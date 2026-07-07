@@ -37,9 +37,10 @@ import os
 import re
 import secrets
 import time
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import agent as _agent
 
@@ -63,6 +64,14 @@ ENV_FORCE_MINT = "BEACON_FORCE_MINT"
 
 _DEFAULT_FRESHNESS_SECONDS = 3600
 _DEFAULT_CLOUD_DEBOUNCE_SECONDS = 30
+# ms-98 / e-2769: TTL for the cloud-first session cache. When
+# BEACON_USE_CLOUD_FIRST_SESSION=1, every CLI invocation used to call
+# POST /api/me/heartbeat. This cache lets us reuse the previous
+# server-minted sid whenever the identity tuple is stable and the last
+# heartbeat is within this window, cutting the 2026-07-02 429-storm's
+# largest amplifier at the source. Override via
+# BEACON_SESSION_CLOUD_MINT_TTL_SECONDS ; set to 0 to disable the cache.
+_DEFAULT_CLOUD_MINT_TTL_SECONDS = 300
 
 _SLUG_NORMALIZE_RE = re.compile(r"-{2,}")
 
@@ -113,6 +122,24 @@ def _cloud_debounce_seconds() -> int:
         except ValueError:
             pass
     return _DEFAULT_CLOUD_DEBOUNCE_SECONDS
+
+
+def _cloud_mint_cache_ttl_seconds() -> int:
+    """TTL for the cloud-first session cache (ms-98 / e-2769).
+
+    Returns 0 when the cache is disabled — either the operator opted out
+    via env var or a negative value slipped through the parse. Callers
+    treat 0 as "no cache, always heartbeat".
+    """
+    raw = os.environ.get("BEACON_SESSION_CLOUD_MINT_TTL_SECONDS", "").strip()
+    if raw:
+        try:
+            v = int(raw)
+            if v >= 0:
+                return v
+        except ValueError:
+            pass
+    return _DEFAULT_CLOUD_MINT_TTL_SECONDS
 
 
 def _slugify(name: str) -> str:
@@ -236,6 +263,21 @@ def write_session(data: dict) -> None:
 ENV_USE_CLOUD_FIRST = "BEACON_USE_CLOUD_FIRST_SESSION"
 ENV_PARENT_PID = "BEACON_PARENT_PID"
 
+# ms-95 / e-2870 — Guard against api_client → session recursion during
+# cloud-first mint. ``get_or_mint_session_via_server`` calls
+# ``client.me_heartbeat``, which routes through ``api_client._request``,
+# which (since ms-97 / e-2694) stamps an ``X-Beacon-Session`` header by
+# calling ``resolve_active_session_id``. Without this guard the resolver
+# would call back into ``get_or_mint_session`` and start a new mint,
+# looping until the 60s wall-clock watchdog kills the CLI.
+#
+# ContextVar (not a plain module-level bool) so async / threaded callers
+# don't share the flag across contexts. Default False = normal resolver
+# behaviour; set True only for the duration of the server mint call.
+_in_cloud_first_mint: ContextVar[bool] = ContextVar(
+    "_in_cloud_first_mint", default=False,
+)
+
 # ~/.beacon/machine.json — per-user cache of the server-issued machine_id
 # (ms-62 / e-1510). Lives outside the project cwd because machine identity
 # is the same across every Beacon project on this device.
@@ -302,6 +344,57 @@ def _resolve_parent_pid() -> int:
     return os.getppid()
 
 
+def _cloud_mint_cache_hit(
+    project_id: str, machine_id: str, parent_pid: int,
+) -> Optional[dict]:
+    """Return a cached session payload iff every gate passes.
+
+    ms-98 / e-2769: called from ``get_or_mint_session_via_server`` before
+    the heartbeat API call. Gates in order:
+
+      1. TTL > 0 (cache not disabled by operator).
+      2. ``.beacon/session.json`` exists and is a valid dict with a
+         ``session_id``.
+      3. Cached identity tuple matches the current call — same
+         ``machine_id`` and same ``parent_pid``. Any drift means the
+         server would mint a new sid, so the cache must not short-
+         circuit that.
+      4. Cached ``last_active`` is within the TTL window.
+      5. Cached ``source`` proves the sid came from an earlier server
+         mint (``server_minted``). We refuse to return a locally-minted
+         sid via the cloud path — that would confuse the server on the
+         next heartbeat because the tuple lookup would find no matching
+         document.
+
+    Returns ``None`` when any gate fails; the caller falls through to
+    the network heartbeat and updates the cache with the fresh payload.
+    """
+    ttl = _cloud_mint_cache_ttl_seconds()
+    if ttl <= 0:
+        return None
+    existing = read_session()
+    if not existing:
+        return None
+    sid = (existing.get("session_id") or "").strip()
+    if not sid:
+        return None
+    if (existing.get("machine_id") or "") != machine_id:
+        return None
+    if int(existing.get("parent_pid") or 0) != parent_pid:
+        return None
+    if existing.get("source") != "server_minted":
+        return None
+    now = _now_iso()
+    if not _is_fresh(existing.get("last_active", ""), now, ttl):
+        return None
+    # Cache hit — refresh last_active in-memory so downstream readers see
+    # a current timestamp, but don't rewrite the file (that would defeat
+    # the "the on-disk stamp survives across CLI calls" contract that
+    # gates freshness). ``minted=False`` mirrors the server contract for
+    # "same tuple → same sid, no new record".
+    return {**existing, "last_active": now, "minted": False}
+
+
 def get_or_mint_session_via_server() -> dict:
     """Server-first session mint (ms-62 / e-1510).
 
@@ -309,10 +402,19 @@ def get_or_mint_session_via_server() -> dict:
       1. Read project_id from ``.beacon/cloud.json``.
       2. Resolve machine_id from ``~/.beacon/machine.json`` cache; on a
          miss, call POST /api/me/machine to mint one + write the cache.
-      3. Call POST /api/me/heartbeat with the identity tuple
+      3. **Cache short-circuit (ms-98 / e-2769)** — if
+         ``.beacon/session.json`` holds a server-minted sid for the
+         current identity tuple and its ``last_active`` is within the
+         cache TTL (default 300 s, tunable via
+         ``BEACON_SESSION_CLOUD_MINT_TTL_SECONDS``, ``0`` to disable),
+         return the cached payload without touching the network. This is
+         the primary throttle for the ``/api/me/heartbeat`` hot path —
+         before the cache, every ``beacon <cmd>`` under
+         ``BEACON_USE_CLOUD_FIRST_SESSION=1`` triggered one heartbeat.
+      4. Call POST /api/me/heartbeat with the identity tuple
          (project_id, machine_id, parent_pid). Server returns the sid
          (= same tuple → same sid for continuity).
-      4. Materialise .beacon/session.json with the returned sid so the
+      5. Materialise .beacon/session.json with the returned sid so the
          legacy single-claim reader and other non-server-aware paths see
          the same id.
 
@@ -320,6 +422,26 @@ def get_or_mint_session_via_server() -> dict:
     network error, malformed response). The caller in
     get_or_mint_session() catches and falls back to the legacy mint
     chain so missing server support never breaks the CLI.
+
+    ms-95 / e-2870 — sets ``_in_cloud_first_mint=True`` for the duration
+    of this call so ``resolve_active_session_id`` (called reentrantly via
+    ``api_client._request`` while stamping ``X-Beacon-Session``) returns
+    empty instead of triggering another mint. The token is reset in a
+    ``finally`` so exceptions leaving this frame still clear the guard.
+    """
+    _mint_guard_token = _in_cloud_first_mint.set(True)
+    try:
+        return _get_or_mint_session_via_server_impl()
+    finally:
+        _in_cloud_first_mint.reset(_mint_guard_token)
+
+
+def _get_or_mint_session_via_server_impl() -> dict:
+    """Body of ``get_or_mint_session_via_server`` (ms-95 / e-2870 split).
+
+    Extracted so the public entry point can wrap the whole call with the
+    ``_in_cloud_first_mint`` guard without indenting the entire body by
+    another level. Identical semantics to the pre-e-2870 body.
     """
     cloud_path = Path.cwd() / _CLOUD_JSON_RELATIVE
     if not cloud_path.exists():
@@ -330,16 +452,30 @@ def get_or_mint_session_via_server() -> dict:
     if not project_id:
         raise RuntimeError("project_id missing from cloud.json")
 
+    actor = _agent.get_actor()
+    fingerprint = actor.get("machine") or actor.get("agent") or "unknown"
+
+    # Cache short-circuit needs the identity tuple, so resolve machine_id
+    # and parent_pid first. If both are cached (typical steady state), no
+    # API call is made at all. If machine_id needs minting, we take one
+    # network hop for that but still consult the sid cache afterwards.
+    cached_machine = _read_machine_cache()
+    machine_id = (cached_machine.get("machine_id") or "").strip()
+    parent_pid = _resolve_parent_pid()
+    if parent_pid <= 0:
+        raise RuntimeError("could not resolve parent_pid")
+
+    if machine_id and cached_machine.get("fingerprint") == fingerprint:
+        cached_sid = _cloud_mint_cache_hit(project_id, machine_id, parent_pid)
+        if cached_sid is not None:
+            return cached_sid
+
+    # Cache miss (or machine_id needed minting) — go to the network.
     # Lazy import: commands._get_api_client requires auth + cloud config.
     import commands as _commands  # noqa: WPS433
     client, _config = _commands._get_api_client()
 
-    # machine_id: read cache or mint.
-    actor = _agent.get_actor()
-    fingerprint = actor.get("machine") or actor.get("agent") or "unknown"
-    cached = _read_machine_cache()
-    machine_id = (cached.get("machine_id") or "").strip()
-    if not machine_id or cached.get("fingerprint") != fingerprint:
+    if not machine_id or cached_machine.get("fingerprint") != fingerprint:
         resp = client.me_upsert_machine(
             fingerprint,
             hostname=actor.get("machine") or "",
@@ -349,10 +485,10 @@ def get_or_mint_session_via_server() -> dict:
         if not machine_id:
             raise RuntimeError("server returned no machine_id")
         _write_machine_cache(machine_id, fingerprint)
-
-    parent_pid = _resolve_parent_pid()
-    if parent_pid <= 0:
-        raise RuntimeError("could not resolve parent_pid")
+        # machine_id just changed — retry the sid cache with the new value.
+        cached_sid = _cloud_mint_cache_hit(project_id, machine_id, parent_pid)
+        if cached_sid is not None:
+            return cached_sid
 
     heartbeat = client.me_heartbeat(
         project_id, machine_id, parent_pid,
@@ -804,7 +940,16 @@ def resolve_active_session_id() -> str:
       2. Fall through to :func:`get_session_id` which applies the
          existing env / mint / session.json precedence (which is itself
          pid-tree-aware as of e-1460).
+
+    ms-95 / e-2870 — when this is called reentrantly during a cloud-first
+    mint (= ``api_client._request`` stamping ``X-Beacon-Session`` while
+    ``get_or_mint_session_via_server`` is in flight), return the empty
+    string instead of triggering another mint. The mint itself will
+    materialise the session_id and store it; there is no in-flight sid
+    to stamp on the ``me_heartbeat`` request that produced the reentry.
     """
+    if _in_cloud_first_mint.get():
+        return ""
     claim = read_bridge_session()
     if claim.get("session_id"):
         return claim["session_id"]

@@ -58,7 +58,8 @@ def local_project(monkeypatch):
     tmp.close()
     monkeypatch.setenv("BEACON_PROJECT_FILE", tmp.name)
     monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "local")
-    sys.modules.pop("firestore_client", None)
+    # ms-95 e-2438: monkeypatch.delitem auto-restores firestore_client.
+    monkeypatch.delitem(sys.modules, "firestore_client", raising=False)
     yield tmp.name
     Path(tmp.name).unlink(missing_ok=True)
 

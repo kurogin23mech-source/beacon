@@ -13,6 +13,7 @@ this test starts to fail, the bus transport's wire format has drifted.
 from __future__ import annotations
 
 import copy
+import json
 import os
 import sys
 
@@ -23,7 +24,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
-import firestore_client  # noqa: E402
+# ms-95 e-2407: Module-load defense (mirrors tests/test_trek_api.py / test_api.py).
+# app.py does `import store_router as db`. If pytest collects another test file
+# (e.g. test_api.py) before this one, app — and thus store_router — get imported
+# first. store_router captures `from firestore_client import append_bus_event` etc.
+# at that moment, so any later `firestore_client.append_bus_event = mock` in this
+# file rebinds the ORIGINAL firestore_client module but leaves store_router's
+# cached reference untouched. Production code calls `db.X` (= store_router.X) and
+# hits the real Firestore client → DefaultCredentialsError in CI (no ADC).
+#
+# By aliasing `sys.modules["firestore_client"] = app_module.db` (= store_router)
+# BEFORE this file's `import firestore_client`, the subsequent rebinds land ON
+# store_router, which is what app.py actually reads.
+import app as app_module  # noqa: E402
+sys.modules["firestore_client"] = app_module.db
+
+import firestore_client  # noqa: E402  (= store_router after the alias above)
 
 # In-memory store mirroring the Firestore subcollection (per project).
 # Mapping: project_id -> list of event dicts (each dict contains event_id +
@@ -289,19 +305,32 @@ def test_unknown_delivery_mode_coerces_to_default():
     assert resp.json()["delivery"] == "propose-to-ai"
 
 
-def test_delivery_field_flows_to_ws_subscribers():
-    """The delivery mode must reach the WS subscriber — otherwise downstream
-    receivers can't enforce auto-execute opt-in."""
+def test_ws_bus_event_is_signal_only_no_payload_leak():
+    """ms-97 P1 (review finding H1): the WS bus_event frame is signal-only.
+
+    Previously the server broadcast the full event (payload, sender, delivery,
+    envelope) to every project subscriber — a DM-body leak to bystanders and
+    bridges. The frame now carries only a wake hint (event_id); receivers
+    re-fetch via the REST inbox, which applies the per-recipient addressed-to
+    filter + payload redaction. So the DM body MUST NOT appear on the wire."""
     with client.websocket_connect(f"/ws/projects/{PROJECT_ID}") as ws:
         ws.receive_json()  # drain initial project frame
         client.post(f"/api/projects/{PROJECT_ID}/bus", json={
             "channel": "policy",
-            "payload": {"op": "run"},
+            "payload": {"op": "run", "secret": "top-secret-dm-body"},
             "delivery": "notify-user-only",
         })
         pushed = ws.receive_json()
         assert pushed["type"] == "bus_event"
-        assert pushed["data"]["delivery"] == "notify-user-only"
+        assert pushed["event_id"]  # wake hint present so clients can dedupe
+        # The leak-prone fields must be absent from the frame entirely.
+        assert "data" not in pushed
+        assert "payload" not in pushed
+        assert "sender_session_id" not in pushed
+        assert "envelope" not in pushed
+        # Belt-and-suspenders: the DM body text must not appear anywhere in the
+        # serialized frame (guards against a future field re-introducing it).
+        assert "top-secret-dm-body" not in json.dumps(pushed)
 
 
 def test_post_uses_server_clock_not_client_supplied():
@@ -398,15 +427,17 @@ def test_get_empty_returns_empty_array():
 # ---------------------------------------------------------------------------
 
 def test_ws_push_delivers_bus_event_to_subscribers():
-    """A POST to /bus should fan out to all open WS connections of the project
-    as a {type: "bus_event", data: {...}} frame, in addition to being persisted.
-    Without this, consumers have to poll GET /bus, which defeats the point of
-    UC1/UC2 (real-time DM / push-driven Operation alerts)."""
+    """A POST to /bus fans out a signal-only {type: "bus_event", event_id}
+    frame to all open WS connections of the project, in addition to being
+    persisted. The frame is a wake hint — subscribers re-fetch via GET /bus
+    (which applies the addressed-to filter + payload redaction) rather than
+    trusting the pushed payload. This keeps the real-time advantage of push
+    (UC1/UC2) without leaking DM bodies to bystanders (ms-97 P1)."""
     with client.websocket_connect(f"/ws/projects/{PROJECT_ID}") as ws:
-        # The initial frame is the project snapshot (type=project). Drain it
-        # so the next receive sees the bus event we trigger below.
+        # The initial frame is a ws_ready signal (e-2326: signal-only protocol).
+        # Drain it so the next receive sees the bus event we trigger below.
         first = ws.receive_json()
-        assert first["type"] == "project"
+        assert first["type"] == "ws_ready"
 
         resp = client.post(f"/api/projects/{PROJECT_ID}/bus", json={
             "channel": "session-dm",
@@ -417,15 +448,11 @@ def test_ws_push_delivers_bus_event_to_subscribers():
 
         pushed = ws.receive_json()
         assert pushed["type"] == "bus_event"
-        body = pushed["data"]
-        assert body["channel"] == "session-dm"
-        assert body["sender_session_id"] == "sess-A"
-        assert body["payload"] == {"text": "hello via ws"}
-        # event_id and server-stamped created_at must round-trip on the WS
-        # frame so subscribers can advance their cursor without a follow-up
-        # GET (otherwise WS push provides no advantage over polling).
-        assert body["event_id"] == resp.json()["event_id"]
-        assert body["created_at"] == resp.json()["created_at"]
+        # The event_id round-trips so a subscriber can dedupe / drive its
+        # re-fetch. No payload / sender / channel body rides the frame.
+        assert pushed["event_id"] == resp.json()["event_id"]
+        assert "data" not in pushed
+        assert "hello via ws" not in json.dumps(pushed)
 
 
 def test_post_without_subscribers_is_not_an_error():

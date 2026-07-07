@@ -842,6 +842,86 @@ def build_parser() -> argparse.ArgumentParser:
     p_trek_state.add_argument("--note", default="")
     p_trek_state.add_argument("--json", action="store_true")
 
+    # ms-97 / e-2626 (AC23) — canonical scope-add verb (= flag-style alias of
+    # plan --add-scope <project>:<ref>). The action delegates to cmd_trek_plan
+    # so the staging machinery (= pending_scope_ops + scope-approve flow) is
+    # shared with the existing --add-scope path.
+    p_trek_scope_add = trek_sub.add_parser("scope-add", add_help=False)
+    p_trek_scope_add.add_argument("trek_id", nargs="?", default="")
+    p_trek_scope_add.add_argument("--project", dest="scope_add_project",
+                                  default="")
+    p_trek_scope_add.add_argument("--milestone", "--ms",
+                                  dest="scope_add_milestone", default="")
+    p_trek_scope_add.add_argument("--operation", "--op",
+                                  dest="scope_add_operation", default="")
+    p_trek_scope_add.add_argument("--task", "--e",
+                                  dest="scope_add_task", default="")
+    p_trek_scope_add.add_argument("--json", action="store_true")
+
+    # ms-97 / e-2611 (AC25) — commit a staged scope op.
+    p_trek_scope_approve = trek_sub.add_parser("scope-approve", add_help=False)
+    p_trek_scope_approve.add_argument("trek_id", nargs="?", default="")
+    p_trek_scope_approve.add_argument("pending_id", nargs="?", default="")
+    p_trek_scope_approve.add_argument("--json", action="store_true")
+
+    # ms-97 / e-2611 (AC25) — drop a staged scope op without applying.
+    p_trek_scope_reject = trek_sub.add_parser("scope-reject", add_help=False)
+    p_trek_scope_reject.add_argument("trek_id", nargs="?", default="")
+    p_trek_scope_reject.add_argument("pending_id", nargs="?", default="")
+    p_trek_scope_reject.add_argument("--json", action="store_true")
+
+    # ms-95 / e-2308 — extend TTL on a single Trek task (= leader 代替 reaffirm
+    # for Agent-tool subagent dispatch path)
+    p_trek_extend = trek_sub.add_parser("extend-ttl", add_help=False)
+    p_trek_extend.add_argument("trek_id", nargs="?", default="")
+    p_trek_extend.add_argument("task_id", nargs="?", default="")
+    p_trek_extend.add_argument("--minutes", default="")
+    p_trek_extend.add_argument("--reason", default="")
+    p_trek_extend.add_argument("--json", action="store_true")
+
+    # ms-99 / e-2829 — slot verbs (nested subcommand). Trek scope entries
+    # become first-class slots under Trek schema v2; the four CLI verbs
+    # (add / amend / claim / list) all flow through the pending_scope_ops
+    # queue so AC 15 (= all slot CLI ops via staging) holds.
+    p_trek_slot = trek_sub.add_parser("slot", add_help=False)
+    slot_sub = p_trek_slot.add_subparsers(dest="slot_cmd", metavar="<subcmd>")
+
+    p_slot_add = slot_sub.add_parser("add", add_help=False)
+    p_slot_add.add_argument("trek_id", nargs="?", default="")
+    p_slot_add.add_argument("--project", dest="slot_project", default="")
+    p_slot_add.add_argument("--milestone", "--ms", dest="slot_milestone",
+                            default="")
+    p_slot_add.add_argument("--operation", "--op", dest="slot_operation",
+                            default="")
+    p_slot_add.add_argument("--task", "--e", dest="slot_task", default="")
+    # ``--children e-A,e-B`` — MS slot opt-in child list. Comma-separated
+    # so scriptable; empty string = legacy null (= all-include).
+    p_slot_add.add_argument("--children", dest="slot_children", default="")
+    p_slot_add.add_argument("--json", action="store_true")
+
+    p_slot_amend = slot_sub.add_parser("amend", add_help=False)
+    p_slot_amend.add_argument("trek_id", nargs="?", default="")
+    p_slot_amend.add_argument("slot_id", nargs="?", default="")
+    p_slot_amend.add_argument("--add-child", dest="slot_add_child",
+                              action="append", default=[])
+    p_slot_amend.add_argument("--remove-child", dest="slot_remove_child",
+                              action="append", default=[])
+    p_slot_amend.add_argument("--json", action="store_true")
+
+    p_slot_claim = slot_sub.add_parser("claim", add_help=False)
+    p_slot_claim.add_argument("trek_id", nargs="?", default="")
+    p_slot_claim.add_argument("slot_id", nargs="?", default="")
+    # ``--session <sid>`` overrides the resolved session; empty string
+    # via ``--unclaim`` clears the claim.
+    p_slot_claim.add_argument("--session", dest="slot_session", default="")
+    p_slot_claim.add_argument("--unclaim", dest="slot_unclaim",
+                              action="store_true")
+    p_slot_claim.add_argument("--json", action="store_true")
+
+    p_slot_list = slot_sub.add_parser("list", add_help=False)
+    p_slot_list.add_argument("trek_id", nargs="?", default="")
+    p_slot_list.add_argument("--json", action="store_true")
+
     # ---- doctor / project / help ----
     sub.add_parser("doctor", add_help=False)
     p_project = sub.add_parser("project", add_help=False)
@@ -861,6 +941,12 @@ def build_parser() -> argparse.ArgumentParser:
     skill_sub = p_skill.add_subparsers(dest="skill_cmd", metavar="<subcmd>")
     p_skill_install = skill_sub.add_parser("install", add_help=False)
     p_skill_install.add_argument("--force", action="store_true")
+    p_skill_install.add_argument("--adopt", action="store_true")
+    p_skill_install.add_argument("--dry-run", action="store_true", dest="dry_run")
+    p_skill_install.add_argument("--prune", action="store_true")
+    p_skill_install.add_argument("--json", action="store_true")
+    p_skill_install.add_argument("--target", choices=("claude", "codex", "both"), default="")
+    p_skill_install.add_argument("--name", default="")
     p_skill_install.add_argument("--settings-path", dest="settings_path", default="")
 
     # ---- session id (ms-54 e-1150 / e-1152 / ms-44 e-1171) ----
@@ -974,6 +1060,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_channel.add_argument("--help", "-h", action="store_true", dest="show_help")
     channel_sub = p_channel.add_subparsers(dest="channel_cmd", metavar="<subcmd>")
     channel_sub.add_parser("install", add_help=False)
+
+    # `beacon retro [--prepare|--catch-up] [--since X] [--until Y]`
+    # `beacon retro save --week YYYY-WNN [--content T] [--stdin] [--json]`
+    # `beacon retro done`
+    #
+    # ms-61 / e-2348: Win parity for /beacon-retro Skill. The Skill calls
+    # `beacon retro --prepare`, `beacon retro --catch-up`, `beacon retro save`,
+    # and `beacon retro done`. Without this parser, Windows beacon.exe (dispatch.py
+    # path) failed with `argparse invalid choice: 'retro'` and the Skill was
+    # unusable end-to-end on Win. Mirrors bin/beacon's `retro)` case
+    # (lines 4119-4151) plus cmd_retro() (lines 1421-1474).
+    p_retro = sub.add_parser(
+        "retro", help="Weekly retrospective (prepare/save/done)", add_help=False,
+    )
+    p_retro.add_argument("--help", "-h", action="store_true", dest="show_help")
+    # Top-level flags handled when no subcommand (= equivalent to bash's
+    # `cmd_retro` default branch) — these drive `retro_prepare`.
+    p_retro.add_argument("--prepare", action="store_true", dest="retro_prepare_flag")
+    p_retro.add_argument("--catch-up", action="store_true", dest="retro_catch_up")
+    p_retro.add_argument("--since", default="")
+    p_retro.add_argument("--until", default="")
+    retro_sub = p_retro.add_subparsers(dest="retro_cmd", metavar="<subcmd>")
+    # `beacon retro save --week ... [--content T] [--stdin] [--json]`
+    p_retro_save = retro_sub.add_parser("save", add_help=False)
+    p_retro_save.add_argument("--week", default="")
+    p_retro_save.add_argument("--content", default="")
+    p_retro_save.add_argument("--stdin", action="store_true")
+    p_retro_save.add_argument("--json", action="store_true")
+    # `beacon retro done` — no flags.
+    retro_sub.add_parser("done", add_help=False)
 
     # ---- ms-55 coordination signals (e-1735) ----
     # Win parity for the 6 ms-55 verbs (stop / resume / rollback / claim /
@@ -2280,6 +2396,20 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
             "  plan <trek-id> --remove-scope <project[:ref]>\n"
             "  plan <trek-id> --goal-state \"<criterion>\"   "
             "(= ms-75 / e-1865, '' clears)\n"
+            "  scope-add <trek-id> --project <pid> "
+            "[--milestone <ms-id> | --operation <op-id> | --task <e-id>]   "
+            "(= canonical, ms-97 / AC23)\n"
+            "  scope-approve <trek-id> <pending-id>   "
+            "(= commit staged op, ms-97 / AC25)\n"
+            "  scope-reject  <trek-id> <pending-id>   "
+            "(= drop staged op, ms-97 / AC25)\n"
+            "  slot add   <trek-id> --project <pid> "
+            "--milestone|--task|--operation <id> [--children e-A,e-B]\n"
+            "  slot amend <trek-id> <slot-id> "
+            "[--add-child <e-id> ...] [--remove-child <e-id> ...]\n"
+            "  slot claim <trek-id> <slot-id> [--session <sid> | --unclaim]\n"
+            "  slot list  <trek-id> [--json]   "
+            "(= materialize view, ms-99 / e-2829)\n"
             "  timeline <trek-id> [--limit N] [--json]   "
             "(= chronological view)\n"
             "  stop <trek-id> [--reason \"...\"]    (= Andon cord、halt 信号)\n"
@@ -2458,6 +2588,19 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
                 "BEACON_JSON": json_env,
             },
         )
+    if cmd == "extend-ttl":
+        # ms-95 / e-2308 — leader-side primitive for Agent-tool subagent
+        # dispatch path. See lib/commands.cmd_trek_extend_ttl docstring.
+        return _run_commands_py(
+            root, "trek_extend_ttl",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_TASK_ID": args.task_id or "",
+                "BEACON_TREK_TTL_MINUTES": getattr(args, "minutes", "") or "",
+                "BEACON_TREK_TTL_REASON": getattr(args, "reason", "") or "",
+                "BEACON_JSON": json_env,
+            },
+        )
     if cmd == "reconcile":
         return _run_commands_py(
             root, "trek_reconcile",
@@ -2467,6 +2610,115 @@ def _handle_trek(root: Path, args: argparse.Namespace) -> int:
                 "BEACON_JSON": json_env,
             },
         )
+    # ms-97 / e-2626 (AC23) — canonical scope-add verb. Delegates to
+    # cmd_trek_plan with BEACON_TREK_SCOPE_ADD assembled from the flag-style
+    # args. Requires at least one narrowing key (= --milestone / --operation /
+    # --task) since cmd_trek_plan / parse_scope_arg rejects bare project-wide
+    # adds under AC7 strict mode.
+    if cmd == "scope-add":
+        project = getattr(args, "scope_add_project", "") or ""
+        milestone = getattr(args, "scope_add_milestone", "") or ""
+        operation = getattr(args, "scope_add_operation", "") or ""
+        task = getattr(args, "scope_add_task", "") or ""
+        if not project:
+            print("Error: --project <pid> is required", file=sys.stderr)
+            return 1
+        ref = milestone or operation or task
+        if not ref:
+            print(
+                "Error: one of --milestone | --operation | --task is required",
+                file=sys.stderr,
+            )
+            return 1
+        return _run_commands_py(
+            root, "trek_plan",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_TREK_SCOPE_ADD": f"{project}:{ref}",
+                "BEACON_JSON": json_env,
+            },
+        )
+    # ms-97 / e-2611 (AC25) — commit a staged scope op.
+    if cmd == "scope-approve":
+        return _run_commands_py(
+            root, "trek_scope_approve",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_PENDING_ID": getattr(args, "pending_id", "") or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    # ms-97 / e-2611 (AC25) — drop a staged scope op.
+    if cmd == "scope-reject":
+        return _run_commands_py(
+            root, "trek_scope_reject",
+            {
+                "BEACON_TREK_ID": args.trek_id or "",
+                "BEACON_PENDING_ID": getattr(args, "pending_id", "") or "",
+                "BEACON_JSON": json_env,
+            },
+        )
+    # ms-99 / e-2829 — slot verbs (nested subcommand). All four flow
+    # through commands.py so the same code path serves bash and pipx
+    # front-ends.
+    if cmd == "slot":
+        slot_cmd = getattr(args, "slot_cmd", None) or ""
+        if not slot_cmd:
+            print(
+                "Usage: beacon trek slot <add|amend|claim|list> [args]",
+                file=sys.stderr,
+            )
+            return 2
+        if slot_cmd == "add":
+            return _run_commands_py(
+                root, "trek_slot_add",
+                {
+                    "BEACON_TREK_ID": args.trek_id or "",
+                    "BEACON_SLOT_PROJECT": getattr(args, "slot_project", "") or "",
+                    "BEACON_SLOT_MILESTONE": getattr(args, "slot_milestone", "") or "",
+                    "BEACON_SLOT_OPERATION": getattr(args, "slot_operation", "") or "",
+                    "BEACON_SLOT_TASK": getattr(args, "slot_task", "") or "",
+                    "BEACON_SLOT_CHILDREN": getattr(args, "slot_children", "") or "",
+                    "BEACON_JSON": json_env,
+                },
+            )
+        if slot_cmd == "amend":
+            add_children = getattr(args, "slot_add_child", []) or []
+            remove_children = getattr(args, "slot_remove_child", []) or []
+            return _run_commands_py(
+                root, "trek_slot_amend",
+                {
+                    "BEACON_TREK_ID": args.trek_id or "",
+                    "BEACON_SLOT_ID": getattr(args, "slot_id", "") or "",
+                    "BEACON_SLOT_ADD_CHILDREN": ",".join(add_children),
+                    "BEACON_SLOT_REMOVE_CHILDREN": ",".join(remove_children),
+                    "BEACON_JSON": json_env,
+                },
+            )
+        if slot_cmd == "claim":
+            return _run_commands_py(
+                root, "trek_slot_claim",
+                {
+                    "BEACON_TREK_ID": args.trek_id or "",
+                    "BEACON_SLOT_ID": getattr(args, "slot_id", "") or "",
+                    "BEACON_SLOT_SESSION": getattr(args, "slot_session", "") or "",
+                    "BEACON_SLOT_UNCLAIM": "1" if getattr(args, "slot_unclaim", False) else "",
+                    "BEACON_JSON": json_env,
+                },
+            )
+        if slot_cmd == "list":
+            return _run_commands_py(
+                root, "trek_slot_list",
+                {
+                    "BEACON_TREK_ID": args.trek_id or "",
+                    "BEACON_JSON": json_env,
+                },
+            )
+        print(
+            f"Error: unknown slot subcommand {slot_cmd!r}",
+            file=sys.stderr,
+        )
+        return 2
     return 1
 
 
@@ -2918,7 +3170,7 @@ def _handle_skill(root: Path, args: argparse.Namespace) -> int:
     path stays env-superset-compatible.
     """
     if args.show_help or args.skill_cmd is None:
-        print("Usage: beacon skill install [--force] [--settings-path PATH]")
+        print("Usage: beacon skill install [--target claude|codex|both --name NAME] [--dry-run] [--prune] [--force|--adopt]")
         return 0 if args.show_help else 2
     if args.skill_cmd != "install":
         print(f"Unknown skill subcommand: {args.skill_cmd}")
@@ -2926,6 +3178,20 @@ def _handle_skill(root: Path, args: argparse.Namespace) -> int:
     env: Dict[str, str] = {}
     if getattr(args, "force", False):
         env["BEACON_FORCE"] = "1"
+    if getattr(args, "adopt", False):
+        env["BEACON_ADOPT"] = "1"
+    if getattr(args, "dry_run", False):
+        env["BEACON_DRY_RUN"] = "1"
+    if getattr(args, "prune", False):
+        env["BEACON_PRUNE"] = "1"
+    if getattr(args, "json", False):
+        env["BEACON_JSON"] = "1"
+    target = getattr(args, "target", "") or ""
+    name = getattr(args, "name", "") or ""
+    if target:
+        env["BEACON_SKILL_TARGET"] = target
+    if name:
+        env["BEACON_SKILL_NAME"] = name
     settings_path = getattr(args, "settings_path", "") or ""
     if settings_path:
         env["BEACON_SETTINGS_PATH"] = settings_path
@@ -3063,6 +3329,116 @@ def _split_target(target: str) -> tuple[str, str]:
         return target, target  # mirrored bash bug-shape; CLI catches it
     k, _, i = target.partition(":")
     return k, i
+
+
+def _handle_retro(root: Path, args: argparse.Namespace) -> int:
+    """`beacon retro [--prepare|--catch-up] [--since X] [--until Y]` (= prepare).
+    `beacon retro save --week ... [--content T] [--stdin] [--json]` (= save).
+    `beacon retro done` (= done).
+
+    ms-61 / e-2348: Windows beacon.exe (= dispatch.py PowerShell-native path)
+    had no retro subcommand registered, so /beacon-retro Skill failed end-to-end
+    on Win with `argparse invalid choice: 'retro'`. Mirrors bin/beacon's
+    ``retro)`` case (lines 4119-4151) and ``cmd_retro`` (lines 1421-1474).
+
+    Dispatch table:
+
+      ``retro_cmd`` value | env vars set                            | commands.py verb
+      ------------------- | --------------------------------------- | ---------------------
+      ``None`` (top)      | ``BEACON_SINCE`` / ``BEACON_UNTIL`` /  | ``retro_prepare``
+                          | ``BEACON_RETRO_CATCH_UP``               |
+      ``save``            | ``BEACON_RETRO_WEEK`` /                 | ``retro_save``
+                          | ``BEACON_CONTENT`` / ``BEACON_JSON``    |
+      ``done``            | (none)                                  | ``retro_done``
+
+    --since defaulting mirrors bash: if absent, call ``cmd_retro_default_since``
+    via the commands.py subprocess (= same code path the bash wrapper uses).
+    --until defaulting: today (or yesterday if today is Monday, so we cover the
+    week ending Sunday).
+    """
+    if args.show_help:
+        print(
+            "Usage: beacon retro [--prepare] [--catch-up] "
+            "[--since YYYY-MM-DD] [--until YYYY-MM-DD]"
+        )
+        print(
+            "       beacon retro save --week YYYY-WNN [--content T | --stdin] [--json]"
+        )
+        print("       beacon retro done")
+        return 0
+
+    sub_cmd = getattr(args, "retro_cmd", None)
+
+    if sub_cmd == "save":
+        week = getattr(args, "week", "") or ""
+        if not week:
+            _eprint(
+                "Usage: beacon retro save --week YYYY-WNN [--content text | --stdin] [--json]"
+            )
+            _eprint("  Content can be piped via stdin.")
+            return 1
+        return _run_commands_py(root, "retro_save", {
+            "BEACON_RETRO_WEEK": week,
+            "BEACON_CONTENT": getattr(args, "content", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        })
+
+    if sub_cmd == "done":
+        return _run_commands_py(root, "retro_done", {})
+
+    # Default branch: `beacon retro [--prepare|--catch-up] [--since X] [--until Y]`
+    # → retro_prepare. --prepare is accepted as an explicit no-op flag for
+    # parity with the bash CLI; presence does not change behaviour.
+    since = getattr(args, "since", "") or ""
+    until = getattr(args, "until", "") or ""
+    catch_up = getattr(args, "retro_catch_up", False)
+
+    if not since:
+        since = _compute_default_since()
+    if not until:
+        until = _compute_default_until()
+
+    return _run_commands_py(root, "retro_prepare", {
+        "BEACON_SINCE": since,
+        "BEACON_UNTIL": until,
+        "BEACON_RETRO_CATCH_UP": "1" if catch_up else "",
+    })
+
+
+def _compute_default_since() -> str:
+    """Compute the default ``--since`` for ``beacon retro --prepare``.
+
+    Mirrors bin/beacon's logic: if today is Monday, anchor on a week ago;
+    otherwise anchor on the most recent Monday. This is the fallback when
+    the (preferred) ``cmd_retro_default_since`` helper isn't reachable; we
+    skip the .reviewed marker / retro_day inspection here because that
+    requires reading project state, and the bash wrapper itself falls back
+    to the same Monday-anchor math when the helper returns empty.
+    """
+    import datetime
+    today = datetime.date.today()
+    # weekday(): Mon=0 ... Sun=6 ; bash's date +%u: Mon=1 ... Sun=7
+    dow_bash = today.weekday() + 1
+    if dow_bash == 1:
+        since = today - datetime.timedelta(days=7)
+    else:
+        since = today - datetime.timedelta(days=dow_bash - 1)
+    return since.strftime("%Y-%m-%d")
+
+
+def _compute_default_until() -> str:
+    """Compute the default ``--until`` for ``beacon retro --prepare``.
+
+    Mirrors bin/beacon: today, except on Monday return yesterday so the
+    cover-window ends on Sunday (= end of the prior ISO week).
+    """
+    import datetime
+    today = datetime.date.today()
+    if today.weekday() == 0:  # Monday
+        until = today - datetime.timedelta(days=1)
+    else:
+        until = today
+    return until.strftime("%Y-%m-%d")
 
 
 def _handle_stop(root: Path, args: argparse.Namespace) -> int:
@@ -3534,6 +3910,11 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
             "BEACON_BUS_SENDER": args.sender or "",
             "BEACON_BUS_DELIVERY": args.delivery or "",
             "BEACON_BUS_IN_REPLY_TO": args.in_reply_to or "",
+            # ms-95 e-2441: pre-populate BEACON_BUS_RECIPIENT_SESSION as empty
+            # so the no-recipient branch (= broadcast channels) still passes
+            # the env var through, matching the bash dispatcher contract that
+            # always exports it. Overridden per-recipient inside the loop.
+            "BEACON_BUS_RECIPIENT_SESSION": "",
             "BEACON_BUS_ACTION": bus_action_csv,
             "BEACON_BUS_NO_ENVELOPE": "1" if getattr(args, "no_envelope", False) else "",
             "BEACON_JSON": "1" if args.json else "",
@@ -3750,6 +4131,8 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "sessions": _handle_sessions,
     "profile": _handle_profile,
     "channel": _handle_channel,
+    # ms-61 / e-2348: Win parity for /beacon-retro Skill (prepare/save/done).
+    "retro": _handle_retro,
     "bus": _handle_bus,
     # ms-70 / e-1716 + e-1923: cross-user DM approval primitives (Win mirror
     # of bin/beacon's `dm)` case). `dm respond` + `dm log`.
@@ -3789,6 +4172,9 @@ def _print_top_help() -> None:
         "  beacon note \"<text>\" | note list | note clear\n"
         "  beacon search \"query\" [--ms id] [--scope S]\n"
         "  beacon trigger fire|check|clear [name]\n"
+        "  beacon retro [--prepare|--catch-up] [--since X] [--until Y]\n"
+        "  beacon retro save --week YYYY-WNN [--content T | --stdin] [--json]\n"
+        "  beacon retro done\n"
         "  beacon cycle status\n"
         "  beacon push record|list\n"
         "  beacon deploy record|list\n"
@@ -3802,7 +4188,7 @@ def _print_top_help() -> None:
         "\n"
         "Not yet available on bash-less systems (tracked under ms-44):\n"
         "  beacon setup, dashboard (tmux), beacon update, beacon pr review,\n"
-        "  beacon cloud open/launch (tmux dashboard), beacon retro (interactive),\n"
+        "  beacon cloud open/launch (tmux dashboard),\n"
         "  beacon operation/run/incident/member.\n"
     )
 

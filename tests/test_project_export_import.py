@@ -70,7 +70,9 @@ def local_project(monkeypatch):
         monkeypatch.setenv("BEACON_PROJECT_FILE", str(beacon_dir / "project.json"))
         monkeypatch.delenv("BEACON_CLOUD", raising=False)
         monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "local")
-        sys.modules.pop("firestore_client", None)
+        # ms-95 e-2441: monkeypatch.delitem auto-restores. Raw pop leaks the
+        # deletion → adjacent test_api mocks vanish.
+        monkeypatch.delitem(sys.modules, "firestore_client", raising=False)
 
         yield root
 

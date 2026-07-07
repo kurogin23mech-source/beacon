@@ -92,6 +92,35 @@ def test_render_context_lists_all_inject_events(hook_module):
     assert "AI コンテキスト inject 対象: 2 件" in out
 
 
+def test_pending_approval_banner_surfaces_and_leads(hook_module):
+    """ms-97 C3 (review H3): an event carrying ``pending_approval`` must
+    render the [DM-PENDING-APPROVAL] banner, name the event_id, point at
+    /beacon-dm-respond, and appear BEFORE the generic event list so the human
+    decision is unmissable."""
+    events = [
+        _make_event("ev-normal"),
+        _make_event("ev-gated", sender="attacker-sess"),
+    ]
+    events[1]["pending_approval"] = True
+    out = hook_module._render_context(events, notify_only_count=0,
+                                       monitor_suggested=False)
+    assert "[DM-PENDING-APPROVAL]" in out
+    assert "ev-gated" in out
+    assert "attacker-sess" in out
+    assert "/beacon-dm-respond" in out
+    # Banner precedes the generic event list.
+    assert out.index("[DM-PENDING-APPROVAL]") < out.index(
+        "AI コンテキスト inject 対象")
+
+
+def test_no_pending_banner_when_no_gated_events(hook_module):
+    """No pending event → no banner (= zero-noise for the common path)."""
+    out = hook_module._render_context([_make_event("ev-1")],
+                                       notify_only_count=0,
+                                       monitor_suggested=False)
+    assert "[DM-PENDING-APPROVAL]" not in out
+
+
 def test_render_context_mentions_notify_only_count_when_nonzero(hook_module):
     events = [_make_event("ev-1")]
     out = hook_module._render_context(events, notify_only_count=3,

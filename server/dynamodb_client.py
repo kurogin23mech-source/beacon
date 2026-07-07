@@ -1631,3 +1631,39 @@ def delete_trek(trek_id: str) -> bool:
     # delete_project pattern once e-1663 lands.
     _table("treks").delete_item(Key={"trek_id": trek_id})
     return True
+
+
+# ---------------------------------------------------------------------------
+# Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
+# DynamoDB MVP: in-process dict, keyed by trek_id. The cloud-shaped store
+# is Firestore (= subcollection). DynamoDB users get a best-effort backend
+# until a `trek_logs` table lands as a follow-up; tests mock these methods
+# directly so the production path is exercised in the Firestore branch.
+# ---------------------------------------------------------------------------
+
+_TREK_LOGS_FALLBACK: dict[str, list[dict]] = {}
+
+
+def _mint_trek_log_id() -> str:
+    import secrets as _secrets
+    return f"log-{_secrets.token_hex(8)}"
+
+
+def append_trek_log(trek_id: str, log_entry: dict) -> str:
+    payload = dict(log_entry or {})
+    log_id = payload.get("log_id") or _mint_trek_log_id()
+    payload["log_id"] = log_id
+    payload["trek_id"] = trek_id
+    _TREK_LOGS_FALLBACK.setdefault(trek_id, []).append(payload)
+    return log_id
+
+
+def list_trek_logs(trek_id: str, *, limit: int = 100,
+                   since: str = "") -> list[dict]:
+    rows = list(_TREK_LOGS_FALLBACK.get(trek_id) or [])
+    if since:
+        rows = [r for r in rows if (r.get("created_at") or "") > since]
+    rows.sort(key=lambda r: (r.get("created_at", ""), r.get("log_id", "")))
+    if limit and limit > 0:
+        rows = rows[:limit]
+    return rows

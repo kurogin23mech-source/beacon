@@ -266,7 +266,16 @@ def get_store(project_file: str | None = None) -> Store:
                 return creds.get("token", "")
             return (creds.id_token or creds.token) if creds else ""
 
-        return StoreApi(api_url, project_id, _token_provider)
+        # ms-95 / e-746: pass the local project.json path so StoreApi can
+        # mirror each cloud read/write back to the local cache. This keeps
+        # ``.beacon/project.json`` fresh as a read-only mirror so Tauri's
+        # ``load_project_json`` no longer renders a stale ms-22-era world
+        # for the first few seconds before the WS push arrives (e-723).
+        # The write-back is best-effort and never raises.
+        return StoreApi(
+            api_url, project_id, _token_provider,
+            local_cache_path=project_file,
+        )
 
     from store_local import LocalStore
     return LocalStore(project_file)

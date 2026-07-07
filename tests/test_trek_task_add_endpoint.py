@@ -43,6 +43,13 @@ sys.modules["firestore_client"] = app_module.db
 # In-memory trek storage + user index.
 _treks: dict[str, dict] = {}
 _users_by_email: dict[str, tuple[str, dict]] = {}
+# ms-95 / Trek task-add slug-resolution bug fix: project registry so
+# tests can exercise the slug ↔ full project_id canonicalisation that
+# the endpoint now performs via ``_resolve_canonical_project_id``.
+# Key is the **full project_id** (= ``"<slug>-<hex6>"``); the entry
+# carries ``owner`` so the user-scoped ``list_projects`` filter mirrors
+# the production firestore_client behaviour.
+_projects: dict[str, dict] = {}
 
 # Recorded apply_operation calls so we can assert the write happened
 # (or didn't) without needing a real project backend. The recorded
@@ -77,6 +84,53 @@ def _mock_get_user(user_id: str):
         if data.get("sub") == user_id or uid == user_id:
             return data
     return None
+
+
+def _mock_get_project(project_id: str):
+    """Mirror firestore_client.get_project — None when missing."""
+    return copy.deepcopy(_projects.get(project_id))
+
+
+# ms-97 Phase 4 / AC14 — session registry per project so the home check
+# in add_trek_task_endpoint can resolve caller_sid → home pid via
+# trek.resolve_session_home_project(... db.list_sessions ...).
+_sessions_by_project: dict[str, list[dict]] = {}
+
+
+def _mock_list_sessions(project_id: str) -> list[dict]:
+    return copy.deepcopy(_sessions_by_project.get(project_id, []))
+
+
+def _register_session(project_id: str, session_id: str) -> None:
+    """Test helper — register a fake session under a project."""
+    _sessions_by_project.setdefault(project_id, []).append({
+        "session_id": session_id,
+    })
+
+
+def _mock_list_projects(user_id: Optional[str] = None,
+                       include_archived: bool = False) -> list[dict]:
+    """Mirror firestore_client.list_projects shape: project_id + name + owner.
+
+    The resolver only reads ``project_id`` from each row so the minimal
+    shape is sufficient. We honour ``user_id`` so owner-mismatched rows
+    don't leak into a slug expansion the caller can't access.
+    """
+    rows: list[dict] = []
+    for pid, data in _projects.items():
+        if user_id and data.get("owner") and data.get("owner") != user_id:
+            continue
+        rows.append({"project_id": pid, "name": data.get("name", "")})
+    return rows
+
+
+def _register_project(project_id: str, *, owner: str = "") -> None:
+    """Test helper — register a fake project so the resolver can find it."""
+    _projects[project_id] = {
+        "name": project_id.rsplit("-", 1)[0] if "-" in project_id else project_id,
+        "milestones": [],
+        "owner": owner,
+    }
 
 
 def _fake_apply_operation(project_id: str, op, *,
@@ -122,6 +176,15 @@ def _rebind_db():
         ("find_user_by_email", _mock_find_user_by_email),
         ("get_or_create_user", _mock_get_or_create_user),
         ("get_user", _mock_get_user),
+        # ms-95 / Trek task-add slug resolution: the endpoint now reads
+        # both ``get_project`` (= fast path full id check) and
+        # ``list_projects`` (= slug expansion scan), so the tests need
+        # to mock both for the resolver to behave deterministically.
+        ("get_project", _mock_get_project),
+        ("list_projects", _mock_list_projects),
+        # ms-97 Phase 4 / AC14 — list_sessions used by
+        # resolve_session_home_project to resolve caller home project.
+        ("list_sessions", _mock_list_sessions),
     ]:
         prior[name] = getattr(db_module, name, None)
         setattr(db_module, name, mock)
@@ -169,6 +232,8 @@ def reset_store():
     prior = _rebind_db()
     _treks.clear()
     _users_by_email.clear()
+    _projects.clear()
+    _sessions_by_project.clear()
     _apply_operation_calls.clear()
     for uid, email in (
         (LEADER_UID, LEADER_EMAIL),
@@ -176,6 +241,17 @@ def reset_store():
         (STRANGER_UID, STRANGER_EMAIL),
     ):
         _users_by_email[email] = (uid, {"sub": uid, "email": email})
+    # ms-95 / Trek task-add slug resolution: the legacy tests pre-date
+    # the resolver and use short ids (``"proj-target"`` / ``"proj-A"`` /
+    # ``"proj-OUTSIDE"``) as if they were full project_ids. Register the
+    # set the legacy tests reference so the resolver's fast path
+    # (``db.get_project`` hit) returns them as-is — that way the legacy
+    # scope-rejection assertions still flow through the 403 path rather
+    # than getting short-circuited to 404. New slug-resolution tests
+    # below register their own projects with the realistic
+    # ``<slug>-<hex6>`` shape so the slug-expansion path is exercised.
+    for legacy_pid in ("proj-target", "proj-A", "proj-B", "proj-OUTSIDE"):
+        _register_project(legacy_pid)
     app_module.app.dependency_overrides.clear()
     prior_auth = app_module._auth_enabled
     app_module._auth_enabled = True
@@ -185,6 +261,8 @@ def reset_store():
         app_module._auth_enabled = prior_auth
         _treks.clear()
         _users_by_email.clear()
+        _projects.clear()
+        _sessions_by_project.clear()
         app_module.app.dependency_overrides.clear()
         _restore_db(prior)
 
@@ -354,6 +432,55 @@ class TestRejectedScopeOnlyTask:
         assert "scope_only_has_task_narrowing" in r.text
 
 
+class TestAC12Closure:
+    """ms-97 / e-2659 (AC12): once AC7 retires project-wide scope on
+    the new write path, the only ways into the task-add endpoint are
+    (a) a milestone-narrowed scope row — allowed under that MS only,
+    (b) an operation-narrowed scope row — rejected as
+    ``scope_only_has_task_narrowing``, or (c) a task-narrowed scope
+    row — also rejected as ``scope_only_has_task_narrowing``.
+
+    There is no longer a "project-wide" path that authorises a task
+    slot to spawn sibling tasks. This test pair pins that closure
+    against the existing scope-guard implementation; both rejections
+    come from ``check_trek_task_add_allowed`` without any new code,
+    making it a *verification* test for AC7's downstream effect.
+    """
+
+    def test_task_slot_cannot_spawn_sibling_task(self):
+        trek_id = _seed_trek([
+            {"project": "proj-A", "task": "e-1234"},
+        ])
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "proj-A",
+                "target_milestone": "ms-10",
+                "description": "AC12: task slot tries to sprout a sibling",
+            },
+        )
+        assert r.status_code == 403, r.text
+        assert "scope_only_has_task_narrowing" in r.text
+        assert not _apply_operation_calls
+
+    def test_operation_slot_cannot_spawn_sibling_task(self):
+        trek_id = _seed_trek([
+            {"project": "proj-A", "operation": "op-7"},
+        ])
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "proj-A",
+                "target_milestone": "ms-10",
+                "description": "AC12: op slot tries to sprout a sibling",
+            },
+        )
+        assert r.status_code == 403, r.text
+        assert "scope_only_has_task_narrowing" in r.text
+
+
 # ---------------------------------------------------------------------------
 # Auth gating — non-member caller is rejected
 # ---------------------------------------------------------------------------
@@ -429,3 +556,326 @@ class TestValidation:
             },
         )
         assert r.status_code == 404, r.text
+
+
+# ---------------------------------------------------------------------------
+# ms-95 / Trek task-add slug ↔ full project_id resolution
+#
+# Background — cross-project Trek dogfood (PE + LPS, 2026-06-27) found
+# that scopes stored as **slug** (= the human-friendly name part the CLI
+# accepts at ``beacon trek plan --add-scope <slug>:<ms>``) crash the
+# task-add endpoint because ``operations.apply_operation`` needs the
+# **full project_id** (= ``"<slug>-<hex6>"`` minted by ``cmd_cloud_setup``).
+# Symptoms before the fix:
+#   * slug stored + slug request → 500 (LookupError in apply_operation)
+#   * slug stored + full id request → 403 project_not_in_scope (literal
+#     string equality miss between scope and request)
+# The endpoint now canonicalises both sides via
+# ``_resolve_canonical_project_id`` so the scope match runs on equal
+# footing and apply_operation always receives a real project_id.
+# ---------------------------------------------------------------------------
+
+
+class TestSlugResolution:
+    """Cover the four canonicalisation paths the bug touches."""
+
+    PE_SLUG = "profile-extractor"
+    PE_FULL_ID = "profile-extractor-276d28"
+
+    def _seed_pe_project(self, owner: str = "") -> None:
+        _register_project(self.PE_FULL_ID, owner=owner)
+
+    def test_slug_stored_scope_accepts_slug_request(self):
+        """Failure case 1 from the dogfood report → was 500, must be 200.
+
+        The scope was added through ``beacon trek plan --add-scope
+        profile-extractor:ms-target`` which stores the user-typed slug.
+        A subsequent ``beacon trek task add tk-... --target
+        profile-extractor:ms-target`` sends the same slug. Both sides
+        must resolve to the full project_id so the scope match passes
+        AND apply_operation sees a real id.
+        """
+        self._seed_pe_project()
+        trek_id = _seed_trek([
+            {"project": self.PE_SLUG, "milestone": "ms-target"},
+        ])
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": self.PE_SLUG,
+                "target_milestone": "ms-target",
+                "description": "PE dogfood reproduction case",
+            },
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # Response carries the canonical full id, not the slug, so
+        # downstream consumers (= meta.trek_id audit, WS broadcast) see
+        # the same project_id Firestore is keyed by.
+        assert body["project_id"] == self.PE_FULL_ID
+        assert body["entry_id"].startswith("e-")
+        # apply_operation was invoked with the resolved full id (= no
+        # LookupError, no 500).
+        assert _apply_operation_calls
+        assert _apply_operation_calls[-1]["project_id"] == self.PE_FULL_ID
+
+    def test_slug_stored_scope_accepts_full_id_request(self):
+        """Failure case 2 from the dogfood report → was 403, must be 200.
+
+        Same slug-stored scope, but the caller specifies the full
+        project_id (e.g. because Web UI fills it in). The scope match
+        must canonicalise the scope side too so the comparison
+        succeeds.
+        """
+        self._seed_pe_project()
+        trek_id = _seed_trek([
+            {"project": self.PE_SLUG, "milestone": "ms-target"},
+        ])
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": self.PE_FULL_ID,
+                "target_milestone": "ms-target",
+                "description": "full id request against slug-stored scope",
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert _apply_operation_calls[-1]["project_id"] == self.PE_FULL_ID
+
+    def test_full_id_stored_scope_accepts_slug_request(self):
+        """Forward-looking: once scope-add canonicalises (= follow-up),
+        scope entries will be stored as full ids. Slug requests must
+        still resolve to that same id so this symmetry is intentional.
+        """
+        self._seed_pe_project()
+        trek_id = _seed_trek([
+            {"project": self.PE_FULL_ID, "milestone": "ms-target"},
+        ])
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": self.PE_SLUG,
+                "target_milestone": "ms-target",
+                "description": "slug request against full-id scope",
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert _apply_operation_calls[-1]["project_id"] == self.PE_FULL_ID
+
+    def test_ambiguous_slug_is_404(self):
+        """Two projects with the same slug prefix → the resolver refuses
+        to guess. The user must supply the full id explicitly.
+
+        This guards against silent cross-tenant write (= picking the
+        wrong project just because its id sorts first).
+        """
+        _register_project("profile-extractor-aaaaaa")
+        _register_project("profile-extractor-bbbbbb")
+        trek_id = _seed_trek([
+            {"project": "profile-extractor", "milestone": "ms-target"},
+        ])
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "profile-extractor",
+                "target_milestone": "ms-target",
+                "description": "ambiguous slug",
+            },
+        )
+        assert r.status_code == 404, r.text
+        assert "ambiguous" in r.text or "not found" in r.text
+        assert not _apply_operation_calls
+
+    def test_unresolvable_target_project_is_404_not_500(self):
+        """Regression guard for the original 500 path.
+
+        Even when the caller sends a target_project that doesn't exist
+        anywhere (= typo, deleted project), the endpoint must return a
+        clean 404 rather than crash on a downstream ``LookupError``.
+        """
+        # No project registered for "ghost-project". The slug-stored
+        # scope match would have succeeded pre-fix (literal equality
+        # against the scope entry), then apply_operation would crash.
+        trek_id = _seed_trek([
+            {"project": "ghost-project", "milestone": "ms-target"},
+        ])
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "ghost-project",
+                "target_milestone": "ms-target",
+                "description": "should never reach apply_op",
+            },
+        )
+        assert r.status_code == 404, r.text
+        assert not _apply_operation_calls
+
+    def test_resolver_respects_owner_scoping(self):
+        """Slug expansion is filtered by the requesting user's
+        ``list_projects`` view — strangers' projects can't be reached
+        even if their slug happens to match.
+        """
+        # PE project owned by someone else; the requesting MEMBER must
+        # not see it via slug expansion.
+        _register_project(self.PE_FULL_ID, owner="someone-else-uid")
+        trek_id = _seed_trek([
+            {"project": self.PE_SLUG, "milestone": "ms-target"},
+        ])
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": self.PE_SLUG,
+                "target_milestone": "ms-target",
+                "description": "should not reach foreign project",
+            },
+        )
+        assert r.status_code == 404, r.text
+
+
+# ---------------------------------------------------------------------------
+# ms-97 Phase 4 / AC14 — executor home project check on slot 起票
+# ---------------------------------------------------------------------------
+
+
+def _seed_phase_a_trek(scope: list[dict]) -> str:
+    """Seed a phase A+ trek (= session_id keyed members) for AC14 tests.
+
+    Stamps ``meta.migration_phase=A`` so trek_mod.is_session_id_keyed
+    returns True, and attaches session_id to the seed members so the
+    endpoint's session-grain role / home checks resolve.
+    """
+    trek_id = _seed_trek(scope)
+    t = _treks[trek_id]
+    t.setdefault("meta", {})["migration_phase"] = "A"
+    for m in t.get("members") or []:
+        if m.get("user_id") == LEADER_UID:
+            m["session_id"] = "sv-leader"
+        elif m.get("user_id") == MEMBER_UID:
+            m["session_id"] = "sv-member"
+    return trek_id
+
+
+class TestAC14ExecutorHomeProject:
+    """AC14: executor (= non-leader member) の slot 起票 は home project に限定。
+
+    - 同じ project に session が登録されていれば 200
+    - 別 scope project への slot 起票試行 (= caller の home ≠ target) は 403
+    - leader は home check 免除 (= cross-project authority を保持)
+    - pre-A trek は legacy 振る舞い (= home check skip)
+    """
+
+    def test_executor_can_add_slot_to_home_project(self):
+        """Positive path: executor の session が target project に登録済 → 200."""
+        trek_id = _seed_phase_a_trek([
+            {"project": "proj-A", "milestone": "ms-target"},
+            {"project": "proj-B", "milestone": "ms-target"},
+        ])
+        # Register member session under proj-A (= their home project).
+        _register_session("proj-A", "sv-member")
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "proj-A",
+                "target_milestone": "ms-target",
+                "description": "executor slot in home",
+            },
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 200, r.text
+
+    def test_executor_cannot_add_slot_to_other_scope_project(self):
+        """AC14 rejection: executor home = proj-A, target = proj-B → 403."""
+        trek_id = _seed_phase_a_trek([
+            {"project": "proj-A", "milestone": "ms-target"},
+            {"project": "proj-B", "milestone": "ms-target"},
+        ])
+        # Member session is registered under proj-A (their home), but
+        # they try to spawn a slot in proj-B.
+        _register_session("proj-A", "sv-member")
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "proj-B",
+                "target_milestone": "ms-target",
+                "description": "executor tries cross-project",
+            },
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 403, r.text
+        assert "home" in r.text.lower() or "AC14" in r.text
+
+    def test_executor_with_ghost_session_rejected(self):
+        """Session not registered in any scope project → 403."""
+        trek_id = _seed_phase_a_trek([
+            {"project": "proj-A", "milestone": "ms-target"},
+        ])
+        # Note: NO _register_session call — member's session_id is
+        # nowhere on the session registry.
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "proj-A",
+                "target_milestone": "ms-target",
+                "description": "ghost session attempt",
+            },
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 403, r.text
+        # Detail mentions home project resolution failure.
+        assert "home" in r.text.lower() or "registered" in r.text.lower()
+
+    def test_leader_exempt_from_home_check(self):
+        """leader は cross-project authority を持つ (= home check skip)."""
+        trek_id = _seed_phase_a_trek([
+            {"project": "proj-A", "milestone": "ms-target"},
+            {"project": "proj-B", "milestone": "ms-target"},
+        ])
+        # Leader session registered under proj-A only; sprouts a slot
+        # in proj-B — should be allowed because leader is exempt.
+        _register_session("proj-A", "sv-leader")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "proj-B",
+                "target_milestone": "ms-target",
+                "description": "leader cross-project slot",
+            },
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 200, r.text
+
+    def test_pre_a_trek_skips_home_check(self):
+        """Pre-A trek invariance: legacy trek with no migration_phase stamp.
+
+        Even without registering the member's session in any scope
+        project, the request succeeds because the home check is
+        gated on ``is_session_id_keyed`` (= phase A+ only).
+        """
+        # _seed_trek (= default) does NOT stamp migration_phase, so
+        # is_session_id_keyed returns False and the home check skips.
+        trek_id = _seed_trek([
+            {"project": "proj-A", "milestone": "ms-target"},
+        ])
+        # NOTE: no _register_session — would 403 under phase A+, but
+        # phase pre-A skips the home check entirely (= legacy contract).
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/task-add",
+            json={
+                "target_project": "proj-A",
+                "target_milestone": "ms-target",
+                "description": "pre-A invariance",
+            },
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 200, r.text

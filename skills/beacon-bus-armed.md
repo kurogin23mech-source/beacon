@@ -15,6 +15,9 @@ triggers:
 
 # Beacon Bus Armed (autonomous DM mode)
 
+> ⚠ **Trek 用途外**: Trek の進行管理は `/beacon-trek-execute` を使う。 本 Skill は
+> 一般 DM の自動応答デバッグ用に格下げ済 (= ms-97 中心原則 6)。
+
 > 「会話してなくても、別セッションから DM が来たら気付いて、N 往復まで自動返答する」状態にこのセッションを切り替える。
 
 このスキルは **3 段ロケット** で動く:

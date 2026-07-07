@@ -104,9 +104,14 @@ def test_build_member_role_validated():
 # normalize_scope_entry
 # ---------------------------------------------------------------------------
 
-def test_normalize_scope_keeps_project_only():
-    out = trek.normalize_scope_entry({"project": "p-1"})
+def test_normalize_scope_keeps_project_only_legacy():
+    # ms-97 / e-2659 (AC8): strict mode now rejects project-wide entries
+    # (= no narrowing key), but the non-strict path is retained for
+    # reading grandfathered on-disk rows. Lock both halves of the contract.
+    out = trek.normalize_scope_entry({"project": "p-1"}, strict=False)
     assert out == {"project": "p-1"}
+    with pytest.raises(ValueError, match="narrowing key"):
+        trek.normalize_scope_entry({"project": "p-1"})
 
 
 def test_normalize_scope_keeps_project_plus_milestone():
@@ -339,16 +344,24 @@ def test_set_goal_state_clear_via_empty_string():
 # ---------------------------------------------------------------------------
 
 def test_new_trek_defaults_meta_empty():
-    """No cadence + no manager URL → meta is present but empty.
+    """No cadence + no manager URL → meta carries only the G6 (e-2660)
+    completion-flow seed fields, all set to ``None``.
 
-    Always-present empty dict keeps consumers from branching on KeyError
-    vs. empty-dict (= the same pattern goal_state uses with empty string).
+    ms-97 / Phase 7-A — ``new_trek`` seeds three tracking fields
+    (``completion_notified_at`` / ``summary_sent_at`` /
+    ``stall_threshold_minutes``) so AC20 / AC21 / AC11 readers find a
+    stable invariant from t=0 instead of branching on
+    KeyError-vs-None. Cadence + manager URL stay opt-in.
     """
     t = trek.new_trek(
         title="x", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-x",
     )
-    assert t["meta"] == {}
+    assert t["meta"] == {
+        "completion_notified_at": None,
+        "summary_sent_at": None,
+        "stall_threshold_minutes": None,
+    }
 
 
 def test_new_trek_with_cadence_minutes():
@@ -692,6 +705,130 @@ def test_aggregate_task_state_active_when_any_working():
 
 
 # ---------------------------------------------------------------------------
+# ms-97 Phase 4 / AC10 — MS slot precedence
+# ---------------------------------------------------------------------------
+
+def test_compute_ms_slot_state_leader_review_wins():
+    """precedence #1: any leader_review child → slot is leader_review.
+
+    Even if other children are done / user_review / working / todo,
+    leader_review wins because the leader's queue is the most
+    actionable / blocking state.
+    """
+    children = [
+        {"state": "done"},
+        {"state": "leader_review"},
+        {"state": "working"},
+        {"state": "todo"},
+    ]
+    assert trek.compute_ms_slot_state(children) == "leader_review"
+
+
+def test_compute_ms_slot_state_all_done():
+    """precedence #2: all done → slot is done."""
+    children = [{"state": "done"}, {"state": "done"}]
+    assert trek.compute_ms_slot_state(children) == "done"
+
+
+def test_compute_ms_slot_state_mixed_terminal_user_review():
+    """precedence #3: terminal mix (done + user_review) → slot is user_review.
+
+    All children are terminal but not all done → user_review wins
+    because the slot needs user judgment to fully close out.
+    """
+    children = [{"state": "done"}, {"state": "user_review"}]
+    assert trek.compute_ms_slot_state(children) == "user_review"
+
+
+def test_compute_ms_slot_state_working_presence():
+    """precedence #4: any working child (no leader_review / no all-terminal) → working."""
+    children = [
+        {"state": "todo"},
+        {"state": "working"},
+        {"state": "done"},
+    ]
+    assert trek.compute_ms_slot_state(children) == "working"
+
+
+def test_compute_ms_slot_state_all_todo():
+    """precedence #5: all todo (or empty slot) → todo."""
+    children = [{"state": "todo"}, {"state": "todo"}]
+    assert trek.compute_ms_slot_state(children) == "todo"
+    # empty slot collapses to todo as well.
+    assert trek.compute_ms_slot_state([]) == "todo"
+
+
+def test_compute_ms_slot_state_unknown_state_collapses_to_todo():
+    """defensive: garbage / unknown state tokens collapse to todo for counting.
+
+    A future-version of trek doc with a state token this version
+    doesn't recognise must not crash the helper; it falls through
+    to the all-todo path.
+    """
+    children = [{"state": "future-state-xyz"}, {"state": "todo"}]
+    assert trek.compute_ms_slot_state(children) == "todo"
+
+
+# ---------------------------------------------------------------------------
+# ms-97 Phase 4 / AC14 — resolve_session_home_project
+# ---------------------------------------------------------------------------
+
+def test_resolve_session_home_project_found_on_first_pid():
+    """First scope project wins when session is registered there."""
+    def lister(pid):
+        if pid == "proj-A":
+            return [{"session_id": "sv-exec"}, {"session_id": "sv-other"}]
+        return []
+    home = trek.resolve_session_home_project(
+        "sv-exec", ["proj-A", "proj-B"], lister,
+    )
+    assert home == "proj-A"
+
+
+def test_resolve_session_home_project_found_on_second_pid():
+    """Walks the list in order — second pid hit returned correctly."""
+    def lister(pid):
+        if pid == "proj-B":
+            return [{"session_id": "sv-exec"}]
+        return []
+    home = trek.resolve_session_home_project(
+        "sv-exec", ["proj-A", "proj-B"], lister,
+    )
+    assert home == "proj-B"
+
+
+def test_resolve_session_home_project_no_match_returns_empty():
+    """Ghost session (registered nowhere in scope) returns ``""``."""
+    home = trek.resolve_session_home_project(
+        "sv-ghost", ["proj-A", "proj-B"],
+        lambda _pid: [{"session_id": "sv-other"}],
+    )
+    assert home == ""
+
+
+def test_resolve_session_home_project_empty_inputs():
+    """Empty session_id or empty scope returns ``""`` immediately."""
+    assert trek.resolve_session_home_project(
+        "", ["proj-A"], lambda _pid: [{"session_id": "sv-x"}],
+    ) == ""
+    assert trek.resolve_session_home_project(
+        "sv-exec", [], lambda _pid: [{"session_id": "sv-exec"}],
+    ) == ""
+
+
+def test_resolve_session_home_project_handles_lister_failure():
+    """Listing exceptions on one pid don't poison the walk."""
+    def flaky(pid):
+        if pid == "proj-A":
+            raise RuntimeError("listing failed")
+        return [{"session_id": "sv-exec"}]
+    home = trek.resolve_session_home_project(
+        "sv-exec", ["proj-A", "proj-B"], flaky,
+    )
+    assert home == "proj-B"
+
+
+# ---------------------------------------------------------------------------
 # ms-88 / e-2107 — 5-state state machine + legacy migration
 # ---------------------------------------------------------------------------
 
@@ -797,9 +934,13 @@ def test_legacy_waiting_review_migrates_on_read():
     assert trek.get_task_state(t, "e-old") == "leader_review"
 
 
-def test_default_ttl_changed_to_12_minutes():
-    """ms-88 / e-2107: DEFAULT_WORKING_TTL_MINUTES 30 → 12 短縮。"""
-    assert trek.DEFAULT_WORKING_TTL_MINUTES == 12
+def test_default_ttl_changed_to_24h():
+    """ms-88 / e-2107 → ms-95 / e-2646: DEFAULT_WORKING_TTL_MINUTES 履歴
+    30 → 12 → 1440 (24h)。 2026-06-28 dogfood で 12 min は prep 待機中の
+    executor を「stuck」 と誤判定する病理を生んだので、 24h baseline に
+    再緩和。 「すぐ stall 判定したい」 個別 Trek は meta.stall_threshold_minutes
+    で短い override 可能 (= 機能変更ではなく default だけ動かす)。"""
+    assert trek.DEFAULT_WORKING_TTL_MINUTES == 1440
 
 
 # ---------------------------------------------------------------------------
@@ -1079,8 +1220,9 @@ def test_get_working_ttl_minutes_default_when_unset():
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
     )
-    # ms-88 / e-2107: TTL default 30 → 12 min (= scheduler cadence + 2 min バッファ)。
-    assert trek.get_working_ttl_minutes(t) == 12
+    # ms-95 / e-2646: TTL default は 24h (= 1440 min) に再緩和。 prep 待機中
+    # の executor を「stuck」 と誤判定する dogfood 病理を構造的に絶つ。
+    assert trek.get_working_ttl_minutes(t) == 1440
 
 
 def test_get_working_ttl_minutes_honors_meta_override():
@@ -1099,8 +1241,8 @@ def test_get_working_ttl_minutes_falls_back_on_non_numeric_override():
     )
     t.setdefault("meta", {})["working_ttl_minutes"] = "garbage"
     # Bad config must not crash; fall back to default so safety net stays on.
-    # ms-88 / e-2107: default 30 → 12 min。
-    assert trek.get_working_ttl_minutes(t) == 12
+    # ms-95 / e-2646: default 12 → 1440 (24h)。
+    assert trek.get_working_ttl_minutes(t) == 1440
 
 
 # ---------------------------------------------------------------------------
@@ -1329,3 +1471,131 @@ def test_summarize_pulse_acks_ignores_legacy_empty_sessions():
     assert summary["active_session_count"] == 0
     assert summary["stuck_session_count"] == 0
     assert summary["idle_session_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Migration scaffolding (= ms-97 / e-2658)
+# ---------------------------------------------------------------------------
+# AC6 (= members[] を user_id keyed から session_id keyed に書き換える)
+# cutover を、 既存 trek の不可逆破壊から守る最小単位 (= backup field +
+# migration_phase tracker) の schema 契約を pin する。 Phase 0-A 段階では
+# 挙動変更ゼロ (= seed のみ / helper は AC34 migration で使う)。
+
+def _new_trek_for_migration() -> dict:
+    return trek.new_trek(
+        title="Migration scaffolding fixture",
+        creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-aaaa-12345",
+    )
+
+
+def test_new_trek_seeds_members_legacy_backup_empty():
+    t = _new_trek_for_migration()
+    assert "members_legacy_backup" in t
+    assert t["members_legacy_backup"] == []
+
+
+def test_get_migration_phase_defaults_to_pre_A():
+    t = _new_trek_for_migration()
+    # meta.migration_phase が無い trek は "pre-A" を silent に返す。
+    assert "migration_phase" not in (t.get("meta") or {})
+    assert trek.get_migration_phase(t) == "pre-A"
+
+
+def test_get_migration_phase_reads_valid_stamp():
+    t = _new_trek_for_migration()
+    t.setdefault("meta", {})["migration_phase"] = "A"
+    assert trek.get_migration_phase(t) == "A"
+
+
+def test_get_migration_phase_falls_back_on_invalid_token():
+    t = _new_trek_for_migration()
+    t.setdefault("meta", {})["migration_phase"] = "bogus"
+    # 不正トークンは silent に "pre-A" に丸める (= 読み手の分岐を守る)。
+    assert trek.get_migration_phase(t) == "pre-A"
+
+
+def test_set_migration_phase_validates_token():
+    t = _new_trek_for_migration()
+    with pytest.raises(ValueError):
+        trek.set_migration_phase(t, "Z")
+    # 有効トークンは stamp される。
+    trek.set_migration_phase(t, "A")
+    assert t["meta"]["migration_phase"] == "A"
+
+
+def test_set_migration_phase_bumps_updated_at():
+    t = _new_trek_for_migration()
+    # updated_at を「過去」値に置き換えてから stamp、 mutation を観測する。
+    t["updated_at"] = "1970-01-01T00:00:00Z"
+    trek.set_migration_phase(t, "A")
+    assert t["updated_at"] != "1970-01-01T00:00:00Z"
+
+
+def test_backup_legacy_members_copies_members_to_backup():
+    t = _new_trek_for_migration()
+    # 既存 leader (1 名) に follower 1 名を足して 2 名分の members[] を作る。
+    t["members"].append({
+        "user_id": "u-2",
+        "email": "c@d.com",
+        "role": "follower",
+        "joined_at": "2026-06-28T00:00:00Z",
+    })
+    assert len(t["members"]) == 2
+    trek.backup_legacy_members(t)
+    assert len(t["members_legacy_backup"]) == 2
+    assert t["members_legacy_backup"][0]["user_id"] == "u-1"
+    assert t["members_legacy_backup"][1]["user_id"] == "u-2"
+
+
+def test_backup_legacy_members_refuses_double_backup():
+    t = _new_trek_for_migration()
+    trek.backup_legacy_members(t)
+    # 既に backup が non-empty (= leader 1 名がコピーされている) なら
+    # 二重 backup を ValueError で拒否する。
+    assert t["members_legacy_backup"] != []
+    with pytest.raises(ValueError):
+        trek.backup_legacy_members(t)
+
+
+def test_backup_legacy_members_is_independent_copy():
+    t = _new_trek_for_migration()
+    trek.backup_legacy_members(t)
+    # 返却された backup entry を変更しても、 元の members[] には影響しない
+    # (= dict(m) の shallow copy で snapshot を独立化している)。
+    t["members_legacy_backup"][0]["role"] = "tampered"
+    assert t["members"][0]["role"] == "leader"
+
+
+def test_restore_legacy_members_restores_from_backup():
+    t = _new_trek_for_migration()
+    trek.backup_legacy_members(t)
+    original_leader = dict(t["members"][0])
+    # cutover を模擬: members[] を AC6 形 (session_id keyed) に書き換える。
+    t["members"] = [{
+        "session_id": "sv-aaaa-12345",
+        "role": "leader",
+        "joined_at": "2026-06-28T00:00:00Z",
+    }]
+    trek.restore_legacy_members(t)
+    assert len(t["members"]) == 1
+    assert t["members"][0]["user_id"] == original_leader["user_id"]
+    # 復元後、 backup field は空に戻る (= 次回 backup を許す状態)。
+    assert t["members_legacy_backup"] == []
+
+
+def test_restore_legacy_members_fails_on_empty_backup():
+    t = _new_trek_for_migration()
+    # backup が空 (= 初期 seed のまま) なら復元元が無い → ValueError。
+    assert t["members_legacy_backup"] == []
+    with pytest.raises(ValueError):
+        trek.restore_legacy_members(t)
+
+
+def test_restore_legacy_members_resets_phase_to_pre_A():
+    t = _new_trek_for_migration()
+    trek.backup_legacy_members(t)
+    trek.set_migration_phase(t, "A")
+    assert t["meta"]["migration_phase"] == "A"
+    trek.restore_legacy_members(t)
+    assert t["meta"]["migration_phase"] == "pre-A"

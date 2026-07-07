@@ -271,14 +271,25 @@ class TestScopeCloudDispatch:
             "milestone": "ms-69", "operation": "", "task": "",
         }
 
-    def test_add_scope_project_only(self, fake_client, monkeypatch):
+    def test_add_scope_project_only_rejected(self, fake_client, monkeypatch):
+        """ms-97 / e-2659 (AC7 CLI layer): project-wide add rejected pre-dispatch.
+
+        Pre-AC7 ``--add-scope beacon`` parsed into a project-only entry
+        and dispatched to the cloud. AC7 now rejects this at parse time
+        (= strict ``normalize_scope_entry``) so the CLI exits 1 and the
+        cloud client is never called.
+        """
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
         monkeypatch.setenv("BEACON_TREK_SCOPE_ADD", "beacon")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_plan()
-        name, kwargs = fake_client.calls[0]
-        assert name == "add_trek_scope"
-        assert kwargs["milestone"] == ""
+        stderr_buf = StringIO()
+        monkeypatch.setattr(sys, "stderr", stderr_buf)
+        with pytest.raises(SystemExit) as exc_info:
+            commands.cmd_trek_plan()
+        assert exc_info.value.code == 1
+        assert "narrowing key" in stderr_buf.getvalue()
+        # Cloud client must NOT have been called.
+        assert fake_client.calls == []
 
     def test_add_scope_task_ref(self, fake_client, monkeypatch):
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")

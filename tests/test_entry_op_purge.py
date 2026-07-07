@@ -235,7 +235,14 @@ def project_dir(monkeypatch):
         monkeypatch.setenv("BEACON_PROJECT_FILE", str(beacon_dir / "project.json"))
         monkeypatch.delenv("BEACON_CLOUD", raising=False)
         monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "local")
-        sys.modules.pop("firestore_client", None)
+        # ms-95 e-2438: use monkeypatch.delitem so sys.modules["firestore_client"]
+        # is auto-restored after the test. A raw `sys.modules.pop()` leaks across
+        # the test boundary; the next `import firestore_client` (e.g. inside
+        # `_apply_mock` for test_invitation_api) re-loads the real module, wiping
+        # the in-memory mocks adjacent test modules set up on the *previous*
+        # firestore_client object → DefaultCredentialsError on CI.
+        if "firestore_client" in sys.modules:
+            monkeypatch.delitem(sys.modules, "firestore_client")
         yield Path(tmp)
 
 

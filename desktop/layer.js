@@ -493,25 +493,13 @@ async function connectCloudWebSocket(projectId) {
       return;
     }
     // ms-84 / e-2326 — signal-only WS. ws_ready / project_changed mean
-    // "refetch via the existing Tauri IPC pull" (loadProject). Legacy
-    // type=project frames are still handled for rollover safety.
+    // "refetch via the existing Tauri IPC pull" (loadProject).
     if (msg.type === 'ws_ready' || msg.type === 'project_changed') {
       state.connected = true;
       state.error = null;
       loadProject();
       return;
     }
-    if (msg.type !== 'project') return;
-    const data = msg.data || {};
-    const newJson = JSON.stringify(data);
-    if (newJson === lastProjectJson) return;
-    lastProjectJson = newJson;
-    state.project = hydrateProjectEntries(data);
-    state.lastUpdate = new Date();
-    state.connected = true;
-    state.error = null;
-    renderOnDataChange();
-    refreshExpandedMilestoneEntries();
   };
 
   ws.onerror = () => {
@@ -771,29 +759,70 @@ function render() {
 // ---- Menu ----
 
 async function renderMenu() {
-  let localProjects = [], cloudProjects = [];
-  try { localProjects = await invoke('list_projects'); } catch (e) {}
-  try {
-    const auth = await invoke('is_authenticated');
-    if (auth) cloudProjects = JSON.parse(await invoke('cloud_list_projects'));
-  } catch (e) {}
-  const localOnly = localProjects.filter(p => p.mode === 'local');
+  // ms-95 / e-2215 — lazy fill pattern (mirrors server/static/index.html).
+  // Previously `renderMenu()` awaited two Tauri invokes (list_projects +
+  // cloud_list_projects) BEFORE the first paint, leaving the menu invisible
+  // until both round-trips finished. On the first open after a fresh page
+  // load the user felt a noticeable delay. Now we paint the panel shell
+  // immediately with loading placeholders, then refill each section in
+  // place as the invokes resolve.
   const currentPath = state.projectPath || '';
   const root = document.getElementById('menu-root');
+  if (!root) return;
+
+  const renderLocalSection = (localProjects) => {
+    const localOnly = (localProjects || []).filter(p => p.mode === 'local');
+    if (localOnly.length === 0) return '';
+    return `<div class="menu-section">
+      <div class="menu-section-title">Local Projects</div>
+      ${localOnly.map(p => `<button class="menu-item ${p.path === currentPath ? 'current' : ''}" data-action="menu-select-project" data-path="${esc(p.path)}">${esc(p.name)}<div class="menu-item-sub">${esc(p.path)}</div></button>`).join('')}
+    </div>`;
+  };
+
+  const renderCloudSection = (cloudProjects) => {
+    const list = (cloudProjects || []).filter(p => !p.archived);
+    if (list.length === 0) return '';
+    return `<div class="menu-section">
+      <div class="menu-section-title">Cloud Projects</div>
+      ${list.map(p => `<button class="menu-item ${('cloud:' + p.project_id) === currentPath ? 'current' : ''}" data-action="menu-select-cloud-project" data-project-id="${esc(p.project_id)}">${esc(p.name)}<div class="menu-item-sub">${esc(p.project_id)}</div></button>`).join('')}
+    </div>`;
+  };
+
+  // First paint — synchronous shell + placeholder. Slide-in animation
+  // starts within the same frame as the click.
   root.innerHTML = `
     <div class="menu-overlay" data-action="close-menu"></div>
     <div class="menu-panel">
       <div class="menu-header"><span class="menu-title">Menu</span><button class="menu-close" data-action="close-menu">×</button></div>
-      ${localOnly.length > 0 ? `<div class="menu-section">
-        <div class="menu-section-title">Local Projects</div>
-        ${localOnly.map(p => `<button class="menu-item ${p.path === currentPath ? 'current' : ''}" data-action="menu-select-project" data-path="${esc(p.path)}">${esc(p.name)}<div class="menu-item-sub">${esc(p.path)}</div></button>`).join('')}
-      </div>` : ''}
-      ${cloudProjects.length > 0 ? `<div class="menu-section">
-        <div class="menu-section-title">Cloud Projects</div>
-        ${cloudProjects.filter(p => !p.archived).map(p => `<button class="menu-item ${('cloud:' + p.project_id) === currentPath ? 'current' : ''}" data-action="menu-select-cloud-project" data-project-id="${esc(p.project_id)}">${esc(p.name)}<div class="menu-item-sub">${esc(p.project_id)}</div></button>`).join('')}
-      </div>` : ''}
+      <div id="menu-projects-body">
+        <div class="menu-section"><div class="menu-user" style="color:var(--text-dim);">Loading…</div></div>
+      </div>
     </div>`;
   root.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
+
+  const refillBody = (localProjects, cloudProjects) => {
+    const body = document.getElementById('menu-projects-body');
+    if (!body) return; // menu closed before fetch returned
+    const localHtml = renderLocalSection(localProjects);
+    const cloudHtml = renderCloudSection(cloudProjects);
+    body.innerHTML = (localHtml + cloudHtml) ||
+      '<div class="menu-section"><div class="menu-user" style="color:var(--text-dim);">No projects.</div></div>';
+    body.querySelectorAll('[data-action]').forEach(el => el.addEventListener('click', handleAction));
+  };
+
+  // Fire fetches in parallel; refill once both settle. Errors degrade
+  // silently (empty array used in place of failed fetch).
+  const localP = invoke('list_projects').catch(() => []);
+  const cloudP = (async () => {
+    try {
+      const auth = await invoke('is_authenticated');
+      if (!auth) return [];
+      return JSON.parse(await invoke('cloud_list_projects'));
+    } catch (_e) { return []; }
+  })();
+  Promise.all([localP, cloudP]).then(([localProjects, cloudProjects]) => {
+    refillBody(localProjects, cloudProjects);
+  });
 }
 
 function closeMenu() { document.getElementById('menu-root').innerHTML = ''; }

@@ -36,11 +36,21 @@ import trek  # noqa: E402
 
 
 def _trek_doc_with_scope(scope_entries: list[dict]) -> dict:
-    """Minimal trek doc carrying just the fields the scope-guard inspects."""
+    """Minimal trek doc carrying just the fields the scope-guard inspects.
+
+    ms-97 / e-2659 (AC8): some of these fixtures intentionally exercise
+    legacy project-wide scope rows (= ``{"project": pid}`` with no
+    narrowing) which the new strict mode would reject. Normalise with
+    ``strict=False`` so the on-disk grandfather path stays exercisable
+    from the scope-guard tests without coupling them to AC7's write-side
+    restrictions.
+    """
     return {
         "trek_id": "tk-test-e2141",
         "status": "active",
-        "scope": [trek.normalize_scope_entry(s) for s in scope_entries],
+        "scope": [
+            trek.normalize_scope_entry(s, strict=False) for s in scope_entries
+        ],
     }
 
 

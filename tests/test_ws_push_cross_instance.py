@@ -77,13 +77,23 @@ def test_deploy_step_pins_min_instances_to_one():
     )
 
 
-def test_deploy_step_caps_max_instances_to_one():
-    """`--max-instances=1` is present (= process-local dict を fanout 不要に保つ)."""
+def test_deploy_step_caps_max_instances_to_three():
+    """`--max-instances=3` is present (= ms-95 / e-2448 multi-instance unlock).
+
+    History — was `=1` until ms-95 / e-2448 (= 2026-06-25 dogfood revealed
+    that `_ws_connections` single-instance cap saturated the user-scope
+    429 budget when the parent + multiple fork sessions wrote concurrently).
+    The cap was raised to 3 in the deploy yml; cross-instance WS fanout is
+    now handled by the Pub/Sub layer landed in the same series, so the
+    process-local dict no longer needs to see every subscriber.
+    """
     run = _find_deploy_step_run()
-    assert re.search(r"--max-instances[=\s]+1\b", run), (
-        "Cloud Run deploy step must cap --max-instances=1 so the LB never "
-        "splits write traffic and WS traffic across instances "
-        "(ms-84 / e-2303). Got run body:\n{run}"
+    assert re.search(r"--max-instances[=\s]+3\b", run), (
+        "Cloud Run deploy step must cap --max-instances=3 — the single-"
+        "instance pin was relaxed in ms-95 / e-2448 after the user-scope "
+        "429 saturation incident. Pub/Sub now fans WS broadcasts across "
+        "instances so cross-instance subscriber loss is no longer an issue. "
+        f"Got run body:\n{run}"
     )
 
 

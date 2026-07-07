@@ -24,7 +24,7 @@
 //                              only when profile == "default" and the new
 //                              path is not yet created by silent migration)
 //   BEACON_CHANNEL_ALLOWLIST (csv, default "dm")
-//   BEACON_BUS_POLL_MS      (default 2000)
+//   BEACON_BUS_POLL_MS      (default 5000、ms-84 e-2366)
 //   BEACON_BUS_LOG          (default /tmp/beacon-bus-channel.log)
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
@@ -226,15 +226,179 @@ const ALLOWED_CHANNELS = Array.from(new Set([
   ..._envAllow,
   ...autoExecuteChannelsFromProject(),
 ]))
-const POLL_INTERVAL = parseInt(process.env.BEACON_BUS_POLL_MS || '2000', 10)
-const SCHEDULER_INTERVAL_MS = parseInt(
-  process.env.BEACON_BRIDGE_SCHEDULE_INTERVAL_MS || '60000', 10)
-const SCHEDULER_DISABLED = process.env.BEACON_BRIDGE_SCHEDULE_DISABLE === '1'
+// ms-84 / e-2366 — bridge poll interval default 2s → 5s.
+// 2s は Cloud Armor の IP 単位レート枠 100 req/60s (= infra/security/setup_cloud_armor.sh)
+// と相まって、1 session 60 req/分 (= 2 API × 30 周/分) が同 IP に 2 session 載るだけで
+// 即 429 Rate exceeded を踏む構造になっていた (= dolphin.orca の解析 / 2026-06-24)。
+// 5s に上げて 1 session 24 req/分まで落とし、合わせ技で予定されている dolphin の
+// heartbeat 緩和 PR (= heartbeat だけ 15s に separate、429 時 exponential backoff)
+// と組み合わせれば 1 session ~16 req/分 → 同 IP に 6 session 載るマージンになる。
+// 副作用は DM 着信遅延が最大 5s に伸びる (= 体感分かるがギリ許容)。
+// healthy 判定窓 max(30s, 2× poll) は 30s 不変、bus directory の live 判定に regression なし。
+// 即時性が必要な経路は BEACON_BUS_POLL_MS=2000 で従来挙動に opt-back 可能。
+const POLL_INTERVAL = parseInt(process.env.BEACON_BUS_POLL_MS || '5000', 10)
+
+// ms-95 / e-1667 — per-request HTTP timeout for apiGet/apiPost/apiPut.
+// Before this, bare fetch() with no timeout meant any stalled response from
+// the cloud server (Cloud Run cold-start, 429 with slow Retry-After, a
+// wedged TCP socket) would block the poll loop's await forever. last_poll_at
+// stopped advancing and the bridge was marked healthy=false for 43+ minutes
+// before manual recovery (= incident 2026-06-12, report doc 5Hg9QWvmhfn5MXa1q2uj).
+// 30s is generous for legitimate cold starts but bounded enough that one
+// stall costs at most one POLL_INTERVAL of latency before the loop recovers.
+const HTTP_TIMEOUT_MS = parseInt(
+  process.env.BEACON_BUS_HTTP_TIMEOUT_MS || '30000', 10)
+// e-1667 defense-in-depth — per-iteration watchdog around pollOnce /
+// writePollHeartbeat. Even if a future await path is added without HTTP
+// timeout, this cap forces the loop to continue. Picked at 2×
+// HTTP_TIMEOUT_MS so a single legitimate stall during pollOnce (multiple
+// awaits) doesn't false-positive.
+const ITERATION_WATCHDOG_MS = parseInt(
+  process.env.BEACON_BUS_ITERATION_WATCHDOG_MS || '60000', 10)
+// ms-95 / e-1490 — periodic refresh of .beacon/bridges/<sid>.json so the claim
+// file's pid / parent_pid / cwd never goes stale relative to the live bus.mjs.
+// Before this, writeBridgeClaim() ran only at cold-start (stampColdStartMetadata).
+// If bus.mjs died and was respawned by a new bclaude in a different cwd /
+// with a different parent pid, the existing bridges/<sid>.json kept pointing
+// at the original startup-time values. `bus directory --live --healthy`
+// then dropped the session because the recorded pid was dead while the
+// real bridge was alive elsewhere (= e-1482 dogfood observation:
+// 3rd bclaude in a separate worktree disappeared from the directory).
+// 60s is the smallest disk-friendly interval — every 5s POLL_INTERVAL tick
+// would thrash the disk for a 4-field JSON that rarely changes; 60s lets
+// us recover within a single retro/ops-loop without measurable IO load.
+// Rewrite is also gated on actual drift (pid / parent_pid / cwd change)
+// so a steady-state bridge skips the disk write entirely.
+const BRIDGE_CLAIM_REFRESH_MS = parseInt(
+  process.env.BEACON_BUS_BRIDGE_CLAIM_REFRESH_MS || '60000', 10)
 
 log(`=== beacon-bus channel starting ===`)
 log(`  api=${API_URL} project=${PROJECT_ID} session=${SESSION_ID}`)
 log(`  allow=[${ALLOWED_CHANNELS.join(',')}] poll=${POLL_INTERVAL}ms cwd=${CWD}`)
-log(`  scheduler=${SCHEDULER_DISABLED ? 'OFF' : SCHEDULER_INTERVAL_MS + 'ms'}`)
+log(`  http_timeout=${HTTP_TIMEOUT_MS}ms iter_watchdog=${ITERATION_WATCHDOG_MS}ms`)
+log(`  bridge_claim_refresh=${BRIDGE_CLAIM_REFRESH_MS}ms`)
+
+// --- ms-96 / e-2380 — WebSocket push accelerator --------------------------
+//
+// 従来 bus.mjs は POLL_INTERVAL (5s) の固定ポーリングだけで DM を取りに行って
+// いた。サーバ側は DM 送信時 (post_bus_event) に /ws/projects/{id} へ bus_event
+// を push 済み (app.py `_broadcast_bus_event`) なので、WS を「今すぐ poll しろ」の
+// 合図として使い受信遅延 (最大 5s) を潰す。
+//
+// 設計方針 (SPEC doc U2OTD44j79WJOXRerslh):
+//   - WS は真値源ではない。実データ取得は従来どおり pollOnce (= cursor /
+//     watermark による冪等・重複排除をそのまま再利用)。WS message は
+//     「新着あり」の合図で、割り込み可能 sleep を起こして即 poll させるだけ。
+//   - WS 健全時は poll を backstop 間隔 (WS_BACKSTOP_MS, 既定 30s) に落とし、
+//     WS が push しない送信経路 (fanout / reply 等、broadcast 未フック) も
+//     取りこぼさない。WS 不通時は従来の POLL_INTERVAL (5s) に自動 fallback。
+//   - 切断時は指数 backoff で再接続。`ws` 依存が解決できない環境では WS を
+//     無効化し、従来ポーリングのみで動作する (= 機能低下せず degrade)。
+const WS_ENABLED = process.env.BEACON_BUS_WS !== '0'
+const WS_BACKSTOP_MS = parseInt(process.env.BEACON_BUS_WS_BACKSTOP_MS || '30000', 10)
+let wsHealthy = false
+
+// interruptible sleep: 通常は指定 ms 待つが、wakePoll() で即座に解決できる。
+let _wakeResolve = null
+function wakePoll() {
+  const w = _wakeResolve
+  if (w) { _wakeResolve = null; w() }
+}
+function interruptibleSleep(ms) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => { _wakeResolve = null; resolve() }, ms)
+    _wakeResolve = () => { clearTimeout(t); resolve() }
+  })
+}
+
+// WebSocket 実装を lazy 解決。Node 22+ 内蔵の global WebSocket を最優先 (依存
+// 不要)、無ければ `ws` パッケージ (channel/package.json に宣言済) に fallback。
+// どちらも解決できなければ null を返し WS accelerator は無効化 (poll は生きる)。
+// 両実装とも WHATWG の addEventListener / ev.data / ev.code に対応するので、
+// 呼び出し側は 1 経路で書ける。
+let _WSImpl
+async function _resolveWS() {
+  if (_WSImpl !== undefined) return _WSImpl
+  if (typeof globalThis.WebSocket === 'function') {
+    _WSImpl = globalThis.WebSocket
+    return _WSImpl
+  }
+  try {
+    _WSImpl = (await import('ws')).default
+  } catch (e) {
+    _WSImpl = null
+    log(`bus WS disabled (no global WebSocket & ws module unavailable: ${e.message}) — polling only`)
+  }
+  return _WSImpl
+}
+
+function _busWsUrl() {
+  // http(s):// → ws(s):// に付け替え、既存の project WS エンドポイントに接続。
+  const base = API_URL.replace(/^http/, 'ws')
+  return `${base}/ws/projects/${encodeURIComponent(PROJECT_ID)}`
+    + `?token=${encodeURIComponent(loadToken())}`
+}
+
+async function connectBusWs() {
+  if (!WS_ENABLED || !PROJECT_ID) return
+  const WS = await _resolveWS()
+  if (!WS) return
+
+  let backoff = 1000
+  const BACKOFF_MAX = 30000
+
+  const openOnce = () => {
+    let ws
+    let pingTimer = null
+    const cleanup = () => {
+      wsHealthy = false
+      if (pingTimer) { clearInterval(pingTimer); pingTimer = null }
+    }
+    const scheduleReconnect = () => {
+      cleanup()
+      const delay = backoff
+      backoff = Math.min(backoff * 2, BACKOFF_MAX)
+      setTimeout(openOnce, delay)
+    }
+    try {
+      ws = new WS(_busWsUrl())
+    } catch (e) {
+      log(`bus WS connect threw: ${e.message}`)
+      scheduleReconnect()
+      return
+    }
+    ws.addEventListener('open', () => {
+      wsHealthy = true
+      backoff = 1000  // reset backoff on a healthy connection
+      log('bus WS connected (push-accelerated poll)')
+      // keepalive: server echoes "pong" to "ping" (app.py ws_project).
+      pingTimer = setInterval(() => {
+        try { ws.send('ping') } catch { /* close handler will reconnect */ }
+      }, 30000)
+      // Fetch once right away in case events landed during the connect gap.
+      wakePoll()
+    })
+    ws.addEventListener('message', () => {
+      // Any server frame = "there is activity for this project". We do NOT
+      // trust the payload as the source of truth — just wake the poll loop
+      // so pollOnce fetches via REST with the existing dedup/cursor logic.
+      wakePoll()
+    })
+    ws.addEventListener('close', (ev) => {
+      const code = ev && typeof ev.code !== 'undefined' ? ev.code : ''
+      log(`bus WS closed (code=${code}) — falling back to ${POLL_INTERVAL}ms poll, reconnecting`)
+      scheduleReconnect()
+    })
+    ws.addEventListener('error', (ev) => {
+      // 'error' is usually followed by 'close'; log and let close reconnect.
+      const detail = (ev && (ev.message || ev.error?.message)) || 'error event'
+      log(`bus WS error (non-fatal): ${detail}`)
+      try { ws.close() } catch { /* already closing */ }
+    })
+  }
+
+  openOnce()
+}
 log(`  session.json source=[${session.source || ''}] last_active=[${session.last_active || ''}]`)
 
 // --- Layer 0-3 transparency metadata (ms-54 / e-1369) -----------------------
@@ -396,8 +560,34 @@ function collectSessionMetadata() {
 
 // --- HTTPS helpers -----------------------------------------------------------
 
+// e-1667: wrap fetch with AbortController + HTTP_TIMEOUT_MS so a stalled
+// server can never hang the poll loop. AbortError is translated to a plain
+// Error with the timeout label so existing log paths (`heartbeat write failed
+// (non-fatal): ...`, `poll error: ...`) surface a readable cause instead of
+// `signal is aborted without reason`. Exported for unit-test ergonomics via
+// `export` at module bottom is unnecessary — tests reach into the module via
+// dynamic import; the structural pin tests in tests/test_bus_mjs_timeout_resilience.py
+// grep the source for the call shape instead of behavioral mocking.
+async function apiFetch(url, init = {}) {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), HTTP_TIMEOUT_MS)
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal })
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      const method = (init.method || 'GET').toUpperCase()
+      throw new Error(
+        `${method} ${url.replace(API_URL, '')} timeout after ${HTTP_TIMEOUT_MS}ms (e-1667)`,
+      )
+    }
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 async function apiGet(p) {
-  const r = await fetch(`${API_URL}${p}`, {
+  const r = await apiFetch(`${API_URL}${p}`, {
     headers: { Authorization: `Bearer ${loadToken()}` },
   })
   if (!r.ok) throw new Error(`GET ${p} → ${r.status}: ${(await r.text()).slice(0, 200)}`)
@@ -405,7 +595,7 @@ async function apiGet(p) {
 }
 
 async function apiPost(p, body) {
-  const r = await fetch(`${API_URL}${p}`, {
+  const r = await apiFetch(`${API_URL}${p}`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${loadToken()}`,
@@ -426,7 +616,7 @@ async function apiPost(p, body) {
 }
 
 async function apiPut(p, body) {
-  const r = await fetch(`${API_URL}${p}`, {
+  const r = await apiFetch(`${API_URL}${p}`, {
     method: 'PUT',
     headers: {
       Authorization: `Bearer ${loadToken()}`,
@@ -441,6 +631,22 @@ async function apiPut(p, body) {
     throw err
   }
   return r.json()
+}
+
+// e-1667: per-iteration watchdog wrapper. Caps any awaited promise at
+// ITERATION_WATCHDOG_MS so a hung pollOnce / scheduler / heartbeat cannot
+// wedge the loop. Returns the promise's result on time, or rejects with a
+// labelled Error after the cap. Stacks with HTTP_TIMEOUT_MS (= apiFetch
+// catches first, watchdog is the structural fallback for non-fetch awaits).
+function withWatchdog(promise, label, timeoutMs) {
+  let timer
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} exceeded watchdog ${timeoutMs}ms (e-1667)`)),
+      timeoutMs,
+    )
+  })
+  return Promise.race([promise, guard]).finally(() => clearTimeout(timer))
 }
 
 /**
@@ -752,6 +958,9 @@ if (!PROJECT_ID || !SESSION_ID) {
   // the poll loop. The cursor advance below remains the source-of-truth
   // for "won't re-deliver" semantics — receipts are an observational
   // signal that sits on top, not a delivery guarantee.
+  // @e-2502-core-candidate — ack endpoint + body shape duplicated in
+  //   lib/codex_receive_loop.py::ack_event. Move to lib/bus_protocol.py;
+  //   this function becomes a thin wrapper.
   async function ackReceipt(eventId, stage) {
     if (!eventId) return
     try {
@@ -767,6 +976,14 @@ if (!PROJECT_ID || !SESSION_ID) {
     }
   }
 
+  // @e-2502-core-candidate (poll URL + watermark dedupe + filter chain
+  //   = self-loop / recipient match / DM-without-recipient drop / channel
+  //   allowlist) +
+  // @e-2502-adapter-specific (mcp.notification call + content building
+  //   block at the bottom). The filter chain is bus protocol and must
+  //   lockstep with lib/codex_receive_loop.py::poll_inbox_once after
+  //   core extraction. The mcp.notification path is the Claude Code
+  //   adapter and stays here.
   async function pollOnce() {
     // Pass in-memory bridgeLastSeen as ?since so the bridge does not depend on
     // (and does not perturb) the server cursor. Empty string ⇒ server falls
@@ -964,6 +1181,17 @@ if (!PROJECT_ID || !SESSION_ID) {
   // still treat it as a fallback for back-compat. If this cold-start
   // inherited the legacy file's session_id (single-bclaude case, no
   // force-mint), clean it up so we don't leave duplicate claims behind.
+  // ms-95 / e-1490 — track the last (pid, parent_pid, cwd) we actually
+  // wrote so refreshBridgeClaim() can short-circuit when nothing changed.
+  // process.pid and process.ppid are immutable within a Node process so
+  // in practice drift is rare, but the gate keeps refresh logic honest
+  // (= "only rewrite when stale") and makes the disk-cost story trivially
+  // bounded (1 write at cold-start + 1 write per actual drift event).
+  let lastClaimPid = null
+  let lastClaimPpid = null
+  let lastClaimCwd = null
+  let lastBridgeClaimWriteAt = 0
+
   function writeBridgeClaim() {
     try {
       fs.mkdirSync(BRIDGES_DIR, { recursive: true })
@@ -976,6 +1204,10 @@ if (!PROJECT_ID || !SESSION_ID) {
       }
       const claimPath = path.join(BRIDGES_DIR, `${SESSION_ID}.json`)
       fs.writeFileSync(claimPath, JSON.stringify(claim, null, 2))
+      lastClaimPid = process.pid
+      lastClaimPpid = process.ppid
+      lastClaimCwd = CWD
+      lastBridgeClaimWriteAt = Date.now()
       log(`bridge claim written: pid=${process.pid} ppid=${process.ppid} session=${SESSION_ID} → ${claimPath}`)
       // Best-effort legacy cleanup: if .beacon/bridge.json carries our
       // sid or a dead pid, remove it so future readers don't see two
@@ -995,6 +1227,41 @@ if (!PROJECT_ID || !SESSION_ID) {
     } catch (e) {
       // Best-effort. CLI degrades to mint path if claim isn't writable.
       log(`bridge claim write failed (non-fatal): ${e.message}`)
+    }
+  }
+
+  // ms-95 / e-1490 — called from loop() once per iteration. Two triggers:
+  //   1. drift detected — pid/parent_pid/cwd differs from what we last wrote
+  //      (rare in practice, but defends against a future code path that
+  //      changes CWD or any other invariant assumption).
+  //   2. periodic timer — at least once every BRIDGE_CLAIM_REFRESH_MS,
+  //      independent of drift. This is the load-bearing case: even if the
+  //      claim file is bit-identical, rewriting it bumps mtime so any
+  //      external garbage collector ("delete bridges/*.json untouched for
+  //      >N min") leaves us alone. More importantly, if a *different*
+  //      bus.mjs in a separate worktree ever overwrites our path (= sid
+  //      collision shouldn't happen post-e-1460 but the file is shared
+  //      state), our next refresh restores our authoritative view.
+  //
+  // Disk cost: 1 write per minute per bridge, ~250 bytes JSON. Negligible
+  // even on a 10-bridge dogfood machine (= 10 writes/min, <3 KB/min).
+  // No network call → no HTTP_TIMEOUT_MS / withWatchdog needed; the
+  // try/catch keeps a transient fs error from killing the loop.
+  function refreshBridgeClaim() {
+    try {
+      const now = Date.now()
+      const drifted =
+        process.pid !== lastClaimPid ||
+        process.ppid !== lastClaimPpid ||
+        CWD !== lastClaimCwd
+      const timerDue = (now - lastBridgeClaimWriteAt) >= BRIDGE_CLAIM_REFRESH_MS
+      if (!drifted && !timerDue) return
+      writeBridgeClaim()
+    } catch (e) {
+      // Defensive: writeBridgeClaim already swallows fs errors, but if the
+      // drift check itself throws (e.g. CWD reassigned to undefined by
+      // future code) we still cannot kill the loop.
+      log(`bridge claim refresh failed (non-fatal): ${e.message}`)
     }
   }
 
@@ -1037,58 +1304,50 @@ if (!PROJECT_ID || !SESSION_ID) {
     }
   }
 
-  // ms-60 / e-1390 Phase 1: bridge-integrated Operation scheduler.
-  // Rate-limited so we don't spam the autofire (idempotent but writes
-  // Firestore once per first-fire-of-the-day). Runs `beacon trigger
-  // check`, which invokes `_auto_fire_operation_triggers()` server-side
-  // and posts a T2-envelope-protected bus event (e-1393). The next
-  // pollOnce() iteration picks the event up via /bus/unread and forwards
-  // to the AI via MCP notification.
-  let lastSchedulerRunAt = 0
-  async function runSchedulerTick() {
-    if (SCHEDULER_DISABLED) return
-    const now = Date.now()
-    if (now - lastSchedulerRunAt < SCHEDULER_INTERVAL_MS) return
-    lastSchedulerRunAt = now
-    try {
-      execSync('beacon trigger check', {
-        cwd: CWD,
-        stdio: ['ignore', 'ignore', 'pipe'],
-        encoding: 'utf8',
-        timeout: 15000,
-      })
-      log('scheduler: trigger check completed')
-    } catch (e) {
-      // Non-zero exit / timeout / spawn fail — log but don't kill the loop.
-      // The autofire path is idempotent so a missed tick recovers next round.
-      log(`scheduler: trigger check failed (non-fatal): ${e.message}`)
-    }
-  }
-
+  // ms-95 / e-2755: the 60s `beacon trigger check` subprocess was removed
+  // here. That path spawned a Python subprocess every minute for a Firestore
+  // round-trip, and long-lived bclaudes launched before PR #303 kept leaking
+  // orphaned children (PPID=1) even after the fix landed. Trigger evaluation
+  // now runs on demand — retro-due / release-due / release-marker fire from
+  // session-start and the PostToolUse commit-log hook; there are no active
+  // Operations yet (server-side Operation scheduler is ms-66) so no Operation
+  // notify is lost.
   async function loop() {
     await ensureCursorPrimed()
     await stampColdStartMetadata()
     while (!stopping) {
+      // e-1667: each step is wrapped in withWatchdog so a hung await never
+      // wedges the iteration. HTTP_TIMEOUT_MS on apiFetch catches network
+      // stalls first; the watchdog is structural defense-in-depth for any
+      // non-fetch await (mcp.notification, fs writes, future code paths).
       try {
-        await pollOnce()
+        await withWatchdog(pollOnce(), 'pollOnce', ITERATION_WATCHDOG_MS)
       } catch (e) {
         log(`poll error: ${e.message}`)
-      }
-      // ms-60 / e-1390: rate-limited Operation schedule check.
-      // Sits between pollOnce and heartbeat so a failure here can't
-      // prevent the heartbeat from advancing.
-      try {
-        await runSchedulerTick()
-      } catch (e) {
-        log(`scheduler error (non-fatal): ${e.message}`)
       }
       // e-1318: heartbeat is a *byproduct* of the poll loop. Whether
       // pollOnce succeeded, no-op'd, or threw (caught above), we got
       // here, so the loop is alive. Writing here means: if the loop
       // hangs or crashes, last_poll_at structurally stops advancing
       // and consumers can detect a dead bridge from cloud state alone.
-      await writePollHeartbeat()
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL))
+      // e-1667: also watchdog-guarded — a hung apiPut here was the
+      // 2026-06-12 incident root cause path.
+      try {
+        await withWatchdog(writePollHeartbeat(), 'writePollHeartbeat', ITERATION_WATCHDOG_MS)
+      } catch (e) {
+        log(`heartbeat watchdog non-fatal: ${e.message}`)
+      }
+      // ms-95 / e-1490: refresh bridges/<sid>.json so pid / parent_pid /
+      // cwd don't go stale between cold-start and the (potentially much
+      // later) next bus.mjs restart. Self-gated to BRIDGE_CLAIM_REFRESH_MS
+      // and to actual drift, so steady-state cost is 1 fs write/minute.
+      // No await / no network — refreshBridgeClaim is sync fs.writeFileSync
+      // (= local disk only) wrapped in try/catch.
+      refreshBridgeClaim()
+      // ms-96 / e-2380: WS 健全時は backstop 間隔まで待つ (WS が wakePoll() で
+      // 即起こす)。WS 不通時は従来の POLL_INTERVAL でポーリング継続。
+      const idleMs = wsHealthy ? WS_BACKSTOP_MS : POLL_INTERVAL
+      await interruptibleSleep(idleMs)
     }
     log('poll loop exiting')
     // Graceful shutdown signal (e-1318): post one last heartbeat with
@@ -1104,4 +1363,7 @@ if (!PROJECT_ID || !SESSION_ID) {
     clearBridgeClaim()
   }
   setTimeout(loop, 500)
+  // ms-96 / e-2380: start the WS push accelerator alongside the poll loop.
+  // Fire-and-forget: any failure disables WS and leaves polling intact.
+  connectBusWs().catch((e) => log(`bus WS init failed (non-fatal): ${e.message}`))
 }

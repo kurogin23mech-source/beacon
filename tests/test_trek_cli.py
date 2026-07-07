@@ -317,6 +317,69 @@ def test_trek_join_after_invite(trek_env):
     assert b_member["joined_at"]  # now joined
 
 
+def test_trek_join_show_reflects_self_session_id(trek_env):
+    """ms-97 / e-2636 (AC6, Done when #5) — join exit 0 直後の trek show で
+    members[] に caller の self.sid が含まれていること。
+
+    dogfood で観察した 「join は exit 0 / success message を出すのに
+    server side members[] に session が反映されない」 silent no-op を
+    塞ぐ構造証拠。 join 直後の trek show response が caller の
+    session_id を載せた member entry を返すことを CLI 経由で確認する。
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-self",
+    })
+    r_join = _run(env_b, "join", tid, "--no-arm", "--json")
+    assert r_join.returncode == 0, r_join.stderr
+    r_show = _run(env_b, "show", tid, "--json")
+    assert r_show.returncode == 0, r_show.stderr
+    doc = json.loads(r_show.stdout)
+    b_entries = [m for m in doc["members"] if m.get("email") == "b@x.com"]
+    assert b_entries, "post-join trek show must surface b@x.com member"
+    # AC6 expand 経路: self.sid を持つ member entry が必ず 1 件以上ある。
+    sids = {m.get("session_id") for m in b_entries}
+    assert "sv-b-self" in sids, (
+        f"expected sv-b-self in members[].session_id, got {sids}"
+    )
+
+
+def test_trek_join_two_sessions_same_user_yields_two_member_entries(trek_env):
+    """ms-97 / e-2636 (AC6, Done when #1) — 同 user 別 session の連続 join で
+    members[] が 2 件になる (= silent no-op 構造塞ぎ) を CLI 経路で pin。
+
+    dogfood の真因経路 (= 同 user_id keyed 古い dedup が 2 つ目 join を
+    silent drop) を CLI 全層 (= bin/beacon → commands.py → server) で
+    通った状態で再現させ、 修正後は 2 entry になることを確認する。
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+    env_b1 = dict(trek_env)
+    env_b1.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-1",
+    })
+    r1 = _run(env_b1, "join", tid, "--no-arm", "--json")
+    assert r1.returncode == 0, r1.stderr
+    env_b2 = dict(env_b1)
+    env_b2["BEACON_SESSION_ID"] = "sv-b-2"
+    r2 = _run(env_b2, "join", tid, "--no-arm", "--json")
+    assert r2.returncode == 0, r2.stderr
+    doc = json.loads(r2.stdout)
+    b_entries = [m for m in doc["members"] if m.get("email") == "b@x.com"]
+    assert len(b_entries) == 2, (
+        f"expected 2 session-grain entries for b@x.com, got {b_entries}"
+    )
+    assert {m.get("session_id") for m in b_entries} == {
+        "sv-b-1", "sv-b-2",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Auto-arm (ms-75 / e-2047): default arms session, --no-arm opts out
 # ---------------------------------------------------------------------------
@@ -608,11 +671,82 @@ def test_trek_join_consent_gate_bypass_with_env_var(trek_env):
     assert r.returncode == 0, r.stderr
 
 
+# ---------------------------------------------------------------------------
+# session_id auto-derive (ms-97 / e-2694) — when BEACON_SESSION_ID env is
+# unset, cmd_trek_join must fall back to reading .beacon/session.json so
+# server-side phase A+ logic doesn't silently no-op on a missing header.
+# ---------------------------------------------------------------------------
+
+def test_trek_join_auto_derives_session_id_from_session_json(trek_env, tmp_path):
+    """BEACON_SESSION_ID env unset + .beacon/session.json present →
+    session_id auto-derived and stamped on the trek's session_history.
+
+    Pre-fix behavior (= ms-97 dogfood e-2694): env unset → join writes
+    session_history with empty session_id (= upsert_session_history
+    no-ops) → server / readers see no per-session record for the
+    joining bclaude. With the auto-derive fallback, the local
+    session.json supplies the sid so session_history correctly
+    attributes the join.
+
+    The test seeds ``.beacon/session.json`` with a fresh ``last_active``
+    so the freshness gate in ``get_or_mint_session`` accepts the file's
+    sid rather than minting a new one. It also pops the host's
+    ``CLAUDE_CODE_SESSION_ID`` (= leaks from the developer's bclaude
+    parent process) which would otherwise override the file path.
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    _run(trek_env, "invite", tid, "--actor", "b@x.com")
+
+    # Seed .beacon/session.json with a known sid and a fresh last_active
+    # so it passes the freshness gate in get_or_mint_session.
+    import json as _json
+    import datetime as _dt
+    fresh_ts = _dt.datetime.now(_dt.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ",
+    )
+    session_json = Path(trek_env["BEACON_CWD"]) / ".beacon" / "session.json"
+    session_json.parent.mkdir(parents=True, exist_ok=True)
+    session_json.write_text(_json.dumps({
+        "session_id": "sv-b-from-file",
+        "last_active": fresh_ts,
+    }))
+
+    env_b = dict(trek_env)
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+    })
+    # CRITICAL: pop env vars so the resolver MUST fall back to session.json.
+    env_b.pop("BEACON_SESSION_ID", None)
+    env_b["CLAUDE_CODE_SESSION_ID"] = ""  # subprocess inherits — explicitly clear
+
+    r = _run(env_b, "join", tid, "--no-arm", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    # session_history must carry the file-derived sid (= auto-derive landed).
+    history = doc.get("session_history") or []
+    sids = {h.get("session_id") for h in history}
+    assert "sv-b-from-file" in sids, (
+        f"auto-derive should have stamped sv-b-from-file on session_history, "
+        f"got sids={sids}"
+    )
+
+
 def test_trek_leave_removes_member(trek_env):
     tid = _make_trek_and_return_id(trek_env)
     _run(trek_env, "invite", tid, "--actor", "b@x.com")
     env_b = dict(trek_env)
-    env_b.update({"BEACON_USER_ID": "u-b", "BEACON_USER_EMAIL": "b@x.com"})
+    # ms-97 / e-2636 — explicit per-user BEACON_SESSION_ID. 旧 test は
+    # trek_env fixture から sv-test-1 を継承していたが、 AC6 cutover で
+    # session_id collision は member identity の混線を引き起こす (= leader
+    # と member が同じ sv-test-1 を共有していると session-grain leave が
+    # 誤って leader entry にヒット)。 fixture は本来 user 毎に独立 sid を
+    # 設定すべきで、 ここではその修正を明示する。
+    env_b.update({
+        "BEACON_USER_ID": "u-b",
+        "BEACON_USER_EMAIL": "b@x.com",
+        "BEACON_SESSION_ID": "sv-b-leave",
+    })
     _run(env_b, "join", tid)
     r = _run(env_b, "leave", tid, "--json")
     assert r.returncode == 0, r.stderr
@@ -647,11 +781,30 @@ def test_trek_leave_non_member(trek_env):
 # ---------------------------------------------------------------------------
 
 def test_trek_plan_add_scope_milestone(trek_env):
+    """ms-97 / e-2626 AC23 — scope-add now stages a pending op.
+
+    ``beacon trek plan --add-scope`` stages a pending record; the user
+    must run ``beacon trek scope-approve <pending_id>`` to actually
+    grow ``scope[]``. The json mode response shows the pending op so
+    callers can chain (= mirror of the e-2611 scope-remove flip).
+    """
     tid = _make_trek_and_return_id(trek_env)
     r = _run(trek_env, "plan", tid, "--add-scope", "beacon-1:ms-64", "--json")
     assert r.returncode == 0, r.stderr
     doc = json.loads(r.stdout)
-    assert {"project": "beacon-1", "milestone": "ms-64"} in doc["scope"]
+    # AC23 — scope unchanged; pending op staged.
+    assert {"project": "beacon-1", "milestone": "ms-64"} not in doc["scope"]
+    pending = doc.get("pending_scope_ops") or []
+    assert len(pending) == 1
+    assert pending[0]["action"] == "scope_add"
+    assert pending[0]["entry"] == {"project": "beacon-1", "milestone": "ms-64"}
+    pid = pending[0]["pending_id"]
+    # Approve flushes the pending into scope[].
+    r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
+    assert r2.returncode == 0, r2.stderr
+    doc2 = json.loads(r2.stdout)
+    assert {"project": "beacon-1", "milestone": "ms-64"} in doc2["scope"]
+    assert doc2.get("pending_scope_ops") == []
 
 
 def test_trek_plan_add_scope_operation(trek_env):
@@ -659,7 +812,12 @@ def test_trek_plan_add_scope_operation(trek_env):
     r = _run(trek_env, "plan", tid, "--add-scope", "pe-1:op-12", "--json")
     assert r.returncode == 0
     doc = json.loads(r.stdout)
-    assert {"project": "pe-1", "operation": "op-12"} in doc["scope"]
+    # AC23 staging — not yet in scope.
+    assert {"project": "pe-1", "operation": "op-12"} not in doc["scope"]
+    pid = doc["pending_scope_ops"][0]["pending_id"]
+    r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
+    doc2 = json.loads(r2.stdout)
+    assert {"project": "pe-1", "operation": "op-12"} in doc2["scope"]
 
 
 def test_trek_plan_add_scope_task(trek_env):
@@ -667,25 +825,225 @@ def test_trek_plan_add_scope_task(trek_env):
     r = _run(trek_env, "plan", tid, "--add-scope", "lps-1:e-1234", "--json")
     assert r.returncode == 0
     doc = json.loads(r.stdout)
-    assert {"project": "lps-1", "task": "e-1234"} in doc["scope"]
+    assert {"project": "lps-1", "task": "e-1234"} not in doc["scope"]
+    pid = doc["pending_scope_ops"][0]["pending_id"]
+    r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
+    doc2 = json.loads(r2.stdout)
+    assert {"project": "lps-1", "task": "e-1234"} in doc2["scope"]
 
 
-def test_trek_plan_add_scope_project_wide(trek_env):
+def test_trek_plan_add_scope_project_wide_rejected(trek_env):
+    """ms-97 / e-2659 (AC7 CLI layer): project-wide add is now rejected.
+
+    Pre-AC7 the CLI accepted ``--add-scope lps-1`` (= no `:<ref>`) and
+    staged a pending op for a project-wide entry. With AC7 the CLI's
+    ``parse_scope_arg`` runs in strict mode by default, so this case
+    bails out before any cloud call with a clear ``narrowing key`` hint.
+    """
     tid = _make_trek_and_return_id(trek_env)
     r = _run(trek_env, "plan", tid, "--add-scope", "lps-1", "--json")
-    assert r.returncode == 0
+    assert r.returncode != 0, r.stdout
+    assert "narrowing key" in r.stderr, r.stderr
+
+
+def _inject_legacy_project_wide_scope(trek_env, tid: str, project: str) -> None:
+    """Splice a legacy project-wide row into a trek doc on disk.
+
+    ms-97 / e-2659 (AC8): the strict write path forbids project-wide
+    scope adds, but grandfathered rows still exist on disk for older
+    treks. Tests for the CLI warning surface must seed such a row
+    without going through the strict CLI / server gates — we patch the
+    JSON file in ``BEACON_TREKS_DIR`` directly.
+    """
+    import json as _json
+    import os as _os
+    path = _os.path.join(trek_env["BEACON_TREKS_DIR"], f"{tid}.json")
+    with open(path, "r", encoding="utf-8") as f:
+        doc = _json.load(f)
+    doc.setdefault("scope", []).append({"project": project})
+    with open(path, "w", encoding="utf-8") as f:
+        _json.dump(doc, f, ensure_ascii=False, indent=2)
+
+
+def test_trek_show_warns_on_legacy_project_wide_scope(trek_env):
+    """ms-97 / e-2659 (AC8 + AC31): trek show flags grandfathered rows."""
+    tid = _make_trek_and_return_id(trek_env)
+    _inject_legacy_project_wide_scope(trek_env, tid, "lps-1")
+    r = _run(trek_env, "show", tid)
+    assert r.returncode == 0, r.stderr
+    assert "Project-wide scope entries detected" in r.stdout
+    assert "lps-1" in r.stdout
+    # The remediation hint must point at the actual CLI verb.
+    assert "--add-scope" in r.stdout
+
+
+def test_trek_show_no_warning_when_all_narrowed(trek_env):
+    """No warning bar when scope[] is fully narrowed."""
+    tid = _make_trek_and_return_id(trek_env)
+    _stage_and_approve_add(trek_env, tid, "beacon-1:ms-64")
+    r = _run(trek_env, "show", tid)
+    assert r.returncode == 0, r.stderr
+    assert "Project-wide scope entries detected" not in r.stdout
+
+
+def test_trek_list_warns_on_legacy_project_wide_scope(trek_env):
+    """ms-97 / e-2659 (AC8 + AC31): trek list summarises grandfathered rows."""
+    tid = _make_trek_and_return_id(trek_env)
+    _inject_legacy_project_wide_scope(trek_env, tid, "lps-1")
+    r = _run(trek_env, "list")
+    assert r.returncode == 0, r.stderr
+    assert "[⚠ 1 project-wide]" in r.stdout
+    assert "Project-wide scope entries detected" in r.stdout
+    assert f"{tid}: lps-1" in r.stdout
+
+
+def _stage_and_approve_add(trek_env, tid, ref):
+    """Helper: run plan --add-scope <ref> + scope-approve to commit.
+
+    ms-97 / e-2626 — scope-add now stages a pending op (AC23). Tests
+    that historically did setup with a single ``--add-scope`` call must
+    chain through scope-approve to actually grow ``scope[]``. This
+    helper hides that two-step dance for setup-only call sites.
+    """
+    r = _run(trek_env, "plan", tid, "--add-scope", ref, "--json")
+    assert r.returncode == 0, r.stderr
     doc = json.loads(r.stdout)
-    assert {"project": "lps-1"} in doc["scope"]
+    pid = doc["pending_scope_ops"][-1]["pending_id"]
+    r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
+    assert r2.returncode == 0, r2.stderr
+
+
+# ---------------------------------------------------------------------------
+# ms-97 Phase 5 (AC23 / AC25) — canonical scope-add / scope-approve /
+# scope-reject verb subparser wirings. The verbs land alongside the existing
+# `plan --add-scope` flow; the staging machinery is shared (cmd_trek_plan).
+# ---------------------------------------------------------------------------
+
+def test_trek_scope_add_canonical_verb_milestone(trek_env):
+    """ms-97 / AC23 — `beacon trek scope-add --project P --milestone M`
+    is the canonical verb. It stages a pending op equivalent to
+    ``plan --add-scope P:M``.
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "scope-add", tid,
+             "--project", "beacon-1", "--milestone", "ms-64", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    # Staged, not committed.
+    assert {"project": "beacon-1", "milestone": "ms-64"} not in doc["scope"]
+    pending = doc.get("pending_scope_ops") or []
+    assert len(pending) == 1
+    assert pending[0]["action"] == "scope_add"
+    assert pending[0]["entry"] == {"project": "beacon-1", "milestone": "ms-64"}
+
+
+def test_trek_scope_add_canonical_verb_task(trek_env):
+    """ms-97 / AC23 — --task / --e narrowing key variant works."""
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "scope-add", tid,
+             "--project", "lps-1", "--task", "e-1234", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    pending = doc.get("pending_scope_ops") or []
+    assert len(pending) == 1
+    assert pending[0]["entry"] == {"project": "lps-1", "task": "e-1234"}
+
+
+def test_trek_scope_add_requires_narrowing_key(trek_env):
+    """ms-97 / AC7+AC23 — bare project-wide scope-add must be rejected
+    by the CLI flag-validation layer (= no narrowing key passed).
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "scope-add", tid, "--project", "lps-1", "--json")
+    assert r.returncode != 0, r.stdout
+    # Either the CLI flag-layer or the downstream parse_scope_arg surfaces
+    # the rejection — accept either wording for forward compatibility.
+    msg = r.stderr or r.stdout
+    assert "milestone" in msg or "narrowing key" in msg or "operation" in msg
+
+
+def test_trek_scope_add_requires_project(trek_env):
+    """ms-97 / AC23 — --project is required."""
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "scope-add", tid, "--milestone", "ms-64", "--json")
+    assert r.returncode != 0, r.stdout
+    assert "--project" in (r.stderr or r.stdout)
+
+
+def test_trek_scope_approve_canonical_verb_commits_pending(trek_env):
+    """ms-97 / AC25 — `beacon trek scope-approve <trek-id> <pending-id>`
+    flushes a staged scope op into ``scope[]``.
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    # Stage via the canonical verb.
+    r = _run(trek_env, "scope-add", tid,
+             "--project", "beacon-1", "--milestone", "ms-64", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    pid = doc["pending_scope_ops"][0]["pending_id"]
+    # Approve.
+    r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
+    assert r2.returncode == 0, r2.stderr
+    doc2 = json.loads(r2.stdout)
+    assert {"project": "beacon-1", "milestone": "ms-64"} in doc2["scope"]
+    assert doc2.get("pending_scope_ops") == []
+
+
+def test_trek_scope_reject_canonical_verb_drops_pending(trek_env):
+    """ms-97 / AC25 — `beacon trek scope-reject <trek-id> <pending-id>`
+    drops a staged op without applying it.
+    """
+    tid = _make_trek_and_return_id(trek_env)
+    r = _run(trek_env, "scope-add", tid,
+             "--project", "beacon-1", "--milestone", "ms-64", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    pid = doc["pending_scope_ops"][0]["pending_id"]
+    # Reject.
+    r2 = _run(trek_env, "scope-reject", tid, pid, "--json")
+    assert r2.returncode == 0, r2.stderr
+    doc2 = json.loads(r2.stdout)
+    # Scope unchanged, pending op gone.
+    assert {"project": "beacon-1", "milestone": "ms-64"} not in doc2["scope"]
+    assert doc2.get("pending_scope_ops") == []
 
 
 def test_trek_plan_remove_scope(trek_env):
+    """ms-97 / e-2611 AC25 — scope-remove now stages a pending op.
+
+    The CLI ``beacon trek plan ... --remove-scope`` stages a pending
+    record; the user must run ``beacon trek scope-approve <pending_id>``
+    to actually shrink ``scope[]``. The json mode response includes
+    the pending op so callers can chain.
+
+    AC23 (e-2626) made scope-add also stage; setup steps below chain
+    through ``_stage_and_approve_add`` so the trek's ``scope[]`` is
+    actually populated before the remove-side flow under test.
+    """
+    # ms-97 / e-2659 (AC7): both setup adds must carry narrowing keys
+    # so they survive the strict-mode parse layer. The remove path is
+    # what's actually under test here.
     tid = _make_trek_and_return_id(trek_env)
-    _run(trek_env, "plan", tid, "--add-scope", "beacon-1:ms-64")
-    _run(trek_env, "plan", tid, "--add-scope", "pe-1")
-    r = _run(trek_env, "plan", tid, "--remove-scope", "beacon-1:ms-64", "--json")
+    _stage_and_approve_add(trek_env, tid, "beacon-1:ms-64")
+    _stage_and_approve_add(trek_env, tid, "pe-1:ms-5")
+    r = _run(trek_env, "plan", tid, "--remove-scope", "beacon-1:ms-64",
+             "--json")
     assert r.returncode == 0
     doc = json.loads(r.stdout)
-    assert doc["scope"] == [{"project": "pe-1"}]
+    # AC25 — scope still has both entries; the pending op was staged.
+    assert {"project": "beacon-1", "milestone": "ms-64"} in doc["scope"]
+    assert {"project": "pe-1", "milestone": "ms-5"} in doc["scope"]
+    pending = doc.get("pending_scope_ops") or []
+    assert len(pending) == 1
+    assert pending[0]["action"] == "scope_remove"
+    assert pending[0]["entry"] == {"project": "beacon-1", "milestone": "ms-64"}
+    pid = pending[0]["pending_id"]
+    # Approve flushes the pending into scope[].
+    r2 = _run(trek_env, "scope-approve", tid, pid, "--json")
+    assert r2.returncode == 0, r2.stderr
+    doc2 = json.loads(r2.stdout)
+    assert doc2["scope"] == [{"project": "pe-1", "milestone": "ms-5"}]
+    assert doc2.get("pending_scope_ops") == []
 
 
 def test_trek_plan_requires_add_or_remove(trek_env):
@@ -705,8 +1063,14 @@ def test_trek_plan_rejects_both_add_and_remove(trek_env):
 
 
 def test_trek_plan_add_scope_rejects_duplicate(trek_env):
+    """ms-97 / e-2626 — duplicate-add still rejected, now at stage-time.
+
+    Stage + approve the first add, then a second --add-scope of the
+    same ref must fail with an "already present" error (= 409 on the
+    HTTP side, exit code != 0 on the CLI side).
+    """
     tid = _make_trek_and_return_id(trek_env)
-    _run(trek_env, "plan", tid, "--add-scope", "beacon-1:ms-64")
+    _stage_and_approve_add(trek_env, tid, "beacon-1:ms-64")
     r = _run(trek_env, "plan", tid, "--add-scope", "beacon-1:ms-64")
     assert r.returncode != 0
     assert "already" in r.stderr.lower()

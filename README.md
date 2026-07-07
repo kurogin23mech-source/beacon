@@ -184,6 +184,7 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon cloud list` | List cloud projects / クラウドプロジェクト一覧 |
 | `beacon cloud join <id>` | Join an existing cloud project / 既存プロジェクトに参加 |
 | `beacon cloud upload-initial` | Initial bootstrap upload to new cloud project / 初回 upload (one-shot; ms-84) |
+| `beacon cloud migrate-from-local --confirm <id>` | Retire an orphan `.beacon/project.json` left from a prior cloud cut-over (pre-flight checks cloud has every local entry, then renames to `.before-cloud-YYYYMMDD`) / 旧 local 残骸の退避 (ms-95 / e-2339) |
 | `beacon cloud off` | Switch back to local mode (sandbox / offline only) / sandbox 用途のみ |
 <!-- ms-84 Phase 4 (e-2038): `beacon cloud push` / `pull` / `force-pull` were removed.
      The cloud → local round-trip was retired because cloud is now the sole truth source. -->
@@ -253,6 +254,7 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon pr reject <entry-id> [--rationale "text"]` | Reject a PR / 却下 |
 | `beacon pr merge <entry-id>` | Mark as merged / マージ済みに設定 |
 | `beacon pr close <entry-id>` | Close without merging / クローズ |
+| `beacon pr sync [--dry-run]` | Sync beacon PR entries with GitHub state (merged/closed) / GitHub状態と整合 (ms-61 / e-2005) |
 
 Use `/review` Claude Code Skill instead of `beacon pr review` for AI-assisted code review.
 
@@ -358,6 +360,15 @@ Treks (= 協奏作業領域) are cross-project, cross-session work areas. While 
 | `beacon trek leave <trek-id>` | Remove self (leader must `transfer-leader` first; last member must `archive` instead) / 離脱 |
 | `beacon trek plan <trek-id> --add-scope <project:ref>` | Add a scope entry (`ms-X` / `op-X` / `e-X` ref, or omit for project-wide) / scope 追加 |
 | `beacon trek plan <trek-id> --remove-scope <project:ref>` | Remove a scope entry / scope 削除 |
+| `beacon trek scope-add <trek-id> --project <pid> [--milestone <ms-id> \| --operation <op-id> \| --task <e-id>]` | Canonical scope-add verb (= flag-style alias of `plan --add-scope`, ms-97 / AC23 e-2626) |
+| `beacon trek scope-approve <trek-id> <pending-id>` | Commit a staged scope op (= apply add or remove, ms-97 / AC25 e-2611) |
+| `beacon trek scope-reject <trek-id> <pending-id>` | Drop a staged scope op (ms-97 / AC25) |
+| `beacon trek blanket-approve <trek-id> --category <cat>` | Pre-approve scope-add for a category (ms-97 / AC24 e-2603). Category: `operation` / `milestone` / `task` / `project:<pid>` / `milestone:<ms-id>` |
+| `beacon trek blanket-revoke <trek-id> --category <cat>` | Drop a blanket pre-approval (ms-97 / AC24) |
+| `beacon trek slot add <trek-id> --project <pid> --milestone\|--task\|--operation <id> [--children e-A,e-B]` | Stage a slot-add with a fresh `sl-<8 hex>` id (ms-99 / e-2829). MS slot は `--children` で子タスクを opt-in (= 個別許可) 指定できる。承認は既存の `scope-approve` を通す (staging path) |
+| `beacon trek slot amend <trek-id> <slot-id> [--add-child <e-id> ...] [--remove-child <e-id> ...]` | Stage a child-list edit on an existing MS slot (ms-99 / e-2829)。legacy null (= 全 include) は承認時に明示 list へ材料化される |
+| `beacon trek slot claim <trek-id> <slot-id> [--session <sid> \| --unclaim]` | Stage a claim stamp (state 変更なし、SPEC 方針 4)。空 `--session` または `--unclaim` で担当解除 (ms-99 / e-2829) |
+| `beacon trek slot list <trek-id> [--json]` | Materialise slot rows (target_kind / target_id / included_task_ids / claim) の一覧を表示 (ms-99 / e-2829) |
 | `beacon trek plan <trek-id> --goal-state "<criterion>"` | Trek の完了マーカーを設定 (空文字で clear、ms-75 / e-1865) |
 | `beacon trek stop <trek-id> [--reason "..."]` | Pull the Andon cord (= halt signal, sessions pause) / 非常停止 |
 | `beacon trek resume <trek-id>` | Clear the halt signal / 再開 |

@@ -81,10 +81,17 @@ firestore_client.stamp_session_actor_email = _mock_stamp_session_actor_email
 firestore_client.get_project = lambda pid: {"name": "test", "milestones": []}
 firestore_client.save_project = lambda pid, data: None
 firestore_client.list_projects = lambda: []
+# ms-95 / e-1905: require_auth() calls db.get_or_create_user when auth is on.
+# Without this stub the email-stamping tests fall through to a real Firestore
+# round-trip and explode with PermissionDenied in local environments where no
+# service-account credentials are present. Lambda no-ops so the auto-register
+# step is a benign noop in tests (we are not validating the user-side write).
+firestore_client.get_or_create_user = lambda *a, **kw: None
 
 
 from fastapi.testclient import TestClient  # noqa: E402
 import app as app_module  # noqa: E402
+import store_router  # noqa: E402
 
 app_module._auth_enabled = False
 app_module._start_watcher = lambda project_id: None
@@ -93,6 +100,27 @@ app_module._stop_watcher = lambda project_id: None
 client = TestClient(app_module.app)
 
 PROJECT_ID = "dir-test"
+
+
+# ms-95 / e-1905: capture store_router originals AFTER `import app` so the
+# reset_store fixture can restore them on test exit. server/app.py calls the
+# DB via `import store_router as db`; store_router took its snapshot of
+# firestore_client.* at its own import time, so re-binding store_router.X
+# (rather than only firestore_client.X) is the only way the endpoint code
+# sees our mocks. Without per-test restore, the patched store_router state
+# leaks into later test modules (notably test_api.py).
+_STORE_ROUTER_ORIGINALS = {
+    name: getattr(store_router, name)
+    for name in (
+        "list_sessions",
+        "upsert_session",
+        "stamp_session_actor_email",
+        "get_project",
+        "save_project",
+        "list_projects",
+        "get_or_create_user",
+    )
+}
 
 
 @pytest.fixture(autouse=True)
@@ -109,9 +137,22 @@ def reset_store():
     firestore_client.get_project = lambda pid: {"name": "test", "milestones": []}
     firestore_client.save_project = lambda pid, data: None
     firestore_client.list_projects = lambda: []
+    firestore_client.get_or_create_user = lambda *a, **kw: None
+    # ms-95 / e-1905: same re-application on store_router (server/app.py uses
+    # `import store_router as db`, so db.X is what the endpoints actually
+    # resolve to). Restored on teardown so we don't pollute other suites.
+    store_router.list_sessions = _mock_list_sessions
+    store_router.upsert_session = _mock_upsert_session
+    store_router.stamp_session_actor_email = _mock_stamp_session_actor_email
+    store_router.get_project = lambda pid: {"name": "test", "milestones": []}
+    store_router.save_project = lambda pid, data: None
+    store_router.list_projects = lambda: []
+    store_router.get_or_create_user = lambda *a, **kw: None
     _sessions_store.clear()
     yield
     _sessions_store.clear()
+    for name, fn in _STORE_ROUTER_ORIGINALS.items():
+        setattr(store_router, name, fn)
 
 
 def _seed(sessions: list[dict]) -> None:
@@ -454,9 +495,13 @@ def test_session_upsert_accepts_new_heartbeat_fields():
     def _fake_upsert(project_id, session_id, data):  # noqa: ARG001
         captured.update(data)
 
-    import firestore_client as fc
-    original = fc.upsert_session
-    fc.upsert_session = _fake_upsert
+    # ms-95 / e-1905: patch store_router (= what server/app.py's `db` resolves
+    # to) rather than firestore_client. The endpoint calls db.upsert_session,
+    # and store_router snapshotted the real firestore_client.upsert_session at
+    # module import time, so swapping fc.upsert_session has no effect on the
+    # call path that actually runs.
+    original = store_router.upsert_session
+    store_router.upsert_session = _fake_upsert
     try:
         now = "2026-06-09T01:00:00.000000Z"
         resp = client.put(
@@ -473,7 +518,7 @@ def test_session_upsert_accepts_new_heartbeat_fields():
         assert captured.get("poll_interval_ms") == 2000
         assert captured.get("shutdown") is False
     finally:
-        fc.upsert_session = original
+        store_router.upsert_session = original
 
 
 # ---------------------------------------------------------------------------
@@ -498,8 +543,15 @@ def test_email_stamped_from_bearer_token_on_mint(monkeypatch):
         lambda tok: {"sub": "user-1", "email": "alice@x.com"},
     )
     # require_auth auto-registers — stub it out for the in-memory store.
+    # ms-95 / e-1905: also patch store_router since require_auth() calls
+    # db.get_or_create_user (= store_router.get_or_create_user), and the
+    # snapshot store_router took at import time was the real Firestore-backed
+    # version. monkeypatch on firestore_client alone leaves db.* untouched.
     monkeypatch.setattr(
         firestore_client, "get_or_create_user", lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        store_router, "get_or_create_user", lambda *a, **kw: None,
     )
     resp = client.put(
         f"/api/projects/{PROJECT_ID}/sessions/s-mint",
@@ -525,8 +577,15 @@ def test_email_cannot_be_spoofed_by_client_body(monkeypatch):
         app_module, "_verify_id_token",
         lambda tok: {"sub": "user-1", "email": "alice@x.com"},
     )
+    # ms-95 / e-1905: also patch store_router since require_auth() calls
+    # db.get_or_create_user (= store_router.get_or_create_user), and the
+    # snapshot store_router took at import time was the real Firestore-backed
+    # version. monkeypatch on firestore_client alone leaves db.* untouched.
     monkeypatch.setattr(
         firestore_client, "get_or_create_user", lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        store_router, "get_or_create_user", lambda *a, **kw: None,
     )
     resp = client.put(
         f"/api/projects/{PROJECT_ID}/sessions/s-spoof",
@@ -552,8 +611,15 @@ def test_heartbeat_stamps_email_without_clobbering_machine_agent(monkeypatch):
         app_module, "_verify_id_token",
         lambda tok: {"sub": "user-1", "email": "alice@x.com"},
     )
+    # ms-95 / e-1905: also patch store_router since require_auth() calls
+    # db.get_or_create_user (= store_router.get_or_create_user), and the
+    # snapshot store_router took at import time was the real Firestore-backed
+    # version. monkeypatch on firestore_client alone leaves db.* untouched.
     monkeypatch.setattr(
         firestore_client, "get_or_create_user", lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        store_router, "get_or_create_user", lambda *a, **kw: None,
     )
     # Initial mint: full actor including machine + agent.
     mint = client.put(
@@ -589,8 +655,15 @@ def test_directory_query_surfaces_actor_email_to_picker(monkeypatch):
         app_module, "_verify_id_token",
         lambda tok: {"sub": "user-1", "email": "alice@x.com"},
     )
+    # ms-95 / e-1905: also patch store_router since require_auth() calls
+    # db.get_or_create_user (= store_router.get_or_create_user), and the
+    # snapshot store_router took at import time was the real Firestore-backed
+    # version. monkeypatch on firestore_client alone leaves db.* untouched.
     monkeypatch.setattr(
         firestore_client, "get_or_create_user", lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        store_router, "get_or_create_user", lambda *a, **kw: None,
     )
     client.put(
         f"/api/projects/{PROJECT_ID}/sessions/s-picker",
@@ -616,8 +689,15 @@ def test_directory_user_filter_uses_stamped_email(monkeypatch):
         app_module, "_verify_id_token",
         lambda tok: {"sub": "user-1", "email": "alice@x.com"},
     )
+    # ms-95 / e-1905: also patch store_router since require_auth() calls
+    # db.get_or_create_user (= store_router.get_or_create_user), and the
+    # snapshot store_router took at import time was the real Firestore-backed
+    # version. monkeypatch on firestore_client alone leaves db.* untouched.
     monkeypatch.setattr(
         firestore_client, "get_or_create_user", lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        store_router, "get_or_create_user", lambda *a, **kw: None,
     )
     client.put(
         f"/api/projects/{PROJECT_ID}/sessions/s-alice",
@@ -666,8 +746,15 @@ def test_email_unknown_does_not_crash_or_create_actor(monkeypatch):
         app_module, "_verify_id_token",
         lambda tok: {"sub": "user-1"},  # no email claim
     )
+    # ms-95 / e-1905: also patch store_router since require_auth() calls
+    # db.get_or_create_user (= store_router.get_or_create_user), and the
+    # snapshot store_router took at import time was the real Firestore-backed
+    # version. monkeypatch on firestore_client alone leaves db.* untouched.
     monkeypatch.setattr(
         firestore_client, "get_or_create_user", lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        store_router, "get_or_create_user", lambda *a, **kw: None,
     )
     resp = client.put(
         f"/api/projects/{PROJECT_ID}/sessions/s-anon",

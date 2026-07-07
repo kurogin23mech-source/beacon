@@ -127,36 +127,55 @@ def _mock_get_operation_envelope(project_id: str, envelope_id: str) -> dict | No
     return copy.deepcopy(_envelope_store.get(project_id, {}).get(envelope_id))
 
 
-firestore_client.get_document = _mock_get_document
-firestore_client.get_active_operation_envelope = _mock_get_active_operation_envelope
-firestore_client.issue_operation_envelope = _mock_issue_operation_envelope
-firestore_client.revoke_operation_envelope = _mock_revoke_operation_envelope
-firestore_client.list_operation_envelopes = _mock_list_operation_envelopes
-firestore_client.get_operation_envelope = _mock_get_operation_envelope
-firestore_client.get_project = lambda pid: copy.deepcopy(PROJECT_DATA)
-firestore_client.save_project = lambda pid, data: None
-firestore_client.list_projects = lambda: []
-
-
 from fastapi.testclient import TestClient  # noqa: E402
 import app as app_module  # noqa: E402
 
-app_module._auth_enabled = False
-app_module._start_watcher = lambda project_id: None
-app_module._stop_watcher = lambda project_id: None
-
-# Bypass membership checks; return the canned project so find_operations works.
-app_module._require_project_role = lambda project_id, user, **kw: (
-    copy.deepcopy(PROJECT_DATA), "owner"
-)
-# _load also touches membership; return project data.
-app_module._load = lambda project_id, user=None: copy.deepcopy(PROJECT_DATA)
-
+# ms-95 e-2441 (re-fix): the module-level mutations of firestore_client and
+# app_module used to happen at collection time, before any test executed.
+# `teardown_module` restored them after this file's tests finished, but by
+# then earlier-collected files (test_api.py at position 4) had already run
+# with the polluted `_load` / `_require_project_role` / `get_project`, causing
+# 8+ test_api failures visible in the ms-98 refactor window. The right shape
+# is per-test monkeypatch (below) — pytest auto-restores on teardown so the
+# pollution never survives past this file.
+_store_router_module = app_module.db  # store_router (= app.py's db)
 client = TestClient(app_module.app)
 
 
 @pytest.fixture(autouse=True)
-def reset():
+def reset(monkeypatch):
+    # Mirror mocks onto BOTH firestore_client and store_router because
+    # store_router snapshots firestore_client at its own import time — it
+    # would otherwise resolve `db.get_project` to the real Firestore call.
+    for name, ref in (
+        ("get_document", _mock_get_document),
+        ("get_active_operation_envelope", _mock_get_active_operation_envelope),
+        ("issue_operation_envelope", _mock_issue_operation_envelope),
+        ("revoke_operation_envelope", _mock_revoke_operation_envelope),
+        ("list_operation_envelopes", _mock_list_operation_envelopes),
+        ("get_operation_envelope", _mock_get_operation_envelope),
+        ("get_project", lambda pid: copy.deepcopy(PROJECT_DATA)),
+        ("save_project", lambda pid, data: None),
+        ("list_projects", lambda: []),
+    ):
+        monkeypatch.setattr(firestore_client, name, ref, raising=False)
+        monkeypatch.setattr(_store_router_module, name, ref, raising=False)
+    # app_module attrs — auth off, no watchers, canned project role/load
+    monkeypatch.setattr(app_module, "_auth_enabled", False, raising=False)
+    monkeypatch.setattr(app_module, "_start_watcher",
+                        lambda project_id: None, raising=False)
+    monkeypatch.setattr(app_module, "_stop_watcher",
+                        lambda project_id: None, raising=False)
+    monkeypatch.setattr(
+        app_module, "_require_project_role",
+        lambda project_id, user, **kw: (copy.deepcopy(PROJECT_DATA), "owner"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        app_module, "_load",
+        lambda project_id, user=None: copy.deepcopy(PROJECT_DATA),
+        raising=False,
+    )
     _envelope_store.clear()
     _doc_store.clear()
     yield

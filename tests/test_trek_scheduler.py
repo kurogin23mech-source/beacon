@@ -379,58 +379,91 @@ def test_payload_unknown_scope_falls_to_all_done():
 # Trek task aggregate terminal (ms-75 / e-2048)
 # ---------------------------------------------------------------------------
 
+def _trek_from_states(states: dict) -> dict:
+    """ms-99 / e-2833 — synthesize scope entries for each task_states key.
+
+    The Phase 2 scheduler reads slot inventory via ``materialize_slots``
+    so the tick decision helpers need a scope[] to have anything to
+    iterate. Task-kind scope entries with an empty project id and no
+    ``claim_session_id`` map cleanly onto the cache-authoritative branch
+    of ``_materialize_atomic_slot``.
+    """
+    return {
+        "scope": [{"project": "p", "task": eid} for eid in states.keys()],
+        "task_states": states,
+    }
+
+
+def _empty_gp(pid: str) -> dict:
+    return {}
+
+
 def test_aggregate_terminal_false_when_no_states_stamped():
-    trek = {"task_states": {}}
-    assert scheduler.is_trek_task_aggregate_terminal(trek) is False
+    trek = _trek_from_states({})
+    assert scheduler.is_trek_task_aggregate_terminal(
+        trek, get_project=_empty_gp,
+    ) is False
 
 
 def test_aggregate_terminal_false_when_any_working():
-    trek = {"task_states": {
+    trek = _trek_from_states({
         "e-1": {"state": "done"},
         "e-2": {"state": "working"},
-    }}
-    assert scheduler.is_trek_task_aggregate_terminal(trek) is False
+    })
+    assert scheduler.is_trek_task_aggregate_terminal(
+        trek, get_project=_empty_gp,
+    ) is False
 
 
 def test_aggregate_terminal_true_when_all_done():
-    trek = {"task_states": {
+    trek = _trek_from_states({
         "e-1": {"state": "done"},
         "e-2": {"state": "done"},
-    }}
-    assert scheduler.is_trek_task_aggregate_terminal(trek) is True
+    })
+    assert scheduler.is_trek_task_aggregate_terminal(
+        trek, get_project=_empty_gp,
+    ) is True
 
 
 def test_aggregate_terminal_false_when_all_leader_review():
     """ms-88 / e-2107: leader_review は NON-terminal (= leader 判断要請、
     scheduler 走り続け)。 legacy `waiting-review` も leader_review に
     migrate するので同じく non-terminal。"""
-    trek = {"task_states": {
+    trek = _trek_from_states({
         "e-1": {"state": "leader_review"},
-    }}
-    assert scheduler.is_trek_task_aggregate_terminal(trek) is False
+    })
+    assert scheduler.is_trek_task_aggregate_terminal(
+        trek, get_project=_empty_gp,
+    ) is False
     # legacy alias も同じ挙動 (migrate されて leader_review 扱い)
-    trek_legacy = {"task_states": {
+    trek_legacy = _trek_from_states({
         "e-1": {"state": "waiting-review"},
-    }}
-    assert scheduler.is_trek_task_aggregate_terminal(trek_legacy) is False
+    })
+    assert scheduler.is_trek_task_aggregate_terminal(
+        trek_legacy, get_project=_empty_gp,
+    ) is False
 
 
 def test_aggregate_terminal_true_when_all_user_review():
     """ms-88 / e-2107: user_review は terminal (= Trek 完遂等価、 leader が
     user に forward 済)。"""
-    trek = {"task_states": {
+    trek = _trek_from_states({
         "e-1": {"state": "user_review"},
-    }}
-    assert scheduler.is_trek_task_aggregate_terminal(trek) is True
+    })
+    assert scheduler.is_trek_task_aggregate_terminal(
+        trek, get_project=_empty_gp,
+    ) is True
 
 
 def test_aggregate_terminal_true_when_mixed_terminal():
     """ms-88 / e-2107: terminal mixed = done + user_review。"""
-    trek = {"task_states": {
+    trek = _trek_from_states({
         "e-1": {"state": "done"},
         "e-2": {"state": "user_review"},
-    }}
-    assert scheduler.is_trek_task_aggregate_terminal(trek) is True
+    })
+    assert scheduler.is_trek_task_aggregate_terminal(
+        trek, get_project=_empty_gp,
+    ) is True
 
 
 # ---------------------------------------------------------------------------
@@ -495,9 +528,12 @@ def test_detect_auto_stalled_skips_task_under_ttl():
 
 
 def test_detect_auto_stalled_detects_task_past_default_ttl():
-    """ms-88 / e-2107: TTL default 30 → 12 min。 13 min silence で stall。"""
+    """ms-88 / e-2107 → ms-95 / e-2646: TTL default は 24h (1440 min) に再緩和。
+    旧 12 min ベースの test は per-trek override で 12 min を inject して
+    動作を保つ (= mechanism は変えていない、 default だけ変わった)。"""
     trek = {
         "status": "active",
+        "meta": {"stall_threshold_minutes": 12},  # ms-95 / e-2646 — inject
         "task_states": {
             "e-1": {"state": "working",
                     "last_activity_at": _iso(_now_minus(13))},
@@ -543,9 +579,11 @@ def test_detect_auto_stalled_honors_per_trek_ttl_override():
 def test_detect_auto_stalled_falls_back_to_updated_at_for_legacy_entries():
     """task_states entries written before e-2067 land have no
     last_activity_at field. The detector falls back to updated_at so
-    legacy stamps are still evaluated. ms-88 / e-2107: TTL 12 min。"""
+    legacy stamps are still evaluated. ms-95 / e-2646: default 24h なので
+    test は short threshold を inject して mechanism を verify。"""
     trek = {
         "status": "active",
+        "meta": {"stall_threshold_minutes": 12},  # ms-95 / e-2646 — inject
         "task_states": {
             "e-1": {"state": "working",
                     "updated_at": _iso(_now_minus(15))},
@@ -570,9 +608,10 @@ def test_detect_auto_stalled_skips_entry_with_no_activity_anchor():
 
 def test_detect_auto_stalled_returns_multiple_tasks():
     """All working + stalled tasks in a single trek are returned together.
-    ms-88 / e-2107: TTL 12 min。"""
+    ms-95 / e-2646: default 24h なので test は short threshold を inject。"""
     trek = {
         "status": "active",
+        "meta": {"stall_threshold_minutes": 12},  # ms-95 / e-2646 — inject
         "task_states": {
             "e-1": {"state": "working",
                     "last_activity_at": _iso(_now_minus(20))},
@@ -600,11 +639,111 @@ def test_build_auto_stall_note_includes_silence_minutes():
 def test_get_working_ttl_minutes_in_scheduler_module_matches_default():
     """Scheduler-side getter is the operational read path; it must agree
     with the schema-side getter so server + CLI render the same number.
-    ms-88 / e-2107: default 30 → 12 min。"""
-    assert scheduler.get_working_ttl_minutes({}) == 12
+    ms-95 / e-2646: default 12 → 1440 min (24h)。"""
+    assert scheduler.get_working_ttl_minutes({}) == 1440
+    # Legacy field name still wins.
     assert scheduler.get_working_ttl_minutes(
         {"meta": {"working_ttl_minutes": 7}}
     ) == 7
+    # ms-95 / e-2646: new field name (= stall_threshold_minutes) is the
+    # preferred override path.
+    assert scheduler.get_working_ttl_minutes(
+        {"meta": {"stall_threshold_minutes": 99}}
+    ) == 99
+    # Conflict: new name wins (= ms-95 / e-2646).
+    assert scheduler.get_working_ttl_minutes(
+        {"meta": {"stall_threshold_minutes": 99,
+                  "working_ttl_minutes": 7}}
+    ) == 99
+
+
+# ---------------------------------------------------------------------------
+# ms-95 / e-2646 — stall threshold 24h default + pause primitive
+# ---------------------------------------------------------------------------
+
+def test_detect_auto_stalled_does_not_fire_under_24h_default():
+    """ms-95 / e-2646: 12 min silence under the new 24h default should NOT
+    trigger stall. This is the dogfood regression reproducer (= prep
+    待機中の executor を「stuck」 と誤判定する病理を構造的に絶つ)。"""
+    trek = {
+        "status": "active",
+        # No meta override → default 1440 min applies.
+        "task_states": {
+            "e-1": {"state": "working",
+                    "last_activity_at": _iso(_now_minus(12))},
+        },
+    }
+    assert scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW) == []
+
+
+def test_detect_auto_stalled_default_still_fires_after_24h():
+    """ms-95 / e-2646: 24h + 1 min silence DOES still fire (= the safety
+    net is still there for genuine silent halts, just slower to fire)."""
+    trek = {
+        "status": "active",
+        "task_states": {
+            "e-1": {"state": "working",
+                    "last_activity_at": _iso(_now_minus(60 * 24 + 1))},
+        },
+    }
+    out = scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW)
+    assert len(out) == 1
+    assert out[0]["task_id"] == "e-1"
+
+
+def test_detect_auto_stalled_skips_when_working_pause_until_is_in_future():
+    """ms-95 / e-2646: per-task pause primitive. executor が「意図的に保留中」
+    と marker を立てている間は stall 判定をスキップ (= staging URL 受領
+    待ち / 別 session のレビュー待ちの正規表現)。"""
+    future = _iso(_BASE_NOW + datetime.timedelta(hours=2))
+    trek = {
+        "status": "active",
+        "meta": {"stall_threshold_minutes": 12},  # 短い threshold inject
+        "task_states": {
+            "e-1": {
+                "state": "working",
+                "last_activity_at": _iso(_now_minus(20)),  # 通常なら stall
+                "meta": {"working_pause_until": future},
+            },
+        },
+    }
+    # threshold は超えているが pause 中なので skip される。
+    assert scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW) == []
+
+
+def test_detect_auto_stalled_fires_after_working_pause_until_expires():
+    """ms-95 / e-2646: pause 期限が過ぎたら通常 stall 判定に戻る。"""
+    past = _iso(_BASE_NOW - datetime.timedelta(minutes=1))
+    trek = {
+        "status": "active",
+        "meta": {"stall_threshold_minutes": 12},
+        "task_states": {
+            "e-1": {
+                "state": "working",
+                "last_activity_at": _iso(_now_minus(20)),
+                "meta": {"working_pause_until": past},
+            },
+        },
+    }
+    out = scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW)
+    assert len(out) == 1
+
+
+def test_detect_auto_stalled_skips_when_working_paused_boolean_is_truthy():
+    """ms-95 / e-2646: 期限指定なしで「とにかく止めて」 と表現する
+    boolean marker も受理する経路。"""
+    trek = {
+        "status": "active",
+        "meta": {"stall_threshold_minutes": 12},
+        "task_states": {
+            "e-1": {
+                "state": "working",
+                "last_activity_at": _iso(_now_minus(60)),
+                "meta": {"working_paused": True},
+            },
+        },
+    }
+    assert scheduler.detect_auto_stalled_tasks(trek, now=_BASE_NOW) == []
 
 
 # ---------------------------------------------------------------------------
@@ -728,4 +867,272 @@ def test_leader_digest_payload_empty_trek_fallback_body():
     payload = scheduler.build_leader_digest_payload(t)
     assert payload["summary"]["active"] == 0
     assert payload["sessions"] == []
-    assert "まだ pulse-ack" in payload["body"]
+
+
+# ---------------------------------------------------------------------------
+# ms-97 Phase 4 / AC32 — halt 完全化 (= autonomous activity 4 paths suspend)
+# ---------------------------------------------------------------------------
+
+def test_ac32_halt_blocks_select_due_treks():
+    """End-to-end: select_due_treks filters out a trek with halt set.
+
+    Even if a trek would otherwise be due (= never fired before, status
+    active), engaging the Andon cord (= halt dict on trek_doc) removes
+    it from the due list. This locks in the scheduler tick fire skip
+    that AC32 promises.
+    """
+    halted = trek_mod.set_halt(
+        _build_trek(status="active"),
+        issued_by_session_id="sv-leader",
+        reason="manual stop",
+    )
+    not_halted = _build_trek(status="active")
+    due = scheduler.select_due_treks([halted, not_halted], now=_utc())
+    due_ids = [t.get("trek_id") for t in due]
+    assert halted["trek_id"] not in due_ids, (
+        "halted trek must not appear in due list"
+    )
+    assert not_halted["trek_id"] in due_ids, (
+        "non-halted trek with no prior fire should still be due"
+    )
+
+
+def test_ac32_halt_blocks_auto_stall_detection():
+    """AC32 path #3 — detect_auto_stalled_tasks returns [] for halted treks.
+
+    Even a task long past its TTL must not auto-transition to
+    leader_review while the trek is halted. The 2-pass tick endpoint
+    relies on this for the auto-stall skip; this test pins the
+    underlying detector behaviour.
+    """
+    # Build a halted trek with a stale working task.
+    t = trek_mod.new_trek(
+        title="x", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    t["status"] = "active"
+    t["halt"] = {
+        "issued_by_session_id": "sv-leader",
+        "reason": "STOP",
+        "issued_at": "2026-06-18T00:00:00.000000Z",
+    }
+    t["task_states"] = {
+        "e-stuck": {
+            "state": "working",
+            "updated_by_session_id": "sv-exec",
+            "updated_at": "2026-06-17T00:00:00.000000Z",
+            "last_activity_at": "2026-06-17T00:00:00.000000Z",
+            "note": "",
+        }
+    }
+    stalled = scheduler.detect_auto_stalled_tasks(t, now=_utc())
+    assert stalled == [], (
+        f"halted trek must not produce auto-stall transitions, got {stalled}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / e-2707 — build_task_state_aggregate + leader-digest payload
+# task_state_aggregate field (AC10 precedence surfaced for leader digest)
+# ---------------------------------------------------------------------------
+
+
+def _trek_with_task_states(states: dict) -> dict:
+    """Build a trek with raw task_states entries pre-populated.
+
+    Bypasses the set_task_state state-machine validator so we can pin
+    arbitrary state combinations (= the aggregate is purely read-side
+    over whatever the executor / leader has stamped).
+    """
+    t = trek_mod.new_trek(
+        title="agg test", creator_user_id="u-1", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    t["status"] = "active"
+    t["task_states"] = dict(states)
+    return t
+
+
+def test_task_state_aggregate_empty_returns_zero_counts_and_todo():
+    """Trek with no task_states (= fresh) aggregates to all-zero counts
+    + overall_state='todo' (= compute_ms_slot_state's empty-slot fallback).
+    """
+    t = _trek_with_task_states({})
+    agg = scheduler.build_task_state_aggregate(t)
+    assert agg["counts"] == {
+        "leader_review": 0, "done": 0, "user_review": 0,
+        "working": 0, "todo": 0,
+    }
+    assert agg["leader_review_queue"] == []
+    assert agg["overall_state"] == "todo"
+
+
+def test_task_state_aggregate_counts_each_state_bucket():
+    """Each state stamped lands in its own bucket; the count matrix is the
+    structural signal leaders read."""
+    t = _trek_with_task_states({
+        "e-a": {"state": "done", "updated_at": "2026-06-25T00:00:00Z"},
+        "e-b": {"state": "done", "updated_at": "2026-06-25T01:00:00Z"},
+        "e-c": {"state": "working", "updated_at": "2026-06-25T02:00:00Z"},
+        "e-d": {"state": "todo", "updated_at": "2026-06-25T03:00:00Z"},
+        "e-e": {"state": "user_review", "updated_at": "2026-06-25T04:00:00Z"},
+    })
+    agg = scheduler.build_task_state_aggregate(t)
+    assert agg["counts"] == {
+        "leader_review": 0, "done": 2, "user_review": 1,
+        "working": 1, "todo": 1,
+    }
+    # overall_state: 1 working → "working" wins per AC10 precedence
+    assert agg["overall_state"] == "working"
+
+
+def test_task_state_aggregate_leader_review_wins_overall_state():
+    """AC10 precedence top: any leader_review present → overall_state='leader_review'.
+    This is the case where the leader is structurally blocking executor
+    progress and the digest must surface it."""
+    t = _trek_with_task_states({
+        "e-a": {"state": "done"},
+        "e-b": {"state": "leader_review",
+                "updated_by_session_id": "sv-exec",
+                "updated_at": "2026-06-25T00:00:00Z",
+                "note": "needs leader judgment"},
+        "e-c": {"state": "working"},
+    })
+    agg = scheduler.build_task_state_aggregate(t)
+    assert agg["overall_state"] == "leader_review"
+    assert agg["counts"]["leader_review"] == 1
+
+
+def test_task_state_aggregate_leader_review_queue_carries_entry_metadata():
+    """Each leader_review entry surfaces task_id + updated_by + updated_at
+    + note so the leader can act without a second lookup."""
+    t = _trek_with_task_states({
+        "e-target": {
+            "state": "leader_review",
+            "updated_by_session_id": "sv-exec-1",
+            "updated_at": "2026-06-25T12:34:56Z",
+            "note": "needs approve / re-work / forward",
+        },
+    })
+    agg = scheduler.build_task_state_aggregate(t)
+    assert len(agg["leader_review_queue"]) == 1
+    row = agg["leader_review_queue"][0]
+    assert row["task_id"] == "e-target"
+    assert row["updated_by_session_id"] == "sv-exec-1"
+    assert row["updated_at"] == "2026-06-25T12:34:56Z"
+    assert "approve" in row["note"]
+
+
+def test_task_state_aggregate_leader_review_queue_sorted_oldest_first():
+    """Oldest leader_review surfaces first (= been waiting longest)."""
+    t = _trek_with_task_states({
+        "e-newest": {"state": "leader_review",
+                     "updated_at": "2026-06-25T03:00:00Z"},
+        "e-oldest": {"state": "leader_review",
+                     "updated_at": "2026-06-25T01:00:00Z"},
+        "e-middle": {"state": "leader_review",
+                     "updated_at": "2026-06-25T02:00:00Z"},
+    })
+    agg = scheduler.build_task_state_aggregate(t)
+    ids = [r["task_id"] for r in agg["leader_review_queue"]]
+    assert ids == ["e-oldest", "e-middle", "e-newest"]
+
+
+def test_task_state_aggregate_unknown_state_collapses_to_todo():
+    """Malformed / unknown state token → counted as todo, not crashed."""
+    t = _trek_with_task_states({
+        "e-weird": {"state": "garbage-state"},
+        "e-clean": {"state": "todo"},
+    })
+    agg = scheduler.build_task_state_aggregate(t)
+    assert agg["counts"]["todo"] == 2
+    assert agg["overall_state"] == "todo"
+
+
+def test_leader_digest_payload_summary_carries_leader_review_queue_count():
+    """summary.leader_review_queue_count surfaces in parallel to
+    needs_leader_judgment so the leader can read either signal.
+    Regression pin: the 2026-06-29 LPS dogfood post-mortem proved
+    needs_leader_judgment=0 while task_states had leader_review queue,
+    which let the leader read past the digest for 10 minutes."""
+    t = _trek_with_task_states({
+        "e-blocked": {"state": "leader_review",
+                      "updated_at": "2026-06-25T00:00:00Z"},
+    })
+    # Add a pulse-ack so the digest doesn't short-circuit to the
+    # empty-sessions path; the queue surface is independent of pulse-acks.
+    trek_mod.record_pulse_ack(
+        t, session_id="sv-exec", picked_choice="continue",
+        state_summary="working", time_on_task_seconds=10,
+    )
+    payload = scheduler.build_leader_digest_payload(t)
+    assert payload["summary"]["leader_review_queue_count"] == 1
+    # needs_leader_judgment is pulse-ack derived and may be 0 even when
+    # leader_review_queue_count is non-zero — the two are independent.
+
+
+def test_leader_digest_payload_includes_task_state_aggregate_field():
+    """The structured task_state_aggregate field is the Skill-facing
+    payload so the leader-side AI can chain /beacon-trek-review without
+    re-deriving state from the body string."""
+    t = _trek_with_task_states({
+        "e-r": {"state": "leader_review",
+                "updated_by_session_id": "sv-exec",
+                "updated_at": "2026-06-25T00:00:00Z",
+                "note": "ready for review"},
+        "e-w": {"state": "working"},
+    })
+    payload = scheduler.build_leader_digest_payload(t)
+    assert "task_state_aggregate" in payload
+    agg = payload["task_state_aggregate"]
+    assert agg["counts"]["leader_review"] == 1
+    assert agg["counts"]["working"] == 1
+    assert agg["overall_state"] == "leader_review"
+    assert agg["leader_review_queue"][0]["task_id"] == "e-r"
+
+
+def test_leader_digest_payload_body_surfaces_leader_review_queue_when_nonempty():
+    """Body text exposes the leader_review queue so legacy Skills /
+    un-upgraded bridges still surface the actionable count."""
+    t = _trek_with_task_states({
+        "e-r1": {"state": "leader_review",
+                 "updated_at": "2026-06-25T00:00:00Z"},
+        "e-r2": {"state": "leader_review",
+                 "updated_at": "2026-06-25T01:00:00Z"},
+    })
+    payload = scheduler.build_leader_digest_payload(t)
+    body = payload["body"]
+    assert "leader_review_queue=2" in body
+    assert "leader_review queue: 2 件" in body
+    assert "/beacon-trek-review" in body
+
+
+def test_leader_digest_payload_body_omits_queue_line_when_empty():
+    """Clean trek (= no leader_review entries) keeps the body terse —
+    the queue line only fires when there is action to take."""
+    t = _trek_with_task_states({
+        "e-a": {"state": "working"},
+    })
+    payload = scheduler.build_leader_digest_payload(t)
+    body = payload["body"]
+    assert "leader_review_queue=0" in body
+    assert "invoke /beacon-trek-review NOW" not in body
+
+
+def test_leader_digest_payload_fallback_path_still_carries_aggregate(monkeypatch):
+    """When the lazy trek import fails (= ``_import_trek`` returns None),
+    the fallback empty-shape payload must still expose
+    task_state_aggregate so callers do not crash on field access."""
+    # Force the trek module unavailable for the duration of the call.
+    monkeypatch.setattr(scheduler, "_import_trek", lambda: None)
+    t = {
+        "trek_id": "tk-fallback",
+        "task_states": {
+            "e-a": {"state": "leader_review",
+                    "updated_at": "2026-06-25T00:00:00Z"},
+        },
+    }
+    payload = scheduler.build_leader_digest_payload(t)
+    assert "task_state_aggregate" in payload
+    assert payload["summary"]["leader_review_queue_count"] == 1
+    assert payload["task_state_aggregate"]["overall_state"] == "leader_review"

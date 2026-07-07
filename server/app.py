@@ -28,8 +28,10 @@ import core
 import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
 import envelope as envelope_mod
 import invitations as invitations_mod  # ms-78 e-1803/e-1804: token-based invites
+import phantom_done_evidence as phantom_done_mod  # ms-95 / e-2726: task done evidence gate
 import store_router as db  # e-1544: BEACON_STORE_BACKEND で firestore / dynamodb を切替
 import operations
+import redis_client  # ms-96 / e-2381: rate limit 用の揮発カウンタ (fail-open)
 import trek as trek_mod  # ms-69 / e-1656: trek schema + pure mutators
 import trek_scheduler as trek_scheduler_mod  # ms-83 / e-1997: progress-check cadence logic
 
@@ -198,6 +200,81 @@ class AuditLogMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(AuditLogMiddleware)
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting (ms-96 / e-2381)
+# ---------------------------------------------------------------------------
+# app 側 Redis 固定窓レート制限。認証済なら user_id、無ければ client IP をキーに、
+# window_seconds ごとの窓内で上限を超えたら 429 を返す。Redis 不通・未設定時は
+# redis_client が None を返し fail-open (= 制限せず通す、可用性優先)。
+#
+# 数値ポリシー (window / 上限) は env で調整可能。より細かい上限ポリシーは運用側の
+# 設定 (env / 外部供給) で与え、本体は「キー単位で上限を課す汎用機構」に閉じる。
+_RATE_LIMIT_ENABLED = os.environ.get("BEACON_RATE_LIMIT", "1") != "0"
+_RATE_LIMIT_WINDOW = int(os.environ.get("BEACON_RATE_LIMIT_WINDOW_S", "60"))
+# 認証済 user は多セッション (bus poll 5s × N session) を許容する必要があるため
+# IP より高め。既定は「制限が乱用者にだけ効き、正常運用では 429 にならない」水準。
+_RATE_LIMIT_USER = int(os.environ.get("BEACON_RATE_LIMIT_USER_PER_WINDOW", "1200"))
+_RATE_LIMIT_IP = int(os.environ.get("BEACON_RATE_LIMIT_IP_PER_WINDOW", "600"))
+
+# 除外パス: liveness / WS handshake / ヘルスは対象外。bus poll 等の高頻度
+# エンドポイントは除外せず、認証済 user の高め上限 (_RATE_LIMIT_USER) で吸収する。
+_RATE_LIMIT_EXEMPT_PREFIXES = ("/api/version", "/health", "/ws/")
+
+
+def _rate_limit_exempt(path: str) -> bool:
+    return any(path.startswith(p) for p in _RATE_LIMIT_EXEMPT_PREFIXES)
+
+
+def _rate_limit_identity(request: Request) -> tuple[str, str]:
+    """レート制限キーを解決。認証済なら (user_id, "user")、無ければ (ip, "ip")。
+
+    middleware は endpoint auth より前に走るので、Authorization ヘッダを best-effort
+    で検証して user_id を得る。検証失敗 / auth 無効時は IP に fall back。
+    """
+    if _auth_enabled:
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer "):
+            try:
+                claims = _verify_id_token(auth[len("Bearer "):])
+                sub = str(claims.get("sub") or "")
+                if sub:
+                    return sub, "user"
+            except Exception:
+                # 無効トークンは IP scope に倒す (= 401 は endpoint auth が返す)。
+                pass
+    xff = request.headers.get("x-forwarded-for", "")
+    ip = (xff.split(",")[0].strip() if xff
+          else (request.client.host if request.client else "unknown"))
+    return ip, "ip"
+
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Fixed-window rate limit keyed by user_id (authed) or client IP.
+
+    Redis 不通時は fail-open (= 通す)。除外パスは無条件で通す。
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if not _RATE_LIMIT_ENABLED or _rate_limit_exempt(request.url.path):
+            return await call_next(request)
+        ident, scope = _rate_limit_identity(request)
+        limit = _RATE_LIMIT_USER if scope == "user" else _RATE_LIMIT_IP
+        count = redis_client.incr_fixed_window(f"{scope}:{ident}", _RATE_LIMIT_WINDOW)
+        # count is None ⇒ Redis unavailable ⇒ fail-open.
+        if count is not None and count > limit:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Too Many Requests"},
+                headers={"Retry-After": str(_RATE_LIMIT_WINDOW)},
+            )
+        return await call_next(request)
+
+
+# Added after AuditLogMiddleware so it wraps it (= runs first on each request),
+# rejecting over-limit callers before audit/auth/handler work happens.
+app.add_middleware(RateLimitMiddleware)
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +530,7 @@ def _require_project_role(
     user: dict | None,
     *,
     allowed: tuple[str, ...] = ("owner", "editor", "viewer"),
+    hydrate_milestones: bool = True,
 ) -> tuple[dict, str]:
     """Single source of truth for "can this user read/write this project?".
 
@@ -469,12 +547,33 @@ def _require_project_role(
     "load + role check" pair, and the only knob is ``allowed`` (used by the
     handful of endpoints that need owner-only / editor-only access).
 
+    ``hydrate_milestones`` (cost-reduction knob, added for the
+    ~60% Firestore read reduction on high-frequency polling endpoints):
+
+      * ``True``  (default) — call ``load_project_consistent`` which streams
+        the ``milestones`` subcollection (97 reads for the Beacon project).
+        Every existing caller kept its current behavior.
+      * ``False`` — call ``load_project_meta_only`` which fetches ONLY the
+        project meta doc (1 read) and returns the SAME dict shape with
+        ``milestones=[]``. Use for endpoints whose handler body never
+        reads ``data["milestones"]`` (bus polling, session intent, cursor
+        updates, per-event acks). The auth check runs on the meta doc alone
+        because ``owner`` / ``members`` live at the top level — unaffected
+        by whether milestones are hydrated.
+
+    Keeping this behind one flag on the single auth helper preserves the
+    "authorization rule lives in one place" invariant this function was
+    created to enforce.
+
     For WS handlers: catch ``HTTPException`` from this helper and translate
     ``404 → close 4404`` / ``403 → close 4403 (forbidden)``. REST handlers
     re-raise as-is.
     """
     try:
-        data = operations.load_project_consistent(project_id)
+        if hydrate_milestones:
+            data = operations.load_project_consistent(project_id)
+        else:
+            data = operations.load_project_meta_only(project_id)
     except LookupError:
         raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
     if not _auth_enabled or user is None:
@@ -507,6 +606,44 @@ def _load(project_id: str, user: dict | None = None) -> dict:
     return data
 
 
+def _load_meta_only(project_id: str, user: dict | None = None) -> dict:
+    """Meta-only variant of :func:`_load` — same auth rule, no milestones hydration.
+
+    Every API call passing through ``_load`` triggered
+    ``operations.load_project_consistent`` which streams the entire
+    ``milestones`` subcollection (97 reads for the Beacon project) even when
+    the handler only needed a role check on the project meta doc. For
+    high-frequency polling endpoints (bus/unread, cursor advance, session
+    intent, per-event ack) this multiplied Firestore reads by ~97x — one of
+    the dominant contributors to the GCP bill discovered during the
+    cost-reduction sweep.
+
+    This helper is the drop-in for those handlers:
+
+      * Same 404 / 403 behavior as ``_load`` (the auth check is delegated to
+        ``_require_project_role`` so the rule stays in ONE place).
+      * Returns the same dict shape as ``_load`` EXCEPT
+        ``data["milestones"]`` is guaranteed to be ``[]``. Any accidental
+        ``for ms in data["milestones"]`` is a silent no-op — the caller does
+        not KeyError, and there is no silently truncated milestone list to
+        mislead downstream code.
+      * The ``user is None`` branch mirrors ``_load``'s dev-mode /
+        internal-caller path so behavior is consistent between the two
+        entry points.
+
+    Do NOT switch endpoints that read ``data["milestones"]`` (like
+    ``GET /api/projects/{project_id}`` or milestone / task CRUD) to this
+    helper — they would silently receive an empty list.
+    """
+    if user is None:
+        try:
+            return operations.load_project_meta_only(project_id)
+        except LookupError:
+            raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    data, _role = _require_project_role(project_id, user, hydrate_milestones=False)
+    return data
+
+
 def _require_write(data: dict, user: dict) -> None:
     """Raise 403 if user doesn't have write access (editor or owner)."""
     role = _get_role(data, user)
@@ -534,6 +671,217 @@ def _save(project_id: str, data: dict) -> None:
 # ---------------------------------------------------------------------------
 # Author resolution (ms-78 / e-1909) — UC11-F5 follow-up
 # ---------------------------------------------------------------------------
+
+def _resolve_canonical_project_id(
+    maybe: str, *, user_id: str
+) -> Optional[str]:
+    """Resolve a slug or full project_id to its canonical full project_id.
+
+    ms-95 / Trek task-add cross-project bug: scope entries can be stored
+    using the user-friendly **slug** (= just ``"profile-extractor"``)
+    because that's what users type at the CLI (``beacon trek plan
+    --add-scope profile-extractor:ms-5``). But ``operations.apply_operation``
+    requires the **full project_id** (= ``"profile-extractor-276d28"`` with
+    the 6-char md5 path-hash suffix the CLI mints in ``cmd_cloud_setup``).
+    Without this resolver, the task-add endpoint passes the slug down to
+    ``db.get_project`` → returns None → ``LookupError`` → uncaught → HTTP
+    500. This helper canonicalizes both the request side and (caller's
+    copy of) the scope side so the scope match works on equal footing and
+    the downstream apply_operation call always sees the full id.
+
+    Returns:
+      * the full project_id on **unique** match
+      * ``None`` if not found OR ambiguous (= multiple slug expansions)
+
+    Resolution strategy:
+      1. Fast path — assume ``maybe`` is already the full id. If
+         ``db.get_project(maybe)`` returns a doc, return ``maybe`` as-is.
+      2. Slug path — scan projects accessible to ``user_id`` and pick
+         those whose project_id starts with ``f"{maybe}-"`` (= slug prefix
+         used by ``cmd_cloud_setup`` when minting ids as ``<slug>-<hex6>``).
+         Return the id when exactly one matches, else ``None``.
+
+    Failure modes (intentional, returned as ``None`` so the caller picks
+    the right HTTP code):
+      * Project does not exist → 404 candidate
+      * Multiple projects share the slug prefix → 409 candidate (the
+        caller should surface "ambiguous slug" so the user can supply
+        the full id explicitly)
+
+    Performance: slug path is O(N) over the user's projects per call.
+    No cache — keep the code simple; if this shows up in latency traces
+    later, memoize per-request.
+    """
+    if not maybe:
+        return None
+    # Fast path: maybe is already a full project_id.
+    try:
+        if db.get_project(maybe) is not None:
+            return maybe
+    except Exception:  # noqa: BLE001 - db hiccup falls through to slug path
+        pass
+    if not user_id:
+        # Cannot scope the slug scan without a user — refuse rather than
+        # leak cross-tenant ids.
+        return None
+    try:
+        rows = db.list_projects(user_id=user_id)
+    except Exception:  # noqa: BLE001 - on db failure, refuse to guess
+        return None
+    prefix = f"{maybe}-"
+    matches = [
+        r.get("project_id") for r in (rows or [])
+        if (r.get("project_id") or "").startswith(prefix)
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _canonicalise_trek_scope_projects_in_place(trek_doc: dict) -> None:
+    """Rewrite ``trek_doc["scope"][*]["project"]`` to the canonical full
+    project_id when the scope entry carries a slug.
+
+    ms-99 / e-2833 — the Phase 2 scheduler's tick decision predicates
+    read the slot inventory via ``materialize_slots(trek_doc, get_project=...)``,
+    which calls ``get_project`` with each scope entry's ``project``
+    value verbatim. If a CLI stored the slug (= ``profile-extractor``
+    rather than ``profile-extractor-276d28``), ``db.get_project`` returns
+    None and every MS slot resolves to ``("todo", "unstamped")`` —
+    silently misfiring both the leader digest gate and the aggregate-
+    terminal quiesce path. This helper closes the gap by resolving each
+    scope entry against the leader user's project list and rewriting
+    the ``project`` field to the full id in place before the tick's
+    predicates run.
+
+    No-op for scope entries whose project already resolves via the
+    fast path (= ``db.get_project`` returns non-None). Unresolvable
+    slugs are left untouched so downstream code observes the exact
+    graceful-degradation behaviour pre-fix.
+    """
+    scope = trek_doc.get("scope") or []
+    if not scope:
+        return
+    leader_user_id = ""
+    for m in trek_doc.get("members") or []:
+        if (m.get("role") or "") == "leader" and m.get("user_id"):
+            leader_user_id = m.get("user_id") or ""
+            break
+    if not leader_user_id:
+        return
+    for entry in scope:
+        raw = (entry.get("project") or "").strip()
+        if not raw:
+            continue
+        resolved = _resolve_canonical_project_id(raw, user_id=leader_user_id)
+        if resolved and resolved != raw:
+            entry["project"] = resolved
+
+
+def _resolve_trek_scope_project_ids(trek_doc: dict) -> list[str]:
+    """Resolve every project in ``trek_doc.scope[]`` to canonical full ids.
+
+    ms-95 / e-2639 — Trek scheduler tick was migrated to per-member dm
+    fanout (= ms-97 SPEC AC16 / 中心原則 6 「Wake 経路は DM と完全同一」)。
+    The single-project ``_resolve_trek_target_project_id`` helper that
+    resolved only ``scope[0]['project']`` was removed: it forced the tick
+    to post into one project bus, leaving members whose home project sat
+    in ``scope[1..N]`` permanently deaf to Trek progress-check / leader-
+    digest events. The new helper canonicalises *every* unique project
+    listed in scope so the caller can walk all candidate home buses when
+    fanning a dm out to each member's live session.
+
+    Resolution strategy mirrors the retired single-project helper: each
+    project value is canonicalised through the leader user's project
+    access list (= leader is guaranteed to have access to every project
+    in scope, so this is the safe identity for scheduler-side slug
+    expansion when no end-user request context exists). Slugs that
+    cannot be resolved are returned as-is so downstream code can still
+    attempt list_sessions / append_bus_event against the raw value —
+    matching the pre-e-2639 graceful-degradation behaviour.
+
+    Behaviour:
+      * Returns canonical full project_ids in scope order, de-duplicated.
+      * Unresolvable slugs are returned raw (= we never raise; the
+        scheduler loop must continue across treks).
+      * Empty scope returns ``[]``.
+    """
+    scope = trek_doc.get("scope") or []
+    if not scope:
+        return []
+    leader_user_id = ""
+    for m in trek_doc.get("members") or []:
+        if (m.get("role") or "") == "leader" and m.get("user_id"):
+            leader_user_id = m.get("user_id") or ""
+            break
+    seen: set[str] = set()
+    out: list[str] = []
+    for entry in scope:
+        raw = (entry.get("project") or "").strip()
+        if not raw:
+            continue
+        canonical = raw
+        if leader_user_id:
+            resolved = _resolve_canonical_project_id(
+                raw, user_id=leader_user_id,
+            )
+            if resolved:
+                canonical = resolved
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        out.append(canonical)
+    return out
+
+
+def _resolve_leader_home_project_id(trek_doc: dict) -> str:
+    """Resolve the project whose bus a *leader-addressed* Trek DM must land on.
+
+    ms-97 P4 (= review finding Trek-H2): three leader-bound DMs — the quiesce
+    notice, the ``trek-task-review`` request, and the auto-stall notice — were
+    posted to ``scope[0]['project']``. That silently drops the DM whenever the
+    leader's home project is a *different* scope project (= cross-project Trek),
+    because a leader's bridge only subscribes to its own project's bus. The
+    quiesce path made this worse by stamping ``quiesce_notified_at`` on a send
+    that never reached the leader (= ms-99 AC12 "silent quiesce eliminated"
+    broke; same shape as the 2026-06-28 dogfood e-2706).
+
+    Resolution walks each scope project's session registry and returns the
+    project that holds the stamped ``leader_session_id``. Falls back to the
+    first scope project when the leader session is not found in any registry
+    (= leader home outside scope / planning-era trek with no live leader),
+    which is the same known limitation the leader-digest resolver carries
+    (review M5) and matches the pre-P4 ``scope[0]`` behaviour exactly.
+
+    We walk the *raw* scope project values (no canonicalisation) on purpose:
+    the pre-P4 code used the raw ``scope[0]['project']`` too, so the fallback
+    is byte-for-byte identical, and we avoid adding a ``db.get_project`` slug
+    round-trip to hot paths (= the ``trek-task-review`` PATCH endpoint fires
+    this on every review-trigger transition; the e-2650 slot-done precondition
+    overreach test pins that non-done transitions stay read-light).
+    """
+    seen: set[str] = set()
+    raw_pids: list[str] = []
+    for entry in trek_doc.get("scope") or []:
+        pid = (entry.get("project") or "").strip()
+        if pid and pid not in seen:
+            seen.add(pid)
+            raw_pids.append(pid)
+    leader_sid = trek_doc.get("leader_session_id") or ""
+    if leader_sid:
+        for pid in raw_pids:
+            try:
+                sessions = db.list_sessions(pid)
+            except Exception:
+                # A single project's registry read failing must not abort the
+                # walk — the leader may still be registered in another scope
+                # project. Fall through to the next candidate.
+                continue
+            for s in sessions:
+                if (s.get("session_id") or "") == leader_sid:
+                    return pid
+    return raw_pids[0] if raw_pids else ""
+
 
 def _resolve_author(user: dict) -> dict:
     """Build the ``meta.author`` dict for a write triggered by ``user``.
@@ -829,6 +1177,18 @@ class OperationApproveRequest(BaseModel):
 class OperationRevokeRequest(BaseModel):
     """Body for POST /api/projects/{id}/operations/{op_id}/envelopes/{env_id}/revoke."""
     reason: str = "manual revoke"
+
+
+class OperationFireClaimRequest(BaseModel):
+    """Body for POST /api/projects/{id}/operation-fires/{op_id}/claim (ms-95).
+
+    Atomic per-day claim used by the CLI scheduler to dedup operation
+    triggers across parallel bclaude sessions in the same project. See
+    ``claim_operation_fire_if_new`` in firestore_client for the gate
+    semantics. ``session_id`` is informational (= which session won the
+    race today) and may be empty when the caller has no bridge mint.
+    """
+    session_id: str = ""
 
 
 class BusCursorAdvance(BaseModel):
@@ -1181,11 +1541,18 @@ def me_list_projects(user: dict = Depends(require_auth)):
                 if m.get("user_id") == uid:
                     role = m.get("role", "member") or "member"
                     break
+            # ms-95 / e-2794 (2026-07-03): 旧「migration-period 対応で無 owner
+            # project を member 扱い」フォールバックを削除。上流の list_projects
+            # が既に ownerless project を deny by default で除外しているため、
+            # ここに到達する時点で role が決まらないケース (= owner でも member
+            # でもない) は認可データの不整合であり、silent に member 化しない。
             if not role:
-                # Migration-period projects without owner are visible to all;
-                # treat that as "member" so the picker doesn't have to handle
-                # an empty role.
-                role = "member"
+                _server_logger.warning(
+                    "me_list_projects: project %s reached me-endpoint without "
+                    "resolvable role for user %s; skipping",
+                    pid, uid,
+                )
+                continue
         result.append({
             "id": pid,
             "name": item.get("name", ""),
@@ -1585,14 +1952,29 @@ def create_project(project_id: str, body: ProjectCreate,
     existing = db.get_project(project_id)
     if existing is not None:
         raise HTTPException(status_code=409, detail=f"Project '{project_id}' already exists")
+    # ms-95 / e-2794 (2026-07-03): owner を必須化。以前は sub 欠落時に空文字
+    # フォールバックで owner="" の project が silent に生まれ、list_projects の
+    # migration-period fallthrough と組み合わさって全ユーザー可視の穴を作って
+    # いた。deny by default 側の fix と両輪で塞ぐ。
+    owner_sub = user.get("sub")
+    if not owner_sub:
+        raise HTTPException(status_code=401, detail="Authenticated user has no sub claim")
     data = {
         "name": body.name,
         "objective": body.objective,
         "milestones": [],
-        "owner": user.get("sub", ""),
+        "owner": owner_sub,
         "members": [],
-        # SCHEMA_V2_BETA — see lib/operations.py
-        "schema_version": operations.SCHEMA_V2_BETA,
+        # schema_version: v2 (β subcollection layout) は Firestore 専用
+        # (1 MiB / doc cap を避ける設計)。dynamodb / mysql は 1 MiB 制約が無く、
+        # v2 経路が Firestore を直呼び (operations.py / _hydrate_v2_milestones)
+        # するため非 Firestore backend では動かない。よって非 Firestore では
+        # v1 unified で作る (ms-96 e-2379)。
+        "schema_version": (
+            operations.SCHEMA_V2_BETA
+            if os.environ.get("BEACON_STORE_BACKEND", "firestore").lower() == "firestore"
+            else 1
+        ),
     }
     _save(project_id, data)
     return {"status": "created", "project_id": project_id}
@@ -1674,9 +2056,11 @@ def put_project(project_id: str, body: dict,
         actor=user.get("sub", ""),
         reason="PUT /api/projects (whole-document replace)",
     )
-    # ms-43 / e-2128 — explicit WS broadcast after every write. The Firestore
-    # on_snapshot listener is unreliable (silent disconnect, multi-instance
-    # watcher偏り, identical-content dedup), so we don't rely on it alone.
+    # ms-43 / e-2128 — explicit WS broadcast after every write. ms-84 / e-2325:
+    # the Firestore on_snapshot listener was disabled (see _start_watcher
+    # docstring) because it produced duplicate broadcasts for every write
+    # (over-broadcast bug). Single-instance Cloud Run posture makes the
+    # explicit broadcast self-sufficient.
     _broadcast_project_after_write(project_id)
     return {"status": "ok", "project_id": project_id}
 
@@ -1894,10 +2278,15 @@ def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
     """ms-88 / e-2167 — task pool ↔ Trek stamp 同期 (= mirror sync).
 
     task pool 側で task が ``done`` に成った瞬間に、 active な Trek の
-    ``task_states[<entry_id>]`` が non-terminal で stamp 済 なら自動で
-    ``done`` に mirror する。 「task pool で done だが Trek stamp は
-    waiting-review / leader_review / working で残ってる」 stuck 状態 (=
-    2026-06-19 dogfood の e-2045 14h 放置事例) を構造的に排除する。
+    ``task_states[<entry_id>]`` が ``working`` / ``todo`` で stamp 済 なら
+    自動で ``done`` に mirror する。 「task pool で done だが Trek stamp は
+    working で残ってる」 stuck 状態 (= 2026-06-19 dogfood の e-2045 14h
+    放置事例) を構造的に排除する。
+
+    ms-97 P5 (= review Trek-H3): ``leader_review`` は除外する。 これは
+    executor が忘れた stuck stamp ではなく leader の forced review を待つ
+    意図的な状態なので、 pool done で ``done`` に上書きすると leader review
+    を bypass してしまう (= endpoint 側の P5 gate と同じ穴)。
 
     state transition validation は bypass する (= 直接書き換え)。 これは
     server-forced reconciliation であり、 「executor / leader / user が
@@ -1923,6 +2312,16 @@ def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
             current_state = (existing or {}).get("state") or ""
         if current_state in trek_mod.TERMINAL_TASK_STATES:
             continue
+        # ms-97 P5 (= review finding Trek-H3): never auto-mirror a task that
+        # is awaiting the leader's forced review. ``leader_review`` is a
+        # deliberate "human judgment pending" state, not a stuck stamp the
+        # executor forgot to advance — overwriting it to ``done`` on pool sync
+        # bypasses the leader review the same way an executor self-approve
+        # would. The mirror only exists to unstick ``working`` / ``todo``
+        # stamps left behind when the pool moved on; leave the review gate to
+        # the leader (via /beacon-trek-review + the endpoint's P5 gate above).
+        if current_state == "leader_review":
+            continue
         # Direct mirror write (= bypass transition validation).
         now_iso = trek_mod.utcnow_iso()
         states[entry_id] = {
@@ -1945,8 +2344,99 @@ def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
     return touched
 
 
+# ms-95 / e-2726 — phantom-done evidence gate.
+#
+# When ``done_entry`` succeeds, compare the just-done task's keywords
+# against the most-recent N commits. If no commit references the task by
+# id AND keyword overlap is below threshold, emit a phantom-done warning
+# to Cloud Logging (structured json line, severity=WARNING). Done itself
+# is ALLOWED — the gate is a flag, not a filter ("動かしながら考える"
+# philosophy from the e-2726 task spec).
+#
+# Background: 2026-06-28 dogfood observed two phantom dones (= e-710 in
+# the PE project, e-2567 here). The CORE doc ``task-done-judgment-principle``
+# / ms-97 AC10 expects done to be backed by physical evidence, but there
+# was no server-side check. This is the implementation gap closer.
+#
+# Companion to e-2650 (= "Trek slot done requires project task done"):
+#   * e-2650 protects the Trek-view layer (= slot done cannot precede
+#     project task done).
+#   * e-2726 (this) protects the project pool layer (= project task done
+#     should have commit evidence).
+# Stacked, the two close the loop: Trek slot done → project task done
+# (e-2650) → commit evidence flagged when missing (e-2726).
+def _check_phantom_done_evidence(
+    project_id: str,
+    entry_id: str,
+    user: dict,
+    request: Optional[Request] = None,
+) -> Optional[dict]:
+    """Evaluate a freshly-done task for commit evidence; emit warning if missing.
+
+    Returns the assessment dict (or ``None`` on lookup failure / disabled).
+    Failure is silently swallowed — the warning emission is purely
+    observational and must not block the task done response. The returned
+    assessment is folded into the endpoint response so the CLI can surface
+    the warning to the user in the same turn.
+
+    Disabled via env ``BEACON_PHANTOM_DONE_GATE=0`` (escape hatch for
+    Cloud Run rollback without a redeploy). Default = enabled.
+    """
+    if os.environ.get("BEACON_PHANTOM_DONE_GATE", "1") == "0":
+        return None
+    try:
+        data = operations.load_project_consistent(project_id)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    found = core.find_entry(data, entry_id)
+    if not found:
+        return None
+    _, _, entry, _ = found
+    recent_commits = phantom_done_mod.collect_recent_commits(data)
+    assessment = phantom_done_mod.evaluate_done_evidence(entry, recent_commits)
+    if assessment.get("has_evidence"):
+        # All good — task has a matching commit OR has no keywords to
+        # judge against. Do not pollute Cloud Logging with negatives.
+        return assessment
+    # Phantom done detected — emit structured warning.
+    sid = ""
+    if request is not None:
+        try:
+            sid = request.headers.get("X-Beacon-Session", "") or ""
+        except Exception:
+            sid = ""
+    uid = ""
+    if isinstance(user, dict):
+        uid = user.get("sub") or user.get("email") or ""
+    log_record = {
+        "evt": "task.done.phantom_done_warning",
+        "severity": "WARNING",
+        "phantom_done_warning": True,  # flag for Cloud Logging filter
+        "task_id": entry_id,
+        "project_id": project_id,
+        "user_id": uid,
+        "session_id": sid,
+        "task_description": (entry.get("description") or "")[:200],
+        "task_keywords_sample": assessment.get("task_keywords", [])[:20],
+        "commit_window": assessment.get("window", 0),
+        "threshold": assessment.get("threshold"),
+        "match_type": assessment.get("match_type", "none"),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    try:
+        # severity=WARNING so Cloud Logging splits this from the bulk
+        # INFO-level audit traffic. The json payload is what aggregation
+        # queries key off.
+        _audit_logger.warning(json.dumps(log_record, ensure_ascii=False))
+    except Exception:
+        pass
+    return assessment
+
+
 @app.post("/api/projects/{project_id}/entries/{entry_id}/done")
-def done_entry(project_id: str, entry_id: str,
+def done_entry(project_id: str, entry_id: str, request: Request,
                user: dict = Depends(require_auth)):
     import datetime
     today = datetime.date.today().isoformat()
@@ -1967,6 +2457,36 @@ def done_entry(project_id: str, entry_id: str,
     # Best-effort: failure does not block the task done response.
     try:
         _mirror_task_done_to_treks(entry_id)
+    except Exception:
+        pass
+    # ms-95 / e-2726 — phantom-done evidence gate. Flag only, no reject.
+    # Failure is silently swallowed inside the helper; we surface the
+    # assessment in the response so the CLI can echo the warning to the
+    # operator in the same turn.
+    try:
+        assessment = _check_phantom_done_evidence(
+            project_id, entry_id, user, request=request,
+        )
+        if (
+            isinstance(result, dict)
+            and isinstance(assessment, dict)
+            and not assessment.get("has_evidence", True)
+        ):
+            result = {
+                **result,
+                "phantom_done_warning": {
+                    "task_id": entry_id,
+                    "match_type": assessment.get("match_type", "none"),
+                    "commit_window": assessment.get("window", 0),
+                    "threshold": assessment.get("threshold"),
+                    "message": (
+                        "No commit in the recent window references this "
+                        "task. Done allowed (= flag, not filter), but the "
+                        "lack of physical evidence is logged for audit "
+                        "(ms-95 / e-2726)."
+                    ),
+                },
+            }
     except Exception:
         pass
     return result
@@ -2235,6 +2755,40 @@ def operation_envelopes_list(
             status_code=400, detail="status must be 'active' or 'revoked'"
         )
     return db.list_operation_envelopes(project_id, op_id=op_id, status=status)
+
+
+@app.post("/api/projects/{project_id}/operation-fires/{op_id}/claim")
+def operation_fire_claim(
+    project_id: str,
+    op_id: str,
+    body: OperationFireClaimRequest,
+    user: dict = Depends(require_auth),
+):
+    """Atomically claim "I'm firing op-<id> today" for this project (ms-95).
+
+    First-write-wins per ``(project, op, today)``. Subsequent callers see the
+    prior claim and skip their bus push. The CLI scheduler
+    (``_auto_fire_operation_triggers`` in lib/commands.py) hits this endpoint
+    before posting the operation-trigger bus event so cross-cwd /
+    cross-machine parallel bclaude sessions in the same project no longer
+    each fire independently (= e-1668 N-multiplied fires / e-2350 4-6 min
+    retrigger storms when ``run_record`` lands locally but cloud sync lag
+    makes the next scheduler tick still see "no run_record yet").
+
+    Response: ``{claimed: bool, claimed_by: str, claimed_at: str}``. Date is
+    server clock (UTC) so all sessions agree on the calendar day boundary
+    even across timezone-mixed machines.
+
+    Any project member (= owner / editor / viewer) may claim. The claim
+    itself is not a privileged action; the gate exists to dedup honest
+    parallel writers, not to enforce access.
+    """
+    _load(project_id, user)  # membership check (any role)
+    import datetime
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    return db.claim_operation_fire_if_new(
+        project_id, op_id, today, body.session_id or ""
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3090,6 +3644,35 @@ def admin_list_projects(user: dict = Depends(require_auth)):
     return db.list_all_projects()
 
 
+@app.get("/api/admin/projects/ownerless")
+def admin_list_ownerless_projects(user: dict = Depends(require_auth)):
+    """Audit endpoint: list projects that have no owner field (ms-95 / e-2794).
+
+    Before the 2026-07-03 fix, ownerless projects leaked into every user's
+    project listing via the ``list_projects`` migration-period fallthrough.
+    That path is now closed (deny by default). This endpoint lets an admin
+    inventory the residue so owners can be backfilled or the projects
+    archived. Returns rows with minimal metadata — no milestones / entries.
+    """
+    _require_admin(user)
+    rows = []
+    for p in db.list_all_projects():
+        if p.get("owner"):
+            continue
+        pid = p.get("project_id", "")
+        full = db.get_project(pid) or {} if pid else {}
+        rows.append({
+            "project_id": pid,
+            "name": p.get("name", "") or full.get("name", ""),
+            "objective": (full.get("objective") or "")[:200],
+            "archived": bool(full.get("archived", False)),
+            "member_count": p.get("member_count", 0),
+            "milestone_count": p.get("milestone_count", 0),
+            "updated_at": p.get("updated_at", ""),
+        })
+    return {"count": len(rows), "projects": rows}
+
+
 @app.delete("/api/admin/projects/{project_id}")
 def admin_delete_project(project_id: str, user: dict = Depends(require_auth)):
     """Delete a project (admin only)."""
@@ -3289,6 +3872,27 @@ class TrekScopeOp(BaseModel):
     task: Optional[str] = None
 
 
+# ms-99 / e-2830 — Trek slot schema v2 body models. Slot-specific verbs
+# (add / amend / claim) carry different payloads: add is a scope entry +
+# optional children opt-in; amend edits child list; claim stamps a
+# session id (or clears it via ``session_id=""``).
+class TrekSlotAdd(BaseModel):
+    project: str
+    milestone: Optional[str] = None
+    operation: Optional[str] = None
+    task: Optional[str] = None
+    included_task_ids: Optional[list[str]] = None
+
+
+class TrekSlotAmend(BaseModel):
+    add_children: list[str] = []
+    remove_children: list[str] = []
+
+
+class TrekSlotClaim(BaseModel):
+    session_id: str = ""  # empty string = unclaim gesture (SPEC 方針 4)
+
+
 class TrekTaskStateSet(BaseModel):
     """ms-75 / e-2048 — Trek-internal task state declaration.
 
@@ -3357,9 +3961,61 @@ class TrekKickoff(BaseModel):
     kickoff_dm_event_id: str = ""  # bus.send 結果の event_id (= audit trace)
 
 
-def _load_trek_for_read(trek_id: str, user: dict) -> dict:
+# ms-97 / Phase 7-B / e-2684 — leader succession consent body (= candidate
+# accept / decline 1 hop response). caller_session_id は X-Beacon-Session
+# header から取るので body には載せない。
+class TrekSuccessionConsent(BaseModel):
+    decision: str  # "accept" | "decline"
+
+
+# ms-95 / e-2308 — extend TTL on a single task (= leader hints "I delegated
+# this to a subagent that can't stamp activity itself"). See
+# lib/trek.extend_task_ttl docstring for semantics.
+class TrekExtendTtl(BaseModel):
+    task_id: str
+    minutes: int  # 0 or negative clears the extension
+    reason: str = ""  # short audit string (e.g. "dispatched to subagent X")
+
+
+# ms-97 / Phase 7-C / AC24, e-2603 — blanket scope approval body.
+class TrekBlanketCategory(BaseModel):
+    category: str  # See lib/trek._normalised_blanket_category for shape
+
+
+def _trek_find_member_dual(
+    t: dict, *, user_id: str, session_id: str = "",
+) -> dict | None:
+    """Phase-gated member lookup (= ms-97 / e-2658 Phase 1 AC6 dual-mode).
+
+    Phase A+ trek (= members[] が session_id keyed) で caller の session_id
+    が分かっている時は session-grain で lookup。 caller_sid が空 (= 旧
+    bridge / curl など header 未送) の時、 または pre-A trek の時は
+    legacy user_id grain で lookup。 dual-mode 経路として cutover 期間
+    の互換性を保つ。
+    """
+    if session_id and trek_mod.is_session_id_keyed(t):
+        m = trek_mod.find_member(t, session_id=session_id)
+        if m is not None:
+            return m
+        # Fallback to user_id grain in case the calling session predates
+        # the migration (= header set but session not yet registered).
+        # This avoids hard-locking honest callers out during the cutover
+        # window; AC13 (= strict session_id hard-check) lands separately.
+    if not user_id:
+        return None
+    return trek_mod.find_member(t, user_id=user_id)
+
+
+def _load_trek_for_read(
+    trek_id: str, user: dict, request: "Request | None" = None,
+) -> dict:
     """Load a trek doc. 404 if missing, 403 if caller is neither creator
-    nor a member (per SPEC visibility = creator OR members)."""
+    nor a member (per SPEC visibility = creator OR members).
+
+    ms-97 / e-2658 Phase 1 (AC6) — ``request`` から ``X-Beacon-Session``
+    を取り、 phase A+ trek の時は session_id grain で membership check
+    する dual-mode 経路。 ``request`` 省略時は user_id grain のみ。
+    """
     t = db.get_trek(trek_id)
     if t is None:
         raise HTTPException(status_code=404, detail=f"Trek '{trek_id}' not found")
@@ -3369,37 +4025,164 @@ def _load_trek_for_read(trek_id: str, user: dict) -> dict:
     creator_uid = (t.get("creator_actor") or {}).get("user_id", "")
     if creator_uid == uid:
         return t
-    for m in t.get("members") or []:
-        if m.get("user_id") == uid:
-            return t
+    caller_sid = ""
+    if request is not None:
+        caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    if _trek_find_member_dual(t, user_id=uid, session_id=caller_sid) is not None:
+        return t
     raise HTTPException(status_code=403, detail="Not a member of this trek")
 
 
-def _trek_member_role(t: dict, user_id: str) -> str:
-    """Return the caller's role ('leader' / 'member' / '' if not a member)."""
-    for m in t.get("members") or []:
-        if m.get("user_id") == user_id:
-            return m.get("role", "member")
-    return ""
+def _reject_if_trek_archived(t: dict) -> None:
+    """Return 410 Gone when the Trek has been archived (ms-95 / e-2875).
+
+    Defense-in-depth guard for write endpoints. After a Trek is archived
+    the server tick stops firing new progress-check events, but events
+    already in the bus (fired shortly before archive) can still reach
+    executor sessions. Without this guard, executors invoke Skills that
+    POST pulse-ack / task-state / task-add to the archived Trek, which
+    then generates peer DM traffic and keeps the executor loop alive for
+    several minutes after the leader has left the room. The
+    client-side inbox-hook drops archived-trek events before Skill
+    invocation on updated bridges; this server guard closes the same
+    hole for pre-fix bridges (= two layers, either alone suffices).
+
+    Applied to state-mutating executor / leader endpoints:
+    pulse-ack, task-state, task-add, kickoff, extend-ttl,
+    session-heartbeat. Read endpoints and the archive transition itself
+    (= mutates status → archived) are exempt.
+
+    Reference: 2026-07-03 tk-29a11d2f archive dogfood, 5-10 minutes of
+    residual peer DM noise after archive; SPEC e-2875 Done when.
+    """
+    if t.get("status") == "archived":
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                f"Trek '{t.get('trek_id') or ''}' is archived; "
+                f"writes rejected (ms-95 / e-2875)"
+            ),
+        )
 
 
-def _require_trek_leader(t: dict, user: dict) -> None:
-    """Raise 403 if caller does not hold the leader role on this trek."""
+def _trek_member_role(
+    t: dict, user_id: str, session_id: str = "",
+) -> str:
+    """Return the caller's role ('leader' / 'member' / '' if not a member).
+
+    ms-97 / e-2658 Phase 1 — phase A+ trek の時は session_id grain 優先、
+    pre-A trek または session_id 不明時は user_id grain。 同 user_id で
+    複数 session が居る場合 (= phase A+ silent expand 状況) は session_id
+    grain hit が真値、 user_id grain は best-effort first-match。
+    """
+    member = _trek_find_member_dual(
+        t, user_id=user_id, session_id=session_id,
+    )
+    if member is None:
+        return ""
+    return member.get("role", "member")
+
+
+def _require_trek_leader(
+    t: dict, user: dict, request: "Request | None" = None,
+) -> None:
+    """Raise 403 if caller does not hold the leader role on this trek.
+
+    ms-97 / e-2658 Phase 1 — original user_id grain (+ phase A+ で session
+    grain 優先) の role check entry-point。 Phase 4 (= AC13 hard-check) で
+    leader-only endpoints は ``_require_trek_leader_session`` 経由に切り
+    替わるが、 この helper 自身は role check 限定の従来 contract を維持
+    する (= 並列で残しておくと既存 caller の影響範囲を最小化できる)。
+    """
     if not _auth_enabled:
         return
-    if _trek_member_role(t, user.get("sub", "")) != "leader":
+    sid = ""
+    if request is not None:
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    if _trek_member_role(t, user.get("sub", ""), sid) != "leader":
         raise HTTPException(status_code=403, detail="Trek leader role required")
 
 
-def _require_trek_joined_member(t: dict, user: dict) -> None:
+def _require_trek_leader_session(
+    t: dict, user: dict, request: "Request | None" = None,
+) -> None:
+    """Raise 403 unless caller is BOTH the leader role AND the live leader session (ms-97 / AC13).
+
+    Two-layer check (= role at user grain + session at session grain):
+
+      1. ``_require_trek_leader`` — caller has ``role == "leader"`` in
+         the trek's members[]. Survives session restart of the same
+         user.
+      2. session_id hard-check    — caller's ``X-Beacon-Session`` header
+         equals ``trek.leader_session_id``. Blocks a second session of
+         the same user from impersonating leader actions (= the gap
+         that AC13 closes; pre-Phase-4 the role check alone allowed
+         any session of the leader user to mutate).
+
+    Layer 2 only fires on phase A+ trek (= ``is_session_id_keyed``
+    True). Pre-A trek invariance: the helper degrades to the
+    role-only check, matching the legacy contract. Without the
+    ``X-Beacon-Session`` header (= legacy CLI / smoke test) we also
+    fall through to role-only — the header is opt-in, not a hard
+    requirement, so we don't break callers that pre-date the
+    session-grain key.
+
+    The 403 detail surfaces a session prefix on both sides of the
+    mismatch so the operator can tell "wrong-session of leader user"
+    from "non-leader user" at a glance (= dogfood ergonomics).
+    """
+    _require_trek_leader(t, user, request)
+    if not _auth_enabled:
+        return
+    if request is None:
+        return
+    caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    if not caller_sid:
+        # No session header → can't apply session grain; the role check
+        # above is the available authoritative gate. Mirrors the
+        # legacy CLI behaviour (= header is opt-in).
+        return
+    if not trek_mod.is_session_id_keyed(t):
+        # Pre-A trek: members[] is keyed by user_id only, so the
+        # leader_session_id field may be stale or absent. Don't fail
+        # the call — pre-A invariance is contractually preserved.
+        return
+    leader_sid = t.get("leader_session_id") or ""
+    if not leader_sid:
+        # Phase A+ trek with no live leader session (= e.g. just
+        # archived or stamped null) — the role check above is the
+        # available gate; refusing here would prevent ``take-over``
+        # from binding a fresh session post-leader-death.
+        return
+    if caller_sid != leader_sid:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "leader action requires the stamped leader session "
+                f"(caller={caller_sid[:8]}.., leader={leader_sid[:8]}..)"
+            ),
+        )
+
+
+def _require_trek_joined_member(
+    t: dict, user: dict, request: "Request | None" = None,
+) -> None:
     """Raise 403 if caller is not a joined member (= invited but not joined
-    is insufficient for write ops; mirrors SPEC 設計方針 12 join-flow)."""
+    is insufficient for write ops; mirrors SPEC 設計方針 12 join-flow).
+
+    ms-97 / e-2658 Phase 1 — phase A+ trek の時は session_id grain 優先。
+    placeholder (= session_id 未設定 + joined_at 空) は invited-but-not-joined
+    として常に reject される。
+    """
     if not _auth_enabled:
         return
     uid = user.get("sub", "")
-    for m in t.get("members") or []:
-        if m.get("user_id") == uid and m.get("joined_at"):
-            return
+    sid = ""
+    if request is not None:
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    member = _trek_find_member_dual(t, user_id=uid, session_id=sid)
+    if member is not None and member.get("joined_at"):
+        return
     raise HTTPException(status_code=403, detail="Only joined members can perform this action")
 
 
@@ -3461,15 +4244,19 @@ def get_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
 
 
 @app.patch("/api/treks/{trek_id}")
-def update_trek_endpoint(trek_id: str, body: TrekUpdate,
+def update_trek_endpoint(trek_id: str, body: TrekUpdate, request: Request,
                          user: dict = Depends(require_auth)):
     """Update title / description / type. Leader-only.
 
     Status / members / scope / halt are mutated through dedicated endpoints
     so audit logs and authz rules stay sharp per intent.
+
+    ms-97 Phase 4 / AC13 — leader hard-check via
+    ``_require_trek_leader_session`` (= role + session_id grain on phase
+    A+ trek). Pre-A invariance preserved.
     """
     t = _load_trek_for_read(trek_id, user)
-    _require_trek_leader(t, user)
+    _require_trek_leader_session(t, user, request)
     if body.title is not None:
         title = body.title.strip()
         if not title:
@@ -3505,10 +4292,16 @@ def update_trek_endpoint(trek_id: str, body: TrekUpdate,
 
 
 @app.delete("/api/treks/{trek_id}")
-def archive_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
-    """Archive a trek (status → archived). Leader-only. Archive is terminal."""
+def archive_trek_endpoint(trek_id: str, request: Request,
+                          user: dict = Depends(require_auth)):
+    """Archive a trek (status → archived). Leader-only. Archive is terminal.
+
+    ms-97 Phase 4 / AC13 — leader hard-check via
+    ``_require_trek_leader_session`` (= role + session_id grain on phase
+    A+ trek). Pre-A invariance preserved.
+    """
     t = _load_trek_for_read(trek_id, user)
-    _require_trek_leader(t, user)
+    _require_trek_leader_session(t, user, request)
     cur = t.get("status", "")
     try:
         trek_mod.validate_transition(cur, "archived")
@@ -3523,10 +4316,16 @@ def archive_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
 
 
 @app.post("/api/treks/{trek_id}/start")
-def start_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
-    """Transition trek planning → active. Leader-only."""
+def start_trek_endpoint(trek_id: str, request: Request,
+                        user: dict = Depends(require_auth)):
+    """Transition trek planning → active. Leader-only.
+
+    ms-97 Phase 4 / AC13 — leader hard-check via
+    ``_require_trek_leader_session`` (= role + session_id grain on phase
+    A+ trek). Pre-A invariance preserved.
+    """
     t = _load_trek_for_read(trek_id, user)
-    _require_trek_leader(t, user)
+    _require_trek_leader_session(t, user, request)
     cur = t.get("status", "")
     try:
         trek_mod.validate_transition(cur, "active")
@@ -3569,6 +4368,107 @@ def invite_trek_member_endpoint(trek_id: str, body: TrekInvite,
     return t
 
 
+def emit_leader_succession_consent_dm(
+    trek_doc: dict,
+    candidate_session_id: str,
+    *,
+    former_leader_session_id: str = "",
+    deadline_seconds: int = 1800,
+    candidate_home_project_id: str = "",
+) -> Optional[str]:
+    """Post a 1 hop leader succession consent DM to ``candidate_session_id``.
+
+    ms-97 / Phase 6 (AC15) — structural placeholder for the (Phase 7) AC22
+    auto-succession algorithm. AC22 itself is not written here; this helper
+    exists so AC22 can call into a stable, signed-envelope DM emit path
+    without re-deriving routing / envelope / payload concerns.
+
+    Contract:
+
+    * Payload kind is ``trek-leader-succession-consent``.
+    * Required payload fields: ``trek_id``, ``candidate_session_id``,
+      ``deadline_seconds``, ``former_leader_session_id``.
+    * Envelope is T1-system scoped to the trek, authorizing the single
+      action ``trek.leader_succession_consent``.
+    * Bus event is posted to ``candidate_home_project_id`` if provided,
+      otherwise the first ``trek_doc.scope[].project`` is used (= the
+      candidate's working project is what the bus inbox watches).
+    * Delivery mode is ``auto-execute`` so the candidate session wakes
+      via the bus-armed loop and the user's terminal Claude surfaces the
+      DM through the normal /beacon-dm-respond path (= 1 hop consent).
+    * Returns the bus event id, or ``None`` if no target bus is
+      resolvable (= empty scope and no explicit override) — the caller
+      can degrade gracefully without a thrown exception.
+
+    Raises ``ValueError`` only for callable-misuse cases (= empty
+    ``candidate_session_id``), so the AC22 algorithm gets a loud signal
+    if it forgets to plumb the candidate routing through.
+    """
+    if not candidate_session_id:
+        raise ValueError(
+            "candidate_session_id is required (= the session that the "
+            "consent DM is addressed to)"
+        )
+    trek_id = trek_doc.get("trek_id") or ""
+
+    target_project_id = candidate_home_project_id or ""
+    if not target_project_id:
+        scope = trek_doc.get("scope") or []
+        if scope:
+            first = scope[0] if isinstance(scope[0], dict) else {}
+            target_project_id = first.get("project") or ""
+    if not target_project_id:
+        # No bus to post to. Caller (= AC22) can fall back to a different
+        # candidate or escalate to user. Return None rather than throwing
+        # because routing failure is an expected runtime state, not a
+        # caller bug.
+        return None
+
+    try:
+        env = envelope_mod.issue_t1_system_envelope(
+            project_id=target_project_id,
+            trek_id=trek_id,
+            actions_authorized=["trek.leader_succession_consent"],
+            data_class="free",
+            ttl_seconds=max(int(deadline_seconds), 60),
+        )
+    except ValueError:
+        env = None
+
+    payload = {
+        "kind": "trek-leader-succession-consent",
+        "trek_id": trek_id,
+        "candidate_session_id": candidate_session_id,
+        "deadline_seconds": int(deadline_seconds),
+        "former_leader_session_id": former_leader_session_id or "",
+        "recipient_session_id": candidate_session_id,
+        "created_at": trek_mod.utcnow_iso(),
+        "body": (
+            f"[Trek leader succession consent] trek_id={trek_id}\n"
+            "現 leader session が不応状態に陥ったため、 あなたが次期 leader "
+            "候補として選ばれました。\n"
+            f"deadline: {int(deadline_seconds)} 秒以内に accept / decline を "
+            "明示してください。\n"
+            "辞退した場合、 次の candidate に escalate されます。"
+        ),
+    }
+    bus_data = {
+        "channel": "dm",
+        "sender_session_id": "",
+        "recipient_session_id": candidate_session_id,
+        "payload": payload,
+        "envelope": env,
+        "delivery": "auto-execute",
+        "created_at": trek_mod.utcnow_iso(),
+    }
+    try:
+        return db.append_bus_event(target_project_id, bus_data)
+    except Exception:
+        # Best-effort delivery; AC22 will observe a missing event via
+        # downstream check and re-escalate to the next candidate.
+        return None
+
+
 @app.post("/api/treks/{trek_id}/members/join")
 def join_trek_endpoint(trek_id: str, request: Request,
                        user: dict = Depends(require_auth)):
@@ -3591,28 +4491,202 @@ def join_trek_endpoint(trek_id: str, request: Request,
     """
     t = _load_trek_for_read(trek_id, user)
     caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    user_id = user.get("sub", "")
     try:
         trek_mod.accept_invitation(
-            t, user_id=user.get("sub", ""), session_id=caller_sid,
+            t, user_id=user_id, session_id=caller_sid,
         )
     except ValueError as e:
         # Not invited (no row at all) → 403, not 404. The trek exists; the
         # caller just cannot self-add.
         raise HTTPException(status_code=403, detail=str(e))
+    # ms-97 / e-2637 — welcome tick bootstrap. After a successful join, if
+    # this session has not yet received a welcome tick, fire one into its
+    # home project bus so the fresh joiner (= claim ゼロ, AC33 lazy start
+    # 不該当) gets a wake-up event that primes the kickoff ritual via
+    # /beacon-trek-execute Skill. Idempotent: ``meta.welcome_tick_fired_at``
+    # tracks per-session_id stamps so retries / re-joins do not re-fire.
+    # The stamp + the bus event write share the same save_trek transaction
+    # below so the audit trail is consistent.
+    welcome_event_id = ""
+    if caller_sid and trek_mod.should_fire_welcome_tick(
+        t, session_id=caller_sid,
+    ):
+        welcome_event_id = _fire_welcome_tick(
+            trek_doc=t, trek_id=trek_id, session_id=caller_sid,
+        )
+        if welcome_event_id:
+            trek_mod.mark_welcome_tick_fired(t, session_id=caller_sid)
     db.save_trek(trek_id, t)
-    return t
+    # ms-97 / Phase 6 (AC15) — surface the accident-time leader candidate
+    # notice on the join response so clients (= CLI / Skill / future UI) can
+    # display the pre-notice to the invitee without re-deriving the text. The
+    # member entry now carries ``meta.leader_candidate_notice_shown_at`` as
+    # the audit stamp (= trek_mod.accept_invitation does that write).
+    response = dict(t)
+    response["leader_candidate_notice"] = (
+        trek_mod.build_leader_candidate_notice(t)
+    )
+    if welcome_event_id:
+        response["_welcome_tick_event_id"] = welcome_event_id
+    return response
+
+
+def _fanout_welcome_ticks_for_pending_members(
+    *, trek_doc: dict, trek_id: str,
+    scope_project_ids: list[str],
+) -> None:
+    """ms-97 / e-2637 — Scheduler-side welcome tick safety net.
+
+    Walks ``trek_doc.members[]`` (phase A+ only) and fires a one-shot
+    welcome tick for every session whose stamp is missing
+    (= ``should_fire_welcome_tick`` True). On success, stamps
+    ``meta.welcome_tick_fired_at[session_id]``.
+
+    The join endpoint fires the welcome tick at join time as the primary
+    path. This scheduler-side sweep is the safety net that catches:
+      * Sessions that joined before this code was deployed.
+      * Sessions whose join-time fire failed (network / DB hiccup).
+      * Sessions whose welcome tick was lost in a bus replay.
+
+    The trek_doc is mutated in place; the surrounding tick loop's
+    save_trek persists the stamps alongside any other mutations made on
+    this tick.
+    """
+    members = trek_doc.get("members") or []
+    if not members:
+        return
+    # ms-97 / e-2637 — Leader session is excluded from welcome tick.
+    # The leader created the trek (= already knows about it); welcome
+    # tick is for fresh joiners who need the AC28 manual + kickoff
+    # primer. Stamping the leader implicitly here would also produce
+    # noise (= leader receives an unnecessary dm on every fresh deploy).
+    leader_sid = trek_doc.get("leader_session_id") or ""
+    for m in members:
+        msid = m.get("session_id") or ""
+        if not msid:
+            continue
+        if leader_sid and msid == leader_sid:
+            # Stamp the leader so future ticks skip immediately, but
+            # do NOT fire a dm to them.
+            trek_mod.mark_welcome_tick_fired(trek_doc, session_id=msid)
+            continue
+        if (m.get("role") or "") == "leader":
+            trek_mod.mark_welcome_tick_fired(trek_doc, session_id=msid)
+            continue
+        if not trek_mod.should_fire_welcome_tick(trek_doc, session_id=msid):
+            continue
+        event_id = _fire_welcome_tick(
+            trek_doc=trek_doc, trek_id=trek_id, session_id=msid,
+            scope_project_ids=scope_project_ids,
+        )
+        if event_id:
+            trek_mod.mark_welcome_tick_fired(trek_doc, session_id=msid)
+
+
+def _fire_welcome_tick(*, trek_doc: dict, trek_id: str,
+                       session_id: str,
+                       scope_project_ids: list[str] | None = None) -> str:
+    """ms-97 / e-2637 — Post a one-shot welcome tick to the joiner's home bus.
+
+    Resolution: walk ``trek_doc.scope`` for the first project whose
+    session registry contains ``session_id`` (= same approach as
+    ``_build_executor_targets_session_grain``). If no scope project
+    surfaces the session, fall back to ``scope[0]`` so the event is
+    still written somewhere observable (= the bridge layer's dm
+    delivery filter keys on ``recipient_session_id``, so as long as
+    the receiver is on this bus the message lands).
+
+    Returns the event_id on success, empty string on failure. Failures
+    must never break the join transaction — the welcome tick is a
+    bootstrap optimisation, not a load-bearing path.
+    """
+    if scope_project_ids is None:
+        try:
+            scope_project_ids = _resolve_trek_scope_project_ids(trek_doc)
+        except Exception:
+            scope_project_ids = []
+    if not scope_project_ids:
+        return ""
+    target_pid = ""
+    for pid in scope_project_ids:
+        try:
+            project_sessions = db.list_sessions(pid)
+        except Exception:
+            project_sessions = []
+        for s in project_sessions:
+            if (s.get("session_id") or "") == session_id:
+                target_pid = pid
+                break
+        if target_pid:
+            break
+    if not target_pid:
+        # Best-effort fallback: deliver to scope[0]. The bridge filters
+        # by recipient_session_id so cross-project posts are safe.
+        target_pid = scope_project_ids[0]
+    payload = trek_mod.build_welcome_tick_payload(
+        trek_doc, session_id=session_id,
+    )
+    try:
+        env = envelope_mod.issue_t1_system_envelope(
+            project_id=target_pid,
+            trek_id=trek_id,
+            actions_authorized=["trek.welcome"],
+            data_class="free",
+            ttl_seconds=3600,
+        )
+    except Exception:
+        env = None
+    bus_data = {
+        "channel": "dm",
+        "sender_session_id": "",
+        "recipient_session_id": session_id,
+        "payload": payload,
+        "envelope": env,
+        "delivery": "auto-execute",
+        "created_at": trek_mod.utcnow_iso(),
+    }
+    try:
+        return db.append_bus_event(target_pid, bus_data)
+    except Exception as exc:
+        print(
+            f"warn[ms-97 e-2637]: welcome tick append failed for trek "
+            f"{trek_id} session {session_id}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return ""
 
 
 @app.delete("/api/treks/{trek_id}/members/me")
-def leave_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
+def leave_trek_endpoint(trek_id: str, request: Request,
+                        user: dict = Depends(require_auth)):
     """Caller removes themselves from the trek.
 
     The leader must transfer leadership first (`POST .../transfer-leader`),
     and the last member cannot leave (= archive the trek instead).
+
+    ms-97 / e-2658 Phase 1 (AC6) — phase A+ trek (= members[] が session_id
+    keyed) で ``X-Beacon-Session`` header があれば、 該当 1 session の
+    member entry だけを削除する (= 同 user の他 session entries は残る、
+    session-grain leave)。 header 不在 / pre-A trek は従来の user-grain
+    leave (= 同 user の全 entries を削除)。
     """
-    t = _load_trek_for_read(trek_id, user)
+    t = _load_trek_for_read(trek_id, user, request)
+    user_id = user.get("sub", "")
+    caller_sid = request.headers.get("X-Beacon-Session", "") or ""
     try:
-        trek_mod.remove_member(t, user_id=user.get("sub", ""))
+        if caller_sid and trek_mod.is_session_id_keyed(t):
+            # session-grain leave (= 自分の 1 session のみ抜ける)。
+            # session 不在なら user-grain にフォールバック (= placeholder
+            # session_id 未設定 entry の挙動を保つ)。
+            target = trek_mod.find_member(t, session_id=caller_sid)
+            if target is not None:
+                trek_mod.remove_member(t, session_id=caller_sid)
+            else:
+                trek_mod.remove_member(t, user_id=user_id)
+        else:
+            trek_mod.remove_member(t, user_id=user_id)
     except ValueError as e:
         # leader-still-leader / not-a-member / last-member → 400
         raise HTTPException(status_code=400, detail=str(e))
@@ -3620,31 +4694,182 @@ def leave_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
     return t
 
 
+# ms-95 / e-2320 — structured audit log for Trek scope mutations.
+# Background: 2026-06-23 (memo doc kINfY5a9LLnxHWWhtbZJ Finding 4) a Trek
+# scope went from 3 narrow MS entries back to including a project-wide
+# entry 1-2 hours after the leader had explicitly removed it. The leader
+# could not identify who or what re-added the project-wide entry. A grep
+# of the entire codebase (lib/ / server/ / scripts/ / channel/ / skills/)
+# found ZERO automated callers of ``add_scope_entry`` other than:
+#   (1) cmd_trek_plan in lib/commands.py (= user-typed `beacon trek plan
+#       --add-scope` only)
+#   (2) this server endpoint (= the only HTTP path for scope writes)
+# Both require explicit caller action. So the re-add was either: a stale
+# CLI from another window, a manual mistake the leader forgot, or a race
+# we couldn't see without log evidence. The "封鎖" (= structural block)
+# for e-2320 is therefore observability: every scope mutation gets a
+# structured log line carrying caller user_id / session / entry so the
+# next occurrence can be traced from Cloud Logging instead of guessed at.
+# (e-2315 is the orthogonal "reject project-wide entries at the parser
+# layer" task — together they close the foot-gun.)
+
+def _log_trek_scope_audit(*, action: str, trek_id: str, user: dict,
+                          request: Request, entry: dict) -> None:
+    """Emit a structured audit line for trek scope add/remove.
+
+    Format mirrors the JSON-line shape Cloud Logging already parses from
+    other server modules. Failure to log is silently swallowed — audit is
+    observational, not load-bearing.
+    """
+    try:
+        import json as _json
+        sid = ""
+        try:
+            sid = request.headers.get("X-Beacon-Session", "") or ""
+        except Exception:
+            sid = ""
+        uid = ""
+        if isinstance(user, dict):
+            uid = user.get("sub") or user.get("email") or ""
+        record = {
+            "evt": "trek.scope.audit",
+            "action": action,  # "add" or "remove"
+            "trek_id": trek_id,
+            "user_id": uid,
+            "session_id": sid,
+            "entry": entry,
+        }
+        print(_json.dumps(record, ensure_ascii=False), flush=True)
+    except Exception:
+        pass
+
+
 @app.put("/api/treks/{trek_id}/scope")
 def add_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
+                            request: Request,
                             user: dict = Depends(require_auth)):
-    """Append a scope entry (cross-project ref). Any joined member."""
+    """Stage a scope-entry add for user approval (ms-97 / e-2626, AC23).
+
+    Pre-e-2626 this was an immediate mutation (= ``scope[]`` grew before
+    any explicit user OK). With AC23 the scope-add must mirror the
+    scope-remove approval flow (= ``pending_user_approval`` state on
+    ``trek_doc.pending_scope_ops[]``). The actual ``scope[]`` mutation
+    lands only when the user runs ``beacon trek scope-approve
+    <pending_id>`` (= POST ``/api/treks/{trek_id}/scope/approve/
+    {pending_id}``).
+
+    The legacy audit log (ms-95 / e-2320) still emits, but now with
+    ``action="add_pending"`` so the Cloud Logging filter can tell the
+    request stage (``pending``) from the apply stage
+    (``scope_add_approved``).
+
+    AC24 (= blanket pre-approval, e-2603) is layered on top in a
+    follow-up task. This endpoint stages unconditionally; the
+    auto-commit on blanket-approved categories lands separately.
+    """
     t = _load_trek_for_read(trek_id, user)
     _require_trek_joined_member(t, user)
-    entry: dict = {"project": body.project}
+    # ms-97 / e-2694 dogfood fix: expand short project names (=
+    # ``life-plan-simulator``) to canonical full ids (=
+    # ``life-plan-simulator-68c5df``) BEFORE we persist the scope entry.
+    # Without this, scope rows storing the short name silently mismatch
+    # against the registry-keyed session lookups (= ``list_sessions`` and
+    # DM fanout key off the full id), so members in those projects
+    # disappear from the fanout target list.
+    requesting_user_id = (user.get("sub") or "").strip()
+    canonical_pid = body.project
+    if requesting_user_id:
+        resolved = _resolve_canonical_project_id(
+            body.project, user_id=requesting_user_id,
+        )
+        if resolved:
+            canonical_pid = resolved
+    entry: dict = {"project": canonical_pid}
     if body.milestone:
         entry["milestone"] = body.milestone
     if body.operation:
         entry["operation"] = body.operation
     if body.task:
         entry["task"] = body.task
+    # ms-97 / e-2659 (AC7 server layer): explicit strict-mode validation
+    # so the project-wide rejection surfaces as HTTPException 400 with the
+    # user-facing message, distinct from the 409 "already present" path
+    # below. add_pending_scope_op will also run strict mode internally,
+    # this front-load is for the clean status code split.
     try:
-        trek_mod.add_scope_entry(t, entry=entry)
+        entry = trek_mod.normalize_scope_entry(entry, strict=True)
     except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # Resolve the requesting session id from the X-Beacon-Session header so
+    # the pending record carries the "who asked" attribution. Falls back to
+    # empty string when the header is absent (= same null behaviour as the
+    # audit helper, callers without a session header still get to stage).
+    sid = ""
+    try:
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    except Exception:
+        sid = ""
+    # ms-97 / Phase 7-C / AC24 — blanket pre-approval auto-commit. When the
+    # leader has registered a matching category (= e.g. "operation" or
+    # "milestone:ms-97"), bypass ``add_pending_scope_op`` and apply the
+    # add directly via ``add_scope_entry``. This is the "no DM hop" path.
+    if trek_mod.is_blanket_approved(t, entry):
+        try:
+            trek_mod.add_scope_entry(t, entry=entry)
+        except ValueError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        db.save_trek(trek_id, t)
+        _log_trek_scope_audit(
+            action="add_blanket_auto_commit", trek_id=trek_id, user=user,
+            request=request, entry=entry,
+        )
+        out = dict(t)
+        out["pending_op"] = None
+        out["auto_committed"] = True
+        out["committed_via"] = "blanket_approval"
+        return out
+    try:
+        rec = trek_mod.add_pending_scope_op(
+            t,
+            action=trek_mod.PENDING_SCOPE_ACTION_ADD,
+            entry=entry,
+            requested_by_session_id=sid,
+        )
+    except ValueError as e:
+        # Normalisation failure (= bad entry shape). 409 to match the
+        # legacy contract on the immediate path.
         raise HTTPException(status_code=409, detail=str(e))
     db.save_trek(trek_id, t)
-    return t
+    _log_trek_scope_audit(
+        action="add_pending", trek_id=trek_id, user=user,
+        request=request, entry=entry,
+    )
+    # Return the trek doc unchanged in shape, plus the pending record so
+    # callers can immediately reference the ``pending_id`` for approve /
+    # reject. Existing clients that ignored the body keep working.
+    out = dict(t)
+    out["pending_op"] = rec
+    out["auto_committed"] = False
+    return out
 
 
 @app.delete("/api/treks/{trek_id}/scope")
 def remove_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
+                               request: Request,
                                user: dict = Depends(require_auth)):
-    """Remove a scope entry. Any joined member."""
+    """Stage a scope-entry removal for user approval (ms-97 / e-2611, AC25).
+
+    Pre-e-2611 this was an immediate mutation. With AC25 the scope-remove
+    must mirror the scope-add approval flow (= ``pending_user_approval``
+    state on ``trek_doc.pending_scope_ops[]``). The actual ``scope[]``
+    mutation lands only when the user runs
+    ``beacon trek scope-approve <pending_id>`` (= POST
+    ``/api/treks/{trek_id}/scope/approve/{pending_id}``).
+
+    The legacy audit log (ms-95 / e-2320) still emits, but now with
+    ``action="remove_pending"`` so the Cloud Logging filter can tell the
+    request stage (``pending``) from the apply stage (``remove_approved``).
+    """
     t = _load_trek_for_read(trek_id, user)
     _require_trek_joined_member(t, user)
     entry: dict = {"project": body.project}
@@ -3654,12 +4879,320 @@ def remove_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
         entry["operation"] = body.operation
     if body.task:
         entry["task"] = body.task
+    # Resolve the requesting session id from the X-Beacon-Session header so
+    # the pending record carries the "who asked" attribution. Falls back to
+    # empty string when the header is absent (= same null behaviour as the
+    # audit helper, callers without a session header still get to stage).
+    sid = ""
     try:
-        trek_mod.remove_scope_entry(t, entry=entry)
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    except Exception:
+        sid = ""
+    try:
+        rec = trek_mod.add_pending_scope_op(
+            t,
+            action=trek_mod.PENDING_SCOPE_ACTION_REMOVE,
+            entry=entry,
+            requested_by_session_id=sid,
+        )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     db.save_trek(trek_id, t)
+    _log_trek_scope_audit(
+        action="remove_pending", trek_id=trek_id, user=user,
+        request=request, entry=entry,
+    )
+    # Return the trek doc unchanged in shape, plus the pending record so
+    # callers can immediately reference the ``pending_id`` for approve /
+    # reject. Existing clients that ignored the body keep working.
+    out = dict(t)
+    out["pending_op"] = rec
+    return out
+
+
+@app.post("/api/treks/{trek_id}/scope/approve/{pending_id}")
+def approve_trek_scope_op_endpoint(trek_id: str, pending_id: str,
+                                   request: Request,
+                                   user: dict = Depends(require_auth)):
+    """Approve a pending scope op (= commit add or remove).
+
+    ms-97 / e-2611 — Mirror of the scope-remove staging endpoint. Any
+    joined member of the trek may approve; the philosophy is that
+    ``pending_user_approval`` is a structural pause for an explicit
+    "yes do that" rather than a per-actor authorisation check. The same
+    ``trek.scope.audit`` log line is emitted with
+    ``action="<scope_add|remove>_approved"`` so the apply step is
+    observable in Cloud Logging alongside the original request stage.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    rec = trek_mod.find_pending_scope_op(t, pending_id=pending_id)
+    if rec is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"pending scope op not found: {pending_id}",
+        )
+    try:
+        applied_entry = trek_mod.approve_pending_scope_op(
+            t, pending_id=pending_id,
+        )
+    except ValueError as e:
+        # The drop happened before raise (see lib helper), so save the
+        # now-cleaned doc and 409 the caller. This matches the
+        # add_scope_entry / remove_scope_entry 409 contract on add.
+        db.save_trek(trek_id, t)
+        raise HTTPException(status_code=409, detail=str(e))
+    db.save_trek(trek_id, t)
+    audit_action = f"{rec.get('action', 'scope_op')}_approved"
+    _log_trek_scope_audit(
+        action=audit_action, trek_id=trek_id, user=user,
+        request=request, entry=applied_entry,
+    )
     return t
+
+
+@app.post("/api/treks/{trek_id}/scope/reject/{pending_id}")
+def reject_trek_scope_op_endpoint(trek_id: str, pending_id: str,
+                                  request: Request,
+                                  user: dict = Depends(require_auth)):
+    """Reject a pending scope op (= drop without applying).
+
+    ms-97 / e-2611 — Companion to ``approve``. Any joined member may
+    reject. Audit line carries
+    ``action="<scope_add|remove>_rejected"`` so the rejection is just as
+    traceable as approve / apply.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    rec = trek_mod.find_pending_scope_op(t, pending_id=pending_id)
+    if rec is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"pending scope op not found: {pending_id}",
+        )
+    try:
+        dropped = trek_mod.reject_pending_scope_op(
+            t, pending_id=pending_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    db.save_trek(trek_id, t)
+    audit_action = f"{dropped.get('action', 'scope_op')}_rejected"
+    _log_trek_scope_audit(
+        action=audit_action, trek_id=trek_id, user=user,
+        request=request, entry=dropped.get("entry") or {},
+    )
+    return t
+
+
+# ---------------------------------------------------------------------------
+# ms-99 / e-2830 — Trek slot schema v2 endpoints (SPEC 方針 6)
+# ---------------------------------------------------------------------------
+# Four endpoints mirror the four CLI verbs. All go through the same
+# ``pending_scope_ops`` queue so AC 15 ("all slot ops via staging")
+# holds server-side too — the actual mutation on ``scope[]`` still
+# lands via ``scope-approve``.
+#
+# Shape validation (AC 14) surfaces as HTTP 400 (bad request) for
+# malformed input distinct from HTTP 404 (slot not found) and HTTP 409
+# (duplicate scope entry). The audit log carries the new
+# ``action="slot_<verb>_pending"`` / ``"slot_<verb>_approved"`` markers
+# so Cloud Logging can filter by verb.
+
+
+@app.post("/api/treks/{trek_id}/slots")
+def add_trek_slot_endpoint(trek_id: str, body: TrekSlotAdd,
+                           request: Request,
+                           user: dict = Depends(require_auth)):
+    """Stage a slot-add pending op with a fresh ``sl-<8 hex>`` id.
+
+    ms-99 / e-2830 (SPEC 方針 6 + AC 14): shape validation runs
+    server-side so malformed calls surface HTTP 400 rather than 409
+    "already present". Successful staging returns the trek doc plus a
+    ``pending_op`` record — same envelope shape as the scope-add
+    endpoint so cross-verb clients can read the id uniformly.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    # Resolve short project names (= "life-plan-simulator") to canonical
+    # suffixed ids at the boundary, matching add_trek_scope_endpoint.
+    requesting_user_id = (user.get("sub") or "").strip()
+    canonical_pid = body.project
+    if requesting_user_id:
+        resolved = _resolve_canonical_project_id(
+            body.project, user_id=requesting_user_id,
+        )
+        if resolved:
+            canonical_pid = resolved
+    entry: dict = {"project": canonical_pid}
+    if body.milestone:
+        entry["milestone"] = body.milestone
+    if body.operation:
+        entry["operation"] = body.operation
+    if body.task:
+        entry["task"] = body.task
+    # Reject empty narrowing at 400 (= same policy as add_trek_scope but
+    # with the v2 slot verb error message). ``included_task_ids`` on a
+    # task/op slot is meaningless — refuse politely.
+    narrowing = [k for k in ("milestone", "operation", "task") if entry.get(k)]
+    if len(narrowing) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "slot add requires one narrowing key: milestone | operation "
+                "| task (= slot must narrow the project, ms-97 AC7)"
+            ),
+        )
+    if len(narrowing) > 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "slot add accepts exactly one of milestone / operation / task"
+            ),
+        )
+    if body.included_task_ids is not None:
+        if "milestone" not in entry:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "included_task_ids is only valid on milestone slots "
+                    "(SPEC 方針 2: MS slot child opt-in)"
+                ),
+            )
+        entry["included_task_ids"] = list(body.included_task_ids)
+    sid = ""
+    try:
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    except Exception:
+        sid = ""
+    try:
+        rec = trek_mod.add_pending_scope_op(
+            t,
+            action=trek_mod.PENDING_SCOPE_ACTION_ADD,
+            entry=entry,
+            requested_by_session_id=sid,
+            mint_slot=True,
+        )
+    except ValueError as e:
+        # normalize_scope_entry ValueError = shape violation → 400
+        msg = str(e)
+        if "already present" in msg or "already exists" in msg:
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+    db.save_trek(trek_id, t)
+    _log_trek_scope_audit(
+        action="slot_add_pending", trek_id=trek_id, user=user,
+        request=request, entry=entry,
+    )
+    out = dict(t)
+    out["pending_op"] = rec
+    return out
+
+
+@app.patch("/api/treks/{trek_id}/slots/{slot_id}")
+def amend_trek_slot_endpoint(trek_id: str, slot_id: str,
+                             body: TrekSlotAmend, request: Request,
+                             user: dict = Depends(require_auth)):
+    """Stage a slot-amend pending op (edit ``included_task_ids``).
+
+    ms-99 / e-2830: 404 when the slot doesn't exist, 400 when the
+    request would be a no-op (= neither add_children nor
+    remove_children given). Applying the amend materialises legacy
+    null semantics to an explicit list at approve time (SPEC AC 4).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    if not body.add_children and not body.remove_children:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "slot amend requires at least one add_children or "
+                "remove_children entry"
+            ),
+        )
+    sid = ""
+    try:
+        sid = request.headers.get("X-Beacon-Session", "") or ""
+    except Exception:
+        sid = ""
+    try:
+        rec = trek_mod.add_pending_slot_amend_op(
+            t,
+            slot_id=slot_id,
+            add_children=list(body.add_children),
+            remove_children=list(body.remove_children),
+            requested_by_session_id=sid,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if "slot not found" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+    db.save_trek(trek_id, t)
+    _log_trek_scope_audit(
+        action="slot_amend_pending", trek_id=trek_id, user=user,
+        request=request, entry={"slot_id": slot_id,
+                                "add": rec.get("add_children") or [],
+                                "remove": rec.get("remove_children") or []},
+    )
+    out = dict(t)
+    out["pending_op"] = rec
+    return out
+
+
+@app.post("/api/treks/{trek_id}/slots/{slot_id}/claim")
+def claim_trek_slot_endpoint(trek_id: str, slot_id: str,
+                             body: TrekSlotClaim, request: Request,
+                             user: dict = Depends(require_auth)):
+    """Stage a slot-claim pending op (stamp ``claim_session_id``).
+
+    ms-99 / e-2830 (SPEC 方針 4): claim never changes task state.
+    ``session_id=""`` is the unclaim gesture — it clears the fields
+    when approved. 404 when the slot doesn't exist.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_joined_member(t, user)
+    requested_by = ""
+    try:
+        requested_by = request.headers.get("X-Beacon-Session", "") or ""
+    except Exception:
+        requested_by = ""
+    try:
+        rec = trek_mod.add_pending_slot_claim_op(
+            t,
+            slot_id=slot_id,
+            session_id=body.session_id or "",
+            requested_by_session_id=requested_by,
+        )
+    except ValueError as e:
+        msg = str(e)
+        if "slot not found" in msg:
+            raise HTTPException(status_code=404, detail=msg)
+        raise HTTPException(status_code=400, detail=msg)
+    db.save_trek(trek_id, t)
+    verb = "unclaim" if not body.session_id else "claim"
+    _log_trek_scope_audit(
+        action=f"slot_{verb}_pending", trek_id=trek_id, user=user,
+        request=request, entry={"slot_id": slot_id,
+                                "session_id": body.session_id or ""},
+    )
+    out = dict(t)
+    out["pending_op"] = rec
+    return out
+
+
+@app.get("/api/treks/{trek_id}/slots")
+def list_trek_slots_endpoint(trek_id: str,
+                             user: dict = Depends(require_auth)):
+    """Return the materialize slot view of the trek (Phase 1 projection).
+
+    ms-99 / e-2830: any authed viewer can list; membership isn't
+    required for read since ``GET /api/treks/{id}`` (the parent trek
+    doc) already permits the same audience.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    rows = trek_mod.materialize_slot_view(t)
+    return {"trek_id": trek_id, "slots": rows}
 
 
 @app.put("/api/treks/{trek_id}/halt")
@@ -3694,6 +5227,70 @@ def clear_trek_halt_endpoint(trek_id: str, user: dict = Depends(require_auth)):
     _require_trek_joined_member(t, user)
     trek_mod.clear_halt(t)
     db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/summary-sent")
+def trek_summary_sent_endpoint(
+    trek_id: str, request: Request,
+    user: dict = Depends(require_auth),
+):
+    """Stamp ``meta.summary_sent_at`` after the leader sent the user
+    summary DM (ms-97 / Phase 7-A / AC21).
+
+    Leader-only via ``_require_trek_leader_session`` (= role + session_id
+    grain on phase A+ trek、 pre-A invariance preserved)。 stamp 後は
+    leader-digest tick が停止条件に入る (= completion_notified_at と
+    summary_sent_at の両方 stamp で leader-digest fire を skip する、
+    AC21)。
+
+    Idempotent: re-calling stamps the latest timestamp but the leader-tick
+    stop condition only cares about "non-null". Returns the updated trek
+    doc so callers can echo ``meta.summary_sent_at`` back to the user.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_leader_session(t, user, request)
+    meta = t.setdefault("meta", {})
+    meta["summary_sent_at"] = trek_mod.utcnow_iso()
+    t["updated_at"] = trek_mod.utcnow_iso()
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/migrate-members-session-keyed")
+def migrate_trek_members_session_keyed_endpoint(
+    trek_id: str,
+    request: Request,
+    dry_run: bool = False,
+    user: dict = Depends(require_auth),
+):
+    """Migrate trek.members[] from user_id keyed to session_id keyed (ms-97 / e-2658 AC6).
+
+    Leader-only via ``_require_trek_leader_session``. Applies the pure
+    mutator ``trek_mod.migrate_members_to_session_keyed`` and persists
+    via ``db.save_trek``. Live Firestore trek (= tk-XXXXXXXX) を CLI から
+    cloud-mode で書き換えるための endpoint。 local-mode は CLI 側で別経路
+    (= scripts/migrate_members_session_keyed.py local fallback)。
+
+    Idempotency:
+        Returns 409 if the trek is already past pre-A phase (= refuse
+        double migration to keep the inverse rollback unambiguous).
+
+    Args:
+        dry_run: ``?dry_run=true`` で migrate 後の trek_doc を返すが
+            ``db.save_trek`` は呼ばない (= 事前確認用)。
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_leader_session(t, user, request)
+    try:
+        trek_mod.migrate_members_to_session_keyed(t)
+    except ValueError as exc:
+        # Double-migration refusal (= already at phase A/B/C) returns 409
+        # Conflict so the CLI / operator can distinguish "already done"
+        # from a 4xx validation error.
+        raise HTTPException(status_code=409, detail=str(exc))
+    if not dry_run:
+        db.save_trek(trek_id, t)
     return t
 
 
@@ -3757,7 +5354,7 @@ def take_over_trek_endpoint(trek_id: str, body: TrekTakeOver,
     # if a future refactor splits role from joined_at.
     if _auth_enabled:
         uid = user.get("sub") or ""
-        member = trek_mod.find_member(t, uid)
+        member = trek_mod.find_member(t, user_id=uid)
         if not member or not member.get("joined_at"):
             raise HTTPException(
                 status_code=403,
@@ -3774,6 +5371,104 @@ def take_over_trek_endpoint(trek_id: str, body: TrekTakeOver,
     trek_mod.reset_kickoff_pending(
         t, session_id=body.session_id, user_id=uid_for_reset,
     )
+    db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/succession-consent")
+def trek_succession_consent_endpoint(
+    trek_id: str,
+    body: TrekSuccessionConsent,
+    request: Request,
+    user: dict = Depends(require_auth),
+):
+    """AC22 1 hop consent endpoint — candidate accepts / declines leadership.
+
+    ms-97 / Phase 7-B / e-2684. Called by the candidate session that
+    received a ``trek-leader-succession-consent`` DM. Strict caller gate:
+
+      * Caller session_id (= ``X-Beacon-Session`` header) MUST equal
+        ``meta.succession_pending_candidate`` (= the session the
+        orchestrator nominated this cycle). Any other session is 403.
+      * ``decision`` must be ``"accept"`` or ``"decline"``.
+
+    On accept:
+      * ``leader_session_id`` を caller_sid に transfer (= ``transfer_leader``)
+      * ``session_history`` に role_at_join="leader" を upsert
+      * ``meta.succession_pending_*`` / ``succession_declined`` /
+        ``succession_escalated_at`` を全てクリア (= clear_succession_state)
+      * caller の ``kickoff_status`` を pending=True に reset (= 新 leader
+        は peer に再度 plan を宣言する義務、 ms-88 / e-2138 互換)
+
+    On decline:
+      * ``meta.succession_declined`` に caller_sid を追加 (= 次 tick で
+        別 candidate を選ぶ)
+      * ``meta.succession_pending_*`` をクリア
+      * leader 役はそのまま (= 引き続き不応のままなら次 tick で再 nominate)
+    """
+    t = _load_trek_for_read(trek_id, user, request)
+    decision = (body.decision or "").strip().lower()
+    if decision not in ("accept", "decline"):
+        raise HTTPException(
+            status_code=400,
+            detail="decision must be 'accept' or 'decline'",
+        )
+    caller_sid = ""
+    if request is not None:
+        caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    if not caller_sid:
+        raise HTTPException(
+            status_code=400,
+            detail="X-Beacon-Session header required for succession consent",
+        )
+    meta = t.get("meta") or {}
+    pending_sid = (
+        meta.get(trek_mod.SUCCESSION_PENDING_CANDIDATE_META_KEY) or ""
+    )
+    if not pending_sid:
+        raise HTTPException(
+            status_code=400,
+            detail="no succession candidate pending for this trek",
+        )
+    if caller_sid != pending_sid:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "only the pending succession candidate can respond "
+                f"(caller={caller_sid[:8]}.., pending={pending_sid[:8]}..)"
+            ),
+        )
+    member = trek_mod.find_member(t, session_id=caller_sid)
+    if member is None:
+        raise HTTPException(
+            status_code=403,
+            detail="caller is not a member of this trek",
+        )
+    if decision == "accept":
+        try:
+            trek_mod.transfer_leader(t, target_session_id=caller_sid)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # Promote member role + record session_history at role_at_join=leader.
+        member["role"] = "leader"
+        trek_mod.upsert_session_history(
+            t,
+            session_id=caller_sid,
+            user_id=member.get("user_id") or "",
+            email=member.get("email") or "",
+            role_at_join="leader",
+        )
+        # Fresh leader session must re-kickoff (= announce plan to peers).
+        trek_mod.reset_kickoff_pending(
+            t,
+            session_id=caller_sid,
+            user_id=member.get("user_id") or "",
+        )
+        trek_mod.clear_succession_state(t)
+        db.save_trek(trek_id, t)
+        return t
+    # Decline path
+    trek_mod.record_succession_decline(t, caller_sid)
     db.save_trek(trek_id, t)
     return t
 
@@ -3798,9 +5493,10 @@ def trek_kickoff_endpoint(trek_id: str, body: TrekKickoff,
     echo "stamped" back to the user.
     """
     t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
     if _auth_enabled:
         uid = user.get("sub") or ""
-        if not trek_mod.find_member(t, uid):
+        if not trek_mod.find_member(t, user_id=uid):
             raise HTTPException(
                 status_code=403,
                 detail="only trek members can mark kickoff completed",
@@ -3828,12 +5524,111 @@ def trek_kickoff_status_endpoint(trek_id: str,
     t = _load_trek_for_read(trek_id, user)
     if _auth_enabled:
         uid = user.get("sub") or ""
-        if not trek_mod.find_member(t, uid):
+        if not trek_mod.find_member(t, user_id=uid):
             raise HTTPException(
                 status_code=403,
                 detail="only trek members can read kickoff status",
             )
     return trek_mod.summarize_kickoff_status(t)
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / Phase 7-C / AC24, e-2603 — blanket scope approval endpoints.
+# Leader-only. The category string is validated by trek_mod helpers.
+# ---------------------------------------------------------------------------
+
+@app.post("/api/treks/{trek_id}/blanket-approve")
+def trek_blanket_approve_endpoint(trek_id: str, body: TrekBlanketCategory,
+                                  request: Request,
+                                  user: dict = Depends(require_auth)):
+    """Register ``category`` as a blanket pre-approval (AC24).
+
+    Subsequent scope-add requests whose entry matches the category will
+    auto-commit (= bypass pending stage). Leader-only.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_leader_session(t, user, request)
+    try:
+        trek_mod.add_blanket_approval(t, body.category)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return {
+        "trek_id": trek_id,
+        "blanket_scope_approvals": trek_mod.list_blanket_approvals(t),
+    }
+
+
+@app.post("/api/treks/{trek_id}/blanket-revoke")
+def trek_blanket_revoke_endpoint(trek_id: str, body: TrekBlanketCategory,
+                                 request: Request,
+                                 user: dict = Depends(require_auth)):
+    """Remove ``category`` from blanket pre-approvals (AC24). Leader-only."""
+    t = _load_trek_for_read(trek_id, user)
+    _require_trek_leader_session(t, user, request)
+    try:
+        trek_mod.remove_blanket_approval(t, body.category)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return {
+        "trek_id": trek_id,
+        "blanket_scope_approvals": trek_mod.list_blanket_approvals(t),
+    }
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / Phase 7-C / AC26 + AC27, e-2603 — structured logs read API.
+# Write paths live next to the relevant endpoints (= tick, pulse-ack,
+# task-state) and call ``db.append_trek_log`` directly.
+# ---------------------------------------------------------------------------
+
+def _append_trek_log_safe(trek_id: str, entry: dict) -> None:
+    """Append a trek log entry, swallowing any backend error.
+
+    Logs are observability, not a transactional concern — a failure to
+    persist the log row must never break the original write (= tick /
+    pulse-ack / task-state). Errors are printed to stderr for visibility.
+    """
+    try:
+        db.append_trek_log(trek_id, entry)
+    except Exception as exc:
+        print(
+            f"warn[ms-97 e-2603]: append_trek_log failed for trek "
+            f"{trek_id}: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+
+
+@app.get("/api/treks/{trek_id}/logs.jsonl")
+def trek_logs_jsonl_endpoint(trek_id: str, request: Request,
+                             since: str = "",
+                             user: dict = Depends(require_auth)):
+    """Stream the trek's structured logs as NDJSON (AC27).
+
+    One JSON object per line, ascending by ``created_at``. RBAC: any
+    joined member (= same surface as ``_load_trek_for_read``). Optional
+    ``?since=<ISO8601>`` filters older rows so callers can resume.
+    """
+    t = _load_trek_for_read(trek_id, user, request)
+    # Cap at a generous limit to keep streaming bounded; clients that
+    # need everything can page via ``since``.
+    rows = db.list_trek_logs(trek_id, limit=10000, since=since or "")
+    # FastAPI StreamingResponse with NDJSON content type.
+    from fastapi.responses import StreamingResponse
+    import json as _json
+
+    def _generator():
+        for row in rows:
+            try:
+                yield _json.dumps(row, ensure_ascii=False) + "\n"
+            except Exception:
+                # Skip un-serialisable rows defensively (= one bad row
+                # must not break the stream).
+                continue
+    # Make sure auth side-effects on ``t`` aren't accidentally serialised.
+    del t  # noqa: F841
+    return StreamingResponse(_generator(), media_type="application/x-ndjson")
 
 
 @app.post("/api/treks/{trek_id}/pulse-ack")
@@ -3856,9 +5651,10 @@ def trek_pulse_ack_endpoint(trek_id: str, body: TrekPulseAck,
     Skill can echo the recorded state back to the user.
     """
     t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
     if _auth_enabled:
         uid = user.get("sub") or ""
-        if not trek_mod.find_member(t, uid):
+        if not trek_mod.find_member(t, user_id=uid):
             raise HTTPException(
                 status_code=403,
                 detail="only trek members can pulse-ack",
@@ -3899,7 +5695,69 @@ def trek_pulse_ack_endpoint(trek_id: str, body: TrekPulseAck,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     db.save_trek(trek_id, t)
+    # ms-97 / Phase 7-C / AC26 — pulse-ack log row. The Skill marker
+    # (= record_pulse_ack already mutated the trek doc); the log row
+    # is the durable observability artefact.
+    _append_trek_log_safe(trek_id, {
+        "kind": "pulse-ack",
+        "session_id": body.session_id,
+        "payload": {
+            "picked_choice": body.picked_choice or "",
+            "note": (body.note or "")[:500],
+            "state_summary": (body.state_summary or "")[:500],
+            "blockers": list(body.blockers or [])[:20],
+            "needs_leader_judgment": bool(body.needs_leader_judgment),
+            "time_on_task_seconds": int(body.time_on_task_seconds or 0),
+        },
+        "created_at": trek_mod.utcnow_iso(),
+    })
     return (t.get("pulse_acks") or {}).get(body.session_id) or {}
+
+
+@app.post("/api/treks/{trek_id}/extend-ttl")
+def extend_trek_task_ttl_endpoint(trek_id: str, body: TrekExtendTtl,
+                                  user: dict = Depends(require_auth)):
+    """Postpone the TTL safety net deadline on a single task (ms-95 / e-2308).
+
+    Leader-side primitive for the Agent-tool subagent dispatch path.
+    When ``/beacon-dispatch`` launches a subagent that cannot stamp
+    ``last_activity_at`` itself (= different ``session_id``, not joined
+    to the trek), the leader calls this endpoint to push the auto-stall
+    deadline forward by ``minutes`` so the TTL check skips the task
+    while delegation is in progress. ``minutes=0`` (or negative) clears
+    the extension and lets normal TTL semantics resume.
+
+    Auth: caller must be a trek member. Leader-only is **not** enforced
+    so that any joined member can call this on their own behalf (= a
+    fork session dispatching a sub-agent for its task without leader
+    handoff still has access). Server-side write goes through
+    ``trek_mod.extend_task_ttl`` which validates the integer cast.
+
+    Returns the updated ``task_states[task_id]`` entry so the caller
+    can echo the new ``ttl_extended_until`` back to the user.
+    """
+    t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
+    if _auth_enabled:
+        uid = user.get("sub") or ""
+        if not trek_mod.find_member(t, user_id=uid):
+            raise HTTPException(
+                status_code=403,
+                detail="only trek members can extend task TTL",
+            )
+    if not body.task_id:
+        raise HTTPException(status_code=400, detail="task_id required")
+    try:
+        trek_mod.extend_task_ttl(
+            t,
+            task_id=body.task_id,
+            minutes=body.minutes,
+            reason=body.reason or "",
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_trek(trek_id, t)
+    return (t.get("task_states") or {}).get(body.task_id) or {}
 
 
 @app.get("/api/treks/{trek_id}/pulse-acks")
@@ -3914,7 +5772,7 @@ def list_trek_pulse_acks_endpoint(trek_id: str,
     t = _load_trek_for_read(trek_id, user)
     if _auth_enabled:
         uid = user.get("sub") or ""
-        if not trek_mod.find_member(t, uid):
+        if not trek_mod.find_member(t, user_id=uid):
             raise HTTPException(
                 status_code=403,
                 detail="only trek members can read pulse-ack stats",
@@ -3945,10 +5803,15 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     grain). Leader-only is not required — any member session can stamp
     on behalf of the work they performed.
     """
-    t = _load_trek_for_read(trek_id, user)
-    # Member check
+    t = _load_trek_for_read(trek_id, user, request)
+    _reject_if_trek_archived(t)
+    # Member check. Determine the calling session_id (best-effort —
+    # bridges include X-Beacon-Session header; CLI/curl callers may
+    # omit it). ms-97 / e-2658 Phase 1 (AC6) — phase A+ trek の時は
+    # session_id grain で member check、 pre-A は user_id grain。
     user_id = user.get("sub") or ""
-    if not trek_mod.find_member(t, user_id):
+    caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    if not _trek_find_member_dual(t, user_id=user_id, session_id=caller_sid):
         raise HTTPException(
             status_code=403,
             detail="only trek members can stamp task state",
@@ -3959,9 +5822,45 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
         trek_mod.validate_task_state(body.state)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    # Determine the calling session_id (best-effort — bridges include
-    # X-Beacon-Session header; CLI/curl callers may omit it).
-    caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    # ms-97 P5 (= review finding Trek-H3): leader-review gate. The state
+    # machine (CORE doc 5nfTSmCDVUzD4SLzIhI5) assigns transitions ORIGINATING
+    # from a review-terminal state to a specific role: ``leader_review → *``
+    # is the Leader's forced 3-choice review, ``user_review → *`` is the
+    # User's call. Without a role gate here, an executor could self-approve
+    # its own task (``leader_review → done``) — bypassing the leader review
+    # entirely. Require the stamped leader session for those origins.
+    # Executor origins (``working → *``) stay open so a member can still
+    # stamp the work it actually performed; ``todo``/``done`` re-open paths
+    # are likewise unrestricted (not a self-approval vector).
+    from_state = trek_mod.get_task_state(t, body.task_id)
+    if from_state in ("leader_review", "user_review"):
+        _require_trek_leader_session(t, user, request)
+    # ms-97 / e-2650 — phantom done 構造防御。 Trek slot を done に flip
+    # する前に、 真値源である project pool の task status が done である
+    # ことを必須条件として check する (= 「view 側だけ done になる経路」 を
+    # server で構造的に reject)。 状態が done 以外なら check skip (= todo
+    # / working / *_review への遷移は従来通り 5-state machine だけで判定、
+    # done だけが evidence-backed terminal なので明示防御の対象)。
+    # 旧コード (= 2026-06-28 以前) ではこの check が無く、 e-710 のような
+    # 「commit ゼロで Trek slot だけ done」 が成立していた。 ms-97 SPEC
+    # AC10 / AC30 補強の構造実装、 詳細は lib/trek.py
+    # ``check_slot_done_precondition`` の docstring を参照。
+    if body.state == "done":
+        allowed, reason_code, message = trek_mod.check_slot_done_precondition(
+            t,
+            task_id=body.task_id,
+            get_project=db.get_project,
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": reason_code,
+                    "message": message,
+                    "trek_id": trek_id,
+                    "task_id": body.task_id,
+                },
+            )
     try:
         trek_mod.set_task_state(
             t,
@@ -3972,6 +5871,17 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # ms-99 / e-2834 — clear quiesce marks when a state transitions OUT
+    # of terminal. This lets the next quiesce lifecycle fire a fresh DM
+    # (= AC "per-quiesce 1 回だけ" is per lifecycle, not per lifetime).
+    # The mark stamping happens in the scheduler tick's quiesce branch;
+    # here we only reset when a resume-like transition lands.
+    if body.state not in trek_mod.TERMINAL_TASK_STATES:
+        meta_after = t.setdefault("meta", {})
+        if meta_after.get("quiesced_at"):
+            meta_after["quiesced_at"] = None
+            meta_after["quiesce_notified_at"] = None
+            meta_after["quiesce_reason"] = None
     db.save_trek(trek_id, t)
     # If the new state is terminal, fan out a review-required notice to
     # the leader. The leader's review Skill (/beacon-trek-review)
@@ -3979,10 +5889,34 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     # project (= first scope entry's project) as the bus event target,
     # and address it to the current leader_session_id so only the
     # responsible session sees it (= no project-wide broadcast).
-    if body.state in trek_mod.TERMINAL_TASK_STATES:
+    # ms-97 / e-2706 (AC1) — review notify trigger 拡張。
+    # 旧コードは `TERMINAL_TASK_STATES` (= done / user_review) のみで判定し、
+    # `leader_review` 遷移時に trek-task-review event が永久に発火しない構造
+    # bug を持っていた (= ms-88 e-2107 で waiting-review → leader_review に
+    # 5-state 移行した際の check 条件 drift)。 REVIEW_TRIGGER_STATES (= done /
+    # user_review / leader_review) に置き換えて leader への review 通知を
+    # 正常化する。 outcome log row は元来 terminal 状態にのみ書く design なので
+    # 同じ trigger 集合に乗せる (= leader_review も「leader 判断要請」 という
+    # 意味で 1 つの outcome event として記録に値する)。
+    if body.state in trek_mod.REVIEW_TRIGGER_STATES:
+        # ms-97 / Phase 7-C / AC26 — outcome log row at review-trigger state.
+        # Recorded BEFORE the DM fanout so the log row exists even if
+        # leader notification fails (= durable audit trail).
+        _append_trek_log_safe(trek_id, {
+            "kind": "outcome",
+            "session_id": caller_sid,
+            "payload": {
+                "task_id": body.task_id,
+                "state": body.state,
+                "note": (body.note or "")[:500],
+            },
+            "created_at": trek_mod.utcnow_iso(),
+        })
         leader_sid = t.get("leader_session_id") or ""
         scope = t.get("scope") or []
-        target_pid = scope[0].get("project") if scope else ""
+        # ms-97 P4 — resolve the leader's home project so a cross-project
+        # leader receives the trek-task-review request (was scope[0] only).
+        target_pid = _resolve_leader_home_project_id(t)
         # ms-88 / e-2168 — self-loop suppress: leader が自分で stamp した
         # transition では、 leader 宛 review event を mint しない。 「自分が判断
         # したものを自分にもう一度 review 依頼する」 ループによる envelope mint +
@@ -4057,6 +5991,7 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
 def add_trek_task_endpoint(
     trek_id: str,
     body: TrekTaskAddRequest,
+    request: Request,
     user: dict = Depends(require_auth),
 ):
     """Cross-project task add through Trek scope (ms-92 / e-2141).
@@ -4081,8 +6016,9 @@ def add_trek_task_endpoint(
         enforcement; task-level scope entries don't sprout sideways)
     """
     t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
     user_id = user.get("sub") or ""
-    if _auth_enabled and not trek_mod.find_member(t, user_id):
+    if _auth_enabled and not trek_mod.find_member(t, user_id=user_id):
         raise HTTPException(
             status_code=403,
             detail="only trek members can add tasks through trek scope",
@@ -4102,9 +6038,106 @@ def add_trek_task_endpoint(
                 "targets — see SPEC ms-92 e-2141 AC #4 MS-grain enforcement)"
             ),
         )
+    # ms-95 / Trek task-add slug ↔ full project_id resolution.
+    # Two storage forms can appear in trek scope: full id (= canonical,
+    # what apply_operation needs) or slug (= what users type at
+    # ``beacon trek plan --add-scope <slug>:<ms>``). Canonicalise both
+    # the request side and an in-memory copy of the scope so the scope
+    # match runs on equal footing and the downstream apply_op call
+    # always receives a real project_id. Without this the bug from PE
+    # + LPS dogfood reports manifests as:
+    #   * slug stored + slug request → scope match ok, then 500
+    #     (LookupError from apply_operation seeing an unknown id)
+    #   * slug stored + full id request → 403 project_not_in_scope
+    #     (literal string equality miss)
+    requesting_user_id = user.get("sub") or ""
+    resolved_target_project = _resolve_canonical_project_id(
+        body.target_project, user_id=requesting_user_id,
+    )
+    if resolved_target_project is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"target_project {body.target_project!r} not found or "
+                "ambiguous (no exact full project_id match and no unique "
+                "slug expansion). Pass the full project_id (e.g. "
+                "'<slug>-<hex6>') if multiple projects share the slug."
+            ),
+        )
+    # Build a scope-copy where each entry's ``project`` field is
+    # canonicalised. Unresolvable entries (= stale slug for a deleted
+    # project, or a slug shared by multiple of the caller's projects)
+    # are kept as-is so they cleanly fail the scope match instead of
+    # crashing the endpoint.
+    canonical_scope: list[dict] = []
+    for s in t.get("scope") or []:
+        original = s.get("project") or ""
+        resolved = (
+            _resolve_canonical_project_id(original, user_id=requesting_user_id)
+            or original
+        )
+        canonical_scope.append({**s, "project": resolved})
+    canonical_t = {**t, "scope": canonical_scope}
+    # ms-97 Phase 4 / AC14 — executor の home project check.
+    #
+    # Trek scope を介した slot 起票は、 caller (= executor) が「自分の
+    # home project に slot を生やす」 経路に限定する。 すなわち caller
+    # の live session_id が登録されている scope project = 起票先 project
+    # でなければならない。 違反例 (= executor A が executor B の project に
+    # slot を生やす) は executor 間で意図しない作業押し付けを生むので、
+    # server side で物理的に塞ぐ (= プロンプト notice ではなく code 制約)。
+    #
+    # 適用範囲: phase A+ trek のみ (= is_session_id_keyed True)。
+    # Pre-A trek は session_id を持たない時代の trek なので、 caller
+    # session_id を home に逆引きする手立てが無い → legacy 振る舞い継続
+    # (= scope guard だけが authorisation の砦)。
+    #
+    # X-Beacon-Session header が空の caller (= CLI smoke / 古い client)
+    # は home check を skip。 header は opt-in、 hard-require には
+    # しない (= AC13 の helper と同じ stance)。
+    #
+    # leader (= role == "leader") は home check 免除。 leader は全
+    # scope projects に対して slot 起票する authority を持つ (=
+    # cross-project authority は leader / scope policy 側で行使)。
+    if _auth_enabled and trek_mod.is_session_id_keyed(canonical_t):
+        caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+        if caller_sid:
+            caller_role = _trek_member_role(
+                canonical_t, user_id=user_id, session_id=caller_sid,
+            )
+            if caller_role != "leader":
+                scope_project_ids: list[str] = []
+                for s in canonical_scope:
+                    pid = s.get("project") or ""
+                    if pid and pid not in scope_project_ids:
+                        scope_project_ids.append(pid)
+                home_pid = trek_mod.resolve_session_home_project(
+                    caller_sid,
+                    scope_project_ids,
+                    db.list_sessions,
+                )
+                if not home_pid:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=(
+                            "executor session is not registered in any "
+                            "scope project; cannot resolve home project "
+                            "for slot 起票 (AC14)"
+                        ),
+                    )
+                if home_pid != resolved_target_project:
+                    raise HTTPException(
+                        status_code=403,
+                        detail=(
+                            f"executor can only add a slot in their home "
+                            f"project (home={home_pid}, "
+                            f"target={resolved_target_project}); leader "
+                            "must originate cross-project slots (AC14)"
+                        ),
+                    )
     allowed, reason = trek_mod.check_trek_task_add_allowed(
-        t,
-        target_project=body.target_project,
+        canonical_t,
+        target_project=resolved_target_project,
         target_milestone=body.target_milestone,
     )
     if not allowed:
@@ -4145,12 +6178,12 @@ def add_trek_task_endpoint(
             meta["origin"] = "trek.task_add"
         return data, {
             "entry_id": eid,
-            "project_id": body.target_project,
+            "project_id": resolved_target_project,
             "milestone_id": body.target_milestone,
             "trek_id": trek_id,
         }
     return _apply_op_and_broadcast(
-        body.target_project,
+        resolved_target_project,
         op,
         op_name="entry.create.trek_scope",
         actor=user.get("sub", ""),
@@ -4175,7 +6208,7 @@ def reconcile_trek_endpoint(trek_id: str, body: TrekReconcileRequest,
     """
     t = _load_trek_for_read(trek_id, user)
     user_id = user.get("sub") or ""
-    if not trek_mod.find_member(t, user_id):
+    if not trek_mod.find_member(t, user_id=user_id):
         raise HTTPException(
             status_code=403,
             detail="only trek members can reconcile task state",
@@ -4517,6 +6550,106 @@ def list_trek_tasks_endpoint(trek_id: str,
     return out
 
 
+# ---------------------------------------------------------------------------
+# ms-95 / e-2640 — Trek scope-entries endpoint (= MS detail body hydration
+# for the Trek detail view). The Trek detail UI used to call
+# ``GET /api/projects/{state.projectId}/milestones/{ms_id}/entries`` from
+# ``fetchMilestoneEntries``, which embeds the *currently selected project*
+# in the URL. For cross-project Treks the MS lives in a different project
+# than the user's current cwd / selected project, so the call resolves to
+# the wrong project, returns 404, and the UI renders the MS card as
+# "milestone not loaded".
+#
+# This endpoint mirrors the ``/milestones`` / ``/tasks`` aggregate pattern
+# but ships the full ``entries[]`` body for every in-scope MS (= where the
+# scope entry has a ``milestone`` narrowing key OR the scope is
+# project-wide). Entries are serialized via ``core.entries_to_json`` so the
+# shape matches the legacy per-project endpoint exactly (= client side
+# patch minimal, ``state.milestoneEntries[msId] = entries`` works
+# unchanged).
+#
+# Authorization: ``_load_trek_for_read`` (= creator-or-member RBAC, mirrors
+# every other ``/api/treks/{id}/*`` endpoint).
+# ---------------------------------------------------------------------------
+
+@app.get("/api/treks/{trek_id}/scope-entries")
+def list_trek_scope_entries_endpoint(
+    trek_id: str,
+    user: dict = Depends(require_auth),
+):
+    """Return ``entries[]`` for every MS in this Trek's scope, cross-project.
+
+    Response shape (= one list keyed off the Trek, dedup'd across projects)::
+
+        {
+          "trek_id": "tk-xxx",
+          "milestones": [
+            {
+              "project_id": "lps-abcdef",
+              "milestone_id": "ms-22",
+              "milestone_title": "...",
+              "entries": [ ...entries_to_json shape... ]
+            },
+            ...
+          ]
+        }
+
+    The ``entries[]`` shape exactly mirrors
+    ``GET /api/projects/{pid}/milestones/{ms_id}/entries`` so the Web UI
+    can stuff the result straight into ``state.milestoneEntries[msId]``
+    without any per-entry rewriting (= ms-95 / e-2640 AC3).
+
+    Scope semantics (= same rule as ``/api/treks/{id}/milestones`` walker
+    above — see ``_scope_contributes``):
+
+      * project-wide entry (= no narrowing key) → every MS in the
+        project contributes its entries
+      * ``{"project": pid, "milestone": ms_id}`` → just that MS's entries
+
+    Operation- or task-only scope entries do not contribute MS entries
+    (= mirrors ``/milestones`` which returns ``[]`` in those cases).
+
+    Stale scope entries pointing at projects the caller cannot read are
+    silently skipped (= identical to ``/documents`` / ``/milestones``).
+    """
+    t = _load_trek_for_read(trek_id, user)
+    by_project = _trek_scope_by_project(t)
+    out_ms: list = []
+    seen: set[tuple[str, str]] = set()
+    for pid, entries in by_project.items():
+        try:
+            project = _load(pid, user)
+        except Exception:
+            # Stale scope entry pointing at a project the caller cannot
+            # read; skip silently so a single bad ref doesn't break the
+            # whole listing (= same regime as /documents / /milestones).
+            continue
+        include_all, narrow_ids = _scope_contributes(entries, kind="milestone")
+        if not include_all and not narrow_ids:
+            # Project only contributes via operation / task narrowing;
+            # the MS aggregate has nothing to ship here.
+            continue
+        for ms in project.get("milestones", []) or []:
+            ms_id = ms.get("id") or ""
+            if not include_all and ms_id not in narrow_ids:
+                continue
+            key = (pid, ms_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            raw_entries = ms.get("entries", []) or []
+            out_ms.append({
+                "project_id": pid,
+                "milestone_id": ms_id,
+                "milestone_title": ms.get("title", ""),
+                "entries": core.entries_to_json(raw_entries),
+            })
+    return {
+        "trek_id": t.get("trek_id") or trek_id,
+        "milestones": out_ms,
+    }
+
+
 @app.get("/api/treks/{trek_id}/summary")
 def trek_summary_endpoint(trek_id: str, user: dict = Depends(require_auth)):
     """Compact status snapshot for dashboards / Web UI Treks tab.
@@ -4612,6 +6745,17 @@ def upsert_session(
     _load(project_id, user)
     payload = {k: v for k, v in body.model_dump().items() if v is not None}
     email = user.get("email", "")
+    uid = user.get("sub", "")
+
+    # ms-95: stamp the authenticated user_id (= JWT ``sub``) on the session
+    # row so ``_apply_dm_payload_visibility`` can resolve sid→uid without a
+    # separate roundtrip. Bridge clients do not (and must not) supply their
+    # own user_id — the auth token is the only authority. Without this
+    # stamp, ``sid_to_uid[recipient_sid] = ""`` and the visibility gate
+    # redacts DM payloads even for the intended recipient (observed 2026-07-06
+    # with Iruka / Windows bridge v0.54.0, DM event Y9kG6O6C2Qz5bp2gQ7cN).
+    if uid:
+        payload["user_id"] = uid
 
     # Mint path: body carried actor. Stamp email in-line so the single
     # db.upsert_session write below lands the complete view atomically.
@@ -5044,23 +7188,45 @@ async def post_bus_event(
     gate_lookup = dm_gate_mod.build_shared_trek_lookup_from_lists(
         # Sender-side trek visibility is sufficient — Trek membership
         # query is symmetric (creator OR members) on either backend.
+        # ms-97 / e-2659 Phase 3 (G4): the lookup is invoked fresh per
+        # bus event — no list reuse — so a member removed between
+        # events stops granting bypass on the next invocation.
         lambda uid: db.list_treks(actor_id=uid) if uid else [],
     )
+    # ms-97 / e-2659 Phase 3 (AC18): pass session ids so phase A+ treks
+    # are evaluated session-grain. Recipient sid is resolved from the
+    # payload (= same shape used by ``_resolve_bus_event_user_ids``).
+    recipient_sid_for_gate = ""
+    if isinstance(body.payload, dict):
+        recipient_sid_for_gate = str(
+            body.payload.get("recipient_session_id") or ""
+        )
     # ms-83 / e-1995: pass tier+issuer so the gate can recognise
     # T1-system server-mint envelopes as T1-equivalent (= bypass).
-    should_gate, gate_reason = dm_gate_mod.should_gate_dm_action(
+    should_gate, gate_reason, gate_trek_id = dm_gate_mod.should_gate_dm_action(
         sender_user_id=sender_uid,
         receiver_user_id=receiver_uid,
         actions_authorized=env_actions,
         shared_trek_lookup=gate_lookup,
         envelope_tier=env_tier,
         envelope_issuer=env_issuer,
+        sender_session_id=body.sender_session_id or "",
+        receiver_session_id=recipient_sid_for_gate,
     )
     audit_record["dm_gate"] = {
         "should_gate": should_gate,
         "reason": gate_reason,
         "sender_user_id": sender_uid,
         "receiver_user_id": receiver_uid,
+        # ms-97 / e-2659 Phase 3 (AC19): bypass flag + matched trek_id.
+        # bypass=True when the gate let an action-bearing cross-user
+        # envelope through *because* of a shared trek membership. The
+        # trek_id makes the audit log searchable by trek.
+        "bypass": (
+            (not should_gate)
+            and gate_reason == dm_gate_mod.GATE_REASON_SHARED_TREK
+        ),
+        "trek_id": gate_trek_id,
     }
     if should_gate:
         # Force a safe, non-auto-execute delivery so legacy receivers
@@ -5085,6 +7251,17 @@ async def post_bus_event(
         data["envelope"] = body.envelope
     if body.requested_action is not None:
         data["requested_action"] = body.requested_action
+    # ms-97 C3 (= review finding H3): stamp a pending-approval marker on the
+    # event itself when the ms-70 gate held it for receiver consent. The
+    # approval *record* lives in the sidecar (below), but the sidecar is not
+    # joined on the receiver's hot inbox read, so the inbox hook had no way to
+    # tell a pending action DM from a normal one — the "[DM-PENDING-APPROVAL]"
+    # banner only surfaced on the CLI/session-start paths, not the main
+    # bridge+hook delivery. Carrying the marker on the event lets the hook
+    # render the banner inline so a human sees "this needs approve/deny" on
+    # the very next turn.
+    if should_gate:
+        data["pending_approval"] = True
 
     event_id = db.append_bus_event(project_id, data)
     audit_record["event_id"] = event_id
@@ -5161,6 +7338,7 @@ def trek_session_heartbeat(
 ):
     """Stamp the trek's last_session_response_at (ms-83 / e-2001)."""
     t = _load_trek_for_read(trek_id, user)
+    _reject_if_trek_archived(t)
     _require_trek_joined_member(t, user)
     import datetime
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
@@ -5184,9 +7362,18 @@ class TrekSchedulerTickRequest(BaseModel):
     Cloud Scheduler calls this endpoint at a fixed cadence (= every minute
     by default). The endpoint walks all active Treks, decides which are
     due based on each trek's ``meta.cadence_minutes`` and previous fire
-    time, mints a T1-system envelope for each due trek, and posts a
-    ``trek-progress-check`` bus event with auto-execute delivery into
-    the trek's leader-session project.
+    time, mints a T1-system envelope for each live member session, and
+    posts one ``dm``-channel bus event per session into that session's
+    home project bus (= ms-95 / e-2639 dm-transport migration, per
+    ms-97 SPEC 中心原則 6 「Wake 経路は DM と完全同一」).
+
+    Pre-e-2639 the tick wrote to dedicated ``trek-progress-check`` /
+    ``trek-leader-digest`` channels in ``scope[0]['project']`` only;
+    members whose home project sat in ``scope[1..N]`` (= cross-project
+    Trek) were permanently deaf. The dm rail re-uses the wake path
+    that already reliably injects context into AI sessions, so every
+    member gets the same delivery guarantee with no new subscription
+    or hook plumbing.
 
     Authentication: ``X-Beacon-Scheduler-Key`` header (same key as
     T1-system mint endpoint — they share a trust boundary).
@@ -5198,6 +7385,186 @@ class TrekSchedulerTickRequest(BaseModel):
     # Optional scoping for tests / staged rollout. None = iterate all.
     project_ids: Optional[list[str]] = None
     trek_ids: Optional[list[str]] = None
+
+
+def _build_executor_targets_user_grain(
+    *,
+    fanout_trek_doc: dict,
+    live_sessions: dict[str, dict],
+    leader_sid: str,
+) -> list[dict]:
+    """Legacy pre-A fanout target builder (= user_id grain).
+
+    ms-97 / e-2659 Phase 3 — kept verbatim for backward compatibility
+    with treks that have NOT been migrated to session_id keyed members[].
+    Walks the live_sessions map (which was already filtered by
+    ``member_user_ids`` upstream), excludes the leader session, and
+    applies the per-session ``should_fire_executor_tick`` lazy-start
+    gate. This is the byte-for-byte equivalent of the pre-Phase-3 inline
+    loop body — extracted into a function purely so the new Phase A+
+    path sits next to it for diff clarity.
+    """
+    targets: list[dict] = []
+    for sid, info in live_sessions.items():
+        if leader_sid and sid == leader_sid:
+            # The stamped leader session is structurally excluded
+            # from progress-check (= CORE doc trek-leader-stance /
+            # e-2166: leader's role is review, not pickup).
+            continue
+        # ms-97 / e-2815 (2026-07-03) — lazy-start gate 撤廃。 以前は
+        # ``should_fire_executor_tick`` で 「Trek 内 claim を持たない
+        # executor は fire しない」 と絞っていたが、 実運用で 「Trek scope
+        # は MS-level bind、 実装は project pool 側 (Trek 未 bind) で走る」
+        # ケースが主流のため、 大多数の executor が silent に skip され
+        # 「Trek scheduler → executor」 経路が事実上死ぬ dogfood 事故に
+        # なった。 Trek 哲学 (= server tick = PM、 executor に周期的に
+        # progress-check を投げる) を invariant として復元するため、
+        # members[] 内の全 non-leader session を無条件に対象化する。
+        targets.append({
+            "session_id": sid,
+            "home_project_id": info["home_project_id"],
+        })
+    return targets
+
+
+def _build_executor_targets_session_grain(
+    *,
+    fanout_trek_doc: dict,
+    trek_doc: dict,
+    scope_project_ids: list[str],
+    leader_sid: str,
+    live_cutoff: str,
+) -> list[dict]:
+    """ms-97 / e-2659 Phase 3 (AC16) — phase A+ fanout target builder.
+
+    Iterates ``trek_doc.members[]`` directly (= session_id keyed) and
+    resolves each session's home project by scanning every scope
+    project's session registry. First match wins (= a session_id is
+    unique to one project bridge in practice). Sessions without a
+    resolvable home project are skipped with a structured warning to
+    stderr — the leader-digest payload's ``alarm`` field already
+    surfaces this case upstream, so the warning is purely log-side.
+
+    Why iterate scope_project_ids for home resolution: the scheduler
+    has no session→project reverse index. With N scope projects the
+    cost is O(M·N) per tick where M = member count; both numbers are
+    small (single digits) in dogfood. If/when scale demands, swap to
+    a session_id → project_id directory point lookup.
+
+    Filters applied (in order):
+      1. Leader session_id → excluded (CORE doc trek-leader-stance).
+      2. No resolvable home project → skipped + stderr warning.
+      3. Session not live (= last_active before live_cutoff) → skipped
+         (= 10-min cutoff matches the user_grain path for parity).
+      4. ``should_fire_executor_tick`` lazy-start gate → skipped if
+         the executor has no signal worth waking on this tick.
+    """
+    members = trek_doc.get("members") or []
+    trek_id_for_log = trek_doc.get("trek_id", "")
+    # ms-97 / e-2660 — diagnostic header. Surfaces input shape so an
+    # empty-targets outcome can be triaged from logs without needing
+    # to recompute the inputs. Emitted at the start of every call.
+    print(
+        f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+        f"_build_executor_targets_session_grain entry: "
+        f"len(members)={len(members)} "
+        f"live_cutoff={live_cutoff} "
+        f"scope_project_ids={scope_project_ids} "
+        f"leader_sid={leader_sid}",
+        file=sys.stderr,
+    )
+    targets: list[dict] = []
+    for m in members:
+        msid = m.get("session_id") or ""
+        mrole = m.get("role") or ""
+        if not msid:
+            # Invitation-stage placeholder (= invited, not joined). No
+            # session yet to wake.
+            print(
+                f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+                f"skipped: empty session_id (role={mrole})",
+                file=sys.stderr,
+            )
+            continue
+        if leader_sid and msid == leader_sid:
+            print(
+                f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+                f"sid={msid} skipped: leader_sid match",
+                file=sys.stderr,
+            )
+            continue
+        # Role-based leader skip (= belt + suspenders with the sid
+        # match above; covers cases where the doc has role=leader but
+        # leader_session_id is unstamped).
+        if mrole == "leader":
+            print(
+                f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+                f"sid={msid} skipped: role=leader",
+                file=sys.stderr,
+            )
+            continue
+        # Resolve home project. First scope project whose session
+        # registry contains msid wins.
+        resolved_pid = ""
+        last_active = ""
+        for pid in scope_project_ids:
+            try:
+                project_sessions = db.list_sessions(pid)
+            except Exception:
+                project_sessions = []
+            for s in project_sessions:
+                if (s.get("session_id") or "") == msid:
+                    resolved_pid = pid
+                    last_active = s.get("last_active") or ""
+                    break
+            if resolved_pid:
+                break
+        if not resolved_pid:
+            # Ghost member: session vanished from every scope project's
+            # registry. Skip + log; the alarm hook upstream already
+            # surfaces this via leader-digest payload.
+            print(
+                f"warn[ms-97 e-2659 AC16]: trek "
+                f"{trek_id_for_log} member session "
+                f"{msid} has no resolvable home project in scope "
+                f"{scope_project_ids}",
+                file=sys.stderr,
+            )
+            print(
+                f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+                f"sid={msid} skipped: no home project resolved "
+                f"(= ghost)",
+                file=sys.stderr,
+            )
+            continue
+        # Live cutoff filter — keeps parity with user_grain path. An
+        # offline session that has not registered a recent heartbeat
+        # would not receive the dm anyway.
+        if last_active and last_active < live_cutoff:
+            print(
+                f"diag[ms-97 e-2660 AC16] trek={trek_id_for_log} "
+                f"sid={msid} skipped: last_active={last_active} "
+                f"< live_cutoff={live_cutoff}",
+                file=sys.stderr,
+            )
+            continue
+        # ms-97 / e-2815 (2026-07-03) — lazy-start gate 撤廃 (旧 AC33)。
+        # 「Trek scope 内 task-level bind が無いと should_fire_executor_tick
+        # が False を返し、 fresh executor が silent skip される」 dogfood
+        # 事故 (LPS session が phase 1 実装 done 後も digest 不可視、
+        # scheduler → executor 経路が完全停止) を受けて、 member[] 内の
+        # 全 non-leader session を無条件に progress-check 対象にする。
+        # 詳細: ms-97 e-2815 SPEC + user_grain 側 (line ~6912) 同期修正。
+        print(
+            f"diag[ms-97 e-2815 AC] trek={trek_id_for_log} "
+            f"sid={msid} kept: home_pid={resolved_pid}",
+            file=sys.stderr,
+        )
+        targets.append({
+            "session_id": msid,
+            "home_project_id": resolved_pid,
+        })
+    return targets
 
 
 @app.post("/api/system/trek-scheduler/tick")
@@ -5222,6 +7589,7 @@ def trek_scheduler_tick_endpoint(
             detail="trek scheduler tick requires X-Beacon-Scheduler-Key",
         )
 
+    import copy
     import datetime
     now = datetime.datetime.now(datetime.timezone.utc)
     # Fan out across active treks. Without project scoping we list every
@@ -5235,6 +7603,20 @@ def trek_scheduler_tick_endpoint(
                            if t.get("trek_id") in wanted]
     candidate_treks = [t for t in candidate_treks
                        if t.get("status") == "active"]
+    # ms-97 / e-2612 (AC32) — explicit halt accounting. ``is_trek_due``
+    # already filters halted treks out of the due set (= the cadence
+    # decision returns False when halt is set, see lib.trek_scheduler),
+    # but the response payload needs to surface the skip so observers
+    # and tests can tell "skipped because halted" apart from "cadence
+    # not elapsed". Collect halted IDs from the candidate set before
+    # select_due_treks drops them silently.
+    halted: list[dict] = []
+    for t in candidate_treks:
+        if trek_mod.is_halted(t):
+            halted.append({
+                "trek_id": t.get("trek_id", ""),
+                "reason": "halted",
+            })
     due_treks = trek_scheduler_mod.select_due_treks(
         candidate_treks, now=now,
     )
@@ -5252,6 +7634,136 @@ def trek_scheduler_tick_endpoint(
     quiesced: list[dict] = []
     for trek_doc in due_treks:
         trek_id = trek_doc.get("trek_id", "")
+        # ms-95 / e-2644 — **fanout snapshot strategy** (= dogfood findings
+        # `e70cUf8IS5uEIS1HIEXt` § #19)。 2026-06-28 dogfood で
+        # 「executor が active claim を保持していたのに progress-check fanout
+        # から漏れた」 病理を観察。 root cause: 同 tick 内で stall transition
+        # が走ると task_states[*].updated_by_session_id が "" にリセットされ、
+        # その後の fanout 評価 (= session_has_active_claim) で claim 主と
+        # session_id が一致せず False を返す → executor_targets から除外。
+        #
+        # 構造的対策: tick endpoint 冒頭で task_states を snapshot 化し
+        # (= deep copy)、 fanout 評価は **snapshot ベース** で実行する。
+        # stall mutation は同 transaction 内で fanout 評価の **後** に
+        # 走るのでこの tick の fanout には影響しない (= 次 tick 以降は
+        # 新しい task_states を snapshot 化した上で評価)。
+        #
+        # snapshot trek_doc は live trek_doc の shallow copy + task_states
+        # の deep copy を持つ shape。 fanout helpers が読むのは task_states
+        # 以外には scope / members / leader_session_id 等の概ね tick 内で
+        # 不変な field のみなので、 shallow copy で十分。
+        task_states_snapshot = copy.deepcopy(
+            trek_doc.get("task_states") or {}
+        )
+        fanout_trek_doc = dict(trek_doc)
+        fanout_trek_doc["task_states"] = task_states_snapshot
+        # ms-97 / e-2612 (AC32) — Defense-in-depth halt skip. The cadence
+        # decision (``is_trek_due`` in lib.trek_scheduler) already filters
+        # halted treks out of ``due_treks``, so this branch should never
+        # actually execute. Keep it as a structural guarantee so a future
+        # cadence-decision change can't silently re-introduce tick fires
+        # on halted treks.
+        if trek_mod.is_halted(trek_doc):
+            continue
+        # ms-97 / Phase 7-B / AC22 — auto-succession orchestrator.
+        # halt をすり抜けてここまで来た上で、 phase A+ trek (= session_id
+        # keyed members) かつ leader session が不応 (= N=3 連続 pulse-ack
+        # miss AND last_active >= 30 min stale AND 条件) の時、 priority
+        # order = invited_at 昇順で次 candidate session を選び、 1 hop
+        # consent DM を emit する。 candidate 不在の時は user に escalation
+        # (= meta.succession_escalated_at を 1 度だけ stamp、 leader-digest
+        # 経由で観測可能)。 各 trek ごとに 1 tick 最大 1 candidate を
+        # nominate する idempotent 設計 (= pending stamp で二重発射防止)。
+        if trek_mod.is_session_id_keyed(trek_doc):
+            try:
+                leader_sid_for_succession = (
+                    trek_doc.get("leader_session_id") or ""
+                )
+                leader_last_active = ""
+                if leader_sid_for_succession:
+                    succession_scope_ids = _resolve_trek_scope_project_ids(
+                        trek_doc
+                    )
+                    for project_pid in succession_scope_ids:
+                        try:
+                            project_sessions = db.list_sessions(project_pid)
+                        except Exception:
+                            project_sessions = []
+                        found_la = ""
+                        for s in project_sessions:
+                            if s.get("session_id") == leader_sid_for_succession:
+                                found_la = s.get("last_active") or ""
+                                break
+                        if found_la:
+                            leader_last_active = found_la
+                            break
+                unresponsive = trek_mod.detect_unresponsive_leader(
+                    trek_doc, now,
+                    leader_last_active=leader_last_active,
+                )
+                if unresponsive:
+                    meta = trek_doc.setdefault("meta", {})
+                    pending_already = (
+                        meta.get(
+                            trek_mod.SUCCESSION_PENDING_CANDIDATE_META_KEY
+                        )
+                        or ""
+                    )
+                    if not pending_already:
+                        candidate = trek_mod.pick_succession_candidate(
+                            trek_doc
+                        )
+                        if candidate is None:
+                            if not meta.get(
+                                trek_mod.SUCCESSION_ESCALATED_AT_META_KEY
+                            ):
+                                meta[
+                                    trek_mod.SUCCESSION_ESCALATED_AT_META_KEY
+                                ] = trek_mod.utcnow_iso()
+                                print(
+                                    f"warn[ms-97 e-2684]: trek "
+                                    f"{trek_id} succession escalated — "
+                                    "no candidate available",
+                                    file=sys.stderr,
+                                )
+                                trek_doc["updated_at"] = (
+                                    trek_mod.utcnow_iso()
+                                )
+                                try:
+                                    db.save_trek(trek_id, trek_doc)
+                                except Exception:
+                                    pass
+                        else:
+                            candidate_sid = candidate.get("session_id") or ""
+                            if candidate_sid:
+                                emit_leader_succession_consent_dm(
+                                    trek_doc, candidate_sid,
+                                    former_leader_session_id=(
+                                        leader_sid_for_succession
+                                    ),
+                                )
+                                meta[
+                                    trek_mod.SUCCESSION_PENDING_CANDIDATE_META_KEY
+                                ] = candidate_sid
+                                meta[
+                                    trek_mod.SUCCESSION_PENDING_EMITTED_AT_META_KEY
+                                ] = trek_mod.utcnow_iso()
+                                trek_doc["updated_at"] = (
+                                    trek_mod.utcnow_iso()
+                                )
+                                try:
+                                    db.save_trek(trek_id, trek_doc)
+                                except Exception:
+                                    pass
+            except Exception as exc:
+                # Succession orchestrator must never break the tick loop.
+                # Log the error and continue with the regular fanout —
+                # next tick re-evaluates from a clean slate.
+                print(
+                    f"warn[ms-97 e-2684]: trek {trek_id} succession "
+                    f"orchestrator error: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
         # ms-75 / e-2048 — Trek task state machine integration. When every
         # task that an executor has stamped state for has reached terminal
         # (= done or waiting-review), the scheduler goes silent for this
@@ -5261,14 +7773,149 @@ def trek_scheduler_tick_endpoint(
         # with no stamped states is NOT terminal — the scheduler still
         # fires obligation DMs to wake an executor that has not yet
         # declared anything (= pre-state-machine compatible).
-        if trek_scheduler_mod.is_trek_task_aggregate_terminal(trek_doc):
+        # ms-99 / e-2833 — canonicalise scope BEFORE the terminal check so
+        # ``materialize_slots`` can resolve pool for slug-stored scope.
+        # (Already done above; the call is idempotent so a second call here
+        # would also be safe. We rely on the above canonicalisation.)
+        if trek_scheduler_mod.is_trek_task_aggregate_terminal(
+            trek_doc, get_project=db.get_project,
+        ):
+            # ms-99 / e-2834 — quiesce observability trio.
+            #
+            # (1) Cloud Run stderr emits a diag[ms-99] line so operators
+            #     can grep "who quiesced when" without cross-referencing
+            #     the trek doc. Written unconditionally per tick.
+            # (2) The trek doc's meta stamps ``quiesced_at`` (first-hit
+            #     timestamp, never overwritten) and ``quiesce_reason``
+            #     (may re-stamp as the reason space grows).
+            # (3) The leader session receives one DM per quiesce lifecycle
+            #     (= dedup via ``meta.quiesce_notified_at``). The DM
+            #     carries the reason + trek id so the leader-side Skill
+            #     can render a "your Trek has quiesced" notice without
+            #     polling.
+            #
+            # This closes the CORE doc 5nfTSmCDVUzD4SLzIhI5 "observable
+            # ack" gap: pre-e-2834 quiesce was semantically significant
+            # but structurally silent — dogfood consumers were left to
+            # infer it from the absence of DMs, which the silent-quiesce
+            # dogfood (2026-07-03) proved was unreliable.
+            quiesce_reason = "task_state_aggregate_terminal"
+            meta = trek_doc.setdefault("meta", {})
+            print(
+                f"diag[ms-99 e-2834] trek={trek_id} quiesced "
+                f"reason={quiesce_reason} "
+                f"already_stamped={bool(meta.get('quiesced_at'))} "
+                f"already_notified={bool(meta.get('quiesce_notified_at'))}",
+                file=sys.stderr,
+            )
+            now_iso = trek_mod.utcnow_iso()
+            if not meta.get("quiesced_at"):
+                meta["quiesced_at"] = now_iso
+            meta["quiesce_reason"] = quiesce_reason
+            # Emit the per-quiesce leader DM iff we have not yet done so
+            # for this quiesce lifecycle. The stamp is cleared when the
+            # trek transitions back to non-terminal (= a task moves out
+            # of terminal state) via the same PATCH endpoint that stamped
+            # the terminal state; see ``clear_quiesce_marks_on_resume``.
+            # ms-97 P3 (= review finding H1 / C2 decision 2026-07-06):
+            # completion_ready (ms-97 AC20/21) was structurally unreachable —
+            # ``is_completion_ready`` requires aggregate-terminal, but every
+            # aggregate-terminal trek is handled here and ``continue``s below,
+            # so the completion_ready block further down never saw it. Evaluate
+            # it here (same trek_doc the terminal check above used) so the
+            # quiesce DM doubles as the AC20 completion signal and — critically
+            # — ``meta.completion_notified_at`` gets stamped, which is the
+            # missing half of the AC21 stop condition (``summary_sent_at AND
+            # completion_notified_at`` → leader-digest tick halts). The op-slot
+            # exclusion + one-shot ``completion_notified_at`` gate both live
+            # inside ``is_completion_ready``, so no extra guarding is needed.
+            completion_ready_now = trek_scheduler_mod.is_completion_ready(
+                trek_doc, get_project=db.get_project,
+            )
+            if not meta.get("quiesce_notified_at"):
+                leader_sid = trek_doc.get("leader_session_id") or ""
+                quiesce_scope_pids = _resolve_trek_scope_project_ids(trek_doc)
+                if leader_sid and quiesce_scope_pids:
+                    # ms-97 P4 — route to the leader's home project, not
+                    # scope[0], so a cross-project leader actually receives
+                    # the quiesce notice (before this, quiesce_notified_at
+                    # was stamped on a send that never arrived).
+                    quiesce_target_pid = _resolve_leader_home_project_id(
+                        trek_doc,
+                    )
+                    try:
+                        quiesce_envelope = (
+                            envelope_mod.issue_t1_system_envelope(
+                                project_id=quiesce_target_pid,
+                                trek_id=trek_id,
+                                actions_authorized=["trek.quiesce_notify"],
+                                data_class="free",
+                                ttl_seconds=3600,
+                            )
+                        )
+                        quiesce_payload = {
+                            "kind": "trek-quiesced",
+                            "trek_id": trek_id,
+                            "recipient_session_id": leader_sid,
+                            "sender_type": "trek-scheduler",
+                            "origin_channel": "trek-leader-digest",
+                            "reason": quiesce_reason,
+                            "quiesced_at": meta["quiesced_at"],
+                            # ms-97 AC20 — mark the quiesce DM as the one-shot
+                            # completion signal when the trek is genuinely
+                            # completion-ready (= terminal, no Op slot, not yet
+                            # notified). Leader-side can render "completed"
+                            # instead of a plain quiesce notice.
+                            **({"completion_ready": True}
+                               if completion_ready_now else {}),
+                            "body": (
+                                f"[Trek quiesced] trek_id={trek_id}\n"
+                                "Trek scope 内の全 slot が terminal state "
+                                "(= done / user_review) に到達しました "
+                                "(= AI 自律実行完了)。 leader review "
+                                "(= /beacon-trek-review) で archive 判断、 "
+                                "もしくは scope 追加 task の投入を "
+                                "決めてください。\n"
+                                f"reason: {quiesce_reason}"
+                            ),
+                        }
+                        db.append_bus_event(quiesce_target_pid, {
+                            "channel": "dm",
+                            "sender_session_id": "",
+                            "payload": quiesce_payload,
+                            "envelope": quiesce_envelope,
+                            "delivery": "auto-execute",
+                            "created_at": now_iso,
+                        })
+                        # Only stamp the notified marker on a successful
+                        # append so a transient failure retries next tick.
+                        meta["quiesce_notified_at"] = now_iso
+                        # ms-97 P3 / AC20 — stamp the one-shot completion
+                        # marker on the same successful append. Gated by
+                        # ``completion_ready_now`` (= is_completion_ready,
+                        # which already excludes Op-slot treks and returns
+                        # False once this is stamped) so it fires once per
+                        # trek lifetime and unblocks the AC21 stop condition.
+                        if completion_ready_now and not meta.get(
+                            "completion_notified_at"
+                        ):
+                            meta["completion_notified_at"] = now_iso
+                    except Exception as exc:  # noqa: BLE001
+                        # Best-effort: log the failure but continue with
+                        # the quiesce flow. Absence of quiesce_notified_at
+                        # means next tick will retry emission.
+                        print(
+                            f"diag[ms-99 e-2834] trek={trek_id} "
+                            f"quiesce_dm_failed: "
+                            f"{type(exc).__name__}: {exc}",
+                            file=sys.stderr,
+                        )
             quiesced.append({
                 "trek_id": trek_id,
-                "reason": "task_state_aggregate_terminal",
+                "reason": quiesce_reason,
             })
             # Still stamp last_progress_check_at so the next cadence
             # window does not re-flag this trek as "never fired".
-            meta = trek_doc.setdefault("meta", {})
             meta["last_progress_check_at"] = now.strftime(
                 "%Y-%m-%dT%H:%M:%S.%fZ"
             )
@@ -5278,11 +7925,18 @@ def trek_scheduler_tick_endpoint(
             except Exception:
                 pass
             continue
-        # Determine the target project for the bus event. The trek's first
-        # scope entry's project is the canonical "home project" for the
-        # progress-check; treks with no scope are skipped by the payload
-        # builder (= empty-scope fallback DM still fires, into the leader
-        # session's home project resolved from its actor).
+        # ms-95 / e-2639 — Trek scheduler tick migrated to **dm channel
+        # per-member fanout** (= ms-97 SPEC AC16 / 中心原則 6 「Wake 経路
+        # は DM と完全同一」)。 Prior to e-2639 the tick posted to
+        # ``scope[0]['project']`` only on dedicated ``trek-progress-check``
+        # / ``trek-leader-digest`` channels — members whose home project
+        # sat in ``scope[1..N]`` (= cross-project Trek) were permanently
+        # deaf because the bridge only subscribes to its own project's
+        # bus. The 2026-06-28 dogfood (= tk-LPS cross-project Trek)
+        # surfaced this as opened ✗ for every member except scope[0]
+        # residents. SPEC 中心原則 6 prescribes the fix: route Trek tick
+        # over the same dm rail that already wakes AI sessions reliably,
+        # one event per recipient in their own home project bus.
         scope = trek_doc.get("scope") or []
         if not scope:
             errors.append({
@@ -5290,158 +7944,541 @@ def trek_scheduler_tick_endpoint(
                 "error": "empty_scope_no_target_project",
             })
             continue
-        target_project_id = scope[0].get("project", "")
-        if not target_project_id:
+        scope_project_ids = _resolve_trek_scope_project_ids(trek_doc)
+        if not scope_project_ids:
             errors.append({
                 "trek_id": trek_id,
                 "error": "scope_entry_missing_project",
             })
             continue
-        try:
-            envelope = envelope_mod.issue_t1_system_envelope(
-                project_id=target_project_id,
-                trek_id=trek_id,
-                actions_authorized=["trek.progress_check"],
-                data_class="free",
-                ttl_seconds=3600,
-            )
-        except ValueError as exc:
-            errors.append({
-                "trek_id": trek_id,
-                "error": f"envelope_mint_failed: {exc}",
-            })
-            continue
-        # Build the DM body from a project-data snapshot. We don't have
-        # live local project.json here on the server side, so the body
-        # is the minimal "scope-aware" fallback (= scope refs only). The
-        # AI side enriches it from the receiving session's local repo.
-        payload = trek_scheduler_mod.build_progress_check_payload(
-            trek_doc,
+        # ms-99 / e-2833 — canonicalise trek_doc.scope in place so
+        # ``materialize_slots`` (= called via the tick decision predicates
+        # below) looks the project pool up under the full id rather than
+        # the raw slug the CLI may have stored. Without this rewrite,
+        # ``get_project`` sees the slug, returns None, and every MS slot
+        # collapses to ``("todo", "unstamped")`` — the exact false-quiesce
+        # / false-fire pathway that broke tk-29a11d2f dogfood.
+        _canonicalise_trek_scope_projects_in_place(trek_doc)
+        # Audit-surface project_id (= back-compat for the dashboard /
+        # observability consumers that already key off the legacy
+        # single-project field). The dm fanout itself addresses each
+        # session in its own home project, so this field becomes a
+        # purely informational "first scope project" marker rather than
+        # the canonical bus location.
+        target_project_id = scope_project_ids[0]
+        # Build per-session message bodies once: scheduler has no local
+        # project.json so the body is the minimal scope-aware fallback
+        # (= scope refs only); the receiver-side AI enriches from its
+        # local repo. Done before iterating sessions because the body
+        # is identical for every recipient on this tick.
+        # ms-95 / e-2644 — payload も snapshot から build (= scope refs
+        # と task_state aggregate を読む経路、 stall flip 影響を受けない)。
+        progress_payload = trek_scheduler_mod.build_progress_check_payload(
+            fanout_trek_doc,
             project_data=None,
             now=now,
         )
-        # ms-83 / e-2036 — fan out to every live session of every Trek
-        # member, not just one project-wide broadcast. Per the dogfood
-        # observation (2026-06-19): trek.members[] is keyed by user_id,
-        # so self-dogfood (= multiple sessions of one user) collapsed to
-        # 1 member, leaving executor sessions unreached. The fix queries
-        # the project's session registry, filters by member user_ids and
-        # a 10-minute live cutoff, then writes one bus event per session
-        # with a session-addressed payload (= payload.recipient_session_id).
-        # If no live sessions resolve (= empty members or all stale), the
-        # broadcast fallback fires (sid="") so behaviour stays compatible.
-        #
-        # ms-88 / e-2109 — per-session task_state filter. The dogfood also
-        # showed that fanning out to every live session even when their
-        # claimed tasks were all terminal (= leader_review / user_review /
-        # done) burned executor inboxes with ticks they couldn't act on.
-        # Filter target_sids down to sessions that either (a) hold at least
-        # one todo / working claim, or (b) have no claims yet (= fresh
-        # executor about to pick up). Sessions whose claims are all in
-        # terminal-ish states get NO tick — they explicitly finished and
-        # should stay quiet until the leader re-stamps them working.
+        # Walk every scope project's session registry and stitch a
+        # canonical (user_id, session_id, home_project_id, last_active)
+        # tuple per live member session. Live cutoff matches the
+        # pre-e-2639 progress-check filter (= 10 minutes).
         member_user_ids = {
             (m.get("user_id") or "")
             for m in (trek_doc.get("members") or [])
             if m.get("user_id")
         }
-        target_sids: list[str] = []
-        if member_user_ids:
+        live_cutoff = (now - datetime.timedelta(minutes=10)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+        # Map of session_id → {"user_id", "home_project_id"}. A given
+        # session_id can only exist in one project (= bridge registers
+        # under its cwd project), so we de-dup by session_id with
+        # "first project wins" — in practice each session appears in
+        # exactly one project's registry.
+        live_sessions: dict[str, dict] = {}
+        for project_pid in scope_project_ids:
             try:
-                project_sessions = db.list_sessions(target_project_id)
+                project_sessions = db.list_sessions(project_pid)
             except Exception:
                 project_sessions = []
-            live_cutoff = (now - datetime.timedelta(minutes=10)).strftime(
-                "%Y-%m-%dT%H:%M:%S.%fZ"
-            )
-            live_sids = [
-                (s.get("session_id") or "")
-                for s in project_sessions
-                if (s.get("user_id") or "") in member_user_ids
-                and (s.get("last_active") or "") >= live_cutoff
-                and s.get("session_id")
-            ]
-            # ms-88 / e-2109 — per-session filter.
-            # 2026-06-20 補完 (e-2109 second pass): leader 除外を追加。 leader は
-            # executor の進捗を促す立場ではない (= 役割が違う、 CORE doc
-            # trek-leader-stance / e-2166 と整合)、 progress-check の宛先から外す。
-            # 残された claim 0 件の executor は「fresh、 これから todo を引き受ける」
-            # と扱われ tick が届く。 leader 専用の集約 surface (= trek-leader-digest
-            # channel、 e-2164) は別 channel で配信する設計。
-            leader_sid_for_filter = trek_doc.get("leader_session_id") or ""
-            for sid in live_sids:
-                if leader_sid_for_filter and sid == leader_sid_for_filter:
-                    # leader は progress-check の宛先ではない。
+            for s in project_sessions:
+                uid = s.get("user_id") or ""
+                sid = s.get("session_id") or ""
+                last_active = s.get("last_active") or ""
+                if not uid or not sid:
                     continue
-                if trek_mod.session_has_active_claim(trek_doc, session_id=sid):
-                    target_sids.append(sid)
-                elif not trek_mod.session_has_any_claim(trek_doc, session_id=sid):
-                    # Fresh session, no claims yet — still tick so it picks
-                    # up a todo task.
-                    target_sids.append(sid)
-                # else: every claim is terminal-ish → skip this session.
-        if not target_sids:
-            # Fallback: broadcast (= sid empty). Preserves behaviour when
-            # member resolution fails (= no live sessions / empty members /
-            # backend hiccup) so the trek still surfaces in some inbox.
-            target_sids = [""]
+                if uid not in member_user_ids:
+                    continue
+                if last_active < live_cutoff:
+                    continue
+                if sid in live_sessions:
+                    continue
+                live_sessions[sid] = {
+                    "user_id": uid,
+                    "home_project_id": project_pid,
+                }
+        # ms-97 / e-2658 — Migration safety 機構 #5: 不整合 alarming.
+        # Phase A+ trek (= members[] が session_id keyed に書き換わった後)
+        # に限り、 各 member.session_id が scope projects の session
+        # registry に居るかを check し、 居なければ warning log を出して
+        # leader-digest payload に ``alarm`` field を載せる。 Phase pre-A
+        # trek (= 旧 user_id keyed legacy) は session_id field を持たない
+        # ので skip する (= alarming 対象外、 構造的 no-op)。
+        member_session_alarm: list[str] = []
+        try:
+            current_phase = trek_mod.get_migration_phase(trek_doc)
+        except Exception:
+            current_phase = "pre-A"
+        if current_phase in ("A", "B", "C"):
+            # Build the union of session_ids known across all scope
+            # projects (= NOT filtered by live cutoff or user_id; the
+            # alarm fires when a stamped member session has *vanished*
+            # entirely, not when it's merely offline).
+            all_known_sids: set[str] = set()
+            for project_pid in scope_project_ids:
+                try:
+                    for s in db.list_sessions(project_pid):
+                        sid = s.get("session_id") or ""
+                        if sid:
+                            all_known_sids.add(sid)
+                except Exception:
+                    # Best-effort: per-project listing failure must not
+                    # break the tick. Missing project just contributes
+                    # zero known sids, which over-reports alarms — that
+                    # is the safer direction (= surface, don't hide).
+                    continue
+            for m in trek_doc.get("members") or []:
+                msid = m.get("session_id") or ""
+                if not msid:
+                    continue
+                if msid not in all_known_sids:
+                    member_session_alarm.append(msid)
+            if member_session_alarm:
+                # Structured warning into stderr → captured by Cloud Run
+                # logs and by local-mode dev server output. Includes
+                # trek_id so the log line is greppable.
+                print(
+                    f"warn[ms-97 e-2658]: trek {trek_id} has member "
+                    f"sessions absent from session registry: "
+                    f"{member_session_alarm}",
+                    file=sys.stderr,
+                )
+        # ms-97 / e-2637 — Welcome tick fanout (= bootstrap path for
+        # fresh joiners that the join-time hook missed, e.g. sessions
+        # that joined before this server code was deployed, or where
+        # the join-time fire failed). Walks members[] (phase A+ only,
+        # because pre-A members have no session_id field) and fires a
+        # one-shot welcome tick to each session whose stamp is missing.
+        # Stamps are recorded on ``meta.welcome_tick_fired_at`` so the
+        # next tick does not re-fire.
+        if trek_mod.is_session_id_keyed(trek_doc):
+            _fanout_welcome_ticks_for_pending_members(
+                trek_doc=trek_doc, trek_id=trek_id,
+                scope_project_ids=scope_project_ids,
+            )
+
+        # ms-88 / e-2109 + ms-97 / e-2613 (AC33) — per-executor lazy
+        # start. The leader role is structurally excluded from progress-
+        # check (= CORE doc trek-leader-stance / e-2166: leader's role
+        # is review, not pickup). For every other live session the
+        # per-session ``should_fire_executor_tick`` gate decides whether
+        # there is signal (= active claim OR unclaim todo float) worth
+        # waking on this tick.
+        leader_sid_for_filter = trek_doc.get("leader_session_id") or ""
+        leader_user_id = ""
+        for m in trek_doc.get("members") or []:
+            if (m.get("role") or "") == "leader" and m.get("user_id"):
+                leader_user_id = m.get("user_id") or ""
+                break
+        # ms-97 / e-2659 Phase 3 (AC16) — fanout target build is now
+        # **phase-gated**. Phase A+ treks (= members[] is session_id
+        # keyed) iterate members[] directly and resolve each session's
+        # home project via the session registry. Pre-A treks keep the
+        # legacy "walk live_sessions, filter by user_id membership"
+        # path verbatim — backward compat for treks not yet migrated.
+        #
+        # Why this matters (= dogfood findings root cause): the old
+        # path required (a) the executor's home project to be in
+        # ``scope[]`` and (b) the session registry to surface a live
+        # row. For LPS / PE cross-project Treks where the executor's
+        # home project was *not* in scope (= scope listed only the
+        # primary project), step (a) failed silently and the executor
+        # never received a tick. Phase A+ iteration removes step (a)
+        # by relying solely on members[] as the canonical recipient
+        # list.
+        if trek_mod.is_session_id_keyed(trek_doc):
+            executor_targets = _build_executor_targets_session_grain(
+                fanout_trek_doc=fanout_trek_doc,
+                trek_doc=trek_doc,
+                scope_project_ids=scope_project_ids,
+                leader_sid=leader_sid_for_filter,
+                live_cutoff=live_cutoff,
+            )
+        else:
+            executor_targets = _build_executor_targets_user_grain(
+                fanout_trek_doc=fanout_trek_doc,
+                live_sessions=live_sessions,
+                leader_sid=leader_sid_for_filter,
+            )
+        # Audit-surface ``recipients`` list (= back-compat for callers
+        # that read ``fired[].recipients``). Empty string sentinel marks
+        # the broadcast fallback.
+        target_sids: list[str] = (
+            [t["session_id"] for t in executor_targets]
+            if executor_targets else [""]
+        )
+        # Per-member fanout: each session gets its own dm posted into
+        # its own home project bus. T1-system envelope is minted per
+        # target project so the envelope's project_id matches the bus
+        # it lands in (= envelope verify chain stays consistent).
         event_ids: list[str] = []
         any_send_succeeded = False
-        for sid in target_sids:
-            send_payload = dict(payload)
-            if sid:
-                send_payload["recipient_session_id"] = sid
-            bus_data = {
-                "channel": "trek-progress-check",
-                "sender_session_id": "",
-                "payload": send_payload,
-                "envelope": envelope,
-                "delivery": "auto-execute",
-                "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            }
+        if executor_targets:
+            for target in executor_targets:
+                send_payload = dict(progress_payload)
+                send_payload["recipient_session_id"] = target["session_id"]
+                # Mark this DM as system-issued so receivers can filter
+                # Trek tick events from human DMs without parsing the
+                # envelope tier (= cheap discriminator on the payload
+                # surface). The body itself already carries the
+                # ``[Trek progress check]`` header for human-readable
+                # audit.
+                send_payload["sender_type"] = "trek-scheduler"
+                send_payload["origin_channel"] = "trek-progress-check"
+                try:
+                    target_envelope = envelope_mod.issue_t1_system_envelope(
+                        project_id=target["home_project_id"],
+                        trek_id=trek_id,
+                        actions_authorized=["trek.progress_check"],
+                        data_class="free",
+                        ttl_seconds=3600,
+                    )
+                except ValueError as exc:
+                    errors.append({
+                        "trek_id": trek_id,
+                        "recipient_session_id": target["session_id"],
+                        "error": f"envelope_mint_failed: {exc}",
+                    })
+                    continue
+                bus_data = {
+                    "channel": "dm",
+                    "sender_session_id": "",
+                    "payload": send_payload,
+                    "envelope": target_envelope,
+                    "delivery": "auto-execute",
+                    "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                }
+                try:
+                    event_ids.append(
+                        db.append_bus_event(
+                            target["home_project_id"], bus_data,
+                        )
+                    )
+                    any_send_succeeded = True
+                except Exception as exc:
+                    errors.append({
+                        "trek_id": trek_id,
+                        "recipient_session_id": target["session_id"],
+                        "error": (
+                            f"bus_append_failed: {type(exc).__name__}: "
+                            f"{exc}"
+                        ),
+                    })
+        else:
+            # Broadcast fallback (= no live executor sessions resolved
+            # OR every live session was filtered out by the lazy-start
+            # gate). Mirrors the pre-e-2639 broadcast minimal-tick
+            # contract: one event posted to the audit-surface project
+            # bus so the trek still surfaces in *some* inbox and
+            # downstream observers see the "fired at minimum once"
+            # guarantee.
+            #
+            # ms-97 / e-2660 — recipient_session_id MUST be set to the
+            # stamped leader_session_id so _bus_event_addressed_to can
+            # deliver it. Prior to this fix the broadcast fallback
+            # posted with channel="dm" and no recipient stamp; the DM
+            # routing filter (server/app.py _bus_event_addressed_to)
+            # structurally drops "DM + no recipient" events, so the
+            # broadcast event was written to storage but never reached
+            # any bridge. Pinning the recipient to the stamped leader
+            # session preserves SPEC 中心原則 6 (= Wake 経路 DM 統一)
+            # AND surfaces the broadcast-fallback as a leader audit
+            # signal (= leader sees "fanout had no executor targets
+            # this tick").
+            stamped_leader_sid_for_broadcast = (
+                trek_doc.get("leader_session_id") or ""
+            )
+            send_payload = dict(progress_payload)
+            send_payload["sender_type"] = "trek-scheduler"
+            send_payload["origin_channel"] = "trek-progress-check"
+            if stamped_leader_sid_for_broadcast:
+                send_payload["recipient_session_id"] = (
+                    stamped_leader_sid_for_broadcast
+                )
             try:
-                event_ids.append(db.append_bus_event(target_project_id, bus_data))
-                any_send_succeeded = True
-            except Exception as exc:
-                errors.append({
-                    "trek_id": trek_id,
-                    "recipient_session_id": sid,
-                    "error": f"bus_append_failed: {type(exc).__name__}: {exc}",
-                })
-        if not any_send_succeeded:
-            # Every send for this trek failed; skip the stamp so the next
-            # tick retries instead of silently swallowing the failure.
-            continue
-        # ms-92 / e-2164 — leader-digest fan-out (= one event to the
-        # leader's session carrying aggregated per-executor status).
-        # Same cadence as trek-progress-check (= they fire together so
-        # the leader sees "what is everyone doing right now" without
-        # polling). Leader session id may be missing on planning-era
-        # treks; skip in that case (= can't deliver without a target).
-        leader_sid = trek_doc.get("leader_session_id") or ""
-        leader_digest_event_id = ""
-        if leader_sid:
-            try:
-                digest_envelope = envelope_mod.issue_t1_system_envelope(
+                target_envelope = envelope_mod.issue_t1_system_envelope(
                     project_id=target_project_id,
                     trek_id=trek_id,
-                    actions_authorized=["trek.leader_digest"],
+                    actions_authorized=["trek.progress_check"],
                     data_class="free",
                     ttl_seconds=3600,
                 )
             except ValueError as exc:
                 errors.append({
                     "trek_id": trek_id,
-                    "error": f"leader_digest_envelope_mint_failed: {exc}",
+                    "error": f"envelope_mint_failed: {exc}",
                 })
-                digest_envelope = None
-            if digest_envelope is not None:
-                digest_payload = trek_scheduler_mod.build_leader_digest_payload(
-                    trek_doc, now=now,
+                continue
+            bus_data = {
+                "channel": "dm",
+                "sender_session_id": "",
+                "payload": send_payload,
+                "envelope": target_envelope,
+                "delivery": "auto-execute",
+                "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            }
+            try:
+                event_ids.append(
+                    db.append_bus_event(target_project_id, bus_data)
                 )
-                digest_payload["recipient_session_id"] = leader_sid
+                any_send_succeeded = True
+            except Exception as exc:
+                errors.append({
+                    "trek_id": trek_id,
+                    "recipient_session_id": (
+                        stamped_leader_sid_for_broadcast
+                    ),
+                    "error": (
+                        f"bus_append_failed: {type(exc).__name__}: {exc}"
+                    ),
+                })
+        if not any_send_succeeded:
+            # Every send for this trek failed; skip the stamp so the next
+            # tick retries instead of silently swallowing the failure.
+            continue
+        # ms-92 / e-2164 — leader-digest fanout (= one event per leader
+        # live session carrying aggregated per-executor status). Same
+        # cadence as the progress-check pass (= they fire together so
+        # the leader sees "what is everyone doing right now" without
+        # polling).
+        #
+        # ms-95 / e-2639 — leader-digest is now also a dm to the
+        # leader's home project bus. SPEC 中心原則 6: 「Wake 経路は DM
+        # と完全同一」 — the leader's session subscribes to the same dm
+        # channel as everyone else, so a dm posted into their home
+        # project wakes them reliably. ``leader_digest_recipients`` audit
+        # field stays for back-compat with dashboard consumers (=
+        # `fired[].leader_digest_recipients`).
+        # ms-95 / e-2645 — leader-digest **narrow fanout**。 旧実装は
+        # 「leader user の全 live session」 に digest を broadcast していたが、
+        # 2026-06-28 dogfood で「同 user の executor session が leader-digest
+        # を受信」 する病理を観察 (= same-user multi-session で user_id filter
+        # が collapse、 dogfood findings § #16)。
+        #
+        # 新方針:
+        #   * **primary path**: stamped ``leader_session_id`` が live なら
+        #     **その 1 session のみ** に digest を送る (= 役割境界明示)。
+        #   * **fallback path**: stamped が stale (= live でない) の時のみ、
+        #     leader user の全 live session に fan out (= ms-92 e-2164
+        #     multi-leader-session 互換、 reconnect / fork で sid が変わった
+        #     場合に digest が宙に消えない経路)。
+        #
+        # この narrow は same-user dogfood で executor の noise を断つだけ
+        # でなく、 cross-user Trek の正常動作 (= leader user の sessions
+        # のみ) も同じ logic で表現できる (= leader_session_id 一致 →
+        # 一つだけ、 stale → leader user の sessions に拡散)。
+        #
+        # ms-95 / e-2723 — fallback path の **second narrow**。 2026-06-28
+        # dogfood 続報 (= dogfood findings § #16 致命的連鎖 #2): e-2645
+        # primary path が落ちて fallback に到達した時、 旧 fallback は
+        # 「leader user の全 live session」 に fan out していた。 これだと
+        # **same-user multi-session** (= leader + executor が同 user の
+        # 別 session、 dogfood の Mac / Win 並走 や 1 user 多 role 検証)
+        # で executor session も leader-digest を受信してしまう。 ms-92
+        # e-2164 SPEC Done when #1 「recipient = leader_session_id のみ」
+        # の意図に反する。
+        #
+        # 新 fallback (= ms-97 AC6 land 後の session_id keyed members[]
+        # を活用):
+        #   * Phase A+ trek (= ``is_session_id_keyed`` True): members[]
+        #     を walk し、 ``role=leader`` な member.session_id が live
+        #     なものだけに narrow。 1 leader = 1 session が原則なので
+        #     normal flow では 1 target、 multi-leader role を許容する
+        #     trek (= 将来の co-leader) でも members[] に書かれた範囲
+        #     だけが対象 (= executor は構造的に除外)。
+        #   * Pre-A trek (= legacy user_id keyed): session_id field が
+        #     members[] に存在しないので fallback は従来通り leader user
+        #     の全 live session。 same-user collapse は pre-A trek でも
+        #     起きうるが、 phase A migration で構造解消する方が筋が良い
+        #     (= pre-A trek の数は migration 進行で減るのみ、 long-term
+        #     には phase A+ が default)。
+        leader_targets: list[dict] = []
+        leader_target_pids: list[str] = []
+        stamped_leader_sid = trek_doc.get("leader_session_id") or ""
+        if (
+            stamped_leader_sid
+            and stamped_leader_sid in live_sessions
+            and (
+                # Sanity: stamped session should actually belong to the
+                # leader user. If the doc is corrupted we fall through
+                # to the fallback path rather than misroute.
+                live_sessions[stamped_leader_sid].get("user_id")
+                == leader_user_id
+                or not leader_user_id
+            )
+        ):
+            # Primary path: stamped leader session is live → narrow to it.
+            info = live_sessions[stamped_leader_sid]
+            leader_targets.append({
+                "session_id": stamped_leader_sid,
+                "home_project_id": info["home_project_id"],
+            })
+        elif trek_mod.is_session_id_keyed(trek_doc):
+            # Fallback path (= phase A+): stamped leader is stale. Walk
+            # members[] and pick live sessions with role=leader only.
+            # This is the e-2723 narrow that closes the same-user
+            # collapse: executor session (= same user_id but
+            # role=executor) is structurally excluded because we never
+            # look at it.
+            for m in trek_doc.get("members") or []:
+                if (m.get("role") or "") != "leader":
+                    continue
+                msid = m.get("session_id") or ""
+                if not msid:
+                    # Invitation-stage leader placeholder (= invited but
+                    # not joined) — no session to wake.
+                    continue
+                if msid not in live_sessions:
+                    # Stamped or named leader sid is offline; skip and
+                    # let the "fully offline" tail fall through to the
+                    # stamped-only stub below.
+                    continue
+                # Sanity user_id match (= belt + suspenders); if the
+                # session registry disagrees with members[] we skip
+                # rather than misroute.
+                if (
+                    leader_user_id
+                    and live_sessions[msid].get("user_id") != leader_user_id
+                ):
+                    continue
+                leader_targets.append({
+                    "session_id": msid,
+                    "home_project_id": live_sessions[msid]["home_project_id"],
+                })
+        else:
+            # Fallback path (= pre-A legacy): members[] is user_id keyed
+            # only — no session_id field to narrow on. Preserve the
+            # legacy "all live sessions of the leader user" fan-out for
+            # backward compat. Phase A migration (= ms-97 AC6) eventually
+            # removes this branch by upgrading every trek's members[].
+            for sid, info in live_sessions.items():
+                if not leader_user_id:
+                    break
+                if info["user_id"] != leader_user_id:
+                    continue
+                leader_targets.append({
+                    "session_id": sid,
+                    "home_project_id": info["home_project_id"],
+                })
+        leader_live_sids: list[str] = [t["session_id"] for t in leader_targets]
+        # Fallback (= leader fully offline): no live leader session resolves
+        # AND the primary stamped sid was already considered above (=
+        # neither live nor present in live_sessions). Fall back to the
+        # stamped leader_session_id targeting the first scope project so
+        # the observability surface (= meta.last_leader_digest_at stamping)
+        # keeps working even when the leader is fully offline. Planning-
+        # era treks (= leader_session_id empty AND no live leader) get
+        # skipped — there is genuinely no recipient.
+        if not leader_targets:
+            stamped = trek_doc.get("leader_session_id") or ""
+            if stamped:
+                leader_targets.append({
+                    "session_id": stamped,
+                    "home_project_id": target_project_id,
+                })
+                leader_live_sids = [stamped]
+        leader_digest_event_id = ""
+        # ms-97 / e-2613 (AC33) — per-leader lazy start. Fire the digest
+        # only when the leader genuinely has signal to consume (=
+        # leader_review queue / todo float / completion imminent). When
+        # the gate closes AND no progress-check fired either (= every
+        # executor was also quiet), the broadcast fallback above already
+        # injects one minimal dm event this tick so leader-digest can
+        # stay silent without violating the "no complete silence" rule.
+        # ms-95 / e-2644 — leader-digest gate も snapshot ベース。
+        # ms-97 / Phase 7-A / AC21 — leader が user summary DM 送信後
+        # (= ``meta.summary_sent_at`` stamped) かつ completion_ready が
+        # 既に 1 回 fire 済 (= ``meta.completion_notified_at`` stamped)
+        # の状態では leader-digest tick を停止する。 「完遂宣言が
+        # 終わった trek に digest を打ち続けない」 ための停止条件。
+        # 片方だけ stamped の状態では従来通り fire し続ける。
+        leader_meta_snapshot = trek_doc.get("meta") or {}
+        leader_halted_by_summary = bool(
+            leader_meta_snapshot.get("summary_sent_at")
+        ) and bool(
+            leader_meta_snapshot.get("completion_notified_at")
+        )
+        # ms-97 / Phase 7-A / AC20 — completion_ready シグナル。
+        # 全 task_states terminal + Op slot 不在 + 未通知 の時 1 回限り
+        # leader-digest payload に ``completion_ready=True`` を載せ、
+        # fanout 成功後に ``meta.completion_notified_at`` を stamp して
+        # 二度目の fire を構造的に防ぐ。
+        completion_ready_now = (
+            trek_scheduler_mod.is_completion_ready(
+                fanout_trek_doc, get_project=db.get_project,
+            )
+        )
+        leader_should_fire = (
+            (not leader_halted_by_summary)
+            and (
+                trek_scheduler_mod.should_fire_leader_tick(
+                    fanout_trek_doc, get_project=db.get_project,
+                )
+                or completion_ready_now
+            )
+        )
+        completion_ready_fanned_out = False
+        if leader_targets and leader_should_fire:
+            base_digest_payload = trek_scheduler_mod.build_leader_digest_payload(
+                fanout_trek_doc, now=now,
+            )
+            if completion_ready_now:
+                base_digest_payload["completion_ready"] = True
+            for target in leader_targets:
+                lsid = target["session_id"]
+                lpid = target["home_project_id"]
+                try:
+                    digest_envelope = envelope_mod.issue_t1_system_envelope(
+                        project_id=lpid,
+                        trek_id=trek_id,
+                        actions_authorized=["trek.leader_digest"],
+                        data_class="free",
+                        ttl_seconds=3600,
+                    )
+                except ValueError as exc:
+                    errors.append({
+                        "trek_id": trek_id,
+                        "recipient_session_id": lsid,
+                        "error": f"leader_digest_envelope_mint_failed: {exc}",
+                    })
+                    continue
+                digest_payload = dict(base_digest_payload)
+                digest_payload["recipient_session_id"] = lsid
+                digest_payload["sender_type"] = "trek-scheduler"
+                digest_payload["origin_channel"] = "trek-leader-digest"
+                # ms-97 / e-2658 — surface missing member sessions to
+                # the leader so a vanished session can be triaged from
+                # the digest UI without crawling logs. Phase pre-A trek
+                # never sets this (= alarming gated by migration_phase
+                # above), so legacy treks read the field as empty.
+                if member_session_alarm:
+                    digest_payload["alarm"] = {
+                        "missing_member_sessions": list(
+                            member_session_alarm
+                        ),
+                    }
                 digest_bus_data = {
-                    "channel": "trek-leader-digest",
+                    "channel": "dm",
                     "sender_session_id": "",
                     "payload": digest_payload,
                     "envelope": digest_envelope,
@@ -5449,12 +8486,23 @@ def trek_scheduler_tick_endpoint(
                     "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
                 }
                 try:
+                    # Record the latest event_id so the stamp below
+                    # fires on at least one successful append. We do
+                    # not collect all event_ids here (= existing
+                    # observability surface = stamp + count is
+                    # sufficient; per-event audit is upstream of bus
+                    # storage).
                     leader_digest_event_id = db.append_bus_event(
-                        target_project_id, digest_bus_data,
+                        lpid, digest_bus_data,
                     )
+                    if lpid not in leader_target_pids:
+                        leader_target_pids.append(lpid)
+                    if completion_ready_now:
+                        completion_ready_fanned_out = True
                 except Exception as exc:
                     errors.append({
                         "trek_id": trek_id,
+                        "recipient_session_id": lsid,
                         "error": (
                             f"leader_digest_send_failed: "
                             f"{type(exc).__name__}: {exc}"
@@ -5473,6 +8521,14 @@ def trek_scheduler_tick_endpoint(
             meta["last_leader_digest_at"] = now.strftime(
                 "%Y-%m-%dT%H:%M:%S.%fZ"
             )
+        # ms-97 / Phase 7-A / AC20 — completion_ready idempotent stamp.
+        # Fanout が 1 つ以上の leader session に成功した時のみ stamp する
+        # (= 全 leader が宛先不在で失敗した場合は次 tick で retry)。 stamp
+        # 後は ``is_completion_ready`` が False を返すので、 同 trek
+        # ライフサイクル内で再 fire しない (= 二度目の通知病理を構造的に
+        # 防ぐ)。
+        if completion_ready_fanned_out:
+            meta["completion_notified_at"] = trek_mod.utcnow_iso()
         trek_doc["updated_at"] = trek_mod.utcnow_iso()
         try:
             db.save_trek(trek_id, trek_doc)
@@ -5482,13 +8538,46 @@ def trek_scheduler_tick_endpoint(
                 "error": f"trek_save_failed: {type(exc).__name__}: {exc}",
             })
             continue
+        # ms-97 / Phase 7-C / AC26 — aggregate tick log row (= one per
+        # tick, not per recipient). Captures fanout breadth for later
+        # analysis without flooding the logs subcollection.
+        _append_trek_log_safe(trek_id, {
+            "kind": "tick",
+            "session_id": "",
+            "payload": {
+                "project_id": target_project_id,
+                "event_ids": list(event_ids),
+                "recipients": list(target_sids),
+                "leader_digest_event_id": leader_digest_event_id,
+                "leader_digest_recipients": list(leader_live_sids),
+                "completion_ready": bool(completion_ready_fanned_out),
+            },
+            "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        })
         fired.append({
             "trek_id": trek_id,
             "project_id": target_project_id,
             "event_ids": event_ids,
             "recipients": target_sids,
             "leader_digest_event_id": leader_digest_event_id,
-            "leader_session_id": leader_sid,
+            # ms-95 / e-2539: keep ``leader_session_id`` in the audit
+            # surface as the **stamped** sid (= the trek_doc field value)
+            # for backward compat with the existing dashboard /
+            # observability consumers. The live fan-out targets are
+            # captured in the new ``leader_digest_recipients`` field
+            # below so callers can tell "where the digest actually went"
+            # apart from "who the doc thinks the leader is".
+            "leader_session_id": trek_doc.get("leader_session_id") or "",
+            "leader_digest_recipients": list(leader_live_sids),
+            # ms-95 / e-2639: per-member dm fanout records the home
+            # project bus each recipient was reached at. Observers can
+            # tell whether scope[0] / scope[1..N] members were each
+            # delivered in their own home project (= the SPEC AC17
+            # cross-project verification surface).
+            "recipient_home_project_ids": [
+                t["home_project_id"] for t in executor_targets
+            ],
+            "leader_digest_target_project_ids": leader_target_pids,
         })
 
     # ms-83 / e-2001: idle escalation pass. Use the pre-snapshot
@@ -5498,6 +8587,12 @@ def trek_scheduler_tick_endpoint(
     for trek_doc in candidate_treks:
         trek_id = trek_doc.get("trek_id", "")
         if trek_id not in idle_trek_ids:
+            continue
+        # ms-97 / e-2612 (AC32) — halt 中 は idle escalation も停止。
+        # 「leader が pause した状態で自律 escalation が走る」 のは
+        # halt の意図 (= 全 autonomous activity の一時停止) に反する。
+        # Resume 後の次 tick で再度 idle 判定 → 必要なら escalate。
+        if trek_mod.is_halted(trek_doc):
             continue
         # Re-read the trek so the cadence-pass save lands in our
         # working copy (= last_idle_escalation_at sits next to the
@@ -5510,9 +8605,17 @@ def trek_scheduler_tick_endpoint(
             # Same fallback path as the progress-check loop; without a
             # target project we have nowhere to post.
             continue
-        target_project_id = scope[0].get("project", "")
-        if not target_project_id:
+        # ms-95 / e-2639 — use the scope-wide resolver and pick the
+        # first canonical project as the idle escalation's notify
+        # surface. Idle escalation goes to the ``notify`` channel
+        # (= user-facing, notify-user-only), not the per-member dm
+        # rail used by progress-check / leader-digest. Posting to
+        # scope[0] keeps the legacy single-bus contract; the dm
+        # transport migration covers the AI-wake rails only.
+        scope_project_ids = _resolve_trek_scope_project_ids(trek_doc)
+        if not scope_project_ids:
             continue
+        target_project_id = scope_project_ids[0]
         payload = trek_scheduler_mod.build_idle_escalation_payload(
             trek_doc, now=now,
         )
@@ -5573,6 +8676,13 @@ def trek_scheduler_tick_endpoint(
         fresh = db.get_trek(trek_id)
         if fresh is not None:
             trek_doc = fresh
+        # ms-97 / e-2612 (AC32) — halt 中 は auto-stall も停止。
+        # detect_auto_stalled_tasks 内部にも halt guard はあるが、
+        # 「server tick endpoint 側で halt なら全 autonomous activity を
+        # 止める」 という contract を一箇所で読み取れるよう、ここでも
+        # 明示的に skip する (= 多層 defence)。
+        if trek_mod.is_halted(trek_doc):
+            continue
         stalled = trek_scheduler_mod.detect_auto_stalled_tasks(
             trek_doc, now=now,
         )
@@ -5581,7 +8691,9 @@ def trek_scheduler_tick_endpoint(
         scope = trek_doc.get("scope") or []
         if not scope:
             continue
-        target_pid = scope[0].get("project", "")
+        # ms-97 P4 — route the auto-stall leader_review notice to the
+        # leader's home project instead of scope[0] (cross-project fix).
+        target_pid = _resolve_leader_home_project_id(trek_doc)
         if not target_pid:
             continue
         leader_sid = trek_doc.get("leader_session_id") or ""
@@ -5677,6 +8789,11 @@ def trek_scheduler_tick_endpoint(
         "auto_stalled": auto_stalled,
         "errors": errors,
         "quiesced": quiesced,
+        # ms-97 / e-2612 (AC32) — treks skipped because halt is set.
+        # Separate from ``quiesced`` (= terminal task-state aggregate)
+        # so observers can tell "leader pulled the cord" apart from
+        # "work is genuinely done".
+        "halted": halted,
     }
 
 
@@ -6315,12 +9432,23 @@ def list_bus_events(
 _DM_CHANNELS = {"dm"}
 
 
-def _bus_event_addressed_to(event: dict, recipient_id: str) -> bool:
+def _bus_event_addressed_to(event: dict, recipient_id: str,
+                            recipient_user_id: str = "") -> bool:
     """Return True iff ``event`` should be delivered to ``recipient_id``.
 
     See the module-level rationale on _DM_CHANNELS above. This helper is
     the single source of truth for DM routing; both the /unread endpoint
     and any future WS fan-out filter must funnel through it.
+
+    ms-54 / e-2934 (2026-07-06): user-scoped 宛先も判定する。
+    ``recipient_user_id`` は caller (= 実行者 user) の user_id で、event の
+    ``payload.recipient_user_id`` と比較する。session_id churn (= bclaude
+    再起動で sid が変わる) 経由で消える情報 DM を、 user 単位アドレスなら
+    次回起動時に読める形で救済する経路。session-scoped と user-scoped は
+    payload の field で明示的に区別され、混在は無い (= sender が --to か
+    --to-user のどちらかを明示、両者は排他)。優先順位は
+    session-scoped 優先 (= session_id field が set なら user field は無視)、
+    どちらも無ければ従来通り DM channel は drop / それ以外は broadcast。
     """
     sender = str(event.get("sender_session_id") or "")
     if sender and sender == recipient_id:
@@ -6334,9 +9462,16 @@ def _bus_event_addressed_to(event: dict, recipient_id: str) -> bool:
         # Malformed payload (non-dict) cannot encode a recipient — treat as
         # broadcast for non-DM channels and as malformed-drop for DM.
         return channel not in _DM_CHANNELS
-    intended = str(payload.get("recipient_session_id") or "")
-    if intended:
-        return intended == recipient_id
+    intended_sid = str(payload.get("recipient_session_id") or "")
+    if intended_sid:
+        return intended_sid == recipient_id
+    # ms-54 e-2934: user-scoped delivery. payload.recipient_user_id が set
+    # かつ caller の user_id と一致すれば delivery。recipient_user_id 引数が
+    # 空 (= 呼び出し側が user 未解決 or session-only mode) なら user-scoped
+    # は評価せず drop 相当 (= 「DM 宛先不明」 として fall-through)。
+    intended_uid = str(payload.get("recipient_user_id") or "")
+    if intended_uid:
+        return bool(recipient_user_id) and intended_uid == recipient_user_id
     # No recipient stamp: DM channels require explicit unicast, others
     # default to broadcast.
     return channel not in _DM_CHANNELS
@@ -6458,6 +9593,44 @@ def _apply_dm_payload_visibility(
         for s in sessions
         if s.get("session_id")
     }
+
+    # ms-95 defense-in-depth: for sessions that mint before ms-95's
+    # user_id-stamp landed (= legacy rows written by older bridge builds),
+    # fall back to actor.email → project.members[].user_id lookup. The
+    # server stamps actor.email from the authenticated JWT on every upsert,
+    # so it is spoof-resistant even for legacy rows. Without this fallback,
+    # a legacy session cannot be resolved to a user_id, and DM payloads
+    # addressed to that session get redacted even from the intended
+    # recipient (= root cause of the 2026-07-06 Iruka observation).
+    empty_sids = [
+        (sid, str((s.get("actor") or {}).get("email") or ""))
+        for s in sessions
+        for sid in (str(s.get("session_id") or ""),)
+        if sid and not sid_to_uid.get(sid) and (s.get("actor") or {}).get("email")
+    ]
+    if empty_sids:
+        try:
+            project_doc = db.get_project(project_id) or {}
+        except Exception:
+            project_doc = {}
+        members = project_doc.get("members") or []
+        email_to_uid: dict[str, str] = {}
+        for m in members:
+            if not isinstance(m, dict):
+                continue
+            m_email = str(m.get("email") or "").strip().lower()
+            m_uid = str(m.get("user_id") or "")
+            if m_email and m_uid:
+                email_to_uid[m_email] = m_uid
+        owner_email = str(project_doc.get("owner_email") or "").strip().lower()
+        owner_uid = str(project_doc.get("owner") or "")
+        if owner_email and owner_uid:
+            email_to_uid.setdefault(owner_email, owner_uid)
+        for sid, actor_email in empty_sids:
+            fallback = email_to_uid.get(actor_email.strip().lower())
+            if fallback:
+                sid_to_uid[sid] = fallback
+
     out: list[dict] = []
     for ev in events:
         channel = ev.get("channel") or ""
@@ -6467,9 +9640,23 @@ def _apply_dm_payload_visibility(
         sender_sid = str(ev.get("sender_session_id") or "")
         payload = ev.get("payload") if isinstance(ev.get("payload"), dict) else {}
         recipient_sid = str(payload.get("recipient_session_id") or "")
+        # ms-54 / e-2934: user-scoped DM は recipient_session_id が空で
+        # recipient_user_id が set。 caller の user_id と直接比較する経路も
+        # 必要 (= session→user 解決を経由しない、payload が持つ uid をそのまま
+        # 権威とする)。
+        recipient_uid_from_payload = str(payload.get("recipient_user_id") or "")
         sender_uid = sid_to_uid.get(sender_sid, "")
         receiver_uid = sid_to_uid.get(recipient_sid, "")
-        if _caller_can_see_dm_payload(ev, caller_uid, sender_uid, receiver_uid):
+        # 通常 (session-scoped) の payload visibility 判定。
+        can_see = _caller_can_see_dm_payload(
+            ev, caller_uid, sender_uid, receiver_uid
+        )
+        # user-scoped の場合、 receiver_uid が payload の recipient_user_id と
+        # 一致すれば caller は intended recipient として payload 可視。
+        if (not can_see and recipient_uid_from_payload
+                and caller_uid == recipient_uid_from_payload):
+            can_see = True
+        if can_see:
             out.append(ev)
         else:
             out.append(_redact_dm_payload(ev))
@@ -6523,7 +9710,11 @@ def list_unread_bus_events(
     AUTONOMOUS ACTION blocks. Empty string ⇒ fall back to the server cursor
     (= legacy behavior, used by /beacon-bus-inbox-hook).
     """
-    _load(project_id, user)
+    # Cost-reduction: this is one of the highest-volume polling endpoints
+    # (bus.mjs hits it every 2-3 seconds per session). The handler body
+    # never reads data["milestones"] — it only needs the meta doc for the
+    # role check. Meta-only load turns 97 Firestore reads into 1.
+    _load_meta_only(project_id, user)
     if not since:
         cursor = db.get_bus_cursor(project_id, recipient_id)
         since = cursor.get("last_seen_at", "")
@@ -6532,7 +9723,16 @@ def list_unread_bus_events(
     raw = db.list_bus_events(
         project_id, since=since, channel=channel, limit=raw_limit,
     )
-    filtered = [e for e in raw if _bus_event_addressed_to(e, recipient_id)]
+    # ms-54 / e-2934: caller の user_id を _bus_event_addressed_to に渡して
+    # user-scoped 宛先 (= payload.recipient_user_id) の DM も配信対象にする。
+    # 認証済 user の user_id は require_auth で解決済 (= _caller_uid)。 caller
+    # が自 session 以外の recipient_id を polling している異常経路 (= admin
+    # tooling 等) では、 その caller の user_id を使って判定するのが安全な既定
+    # (= 自分宛の user-scoped DM は自 poll で必ず届く、 他人宛の user-scoped
+    # DM は他人の polling で拾わせる)。
+    caller_uid = _caller_uid(user)
+    filtered = [e for e in raw
+                if _bus_event_addressed_to(e, recipient_id, caller_uid)]
     if limit:
         filtered = filtered[:limit]
     # ms-93 / e-2275: redact DM payloads the caller isn't a party to. The
@@ -6558,7 +9758,10 @@ def advance_bus_cursor(
     response is the cursor state *after* the call, so the client can verify
     its commit landed.
     """
-    _load(project_id, user)
+    # Cost-reduction: cursor advance follows every bus/unread poll (paired
+    # write after read). Handler only needs the meta doc for auth — the
+    # cursor state itself lives in bus_cursors, not data["milestones"].
+    _load_meta_only(project_id, user)
     return db.advance_bus_cursor(project_id, recipient_id, body.last_seen_at)
 
 
@@ -6569,7 +9772,8 @@ def get_bus_cursor(
     user: dict = Depends(require_auth),
 ):
     """Return the current cursor for ``recipient_id`` ({} if unset)."""
-    _load(project_id, user)
+    # Cost-reduction: read-only cursor fetch, no milestones touched.
+    _load_meta_only(project_id, user)
     return db.get_bus_cursor(project_id, recipient_id)
 
 
@@ -6604,11 +9808,13 @@ def upsert_session_intent(
 
     The endpoint does NOT enforce that the calling session_id matches the
     authenticated user — multi-agent dispatch may stamp on behalf of a
-    sub-session. We do require project membership via _load. The
+    sub-session. We do require project membership via _load_meta_only. The
     ``actor.email`` already on the session document is the audit trail for
     who actually owns it.
     """
-    _load(project_id, user)
+    # Cost-reduction: intent stamping writes to the session doc only.
+    # Membership check needs the meta doc; milestones are never read.
+    _load_meta_only(project_id, user)
     payload = body.model_dump(exclude_none=True)
     if not payload:
         return {"status": "noop"}
@@ -6658,7 +9864,9 @@ def ack_bus_event_receipt(
     boundary so a typo on the receiver does not accidentally smuggle a new
     field onto the event document.
     """
-    _load(project_id, user)
+    # Cost-reduction: receipt ack writes to the bus event doc only.
+    # Handler only needs auth via the meta doc; no milestones access.
+    _load_meta_only(project_id, user)
     stage = body.stage
     if stage not in _RECEIPT_STAGES:
         raise HTTPException(
@@ -6863,6 +10071,11 @@ def _hydrate_v2_milestones(project_id: str, data: dict) -> dict:
     Fallback: any read failure returns data unchanged. We never want a broadcast
     to be dropped on hydration error — stale-but-present beats empty.
     """
+    # v2 hydration は Firestore 専用 (db.get_db())。dynamodb / mysql backend では
+    # 全 project が v1 unified なので skip する (= store_router に get_db が無く
+    # AttributeError になるのも防ぐ、ms-96 e-2379)。
+    if os.environ.get("BEACON_STORE_BACKEND", "firestore").lower() != "firestore":
+        return data
     if data.get("schema_version") != 2:
         return data
     try:
@@ -6938,6 +10151,59 @@ def _enrich_project_slim(data: dict) -> dict:
     return enriched
 
 
+def _enrich_project_active_only(
+    data: dict, *, drop_done_entries: bool = True
+) -> dict:
+    """Active-only enrichment — drop done milestones (and optionally done entries).
+
+    Cost / payload reduction sibling of :func:`_enrich_project` and
+    :func:`_enrich_project_slim`. A typical Beacon project accumulates a
+    long tail of ``status="done"`` milestones (and each surviving milestone
+    accumulates a long tail of ``status="done"`` entries). Most polling
+    consumers (dashboard "what's happening now" views, status widgets,
+    Trek executor progress checks) only care about work that is currently
+    in flight. This helper filters both layers so callers that opt in can
+    ship a much smaller payload without touching the storage layer.
+
+    Contract:
+      * Milestones with ``status == "done"`` are dropped entirely.
+      * When ``drop_done_entries=True`` (default), remaining milestones
+        have their ``entries`` list filtered to items whose ``status`` is
+        not ``"done"``. When ``False``, all entries on surviving
+        milestones are preserved.
+      * All other fields on data / milestones / entries are pass-through.
+      * Same computed fields as :func:`_enrich_project`
+        (``total_tasks``, ``done_tasks``, ``entries_to_json``) are added.
+        The counts are computed on the FULL entries list (before the
+        done-drop) so consumers can still see "3 of 5 done" summaries
+        even when the done entries are not returned inline.
+
+    Deliberately NOT wired into any endpoint. Add on an opt-in basis in a
+    follow-up so we can measure impact per caller instead of silently
+    changing behavior of existing consumers.
+    """
+    enriched = {**data}
+    milestones = []
+    for ms in data.get("milestones", []):
+        if ms.get("status") == "done":
+            continue
+        entries = ms.get("entries", []) or []
+        total, done = core.count_task_status(entries)
+        kept_entries = entries
+        if drop_done_entries:
+            kept_entries = [
+                e for e in entries if e.get("status") != "done"
+            ]
+        milestones.append({
+            **ms,
+            "entries": core.entries_to_json(kept_entries),
+            "total_tasks": total,
+            "done_tasks": done,
+        })
+    enriched["milestones"] = milestones
+    return enriched
+
+
 async def _broadcast(project_id: str, data: dict):
     """Notify subscribed WS clients that the project changed (ms-84 / e-2326).
 
@@ -7002,9 +10268,13 @@ def _broadcast_project_after_write(project_id: str) -> None:
 
     構造解 (= ms-43 / e-2128 path): broadcast を listener に依存させない。
     write 経路の HTTP endpoint で必ず本 helper を呼んで explicit broadcast を
-    打つ。 listener (= ``_on_snapshot``) は cross-instance fallback として残す
-    (= 削除しない、 listener が動く環境では冗長 broadcast、 client 側 JSON
-    dedup で吸収)。
+    打つ。
+
+    ms-84 / e-2325 更新: listener (= ``_on_snapshot``) は disable (=
+    ``_start_watcher`` が no-op に変更) 。 1 write が explicit + listener の
+    2 経路で fire していたのが over-broadcast 病理の構造源で、 単一 instance
+    posture (min=max=1) では fallback 不要、 explicit 1 本に集約する。 詳細
+    は ``_start_watcher`` の docstring 参照。
 
     Behavior:
       * No-op when no WS clients are subscribed to ``project_id`` (= 速攻 return)
@@ -7045,7 +10315,18 @@ async def _broadcast_bus_event(project_id: str, event: dict):
     clients = _ws_connections.get(project_id, set()).copy()
     if not clients:
         return
-    msg = {"type": "bus_event", "data": event}
+    # ms-97 P1 (= review finding H1): signal-only. Broadcasting the full event
+    # over the WS leaked the DM body / sender / envelope to *every* project
+    # subscriber — including bridges (e-2380 WS push) and the Web UI —
+    # regardless of who the DM was addressed to, and even for events the ms-70
+    # gate parked as ``pending``. The frame now carries only a wake hint
+    # (event_id); every receiver re-fetches via the REST inbox, which already
+    # applies the per-recipient ``_bus_event_addressed_to`` filter + DM payload
+    # redaction (ms-93 / e-2275). Same posture the project_changed /
+    # document_change frames took in ms-84 / e-2326. Any field added here in
+    # future MUST stay non-sensitive routing metadata — never payload /
+    # sender_session_id / envelope.
+    msg = {"type": "bus_event", "event_id": event.get("event_id")}
     for ws in clients:
         try:
             await ws.send_json(msg)
@@ -7118,7 +10399,14 @@ async def _broadcast_document_change(project_id: str, payload: dict):
 
 
 def _on_snapshot(project_id: str, doc_snapshot, changes, read_time):
-    """Firestore on_snapshot callback (runs in background thread)."""
+    """Firestore on_snapshot callback (runs in background thread).
+
+    Retained but no longer wired up after ms-84 / e-2325. Kept so the v2
+    milestone-hydration contract test (tests/test_ws_v2_snapshot_hydrates_milestones.py)
+    can still exercise the function directly. If the listener is ever
+    re-attached, the body still hydrates v2 milestones correctly before
+    broadcasting.
+    """
     for doc in doc_snapshot:
         data = doc.to_dict()
         if _event_loop and _ws_connections.get(project_id):
@@ -7129,19 +10417,42 @@ def _on_snapshot(project_id: str, doc_snapshot, changes, read_time):
 
 
 def _start_watcher(project_id: str):
-    if project_id in _watchers:
-        return
-    doc_ref = db.get_db().collection(db.COLLECTION).document(project_id)
-    unsub = doc_ref.on_snapshot(
-        lambda ds, ch, rt: _on_snapshot(project_id, ds, ch, rt)
-    )
-    _watchers[project_id] = unsub
+    """No-op stub (ms-84 / e-2325).
+
+    Previously attached a Firestore ``on_snapshot`` listener as a cross-
+    instance broadcast fallback. The listener fires once per project doc
+    write *in addition to* the explicit broadcast from
+    ``_broadcast_project_after_write`` — so every write produced two
+    broadcasts. After e-2326 made WS payloads signal-only
+    (``{"type":"project_changed"}``), the two broadcasts are byte-identical
+    and the comment at ``_broadcast_project_after_write`` claiming
+    "client-side JSON dedup absorbs the duplicate" is structurally false
+    (identical payloads have no dedup signal). User-observed symptom:
+    Web UI WS Messages tab shows a row every 2-3 seconds with no
+    user-visible writes (e-2325 motivation).
+
+    Cloud Run is currently pinned to single-instance
+    (``--min-instances=1 --max-instances=1`` in
+    ``.github/workflows/deploy-cloud-run.yml``), so the cross-instance
+    fanout fallback this listener provided is structurally unneeded —
+    every write hits the same instance that owns the WS connections.
+    The explicit broadcast in ``_broadcast_project_after_write`` covers
+    100% of real-time updates in this posture.
+
+    If multi-instance is restored later, the right design is a proper
+    pub/sub layer (Cloud Pub/Sub) — not ``on_snapshot``, which is fragile
+    (silent disconnect, identical-content dedup, multi-watcher偏り —
+    see line 5121 comment, same trade-off).
+
+    The function name + signature is kept as a no-op so existing test
+    fixtures that patch it as ``lambda pid: None`` still resolve.
+    """
+    return
 
 
 def _stop_watcher(project_id: str):
-    if project_id in _watchers and not _ws_connections.get(project_id):
-        _watchers[project_id]()
-        del _watchers[project_id]
+    """No-op stub (ms-84 / e-2325). See ``_start_watcher`` for rationale."""
+    return
 
 
 @app.websocket("/ws/projects/{project_id}")

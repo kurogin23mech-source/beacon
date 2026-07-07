@@ -29,12 +29,64 @@ place (= app.py).
 from __future__ import annotations
 
 import datetime
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
+
+# ms-99 / e-2833 — Slot inventory primitive (Phase 2). The six tick decision
+# functions below all delegate slot resolution to ``materialize_slots`` so
+# the source of truth for "what work exists in this Trek" is ``scope[] ×
+# project pool`` rather than the ``task_states`` cache alone. This closes
+# the silent-quiesce loop where a partial-stamp ``task_states`` map made the
+# scheduler read the Trek as complete while pool-side todo remained (see
+# ``tests/test_trek_silent_quiesce_regression.py`` for the tk-29a11d2f
+# reproduction).
+try:
+    from trek_slots import Slot, materialize_slots  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover — flat-layout import fallback
+    from lib.trek_slots import Slot, materialize_slots  # type: ignore[no-redef]
 
 # Cadence × N rule for idle escalation (ms-83 / e-2001). Re-used here as
 # the read-side default so callers don't need to import lib.trek for one
 # constant.
 DEFAULT_CADENCE_MINUTES = 10
+
+
+# ---------------------------------------------------------------------------
+# ms-97 / e-2667 — Dual-form lazy import helper for Cloud Run flat layout.
+#
+# Cloud Run uses WORKDIR=/app/server + PYTHONPATH=/app/lib:/app/server, so
+# ``lib`` is NOT a package on the path — modules under lib/ are reachable
+# only via their bare names (= ``import trek``, matching server/app.py:33
+# ``import trek as trek_mod``). Local pytest / dev runs typically have the
+# repo root on sys.path instead, where ``from lib.trek import ...`` works.
+#
+# Pre-fix, every lazy import site tried only ``from lib.trek import ...``,
+# which silently fell back to ``None`` on Cloud Run. That broke
+# ``should_fire_executor_tick`` so every executor with no unclaim todo
+# (= the common steady-state) got skipped from executor_targets, which is
+# the real root cause behind the dogfood "全 tick で executor skip" symptom.
+#
+# This helper centralises the dual-form fallback so the four call sites
+# below stay short and the fallback order is identical everywhere.
+# ---------------------------------------------------------------------------
+
+def _import_trek():
+    """Import the lib.trek module under both flat (Cloud Run) and package layouts.
+
+    Returns the trek module on success, or ``None`` if neither import
+    path works (= a genuinely broken deploy; callers should fall back
+    to their conservative "no info" branch).
+    """
+    try:
+        import trek as _t  # type: ignore[import-not-found]
+        return _t
+    except ImportError:
+        pass
+    try:
+        from lib import trek as _t  # type: ignore[no-redef]
+        return _t
+    except ImportError:
+        return None
+
 
 # ms-75 / e-2048 + ms-88 / e-2107 — Trek task state machine constants.
 # Re-export so we can recognise terminal vs working states without dragging
@@ -42,22 +94,38 @@ DEFAULT_CADENCE_MINUTES = 10
 # side). Note: ms-88 / e-2107 changed DEFAULT_TASK_STATE from `working` to
 # `todo`, so we now use a dedicated `WORKING_TASK_STATE` constant to anchor
 # the auto-stall TTL check (= "tasks that are actively progressing").
-try:
-    from lib.trek import (
-        DEFAULT_TASK_STATE,  # noqa: F401  (= "todo")
-        TERMINAL_TASK_STATES,  # noqa: F401  (= ("done", "user_review"))
-    )
-except Exception:
+_trek_for_constants = _import_trek()
+if _trek_for_constants is not None:
+    try:
+        DEFAULT_TASK_STATE = _trek_for_constants.DEFAULT_TASK_STATE  # (= "todo")
+        TERMINAL_TASK_STATES = _trek_for_constants.TERMINAL_TASK_STATES  # (= ("done", "user_review"))
+    except AttributeError:
+        DEFAULT_TASK_STATE = "todo"
+        TERMINAL_TASK_STATES = ("done", "user_review")
+else:
     DEFAULT_TASK_STATE = "todo"
     TERMINAL_TASK_STATES = ("done", "user_review")
+del _trek_for_constants
 
 WORKING_TASK_STATE = "working"
 
-# ms-75 / e-2067 + ms-88 / e-2107 — server-side TTL safety net default.
-# Shortened 30 → 12 min so silent halts are caught within one scheduler
-# cadence (+ 2 min buffer). 罰則 = 全 working を leader_review に強制遷移
-# (= server/app.py の orchestrator 経路、 ここは検出のみ)。
-DEFAULT_WORKING_TTL_MINUTES = 12
+# ms-75 / e-2067 + ms-88 / e-2107 + ms-95 / e-2646 — server-side TTL safety
+# net default. **24h (= 1440 min)** baseline (was 12 min, was 30 min).
+#
+# 2026-06-28 dogfood で 12 min は **短すぎ** が確定: prep 待機中の executor
+# (= 例: staging URL を待っている LPS / 別 session のレビュー待ち) を
+# 「stuck」 と誤判定して working → leader_review に勝手に flip し、 executor
+# の attribution を奪う病理が観察された (= e-2646 / dogfood findings memo
+# `e70cUf8IS5uEIS1HIEXt` § #14 / #19 連鎖)。
+#
+# 24h default = 「待機」 を「stuck」 と誤判定する確率を実用上ゼロに、 かつ
+# 完全 silent halt (= 翌日になっても無反応) は依然 catch する境界。 個別
+# Trek は ``trek_doc.meta.stall_threshold_minutes`` で短い override 可能
+# (= per-Trek の急ぎ事情に合わせる経路、 既存の `working_ttl_minutes`
+# field と互換)。 「prep 待機中」 を明示的に表現したい時は
+# ``task_states[*].meta.working_pause_until`` (ISO8601) で「この時刻まで
+# stall 判定をスキップ」 と marker を立てる経路を別途用意 (= e-2646)。
+DEFAULT_WORKING_TTL_MINUTES = 1440
 
 
 # ---------------------------------------------------------------------------
@@ -153,42 +221,301 @@ def select_due_treks(
     )]
 
 
-def is_trek_task_aggregate_terminal(trek_doc: dict) -> bool:
-    """Return True iff every stamped Trek task state is terminal.
+def is_trek_task_aggregate_terminal(
+    trek_doc: dict,
+    *,
+    get_project: Callable[[str], dict],
+) -> bool:
+    """Return True iff every materialized Trek slot is in a terminal state.
 
-    ms-88 / e-2107 — terminal = ``done`` OR ``user_review`` (per the
-    5-state model and CORE doc 5nfTSmCDVUzD4SLzIhI5 § "Trek 完遂判定").
-    ``todo`` / ``working`` / ``leader_review`` keep the scheduler firing
-    because there is still active work or a pending leader judgment.
+    ms-99 / e-2833 — Phase 2 refactor: reads from ``materialize_slots``
+    (= scope[] × project pool) rather than the ``task_states`` cache. This
+    is the fix for the tk-29a11d2f silent-quiesce dogfood (2026-07-03):
+    a partial-stamp cache with one ``user_review`` entry made the old
+    task_states-only path return True while three unclaim todos still
+    lived in the pool, causing the scheduler to quiesce prematurely.
 
-    A trek with **no** stamped states (= empty task_states map) is NOT
-    terminal — it means "no executor has declared anything yet", and the
-    scheduler should keep firing obligation DMs so the executor knows to
-    act and stamp state. This preserves the existing pre-state-machine
-    behaviour when no one is using the new API.
+    Terminal = ``done`` OR ``user_review`` (ms-88 / e-2107; CORE doc
+    5nfTSmCDVUzD4SLzIhI5 § "Trek 完遂判定"). A trek with an empty scope
+    (= materialize_slots returns []) is NOT terminal — the scheduler
+    keeps firing obligation DMs until scope is populated.
 
-    Legacy ``waiting-review`` is migrated transparently via lib.trek
-    (= maps to ``leader_review`` = non-terminal) so old data keeps the
-    scheduler running until the leader makes a call.
+    ``get_project`` is a callable that returns the project pool doc for
+    a given project_id (in production this is ``db.get_project``). It is
+    keyword-only because e-2840's regression pins exercise the keyword
+    signature and the primitive's own contract mirrors it.
     """
-    states = trek_doc.get("task_states") or {}
-    if not states:
+    slots = materialize_slots(trek_doc, get_project=get_project)
+    if not slots:
+        # Empty scope = "nothing to complete yet"; keep firing.
         return False
-    try:
-        # Lazy import inside the call so the module stays light when
-        # imported by tests that mock lib.trek.
-        from lib.trek import get_task_state as _get_state
-    except Exception:
-        _get_state = None
-    for tid, entry in states.items():
-        if _get_state is not None:
-            # Use the canonical getter so legacy tokens migrate.
-            state = _get_state(trek_doc, tid)
-        else:
-            state = (entry or {}).get("state") or DEFAULT_TASK_STATE
-        if state not in TERMINAL_TASK_STATES:
+    for slot in slots:
+        if slot.resolved_state not in TERMINAL_TASK_STATES:
             return False
     return True
+
+
+# ---------------------------------------------------------------------------
+# Per-executor / per-leader lazy start (ms-97 / e-2613, AC33)
+#
+# Pre-e-2613 the scheduler fired ticks at every cadence window for every
+# live session of every member, leaving only the global aggregate-terminal
+# quiesce (= ms-88 / e-2107) and per-session terminal-claim filter
+# (= ms-88 / e-2109) as silence gates. AC33 narrows further:
+#
+#   * Per-executor tick fires iff the executor "has >=1 active claim
+#     slot" (= todo / working stamped to this session_id) OR "has unclaim
+#     todo in scope" (= there exist todo entries with no
+#     updated_by_session_id stamp, which the executor could pick up).
+#     Stop: all claim slots terminal AND no unclaim todo float.
+#
+#   * Per-leader (= leader-digest) tick fires iff "leader_review queue
+#     non-empty" OR "todo float exists" OR "completion imminent (=
+#     within COMPLETION_IMMINENT_SLOTS slots of all-terminal)" OR
+#     "abnormal executor (= leader_review queue counted above already)".
+#     Stop: all slots terminal.
+#
+#   * Even when all gates close, a single MINIMAL tick still fires per
+#     cadence window (= no complete silence). This is the broadcast
+#     fallback the existing fanout uses for sessions without claims;
+#     leader-digest gets the same minimal-tick treatment.
+# ---------------------------------------------------------------------------
+
+COMPLETION_IMMINENT_SLOTS = 2
+
+
+def _task_state_of(trek_doc: dict, task_id: str, entry: dict) -> str:
+    """Best-effort state getter for a task_states entry.
+
+    Wraps the lib.trek.get_task_state lazy import so callers do not need
+    to retry on each task. ``entry`` is the raw map; fallback to its
+    ``state`` field when the canonical getter is unavailable.
+    """
+    # ms-97 / e-2667 — dual-form lazy import so Cloud Run's flat layout
+    # (PYTHONPATH=/app/lib:/app/server) also resolves the canonical getter.
+    _trek = _import_trek()
+    _get_state = getattr(_trek, "get_task_state", None) if _trek else None
+    if _get_state is not None:
+        return _get_state(trek_doc, task_id)
+    return (entry or {}).get("state") or DEFAULT_TASK_STATE
+
+
+# ms-99 / e-2833 — "Signal source" invariant: a slot whose
+# ``resolved_state_source == "unstamped"`` is a placeholder — neither the
+# task_states cache nor the project pool has told us anything about it
+# (e.g. an MS slot whose scope entry references a project not currently
+# reachable via ``get_project``, or an atomic task/op slot whose pool
+# entry has been deleted). Such slots participate in
+# ``is_trek_task_aggregate_terminal`` (= they keep the aggregate non-
+# terminal so the scheduler keeps trying, per SPEC 方針 3 fallback), but
+# they must NOT count as "there is work to pick up / show the leader"
+# for the leader-digest / executor-pickup gates. Filtering them out here
+# is the direct fix for the false-fire path exercised by
+# ``test_lazy_start_no_signal_yields_broadcast_fallback_only``.
+_UNSTAMPED_SOURCE = "unstamped"
+
+
+def _signal_slots(slots: list[Slot]) -> list[Slot]:
+    return [s for s in slots if s.resolved_state_source != _UNSTAMPED_SOURCE]
+
+
+def has_unclaim_todo(
+    trek_doc: dict,
+    *,
+    get_project: Callable[[str], dict],
+) -> bool:
+    """Return True iff any materialized slot is unclaimed todo work.
+
+    ms-99 / e-2833 — Phase 2 refactor: reads slot inventory rather than
+    the task_states cache. "Unclaim todo" now means a slot whose
+    ``owner_session_id`` is empty AND whose ``resolved_state`` is
+    ``todo`` AND whose source is not ``unstamped`` (= there is a real
+    cache/pool signal indicating pickup-able work). This surfaces pool-
+    side todo tasks that never got a ``task_states`` stamp — the fresh-
+    executor silent-skip loop from tk-29a11d2f dogfood — without
+    spuriously firing on empty MS slots whose pool is unreachable.
+    """
+    for slot in _signal_slots(materialize_slots(trek_doc, get_project=get_project)):
+        if slot.owner_session_id:
+            continue
+        if slot.resolved_state == DEFAULT_TASK_STATE:
+            return True
+    return False
+
+
+def has_leader_review_queue(
+    trek_doc: dict,
+    *,
+    get_project: Callable[[str], dict],
+) -> bool:
+    """Return True iff any materialized slot is in ``leader_review``.
+
+    ms-99 / e-2833 — Phase 2 refactor: iterate slots, not task_states.
+    Any slot whose ``resolved_state == "leader_review"`` keeps the
+    leader digest firing until they act. ``leader_review`` can never
+    come from an unstamped source (= it requires an explicit stamp),
+    so no source filter is applied here.
+    """
+    slots = materialize_slots(trek_doc, get_project=get_project)
+    for slot in slots:
+        if slot.resolved_state == "leader_review":
+            return True
+    return False
+
+
+def has_todo_float(
+    trek_doc: dict,
+    *,
+    get_project: Callable[[str], dict],
+) -> bool:
+    """Return True iff any materialized slot is in ``todo`` with a real
+    cache/pool signal (= not an unstamped placeholder).
+
+    ms-99 / e-2833 — unlike ``has_unclaim_todo`` this also counts claimed
+    todo slots (= "todo float exists" for the leader digest regardless
+    of who owns it), but still filters unstamped slots so an empty-scope
+    Trek does not spuriously fire the digest.
+    """
+    for slot in _signal_slots(materialize_slots(trek_doc, get_project=get_project)):
+        if slot.resolved_state == DEFAULT_TASK_STATE:
+            return True
+    return False
+
+
+def is_completion_imminent(
+    trek_doc: dict,
+    *,
+    get_project: Callable[[str], dict],
+    threshold: int = COMPLETION_IMMINENT_SLOTS,
+) -> bool:
+    """Return True iff the trek is within ``threshold`` non-terminal slots
+    of full aggregate-terminal completion.
+
+    ms-99 / e-2833 — Phase 2 refactor: counts non-terminal materialized
+    slots. Unstamped placeholder slots are excluded from the count (= they
+    do not represent real remaining work), so an empty-scope Trek returns
+    False (= no imminence).
+    """
+    signal = _signal_slots(materialize_slots(trek_doc, get_project=get_project))
+    if not signal:
+        return False
+    non_terminal = 0
+    for slot in signal:
+        if slot.resolved_state not in TERMINAL_TASK_STATES:
+            non_terminal += 1
+            if non_terminal > threshold:
+                return False
+    return 0 < non_terminal <= threshold
+
+
+def should_fire_executor_tick(
+    trek_doc: dict,
+    *,
+    session_id: str,
+    get_project: Callable[[str], dict],
+) -> bool:
+    """Lazy-start decision for one executor's progress-check tick.
+
+    ms-99 / e-2833 — Phase 2 refactor: slot-inventory based. Returns True iff:
+      * The executor holds an active claim on a slot (= slot.owner_session_id
+        equals ``session_id`` AND slot.resolved_state is non-terminal;
+        source may be unstamped — the executor explicitly claimed it), OR
+      * The trek has an unclaim todo slot with a real cache/pool signal
+        the executor could pick up.
+
+    Returns False when the executor's claims are all terminal AND no
+    unclaim todo signal remains (= AC33 stop condition). The server
+    orchestrator falls back to a minimal broadcast if every executor's
+    decision is False so no complete silence occurs.
+    """
+    slots = materialize_slots(trek_doc, get_project=get_project)
+    for slot in slots:
+        if slot.owner_session_id != session_id:
+            continue
+        if slot.resolved_state not in TERMINAL_TASK_STATES:
+            return True
+    # No active claim → fall through to the unclaim-todo pickup check.
+    for slot in _signal_slots(slots):
+        if slot.owner_session_id:
+            continue
+        if slot.resolved_state == DEFAULT_TASK_STATE:
+            return True
+    return False
+
+
+def should_fire_leader_tick(
+    trek_doc: dict,
+    *,
+    get_project: Callable[[str], dict],
+) -> bool:
+    """Lazy-start decision for the leader-digest tick.
+
+    ms-99 / e-2833 — Phase 2 refactor: still layered on top of the three
+    primitives (``has_leader_review_queue`` / ``has_todo_float`` /
+    ``is_completion_imminent``) which now all read slot inventory. Each
+    primitive call re-materializes the slot list; that is idempotent
+    (auto-mirror stamps carry the AUTO_MIRROR_SESSION_ID marker and are
+    skipped on repeats) and keeps the composition boundary readable.
+
+    A trek with empty scope returns False — the orchestrator's minimal-
+    tick fallback keeps one event per cadence window so the leader can
+    still observe "nothing has happened" through the digest channel.
+    """
+    if has_leader_review_queue(trek_doc, get_project=get_project):
+        return True
+    if has_todo_float(trek_doc, get_project=get_project):
+        return True
+    if is_completion_imminent(trek_doc, get_project=get_project):
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Completion-ready signal (ms-97 / Phase 7-A, AC20)
+# ---------------------------------------------------------------------------
+
+def _has_op_slot(trek_doc: dict) -> bool:
+    """Return True iff any scope entry narrows to an Operation (= ``operation`` key set).
+
+    ms-97 / AC20 — Op slot 入りの trek は completion_ready を発火しない。
+    Op (= 定期 / 自動運転 task) は trek 完遂条件の外側で動くため、
+    別 SPEC が決まるまで本シグナル経路を suppress する。
+    """
+    for entry in trek_doc.get("scope") or []:
+        if isinstance(entry, dict) and entry.get("operation"):
+            return True
+    return False
+
+
+def is_completion_ready(
+    trek_doc: dict,
+    *,
+    get_project: Callable[[str], dict],
+) -> bool:
+    """Return True iff this trek is ready to fire a one-shot completion_ready marker.
+
+    ms-97 / Phase 7-A / AC20 — fires ONCE per trek when:
+
+      * every materialized slot is in a terminal state (= ``done`` or
+        ``user_review`` — same set as ``is_trek_task_aggregate_terminal``),
+        AND
+      * the scope contains NO Operation slot (= per AC20 footnote,
+        Op-bearing treks defer this signal pending separate SPEC), AND
+      * ``meta.completion_notified_at`` is still unstamped (= ``None``
+        / absent — i.e. the marker has not already been fanned out).
+
+    ms-99 / e-2833 — signature now threads ``get_project`` through to
+    ``is_trek_task_aggregate_terminal`` so completion detection reads
+    the same slot inventory as every other tick predicate. This is the
+    e-2840 xfail contract (= test_is_completion_ready_false_when_pool_
+    has_unclaim_todo pin).
+    """
+    if _has_op_slot(trek_doc):
+        return False
+    meta = trek_doc.get("meta") or {}
+    if meta.get("completion_notified_at"):
+        return False
+    return is_trek_task_aggregate_terminal(trek_doc, get_project=get_project)
 
 
 # ---------------------------------------------------------------------------
@@ -204,15 +531,56 @@ def get_working_ttl_minutes(trek_doc: dict,
     we use for DEFAULT_TASK_STATE). Both functions must read the same
     field name; a divergence would cause the server to interpret the
     TTL one way and the CLI to render it another.
+
+    ms-95 / e-2646 — both ``working_ttl_minutes`` (= legacy field name)
+    and ``stall_threshold_minutes`` (= new name introduced with the
+    24h default) are accepted. The new name reads first so callers
+    that adopt the new field win, but old data + tests using the old
+    name keep working unchanged (= no migration required).
     """
     meta = trek_doc.get("meta") or {}
-    val = meta.get("working_ttl_minutes")
+    # New field name takes precedence (= explicit user override for the
+    # 24h-default era).
+    val = meta.get("stall_threshold_minutes")
+    if val is None:
+        val = meta.get("working_ttl_minutes")
     if val is None:
         return default
     try:
         return int(val)
     except (TypeError, ValueError):
         return default
+
+
+def _task_entry_is_paused(entry: dict, now: datetime.datetime) -> bool:
+    """ms-95 / e-2646 — return True iff a task_states entry is marked as
+    intentionally paused (= prep waiting, not stuck).
+
+    Two equivalent markers are accepted:
+
+      * ``entry.meta.working_pause_until`` (ISO8601) — pause expires at
+        that timestamp; before it, stall check is skipped.
+      * ``entry.meta.working_paused`` truthy — explicit boolean marker,
+        useful for "pause indefinitely until I un-pause" flows.
+
+    Both live under ``entry["meta"]`` to keep the entry's top-level
+    shape (state / updated_at / updated_by_session_id / note /
+    last_activity_at) stable. The detector treats either as "skip stall
+    for this task this tick"; the caller (server tick endpoint) treats
+    the task as still actively-claimed even though no recent activity.
+    """
+    if not entry:
+        return False
+    meta = entry.get("meta") or {}
+    if meta.get("working_paused"):
+        return True
+    pause_str = meta.get("working_pause_until") or ""
+    if not pause_str:
+        return False
+    pause_until = _parse_iso(pause_str)
+    if pause_until is None:
+        return False
+    return _ensure_utc(pause_until) > _ensure_utc(now)
 
 
 def detect_auto_stalled_tasks(
@@ -266,6 +634,26 @@ def detect_auto_stalled_tasks(
         # なるので自然に対象外。
         if not entry or (entry or {}).get("state") != WORKING_TASK_STATE:
             continue
+        # ms-95 / e-2646 — prep 待機 marker。 executor が「意図的に保留中」
+        # と明示している間は stall 判定をスキップ (= 24h default の
+        # threshold より精細な per-task pause primitive)。 staging URL
+        # 受領待ち / 別 session のレビュー待ちなど、 dogfood で attribution
+        # を奪われる病理の構造的対策。
+        if _task_entry_is_paused(entry, now):
+            continue
+        # ms-95 / e-2308 — per-task TTL extension. Set by the leader via
+        # ``trek.extend_task_ttl`` (CLI ``beacon trek extend-ttl``) when
+        # delegating to an Agent-tool subagent that cannot stamp
+        # ``last_activity_at`` itself. While the extension is in the
+        # future, skip auto-stall regardless of how stale
+        # ``last_activity_at`` is. Once the extension expires, normal
+        # TTL semantics resume (= the leader is expected to renew or
+        # let the safety net fire).
+        ext_str = entry.get("ttl_extended_until") or ""
+        if ext_str:
+            ext = _parse_iso(ext_str)
+            if ext is not None and _ensure_utc(ext) > now:
+                continue
         last_str = entry.get("last_activity_at") or entry.get("updated_at") or ""
         last = _parse_iso(last_str)
         if last is None:
@@ -622,6 +1010,100 @@ _LEADER_DIGEST_HEADER = "Trek leader digest"
 _LEADER_DIGEST_KIND = "trek-leader-digest"
 
 
+def build_task_state_aggregate(trek_doc: dict) -> dict:
+    """Aggregate ``trek_doc.task_states`` for the leader-digest payload (ms-97 / e-2707).
+
+    Surfaces AC10 precedence (= ``leader_review`` / ``done`` / ``user_review``
+    / ``working`` / ``todo``) so the leader can see at a glance "どこに
+    判断要請があるか / どこが詰まっているか" without polling each session.
+    The legacy pulse-ack derived ``needs_leader_judgment`` flag is
+    executor-self-report (= updated only when an executor remembers to
+    pulse-ack with the flag), so it can sit at 0 while task_states[*].state
+    has flipped to ``leader_review``. This aggregate closes that blind spot.
+
+    Returned shape:
+        {
+          "counts": {
+            "leader_review": int, "done": int, "user_review": int,
+            "working": int, "todo": int,
+          },
+          "leader_review_queue": [
+            {
+              "task_id": str,
+              "updated_by_session_id": str,
+              "updated_at": ISO8601,
+              "note": str,
+            },
+            ...
+          ],
+          "overall_state": str,   # one of compute_ms_slot_state's outputs
+        }
+
+    Pure / I/O-free so unit tests can pin the matrix without standing up
+    Firestore. Uses ``compute_ms_slot_state`` from lib.trek (via
+    ``_import_trek``) for the overall_state derivation; if the trek module
+    cannot be resolved, the helper falls back to the same precedence rule
+    locally so the payload still ships a valid token.
+    """
+    states = trek_doc.get("task_states") or {}
+    counts = {
+        "leader_review": 0,
+        "done": 0,
+        "user_review": 0,
+        "working": 0,
+        "todo": 0,
+    }
+    leader_review_queue: list[dict] = []
+    # Build the children list for compute_ms_slot_state in one pass.
+    children: list[dict] = []
+    for tid, entry in states.items():
+        entry = entry or {}
+        state = _task_state_of(trek_doc, tid, entry)
+        if state not in counts:
+            # Unknown / malformed → collapse to todo for counting (mirrors
+            # compute_ms_slot_state's defensive cast).
+            state = "todo"
+        counts[state] += 1
+        children.append({"state": state})
+        if state == "leader_review":
+            leader_review_queue.append({
+                "task_id": tid,
+                "updated_by_session_id": entry.get("updated_by_session_id") or "",
+                "updated_at": entry.get("updated_at") or "",
+                "note": (entry.get("note") or "")[:500],
+            })
+    # Stable ordering: oldest leader_review first so the leader's eye lands
+    # on the one that has been waiting longest (= same intent as the
+    # sessions[] sort by time_on_task desc).
+    leader_review_queue.sort(key=lambda r: r.get("updated_at") or "")
+
+    _trek = _import_trek()
+    _compute = getattr(_trek, "compute_ms_slot_state", None) if _trek else None
+    if _compute is not None and children:
+        overall_state = _compute(children)
+    elif children:
+        # Local fallback mirrors lib.trek.compute_ms_slot_state precedence.
+        cs = [c["state"] for c in children]
+        if "leader_review" in cs:
+            overall_state = "leader_review"
+        elif all(s == "done" for s in cs):
+            overall_state = "done"
+        elif all(s in ("done", "user_review") for s in cs):
+            overall_state = "user_review"
+        elif "working" in cs:
+            overall_state = "working"
+        else:
+            overall_state = "todo"
+    else:
+        overall_state = "todo"
+
+    return {
+        "counts": counts,
+        "leader_review_queue": leader_review_queue,
+        "overall_state": overall_state,
+    }
+
+
 def build_leader_digest_payload(
     trek_doc: dict,
     *,
@@ -673,8 +1155,37 @@ def build_leader_digest_payload(
     """
     # Local import to keep module-level imports light (= the scheduler
     # module is imported in lots of hot test paths and trek is a
-    # comparatively heavy module).
-    import trek as trek_mod
+    # comparatively heavy module). ms-97 / e-2667 — dual-form so both
+    # Cloud Run flat layout and local package layout resolve.
+    trek_mod = _import_trek()
+    if trek_mod is None or not hasattr(trek_mod, "summarize_pulse_acks"):
+        # Defensive: with no trek module we can't render a real digest.
+        # Return an empty-but-well-shaped payload so callers do not crash.
+        now = _ensure_utc(now or datetime.datetime.now(datetime.timezone.utc))
+        # ms-97 / e-2707 — even on the fallback path, surface the
+        # task_state aggregate so the leader-digest is never silent about
+        # the leader_review queue (= the legacy needs_leader_judgment is
+        # pulse-ack derived and can lag behind real state).
+        task_state_aggregate = build_task_state_aggregate(trek_doc)
+        return {
+            "kind": _LEADER_DIGEST_KIND,
+            "trek_id": trek_doc.get("trek_id", ""),
+            "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "summary": {
+                "active": 0, "stuck": 0, "idle": 0,
+                "needs_leader_judgment": 0,
+                "leader_review_queue_count": len(
+                    task_state_aggregate["leader_review_queue"]
+                ),
+                "total_acks_across_sessions": 0,
+            },
+            "sessions": [],
+            "task_state_aggregate": task_state_aggregate,
+            "body": (
+                f"[{_LEADER_DIGEST_HEADER}] trek_id={trek_doc.get('trek_id', '')}\n"
+                "  (trek module unavailable — digest skipped this tick)"
+            ),
+        }
 
     now = _ensure_utc(now or datetime.datetime.now(datetime.timezone.utc))
     trek_id = trek_doc.get("trek_id", "")
@@ -705,12 +1216,26 @@ def build_leader_digest_payload(
         reverse=True,
     )
 
+    # ms-97 / e-2707 — task_state aggregate (= AC10 precedence + leader_review
+    # queue list). Surface BEFORE summary_block so the count field below
+    # can read it without recomputing.
+    task_state_aggregate = build_task_state_aggregate(trek_doc)
+
     summary_block = {
         "active": int(summary.get("active_session_count") or 0),
         "stuck": int(summary.get("stuck_session_count") or 0),
         "idle": int(summary.get("idle_session_count") or 0),
         "needs_leader_judgment": int(
             summary.get("needs_leader_judgment_count") or 0
+        ),
+        # ms-97 / e-2707 — task_state-derived parallel to needs_leader_judgment.
+        # needs_leader_judgment is pulse-ack self-report (= executor remembers
+        # to flag it); leader_review_queue_count is structural (= counted
+        # straight from task_states.*.state). The two answer different
+        # questions: "did executor wave a hand?" vs "did anyone flip the slot
+        # to leader_review?". Leaders read whichever is non-zero.
+        "leader_review_queue_count": len(
+            task_state_aggregate["leader_review_queue"]
         ),
         "total_acks_across_sessions": int(
             summary.get("total_acks_across_sessions") or 0
@@ -739,12 +1264,28 @@ def build_leader_digest_payload(
     else:
         sessions_block_str = "  (まだ pulse-ack を打った session がありません)"
 
+    # ms-97 / e-2707 — leader_review_queue line is emitted only when the
+    # queue is non-empty so a clean digest stays terse. When non-empty it
+    # surfaces the count + first 3 task_ids so the leader sees them inline
+    # without having to re-read the structured payload.
+    lr_queue = task_state_aggregate["leader_review_queue"]
+    lr_line = ""
+    if lr_queue:
+        lr_ids = ", ".join(r["task_id"] for r in lr_queue[:3])
+        more = f" (+{len(lr_queue) - 3} more)" if len(lr_queue) > 3 else ""
+        lr_line = (
+            f"\nleader_review queue: {len(lr_queue)} 件 [{lr_ids}{more}] "
+            f"— invoke /beacon-trek-review NOW"
+        )
+
     body = (
         f"[{_LEADER_DIGEST_HEADER}] trek_id={trek_id}\n"
         f"active={summary_block['active']} "
         f"stuck={summary_block['stuck']} "
         f"idle={summary_block['idle']} "
-        f"needs_leader_judgment={summary_block['needs_leader_judgment']}\n"
+        f"needs_leader_judgment={summary_block['needs_leader_judgment']} "
+        f"leader_review_queue={summary_block['leader_review_queue_count']}"
+        f"{lr_line}\n"
         f"{sessions_block_str}"
     )
 
@@ -754,6 +1295,7 @@ def build_leader_digest_payload(
         "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "summary": summary_block,
         "sessions": sessions_list,
+        "task_state_aggregate": task_state_aggregate,
         "body": body,
     }
 

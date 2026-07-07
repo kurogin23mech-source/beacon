@@ -182,7 +182,7 @@ ALLOW_MISSING_FROM_HELP_JSON: set[str] = {
 # Source of truth for the asymmetry baseline as of ms-44 e-1171.
 ALLOW_BASH_ONLY_DISPATCH: set[str] = {
     "setup",       # interactive shell setup (tmux/zsh detection)
-    "retro",       # interactive curses retro flow
+    # ms-61 / e-2348: `retro` is now in dispatch.py (prepare/save/done)
     "update",      # self-update via brew/curl, bash-specific
     "reset",       # destructive admin op, bash-only
     "run",         # operation run record (member-aware, not in Python yet)
@@ -233,6 +233,9 @@ ALLOW_MISSING_FROM_README: set[str] = {
     # main `## CLI Commands` table.
     "cloud upload-initial",
     "cloud force-pull",
+    # ms-95 / e-2339: orphan-retire helper, documented alongside its
+    # sibling `cloud upload-initial` in the Cloud Mode section.
+    "cloud migrate-from-local",
     "help",             # `beacon help` mirrors --help, not a "command"
     "update",           # documented in self-update section, not CLI table
     # ms-55 coordination signal CLIs — README rows are a follow-up; until

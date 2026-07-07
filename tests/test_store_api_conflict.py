@@ -83,3 +83,74 @@ def test_baseline_refreshes_after_save():
     s.save_project(data)  # must not raise — baseline tracked our own write
     assert len(s._client.put_calls) == 2
     assert s._client.put_calls[-1]["summary"] == "second"
+
+
+# ---------------------------------------------------------------------------
+# ms-95 / e-2710 — cloud round-trip MUST preserve bus_auto_execute_channels
+# in the local mirror.
+#
+# Failure mode this guards against:
+# 1. trek auto-arm writes 4 channels to local + cloud.
+# 2. A later `load_project()` fetches the cloud doc (still has the field)
+#    and _write_local_cache overwrites the local file.
+# 3. If the field is silently dropped at any layer (= API serializer,
+#    validation, write-back coercion), the local file ends up without it —
+#    the inbox hook then reads [] and downgrades every trek event.
+#
+# This is the structural symmetry assertion that backs the
+# `test_client_and_server_*` invariant tests in
+# tests/test_bus_auto_execute_allowlist.py — they pin the **two readers**
+# while this one pins the **write-back path** that feeds those readers.
+# ---------------------------------------------------------------------------
+
+def test_load_project_local_mirror_preserves_allowlist(tmp_path):
+    """A load that triggers _write_local_cache MUST persist
+    bus_auto_execute_channels into the local file. Without it, a cloud-side
+    save of allowlist updates by one CLI invocation would be erased by the
+    next `load_project` from a separate invocation."""
+    import json as _json
+    cache_path = tmp_path / "project.json"
+    allowlist = [
+        "trek-progress-check", "trek-trigger",
+        "trek-task-review", "trek-leader-digest",
+    ]
+    cloud_doc = {
+        "name": "p", "summary": "", "milestones": [],
+        "bus_auto_execute_channels": allowlist,
+    }
+    s = _make_store(cloud_doc)
+    s._local_cache_path = str(cache_path)
+
+    s.load_project()
+
+    assert cache_path.exists(), (
+        "_write_local_cache must produce a local file after load_project")
+    local = _json.loads(cache_path.read_text())
+    assert local.get("bus_auto_execute_channels") == allowlist, (
+        f"local mirror lost the allowlist round-tripping through StoreApi: "
+        f"local={local.get('bus_auto_execute_channels')!r}. "
+        f"This is the e-2710 failure surface — if this regresses, every "
+        f"non-trek CLI invocation will silently erase the trek auto-arm "
+        f"and the inbox hook will downgrade every trek event.")
+
+
+def test_save_project_local_mirror_preserves_allowlist(tmp_path):
+    """Symmetric: a save that triggers _write_local_cache MUST persist
+    bus_auto_execute_channels into the local file. This is what
+    `cmd_bus_auto_execute_add` and `_arm_trek_channels_and_budget` rely on
+    to keep the inbox hook in sync after a CLI write."""
+    import json as _json
+    cache_path = tmp_path / "project.json"
+    allowlist = ["trek-progress-check"]
+    cloud_doc = {"name": "p", "summary": "", "milestones": []}
+    s = _make_store(cloud_doc)
+    s._local_cache_path = str(cache_path)
+
+    # Mirror the real CLI flow: load, mutate, save.
+    data = s.load_project()
+    data["bus_auto_execute_channels"] = allowlist
+    s.save_project(data)
+
+    assert cache_path.exists()
+    local = _json.loads(cache_path.read_text())
+    assert local.get("bus_auto_execute_channels") == allowlist

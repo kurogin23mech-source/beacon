@@ -69,7 +69,7 @@ def test_gate_skip_when_sender_equals_receiver():
     to talk to themselves without the gate firing. This is the dogfood
     backward-compat path that ms-70 must preserve.
     """
-    should_gate, reason = dm_gate.should_gate_dm_action(
+    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
         sender_user_id="user-alice",
         receiver_user_id="user-alice",
         actions_authorized=["commit", "deploy"],
@@ -91,7 +91,7 @@ def test_gate_skip_when_sender_and_receiver_share_a_trek():
     already consented (at Trek-join time) to having the sender's AI
     act on their behalf within that scope.
     """
-    should_gate, reason = dm_gate.should_gate_dm_action(
+    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
         sender_user_id="user-alice",
         receiver_user_id="user-bob",
         actions_authorized=["commit"],
@@ -113,7 +113,7 @@ def test_gate_triggers_for_cross_user_action_without_shared_trek():
     pending sidecar so a downstream Skill / CLI can read it and prompt
     the receiver's human for y/n.
     """
-    should_gate, reason = dm_gate.should_gate_dm_action(
+    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
         sender_user_id="user-alice",
         receiver_user_id="user-bob",
         actions_authorized=["commit", "push"],
@@ -135,7 +135,7 @@ def test_gate_skip_when_actions_authorized_is_empty_even_across_users():
     chat throttling. Tested explicitly here so a future refactor can't
     accidentally turn the bus into a moderation pipeline.
     """
-    should_gate, reason = dm_gate.should_gate_dm_action(
+    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
         sender_user_id="user-alice",
         receiver_user_id="user-bob",
         actions_authorized=[],
@@ -151,7 +151,7 @@ def test_gate_skip_when_actions_authorized_is_none():
     Some envelope readers normalize missing key to None rather than
     empty list. The judge must handle both shapes identically.
     """
-    should_gate, reason = dm_gate.should_gate_dm_action(
+    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
         sender_user_id="user-alice",
         receiver_user_id="user-bob",
         actions_authorized=None,
@@ -173,7 +173,7 @@ def test_same_user_skip_takes_precedence_over_no_actions():
     "info-sharing skip"; it should be tagged as "same-user skip" so
     the post-hoc trail clearly distinguishes the structural reason.
     """
-    should_gate, reason = dm_gate.should_gate_dm_action(
+    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
         sender_user_id="user-alice",
         receiver_user_id="user-alice",
         actions_authorized=[],
@@ -204,9 +204,12 @@ def test_shared_trek_lookup_detects_receiver_in_members_list():
     lookup = dm_gate.build_shared_trek_lookup_from_lists(
         lambda uid: treks_by_uid.get(uid, [])
     )
-    assert lookup("user-alice", "user-bob") is True
+    matched, trek_id = lookup("user-alice", "user-bob")
+    assert matched is True
+    assert trek_id == "tk-aaa"
     # Receiver NOT in the trek → False.
-    assert lookup("user-alice", "user-charlie") is False
+    matched_neg, _ = lookup("user-alice", "user-charlie")
+    assert matched_neg is False
 
 
 def test_shared_trek_lookup_detects_receiver_as_creator():
@@ -227,7 +230,100 @@ def test_shared_trek_lookup_detects_receiver_as_creator():
     lookup = dm_gate.build_shared_trek_lookup_from_lists(
         lambda uid: treks_by_uid.get(uid, [])
     )
-    assert lookup("user-alice", "user-bob") is True
+    matched, trek_id = lookup("user-alice", "user-bob")
+    assert matched is True
+    assert trek_id == "tk-bbb"
+
+
+def test_shared_trek_lookup_skips_halted_trek():
+    """ms-97 / e-2612 (AC32) — halted treks must not grant DM bypass.
+
+    Leader pulled the Andon cord → autonomous cross-user action exchange
+    must fall back to the normal cross-user gate. Even if sender +
+    receiver share the trek's members[], the halt flag suspends the
+    bypass for the duration of the halt.
+    """
+    treks_by_uid = {
+        "user-alice": [
+            {
+                "trek_id": "tk-halted",
+                "creator_actor": {"user_id": "user-alice"},
+                "members": [
+                    {"user_id": "user-alice", "role": "leader"},
+                    {"user_id": "user-bob", "role": "member"},
+                ],
+                "halt": {"issued_by_session_id": "sv-alice"},
+                "status": "active",
+            }
+        ],
+    }
+    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+        lambda uid: treks_by_uid.get(uid, [])
+    )
+    # Halt set → no bypass even though both users are in members[].
+    matched, _ = lookup("user-alice", "user-bob")
+    assert matched is False
+
+
+def test_shared_trek_lookup_skips_archived_trek():
+    """Archived treks no longer grant DM bypass (defence in depth alongside
+    AC32 halt skip). Caller-side filter already hides archived by default
+    but the lookup itself must not depend on the filter being applied."""
+    treks_by_uid = {
+        "user-alice": [
+            {
+                "trek_id": "tk-archived",
+                "creator_actor": {"user_id": "user-alice"},
+                "members": [
+                    {"user_id": "user-alice"},
+                    {"user_id": "user-bob"},
+                ],
+                "status": "archived",
+            }
+        ],
+    }
+    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+        lambda uid: treks_by_uid.get(uid, [])
+    )
+    matched, _ = lookup("user-alice", "user-bob")
+    assert matched is False
+
+
+def test_shared_trek_lookup_multi_trek_only_one_active_still_grants_bypass():
+    """ms-97 / e-2612 (AC32) — if the user shares multiple treks and at
+    least one is non-halted + non-archived, bypass still applies. Halt
+    only suspends bypass for the specific halted trek, not blanket.
+    """
+    treks_by_uid = {
+        "user-alice": [
+            {
+                "trek_id": "tk-halted",
+                "creator_actor": {"user_id": "user-alice"},
+                "members": [
+                    {"user_id": "user-alice"},
+                    {"user_id": "user-bob"},
+                ],
+                "halt": {"issued_by_session_id": "sv-alice"},
+                "status": "active",
+            },
+            {
+                "trek_id": "tk-active",
+                "creator_actor": {"user_id": "user-alice"},
+                "members": [
+                    {"user_id": "user-alice"},
+                    {"user_id": "user-bob"},
+                ],
+                "status": "active",
+            },
+        ],
+    }
+    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+        lambda uid: treks_by_uid.get(uid, [])
+    )
+    # tk-active grants bypass despite tk-halted being halted.
+    matched, trek_id = lookup("user-alice", "user-bob")
+    assert matched is True
+    assert trek_id == "tk-active"
 
 
 def test_shared_trek_lookup_empty_user_ids_return_false():
@@ -238,9 +334,9 @@ def test_shared_trek_lookup_empty_user_ids_return_false():
     judge falls through to the no_actions or cross-user-action path.
     """
     lookup = dm_gate.build_shared_trek_lookup_from_lists(lambda uid: [])
-    assert lookup("", "user-bob") is False
-    assert lookup("user-alice", "") is False
-    assert lookup("", "") is False
+    assert lookup("", "user-bob")[0] is False
+    assert lookup("user-alice", "")[0] is False
+    assert lookup("", "")[0] is False
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +407,7 @@ def test_dispatcher_writes_pending_sidecar_when_gate_triggers(monkeypatch):
     sender_uid = "user-alice"
     receiver_uid = "user-bob"
     actions = ["commit"]
-    should_gate, reason = dm_gate.should_gate_dm_action(
+    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
         sender_user_id=sender_uid,
         receiver_user_id=receiver_uid,
         actions_authorized=actions,
@@ -352,7 +448,7 @@ def test_dispatcher_skips_sidecar_when_no_actions(monkeypatch):
     def fake_put_bus_event_approval(*args, **kwargs):
         call_count["n"] += 1
 
-    should_gate, reason = dm_gate.should_gate_dm_action(
+    should_gate, reason, _trek_id = dm_gate.should_gate_dm_action(
         sender_user_id="user-alice",
         receiver_user_id="user-bob",
         actions_authorized=[],

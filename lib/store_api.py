@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 
@@ -42,7 +43,8 @@ class StoreApi:
     _WS_RECONNECT_BASE = 1.0
     _WS_RECONNECT_MAX = 30.0
 
-    def __init__(self, api_url: str, project_id: str, token: str = ""):
+    def __init__(self, api_url: str, project_id: str, token: str = "",
+                 local_cache_path: str | None = None):
         from api_client import ApiClient
         self._client = ApiClient(api_url, token)
         self._api_url = api_url
@@ -60,6 +62,17 @@ class StoreApi:
         self._ws_reconnect_attempts = 0
         # HTTP polling throttle
         self._last_poll_time = 0.0
+        # ms-95 / e-746: write-back cache path. When set, every successful
+        # API read / write also writes the canonical document to this local
+        # file, keeping ``.beacon/project.json`` as an up-to-date read-only
+        # mirror of the cloud truth. This addresses the original ms-36
+        # "cloud mode はローカル .beacon を読み取り専用キャッシュ" contract
+        # that ms-84 Phase 3 (e-2037) deferred. Tauri's ``load_project_json``
+        # still reads this file at startup; without write-back the first
+        # render shows stale data until the WS push arrives (= e-723 era).
+        # The write is best-effort and never raises — any I/O failure is
+        # swallowed so a flaky disk cannot break the CLI command itself.
+        self._local_cache_path = local_cache_path
 
     def load_project(self) -> dict:
         # If we have fresh data from WebSocket, use it
@@ -69,10 +82,12 @@ class StoreApi:
                 self._ws_data = None
                 self._last_hash = self._hash(data)
                 StoreApi._load_baseline[self._project_id] = self._last_hash
+                self._write_local_cache(data)
                 return data
         data = self._client.get_project(self._project_id)
         self._last_hash = self._hash(data)
         StoreApi._load_baseline[self._project_id] = self._last_hash
+        self._write_local_cache(data)
         return data
 
     def save_project(self, data: dict) -> None:
@@ -94,6 +109,47 @@ class StoreApi:
         self._client.put_project(self._project_id, data)
         self._last_hash = self._hash(data)
         StoreApi._load_baseline[self._project_id] = self._last_hash
+        self._write_local_cache(data)
+
+    def _write_local_cache(self, data: dict) -> None:
+        """Mirror the just-loaded/saved cloud document into the local cache.
+
+        ms-95 / e-746 — Cloud mode previously left ``.beacon/project.json``
+        as a stale snapshot from initial cloud-join (or a pre-cut-over local
+        install), causing Tauri's ``load_project_json`` to render a
+        ms-22-era world for several seconds until the WS push arrived.
+        Writing back here keeps the local file as a read-only mirror of the
+        cloud truth, refreshed on every CLI invocation.
+
+        The write is intentionally best-effort: any OS / filesystem error
+        is swallowed so a non-writable disk cannot break the CLI command
+        itself. Direction is cloud→local only (= we never PUT from this
+        file back to cloud), which preserves the ms-84 Phase 3 (e-2037)
+        invariant that the cloud document is the single source of truth
+        for writes.
+        """
+        # ``getattr`` default protects test fixtures that build StoreApi via
+        # ``__new__`` + manual attribute seeding (= avoids ApiClient / auth /
+        # WS construction in unit tests; see tests/test_cmd_purge_cloud.py).
+        # Those fixtures may not seed ``_local_cache_path``; we treat that
+        # the same as the explicit ``None`` case (= no cache write).
+        cache_path = getattr(self, "_local_cache_path", None)
+        if not cache_path:
+            return
+        try:
+            cache_dir = os.path.dirname(cache_path)
+            if cache_dir:
+                os.makedirs(cache_dir, exist_ok=True)
+            # Write atomically via a temp file in the same directory so a
+            # partial write cannot leave a truncated project.json on disk.
+            tmp_path = f"{cache_path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+            os.replace(tmp_path, cache_path)
+        except OSError:
+            # Best-effort cache; never block the CLI on a disk hiccup.
+            return
 
     def has_changed(self) -> bool:
         """Check if the project has changed since last load/save.

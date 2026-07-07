@@ -439,6 +439,36 @@ stdout が `ok` の場合のみ Step 7b に進む。
 
 「あとで」「要らない」を選んだら何もしない。ユーザーは後で明示的に opt-in / install できる。
 
+## GitHub owner / repo の取り扱い (= 推測禁止 / e-2370)
+
+install 手順 / clone コマンド / repository URL 等を生成・提示するとき、 GitHub の **owner (= 所有者) と repository 名は AI が推測してはならない**。 過去の dogfood (= 2026-06-24) で、 install prompt 生成時に AI が owner 名を勝手に推測 (= hallucination) して wrong owner の clone URL を流す事故が観察された。 user が手元で気付かないと、 wrong owner の clone url が install 手順に流れ、 install 失敗 / 別 user の repo を clone する事故 (= silently wrong url) になる。
+
+### 構造的ルール
+
+1. **取得は構造化 source から**: GitHub owner / repository 名が必要になったら、 必ず以下の順序で **コマンド実行による取得** を行う:
+   ```bash
+   # 第 1 候補: gh CLI (= 認証済 / fast)
+   gh repo view --json owner,name -q '.owner.login + "/" + .name' 2>/dev/null
+
+   # 第 2 候補: git remote (= gh が無い時)
+   git remote get-url origin 2>/dev/null \
+     | sed -E 's|^.*github\.com[:/]([^/]+)/([^/.]+)(\.git)?$|\1/\2|'
+   ```
+
+2. **取得失敗時は placeholder を残す**: 両方失敗 (= git remote が無い / GitHub 以外の remote / コマンド未インストール) したら、 AI 推測で埋めずに **明確な placeholder** をそのまま残す:
+   - owner: `<your-github-owner>`
+   - repo:  `<your-repo-name>`
+   - URL 例: `https://github.com/<your-github-owner>/<your-repo-name>`
+
+3. **絶対禁止**:
+   - cwd ディレクトリ名 / プロジェクト名から owner を類推する
+   - 過去の文脈 / training data から既知の owner 名を流用する
+   - 「たぶん」「推定」 で owner を埋める
+
+4. **user への提示**: placeholder を残した時は「GitHub owner / repo は取得できませんでした。 install 前にこの placeholder を user の値に置き換えてください」 と明示的に伝える。
+
+この forcing function は本 Skill だけでなく、 `/beacon-onboard` Skill および server/static/join.html `buildSetupPrompt` (= 招待 install prompt) でも適用される (= 全 install prompt 経路に共通)。
+
 ## 制約
 
 - **ユーザーをターミナルに戻さない** (CORE doc `ux-principle-no-terminal`)

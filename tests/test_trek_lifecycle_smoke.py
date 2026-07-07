@@ -120,11 +120,24 @@ def test_cross_project_trek_full_lifecycle(smoke_env):
     assert trek_id.startswith("tk-")
 
     # --- 2. Alice plans cross-project scope (4 projects)
-    _ok(_run(alice, "plan", trek_id, "--add-scope", "beacon-b95643:ms-69"),
-        "plan beacon")
-    _ok(_run(alice, "plan", trek_id, "--add-scope", "pe-xxx:op-12"), "plan pe")
-    _ok(_run(alice, "plan", trek_id, "--add-scope", "lps-xxx:e-1234"), "plan lps")
-    _ok(_run(alice, "plan", trek_id, "--add-scope", "trailnode-xxx"), "plan tn")
+    # ms-97 / e-2626 — scope-add now stages a pending op (AC23). Each
+    # ``--add-scope`` call returns a pending_id; the caller must approve
+    # to grow ``scope[]``. We do that inline so the smoke test exercises
+    # the full stage→approve round-trip per entry.
+    # ms-97 / e-2659 (AC7): all entries must carry a narrowing key,
+    # so the trailing trailnode entry now scopes a milestone instead of
+    # the whole project (= used to test the project-wide path; the strict
+    # default has retired that variant on the new add path).
+    for ref in ("beacon-b95643:ms-69", "pe-xxx:op-12",
+                "lps-xxx:e-1234", "trailnode-xxx:ms-1"):
+        r_add = _ok(
+            _run(alice, "plan", trek_id, "--add-scope", ref, "--json"),
+            f"plan {ref}",
+        )
+        add_doc = json.loads(r_add.stdout)
+        pid = add_doc["pending_scope_ops"][-1]["pending_id"]
+        _ok(_run(alice, "scope-approve", trek_id, pid),
+            f"approve {ref}")
 
     r = _ok(_run(alice, "show", trek_id, "--json"))
     doc = json.loads(r.stdout)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Beacon CLI commands - thin adapter over core.py logic."""
 
-__version__ = "0.48.0"
+__version__ = "0.55.0"
 
 import json
 import os
@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 import urllib.parse
-from typing import Optional
+from typing import Optional, Tuple
 
 from store import get_store
 import core
@@ -31,10 +31,18 @@ def _resolve_session_id() -> str:
     test sandboxes that don't run the heartbeat). The empty string is
     the documented "no session" sentinel in core.log_commit / core.pr_add —
     those entries simply won't appear in session-log aggregation queries.
+
+    ms-95 e-2419: bridge claim を優先する resolve_active_session_id を使う
+    (= e-1331 / e-1460 で確立された "MCP bridge が listen 中の cwd では bridge
+    の session_id を CLI sender にも採用する" 原則)。 これで beacon bus send で
+    送った DM への reply (= recipient = parent sender) が bridge listen sid に
+    一致し、 PE → LPS → PE の双方向 push が成立する。 旧実装は get_session_id を
+    直叩きしていたため bridge claim を skip し、 CLI mint sid と bridge listen
+    sid が乖離して reply silent failure を引き起こしていた。
     """
     try:
         import session as _session
-        return _session.get_session_id()
+        return _session.resolve_active_session_id()
     except Exception:
         return ""
 
@@ -905,6 +913,12 @@ def cmd_milestone_list():
             "summary": data.get("summary", ""),
             "milestones": [],
             "operations": [],
+            # ms-61 / e-1843 — pending Operations (= todo / in_progress)
+            # are surfaced separately so /beacon-session-start Step 3.7
+            # ("pending Operation の活性化議論") has data to read.
+            # The legacy ``operations[]`` field stays open-only so all
+            # existing readers / Skills keep working unchanged.
+            "pending_operations": [],
         }
         for ms in milestones:
             entries = ms.get("entries", [])
@@ -925,23 +939,47 @@ def cmd_milestone_list():
         import datetime as _dt
         today_str = _dt.date.today().isoformat()
         for op in data.get("operations", []):
-            if op.get("status") != "open":
-                continue
-            entries = op.get("entries", [])
-            runs = [e for e in entries if e.get("type") == "run_record"]
-            open_incidents = [e for e in entries if e.get("type") == "incident" and e.get("status") == "open"]
-            recent_runs = []
-            for r in runs[-3:]:
-                recent_runs.append({"date": _local_date(r.get("date", "")), "status": r.get("status", "")})
-            output["operations"].append({
-                "id": op["id"],
-                "title": op.get("title", ""),
-                "status": op.get("status", "open"),
-                "log_source": op.get("log_source", ""),
-                "schedule": op.get("schedule", {}),
-                "recent_runs": recent_runs,
-                "open_incidents": open_incidents,
-            })
+            if op.get("status") == "open":
+                entries = op.get("entries", [])
+                runs = [e for e in entries if e.get("type") == "run_record"]
+                open_incidents = [e for e in entries if e.get("type") == "incident" and e.get("status") == "open"]
+                recent_runs = []
+                for r in runs[-3:]:
+                    recent_runs.append({"date": _local_date(r.get("date", "")), "status": r.get("status", "")})
+                output["operations"].append({
+                    "id": op["id"],
+                    "title": op.get("title", ""),
+                    "status": op.get("status", "open"),
+                    "log_source": op.get("log_source", ""),
+                    "schedule": op.get("schedule", {}),
+                    "recent_runs": recent_runs,
+                    "open_incidents": open_incidents,
+                })
+            elif op.get("status") in ("todo", "in_progress"):
+                # ms-61 / e-1843 — surface pending Operations for the
+                # Skill's Step 3.7 activation discussion. We carry the
+                # full ``entries`` list so the Skill / helper can count
+                # operation_tasks without a second CLI call (mirrors the
+                # "embed enough context to avoid round-trips" pattern
+                # used for milestones above).
+                entries = op.get("entries", [])
+                op_tasks = [e for e in entries if e.get("type") == "operation_task"]
+                op_tasks_done = sum(1 for t in op_tasks if t.get("status") == "done")
+                output["pending_operations"].append({
+                    "id": op["id"],
+                    "title": op.get("title", ""),
+                    "status": op.get("status", ""),
+                    "log_source": op.get("log_source", ""),
+                    "schedule": op.get("schedule", {}),
+                    "activation_hint": op.get("activation_hint", ""),
+                    "objective": op.get("objective", ""),
+                    "operation_tasks_total": len(op_tasks),
+                    "operation_tasks_done": op_tasks_done,
+                    # The Skill's classifier helper reads ``entries`` to
+                    # decide verdict; embed verbatim so caller has one
+                    # source of truth.
+                    "entries": entries,
+                })
         print(json.dumps(output, ensure_ascii=False))
         return
 
@@ -3010,6 +3048,84 @@ def _push_session_log_to_cloud(payload: dict) -> bool:
         return False
 
 
+def _stamp_cloud_session_shutdown(session_id: str) -> bool:
+    """Mark a cloud session document as shut down (ms-95 / e-2305).
+
+    Writes ``shutdown=true`` + ``last_poll_at=now`` to the cloud
+    sessions/{session_id} doc so the server-side directory query
+    (``/api/projects/{pid}/sessions?healthy_only=true``) classifies this
+    session as not-healthy *immediately* — without waiting for the
+    bridge's natural ``last_poll_at`` aging window (= max(30s, 2×
+    poll_interval_ms)).
+
+    Why this exists (e-2305 background): the shutdown stamp was
+    previously written only by ``channel/bus.mjs`` from its SIGINT /
+    SIGTERM graceful-exit path. That single path has three silent-failure
+    modes that leave the session advertised as ``healthy=true`` long
+    after the user-facing terminal has closed:
+
+      1. The bridge process outlives its Claude Code parent (= MCP
+         stdio shutdown unreliable on some hosts). bridge keeps polling,
+         so ``last_poll_at`` never goes stale → directory keeps the
+         row healthy indefinitely.
+      2. The shutdown PUT fails (cloud transient blip). The bridge's
+         try/catch swallows the error; the bridge then exits. The
+         server-side row carries no ``shutdown`` flag, but
+         ``last_poll_at`` will age out within 30s — so this case
+         self-heals at the heartbeat-staleness threshold.
+      3. Hard kill (SIGKILL / OS shutdown). No shutdown stamp; the
+         session ages out at the same 30s window as case 2.
+
+    Case 1 is the e-2305 reproduction: 3 sessions stacking up,
+    ``healthy=true`` persistently displayed. Adding a CLI-driven shutdown
+    stamp closes this gap structurally: when the user explicitly says
+    "this session is ending" via ``beacon session end``, we converge on
+    the same server-side merge field bus.mjs uses (= idempotent), but
+    via a path that does NOT depend on the bridge process's liveness or
+    its signal-delivery ordering. The two paths are integrity-safe by
+    Firestore merge=True semantics.
+
+    Best-effort: cloud unreachable, local-mode project, or not-logged-in
+    all return False without raising. Caller (cmd_session_end /
+    cmd_session_rescue) MUST NOT abort on a False return — the local
+    session log persistence is the primary truth source; the cloud
+    stamp is an immediacy optimization on the directory side.
+    """
+    if not session_id:
+        return False
+    store = get_store()
+    if not store.is_cloud():
+        return False  # Local mode: no cloud session doc to stamp.
+    import datetime
+    # ms precision matches what bus-heartbeat.mjs writes (= JavaScript
+    # Date.toISOString output). Server parses both ms and µs precision
+    # via fromisoformat with the Z→+00:00 replace dance, so the choice
+    # is stylistic — we go ms-precision to match the bridge so the two
+    # paths produce indistinguishable rows on the server.
+    now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    body = {
+        "last_active": now_iso,
+        "last_poll_at": now_iso,
+        "shutdown": True,
+    }
+    try:
+        from auth import load_credentials
+        if load_credentials() is None:
+            return False
+        client, cfg = _get_api_client()
+        pid = cfg.get("project_id", "")
+        if not pid:
+            return False
+        client.upsert_session(pid, session_id, body)
+        return True
+    except BaseException:
+        if os.environ.get("BEACON_DEBUG") == "1":
+            import traceback as _tb
+            _tb.print_exc()
+        return False
+
+
 def _list_other_session_ids() -> list:
     """Return session_ids (other than the current one) that have entries
     associated with them in the project data or local notes.
@@ -3176,6 +3292,18 @@ def cmd_session_end():
             file=sys.stderr,
         )
 
+    # ms-95 / e-2305: stamp shutdown=true on the cloud session doc so the
+    # directory's healthy_only filter drops this session immediately —
+    # without waiting for the bridge's natural last_poll_at aging window.
+    # See _stamp_cloud_session_shutdown docstring for the failure modes
+    # this closes (bridge outliving Claude Code parent, network blips on
+    # the bridge's own graceful-exit stamp). Best-effort: local-mode or
+    # cloud-unreachable returns False silently so the session log
+    # persistence remains the primary truth source.
+    _stamped = _stamp_cloud_session_shutdown(sid)
+    if _stamped and os.environ.get("BEACON_DEBUG") == "1":
+        print(f"  cloud session {sid} marked shutdown=true", file=sys.stderr)
+
     payload = _aggregate_and_persist(sid, recovered=False,
                                       summary_override=summary_override)
     if json_mode:
@@ -3202,6 +3330,12 @@ def cmd_session_rescue():
     for sid in sids:
         try:
             payload = _aggregate_and_persist(sid, recovered=True)
+            # ms-95 / e-2305: rescued sessions are by definition orphan
+            # (= the original bclaude tab is no longer driving them).
+            # Stamp shutdown=true so the directory's healthy_only filter
+            # doesn't keep advertising them as receive-capable. Best-effort;
+            # see _stamp_cloud_session_shutdown for failure semantics.
+            _stamp_cloud_session_shutdown(sid)
             results.append({"session_id": sid, "status": "ok",
                             "notes": len(payload.get("note_ids", [])),
                             "commits": len(payload.get("commit_ids", [])),
@@ -4704,6 +4838,10 @@ def cmd_trek_list():
         return
 
     print(f"Treks ({len(treks)}):")
+    # ms-97 / e-2659 (AC8 + AC31): collect treks with grandfathered
+    # project-wide scope so the listing surfaces the warning once at the
+    # bottom (= avoid spamming every row).
+    project_wide_treks: list[tuple[str, list[str]]] = []
     for t in treks:
         status_icon = {
             "planning": "○",
@@ -4712,10 +4850,33 @@ def cmd_trek_list():
         }.get(t.get("status", ""), "?")
         halt_marker = " [halted]" if t.get("halt") else ""
         member_count = len(t.get("members") or [])
-        scope_count = len(t.get("scope") or [])
+        scope_entries = t.get("scope") or []
+        scope_count = len(scope_entries)
+        project_wide = [
+            s.get("project") or ""
+            for s in scope_entries
+            if not any(s.get(k) for k in ("milestone", "operation", "task"))
+        ]
+        pw_marker = (
+            f" [⚠ {len(project_wide)} project-wide]" if project_wide else ""
+        )
         print(f"  {status_icon} {t['trek_id']:14s} {t['title'][:55]}"
               f" — {t.get('type', '?')}/{t.get('status', '?')}"
-              f"{halt_marker}, {member_count}m/{scope_count}s")
+              f"{halt_marker}, {member_count}m/{scope_count}s{pw_marker}")
+        if project_wide:
+            project_wide_treks.append((t["trek_id"], project_wide))
+    if project_wide_treks:
+        print()
+        print("⚠ Project-wide scope entries detected "
+              "(= legacy, narrowing key 無し):")
+        for trek_id, projects in project_wide_treks:
+            for project in projects:
+                print(f"  - {trek_id}: {project}")
+        print("これらは旧 SPEC で許容されていた entry で、 "
+              "新規追加は server reject されます。")
+        print("対処: `beacon trek plan --remove-scope <project>` で削除し、 "
+              "`beacon trek plan --add-scope <project>:<ms-id|op-id|e-id>` "
+              "で narrowing 付き entry を staging してください。")
 
 
 def _current_project_id() -> str:
@@ -4998,9 +5159,23 @@ def cmd_trek_show():
         return
 
     halt_marker = " [HALTED]" if t.get("halt") else ""
-    print(f"Trek {t['trek_id']} — {t['title']}{halt_marker}")
+    # ms-99 / e-2834 — quiesce marker in the header so an operator eyeing
+    # a Trek immediately sees "AI 自律実行完了 (task_state_aggregate_terminal)"
+    # without hunting through meta. The stamp is set by the scheduler
+    # tick's quiesce branch and cleared by ``PATCH .../task-state`` when
+    # a task transitions out of terminal.
+    quiesced_meta = (t.get("meta") or {}).get("quiesced_at") or ""
+    quiesce_marker = f" [QUIESCED @ {quiesced_meta[:19]}]" if quiesced_meta else ""
+    print(f"Trek {t['trek_id']} — {t['title']}{halt_marker}{quiesce_marker}")
     print(f"  type:        {t.get('type')}")
     print(f"  status:      {t.get('status')}")
+    if quiesced_meta:
+        meta = t.get("meta") or {}
+        print(
+            f"  quiesced:    {quiesced_meta[:19]} "
+            f"(reason={meta.get('quiesce_reason', '')}, "
+            f"notified={bool(meta.get('quiesce_notified_at'))})"
+        )
     print(f"  created:     {t.get('created_at', '')[:19]}")
     if t.get("archived_at"):
         print(f"  archived:    {t.get('archived_at', '')[:19]}")
@@ -5022,6 +5197,7 @@ def cmd_trek_show():
         print(f"    - {m.get('email')} [{m.get('role')}] ({joined})")
     scope = t.get("scope") or []
     print(f"  scope ({len(scope)}):")
+    project_wide_entries: list[dict] = []
     for s in scope:
         # ms-75 / e-1864 AC 6: surface bind grain (project / project:task=eXXX /
         # project:ms=msXX / project:op=opXX) explicitly so members understand
@@ -5032,6 +5208,23 @@ def cmd_trek_show():
             print(f"    - {s.get('project')}:{ref_str}")
         else:
             print(f"    - {s.get('project')} (project-wide)")
+            project_wide_entries.append(s)
+    # ms-97 / e-2659 (AC8 + AC31): warn the operator when the trek still
+    # carries grandfathered project-wide scope entries (= rows with no
+    # narrowing key). New additions are server-rejected (AC7), but legacy
+    # data stays readable. Surface the gap so the operator knows the trek
+    # is broader than today's policy would allow.
+    if project_wide_entries:
+        print()
+        print("  ⚠ Project-wide scope entries detected "
+              "(= legacy, narrowing key 無し):")
+        for s in project_wide_entries:
+            print(f"    - {s.get('project')}")
+        print("  これらは旧 SPEC で許容されていた entry で、 "
+              "新規追加は server reject されます。")
+        print("  対処: `beacon trek plan --remove-scope <project>` で削除し、 "
+              "`beacon trek plan --add-scope <project>:<ms-id|op-id|e-id>` "
+              "で narrowing 付き entry を staging してください。")
     if t.get("halt"):
         h = t["halt"]
         print(f"  halt: at={h.get('issued_at')} by={h.get('issued_by_session_id')}"
@@ -5617,6 +5810,20 @@ def cmd_trek_join():
         print("Error: trek_id is required", file=sys.stderr)
         sys.exit(1)
 
+    # ms-97 / e-2694 dogfood fix: BEACON_SESSION_ID env unset is the
+    # default for many user shells (= the env var is only set by the
+    # bclaude wrapper / dispatch shim). Without auto-derive, the server
+    # sees ``X-Beacon-Session: <empty>`` on the join HTTP call, falls
+    # into the pre-A path, and silently no-ops on a phase A+ trek (=
+    # leader stamp only, no member expansion). Resolve eagerly here so
+    # the env var is set for both the local-mode local writer AND the
+    # downstream api_client._request, restoring a single source of truth
+    # for the joining session id.
+    if not os.environ.get("BEACON_SESSION_ID", "").strip():
+        derived_sid = _resolve_session_id()
+        if derived_sid:
+            os.environ["BEACON_SESSION_ID"] = derived_sid
+
     user_id, email, _ = _resolve_creator_identity()
     if not email:
         print(
@@ -5653,9 +5860,21 @@ def cmd_trek_join():
         # for the invitee who is told "look for an invitation to email X"); fall
         # back to user_id lookup. Use the looked-up member's user_id for the
         # actual accept call.
-        member = trek.find_member_by_email(t, email)
+        # ms-86 / e-2225 — pass BEACON_SESSION_ID so the join writes a
+        # session_history entry. Empty session_id is tolerated by
+        # accept_invitation (= no-op on the history dimension).
+        session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
+        # ms-97 / e-2658 Phase 1 (AC6) — phase A+ trek の時は、 まず
+        # session_id grain で既存 member entry を探す (= 同 session の
+        # 再 join idempotent path)。 見つからなければ email / user_id
+        # grain で placeholder (= 未 accept invitation) 経路に落ちる。
+        member = None
+        if session_id and trek.is_session_id_keyed(t):
+            member = trek.find_member(t, session_id=session_id)
         if member is None:
-            member = trek.find_member(t, user_id)
+            member = trek.find_member_by_email(t, email)
+        if member is None:
+            member = trek.find_member(t, user_id=user_id)
         if member is None:
             print(
                 f"Error: no invitation found for {email} (user_id={user_id}) "
@@ -5663,10 +5882,6 @@ def cmd_trek_join():
                 file=sys.stderr,
             )
             sys.exit(1)
-        # ms-86 / e-2225 — pass BEACON_SESSION_ID so the join writes a
-        # session_history entry. Empty session_id is tolerated by
-        # accept_invitation (= no-op on the history dimension).
-        session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
         try:
             trek.accept_invitation(
                 t, user_id=member["user_id"], session_id=session_id,
@@ -5690,6 +5905,20 @@ def cmd_trek_join():
                 file=sys.stderr,
             )
 
+    # ms-97 / Phase 6 (AC15) — render accident-time leader-candidate notice.
+    # The cloud path may already surface this via the server response key
+    # ``leader_candidate_notice``; if present we honor that text verbatim
+    # (= avoids wording drift between client / server). For local mode we
+    # derive the notice locally from the live trek doc.
+    notice_text = ""
+    if isinstance(t, dict) and t.get("leader_candidate_notice"):
+        notice_text = str(t["leader_candidate_notice"])
+    else:
+        try:
+            notice_text = trek.build_leader_candidate_notice(t)
+        except Exception:
+            notice_text = ""
+
     if json_mode:
         # Keep the trek doc as the top-level shape so existing consumers
         # (= tests / Skill bodies parsing the trek doc directly) keep
@@ -5701,6 +5930,8 @@ def cmd_trek_join():
             out["_arm"] = arm_summary
         elif no_arm:
             out["_arm"] = {"skipped": True, "reason": "--no-arm"}
+        if notice_text:
+            out["leader_candidate_notice"] = notice_text
         print(json.dumps(out, ensure_ascii=False))
     else:
         print(f"Joined trek {trek_id} as {email}")
@@ -5736,6 +5967,14 @@ def cmd_trek_join():
                 "Run `beacon bus auto-execute add --channel trek-progress-check` "
                 "and `beacon bus budget grant --turns 20` manually to arm later."
             )
+
+        # ms-97 / Phase 6 (AC15) — accident-time leader-candidate pre-notice.
+        # Surface unconditionally at the tail of the human output so the
+        # invitee sees it on the same screen as the join confirmation
+        # (= no extra command, no hidden read).
+        if notice_text:
+            print()
+            print(notice_text)
 
 
 def cmd_trek_stop():
@@ -6043,7 +6282,7 @@ def cmd_trek_kickoff():
         sys.exit(1)
     member = trek.find_member_by_email(t, email) if email else None
     if member is None:
-        member = trek.find_member(t, user_id)
+        member = trek.find_member(t, user_id=user_id)
     if member is None:
         print(
             f"Error: you are not a member of trek {trek_id} "
@@ -6146,7 +6385,7 @@ def cmd_trek_take_over():
         # pointer to a fresh session_id under that user.
         member = trek.find_member_by_email(t, email) if email else None
         if member is None:
-            member = trek.find_member(t, user_id)
+            member = trek.find_member(t, user_id=user_id)
         if member is None:
             print(
                 f"Error: you are not a member of trek {trek_id} "
@@ -6471,7 +6710,10 @@ def cmd_trek_task_state():
             print(
                 f"Stamped trek {trek_id} task {task_id} state → {state}"
             )
-            if state in trek.TERMINAL_TASK_STATES:
+            # ms-97 / e-2706 — leader notify は REVIEW_TRIGGER_STATES
+            # (= done / user_review / leader_review) で発火する。 CLI 表示も
+            # server 側 emit 条件と一致させる。
+            if state in trek.REVIEW_TRIGGER_STATES:
                 print(
                     "  Leader has been notified via trek-task-review DM "
                     "(= /beacon-trek-review surface)."
@@ -6501,6 +6743,160 @@ def cmd_trek_task_state():
         print(
             f"Stamped trek {trek_id} task {task_id} state → {state} "
             "(local mode; review notification skipped — no bus path)"
+        )
+
+
+def cmd_trek_extend_ttl():
+    """Postpone TTL safety net deadline on a Trek task (ms-95 / e-2308).
+
+    Leader-side primitive for the Agent-tool subagent dispatch path:
+    main session calls this before launching a subagent that cannot
+    stamp ``last_activity_at`` itself, so the auto-stall deadline does
+    not fire mid-delegation. ``--minutes 0`` clears the extension.
+
+    Env:
+      BEACON_TREK_ID            (required)
+      BEACON_TREK_TASK_ID       (required)
+      BEACON_TREK_TTL_MINUTES   (required, int; ≤0 clears)
+      BEACON_TREK_TTL_REASON    (optional, short audit string)
+      BEACON_JSON               "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    task_id = os.environ.get("BEACON_TREK_TASK_ID", "").strip()
+    minutes_raw = os.environ.get("BEACON_TREK_TTL_MINUTES", "").strip()
+    reason = os.environ.get("BEACON_TREK_TTL_REASON", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not task_id:
+        print("Error: task_id is required (e.g. e-2034)", file=sys.stderr)
+        sys.exit(1)
+    if not minutes_raw:
+        print(
+            "Error: --minutes is required (use 0 to clear an existing "
+            "extension)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        minutes = int(minutes_raw)
+    except ValueError:
+        print(
+            f"Error: --minutes must be an integer (got {minutes_raw!r})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            entry = client.extend_trek_task_ttl(
+                trek_id,
+                task_id=task_id,
+                minutes=minutes,
+                reason=reason,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(entry, ensure_ascii=False))
+        else:
+            ext = (entry or {}).get("ttl_extended_until") or ""
+            if ext:
+                print(
+                    f"Extended trek {trek_id} task {task_id} TTL until {ext} "
+                    f"(+{minutes} min)"
+                )
+            else:
+                print(
+                    f"Cleared TTL extension on trek {trek_id} task {task_id} "
+                    f"(normal TTL resumes on next scheduler tick)"
+                )
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    try:
+        trek.extend_task_ttl(
+            t,
+            task_id=task_id,
+            minutes=minutes,
+            reason=reason,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+    entry = (t.get("task_states") or {}).get(task_id) or {}
+    if json_mode:
+        print(json.dumps(entry, ensure_ascii=False))
+    else:
+        ext = entry.get("ttl_extended_until") or ""
+        if ext:
+            print(
+                f"Extended trek {trek_id} task {task_id} TTL until {ext} "
+                f"(+{minutes} min, local mode)"
+            )
+        else:
+            print(
+                f"Cleared TTL extension on trek {trek_id} task {task_id} "
+                "(local mode)"
+            )
+
+
+def cmd_trek_summary_sent():
+    """Stamp ``meta.summary_sent_at`` after the leader sent the user
+    summary DM (ms-97 / Phase 7-A / AC21).
+
+    Leader-only on the server side (= ``_require_trek_leader_session``
+    hard-check on phase A+ trek)。 stamp 後は ``completion_notified_at``
+    と組み合わせて leader-digest tick が停止する。 Cloud-mode only
+    (= server endpoint 経由)。 ローカル mode では scheduler tick が
+    存在しないため stamp する意味がない。
+
+    Env:
+      BEACON_TREK_ID  (required)
+      BEACON_JSON     "1" → json output
+    """
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    if not _is_cloud_mode():
+        print(
+            "Error: beacon trek summary-sent is cloud-mode only "
+            "(= server endpoint stamps meta.summary_sent_at; local treks "
+            "have no scheduler tick to stop)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        client, _config = _get_api_client()
+        t = client.trek_summary_sent(trek_id)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        stamped = (t.get("meta") or {}).get("summary_sent_at") or "(unknown)"
+        print(
+            f"Stamped meta.summary_sent_at={stamped} on trek {trek_id}. "
+            "Leader-digest tick will stop once completion_ready has also "
+            "fired."
         )
 
 
@@ -6559,6 +6955,12 @@ def cmd_trek_plan():
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
 
+    # ``pending_rec`` is the local-mode handle to the freshly-staged pending
+    # op record (ms-97 / e-2626 + e-2611). Initialise to None so the print
+    # block downstream can safely query ``(pending_rec or {}).get(...)``
+    # even on goal_state-only invocations that never enter the staging path.
+    pending_rec: dict | None = None
+
     if _is_cloud_mode():
         try:
             client, _config = _get_api_client()
@@ -6607,9 +7009,26 @@ def cmd_trek_plan():
         try:
             if entry is not None:
                 if add_arg:
-                    trek.add_scope_entry(t, entry=entry)
+                    # ms-97 / e-2626 (AC23) — scope-add now stages a pending op
+                    # (= ``pending_user_approval`` state). User commits with
+                    # ``beacon trek scope-approve <pending_id>``. Mirrors the
+                    # scope-remove flip in e-2611. AC24 blanket pre-approval
+                    # lands as a layer on top in a follow-up task (= e-2603).
+                    pending_rec = trek.add_pending_scope_op(
+                        t,
+                        action=trek.PENDING_SCOPE_ACTION_ADD,
+                        entry=entry,
+                        requested_by_session_id=_resolve_local_session_id(),
+                    )
                 else:
-                    trek.remove_scope_entry(t, entry=entry)
+                    # ms-97 / e-2611 — scope-remove also stages a pending op.
+                    # User commits with ``beacon trek scope-approve <id>``.
+                    pending_rec = trek.add_pending_scope_op(
+                        t,
+                        action=trek.PENDING_SCOPE_ACTION_REMOVE,
+                        entry=entry,
+                        requested_by_session_id=_resolve_local_session_id(),
+                    )
             if goal_state_explicit:
                 trek.set_goal_state(t, goal_state=goal_state_arg)
         except ValueError as e:
@@ -6620,17 +7039,641 @@ def cmd_trek_plan():
     if json_mode:
         print(json.dumps(t, ensure_ascii=False))
     else:
-        if add_arg or remove_arg:
-            verb = "Added" if add_arg else "Removed"
-            ref_display = (add_arg or remove_arg)
-            print(f"{verb} scope {ref_display} on trek {trek_id} "
-                  f"(scope: {len(t.get('scope') or [])} items)")
+        if add_arg:
+            ref_display = add_arg
+            # ms-97 / e-2626 (AC23) — scope-add now stages a pending op.
+            # Show the pending_id so the user knows the exact handle for
+            # the approve / reject CLI. Cloud-mode path returns a
+            # ``pending_op`` field on the response payload (= server add
+            # endpoint) so json-mode consumers get the same info.
+            pending_id = ""
+            if _is_cloud_mode():
+                po = (t or {}).get("pending_op") or {}
+                pending_id = po.get("pending_id") or ""
+            else:
+                pending_id = (pending_rec or {}).get("pending_id") or ""
+            print(
+                f"Staged scope-add of {ref_display} on trek {trek_id} "
+                f"(pending_id: {pending_id}). "
+                f"Approve: beacon trek scope-approve {pending_id} "
+                f"(reject: beacon trek scope-reject {pending_id})"
+            )
+        elif remove_arg:
+            ref_display = remove_arg
+            # Show the pending_id so the user knows the exact handle
+            # for the approve / reject CLI. Cloud-mode path also returns
+            # a ``pending_op`` field on the response payload (see server
+            # remove endpoint) so json-mode consumers get the same info.
+            pending_id = ""
+            if _is_cloud_mode():
+                po = (t or {}).get("pending_op") or {}
+                pending_id = po.get("pending_id") or ""
+            else:
+                pending_id = (pending_rec or {}).get("pending_id") or ""
+            print(
+                f"Staged scope-remove of {ref_display} on trek {trek_id} "
+                f"(pending_id: {pending_id}). "
+                f"Approve: beacon trek scope-approve {pending_id} "
+                f"(reject: beacon trek scope-reject {pending_id})"
+            )
         if goal_state_explicit:
             new_val = (goal_state_arg or "").strip()
             if new_val:
                 print(f"goal_state set on trek {trek_id}: \"{new_val}\"")
             else:
                 print(f"goal_state cleared on trek {trek_id}")
+
+
+def _resolve_local_session_id() -> str:
+    """Best-effort resolution of the current bclaude session id.
+
+    Used for stamping ``requested_by_session_id`` on pending scope ops in
+    local mode (= the cloud-mode path resolves the session from the
+    ``X-Beacon-Session`` request header on the server side). Falls back
+    to an empty string when no session is bound — the pending record
+    still works; only the attribution is blank.
+    """
+    sid = os.environ.get("BEACON_SESSION_ID", "").strip()
+    if sid:
+        return sid
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    return sid
+
+
+# ---------------------------------------------------------------------------
+# ms-99 / e-2829 — slot verbs (Trek schema v2 CLI, SPEC 方針 6)
+# ---------------------------------------------------------------------------
+# All four (add / amend / claim / list) run through the pending_scope_ops
+# queue so AC 15 ("all slot CLI ops via staging") holds. Cloud-mode
+# parity lands in e-2830 (Phase 1 API endpoints); until then the cloud
+# branch surfaces a graceful warning and exits.
+
+
+def _cloud_slot_client():
+    """Return (client, config) for cloud-mode slot operations, or None.
+
+    ms-99 / e-2830: shared bootstrap for the four slot verbs. Falls
+    back to None so callers can degrade gracefully rather than crash
+    (matches the pre-e-2830 stub warning contract).
+    """
+    try:
+        return _get_api_client()
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_trek_slot_add():
+    """Stage a slot-add pending op with a fresh ``sl-<8 hex>`` id.
+
+    Env:
+      BEACON_TREK_ID          (required)
+      BEACON_SLOT_PROJECT     (required — project_id the slot lives in)
+      BEACON_SLOT_MILESTONE   optional narrowing key (one of the three)
+      BEACON_SLOT_OPERATION
+      BEACON_SLOT_TASK
+      BEACON_SLOT_CHILDREN    optional comma-separated e-ids for MS slots
+      BEACON_JSON             "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    project = os.environ.get("BEACON_SLOT_PROJECT", "").strip()
+    milestone = os.environ.get("BEACON_SLOT_MILESTONE", "").strip()
+    operation = os.environ.get("BEACON_SLOT_OPERATION", "").strip()
+    task = os.environ.get("BEACON_SLOT_TASK", "").strip()
+    children_raw = os.environ.get("BEACON_SLOT_CHILDREN", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not project:
+        print("Error: --project <pid> is required", file=sys.stderr)
+        sys.exit(1)
+    narrowing_count = sum(1 for v in (milestone, operation, task) if v)
+    if narrowing_count == 0:
+        print(
+            "Error: one of --milestone | --operation | --task is required "
+            "(= slot must narrow the project, ms-97 AC7)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if narrowing_count > 1:
+        print(
+            "Error: pass exactly one of --milestone / --operation / --task",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    children_list = [c.strip() for c in children_raw.split(",") if c.strip()]
+    entry: dict = {"project": project}
+    if milestone:
+        entry["milestone"] = milestone
+    elif operation:
+        entry["operation"] = operation
+    elif task:
+        entry["task"] = task
+    # ``--children`` only makes sense for MS slots (SPEC 方針 2). For
+    # task/op slots the child list is meaningless; refuse politely.
+    if children_list and not milestone:
+        print(
+            "Error: --children is only valid with --milestone (MS slot "
+            "child opt-in, SPEC 方針 2)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if children_list:
+        entry["included_task_ids"] = children_list
+
+    if _is_cloud_mode():
+        client, _config = _cloud_slot_client()
+        try:
+            resp = client.add_trek_slot(
+                trek_id,
+                project=project,
+                milestone=milestone,
+                operation=operation,
+                task=task,
+                included_task_ids=(children_list if milestone else None),
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        pending = resp.get("pending_op") or {}
+        slot_id = (pending.get("entry") or {}).get("slot_id") or ""
+        pending_id = pending.get("pending_id") or ""
+        if json_mode:
+            print(json.dumps({
+                "pending_id": pending_id,
+                "slot_id": slot_id,
+                "entry": pending.get("entry") or {},
+            }, ensure_ascii=False))
+        else:
+            target_ref = milestone or operation or task
+            print(
+                f"Staged slot-add on trek {trek_id}: "
+                f"slot_id={slot_id}, target={project}:{target_ref} "
+                f"(pending_id: {pending_id}). "
+                f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+            )
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    try:
+        rec = trek.add_pending_scope_op(
+            t,
+            action=trek.PENDING_SCOPE_ACTION_ADD,
+            entry=entry,
+            requested_by_session_id=_resolve_local_session_id(),
+            mint_slot=True,
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+
+    slot_id = (rec.get("entry") or {}).get("slot_id") or ""
+    pending_id = rec.get("pending_id") or ""
+    if json_mode:
+        print(json.dumps({
+            "pending_id": pending_id,
+            "slot_id": slot_id,
+            "entry": rec.get("entry") or {},
+        }, ensure_ascii=False))
+    else:
+        target_ref = milestone or operation or task
+        print(
+            f"Staged slot-add on trek {trek_id}: "
+            f"slot_id={slot_id}, target={project}:{target_ref} "
+            f"(pending_id: {pending_id}). "
+            f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+        )
+
+
+def cmd_trek_slot_amend():
+    """Stage a slot-amend pending op (= edit ``included_task_ids``).
+
+    Env:
+      BEACON_TREK_ID              (required)
+      BEACON_SLOT_ID              (required)
+      BEACON_SLOT_ADD_CHILDREN    comma-separated e-ids to add
+      BEACON_SLOT_REMOVE_CHILDREN comma-separated e-ids to remove
+      BEACON_JSON                 "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    slot_id = os.environ.get("BEACON_SLOT_ID", "").strip()
+    add_raw = os.environ.get("BEACON_SLOT_ADD_CHILDREN", "").strip()
+    rem_raw = os.environ.get("BEACON_SLOT_REMOVE_CHILDREN", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id or not slot_id:
+        print("Error: trek_id and slot_id are required", file=sys.stderr)
+        sys.exit(1)
+    add_list = [c.strip() for c in add_raw.split(",") if c.strip()]
+    rem_list = [c.strip() for c in rem_raw.split(",") if c.strip()]
+    if not add_list and not rem_list:
+        print(
+            "Error: at least one --add-child or --remove-child is required",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        client, _config = _cloud_slot_client()
+        try:
+            resp = client.amend_trek_slot(
+                trek_id, slot_id,
+                add_children=add_list,
+                remove_children=rem_list,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        pending = resp.get("pending_op") or {}
+        pending_id = pending.get("pending_id") or ""
+        if json_mode:
+            print(json.dumps(pending, ensure_ascii=False))
+        else:
+            print(
+                f"Staged slot-amend on trek {trek_id}, slot={slot_id} "
+                f"(pending_id: {pending_id}). "
+                f"add={add_list} remove={rem_list}. "
+                f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+            )
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    try:
+        rec = trek.add_pending_slot_amend_op(
+            t,
+            slot_id=slot_id,
+            add_children=add_list,
+            remove_children=rem_list,
+            requested_by_session_id=_resolve_local_session_id(),
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+
+    pending_id = rec.get("pending_id") or ""
+    if json_mode:
+        print(json.dumps(rec, ensure_ascii=False))
+    else:
+        print(
+            f"Staged slot-amend on trek {trek_id}, slot={slot_id} "
+            f"(pending_id: {pending_id}). "
+            f"add={add_list} remove={rem_list}. "
+            f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+        )
+
+
+def cmd_trek_slot_claim():
+    """Stage a slot-claim pending op (= stamp claim_session_id + claimed_at).
+
+    Env:
+      BEACON_TREK_ID       (required)
+      BEACON_SLOT_ID       (required)
+      BEACON_SLOT_SESSION  session_id override (default: current session)
+      BEACON_SLOT_UNCLAIM  "1" → clear the claim (empty session_id)
+      BEACON_JSON          "1" → json output
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    slot_id = os.environ.get("BEACON_SLOT_ID", "").strip()
+    session_override = os.environ.get("BEACON_SLOT_SESSION", "").strip()
+    unclaim = os.environ.get("BEACON_SLOT_UNCLAIM", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id or not slot_id:
+        print("Error: trek_id and slot_id are required", file=sys.stderr)
+        sys.exit(1)
+    if unclaim:
+        session_id = ""
+    else:
+        session_id = session_override or _resolve_local_session_id()
+        if not session_id:
+            print(
+                "Error: no session_id resolved. Pass --session <sid> or "
+                "run inside a bclaude session (= BEACON_SESSION_ID set)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    if _is_cloud_mode():
+        client, _config = _cloud_slot_client()
+        try:
+            resp = client.claim_trek_slot(
+                trek_id, slot_id, session_id=session_id,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        pending = resp.get("pending_op") or {}
+        pending_id = pending.get("pending_id") or ""
+        if json_mode:
+            print(json.dumps(pending, ensure_ascii=False))
+        else:
+            verb = "unclaim" if not session_id else f"claim by {session_id}"
+            print(
+                f"Staged slot-{verb} on trek {trek_id}, slot={slot_id} "
+                f"(pending_id: {pending_id}). "
+                f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+            )
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    try:
+        rec = trek.add_pending_slot_claim_op(
+            t,
+            slot_id=slot_id,
+            session_id=session_id,
+            requested_by_session_id=_resolve_local_session_id(),
+        )
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    trek_store.save_trek(t)
+
+    pending_id = rec.get("pending_id") or ""
+    if json_mode:
+        print(json.dumps(rec, ensure_ascii=False))
+    else:
+        verb = "unclaim" if not session_id else f"claim by {session_id}"
+        print(
+            f"Staged slot-{verb} on trek {trek_id}, slot={slot_id} "
+            f"(pending_id: {pending_id}). "
+            f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
+        )
+
+
+def cmd_trek_slot_list():
+    """List slot rows (materialized shape) for ``beacon trek slot list``.
+
+    Phase 1 view: projects each on-disk scope entry through
+    ``trek.materialize_slot_view`` — v2 attributes + narrowing keys +
+    child opt-in list + claim. Phase 2 (e-2832) adds full expansion of
+    the child set via ``materialize_slots``.
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        client, _config = _cloud_slot_client()
+        try:
+            resp = client.list_trek_slots(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        rows = resp.get("slots") or []
+        if json_mode:
+            print(json.dumps(rows, ensure_ascii=False))
+            return
+        if not rows:
+            print(f"(no slots on trek {trek_id})")
+            return
+        for r in rows:
+            children = r.get("included_task_ids")
+            if children is None:
+                children_repr = "(legacy: all children)"
+            else:
+                children_repr = f"{len(children)} explicit: {children}"
+            claim = r.get("claim_session_id") or "(unclaimed)"
+            print(
+                f"- slot_id={r.get('slot_id') or '(legacy-no-id)'} "
+                f"{r.get('target_kind', '')}={r.get('target_id', '')} "
+                f"project={r.get('project', '')} "
+                f"children={children_repr} claim={claim}"
+            )
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    rows = trek.materialize_slot_view(t)
+    if json_mode:
+        print(json.dumps(rows, ensure_ascii=False))
+    else:
+        if not rows:
+            print(f"(no slots on trek {trek_id})")
+            return
+        for r in rows:
+            children = r.get("included_task_ids")
+            if children is None:
+                children_repr = "(legacy: all children)"
+            else:
+                children_repr = f"{len(children)} explicit: {children}"
+            claim = r.get("claim_session_id") or "(unclaimed)"
+            print(
+                f"- slot_id={r['slot_id'] or '(legacy-no-id)'} "
+                f"{r['target_kind']}={r['target_id']} "
+                f"project={r['project']} "
+                f"children={children_repr} claim={claim}"
+            )
+
+
+def cmd_trek_scope_approve():
+    """Commit a pending scope op (= apply add or remove).
+
+    ms-97 / e-2611 AC25 — Mirror of scope-add approval. Reads
+    BEACON_TREK_ID + BEACON_PENDING_ID and either calls the server
+    approve endpoint (cloud mode) or applies in-place via
+    ``trek.approve_pending_scope_op`` (local mode).
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    pending_id = os.environ.get("BEACON_PENDING_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id or not pending_id:
+        print("Error: trek_id and pending_id are required", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            if hasattr(client, "approve_trek_scope_op"):
+                t = client.approve_trek_scope_op(trek_id, pending_id)
+            else:
+                # Fallback: hit the endpoint directly via the client's
+                # raw HTTP helper. The api_client method lands in a
+                # follow-up; CLI users get parity through the raw POST.
+                t = client.post(
+                    f"/api/treks/{trek_id}/scope/approve/{pending_id}",
+                    body={},
+                )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        try:
+            trek.approve_pending_scope_op(t, pending_id=pending_id)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(
+            f"Approved pending scope op {pending_id} on trek {trek_id} "
+            f"(scope: {len(t.get('scope') or [])} items, "
+            f"pending: {len(t.get('pending_scope_ops') or [])} items)"
+        )
+
+
+def cmd_trek_scope_reject():
+    """Drop a pending scope op without applying it.
+
+    ms-97 / e-2611 AC25 — Companion to scope-approve. Same env contract.
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    pending_id = os.environ.get("BEACON_PENDING_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id or not pending_id:
+        print("Error: trek_id and pending_id are required", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            if hasattr(client, "reject_trek_scope_op"):
+                t = client.reject_trek_scope_op(trek_id, pending_id)
+            else:
+                t = client.post(
+                    f"/api/treks/{trek_id}/scope/reject/{pending_id}",
+                    body={},
+                )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        try:
+            trek.reject_pending_scope_op(t, pending_id=pending_id)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(t)
+
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(
+            f"Rejected pending scope op {pending_id} on trek {trek_id} "
+            f"(pending: {len(t.get('pending_scope_ops') or [])} items)"
+        )
+
+
+def _cmd_trek_blanket(direction: str):
+    """Shared implementation for blanket-approve / blanket-revoke.
+
+    ms-97 / Phase 7-C / AC24 — Cloud / local mode both supported. Cloud
+    mode hits the new ``/api/treks/{id}/blanket-approve`` (or revoke)
+    endpoint; local mode mutates the trek doc in place via the trek
+    helpers and saves through ``trek_store``.
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    category = os.environ.get("BEACON_TREK_BLANKET_CATEGORY", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not trek_id or not category:
+        print(
+            "Error: trek_id and --category are required",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    path = "blanket-approve" if direction == "approve" else "blanket-revoke"
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            payload = client.post(
+                f"/api/treks/{trek_id}/{path}",
+                body={"category": category},
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        result = payload
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        try:
+            if direction == "approve":
+                trek.add_blanket_approval(t, category)
+            else:
+                trek.remove_blanket_approval(t, category)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        trek_store.save_trek(t)
+        result = {
+            "trek_id": trek_id,
+            "blanket_scope_approvals": trek.list_blanket_approvals(t),
+        }
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        verb = "Added" if direction == "approve" else "Removed"
+        approvals = result.get("blanket_scope_approvals") or []
+        print(
+            f"{verb} blanket category '{category}' on trek {trek_id} "
+            f"(active categories: {approvals})"
+        )
+
+
+def cmd_trek_blanket_approve():
+    """Register a blanket scope-add pre-approval (ms-97 / AC24, e-2603)."""
+    _cmd_trek_blanket("approve")
+
+
+def cmd_trek_blanket_revoke():
+    """Remove a blanket scope-add pre-approval (ms-97 / AC24, e-2603)."""
+    _cmd_trek_blanket("revoke")
 
 
 def cmd_trek_task_add():
@@ -6837,7 +7880,19 @@ def cmd_trek_leave():
         print(f"Error: trek {trek_id} not found", file=sys.stderr)
         sys.exit(1)
 
-    member = trek.find_member_by_email(t, email) or trek.find_member(t, user_id)
+    # ms-97 / e-2658 Phase 1 (AC6) — phase A+ trek の時は session_id grain
+    # で自セッションのみ leave (= 同 user の他 session は残す)。 pre-A
+    # trek または session_id 不在時は user-grain leave (= 同 user の全
+    # entries 削除、 従来挙動)。
+    session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
+    session_grain = bool(session_id) and trek.is_session_id_keyed(t)
+    member = None
+    if session_grain:
+        member = trek.find_member(t, session_id=session_id)
+    if member is None:
+        member = trek.find_member_by_email(t, email)
+    if member is None:
+        member = trek.find_member(t, user_id=user_id)
     if member is None:
         print(
             f"Error: {email} (user_id={user_id}) is not a member of trek "
@@ -6847,7 +7902,10 @@ def cmd_trek_leave():
         sys.exit(1)
 
     try:
-        trek.remove_member(t, user_id=member["user_id"])
+        if session_grain and member.get("session_id"):
+            trek.remove_member(t, session_id=member["session_id"])
+        else:
+            trek.remove_member(t, user_id=member["user_id"])
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -6899,6 +7957,97 @@ def cmd_member_add():
         print("  collaborator access is separate — set via `gh repo edit --add-collaborator <user>`.")
 
 
+def _build_owner_row(data: dict) -> Optional[dict]:
+    """Build a project-owner row in the same shape as members[] (ms-95 e-2288).
+
+    Background: `project.json` stores the project owner in a top-level
+    ``owner`` field (= user_id string) that is structurally separate from
+    ``members[]``. Historically `beacon member list` only iterated
+    ``members[]`` and silently omitted the owner — leading AI / human readers
+    to mis-identify the highest-privilege actor (= 2026-06-23 incident:
+    profile-extractor AI sent a DM to the wrong recipient because the
+    `member list` output hid the actual project owner).
+
+    Returns a dict mirroring the members[] row shape so JSON consumers can
+    iterate one combined list:
+      {
+        "user_id":      <str>,
+        "email":        <str (best-effort, "" in pure local mode)>,
+        "display_name": <str (best-effort, "" in pure local mode)>,
+        "role":         "owner",
+        "source":       "project.owner",  # provenance marker (= AC #2 audit)
+      }
+
+    Resolution strategy for email / display_name:
+      1. **Cloud mode** (``.beacon/cloud.json`` present): call
+         ``GET /api/projects/{pid}/members`` — the server already enriches
+         ``owner_email`` + ``owner_display_name`` from the users collection.
+         Best-effort; auth / network failures fall through to (3).
+      2. **Members[] cross-reference**: if a member row carries the same
+         user_id as the project owner, reuse its email / display_name.
+      3. **Pure local fallback**: leave email / display_name empty. The
+         user_id itself is still surfaced so the row is never silently
+         omitted (the original bug).
+
+    Returns ``None`` only when ``data["owner"]`` is empty / missing
+    (= legacy local-only project that never bound an owner). Callers should
+    skip prepending in that case to preserve "no members" output.
+    """
+    owner_id = (data.get("owner") or "").strip()
+    if not owner_id:
+        return None
+
+    email = ""
+    display_name = ""
+
+    # Strategy 2: scan members[] for matching user_id (works in any mode and
+    # avoids an HTTP roundtrip when the data is already on hand).
+    for m in core.members_list(data):
+        if not isinstance(m, dict):
+            continue
+        if (m.get("user_id") or "") == owner_id:
+            email = m.get("email", "") or email
+            display_name = m.get("display_name", "") or m.get("name", "") or display_name
+            break
+
+    # Strategy 1: cloud-mode enrichment via /members endpoint. Best-effort —
+    # silent on any failure (auth missing, offline, server 5xx) so local /
+    # disconnected workflows still emit the row.
+    if not email or not display_name:
+        try:
+            project_file = get_project_file()
+            beacon_dir = os.path.dirname(project_file) or ".beacon"
+            cloud_json = os.path.join(beacon_dir, "cloud.json")
+            if os.path.exists(cloud_json):
+                with open(cloud_json, "r", encoding="utf-8") as f:
+                    pid = (json.load(f) or {}).get("project_id", "")
+                if pid:
+                    from auth import load_credentials
+                    creds = load_credentials()
+                    if creds is not None:
+                        api_url = _resolve_active_api_url()
+                        from api_client import ApiClient
+                        client = ApiClient(api_url, _extract_token(creds))
+                        resp = client.get(f"/api/projects/{pid}/members")
+                        if isinstance(resp, dict):
+                            email = email or (resp.get("owner_email") or "")
+                            display_name = display_name or (
+                                resp.get("owner_display_name") or ""
+                            )
+        except Exception:
+            # Best-effort enrichment — never block the owner row on cloud
+            # round-trip failures. The user_id still surfaces.
+            pass
+
+    return {
+        "user_id": owner_id,
+        "email": email,
+        "display_name": display_name,
+        "role": "owner",
+        "source": "project.owner",
+    }
+
+
 def cmd_member_list():
     """List members of the project.
 
@@ -6906,14 +8055,42 @@ def cmd_member_list():
     invite accept) over the raw id / email when present. Local-mode members
     use the id-based schema; cloud members use the user_id-based schema —
     the display logic accepts both.
+
+    ms-95 e-2288: project owner (= ``data["owner"]`` top-level field) is
+    prepended as the first row with ``role="owner"``. Previously the owner
+    was silently omitted because the members[] iteration never inspected
+    the owner field, which led AI readers to mis-identify the highest
+    privileged actor on the project. The prepended row carries
+    ``source="project.owner"`` so external tooling can distinguish it from
+    rows that live inside members[].
     """
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
-    members = core.members_list(data)
+    members = list(core.members_list(data))
+
+    # Build the synthetic owner row and decide whether it needs prepending.
+    # Skip if the owner is already present in members[] with role="owner"
+    # (= some projects model owner inside members[] as well; we de-dupe to
+    # avoid two owner rows when both schemas hold the same identity).
+    owner_row = _build_owner_row(data)
+    if owner_row is not None:
+        owner_id = owner_row["user_id"]
+        already_in_members = any(
+            isinstance(m, dict)
+            and (m.get("user_id") or "") == owner_id
+            and (m.get("role") or "") == "owner"
+            for m in members
+        )
+        if not already_in_members:
+            members = [owner_row, *members]
+
     if json_mode:
         print(json.dumps(members, ensure_ascii=False, indent=2))
         return
     if not members:
+        # AC #4: preserve the "no members" output path even after the owner
+        # prepend logic — owner-less local projects are logically rare but
+        # defensively allowed.
         print("(no members — `beacon member add <id>` to add the first one)")
         return
     print(f"Members ({len(members)}):")
@@ -8537,6 +9714,16 @@ def _auto_fire_operation_triggers():
         with open(trigger_path, "w", encoding="utf-8") as f:
             json.dump(trigger_data, f, ensure_ascii=False)
             f.write("\n")
+        # ms-95 / e-1668 + e-2350: cloud-side atomic claim before the bus
+        # push. The local trigger file above is per-cwd UI state and
+        # harmless when duplicated across cwds (= each cwd has its own
+        # `.beacon/triggers/`); the bus push fanout is what would
+        # N-multiply across parallel bclaude sessions without this gate.
+        # The claim runs in a Firestore transaction server-side so only
+        # one of N concurrent bclaude sessions per (project, op, date)
+        # wins — losers skip the bus push.
+        if not _claim_operation_fire_for_bus_push(op_id):
+            continue
         # ms-60 / e-1340: also mirror onto the bus so AI sessions subscribed
         # via the inbox hook can autonomously run `/beacon-operation-execute`.
         # Channel "operation-trigger" + delivery="auto-execute" is the autonomous
@@ -8686,6 +9873,96 @@ def _resolve_operation_trigger_recipient(op_id: str) -> str:
             return owner
         break
     return ""
+
+
+def _claim_operation_fire_for_bus_push(op_id: str) -> bool:
+    """Return True iff this CLI should post the operation-trigger bus event.
+
+    Cloud mode: call ``POST /api/projects/<pid>/operation-fires/<op>/claim``
+    which uses a Firestore transaction to dedup across parallel bclaude
+    sessions in the same project. Server returns ``{claimed: True}`` for
+    the first caller per ``(project, op, today)`` and ``{claimed: False}``
+    for the rest. The losers skip ``_push_operation_trigger_to_bus`` so
+    only one operation-trigger event lands on the bus per day.
+
+    Local mode (no ``cloud.json``): always returns True. Without the
+    cloud, there is no cross-cwd race surface — each project root has its
+    own ``.beacon/triggers/`` and the per-cwd file gate above prevents
+    intra-cwd duplicates.
+
+    Failure-open policy (= ms-95 SPEC §設計方針 1 fail-open):
+    on network / auth / missing config errors, return True. The cost of
+    fail-open is a duplicate operation-trigger event (= cheap, the inbox
+    hook is idempotent on op_id + date). The cost of fail-close is a
+    silently missed daily Operation fire (= user-facing ritual broken
+    until they notice). Daily Operations are part of the SPEC contract
+    that "approved ops fire reliably"; a transient cloud hiccup must
+    not turn into silently lost fires.
+
+    ms-95 / e-1668 (= N-multiplied fires across parallel bclaude) and
+    e-2350 (= 4-6 min retrigger storms when local CLI run_record landed
+    but cloud sync lag hides it from the next scheduler tick) collapse
+    into a single root cause: scheduler decision based on a
+    locally-fetched view of cloud state. Pushing the decision to the
+    server transaction layer makes the dedup atomic.
+    """
+    try:
+        config_path = _get_cloud_config_path()
+        if not os.path.exists(config_path):
+            return True
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+        project_id = config.get("project_id")
+        if not project_id:
+            return True
+        from auth import load_credentials
+        creds = load_credentials()
+        if creds is None:
+            return True
+        from api_client import ApiClient
+        api_url = _resolve_active_api_url()
+        client = ApiClient(api_url, _extract_token(creds))
+        session_id = ""
+        try:
+            import session as _session
+            session_id = _session.get_session_id() or ""
+        except Exception:
+            pass
+        result = client.claim_operation_fire(project_id, op_id, session_id)
+        return bool(result.get("claimed", True))
+    except Exception as exc:
+        # ms-98 / e-2781: narrow the fail-open policy. The original
+        # rationale for "return True on any error" was to avoid silently
+        # losing a scheduled operation fire during a transient network
+        # blip. But on 2026-07-02 that same policy amplified the 429
+        # storm: every parallel bclaude session that failed the claim
+        # STILL pushed a bus event, adding to the server's load. Two
+        # classes of failure are now split:
+        #
+        #   * Rate-limit family (429 in the exception message, or the
+        #     e-2777 circuit breaker returning "circuit open"). Treat as
+        #     "not this tick" — return False so the caller skips the bus
+        #     push. The scheduler's next tick will retry the claim and
+        #     the fire lands as long as the storm has cleared. This
+        #     stops the client from adding to the storm.
+        #
+        #   * Everything else (auth misconfig, config missing, generic
+        #     network failure, malformed response, etc.) — keep the
+        #     original fail-open so a genuine transient issue still
+        #     doesn't drop a fire.
+        msg = str(exc)
+        rate_limited = "429" in msg or "circuit open" in msg.lower()
+        if rate_limited:
+            sys.stderr.write(
+                f"[beacon] operation fire claim skipped (rate-limited; "
+                f"will retry next tick): {type(exc).__name__}: {exc}\n"
+            )
+            return False
+        sys.stderr.write(
+            f"[beacon] operation fire claim failed (fail-open, "
+            f"may duplicate-fire): {type(exc).__name__}: {exc}\n"
+        )
+        return True
 
 
 def _push_operation_trigger_to_bus(op_id: str, log_source: str,
@@ -8873,12 +10150,124 @@ def _push_trek_trigger_to_bus(trek_id: str, trigger_data: dict) -> None:
         )
 
 
+_TRIGGER_TICK_TTL_SECONDS = 300  # 5 minutes; overridable via BEACON_TRIGGER_TICK_TTL
+
+
+def _trigger_tick_stamp_path() -> str:
+    return os.path.join(_get_triggers_dir(), ".last_tick_at")
+
+
+def _trigger_tick_lock_path() -> str:
+    return os.path.join(_get_triggers_dir(), ".tick.lock")
+
+
+def _trigger_tick_ttl_seconds() -> int:
+    raw = os.environ.get("BEACON_TRIGGER_TICK_TTL", "")
+    if raw.strip():
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return _TRIGGER_TICK_TTL_SECONDS
+
+
+def _maybe_auto_tick(*, verbose: bool = False) -> bool:
+    """Run auto-fire pipeline iff the last tick is older than the TTL and no
+    other process holds the lock.
+
+    Returns True if this call actually ran the tick. Non-blocking — if a
+    peer is already ticking (lock held) or the stamp is fresh, this
+    returns False without doing any server-touching work.
+
+    Silent failure by design: the throttle gate must never block
+    ``beacon trigger check``; the user's local read is the guaranteed
+    contract, freshness is best-effort.
+    """
+    try:
+        triggers_dir = _get_triggers_dir()
+        os.makedirs(triggers_dir, exist_ok=True)
+    except OSError:
+        return False
+
+    ttl = _trigger_tick_ttl_seconds()
+    if ttl <= 0:
+        return False
+
+    stamp = _trigger_tick_stamp_path()
+    now = __import__("time").time()
+    try:
+        if os.path.exists(stamp) and (now - os.path.getmtime(stamp)) < ttl:
+            return False  # fresh enough
+    except OSError:
+        pass  # stamp unreadable — treat as stale and try to tick
+
+    lock = _trigger_tick_lock_path()
+    # Atomic acquire: O_EXCL fails if another process is mid-tick. Never
+    # block on the lock — the peer's tick will refresh the stamp for us.
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except OSError:
+        return False  # peer is ticking; skip
+
+    try:
+        _auto_fire_retro_trigger()
+        _auto_fire_operation_triggers()
+        _auto_fire_release_due_trigger()
+        _auto_fire_release_marker_trigger()
+        _cleanup_stale_triggers()
+        # Touch stamp so subsequent checks within TTL skip the tick.
+        try:
+            with open(stamp, "w", encoding="utf-8") as f:
+                f.write(str(now))
+        except OSError:
+            pass
+        if verbose:
+            sys.stderr.write("[beacon] trigger tick ran (auto)\n")
+        return True
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.remove(lock)
+        except OSError:
+            pass
+
+
 def cmd_trigger_check():
-    _auto_fire_retro_trigger()
-    _auto_fire_operation_triggers()
-    _auto_fire_release_due_trigger()
-    _auto_fire_release_marker_trigger()
-    _cleanup_stale_triggers()
+    """Read ``.beacon/triggers/*.json`` and print as JSON.
+
+    ms-98 / e-2764: previously this command **unconditionally** invoked
+    ``_auto_fire_*`` and ``_cleanup_stale_triggers`` on every call. Both
+    paths reach the cloud (``load_project`` / ``claim_operation_fire`` /
+    bus push). Multiplied by every Skill Step that surfaced trigger
+    state, this created a hidden hot path from ``beacon trigger check``
+    to ``/api/me/heartbeat`` and
+    ``/api/projects/*/operation-fires/*/claim``. Concurrent Skill fires
+    piled up into the 2026-07-02 429 storm + 104-hung-process leak.
+
+    Two structural changes tame the hot path while keeping the observable
+    contract intact:
+
+      1. Auto-fire and cleanup moved to :func:`cmd_trigger_tick`. Callers
+         who explicitly want fresh state can run ``beacon trigger tick``
+         and then ``beacon trigger check``.
+
+      2. This function opportunistically ticks **only when** the local
+         stamp file (``.beacon/triggers/.last_tick_at``) is older than
+         ``BEACON_TRIGGER_TICK_TTL`` seconds (default 300). Concurrent
+         checks are gated by an ``O_EXCL`` lock so at most one process
+         per (project, TTL window) reaches the cloud. Callers who want
+         to opt out entirely set ``BEACON_TRIGGER_TICK_TTL=0``.
+
+    The net effect: default calls stay under a millisecond of local IO,
+    freshness is refreshed at most once every 5 minutes per project, and
+    a caller that wants freshness NOW can force it with an explicit
+    ``beacon trigger tick``.
+    """
+    _maybe_auto_tick()
+
     triggers_dir = _get_triggers_dir()
     if not os.path.isdir(triggers_dir):
         print("[]")
@@ -8886,6 +10275,11 @@ def cmd_trigger_check():
     triggers = []
     for fname in sorted(os.listdir(triggers_dir)):
         if not fname.endswith(".json"):
+            continue
+        if fname.startswith("."):
+            # ms-98 / e-2764: internal stamp / lock files (.last_tick_at,
+            # .tick.lock) live alongside the trigger payloads. Skip them
+            # here so JSON parsing never touches them.
             continue
         fpath = os.path.join(triggers_dir, fname)
         try:
@@ -8902,6 +10296,42 @@ def cmd_trigger_check():
                 f"{os.path.basename(fpath)}: {type(exc).__name__}\n"
             )
     print(json.dumps(triggers, ensure_ascii=False))
+
+
+def cmd_trigger_tick():
+    """Refresh trigger state — run the auto-fire + cleanup pipeline.
+
+    ms-98 / e-2764: split out from ``cmd_trigger_check`` so the expensive
+    server-touching path can be scheduled separately from the cheap local
+    read. This function runs the four auto-fire evaluators (retro,
+    operation, release-due, release-marker) and the stale-trigger cleanup,
+    all of which may touch the cloud (via ``load_project`` /
+    ``claim_operation_fire`` / bus push).
+
+    Intended callers:
+      * Skills that need to surface freshly-computed triggers to the user
+        (session-start, log, push): call ``tick`` first, then ``check``.
+      * Interactive users: ``beacon trigger tick`` on demand, or wire it
+        into their editor / shell hook at a debounced cadence.
+
+    Not intended for high-frequency hook fires. Each tick issues at least
+    one authenticated API call (operation claim) plus a full project load.
+    """
+    _auto_fire_retro_trigger()
+    _auto_fire_operation_triggers()
+    _auto_fire_release_due_trigger()
+    _auto_fire_release_marker_trigger()
+    _cleanup_stale_triggers()
+    # Touch the stamp so subsequent ``check`` calls within the TTL window
+    # skip the auto-tick gate. Mirrors what ``_maybe_auto_tick`` writes on
+    # its own successful path.
+    try:
+        stamp = _trigger_tick_stamp_path()
+        os.makedirs(os.path.dirname(stamp), exist_ok=True)
+        with open(stamp, "w", encoding="utf-8") as f:
+            f.write(str(__import__("time").time()))
+    except OSError:
+        pass
 
 
 def cmd_trigger_clear():
@@ -9827,7 +11257,12 @@ def cmd_cloud_list():
             print("Run 'beacon cloud upload-initial' to upload a project.")
             return
         for i, p in enumerate(projects, 1):
-            print(f"  {i}. {p['project_id']}: {p['name']}")
+            # ms-95 / e-2411 — render owner email so cross-project work can
+            # see "who do I ask about this?" at a glance. Silently skipped
+            # when server didn't resolve one (= migration-era projects).
+            owner_email = (p.get("owner_email") or "").strip()
+            owner_suffix = f"  (owner: {owner_email})" if owner_email else ""
+            print(f"  {i}. {p['project_id']}: {p['name']}{owner_suffix}")
             if p.get('objective'):
                 print(f"     {p['objective'][:60]}")
 
@@ -10018,6 +11453,230 @@ def cmd_cloud_status():
     print(f"Cloud: {config['project_id']}")
     print(f"API: {_resolve_active_api_url()}")
     print(f"Auth: {'logged in' if logged_in else 'not logged in'}")
+
+
+def _local_vs_cloud_pre_flight(local: dict, remote: dict) -> list[str]:
+    """Compare local project.json against the cloud-side project snapshot.
+
+    Returns a list of human-readable issues. Empty list = pre-flight pass
+    (= cloud has at least everything local has, safe to retire local).
+
+    ms-95 / e-2339 (= 旧 local モード由来 orphan project.json の migration):
+    cloud モード以降の writes は cloud のみに行くので、 local は通常 stale
+    snapshot にしかならない。 risk は逆向き — local に cloud が知らない
+    entry が残っていると、 retire (= rename to .trash/-ish) でその痕跡が
+    cold storage に押しやられる。 pre-flight でそれを 1 回 catch する。
+
+    Compared dimensions:
+
+      * project name / objective text mismatch (= 別 project を間違って
+        join した可能性)
+      * milestones[].id: local ⊆ cloud (完全な MS 欠落のみ fail)
+      * milestones[].entries[].id: local の各 entry id が cloud の
+        **project 全体 (= 任意 MS) の entry id 集合** に含まれること
+      * operations[].id: local ⊆ cloud
+      * operations[].entries[].id: local の各 entry id が cloud の
+        **project 全体 (= 任意 operation) の entry id 集合** に含まれること
+
+    ms-95 / e-2405 (= MS 移動 entries の false-positive 解消):
+    以前は entry の MS 所属まで一致を要求していたので、 dogfood で wave 1/2
+    に整理した MS 間移動 (= e-1454 / e-1668 / e-2007 等 10 件) が
+    「local の ms-A に居る entry が cloud の ms-A に無い」 = missing と
+    false-positive 判定され、 user に余計な force-after-review 確認を
+    強要していた。 cloud には entry 自体は別 MS に存在しており data loss
+    リスクはゼロ。 そこで entry の所在判定は project 全体の id 集合に
+    平坦化し、 「entry id がどこかに存在すれば OK」 に緩めた。 完全な MS
+    自体の欠落は依然 fail として残す (= MS 構造そのものが消えるのは別問題)。
+    """
+    issues: list[str] = []
+
+    local_name = (local.get("name") or "").strip()
+    remote_name = (remote.get("name") or "").strip()
+    if local_name and remote_name and local_name != remote_name:
+        issues.append(
+            f"project name differs: local={local_name!r} vs cloud={remote_name!r}"
+        )
+
+    def _id_set(items, key="id"):
+        out = set()
+        for it in items or []:
+            v = it.get(key)
+            if isinstance(v, str) and v:
+                out.add(v)
+        return out
+
+    def _flat_entry_ids(containers):
+        """Flatten entry ids across every milestone or operation."""
+        flat: set[str] = set()
+        for c in containers or []:
+            for e in (c.get("entries") or []):
+                v = e.get("id") if isinstance(e, dict) else None
+                if isinstance(v, str) and v:
+                    flat.add(v)
+        return flat
+
+    local_ms = _id_set(local.get("milestones", []))
+    cloud_ms = _id_set(remote.get("milestones", []))
+    missing_ms = sorted(local_ms - cloud_ms)
+    if missing_ms:
+        issues.append(
+            f"milestones present locally but missing in cloud: {missing_ms}"
+        )
+
+    # ms-95 / e-2405: entries lookup is project-wide so that MS-moved entries
+    # are not false-positively reported as missing (= they still exist in
+    # cloud, just under a different milestone).
+    cloud_ms_entry_ids = _flat_entry_ids(remote.get("milestones", []))
+    for m in local.get("milestones", []) or []:
+        mid = m.get("id")
+        local_entries = _id_set(m.get("entries", []))
+        missing = sorted(local_entries - cloud_ms_entry_ids)
+        if missing:
+            issues.append(
+                f"milestone {mid}: entries present locally but missing in cloud (anywhere): {missing}"
+            )
+
+    local_ops = _id_set(local.get("operations", []))
+    cloud_ops = _id_set(remote.get("operations", []))
+    missing_ops = sorted(local_ops - cloud_ops)
+    if missing_ops:
+        issues.append(
+            f"operations present locally but missing in cloud: {missing_ops}"
+        )
+
+    cloud_op_entry_ids = _flat_entry_ids(remote.get("operations", []))
+    for o in local.get("operations", []) or []:
+        oid = o.get("id")
+        local_entries = _id_set(o.get("entries", []))
+        missing = sorted(local_entries - cloud_op_entry_ids)
+        if missing:
+            issues.append(
+                f"operation {oid}: entries present locally but missing in cloud (anywhere): {missing}"
+            )
+
+    return issues
+
+
+def cmd_cloud_migrate_from_local():
+    """Retire an orphan local project.json that survived the cloud cut-over.
+
+    ms-95 / e-2339 (= cloud モード移行済プロジェクトに残った旧 local project.json
+    を .beacon/.trash/-ish に退避する): ms-84 Phase 3 (e-2037) で
+    ``cloud upload-initial`` 経路に追加された ``_rename_local_project_json_
+    for_cloud_cutover`` は新規 cut-over 経路にしか効かず、 それ以前に cloud
+    モードに移行した historical project は ``.beacon/project.json`` (=
+    cloud 側と divergent な stale snapshot) を持ち続けていた。 本 CLI は
+    その orphan を pre-flight check 経由で安全に退避する。
+
+    Flow:
+
+      1. ``.beacon/cloud.json`` の存在 (= cloud モード判定) を確認
+      2. ``.beacon/project.json`` の存在 (= orphan condition) を確認
+      3. ``BEACON_CONFIRM`` (= ``--confirm <project_id>`` 経路) と cloud.json
+         の project_id を照合 (= silent invocation 防御、 ``cloud off`` と
+         同じ二段確認パターン、 e-1776 incident 由来)
+      4. local project.json + cloud project を比較する pre-flight check
+         (``_local_vs_cloud_pre_flight``)。 何かが local-only なら abort
+         (= ``--force-after-review`` で override 可)
+      5. ``_rename_local_project_json_for_cloud_cutover`` を呼んで rename
+         (= 既存ヘルパー再利用、 ``.before-cloud-YYYYMMDD`` suffix 付き、
+         再実行 idempotent + 既存 backup を上書きしない)
+
+    Override (``BEACON_FORCE`` = ``--force-after-review``): pre-flight で
+    local-only entry を catch したあと、 user がそれを確認したうえで本 fix
+    が必要な場合の脱出口。 例えば「local-only entry は意図的な未 sync 残骸
+    (= 削除予定)」 のケース。 fail-close 設計だが、 user 監査後の override
+    は許す。
+    """
+    expected_pid = os.environ.get("BEACON_CONFIRM", "").strip()
+    force_after_review = os.environ.get("BEACON_FORCE", "") == "1"
+
+    config_path = _get_cloud_config_path()
+    if not os.path.exists(config_path):
+        print("Not in cloud mode (no .beacon/cloud.json found).")
+        print("This command retires a local project.json that survived a")
+        print("prior cloud cut-over — without cloud.json there is no cut-over")
+        print("to retire.")
+        sys.exit(1)
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    project_id = config.get("project_id", "")
+    if not project_id:
+        print("Error: .beacon/cloud.json is malformed (no project_id).")
+        sys.exit(1)
+
+    pf = get_project_file()
+    if not os.path.exists(pf):
+        print(f"No local project.json at {pf} — nothing to migrate.")
+        print("(= already retired, or this project was created cloud-first.)")
+        return
+
+    if not expected_pid or expected_pid != project_id:
+        print("Refusing to retire local project.json without two-factor confirmation.")
+        print("")
+        print(f"  Run: beacon cloud migrate-from-local --confirm {project_id!r}")
+        print("")
+        print("  This guard mirrors `cloud off` (e-1776): a sub-agent or stray")
+        print("  command should not be able to silently move historical state")
+        print("  out of the working tree.")
+        sys.exit(1)
+
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login")
+        sys.exit(1)
+
+    print("Pre-flight check: comparing local project.json against cloud state...")
+    from store_local import LocalStore
+    local = LocalStore(pf).load_project()
+
+    from api_client import ApiClient
+    api_url = _resolve_active_api_url()
+    client = ApiClient(api_url, _extract_token(creds))
+    try:
+        remote = client.get_project(project_id)
+    except RuntimeError as exc:
+        print(f"Error: could not fetch cloud project: {exc}")
+        sys.exit(1)
+
+    issues = _local_vs_cloud_pre_flight(local, remote)
+    if issues:
+        print("")
+        print(f"Pre-flight failed — local has {len(issues)} issue(s) that cloud is missing:")
+        for line in issues:
+            print(f"  - {line}")
+        if not force_after_review:
+            print("")
+            print("Refusing to retire local project.json: cloud is missing data that")
+            print("only exists locally. Either:")
+            print("")
+            print("  (a) Investigate the missing entries (a stale milestone? a")
+            print("      partial sync from before cloud cut-over?). Recover the")
+            print("      value you want into cloud via the CLI / Web UI, then re-run.")
+            print("  (b) If the local-only entries are intentional residue (= dead")
+            print("      cleanup pending), confirm by re-running with both flags:")
+            print("        BEACON_CONFIRM=<pid> BEACON_FORCE=1 beacon cloud migrate-from-local --confirm <pid> --force-after-review")
+            print("      (or via the CLI wrapper). The renamed copy stays under")
+            print("      .beacon/project.json.before-cloud-YYYYMMDD so recovery")
+            print("      remains possible.")
+            sys.exit(1)
+        print("")
+        print("Override accepted (--force-after-review). Proceeding to rename.")
+
+    renamed = _rename_local_project_json_for_cloud_cutover(pf)
+    if not renamed:
+        print(f"Rename failed (see warning above). The orphan file is still at {pf}.")
+        sys.exit(1)
+
+    print("")
+    print(f"Retired: {pf} → {renamed}")
+    print(f"  cloud project: {project_id}")
+    print(f"  pre-flight issues: {len(issues)}{' (override)' if issues else ''}")
+    print("")
+    print("From here on, cloud is the sole truth source for this working tree.")
+    print(f"To recover the old snapshot: mv {renamed} {pf}")
 
 
 # ---------------------------------------------------------------------------
@@ -10292,10 +11951,178 @@ def cmd_pr_close():
         print(f"Closed PR [{entry_id}]: {entry.get('description', '')}")
 
 
+def _collect_pr_bound_task_ids(pr_entry: dict, data: dict) -> list:
+    """ms-95 / e-2369 — collect the task IDs bound to this PR's commits.
+
+    Two signal sources are unioned, in order:
+
+    1. **Hash-join with beacon-logged commits' ``meta.resolves``** —
+       ``pr_add`` stores child commits with only ``meta.hash``, but the
+       beacon-logged side (= the entry created by ``beacon log``) carries
+       ``meta.resolves = "e-XXX"`` whenever the developer passed
+       ``--resolves <task-id>``. Joining by 7-char hash lifts that binding
+       up to the PR.
+    2. **``e-\\d+`` regex on commit messages** — for projects that don't
+       pass ``--resolves`` but mention the task id in the commit message
+       (``feat(ms-X): e-YYY ...``), this fallback still catches the
+       binding. Common in this very repo's commit log.
+
+    Returns a de-duplicated list of task IDs (strings). Order: stable on
+    first encounter so the auto-done report is deterministic.
+    """
+    bound: list = []
+    seen: set = set()
+
+    def _record(tid: str):
+        if tid and tid not in seen:
+            seen.add(tid)
+            bound.append(tid)
+
+    # Build hash → resolves map from beacon-logged commit entries.
+    hash_to_resolves: dict = {}
+    for ms in data.get("milestones", []):
+        if not isinstance(ms, dict):
+            continue
+        for ent in ms.get("entries", []) or []:
+            if not isinstance(ent, dict) or ent.get("type") != "commit":
+                continue
+            meta = ent.get("meta") or {}
+            h = (meta.get("hash") or "")[:7]
+            r = (meta.get("resolves") or "").strip()
+            if h and r:
+                hash_to_resolves[h] = r
+
+    # Walk PR's commit children.
+    for child in pr_entry.get("entries", []) or []:
+        if not isinstance(child, dict) or child.get("type") != "commit":
+            continue
+        meta = child.get("meta") or {}
+        h = (meta.get("hash") or "")[:7]
+        # Signal 1: hash-joined resolves
+        if h and h in hash_to_resolves:
+            _record(hash_to_resolves[h])
+        # Signal 1b: a resolves field may have been set on the PR child
+        # directly (forward-compat — currently pr_add doesn't, but future
+        # callers might).
+        r_direct = (meta.get("resolves") or "").strip()
+        if r_direct:
+            _record(r_direct)
+        # Signal 2: regex on the commit message text.
+        msg = child.get("description", "") or ""
+        for m in re.findall(r"e-\d+", msg):
+            _record(m)
+
+    return bound
+
+
+def _judge_pr_approve_auto_done(pr_entry: dict, data: dict) -> list:
+    """ms-95 / e-2369 — produce per-task judgement for PR approve auto-done.
+
+    Mirrors `/beacon-log` Skill Step 1.9's HIGH / MID / LOW × DONE / SKIP
+    judgement, but lives Python-side because `beacon pr approve` is a CLI
+    call (not an AI Skill prompt). The matching corpus is the PR
+    title/body/intent + every child commit message. The candidate task
+    set comes from `_collect_pr_bound_task_ids`.
+
+    Confidence rules (mirrors Step 1.9):
+      * **HIGH** — task ID is explicitly mentioned in the PR title /
+        intent / one of the commit messages, AND at least one
+        description / AC keyword overlaps with the same corpus.
+      * **MID**  — keyword overlap only (≥ 1 description / AC keyword
+        matches), but no explicit task-id mention in the corpus. Surface
+        as a candidate but do not auto-done.
+      * **LOW**  — only the task-id was found via a weak signal (e.g.
+        resolves was set in beacon log but the description doesn't even
+        share a token). Silently dropped.
+
+    Returns a list of dicts:
+        {"task_id": str, "confidence": "HIGH"|"MID"|"LOW",
+         "description": str, "ac_matched": [str, ...],
+         "reason": str}
+
+    Skips tasks that are already done / cancelled (idempotent).
+    """
+    # Compose the matching corpus.
+    pr_meta = pr_entry.get("meta") or {}
+    pr_title = pr_entry.get("description", "") or ""
+    pr_intent = pr_meta.get("intent", "") or ""
+    commit_msgs = [
+        (c.get("description") or "")
+        for c in (pr_entry.get("entries") or [])
+        if isinstance(c, dict) and c.get("type") == "commit"
+    ]
+    corpus_text = " \n".join([pr_title, pr_intent, *commit_msgs])
+    corpus_lower = corpus_text.lower()
+    corpus_tokens = core._tokenize(corpus_text)
+
+    bound = _collect_pr_bound_task_ids(pr_entry, data)
+    judgements: list = []
+
+    for tid in bound:
+        result = core.find_entry(data, tid)
+        if not result:
+            # Bound id points to a nonexistent / removed entry — skip
+            # silently (matches PR-not-found fail-soft style).
+            continue
+        _ms, _parent, task_entry, _idx = result
+        if task_entry.get("type") != "task":
+            # The bind pointed at a commit / note / PR — not actionable.
+            continue
+        if task_entry.get("status") in ("done", "cancelled"):
+            # Idempotent: a re-approve doesn't re-done.
+            continue
+
+        # Build task-side text for keyword matching.
+        task_desc = task_entry.get("description", "") or ""
+        ac_text = task_entry.get("acceptance_criteria", "") or ""
+        motivation = task_entry.get("motivation", "") or ""
+        task_side_text = " ".join([task_desc, ac_text, motivation])
+        task_tokens = core._tokenize(task_side_text)
+        overlap = task_tokens & corpus_tokens
+        ac_matched = sorted(overlap)[:5]
+
+        # HIGH: task-id explicit in corpus AND ≥1 keyword overlap.
+        # MID:  keyword overlap only, no explicit mention.
+        # LOW:  no overlap (drops silently).
+        explicit_mention = tid in re.findall(r"e-\d+", corpus_text)
+        if explicit_mention and overlap:
+            confidence = "HIGH"
+        elif overlap:
+            confidence = "MID"
+        elif explicit_mention:
+            # Explicit binding but zero keyword overlap → conservative
+            # MID (= surface for user review, don't auto-done).
+            confidence = "MID"
+        else:
+            confidence = "LOW"
+
+        if confidence == "LOW":
+            continue
+
+        pr_num = pr_meta.get("pr_number")
+        pr_label = f"#{pr_num}" if pr_num else pr_entry.get("id", "")
+        kw_list = ", ".join(ac_matched) if ac_matched else "(no AC keywords)"
+        reason = (
+            f"Auto-done from PR approve [{pr_label}]: "
+            f"{(pr_title or '').strip()[:120]}. "
+            f"AC keywords matched: {kw_list}"
+        )
+        judgements.append({
+            "task_id": tid,
+            "confidence": confidence,
+            "description": task_desc,
+            "ac_matched": ac_matched,
+            "reason": reason,
+        })
+
+    return judgements
+
+
 def cmd_pr_approve():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     rationale = os.environ.get("BEACON_RATIONALE", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    no_auto_done = os.environ.get("BEACON_NO_AUTO_DONE", "") == "1"
 
     if not entry_id:
         print("Error: entry ID required", file=sys.stderr)
@@ -10317,15 +12144,66 @@ def cmd_pr_approve():
     except ValueError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
+
+    # ms-95 / e-2369 — auto-done tasks bound to this PR's commits via
+    # `meta.resolves` (or `e-XXX` mention in the commit messages). HIGH
+    # confidence → done with explicit `done_reason`; MID → surface as a
+    # warning for the user to follow up; LOW → silent. Skipped entirely
+    # when --no-auto-done is set (= BEACON_NO_AUTO_DONE=1).
+    auto_done_results: list = []
+    mid_warnings: list = []
+    if not no_auto_done:
+        try:
+            judgements = _judge_pr_approve_auto_done(entry, data)
+        except Exception:
+            # Fail-soft: never break the approve flow because of the
+            # auto-done helper. The save below still records the approve.
+            judgements = []
+        for j in judgements:
+            if j["confidence"] == "HIGH":
+                try:
+                    core.task_done(
+                        data, j["task_id"], reason=j["reason"]
+                    )
+                    auto_done_results.append(j)
+                except ValueError:
+                    # Task disappeared between collect and done — skip.
+                    pass
+            elif j["confidence"] == "MID":
+                mid_warnings.append(j)
+
     save_project(data)
 
     if json_mode:
-        print(json.dumps({"entry_id": entry_id, "review_status": "approved",
-                          "review_rationale": rationale}, ensure_ascii=False))
+        out = {
+            "entry_id": entry_id,
+            "review_status": "approved",
+            "review_rationale": rationale,
+            "auto_done": [
+                {"task_id": j["task_id"], "reason": j["reason"]}
+                for j in auto_done_results
+            ],
+            "mid_candidates": [
+                {"task_id": j["task_id"], "description": j["description"]}
+                for j in mid_warnings
+            ],
+        }
+        print(json.dumps(out, ensure_ascii=False))
     else:
         print(f"Approved PR [{entry_id}]: {entry.get('description', '')}")
         if rationale:
             print(f"  Rationale: {rationale}")
+        for j in auto_done_results:
+            print(
+                f"  ✓ Auto-done: {j['task_id']} ({j['description'][:60]}) "
+                f"— HIGH confidence"
+            )
+        for j in mid_warnings:
+            print(
+                f"  ⚠ Candidate: {j['task_id']} ({j['description'][:60]}) "
+                f"— MID confidence, run "
+                f"'beacon task done {j['task_id']} --reason ...' if AC is met"
+            )
 
 
 def cmd_pr_reject():
@@ -10509,6 +12387,105 @@ def cmd_pr_merge():
         print(json.dumps({"entry_id": entry_id, "pr_status": "merged"}, ensure_ascii=False))
     else:
         print(f"Merged PR [{entry_id}]: {entry.get('description', '')}")
+
+
+def _fetch_gh_pr_list_all() -> list:
+    """ms-61 / e-2005 — query `gh pr list --state all` and return a list
+    of dicts with at least `number`, `state`, `url`, `mergedAt`.
+
+    Returns [] if `gh` is unavailable, the repo isn't recognised, or the
+    output isn't parsable. Soft-fails so the caller can degrade gracefully.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "list", "--state", "all", "--limit", "100",
+             "--json", "number,state,url,mergedAt,title"],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+    try:
+        rows = json.loads(result.stdout or "[]")
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(rows, list):
+        return []
+    return rows
+
+
+def cmd_pr_sync():
+    """ms-61 / e-2005 — sync beacon PR entries with GitHub state.
+
+    Walks every PR entry in the project, queries `gh pr list --state all`,
+    and for each entry whose GitHub state has advanced past beacon's
+    record:
+      - GitHub MERGED + beacon not-yet-done → `beacon pr merge`
+      - GitHub CLOSED + beacon not-yet-cancelled → `beacon pr close`
+
+    Read-only when `BEACON_DRY_RUN=1` (= prints plan only).
+    """
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    dry_run = os.environ.get("BEACON_DRY_RUN", "") == "1"
+
+    gh_prs = _fetch_gh_pr_list_all()
+    if not gh_prs:
+        msg = ("Warning: could not fetch GitHub PR list "
+               "(gh not configured / outside repo / no PRs).")
+        if json_mode:
+            print(json.dumps({"actions": [], "summary": {
+                "merged": 0, "closed": 0, "skipped": 0, "errors": []
+            }, "warning": msg}, ensure_ascii=False))
+        else:
+            print(msg, file=sys.stderr)
+        return
+
+    data = load_project()
+    actions = core.plan_pr_sync(data, gh_prs)
+
+    # Sort actions so non-skip transitions surface first.
+    actions_sorted = sorted(
+        actions, key=lambda a: (0 if a.get("action") != "skip" else 1, a.get("pr_number", 0))
+    )
+
+    if dry_run:
+        if json_mode:
+            print(json.dumps({"dry_run": True, "actions": actions_sorted},
+                             ensure_ascii=False))
+        else:
+            actionable = [a for a in actions_sorted if a.get("action") != "skip"]
+            if not actionable:
+                print("All beacon PR entries are already aligned with GitHub.")
+            else:
+                print(f"PR sync plan (dry-run, {len(actionable)} actionable):")
+                for a in actionable:
+                    print(f"  [{a['entry_id']}] PR#{a['pr_number']}: "
+                          f"{a['from_status']} → {a['to_status']} "
+                          f"({a['action']}; {a['reason']})")
+        return
+
+    summary = core.apply_pr_sync(data, actions_sorted)
+    save_project(data)
+
+    if json_mode:
+        print(json.dumps({"actions": actions_sorted, "summary": summary},
+                         ensure_ascii=False))
+    else:
+        if summary["merged"] == 0 and summary["closed"] == 0:
+            print("All beacon PR entries are already aligned with GitHub.")
+        else:
+            print(f"PR sync: {summary['merged']} merged, "
+                  f"{summary['closed']} closed, "
+                  f"{summary['skipped']} skipped.")
+            for a in actions_sorted:
+                if a.get("action") in ("merge", "close"):
+                    print(f"  [{a['entry_id']}] PR#{a['pr_number']}: "
+                          f"{a['from_status']} → {a['to_status']}")
+        if summary["errors"]:
+            print(f"  ⚠ {len(summary['errors'])} errors:", file=sys.stderr)
+            for err in summary["errors"]:
+                print(f"    [{err['entry_id']}] {err['error']}", file=sys.stderr)
 
 
 def _infer_pr_ms_id(data: dict) -> tuple[str, str]:
@@ -10943,6 +12920,53 @@ def _resolve_hook_command(hook_basename: str) -> str:
 def cmd_skill_install():
     """Install beacon Claude Code Skills into ~/.claude/skills/, update CLAUDE.md, and configure hooks."""
     import shutil
+    from pathlib import Path
+    converter_target = os.environ.get("BEACON_SKILL_TARGET", "").strip()
+    converter_name = os.environ.get("BEACON_SKILL_NAME", "").strip()
+    if converter_target or converter_name:
+        from skill_converter import (
+            SkillConversionError,
+            install_skill,
+            prune_skill,
+            resolve_canonical_root,
+        )
+
+        if not converter_target or not converter_name:
+            print("Error: converter install requires both --target and --name", file=sys.stderr)
+            sys.exit(2)
+        targets = ("claude", "codex") if converter_target == "both" else (converter_target,)
+        try:
+            common = {
+                "targets": targets,
+                "home": Path(_user_home()),
+                "dry_run": os.environ.get("BEACON_DRY_RUN") == "1",
+                "force": os.environ.get("BEACON_FORCE") == "1",
+            }
+            if os.environ.get("BEACON_PRUNE") == "1":
+                if os.environ.get("BEACON_ADOPT") == "1":
+                    raise SkillConversionError("--prune and --adopt are mutually exclusive")
+                results = prune_skill(converter_name, **common)
+            else:
+                results = install_skill(
+                    resolve_canonical_root() / converter_name,
+                    adopt=os.environ.get("BEACON_ADOPT") == "1",
+                    **common,
+                )
+        except SkillConversionError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            sys.exit(1)
+        if os.environ.get("BEACON_JSON") == "1":
+            print(json.dumps(results, ensure_ascii=False))
+        else:
+            for result in results:
+                print(
+                    f"{result['target']}: {result['action']} "
+                    f"{result['destination']}"
+                )
+                for warning in result.get("warnings", []):
+                    print(f"  warning: {warning}")
+        return
+
     _append_claude_md()
 
     skills_src = _resolve_skills_src()
@@ -13263,6 +15287,126 @@ def _doctor_check_claude_md_principle_marker():
     ]
 
 
+def _doctor_check_cloud_state_consistency():
+    """ms-61 / e-1776: surface cloud.json ↔ config.json mode-field divergence.
+
+    Background: cloud mode has two on-disk state files in ``.beacon/``:
+
+      - ``cloud.json`` — present iff this project is bound to a cloud
+        Firestore document. e-1861 (ms-61) made *cloud.json existence the
+        sole source of truth* for ``get_store()`` routing, so any CLI call
+        looks at this file and only this file when deciding cloud vs local.
+      - ``config.json["mode"]`` — legacy hint that historically toggled
+        cloud / local mode. Retired in e-1861 because a sub-agent could
+        silently rewrite it to ``{"mode": "local"}`` and flip every
+        subsequent CLI call back to LocalStore without touching cloud.json,
+        manifesting as apparent user data loss (2026-06-15 incident).
+
+    Even though the runtime ignores ``config.json["mode"]``, a divergence
+    between the two surfaces is still a structural signal that something
+    is being narrated wrong. Two failure modes specifically:
+
+      (1) cloud.json exists + config.json mode != "cloud"
+          → CLI is reading cloud (correct), but config.json claims local.
+            Humans and AI reading the on-disk state by hand will be misled,
+            and the symptom mirrors the original e-1861 silent failure
+            class. Surface a louder warning than the simple
+            ``legacy-mode-field`` heads-up so the Web UI ↔ CLI parity
+            confusion is named explicitly.
+
+      (2) cloud.json absent + config.json mode == "cloud"
+          → config.json narrates cloud but ``get_store()`` will route to
+            LocalStore (cloud.json is missing). The next ``beacon auth``
+            / cloud API call will silently degrade or fail in non-obvious
+            ways. Surface as a separate broken-cloud-binding warning.
+
+    Both warnings include:
+      - the ``config.json`` mtime (= last time the mode field was rewritten,
+        the only proxy we have for "when did the divergence appear"), and
+      - a one-line repair command suggestion.
+
+    Returns a list of warning strings; empty list = consistent or n/a.
+
+    AC mapping (e-1776):
+      AC #1: case (1) above.
+      AC #2: case (2) above.
+      AC #3: config.json mtime is appended to each warning body.
+      AC #4: each warning ends with a one-line repair command.
+    """
+    cloud_json_path = os.path.join(".beacon", "cloud.json")
+    config_json_path = os.path.join(".beacon", "config.json")
+
+    cloud_exists = os.path.exists(cloud_json_path)
+    config_exists = os.path.exists(config_json_path)
+
+    # Both absent (typical fresh checkout) or only cloud.json present
+    # without any config.json mode hint: nothing to reconcile.
+    if not config_exists:
+        return []
+
+    try:
+        with open(config_json_path, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
+    except Exception:
+        # Unreadable config.json is reported elsewhere; we can't read mode.
+        return []
+
+    if not isinstance(config_data, dict):
+        return []
+
+    mode = config_data.get("mode")
+    # No mode field present at all = nothing to diverge on.
+    if mode is None:
+        return []
+
+    # AC #3: mtime breadcrumb — when did the mode field last get rewritten?
+    # Best-effort; if stat fails, we just omit the timestamp line.
+    try:
+        import datetime as _dt
+        _mtime = os.path.getmtime(config_json_path)
+        mtime_str = _dt.datetime.fromtimestamp(_mtime).isoformat(timespec="seconds")
+        mtime_line = f"       config.json last modified: {mtime_str} (= proxy for last mode switch)\n"
+    except Exception:
+        mtime_line = ""
+
+    warnings: list[str] = []
+
+    if cloud_exists and mode != "cloud":
+        # AC #1: cloud.json present, but config.json says non-cloud mode.
+        # CLI reads cloud correctly (e-1861), but humans / AI eyeballing the
+        # on-disk state are misled — same shape as the original 2026-06-15
+        # silent failure class.
+        warnings.append(
+            "WARN [cloud-state-divergence] cloud.json exists but config.json has `mode`=" + repr(mode) + ".\n"
+            "       The runtime reads cloud (cloud.json existence is the sole source\n"
+            "       of truth since e-1861), but the on-disk narration is split.\n"
+            "       Humans / AI reading state by hand may believe this project is\n"
+            "       local-only and report Web UI ↔ CLI output as a data-loss bug.\n"
+            + mtime_line +
+            "       Repair (drop the stale mode hint):\n"
+            "         python3 -c 'import json,pathlib;p=pathlib.Path(\".beacon/config.json\");"
+            "d=json.loads(p.read_text());d.pop(\"mode\",None);p.write_text(json.dumps(d,indent=2))'"
+        )
+    elif (not cloud_exists) and mode == "cloud":
+        # AC #2: config.json claims cloud but cloud.json is gone — get_store()
+        # will route to LocalStore and any cloud API path will silently
+        # degrade.
+        warnings.append(
+            "WARN [cloud-state-divergence] config.json `mode`='cloud' but .beacon/cloud.json is missing.\n"
+            "       The runtime routes to LocalStore (cloud.json absence wins since\n"
+            "       e-1861), so cloud auth / cloud API paths will silently degrade\n"
+            "       or fail with confusing errors.\n"
+            + mtime_line +
+            "       Repair options (pick one):\n"
+            "         beacon cloud upload-initial         # if this should be cloud\n"
+            "         python3 -c 'import json,pathlib;p=pathlib.Path(\".beacon/config.json\");"
+            "d=json.loads(p.read_text());d.pop(\"mode\",None);p.write_text(json.dumps(d,indent=2))'"
+            "   # if this should be local"
+        )
+
+    return warnings
+
+
 def _doctor_check_ms81_state_machine():
     """ms-81 e-1921: surface the four state-machine warnings named in SPEC AC #9.
 
@@ -13382,6 +15526,69 @@ def _doctor_check_ms81_state_machine():
     return warnings
 
 
+def _doctor_probe_beacon_version(binary_path: str) -> str:
+    """Return the raw `--version` stdout for a beacon binary, or '?' on failure.
+
+    Used by the e-1170 multi-binary surface and the e-2276
+    selected-version-too-old gate. Subprocess timeout is intentionally
+    short (3s) — doctor must remain responsive even when a stale binary
+    hangs on stdin.
+    """
+    import subprocess as _subprocess
+    try:
+        return _subprocess.run(
+            [binary_path, "--version"],
+            capture_output=True, text=True, timeout=3,
+        ).stdout.strip() or "?"
+    except Exception:
+        return "?"
+
+
+def _doctor_parse_version(raw: str):
+    """Return ``(major, minor, patch)`` parsed from a `beacon <ver>` string.
+
+    Accepts both `beacon 0.48.0` and `0.48.0` shapes. Returns ``None``
+    when the string does not contain a parseable semver triple — the
+    caller treats that as "version unknown" and skips the
+    selected-version-too-old gate, never blocking on a probe failure.
+    """
+    import re
+    m = re.search(r"(\d+)\.(\d+)\.(\d+)", raw or "")
+    if not m:
+        return None
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+
+
+def _doctor_probe_missing_subcommands(binary_path: str, subs: tuple) -> tuple:
+    """Return tuple of `subs` that the binary rejects as 'Unknown command'.
+
+    Probes ``<binary> <sub> --help`` for each subcommand. The probe
+    returns no missing subs (= empty tuple) when the subprocess fails for
+    transport reasons (timeout, ENOENT) — we don't want a flaky subprocess
+    to fire a false bus-sessions-unavailable signal. Only an authoritative
+    'Unknown command' line (printed by cmd dispatcher) is treated as
+    missing.
+    """
+    import subprocess as _subprocess
+    missing = []
+    for sub in subs:
+        try:
+            r = _subprocess.run(
+                [binary_path, sub, "--help"],
+                capture_output=True, text=True, timeout=3,
+            )
+            combined = (r.stdout or "") + (r.stderr or "")
+            # The CLI prints `Unknown command: <name>` (lib/commands.py
+            # main dispatch) — pin on that exact phrase to avoid false
+            # positives from unrelated stderr like deprecation notices.
+            if "Unknown command" in combined:
+                missing.append(sub)
+        except Exception:
+            # Subprocess failure (timeout / ENOENT) → can't say, skip.
+            continue
+    return tuple(missing)
+
+
 def cmd_doctor():
     """Lightweight environment health check for Beacon.
 
@@ -13396,6 +15603,9 @@ def cmd_doctor():
       7. Duplicate IDs (Issue #14).
       8. Skill markdown references known beacon subcommands (ms-61 / e-1570).
       9. .beacon/project.json staleness vs cloud (ms-61 / e-1571).
+     10. CLAUDE.md entry-writing-principle marker (ms-68 / e-1640).
+     11. ms-81 state-machine warnings (e-1921).
+     12. cloud.json ↔ config.json state-file divergence (ms-61 / e-1776).
 
     Only prints warnings for problems found. Exits 0 if all checks pass,
     exits 1 if at least one warning was emitted.
@@ -13403,11 +15613,26 @@ def cmd_doctor():
     import shutil as _shutil
     import time as _time
 
+    # ms-93 / e-2276: --json flag emits structured signals (Codex wrapper /
+    # Skill gate parses these to drive 'use BEACON_BIN=<abs path>' UX).
+    json_mode = "--json" in sys.argv[2:] if len(sys.argv) > 2 else False
+
     home = _user_home()
     warnings: list[str] = []
+    # path_signals carries rich metadata that the Codex wrapper / Skill
+    # need to act on PATH problems decisively (= which binaries, which
+    # version, which subcommands are missing). The 3 codes are pinned by
+    # tests/test_doctor_path_signals.py.
+    path_signals: list[dict] = []
+    # ``warning_to_signal_idx`` maps a warning's index in ``warnings`` to
+    # the index in ``path_signals`` that already encodes it with rich
+    # metadata. Used by --json mode to emit each warning exactly once
+    # (rich signal wins when a mapping exists).
+    warning_to_signal_idx: dict = {}
 
     # ------------------------------------------------------------------ #
-    # 1. beacon on PATH (+ e-1170 version shadowing detect)
+    # 1. beacon on PATH (+ e-1170 version shadowing detect +
+    #    e-2276 selected-version-too-old + bus-sessions-unavailable)
     # ------------------------------------------------------------------ #
     beacon_paths = _find_all_on_path("beacon")
     if not beacon_paths:
@@ -13416,32 +15641,117 @@ def cmd_doctor():
             "       Add the beacon bin/ directory to your PATH, or use\n"
             "       the full path to the beacon script."
         )
-    elif len(beacon_paths) > 1:
-        # e-1170: multiple beacon binaries on PATH = potential version
-        # shadowing. Today's Win user case: stale ~/.local/bin 0.11.1
-        # shadowing AppData/.../Scripts 0.19.0, so `beacon --version`
-        # returned the old value silently and post-install confusion was
-        # massive. Surface the shadow chain with versions for each.
+        warning_to_signal_idx[len(warnings) - 1] = len(path_signals)
+        path_signals.append({
+            "code": "beacon-not-on-path",
+            "category": "PATH",
+            "severity": "WARN",
+            "message": "beacon binary not found on PATH",
+            "metadata": {},
+        })
+    else:
+        # Always probe primary version (used by both the multiple-binaries
+        # warning and the version-too-old gate).
         import subprocess as _subprocess
-        version_lines = []
-        for bp in beacon_paths:
-            try:
-                v = _subprocess.run(
-                    [bp, "--version"], capture_output=True, text=True, timeout=3
-                ).stdout.strip() or "?"
-            except Exception:
-                v = "?"
-            version_lines.append(f"         {bp}  →  {v}")
         primary = beacon_paths[0]
-        warnings.append(
-            f"WARN [PATH] Multiple `beacon` binaries on PATH ({len(beacon_paths)} found):\n"
-            + "\n".join(version_lines)
-            + f"\n       Primary (will be used): {primary}\n"
-            "       This is usually fine, but if `beacon --version` looks stale\n"
-            "       relative to your last upgrade, the entry earlier on PATH is\n"
-            "       shadowing a newer install. Remove or reorder PATH to put the\n"
-            "       intended install first."
-        )
+        primary_version_raw = _doctor_probe_beacon_version(primary)
+        primary_version_parsed = _doctor_parse_version(primary_version_raw)
+
+        if len(beacon_paths) > 1:
+            # e-1170: multiple beacon binaries on PATH = potential version
+            # shadowing. Today's Win user case: stale ~/.local/bin 0.11.1
+            # shadowing AppData/.../Scripts 0.19.0, so `beacon --version`
+            # returned the old value silently and post-install confusion was
+            # massive. Surface the shadow chain with versions for each.
+            version_lines = []
+            binaries_meta = []
+            for bp in beacon_paths:
+                v_raw = _doctor_probe_beacon_version(bp)
+                version_lines.append(f"         {bp}  →  {v_raw}")
+                binaries_meta.append({"path": bp, "version": v_raw})
+            warnings.append(
+                f"WARN [PATH] Multiple `beacon` binaries on PATH ({len(beacon_paths)} found):\n"
+                + "\n".join(version_lines)
+                + f"\n       Primary (will be used): {primary}\n"
+                "       This is usually fine, but if `beacon --version` looks stale\n"
+                "       relative to your last upgrade, the entry earlier on PATH is\n"
+                "       shadowing a newer install. Remove or reorder PATH to put the\n"
+                "       intended install first."
+            )
+            warning_to_signal_idx[len(warnings) - 1] = len(path_signals)
+            path_signals.append({
+                "code": "multiple-binaries",
+                "category": "PATH",
+                "severity": "WARN",
+                "message": f"Multiple `beacon` binaries on PATH ({len(beacon_paths)} found); primary={primary}",
+                "metadata": {
+                    "binaries": binaries_meta,
+                    "primary": primary,
+                },
+            })
+
+        # e-2276 (a): selected-version-too-old. The Codex DM dogfood
+        # (2026-06-25) confirmed that homebrew's stale 0.2.1 shadowing a
+        # current /Users/.../beacon/bin (v0.48.0) leaves the user with a
+        # primary that lacks `bus` / `sessions` entirely. We fire even when
+        # there is only a single binary on PATH — an old solo install is
+        # equally broken.
+        min_required = os.environ.get("BEACON_DOCTOR_MIN_VERSION", "0.30.0")
+        min_required_parsed = _doctor_parse_version(f"beacon {min_required}")
+        if (
+            primary_version_parsed is not None
+            and min_required_parsed is not None
+            and primary_version_parsed < min_required_parsed
+        ):
+            warnings.append(
+                f"WARN [PATH] Selected `beacon` (primary on PATH) is older than required:\n"
+                f"         path:     {primary}\n"
+                f"         version:  {primary_version_raw}\n"
+                f"         required: >= {min_required}\n"
+                "       This often means a stale install (homebrew, ~/.local/bin) is\n"
+                "       shadowing a newer beacon further down PATH. Set BEACON_BIN to\n"
+                "       the absolute path of the newer install, or reorder PATH."
+            )
+            warning_to_signal_idx[len(warnings) - 1] = len(path_signals)
+            path_signals.append({
+                "code": "selected-version-too-old",
+                "category": "PATH",
+                "severity": "WARN",
+                "message": f"Primary beacon on PATH ({primary_version_raw}) is older than required >= {min_required}",
+                "metadata": {
+                    "primary": primary,
+                    "primary_version": primary_version_raw,
+                    "required_min": min_required,
+                },
+            })
+
+        # e-2276 (c): bus-sessions-unavailable. Probe the primary binary
+        # directly. If `beacon bus --help` or `beacon sessions --help`
+        # returns "Unknown command", the primary cannot fulfil DM /
+        # session discovery — even if its version string looks acceptable.
+        # This is the authoritative subcommand-presence check; the
+        # version-too-old gate above is a fast proxy.
+        missing_subs = _doctor_probe_missing_subcommands(primary, ("bus", "sessions"))
+        if missing_subs:
+            warnings.append(
+                "WARN [PATH] Selected `beacon` is missing required subcommands:\n"
+                f"         path:           {primary}\n"
+                f"         missing:        {', '.join(missing_subs)}\n"
+                "       Codex / Claude Code Beacon integration relies on `bus` and\n"
+                "       `sessions`. Set BEACON_BIN to an absolute path of a recent\n"
+                "       beacon (v0.30.0+), or reorder PATH."
+            )
+            warning_to_signal_idx[len(warnings) - 1] = len(path_signals)
+            path_signals.append({
+                "code": "bus-sessions-unavailable",
+                "category": "PATH",
+                "severity": "WARN",
+                "message": f"Primary beacon on PATH lacks subcommands: {', '.join(missing_subs)}",
+                "metadata": {
+                    "primary": primary,
+                    "missing_subcommands": list(missing_subs),
+                },
+            })
 
     # ------------------------------------------------------------------ #
     # 2. PostToolUse hook in ~/.claude/settings.json
@@ -13675,8 +15985,38 @@ def cmd_doctor():
         warnings.extend(_doctor_check_ms81_state_machine())
 
     # ------------------------------------------------------------------ #
+    # 12. cloud.json ↔ config.json state-file divergence (ms-61 / e-1776)
+    # ------------------------------------------------------------------ #
+    # Two on-disk state files (`.beacon/cloud.json` and
+    # `.beacon/config.json["mode"]`) can narrate cloud vs local
+    # independently. e-1861 made cloud.json existence the sole runtime
+    # truth, but a stale config.json mode field still produces silent
+    # "Web UI shows the doc / CLI says Document not found" confusion when
+    # humans inspect state by hand. Surface the divergence loudly, name
+    # the symptom class, and suggest a one-line repair (AC #1–#4 of
+    # e-1776). Warning-level only; never block.
+    if os.environ.get("BEACON_DOCTOR_SKIP_CLOUD_STATE") != "1":
+        warnings.extend(_doctor_check_cloud_state_consistency())
+
+    # ------------------------------------------------------------------ #
     # Summary
     # ------------------------------------------------------------------ #
+    if json_mode:
+        # ms-93 / e-2276: Codex wrapper / Skill gate parses this. Each
+        # warning string is converted to a minimal structured entry so
+        # callers can branch on `code`. Warnings that have a paired rich
+        # path_signal (= tracked in warning_to_signal_idx) use that
+        # signal instead of the generic parse — rich metadata wins.
+        structured: list[dict] = []
+        for i, w in enumerate(warnings):
+            rich_idx = warning_to_signal_idx.get(i)
+            if rich_idx is not None:
+                structured.append(path_signals[rich_idx])
+            else:
+                structured.append(_doctor_warning_to_signal(w))
+        print(json.dumps({"ok": not warnings, "signals": structured}, ensure_ascii=False))
+        sys.exit(1 if warnings else 0)
+
     if warnings:
         for w in warnings:
             print(w)
@@ -13684,6 +16024,35 @@ def cmd_doctor():
     else:
         print("OK: all checks passed.")
         sys.exit(0)
+
+
+def _doctor_warning_to_signal(warn_text: str) -> dict:
+    """Parse a `WARN [tag] ...` string into a minimal structured signal.
+
+    Used by `beacon doctor --json` to convert legacy `warnings: list[str]`
+    entries into ``{code, category, severity, message}`` dicts for
+    machine consumption (= ms-93 / e-2276 Codex wrapper). PATH signals
+    have a richer parallel list (``path_signals``) that overrides this
+    minimal form when the code matches.
+    """
+    import re
+    m = re.match(r"WARN \[([^\]]+)\]\s*(.*)", warn_text, re.DOTALL)
+    if not m:
+        return {
+            "code": "unknown",
+            "category": "other",
+            "severity": "WARN",
+            "message": warn_text.strip(),
+        }
+    tag, body = m.group(1), m.group(2).strip()
+    # First line is the title; subsequent lines are detail.
+    first_line = body.split("\n", 1)[0].strip()
+    return {
+        "code": tag,
+        "category": tag,
+        "severity": "WARN",
+        "message": first_line,
+    }
 
 
 def cmd_help_json():
@@ -13724,13 +16093,15 @@ def cmd_help_json():
         {"command": "beacon doc update <doc-id>", "flags": ["--content <text>", "--stdin"], "description": "Update document content"},
         {"command": "beacon doc image-upload <local-file>", "flags": ["--json"], "description": "Upload image, get markdown img tag"},
         {"command": "beacon pr add", "flags": ["-m <ms-id>", "--url <url>", "--intent <text>"], "description": "Record a PR entry"},
-        {"command": "beacon pr approve <entry-id>", "flags": [], "description": "Approve a PR"},
+        {"command": "beacon pr approve <entry-id>", "flags": ["--rationale <text>", "--no-auto-done", "--json"], "description": "Approve a PR (auto-dones bound tasks at HIGH confidence; --no-auto-done to opt out)"},
         {"command": "beacon pr reject <entry-id>", "flags": [], "description": "Reject a PR"},
         {"command": "beacon pr merge <entry-id>", "flags": [], "description": "Mark PR as merged"},
+        {"command": "beacon pr sync", "flags": ["--dry-run", "--json"], "description": "Align beacon PR entries with GitHub state (merged/closed) — ms-61 / e-2005"},
         {"command": "beacon retro", "flags": [], "description": "Start weekly retrospective (interactive)"},
         {"command": "beacon trigger check", "flags": [], "description": "Check pending triggers (JSON array)"},
         {"command": "beacon cloud list", "flags": [], "description": "List cloud projects"},
         {"command": "beacon cloud upload-initial", "flags": ["--force"], "description": "Initial bootstrap upload to a new cloud project (one-shot local→cloud migration; ms-84 Phase 4)"},
+        {"command": "beacon cloud migrate-from-local", "flags": ["--confirm", "--force-after-review"], "description": "Retire a stale .beacon/project.json that survived a prior cloud cut-over (pre-flight verifies cloud has every local entry; ms-95 / e-2339)"},
         # ms-84 Phase 4 (e-2038): push / pull / force-pull entries removed.
         # The cloud → local round-trip is structurally impossible (= cloud
         # is the sole truth source). bin/beacon now routes these names to
@@ -13752,6 +16123,15 @@ def cmd_help_json():
         {"command": "beacon trek join <trek-id>", "flags": ["--json"], "description": "Accept own invitation"},
         {"command": "beacon trek leave <trek-id>", "flags": ["--json"], "description": "Remove self from the trek (leader must transfer first)"},
         {"command": "beacon trek plan <trek-id>", "flags": ["--add-scope <project:ref>", "--remove-scope <project:ref>", "--goal-state <criterion>", "--json"], "description": "Edit trek scope or goal_state (ms-75/e-1865)"},
+        {"command": "beacon trek scope-add <trek-id>", "flags": ["--project <pid>", "--milestone <ms-id>", "--operation <op-id>", "--task <e-id>", "--json"], "description": "Canonical scope-add verb (= flag-style alias of plan --add-scope, ms-97/AC23 e-2626)"},
+        {"command": "beacon trek scope-approve <trek-id> <pending-id>", "flags": ["--json"], "description": "Commit a staged scope op (= apply add or remove, ms-97/AC25 e-2611)"},
+        {"command": "beacon trek scope-reject <trek-id> <pending-id>", "flags": ["--json"], "description": "Drop a staged scope op (ms-97/AC25)"},
+        {"command": "beacon trek blanket-approve <trek-id> --category <cat>", "flags": ["--json"], "description": "Pre-approve scope-add for a category (ms-97/AC24 e-2603). Category: operation | milestone | task | project:<pid> | milestone:<ms-id>"},
+        {"command": "beacon trek blanket-revoke <trek-id> --category <cat>", "flags": ["--json"], "description": "Drop a blanket pre-approval (ms-97/AC24)"},
+        {"command": "beacon trek slot add <trek-id>", "flags": ["--project <pid>", "--milestone <ms-id>", "--task <e-id>", "--operation <op-id>", "--children e-A,e-B", "--json"], "description": "(ms-99/e-2829) Stage a slot-add with a fresh sl-<8hex> id"},
+        {"command": "beacon trek slot amend <trek-id> <slot-id>", "flags": ["--add-child <e-id>", "--remove-child <e-id>", "--json"], "description": "(ms-99/e-2829) Stage a child-list edit on an existing MS slot"},
+        {"command": "beacon trek slot claim <trek-id> <slot-id>", "flags": ["--session <sid>", "--unclaim", "--json"], "description": "(ms-99/e-2829) Stage a claim stamp (state-free, SPEC 方針 4)"},
+        {"command": "beacon trek slot list <trek-id>", "flags": ["--json"], "description": "(ms-99/e-2829) Materialise slot rows for the trek"},
         {"command": "beacon trek stop <trek-id>", "flags": ["--reason <text>", "--json"], "description": "Pull the Andon cord (= halt signal, sessions pause)"},
         {"command": "beacon trek resume <trek-id>", "flags": ["--json"], "description": "Clear the halt signal"},
         {"command": "beacon trek transfer-leader <trek-id> --to <session-id>", "flags": ["--json"], "description": "Hand off leader_session_id to another session"},
@@ -14896,16 +17276,48 @@ def cmd_bus_send():
     # so existing scripts that rely on legacy broadcast behavior get loud
     # feedback instead of silent message loss.
     recipient = os.environ.get("BEACON_BUS_RECIPIENT_SESSION", "").strip()
+    # ms-54 / e-2934: user-scoped 宛先 (--to-user)。 session_id churn しても
+    # 同 user の別 session が読める、 時差配信 (= 相手が offline でも次回起動時
+    # に inbox に届く) を成立させる。 現段階では user_id 直指定のみ受け付ける
+    # (= email → user_id 解決は将来 PR で追加、 beacon member list --json で
+    # 事前に user_id を引く運用)。
+    recipient_user = os.environ.get("BEACON_BUS_RECIPIENT_USER", "").strip()
+    if recipient and recipient_user:
+        # bash 側でも弾いているが python 側でも念のため hard error
+        # (= 直接 python3 commands.py bus_send を叩かれても排他を守る)。
+        print(
+            "Error: --to (session-scoped) と --to-user (user-scoped) は相互排他"
+            " です。 どちらか片方のみ指定してください。",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if recipient_user and "@" in recipient_user:
+        # 現段階では email 解決 未実装 (= 別 PR で実装予定)。 user_id を
+        # 使うよう案内する親切エラー。
+        print(
+            "Error: --to-user は現在 user_id のみ受け付けます (email 解決は"
+            " 未実装)。 `beacon member list --json` で受信者の user_id を"
+            " 引いて指定してください。",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     if recipient:
         # Caller-supplied --to overrides any payload.recipient_session_id
         # set by --payload; the flag is the unambiguous source of truth.
         payload = {**payload, "recipient_session_id": recipient}
-    elif channel == "dm" and not payload.get("recipient_session_id"):
+    elif recipient_user:
+        # user-scoped 宛先: payload.recipient_user_id を stamp。
+        # session_id 経路とは別 field なので、 server 側 filter (= app.py
+        # _bus_event_addressed_to) で 「recipient_session_id が空 かつ
+        # recipient_user_id が set」 として認識される。
+        payload = {**payload, "recipient_user_id": recipient_user}
+    elif channel == "dm" and not payload.get("recipient_session_id") \
+            and not payload.get("recipient_user_id"):
         print(
-            "Warning: sending to channel 'dm' without --to <session_id>. "
-            "After e-1209 the server drops unaddressed DM events rather than "
-            "broadcasting them — pass --to or use a different channel for "
-            "broadcasts.",
+            "Warning: sending to channel 'dm' without --to <session_id> or "
+            "--to-user <user_id>. After e-1209 the server drops unaddressed "
+            "DM events rather than broadcasting them — pass --to or --to-user "
+            "or use a different channel for broadcasts.",
             file=sys.stderr,
         )
 
@@ -14982,14 +17394,42 @@ def cmd_bus_send():
 
     client, config = _get_api_client()
     project_id = _resolve_bus_project_id(config)  # e-1151: --project override
+
+    # ms-94 / e-2811 (2026-07-06): sender の真 home project を payload に stamp。
+    # 従来は bridge (channel/bus.mjs) が payload.source_project を fallback で
+    # PROJECT_ID (= receiver bridge の own project_id) に埋めていたため、 event
+    # の from_project は 「送信元」 ではなく 「受信 bridge の cwd project」 に
+    # なっていた (= audit 不能 / cross-project reply が壊れる)。 sender の cwd
+    # project (= cloud.json.project_id、 --project override では変わらない
+    # 「本人のいる project」) を明示 stamp して bridge fallback を使わせない。
+    #
+    # 順序: (1) 既に payload.source_project が set されていればそれを尊重、
+    # (2) cwd cloud.json.project_id (= 本人の home、 --project override 前提)、
+    # (3) 最終 fallback として現在の target project_id (= --project override 後)。
+    if not payload.get("source_project"):
+        cwd_project_id = str((config or {}).get("project_id") or "").strip()
+        source_project = cwd_project_id or project_id
+        if source_project:
+            payload = {**payload, "source_project": source_project}
     # e-1340 follow-up (= structural defense against the 2026-06-09 silent
     # cross-project misroute incident): if --to points at a session that
     # polls a different project than `project_id`, auto-route to that
     # project. Loud stderr notice keeps the override auditable.
     project_id = _validate_recipient_project(recipient, project_id, channel)
-    # e-1402: liveness gate on the sid itself (independent of project
-    # routing). Catches stale session_id reuse when the Skill is bypassed.
-    _check_recipient_live_health(recipient, channel)
+    # e-1402 + e-2280: liveness gate on the sid itself, with conservative
+    # auto-swap when the stale sid maps to a single live healthy sibling
+    # owned by the same user. ms-95 / e-2280 lifts AI's per-send duty to
+    # manually re-resolve via `bus directory --live` after observed
+    # 2026-06-22 kyozai dolphin Trek dogfood (= 2 stale sends in 30 min).
+    swapped_recipient, swap_notice = _resolve_recipient_live(recipient, channel)
+    if swap_notice is not None and swapped_recipient != recipient:
+        # Update payload + re-validate project routing for the new sid.
+        # The new session may live in a different project (= different
+        # bclaude worktree); _validate_recipient_project handles the
+        # cross-project hop with its own stderr notice.
+        recipient = swapped_recipient
+        payload = {**payload, "recipient_session_id": recipient}
+        project_id = _validate_recipient_project(recipient, project_id, channel)
 
     # e-1290: envelope-by-default for CLI sends.
     #
@@ -15191,8 +17631,20 @@ def cmd_bus_listen():
     Sidecar lookup failures (= older server / no auth / network) silently
     fall back to the legacy "just JSON" output — the banner is added on
     top of the existing contract, not in place of it.
+
+    ms-95 / e-1454: wrap the per-iteration ``list_unread_bus_events``
+    call in a transient-network retry shield. The Monitor armed-mode
+    flow (= ``/beacon-bus-armed``) depends on this process staying
+    alive across SSL handshake timeouts / fetch failures / connection
+    resets. On a network exception we log to stderr, sleep with
+    exponential backoff (1 → 2 → 4 → 8 → 16 → 30s cap), and continue
+    the loop; on a successful round-trip the backoff resets to 1s.
+    Logic errors (= TypeError, KeyError, etc.) still propagate.
     """
+    import socket
+    import ssl
     import time
+    import urllib.error
     recipient = _bus_resolve_recipient()
     channel = os.environ.get("BEACON_BUS_CHANNEL", "").strip()
     auto_ack = os.environ.get("BEACON_BUS_AUTO_ACK", "") == "1"
@@ -15204,11 +17656,39 @@ def cmd_bus_listen():
     client, config = _get_api_client()
     project_id = _resolve_bus_project_id(config)  # e-1151: --project override
 
+    # ms-95 / e-1454: backoff state for transient network errors. Doubles
+    # on each consecutive failure up to ``backoff_cap``, resets to 1 on
+    # the next successful network round-trip. Function-local int keeps
+    # the contract simple — no module state, no test fixture juggling.
+    backoff_seconds = 1
+    backoff_cap = 30
     try:
         while True:
-            events = client.list_unread_bus_events(
-                project_id, recipient, channel=channel,
-            )
+            try:
+                events = client.list_unread_bus_events(
+                    project_id, recipient, channel=channel,
+                )
+            except (urllib.error.URLError, ssl.SSLError,
+                    TimeoutError, socket.timeout) as net_err:
+                # Transient network error: log to stderr (so an attached
+                # human / debug tail can see the cause), sleep with
+                # exponential backoff, then continue. Do NOT raise — the
+                # Monitor armed-mode loop depends on the process staying
+                # alive across SSL handshake timeouts / fetch failures /
+                # connection resets (2026-06-11 02:00Z incident).
+                print(
+                    f"[bus listen] transient network error: "
+                    f"{type(net_err).__name__}: {net_err} "
+                    f"(retry in {backoff_seconds}s)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(backoff_seconds)
+                backoff_seconds = min(backoff_seconds * 2, backoff_cap)
+                continue
+            # Successful round-trip: reset backoff so the next failure
+            # starts at 1s again (= short hiccups don't compound).
+            backoff_seconds = 1
             if events:
                 # e-1715: refresh sidecar lookup once per batch so a
                 # newly-approved row in the middle of a poll loop stops
@@ -15666,11 +18146,60 @@ def _resolve_bus_project_id(config: dict) -> str:
          session DMs a TrailNode session) without flipping cwd.
       2. ``config["project_id"]`` — the default, derived from
          ``.beacon/cloud.json`` of the current project.
+
+    ms-97 / e-2694 dogfood fix: when an override is supplied via
+    ``--project`` (= env var), pass it through
+    :func:`lib.project_ref.resolve_project_ref` against the cloud
+    project list so short names (= ``life-plan-simulator``) expand to
+    full suffix'd ids (= ``life-plan-simulator-68c5df``). The session
+    registry, DM fanout, and recipient lookups all key off the full
+    id — short-name input silently misses every record. Best-effort:
+    if the api client / list call is unavailable (= local-mode tests,
+    offline), passthrough preserves the legacy behaviour.
     """
     override = os.environ.get("BEACON_BUS_PROJECT_ID", "").strip()
     if override:
-        return override
+        return _canonicalize_project_ref(override) or override
     return config.get("project_id", "")
+
+
+def _canonicalize_project_ref(ref: str) -> str:
+    """Best-effort short-name → full project_id expansion.
+
+    Wraps :func:`lib.project_ref.resolve_project_ref` with a cloud-only
+    lister (= ``api_client.list_projects``) and swallows transport
+    errors so a network blip in the resolver never blocks the underlying
+    send / fanout. Returns the resolved id, or the input unchanged when
+    resolution can't run.
+    """
+    if not ref:
+        return ref
+    try:
+        from project_ref import resolve_project_ref as _resolve
+    except ImportError:
+        from lib.project_ref import resolve_project_ref as _resolve
+    lister = None
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+
+            def _list() -> list:
+                try:
+                    return client.list_projects() or []
+                except Exception:  # noqa: BLE001 — degrade to passthrough
+                    return []
+
+            lister = _list
+        except Exception:  # noqa: BLE001
+            lister = None
+    try:
+        return _resolve(ref, db_or_lister=lister)
+    except ValueError:
+        # Ambiguous — surface the input unchanged. The downstream call
+        # (= /bus send, /trek scope add) will hit a clearer error path
+        # (= "project not found" or rejection at the server) instead of
+        # the resolver hijacking error reporting.
+        return ref
 
 
 def _validate_recipient_project(
@@ -15678,21 +18207,26 @@ def _validate_recipient_project(
 ):
     """Cross-project pre-flight for ``beacon bus send --to <recipient>``.
 
-    Today's dogfood (2026-06-09) surfaced a silent-misroute pattern: the
-    sender's CLI posts to its cwd's project bus, but the recipient is
-    polling a different project. The event is stored but never delivered.
-    Without this check, the only signal is the absence of a ``delivered``
-    receipt — a negative signal humans (and AI) routinely miss.
+    2026-06-09 dogfood で発見された silent-misroute パターン: sender の CLI が
+    cwd project に post するが、 recipient は別 project を polling → event
+    は書かれるが配信されない (「届いたか?」の唯一の signal が delivered receipt
+    の absent = negative signal で気付きにくい)。
 
-    Resolution policy:
-      * Non-DM channels skip (broadcast semantics, no fixed recipient).
-      * Empty recipient skips (already warned about elsewhere).
-      * If the recipient is found in the target project's local directory
-        — pass through, no change.
-      * If found in a *different* local project — auto-route to that
-        project. Loud stderr warning so the routing decision is auditable.
-      * If not found in any local project — soft warn (might be a remote
-        bridge we can't see locally) but don't refuse.
+    ms-94 / e-2291 (2026-07-06 全面改修): 従来は local bridge 依存の
+    ``dm_discover`` (= 送信元マシンで走ってる bridge しか見えない) で
+    lookup していたので、 remote / bridge 未起動の recipient が not-found →
+    soft-warn → cwd fallback → silent misroute の失敗経路が残っていた。 サーバー
+    経由 (``list_sessions`` / ``list_user_sessions``) の lookup に置換し、 remote
+    session も見つけられるようにする。 not-found を **hard error に昇格** し
+    ("silent misroute 防止")、 fall-back は明示的な opt-out env でのみ許容。
+
+    Resolution policy (new):
+      1. target project の全 session を server 側 lookup (``list_sessions``)、
+         recipient sid が居れば pass-through。
+      2. 居なければ caller の全 project (``list_user_sessions``) を横断 lookup、
+         別 project で見つかれば auto-route (loud warning、 audit 可能)。
+      3. どこにも居なければ **hard error** (silent misroute を防ぐ、 従来の
+         soft-warn は opt-out env でのみ復活)。
 
     Returns the project_id to actually use. May differ from
     ``target_project_id`` when auto-routing.
@@ -15703,47 +18237,52 @@ def _validate_recipient_project(
       * ``BEACON_BUS_NO_AUTO_ROUTE=1`` — keep the check, but refuse to
         auto-route on mismatch (emits a hard error so the script breaks
         instead of silently switching project).
+      * ``BEACON_BUS_ALLOW_UNKNOWN=1`` — not-found を hard error にしない
+        legacy soft-warn 経路に戻す (= 破壊的変更を吸収したい既存 script 用)。
+        default では unknown recipient は refuse。
     """
     if channel != "dm" or not recipient:
         return target_project_id
     if os.environ.get("BEACON_BUS_SKIP_TO_CHECK", "") == "1":
         return target_project_id
 
-    # Import lazily so a missing dm_discover module (older install) just
-    # bypasses the check rather than breaking `bus send`.
+    # ms-94 / e-2291: server-side lookup で local bridge 依存を切る。 API 失敗
+    # (= network hiccup / auth 未設定 等) は defensive fall-through、 発信自体は
+    # 妨げない (= 「防御 guard が発信を殺す」 逆転 footgun 防止)。
+    client, _config = _get_api_client()
+
+    same_project = False
+    other_pid: Optional[str] = None
+    lookup_failed = False
+
+    # Step 1: target project 直接 lookup。 since_min は 1 日 (= 1440min) にして
+    # bridge 停止直後 の recipient も救う (= e-1402 stale sid 検出とバランス)。
     try:
-        # Ensure beacon_cli is importable; pip / dev-clone layouts vary.
-        import importlib
-        helpers = importlib.import_module(
-            "beacon_cli.skills_helpers.dm_discover"
+        target_sessions = client.list_sessions(
+            target_project_id, since_minutes=1440,
         )
+        for s in target_sessions:
+            if s.get("session_id") == recipient:
+                same_project = True
+                break
     except Exception:
+        lookup_failed = True
+
+    if same_project:
         return target_project_id
 
-    try:
-        rows = helpers.discover_and_aggregate(healthy=False, since_min=10)
-    except Exception:
-        # Discovery itself failed (psutil missing / network hiccup). Fall
-        # back to no-op rather than refusing the send — defensive guard
-        # mustn't become a footgun for unrelated errors.
-        return target_project_id
+    # Step 2: caller の全 project 横断 lookup (= /me/sessions endpoint 経由)。
+    if not lookup_failed:
+        try:
+            my_sessions = client.list_user_sessions(since_minutes=1440)
+            for s in my_sessions:
+                if s.get("session_id") == recipient:
+                    other_pid = s.get("project_id") or None
+                    break
+        except Exception:
+            lookup_failed = True
 
-    same_project: dict | None = None
-    other_project: dict | None = None
-    for row in rows:
-        if row.get("session_id") != recipient:
-            continue
-        if row.get("project_id") == target_project_id:
-            same_project = row
-            break
-        if other_project is None:
-            other_project = row
-
-    if same_project is not None:
-        return target_project_id
-
-    if other_project is not None:
-        other_pid = other_project.get("project_id", "?")
+    if other_pid and other_pid != target_project_id:
         if os.environ.get("BEACON_BUS_NO_AUTO_ROUTE", "") == "1":
             print(
                 f"Error: recipient session {recipient!r} polls project "
@@ -15764,49 +18303,186 @@ def _validate_recipient_project(
         )
         return other_pid
 
-    # Not found in any locally-visible bridge. Could be a remote session
-    # (different machine) — we can't disprove that here. Soft warn only.
+    # Step 3: どこにも見つからない。 lookup 自体が失敗した場合は API/network 問題
+    # を防御的に fall-through (発信は続行、 legacy soft-warn 相当)。 lookup 成功
+    # かつ recipient 見つからなかった場合は e-2291 の new behavior として hard
+    # error に昇格 (opt-out あり)。
+    if lookup_failed:
+        print(
+            f"⚠ recipient session {recipient[:24]}… の project lookup が "
+            f"API 経由で失敗しました。 Send proceeding against project "
+            f"{target_project_id!r} as-is; verify the receipt afterwards "
+            f"with `beacon bus status <event_id>`.",
+            file=sys.stderr,
+        )
+        return target_project_id
+
+    if os.environ.get("BEACON_BUS_ALLOW_UNKNOWN", "") == "1":
+        # Legacy soft-warn: 既存 script との後方互換 opt-out。
+        print(
+            f"⚠ recipient session {recipient[:24]}… is not visible in any "
+            f"of your projects. Send proceeding against project "
+            f"{target_project_id!r} as-is; verify the receipt afterwards "
+            f"with `beacon bus status <event_id>`. (Set via "
+            f"BEACON_BUS_ALLOW_UNKNOWN=1.)",
+            file=sys.stderr,
+        )
+        return target_project_id
+
+    # e-2291 デフォルト新挙動: hard error。 silent misroute (= 誤 project に
+    # event が書かれて配信されない) を構造的に防止。
     print(
-        f"⚠ recipient session {recipient[:24]}… is not visible in any "
-        f"locally-running bridge. Send proceeding against project "
-        f"{target_project_id!r} as-is; verify the receipt afterwards "
-        f"with `beacon bus status <event_id>`.",
+        f"Error: recipient session {recipient[:24]}… は target project "
+        f"{target_project_id!r} にも caller の他 project にも見つかりません。"
+        f" silent misroute (= 誤 project に配信されない event を書く) を防ぐ"
+        f"ため送信を refuse します。 ms-94 / e-2291 (2026-07-06 新挙動)。\n"
+        f"  対処:\n"
+        f"    (a) 相手が実在するなら `beacon bus directory` で live 状態と "
+        f"project を確認、正しい sid を渡してください。\n"
+        f"    (b) 相手が別マシンでオフラインなら user 単位で送る "
+        f"`--to-user <user_id>` に切替 (= ms-54 / e-2934、 sid churn 耐性)。\n"
+        f"    (c) 意図的に 「見つからなくても送りたい」 場合は "
+        f"BEACON_BUS_ALLOW_UNKNOWN=1 で legacy soft-warn 経路に戻せます。",
         file=sys.stderr,
     )
-    return target_project_id
+    sys.exit(1)
 
 
-def _check_recipient_live_health(recipient: str, channel: str) -> None:
-    """Defense-in-depth gate (e-1402) against stale session_id reuse.
+def _row_owner_identity(row: dict) -> Tuple[str, str]:
+    """Extract (user_id, email) from a directory row, normalised to strings.
 
-    2026-06-10 LPS dogfood incident: an AI in another project bypassed the
-    /beacon-dm-send Skill (which forces a fresh `dm_discover` lookup per
-    send) and reused a session_id from conversation memory. The target had
-    shutdown 1 hour earlier; the DM landed in a dead session. The Skill's
-    safety net was structural but only effective when the Skill was used.
+    Both fields are best-effort: the server stamps ``user_id`` at the top
+    level of each session document (= ms-70 / e-1713 path); ``actor.email``
+    arrives via ``stamp_session_actor_email`` (ms-54 / e-1349) on bridge
+    boot. Either one alone is enough to recognise "same user" for the
+    auto-swap decision; we accept both so e-2280 swap works across the
+    full deployment surface even if one field is unset on legacy bridges.
+    """
+    uid = str(row.get("user_id") or "").strip()
+    actor = row.get("actor") if isinstance(row.get("actor"), dict) else {}
+    email = str(actor.get("email") or "").strip()
+    return (uid, email)
 
-    This helper closes that hole at the CLI surface: any `--to <sid>` send
-    on the dm channel triggers a live+healthy directory check. If the sid
-    isn't currently held by a polling bridge, emit a loud stderr warning
-    naming the Skill as the recommended remediation. Soft-warn only — the
-    send proceeds, since CLI immediacy is the legitimate use case (CI
-    scripts, automated tooling, debugging). Hard-refuse is an opt-in for
-    future strictness.
 
-    Distinct from ``_validate_recipient_project`` (e-1362) which asks
-    *which project does this sid poll?* — that's about cross-project
-    routing. This one asks *is this sid alive right now?* — that's about
-    session lifecycle. Same directory backend, different semantics, kept
-    as separate helpers per the "thin single-purpose" convention.
+def _identity_matches(a: Tuple[str, str], b: Tuple[str, str]) -> bool:
+    """Same-user check: any non-empty field matches on both sides.
 
-    Opt-out:
-      * ``BEACON_BUS_NO_LIVE_CHECK=1`` — bypass entirely (CI / automated
-        scripts that handle their own liveness verification).
+    Conservative: an empty pair on either side is never a match (so we
+    never auto-swap into a row whose owner we cannot identify). Either
+    user_id OR email matching is sufficient — this tolerates legacy
+    bridges that only stamp one of the two.
+    """
+    a_uid, a_email = a
+    b_uid, b_email = b
+    if a_uid and b_uid and a_uid == b_uid:
+        return True
+    if a_email and b_email and a_email == b_email:
+        return True
+    return False
+
+
+def _find_stale_recipient_identity(
+    recipient: str, helpers
+) -> Optional[Tuple[str, str]]:
+    """Look up the (user_id, email) the stale recipient sid belonged to.
+
+    Live+healthy directory excludes the stale sid (by definition — that's
+    why we're here). We query the broader directory (no healthy filter,
+    wider since_min) to recover the dead session's owner identity, so
+    the swap candidate search has something to match against.
+
+    Returns ``None`` if the sid can't be found in the broader directory
+    either — that means we don't know who owned it (= stamp was lost
+    or the sid was synthetic / never registered). In that case we fall
+    through to the existing soft-warn path; auto-swap is unsafe without
+    a confirmed owner identity.
+    """
+    try:
+        rows = helpers.discover_and_aggregate(healthy=False, since_min=1440)
+    except Exception:
+        return None
+    for row in rows:
+        if row.get("session_id") == recipient:
+            ident = _row_owner_identity(row)
+            if ident[0] or ident[1]:
+                return ident
+            return None
+    return None
+
+
+def _find_swap_candidate(
+    stale_recipient: str,
+    healthy_rows: list,
+    helpers,
+) -> Optional[dict]:
+    """Pick a same-user live+healthy session to swap the stale sid to.
+
+    Rules (intentionally narrow to keep auto-swap conservative):
+      * Stale recipient's owner identity must be recoverable (= we need
+        a user_id or email to match on).
+      * Among healthy rows, count rows that match that identity AND are
+        not the stale sid itself.
+      * Exactly 1 match → return it (= unambiguous swap).
+      * 0 or 2+ matches → return None (fall through to soft warn; we
+        will not guess between multiple live sessions of the same user).
+
+    The 2+ case matters: the same user can hold multiple concurrent
+    bclaude sessions on different worktrees / machines. Without further
+    context (cwd, machine, agent) we can't tell which one the sender
+    "meant", so we refuse to guess and let the sender re-pick.
+    """
+    stale_ident = _find_stale_recipient_identity(stale_recipient, helpers)
+    if stale_ident is None:
+        return None
+    matches = []
+    for row in healthy_rows:
+        if row.get("session_id") == stale_recipient:
+            continue
+        if _identity_matches(_row_owner_identity(row), stale_ident):
+            matches.append(row)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _resolve_recipient_live(
+    recipient: str, channel: str
+) -> Tuple[str, Optional[str]]:
+    """Liveness gate + soft auto-swap for stale session_id reuse.
+
+    e-1402 established the soft-warn floor: any ``--to <sid>`` DM send
+    triggers a live+healthy directory check; if the sid isn't present,
+    emit a loud stderr warning naming the Skill as recommended fix and
+    let the send proceed.
+
+    e-2280 extends that with a structural recovery path: when the stale
+    sid resolves to a known user, and that user has *exactly one* live
+    healthy session in the directory, auto-swap to that sid (= the AI's
+    new bclaude restart). The swap is loud (stderr notice) so it stays
+    auditable, and conservative (only single-candidate swaps) so we
+    never silently redirect cross-machine or cross-worktree.
+
+    Returns ``(new_recipient, swap_notice)`` where ``swap_notice`` is
+    ``None`` if no swap happened (= unchanged sid), or a short string
+    describing the swap (= caller can log / display).
+
+    Distinct from ``_validate_recipient_project`` (e-1362) which routes
+    cross-project. This one is identity-grain (same user, new sid).
+
+    Opt-outs:
+      * ``BEACON_BUS_NO_LIVE_CHECK=1`` — bypass entirely (= retains
+        e-1402 contract; CI / automation that handles its own liveness).
+      * ``BEACON_BUS_NO_AUTO_SWAP=1`` — keep the live-check warning but
+        never swap. Useful for scripts that want to detect stale sends
+        explicitly without surprise redirection.
+      * ``BEACON_BUS_REFUSE_STALE=1`` — hard-refuse (exit 1) when stale
+        AND no swap candidate. Opt-in strictness for CI pipelines that
+        treat dead-sid sends as a bug rather than a soft hint.
     """
     if channel != "dm" or not recipient:
-        return
+        return (recipient, None)
     if os.environ.get("BEACON_BUS_NO_LIVE_CHECK", "") == "1":
-        return
+        return (recipient, None)
 
     try:
         import importlib
@@ -15817,44 +18493,102 @@ def _check_recipient_live_health(recipient: str, channel: str) -> None:
         # No discovery module available — bypass silently. Mirrors the
         # defensive posture of _validate_recipient_project; a missing
         # helper shouldn't break the send.
-        return
+        return (recipient, None)
 
     try:
         rows = helpers.discover_and_aggregate(healthy=True, since_min=10)
     except Exception:
         # Discovery raised (network / psutil / auth) — bypass rather than
         # turning a transient failure into a CLI footgun.
-        return
+        return (recipient, None)
 
     for row in rows:
         if row.get("session_id") == recipient:
-            return  # live + healthy, all good
+            return (recipient, None)  # live + healthy, all good
 
-    # Not in the live+healthy set. The session might be down (= dead) or
-    # simply not visible to this machine's bridge directory. Either way,
-    # the sender should know that the send is best-effort.
+    # Not in the live+healthy set. Try auto-swap before falling back to
+    # the soft warning.
+    swap_disabled = os.environ.get("BEACON_BUS_NO_AUTO_SWAP", "") == "1"
+    candidate = None
+    if not swap_disabled:
+        candidate = _find_swap_candidate(recipient, rows, helpers)
+
+    if candidate is not None:
+        new_sid = str(candidate.get("session_id") or "")
+        actor = candidate.get("actor") or {}
+        ident_hint = (
+            actor.get("email")
+            or actor.get("machine")
+            or actor.get("agent")
+            or "(unknown owner)"
+        )
+        notice = (
+            f"recipient {recipient[:24]}… is stale; auto-swapped to "
+            f"{new_sid[:24]}… (owner={ident_hint}, single live match)"
+        )
+        print(f"⇄ {notice}", file=sys.stderr)
+        return (new_sid, notice)
+
+    # Stale + no swap candidate (= zero or multiple matches, or owner
+    # identity not recoverable). Either soft-warn (default) or hard-
+    # refuse if the strict opt-in is set.
+    if os.environ.get("BEACON_BUS_REFUSE_STALE", "") == "1":
+        print(
+            f"Error: recipient session {recipient[:24]}… is not in the "
+            f"live+healthy directory and BEACON_BUS_REFUSE_STALE=1 is set."
+            f" Refusing to send into a dead or unreachable session. Use "
+            f"`/beacon-dm-send` Skill to re-discover a live recipient, or"
+            f" unset the env to fall back to soft-warn.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     print(
         f"⚠ recipient session {recipient[:24]}… is not in the live+healthy "
         f"directory. The send will proceed, but the target may be dead or "
         f"unreachable. Consider `/beacon-dm-send` Skill which re-discovers "
-        f"on every send. (Set BEACON_BUS_NO_LIVE_CHECK=1 to suppress.)",
+        f"on every send. (Set BEACON_BUS_NO_LIVE_CHECK=1 to suppress, "
+        f"BEACON_BUS_REFUSE_STALE=1 to hard-refuse instead.)",
         file=sys.stderr,
     )
+    return (recipient, None)
+
+
+def _check_recipient_live_health(recipient: str, channel: str) -> None:
+    """Back-compat shim around ``_resolve_recipient_live`` (e-1402 contract).
+
+    Pre-e-2280 callers / external tests invoked this for its stderr
+    side-effect only. Forward to the resolver but drop the return value
+    so the old void contract holds; the new ``cmd_bus_send`` path uses
+    the resolver directly and consumes the swapped sid.
+    """
+    _resolve_recipient_live(recipient, channel)
 
 
 def cmd_bus_directory():
     """Look up live sessions for DM target selection (ms-54 / e-1134 / e-1151).
 
-    Wraps GET /sessions with the directory-query filters. The output is
-    intentionally human-pickable (one line per session showing session_id +
-    actor identity + last_active) — a sender reads this, picks a session_id,
-    and passes it as the recipient for `bus send`. JSON mode is for scripts
-    that want to auto-route (e.g. "send to every live agent of user X").
+    Wraps GET /sessions (cwd project) or GET /me/sessions (cross-project) with
+    the directory-query filters. The output is intentionally human-pickable
+    (one line per session showing session_id + actor identity + last_active) —
+    a sender reads this, picks a session_id, and passes it as the recipient
+    for `bus send`. JSON mode is for scripts that want to auto-route (e.g.
+    "send to every live agent of user X").
+
+    Default (ms-94 / e-2291, 2026-07-06 reversal): user が member の全 project
+    横断 (= /api/me/sessions endpoint 経由)。 「他 project の live session が
+    見えない」 という cwd 限定 default の footgun (= 「セッションがいません」
+    誤報告の直接原因、 かつての phantom flag --all-projects を silent に
+    skip していた病理) を構造的に解消する。
+
+    ``--cwd-only`` (env ``BEACON_DIR_CWD_ONLY``): opt-in で cwd project 限定
+    モード。 default が cross-project になった逆パターン、 明示的に cwd 内に
+    scope 限定したい (= script / test / 差分 audit 用途) 時のみ指定する。
 
     ``--project <id>`` (env ``BEACON_BUS_PROJECT_ID``) lets the caller list
-    sessions of a different project. The auth + API URL still come from
-    the current project's cloud.json; only the project_id in the API call
-    changes.
+    sessions of a specific different project (implies cwd-only semantics with
+    the target project). The auth + API URL still come from the current
+    project's cloud.json; only the project_id in the API call changes.
 
     ``--healthy`` (env ``BEACON_DIR_HEALTHY``, ms-54 e-1318): only return
     sessions whose bridge poll loop is actively pumping events into the AI
@@ -15863,16 +18597,53 @@ def cmd_bus_directory():
     without --healthy) so scripts can decide their own threshold.
     """
     client, config = _get_api_client()
-    project_id = _resolve_bus_project_id(config)
-    sessions = client.list_sessions(
-        project_id,
-        user_id=os.environ.get("BEACON_DIR_USER", "").strip(),
-        machine=os.environ.get("BEACON_DIR_MACHINE", "").strip(),
-        agent=os.environ.get("BEACON_DIR_AGENT", "").strip(),
-        live_only=os.environ.get("BEACON_DIR_LIVE", "") == "1",
-        since_minutes=int(os.environ.get("BEACON_DIR_SINCE_MIN", "5") or "5"),
-        healthy_only=os.environ.get("BEACON_DIR_HEALTHY", "") == "1",
-    )
+
+    # ms-94 / e-2291: default reversal — cross-project unless caller opted
+    # into cwd 限定 (--cwd-only) or targeted a specific project (--project).
+    cwd_only = os.environ.get("BEACON_DIR_CWD_ONLY", "") == "1"
+    explicit_project = os.environ.get("BEACON_BUS_PROJECT_ID", "").strip()
+
+    user_id = os.environ.get("BEACON_DIR_USER", "").strip()
+    machine = os.environ.get("BEACON_DIR_MACHINE", "").strip()
+    agent = os.environ.get("BEACON_DIR_AGENT", "").strip()
+    live_only = os.environ.get("BEACON_DIR_LIVE", "") == "1"
+    since_minutes = int(os.environ.get("BEACON_DIR_SINCE_MIN", "5") or "5")
+    healthy_only = os.environ.get("BEACON_DIR_HEALTHY", "") == "1"
+
+    if cwd_only or explicit_project:
+        # 従来経路: cwd project 限定 or 明示 --project 指定先の限定 lookup。
+        project_id = _resolve_bus_project_id(config)
+        sessions = client.list_sessions(
+            project_id,
+            user_id=user_id,
+            machine=machine,
+            agent=agent,
+            live_only=live_only,
+            since_minutes=since_minutes,
+            healthy_only=healthy_only,
+        )
+    else:
+        # 新 default (ms-94 / e-2291): user が member の全 project 横断 lookup。
+        # /api/me/sessions endpoint 経由 (= cmd_sessions_list と同じ経路)、 各行
+        # に project_id / project_name が付いて返るので picker で識別可能。
+        sessions = client.list_user_sessions(
+            live_only=live_only,
+            since_minutes=since_minutes,
+            healthy_only=healthy_only,
+            machine=machine,
+            agent=agent,
+        )
+        # user_id filter は list_user_sessions では auth 済 caller の user_id が
+        # 暗黙前提なので、 別 user 指定はできない (= 各 user の scope で分離)。
+        # 明示 user_id filter が必要な場合は --cwd-only + --user で cwd-scope
+        # に絞る fall-back 経路になる。 rare use-case なので stderr で案内。
+        if user_id:
+            print(
+                "Note: --user filter は --cwd-only モード時のみ有効です "
+                "(default 経路は auth caller 本人の全 project scope)。"
+                " --cwd-only を追加してください。",
+                file=sys.stderr,
+            )
     if os.environ.get("BEACON_JSON", "") == "1":
         print(json.dumps(sessions, ensure_ascii=False))
         return
@@ -15905,7 +18676,17 @@ def cmd_bus_directory():
             health_tag = f"  health=stale({age_str})"
         else:
             health_tag = "  health=unknown"
-        print(f"  {sid}  {ident}  last_active={last}{health_tag}")
+
+        # ms-94 / e-2291: cross-project default では 各 row に project_name/id
+        # が入るので human picker に接頭辞として添える (= 「どの project の
+        # session か」 が即分かる、 誤送信防止に直結)。 cwd-only モードでは
+        # project_id は暗黙 (= cwd と同じ) なので prefix 省略。
+        pid = s.get("project_id", "")
+        pname = s.get("project_name", "") or pid
+        if pname and not cwd_only and not explicit_project:
+            print(f"  [{pname}]  {sid}  {ident}  last_active={last}{health_tag}")
+        else:
+            print(f"  {sid}  {ident}  last_active={last}{health_tag}")
 
 
 def cmd_profile_list():
@@ -17294,11 +20075,70 @@ def cmd_sessions_list():
 
 
 # ---------------------------------------------------------------------------
+# Wall-clock TTL for CLI subcommand execution (ms-98 / e-2773)
+# ---------------------------------------------------------------------------
+
+_DEFAULT_CLI_MAX_SECONDS = 60
+
+
+def _install_wall_clock_timeout(cmd_name: str) -> None:
+    """Install a self-termination timer so a single CLI invocation cannot
+    outlive its budget.
+
+    Rationale (2026-07-02 incident): ``urllib`` timeouts on individual API
+    calls (30-60 s) do not compose. ``cmd_trigger_check`` used to invoke
+    four ``_auto_fire_*`` helpers plus ``_cleanup_stale_triggers``; if any
+    of those hung on a per-call timeout, the process could sit for
+    hundreds of seconds without producing output. Concurrent hook fires
+    then piled up hundreds of these zombie processes.
+
+    A wall-clock ``SIGALRM`` at the top of the CLI dispatch caps every
+    subcommand at a bounded budget regardless of how many API round-trips
+    it stacks. Timeouts are best-effort: on a signal handler platforms
+    (POSIX only — ``signal.SIGALRM`` is not defined on Windows) we skip
+    installation silently so the CLI still runs.
+
+    Configuration:
+      * ``BEACON_CLI_MAX_SECONDS`` env var (int, seconds). Default 60.
+      * ``0`` disables the timer entirely (post-mortem / long-running debug).
+      * Negative or malformed values fall through to the default.
+    """
+    import signal
+    if not hasattr(signal, "SIGALRM"):
+        return  # Windows / other non-POSIX — silent skip.
+
+    raw = os.environ.get("BEACON_CLI_MAX_SECONDS", "").strip()
+    if raw:
+        try:
+            budget = int(raw)
+        except ValueError:
+            budget = _DEFAULT_CLI_MAX_SECONDS
+    else:
+        budget = _DEFAULT_CLI_MAX_SECONDS
+
+    if budget <= 0:
+        return  # explicitly disabled — no timer
+
+    def _timeout(signum, frame):  # noqa: ARG001
+        sys.stderr.write(
+            f"[beacon] wall-clock timeout after {budget}s in {cmd_name or '?'}\n"
+        )
+        # Exit 124 mirrors GNU ``timeout(1)`` — well-known convention that
+        # calling shells can pattern-match on to skip cleanup that assumes
+        # a normal exit.
+        os._exit(124)
+
+    signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(budget)
+
+
+# ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+    _install_wall_clock_timeout(cmd)
     commands = {
         "init": cmd_init,
         "milestone_add": cmd_milestone_add,
@@ -17341,6 +20181,7 @@ if __name__ == "__main__":
         "retro_default_since": cmd_retro_default_since,
         "trigger_fire": cmd_trigger_fire,
         "trigger_check": cmd_trigger_check,
+        "trigger_tick": cmd_trigger_tick,
         "trigger_clear": cmd_trigger_clear,
         "doc_list": cmd_doc_list,
         "doc_show": cmd_doc_show,
@@ -17358,6 +20199,7 @@ if __name__ == "__main__":
         "cloud_status": cmd_cloud_status,
         "cloud_check_project": cmd_cloud_check_project,
         "cloud_join": cmd_cloud_join,
+        "cloud_migrate_from_local": cmd_cloud_migrate_from_local,
         "common_setup": cmd_common_setup,
         "auth_check": cmd_auth_check,
         "auth_login": lambda: __import__("auth").login(),
@@ -17387,6 +20229,7 @@ if __name__ == "__main__":
         "pr_request_review": cmd_pr_request_review,
         "pr_request_changes": cmd_pr_request_changes,
         "pr_merge": cmd_pr_merge,
+        "pr_sync": cmd_pr_sync,
         "issue_import": cmd_issue_import,
         "issue_list": cmd_issue_list,
         "issue_sync": cmd_issue_sync,
@@ -17492,7 +20335,22 @@ if __name__ == "__main__":
         "trek_join": cmd_trek_join,
         "trek_leave": cmd_trek_leave,
         "trek_plan": cmd_trek_plan,
+        # ms-97 / e-2611 AC25 — scope mutation approval flow.
+        "trek_scope_approve": cmd_trek_scope_approve,
+        "trek_scope_reject": cmd_trek_scope_reject,
+        # ms-99 / e-2829 — slot verbs (schema v2).
+        "trek_slot_add": cmd_trek_slot_add,
+        "trek_slot_amend": cmd_trek_slot_amend,
+        "trek_slot_claim": cmd_trek_slot_claim,
+        "trek_slot_list": cmd_trek_slot_list,
+        # ms-97 / Phase 7-C / AC24 — blanket pre-approval (e-2603).
+        "trek_blanket_approve": cmd_trek_blanket_approve,
+        "trek_blanket_revoke": cmd_trek_blanket_revoke,
         "trek_task_state": cmd_trek_task_state,
+        "trek_extend_ttl": cmd_trek_extend_ttl,
+        # ms-97 / Phase 7-A / AC21 — leader が user summary DM 送信後
+        # に meta.summary_sent_at を stamp する CLI wrapper。
+        "trek_summary_sent": cmd_trek_summary_sent,
         # ms-92 / e-2141 — cross-project task add via Trek scope
         "trek_task_add": cmd_trek_task_add,
         "trek_stop": cmd_trek_stop,

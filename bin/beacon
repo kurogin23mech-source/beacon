@@ -61,6 +61,7 @@ Pull Requests:
   beacon pr reject <entry-id>                  Reject a PR
   beacon pr merge <entry-id>                   Mark PR as merged
   beacon pr close <entry-id>                   Close PR without merging
+  beacon pr sync [--dry-run]                   Sync beacon PR entries with GitHub state (merged/closed)
 
 Documents:
   beacon doc add "title" [--scope core|spec|memo|retro|report]  Create a document
@@ -110,6 +111,25 @@ Treks (cross-project / cross-session 協奏作業領域 — ms-69):
   beacon trek leave <trek-id>       Remove self (leader must transfer first)
   beacon trek plan <trek-id> --add-scope <project:ref> | --remove-scope <project:ref>
                                     Edit scope (ms-/op-/e- ref, or project-wide)
+  beacon trek scope-add <trek-id> --project <pid> [--milestone <ms-id> | --operation <op-id> | --task <e-id>]
+                                    Canonical scope-add verb (= flag-style alias of plan --add-scope, ms-97/AC23)
+  beacon trek scope-approve <trek-id> <pending-id>
+                                    Commit a staged scope op (= apply add or remove, ms-97/AC25)
+  beacon trek scope-reject <trek-id> <pending-id>
+  beacon trek slot add <trek-id> --project <pid> --milestone|--task|--operation <id> [--children e-A,e-B]
+                                    (ms-99/e-2829) Stage a slot-add with a fresh sl-<8hex> id.
+  beacon trek slot amend <trek-id> <slot-id> [--add-child <e-id> ...] [--remove-child <e-id> ...]
+                                    (ms-99/e-2829) Stage a child-list edit on an existing MS slot.
+  beacon trek slot claim <trek-id> <slot-id> [--session <sid> | --unclaim]
+                                    (ms-99/e-2829) Stage a claim stamp (state-free, SPEC 方針 4).
+  beacon trek slot list  <trek-id> [--json]
+                                    (ms-99/e-2829) Materialise slot rows for the trek.
+                                    Drop a staged scope op (ms-97/AC25)
+  beacon trek blanket-approve <trek-id> --category <cat>
+                                    Pre-approve scope-add for a category (ms-97/AC24).
+                                    Category: operation | milestone | task | project:<pid> | milestone:<ms-id>
+  beacon trek blanket-revoke <trek-id> --category <cat>
+                                    Drop a blanket pre-approval (ms-97/AC24)
   beacon trek plan <trek-id> --goal-state "<criterion>"
                                     Set / clear (空文字で clear) trek の完了マーカー.
   beacon trek timeline <trek-id> [--limit N] [--json]
@@ -182,6 +202,10 @@ Cloud:
   beacon cloud list                  List accessible cloud projects (read-only)
   beacon cloud join <id>             Join an existing cloud project
   beacon cloud upload-initial        Initial bootstrap upload to a new cloud project (one-shot migration)
+  beacon cloud migrate-from-local --confirm <id>
+                                     Retire a stale .beacon/project.json that survived a prior cloud
+                                     cut-over (ms-95 / e-2339). Pre-flight verifies cloud has every
+                                     local entry before renaming to project.json.before-cloud-YYYYMMDD
   beacon cloud off --confirm <id>    Switch back to local mode (sandbox / verification only;
                                      e-1861/ms-61: archives cloud.json to .beacon/.trash/, no data loss)
   # ms-84 Phase 4 (e-2038): `push` / `pull` / `force-pull` were removed.
@@ -217,7 +241,9 @@ Other:
   beacon auth login                 Sign in with Google (use this, not 'cloud login')
   beacon auth logout                Remove cached credentials
   beacon auth status                Show login status
-  beacon skill install              Install Claude Code Skills
+  beacon skill install              Install legacy Claude Code Skills
+  beacon skill install --target claude|codex|both --name <name>
+                                    Install a canonical shared Skill
   beacon monitor context [--dry-run]
                                     Stop hook: context-usage threshold monitor (e-854)
   beacon update [--check] [--skill-only] [--yes]
@@ -1860,20 +1886,23 @@ cmd_pr() {
             local entry_id=""
             local rationale=""
             local json_flag=""
+            local no_auto_done_flag=""
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --rationale) rationale="${2:-}"; shift 2 ;;
-                    --json)      json_flag="1"; shift ;;
-                    *)           entry_id="$1"; shift ;;
+                    --rationale)    rationale="${2:-}"; shift 2 ;;
+                    --json)         json_flag="1"; shift ;;
+                    --no-auto-done) no_auto_done_flag="1"; shift ;;
+                    *)              entry_id="$1"; shift ;;
                 esac
             done
 
             if [ -z "$entry_id" ]; then
-                echo "Usage: beacon pr approve <entry-id> [--rationale \"text\"] [--json]"
+                echo "Usage: beacon pr approve <entry-id> [--rationale \"text\"] [--no-auto-done] [--json]"
                 exit 1
             fi
-            BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" BEACON_JSON="$json_flag" \
+            BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" \
+                BEACON_JSON="$json_flag" BEACON_NO_AUTO_DONE="$no_auto_done_flag" \
                 python3 "$COMMANDS_PY" pr_approve
             ;;
         reject)
@@ -1982,8 +2011,26 @@ cmd_pr() {
             fi
             BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" pr_merge
             ;;
+        sync)
+            # ms-61 / e-2005: align beacon PR entries with GitHub state.
+            # GitHub MERGED → beacon pr merge; GitHub CLOSED → beacon pr close.
+            shift
+            local json_flag=""
+            local dry_run_flag=""
+
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --json)    json_flag="1"; shift ;;
+                    --dry-run) dry_run_flag="1"; shift ;;
+                    *)         shift ;;
+                esac
+            done
+
+            BEACON_JSON="$json_flag" BEACON_DRY_RUN="$dry_run_flag" \
+                python3 "$COMMANDS_PY" pr_sync
+            ;;
         *)
-            echo "Usage: beacon pr [create|add|show|review|approve|request-changes|reject|merge|close]"
+            echo "Usage: beacon pr [create|add|show|review|approve|request-changes|reject|merge|close|sync]"
             echo "  create          [-m <ms-id>] [--intent \"text\"] [gh pr create flags...]"
             echo "                  Run gh pr create and auto-record the PR in beacon"
             echo "  add             <github-url> [-m <ms-id>] [--intent \"text\"]  Register a PR"
@@ -1994,6 +2041,7 @@ cmd_pr() {
             echo "  reject          <entry-id> [--rationale \"text\"]  Reject a PR"
             echo "  merge           <entry-id>   Mark as merged"
             echo "  close           <entry-id>   Close without merging"
+            echo "  sync            [--dry-run]  Align beacon PR entries with GitHub state (merged/closed)"
             ;;
     esac
 }
@@ -2620,6 +2668,209 @@ except ValueError as e:
                 BEACON_TREK_ID="$trek_id" BEACON_LIMIT="$limit" \
                     python3 "$COMMANDS_PY" trek_timeline
                 ;;
+            # ms-97 / e-2626 (AC23) — canonical scope-add verb.
+            # Alias of `plan --add-scope <project>:<ref>` with a flag-style
+            # signature (= --project / --milestone / --operation / --task)
+            # so users don't have to hand-assemble the colon-joined ref.
+            # Reuses cmd_trek_plan under the hood (= one code path for the
+            # staging machinery shared with --add-scope).
+            scope-add)
+                shift 2
+                trek_id="" sa_project="" sa_milestone="" sa_operation="" sa_task=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --project) sa_project="${2:-}"; shift 2 ;;
+                        --milestone|--ms) sa_milestone="${2:-}"; shift 2 ;;
+                        --operation|--op) sa_operation="${2:-}"; shift 2 ;;
+                        --task|--e) sa_task="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                if [[ -z "$sa_project" ]]; then
+                    echo "Error: --project <pid> is required" >&2
+                    exit 1
+                fi
+                # Pick the narrowing key. cmd_trek_plan rejects bare
+                # project-wide entries via parse_scope_arg (AC7 strict),
+                # so we require at least one narrowing flag here too.
+                ref=""
+                if [[ -n "$sa_milestone" ]]; then
+                    ref="$sa_milestone"
+                elif [[ -n "$sa_operation" ]]; then
+                    ref="$sa_operation"
+                elif [[ -n "$sa_task" ]]; then
+                    ref="$sa_task"
+                else
+                    echo "Error: one of --milestone | --operation | --task is required" >&2
+                    exit 1
+                fi
+                BEACON_TREK_ID="$trek_id" \
+                    BEACON_TREK_SCOPE_ADD="${sa_project}:${ref}" \
+                    python3 "$COMMANDS_PY" trek_plan
+                ;;
+            # ms-97 / e-2611 AC25 — scope mutation approval flow.
+            scope-approve)
+                shift 2
+                trek_id="" pending_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *)
+                            if [[ -z "$trek_id" ]]; then
+                                trek_id="$1"
+                            elif [[ -z "$pending_id" ]]; then
+                                pending_id="$1"
+                            fi
+                            shift
+                            ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_PENDING_ID="$pending_id" \
+                    python3 "$COMMANDS_PY" trek_scope_approve
+                ;;
+            scope-reject)
+                shift 2
+                trek_id="" pending_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *)
+                            if [[ -z "$trek_id" ]]; then
+                                trek_id="$1"
+                            elif [[ -z "$pending_id" ]]; then
+                                pending_id="$1"
+                            fi
+                            shift
+                            ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_PENDING_ID="$pending_id" \
+                    python3 "$COMMANDS_PY" trek_scope_reject
+                ;;
+            # ms-99 / e-2829 — slot verbs (Trek schema v2). Nested
+            # subcommand: `beacon trek slot <add|amend|claim|list>`.
+            slot)
+                _slot_sub="${3:-}"
+                case "$_slot_sub" in
+                    add)
+                        shift 3
+                        trek_id="" project="" ms="" op="" task="" children=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --project) project="${2:-}"; shift 2 ;;
+                                --milestone|--ms) ms="${2:-}"; shift 2 ;;
+                                --operation|--op) op="${2:-}"; shift 2 ;;
+                                --task|--e) task="${2:-}"; shift 2 ;;
+                                --children) children="${2:-}"; shift 2 ;;
+                                --json) export BEACON_JSON=1; shift ;;
+                                *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                            esac
+                        done
+                        BEACON_TREK_ID="$trek_id" \
+                            BEACON_SLOT_PROJECT="$project" \
+                            BEACON_SLOT_MILESTONE="$ms" \
+                            BEACON_SLOT_OPERATION="$op" \
+                            BEACON_SLOT_TASK="$task" \
+                            BEACON_SLOT_CHILDREN="$children" \
+                            python3 "$COMMANDS_PY" trek_slot_add
+                        ;;
+                    amend)
+                        shift 3
+                        trek_id="" slot_id="" add_children="" rem_children=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --add-child)
+                                    if [[ -z "$add_children" ]]; then
+                                        add_children="${2:-}"
+                                    else
+                                        add_children="$add_children,${2:-}"
+                                    fi
+                                    shift 2 ;;
+                                --remove-child)
+                                    if [[ -z "$rem_children" ]]; then
+                                        rem_children="${2:-}"
+                                    else
+                                        rem_children="$rem_children,${2:-}"
+                                    fi
+                                    shift 2 ;;
+                                --json) export BEACON_JSON=1; shift ;;
+                                *)
+                                    if [[ -z "$trek_id" ]]; then
+                                        trek_id="$1"
+                                    elif [[ -z "$slot_id" ]]; then
+                                        slot_id="$1"
+                                    fi
+                                    shift ;;
+                            esac
+                        done
+                        BEACON_TREK_ID="$trek_id" \
+                            BEACON_SLOT_ID="$slot_id" \
+                            BEACON_SLOT_ADD_CHILDREN="$add_children" \
+                            BEACON_SLOT_REMOVE_CHILDREN="$rem_children" \
+                            python3 "$COMMANDS_PY" trek_slot_amend
+                        ;;
+                    claim)
+                        shift 3
+                        trek_id="" slot_id="" session_="" unclaim=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --session) session_="${2:-}"; shift 2 ;;
+                                --unclaim) unclaim="1"; shift ;;
+                                --json) export BEACON_JSON=1; shift ;;
+                                *)
+                                    if [[ -z "$trek_id" ]]; then
+                                        trek_id="$1"
+                                    elif [[ -z "$slot_id" ]]; then
+                                        slot_id="$1"
+                                    fi
+                                    shift ;;
+                            esac
+                        done
+                        BEACON_TREK_ID="$trek_id" \
+                            BEACON_SLOT_ID="$slot_id" \
+                            BEACON_SLOT_SESSION="$session_" \
+                            BEACON_SLOT_UNCLAIM="$unclaim" \
+                            python3 "$COMMANDS_PY" trek_slot_claim
+                        ;;
+                    list)
+                        shift 3
+                        trek_id=""
+                        while [[ $# -gt 0 ]]; do
+                            case "$1" in
+                                --json) export BEACON_JSON=1; shift ;;
+                                *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                            esac
+                        done
+                        BEACON_TREK_ID="$trek_id" \
+                            python3 "$COMMANDS_PY" trek_slot_list
+                        ;;
+                    *)
+                        echo "Usage: beacon trek slot <add|amend|claim|list> [args]" >&2
+                        exit 2
+                        ;;
+                esac
+                ;;
+            # ms-97 / Phase 7-C / AC24 — blanket pre-approval (e-2603).
+            blanket-approve|blanket-revoke)
+                _bk_sub="$2"
+                shift 2
+                trek_id="" category=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --category) category="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                if [[ "$_bk_sub" == "blanket-approve" ]]; then
+                    BEACON_TREK_ID="$trek_id" BEACON_TREK_BLANKET_CATEGORY="$category" \
+                        python3 "$COMMANDS_PY" trek_blanket_approve
+                else
+                    BEACON_TREK_ID="$trek_id" BEACON_TREK_BLANKET_CATEGORY="$category" \
+                        python3 "$COMMANDS_PY" trek_blanket_revoke
+                fi
+                ;;
             stop)
                 shift 2
                 trek_id="" reason=""
@@ -2768,6 +3019,44 @@ except ValueError as e:
                 BEACON_TREK_ID="$trek_id" BEACON_TREK_TASK_ID="$task_id" \
                 BEACON_TREK_STATE="$state" BEACON_TREK_NOTE="$note" \
                     python3 "$COMMANDS_PY" trek_task_state
+                ;;
+            # ms-95 / e-2308 — TTL safety net deadline 延長 (= leader が Agent
+            # subagent dispatch する際の reaffirm 代替)。 --minutes 0 で clear。
+            extend-ttl)
+                shift 2
+                trek_id="" task_id="" minutes="" reason=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --minutes) minutes="${2:-}"; shift 2 ;;
+                        --reason) reason="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        *)
+                            if [[ -z "$trek_id" ]]; then trek_id="$1"
+                            elif [[ -z "$task_id" ]]; then task_id="$1"
+                            fi
+                            shift
+                            ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_TREK_TASK_ID="$task_id" \
+                BEACON_TREK_TTL_MINUTES="$minutes" \
+                BEACON_TREK_TTL_REASON="$reason" \
+                    python3 "$COMMANDS_PY" trek_extend_ttl
+                ;;
+            # ms-97 / Phase 7-A / AC21 — leader が user summary DM 送信後に
+            # meta.summary_sent_at を stamp し、 completion_notified_at と
+            # 組合せて leader-digest tick を停止する。
+            summary-sent)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" \
+                    python3 "$COMMANDS_PY" trek_summary_sent
                 ;;
             # ms-92 / e-2141 — cross-project task add via Trek scope。
             # Trek scope に含まれる project の MS 配下にのみ task を起票できる
@@ -3713,8 +4002,24 @@ EOF
         # --json | jq`. send subcommand fans out per-recipient.
         _bus_to_list=""
         _bus_to_trek=""
+        # ms-54 / e-2934: --to-user for user-scoped (project × user) 宛先。
+        # session_id churn (= bclaude 再起動で sid が変わる) しても、受信者側で
+        # 新 session が起動すれば inbox に届く。email or user_id 受け付ける
+        # (email はサーバー側で user_id に解決)。--to (session-scoped) との
+        # 併用は禁止 (= cmd_bus_send で hard error)、どちらか一方のみ。
+        _bus_to_user=""
         _bus_action=""          # e-1290: comma-joined actions_authorized for T1 envelope
         _bus_no_envelope=""     # e-1290: opt-out of envelope path (debug legacy)
+        # ms-94 / e-2291 (2026-07-06): `bus directory` の default 挙動を反転。
+        # 今まで cwd project 限定 (= 他 project の live session が見えない) が
+        # default だったので、user / AI が --all-projects と付けても phantom flag
+        # で無視されて silent に cwd 限定のまま返るという構造的footgun があった
+        # (= 「セッションがいません」誤報告の直接原因)。 default を全 project 横断
+        # (= 自 user が member の全 project の live session) にし、明示的に cwd
+        # 限定したい時は --cwd-only opt-in にする。 --all-projects は
+        # deprecated (= もう default だよ) の stderr warning で phantom を可視化。
+        _bus_cwd_only=""
+        _bus_all_projects_seen=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --channel)        _bus_channel="${2:-}"; shift 2 ;;
@@ -3723,6 +4028,7 @@ EOF
                 --recipient)      _bus_recipient="${2:-}"; shift 2 ;;
                 --to)             _bus_to="${2:-}"; _bus_to_list="${_bus_to_list}${2:-}"$'\n'; shift 2 ;;
                 --to-trek)        _bus_to_trek="${2:-}"; shift 2 ;;
+                --to-user)        _bus_to_user="${2:-}"; shift 2 ;;
                 --delivery)       _bus_delivery="${2:-}"; shift 2 ;;
                 --interval)       _bus_interval="${2:-}"; shift 2 ;;
                 --timeout)        _bus_timeout="${2:-}"; shift 2 ;;
@@ -3745,6 +4051,12 @@ EOF
                 --turns|-n)       _bud_turns="${2:-}"; shift 2 ;;
                 --in-reply-to)    _bus_in_reply_to="${2:-}"; shift 2 ;;
                 --project)        _bus_project_id="${2:-}"; shift 2 ;;
+                # ms-94 / e-2291: opt-in cwd 限定モード (bus directory の逆 default)。
+                --cwd-only)       _bus_cwd_only="1"; shift ;;
+                # ms-94 / e-2291: 過去 phantom flag だった --all-projects を明示検知。
+                # bus directory 側で default = cross-project になったので冗長。
+                # 他 subcommand では意味なし、silent skip して stderr で気付かせる。
+                --all-projects)   _bus_all_projects_seen="1"; shift ;;
                 # e-1290: --action <name> may repeat; collected as
                 # comma-joined string then split back in commands.py. Wildcards
                 # are rejected server-side at envelope/issue time.
@@ -3780,6 +4092,13 @@ print(m.group(1) if m else "")' || true)
                         fi
                     fi
                 fi
+                # ms-54 / e-2934: --to と --to-user は相互排他 (どちらか片方のみ)。
+                # 両方 or どちらも無し (channel=dm 時) はここでは通し、 python 側
+                # (cmd_bus_send) が最終判定して親切エラーを出す。
+                if [[ -n "$_bus_to_user" ]] && [[ -n "$_bus_to_list" || -n "$_bus_to" ]]; then
+                    echo "Error: --to と --to-user は相互排他です (どちらか片方のみ指定してください)。" >&2
+                    exit 2
+                fi
                 # Dedupe and fan out one send per recipient. The legacy
                 # behavior (single --to) collapses to a single subprocess.
                 if [[ -z "$_bus_to_list" ]]; then
@@ -3787,6 +4106,7 @@ print(m.group(1) if m else "")' || true)
                         BEACON_BUS_PAYLOAD="$_bus_payload" \
                         BEACON_BUS_SENDER="$_bus_sender" \
                         BEACON_BUS_RECIPIENT_SESSION="$_bus_to" \
+                        BEACON_BUS_RECIPIENT_USER="$_bus_to_user" \
                         BEACON_BUS_DELIVERY="$_bus_delivery" \
                         BEACON_BUS_IN_REPLY_TO="$_bus_in_reply_to" \
                         BEACON_BUS_PROJECT_ID="$_bus_project_id" \
@@ -3864,6 +4184,12 @@ print(m.group(1) if m else "")' || true)
                     python3 "$COMMANDS_PY" bus_status
                 ;;
             directory|dir)
+                # ms-94 / e-2291: --all-projects は phantom flag だった名残なので
+                # 気付きの stderr を出す (subcommand=directory 経路のみ)。 default
+                # が cross-project になったので指定しても no-op。
+                if [[ -n "$_bus_all_projects_seen" ]]; then
+                    echo "Note: --all-projects は既に default になりました (ms-94 / e-2291)。 このフラグは不要です。 cwd 限定したい時は --cwd-only を使ってください。" >&2
+                fi
                 BEACON_DIR_USER="$_bus_user" \
                     BEACON_DIR_MACHINE="$_bus_machine" \
                     BEACON_DIR_AGENT="$_bus_agent" \
@@ -3871,6 +4197,7 @@ print(m.group(1) if m else "")' || true)
                     BEACON_DIR_HEALTHY="$_bus_healthy" \
                     BEACON_DIR_SINCE_MIN="$_bus_since_min" \
                     BEACON_BUS_PROJECT_ID="$_bus_project_id" \
+                    BEACON_DIR_CWD_ONLY="$_bus_cwd_only" \
                     BEACON_JSON="$_bus_json" \
                     python3 "$COMMANDS_PY" bus_directory
                 ;;
@@ -3932,7 +4259,7 @@ Usage: beacon bus send         --channel <ch> [--to <session_id>]... [--to-trek 
        beacon bus receive      [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack] [--project <id>]
        beacon bus ack          [--recipient <id>] (--last-seen-at <iso8601> | --event <event_id>) [--project <id>]
        beacon bus status       <event_id> [--project <id>] [--json]
-       beacon bus directory    [--user <email>] [--machine <name>] [--agent <name>] [--live] [--healthy] [--since-min <N>] [--project <id>] [--json]
+       beacon bus directory    [--user <email>] [--machine <name>] [--agent <name>] [--live] [--healthy] [--since-min <N>] [--project <id>] [--cwd-only] [--json]
        beacon bus budget       grant --turns <N>  |  show  |  clear
        beacon bus auto-execute add --channel <name>  |  remove --channel <name>  |  list
 
@@ -3948,6 +4275,10 @@ delivery: auto-execute | propose-to-ai (default) | notify-user-only
 --project:     override the cwd's project_id (e-1151) for cross-project DM/directory.
                Auth + API URL still come from the current project; only the
                target project_id in the API call changes.
+--cwd-only:    (directory only, ms-94 / e-2291) opt-in to cwd 限定 mode。
+               default (無指定時) は user が member の全 project 横断で live
+               session を返す。 「他 project の session が見えない」 かつての
+               phantom flag --all-projects は不要。
 --action:      (send, repeatable) action name the receiver should be authorized
                to auto-execute on the signed T1 envelope. Wildcards / regex
                are rejected server-side; enumerate. High-risk actions
@@ -4141,12 +4472,20 @@ EOF
             check)
                 python3 "$COMMANDS_PY" trigger_check
                 ;;
+            tick)
+                # ms-98 / e-2764: run auto-fire + cleanup pipeline. This is
+                # the server-touching half that used to be baked into
+                # `trigger check`. Call it on a debounced cadence (Skill /
+                # cron) — never in a tight loop or per-hook.
+                python3 "$COMMANDS_PY" trigger_tick
+                ;;
             clear)
                 BEACON_TRIGGER_NAME="${3:-}" python3 "$COMMANDS_PY" trigger_clear
                 ;;
             *)
                 echo "Usage: beacon trigger fire [--trek <trek-id>] <name> [message]"
-                echo "       beacon trigger check"
+                echo "       beacon trigger check                 (local-only read)"
+                echo "       beacon trigger tick                  (refresh via cloud)"
                 echo "       beacon trigger clear <name>"
                 ;;
         esac
@@ -4182,6 +4521,35 @@ EOF
                 ;;
             status) python3 "$COMMANDS_PY" cloud_status ;;
             list)   python3 "$COMMANDS_PY" cloud_list ;;
+            migrate-from-local)
+                # ms-95 / e-2339: retire an orphan local project.json that
+                # survived the cloud cut-over. Two-factor confirm + pre-flight
+                # check mirror the `cloud off` pattern (e-1776 silent-flip
+                # incident shape applies here too — moving historical state
+                # out of the working tree must not be silently invocable).
+                shift 2  # drop 'cloud' and 'migrate-from-local'
+                confirm_pid=""
+                force=""
+                while [ -n "${1:-}" ]; do
+                    case "$1" in
+                        --confirm)
+                            confirm_pid="${2:-}"
+                            shift 2
+                            ;;
+                        --force-after-review|--force)
+                            force="1"
+                            shift
+                            ;;
+                        *)
+                            echo "Error: unknown flag '$1' for migrate-from-local."
+                            echo "Usage: beacon cloud migrate-from-local --confirm <project_id> [--force-after-review]"
+                            exit 1
+                            ;;
+                    esac
+                done
+                BEACON_CONFIRM="$confirm_pid" BEACON_FORCE="$force" \
+                    python3 "$COMMANDS_PY" cloud_migrate_from_local
+                ;;
             off)
                 # e-1861 (ms-61): "cloud off" is sandbox / verification-only now.
                 # Beacon = cloud-only in normal operation (Claude Code requires
@@ -4237,8 +4605,9 @@ EOF
                 # removed structurally. They now hit this wildcard branch
                 # ("error: unknown subcommand") per SPEC AC3.
                 echo "Error: unknown subcommand '${2}'."
-                echo "Usage: beacon cloud [open|status|list|join|upload-initial|off]"
+                echo "Usage: beacon cloud [open|status|list|join|upload-initial|migrate-from-local|off]"
                 echo "       (sandbox: cloud off --confirm <project_id>)"
+                echo "       (orphan retire: cloud migrate-from-local --confirm <project_id>)"
                 exit 1
                 ;;
         esac
@@ -4275,7 +4644,28 @@ EOF
         ;;
     skill)
         case "${2:-}" in
-            install) python3 "$COMMANDS_PY" skill_install ;;
+            install)
+                shift 2
+                _skill_target=""; _skill_name=""; _skill_force=""
+                _skill_adopt=""; _skill_dry_run=""; _skill_prune=""; _skill_json=""
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        --target)  _skill_target="${2:-}"; shift 2 ;;
+                        --name)    _skill_name="${2:-}"; shift 2 ;;
+                        --force)   _skill_force="1"; shift ;;
+                        --adopt)   _skill_adopt="1"; shift ;;
+                        --dry-run) _skill_dry_run="1"; shift ;;
+                        --prune)   _skill_prune="1"; shift ;;
+                        --json)    _skill_json="1"; shift ;;
+                        *) echo "Usage: beacon skill install [--target claude|codex|both --name <name>] [--dry-run] [--prune] [--force|--adopt] [--json]"; exit 2 ;;
+                    esac
+                done
+                BEACON_SKILL_TARGET="$_skill_target" BEACON_SKILL_NAME="$_skill_name" \
+                BEACON_FORCE="$_skill_force" BEACON_ADOPT="$_skill_adopt" \
+                BEACON_DRY_RUN="$_skill_dry_run" BEACON_PRUNE="$_skill_prune" \
+                BEACON_JSON="$_skill_json" \
+                    python3 "$COMMANDS_PY" skill_install
+                ;;
             *)       echo "Usage: beacon skill install" ;;
         esac
         ;;
@@ -4838,7 +5228,7 @@ EOF
             python3 "$COMMANDS_PY" search
         ;;
     doctor)
-        python3 "$COMMANDS_PY" doctor
+        python3 "$COMMANDS_PY" doctor "${@:2}"
         ;;
     cycle)
         ensure_project

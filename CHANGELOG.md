@@ -2,6 +2,435 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.55.0] - 2026-07-06
+
+- Merge pull request #347 from kurogin23mech-source/feat/ms-54-dm-primitive-split
+- feat(ms-54): DM primitive 2 経路 (session-scoped 即時 wake / user-scoped 次回 catch-up) の使い分けを Skill 側に実装 (e-2972 / e-2973 / e-2974)
+- Merge pull request #346 from kurogin23mech-source/fix/ms-95-dm-visibility-session-user-id-stamp
+- fix(ms-95): DM payload visibility gate stops redacting the intended recipient (e-2960)
+- Merge pull request #345 from kurogin23mech-source/feat/ms-97-c3b-inbox-pending-banner
+- feat(ms-97): [C3] inbox-hook に承認待ち DM の banner を出す (H3 可視性)
+- Merge pull request #344 from kurogin23mech-source/fix/ms-97-p5-leader-review-self-approve
+- fix(ms-97): [P5] leader review の自己承認を server で構造的に塞ぐ
+- docs(release): update README/CHANGELOG for v0.54.0
+- chore(release): bump formula to 0.54.0
+
+## [v0.54.0] - 2026-07-06
+
+- Merge pull request #343 from kurogin23mech-source/feat/ms-94-e2291-cross-project-defaults
+- feat(ms-94): CLI cross-project defaults 全面改修 (e-2291/e-2811)
+- Merge pull request #342 from kurogin23mech-source/fix/ms-97-p4-leader-dm-cross-project
+- fix(ms-97): [P4] leader 宛 DM 3 経路を scope[0] 固定から leader home project 解決に
+- Merge pull request #338 from kurogin23mech-source/fix/ms-97-p3-completion-ready-quiesce
+- Merge pull request #339 from kurogin23mech-source/ms-96-e2381
+- Merge pull request #341 from kurogin23mech-source/feat/ms-96-e2379-v3-entry-level
+- Merge pull request #334 from kurogin23mech-source/ms-96-vps-1
+- Merge pull request #340 from kurogin23mech-source/feat/ms-54-e2934-user-scoped-dm
+- feat(ms-54): DM 送信先を project × user 単位でも指定できるようにする (e-2934)
+- feat(ms-96): migrate script を v2→v3 直行に切替 (e-2379)
+- feat(ms-96): v3 schema (entry-level split) の core 実装 (e-2379 follow-up)
+- chore(ms-96): main を ms-96-vps-1 に取り込む (CI base 追従 + P1/P2 セキュリティ fix 統合)
+- feat(ms-96): app/Redis 固定窓レート制限ミドルウェア (e-2381)
+- fix(ms-97): [P3/C2] quiesce branch で completion_ready を評価し AC21 停止条件を成立させる
+- Merge pull request #336 from kurogin23mech-source/fix/ms-97-p2-inbox-hook-envelope-verify
+- Merge pull request #337 from kurogin23mech-source/fix/ms-97-p1-ws-bus-broadcast-signal-only
+- fix(ms-97): [P1/H1] bus event の WS ブロードキャストを signal-only 化 (DM 本文の漏洩を塞ぐ)
+- fix(ms-97): [P2/H2] inbox-hook で imperative 発火に T1-system provenance を強制 + payload id を sanitize
+- Merge pull request #281 from kurogin23mech-source/feat/ms-93-e2557-skill-converter-mvp
+- chore(ms-93): prune beacon-trek from SKILL_MANIFEST (drift refresh)
+- fix(ms-93): align Skill converter with schema v2
+- feat(ms-93): add canonical Skill converter MVP
+- feat(ms-93): e-2558 add SKILL_MANIFEST.json — enumerated 39 Skill inventory
+- Merge pull request #335 from kurogin23mech-source/fix/ms-95-main-red-pytest-pollution-wheel-glob
+- fix(ms-95): test_beacon_find_root を CI checkout に非依存化 (残 2 red 解消)
+- fix(ms-96): bus WS は Node 内蔵 global WebSocket を優先 (e-2380)
+- fix(ms-95): 残 6 red を全部緑化 — main CI 完全 green (4274 passed)
+- feat(ms-96): bus.mjs を WebSocket push 対応に (e-2380)
+- fix(ms-95): main を green に近づける — pytest cross-file 汚染 + wheel glob 修正
+- fix(ms-96): mysql backend の書き込み経路を whole-doc apply に載せる (e-2379)
+- fix(ms-96): 移行スクリプトに v2→v1 collapse を追加 (e-2379)
+- docs(release): update README/CHANGELOG for v0.53.1
+- chore(release): bump formula to 0.53.1
+- feat(ms-96): Firestore→MySQL 移行スクリプト + trek ログ永続化修正 (e-2379)
+- feat(ms-96): MySQL JSON-blob ストアバックエンド新設 (e-2378)
+
+## [v0.53.1] - 2026-07-04
+
+- Merge pull request #333 from kurogin23mech-source/fix/ms-95-e2875-archived-trek-guards
+- fix(ms-95): [e-2875] inbox-hook で archived Trek 進行 event を silent drop (layer 3-A)
+- fix(ms-95): [e-2875] server 410 Gone guards on archived Trek writes (layer 3-B)
+- docs(release): update README/CHANGELOG for v0.53.0
+- chore(release): bump formula to 0.53.0
+
+## [v0.53.0] - 2026-07-03
+
+- Merge pull request #332 from kurogin23mech-source/fix/ms-95-e2870-cloud-first-recursion
+- fix(ms-95): [Critical] BEACON_USE_CLOUD_FIRST_SESSION recursion guard (e-2870)
+- Merge pull request #331 from kurogin23mech-source/feat/ms-99-e2834-observability
+- Merge pull request #330 from kurogin23mech-source/feat/ms-99-e2833-scheduler-refactor
+- Merge pull request #329 from kurogin23mech-source/feat/ms-99-e2832-materialize-slots
+- feat(ms-99): [Trek slot schema v2] quiesce observability trio (e-2834)
+- feat(ms-99): [Trek slot schema v2] scheduler refactor onto materialize_slots (e-2833)
+- feat(ms-99): [Trek slot schema v2] materialize_slots primitive (e-2832)
+- Merge pull request #328 from kurogin23mech-source/ms-99-trek-slot-schema-v2-inventory-silent
+- Merge pull request #327 from kurogin23mech-source/fix/ms-99-e2828-scope-entry-v2-schema
+- feat(ms-99): [Trek slot schema v2] API endpoints + README bundle (e-2830)
+- test(ms-99): [Silent quiesce regression] test-first pin for Phase 2 (e-2840)
+- feat(ms-99): [Trek slot schema v2] CLI 4 verbs (add / amend / claim / list) via staging (e-2829)
+- test(ms-99): [Trek slot done precondition] gap-pin for 4 missing branches (e-2839)
+- feat(ms-99): [Trek slot schema v2] scope entry v2 shape + identity match (e-2828)
+- Merge pull request #326 from kurogin23mech-source/fix/ms-97-e2815-revert-revision
+- Revert "Merge pull request #325 from kurogin23mech-source/fix/ms-97-e2815-revision-4rule-gate"
+- Merge pull request #325 from kurogin23mech-source/fix/ms-97-e2815-revision-4rule-gate
+- fix(ms-97): [Trek harness] e-2815 revision — 4-rule executor fanout gate
+- Merge pull request #324 from kurogin23mech-source/fix/ms-97-e2815-executor-fanout
+- fix(ms-97): [Trek harness] executor fanout に無条件 fire を復元 (e-2815)
+- Merge pull request #323 from kurogin23mech-source/fix/ms-93-e2788-followup-auth-whoami-typo
+- fix(ms-93): setup prompt の実在しない `beacon auth whoami` を `beacon auth status` に置換 (e-2802)
+- Merge pull request #322 from kurogin23mech-source/fix/ms-93-e2788-followup-install-guide-link
+- fix(ms-93): empty-state install guide のデッドリンクを実 repo に置換 (e-2798)
+- Merge pull request #321 from kurogin23mech-source/fix/ms-95-e2794-list-projects-ownerless-leak
+- fix(ms-95): [SECURITY] close ownerless project visibility leak (e-2794)
+- Merge pull request #320 from kurogin23mech-source/feat/ms-93-e2788-empty-state-setup-prompt
+- feat(ms-93): empty-state に Beacon CLI setup prompt block を追加 (e-2788)
+- Merge pull request #319 from kurogin23mech-source/feat/ms-98-e2766-skill-explicit-tick
+- feat(ms-98): migrate 6 Skills to explicit tick && check pattern
+- Merge pull request #318 from kurogin23mech-source/feat/ms-98-e2775-fail-open-scope-narrowing
+- Merge pull request #317 from kurogin23mech-source/feat/ms-98-e2774-api-client-circuit-breaker
+- Merge pull request #316 from kurogin23mech-source/feat/ms-98-e2770-command-wall-clock-timeout
+- Merge pull request #315 from kurogin23mech-source/feat/ms-98-e2765-session-cache-via-server
+- Merge pull request #314 from kurogin23mech-source/feat/ms-98-e2764-trigger-check-local-only
+- feat(ms-98): narrow operation-fire fail-open scope to skip rate-limit errors
+- feat(ms-98): api_client circuit breaker to stop feeding a 429 storm
+- feat(ms-98): wall-clock TTL on CLI dispatch to bound hung-process leaks
+- feat(ms-98): cache cloud-first session mint to cut heartbeat spam
+- feat(ms-98): split beacon trigger check/tick + auto-throttle to end API spam
+- Merge pull request #313 from kurogin23mech-source/feat/cost-meta-only-load-polling-endpoints
+- feat(cost): meta-only auth path for high-frequency polling endpoints
+- docs(release): update README/CHANGELOG for v0.52.1
+- chore(release): bump formula to 0.52.1
+
+## [v0.52.1] - 2026-07-01
+
+- Merge pull request #312 from kurogin23mech-source/ms-95-fork-705831
+- fix(ms-95): e-2755 — bus.mjs 60s trigger check tick を廃止して orphan leak 経路を根絶
+- docs(release): update README/CHANGELOG for v0.52.0
+- chore(release): bump formula to 0.52.0
+
+## [v0.52.0] - 2026-07-01
+
+- Merge pull request #311 from kurogin23mech-source/feat/ms-97-e2650-slot-done-precondition
+- Merge pull request #310 from kurogin23mech-source/feat/ms-95-e2726-task-done-forcing-function
+- feat(ms-97): e-2650 — Trek slot done 構造防御 (= project pool 真値源 + AC28 manual 明文化)
+- feat(ms-95): e-2726 — task done evidence gate (#8 phantom done forcing function)
+- Merge pull request #309 from kurogin23mech-source/feat/ms-97-fresh-joiner-chain-e2636-e2637-e2638
+- feat(ms-97): fresh joiner chain e-2636/e-2637/e-2638 — 同 user 別 session 2 件目 join silent no-op 解消 + welcome tick bootstrap
+- Merge pull request #308 from kurogin23mech-source/fix/ms-95-e2723-leader-digest-same-user-collapse
+- fix(ms-95): e-2723 — leader-digest が同 user の executor session に collapse する病理を解消 (#16)
+- Merge pull request #307 from kurogin23mech-source/feat/ms-97-spec-chain-e2711-e2707-e2709
+- Merge pull request #306 from kurogin23mech-source/feat/ms-95-e2640-cross-project-scope-entries
+- feat(ms-97): SPEC chain Step 3-5 — Level 3 imperative + leader-digest aggregate + Skill idempotent (e-2711/e-2707/e-2709)
+- feat(ms-95): e-2640 — cross-project Trek detail scope-entries endpoint (data モデル独立性を API/UI 層まで貫通)
+- Merge pull request #305 from kurogin23mech-source/fix/ms-95-e2710-allowlist-invariants-observability
+- Merge pull request #304 from kurogin23mech-source/fix/ms-97-e2706-review-trigger-states
+- fix(ms-95): e-2710 — bus_auto_execute_channels invariants pin + downgrade diag frame
+- fix(ms-97): e-2706 — REVIEW_TRIGGER_STATES で leader_review notify 復活 (5-state migration drift)
+- docs(release): update README/CHANGELOG for v0.51.5
+- chore(release): bump formula to 0.51.5
+
+## [v0.51.5] - 2026-06-29
+
+- Merge pull request #303 from kurogin23mech-source/fix/trigger-check-runaway
+- fix: stop runaway trigger check processes
+- docs(release): update README/CHANGELOG for v0.51.4
+- chore(release): bump formula to 0.51.4
+
+## [v0.51.4] - 2026-06-28
+
+- Merge pull request #302 from kurogin23mech-source/fix/ms-97-trek-scheduler-import-flat-layout
+- fix(ms-97): lib/trek_scheduler.py lazy import for Cloud Run flat layout (= dogfood 全 tick で executor skip 真因)
+- docs(release): update README/CHANGELOG for v0.51.3
+- chore(release): bump formula to 0.51.3
+
+## [v0.51.3] - 2026-06-28
+
+- Merge pull request #301 from kurogin23mech-source/fix/ms-97-fanout-empty-targets-and-broadcast-delivery
+- fix(ms-97): broadcast-fallback DM delivery + executor target diagnostic
+- docs(release): update README/CHANGELOG for v0.51.2
+- chore(release): bump formula to 0.51.2
+
+## [v0.51.2] - 2026-06-28
+
+- Merge pull request #300 from kurogin23mech-source/fix/ms-97-project-ref-and-session-resolution
+- fix(ms-97): project_ref + session_id resolution unification (= dogfood structural fixes)
+- docs(release): update README/CHANGELOG for v0.51.1
+- chore(release): bump formula to 0.51.1
+
+## [v0.51.1] - 2026-06-28
+
+- Merge pull request #299 from kurogin23mech-source/fix/ms-97-cloud-migration-endpoint
+- fix(ms-97): cloud-mode migration endpoint (= live trek migrate without local store)
+- docs(release): update README/CHANGELOG for v0.51.0
+- chore(release): bump formula to 0.51.0
+
+## [v0.51.0] - 2026-06-28
+
+- Merge pull request #298 from kurogin23mech-source/feat/ms-97-phase7c-blanket-and-logs
+- feat(ms-97): Phase 7-C — AC24 blanket approval + AC26/27 structured logs (ms-97 FINAL)
+- Merge pull request #297 from kurogin23mech-source/feat/ms-97-phase7b-ac22-succession
+- feat(ms-97): Phase 7-B — AC22 auto-succession (priority + threshold + consent + escalation)
+- Merge pull request #296 from kurogin23mech-source/feat/ms-97-phase7a-ac20-ac21-completion-ready
+- feat(ms-97): Phase 7-A — AC20/AC21/G6 completion_ready + summary_sent + meta seed
+- Merge pull request #295 from kurogin23mech-source/feat/ms-97-phase6-ac15-invite-consent
+- feat(ms-97): Phase 6 — AC15 invite consent (accident-time leader candidate notice + 1 hop consent hook)
+- Merge pull request #294 from kurogin23mech-source/feat/ms-97-phase5-ui-cli-skill
+- Merge pull request #293 from kurogin23mech-source/feat/ms-97-phase4-ac10-ac13-ac14-ac32
+- feat(ms-97): Phase 5 — UI/CLI/Skill 動線整理 + Manual auto-show + Skill 重複解消
+- feat(ms-97): Phase 4 — AC10/AC13/AC14/AC32 (MS slot precedence + leader/executor auth boundaries + halt 完全化)
+- Merge pull request #292 from kurogin23mech-source/feat/ms-97-phase3-ac16-fanout-bypass
+- feat(ms-97): Phase 3 — AC16/AC18/AC19/G3/G4 — fanout members iterate + DM bypass session-grain
+- Merge pull request #291 from kurogin23mech-source/feat/ms-97-phase2-ac7-scope-strict
+- feat(ms-97): Phase 2 — AC7/AC8/AC31/AC12 scope narrowing strict (3-layer reject + grandfather warning)
+- Merge pull request #290 from kurogin23mech-source/feat/ms-97-phase1-ac6-members-session-keyed
+- feat(ms-97): e-2658 Phase 1 — AC6 members[] cutover to session_id keyed (phase-gated dual-mode)
+- Merge pull request #289 from kurogin23mech-source/feat/ms-97-e2658-phase0a-remainder
+- Merge pull request #288 from kurogin23mech-source/feat/ms-97-e2658-phase0a-scaffolding
+- feat(ms-97): e-2658 Phase 0-A remainder + e-2659 test scaffolding (migration script + alarming + red tests for AC6/7/16-19/34)
+- feat(ms-97): e-2658 Phase 0-A scaffolding — add members_legacy_backup field + migration_phase tracker
+- docs(release): update README/CHANGELOG for v0.50.1
+- chore(release): bump formula to 0.50.1
+
+## [v0.50.1] - 2026-06-28
+
+- Merge pull request #287 from kurogin23mech-source/feat/ms-95-dogfood-tick-fixes
+- fix(ms-95): e-2644/e-2645/e-2646 dogfood tick fixes (snapshot + narrow + 24h)
+- docs(release): update README/CHANGELOG for v0.50.0
+- chore(release): bump formula to 0.50.0
+
+## [v0.50.0] - 2026-06-28
+
+- Merge pull request #286 from kurogin23mech-source/feat/ms-95-e2639-tick-via-dm
+- feat(ms-95): e-2639 migrate Trek tick to dm channel transport (per-member fanout)
+- Merge pull request #284 from kurogin23mech-source/feat/ms-97-e2626-scope-add-pending
+- feat(ms-97): e-2626 scope-add pending_user_approval flow (AC23)
+- Merge pull request #282 from kurogin23mech-source/feat/ms-97-phase1b-ui
+- Merge pull request #283 from kurogin23mech-source/feat/ms-97-phase1b-backend
+- feat(ms-97): e-2613 tick fire lazy start (AC33)
+- test(ms-97): Phase 1b UI invariants (AC1〜AC8/AC23 を tests で pin)
+- feat(ms-97): e-2609 scope-add/remove approval surface (AC23/25)
+- feat(ms-97): e-2608 leader_session_id 表示 + project-wide warning (AC5/8/31)
+- feat(ms-97): e-2612 halt 中 tick fire 全停止 (AC32)
+- feat(ms-97): e-2607 Trek list を user member 全 Trek に切替 (AC2)
+- feat(ms-97): e-2606 ハンバーガー復活 + tab bar 削除 (AC1/3/4)
+- feat(ms-97): e-2611 scope-remove approval flow (AC25)
+- docs(release): update README/CHANGELOG for v0.49.2
+- chore(release): bump formula to 0.49.2
+
+## [v0.49.2] - 2026-06-27
+
+## [v0.49.1] - 2026-06-27
+
+## [v0.49.0] - 2026-06-25
+
+- Merge pull request #267 from kurogin23mech-source/fix/ms-95-e2441-project-export-import-sys-modules-leak
+- fix(ms-95): e-2441 project_export_import raw sys.modules.pop (-8 test_api)
+- Merge pull request #266 from kurogin23mech-source/fix/ms-95-e2441-milestone-purge-ms-start-sys-modules-leak
+- fix(ms-95): e-2441 milestone_purge + ms_start raw sys.modules.pop (-8 fails)
+- Merge pull request #265 from kurogin23mech-source/fix/ms-95-e2441-env-integration-setup-teardown-delayed
+- fix(ms-95): e-2441 env_integration + op_env delayed setup/teardown (-25 fails)
+- Merge pull request #264 from kurogin23mech-source/fix/ms-95-e2441-revert-263-env-integration-teardown
+- Revert "Merge pull request #263 from kurogin23mech-source/fix/ms-95-e2441-envelope-integration-module-teardown"
+- Merge pull request #263 from kurogin23mech-source/fix/ms-95-e2441-envelope-integration-module-teardown
+- fix(ms-95): e-2441 envelope_integration module mutations leak (-15 fails)
+- Merge pull request #262 from kurogin23mech-source/fix/ms-95-e2441-operation-envelopes-module-teardown
+- fix(ms-95): e-2441 operation_envelopes module mutations leak (-14 fails)
+- Merge pull request #261 from kurogin23mech-source/fix/ms-95-e2441-trailnode-fixture-real-fc-db
+- fix(ms-95): e-2441 trailnode fixture patches wrong firestore_client (-7 fails)
+- Merge pull request #260 from kurogin23mech-source/fix/ms-95-e2441-ms73-dm-recipient-session-env
+- fix(ms-95): e-2441 ms73 dm dispatch missing recipient_session env (-1 fail)
+- Merge pull request #259 from kurogin23mech-source/fix/ms-95-e2441-ws-push-cross-instance-max-3
+- fix(ms-95): e-2441 ws_push_cross_instance test pins old max-instances=1 (-1 fail)
+- Merge pull request #258 from kurogin23mech-source/fix/ms-95-e2441-treks-tab-test-outdated
+- fix(ms-95): e-2441 treks tab tests outdated post-e-2251 / e-2226 (-5 fails)
+- Merge pull request #257 from kurogin23mech-source/fix/ms-95-e2441-credentials-reload-profile-class-identity
+- fix(ms-95): e-2441 test_credentials reload-of-profile breaks test_profile (-12 fails)
+- Merge pull request #256 from kurogin23mech-source/fix/ms-95-e2440-install-hooks-shutil-which-mock
+- fix(ms-95): e-2440 install_hooks shutil.which mock — restore CI green (-2 fails)
+- Merge pull request #254 from kurogin23mech-source/fix/ms-95-e2438-test-fixture-sys-modules-leak
+- Merge pull request #255 from kurogin23mech-source/fix/ms-95-e2448-max-instances-3
+- fix(ms-95): e-2448 bump Cloud Run max-instances 1 → 3 to relieve 429 saturation
+- fix(ms-95): e-2438 test fixture sys.modules.pop leak (-14 fails)
+- Merge pull request #253 from kurogin23mech-source/fix/ms-95-e2446-inbox-hook-cursor-prime
+- fix(ms-95): e-2446 inbox-hook cursor priming — stop fork session storm-flood
+- Merge pull request #252 from kurogin23mech-source/fix/ms-95-e2407-ws-protocol-redesign
+- fix(ms-95): e-2407/e-2437 WS signal-only protocol — redesign 19 stale tests
+- Merge pull request #251 from kurogin23mech-source/fix/ms-95-e2407-envelope-invitation
+- fix(ms-95): e-2407 test_envelope_integration sys.modules alias (-9 fails)
+- Merge pull request #250 from kurogin23mech-source/fix/ms-95-e2407-test-api
+- fix(ms-95): e-2407 test_api mirror project mocks on store_router (-17 fails)
+- Merge pull request #249 from kurogin23mech-source/fix/ms-95-e2407-bus-transport
+- fix(ms-95): e-2407 test_bus_transport sys.modules alias breaks 38-test pollution cascade (-47 fails)
+- Merge pull request #248 from kurogin23mech-source/fix/ms-95-e2407-store-router-reexport
+- fix(ms-95): e-2407 store_router exposes _db / get_db / COLLECTION (~10 test errors + 1 prod silent failure)
+- fix(ms-95): _resolve_session_id を resolve_active_session_id に切替 (e-2419)
+- Revert "fix(ms-95): _resolve_session_id を resolve_active_session_id に切替 (e-2419)"
+- fix(ms-95): _resolve_session_id を resolve_active_session_id に切替 (e-2419)
+- Merge pull request #246 from kurogin23mech-source/fix/ms-95-e2411-cloud-list-owner-email
+- feat(ms-95): e-2411 beacon cloud list shows owner email per project
+- Merge pull request #245 from kurogin23mech-source/e-746/work
+- Merge pull request #244 from kurogin23mech-source/e-2370/work
+- Merge pull request #243 from kurogin23mech-source/e-1490/work
+- fix(ms-95): e-746 cloud-mode CLI writes API response back to local .beacon/project.json (dead cache fix)
+- fix(ms-95): e-2370 prevent install prompt from hallucinating GitHub owner/repo (use git remote, fall back to placeholder)
+- fix(ms-95): e-1490 refresh bridges/<sid>.json pid/parent_pid/cwd periodically in bus.mjs poll loop
+- Merge pull request #242 from kurogin23mech-source/e-1905/work
+- Merge pull request #241 from kurogin23mech-source/e-2305/work
+- Merge pull request #240 from kurogin23mech-source/e-2280/work
+- test(ms-95): e-1905 mock Firestore in test_bus_directory email stamping cases (local-env pass)
+- fix(ms-95): e-2305 session close → live cleanup propagation fix
+- feat(ms-95): e-2280 bus send live-check structure + auto-swap for stale session_id
+- Merge pull request #239 from kurogin23mech-source/e-2215/work
+- Merge pull request #238 from kurogin23mech-source/e-2288/work
+- Merge pull request #237 from kurogin23mech-source/e-2405/work
+- fix(ms-95): e-2215 WebUI hamburger menu open is now instant (lazy fill pattern)
+- fix(ms-95): e-2288 beacon member list shows project owner as first row
+- fix(ms-95): e-2405 pre-flight subset check uses project-wide id set (MS move false-positive fix)
+- Merge pull request #236 from kurogin23mech-source/e-2348/work
+- Merge pull request #235 from kurogin23mech-source/e-2005/work
+- feat(ms-61): e-2348 add retro subcommand to Windows beacon_cli/dispatch.py
+- feat(ms-61): e-2005 PR lifecycle ↔ MS progress integration forcing function
+- Merge pull request #234 from kurogin23mech-source/fix/ms-95-e2320-trek-scope-audit-log
+- Merge pull request #233 from kurogin23mech-source/e-1892/work
+- Merge pull request #232 from kurogin23mech-source/e-1778/work
+- feat(ms-95): e-2320 Trek scope mutation audit log + structural caller boundary pin
+- feat(ms-61): e-1892 /beacon-review-apply Skill prompts to activate parent MS after new MS issuance
+- docs(ms-61): e-1778 enrich /beacon-cloud push warning with concrete past pathology examples
+- Merge pull request #230 from kurogin23mech-source/fix/ms-95-e2308-trek-ttl-subagent-dispatch
+- Merge pull request #229 from kurogin23mech-source/e-1843/work
+- Merge pull request #228 from kurogin23mech-source/fix/ms-95-e1667-bridge-poll-timeout
+- Merge pull request #227 from kurogin23mech-source/e-1825/work
+- Merge pull request #226 from kurogin23mech-source/e-1776/work
+- Merge pull request #225 from kurogin23mech-source/fix/ms-95-e2406-webui-nonactive-ms-entries
+- Merge pull request #231 from kurogin23mech-source/fix/ms-61-e2349-ci-server-requirements
+- fix(ms-61): e-2349 also install httpx for starlette TestClient
+- fix(ms-61): e-2349 install server/requirements.txt + pyyaml in pytest CI workflow
+- feat(ms-95): e-2308 add per-task TTL extension (= leader-side primitive for Agent subagent dispatch)
+- test(ms-61): e-1843 verify session-start Operation activation discussion logic across pending states
+- fix(ms-95): e-1667 bridge poll loop timeout / watchdog (root cause for 43-min stale heartbeat regression)
+- feat(ms-61): e-1825 enforce parallel subagent cap (≤3) in /beacon-dispatch
+- feat(ms-61): e-1776 add cloud mode state file consistency check to beacon doctor
+- fix(ms-95): e-2406 lazy-fetch entries on expand for non-active milestones
+- Merge pull request #223 from kurogin23mech-source/feat/ms-95-e2369-pr-approve-autodone
+- Merge pull request #224 from kurogin23mech-source/feat/ms-95-e1454-bus-listen-retry
+- Merge pull request #222 from kurogin23mech-source/feat/ms-95-e2007-current-project-id
+- feat(ms-95): e-2369 auto-done bound tasks at beacon pr approve time
+- fix(ms-95): e-1454 bus listen resilience: exponential backoff on transient network errors
+- fix(ms-95): e-2007 pin _current_project_id cloud-mode fallback with tests
+- Merge pull request #221 from kurogin23mech-source/feat/ms-84-e2339-migrate-from-local
+- Merge pull request #220 from kurogin23mech-source/ms-95-ms-triage
+- Merge pull request #219 from kurogin23mech-source/fix/ms-84-bus-poll-10s
+- docs(ms-84): e-2339 register `cloud migrate-from-local` in help & drift allowlist
+- docs(ms-84): e-2339 add `cloud migrate-from-local` to README CLI tables
+- feat(ms-84): e-2339 add `beacon cloud migrate-from-local` to retire orphan project.json
+- feat(ms-95): e-1668+e-2350 server-side claim gate for operation fire dedup
+- fix(ms-84): e-2366 tone down poll interval bump 10s → 5s for combination fix
+- fix(ms-84): e-2366 bump bridge poll interval default 2s → 10s
+- Merge pull request #218 from kurogin23mech-source/ms-84-fork-321aff
+- Merge pull request #217 from kurogin23mech-source/ms-86-fork-275318
+- Merge pull request #216 from kurogin23mech-source/ms-84-fork-9f4ccd
+- fix(ms-84): e-2325 disable on_snapshot listener to fix WS over-broadcast
+- feat(ms-86): e-2227 add "last activity" column to MEMBERS table
+- fix(ms-84): e-2338 collapse reload paint cascade to ≤2 renders
+- feat(ms-86): e-2226 rename RECENT ACTIVITY → ACTIVITY, enrich rows + pagination
+- Merge pull request #215 from kurogin23mech-source/e-2251/hamburger-trek
+- Merge pull request #214 from kurogin23mech-source/e-2337/legacy-fallback
+- Merge pull request #213 from kurogin23mech-source/e-1904/pytest-ci
+- feat(ms-86): e-2251 promote Trek to top-level menu + all-user list view
+- refactor(ms-84): e-2337 drop legacy 'type=project' fallback after signal-only rollover
+- feat(ms-61): e-1904 add pytest workflow as PR merge gate
+- Merge pull request #212 from kurogin23mech-source/ms-84/e-2326-signal-only-ws
+- fix(ms-84): e-2326 third pass — signal-only WS, fetch state via REST
+- Merge pull request #211 from kurogin23mech-source/ms-84/e-2326-followup-drop-tab-scoped-arrays
+- fix(ms-84): e-2326 follow-up — drop tab-scoped arrays from slim WS broadcast
+- Merge pull request #210 from kurogin23mech-source/ms-84/e-2326-ws-slim-broadcast
+- fix(ms-84): e-2326 slim WS broadcast to escape 1MiB frame limit
+- Merge pull request #209 from kurogin23mech-source/fix/ms-84-e2322-cloud-run-ws-timeout
+- Merge pull request #208 from kurogin23mech-source/ms-60-fork-2025d0
+- Merge pull request #207 from kurogin23mech-source/feat/ms-93-e2275-dm-payload-visibility
+- fix(ms-84): e-2322 extend Cloud Run request timeout to 60 min for WS push live verify
+- fix(ms-60): operation_approve 500 → expose private frontmatter helper through store_router (e-2306)
+- feat(ms-93): e-2275 enforce DM payload visibility boundary on read endpoints
+- Merge pull request #206 from kurogin23mech-source/fix/ms-43-e2304-ui-truncation
+- Merge pull request #205 from kurogin23mech-source/fix/ms-84-e2303-ws-push-cloud-run-instances
+- Merge pull request #203 from kurogin23mech-source/feat/ms-86-e2253-tauri-parity
+- Merge pull request #202 from kurogin23mech-source/feat/ms-86-e2252-mockup-cross-project
+- Merge pull request #201 from kurogin23mech-source/feat/ms-86-e2225-trek-session-history
+- fix(ms-43): drop 8000px max-height clamp on expanded MS body (e-2304)
+- fix(ms-84): e-2303 pin Cloud Run to single instance for WS push fanout
+- Merge pull request #200 from kurogin23mech-source/fix/ms-43-e2281-creator-stamping
+- Merge pull request #199 from kurogin23mech-source/ms-93-codex-openai-codex-cli-beacon-skill
+- Merge pull request #204 from kurogin23mech-source/feat/ms-43-e2298-web-ui-session-30day
+- feat(ms-43): e-2298 exchange Firebase id_token for 30-day bcli token in Web UI
+- feat(ms-86): Trek session_history persistent join record (e-2225)
+- feat(ms-86): Tauri Desktop App parity for Trek cross-project independence (e-2253)
+- feat(ms-86): add mockup trek-detail-top-level.html as visual reference for cross-project Trek routing (e-2252)
+- feat(ms-43): e-2281 stamp meta.author on MS/task/Operation creates
+- fix(ms-93): e-2274 normalize bus send exit code on success path
+- Merge pull request #198 from kurogin23mech-source/fix/ms-86-trek-detail-suppress-ws-rerender
+- fix(ms-86): suppress WS-driven re-render while Trek detail is open (e-2270)
+- Merge pull request #196 from kurogin23mech-source/feat/ms-86-e2250-trek-detail-state-openTrekId-axis
+- feat(ms-86): Trek detail axis = state.openTrekId, URL = ?trek=<id>, header brand-only (e-2250)
+- Merge pull request #197 from kurogin23mech-source/hotfix/ms-86-e2249-trek-members-scope-shadow-syntax-error
+- fix(ms-86): rename _renderTrekMembersTable scope param to avoid shadowing local const (e-2249 hotfix)
+- Merge pull request #195 from kurogin23mech-source/feat/ms-86-e2249-trek-lookup-helper-state-project-independent
+- feat(ms-86): refactor Trek lookup helpers to be state.project-independent (e-2249)
+- Merge pull request #194 from kurogin23mech-source/feat/ms-86-e2248-trek-scope-aggregate-endpoints
+- feat(ms-86): add Trek scope aggregate endpoints for milestones/operations/tasks (e-2248)
+- Merge pull request #193 from kurogin23mech-source/feat/ms-43-e2246-entry-creator-display
+- feat(ms-43): gate entry author column on multi-actor detection (e-2246)
+- feat(ms-43): stamp meta.author on milestones and operations (e-2246)
+- Merge pull request #192 from kurogin23mech-source/fix/ms-86-agents-sid-column-and-header
+- fix(ms-86): ヘッダ project 名漏れ箇所を全 fix (= 2026-06-23 dogfood)
+- fix(ms-86): MEMBERS table に raw session_id 列を追加 (= 2026-06-23 dogfood)
+- Merge pull request #191 from kurogin23mech-source/fix/ms-86-done-task-visual-grayout
+- fix(ms-86): MEMBERS table の leader 行を leader_session_id にフォールバック + done タスク視覚 grayout
+- Merge pull request #190 from kurogin23mech-source/fix/ms-86-v2-bugs-and-routing
+- Merge pull request #189 from kurogin23mech-source/fix/ms-86-revert-pulse-ack-compliance
+- fix(ms-86): show done ボタンを wire-through し done 状態 task を inline 表示する (e-2224)
+- fix(ms-86): task leaf 行 / accordion child 行クリックで詳細 modal を開く (e-2223)
+- fix(ms-86): TREK TASKS chevron 経由 accordion を user 操作で開閉できるようにする (e-2222)
+- fix(ms-86): STOP card 幅を mockup 通り画面半分 (max-width 700px) に絞る (e-2221)
+- fix(ms-43): Trek detail を開いた状態から project 戻り経路を復活させる (e-2220)
+- fix(ms-86): Trek detail page ヘッダから project 名 / project tag を隠す (e-2219)
+- revert(ms-86): PULSE-ACK COMPLIANCE section を Trek detail page から撤去
+- Merge pull request #188 from kurogin23mech-source/feat/ms-86-v2-and-ms-88-phase4
+- feat(ms-86): re-apply e-2133 s-N session badge on v2 layout (= cherry-pick recovery)
+- feat(ms-86): Trek detail v2 — post-approve refinement (= e-2126 AC 完全充足)
+- feat(ms-86): Trek detail page v2 layout reflow (= e-2126 mockup 通り実装)
+- feat(ms-88): Phase 4 Trek UI pulse-ack compliance dashboard (= e-2108)
+- docs(ms-86): Trek detail page wireframe mockup (= e-2126 visual reference)
+- Merge pull request #187 from kurogin23mech-source/fix/skill-cli-drift-trek-execute
+- Merge pull request #184 from kurogin23mech-source/ms-92-fork-aa2848
+- feat(ms-92): Trek 終結 merge UX + CORE doc pr-review-autonomy-boundary (e-2169)
+- Merge pull request #186 from kurogin23mech-source/ms-84/cloud-store
+- Merge pull request #185 from kurogin23mech-source/ms-86-trek-ui-ms-83-dogfood-server-side-ui
+- feat(ms-92): leader stance Skill 統合 + CORE doc 新設 (e-2166)
+- feat(ms-92): leader-digest server push channel (e-2164)
+- feat(ms-92): pulse-ack 構造化 payload schema 拡張 (e-2165)
+- feat(ms-92): trek join consent gate 文面を 4 セクション化 (e-2182)
+- feat(ms-92): cross-project task add via Trek scope (e-2141)
+- feat(ms-84): Phase 5 retire project-stale doctor check + skill cleanup (e-2039)
+- feat(ms-84): Phase 4 remove cloud push / pull / force-pull CLI (e-2038)
+- feat(ms-92): /beacon-dm-send 確認 step を 1 prompt に集約 (e-2181)
+- feat(ms-84): Phase 3 cut over local project.json in cloud mode (e-2037)
+- fix(skills): beacon-trek-execute の skill-cli-drift を解消
+- feat(ms-86): Trek 担当 session 列を local s-N 番号化 (= e-2133 AC6 of e-2126)
+- docs(ms-84): Phase 3 write path audit (e-2037)
+- Merge pull request #183 from kurogin23mech-source/fix/lint-docs-drift-trek-kickoff-reconcile
+- fix(docs): bin/beacon usage + README CLI tables に trek kickoff / reconcile を追加 (= lint-docs drift fix)
+- docs(release): update README/CHANGELOG for v0.48.0
+- chore(release): bump formula to 0.48.0
+
 ## [v0.48.0] - 2026-06-22
 
 - Merge pull request #182 from kurogin23mech-source/fix/ms-88-server-bugs-A

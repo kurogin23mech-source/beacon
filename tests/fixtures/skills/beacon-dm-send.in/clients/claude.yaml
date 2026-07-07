@@ -1,0 +1,4 @@
+args: "<recipient> <message>"
+triggers:
+  - "DMを送る"
+  - "send dm"

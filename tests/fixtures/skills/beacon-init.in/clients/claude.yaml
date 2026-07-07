@@ -1,0 +1,4 @@
+args: "[project-name]"
+triggers:
+  - "beacon init"
+  - "start beacon"

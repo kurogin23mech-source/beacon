@@ -163,8 +163,15 @@ def test_remove_member_blocks_last_member(base_trek):
 # parse_scope_arg / add_scope_entry / remove_scope_entry (e-1655)
 # ---------------------------------------------------------------------------
 
-def test_parse_scope_arg_project_only():
-    assert trek.parse_scope_arg("beacon-1") == {"project": "beacon-1"}
+def test_parse_scope_arg_project_only_legacy():
+    # ms-97 / e-2659 (AC7): project-wide is now rejected in strict mode
+    # (= the default). The legacy parse path remains via ``strict=False``
+    # so migrations / read-only inspection still works.
+    assert trek.parse_scope_arg("beacon-1", strict=False) == {
+        "project": "beacon-1",
+    }
+    with pytest.raises(ValueError, match="narrowing key"):
+        trek.parse_scope_arg("beacon-1")
 
 
 def test_parse_scope_arg_milestone():
@@ -185,9 +192,17 @@ def test_parse_scope_arg_task():
     }
 
 
-def test_parse_scope_arg_empty_ref_means_project_wide():
-    """Trailing `:` is allowed → project-wide."""
-    assert trek.parse_scope_arg("beacon-1:") == {"project": "beacon-1"}
+def test_parse_scope_arg_empty_ref_legacy():
+    """Trailing `:` → project-wide.
+
+    ms-97 / e-2659 (AC7): rejected in strict mode, accepted under
+    ``strict=False`` for legacy callers.
+    """
+    assert trek.parse_scope_arg("beacon-1:", strict=False) == {
+        "project": "beacon-1",
+    }
+    with pytest.raises(ValueError, match="narrowing key"):
+        trek.parse_scope_arg("beacon-1:")
 
 
 def test_parse_scope_arg_unknown_ref_prefix():
@@ -221,12 +236,21 @@ def test_add_scope_entry_rejects_duplicate(base_trek):
 
 def test_remove_scope_entry_basic(base_trek):
     trek.add_scope_entry(base_trek, entry={"project": "p", "milestone": "ms-1"})
-    trek.add_scope_entry(base_trek, entry={"project": "q"})
+    # ms-97 / e-2659 (AC8): inject a legacy project-wide row directly so
+    # the AC8 grandfather path (= remove uses strict=False to look it up)
+    # is exercised; add_scope_entry itself now refuses project-wide writes.
+    base_trek["scope"].append({"project": "q"})
     trek.remove_scope_entry(base_trek, entry={"project": "p", "milestone": "ms-1"})
     assert base_trek["scope"] == [{"project": "q"}]
+    # AC8: removing the grandfathered project-wide row must still work.
+    trek.remove_scope_entry(base_trek, entry={"project": "q"})
+    assert base_trek["scope"] == []
 
 
 def test_remove_scope_entry_missing(base_trek):
+    # ms-97 / e-2659 (AC8): legacy project-wide entries must remain
+    # addressable for removal even when no row matches — the lookup runs
+    # in non-strict mode so the only failure is "not found".
     with pytest.raises(ValueError, match="not found"):
         trek.remove_scope_entry(base_trek, entry={"project": "p"})
 

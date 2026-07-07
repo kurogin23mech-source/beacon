@@ -187,15 +187,15 @@ function buildSetupPrompt(vars) {
 
 タスク:
 1. Beacon CLI を install (= 設置)
-   - mac:     brew install r-kida2/tap/beacon
-   - windows: pipx install beacon-cli
-   - linux:   pipx install beacon-cli
+   - mac:     brew install kurogin23mech-source/beacon/beacon
+   - windows: pipx install beacon-ai
+   - linux:   pipx install beacon-ai
    install 確認: \`beacon --version\` が表示されれば OK。
 
 2. Beacon Cloud にログイン
    - \`beacon auth login\` を実行
    - ブラウザが開いて Google 認証 → 完了したら閉じる
-   - 確認: \`beacon auth whoami\` で email が表示されれば OK
+   - 確認: \`beacon auth status\` で email が表示されれば OK
 
 3. 招待を受諾してプロジェクトに参加 (= 既に Web 上で完了済の場合は skip 可能)
    - \`beacon member join --token ${vars.invite_token}\` を実行
@@ -211,6 +211,10 @@ function buildSetupPrompt(vars) {
 5. 作業フォルダに移動 + (任意) channel install (= 他セッションからの DM 受信、optional)
    - 既存の repo がある場合: その repo の root へ \`cd\`
    - repo が無い場合: 適当な作業ディレクトリを作って \`cd\`
+   - **重要 (= e-2370 / hallucination 防止)**: もし \`git clone\` で repo を持ってくる手順を提示する必要があれば、 GitHub の owner (= 所有者) と repository 名は **AI が推測しないこと**。 必ず以下のいずれかで取得すること:
+     - \`gh repo view --json owner,name -q '.owner.login + "/" + .name'\` (= gh CLI)
+     - \`git remote get-url origin\` (= 既に clone 済の場合)
+     どちらも取れない場合は \`<your-github-owner>/<your-repo-name>\` の placeholder をそのまま残し、 「GitHub owner / repo は取得できませんでした。 install 前にこの placeholder を user の値に置き換えてください」 と user に明示すること。 cwd のディレクトリ名 / 招待主の email / プロジェクト名から owner を類推することは禁止。
    - (DM 受信動線が要る場合のみ) \`beacon channel install\` を実行
    - 1 人開発・単一マシン・DM 不要なら本ステップは skip しても問題ありません
    - 失敗時の対処: \`beacon doctor\` で原因を表示、warning に従う

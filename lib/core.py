@@ -1895,6 +1895,150 @@ def pr_reject(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, 
     return ms, entry
 
 
+def _extract_pr_number_from_url(url: str) -> int | None:
+    """Extract a PR number from a GitHub PR URL (or return None)."""
+    if not url:
+        return None
+    import re as _re
+    m = _re.search(r"/pull/(\d+)(?:[/?#].*)?$", url.strip())
+    if m:
+        try:
+            return int(m.group(1))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def plan_pr_sync(data: dict, gh_prs: list) -> list:
+    """ms-61 / e-2005 — produce a plan of PR-entry transitions needed to
+    align beacon state with GitHub state.
+
+    Pure / read-only — returns the list of actions but does not mutate
+    `data`. The CLI wrapper (`cmd_pr_sync`) applies the actions and saves.
+
+    Args:
+        data: project dict (= load_project() output).
+        gh_prs: list of dicts as returned by ``gh pr list --state all
+            --json number,state,url,mergedAt``. Each dict carries at least
+            ``number`` (int), ``state`` ("OPEN" / "CLOSED" / "MERGED"),
+            and either ``url`` or both number+repo.
+
+    Returns a list of action dicts, each:
+        {"entry_id": str, "pr_number": int, "action": "merge"|"close"|"skip",
+         "from_status": str, "to_status": str, "reason": str}
+
+    Mapping rules:
+      - GitHub state=MERGED and beacon entry not yet in
+        {done, merged} → action="merge" (= advance to terminal done).
+      - GitHub state=CLOSED (not merged) and beacon entry not yet in
+        {cancelled, closed} → action="close" (= cancel, no merge).
+      - Everything else (= already aligned, or GitHub still OPEN) →
+        action="skip".
+
+    The plan is informative for callers; CLI surfaces it with
+    `--dry-run` so humans can audit before applying.
+    """
+    # Build PR number → GitHub state lookup.
+    gh_by_number: dict = {}
+    for row in gh_prs or []:
+        if not isinstance(row, dict):
+            continue
+        num = row.get("number")
+        if not isinstance(num, int):
+            continue
+        gh_by_number[num] = (row.get("state") or "").upper()
+
+    actions: list = []
+
+    def _walk(entries: list):
+        for e in entries or []:
+            if isinstance(e, dict) and e.get("type") == "pr":
+                meta = e.get("meta") or {}
+                pr_num = meta.get("pr_number")
+                if not isinstance(pr_num, int):
+                    pr_num = _extract_pr_number_from_url(meta.get("url", ""))
+                if not pr_num:
+                    continue  # un-numbered (= local-only) PR entry, skip
+                gh_state = gh_by_number.get(pr_num)
+                if not gh_state:
+                    continue  # GitHub doesn't know this PR (= deleted? not visible?), skip
+                cur_status = e.get("status", "")
+                if gh_state == "MERGED":
+                    if cur_status in ("done",) or meta.get("pr_status") == "merged":
+                        actions.append({
+                            "entry_id": e.get("id", ""),
+                            "pr_number": pr_num,
+                            "action": "skip",
+                            "from_status": cur_status,
+                            "to_status": cur_status,
+                            "reason": "already merged in beacon",
+                        })
+                    else:
+                        actions.append({
+                            "entry_id": e.get("id", ""),
+                            "pr_number": pr_num,
+                            "action": "merge",
+                            "from_status": cur_status,
+                            "to_status": "done",
+                            "reason": "GitHub MERGED but beacon not yet",
+                        })
+                elif gh_state == "CLOSED":
+                    if cur_status in ("cancelled",) or meta.get("pr_status") == "closed":
+                        actions.append({
+                            "entry_id": e.get("id", ""),
+                            "pr_number": pr_num,
+                            "action": "skip",
+                            "from_status": cur_status,
+                            "to_status": cur_status,
+                            "reason": "already closed in beacon",
+                        })
+                    else:
+                        actions.append({
+                            "entry_id": e.get("id", ""),
+                            "pr_number": pr_num,
+                            "action": "close",
+                            "from_status": cur_status,
+                            "to_status": "cancelled",
+                            "reason": "GitHub CLOSED but beacon not yet",
+                        })
+                # GitHub OPEN → no action; this is the steady state.
+            if isinstance(e, dict):
+                _walk(e.get("entries", []))
+
+    for ms in data.get("milestones", []):
+        if isinstance(ms, dict):
+            _walk(ms.get("entries", []))
+
+    return actions
+
+
+def apply_pr_sync(data: dict, actions: list) -> dict:
+    """ms-61 / e-2005 — apply a plan produced by `plan_pr_sync`.
+
+    Mutates `data` in place. Returns a summary dict
+    ``{"merged": n, "closed": n, "skipped": n, "errors": [...]}``.
+    """
+    summary = {"merged": 0, "closed": 0, "skipped": 0, "errors": []}
+    for act in actions or []:
+        eid = act.get("entry_id", "")
+        a = act.get("action", "")
+        if a == "skip" or not eid:
+            summary["skipped"] += 1
+            continue
+        try:
+            if a == "merge":
+                pr_merge(data, eid)
+                summary["merged"] += 1
+            elif a == "close":
+                pr_close(data, eid)
+                summary["closed"] += 1
+            else:
+                summary["skipped"] += 1
+        except ValueError as e:
+            summary["errors"].append({"entry_id": eid, "error": str(e)})
+    return summary
+
+
 # ---------------------------------------------------------------------------
 # Save entry (ms-16)
 # ---------------------------------------------------------------------------
@@ -2129,14 +2273,39 @@ def count_task_status(entries: list) -> tuple[int, int]:
     Note: `save` entries are intrinsically completed artifacts (doc adds, etc.)
     so they always count as done. Including them makes MS progress reflect
     save-heavy work (research / design MSs) that would otherwise show 0%.
+
+    ms-61 / e-2005 — PR lifecycle alignment forcing function. A PR entry's
+    lifecycle is `in_review → approved → merged` (or `closed`). Until e-2005
+    only `done` / `cancelled` counted as completed, so a PR that was
+    `beacon pr approve`'d (= status="approved") never advanced the MS
+    progress counter even though the human work was finished. This caused
+    ms-75 / ms-76 / ms-83 progress to look stuck at < 100 %.
+
+    The fix recognises PR-specific terminal states (`approved` / `merged`)
+    as "done" for counting purposes. The structural status of the PR entry
+    itself is unchanged; this just teaches the counter to read PR lifecycle
+    correctly.
+
+    Tracking-only: `closed` PRs are counted as done as well (= the work is
+    no longer in-flight, even if it wasn't merged). PRs in `in_review`
+    state still count as in-progress (not done).
     """
+    PR_DONE_STATUSES = ("done", "cancelled", "approved", "merged", "closed")
     total = 0
     done = 0
     for e in entries:
-        if e.get("type") in ("task", "commit", "pr", "save"):
+        etype = e.get("type")
+        if etype in ("task", "commit", "pr", "save"):
             total += 1
-            if e.get("status") in ("done", "cancelled"):
-                done += 1
+            estatus = e.get("status")
+            if etype == "pr":
+                # PR lifecycle: approved / merged / closed all count as
+                # terminal "done" for MS progress purposes (e-2005).
+                if estatus in PR_DONE_STATUSES:
+                    done += 1
+            else:
+                if estatus in ("done", "cancelled"):
+                    done += 1
         t, d = count_task_status(e.get("entries", []))
         total += t
         done += d
