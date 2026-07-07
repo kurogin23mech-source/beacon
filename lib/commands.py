@@ -17883,6 +17883,25 @@ def cmd_bus_status():
     opened_at = event.get("opened_at", "")
     opened_by = event.get("opened_by", "")
 
+    def _fmt_by(sid, identity):
+        """Prefer the Phase 3 resolved identity (ms-93) over the raw sid so a
+        human can tell WHO opened / delivered a DM. Falls back to the sid when
+        the server did not attach attribution (legacy event, GC'd session, or
+        third-party caller whose view is gated)."""
+        if isinstance(identity, dict) and identity:
+            email = identity.get("email") or ""
+            attrs = [
+                identity.get("machine") or "",
+                identity.get("agent_kind") or "",
+                identity.get("cwd") or "",
+            ]
+            attrs = [a for a in attrs if a]
+            label = email or (sid or "")
+            if attrs:
+                label = f"{label} [{' / '.join(attrs)}]"
+            return label
+        return sid or ""
+
     def _row(mark, label, ts, by=""):
         ts_str = ts if ts else "(not yet)"
         by_str = f"  by {by}" if by else ""
@@ -17891,11 +17910,12 @@ def cmd_bus_status():
     channel = event.get("channel", "")
     delivery = event.get("delivery", "")
     sender = event.get("sender_session_id", "")
+    sender_by = _fmt_by(sender, event.get("sender_identity"))
     payload = event.get("payload", {})
 
     print(f"event: {event_id}")
     print(f"  channel: {channel}  delivery: {delivery}")
-    print(f"  sender:  {sender}")
+    print(f"  sender:  {sender_by}")
     try:
         print(f"  payload: {json.dumps(payload, ensure_ascii=False)}")
     except Exception:
@@ -17903,8 +17923,9 @@ def cmd_bus_status():
     print("  receipt:")
     print(_row("✓", "sent", sent_at))
     print(_row("✓" if delivered_at else "✗", "delivered", delivered_at,
-               delivered_by))
-    print(_row("✓" if opened_at else "✗", "opened", opened_at, opened_by))
+               _fmt_by(delivered_by, event.get("delivered_by_identity"))))
+    print(_row("✓" if opened_at else "✗", "opened", opened_at,
+               _fmt_by(opened_by, event.get("opened_by_identity"))))
 
 
 def cmd_dm_respond():
