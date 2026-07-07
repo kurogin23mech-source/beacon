@@ -8,10 +8,60 @@ from __future__ import annotations
 
 import json
 import os as _os
+import ssl as _ssl
 import time as _time
 import urllib.parse
 import urllib.request
 import urllib.error
+
+
+# ---------------------------------------------------------------------------
+# TLS trust store (ms-96 dogfood fix / observed 2026-07-07)
+#
+# On some hosts (seen on Windows) Python's default SSL context validates
+# against a system trust store that still carries an expired root CA
+# (Let's Encrypt's old cross-signed chain), so every HTTPS call to the
+# API fails with ``CERTIFICATE_VERIFY_FAILED: certificate has expired``
+# even though the server presents a valid, freshly-renewed certificate
+# (curl / browsers accept it). ``certifi`` ships Mozilla's up-to-date CA
+# bundle; when it is importable we build the context from that so trust
+# does not depend on the host store being current. Falls back to the
+# stdlib default when certifi is absent (local-only installs), and a
+# custom bundle can be pinned via ``BEACON_API_CAFILE``.
+#
+# Cached module-level (same pattern as the circuit breaker state): the CA
+# bundle does not change within a process, and building a context is not
+# free.
+# ---------------------------------------------------------------------------
+
+_CAFILE_ENV = "BEACON_API_CAFILE"
+_SSL_CONTEXT = None
+
+
+def _get_ssl_context() -> "_ssl.SSLContext":
+    """Return a shared SSL context that trusts an up-to-date CA bundle.
+
+    Prefers ``$BEACON_API_CAFILE`` if set, then ``certifi``'s bundle, then
+    the stdlib default. Built once and cached for the process.
+    """
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is not None:
+        return _SSL_CONTEXT
+    cafile = _os.environ.get(_CAFILE_ENV, "").strip() or None
+    if cafile is None:
+        try:
+            import certifi
+
+            cafile = certifi.where()
+        except Exception:
+            cafile = None
+    try:
+        _SSL_CONTEXT = _ssl.create_default_context(cafile=cafile)
+    except Exception:
+        # A bad/unreadable cafile should not make the client unusable;
+        # fall back to the host default rather than raising here.
+        _SSL_CONTEXT = _ssl.create_default_context()
+    return _SSL_CONTEXT
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +239,9 @@ class ApiClient:
             req.add_header("X-Beacon-Session", sid)
 
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(
+                req, timeout=30, context=_get_ssl_context()
+            ) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8", errors="replace")
@@ -382,7 +434,9 @@ class ApiClient:
             req.add_header("Authorization", f"Bearer {token}")
 
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with urllib.request.urlopen(
+                req, timeout=60, context=_get_ssl_context()
+            ) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             error_body = e.read().decode("utf-8", errors="replace")
