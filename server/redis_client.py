@@ -14,6 +14,7 @@ mysql_client と同じ流儀)。
 """
 from __future__ import annotations
 
+import json
 import os
 import time
 
@@ -93,4 +94,142 @@ def incr_fixed_window(ident: str, window_seconds: int) -> int | None:
         return int(count)
     except Exception:
         # 実行時の transient なエラーも fail-open (制限より可用性)。
+        return None
+
+
+# ---------------------------------------------------------------------------
+# WS 接続レジストリ + push pub/sub (ms-101 / e-3008)
+# ---------------------------------------------------------------------------
+#
+# ms-101 は「今つながっている WebSocket 接続の集合」を liveness (= 生存判定) の
+# 真値源にする。接続台帳 (= どの session がつながっているか) を Redis に置くと、
+# uvicorn を複数プロセス / 複数ワーカーで動かしても全プロセスが同じ live 情報を
+# 共有できる。サーバ内の _ws_connections はプロセスローカル (= そのプロセス内
+# だけ) なので、別プロセスにつながる相手を not-live と誤判定してしまう。これを
+# Redis 共有で根治する (SPEC 設計方針 #2)。
+#
+# 台帳の構造 — 1 session が複数 WS を張るケースと、プロセス crash による stale
+# (= 死んだのに残る) 残留の両方に耐える形にする:
+#
+#   key   : beacon:ws:conns:{project_id}:{session_id}   (Redis sorted set)
+#   member: conn_id (= 接続 1 本ごとに振る uuid)
+#   score : その接続の有効期限を表す epoch 秒 (= now + ttl)。keepalive で更新。
+#
+# liveness = score が現在時刻より未来の member が 1 本以上あるか (= 期限切れは
+# 死んだ接続とみなして数えない)。crash したプロセスの member は keepalive で
+# refresh されないため score が過去になり、自然と live 判定から外れる。全 member
+# が消えた key は EXPIRE で自然消滅する (= 掃除漏れ防止)。
+#
+# fail-open 契約は counter helper と同じ: Redis が不通なら liveness helper は
+# None を返し、呼び出し側は「Redis で判定できない → 従来の poll heartbeat 判定に
+# 落ちる」と解釈する (SPEC の poll fallback 方針と整合、可用性優先)。
+
+_WS_TTL_SECONDS = 60      # 接続 liveness の寿命 (秒)。keepalive で更新する (e-3009)
+_WS_KEY_GRACE = 10        # key 全体 TTL に足す猶予 (= 最終 member が抜けた後の掃除用)
+_WS_PUSH_CHANNEL = "beacon:ws:push"  # 新着 event の wake hint を配る pub/sub チャンネル
+
+
+def _ws_conns_key(project_id: str, session_id: str) -> str:
+    return f"beacon:ws:conns:{project_id}:{session_id}"
+
+
+def ws_register(
+    project_id: str, session_id: str, conn_id: str, *, ttl: int = _WS_TTL_SECONDS
+) -> bool:
+    """接続を live として台帳に登録する (keepalive による TTL 更新も同じ呼び出し)。
+
+    idempotent: 同じ conn_id を再登録すると score (= 有効期限) を更新するだけ。
+    Returns True if recorded, False if Redis unavailable (fail-open)。
+    """
+    r = _client()
+    if r is None:
+        return False
+    try:
+        key = _ws_conns_key(project_id, session_id)
+        expiry = time.time() + ttl
+        r.zadd(key, {conn_id: expiry})
+        # 全 member が ZREM された後の空 key を自然消滅させる保険。生きている
+        # 接続がある限り keepalive のたびに TTL が伸びるので消えない。
+        r.expire(key, ttl + _WS_KEY_GRACE)
+        return True
+    except Exception:
+        return False
+
+
+# keepalive (= ping/pong で生存確認できた接続) の TTL 更新は register と同義。
+ws_refresh = ws_register
+
+
+def ws_unregister(project_id: str, session_id: str, conn_id: str) -> bool:
+    """接続を台帳から外す (= clean な切断時)。
+
+    Returns True if removed, False if Redis unavailable (fail-open)。
+    """
+    r = _client()
+    if r is None:
+        return False
+    try:
+        r.zrem(_ws_conns_key(project_id, session_id), conn_id)
+        return True
+    except Exception:
+        return False
+
+
+def ws_session_live(project_id: str, session_id: str) -> bool | None:
+    """session が期限内の WS 接続を 1 本以上持つか (= live か) を返す。
+
+    Returns:
+      True  — 期限内の接続が 1 本以上ある (live)
+      False — 期限内の接続がない (not-live)
+      None  — Redis が不通で判定不能 (呼び出し側は従来の poll 判定へ fallback)
+    """
+    r = _client()
+    if r is None:
+        return None
+    try:
+        key = _ws_conns_key(project_id, session_id)
+        now = time.time()
+        # 純粋な read: 期限切れ member を消さずに、score > now の member だけ数える。
+        # crash 由来の期限切れ member はここで除外され、key ごと TTL で消える。
+        return r.zcount(key, now, "+inf") > 0
+    except Exception:
+        return None
+
+
+def publish_ws_push(project_id: str, event_id: str, *, kind: str = "bus_event") -> bool:
+    """新着 event の wake hint (= 起こす合図) を全プロセスへ pub/sub 中継する。
+
+    payload は routing metadata のみ (project_id / event_id / kind)。DM 本文・
+    送信者・envelope は載せない (= signal-only。受信側は wake hint を受けて REST
+    inbox を引き直す。ms-97 / e-2380 の signal-only 方針と同一)。
+
+    Returns True if published, False if Redis unavailable (fail-open)。
+    """
+    r = _client()
+    if r is None:
+        return False
+    try:
+        r.publish(
+            _WS_PUSH_CHANNEL,
+            json.dumps({"project_id": project_id, "event_id": event_id, "kind": kind}),
+        )
+        return True
+    except Exception:
+        return False
+
+
+def ws_push_subscription():
+    """push 中継チャンネルを購読する pubsub オブジェクトを返す (subscriber loop 用)。
+
+    subscribe モードの接続は他コマンドを打てないため、共有 client とは別に pubsub
+    を作る。Returns the pubsub object, or None if Redis unavailable (fail-open)。
+    """
+    r = _client()
+    if r is None:
+        return None
+    try:
+        p = r.pubsub(ignore_subscribe_messages=True)
+        p.subscribe(_WS_PUSH_CHANNEL)
+        return p
+    except Exception:
         return None
