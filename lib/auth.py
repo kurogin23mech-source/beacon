@@ -11,6 +11,11 @@ import urllib.error
 import webbrowser
 from pathlib import Path
 
+# Share the up-to-date-CA SSL context so auth HTTPS calls (login / poll /
+# token exchange) do not depend on the host trust store either — same
+# expired-root-CA failure as api_client (see its _get_ssl_context docstring).
+from api_client import _get_ssl_context
+
 # Path-bundled firebase_config.json — used as fallback when the active
 # profile does not have its own copy. Kept as a constant so test fixtures
 # can compute its location without importing the module twice.
@@ -123,7 +128,9 @@ def login():
     # First discover what auth provider the server uses
     api_url = _get_api_url()
     try:
-        with urllib.request.urlopen(f"{api_url}/api/auth/config", timeout=10) as r:
+        with urllib.request.urlopen(
+            f"{api_url}/api/auth/config", timeout=10, context=_get_ssl_context()
+        ) as r:
             server_auth = json.loads(r.read())
     except Exception:
         server_auth = {}
@@ -177,7 +184,7 @@ def login_web():
     try:
         req = urllib.request.Request(f"{api_url}/api/auth/cli-start", method="POST",
                                      data=b"", headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=_get_ssl_context()) as resp:
             data = json.loads(resp.read())
     except Exception as e:
         print(f"Error: Could not reach server at {api_url}: {e}")
@@ -200,7 +207,9 @@ def login_web():
         print(".", end="", flush=True)
         try:
             poll_url = f"{api_url}/api/auth/cli-poll?code={code}"
-            with urllib.request.urlopen(poll_url, timeout=10) as resp:
+            with urllib.request.urlopen(
+                poll_url, timeout=10, context=_get_ssl_context()
+            ) as resp:
                 result = json.loads(resp.read())
             if result.get("status") == "approved":
                 print(" approved!")
@@ -291,7 +300,7 @@ def login_dev() -> None:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=_get_ssl_context()) as resp:
             result = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         if e.code == 404:
@@ -471,7 +480,7 @@ def login_cognito(server_config: dict) -> None:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=15, context=_get_ssl_context()) as resp:
             tokens = json.loads(resp.read())
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="replace")
@@ -597,7 +606,7 @@ def _refresh_web_auth_token(creds_data: dict) -> dict | None:
     req = urllib.request.Request(url, data=body, method="POST",
                                  headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=_get_ssl_context()) as resp:
             result = json.loads(resp.read())
     except Exception:
         return None

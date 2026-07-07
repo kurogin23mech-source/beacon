@@ -16,7 +16,7 @@ import urllib.error
 
 
 # ---------------------------------------------------------------------------
-# TLS trust store (ms-96 dogfood fix / observed 2026-07-07)
+# TLS trust store (ms-95 bug-aggregation / observed 2026-07-07 dogfood)
 #
 # On some hosts (seen on Windows) Python's default SSL context validates
 # against a system trust store that still carries an expired root CA
