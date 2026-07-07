@@ -297,6 +297,10 @@ log(`  bridge_claim_refresh=${BRIDGE_CLAIM_REFRESH_MS}ms`)
 const WS_ENABLED = process.env.BEACON_BUS_WS !== '0'
 const WS_BACKSTOP_MS = parseInt(process.env.BEACON_BUS_WS_BACKSTOP_MS || '30000', 10)
 let wsHealthy = false
+// ms-101 / e-3012 — push 駆動で受け取った bus_event (= DM の wake hint) の累計。
+// server 側 push (e-3011) が届いているかを bridge ログから確認でき、e-3013 の
+// 「poll 停止後も push だけでズレなく届くか」検証の telemetry になる。
+let wsPushCount = 0
 
 // interruptible sleep: 通常は指定 ms 待つが、wakePoll() で即座に解決できる。
 let _wakeResolve = null
@@ -384,10 +388,23 @@ async function connectBusWs() {
       // Fetch once right away in case events landed during the connect gap.
       wakePoll()
     })
-    ws.addEventListener('message', () => {
+    ws.addEventListener('message', (ev) => {
       // Any server frame = "there is activity for this project". We do NOT
       // trust the payload as the source of truth — just wake the poll loop
       // so pollOnce fetches via REST with the existing dedup/cursor logic.
+      //
+      // ms-101 / e-3012 — push 受信の明示化。frame が bus_event (= DM の wake
+      // hint、server 側 _fanout_bus_event / e-3011 が送る) なら push 駆動の受信
+      // として数えてログする。frame の payload は依然 真値源にせず、下の
+      // wakePoll() → pollOnce() が REST 経由で dedup/cursor 付き取得する
+      // (= signal-only 方針を維持)。非 JSON / 他 type frame はカウントせず起こす。
+      try {
+        const frame = JSON.parse(ev && ev.data)
+        if (frame && frame.type === 'bus_event') {
+          wsPushCount += 1
+          log(`bus WS push received (bus_event event_id=${frame.event_id || '?'} total=${wsPushCount})`)
+        }
+      } catch { /* 非 JSON frame は無視して wakePoll だけする */ }
       wakePoll()
     })
     ws.addEventListener('close', (ev) => {
