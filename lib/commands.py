@@ -2159,6 +2159,7 @@ def cmd_log():
     progress = os.environ.get("BEACON_PROGRESS", "")
     behavior = os.environ.get("BEACON_BEHAVIOR", "")
     resolves = os.environ.get("BEACON_RESOLVES", "")
+    resolves_explicit = os.environ.get("BEACON_RESOLVES_SET", "") == "1"
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     # ms-51 / e-934: attach actor (see cmd_log_finalize for the matching
@@ -2192,8 +2193,8 @@ def cmd_log():
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary, progress=progress,
-        behavior=behavior, resolves=resolves, actor=actor,
-        session_id=session_id, source=source,
+        behavior=behavior, resolves=resolves, resolves_explicit=resolves_explicit,
+        actor=actor, session_id=session_id, source=source,
     )
     save_project(data)
 
@@ -2324,6 +2325,7 @@ def cmd_log_finalize():
     legacy_new_summary = os.environ.get("BEACON_NEW_SUMMARY", "")
     behavior = os.environ.get("BEACON_BEHAVIOR", "")
     resolves = os.environ.get("BEACON_RESOLVES", "")
+    resolves_explicit = os.environ.get("BEACON_RESOLVES_SET", "") == "1"
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     # ms-51 / e-934: attach actor metadata so multi-machine commits are
@@ -2356,8 +2358,8 @@ def cmd_log_finalize():
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary_text, progress=progress,
-        behavior=behavior, resolves=resolves, actor=actor,
-        session_id=session_id, source=source,
+        behavior=behavior, resolves=resolves, resolves_explicit=resolves_explicit,
+        actor=actor, session_id=session_id, source=source,
     )
 
     # e-1040 deprecation: don't write data["summary"] anymore. The legacy

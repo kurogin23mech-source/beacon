@@ -402,6 +402,71 @@ class TestLogCommit:
         assert len(ms["entries"]) == 1  # task still at top
         assert len(task.get("entries", [])) == 1  # commit nested
 
+    def test_resolves_id_is_authoritative_over_fuzzy_match(self):
+        """--resolves e-2 must win even when the message fuzzy-matches e-1.
+
+        Regression for the auto-bind footgun: previously `resolves` was only
+        stored in meta and never consulted, so the commit nested under
+        whichever task shared the most message tokens."""
+        t1 = make_entry("e-1", desc="Fix authentication login flow")
+        t2 = make_entry("e-2", desc="Refactor database layer")
+        ms = make_ms(ms_id="ms-1", status="in_progress", entries=[t1, t2])
+        data = make_project(milestones=[ms])
+        result = core.log_commit(
+            data, ms_id="ms-1", commit_hash="abc1234",
+            message="Fix authentication",  # tokens overlap e-1, not e-2
+            date="2026-05-11", resolves="e-2", resolves_explicit=True,
+        )
+        assert result["matched_task"] == "e-2"          # authoritative
+        assert len(t2.get("entries", [])) == 1          # nested under e-2
+        assert len(t1.get("entries", [])) == 0          # NOT the fuzzy pick
+
+    def test_explicit_empty_resolves_opts_out_of_binding(self):
+        """--resolves "" must land the commit at milestone top level, never a
+        coincidental fuzzy match (the exact e-3062→e-2556 mis-bind case)."""
+        task = make_entry("e-1", desc="Fix authentication bug")
+        ms = make_ms(ms_id="ms-1", status="in_progress", entries=[task])
+        data = make_project(milestones=[ms])
+        result = core.log_commit(
+            data, ms_id="ms-1", commit_hash="abc1234",
+            message="Fix authentication", date="2026-05-11",
+            resolves="", resolves_explicit=True,
+        )
+        assert "matched_task" not in result             # no binding
+        assert len(task.get("entries", [])) == 0        # task untouched
+        assert len(ms["entries"]) == 2                  # task + top-level commit
+
+    def test_unset_resolves_still_fuzzy_matches(self):
+        """The post-commit hook / auto-fire path passes no --resolves; legacy
+        fuzzy nesting must still work so hook-driven logs self-organize."""
+        task = make_entry("e-1", desc="Fix authentication bug")
+        ms = make_ms(ms_id="ms-1", status="in_progress", entries=[task])
+        data = make_project(milestones=[ms])
+        result = core.log_commit(
+            data, ms_id="ms-1", commit_hash="abc1234",
+            message="Fix authentication", date="2026-05-11",
+            resolves="", resolves_explicit=False,  # unset sentinel
+        )
+        assert result["matched_task"] == "e-1"
+        assert len(task.get("entries", [])) == 1
+
+    def test_resolves_id_absent_falls_to_top_level_not_fuzzy(self):
+        """--resolves names a task that doesn't exist → top level, never a
+        fuzzy consolation pick."""
+        task = make_entry("e-1", desc="Fix authentication bug")
+        ms = make_ms(ms_id="ms-1", status="in_progress", entries=[task])
+        data = make_project(milestones=[ms])
+        result = core.log_commit(
+            data, ms_id="ms-1", commit_hash="abc1234",
+            message="Fix authentication", date="2026-05-11",
+            resolves="e-999", resolves_explicit=True,
+        )
+        assert "matched_task" not in result
+        assert len(task.get("entries", [])) == 0
+        # resolves value is still recorded in the commit's meta.
+        commit = ms["entries"][-1]
+        assert commit["meta"].get("resolves") == "e-999"
+
 
 # ---------------------------------------------------------------------------
 # Serialization helpers
