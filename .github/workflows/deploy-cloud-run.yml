@@ -12,14 +12,18 @@ name: Deploy API to Cloud Run
 # reach the image).
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'server/**'
-      - 'lib/**'
-      - 'pyproject.toml'
-      - 'Dockerfile'
-      - '.github/workflows/deploy-cloud-run.yml'
+  # ms-102 — RETIRED. ms-96 でバックエンドを VPS へ移行し Cloud Run は使っていない。
+  # main への push で死んだ Cloud Run 環境へ空デプロイが飛ぶのを止めるため、push
+  # トリガーを無効化した。本番デプロイは .github/workflows/deploy-vps.yml が担う。
+  # ファイル自体は履歴 / 万一 Cloud Run へ戻す判断のため残す (workflow_dispatch のみ)。
+  # push:
+  #   branches: [main]
+  #   paths:
+  #     - 'server/**'
+  #     - 'lib/**'
+  #     - 'pyproject.toml'
+  #     - 'Dockerfile'
+  #     - '.github/workflows/deploy-cloud-run.yml'
   workflow_dispatch:
     inputs:
       version:
