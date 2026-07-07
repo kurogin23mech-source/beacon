@@ -4,3 +4,6 @@
 # pip install google-auth-oauthlib
 google-auth-oauthlib>=1.2.0
 google-auth>=2.29.0
+# Up-to-date CA bundle so API TLS verification does not depend on the
+# host trust store (some hosts carry an expired Let's Encrypt root).
+certifi>=2024.2.2
