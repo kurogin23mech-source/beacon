@@ -22,6 +22,8 @@ and reusable by the CLI, the /beacon-dm-send picker, and future callers.
 
 from __future__ import annotations
 
+import json
+import sys
 from typing import Any
 
 
@@ -150,3 +152,73 @@ def describe_candidate(row: dict[str, Any]) -> str:
         tail.append(f"pid {pid}")
     suffix = f" ({', '.join(tail)})" if tail else ""
     return f"{kind} on {machine} in {cwd}{suffix}"
+
+
+def label_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Annotate each directory row with its stable-identity label + key for the
+    /beacon-dm-send picker. Keeps the raw ``session_id`` so the human sees a
+    person/workspace first and the route token only as sub-info."""
+    out = []
+    for row in rows:
+        project_id, machine, cwd, agent_kind = stable_identity_key(row)
+        out.append({
+            "session_id": str(row.get("session_id") or ""),
+            "label": describe_candidate(row),
+            "project_id": project_id,
+            "machine": machine,
+            "cwd": cwd,
+            "agent_kind": agent_kind,
+            "last_poll_at": _poll_ts(row),
+        })
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry: ``python3 -m beacon_cli.skills_helpers.identity_resolve``.
+
+    Reads directory rows (the JSON array from ``beacon bus directory --json``)
+    on stdin and, per subcommand, emits JSON on stdout:
+
+      * ``label``  → array of {session_id, label, project_id, machine, cwd,
+        agent_kind, last_poll_at} for the picker.
+      * ``resolve --machine M --cwd C --agent-kind K [--project P]`` →
+        {current_sid, candidates:[...]}. ``current_sid`` is the most recently
+        live sid for that coarse identity (the value a sender should route to
+        at send time, so a churned sid never sends to a dead session); empty
+        when nothing matches. ``candidates`` holds all ranked matches so the
+        Skill can disambiguate 2+ concurrent sessions via the labels.
+    """
+    import argparse
+    parser = argparse.ArgumentParser(prog="identity_resolve")
+    sub = parser.add_subparsers(dest="mode", required=True)
+    sub.add_parser("label")
+    rp = sub.add_parser("resolve")
+    rp.add_argument("--machine", default="")
+    rp.add_argument("--cwd", default="")
+    rp.add_argument("--agent-kind", default="")
+    rp.add_argument("--project", default="")
+    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+
+    raw = sys.stdin.read().strip()
+    rows = json.loads(raw) if raw else []
+    if not isinstance(rows, list):
+        rows = []
+
+    if args.mode == "label":
+        print(json.dumps(label_rows(rows), ensure_ascii=False, indent=2))
+        return 0
+
+    ranked = resolve_stable_identity(
+        rows, machine=args.machine, cwd=args.cwd,
+        agent_kind=args.agent_kind, project_id=args.project,
+    )
+    result = {
+        "current_sid": str(ranked[0].get("session_id") or "") if ranked else "",
+        "candidates": label_rows(ranked),
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

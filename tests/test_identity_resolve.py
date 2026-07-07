@@ -12,10 +12,15 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "beacon_cli"))
 
+import io  # noqa: E402
+import json  # noqa: E402
+
 from skills_helpers.identity_resolve import (  # noqa: E402
     agent_kind_of,
     current_sid,
     describe_candidate,
+    label_rows,
+    main,
     resolve_stable_identity,
     stable_identity_key,
 )
@@ -130,3 +135,73 @@ def test_describe_candidate_surfaces_disambiguators():
     assert "/Users/x/beacon" in label
     assert "2026-07-07T05:44" in label
     assert "23353" in label
+
+
+# -- label_rows (picker annotation) -----------------------------------------
+
+def test_label_rows_keeps_sid_and_adds_label_and_key():
+    rows = [_sess("sv-1", machine="mc-a", agent_kind="claude-code",
+                  cwd="/w", last_poll_at="2026-07-07T10:00:00Z")]
+    out = label_rows(rows)
+    assert len(out) == 1
+    r = out[0]
+    assert r["session_id"] == "sv-1"          # route token preserved
+    assert "claude-code" in r["label"]        # human-first label
+    assert r["machine"] == "mc-a"
+    assert r["cwd"] == "/w"
+    assert r["agent_kind"] == "claude-code"
+    assert r["last_poll_at"] == "2026-07-07T10:00:00Z"
+
+
+# -- main() CLI (Skill entrypoint) ------------------------------------------
+
+def _run_main(argv, rows, monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin",
+                        io.StringIO(json.dumps(rows)))
+    rc = main(argv)
+    out = capsys.readouterr().out
+    return rc, json.loads(out)
+
+
+def test_main_label_mode_emits_annotated_rows(monkeypatch, capsys):
+    rows = [_sess("sv-1", machine="mc-a", agent_kind="claude-code", cwd="/w")]
+    rc, data = _run_main(["label"], rows, monkeypatch, capsys)
+    assert rc == 0
+    assert data[0]["session_id"] == "sv-1"
+    assert "claude-code" in data[0]["label"]
+
+
+def test_main_resolve_mode_picks_freshest_sid(monkeypatch, capsys):
+    """The send-time re-resolve: a churned identity routes to the current
+    live sid, not the stale one the picker first listed."""
+    rows = [
+        _sess("sv-OLD", machine="mc-a", agent_kind="claude-code", cwd="/w",
+              last_poll_at="2026-07-07T10:00:00Z", project_id="p1"),
+        _sess("sv-NEW", machine="mc-a", agent_kind="claude-code", cwd="/w",
+              last_poll_at="2026-07-07T22:00:00Z", project_id="p1"),
+    ]
+    rc, data = _run_main(
+        ["resolve", "--machine", "mc-a", "--cwd", "/w",
+         "--agent-kind", "claude-code", "--project", "p1"],
+        rows, monkeypatch, capsys)
+    assert rc == 0
+    assert data["current_sid"] == "sv-NEW"
+    assert len(data["candidates"]) == 2
+
+
+def test_main_resolve_mode_empty_when_no_match(monkeypatch, capsys):
+    rows = [_sess("sv-1", machine="mc-a", agent_kind="codex", cwd="/w")]
+    rc, data = _run_main(
+        ["resolve", "--machine", "mc-a", "--cwd", "/w",
+         "--agent-kind", "claude-code"],  # kind mismatch
+        rows, monkeypatch, capsys)
+    assert rc == 0
+    assert data["current_sid"] == ""
+    assert data["candidates"] == []
+
+
+def test_main_label_mode_handles_empty_stdin(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    rc = main(["label"])
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == []
