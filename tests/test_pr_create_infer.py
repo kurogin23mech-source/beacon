@@ -161,3 +161,122 @@ def test_git_missing_does_not_crash(monkeypatch):
     # Falls through to "sole active MS" — which doesn't need git.
     inferred, reason = commands._infer_pr_ms_id(data)
     assert inferred == "ms-2"
+
+
+# ---------------------------------------------------------------------------
+# UTF-8 passthrough of `gh pr create` flags (Japanese title regression)
+# ---------------------------------------------------------------------------
+#
+# Root cause: the bash wrapper used `printf '%q '` and commands.py used
+# `shlex.split()`. Bash emits `$'...'` ANSI-C quoting for non-ASCII, which
+# Python's shlex does not understand — it strips the quotes and leaves a
+# stray leading `$`, corrupting Japanese PR titles. The fix forwards argv
+# as a JSON array (BEACON_GH_ARGS_JSON) so it round-trips byte-for-byte.
+
+def _stub_pr_create_env(monkeypatch, title):
+    """Common stubs so cmd_pr_create runs without touching git/gh/disk."""
+    monkeypatch.setattr(commands, "load_project", lambda: project([ms("ms-25")]))
+    monkeypatch.setattr(commands, "save_project", lambda _data: None)
+    monkeypatch.setattr(
+        commands, "_fetch_gh_pr_info",
+        lambda _url: {"title": title, "commits": []},
+    )
+    monkeypatch.setattr(commands.core, "pr_add", lambda *a, **kw: "e-999")
+
+
+def test_pr_create_passes_unicode_gh_args_from_json(monkeypatch, capsys):
+    """`beacon pr create --title <日本語>` must reach gh unchanged."""
+    import json as _json
+
+    title = "feat(ms-25): 抽出の構造的 invariant — 発火時の自己整合を物理強制 (e-841/842/843)"
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        if args[:3] == ["gh", "pr", "create"]:
+            captured["args"] = args
+        return _FakeRun(stdout="https://github.com/example/repo/pull/25\n")
+
+    monkeypatch.setenv("BEACON_MS_ID", "ms-25")
+    monkeypatch.setenv("BEACON_INTENT", "unicode title regression")
+    monkeypatch.setenv(
+        "BEACON_GH_ARGS_JSON",
+        _json.dumps(["--title", title, "--body-file", "/tmp/body.md"],
+                    ensure_ascii=False),
+    )
+    monkeypatch.delenv("BEACON_GH_ARGS", raising=False)
+    monkeypatch.setattr(commands.subprocess, "run", fake_run)
+    _stub_pr_create_env(monkeypatch, title)
+
+    commands.cmd_pr_create()
+
+    # The Japanese title must arrive intact — no mojibake, no leading `$`.
+    assert captured["args"] == [
+        "gh", "pr", "create",
+        "--title", title,
+        "--body-file", "/tmp/body.md",
+    ]
+    out = capsys.readouterr().out
+    assert "Beacon: PR recorded [e-999]" in out
+    assert title in out
+
+
+def test_pr_create_json_path_takes_precedence_over_legacy(monkeypatch):
+    """When both env vars are set, the JSON array wins over legacy shlex."""
+    import json as _json
+
+    title = "日本語タイトル"
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        if args[:3] == ["gh", "pr", "create"]:
+            captured["args"] = args
+        return _FakeRun(stdout="https://github.com/example/repo/pull/7\n")
+
+    monkeypatch.setenv("BEACON_MS_ID", "ms-25")
+    monkeypatch.setenv("BEACON_INTENT", "precedence")
+    monkeypatch.setenv(
+        "BEACON_GH_ARGS_JSON",
+        _json.dumps(["--title", title], ensure_ascii=False),
+    )
+    # Stale legacy value that would corrupt if it were used.
+    monkeypatch.setenv("BEACON_GH_ARGS", "--title $'\\346'")
+    monkeypatch.setattr(commands.subprocess, "run", fake_run)
+    _stub_pr_create_env(monkeypatch, title)
+
+    commands.cmd_pr_create()
+
+    assert captured["args"] == ["gh", "pr", "create", "--title", title]
+
+
+def test_pr_create_rejects_malformed_json(monkeypatch, capsys):
+    """Invalid BEACON_GH_ARGS_JSON must exit non-zero, not silently drop."""
+    monkeypatch.setenv("BEACON_MS_ID", "ms-25")
+    monkeypatch.setenv("BEACON_GH_ARGS_JSON", "{not a list")
+    monkeypatch.delenv("BEACON_GH_ARGS", raising=False)
+    monkeypatch.setattr(commands, "load_project", lambda: project([ms("ms-25")]))
+
+    with pytest.raises(SystemExit) as exc:
+        commands.cmd_pr_create()
+    assert exc.value.code == 2
+    assert "BEACON_GH_ARGS_JSON" in capsys.readouterr().err
+
+
+def test_pr_create_legacy_ascii_shlex_still_supported(monkeypatch):
+    """Older dispatchers passing BEACON_GH_ARGS (ASCII) must keep working."""
+    captured = {}
+
+    def fake_run(args, **kwargs):
+        if args[:3] == ["gh", "pr", "create"]:
+            captured["args"] = args
+        return _FakeRun(stdout="https://github.com/example/repo/pull/3\n")
+
+    monkeypatch.setenv("BEACON_MS_ID", "ms-25")
+    monkeypatch.setenv("BEACON_INTENT", "legacy")
+    monkeypatch.delenv("BEACON_GH_ARGS_JSON", raising=False)
+    monkeypatch.setenv("BEACON_GH_ARGS", "--title 'Hello World'")
+    monkeypatch.setattr(commands.subprocess, "run", fake_run)
+    _stub_pr_create_env(monkeypatch, "Hello World")
+
+    commands.cmd_pr_create()
+
+    assert captured["args"] == ["gh", "pr", "create", "--title", "Hello World"]
