@@ -536,7 +536,10 @@ def test_app_server_remote_url_uses_websocket(monkeypatch):
 
     handle = client.start_app_server(remote_url="ws://127.0.0.1:39988")
     assert captured["url"] == "ws://127.0.0.1:39988"
-    assert captured["kwargs"] == {"ping_interval": None}
+    assert captured["kwargs"] == {
+        "ping_interval": None,
+        "max_size": client._WS_MAX_SIZE,
+    }
     assert handle.ws is not None
     handle.stop()
     assert captured["closed"] is True
