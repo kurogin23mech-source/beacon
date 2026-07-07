@@ -11,6 +11,7 @@ import logging
 import os
 import sys
 import time
+import uuid
 from typing import Optional
 
 # Add lib/ to path so we can import core
@@ -10008,6 +10009,12 @@ _ws_connections: dict[str, set[WebSocket]] = {}
 _watchers: dict[str, object] = {}
 _event_loop: asyncio.AbstractEventLoop | None = None
 
+# ms-101 / e-3009 — WS receive の idle timeout (秒)。client ping 間隔 (bridge は
+# 30s) より長く張り、その間 1 通も来なければ silent-dead (= 黙って切れた接続) と
+# みなして台帳から外し close する。module 定数にしてテストが小さい値へ差し替え
+# られるようにしてある。
+_WS_IDLE_TIMEOUT_SECONDS = 90
+
 
 @app.on_event("startup")
 async def _capture_event_loop():
@@ -10531,6 +10538,23 @@ async def ws_project(websocket: WebSocket, project_id: str):
         _ws_connections[project_id] = set()
     _ws_connections[project_id].add(websocket)
 
+    # ms-101 / e-3009 — 接続ベースの liveness (= 生存判定) 台帳への登録。
+    # bridge (= 各セッションの常駐受信プロセス) は WS URL に ``session_id`` を
+    # 付けて接続する。その接続を Redis の接続台帳 (redis_client.ws_register) に
+    # 登録し、「今つながっている session」を複数プロセス間で共有された真値源に
+    # する。Web UI ダッシュボードは session_id を付けずに接続するので、liveness
+    # 台帳には載らない (= directory の live 一覧はあくまで bridge session が対象)。
+    #
+    # session_id は client 申告値 (token claims ではない)。project へのアクセスは
+    # 直前の _require_project_role で既に認可済みなので、悪用しても「自分が入れる
+    # project 内で任意の session_id を live に見せる」までで、他 project には波及
+    # しない。token claims への束縛は将来課題 (= 過剰設計を避け現状は申告値を許容)。
+    conn_id = uuid.uuid4().hex
+    session_id = websocket.query_params.get("session_id") or ""
+    _registry_enabled = bool(session_id)
+    if _registry_enabled:
+        redis_client.ws_register(project_id, session_id, conn_id)
+
     # ms-84 / e-2326 — signal-only WS. Past attempts to push project state
     # over WS (full / slim / aggressively-slim) all hit a Cloud Run / GFE WS
     # frame tolerance somewhere in the 20-50 KB range, well under what
@@ -10547,14 +10571,40 @@ async def ws_project(websocket: WebSocket, project_id: str):
 
     _start_watcher(project_id)
 
+    # ms-101 / e-3009 — ping/pong keepalive + silent 切断 (= 黙って切れた接続) の
+    # 能動回収。bridge は 30s ごとに "ping" を送る (channel/bus.mjs)。受信のたびに
+    # 台帳 TTL を更新 (ws_refresh) することで、生きている間だけ live が保たれる。
+    #
+    # WS は NAT / proxy のアイドル切断で TCP レベルの close が飛ばず黙って死ぬ
+    # ことがある (SPEC #5)。receive を無期限に待つと dead socket を掴んだまま
+    # ハングし、台帳の TTL 失効に頼るしかない。そこで client ping 間隔 (30s) より
+    # 長い idle timeout (90s) を張り、その間 1 通も来なければ silent-dead とみなして
+    # 台帳から外し close する (= 台帳 TTL 失効 <=60s を待たず能動的に回収する)。
     try:
         while True:
-            msg = await websocket.receive_text()
+            try:
+                msg = await asyncio.wait_for(
+                    websocket.receive_text(), timeout=_WS_IDLE_TIMEOUT_SECONDS
+                )
+            except asyncio.TimeoutError:
+                # client ping が途絶えた = silent-dead。close して後片付けへ。
+                try:
+                    await websocket.close(code=1001)  # going away
+                except Exception:
+                    pass
+                break
             if msg == "ping":
+                if _registry_enabled:
+                    # keepalive: 生存確認できたので台帳 TTL を更新する。
+                    redis_client.ws_refresh(project_id, session_id, conn_id)
                 await websocket.send_text("pong")
     except WebSocketDisconnect:
-        _ws_connections[project_id].discard(websocket)
+        pass
+    finally:
+        _ws_connections.get(project_id, set()).discard(websocket)
         _stop_watcher(project_id)
+        if _registry_enabled:
+            redis_client.ws_unregister(project_id, session_id, conn_id)
 
 
 # ---------------------------------------------------------------------------

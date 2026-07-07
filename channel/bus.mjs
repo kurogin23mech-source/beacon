@@ -335,8 +335,14 @@ async function _resolveWS() {
 function _busWsUrl() {
   // http(s):// → ws(s):// に付け替え、既存の project WS エンドポイントに接続。
   const base = API_URL.replace(/^http/, 'ws')
-  return `${base}/ws/projects/${encodeURIComponent(PROJECT_ID)}`
+  let url = `${base}/ws/projects/${encodeURIComponent(PROJECT_ID)}`
     + `?token=${encodeURIComponent(loadToken())}`
+  // ms-101 / e-3009 — session_id を渡して、この WS 接続をサーバ側の接続台帳
+  // (= 「今つながっている session」の真値源) に登録させる。これにより directory
+  // の live 判定が last_poll_at (最後の問い合わせ時刻) 依存から接続ベースに変わる。
+  // Web UI は session_id を持たず付けないので、bridge 接続だけが台帳に載る。
+  if (SESSION_ID) url += `&session_id=${encodeURIComponent(SESSION_ID)}`
+  return url
 }
 
 async function connectBusWs() {
