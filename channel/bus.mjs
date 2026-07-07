@@ -295,8 +295,24 @@ log(`  bridge_claim_refresh=${BRIDGE_CLAIM_REFRESH_MS}ms`)
 //   - 切断時は指数 backoff で再接続。`ws` 依存が解決できない環境では WS を
 //     無効化し、従来ポーリングのみで動作する (= 機能低下せず degrade)。
 const WS_ENABLED = process.env.BEACON_BUS_WS !== '0'
-const WS_BACKSTOP_MS = parseInt(process.env.BEACON_BUS_WS_BACKSTOP_MS || '30000', 10)
+// ms-101 / e-3013 — WS 主経路化に伴い、WS 健全時の event-poll (/bus/unread) を
+// backstop まで大幅に落とす (30s → 120s)。DM の即時性は server 側 push (e-3011) が
+// 担い、backstop poll は「push が届かない送信経路 (fanout / reply 等)」の取りこぼし
+// 防止の安全網に徹する。WS 不通時は下の POLL_INTERVAL (5s) に自動 fallback。
+// 従来の 30s に戻すには BEACON_BUS_WS_BACKSTOP_MS=30000。
+const WS_BACKSTOP_MS = parseInt(process.env.BEACON_BUS_WS_BACKSTOP_MS || '120000', 10)
+// ms-101 / e-3013 — heartbeat (last_active / last_poll_at の更新) を event-poll の
+// 周期から切り離す専用タイマー間隔。event-poll を backstop まで延ばすと、poll ループ
+// に相乗りしていた heartbeat も遅くなり last_active が古くなって directory の
+// live_only (= 直近 N 分の活動で絞る) 判定が壊れる。そこで WS 健全時はこの短い間隔で
+// heartbeat だけ独立して打ち、liveness 指標の鮮度を保つ。
+const HEARTBEAT_INTERVAL_MS = parseInt(
+  process.env.BEACON_BUS_HEARTBEAT_MS || '15000', 10)
 let wsHealthy = false
+// ms-101 / e-3012 — push 駆動で受け取った bus_event (= DM の wake hint) の累計。
+// server 側 push (e-3011) が届いているかを bridge ログから確認でき、e-3013 の
+// 「poll 停止後も push だけでズレなく届くか」検証の telemetry になる。
+let wsPushCount = 0
 
 // interruptible sleep: 通常は指定 ms 待つが、wakePoll() で即座に解決できる。
 let _wakeResolve = null
@@ -335,8 +351,14 @@ async function _resolveWS() {
 function _busWsUrl() {
   // http(s):// → ws(s):// に付け替え、既存の project WS エンドポイントに接続。
   const base = API_URL.replace(/^http/, 'ws')
-  return `${base}/ws/projects/${encodeURIComponent(PROJECT_ID)}`
+  let url = `${base}/ws/projects/${encodeURIComponent(PROJECT_ID)}`
     + `?token=${encodeURIComponent(loadToken())}`
+  // ms-101 / e-3009 — session_id を渡して、この WS 接続をサーバ側の接続台帳
+  // (= 「今つながっている session」の真値源) に登録させる。これにより directory
+  // の live 判定が last_poll_at (最後の問い合わせ時刻) 依存から接続ベースに変わる。
+  // Web UI は session_id を持たず付けないので、bridge 接続だけが台帳に載る。
+  if (SESSION_ID) url += `&session_id=${encodeURIComponent(SESSION_ID)}`
+  return url
 }
 
 async function connectBusWs() {
@@ -353,6 +375,14 @@ async function connectBusWs() {
     const cleanup = () => {
       wsHealthy = false
       if (pingTimer) { clearInterval(pingTimer); pingTimer = null }
+      // ms-101 review fix — WS が切れて wsHealthy=false になったら、120s backstop
+      // スリープ中かもしれない poll loop を即起こす。起こさないと最大 backstop ぶん
+      // (120s) 次の pollOnce と writePollHeartbeat が走らず、last_poll_at と Redis
+      // ws_live の TTL(60s) が失効して、生きている再接続中セッションが not-live 扱いに
+      // なり DM を取りこぼす。起こせばループは即 poll + heartbeat し、以降 WS 復旧まで
+      // 5s poll に戻る (= 専用 heartbeat タイマーは !wsHealthy で止まるが、ループ側の
+      // 毎周回 writePollHeartbeat が代わりに鮮度を保つ)。
+      wakePoll()
     }
     const scheduleReconnect = () => {
       cleanup()
@@ -378,10 +408,23 @@ async function connectBusWs() {
       // Fetch once right away in case events landed during the connect gap.
       wakePoll()
     })
-    ws.addEventListener('message', () => {
+    ws.addEventListener('message', (ev) => {
       // Any server frame = "there is activity for this project". We do NOT
       // trust the payload as the source of truth — just wake the poll loop
       // so pollOnce fetches via REST with the existing dedup/cursor logic.
+      //
+      // ms-101 / e-3012 — push 受信の明示化。frame が bus_event (= DM の wake
+      // hint、server 側 _fanout_bus_event / e-3011 が送る) なら push 駆動の受信
+      // として数えてログする。frame の payload は依然 真値源にせず、下の
+      // wakePoll() → pollOnce() が REST 経由で dedup/cursor 付き取得する
+      // (= signal-only 方針を維持)。非 JSON / 他 type frame はカウントせず起こす。
+      try {
+        const frame = JSON.parse(ev && ev.data)
+        if (frame && frame.type === 'bus_event') {
+          wsPushCount += 1
+          log(`bus WS push received (bus_event event_id=${frame.event_id || '?'} total=${wsPushCount})`)
+        }
+      } catch { /* 非 JSON frame は無視して wakePoll だけする */ }
       wakePoll()
     })
     ws.addEventListener('close', (ev) => {
@@ -1363,6 +1406,35 @@ if (!PROJECT_ID || !SESSION_ID) {
     clearBridgeClaim()
   }
   setTimeout(loop, 500)
+
+  // ms-101 / e-3013 — event-poll から分離した heartbeat 専用タイマー。
+  // WS 健全時は event-poll (pollOnce) を backstop (120s) まで落とすため、poll
+  // ループ相乗りの heartbeat だけでは last_active / last_poll_at が古くなる。
+  // ここで短い間隔 (HEARTBEAT_INTERVAL_MS = 15s) で writePollHeartbeat を独立して
+  // 打ち、directory の live_only / poll_health の鮮度を保つ。
+  //
+  // WS 不通時 (= wsHealthy false) はこのタイマーは発火しない: その場合ループ自身が
+  // POLL_INTERVAL (5s) で pollOnce + writePollHeartbeat を回すので heartbeat は
+  // ループ側で十分に新鮮で、二重書き込みを避ける。overlap 防止に _hbBusy で guard。
+  let _hbBusy = false
+  const heartbeatTimer = setInterval(async () => {
+    if (stopping || _hbBusy || !wsHealthy) return
+    _hbBusy = true
+    try {
+      await withWatchdog(writePollHeartbeat(), 'heartbeatTimer', ITERATION_WATCHDOG_MS)
+    } catch (e) {
+      log(`heartbeat timer non-fatal: ${e.message}`)
+    } finally {
+      _hbBusy = false
+    }
+  }, HEARTBEAT_INTERVAL_MS)
+  // プロセス終了を妨げないよう unref。SIGINT/SIGTERM で stopping=true になれば
+  // 上のガードで発火が止まり、下で clearInterval する。
+  if (heartbeatTimer.unref) heartbeatTimer.unref()
+  const _clearHeartbeatTimer = () => clearInterval(heartbeatTimer)
+  process.on('SIGINT', _clearHeartbeatTimer)
+  process.on('SIGTERM', _clearHeartbeatTimer)
+
   // ms-96 / e-2380: start the WS push accelerator alongside the poll loop.
   // Fire-and-forget: any failure disables WS and leaves polling intact.
   connectBusWs().catch((e) => log(`bus WS init failed (non-fatal): ${e.message}`))

@@ -333,6 +333,29 @@ def test_ws_bus_event_is_signal_only_no_payload_leak():
         assert "top-secret-dm-body" not in json.dumps(pushed)
 
 
+def test_post_publishes_cross_process_wake_hint(monkeypatch):
+    """ms-101 / e-3011: DM を post すると、受信者がどのプロセスにつながっていても
+    届くよう Redis pub/sub へ wake hint を publish する。
+
+    旧 e-997 は「同一プロセスに WS 接続がある場合のみ push」だったため、別プロセス
+    (uvicorn 別ワーカー) につながる受信者には届かなかった。ここでは publish_ws_push
+    がローカル接続の有無に関わらず、post した project_id + 採番された event_id で
+    必ず呼ばれることを確認する (= 別プロセス接続にも届く経路が張られた証跡)。"""
+    calls = []
+    monkeypatch.setattr(
+        app_module.redis_client, "publish_ws_push",
+        lambda pid, eid, **kw: calls.append((pid, eid)) or True,
+    )
+    resp = client.post(f"/api/projects/{PROJECT_ID}/bus", json={
+        "channel": "session-dm",
+        "payload": {"text": "hi"},
+    })
+    assert resp.status_code == 200, resp.text
+    eid = resp.json()["event_id"]
+    # WS 接続が 1 本も無くても publish される (= ローカル接続ガードを撤去した)。
+    assert calls == [(PROJECT_ID, eid)]
+
+
 def test_post_uses_server_clock_not_client_supplied():
     """Clients can't backdate or future-date events — the cursor only works
     if all clients agree on event ordering, which requires server time."""

@@ -1646,13 +1646,13 @@ def _handle_log(root: Path, args: argparse.Namespace) -> int:
     target_ref = args.explicit_hash or "HEAD"
     try:
         commit_hash = subprocess.check_output(
-            git_C + ["rev-parse", "--short", target_ref], text=True
+            git_C + ["rev-parse", "--short", target_ref], text=True, encoding="utf-8"
         ).strip()
         commit_msg = subprocess.check_output(
-            git_C + ["log", "-1", "--pretty=%s", target_ref], text=True
+            git_C + ["log", "-1", "--pretty=%s", target_ref], text=True, encoding="utf-8"
         ).strip()
         commit_date = subprocess.check_output(
-            git_C + ["log", "-1", "--pretty=%ci", target_ref], text=True
+            git_C + ["log", "-1", "--pretty=%ci", target_ref], text=True, encoding="utf-8"
         ).strip().split(" ", 1)[0]
     except subprocess.CalledProcessError as exc:
         _eprint(f"Error: git lookup for {target_ref} failed: {exc}")
@@ -1666,6 +1666,7 @@ def _handle_log(root: Path, args: argparse.Namespace) -> int:
             changed = subprocess.check_output(
                 git_C + ["diff-tree", "--no-commit-id", "--name-only", "-r", target_ref],
                 text=True,
+                encoding="utf-8",
             ).strip().splitlines()
         except subprocess.CalledProcessError:
             changed = []
