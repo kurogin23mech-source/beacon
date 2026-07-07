@@ -10,11 +10,16 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: bcodex [--armed] [--keep-app-server] [--port PORT] [--] [codex args...]
+Usage: bcodex [--armed [--armed-turns N]] [--keep-app-server] [--port PORT] [--] [codex args...]
 
 Options:
-  --armed            After wake, send the generated Codex response back as a DM.
-                     Requires Beacon bus reply budget.
+  --armed            After wake, send the generated Codex response back as a DM
+                     (autonomous reply). Auto-grants the Beacon bus reply budget
+                     so no separate `beacon bus budget grant` is needed. Without
+                     --armed the session is DM-ready (receives) but does not
+                     auto-reply, mirroring bclaude.
+  --armed-turns N    How many autonomous replies --armed authorizes before the
+                     budget gate stops (default: 20). No effect without --armed.
   --keep-app-server  Do not stop the background app-server when Codex exits.
   --port PORT        Bind app-server to this localhost port.
   -h, --help         Show this help.
@@ -24,6 +29,7 @@ EOF
 }
 
 ARMED=0
+ARMED_TURNS=20
 KEEP_APP_SERVER=0
 PORT=""
 CODEX_ARGS=()
@@ -33,6 +39,20 @@ while [ "$#" -gt 0 ]; do
         --armed)
             ARMED=1
             shift
+            ;;
+        --armed-turns)
+            if [ "$#" -lt 2 ]; then
+                echo "bcodex: --armed-turns requires a value" >&2
+                exit 2
+            fi
+            case "$2" in
+                ''|*[!0-9]*)
+                    echo "bcodex: --armed-turns must be a positive integer (got: '$2')" >&2
+                    exit 2
+                    ;;
+            esac
+            ARMED_TURNS="$2"
+            shift 2
             ;;
         --keep-app-server)
             KEEP_APP_SERVER=1
@@ -109,6 +129,24 @@ if [ ! -x "$BRIDGE" ]; then
         exec "$CODEX_BIN" "${CODEX_ARGS[@]}"
     else
         exec "$CODEX_BIN"
+    fi
+fi
+
+if [ "$ARMED" = "1" ]; then
+    # 穴① (ms-93 e-2992): make `--armed` self-sufficient. The bridge daemon
+    # deliberately does NOT auto-grant budget from inside (see the
+    # beacon-codex-bridge `--armed` help) — a headless daemon must not
+    # self-authorize its own outbound sends. The launcher is the
+    # human-initiated entry point, so it grants the reply budget here.
+    # Without this, `bcodex --armed` replies were silently refused until the
+    # user ran `beacon bus budget grant` by hand (the manual step this
+    # closes). Grant from $ROOT so the budget file lands in the same
+    # .beacon the bridge (started with --cwd "$ROOT") reads from.
+    if (cd "$ROOT" && "$BEACON_BIN_SELECTED" bus budget grant --turns "$ARMED_TURNS" >/dev/null 2>&1); then
+        echo "[bcodex] armed: granted $ARMED_TURNS autonomous-reply budget" >&2
+    else
+        echo "[bcodex] warning: 'bus budget grant' failed — armed replies may be refused." >&2
+        echo "  Run manually: beacon bus budget grant --turns $ARMED_TURNS" >&2
     fi
 fi
 

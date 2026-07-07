@@ -51,7 +51,19 @@ def _run(tmp_path: Path, args: list[str] | None = None, extra_env: dict | None =
     bridge.chmod(0o755)
     beacon_bin = install_root / "bin" / "beacon"
     beacon_bin.parent.mkdir(parents=True)
-    beacon_bin.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    # Record every `beacon ...` invocation (argv) so tests can assert on the
+    # launcher's side-effects (e.g. `bus budget grant` under --armed).
+    beacon_bin.write_text(textwrap.dedent("""
+        #!/usr/bin/env bash
+        if [ -n "${BEACON_FAKE_CALLS:-}" ]; then
+            python3 - "$@" <<'PY'
+import json, os, sys
+with open(os.environ["BEACON_FAKE_CALLS"], "a", encoding="utf-8") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\\n")
+PY
+        fi
+        exit 0
+    """).strip(), encoding="utf-8")
     beacon_bin.chmod(0o755)
 
     bin_dir = tmp_path / "fakebin"
@@ -65,6 +77,7 @@ def _run(tmp_path: Path, args: list[str] | None = None, extra_env: dict | None =
     env["FAKE_CODEX_CALLS"] = str(calls_path)
     env["BEACON_INSTALL_ROOT"] = str(install_root)
     env["BEACON_BIN"] = str(beacon_bin)
+    env["BEACON_FAKE_CALLS"] = str(tmp_path / "beacon_calls.json")
     env["HOME"] = str(tmp_path / "home")
     if extra_env:
         env.update(extra_env)
@@ -116,3 +129,43 @@ def test_bcodex_opt_out_launches_plain_codex(tmp_path):
     assert proc.returncode == 0
     assert calls == [["--model", "x"]]
     assert "DM opt-out" in proc.stderr
+
+
+def _beacon_calls(tmp_path: Path) -> list[list[str]]:
+    p = tmp_path / "beacon_calls.json"
+    if not p.exists():
+        return []
+    return [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
+
+
+def test_bcodex_armed_auto_grants_budget(tmp_path):
+    # 穴① (ms-93 e-2992): --armed must be self-sufficient. The launcher grants
+    # the reply budget so the user no longer runs `beacon bus budget grant` by
+    # hand; the daemon deliberately never self-grants (T2 can't self-escalate).
+    proc, _calls, _project = _run(tmp_path, args=["--armed", "--port", "39994"])
+    assert proc.returncode == 0, proc.stderr
+    assert ["bus", "budget", "grant", "--turns", "20"] in _beacon_calls(tmp_path)
+
+
+def test_bcodex_armed_turns_overrides_default(tmp_path):
+    proc, _calls, _project = _run(
+        tmp_path, args=["--armed", "--armed-turns", "5", "--port", "39995"])
+    assert proc.returncode == 0, proc.stderr
+    assert ["bus", "budget", "grant", "--turns", "5"] in _beacon_calls(tmp_path)
+
+
+def test_bcodex_non_armed_does_not_grant_budget(tmp_path):
+    # Without --armed the session is DM-ready (receives) but must NOT grant an
+    # autonomous-reply budget — mirrors bclaude (no armed by default).
+    proc, _calls, _project = _run(tmp_path, args=["--port", "39996"])
+    assert proc.returncode == 0, proc.stderr
+    grants = [c for c in _beacon_calls(tmp_path)
+              if c[:3] == ["bus", "budget", "grant"]]
+    assert grants == []
+
+
+def test_bcodex_armed_turns_rejects_non_integer(tmp_path):
+    proc, _calls, _project = _run(
+        tmp_path, args=["--armed", "--armed-turns", "abc"])
+    assert proc.returncode == 2
+    assert "positive integer" in proc.stderr
