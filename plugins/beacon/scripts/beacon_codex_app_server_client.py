@@ -41,6 +41,14 @@ from typing import Any, Callable, Iterable
 
 
 CODEX_BIN_DEFAULT = "/opt/homebrew/bin/codex"
+
+# e-2997: max inbound WebSocket frame size for the app-server connection.
+# The websockets default is 2**20 (1 MiB); a resumed Codex TUI thread streams
+# its full state back in one frame that grows with the conversation, so the
+# default 1009-kills DM wake once the thread passes ~1 MiB. The peer is a local,
+# trusted `codex app-server` on 127.0.0.1, so a generous 64 MiB ceiling keeps a
+# sane bound while comfortably covering realistic thread sizes.
+_WS_MAX_SIZE = 64 * 1024 * 1024
 BRIDGE_BASE_INSTRUCTIONS = (
     "You are the Beacon Codex DM bridge response worker. "
     "Respond to the DM text only. Do not run shell commands, edit files, "
@@ -130,7 +138,19 @@ def start_app_server(
         # state the client closes an otherwise usable connection before the
         # next Beacon DM arrives. JSON-RPC requests already have bounded
         # response timeouts, so use those as the liveness check instead.
-        return AppServerHandle(ws=connect(remote_url, ping_interval=None))
+        #
+        # e-2997: on `thread/resume` + `turn/start` against an existing TUI
+        # thread, the app-server streams the resumed thread state back as a
+        # single frame. Once the Codex conversation grows past the websockets
+        # default max_size (2**20 = 1 MiB) the receive path rejects that frame
+        # with close code 1009 (message too big) and the DM is delivered but
+        # never wakes the visible thread (delivered ✓ / opened ✗). The frame is
+        # inbound from a local, trusted app-server (127.0.0.1), so lift the cap
+        # generously instead of compacting our (already tiny) turn input — the
+        # 2 MiB is what we RECEIVE, not what we send.
+        return AppServerHandle(
+            ws=connect(remote_url, ping_interval=None, max_size=_WS_MAX_SIZE)
+        )
 
     env = {
         **os.environ,

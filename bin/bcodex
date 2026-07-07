@@ -10,11 +10,16 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: bcodex [--armed] [--keep-app-server] [--port PORT] [--] [codex args...]
+Usage: bcodex [--armed [--armed-turns N]] [--keep-app-server] [--port PORT] [--] [codex args...]
 
 Options:
-  --armed            After wake, send the generated Codex response back as a DM.
-                     Requires Beacon bus reply budget.
+  --armed            After wake, send the generated Codex response back as a DM
+                     (autonomous reply). Auto-grants the Beacon bus reply budget
+                     so no separate `beacon bus budget grant` is needed. Without
+                     --armed the session is DM-ready (receives) but does not
+                     auto-reply, mirroring bclaude.
+  --armed-turns N    How many autonomous replies --armed authorizes before the
+                     budget gate stops (default: 20). No effect without --armed.
   --keep-app-server  Do not stop the background app-server when Codex exits.
   --port PORT        Bind app-server to this localhost port.
   -h, --help         Show this help.
@@ -24,6 +29,7 @@ EOF
 }
 
 ARMED=0
+ARMED_TURNS=20
 KEEP_APP_SERVER=0
 PORT=""
 CODEX_ARGS=()
@@ -33,6 +39,20 @@ while [ "$#" -gt 0 ]; do
         --armed)
             ARMED=1
             shift
+            ;;
+        --armed-turns)
+            if [ "$#" -lt 2 ]; then
+                echo "bcodex: --armed-turns requires a value" >&2
+                exit 2
+            fi
+            case "$2" in
+                ''|*[!0-9]*)
+                    echo "bcodex: --armed-turns must be a positive integer (got: '$2')" >&2
+                    exit 2
+                    ;;
+            esac
+            ARMED_TURNS="$2"
+            shift 2
             ;;
         --keep-app-server)
             KEEP_APP_SERVER=1
@@ -112,6 +132,24 @@ if [ ! -x "$BRIDGE" ]; then
     fi
 fi
 
+if [ "$ARMED" = "1" ]; then
+    # 穴① (ms-93 e-2992): make `--armed` self-sufficient. The bridge daemon
+    # deliberately does NOT auto-grant budget from inside (see the
+    # beacon-codex-bridge `--armed` help) — a headless daemon must not
+    # self-authorize its own outbound sends. The launcher is the
+    # human-initiated entry point, so it grants the reply budget here.
+    # Without this, `bcodex --armed` replies were silently refused until the
+    # user ran `beacon bus budget grant` by hand (the manual step this
+    # closes). Grant from $ROOT so the budget file lands in the same
+    # .beacon the bridge (started with --cwd "$ROOT") reads from.
+    if (cd "$ROOT" && "$BEACON_BIN_SELECTED" bus budget grant --turns "$ARMED_TURNS" >/dev/null 2>&1); then
+        echo "[bcodex] armed: granted $ARMED_TURNS autonomous-reply budget" >&2
+    else
+        echo "[bcodex] warning: 'bus budget grant' failed — armed replies may be refused." >&2
+        echo "  Run manually: beacon bus budget grant --turns $ARMED_TURNS" >&2
+    fi
+fi
+
 if [ -z "$PORT" ]; then
     PORT="$(python3 - <<'PY'
 import socket
@@ -161,70 +199,34 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-python3 - "$ROOT" "$URL" "$BRIDGE" "$BEACON_BIN_SELECTED" "$INSTALL_ROOT" "$ARMED" "$$" <<'PY' &
-import os, sqlite3, subprocess, sys, time
-from pathlib import Path
-
-cwd, url, bridge, beacon_bin, install_root, armed, wrapper_pid = sys.argv[1:]
-codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
-db = codex_home / "state_5.sqlite"
-started = int(time.time())
-deadline = time.time() + 3600
-seen = set()
-
-def latest_thread():
-    if not db.is_file():
-        return ""
-    con = sqlite3.connect(str(db))
-    try:
-        rows = con.execute(
-            "select id, updated_at from threads where cwd=? "
-            "and source in ('vscode','cli') order by updated_at desc limit 8",
-            (cwd,),
-        ).fetchall()
-    finally:
-        con.close()
-    for tid, updated in rows:
-        if tid in seen:
-            continue
-        if int(updated or 0) >= started - 5:
-            return str(tid)
-    return ""
-
-while time.time() < deadline:
-    try:
-        os.kill(int(wrapper_pid), 0)
-    except OSError:
-        sys.exit(0)
-    tid = latest_thread()
-    if tid:
-        argv = [
-            sys.executable,
-            bridge,
-            "restart",
-            "--cwd",
-            cwd,
-            "--app-server",
-            "--app-server-url",
-            url,
-            "--codex-thread-id",
-            tid,
-        ]
-        if armed == "1":
-            argv.append("--armed")
-        env = {
-            **os.environ,
-            "BEACON_BIN": beacon_bin,
-            "BEACON_INSTALL_ROOT": install_root,
-        }
-        subprocess.run(argv, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        sys.exit(0)
-    time.sleep(1)
-PY
-WATCHER_PID="$!"
-
-echo "[bcodex] app-server: $URL (pid=$APP_PID)" >&2
-echo "[bcodex] bridge will arm after the first Codex thread appears" >&2
+# DM-wake watcher (ms-93 / e-2534 + e-2535). Extracted to a standalone,
+# unit-testable script (= scripts/bcodex-watcher.py). It brings the receive
+# daemon up pull-only at t0 (DMs delivered before the first Codex thread
+# exists), then upgrades to app-server dispatch once the thread appears —
+# with logging, retry, and a post-start liveness check so a transient bridge
+# failure can no longer kill DM receive silently (memo Odd5UclF3fXXJTNMSjnB).
+WATCHER="$INSTALL_ROOT/scripts/bcodex-watcher.py"
+WATCHER_ARGS=(
+    --cwd "$ROOT"
+    --url "$URL"
+    --bridge "$BRIDGE"
+    --beacon-bin "$BEACON_BIN_SELECTED"
+    --install-root "$INSTALL_ROOT"
+    --wrapper-pid "$$"
+)
+if [ "$ARMED" = "1" ]; then
+    WATCHER_ARGS+=(--armed)
+fi
+if [ -f "$WATCHER" ]; then
+    python3 "$WATCHER" "${WATCHER_ARGS[@]}" &
+    WATCHER_PID="$!"
+    echo "[bcodex] app-server: $URL (pid=$APP_PID)" >&2
+    echo "[bcodex] DM receive daemon starting (pull-only now, wakes after first Codex thread)" >&2
+else
+    WATCHER_PID=""
+    echo "[bcodex] warning: watcher script missing at $WATCHER — DM wake disabled." >&2
+    echo "  Set BEACON_INSTALL_ROOT to your beacon checkout." >&2
+fi
 
 if [ "${#CODEX_ARGS[@]}" -gt 0 ]; then
     "$CODEX_BIN" --remote "$URL" -C "$ROOT" "${CODEX_ARGS[@]}"
@@ -233,7 +235,7 @@ else
 fi
 CODEX_RC="$?"
 
-if kill -0 "$WATCHER_PID" >/dev/null 2>&1; then
+if [ -n "$WATCHER_PID" ] && kill -0 "$WATCHER_PID" >/dev/null 2>&1; then
     kill "$WATCHER_PID" >/dev/null 2>&1 || true
 fi
 
