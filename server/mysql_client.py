@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 
 # PyMySQL は pure-Python (build 依存なし)。BEACON_STORE_BACKEND != "mysql" 環境
 # では import されないよう、boto3 と同じく import 失敗を握りつぶす。実際に関数を
@@ -118,7 +119,15 @@ def _table_name(entity: str) -> str:
 # ---------------------------------------------------------------------------
 # module-level に 1 本張って使い回す。PyMySQL はアイドルで切れることがあるので
 # _conn() で毎回 ping(reconnect=True) して live を保証する。落ちていたら張り直す。
-_CONN = None
+#
+# ★ 並行性 (ms-96 cutover 後の本番インシデント): PyMySQL の Connection は
+#   スレッド安全でない。uvicorn は sync エンドポイントを anyio のスレッドプール
+#   (デフォルト上限 40) で並行実行するため、1 本のグローバル接続を共有すると、
+#   あるスレッドがソケットを読んでいる最中に別スレッドが操作して socket が None に
+#   なり `'NoneType' object has no attribute 'settimeout'` でハング/500 する。
+#   → 接続を **thread-local** にして各スレッド専用の Connection を持たせる。
+#   スレッドは使い回されるので接続数はプール上限 (≒40) に収まり、毎回張り直さない。
+_LOCAL = threading.local()
 
 
 def _env(*names: str, default: str | None = None) -> str | None:
@@ -151,18 +160,25 @@ def _connect():
 
 
 def _conn():
-    global _CONN
     if pymysql is None:
         raise RuntimeError("pymysql is not installed (= MySQL backend cannot be used)")
-    if _CONN is None:
-        _CONN = _connect()
-        return _CONN
+    conn = getattr(_LOCAL, "conn", None)
+    if conn is None:
+        conn = _connect()
+        _LOCAL.conn = conn
+        return conn
     try:
-        _CONN.ping(reconnect=True)
+        conn.ping(reconnect=True)
     except Exception:
         # ping ごと死んでいたら張り直す (= server 再起動 / 長時間アイドル対策)。
-        _CONN = _connect()
-    return _CONN
+        # 壊れた接続は捨てて、このスレッド専用に新しく張り直す。
+        try:
+            conn.close()
+        except Exception:
+            pass
+        conn = _connect()
+        _LOCAL.conn = conn
+    return conn
 
 
 # ---------------------------------------------------------------------------
