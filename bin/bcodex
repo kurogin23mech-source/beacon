@@ -199,70 +199,34 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-python3 - "$ROOT" "$URL" "$BRIDGE" "$BEACON_BIN_SELECTED" "$INSTALL_ROOT" "$ARMED" "$$" <<'PY' &
-import os, sqlite3, subprocess, sys, time
-from pathlib import Path
-
-cwd, url, bridge, beacon_bin, install_root, armed, wrapper_pid = sys.argv[1:]
-codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
-db = codex_home / "state_5.sqlite"
-started = int(time.time())
-deadline = time.time() + 3600
-seen = set()
-
-def latest_thread():
-    if not db.is_file():
-        return ""
-    con = sqlite3.connect(str(db))
-    try:
-        rows = con.execute(
-            "select id, updated_at from threads where cwd=? "
-            "and source in ('vscode','cli') order by updated_at desc limit 8",
-            (cwd,),
-        ).fetchall()
-    finally:
-        con.close()
-    for tid, updated in rows:
-        if tid in seen:
-            continue
-        if int(updated or 0) >= started - 5:
-            return str(tid)
-    return ""
-
-while time.time() < deadline:
-    try:
-        os.kill(int(wrapper_pid), 0)
-    except OSError:
-        sys.exit(0)
-    tid = latest_thread()
-    if tid:
-        argv = [
-            sys.executable,
-            bridge,
-            "restart",
-            "--cwd",
-            cwd,
-            "--app-server",
-            "--app-server-url",
-            url,
-            "--codex-thread-id",
-            tid,
-        ]
-        if armed == "1":
-            argv.append("--armed")
-        env = {
-            **os.environ,
-            "BEACON_BIN": beacon_bin,
-            "BEACON_INSTALL_ROOT": install_root,
-        }
-        subprocess.run(argv, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        sys.exit(0)
-    time.sleep(1)
-PY
-WATCHER_PID="$!"
-
-echo "[bcodex] app-server: $URL (pid=$APP_PID)" >&2
-echo "[bcodex] bridge will arm after the first Codex thread appears" >&2
+# DM-wake watcher (ms-93 / e-2534 + e-2535). Extracted to a standalone,
+# unit-testable script (= scripts/bcodex-watcher.py). It brings the receive
+# daemon up pull-only at t0 (DMs delivered before the first Codex thread
+# exists), then upgrades to app-server dispatch once the thread appears —
+# with logging, retry, and a post-start liveness check so a transient bridge
+# failure can no longer kill DM receive silently (memo Odd5UclF3fXXJTNMSjnB).
+WATCHER="$INSTALL_ROOT/scripts/bcodex-watcher.py"
+WATCHER_ARGS=(
+    --cwd "$ROOT"
+    --url "$URL"
+    --bridge "$BRIDGE"
+    --beacon-bin "$BEACON_BIN_SELECTED"
+    --install-root "$INSTALL_ROOT"
+    --wrapper-pid "$$"
+)
+if [ "$ARMED" = "1" ]; then
+    WATCHER_ARGS+=(--armed)
+fi
+if [ -f "$WATCHER" ]; then
+    python3 "$WATCHER" "${WATCHER_ARGS[@]}" &
+    WATCHER_PID="$!"
+    echo "[bcodex] app-server: $URL (pid=$APP_PID)" >&2
+    echo "[bcodex] DM receive daemon starting (pull-only now, wakes after first Codex thread)" >&2
+else
+    WATCHER_PID=""
+    echo "[bcodex] warning: watcher script missing at $WATCHER — DM wake disabled." >&2
+    echo "  Set BEACON_INSTALL_ROOT to your beacon checkout." >&2
+fi
 
 if [ "${#CODEX_ARGS[@]}" -gt 0 ]; then
     "$CODEX_BIN" --remote "$URL" -C "$ROOT" "${CODEX_ARGS[@]}"
@@ -271,7 +235,7 @@ else
 fi
 CODEX_RC="$?"
 
-if kill -0 "$WATCHER_PID" >/dev/null 2>&1; then
+if [ -n "$WATCHER_PID" ] && kill -0 "$WATCHER_PID" >/dev/null 2>&1; then
     kill "$WATCHER_PID" >/dev/null 2>&1 || true
 fi
 
