@@ -931,13 +931,48 @@ def read_bridge_session() -> dict:
     return data
 
 
+def _codex_session_pointer_path() -> Path:
+    """Cwd-level pointer the Codex receive-loop daemon publishes (e-2531).
+
+    Mirrors ``scripts/codex-receive-loop.py:_session_pointer_file`` — the daemon
+    writes ``{session_id, project_id, ...}`` here on (re)start so any process in
+    the cwd (hooks, the agent's own `beacon bus send`) can discover the stable
+    codex- sid without pid math.
+    """
+    return Path.cwd() / ".beacon" / "codex" / "receive-loop.session.json"
+
+
+def read_codex_session_pointer() -> str:
+    """Return the Codex daemon's stable session_id for this cwd, or "".
+
+    Best-effort: any read/parse failure yields "" so the caller falls through
+    to the normal mint chain. Only the ``session_id`` field is consumed here;
+    the rest of the pointer (project_id / thread / app_server_url) is for the
+    Codex hook path.
+    """
+    try:
+        path = _codex_session_pointer_path()
+        if not path.is_file():
+            return ""
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return str(data.get("session_id") or "").strip()
+    except Exception:
+        return ""
+    return ""
+
+
 def resolve_active_session_id() -> str:
     """Return the session_id the CLI should treat as the current session.
 
-    Resolution order (e-1331 + e-1460):
+    Resolution order (e-1331 + e-1460 + e-2531):
       1. Bridge claim — pid-tree match in .beacon/bridges/<sid>.json
          (per-bclaude isolation), or legacy .beacon/bridge.json fallback.
-      2. Fall through to :func:`get_session_id` which applies the
+      2. Codex session pointer (e-2531) — the stable codex- sid the Codex
+         receive-loop daemon published for this cwd, so every Codex send path
+         shares one sender identity instead of minting a fresh sv-.
+      3. Fall through to :func:`get_session_id` which applies the
          existing env / mint / session.json precedence (which is itself
          pid-tree-aware as of e-1460).
 
@@ -953,6 +988,19 @@ def resolve_active_session_id() -> str:
     claim = read_bridge_session()
     if claim.get("session_id"):
         return claim["session_id"]
+    # e-2531: adopt the Codex receive-loop session pointer if present. Without
+    # this, a Codex-originated `beacon bus send` that does NOT set
+    # BEACON_BUS_SENDER (= any non-daemon path: the agent sending directly)
+    # falls through to get_session_id() and mints a FRESH sv- every call, so
+    # the same Codex session's outbound DMs churn their sender identity and
+    # "who replied" attribution in the directory breaks. The pointer holds the
+    # stable codex- sid the daemon minted, shared by every process in this cwd.
+    # Ordering is safe: a Claude send matches the pid-tree bridge claim above
+    # and never reaches here; a Codex send is a descendant of the daemon (not
+    # a bclaude), so the claim is empty and the cwd-level pointer is correct.
+    codex_sid = read_codex_session_pointer()
+    if codex_sid:
+        return codex_sid
     return get_session_id()
 
 
@@ -970,6 +1018,7 @@ __all__ = [
     "mint_fresh_session",
     "read_all_bridge_claims",
     "read_bridge_session",
+    "read_codex_session_pointer",
     "read_session",
     "resolve_active_session_id",
     "update_last_active",
