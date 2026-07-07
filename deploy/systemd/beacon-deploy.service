@@ -1,0 +1,16 @@
+# ms-102 — Pull 型デプロイの oneshot ジョブ (beacon-deploy.timer から起動される)。
+# /etc/systemd/system/beacon-deploy.service に配置する (下の docs/DEPLOY_VPS.md 参照)。
+[Unit]
+Description=Beacon pull-based deploy (fetch main, self-update if advanced)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/opt/beacon
+# repo 内のスクリプトを直接実行する (git reset で自動更新される)。self-update 耐性は
+# スクリプト側で main() 包みにより担保。
+ExecStart=/opt/beacon/scripts/vps-pull-deploy.sh
+# デプロイが 5 分以上かかったら異常とみなして止める。
+TimeoutStartSec=300

@@ -1,0 +1,16 @@
+# ms-102 — Pull 型デプロイを定期起動する timer。
+# /etc/systemd/system/beacon-deploy.timer に配置し `systemctl enable --now` する。
+[Unit]
+Description=Run Beacon pull-based deploy periodically
+
+[Timer]
+# 起動 2 分後から動き出し、以降 2 分間隔で main をチェックする。
+# デプロイ即時性 = 最大 2 分遅延 (Push 型に対する唯一のトレードオフ)。
+OnBootSec=2min
+OnUnitActiveSec=2min
+# 複数 VPS を並べても負荷が偏らないよう軽く散らす (単一構成では影響なし)。
+AccuracySec=20s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
