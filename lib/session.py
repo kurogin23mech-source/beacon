@@ -813,6 +813,93 @@ def _get_ancestor_pids(start_pid: int | None = None, max_depth: int = 20) -> set
     return pids
 
 
+def _read_claims_from_dir(bridges_dir: Path) -> list:
+    """Read all ``bridges/<sid>.json`` claim dicts from one directory.
+
+    Best-effort: missing dir / unreadable files yield an empty list rather
+    than raising, so callers can point this at any (possibly absent) worktree.
+    """
+    claims = []
+    if bridges_dir.exists() and bridges_dir.is_dir():
+        for f in sorted(bridges_dir.glob("*.json")):
+            try:
+                with f.open("r", encoding="utf-8") as fp:
+                    data = json.load(fp)
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict) and data.get("session_id"):
+                claims.append(data)
+    return claims
+
+
+def _in_linked_worktree() -> bool:
+    """True when the current cwd is a *linked* git worktree.
+
+    A linked worktree's ``.git`` is a FILE (a ``gitdir:`` pointer), whereas the
+    main worktree's ``.git`` is a directory. Gating the cross-worktree bridge
+    scan on this keeps the ``git worktree list`` subprocess off the hot path for
+    bridge-less sessions in a normal repo / non-git dir — it only runs in the
+    exact scenario the receive-orphan fix targets (``cd`` into a worktree).
+    """
+    try:
+        return (Path.cwd() / ".git").is_file()
+    except OSError:
+        return False
+
+
+def _sibling_worktree_bridges_dirs() -> list:
+    """Return ``.beacon/bridges/`` dirs for every OTHER git worktree of this repo.
+
+    The receive-orphan fix (ms-93): a bclaude launched in worktree A writes its
+    bridge claim to ``A/.beacon/bridges/``. If the CLI later runs in a different
+    worktree B (hand ``cd`` or ``beacon milestone start``), ``B/.beacon/bridges/``
+    is empty, so the pid-tree resolver misses A's claim and the session silently
+    falls through to B's own sid — orphaning the receive bridge (sends keep
+    working, incoming DMs never live-wake). Enumerating sibling worktrees lets
+    the pid-tree match find the running bridge regardless of which worktree the
+    CLI sits in.
+
+    Best-effort: returns ``[]`` outside a git repo, on any git failure, or when
+    ``git worktree list`` is unavailable. Excludes the current cwd (already
+    covered by the fast path).
+    """
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except Exception:
+        return []
+    if out.returncode != 0:
+        return []
+    cwd = str(Path.cwd())
+    dirs = []
+    for line in out.stdout.splitlines():
+        if line.startswith("worktree "):
+            wt = line[len("worktree "):].strip()
+            if wt and wt != cwd:
+                dirs.append(Path(wt) / _BRIDGES_DIR_RELATIVE)
+    return dirs
+
+
+def _match_claim_by_pidtree(claims: list, ancestors: set) -> dict:
+    """Return the first alive claim whose ``parent_pid`` is in ``ancestors``.
+
+    A claim is only adopted when its bridge process (``pid``) is still alive —
+    a dead bus.mjs cannot own the current session. Legacy claims without
+    ``parent_pid`` are skipped (they cannot be attributed to a specific bclaude).
+    """
+    for claim in claims:
+        pid = claim.get("pid")
+        if not isinstance(pid, int) or not _pid_alive(pid):
+            continue
+        parent_pid = claim.get("parent_pid")
+        if isinstance(parent_pid, int) and parent_pid in ancestors:
+            return claim
+    return {}
+
+
 def read_all_bridge_claims() -> list:
     """Return all bridge claims from .beacon/bridges/*.json + legacy fallback.
 
@@ -825,17 +912,7 @@ def read_all_bridge_claims() -> list:
     should be ignored. This keeps the function usable for diagnostics
     (e.g. ``beacon doctor``) that want to see dead claims too.
     """
-    claims = []
-    bridges_dir = _bridges_dir()
-    if bridges_dir.exists() and bridges_dir.is_dir():
-        for f in sorted(bridges_dir.glob("*.json")):
-            try:
-                with f.open("r", encoding="utf-8") as fp:
-                    data = json.load(fp)
-            except (OSError, json.JSONDecodeError):
-                continue
-            if isinstance(data, dict) and data.get("session_id"):
-                claims.append(data)
+    claims = _read_claims_from_dir(_bridges_dir())
     # Legacy fallback: single .beacon/bridge.json (pre-e-1460 schema, no
     # parent_pid). Include it only if no per-sid claim with the same sid
     # exists, so a half-migrated cwd doesn't double-count.
@@ -882,15 +959,24 @@ def find_my_bridge_claim() -> dict:
             stacklevel=2,
         )
     my_ancestors = _get_ancestor_pids()
-    for claim in read_all_bridge_claims():
-        # Bridge process must be alive — a dead bus.mjs cannot legitimately
-        # claim ownership of the current session.
-        pid = claim.get("pid")
-        if not isinstance(pid, int) or not _pid_alive(pid):
-            continue
-        parent_pid = claim.get("parent_pid")
-        if isinstance(parent_pid, int) and parent_pid in my_ancestors:
-            return claim
+    # Fast path: claims in the current cwd's .beacon/bridges/ (+ legacy). This
+    # is the common case and pays no extra process cost.
+    match = _match_claim_by_pidtree(read_all_bridge_claims(), my_ancestors)
+    if match:
+        return match
+    # Fallback (ms-93 receive-orphan fix): the CLI is in a git worktree that
+    # has no local bridge claim, but my bclaude's bridge is alive in a sibling
+    # worktree. Search those by the same pid-tree key so the running bridge
+    # stays authoritative across a `cd` / `milestone start` into a worktree —
+    # otherwise the session silently orphans its receive path (send-only).
+    # Gated to linked worktrees so bridge-less sessions in a normal repo never
+    # pay the `git worktree list` subprocess.
+    if _in_linked_worktree():
+        for bdir in _sibling_worktree_bridges_dirs():
+            match = _match_claim_by_pidtree(
+                _read_claims_from_dir(bdir), my_ancestors)
+            if match:
+                return match
     return {}
 
 
