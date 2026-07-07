@@ -105,6 +105,10 @@ beacon-hook-context-monitor = "beacon_cli.hooks.context_monitor:main"
 # halt-request.json the bus inbox hook drops on disk and injects it as
 # additionalContext so the AI sees the halt request after each tool call.
 beacon-hook-halt-check = "beacon_cli.hooks.halt_check:main"
+# SessionStart: beacon の自動アップデート (ms-103)。bclaude 起動時に 1 日 1 回 PyPI を
+# 見て新版があれば install 方法別に detached で更新する (更新後 smoke + 失敗時
+# ロールバック / 公開後 24h 熟成待ち付き)。BEACON_AUTO_UPDATE=0 で無効化。
+beacon-hook-session-start = "beacon_cli.hooks.session_start:main"
 
 # -----------------------------------------------------------------------------
 # Packaging layout
