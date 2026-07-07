@@ -29,9 +29,11 @@ os.environ["BEACON_OPERATIONS_BACKEND"] = "mock"
 import app as app_module  # noqa: E402
 
 
-# --- _fanout_bus_event: publish vs fallback --------------------------------
+# --- _fanout_bus_event: 常にローカル配信 + cross-process publish -------------
 
-def test_fanout_publishes_when_redis_up(monkeypatch):
+def test_fanout_always_delivers_local_and_publishes(monkeypatch):
+    """review fix B: Redis UP でもローカル配信は必ず行う (subscriber スレッドの
+    生死に依存させない)。加えて cross-process 用に publish もする。"""
     pub, delivered = [], []
     monkeypatch.setattr(
         app_module.redis_client, "publish_ws_push",
@@ -43,12 +45,12 @@ def test_fanout_publishes_when_redis_up(monkeypatch):
 
     monkeypatch.setattr(app_module, "_deliver_bus_signal_local", _fake_local)
     asyncio.run(app_module._fanout_bus_event("p1", {"event_id": "e1"}))
-    # 中継は publish 経由。発行元プロセスは直接ローカル配信しない (二重配信回避)。
-    assert pub == [("p1", "e1")]
-    assert delivered == []
+    assert delivered == [("p1", "e1")]  # ローカル配信は常に効く
+    assert pub == [("p1", "e1")]        # cross-process 中継も行う
 
 
-def test_fanout_falls_back_to_local_when_redis_down(monkeypatch):
+def test_fanout_local_delivery_survives_redis_down(monkeypatch):
+    """Redis 不通 (publish が False / no-op) でもローカル配信は保証される。"""
     delivered = []
     monkeypatch.setattr(
         app_module.redis_client, "publish_ws_push", lambda pid, eid, **kw: False
@@ -59,29 +61,16 @@ def test_fanout_falls_back_to_local_when_redis_down(monkeypatch):
 
     monkeypatch.setattr(app_module, "_deliver_bus_signal_local", _fake_local)
     asyncio.run(app_module._fanout_bus_event("p1", {"event_id": "e2"}))
-    # Redis 不通 → 同プロセスのローカル配信に fallback (e-2380 挙動を保つ)。
     assert delivered == [("p1", "e2")]
 
 
-# --- subscriber: pub/sub message → ローカル配信 -----------------------------
+# --- subscriber: 1 メッセージのルーティング (_dispatch_ws_push_message) -------
+# resilient loop 本体は `while True` の無限ループなので、per-message の判断だけを
+# 切り出した _dispatch_ws_push_message を直接検証する。
 
-def test_subscriber_delivers_message_to_local_clients(monkeypatch):
-    class _FakePubSub:
-        def listen(self):
-            yield {"type": "subscribe"}  # 購読確認メッセージ (無視される)
-            yield {
-                "type": "message",
-                "data": json.dumps({"project_id": "p1", "event_id": "e9"}),
-            }
-            # generator が尽きると _run_ws_push_subscriber は return する
-
-    monkeypatch.setattr(
-        app_module.redis_client, "ws_push_subscription", lambda: _FakePubSub()
-    )
-    # 配信が発火する条件: event loop 設定済 + 該当 project にローカル接続あり。
+def test_dispatch_delivers_message_to_local_clients(monkeypatch):
     monkeypatch.setattr(app_module, "_event_loop", object())
     monkeypatch.setattr(app_module, "_ws_connections", {"p1": {object()}})
-
     scheduled = []
 
     def _fake_schedule(coro, loop):
@@ -89,24 +78,14 @@ def test_subscriber_delivers_message_to_local_clients(monkeypatch):
 
     monkeypatch.setattr(app_module.asyncio, "run_coroutine_threadsafe", _fake_schedule)
 
-    app_module._run_ws_push_subscriber()
-
-    # message 1 通につき 1 回、ローカル配信コルーチンが event loop に乗る。
+    msg = {"type": "message",
+           "data": json.dumps({"project_id": "p1", "event_id": "e9"})}
+    assert app_module._dispatch_ws_push_message(msg) is True
     assert len(scheduled) == 1
     scheduled[0].close()  # 未 await の coroutine を閉じて警告回避
 
 
-def test_subscriber_skips_when_no_local_connection(monkeypatch):
-    class _FakePubSub:
-        def listen(self):
-            yield {
-                "type": "message",
-                "data": json.dumps({"project_id": "p-other", "event_id": "e9"}),
-            }
-
-    monkeypatch.setattr(
-        app_module.redis_client, "ws_push_subscription", lambda: _FakePubSub()
-    )
+def test_dispatch_skips_when_no_local_connection(monkeypatch):
     monkeypatch.setattr(app_module, "_event_loop", object())
     monkeypatch.setattr(app_module, "_ws_connections", {"p1": {object()}})
     scheduled = []
@@ -114,14 +93,29 @@ def test_subscriber_skips_when_no_local_connection(monkeypatch):
         app_module.asyncio, "run_coroutine_threadsafe",
         lambda coro, loop: scheduled.append(coro),
     )
-    app_module._run_ws_push_subscriber()
+    msg = {"type": "message",
+           "data": json.dumps({"project_id": "p-other", "event_id": "e9"})}
     # p-other にローカル接続が無いので配信は乗らない。
+    assert app_module._dispatch_ws_push_message(msg) is False
     assert scheduled == []
 
 
-def test_subscriber_returns_quietly_when_redis_unavailable(monkeypatch):
+def test_dispatch_ignores_non_message_and_bad_json(monkeypatch):
+    monkeypatch.setattr(app_module, "_event_loop", object())
+    monkeypatch.setattr(app_module, "_ws_connections", {"p1": {object()}})
     monkeypatch.setattr(
-        app_module.redis_client, "ws_push_subscription", lambda: None
+        app_module.asyncio, "run_coroutine_threadsafe",
+        lambda coro, loop: None,
     )
-    # 例外を投げずに即 return する (= fail-open、process は poll-only で継続)。
+    # subscribe 確認メッセージは無視。
+    assert app_module._dispatch_ws_push_message({"type": "subscribe"}) is False
+    # 壊れた JSON も握りつぶす (= throw しない)。
+    assert app_module._dispatch_ws_push_message(
+        {"type": "message", "data": "{not json"}) is False
+
+
+def test_subscriber_returns_quietly_when_redis_py_absent(monkeypatch):
+    # redis-py 未インストール環境では subscriber は retry せず即 return する
+    # (= 無限ループに入らない、fail-open)。
+    monkeypatch.setattr(app_module.redis_client, "_redis", None)
     app_module._run_ws_push_subscriber()

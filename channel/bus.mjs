@@ -375,6 +375,14 @@ async function connectBusWs() {
     const cleanup = () => {
       wsHealthy = false
       if (pingTimer) { clearInterval(pingTimer); pingTimer = null }
+      // ms-101 review fix — WS が切れて wsHealthy=false になったら、120s backstop
+      // スリープ中かもしれない poll loop を即起こす。起こさないと最大 backstop ぶん
+      // (120s) 次の pollOnce と writePollHeartbeat が走らず、last_poll_at と Redis
+      // ws_live の TTL(60s) が失効して、生きている再接続中セッションが not-live 扱いに
+      // なり DM を取りこぼす。起こせばループは即 poll + heartbeat し、以降 WS 復旧まで
+      // 5s poll に戻る (= 専用 heartbeat タイマーは !wsHealthy で止まるが、ループ側の
+      // 毎周回 writePollHeartbeat が代わりに鮮度を保つ)。
+      wakePoll()
     }
     const scheduleReconnect = () => {
       cleanup()

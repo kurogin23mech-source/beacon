@@ -25,6 +25,20 @@ try:
 except ImportError:
     _redis = None  # type: ignore[assignment]
 
+# fail-open な client は接続失敗時にリトライせず即 None に倒すべき (= リトライは
+# 「制限より可用性 / push は poll backstop に degrade」の設計と矛盾し、ホットパスを
+# 塞ぐ)。redis-py はデフォルトで ConnectionError を数回リトライ + backoff するため、
+# Redis 不通時に接続 helper が数秒〜十数秒ブロックしうる (特に closed port が RST を
+# 返さず timeout する環境)。リトライ 0 の Retry を用意して即失敗させる。import パスは
+# redis 5.x / 8.x 共通。取得できなければ None (= redis-py 既定挙動にフォールバック)。
+try:
+    from redis.retry import Retry as _Retry
+    from redis.backoff import NoBackoff as _NoBackoff
+
+    _NO_RETRY = _Retry(_NoBackoff(), 0)
+except Exception:
+    _NO_RETRY = None
+
 
 def _env(*names: str, default: str | None = None) -> str | None:
     """最初に見つかった env var を返す (= 別名フォールバック)。
@@ -40,17 +54,27 @@ def _env(*names: str, default: str | None = None) -> str | None:
 
 
 _CLIENT = None
-_CLIENT_FAILED = False  # 一度接続に失敗したら以降 fail-open で即 None (毎回接続試行しない)
+# 接続に失敗したら、この epoch 秒まで再接続を試みない (その間は fail-open で即 None)。
+# 以前は「一度失敗したら永続ラッチ」だったが、それだと ms-101 で Redis に依存する
+# ようになった push / liveness が、boot 時の一瞬の Redis 不通でプロセス寿命まで
+# 永久に無効化されてしまう (= 自己回復しない、ms-101 review finding)。時間クールダウン
+# にして、cooldown 経過後は再接続を試すことで Redis 復旧後に自然回復させる。
+_CLIENT_RETRY_COOLDOWN_S = 30
+_CLIENT_RETRY_AT = 0.0
 
 
 def _client():
     """Return a live Redis client, or None if unavailable (fail-open)."""
-    global _CLIENT, _CLIENT_FAILED
-    if _redis is None or _CLIENT_FAILED:
+    global _CLIENT, _CLIENT_RETRY_AT
+    if _redis is None:
         return None
     if _CLIENT is not None:
         return _CLIENT
+    # 直近の接続失敗から cooldown 中は再接続を試さず即 None (毎回接続試行しない)。
+    if time.time() < _CLIENT_RETRY_AT:
+        return None
     try:
+        _extra = {"retry": _NO_RETRY} if _NO_RETRY else {}
         _CLIENT = _redis.Redis(
             host=_env("BEACON_REDIS_HOST", "REDIS_HOST", default="127.0.0.1"),
             port=int(_env("BEACON_REDIS_PORT", "REDIS_PORT", default="6379")),
@@ -58,12 +82,13 @@ def _client():
             socket_connect_timeout=1,
             socket_timeout=1,
             decode_responses=True,
+            **_extra,
         )
-        # 初回に一度だけ ping して疎通確認 (失敗したら fail-open に倒す)。
+        # 初回に一度だけ ping して疎通確認 (失敗したら cooldown を張って fail-open)。
         _CLIENT.ping()
     except Exception:
         _CLIENT = None
-        _CLIENT_FAILED = True
+        _CLIENT_RETRY_AT = time.time() + _CLIENT_RETRY_COOLDOWN_S
         return None
     return _CLIENT
 
@@ -146,8 +171,13 @@ def ws_register(
         return False
     try:
         key = _ws_conns_key(project_id, session_id)
-        expiry = time.time() + ttl
-        r.zadd(key, {conn_id: expiry})
+        now = time.time()
+        # 期限切れ member (= crash / silent 切断で ZREM されず残った conn_id) を
+        # 掃除してから登録する。これをしないと、WS を頻繁に張り直す session が
+        # 常に 1 本以上生きている限り key が EXPIRE で消えず、死んだ conn_id が
+        # 無限に溜まって Redis メモリが肥大する (ms-101 review finding)。
+        r.zremrangebyscore(key, "-inf", now)
+        r.zadd(key, {conn_id: now + ttl})
         # 全 member が ZREM された後の空 key を自然消滅させる保険。生きている
         # 接続がある限り keepalive のたびに TTL が伸びるので消えない。
         r.expire(key, ttl + _WS_KEY_GRACE)

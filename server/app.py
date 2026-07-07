@@ -10389,19 +10389,54 @@ async def _fanout_bus_event(project_id: str, event: dict):
     つながっていると届かず、その受信者は次の poll (= 定期問い合わせ) まで DM に
     気づけなかった。
 
-    ここでは Redis pub/sub で wake hint を全プロセスへ中継する。各プロセスの
-    subscriber (``_run_ws_push_subscriber``) が受け取り、自分がローカルに持つ
-    WS 接続へ配信する。発行元プロセスも subscriber を持つので自プロセス宛ての
-    配信も同じ経路で届く (= 二重配信を避けるため、ここでは直接ローカル配信しない)。
+    2 経路で届ける:
+      (1) 同一プロセスの受信者へは **必ず直接** 配信する (_deliver_bus_signal_local)。
+          Redis や subscriber スレッドの生死に依存させない。以前は Redis UP 時に
+          publish のみで直接配信しなかったため、subscriber スレッドが listen の
+          一時エラーで死ぬと、同プロセスの受信者が push を取りこぼし 120s backstop
+          に無言で劣化していた (ms-101 review finding B の是正)。
+      (2) 別プロセス (uvicorn 別ワーカー) の受信者へは Redis pub/sub で中継する。
+          各プロセスの subscriber (_run_ws_push_subscriber) が受け取りローカル配信。
 
-    fail-open: Redis 不通で publish できないとき (publish_ws_push が False) は、
-    従来どおり同プロセスのローカル配信に fallback する (= 単一プロセス構成では
-    これで十分、e-2380 挙動を保つ)。
+    signal-only (event_id のみ) なので、発行元プロセスの subscriber が pub/sub 経由で
+    同じ hint を再配信して自プロセス受信者に二重に届いても無害 (bridge は wakePoll
+    するだけで pollOnce が cursor で dedup する)。Redis 不通なら (2) が no-op になる
+    だけで (1) は常に効く (= 単一プロセス構成 / Redis 障害でもローカル配信は保証)。
     """
     event_id = event.get("event_id")
-    published = redis_client.publish_ws_push(project_id, event_id)
-    if not published:
-        await _deliver_bus_signal_local(project_id, event_id)
+    await _deliver_bus_signal_local(project_id, event_id)
+    redis_client.publish_ws_push(project_id, event_id)
+
+
+def _dispatch_ws_push_message(message) -> bool:
+    """pub/sub で受けた 1 メッセージを解釈し、該当 project にローカル接続がある
+    ときだけローカル配信コルーチンを event loop に乗せる (ms-101 / e-3011)。
+
+    subscriber スレッドの blocking listen ループから切り出したので、per-message の
+    ルーティング判断を loop と独立に検証できる。Returns True if a delivery was
+    scheduled (= テスト用)。thread→loop の橋渡しは run_coroutine_threadsafe。
+    """
+    if message.get("type") != "message":
+        return False
+    try:
+        data = json.loads(message.get("data") or "{}")
+    except Exception:
+        return False
+    pid = data.get("project_id")
+    event_id = data.get("event_id")
+    if not pid:
+        return False
+    # このプロセスに該当 project の接続が無ければ配ることは無い (速攻 skip)。
+    if _event_loop is not None and _ws_connections.get(pid):
+        try:
+            asyncio.run_coroutine_threadsafe(
+                _deliver_bus_signal_local(pid, event_id), _event_loop
+            )
+            return True
+        except Exception:
+            # event loop が閉じている等の race。fire-and-forget で skip。
+            return False
+    return False
 
 
 def _run_ws_push_subscriber():
@@ -10412,45 +10447,47 @@ def _run_ws_push_subscriber():
     回し、message 受信時に ``asyncio.run_coroutine_threadsafe`` で event loop 上の
     ローカル配信コルーチンに乗せる (= 旧 Firestore watcher と同じ thread→loop 橋渡し)。
 
-    fail-open: 起動時に Redis が使えなければ subscriber を立てず return する
-    (= そのプロセスは cross-process push 無しの poll-only で動く。redis_client の
-    fail-open latch により、一度 Redis 不通と判定された process は以後 poll-only)。
-    listen 中の transient なエラーでも thread を終わらせ、process は poll-only で
-    継続する (= push が最悪 poll backstop に degrade するだけで DM は取りこぼさない)。
+    resilient loop: listen 中の transient なエラーや Redis 一時不通でも thread を
+    終わらせず、cooldown 後に再購読を試みる。以前は一度の listen エラー / boot 時の
+    一瞬の Redis 不通で subscriber が永久に止まり、cross-process push がプロセス寿命
+    まで復活しなかった (ms-101 review finding B/C の是正)。Redis 復旧後に自然回復する。
+    local 配信は _fanout_bus_event が直接行うので、ここが一時的に止まっても影響は
+    cross-process push のみ (= 別ワーカー接続の受信者が backstop poll に degrade する
+    だけで DM は取りこぼさない)。
+
+    redis-py 自体が未インストールの環境 (= CI / 従来 local) では Redis が永久に
+    現れないので retry せず即終了する。
     """
-    pubsub = redis_client.ws_push_subscription()
-    if pubsub is None:
+    if redis_client._redis is None:
         _server_logger.info(
-            "ws push subscriber not started (Redis unavailable) — "
-            "cross-process DM push disabled, poll backstop covers delivery"
+            "ws push subscriber disabled (redis-py not installed) — "
+            "poll backstop covers delivery"
         )
         return
-    _server_logger.info("ws push subscriber started")
-    try:
-        for message in pubsub.listen():
-            if message.get("type") != "message":
-                continue
+    _WS_SUB_RETRY_S = 5
+    while True:
+        pubsub = redis_client.ws_push_subscription()
+        if pubsub is None:
+            # Redis 不通 (redis_client 側の retry cooldown 中)。少し待って再試行。
+            time.sleep(_WS_SUB_RETRY_S)
+            continue
+        _server_logger.info("ws push subscriber connected")
+        try:
+            for message in pubsub.listen():
+                _dispatch_ws_push_message(message)
+        except Exception as exc:
+            _server_logger.warning(
+                "ws push subscriber loop errored (%s) — re-subscribing after %ss",
+                exc, _WS_SUB_RETRY_S,
+            )
             try:
-                data = json.loads(message.get("data") or "{}")
+                pubsub.close()
             except Exception:
-                continue
-            pid = data.get("project_id")
-            event_id = data.get("event_id")
-            if not pid:
-                continue
-            # このプロセスに該当 project の接続が無ければ配ることは無い (= 速攻 skip)。
-            if _event_loop is not None and _ws_connections.get(pid):
-                try:
-                    asyncio.run_coroutine_threadsafe(
-                        _deliver_bus_signal_local(pid, event_id), _event_loop
-                    )
-                except Exception:
-                    # event loop が閉じている等の race。fire-and-forget で skip。
-                    pass
-    except Exception as exc:
-        _server_logger.warning(
-            "ws push subscriber loop ended (%s) — process continues poll-only", exc
-        )
+                pass
+            time.sleep(_WS_SUB_RETRY_S)
+
+
+_ws_subscriber_started = False
 
 
 @app.on_event("startup")
@@ -10458,8 +10495,18 @@ async def _start_ws_push_subscriber():
     """起動時に ws push subscriber スレッドを立てる (ms-101 / e-3011)。
 
     daemon スレッドなので process 終了を妨げない。Redis 不通なら subscriber は
-    即 return し、poll backstop が配信を担保する (fail-open)。
+    poll backstop が配信を担保する (fail-open)。
+
+    冪等: startup hook が複数回走っても (= 同一プロセスで ASGI lifespan が再入する
+    テスト等) subscriber スレッドは 1 本だけにする。ガードが無いと startup ごとに
+    スレッドが増え、1 event が同じ WS 受信者へ複数回配信される / スレッド leak になる
+    (ms-101 review finding の是正)。
     """
+    global _ws_subscriber_started
+    if _ws_subscriber_started:
+        return
+    _ws_subscriber_started = True
+
     import threading
 
     threading.Thread(
@@ -10662,53 +10709,62 @@ async def ws_project(websocket: WebSocket, project_id: str):
 
     await websocket.accept()
 
-    if project_id not in _ws_connections:
-        _ws_connections[project_id] = set()
-    _ws_connections[project_id].add(websocket)
-
-    # ms-101 / e-3009 — 接続ベースの liveness (= 生存判定) 台帳への登録。
-    # bridge (= 各セッションの常駐受信プロセス) は WS URL に ``session_id`` を
-    # 付けて接続する。その接続を Redis の接続台帳 (redis_client.ws_register) に
-    # 登録し、「今つながっている session」を複数プロセス間で共有された真値源に
-    # する。Web UI ダッシュボードは session_id を付けずに接続するので、liveness
-    # 台帳には載らない (= directory の live 一覧はあくまで bridge session が対象)。
-    #
-    # session_id は client 申告値 (token claims ではない)。project へのアクセスは
-    # 直前の _require_project_role で既に認可済みなので、悪用しても「自分が入れる
-    # project 内で任意の session_id を live に見せる」までで、他 project には波及
-    # しない。token claims への束縛は将来課題 (= 過剰設計を避け現状は申告値を許容)。
+    # 接続の識別子。純粋な値計算 (I/O なし) なので try の前で確定させ、下の
+    # finally が discard / ws_unregister で参照できるようにする。
     conn_id = uuid.uuid4().hex
     session_id = websocket.query_params.get("session_id") or ""
     _registry_enabled = bool(session_id)
-    if _registry_enabled:
-        redis_client.ws_register(project_id, session_id, conn_id)
 
-    # ms-84 / e-2326 — signal-only WS. Past attempts to push project state
-    # over WS (full / slim / aggressively-slim) all hit a Cloud Run / GFE WS
-    # frame tolerance somewhere in the 20-50 KB range, well under what
-    # Starlette's `max_size` default (1 MiB) would suggest. Rather than
-    # chasing that opaque limit, we send a tiny "ready" notification and
-    # let the client pull the actual state via REST (which has no frame
-    # limit and already returns the slim variant via ?slim=true). Subsequent
-    # change events on this socket follow the same shape — type=project_changed
-    # with no body — so the client's update path is "refetch on signal".
-    await websocket.send_json({
-        "type": "ws_ready",
-        "project_id": project_id,
-    })
-
-    _start_watcher(project_id)
-
-    # ms-101 / e-3009 — ping/pong keepalive + silent 切断 (= 黙って切れた接続) の
-    # 能動回収。bridge は 30s ごとに "ping" を送る (channel/bus.mjs)。受信のたびに
-    # 台帳 TTL を更新 (ws_refresh) することで、生きている間だけ live が保たれる。
-    #
-    # WS は NAT / proxy のアイドル切断で TCP レベルの close が飛ばず黙って死ぬ
-    # ことがある (SPEC #5)。receive を無期限に待つと dead socket を掴んだまま
-    # ハングし、台帳の TTL 失効に頼るしかない。そこで client ping 間隔 (30s) より
-    # 長い idle timeout (90s) を張り、その間 1 通も来なければ silent-dead とみなして
-    # 台帳から外し close する (= 台帳 TTL 失効 <=60s を待たず能動的に回収する)。
+    # accept 後の登録 (_ws_connections への追加 / ws_register / ws_ready 送信 /
+    # watcher 起動) を try の中で行い、途中で例外が出ても finally が必ず走って
+    # in-process set と Redis 台帳の両方を後片付けする。登録を try の外でやると、
+    # 例えば send_json 直後に client が TCP を切って例外が飛んだとき ws_unregister
+    # が漏れ、死んだ session が最大 TTL(60s) 間 live=True と誤判定される
+    # (ms-101 review finding の是正)。
     try:
+        if project_id not in _ws_connections:
+            _ws_connections[project_id] = set()
+        _ws_connections[project_id].add(websocket)
+
+        # ms-101 / e-3009 — 接続ベースの liveness (= 生存判定) 台帳への登録。
+        # bridge (= 各セッションの常駐受信プロセス) は WS URL に ``session_id`` を
+        # 付けて接続する。その接続を Redis の接続台帳 (redis_client.ws_register) に
+        # 登録し、「今つながっている session」を複数プロセス間で共有された真値源に
+        # する。Web UI ダッシュボードは session_id を付けずに接続するので、liveness
+        # 台帳には載らない (= directory の live 一覧はあくまで bridge session が対象)。
+        #
+        # session_id は client 申告値 (token claims ではない)。project へのアクセスは
+        # 直前の _require_project_role で既に認可済みなので、悪用しても「自分が入れる
+        # project 内で任意の session_id を live に見せる」までで、他 project には波及
+        # しない。token claims への束縛は将来課題 (= 過剰設計を避け現状は申告値を許容)。
+        if _registry_enabled:
+            redis_client.ws_register(project_id, session_id, conn_id)
+
+        # ms-84 / e-2326 — signal-only WS. Past attempts to push project state
+        # over WS (full / slim / aggressively-slim) all hit a Cloud Run / GFE WS
+        # frame tolerance somewhere in the 20-50 KB range, well under what
+        # Starlette's `max_size` default (1 MiB) would suggest. Rather than
+        # chasing that opaque limit, we send a tiny "ready" notification and
+        # let the client pull the actual state via REST (which has no frame
+        # limit and already returns the slim variant via ?slim=true). Subsequent
+        # change events on this socket follow the same shape — type=project_changed
+        # with no body — so the client's update path is "refetch on signal".
+        await websocket.send_json({
+            "type": "ws_ready",
+            "project_id": project_id,
+        })
+
+        _start_watcher(project_id)
+
+        # ms-101 / e-3009 — ping/pong keepalive + silent 切断 (= 黙って切れた接続) の
+        # 能動回収。bridge は 30s ごとに "ping" を送る (channel/bus.mjs)。受信のたびに
+        # 台帳 TTL を更新 (ws_refresh) することで、生きている間だけ live が保たれる。
+        #
+        # WS は NAT / proxy のアイドル切断で TCP レベルの close が飛ばず黙って死ぬ
+        # ことがある (SPEC #5)。receive を無期限に待つと dead socket を掴んだまま
+        # ハングし、台帳の TTL 失効に頼るしかない。そこで client ping 間隔 (30s) より
+        # 長い idle timeout (90s) を張り、その間 1 通も来なければ silent-dead とみなして
+        # 台帳から外し close する (= 台帳 TTL 失効 <=60s を待たず能動的に回収する)。
         while True:
             try:
                 msg = await asyncio.wait_for(

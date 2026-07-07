@@ -40,6 +40,25 @@ class _FakeRedis:
         if z is not None:
             z.pop(member, None)
 
+    def zremrangebyscore(self, key, min_, max_):
+        z = self.zsets.get(key)
+        if z is None:
+            return 0
+
+        def _bound(v, default):
+            if v == "+inf":
+                return float("inf")
+            if v == "-inf":
+                return float("-inf")
+            return float(v)
+
+        lo = _bound(min_, float("-inf"))
+        hi = _bound(max_, float("inf"))
+        removed = [m for m, s in z.items() if lo <= s <= hi]
+        for m in removed:
+            z.pop(m, None)
+        return len(removed)
+
     def zcount(self, key, min_, max_):
         z = self.zsets.get(key, {})
 
@@ -136,6 +155,21 @@ def test_refresh_extends_liveness(fake, monkeypatch):
     monkeypatch.setattr(redis_client.time, "time", lambda: base + 80)
     # 元の期限 (base+60) は過ぎたが refresh で base+90 まで延びているので live。
     assert redis_client.ws_session_live("proj", "sess-A") is True
+
+
+def test_register_prunes_expired_members(fake, monkeypatch):
+    """review fix: 期限切れ member (crash / silent 切断で残った conn_id) は
+    次の register 時に掃除され、ZSET に無限に溜まらない。"""
+    import time as _t
+
+    base = _t.time()
+    monkeypatch.setattr(redis_client.time, "time", lambda: base)
+    redis_client.ws_register("proj", "sess-A", "c-stale", ttl=1)  # score base+1
+    key = redis_client._ws_conns_key("proj", "sess-A")
+    # 期限を過ぎてから別 conn を register → 古い c-stale は prune される。
+    monkeypatch.setattr(redis_client.time, "time", lambda: base + 10)
+    redis_client.ws_register("proj", "sess-A", "c-fresh", ttl=60)
+    assert set(fake.zsets[key].keys()) == {"c-fresh"}
 
 
 def test_key_gets_ttl_bound(fake):
