@@ -12899,6 +12899,12 @@ def _resolve_hook_command(hook_basename: str) -> str:
             "beacon_cli.hooks.context_monitor",
             "CLAUDE_CONTEXT_MONITOR_HOOK_SCRIPT",
         ),
+        # ms-103: SessionStart 自動アップデート hook。bash 版は無く Python 専用。
+        "beacon-session-start.sh": (
+            "beacon-hook-session-start",
+            "beacon_cli.hooks.session_start",
+            "CLAUDE_SESSION_START_HOOK_SCRIPT",
+        ),
     }
     entry_name, module_name, const_name = mapping.get(
         hook_basename, ("", "", "")
@@ -13583,10 +13589,55 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
             })
             stop_hook_dirty = True
 
-    if removed_stale or posttooluse_dirty or postcompact_dirty or stop_hook_dirty:
+    # ms-103: SessionStart hook — beacon の自動アップデート。bclaude 起動時に 1 日 1 回
+    # PyPI を見て新版があれば install 方法別に detached で更新する (更新後 smoke +
+    # 失敗時ロールバック / 公開後 24h 熟成待ち付き)。BEACON_AUTO_UPDATE=0 で無効化。
+    sessionstart_dirty = False
+    ss_cmd = _resolve_hook_command("beacon-session-start.sh")
+    ss_ok = bool(ss_cmd) and (
+        not _is_path_command(ss_cmd) or os.path.exists(ss_cmd)
+    )
+    if ss_ok:
+        session_start_hooks = hooks.setdefault("SessionStart", [])
+        ss_identity = (
+            "beacon-hook-session-start",
+            "beacon_cli.hooks.session_start",
+        )
+        cleaned_ss = []
+        for entry in session_start_hooks:
+            kept = []
+            for h in entry.get("hooks", []):
+                existing = h.get("command", "")
+                same_kind = any(s in existing for s in ss_identity)
+                if same_kind and existing != ss_cmd:
+                    removed_stale = True
+                    continue  # drop stale
+                kept.append(h)
+            entry["hooks"] = kept
+            if kept:
+                cleaned_ss.append(entry)
+        session_start_hooks[:] = cleaned_ss
+
+        already_ss = any(
+            h.get("command", "") == ss_cmd
+            for entry in session_start_hooks
+            for h in entry.get("hooks", [])
+        )
+        if not already_ss:
+            session_start_hooks.append({
+                "hooks": [{
+                    "type": "command",
+                    "command": ss_cmd,
+                    "timeout": 15,
+                    "statusMessage": "Beacon: checking for updates...",
+                }],
+            })
+            sessionstart_dirty = True
+
+    if removed_stale or posttooluse_dirty or postcompact_dirty or stop_hook_dirty or sessionstart_dirty:
         with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
-        if removed_stale and not (posttooluse_dirty or postcompact_dirty or stop_hook_dirty):
+        if removed_stale and not (posttooluse_dirty or postcompact_dirty or stop_hook_dirty or sessionstart_dirty):
             print(f"Hooks: cleaned stale {hook_basename} entries; current path active")
         else:
             parts = []
@@ -13596,6 +13647,8 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
                 parts.append("PostCompact")
             if stop_hook_dirty:
                 parts.append("Stop")
+            if sessionstart_dirty:
+                parts.append("SessionStart")
             print(f"Hooks: registered {' + '.join(parts) or 'nothing new'} in {settings_path}")
     else:
         print("Hooks: already configured in ~/.claude/settings.json")
