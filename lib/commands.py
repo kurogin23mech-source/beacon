@@ -12562,6 +12562,7 @@ def cmd_pr_create():
     """Wrapper for gh pr create that auto-records the PR in beacon."""
     ms_id = os.environ.get("BEACON_MS_ID", "")
     intent = os.environ.get("BEACON_INTENT", "")
+    gh_args_json = os.environ.get("BEACON_GH_ARGS_JSON", "")
     gh_args = os.environ.get("BEACON_GH_ARGS", "")
 
     # e-607: auto-infer ms_id when -m was omitted.
@@ -12583,9 +12584,28 @@ def cmd_pr_create():
                 file=sys.stderr,
             )
 
-    # Run gh pr create and capture the URL from stdout
+    # Run gh pr create and capture the URL from stdout.
+    #
+    # argv is forwarded as a JSON array (BEACON_GH_ARGS_JSON). This keeps
+    # non-ASCII (e.g. Japanese PR titles) intact across the env-var hop:
+    # json.loads yields the exact str list the caller built, and
+    # subprocess re-encodes it to the child argv without any lossy
+    # shell-quote round-trip. The legacy BEACON_GH_ARGS + shlex path is
+    # kept only for backward compatibility with older dispatchers and
+    # cannot reliably carry non-ASCII (bash `printf %q` emits $'...'
+    # quoting that Python shlex does not understand).
     cmd = ["gh", "pr", "create"]
-    if gh_args:
+    if gh_args_json:
+        try:
+            parsed = json.loads(gh_args_json)
+        except json.JSONDecodeError as exc:
+            print(f"Error: BEACON_GH_ARGS_JSON is invalid JSON: {exc}", file=sys.stderr)
+            sys.exit(2)
+        if not isinstance(parsed, list) or not all(isinstance(a, str) for a in parsed):
+            print("Error: BEACON_GH_ARGS_JSON must be a JSON array of strings", file=sys.stderr)
+            sys.exit(2)
+        cmd += parsed
+    elif gh_args:
         import shlex
         cmd += shlex.split(gh_args)
 

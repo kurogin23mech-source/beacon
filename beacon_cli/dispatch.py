@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
 import subprocess
 import sys
@@ -2790,17 +2791,17 @@ def _handle_pr(root: Path, args: argparse.Namespace) -> int:
             },
         )
     if cmd == "create":
-        # gh_args is a REMAINDER list — bash forwards via printf %q. We
-        # join with shell-safe quoting; commands.py:cmd_pr_create reads
-        # BEACON_GH_ARGS as a pre-quoted single string.
-        import shlex
-        gh_args = " ".join(shlex.quote(a) for a in (args.gh_args or []))
+        # gh_args is a REMAINDER list. Forward it as a JSON array, not a
+        # shell-quoted string: shell quoting cannot round-trip non-ASCII
+        # (Japanese PR titles) cleanly across the env-var hop into
+        # commands.py:cmd_pr_create, which reads BEACON_GH_ARGS_JSON.
+        gh_args_json = json.dumps(args.gh_args or [], ensure_ascii=False)
         return _run_commands_py(
             root, "pr_create",
             {
                 "BEACON_MS_ID": args.ms_id or "",
                 "BEACON_INTENT": args.intent or "",
-                "BEACON_GH_ARGS": gh_args,
+                "BEACON_GH_ARGS_JSON": gh_args_json,
             },
         )
     if cmd == "request-review":

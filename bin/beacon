@@ -1930,7 +1930,7 @@ cmd_pr() {
             shift
             local ms_id=""
             local intent=""
-            local gh_args=""
+            local gh_args_json="[]"
 
             # Collect known beacon flags; pass remaining args to gh pr create
             local remaining=()
@@ -1942,12 +1942,18 @@ cmd_pr() {
                 esac
             done
 
-            # Build gh args string for passthrough (printf %q preserves args with spaces)
+            # Pass argv as JSON, not a shell-quoted string. `printf %q` emits
+            # bash-specific $'...' quoting for non-ASCII, and Python shlex
+            # cannot round-trip that format (it corrupts Japanese PR titles
+            # and prepends a stray `$`). A JSON array round-trips cleanly.
             if [ ${#remaining[@]} -gt 0 ]; then
-                gh_args=$(printf '%q ' "${remaining[@]}")
+                gh_args_json=$(
+                    PYTHONUTF8=1 python3 -c 'import json, sys; print(json.dumps(sys.argv[1:], ensure_ascii=False))' \
+                        "${remaining[@]}"
+                )
             fi
 
-            BEACON_MS_ID="$ms_id" BEACON_INTENT="$intent" BEACON_GH_ARGS="$gh_args" \
+            BEACON_MS_ID="$ms_id" BEACON_INTENT="$intent" BEACON_GH_ARGS_JSON="$gh_args_json" \
                 python3 "$COMMANDS_PY" pr_create
             ;;
         request-review)
