@@ -1130,7 +1130,10 @@ def resolve_active_session_id() -> str:
          (per-bclaude isolation), or legacy .beacon/bridge.json fallback.
       2. Codex session pointer (e-2531) — the stable codex- sid the Codex
          receive-loop daemon published for this cwd, so every Codex send path
-         shares one sender identity instead of minting a fresh sv-.
+         shares one sender identity instead of minting a fresh sv-. e-3091:
+         this step is skipped when the caller is claude-code (a co-located
+         Claude Code session must never adopt the Codex daemon's sid; see the
+         inline comment for the cold-start race that made this necessary).
       3. Fall through to :func:`get_session_id` which applies the
          existing env / mint / session.json precedence (which is itself
          pid-tree-aware as of e-1460).
@@ -1154,11 +1157,23 @@ def resolve_active_session_id() -> str:
     # the same Codex session's outbound DMs churn their sender identity and
     # "who replied" attribution in the directory breaks. The pointer holds the
     # stable codex- sid the daemon minted, shared by every process in this cwd.
-    # Ordering is safe: a Claude send matches the pid-tree bridge claim above
-    # and never reaches here; a Codex send is a descendant of the daemon (not
-    # a bclaude), so the claim is empty and the cwd-level pointer is correct.
+    #
+    # e-3091: the pointer adoption is now agent_kind-gated to EXCLUDE
+    # claude-code callers. The old comment here claimed "a Claude send matches
+    # the pid-tree bridge claim above and never reaches here" — that invariant
+    # is FALSE at a Claude Code bus.mjs COLD-START: the bridge claim for the
+    # freshly-spawning bus.mjs does not exist yet, so read_bridge_session()
+    # (step 1) returns empty and a Claude Code caller FELL THROUGH to here and
+    # adopted the co-located Codex daemon's codex- sid (observed 2026-07-08:
+    # a Claude Code session ended up on codex-1783398297606 with
+    # agent.kind=claude-code, entangling it with the Codex daemon so DMs to it
+    # vanished). Gating on _caller_agent_kind() != "claude-code" keeps the
+    # e-2531 anti-churn benefit for Codex (and the legacy/unknown fallback)
+    # while a Claude Code caller now skips the pointer and mints its own sv-
+    # below. bus.mjs execSyncs `beacon session id` with CLAUDECODE=1 inherited,
+    # so _caller_agent_kind() resolves "claude-code" at that call site.
     codex_sid = read_codex_session_pointer()
-    if codex_sid:
+    if codex_sid and _caller_agent_kind() != "claude-code":
         return codex_sid
     return get_session_id()
 

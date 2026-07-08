@@ -197,3 +197,64 @@ def test_caller_agent_kind_non_codex_sender_not_codex(monkeypatch):
 ])
 def test_claim_kind_matches_caller_matrix(claim_kind, caller_kind, expected):
     assert session._claim_kind_matches_caller(claim_kind, caller_kind) is expected
+
+
+# -- e-3091 (completing half): codex-session-pointer adoption is gated --------
+#
+# The REAL production trigger. At a Claude Code bus.mjs cold-start there is no
+# bridge claim yet, so resolve_active_session_id() step 1 (read_bridge_session)
+# returns empty and execution falls through to the codex-pointer adoption. Before
+# the gate, a claude-code caller in a cwd with a co-located Codex daemon adopted
+# the daemon's codex- sid (observed: a Claude Code session on codex-… with
+# agent.kind=claude-code, so DMs to it vanished). These tests pin that a
+# claude-code caller now SKIPS the pointer while codex / unknown callers still
+# adopt it (preserving the e-2531 anti-churn benefit).
+
+@pytest.fixture
+def pointer_wired(monkeypatch):
+    """Simulate cold-start: no bridge claim, a codex pointer present. Returns the
+    codex sid the pointer publishes. The caller's kind is set per-test."""
+    codex_sid = "codex-1783398297606-65dbdb5e"
+    monkeypatch.setattr(session, "read_bridge_session", lambda: {})
+    monkeypatch.setattr(session, "read_codex_session_pointer", lambda: codex_sid)
+    # get_session_id() is the fall-through mint path; return a sentinel sv- so a
+    # test can assert "fell through, did NOT adopt the codex sid".
+    monkeypatch.setattr(session, "get_session_id", lambda: "sv-MINTED-FRESH")
+    monkeypatch.delenv("BEACON_BUS_SENDER", raising=False)
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    return codex_sid
+
+
+def test_claude_caller_does_not_adopt_codex_pointer(pointer_wired, monkeypatch):
+    """The load-bearing fix: a claude-code caller must NOT adopt the codex
+    pointer at cold-start — it falls through to mint its own sv-."""
+    monkeypatch.setenv("CLAUDECODE", "1")
+    assert session.resolve_active_session_id() == "sv-MINTED-FRESH"
+
+
+def test_codex_caller_still_adopts_codex_pointer(pointer_wired, monkeypatch):
+    """Anti-churn regression guard: a codex caller still adopts the stable
+    codex- sid the daemon published (e-2531 behaviour preserved)."""
+    codex_sid = pointer_wired
+    monkeypatch.setenv("BEACON_BUS_SENDER", codex_sid)
+    assert session.resolve_active_session_id() == codex_sid
+
+
+def test_unknown_caller_still_adopts_codex_pointer(pointer_wired):
+    """Unknown caller (no env signal) also adopts the pointer — the gate only
+    excludes claude-code, so a Codex send path with a stripped env keeps its
+    stable sender identity rather than churning."""
+    codex_sid = pointer_wired
+    # pointer_wired already cleared both env signals → caller_kind == "".
+    assert session.resolve_active_session_id() == codex_sid
+
+
+def test_bridge_claim_still_wins_over_pointer(monkeypatch):
+    """Ordering unchanged: when a bridge claim DOES exist (warm bus.mjs), it is
+    returned before the pointer is even consulted."""
+    monkeypatch.setattr(session, "read_bridge_session",
+                        lambda: {"session_id": "sv-WARM"})
+    monkeypatch.setattr(session, "read_codex_session_pointer",
+                        lambda: "codex-SHOULD-NOT-REACH")
+    monkeypatch.setenv("CLAUDECODE", "1")
+    assert session.resolve_active_session_id() == "sv-WARM"

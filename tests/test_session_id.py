@@ -533,7 +533,16 @@ def test_read_codex_session_pointer_corrupt_returns_empty(project_dir):
 
 def test_resolve_adopts_codex_pointer_over_fresh_mint(project_dir, monkeypatch):
     """A Codex send with no BEACON_BUS_SENDER must adopt the daemon's stable
-    codex- sid instead of minting a fresh sv- (the e-2531 churn)."""
+    codex- sid instead of minting a fresh sv- (the e-2531 churn).
+
+    e-3091: the pointer adoption is now gated to EXCLUDE claude-code callers,
+    so this test must represent a genuine non-claude-code caller. We clear the
+    ambient CLAUDECODE / BEACON_BUS_SENDER (the pytest process inherits
+    CLAUDECODE=1 when the suite is run from a Claude Code shell) so
+    _caller_agent_kind() resolves "" (unknown) — which still adopts the pointer.
+    """
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    monkeypatch.delenv("BEACON_BUS_SENDER", raising=False)
     monkeypatch.setattr(session, "read_bridge_session", lambda: {})
     _write_codex_pointer(project_dir, "codex-STABLE-1")
     assert session.resolve_active_session_id() == "codex-STABLE-1"
