@@ -62,6 +62,19 @@ def _import_app_server_client(install_root: Path):
     return ac_mod
 
 
+def _import_exec_worker(install_root: Path):
+    """Late import of the exec-worker fallback (= ms-93 / e-2519 AC 2).
+
+    Kept behind a function for the same reason as the app-server client:
+    the default (unarmed) daemon takes no dependency on it.
+    """
+    plugin_scripts = str(install_root / "plugins" / "beacon" / "scripts")
+    if plugin_scripts not in sys.path:
+        sys.path.insert(0, plugin_scripts)
+    import beacon_codex_exec_worker as ew_mod  # noqa: E402
+    return ew_mod
+
+
 def _load_cloud_config(cwd: Path) -> dict:
     """Read ``<cwd>/.beacon/cloud.json`` + locate the auth token.
 
@@ -282,11 +295,14 @@ def main() -> int:
             "1", "true", "yes", "on",
         )
     if args.armed and not args.app_server:
+        # e-2519 AC 2: armed no longer *requires* the app-server (D) path.
+        # Without --app-server, autonomous replies go through the exec-worker
+        # (B) fallback — a separate one-shot `codex exec` per DM. Keep armed on.
         sys.stderr.write(
-            "codex-receive-loop: --armed has no effect without --app-server "
-            "(= autonomous reply needs the app-server dispatch path); ignoring.\n"
+            "codex-receive-loop: --armed without --app-server will use the "
+            "exec-worker fallback (= a separate headless `codex exec` per DM "
+            "in a conservative sandbox, not your TUI).\n"
         )
-        args.armed = False
     if not args.codex_thread_id:
         args.codex_thread_id = os.environ.get("BEACON_CODEX_THREAD_ID", "").strip()
     if not args.app_server_proxy:
@@ -384,9 +400,24 @@ def main() -> int:
     # queue (server-filtered to DMs), but our endpoint returns broader
     # history and the filter chain runs on our side.
     app_server_client = None
-    if args.app_server:
+    ac_mod = None
+    # ``ac_mod`` carries ``agent_message_text_from_notifications``, which BOTH
+    # the app-server (D) and exec-worker (B) transports reuse to reconstruct
+    # the reply, so import it whenever either autonomous path may run.
+    if args.app_server or args.armed:
         try:
             ac_mod = _import_app_server_client(install_root)
+        except Exception as exc:
+            print(
+                f"codex-receive-loop: could not import app-server client ({exc}); "
+                "autonomous paths disabled, continuing with pull-on-prompt only.",
+                file=sys.stderr,
+                flush=True,
+            )
+            ac_mod = None
+
+    if args.app_server and ac_mod is not None:
+        try:
             app_server_client = ac_mod.BridgeAppServerClient(
                 target_thread_id=args.codex_thread_id,
                 use_proxy=args.app_server_proxy,
@@ -407,9 +438,38 @@ def main() -> int:
                 flush=True,
             )
         except Exception as exc:
-            # Don't tear down the daemon — log and fall back to pull-only.
+            # Don't tear down the daemon — log and (if armed) fall back to the
+            # exec-worker path below, else pull-on-prompt.
             print(
                 f"codex-receive-loop: app-server start failed ({exc}); "
+                "trying exec-worker fallback." if args.armed else
+                f"codex-receive-loop: app-server start failed ({exc}); "
+                "continuing with pull-on-prompt only.",
+                file=sys.stderr,
+                flush=True,
+            )
+            app_server_client = None
+
+    # e-2519 AC 2: exec-worker (B) fallback — armed only. When the app-server
+    # (D) transport is unavailable (not requested, or failed to start) but the
+    # bridge is armed, spawn a one-shot ``codex exec`` worker per DM so
+    # autonomous replies still happen in a conservative sandbox. NOTE: this
+    # launches a SEPARATE headless Codex process; it does not wake the user's
+    # interactive TUI.
+    if app_server_client is None and args.armed and ac_mod is not None:
+        try:
+            ew_mod = _import_exec_worker(install_root)
+            app_server_client = ew_mod.ExecWorkerClient()
+            app_server_client.ensure_started(cwd=str(cwd))
+            print(
+                "codex-receive-loop: using exec-worker fallback "
+                f"(sandbox={app_server_client.sandbox}, spawns a separate "
+                "headless `codex exec` per DM, not your TUI).",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"codex-receive-loop: exec-worker fallback start failed ({exc}); "
                 "continuing with pull-on-prompt only.",
                 file=sys.stderr,
                 flush=True,
