@@ -96,7 +96,10 @@
     {
       "skill_name": "beacon-deploy",
       "current_location": "skills/beacon-deploy.md",
-      "frontmatter": {},
+      "frontmatter": {
+        "name": "beacon-deploy",
+        "description": "デプロイ後に自動で実行し、コミットとマイルストーンから「何ができるようになったか」の説明を生成してデプロイ記録を残す。"
+      },
       "claude_only_fields": [],
       "has_sub_resources": false,
       "codex_portability_status": "unported",
@@ -388,7 +391,10 @@
     {
       "skill_name": "beacon-push",
       "current_location": "skills/beacon-push.md",
-      "frontmatter": {},
+      "frontmatter": {
+        "name": "beacon-push",
+        "description": "git push 後に自動で実行し、コミットから「何が変わったか」の説明を生成してプッシュ記録を残す。"
+      },
       "claude_only_fields": [],
       "has_sub_resources": false,
       "codex_portability_status": "unported",
