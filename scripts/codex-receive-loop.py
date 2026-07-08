@@ -431,76 +431,41 @@ def main() -> int:
         """
         if app_server_client is None:
             return
-        try:
-            rsp = app_server_client.dispatch_dm_and_wait(evt)
-            agent_text = ac_mod.agent_message_text_from_notifications(
-                rsp.get("_notifications") or []
+        event_id = str((evt or {}).get("event_id") or "")
+
+        def _ack_opened(eid):
+            crl.ack_event(
+                api,
+                project_id=project_id,
+                event_id=eid,
+                stage="opened",
+                recipient_session_id=session.session_id,
             )
-            event_id = str((evt or {}).get("event_id") or "")
-            preview = (agent_text or "").strip().replace("\n", " ")[:160]
+
+        def _log(msg, *, err=False):
+            print(msg, file=sys.stderr if err else sys.stdout, flush=True)
+
+        try:
+            # The whole idle→DM→(armed reply) loop lives in the extracted,
+            # unit-tested seam (= e-2519 AC 7). Dispatch exceptions propagate
+            # so the reconnect handler below runs; reply-send errors are
+            # handled inside the seam (best-effort reply contract).
+            res = crl.dispatch_kept_event(
+                evt,
+                app_server_client=app_server_client,
+                agent_text_fn=ac_mod.agent_message_text_from_notifications,
+                ack_fn=_ack_opened,
+                armed=bool(args.armed),
+                sender_session_id=session.session_id,
+                beacon_bin=os.environ.get("BEACON_BIN") or "beacon",
+                log=_log,
+            )
+            preview = (res.get("agent_text") or "").strip().replace("\n", " ")[:160]
             print(
                 f"codex-receive-loop: app-server dispatched event={event_id} "
                 f"agent_text_preview={preview!r}",
                 flush=True,
             )
-            crl.ack_event(
-                api,
-                project_id=project_id,
-                event_id=event_id,
-                stage="opened",
-                recipient_session_id=session.session_id,
-            )
-
-            if not args.armed:
-                return
-            reply_argv = crl.build_dm_reply_args(
-                event=evt,
-                agent_text=agent_text,
-                beacon_bin=os.environ.get("BEACON_BIN") or "beacon",
-            )
-            if reply_argv is None:
-                print(
-                    f"codex-receive-loop: armed reply skipped event={event_id} "
-                    "(= empty agent_text or missing event_id / sender_session_id)",
-                    flush=True,
-                )
-                return
-            reply_env = {
-                **os.environ,
-                # Pin the sender to this daemon's session so the reply is
-                # attributed to the Codex bridge, not whatever beacon CLI
-                # would mint on its own.
-                "BEACON_BUS_SENDER": session.session_id,
-            }
-            try:
-                result = subprocess.run(
-                    reply_argv,
-                    env=reply_env,
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
-            except Exception as exc:
-                print(
-                    f"codex-receive-loop: armed reply exception event={event_id}: {exc}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                return
-            if result.returncode == 0:
-                print(
-                    f"codex-receive-loop: armed reply sent event={event_id} "
-                    f"to={evt.get('sender_session_id')} (= in_reply_to)",
-                    flush=True,
-                )
-            else:
-                stderr_preview = (result.stderr or "").strip().replace("\n", " ")[:240]
-                print(
-                    f"codex-receive-loop: armed reply failed event={event_id} "
-                    f"rc={result.returncode} stderr={stderr_preview!r}",
-                    file=sys.stderr,
-                    flush=True,
-                )
         except Exception as exc:
             print(
                 f"codex-receive-loop: app-server dispatch failed: {exc}",
