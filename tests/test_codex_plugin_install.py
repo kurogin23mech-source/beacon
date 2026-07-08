@@ -925,3 +925,177 @@ def test_build_dm_reply_args_payload_is_valid_json():
     payload_idx = argv.index("--payload") + 1
     parsed = json.loads(argv[payload_idx])
     assert parsed["text"] == 'hello with "quotes" and \nnewline'
+
+
+# ------------------------------------------------------------------ #
+# 10. Codex sandbox network_access ensure (= ms-93 / e-3000)
+#
+# Codex's workspace-write sandbox blocks network by default, so every
+# beacon cloud call from inside Codex died on DNS resolution
+# (socket.gaierror [Errno 8]). The bridge idempotently writes
+# `[sandbox_workspace_write] network_access = true` into
+# ~/.codex/config.toml, preserving all existing content.
+# ------------------------------------------------------------------ #
+
+
+@pytest.fixture
+def fake_config_path(tmp_path, monkeypatch):
+    """Redirect ~/.codex/config.toml to a tmp file for TOML-ensure tests."""
+    bridge = _load_bridge_module()
+    target = tmp_path / "config.toml"
+    monkeypatch.setattr(bridge, "CODEX_CONFIG_PATH", target)
+    return bridge, target
+
+
+def _net_enabled(text: str) -> bool:
+    """True iff the config text enables sandbox network access.
+
+    Accepts both the table form and the root dotted-key form.
+    """
+    cur = None
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("[[") and s.endswith("]]"):
+            cur = "\x00"
+            continue
+        if s.startswith("[") and s.endswith("]"):
+            cur = s[1:-1].strip()
+            continue
+        body = s.split("#", 1)[0]
+        if "=" not in body:
+            continue
+        key, _, val = body.partition("=")
+        key = key.strip()
+        is_true = val.strip().lower() == "true"
+        if cur == "sandbox_workspace_write" and key == "network_access" and is_true:
+            return True
+        if cur is None and key == "sandbox_workspace_write.network_access" and is_true:
+            return True
+    return False
+
+
+def test_ensure_network_creates_block_when_file_absent(fake_config_path):
+    bridge, target = fake_config_path
+    assert not target.exists()
+    verdict, detail = bridge._ensure_codex_network_access()
+    assert verdict == "created"
+    assert target.is_file()
+    text = target.read_text("utf-8")
+    assert "[sandbox_workspace_write]" in text
+    assert _net_enabled(text)
+
+
+def test_ensure_network_is_idempotent(fake_config_path):
+    bridge, target = fake_config_path
+    assert bridge._ensure_codex_network_access()[0] == "created"
+    first = target.read_text("utf-8")
+    verdict, _ = bridge._ensure_codex_network_access()
+    assert verdict == "already"
+    # No-op must not rewrite / mutate the file.
+    assert target.read_text("utf-8") == first
+
+
+def test_ensure_network_inserts_key_into_existing_table(fake_config_path):
+    bridge, target = fake_config_path
+    target.write_text(
+        "[sandbox_workspace_write]\nexclude_tmpdir_env_var = true\n",
+        encoding="utf-8",
+    )
+    verdict, _ = bridge._ensure_codex_network_access()
+    assert verdict == "inserted"
+    text = target.read_text("utf-8")
+    assert _net_enabled(text)
+    # Existing sibling key preserved.
+    assert "exclude_tmpdir_env_var = true" in text
+
+
+def test_ensure_network_flips_false_to_true(fake_config_path):
+    bridge, target = fake_config_path
+    target.write_text(
+        "[sandbox_workspace_write]\nnetwork_access = false\n",
+        encoding="utf-8",
+    )
+    verdict, _ = bridge._ensure_codex_network_access()
+    assert verdict == "updated"
+    text = target.read_text("utf-8")
+    assert _net_enabled(text)
+    assert "network_access = false" not in text
+
+
+def test_ensure_network_flips_dotted_false_to_true(fake_config_path):
+    bridge, target = fake_config_path
+    target.write_text(
+        "sandbox_workspace_write.network_access = false\n\n"
+        '[projects."/x"]\ntrust_level = "trusted"\n',
+        encoding="utf-8",
+    )
+    verdict, _ = bridge._ensure_codex_network_access()
+    assert verdict == "updated"
+    assert _net_enabled(target.read_text("utf-8"))
+
+
+def test_ensure_network_dotted_true_is_already(fake_config_path):
+    bridge, target = fake_config_path
+    target.write_text(
+        "sandbox_workspace_write.network_access = true\n", encoding="utf-8"
+    )
+    assert bridge._ensure_codex_network_access()[0] == "already"
+
+
+def test_ensure_network_preserves_unrelated_tables(fake_config_path):
+    bridge, target = fake_config_path
+    seed = (
+        '[projects."/Users/x/tools/beacon"]\n'
+        'trust_level = "trusted"\n\n'
+        "[tui.model_availability_nux]\n"
+        '"gpt-5.5" = 4\n'
+    )
+    target.write_text(seed, encoding="utf-8")
+    verdict, _ = bridge._ensure_codex_network_access()
+    assert verdict == "created"
+    text = target.read_text("utf-8")
+    # Every original line survives.
+    for line in seed.splitlines():
+        assert line in text
+    assert _net_enabled(text)
+
+
+def test_ensure_network_does_not_match_key_in_other_table(fake_config_path):
+    """A `network_access` under a different table must not count as satisfied."""
+    bridge, target = fake_config_path
+    target.write_text(
+        "[some_other_table]\nnetwork_access = true\n", encoding="utf-8"
+    )
+    verdict, _ = bridge._ensure_codex_network_access()
+    assert verdict == "created"
+    text = target.read_text("utf-8")
+    assert "[sandbox_workspace_write]" in text
+    assert _net_enabled(text)
+
+
+def test_ensure_network_error_when_config_unreadable(fake_config_path):
+    """A directory at the config path yields a non-fatal error verdict."""
+    bridge, target = fake_config_path
+    target.mkdir()  # path exists but is a directory → read/write fails
+    verdict, detail = bridge._ensure_codex_network_access()
+    assert verdict == "error"
+    assert str(target) in detail
+
+
+def test_install_hook_also_ensures_network_access(fake_hooks_path, tmp_path, monkeypatch):
+    """install-hook must enable sandbox network access as a side effect."""
+    bridge, _hooks = fake_hooks_path
+    config = tmp_path / "config.toml"
+    monkeypatch.setattr(bridge, "CODEX_CONFIG_PATH", config)
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    assert bridge.cmd_install_hook(REPO_ROOT, cwd) == 0
+    assert config.is_file()
+    assert _net_enabled(config.read_text("utf-8"))
+
+
+def test_cmd_ensure_network_subaction_returns_zero(fake_config_path, capsys):
+    bridge, _target = fake_config_path
+    assert bridge.cmd_ensure_network() == 0
+    out = capsys.readouterr().out
+    assert "network_access" in out
