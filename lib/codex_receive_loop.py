@@ -352,10 +352,145 @@ def build_dm_reply_args(
     ]
 
 
+# ------------------------------------------------------------------ #
+# Autonomous push-receive dispatch (= ms-93 / e-2519 AC 7)
+#
+# The idle→DM→autonomous-reply loop lived entirely inside the daemon's
+# ``_on_kept_event`` closure (scripts/codex-receive-loop.py), so it could
+# only be exercised by running the whole daemon. Extracting it here makes
+# it a single testable seam: an integration test can drive
+# idle→DM→app-server→reply with fakes and no real Codex / bus, and the
+# test then pins the loop against regression (= the AC 7 forcing function).
+# ------------------------------------------------------------------ #
+
+
+def _default_run_reply(argv, *, sender_session_id: str):
+    """Shell out the reply, pinning the sender to this daemon's sid.
+
+    ``BEACON_BUS_SENDER`` attributes the reply to the Codex bridge rather
+    than whatever sid the ``beacon`` CLI would mint on its own.
+    """
+    import subprocess
+
+    env = {**os.environ, "BEACON_BUS_SENDER": sender_session_id}
+    return subprocess.run(
+        argv, env=env, capture_output=True, text=True, timeout=15
+    )
+
+
+def dispatch_kept_event(
+    evt,
+    *,
+    app_server_client,
+    agent_text_fn,
+    ack_fn,
+    armed: bool,
+    sender_session_id: str,
+    beacon_bin: str = "beacon",
+    run_reply=None,
+    log=None,
+) -> dict:
+    """Run one kept-DM dispatch: app-server turn → ack → optional reply.
+
+    This is the single testable seam for e-2519's push-receive loop. The
+    daemon closure delegates here; a test drives it with fakes.
+
+    Steps:
+      1. dispatch the DM to the app-server child and wait for the turn to
+         idle (``app_server_client.dispatch_dm_and_wait``)
+      2. reconstruct the agent reply text from streamed notifications
+         (``agent_text_fn``)
+      3. ack the event as ``opened`` (``ack_fn``)
+      4. if ``armed``, build the reply argv (``build_dm_reply_args``) and
+         shell it out via ``run_reply``
+
+    Dependency injection (= keeps this pure of real Codex / bus / network):
+      ``app_server_client`` — exposes ``dispatch_dm_and_wait(evt)``
+      ``agent_text_fn`` — ``notifications -> str``
+      ``ack_fn`` — ``callable(event_id: str)`` (caller binds api / sid)
+      ``run_reply`` — ``callable(argv, sender_session_id=...)`` returning an
+        object with ``returncode`` / ``stderr``; defaults to a real send
+      ``log`` — ``callable(msg, *, err=False)``; defaults to no-op
+
+    ``dispatch_dm_and_wait`` exceptions propagate (the daemon reconnects the
+    transport); reply-send exceptions are caught and logged (best-effort
+    reply contract). Returns a result dict:
+      ``{"agent_text", "acked", "replied", "reply_argv", "reason"}``.
+    """
+    if log is None:
+        def log(_msg, *, err=False):
+            return None
+    if run_reply is None:
+        run_reply = _default_run_reply
+
+    # (1)+(2): may raise → daemon reconnects the transport for the next DM.
+    rsp = app_server_client.dispatch_dm_and_wait(evt)
+    agent_text = agent_text_fn((rsp or {}).get("_notifications") or [])
+    event_id = str((evt or {}).get("event_id") or "")
+
+    # (3): ack as opened (= the AI "saw" the DM).
+    ack_fn(event_id)
+    result = {
+        "agent_text": agent_text,
+        "acked": True,
+        "replied": False,
+        "reply_argv": None,
+        "reason": "",
+    }
+
+    # (4): autonomous reply only when explicitly armed (= e-2519 AC 6 gate).
+    if not armed:
+        result["reason"] = "not-armed"
+        return result
+
+    reply_argv = build_dm_reply_args(
+        event=evt, agent_text=agent_text, beacon_bin=beacon_bin,
+    )
+    result["reply_argv"] = reply_argv
+    if reply_argv is None:
+        result["reason"] = "reply-skipped-empty-or-unaddressable"
+        log(
+            f"codex-receive-loop: armed reply skipped event={event_id} "
+            "(= empty agent_text or missing event_id / sender_session_id)"
+        )
+        return result
+
+    try:
+        proc = run_reply(reply_argv, sender_session_id=sender_session_id)
+    except Exception as exc:  # noqa: BLE001 — best-effort reply contract
+        result["reason"] = f"reply-exception:{exc}"
+        log(
+            f"codex-receive-loop: armed reply exception event={event_id}: {exc}",
+            err=True,
+        )
+        return result
+
+    rc = getattr(proc, "returncode", 1)
+    if rc == 0:
+        result["replied"] = True
+        result["reason"] = "replied"
+        log(
+            f"codex-receive-loop: armed reply sent event={event_id} "
+            f"to={(evt or {}).get('sender_session_id')} (= in_reply_to)"
+        )
+    else:
+        stderr_preview = (
+            (getattr(proc, "stderr", "") or "").strip().replace("\n", " ")[:240]
+        )
+        result["reason"] = f"reply-failed-rc-{rc}"
+        log(
+            f"codex-receive-loop: armed reply failed event={event_id} "
+            f"rc={rc} stderr={stderr_preview!r}",
+            err=True,
+        )
+    return result
+
+
 __all__ = [
     "ack_event",
     "archive_inbox_event",
     "build_dm_reply_args",
+    "dispatch_kept_event",
     "heartbeat_to_server",
     "inbox_dir",
     "list_inbox_events",

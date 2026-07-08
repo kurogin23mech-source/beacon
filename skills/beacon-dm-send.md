@@ -265,14 +265,15 @@ PYTHONPATH="$(dirname $(dirname $(realpath $(which beacon))))" \
     --project "<project_id>" <<< "$FRESH"
 ```
 
-返る `current_sid` を使う:
+返る `current_sid` と **`current_sid_stale`** (= その sid が直近 `stale_threshold_s` 秒 (既定 30 秒) 以内に poll していなければ `true`、ms-93 / e-2519 AC 5) を使う。`current_sid_stale` は「解決はできたが、その session は 30 秒以上 heartbeat しておらず死んでいる疑いが濃い」を表す。`--now` を渡さなければ helper が現在 UTC で判定する:
 
 | 観測結果 | 動作 |
 |---|---|
-| `current_sid` が非空で、控えていた `recipient_sid` と同じ | churn なし。そのまま続行 |
-| `current_sid` が非空だが `recipient_sid` と違う | **sid が churn した**。`recipient_sid` を `current_sid` に更新し、ユーザーに 1 行通知:「相手の sid が更新されていたので最新の `<current_sid>` に送ります (identity: <label>)」。以降 Step 2 本体の live 検証は skip 可 (= 既に live directory から解決済) |
+| `current_sid` が非空・`current_sid_stale=false` で、控えていた `recipient_sid` と同じ | churn なし・生きている。そのまま続行 |
+| `current_sid` が非空・`current_sid_stale=false` だが `recipient_sid` と違う | **sid が churn した**。`recipient_sid` を `current_sid` に更新し、ユーザーに 1 行通知:「相手の sid が更新されていたので最新の `<current_sid>` に送ります (identity: <label>)」。以降 Step 2 本体の live 検証は skip 可 (= 既に live directory から解決済) |
+| `current_sid` が非空だが **`current_sid_stale=true`** | 解決はできたが相手は 30 秒以上 heartbeat しておらず死んでいる疑い。**そのまま送らず** soft-warn:「相手の最新 sid `<current_sid>` は約 `<poll_age_s>` 秒 heartbeat が途絶えています (死んでいる可能性)。送っても配送されないかもしれません。送る / 中止?」。ユーザーが送るを選んだ時だけ続行 (= dead sid への sailent 配送を構造的に止める、§8-G FINDING #3) |
 | `current_sid` が空 (`candidates` も空) | その identity は現在 live でない。Step 2 本体の soft-warn 経路へ流す (= 生 sid のまま送るか中止) |
-| `candidates` が 2 件以上 | 同 identity key の並走 session が複数。label で人間に選び直させる (= 通常は agent_kind + cwd で 1 件に絞れるはずなので稀) |
+| `candidates` が 2 件以上 | 同 identity key の並走 session が複数。label で人間に選び直させる (= 通常は agent_kind + cwd で 1 件に絞れるはずなので稀)。各 candidate の `stale` フラグで死んでいる方を除外する |
 
 生 sid を直接貼られた (= identity を経由しない) 場合、この Step は skip して Step 2 本体の live 検証へ進む。
 

@@ -62,6 +62,28 @@ def _import_app_server_client(install_root: Path):
     return ac_mod
 
 
+def _import_exec_worker(install_root: Path):
+    """Late import of the exec-worker fallback (= ms-93 / e-2519 AC 2).
+
+    Kept behind a function for the same reason as the app-server client:
+    the default (unarmed) daemon takes no dependency on it.
+    """
+    plugin_scripts = str(install_root / "plugins" / "beacon" / "scripts")
+    if plugin_scripts not in sys.path:
+        sys.path.insert(0, plugin_scripts)
+    import beacon_codex_exec_worker as ew_mod  # noqa: E402
+    return ew_mod
+
+
+def _import_desktop_notify(install_root: Path):
+    """Late import of the desktop-notification fallback (= ms-93 / e-2519 AC 3)."""
+    lib_dir = str(install_root / "lib")
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    import desktop_notify as dn  # noqa: E402
+    return dn
+
+
 def _load_cloud_config(cwd: Path) -> dict:
     """Read ``<cwd>/.beacon/cloud.json`` + locate the auth token.
 
@@ -282,11 +304,14 @@ def main() -> int:
             "1", "true", "yes", "on",
         )
     if args.armed and not args.app_server:
+        # e-2519 AC 2: armed no longer *requires* the app-server (D) path.
+        # Without --app-server, autonomous replies go through the exec-worker
+        # (B) fallback — a separate one-shot `codex exec` per DM. Keep armed on.
         sys.stderr.write(
-            "codex-receive-loop: --armed has no effect without --app-server "
-            "(= autonomous reply needs the app-server dispatch path); ignoring.\n"
+            "codex-receive-loop: --armed without --app-server will use the "
+            "exec-worker fallback (= a separate headless `codex exec` per DM "
+            "in a conservative sandbox, not your TUI).\n"
         )
-        args.armed = False
     if not args.codex_thread_id:
         args.codex_thread_id = os.environ.get("BEACON_CODEX_THREAD_ID", "").strip()
     if not args.app_server_proxy:
@@ -384,9 +409,24 @@ def main() -> int:
     # queue (server-filtered to DMs), but our endpoint returns broader
     # history and the filter chain runs on our side.
     app_server_client = None
-    if args.app_server:
+    ac_mod = None
+    # ``ac_mod`` carries ``agent_message_text_from_notifications``, which BOTH
+    # the app-server (D) and exec-worker (B) transports reuse to reconstruct
+    # the reply, so import it whenever either autonomous path may run.
+    if args.app_server or args.armed:
         try:
             ac_mod = _import_app_server_client(install_root)
+        except Exception as exc:
+            print(
+                f"codex-receive-loop: could not import app-server client ({exc}); "
+                "autonomous paths disabled, continuing with pull-on-prompt only.",
+                file=sys.stderr,
+                flush=True,
+            )
+            ac_mod = None
+
+    if args.app_server and ac_mod is not None:
+        try:
             app_server_client = ac_mod.BridgeAppServerClient(
                 target_thread_id=args.codex_thread_id,
                 use_proxy=args.app_server_proxy,
@@ -407,14 +447,72 @@ def main() -> int:
                 flush=True,
             )
         except Exception as exc:
-            # Don't tear down the daemon — log and fall back to pull-only.
+            # Don't tear down the daemon — log and (if armed) fall back to the
+            # exec-worker path below, else pull-on-prompt.
             print(
+                f"codex-receive-loop: app-server start failed ({exc}); "
+                "trying exec-worker fallback." if args.armed else
                 f"codex-receive-loop: app-server start failed ({exc}); "
                 "continuing with pull-on-prompt only.",
                 file=sys.stderr,
                 flush=True,
             )
             app_server_client = None
+
+    # e-2519 AC 2: exec-worker (B) fallback — armed only. When the app-server
+    # (D) transport is unavailable (not requested, or failed to start) but the
+    # bridge is armed, spawn a one-shot ``codex exec`` worker per DM so
+    # autonomous replies still happen in a conservative sandbox. NOTE: this
+    # launches a SEPARATE headless Codex process; it does not wake the user's
+    # interactive TUI.
+    if app_server_client is None and args.armed and ac_mod is not None:
+        try:
+            ew_mod = _import_exec_worker(install_root)
+            app_server_client = ew_mod.ExecWorkerClient()
+            app_server_client.ensure_started(cwd=str(cwd))
+            print(
+                "codex-receive-loop: using exec-worker fallback "
+                f"(sandbox={app_server_client.sandbox}, spawns a separate "
+                "headless `codex exec` per DM, not your TUI).",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"codex-receive-loop: exec-worker fallback start failed ({exc}); "
+                "continuing with pull-on-prompt only.",
+                file=sys.stderr,
+                flush=True,
+            )
+            app_server_client = None
+
+    # e-2519 AC 3: desktop-notification fallback (SPEC §8-G option C). When no
+    # autonomous transport is active (= not armed / both D and B unavailable),
+    # a DM arriving while the user is away would just sit in the inbox until
+    # their next prompt. Opt-in via BEACON_CODEX_DESKTOP_NOTIFY pops a desktop
+    # alert so the human notices and replies manually (no autonomous action).
+    # Throttled so a burst of DMs is one alert, not a popup storm.
+    notify_enabled = os.environ.get(
+        "BEACON_CODEX_DESKTOP_NOTIFY", ""
+    ).strip() in ("1", "true", "yes", "on")
+    dn = None
+    if notify_enabled and app_server_client is None:
+        try:
+            dn = _import_desktop_notify(install_root)
+            print(
+                "codex-receive-loop: desktop-notification fallback on "
+                "(no autonomous transport; incoming DMs pop a desktop alert).",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"codex-receive-loop: desktop-notify import failed ({exc}); "
+                "continuing with pull-on-prompt only.",
+                file=sys.stderr,
+                flush=True,
+            )
+            dn = None
+    notify_state = {"last_at": 0.0}
+    NOTIFY_MIN_INTERVAL_S = 30.0
 
     def _on_kept_event(evt):
         """Dispatch a kept DM to the app-server child and log the result.
@@ -430,77 +528,54 @@ def main() -> int:
         can re-grant.
         """
         if app_server_client is None:
+            # AC 3 fallback: no autonomous transport → best-effort desktop
+            # alert (throttled) so the human notices and can reply manually.
+            if dn is None:
+                return
+            now = time.time()
+            if now - notify_state["last_at"] < NOTIFY_MIN_INTERVAL_S:
+                return
+            notify_state["last_at"] = now
+            payload = (evt or {}).get("payload") or {}
+            sender = str((evt or {}).get("sender_session_id") or "someone")[:16]
+            body = str(payload.get("text") or "").replace("\n", " ")[:80]
+            dn.notify("Beacon: new DM", f"from {sender}: {body}")
             return
-        try:
-            rsp = app_server_client.dispatch_dm_and_wait(evt)
-            agent_text = ac_mod.agent_message_text_from_notifications(
-                rsp.get("_notifications") or []
+        event_id = str((evt or {}).get("event_id") or "")
+
+        def _ack_opened(eid):
+            crl.ack_event(
+                api,
+                project_id=project_id,
+                event_id=eid,
+                stage="opened",
+                recipient_session_id=session.session_id,
             )
-            event_id = str((evt or {}).get("event_id") or "")
-            preview = (agent_text or "").strip().replace("\n", " ")[:160]
+
+        def _log(msg, *, err=False):
+            print(msg, file=sys.stderr if err else sys.stdout, flush=True)
+
+        try:
+            # The whole idle→DM→(armed reply) loop lives in the extracted,
+            # unit-tested seam (= e-2519 AC 7). Dispatch exceptions propagate
+            # so the reconnect handler below runs; reply-send errors are
+            # handled inside the seam (best-effort reply contract).
+            res = crl.dispatch_kept_event(
+                evt,
+                app_server_client=app_server_client,
+                agent_text_fn=ac_mod.agent_message_text_from_notifications,
+                ack_fn=_ack_opened,
+                armed=bool(args.armed),
+                sender_session_id=session.session_id,
+                beacon_bin=os.environ.get("BEACON_BIN") or "beacon",
+                log=_log,
+            )
+            preview = (res.get("agent_text") or "").strip().replace("\n", " ")[:160]
             print(
                 f"codex-receive-loop: app-server dispatched event={event_id} "
                 f"agent_text_preview={preview!r}",
                 flush=True,
             )
-            crl.ack_event(
-                api,
-                project_id=project_id,
-                event_id=event_id,
-                stage="opened",
-                recipient_session_id=session.session_id,
-            )
-
-            if not args.armed:
-                return
-            reply_argv = crl.build_dm_reply_args(
-                event=evt,
-                agent_text=agent_text,
-                beacon_bin=os.environ.get("BEACON_BIN") or "beacon",
-            )
-            if reply_argv is None:
-                print(
-                    f"codex-receive-loop: armed reply skipped event={event_id} "
-                    "(= empty agent_text or missing event_id / sender_session_id)",
-                    flush=True,
-                )
-                return
-            reply_env = {
-                **os.environ,
-                # Pin the sender to this daemon's session so the reply is
-                # attributed to the Codex bridge, not whatever beacon CLI
-                # would mint on its own.
-                "BEACON_BUS_SENDER": session.session_id,
-            }
-            try:
-                result = subprocess.run(
-                    reply_argv,
-                    env=reply_env,
-                    capture_output=True,
-                    text=True,
-                    timeout=15,
-                )
-            except Exception as exc:
-                print(
-                    f"codex-receive-loop: armed reply exception event={event_id}: {exc}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                return
-            if result.returncode == 0:
-                print(
-                    f"codex-receive-loop: armed reply sent event={event_id} "
-                    f"to={evt.get('sender_session_id')} (= in_reply_to)",
-                    flush=True,
-                )
-            else:
-                stderr_preview = (result.stderr or "").strip().replace("\n", " ")[:240]
-                print(
-                    f"codex-receive-loop: armed reply failed event={event_id} "
-                    f"rc={result.returncode} stderr={stderr_preview!r}",
-                    file=sys.stderr,
-                    flush=True,
-                )
         except Exception as exc:
             print(
                 f"codex-receive-loop: app-server dispatch failed: {exc}",
@@ -581,7 +656,11 @@ def main() -> int:
                 api, project_id=project_id,
                 session_id=session.session_id,
                 since=state["since"], cwd=str(cwd),
-                on_kept_event=_on_kept_event if app_server_client else None,
+                on_kept_event=(
+                    _on_kept_event
+                    if (app_server_client is not None or dn is not None)
+                    else None
+                ),
                 persist_kept=app_server_client is None,
             )
             state["since"] = latest

@@ -2,9 +2,15 @@
 """Beacon Codex bridge lifecycle CLI (= ms-93 / e-2508).
 
 `start` / `stop` / `restart` / `status` / `install-hook` / `uninstall-hook` /
-`uninstall` を 1 つの CLI に統合する。 Codex plugin の skill
+`uninstall` / `ensure-network` を 1 つの CLI に統合する。 Codex plugin の skill
 ``beacon-codex-bridge`` から呼ばれる product path であり、 user が手で
 ``nohup python3 scripts/codex-receive-loop.py &`` を打つ必要を消す。
+
+``ensure-network`` (= ms-93 / e-3000) は ``~/.codex/config.toml`` に
+``[sandbox_workspace_write] network_access = true`` を冪等に書き込み、 Codex
+sandbox 内から beacon cloud (= beacon-ai.dev) へ到達できるようにする。
+``install-hook`` / ``start`` からも自動で呼ばれる (= 受信 hook を入れる時点で
+cloud 到達性も揃える)。
 
 cwd-scoped lifecycle:
 
@@ -167,8 +173,165 @@ def _save_hooks_json(data: dict) -> None:
     tmp.replace(CODEX_HOOKS_PATH)
 
 
+# ------------------------------------------------------------------ #
+# Codex sandbox network access (ms-93 / e-3000)
+#
+# Codex runs model-generated shell commands inside a ``workspace-write``
+# sandbox whose ``network_access`` defaults to false. That silently
+# breaks every beacon cloud call the Codex agent makes: DNS resolution of
+# ``beacon-ai.dev`` fails with ``socket.gaierror [Errno 8]`` and all cloud
+# API access dies (observed in the 2026-07-07 Codex dogfood). We
+# idempotently ensure ``[sandbox_workspace_write] network_access = true``
+# in the user-global Codex config so the sandboxed ``beacon`` CLI can
+# reach cloud. This is a dependency-free TOML edit (Python 3.9 has no
+# ``tomllib`` / ``tomli_w``) that preserves all existing config content.
+# ------------------------------------------------------------------ #
+
+CODEX_CONFIG_PATH = Path(os.path.expanduser("~/.codex/config.toml"))
+_SANDBOX_TABLE = "sandbox_workspace_write"
+_NET_KEY = "network_access"
+
+
+def _table_of_line(line: str):
+    """Return the bare table name for a ``[table]`` header line.
+
+    Array-of-tables (``[[x]]``) returns a non-target sentinel so callers
+    treat it as a scope change away from our target table. Non-header
+    lines return ``None``.
+    """
+    s = line.strip()
+    if s.startswith("[[") and s.endswith("]]"):
+        return "\x00array-of-tables"
+    if s.startswith("[") and s.endswith("]"):
+        return s[1:-1].strip()
+    return None
+
+
+def _bool_kv(line: str):
+    """For a ``key = value`` line, return ``(key, is_true)`` or ``None``.
+
+    Values here are booleans, so a bare ``#`` reliably marks a comment.
+    """
+    body = line.split("#", 1)[0]
+    if "=" not in body:
+        return None
+    key, _, val = body.partition("=")
+    return key.strip(), val.strip().lower() == "true"
+
+
+def _ensure_codex_network_access(config_path: Path = None):
+    """Idempotently ensure the Codex sandbox allows network access.
+
+    Returns ``(verdict, detail)`` where verdict is one of
+    ``already`` / ``inserted`` / ``updated`` / ``created`` / ``error``.
+    Best-effort: never raises. On unreadable/unwritable config it returns
+    ``("error", msg)`` so the caller can warn without failing the install.
+    """
+    path = config_path or CODEX_CONFIG_PATH
+    try:
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    except OSError as exc:
+        return "error", f"cannot read {path}: {exc}"
+
+    lines = text.splitlines()
+
+    cur_table = None            # None = root scope
+    table_header_idx = -1       # index of the [sandbox_workspace_write] header
+    table_net_idx = -1          # network_access line inside that table
+    dotted_idx = -1             # root-scope `sandbox_workspace_write.network_access`
+    satisfied = False
+    dotted_key = f"{_SANDBOX_TABLE}.{_NET_KEY}"
+
+    for i, line in enumerate(lines):
+        hdr = _table_of_line(line)
+        if hdr is not None:
+            cur_table = hdr
+            if hdr == _SANDBOX_TABLE and table_header_idx < 0:
+                table_header_idx = i
+            continue
+        kv = _bool_kv(line)
+        if kv is None:
+            continue
+        key, is_true = kv
+        if cur_table == _SANDBOX_TABLE and key == _NET_KEY and table_net_idx < 0:
+            table_net_idx = i
+            satisfied = satisfied or is_true
+        elif cur_table is None and key == dotted_key and dotted_idx < 0:
+            dotted_idx = i
+            satisfied = satisfied or is_true
+
+    if satisfied:
+        return "already", str(path)
+
+    if table_net_idx >= 0:
+        # Flip the existing (false/other) line to true, preserving indent.
+        raw = lines[table_net_idx]
+        indent = raw[: len(raw) - len(raw.lstrip())]
+        lines[table_net_idx] = f"{indent}{_NET_KEY} = true"
+        verdict = "updated"
+    elif table_header_idx >= 0:
+        # Table exists but no network_access line — insert after the header.
+        lines.insert(table_header_idx + 1, f"{_NET_KEY} = true")
+        verdict = "inserted"
+    elif dotted_idx >= 0:
+        # Root dotted key present but false — flip to true.
+        lines[dotted_idx] = f"{dotted_key} = true"
+        verdict = "updated"
+    else:
+        # Absent entirely — append a fresh table block.
+        if lines and lines[-1].strip() != "":
+            lines.append("")
+        lines.append(f"[{_SANDBOX_TABLE}]")
+        lines.append(f"{_NET_KEY} = true")
+        verdict = "created"
+
+    new_text = "\n".join(lines) + "\n"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".toml.tmp")
+        tmp.write_text(new_text, encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        return "error", f"cannot write {path}: {exc}"
+    return verdict, str(path)
+
+
+def cmd_ensure_network() -> int:
+    """Standalone entry point for the network_access ensure (idempotent)."""
+    verdict, detail = _ensure_codex_network_access()
+    if verdict == "already":
+        print(f"codex-config: sandbox network_access already enabled ({detail})")
+        return 0
+    if verdict in ("inserted", "updated", "created"):
+        print(
+            f"codex-config: enabled sandbox network_access [{verdict}] "
+            f"(= beacon cloud reachable from inside Codex) {detail}"
+        )
+        return 0
+    print(f"codex-config: error: {detail}", file=sys.stderr)
+    return 1
+
+
 def cmd_install_hook(install_root: Path, cwd: Path) -> int:
-    """Idempotently merge our UserPromptSubmit entry into hooks.json."""
+    """Idempotently merge our UserPromptSubmit entry into hooks.json.
+
+    Also ensures the Codex sandbox can reach beacon cloud (ms-93 / e-3000)
+    so cloud calls from inside Codex don't die on DNS resolution.
+    """
+    verdict, detail = _ensure_codex_network_access()
+    if verdict in ("inserted", "updated", "created"):
+        print(
+            f"codex-config: enabled sandbox network_access "
+            f"(= beacon cloud reachable from inside Codex) [{verdict}] {detail}"
+        )
+    elif verdict == "error":
+        print(
+            "codex-config: warning: could not ensure sandbox network_access "
+            f"({detail}). Beacon cloud calls from inside Codex may fail with "
+            "DNS errors. Fix by adding to ~/.codex/config.toml:\n"
+            "  [sandbox_workspace_write]\n  network_access = true",
+            file=sys.stderr,
+        )
     try:
         data = _load_hooks_json()
     except RuntimeError as exc:
@@ -500,6 +663,7 @@ def main() -> int:
             "install-hook",
             "uninstall-hook",
             "uninstall",
+            "ensure-network",
         ],
     )
     parser.add_argument("--cwd", default="", help="Project cwd (default: $PWD).")
@@ -607,6 +771,8 @@ def main() -> int:
         return cmd_uninstall_hook(cwd)
     if args.subaction == "uninstall":
         return cmd_uninstall(install_root, cwd)
+    if args.subaction == "ensure-network":
+        return cmd_ensure_network()
     parser.error(f"unknown subaction: {args.subaction}")
     return 2
 
