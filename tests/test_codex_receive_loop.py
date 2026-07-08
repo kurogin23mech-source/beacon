@@ -113,6 +113,31 @@ class TestHeartbeat:
         _path, body = api.put_calls[0]
         assert body["shutdown"] is True
 
+    def test_stamps_top_level_agent_kind_from_actor(self):
+        # e-3091 follow-up: the session doc's top-level ``agent.kind`` must be
+        # set (mirroring bus.mjs cold-start) so identity_resolve.agent_kind_of
+        # returns "codex" and resolve_stable_identity(agent_kind="codex")
+        # matches the Codex row. Derived from actor.agent_kind (the daemon
+        # always passes it).
+        api = _FakeApi()
+        crl.heartbeat_to_server(
+            api, project_id="p", session_id="s",
+            actor={"machine": "m", "agent": "codex", "agent_kind": "codex"},
+        )
+        _path, body = api.put_calls[0]
+        assert body["agent"] == {"kind": "codex"}
+
+    def test_no_top_level_agent_when_actor_lacks_agent_kind(self):
+        # actor.agent (a machine label) alone must NOT populate the structural
+        # top-level agent.kind — only the explicit agent_kind field does.
+        api = _FakeApi()
+        crl.heartbeat_to_server(
+            api, project_id="p", session_id="s",
+            actor={"machine": "m", "agent": "codex"},
+        )
+        _path, body = api.put_calls[0]
+        assert "agent" not in body
+
 
 # ------------------------------------------------------------------ #
 # Persist + ack

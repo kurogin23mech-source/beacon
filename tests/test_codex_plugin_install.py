@@ -393,6 +393,47 @@ def test_stop_wait_window_is_at_least_5_seconds(tmp_path):
     )
 
 
+def test_stop_escalates_to_sigkill_when_graceful_window_expires(tmp_path, monkeypatch):
+    """A daemon that ignores SIGTERM (stuck shutdown) must still be stopped.
+
+    ms-93 / e-3110: the graceful shutdown path (final shutdown=True heartbeat
+    + app_server_client.stop()) can hang on a slow / unreachable network,
+    leaving the old daemon and its pidfile alive past the 10s window. Since
+    `restart` no longer gates on stop's exit code, `start` would then see a
+    live pid and no-op as "already running" — silently keeping a stale
+    pull-only daemon and dropping the app-server (wake) upgrade. cmd_stop must
+    escalate to SIGKILL so the stop is guaranteed and the pidfile is cleaned.
+    """
+    bridge = _load_bridge_module()
+    codex_dir = tmp_path / ".beacon" / "codex"
+    codex_dir.mkdir(parents=True)
+    pidfile = codex_dir / "receive-loop.pid"
+    pidfile.write_text("999999")
+
+    signals = []
+    state = {"alive": True}
+
+    def fake_kill(pid, sig):
+        signals.append((pid, sig))
+        if sig == signal.SIGKILL:
+            state["alive"] = False
+            return
+        if sig == 0 and not state["alive"]:
+            raise ProcessLookupError()
+        # SIGTERM (ignored by the stuck daemon) and liveness probes while
+        # alive are no-ops.
+
+    monkeypatch.setattr(bridge.os, "kill", fake_kill)
+    monkeypatch.setattr(bridge.time, "sleep", lambda *_: None)
+
+    rc = bridge.cmd_stop(tmp_path)
+
+    assert rc == 0, "stop must succeed once it escalates to SIGKILL"
+    assert (999999, signal.SIGTERM) in signals, "SIGTERM must be tried first"
+    assert (999999, signal.SIGKILL) in signals, "SIGKILL must be the escalation"
+    assert not pidfile.exists(), "pidfile must be cleaned after the kill"
+
+
 # ------------------------------------------------------------------ #
 # 6. app-server spike helpers (= ms-93 / e-2519 SPEC §8-G option D)
 # ------------------------------------------------------------------ #

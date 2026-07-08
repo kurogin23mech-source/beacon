@@ -537,13 +537,41 @@ def cmd_stop(cwd: Path) -> int:
         if _read_pid(cwd) == 0:
             print(f"daemon: stopped (pid={pid})")
             return 0
-    # Daemon didn't exit in 10s; report but don't escalate to SIGKILL automatically.
+    # Daemon didn't exit gracefully in 10s. A stuck shutdown path (e.g. the
+    # final shutdown=True heartbeat hanging on a slow / unreachable network,
+    # or app_server_client.stop() blocking) must not leave the old daemon and
+    # its pidfile alive: the subsequent `start` would see a live pid, no-op as
+    # "already running", and never apply the new config. That is exactly how a
+    # `bcodex` restart silently kept a stale pull-only daemon and dropped the
+    # app-server (wake) upgrade (ms-93 / e-3110). Escalate to SIGKILL so the
+    # stop is guaranteed. We forfeit the graceful shutdown=True server stamp,
+    # but the server's poll-health marks the sid stale within ~30s regardless.
     print(
-        f"daemon: SIGTERM sent to pid={pid} but pidfile still present after 10s. "
-        "Re-run `stop` or inspect the daemon manually.",
+        f"daemon: SIGTERM sent to pid={pid} did not exit in 10s; escalating to SIGKILL.",
         file=sys.stderr,
     )
-    return 1
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        # Exited between the last poll and the SIGKILL — treat as a clean stop.
+        _clean_stale_pidfile(cwd)
+        print(f"daemon: stopped (pid={pid})")
+        return 0
+    except PermissionError:
+        print(
+            f"daemon: cannot SIGKILL pid={pid} (permission denied)",
+            file=sys.stderr,
+        )
+        return 1
+    # Wait for the kernel to reap the killed process, then clean the pidfile
+    # the dead daemon never got to unlink itself.
+    for _ in range(20):
+        time.sleep(0.1)
+        if _read_pid(cwd) == 0:
+            break
+    _clean_stale_pidfile(cwd)
+    print(f"daemon: SIGKILL escalated (pid={pid}) after 10s graceful window; stopped.")
+    return 0
 
 
 def cmd_restart(

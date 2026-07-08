@@ -65,6 +65,18 @@ def heartbeat_to_server(
     heartbeat (= mint path) or when the caller wants to refresh it;
     the server's field-path merge preserves actor.machine/agent.
 
+    e-3091 follow-up: also stamp the **top-level** ``agent.kind`` on the
+    session doc, mirroring channel/bus.mjs's cold-start stamp
+    (``stampColdStartMetadata`` PUTs ``{ agent: {kind, version}, ... }``
+    to the same ``/sessions/<sid>`` endpoint). Without this the Codex
+    session doc only carries ``actor.agent`` (a machine label) and its
+    top-level ``agent.kind`` stays unset — so
+    ``identity_resolve.agent_kind_of`` returns "" and
+    ``resolve_stable_identity(agent_kind="codex")`` never matches the
+    Codex row, silently degrading the DM churn-safe re-resolution that
+    e-3091 built. The structural kind is read from ``actor.agent_kind``
+    (the daemon always passes "codex").
+
     Returns ``True`` on success, ``False`` on transport failure
     (= we never raise; the loop must survive transient network blips).
     """
@@ -75,6 +87,9 @@ def heartbeat_to_server(
     )
     if actor:
         body["actor"] = actor
+        kind = str(actor.get("agent_kind") or "").strip()
+        if kind:
+            body["agent"] = {"kind": kind}
     try:
         api.put(bp.heartbeat_path(project_id, session_id), body)
         return True
