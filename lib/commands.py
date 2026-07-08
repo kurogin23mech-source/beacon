@@ -3447,7 +3447,14 @@ def cmd_session_id():
     """
     try:
         import session as _session
-        sid = _session.get_session_id()
+        # ms-93: prefer the bridge-aware resolver (same principle as ms-95
+        # e-2419 for bus sender). In a git worktree with no local bridge, this
+        # reconnects to the running bridge's sid via the cross-worktree pid-tree
+        # scan instead of reporting the orphan cwd session — so `beacon session
+        # id` matches the sid the bridge actually receives on, and bus.mjs
+        # cold-start discovers the right identity. Falls through to
+        # get_session_id() (which mints) when no claim exists.
+        sid = _session.resolve_active_session_id() or _session.get_session_id()
         if not sid:
             print("Error: failed to materialise session_id", file=sys.stderr)
             sys.exit(1)
