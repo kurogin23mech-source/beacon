@@ -205,3 +205,113 @@ def test_main_label_mode_handles_empty_stdin(monkeypatch, capsys):
     rc = main(["label"])
     assert rc == 0
     assert json.loads(capsys.readouterr().out) == []
+
+
+# -- liveness / staleness gate (= ms-93 / e-2519 AC 5, §8-G FINDING #3) ------
+
+from skills_helpers.identity_resolve import (  # noqa: E402
+    current_live_sid,
+    is_fresh,
+    poll_age_seconds,
+)
+
+_NOW = "2026-07-07T00:01:00Z"  # reference "now" for the tests below
+
+
+def test_poll_age_seconds_computes_gap():
+    row = _sess("codex-1", last_poll_at="2026-07-07T00:00:30Z")
+    assert poll_age_seconds(row, now_iso=_NOW) == 30.0
+
+
+def test_poll_age_seconds_none_when_no_poll():
+    assert poll_age_seconds(_sess("codex-1", last_poll_at=""), now_iso=_NOW) is None
+
+
+def test_poll_age_seconds_clamps_future_skew_to_zero():
+    row = _sess("codex-1", last_poll_at="2026-07-07T00:02:00Z")  # 60s in future
+    assert poll_age_seconds(row, now_iso=_NOW) == 0.0
+
+
+def test_is_fresh_within_threshold():
+    assert is_fresh(_sess("c", last_poll_at="2026-07-07T00:00:45Z"), now_iso=_NOW)
+
+
+def test_is_fresh_false_beyond_threshold():
+    # 45s old > 30s default → stale.
+    assert not is_fresh(_sess("c", last_poll_at="2026-07-07T00:00:15Z"), now_iso=_NOW)
+
+
+def test_is_fresh_unknown_age_is_not_fresh():
+    # Absence of proof of life is proof of stale for send-gating.
+    assert not is_fresh(_sess("c", last_poll_at=""), now_iso=_NOW)
+
+
+def test_current_live_sid_fresh_target_not_stale():
+    rows = [_sess("codex-live", agent_kind="codex", cwd="/work",
+                  last_poll_at="2026-07-07T00:00:50Z")]  # 10s old
+    sid, stale = current_live_sid(rows, now_iso=_NOW, machine="mac1",
+                                  cwd="/work", agent_kind="codex")
+    assert sid == "codex-live"
+    assert stale is False
+
+
+def test_current_live_sid_flags_stale_when_best_match_is_dead():
+    """The sid resolves but it last polled 45s ago → the send path must NOT
+    blindly fire (§8-G FINDING #3: stale-sid DMs vanished silently)."""
+    rows = [_sess("codex-dying", agent_kind="codex", cwd="/work",
+                  last_poll_at="2026-07-07T00:00:15Z")]  # 45s old
+    sid, stale = current_live_sid(rows, now_iso=_NOW, machine="mac1",
+                                  cwd="/work", agent_kind="codex")
+    assert sid == "codex-dying"  # still resolved (so the caller can warn about it)
+    assert stale is True
+
+
+def test_current_live_sid_empty_identity_is_stale():
+    sid, stale = current_live_sid([], now_iso=_NOW, machine="x", cwd="/y",
+                                  agent_kind="codex")
+    assert sid == ""
+    assert stale is True
+
+
+def test_current_live_sid_custom_threshold():
+    rows = [_sess("codex-1", agent_kind="codex", cwd="/work",
+                  last_poll_at="2026-07-07T00:00:15Z")]  # 45s old
+    # With a 60s threshold, 45s old is still fresh.
+    _sid, stale = current_live_sid(rows, now_iso=_NOW, stale_threshold_s=60,
+                                   machine="mac1", cwd="/work", agent_kind="codex")
+    assert stale is False
+
+
+def test_label_rows_annotate_staleness_when_now_supplied():
+    rows = [
+        _sess("codex-fresh", agent_kind="codex", cwd="/work",
+              last_poll_at="2026-07-07T00:00:50Z"),  # 10s
+        _sess("codex-stale", agent_kind="codex", cwd="/work",
+              last_poll_at="2026-07-07T00:00:10Z"),  # 50s
+    ]
+    labelled = label_rows(rows, now_iso=_NOW)
+    by_sid = {r["session_id"]: r for r in labelled}
+    assert by_sid["codex-fresh"]["stale"] is False
+    assert by_sid["codex-fresh"]["poll_age_s"] == 10.0
+    assert by_sid["codex-stale"]["stale"] is True
+
+
+def test_label_rows_omit_staleness_without_now():
+    # Backward compat: no now_iso → no stale/poll_age keys (existing callers).
+    labelled = label_rows([_sess("c", last_poll_at="2026-07-07T00:00:50Z")])
+    assert "stale" not in labelled[0]
+    assert "poll_age_s" not in labelled[0]
+
+
+def test_main_resolve_emits_stale_flag(monkeypatch, capsys):
+    rows = [_sess("codex-dying", machine="mac1", agent_kind="codex", cwd="/work",
+                  last_poll_at="2026-07-07T00:00:15Z")]  # 45s before _NOW
+    rc, data = _run_main(
+        ["resolve", "--machine", "mac1", "--cwd", "/work",
+         "--agent-kind", "codex", "--now", _NOW],
+        rows, monkeypatch, capsys)
+    assert rc == 0
+    assert data["current_sid"] == "codex-dying"
+    assert data["current_sid_stale"] is True
+    assert data["stale_threshold_s"] == 30.0
+    assert data["candidates"][0]["stale"] is True
