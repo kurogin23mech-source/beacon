@@ -6897,6 +6897,8 @@ def list_sessions(
     user_id: str = "",
     machine: str = "",
     agent: str = "",
+    cwd: str = "",
+    agent_kind: str = "",
     live_only: bool = False,
     since_minutes: int = 5,
     healthy_only: bool = False,
@@ -6916,6 +6918,15 @@ def list_sessions(
                             email field per session.py's mint convention).
       * ``machine``       — match ``actor.machine`` exactly.
       * ``agent``         — match ``actor.agent`` exactly.
+      * ``cwd``           — match the session's ``cwd`` exactly (e-2520 stable
+                            recipient identity: part of the coarse key that
+                            survives sid re-mint).
+      * ``agent_kind``    — match ``agent.kind`` exactly (claude-code / codex).
+                            This is the structural agent type, distinct from
+                            ``actor.agent`` (a machine label). Together with
+                            ``cwd`` + ``machine`` this forms the sid-independent
+                            identity a sender can resolve to the current live
+                            session.
       * ``live_only``     — drop sessions whose ``last_active`` is older than
                             ``since_minutes`` ago. Heartbeat-based liveness, so
                             a session that crashed without session-end is
@@ -6965,7 +6976,7 @@ def list_sessions(
     for s in sessions:
         _stamp_session_liveness(s, project_id, now_dt)
 
-    if not (user_id or machine or agent or live_only or healthy_only):
+    if not (user_id or machine or agent or cwd or agent_kind or live_only or healthy_only):
         return sessions
 
     def _matches(s: dict) -> bool:
@@ -6975,6 +6986,17 @@ def list_sessions(
         if machine and actor.get("machine", "") != machine:
             return False
         if agent and actor.get("agent", "") != agent:
+            return False
+        # e-2520: stable-recipient-identity resolve. cwd + agent_kind are the
+        # coarse identity key that survives sid re-mint (bridge restart /
+        # daemon churn), so a sender can target "the codex in /path on this
+        # machine" instead of a raw ephemeral sid. agent_kind matches the
+        # structural agent.kind (claude-code / codex), NOT actor.agent (which
+        # is just the machine label). Combined with healthy_only + client-side
+        # sort by last_poll_at, this yields the current live sid for a tuple.
+        if cwd and (s.get("cwd") or "") != cwd:
+            return False
+        if agent_kind and ((s.get("agent") or {}).get("kind") or "") != agent_kind:
             return False
         return True
 
@@ -9586,6 +9608,82 @@ def _caller_can_see_dm_payload(
     return False
 
 
+# ---------------------------------------------------------------------------
+# DM receipt attribution (ms-93 / Phase 3)
+#
+# ``opened_by`` / ``delivered_by`` / ``sender_session_id`` are raw ephemeral
+# session_ids (route tokens). A human reading ``beacon bus status`` cannot tell
+# WHO opened a DM from ``by sv-77e81553-…4649aa42`` — and a green ``opened`` ✓
+# stamped by a mis-addressed session looks identical to a correct delivery
+# ("緑の opened が誤配を隠す"). Phase 3 resolves those sids to a stable identity
+# (email / machine / agent_kind / cwd) on the read side so mis-delivery becomes
+# visible.
+#
+# Authorization (Phase 3 (b)): attribution is a disclosure, so it rides the
+# SAME participant gate as the DM payload. Only a caller who is sender or
+# recipient of the DM gets ``*_identity`` fields; a third-party member who can
+# list bus sidecar metadata sees the receipt timestamps but NOT who opened it.
+# This is enforced structurally by attaching attribution only inside the
+# ``can_see`` branch of :func:`_apply_dm_payload_visibility` (never on a
+# redacted event).
+# ---------------------------------------------------------------------------
+
+_ATTRIBUTION_FIELDS = (
+    ("sender_session_id", "sender_identity"),
+    ("delivered_by", "delivered_by_identity"),
+    ("opened_by", "opened_by_identity"),
+)
+
+
+def _session_identity(session_row: dict) -> dict:
+    """Extract a stable, human-readable identity from a directory session row.
+
+    Prefers the spoof-resistant ``actor`` block (server stamps ``actor.email``
+    from the authenticated JWT on every upsert) and falls back to the
+    self-reported ``agent`` block for agent_kind / machine. Returns only the
+    non-empty fields so the client can render a compact label.
+    """
+    actor = session_row.get("actor") if isinstance(session_row.get("actor"), dict) else {}
+    agent = session_row.get("agent") if isinstance(session_row.get("agent"), dict) else {}
+    identity: dict = {}
+    email = str(actor.get("email") or "").strip()
+    if email:
+        identity["email"] = email
+    machine = str(actor.get("machine") or agent.get("machine_id") or "").strip()
+    if machine:
+        identity["machine"] = machine
+    agent_kind = str(actor.get("agent_kind") or agent.get("kind") or "").strip()
+    if agent_kind:
+        identity["agent_kind"] = agent_kind
+    cwd = str(session_row.get("cwd") or "").strip()
+    if cwd:
+        identity["cwd"] = cwd
+    return identity
+
+
+def _attach_dm_attribution(event: dict, sid_to_identity: dict) -> dict:
+    """Return a shallow copy of ``event`` with ``*_identity`` fields resolved
+    for the receipt sids present. Also resolves ``payload.recipient_session_id``
+    to ``recipient_identity`` (kept as a top-level field so a redaction-free
+    payload copy is unnecessary). Unknown sids (GC'd / legacy rows) are skipped
+    so the client falls back to the raw sid.
+    """
+    if not isinstance(event, dict):
+        return event
+    out = dict(event)
+    for src_field, id_field in _ATTRIBUTION_FIELDS:
+        sid = str(event.get(src_field) or "")
+        identity = sid_to_identity.get(sid) if sid else None
+        if identity:
+            out[id_field] = identity
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    recipient_sid = str(payload.get("recipient_session_id") or "")
+    recipient_identity = sid_to_identity.get(recipient_sid) if recipient_sid else None
+    if recipient_identity:
+        out["recipient_identity"] = recipient_identity
+    return out
+
+
 def _apply_dm_payload_visibility(
     project_id: str,
     events: list[dict],
@@ -9625,6 +9723,14 @@ def _apply_dm_payload_visibility(
         ]
     sid_to_uid = {
         str(s.get("session_id") or ""): str(s.get("user_id") or "")
+        for s in sessions
+        if s.get("session_id")
+    }
+    # Phase 3: sid → identity for receipt attribution. Built from the same
+    # sessions pass (no extra DB roundtrip). Attached only to events the caller
+    # is allowed to see (see the can_see branch below).
+    sid_to_identity = {
+        str(s.get("session_id") or ""): _session_identity(s)
         for s in sessions
         if s.get("session_id")
     }
@@ -9692,7 +9798,9 @@ def _apply_dm_payload_visibility(
                 and caller_uid == recipient_uid_from_payload):
             can_see = True
         if can_see:
-            out.append(ev)
+            # Phase 3 (b): attribution rides the participant gate — only a
+            # sender/recipient sees who opened/delivered the DM.
+            out.append(_attach_dm_attribution(ev, sid_to_identity))
         else:
             out.append(_redact_dm_payload(ev))
     return out

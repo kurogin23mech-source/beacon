@@ -500,3 +500,56 @@ def test_read_bridge_session_returns_empty_when_pid_field_missing(
     }))
     assert session.read_bridge_session().get("session_id") == "no-pid-sid"
     assert session.resolve_active_session_id() == "no-pid-sid"
+
+
+# ---------------------------------------------------------------------------
+# e-2531: Codex receive-loop session pointer adoption in resolve_active_session_id
+# ---------------------------------------------------------------------------
+
+def _write_codex_pointer(project_dir: Path, sid: str) -> None:
+    d = project_dir / ".beacon" / "codex"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "receive-loop.session.json").write_text(
+        json.dumps({"session_id": sid, "project_id": "p-x"}),
+        encoding="utf-8",
+    )
+
+
+def test_read_codex_session_pointer_missing_returns_empty(project_dir):
+    assert session.read_codex_session_pointer() == ""
+
+
+def test_read_codex_session_pointer_reads_sid(project_dir):
+    _write_codex_pointer(project_dir, "codex-123-abc")
+    assert session.read_codex_session_pointer() == "codex-123-abc"
+
+
+def test_read_codex_session_pointer_corrupt_returns_empty(project_dir):
+    d = project_dir / ".beacon" / "codex"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "receive-loop.session.json").write_text("{ not json", encoding="utf-8")
+    assert session.read_codex_session_pointer() == ""
+
+
+def test_resolve_adopts_codex_pointer_over_fresh_mint(project_dir, monkeypatch):
+    """A Codex send with no BEACON_BUS_SENDER must adopt the daemon's stable
+    codex- sid instead of minting a fresh sv- (the e-2531 churn)."""
+    monkeypatch.setattr(session, "read_bridge_session", lambda: {})
+    _write_codex_pointer(project_dir, "codex-STABLE-1")
+    assert session.resolve_active_session_id() == "codex-STABLE-1"
+
+
+def test_resolve_prefers_bridge_claim_over_codex_pointer(project_dir, monkeypatch):
+    """A Claude send matches the pid-tree bridge claim first; the codex pointer
+    (if any lingers in the cwd) must not override it."""
+    monkeypatch.setattr(session, "read_bridge_session",
+                        lambda: {"session_id": "sv-CLAUDE-CLAIM"})
+    _write_codex_pointer(project_dir, "codex-SHOULD-NOT-WIN")
+    assert session.resolve_active_session_id() == "sv-CLAUDE-CLAIM"
+
+
+def test_resolve_falls_through_to_mint_when_no_pointer(project_dir, monkeypatch):
+    """No bridge claim, no codex pointer → normal mint chain (non-empty sv-)."""
+    monkeypatch.setattr(session, "read_bridge_session", lambda: {})
+    sid = session.resolve_active_session_id()
+    assert sid and not sid.startswith("codex-")

@@ -2159,6 +2159,7 @@ def cmd_log():
     progress = os.environ.get("BEACON_PROGRESS", "")
     behavior = os.environ.get("BEACON_BEHAVIOR", "")
     resolves = os.environ.get("BEACON_RESOLVES", "")
+    resolves_explicit = os.environ.get("BEACON_RESOLVES_SET", "") == "1"
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     # ms-51 / e-934: attach actor (see cmd_log_finalize for the matching
@@ -2192,8 +2193,8 @@ def cmd_log():
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary, progress=progress,
-        behavior=behavior, resolves=resolves, actor=actor,
-        session_id=session_id, source=source,
+        behavior=behavior, resolves=resolves, resolves_explicit=resolves_explicit,
+        actor=actor, session_id=session_id, source=source,
     )
     save_project(data)
 
@@ -2324,6 +2325,7 @@ def cmd_log_finalize():
     legacy_new_summary = os.environ.get("BEACON_NEW_SUMMARY", "")
     behavior = os.environ.get("BEACON_BEHAVIOR", "")
     resolves = os.environ.get("BEACON_RESOLVES", "")
+    resolves_explicit = os.environ.get("BEACON_RESOLVES_SET", "") == "1"
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     # ms-51 / e-934: attach actor metadata so multi-machine commits are
@@ -2356,8 +2358,8 @@ def cmd_log_finalize():
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary_text, progress=progress,
-        behavior=behavior, resolves=resolves, actor=actor,
-        session_id=session_id, source=source,
+        behavior=behavior, resolves=resolves, resolves_explicit=resolves_explicit,
+        actor=actor, session_id=session_id, source=source,
     )
 
     # e-1040 deprecation: don't write data["summary"] anymore. The legacy
@@ -3445,7 +3447,14 @@ def cmd_session_id():
     """
     try:
         import session as _session
-        sid = _session.get_session_id()
+        # ms-93: prefer the bridge-aware resolver (same principle as ms-95
+        # e-2419 for bus sender). In a git worktree with no local bridge, this
+        # reconnects to the running bridge's sid via the cross-worktree pid-tree
+        # scan instead of reporting the orphan cwd session — so `beacon session
+        # id` matches the sid the bridge actually receives on, and bus.mjs
+        # cold-start discovers the right identity. Falls through to
+        # get_session_id() (which mints) when no claim exists.
+        sid = _session.resolve_active_session_id() or _session.get_session_id()
         if not sid:
             print("Error: failed to materialise session_id", file=sys.stderr)
             sys.exit(1)
@@ -4418,6 +4427,24 @@ def cmd_channel_status():
     print()
     print("[4] Next auto-install:")
     print(f"    → {prediction}")
+    print()
+
+    # ---- 5. Receive capability (send/receive asymmetry) -------------------
+    # ms-93 recipient-stability follow-up: `bus send` is a CLI push and works
+    # without a bridge, so a cwd with no `.mcp.json` (e.g. a hand-`cd`'d git
+    # worktree) silently falls into a send-only state — outgoing DMs work,
+    # incoming ones never live-wake. Make that asymmetry loud here rather than
+    # letting the user infer "connected" from a working send.
+    print("[5] Receive capability (受信は送信と非対称):")
+    if mcp_has_entry:
+        print("    ✓ 受信 bridge 経路あり — この cwd で起動した session は "
+              "他セッションからの DM を live-wake で受信できます")
+    else:
+        print("    ⚠ 送信専用の恐れ — この cwd に beacon-bus MCP entry が無い")
+        print("      送信 (`bus send`) は CLI push なので効きますが、他セッション"
+              "からの DM は live-wake せず、次回 prompt の catch-up でのみ届きます。")
+        print("      (git worktree に手で cd した等で起動 cwd と別 .beacon "
+              "session になっている場合に起きがち)")
     print()
 
     # Action hints based on current state.
@@ -17936,6 +17963,25 @@ def cmd_bus_status():
     opened_at = event.get("opened_at", "")
     opened_by = event.get("opened_by", "")
 
+    def _fmt_by(sid, identity):
+        """Prefer the Phase 3 resolved identity (ms-93) over the raw sid so a
+        human can tell WHO opened / delivered a DM. Falls back to the sid when
+        the server did not attach attribution (legacy event, GC'd session, or
+        third-party caller whose view is gated)."""
+        if isinstance(identity, dict) and identity:
+            email = identity.get("email") or ""
+            attrs = [
+                identity.get("machine") or "",
+                identity.get("agent_kind") or "",
+                identity.get("cwd") or "",
+            ]
+            attrs = [a for a in attrs if a]
+            label = email or (sid or "")
+            if attrs:
+                label = f"{label} [{' / '.join(attrs)}]"
+            return label
+        return sid or ""
+
     def _row(mark, label, ts, by=""):
         ts_str = ts if ts else "(not yet)"
         by_str = f"  by {by}" if by else ""
@@ -17944,11 +17990,12 @@ def cmd_bus_status():
     channel = event.get("channel", "")
     delivery = event.get("delivery", "")
     sender = event.get("sender_session_id", "")
+    sender_by = _fmt_by(sender, event.get("sender_identity"))
     payload = event.get("payload", {})
 
     print(f"event: {event_id}")
     print(f"  channel: {channel}  delivery: {delivery}")
-    print(f"  sender:  {sender}")
+    print(f"  sender:  {sender_by}")
     try:
         print(f"  payload: {json.dumps(payload, ensure_ascii=False)}")
     except Exception:
@@ -17956,8 +18003,9 @@ def cmd_bus_status():
     print("  receipt:")
     print(_row("✓", "sent", sent_at))
     print(_row("✓" if delivered_at else "✗", "delivered", delivered_at,
-               delivered_by))
-    print(_row("✓" if opened_at else "✗", "opened", opened_at, opened_by))
+               _fmt_by(delivered_by, event.get("delivered_by_identity"))))
+    print(_row("✓" if opened_at else "✗", "opened", opened_at,
+               _fmt_by(opened_by, event.get("opened_by_identity"))))
 
 
 def cmd_dm_respond():

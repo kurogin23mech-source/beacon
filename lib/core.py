@@ -1411,7 +1411,8 @@ def check_duplicate_commit(entries: list, commit_hash: str) -> bool:
 def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
                message: str, date: str, summary: str = "",
                progress: str = "", behavior: str = "",
-               resolves: str = "", actor: dict | None = None,
+               resolves: str = "", resolves_explicit: bool = False,
+               actor: dict | None = None,
                session_id: str = "", source: str = "",
                author: dict | None = None) -> dict:
     """Record a commit to the target milestone. Returns result info dict.
@@ -1493,8 +1494,22 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
     if behavior:
         commit_entry["behavior"] = behavior
 
-    commit_text = (summary or "") + " " + (message or "")
-    matched_task = _find_matching_task(entries, commit_text)
+    # Task binding precedence (fixes the auto-bind footgun where `--resolves`
+    # was recorded to meta but never consulted for the actual nesting):
+    #   1. resolves names a concrete e-XXX task  → authoritative, no fuzzy match.
+    #      (specified-but-absent falls through to top-level, never a fuzzy pick.)
+    #   2. resolves explicitly empty (--resolves "") → opt out of binding; the
+    #      commit sits at milestone top level.
+    #   3. resolves unset (auto-fire / post-commit hook) → legacy fuzzy match on
+    #      the commit message so hook-driven logs still self-nest.
+    resolve_ids = re.findall(r'e-\d+', resolves or "")
+    if resolve_ids:
+        matched_task = _find_task_by_ids(entries, resolve_ids)
+    elif resolves_explicit:
+        matched_task = None
+    else:
+        commit_text = (summary or "") + " " + (message or "")
+        matched_task = _find_matching_task(entries, commit_text)
 
     if matched_task:
         matched_task.setdefault("entries", []).append(commit_entry)
@@ -1524,6 +1539,25 @@ def _tokenize(text: str) -> set:
     ja_chunks = re.split(r'[のをにはがでとからまでもへや、。・\s]+', ja_text)
     ja_tokens = [c for c in ja_chunks if len(c) >= 2]
     return set(en_words + ja_tokens)
+
+
+def _find_task_by_ids(entries: list, ids: list):
+    """Return the first task entry whose id is in ``ids`` (recursive).
+
+    Used by ``log_commit`` when the caller passed an explicit ``--resolves
+    e-XXX``: that binding is authoritative and must win over the fuzzy
+    message matcher. Recurses into nested entries so a resolves target that
+    lives under a parent task still binds. Returns None if no id matches
+    (specified-but-absent → commit lands at milestone top level, never a
+    coincidental fuzzy pick)."""
+    id_set = set(ids)
+    for entry in entries:
+        if entry.get("type") == "task" and entry.get("id") in id_set:
+            return entry
+        nested = _find_task_by_ids(entry.get("entries", []), ids)
+        if nested is not None:
+            return nested
+    return None
 
 
 def _find_matching_task(entries: list, commit_text: str):

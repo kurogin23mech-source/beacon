@@ -193,25 +193,37 @@ beacon member list --json
 
 session.actor.email がメンバーの email と一致するなら、その人の email + role を picker 行に添える。一致しないなら machine / agent のみで表示する。member list が空でもエラーにせず無視する。
 
-#### Step 1-send-e: 候補表示と選択
+#### Step 1-send-e: 候補表示と選択 (identity 配線、ms-93 Phase 3)
 
-各 session を以下のフォーマットで表示する (helpers の `render_candidate_line` と同じ規則):
+**session_id (sid) は使い捨ての経路トークンであって identity ではない** (bridge 再起動 / Codex daemon の re-mint で sid は変わる)。picker で生 sid を選ばせると、選んでから送るまでの間に sid が churn して stale に飛ぶ事故が起きる (2026-07-07 に DNS 切替 DM と bug 報告 DM が 2 回 stale sid に消えた)。そこで **人間には「誰の / どの作業場か」を stable identity で見せ、送信時に現在生きている sid へ解決し直す**。
+
+Step 1-send で取得した directory rows (JSON 配列) を identity helper に通してラベル化する:
+
+```bash
+# ROWS = beacon bus directory --live --healthy --since-min 5 --json の出力
+PYTHONPATH="$(dirname $(dirname $(realpath $(which beacon))))" \
+  python3 -m beacon_cli.skills_helpers.identity_resolve label <<< "$ROWS"
+```
+
+返る各要素は `{session_id, label, project_id, machine, cwd, agent_kind, last_poll_at}`。`label` は `describe_candidate` の「種別 on マシン in cwd (started …, pid …)」形式。これを軸に表示し、生 sid は補助情報 (括弧) に降格する:
 
 ```
-1. [machine=DESKTOP-CHG6PAT, agent=DESKTOP-CHG6PAT] session=aa60cc21… healthy (age 3s) → dolphin.orca@gmail.com (editor)
-2. [machine=WORKMACHINE] session=dc526151… healthy (age 1s)
-3. [machine=mac-mini] session=6d270a08… stale (age 12m) → (member unknown)
+1. claude-code on WORKMACHINE in D:\Projects\beacon (started 2026-07-07T21, pid 222) → dolphin.orca@gmail.com (editor)  [sid=workmachine-…8ff3c173, healthy age 1s]
+2. codex on CFGW5D79LL in /Users/…/beacon (started 2026-07-07T05, pid 68732)  [sid=codex-…65dbdb5e, healthy age 5s]
+3. claude-code on mac-mini in /Users/…/beacon  [sid=6d270a08…, stale age 12m] → (member unknown)
 ```
+
+Step 1-send-d のメンバー email / role は従来通りラベル末尾に添える。member 一致は `machine` / actor.email で cross-reference する。
 
 ユーザーに尋ねる:
 ```
 どの受信者に送りますか?
 - 番号 (1, 2, 3, …) でピック
-- session_id を直接貼り付け
+- session_id を直接貼り付け (= identity を経由せず生 sid 指定、上級者向け)
 - cancel で中止
 ```
 
-選択された session の `session_id` と `project_id` を控える (以下 `recipient_sid`, `recipient_project_id` と呼ぶ)。
+選択された行の **identity key** (`machine` / `cwd` / `agent_kind` / `project_id`) と、その時点の `session_id` (= `recipient_sid`)・`project_id` (= `recipient_project_id`) を控える。identity key は Step 2 / Step 7 の送信時 re-resolve で使う。
 
 ### Step 1-reply (reply mode のみ)
 
@@ -240,6 +252,29 @@ beacon bus listen --once --channel dm --json
 ---
 
 ## Step 2: 受信者の live 検証 (両モード共通)
+
+### Step 2-pre: identity 送信時 re-resolve (send mode で identity key を控えている場合、ms-93 Phase 3)
+
+Step 1-send-e で **identity key** (machine / cwd / agent_kind / project_id) を控えている場合、picker 表示から送信までの間に sid が churn している可能性があるので、**送信直前に現在生きている sid へ解決し直す**。fresh な directory を取り直して helper に通す:
+
+```bash
+FRESH=$(beacon bus directory --live --healthy --since-min 5 --json)
+PYTHONPATH="$(dirname $(dirname $(realpath $(which beacon))))" \
+  python3 -m beacon_cli.skills_helpers.identity_resolve resolve \
+    --machine "<machine>" --cwd "<cwd>" --agent-kind "<agent_kind>" \
+    --project "<project_id>" <<< "$FRESH"
+```
+
+返る `current_sid` を使う:
+
+| 観測結果 | 動作 |
+|---|---|
+| `current_sid` が非空で、控えていた `recipient_sid` と同じ | churn なし。そのまま続行 |
+| `current_sid` が非空だが `recipient_sid` と違う | **sid が churn した**。`recipient_sid` を `current_sid` に更新し、ユーザーに 1 行通知:「相手の sid が更新されていたので最新の `<current_sid>` に送ります (identity: <label>)」。以降 Step 2 本体の live 検証は skip 可 (= 既に live directory から解決済) |
+| `current_sid` が空 (`candidates` も空) | その identity は現在 live でない。Step 2 本体の soft-warn 経路へ流す (= 生 sid のまま送るか中止) |
+| `candidates` が 2 件以上 | 同 identity key の並走 session が複数。label で人間に選び直させる (= 通常は agent_kind + cwd で 1 件に絞れるはずなので稀) |
+
+生 sid を直接貼られた (= identity を経由しない) 場合、この Step は skip して Step 2 本体の live 検証へ進む。
 
 **ここが旧 dm-send / dm-reply 両方に共通する live-check の責務**。CLI 側にも e-1402 (= 2026-06-10 LPS 観察 4 で起票された CLI-side live-check gate) で同じ防御が入っているが、Skill 側でも **送信前に明示的に** 検証することで「dead session に DM を投げる」を構造的に防ぐ (defense in depth)。
 

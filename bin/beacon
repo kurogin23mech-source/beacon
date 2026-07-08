@@ -1084,6 +1084,11 @@ cmd_log() {
     local explicit_hash=""
     local behavior=""
     local resolves=""
+    # Distinguish "--resolves was passed" (even with an empty value = "bind to
+    # nothing") from "--resolves omitted" (= fall back to fuzzy message match).
+    # Without this the core matcher cannot tell an explicit opt-out from the
+    # auto-fire path and always fuzzy-binds. See lib/core._find_matching_task.
+    local resolves_set=""
 
     # Parse options
     while [[ $# -gt 0 ]]; do
@@ -1096,7 +1101,7 @@ cmd_log() {
             --summary)     custom_summary="${2:-}";  shift 2 ;;
             --hash)        explicit_hash="${2:-}";   shift 2 ;;
             --behavior)    behavior="${2:-}";        shift 2 ;;
-            --resolves)    resolves="${2:-}";        shift 2 ;;
+            --resolves)    resolves="${2:-}"; resolves_set="1"; shift 2 ;;
             *)             custom_summary="$1";      shift   ;;
         esac
     done
@@ -1150,6 +1155,7 @@ cmd_log() {
                 BEACON_NEW_SUMMARY="${BEACON_NEW_SUMMARY:-$custom_summary}" \
                 BEACON_JSON="$json_flag" \
                 BEACON_BEHAVIOR="$behavior" BEACON_RESOLVES="$resolves" \
+                BEACON_RESOLVES_SET="$resolves_set" \
                 python3 "$COMMANDS_PY" log_finalize
             ;;
         normal)
@@ -1157,6 +1163,7 @@ cmd_log() {
                 BEACON_SUMMARY="$custom_summary" BEACON_MS_ID="$ms_id" \
                 BEACON_PROGRESS="$progress" BEACON_JSON="$json_flag" \
                 BEACON_BEHAVIOR="$behavior" BEACON_RESOLVES="$resolves" \
+                BEACON_RESOLVES_SET="$resolves_set" \
                 python3 "$COMMANDS_PY" log
             ;;
     esac

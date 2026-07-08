@@ -359,10 +359,18 @@ PY
 `OK` / `UNKNOWN` 以外の場合、Step 3 出力に以下のバンドを追加する:
 
 ```
-⚠ beacon-bus channel が未 install です (この cwd で `beacon channel install` を実行してください)
+⚠ この cwd は「送信専用」の恐れ (受信 bridge 未設置、ms-93 recipient-stability)
   detail: [NO_MCP_JSON / NO_BEACON_BUS_ENTRY / MCP_JSON_MALFORMED]
-  影響: 他セッションからの DM (channel/bus.mjs 経由) がこの session に届きません
+  非対称に注意: `beacon bus send` は CLI push なので効きます (= 繋がって見える) が、
+    他セッションからの DM は live-wake せず、次回 prompt の catch-up でのみ届きます。
+  よくある原因: git worktree に手で cd した等で、起動 cwd と別の .beacon session
+    (別 session_id) になり、その session に受信 bridge が無い状態。
+  対処: この cwd で `beacon channel install` を実行して受信を有効化してください。
 ```
+
+**送信は効くのに受信だけ silent に死ぬ** 非対称が本質。「送れたから繋がっている」と誤認させないため、送受信の非対称を明示する (= 2026-07-07 profile-extractor で実害)。
+
+> **補足 (milestone start / worktree 遷移)**: `beacon milestone start <id>` で `.worktrees/<slug>/` に入って作業を続ける場合も同じ穴に落ちる (= 新 worktree に `.mcp.json` が無ければ受信 bridge 無し)。session-start はセッション開始時の 1 回しか走らないので、worktree に cd した直後は改めて `beacon channel status` の `[5] Receive capability` ブロックで受信可否を確認するとよい。
 
 この Step は **読み取り専用**。自動で `beacon channel install` を実行してはならない（session-start 全体の読み取り専用原則に従う）。
 

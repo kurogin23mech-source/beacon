@@ -567,6 +567,7 @@ class ApiClient:
 
     def list_sessions(self, project_id: str, *, user_id: str = "",
                       machine: str = "", agent: str = "",
+                      cwd: str = "", agent_kind: str = "",
                       live_only: bool = False, since_minutes: int = 5,
                       healthy_only: bool = False) -> list:
         """List sessions for a project. Empty filters return everything (the
@@ -586,6 +587,10 @@ class ApiClient:
             qs.append(f"machine={urllib.parse.quote(machine)}")
         if agent:
             qs.append(f"agent={urllib.parse.quote(agent)}")
+        if cwd:
+            qs.append(f"cwd={urllib.parse.quote(cwd)}")
+        if agent_kind:
+            qs.append(f"agent_kind={urllib.parse.quote(agent_kind)}")
         if live_only:
             qs.append("live_only=true")
             qs.append(f"since_minutes={since_minutes}")
