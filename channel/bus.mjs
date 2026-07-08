@@ -1206,9 +1206,9 @@ if (!PROJECT_ID || !SESSION_ID) {
   // bridge's authoritative view to bridge.json lets the CLI see it and skip
   // the env-override path.
   //
-  // bridge claim schema (e-1460):
+  // bridge claim schema (e-1460, agent_kind added e-3091):
   //   { session_id: str, pid: number, parent_pid: number, cwd: str,
-  //     started_at: ISO8601 }
+  //     agent_kind: str, started_at: ISO8601 }
   //
   // pid          = this bus.mjs process (used by readers to drop stale
   //                claims after a crash).
@@ -1243,6 +1243,12 @@ if (!PROJECT_ID || !SESSION_ID) {
         pid: process.pid,
         parent_pid: process.ppid,
         cwd: CWD,
+        // e-3091: stamp the structural agent kind so the Python-side
+        // pid-tree resolver (lib/session.find_my_bridge_claim) never lets a
+        // co-located Codex receive-loop daemon adopt this Claude Code bridge
+        // (or vice versa) when they share an ancestor pid in the same cwd.
+        // bus.mjs is the Claude Code bridge, so this is always 'claude-code'.
+        agent_kind: 'claude-code',
         started_at: new Date().toISOString(),
       }
       const claimPath = path.join(BRIDGES_DIR, `${SESSION_ID}.json`)
