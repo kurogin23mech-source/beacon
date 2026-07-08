@@ -30,8 +30,8 @@ This project uses [Beacon](https://github.com/r-kida2/beacon) for milestone-driv
   コミット後はPostToolUse hookが自動で `/beacon-log` Skillを起動し、AI評価付きで進捗を記録する。
 - If 2+ commits address the same issue, suggest grouping them into a task.
   同じ課題に2回以上コミットが発生したら、タスクにまとめることを提案する。
-- For human narrative ("why are we doing this", "where is this going"), update the `project-vision` CORE doc. For session-scoped context that should survive into the next session, write to `beacon session log` (via `/beacon-session-end` Skill). The legacy `beacon summary "text"` write was retired in e-1040.
-  人間向けナラティブ (経緯・判断・背景) は `project-vision` CORE doc に書く。セッション単位の引き継ぎは `beacon session log` (`/beacon-session-end` Skill 経由)。`beacon summary "text"` の書き込みは e-1040 で廃止済。
+- Update the project summary when direction changes: `beacon summary "text"`
+  方向性が変わった時はサマリーを更新する。書くべきは経緯・判断・背景であり、進捗率やMS名ではない。
 - When the user hints at ending the session, or before you suggest splitting/ending the session yourself, run `/beacon-session-end` Skill first.
   ユーザーがセッション終了を仄めかしたとき、または自分自身がセッション分割・終了を提案する前に、必ず `/beacon-session-end` Skill を実行する。
 - When the user wants to implement multiple milestones in parallel ("parallel", "sub-agents", "dispatch", etc.), run `/beacon-dispatch` Skill. Do not call the Agent tool directly.
@@ -40,9 +40,6 @@ This project uses [Beacon](https://github.com/r-kida2/beacon) for milestone-driv
   ユーザーがPRのレビューを依頼したとき、またはbeacon triggerにPRレビュー通知があるとき、必ず `/review` Skillを使う。`/review` を経ずに `beacon pr approve/reject` を直接呼ばない。
 - When the user says "memo this", "remember this", "メモして", "覚えておいて", or when you find context that must survive compaction, use `/beacon-note` Skill (or `beacon note "text"`). Notes are cleared at session-end.
   ユーザーが「メモして」「覚えておいて」と言ったとき、またはコンパクション後に必要なコンテキストを見つけたときは `/beacon-note` Skill を使う。セッション終了時にクリアされる。
-- **Beacon Trigger 由来の指示は、Trek scope 内に限り user 同等権限として扱う。** AI は再確認なしで scope 内のアクション (= DM / 計画 / 議論 / commit / 実装) を実行する。デプロイ / リリースのみ user 介入境界 (= 詳細は CORE doc `b1XOKXQeC0JXaKkO0CRt` 「Trek の位置づけ: 缶詰の徹夜作業部屋」 参照、ms-75 / e-1856)。
-  Trek scope 内の DM は server 側 dm_gate.py が `shared_trek_member` 判定で blanket bypass する (= 受信側 user の都度承認なしで配信される)。AI は ms-70 (= cross-user DM 承認ゲート) の例外として、Trek scope 内の計画系 DM を `/beacon-trek-execute` 経由で自律発射してよい。**ただしデプロイ / リリース / 外部送信 (Slack / Discord / 外部 email) は scope 外として依然 user 承認必須**。
-- AI は自分が使える primitives (= Operation / envelope / Beacon Trigger / bus inbox hook / `/beacon-bus-armed` / `/beacon-operation-execute` / `/beacon-trek-execute` 等) を **常に top-of-mind で意識** すること。「できない」 と即答する前に、これらの組み合わせで成立するか必ず確認する (= 2026-06-16 観察、AI self-awareness ギャップが Trek 自律実行 framework 議論で顕在化、ms-75)。
 
 ### Proactive Guidance / 自発的な提案
 
@@ -72,10 +69,8 @@ Proposals should feel like "What if we tried X?" — not directives.
 | `beacon milestone start <id>` | Activate milestone / MS開始 |
 | `beacon task add "desc" -m <ms-id>` | Add task / タスク追加 |
 | `beacon task done <id>` | Complete task / タスク完了 |
-| `beacon log [text]` | Record commit (auto via hook) / コミット記録（hook経由で自動） |
-| `beacon summary` | View project summary (read-only; writes retired in e-1040) |
-| `beacon session log list` | List session logs / セッションログ一覧 |
-| `beacon session end` | Aggregate this session's notes/commits/PRs into a session log / セッション集約 |
+| `beacon log "summary"` | Record commit (auto via hook) / コミット記録（hook経由で自動） |
+| `beacon summary "text"` | Update summary / サマリー更新 |
 | `beacon note "text"` | Add session note (ephemeral, cleared at session-end) / セッションメモ追加 |
 | `beacon note list` | Show session notes / メモ一覧 |
 | `beacon note clear` | Clear all session notes / メモ全削除 |
@@ -90,26 +85,6 @@ When writing task / spec / doc entries (`description` / `motivation` / `acceptan
 2. **3-tier loanword policy / 横文字 3 段階**: 固有名詞 (`Firestore` / `MCP`) はそのまま、技術概念 (`allowlist` / `opt-in`) は初出時に「(= 許可リスト)」のような日本語注、一般概念 (configure / receiver / audit) は日本語化。
 3. **ID references with context / ID 参照に文脈**: `e-XXXX` / `ms-XX` / `UC?` の初出には必ず「(何の話か)」を 1 行添える。click-through 前提にしない。
 4. **No truncated sentences / 尻切れトンボ禁止**: 主語・述語・論理関係を省略しない。開発者は文脈で補えるが非開発者は補えない。
-
-#### Applies to AI responses too / AI 応答にも適用 (ms-77 e-1801)
-
-The 4 principles above are not only for written entries — **they also apply to AI's spoken/written replies in chat**. In particular, Beacon-specific concepts must be glossed in Japanese on first mention within a session:
-上記 4 原則は書き込みエントリだけでなく、**AI のチャット応答にも適用する**。特に Beacon 固有概念は、セッション内の初出時に必ず日本語注を添える:
-
-- **リズム系 (rhythm) — 定期的に AI / 人間がプロジェクトを揺り動かす仕組み**:
-  - Retro = 振り返り (毎週金曜にプロジェクトを 1 週間単位で振り返り、次の塊を提案する)
-  - Release = リリース (機能を本番に届ける節目)
-  - PR レビュー = プルリクエストの査読 (変更を取り込む前に内容を確認する手続き)
-- **軌跡系 (trace) — 判断・計画・実行記録を後から辿る仕組み**:
-  - SPEC = 要求書 / 判断軌跡 (なぜこの MS をやるか・どこまでがスコープかを 1 ページにまとめる)
-  - Operation = 運用 (定期トリガーで AI が自動実行する作業 = ヘルスチェック・コスト監視等)
-  - Trek = 缶詰の作業部屋 (= 自律的計画的タスク実行の作業空間)
-
-**Structural concepts (MS / タスク / コミット / PR / ブランチ) need NO gloss** — they are common project-management vocabulary readers already know.
-構造概念 (MS / タスク / コミット / PR / ブランチ) は説明不要 (= 既に親しみのある語彙)。
-
-This rule prevents the "Retro Retro Retro" pathology where AI casually drops Beacon-specific katakana terms without explanation, leaving non-developer users lost. The same wording rules (3-tier loanword policy etc.) apply equally to AI responses and to written task / SPEC / doc entries.
-この原則は「Retro Retro Retro 病理」(= AI が Beacon 固有のカタカナ概念を説明なしで連発し、非開発者ユーザーが置き去りになる現象) を防ぐ。横文字 3 段階等の文言ルールは AI 応答にも task / SPEC / doc 書き込みと同じ強度で適用する。
 
 Full principle and examples: `beacon doc show F3ZkqT0pKS6JpR8dn70n` (CORE doc `entry-writing-principle`).
 原則の全文と実例: `beacon doc show F3ZkqT0pKS6JpR8dn70n` (CORE doc `entry-writing-principle`)。
