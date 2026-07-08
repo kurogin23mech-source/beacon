@@ -883,20 +883,79 @@ def _sibling_worktree_bridges_dirs() -> list:
     return dirs
 
 
-def _match_claim_by_pidtree(claims: list, ancestors: set) -> dict:
+def _caller_agent_kind() -> str:
+    """Best-effort structural agent kind of the CURRENT process (e-3091).
+
+    Returns ``"codex"`` / ``"claude-code"`` / ``""`` (unknown). Used solely to
+    make :func:`find_my_bridge_claim` agent_kind-aware so a Claude Code CLI
+    call never adopts a co-located Codex daemon's bridge claim (and vice
+    versa) when both share an ancestor pid in the same cwd.
+
+    Signals, in order:
+      1. ``BEACON_BUS_SENDER`` starting with ``"codex-"`` — the Codex
+         receive-loop daemon exports this sid for every child CLI call
+         (``scripts/codex-receive-loop.py``), so it is the strongest Codex
+         marker available in a plain subprocess env.
+      2. ``CLAUDECODE=1`` — Claude Code sets this in every Bash-tool / bridge
+         subprocess (the same signal :func:`_detect_harness` keys off).
+
+    Returns ``""`` when neither fires; the caller then falls back to
+    pid-tree-only adoption (= pre-e-3091 behaviour) so a truly-unknown caller
+    is never blocked from its own bridge.
+    """
+    sender = (os.environ.get("BEACON_BUS_SENDER") or "").strip()
+    if sender.startswith("codex-"):
+        return "codex"
+    if os.environ.get("CLAUDECODE") == "1":
+        return "claude-code"
+    return ""
+
+
+def _claim_kind_matches_caller(claim_kind: str, caller_kind: str) -> bool:
+    """Agent-kind adoption gate for one bridge claim (e-3091).
+
+    Rules:
+      * Claim WITHOUT ``agent_kind`` (legacy / pre-e-3091 → ``""`` here):
+        adoptable by ANY caller — pid-tree alone decides. Keeps existing
+        single-bridge cwds working through the migration window. (AC #4)
+      * Claim WITH ``agent_kind``: adoptable only by a caller of the SAME
+        kind. A Claude Code CLI never adopts a codex bridge and vice versa.
+        (AC #2)
+      * ``caller_kind`` unknown (``""``): treated as "matches anything" so a
+        caller we cannot classify is never blocked from its own bridge
+        (degrades to pid-tree-only, the pre-e-3091 behaviour).
+    """
+    if not claim_kind:
+        return True
+    if not caller_kind:
+        return True
+    return claim_kind == caller_kind
+
+
+def _match_claim_by_pidtree(claims: list, ancestors: set, caller_kind: str = "") -> dict:
     """Return the first alive claim whose ``parent_pid`` is in ``ancestors``.
 
     A claim is only adopted when its bridge process (``pid``) is still alive —
     a dead bus.mjs cannot own the current session. Legacy claims without
     ``parent_pid`` are skipped (they cannot be attributed to a specific bclaude).
+
+    e-3091: ``caller_kind`` gates cross-kind adoption. A claim that records an
+    ``agent_kind`` (bus.mjs stamps ``"claude-code"``) is only adopted by a
+    caller of the same kind, so a Claude Code session and a co-located Codex
+    daemon sharing an ancestor pid in one cwd never silently swap sids.
+    Claims without ``agent_kind`` stay adoptable by anyone (legacy fallback).
     """
     for claim in claims:
         pid = claim.get("pid")
         if not isinstance(pid, int) or not _pid_alive(pid):
             continue
         parent_pid = claim.get("parent_pid")
-        if isinstance(parent_pid, int) and parent_pid in ancestors:
-            return claim
+        if not (isinstance(parent_pid, int) and parent_pid in ancestors):
+            continue
+        claim_kind = str(claim.get("agent_kind") or "").strip()
+        if not _claim_kind_matches_caller(claim_kind, caller_kind):
+            continue
+        return claim
     return {}
 
 
@@ -943,6 +1002,18 @@ def find_my_bridge_claim() -> dict:
     their respective bus.mjs at cold-start; pid-tree match picks the
     right one for the calling CLI.
 
+    e-3091 (short-term mitigation): the pid-tree match is now agent_kind-
+    aware. Before this fix a Claude Code CLI call and a co-located Codex
+    receive-loop daemon sharing an ancestor pid in the same cwd could adopt
+    each other's bridge claim (the claim files carried no ``agent_kind``),
+    making ``agent.kind`` on the shared sid non-deterministic (last-writer-
+    wins) and breaking ``resolve_stable_identity(agent_kind="codex")``. Now a
+    claim that records ``agent_kind`` is only adopted by a caller of the same
+    kind (see :func:`_caller_agent_kind` / :func:`_claim_kind_matches_caller`).
+    This is a band-aid on top of the already-planned e-1511 removal below —
+    the real cure is the server-side identity tuple lookup, which is inherently
+    agent_kind-keyed; keep this only until that supersedes the pid-tree path.
+
     DEPRECATED (ms-62 / e-1511): the bridges/<sid>.json + pid-tree
     resolver is being replaced by the server-side identity tuple lookup
     (``(project_id, machine_id, parent_pid)`` → ``sid``). Scheduled for
@@ -959,9 +1030,11 @@ def find_my_bridge_claim() -> dict:
             stacklevel=2,
         )
     my_ancestors = _get_ancestor_pids()
+    caller_kind = _caller_agent_kind()
     # Fast path: claims in the current cwd's .beacon/bridges/ (+ legacy). This
     # is the common case and pays no extra process cost.
-    match = _match_claim_by_pidtree(read_all_bridge_claims(), my_ancestors)
+    match = _match_claim_by_pidtree(
+        read_all_bridge_claims(), my_ancestors, caller_kind)
     if match:
         return match
     # Fallback (ms-93 receive-orphan fix): the CLI is in a git worktree that
@@ -974,7 +1047,7 @@ def find_my_bridge_claim() -> dict:
     if _in_linked_worktree():
         for bdir in _sibling_worktree_bridges_dirs():
             match = _match_claim_by_pidtree(
-                _read_claims_from_dir(bdir), my_ancestors)
+                _read_claims_from_dir(bdir), my_ancestors, caller_kind)
             if match:
                 return match
     return {}
@@ -1057,7 +1130,10 @@ def resolve_active_session_id() -> str:
          (per-bclaude isolation), or legacy .beacon/bridge.json fallback.
       2. Codex session pointer (e-2531) — the stable codex- sid the Codex
          receive-loop daemon published for this cwd, so every Codex send path
-         shares one sender identity instead of minting a fresh sv-.
+         shares one sender identity instead of minting a fresh sv-. e-3091:
+         this step is skipped when the caller is claude-code (a co-located
+         Claude Code session must never adopt the Codex daemon's sid; see the
+         inline comment for the cold-start race that made this necessary).
       3. Fall through to :func:`get_session_id` which applies the
          existing env / mint / session.json precedence (which is itself
          pid-tree-aware as of e-1460).
@@ -1081,11 +1157,23 @@ def resolve_active_session_id() -> str:
     # the same Codex session's outbound DMs churn their sender identity and
     # "who replied" attribution in the directory breaks. The pointer holds the
     # stable codex- sid the daemon minted, shared by every process in this cwd.
-    # Ordering is safe: a Claude send matches the pid-tree bridge claim above
-    # and never reaches here; a Codex send is a descendant of the daemon (not
-    # a bclaude), so the claim is empty and the cwd-level pointer is correct.
+    #
+    # e-3091: the pointer adoption is now agent_kind-gated to EXCLUDE
+    # claude-code callers. The old comment here claimed "a Claude send matches
+    # the pid-tree bridge claim above and never reaches here" — that invariant
+    # is FALSE at a Claude Code bus.mjs COLD-START: the bridge claim for the
+    # freshly-spawning bus.mjs does not exist yet, so read_bridge_session()
+    # (step 1) returns empty and a Claude Code caller FELL THROUGH to here and
+    # adopted the co-located Codex daemon's codex- sid (observed 2026-07-08:
+    # a Claude Code session ended up on codex-1783398297606 with
+    # agent.kind=claude-code, entangling it with the Codex daemon so DMs to it
+    # vanished). Gating on _caller_agent_kind() != "claude-code" keeps the
+    # e-2531 anti-churn benefit for Codex (and the legacy/unknown fallback)
+    # while a Claude Code caller now skips the pointer and mints its own sv-
+    # below. bus.mjs execSyncs `beacon session id` with CLAUDECODE=1 inherited,
+    # so _caller_agent_kind() resolves "claude-code" at that call site.
     codex_sid = read_codex_session_pointer()
-    if codex_sid:
+    if codex_sid and _caller_agent_kind() != "claude-code":
         return codex_sid
     return get_session_id()
 
