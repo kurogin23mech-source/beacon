@@ -75,6 +75,15 @@ def _import_exec_worker(install_root: Path):
     return ew_mod
 
 
+def _import_desktop_notify(install_root: Path):
+    """Late import of the desktop-notification fallback (= ms-93 / e-2519 AC 3)."""
+    lib_dir = str(install_root / "lib")
+    if lib_dir not in sys.path:
+        sys.path.insert(0, lib_dir)
+    import desktop_notify as dn  # noqa: E402
+    return dn
+
+
 def _load_cloud_config(cwd: Path) -> dict:
     """Read ``<cwd>/.beacon/cloud.json`` + locate the auth token.
 
@@ -476,6 +485,35 @@ def main() -> int:
             )
             app_server_client = None
 
+    # e-2519 AC 3: desktop-notification fallback (SPEC §8-G option C). When no
+    # autonomous transport is active (= not armed / both D and B unavailable),
+    # a DM arriving while the user is away would just sit in the inbox until
+    # their next prompt. Opt-in via BEACON_CODEX_DESKTOP_NOTIFY pops a desktop
+    # alert so the human notices and replies manually (no autonomous action).
+    # Throttled so a burst of DMs is one alert, not a popup storm.
+    notify_enabled = os.environ.get(
+        "BEACON_CODEX_DESKTOP_NOTIFY", ""
+    ).strip() in ("1", "true", "yes", "on")
+    dn = None
+    if notify_enabled and app_server_client is None:
+        try:
+            dn = _import_desktop_notify(install_root)
+            print(
+                "codex-receive-loop: desktop-notification fallback on "
+                "(no autonomous transport; incoming DMs pop a desktop alert).",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"codex-receive-loop: desktop-notify import failed ({exc}); "
+                "continuing with pull-on-prompt only.",
+                file=sys.stderr,
+                flush=True,
+            )
+            dn = None
+    notify_state = {"last_at": 0.0}
+    NOTIFY_MIN_INTERVAL_S = 30.0
+
     def _on_kept_event(evt):
         """Dispatch a kept DM to the app-server child and log the result.
 
@@ -490,6 +528,18 @@ def main() -> int:
         can re-grant.
         """
         if app_server_client is None:
+            # AC 3 fallback: no autonomous transport → best-effort desktop
+            # alert (throttled) so the human notices and can reply manually.
+            if dn is None:
+                return
+            now = time.time()
+            if now - notify_state["last_at"] < NOTIFY_MIN_INTERVAL_S:
+                return
+            notify_state["last_at"] = now
+            payload = (evt or {}).get("payload") or {}
+            sender = str((evt or {}).get("sender_session_id") or "someone")[:16]
+            body = str(payload.get("text") or "").replace("\n", " ")[:80]
+            dn.notify("Beacon: new DM", f"from {sender}: {body}")
             return
         event_id = str((evt or {}).get("event_id") or "")
 
@@ -606,7 +656,11 @@ def main() -> int:
                 api, project_id=project_id,
                 session_id=session.session_id,
                 since=state["since"], cwd=str(cwd),
-                on_kept_event=_on_kept_event if app_server_client else None,
+                on_kept_event=(
+                    _on_kept_event
+                    if (app_server_client is not None or dn is not None)
+                    else None
+                ),
                 persist_kept=app_server_client is None,
             )
             state["since"] = latest

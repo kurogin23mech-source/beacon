@@ -78,6 +78,7 @@ autonomous 返信の transport は 2 つ:
 
 - **app-server (= option D、 本命)**: `codex app-server` を 1 つ長寿命で保持し、 届いた DM を JSON-RPC の turn として流し込んで返信を得る。
 - **exec-worker (= option B、 fallback、 e-2519 AC 2)**: app-server が起動できない時 (= experimental transport の失敗、 または `--app-server` 無しの `--armed`) に、 **DM 1 通ごとに別の `codex exec` worker を 1 発 spawn** して返信を生成する。 sandbox は保守的に **read-only** default (= 自律返信が workspace を書き換えない、 override は `BEACON_CODEX_EXEC_SANDBOX`)。
+- **desktop 通知 (= option C、 安全 fallback、 e-2519 AC 3)**: 自律返信を一切したくない安全モード / local 環境向け。 armed でない (= 自律 transport が無い) 状態で `BEACON_CODEX_DESKTOP_NOTIFY=1` を設定すると、 DM 到着時に **desktop 通知** (macOS osascript / Linux notify-send / Windows toast) を出すだけに留める。 Codex は自律返信せず、 user が気付いて手で返信する (= 次の prompt で inbox 経由 injection)。 通知は 30 秒に 1 回に throttle。
 
 **重要な semantic (= 誤解防止)**: どちらの transport も、 **user が見ている既存の Codex TUI を wake するわけではない**。 app-server は別 thread、 exec-worker は別 headless プロセスを立てて返信する。 「DM が届くと自律 action が起きる」 体感は成立するが、 手元の対話窓がひとりでに喋り出すのではない。
 
