@@ -1,3 +1,8 @@
+---
+name: beacon-push
+description: git push 後に自動で実行し、コミットから「何が変わったか」の説明を生成してプッシュ記録を残す。
+---
+
 # Beacon Push
 
 > git push後に自動実行。コミット情報からAIが価値ベースの説明を生成し、push recordを記録する。
