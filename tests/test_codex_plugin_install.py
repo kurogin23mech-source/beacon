@@ -91,6 +91,24 @@ def test_plugin_skill_present():
     assert "name: beacon-codex-bridge" in body
 
 
+def test_codex_armed_skill_present_and_covers_ac6(tmp_path):
+    """The Codex armed Skill (= e-2519 AC 6) must exist and carry the safety
+    surface: explicit opt-in / budget gate / stop / audit / separate-worker
+    disclosure copy."""
+    skill = PLUGIN_ROOT / "skills" / "beacon-codex-armed" / "SKILL.md"
+    assert skill.is_file()
+    body = skill.read_text(encoding="utf-8")
+    assert "name: beacon-codex-armed" in body
+    # budget gate (max auto replies) + arm/status/stop verbs.
+    assert "bus budget" in body
+    assert "stop" in body
+    # allowed channels + audit trail.
+    assert "auto-execute" in body
+    assert "receive-loop.log" in body
+    # the "spawns a separate worker, does not wake your TUI" disclosure copy.
+    assert "TUI" in body
+
+
 def test_plugin_manifest_does_not_declare_hooks_field():
     """Validator rejects `hooks` in plugin.json (= ms-93 / e-2508 finding).
 
