@@ -72,8 +72,12 @@ def build_exec_argv(
     - ``--json`` + ``--output-last-message`` capture the final agent message
       deterministically (we read the file, not the JSONL stream).
     - ``-s <sandbox>`` keeps the worker conservative (default read-only).
-    - ``-a never`` + ``--skip-git-repo-check`` keep it non-interactive so a
-      headless daemon never blocks on an approval prompt.
+    - ``--skip-git-repo-check`` avoids a hard error outside a git repo.
+
+    ``codex exec`` is already non-interactive (no approval prompts), so no
+    ``-a/--ask-for-approval`` flag is passed — that flag only exists on the
+    top-level ``codex`` command and ``codex exec`` rejects it (verified via a
+    live daemon dogfood, 2026-07-08: ``unexpected argument '-a' found``).
     """
     return [
         codex_bin,
@@ -83,8 +87,6 @@ def build_exec_argv(
         output_path,
         "-s",
         sandbox,
-        "-a",
-        "never",
         "--skip-git-repo-check",
         prompt,
     ]

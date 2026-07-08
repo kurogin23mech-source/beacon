@@ -79,9 +79,12 @@ def test_build_exec_argv_is_json_output_last_message_conservative_sandbox():
     assert "--json" in argv
     assert argv[argv.index("--output-last-message") + 1] == "/tmp/out.txt"
     assert argv[argv.index("-s") + 1] == "read-only"
-    # Non-interactive so a headless daemon never blocks on approval.
-    assert argv[argv.index("-a") + 1] == "never"
     assert "--skip-git-repo-check" in argv
+    # `codex exec` has NO -a/--ask-for-approval flag (it's already
+    # non-interactive); passing it makes the worker fail with
+    # "unexpected argument '-a'" (caught by a live daemon dogfood 2026-07-08).
+    assert "-a" not in argv
+    assert "--ask-for-approval" not in argv
     # Prompt is the final positional argument.
     assert argv[-1] == "the prompt"
 
