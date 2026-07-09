@@ -68,10 +68,11 @@ def _make_fake_bridge(path: Path, calls_path: Path, control_path: Path) -> None:
     path.chmod(0o755)
 
 
-def _make_state_db(codex_home: Path, cwd: Path, tid: str = "thread-abc") -> None:
-    """Write a state_5.sqlite with one fresh thread row for ``cwd``."""
+def _make_state_db(codex_home: Path, cwd: Path, tid: str = "thread-abc",
+                   filename: str = "state_5.sqlite") -> None:
+    """Write a state_<N>.sqlite with one fresh thread row for ``cwd``."""
     codex_home.mkdir(parents=True, exist_ok=True)
-    db = codex_home / "state_5.sqlite"
+    db = codex_home / filename
     con = sqlite3.connect(str(db))
     try:
         con.execute(
@@ -167,6 +168,36 @@ def test_upgrade_on_thread(tmp_path):
     assert "--codex-thread-id" in r and "thread-xyz" in r
     assert "--app-server-url" in r
     assert "--armed" not in r
+
+
+def test_upgrade_on_thread_state_version_bump(tmp_path):
+    # e-2533: a Codex schema bump names the db state_6.sqlite. The watcher must
+    # still find the thread (glob for state_*.sqlite, pick the highest version)
+    # instead of silently failing on a hard-coded state_5.sqlite.
+    ctx = _setup(tmp_path, {"daemon_alive": True})
+    _make_state_db(ctx["codex_home"], ctx["project"], tid="thread-v6",
+                   filename="state_6.sqlite")
+    proc = _run_watcher(ctx, deadline="2")
+    assert proc.returncode == 0, proc.stderr
+    restart_calls = [c for c in _calls(ctx) if c and c[0] == "restart"]
+    assert restart_calls, f"expected an upgrade restart, got {_calls(ctx)}"
+    r = restart_calls[0]
+    assert "--codex-thread-id" in r and "thread-v6" in r
+
+
+def test_upgrade_prefers_highest_state_version(tmp_path):
+    # When both state_5 and state_6 exist (mid-migration), the watcher must
+    # read the newer schema (state_6) so it sees the current thread.
+    ctx = _setup(tmp_path, {"daemon_alive": True})
+    _make_state_db(ctx["codex_home"], ctx["project"], tid="thread-old",
+                   filename="state_5.sqlite")
+    _make_state_db(ctx["codex_home"], ctx["project"], tid="thread-new",
+                   filename="state_6.sqlite")
+    proc = _run_watcher(ctx, deadline="2")
+    assert proc.returncode == 0, proc.stderr
+    restart_calls = [c for c in _calls(ctx) if c and c[0] == "restart"]
+    assert restart_calls, f"expected an upgrade restart, got {_calls(ctx)}"
+    assert "thread-new" in restart_calls[0]
 
 
 def test_upgrade_passes_armed(tmp_path):

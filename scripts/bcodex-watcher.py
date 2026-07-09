@@ -10,8 +10,10 @@ DMs reach the session, using the two-phase design agreed by two AI bodies
    receive daemon in pull-only mode (no ``--app-server``, no thread id needed).
    DMs are delivered from the very first moment, closing the pre-first-turn
    drop window (= proposal 3, the 本命).
-2. **upgrade on thread** — once the Codex TUI thread appears in
-   ``state_5.sqlite``, ``restart`` the daemon with ``--app-server`` +
+2. **upgrade on thread** — once the Codex TUI thread appears in the Codex
+   state db (``state_<N>.sqlite``, resolved by glob so a schema version bump
+   does not silently break detection — e-2533), ``restart`` the daemon with
+   ``--app-server`` +
    ``--codex-thread-id`` so pushed DMs *wake* Codex, not just queue.
 
 Robustness (the whole point of this rewrite — the old inline watcher fired a
@@ -63,10 +65,9 @@ class Watcher:
         override = os.environ.get("BCODEX_WATCHER_BACKOFF", "").strip()
         self.backoff_override = float(override) if override else None
 
-        codex_home = Path(
+        self.codex_home = Path(
             os.environ.get("CODEX_HOME") or Path.home() / ".codex"
         )
-        self.db = codex_home / "state_5.sqlite"
 
         self.log_path = Path(self.cwd) / ".beacon" / "codex" / "bcodex-watcher.log"
         try:
@@ -157,11 +158,42 @@ class Watcher:
             return False
         return "daemon:  running" in (proc.stdout or "")
 
+    def _resolve_state_db(self) -> Path | None:
+        """Resolve the Codex thread-state sqlite, tolerating schema version bumps.
+
+        Codex names this file ``state_<N>.sqlite`` (e.g. ``state_5.sqlite``);
+        a schema bump increments N. Hard-coding one N means a single bump
+        (state_6.sqlite) silently breaks thread detection — the daemon never
+        upgrades to app-server dispatch and DMs stop waking Codex (= e-2533).
+        So glob every ``state_*.sqlite`` and pick the highest version number,
+        falling back to the legacy fixed name, then an unsuffixed variant.
+        """
+        candidates: list[tuple[int, Path]] = []
+        try:
+            for p in self.codex_home.glob("state_*.sqlite"):
+                stem = p.name[len("state_"):-len(".sqlite")]
+                try:
+                    candidates.append((int(stem), p))
+                except ValueError:
+                    continue
+        except OSError:
+            candidates = []
+        if candidates:
+            candidates.sort(key=lambda t: t[0], reverse=True)
+            return candidates[0][1]
+        # fallback chain (= 複数 path 試行): legacy fixed name, then unsuffixed.
+        for name in ("state_5.sqlite", "state.sqlite"):
+            p = self.codex_home / name
+            if p.is_file():
+                return p
+        return None
+
     def latest_thread(self) -> str:
-        if not self.db.is_file():
+        db = self._resolve_state_db()
+        if db is None:
             return ""
         try:
-            con = sqlite3.connect(str(self.db))
+            con = sqlite3.connect(str(db))
         except sqlite3.Error as exc:
             self.log(f"sqlite connect failed: {exc}")
             return ""
