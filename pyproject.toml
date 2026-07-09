@@ -63,6 +63,15 @@ cloud = [
     "google-auth-oauthlib>=1.2.0",
     "google-auth>=2.29.0",
 ]
+# Codex DM-wake (= ms-93). The receive daemon's url transport
+# (codex-receive-loop --app-server-url ws://...) needs `websockets` to wake the
+# Codex TUI on DM receipt; without it DMs still arrive but only catch up on the
+# next prompt (pull-only). NOTE: the daemon runs under system python3, so this
+# extra alone does not guarantee the daemon's interpreter has it — bin/bcodex
+# also pre-flight-checks and warns at launch (e-2536).
+codex = [
+    "websockets>=12",
+]
 dev = [
     "build>=1.0",
     "pytest>=7.0",
