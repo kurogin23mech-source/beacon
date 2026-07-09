@@ -48,3 +48,32 @@ def test_remote_connect_raises_max_size(monkeypatch):
     assert captured["kwargs"]["max_size"] == ac._WS_MAX_SIZE
     # ping_interval must stay disabled (pre-existing keepalive behavior).
     assert captured["kwargs"].get("ping_interval", "unset") is None
+
+
+def test_remote_connect_missing_websockets_raises_actionable(monkeypatch):
+    # e-2536: when `websockets` is absent (fresh install under the system
+    # python), the remote wake path must fail with a specific, actionable error
+    # instead of a generic ImportError that the caller swallows into a silent
+    # pull-only degradation.
+    ac = _load_client()
+
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("websockets"):
+            raise ModuleNotFoundError(f"No module named '{name}'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(ModuleNotFoundError) as excinfo:
+        ac.start_app_server(remote_url="ws://127.0.0.1:12345")
+
+    msg = str(excinfo.value)
+    assert "websockets" in msg
+    assert "pip install websockets" in msg
+    # The message must name the silent failure mode so the reader understands
+    # what breaks, not just what to install.
+    assert "pull-only" in msg

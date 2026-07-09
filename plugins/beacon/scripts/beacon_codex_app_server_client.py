@@ -131,7 +131,25 @@ def start_app_server(
             raise ValueError(
                 "remote_url currently supports ws:// or wss:// app-server endpoints"
             )
-        from websockets.sync.client import connect
+        try:
+            from websockets.sync.client import connect
+        except ModuleNotFoundError as exc:
+            # e-2536: the standard same-machine wake path uses --app-server-url
+            # ws://127.0.0.1 (bin/bcodex → watcher.upgrade()), which needs the
+            # `websockets` package. Beacon declares no dependencies, and the
+            # daemon runs under the system python (/usr/bin/python3), so a fresh
+            # install may lack websockets entirely. Without this raise the caller
+            # swallows the ImportError into a generic "app-server start failed"
+            # and DMs silently degrade to pull-only (received, never woken).
+            # Make the failure specific and actionable instead.
+            raise ModuleNotFoundError(
+                "the 'websockets' package is required to wake Codex over an "
+                f"app-server WebSocket URL ({remote_url}), but it is not "
+                f"installed for this Python ({sys.executable}). Without it, DMs "
+                "are received but only caught up on the next prompt (pull-only), "
+                "never woken live. Install it with: "
+                f"{sys.executable} -m pip install websockets"
+            ) from exc
 
         # A Codex turn can keep the shared app-server busy longer than the
         # websockets client's default 20-second keepalive window. In that
