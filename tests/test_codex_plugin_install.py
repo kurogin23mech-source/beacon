@@ -152,11 +152,12 @@ def test_marketplace_plugin_source_points_at_bundled_plugin():
     assert (resolved / ".codex-plugin" / "plugin.json").is_file()
 
 
-def test_marketplace_authentication_field_omitted():
+def test_marketplace_authentication_is_valid_variant_or_omitted():
     """`policy.authentication` only accepts ON_INSTALL / ON_USE — writing
     `NONE` makes `codex plugin marketplace add` fail with `unknown variant`.
-    Beacon needs no install-time auth, so the field must be omitted entirely.
-    """
+    Beacon needs no install-time auth so it omits the field entirely; this
+    test pins the regression for any plugin: if the field is present at all,
+    it must be a valid variant (never `NONE`)."""
     data = json.loads(MARKETPLACE_MANIFEST.read_text("utf-8"))
     for p in data.get("plugins") or []:
         policy = p.get("policy") or {}

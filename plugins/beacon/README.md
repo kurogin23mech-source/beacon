@@ -35,15 +35,21 @@ bridge Skill は実行時に `$BEACON_INSTALL_ROOT/plugins/beacon/scripts/beacon
 を呼び戻します (daemon 本体 `scripts/codex-receive-loop.py` と `lib/` は
 beacon checkout 側にしか無いため)。plugin install は「Skill を Codex に
 発見させる」役割で、実行実体は checkout 側という二層構造です。だから
-marketplace source を checkout の絶対パスにするのが最も素直で、コピー由来の
-drift も起きません。
+`codex plugin marketplace add` に渡す引数を beacon checkout そのもの
+(例: `~/tools/beacon`) にするのが最も素直です。目録内の plugin source
+(`./plugins/beacon`) も同じ checkout 内を相対で指すため、install しても
+plugin 本体のコピーが repo から離れず、drift が起きません。
+
+> 用語: 「`marketplace add` の引数」= 棚として登録する checkout のパス
+> (実行時に絶対パスへ解決される)。「目録内の `source.path`」= marketplace root
+> からの相対パス (`./plugins/beacon`)。両者は別物なので混同しないこと。
 
 ## Update / Uninstall
 
 ```bash
 # plugin.json の version を上げた後、install 済みを更新
 codex plugin marketplace upgrade beacon      # git marketplace の場合のみ
-codex plugin add beacon@beacon               # local marketplace は再 add で最新化
+codex plugin add beacon@beacon               # local marketplace は再 add で最新化 (※ version bump 時の取り込みは未検証)
 
 # 外す
 $beacon-codex-bridge uninstall               # hook 除去 + daemon stop
