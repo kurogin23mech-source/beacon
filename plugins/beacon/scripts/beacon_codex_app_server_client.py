@@ -523,13 +523,30 @@ class BridgeAppServerClient:
             input_payload=text_input(text),
         )
 
-    def dispatch_dm_and_wait(self, event: dict, *, timeout_s: float = 60.0) -> dict:
-        """Dispatch a DM and drain notifications until the turn is idle."""
+    def dispatch_dm_and_wait(
+        self, event: dict, *, timeout_s: float = 60.0, on_dispatched=None
+    ) -> dict:
+        """Dispatch a DM and drain notifications until the turn is idle.
+
+        ``on_dispatched`` (= optional ``callable()``) fires right after the DM
+        is handed to the app-server turn (= injected via ``dispatch_dm``) and
+        before we block on the turn completing. The receive loop uses this
+        seam to stamp the ``opened`` receipt at read-time rather than
+        turn-completion time (= ms-93 / e-3140): ``opened`` is a read-receipt,
+        and the AI reads the DM when it enters the turn, not when the
+        (arbitrarily long) turn finishes. A failed inject (= ``dispatch_dm``
+        raising) happens before ``on_dispatched``, so ``opened`` is never
+        stamped for a DM that did not reach a turn. ``on_dispatched`` must be
+        best-effort (= not raise); a receipt-stamp failure must not abort the
+        turn.
+        """
         if self.handle is None or self.thread_id is None:
             raise RuntimeError(
                 "BridgeAppServerClient: call ensure_started() before dispatch_dm_and_wait()"
             )
         rsp = self.dispatch_dm(event)
+        if on_dispatched is not None:
+            on_dispatched()
         turn_id = extract_turn_id(rsp)
         rsp.setdefault("_notifications", [])
         rsp["_notifications"].extend(

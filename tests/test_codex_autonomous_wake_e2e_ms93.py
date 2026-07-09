@@ -73,10 +73,15 @@ class _FakeAppServer:
         self._raise = raise_exc
         self.dispatched = []
 
-    def dispatch_dm_and_wait(self, evt):
+    def dispatch_dm_and_wait(self, evt, *, on_dispatched=None):
         self.dispatched.append(evt)
+        # A transport error models the inject (dispatch_dm) failing, which in
+        # the real client raises before on_dispatched → opened not stamped.
         if self._raise is not None:
             raise self._raise
+        # Inject succeeded → stamp opened at read-time, then the turn completes.
+        if on_dispatched is not None:
+            on_dispatched()
         return {
             "_notifications": [
                 {
@@ -159,7 +164,9 @@ def test_reply_reconstructs_text_from_streamed_deltas():
     crl = _load_receive_loop_module()
 
     class _DeltaApp:
-        def dispatch_dm_and_wait(self, evt):
+        def dispatch_dm_and_wait(self, evt, *, on_dispatched=None):
+            if on_dispatched is not None:
+                on_dispatched()
             return {
                 "_notifications": [
                     {"method": "item/agentMessage/delta", "params": {"delta": "par"}},
@@ -281,3 +288,71 @@ def test_dispatch_transport_error_propagates_for_reconnect():
             sender_session_id="sv-self",
             run_reply=_ReplyCapture(),
         )
+
+
+# ------------------------------------------------------------------ #
+# opened is a read-receipt: acked at turn-entry, not turn-completion
+# (= ms-93 / e-3140)
+# ------------------------------------------------------------------ #
+
+
+def test_opened_acked_at_inject_before_turn_completes():
+    """``opened`` must fire when the DM enters the turn (= read-time), not
+    after the arbitrarily-long turn finishes.
+
+    Regression guard for e-3140: the app-server wake path used to ack
+    ``opened`` only after ``dispatch_dm_and_wait`` returned, so a sender's
+    receipt check saw ``opened ✗`` for the whole turn duration (~60s in the
+    dogfood). We pin the ordering: opened is stamped via the ``on_dispatched``
+    seam before the turn (drain) completes.
+    """
+    crl = _load_receive_loop_module()
+    order = []
+
+    class _OrderedApp:
+        def dispatch_dm_and_wait(self, evt, *, on_dispatched=None):
+            # inject → opened acked at read-time...
+            if on_dispatched is not None:
+                on_dispatched()
+            # ...then the turn "completes" (drain returns) afterwards.
+            order.append("turn-complete")
+            return {
+                "_notifications": [
+                    {
+                        "method": "item/completed",
+                        "params": {"item": {"type": "agentMessage", "text": "hi"}},
+                    },
+                ]
+            }
+
+    crl.dispatch_kept_event(
+        _make_evt(event_id="evt-order"),
+        app_server_client=_OrderedApp(),
+        agent_text_fn=_real_agent_text_fn(),
+        ack_fn=lambda eid: order.append(f"opened:{eid}"),
+        armed=False,
+        sender_session_id="sv-self",
+        run_reply=_ReplyCapture(),
+    )
+
+    assert order == ["opened:evt-order", "turn-complete"]
+
+
+def test_failed_inject_does_not_stamp_opened():
+    """If the DM never reaches a turn (= inject/transport error), ``opened``
+    must not be stamped (= a receipt lie would be worse than a missing one).
+    """
+    crl = _load_receive_loop_module()
+    acked = []
+    app = _FakeAppServer(raise_exc=ConnectionError("websocket closed"))
+    with pytest.raises(ConnectionError):
+        crl.dispatch_kept_event(
+            _make_evt(event_id="evt-fail"),
+            app_server_client=app,
+            agent_text_fn=_real_agent_text_fn(),
+            ack_fn=lambda eid: acked.append(eid),
+            armed=True,
+            sender_session_id="sv-self",
+            run_reply=_ReplyCapture(),
+        )
+    assert acked == []
