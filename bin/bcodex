@@ -214,6 +214,19 @@ if ! "$WS_PROBE_PY" -c "import websockets" >/dev/null 2>&1; then
     echo "[bcodex]   有効化: $WS_PROBE_PY -m pip install --user websockets" >&2
 fi
 
+# e-3121: version / environment skew. If PATH carries multiple `beacon` versions
+# (or a running daemon is on a different version), the user can end up "動いて
+# いるようで別物を見ている" — commands and daemon disagree. Surface it at launch;
+# best-effort and fail-open (never blocks). Detection logic lives in
+# lib/version_skew.py so it stays unit-testable.
+if [ -f "$INSTALL_ROOT/lib/version_skew.py" ]; then
+    "$WS_PROBE_PY" "$INSTALL_ROOT/lib/version_skew.py" \
+        --current-version "$("$BEACON_BIN_SELECTED" --version 2>/dev/null | tail -1)" \
+        2>/dev/null | while IFS= read -r __sk; do
+        [ -n "$__sk" ] && echo "[bcodex] $__sk" >&2
+    done
+fi
+
 # DM-wake watcher (ms-93 / e-2534 + e-2535). Extracted to a standalone,
 # unit-testable script (= scripts/bcodex-watcher.py). It brings the receive
 # daemon up pull-only at t0 (DMs delivered before the first Codex thread
