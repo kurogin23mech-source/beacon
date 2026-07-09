@@ -143,14 +143,25 @@ class ExecWorkerClient:
             timeout=timeout_s,
         )
 
-    def dispatch_dm_and_wait(self, event: dict, *, timeout_s: float = None) -> dict:
+    def dispatch_dm_and_wait(
+        self, event: dict, *, timeout_s: float = None, on_dispatched=None
+    ) -> dict:
         """Spawn a one-shot worker for this DM and return its reply.
 
         Returns the same ``{"_notifications": [...]}`` shape as the app-server
         path. Raises on a failed worker so the daemon's dispatch error handler
         runs (persist for the hook fallback); reply-send gating is the caller's.
+
+        ``on_dispatched`` (= optional ``callable()``) fires once the DM has
+        been handed to a worker (= injected / read), before we block on the
+        worker completing — the same read-receipt seam as the app-server path
+        (= ms-93 / e-3140). ``opened`` is a read-receipt, so it fires when the
+        worker starts on the DM, not when the (arbitrarily long) worker turn
+        finishes. Must be best-effort (= not raise).
         """
         prompt = build_exec_prompt(event)
+        if on_dispatched is not None:
+            on_dispatched()
         with tempfile.TemporaryDirectory(prefix="beacon-codex-exec-") as tmp:
             out_path = str(Path(tmp) / "last-message.txt")
             argv = build_exec_argv(

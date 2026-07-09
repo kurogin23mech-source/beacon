@@ -411,12 +411,15 @@ def dispatch_kept_event(
     daemon closure delegates here; a test drives it with fakes.
 
     Steps:
-      1. dispatch the DM to the app-server child and wait for the turn to
-         idle (``app_server_client.dispatch_dm_and_wait``)
+      1. dispatch the DM to the app-server child, acking ``opened`` at
+         read-time (= the moment the DM enters the turn, via the
+         ``on_dispatched`` seam), then wait for the turn to idle
+         (``app_server_client.dispatch_dm_and_wait``). ``opened`` is a
+         read-receipt, so it fires when the AI reads the DM (= turn entry),
+         not when the arbitrarily-long turn finishes (= ms-93 / e-3140).
       2. reconstruct the agent reply text from streamed notifications
          (``agent_text_fn``)
-      3. ack the event as ``opened`` (``ack_fn``)
-      4. if ``armed``, build the reply argv (``build_dm_reply_args``) and
+      3. if ``armed``, build the reply argv (``build_dm_reply_args``) and
          shell it out via ``run_reply``
 
     Dependency injection (= keeps this pure of real Codex / bus / network):
@@ -438,13 +441,20 @@ def dispatch_kept_event(
     if run_reply is None:
         run_reply = _default_run_reply
 
-    # (1)+(2): may raise → daemon reconnects the transport for the next DM.
-    rsp = app_server_client.dispatch_dm_and_wait(evt)
-    agent_text = agent_text_fn((rsp or {}).get("_notifications") or [])
     event_id = str((evt or {}).get("event_id") or "")
 
-    # (3): ack as opened (= the AI "saw" the DM).
-    ack_fn(event_id)
+    # (1) dispatch (= inject) → stamp ``opened`` at read-time via the
+    #     ``on_dispatched`` seam (= ms-93 / e-3140: ``opened`` is a
+    #     read-receipt; the AI reads the DM when it enters the turn, not when
+    #     the arbitrarily-long turn ends), then (2) drain until idle.
+    #     ``dispatch_dm_and_wait`` may raise → daemon reconnects the transport
+    #     for the next DM. A failed inject fires before ``on_dispatched``, so
+    #     ``opened`` is not stamped for a DM that never reached a turn.
+    rsp = app_server_client.dispatch_dm_and_wait(
+        evt, on_dispatched=lambda: ack_fn(event_id)
+    )
+    agent_text = agent_text_fn((rsp or {}).get("_notifications") or [])
+
     result = {
         "agent_text": agent_text,
         "acked": True,
