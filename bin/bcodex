@@ -199,6 +199,21 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# e-2536 (B-2): the DM-wake url transport (codex-receive-loop --app-server-url
+# ws://...) needs the Python `websockets` package under the SAME python3 that
+# runs the receive daemon. Beacon declares it only as the `codex` extra and the
+# daemon runs under system python3, so a fresh install can lack it — in which
+# case DMs are received but wake silently degrades to pull-only (never woken
+# live). Pre-flight-check the daemon's python here and surface it loudly at
+# launch instead of leaving it buried in the daemon log.
+# The probe interpreter is overridable (default python3, = what the daemon uses)
+# so tests can force both branches deterministically.
+WS_PROBE_PY="${BEACON_CODEX_WS_PROBE_PY:-python3}"
+if ! "$WS_PROBE_PY" -c "import websockets" >/dev/null 2>&1; then
+    echo "[bcodex] ⚠ websockets が見つかりません ($WS_PROBE_PY)。DM は届きますが、Codex を起こす wake は pull-only に降格します（次の入力までキュー）。" >&2
+    echo "[bcodex]   有効化: $WS_PROBE_PY -m pip install --user websockets" >&2
+fi
+
 # DM-wake watcher (ms-93 / e-2534 + e-2535). Extracted to a standalone,
 # unit-testable script (= scripts/bcodex-watcher.py). It brings the receive
 # daemon up pull-only at t0 (DMs delivered before the first Codex thread

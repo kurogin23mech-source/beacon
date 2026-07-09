@@ -131,6 +131,48 @@ def test_bcodex_opt_out_launches_plain_codex(tmp_path):
     assert "DM opt-out" in proc.stderr
 
 
+def _make_ws_probe(tmp_path: Path, *, present: bool) -> Path:
+    """A stub interpreter for the websockets pre-flight probe (e-2536 B-2).
+
+    bcodex runs ``$BEACON_CODEX_WS_PROBE_PY -c "import websockets"``. Exit 0
+    simulates websockets present, exit 1 simulates it absent — so both branches
+    are testable regardless of whether the test env actually has websockets.
+    """
+    probe = tmp_path / ("ws_probe_present" if present else "ws_probe_missing")
+    probe.write_text(
+        f"#!/usr/bin/env bash\nexit {0 if present else 1}\n", encoding="utf-8"
+    )
+    probe.chmod(0o755)
+    return probe
+
+
+def test_bcodex_warns_when_websockets_missing(tmp_path):
+    # e-2536 B-2: a fresh install whose daemon python lacks websockets must be
+    # warned at launch that DM wake silently degrades to pull-only.
+    probe = _make_ws_probe(tmp_path, present=False)
+    proc, _calls, _project = _run(
+        tmp_path,
+        args=["--port", "39994"],
+        extra_env={"BEACON_CODEX_WS_PROBE_PY": str(probe)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "websockets" in proc.stderr
+    assert "pull-only" in proc.stderr
+    assert "pip install" in proc.stderr
+
+
+def test_bcodex_no_websockets_warning_when_present(tmp_path):
+    # When the daemon python has websockets, no scary wake warning is emitted.
+    probe = _make_ws_probe(tmp_path, present=True)
+    proc, _calls, _project = _run(
+        tmp_path,
+        args=["--port", "39995"],
+        extra_env={"BEACON_CODEX_WS_PROBE_PY": str(probe)},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "websockets が見つかりません" not in proc.stderr
+
+
 def _beacon_calls(tmp_path: Path) -> list[list[str]]:
     p = tmp_path / "beacon_calls.json"
     if not p.exists():
