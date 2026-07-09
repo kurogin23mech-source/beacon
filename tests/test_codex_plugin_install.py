@@ -122,6 +122,49 @@ def test_plugin_manifest_does_not_declare_hooks_field():
 
 
 # ------------------------------------------------------------------ #
+# 1b. marketplace manifest (= ms-93 / e-2512 install path)
+# ------------------------------------------------------------------ #
+
+MARKETPLACE_MANIFEST = REPO_ROOT / ".agents" / "plugins" / "marketplace.json"
+
+
+def test_marketplace_manifest_present_and_names_beacon():
+    """The repo doubles as a Codex marketplace: `codex plugin marketplace add
+    <checkout>` reads this manifest, and the name becomes the install
+    identifier `beacon@<name>`."""
+    assert MARKETPLACE_MANIFEST.is_file()
+    data = json.loads(MARKETPLACE_MANIFEST.read_text("utf-8"))
+    assert data.get("name") == "beacon"
+
+
+def test_marketplace_plugin_source_points_at_bundled_plugin():
+    """The listed plugin's source.path must resolve to plugins/beacon so that
+    `codex plugin add` finds the bundled plugin (no copy / no drift)."""
+    data = json.loads(MARKETPLACE_MANIFEST.read_text("utf-8"))
+    plugins = data.get("plugins") or []
+    beacon = next((p for p in plugins if p.get("name") == "beacon"), None)
+    assert beacon is not None, "marketplace must list a `beacon` plugin"
+    src = beacon.get("source") or {}
+    assert src.get("source") == "local"
+    # path is relative to the marketplace root (= repo root).
+    resolved = (MARKETPLACE_MANIFEST.parent.parent.parent / src.get("path", "")).resolve()
+    assert resolved == PLUGIN_ROOT
+    assert (resolved / ".codex-plugin" / "plugin.json").is_file()
+
+
+def test_marketplace_authentication_field_omitted():
+    """`policy.authentication` only accepts ON_INSTALL / ON_USE — writing
+    `NONE` makes `codex plugin marketplace add` fail with `unknown variant`.
+    Beacon needs no install-time auth, so the field must be omitted entirely.
+    """
+    data = json.loads(MARKETPLACE_MANIFEST.read_text("utf-8"))
+    for p in data.get("plugins") or []:
+        policy = p.get("policy") or {}
+        if "authentication" in policy:
+            assert policy["authentication"] in ("ON_INSTALL", "ON_USE")
+
+
+# ------------------------------------------------------------------ #
 # 2. install-hook / uninstall-hook
 # ------------------------------------------------------------------ #
 
