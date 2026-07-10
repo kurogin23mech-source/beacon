@@ -208,5 +208,107 @@ def test_beacon_bus_send_missing_channel_exits_nonzero():
     )
 
 
+# ---------------------------------------------------------------------------
+# Unknown-flag footgun (ms-89 / e-3163).
+#
+# 2026-07-09 Codex operator dogfood: `beacon bus send --to <sid> --body "..."`
+# sent an EMPTY DM. The generic bus arg-parsing loop in bin/beacon ended with
+# `*) shift ;;`, which silently discarded any unrecognized token — so `--body`
+# (a typo for the JSON `--payload`) was eaten, `--payload` was never set, and an
+# empty-payload event went out with exit 0. No error, no warning, message lost.
+#
+# The fix rejects unknown `--flags` and stray positionals with a helpful error
+# and exit 2, so a mistyped flag can never silently drop the message body.
+# ---------------------------------------------------------------------------
+
+
+def _run_bus(*args: str) -> subprocess.CompletedProcess:
+    env = os.environ.copy()
+    env["BEACON_BUS_SKIP_TO_CHECK"] = "1"
+    env["BEACON_BUS_NO_LIVE_CHECK"] = "1"
+    return subprocess.run(
+        [str(BEACON_BIN), "bus", *args],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_bus_send_unknown_flag_errors_not_silently_dropped():
+    """The reported footgun: `--body` must be rejected, not eaten."""
+    proc = _run_bus("send", "--channel", "dm", "--to", "sv-fake",
+                    "--body", "hello")
+    assert proc.returncode == 2, (
+        f"Unknown flag must exit 2, got {proc.returncode}.\n"
+        f"stdout: {proc.stdout!r}\nstderr: {proc.stderr!r}"
+    )
+    assert "--body" in proc.stderr and "unknown flag" in proc.stderr.lower(), (
+        f"Error must name the offending flag. stderr: {proc.stderr!r}"
+    )
+    # The message must NOT have been sent (no event / payload path reached).
+    assert "event" not in proc.stdout.lower()
+
+
+def test_bus_send_arbitrary_typo_flag_rejected():
+    proc = _run_bus("send", "--channel", "dm", "--txt", "hi")
+    assert proc.returncode == 2
+    assert "--txt" in proc.stderr
+
+
+def test_bus_send_stray_positional_rejected():
+    proc = _run_bus("send", "--channel", "dm", "bare-positional")
+    assert proc.returncode == 2
+    assert "bare-positional" in proc.stderr
+
+
+def test_bus_help_still_exits_zero():
+    """`-h` / `--help` must route to usage, not the unknown-flag error."""
+    proc = _run_bus("--help")
+    assert proc.returncode == 0, (
+        f"help must exit 0, got {proc.returncode}. stderr: {proc.stderr!r}"
+    )
+    assert "Usage: beacon bus send" in proc.stdout
+
+
+def test_bus_known_flags_not_rejected_by_loop():
+    """Recognized flags must pass the parse loop and reach the Python layer.
+
+    We use `bus budget show` (no network) to prove a valid invocation is not
+    caught by the new unknown-flag guard. A parse-layer rejection would exit 2
+    with 'unknown flag'; the real command prints budget state or a benign
+    'no budget' line.
+    """
+    proc = _run_bus("budget", "show")
+    assert "unknown flag" not in proc.stderr.lower()
+    assert "unexpected argument" not in proc.stderr.lower()
+
+
+def test_bin_beacon_bus_loop_rejects_unknown_flags():
+    """Structural guard: the generic bus loop must not resurrect `*) shift`.
+
+    The pre-fix catch-all silently dropped tokens. Pin that the loop now has
+    an explicit unknown-flag arm so a future refactor can't reintroduce the
+    silent-drop footgun.
+    """
+    src = BEACON_BIN.read_text(encoding="utf-8")
+    marker = "--no-envelope)    _bus_no_envelope="
+    assert marker in src, (
+        f"Could not find the bus flag loop marker `{marker}` in bin/beacon — "
+        "the file layout changed; update this test."
+    )
+    after = src.split(marker, 1)[1]
+    head = "\n".join(after.splitlines()[:30])
+    assert "unknown flag" in head, (
+        "Regression: the bus flag loop no longer rejects unknown flags. "
+        "Restore the `-*)` arm that errors on typos (see ms-89 / e-3163)."
+    )
+    # The bare silent-drop must be gone from this stretch.
+    assert "*)                shift ;;" not in head, (
+        "Regression: the silent `*) shift ;;` catch-all is back on the bus "
+        "flag loop — unknown flags will be dropped again."
+    )
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

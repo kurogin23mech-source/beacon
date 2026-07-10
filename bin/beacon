@@ -4081,7 +4081,29 @@ EOF
                     fi
                     shift 2 ;;
                 --no-envelope)    _bus_no_envelope="1"; shift ;;
-                *)                shift ;;
+                # Route help to the usage block via the dispatch `*)` arm so we
+                # don't duplicate the heredoc. `__help__` matches no real sub.
+                -h|--help)        _bus_sub="__help__"; shift ;;
+                # ms-89: reject unknown flags instead of silently dropping them.
+                # The pre-fix `*) shift ;;` swallowed typos like `--body`/`--text`,
+                # so `beacon bus send --to X --body "hi"` posted an EMPTY payload
+                # with no error (2026-07-09 Codex operator footgun: an empty DM was
+                # sent because --body was discarded and --payload never set). Every
+                # legitimate bus flag is enumerated above, and the sub-subcommands
+                # (budget/auto-execute) plus `status <event_id>` are extracted
+                # before this loop, so any token reaching here is a user error —
+                # surface it loudly rather than eating the message body.
+                -*)
+                    echo "Error: unknown flag '$1' for 'beacon bus ${_bus_sub}'." >&2
+                    echo "       Run 'beacon bus' (no subcommand) for the full flag list." >&2
+                    echo "       Message text goes in --payload '<json>', e.g. --payload '{\"text\":\"hi\"}'; there is no --body/--text flag." >&2
+                    exit 2
+                    ;;
+                *)
+                    echo "Error: unexpected argument '$1' for 'beacon bus ${_bus_sub}'." >&2
+                    echo "       'beacon bus' subcommands take flags; only 'beacon bus status <event_id>' takes a positional argument." >&2
+                    exit 2
+                    ;;
             esac
         done
         case "$_bus_sub" in
