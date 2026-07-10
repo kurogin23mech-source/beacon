@@ -1,0 +1,8 @@
+triggers:
+  - "/beacon-session-fork"
+  - "/beacon-fork"
+  - "セッションを fork"
+  - "別セッションを立てる"
+  - "並列セッション"
+  - "fork session"
+  - "parallel session"
