@@ -1285,3 +1285,32 @@ def test_build_codex_plugin_skills_check_mode_is_green():
     assert proc.returncode == 0, (
         f"build-codex-plugin-skills.py --check failed:\n{proc.stdout}\n{proc.stderr}"
     )
+
+
+# ---------------------------------------------------------------------------
+# CODEX_HOME resolution (ms-93 / e-3202).
+#
+# The bridge resolved hooks.json / config.toml at a hardcoded ~/.codex,
+# ignoring $CODEX_HOME. An isolated dogfood env (CODEX_HOME=/tmp/...) therefore
+# read the developer's REAL ~/.codex — `status` reported the live daemon as if
+# it were the isolated one, making a clean-env dogfood impossible. Paths must
+# follow $CODEX_HOME first, falling back to ~/.codex.
+# ---------------------------------------------------------------------------
+
+
+def test_codex_home_env_relocates_hooks_and_config(monkeypatch, tmp_path):
+    isolated = tmp_path / "isolated-codex"
+    monkeypatch.setenv("CODEX_HOME", str(isolated))
+    bridge = _load_bridge_module()  # constants evaluate at load → read env now
+    assert bridge._codex_home() == isolated.resolve()
+    assert bridge.CODEX_HOOKS_PATH == isolated.resolve() / "hooks.json"
+    assert bridge.CODEX_CONFIG_PATH == isolated.resolve() / "config.toml"
+
+
+def test_codex_home_falls_back_to_dot_codex_when_unset(monkeypatch):
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    bridge = _load_bridge_module()
+    expected = Path(os.path.expanduser("~/.codex"))
+    assert bridge._codex_home() == expected
+    assert bridge.CODEX_HOOKS_PATH == expected / "hooks.json"
+    assert bridge.CODEX_CONFIG_PATH == expected / "config.toml"
