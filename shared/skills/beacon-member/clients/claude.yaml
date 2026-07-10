@@ -1,0 +1,8 @@
+triggers:
+  - "/beacon-member"
+  - "member 招待"
+  - "メンバー招待"
+  - "role 変更"
+  - "役割変更"
+  - "member 削除"
+  - "invite member"
