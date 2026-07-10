@@ -1,0 +1,5 @@
+triggers:
+  - "/beacon-drift-check"
+  - "drift をチェック"
+  - "整合性チェック"
+  - "Skill 整合性を見て"

@@ -1,0 +1,5 @@
+triggers:
+  - "/beacon-log"
+  - "beacon に記録"
+  - "コミットを記録"
+  - "進捗を更新"
