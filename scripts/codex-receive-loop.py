@@ -681,6 +681,7 @@ def main() -> int:
                     api, project_id=project_id,
                     session_id=session.session_id, actor=actor,
                     poll_interval_ms=poll_secs * 1000,
+                    cwd=str(cwd),
                 )
                 if ok:
                     cs.heartbeat_codex_session(session_file)
@@ -731,6 +732,7 @@ def main() -> int:
             api, project_id=project_id,
             session_id=session.session_id, actor=actor,
             poll_interval_ms=poll_secs * 1000, shutdown=True,
+            cwd=str(cwd),
         )
         if app_server_client is not None:
             try:

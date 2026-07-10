@@ -5359,6 +5359,11 @@ function _renderSettingsAgentsTab() {
     const email = (s.actor && s.actor.email) || '';
     const proj = s.project_name || s.project_id || '';
     const ts = (s.last_active || s.created_at || '').slice(0, 16).replace('T', ' ');
+    // e-2516: surface the working directory so a user running several
+    // sessions (esp. multiple Codex daemons in different cwds) can tell them
+    // apart. Generic across agent kinds — sv- (Claude Code) and codex- rows
+    // both carry a top-level `cwd` now.
+    const cwd = s.cwd || '';
     const treksForSession = userTreks(email);
     const trekLabel = treksForSession.length
       ? treksForSession.map(t => t.title).join(' / ')
@@ -5366,7 +5371,7 @@ function _renderSettingsAgentsTab() {
     const muted = !!s.shutdown;
     return `
       <tr class="${muted ? 'muted' : ''}">
-        <td><span class="session-avatar"></span><span class="session-id">${esc(sidShort)}</span></td>
+        <td><span class="session-avatar"></span><span class="session-id">${esc(sidShort)}</span>${cwd ? `<div class="session-cwd" style="color:var(--text-dim);font-size:0.78em;margin-top:2px;">${esc(cwd)}</div>` : ''}</td>
         <td>${esc(proj)}</td>
         <td>${esc(trekLabel)}</td>
         <td>${esc(ts)}</td>

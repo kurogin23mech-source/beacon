@@ -138,6 +138,40 @@ class TestHeartbeat:
         _path, body = api.put_calls[0]
         assert "agent" not in body
 
+    def test_stamps_top_level_cwd_when_supplied(self):
+        # e-2516: the session doc must carry a top-level ``cwd`` (mirroring
+        # bus.mjs collectLayer1Where) so `beacon sessions --live` can show which
+        # working directory each Codex session runs in (multi-cwd disambiguation).
+        api = _FakeApi()
+        crl.heartbeat_to_server(
+            api, project_id="p", session_id="s",
+            actor={"machine": "m", "agent": "codex", "agent_kind": "codex"},
+            cwd="/Users/x/repo",
+        )
+        _path, body = api.put_calls[0]
+        assert body["cwd"] == "/Users/x/repo"
+
+    def test_no_cwd_field_when_not_supplied(self):
+        # Absent cwd must not inject an empty field (keeps the body clean and
+        # avoids overwriting a previously-stamped cwd with "").
+        api = _FakeApi()
+        crl.heartbeat_to_server(
+            api, project_id="p", session_id="s",
+            actor={"machine": "m", "agent": "codex", "agent_kind": "codex"},
+        )
+        _path, body = api.put_calls[0]
+        assert "cwd" not in body
+
+    def test_no_cwd_when_actor_absent(self):
+        # cwd rides the actor (cold-start / refresh) path, not every poll.
+        api = _FakeApi()
+        crl.heartbeat_to_server(
+            api, project_id="p", session_id="s",
+            actor={}, cwd="/Users/x/repo",
+        )
+        _path, body = api.put_calls[0]
+        assert "cwd" not in body
+
 
 # ------------------------------------------------------------------ #
 # Persist + ack
