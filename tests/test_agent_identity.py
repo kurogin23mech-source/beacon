@@ -44,6 +44,16 @@ def project_dir(monkeypatch):
         # Clean any inherited sub-agent env so each test starts fresh.
         monkeypatch.delenv("BEACON_AGENT_PARENT", raising=False)
         monkeypatch.delenv("BEACON_AGENT_CHILD_ID", raising=False)
+        # ms-93 / e-2559: agent kind now participates in name resolution.
+        # Clear the explicit env + runtime markers so "no signal" tests are
+        # deterministic even when the test process itself runs inside an AI
+        # client (e.g. pytest launched from Claude Code sets CLAUDECODE).
+        # Individual tests set these explicitly when they exercise a kind.
+        monkeypatch.delenv("BEACON_AGENT_KIND", raising=False)
+        for _k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CODEX_HOME"):
+            monkeypatch.delenv(_k, raising=False)
+        for _k in [k for k in list(os.environ) if k.startswith("CODEX_")]:
+            monkeypatch.delenv(_k, raising=False)
         yield Path(tmp)
 
 
@@ -166,3 +176,58 @@ def test_get_actor_with_subagent_shows_dispatch_chain(project_dir, monkeypatch):
     actor = agent.get_actor()
     assert actor["agent"] == "mac-claude.dispatch-3"
     assert actor["machine"]  # machine doesn't change for subagents
+
+
+# ---------------------------------------------------------------------------
+# ms-93 / e-2559 — AI-client kind auto-suffix (案B: bare hostname when no signal)
+# ---------------------------------------------------------------------------
+
+def test_explicit_env_kind_suffixes_machine(project_dir, monkeypatch):
+    """BEACON_AGENT_KIND=codex → <machine>-codex (explicit durable contract)."""
+    monkeypatch.setenv("BEACON_AGENT_KIND", "codex")
+    assert agent.get_agent() == f"{socket.gethostname()}-codex"
+
+
+def test_env_kind_beats_agent_json_kind(project_dir, monkeypatch):
+    """Runtime env wins over persisted kind — this IS the install-time vs
+    runtime-identity separation (AC 4): a checkout installed as codex but
+    launched as claude reports claude."""
+    _write_agent_json(project_dir, {"kind": "codex", "kind_source": "install-time"})
+    monkeypatch.setenv("BEACON_AGENT_KIND", "claude")
+    assert agent.get_agent() == f"{socket.gethostname()}-claude"
+
+
+def test_agent_json_kind_persist_path(project_dir):
+    """No env, no marker → the persisted agent.json kind supplies the suffix."""
+    agent.persist_agent_kind("codex", source="install-time")
+    cfg = agent.read_agent_config()
+    assert cfg["kind"] == "codex" and cfg["kind_source"] == "install-time"
+    assert agent.get_agent() == f"{socket.gethostname()}-codex"
+
+
+def test_runtime_marker_path(project_dir, monkeypatch):
+    """No env, no agent.json → a runtime marker (CLAUDECODE) supplies claude."""
+    monkeypatch.setenv("CLAUDECODE", "1")
+    assert agent.get_agent() == f"{socket.gethostname()}-claude"
+
+
+def test_no_signal_falls_back_to_bare_hostname(project_dir):
+    """案B (ms-93/e-2559): no env, no agent.json kind, no marker → bare
+    <machine>. A no-signal invocation may be a human running beacon directly,
+    so we do NOT over-assert an AI identity with <machine>-unknown. This keeps
+    the ms-51 AC-5 hostname-fallback contract intact."""
+    assert agent.get_agent() == socket.gethostname()
+
+
+def test_explicit_name_overrides_kind(project_dir, monkeypatch):
+    """agent.json explicit name is the top override — kind is not appended."""
+    _write_agent_json(project_dir, {"name": "my-box", "kind": "codex"})
+    monkeypatch.setenv("BEACON_AGENT_KIND", "claude")
+    assert agent.get_agent() == "my-box"
+
+
+def test_unknown_env_kind_is_ignored(project_dir, monkeypatch):
+    """An unrecognised BEACON_AGENT_KIND must not leak into the name; falls
+    through to the bare hostname rather than <machine>-<garbage>."""
+    monkeypatch.setenv("BEACON_AGENT_KIND", "banana")
+    assert agent.get_agent() == socket.gethostname()
