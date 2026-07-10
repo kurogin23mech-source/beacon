@@ -1,0 +1,6 @@
+triggers:
+  - "/beacon-operation-setup"
+  - "Operationをセットアップ"
+  - "Operationを活性化"
+  - "運用監視を始めたい"
+  - "バッチの記録を始めたい"

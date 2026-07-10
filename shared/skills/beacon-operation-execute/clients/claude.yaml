@@ -1,0 +1,4 @@
+triggers:
+  - "/beacon-operation-execute"
+  - "operation-trigger"
+  - "自律実行"
