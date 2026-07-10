@@ -1,0 +1,4 @@
+triggers:
+  - "/beacon-review-apply"
+  - "MS再分割を実行"
+  - "レビュー結果を適用"
