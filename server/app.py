@@ -1562,6 +1562,24 @@ def me_list_projects(user: dict = Depends(require_auth)):
     return result
 
 
+def _session_is_live(s: dict, cutoff_iso: str) -> bool:
+    """Whether a session counts as live for ``--live`` directory queries.
+
+    e-3214 / e-3220: a gracefully shut-down session stamps ``shutdown=true``
+    together with a fresh ``last_active`` (so ``healthy_only`` kills it
+    immediately, e-2305). A recency-only check therefore keeps advertising a
+    just-stopped daemon as live. BOTH directory endpoints — ``/api/me/sessions``
+    (cross-project, the DEFAULT ``bus directory`` path) and
+    ``/api/projects/{pid}/sessions`` — must agree, so the rule lives in ONE
+    place. (2026-07-10 miss: e-3214 fixed only the per-project filter, leaving
+    ``bus directory --live`` still leaking shutdown rows via /api/me/sessions.)
+    """
+    if bool(s.get("shutdown", False)):
+        return False
+    la = s.get("last_active", "")
+    return bool(la) and la >= cutoff_iso
+
+
 @app.get("/api/me/sessions")
 def me_list_sessions(
     live_only: bool = False,
@@ -1629,10 +1647,9 @@ def me_list_sessions(
     if live_only:
         cutoff = now_dt - datetime.timedelta(minutes=since_minutes)
         cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-        filtered = [
-            s for s in filtered
-            if (la := s.get("last_active", "")) and la >= cutoff_iso
-        ]
+        # e-3220: cross-project directory (the default `bus directory` path)
+        # must drop shut-down daemons too — shared with the per-project filter.
+        filtered = [s for s in filtered if _session_is_live(s, cutoff_iso)]
 
     if healthy_only:
         # ms-101 / e-3010 — per-project endpoint と同じ union 判定。接続ベースの
@@ -7006,24 +7023,9 @@ def list_sessions(
         cutoff = now_dt - datetime.timedelta(minutes=since_minutes)
         cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
-        def _is_live(s: dict) -> bool:
-            # e-3214: a gracefully shut-down session stamps ``shutdown=true``
-            # together with a fresh ``last_poll_at``/``last_active`` (so
-            # healthy_only classifies it dead *immediately*, e-2305). A pure
-            # recency check would therefore keep advertising a just-stopped
-            # daemon as live for ~since_minutes. A shut-down session is not
-            # live regardless of recency, so drop it here too — this brings
-            # ``--live`` in line with ``--healthy`` for stopped daemons
-            # (Codex e-3209 clean-env dogfood: shutdown row lingered in
-            # ``bus directory --live``).
-            if bool(s.get("shutdown", False)):
-                return False
-            la = s.get("last_active", "")
-            # Compare ISO8601 strings lexicographically — same wire format on
-            # both sides (server-stamped UTC microseconds).
-            return bool(la) and la >= cutoff_iso
-
-        filtered = [s for s in filtered if _is_live(s)]
+        # e-3214/e-3220: shared with /api/me/sessions so both directory paths
+        # drop shut-down daemons identically (see _session_is_live).
+        filtered = [s for s in filtered if _session_is_live(s, cutoff_iso)]
 
     if healthy_only:
         # ms-101 / e-3010 — 接続ベースの liveness を優先する union 判定に切替。

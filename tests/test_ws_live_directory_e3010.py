@@ -255,3 +255,32 @@ def test_healthy_only_and_live_only_agree_for_shutdown():
         "/api/projects/p1/sessions?healthy_only=true").json()]
     assert "s-stopped" not in live
     assert "s-stopped" not in healthy
+
+
+# --- e-3220: the DEFAULT `bus directory --live` path is /api/me/sessions ------
+# e-3214 fixed only /api/projects/{pid}/sessions. But `bus directory --live`
+# defaults to the cross-project /api/me/sessions endpoint, whose live filter
+# ALSO checked recency only — so the shutdown row still leaked. Both now share
+# _session_is_live; pin the /me/sessions path too so it can't regress.
+
+def test_me_sessions_live_only_drops_shutdown_session():
+    _seed_project("p1")
+    _seed_shutdown_session("p1", "s-stopped")
+    _seed_session("p1", "s-alive", poll_fresh=True)
+    rows = client.get("/api/me/sessions?live_only=true").json()
+    sids = [r["session_id"] for r in rows]
+    assert "s-stopped" not in sids, (
+        "shut-down daemon must not appear in /api/me/sessions --live — this is "
+        "the DEFAULT bus directory path (e-3220)"
+    )
+    assert "s-alive" in sids
+
+
+def test_both_directory_endpoints_agree_on_shutdown():
+    """Per-project and cross-project --live must drop the same stopped daemon."""
+    _seed_project("p1")
+    _seed_shutdown_session("p1", "s-stopped")
+    me = [r["session_id"] for r in client.get("/api/me/sessions?live_only=true").json()]
+    proj = [r["session_id"] for r in client.get("/api/projects/p1/sessions?live_only=true").json()]
+    assert "s-stopped" not in me
+    assert "s-stopped" not in proj
