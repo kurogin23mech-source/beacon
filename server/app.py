@@ -10958,9 +10958,18 @@ def auth_config():
             "local_dev": _local_dev_enabled,
         }
     # Firebase / Cloud Run 既存経路 (= 後方互換)
+    # BEACON_OAUTH_CLIENT_ID は公開値 (= Web の Google Identity Services が使う
+    # client_id。ページ HTML に埋まって配信されるので secret ではない)。env 未設定/空
+    # でもログインボタンを死なせないよう、既知の公開 client_id を default に持たせる。
+    # env があればそちらが優先。これは env を version 管理側にも固定して、サービス移設
+    # (= Cloud Run -> VPS 等) で env が無音欠落してもログインが落ちないようにする構造修正
+    # (ms-96 e-3196)。空欠落による silent no-button の再発防止も兼ねる (e-3197 と対)。
+    _DEFAULT_WEB_OAUTH_CLIENT_ID = (
+        "192136550838-evgdpddgcpsim62jrc4bh77j6p9if716.apps.googleusercontent.com"
+    )
     return {
         "provider": "firebase",
-        "client_id": os.environ.get("BEACON_OAUTH_CLIENT_ID", ""),
+        "client_id": os.environ.get("BEACON_OAUTH_CLIENT_ID") or _DEFAULT_WEB_OAUTH_CLIENT_ID,
         # local_dev: ローカル時のみ true。本番 Cloud Run では env 未設定 = false。
         "local_dev": _local_dev_enabled,
     }
