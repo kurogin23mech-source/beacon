@@ -1,0 +1,4 @@
+triggers:
+  - "/beacon-incident-report"
+  - "インシデントレポート"
+  - "インシデント閉じる"

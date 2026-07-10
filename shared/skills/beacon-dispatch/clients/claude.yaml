@@ -1,0 +1,8 @@
+triggers:
+  - "/beacon-dispatch"
+  - "サブエージェントを起動"
+  - "並列で実行"
+  - "dispatch"
+  - "次に実行可能なMSは"
+  - "タスクを並列実行"
+  - "task-level dispatch"

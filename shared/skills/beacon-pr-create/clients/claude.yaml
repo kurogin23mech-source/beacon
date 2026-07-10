@@ -1,0 +1,6 @@
+triggers:
+  - "/beacon-pr-create"
+  - "PRを切る"
+  - "PRを作る"
+  - "プルリクエストを作る"
+  - "create pull request"
