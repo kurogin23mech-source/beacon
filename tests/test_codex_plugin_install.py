@@ -1314,3 +1314,40 @@ def test_codex_home_falls_back_to_dot_codex_when_unset(monkeypatch):
     assert bridge._codex_home() == expected
     assert bridge.CODEX_HOOKS_PATH == expected / "hooks.json"
     assert bridge.CODEX_CONFIG_PATH == expected / "config.toml"
+
+
+# ---------------------------------------------------------------------------
+# Codex plugin selector consistency (ms-93 / e-3204).
+#
+# The repo doubles as a Codex marketplace: `codex plugin marketplace add
+# <checkout>` registers a marketplace whose top-level name is `beacon`
+# (marketplace.json), so the install selector is `beacon@beacon`. Docs that
+# said `beacon@personal` referred to a DIFFERENT (~/.agents personal)
+# marketplace and were misleading. Pin the selector so docs don't drift back.
+# ---------------------------------------------------------------------------
+
+_SELECTOR_DOC_FILES = [
+    REPO_ROOT / "AGENTS.md",
+    REPO_ROOT / "plugins" / "beacon" / "README.md",
+    REPO_ROOT / "plugins" / "beacon" / "skills" / "beacon-codex-bridge" / "SKILL.md",
+]
+
+
+def test_marketplace_name_implies_beacon_at_beacon_selector():
+    import json as _json
+    mkt = _json.loads((REPO_ROOT / ".agents" / "plugins" / "marketplace.json").read_text("utf-8"))
+    assert mkt.get("name") == "beacon", (
+        "marketplace top-level name is the selector's second half; changing it "
+        "means updating the beacon@beacon references in docs."
+    )
+
+
+def test_docs_do_not_reference_wrong_personal_selector():
+    offenders = []
+    for path in _SELECTOR_DOC_FILES:
+        if path.is_file() and "beacon@personal" in path.read_text("utf-8"):
+            offenders.append(str(path.relative_to(REPO_ROOT)))
+    assert not offenders, (
+        f"these docs use the wrong selector beacon@personal (repo marketplace "
+        f"is beacon@beacon): {offenders}"
+    )
