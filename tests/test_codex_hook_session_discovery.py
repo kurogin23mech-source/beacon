@@ -93,3 +93,47 @@ class TestHookOutputShape:
                 "additionalContext": "hello",
             }
         }
+
+
+class TestAppServerDispatchHookNoOp:
+    """When the hook fires inside the app-server DM-dispatch child (marked by
+    ``BEACON_CODEX_APP_SERVER_DISPATCH=1``), it must NOT read or archive the
+    shared foreground inbox — otherwise it drains the DM before the human's
+    foreground TUI surfaces it (= ms-93 / e-3156 2nd-layer hook-archive race).
+    """
+
+    def _seed_inbox(self, cwd: Path, event_id: str) -> Path:
+        inbox = cwd / ".beacon" / "codex" / "inbox"
+        inbox.mkdir(parents=True, exist_ok=True)
+        f = inbox / f"{event_id}.json"
+        f.write_text(json.dumps({
+            "event_id": event_id,
+            "channel": "dm",
+            "sender_session_id": "other",
+            "payload": {"text": "hi"},
+            "created_at": "2026-07-10T00:00:00Z",
+        }))
+        return f
+
+    def test_marker_no_ops_and_leaves_inbox_intact(self, tmp_path, monkeypatch, capsys):
+        f = self._seed_inbox(tmp_path, "evt-race")
+        monkeypatch.setenv("BEACON_CODEX_APP_SERVER_DISPATCH", "1")
+        monkeypatch.setattr(sys, "argv", ["codex-inbox-hook", "--cwd", str(tmp_path)])
+        rc = hook_mod.main()
+        assert rc == 0
+        # Empty additionalContext (no injection in the worker child).
+        assert capsys.readouterr().out.strip() == "{}"
+        # The foreground inbox event is NOT consumed / archived.
+        assert f.exists()
+        assert not (
+            tmp_path / ".beacon" / "codex" / "inbox" / ".read" / "evt-race.json"
+        ).exists()
+
+    def test_without_marker_the_dm_is_rendered(self, tmp_path, monkeypatch, capsys):
+        # The foreground hook (no marker) still surfaces the DM as before.
+        self._seed_inbox(tmp_path, "evt-fg")
+        monkeypatch.delenv("BEACON_CODEX_APP_SERVER_DISPATCH", raising=False)
+        monkeypatch.setattr(sys, "argv", ["codex-inbox-hook", "--cwd", str(tmp_path)])
+        rc = hook_mod.main()
+        assert rc == 0
+        assert "BEACON BUS INBOX" in capsys.readouterr().out

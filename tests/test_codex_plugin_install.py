@@ -716,6 +716,9 @@ def test_bridge_app_server_can_resume_existing_remote_thread(monkeypatch):
         "proxy": True,
         "sock": "/tmp/codex.sock",
         "remote_url": "ws://127.0.0.1:39988",
+        # ms-93 / e-3156 (2nd layer): the app-server child is marked so its
+        # UserPromptSubmit hook no-ops instead of draining the foreground inbox.
+        "extra_env": {"BEACON_CODEX_APP_SERVER_DISPATCH": "1"},
     }
     assert captured["resume_kwargs"] == {
         "thread_id": "thr-existing",
