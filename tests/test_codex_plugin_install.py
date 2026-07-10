@@ -1205,3 +1205,83 @@ def test_cmd_ensure_network_subaction_returns_zero(fake_config_path, capsys):
     assert bridge.cmd_ensure_network() == 0
     out = capsys.readouterr().out
     assert "network_access" in out
+
+
+# ---------------------------------------------------------------------------
+# Canonical Skill bundling into the plugin cache (ms-93 / e-2512).
+#
+# The plugin ships `plugins/beacon/skills/` verbatim (plugin.json declares
+# `skills: ./skills/`); `codex plugin add` copies that subtree into the cache
+# and discovers skills there. Anything outside the plugin subtree (the
+# canonical `shared/skills/`) is NOT delivered. 2026-07-10 Codex dogfood
+# confirmed a fresh install received only the 2 plugin-only skills and none of
+# the 35 canonical ones. scripts/build-codex-plugin-skills.py materializes the
+# canonical skills into the plugin; these tests pin that delivery so a future
+# `shared/skills/` change without re-running the build fails CI.
+# ---------------------------------------------------------------------------
+
+SHARED_SKILLS = REPO_ROOT / "shared" / "skills"
+PLUGIN_SKILLS = PLUGIN_ROOT / "skills"
+PLUGIN_ONLY_SKILLS = {"beacon-codex-bridge", "beacon-codex-armed"}
+
+
+def _canonical_skill_names():
+    return sorted(
+        p.name
+        for p in SHARED_SKILLS.iterdir()
+        if p.is_dir() and (p / "SKILL.md").is_file()
+    )
+
+
+def test_plugin_ships_exact_canonical_plus_plugin_only_set():
+    """The plugin's skills/ dir must be exactly canonical ∪ plugin-only.
+
+    Fewer → canonical skills don't reach Codex (the 2026-07-10 gap). More →
+    a stray/renamed skill leaks into the cache. Either is a delivery bug.
+    """
+    canonical = set(_canonical_skill_names())
+    present = {p.name for p in PLUGIN_SKILLS.iterdir() if p.is_dir()}
+    expected = canonical | PLUGIN_ONLY_SKILLS
+    assert present == expected, (
+        f"plugin skills set drift.\n"
+        f"  missing: {sorted(expected - present)}\n"
+        f"  stray:   {sorted(present - expected)}\n"
+        "Run: python scripts/build-codex-plugin-skills.py"
+    )
+
+
+@pytest.mark.parametrize("name", _canonical_skill_names())
+def test_plugin_skill_matches_canonical_source(name):
+    """Each bundled canonical skill's SKILL.md must be byte-identical to its
+    shared/skills source (render_codex copies it verbatim)."""
+    src = SHARED_SKILLS / name / "SKILL.md"
+    dst = PLUGIN_SKILLS / name / "SKILL.md"
+    assert dst.is_file(), (
+        f"plugins/beacon/skills/{name}/SKILL.md missing — run "
+        "scripts/build-codex-plugin-skills.py"
+    )
+    assert dst.read_bytes() == src.read_bytes(), (
+        f"plugins/beacon/skills/{name}/SKILL.md is stale vs shared/skills. "
+        "Re-run scripts/build-codex-plugin-skills.py."
+    )
+
+
+def test_plugin_skills_contain_no_symlinks():
+    """Symlinks / ../.. refs break when the plugin subtree is copied into the
+    archive/cache; the bundled skills must be real files."""
+    links = [p for p in PLUGIN_SKILLS.rglob("*") if p.is_symlink()]
+    assert not links, f"symlinks in plugin skills break cache delivery: {links}"
+
+
+def test_build_codex_plugin_skills_check_mode_is_green():
+    """The build script's --check must pass on the committed tree (= the
+    materialized output is in sync). This is the forcing function that fails
+    CI if shared/skills changed without re-running the build."""
+    script = REPO_ROOT / "scripts" / "build-codex-plugin-skills.py"
+    proc = subprocess.run(
+        [sys.executable, str(script), "--check"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, (
+        f"build-codex-plugin-skills.py --check failed:\n{proc.stdout}\n{proc.stderr}"
+    )
