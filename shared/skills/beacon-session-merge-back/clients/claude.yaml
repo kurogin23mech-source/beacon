@@ -1,0 +1,8 @@
+triggers:
+  - "/beacon-session-merge-back"
+  - "/beacon-merge-back"
+  - "fork を片付ける"
+  - "fork を閉じる"
+  - "worktree を片付ける"
+  - "cleanup fork"
+  - "merge back"
