@@ -478,6 +478,15 @@ class BridgeAppServerClient:
             proxy=self.use_proxy,
             sock=self.proxy_sock,
             remote_url=self.remote_url,
+            # ms-93 / e-3156 (2nd layer): the app-server child is a dedicated
+            # DM-dispatch worker, but its turns still fire the UserPromptSubmit
+            # hook, which would drain the SHARED foreground inbox and race the
+            # human's TUI (= the DM archives before the foreground sees it).
+            # Mark the child so codex-inbox-hook.py no-ops there and leaves the
+            # foreground inbox intact. Only applies to the ephemeral --stdio
+            # child (remote_url / proxy paths reach an external app-server whose
+            # env we don't own).
+            extra_env={"BEACON_CODEX_APP_SERVER_DISPATCH": "1"},
         )
         # Standard JSON-RPC initialize.
         initialize(self.handle)

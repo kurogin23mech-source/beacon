@@ -178,6 +178,17 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    # ms-93 / e-3156 (2nd layer): when this hook fires inside the app-server
+    # DM-dispatch child (marked by the daemon via extra_env), it must NOT read
+    # or archive the SHARED foreground inbox — otherwise it drains the DM
+    # before the human's foreground TUI surfaces it (= the hook-archive race
+    # residual of the non-armed app-server blackhole). The app-server turn
+    # already receives the DM as its dispatched turn input, so the hook is
+    # redundant there; no-op and leave the foreground inbox intact.
+    if os.environ.get("BEACON_CODEX_APP_SERVER_DISPATCH") == "1":
+        print(json.dumps({}))
+        return 0
+
     install_root = Path(args.install_root or Path(__file__).resolve().parent.parent)
     cwd = args.cwd or os.getcwd()
     crl, ac, cs = _import_modules(install_root)
