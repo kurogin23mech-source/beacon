@@ -146,9 +146,16 @@ def _format_entry(entry: dict) -> str:
     payload = evt.get("payload") or {}
     text = payload.get("text") if isinstance(payload, dict) else ""
     text_str = str(text) if text else json.dumps(payload, ensure_ascii=False)
+    # ms-93 / e-3201: show the FULL sender session_id. It was truncated to
+    # sender[:32], but session_ids are 34 chars (e.g.
+    # sv-77e81553-1783403082006-4649aa42), so the last 2 chars were dropped.
+    # The receiving AI replies to the displayed `from=` value; a truncated id
+    # fails the recipient gate (2026-07-10 Codex dogfood: reply → unknown
+    # recipient). The id IS the reply target, so it must be exact, not cosmetic.
     return (
-        f"  - [{event_id}] channel={channel} from={sender[:32]}"
+        f"  - [{event_id}] channel={channel} from={sender}"
         f" at={created_at}\n"
+        f"    reply-to: {sender}\n"
         f"    payload: {text_str}\n"
     )
 
