@@ -748,20 +748,30 @@ class TestWebUI_TrekScopeApprovalSurface:
         assert 'data-pending-id="' in self.src
 
     def test_approve_endpoint_posts_to_scope_approve(self):
-        # handleAction の trek-scope-approve case で /scope-approve エンドポイント
-        # を POST 経由で叩いていることを構造的に pin (= endpoint 名が drift しない
-        # ように tied)。
+        # ms-93 e-3203 (SHARED purity): handler は dataSource 経由で叩く。
+        # 1) handler が dataSource.approveTrekScopeChange を呼ぶこと
         idx = self.src.index("case 'trek-scope-approve':")
         end = self.src.index("case 'trek-scope-reject':", idx)
-        block = self.src[idx:end]
-        assert "/scope-approve" in block and "POST" in block
+        handler = self.src[idx:end]
+        assert "dataSource.approveTrekScopeChange" in handler, (
+            "handler must route through dataSource, not call api() directly "
+            "(SHARED purity, ms-93 e-3203 / ms-46 e-728)"
+        )
+        # 2) dataSource メソッドが /scope-approve を POST すること (endpoint 名 drift 防止)
+        didx = self.src.index("approveTrekScopeChange:")
+        dblock = self.src[didx:didx + 400]
+        assert "/scope-approve" in dblock and "POST" in dblock
 
     def test_reject_endpoint_posts_to_scope_reject(self):
         idx = self.src.index("case 'trek-scope-reject':")
-        # 大きめにブロック取って、 次の case まで。
         end = self.src.index("    case 'trek-cli-hint':", idx)
-        block = self.src[idx:end]
-        assert "/scope-reject" in block and "POST" in block
+        handler = self.src[idx:end]
+        assert "dataSource.rejectTrekScopeChange" in handler, (
+            "handler must route through dataSource (SHARED purity, ms-93 e-3203)"
+        )
+        didx = self.src.index("rejectTrekScopeChange:")
+        dblock = self.src[didx:didx + 400]
+        assert "/scope-reject" in dblock and "POST" in dblock
 
 
 # ---------------------------------------------------------------------------

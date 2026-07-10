@@ -337,6 +337,16 @@ const dataSource = {
       [],
     );
   },
+  // ms-93 e-3203 — Trek scope approve/reject has no desktop Rust binding yet
+  // (Web-only feature, backend SPEC e-2611). Stub with a clear error so the
+  // SHARED handler's .catch surfaces "not available on desktop" instead of a
+  // ReferenceError (the Tauri layer has no api() helper at all).
+  approveTrekScopeChange: async () => {
+    throw new Error('Trek scope approval is not available in the desktop app yet');
+  },
+  rejectTrekScopeChange: async () => {
+    throw new Error('Trek scope approval is not available in the desktop app yet');
+  },
 };
 
 // ms-86 / e-2253 — small fetch helper for Trek endpoints. Mirrors Web's api()

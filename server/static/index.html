@@ -4516,6 +4516,18 @@ const dataSource = {
     `/api/projects/${pid}/${action}`,
     { method: 'POST' },
   ),
+  // ms-93 e-3203 — Trek scope approve/reject via DataSource so the SHARED
+  // handler stays pure (no direct api() leak into the Tauri layer).
+  approveTrekScopeChange: async (trekId, pendingId) => api(
+    `/api/treks/${encodeURIComponent(trekId)}/scope-approve`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pending_id: pendingId }) },
+  ),
+  rejectTrekScopeChange: async (trekId, pendingId, reason) => api(
+    `/api/treks/${encodeURIComponent(trekId)}/scope-reject`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pending_id: pendingId, reason: reason || '' }) },
+  ),
 };
 
 function render() {
@@ -8068,11 +8080,7 @@ function handleCommonAction(action, el) {
       const pendingId = el.dataset.pendingId || '';
       if (!trekId || !pendingId) return true;
       el.disabled = true;
-      api(`/api/treks/${encodeURIComponent(trekId)}/scope-approve`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({pending_id: pendingId}),
-      }).then(updated => {
+      dataSource.approveTrekScopeChange(trekId, pendingId).then(updated => {
         // server returns the refreshed trek doc; merge into state.treks so the
         // detail re-render drops the pending row immediately.
         if (updated && updated.trek_id) {
@@ -8097,11 +8105,7 @@ function handleCommonAction(action, el) {
       const reasonInput = reasonInputId ? document.getElementById(reasonInputId) : null;
       const reason = reasonInput ? reasonInput.value : '';
       el.disabled = true;
-      api(`/api/treks/${encodeURIComponent(trekId)}/scope-reject`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({pending_id: pendingId, reason: reason || ''}),
-      }).then(updated => {
+      dataSource.rejectTrekScopeChange(trekId, pendingId, reason).then(updated => {
         if (updated && updated.trek_id) {
           state.treks = (state.treks || []).map(t =>
             t.trek_id === updated.trek_id ? updated : t);
