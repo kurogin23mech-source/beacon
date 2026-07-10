@@ -56,6 +56,10 @@ WEB_ONLY_ACTIONS = {
     "invite-member",
     "change-member-role",
     "logout",
+    # ms-93 e-3203 — the "copy setup prompt" button (empty-state install help)
+    # is wired via an element-local addEventListener (index.html), not the
+    # action switch, and is Web-only (Codex/Claude setup prompt copy).
+    "copy-setup-prompt",
 }
 # ms-72 e-1774 — actions wired via element-local `addEventListener` instead
 # of the top-level `handleAction` switch (e.g. `<select>` change events,
@@ -68,6 +72,9 @@ EVENT_LISTENER_ROUTED_ACTIONS = {
     "settings-change-role",
     "settings-remove-member",
     "settings-set-filter-trek",
+    # ms-93 e-3203 — empty-state "copy setup prompt" button; wired via a
+    # local addEventListener in index.html (setup-prompt-copy), not the switch.
+    "copy-setup-prompt",
 }
 # Tabs are expected to be 1:1 once e-743 (render() SHARED) completes.
 # Until then, allow-list Web-only tabs that Tauri hasn't caught up to yet.
