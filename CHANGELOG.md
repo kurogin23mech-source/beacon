@@ -2,6 +2,8 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.57.0] - 2026-07-10
+
 ## [v0.56.1] - 2026-07-08
 
 ## [v0.56.0] - 2026-07-07
