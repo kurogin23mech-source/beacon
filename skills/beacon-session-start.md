@@ -537,14 +537,14 @@ for r in rows[:5]:
     print(f'  [{r["event_id"][:12]}] from {r["sender_session_id"][:12]} at {r["created_at"][:19]}{opened}')
     print(f'    {r["text_preview"]}...')
 if len(rows) > 5:
-    print(f'  … 他 {len(rows)-5} 件 (`beacon bus receive --channel dm --event-id <id>` で全文)')
+    print(f'  … 他 {len(rows)-5} 件 (`beacon bus receive --channel dm` で全文)')
 PY
 fi
 ```
 
 出力が空でなければ Step 3 の出力ヘッダ部 (「保留中 DM action」セクションの直後、Trek 一覧の直前あたり) に **そのまま転記** する。空ならセクションごと省略。
 
-payload.text は preview 80 文字まで、詳細確認は `beacon bus receive --channel dm --event-id <event_id>` を案内。返信したい場合は `/beacon-dm-send` (reply mode) 経由。
+payload.text は preview 80 文字まで、詳細確認は `beacon bus receive --channel dm` を案内。返信したい場合は `/beacon-dm-send` (reply mode) 経由。
 
 local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムアウトはすべて silent skip。session-start を中断しない。
 
@@ -954,7 +954,7 @@ Beacon: [name]
 留守中に届いた DM (user-scoped catch-up):   ← Step 1n-2 の出力があれば転記、なければセクションごと省略
   [event_id 短縮] from [sender 短縮] at [created_at] [(既読)]
     [preview 80 chars]...
-  … 他 N 件 (詳細は `beacon bus receive --channel dm --event-id <id>`)
+  … 他 N 件 (詳細は `beacon bus receive --channel dm`)
 
 ドキュメント (core=設計原則・常時参照 / spec=仕様・技術詳細 / memo=検討メモ):
   [CORE] [title]: [1行サマリー (ms-43 e-566)]
