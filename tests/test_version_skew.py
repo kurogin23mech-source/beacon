@@ -81,3 +81,131 @@ def test_distinct_versions_helper():
         {"version_raw": "beacon 0.2.1"},
         {"version": "0.56.1"},
     ]) == ["0.2.1", "0.56.1"]
+
+
+# ---------------------------------------------------------------------------
+# e-3135: daemon-version read-back from the receive-loop session pointer.
+# ---------------------------------------------------------------------------
+
+
+def _write_daemon_state(cwd, *, pid, beacon_version):
+    import json
+
+    base = cwd / ".beacon" / "codex"
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "receive-loop.pid").write_text(str(pid))
+    (base / "receive-loop.session.json").write_text(
+        json.dumps({"session_id": "x", "project_id": "p",
+                    "beacon_version": beacon_version})
+    )
+
+
+def test_probe_daemon_version_live_pid(tmp_path):
+    """A live daemon's stamped version is returned (pid of this test process)."""
+    _write_daemon_state(tmp_path, pid=os.getpid(), beacon_version="0.2.1")
+    assert vs._probe_daemon_version(str(tmp_path)) == "0.2.1"
+
+
+def test_probe_daemon_version_dead_pid_is_silent(tmp_path):
+    """A stale pointer from a dead daemon must not report a version."""
+    _write_daemon_state(tmp_path, pid=999999, beacon_version="0.2.1")
+    assert vs._probe_daemon_version(str(tmp_path)) == ""
+
+
+def test_probe_daemon_version_missing_files(tmp_path):
+    assert vs._probe_daemon_version(str(tmp_path)) == ""
+
+
+def test_main_cwd_autofills_daemon_version_and_warns(tmp_path, capsys):
+    """`--cwd` auto-discovers a live daemon's version and surfaces the skew."""
+    _write_daemon_state(tmp_path, pid=os.getpid(), beacon_version="0.2.1")
+    rc = vs.main(["--current-version", "0.56.1", "--cwd", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "daemon=0.2.1" in out and "CLI=0.56.1" in out
+
+
+def test_main_explicit_daemon_version_beats_cwd(tmp_path, capsys):
+    """An explicit --daemon-version is not overridden by --cwd discovery."""
+    _write_daemon_state(tmp_path, pid=os.getpid(), beacon_version="0.2.1")
+    rc = vs.main([
+        "--current-version", "0.56.1",
+        "--daemon-version", "0.55.0",
+        "--cwd", str(tmp_path),
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "daemon=0.55.0" in out
+
+
+# ---------------------------------------------------------------------------
+# e-3135 AC 3: hook-version skew (Codex UserPromptSubmit hook vs CLI).
+# ---------------------------------------------------------------------------
+
+
+def test_hook_version_skew_warns():
+    report = vs.format_skew_report("0.56.1", [], hook_version="0.2.1")
+    joined = "\n".join(report)
+    assert "hook=0.2.1" in joined and "CLI=0.56.1" in joined
+
+
+def test_hook_version_match_no_warning():
+    assert vs.format_skew_report("0.56.1", [], hook_version="0.56.1") == []
+
+
+def test_read_beacon_version_from_root_both_layouts(tmp_path):
+    src = tmp_path / "src"
+    (src / "lib").mkdir(parents=True)
+    (src / "lib" / "commands.py").write_text('__version__ = "1.2.3"\n')
+    assert vs._read_beacon_version_from_root(src) == "1.2.3"
+    whl = tmp_path / "beacon_cli"
+    (whl / "_bundled_lib").mkdir(parents=True)
+    (whl / "_bundled_lib" / "commands.py").write_text('__version__ = "4.5.6"\n')
+    assert vs._read_beacon_version_from_root(whl) == "4.5.6"
+    assert vs._read_beacon_version_from_root(tmp_path / "none") == ""
+
+
+def _write_codex_hook(codex_home, install_root):
+    import json
+
+    codex_home.mkdir(parents=True, exist_ok=True)
+    script = install_root / "scripts" / "codex-inbox-hook.py"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("# stub\n")
+    (codex_home / "hooks.json").write_text(json.dumps({
+        "hooks": {"UserPromptSubmit": [{"hooks": [{
+            "type": "command",
+            "command": f"/usr/bin/python3 {script} --cwd /x",
+            "timeout": 10,
+        }]}]}
+    }))
+
+
+def test_probe_hook_version_reads_install_root(tmp_path, monkeypatch):
+    """Derives the hook's install version from $CODEX_HOME/hooks.json."""
+    install_root = tmp_path / "oldinstall"
+    (install_root / "lib").mkdir(parents=True)
+    (install_root / "lib" / "commands.py").write_text('__version__ = "0.2.1"\n')
+    codex_home = tmp_path / "codexhome"
+    _write_codex_hook(codex_home, install_root)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    assert vs._probe_hook_version() == "0.2.1"
+
+
+def test_probe_hook_version_no_hooks_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "empty"))
+    assert vs._probe_hook_version() == ""
+
+
+def test_main_no_hook_probe_suppresses(tmp_path, monkeypatch, capsys):
+    """--no-hook-probe skips the global hooks.json read."""
+    install_root = tmp_path / "oldinstall"
+    (install_root / "lib").mkdir(parents=True)
+    (install_root / "lib" / "commands.py").write_text('__version__ = "0.2.1"\n')
+    codex_home = tmp_path / "codexhome"
+    _write_codex_hook(codex_home, install_root)
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    rc = vs.main(["--current-version", "0.56.1", "--no-hook-probe"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "hook=" not in out

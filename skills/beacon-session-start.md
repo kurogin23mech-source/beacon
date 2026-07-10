@@ -106,6 +106,36 @@ BEACON_BIN gate (Step 0a-pre) が PATH 関連の構造化判定を行うので�
 PATH 警告は冗長になることがあるが、 そのほかの警告 (= hooks / skills-drift /
 legacy-mode-field / ms81 系) は doctor 経由でしか出ないため両方走らせる。
 
+### Step 0a-skew: version skew 検知 (= ms-93 / e-3135)
+
+古い beacon が daemon / hook として混じっていないかを検知する (= Codex が
+「古い hook / skill / daemon が混じると動いているようで別物を見ている」と指摘した
+穴、 e-3135)。 受信 daemon は起動時に自分の beacon version を
+`.beacon/codex/receive-loop.session.json` に stamp し、 Codex の
+`UserPromptSubmit` hook は install 時の script path から version を辿れる。 これを
+CLI version と突き合わせて skew を session 開始時に surface する。
+
+Bash ツールで実行 (fail-safe、 daemon / hook が無ければ何も出ない):
+
+```bash
+__ROOT=$(beacon-find-root) && python3 "$__ROOT/lib/version_skew.py" \
+  --current-version "$(beacon --version 2>/dev/null | tail -1)" \
+  --cwd "$__ROOT" 2>/dev/null
+```
+
+- `--cwd` で **daemon skew** (この cwd で走る受信 daemon の版)、 `$CODEX_HOME`
+  (既定 `~/.codex`) の hooks.json 経由で **hook skew** を自動判定する。
+- 出力が **空** → skew 無し、 何も表示しない
+- 出力に `⚠ version skew:` 行があれば → Step 3 出力ヘッダに **そのまま転記**
+  (daemon skew は「daemon を再起動」、 hook skew は
+  「`beacon-codex-bridge install-hook` を再実行」が対処。 PATH 上の複数 binary
+  skew は Step 0a-pre の BEACON_BIN gate と重複しうるので、 daemon / hook 行を
+  優先して出す)
+
+`lib/version_skew.py` が無い (= 古い beacon repo) 場合は silent skip。 この Step
+は **読み取り専用** かつ **never block** (= skew は warning、 session 開始を
+止めない)。
+
 ## Step 0a: 引数チェック
 
 ユーザーが `/beacon-session-start ms-XX` のように引数付きで呼んだ場合、`ms-XX` を **スコープMS** として記憶する。
