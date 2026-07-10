@@ -1,0 +1,4 @@
+triggers:
+  - "/beacon-review-uc"
+  - "UC を精査したい"
+  - "次のユースケース見たい"
