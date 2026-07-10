@@ -148,6 +148,7 @@ packages = [
     "beacon_cli._bundled_lib",
     "beacon_cli._bundled_skills",
     "beacon_cli._bundled_channel",
+    "beacon_cli._bundled_scripts",
 ]
 include-package-data = true
 
@@ -162,6 +163,13 @@ version = { attr = "beacon_cli._version.__version__" }
 # _ensure_channel_node_modules() — shipping it in the wheel would be
 # platform-fragile (native deps, symlinks, large size).
 "beacon_cli._bundled_channel" = "channel"
+# ms-93 e-3209: ship scripts/ so a pipx/brew wheel carries the Codex DM
+# daemon (codex-receive-loop.py) + hook (codex-inbox-hook.py). Without
+# this, `codex plugin add beacon` copies plugins/beacon/ verbatim but the
+# daemon scripts live at repo-root scripts/ (outside the plugin subtree),
+# so the bridge cannot find codex-receive-loop.py and the daemon fails to
+# start. The bridge resolves this bundled dir via `beacon __codex-script-root__`.
+"beacon_cli._bundled_scripts" = "scripts"
 
 [tool.setuptools.package-data]
 "beacon_cli._bundled_lib" = [
@@ -178,6 +186,9 @@ version = { attr = "beacon_cli._version.__version__" }
     "*.mjs",
     "package.json",
     "package-lock.json",
+]
+"beacon_cli._bundled_scripts" = [
+    "*.py",
 ]
 beacon_cli = [
     "_bundled_bin/beacon",

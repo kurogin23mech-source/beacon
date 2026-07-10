@@ -1351,3 +1351,71 @@ def test_docs_do_not_reference_wrong_personal_selector():
         f"these docs use the wrong selector beacon@personal (repo marketplace "
         f"is beacon@beacon): {offenders}"
     )
+
+
+# ---------------------------------------------------------------------------
+# ms-93 e-3209: runtime asset packaging — bridge resolves daemon/hook scripts
+# across dev checkout vs pipx/brew wheel, and the daemon/hook import lib from
+# the wheel's _bundled_lib when spawned from _bundled_scripts.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_script_primary_wins_without_discovery(monkeypatch):
+    """When install_root/scripts/<name> exists, no CLI discovery is attempted."""
+    bridge = _load_bridge_module()
+
+    def _boom():
+        raise AssertionError("_bundled_script_dir must not be called on primary hit")
+
+    monkeypatch.setattr(bridge, "_bundled_script_dir", _boom)
+    resolved = bridge._resolve_script(REPO_ROOT, "codex-receive-loop.py")
+    assert resolved == REPO_ROOT / "scripts" / "codex-receive-loop.py"
+
+
+def test_resolve_script_bundled_fallback(monkeypatch, tmp_path):
+    """No repo-root scripts/ (plugin-cache install) → discover via the wheel."""
+    bridge = _load_bridge_module()
+
+    # A wheel-style bundled scripts dir with the daemon present.
+    bundled = tmp_path / "_bundled_scripts"
+    bundled.mkdir()
+    (bundled / "codex-receive-loop.py").write_text("# stub\n")
+    monkeypatch.setattr(bridge, "_bundled_script_dir", lambda: bundled)
+
+    # install_root has NO scripts/ (mimics the plugin cache grandparent).
+    resolved = bridge._resolve_script(tmp_path / "plugin_cache", "codex-receive-loop.py")
+    assert resolved == bundled / "codex-receive-loop.py"
+
+
+def test_resolve_script_returns_none_when_nowhere(monkeypatch, tmp_path):
+    bridge = _load_bridge_module()
+    monkeypatch.setattr(bridge, "_bundled_script_dir", lambda: None)
+    assert bridge._resolve_script(tmp_path, "codex-receive-loop.py") is None
+
+
+def _load_script_module(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, str(path))
+    spec = importlib.util.spec_from_loader(name, loader)
+    m = importlib.util.module_from_spec(spec)
+    loader.exec_module(m)
+    return m
+
+
+@pytest.mark.parametrize(
+    "script_rel",
+    ["scripts/codex-receive-loop.py", "scripts/codex-inbox-hook.py"],
+)
+def test_daemon_lib_fallback_prefers_source_then_bundled(script_rel, tmp_path):
+    """_resolve_lib_dir returns lib/ in source layout, _bundled_lib in a wheel."""
+    mod = _load_script_module(
+        script_rel.replace("/", "_").replace(".py", "").replace("-", "_"),
+        REPO_ROOT / script_rel,
+    )
+    # source layout
+    src_root = tmp_path / "src"
+    (src_root / "lib").mkdir(parents=True)
+    assert mod._resolve_lib_dir(src_root) == src_root / "lib"
+    # wheel layout: only _bundled_lib present (== beacon_cli package dir)
+    whl_root = tmp_path / "beacon_cli"
+    (whl_root / "_bundled_lib").mkdir(parents=True)
+    assert mod._resolve_lib_dir(whl_root) == whl_root / "_bundled_lib"
