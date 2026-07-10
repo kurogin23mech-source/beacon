@@ -36,10 +36,28 @@ import time
 from pathlib import Path
 
 
+def _resolve_lib_dir(install_root: Path) -> Path:
+    """Return the directory to add to ``sys.path`` for ``import store`` etc.
+
+    ms-93 e-3209: source/editable installs keep lib at ``<root>/lib``; a
+    pipx/brew wheel remaps it to ``beacon_cli/_bundled_lib``. When this
+    daemon is spawned from the bundled ``_bundled_scripts/`` dir, its
+    self-resolved install_root is the ``beacon_cli`` package, so lib lives at
+    the ``_bundled_lib`` sibling. Fall back to it when ``lib/`` is absent.
+    """
+    lib_dir = install_root / "lib"
+    if lib_dir.is_dir():
+        return lib_dir
+    bundled = install_root / "_bundled_lib"
+    if bundled.is_dir():
+        return bundled
+    return lib_dir
+
+
 def _import_modules(install_root: Path):
     """Make ``lib`` importable, return (codex_session, codex_receive_loop,
     api_client, bus_protocol)."""
-    lib_dir = str(install_root / "lib")
+    lib_dir = str(_resolve_lib_dir(install_root))
     if lib_dir not in sys.path:
         sys.path.insert(0, lib_dir)
     import codex_session as cs  # noqa: E402
@@ -77,7 +95,7 @@ def _import_exec_worker(install_root: Path):
 
 def _import_desktop_notify(install_root: Path):
     """Late import of the desktop-notification fallback (= ms-93 / e-2519 AC 3)."""
-    lib_dir = str(install_root / "lib")
+    lib_dir = str(_resolve_lib_dir(install_root))
     if lib_dir not in sys.path:
         sys.path.insert(0, lib_dir)
     import desktop_notify as dn  # noqa: E402

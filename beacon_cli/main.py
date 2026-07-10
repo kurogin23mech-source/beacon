@@ -107,6 +107,25 @@ def _resolve_lib_dir(root: Path) -> Optional[Path]:
     return None
 
 
+def _resolve_scripts_dir(root: Path) -> Optional[Path]:
+    """Return the directory holding repo `scripts/*.py` across layouts.
+
+    ms-93 e-3209: the Codex bridge (running from the plugin cache, which does
+    NOT ship the daemon scripts) discovers this dir via
+    ``beacon __codex-script-root__`` so it can spawn
+    ``codex-receive-loop.py`` / ``codex-inbox-hook.py`` from a pipx/brew
+    wheel. Source/editable installs expose them at ``<root>/scripts``; the
+    wheel remaps them to ``beacon_cli/_bundled_scripts``.
+    """
+    candidate = root / "scripts"
+    if (candidate / "codex-receive-loop.py").exists():
+        return candidate
+    candidate = root / "_bundled_scripts"
+    if (candidate / "codex-receive-loop.py").exists():
+        return candidate
+    return None
+
+
 def _find_bash() -> Optional[str]:
     """Return path to a usable bash binary, or None on Windows-native."""
     return shutil.which("bash")
@@ -202,6 +221,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Fast path: --version always works (no repo / bash needed)
     if argv and argv[0] in ("--version", "-V"):
         print(f"beacon {__version__}")
+        return 0
+
+    # ms-93 e-3209: hidden helper for the Codex bridge. Print the directory
+    # that holds the Codex daemon scripts for THIS install (source `scripts/`
+    # or wheel `_bundled_scripts/`). Intercepted before bash delegation so it
+    # answers identically for git checkouts and pipx/brew wheels. Prints
+    # nothing + exits 1 when the scripts can't be located (partial install).
+    if argv and argv[0] == "__codex-script-root__":
+        scripts_dir = _resolve_scripts_dir(root) if root is not None else None
+        if scripts_dir is None:
+            return 1
+        print(str(scripts_dir))
         return 0
 
     # ms-44 e-1311: never delegate to bash on Windows. Git for Windows

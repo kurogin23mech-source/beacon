@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -73,6 +74,58 @@ def _install_root() -> Path:
     if env:
         return Path(env).expanduser().resolve()
     return Path(__file__).resolve().parent.parent.parent.parent
+
+
+def _beacon_bin() -> str:
+    """Resolve the ``beacon`` CLI used to discover wheel-bundled scripts."""
+    env = os.environ.get("BEACON_BIN", "").strip()
+    if env:
+        return env
+    return shutil.which("beacon") or "beacon"
+
+
+def _bundled_script_dir() -> "Path | None":
+    """Ask the installed ``beacon`` CLI where its Codex daemon scripts live.
+
+    ms-93 e-3209: a ``codex plugin add`` install carries this bridge but NOT
+    the repo-root ``scripts/`` (they sit outside the copied plugin subtree).
+    A pipx/brew wheel ships them at ``beacon_cli/_bundled_scripts/``, which
+    the CLI reports via the hidden ``__codex-script-root__`` command. Returns
+    None when there is no ``beacon`` on PATH or it can't locate the scripts.
+    """
+    try:
+        out = subprocess.run(
+            [_beacon_bin(), "__codex-script-root__"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    d = out.stdout.strip()
+    if not d:
+        return None
+    p = Path(d)
+    return p if p.is_dir() else None
+
+
+def _resolve_script(install_root: Path, basename: str) -> "Path | None":
+    """Locate a repo-root script across dev checkout and wheel installs.
+
+    1. ``install_root/scripts/<basename>`` — git checkout / BEACON_INSTALL_ROOT
+    2. wheel bundle discovered via the ``beacon`` CLI (pipx/brew + codex plugin)
+
+    Returns None when neither location has the file.
+    """
+    primary = install_root / "scripts" / basename
+    if primary.is_file():
+        return primary
+    bundled = _bundled_script_dir()
+    if bundled is not None:
+        candidate = bundled / basename
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _codex_dir(cwd: Path) -> Path:
@@ -128,8 +181,15 @@ def _clean_stale_pidfile(cwd: Path) -> bool:
 
 
 def _hook_command(install_root: Path) -> str:
-    """Absolute command string Codex stores in ``hooks.json``."""
-    script = install_root / "scripts" / HOOK_SCRIPT_BASENAME
+    """Absolute command string Codex stores in ``hooks.json``.
+
+    ms-93 e-3209: resolve across dev checkout vs pipx/brew wheel. Falls back
+    to the git-style path when discovery is unavailable so idempotency /
+    uninstall matching (which keys on the basename) keeps working.
+    """
+    script = _resolve_script(install_root, HOOK_SCRIPT_BASENAME) or (
+        install_root / "scripts" / HOOK_SCRIPT_BASENAME
+    )
     return f"/usr/bin/python3 {script}"
 
 
@@ -456,11 +516,12 @@ def cmd_start(
     log_f.write(f"\n--- bridge start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} ---\n")
     log_f.flush()
 
-    daemon_script = install_root / "scripts" / "codex-receive-loop.py"
-    if not daemon_script.is_file():
+    daemon_script = _resolve_script(install_root, "codex-receive-loop.py")
+    if daemon_script is None:
         print(
-            f"daemon: {daemon_script} not found. "
-            "Check BEACON_INSTALL_ROOT.",
+            f"daemon: codex-receive-loop.py not found under {install_root}/scripts "
+            "or the installed beacon wheel. Check BEACON_INSTALL_ROOT or that "
+            "`beacon` is on PATH (pipx/brew install).",
             file=sys.stderr,
         )
         log_f.close()
@@ -480,7 +541,12 @@ def cmd_start(
     if app_server_url:
         daemon_argv.extend(["--app-server-url", app_server_url])
 
-    daemon_env = {**os.environ, "BEACON_INSTALL_ROOT": str(install_root)}
+    # ms-93 e-3209: point BEACON_INSTALL_ROOT at the root the daemon actually
+    # loads from (git repo root, or the beacon_cli package for a wheel), which
+    # is the parent of the resolved script's scripts/ dir. Using the raw
+    # install_root here would be wrong for a plugin-cache install (no lib/).
+    daemon_root = daemon_script.parent.parent
+    daemon_env = {**os.environ, "BEACON_INSTALL_ROOT": str(daemon_root)}
     if app_server:
         # Env-var duplicate of the flag so a stale daemon argv (= old
         # supervisor) can't silently flip the opt-in off on restart.
@@ -776,10 +842,11 @@ def main() -> int:
     )
     cwd = Path(args.cwd or os.getcwd()).resolve()
 
-    if not (install_root / "scripts" / "codex-receive-loop.py").is_file():
+    if _resolve_script(install_root, "codex-receive-loop.py") is None:
         print(
-            f"bridge: cannot find scripts/codex-receive-loop.py under {install_root}. "
-            "Set BEACON_INSTALL_ROOT to your beacon checkout.",
+            f"bridge: cannot find codex-receive-loop.py under {install_root}/scripts "
+            "or the installed beacon wheel. Set BEACON_INSTALL_ROOT to your beacon "
+            "checkout, or install beacon (pipx/brew) so `beacon` is on PATH.",
             file=sys.stderr,
         )
         return 1

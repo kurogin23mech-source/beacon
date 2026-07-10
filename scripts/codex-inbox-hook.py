@@ -31,8 +31,24 @@ import sys
 from pathlib import Path
 
 
+def _resolve_lib_dir(install_root: Path) -> Path:
+    """Return the lib dir across source/editable vs pipx/brew wheel layouts.
+
+    ms-93 e-3209: mirrors codex-receive-loop.py. When this hook runs from the
+    bundled ``_bundled_scripts/`` dir, its self-resolved install_root is the
+    ``beacon_cli`` package and lib lives at the ``_bundled_lib`` sibling.
+    """
+    lib_dir = install_root / "lib"
+    if lib_dir.is_dir():
+        return lib_dir
+    bundled = install_root / "_bundled_lib"
+    if bundled.is_dir():
+        return bundled
+    return lib_dir
+
+
 def _import_modules(install_root: Path):
-    lib_dir = str(install_root / "lib")
+    lib_dir = str(_resolve_lib_dir(install_root))
     if lib_dir not in sys.path:
         sys.path.insert(0, lib_dir)
     import codex_receive_loop as crl  # noqa: E402

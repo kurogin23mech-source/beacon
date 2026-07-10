@@ -188,3 +188,62 @@ def test_posix_delegates_to_bash_when_available(monkeypatch):
     )
     assert called["bash"] is True
     assert called["python"] is False
+
+
+# ---------------------------------------------------------------------------
+# Codex daemon script discovery (ms-93 e-3209)
+# ---------------------------------------------------------------------------
+#
+# The Codex bridge runs from the plugin cache (no repo-root scripts/) and
+# discovers the daemon scripts via `beacon __codex-script-root__`. These pin
+# that the command resolves the source `scripts/` and the wheel
+# `_bundled_scripts/` layouts, and short-circuits before bash delegation.
+
+
+def test_resolve_scripts_dir_source_layout():
+    from beacon_cli.main import _resolve_scripts_dir
+
+    scripts = _resolve_scripts_dir(ROOT)
+    assert scripts == ROOT / "scripts"
+    assert (scripts / "codex-receive-loop.py").is_file()
+
+
+def test_resolve_scripts_dir_wheel_layout(tmp_path):
+    """A wheel install exposes scripts at `_bundled_scripts/`, not `scripts/`."""
+    from beacon_cli.main import _resolve_scripts_dir
+
+    bundled = tmp_path / "_bundled_scripts"
+    bundled.mkdir()
+    (bundled / "codex-receive-loop.py").write_text("# stub\n")
+    assert _resolve_scripts_dir(tmp_path) == bundled
+
+
+def test_resolve_scripts_dir_missing_returns_none(tmp_path):
+    from beacon_cli.main import _resolve_scripts_dir
+
+    assert _resolve_scripts_dir(tmp_path) is None
+
+
+def test_codex_script_root_command_prints_dir(capsys, monkeypatch):
+    """`beacon __codex-script-root__` prints the resolved scripts dir, exit 0.
+
+    Intercepted before bash delegation so it answers identically for git
+    checkouts and pipx/brew wheels.
+    """
+    from beacon_cli import main as main_mod
+
+    monkeypatch.setattr(main_mod, "_find_repo_root", lambda: ROOT)
+    rc = main_mod.main(["__codex-script-root__"])
+    out = capsys.readouterr().out.strip()
+    assert rc == 0
+    assert out == str(ROOT / "scripts")
+
+
+def test_codex_script_root_command_exit1_when_unresolvable(capsys, monkeypatch):
+    from beacon_cli import main as main_mod
+
+    monkeypatch.setattr(main_mod, "_find_repo_root", lambda: None)
+    rc = main_mod.main(["__codex-script-root__"])
+    out = capsys.readouterr().out.strip()
+    assert rc == 1
+    assert out == ""
