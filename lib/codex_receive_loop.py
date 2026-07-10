@@ -57,6 +57,7 @@ def heartbeat_to_server(
     actor: dict,
     poll_interval_ms: int = 2000,
     shutdown: bool = False,
+    cwd: str = "",
 ) -> bool:
     """PUT /api/projects/<pid>/sessions/<sid> with the canonical body.
 
@@ -77,6 +78,15 @@ def heartbeat_to_server(
     e-3091 built. The structural kind is read from ``actor.agent_kind``
     (the daemon always passes "codex").
 
+    e-2516: also stamp the **top-level** ``cwd`` when supplied, mirroring
+    channel/bus.mjs's cold-start ``collectLayer1Where`` (which PUTs a
+    top-level ``cwd`` to the same ``/sessions/<sid>`` endpoint). Without
+    this, ``beacon sessions --live`` shows Codex rows with no working
+    directory, so a user running Codex in several cwds cannot tell which
+    session is which (= the multi-cwd identification gap this closes).
+    Gated on ``actor`` so it rides the cold-start / refresh path, not
+    every 2s poll — cwd never changes mid-session.
+
     Returns ``True`` on success, ``False`` on transport failure
     (= we never raise; the loop must survive transient network blips).
     """
@@ -90,6 +100,9 @@ def heartbeat_to_server(
         kind = str(actor.get("agent_kind") or "").strip()
         if kind:
             body["agent"] = {"kind": kind}
+        cwd = str(cwd or "").strip()
+        if cwd:
+            body["cwd"] = cwd
     try:
         api.put(bp.heartbeat_path(project_id, session_id), body)
         return True
