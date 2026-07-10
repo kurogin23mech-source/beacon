@@ -38,8 +38,23 @@ import time
 from pathlib import Path
 
 
-# Codex hooks.json — user-global location.
-CODEX_HOOKS_PATH = Path(os.path.expanduser("~/.codex/hooks.json"))
+def _codex_home() -> Path:
+    """Codex home directory.
+
+    Respects ``$CODEX_HOME`` (Codex CLI's own env var), falling back to
+    ``~/.codex``. ms-93 / e-3202: hardcoding ``~/.codex`` made an isolated
+    dogfood env (started with ``CODEX_HOME=/tmp/...``) falsely resolve the
+    REAL ``~/.codex`` — so ``status`` reported the developer's live daemon as
+    if it were the isolated one, and a clean-env dogfood was impossible.
+    """
+    env = os.environ.get("CODEX_HOME", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return Path(os.path.expanduser("~/.codex"))
+
+
+# Codex hooks.json — under $CODEX_HOME (default ~/.codex).
+CODEX_HOOKS_PATH = _codex_home() / "hooks.json"
 HOOK_EVENT = "UserPromptSubmit"
 # Stable marker so we can detect "our" hook entry across upgrades.
 HOOK_SCRIPT_BASENAME = "codex-inbox-hook.py"
@@ -187,7 +202,7 @@ def _save_hooks_json(data: dict) -> None:
 # ``tomllib`` / ``tomli_w``) that preserves all existing config content.
 # ------------------------------------------------------------------ #
 
-CODEX_CONFIG_PATH = Path(os.path.expanduser("~/.codex/config.toml"))
+CODEX_CONFIG_PATH = _codex_home() / "config.toml"
 _SANDBOX_TABLE = "sandbox_workspace_write"
 _NET_KEY = "network_access"
 
