@@ -7007,6 +7007,17 @@ def list_sessions(
         cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
         def _is_live(s: dict) -> bool:
+            # e-3214: a gracefully shut-down session stamps ``shutdown=true``
+            # together with a fresh ``last_poll_at``/``last_active`` (so
+            # healthy_only classifies it dead *immediately*, e-2305). A pure
+            # recency check would therefore keep advertising a just-stopped
+            # daemon as live for ~since_minutes. A shut-down session is not
+            # live regardless of recency, so drop it here too — this brings
+            # ``--live`` in line with ``--healthy`` for stopped daemons
+            # (Codex e-3209 clean-env dogfood: shutdown row lingered in
+            # ``bus directory --live``).
+            if bool(s.get("shutdown", False)):
+                return False
             la = s.get("last_active", "")
             # Compare ISO8601 strings lexicographically — same wire format on
             # both sides (server-stamped UTC microseconds).
