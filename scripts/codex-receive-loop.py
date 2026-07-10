@@ -661,7 +661,15 @@ def main() -> int:
                     if (app_server_client is not None or dn is not None)
                     else None
                 ),
-                persist_kept=app_server_client is None,
+                # Keep the hook inbox fallback unless the app-server is BOTH
+                # present AND armed (= ms-93 / e-3156). A non-armed app-server
+                # dispatches to a silent background turn that never wakes the
+                # foreground TUI and sends no reply, so without the inbox
+                # fallback the DM blackholes.
+                persist_kept=crl.should_persist_kept(
+                    has_app_server=app_server_client is not None,
+                    armed=bool(args.armed),
+                ),
             )
             state["since"] = latest
             if persisted:

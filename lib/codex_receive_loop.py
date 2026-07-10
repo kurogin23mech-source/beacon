@@ -153,6 +153,34 @@ def ack_event(api, *, project_id: str, event_id: str, stage: str,
 
 
 # ------------------------------------------------------------------ #
+# persist-fallback decision (= ms-93 / e-3156 blackhole fix)
+# ------------------------------------------------------------------ #
+
+
+def should_persist_kept(*, has_app_server: bool, armed: bool) -> bool:
+    """Decide whether a kept DM must also land in the hook inbox fallback.
+
+    ``opened`` and the visible-session surfacing are two different things. In
+    ``--app-server`` mode a kept DM is dispatched to a background turn (which
+    acks ``opened``), but that turn does NOT wake the human's foreground TUI.
+    So the inbox fallback (= pull-on-prompt via the UserPromptSubmit hook) is
+    the only path that surfaces the DM to the human at their next prompt.
+
+    The blackhole (= ms-93 / e-3156): the daemon used to persist the inbox
+    fallback only when there was no app-server at all
+    (``persist_kept = app_server_client is None``). With an app-server but
+    WITHOUT ``--armed``, a DM was dispatched to a silent background turn, got
+    no autonomous reply (not armed), and was never kept in the inbox — so it
+    vanished from every human-visible path.
+
+    Rule: keep the inbox fallback UNLESS the app-server is BOTH present AND
+    armed. Only in armed+app-server mode is the autonomous reply itself the
+    surfacing path, so the inbox fallback is redundant there.
+    """
+    return (not has_app_server) or (not armed)
+
+
+# ------------------------------------------------------------------ #
 # poll_inbox_once — core filter + adapter persist
 # ------------------------------------------------------------------ #
 

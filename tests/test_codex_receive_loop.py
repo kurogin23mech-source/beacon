@@ -511,3 +511,33 @@ class TestPollInboxOnceDriftFixes:
             allowed_channels=("dm",),
         )
         assert n == 0
+
+
+# ------------------------------------------------------------------ #
+# should_persist_kept — inbox fallback vs blackhole (= ms-93 / e-3156)
+# ------------------------------------------------------------------ #
+
+
+class TestShouldPersistKept:
+    """The inbox fallback must survive UNLESS the app-server is present AND
+    armed. Regression guard for the non-armed app-server DM blackhole where a
+    kept DM was dispatched to a silent background turn and never surfaced to
+    the human (2026-07-10, reported by Codex)."""
+
+    def test_no_app_server_pull_only_persists(self):
+        # Pure pull-on-prompt (no app-server): the inbox IS the only path.
+        assert crl.should_persist_kept(has_app_server=False, armed=False) is True
+
+    def test_no_app_server_armed_persists(self):
+        # armed without an app-server (= exec-worker path) still needs inbox.
+        assert crl.should_persist_kept(has_app_server=False, armed=True) is True
+
+    def test_app_server_not_armed_persists(self):
+        # THE BUG: non-armed app-server dispatched a silent turn and dropped
+        # the inbox → blackhole. Must now keep the inbox fallback.
+        assert crl.should_persist_kept(has_app_server=True, armed=False) is True
+
+    def test_app_server_armed_skips_inbox(self):
+        # Only here is the autonomous reply the surfacing path, so the inbox
+        # fallback is redundant (= preserve the pre-bug behavior).
+        assert crl.should_persist_kept(has_app_server=True, armed=True) is False
