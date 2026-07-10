@@ -1,0 +1,9 @@
+triggers:
+  - "/beacon-trek-execute"
+  - "trek-trigger"
+  - "trek-progress-check"
+  - "trek-leader-digest"
+  - "trek-task-review"
+  - "trek 自律実行"
+  - "Trek で解決"
+  - "Trek 自走"
