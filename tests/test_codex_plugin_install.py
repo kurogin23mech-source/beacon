@@ -1419,3 +1419,34 @@ def test_daemon_lib_fallback_prefers_source_then_bundled(script_rel, tmp_path):
     whl_root = tmp_path / "beacon_cli"
     (whl_root / "_bundled_lib").mkdir(parents=True)
     assert mod._resolve_lib_dir(whl_root) == whl_root / "_bundled_lib"
+
+
+# ---------------------------------------------------------------------------
+# ms-93 e-3135: the daemon stamps its beacon version so version-skew detection
+# can compare a running daemon against the CLI.
+# ---------------------------------------------------------------------------
+
+
+def test_daemon_reads_own_beacon_version(tmp_path):
+    """_beacon_version reads __version__ from the resolved lib/commands.py."""
+    daemon = _load_script_module("crl_ver", REPO_ROOT / "scripts" / "codex-receive-loop.py")
+    root = tmp_path / "src"
+    (root / "lib").mkdir(parents=True)
+    (root / "lib" / "commands.py").write_text('__version__ = "9.9.9"\n')
+    assert daemon._beacon_version(root) == "9.9.9"
+    # No commands.py → fail-open to "".
+    assert daemon._beacon_version(tmp_path / "empty") == ""
+
+
+def test_daemon_session_pointer_includes_beacon_version(tmp_path):
+    """_write_session_pointer persists beacon_version for skew read-back."""
+    import json
+
+    daemon = _load_script_module("crl_ptr", REPO_ROOT / "scripts" / "codex-receive-loop.py")
+    daemon._write_session_pointer(
+        tmp_path, session_id="s", project_id="p", beacon_bin="beacon",
+        beacon_version="0.56.1",
+    )
+    pointer = tmp_path / ".beacon" / "codex" / "receive-loop.session.json"
+    data = json.loads(pointer.read_text())
+    assert data["beacon_version"] == "0.56.1"

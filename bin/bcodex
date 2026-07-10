@@ -220,8 +220,11 @@ fi
 # best-effort and fail-open (never blocks). Detection logic lives in
 # lib/version_skew.py so it stays unit-testable.
 if [ -f "$INSTALL_ROOT/lib/version_skew.py" ]; then
+    # --cwd lets the detector compare a still-running receive daemon's stamped
+    # beacon version against this CLI (e-3135), on top of the PATH-binary check.
     "$WS_PROBE_PY" "$INSTALL_ROOT/lib/version_skew.py" \
         --current-version "$("$BEACON_BIN_SELECTED" --version 2>/dev/null | tail -1)" \
+        --cwd "$ROOT" \
         2>/dev/null | while IFS= read -r __sk; do
         [ -n "$__sk" ] && echo "[bcodex] $__sk" >&2
     done

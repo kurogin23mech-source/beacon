@@ -54,6 +54,24 @@ def _resolve_lib_dir(install_root: Path) -> Path:
     return lib_dir
 
 
+def _beacon_version(install_root: Path) -> str:
+    """Best-effort read of this install's beacon ``__version__`` (e-3135).
+
+    The daemon stamps this into its session pointer so a launcher / session-start
+    can detect "the running daemon is a different beacon version than the CLI"
+    (= the '別 daemon を見ている' skew Codex flagged). Reads the literal from
+    ``commands.py`` without importing it (heavy) and fails open to "".
+    """
+    import re
+    try:
+        commands_py = _resolve_lib_dir(install_root) / "commands.py"
+        src = commands_py.read_text(encoding="utf-8")
+        m = re.search(r'__version__\s*=\s*"([^"]+)"', src)
+        return m.group(1) if m else ""
+    except Exception:
+        return ""
+
+
 def _import_modules(install_root: Path):
     """Make ``lib`` importable, return (codex_session, codex_receive_loop,
     api_client, bus_protocol)."""
@@ -196,14 +214,20 @@ def _write_pid_file(cwd: Path) -> None:
 def _write_session_pointer(cwd: Path, *, session_id: str, project_id: str,
                             beacon_bin: str, codex_thread_id: str = "",
                             app_server_proxy: bool = False,
-                            app_server_url: str = "") -> None:
-    """Publish the active session pointer for the hook to read."""
+                            app_server_url: str = "",
+                            beacon_version: str = "") -> None:
+    """Publish the active session pointer for the hook to read.
+
+    ``beacon_version`` (e-3135) records which beacon version this daemon runs
+    as, so a launcher / session-start can warn on daemon-vs-CLI version skew.
+    """
     path = _session_pointer_file(cwd)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "session_id": session_id,
         "project_id": project_id,
         "beacon_bin": beacon_bin,
+        "beacon_version": beacon_version,
         "codex_thread_id": codex_thread_id,
         "app_server_proxy": app_server_proxy,
         "app_server_url": app_server_url,
@@ -402,6 +426,7 @@ def main() -> int:
         codex_thread_id=args.codex_thread_id,
         app_server_proxy=args.app_server_proxy,
         app_server_url=args.app_server_url,
+        beacon_version=_beacon_version(install_root),
     )
 
     print(
