@@ -1,0 +1,7 @@
+triggers:
+  - "/beacon-trek-finalize"
+  - "trek finalize"
+  - "trek 終結"
+  - "trek を終わらせる"
+  - "trek archive merge"
+  - "close trek"
