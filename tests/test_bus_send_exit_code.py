@@ -222,22 +222,41 @@ def test_beacon_bus_send_missing_channel_exits_nonzero():
 # ---------------------------------------------------------------------------
 
 
-def _run_bus(*args: str) -> subprocess.CompletedProcess:
+@pytest.fixture
+def bus_project(tmp_path):
+    """A minimal local Beacon project directory.
+
+    The `bus` arm of bin/beacon runs `ensure_project` (which requires
+    .beacon/project.json or .beacon/cloud.json) BEFORE the flag-parsing loop.
+    CI checkouts have no .beacon/, so without this the wrapper would exit 1 on
+    the missing project and never reach the flag guard under test. Running from
+    a throwaway project puts the flag loop on the execution path. The unknown-
+    flag / help checks resolve entirely in bash before any network call, so a
+    bare project.json (no cloud.json) is sufficient.
+    """
+    (tmp_path / ".beacon").mkdir()
+    (tmp_path / ".beacon" / "project.json").write_text(
+        '{"name": "test", "milestones": []}', encoding="utf-8"
+    )
+    return tmp_path
+
+
+def _run_bus(cwd, *args: str) -> subprocess.CompletedProcess:
     env = os.environ.copy()
     env["BEACON_BUS_SKIP_TO_CHECK"] = "1"
     env["BEACON_BUS_NO_LIVE_CHECK"] = "1"
     return subprocess.run(
         [str(BEACON_BIN), "bus", *args],
-        cwd=str(REPO_ROOT),
+        cwd=str(cwd),
         env=env,
         capture_output=True,
         text=True,
     )
 
 
-def test_bus_send_unknown_flag_errors_not_silently_dropped():
+def test_bus_send_unknown_flag_errors_not_silently_dropped(bus_project):
     """The reported footgun: `--body` must be rejected, not eaten."""
-    proc = _run_bus("send", "--channel", "dm", "--to", "sv-fake",
+    proc = _run_bus(bus_project, "send", "--channel", "dm", "--to", "sv-fake",
                     "--body", "hello")
     assert proc.returncode == 2, (
         f"Unknown flag must exit 2, got {proc.returncode}.\n"
@@ -250,28 +269,28 @@ def test_bus_send_unknown_flag_errors_not_silently_dropped():
     assert "event" not in proc.stdout.lower()
 
 
-def test_bus_send_arbitrary_typo_flag_rejected():
-    proc = _run_bus("send", "--channel", "dm", "--txt", "hi")
+def test_bus_send_arbitrary_typo_flag_rejected(bus_project):
+    proc = _run_bus(bus_project, "send", "--channel", "dm", "--txt", "hi")
     assert proc.returncode == 2
     assert "--txt" in proc.stderr
 
 
-def test_bus_send_stray_positional_rejected():
-    proc = _run_bus("send", "--channel", "dm", "bare-positional")
+def test_bus_send_stray_positional_rejected(bus_project):
+    proc = _run_bus(bus_project, "send", "--channel", "dm", "bare-positional")
     assert proc.returncode == 2
     assert "bare-positional" in proc.stderr
 
 
-def test_bus_help_still_exits_zero():
+def test_bus_help_still_exits_zero(bus_project):
     """`-h` / `--help` must route to usage, not the unknown-flag error."""
-    proc = _run_bus("--help")
+    proc = _run_bus(bus_project, "--help")
     assert proc.returncode == 0, (
         f"help must exit 0, got {proc.returncode}. stderr: {proc.stderr!r}"
     )
     assert "Usage: beacon bus send" in proc.stdout
 
 
-def test_bus_known_flags_not_rejected_by_loop():
+def test_bus_known_flags_not_rejected_by_loop(bus_project):
     """Recognized flags must pass the parse loop and reach the Python layer.
 
     We use `bus budget show` (no network) to prove a valid invocation is not
@@ -279,7 +298,7 @@ def test_bus_known_flags_not_rejected_by_loop():
     with 'unknown flag'; the real command prints budget state or a benign
     'no budget' line.
     """
-    proc = _run_bus("budget", "show")
+    proc = _run_bus(bus_project, "budget", "show")
     assert "unknown flag" not in proc.stderr.lower()
     assert "unexpected argument" not in proc.stderr.lower()
 
