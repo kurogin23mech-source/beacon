@@ -1,0 +1,4 @@
+triggers:
+  - "/beacon-operation-review"
+  - "バッチ確認"
+  - "運用チェック"
