@@ -89,6 +89,12 @@ if [ -z "$CODEX_BIN" ]; then
     exit 127
 fi
 
+# ms-93 / e-2559: declare the runtime AI-client identity explicitly so beacon
+# actor names resolve to "<machine>-codex" without relying on undocumented
+# CODEX_* markers. Durable contract (env > agent.json kind > marker), inherited
+# by every child `beacon` call. An explicit caller override is honoured.
+export BEACON_AGENT_KIND="${BEACON_AGENT_KIND:-codex}"
+
 if [ -n "${BEACON_NO_BUS:-}" ] && \
    [ "$BEACON_NO_BUS" != "0" ] && \
    [ "$BEACON_NO_BUS" != "false" ] && \

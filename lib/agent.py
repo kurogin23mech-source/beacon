@@ -102,15 +102,109 @@ def read_agent_config() -> dict:
     return data
 
 
+# AI-client kinds we auto-suffix. Kept short (``mac-claude`` / ``mac-codex``)
+# per ms-93 / e-2559. New kinds extend this set + the marker heuristic below.
+_KNOWN_KINDS = ("claude", "codex")
+
+
+def _kind_from_env() -> str:
+    """Explicit ``BEACON_AGENT_KIND`` (= codex | claude), or "".
+
+    This is the durable contract: ``bclaude`` / ``bcodex`` export it, and a
+    user can set it by hand. It is checked before any undocumented runtime
+    marker so identity is never left to a heuristic when an explicit signal
+    exists (ms-93 / e-2559).
+    """
+    v = os.environ.get("BEACON_AGENT_KIND", "").strip().lower()
+    return v if v in _KNOWN_KINDS else ""
+
+
+def _kind_from_config(cfg: dict) -> str:
+    """Persisted ``kind`` field in ``agent.json`` (= install-time or manual)."""
+    v = str((cfg or {}).get("kind") or "").strip().lower()
+    return v if v in _KNOWN_KINDS else ""
+
+
+def _kind_from_runtime_markers() -> str:
+    """Best-effort kind from runtime env markers — internal heuristic only.
+
+    ms-93 / e-2559 AC 5: these markers are NOT a durable contract (Codex's
+    ``CODEX_*`` env beyond ``CODEX_HOME`` are undocumented and may change
+    between CLI versions), so their use is confined to this function. A miss
+    returns "" (→ the caller keeps the plain ``<machine>`` label) rather than
+    guessing — an honestly-unlabelled machine beats a confidently-wrong kind.
+    """
+    env = os.environ
+    # Claude Code sets CLAUDECODE / CLAUDE_CODE_* in its shell.
+    if env.get("CLAUDECODE") or env.get("CLAUDE_CODE_ENTRYPOINT"):
+        return "claude"
+    # Codex: CODEX_HOME is the one documented env; treat any CODEX_* as a hint.
+    if env.get("CODEX_HOME") or any(k.startswith("CODEX_") for k in env):
+        return "codex"
+    return ""
+
+
+def _resolve_kind(cfg: dict) -> str:
+    """Resolve the AI-client kind, or "" when there is no signal at all.
+
+    Order (ms-93 / e-2559, 案B): explicit env → persisted config → runtime
+    marker. Returns "" when nothing is known — the caller then falls back to
+    the bare ``<machine>`` label (ms-51 AC-5 contract preserved). We do NOT
+    return ``unknown`` here: a no-signal invocation may be a *human* running
+    ``beacon`` directly, so asserting an AI identity would over-claim.
+    """
+    return _kind_from_env() or _kind_from_config(cfg) or _kind_from_runtime_markers()
+
+
+def persist_agent_kind(kind: str, *, source: str = "manual") -> bool:
+    """Write ``kind`` + ``kind_source`` into ``.beacon/agent.json`` (merge).
+
+    ms-93 / e-2559 AC 3: the persisted ``kind`` is the middle resolution rung
+    (after the explicit ``BEACON_AGENT_KIND`` env, before the runtime marker).
+    ``source`` records provenance for audit: ``install-time`` (an installer
+    stamped it), ``runtime-detect`` (a launcher persisted a detected value),
+    or ``manual`` (a human set it).
+
+    Deliberately NOT called from ``beacon skill install --target`` — that flag
+    selects an install *destination* (and ``--target both`` is common), which
+    AC 4 keeps separate from "which client is running now". A launcher/installer
+    that genuinely knows the runtime client calls this explicitly.
+
+    Returns True on write, False on any IO error (fail-open; identity still
+    resolves via env / marker / hostname).
+    """
+    kind = str(kind or "").strip().lower()
+    if kind not in _KNOWN_KINDS:
+        return False
+    cfg = read_agent_config()
+    cfg["kind"] = kind
+    cfg["kind_source"] = source
+    path = _agent_json_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        return True
+    except OSError:
+        return False
+
+
 def _base_agent_name() -> str:
     """Resolve the agent name *before* sub-agent suffixing.
 
-    Order: agent.json's ``name`` field → hostname.
+    Order (ms-93 / e-2559):
+      1. ``agent.json`` explicit ``name`` (full override) → use as-is.
+      2. Otherwise ``<machine>-<kind>`` when an AI-client kind is resolvable
+         (explicit env / persisted config / runtime marker).
+      3. Otherwise the bare ``<machine>`` hostname (ms-51 AC-5 fallback).
     """
     cfg = read_agent_config()
     name = cfg.get("name")
     if isinstance(name, str) and name.strip():
         return name.strip()
+    kind = _resolve_kind(cfg)
+    if kind:
+        return f"{get_machine()}-{kind}"
     return get_machine()
 
 
@@ -179,5 +273,6 @@ __all__ = [
     "get_actor",
     "get_agent",
     "get_machine",
+    "persist_agent_kind",
     "read_agent_config",
 ]

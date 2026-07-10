@@ -53,6 +53,13 @@ if [ -z "$CLAUDE_BIN" ]; then
     exit 127
 fi
 
+# ms-93 / e-2559: declare the runtime AI-client identity explicitly so beacon
+# actor names resolve to "<machine>-claude" without relying on undocumented
+# markers. This is the durable contract (env > agent.json kind > marker); it
+# is inherited by every child `beacon` call, including the opt-out path below.
+# An explicit caller override is honoured.
+export BEACON_AGENT_KIND="${BEACON_AGENT_KIND:-claude}"
+
 # ---------------------------------------------------------------------------
 # Step 2: Probe opt-out sources. If any is set, fall back to plain claude.
 # Keep this logic in lockstep with lib/commands.py:_is_bus_opted_out().
