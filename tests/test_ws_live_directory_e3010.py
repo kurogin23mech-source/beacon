@@ -213,3 +213,45 @@ def test_project_endpoint_healthy_only_union():
     rows = client.get("/api/projects/p1/sessions?healthy_only=true").json()
     assert "s-ws" in [r["session_id"] for r in rows]
     assert next(r for r in rows if r["session_id"] == "s-ws")["ws_live"] is True
+
+
+# --- e-3214: shutdown session must not linger in --live -----------------------
+# A gracefully-stopped daemon stamps shutdown=true WITH a fresh last_poll_at/
+# last_active (so healthy_only kills it immediately, e-2305). --live must drop
+# it too — a recency check alone would keep advertising a just-stopped daemon
+# as live for ~since_minutes (Codex e-3209 clean-env dogfood observation).
+
+def _seed_shutdown_session(pid: str, sid: str) -> None:
+    now = _now()
+    _sessions_store.setdefault(pid, []).append({
+        "session_id": sid,
+        "actor": {"email": "", "machine": "", "agent": ""},
+        "last_active": _iso(now),          # fresh
+        "poll_interval_ms": 2000,
+        "shutdown": True,                  # but gracefully shut down
+        "last_poll_at": _iso(now),         # fresh shutdown stamp
+    })
+
+
+def test_live_only_drops_shutdown_session_even_when_fresh():
+    _seed_project("p1")
+    _seed_shutdown_session("p1", "s-stopped")
+    _seed_session("p1", "s-alive", poll_fresh=True)  # control
+    rows = client.get("/api/projects/p1/sessions?live_only=true").json()
+    sids = [r["session_id"] for r in rows]
+    assert "s-stopped" not in sids, (
+        "a shut-down daemon must not appear in --live (e-3214)"
+    )
+    assert "s-alive" in sids  # a genuinely live session is unaffected
+
+
+def test_healthy_only_and_live_only_agree_for_shutdown():
+    """--live and --healthy must both exclude a stopped daemon (consistency)."""
+    _seed_project("p1")
+    _seed_shutdown_session("p1", "s-stopped")
+    live = [r["session_id"] for r in client.get(
+        "/api/projects/p1/sessions?live_only=true").json()]
+    healthy = [r["session_id"] for r in client.get(
+        "/api/projects/p1/sessions?healthy_only=true").json()]
+    assert "s-stopped" not in live
+    assert "s-stopped" not in healthy
