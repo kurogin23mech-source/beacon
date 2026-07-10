@@ -1,0 +1,9 @@
+triggers:
+  - "/beacon-dm-respond"
+  - "/beacon-dm-approve"
+  - "/beacon-dm-deny"
+  - "DMを承認"
+  - "DMに応答"
+  - "envelope 承認"
+  - "approve dm"
+  - "respond dm"

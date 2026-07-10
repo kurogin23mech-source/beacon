@@ -1,0 +1,9 @@
+triggers:
+  - "/beacon-bus-armed"
+  - "armed mode"
+  - "autonomous mode"
+  - "自律モード"
+  - "自動返信モード"
+  - "自動応答"
+  - "bus を armed"
+  - "listen を armed"
