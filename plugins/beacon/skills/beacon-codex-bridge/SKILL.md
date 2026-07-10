@@ -13,7 +13,7 @@ description: Beacon の DM 受信 bridge を Codex CLI で 1 step で扱う Skil
 - `stop` — daemon を graceful 停止 (= SIGTERM)
 - `restart` — stop → start
 - `status` — daemon の running 状態 + hook install 状態 + session pointer を表示
-- `uninstall` — hook を `~/.codex/hooks.json` から除去 + daemon stop (= plugin 自体は `codex plugin remove beacon@personal` で別途)
+- `uninstall` — hook を `~/.codex/hooks.json` から除去 + daemon stop (= plugin 自体は `codex plugin remove beacon@beacon` で別途)
 
 引数なしの場合は `status` 相当を実行。
 

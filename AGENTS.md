@@ -41,7 +41,7 @@ $beacon-codex-bridge stop
 
 **`nohup python3 scripts/codex-receive-loop.py &` を別 terminal で打つ必要はありません**。 tmux ad-hoc launcher は dev / dogfood 専用扱いで、 product path は plugin Skill 経由です。
 
-plugin 自体の install (= `codex plugin add beacon@personal`) と marketplace entry の整備は別途 (= MVP では skill 直叩きが優先、 marketplace 整備は follow-up task)。
+plugin 自体の install (= `codex plugin add beacon@beacon`) と marketplace entry の整備は別途 (= MVP では skill 直叩きが優先、 marketplace 整備は follow-up task)。selector は `<plugin>@<marketplace>` で、repo を marketplace として登録する (`codex plugin marketplace add <checkout>`) と marketplace 名は `beacon` (marketplace.json の top-level name)。したがって正しい selector は `beacon@beacon`。`@personal` は `~/.agents` の personal marketplace を指す別物なので混同しない。
 
 ## 関連 task / SPEC
 
