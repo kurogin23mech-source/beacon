@@ -5,8 +5,9 @@ Skill markdown into tested scripts/lib:
 
   * Step 1i (beacon-bus receive capability) -> scripts/check-mcp-receive-capability.py
   * Step 2.7 (Web UI open)                 -> scripts/open-webui.py
-  * Step 1n-2 (user-scoped DM catch-up)    -> scripts/dm-user-scoped-catchup.py
-                                              + lib/dm_pending formatters
+  * Step 1n-2 (user-scoped DM catch-up)    -> lib/dm_pending formatters
+    (fetch orchestration later merged into scripts/session-start-dm-inbox.py
+     by ms-85 e-3180; the pure filter/format helpers tested here are shared)
 
 The refactor's contract is **behavior unchanged**: these tests pin the moved
 logic (status detection, warning-band text, filter/format, local-mode skip)

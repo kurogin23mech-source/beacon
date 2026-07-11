@@ -363,132 +363,46 @@ JSON が返れば parse して以下のフィールドを Step 3 で表示する
 
 この Step は **読み取り専用**。
 
-## Step 1n: 保留中 DM action の取得 (ms-70 e-1714)
+## Step 1n / 1n-2: DM inbox の取得 (ms-70 e-1714 + ms-54 e-2974、ms-85 e-3180 で統合)
 
-terminal が close 中に届いた **cross-user DM (= 直接メッセージ) action 付き envelope** は、ms-70 / e-1713 のディスパッチャ・ゲートが `bus_event_approvals` sidecar (= 同 event_id を主キーに別 subcollection で保持する判断記録) に `approval_status="pending"` を立てて auto-act を抑止している。session-start でその pending リストを取り出して human に提示することで、「閉じている間に来た action 系 DM が、次回起動時に必ず目に入る」 経路を作る。
+session-start が start 時に取り込むべき DM は 2 系統ある:
 
-Bash ツールで実行 (fail-safe、cloud 未設定 / endpoint 不在ならスキップ):
+- **保留中 DM action** (Step 1n / ms-70 e-1714): terminal close 中に届いた cross-user DM の action 付き envelope。ディスパッチャ・ゲートが `bus_event_approvals` sidecar に `approval_status="pending"` を立てて auto-act を抑止しており、これを human に提示して「閉じている間に来た action 系 DM が次回起動時に必ず目に入る」経路を作る。
+- **user-scoped DM catch-up** (Step 1n-2 / ms-54 e-2974): 受信 bridge が e-1209 filter で意図的に drop する user-scoped 情報 DM。過去セッションの inbox に出ないため「留守中に届いた DM」が見落とされる穴を、server bus events を直接 query して埋める。
 
-```bash
-PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))" 2>/dev/null)
-USER_ID=$(python3 -c "import json,os; p=os.path.expanduser('~/.beacon/auth.json'); print(json.load(open(p)).get('user_id',''))" 2>/dev/null)
-if [ -n "$PROJECT_ID" ] && [ -n "$USER_ID" ]; then
-  python3 - <<'PY' 2>/dev/null
-import json, os, sys, urllib.request, urllib.parse
-project_id = os.environ.get("PROJECT_ID") or ""
-user_id = os.environ.get("USER_ID") or ""
-base = os.environ.get("BEACON_API_BASE") or "https://beacon-api-prod-2dlj7zlbiq-uc.a.run.app"
-# token: cloud.json -> id_token, fallback to auth.json
-token = ""
-try:
-    with open(".beacon/cloud.json") as f: token = json.load(f).get("id_token","") or ""
-except Exception: pass
-if not token:
-    try:
-        with open(os.path.expanduser("~/.beacon/auth.json")) as f: token = json.load(f).get("id_token","") or ""
-    except Exception: pass
-q = urllib.parse.urlencode({"receiver_user_id": user_id})
-url = f"{base}/api/projects/{project_id}/dm/pending?{q}"
-req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"} if token else {})
-try:
-    with urllib.request.urlopen(req, timeout=5) as r:
-        rows = json.loads(r.read().decode("utf-8"))
-except Exception as e:
-    print(f"PENDING_DM_FETCH_FAIL: {e}", file=sys.stderr); sys.exit(0)
-sys.path.insert(0, os.path.abspath("lib"))
-try:
-    from dm_pending import format_pending_dm_summary
-    print(format_pending_dm_summary(rows))
-except Exception as e:
-    print(f"PENDING_DM_FORMAT_FAIL: {e}", file=sys.stderr)
-PY
-fi
-```
-
-出力が空でなければ Step 3 の出力ヘッダ部に **そのまま転記** する。空ならセクションごと省略 (= ノイズ削減、`format_pending_dm_summary` が `""` を返す契約)。
-
-提示情報は helper (= `lib/dm_pending.py` の `format_pending_dm_summary`) が 1 行サマリーに圧縮: `event_id from sender_user_id at created_at`。envelope 本文 (= `actions_authorized` 等) は sidecar に持たない設計 (ms-70 / e-1712) なので、詳細展開は出力末尾に書かれた `beacon dm show <event_id>` (= e-1716 で primitive 化予定) と `beacon dm respond approve|deny <event_id>` の案内に従う。
-
-local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムアウトはすべて silent skip。session-start を中断しない。
-
-この Step は **読み取り専用**。sidecar の書き換え (= approved / denied 決定) は `/beacon-dm-respond` Skill 経由でのみ行う。
-
-## Step 1n-2: user-scoped DM の catch-up (ms-54 / e-2974)
-
-前回セッション終了以降に **user-scoped で送られた情報 DM (= 直接メッセージ、action 権限なし)** は、受信 bridge (channel/bus.mjs) が e-1209 filter で意図的に drop している (= SPEC doc `wJZrmxZGmT7d5lRQvWnE`「DM primitive の使い分け原則: session-scoped = 即時 wake / user-scoped = 次回 catch-up」に基づく設計)。したがって過去セッションの inbox には出ておらず、AI から見て「留守中に届いた DM」が session-start 時に完全に見落とされる。
-
-本 Step は **server の bus events を直接 query** し、user-scoped で自分宛 (payload.recipient_user_id == 自 user_id) の DM を「catch-up 対象」として拾い、Step 3 の出力に含める。session-scoped で既に届いた DM (bridge 経由で AI が過去に read 済のもの) は対象外 (受信 bridge の inbox 経由で既に見ているはず)。
-
-Bash ツールで実行 (fail-safe、cloud 未設定 / endpoint 不在ならスキップ):
+e-3180 でこの 2 系統を **1 スクリプトに統合**: project_id / user_id / id_token の解決を 1 回だけ行い、両セクションを 1 回の呼び出しで出す。Bash ツールで実行 (fail-safe、cloud 未設定 / endpoint 不在ならスキップ):
 
 ```bash
-python3 scripts/dm-user-scoped-catchup.py 2>/dev/null
+python3 scripts/session-start-dm-inbox.py 2>/dev/null
 ```
 
-スクリプトは server の bus events を query し、user-scoped で自分宛の DM だけを抽出・整形して stdout に出す (フェッチ = `scripts/dm-user-scoped-catchup.py`、抽出/整形 = `lib/dm_pending.filter_user_scoped_catchup` / `format_user_scoped_catchup` に分離、単体テスト済み)。since は前回 session log の created_at、無ければ 7 日前。
+出力が空でなければ Step 3 の出力ヘッダ部に **そのまま転記** する (保留中 action → catch-up の順、両方あれば空行区切り)。空ならセクションごと省略。フェッチ統合 = `scripts/session-start-dm-inbox.py`、整形 = `lib/dm_pending.format_pending_dm_summary` / `filter_user_scoped_catchup` / `format_user_scoped_catchup` (単体テスト済み)。
 
-出力が空でなければ Step 3 の出力ヘッダ部 (「保留中 DM action」セクションの直後、Trek 一覧の直前あたり) に **そのまま転記** する。空ならセクションごと省略。
+- 保留中 action は `event_id from sender_user_id at created_at` の 1 行サマリー。envelope 本文は sidecar に持たない設計 (ms-70 / e-1712) なので、詳細は `beacon dm show <event_id>` (e-1716 で primitive 化予定) + `beacon dm respond approve|deny <event_id>`。決定は `/beacon-dm-respond` Skill 経由でのみ (読み取り専用)。
+- catch-up は preview 80 文字まで、詳細は `beacon bus receive --channel dm`、返信は `/beacon-dm-send` (reply mode)。既読 stamp は AI が read した際にサーバ側で自動記録 (Skill 側で明示 ack しない)。
 
-payload.text は preview 80 文字まで、詳細確認は `beacon bus receive --channel dm` を案内。返信したい場合は `/beacon-dm-send` (reply mode) 経由。
+local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムアウトはすべて silent skip。session-start を中断しない。この Step は **読み取り専用**。
 
-local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムアウトはすべて silent skip。session-start を中断しない。
+## Step 1o / 1o-2: Trek 状態の取得 (ms-75 e-1813 + e-1854 + e-2047、ms-85 e-3180 で統合)
 
-この Step は **読み取り専用**。既読フラグの更新 (opened stamp) は AI が payload を read した際にサーバ側で自動記録されるため、Skill 側で明示 ack しない (= 次回同 Step が「既読」表示するのに任せる)。
+Trek (= 缶詰の徹夜作業部屋、 user が join した瞬間に scope 内 action が事前承認スコープになる作業空間) に関する 2 つの可視化を session-start で行う:
 
-## Step 1o: 現在 join 中の Trek 一覧 (ms-75 / e-1813 + e-1854)
+- **join 中 Trek 一覧** (Step 1o / e-1813 + e-1854): join 済 trek のリストと goal_state / halt 状態。ms-70 (= cross-user DM 承認ゲート) は Trek 参加中だけ blanket 自動承認 (= 都度確認なしで配信) になるため、「自分が今どの Trek の blanket 例外を受けているか」を毎セッション可視化する。
+- **armed セルフチェック** (Step 1o-2 / e-2047): active Trek に join 中なら、このセッションが armed (= 自律実行モード) かを確認する。`--no-arm` opt-out / 旧バージョン join / 別 worktree の budget 不在で not-armed が起こりうる。
 
-Trek (= 缶詰の徹夜作業部屋、 user が join した瞬間に scope 内 action が事前承認スコープになる作業空間) に join 済の場合、 そのリストと goal_state / halt 状態を session-start で必ず可視化する。 ms-70 (= cross-user DM 承認ゲート) は Trek 参加中だけ blanket 自動承認 (= 都度確認なしで配信) になるため、 「自分が今どの Trek の blanket 例外を受けているか」 を session 開始時に user 自身が把握できる必要がある。
-
-Bash ツールで実行:
+e-3180 でこの 2 つを **1 スクリプトに統合**: `beacon trek list --joined` を 1 回だけ叩き、active trek がある時だけ armed 判定用の `beacon bus auto-execute list` / `beacon bus budget show` を追加取得する。Bash ツールで実行:
 
 ```bash
-beacon trek list --joined --json 2>/dev/null
+python3 scripts/session-start-trek-status.py 2>/dev/null
 ```
 
-出力が空配列 `[]` ならセクションごと省略。 1 件以上あれば、 各 trek について以下を抽出して **Step 3 ヘッダに転記**:
+出力が空ならセクションごと省略。空でなければ **Step 3 ヘッダにそのまま転記**。整形/判定は `lib/trek_status` (`format_joined_treks` / `has_active_trek` / `is_armed`、単体テスト済み) が所管し、以下を保証する:
 
-- `trek_id` と `title` (= 1 行)
-- `status` (= active / planning / archived)
-- `halt` が non-null なら 「⚠ HALTED: {halt.reason}」 を強調表示
-- `goal_state` が空でなければ 「目標: {goal_state}」 を 1 行で追加
-- `members` の自分以外の数を 「他 N 名」 と要約
+- 各 trek: `[trek_id] title` / `status` / `halt` non-null 時「⚠ HALTED: {reason}」/ `goal_state` 非空時「目標: {goal_state}」/ 自分以外の数「他 N 名」。
+- active trek が 1 つ以上あれば blanket 自動承認リマインダを 1 行添える (e-1854 AC 1: 「自分が今 blanket 自動承認の対象になっている」ことを毎セッション可視化)。撤回は `beacon trek leave <trek-id>`、デプロイ / リリースのみ user 確認境界。実際の承認は server 側 dm_gate.py が `shared_trek_member` 判定で行う。
+- active trek に join 中かつ not-armed なら「⚠ Trek 参加中だが自律実行モードが not-armed」警告を添える (armed 条件 AND: trek 系 channel が auto-execute allowlist にある かつ budget が total > 0 / used < total)。armed なら何も出さない。planning / archived のみの join は判定不要。
 
-加えて、 Trek 参加中であれば user に以下を 1 行で必ず伝える:
-
-> Trek 参加中: 同 Trek scope 内の DM (= 計画 / 議論 / 実装計画) は自動承認 (= blanket 例外、 ms-70/e-1854) で配信されています。 撤回したい場合は `beacon trek leave <trek-id>` を実行してください。 デプロイ / リリースのみ user 確認境界です。
-
-これは「自分が今 blanket 自動承認の対象になっている」 ことを毎セッション可視化する e-1854 AC 1 の構造的実装。 user が知らないうちに自律応答が走るリスクを構造的に低減する (= 表示は読み取り専用、 実際の承認自体は server 側 dm_gate.py が `shared_trek_member` 判定で行う)。
-
-planning や archived な trek は blanket 例外の対象外なので、 表示はするが警告メッセージは active な trek だけに添える。
-
-local mode (= `.beacon/cloud.json` 不在) でも `~/.beacon/treks/` から拾うので動作する。
-
-### Step 1o-2: 自律実行モード (= armed) のセルフチェック (ms-75 / e-2047)
-
-active な Trek に join 中なら、 このセッションが **armed (= 自律実行モード)** であることを確認する。 `beacon trek join` は AC 1 で auto-arm が default になっているが、 以下のケースで not-armed が起こりうる:
-
-- `--no-arm` で opt-out した
-- 古いバージョンで join 済 (= auto-arm 前の trek)
-- 別 worktree で join したため `.beacon/bus-budget.json` がこの cwd に無い
-
-判定材料を Bash で並列取得:
-
-```bash
-beacon bus auto-execute list --json 2>/dev/null
-beacon bus budget show --json 2>/dev/null
-```
-
-armed 条件 (AND): `bus_auto_execute_channels` に **少なくとも 1 つの trek 系 channel (= trek-progress-check / trek-trigger / trek-task-review)** が含まれている、 かつ budget が `armed` 状態 (= total > 0 かつ used < total)。
-
-armed でない場合、 Step 3 のヘッダに以下を 1 行で添える:
-
-```
-⚠ Trek 参加中だが自律実行モードが not-armed です。 `/beacon-bus-armed` で起動するか、 `beacon trek join <trek-id>` を再実行して auto-arm し直してください (= 進行 DM が wake せず silent-ack 病理を再生します)。
-```
-
-armed なら何も表示しない (= ノイズ削減)。
-
-archived / planning trek にしか join していない場合は判定不要 (= scope 内 action が事前承認の対象外)。 この Step は **読み取り専用**。
+local mode (= `.beacon/cloud.json` 不在) でも `~/.beacon/treks/` から拾うので動作する。この Step は **読み取り専用**。
 
 ## Step 1j: 前セッションの session log 読み込み（ms-43 e-1360）
 
