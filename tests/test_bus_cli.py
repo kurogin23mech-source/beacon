@@ -243,6 +243,12 @@ def test_bus_send_dm_reply_without_context_does_not_warn(monkeypatch, capsys,
     monkeypatch.setenv("BEACON_BUS_IN_REPLY_TO", "evt-parent")
     # --in-reply-to triggers the budget gate; grant it so the send proceeds
     # to the (non-)warning path rather than refusing on budget state.
+    # Stub BOTH the pre-check read and the consume; _read_bus_budget() reads
+    # the cwd-scoped .beacon/bus-budget.json, so without this stub the test
+    # only passes when an ambient budget file happens to exist in cwd (= the
+    # cwd-scoped budget footgun). Stubbing keeps the test hermetic.
+    monkeypatch.setattr(commands, "_read_bus_budget",
+                        lambda: {"armed": True, "total": 10, "used": 1})
     monkeypatch.setattr(commands, "_bus_budget_consume_one",
                         lambda: (True, {"armed": True, "total": 10, "used": 1}))
     commands.cmd_bus_send()
