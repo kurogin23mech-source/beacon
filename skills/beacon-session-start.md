@@ -136,7 +136,7 @@ __ROOT=$(beacon-find-root) && python3 "$__ROOT/lib/version_skew.py" \
 は **読み取り専用** かつ **never block** (= skew は warning、 session 開始を
 止めない)。
 
-## Step 0a: 引数チェック
+## Step 0c: 引数チェック
 
 ユーザーが `/beacon-session-start ms-XX` のように引数付きで呼んだ場合、`ms-XX` を **スコープMS** として記憶する。
 複数指定も可能: `/beacon-session-start ms-16 ms-17`
@@ -145,19 +145,7 @@ __ROOT=$(beacon-find-root) && python3 "$__ROOT/lib/version_skew.py" \
 
 ## Step 0b: bus heartbeat — 廃止 (ms-54 e-1319)
 
-このステップは **何もしない**。
-
-以前は (e-1150) Bash で `beacon session id` を呼び `lib/session.update_last_active()` 経由で `.beacon/session.json.last_active` と cloud sessions/ subcollection を bump し、自セッションを `beacon bus directory --live` に visible にしていた。
-
-Option C (PR #111 / commit 78048b6) で **bridge の poll loop が真値源** になったため、CLI 側で重ねて書くと「どっちが真実か」あいまいになる。責務分離:
-
-- **mint + heartbeat = bridge**: poll iteration ごとに `last_active` + `last_poll_at` を stamp
-- **resolve = CLI**: `beacon session id` は pure getter (mint 1 回だけ、その後は read-only)
-- **lifecycle = `beacon session end`**: graceful close
-
-channel が未 install の session は bus directory に出ない — これは「receive 不可だから出ない」が正しい挙動。
-
-> Note: `beacon session id` 自体は今も呼べる (pure getter)。channel/bus.mjs が cold-start で session_id を materialise するために使う。
+このステップは **何もしない** (no-op)。heartbeat の真値源は bridge の poll loop に一本化済み。責務分界の経緯は commit 78048b6 / test `test_session_heartbeat_responsibility` を参照。
 
 ## Step 1: プロジェクト状態の取得（並列実行可）
 
@@ -267,22 +255,7 @@ beacon doc list --scope spec --op <op-id> --json
 
 結果が空でなければ、各ドキュメントの内容を Step 1e と同様に `beacon doc show <doc_id>` で **並列に** 取得する。
 
-### SPEC 無し active MS の検出 (warning only, never block)
-
-active な MS (`status == "in_progress"`) で SPEC が **1 つも存在しない** ものを **SPEC 無し MS** として記憶する。
-
-これは CORE doc `doc-classification` および ms-41 SPEC で確立した運用:
-- SPEC = 要求書 / 判断軌跡 (詳細仕様書ではない)
-- SPEC 無しでも作業は続行可能 (hard block しない)
-- 但しサブエージェント dispatch・retrospection・onboarding の質が下がるため、warning で促進
-
-Step 3 の出力でこのリストを表示する (後述):
-```
-SPEC 無し active MS:
-  - [ms-id] [title] → `/beacon-spec [ms-id]` で対話駆動作成できます
-```
-
-なお、これと並行して `beacon trigger check` (Step 4) も `spec-needed-<ms-id>` トリガーを返す。両者は同じ事象を別経路で通知している (trigger は MS 追加時 fire、こちらは session-start 時のスキャン)。重複表示は冗長なので、**warning 表示はどちらか一方** (典型的には trigger を優先) で構わない。
+> SPEC 無し active MS の warning は Step 4 の `spec-needed-<ms-id>` トリガーが担う (MS 追加時 fire)。session-start 側で重ねてスキャンしない (= 重複表示を避ける)。
 
 ## Step 1g: GitHub PR 自動検知（fail-safe）
 
@@ -1018,10 +991,6 @@ Active: [ms-id] [title] ([progress]%) [done_tasks]/[total_tasks]タスク完了
 他のマイルストーン:
   [status-icon] [ms-id] [title] ([progress]%)
   ...
-
-SPEC 無し active MS (warning):     ← Step 1f で検出した SPEC 無しactive MS がある場合のみ
-  ⚠ [ms-id] [title] — `/beacon-spec [ms-id]` で対話駆動作成できます
-  ※ SPEC = 要求書/判断軌跡。dispatch / retrospection の質が下がるため、作成を推奨
 
 未記録のコミット: [git logのハッシュがbeaconエントリに存在しないもの]
 uncommitted changes: [git statusの結果があれば]
