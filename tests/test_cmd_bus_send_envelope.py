@@ -99,6 +99,8 @@ class _StubApiClient:
         delivery="propose-to-ai",
         envelope=None,
         requested_action=None,
+        context="",
+        rationale="",
     ):
         self.post_calls.append({
             "project_id": project_id,
@@ -108,6 +110,8 @@ class _StubApiClient:
             "delivery": delivery,
             "envelope": envelope,
             "requested_action": requested_action,
+            "context": context,
+            "rationale": rationale,
         })
         return {
             "event_id": f"e-{len(self.post_calls)}",

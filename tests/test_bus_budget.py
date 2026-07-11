@@ -185,15 +185,18 @@ class _StubClient:
 
     def post_bus_event(self, project_id, channel, *, sender_session_id="",
                        payload=None, delivery="propose-to-ai",
-                       envelope=None, requested_action=None):
+                       envelope=None, requested_action=None,
+                       context="", rationale=""):
         # e-1290: tolerate envelope/requested_action kwargs from the
         # envelope-by-default CLI path. The budget tests don't assert on
         # envelope contents — they care about decrement timing — so we just
         # record them alongside the rest.
+        # ms-90 / e-3246: context / rationale も real signature に合わせて受ける。
         self.calls.append({
             "channel": channel, "sender": sender_session_id,
             "payload": payload or {}, "delivery": delivery,
             "envelope": envelope, "requested_action": requested_action,
+            "context": context, "rationale": rationale,
         })
         return {
             "event_id": f"e-{len(self.calls)}",

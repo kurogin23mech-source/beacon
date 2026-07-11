@@ -17562,6 +17562,10 @@ def cmd_bus_send():
     sender = os.environ.get("BEACON_BUS_SENDER", "").strip() or _resolve_session_id()
     delivery = os.environ.get("BEACON_BUS_DELIVERY", "").strip() or "propose-to-ai"
     in_reply_to = os.environ.get("BEACON_BUS_IN_REPLY_TO", "").strip()
+    # ms-90 / e-3246: decision-event の背景 (= 直面した問題) と判断理由。
+    # DM 発信を「問題駆動の相談」として記録するためのメタデータ。本文とは別に運ぶ。
+    dec_context = os.environ.get("BEACON_BUS_CONTEXT", "").strip()
+    dec_rationale = os.environ.get("BEACON_BUS_RATIONALE", "").strip()
     # e-1209: --to <session_id> stamps payload.recipient_session_id so the
     # server-side filter in /bus/unread can route the event to a single
     # recipient. Without this, `dm`-channel events fan out to every session
@@ -17803,6 +17807,17 @@ def cmd_bus_send():
             envelope_obj = None
             requested_action = None
 
+    # ms-90 / e-3246: 相談を「開始」する DM (= 返信でない) で背景 (context) が
+    # 空なら、書くよう促す (= SPEC §設計方針3: promote、hard block しない)。
+    # 返信 (in_reply_to あり) は継続なので促さない (= ノイズ回避、主役は開始の瞬間)。
+    if channel == "dm" and not in_reply_to and not dec_context:
+        print(
+            "Note: 背景なしで DM を発信します。この相談で『どんな問題に直面したか』を"
+            " --context \"...\" で添えると、意思決定の記録 (decision-event) が"
+            " 問題駆動の相談として残ります (任意、送信は止めません)。",
+            file=sys.stderr,
+        )
+
     event = client.post_bus_event(
         project_id, channel,
         sender_session_id=sender,
@@ -17810,6 +17825,8 @@ def cmd_bus_send():
         delivery=delivery,
         envelope=envelope_obj,
         requested_action=requested_action,
+        context=dec_context,
+        rationale=dec_rationale,
     )
     if os.environ.get("BEACON_JSON", "") == "1":
         # Augment the event JSON with the post-decrement budget so scripted

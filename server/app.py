@@ -27,6 +27,7 @@ from starlette.responses import Response, JSONResponse
 import approved_actions as approved_actions_mod
 import core
 import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
+import decision_event as decision_event_mod  # ms-90 / e-3246: decision-event 記録
 import envelope as envelope_mod
 import invitations as invitations_mod  # ms-78 e-1803/e-1804: token-based invites
 import phantom_done_evidence as phantom_done_mod  # ms-95 / e-2726: task done evidence gate
@@ -1136,6 +1137,12 @@ class BusEventCreate(BaseModel):
     # the action by name here. The legacy free-text payload path remains
     # supported for backward compat (no enforced action).
     requested_action: Optional[str] = None
+    # ms-90 / e-3246: decision-event の背景 (= 直面した問題) と判断理由。
+    # DM 発信を「問題駆動の相談」として decision_events ストリームに記録する
+    # ためのメタデータ。本文 (payload) とは別に運ぶ (= 受信者には見せない)。
+    # context は主役だが未指定でも送信は通す (= hard block しない)。
+    context: str = ""
+    rationale: str = ""
 
 
 class EnvelopeIssueRequest(BaseModel):
@@ -7335,6 +7342,30 @@ async def post_bus_event(
     event_id = db.append_bus_event(project_id, data)
     audit_record["event_id"] = event_id
     db.append_bus_audit(project_id, audit_record)
+
+    # ms-90 / e-3246: DM 発信を decision-event ストリームに記録する (主役経路)。
+    # 「問題に直面して相談を始めた瞬間」を context (= 背景) と共に残し、将来
+    # ローカル LLM で PM 専用 AI を訓練する材料にする。DM 本文は複製せず
+    # related.event_id で参照する。書き込み失敗は send を壊してはならない
+    # (= 記録は付随的、bus event は既に永続化済) ので握り潰してログするだけ。
+    try:
+        _dec = decision_event_mod.maybe_dm_send_record(
+            channel=body.channel,
+            payload=body.payload,
+            sender_session_id=body.sender_session_id,
+            sender_user_id=sender_uid or "",
+            context=body.context or "",
+            rationale=body.rationale or "",
+            event_id=event_id,
+            agent=env_issuer or None,
+        )
+        if _dec is not None:
+            db.append_decision_event(project_id, _dec)
+    except Exception as _dec_exc:  # pragma: no cover - defensive
+        logging.getLogger(__name__).warning(
+            "append_decision_event failed for event_id=%s: %s",
+            event_id, _dec_exc,
+        )
 
     # Sidecar write must happen *after* append_bus_event so the parent
     # event_id exists. Pending is the only status we record from this

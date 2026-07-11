@@ -4007,6 +4007,8 @@ EOF
         _bus_since_min=""
         _bud_turns=""
         _bus_in_reply_to=""
+        _bus_context=""       # ms-90 / e-3246: decision-event の背景 (直面した問題)
+        _bus_rationale=""     # ms-90 / e-3246: decision-event の判断理由 (任意)
         _bus_project_id=""
         _bus_to=""
         # ms-75 / e-1858: --to repeatable + --to-trek expansion.
@@ -4063,6 +4065,8 @@ EOF
                 --since-min)      _bus_since_min="${2:-}"; shift 2 ;;
                 --turns|-n)       _bud_turns="${2:-}"; shift 2 ;;
                 --in-reply-to)    _bus_in_reply_to="${2:-}"; shift 2 ;;
+                --context)        _bus_context="${2:-}"; shift 2 ;;
+                --rationale)      _bus_rationale="${2:-}"; shift 2 ;;
                 --project)        _bus_project_id="${2:-}"; shift 2 ;;
                 # ms-94 / e-2291: opt-in cwd 限定モード (bus directory の逆 default)。
                 --cwd-only)       _bus_cwd_only="1"; shift ;;
@@ -4144,6 +4148,8 @@ print(m.group(1) if m else "")' || true)
                         BEACON_BUS_RECIPIENT_USER="$_bus_to_user" \
                         BEACON_BUS_DELIVERY="$_bus_delivery" \
                         BEACON_BUS_IN_REPLY_TO="$_bus_in_reply_to" \
+                        BEACON_BUS_CONTEXT="$_bus_context" \
+                        BEACON_BUS_RATIONALE="$_bus_rationale" \
                         BEACON_BUS_PROJECT_ID="$_bus_project_id" \
                         BEACON_BUS_ACTION="$_bus_action" \
                         BEACON_BUS_NO_ENVELOPE="$_bus_no_envelope" \
@@ -4162,6 +4168,8 @@ print(m.group(1) if m else "")' || true)
                             BEACON_BUS_RECIPIENT_SESSION="$_recipient" \
                             BEACON_BUS_DELIVERY="$_bus_delivery" \
                             BEACON_BUS_IN_REPLY_TO="$_bus_in_reply_to" \
+                            BEACON_BUS_CONTEXT="$_bus_context" \
+                            BEACON_BUS_RATIONALE="$_bus_rationale" \
                             BEACON_BUS_PROJECT_ID="$_bus_project_id" \
                             BEACON_BUS_ACTION="$_bus_action" \
                             BEACON_BUS_NO_ENVELOPE="$_bus_no_envelope" \

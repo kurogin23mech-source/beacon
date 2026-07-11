@@ -649,7 +649,8 @@ class ApiClient:
                        sender_session_id: str = "", payload: dict | None = None,
                        delivery: str = "propose-to-ai",
                        envelope: dict | None = None,
-                       requested_action: str | None = None) -> dict:
+                       requested_action: str | None = None,
+                       context: str = "", rationale: str = "") -> dict:
         body = {
             "channel": channel,
             "sender_session_id": sender_session_id,
@@ -663,6 +664,12 @@ class ApiClient:
             body["envelope"] = envelope
         if requested_action is not None:
             body["requested_action"] = requested_action
+        # ms-90 / e-3246: decision-event の背景・判断理由。空なら送らない
+        # (= 古いサーバは無視、新しいサーバのみ decision_events に記録する)。
+        if context:
+            body["context"] = context
+        if rationale:
+            body["rationale"] = rationale
         return self.post(f"/api/projects/{project_id}/bus", body)
 
     def issue_bus_envelope(self, project_id: str, *, tier: str,

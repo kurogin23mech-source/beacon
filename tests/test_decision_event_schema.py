@@ -177,3 +177,56 @@ def test_dynamo_persistence_rejects_outcome():
         dyn.append_decision_event("proj-D", {"kind": "dm-send",
                                              "decision": "x",
                                              "outcome": "sneaky"})
+
+
+# ---------------------------------------------------------------------------
+# e-3246 — DM 発信の decision-event 組み立て (主役経路)
+# ---------------------------------------------------------------------------
+
+def test_dm_send_record_shape():
+    e = de.decision_event_from_dm_send(
+        sender_session_id="sv-1", sender_user_id="u1",
+        context="listener が 60s で死ぬ問題", rationale="相談が速い",
+        event_id="evt-9", in_reply_to="evt-0", agent="claude",
+    )
+    assert e["kind"] == "dm-send"
+    assert e["decision"] == "sent"
+    assert e["context"] == "listener が 60s で死ぬ問題"
+    assert e["rationale"] == "相談が速い"
+    assert e["who"] == {"session_id": "sv-1", "user_id": "u1",
+                        "agent": "claude"}
+    assert e["related"]["event_id"] == "evt-9"
+    assert e["related"]["in_reply_to"] == "evt-0"
+    assert "outcome" not in e
+
+
+def test_dm_send_record_context_optional():
+    # 背景なしでも組み立てられる (= hard block しない、warning は CLI の責務)。
+    e = de.decision_event_from_dm_send(sender_session_id="sv-2", event_id="e1")
+    assert e["context"] == ""
+    assert e["rationale"] is None
+
+
+def test_maybe_dm_send_record_only_for_dm_channel():
+    # dm 以外は None (= 記録しない)。
+    assert de.maybe_dm_send_record(channel="trek-trigger", payload={},
+                                   event_id="e1") is None
+    assert de.maybe_dm_send_record(channel="operation-trigger", payload={},
+                                   event_id="e1") is None
+    rec = de.maybe_dm_send_record(channel="dm", payload={}, event_id="e1")
+    assert rec is not None and rec["kind"] == "dm-send"
+
+
+def test_maybe_dm_send_record_extracts_in_reply_to_from_payload():
+    rec = de.maybe_dm_send_record(
+        channel="dm",
+        payload={"recipient_session_id": "sv-x", "in_reply_to": "evt-parent"},
+        sender_session_id="sv-1", event_id="evt-child",
+    )
+    assert rec["related"]["in_reply_to"] == "evt-parent"
+    assert rec["related"]["event_id"] == "evt-child"
+
+
+def test_maybe_dm_send_record_handles_non_dict_payload():
+    rec = de.maybe_dm_send_record(channel="dm", payload=None, event_id="e1")
+    assert rec["related"]["in_reply_to"] is None

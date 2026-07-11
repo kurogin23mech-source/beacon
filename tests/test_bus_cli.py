@@ -44,10 +44,12 @@ class _StubApiClient:
 
     def post_bus_event(self, project_id, channel, *, sender_session_id="",
                        payload=None, delivery="propose-to-ai",
-                       envelope=None, requested_action=None):
+                       envelope=None, requested_action=None,
+                       context="", rationale=""):
         # e-1290: envelope / requested_action are accepted to match the real
         # api_client signature. The pre-envelope CLI tests don't care about
         # these fields; they assert payload/channel/delivery only.
+        # ms-90 / e-3246: context / rationale も real signature に合わせて受ける。
         ev = {
             "event_id": f"e-{len(self.events) + 1}",
             "channel": channel,
@@ -56,6 +58,8 @@ class _StubApiClient:
             "delivery": delivery,
             "envelope": envelope,
             "requested_action": requested_action,
+            "context": context,
+            "rationale": rationale,
             "created_at": f"2026-06-07T00:00:0{len(self.events)}.000000Z",
         }
         self.events.append(ev)
@@ -140,6 +144,7 @@ def _clear_bus_env(monkeypatch):
                 "BEACON_BUS_DELIVERY", "BEACON_BUS_ONCE", "BEACON_BUS_AUTO_ACK",
                 "BEACON_BUS_TIMEOUT", "BEACON_BUS_LAST_SEEN_AT", "BEACON_JSON",
                 "BEACON_BUS_RECIPIENT_SESSION", "BEACON_BUS_IN_REPLY_TO",
+                "BEACON_BUS_CONTEXT", "BEACON_BUS_RATIONALE",
                 "BEACON_BUS_EVENT_ID", "BEACON_BUS_ACK_EVENT_ID"):
         monkeypatch.delenv(key, raising=False)
 
@@ -202,6 +207,44 @@ def test_bus_send_json_mode(monkeypatch, capsys, stub):
     out = capsys.readouterr().out.strip()
     parsed = json.loads(out)
     assert parsed["channel"] == "x"
+
+
+# ---------------------------------------------------------------------------
+# ms-90 / e-3246: --context / --rationale forward to post_bus_event so the
+# server can record a DM-send decision-event, and initiating a DM without
+# context nudges the sender (promote, not block).
+# ---------------------------------------------------------------------------
+
+def test_bus_send_context_and_rationale_forwarded(monkeypatch, capsys, stub):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    monkeypatch.setenv("BEACON_BUS_CONTEXT", "listener が 60s で死ぬ")
+    monkeypatch.setenv("BEACON_BUS_RATIONALE", "相談が速い")
+    commands.cmd_bus_send()
+    assert stub.events[-1]["context"] == "listener が 60s で死ぬ"
+    assert stub.events[-1]["rationale"] == "相談が速い"
+
+
+def test_bus_send_dm_initiate_without_context_warns(monkeypatch, capsys, stub):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    commands.cmd_bus_send()
+    err = capsys.readouterr().err
+    assert "--context" in err  # promote-context nudge on initiating DM
+
+
+def test_bus_send_dm_reply_without_context_does_not_warn(monkeypatch, capsys,
+                                                         stub):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    monkeypatch.setenv("BEACON_BUS_IN_REPLY_TO", "evt-parent")
+    commands.cmd_bus_send()
+    err = capsys.readouterr().err
+    # 返信は継続なので背景 nudge は出さない (= ノイズ回避)。
+    assert "この相談で" not in err and "--context \"" not in err
 
 
 # ---------------------------------------------------------------------------

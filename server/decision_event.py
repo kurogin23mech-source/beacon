@@ -112,6 +112,71 @@ def build_decision_event(
     }
 
 
+def decision_event_from_dm_send(
+    *,
+    sender_session_id: str = "",
+    sender_user_id: str = "",
+    context: str = "",
+    rationale: str | None = None,
+    event_id: str = "",
+    in_reply_to: str | None = None,
+    agent: str | None = None,
+) -> dict:
+    """DM 発信 (= 主役経路 / e-3246) の decision-event を組み立てる純関数。
+
+    「問題に直面して相談を始めた瞬間」を記録する。``context`` (= 直面した
+    問題) が主役だが空でも組み立てる (= hard block しない、warning は送信側
+    CLI の責務)。``related.event_id`` は発行済み bus event を指し、DM 本文は
+    複製せず参照で繋ぐ (= approvals sidecar と同じ考え方)。``decision`` は
+    経路内の選択で、DM 発信は ``"sent"`` 固定。
+    """
+    return build_decision_event(
+        kind="dm-send",
+        decision="sent",
+        context=context,
+        who={
+            "session_id": sender_session_id,
+            "user_id": sender_user_id,
+            "agent": agent,
+        },
+        rationale=rationale,
+        related={"event_id": event_id, "in_reply_to": in_reply_to},
+    )
+
+
+def maybe_dm_send_record(
+    *,
+    channel: str,
+    payload: dict | None,
+    sender_session_id: str = "",
+    sender_user_id: str = "",
+    context: str = "",
+    rationale: str = "",
+    event_id: str = "",
+    agent: str | None = None,
+) -> dict | None:
+    """DM 発信なら decision-event レコードを、そうでなければ None を返す。
+
+    post_bus_event の配線を薄く保つための決定点 (= channel 判定 + payload から
+    in_reply_to 抽出 + record 組み立て) を 1 箇所に集約し、server harness 無しで
+    単体テストできるようにする。``channel != "dm"`` は None (= 記録しない)。
+    """
+    if channel != "dm":
+        return None
+    in_reply_to = (
+        payload.get("in_reply_to") if isinstance(payload, dict) else None
+    )
+    return decision_event_from_dm_send(
+        sender_session_id=sender_session_id,
+        sender_user_id=sender_user_id,
+        context=context,
+        rationale=(rationale or None),
+        event_id=event_id,
+        in_reply_to=in_reply_to,
+        agent=(agent or None),
+    )
+
+
 def assert_no_outcome(record: dict) -> None:
     """レコードに outcome 系の禁止フィールドが混入していないか検証する。
 
