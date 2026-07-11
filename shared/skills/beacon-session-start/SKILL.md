@@ -310,46 +310,13 @@ beacon issue list --json 2>/dev/null
 
 session-start が走った cwd で beacon-bus channel が install されていない場合、ユーザーが `claude --dangerously-load-development-channels server:beacon-bus` で起動しても `no MCP server configured` で channel 不成立になる。Mac でも cwd 移動で黙って壊れる UX 抜け (memo doc `EZtptg0e8qwBUUhlN2aX` で発覚) を構造的に塞ぐため、session-start 時に `.mcp.json` / `beacon-bus` MCP entry の存在を検知する。
 
-Bash ツールで実行（fail-safe、`.beacon/project.json` 存在前提）:
+Bash ツールで実行（fail-safe、常に終了コード 0）:
 
 ```bash
-python3 - <<'PY' 2>/dev/null || echo "MCP_STATUS=UNKNOWN"
-import json, os
-status = "OK"
-if not os.path.exists(".mcp.json"):
-    status = "NO_MCP_JSON"
-else:
-    try:
-        with open(".mcp.json") as f:
-            d = json.load(f)
-        servers = d.get("mcpServers") or {}
-        if "beacon-bus" not in servers:
-            status = "NO_BEACON_BUS_ENTRY"
-    except Exception:
-        status = "MCP_JSON_MALFORMED"
-print(f"MCP_STATUS={status}")
-PY
+python3 scripts/check-mcp-receive-capability.py 2>/dev/null
 ```
 
-結果の解釈:
-
-- `OK` → 何もしない（出力に含めない）
-- `NO_MCP_JSON` → `.mcp.json` が存在しない。この cwd で `beacon channel install` を実行していない可能性が高い
-- `NO_BEACON_BUS_ENTRY` → `.mcp.json` はあるが `beacon-bus` server が登録されていない（他の MCP server だけ install 済み等）
-- `MCP_JSON_MALFORMED` → JSON parse エラー、または `mcpServers` キーが想定外の型
-- `UNKNOWN` → python3 不在等で判定不能（出力に含めない、Bash の `|| echo "MCP_STATUS=UNKNOWN"` でフォールバック）
-
-`OK` / `UNKNOWN` 以外の場合、Step 3 出力に以下のバンドを追加する:
-
-```
-⚠ この cwd は「送信専用」の恐れ (受信 bridge 未設置、ms-93 recipient-stability)
-  detail: [NO_MCP_JSON / NO_BEACON_BUS_ENTRY / MCP_JSON_MALFORMED]
-  非対称に注意: `beacon bus send` は CLI push なので効きます (= 繋がって見える) が、
-    他セッションからの DM は live-wake せず、次回 prompt の catch-up でのみ届きます。
-  よくある原因: git worktree に手で cd した等で、起動 cwd と別の .beacon session
-    (別 session_id) になり、その session に受信 bridge が無い状態。
-  対処: この cwd で `beacon channel install` を実行して受信を有効化してください。
-```
+スクリプトが何も出力しなければ受信 bridge は健全（= 出力に含めない）。**stdout に「⚠ この cwd は「送信専用」の恐れ」で始まるバンドが出たら、それを Step 3 出力にそのまま転記する**。`detail:` 行に `NO_MCP_JSON` / `NO_BEACON_BUS_ENTRY` / `MCP_JSON_MALFORMED` のどれかが入る。判定ロジックとバンド文言は script 側 (`detect_status` / `format_warning`) が所管。
 
 **送信は効くのに受信だけ silent に死ぬ** 非対称が本質。「送れたから繋がっている」と誤認させないため、送受信の非対称を明示する (= 2026-07-07 profile-extractor で実害)。
 
@@ -455,75 +422,10 @@ local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムア�
 Bash ツールで実行 (fail-safe、cloud 未設定 / endpoint 不在ならスキップ):
 
 ```bash
-PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))" 2>/dev/null)
-USER_ID=$(python3 -c "import json,os; p=os.path.expanduser('~/.beacon/auth.json'); print(json.load(open(p)).get('user_id',''))" 2>/dev/null)
-if [ -n "$PROJECT_ID" ] && [ -n "$USER_ID" ]; then
-  python3 - <<'PY' 2>/dev/null
-import json, os, sys, urllib.request, urllib.parse, subprocess, datetime
-project_id = os.environ.get("PROJECT_ID") or ""
-user_id = os.environ.get("USER_ID") or ""
-base = os.environ.get("BEACON_API_BASE") or "https://beacon-api-prod-2dlj7zlbiq-uc.a.run.app"
-token = ""
-try:
-    with open(".beacon/cloud.json") as f: token = json.load(f).get("id_token","") or ""
-except Exception: pass
-if not token:
-    try:
-        with open(os.path.expanduser("~/.beacon/auth.json")) as f: token = json.load(f).get("id_token","") or ""
-    except Exception: pass
-
-# "since" は前回 session log の created_at、無ければ 7 日前
-since_iso = ""
-try:
-    r = subprocess.run(["beacon", "session", "log", "list", "--json"],
-                       capture_output=True, text=True, timeout=5)
-    logs = json.loads(r.stdout or "[]")
-    if logs:
-        since_iso = str(logs[0].get("created_at","") or "")
-except Exception: pass
-if not since_iso:
-    since_iso = (datetime.datetime.now(datetime.timezone.utc)
-                 - datetime.timedelta(days=7)).isoformat().replace("+00:00","Z")
-
-# server の bus events を取得 (visibility gate 通過分のみ返る)
-q = urllib.parse.urlencode({"channel": "dm", "since": since_iso, "limit": 100})
-url = f"{base}/api/projects/{project_id}/bus?{q}"
-req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"} if token else {})
-try:
-    with urllib.request.urlopen(req, timeout=5) as r:
-        events = json.loads(r.read().decode("utf-8"))
-except Exception as e:
-    print(f"CATCHUP_FETCH_FAIL: {e}", file=sys.stderr); sys.exit(0)
-
-# user-scoped で自分宛 (recipient_user_id 一致 かつ recipient_session_id 空) だけ抽出
-rows = []
-for ev in events or []:
-    p = ev.get("payload") or {}
-    if not isinstance(p, dict): continue
-    r_uid = str(p.get("recipient_user_id") or "")
-    r_sid = str(p.get("recipient_session_id") or "")
-    if r_uid == user_id and not r_sid:
-        rows.append({
-            "event_id": ev.get("event_id",""),
-            "sender_session_id": ev.get("sender_session_id",""),
-            "created_at": ev.get("created_at",""),
-            "text_preview": (p.get("text") or "")[:80],
-            "opened_at": ev.get("opened_at",""),
-        })
-
-if not rows:
-    sys.exit(0)  # ノイズ削減、該当なし
-
-print("留守中に届いた DM (user-scoped catch-up):")
-for r in rows[:5]:
-    opened = " (既読)" if r["opened_at"] else ""
-    print(f'  [{r["event_id"][:12]}] from {r["sender_session_id"][:12]} at {r["created_at"][:19]}{opened}')
-    print(f'    {r["text_preview"]}...')
-if len(rows) > 5:
-    print(f'  … 他 {len(rows)-5} 件 (`beacon bus receive --channel dm` で全文)')
-PY
-fi
+python3 scripts/dm-user-scoped-catchup.py 2>/dev/null
 ```
+
+スクリプトは server の bus events を query し、user-scoped で自分宛の DM だけを抽出・整形して stdout に出す (フェッチ = `scripts/dm-user-scoped-catchup.py`、抽出/整形 = `lib/dm_pending.filter_user_scoped_catchup` / `format_user_scoped_catchup` に分離、単体テスト済み)。since は前回 session log の created_at、無ければ 7 日前。
 
 出力が空でなければ Step 3 の出力ヘッダ部 (「保留中 DM action」セクションの直後、Trek 一覧の直前あたり) に **そのまま転記** する。空ならセクションごと省略。
 
@@ -841,44 +743,10 @@ Beacon の作業形態は「ターミナル + Web UI 並列表示」が前提。
 session-start 時に Web UI を立ち上げ直す（既に開かれていればブラウザが既存タブを focus する）。
 
 ```bash
-# Bash 呼び出し
-# ms-46 e-737: open URL は macOS が Beacon.app を URL handler として解釈し
-# Tauri を起動してしまうケースがある (cloud mode で Tauri が起動すると
-# ローカルキャッシュ表示で混乱)。ブラウザを明示的に指定して回避。
-# macOS: Python webbrowser は LSGetDefaultRoleHandler を使うので Beacon.app
-# を回避できないことがある → -b で default browser app ID を直接渡す。
-# 検出失敗時は Safari にフォールバック (System 標準で必ず存在)。
-if [ -f .beacon/cloud.json ]; then
-  PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))")
-  if [ -n "$PROJECT_ID" ]; then
-    WEBUI_URL="https://beacon-ai.dev/?project=$PROJECT_ID"
-    # macOS: 既定の https handler を取得 (Beacon.app になっていたら Safari にフォールバック)
-    DEFAULT_BROWSER=$(python3 -c "
-import subprocess, plistlib, os, sys
-p = os.path.expanduser('~/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist')
-try:
-    with open(p, 'rb') as f: d = plistlib.load(f)
-    for h in d.get('LSHandlers', []):
-        if h.get('LSHandlerURLScheme') == 'https':
-            r = h.get('LSHandlerRoleAll', '')
-            if r and 'beacon' not in r.lower():
-                print(r); sys.exit(0)
-except Exception: pass
-print('com.apple.Safari')
-" 2>/dev/null || echo 'com.apple.Safari')
-
-    (open -b "$DEFAULT_BROWSER" "$WEBUI_URL" 2>/dev/null \
-      || open -a Safari "$WEBUI_URL" 2>/dev/null \
-      || xdg-open "$WEBUI_URL" 2>/dev/null \
-      || cmd.exe /c start "$WEBUI_URL" 2>/dev/null \
-      || powershell.exe -Command "Start-Process '$WEBUI_URL'" 2>/dev/null) &
-    echo "WEBUI_URL=$WEBUI_URL"
-  fi
-fi
+python3 scripts/open-webui.py 2>/dev/null
 ```
 
-取得した URL は Step 3 の出力ヘッダに表示する。  
-local mode（cloud.json 無し）の場合はこのステップをスキップ。
+このスクリプトは cloud mode でのみブラウザを起動し (ms-46 e-737: Beacon.app への URL handler 誤ルーティングを回避して default browser / Safari を明示指定)、`WEBUI_URL=<url>` を stdout に出す。取得した URL は Step 3 の出力ヘッダに表示する。local mode（`.beacon/cloud.json` 無し / project_id 無し）では何も出力せずスキップする。
 
 ## Step 2.9: 次セッション最初の作業の特定 (ms-43 e-568)
 

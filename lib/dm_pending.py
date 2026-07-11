@@ -198,6 +198,73 @@ def format_inline_dm_banner(event_id: str,
     )
 
 
+USER_SCOPED_CATCHUP_HEADER = "留守中に届いた DM (user-scoped catch-up):"
+
+
+def filter_user_scoped_catchup(events: Iterable[dict] | None,
+                               user_id: str) -> list[dict]:
+    """Pick user-scoped DM events addressed to ``user_id`` from raw bus rows.
+
+    ms-54 / e-2974: user-scoped information DMs are dropped by the receive
+    bridge (channel/bus.mjs e-1209 filter) by design, so they never show up
+    in a past session's inbox. session-start queries the server's bus
+    endpoint directly and keeps only the events where
+    ``payload.recipient_user_id == user_id`` **and**
+    ``payload.recipient_session_id`` is empty (= user-scoped, not the
+    session-scoped variant the bridge already delivered).
+
+    Returns a list of compact dicts (event_id / sender_session_id /
+    created_at / text_preview / opened_at) so the formatter is pure and the
+    fetch/format seam is testable. Behavior mirrors the extracted inline
+    heredoc verbatim.
+    """
+    rows: list[dict] = []
+    for ev in events or []:
+        p = ev.get("payload") or {}
+        if not isinstance(p, dict):
+            continue
+        r_uid = str(p.get("recipient_user_id") or "")
+        r_sid = str(p.get("recipient_session_id") or "")
+        if r_uid == user_id and not r_sid:
+            rows.append({
+                "event_id": ev.get("event_id", ""),
+                "sender_session_id": ev.get("sender_session_id", ""),
+                "created_at": ev.get("created_at", ""),
+                "text_preview": (p.get("text") or "")[:80],
+                "opened_at": ev.get("opened_at", ""),
+            })
+    return rows
+
+
+def format_user_scoped_catchup(rows: Iterable[dict] | None) -> str:
+    """Render user-scoped catch-up rows into the session-start section.
+
+    Returns an empty string for empty input so the caller can drop the
+    section (= same "empty -> omit" contract as
+    ``format_pending_dm_summary``). Otherwise returns the header plus up to
+    5 rows (event_id / sender / timestamp / 80-char preview), with a
+    ``… 他 N 件`` tail when more remain. Output is byte-for-byte what the
+    Step 1n-2 inline heredoc printed.
+    """
+    rows = list(rows or [])
+    if not rows:
+        return ""
+    lines = [USER_SCOPED_CATCHUP_HEADER]
+    for r in rows[:5]:
+        opened = " (既読)" if r.get("opened_at") else ""
+        eid = str(r.get("event_id") or "")[:12]
+        sender = str(r.get("sender_session_id") or "")[:12]
+        created = str(r.get("created_at") or "")[:19]
+        preview = r.get("text_preview") or ""
+        lines.append(f'  [{eid}] from {sender} at {created}{opened}')
+        lines.append(f'    {preview}...')
+    if len(rows) > 5:
+        lines.append(
+            f'  … 他 {len(rows) - 5} 件 (`beacon bus receive --channel dm` で全文)'
+        )
+    return "\n".join(lines)
+
+
 def build_pending_lookup(rows: Iterable[dict] | None) -> dict:
     """Index pending sidecar rows by ``event_id`` for O(1) lookup.
 
