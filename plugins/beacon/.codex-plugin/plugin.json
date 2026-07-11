@@ -1,7 +1,7 @@
 {
   "name": "beacon",
-  "version": "0.3.0",
-  "description": "Beacon for Codex CLI — DM inbox bridge + Beacon Skills bundled as one Codex plugin.",
+  "version": "0.3.0+codex.20260711061931",
+  "description": "Beacon for Codex CLI \u2014 DM inbox bridge + Beacon Skills bundled as one Codex plugin.",
   "author": {
     "name": "Beacon Team",
     "url": "https://github.com/r-kida2/beacon"
@@ -9,19 +9,27 @@
   "homepage": "https://beacon-ai.dev/",
   "repository": "https://github.com/r-kida2/beacon",
   "license": "MIT",
-  "keywords": ["beacon", "dm", "bridge", "bus"],
+  "keywords": [
+    "beacon",
+    "dm",
+    "bridge",
+    "bus"
+  ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Beacon",
-    "shortDescription": "Codex CLI 連携 — Beacon DM inbox + Skills",
-    "longDescription": "Beacon の Codex 対応 plugin。 UserPromptSubmit hook で DM (= 別 Codex / Claude Code session からの直接メッセージ) を受信し、 PostToolUse hook で commit / push / deploy 後の Beacon 記録を促す。 receive-loop daemon の lifecycle (= start / stop / status) も 1 step で扱える。",
+    "shortDescription": "Codex CLI \u9023\u643a \u2014 Beacon DM inbox + Skills",
+    "longDescription": "Beacon \u306e Codex \u5bfe\u5fdc plugin\u3002 UserPromptSubmit hook \u3067 DM (= \u5225 Codex / Claude Code session \u304b\u3089\u306e\u76f4\u63a5\u30e1\u30c3\u30bb\u30fc\u30b8) \u3092\u53d7\u4fe1\u3057\u3001 PostToolUse hook \u3067 commit / push / deploy \u5f8c\u306e Beacon \u8a18\u9332\u3092\u4fc3\u3059\u3002 receive-loop daemon \u306e lifecycle (= start / stop / status) \u3082 1 step \u3067\u6271\u3048\u308b\u3002",
     "developerName": "Beacon Team",
     "category": "Productivity",
-    "capabilities": ["Interactive", "Write"],
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
     "defaultPrompt": [
-      "$beacon-codex-bridge start で DM 受信を有効化",
-      "$beacon-codex-bridge status で daemon の状態確認",
-      "DM が来たら次の prompt の冒頭に表示されます"
+      "$beacon-codex-bridge start \u3067 DM \u53d7\u4fe1\u3092\u6709\u52b9\u5316",
+      "$beacon-codex-bridge status \u3067 daemon \u306e\u72b6\u614b\u78ba\u8a8d",
+      "DM \u304c\u6765\u305f\u3089\u6b21\u306e prompt \u306e\u5192\u982d\u306b\u8868\u793a\u3055\u308c\u307e\u3059"
     ]
   }
 }

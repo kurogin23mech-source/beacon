@@ -62,6 +62,18 @@ POST_TOOL_HOOK_EVENT = "PostToolUse"
 HOOK_SCRIPT_BASENAME = "codex-inbox-hook.py"
 POST_TOOL_HOOK_SCRIPT_BASENAME = "codex-post-tool-use-hook.py"
 
+AGENTS_GUIDANCE_START = "<!-- BEACON_CODEX_PROJECT_RULES -->"
+AGENTS_GUIDANCE_END = "<!-- /BEACON_CODEX_PROJECT_RULES -->"
+AGENTS_GUIDANCE = f"""{AGENTS_GUIDANCE_START}
+## Beacon project rules
+
+- Do not run a bare `beacon` command until the usable executable has been resolved. Prefer the project resolver when available; otherwise use the absolute installed Beacon executable and pass it through `BEACON_BIN`.
+- In an already initialized Beacon project, normal implementation, investigation, commit, and session work must not invoke the `beacon-init` Skill. Use `beacon-init` only when the user explicitly requests Beacon project initialization.
+- Keep Beacon CLI calls pinned to the resolved executable: `env BEACON_BIN=<absolute-path> <absolute-path> ...`.
+
+{AGENTS_GUIDANCE_END}
+"""
+
 
 def _install_root() -> Path:
     """Resolve the Beacon source checkout.
@@ -266,6 +278,51 @@ def _save_hooks_json(data: dict) -> None:
     tmp.replace(CODEX_HOOKS_PATH)
 
 
+def _install_project_guidance(cwd: Path) -> tuple[str, str]:
+    """Install/update Beacon's managed section in ``<cwd>/AGENTS.md``.
+
+    This is the Codex-side counterpart of Claude Code's
+    ``beacon skill install`` → ``CLAUDE.md`` integration. Existing project
+    instructions remain byte-for-byte outside the managed marker pair.
+    """
+    path = cwd / "AGENTS.md"
+    try:
+        current = path.read_text(encoding="utf-8") if path.is_file() else ""
+    except OSError as exc:
+        return "error", f"cannot read {path}: {exc}"
+
+    start = current.find(AGENTS_GUIDANCE_START)
+    end = current.find(AGENTS_GUIDANCE_END)
+    if (start < 0) != (end < 0) or (start >= 0 and end < start):
+        return "error", (
+            f"{path} has a malformed Beacon managed section; fix the marker "
+            "pair before retrying"
+        )
+
+    if start >= 0:
+        end += len(AGENTS_GUIDANCE_END)
+        replacement = AGENTS_GUIDANCE.rstrip("\n")
+        updated = current[:start] + replacement + current[end:]
+        verdict = "already" if updated == current else "updated"
+    else:
+        prefix = current.rstrip("\n")
+        updated = (
+            f"{prefix}\n\n{AGENTS_GUIDANCE}" if prefix else AGENTS_GUIDANCE
+        )
+        verdict = "created" if not current else "installed"
+
+    if updated == current:
+        return "already", str(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".md.tmp")
+        tmp.write_text(updated, encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        return "error", f"cannot write {path}: {exc}"
+    return verdict, str(path)
+
+
 # ------------------------------------------------------------------ #
 # Codex sandbox network access (ms-93 / e-3000)
 #
@@ -435,6 +492,12 @@ def cmd_install_hook(install_root: Path, cwd: Path) -> int:
     Also ensures the Codex sandbox can reach beacon cloud (ms-93 / e-3000)
     so cloud calls from inside Codex don't die on DNS resolution.
     """
+    guidance_verdict, guidance_detail = _install_project_guidance(cwd)
+    if guidance_verdict == "error":
+        print(f"agents-guidance: error: {guidance_detail}", file=sys.stderr)
+        return 1
+    print(f"agents-guidance: {guidance_verdict} ({guidance_detail})")
+
     verdict, detail = _ensure_codex_network_access()
     if verdict in ("inserted", "updated", "created"):
         print(

@@ -26,6 +26,12 @@ codex plugin add beacon@beacon
 $beacon-codex-bridge start
 ```
 
+Step 3 は hook / daemon に加えて、対象プロジェクトの `AGENTS.md` に
+Beacon の常時ルールを marker 管理で冪等に反映します。既存の記述は保持されます。
+これは Claude Code の `beacon skill install` が `CLAUDE.md` を更新する経路に
+対応する Codex 側の初期設定です。`codex plugin add` 自体は任意 script を
+実行しないため、project cwd が確定する `$beacon-codex-bridge start` を反映点にします。
+
 `codex plugin list` に `beacon@beacon  installed, enabled` と出れば成功です。
 
 ### なぜ install 後も beacon checkout が要るのか
