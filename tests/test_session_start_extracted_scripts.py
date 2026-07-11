@@ -80,21 +80,33 @@ def test_mcp_warning_band_empty_for_ok_and_unknown():
 WEBUI = _load_script("open-webui.py")
 
 
-def test_webui_local_mode_skips(tmp_path, monkeypatch, capsys):
-    """No .beacon/cloud.json -> print nothing, exit 0 (session-start skips)."""
+def test_webui_local_mode_launches_desktop(tmp_path, monkeypatch, capsys):
+    """No .beacon/cloud.json -> launch the Tauri desktop app, announce it."""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(WEBUI, "_launch_desktop", lambda: True)
+    rc = WEBUI.main()
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "DESKTOP_LAUNCHED=Beacon"
+
+
+def test_webui_local_mode_silent_when_desktop_absent(tmp_path, monkeypatch, capsys):
+    """Local mode but no desktop app installed -> print nothing, never block."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(WEBUI, "_launch_desktop", lambda: False)
     rc = WEBUI.main()
     assert rc == 0
     assert capsys.readouterr().out == ""
 
 
-def test_webui_no_project_id_skips(tmp_path, monkeypatch, capsys):
+def test_webui_no_project_id_falls_back_to_desktop(tmp_path, monkeypatch, capsys):
+    """cloud.json without a project_id is not a live cloud project -> desktop."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / ".beacon").mkdir()
     (tmp_path / ".beacon" / "cloud.json").write_text(json.dumps({}))
+    monkeypatch.setattr(WEBUI, "_launch_desktop", lambda: True)
     rc = WEBUI.main()
     assert rc == 0
-    assert capsys.readouterr().out == ""
+    assert capsys.readouterr().out.strip() == "DESKTOP_LAUNCHED=Beacon"
 
 
 def test_webui_cloud_mode_prints_url_without_launching(tmp_path, monkeypatch, capsys):
