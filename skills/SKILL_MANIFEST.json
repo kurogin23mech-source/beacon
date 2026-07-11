@@ -3,12 +3,12 @@
   "generated_at": "2026-07-05T22:20:00Z",
   "generator": "manual + beacon-cli (ms-93 / e-2558)",
   "source_dir": "skills/",
-  "total_skills": 38,
+  "total_skills": 39,
   "spec_reference": "doc_id 6aK8fr1OjsO3hJNHb7hA (= ms-93 §3-B canonical Skill schema)",
   "cohort_summary": {
     "bus-dm": 5,
     "core-workflow": 9,
-    "infrastructure": 2,
+    "infrastructure": 3,
     "methodology": 3,
     "onboarding": 4,
     "operation": 3,
@@ -741,6 +741,26 @@
       "size_chars": 9005,
       "content_hash": "d748724a269b",
       "migration_cohort": "onboarding",
+      "migration_status": "todo"
+    },
+    {
+      "skill_name": "beacon-map",
+      "current_location": "skills/beacon-map.md",
+      "frontmatter": {
+        "name": "beacon-map",
+        "description": "アプリケーション全貌マップ (= 今このプロダクトに何ができるかを写した現在地の索引、CORE doc `application-map`) を生成・再生成・reconcile する。無ければ全 surface を列挙して初版を作り、有れば source と照合して足す＆消す。新機能を足す前に「近い既存機能があるか」を引ける状態を保つ。",
+        "version": "1.0.0",
+        "triggers": ""
+      },
+      "claude_only_fields": [
+        "version",
+        "triggers"
+      ],
+      "has_sub_resources": false,
+      "codex_portability_status": "unported",
+      "size_chars": 6004,
+      "content_hash": "b1d01f4c26ec",
+      "migration_cohort": "infrastructure",
       "migration_status": "todo"
     }
   ]

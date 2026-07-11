@@ -656,6 +656,56 @@ def _build_disclosure_policy_from_env() -> dict:
     }
 
 
+def _application_map_box_content(objective: str) -> str:
+    """ms-104 e-3153a: init が用意する『空の箱』本文。
+
+    map は状態の反映なので t=0 では surface ゼロ = 空。ここで作るのはヘッダ (=
+    契約 / 読み方) と『/beacon-map で埋めて』の指示だけの placeholder。実際の充填は
+    /beacon-map 初回 + deploy reconcile が行う。project-vision と同格の常設 CORE doc。
+    """
+    obj_line = objective.strip() or "(未設定 — beacon summary / project-vision 参照)"
+    return (
+        "# アプリケーション全貌マップ\n\n"
+        "> **現在地の断面** — 今このプロダクトに何ができるか (= 全機能の入口) を写した索引。\n"
+        "> project-vision (目的地) / milestone 履歴 (軌跡) に続く 3 つ目の軸。\n"
+        "> 新機能を足す前にここを引いて「近い既存機能があるか」を確認し、二重実装を防ぐ。\n"
+        ">\n"
+        "> **これは init が用意した空の箱です。** 中身 (= surface 一覧) はまだありません。\n"
+        "> プロジェクトが育ったら `/beacon-map` を実行すると、現在の全 surface (CLI / API /\n"
+        "> Skill 等) を列挙して初版を生成します。以降は deploy 時の reconcile と map-drift\n"
+        "> trigger で自動的に鮮度が保たれます。\n"
+        ">\n"
+        "> **読み方 (生成後)**: 章 (価値エリア) → 節 (価値) → surface 行。各 surface 行末の\n"
+        "> `` `type:ident` `` は照合の楔 (= 実在するかを機械で突く目印、cli/api/skill/file)。\n"
+        ">\n"
+        f"> 目的 (objective): {obj_line}\n\n"
+        "## (未生成)\n\n"
+        "`/beacon-map` で現在の全 surface から初版を生成してください。\n"
+    )
+
+
+def _seed_application_map_box(objective: str) -> None:
+    """init 時に空の application-map CORE doc (固定 id) を local docs dir に seed。
+
+    ms-104 e-3153a: 『必須インフラは init で箱を作る』統一パターン。既に存在すれば
+    上書きしない (= 冪等)。cloud mode の seed は server 側の責務 (別 site、未配線)。
+    IO 失敗は init を止めない (best-effort)。
+    """
+    try:
+        docs_dir = _get_docs_dir()
+        os.makedirs(docs_dir, exist_ok=True)
+        fpath = os.path.join(docs_dir, "application-map.md")
+        if os.path.exists(fpath):
+            return
+        content = _add_frontmatter(
+            _application_map_box_content(objective), "core", "", "", ""
+        )
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(content)
+    except OSError:
+        return
+
+
 def cmd_init():
     name = os.environ.get("BEACON_NAME", "")
     objective = os.environ.get("BEACON_OBJECTIVE", "")
@@ -688,6 +738,10 @@ def cmd_init():
     else:
         print("  disclosure_policy.sensitivity = high (default-safe; T5 DM "
               "replies capped to schema)")
+
+    # ms-104 e-3153a: 必須インフラは init で箱を作る統一パターン。空の
+    # application-map CORE doc を seed する (中身は /beacon-map が後で埋める)。
+    _seed_application_map_box(objective)
 
     chosen = _maybe_prompt_initial_profile()
     if chosen:
@@ -9450,6 +9504,146 @@ def _auto_fire_release_due_trigger() -> None:
         f.write("\n")
 
 
+# map-drift trigger (ms-104 e-3155). Commit-count backstop that surfaces when
+# the application-map CORE doc (= 全貌マップ / 現在地の surface 索引) has gone
+# stale relative to accumulated commits. General mechanism: fires for ANY
+# project that has an application-map doc; the actual add/remove reconcile is
+# /beacon-map's job (which uses a per-project surface adapter such as
+# scripts/check-map-drift.py when present). Mirrors release-due: the count
+# prompts a human/AI action, it does not act on its own.
+_MAP_DRIFT_COMMIT_THRESHOLD = 20
+
+
+def _map_drift_trigger_path() -> str:
+    return os.path.join(_get_triggers_dir(), "map-drift.json")
+
+
+def _clear_map_drift_trigger_if_exists() -> None:
+    path = _map_drift_trigger_path()
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _auto_fire_map_drift_trigger() -> None:
+    """Fire a 'map-drift' trigger when >= _MAP_DRIFT_COMMIT_THRESHOLD commits
+    have accrued since the application-map doc was last updated.
+
+    Fires only when the map EXISTS; a missing map is the session-start
+    proposal's job (ms-104 e-3153), not this backstop's. Baseline = the map
+    doc's updated_at (refreshed whenever /beacon-map rewrites it), so no
+    separate marker file is needed. Degrades silently with no store / no map /
+    outside a git repo.
+    """
+    try:
+        doc = get_store().get_document("application-map")
+    except Exception:
+        return
+    if not doc:
+        _clear_map_drift_trigger_if_exists()
+        return
+    updated_at = str(doc.get("updated_at") or "")
+    if not updated_at:
+        return
+
+    project_dir = os.path.dirname(get_project_file())
+    repo_root = os.path.dirname(project_dir) or "."
+    try:
+        result = subprocess.run(
+            ["git", "log", f"--since={updated_at}", "--pretty=format:%H"],
+            capture_output=True, text=True, cwd=repo_root, check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return
+    if result.returncode != 0:
+        return
+    n = len([ln for ln in result.stdout.splitlines() if ln.strip()])
+
+    if n < _MAP_DRIFT_COMMIT_THRESHOLD:
+        _clear_map_drift_trigger_if_exists()
+        return
+
+    triggers_dir = _get_triggers_dir()
+    os.makedirs(triggers_dir, exist_ok=True)
+    trigger_path = _map_drift_trigger_path()
+
+    existing = None
+    if os.path.exists(trigger_path):
+        try:
+            with open(trigger_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except (json.JSONDecodeError, IOError, UnicodeDecodeError):
+            existing = None
+
+    import datetime
+    now_iso = datetime.datetime.now().isoformat()
+    # Preserve created_at while the baseline (map updated_at) is unchanged;
+    # once /beacon-map rewrites the map, updated_at moves and "since" resets.
+    if existing and existing.get("map_updated_at") == updated_at:
+        created_at = existing.get("created_at", now_iso)
+    else:
+        created_at = now_iso
+
+    message = (
+        f"全貌マップ (application-map) の最終更新から {n} commits 積み上がっています。"
+        f"surface (= 機能の入口) が増減して地図が古い可能性があります。"
+        f"`/beacon-map` で reconcile (= 足す＆消す) してください。"
+    )
+    trigger_data = {
+        "name": "map-drift",
+        "kind": "map-drift",
+        "map_updated_at": updated_at,
+        "commit_count": n,
+        "message": message,
+        "created_at": created_at,
+        "refreshed_at": now_iso,
+    }
+    with open(trigger_path, "w", encoding="utf-8") as f:
+        json.dump(trigger_data, f, ensure_ascii=False)
+        f.write("\n")
+
+
+def _fire_map_reconcile_trigger() -> None:
+    """Fire a 'map-reconcile' trigger at deploy time (ms-104 e-3154).
+
+    A deploy is the natural moment surfaces (= 機能の入口) go to the world, so
+    per SPEC §4 the application-map should be reconciled (足す＆消す) then.
+    Fires only when a map already exists — a missing map is the session-start
+    proposal's job. The reconcile itself is /beacon-map's work; this trigger
+    only prompts it. General mechanism (fires for any project's deploy).
+    Degrades silently with no store / no map / IO error.
+    """
+    try:
+        doc = get_store().get_document("application-map")
+    except Exception:
+        return
+    if not doc:
+        return
+    try:
+        triggers_dir = _get_triggers_dir()
+        os.makedirs(triggers_dir, exist_ok=True)
+        import datetime
+        now_iso = datetime.datetime.now().isoformat()
+        trigger_data = {
+            "name": "map-reconcile",
+            "kind": "map-reconcile",
+            "message": (
+                "デプロイを記録しました。全貌マップ (application-map) を "
+                "`/beacon-map` で reconcile (= 足す＆消す) して、"
+                "今回の surface 変化を地図に反映してください。"
+            ),
+            "created_at": now_iso,
+            "refreshed_at": now_iso,
+        }
+        with open(os.path.join(triggers_dir, "map-reconcile.json"), "w", encoding="utf-8") as f:
+            json.dump(trigger_data, f, ensure_ascii=False)
+            f.write("\n")
+    except OSError:
+        return
+
+
 def _count_commits_between_tags(repo_root: str, prev_tag: str, tag: str) -> int:
     """Count commits between `prev_tag..tag`. If prev_tag is empty, count
     commits up to and including `tag`. Returns 0 on any git failure."""
@@ -10241,6 +10435,7 @@ def _maybe_auto_tick(*, verbose: bool = False) -> bool:
         _auto_fire_operation_triggers()
         _auto_fire_release_due_trigger()
         _auto_fire_release_marker_trigger()
+        _auto_fire_map_drift_trigger()
         _cleanup_stale_triggers()
         # Touch stamp so subsequent checks within TTL skip the tick.
         try:
@@ -10348,6 +10543,7 @@ def cmd_trigger_tick():
     _auto_fire_operation_triggers()
     _auto_fire_release_due_trigger()
     _auto_fire_release_marker_trigger()
+    _auto_fire_map_drift_trigger()
     _cleanup_stale_triggers()
     # Touch the stamp so subsequent ``check`` calls within the TTL window
     # skip the auto-tick gate. Mirrors what ``_maybe_auto_tick`` writes on
@@ -13940,6 +14136,9 @@ def cmd_deploy_record():
     else:
         dep_list.append(deploy_entry)
     save_project(data)
+
+    # ms-104 e-3154: deploy = surface が世に出る節目。全貌マップの reconcile を促す。
+    _fire_map_reconcile_trigger()
 
     if json_mode:
         out = {"deploy": deploy_entry}
