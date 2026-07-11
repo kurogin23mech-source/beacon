@@ -28,14 +28,14 @@ ReleaseDate: 2026-06-02
 
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/r-kida2/beacon/releases/download/desktop-v0.1.0/Beacon-0.1.0-x64.msi
+    InstallerUrl: https://github.com/kurogin23mech-source/beacon/releases/download/desktop-v0.1.0/Beacon-0.1.0-x64.msi
     # 64-zero placeholder — REPLACE before submission with the real SHA-256
     # from the .msi.sha256 sidecar on the GitHub Release.
     InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
 
 # (future) Add arm64 once we publish Windows ARM builds:
 #  - Architecture: arm64
-#    InstallerUrl: https://github.com/r-kida2/beacon/releases/download/desktop-v0.1.0/Beacon-0.1.0-arm64.msi
+#    InstallerUrl: https://github.com/kurogin23mech-source/beacon/releases/download/desktop-v0.1.0/Beacon-0.1.0-arm64.msi
 #    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
 
 ManifestType: installer

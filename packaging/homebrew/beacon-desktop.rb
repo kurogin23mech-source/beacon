@@ -13,17 +13,17 @@ cask "beacon-desktop" do
 
   on_arm do
     sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-    url "https://github.com/r-kida2/beacon/releases/download/desktop-v#{version}/Beacon-#{version}-arm64.dmg"
+    url "https://github.com/kurogin23mech-source/beacon/releases/download/desktop-v#{version}/Beacon-#{version}-arm64.dmg"
   end
 
   on_intel do
     sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-    url "https://github.com/r-kida2/beacon/releases/download/desktop-v#{version}/Beacon-#{version}-x64.dmg"
+    url "https://github.com/kurogin23mech-source/beacon/releases/download/desktop-v#{version}/Beacon-#{version}-x64.dmg"
   end
 
   name "Beacon Desktop"
   desc "AI-driven milestone tracker for Claude Code sessions"
-  homepage "https://github.com/r-kida2/beacon"
+  homepage "https://github.com/kurogin23mech-source/beacon"
 
   livecheck do
     url :url
@@ -61,9 +61,9 @@ cask "beacon-desktop" do
     After this one-time approval Beacon launches normally.
 
     For the terminal CLI, install separately:
-        brew install r-kida2/beacon/beacon
+        brew install kurogin23mech-source/beacon/beacon
 
     Full install guide:
-        https://github.com/r-kida2/beacon/blob/main/INSTALL.md
+        https://github.com/kurogin23mech-source/beacon/blob/main/INSTALL.md
   EOS
 end

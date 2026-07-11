@@ -47,7 +47,7 @@ def _project_with_one_pr():
                         "description": "feat(cli): beacon update",
                         "status": "in_review",
                         "meta": {
-                            "url": "https://github.com/r-kida2/beacon/pull/42",
+                            "url": "https://github.com/kurogin23mech-source/beacon/pull/42",
                             "pr_number": 42,
                             "author": "alice",
                             "intent": "Close UC6-K1 by one-shotting brew upgrade",
@@ -110,7 +110,7 @@ def test_resolve_by_pr_number(monkeypatch):
 
 def test_resolve_by_url(monkeypatch):
     code, out, err = _run_pr_show(
-        monkeypatch, "https://github.com/r-kida2/beacon/pull/42",
+        monkeypatch, "https://github.com/kurogin23mech-source/beacon/pull/42",
     )
     assert code is None
     payload = json.loads(out)

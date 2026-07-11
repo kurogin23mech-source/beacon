@@ -378,7 +378,7 @@ from: <from_session の頭8文字>
 PR レビュー依頼。 受信側 reviewer は 「PR 番号 / 何を変えたか / どこを見てほしいか / 緊急度」 を 1 メッセージで掴める必要がある。 以下を順に聞いて埋める (= 既に Step 5b で本文を書いていれば「要点」 欄として再利用):
 
 ```
-PR URL or 番号: (例: https://github.com/r-kida2/beacon/pull/157 or #157)
+PR URL or 番号: (例: https://github.com/kurogin23mech-source/beacon/pull/157 or #157)
 1 行サマリー: (= この PR で何ができるようになるか、 Step 5b 本文があれば流用)
 注視ポイント: (例: lib/auth.py の profile resolver 周辺、 AWS profile 経路)
 受入条件 / AC: (= 何が満たされれば merge OK か、 SPEC doc id / task id があれば添える)

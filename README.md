@@ -45,9 +45,9 @@ Beacon ships in two forms that work independently:
 
 | OS | Beacon Desktop | Beacon CLI |
 |---|---|---|
-| **macOS** | `brew install --cask beacon-desktop`<br>or download `.dmg` from [Releases](https://github.com/r-kida2/beacon/releases) | `brew install r-kida2/beacon/beacon`<br>or `pipx install beacon-ai` |
-| **Windows** | `winget install BeaconAI.BeaconDesktop`<br>or download `.msi` from [Releases](https://github.com/r-kida2/beacon/releases) | `pipx install beacon-ai` |
-| **Linux** | Download `.AppImage` from [Releases](https://github.com/r-kida2/beacon/releases) and `chmod +x` | `pipx install beacon-ai`<br>or Homebrew on Linux |
+| **macOS** | `brew install --cask beacon-desktop`<br>or download `.dmg` from [Releases](https://github.com/kurogin23mech-source/beacon/releases) | `brew install kurogin23mech-source/beacon/beacon`<br>or `pipx install beacon-ai` |
+| **Windows** | `winget install BeaconAI.BeaconDesktop`<br>or download `.msi` from [Releases](https://github.com/kurogin23mech-source/beacon/releases) | `pipx install beacon-ai` |
+| **Linux** | Download `.AppImage` from [Releases](https://github.com/kurogin23mech-source/beacon/releases) and `chmod +x` | `pipx install beacon-ai`<br>or Homebrew on Linux |
 
 `pipx install beacon-ai` works natively on all three OSes — PowerShell-only Windows users get the full CLI without WSL2.
 
