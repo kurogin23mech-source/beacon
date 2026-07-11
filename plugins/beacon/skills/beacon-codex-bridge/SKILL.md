@@ -9,7 +9,7 @@ description: Beacon の DM 受信 bridge を Codex CLI で 1 step で扱う Skil
 
 ## 引数
 
-- `start` — UserPromptSubmit hook を `~/.codex/hooks.json` に install (= 冪等) + receive-loop daemon を起動 (= 既に running なら no-op)
+- `start` — `<cwd>/AGENTS.md` に Beacon の常時ルールを反映 (= 冪等) + UserPromptSubmit hook を `~/.codex/hooks.json` に install (= 冪等) + receive-loop daemon を起動 (= 既に running なら no-op)
 - `stop` — daemon を graceful 停止 (= SIGTERM)
 - `restart` — stop → start
 - `status` — daemon の running 状態 + hook install 状態 + session pointer を表示
@@ -34,12 +34,13 @@ python3 "$BRIDGE" <subaction> --cwd "$(pwd)"
 
 `beacon-codex-bridge` (Python script) が実装する責務:
 
-1. **`install-hook`** — `~/.codex/hooks.json` を読み、 `UserPromptSubmit` 配列に Beacon の hook entry が無ければ append。 同 entry (= command が `codex-inbox-hook.py` を指す) が既にあれば no-op。 冪等。
-2. **`uninstall-hook`** — `~/.codex/hooks.json` から Beacon の hook entry を除去。 他の entry は触らない。
-3. **`start`** — `install-hook` の後、 `scripts/codex-receive-loop.py` を nohup 起動 (= `<cwd>/.beacon/codex/receive-loop.log` に redirect)。 既存 pidfile が live ならその pid を返して exit 0 (= idempotent)。 stale pidfile (= pid が dead) は削除してから起動。
-4. **`stop`** — pidfile から pid を読み、 SIGTERM。 pidfile が無い / pid が dead なら no-op で exit 0。
-5. **`restart`** — `stop` → `start`。
-6. **`status`** — pidfile 状態 + hook install 状態 + `<cwd>/.beacon/codex/receive-loop.session.json` を表示。
+1. **project guidance** — `<cwd>/AGENTS.md` の `BEACON_CODEX_PROJECT_RULES` marker 内へ Beacon の常時ルールを反映。既存の user 記述は保持し、再実行時は marker 内だけを更新する。これは Claude Code の `beacon skill install` → `CLAUDE.md` 追記に対応する Codex 側の初期設定経路。
+2. **`install-hook`** — `~/.codex/hooks.json` を読み、 `UserPromptSubmit` 配列に Beacon の hook entry が無ければ append。 同 entry (= command が `codex-inbox-hook.py` を指す) が既にあれば no-op。 冪等。project guidance の反映もこの subaction に含む。
+3. **`uninstall-hook`** — `~/.codex/hooks.json` から Beacon の hook entry を除去。 他の entry は触らない。`AGENTS.md` はプロジェクトの追跡対象になり得るため自動削除しない。
+4. **`start`** — `install-hook` の後、 `scripts/codex-receive-loop.py` を nohup 起動 (= `<cwd>/.beacon/codex/receive-loop.log` に redirect)。 既存 pidfile が live ならその pid を返して exit 0 (= idempotent)。 stale pidfile (= pid が dead) は削除してから起動。
+5. **`stop`** — pidfile から pid を読み、 SIGTERM。 pidfile が無い / pid が dead なら no-op で exit 0。
+6. **`restart`** — `stop` → `start`。
+7. **`status`** — pidfile 状態 + hook install 状態 + `<cwd>/.beacon/codex/receive-loop.session.json` を表示。
 
 ## エラーハンドリング
 

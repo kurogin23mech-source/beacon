@@ -1,6 +1,6 @@
 # AGENTS.md (Codex CLI 向け案内)
 
-> 本ファイルは Codex CLI が beacon repo で動くときに読む案内ドキュメントです。 **具体的な実行手順は `.agents/skills/beacon-init/SKILL.md`** に置いてあり、 こちらは「なぜそうするか」 と「使うべきコマンドの大枠」 を示します。
+> 本ファイルは Codex CLI が beacon repo で動くときに読む案内ドキュメントです。 通常作業では下記の `BEACON_BIN` gate だけを行い、プロジェクト初期化を依頼された場合に限って `beacon-init` Skill を使います。
 
 ## Beacon を Codex から使うときの大原則
 
@@ -8,13 +8,24 @@
 2. **必ず `BEACON_BIN=<absolute path>` で実行する**。 `BEACON_BIN` は `lib/commands.py:_resolve_session_id()` の env override 経路で参照され、 PATH を経由せずに「使う 1 本」 を固定できる。
 3. **`BEACON_BIN` の値は Codex run の中で動的に決める**。 別マシン / 別 clone / pipx vs brew 環境で正解が変わるため、 AGENTS.md や global config に絶対パスを書き込まない。
 
-## 入口は `.agents/skills/beacon-init/SKILL.md`
+## 通常作業の入口は `BEACON_BIN` resolver
 
-Codex が beacon repo で何かを始めるときは、 まず `.agents/skills/beacon-init/SKILL.md` Skill を起動してください。 Skill は:
+既存の Beacon プロジェクトで通常作業を始めるときは、`beacon-init` Skill を起動せず、次の resolver だけを実行します。
 
-1. `python3 <repo>/scripts/beacon-bin-resolver.py` を実行して、 使うべき `beacon` 絶対パスと健全性 verdict を得る
+1. `python3 <repo>/scripts/beacon-bin-resolver.py` を実行して、使うべき `beacon` 絶対パスと健全性 verdict を得る
 2. `verdict == hard_fail / no-candidate` なら user に修正方法を 1 行で出して停止
 3. `verdict == ok / soft_warn` なら以降の Beacon CLI 呼び出しで `env BEACON_BIN=<selected_bin> <selected_bin> ...` 形式を使う
+
+```bash
+__ROOT=$(beacon-find-root 2>/dev/null || pwd)
+python3 "$__ROOT/scripts/beacon-bin-resolver.py"
+```
+
+## `beacon-init` Skill を使う場合
+
+`.agents/skills/beacon-init/SKILL.md` は **Beacon プロジェクトを新規初期化するための Skill** です。ユーザーが `beacon init`、`/beacon-init`、または新規プロジェクト作成を明示的に依頼した場合にのみ起動します。
+
+既に初期化済みのプロジェクトで、実装・調査・コミット・session-start などの通常作業を行うだけなら、この Skill の中身を読んだり初期化フローを開始したりしてはいけません。
 
 ## DM 受信を有効化する (= Beacon Codex plugin / e-2508 minimum viable)
 

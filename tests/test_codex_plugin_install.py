@@ -210,6 +210,61 @@ def test_install_hook_is_idempotent(fake_hooks_path, tmp_path):
     assert len(data["hooks"]["PostToolUse"]) == 1
 
 
+def test_install_hook_creates_codex_project_guidance(fake_hooks_path, tmp_path):
+    """Codex setup mirrors Claude skill install's CLAUDE.md integration."""
+    bridge, _target = fake_hooks_path
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+
+    assert bridge.cmd_install_hook(REPO_ROOT, cwd) == 0
+
+    agents = (cwd / "AGENTS.md").read_text("utf-8")
+    assert agents.count(bridge.AGENTS_GUIDANCE_START) == 1
+    assert agents.count(bridge.AGENTS_GUIDANCE_END) == 1
+    assert "normal implementation" in agents
+    assert "must not invoke the `beacon-init` Skill" in agents
+
+
+def test_project_guidance_preserves_user_text_and_updates_managed_section(
+    fake_hooks_path, tmp_path
+):
+    bridge, _target = fake_hooks_path
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    agents = cwd / "AGENTS.md"
+    agents.write_text(
+        "# User rules\n\nKeep this.\n\n"
+        f"{bridge.AGENTS_GUIDANCE_START}\nstale\n"
+        f"{bridge.AGENTS_GUIDANCE_END}\n\n## Tail\nKeep tail.\n",
+        encoding="utf-8",
+    )
+
+    assert bridge.cmd_install_hook(REPO_ROOT, cwd) == 0
+    first = agents.read_text("utf-8")
+    assert "# User rules\n\nKeep this." in first
+    assert "## Tail\nKeep tail." in first
+    assert "stale" not in first
+    assert first.count(bridge.AGENTS_GUIDANCE_START) == 1
+
+    assert bridge.cmd_install_hook(REPO_ROOT, cwd) == 0
+    assert agents.read_text("utf-8") == first
+
+
+def test_project_guidance_rejects_malformed_marker_without_overwrite(
+    fake_hooks_path, tmp_path
+):
+    bridge, target = fake_hooks_path
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    agents = cwd / "AGENTS.md"
+    original = f"user content\n{bridge.AGENTS_GUIDANCE_START}\nunterminated\n"
+    agents.write_text(original, encoding="utf-8")
+
+    assert bridge.cmd_install_hook(REPO_ROOT, cwd) == 1
+    assert agents.read_text("utf-8") == original
+    assert not target.exists()
+
+
 def test_install_hook_preserves_unrelated_entries(fake_hooks_path, tmp_path):
     bridge, target = fake_hooks_path
     # Seed with an unrelated user hook.
@@ -1348,6 +1403,21 @@ _SELECTOR_DOC_FILES = [
     REPO_ROOT / "plugins" / "beacon" / "README.md",
     REPO_ROOT / "plugins" / "beacon" / "skills" / "beacon-codex-bridge" / "SKILL.md",
 ]
+
+
+def test_agents_guidance_separates_resolver_from_project_init_skill():
+    """Normal repo work must not be routed through the init-only Skill.
+
+    AGENTS.md used to say that Codex should launch beacon-init whenever it
+    started *any* work in the repo. That made ordinary commit/hook checks read
+    and apply a project-initialization workflow. Keep the lightweight binary
+    resolver as the general preflight and reserve beacon-init for explicit
+    project initialization.
+    """
+    text = (REPO_ROOT / "AGENTS.md").read_text("utf-8")
+    assert "通常作業を始めるときは、`beacon-init` Skill を起動せず" in text
+    assert "新規初期化するための Skill" in text
+    assert "通常作業を行うだけなら、この Skill の中身を読んだり" in text
 
 
 def test_marketplace_name_implies_beacon_at_beacon_selector():
