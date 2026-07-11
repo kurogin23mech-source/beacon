@@ -3933,6 +3933,9 @@ class TrekTaskStateSet(BaseModel):
 class TrekHaltSet(BaseModel):
     issued_by_session_id: str
     reason: str = ""
+    # ms-90 / e-3241: 中断の判断理由 (= なぜ止めると決めたか)。reason は「直面
+    # した問題」= context に、rationale は「その判断の理由」に分けて記録する。任意。
+    rationale: str = ""
 
 
 # ms-92 / e-2141 — cross-project task add via Trek scope.
@@ -5220,8 +5223,8 @@ def list_trek_slots_endpoint(trek_id: str,
 
 def _record_halt_decision(project_id: str, trek_id: str, *, resumed: bool,
                           issuer_session_id: str, issuer_user_id: str,
-                          context: str) -> None:
-    """ms-90 / e-3247: Trek の halt / resume を decision-event に記録する。
+                          context: str, rationale: str = "") -> None:
+    """ms-90 / e-3247 + e-3241: Trek の halt / resume を decision-event に記録。
 
     記録失敗は halt / resume 自体を壊してはならない (= 付随的) ので握り潰して
     ログするだけ。project_id が空 (= home project 解決失敗) なら skip する。
@@ -5237,6 +5240,7 @@ def _record_halt_decision(project_id: str, trek_id: str, *, resumed: bool,
                 issuer_session_id=issuer_session_id,
                 issuer_user_id=issuer_user_id,
                 context=context,
+                rationale=(rationale or None),
             ),
         )
     except Exception as _dec_exc:  # pragma: no cover - defensive
@@ -5274,6 +5278,7 @@ def set_trek_halt_endpoint(trek_id: str, body: TrekHaltSet,
         _resolve_leader_home_project_id(t), trek_id, resumed=False,
         issuer_session_id=body.issued_by_session_id,
         issuer_user_id=user.get("sub") or "", context=body.reason or "",
+        rationale=body.rationale or "",
     )
     return t
 
@@ -5946,10 +5951,11 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
             meta_after["quiesce_notified_at"] = None
             meta_after["quiesce_reason"] = None
     db.save_trek(trek_id, t)
-    # ms-90 / e-3247: リーダーの review 判断 (= leader_review からの遷移) を
-    # decision-event に記録する。done→承認 / user_review→user 転送 / それ以外→
-    # 再作業。executor の作業遷移 (working→*) は決定ではないので対象外。記録
-    # 失敗は state 遷移を壊さない (= 付随的) ので握り潰してログするだけ。
+    # ms-90 / e-3247 + e-3241: リーダーの review 判断 (= leader_review からの
+    # 遷移) を decision-event に記録する。done→承認 / user_review→user 転送 /
+    # それ以外→再作業。leader_review 遷移時の note はリーダーの review 理由なので
+    # rationale (= なぜその判断か) に載せる。executor の作業遷移 (working→*) は
+    # 決定ではないので対象外。記録失敗は state 遷移を壊さない (= 付随的)。
     if from_state == "leader_review":
         try:
             _review_pid = _resolve_leader_home_project_id(t)
@@ -5963,7 +5969,7 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
                         task_id=body.task_id,
                         decider_session_id=caller_sid,
                         decider_user_id=user_id,
-                        context=body.note or "",
+                        rationale=(body.note or None),
                     ),
                 )
         except Exception as _dec_exc:  # pragma: no cover - defensive

@@ -284,6 +284,20 @@ def test_halt_and_resume_records():
     assert r["context"] == ""
 
 
+def test_rationale_flows_through_every_path_helper():
+    # e-3241: 「なぜ」(rationale) が各経路の helper で運べる。
+    dm = de.decision_event_from_dm_send(event_id="e", rationale="速い方が良い")
+    sc = de.decision_event_from_scope_approval(decision="deny",
+                                               rationale="権限外だから")
+    tr = de.decision_event_from_trek_review(decision="re-work",
+                                            rationale="AC 未達で差し戻し")
+    ht = de.decision_event_from_halt(resumed=False, rationale="影響が広い")
+    assert dm["rationale"] == "速い方が良い"
+    assert sc["rationale"] == "権限外だから"
+    assert tr["rationale"] == "AC 未達で差し戻し"
+    assert ht["rationale"] == "影響が広い"
+
+
 def test_all_four_kinds_reachable_via_helpers():
     # 4 経路すべてが helper 経由で閉じた語彙のどれかを出す (= AC4 の構造確認)。
     kinds = {
