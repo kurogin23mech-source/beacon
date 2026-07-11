@@ -164,7 +164,8 @@ version = { attr = "beacon_cli._version.__version__" }
 # platform-fragile (native deps, symlinks, large size).
 "beacon_cli._bundled_channel" = "channel"
 # ms-93 e-3209: ship scripts/ so a pipx/brew wheel carries the Codex DM
-# daemon (codex-receive-loop.py) + hook (codex-inbox-hook.py). Without
+# daemon (codex-receive-loop.py) + hooks (codex-inbox-hook.py and
+# codex-post-tool-use-hook.py). Without
 # this, `codex plugin add beacon` copies plugins/beacon/ verbatim but the
 # daemon scripts live at repo-root scripts/ (outside the plugin subtree),
 # so the bridge cannot find codex-receive-loop.py and the daemon fails to

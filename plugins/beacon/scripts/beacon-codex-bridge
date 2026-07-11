@@ -57,8 +57,10 @@ def _codex_home() -> Path:
 # Codex hooks.json — under $CODEX_HOME (default ~/.codex).
 CODEX_HOOKS_PATH = _codex_home() / "hooks.json"
 HOOK_EVENT = "UserPromptSubmit"
+POST_TOOL_HOOK_EVENT = "PostToolUse"
 # Stable marker so we can detect "our" hook entry across upgrades.
 HOOK_SCRIPT_BASENAME = "codex-inbox-hook.py"
+POST_TOOL_HOOK_SCRIPT_BASENAME = "codex-post-tool-use-hook.py"
 
 
 def _install_root() -> Path:
@@ -180,15 +182,15 @@ def _clean_stale_pidfile(cwd: Path) -> bool:
         return False
 
 
-def _hook_command(install_root: Path) -> str:
+def _hook_command(install_root: Path, basename: str = HOOK_SCRIPT_BASENAME) -> str:
     """Absolute command string Codex stores in ``hooks.json``.
 
     ms-93 e-3209: resolve across dev checkout vs pipx/brew wheel. Falls back
     to the git-style path when discovery is unavailable so idempotency /
     uninstall matching (which keys on the basename) keeps working.
     """
-    script = _resolve_script(install_root, HOOK_SCRIPT_BASENAME) or (
-        install_root / "scripts" / HOOK_SCRIPT_BASENAME
+    script = _resolve_script(install_root, basename) or (
+        install_root / "scripts" / basename
     )
     return f"/usr/bin/python3 {script}"
 
@@ -206,7 +208,23 @@ def _hook_entry(install_root: Path, cwd: Path) -> dict:
     }
 
 
-def _is_our_hook(entry: dict) -> bool:
+def _post_tool_hook_entry(install_root: Path, cwd: Path) -> dict:
+    """PostToolUse(Bash) entry for commit/push/deploy detection."""
+    return {
+        "matcher": "^Bash$",
+        "hooks": [
+            {
+                "type": "command",
+                "command": _hook_command(
+                    install_root, POST_TOOL_HOOK_SCRIPT_BASENAME
+                ),
+                "timeout": 10,
+            }
+        ],
+    }
+
+
+def _is_our_hook(entry: dict, basename: str = HOOK_SCRIPT_BASENAME) -> bool:
     """Detect a beacon-owned hook entry across upgrades.
 
     Match on the basename of the script file so absolute-path changes
@@ -215,7 +233,7 @@ def _is_our_hook(entry: dict) -> bool:
     """
     for h in (entry or {}).get("hooks", []) or []:
         cmd = str(h.get("command", ""))
-        if HOOK_SCRIPT_BASENAME in cmd:
+        if basename in cmd:
             return True
     return False
 
@@ -387,8 +405,32 @@ def cmd_ensure_network() -> int:
     return 1
 
 
+def _merge_hook_entry(
+    data: dict, event: str, desired: dict, basename: str, cwd: Path,
+) -> tuple[bool, str]:
+    """Merge one cwd-scoped Beacon hook. Return (changed, verdict)."""
+    bucket = data["hooks"].setdefault(event, [])
+    if not isinstance(bucket, list):
+        raise RuntimeError(f"~/.codex/hooks.json `hooks.{event}` is not an array.")
+    for i, entry in enumerate(bucket):
+        if not _is_our_hook(entry, basename):
+            continue
+        existing_cmd = (entry.get("hooks") or [{}])[0].get("command", "")
+        # UserPromptSubmit commands carry --cwd. PostToolUse runs in the
+        # session cwd and has one shared entry, so its basename is sufficient.
+        same_scope = str(cwd) in existing_cmd if event == HOOK_EVENT else True
+        if not same_scope:
+            continue
+        if entry == desired:
+            return False, "already"
+        bucket[i] = desired
+        return True, "updated"
+    bucket.append(desired)
+    return True, "installed"
+
+
 def cmd_install_hook(install_root: Path, cwd: Path) -> int:
-    """Idempotently merge our UserPromptSubmit entry into hooks.json.
+    """Idempotently merge UserPromptSubmit + PostToolUse into hooks.json.
 
     Also ensures the Codex sandbox can reach beacon cloud (ms-93 / e-3000)
     so cloud calls from inside Codex don't die on DNS resolution.
@@ -412,41 +454,34 @@ def cmd_install_hook(install_root: Path, cwd: Path) -> int:
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    bucket = data["hooks"].setdefault(HOOK_EVENT, [])
-    if not isinstance(bucket, list):
-        print(
-            f"~/.codex/hooks.json `hooks.{HOOK_EVENT}` is not an array.",
-            file=sys.stderr,
-        )
+    specs = (
+        (HOOK_EVENT, _hook_entry(install_root, cwd), HOOK_SCRIPT_BASENAME),
+        (
+            POST_TOOL_HOOK_EVENT,
+            _post_tool_hook_entry(install_root, cwd),
+            POST_TOOL_HOOK_SCRIPT_BASENAME,
+        ),
+    )
+    changed = False
+    verdicts = []
+    try:
+        for event, desired, basename in specs:
+            did_change, verdict = _merge_hook_entry(
+                data, event, desired, basename, cwd
+            )
+            changed = changed or did_change
+            verdicts.append(f"{event}={verdict}")
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
         return 1
-    # If we already have a beacon-owned entry for this cwd, update its
-    # command to the current absolute path (= absorbs install_root drift).
-    desired = _hook_entry(install_root, cwd)
-    desired_cmd = desired["hooks"][0]["command"]
-    for i, entry in enumerate(bucket):
-        if not _is_our_hook(entry):
-            continue
-        # Only update if this entry is bound to the same cwd; otherwise
-        # leave it (= another cwd has its own entry, multi-project ok).
-        existing_cmd = (entry.get("hooks") or [{}])[0].get("command", "")
-        if str(cwd) in existing_cmd:
-            if existing_cmd == desired_cmd:
-                print(
-                    f"hook: already installed for cwd={cwd} (no-op)",
-                )
-                return 0
-            bucket[i] = desired
-            _save_hooks_json(data)
-            print(f"hook: updated command for cwd={cwd}")
-            return 0
-    bucket.append(desired)
-    _save_hooks_json(data)
-    print(f"hook: installed for cwd={cwd}")
+    if changed:
+        _save_hooks_json(data)
+    print(f"hook: {', '.join(verdicts)} for cwd={cwd}")
     return 0
 
 
 def cmd_uninstall_hook(cwd: Path) -> int:
-    """Remove our hook entry for this cwd. Leaves other entries alone."""
+    """Remove our UserPromptSubmit + PostToolUse entries."""
     if not CODEX_HOOKS_PATH.is_file():
         print("hook: ~/.codex/hooks.json not found (already absent)")
         return 0
@@ -455,25 +490,40 @@ def cmd_uninstall_hook(cwd: Path) -> int:
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    bucket = data.get("hooks", {}).get(HOOK_EVENT)
-    if not isinstance(bucket, list):
-        print("hook: not installed (nothing to remove)")
-        return 0
-    keep = []
     removed = 0
-    for entry in bucket:
-        if not _is_our_hook(entry):
+    for event, basename in ((HOOK_EVENT, HOOK_SCRIPT_BASENAME),):
+        bucket = data.get("hooks", {}).get(event)
+        if not isinstance(bucket, list):
+            continue
+        keep = []
+        for entry in bucket:
+            if not _is_our_hook(entry, basename):
+                keep.append(entry)
+                continue
+            cmd = (entry.get("hooks") or [{}])[0].get("command", "")
+            if str(cwd) in cmd:
+                removed += 1
+                continue
             keep.append(entry)
-            continue
-        cmd = (entry.get("hooks") or [{}])[0].get("command", "")
-        if str(cwd) in cmd:
-            removed += 1
-            continue
-        keep.append(entry)
+        data["hooks"][event] = keep
+    # PostToolUse is intentionally shared across cwd values because Codex runs
+    # it in the active session cwd and the detector discovers the Beacon root
+    # from hook input. Remove it only after the final Beacon inbox entry is
+    # gone, preserving automation for other installed project bridges.
+    inbox_bucket = data.get("hooks", {}).get(HOOK_EVENT, [])
+    has_beacon_cwd = any(_is_our_hook(e) for e in inbox_bucket)
+    if not has_beacon_cwd:
+        post_bucket = data.get("hooks", {}).get(POST_TOOL_HOOK_EVENT)
+        if isinstance(post_bucket, list):
+            keep = [
+                e for e in post_bucket
+                if not _is_our_hook(e, POST_TOOL_HOOK_SCRIPT_BASENAME)
+            ]
+            removed += len(post_bucket) - len(keep)
+            data["hooks"][POST_TOOL_HOOK_EVENT] = keep
     if removed == 0:
         print(f"hook: not installed for cwd={cwd}")
         return 0
-    data["hooks"][HOOK_EVENT] = keep
     _save_hooks_json(data)
     print(f"hook: removed {removed} entry for cwd={cwd}")
     return 0
