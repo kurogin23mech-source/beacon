@@ -11061,9 +11061,32 @@ def health():
             from commands import __version__ as _beacon_version  # type: ignore
         except Exception:
             pass
+    # e-3197: fail loud when a firebase-provider *production* deploy is missing
+    # BEACON_OAUTH_CLIENT_ID. Without the client_id the Web UI login button
+    # silently vanishes (Google Identity Services can't render it) yet the
+    # deploy would otherwise go green. vps-pull-deploy.sh health-checks /health
+    # with `curl -fsS`, which fails only on a non-2xx status — so returning 503
+    # here turns a silent dead-login into a red deploy that rolls back. Gated to
+    # BEACON_ENV=prod so dev / test stay 200 even with the env unset (dev logs
+    # in via the local dev form, not Google). The value itself lives in
+    # deploy/app.env.example + /etc/beacon/app.env (see docs/DEPLOY_VPS.md) —
+    # env is the single source of truth, not a hardcoded fallback (= e-3196).
+    _env = os.environ.get("BEACON_ENV", "dev")
+    _provider = os.environ.get("BEACON_AUTH_PROVIDER", "firebase").lower()
+    _oauth_client_id = os.environ.get("BEACON_OAUTH_CLIENT_ID", "").strip()
+    if _env == "prod" and _provider == "firebase" and not _oauth_client_id:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "degraded: BEACON_OAUTH_CLIENT_ID is unset in a firebase-"
+                "provider production deploy — the Web UI login button would be "
+                "dead. Set it in /etc/beacon/app.env (see deploy/app.env.example "
+                "and docs/DEPLOY_VPS.md) and redeploy."
+            ),
+        )
     return {
         "status": "ok",
-        "env": os.environ.get("BEACON_ENV", "dev"),
+        "env": _env,
         "version": _beacon_version,
     }
 
@@ -11097,17 +11120,17 @@ def auth_config():
         }
     # Firebase / Cloud Run 既存経路 (= 後方互換)
     # BEACON_OAUTH_CLIENT_ID は公開値 (= Web の Google Identity Services が使う
-    # client_id。ページ HTML に埋まって配信されるので secret ではない)。env 未設定/空
-    # でもログインボタンを死なせないよう、既知の公開 client_id を default に持たせる。
-    # env があればそちらが優先。これは env を version 管理側にも固定して、サービス移設
-    # (= Cloud Run -> VPS 等) で env が無音欠落してもログインが落ちないようにする構造修正
-    # (ms-96 e-3196)。空欠落による silent no-button の再発防止も兼ねる (e-3197 と対)。
-    _DEFAULT_WEB_OAUTH_CLIENT_ID = (
-        "192136550838-evgdpddgcpsim62jrc4bh77j6p9if716.apps.googleusercontent.com"
-    )
+    # client_id。ページ HTML に埋まって配信されるので secret ではない) だが、
+    # 固有値をソースにハードコードすると (a) このデプロイが常に beacon-ai.dev の
+    # OAuth アプリを指す前提が焼き込まれ、(b) env 欠落を黙って埋めて設定ミスを
+    # 隠す silent fallback になる。そこで値はソースに持たせず env を唯一の真値源に
+    # し、repo 側では deploy/app.env.example + docs/DEPLOY_VPS.md の runbook に
+    # 公開値として固定する (= ms-96 e-3196、サービス移設で無音欠落しない)。env
+    # 欠落は隠さず、本番では /health が 503 を返して deploy を赤くする (= e-3197、
+    # 上記 health() 参照)。dev はログインフォーム経路なので空でも 200 のまま。
     return {
         "provider": "firebase",
-        "client_id": os.environ.get("BEACON_OAUTH_CLIENT_ID") or _DEFAULT_WEB_OAUTH_CLIENT_ID,
+        "client_id": os.environ.get("BEACON_OAUTH_CLIENT_ID", ""),
         # local_dev: ローカル時のみ true。本番 Cloud Run では env 未設定 = false。
         "local_dev": _local_dev_enabled,
     }

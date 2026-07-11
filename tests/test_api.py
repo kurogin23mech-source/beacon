@@ -135,6 +135,61 @@ def test_health():
 
 
 # ---------------------------------------------------------------------------
+# OAuth client_id: env is the single source of truth, loud on empty in prod
+# (ms-96 e-3196 / e-3197). The hardcoded default was removed so a missing env
+# can't be silently masked — a firebase-provider production deploy without
+# BEACON_OAUTH_CLIENT_ID must fail the /health check (curl -fsS in
+# vps-pull-deploy.sh) instead of silently shipping a dead login button.
+# ---------------------------------------------------------------------------
+
+def test_health_degraded_when_prod_firebase_missing_client_id(monkeypatch):
+    monkeypatch.setenv("BEACON_ENV", "prod")
+    monkeypatch.setenv("BEACON_AUTH_PROVIDER", "firebase")
+    monkeypatch.delenv("BEACON_OAUTH_CLIENT_ID", raising=False)
+    r = client.get("/health")
+    assert r.status_code == 503
+    assert "BEACON_OAUTH_CLIENT_ID" in r.json()["detail"]
+
+
+def test_health_ok_when_prod_firebase_has_client_id(monkeypatch):
+    monkeypatch.setenv("BEACON_ENV", "prod")
+    monkeypatch.setenv("BEACON_AUTH_PROVIDER", "firebase")
+    monkeypatch.setenv(
+        "BEACON_OAUTH_CLIENT_ID", "some-id.apps.googleusercontent.com"
+    )
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+
+def test_health_ok_in_dev_even_without_client_id(monkeypatch):
+    # dev は Google ではなくローカルログインフォーム経路なので client_id 空でも
+    # 200。deploy を落とす gate は本番 (BEACON_ENV=prod) のみ。
+    monkeypatch.setenv("BEACON_ENV", "dev")
+    monkeypatch.setenv("BEACON_AUTH_PROVIDER", "firebase")
+    monkeypatch.delenv("BEACON_OAUTH_CLIENT_ID", raising=False)
+    r = client.get("/health")
+    assert r.status_code == 200
+
+
+def test_auth_config_firebase_client_id_comes_from_env_not_hardcode(monkeypatch):
+    # e-3196: ハードコード default を撤去したので、env がそのまま真値源になる。
+    monkeypatch.setattr(app_module, "_AUTH_PROVIDER", "firebase", raising=False)
+    monkeypatch.setenv(
+        "BEACON_OAUTH_CLIENT_ID", "explicit.apps.googleusercontent.com"
+    )
+    r = client.get("/api/auth/config")
+    assert r.status_code == 200
+    assert r.json()["client_id"] == "explicit.apps.googleusercontent.com"
+
+    monkeypatch.delenv("BEACON_OAUTH_CLIENT_ID", raising=False)
+    r2 = client.get("/api/auth/config")
+    assert r2.json()["client_id"] == "", (
+        "hardcoded default must be gone: empty env → empty client_id"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Project
 # ---------------------------------------------------------------------------
 
