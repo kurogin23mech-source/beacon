@@ -75,6 +75,9 @@ ENTITIES = [
     # ここを in-memory fallback で握っていて再起動で消える既知の穴があるが、MySQL は
     # 汎用 (pk, sk, data) テーブルで正しく永続化できるので trek_logs を実体化する。
     "trek_logs",
+    # projects/{pid}/decision_events (ms-90 e-3242): 意思決定の統一ストリーム。
+    # pk=project_id, sk=decision_id。append-only。
+    "decision_events",
     # users/{uid}/* subcollections
     "machines",
     "session_lookup",
@@ -104,6 +107,8 @@ _SUBCOLLECTION_SK_NAMES = {
     # delete_project の cascade を成立させるため必ずこの map に入れる。
     "milestones": "milestone_id",
     "entries": "entry_composite_sk",  # sk = "{ms_id}#{entry_id}"
+    # ms-90 e-3242: project 配下 subcollection。delete_project の cascade 対象。
+    "decision_events": "decision_id",
 }
 
 
@@ -1807,6 +1812,50 @@ def list_trek_logs(trek_id: str, *, limit: int = 100,
     if since:
         rows = [r for r in rows if (r.get("created_at") or "") > since]
     rows.sort(key=lambda r: (r.get("created_at", ""), r.get("log_id", "")))
+    if limit and limit > 0:
+        rows = rows[:limit]
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Decision events (ms-90 e-3242): 意思決定の統一 append-only ストリーム。
+# pk=project_id, sk=decision_id。schema builder は server/decision_event.py。
+# ---------------------------------------------------------------------------
+
+def _mint_decision_event_id() -> str:
+    import secrets as _secrets
+    return f"dec-{_secrets.token_hex(8)}"
+
+
+def append_decision_event(project_id: str, data: dict) -> str:
+    """projects/{project_id}/decision_events に 1 件追記する。返り値は decision_id。
+
+    decision_id / created_at は未指定なら補完する。``outcome`` 系の禁止
+    フィールドが混入していたら書き込み前に ValueError で弾く (= SPEC 不変条件)。
+    """
+    try:
+        from decision_event import assert_no_outcome
+        assert_no_outcome(data or {})
+    except ImportError:
+        pass
+    payload = dict(data or {})
+    decision_id = payload.get("decision_id") or _mint_decision_event_id()
+    payload["decision_id"] = decision_id
+    payload.setdefault("created_at", _now_iso_utc())
+    _put("decision_events", project_id, payload, sk=decision_id)
+    return decision_id
+
+
+def list_decision_events(project_id: str, *, limit: int = 100,
+                         since: str = "") -> list[dict]:
+    """decision_events を created_at 昇順で返す (= 1 本のストリームとして読む)。
+
+    since: ISO8601 の下限 (= created_at > since のみ)。limit: 返却上限。
+    """
+    rows = _query("decision_events", project_id)
+    if since:
+        rows = [r for r in rows if (r.get("created_at") or "") > since]
+    rows.sort(key=lambda r: (r.get("created_at", ""), r.get("decision_id", "")))
     if limit and limit > 0:
         rows = rows[:limit]
     return rows

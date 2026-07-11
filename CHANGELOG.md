@@ -2,6 +2,17 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.58.0] - 2026-07-11
+
+- Merge pull request #397 from kurogin23mech-source/feat/ms-104-application-map
+- fix(ms-104): CI green化 — test の git 深さ依存除去 + session-start skill 3コピー同期 (e-3155/e-3153)
+- Merge pull request #396 from kurogin23mech-source/fix/ms-93-e3225-codex-posttool-hook
+- feat(ms-93): Codex PostToolUse hook で Beacon 自動記録を配線 (e-3225)
+- fix(ms-104): beacon-map skill の drift 例を修正 (e-3151)
+- feat(ms-104): アプリケーション全貌マップの生成・照合・自動メンテ機構
+- docs(release): update README/CHANGELOG for v0.57.0
+- chore(release): bump formula to 0.57.0
+
 ## [v0.57.0] - 2026-07-10
 
 ## [v0.56.1] - 2026-07-08
