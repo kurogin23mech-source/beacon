@@ -186,10 +186,29 @@ class _FakeStore:
         return self._doc if doc_id == "application-map" else None
 
 
+class _FakeProc:
+    def __init__(self, stdout, returncode=0):
+        self.stdout = stdout
+        self.returncode = returncode
+
+
+def _fake_git(nlines):
+    """Deterministic `git log --since=... --pretty=%H` output of nlines hashes.
+
+    Pins commit_count independent of the real repo depth (CI uses a shallow
+    fetch-depth=1 checkout, so `git log --since=2020` there returns ~0 commits).
+    """
+    def _run(*args, **kwargs):
+        return _FakeProc("\n".join(f"{i:040x}" for i in range(nlines)))
+    return _run
+
+
 def test_map_drift_fires_when_stale(tmp_path, monkeypatch):
     monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
     monkeypatch.setattr(commands, "get_store",
                         lambda: _FakeStore({"updated_at": "2020-01-01T00:00:00"}))
+    monkeypatch.setattr(commands.subprocess, "run",
+                        _fake_git(commands._MAP_DRIFT_COMMIT_THRESHOLD + 5))
     commands._auto_fire_map_drift_trigger()
     p = tmp_path / "map-drift.json"
     assert p.exists()
@@ -198,13 +217,13 @@ def test_map_drift_fires_when_stale(tmp_path, monkeypatch):
     assert data["commit_count"] >= commands._MAP_DRIFT_COMMIT_THRESHOLD
 
 
-def test_map_drift_does_not_fire_when_fresh(tmp_path, monkeypatch):
+def test_map_drift_does_not_fire_when_below_threshold(tmp_path, monkeypatch):
     monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
-    # updated_at = now → 0 commits since → below threshold
-    import datetime
-    now = datetime.datetime.now().isoformat()
     monkeypatch.setattr(commands, "get_store",
-                        lambda: _FakeStore({"updated_at": now}))
+                        lambda: _FakeStore({"updated_at": "2020-01-01T00:00:00"}))
+    # Fewer commits than the threshold → no fire (independent of real git depth).
+    monkeypatch.setattr(commands.subprocess, "run",
+                        _fake_git(commands._MAP_DRIFT_COMMIT_THRESHOLD - 1))
     commands._auto_fire_map_drift_trigger()
     assert not (tmp_path / "map-drift.json").exists()
 
