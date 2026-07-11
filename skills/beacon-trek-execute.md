@@ -156,7 +156,7 @@ cd "$PROJECT_DIR" && beacon bus budget show --json
 
 ## Step 5: デプロイ / リリース境界 detection
 
-以下が必要になったら **実行せず Step 7 escalation**: `git push origin main` / `gh pr merge` / `beacon release` / 外部 deploy / 本番 secret / 外部送信 (Slack / Discord / 外部 email) / 外部 user の Trek 招待 (sensitivity=high 含む組合せ)。
+以下が必要になったら **実行せず Step 7 escalation**: `git push origin main` / `gh pr merge` / `gh workflow run release.yml` / 外部 deploy / 本番 secret / 外部送信 (Slack / Discord / 外部 email) / 外部 user の Trek 招待 (sensitivity=high 含む組合せ)。
 
 ## Step 5.5: budget 枯渇 / 致命エラー時の降格 (graceful stop)
 
