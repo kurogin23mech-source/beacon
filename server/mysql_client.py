@@ -1435,6 +1435,34 @@ def list_pending_approvals(project_id: str, *,
     return rows
 
 
+def list_decided_approvals(project_id: str, *, limit: int = 50) -> list[dict]:
+    """List sidecar rows in approval_status in {"approved","denied"} (= ms-70 / e-1718).
+
+    MySQL mirror of :func:`firestore_client.list_decided_approvals` and
+    :func:`dynamodb_client.list_decided_approvals`. Same contract: pending /
+    auto excluded, newest-first by ``decision_at`` (fallback ``created_at``),
+    cap at ``limit``. Backs the Web UI "DM 承認履歴" (DM approval history)
+    audit view via ``GET`` in app.py.
+
+    This method was missing from the MySQL backend after the ms-96 VPS
+    re-platform (= 移植漏れ), so the audit endpoint 500'd in production once
+    MySQL became the store. Implemented here to restore parity with the
+    Firestore / DynamoDB backends.
+    """
+    rows = []
+    for it in _query("bus_event_approvals", project_id):
+        if it.get("approval_status") not in ("approved", "denied"):
+            continue
+        rows.append({k: v for k, v in it.items() if k != "project_id"})
+    rows.sort(
+        key=lambda r: r.get("decision_at") or r.get("created_at") or "",
+        reverse=True,
+    )
+    if limit:
+        rows = rows[:limit]
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Sessions (PK=project_id, SK=session_id)
 # ---------------------------------------------------------------------------

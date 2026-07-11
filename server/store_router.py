@@ -73,6 +73,7 @@ if _BACKEND == "dynamodb":
         get_bus_event_approval,
         put_bus_event_approval,
         list_pending_approvals,
+        list_decided_approvals,
         # Sessions
         upsert_session,
         stamp_session_actor_email,
@@ -174,6 +175,7 @@ elif _BACKEND == "mysql":
         get_bus_event_approval,
         put_bus_event_approval,
         list_pending_approvals,
+        list_decided_approvals,
         # Sessions
         upsert_session,
         stamp_session_actor_email,
@@ -278,6 +280,7 @@ elif _BACKEND == "firestore":
         get_bus_event_approval,
         put_bus_event_approval,
         list_pending_approvals,
+        list_decided_approvals,
         # Sessions
         upsert_session,
         stamp_session_actor_email,

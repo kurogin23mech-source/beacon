@@ -483,3 +483,46 @@ def test_firestore_empty_returns_empty_list(firestore_client):
 def test_dynamodb_empty_returns_empty_list(ddb_client):
     out = ddb_client.list_decided_approvals(PID_A)
     assert out == []
+
+
+# ===========================================================================
+# e-3240 regression: store_router must re-export list_decided_approvals for
+# EVERY backend.
+#
+# app.py:9298 calls ``db.list_decided_approvals`` where ``db`` is
+# ``store_router`` (aliased). store_router uses explicit ``from <backend>
+# import (...)`` re-export lists with no ``__getattr__`` fallback, so a
+# function that isn't listed raises AttributeError → 500. The audit endpoint
+# 500'd in production because (1) store_router never re-exported the function
+# in any backend block and (2) the MySQL backend lacked the function entirely.
+# Every test above imports a concrete backend module directly, so none of
+# them exercised the router path that production actually uses.
+#
+# Run in a subprocess per backend so each gets a clean BEACON_STORE_BACKEND
+# without reload pollution leaking into other tests that ``import
+# store_router as db``.
+# ===========================================================================
+
+@pytest.mark.parametrize("backend", ["firestore", "dynamodb", "mysql"])
+def test_store_router_reexports_list_decided_approvals(backend):
+    import subprocess
+
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.path.insert(0, 'server'); "
+            "import store_router as db; "
+            "assert hasattr(db, 'list_decided_approvals'), "
+            "'store_router must re-export list_decided_approvals'",
+        ],
+        cwd=repo_root,
+        env={**os.environ, "BEACON_STORE_BACKEND": backend},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"store_router({backend}) must re-export list_decided_approvals so "
+        f"app.py's db.list_decided_approvals resolves; stderr:\n{result.stderr}"
+    )
