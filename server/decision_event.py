@@ -144,6 +144,107 @@ def decision_event_from_dm_send(
     )
 
 
+def decision_event_from_scope_approval(
+    *,
+    decision: str,
+    decider_user_id: str = "",
+    decider_session_id: str = "",
+    event_id: str = "",
+    context: str = "",
+    rationale: str | None = None,
+    agent: str | None = None,
+) -> dict:
+    """cross-user DM action の承認/却下 (= scope 承認経路) の decision-event。
+
+    ``decision`` は ``"approve"`` / ``"deny"``。判断した人 (= 受信者) を who に、
+    対象の bus event を related.event_id に置く。
+    """
+    return build_decision_event(
+        kind="scope-approval",
+        decision=decision,
+        context=context,
+        who={
+            "session_id": decider_session_id,
+            "user_id": decider_user_id,
+            "agent": agent,
+        },
+        rationale=rationale,
+        related={"event_id": event_id},
+    )
+
+
+# leader_review からの遷移先 → review 判断の対応 (= 閉じた mapping)。
+def trek_review_decision_from_state(target_state: str) -> str:
+    """leader_review 状態からの遷移先を review 判断語に写す。
+
+    done → 承認 (approve)、user_review → user へ転送 (forward-to-user)、
+    それ以外 (= working / todo へ差し戻し) → 再作業 (re-work)。
+    """
+    if target_state == "done":
+        return "approve"
+    if target_state == "user_review":
+        return "forward-to-user"
+    return "re-work"
+
+
+def decision_event_from_trek_review(
+    *,
+    decision: str,
+    trek_id: str = "",
+    task_id: str = "",
+    decider_session_id: str = "",
+    decider_user_id: str = "",
+    context: str = "",
+    rationale: str | None = None,
+    agent: str | None = None,
+) -> dict:
+    """Trek タスクのリーダー review (approve / re-work / forward-to-user) の
+    decision-event。判断したリーダーを who に、対象の trek / task を related に置く。
+    """
+    return build_decision_event(
+        kind="trek-review",
+        decision=decision,
+        context=context,
+        who={
+            "session_id": decider_session_id,
+            "user_id": decider_user_id,
+            "agent": agent,
+        },
+        rationale=rationale,
+        related={"trek_id": trek_id, "task_id": task_id},
+    )
+
+
+def decision_event_from_halt(
+    *,
+    resumed: bool = False,
+    trek_id: str = "",
+    issuer_session_id: str = "",
+    issuer_user_id: str = "",
+    context: str = "",
+    rationale: str | None = None,
+    agent: str | None = None,
+) -> dict:
+    """Trek の中断 (halt) / 再開 (resume) の decision-event。
+
+    ``resumed=False`` なら kind=halt / decision=halt、``resumed=True`` なら
+    kind=resume / decision=resume。halt の理由 (= 直面した問題) は context に置く。
+    """
+    kind = "resume" if resumed else "halt"
+    return build_decision_event(
+        kind=kind,
+        decision=kind,
+        context=context,
+        who={
+            "session_id": issuer_session_id,
+            "user_id": issuer_user_id,
+            "agent": agent,
+        },
+        rationale=rationale,
+        related={"trek_id": trek_id},
+    )
+
+
 def maybe_dm_send_record(
     *,
     channel: str,

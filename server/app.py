@@ -5218,6 +5218,34 @@ def list_trek_slots_endpoint(trek_id: str,
     return {"trek_id": trek_id, "slots": rows}
 
 
+def _record_halt_decision(project_id: str, trek_id: str, *, resumed: bool,
+                          issuer_session_id: str, issuer_user_id: str,
+                          context: str) -> None:
+    """ms-90 / e-3247: Trek の halt / resume を decision-event に記録する。
+
+    記録失敗は halt / resume 自体を壊してはならない (= 付随的) ので握り潰して
+    ログするだけ。project_id が空 (= home project 解決失敗) なら skip する。
+    """
+    if not project_id:
+        return
+    try:
+        db.append_decision_event(
+            project_id,
+            decision_event_mod.decision_event_from_halt(
+                resumed=resumed,
+                trek_id=trek_id,
+                issuer_session_id=issuer_session_id,
+                issuer_user_id=issuer_user_id,
+                context=context,
+            ),
+        )
+    except Exception as _dec_exc:  # pragma: no cover - defensive
+        logging.getLogger(__name__).warning(
+            "append_decision_event (halt/resume) failed for trek_id=%s: %s",
+            trek_id, _dec_exc,
+        )
+
+
 @app.put("/api/treks/{trek_id}/halt")
 def set_trek_halt_endpoint(trek_id: str, body: TrekHaltSet,
                            user: dict = Depends(require_auth)):
@@ -5240,6 +5268,13 @@ def set_trek_halt_endpoint(trek_id: str, body: TrekHaltSet,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     db.save_trek(trek_id, t)
+    # ms-90 / e-3247: halt (= 中断発令) を decision-event に記録する。理由 (=
+    # 直面した問題) を context に置く。記録失敗は halt を壊さない (= 付随的)。
+    _record_halt_decision(
+        _resolve_leader_home_project_id(t), trek_id, resumed=False,
+        issuer_session_id=body.issued_by_session_id,
+        issuer_user_id=user.get("sub") or "", context=body.reason or "",
+    )
     return t
 
 
@@ -5250,6 +5285,11 @@ def clear_trek_halt_endpoint(trek_id: str, user: dict = Depends(require_auth)):
     _require_trek_joined_member(t, user)
     trek_mod.clear_halt(t)
     db.save_trek(trek_id, t)
+    # ms-90 / e-3247: resume (= 中断解除) を decision-event に記録する。
+    _record_halt_decision(
+        _resolve_leader_home_project_id(t), trek_id, resumed=True,
+        issuer_session_id="", issuer_user_id=user.get("sub") or "", context="",
+    )
     return t
 
 
@@ -5906,6 +5946,31 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
             meta_after["quiesce_notified_at"] = None
             meta_after["quiesce_reason"] = None
     db.save_trek(trek_id, t)
+    # ms-90 / e-3247: リーダーの review 判断 (= leader_review からの遷移) を
+    # decision-event に記録する。done→承認 / user_review→user 転送 / それ以外→
+    # 再作業。executor の作業遷移 (working→*) は決定ではないので対象外。記録
+    # 失敗は state 遷移を壊さない (= 付随的) ので握り潰してログするだけ。
+    if from_state == "leader_review":
+        try:
+            _review_pid = _resolve_leader_home_project_id(t)
+            if _review_pid:
+                db.append_decision_event(
+                    _review_pid,
+                    decision_event_mod.decision_event_from_trek_review(
+                        decision=decision_event_mod
+                        .trek_review_decision_from_state(body.state),
+                        trek_id=trek_id,
+                        task_id=body.task_id,
+                        decider_session_id=caller_sid,
+                        decider_user_id=user_id,
+                        context=body.note or "",
+                    ),
+                )
+        except Exception as _dec_exc:  # pragma: no cover - defensive
+            logging.getLogger(__name__).warning(
+                "append_decision_event (trek-review) failed for trek_id=%s: %s",
+                trek_id, _dec_exc,
+            )
     # If the new state is terminal, fan out a review-required notice to
     # the leader. The leader's review Skill (/beacon-trek-review)
     # surfaces this as a forced 3-choice action. We use the trek's home
@@ -9248,6 +9313,10 @@ def list_dm_approval_history(
 #       clicking a colleague's pending row).
 class DMRespondBody(BaseModel):
     decision: str  # "approve" | "deny"
+    # ms-90 / e-3247: 承認/却下の背景 (= 直面した問題) と判断理由。decision-event
+    # に記録するためのメタデータ。任意 (= 未指定でも決定は通る)。
+    context: str = ""
+    rationale: str = ""
 
 
 @app.post("/api/projects/{project_id}/dm/approval/{event_id}")
@@ -9355,6 +9424,25 @@ def respond_dm_approval(
         decision_by=caller_uid,
         decision_at=now,
     )
+
+    # ms-90 / e-3247: scope 承認/却下も decision-event ストリームに記録する。
+    # 記録失敗は決定を壊してはならない (= 付随的) ので握り潰してログするだけ。
+    try:
+        db.append_decision_event(
+            project_id,
+            decision_event_mod.decision_event_from_scope_approval(
+                decision=decision,
+                decider_user_id=caller_uid,
+                event_id=event_id,
+                context=body.context or "",
+                rationale=body.rationale or None,
+            ),
+        )
+    except Exception as _dec_exc:  # pragma: no cover - defensive
+        logging.getLogger(__name__).warning(
+            "append_decision_event (scope-approval) failed for event_id=%s: %s",
+            event_id, _dec_exc,
+        )
 
     # ms-70 / e-1717: denied → emit a server-issued T5 reply addressed
     # back to the original envelope's sender_session_id so the AI that

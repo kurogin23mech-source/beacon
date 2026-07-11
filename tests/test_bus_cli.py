@@ -241,6 +241,10 @@ def test_bus_send_dm_reply_without_context_does_not_warn(monkeypatch, capsys,
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
     monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
     monkeypatch.setenv("BEACON_BUS_IN_REPLY_TO", "evt-parent")
+    # --in-reply-to triggers the budget gate; grant it so the send proceeds
+    # to the (non-)warning path rather than refusing on budget state.
+    monkeypatch.setattr(commands, "_bus_budget_consume_one",
+                        lambda: (True, {"armed": True, "total": 10, "used": 1}))
     commands.cmd_bus_send()
     err = capsys.readouterr().err
     # 返信は継続なので背景 nudge は出さない (= ノイズ回避)。

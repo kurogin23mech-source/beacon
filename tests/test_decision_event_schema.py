@@ -230,3 +230,69 @@ def test_maybe_dm_send_record_extracts_in_reply_to_from_payload():
 def test_maybe_dm_send_record_handles_non_dict_payload():
     rec = de.maybe_dm_send_record(channel="dm", payload=None, event_id="e1")
     assert rec["related"]["in_reply_to"] is None
+
+
+# ---------------------------------------------------------------------------
+# e-3247 — 残り 3 経路 (scope 承認 / trek-review / halt-resume) の組み立て
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("decision", ["approve", "deny"])
+def test_scope_approval_record(decision):
+    e = de.decision_event_from_scope_approval(
+        decision=decision, decider_user_id="u9", event_id="evt-7",
+        context="権限外の action だった",
+    )
+    assert e["kind"] == "scope-approval"
+    assert e["decision"] == decision
+    assert e["who"]["user_id"] == "u9"
+    assert e["related"]["event_id"] == "evt-7"
+    assert "outcome" not in e
+
+
+def test_trek_review_decision_from_state_mapping():
+    # leader_review からの遷移先 → 判断語 (閉じた mapping)。
+    assert de.trek_review_decision_from_state("done") == "approve"
+    assert de.trek_review_decision_from_state("user_review") == "forward-to-user"
+    assert de.trek_review_decision_from_state("working") == "re-work"
+    assert de.trek_review_decision_from_state("todo") == "re-work"
+
+
+def test_trek_review_record():
+    e = de.decision_event_from_trek_review(
+        decision="approve", trek_id="tk-1", task_id="T-2",
+        decider_session_id="sv-leader", decider_user_id="u1",
+        context="AC を満たしていた",
+    )
+    assert e["kind"] == "trek-review"
+    assert e["decision"] == "approve"
+    assert e["related"]["trek_id"] == "tk-1"
+    assert e["related"]["task_id"] == "T-2"
+    assert e["who"]["session_id"] == "sv-leader"
+
+
+def test_halt_and_resume_records():
+    h = de.decision_event_from_halt(
+        resumed=False, trek_id="tk-1", issuer_session_id="sv-x",
+        context="本番が壊れたので止めた",
+    )
+    assert h["kind"] == "halt" and h["decision"] == "halt"
+    assert h["context"] == "本番が壊れたので止めた"
+    assert h["related"]["trek_id"] == "tk-1"
+
+    r = de.decision_event_from_halt(resumed=True, trek_id="tk-1")
+    assert r["kind"] == "resume" and r["decision"] == "resume"
+    assert r["context"] == ""
+
+
+def test_all_four_kinds_reachable_via_helpers():
+    # 4 経路すべてが helper 経由で閉じた語彙のどれかを出す (= AC4 の構造確認)。
+    kinds = {
+        de.decision_event_from_dm_send(event_id="e")["kind"],
+        de.decision_event_from_scope_approval(decision="approve")["kind"],
+        de.decision_event_from_trek_review(decision="approve")["kind"],
+        de.decision_event_from_halt(resumed=False)["kind"],
+        de.decision_event_from_halt(resumed=True)["kind"],
+    }
+    assert kinds == {"dm-send", "scope-approval", "trek-review", "halt",
+                     "resume"}
+    assert kinds <= de.DECISION_KINDS
