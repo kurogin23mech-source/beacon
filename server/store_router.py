@@ -99,6 +99,9 @@ if _BACKEND == "dynamodb":
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
         append_trek_log,
         list_trek_logs,
+        # Decision events (ms-90 e-3242) — 意思決定の統一ストリーム
+        append_decision_event,
+        list_decision_events,
         # Active claims (ms-55 e-1730)
         list_active_claims,
         get_active_claim,
@@ -197,6 +200,9 @@ elif _BACKEND == "mysql":
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
         append_trek_log,
         list_trek_logs,
+        # Decision events (ms-90 e-3242) — 意思決定の統一ストリーム
+        append_decision_event,
+        list_decision_events,
         # Active claims (ms-55 e-1730)
         list_active_claims,
         get_active_claim,
@@ -298,6 +304,9 @@ elif _BACKEND == "firestore":
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
         append_trek_log,
         list_trek_logs,
+        # Decision events (ms-90 e-3242) — 意思決定の統一ストリーム
+        append_decision_event,
+        list_decision_events,
         # Active claims (ms-55 e-1730)
         list_active_claims,
         get_active_claim,

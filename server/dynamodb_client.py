@@ -1667,3 +1667,43 @@ def list_trek_logs(trek_id: str, *, limit: int = 100,
     if limit and limit > 0:
         rows = rows[:limit]
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Decision events (ms-90 e-3242): 意思決定の統一 append-only ストリーム。
+# DynamoDB MVP: in-process dict keyed by project_id (= trek_logs と同じ
+# best-effort。cloud-shaped store は Firestore / MySQL)。schema builder は
+# server/decision_event.py。
+# ---------------------------------------------------------------------------
+
+_DECISION_EVENTS_FALLBACK: dict[str, list[dict]] = {}
+
+
+def _mint_decision_event_id() -> str:
+    import secrets as _secrets
+    return f"dec-{_secrets.token_hex(8)}"
+
+
+def append_decision_event(project_id: str, data: dict) -> str:
+    try:
+        from decision_event import assert_no_outcome
+        assert_no_outcome(data or {})
+    except ImportError:
+        pass
+    payload = dict(data or {})
+    decision_id = payload.get("decision_id") or _mint_decision_event_id()
+    payload["decision_id"] = decision_id
+    payload.setdefault("created_at", _now_iso_utc())
+    _DECISION_EVENTS_FALLBACK.setdefault(project_id, []).append(payload)
+    return decision_id
+
+
+def list_decision_events(project_id: str, *, limit: int = 100,
+                         since: str = "") -> list[dict]:
+    rows = list(_DECISION_EVENTS_FALLBACK.get(project_id) or [])
+    if since:
+        rows = [r for r in rows if (r.get("created_at") or "") > since]
+    rows.sort(key=lambda r: (r.get("created_at", ""), r.get("decision_id", "")))
+    if limit and limit > 0:
+        rows = rows[:limit]
+    return rows
