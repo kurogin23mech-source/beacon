@@ -5,15 +5,15 @@ PackageVersion: 0.1.0
 PackageLocale: en-US
 
 Publisher: Beacon AI
-PublisherUrl: https://github.com/r-kida2/beacon
-PublisherSupportUrl: https://github.com/r-kida2/beacon/issues
-Author: r-kida2
+PublisherUrl: https://github.com/kurogin23mech-source/beacon
+PublisherSupportUrl: https://github.com/kurogin23mech-source/beacon/issues
+Author: kurogin23mech-source
 
 PackageName: Beacon Desktop
-PackageUrl: https://github.com/r-kida2/beacon
+PackageUrl: https://github.com/kurogin23mech-source/beacon
 License: MIT
-LicenseUrl: https://github.com/r-kida2/beacon/blob/main/LICENSE
-Copyright: Copyright (c) 2026 r-kida2
+LicenseUrl: https://github.com/kurogin23mech-source/beacon/blob/main/LICENSE
+Copyright: Copyright (c) 2026 kurogin23mech-source
 
 ShortDescription: AI-driven milestone tracker for Claude Code sessions.
 Description: |-
@@ -32,7 +32,7 @@ Tags:
   - productivity
   - developer-tools
 
-ReleaseNotesUrl: https://github.com/r-kida2/beacon/releases
+ReleaseNotesUrl: https://github.com/kurogin23mech-source/beacon/releases
 
 ManifestType: defaultLocale
 ManifestVersion: 1.6.0

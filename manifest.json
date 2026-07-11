@@ -5,7 +5,7 @@
   "type": "app",
   "version": "2026-06-09.2",
   "description": "AI-driven milestone tracker for Claude Code sessions",
-  "author": "r-kida2",
+  "author": "kurogin23mech-source",
   "tags": ["beacon", "milestone", "cli", "ai", "claude-code"],
   "install": {
     "files": {

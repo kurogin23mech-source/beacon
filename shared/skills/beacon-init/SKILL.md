@@ -235,7 +235,7 @@ case "$OS_NAME" in
     ;;
   Linux)
     echo "  Beacon Desktop は未インストールです。以下で入ります (Linux):"
-    echo "    curl -LO https://github.com/r-kida2/beacon/releases/latest/download/Beacon-x86_64.AppImage"
+    echo "    curl -LO https://github.com/kurogin23mech-source/beacon/releases/latest/download/Beacon-x86_64.AppImage"
     echo "    chmod +x Beacon-x86_64.AppImage && ./Beacon-x86_64.AppImage"
     ;;
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
@@ -246,7 +246,7 @@ case "$OS_NAME" in
     ;;
   *)
     echo "  Beacon Desktop は未インストールです。INSTALL.md を参照:"
-    echo "    https://github.com/r-kida2/beacon/blob/main/INSTALL.md"
+    echo "    https://github.com/kurogin23mech-source/beacon/blob/main/INSTALL.md"
     ;;
 esac
 

@@ -171,7 +171,7 @@ def test_install_surfaces_do_not_hardcode_sample_owner():
     """Guard against a future contributor pasting an example owner
     (= e.g. ``acme-corp`` / ``foo-org``) directly into the install
     prompt as a 'helpful' default.  Only the *project-level* Beacon
-    self-references (= ``r-kida2/beacon`` / ``kurogin23mech-source/beacon``)
+    self-references (= ``kurogin23mech-source/beacon`` / ``kurogin23mech-source/beacon``)
     are allowed because they point to the Beacon project itself, not the
     user's repo.
 

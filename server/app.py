@@ -2875,7 +2875,7 @@ def update_summary(project_id: str, body: SummaryUpdate,
     response.headers["Deprecation"] = "true"
     response.headers["Sunset"] = "see e-1040; endpoint will be removed"
     response.headers["Link"] = (
-        '<https://github.com/r-kida2/beacon/blob/main/CLAUDE.md>; '
+        '<https://github.com/kurogin23mech-source/beacon/blob/main/CLAUDE.md>; '
         'rel="deprecation"; type="text/html"'
     )
     return response

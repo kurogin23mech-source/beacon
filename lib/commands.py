@@ -272,7 +272,7 @@ CLAUDE_MD_BEACON_SECTION = """\
 
 ## Beacon Project Management
 
-This project uses [Beacon](https://github.com/r-kida2/beacon) for milestone-driven progress tracking.
+This project uses [Beacon](https://github.com/kurogin23mech-source/beacon) for milestone-driven progress tracking.
 このプロジェクトは Beacon でマイルストーンベースの進捗管理を行っています。
 
 ### Rules / ルール

@@ -36,7 +36,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [
-    { name = "r-kida2", email = "kurogin23mech@gmail.com" },
+    { name = "kurogin23mech-source", email = "kurogin23mech@gmail.com" },
 ]
 keywords = ["ai", "claude-code", "milestone", "project-management", "productivity"]
 classifiers = [
@@ -79,9 +79,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/r-kida2/beacon"
-Repository = "https://github.com/r-kida2/beacon"
-Issues = "https://github.com/r-kida2/beacon/issues"
+Homepage = "https://github.com/kurogin23mech-source/beacon"
+Repository = "https://github.com/kurogin23mech-source/beacon"
+Issues = "https://github.com/kurogin23mech-source/beacon/issues"
 
 [project.scripts]
 # Cross-platform entry-point. On macOS/Linux this delegates to `bin/beacon`

@@ -4,10 +4,10 @@
   "description": "Beacon for Codex CLI — DM inbox bridge + Beacon Skills bundled as one Codex plugin.",
   "author": {
     "name": "Beacon Team",
-    "url": "https://github.com/r-kida2/beacon"
+    "url": "https://github.com/kurogin23mech-source/beacon"
   },
   "homepage": "https://beacon-ai.dev/",
-  "repository": "https://github.com/r-kida2/beacon",
+  "repository": "https://github.com/kurogin23mech-source/beacon",
   "license": "MIT",
   "keywords": ["beacon", "dm", "bridge", "bus"],
   "skills": "./skills/",
