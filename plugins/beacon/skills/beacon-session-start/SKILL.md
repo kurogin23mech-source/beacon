@@ -20,11 +20,7 @@ beacon-find-root >/dev/null && echo "OK" || echo "NO_BEACON"
 
 ### Step 0a-pre: BEACON_BIN gate (= ms-93 / e-2276)
 
-PATH 上の古い `beacon` が新しい install を黙って隠しているケースを構造的に
-検出する。 2026-06-25 PE / Codex dogfood で「`beacon doctor --json` を叩いたら
-古い CLI が `OK: all checks passed.` を返して silent success する」 経路が
-確認されたため、 doctor 任せにせず resolver で hard fail / soft warn を
-明示的に判定する。
+PATH 上の古い `beacon` が新しい install を黙って隠すケースを、doctor 任せにせず resolver で hard fail / soft warn を明示判定する (背景と dogfood 経緯は e-2276 を参照)。
 
 repo root を見つけて (= `beacon-find-root` の出力)、 resolver script を直接叩く:
 
@@ -88,12 +84,7 @@ legacy-mode-field / ms81 系) は doctor 経由でしか出ないため両方走
 
 ### Step 0a-skew: version skew 検知 (= ms-93 / e-3135)
 
-古い beacon が daemon / hook として混じっていないかを検知する (= Codex が
-「古い hook / skill / daemon が混じると動いているようで別物を見ている」と指摘した
-穴、 e-3135)。 受信 daemon は起動時に自分の beacon version を
-`.beacon/codex/receive-loop.session.json` に stamp し、 Codex の
-`UserPromptSubmit` hook は install 時の script path から version を辿れる。 これを
-CLI version と突き合わせて skew を session 開始時に surface する。
+古い beacon が daemon / hook として混じっていないか (= 動いているようで別物を見ている穴) を、受信 daemon の stamp した version と CLI version の skew として session 開始時に surface する (背景と stamp 経路の詳細は e-3135 を参照)。
 
 Bash ツールで実行 (fail-safe、 daemon / hook が無ければ何も出ない):
 
@@ -308,7 +299,7 @@ beacon issue list --json 2>/dev/null
 
 ## Step 1i: beacon-bus channel install 検知（ms-54 e-1173）
 
-session-start が走った cwd で beacon-bus channel が install されていない場合、ユーザーが `claude --dangerously-load-development-channels server:beacon-bus` で起動しても `no MCP server configured` で channel 不成立になる。Mac でも cwd 移動で黙って壊れる UX 抜け (memo doc `EZtptg0e8qwBUUhlN2aX` で発覚) を構造的に塞ぐため、session-start 時に `.mcp.json` / `beacon-bus` MCP entry の存在を検知する。
+session-start が走った cwd で beacon-bus channel が未 install だと、送信は効くのに受信だけ silent に死ぬ (= 「送れたから繋がっている」と誤認する) 非対称が起きる。`.mcp.json` / `beacon-bus` MCP entry の存在を検知して警告する (背景・実害事例・worktree 遷移で同穴に落ちる注意は e-1173 を参照)。
 
 Bash ツールで実行（fail-safe、常に終了コード 0）:
 
@@ -317,10 +308,6 @@ python3 scripts/check-mcp-receive-capability.py 2>/dev/null
 ```
 
 スクリプトが何も出力しなければ受信 bridge は健全（= 出力に含めない）。**stdout に「⚠ この cwd は「送信専用」の恐れ」で始まるバンドが出たら、それを Step 3 出力にそのまま転記する**。`detail:` 行に `NO_MCP_JSON` / `NO_BEACON_BUS_ENTRY` / `MCP_JSON_MALFORMED` のどれかが入る。判定ロジックとバンド文言は script 側 (`detect_status` / `format_warning`) が所管。
-
-**送信は効くのに受信だけ silent に死ぬ** 非対称が本質。「送れたから繋がっている」と誤認させないため、送受信の非対称を明示する (= 2026-07-07 profile-extractor で実害)。
-
-> **補足 (milestone start / worktree 遷移)**: `beacon milestone start <id>` で `.worktrees/<slug>/` に入って作業を続ける場合も同じ穴に落ちる (= 新 worktree に `.mcp.json` が無ければ受信 bridge 無し)。session-start はセッション開始時の 1 回しか走らないので、worktree に cd した直後は改めて `beacon channel status` の `[5] Receive capability` ブロックで受信可否を確認するとよい。
 
 この Step は **読み取り専用**。自動で `beacon channel install` を実行してはならない（session-start 全体の読み取り専用原則に従う）。
 
@@ -592,8 +579,6 @@ beacon note list --json
 
 Step 1a の結果の **`pending_operations[]` フィールド** (= `beacon status --json` が出す todo / in_progress の Operation 一覧) を取得する。空配列 (= 通常プロジェクトの定常状態) ならこの Step はスキップ。
 
-> **e-1843 修正経緯**: 旧版はこの Step 1a から「status==todo / in_progress を抽出する」と書いていたが、`beacon status --json` は実装上 `status="open"` のみを出していたため、Step 3.7 は **構造的に空を見せ続けて dead code 化** していた。e-1843 で CLI 側に `pending_operations[]` フィールドを追加 + helper (= `lib/operation_activation.py`) で verdict 分類を構造化、Skill 側はその verdict に従って discussion を組み立てる責務分担に再編した。
-
 ### 構造的分類は helper が行う (Python 側)
 
 `lib/operation_activation.format_pending_activation_section(pending_operations)` が、各 pending Operation を以下 4 verdict (= 判定) のどれかに分類して bullet 文字列を返す:
@@ -645,13 +630,7 @@ helper の verdict を **そのまま出すだけでは AI 価値が無い**。`
 Step 3 の出力の末尾、Step 4 トリガーチェックの直前に挿入。
 論点が無い (= 全 verdict が「まだ早い」AI 判定で省略) なら、 セクションごと出さなくてよい。
 
-### 責任分界 (= e-1843 AC #5)
-
-- **CLI (`lib/commands.py:cmd_status`)**: `pending_operations[]` フィールドの shape (= id / title / status / activation_hint / operation_tasks_total / operation_tasks_done / entries) を保証する。 shape を変える時は本 Skill markdown と helper の両方に追従が必要。
-- **helper (`lib/operation_activation.py`)**: verdict 分類ロジックの structural 部分を所管。 verdict を増やす / 名前を変える時は tests (= `tests/test_session_start_operation_activation.py`) が fail するので Skill markdown 追従も自動的に強制される (forcing function)。
-- **Skill markdown (この section)**: verdict → discussion 文の対応表 + AI 判断 (= `needs-ai-judgement` verdict の qualitative call) を所管。 helper の verdict literal が変わったら本 markdown の対応表も更新する。
-
-shape / verdict literal の drift は tests で捕まる構造 (= `test_verdict_vocabulary_is_closed`、 `test_cli_status_json_has_pending_operations_field_when_zero` 等) のため、 Skill 側の指示文と Python 側の実装が同時に壊れない限り、 silent drift は起きない。
+> 責任分界 (CLI = `pending_operations[]` shape / helper `lib/operation_activation.py` = verdict 分類 / この Skill = verdict→discussion 対応表 + AI 判断) と drift 防止の forcing function (`tests/test_session_start_operation_activation.py`) の詳細は CORE doc `architecture-tool-skill-separation` と e-1843 (Step 3.7 再設計) を参照。verdict literal を変える時は本 markdown の対応表も更新する。
 
 ## Step 4: トリガーチェック
 
