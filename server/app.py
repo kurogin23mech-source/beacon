@@ -27,6 +27,7 @@ from starlette.responses import Response, JSONResponse
 import approved_actions as approved_actions_mod
 import core
 import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
+import decision_event as decision_event_mod  # ms-90 / e-3246: decision-event 記録
 import envelope as envelope_mod
 import invitations as invitations_mod  # ms-78 e-1803/e-1804: token-based invites
 import phantom_done_evidence as phantom_done_mod  # ms-95 / e-2726: task done evidence gate
@@ -1136,6 +1137,12 @@ class BusEventCreate(BaseModel):
     # the action by name here. The legacy free-text payload path remains
     # supported for backward compat (no enforced action).
     requested_action: Optional[str] = None
+    # ms-90 / e-3246: decision-event の背景 (= 直面した問題) と判断理由。
+    # DM 発信を「問題駆動の相談」として decision_events ストリームに記録する
+    # ためのメタデータ。本文 (payload) とは別に運ぶ (= 受信者には見せない)。
+    # context は主役だが未指定でも送信は通す (= hard block しない)。
+    context: str = ""
+    rationale: str = ""
 
 
 class EnvelopeIssueRequest(BaseModel):
@@ -3926,6 +3933,9 @@ class TrekTaskStateSet(BaseModel):
 class TrekHaltSet(BaseModel):
     issued_by_session_id: str
     reason: str = ""
+    # ms-90 / e-3241: 中断の判断理由 (= なぜ止めると決めたか)。reason は「直面
+    # した問題」= context に、rationale は「その判断の理由」に分けて記録する。任意。
+    rationale: str = ""
 
 
 # ms-92 / e-2141 — cross-project task add via Trek scope.
@@ -5211,6 +5221,35 @@ def list_trek_slots_endpoint(trek_id: str,
     return {"trek_id": trek_id, "slots": rows}
 
 
+def _record_halt_decision(project_id: str, trek_id: str, *, resumed: bool,
+                          issuer_session_id: str, issuer_user_id: str,
+                          context: str, rationale: str = "") -> None:
+    """ms-90 / e-3247 + e-3241: Trek の halt / resume を decision-event に記録。
+
+    記録失敗は halt / resume 自体を壊してはならない (= 付随的) ので握り潰して
+    ログするだけ。project_id が空 (= home project 解決失敗) なら skip する。
+    """
+    if not project_id:
+        return
+    try:
+        db.append_decision_event(
+            project_id,
+            decision_event_mod.decision_event_from_halt(
+                resumed=resumed,
+                trek_id=trek_id,
+                issuer_session_id=issuer_session_id,
+                issuer_user_id=issuer_user_id,
+                context=context,
+                rationale=(rationale or None),
+            ),
+        )
+    except Exception as _dec_exc:  # pragma: no cover - defensive
+        logging.getLogger(__name__).warning(
+            "append_decision_event (halt/resume) failed for trek_id=%s: %s",
+            trek_id, _dec_exc,
+        )
+
+
 @app.put("/api/treks/{trek_id}/halt")
 def set_trek_halt_endpoint(trek_id: str, body: TrekHaltSet,
                            user: dict = Depends(require_auth)):
@@ -5233,6 +5272,14 @@ def set_trek_halt_endpoint(trek_id: str, body: TrekHaltSet,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     db.save_trek(trek_id, t)
+    # ms-90 / e-3247: halt (= 中断発令) を decision-event に記録する。理由 (=
+    # 直面した問題) を context に置く。記録失敗は halt を壊さない (= 付随的)。
+    _record_halt_decision(
+        _resolve_leader_home_project_id(t), trek_id, resumed=False,
+        issuer_session_id=body.issued_by_session_id,
+        issuer_user_id=user.get("sub") or "", context=body.reason or "",
+        rationale=body.rationale or "",
+    )
     return t
 
 
@@ -5243,6 +5290,11 @@ def clear_trek_halt_endpoint(trek_id: str, user: dict = Depends(require_auth)):
     _require_trek_joined_member(t, user)
     trek_mod.clear_halt(t)
     db.save_trek(trek_id, t)
+    # ms-90 / e-3247: resume (= 中断解除) を decision-event に記録する。
+    _record_halt_decision(
+        _resolve_leader_home_project_id(t), trek_id, resumed=True,
+        issuer_session_id="", issuer_user_id=user.get("sub") or "", context="",
+    )
     return t
 
 
@@ -5899,6 +5951,32 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
             meta_after["quiesce_notified_at"] = None
             meta_after["quiesce_reason"] = None
     db.save_trek(trek_id, t)
+    # ms-90 / e-3247 + e-3241: リーダーの review 判断 (= leader_review からの
+    # 遷移) を decision-event に記録する。done→承認 / user_review→user 転送 /
+    # それ以外→再作業。leader_review 遷移時の note はリーダーの review 理由なので
+    # rationale (= なぜその判断か) に載せる。executor の作業遷移 (working→*) は
+    # 決定ではないので対象外。記録失敗は state 遷移を壊さない (= 付随的)。
+    if from_state == "leader_review":
+        try:
+            _review_pid = _resolve_leader_home_project_id(t)
+            if _review_pid:
+                db.append_decision_event(
+                    _review_pid,
+                    decision_event_mod.decision_event_from_trek_review(
+                        decision=decision_event_mod
+                        .trek_review_decision_from_state(body.state),
+                        trek_id=trek_id,
+                        task_id=body.task_id,
+                        decider_session_id=caller_sid,
+                        decider_user_id=user_id,
+                        rationale=(body.note or None),
+                    ),
+                )
+        except Exception as _dec_exc:  # pragma: no cover - defensive
+            logging.getLogger(__name__).warning(
+                "append_decision_event (trek-review) failed for trek_id=%s: %s",
+                trek_id, _dec_exc,
+            )
     # If the new state is terminal, fan out a review-required notice to
     # the leader. The leader's review Skill (/beacon-trek-review)
     # surfaces this as a forced 3-choice action. We use the trek's home
@@ -7335,6 +7413,30 @@ async def post_bus_event(
     event_id = db.append_bus_event(project_id, data)
     audit_record["event_id"] = event_id
     db.append_bus_audit(project_id, audit_record)
+
+    # ms-90 / e-3246: DM 発信を decision-event ストリームに記録する (主役経路)。
+    # 「問題に直面して相談を始めた瞬間」を context (= 背景) と共に残し、将来
+    # ローカル LLM で PM 専用 AI を訓練する材料にする。DM 本文は複製せず
+    # related.event_id で参照する。書き込み失敗は send を壊してはならない
+    # (= 記録は付随的、bus event は既に永続化済) ので握り潰してログするだけ。
+    try:
+        _dec = decision_event_mod.maybe_dm_send_record(
+            channel=body.channel,
+            payload=body.payload,
+            sender_session_id=body.sender_session_id,
+            sender_user_id=sender_uid or "",
+            context=body.context or "",
+            rationale=body.rationale or "",
+            event_id=event_id,
+            agent=env_issuer or None,
+        )
+        if _dec is not None:
+            db.append_decision_event(project_id, _dec)
+    except Exception as _dec_exc:  # pragma: no cover - defensive
+        logging.getLogger(__name__).warning(
+            "append_decision_event failed for event_id=%s: %s",
+            event_id, _dec_exc,
+        )
 
     # Sidecar write must happen *after* append_bus_event so the parent
     # event_id exists. Pending is the only status we record from this
@@ -9217,6 +9319,10 @@ def list_dm_approval_history(
 #       clicking a colleague's pending row).
 class DMRespondBody(BaseModel):
     decision: str  # "approve" | "deny"
+    # ms-90 / e-3247: 承認/却下の背景 (= 直面した問題) と判断理由。decision-event
+    # に記録するためのメタデータ。任意 (= 未指定でも決定は通る)。
+    context: str = ""
+    rationale: str = ""
 
 
 @app.post("/api/projects/{project_id}/dm/approval/{event_id}")
@@ -9324,6 +9430,25 @@ def respond_dm_approval(
         decision_by=caller_uid,
         decision_at=now,
     )
+
+    # ms-90 / e-3247: scope 承認/却下も decision-event ストリームに記録する。
+    # 記録失敗は決定を壊してはならない (= 付随的) ので握り潰してログするだけ。
+    try:
+        db.append_decision_event(
+            project_id,
+            decision_event_mod.decision_event_from_scope_approval(
+                decision=decision,
+                decider_user_id=caller_uid,
+                event_id=event_id,
+                context=body.context or "",
+                rationale=body.rationale or None,
+            ),
+        )
+    except Exception as _dec_exc:  # pragma: no cover - defensive
+        logging.getLogger(__name__).warning(
+            "append_decision_event (scope-approval) failed for event_id=%s: %s",
+            event_id, _dec_exc,
+        )
 
     # ms-70 / e-1717: denied → emit a server-issued T5 reply addressed
     # back to the original envelope's sender_session_id so the AI that

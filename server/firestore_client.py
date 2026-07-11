@@ -2161,3 +2161,71 @@ def list_trek_logs(trek_id: str, *, limit: int = 100,
     if limit and limit > 0:
         out = out[:limit]
     return out
+
+
+# ---------------------------------------------------------------------------
+# Decision events (ms-90 e-3242): projects/{pid}/decision_events に永続化する
+# 意思決定の統一 append-only ストリーム。schema builder は
+# server/decision_event.py。approvals sidecar (bus_event_approvals) を 4 経路
+# (dm-send / trek-review / scope-approval / halt-resume) に一般化したもの。
+# ---------------------------------------------------------------------------
+
+DECISION_EVENTS_SUBCOLLECTION = "decision_events"
+
+
+def _mint_decision_event_id() -> str:
+    import secrets as _secrets
+    return f"dec-{_secrets.token_hex(8)}"
+
+
+def append_decision_event(project_id: str, data: dict) -> str:
+    """Append a decision event (= minted decision_id). Returns the decision_id.
+
+    Stamps ``decision_id`` / ``created_at`` if absent and rejects
+    outcome-like fields before the write (= SPEC §設計方針2 invariant).
+    """
+    try:
+        from decision_event import assert_no_outcome
+        assert_no_outcome(data or {})
+    except ImportError:
+        pass
+    payload = dict(data or {})
+    decision_id = payload.get("decision_id") or _mint_decision_event_id()
+    payload["decision_id"] = decision_id
+    if not payload.get("created_at"):
+        payload["created_at"] = _now_iso()
+    (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(DECISION_EVENTS_SUBCOLLECTION)
+        .document(decision_id)
+        .set(payload)
+    )
+    return decision_id
+
+
+def list_decision_events(project_id: str, *, limit: int = 100,
+                         since: str = "") -> list[dict]:
+    """Return ``projects/{pid}/decision_events`` ordered by ``created_at`` asc.
+
+    ``since`` is an optional ISO8601 lower bound (= created_at > since only).
+    ``limit`` caps the row count so the read stays bounded.
+    """
+    col = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(DECISION_EVENTS_SUBCOLLECTION)
+    )
+    out: list[dict] = []
+    for d in col.stream():
+        rec = d.to_dict() or {}
+        if since and (rec.get("created_at") or "") <= since:
+            continue
+        rec["decision_id"] = d.id
+        out.append(rec)
+    out.sort(key=lambda r: (r.get("created_at", ""), r.get("decision_id", "")))
+    if limit and limit > 0:
+        out = out[:limit]
+    return out
