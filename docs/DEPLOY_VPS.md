@@ -130,3 +130,35 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 ```
+
+## 必須アプリ env (`/etc/beacon/app.env`) — ms-96 e-3196 / e-3197
+
+`beacon-api.service` が `EnvironmentFile=/etc/beacon/app.env` で読み込む
+アプリレベルの env。**テンプレートは repo の `deploy/app.env.example`** にあり、
+移設で「必須 env が無音欠落」する事故を防ぐため repo 側に固定してある。
+
+| env | 必須 | 説明 |
+|-----|------|------|
+| `BEACON_OAUTH_CLIENT_ID` | ✅ (provider=firebase) | Web UI ログインの Google OAuth client_id (PUBLIC 値)。空だとログインボタンが消える。 |
+
+### なぜ loud に落ちるのか (e-3197)
+
+この値はソースにハードコードしていない (= silent fallback を作らないため)。
+`BEACON_AUTH_PROVIDER=firebase` かつ `BEACON_ENV=prod` でこの env が空のとき、
+`/health` は **503** を返す。`scripts/vps-pull-deploy.sh` の health check
+(`curl -fsS`) が 503 を検出して deploy を **ERROR** にするので、ログイン不能が
+「気付けない本番障害」ではなく「赤くなった deploy」として顕在化する。
+
+### セットアップ手順
+
+```bash
+# repo テンプレートを元に本番 app.env を作成 (値はそのまま使える PUBLIC 値)
+sudo install -m 0644 /opt/beacon/deploy/app.env.example /etc/beacon/app.env
+# 別ドメインに展開する場合のみ BEACON_OAUTH_CLIENT_ID を差し替える
+sudo systemctl restart beacon-api
+curl -fsS https://beacon-ai.dev/health   # 200 なら OK、503 なら env 欠落
+```
+
+> ⚠ ハードコード default を撤去した変更 (e-3196/e-3197) を deploy する **前** に
+> `/etc/beacon/app.env` へ `BEACON_OAUTH_CLIENT_ID` を入れておくこと。先に入れて
+> おけば無停止で切り替わる。入れ忘れると (狙い通り) deploy が 503 で止まる。
