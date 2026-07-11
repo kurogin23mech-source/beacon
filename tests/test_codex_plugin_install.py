@@ -192,6 +192,10 @@ def test_install_hook_creates_file_when_absent(fake_hooks_path, tmp_path):
     cmd = entry["hooks"][0]["command"]
     assert "codex-inbox-hook.py" in cmd
     assert str(cwd) in cmd
+    post = data["hooks"]["PostToolUse"]
+    assert len(post) == 1
+    assert post[0]["matcher"] == "^Bash$"
+    assert "codex-post-tool-use-hook.py" in post[0]["hooks"][0]["command"]
 
 
 def test_install_hook_is_idempotent(fake_hooks_path, tmp_path):
@@ -203,6 +207,7 @@ def test_install_hook_is_idempotent(fake_hooks_path, tmp_path):
     assert bridge.cmd_install_hook(REPO_ROOT, cwd) == 0
     data = json.loads(target.read_text("utf-8"))
     assert len(data["hooks"]["UserPromptSubmit"]) == 1
+    assert len(data["hooks"]["PostToolUse"]) == 1
 
 
 def test_install_hook_preserves_unrelated_entries(fake_hooks_path, tmp_path):
@@ -269,6 +274,18 @@ def test_uninstall_hook_removes_only_requested_cwd(fake_hooks_path, tmp_path):
     cmds = [h["hooks"][0]["command"] for h in bucket]
     assert not any(str(cwd_a) in c for c in cmds)
     assert any(str(cwd_b) in c for c in cmds)
+    assert len(data["hooks"]["PostToolUse"]) == 1
+
+
+def test_uninstall_last_cwd_removes_both_hook_events(fake_hooks_path, tmp_path):
+    bridge, target = fake_hooks_path
+    cwd = tmp_path / "only"
+    cwd.mkdir()
+    assert bridge.cmd_install_hook(REPO_ROOT, cwd) == 0
+    assert bridge.cmd_uninstall_hook(cwd) == 0
+    data = json.loads(target.read_text("utf-8"))
+    assert data["hooks"]["UserPromptSubmit"] == []
+    assert data["hooks"]["PostToolUse"] == []
 
 
 def test_uninstall_hook_no_op_when_absent(fake_hooks_path, tmp_path):
@@ -1403,7 +1420,10 @@ def _load_script_module(name, path):
 
 @pytest.mark.parametrize(
     "script_rel",
-    ["scripts/codex-receive-loop.py", "scripts/codex-inbox-hook.py"],
+    [
+        "scripts/codex-receive-loop.py",
+        "scripts/codex-inbox-hook.py",
+    ],
 )
 def test_daemon_lib_fallback_prefers_source_then_bundled(script_rel, tmp_path):
     """_resolve_lib_dir returns lib/ in source layout, _bundled_lib in a wheel."""
