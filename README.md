@@ -483,6 +483,7 @@ Beacon ships with [Claude Code Skills](https://docs.anthropic.com/en/docs/claude
 | `beacon-retrospect` | Query project history in natural language ("did we build X? how?") / プロジェクト史を自然言語で検索 |
 | `beacon-vision` | Refine a fuzzy idea into a structured project vision (CORE doc) / ふわっとした構想をビジョンに精緻化 |
 | `beacon-roadmap` | Design a set of milestones (3–7) toward the project vision / 大目的に向けたマイルストーン群を設計 |
+| `beacon-archaeology` | Infer past phases and propose next milestones from git history + source when no active milestone / アクティブMSゼロ時に過去を遡行推測し次のMSを提案 |
 | `beacon-pr-create` | Conversational PR creation (intent capture + branch/commit checks) / 対話形式でPR作成 |
 | `beacon-incident-report` | Close an incident and save a cause/response/prevention report / インシデントclose+レポート作成 |
 

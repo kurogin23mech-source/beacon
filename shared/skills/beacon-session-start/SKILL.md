@@ -20,11 +20,7 @@ beacon-find-root >/dev/null && echo "OK" || echo "NO_BEACON"
 
 ### Step 0a-pre: BEACON_BIN gate (= ms-93 / e-2276)
 
-PATH 上の古い `beacon` が新しい install を黙って隠しているケースを構造的に
-検出する。 2026-06-25 PE / Codex dogfood で「`beacon doctor --json` を叩いたら
-古い CLI が `OK: all checks passed.` を返して silent success する」 経路が
-確認されたため、 doctor 任せにせず resolver で hard fail / soft warn を
-明示的に判定する。
+PATH 上の古い `beacon` が新しい install を黙って隠すケースを、doctor 任せにせず resolver で hard fail / soft warn を明示判定する (背景と dogfood 経緯は e-2276 を参照)。
 
 repo root を見つけて (= `beacon-find-root` の出力)、 resolver script を直接叩く:
 
@@ -88,12 +84,7 @@ legacy-mode-field / ms81 系) は doctor 経由でしか出ないため両方走
 
 ### Step 0a-skew: version skew 検知 (= ms-93 / e-3135)
 
-古い beacon が daemon / hook として混じっていないかを検知する (= Codex が
-「古い hook / skill / daemon が混じると動いているようで別物を見ている」と指摘した
-穴、 e-3135)。 受信 daemon は起動時に自分の beacon version を
-`.beacon/codex/receive-loop.session.json` に stamp し、 Codex の
-`UserPromptSubmit` hook は install 時の script path から version を辿れる。 これを
-CLI version と突き合わせて skew を session 開始時に surface する。
+古い beacon が daemon / hook として混じっていないか (= 動いているようで別物を見ている穴) を、受信 daemon の stamp した version と CLI version の skew として session 開始時に surface する (背景と stamp 経路の詳細は e-3135 を参照)。
 
 Bash ツールで実行 (fail-safe、 daemon / hook が無ければ何も出ない):
 
@@ -116,7 +107,7 @@ __ROOT=$(beacon-find-root) && python3 "$__ROOT/lib/version_skew.py" \
 は **読み取り専用** かつ **never block** (= skew は warning、 session 開始を
 止めない)。
 
-## Step 0a: 引数チェック
+## Step 0c: 引数チェック
 
 ユーザーが `/beacon-session-start ms-XX` のように引数付きで呼んだ場合、`ms-XX` を **スコープMS** として記憶する。
 複数指定も可能: `/beacon-session-start ms-16 ms-17`
@@ -125,19 +116,7 @@ __ROOT=$(beacon-find-root) && python3 "$__ROOT/lib/version_skew.py" \
 
 ## Step 0b: bus heartbeat — 廃止 (ms-54 e-1319)
 
-このステップは **何もしない**。
-
-以前は (e-1150) Bash で `beacon session id` を呼び `lib/session.update_last_active()` 経由で `.beacon/session.json.last_active` と cloud sessions/ subcollection を bump し、自セッションを `beacon bus directory --live` に visible にしていた。
-
-Option C (PR #111 / commit 78048b6) で **bridge の poll loop が真値源** になったため、CLI 側で重ねて書くと「どっちが真実か」あいまいになる。責務分離:
-
-- **mint + heartbeat = bridge**: poll iteration ごとに `last_active` + `last_poll_at` を stamp
-- **resolve = CLI**: `beacon session id` は pure getter (mint 1 回だけ、その後は read-only)
-- **lifecycle = `beacon session end`**: graceful close
-
-channel が未 install の session は bus directory に出ない — これは「receive 不可だから出ない」が正しい挙動。
-
-> Note: `beacon session id` 自体は今も呼べる (pure getter)。channel/bus.mjs が cold-start で session_id を materialise するために使う。
+このステップは **何もしない** (no-op)。heartbeat の真値源は bridge の poll loop に一本化済み。責務分界の経緯は commit 78048b6 / test `test_session_heartbeat_responsibility` を参照。
 
 ## Step 1: プロジェクト状態の取得（並列実行可）
 
@@ -265,22 +244,7 @@ beacon doc list --scope spec --op <op-id> --json
 
 結果が空でなければ、各ドキュメントの内容を Step 1e と同様に `beacon doc show <doc_id>` で **並列に** 取得する。
 
-### SPEC 無し active MS の検出 (warning only, never block)
-
-active な MS (`status == "in_progress"`) で SPEC が **1 つも存在しない** ものを **SPEC 無し MS** として記憶する。
-
-これは CORE doc `doc-classification` および ms-41 SPEC で確立した運用:
-- SPEC = 要求書 / 判断軌跡 (詳細仕様書ではない)
-- SPEC 無しでも作業は続行可能 (hard block しない)
-- 但しサブエージェント dispatch・retrospection・onboarding の質が下がるため、warning で促進
-
-Step 3 の出力でこのリストを表示する (後述):
-```
-SPEC 無し active MS:
-  - [ms-id] [title] → `/beacon-spec [ms-id]` で対話駆動作成できます
-```
-
-なお、これと並行して `beacon trigger check` (Step 4) も `spec-needed-<ms-id>` トリガーを返す。両者は同じ事象を別経路で通知している (trigger は MS 追加時 fire、こちらは session-start 時のスキャン)。重複表示は冗長なので、**warning 表示はどちらか一方** (典型的には trigger を優先) で構わない。
+> SPEC 無し active MS の warning は Step 4 の `spec-needed-<ms-id>` トリガーが担う (MS 追加時 fire)。session-start 側で重ねてスキャンしない (= 重複表示を避ける)。
 
 ## Step 1g: GitHub PR 自動検知（fail-safe）
 
@@ -353,52 +317,15 @@ beacon issue list --json 2>/dev/null
 
 ## Step 1i: beacon-bus channel install 検知（ms-54 e-1173）
 
-session-start が走った cwd で beacon-bus channel が install されていない場合、ユーザーが `claude --dangerously-load-development-channels server:beacon-bus` で起動しても `no MCP server configured` で channel 不成立になる。Mac でも cwd 移動で黙って壊れる UX 抜け (memo doc `EZtptg0e8qwBUUhlN2aX` で発覚) を構造的に塞ぐため、session-start 時に `.mcp.json` / `beacon-bus` MCP entry の存在を検知する。
+session-start が走った cwd で beacon-bus channel が未 install だと、送信は効くのに受信だけ silent に死ぬ (= 「送れたから繋がっている」と誤認する) 非対称が起きる。`.mcp.json` / `beacon-bus` MCP entry の存在を検知して警告する (背景・実害事例・worktree 遷移で同穴に落ちる注意は e-1173 を参照)。
 
-Bash ツールで実行（fail-safe、`.beacon/project.json` 存在前提）:
+Bash ツールで実行（fail-safe、常に終了コード 0）:
 
 ```bash
-python3 - <<'PY' 2>/dev/null || echo "MCP_STATUS=UNKNOWN"
-import json, os
-status = "OK"
-if not os.path.exists(".mcp.json"):
-    status = "NO_MCP_JSON"
-else:
-    try:
-        with open(".mcp.json") as f:
-            d = json.load(f)
-        servers = d.get("mcpServers") or {}
-        if "beacon-bus" not in servers:
-            status = "NO_BEACON_BUS_ENTRY"
-    except Exception:
-        status = "MCP_JSON_MALFORMED"
-print(f"MCP_STATUS={status}")
-PY
+python3 scripts/check-mcp-receive-capability.py 2>/dev/null
 ```
 
-結果の解釈:
-
-- `OK` → 何もしない（出力に含めない）
-- `NO_MCP_JSON` → `.mcp.json` が存在しない。この cwd で `beacon channel install` を実行していない可能性が高い
-- `NO_BEACON_BUS_ENTRY` → `.mcp.json` はあるが `beacon-bus` server が登録されていない（他の MCP server だけ install 済み等）
-- `MCP_JSON_MALFORMED` → JSON parse エラー、または `mcpServers` キーが想定外の型
-- `UNKNOWN` → python3 不在等で判定不能（出力に含めない、Bash の `|| echo "MCP_STATUS=UNKNOWN"` でフォールバック）
-
-`OK` / `UNKNOWN` 以外の場合、Step 3 出力に以下のバンドを追加する:
-
-```
-⚠ この cwd は「送信専用」の恐れ (受信 bridge 未設置、ms-93 recipient-stability)
-  detail: [NO_MCP_JSON / NO_BEACON_BUS_ENTRY / MCP_JSON_MALFORMED]
-  非対称に注意: `beacon bus send` は CLI push なので効きます (= 繋がって見える) が、
-    他セッションからの DM は live-wake せず、次回 prompt の catch-up でのみ届きます。
-  よくある原因: git worktree に手で cd した等で、起動 cwd と別の .beacon session
-    (別 session_id) になり、その session に受信 bridge が無い状態。
-  対処: この cwd で `beacon channel install` を実行して受信を有効化してください。
-```
-
-**送信は効くのに受信だけ silent に死ぬ** 非対称が本質。「送れたから繋がっている」と誤認させないため、送受信の非対称を明示する (= 2026-07-07 profile-extractor で実害)。
-
-> **補足 (milestone start / worktree 遷移)**: `beacon milestone start <id>` で `.worktrees/<slug>/` に入って作業を続ける場合も同じ穴に落ちる (= 新 worktree に `.mcp.json` が無ければ受信 bridge 無し)。session-start はセッション開始時の 1 回しか走らないので、worktree に cd した直後は改めて `beacon channel status` の `[5] Receive capability` ブロックで受信可否を確認するとよい。
+スクリプトが何も出力しなければ受信 bridge は健全（= 出力に含めない）。**stdout に「⚠ この cwd は「送信専用」の恐れ」で始まるバンドが出たら、それを Step 3 出力にそのまま転記する**。`detail:` 行に `NO_MCP_JSON` / `NO_BEACON_BUS_ENTRY` / `MCP_JSON_MALFORMED` のどれかが入る。判定ロジックとバンド文言は script 側 (`detect_status` / `format_warning`) が所管。
 
 この Step は **読み取り専用**。自動で `beacon channel install` を実行してはならない（session-start 全体の読み取り専用原則に従う）。
 
@@ -441,197 +368,46 @@ JSON が返れば parse して以下のフィールドを Step 3 で表示する
 
 この Step は **読み取り専用**。
 
-## Step 1n: 保留中 DM action の取得 (ms-70 e-1714)
+## Step 1n / 1n-2: DM inbox の取得 (ms-70 e-1714 + ms-54 e-2974、ms-85 e-3180 で統合)
 
-terminal が close 中に届いた **cross-user DM (= 直接メッセージ) action 付き envelope** は、ms-70 / e-1713 のディスパッチャ・ゲートが `bus_event_approvals` sidecar (= 同 event_id を主キーに別 subcollection で保持する判断記録) に `approval_status="pending"` を立てて auto-act を抑止している。session-start でその pending リストを取り出して human に提示することで、「閉じている間に来た action 系 DM が、次回起動時に必ず目に入る」 経路を作る。
+session-start が start 時に取り込むべき DM は 2 系統ある:
 
-Bash ツールで実行 (fail-safe、cloud 未設定 / endpoint 不在ならスキップ):
+- **保留中 DM action** (Step 1n / ms-70 e-1714): terminal close 中に届いた cross-user DM の action 付き envelope。ディスパッチャ・ゲートが `bus_event_approvals` sidecar に `approval_status="pending"` を立てて auto-act を抑止しており、これを human に提示して「閉じている間に来た action 系 DM が次回起動時に必ず目に入る」経路を作る。
+- **user-scoped DM catch-up** (Step 1n-2 / ms-54 e-2974): 受信 bridge が e-1209 filter で意図的に drop する user-scoped 情報 DM。過去セッションの inbox に出ないため「留守中に届いた DM」が見落とされる穴を、server bus events を直接 query して埋める。
 
-```bash
-PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))" 2>/dev/null)
-USER_ID=$(python3 -c "import json,os; p=os.path.expanduser('~/.beacon/auth.json'); print(json.load(open(p)).get('user_id',''))" 2>/dev/null)
-if [ -n "$PROJECT_ID" ] && [ -n "$USER_ID" ]; then
-  python3 - <<'PY' 2>/dev/null
-import json, os, sys, urllib.request, urllib.parse
-project_id = os.environ.get("PROJECT_ID") or ""
-user_id = os.environ.get("USER_ID") or ""
-base = os.environ.get("BEACON_API_BASE") or "https://beacon-api-prod-2dlj7zlbiq-uc.a.run.app"
-# token: cloud.json -> id_token, fallback to auth.json
-token = ""
-try:
-    with open(".beacon/cloud.json") as f: token = json.load(f).get("id_token","") or ""
-except Exception: pass
-if not token:
-    try:
-        with open(os.path.expanduser("~/.beacon/auth.json")) as f: token = json.load(f).get("id_token","") or ""
-    except Exception: pass
-q = urllib.parse.urlencode({"receiver_user_id": user_id})
-url = f"{base}/api/projects/{project_id}/dm/pending?{q}"
-req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"} if token else {})
-try:
-    with urllib.request.urlopen(req, timeout=5) as r:
-        rows = json.loads(r.read().decode("utf-8"))
-except Exception as e:
-    print(f"PENDING_DM_FETCH_FAIL: {e}", file=sys.stderr); sys.exit(0)
-sys.path.insert(0, os.path.abspath("lib"))
-try:
-    from dm_pending import format_pending_dm_summary
-    print(format_pending_dm_summary(rows))
-except Exception as e:
-    print(f"PENDING_DM_FORMAT_FAIL: {e}", file=sys.stderr)
-PY
-fi
-```
-
-出力が空でなければ Step 3 の出力ヘッダ部に **そのまま転記** する。空ならセクションごと省略 (= ノイズ削減、`format_pending_dm_summary` が `""` を返す契約)。
-
-提示情報は helper (= `lib/dm_pending.py` の `format_pending_dm_summary`) が 1 行サマリーに圧縮: `event_id from sender_user_id at created_at`。envelope 本文 (= `actions_authorized` 等) は sidecar に持たない設計 (ms-70 / e-1712) なので、詳細展開は出力末尾に書かれた `beacon dm show <event_id>` (= e-1716 で primitive 化予定) と `beacon dm respond approve|deny <event_id>` の案内に従う。
-
-local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムアウトはすべて silent skip。session-start を中断しない。
-
-この Step は **読み取り専用**。sidecar の書き換え (= approved / denied 決定) は `/beacon-dm-respond` Skill 経由でのみ行う。
-
-## Step 1n-2: user-scoped DM の catch-up (ms-54 / e-2974)
-
-前回セッション終了以降に **user-scoped で送られた情報 DM (= 直接メッセージ、action 権限なし)** は、受信 bridge (channel/bus.mjs) が e-1209 filter で意図的に drop している (= SPEC doc `wJZrmxZGmT7d5lRQvWnE`「DM primitive の使い分け原則: session-scoped = 即時 wake / user-scoped = 次回 catch-up」に基づく設計)。したがって過去セッションの inbox には出ておらず、AI から見て「留守中に届いた DM」が session-start 時に完全に見落とされる。
-
-本 Step は **server の bus events を直接 query** し、user-scoped で自分宛 (payload.recipient_user_id == 自 user_id) の DM を「catch-up 対象」として拾い、Step 3 の出力に含める。session-scoped で既に届いた DM (bridge 経由で AI が過去に read 済のもの) は対象外 (受信 bridge の inbox 経由で既に見ているはず)。
-
-Bash ツールで実行 (fail-safe、cloud 未設定 / endpoint 不在ならスキップ):
+e-3180 でこの 2 系統を **1 スクリプトに統合**: project_id / user_id / id_token の解決を 1 回だけ行い、両セクションを 1 回の呼び出しで出す。Bash ツールで実行 (fail-safe、cloud 未設定 / endpoint 不在ならスキップ):
 
 ```bash
-PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))" 2>/dev/null)
-USER_ID=$(python3 -c "import json,os; p=os.path.expanduser('~/.beacon/auth.json'); print(json.load(open(p)).get('user_id',''))" 2>/dev/null)
-if [ -n "$PROJECT_ID" ] && [ -n "$USER_ID" ]; then
-  python3 - <<'PY' 2>/dev/null
-import json, os, sys, urllib.request, urllib.parse, subprocess, datetime
-project_id = os.environ.get("PROJECT_ID") or ""
-user_id = os.environ.get("USER_ID") or ""
-base = os.environ.get("BEACON_API_BASE") or "https://beacon-api-prod-2dlj7zlbiq-uc.a.run.app"
-token = ""
-try:
-    with open(".beacon/cloud.json") as f: token = json.load(f).get("id_token","") or ""
-except Exception: pass
-if not token:
-    try:
-        with open(os.path.expanduser("~/.beacon/auth.json")) as f: token = json.load(f).get("id_token","") or ""
-    except Exception: pass
-
-# "since" は前回 session log の created_at、無ければ 7 日前
-since_iso = ""
-try:
-    r = subprocess.run(["beacon", "session", "log", "list", "--json"],
-                       capture_output=True, text=True, timeout=5)
-    logs = json.loads(r.stdout or "[]")
-    if logs:
-        since_iso = str(logs[0].get("created_at","") or "")
-except Exception: pass
-if not since_iso:
-    since_iso = (datetime.datetime.now(datetime.timezone.utc)
-                 - datetime.timedelta(days=7)).isoformat().replace("+00:00","Z")
-
-# server の bus events を取得 (visibility gate 通過分のみ返る)
-q = urllib.parse.urlencode({"channel": "dm", "since": since_iso, "limit": 100})
-url = f"{base}/api/projects/{project_id}/bus?{q}"
-req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"} if token else {})
-try:
-    with urllib.request.urlopen(req, timeout=5) as r:
-        events = json.loads(r.read().decode("utf-8"))
-except Exception as e:
-    print(f"CATCHUP_FETCH_FAIL: {e}", file=sys.stderr); sys.exit(0)
-
-# user-scoped で自分宛 (recipient_user_id 一致 かつ recipient_session_id 空) だけ抽出
-rows = []
-for ev in events or []:
-    p = ev.get("payload") or {}
-    if not isinstance(p, dict): continue
-    r_uid = str(p.get("recipient_user_id") or "")
-    r_sid = str(p.get("recipient_session_id") or "")
-    if r_uid == user_id and not r_sid:
-        rows.append({
-            "event_id": ev.get("event_id",""),
-            "sender_session_id": ev.get("sender_session_id",""),
-            "created_at": ev.get("created_at",""),
-            "text_preview": (p.get("text") or "")[:80],
-            "opened_at": ev.get("opened_at",""),
-        })
-
-if not rows:
-    sys.exit(0)  # ノイズ削減、該当なし
-
-print("留守中に届いた DM (user-scoped catch-up):")
-for r in rows[:5]:
-    opened = " (既読)" if r["opened_at"] else ""
-    print(f'  [{r["event_id"][:12]}] from {r["sender_session_id"][:12]} at {r["created_at"][:19]}{opened}')
-    print(f'    {r["text_preview"]}...')
-if len(rows) > 5:
-    print(f'  … 他 {len(rows)-5} 件 (`beacon bus receive --channel dm` で全文)')
-PY
-fi
+python3 scripts/session-start-dm-inbox.py 2>/dev/null
 ```
 
-出力が空でなければ Step 3 の出力ヘッダ部 (「保留中 DM action」セクションの直後、Trek 一覧の直前あたり) に **そのまま転記** する。空ならセクションごと省略。
+出力が空でなければ Step 3 の出力ヘッダ部に **そのまま転記** する (保留中 action → catch-up の順、両方あれば空行区切り)。空ならセクションごと省略。フェッチ統合 = `scripts/session-start-dm-inbox.py`、整形 = `lib/dm_pending.format_pending_dm_summary` / `filter_user_scoped_catchup` / `format_user_scoped_catchup` (単体テスト済み)。
 
-payload.text は preview 80 文字まで、詳細確認は `beacon bus receive --channel dm` を案内。返信したい場合は `/beacon-dm-send` (reply mode) 経由。
+- 保留中 action は `event_id from sender_user_id at created_at` の 1 行サマリー。envelope 本文は sidecar に持たない設計 (ms-70 / e-1712) なので、詳細は `beacon dm show <event_id>` (e-1716 で primitive 化予定) + `beacon dm respond approve|deny <event_id>`。決定は `/beacon-dm-respond` Skill 経由でのみ (読み取り専用)。
+- catch-up は preview 80 文字まで、詳細は `beacon bus receive --channel dm`、返信は `/beacon-dm-send` (reply mode)。既読 stamp は AI が read した際にサーバ側で自動記録 (Skill 側で明示 ack しない)。
 
-local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムアウトはすべて silent skip。session-start を中断しない。
+local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムアウトはすべて silent skip。session-start を中断しない。この Step は **読み取り専用**。
 
-この Step は **読み取り専用**。既読フラグの更新 (opened stamp) は AI が payload を read した際にサーバ側で自動記録されるため、Skill 側で明示 ack しない (= 次回同 Step が「既読」表示するのに任せる)。
+## Step 1o / 1o-2: Trek 状態の取得 (ms-75 e-1813 + e-1854 + e-2047、ms-85 e-3180 で統合)
 
-## Step 1o: 現在 join 中の Trek 一覧 (ms-75 / e-1813 + e-1854)
+Trek (= 缶詰の徹夜作業部屋、 user が join した瞬間に scope 内 action が事前承認スコープになる作業空間) に関する 2 つの可視化を session-start で行う:
 
-Trek (= 缶詰の徹夜作業部屋、 user が join した瞬間に scope 内 action が事前承認スコープになる作業空間) に join 済の場合、 そのリストと goal_state / halt 状態を session-start で必ず可視化する。 ms-70 (= cross-user DM 承認ゲート) は Trek 参加中だけ blanket 自動承認 (= 都度確認なしで配信) になるため、 「自分が今どの Trek の blanket 例外を受けているか」 を session 開始時に user 自身が把握できる必要がある。
+- **join 中 Trek 一覧** (Step 1o / e-1813 + e-1854): join 済 trek のリストと goal_state / halt 状態。ms-70 (= cross-user DM 承認ゲート) は Trek 参加中だけ blanket 自動承認 (= 都度確認なしで配信) になるため、「自分が今どの Trek の blanket 例外を受けているか」を毎セッション可視化する。
+- **armed セルフチェック** (Step 1o-2 / e-2047): active Trek に join 中なら、このセッションが armed (= 自律実行モード) かを確認する。`--no-arm` opt-out / 旧バージョン join / 別 worktree の budget 不在で not-armed が起こりうる。
 
-Bash ツールで実行:
+e-3180 でこの 2 つを **1 スクリプトに統合**: `beacon trek list --joined` を 1 回だけ叩き、active trek がある時だけ armed 判定用の `beacon bus auto-execute list` / `beacon bus budget show` を追加取得する。Bash ツールで実行:
 
 ```bash
-beacon trek list --joined --json 2>/dev/null
+python3 scripts/session-start-trek-status.py 2>/dev/null
 ```
 
-出力が空配列 `[]` ならセクションごと省略。 1 件以上あれば、 各 trek について以下を抽出して **Step 3 ヘッダに転記**:
+出力が空ならセクションごと省略。空でなければ **Step 3 ヘッダにそのまま転記**。整形/判定は `lib/trek_status` (`format_joined_treks` / `has_active_trek` / `is_armed`、単体テスト済み) が所管し、以下を保証する:
 
-- `trek_id` と `title` (= 1 行)
-- `status` (= active / planning / archived)
-- `halt` が non-null なら 「⚠ HALTED: {halt.reason}」 を強調表示
-- `goal_state` が空でなければ 「目標: {goal_state}」 を 1 行で追加
-- `members` の自分以外の数を 「他 N 名」 と要約
+- 各 trek: `[trek_id] title` / `status` / `halt` non-null 時「⚠ HALTED: {reason}」/ `goal_state` 非空時「目標: {goal_state}」/ 自分以外の数「他 N 名」。
+- active trek が 1 つ以上あれば blanket 自動承認リマインダを 1 行添える (e-1854 AC 1: 「自分が今 blanket 自動承認の対象になっている」ことを毎セッション可視化)。撤回は `beacon trek leave <trek-id>`、デプロイ / リリースのみ user 確認境界。実際の承認は server 側 dm_gate.py が `shared_trek_member` 判定で行う。
+- active trek に join 中かつ not-armed なら「⚠ Trek 参加中だが自律実行モードが not-armed」警告を添える (armed 条件 AND: trek 系 channel が auto-execute allowlist にある かつ budget が total > 0 / used < total)。armed なら何も出さない。planning / archived のみの join は判定不要。
 
-加えて、 Trek 参加中であれば user に以下を 1 行で必ず伝える:
-
-> Trek 参加中: 同 Trek scope 内の DM (= 計画 / 議論 / 実装計画) は自動承認 (= blanket 例外、 ms-70/e-1854) で配信されています。 撤回したい場合は `beacon trek leave <trek-id>` を実行してください。 デプロイ / リリースのみ user 確認境界です。
-
-これは「自分が今 blanket 自動承認の対象になっている」 ことを毎セッション可視化する e-1854 AC 1 の構造的実装。 user が知らないうちに自律応答が走るリスクを構造的に低減する (= 表示は読み取り専用、 実際の承認自体は server 側 dm_gate.py が `shared_trek_member` 判定で行う)。
-
-planning や archived な trek は blanket 例外の対象外なので、 表示はするが警告メッセージは active な trek だけに添える。
-
-local mode (= `.beacon/cloud.json` 不在) でも `~/.beacon/treks/` から拾うので動作する。
-
-### Step 1o-2: 自律実行モード (= armed) のセルフチェック (ms-75 / e-2047)
-
-active な Trek に join 中なら、 このセッションが **armed (= 自律実行モード)** であることを確認する。 `beacon trek join` は AC 1 で auto-arm が default になっているが、 以下のケースで not-armed が起こりうる:
-
-- `--no-arm` で opt-out した
-- 古いバージョンで join 済 (= auto-arm 前の trek)
-- 別 worktree で join したため `.beacon/bus-budget.json` がこの cwd に無い
-
-判定材料を Bash で並列取得:
-
-```bash
-beacon bus auto-execute list --json 2>/dev/null
-beacon bus budget show --json 2>/dev/null
-```
-
-armed 条件 (AND): `bus_auto_execute_channels` に **少なくとも 1 つの trek 系 channel (= trek-progress-check / trek-trigger / trek-task-review)** が含まれている、 かつ budget が `armed` 状態 (= total > 0 かつ used < total)。
-
-armed でない場合、 Step 3 のヘッダに以下を 1 行で添える:
-
-```
-⚠ Trek 参加中だが自律実行モードが not-armed です。 `/beacon-bus-armed` で起動するか、 `beacon trek join <trek-id>` を再実行して auto-arm し直してください (= 進行 DM が wake せず silent-ack 病理を再生します)。
-```
-
-armed なら何も表示しない (= ノイズ削減)。
-
-archived / planning trek にしか join していない場合は判定不要 (= scope 内 action が事前承認の対象外)。 この Step は **読み取り専用**。
+local mode (= `.beacon/cloud.json` 不在) でも `~/.beacon/treks/` から拾うので動作する。この Step は **読み取り専用**。
 
 ## Step 1j: 前セッションの session log 読み込み（ms-43 e-1360）
 
@@ -672,213 +448,14 @@ stdout の JSON から:
 
 ## Step 2.5: コンサルタントモード（次のマイルストーンが必要な場合）
 
-以下のいずれかに該当する場合、通常の Step 3 出力の代わりに以下を行う:
+以下のいずれかに該当する場合、通常の Step 3 出力の代わりに **`/beacon-archaeology` Skill にチェイン** する:
 
 - `milestones[]` が空（新規プロジェクト）
 - `status == "in_progress"` または `status == "todo"` のマイルストーンが一件もない（done/observing/waitingのみ）
 
-「やるべきことが前に存在しない」状態 = 次のマイルストーンを作るタイミング。
+「やるべきことが前に存在しない」状態 = 次のマイルストーンを作るタイミング。`/beacon-archaeology` が git 履歴 + ソースコードを読んで「これまでの歩み」と「次の MS 候補」を提案する (フロー A: Archaeology / フロー B: 白紙提案、F29/F30 の橋渡しメッセージ含む。詳細ロジックは `beacon-archaeology` skill が所管、ms-85 e-3179 で分離)。
 
-### F30: 起動原因の橋渡しメッセージ
-
-ユーザーが「archaeology して」「過去掘って」「リポジトリ分析して」等の **概念名** で起動した場合、ユーザー視点では「archaeology Skill」を呼んだつもりが `/beacon-session-start` が動くため、Skill 名のミスマッチで一瞬「あれ違う Skill？」となる。
-
-以下のキーワードが直近の user 発話に含まれていたら、コンサルタントモードの出力の **最初の 1 行** に橋渡しメッセージを添える:
-
-- `archaeology` / `Archaeology`
-- `掘って` / `経緯` / `これまでの流れ`
-- `リポジトリ分析` / `コード読んで`
-
-```
-(Archaeology を含む /beacon-session-start を起動します — git log とコードを読んで提案します)
-
-このリポジトリを分析しました。
-...
-```
-
-含まれていなければ橋渡し行は不要。
-
-### 分岐: 常に B (code reading)、git 履歴あれば A も追加 (F29)
-
-排他分岐ではなく **加算構成**:
-
-```bash
-git log --oneline 2>/dev/null | wc -l
-```
-
-- **常に B (code reading) を実行**: README/source/設定ファイルを読んでプロジェクトの現状を理解する
-- **追加で `git_commits >= 10` の時のみ A (Archaeology) を実行**: git log clustering で過去フェーズを推測する
-- B の結果と A の結果を **統合して提案を出す**
-
-つまり「コード文脈は常に拾う、git 履歴がある時は追加で過去経緯も拾う」。閾値で **排他にしない** (commit 少の既存リポでも code reading は走る)。
-
-A 単独実行時のエッジケースは自然に degrade:
-- `commits == 1` (初期コミットのみ) → A は phase 0〜1 個しか作れない、B の code reading が主軸になる
-- `commits >= 10` → A の phase clustering が主軸、B が補完
-- `commits == 0` (git 未初期化) → A スキップ、B のみ
-
----
-
-### フロー A: Project Archaeology（リポジトリ遡行推測）
-
-#### Step A1: 情報収集（並列 Bash 実行）
-
-以下を **同時に** 実行する:
-
-```bash
-# A1-1: コミット履歴（最大200件）
-git log --oneline -200
-
-# A1-2: 直近コミットの変更ファイル（傾向把握）
-git log --stat -10
-
-# A1-3: タグ一覧（リリース境界の手がかり）
-git tag --sort=-creatordate | head -10
-
-# A1-4: README（プロジェクト概要）
-cat README.md 2>/dev/null || cat README.rst 2>/dev/null || cat README.txt 2>/dev/null || echo ""
-
-# A1-5: ファイル一覧（技術スタック判定）
-ls -la
-
-# A1-6: 言語/フレームワーク判定ファイル（存在するものだけ読む）
-cat package.json 2>/dev/null; cat Cargo.toml 2>/dev/null; cat pyproject.toml 2>/dev/null; cat go.mod 2>/dev/null; cat build.gradle 2>/dev/null; cat pom.xml 2>/dev/null
-```
-
-#### Step A2: AI 解釈
-
-収集した情報から以下を推測する:
-
-1. **Objective の言語化**
-   - ユーザー目線で「このプロジェクトが完成したら何ができるようになるか」を1文で表現
-   - 形式: 「〜できるようになる」「〜が実現する」
-   - README・package.json の description・コミットメッセージのテーマを総合的に判断
-
-2. **過去フェーズのクラスタリング（3〜7個）**
-   - git log のコミットメッセージをテーマでグループ化
-   - 手がかり:
-     - コミットメッセージの語彙変化（「init」「setup」→「feat」→「fix」→「refactor」等）
-     - feat/fix の比率が変わるタイミング
-     - タグが打たれた境界
-     - ファイル変更の傾向（初期は多数ファイル、後期は特定領域に集中）
-   - 各フェーズに「何ができるようになったか」を表すタイトルをつける
-   - git log の日付から各フェーズのおよその時期（YYYY年M月頃）を付与
-
-3. **現在地の特定**
-   - 直近 30 コミットの傾向から、現在何に取り組んでいるかを推測
-
-4. **次 MS の提案（1〜3個）**
-   - 現在地から自然につながる次の一手
-   - 「何ができるようになるか」形式でタイトル化
-
-#### Step A3: ユーザーへの提示
-
-```
-このリポジトリを分析しました。
-
-プロジェクト概要（推測）: [objective — ユーザー目線の1文]
-
-開発の歩み（推測）:
-  ● [フェーズ1タイトル]  (YYYY年M月頃)
-  ● [フェーズ2タイトル]  (YYYY年M月頃)
-  ● [フェーズ3タイトル]  (YYYY年M月頃)
-  ◐ [現在進行中フェーズ]  (YYYY年M月〜)
-
-次のマイルストーン候補:
-  1. "[提案1]"
-     理由: [なぜこれが次の一手として適切か]
-
-  2. "[提案2]"（別の方向性があれば）
-     理由: [...]
-
-調整があれば教えてください。このまま登録しますか？
-```
-
-#### Step A4: ユーザー承認後の登録（書き込みフェーズ）
-
-ユーザーが承認（「はい」「登録して」「OK」等）した場合のみ実行する:
-
-```bash
-# 1. Objective をサマリーに設定
-beacon summary "<推測したobjective>"
-
-# 2. 過去完了フェーズを登録（古い順に）
-beacon milestone add "<フェーズ1タイトル>"
-# → 返り値の ms-id を使って
-beacon milestone done <ms-id>
-
-beacon milestone add "<フェーズ2タイトル>"
-beacon milestone done <ms-id>
-# ... 完了分をすべて登録
-
-# 3. 現在進行中フェーズを登録・開始
-beacon milestone add "<現在進行中フェーズ>"
-beacon milestone start <ms-id>
-
-# 4. 次MS候補を登録（todo 状態）
-beacon milestone add "<次MS提案1>"
-# （提案2があれば続けて追加）
-```
-
-**注意**: Step A4 はユーザーの明示的な承認なしに実行してはならない。提示後は必ず確認を取る。
-
----
-
-### フロー B: 白紙提案（コミット数 < 10 または git 未初期化）
-
-#### やること
-
-1. CORE ドキュメントがあれば読む（Step 1d/1e の結果を利用）
-2. **ソースコードを読んで実装状況を把握する**（以下を並列実行）:
-
-```bash
-cat README.md 2>/dev/null
-```
-
-```bash
-find . -type f \( -name "*.ts" -o -name "*.tsx" -o -name "*.py" -o -name "*.vue" -o -name "*.go" -o -name "*.rb" \) \
-  -not -path "*/node_modules/*" -not -path "*/.git/*" \
-  -not -path "*/dist/*" -not -path "*/__pycache__/*" | head -40
-```
-
-READMEがあればそれを読む。ファイル一覧からルーター・型定義・ページ・モデル等の主要ファイルを特定し、3〜5件を並列Readする。
-
-**この情報はドキュメントとして保存しない。提案の精度向上のみに使う。**
-
-3. プロジェクト名・objective・ソースコードの実態を踏まえて、**最初のマイルストーン候補を1〜3個提案する**
-
-#### 提案の視点（重要）
-
-- **「何を作るか」ではなく「何ができるようになるか」** でタイトルをつける
-- objective を起点に考える。最終ゴールに向かう最初の一歩として、ユーザーが体験できる状態変化を表現する
-- 「基盤構築」「パイプライン設計」のような技術的な工程名は避ける
-- 例：objective が「家計の無駄遣いを減らして貯金を増やしたい」なら
-  - ✗ 「データ取り込みパイプラインの設計」
-  - ✓ 「先月の支出を入力して、無駄な出費のパターンを一覧で見られるようにする」
-
-#### 出力フォーマット
-
-```
-Beacon: [name] — [MSゼロなら「まだマイルストーンがありません」/ done MSがあれば「次のマイルストーンを決めましょう」]
----
-[objective・summary・完了済みMSの流れを一言で解釈]
-
-[完了済みMSがある場合は「ここまで達成しました：〇〇、△△」を一行添える]
-
-次のマイルストーンをこう考えます：
-
-  1. "[提案タイトル]"
-     理由: [なぜこれが最初の一手として適切か]
-
-  2. "[提案タイトル]"（もし別の方向性があれば）
-     理由: [...]
-
-どれかを選ぶか、別のゴールを教えてもらえれば `beacon milestone add` で登録します。
-```
-
----
-
-コンサルタントモード（フロー A または B）の後は Step 4（トリガーチェック）に進む。通常の Step 3 出力は不要。
+session-start で取得済みの `beacon status --json` 結果と CORE doc (Step 1a/1d/1e) はそのまま渡してよい。`/beacon-archaeology` の後は Step 4（トリガーチェック）に戻る。通常の Step 3 出力は不要。
 
 ## Step 2.7: Web UI を自動オープン（cloud mode の場合）
 
@@ -886,44 +463,10 @@ Beacon の作業形態は「ターミナル + Web UI 並列表示」が前提。
 session-start 時に Web UI を立ち上げ直す（既に開かれていればブラウザが既存タブを focus する）。
 
 ```bash
-# Bash 呼び出し
-# ms-46 e-737: open URL は macOS が Beacon.app を URL handler として解釈し
-# Tauri を起動してしまうケースがある (cloud mode で Tauri が起動すると
-# ローカルキャッシュ表示で混乱)。ブラウザを明示的に指定して回避。
-# macOS: Python webbrowser は LSGetDefaultRoleHandler を使うので Beacon.app
-# を回避できないことがある → -b で default browser app ID を直接渡す。
-# 検出失敗時は Safari にフォールバック (System 標準で必ず存在)。
-if [ -f .beacon/cloud.json ]; then
-  PROJECT_ID=$(python3 -c "import json; print(json.load(open('.beacon/cloud.json')).get('project_id',''))")
-  if [ -n "$PROJECT_ID" ]; then
-    WEBUI_URL="https://beacon-ai.dev/?project=$PROJECT_ID"
-    # macOS: 既定の https handler を取得 (Beacon.app になっていたら Safari にフォールバック)
-    DEFAULT_BROWSER=$(python3 -c "
-import subprocess, plistlib, os, sys
-p = os.path.expanduser('~/Library/Preferences/com.apple.LaunchServices/com.apple.launchservices.secure.plist')
-try:
-    with open(p, 'rb') as f: d = plistlib.load(f)
-    for h in d.get('LSHandlers', []):
-        if h.get('LSHandlerURLScheme') == 'https':
-            r = h.get('LSHandlerRoleAll', '')
-            if r and 'beacon' not in r.lower():
-                print(r); sys.exit(0)
-except Exception: pass
-print('com.apple.Safari')
-" 2>/dev/null || echo 'com.apple.Safari')
-
-    (open -b "$DEFAULT_BROWSER" "$WEBUI_URL" 2>/dev/null \
-      || open -a Safari "$WEBUI_URL" 2>/dev/null \
-      || xdg-open "$WEBUI_URL" 2>/dev/null \
-      || cmd.exe /c start "$WEBUI_URL" 2>/dev/null \
-      || powershell.exe -Command "Start-Process '$WEBUI_URL'" 2>/dev/null) &
-    echo "WEBUI_URL=$WEBUI_URL"
-  fi
-fi
+python3 scripts/open-webui.py 2>/dev/null
 ```
 
-取得した URL は Step 3 の出力ヘッダに表示する。  
-local mode（cloud.json 無し）の場合はこのステップをスキップ。
+このスクリプトは cloud mode でのみブラウザを起動し (ms-46 e-737: Beacon.app への URL handler 誤ルーティングを回避して default browser / Safari を明示指定)、`WEBUI_URL=<url>` を stdout に出す。取得した URL は Step 3 の出力ヘッダに表示する。local mode（`.beacon/cloud.json` 無し / project_id 無し）では何も出力せずスキップする。
 
 ## Step 2.9: 次セッション最初の作業の特定 (ms-43 e-568)
 
@@ -1017,10 +560,6 @@ Active: [ms-id] [title] ([progress]%) [done_tasks]/[total_tasks]タスク完了
   [status-icon] [ms-id] [title] ([progress]%)
   ...
 
-SPEC 無し active MS (warning):     ← Step 1f で検出した SPEC 無しactive MS がある場合のみ
-  ⚠ [ms-id] [title] — `/beacon-spec [ms-id]` で対話駆動作成できます
-  ※ SPEC = 要求書/判断軌跡。dispatch / retrospection の質が下がるため、作成を推奨
-
 未記録のコミット: [git logのハッシュがbeaconエントリに存在しないもの]
 uncommitted changes: [git statusの結果があれば]
 ---
@@ -1057,8 +596,6 @@ beacon note list --json
 ## Step 3.7: pending Operation の活性化議論 (ms-61 / e-1843 で再設計)
 
 Step 1a の結果の **`pending_operations[]` フィールド** (= `beacon status --json` が出す todo / in_progress の Operation 一覧) を取得する。空配列 (= 通常プロジェクトの定常状態) ならこの Step はスキップ。
-
-> **e-1843 修正経緯**: 旧版はこの Step 1a から「status==todo / in_progress を抽出する」と書いていたが、`beacon status --json` は実装上 `status="open"` のみを出していたため、Step 3.7 は **構造的に空を見せ続けて dead code 化** していた。e-1843 で CLI 側に `pending_operations[]` フィールドを追加 + helper (= `lib/operation_activation.py`) で verdict 分類を構造化、Skill 側はその verdict に従って discussion を組み立てる責務分担に再編した。
 
 ### 構造的分類は helper が行う (Python 側)
 
@@ -1111,13 +648,7 @@ helper の verdict を **そのまま出すだけでは AI 価値が無い**。`
 Step 3 の出力の末尾、Step 4 トリガーチェックの直前に挿入。
 論点が無い (= 全 verdict が「まだ早い」AI 判定で省略) なら、 セクションごと出さなくてよい。
 
-### 責任分界 (= e-1843 AC #5)
-
-- **CLI (`lib/commands.py:cmd_status`)**: `pending_operations[]` フィールドの shape (= id / title / status / activation_hint / operation_tasks_total / operation_tasks_done / entries) を保証する。 shape を変える時は本 Skill markdown と helper の両方に追従が必要。
-- **helper (`lib/operation_activation.py`)**: verdict 分類ロジックの structural 部分を所管。 verdict を増やす / 名前を変える時は tests (= `tests/test_session_start_operation_activation.py`) が fail するので Skill markdown 追従も自動的に強制される (forcing function)。
-- **Skill markdown (この section)**: verdict → discussion 文の対応表 + AI 判断 (= `needs-ai-judgement` verdict の qualitative call) を所管。 helper の verdict literal が変わったら本 markdown の対応表も更新する。
-
-shape / verdict literal の drift は tests で捕まる構造 (= `test_verdict_vocabulary_is_closed`、 `test_cli_status_json_has_pending_operations_field_when_zero` 等) のため、 Skill 側の指示文と Python 側の実装が同時に壊れない限り、 silent drift は起きない。
+> 責任分界 (CLI = `pending_operations[]` shape / helper `lib/operation_activation.py` = verdict 分類 / この Skill = verdict→discussion 対応表 + AI 判断) と drift 防止の forcing function (`tests/test_session_start_operation_activation.py`) の詳細は CORE doc `architecture-tool-skill-separation` と e-1843 (Step 3.7 再設計) を参照。verdict literal を変える時は本 markdown の対応表も更新する。
 
 ## Step 4: トリガーチェック
 
