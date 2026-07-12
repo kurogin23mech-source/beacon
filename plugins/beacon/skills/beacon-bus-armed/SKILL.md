@@ -156,6 +156,15 @@ Monitor の stdout 行 (= 1 event = JSON) を notification として受け取っ
    - send 成功時に CLI が表示する「budget: M/N, X remaining」を読んで、残数が 0 ならそれ以上送らない
 6. **返答が不要と判断したら**: 何もせず次の event を待つ (= sleep)
 
+### 4.3 B芯: 通常会話は確認を挟まず自律返信する (= 構造で担保、ms-100 e-3309)
+
+armed の価値は「AI が席にいなくても自律的に返信する」こと。**通常会話** (= 計画系 / 議論 / 進捗共有、4.1 表の「計画系応答」) の返信では、`/beacon-dm-send` の draft 提示 + y/n 確認を **挟まず**、reply tool / `beacon bus send --in-reply-to` で直接返信する。確認を都度求めるのはプロンプト時代の名残で、armed の意図 (= 無人自律) と矛盾する。
+
+危険カテゴリ (= 外部宛 [別プロジェクト宛の plain DM] / 機密 / action 付き) は、AI が「聞くのを忘れる」かどうかに依存しない: reply 送信経路の **質的ゲート** (`channel/bus-qualgate.mjs`、ms-100 e-3308) が armed 中に構造的に hold し、`isError` の「reply held」メッセージを返す。つまり本 Skill 4.1 / 4.2 の分類ガイダンスは human 向けの動線であって、**最終的な安全は code gate が担保する** (= 二重防御。AI の disposition が揺れても危険カテゴリは物理的に送れない)。
+
+- **通常会話返信** → 確認なしで直接送信 (budget 残量内、B芯)
+- **危険カテゴリ** → 質的ゲートが構造的に hold → held が返ってきたら `/beacon-dm-respond` 経由で user に判断を仰ぐ (A gate)
+
 ### Trek 参加中の DM 自律応答 (= ms-75 / e-1856 blanket exception)
 
 送信者と受信者が同じ Trek の member の場合、server 側 `dm_gate.py` が `shared_trek_member` 判定で gate を bypass している (= ms-70 例外)。AI は届いた envelope に対し以下のように振る舞う:
