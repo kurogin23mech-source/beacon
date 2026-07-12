@@ -51,8 +51,16 @@ export function readBusBudget(projectRoot) {
 export function consumeBusBudgetOne(projectRoot) {
   // Returns { allowed, reason?, budget? }.
   //
-  // Semantics — kept in lockstep with lib/commands._bus_budget_consume_one:
+  // Semantics — in lockstep with lib/commands._bus_budget_consume_one on the
+  // ARMED cases, but INTENTIONALLY DIVERGENT on the missing-file case:
   //   * missing file        → refuse, reason='not_granted' (default OFF)
+  //         ^ The ONE place the MCP gate deliberately differs from the CLI
+  //           gate: the CLI ALLOWS on a missing file (a human's manual
+  //           `beacon bus send` must not require `grant` first); the MCP gate
+  //           REFUSES (the AI's autonomous replies are default-OFF, an explicit
+  //           grant is required). human-vs-AI, by design — do NOT "align" them.
+  //           Pinned by tests/test_bus_budget_asymmetry.py (ms-100 e-3310);
+  //           background in SPEC PVaNf6HYFjucgBS3lkQF ("armed の本質").
   //   * corrupt file        → refuse, reason='corrupt' (fail-closed)
   //   * total<=0            → allow without decrement (legacy "file present
   //                            but not armed"); budget.armed=false

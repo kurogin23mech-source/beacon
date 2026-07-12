@@ -17171,6 +17171,15 @@ def _bus_budget_consume_one() -> tuple[bool, dict]:
         # No budget file at all == autonomous mode never armed → allow
         # sends (the gate only applies when armed). Manual one-off DMs from
         # the CLI should not require granting first.
+        #
+        # INTENTIONAL ASYMMETRY (ms-100 e-3310): the MCP reply gate
+        # (channel/bus-budget.mjs consumeBusBudgetOne) REFUSES on a missing
+        # file ('not_granted') instead of allowing. CLI = human (allow), MCP =
+        # AI (default-OFF, require grant). The two agree on every armed case
+        # (total<=0 / exhausted / decrement) and diverge ONLY here, on purpose.
+        # Do not "unify" — that either removes armed mode's safety or breaks
+        # manual sends. Pinned by tests/test_bus_budget_asymmetry.py; background
+        # in SPEC PVaNf6HYFjucgBS3lkQF ("armed の本質").
         return True, {"total": 0, "used": 0, "armed": False}
     total = int(b.get("total", 0))
     used = int(b.get("used", 0))
