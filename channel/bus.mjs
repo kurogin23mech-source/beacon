@@ -35,6 +35,9 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { consumeBusBudgetOne, refuseMessage } from './bus-budget.mjs'
+import {
+  classifyOutboundReply, evaluateOutboundQualGate, qualHoldMessage,
+} from './bus-qualgate.mjs'
 import { selectTierForBridge } from './bus-envelope.mjs'
 import { buildHeartbeatBody } from './bus-heartbeat.mjs'
 import { createLocalSessionHeartbeat } from './bus-local-heartbeat.mjs'
@@ -810,6 +813,32 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       return { content: [{ type: 'text', text: msg }], isError: true }
     }
     log(`reply budget consumed: ${gate.budget.used}/${gate.budget.total}`)
+
+    // Qualitative gate (ms-100 e-3308): the budget gate is quantitative
+    // ("at most N auto-sends"); this is the qualitative half. Even within
+    // budget, armed mode must HOLD 外部宛 / 機密 / action付き autonomous replies
+    // for the human instead of leaning on the Skill prompt to remember to ask.
+    // Trek-scoped channels are pre-approved scope → not held. BEACON_QUALGATE_OFF=1
+    // is an explicit escape hatch (mirrors BEACON_BUS_NO_LIVE_CHECK).
+    if (process.env.BEACON_QUALGATE_OFF !== '1' && gate.budget && gate.budget.armed) {
+      const category = classifyOutboundReply({
+        channel,
+        senderProjectId: PROJECT_ID,
+        recipientProjectId: recipient_project_id,
+        // MCP reply tool sends text-only pings; envelope actions are minted
+        // later and empty here. Confidential is deferred to ms-63 (no signal).
+        actionsAuthorized: null,
+        confidential: false,
+      })
+      const q = evaluateOutboundQualGate({ classification: category, armed: true })
+      if (q.hold) {
+        log(`reply HELD by qual gate: category=${q.category}`)
+        return {
+          content: [{ type: 'text', text: qualHoldMessage(q.category) }],
+          isError: true,
+        }
+      }
+    }
   }
 
   // Envelope-by-default (e-1290). Mint a server-signed envelope before
