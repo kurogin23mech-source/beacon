@@ -477,16 +477,21 @@ stdout の JSON から:
 
 session-start で取得済みの `beacon status --json` 結果と CORE doc (Step 1a/1d/1e) はそのまま渡してよい。`/beacon-archaeology` の後は Step 4（トリガーチェック）に戻る。通常の Step 3 出力は不要。
 
-## Step 2.7: Web UI を自動オープン（cloud mode の場合）
+## Step 2.7: フロントエンドを自動オープン（cloud=Web UI / local=Desktop）
 
-Beacon の作業形態は「ターミナル + Web UI 並列表示」が前提。  
-session-start 時に Web UI を立ち上げ直す（既に開かれていればブラウザが既存タブを focus する）。
+Beacon の作業形態は「ターミナル + フロントエンド 並列表示」が前提。  
+session-start 時にフロントエンドを立ち上げ直す（既に開かれていれば既存ウィンドウ / タブが focus する）。
 
 ```bash
 python3 scripts/open-webui.py 2>/dev/null
 ```
 
-このスクリプトは cloud mode でのみブラウザを起動し (ms-46 e-737: Beacon.app への URL handler 誤ルーティングを回避して default browser / Safari を明示指定)、`WEBUI_URL=<url>` を stdout に出す。取得した URL は Step 3 の出力ヘッダに表示する。local mode（`.beacon/cloud.json` 無し / project_id 無し）では何も出力せずスキップする。
+このスクリプトは **プロジェクトのモード (= どこにデータの真値があるか) に応じて起動先を選ぶ**。cloud プロジェクトの生きた front-end は Web UI (真値はサーバ)、local プロジェクトは desktop アプリ (サーバ URL が無い) — データを持つ側が、それを描画する front-end を決める (背景・macOS の URL handler 回避策は `scripts/open-webui.py` の docstring と ms-46 e-737 を参照):
+
+- **cloud mode** (`.beacon/cloud.json` に `project_id` あり): ブラウザで Web UI を開き (Beacon.app への URL handler 誤ルーティングを回避して default browser / Safari を明示指定)、`WEBUI_URL=<url>` を stdout に出す。
+- **local mode** (`.beacon/cloud.json` 無し / project_id 無し): Beacon Tauri desktop アプリ (= ローカルの `.beacon/project.json` を読む) を起動し、`DESKTOP_LAUNCHED=<name>` を stdout に出す。desktop アプリ未インストールなら何も出さない (best-effort, session-start を止めない)。
+
+取得した `WEBUI_URL` / `DESKTOP_LAUNCHED` は Step 3 の出力ヘッダに表示する。
 
 ## Step 2.9: 次セッション最初の作業の特定 (ms-43 e-568)
 
@@ -526,7 +531,8 @@ Step 1〜2 の結果を組み合わせて、以下のフォーマットで **テ
 
 ```
 Beacon: [name]
-📊 Web UI: $WEBUI_URL  ← cloud mode の場合のみ
+📊 Web UI: $WEBUI_URL  ← cloud mode で WEBUI_URL が出た場合のみ
+🖥 Desktop: $DESKTOP_LAUNCHED (Tauri) を起動  ← local mode で DESKTOP_LAUNCHED が出た場合のみ
 🔗 fork from: [target_ms_id] [target_ms_title]  ← Step 1m / .beacon/fork.json があれば
    parent: [parent_session_id 短縮] (branch=[parent_branch], repo=[parent_repo_path basename])
    child:  [child_branch] (この worktree)
