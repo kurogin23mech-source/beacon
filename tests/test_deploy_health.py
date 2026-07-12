@@ -87,9 +87,18 @@ def test_recipient_prefers_most_recently_active_on_tie():
     assert r["session_id"] == "sv-new"
 
 
-def test_recipient_falls_back_to_owner_user_scope():
-    # no live session sits at the deployed rev → user-scoped owner DM.
-    sessions = [_sess("sv-a", "0000000"), _sess("sv-b", "1111111")]
+def test_recipient_falls_back_to_owner_live_session():
+    # no session at the deployed rev, but the owner is online elsewhere →
+    # unicast to the owner's (other) live session.
+    sessions = [_sess("sv-a", "0000000", user="u-owner", last_active="2026-07-12T09:00:00Z"),
+                _sess("sv-x", "1111111", user="someone-else")]
+    r = dh.resolve_alert_recipient(sessions, "beefcafe", "u-owner")
+    assert r["mode"] == "session" and r["session_id"] == "sv-a"
+
+
+def test_recipient_falls_back_to_user_scope_when_owner_offline():
+    # no session at the rev AND none owned by the owner → user-scoped (offline).
+    sessions = [_sess("sv-x", "0000000", user="someone-else")]
     r = dh.resolve_alert_recipient(sessions, "beefcafe", "u-owner")
     assert r["mode"] == "user"
     assert r["user_id"] == "u-owner"

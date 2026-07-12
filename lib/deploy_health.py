@@ -107,36 +107,54 @@ def resolve_alert_recipient(
 ) -> dict:
     """Pick the beacon-bus DM recipient for a deploy-health alert.
 
-    Preference order:
+    Preference order (each session step yields a session to unicast to):
       1. The **deploying session** — a live session sitting at ``target_rev``
          (= whoever pushed the revision prod should be serving is usually at
          that HEAD). If several match, the most recently active wins.
-      2. Fallback: a **user-scoped** DM to the project owner, which the owner
-         sees at their next session-start catch-up even if no session is live
-         now (ms-54 e-2974).
+      2. **Any live session of the owner** — the owner is online elsewhere
+         (a different repo / rev). Still a real session to unicast to.
+      3. Fallback: **user-scoped** (owner fully offline). No live session to
+         target — a beacon-bus DM needs a session, and the bus is co-located
+         with prod anyway, so a truly offline owner + down box is the
+         external-channel case (out of scope here).
 
     Returns one of:
       ``{"mode": "session", "session_id": ..., "user_id": ..., "reason": ...}``
       ``{"mode": "user",    "user_id": ...,    "reason": ...}``
-    ``user_id`` may be empty in the session case if the directory entry lacks it.
     """
-    candidates = [
-        s for s in (live_sessions or [])
-        if s.get("live", True)
-        and _rev_matches(str((s.get("git") or {}).get("head_short", "")), target_rev)
+    live = [s for s in (live_sessions or []) if s.get("live", True)]
+
+    def _most_recent(rows):
+        return sorted(rows, key=lambda s: s.get("last_active") or "",
+                      reverse=True)[0]
+
+    at_rev = [
+        s for s in live
+        if _rev_matches(str((s.get("git") or {}).get("head_short", "")), target_rev)
     ]
-    if candidates:
-        # most recently active first (missing last_active sorts last)
-        candidates.sort(key=lambda s: s.get("last_active") or "", reverse=True)
-        top = candidates[0]
+    if at_rev:
+        top = _most_recent(at_rev)
         return {
             "mode": "session",
             "session_id": top.get("session_id", ""),
             "user_id": top.get("user_id", ""),
             "reason": "live session at the deployed revision",
         }
+
+    owner_live = [
+        s for s in live if owner_user_id and s.get("user_id") == owner_user_id
+    ]
+    if owner_live:
+        top = _most_recent(owner_live)
+        return {
+            "mode": "session",
+            "session_id": top.get("session_id", ""),
+            "user_id": top.get("user_id", ""),
+            "reason": "owner has a live session (not at the deployed rev)",
+        }
+
     return {
         "mode": "user",
         "user_id": owner_user_id,
-        "reason": "no live session at the deployed revision; owner user-scoped",
+        "reason": "owner has no live session; nothing to unicast to",
     }
