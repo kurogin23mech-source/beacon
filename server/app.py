@@ -11041,6 +11041,47 @@ async def ws_project(websocket: WebSocket, project_id: str):
 # Health
 # ---------------------------------------------------------------------------
 
+# 本番 readiness の宣言的チェック (= ms-105 e-3312)。
+# 「本番 (= BEACON_ENV=prod) で満たされていないと Web UI / 認証が壊れる設定」を
+# 1 箇所に宣言する。/health はこのリストを回すだけで判定するので、必須設定が
+# 増えても health() 本体に症状ごとの手書き if を足さずに済む (= e-3197 で client_id
+# 欠落だけを手書き if にしていたのを、宣言的な一般形に整理したもの)。
+# 各 check は:
+#   - env_var:  必須の環境変数名
+#   - applies(env, provider): その環境で必須になる条件 (= 満たすとき check 対象)
+#   - detail:   欠落時に /health が 503 で返す説明 (運用者向けに直し方まで書く)
+_PROD_READINESS_CHECKS = [
+    {
+        "env_var": "BEACON_OAUTH_CLIENT_ID",
+        "applies": lambda env, provider: env == "prod" and provider == "firebase",
+        "detail": (
+            "BEACON_OAUTH_CLIENT_ID is unset in a firebase-provider production "
+            "deploy — the Web UI login button would be dead. Set it in "
+            "/etc/beacon/app.env (see deploy/app.env.example for the required env "
+            "and docs/DEPLOY_VPS.md for the value) and redeploy."
+        ),
+    },
+]
+
+
+def evaluate_prod_readiness(env: str, provider: str, environ) -> list:
+    """現在の環境に対する readiness 失敗の説明一覧を返す (空 = 健全)。
+
+    ``_PROD_READINESS_CHECKS`` のうち ``applies(env, provider)`` が真で、かつ
+    ``env_var`` が未設定 / 空白のものが、その ``detail`` を 1 件ずつ積む。
+    ms-105 e-3312: health() の症状ごとの手書き if を宣言的リストに置き換えた
+    もので、新しい本番必須設定を足すのは上のリストへの 1 行追記で済む
+    (= endpoint 本体を編集しない)。純関数なので単体テストしやすい。
+    """
+    failures = []
+    for check in _PROD_READINESS_CHECKS:
+        if not check["applies"](env, provider):
+            continue
+        if not str(environ.get(check["env_var"], "")).strip():
+            failures.append(check["detail"])
+    return failures
+
+
 @app.get("/health")
 def health():
     # version is exposed so release.yml can assert that the bump commit has
@@ -11061,28 +11102,19 @@ def health():
             from commands import __version__ as _beacon_version  # type: ignore
         except Exception:
             pass
-    # e-3197: fail loud when a firebase-provider *production* deploy is missing
-    # BEACON_OAUTH_CLIENT_ID. Without the client_id the Web UI login button
-    # silently vanishes (Google Identity Services can't render it) yet the
-    # deploy would otherwise go green. vps-pull-deploy.sh health-checks /health
-    # with `curl -fsS`, which fails only on a non-2xx status — so returning 503
-    # here turns a silent dead-login into a red deploy that rolls back. Gated to
-    # BEACON_ENV=prod so dev / test stay 200 even with the env unset (dev logs
-    # in via the local dev form, not Google). The value itself lives in
-    # deploy/app.env.example + /etc/beacon/app.env (see docs/DEPLOY_VPS.md) —
-    # env is the single source of truth, not a hardcoded fallback (= e-3196).
+    # readiness: 本番 (prod) で満たされるべき必須設定を宣言的に評価する
+    # (= ms-105 e-3312、旧 e-3197 の client_id 手書き if を一般化)。欠落があれば
+    # 503 を返し、vps-pull-deploy.sh の health check (curl -fsS、非 2xx で失敗) が
+    # deploy を赤くするので、silent 障害 (例: ログインボタンが黙って消える) が
+    # 「気付けない本番障害」ではなく「赤くなった deploy」として顕在化する。
+    # dev / test は applies が偽なので env 未設定でも 200 のまま。
     _env = os.environ.get("BEACON_ENV", "dev")
     _provider = os.environ.get("BEACON_AUTH_PROVIDER", "firebase").lower()
-    _oauth_client_id = os.environ.get("BEACON_OAUTH_CLIENT_ID", "").strip()
-    if _env == "prod" and _provider == "firebase" and not _oauth_client_id:
+    _failures = evaluate_prod_readiness(_env, _provider, os.environ)
+    if _failures:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "degraded: BEACON_OAUTH_CLIENT_ID is unset in a firebase-"
-                "provider production deploy — the Web UI login button would be "
-                "dead. Set it in /etc/beacon/app.env (see deploy/app.env.example "
-                "and docs/DEPLOY_VPS.md) and redeploy."
-            ),
+            detail="degraded: " + "; ".join(_failures),
         )
     return {
         "status": "ok",

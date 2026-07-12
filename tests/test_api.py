@@ -172,6 +172,45 @@ def test_health_ok_in_dev_even_without_client_id(monkeypatch):
     assert r.status_code == 200
 
 
+# ---------------------------------------------------------------------------
+# 宣言的 readiness (ms-105 e-3312): /health の手書き if を、本番必須設定を回す
+# 純関数 evaluate_prod_readiness に置き換えた。新しい必須設定はリストへの追記で
+# 効く (= endpoint 本体を触らない) ことを固定する。
+# ---------------------------------------------------------------------------
+
+def test_prod_readiness_reports_missing_client_id():
+    fails = app_module.evaluate_prod_readiness("prod", "firebase", {})
+    assert len(fails) == 1
+    assert "BEACON_OAUTH_CLIENT_ID" in fails[0]
+
+
+def test_prod_readiness_clean_when_client_id_present():
+    env = {"BEACON_OAUTH_CLIENT_ID": "some-id.apps.googleusercontent.com"}
+    assert app_module.evaluate_prod_readiness("prod", "firebase", env) == []
+
+
+def test_prod_readiness_lax_outside_prod_firebase():
+    # dev / 非 firebase provider は applies が偽なので、client_id 空でも失敗ゼロ。
+    assert app_module.evaluate_prod_readiness("dev", "firebase", {}) == []
+    assert app_module.evaluate_prod_readiness("prod", "cognito", {}) == []
+
+
+def test_prod_readiness_is_declarative_new_check_picked_up(monkeypatch):
+    # AC: 新しい本番必須設定は「リストへの 1 行追記」だけで /health に効く
+    # (= health() 本体を編集しない)。一時 check を差し込んで検証する。
+    extra = {
+        "env_var": "BEACON_MADE_UP_REQUIRED",
+        "applies": lambda env, provider: env == "prod",
+        "detail": "BEACON_MADE_UP_REQUIRED is unset",
+    }
+    monkeypatch.setattr(
+        app_module, "_PROD_READINESS_CHECKS",
+        app_module._PROD_READINESS_CHECKS + [extra],
+    )
+    fails = app_module.evaluate_prod_readiness("prod", "firebase", {})
+    assert any("BEACON_MADE_UP_REQUIRED" in f for f in fails)
+
+
 def test_auth_config_firebase_client_id_comes_from_env_not_hardcode(monkeypatch):
     # e-3196: ハードコード default を撤去したので、env がそのまま真値源になる。
     monkeypatch.setattr(app_module, "_AUTH_PROVIDER", "firebase", raising=False)
