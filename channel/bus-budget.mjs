@@ -100,6 +100,41 @@ export function consumeBusBudgetOne(projectRoot) {
   }
 }
 
+export function refundBusBudgetOne(projectRoot) {
+  // Give back one consumed slot (ms-100 e-2999). consumeBusBudgetOne is a
+  // *pessimistic* decrement — it commits the slot BEFORE the send happens so
+  // the gate can't be raced. If the send is then held (qual gate) or fails
+  // (network / server error), that slot was never actually used, so refund it.
+  // Best-effort and idempotent-ish: clamps ``used`` at 0 so a double refund or
+  // a refund with no prior consume can't drive the counter negative.
+  //
+  // Returns { refunded: bool, budget?: {...} }. refunded=false when there is
+  // no armed budget file to refund against (nothing was consumed there).
+  const read = readBusBudget(projectRoot)
+  if (read.state !== 'present') {
+    return { refunded: false }
+  }
+  const data = read.data
+  const total = Number.parseInt(data.total ?? 0, 10) || 0
+  const used = Number.parseInt(data.used ?? 0, 10) || 0
+  if (total <= 0 || used <= 0) {
+    // total<=0 → not armed (consume didn't decrement); used<=0 → nothing to
+    // give back. Either way leave the file untouched.
+    return { refunded: false, budget: { total, used, armed: total > 0 } }
+  }
+  const next = { ...data, used: used - 1 }
+  try {
+    fs.writeFileSync(budgetPath(projectRoot), JSON.stringify(next, null, 2), 'utf8')
+  } catch (_e) {
+    return { refunded: false }
+  }
+  return {
+    refunded: true,
+    budget: { total: next.total, used: next.used, armed: true },
+  }
+}
+
+
 export function refuseMessage(reason, budget) {
   // Centralised error text so CLI / MCP / docs stay aligned. The strings
   // explicitly reference `beacon bus budget grant` so the user always sees
