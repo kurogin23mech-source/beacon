@@ -1,6 +1,6 @@
 ---
 name: beacon-bus-armed
-description: 現在のセッションを「自律 DM 応答モード」に切り替える。Monitor で bus listen を armed しっぱなしにし、prompt 無しでも別セッションからの DM に AI が起動して返答できる状態を作る。budget gate で必ず N 回で止まる安全形。
+description: 現在のセッションを「自律 DM 応答モード」に切り替える。budget grant で N 往復まで自動返答を許可する。DM 到着で AI を起こす idle-wake は channel (MCP bus 通知) が担い、Monitor による配信複製は廃止 (ms-100 e-3255)。budget gate で必ず N 回で止まる安全形。
 version: 1.0.0
 ---
 
@@ -11,11 +11,12 @@ version: 1.0.0
 
 > 「会話してなくても、別セッションから DM が来たら気付いて、N 往復まで自動返答する」状態にこのセッションを切り替える。
 
-このスキルは **3 段ロケット** で動く:
+このスキルは **2 段ロケット** で動く (= Monitor による配信複製は ms-100 e-3255 で廃止):
 
 1. **Budget grant** — 何ターンまで自動返答を許可するか人間に確認・付与
 2. **inbox hook 確認** — `~/.claude/settings.json` に hook が install されているか確認 (してなければ案内)
-3. **Monitor 起動** — `beacon bus listen --auto-ack` を Monitor ツールで armed する。これで event 1 件ごとに harness が起動 = prompt 無しでも反応するようになる
+
+armed = **budget が granted な状態、それだけ**。DM 到着で AI を起こす idle-wake (= 会話が無くても起動すること) の真値源は **channel** (= MCP bus 通知、`<channel source="beacon-bus">` として届く) であって、別プロセスの Monitor ではない。以前は Step 3 で `beacon bus listen` を Monitor に張っていたが、これは channel と同じ bus backend を二重に叩く配信複製のアンチパターン (= 故障が独立せず、60s timeout で self-terminate して「wake が壊れた」と誤診させる) だったので廃止した (= e-3255)。運用で「Monitor が死んでいる間も channel 経由で DM が届く」ことを確認済み。budget grant は「N 回まで自律送信してよい」という許可付与だけを担う。
 
 ## 前提条件チェック
 
@@ -57,7 +58,7 @@ Bus event の自律返答モードを起動します。最大何往復まで AI 
 beacon bus budget grant --turns <N>
 ```
 
-ユーザーが skip / 拒否したら何もせず終了 (Monitor も armed しない)。
+ユーザーが skip / 拒否したら何もせず終了 (= budget を grant しない = armed にしない)。
 
 ### Budget 既に grant 済の場合
 
@@ -72,10 +73,10 @@ test -f ~/.claude/settings.json && grep -q "beacon-bus-inbox-hook" ~/.claude/set
 
 ### `NOT_INSTALLED` の場合
 
-inbox hook が無いと「DM 来ても AI コンテキストに inject されない」ので autonomous mode が機能しない。**Monitor も armed しないで** ユーザーに案内:
+inbox hook が無いと「DM 来ても AI コンテキストに inject されない」ので autonomous mode が機能しない。**budget を grant せず** ユーザーに案内:
 
 ```
-inbox hook が未 install です。Monitor を armed しても DM が AI コンテキストに inject されないので、armed mode の意味がありません。
+inbox hook が未 install です。budget を grant しても DM が AI コンテキストに inject されないので、armed mode の意味がありません。
 
 ~/.claude/settings.json に以下を追加してください (`update-config` スキルでも可):
 
@@ -89,40 +90,28 @@ install したら再度 /beacon-bus-armed を実行してください。
 
 ### `INSTALLED` の場合
 
-Step 3 に進む。
+Step 3 (armed 完了) に進む。
 
-## Step 3: Monitor を armed する
+## Step 3: armed 完了報告 (Monitor は張らない、ms-100 e-3255)
 
-AI ツール `Monitor` を以下のように起動する:
+budget grant + inbox hook 確認が済めば、それで **armed 完了**。別プロセスの Monitor は張らない (= 配信複製の廃止)。DM 到着時に AI を起こすのは channel (MCP bus 通知) で、これが真値源。
 
-```
-Monitor(
-  command: "beacon bus listen --auto-ack",
-  description: "bus inbox listener — incoming DM をリアルタイムで pick up",
-  persistent: true,
-  timeout_ms: 3600000
-)
-```
-
-`persistent: true` でセッション lifetime いっぱい armed しっぱなし。`--auto-ack` で受信後自動 cursor advance、重複配信が起きない。
-
-armed 後にユーザーへ報告:
+ユーザーへ報告:
 
 ```
 ✓ autonomous DM mode armed
   budget: X / Y 残
-  Monitor: bus listen --auto-ack (persistent, session lifetime)
+  wake: channel (MCP bus 通知) — 別プロセスの Monitor は不要 (e-3255)
 
-別セッションから --in-reply-to 指定で DM が来ると、この AI が prompt 無しでも起動して、budget 残数を見ながら返答します。
+別セッションから --in-reply-to 指定で DM が来ると、channel 経由で AI が起動し、budget 残数を見ながら返答します。
 
 停止したい時:
-  - `beacon bus budget clear` で budget を 0 にする
-  - もしくは Monitor を TaskStop で止める (この session は普通の状態に戻る)
+  - `beacon bus budget clear` で budget を 0 にする (= armed 解除)
 ```
 
 ## Step 4: 返答ループの取り扱い指示 (Skill 内ガイダンス)
 
-Monitor が armed されている間、AI は次のように振る舞う:
+armed (= budget granted) の間、channel から DM が届くと AI は次のように振る舞う:
 
 ### 4.1 action 種別 × tier 要件の判定 (= ms-76 framework)
 
@@ -139,7 +128,7 @@ tier 判定は **action 種別から先に決める**: 受信 envelope の tier 
 
 ### 4.2 event 受信時の手順
 
-Monitor の stdout 行 (= 1 event = JSON) を notification として受け取ったら:
+channel (MCP bus 通知) 経由で DM event (= `<channel source="beacon-bus">...`) が届いたら:
 
 1. event を読む
 2. payload の `text` / `to` / `in_reply_to` を確認、payload に明示的指示があれば従う
@@ -181,15 +170,15 @@ armed の価値は「AI が席にいなくても自律的に返信する」こ�
 
 1. 残りの未送信応答は諦める
 2. PushNotification でユーザーに「budget exhausted、N 件未対応の DM あり」を通知 (任意)
-3. Monitor は armed のまま放置 (再 grant されれば再び動き出す)
+3. armed (= budget) 状態はそのまま。再 grant すれば channel wake で再び動き出す
 
-### 既存の Monitor との関係
+### 他の autonomous loop との関係
 
-このセッションが他の autonomous loop (例: ScheduleWakeup ベースの cron loop) を持っている場合、Monitor は **並走** する。Monitor からの notification と user prompt と Schedule wakeup tick が混ざる可能性がある — 順番は harness が serialize するので競合は起きないが、文脈の切り替わりが多くなる点は注意。
+このセッションが他の autonomous loop (例: ScheduleWakeup ベースの cron loop) を持っている場合、channel からの DM wake と user prompt と Schedule wakeup tick が混ざる可能性がある — 順番は harness が serialize するので競合は起きないが、文脈の切り替わりが多くなる点は注意。
 
 ## 制約
 
-- Monitor 起動は **ユーザー確認の後**。Skill が無断で armed するのは Monitor が token を食う性質上やめておく。
-- Budget が grant 済でも、ユーザーが明示的に「やめて」と言ったら Monitor を TaskStop してから終了する。
-- 同じプロジェクトで複数の Monitor を多重 armed しない (1 セッション 1 Monitor)。重複してると同じ event が複数回 inject される無駄が出る。
-- Monitor の `persistent: true` は session 終了時に自動で消える。長時間放置するなら Cloud Run の cost も意識する。
+- budget grant は **ユーザー確認の後**。Skill が無断で armed (= grant) しない (= 自律送信の許可は human の明示同意が要る)。
+- Budget が grant 済でも、ユーザーが明示的に「やめて」と言ったら `beacon bus budget clear` で解除して終了する。
+- 別プロセスの Monitor (`beacon bus listen`) は **張らない** (= e-3255、channel と同じ bus backend を叩く配信複製。故障が独立せず、60s timeout で self-terminate して「wake が壊れた」と誤診させるため廃止した)。DM wake は channel が担う。
+- 離席フォールバックが将来要るなら、配信複製でなく「未読 DM 検知 → PushNotification」の独立検知役で足す (= e-3255 方針、実装は別途)。
