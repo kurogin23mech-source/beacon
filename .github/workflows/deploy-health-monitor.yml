@@ -1,0 +1,75 @@
+name: Deploy health monitor (ms-105 e-3230)
+
+# Independent watchdog for the 2026-07-10 incident: the pull-deploy (VPS polls
+# main and self-updates) stalled for 3 days and was noticed only by accident.
+# This runs on GitHub's infra — OUTSIDE the monitored VPS — so a fully-down box
+# is still caught (a monitor on the box can't report its own outage).
+#
+# Every ~10 min it fetches production's live git revision from /api/version,
+# compares it to origin/main HEAD (with a grace window so an in-flight deploy
+# isn't misread as stuck), and on a stuck / unreachable prod sends a beacon-bus
+# DM to the deploying session (or the owner's live session). See
+# scripts/deploy-health-monitor.py + lib/deploy_health.py.
+#
+# Required repo configuration (Settings → Secrets and variables → Actions):
+#   * secret  BEACON_DEPLOY_MONITOR_TOKEN — a beacon cloud id-token the CLI uses
+#             to send the DM. Without it detection still runs but the send fails
+#             (the job then goes red, which is itself a visible signal).
+#   * variable BEACON_OWNER_USER_ID       — fallback DM recipient (project owner
+#             user_id) when no session sits at the deployed revision.
+#   * variable BEACON_PROD_URL (optional) — defaults to https://beacon-ai.dev
+#
+# Caveat (design): the beacon-bus backend is co-located with prod, so a fully
+# DOWN box can't receive the DM (the bus is down too). This covers the
+# stuck-deploy class (server up, serving stale code = the actual incident); a
+# total outage needs an external channel (Discord/email), out of scope here.
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'   # every 10 minutes
+  workflow_dispatch: {}
+
+# Serialize runs so an overlapping tick can't double-alert; cancel the older.
+concurrency:
+  group: deploy-health-monitor
+  cancel-in-progress: true
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Need the main HEAD commit + its author time for the grace check.
+          fetch-depth: 2
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      # Install the repo so the `beacon` CLI (used to resolve live sessions and
+      # send the DM) is on PATH. Detection itself only imports lib/deploy_health.
+      - name: Install beacon CLI
+        run: pip install -e .
+
+      # Persist the "last alerted rev" between runs so a persistent stuck deploy
+      # alerts once per rev, not every 10 minutes.
+      - name: Restore alert dedup state
+        uses: actions/cache@v4
+        with:
+          path: .beacon/.deploy-health-alerted
+          key: deploy-health-alerted-${{ github.run_id }}
+          restore-keys: |
+            deploy-health-alerted-
+
+      - name: Run monitor
+        env:
+          BEACON_PROD_URL: ${{ vars.BEACON_PROD_URL }}
+          BEACON_OWNER_USER_ID: ${{ vars.BEACON_OWNER_USER_ID }}
+          BEACON_CLOUD_ID_TOKEN: ${{ secrets.BEACON_DEPLOY_MONITOR_TOKEN }}
+        run: |
+          python3 scripts/deploy-health-monitor.py \
+            --prod-url "${BEACON_PROD_URL:-https://beacon-ai.dev}" \
+            --owner-user-id "${BEACON_OWNER_USER_ID:-}" \
+            --main-ref HEAD \
+            --state-file .beacon/.deploy-health-alerted
