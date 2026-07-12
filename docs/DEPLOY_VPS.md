@@ -141,6 +141,17 @@ WantedBy=multi-user.target
 |-----|------|------|
 | `BEACON_OAUTH_CLIENT_ID` | ✅ (provider=firebase) | Web UI ログインの Google OAuth client_id (PUBLIC 値)。空だとログインボタンが消える。 |
 
+**beacon-ai.dev 本番の実値** (PUBLIC 値、secret ではない):
+
+```
+BEACON_OAUTH_CLIENT_ID=192136550838-evgdpddgcpsim62jrc4bh77j6p9if716.apps.googleusercontent.com
+```
+
+この実値は runbook (この文書) と本番の `/etc/beacon/app.env` だけが持つ。repo の
+`deploy/app.env.example` は placeholder を置くテンプレートで、固有値は焼き込まない
+(= ms-105 e-3313)。別ドメインに展開する場合は、そのドメインを許可した OAuth アプリの
+client_id に差し替えること。
+
 ### なぜ loud に落ちるのか (e-3197)
 
 この値はソースにハードコードしていない (= silent fallback を作らないため)。
@@ -152,11 +163,15 @@ WantedBy=multi-user.target
 ### セットアップ手順
 
 ```bash
-# repo テンプレートを元に本番 app.env を作成 (値はそのまま使える PUBLIC 値)
+# repo テンプレート (必須 env の一覧) を元に本番 app.env を作成
 sudo install -m 0644 /opt/beacon/deploy/app.env.example /etc/beacon/app.env
-# 別ドメインに展開する場合のみ BEACON_OAUTH_CLIENT_ID を差し替える
+# テンプレは placeholder なので、上表の実値を /etc/beacon/app.env にセットする
+# (別ドメインなら、そのドメインを許可した OAuth アプリの client_id を入れる)
+sudo sed -i \
+  's#^BEACON_OAUTH_CLIENT_ID=.*#BEACON_OAUTH_CLIENT_ID=192136550838-evgdpddgcpsim62jrc4bh77j6p9if716.apps.googleusercontent.com#' \
+  /etc/beacon/app.env
 sudo systemctl restart beacon-api
-curl -fsS https://beacon-ai.dev/health   # 200 なら OK、503 なら env 欠落
+curl -fsS https://beacon-ai.dev/health   # 200 なら OK、503 なら env 欠落 (placeholder のまま等)
 ```
 
 > ⚠ ハードコード default を撤去した変更 (e-3196/e-3197) を deploy する **前** に

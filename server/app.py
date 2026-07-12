@@ -11124,10 +11124,12 @@ def auth_config():
     # 固有値をソースにハードコードすると (a) このデプロイが常に beacon-ai.dev の
     # OAuth アプリを指す前提が焼き込まれ、(b) env 欠落を黙って埋めて設定ミスを
     # 隠す silent fallback になる。そこで値はソースに持たせず env を唯一の真値源に
-    # し、repo 側では deploy/app.env.example + docs/DEPLOY_VPS.md の runbook に
-    # 公開値として固定する (= ms-96 e-3196、サービス移設で無音欠落しない)。env
-    # 欠落は隠さず、本番では /health が 503 を返して deploy を赤くする (= e-3197、
-    # 上記 health() 参照)。dev はログインフォーム経路なので空でも 200 のまま。
+    # する (= ms-96 e-3196)。固有の実値は runbook (docs/DEPLOY_VPS.md) と本番の
+    # /etc/beacon/app.env だけが持ち、repo の deploy/app.env.example は placeholder
+    # を置くテンプレート (= 固有値を焼き込まない、ms-105 e-3313)。env 欠落は隠さず、
+    # 本番では /health が 503 を返して deploy を赤くする (= e-3197、上記 health()
+    # 参照) ので、実値を repo に置かなくても無音欠落しない。dev はログインフォーム
+    # 経路なので空でも 200 のまま。
     return {
         "provider": "firebase",
         "client_id": os.environ.get("BEACON_OAUTH_CLIENT_ID", ""),
