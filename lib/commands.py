@@ -17857,6 +17857,39 @@ def cmd_bus_send():
             file=sys.stderr,
         )
 
+    # Qualitative gate (ms-93 e-3340 — mirrors channel/bus-qualgate.mjs).
+    # When this is an armed autonomous reply (in_reply_to + a real budget slot
+    # was consumed), HOLD 外部宛 / 機密 / action付き sends for the human instead
+    # of letting them go out. This brings the CLI send path — how a Codex armed
+    # session replies (codex_receive_loop builds `beacon bus send`) — to parity
+    # with bus.mjs's MCP reply gate, so e-3308's qualitative safety isn't
+    # Claude-only. Held sends refund the slot (e-2999). BEACON_QUALGATE_OFF=1
+    # opts out (same escape hatch as the JS side).
+    if (
+        in_reply_to and _budget_slot_consumed
+        and os.environ.get("BEACON_QUALGATE_OFF") != "1"
+    ):
+        import dm_qualgate
+        _sender_proj = str((config or {}).get("project_id") or "").strip()
+        _actions = [
+            a for a in os.environ.get("BEACON_BUS_ACTION", "").split(",")
+            if a.strip()
+        ]
+        _cat = dm_qualgate.classify_outbound_reply(
+            channel=channel,
+            sender_project_id=_sender_proj,
+            recipient_project_id=project_id,
+            actions_authorized=_actions,
+            confidential=False,
+        )
+        _q = dm_qualgate.evaluate_outbound_qual_gate(_cat, armed=True)
+        if _q["hold"]:
+            # Held, not delivered → refund the consumed slot so a held reply
+            # doesn't cost an autonomous turn.
+            _bus_budget_refund_one()
+            print(dm_qualgate.qual_hold_message(_q["category"]), file=sys.stderr)
+            sys.exit(1)
+
     try:
         event = client.post_bus_event(
             project_id, channel,
