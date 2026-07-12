@@ -34,7 +34,12 @@ import { execSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { consumeBusBudgetOne, refuseMessage } from './bus-budget.mjs'
+import {
+  consumeBusBudgetOne, refundBusBudgetOne, refuseMessage,
+} from './bus-budget.mjs'
+import {
+  classifyOutboundReply, evaluateOutboundQualGate, qualHoldMessage,
+} from './bus-qualgate.mjs'
 import { selectTierForBridge } from './bus-envelope.mjs'
 import { buildHeartbeatBody } from './bus-heartbeat.mjs'
 import { createLocalSessionHeartbeat } from './bus-local-heartbeat.mjs'
@@ -802,6 +807,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   // post (no in_reply_to) is a manual send — the human composing the tool
   // call IS the approval, same as the CLI's manual-send path. Without this
   // distinction the CLI and MCP semantics diverge again.
+  // Track whether the pessimistic budget decrement committed a slot, so a
+  // held / failed send can refund it (ms-100 e-2999) instead of burning a turn.
+  let budgetConsumed = false
   if (in_reply_to) {
     const gate = consumeBusBudgetOne(CWD)
     if (!gate.allowed) {
@@ -809,7 +817,37 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       log(`reply REFUSED by budget gate: reason=${gate.reason}`)
       return { content: [{ type: 'text', text: msg }], isError: true }
     }
+    budgetConsumed = !!(gate.budget && gate.budget.armed)
     log(`reply budget consumed: ${gate.budget.used}/${gate.budget.total}`)
+
+    // Qualitative gate (ms-100 e-3308): the budget gate is quantitative
+    // ("at most N auto-sends"); this is the qualitative half. Even within
+    // budget, armed mode must HOLD 外部宛 / 機密 / action付き autonomous replies
+    // for the human instead of leaning on the Skill prompt to remember to ask.
+    // Trek-scoped channels are pre-approved scope → not held. BEACON_QUALGATE_OFF=1
+    // is an explicit escape hatch (mirrors BEACON_BUS_NO_LIVE_CHECK).
+    if (process.env.BEACON_QUALGATE_OFF !== '1' && budgetConsumed) {
+      const category = classifyOutboundReply({
+        channel,
+        senderProjectId: PROJECT_ID,
+        recipientProjectId: recipient_project_id,
+        // MCP reply tool sends text-only pings; envelope actions are minted
+        // later and empty here. Confidential is deferred to ms-63 (no signal).
+        actionsAuthorized: null,
+        confidential: false,
+      })
+      const q = evaluateOutboundQualGate({ classification: category, armed: true })
+      if (q.hold) {
+        // The send is being held, not delivered — refund the consumed slot
+        // (e-2999) so a held reply doesn't cost an autonomous turn.
+        refundBusBudgetOne(CWD)
+        log(`reply HELD by qual gate: category=${q.category} (budget refunded)`)
+        return {
+          content: [{ type: 'text', text: qualHoldMessage(q.category) }],
+          isError: true,
+        }
+      }
+    }
   }
 
   // Envelope-by-default (e-1290). Mint a server-signed envelope before
@@ -837,7 +875,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     log(`reply sent: event_id=${result.event_id} ${tag} → ${recipient_project_id}/${recipient_session_id}`)
     return { content: [{ type: 'text', text: `sent ${result.event_id}` }] }
   } catch (e) {
-    log(`reply ERROR: ${e.message}`)
+    // The send failed — refund the pessimistically-consumed slot (e-2999) so a
+    // network / server error doesn't silently burn an autonomous-reply turn.
+    if (budgetConsumed) {
+      refundBusBudgetOne(CWD)
+      log(`reply ERROR: ${e.message} (budget refunded)`)
+    } else {
+      log(`reply ERROR: ${e.message}`)
+    }
     return { content: [{ type: 'text', text: `error: ${e.message}` }], isError: true }
   }
 })

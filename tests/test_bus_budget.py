@@ -405,11 +405,13 @@ def test_grant_allowed_when_no_operation_context(project_dir, monkeypatch,
     assert data["total"] == 5
 
 
-def test_reply_consumes_even_if_cloud_call_would_fail(project_dir, monkeypatch,
-                                                       capsys):
-    """Pessimistic semantics: decrement happens BEFORE the cloud call so a
-    retry storm on a flaky network can't smuggle extra sends. We verify by
-    making the cloud raise — the budget should still reflect a consumed slot."""
+def test_reply_refunds_budget_when_cloud_call_fails(project_dir, monkeypatch,
+                                                    capsys):
+    """ms-100 e-2999: the decrement is still pessimistic (happens BEFORE the
+    cloud call so the gate can't be raced), but if the send then FAILS the slot
+    is refunded — a failed send must not silently burn an autonomous-reply turn.
+    Previously (test_reply_consumes_even_if_cloud_call_would_fail) the slot was
+    kept even on failure; e-2999 flips that to refund-on-failure."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "3")
     commands.cmd_bus_budget_grant()
@@ -420,11 +422,8 @@ def test_reply_consumes_even_if_cloud_call_would_fail(project_dir, monkeypatch,
             raise RuntimeError("cloud is down")
 
         def issue_bus_envelope(self, *a, **kw):
-            # e-1290: envelope-by-default in cmd_bus_send. We make issuance
-            # fail with the same shape as the post — both 5xx-class
-            # RuntimeError. The CLI falls back to no-envelope (logs to
-            # stderr) and *then* the post fails. The test still asserts
-            # the budget was decremented before the cloud-down post.
+            # e-1290: envelope-by-default. Issuance fails the same 5xx-class
+            # way; the CLI falls back to no-envelope, then the post fails.
             raise RuntimeError("cloud is down")
 
     monkeypatch.setattr(commands, "_get_api_client",
@@ -433,10 +432,10 @@ def test_reply_consumes_even_if_cloud_call_would_fail(project_dir, monkeypatch,
     monkeypatch.setenv("BEACON_BUS_IN_REPLY_TO", "e-x")
     with pytest.raises(RuntimeError):
         commands.cmd_bus_send()
-    # Budget still went from 0 → 1 even though the cloud call raised.
+    # Budget went 0 → 1 (pessimistic) then refunded back to 0 on the failure.
     budget = json.loads(
         (project_dir / ".beacon" / "bus-budget.json").read_text())
-    assert budget["used"] == 1
+    assert budget["used"] == 0, "a failed send must refund the consumed slot"
 
 
 # ---------------------------------------------------------------------------

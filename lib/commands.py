@@ -17171,6 +17171,15 @@ def _bus_budget_consume_one() -> tuple[bool, dict]:
         # No budget file at all == autonomous mode never armed → allow
         # sends (the gate only applies when armed). Manual one-off DMs from
         # the CLI should not require granting first.
+        #
+        # INTENTIONAL ASYMMETRY (ms-100 e-3310): the MCP reply gate
+        # (channel/bus-budget.mjs consumeBusBudgetOne) REFUSES on a missing
+        # file ('not_granted') instead of allowing. CLI = human (allow), MCP =
+        # AI (default-OFF, require grant). The two agree on every armed case
+        # (total<=0 / exhausted / decrement) and diverge ONLY here, on purpose.
+        # Do not "unify" — that either removes armed mode's safety or breaks
+        # manual sends. Pinned by tests/test_bus_budget_asymmetry.py; background
+        # in SPEC PVaNf6HYFjucgBS3lkQF ("armed の本質").
         return True, {"total": 0, "used": 0, "armed": False}
     total = int(b.get("total", 0))
     used = int(b.get("used", 0))
@@ -17181,6 +17190,29 @@ def _bus_budget_consume_one() -> tuple[bool, dict]:
     b["used"] = used + 1
     _write_bus_budget(b)
     return True, {**b, "armed": True}
+
+
+def _bus_budget_refund_one() -> bool:
+    """Give back one consumed budget slot (ms-100 e-2999).
+
+    ``_bus_budget_consume_one`` is a *pessimistic* decrement: it commits the
+    slot before the send happens so the gate can't be raced. If the send is
+    then aborted or fails, that slot was never actually used — refund it so a
+    failed send doesn't silently burn an autonomous-reply turn. Clamps ``used``
+    at 0 (a double refund / refund-without-consume can't go negative). Returns
+    True iff a slot was actually given back. Mirrors
+    ``channel/bus-budget.mjs refundBusBudgetOne`` for the MCP path.
+    """
+    b = _read_bus_budget()
+    if b is None:
+        return False
+    total = int(b.get("total", 0))
+    used = int(b.get("used", 0))
+    if total <= 0 or used <= 0:
+        return False
+    b["used"] = used - 1
+    _write_bus_budget(b)
+    return True
 
 
 def _record_bus_budget_trek_bypass(trek_id: str) -> None:
@@ -17643,8 +17675,12 @@ def cmd_bus_send():
     #     human must re-grant.
     #   * budget granted and remaining > 0 → decrement, then send. The
     #     decrement happens *before* the cloud call so a network failure
-    #     can't smuggle an extra send past the gate.
+    #     can't smuggle an extra send past the gate. If the send then fails
+    #     the slot is refunded (e-2999) so a failed send doesn't burn a turn.
     budget: dict = {"armed": False}
+    # ms-100 e-2999: True once a real budget slot was decremented (not a Trek
+    # bypass), so a failed send below can refund exactly that slot.
+    _budget_slot_consumed = False
     if in_reply_to:
         # ms-75 / e-2044: Trek-internal sends bypass the budget gate. Trek
         # is an opt-in pre-approval scope (= 缶詰の作業部屋), so the budget
@@ -17688,6 +17724,9 @@ def cmd_bus_send():
                     file=sys.stderr,
                 )
                 sys.exit(1)
+            # A real slot was decremented (armed budget, not a Trek bypass).
+            # Remember so the send failure path can refund it (e-2999).
+            _budget_slot_consumed = bool(budget.get("armed"))
 
     if in_reply_to:
         # Thread the reply by stamping the parent event_id on the payload.
@@ -17818,16 +17857,24 @@ def cmd_bus_send():
             file=sys.stderr,
         )
 
-    event = client.post_bus_event(
-        project_id, channel,
-        sender_session_id=sender,
-        payload=payload,
-        delivery=delivery,
-        envelope=envelope_obj,
-        requested_action=requested_action,
-        context=dec_context,
-        rationale=dec_rationale,
-    )
+    try:
+        event = client.post_bus_event(
+            project_id, channel,
+            sender_session_id=sender,
+            payload=payload,
+            delivery=delivery,
+            envelope=envelope_obj,
+            requested_action=requested_action,
+            context=dec_context,
+            rationale=dec_rationale,
+        )
+    except BaseException:
+        # The send failed — refund the pessimistically-decremented slot
+        # (e-2999) so a network / server error doesn't silently burn an
+        # autonomous-reply turn. Then re-raise so the failure still surfaces.
+        if _budget_slot_consumed:
+            _bus_budget_refund_one()
+        raise
     if os.environ.get("BEACON_JSON", "") == "1":
         # Augment the event JSON with the post-decrement budget so scripted
         # callers can decide whether to keep the autonomous loop running.
