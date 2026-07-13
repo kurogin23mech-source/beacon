@@ -383,6 +383,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_account_contact.add_argument("--role", default="")
     p_account_contact.add_argument("--email", default="")
 
+    p_account_phase = account_sub.add_parser("phase", add_help=False)
+    p_account_phase.add_argument("acc_id", nargs="?", default="")
+    p_account_phase.add_argument("phase", nargs="?", default="")
+    p_account_phase.add_argument("--note", default="")
+
+    p_account_delete = account_sub.add_parser("delete", add_help=False)
+    p_account_delete.add_argument("acc_id", nargs="?", default="")
+    p_account_delete.add_argument("--force", action="store_true")
+
     # ---- opportunity (ms-106: sales entities, profession=sales) ----
     p_opp = sub.add_parser(
         "opportunity", aliases=["opp"], help="Sales opportunity operations",
@@ -414,6 +423,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_opp_activity.add_argument("desc", nargs="?", default="")
     p_opp_activity.add_argument("--deadline", default="")
     p_opp_activity.add_argument("--ball", default="")
+
+    p_opp_delete = opp_sub.add_parser("delete", add_help=False)
+    p_opp_delete.add_argument("opp_id", nargs="?", default="")
+
+    # ---- phase (ms-106: sales entities, profession=sales) ----
+    p_phase = sub.add_parser(
+        "phase", help="Sales phase funnel vocabulary", add_help=False,
+    )
+    p_phase.add_argument("--help", "-h", action="store_true", dest="show_help")
+    phase_sub = p_phase.add_subparsers(dest="phase_cmd", metavar="<subcmd>")
+
+    phase_sub.add_parser("list", add_help=False).add_argument(
+        "--json", action="store_true"
+    )
 
     # ---- sync ----
     p_sync = sub.add_parser("sync", help="Auto-sync recent git commits", add_help=False)
@@ -1773,7 +1796,7 @@ def _handle_save(root: Path, args: argparse.Namespace) -> int:
 
 def _handle_account(root: Path, args: argparse.Namespace) -> int:
     if args.show_help or args.account_cmd is None:
-        print("Usage: beacon account [add|list|contact] [options]")
+        print("Usage: beacon account [add|list|contact|phase|delete] [options]")
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
         return rc
@@ -1803,13 +1826,32 @@ def _handle_account(root: Path, args: argparse.Namespace) -> int:
             "BEACON_CONTACT_EMAIL": args.email or "",
         }
         return _run_commands_py(root, "account_contact", env)
-    print("Usage: beacon account [add|list|contact] [options]")
+    if cmd == "phase":
+        if not args.acc_id or not args.phase:
+            print("Usage: beacon account phase <acc-id> <phase> [--note <text>]")
+            return 1
+        env = {
+            "BEACON_ACCOUNT_ID": args.acc_id or "",
+            "BEACON_PHASE": args.phase or "",
+            "BEACON_PHASE_NOTE": args.note or "",
+        }
+        return _run_commands_py(root, "account_phase", env)
+    if cmd == "delete":
+        if not args.acc_id:
+            print("Usage: beacon account delete <acc-id> [--force]")
+            return 1
+        env = {
+            "BEACON_ACCOUNT_ID": args.acc_id or "",
+            "BEACON_FORCE": "1" if args.force else "",
+        }
+        return _run_commands_py(root, "account_delete", env)
+    print("Usage: beacon account [add|list|contact|phase|delete] [options]")
     return 2
 
 
 def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
     if args.show_help or args.opp_cmd is None:
-        print("Usage: beacon opportunity [add|list|phase|activity] [options]")
+        print("Usage: beacon opportunity [add|list|phase|activity|delete] [options]")
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
         return rc
@@ -1856,7 +1898,28 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
             "BEACON_ACTIVITY_BALL": args.ball or "",
         }
         return _run_commands_py(root, "opportunity_activity", env)
-    print("Usage: beacon opportunity [add|list|phase|activity] [options]")
+    if cmd == "delete":
+        if not args.opp_id:
+            print("Usage: beacon opportunity delete <opp-id>")
+            return 1
+        env = {"BEACON_OPP_ID": args.opp_id or ""}
+        return _run_commands_py(root, "opportunity_delete", env)
+    print("Usage: beacon opportunity [add|list|phase|activity|delete] [options]")
+    return 2
+
+
+def _handle_phase(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help or args.phase_cmd is None:
+        print("Usage: beacon phase list [--json]")
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+
+    cmd = args.phase_cmd
+    if cmd == "list":
+        env = {"BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "phase_list", env)
+    print("Usage: beacon phase list [--json]")
     return 2
 
 
@@ -4255,6 +4318,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "acc": _handle_account,
     "opportunity": _handle_opportunity,
     "opp": _handle_opportunity,
+    "phase": _handle_phase,
     "sync": _handle_sync,
     "task": _handle_task,
     "milestone": _handle_milestone,

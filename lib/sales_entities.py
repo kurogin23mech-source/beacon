@@ -352,6 +352,47 @@ def activity_add(data: dict, opportunity_id: str, description: str, *,
 
 
 # ---------------------------------------------------------------------------
+# Deletion (referential integrity: 参照 association is checked; composition
+# children are removed with their parent).
+# ---------------------------------------------------------------------------
+
+def account_delete(data: dict, account_id: str, *, force: bool = False) -> list:
+    """Remove an Account. Returns the list of opportunity ids that referenced
+    it (orphaned when ``force``).
+
+    Because Opportunity → Account is a 参照 association (independent lifecycle),
+    deleting a referenced Account is refused unless ``force`` — with ``force``
+    the referencing opportunities are orphaned (``account_id`` set to None)
+    rather than cascade-deleted (a lost deal shouldn't vanish with its account).
+    """
+    acc = find_account(data, account_id)
+    if acc is None:
+        raise ValueError(f"Account not found: {account_id}")
+    referencing = [o["id"] for o in data.get("opportunities", [])
+                   if o.get("account_id") == account_id]
+    if referencing and not force:
+        raise ValueError(
+            f"Account {account_id} is referenced by {referencing}; reassign "
+            f"those opportunities or pass force=True to orphan them")
+    if referencing and force:
+        for o in data.get("opportunities", []):
+            if o.get("account_id") == account_id:
+                o["account_id"] = None
+    data["accounts"] = [a for a in data.get("accounts", [])
+                        if a.get("id") != account_id]
+    return referencing
+
+
+def opportunity_delete(data: dict, opportunity_id: str) -> None:
+    """Remove an Opportunity and its composition children (activities go with
+    it — they have no life independent of the deal)."""
+    if find_opportunity(data, opportunity_id) is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    data["opportunities"] = [o for o in data.get("opportunities", [])
+                             if o.get("id") != opportunity_id]
+
+
+# ---------------------------------------------------------------------------
 # Sales project template
 # ---------------------------------------------------------------------------
 

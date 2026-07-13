@@ -214,3 +214,55 @@ def test_activity_unknown_opportunity():
     data = _fresh()
     with pytest.raises(ValueError):
         se.activity_add(data, "opp-9", "call")
+
+
+# --- deletion + referential integrity --------------------------------------
+
+def test_opportunity_delete_removes_it_and_activities():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    se.activity_add(data, opp, "call")
+    se.opportunity_delete(data, opp)
+    assert se.find_opportunity(data, opp) is None
+    assert data["opportunities"] == []
+
+
+def test_opportunity_delete_unknown():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.opportunity_delete(data, "opp-9")
+
+
+def test_account_delete_unreferenced():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    orphaned = se.account_delete(data, acc)
+    assert orphaned == []
+    assert se.find_account(data, acc) is None
+
+
+def test_account_delete_referenced_refused_without_force():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    se.opportunity_add(data, "Deal", account_id=acc)
+    with pytest.raises(ValueError):
+        se.account_delete(data, acc)
+    # account survives the refusal
+    assert se.find_account(data, acc) is not None
+
+
+def test_account_delete_force_orphans_opportunities():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    opp = se.opportunity_add(data, "Deal", account_id=acc)
+    orphaned = se.account_delete(data, acc, force=True)
+    assert orphaned == [opp]
+    assert se.find_account(data, acc) is None
+    # the deal survives, now account-less (a lost deal shouldn't vanish)
+    assert se.find_opportunity(data, opp)["account_id"] is None
+
+
+def test_account_delete_unknown():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.account_delete(data, "acc-9")

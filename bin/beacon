@@ -56,10 +56,14 @@ Sales (profession=sales):
   beacon account add "<name>" [--health <text>]              Add an account (customer / company)
   beacon account list [--json]                               List accounts + their contacts
   beacon account contact <acc-id> <name> [--role <text>] [--email <text>]   Add a contact to an account
+  beacon account phase <acc-id> <phase> [--note <text>]      Declare an account lifecycle phase transition
+  beacon account delete <acc-id> [--force]                   Delete an account (--force orphans referencing opportunities)
   beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart]   Add a deal / opportunity
   beacon opportunity list [--json]                           List opportunities
   beacon opportunity phase <opp-id> <phase> [--note <text>]  Move an opportunity to a new phase
   beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self|counterpart]   Log an activity on an opportunity
+  beacon opportunity delete <opp-id>                         Delete an opportunity and its activities
+  beacon phase list [--json]                                 Show the configured phase funnels
 
 Pull Requests:
   beacon pr create [-m <ms-id>] [gh flags...]  Create PR and record it
@@ -1206,6 +1210,72 @@ cmd_opportunity_activity() {
         python3 "$COMMANDS_PY" opportunity_activity
 }
 
+cmd_account_phase() {
+    ensure_project
+    local acc_id="" phase="" note=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --note) note="${2:-}"; shift 2 ;;
+            -?*)    _guard_positional "$1" "Usage: beacon account phase <acc-id> <phase> [--note <text>]" ;;
+            *)
+                if [ -z "$acc_id" ]; then acc_id="$1"; else phase="$1"; fi
+                shift ;;
+        esac
+    done
+    if [ -z "$acc_id" ] || [ -z "$phase" ]; then
+        echo "Usage: beacon account phase <acc-id> <phase> [--note <text>]"
+        exit 1
+    fi
+    BEACON_ACCOUNT_ID="$acc_id" BEACON_PHASE="$phase" BEACON_PHASE_NOTE="$note" \
+        python3 "$COMMANDS_PY" account_phase
+}
+
+cmd_account_delete() {
+    ensure_project
+    local acc_id="" force=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force) force="1"; shift ;;
+            -?*)     _guard_positional "$1" "Usage: beacon account delete <acc-id> [--force]" ;;
+            *)       acc_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$acc_id" ]; then
+        echo "Usage: beacon account delete <acc-id> [--force]"
+        exit 1
+    fi
+    BEACON_ACCOUNT_ID="$acc_id" BEACON_FORCE="$force" \
+        python3 "$COMMANDS_PY" account_delete
+}
+
+cmd_opportunity_delete() {
+    ensure_project
+    local opp_id=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -?*) _guard_positional "$1" "Usage: beacon opportunity delete <opp-id>" ;;
+            *)   opp_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ]; then
+        echo "Usage: beacon opportunity delete <opp-id>"
+        exit 1
+    fi
+    BEACON_OPP_ID="$opp_id" python3 "$COMMANDS_PY" opportunity_delete
+}
+
+cmd_phase_list() {
+    ensure_project
+    local json_flag=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_flag="1"; shift ;;
+            *)      shift ;;
+        esac
+    done
+    BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" phase_list
+}
+
 cmd_log() {
     ensure_project
     # e-1227 (ms-17): resolve git operations from the *original* invocation
@@ -2332,7 +2402,9 @@ case "${1:-}" in
             add)     shift 2; cmd_account_add "$@" ;;
             list|ls) shift 2; cmd_account_list "$@" ;;
             contact) shift 2; cmd_account_contact "$@" ;;
-            *)       echo "Usage: beacon account [add|list|contact]" ;;
+            phase)   shift 2; cmd_account_phase "$@" ;;
+            delete)  shift 2; cmd_account_delete "$@" ;;
+            *)       echo "Usage: beacon account [add|list|contact|phase|delete]" ;;
         esac
         ;;
     opportunity|opp)
@@ -2341,7 +2413,14 @@ case "${1:-}" in
             list|ls)  shift 2; cmd_opportunity_list "$@" ;;
             phase)    shift 2; cmd_opportunity_phase "$@" ;;
             activity) shift 2; cmd_opportunity_activity "$@" ;;
-            *)        echo "Usage: beacon opportunity [add|list|phase|activity]" ;;
+            delete)   shift 2; cmd_opportunity_delete "$@" ;;
+            *)        echo "Usage: beacon opportunity [add|list|phase|activity|delete]" ;;
+        esac
+        ;;
+    phase)
+        case "${2:-}" in
+            list)    shift 2; cmd_phase_list "$@" ;;
+            *)       echo "Usage: beacon phase list [--json]" ;;
         esac
         ;;
     sync)

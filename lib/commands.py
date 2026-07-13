@@ -16409,10 +16409,14 @@ def cmd_help_json():
         {"command": "beacon account add <name>", "flags": ["--health <text>"], "description": "Add a sales account (顧客; 対象・継続)"},
         {"command": "beacon account list", "flags": ["--json"], "description": "List sales accounts and their contacts"},
         {"command": "beacon account contact <acc-id> <name>", "flags": ["--role <text>", "--email <text>"], "description": "Add a contact (担当者) nested under an account"},
+        {"command": "beacon account phase <acc-id> <phase>", "flags": ["--note <text>"], "description": "Declare an account lifecycle phase transition (append-only)"},
+        {"command": "beacon account delete <acc-id>", "flags": ["--force"], "description": "Delete an account (--force orphans referencing opportunities)"},
         {"command": "beacon opportunity add <title>", "flags": ["--account <acc-id>", "--phase <p>", "--goal <n>", "--probability <n>", "--deadline <date>", "--ball self|counterpart"], "description": "Add a sales opportunity (商談; 対象・有限)"},
         {"command": "beacon opportunity list", "flags": ["--json"], "description": "List sales opportunities with phase / status / account"},
         {"command": "beacon opportunity phase <opp-id> <phase>", "flags": ["--note <text>"], "description": "Declare a phase transition (append-only phase_history; master=人間)"},
         {"command": "beacon opportunity activity <opp-id> <desc>", "flags": ["--deadline <date>", "--ball self|counterpart"], "description": "Add an activity (業務・事前計画型) under an opportunity"},
+        {"command": "beacon opportunity delete <opp-id>", "flags": [], "description": "Delete an opportunity and its activities"},
+        {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity vocabulary)"},
         {"command": "beacon save <desc>", "flags": ["-m <ms-id>", "--hash <hash>", "--source manual", "--json"], "description": "Save a freeform entry to a milestone"},
         {"command": "beacon sync", "flags": [], "description": "Auto-sync recent git commits to active milestone"},
         {"command": "beacon summary <text>", "flags": [], "description": "Update project summary"},
@@ -20636,6 +20640,43 @@ def cmd_account_list():
             print(f"    - {c.get('name', '?')}{role}{email}")
 
 
+def cmd_account_phase():
+    import sales_entities
+    account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
+    new_phase = os.environ.get("BEACON_PHASE", "")
+    note = os.environ.get("BEACON_PHASE_NOTE", "")
+    data = load_project()
+    for w in sales_entities.account_phase_warnings(data, new_phase):
+        print(f"  ⚠ {w}", file=sys.stderr)
+    if not account_id.startswith("acc-"):
+        print(f"Error: expected an account id (acc-…), got {account_id!r}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        rec = sales_entities.phase_set(data, account_id, new_phase, note=note,
+                                       at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"{account_id} phase → {rec['phase']} (recorded in phase_history)")
+
+
+def cmd_account_delete():
+    import sales_entities
+    account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
+    force = os.environ.get("BEACON_FORCE", "") == "1"
+    data = load_project()
+    try:
+        orphaned = sales_entities.account_delete(data, account_id, force=force)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Deleted account {account_id}")
+    if orphaned:
+        print(f"  orphaned opportunities (account_id cleared): {', '.join(orphaned)}")
+
+
 def cmd_account_contact():
     import sales_entities
     account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
@@ -20741,6 +20782,56 @@ def cmd_opportunity_phase():
     print(f"{opp_id} phase → {rec['phase']} (recorded in phase_history)")
 
 
+def cmd_opportunity_delete():
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    data = load_project()
+    try:
+        sales_entities.opportunity_delete(data, opp_id)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Deleted opportunity {opp_id}")
+
+
+def cmd_phase_list():
+    """Show the configured phase funnels (per-company vocabulary), not a single
+    entity's transitions. This is the sales-project's methodology, editable
+    config living in project.json."""
+    import sales_entities
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    acc_phases = sales_entities.account_phases(data)
+    opp_phases = sales_entities.opportunity_phases(data)
+    if json_mode:
+        print(json.dumps({"account_phases": acc_phases,
+                          "opportunity_phases": opp_phases},
+                         ensure_ascii=False, indent=2))
+        return
+    if not acc_phases and not opp_phases:
+        print("No phase funnel configured (not a sales project, or no phases set).")
+        return
+    print("顧客 (Account) phases:")
+    for p in acc_phases:
+        print(f"  - {p.get('name')}")
+    print("商談 (Opportunity) phases:")
+    for p in opp_phases:
+        if p.get("terminal"):
+            outcome = p.get("outcome", "")
+            print(f"  - {p.get('name')} [terminal → {outcome}]")
+        else:
+            allowed = p.get("allowed_terminals")
+            prob = p.get("probability")
+            bits = []
+            if prob is not None:
+                bits.append(f"prob {prob}")
+            if allowed:
+                bits.append(f"→ {'/'.join(allowed)}")
+            suffix = f"  ({', '.join(bits)})" if bits else ""
+            print(f"  - {p.get('name')}{suffix}")
+
+
 def cmd_opportunity_activity():
     import sales_entities
     opp_id = os.environ.get("BEACON_OPP_ID", "")
@@ -20791,10 +20882,14 @@ if __name__ == "__main__":
         "account_add": cmd_account_add,
         "account_list": cmd_account_list,
         "account_contact": cmd_account_contact,
+        "account_phase": cmd_account_phase,
+        "account_delete": cmd_account_delete,
         "opportunity_add": cmd_opportunity_add,
         "opportunity_list": cmd_opportunity_list,
         "opportunity_phase": cmd_opportunity_phase,
         "opportunity_activity": cmd_opportunity_activity,
+        "opportunity_delete": cmd_opportunity_delete,
+        "phase_list": cmd_phase_list,
         "task_add": cmd_task_add,
         "task_done": cmd_task_done,
         "task_list": cmd_task_list,

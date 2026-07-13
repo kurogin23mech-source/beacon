@@ -252,10 +252,14 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon account add "<name>" [--health <text>]` | Add an account / 取引先を追加 |
 | `beacon account list [--json]` | List accounts and their contacts / 取引先と担当者を一覧 |
 | `beacon account contact <acc-id> <name> [--role <text>] [--email <text>]` | Add a contact to an account / 取引先に担当者を追加 |
+| `beacon account phase <acc-id> <phase> [--note <text>]` | Declare an account lifecycle phase transition (append-only) / 取引先のフェーズを記録（追記のみ） |
+| `beacon account delete <acc-id> [--force]` | Delete an account (--force orphans referencing opportunities) / 取引先を削除（--force で参照中の商談を孤立化） |
 | `beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self\|counterpart]` | Add a deal / 商談を追加 |
 | `beacon opportunity list [--json]` | List opportunities / 商談を一覧 |
 | `beacon opportunity phase <opp-id> <phase> [--note <text>]` | Move an opportunity to a new phase (recorded in history) / 商談のフェーズを変更（履歴に記録） |
 | `beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self\|counterpart]` | Log an activity on an opportunity / 商談に活動を記録 |
+| `beacon opportunity delete <opp-id>` | Delete an opportunity and its activities / 商談と活動を削除 |
+| `beacon phase list [--json]` | Show the configured phase funnels (account / opportunity vocabulary) / 設定済みフェーズファネルを表示 |
 
 ### Pull Requests
 
