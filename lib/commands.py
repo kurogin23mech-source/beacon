@@ -718,17 +718,36 @@ def cmd_init():
     # next to the existing top-level project fields so legacy readers that
     # don't know about it just ignore it (= forward-compat append-only).
     disclosure_policy = _build_disclosure_policy_from_env()
-    data = {
-        "name": name,
-        "objective": objective,
-        "milestones": [],
-        "retro_day": retro_day,
-        "disclosure_policy": disclosure_policy,
-    }
+    # ms-106 ① — 職種テンプレート選択. BEACON_PROFESSION picks the job-template
+    # (= agent class instance, SPEC 設計方針 0). Default "dev" keeps the
+    # existing schema byte-for-byte; "sales" emits the sales entity schema
+    # (opportunities/accounts) instead of driving work through milestones.
+    # Both carry milestones:[] so the shared validator passes unchanged.
+    profession = (os.environ.get("BEACON_PROFESSION", "dev") or "dev").strip().lower()
+    if profession == "sales":
+        import sales_entities
+        data = sales_entities.build_sales_project(
+            name, objective, retro_day=retro_day,
+            disclosure_policy=disclosure_policy)
+    elif profession in ("", "dev"):
+        data = {
+            "name": name,
+            "objective": objective,
+            "profession": "dev",
+            "milestones": [],
+            "retro_day": retro_day,
+            "disclosure_policy": disclosure_policy,
+        }
+    else:
+        print(f"Error: unknown profession '{profession}' (valid: dev, sales)",
+              file=sys.stderr)
+        sys.exit(1)
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
     print(f"Created {pf}")
+    if profession == "sales":
+        print("  profession = sales (営業スキーマ: opportunities / accounts)")
     # Visible feedback on the chosen posture (SPEC § acceptance 2 + 3):
     # default-high is silent-but-printed so the user notices, opt-in low
     # gets a single-line confirmation that the OSS-friendly mode is active.
@@ -748,7 +767,10 @@ def cmd_init():
         _persist_initial_profile_choice(chosen)
         print(f"Profile pinned for this project: {chosen}")
 
-    print("Next: beacon milestone add")
+    if profession == "sales":
+        print("Next: beacon account add / beacon opportunity add")
+    else:
+        print("Next: beacon milestone add")
 
 
 def cmd_common_setup():
