@@ -362,6 +362,59 @@ def build_parser() -> argparse.ArgumentParser:
     p_save.add_argument("--json", action="store_true")
     p_save.add_argument("--help", "-h", action="store_true", dest="show_help")
 
+    # ---- account (ms-106: sales entities, profession=sales) ----
+    p_account = sub.add_parser(
+        "account", aliases=["acc"], help="Sales account operations", add_help=False,
+    )
+    p_account.add_argument("--help", "-h", action="store_true", dest="show_help")
+    account_sub = p_account.add_subparsers(dest="account_cmd", metavar="<subcmd>")
+
+    p_account_add = account_sub.add_parser("add", add_help=False)
+    p_account_add.add_argument("name", nargs="?", default="")
+    p_account_add.add_argument("--health", default="")
+
+    account_sub.add_parser("list", aliases=["ls"], add_help=False).add_argument(
+        "--json", action="store_true"
+    )
+
+    p_account_contact = account_sub.add_parser("contact", add_help=False)
+    p_account_contact.add_argument("acc_id", nargs="?", default="")
+    p_account_contact.add_argument("name", nargs="?", default="")
+    p_account_contact.add_argument("--role", default="")
+    p_account_contact.add_argument("--email", default="")
+
+    # ---- opportunity (ms-106: sales entities, profession=sales) ----
+    p_opp = sub.add_parser(
+        "opportunity", aliases=["opp"], help="Sales opportunity operations",
+        add_help=False,
+    )
+    p_opp.add_argument("--help", "-h", action="store_true", dest="show_help")
+    opp_sub = p_opp.add_subparsers(dest="opp_cmd", metavar="<subcmd>")
+
+    p_opp_add = opp_sub.add_parser("add", add_help=False)
+    p_opp_add.add_argument("title", nargs="?", default="")
+    p_opp_add.add_argument("--account", default="")
+    p_opp_add.add_argument("--phase", default="")
+    p_opp_add.add_argument("--goal", default="")
+    p_opp_add.add_argument("--probability", default="")
+    p_opp_add.add_argument("--deadline", default="")
+    p_opp_add.add_argument("--ball", default="")
+
+    opp_sub.add_parser("list", aliases=["ls"], add_help=False).add_argument(
+        "--json", action="store_true"
+    )
+
+    p_opp_phase = opp_sub.add_parser("phase", add_help=False)
+    p_opp_phase.add_argument("opp_id", nargs="?", default="")
+    p_opp_phase.add_argument("phase", nargs="?", default="")
+    p_opp_phase.add_argument("--note", default="")
+
+    p_opp_activity = opp_sub.add_parser("activity", add_help=False)
+    p_opp_activity.add_argument("opp_id", nargs="?", default="")
+    p_opp_activity.add_argument("desc", nargs="?", default="")
+    p_opp_activity.add_argument("--deadline", default="")
+    p_opp_activity.add_argument("--ball", default="")
+
     # ---- sync ----
     p_sync = sub.add_parser("sync", help="Auto-sync recent git commits", add_help=False)
     p_sync.add_argument("--help", "-h", action="store_true", dest="show_help")
@@ -1713,6 +1766,98 @@ def _handle_save(root: Path, args: argparse.Namespace) -> int:
         "BEACON_JSON": "1" if args.json else "",
     }
     return _run_commands_py(root, "save", env)
+
+
+# ---- sales entities handlers (ms-106, profession=sales) ----
+
+
+def _handle_account(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help or args.account_cmd is None:
+        print("Usage: beacon account [add|list|contact] [options]")
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+
+    cmd = args.account_cmd
+    if cmd == "add":
+        if not args.name:
+            print('Usage: beacon account add "<name>" [--health <text>]')
+            return 1
+        env = {
+            "BEACON_ACCOUNT_NAME": args.name or "",
+            "BEACON_ACCOUNT_HEALTH": args.health or "",
+        }
+        return _run_commands_py(root, "account_add", env)
+    if cmd in ("list", "ls"):
+        env = {"BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "account_list", env)
+    if cmd == "contact":
+        if not args.acc_id or not args.name:
+            print("Usage: beacon account contact <acc-id> <name> "
+                  "[--role <text>] [--email <text>]")
+            return 1
+        env = {
+            "BEACON_ACCOUNT_ID": args.acc_id or "",
+            "BEACON_CONTACT_NAME": args.name or "",
+            "BEACON_CONTACT_ROLE": args.role or "",
+            "BEACON_CONTACT_EMAIL": args.email or "",
+        }
+        return _run_commands_py(root, "account_contact", env)
+    print("Usage: beacon account [add|list|contact] [options]")
+    return 2
+
+
+def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help or args.opp_cmd is None:
+        print("Usage: beacon opportunity [add|list|phase|activity] [options]")
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+
+    cmd = args.opp_cmd
+    if cmd == "add":
+        if not args.title:
+            print('Usage: beacon opportunity add "<title>" [--account <acc-id>] '
+                  "[--phase <p>] [--goal <n>] [--probability <n>] "
+                  "[--deadline <date>] [--ball self|counterpart]")
+            return 1
+        env = {
+            "BEACON_OPP_TITLE": args.title or "",
+            "BEACON_OPP_ACCOUNT": args.account or "",
+            "BEACON_OPP_PHASE": args.phase or "",
+            "BEACON_OPP_GOAL": args.goal or "",
+            "BEACON_OPP_PROBABILITY": args.probability or "",
+            "BEACON_OPP_DEADLINE": args.deadline or "",
+            "BEACON_OPP_BALL": args.ball or "",
+        }
+        return _run_commands_py(root, "opportunity_add", env)
+    if cmd in ("list", "ls"):
+        env = {"BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "opportunity_list", env)
+    if cmd == "phase":
+        if not args.opp_id or not args.phase:
+            print("Usage: beacon opportunity phase <opp-id> <phase> [--note <text>]")
+            return 1
+        env = {
+            "BEACON_OPP_ID": args.opp_id or "",
+            "BEACON_PHASE": args.phase or "",
+            "BEACON_PHASE_NOTE": args.note or "",
+        }
+        return _run_commands_py(root, "opportunity_phase", env)
+    if cmd == "activity":
+        if not args.opp_id or not args.desc:
+            print("Usage: beacon opportunity activity <opp-id> <desc> "
+                  "[--deadline <date>] [--ball self|counterpart]")
+            return 1
+        env = {
+            "BEACON_OPP_ID": args.opp_id or "",
+            "BEACON_ACTIVITY_DESC": args.desc or "",
+            "BEACON_ACTIVITY_DEADLINE": args.deadline or "",
+            "BEACON_ACTIVITY_BALL": args.ball or "",
+        }
+        return _run_commands_py(root, "opportunity_activity", env)
+    print("Usage: beacon opportunity [add|list|phase|activity] [options]")
+    return 2
 
 
 def _handle_sync(root: Path, args: argparse.Namespace) -> int:
@@ -4105,6 +4250,11 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "summary": _handle_summary,
     "log": _handle_log,
     "save": _handle_save,
+    # ms-106: sales entities (profession=sales)
+    "account": _handle_account,
+    "acc": _handle_account,
+    "opportunity": _handle_opportunity,
+    "opp": _handle_opportunity,
     "sync": _handle_sync,
     "task": _handle_task,
     "milestone": _handle_milestone,

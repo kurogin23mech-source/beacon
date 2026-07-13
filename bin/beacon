@@ -52,6 +52,15 @@ Tasks & Progress:
   beacon sync                           Auto-sync recent git commits
   beacon summary "text"                 Update the project summary
 
+Sales (profession=sales):
+  beacon account add "<name>" [--health <text>]              Add an account (customer / company)
+  beacon account list [--json]                               List accounts + their contacts
+  beacon account contact <acc-id> <name> [--role <text>] [--email <text>]   Add a contact to an account
+  beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart]   Add a deal / opportunity
+  beacon opportunity list [--json]                           List opportunities
+  beacon opportunity phase <opp-id> <phase> [--note <text>]  Move an opportunity to a new phase
+  beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self|counterpart]   Log an activity on an opportunity
+
 Pull Requests:
   beacon pr create [-m <ms-id>] [gh flags...]  Create PR and record it
   beacon pr add <url> [-m <ms-id>]             Register an existing PR
@@ -1060,6 +1069,141 @@ cmd_save() {
         BEACON_HASH="$hash" \
         BEACON_DATE="$date_str" BEACON_JSON="$json_flag" \
         python3 "$COMMANDS_PY" save
+}
+
+# ms-106: Sales entities (profession=sales). Account / Opportunity CRUD.
+# Thin argv→env translators mirroring cmd_save's shape; business logic
+# lives in lib/commands.py (cmd_account_* / cmd_opportunity_*).
+cmd_account_add() {
+    ensure_project
+    local name="" health=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --health) health="${2:-}"; shift 2 ;;
+            -?*)      _guard_positional "$1" "Usage: beacon account add \"<name>\" [--health <text>]" ;;
+            *)        name="$1"; shift ;;
+        esac
+    done
+    if [ -z "$name" ]; then
+        echo "Usage: beacon account add \"<name>\" [--health <text>]"
+        exit 1
+    fi
+    BEACON_ACCOUNT_NAME="$name" BEACON_ACCOUNT_HEALTH="$health" \
+        python3 "$COMMANDS_PY" account_add
+}
+
+cmd_account_list() {
+    ensure_project
+    local json_flag=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_flag="1"; shift ;;
+            *)      shift ;;
+        esac
+    done
+    BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" account_list
+}
+
+cmd_account_contact() {
+    ensure_project
+    local acc_id="" name="" role="" email=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --role)  role="${2:-}"; shift 2 ;;
+            --email) email="${2:-}"; shift 2 ;;
+            -?*)     _guard_positional "$1" "Usage: beacon account contact <acc-id> <name> [--role <text>] [--email <text>]" ;;
+            *)
+                if [ -z "$acc_id" ]; then acc_id="$1"; else name="$1"; fi
+                shift ;;
+        esac
+    done
+    if [ -z "$acc_id" ] || [ -z "$name" ]; then
+        echo "Usage: beacon account contact <acc-id> <name> [--role <text>] [--email <text>]"
+        exit 1
+    fi
+    BEACON_ACCOUNT_ID="$acc_id" BEACON_CONTACT_NAME="$name" \
+        BEACON_CONTACT_ROLE="$role" BEACON_CONTACT_EMAIL="$email" \
+        python3 "$COMMANDS_PY" account_contact
+}
+
+cmd_opportunity_add() {
+    ensure_project
+    local title="" account="" phase="" goal="" probability="" deadline="" ball=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --account)     account="${2:-}"; shift 2 ;;
+            --phase)       phase="${2:-}"; shift 2 ;;
+            --goal)        goal="${2:-}"; shift 2 ;;
+            --probability) probability="${2:-}"; shift 2 ;;
+            --deadline)    deadline="${2:-}"; shift 2 ;;
+            --ball)        ball="${2:-}"; shift 2 ;;
+            -?*)           _guard_positional "$1" "Usage: beacon opportunity add \"<title>\" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart]" ;;
+            *)             title="$1"; shift ;;
+        esac
+    done
+    if [ -z "$title" ]; then
+        echo "Usage: beacon opportunity add \"<title>\" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart]"
+        exit 1
+    fi
+    BEACON_OPP_TITLE="$title" BEACON_OPP_ACCOUNT="$account" \
+        BEACON_OPP_PHASE="$phase" BEACON_OPP_GOAL="$goal" \
+        BEACON_OPP_PROBABILITY="$probability" BEACON_OPP_DEADLINE="$deadline" \
+        BEACON_OPP_BALL="$ball" \
+        python3 "$COMMANDS_PY" opportunity_add
+}
+
+cmd_opportunity_list() {
+    ensure_project
+    local json_flag=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_flag="1"; shift ;;
+            *)      shift ;;
+        esac
+    done
+    BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" opportunity_list
+}
+
+cmd_opportunity_phase() {
+    ensure_project
+    local opp_id="" phase="" note=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --note) note="${2:-}"; shift 2 ;;
+            -?*)    _guard_positional "$1" "Usage: beacon opportunity phase <opp-id> <phase> [--note <text>]" ;;
+            *)
+                if [ -z "$opp_id" ]; then opp_id="$1"; else phase="$1"; fi
+                shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ] || [ -z "$phase" ]; then
+        echo "Usage: beacon opportunity phase <opp-id> <phase> [--note <text>]"
+        exit 1
+    fi
+    BEACON_OPP_ID="$opp_id" BEACON_PHASE="$phase" BEACON_PHASE_NOTE="$note" \
+        python3 "$COMMANDS_PY" opportunity_phase
+}
+
+cmd_opportunity_activity() {
+    ensure_project
+    local opp_id="" desc="" deadline="" ball=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --deadline) deadline="${2:-}"; shift 2 ;;
+            --ball)     ball="${2:-}"; shift 2 ;;
+            -?*)        _guard_positional "$1" "Usage: beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self|counterpart]" ;;
+            *)
+                if [ -z "$opp_id" ]; then opp_id="$1"; else desc="$1"; fi
+                shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ] || [ -z "$desc" ]; then
+        echo "Usage: beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self|counterpart]"
+        exit 1
+    fi
+    BEACON_OPP_ID="$opp_id" BEACON_ACTIVITY_DESC="$desc" \
+        BEACON_ACTIVITY_DEADLINE="$deadline" BEACON_ACTIVITY_BALL="$ball" \
+        python3 "$COMMANDS_PY" opportunity_activity
 }
 
 cmd_log() {
@@ -2182,6 +2326,23 @@ case "${1:-}" in
     save)
         shift
         cmd_save "$@"
+        ;;
+    account|acc)
+        case "${2:-}" in
+            add)     shift 2; cmd_account_add "$@" ;;
+            list|ls) shift 2; cmd_account_list "$@" ;;
+            contact) shift 2; cmd_account_contact "$@" ;;
+            *)       echo "Usage: beacon account [add|list|contact]" ;;
+        esac
+        ;;
+    opportunity|opp)
+        case "${2:-}" in
+            add)      shift 2; cmd_opportunity_add "$@" ;;
+            list|ls)  shift 2; cmd_opportunity_list "$@" ;;
+            phase)    shift 2; cmd_opportunity_phase "$@" ;;
+            activity) shift 2; cmd_opportunity_activity "$@" ;;
+            *)        echo "Usage: beacon opportunity [add|list|phase|activity]" ;;
+        esac
         ;;
     sync)
         cmd_sync

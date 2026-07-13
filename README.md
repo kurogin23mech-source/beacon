@@ -243,6 +243,20 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon entry move <id> -t <task-id>` | Move entry under a task / タスク配下に移動 |
 | `beacon entry purge <e-id> --reason "..." [--index <n>]` | Hard delete an entry record — recovery for duplicate-ID corruption (e-863) / ハード削除（重複ID復旧用） |
 
+### Sales (営業 / profession=sales)
+
+For sales projects (`beacon init --profession sales`), track accounts (= 顧客 / 取引先) and opportunities (= 商談 / 案件) alongside milestones. `acc` / `opp` are short aliases.
+
+| Command | Description |
+|---------|-------------|
+| `beacon account add "<name>" [--health <text>]` | Add an account / 取引先を追加 |
+| `beacon account list [--json]` | List accounts and their contacts / 取引先と担当者を一覧 |
+| `beacon account contact <acc-id> <name> [--role <text>] [--email <text>]` | Add a contact to an account / 取引先に担当者を追加 |
+| `beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self\|counterpart]` | Add a deal / 商談を追加 |
+| `beacon opportunity list [--json]` | List opportunities / 商談を一覧 |
+| `beacon opportunity phase <opp-id> <phase> [--note <text>]` | Move an opportunity to a new phase (recorded in history) / 商談のフェーズを変更（履歴に記録） |
+| `beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self\|counterpart]` | Log an activity on an opportunity / 商談に活動を記録 |
+
 ### Pull Requests
 
 | Command | Description |
