@@ -266,3 +266,47 @@ def test_account_delete_unknown():
     data = _fresh()
     with pytest.raises(ValueError):
         se.account_delete(data, "acc-9")
+
+
+# --- send identity pin (複垢取り違え防止) -----------------------------------
+
+def test_send_identity_default_empty():
+    assert se.get_send_identity(_fresh()) == ""
+
+
+def test_send_identity_set_and_get():
+    data = _fresh()
+    se.set_send_identity(data, "sales@corp.example")
+    assert se.get_send_identity(data) == "sales@corp.example"
+
+
+def test_send_identity_set_requires_value():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.set_send_identity(data, "   ")
+
+
+def test_check_send_from_no_pin_blocks():
+    ok, msg = se.check_send_from(_fresh(), "anyone@corp.example")
+    assert ok is False and "未設定" in msg
+
+
+def test_check_send_from_empty_from_blocks():
+    data = _fresh()
+    se.set_send_identity(data, "sales@corp.example")
+    ok, msg = se.check_send_from(data, "")
+    assert ok is False and "空" in msg
+
+
+def test_check_send_from_match_ok():
+    data = _fresh()
+    se.set_send_identity(data, "Sales@Corp.Example")
+    ok, _ = se.check_send_from(data, "sales@corp.example")  # case-insensitive
+    assert ok is True
+
+
+def test_check_send_from_mismatch_blocks():
+    data = _fresh()
+    se.set_send_identity(data, "sales@corp.example")
+    ok, msg = se.check_send_from(data, "personal@gmail.example")
+    assert ok is False and "取り違え" in msg

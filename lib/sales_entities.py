@@ -393,6 +393,55 @@ def opportunity_delete(data: dict, opportunity_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Send identity pin (ms-107 e-3353 — 複数 Google アカウントの取り違え防止)
+# ---------------------------------------------------------------------------
+# 会社用 / 個人用など複数の Google アカウントがあり、取り違え送信は顧客との
+# 関係を壊す一発事故。プロジェクト (将来は商談単位でも) に「この identity で
+# 送る」を pin し、送信系 Skill は送信前に必ず from を pin と照合する。ここは
+# データと照合ロジックのみ (照合を呼ぶのは各送信 Skill の責務)。
+
+SEND_IDENTITY_KEY = "send_identity"
+
+
+def get_send_identity(data: dict) -> str:
+    """Return the pinned send identity (email address or account label), or ''."""
+    return data.get(SEND_IDENTITY_KEY, "") or ""
+
+
+def set_send_identity(data: dict, identity: str) -> str:
+    """Pin the send identity for this sales project. Returns the stored value."""
+    if not identity or not identity.strip():
+        raise ValueError("send identity is required (email address or account label)")
+    data[SEND_IDENTITY_KEY] = identity.strip()
+    return data[SEND_IDENTITY_KEY]
+
+
+def check_send_from(data: dict, from_value: str) -> tuple:
+    """Compare a proposed send ``from`` against the pinned identity.
+
+    Returns ``(ok, message)``. The send Skill calls this immediately before
+    sending and surfaces the message; on ``ok == False`` it must stop and let
+    the human resolve (取り違え防止は仕組みで閉じる、SPEC §2)。
+
+    * No identity pinned  → ok=False, ask the user to pin one first.
+    * from empty          → ok=False, from must be explicit.
+    * matches (case/space-insensitive) → ok=True.
+    * mismatch            → ok=False, name both so the human sees the conflict.
+    """
+    pinned = get_send_identity(data)
+    if not pinned:
+        return (False, "送信 identity が未設定です。先に pin してください "
+                       "(取り違え防止のため、from を明示せず送信しません)")
+    if not from_value or not from_value.strip():
+        return (False, f"from が空です。pin された identity は '{pinned}'。"
+                       "from を明示してください")
+    if from_value.strip().lower() == pinned.strip().lower():
+        return (True, f"from='{from_value}' は pin された identity と一致")
+    return (False, f"from='{from_value}' が pin された identity '{pinned}' と"
+                   "一致しません。取り違えの恐れ。送信を止めます")
+
+
+# ---------------------------------------------------------------------------
 # Sales project template
 # ---------------------------------------------------------------------------
 

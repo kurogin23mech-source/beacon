@@ -20640,6 +20640,49 @@ def cmd_account_list():
             print(f"    - {c.get('name', '?')}{role}{email}")
 
 
+def cmd_sales_identity_set():
+    """Internal (Skill-invoked): pin the send identity for the sales project.
+    Not a user-facing verb — the sales Skills call this; kept out of bin/beacon
+    / README so it doesn't need CLI-drift wiring."""
+    import sales_entities
+    identity = os.environ.get("BEACON_SEND_IDENTITY", "")
+    data = load_project()
+    try:
+        val = sales_entities.set_send_identity(data, identity)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"send identity pinned: {val}")
+
+
+def cmd_sales_identity_show():
+    """Internal (Skill-invoked): show the pinned send identity."""
+    import sales_entities
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    val = sales_entities.get_send_identity(data)
+    if json_mode:
+        print(json.dumps({"send_identity": val}, ensure_ascii=False))
+        return
+    print(val if val else "(未設定)")
+
+
+def cmd_sales_identity_check():
+    """Internal (Skill-invoked): check a proposed send ``from`` against the pin.
+    Exit 0 + 'OK: <msg>' when it matches, exit 1 + 'BLOCK: <msg>' otherwise —
+    so a send Skill can gate on the exit code before sending."""
+    import sales_entities
+    from_value = os.environ.get("BEACON_SEND_FROM", "")
+    data = load_project()
+    ok, msg = sales_entities.check_send_from(data, from_value)
+    if ok:
+        print(f"OK: {msg}")
+        sys.exit(0)
+    print(f"BLOCK: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
 def cmd_account_phase():
     import sales_entities
     account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
@@ -20890,6 +20933,11 @@ if __name__ == "__main__":
         "opportunity_activity": cmd_opportunity_activity,
         "opportunity_delete": cmd_opportunity_delete,
         "phase_list": cmd_phase_list,
+        # ms-107 e-3353 — send identity pin (internal; called by sales Skills,
+        # not exposed as a user CLI verb → no bin/beacon/README/dispatch.py entry)
+        "sales_identity_set": cmd_sales_identity_set,
+        "sales_identity_show": cmd_sales_identity_show,
+        "sales_identity_check": cmd_sales_identity_check,
         "task_add": cmd_task_add,
         "task_done": cmd_task_done,
         "task_list": cmd_task_list,
