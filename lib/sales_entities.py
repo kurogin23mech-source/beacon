@@ -188,6 +188,122 @@ def account_phase_warnings(data: dict, new_phase: str) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Phase methodology (config schema) — ms-107 e-3371, SPEC §1/§7.
+# ---------------------------------------------------------------------------
+# A phase definition (a dict in a target-type's phase vocabulary) may carry the
+# *methodology* of that phase, on top of the ms-106 fields (name / probability /
+# terminal / allowed_terminals / outcome):
+#
+#   goal              str   — このフェーズが達成したいゴール (1 行)
+#   activity_template list  — ゴールへ向かう期待活動のテンプレ (固定でなく「期待」,
+#                             SPEC §4: 面談 outcome で reconcile する)
+#   transition_signal str   — 遷移の判定手段 (どう判定するか, 下記 SIGNAL_*)
+#   on_fail           dict  — 判定が失敗した時の分岐設定 (下記 on_fail schema)
+#   default_lead      int   — フェーズ入場時に遷移日を置く既定リード日数
+#
+# These are the *target-class generic* vocabulary (SPEC §7: engine core は
+# "商談" を語に焼き込まない). The accessors below read a phase_def dict without
+# knowing whether the target is an opportunity — so ms-109 can drive the same
+# engine over milestones/tasks by supplying a different phase vocabulary.
+#
+# All fields are OPTIONAL: the ms-106 seed does not carry them yet (the 営業
+# アダプタ の初期 methodology は e-3375 で seed する). Accessors default
+# gracefully so live projects created before this task keep working.
+
+PHASE_METHODOLOGY_FIELDS = (
+    "goal", "activity_template", "transition_signal", "on_fail", "default_lead")
+
+# transition_signal vocabulary (SPEC §5: 決定的〜判断的 スペクトラム). The
+# detection wiring lands in later tasks (calendar auto-detect = e-3374); here we
+# only fix the vocabulary so config can name a signal and the engine can branch.
+SIGNAL_MANUAL = "manual"                    # 人間が遷移を宣言する (既定)
+SIGNAL_CALENDAR_ACCEPTED = "calendar_accepted"  # 相手が招待を accept → 面談確定
+SIGNAL_CALENDAR_ENDED = "calendar_ended"    # event.end < now → 面談実施済み
+SIGNAL_COUNTERPART_REPLY = "counterpart_reply"  # 先方からの返信 (メール等)
+VALID_TRANSITION_SIGNALS = {
+    SIGNAL_MANUAL, SIGNAL_CALENDAR_ACCEPTED, SIGNAL_CALENDAR_ENDED,
+    SIGNAL_COUNTERPART_REPLY,
+}
+
+
+def phase_goal(phase_def: Optional[dict]) -> str:
+    """The phase's goal string, or '' when unset."""
+    return (phase_def or {}).get("goal", "") or ""
+
+
+def phase_activity_template(phase_def: Optional[dict]) -> list:
+    """The phase's expected-activity template (list), or [] when unset.
+
+    SPEC §4: this is an *expectation*, not a fixed pipeline — the engine
+    reconciles it against real meeting outcomes rather than enforcing it.
+    """
+    tpl = (phase_def or {}).get("activity_template")
+    return list(tpl) if tpl else []
+
+
+def phase_transition_signal(phase_def: Optional[dict]) -> str:
+    """How this phase's transition is judged. Defaults to SIGNAL_MANUAL — with
+    no signal configured the human declares the transition (master, SPEC §6)."""
+    return (phase_def or {}).get("transition_signal") or SIGNAL_MANUAL
+
+
+def phase_on_fail(phase_def: Optional[dict]) -> Optional[dict]:
+    """The failure-branch config for this phase, or None.
+
+    Shape (all optional): ``{"terminals": [<phase-name>...], "retry": bool}``.
+    ``terminals`` narrows the決着 choices on failure (falls back to the phase's
+    ``allowed_terminals`` when absent); ``retry`` marks that staying in-phase
+    with a new transition_date is allowed (SPEC §3: advance / retry / terminal).
+    The 3-way judgement itself is human-confirmed and lives in e-3372.
+    """
+    of = (phase_def or {}).get("on_fail")
+    return of if isinstance(of, dict) else None
+
+
+def phase_default_lead(phase_def: Optional[dict]) -> Optional[int]:
+    """Default lead time (in days) for placing this phase's transition_date on
+    entry, or None when unset. Kept as a plain int-of-days; date arithmetic is
+    the caller's job (the engine, e-3372)."""
+    lead = (phase_def or {}).get("default_lead")
+    if lead is None:
+        return None
+    try:
+        return int(lead)
+    except (TypeError, ValueError):
+        return None
+
+
+def phase_methodology(phase_def: Optional[dict]) -> dict:
+    """Normalized methodology view of a phase_def (target-class generic).
+
+    Always returns every PHASE_METHODOLOGY_FIELDS key with a graceful default,
+    so the engine and callers never KeyError on a phase that predates this
+    schema (or on the ms-106 seed, which does not carry methodology yet).
+    """
+    return {
+        "goal": phase_goal(phase_def),
+        "activity_template": phase_activity_template(phase_def),
+        "transition_signal": phase_transition_signal(phase_def),
+        "on_fail": phase_on_fail(phase_def),
+        "default_lead": phase_default_lead(phase_def),
+    }
+
+
+def opportunity_phase_methodology(data: dict, phase_name: str) -> dict:
+    """Methodology for a named opportunity phase (looked up in the configured
+    vocabulary). Returns the same defaulted shape as ``phase_methodology`` even
+    when the phase name is unknown, so callers get a stable dict."""
+    pdef = _find_phase_def(opportunity_phases(data), phase_name)
+    return phase_methodology(pdef)
+
+
+def opportunity_phase_is_terminal(data: dict, phase_name: str) -> bool:
+    """True when the named opportunity phase is a 決着 (terminal) stage."""
+    pdef = _find_phase_def(opportunity_phases(data), phase_name)
+    return bool(pdef and pdef.get("terminal"))
+
+
+# ---------------------------------------------------------------------------
 # Finders
 # ---------------------------------------------------------------------------
 
@@ -254,11 +370,14 @@ def contact_add(data: dict, account_id: str, name: str, *,
 def opportunity_add(data: dict, title: str, *, account_id: str = "",
                     phase: str = "", goal_amount=None, probability=None,
                     deadline: str = "", who_has_the_ball: str = BALL_SELF,
-                    created_at: str = "") -> str:
+                    transition_date: str = "", created_at: str = "") -> str:
     """Append a new Opportunity (対象・有限) and return its id.
 
     ``account_id`` is a 参照 association (N:1 → Account) validated when given.
     ``phase`` defaults to the configured funnel entry and seeds phase_history.
+    ``transition_date`` (= 遷移日, SPEC §2) is the planned date on which this
+    phase's goal is judged; optional at creation (the engine prompts to place
+    it when the target enters a non-terminal phase without one).
     """
     if not title or not title.strip():
         raise ValueError("Opportunity title is required")
@@ -281,6 +400,10 @@ def opportunity_add(data: dict, title: str, *, account_id: str = "",
         "probability": probability,
         "deadline": deadline,
         "who_has_the_ball": who_has_the_ball,
+        "transition_date": transition_date or "",
+        "transition_date_history": (
+            [{"transition_date": transition_date, "at": created_at, "note": "initial"}]
+            if transition_date else []),
         "status": _opportunity_status_for_phase(data, initial_phase),
         "created_at": created_at,
         "activities": [],
@@ -321,6 +444,66 @@ def phase_set(data: dict, target_id: str, new_phase: str, *,
         return record
     raise ValueError(
         f"target id must start with 'opp-' or 'acc-', got {target_id!r}")
+
+
+# ---------------------------------------------------------------------------
+# Transition date (遷移日) — ms-107 e-3371, SPEC §2. Target-class primitive.
+# ---------------------------------------------------------------------------
+# 遷移日 = 「そのフェーズのゴール達成を判定する予定日」. It sits alongside ``ball``
+# on a target's runtime state and is the pivot of the engine cycle
+# (置く → 準備 → 判定 → advance/retry/terminal). Written like ``phase_history``:
+# the current value is mirrored on the target, and every change is appended to
+# an append-only ``transition_date_history`` (証跡, data-immutability-principle).
+# Generic over targets that close (opp- today); accounts (対象・継続) never do.
+
+def get_transition_date(data: dict, target_id: str) -> str:
+    """Current transition_date of a target (opp-…), or '' when unset."""
+    if target_id.startswith("opp-"):
+        opp = find_opportunity(data, target_id)
+        if opp is None:
+            raise ValueError(f"Opportunity not found: {target_id}")
+        return opp.get("transition_date", "") or ""
+    raise ValueError(
+        f"transition_date targets an opportunity (opp-…), got {target_id!r}")
+
+
+def set_transition_date(data: dict, target_id: str, transition_date: str, *,
+                        note: str = "", at: str = "") -> dict:
+    """Set (or clear) a target's transition_date and log it append-only.
+
+    Passing an empty ``transition_date`` clears the field (still logged, so the
+    clearing is auditable). Returns the appended history record. Permissive by
+    design — the engine (e-3372) decides *when* a date is placed; this is only
+    the storage primitive.
+    """
+    if target_id.startswith("opp-"):
+        opp = find_opportunity(data, target_id)
+        if opp is None:
+            raise ValueError(f"Opportunity not found: {target_id}")
+        value = (transition_date or "").strip()
+        record = {"transition_date": value, "at": at, "note": note}
+        opp.setdefault("transition_date_history", []).append(record)
+        opp["transition_date"] = value
+        return record
+    raise ValueError(
+        f"transition_date targets an opportunity (opp-…), got {target_id!r}")
+
+
+def needs_transition_date(data: dict, target_id: str) -> bool:
+    """True when a target sits in a non-terminal phase but has no transition_date
+    (SPEC §2: placing the 遷移日 is the top-priority activity on phase entry —
+    without a judgement date, preparation and follow-up can't be driven).
+
+    Terminal-phase targets (決着済み) never need one, so this is False for them.
+    """
+    if not target_id.startswith("opp-"):
+        return False
+    opp = find_opportunity(data, target_id)
+    if opp is None:
+        return False
+    if opportunity_phase_is_terminal(data, opp.get("phase", "")):
+        return False
+    return not (opp.get("transition_date") or "").strip()
 
 
 # ---------------------------------------------------------------------------

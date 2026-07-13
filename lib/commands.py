@@ -16414,6 +16414,7 @@ def cmd_help_json():
         {"command": "beacon opportunity add <title>", "flags": ["--account <acc-id>", "--phase <p>", "--goal <n>", "--probability <n>", "--deadline <date>", "--ball self|counterpart"], "description": "Add a sales opportunity (商談; 対象・有限)"},
         {"command": "beacon opportunity list", "flags": ["--json"], "description": "List sales opportunities with phase / status / account"},
         {"command": "beacon opportunity phase <opp-id> <phase>", "flags": ["--note <text>"], "description": "Declare a phase transition (append-only phase_history; master=人間)"},
+        {"command": "beacon opportunity transition-date <opp-id> <YYYY-MM-DD>", "flags": ["--note <text>", "--clear"], "description": "Set the 遷移日 (judgement date) for the current phase (append-only transition_date_history)"},
         {"command": "beacon opportunity activity <opp-id> <desc>", "flags": ["--deadline <date>", "--ball self|counterpart"], "description": "Add an activity (業務・事前計画型) under an opportunity"},
         {"command": "beacon opportunity delete <opp-id>", "flags": [], "description": "Delete an opportunity and its activities"},
         {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity vocabulary)"},
@@ -20895,13 +20896,23 @@ def cmd_opportunity_list():
     if not opps:
         print("No opportunities yet. Add one with: beacon opportunity add \"<title>\"")
         return
+    import sales_entities
     for o in opps:
         acc = o.get("account_id") or "-"
         deadline = f" due {o['deadline']}" if o.get("deadline") else ""
         ball = o.get("who_has_the_ball", "")
+        td = o.get("transition_date") or ""
+        # 遷移日 = 判定予定日 (SPEC §2). Non-terminal deal without one → 最優先で促す。
+        if td:
+            td_str = f" / 遷移日: {td}"
+        elif sales_entities.needs_transition_date(data, o["id"]):
+            td_str = " / ⚠ 遷移日 未設定"
+        else:
+            td_str = ""
         print(f"[{o['id']}] {o['title']} — phase: {o.get('phase', '?')} "
               f"/ status: {o.get('status', '?')} / account: {acc}"
-              f"{deadline} / ball: {ball} / activities: {len(o.get('activities', []))}")
+              f"{deadline} / ball: {ball}{td_str} "
+              f"/ activities: {len(o.get('activities', []))}")
 
 
 def cmd_opportunity_phase():
@@ -20929,6 +20940,31 @@ def cmd_opportunity_phase():
         sys.exit(1)
     save_project(data)
     print(f"{opp_id} phase → {rec['phase']} (recorded in phase_history)")
+
+
+def cmd_opportunity_transition_date():
+    """Set (or clear) an opportunity's 遷移日 (transition_date, ms-107 e-3371).
+
+    Env: BEACON_OPP_ID, BEACON_TRANSITION_DATE (empty clears), BEACON_PHASE_NOTE.
+    The date is the planned day this phase's goal is judged (SPEC §2); the
+    change is logged append-only in transition_date_history."""
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    transition_date = os.environ.get("BEACON_TRANSITION_DATE", "")
+    note = os.environ.get("BEACON_PHASE_NOTE", "")
+    data = load_project()
+    try:
+        rec = sales_entities.set_transition_date(
+            data, opp_id, transition_date, note=note, at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    if rec["transition_date"]:
+        print(f"{opp_id} transition_date → {rec['transition_date']} "
+              f"(recorded in transition_date_history)")
+    else:
+        print(f"{opp_id} transition_date cleared (recorded in transition_date_history)")
 
 
 def cmd_opportunity_delete():
@@ -20969,16 +21005,27 @@ def cmd_phase_list():
         if p.get("terminal"):
             outcome = p.get("outcome", "")
             print(f"  - {p.get('name')} [terminal → {outcome}]")
-        else:
-            allowed = p.get("allowed_terminals")
-            prob = p.get("probability")
-            bits = []
-            if prob is not None:
-                bits.append(f"prob {prob}")
-            if allowed:
-                bits.append(f"→ {'/'.join(allowed)}")
-            suffix = f"  ({', '.join(bits)})" if bits else ""
-            print(f"  - {p.get('name')}{suffix}")
+            continue
+        allowed = p.get("allowed_terminals")
+        prob = p.get("probability")
+        bits = []
+        if prob is not None:
+            bits.append(f"prob {prob}")
+        if allowed:
+            bits.append(f"→ {'/'.join(allowed)}")
+        suffix = f"  ({', '.join(bits)})" if bits else ""
+        print(f"  - {p.get('name')}{suffix}")
+        # Methodology (ms-107 e-3371): shown only when configured (seed carries
+        # none yet; the 営業アダプタ config is seeded in e-3375).
+        m = sales_entities.phase_methodology(p)
+        if m["goal"]:
+            print(f"      ゴール: {m['goal']}")
+        if m["activity_template"]:
+            print(f"      活動テンプレ: {', '.join(str(a) for a in m['activity_template'])}")
+        if p.get("transition_signal"):
+            print(f"      遷移判定: {m['transition_signal']}")
+        if m["default_lead"] is not None:
+            print(f"      遷移日リード: {m['default_lead']}日")
 
 
 def cmd_opportunity_activity():
@@ -21036,6 +21083,7 @@ if __name__ == "__main__":
         "opportunity_add": cmd_opportunity_add,
         "opportunity_list": cmd_opportunity_list,
         "opportunity_phase": cmd_opportunity_phase,
+        "opportunity_transition_date": cmd_opportunity_transition_date,
         "opportunity_activity": cmd_opportunity_activity,
         "opportunity_delete": cmd_opportunity_delete,
         "phase_list": cmd_phase_list,

@@ -61,6 +61,7 @@ Sales (profession=sales):
   beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart]   Add a deal / opportunity
   beacon opportunity list [--json]                           List opportunities
   beacon opportunity phase <opp-id> <phase> [--note <text>]  Move an opportunity to a new phase
+  beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] | --clear   Set the 遷移日 (judgement date) for the current phase
   beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self|counterpart]   Log an activity on an opportunity
   beacon opportunity delete <opp-id>                         Delete an opportunity and its activities
   beacon phase list [--json]                                 Show the configured phase funnels
@@ -1186,6 +1187,29 @@ cmd_opportunity_phase() {
     fi
     BEACON_OPP_ID="$opp_id" BEACON_PHASE="$phase" BEACON_PHASE_NOTE="$note" \
         python3 "$COMMANDS_PY" opportunity_phase
+}
+
+cmd_opportunity_transition_date() {
+    ensure_project
+    local opp_id="" date="" note=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --note) note="${2:-}"; shift 2 ;;
+            --clear) date="__CLEAR__"; shift ;;
+            -?*)    _guard_positional "$1" "Usage: beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] | --clear" ;;
+            *)
+                if [ -z "$opp_id" ]; then opp_id="$1"; else date="$1"; fi
+                shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ] || [ -z "$date" ]; then
+        echo "Usage: beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] | --clear"
+        exit 1
+    fi
+    # --clear passes an empty date through (set_transition_date treats it as clear).
+    [ "$date" = "__CLEAR__" ] && date=""
+    BEACON_OPP_ID="$opp_id" BEACON_TRANSITION_DATE="$date" BEACON_PHASE_NOTE="$note" \
+        python3 "$COMMANDS_PY" opportunity_transition_date
 }
 
 cmd_opportunity_activity() {
@@ -2412,9 +2436,10 @@ case "${1:-}" in
             add)      shift 2; cmd_opportunity_add "$@" ;;
             list|ls)  shift 2; cmd_opportunity_list "$@" ;;
             phase)    shift 2; cmd_opportunity_phase "$@" ;;
+            transition-date|td) shift 2; cmd_opportunity_transition_date "$@" ;;
             activity) shift 2; cmd_opportunity_activity "$@" ;;
             delete)   shift 2; cmd_opportunity_delete "$@" ;;
-            *)        echo "Usage: beacon opportunity [add|list|phase|activity|delete]" ;;
+            *)        echo "Usage: beacon opportunity [add|list|phase|transition-date|activity|delete]" ;;
         esac
         ;;
     phase)

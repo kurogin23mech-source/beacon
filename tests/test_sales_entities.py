@@ -451,3 +451,150 @@ def test_check_send_from_ledger_mismatch_blocks():
     # 個人's email against the 会社 default → mismatch
     ok, msg = se.check_send_from(data, "me@gmail.example")
     assert ok is False and "取り違え" in msg
+
+
+# --- phase methodology (config schema) — ms-107 e-3371 ---------------------
+
+def test_phase_methodology_defaults_for_bare_phase():
+    # The ms-106 seed carries no methodology; accessors default gracefully.
+    m = se.phase_methodology({"name": "商談準備"})
+    assert m["goal"] == ""
+    assert m["activity_template"] == []
+    assert m["transition_signal"] == se.SIGNAL_MANUAL
+    assert m["on_fail"] is None
+    assert m["default_lead"] is None
+
+
+def test_phase_methodology_defaults_for_none():
+    m = se.phase_methodology(None)
+    assert m == {"goal": "", "activity_template": [], "on_fail": None,
+                 "default_lead": None, "transition_signal": se.SIGNAL_MANUAL}
+
+
+def test_phase_methodology_reads_configured_fields():
+    pdef = {
+        "name": "提案準備", "terminal": False, "allowed_terminals": ["成約", "失注"],
+        "goal": "提案内容に合意をとる",
+        "activity_template": ["提案書ドラフト", "見積提示"],
+        "transition_signal": se.SIGNAL_CALENDAR_ENDED,
+        "on_fail": {"terminals": ["失注"], "retry": True},
+        "default_lead": 7,
+    }
+    m = se.phase_methodology(pdef)
+    assert m["goal"] == "提案内容に合意をとる"
+    assert m["activity_template"] == ["提案書ドラフト", "見積提示"]
+    assert m["transition_signal"] == se.SIGNAL_CALENDAR_ENDED
+    assert m["on_fail"] == {"terminals": ["失注"], "retry": True}
+    assert m["default_lead"] == 7
+
+
+def test_phase_default_lead_coerces_and_guards():
+    assert se.phase_default_lead({"default_lead": "5"}) == 5
+    assert se.phase_default_lead({"default_lead": "oops"}) is None
+    assert se.phase_default_lead({}) is None
+
+
+def test_phase_on_fail_ignores_non_dict():
+    assert se.phase_on_fail({"on_fail": "nope"}) is None
+    assert se.phase_on_fail({"on_fail": {"retry": True}}) == {"retry": True}
+
+
+def test_opportunity_phase_methodology_by_name():
+    data = _fresh()
+    # Attach methodology to a seed phase (config is editable per company).
+    prep = se._find_phase_def(data["opportunity_phases"], "商談準備")
+    prep["goal"] = "面談を確定する"
+    prep["default_lead"] = 3
+    m = se.opportunity_phase_methodology(data, "商談準備")
+    assert m["goal"] == "面談を確定する" and m["default_lead"] == 3
+    # Unknown name → stable defaulted shape, no KeyError.
+    assert se.opportunity_phase_methodology(data, "無い")["goal"] == ""
+
+
+def test_opportunity_phase_is_terminal():
+    data = _fresh()
+    assert se.opportunity_phase_is_terminal(data, "成約") is True
+    assert se.opportunity_phase_is_terminal(data, "商談準備") is False
+    assert se.opportunity_phase_is_terminal(data, "未知") is False
+
+
+# --- transition_date (遷移日) — ms-107 e-3371 ------------------------------
+
+def test_opportunity_add_defaults_transition_date_empty():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", created_at="T0")
+    o = se.find_opportunity(data, opp)
+    assert o["transition_date"] == ""
+    assert o["transition_date_history"] == []
+
+
+def test_opportunity_add_with_transition_date_seeds_history():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", transition_date="2026-08-01", created_at="T0")
+    o = se.find_opportunity(data, opp)
+    assert o["transition_date"] == "2026-08-01"
+    assert o["transition_date_history"] == [
+        {"transition_date": "2026-08-01", "at": "T0", "note": "initial"}]
+
+
+def test_set_and_get_transition_date_is_append_only():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", created_at="T0")
+    se.set_transition_date(data, opp, "2026-08-01", note="面談日", at="T1")
+    se.set_transition_date(data, opp, "2026-08-10", note="reschedule", at="T2")
+    assert se.get_transition_date(data, opp) == "2026-08-10"
+    hist = se.find_opportunity(data, opp)["transition_date_history"]
+    assert [h["transition_date"] for h in hist] == ["2026-08-01", "2026-08-10"]
+    assert hist[0]["note"] == "面談日" and hist[1]["at"] == "T2"
+
+
+def test_set_transition_date_clear_is_logged():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", transition_date="2026-08-01", created_at="T0")
+    rec = se.set_transition_date(data, opp, "", note="cleared", at="T1")
+    assert rec["transition_date"] == ""
+    assert se.get_transition_date(data, opp) == ""
+    # the clear is still recorded (append-only 証跡).
+    assert se.find_opportunity(data, opp)["transition_date_history"][-1]["note"] == "cleared"
+
+
+def test_transition_date_unknown_opportunity():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.set_transition_date(data, "opp-9", "2026-08-01")
+    with pytest.raises(ValueError):
+        se.get_transition_date(data, "opp-9")
+
+
+def test_transition_date_rejects_non_opportunity_target():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    with pytest.raises(ValueError):
+        se.set_transition_date(data, acc, "2026-08-01")
+
+
+def test_needs_transition_date_true_when_unset_in_stage():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", created_at="T0")  # 商談準備, no date
+    assert se.needs_transition_date(data, opp) is True
+
+
+def test_needs_transition_date_false_once_set():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", created_at="T0")
+    se.set_transition_date(data, opp, "2026-08-01", at="T1")
+    assert se.needs_transition_date(data, opp) is False
+
+
+def test_needs_transition_date_false_in_terminal_phase():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", created_at="T0")
+    se.phase_set(data, opp, "不成立", at="T1")  # terminal — deal is decided
+    assert se.needs_transition_date(data, opp) is False
+
+
+def test_needs_transition_date_false_for_unknown_or_account():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    assert se.needs_transition_date(data, acc) is False
+    assert se.needs_transition_date(data, "opp-99") is False
