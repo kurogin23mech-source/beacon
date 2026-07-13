@@ -20626,8 +20626,10 @@ def cmd_account_list():
     for a in accounts:
         contacts = a.get("contacts", [])
         health = a.get("health", "")
+        phase = a.get("phase", "")
+        phase_str = f"phase: {phase} / " if phase else ""
         suffix = f" [health: {health}]" if health else ""
-        print(f"[{a['id']}] {a['name']}{suffix} — contacts: {len(contacts)}")
+        print(f"[{a['id']}] {a['name']}{suffix} — {phase_str}contacts: {len(contacts)}")
         for c in contacts:
             role = f" ({c['role']})" if c.get("role") else ""
             email = f" <{c['email']}>" if c.get("email") else ""
@@ -20654,7 +20656,8 @@ def cmd_opportunity_add():
     import sales_entities
     title = os.environ.get("BEACON_OPP_TITLE", "")
     account_id = os.environ.get("BEACON_OPP_ACCOUNT", "")
-    phase = os.environ.get("BEACON_OPP_PHASE", "") or "lead"
+    # Empty → the model picks the configured funnel entry (default_opportunity_phase).
+    phase = os.environ.get("BEACON_OPP_PHASE", "")
     deadline = os.environ.get("BEACON_OPP_DEADLINE", "")
     ball = os.environ.get("BEACON_OPP_BALL", "") or sales_entities.BALL_SELF
     goal_raw = os.environ.get("BEACON_OPP_GOAL", "")
@@ -20673,10 +20676,11 @@ def cmd_opportunity_add():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     save_project(data)
+    opp = sales_entities.find_opportunity(data, opp_id)
     print(f"Added opportunity {opp_id}: {title}")
     if account_id:
         print(f"  account: {account_id}")
-    print(f"  phase: {phase}")
+    print(f"  phase: {opp.get('phase', '') if opp else phase}")
 
 
 def _parse_number(raw: str, flag: str):
@@ -20716,6 +20720,17 @@ def cmd_opportunity_phase():
     new_phase = os.environ.get("BEACON_PHASE", "")
     note = os.environ.get("BEACON_PHASE_NOTE", "")
     data = load_project()
+    # Surface vocabulary / terminal-rule violations BEFORE the write, but never
+    # block: master = human (SPEC §5). Warnings compare against the current phase.
+    warnings = []
+    if opp_id.startswith("opp-"):
+        opp = sales_entities.find_opportunity(data, opp_id)
+        cur = opp.get("phase", "") if opp else ""
+        warnings = sales_entities.opportunity_phase_warnings(data, cur, new_phase)
+    elif opp_id.startswith("acc-"):
+        warnings = sales_entities.account_phase_warnings(data, new_phase)
+    for w in warnings:
+        print(f"  ⚠ {w}", file=sys.stderr)
     try:
         rec = sales_entities.phase_set(data, opp_id, new_phase, note=note,
                                        at=core._now_iso())
