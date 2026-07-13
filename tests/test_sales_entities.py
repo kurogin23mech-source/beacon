@@ -389,9 +389,18 @@ def test_resolve_route_unknown_account_returns_none():
     assert se.resolve_route(data, "gmail", "存在しない") is None
 
 
+def test_resolve_route_slack_namespace_only():
+    data = _fresh()
+    se.add_send_account(data, "会社", "sales@corp.example",
+                        routes={"slack": {"namespace": "slack-ga"}})
+    se.set_send_identity(data, "会社")
+    r = se.resolve_route(data, "slack")
+    assert r["namespace"] == "slack-ga" and r["alias"] is None
+
+
 def test_resolve_route_rejects_unknown_service():
     with pytest.raises(ValueError):
-        se.resolve_route(_with_ledger(), "slack")
+        se.resolve_route(_with_ledger(), "teams")
 
 
 def test_set_account_route_updates_in_place():
@@ -410,7 +419,7 @@ def test_clean_routes_drops_unknown_service_and_empty_ns():
     data = _fresh()
     se.add_send_account(data, "会社", "a@b.c", routes={
         "gmail": {"namespace": "mcp__gmail"},
-        "slack": {"namespace": "mcp__slack"},   # unknown service dropped
+        "teams": {"namespace": "mcp__teams"},   # unknown service dropped
         "drive": {"namespace": ""},             # empty namespace dropped
     })
     routes = se.get_send_account(data, "会社")["routes"]

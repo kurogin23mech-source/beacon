@@ -404,8 +404,9 @@ SEND_IDENTITY_KEY = "send_identity"    # the *default* send label (or, legacy, a
 SEND_ACCOUNTS_KEY = "send_accounts"    # 送信アカウント台帳: 自分の Google アカウント群
 
 # Services the ledger routes to concrete MCP tools. Kept small and explicit —
-# each送信/操作 Skill maps one of these to its MCP tool family.
-SEND_SERVICES = ("gmail", "calendar", "drive")
+# each送信/操作 Skill maps one of these to its MCP tool family. slack は
+# namespace=workspace 切替 (gmail と同型、account 引数なし)。
+SEND_SERVICES = ("gmail", "calendar", "drive", "slack")
 
 
 def _norm(value) -> str:
