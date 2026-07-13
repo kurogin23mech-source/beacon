@@ -310,3 +310,135 @@ def test_check_send_from_mismatch_blocks():
     se.set_send_identity(data, "sales@corp.example")
     ok, msg = se.check_send_from(data, "personal@gmail.example")
     assert ok is False and "取り違え" in msg
+
+
+# --- send-account ledger (ms-107 e-3365) -----------------------------------
+
+def _with_ledger():
+    """Sales project with two send accounts + routes, default = 会社."""
+    data = _fresh()
+    se.add_send_account(data, "会社", "sales@corp.example", routes={
+        "gmail": {"namespace": "mcp__gmail"},
+        "calendar": {"namespace": "mcp__google-calendar", "alias": "work"},
+        "drive": {"namespace": "mcp__google-drive", "alias": "work"},
+    })
+    se.add_send_account(data, "個人", "me@gmail.example", routes={
+        "calendar": {"namespace": "mcp__google-calendar-personal", "alias": "personal"},
+    })
+    se.set_send_identity(data, "会社")
+    return data
+
+
+def test_ledger_default_empty():
+    assert se.list_send_accounts(_fresh()) == []
+
+
+def test_ledger_add_and_get_by_label_and_email():
+    data = _with_ledger()
+    assert len(se.list_send_accounts(data)) == 2
+    assert se.get_send_account(data, "会社")["email"] == "sales@corp.example"
+    # email lookup + case-insensitive
+    assert se.get_send_account(data, "ME@GMAIL.EXAMPLE")["label"] == "個人"
+    assert se.get_send_account(data, "missing") is None
+
+
+def test_ledger_add_requires_label_and_email():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.add_send_account(data, "", "x@y.z")
+    with pytest.raises(ValueError):
+        se.add_send_account(data, "会社", "  ")
+
+
+def test_ledger_add_is_idempotent_on_label():
+    data = _fresh()
+    se.add_send_account(data, "会社", "old@corp.example")
+    se.add_send_account(data, "会社", "new@corp.example",
+                        routes={"gmail": {"namespace": "mcp__gmail"}})
+    assert len(se.list_send_accounts(data)) == 1
+    assert se.get_send_account(data, "会社")["email"] == "new@corp.example"
+
+
+def test_resolve_route_default_label():
+    data = _with_ledger()
+    r = se.resolve_route(data, "calendar")  # default = 会社
+    assert r["namespace"] == "mcp__google-calendar" and r["alias"] == "work"
+    assert r["label"] == "会社" and r["email"] == "sales@corp.example"
+
+
+def test_resolve_route_explicit_label_switch():
+    data = _with_ledger()
+    r = se.resolve_route(data, "calendar", "個人")
+    assert r["namespace"] == "mcp__google-calendar-personal"
+    assert r["alias"] == "personal"
+
+
+def test_resolve_route_gmail_has_no_alias():
+    data = _with_ledger()
+    r = se.resolve_route(data, "gmail", "会社")
+    assert r["namespace"] == "mcp__gmail" and r["alias"] is None
+
+
+def test_resolve_route_missing_service_returns_none():
+    data = _with_ledger()
+    assert se.resolve_route(data, "drive", "個人") is None  # 個人 has no drive route
+
+
+def test_resolve_route_unknown_account_returns_none():
+    data = _with_ledger()
+    assert se.resolve_route(data, "gmail", "存在しない") is None
+
+
+def test_resolve_route_rejects_unknown_service():
+    with pytest.raises(ValueError):
+        se.resolve_route(_with_ledger(), "slack")
+
+
+def test_set_account_route_updates_in_place():
+    data = _with_ledger()
+    se.set_account_route(data, "個人", "gmail", "mcp__gmail_personal")
+    r = se.resolve_route(data, "gmail", "個人")
+    assert r["namespace"] == "mcp__gmail_personal"
+
+
+def test_set_account_route_unknown_account_raises():
+    with pytest.raises(ValueError):
+        se.set_account_route(_fresh(), "会社", "gmail", "mcp__gmail")
+
+
+def test_clean_routes_drops_unknown_service_and_empty_ns():
+    data = _fresh()
+    se.add_send_account(data, "会社", "a@b.c", routes={
+        "gmail": {"namespace": "mcp__gmail"},
+        "slack": {"namespace": "mcp__slack"},   # unknown service dropped
+        "drive": {"namespace": ""},             # empty namespace dropped
+    })
+    routes = se.get_send_account(data, "会社")["routes"]
+    assert set(routes.keys()) == {"gmail"}
+
+
+def test_remove_send_account():
+    data = _with_ledger()
+    se.remove_send_account(data, "個人")
+    assert se.get_send_account(data, "個人") is None
+    with pytest.raises(ValueError):
+        se.remove_send_account(data, "個人")
+
+
+def test_check_send_from_ledger_match_by_email():
+    data = _with_ledger()  # default label 会社 → sales@corp.example
+    ok, msg = se.check_send_from(data, "sales@corp.example")
+    assert ok is True and "会社" in msg
+
+
+def test_check_send_from_ledger_label_switch_match():
+    data = _with_ledger()
+    ok, _ = se.check_send_from(data, "me@gmail.example", label="個人")
+    assert ok is True
+
+
+def test_check_send_from_ledger_mismatch_blocks():
+    data = _with_ledger()
+    # 個人's email against the 会社 default → mismatch
+    ok, msg = se.check_send_from(data, "me@gmail.example")
+    assert ok is False and "取り違え" in msg

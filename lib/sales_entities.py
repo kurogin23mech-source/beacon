@@ -400,34 +400,196 @@ def opportunity_delete(data: dict, opportunity_id: str) -> None:
 # 送る」を pin し、送信系 Skill は送信前に必ず from を pin と照合する。ここは
 # データと照合ロジックのみ (照合を呼ぶのは各送信 Skill の責務)。
 
-SEND_IDENTITY_KEY = "send_identity"
+SEND_IDENTITY_KEY = "send_identity"    # the *default* send label (or, legacy, a bare email)
+SEND_ACCOUNTS_KEY = "send_accounts"    # 送信アカウント台帳: 自分の Google アカウント群
+
+# Services the ledger routes to concrete MCP tools. Kept small and explicit —
+# each送信/操作 Skill maps one of these to its MCP tool family.
+SEND_SERVICES = ("gmail", "calendar", "drive")
+
+
+def _norm(value) -> str:
+    """Case/space-insensitive key for label/email matching."""
+    return (value or "").strip().lower()
 
 
 def get_send_identity(data: dict) -> str:
-    """Return the pinned send identity (email address or account label), or ''."""
+    """Return the default send label (or legacy bare email), or ''."""
     return data.get(SEND_IDENTITY_KEY, "") or ""
 
 
 def set_send_identity(data: dict, identity: str) -> str:
-    """Pin the send identity for this sales project. Returns the stored value."""
+    """Pin the *default* send label for this project. Returns the stored value.
+
+    This is now a pointer into the ledger (``send_accounts``): the value should
+    be a ledger *label*. For backward compat a bare email is still accepted —
+    ``check_send_from`` falls back to a plain string compare when no ledger
+    entry resolves for the value.
+    """
     if not identity or not identity.strip():
         raise ValueError("send identity is required (email address or account label)")
     data[SEND_IDENTITY_KEY] = identity.strip()
     return data[SEND_IDENTITY_KEY]
 
 
-def check_send_from(data: dict, from_value: str) -> tuple:
-    """Compare a proposed send ``from`` against the pinned identity.
+# ---------------------------------------------------------------------------
+# Send-account ledger (ms-107 e-3365 — label → {email, per-service MCP route})
+# ---------------------------------------------------------------------------
+# 「どのアカウントで送るか」を bare email から台帳に格上げする。bare email では
+# ① calendar/drive は同一 namespace 内で account=alias 切替、gmail は namespace
+# 切替、と service ごとに切替機構が非対称なこと、② 同じ人物が複数 namespace で
+# 到達可能なこと、を表せない。台帳は label → {email, routes{service:{namespace,
+# alias}}} を持ち、送信/操作 Skill は namespace を必ず ``resolve_route`` 経由で
+# 引く。台帳を通らない送信経路が存在しない = 取り違えが物理的に起きない (SPEC §2)。
+# 注意: ここでの "account" は自分の送信アカウント。顧客 ``accounts`` (Account
+# 顧客エンティティ) とは別物なので別キー ``send_accounts`` に格納する。
+
+
+def list_send_accounts(data: dict) -> list:
+    """Return the send-account ledger (list of entries), possibly empty."""
+    return list(data.get(SEND_ACCOUNTS_KEY, []) or [])
+
+
+def get_send_account(data: dict, label_or_email: str):
+    """Return the ledger entry matching a label OR email (case-insensitive), or None."""
+    key = _norm(label_or_email)
+    if not key:
+        return None
+    for a in list_send_accounts(data):
+        if _norm(a.get("label")) == key or _norm(a.get("email")) == key:
+            return a
+    return None
+
+
+def _clean_routes(routes) -> dict:
+    """Keep only known services with a non-empty namespace; normalise shape."""
+    out = {}
+    for svc, r in (routes or {}).items():
+        if svc not in SEND_SERVICES or not isinstance(r, dict):
+            continue
+        ns = (r.get("namespace") or "").strip()
+        if not ns:
+            continue
+        entry = {"namespace": ns}
+        alias = (r.get("alias") or "").strip()
+        if alias:
+            entry["alias"] = alias
+        out[svc] = entry
+    return out
+
+
+def add_send_account(data: dict, label: str, email: str, routes=None) -> dict:
+    """Add (or idempotently update) a send account in the ledger.
+
+    Matching an existing label updates email/routes in place so a Skill can
+    re-run without creating duplicates. Returns the stored entry.
+    """
+    label = (label or "").strip()
+    email = (email or "").strip()
+    if not label:
+        raise ValueError("account label is required")
+    if not email:
+        raise ValueError("account email is required")
+    ledger = data.setdefault(SEND_ACCOUNTS_KEY, [])
+    for a in ledger:
+        if _norm(a.get("label")) == _norm(label):
+            a["email"] = email
+            if routes is not None:
+                a["routes"] = _clean_routes(routes)
+            return a
+    entry = {"label": label, "email": email, "routes": _clean_routes(routes or {})}
+    ledger.append(entry)
+    return entry
+
+
+def set_account_route(data: dict, label: str, service: str,
+                      namespace: str, alias: str = "") -> dict:
+    """Set one service's MCP route (namespace [+ alias]) on a ledger entry."""
+    if service not in SEND_SERVICES:
+        raise ValueError(f"unknown service '{service}' (expected one of {list(SEND_SERVICES)})")
+    a = get_send_account(data, label)
+    if a is None:
+        raise ValueError(f"send account not found: {label}")
+    ns = (namespace or "").strip()
+    if not ns:
+        raise ValueError("namespace is required")
+    route = {"namespace": ns}
+    alias = (alias or "").strip()
+    if alias:
+        route["alias"] = alias
+    a.setdefault("routes", {})[service] = route
+    return route
+
+
+def remove_send_account(data: dict, label: str) -> None:
+    """Remove a ledger entry by label (or email). Raises if not found."""
+    key = _norm(label)
+    ledger = list_send_accounts(data)
+    kept = [a for a in ledger
+            if _norm(a.get("label")) != key and _norm(a.get("email")) != key]
+    if len(kept) == len(ledger):
+        raise ValueError(f"send account not found: {label}")
+    data[SEND_ACCOUNTS_KEY] = kept
+
+
+def resolve_route(data: dict, service: str, label: str = "") -> Optional[dict]:
+    """Resolve the concrete MCP routing for ``service`` for a given label
+    (or the default send label when ``label`` is empty).
+
+    Returns ``{label, email, service, namespace, alias}`` or ``None`` when the
+    account or its route for that service is not configured. **This is the only
+    sanctioned way a send/操作 Skill obtains a namespace** — a Skill must never
+    free-hand one (that would reopen the取り違え hole, SPEC §2).
+    """
+    if service not in SEND_SERVICES:
+        raise ValueError(f"unknown service '{service}' (expected one of {list(SEND_SERVICES)})")
+    target = label.strip() if (label and label.strip()) else get_send_identity(data)
+    a = get_send_account(data, target)
+    if a is None:
+        return None
+    route = (a.get("routes") or {}).get(service)
+    if not route or not route.get("namespace"):
+        return None
+    return {
+        "label": a.get("label"),
+        "email": a.get("email"),
+        "service": service,
+        "namespace": route.get("namespace"),
+        "alias": route.get("alias"),
+    }
+
+
+def check_send_from(data: dict, from_value: str, label: str = "") -> tuple:
+    """Compare a proposed send ``from`` against the resolved send identity.
 
     Returns ``(ok, message)``. The send Skill calls this immediately before
     sending and surfaces the message; on ``ok == False`` it must stop and let
     the human resolve (取り違え防止は仕組みで閉じる、SPEC §2)。
 
-    * No identity pinned  → ok=False, ask the user to pin one first.
-    * from empty          → ok=False, from must be explicit.
+    Resolution order:
+    * ``label`` (or the default send label) resolves to a *ledger entry* →
+      compare ``from`` against that entry's **email** (the台帳 is authoritative).
+    * No ledger entry resolves → legacy bare-string pin compare (back-compat).
+
+    Branches (either path):
+    * Nothing pinned/configured → ok=False, ask to pin/register first.
+    * from empty                → ok=False, from must be explicit.
     * matches (case/space-insensitive) → ok=True.
-    * mismatch            → ok=False, name both so the human sees the conflict.
+    * mismatch                  → ok=False, name both so the human sees it.
     """
+    target = label.strip() if (label and label.strip()) else get_send_identity(data)
+    entry = get_send_account(data, target) if target else None
+    if entry is not None:
+        expected = entry.get("email", "")
+        who = entry.get("label", "")
+        if not from_value or not from_value.strip():
+            return (False, f"from が空です。台帳 '{who}' の identity は '{expected}'。"
+                           "from を明示してください")
+        if _norm(from_value) == _norm(expected):
+            return (True, f"from='{from_value}' は台帳 '{who}' ({expected}) と一致")
+        return (False, f"from='{from_value}' が台帳 '{who}' ({expected}) と"
+                       "一致しません。取り違えの恐れ。送信を止めます")
+    # Legacy path: bare-string pin (no ledger entry for the pinned value).
     pinned = get_send_identity(data)
     if not pinned:
         return (False, "送信 identity が未設定です。先に pin してください "

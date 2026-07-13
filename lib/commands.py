@@ -20669,18 +20669,124 @@ def cmd_sales_identity_show():
 
 
 def cmd_sales_identity_check():
-    """Internal (Skill-invoked): check a proposed send ``from`` against the pin.
-    Exit 0 + 'OK: <msg>' when it matches, exit 1 + 'BLOCK: <msg>' otherwise —
-    so a send Skill can gate on the exit code before sending."""
+    """Internal (Skill-invoked): check a proposed send ``from`` against the
+    resolved identity (台帳 label or, legacy, the bare pin). Optional
+    BEACON_SEND_LABEL selects a ledger entry for a per-send account switch;
+    omit it to use the default send label. Exit 0 + 'OK: <msg>' on match, exit 1
+    + 'BLOCK: <msg>' otherwise — a send Skill gates on the exit code."""
     import sales_entities
     from_value = os.environ.get("BEACON_SEND_FROM", "")
+    label = os.environ.get("BEACON_SEND_LABEL", "")
     data = load_project()
-    ok, msg = sales_entities.check_send_from(data, from_value)
+    ok, msg = sales_entities.check_send_from(data, from_value, label)
     if ok:
         print(f"OK: {msg}")
         sys.exit(0)
     print(f"BLOCK: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+# --- send-account ledger (ms-107 e-3365) -----------------------------------
+# label → {email, routes{service:{namespace, alias}}}. Internal verbs invoked by
+# the sales Skills to register accounts and resolve the concrete MCP route a
+# send must use. Not user-facing CLI verbs (kept out of bin/beacon / README).
+
+def cmd_sales_account_add():
+    """Internal (Skill-invoked): add/update a send account (label + email).
+    Env: BEACON_SEND_LABEL, BEACON_SEND_EMAIL. Idempotent on label."""
+    import sales_entities
+    label = os.environ.get("BEACON_SEND_LABEL", "")
+    email = os.environ.get("BEACON_SEND_EMAIL", "")
+    data = load_project()
+    try:
+        entry = sales_entities.add_send_account(data, label, email)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"send account: {entry['label']} → {entry['email']}")
+
+
+def cmd_sales_account_route():
+    """Internal (Skill-invoked): set one service's MCP route on a send account.
+    Env: BEACON_SEND_LABEL, BEACON_SEND_SERVICE (gmail|calendar|drive),
+    BEACON_SEND_NAMESPACE, optional BEACON_SEND_ALIAS."""
+    import sales_entities
+    label = os.environ.get("BEACON_SEND_LABEL", "")
+    service = os.environ.get("BEACON_SEND_SERVICE", "")
+    namespace = os.environ.get("BEACON_SEND_NAMESPACE", "")
+    alias = os.environ.get("BEACON_SEND_ALIAS", "")
+    data = load_project()
+    try:
+        route = sales_entities.set_account_route(data, label, service, namespace, alias)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    tail = f" (account={route['alias']})" if route.get("alias") else ""
+    print(f"route set: {label}/{service} → {route['namespace']}{tail}")
+
+
+def cmd_sales_account_list():
+    """Internal (Skill-invoked): list the send-account ledger.
+    BEACON_JSON=1 for machine output."""
+    import sales_entities
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    ledger = sales_entities.list_send_accounts(data)
+    default = sales_entities.get_send_identity(data)
+    if json_mode:
+        print(json.dumps({"send_accounts": ledger, "default": default},
+                         ensure_ascii=False))
+        return
+    if not ledger:
+        print("(台帳は空です)")
+        return
+    for a in ledger:
+        mark = " ★default" if sales_entities._norm(a.get("label")) == \
+            sales_entities._norm(default) else ""
+        routes = ", ".join(
+            f"{svc}={r.get('namespace')}" + (f":{r.get('alias')}" if r.get('alias') else "")
+            for svc, r in (a.get("routes") or {}).items()) or "(routes 未設定)"
+        print(f"  {a.get('label')} <{a.get('email')}>{mark}  [{routes}]")
+
+
+def cmd_sales_account_resolve():
+    """Internal (Skill-invoked): resolve the concrete MCP route for a service.
+    Env: BEACON_SEND_SERVICE (gmail|calendar|drive), optional BEACON_SEND_LABEL
+    (default send label when omitted). Prints JSON route on success (exit 0);
+    exit 1 when the account/route is not configured — the Skill must not
+    free-hand a namespace, so an unresolved route stops the send."""
+    import sales_entities
+    service = os.environ.get("BEACON_SEND_SERVICE", "")
+    label = os.environ.get("BEACON_SEND_LABEL", "")
+    data = load_project()
+    try:
+        route = sales_entities.resolve_route(data, service, label)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if route is None:
+        who = label or sales_entities.get_send_identity(data) or "(default 未設定)"
+        print(f"BLOCK: '{who}' の {service} route が台帳にありません。"
+              "先に台帳へ登録してください", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(route, ensure_ascii=False))
+
+
+def cmd_sales_account_remove():
+    """Internal (Skill-invoked): remove a send account by label.
+    Env: BEACON_SEND_LABEL."""
+    import sales_entities
+    label = os.environ.get("BEACON_SEND_LABEL", "")
+    data = load_project()
+    try:
+        sales_entities.remove_send_account(data, label)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"send account removed: {label}")
 
 
 def cmd_account_phase():
@@ -20938,6 +21044,12 @@ if __name__ == "__main__":
         "sales_identity_set": cmd_sales_identity_set,
         "sales_identity_show": cmd_sales_identity_show,
         "sales_identity_check": cmd_sales_identity_check,
+        # ms-107 e-3365 — send-account ledger (label→email+per-service MCP route)
+        "sales_account_add": cmd_sales_account_add,
+        "sales_account_route": cmd_sales_account_route,
+        "sales_account_list": cmd_sales_account_list,
+        "sales_account_resolve": cmd_sales_account_resolve,
+        "sales_account_remove": cmd_sales_account_remove,
         "task_add": cmd_task_add,
         "task_done": cmd_task_done,
         "task_list": cmd_task_list,
