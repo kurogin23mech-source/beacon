@@ -55,19 +55,58 @@ beacon opportunity list
 beacon account list
 ```
 
-## Step 2: 空き時間の確認
+## Step 2: どのアカウントのカレンダーか — 送信アカウント台帳から解決 (この調整ごとに切替可)
+
+どのカレンダーに入れるかは **送信アカウント台帳** (label→MCP route、e-3365) から引く。
+台帳を通さず namespace を手書きしない (= 取り違え防止)。まず台帳を確認:
+
+```bash
+BEACON_JSON=1 python3 "$ROOT/lib/commands.py" sales_account_list
+```
+
+- **台帳が空 / calendar route 未設定** の場合、ユーザーに「どの Google アカウントの
+  カレンダーで調整しますか？」と確認して登録する (label が既にあれば route だけ足す):
+
+```bash
+BEACON_SEND_LABEL="会社" BEACON_SEND_EMAIL="<アドレス>" python3 "$ROOT/lib/commands.py" sales_account_add
+BEACON_SEND_LABEL="会社" BEACON_SEND_SERVICE="calendar" \
+  BEACON_SEND_NAMESPACE="mcp__google-calendar" BEACON_SEND_ALIAS="work" \
+  python3 "$ROOT/lib/commands.py" sales_account_route
+```
+
+- 既定 (default label) でよければ `$LABEL` は空のまま。この 1 件だけ別アカウントの
+  カレンダーにしたい場合は、ユーザーが選んだ label を `$LABEL` に入れる (real-time 切替)。
+
+calendar の route を台帳から解決する。**これが使うカレンダーの唯一の決定経路**:
+
+```bash
+BEACON_SEND_SERVICE="calendar" BEACON_SEND_LABEL="$LABEL" \
+  python3 "$ROOT/lib/commands.py" sales_account_resolve
+echo "RESOLVE_EXIT=$?"
+```
+
+- `RESOLVE_EXIT=0` → JSON `{label,email,namespace,alias}`。`namespace` を `$CALNS`
+  (使うカレンダー MCP ツール群。例 `mcp__google-calendar` / `mcp__google-calendar-personal`)、
+  `alias` を `$CALACCT` (各ツールの `account` 引数。null なら省略) として保持。
+- `RESOLVE_EXIT=1` (BLOCK) → その label の calendar route が台帳に無い。**予定を作らない**。
+  上の登録をしてから再開する。
+
+以降、カレンダー MCP を呼ぶときは必ず `$CALNS` のツールを使い、`account: $CALACCT` を渡す
+(alias が null のときは `account` 省略)。namespace を別のものに差し替えない。
+
+## Step 3: 空き時間の確認
 
 まず今日時点の日時を取得し、いつ以降で探すかの基準にする:
 
-Google カレンダー MCP の `mcp__google-calendar__get-current-time` で現在日時を取得する。
+`$CALNS` の `get-current-time` (例 `mcp__google-calendar__get-current-time`) で現在日時を取得する。
 
-続いて `mcp__google-calendar__get-freebusy` で自分の空きを取得する。探索する期間は
+続いて `$CALNS` の `get-freebusy` で自分の空きを取得する (`account: $CALACCT`)。探索する期間は
 ユーザーの希望 (例:「来週」) に合わせ、無指定なら今日以降の直近 1〜2 週間を見る。
 
 > 参考: `briefing-manager` Skill が同じ Google カレンダー MCP (freebusy / create) を
 > 使っており、そのカレンダー操作パターンを流用できる。ただし本 Skill は自己完結で書く。
 
-## Step 3: 候補の提示 → 相手都合の確認
+## Step 4: 候補の提示 → 相手都合の確認
 
 freebusy の空きから、面談に使えそうな時間帯を **2〜3 個**、曜日込みで提示する
 (例:「7/15 (火) 14:00〜15:00 / 7/16 (水) 10:00〜11:00 / 7/17 (木) 16:00〜17:00」)。
@@ -79,12 +118,12 @@ freebusy の空きから、面談に使えそうな時間帯を **2〜3 個**、
   その場合は `/beacon-sales-email` で送れます」と `/beacon-sales-email` への連携を促す。
 - ユーザーがその場で日時を確定できる → Step 5 へ。
 
-## Step 4: 日時の確定 (人間が決める)
+## Step 5: 日時の確定 (人間が決める)
 
 相手都合が分かり、ユーザーが 1 つの日時を確定したら、その日時 (開始・終了・場所/
 オンライン別) を `$WHEN` として整理する。AI が勝手に確定しない — 確定はユーザーの言葉で。
 
-## Step 5: 予定作成 (人間承認後)
+## Step 6: 予定作成 (人間承認後)
 
 確定した日時をユーザーに提示し、**カレンダーに登録してよいか明示的に確認**する。
 AI が自律でカレンダーに入れてはならない (制約参照)。
@@ -99,15 +138,15 @@ AI が自律でカレンダーに入れてはならない (制約参照)。
 登録しますか？ (登録する / 直す / やめる)
 ```
 
-ユーザーが「登録する」と答えたら、Google カレンダー MCP の
-`mcp__google-calendar__create-event` で予定を作る。タイトルは相手と用件が分かる形
-(例:「[商談] ○○社 △△様 面談」)、説明に商談 ID を残す。「直す」なら Step 3 に戻り、
-「やめる」なら中止する。
+ユーザーが「登録する」と答えたら、**Step 2 で解決した `$CALNS` の `create-event`**
+(例 `mcp__google-calendar__create-event`) で予定を作る。`account: $CALACCT` を渡す
+(alias が null なら省略)。タイトルは相手と用件が分かる形 (例:「[商談] ○○社 △△様 面談」)、
+説明に商談 ID を残す。「直す」なら Step 4 に戻り、「やめる」なら中止する。
 
-> 補足: 仕事用/個人用など複数の Google アカウントがある場合、営業用のカレンダーに
-> 入れる。どのアカウント/カレンダーに入れるかの精緻化 (identity 照合) は今後の課題。
+> 使うカレンダー (namespace/account) は Step 2 の台帳解決の値をそのまま使い、別のものに
+> 差し替えない。会社用/個人用の取り違えは台帳解決で構造的に閉じる (e-3365)。
 
-## Step 6: 活動記録 (証跡) を必ず残す
+## Step 7: 活動記録 (証跡) を必ず残す
 
 予定を作れたら、対象商談にアポ確定を活動記録として残す。これを飛ばすと「いつ次に
 会うか」を後で辿れなくなるため必須 (beacon-sales-email と同じ内部コマンド経路):
@@ -117,7 +156,7 @@ BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[アポ確定] <日時> <相手/場�
   python3 "$ROOT/lib/commands.py" opportunity_activity
 ```
 
-## Step 7: 結果報告
+## Step 8: 結果報告
 
 ユーザーに簡潔に報告:
 
@@ -133,8 +172,8 @@ BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[アポ確定] <日時> <相手/場�
 
 - **予定の作成は人間承認を経る** (AI 自律は候補提示まで、勝手にカレンダーへ入れない)。
 - 相手へのメール送信は自動でしない (`/beacon-sales-email` に連携、送信はそちらの承認経路)。
-- **予定を作れたら必ず Step 6 の活動記録を残す** (証跡を欠かさない)。
+- **使うカレンダー (namespace/account) は必ず台帳解決 (Step 2) から取る**。namespace や
+  account を手書きしない — 台帳を通らない経路を残さないのが取り違え防止の本質 (e-3365)。
+- **予定を作れたら必ず Step 7 の活動記録を残す** (証跡を欠かさない)。
 - `project.json` を直接書き換えない。内部コマンド / CLI 経由のみ。
-- 複数 Google アカウント (仕事用/個人用) に注意し、営業用のカレンダーに入れる
-  (アカウント選択の精緻化は今後の課題)。
 - 相手に見せる文面・日時は非開発者が読める自然な日本語で (社内略語を持ち込まない)。

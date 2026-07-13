@@ -51,23 +51,47 @@ beacon opportunity list
 beacon account list
 ```
 
-## Step 2: 送信 identity (どのアカウントで送るか) の確認
+## Step 2: どのアカウントで送るか — 送信アカウント台帳から解決 (この送信ごとに切替可)
 
-Bash ツールで pin 済みの送信 identity を確認:
-
-```bash
-python3 "$ROOT/lib/commands.py" sales_identity_show
-```
-
-- 値が返れば `$FROM` として保持。
-- `(未設定)` の場合、ユーザーに「どの Google アカウント (メールアドレス) で送りますか？」と確認し、pin する:
+送信元は **送信アカウント台帳** (label→email+MCP route、e-3365) から引く。台帳を通さず
+namespace を手書きしない (= 取り違えが起きる経路を残さない)。まず台帳を確認:
 
 ```bash
-BEACON_SEND_IDENTITY="<ユーザーが答えたアドレス>" python3 "$ROOT/lib/commands.py" sales_identity_set
+BEACON_JSON=1 python3 "$ROOT/lib/commands.py" sales_account_list
 ```
 
-pin は取り違え防止の土台。会社用/個人用を取り違えて顧客に送る事故を防ぐため、
-以降このプロジェクトの送信はここで固定した identity に揃える。
+- **台帳が空** の場合、ユーザーに「どの Google アカウント (メールアドレス) で送りますか？
+  会社用/個人用など呼び名 (label) も教えてください」と確認し、登録する:
+
+```bash
+BEACON_SEND_LABEL="会社" BEACON_SEND_EMAIL="<アドレス>" python3 "$ROOT/lib/commands.py" sales_account_add
+BEACON_SEND_LABEL="会社" BEACON_SEND_SERVICE="gmail" BEACON_SEND_NAMESPACE="mcp__gmail" \
+  python3 "$ROOT/lib/commands.py" sales_account_route
+# 既定の送信元にするなら default label を pin (次回から $LABEL 省略で使える):
+BEACON_SEND_IDENTITY="会社" python3 "$ROOT/lib/commands.py" sales_identity_set
+```
+
+- **どの label で送るか**を決める。既定 (default label) でよければ `$LABEL` は空のまま。
+  この 1 通だけ別アカウントにしたい場合は、ユーザーが選んだ label を `$LABEL` に入れる
+  (= real-time 切替。プロジェクト全体を pin し直す必要はない)。
+
+送信に使う Gmail の route を台帳から解決する。**これが送信先アカウントの唯一の決定経路**:
+
+```bash
+BEACON_SEND_SERVICE="gmail" BEACON_SEND_LABEL="$LABEL" \
+  python3 "$ROOT/lib/commands.py" sales_account_resolve
+echo "RESOLVE_EXIT=$?"
+```
+
+- `RESOLVE_EXIT=0` → JSON `{label,email,namespace,alias}` が返る。`email` を `$FROM`、
+  `namespace` を `$NS` (使う Gmail MCP ツール群。現状 `mcp__gmail`) として保持。
+- `RESOLVE_EXIT=1` (BLOCK) → その label の gmail route が台帳に無い。**送信しない**。
+  上の `sales_account_add` / `sales_account_route` で登録してから再開する。
+
+> Gmail は `send_email` に account 引数が無いため、アカウント切替 = **namespace 切替**
+> (別サーバ)。現状この環境は `mcp__gmail` 単一サーバなので実切替先は 1 つ。2 つ目の
+> Gmail アカウントを使うには別 namespace のサーバ接続が要る (台帳は複数 namespace を
+> 持てる形なので、繋げば `sales_account_route` で足すだけ)。
 
 ## Step 3: 下書きの生成 (自律はここまで)
 
@@ -81,16 +105,18 @@ pin は取り違え防止の土台。会社用/個人用を取り違えて顧客
 
 ## Step 4: 送信前ゲート (identity 照合) — 必須
 
-送信に使う from が pin と一致するかを、送信の **直前** に照合する。exit code で gate:
+送信に使う from が、選んだ label の identity と一致するかを、送信の **直前** に照合する。
+Step 2 と同じ `$LABEL` を渡す (= 解決した route と同じアカウントで gate する)。exit code で gate:
 
 ```bash
-BEACON_SEND_FROM="$FROM" python3 "$ROOT/lib/commands.py" sales_identity_check
+BEACON_SEND_FROM="$FROM" BEACON_SEND_LABEL="$LABEL" \
+  python3 "$ROOT/lib/commands.py" sales_identity_check
 echo "GATE_EXIT=$?"
 ```
 
 - `GATE_EXIT=0` (OK) → Step 5 へ進んでよい。
 - `GATE_EXIT=1` (BLOCK) → **送信しない**。BLOCK メッセージをユーザーに転記し、
-  identity を pin し直すか from を直すかをユーザーに委ねる。ここは止めるのが正しい挙動。
+  台帳の email を直すか label を選び直すかをユーザーに委ねる。ここは止めるのが正しい挙動。
 
 ## Step 5: 人間承認 → 送信
 
@@ -108,12 +134,14 @@ AI が自律で送信してはならない (SPEC §3: 送信は人間承認)。
 送信しますか？ (送信する / 直す / やめる)
 ```
 
-ユーザーが「送信」と答えたら、Gmail MCP で送信する (ツールは環境の Gmail 送信ツール
-= `mcp__gmail__send_email` 等)。ユーザーが「直す」なら Step 3 に戻る。「やめる」なら中止。
+ユーザーが「送信」と答えたら、**Step 2 で解決した `$NS` の送信ツール**で送る
+(例 `$NS` = `mcp__gmail` → `mcp__gmail__send_email`)。namespace は台帳解決の値をそのまま
+使い、別のものに差し替えない (取り違え防止)。ユーザーが「直す」なら Step 3 に戻る。
+「やめる」なら中止。
 
-> 補足: MCP 側に複数の Gmail アカウントがある場合、send が使うアカウントが pin と
-> 一致するかは Step 4 のゲートで担保する。将来、送信ツール側のアカウント選択 (from の
-> 明示指定) を詰める (= 回しながら精緻化)。
+> 送信先アカウントは Step 2 の台帳解決 (`$NS`/`$FROM`) と Step 4 のゲートの二重で担保
+> される。将来 Gmail 側が account 引数対応 or 複数 namespace になれば、台帳に route を
+> 足すだけで同じ動線で切り替わる。
 
 ## Step 6: 活動記録 (証跡) を必ず残す
 
@@ -142,7 +170,10 @@ BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[メール送信済] 件名『<件名
 ## 制約
 
 - **送信は人間承認を経る** (AI 自律は下書きまで、SPEC §3)。
-- **Step 4 のゲートを飛ばさない** (identity 照合前に送信しない、取り違え防止)。
+- **送信先アカウント (namespace/from) は必ず台帳解決 (Step 2) から取る**。namespace を
+  手書きしない — 台帳を通らない送信経路を残さないのが取り違え防止の本質 (e-3365)。
+- **Step 4 のゲートを飛ばさない** (identity 照合前に送信しない)。Step 2 と Step 4 は
+  同じ `$LABEL` で揃える。
 - **送信できたら必ず Step 6 の活動記録を残す** (証跡を欠かさない)。
 - `project.json` を直接書き換えない。内部コマンド / CLI 経由のみ。
 - 顧客宛て本文は非開発者が読める自然な日本語で (社内略語を持ち込まない)。
