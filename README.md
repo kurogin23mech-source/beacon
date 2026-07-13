@@ -257,6 +257,9 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self\|counterpart]` | Add a deal / 商談を追加 |
 | `beacon opportunity list [--json]` | List opportunities / 商談を一覧 |
 | `beacon opportunity phase <opp-id> <phase> [--note <text>]` | Move an opportunity to a new phase (recorded in history) / 商談のフェーズを変更（履歴に記録） |
+| `beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] \| --clear` | Set the 遷移日 (judgement date) for the current phase / 現フェーズの遷移日（判定予定日）を設定 |
+| `beacon opportunity judge <opp-id> advance\|retry\|terminal [<date\|terminal-phase>] [--note <text>]` | Judge a reached 遷移日 (3-way, human-confirmed) / 到達した遷移日を判定（次へ/やり直し/決着） |
+| `beacon opportunity due [--json]` | List opportunities awaiting a transition judgement / 判定待ち（遷移日 到達・超過）の商談を一覧 |
 | `beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self\|counterpart]` | Log an activity on an opportunity / 商談に活動を記録 |
 | `beacon opportunity delete <opp-id>` | Delete an opportunity and its activities / 商談と活動を削除 |
 | `beacon phase list [--json]` | Show the configured phase funnels (account / opportunity vocabulary) / 設定済みフェーズファネルを表示 |

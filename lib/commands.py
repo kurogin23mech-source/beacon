@@ -16415,6 +16415,8 @@ def cmd_help_json():
         {"command": "beacon opportunity list", "flags": ["--json"], "description": "List sales opportunities with phase / status / account"},
         {"command": "beacon opportunity phase <opp-id> <phase>", "flags": ["--note <text>"], "description": "Declare a phase transition (append-only phase_history; master=人間)"},
         {"command": "beacon opportunity transition-date <opp-id> <YYYY-MM-DD>", "flags": ["--note <text>", "--clear"], "description": "Set the 遷移日 (judgement date) for the current phase (append-only transition_date_history)"},
+        {"command": "beacon opportunity judge <opp-id> advance|retry|terminal", "flags": ["--note <text>"], "description": "Judge a reached 遷移日 (3-way: 次へ/やり直し/決着; human-confirmed, master=人間)"},
+        {"command": "beacon opportunity due", "flags": ["--json"], "description": "List opportunities awaiting a transition judgement (遷移日 due/overdue)"},
         {"command": "beacon opportunity activity <opp-id> <desc>", "flags": ["--deadline <date>", "--ball self|counterpart"], "description": "Add an activity (業務・事前計画型) under an opportunity"},
         {"command": "beacon opportunity delete <opp-id>", "flags": [], "description": "Delete an opportunity and its activities"},
         {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity vocabulary)"},
@@ -20592,6 +20594,13 @@ def _install_wall_clock_timeout(cmd_name: str) -> None:
 # substrate but not the milestone/task functions. All args arrive via env vars
 # set by bin/beacon / beacon_cli.dispatch, matching the rest of this module.
 
+def _today_iso() -> str:
+    """Today's date as YYYY-MM-DD (the transition_date engine works in dates,
+    not datetimes — core._now_iso() carries a time component we don't want)."""
+    import datetime
+    return datetime.date.today().isoformat()
+
+
 def _require_sales_project(data: dict) -> None:
     """Warn (not block) if run against a non-sales project. Sales commands
     still work on any project — they just create the collections lazily — but
@@ -20897,17 +20906,24 @@ def cmd_opportunity_list():
         print("No opportunities yet. Add one with: beacon opportunity add \"<title>\"")
         return
     import sales_entities
+    import datetime
+    today = datetime.date.today().isoformat()
     for o in opps:
         acc = o.get("account_id") or "-"
         deadline = f" due {o['deadline']}" if o.get("deadline") else ""
         ball = o.get("who_has_the_ball", "")
         td = o.get("transition_date") or ""
-        # 遷移日 = 判定予定日 (SPEC §2). Non-terminal deal without one → 最優先で促す。
-        if td:
+        # 遷移日 = 判定予定日 (SPEC §2/§3). 判定待ちの overdue/due は距離を強調して促す。
+        st = sales_entities.transition_status(data, o["id"], today)
+        if st == sales_entities.TRANSITION_OVERDUE:
+            td_str = f" / ⚠ 遷移日 超過 {td} (判定待ち)"
+        elif st == sales_entities.TRANSITION_DUE:
+            td_str = f" / ⏰ 遷移日 本日 {td} (要判定)"
+        elif st == sales_entities.TRANSITION_SCHEDULED:
             td_str = f" / 遷移日: {td}"
-        elif sales_entities.needs_transition_date(data, o["id"]):
+        elif st == sales_entities.TRANSITION_UNSET:
             td_str = " / ⚠ 遷移日 未設定"
-        else:
+        else:  # settled
             td_str = ""
         print(f"[{o['id']}] {o['title']} — phase: {o.get('phase', '?')} "
               f"/ status: {o.get('status', '?')} / account: {acc}"
@@ -20965,6 +20981,88 @@ def cmd_opportunity_transition_date():
               f"(recorded in transition_date_history)")
     else:
         print(f"{opp_id} transition_date cleared (recorded in transition_date_history)")
+
+
+def cmd_opportunity_judge():
+    """Judge a transition (ms-107 e-3372, SPEC §3): advance / retry / terminal.
+
+    Env: BEACON_OPP_ID, BEACON_JUDGE_DECISION (advance|retry|terminal),
+    BEACON_JUDGE_ARG (retry→new date, terminal→terminal phase; advance→optional
+    next date), BEACON_PHASE_NOTE. The human decides the branch; this applies it
+    (AI never auto-changes state — master=人間)."""
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    decision = os.environ.get("BEACON_JUDGE_DECISION", "")
+    arg = os.environ.get("BEACON_JUDGE_ARG", "")
+    note = os.environ.get("BEACON_PHASE_NOTE", "")
+    data = load_project()
+    at = core._now_iso()
+    try:
+        if decision == "advance":
+            res = sales_entities.advance_transition(
+                data, opp_id, next_transition_date=arg, note=note, at=at)
+            save_project(data)
+            print(f"{opp_id} advance → phase {res['phase']}")
+            if arg:
+                print(f"  次の遷移日: {arg}")
+            elif sales_entities.needs_transition_date(data, opp_id):
+                # SPEC §2: 新フェーズ入場 → 遷移日設定が最優先。lead があれば候補提示。
+                base = _today_iso()
+                sug = sales_entities.suggest_transition_date(data, res["phase"], base)
+                hint = f" (候補: {sug})" if sug else ""
+                print(f"  ⚠ 次フェーズの遷移日が未設定です{hint} — "
+                      f"beacon opportunity transition-date {opp_id} <YYYY-MM-DD>")
+        elif decision == "retry":
+            sales_entities.retry_transition(data, opp_id, arg, note=note, at=at)
+            save_project(data)
+            print(f"{opp_id} retry → 同フェーズ継続、新しい遷移日: {arg}")
+        elif decision == "terminal":
+            # 決着候補の外を宣言した時は warning を出す (block しない、master=人間)。
+            opp = sales_entities.find_opportunity(data, opp_id)
+            cur = opp.get("phase", "") if opp else ""
+            for w in sales_entities.opportunity_phase_warnings(data, cur, arg):
+                print(f"  ⚠ {w}", file=sys.stderr)
+            sales_entities.terminal_transition(data, opp_id, arg, note=note, at=at)
+            save_project(data)
+            print(f"{opp_id} terminal → {arg} (決着、遷移日は用済みでクリア)")
+        else:
+            print(f"Error: decision must be advance|retry|terminal, got {decision!r}",
+                  file=sys.stderr)
+            sys.exit(1)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        # terminal 候補を添える (失敗時の次アクションを示す)。
+        if decision in ("terminal", "advance"):
+            try:
+                allowed = sales_entities.allowed_terminals_for(data, opp_id)
+                if allowed:
+                    print(f"  この段階から決着できるのは: {', '.join(allowed)}",
+                          file=sys.stderr)
+            except ValueError:
+                pass
+        sys.exit(1)
+
+
+def cmd_opportunity_due():
+    """List opportunities whose 遷移日 is due or overdue as of today (ms-107
+    e-3372): the deals awaiting a human judgement. BEACON_JSON=1 for machine
+    output. This is the AI's catch surface for the overdue (判定漏れ) state."""
+    import sales_entities
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    rows = sales_entities.opportunities_awaiting_judgement(data, _today_iso())
+    if json_mode:
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+    if not rows:
+        print("判定待ちの商談はありません (遷移日 due/overdue なし)")
+        return
+    print("判定待ちの商談 (遷移日 到達 / 超過):")
+    for r in rows:
+        mark = "⚠ 超過" if r["transition_status"] == sales_entities.TRANSITION_OVERDUE else "⏰ 本日"
+        print(f"  [{r['id']}] {r['title']} — phase: {r['phase']} / "
+              f"遷移日 {r['transition_date']} {mark}")
+    print("  → beacon opportunity judge <opp-id> advance|retry|terminal で判定")
 
 
 def cmd_opportunity_delete():
@@ -21084,6 +21182,8 @@ if __name__ == "__main__":
         "opportunity_list": cmd_opportunity_list,
         "opportunity_phase": cmd_opportunity_phase,
         "opportunity_transition_date": cmd_opportunity_transition_date,
+        "opportunity_judge": cmd_opportunity_judge,
+        "opportunity_due": cmd_opportunity_due,
         "opportunity_activity": cmd_opportunity_activity,
         "opportunity_delete": cmd_opportunity_delete,
         "phase_list": cmd_phase_list,

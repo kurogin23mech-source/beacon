@@ -598,3 +598,135 @@ def test_needs_transition_date_false_for_unknown_or_account():
     acc = se.account_add(data, "Globex")
     assert se.needs_transition_date(data, acc) is False
     assert se.needs_transition_date(data, "opp-99") is False
+
+
+# --- transition judgement engine (3-way + overdue) — ms-107 e-3372 ---------
+
+def _opp_in_stage(data, stage="商談準備", date=""):
+    opp = se.opportunity_add(data, "Deal", phase=stage, transition_date=date, created_at="T0")
+    return opp
+
+
+def test_transition_status_unset_and_scheduled():
+    data = _fresh()
+    opp = _opp_in_stage(data)  # no date
+    assert se.transition_status(data, opp, "2026-08-01") == se.TRANSITION_UNSET
+    se.set_transition_date(data, opp, "2026-08-10", at="T1")
+    assert se.transition_status(data, opp, "2026-08-01") == se.TRANSITION_SCHEDULED
+
+
+def test_transition_status_due_and_overdue():
+    data = _fresh()
+    opp = _opp_in_stage(data, date="2026-08-01")
+    assert se.transition_status(data, opp, "2026-08-01") == se.TRANSITION_DUE
+    assert se.transition_status(data, opp, "2026-08-02") == se.TRANSITION_OVERDUE
+    assert se.transition_status(data, opp, "2026-07-31") == se.TRANSITION_SCHEDULED
+
+
+def test_transition_status_settled_in_terminal_regardless_of_date():
+    data = _fresh()
+    opp = _opp_in_stage(data, date="2026-08-01")
+    se.phase_set(data, opp, "不成立", at="T1")
+    # even with an old date, a terminal deal is settled (not overdue).
+    assert se.transition_status(data, opp, "2027-01-01") == se.TRANSITION_SETTLED
+
+
+def test_next_opportunity_phase_order_and_end():
+    data = _fresh()
+    assert se.next_opportunity_phase(data, "商談準備") == "提案準備"
+    assert se.next_opportunity_phase(data, "先方検討中") == "合意済み"
+    # last non-terminal → None (success from here is a terminal, not advance).
+    assert se.next_opportunity_phase(data, "合意済み") is None
+    assert se.next_opportunity_phase(data, "成約") is None
+    assert se.next_opportunity_phase(data, "未知") is None
+
+
+def test_advance_moves_phase_and_clears_date_when_none_given():
+    data = _fresh()
+    opp = _opp_in_stage(data, date="2026-08-01")
+    res = se.advance_transition(data, opp, at="T1")
+    assert res["phase"] == "提案準備"
+    o = se.find_opportunity(data, opp)
+    assert o["phase"] == "提案準備"
+    assert o["transition_date"] == ""          # consumed → prompts for a new one
+    assert se.needs_transition_date(data, opp) is True
+
+
+def test_advance_sets_next_date_when_given():
+    data = _fresh()
+    opp = _opp_in_stage(data, date="2026-08-01")
+    se.advance_transition(data, opp, next_transition_date="2026-09-01", at="T1")
+    assert se.get_transition_date(data, opp) == "2026-09-01"
+
+
+def test_advance_from_last_stage_raises():
+    data = _fresh()
+    opp = _opp_in_stage(data, stage="合意済み", date="2026-08-01")
+    with pytest.raises(ValueError):
+        se.advance_transition(data, opp, at="T1")
+
+
+def test_retry_keeps_phase_new_date_and_requires_date():
+    data = _fresh()
+    opp = _opp_in_stage(data, date="2026-08-01")
+    se.retry_transition(data, opp, "2026-08-20", note="粘る", at="T1")
+    o = se.find_opportunity(data, opp)
+    assert o["phase"] == "商談準備" and o["transition_date"] == "2026-08-20"
+    with pytest.raises(ValueError):
+        se.retry_transition(data, opp, "", at="T2")
+
+
+def test_allowed_terminals_for_current_phase():
+    data = _fresh()
+    opp = _opp_in_stage(data, stage="提案準備")
+    assert se.allowed_terminals_for(data, opp) == ["成約", "失注"]
+
+
+def test_terminal_transition_settles_and_clears_date():
+    data = _fresh()
+    opp = _opp_in_stage(data, stage="提案準備", date="2026-08-01")
+    se.terminal_transition(data, opp, "失注", at="T1")
+    o = se.find_opportunity(data, opp)
+    assert o["phase"] == "失注" and o["status"] == "lost"
+    assert o["transition_date"] == ""
+    assert se.transition_status(data, opp, "2026-08-02") == se.TRANSITION_SETTLED
+
+
+def test_terminal_transition_rejects_non_terminal_phase():
+    data = _fresh()
+    opp = _opp_in_stage(data, stage="提案準備")
+    with pytest.raises(ValueError):
+        se.terminal_transition(data, opp, "先方検討中")  # not terminal
+
+
+def test_suggest_transition_date_from_default_lead():
+    data = _fresh()
+    prep = se._find_phase_def(data["opportunity_phases"], "提案準備")
+    prep["default_lead"] = 7
+    assert se.suggest_transition_date(data, "提案準備", "2026-08-01") == "2026-08-08"
+    # no lead configured → None
+    assert se.suggest_transition_date(data, "商談準備", "2026-08-01") is None
+    # bad base date → None (guarded)
+    assert se.suggest_transition_date(data, "提案準備", "nope") is None
+
+
+def test_opportunities_awaiting_judgement_scan_and_sort():
+    data = _fresh()
+    a = se.opportunity_add(data, "A", transition_date="2026-08-05", created_at="T0")  # future
+    b = se.opportunity_add(data, "B", transition_date="2026-08-01", created_at="T0")  # overdue
+    c = se.opportunity_add(data, "C", transition_date="2026-08-03", created_at="T0")  # due
+    se.opportunity_add(data, "D", created_at="T0")                                    # unset
+    rows = se.opportunities_awaiting_judgement(data, "2026-08-03")
+    # only overdue(B) + due(C); sorted oldest-first (B before C); A/D excluded.
+    assert [r["id"] for r in rows] == [b, c]
+    assert rows[0]["transition_status"] == se.TRANSITION_OVERDUE
+    assert rows[1]["transition_status"] == se.TRANSITION_DUE
+
+
+def test_overdue_persists_until_judged():
+    data = _fresh()
+    opp = _opp_in_stage(data, date="2026-08-01")
+    assert se.transition_status(data, opp, "2026-08-10") == se.TRANSITION_OVERDUE
+    # retry (place a new future date) clears the overdue state.
+    se.retry_transition(data, opp, "2026-08-20", at="T1")
+    assert se.transition_status(data, opp, "2026-08-10") == se.TRANSITION_SCHEDULED

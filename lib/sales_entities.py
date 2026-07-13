@@ -507,6 +507,178 @@ def needs_transition_date(data: dict, target_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Transition judgement engine — ms-107 e-3372, SPEC §3. Target-class generic.
+# ---------------------------------------------------------------------------
+# 遷移日に達したら、そのフェーズのゴールを人間が判定する: advance (次へ) /
+# retry (やり直し = 新しい遷移日) / terminal (決着). AI は候補を出すだけで状態は
+# 変えない (master=人間, SPEC §6) — この層は「判定を適用する」プリミティブで、
+# *いつ* 判定するか / *どの* 分岐かは呼び出し側 (Skill + 人間) が決める。
+#
+# transition_status は派生 (derived) — transition_date と「今日」から毎回導出し、
+# 永続フラグを持たない。判定されないまま遷移日を過ぎた商談は自動で ``overdue``
+# に分類され、非terminal な間はそこに居座る (= 人間が判定するまで催促し続ける)。
+# 永続フラグにすると、日付が過ぎた瞬間にフラグを立て直す常駐処理が要り必ず
+# stale になるが、派生なら常に正しい。``status`` (open/won/lost…) とは直交する
+# 別次元 (overdue な商談も status は open のまま)。
+
+TRANSITION_UNSET = "unset"          # 非terminal・遷移日なし (= needs_transition_date)
+TRANSITION_SCHEDULED = "scheduled"  # 遷移日が未来
+TRANSITION_DUE = "due"              # 遷移日が今日 (= 判定日)
+TRANSITION_OVERDUE = "overdue"      # 遷移日を過ぎ、まだ非terminal (= 判定待ち, 抜け漏れ候補)
+TRANSITION_SETTLED = "settled"      # terminal フェーズ (= 決着済み)
+
+
+def transition_status(data: dict, target_id: str, today: str) -> str:
+    """Derived judgement state of a target (opp-…) relative to ``today``.
+
+    ``today`` is a ``YYYY-MM-DD`` string (the caller supplies it — no hidden
+    clock, so this stays testable). Returns one of the TRANSITION_* constants.
+    Terminal targets are SETTLED regardless of date; a non-terminal target with
+    no transition_date is UNSET; otherwise the date is compared to today
+    (past → OVERDUE, today → DUE, future → SCHEDULED). ISO dates compare
+    correctly as plain strings, so no parsing is needed here.
+    """
+    opp = find_opportunity(data, target_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {target_id}")
+    if opportunity_phase_is_terminal(data, opp.get("phase", "")):
+        return TRANSITION_SETTLED
+    td = (opp.get("transition_date") or "").strip()
+    if not td:
+        return TRANSITION_UNSET
+    if td < today:
+        return TRANSITION_OVERDUE
+    if td == today:
+        return TRANSITION_DUE
+    return TRANSITION_SCHEDULED
+
+
+def next_opportunity_phase(data: dict, phase_name: str) -> Optional[str]:
+    """The next *non-terminal* phase after ``phase_name`` in the configured
+    funnel order, or None when ``phase_name`` is the last non-terminal stage,
+    is unknown, or is itself terminal. Advance moves along this order; the
+    success outcome after the final stage is a terminal (決着), which goes
+    through the terminal path, not advance."""
+    phases = opportunity_phases(data)
+    names = _phase_names(phases)
+    if phase_name not in names:
+        return None
+    idx = names.index(phase_name)
+    for p in phases[idx + 1:]:
+        if not p.get("terminal"):
+            return p.get("name")
+    return None
+
+
+def advance_transition(data: dict, target_id: str, *,
+                       next_transition_date: str = "", note: str = "",
+                       at: str = "") -> dict:
+    """Advance a target to the next non-terminal phase (goal met, SPEC §3).
+
+    Consumes the current transition_date: sets ``next_transition_date`` on the
+    new phase when provided, else clears it so ``needs_transition_date`` prompts
+    for a fresh one (SPEC §2). Returns ``{"phase": <new>, "transition_date": …}``.
+    Raises ValueError when there is no next non-terminal phase (the caller should
+    use the terminal path — 成約 等 — instead of advance).
+    """
+    opp = find_opportunity(data, target_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {target_id}")
+    cur = opp.get("phase", "")
+    nxt = next_opportunity_phase(data, cur)
+    if nxt is None:
+        raise ValueError(
+            f"'{cur}' は最終ステージです (次の非terminalフェーズがありません)。"
+            "advance ではなく terminal (決着) を宣言してください")
+    phase_set(data, target_id, nxt, note=note, at=at)
+    set_transition_date(data, target_id, next_transition_date,
+                        note=note or "advance", at=at)
+    return {"phase": nxt, "transition_date": opp.get("transition_date", "")}
+
+
+def retry_transition(data: dict, target_id: str, new_transition_date: str, *,
+                     note: str = "", at: str = "") -> dict:
+    """Stay in the same phase but place a new transition_date (未達だが粘る,
+    SPEC §3). ``new_transition_date`` is required — retry means 置き直す, so an
+    empty date is rejected (that would be a clear, not a retry). Returns the
+    appended transition_date_history record."""
+    if not (new_transition_date or "").strip():
+        raise ValueError("retry requires a new transition_date (置き直す日付)")
+    return set_transition_date(data, target_id, new_transition_date,
+                               note=note or "retry", at=at)
+
+
+def allowed_terminals_for(data: dict, target_id: str) -> list:
+    """The terminal (決着) phases declarable from the target's current phase
+    (its ``allowed_terminals`` rule), or [] when unknown/unset. This is the
+    choice list a human picks from on a failed judgement (SPEC §3)."""
+    opp = find_opportunity(data, target_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {target_id}")
+    cur_def = _find_phase_def(opportunity_phases(data), opp.get("phase", ""))
+    return list((cur_def or {}).get("allowed_terminals") or [])
+
+
+def terminal_transition(data: dict, target_id: str, terminal_phase: str, *,
+                        note: str = "", at: str = "") -> dict:
+    """Declare a terminal (決着) phase and consume the transition_date.
+
+    Permissive (master=人間, SPEC §6): declaring a terminal outside the stage's
+    ``allowed_terminals`` is surfaced by ``opportunity_phase_warnings`` (caller's
+    job), never blocked here. This helper only enforces that the target phase is
+    actually terminal (a typo'd stage name would silently leave the deal open).
+    Returns the phase_history record.
+    """
+    if not opportunity_phase_is_terminal(data, terminal_phase):
+        raise ValueError(
+            f"'{terminal_phase}' は terminal (決着) フェーズではありません "
+            f"(既知の決着: {[p['name'] for p in opportunity_phases(data) if p.get('terminal')]})")
+    rec = phase_set(data, target_id, terminal_phase, note=note or "terminal", at=at)
+    # 決着したら遷移日は用済み — 証跡を残して消す (settled は date を持たない)。
+    set_transition_date(data, target_id, "", note="settled", at=at)
+    return rec
+
+
+def suggest_transition_date(data: dict, phase_name: str,
+                            base_date: str) -> Optional[str]:
+    """Suggest a transition_date for a phase = ``base_date`` + the phase's
+    ``default_lead`` days, or None when the phase has no default_lead. Pure
+    date arithmetic; the human still confirms (this is a suggestion, SPEC §6).
+    ``base_date`` is ``YYYY-MM-DD``."""
+    pdef = _find_phase_def(opportunity_phases(data), phase_name)
+    lead = phase_default_lead(pdef)
+    if lead is None:
+        return None
+    import datetime
+    try:
+        base = datetime.date.fromisoformat(base_date)
+    except (TypeError, ValueError):
+        return None
+    return (base + datetime.timedelta(days=lead)).isoformat()
+
+
+def opportunities_awaiting_judgement(data: dict, today: str) -> list:
+    """Scan for opportunities whose transition_date is due or overdue as of
+    ``today`` (= the deals a human should judge now, SPEC §3). Returns a list of
+    ``{"id","title","phase","transition_date","transition_status"}`` sorted by
+    transition_date (oldest first — the most overdue surface at the top). This
+    is the AI's catch surface for the ``overdue`` state (判定漏れの可視化)."""
+    out = []
+    for o in data.get("opportunities", []):
+        st = transition_status(data, o["id"], today)
+        if st in (TRANSITION_DUE, TRANSITION_OVERDUE):
+            out.append({
+                "id": o["id"],
+                "title": o.get("title", ""),
+                "phase": o.get("phase", ""),
+                "transition_date": o.get("transition_date", ""),
+                "transition_status": st,
+            })
+    out.sort(key=lambda r: r["transition_date"])
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Activity (業務・事前計画型) — 従属 composition → Opportunity
 # ---------------------------------------------------------------------------
 
