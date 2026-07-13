@@ -718,17 +718,36 @@ def cmd_init():
     # next to the existing top-level project fields so legacy readers that
     # don't know about it just ignore it (= forward-compat append-only).
     disclosure_policy = _build_disclosure_policy_from_env()
-    data = {
-        "name": name,
-        "objective": objective,
-        "milestones": [],
-        "retro_day": retro_day,
-        "disclosure_policy": disclosure_policy,
-    }
+    # ms-106 ① — 職種テンプレート選択. BEACON_PROFESSION picks the job-template
+    # (= agent class instance, SPEC 設計方針 0). Default "dev" keeps the
+    # existing schema byte-for-byte; "sales" emits the sales entity schema
+    # (opportunities/accounts) instead of driving work through milestones.
+    # Both carry milestones:[] so the shared validator passes unchanged.
+    profession = (os.environ.get("BEACON_PROFESSION", "dev") or "dev").strip().lower()
+    if profession == "sales":
+        import sales_entities
+        data = sales_entities.build_sales_project(
+            name, objective, retro_day=retro_day,
+            disclosure_policy=disclosure_policy)
+    elif profession in ("", "dev"):
+        data = {
+            "name": name,
+            "objective": objective,
+            "profession": "dev",
+            "milestones": [],
+            "retro_day": retro_day,
+            "disclosure_policy": disclosure_policy,
+        }
+    else:
+        print(f"Error: unknown profession '{profession}' (valid: dev, sales)",
+              file=sys.stderr)
+        sys.exit(1)
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
     print(f"Created {pf}")
+    if profession == "sales":
+        print("  profession = sales (営業スキーマ: opportunities / accounts)")
     # Visible feedback on the chosen posture (SPEC § acceptance 2 + 3):
     # default-high is silent-but-printed so the user notices, opt-in low
     # gets a single-line confirmation that the OSS-friendly mode is active.
@@ -748,7 +767,10 @@ def cmd_init():
         _persist_initial_profile_choice(chosen)
         print(f"Profile pinned for this project: {chosen}")
 
-    print("Next: beacon milestone add")
+    if profession == "sales":
+        print("Next: beacon account add / beacon opportunity add")
+    else:
+        print("Next: beacon milestone add")
 
 
 def cmd_common_setup():
@@ -16383,6 +16405,18 @@ def cmd_help_json():
         {"command": "beacon task list", "flags": ["--json", "--ms <id>"], "description": "List tasks"},
         {"command": "beacon task update <entry-id>", "flags": ["--ms <ms-id>", "--description <text>", "--status <s>", "--detail <text>", "--motivation <text>", "--acceptance-criteria <text>", "--behavior <text>", "--priority <p>"], "description": "Update task fields (description / status / detail / motivation / acceptance_criteria / behavior / priority) or move to another milestone"},
         {"command": "beacon log [message]", "flags": ["--prepare", "--finalize", "-m <ms-id>", "--progress <n>", "--summary <text>"], "description": "Record HEAD commit to active milestone"},
+        # ms-106 ② — sales job-template entities (profession=sales projects)
+        {"command": "beacon account add <name>", "flags": ["--health <text>"], "description": "Add a sales account (顧客; 対象・継続)"},
+        {"command": "beacon account list", "flags": ["--json"], "description": "List sales accounts and their contacts"},
+        {"command": "beacon account contact <acc-id> <name>", "flags": ["--role <text>", "--email <text>"], "description": "Add a contact (担当者) nested under an account"},
+        {"command": "beacon account phase <acc-id> <phase>", "flags": ["--note <text>"], "description": "Declare an account lifecycle phase transition (append-only)"},
+        {"command": "beacon account delete <acc-id>", "flags": ["--force"], "description": "Delete an account (--force orphans referencing opportunities)"},
+        {"command": "beacon opportunity add <title>", "flags": ["--account <acc-id>", "--phase <p>", "--goal <n>", "--probability <n>", "--deadline <date>", "--ball self|counterpart"], "description": "Add a sales opportunity (商談; 対象・有限)"},
+        {"command": "beacon opportunity list", "flags": ["--json"], "description": "List sales opportunities with phase / status / account"},
+        {"command": "beacon opportunity phase <opp-id> <phase>", "flags": ["--note <text>"], "description": "Declare a phase transition (append-only phase_history; master=人間)"},
+        {"command": "beacon opportunity activity <opp-id> <desc>", "flags": ["--deadline <date>", "--ball self|counterpart"], "description": "Add an activity (業務・事前計画型) under an opportunity"},
+        {"command": "beacon opportunity delete <opp-id>", "flags": [], "description": "Delete an opportunity and its activities"},
+        {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity vocabulary)"},
         {"command": "beacon save <desc>", "flags": ["-m <ms-id>", "--hash <hash>", "--source manual", "--json"], "description": "Save a freeform entry to a milestone"},
         {"command": "beacon sync", "flags": [], "description": "Auto-sync recent git commits to active milestone"},
         {"command": "beacon summary <text>", "flags": [], "description": "Update project summary"},
@@ -20550,6 +20584,273 @@ def _install_wall_clock_timeout(cmd_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Sales job-template commands (ms-106 ② — opportunity / account / activity)
+# ---------------------------------------------------------------------------
+# These operate on the sales collections (opportunities / accounts) rather than
+# on milestones. They are new ② code (SPEC 設計方針 0): sharing the Store
+# substrate but not the milestone/task functions. All args arrive via env vars
+# set by bin/beacon / beacon_cli.dispatch, matching the rest of this module.
+
+def _require_sales_project(data: dict) -> None:
+    """Warn (not block) if run against a non-sales project. Sales commands
+    still work on any project — they just create the collections lazily — but
+    a wrong-profession invocation is almost always a mistake worth surfacing."""
+    prof = data.get("profession", "")
+    if prof and prof != "sales":
+        print(f"  note: this project's profession is '{prof}', not 'sales' "
+              f"(sales entities will still be created)", file=sys.stderr)
+
+
+def cmd_account_add():
+    import sales_entities
+    name = os.environ.get("BEACON_ACCOUNT_NAME", "")
+    health = os.environ.get("BEACON_ACCOUNT_HEALTH", "")
+    data = load_project()
+    _require_sales_project(data)
+    try:
+        acc_id = sales_entities.account_add(data, name, health=health,
+                                            created_at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Added account {acc_id}: {name}")
+
+
+def cmd_account_list():
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    accounts = data.get("accounts", [])
+    if json_mode:
+        print(json.dumps(accounts, ensure_ascii=False, indent=2))
+        return
+    if not accounts:
+        print("No accounts yet. Add one with: beacon account add \"<name>\"")
+        return
+    for a in accounts:
+        contacts = a.get("contacts", [])
+        health = a.get("health", "")
+        phase = a.get("phase", "")
+        phase_str = f"phase: {phase} / " if phase else ""
+        suffix = f" [health: {health}]" if health else ""
+        print(f"[{a['id']}] {a['name']}{suffix} — {phase_str}contacts: {len(contacts)}")
+        for c in contacts:
+            role = f" ({c['role']})" if c.get("role") else ""
+            email = f" <{c['email']}>" if c.get("email") else ""
+            print(f"    - {c.get('name', '?')}{role}{email}")
+
+
+def cmd_account_phase():
+    import sales_entities
+    account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
+    new_phase = os.environ.get("BEACON_PHASE", "")
+    note = os.environ.get("BEACON_PHASE_NOTE", "")
+    data = load_project()
+    for w in sales_entities.account_phase_warnings(data, new_phase):
+        print(f"  ⚠ {w}", file=sys.stderr)
+    if not account_id.startswith("acc-"):
+        print(f"Error: expected an account id (acc-…), got {account_id!r}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        rec = sales_entities.phase_set(data, account_id, new_phase, note=note,
+                                       at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"{account_id} phase → {rec['phase']} (recorded in phase_history)")
+
+
+def cmd_account_delete():
+    import sales_entities
+    account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
+    force = os.environ.get("BEACON_FORCE", "") == "1"
+    data = load_project()
+    try:
+        orphaned = sales_entities.account_delete(data, account_id, force=force)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Deleted account {account_id}")
+    if orphaned:
+        print(f"  orphaned opportunities (account_id cleared): {', '.join(orphaned)}")
+
+
+def cmd_account_contact():
+    import sales_entities
+    account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
+    name = os.environ.get("BEACON_CONTACT_NAME", "")
+    role = os.environ.get("BEACON_CONTACT_ROLE", "")
+    email = os.environ.get("BEACON_CONTACT_EMAIL", "")
+    data = load_project()
+    try:
+        sales_entities.contact_add(data, account_id, name, role=role, email=email)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Added contact '{name}' to {account_id}")
+
+
+def cmd_opportunity_add():
+    import sales_entities
+    title = os.environ.get("BEACON_OPP_TITLE", "")
+    account_id = os.environ.get("BEACON_OPP_ACCOUNT", "")
+    # Empty → the model picks the configured funnel entry (default_opportunity_phase).
+    phase = os.environ.get("BEACON_OPP_PHASE", "")
+    deadline = os.environ.get("BEACON_OPP_DEADLINE", "")
+    ball = os.environ.get("BEACON_OPP_BALL", "") or sales_entities.BALL_SELF
+    goal_raw = os.environ.get("BEACON_OPP_GOAL", "")
+    prob_raw = os.environ.get("BEACON_OPP_PROBABILITY", "")
+    goal_amount = _parse_number(goal_raw, "--goal")
+    probability = _parse_number(prob_raw, "--probability")
+    data = load_project()
+    _require_sales_project(data)
+    try:
+        opp_id = sales_entities.opportunity_add(
+            data, title, account_id=account_id, phase=phase,
+            goal_amount=goal_amount, probability=probability,
+            deadline=deadline, who_has_the_ball=ball,
+            created_at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    opp = sales_entities.find_opportunity(data, opp_id)
+    print(f"Added opportunity {opp_id}: {title}")
+    if account_id:
+        print(f"  account: {account_id}")
+    print(f"  phase: {opp.get('phase', '') if opp else phase}")
+
+
+def _parse_number(raw: str, flag: str):
+    """Parse an optional numeric flag; empty → None, int-if-whole else float."""
+    if not raw or not raw.strip():
+        return None
+    try:
+        val = float(raw)
+        return int(val) if val.is_integer() else val
+    except ValueError:
+        print(f"Error: {flag} must be a number, got {raw!r}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_opportunity_list():
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    opps = data.get("opportunities", [])
+    if json_mode:
+        print(json.dumps(opps, ensure_ascii=False, indent=2))
+        return
+    if not opps:
+        print("No opportunities yet. Add one with: beacon opportunity add \"<title>\"")
+        return
+    for o in opps:
+        acc = o.get("account_id") or "-"
+        deadline = f" due {o['deadline']}" if o.get("deadline") else ""
+        ball = o.get("who_has_the_ball", "")
+        print(f"[{o['id']}] {o['title']} — phase: {o.get('phase', '?')} "
+              f"/ status: {o.get('status', '?')} / account: {acc}"
+              f"{deadline} / ball: {ball} / activities: {len(o.get('activities', []))}")
+
+
+def cmd_opportunity_phase():
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    new_phase = os.environ.get("BEACON_PHASE", "")
+    note = os.environ.get("BEACON_PHASE_NOTE", "")
+    data = load_project()
+    # Surface vocabulary / terminal-rule violations BEFORE the write, but never
+    # block: master = human (SPEC §5). Warnings compare against the current phase.
+    warnings = []
+    if opp_id.startswith("opp-"):
+        opp = sales_entities.find_opportunity(data, opp_id)
+        cur = opp.get("phase", "") if opp else ""
+        warnings = sales_entities.opportunity_phase_warnings(data, cur, new_phase)
+    elif opp_id.startswith("acc-"):
+        warnings = sales_entities.account_phase_warnings(data, new_phase)
+    for w in warnings:
+        print(f"  ⚠ {w}", file=sys.stderr)
+    try:
+        rec = sales_entities.phase_set(data, opp_id, new_phase, note=note,
+                                       at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"{opp_id} phase → {rec['phase']} (recorded in phase_history)")
+
+
+def cmd_opportunity_delete():
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    data = load_project()
+    try:
+        sales_entities.opportunity_delete(data, opp_id)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Deleted opportunity {opp_id}")
+
+
+def cmd_phase_list():
+    """Show the configured phase funnels (per-company vocabulary), not a single
+    entity's transitions. This is the sales-project's methodology, editable
+    config living in project.json."""
+    import sales_entities
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    acc_phases = sales_entities.account_phases(data)
+    opp_phases = sales_entities.opportunity_phases(data)
+    if json_mode:
+        print(json.dumps({"account_phases": acc_phases,
+                          "opportunity_phases": opp_phases},
+                         ensure_ascii=False, indent=2))
+        return
+    if not acc_phases and not opp_phases:
+        print("No phase funnel configured (not a sales project, or no phases set).")
+        return
+    print("顧客 (Account) phases:")
+    for p in acc_phases:
+        print(f"  - {p.get('name')}")
+    print("商談 (Opportunity) phases:")
+    for p in opp_phases:
+        if p.get("terminal"):
+            outcome = p.get("outcome", "")
+            print(f"  - {p.get('name')} [terminal → {outcome}]")
+        else:
+            allowed = p.get("allowed_terminals")
+            prob = p.get("probability")
+            bits = []
+            if prob is not None:
+                bits.append(f"prob {prob}")
+            if allowed:
+                bits.append(f"→ {'/'.join(allowed)}")
+            suffix = f"  ({', '.join(bits)})" if bits else ""
+            print(f"  - {p.get('name')}{suffix}")
+
+
+def cmd_opportunity_activity():
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    desc = os.environ.get("BEACON_ACTIVITY_DESC", "")
+    deadline = os.environ.get("BEACON_ACTIVITY_DEADLINE", "")
+    ball = os.environ.get("BEACON_ACTIVITY_BALL", "") or sales_entities.BALL_SELF
+    data = load_project()
+    try:
+        act_id = sales_entities.activity_add(data, opp_id, desc, deadline=deadline,
+                                             who_has_the_ball=ball,
+                                             created_at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Added activity {act_id} to {opp_id}: {desc}")
+
+
+# ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
 
@@ -20577,6 +20878,18 @@ if __name__ == "__main__":
         "log_prepare": cmd_log_prepare,
         "log_finalize": cmd_log_finalize,
         "sync": cmd_sync,
+        # ms-106 ② sales job-template entities
+        "account_add": cmd_account_add,
+        "account_list": cmd_account_list,
+        "account_contact": cmd_account_contact,
+        "account_phase": cmd_account_phase,
+        "account_delete": cmd_account_delete,
+        "opportunity_add": cmd_opportunity_add,
+        "opportunity_list": cmd_opportunity_list,
+        "opportunity_phase": cmd_opportunity_phase,
+        "opportunity_activity": cmd_opportunity_activity,
+        "opportunity_delete": cmd_opportunity_delete,
+        "phase_list": cmd_phase_list,
         "task_add": cmd_task_add,
         "task_done": cmd_task_done,
         "task_list": cmd_task_list,
