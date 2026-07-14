@@ -94,9 +94,11 @@ def test_account_phase_transition_is_append_only():
 def test_contact_nested_under_account():
     data = _fresh()
     acc = se.account_add(data, "Globex")
-    se.contact_add(data, acc, "Alice", role="CTO", email="a@globex.com")
+    se.contact_add(data, acc, "Alice", role="CTO", email="a@globex.com",
+                   phone="03-1234-5678")
     contacts = se.find_account(data, acc)["contacts"]
-    assert contacts == [{"name": "Alice", "role": "CTO", "email": "a@globex.com"}]
+    assert contacts == [{"name": "Alice", "role": "CTO", "email": "a@globex.com",
+                         "phone": "03-1234-5678"}]
 
 
 def test_contact_unknown_account():

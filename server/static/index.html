@@ -3120,6 +3120,33 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .sm-close:hover { color:var(--text-primary); }
 .sales-empty { color:var(--text-dim); padding:20px; text-align:center; }
 .sales-empty code { color:var(--text-secondary); background:var(--bg-raised); padding:1px 5px; border-radius:3px; }
+/* --- ms-106 fb1: phase color-coding (target-class generic: 準備/active/決着) --- */
+.pp { border:1px solid currentColor; border-radius:4px; padding:2px 7px; font-size:11px; white-space:nowrap; }
+.pp-prep     { color:var(--todo); }         /* 準備 (funnel entry) = todo */
+.pp-active   { color:var(--in-progress); }  /* 進行中 (それ以降) = active */
+.pp-won      { color:var(--done); }         /* 成約 = done */
+.pp-lost     { color:var(--observing); }    /* 失注 = observing */
+.pp-abandoned{ color:var(--cancelled); }    /* 不成立 = cancelled */
+/* --- ms-106 fb1: 商談タブ controls (filter + terminal toggle) --- */
+.opp-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:2px 0 14px; }
+.opp-filter { background:var(--bg-surface); color:var(--text-dim); border:1px solid var(--border); border-radius:14px; padding:4px 12px; font-family:var(--font-mono); font-size:12px; cursor:pointer; }
+.opp-filter:hover { color:var(--text-secondary); }
+.opp-filter.active { background:var(--bg-hover); color:var(--accent); border-color:var(--accent-dim); }
+.opp-filter-label { font-size:11px; color:var(--text-dim); margin-right:2px; align-self:center; }
+.kb-toggle { background:var(--bg-surface); color:var(--text-dim); border:1px solid var(--border); border-radius:6px; padding:5px 12px; font-family:var(--font-mono); font-size:12px; cursor:pointer; margin-left:auto; }
+.kb-toggle.on { color:var(--accent); border-color:var(--accent-dim); }
+/* --- ms-106 fb1: account name chip on opp card --- */
+.opp-acct { font-size:11px; color:var(--info); }
+.opp-acct::before { content:"🏢 "; }
+/* --- ms-106 fb1: opportunity detail modal --- */
+.sm-detail { display:flex; flex-direction:column; gap:7px; margin:4px 0 6px; }
+.sm-drow { display:flex; gap:10px; font-size:12px; }
+.sm-dkey { color:var(--text-dim); flex:0 0 92px; }
+.sm-dval { color:var(--text-primary); }
+/* --- ms-106 fb1: account modal → 商談 list (現在/過去) --- */
+.sm-opp { display:flex; align-items:center; gap:9px; padding:7px 0; border-bottom:1px solid var(--border-subtle); }
+.sm-opp:last-child { border-bottom:none; }
+.sm-opp-title { color:var(--text-primary); font-size:13px; flex:1; }
 
 </style>
 </head>
@@ -3160,6 +3187,9 @@ let state = {
   expanded: new Set(),
   oppView: 'kanban',       // ms-106: sales 商談タブの view — 'kanban' | 'list'
   openAccountId: null,     // ms-106: sales Account モーダルで開いている acc-id
+  openOppId: null,         // ms-106 fb1: 商談モーダルで開いている opp-id (カンバン click)
+  oppPhaseFilter: '',      // ms-106 fb1: 商談の phase 絞り込み ('' = 全て)
+  showTerminalCols: false, // ms-106 fb1: カンバンの決着(成約/失注/不成立)列の表示切替
   lastUpdate: null,
   // e-1273: Beacon server version (from /health). Shown in footer so the
   // running release can be cross-referenced to screen state. "" until fetched.
@@ -4228,6 +4258,7 @@ function renderMainContent() {
     ${effectiveTab === 'opportunities' ? renderOpportunitiesSection() : ''}
     ${effectiveTab === 'account' ? renderAccountsSection() : ''}
     ${isSales && state.openAccountId ? renderAccountModal(state.openAccountId) : ''}
+    ${isSales && state.openOppId ? renderOpportunityModal(state.openOppId) : ''}
     ${effectiveTab === 'dashboard' ? `
     <section class="milestones fade-in">
       <div class="milestones-header">
@@ -4289,6 +4320,35 @@ function _salesOppStatusOf(o, phases, today) {
 function _salesOpenActs(o) {
   return (o.activities || []).filter(a => a.status !== 'done').length;
 }
+// ms-106 fb1: map a phase → color class. Target-class generic: derives from the
+// phase def's terminal/outcome + funnel position, never hardcoded 語彙.
+//   準備 (funnel entry, non-terminal[0]) → prep(todo) / それ以降 → active
+//   terminal outcome won → won(done) / lost → lost(observing) / else → abandoned(cancel)
+function _salesPhaseClass(phaseName, phases) {
+  const def = (phases || []).find(x => x.name === phaseName);
+  if (!def) return 'pp-active';
+  if (def.terminal) {
+    const oc = def.outcome;
+    if (oc === 'won') return 'pp-won';
+    if (oc === 'lost') return 'pp-lost';
+    return 'pp-abandoned';
+  }
+  const firstNonTerminal = (phases || []).find(x => !x.terminal);
+  if (firstNonTerminal && firstNonTerminal.name === phaseName) return 'pp-prep';
+  return 'pp-active';
+}
+function _salesPhaseBadge(phaseName, phases) {
+  return `<span class="pp ${_salesPhaseClass(phaseName, phases)}">${esc(phaseName || '?')}</span>`;
+}
+function _salesAccountName(p, accId) {
+  if (!accId) return '';
+  const a = (p.accounts || []).find(x => x.id === accId);
+  return a ? (a.name || '') : '';
+}
+function _salesAcctChip(p, o) {
+  const n = _salesAccountName(p, o.account_id);
+  return n ? `<span class="opp-acct">${esc(n)}</span>` : '';
+}
 function renderOpportunitiesSection() {
   const p = state.project;
   const opps = p.opportunities || [];
@@ -4296,37 +4356,59 @@ function renderOpportunitiesSection() {
     return `<section class="sales-board fade-in"><div class="sales-empty">商談がありません。<code>beacon opportunity add "&lt;タイトル&gt;"</code> で追加できます。</div></section>`;
   }
   const view = state.oppView === 'list' ? 'list' : 'kanban';
+  const phases = p.opportunity_phases || [];
   const toggle = `<div class="opp-view-toggle">
       <button class="${view === 'list' ? 'active' : ''}" data-action="opp-view" data-view="list">リスト</button>
       <button class="${view === 'kanban' ? 'active' : ''}" data-action="opp-view" data-view="kanban">カンバン</button>
     </div>`;
+  const filter = _renderOppFilter(phases);
+  const termBtn = view === 'kanban'
+    ? `<button class="kb-toggle ${state.showTerminalCols ? 'on' : ''}" data-action="toggle-terminal-cols">${state.showTerminalCols ? '決着を隠す' : '決着(成約/失注/不成立)を表示'}</button>`
+    : '';
+  const controls = `<div class="opp-controls">${toggle}${filter}${termBtn}</div>`;
   const body = view === 'list' ? _renderOppList(p) : _renderOppKanban(p);
-  return `<section class="sales-board fade-in">${toggle}${body}</section>`;
+  return `<section class="sales-board fade-in">${controls}${body}</section>`;
+}
+// ms-106 fb1: phase filter chips (colored by phase category). '' = すべて.
+function _renderOppFilter(phases) {
+  const cur = state.oppPhaseFilter || '';
+  const chip = (name, label, extraCls) =>
+    `<button class="opp-filter ${extraCls || ''} ${cur === name ? 'active' : ''}" data-action="opp-filter" data-phase="${esc(name)}">${esc(label)}</button>`;
+  const chips = [chip('', 'すべて', '')]
+    .concat((phases || []).map(ph => chip(ph.name, ph.name, _salesPhaseClass(ph.name, phases))));
+  return `<span class="opp-filter-label">絞り込み</span>${chips.join('')}`;
 }
 function _renderOppKanban(p) {
   const phases = p.opportunity_phases || [];
   const opps = p.opportunities || [];
   const today = _salesTodayISO();
+  const filter = state.oppPhaseFilter || '';
   const byPhase = {};
   opps.forEach(o => { (byPhase[o.phase] = byPhase[o.phase] || []).push(o); });
   let cols = '';
   phases.forEach(ph => {
+    // Column visibility: with a filter, show only that column; otherwise show
+    // non-terminal always and terminal (成約/失注/不成立) only when toggled on.
+    if (filter) { if (ph.name !== filter) return; }
+    else if (ph.terminal && !state.showTerminalCols) return;
     const list = byPhase[ph.name] || [];
-    if (ph.terminal && !list.length) return;
     const goal = ph.terminal ? (ph.outcome ? `決着 → ${esc(ph.outcome)}` : '決着') : (ph.goal ? esc(ph.goal) : '');
     const cards = list.map(o => {
       const st = _salesOppStatusOf(o, phases, today);
-      return `<div class="kb-card">
+      const badge = ph.terminal ? '' : _salesTransitionBadge(st, o.transition_date);
+      return `<div class="kb-card" data-action="open-opp" data-opp-id="${esc(o.id)}">
         <div class="kb-card-title">${esc(o.title || '(no title)')}</div>
-        <div class="kb-card-meta">${_salesTransitionBadge(st, o.transition_date)}<span class="opp-acts">活動 ${_salesOpenActs(o)}</span></div>
+        ${_salesAcctChip(p, o)}
+        <div class="kb-card-meta">${badge}<span class="opp-acts">活動 ${_salesOpenActs(o)}</span></div>
       </div>`;
     }).join('') || '<div class="kb-none">—</div>';
     cols += `<div class="kb-col ${ph.terminal ? 'terminal' : ''}">
-      <div class="kb-col-head"><span class="kb-col-name">${esc(ph.name)}</span><span class="kb-col-count">${list.length}</span></div>
+      <div class="kb-col-head"><span class="kb-col-name ${_salesPhaseClass(ph.name, phases)}" style="border:none;padding:0">${esc(ph.name)}</span><span class="kb-col-count">${list.length}</span></div>
       <div class="kb-col-goal">${goal}</div>
       <div class="kb-cards">${cards}</div>
     </div>`;
   });
+  if (!cols) cols = `<div class="kb-none" style="padding:16px">該当する商談がありません。</div>`;
   return `<div class="kb-cols">${cols}</div>`;
 }
 function _renderOppList(p) {
@@ -4334,18 +4416,23 @@ function _renderOppList(p) {
   const today = _salesTodayISO();
   const term = new Set(phases.filter(x => x.terminal).map(x => x.name));
   // active (non-terminal) first, then settled; mirrors the milestone list feel.
-  const opps = (p.opportunities || []).slice().sort((a, b) => {
-    const at = term.has(a.phase) ? 1 : 0, bt = term.has(b.phase) ? 1 : 0;
-    return at - bt;
-  });
+  const filter = state.oppPhaseFilter || '';
+  const opps = (p.opportunities || []).slice()
+    .filter(o => !filter || o.phase === filter)
+    .sort((a, b) => {
+      const at = term.has(a.phase) ? 1 : 0, bt = term.has(b.phase) ? 1 : 0;
+      return at - bt;
+    });
+  if (!opps.length) return `<div class="act-empty" style="padding:16px">該当する商談がありません。</div>`;
   const rows = opps.map(o => {
     const st = _salesOppStatusOf(o, phases, today);
     const expanded = state.expanded.has(o.id);
     const body = expanded ? `<div class="opp-lbody">${_renderOppActivities(o)}</div>` : '';
+    const acct = _salesAccountName(p, o.account_id);
     return `<div class="opp-lcard${expanded ? ' expanded' : ''}">
       <div class="opp-lhead" data-action="toggle-opp" data-opp-id="${esc(o.id)}">
-        <span class="opp-lphase">${esc(o.phase || '?')}</span>
-        <span class="opp-ltitle">${esc(o.title || '(no title)')}</span>
+        ${_salesPhaseBadge(o.phase, phases)}
+        <span class="opp-ltitle">${esc(o.title || '(no title)')}${acct ? ` <span class="opp-acct">${esc(acct)}</span>` : ''}</span>
         ${term.has(o.phase) ? '' : _salesTransitionBadge(st, o.transition_date)}
         <span class="opp-acts">活動 ${_salesOpenActs(o)}</span>
       </div>${body}
@@ -4391,18 +4478,67 @@ function renderAccountModal(accId) {
   const contactHtml = contacts.length
     ? contacts.map(c => `<div class="sm-contact">
         <div class="sm-contact-name">${esc(c.name || '(no name)')}</div>
-        <div class="sm-contact-sub">${[c.role, c.email].filter(Boolean).map(esc).join(' · ') || '—'}</div>
+        <div class="sm-contact-sub">${[c.role, c.email, c.phone].filter(Boolean).map(esc).join(' · ') || '—'}</div>
       </div>`).join('')
     : `<div class="act-empty">Contact は登録されていません。</div>`;
-  const health = a.health ? `<span>health: ${esc(a.health)}</span>` : '';
+  // ms-106 fb1: this account's opportunities, split 現在(進行中) / 過去(決着済).
+  const p = state.project || {};
+  const phaseDefs = p.opportunity_phases || [];
+  const term = new Set(phaseDefs.filter(x => x.terminal).map(x => x.name));
+  const accOpps = (p.opportunities || []).filter(o => o.account_id === a.id);
+  const current = accOpps.filter(o => !term.has(o.phase));
+  const past = accOpps.filter(o => term.has(o.phase));
+  const oppRow = o => `<div class="sm-opp" data-action="open-opp" data-opp-id="${esc(o.id)}" style="cursor:pointer">
+      ${_salesPhaseBadge(o.phase, phaseDefs)}
+      <span class="sm-opp-title">${esc(o.title || '(no title)')}</span>
+    </div>`;
+  const oppSection = (label, list) => list.length
+    ? `<div class="sm-sec">${label} (${list.length})</div>${list.map(oppRow).join('')}`
+    : `<div class="sm-sec">${label} (0)</div><div class="act-empty">なし</div>`;
   const phase = a.phase ? `<span>phase: ${esc(a.phase)}</span>` : '';
   return `<div class="sales-modal-bg" data-action="close-account">
     <div class="sales-modal" data-action="sales-modal-noop">
       <span class="sm-close" data-action="close-account">×</span>
       <div class="sm-head"><span class="sm-name">${esc(a.name || '(no name)')}</span></div>
-      <div class="sm-meta">${phase}${health}</div>
+      <div class="sm-meta">${phase}</div>
+      ${oppSection('現在の商談', current)}
+      ${oppSection('過去の商談', past)}
       <div class="sm-sec">Contacts (${contacts.length})</div>
       ${contactHtml}
+    </div>
+  </div>`;
+}
+// ms-106 fb1: opportunity detail modal (opened from a kanban card / account modal).
+// Read-only mirror of the deal: account, colored phase, transition-date, engine
+// fields (goal_amount / probability / deadline / status), then activities.
+function renderOpportunityModal(oppId) {
+  const p = state.project || {};
+  const o = (p.opportunities || []).find(x => x.id === oppId);
+  if (!o) return '';
+  const phases = p.opportunity_phases || [];
+  const today = _salesTodayISO();
+  const st = _salesOppStatusOf(o, phases, today);
+  const term = new Set(phases.filter(x => x.terminal).map(x => x.name));
+  const acct = _salesAccountName(p, o.account_id);
+  const row = (k, v) => v ? `<div class="sm-drow"><span class="sm-dkey">${k}</span><span class="sm-dval">${v}</span></div>` : '';
+  const money = (o.goal_amount != null && o.goal_amount !== '') ? esc(String(o.goal_amount)) : '';
+  const prob = (o.probability != null && o.probability !== '') ? esc(String(o.probability)) + '%' : '';
+  const detail = `<div class="sm-detail">
+    ${row('顧客', acct ? esc(acct) : '<span class="text-dim">未紐付け</span>')}
+    ${row('フェーズ', _salesPhaseBadge(o.phase, phases))}
+    ${term.has(o.phase) ? '' : row('遷移日', _salesTransitionBadge(st, o.transition_date) || '—')}
+    ${row('目標金額', money)}
+    ${row('確度', prob)}
+    ${row('期日', o.deadline ? esc(o.deadline) : '')}
+    ${row('ステータス', esc(o.status || ''))}
+  </div>`;
+  return `<div class="sales-modal-bg" data-action="close-opp">
+    <div class="sales-modal" data-action="sales-modal-noop">
+      <span class="sm-close" data-action="close-opp">×</span>
+      <div class="sm-head"><span class="sm-name">${esc(o.title || '(no title)')}</span></div>
+      ${detail}
+      <div class="sm-sec">活動</div>
+      ${_renderOppActivities(o)}
     </div>
   </div>`;
 }
@@ -8205,6 +8341,15 @@ function handleCommonAction(action, el) {
       state.openAccountId = el.dataset.accId; render(); return true;
     case 'close-account':
       state.openAccountId = null; render(); return true;
+    // ms-106 fb1: opportunity modal + phase filter + kanban terminal toggle
+    case 'open-opp':
+      state.openOppId = el.dataset.oppId; render(); return true;
+    case 'close-opp':
+      state.openOppId = null; render(); return true;
+    case 'toggle-terminal-cols':
+      state.showTerminalCols = !state.showTerminalCols; render(); return true;
+    case 'opp-filter':
+      state.oppPhaseFilter = el.dataset.phase || ''; render(); return true;
     case 'sales-modal-noop':
       return true;  // swallow clicks inside the modal (don't close via backdrop)
     case 'set-session-view':
