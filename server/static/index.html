@@ -4257,7 +4257,7 @@ function renderMainContent() {
   const isSales = p.profession === 'sales';
   const effectiveTab = (isSales && state.activeTab === 'dashboard') ? 'opportunities' : state.activeTab;
   const salesTabBar = `
-      <button class="tab-btn ${effectiveTab === 'opportunities' ? 'active' : ''}" data-action="switch-tab" data-tab="opportunities">商談</button>
+      <button class="tab-btn ${effectiveTab === 'opportunities' ? 'active' : ''}" data-action="switch-tab" data-tab="opportunities">Opportunity</button>
       <button class="tab-btn ${effectiveTab === 'account' ? 'active' : ''}" data-action="switch-tab" data-tab="account">Account</button>
       <button class="tab-btn ${effectiveTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${effectiveTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Session</button>`;
@@ -4380,8 +4380,14 @@ function _salesAcctChip(p, o) {
   const n = _salesAccountName(p, o.account_id);
   return n ? `<span class="opp-acct">${esc(n)}</span>` : '';
 }
-function _salesOwnerChip(o) {
-  return o.assignee ? `<span class="opp-owner">${esc(o.assignee)}</span>` : '';
+// assignee(email) を member の表示名に解決。member でなければ生値。
+function _salesMemberLabel(p, email) {
+  if (!email) return '';
+  const m = _salesProjectMembers(p).find(x => x.email === email);
+  return m ? (m.name || m.email) : email;
+}
+function _salesOwnerChip(p, o) {
+  return o.assignee ? `<span class="opp-owner">${esc(_salesMemberLabel(p, o.assignee))}</span>` : '';
 }
 // ms-106 fb4: 見込み売上 (weighted pipeline) = Σ 金額 × フェーズ成約率 over open
 // 商談。assignee を渡すとその担当分だけ。lib.weighted_pipeline の JS 版。
@@ -4431,12 +4437,12 @@ function _renderSalesPipelineInfo(p) {
       valueHtml = `${_salesYen(pipeline)} <span class="pipeline-sub">/ 目標 ${_salesYen(target)}・進捗 ${pct}%</span>
         <div class="pipeline-bar"><div class="pipeline-bar-fill" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div>`;
     } else {
-      valueHtml = `${_salesYen(pipeline)} <span class="pipeline-sub">（${esc(member)} の目標未設定）</span>`;
+      valueHtml = `${_salesYen(pipeline)} <span class="pipeline-sub">（${esc(_salesMemberLabel(p, member))} の目標未設定）</span>`;
     }
   } else {
     valueHtml = _salesYen(pipeline);
   }
-  const label = member ? `見込み売上 (${esc(member)})` : '見込み売上';
+  const label = member ? `見込み売上 (${esc(_salesMemberLabel(p, member))})` : '見込み売上';
   // pipeline-row = flex-basis:100% → Objective の次の行に改行して配置。
   return `<div class="project-info-item pipeline-row"><span class="project-info-label">${label}</span><span class="project-info-value">${valueHtml}</span></div>`;
 }
@@ -4487,13 +4493,31 @@ function _oppVisible(o) {
 }
 // ms-106 fb3: 担当ユーザーでの絞り込みバー (検索とは別。営業が「自分の商談」を見る用)。
 // 商談に登場する assignee の distinct 集合 + すべて。単一選択。
+// ms-106 fb7 (案A): 担当リストは *プロジェクトメンバー* (招待済ユーザー) 由来。
+// owner_email + members[].email を出所にし、無関係な文字列は出さない。
+// assignee 値は member の email。現在ユーザー (state.auth.email) は「(自分)」表示。
+function _salesProjectMembers(p) {
+  const seen = new Set(), out = [];
+  const push = (email, name) => {
+    const e = (email || '').trim();
+    if (e && !seen.has(e)) { seen.add(e); out.push({ email: e, name: (name || '').trim() }); }
+  };
+  if (p.owner_email) push(p.owner_email, p.owner_display_name);
+  (p.members || []).forEach(m => push(m.email, m.display_name));
+  return out;
+}
 function _renderAssigneeBar(opps) {
-  const owners = [...new Set((opps || []).map(o => o.assignee).filter(Boolean))].sort();
-  if (!owners.length) return '';
+  const p = state.project;
+  const members = _salesProjectMembers(p);
+  const anyAssigned = (opps || []).some(o => o.assignee);
+  if (members.length < 2 && !anyAssigned) return '';  // 1人・未割当なら絞り込み不要
   const cur = state.oppAssignee || '';
+  const meEmail = (state.auth && state.auth.email) || '';
   const chip = (val, label) =>
     `<button class="assignee-chip ${cur === val ? 'active' : ''}" data-action="opp-assignee" data-assignee="${esc(val)}">${esc(label)}</button>`;
-  return `<div class="assignee-bar"><span class="assignee-bar-label">担当</span>${chip('', 'すべて')}${owners.map(o => chip(o, o)).join('')}</div>`;
+  const chips = members.map(m =>
+    chip(m.email, (m.name || m.email) + (m.email === meEmail ? ' (自分)' : '')));
+  return `<div class="assignee-bar"><span class="assignee-bar-label">担当</span>${chip('', 'すべて')}${chips.join('')}</div>`;
 }
 function _renderOppKanban(p) {
   const phases = p.opportunity_phases || [];
@@ -4514,7 +4538,7 @@ function _renderOppKanban(p) {
       const badge = ph.terminal ? '' : _salesTransitionBadge(st, o.transition_date);
       return `<div class="kb-card" data-action="open-opp" data-opp-id="${esc(o.id)}">
         <div class="kb-card-title">${esc(o.title || '(no title)')}</div>
-        <div class="kb-card-meta">${_salesAcctChip(p, o)}${_salesOwnerChip(o)}</div>
+        <div class="kb-card-meta">${_salesAcctChip(p, o)}${_salesOwnerChip(p, o)}</div>
         <div class="kb-card-meta">${badge}${_salesActsBadge(o)}${_salesOppWeightedChip(p, o)}</div>
       </div>`;
     }).join('') || '<div class="kb-none">—</div>';
@@ -4547,7 +4571,7 @@ function _renderOppList(p) {
     return `<div class="opp-lcard${expanded ? ' expanded' : ''}">
       <div class="opp-lhead" data-action="toggle-opp" data-opp-id="${esc(o.id)}">
         ${_salesPhaseBadge(o.phase, phases)}
-        <span class="opp-ltitle">${esc(o.title || '(no title)')}${acct ? ` <span class="opp-acct">${esc(acct)}</span>` : ''}${_salesOwnerChip(o)}</span>
+        <span class="opp-ltitle">${esc(o.title || '(no title)')}${acct ? ` <span class="opp-acct">${esc(acct)}</span>` : ''}${_salesOwnerChip(p, o)}</span>
         ${term.has(o.phase) ? '' : _salesTransitionBadge(st, o.transition_date)}
         ${_salesActsBadge(o)}
         ${_salesOppWeightedChip(p, o)}
@@ -4589,7 +4613,13 @@ function renderAccountsSection() {
   if (!accs.length) {
     return `<section class="sales-board fade-in"><div class="sales-empty">顧客 (Account) がありません。<code>beacon account add "&lt;会社名&gt;"</code> で追加できます。</div></section>`;
   }
-  const rows = accs.map(a => {
+  // ms-106 fb7: Account にも担当絞り込み (商談タブと同じ member 由来・state 共有)。
+  const filterBar = _renderAssigneeBar(accs);
+  const shown = accs.filter(a => !state.oppAssignee || (a.assignee || '') === state.oppAssignee);
+  if (!shown.length) {
+    return `<section class="sales-board fade-in">${filterBar}<div class="act-empty" style="padding:16px">該当する顧客がいません。</div></section>`;
+  }
+  const rows = shown.map(a => {
     const nc = (a.contacts || []).length;
     const nn = (a.nurturings || []).length;
     const expanded = state.expanded.has(a.id);
@@ -4600,14 +4630,14 @@ function renderAccountsSection() {
     return `<div class="acc-lcard${expanded ? ' expanded' : ''}">
       <div class="acc-card" data-action="toggle-account" data-acc-id="${esc(a.id)}">
         <span class="acc-name">${esc(a.name || '(no name)')}</span>
-        ${a.assignee ? `<span class="opp-owner">${esc(a.assignee)}</span>` : ''}
+        ${a.assignee ? `<span class="opp-owner">${esc(_salesMemberLabel(p, a.assignee))}</span>` : ''}
         <span class="acc-sub">Contact ${nc}・ナーチャリング ${nn}</span>
         ${a.phase ? `<span class="acc-phase">${esc(a.phase)}</span>` : ''}
         <button class="acc-detail-btn" data-action="open-account" data-acc-id="${esc(a.id)}">詳細</button>
       </div>${body}
     </div>`;
   }).join('');
-  return `<section class="sales-board fade-in"><div class="acc-list">${rows}</div></section>`;
+  return `<section class="sales-board fade-in">${filterBar}<div class="acc-list">${rows}</div></section>`;
 }
 function renderAccountModal(accId) {
   const accs = (state.project && state.project.accounts) || [];
@@ -4635,7 +4665,7 @@ function renderAccountModal(accId) {
     ? `<div class="sm-sec">${label} (${list.length})</div>${list.map(oppRow).join('')}`
     : `<div class="sm-sec">${label} (0)</div><div class="act-empty">なし</div>`;
   const phase = a.phase ? `<span>phase: ${esc(a.phase)}</span>` : '';
-  const owner = a.assignee ? `<span>担当: ${esc(a.assignee)}</span>` : '';
+  const owner = a.assignee ? `<span>担当: ${esc(_salesMemberLabel(p, a.assignee))}</span>` : '';
   return `<div class="sales-modal-bg" data-action="close-account">
     <div class="sales-modal" data-action="sales-modal-noop">
       <span class="sm-close" data-action="close-account">×</span>
@@ -4667,7 +4697,7 @@ function renderOpportunityModal(oppId) {
   const wtd = _salesOppWeighted(p, o);
   const detail = `<div class="sm-detail">
     ${row('顧客', acct ? esc(acct) : '<span class="text-dim">未紐付け</span>')}
-    ${row('担当', o.assignee ? esc(o.assignee) : '')}
+    ${row('担当', o.assignee ? esc(_salesMemberLabel(p, o.assignee)) : '')}
     ${row('フェーズ', _salesPhaseBadge(o.phase, phases))}
     ${term.has(o.phase) ? '' : row('遷移日', _salesTransitionBadge(st, o.transition_date) || '—')}
     ${row('金額', money)}
