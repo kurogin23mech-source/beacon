@@ -3053,6 +3053,37 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
   color: var(--text-primary);
 }
 
+/* --- ms-106 e-3394: 営業 商談ボード (read-only, profession=sales) --- */
+.sales-board { display:flex; flex-direction:column; gap:14px; }
+.sb-summary { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:10px 12px; background:var(--bg-surface); border:1px solid var(--border); border-radius:6px; }
+.sb-title { font-weight:600; color:var(--text-secondary); margin-right:6px; letter-spacing:.04em; }
+.sb-chip { font-size:12px; padding:3px 8px; border-radius:4px; border:1px solid var(--border); color:var(--text-dim); }
+.sb-chip.on.mine { color:var(--warning); border-color:var(--warning); }
+.sb-chip.on.cp { color:var(--waiting); border-color:var(--waiting); }
+.sb-chip.on.unset { color:var(--warning); }
+.sb-chip.total { margin-left:auto; color:var(--text-secondary); }
+.sb-phase { background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:6px; padding:10px 12px; }
+.sb-phase.terminal { opacity:.65; }
+.sb-phase-head { display:flex; align-items:baseline; gap:10px; margin-bottom:8px; padding-bottom:6px; border-bottom:1px solid var(--border-subtle); }
+.sb-phase-name { font-weight:600; color:var(--text-primary); }
+.sb-phase-goal { font-size:12px; color:var(--text-dim); flex:1; }
+.sb-phase-count { font-size:12px; color:var(--text-secondary); }
+.sb-cards { display:flex; flex-direction:column; gap:6px; }
+.sb-none { color:var(--text-dim); font-size:12px; padding:2px 0; }
+.opp-card { background:var(--bg-raised); border:1px solid var(--border); border-radius:5px; padding:8px 10px; }
+.opp-title { color:var(--text-primary); font-size:13px; margin-bottom:5px; }
+.opp-acc { color:var(--text-dim); font-size:11px; margin-left:6px; }
+.opp-meta { display:flex; gap:6px; flex-wrap:wrap; }
+.opp-badge { font-size:11px; padding:2px 6px; border-radius:3px; border:1px solid var(--border); color:var(--text-dim); }
+.opp-badge.td-overdue { color:var(--cancelled); border-color:var(--cancelled); }
+.opp-badge.td-due { color:var(--warning); border-color:var(--warning); }
+.opp-badge.td-sched { color:var(--info); }
+.opp-badge.td-unset { color:var(--warning); border-style:dashed; }
+.opp-badge.ball-self { color:var(--accent); border-color:var(--accent-dim); }
+.opp-badge.ball-cp { color:var(--waiting); }
+.sb-empty { color:var(--text-dim); padding:20px; text-align:center; }
+.sb-empty code { color:var(--text-secondary); background:var(--bg-raised); padding:1px 5px; border-radius:3px; }
+
 </style>
 </head>
 <body>
@@ -4625,9 +4656,16 @@ function renderMainContent() {
   const filtered = filterMilestones(sorted);
   const activeCount = (p.milestones || []).filter(m => m.status === 'in_progress').length;
   const doneCount = (p.milestones || []).filter(m => m.status === 'done').length;
+  // ms-106: sales projects lead with the opportunity board instead of Milestones.
+  // 'dashboard' is the default activeTab; for sales we map it to 'opportunities'
+  // so the board is the landing view without touching state init.
+  const isSales = p.profession === 'sales';
+  const effectiveTab = (isSales && state.activeTab === 'dashboard') ? 'opportunities' : state.activeTab;
   return `
     <div class="tab-bar fade-in stagger-1">
-      <button class="tab-btn ${state.activeTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
+      ${isSales
+        ? `<button class="tab-btn ${effectiveTab === 'opportunities' ? 'active' : ''}" data-action="switch-tab" data-tab="opportunities">商談</button>`
+        : `<button class="tab-btn ${effectiveTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>`}
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
       <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
@@ -4637,7 +4675,8 @@ function renderMainContent() {
            Treks セクション (= renderTreksSection in renderMenu) から入る。 -->
       <button class="tab-btn ${state.activeTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Session</button>
     </div>
-    ${state.activeTab === 'dashboard' ? `
+    ${effectiveTab === 'opportunities' ? renderOpportunitiesSection() : ''}
+    ${effectiveTab === 'dashboard' ? `
     <section class="milestones fade-in">
       <div class="milestones-header">
         <span class="milestones-title">Milestones</span>
@@ -4661,6 +4700,91 @@ function renderMainContent() {
     ${state.activeTab === 'operations' ? renderOperationsSection() : ''}
     ${state.activeTab === 'notes' ? renderSessionSection() : ''}
   `;
+}
+
+// --- ms-106: sales opportunity board (read-only) --------------------------
+// Renders the sales engine state (opportunities × phase funnel) as a vertical
+// board. Read-only: mutations stay in CLI/Skill (where human-confirm lives).
+// Mirrors lib/sales_entities.temporal_status so 遷移日 (transition_date) shows
+// the same ⏰本日 / ⚠超過 / 予定 states the CLI does.
+function _salesTodayISO() {
+  const d = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+function _salesTemporalStatus(dueDate, today, settled) {
+  if (settled) return 'settled';
+  const d = (dueDate || '').trim();
+  if (!d) return 'unset';
+  if (d < today) return 'overdue';
+  if (d === today) return 'due';
+  return 'scheduled';
+}
+function _salesTransitionBadge(st, td) {
+  switch (st) {
+    case 'overdue':   return `<span class="opp-badge td-overdue">⚠ 遷移日 超過 ${esc(td)}</span>`;
+    case 'due':       return `<span class="opp-badge td-due">⏰ 遷移日 本日 ${esc(td)}</span>`;
+    case 'scheduled': return `<span class="opp-badge td-sched">遷移日 ${esc(td)}</span>`;
+    case 'unset':     return `<span class="opp-badge td-unset">⚠ 遷移日 未設定</span>`;
+    default:          return '';
+  }
+}
+function renderOpportunityCard(o, st) {
+  const ball = o.who_has_the_ball === 'counterpart'
+    ? `<span class="opp-badge ball-cp">相手ボール</span>`
+    : `<span class="opp-badge ball-self">自分ボール</span>`;
+  const open = (o.activities || []).filter(a => a.status !== 'done').length;
+  const actBadge = open ? `<span class="opp-badge">未消化 ${open}</span>` : '';
+  const acc = o.account_id ? `<span class="opp-acc">${esc(o.account_id)}</span>` : '';
+  return `<div class="opp-card">
+    <div class="opp-title">${esc(o.title || '(no title)')}${acc}</div>
+    <div class="opp-meta">${_salesTransitionBadge(st, o.transition_date)}${st === 'settled' ? '' : ball}${actBadge}</div>
+  </div>`;
+}
+function renderOpportunitiesSection() {
+  const p = state.project;
+  const opps = p.opportunities || [];
+  const phases = p.opportunity_phases || [];
+  const today = _salesTodayISO();
+  const termNames = new Set(phases.filter(x => x.terminal).map(x => x.name));
+  const statusOf = o => _salesTemporalStatus(o.transition_date, today, termNames.has(o.phase));
+  if (!opps.length) {
+    return `<section class="sales-board fade-in"><div class="sb-empty">商談がありません。<code>beacon opportunity add "&lt;タイトル&gt;"</code> で追加できます。</div></section>`;
+  }
+  // 締切精査 summary — overdue/due の active な商談を who-has-the-ball で割る。
+  const active = opps.filter(o => !termNames.has(o.phase));
+  const isDue = o => { const s = statusOf(o); return s === 'overdue' || s === 'due'; };
+  const dueMine = active.filter(o => isDue(o) && o.who_has_the_ball !== 'counterpart').length;
+  const dueCp = active.filter(o => isDue(o) && o.who_has_the_ball === 'counterpart').length;
+  const unset = active.filter(o => statusOf(o) === 'unset').length;
+  const byPhase = {};
+  opps.forEach(o => { (byPhase[o.phase] = byPhase[o.phase] || []).push(o); });
+  let board = '';
+  phases.forEach(ph => {
+    const list = byPhase[ph.name] || [];
+    if (ph.terminal && !list.length) return; // 空の決着フェーズは出さない
+    const goal = ph.terminal
+      ? (ph.outcome ? `決着 → ${esc(ph.outcome)}` : '決着')
+      : (ph.goal ? esc(ph.goal) : '');
+    board += `<div class="sb-phase ${ph.terminal ? 'terminal' : ''}">
+      <div class="sb-phase-head">
+        <span class="sb-phase-name">${esc(ph.name)}</span>
+        <span class="sb-phase-goal">${goal}</span>
+        <span class="sb-phase-count">${list.length}</span>
+      </div>
+      <div class="sb-cards">${list.map(o => renderOpportunityCard(o, statusOf(o))).join('') || '<div class="sb-none">—</div>'}</div>
+    </div>`;
+  });
+  return `<section class="sales-board fade-in">
+    <div class="sb-summary">
+      <span class="sb-title">締切精査</span>
+      <span class="sb-chip mine ${dueMine ? 'on' : ''}">判定待ち(自分) ${dueMine}</span>
+      <span class="sb-chip cp ${dueCp ? 'on' : ''}">相手待ち超過 ${dueCp}</span>
+      <span class="sb-chip unset ${unset ? 'on' : ''}">遷移日未設定 ${unset}</span>
+      <span class="sb-chip total">商談 ${opps.length}</span>
+    </div>
+    ${board}
+  </section>`;
 }
 
 function renderMainContentArea() {
