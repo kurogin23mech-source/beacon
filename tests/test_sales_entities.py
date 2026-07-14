@@ -785,3 +785,49 @@ def test_activity_add_records_source():
     a = se.activity_add(data, opp, "手動タスク", source="ai", created_at="T1")
     act = se.find_opportunity(data, opp)["activities"][0]
     assert act["source"] == "ai"
+
+
+# --- target-class temporal core + 締切精査 (e-3271) -------------------------
+
+def test_temporal_status_pure_generic():
+    assert se.temporal_status("", "2026-08-01") == se.TRANSITION_UNSET
+    assert se.temporal_status("2026-08-01", "2026-08-01") == se.TRANSITION_DUE
+    assert se.temporal_status("2026-07-30", "2026-08-01") == se.TRANSITION_OVERDUE
+    assert se.temporal_status("2026-08-10", "2026-08-01") == se.TRANSITION_SCHEDULED
+    # settled short-circuits regardless of date
+    assert se.temporal_status("2020-01-01", "2026-08-01", settled=True) == se.TRANSITION_SETTLED
+
+
+def test_scan_overdue_generic_over_arbitrary_items():
+    # simulate a non-sales target class (e.g. milestone-like dicts) to prove the
+    # scanner is entity-agnostic — this is the ms-109 second-consumer shape.
+    items = [
+        {"k": "A", "date": "2026-08-05", "done": False},   # future
+        {"k": "B", "date": "2026-08-01", "done": False},   # overdue
+        {"k": "C", "date": "2026-08-03", "done": False},   # due
+        {"k": "D", "date": "", "done": False},             # no date
+        {"k": "E", "date": "2026-07-01", "done": True},    # settled → excluded
+    ]
+    pairs = se.scan_overdue(items, lambda it: it["date"], lambda it: it["done"], "2026-08-03")
+    assert [it["k"] for it, _ in pairs] == ["B", "C"]  # oldest first, settled/future/unset excluded
+    assert pairs[0][1] == se.TRANSITION_OVERDUE and pairs[1][1] == se.TRANSITION_DUE
+
+
+def test_transition_status_still_matches_after_refactor():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", phase="商談準備", transition_date="2026-08-01", created_at="T0")
+    assert se.transition_status(data, opp, "2026-08-02") == se.TRANSITION_OVERDUE
+    se.phase_set(data, opp, "不成立", at="T1")
+    assert se.transition_status(data, opp, "2027-01-01") == se.TRANSITION_SETTLED
+
+
+def test_awaiting_judgement_carries_ball_dimension():
+    data = _fresh()
+    a = se.opportunity_add(data, "A", transition_date="2026-08-01",
+                           who_has_the_ball=se.BALL_SELF, created_at="T0")
+    b = se.opportunity_add(data, "B", transition_date="2026-08-01",
+                           who_has_the_ball=se.BALL_COUNTERPART, created_at="T0")
+    rows = se.opportunities_awaiting_judgement(data, "2026-08-05")
+    by_id = {r["id"]: r for r in rows}
+    assert by_id[a]["who_has_the_ball"] == se.BALL_SELF
+    assert by_id[b]["who_has_the_ball"] == se.BALL_COUNTERPART

@@ -21050,9 +21050,10 @@ def cmd_opportunity_judge():
 
 
 def cmd_opportunity_due():
-    """List opportunities whose 遷移日 is due or overdue as of today (ms-107
-    e-3372): the deals awaiting a human judgement. BEACON_JSON=1 for machine
-    output. This is the AI's catch surface for the overdue (判定漏れ) state."""
+    """締切精査 (deadline review, ms-107 e-3271): opportunities whose 遷移日 is
+    due/overdue as of today, split by who-has-the-ball into the two actions the
+    overdue set implies — 自分ボール(判定/対応) と 相手ボール(催促). BEACON_JSON=1
+    for machine output. This is the AI's catch surface for the overdue state."""
     import sales_entities
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
@@ -21061,14 +21062,26 @@ def cmd_opportunity_due():
         print(json.dumps(rows, ensure_ascii=False))
         return
     if not rows:
-        print("判定待ちの商談はありません (遷移日 due/overdue なし)")
+        print("締切精査: 期日 到達/超過の商談はありません")
         return
-    print("判定待ちの商談 (遷移日 到達 / 超過):")
-    for r in rows:
+
+    def _fmt(r):
         mark = "⚠ 超過" if r["transition_status"] == sales_entities.TRANSITION_OVERDUE else "⏰ 本日"
-        print(f"  [{r['id']}] {r['title']} — phase: {r['phase']} / "
-              f"遷移日 {r['transition_date']} {mark}")
-    print("  → beacon opportunity judge <opp-id> advance|retry|terminal で判定")
+        return (f"  [{r['id']}] {r['title']} — phase: {r['phase']} / "
+                f"遷移日 {r['transition_date']} {mark}")
+
+    mine = [r for r in rows if r.get("who_has_the_ball") == sales_entities.BALL_SELF]
+    theirs = [r for r in rows if r.get("who_has_the_ball") == sales_entities.BALL_COUNTERPART]
+    if mine:
+        print("自分のボール — 判定/対応が必要:")
+        for r in mine:
+            print(_fmt(r))
+        print("  → beacon opportunity judge <opp-id> advance|retry|terminal で判定")
+    if theirs:
+        print("相手のボール — 相手待ちが期限超過、催促が必要:")
+        for r in theirs:
+            print(_fmt(r))
+        print("  → 相手に催促 (メール/日程調整) or beacon opportunity judge で決着判断")
 
 
 def cmd_opportunity_delete():

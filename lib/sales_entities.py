@@ -528,29 +528,59 @@ TRANSITION_OVERDUE = "overdue"      # 遷移日を過ぎ、まだ非terminal (= 
 TRANSITION_SETTLED = "settled"      # terminal フェーズ (= 決着済み)
 
 
-def transition_status(data: dict, target_id: str, today: str) -> str:
-    """Derived judgement state of a target (opp-…) relative to ``today``.
+# --- target-class temporal core (ms-107 e-3271) ----------------------------
+# 「対象が期日を持つ → 時間的ステータスが派生する」は sales 固有でなく target-class
+# 共通の関心事 (milestone.target_date / opportunity.transition_date / operation の
+# 次回発火 は同型)。開発 Beacon が締切を surface していないのは設計でなく gap。
+# ここは *pure* な汎用コア (data も target 型も知らない、期日と『今日』と settled
+# 述語だけ) として書き、営業は下の transition_status がこれを wrap する第一
+# consumer。ms-109 (統合リファクタ) で L2 engine module へそのまま抽出し、
+# milestone.target_date を second consumer として差す。
 
-    ``today`` is a ``YYYY-MM-DD`` string (the caller supplies it — no hidden
-    clock, so this stays testable). Returns one of the TRANSITION_* constants.
-    Terminal targets are SETTLED regardless of date; a non-terminal target with
-    no transition_date is UNSET; otherwise the date is compared to today
-    (past → OVERDUE, today → DUE, future → SCHEDULED). ISO dates compare
-    correctly as plain strings, so no parsing is needed here.
+def temporal_status(due_date: str, today: str, *, settled: bool = False) -> str:
+    """Pure temporal classification of a due date relative to ``today``
+    (both ``YYYY-MM-DD``). Target-class generic — no entity knowledge.
+
+    ``settled=True`` (= 決着済み / 完了) → SETTLED regardless of date. No due
+    date → UNSET. Otherwise past → OVERDUE, today → DUE, future → SCHEDULED.
+    ISO dates compare correctly as plain strings, so no parsing is needed.
     """
+    if settled:
+        return TRANSITION_SETTLED
+    d = (due_date or "").strip()
+    if not d:
+        return TRANSITION_UNSET
+    if d < today:
+        return TRANSITION_OVERDUE
+    if d == today:
+        return TRANSITION_DUE
+    return TRANSITION_SCHEDULED
+
+
+def scan_overdue(items, due_date_of, settled_of, today: str) -> list:
+    """Generic 締切精査 (deadline review): return ``(item, status)`` pairs whose
+    temporal_status is DUE or OVERDUE, oldest due date first. ``due_date_of`` /
+    ``settled_of`` are callables reading a due date / settled flag off each item,
+    so any target class plugs in (opportunities today; milestones at ms-109)."""
+    out = []
+    for it in items:
+        st = temporal_status(due_date_of(it), today, settled=bool(settled_of(it)))
+        if st in (TRANSITION_DUE, TRANSITION_OVERDUE):
+            out.append((it, st))
+    out.sort(key=lambda pair: (due_date_of(pair[0]) or ""))
+    return out
+
+
+def transition_status(data: dict, target_id: str, today: str) -> str:
+    """Derived judgement state of an opportunity relative to ``today`` — the
+    sales wrapper over ``temporal_status`` (due date = transition_date, settled =
+    terminal phase). Returns one of the TRANSITION_* constants."""
     opp = find_opportunity(data, target_id)
     if opp is None:
         raise ValueError(f"Opportunity not found: {target_id}")
-    if opportunity_phase_is_terminal(data, opp.get("phase", "")):
-        return TRANSITION_SETTLED
-    td = (opp.get("transition_date") or "").strip()
-    if not td:
-        return TRANSITION_UNSET
-    if td < today:
-        return TRANSITION_OVERDUE
-    if td == today:
-        return TRANSITION_DUE
-    return TRANSITION_SCHEDULED
+    return temporal_status(
+        opp.get("transition_date", ""), today,
+        settled=opportunity_phase_is_terminal(data, opp.get("phase", "")))
 
 
 def next_opportunity_phase(data: dict, phase_name: str) -> Optional[str]:
@@ -663,24 +693,31 @@ def suggest_transition_date(data: dict, phase_name: str,
 
 
 def opportunities_awaiting_judgement(data: dict, today: str) -> list:
-    """Scan for opportunities whose transition_date is due or overdue as of
-    ``today`` (= the deals a human should judge now, SPEC §3). Returns a list of
-    ``{"id","title","phase","transition_date","transition_status"}`` sorted by
-    transition_date (oldest first — the most overdue surface at the top). This
-    is the AI's catch surface for the ``overdue`` state (判定漏れの可視化)."""
-    out = []
-    for o in data.get("opportunities", []):
-        st = transition_status(data, o["id"], today)
-        if st in (TRANSITION_DUE, TRANSITION_OVERDUE):
-            out.append({
-                "id": o["id"],
-                "title": o.get("title", ""),
-                "phase": o.get("phase", ""),
-                "transition_date": o.get("transition_date", ""),
-                "transition_status": st,
-            })
-    out.sort(key=lambda r: r["transition_date"])
-    return out
+    """締切精査 for opportunities: due/overdue deals as of ``today``, oldest
+    first. Built on the generic ``scan_overdue`` (transition_date + terminal =
+    settled). Each row carries ``who_has_the_ball`` so the sales view can split
+    the overdue set into the two actions it implies (SPEC §3 + e-3271):
+
+    * ball=self  → 自分が判定/対応する (判定待ち)
+    * ball=counterpart → 相手待ちが期限超過 → 催促する (相手ボール timeout)
+
+    Returns dicts with id / title / phase / transition_date / transition_status /
+    who_has_the_ball. This is the AI's catch surface for the ``overdue`` state."""
+    def due_of(o):
+        return o.get("transition_date", "")
+
+    def settled_of(o):
+        return opportunity_phase_is_terminal(data, o.get("phase", ""))
+
+    pairs = scan_overdue(data.get("opportunities", []), due_of, settled_of, today)
+    return [{
+        "id": o["id"],
+        "title": o.get("title", ""),
+        "phase": o.get("phase", ""),
+        "transition_date": o.get("transition_date", ""),
+        "transition_status": st,
+        "who_has_the_ball": o.get("who_has_the_ball", ""),
+    } for o, st in pairs]
 
 
 # ---------------------------------------------------------------------------
