@@ -4351,7 +4351,7 @@ function _salesOverdueActs(o) {
 // 活動カウントのバッジ。期日超過が 1 件でもあれば赤 + ⚠N を添える。
 function _salesActsBadge(o) {
   const od = _salesOverdueActs(o);
-  return `<span class="opp-acts${od ? ' overdue' : ''}">活動 ${_salesOpenActs(o)}${od ? ` ⚠${od}` : ''}</span>`;
+  return `<span class="opp-acts${od ? ' overdue' : ''}">Activity ${_salesOpenActs(o)}${od ? ` ⚠${od}` : ''}</span>`;
 }
 // ms-106 fb1: map a phase → color class. Target-class generic: derives from the
 // phase def's terminal/outcome + funnel position, never hardcoded 語彙.
@@ -4601,12 +4601,12 @@ function _salesWorkRows(items) {
 }
 function _renderOppActivities(o) {
   const acts = o.activities || [];
-  if (!acts.length) return `<div class="act-empty">活動はまだありません。</div>`;
-  return `<div class="opp-acts-head">活動 (${acts.length})</div>${_salesWorkRows(acts)}`;
+  if (!acts.length) return `<div class="act-empty">Activity はまだありません。</div>`;
+  return `<div class="opp-acts-head">Activity (${acts.length})</div>${_salesWorkRows(acts)}`;
 }
 function _renderNurturings(a) {
   const items = a.nurturings || [];
-  if (!items.length) return `<div class="act-empty">ナーチャリング業務はありません。</div>`;
+  if (!items.length) return `<div class="act-empty">Nurturing はまだありません。</div>`;
   return _salesWorkRows(items);
 }
 function renderAccountsSection() {
@@ -4627,7 +4627,7 @@ function renderAccountsSection() {
     const expanded = state.expanded.has(a.id);
     // クリックで展開 → ナーチャリング一覧。詳細ボタン → モーダル (Contact + 関連商談)。
     const body = expanded ? `<div class="acc-body">
-        <div class="opp-acts-head">ナーチャリング (${nn})</div>${_renderNurturings(a)}
+        <div class="opp-acts-head">Nurturing (${nn})</div>${_renderNurturings(a)}
       </div>` : '';
     return `<div class="acc-lcard${expanded ? ' expanded' : ''}">
       <div class="acc-card" data-action="toggle-account" data-acc-id="${esc(a.id)}">
@@ -4713,7 +4713,6 @@ function renderOpportunityModal(oppId) {
       <span class="sm-close" data-action="close-opp">×</span>
       <div class="sm-head"><span class="sm-name">${esc(o.title || '(no title)')}</span></div>
       ${detail}
-      <div class="sm-sec">活動</div>
       ${_renderOppActivities(o)}
     </div>
   </div>`;
