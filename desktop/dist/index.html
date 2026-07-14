@@ -3099,8 +3099,13 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .act-empty { color:var(--text-dim); font-size:12px; padding:6px 0; }
 /* --- account list + modal --- */
 .acc-list { display:flex; flex-direction:column; gap:8px; }
-.acc-card { display:flex; align-items:center; gap:10px; background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:6px; padding:11px 13px; cursor:pointer; }
-.acc-card:hover { background:var(--bg-hover); border-color:var(--border); }
+.acc-lcard { background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:6px; overflow:hidden; }
+.acc-lcard.expanded { border-color:var(--border); }
+.acc-card { display:flex; align-items:center; gap:10px; padding:11px 13px; cursor:pointer; }
+.acc-card:hover { background:var(--bg-hover); }
+.acc-body { padding:4px 13px 12px; border-top:1px solid var(--border-subtle); }
+.acc-detail-btn { margin-left:auto; background:var(--bg-raised); color:var(--text-secondary); border:1px solid var(--border); border-radius:5px; padding:4px 12px; font-family:var(--font-mono); font-size:11px; cursor:pointer; }
+.acc-detail-btn:hover { color:var(--accent); border-color:var(--accent-dim); }
 .acc-name { color:var(--text-primary); font-size:14px; flex:1; }
 .acc-phase { font-size:11px; color:var(--text-secondary); border:1px solid var(--border); border-radius:4px; padding:2px 7px; }
 .acc-sub { font-size:11px; color:var(--text-dim); }
@@ -4806,10 +4811,10 @@ function _salesTemporalStatus(dueDate, today, settled) {
 }
 function _salesTransitionBadge(st, td) {
   switch (st) {
-    case 'overdue':   return `<span class="opp-badge td-overdue">⚠ 遷移日 超過 ${esc(td)}</span>`;
-    case 'due':       return `<span class="opp-badge td-due">⏰ 遷移日 本日 ${esc(td)}</span>`;
-    case 'scheduled': return `<span class="opp-badge td-sched">遷移日 ${esc(td)}</span>`;
-    case 'unset':     return `<span class="opp-badge td-unset">⚠ 遷移日 未設定</span>`;
+    case 'overdue':   return `<span class="opp-badge td-overdue">⚠ 超過 ${esc(td)}</span>`;
+    case 'due':       return `<span class="opp-badge td-due">⏰ 本日 ${esc(td)}</span>`;
+    case 'scheduled': return `<span class="opp-badge td-sched">📅 ${esc(td)}</span>`;
+    case 'unset':     return `<span class="opp-badge td-unset">📅 未設定</span>`;
     default:          return '';
   }
 }
@@ -5073,10 +5078,20 @@ function renderAccountsSection() {
   }
   const rows = accs.map(a => {
     const nc = (a.contacts || []).length;
-    return `<div class="acc-card" data-action="open-account" data-acc-id="${esc(a.id)}">
-      <span class="acc-name">${esc(a.name || '(no name)')}</span>
-      <span class="acc-sub">Contact ${nc}</span>
-      ${a.phase ? `<span class="acc-phase">${esc(a.phase)}</span>` : ''}
+    const nn = (a.nurturings || []).length;
+    const expanded = state.expanded.has(a.id);
+    // クリックで展開 → ナーチャリング一覧。詳細ボタン → モーダル (Contact + 関連商談)。
+    const body = expanded ? `<div class="acc-body">
+        <div class="opp-acts-head">ナーチャリング (${nn})</div>${_renderNurturings(a)}
+      </div>` : '';
+    return `<div class="acc-lcard${expanded ? ' expanded' : ''}">
+      <div class="acc-card" data-action="toggle-account" data-acc-id="${esc(a.id)}">
+        <span class="acc-name">${esc(a.name || '(no name)')}</span>
+        ${a.assignee ? `<span class="opp-owner">${esc(a.assignee)}</span>` : ''}
+        <span class="acc-sub">Contact ${nc}・ナーチャリング ${nn}</span>
+        ${a.phase ? `<span class="acc-phase">${esc(a.phase)}</span>` : ''}
+        <button class="acc-detail-btn" data-action="open-account" data-acc-id="${esc(a.id)}">詳細</button>
+      </div>${body}
     </div>`;
   }).join('');
   return `<section class="sales-board fade-in"><div class="acc-list">${rows}</div></section>`;
@@ -5108,7 +5123,6 @@ function renderAccountModal(accId) {
     : `<div class="sm-sec">${label} (0)</div><div class="act-empty">なし</div>`;
   const phase = a.phase ? `<span>phase: ${esc(a.phase)}</span>` : '';
   const owner = a.assignee ? `<span>担当: ${esc(a.assignee)}</span>` : '';
-  const nurturings = a.nurturings || [];
   return `<div class="sales-modal-bg" data-action="close-account">
     <div class="sales-modal" data-action="sales-modal-noop">
       <span class="sm-close" data-action="close-account">×</span>
@@ -5116,8 +5130,6 @@ function renderAccountModal(accId) {
       <div class="sm-meta">${phase}${owner}</div>
       ${oppSection('現在の商談', current)}
       ${oppSection('過去の商談', past)}
-      <div class="sm-sec">ナーチャリング (${nurturings.length})</div>
-      <div class="sm-nurturing">${_renderNurturings(a)}</div>
       <div class="sm-sec">Contacts (${contacts.length})</div>
       ${contactHtml}
     </div>
@@ -8532,6 +8544,11 @@ function handleCommonAction(action, el) {
     case 'opp-view':
       state.oppView = el.dataset.view === 'list' ? 'list' : 'kanban';
       render(); return true;
+    case 'toggle-account': {
+      const aid2 = el.dataset.accId;
+      state.expanded.has(aid2) ? state.expanded.delete(aid2) : state.expanded.add(aid2);
+      render(); return true;
+    }
     case 'toggle-opp': {
       const oid = el.dataset.oppId;
       state.expanded.has(oid) ? state.expanded.delete(oid) : state.expanded.add(oid);
