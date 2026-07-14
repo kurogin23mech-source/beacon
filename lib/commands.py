@@ -16418,7 +16418,7 @@ def cmd_help_json():
         # ms-106 ② — sales job-template entities (profession=sales projects)
         {"command": "beacon account add <name>", "flags": ["--health <text>"], "description": "Add a sales account (顧客; 対象・継続)"},
         {"command": "beacon account list", "flags": ["--json"], "description": "List sales accounts and their contacts"},
-        {"command": "beacon account contact <acc-id> <name>", "flags": ["--role <text>", "--email <text>"], "description": "Add a contact (担当者) nested under an account"},
+        {"command": "beacon account contact <acc-id> <name>", "flags": ["--role <text>", "--email <text>", "--phone <text>"], "description": "Add a contact (担当者) nested under an account"},
         {"command": "beacon account phase <acc-id> <phase>", "flags": ["--note <text>"], "description": "Declare an account lifecycle phase transition (append-only)"},
         {"command": "beacon account delete <acc-id>", "flags": ["--force"], "description": "Delete an account (--force orphans referencing opportunities)"},
         {"command": "beacon opportunity add <title>", "flags": ["--account <acc-id>", "--phase <p>", "--goal <n>", "--probability <n>", "--deadline <date>", "--ball self|counterpart"], "description": "Add a sales opportunity (商談; 対象・有限)"},
@@ -20852,9 +20852,10 @@ def cmd_account_contact():
     name = os.environ.get("BEACON_CONTACT_NAME", "")
     role = os.environ.get("BEACON_CONTACT_ROLE", "")
     email = os.environ.get("BEACON_CONTACT_EMAIL", "")
+    phone = os.environ.get("BEACON_CONTACT_PHONE", "")
     data = load_project()
     try:
-        sales_entities.contact_add(data, account_id, name, role=role, email=email)
+        sales_entities.contact_add(data, account_id, name, role=role, email=email, phone=phone)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

@@ -376,14 +376,14 @@ def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
 
 
 def contact_add(data: dict, account_id: str, name: str, *,
-                role: str = "", email: str = "") -> dict:
+                role: str = "", email: str = "", phone: str = "") -> dict:
     """Append a Contact under an Account (nested sub-entity) and return it."""
     acc = find_account(data, account_id)
     if acc is None:
         raise ValueError(f"Account not found: {account_id}")
     if not name or not name.strip():
         raise ValueError("Contact name is required")
-    contact = {"name": name.strip(), "role": role, "email": email}
+    contact = {"name": name.strip(), "role": role, "email": email, "phone": phone}
     acc.setdefault("contacts", []).append(contact)
     return contact
 

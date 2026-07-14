@@ -55,7 +55,7 @@ Tasks & Progress:
 Sales (profession=sales):
   beacon account add "<name>" [--health <text>]              Add an account (customer / company)
   beacon account list [--json]                               List accounts + their contacts
-  beacon account contact <acc-id> <name> [--role <text>] [--email <text>]   Add a contact to an account
+  beacon account contact <acc-id> <name> [--role <text>] [--email <text>] [--phone <text>]   Add a contact to an account
   beacon account phase <acc-id> <phase> [--note <text>]      Declare an account lifecycle phase transition
   beacon account delete <acc-id> [--force]                   Delete an account (--force orphans referencing opportunities)
   beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart]   Add a deal / opportunity
@@ -1113,23 +1113,25 @@ cmd_account_list() {
 
 cmd_account_contact() {
     ensure_project
-    local acc_id="" name="" role="" email=""
+    local acc_id="" name="" role="" email="" phone=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --role)  role="${2:-}"; shift 2 ;;
             --email) email="${2:-}"; shift 2 ;;
-            -?*)     _guard_positional "$1" "Usage: beacon account contact <acc-id> <name> [--role <text>] [--email <text>]" ;;
+            --phone) phone="${2:-}"; shift 2 ;;
+            -?*)     _guard_positional "$1" "Usage: beacon account contact <acc-id> <name> [--role <text>] [--email <text>] [--phone <text>]" ;;
             *)
                 if [ -z "$acc_id" ]; then acc_id="$1"; else name="$1"; fi
                 shift ;;
         esac
     done
     if [ -z "$acc_id" ] || [ -z "$name" ]; then
-        echo "Usage: beacon account contact <acc-id> <name> [--role <text>] [--email <text>]"
+        echo "Usage: beacon account contact <acc-id> <name> [--role <text>] [--email <text>] [--phone <text>]"
         exit 1
     fi
     BEACON_ACCOUNT_ID="$acc_id" BEACON_CONTACT_NAME="$name" \
         BEACON_CONTACT_ROLE="$role" BEACON_CONTACT_EMAIL="$email" \
+        BEACON_CONTACT_PHONE="$phone" \
         python3 "$COMMANDS_PY" account_contact
 }
 
