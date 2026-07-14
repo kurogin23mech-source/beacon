@@ -47,12 +47,37 @@ DEFAULT_ACCOUNT_PHASES = [
     {"name": "成約顧客"},        # 成約実績のある継続顧客
 ]
 
+# 各進行フェーズは面談で区切られる (商談準備→初回面談→提案準備→提案面談→先方
+# 検討中→先方合意→合意済み、最低2回・同期合意なら3回の面談)。methodology
+# (goal / activity_template / transition_signal / default_lead) は ms-107 e-3375
+# でユーザー実務から確定した基本4フェーズの型。transition_signal の "calendar_ended"
+# は面談実施を、"manual" は人間判定を意味する (= SIGNAL_* 定数と同値)。default_lead
+# は面談未定時のフォールバック日数 (本命の遷移日は実際の面談日 = カレンダー由来)。
+# 詳細見積の提出は「提案段階の時も検討段階の時もある」状況依存のためテンプレに
+# 入れず、AI の文脈生成 (e-3373) が必要な時だけ足す。これらは SEED (編集可能な
+# 出発点) であり enforce される定数ではない。
 DEFAULT_OPPORTUNITY_PHASES = [
     # 進行フェーズ: allowed_terminals = ここから宣言できる決着。
-    {"name": "商談準備",   "probability": None, "terminal": False, "allowed_terminals": ["不成立"]},
-    {"name": "提案準備",   "probability": None, "terminal": False, "allowed_terminals": ["成約", "失注"]},
-    {"name": "先方検討中", "probability": None, "terminal": False, "allowed_terminals": ["成約", "失注"]},
-    {"name": "合意済み",   "probability": None, "terminal": False, "allowed_terminals": ["成約", "失注"]},
+    {"name": "商談準備", "probability": None, "terminal": False,
+     "allowed_terminals": ["不成立"],
+     "goal": "初回面談の実施により、商談として進行可能な状態にする",
+     "activity_template": ["初回面談を打診", "初回面談を実施", "提案の方向性を確定"],
+     "transition_signal": "calendar_ended", "default_lead": 7},
+    {"name": "提案準備", "probability": None, "terminal": False,
+     "allowed_terminals": ["成約", "失注"],
+     "goal": "企画を作り提案を終え、先方が検討フェーズに入った状態にする",
+     "activity_template": ["提案面談を打診", "提案面談を実施", "提案内容を準備"],
+     "transition_signal": "calendar_ended", "default_lead": 14},
+    {"name": "先方検討中", "probability": None, "terminal": False,
+     "allowed_terminals": ["成約", "失注"],
+     "goal": "先方の実行合意を取る",
+     "activity_template": ["合意確認日を確定（必要なら面談設定）", "合意の確認を取る"],
+     "transition_signal": "manual", "default_lead": 14},
+    {"name": "合意済み", "probability": None, "terminal": False,
+     "allowed_terminals": ["成約", "失注"],
+     "goal": "契約を締結する",
+     "activity_template": ["契約書を送付", "締結"],
+     "transition_signal": "manual", "default_lead": 7},
     # 決着フェーズ (terminal): outcome は有限ターゲットの結末種別。
     {"name": "成約",       "probability": 100,  "terminal": True,  "outcome": "won"},
     {"name": "失注",       "probability": 0,    "terminal": True,  "outcome": "lost"},

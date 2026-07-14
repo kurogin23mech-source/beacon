@@ -50,6 +50,20 @@ def test_sales_template_passes_shared_validator():
     core.validate_project(se.build_sales_project("S", "obj"))
 
 
+def test_seed_phases_carry_methodology():
+    # ms-107 e-3375: the shipped base 4-phase seed now carries goal /
+    # activity_template / transition_signal / default_lead per phase.
+    data = _fresh()
+    m = se.opportunity_phase_methodology(data, "商談準備")
+    assert m["goal"] and m["transition_signal"] == se.SIGNAL_CALENDAR_ENDED
+    assert "初回面談を実施" in m["activity_template"] and m["default_lead"] == 7
+    agree = se.opportunity_phase_methodology(data, "合意済み")
+    assert agree["activity_template"] == ["契約書を送付", "締結"]
+    assert agree["transition_signal"] == se.SIGNAL_MANUAL
+    kentou = se.opportunity_phase_methodology(data, "先方検討中")
+    assert kentou["goal"] == "先方の実行合意を取る" and kentou["default_lead"] == 14
+
+
 # --- Account + lifecycle phase + Contact -----------------------------------
 
 def test_account_add_defaults_to_first_phase():
@@ -704,7 +718,8 @@ def test_suggest_transition_date_from_default_lead():
     prep = se._find_phase_def(data["opportunity_phases"], "提案準備")
     prep["default_lead"] = 7
     assert se.suggest_transition_date(data, "提案準備", "2026-08-01") == "2026-08-08"
-    # no lead configured → None
+    # no lead configured → None (clear the seed's lead to exercise this path)
+    se._find_phase_def(data["opportunity_phases"], "商談準備")["default_lead"] = None
     assert se.suggest_transition_date(data, "商談準備", "2026-08-01") is None
     # bad base date → None (guarded)
     assert se.suggest_transition_date(data, "提案準備", "nope") is None
@@ -752,7 +767,9 @@ def test_advance_instantiates_next_phase_anchor_activities():
 
 
 def test_advance_into_phase_without_template_creates_nothing():
-    data = _fresh()  # seed carries no activity_template
+    data = _fresh()
+    # explicitly clear the next phase's template to exercise the no-template path
+    se._find_phase_def(data["opportunity_phases"], "提案準備")["activity_template"] = []
     opp = se.opportunity_add(data, "Deal", phase="商談準備", transition_date="2026-08-01", created_at="T0")
     se.advance_transition(data, opp, at="T1")
     assert se.find_opportunity(data, opp)["activities"] == []
