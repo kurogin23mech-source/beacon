@@ -1,0 +1,179 @@
+---
+name: beacon-sales-email
+description: 営業の商談に紐づくメールを、下書き→送信アカウント(identity)の照合→人間承認→送信まで Beacon のコンソール上で完結させる。送信は必ず商談に活動記録(証跡)として残し、複数 Google アカウントの取り違えを送信前の照合で構造的に防ぐ。「営業メール送って」「商談のメール」「初回連絡のメール」等で起動。
+version: 1.0.0
+triggers:
+  - /beacon-sales-email
+  - 営業メール
+  - 商談メール
+  - 初回連絡メール
+  - この商談のメール
+---
+
+# Beacon Sales Email
+
+> 営業 (profession=sales) プロジェクトで、商談 (Opportunity) に紐づくメールを送る。
+> ms-107 e-3354。送信の自律度は **下書きまで**、送信は人間承認を経る (SPEC §3)。
+> 複数 Google アカウントの取り違えは送信前の照合で止める (SPEC §2、土台は e-3353)。
+
+## 文章の書き方 (Beacon 全体の哲学)
+
+顧客に出すメール本文は、相手 (非開発者・社外の意思決定者) が 1 度読んで意味が取れる自然な日本語で書く。社内の略語・横文字を持ち込まない。件名は用件が 1 行で分かる形にする。
+
+## 前提条件チェック
+
+Bash ツールで実行し、営業プロジェクトかを確認:
+
+```bash
+ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$ROOT/lib/commands.py" account_list >/dev/null 2>&1 && \
+  test "$(python3 -c "import json;print(json.load(open('$ROOT/.beacon/project.json')).get('profession',''))" 2>/dev/null)" = "sales" && echo "SALES_OK" || echo "NOT_SALES"
+```
+
+`NOT_SALES` の場合 (= 営業テンプレートでないプロジェクト)、この Skill は「営業プロジェクトでのみ使えます」と伝えて終了する。cloud mode で `project.json` を直接読めない場合は `beacon opportunity list` が動くかで代替判定してよい。
+
+以降、`$ROOT` は `beacon-find-root` の出力。内部コマンド (`sales_identity_*`) は
+ユーザー向け CLI 動詞ではないので `python3 "$ROOT/lib/commands.py" <cmd>` で呼ぶ。
+
+## Step 1: 対象商談の特定
+
+Bash ツールで商談一覧を取得し、ユーザーにどの商談のメールかを確認する:
+
+```bash
+beacon opportunity list
+```
+
+引数で `/beacon-sales-email opp-3` のように商談 ID が渡されていればそれを採用。
+無ければ一覧を提示し「どの商談ですか？」と 1 問だけ聞く。対象を `$OPP` として保持。
+
+商談の相手 (顧客 Account とその担当者 Contact) を把握するため account 一覧も引く:
+
+```bash
+beacon account list
+```
+
+## Step 2: どのアカウントで送るか — 送信アカウント台帳から解決 (この送信ごとに切替可)
+
+送信元は **送信アカウント台帳** (label→email+MCP route、e-3365) から引く。台帳を通さず
+namespace を手書きしない (= 取り違えが起きる経路を残さない)。まず台帳を確認:
+
+```bash
+BEACON_JSON=1 python3 "$ROOT/lib/commands.py" sales_account_list
+```
+
+- **台帳が空** の場合、ユーザーに「どの Google アカウント (メールアドレス) で送りますか？
+  会社用/個人用など呼び名 (label) も教えてください」と確認し、登録する:
+
+```bash
+BEACON_SEND_LABEL="会社" BEACON_SEND_EMAIL="<アドレス>" python3 "$ROOT/lib/commands.py" sales_account_add
+BEACON_SEND_LABEL="会社" BEACON_SEND_SERVICE="gmail" BEACON_SEND_NAMESPACE="mcp__gmail" \
+  python3 "$ROOT/lib/commands.py" sales_account_route
+# 既定の送信元にするなら default label を pin (次回から $LABEL 省略で使える):
+BEACON_SEND_IDENTITY="会社" python3 "$ROOT/lib/commands.py" sales_identity_set
+```
+
+- **どの label で送るか**を決める。既定 (default label) でよければ `$LABEL` は空のまま。
+  この 1 通だけ別アカウントにしたい場合は、ユーザーが選んだ label を `$LABEL` に入れる
+  (= real-time 切替。プロジェクト全体を pin し直す必要はない)。
+
+送信に使う Gmail の route を台帳から解決する。**これが送信先アカウントの唯一の決定経路**:
+
+```bash
+BEACON_SEND_SERVICE="gmail" BEACON_SEND_LABEL="$LABEL" \
+  python3 "$ROOT/lib/commands.py" sales_account_resolve
+echo "RESOLVE_EXIT=$?"
+```
+
+- `RESOLVE_EXIT=0` → JSON `{label,email,namespace,alias}` が返る。`email` を `$FROM`、
+  `namespace` を `$NS` (使う Gmail MCP ツール群。現状 `mcp__gmail`) として保持。
+- `RESOLVE_EXIT=1` (BLOCK) → その label の gmail route が台帳に無い。**送信しない**。
+  上の `sales_account_add` / `sales_account_route` で登録してから再開する。
+
+> Gmail は `send_email` に account 引数が無いため、アカウント切替 = **namespace 切替**
+> (別サーバ)。現状この環境は `mcp__gmail` 単一サーバなので実切替先は 1 つ。2 つ目の
+> Gmail アカウントを使うには別 namespace のサーバ接続が要る (台帳は複数 namespace を
+> 持てる形なので、繋げば `sales_account_route` で足すだけ)。
+
+## Step 3: 下書きの生成 (自律はここまで)
+
+商談の文脈 (フェーズ・相手・これまでの活動) と、ユーザーが伝えた用件から、
+**件名と本文の下書き**を生成する。宛先 (To) は対象商談の担当者 Contact の
+メールアドレス (account list に出る) を使う。ユーザーが宛先や用件を指定して
+いればそれに従う。
+
+生成したら self-review: (a) 相手が 1 度で意味を取れるか (b) 用件が件名 1 行で
+分かるか (c) 社内略語が残っていないか。違反があれば直す。
+
+## Step 4: 送信前ゲート (identity 照合) — 必須
+
+送信に使う from が、選んだ label の identity と一致するかを、送信の **直前** に照合する。
+Step 2 と同じ `$LABEL` を渡す (= 解決した route と同じアカウントで gate する)。exit code で gate:
+
+```bash
+BEACON_SEND_FROM="$FROM" BEACON_SEND_LABEL="$LABEL" \
+  python3 "$ROOT/lib/commands.py" sales_identity_check
+echo "GATE_EXIT=$?"
+```
+
+- `GATE_EXIT=0` (OK) → Step 5 へ進んでよい。
+- `GATE_EXIT=1` (BLOCK) → **送信しない**。BLOCK メッセージをユーザーに転記し、
+  台帳の email を直すか label を選び直すかをユーザーに委ねる。ここは止めるのが正しい挙動。
+
+## Step 5: 人間承認 → 送信
+
+下書き (件名 / 本文 / 宛先 / from) をユーザーに提示し、**送信してよいか明示的に確認**する。
+AI が自律で送信してはならない (SPEC §3: 送信は人間承認)。
+
+```
+以下のメールを送信します:
+  from:    [FROM]
+  to:      [宛先]
+  件名:    [件名]
+  本文:
+    [本文]
+
+送信しますか？ (送信する / 直す / やめる)
+```
+
+ユーザーが「送信」と答えたら、**Step 2 で解決した `$NS` の送信ツール**で送る
+(例 `$NS` = `mcp__gmail` → `mcp__gmail__send_email`)。namespace は台帳解決の値をそのまま
+使い、別のものに差し替えない (取り違え防止)。ユーザーが「直す」なら Step 3 に戻る。
+「やめる」なら中止。
+
+> 送信先アカウントは Step 2 の台帳解決 (`$NS`/`$FROM`) と Step 4 のゲートの二重で担保
+> される。将来 Gmail 側が account 引数対応 or 複数 namespace になれば、台帳に route を
+> 足すだけで同じ動線で切り替わる。
+
+## Step 6: 活動記録 (証跡) を必ず残す
+
+送信できたら、対象商談にメール送信を活動記録として残す (SPEC 受入条件 4)。
+これを飛ばすと「何をしたか」を後で辿れなくなるため必須:
+
+```bash
+BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[メール送信済] 件名『<件名>』→ <宛先>" \
+  python3 "$ROOT/lib/commands.py" opportunity_activity
+```
+
+> v1 補足: 現状 activity は「予定 (todo)」型で記録される。送信済みを表す
+> 「起きた事実 (event)」型の記録は今後の精緻化対象 (description に [送信済] を明記して代替)。
+
+## Step 7: 結果報告
+
+ユーザーに簡潔に報告:
+
+```
+✉ 送信しました (from [FROM] → [宛先])
+  商談 [OPP] に活動記録を残しました。
+```
+
+送信を止めた場合 (Step 4 BLOCK / ユーザーが「やめる」) は、送信しなかった旨と理由を報告する。
+
+## 制約
+
+- **送信は人間承認を経る** (AI 自律は下書きまで、SPEC §3)。
+- **送信先アカウント (namespace/from) は必ず台帳解決 (Step 2) から取る**。namespace を
+  手書きしない — 台帳を通らない送信経路を残さないのが取り違え防止の本質 (e-3365)。
+- **Step 4 のゲートを飛ばさない** (identity 照合前に送信しない)。Step 2 と Step 4 は
+  同じ `$LABEL` で揃える。
+- **送信できたら必ず Step 6 の活動記録を残す** (証跡を欠かさない)。
+- `project.json` を直接書き換えない。内部コマンド / CLI 経由のみ。
+- 顧客宛て本文は非開発者が読める自然な日本語で (社内略語を持ち込まない)。

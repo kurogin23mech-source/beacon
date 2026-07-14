@@ -16414,6 +16414,9 @@ def cmd_help_json():
         {"command": "beacon opportunity add <title>", "flags": ["--account <acc-id>", "--phase <p>", "--goal <n>", "--probability <n>", "--deadline <date>", "--ball self|counterpart"], "description": "Add a sales opportunity (商談; 対象・有限)"},
         {"command": "beacon opportunity list", "flags": ["--json"], "description": "List sales opportunities with phase / status / account"},
         {"command": "beacon opportunity phase <opp-id> <phase>", "flags": ["--note <text>"], "description": "Declare a phase transition (append-only phase_history; master=人間)"},
+        {"command": "beacon opportunity transition-date <opp-id> <YYYY-MM-DD>", "flags": ["--note <text>", "--clear"], "description": "Set the 遷移日 (judgement date) for the current phase (append-only transition_date_history)"},
+        {"command": "beacon opportunity judge <opp-id> advance|retry|terminal", "flags": ["--note <text>"], "description": "Judge a reached 遷移日 (3-way: 次へ/やり直し/決着; human-confirmed, master=人間)"},
+        {"command": "beacon opportunity due", "flags": ["--json"], "description": "List opportunities awaiting a transition judgement (遷移日 due/overdue)"},
         {"command": "beacon opportunity activity <opp-id> <desc>", "flags": ["--deadline <date>", "--ball self|counterpart"], "description": "Add an activity (業務・事前計画型) under an opportunity"},
         {"command": "beacon opportunity delete <opp-id>", "flags": [], "description": "Delete an opportunity and its activities"},
         {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity vocabulary)"},
@@ -20591,6 +20594,13 @@ def _install_wall_clock_timeout(cmd_name: str) -> None:
 # substrate but not the milestone/task functions. All args arrive via env vars
 # set by bin/beacon / beacon_cli.dispatch, matching the rest of this module.
 
+def _today_iso() -> str:
+    """Today's date as YYYY-MM-DD (the transition_date engine works in dates,
+    not datetimes — core._now_iso() carries a time component we don't want)."""
+    import datetime
+    return datetime.date.today().isoformat()
+
+
 def _require_sales_project(data: dict) -> None:
     """Warn (not block) if run against a non-sales project. Sales commands
     still work on any project — they just create the collections lazily — but
@@ -20638,6 +20648,155 @@ def cmd_account_list():
             role = f" ({c['role']})" if c.get("role") else ""
             email = f" <{c['email']}>" if c.get("email") else ""
             print(f"    - {c.get('name', '?')}{role}{email}")
+
+
+def cmd_sales_identity_set():
+    """Internal (Skill-invoked): pin the send identity for the sales project.
+    Not a user-facing verb — the sales Skills call this; kept out of bin/beacon
+    / README so it doesn't need CLI-drift wiring."""
+    import sales_entities
+    identity = os.environ.get("BEACON_SEND_IDENTITY", "")
+    data = load_project()
+    try:
+        val = sales_entities.set_send_identity(data, identity)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"send identity pinned: {val}")
+
+
+def cmd_sales_identity_show():
+    """Internal (Skill-invoked): show the pinned send identity."""
+    import sales_entities
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    val = sales_entities.get_send_identity(data)
+    if json_mode:
+        print(json.dumps({"send_identity": val}, ensure_ascii=False))
+        return
+    print(val if val else "(未設定)")
+
+
+def cmd_sales_identity_check():
+    """Internal (Skill-invoked): check a proposed send ``from`` against the
+    resolved identity (台帳 label or, legacy, the bare pin). Optional
+    BEACON_SEND_LABEL selects a ledger entry for a per-send account switch;
+    omit it to use the default send label. Exit 0 + 'OK: <msg>' on match, exit 1
+    + 'BLOCK: <msg>' otherwise — a send Skill gates on the exit code."""
+    import sales_entities
+    from_value = os.environ.get("BEACON_SEND_FROM", "")
+    label = os.environ.get("BEACON_SEND_LABEL", "")
+    data = load_project()
+    ok, msg = sales_entities.check_send_from(data, from_value, label)
+    if ok:
+        print(f"OK: {msg}")
+        sys.exit(0)
+    print(f"BLOCK: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+# --- send-account ledger (ms-107 e-3365) -----------------------------------
+# label → {email, routes{service:{namespace, alias}}}. Internal verbs invoked by
+# the sales Skills to register accounts and resolve the concrete MCP route a
+# send must use. Not user-facing CLI verbs (kept out of bin/beacon / README).
+
+def cmd_sales_account_add():
+    """Internal (Skill-invoked): add/update a send account (label + email).
+    Env: BEACON_SEND_LABEL, BEACON_SEND_EMAIL. Idempotent on label."""
+    import sales_entities
+    label = os.environ.get("BEACON_SEND_LABEL", "")
+    email = os.environ.get("BEACON_SEND_EMAIL", "")
+    data = load_project()
+    try:
+        entry = sales_entities.add_send_account(data, label, email)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"send account: {entry['label']} → {entry['email']}")
+
+
+def cmd_sales_account_route():
+    """Internal (Skill-invoked): set one service's MCP route on a send account.
+    Env: BEACON_SEND_LABEL, BEACON_SEND_SERVICE (gmail|calendar|drive),
+    BEACON_SEND_NAMESPACE, optional BEACON_SEND_ALIAS."""
+    import sales_entities
+    label = os.environ.get("BEACON_SEND_LABEL", "")
+    service = os.environ.get("BEACON_SEND_SERVICE", "")
+    namespace = os.environ.get("BEACON_SEND_NAMESPACE", "")
+    alias = os.environ.get("BEACON_SEND_ALIAS", "")
+    data = load_project()
+    try:
+        route = sales_entities.set_account_route(data, label, service, namespace, alias)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    tail = f" (account={route['alias']})" if route.get("alias") else ""
+    print(f"route set: {label}/{service} → {route['namespace']}{tail}")
+
+
+def cmd_sales_account_list():
+    """Internal (Skill-invoked): list the send-account ledger.
+    BEACON_JSON=1 for machine output."""
+    import sales_entities
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    ledger = sales_entities.list_send_accounts(data)
+    default = sales_entities.get_send_identity(data)
+    if json_mode:
+        print(json.dumps({"send_accounts": ledger, "default": default},
+                         ensure_ascii=False))
+        return
+    if not ledger:
+        print("(台帳は空です)")
+        return
+    for a in ledger:
+        mark = " ★default" if sales_entities._norm(a.get("label")) == \
+            sales_entities._norm(default) else ""
+        routes = ", ".join(
+            f"{svc}={r.get('namespace')}" + (f":{r.get('alias')}" if r.get('alias') else "")
+            for svc, r in (a.get("routes") or {}).items()) or "(routes 未設定)"
+        print(f"  {a.get('label')} <{a.get('email')}>{mark}  [{routes}]")
+
+
+def cmd_sales_account_resolve():
+    """Internal (Skill-invoked): resolve the concrete MCP route for a service.
+    Env: BEACON_SEND_SERVICE (gmail|calendar|drive), optional BEACON_SEND_LABEL
+    (default send label when omitted). Prints JSON route on success (exit 0);
+    exit 1 when the account/route is not configured — the Skill must not
+    free-hand a namespace, so an unresolved route stops the send."""
+    import sales_entities
+    service = os.environ.get("BEACON_SEND_SERVICE", "")
+    label = os.environ.get("BEACON_SEND_LABEL", "")
+    data = load_project()
+    try:
+        route = sales_entities.resolve_route(data, service, label)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if route is None:
+        who = label or sales_entities.get_send_identity(data) or "(default 未設定)"
+        print(f"BLOCK: '{who}' の {service} route が台帳にありません。"
+              "先に台帳へ登録してください", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(route, ensure_ascii=False))
+
+
+def cmd_sales_account_remove():
+    """Internal (Skill-invoked): remove a send account by label.
+    Env: BEACON_SEND_LABEL."""
+    import sales_entities
+    label = os.environ.get("BEACON_SEND_LABEL", "")
+    data = load_project()
+    try:
+        sales_entities.remove_send_account(data, label)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"send account removed: {label}")
 
 
 def cmd_account_phase():
@@ -20746,13 +20905,30 @@ def cmd_opportunity_list():
     if not opps:
         print("No opportunities yet. Add one with: beacon opportunity add \"<title>\"")
         return
+    import sales_entities
+    import datetime
+    today = datetime.date.today().isoformat()
     for o in opps:
         acc = o.get("account_id") or "-"
         deadline = f" due {o['deadline']}" if o.get("deadline") else ""
         ball = o.get("who_has_the_ball", "")
+        td = o.get("transition_date") or ""
+        # 遷移日 = 判定予定日 (SPEC §2/§3). 判定待ちの overdue/due は距離を強調して促す。
+        st = sales_entities.transition_status(data, o["id"], today)
+        if st == sales_entities.TRANSITION_OVERDUE:
+            td_str = f" / ⚠ 遷移日 超過 {td} (判定待ち)"
+        elif st == sales_entities.TRANSITION_DUE:
+            td_str = f" / ⏰ 遷移日 本日 {td} (要判定)"
+        elif st == sales_entities.TRANSITION_SCHEDULED:
+            td_str = f" / 遷移日: {td}"
+        elif st == sales_entities.TRANSITION_UNSET:
+            td_str = " / ⚠ 遷移日 未設定"
+        else:  # settled
+            td_str = ""
         print(f"[{o['id']}] {o['title']} — phase: {o.get('phase', '?')} "
               f"/ status: {o.get('status', '?')} / account: {acc}"
-              f"{deadline} / ball: {ball} / activities: {len(o.get('activities', []))}")
+              f"{deadline} / ball: {ball}{td_str} "
+              f"/ activities: {len(o.get('activities', []))}")
 
 
 def cmd_opportunity_phase():
@@ -20780,6 +20956,132 @@ def cmd_opportunity_phase():
         sys.exit(1)
     save_project(data)
     print(f"{opp_id} phase → {rec['phase']} (recorded in phase_history)")
+
+
+def cmd_opportunity_transition_date():
+    """Set (or clear) an opportunity's 遷移日 (transition_date, ms-107 e-3371).
+
+    Env: BEACON_OPP_ID, BEACON_TRANSITION_DATE (empty clears), BEACON_PHASE_NOTE.
+    The date is the planned day this phase's goal is judged (SPEC §2); the
+    change is logged append-only in transition_date_history."""
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    transition_date = os.environ.get("BEACON_TRANSITION_DATE", "")
+    note = os.environ.get("BEACON_PHASE_NOTE", "")
+    data = load_project()
+    try:
+        rec = sales_entities.set_transition_date(
+            data, opp_id, transition_date, note=note, at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    if rec["transition_date"]:
+        print(f"{opp_id} transition_date → {rec['transition_date']} "
+              f"(recorded in transition_date_history)")
+    else:
+        print(f"{opp_id} transition_date cleared (recorded in transition_date_history)")
+
+
+def cmd_opportunity_judge():
+    """Judge a transition (ms-107 e-3372, SPEC §3): advance / retry / terminal.
+
+    Env: BEACON_OPP_ID, BEACON_JUDGE_DECISION (advance|retry|terminal),
+    BEACON_JUDGE_ARG (retry→new date, terminal→terminal phase; advance→optional
+    next date), BEACON_PHASE_NOTE. The human decides the branch; this applies it
+    (AI never auto-changes state — master=人間)."""
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    decision = os.environ.get("BEACON_JUDGE_DECISION", "")
+    arg = os.environ.get("BEACON_JUDGE_ARG", "")
+    note = os.environ.get("BEACON_PHASE_NOTE", "")
+    data = load_project()
+    at = core._now_iso()
+    try:
+        if decision == "advance":
+            res = sales_entities.advance_transition(
+                data, opp_id, next_transition_date=arg, note=note, at=at)
+            save_project(data)
+            print(f"{opp_id} advance → phase {res['phase']}")
+            # e-3270: フェーズ固有の固定アンカー活動を自動起票 (あれば)。
+            for aid in res.get("activities", []):
+                act = next((a for a in sales_entities.find_opportunity(data, opp_id).get("activities", [])
+                            if a["id"] == aid), None)
+                if act:
+                    print(f"  + 活動 {aid}: {act['description']} (テンプレ)")
+            if arg:
+                print(f"  次の遷移日: {arg}")
+            elif sales_entities.needs_transition_date(data, opp_id):
+                # SPEC §2: 新フェーズ入場 → 遷移日設定が最優先。lead があれば候補提示。
+                base = _today_iso()
+                sug = sales_entities.suggest_transition_date(data, res["phase"], base)
+                hint = f" (候補: {sug})" if sug else ""
+                print(f"  ⚠ 次フェーズの遷移日が未設定です{hint} — "
+                      f"beacon opportunity transition-date {opp_id} <YYYY-MM-DD>")
+        elif decision == "retry":
+            sales_entities.retry_transition(data, opp_id, arg, note=note, at=at)
+            save_project(data)
+            print(f"{opp_id} retry → 同フェーズ継続、新しい遷移日: {arg}")
+        elif decision == "terminal":
+            # 決着候補の外を宣言した時は warning を出す (block しない、master=人間)。
+            opp = sales_entities.find_opportunity(data, opp_id)
+            cur = opp.get("phase", "") if opp else ""
+            for w in sales_entities.opportunity_phase_warnings(data, cur, arg):
+                print(f"  ⚠ {w}", file=sys.stderr)
+            sales_entities.terminal_transition(data, opp_id, arg, note=note, at=at)
+            save_project(data)
+            print(f"{opp_id} terminal → {arg} (決着、遷移日は用済みでクリア)")
+        else:
+            print(f"Error: decision must be advance|retry|terminal, got {decision!r}",
+                  file=sys.stderr)
+            sys.exit(1)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        # terminal 候補を添える (失敗時の次アクションを示す)。
+        if decision in ("terminal", "advance"):
+            try:
+                allowed = sales_entities.allowed_terminals_for(data, opp_id)
+                if allowed:
+                    print(f"  この段階から決着できるのは: {', '.join(allowed)}",
+                          file=sys.stderr)
+            except ValueError:
+                pass
+        sys.exit(1)
+
+
+def cmd_opportunity_due():
+    """締切精査 (deadline review, ms-107 e-3271): opportunities whose 遷移日 is
+    due/overdue as of today, split by who-has-the-ball into the two actions the
+    overdue set implies — 自分ボール(判定/対応) と 相手ボール(催促). BEACON_JSON=1
+    for machine output. This is the AI's catch surface for the overdue state."""
+    import sales_entities
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    rows = sales_entities.opportunities_awaiting_judgement(data, _today_iso())
+    if json_mode:
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+    if not rows:
+        print("締切精査: 期日 到達/超過の商談はありません")
+        return
+
+    def _fmt(r):
+        mark = "⚠ 超過" if r["transition_status"] == sales_entities.TRANSITION_OVERDUE else "⏰ 本日"
+        return (f"  [{r['id']}] {r['title']} — phase: {r['phase']} / "
+                f"遷移日 {r['transition_date']} {mark}")
+
+    mine = [r for r in rows if r.get("who_has_the_ball") == sales_entities.BALL_SELF]
+    theirs = [r for r in rows if r.get("who_has_the_ball") == sales_entities.BALL_COUNTERPART]
+    if mine:
+        print("自分のボール — 判定/対応が必要:")
+        for r in mine:
+            print(_fmt(r))
+        print("  → beacon opportunity judge <opp-id> advance|retry|terminal で判定")
+    if theirs:
+        print("相手のボール — 相手待ちが期限超過、催促が必要:")
+        for r in theirs:
+            print(_fmt(r))
+        print("  → 相手に催促 (メール/日程調整) or beacon opportunity judge で決着判断")
 
 
 def cmd_opportunity_delete():
@@ -20820,16 +21122,27 @@ def cmd_phase_list():
         if p.get("terminal"):
             outcome = p.get("outcome", "")
             print(f"  - {p.get('name')} [terminal → {outcome}]")
-        else:
-            allowed = p.get("allowed_terminals")
-            prob = p.get("probability")
-            bits = []
-            if prob is not None:
-                bits.append(f"prob {prob}")
-            if allowed:
-                bits.append(f"→ {'/'.join(allowed)}")
-            suffix = f"  ({', '.join(bits)})" if bits else ""
-            print(f"  - {p.get('name')}{suffix}")
+            continue
+        allowed = p.get("allowed_terminals")
+        prob = p.get("probability")
+        bits = []
+        if prob is not None:
+            bits.append(f"prob {prob}")
+        if allowed:
+            bits.append(f"→ {'/'.join(allowed)}")
+        suffix = f"  ({', '.join(bits)})" if bits else ""
+        print(f"  - {p.get('name')}{suffix}")
+        # Methodology (ms-107 e-3371): shown only when configured (seed carries
+        # none yet; the 営業アダプタ config is seeded in e-3375).
+        m = sales_entities.phase_methodology(p)
+        if m["goal"]:
+            print(f"      ゴール: {m['goal']}")
+        if m["activity_template"]:
+            print(f"      活動テンプレ: {', '.join(str(a) for a in m['activity_template'])}")
+        if p.get("transition_signal"):
+            print(f"      遷移判定: {m['transition_signal']}")
+        if m["default_lead"] is not None:
+            print(f"      遷移日リード: {m['default_lead']}日")
 
 
 def cmd_opportunity_activity():
@@ -20887,9 +21200,23 @@ if __name__ == "__main__":
         "opportunity_add": cmd_opportunity_add,
         "opportunity_list": cmd_opportunity_list,
         "opportunity_phase": cmd_opportunity_phase,
+        "opportunity_transition_date": cmd_opportunity_transition_date,
+        "opportunity_judge": cmd_opportunity_judge,
+        "opportunity_due": cmd_opportunity_due,
         "opportunity_activity": cmd_opportunity_activity,
         "opportunity_delete": cmd_opportunity_delete,
         "phase_list": cmd_phase_list,
+        # ms-107 e-3353 — send identity pin (internal; called by sales Skills,
+        # not exposed as a user CLI verb → no bin/beacon/README/dispatch.py entry)
+        "sales_identity_set": cmd_sales_identity_set,
+        "sales_identity_show": cmd_sales_identity_show,
+        "sales_identity_check": cmd_sales_identity_check,
+        # ms-107 e-3365 — send-account ledger (label→email+per-service MCP route)
+        "sales_account_add": cmd_sales_account_add,
+        "sales_account_route": cmd_sales_account_route,
+        "sales_account_list": cmd_sales_account_list,
+        "sales_account_resolve": cmd_sales_account_resolve,
+        "sales_account_remove": cmd_sales_account_remove,
         "task_add": cmd_task_add,
         "task_done": cmd_task_done,
         "task_list": cmd_task_list,

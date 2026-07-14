@@ -50,6 +50,20 @@ def test_sales_template_passes_shared_validator():
     core.validate_project(se.build_sales_project("S", "obj"))
 
 
+def test_seed_phases_carry_methodology():
+    # ms-107 e-3375: the shipped base 4-phase seed now carries goal /
+    # activity_template / transition_signal / default_lead per phase.
+    data = _fresh()
+    m = se.opportunity_phase_methodology(data, "商談準備")
+    assert m["goal"] and m["transition_signal"] == se.SIGNAL_CALENDAR_ENDED
+    assert "初回面談を実施" in m["activity_template"] and m["default_lead"] == 7
+    agree = se.opportunity_phase_methodology(data, "合意済み")
+    assert agree["activity_template"] == ["契約書を送付", "締結"]
+    assert agree["transition_signal"] == se.SIGNAL_MANUAL
+    kentou = se.opportunity_phase_methodology(data, "先方検討中")
+    assert kentou["goal"] == "先方の実行合意を取る" and kentou["default_lead"] == 14
+
+
 # --- Account + lifecycle phase + Contact -----------------------------------
 
 def test_account_add_defaults_to_first_phase():
@@ -266,3 +280,571 @@ def test_account_delete_unknown():
     data = _fresh()
     with pytest.raises(ValueError):
         se.account_delete(data, "acc-9")
+
+
+# --- send identity pin (複垢取り違え防止) -----------------------------------
+
+def test_send_identity_default_empty():
+    assert se.get_send_identity(_fresh()) == ""
+
+
+def test_send_identity_set_and_get():
+    data = _fresh()
+    se.set_send_identity(data, "sales@corp.example")
+    assert se.get_send_identity(data) == "sales@corp.example"
+
+
+def test_send_identity_set_requires_value():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.set_send_identity(data, "   ")
+
+
+def test_check_send_from_no_pin_blocks():
+    ok, msg = se.check_send_from(_fresh(), "anyone@corp.example")
+    assert ok is False and "未設定" in msg
+
+
+def test_check_send_from_empty_from_blocks():
+    data = _fresh()
+    se.set_send_identity(data, "sales@corp.example")
+    ok, msg = se.check_send_from(data, "")
+    assert ok is False and "空" in msg
+
+
+def test_check_send_from_match_ok():
+    data = _fresh()
+    se.set_send_identity(data, "Sales@Corp.Example")
+    ok, _ = se.check_send_from(data, "sales@corp.example")  # case-insensitive
+    assert ok is True
+
+
+def test_check_send_from_mismatch_blocks():
+    data = _fresh()
+    se.set_send_identity(data, "sales@corp.example")
+    ok, msg = se.check_send_from(data, "personal@gmail.example")
+    assert ok is False and "取り違え" in msg
+
+
+# --- send-account ledger (ms-107 e-3365) -----------------------------------
+
+def _with_ledger():
+    """Sales project with two send accounts + routes, default = 会社."""
+    data = _fresh()
+    se.add_send_account(data, "会社", "sales@corp.example", routes={
+        "gmail": {"namespace": "mcp__gmail"},
+        "calendar": {"namespace": "mcp__google-calendar", "alias": "work"},
+        "drive": {"namespace": "mcp__google-drive", "alias": "work"},
+    })
+    se.add_send_account(data, "個人", "me@gmail.example", routes={
+        "calendar": {"namespace": "mcp__google-calendar-personal", "alias": "personal"},
+    })
+    se.set_send_identity(data, "会社")
+    return data
+
+
+def test_ledger_default_empty():
+    assert se.list_send_accounts(_fresh()) == []
+
+
+def test_ledger_add_and_get_by_label_and_email():
+    data = _with_ledger()
+    assert len(se.list_send_accounts(data)) == 2
+    assert se.get_send_account(data, "会社")["email"] == "sales@corp.example"
+    # email lookup + case-insensitive
+    assert se.get_send_account(data, "ME@GMAIL.EXAMPLE")["label"] == "個人"
+    assert se.get_send_account(data, "missing") is None
+
+
+def test_ledger_add_requires_label_and_email():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.add_send_account(data, "", "x@y.z")
+    with pytest.raises(ValueError):
+        se.add_send_account(data, "会社", "  ")
+
+
+def test_ledger_add_is_idempotent_on_label():
+    data = _fresh()
+    se.add_send_account(data, "会社", "old@corp.example")
+    se.add_send_account(data, "会社", "new@corp.example",
+                        routes={"gmail": {"namespace": "mcp__gmail"}})
+    assert len(se.list_send_accounts(data)) == 1
+    assert se.get_send_account(data, "会社")["email"] == "new@corp.example"
+
+
+def test_resolve_route_default_label():
+    data = _with_ledger()
+    r = se.resolve_route(data, "calendar")  # default = 会社
+    assert r["namespace"] == "mcp__google-calendar" and r["alias"] == "work"
+    assert r["label"] == "会社" and r["email"] == "sales@corp.example"
+
+
+def test_resolve_route_explicit_label_switch():
+    data = _with_ledger()
+    r = se.resolve_route(data, "calendar", "個人")
+    assert r["namespace"] == "mcp__google-calendar-personal"
+    assert r["alias"] == "personal"
+
+
+def test_resolve_route_gmail_has_no_alias():
+    data = _with_ledger()
+    r = se.resolve_route(data, "gmail", "会社")
+    assert r["namespace"] == "mcp__gmail" and r["alias"] is None
+
+
+def test_resolve_route_missing_service_returns_none():
+    data = _with_ledger()
+    assert se.resolve_route(data, "drive", "個人") is None  # 個人 has no drive route
+
+
+def test_resolve_route_unknown_account_returns_none():
+    data = _with_ledger()
+    assert se.resolve_route(data, "gmail", "存在しない") is None
+
+
+def test_resolve_route_slack_namespace_only():
+    data = _fresh()
+    se.add_send_account(data, "会社", "sales@corp.example",
+                        routes={"slack": {"namespace": "slack-ga"}})
+    se.set_send_identity(data, "会社")
+    r = se.resolve_route(data, "slack")
+    assert r["namespace"] == "slack-ga" and r["alias"] is None
+
+
+def test_resolve_route_rejects_unknown_service():
+    with pytest.raises(ValueError):
+        se.resolve_route(_with_ledger(), "teams")
+
+
+def test_set_account_route_updates_in_place():
+    data = _with_ledger()
+    se.set_account_route(data, "個人", "gmail", "mcp__gmail_personal")
+    r = se.resolve_route(data, "gmail", "個人")
+    assert r["namespace"] == "mcp__gmail_personal"
+
+
+def test_set_account_route_unknown_account_raises():
+    with pytest.raises(ValueError):
+        se.set_account_route(_fresh(), "会社", "gmail", "mcp__gmail")
+
+
+def test_clean_routes_drops_unknown_service_and_empty_ns():
+    data = _fresh()
+    se.add_send_account(data, "会社", "a@b.c", routes={
+        "gmail": {"namespace": "mcp__gmail"},
+        "teams": {"namespace": "mcp__teams"},   # unknown service dropped
+        "drive": {"namespace": ""},             # empty namespace dropped
+    })
+    routes = se.get_send_account(data, "会社")["routes"]
+    assert set(routes.keys()) == {"gmail"}
+
+
+def test_remove_send_account():
+    data = _with_ledger()
+    se.remove_send_account(data, "個人")
+    assert se.get_send_account(data, "個人") is None
+    with pytest.raises(ValueError):
+        se.remove_send_account(data, "個人")
+
+
+def test_check_send_from_ledger_match_by_email():
+    data = _with_ledger()  # default label 会社 → sales@corp.example
+    ok, msg = se.check_send_from(data, "sales@corp.example")
+    assert ok is True and "会社" in msg
+
+
+def test_check_send_from_ledger_label_switch_match():
+    data = _with_ledger()
+    ok, _ = se.check_send_from(data, "me@gmail.example", label="個人")
+    assert ok is True
+
+
+def test_check_send_from_ledger_mismatch_blocks():
+    data = _with_ledger()
+    # 個人's email against the 会社 default → mismatch
+    ok, msg = se.check_send_from(data, "me@gmail.example")
+    assert ok is False and "取り違え" in msg
+
+
+# --- phase methodology (config schema) — ms-107 e-3371 ---------------------
+
+def test_phase_methodology_defaults_for_bare_phase():
+    # The ms-106 seed carries no methodology; accessors default gracefully.
+    m = se.phase_methodology({"name": "商談準備"})
+    assert m["goal"] == ""
+    assert m["activity_template"] == []
+    assert m["transition_signal"] == se.SIGNAL_MANUAL
+    assert m["on_fail"] is None
+    assert m["default_lead"] is None
+
+
+def test_phase_methodology_defaults_for_none():
+    m = se.phase_methodology(None)
+    assert m == {"goal": "", "activity_template": [], "on_fail": None,
+                 "default_lead": None, "transition_signal": se.SIGNAL_MANUAL}
+
+
+def test_phase_methodology_reads_configured_fields():
+    pdef = {
+        "name": "提案準備", "terminal": False, "allowed_terminals": ["成約", "失注"],
+        "goal": "提案内容に合意をとる",
+        "activity_template": ["提案書ドラフト", "見積提示"],
+        "transition_signal": se.SIGNAL_CALENDAR_ENDED,
+        "on_fail": {"terminals": ["失注"], "retry": True},
+        "default_lead": 7,
+    }
+    m = se.phase_methodology(pdef)
+    assert m["goal"] == "提案内容に合意をとる"
+    assert m["activity_template"] == ["提案書ドラフト", "見積提示"]
+    assert m["transition_signal"] == se.SIGNAL_CALENDAR_ENDED
+    assert m["on_fail"] == {"terminals": ["失注"], "retry": True}
+    assert m["default_lead"] == 7
+
+
+def test_phase_default_lead_coerces_and_guards():
+    assert se.phase_default_lead({"default_lead": "5"}) == 5
+    assert se.phase_default_lead({"default_lead": "oops"}) is None
+    assert se.phase_default_lead({}) is None
+
+
+def test_phase_on_fail_ignores_non_dict():
+    assert se.phase_on_fail({"on_fail": "nope"}) is None
+    assert se.phase_on_fail({"on_fail": {"retry": True}}) == {"retry": True}
+
+
+def test_opportunity_phase_methodology_by_name():
+    data = _fresh()
+    # Attach methodology to a seed phase (config is editable per company).
+    prep = se._find_phase_def(data["opportunity_phases"], "商談準備")
+    prep["goal"] = "面談を確定する"
+    prep["default_lead"] = 3
+    m = se.opportunity_phase_methodology(data, "商談準備")
+    assert m["goal"] == "面談を確定する" and m["default_lead"] == 3
+    # Unknown name → stable defaulted shape, no KeyError.
+    assert se.opportunity_phase_methodology(data, "無い")["goal"] == ""
+
+
+def test_opportunity_phase_is_terminal():
+    data = _fresh()
+    assert se.opportunity_phase_is_terminal(data, "成約") is True
+    assert se.opportunity_phase_is_terminal(data, "商談準備") is False
+    assert se.opportunity_phase_is_terminal(data, "未知") is False
+
+
+# --- transition_date (遷移日) — ms-107 e-3371 ------------------------------
+
+def test_opportunity_add_defaults_transition_date_empty():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", created_at="T0")
+    o = se.find_opportunity(data, opp)
+    assert o["transition_date"] == ""
+    assert o["transition_date_history"] == []
+
+
+def test_opportunity_add_with_transition_date_seeds_history():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", transition_date="2026-08-01", created_at="T0")
+    o = se.find_opportunity(data, opp)
+    assert o["transition_date"] == "2026-08-01"
+    assert o["transition_date_history"] == [
+        {"transition_date": "2026-08-01", "at": "T0", "note": "initial"}]
+
+
+def test_set_and_get_transition_date_is_append_only():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", created_at="T0")
+    se.set_transition_date(data, opp, "2026-08-01", note="面談日", at="T1")
+    se.set_transition_date(data, opp, "2026-08-10", note="reschedule", at="T2")
+    assert se.get_transition_date(data, opp) == "2026-08-10"
+    hist = se.find_opportunity(data, opp)["transition_date_history"]
+    assert [h["transition_date"] for h in hist] == ["2026-08-01", "2026-08-10"]
+    assert hist[0]["note"] == "面談日" and hist[1]["at"] == "T2"
+
+
+def test_set_transition_date_clear_is_logged():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", transition_date="2026-08-01", created_at="T0")
+    rec = se.set_transition_date(data, opp, "", note="cleared", at="T1")
+    assert rec["transition_date"] == ""
+    assert se.get_transition_date(data, opp) == ""
+    # the clear is still recorded (append-only 証跡).
+    assert se.find_opportunity(data, opp)["transition_date_history"][-1]["note"] == "cleared"
+
+
+def test_transition_date_unknown_opportunity():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.set_transition_date(data, "opp-9", "2026-08-01")
+    with pytest.raises(ValueError):
+        se.get_transition_date(data, "opp-9")
+
+
+def test_transition_date_rejects_non_opportunity_target():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    with pytest.raises(ValueError):
+        se.set_transition_date(data, acc, "2026-08-01")
+
+
+def test_needs_transition_date_true_when_unset_in_stage():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", created_at="T0")  # 商談準備, no date
+    assert se.needs_transition_date(data, opp) is True
+
+
+def test_needs_transition_date_false_once_set():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", created_at="T0")
+    se.set_transition_date(data, opp, "2026-08-01", at="T1")
+    assert se.needs_transition_date(data, opp) is False
+
+
+def test_needs_transition_date_false_in_terminal_phase():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", created_at="T0")
+    se.phase_set(data, opp, "不成立", at="T1")  # terminal — deal is decided
+    assert se.needs_transition_date(data, opp) is False
+
+
+def test_needs_transition_date_false_for_unknown_or_account():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    assert se.needs_transition_date(data, acc) is False
+    assert se.needs_transition_date(data, "opp-99") is False
+
+
+# --- transition judgement engine (3-way + overdue) — ms-107 e-3372 ---------
+
+def _opp_in_stage(data, stage="商談準備", date=""):
+    opp = se.opportunity_add(data, "Deal", phase=stage, transition_date=date, created_at="T0")
+    return opp
+
+
+def test_transition_status_unset_and_scheduled():
+    data = _fresh()
+    opp = _opp_in_stage(data)  # no date
+    assert se.transition_status(data, opp, "2026-08-01") == se.TRANSITION_UNSET
+    se.set_transition_date(data, opp, "2026-08-10", at="T1")
+    assert se.transition_status(data, opp, "2026-08-01") == se.TRANSITION_SCHEDULED
+
+
+def test_transition_status_due_and_overdue():
+    data = _fresh()
+    opp = _opp_in_stage(data, date="2026-08-01")
+    assert se.transition_status(data, opp, "2026-08-01") == se.TRANSITION_DUE
+    assert se.transition_status(data, opp, "2026-08-02") == se.TRANSITION_OVERDUE
+    assert se.transition_status(data, opp, "2026-07-31") == se.TRANSITION_SCHEDULED
+
+
+def test_transition_status_settled_in_terminal_regardless_of_date():
+    data = _fresh()
+    opp = _opp_in_stage(data, date="2026-08-01")
+    se.phase_set(data, opp, "不成立", at="T1")
+    # even with an old date, a terminal deal is settled (not overdue).
+    assert se.transition_status(data, opp, "2027-01-01") == se.TRANSITION_SETTLED
+
+
+def test_next_opportunity_phase_order_and_end():
+    data = _fresh()
+    assert se.next_opportunity_phase(data, "商談準備") == "提案準備"
+    assert se.next_opportunity_phase(data, "先方検討中") == "合意済み"
+    # last non-terminal → None (success from here is a terminal, not advance).
+    assert se.next_opportunity_phase(data, "合意済み") is None
+    assert se.next_opportunity_phase(data, "成約") is None
+    assert se.next_opportunity_phase(data, "未知") is None
+
+
+def test_advance_moves_phase_and_clears_date_when_none_given():
+    data = _fresh()
+    opp = _opp_in_stage(data, date="2026-08-01")
+    res = se.advance_transition(data, opp, at="T1")
+    assert res["phase"] == "提案準備"
+    o = se.find_opportunity(data, opp)
+    assert o["phase"] == "提案準備"
+    assert o["transition_date"] == ""          # consumed → prompts for a new one
+    assert se.needs_transition_date(data, opp) is True
+
+
+def test_advance_sets_next_date_when_given():
+    data = _fresh()
+    opp = _opp_in_stage(data, date="2026-08-01")
+    se.advance_transition(data, opp, next_transition_date="2026-09-01", at="T1")
+    assert se.get_transition_date(data, opp) == "2026-09-01"
+
+
+def test_advance_from_last_stage_raises():
+    data = _fresh()
+    opp = _opp_in_stage(data, stage="合意済み", date="2026-08-01")
+    with pytest.raises(ValueError):
+        se.advance_transition(data, opp, at="T1")
+
+
+def test_retry_keeps_phase_new_date_and_requires_date():
+    data = _fresh()
+    opp = _opp_in_stage(data, date="2026-08-01")
+    se.retry_transition(data, opp, "2026-08-20", note="粘る", at="T1")
+    o = se.find_opportunity(data, opp)
+    assert o["phase"] == "商談準備" and o["transition_date"] == "2026-08-20"
+    with pytest.raises(ValueError):
+        se.retry_transition(data, opp, "", at="T2")
+
+
+def test_allowed_terminals_for_current_phase():
+    data = _fresh()
+    opp = _opp_in_stage(data, stage="提案準備")
+    assert se.allowed_terminals_for(data, opp) == ["成約", "失注"]
+
+
+def test_terminal_transition_settles_and_clears_date():
+    data = _fresh()
+    opp = _opp_in_stage(data, stage="提案準備", date="2026-08-01")
+    se.terminal_transition(data, opp, "失注", at="T1")
+    o = se.find_opportunity(data, opp)
+    assert o["phase"] == "失注" and o["status"] == "lost"
+    assert o["transition_date"] == ""
+    assert se.transition_status(data, opp, "2026-08-02") == se.TRANSITION_SETTLED
+
+
+def test_terminal_transition_rejects_non_terminal_phase():
+    data = _fresh()
+    opp = _opp_in_stage(data, stage="提案準備")
+    with pytest.raises(ValueError):
+        se.terminal_transition(data, opp, "先方検討中")  # not terminal
+
+
+def test_suggest_transition_date_from_default_lead():
+    data = _fresh()
+    prep = se._find_phase_def(data["opportunity_phases"], "提案準備")
+    prep["default_lead"] = 7
+    assert se.suggest_transition_date(data, "提案準備", "2026-08-01") == "2026-08-08"
+    # no lead configured → None (clear the seed's lead to exercise this path)
+    se._find_phase_def(data["opportunity_phases"], "商談準備")["default_lead"] = None
+    assert se.suggest_transition_date(data, "商談準備", "2026-08-01") is None
+    # bad base date → None (guarded)
+    assert se.suggest_transition_date(data, "提案準備", "nope") is None
+
+
+def test_opportunities_awaiting_judgement_scan_and_sort():
+    data = _fresh()
+    a = se.opportunity_add(data, "A", transition_date="2026-08-05", created_at="T0")  # future
+    b = se.opportunity_add(data, "B", transition_date="2026-08-01", created_at="T0")  # overdue
+    c = se.opportunity_add(data, "C", transition_date="2026-08-03", created_at="T0")  # due
+    se.opportunity_add(data, "D", created_at="T0")                                    # unset
+    rows = se.opportunities_awaiting_judgement(data, "2026-08-03")
+    # only overdue(B) + due(C); sorted oldest-first (B before C); A/D excluded.
+    assert [r["id"] for r in rows] == [b, c]
+    assert rows[0]["transition_status"] == se.TRANSITION_OVERDUE
+    assert rows[1]["transition_status"] == se.TRANSITION_DUE
+
+
+def test_overdue_persists_until_judged():
+    data = _fresh()
+    opp = _opp_in_stage(data, date="2026-08-01")
+    assert se.transition_status(data, opp, "2026-08-10") == se.TRANSITION_OVERDUE
+    # retry (place a new future date) clears the overdue state.
+    se.retry_transition(data, opp, "2026-08-20", at="T1")
+    assert se.transition_status(data, opp, "2026-08-10") == se.TRANSITION_SCHEDULED
+
+
+# --- phase-entry activity anchors (e-3270) ---------------------------------
+
+def _with_anchor(data, phase="提案準備", anchors=None):
+    pdef = se._find_phase_def(data["opportunity_phases"], phase)
+    pdef["activity_template"] = anchors if anchors is not None else ["提案書を作成する"]
+
+
+def test_advance_instantiates_next_phase_anchor_activities():
+    data = _fresh()
+    _with_anchor(data, "提案準備", ["提案書を作成する", "見積を用意する"])
+    opp = se.opportunity_add(data, "Deal", phase="商談準備", transition_date="2026-08-01", created_at="T0")
+    res = se.advance_transition(data, opp, at="T1")  # → 提案準備
+    assert res["phase"] == "提案準備"
+    acts = se.find_opportunity(data, opp)["activities"]
+    assert [a["description"] for a in acts] == ["提案書を作成する", "見積を用意する"]
+    assert all(a["source"] == "template-anchor" and a["status"] == "todo" for a in acts)
+    assert res["activities"] == [a["id"] for a in acts]
+
+
+def test_advance_into_phase_without_template_creates_nothing():
+    data = _fresh()
+    # explicitly clear the next phase's template to exercise the no-template path
+    se._find_phase_def(data["opportunity_phases"], "提案準備")["activity_template"] = []
+    opp = se.opportunity_add(data, "Deal", phase="商談準備", transition_date="2026-08-01", created_at="T0")
+    se.advance_transition(data, opp, at="T1")
+    assert se.find_opportunity(data, opp)["activities"] == []
+
+
+def test_instantiate_phase_activities_is_idempotent_by_description():
+    data = _fresh()
+    _with_anchor(data, "商談準備", ["面談を打診する"])
+    opp = se.opportunity_add(data, "Deal", phase="商談準備", created_at="T0")
+    first = se.instantiate_phase_activities(data, opp, at="T1")
+    second = se.instantiate_phase_activities(data, opp, at="T2")  # same anchor already present
+    assert len(first) == 1 and second == []
+    assert len(se.find_opportunity(data, opp)["activities"]) == 1
+
+
+def test_instantiate_skips_anchor_matching_existing_but_readds_if_done():
+    data = _fresh()
+    _with_anchor(data, "商談準備", ["面談を打診する"])
+    opp = se.opportunity_add(data, "Deal", phase="商談準備", created_at="T0")
+    aid = se.instantiate_phase_activities(data, opp, at="T1")[0]
+    # mark it done → the anchor is eligible to be re-created next entry.
+    se.find_opportunity(data, opp)["activities"][0]["status"] = "done"
+    again = se.instantiate_phase_activities(data, opp, at="T2")
+    assert len(again) == 1 and again[0] != aid
+
+
+def test_activity_add_records_source():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", created_at="T0")
+    a = se.activity_add(data, opp, "手動タスク", source="ai", created_at="T1")
+    act = se.find_opportunity(data, opp)["activities"][0]
+    assert act["source"] == "ai"
+
+
+# --- target-class temporal core + 締切精査 (e-3271) -------------------------
+
+def test_temporal_status_pure_generic():
+    assert se.temporal_status("", "2026-08-01") == se.TRANSITION_UNSET
+    assert se.temporal_status("2026-08-01", "2026-08-01") == se.TRANSITION_DUE
+    assert se.temporal_status("2026-07-30", "2026-08-01") == se.TRANSITION_OVERDUE
+    assert se.temporal_status("2026-08-10", "2026-08-01") == se.TRANSITION_SCHEDULED
+    # settled short-circuits regardless of date
+    assert se.temporal_status("2020-01-01", "2026-08-01", settled=True) == se.TRANSITION_SETTLED
+
+
+def test_scan_overdue_generic_over_arbitrary_items():
+    # simulate a non-sales target class (e.g. milestone-like dicts) to prove the
+    # scanner is entity-agnostic — this is the ms-109 second-consumer shape.
+    items = [
+        {"k": "A", "date": "2026-08-05", "done": False},   # future
+        {"k": "B", "date": "2026-08-01", "done": False},   # overdue
+        {"k": "C", "date": "2026-08-03", "done": False},   # due
+        {"k": "D", "date": "", "done": False},             # no date
+        {"k": "E", "date": "2026-07-01", "done": True},    # settled → excluded
+    ]
+    pairs = se.scan_overdue(items, lambda it: it["date"], lambda it: it["done"], "2026-08-03")
+    assert [it["k"] for it, _ in pairs] == ["B", "C"]  # oldest first, settled/future/unset excluded
+    assert pairs[0][1] == se.TRANSITION_OVERDUE and pairs[1][1] == se.TRANSITION_DUE
+
+
+def test_transition_status_still_matches_after_refactor():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", phase="商談準備", transition_date="2026-08-01", created_at="T0")
+    assert se.transition_status(data, opp, "2026-08-02") == se.TRANSITION_OVERDUE
+    se.phase_set(data, opp, "不成立", at="T1")
+    assert se.transition_status(data, opp, "2027-01-01") == se.TRANSITION_SETTLED
+
+
+def test_awaiting_judgement_carries_ball_dimension():
+    data = _fresh()
+    a = se.opportunity_add(data, "A", transition_date="2026-08-01",
+                           who_has_the_ball=se.BALL_SELF, created_at="T0")
+    b = se.opportunity_add(data, "B", transition_date="2026-08-01",
+                           who_has_the_ball=se.BALL_COUNTERPART, created_at="T0")
+    rows = se.opportunities_awaiting_judgement(data, "2026-08-05")
+    by_id = {r["id"]: r for r in rows}
+    assert by_id[a]["who_has_the_ball"] == se.BALL_SELF
+    assert by_id[b]["who_has_the_ball"] == se.BALL_COUNTERPART
