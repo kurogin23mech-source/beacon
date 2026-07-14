@@ -3144,6 +3144,10 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .assignee-chip.active { color:var(--accent); border-color:var(--accent-dim); background:var(--accent-glow); }
 /* --- ms-106 fb3: Nurturing (継続関係の業務) — 見た目は activity と同じ --- */
 .sm-nurturing { margin-top:4px; }
+/* --- ms-106 fb4: 見込み売上 / 目標進捗バー --- */
+.pipeline-sub { color:var(--text-dim); font-size:0.85em; }
+.pipeline-bar { height:5px; background:var(--bg-raised); border-radius:3px; margin-top:5px; overflow:hidden; max-width:240px; }
+.pipeline-bar-fill { height:100%; background:var(--accent); border-radius:3px; transition:width .3s; }
 /* --- ms-106 fb1: opportunity detail modal --- */
 .sm-detail { display:flex; flex-direction:column; gap:7px; margin:4px 0 6px; }
 .sm-drow { display:flex; gap:10px; font-size:12px; }
@@ -4372,6 +4376,49 @@ function _salesAcctChip(p, o) {
 function _salesOwnerChip(o) {
   return o.assignee ? `<span class="opp-owner">${esc(o.assignee)}</span>` : '';
 }
+// ms-106 fb4: 見込み売上 (weighted pipeline) = Σ 金額 × フェーズ成約率 over open
+// 商談。assignee を渡すとその担当分だけ。lib.weighted_pipeline の JS 版。
+function _salesYen(n) {
+  return '¥' + Math.round(n || 0).toLocaleString('ja-JP');
+}
+function _salesWeightedPipeline(p, assignee) {
+  const phases = p.opportunity_phases || [];
+  const term = new Set(phases.filter(x => x.terminal).map(x => x.name));
+  const probOf = name => {
+    const d = phases.find(x => x.name === name);
+    return d && typeof d.probability === 'number' ? d.probability : 0;
+  };
+  let total = 0;
+  (p.opportunities || []).forEach(o => {
+    if (term.has(o.phase)) return;
+    if (assignee && (o.assignee || '') !== assignee) return;
+    if (typeof o.goal_amount === 'number') total += o.goal_amount * probOf(o.phase) / 100;
+  });
+  return total;
+}
+// 見込み売上を Objective の下に出す (sales project のみ)。担当で絞り込み中なら
+// その担当の 目標売上 / 進捗バーも添える。目標未設定のメンバーは見込みのみ。
+function _renderSalesPipelineInfo(p) {
+  if (p.profession !== 'sales') return '';
+  const member = state.oppAssignee || '';
+  const pipeline = _salesWeightedPipeline(p, member || null);
+  const targets = p.sales_targets || {};
+  let valueHtml;
+  if (member) {
+    const target = targets[member];
+    if (typeof target === 'number' && target > 0) {
+      const pct = Math.round(pipeline / target * 100);
+      valueHtml = `${_salesYen(pipeline)} <span class="pipeline-sub">/ 目標 ${_salesYen(target)}・進捗 ${pct}%</span>
+        <div class="pipeline-bar"><div class="pipeline-bar-fill" style="width:${Math.max(0, Math.min(100, pct))}%"></div></div>`;
+    } else {
+      valueHtml = `${_salesYen(pipeline)} <span class="pipeline-sub">（${esc(member)} の目標未設定）</span>`;
+    }
+  } else {
+    valueHtml = _salesYen(pipeline);
+  }
+  const label = member ? `見込み売上 (${esc(member)})` : '見込み売上';
+  return `<div class="project-info-item"><span class="project-info-label">${label}</span><span class="project-info-value">${valueHtml}</span></div>`;
+}
 function renderOpportunitiesSection() {
   const p = state.project;
   const opps = p.opportunities || [];
@@ -4689,9 +4736,10 @@ function renderShell(app) {
       ${PLATFORM.accountMenuItemsHTML()}
     </div>
 
-    ${(!state.openTrekId && (p.objective || retro)) ? `
+    ${(!state.openTrekId && (p.objective || retro || p.profession === 'sales')) ? `
     <div class="project-info fade-in stagger-1">
       ${p.objective ? `<div class="project-info-item"><span class="project-info-label">Objective</span><span class="project-info-value">${esc(p.objective)}</span></div>` : ''}
+      ${_renderSalesPipelineInfo(p)}
       ${retro ? `<div class="project-info-item${retro.isToday ? ' review-due' : ''}"><span class="project-info-label">${retro.isToday ? '⚠ Review Due Today' : 'Next Review'}</span><span class="project-info-value">${retro.date} (${esc(p.retro_day || 'friday')})</span></div>` : ''}
     </div>
     ` : ''}

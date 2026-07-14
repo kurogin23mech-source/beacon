@@ -58,22 +58,22 @@ DEFAULT_ACCOUNT_PHASES = [
 # 出発点) であり enforce される定数ではない。
 DEFAULT_OPPORTUNITY_PHASES = [
     # 進行フェーズ: allowed_terminals = ここから宣言できる決着。
-    {"name": "商談準備", "probability": None, "terminal": False,
+    {"name": "商談準備", "probability": 10, "terminal": False,
      "allowed_terminals": ["不成立"],
      "goal": "初回面談の実施により、商談として進行可能な状態にする",
      "activity_template": ["初回面談を打診", "初回面談を実施", "提案の方向性を確定"],
      "transition_signal": "calendar_ended", "default_lead": 7},
-    {"name": "提案準備", "probability": None, "terminal": False,
+    {"name": "提案準備", "probability": 20, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "企画を作り提案を終え、先方が検討フェーズに入った状態にする",
      "activity_template": ["提案面談を打診", "提案面談を実施", "提案内容を準備"],
      "transition_signal": "calendar_ended", "default_lead": 14},
-    {"name": "先方検討中", "probability": None, "terminal": False,
+    {"name": "先方検討中", "probability": 40, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "先方の実行合意を取る",
      "activity_template": ["合意確認日を確定（必要なら面談設定）", "合意の確認を取る"],
      "transition_signal": "manual", "default_lead": 14},
-    {"name": "合意済み", "probability": None, "terminal": False,
+    {"name": "合意済み", "probability": 80, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "契約を締結する",
      "activity_template": ["契約書を送付", "締結"],
@@ -611,6 +611,82 @@ def _auto_advance_account_phase(data: dict, account_id: str, *, at: str = "") ->
         acc["phase"] = derived
         return record
     return None
+
+
+# ---------------------------------------------------------------------------
+# Pipeline value & member targets (見込み売上 / メンバー別 目標売上, ms-106 fb4)
+# ---------------------------------------------------------------------------
+# 見込み売上 (weighted pipeline) = Σ over OPEN (non-terminal) opportunities of
+# goal_amount × phase.probability. Member targets (目標売上) live in a *sparse*
+# project-level map ``sales_targets`` {member: amount}: a member added later
+# simply has no entry (= 目標未設定) until one is set — additive, no migration.
+# This is L3 (sales-adapter) config; ms-109 generalizes it to "a target carries
+# a quota / KPI".
+
+def set_opportunity_amount(data: dict, opp_id: str, amount) -> dict:
+    """Set an opportunity's goal_amount (商談金額). ``amount`` is a number (円)
+    or None to clear. Returns the mutated opportunity."""
+    opp = find_opportunity(data, opp_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opp_id}")
+    opp["goal_amount"] = amount
+    return opp
+
+
+def set_phase_probability(data: dict, phase_name: str, probability) -> dict:
+    """Set a per-company win probability (成約率, 0-100) on an opportunity phase
+    definition. Config-level edit (per-company funnel tuning). Returns the def."""
+    pdef = _find_phase_def(opportunity_phases(data), phase_name)
+    if pdef is None:
+        raise ValueError(f"Opportunity phase not found: {phase_name}")
+    pdef["probability"] = probability
+    return pdef
+
+
+def sales_targets(data: dict) -> dict:
+    return data.get("sales_targets", {})
+
+
+def set_sales_target(data: dict, member: str, amount) -> dict:
+    """Set a member's 目標売上 (sales quota) in the sparse ``sales_targets`` map.
+    ``amount`` None removes the entry (= 目標未設定 に戻す). Returns the map."""
+    if not member or not str(member).strip():
+        raise ValueError("member is required")
+    key = str(member).strip()
+    targets = data.setdefault("sales_targets", {})
+    if amount is None:
+        targets.pop(key, None)
+    else:
+        targets[key] = amount
+    return targets
+
+
+def get_sales_target(data: dict, member: str):
+    return sales_targets(data).get(member)
+
+
+def _phase_probability(data: dict, phase_name: str) -> float:
+    pdef = _find_phase_def(opportunity_phases(data), phase_name)
+    p = pdef.get("probability") if pdef else None
+    return float(p) if isinstance(p, (int, float)) else 0.0
+
+
+def weighted_pipeline(data: dict, *, assignee: Optional[str] = None) -> float:
+    """見込み売上 = Σ (goal_amount × phase.probability / 100) over OPEN
+    (non-terminal) opportunities. ``assignee`` scopes it to one member's
+    pipeline. Deals with no amount or no phase probability contribute 0."""
+    phases = opportunity_phases(data)
+    term = {p.get("name") for p in phases if p.get("terminal")}
+    total = 0.0
+    for o in data.get("opportunities", []):
+        if o.get("phase") in term:
+            continue
+        if assignee is not None and (o.get("assignee") or "") != assignee:
+            continue
+        amt = o.get("goal_amount")
+        if isinstance(amt, (int, float)):
+            total += amt * _phase_probability(data, o.get("phase")) / 100.0
+    return total
 
 
 # ---------------------------------------------------------------------------

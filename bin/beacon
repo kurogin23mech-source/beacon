@@ -65,6 +65,9 @@ Sales (profession=sales):
   beacon opportunity list [--json]                           List opportunities
   beacon opportunity phase <opp-id> <phase> [--note <text>]  Move an opportunity to a new phase
   beacon opportunity assign <opp-id> <user>                  Set the assignee (担当ユーザー) on an opportunity
+  beacon opportunity amount <opp-id> <amount>                Set the deal amount (金額, 円)
+  beacon opportunity phase-prob <phase> <n>                  Set a phase win probability (成約率 0-100)
+  beacon sales target <user> <amount> | list                Set/list a member's sales quota (目標売上) with pipeline
   beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] | --clear   Set the 遷移日 (judgement date) for the current phase
   beacon opportunity judge <opp-id> advance|retry|terminal [<date|terminal-phase>] [--note <text>]   Judge a reached 遷移日 (3-way, human-confirmed)
   beacon opportunity due [--json]                            List opportunities awaiting a transition judgement (due/overdue)
@@ -1237,6 +1240,67 @@ cmd_opportunity_assign() {
     fi
     BEACON_OPP_ID="$opp_id" BEACON_ASSIGNEE="$assignee" \
         python3 "$COMMANDS_PY" opportunity_assign
+}
+
+cmd_opportunity_amount() {
+    ensure_project
+    local opp_id="" amount=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -?*) _guard_positional "$1" "Usage: beacon opportunity amount <opp-id> <amount>" ;;
+            *)   if [ -z "$opp_id" ]; then opp_id="$1"; else amount="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ] || [ -z "$amount" ]; then
+        echo "Usage: beacon opportunity amount <opp-id> <amount>"
+        exit 1
+    fi
+    BEACON_OPP_ID="$opp_id" BEACON_OPP_AMOUNT="$amount" \
+        python3 "$COMMANDS_PY" opportunity_amount
+}
+
+cmd_opportunity_phase_prob() {
+    ensure_project
+    local phase="" prob=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -?*) _guard_positional "$1" "Usage: beacon opportunity phase-prob <phase> <n>" ;;
+            *)   if [ -z "$phase" ]; then phase="$1"; else prob="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$phase" ] || [ -z "$prob" ]; then
+        echo "Usage: beacon opportunity phase-prob <phase> <n>"
+        exit 1
+    fi
+    BEACON_PHASE_NAME="$phase" BEACON_PHASE_PROB="$prob" \
+        python3 "$COMMANDS_PY" opportunity_phase_prob
+}
+
+cmd_sales_target() {
+    ensure_project
+    # `beacon sales target list [--json]` vs `beacon sales target <user> <amount>`
+    if [ "${1:-}" = "list" ]; then
+        shift
+        local json_flag=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in --json) json_flag="1"; shift ;; *) shift ;; esac
+        done
+        BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" sales_target_list
+        return
+    fi
+    local member="" amount=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -?*) _guard_positional "$1" "Usage: beacon sales target <user> <amount> | list" ;;
+            *)   if [ -z "$member" ]; then member="$1"; else amount="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$member" ]; then
+        echo "Usage: beacon sales target <user> <amount> | list"
+        exit 1
+    fi
+    BEACON_TARGET_MEMBER="$member" BEACON_TARGET_AMOUNT="$amount" \
+        python3 "$COMMANDS_PY" sales_target
 }
 
 cmd_opportunity_list() {
@@ -2560,12 +2624,20 @@ case "${1:-}" in
             list|ls)  shift 2; cmd_opportunity_list "$@" ;;
             phase)    shift 2; cmd_opportunity_phase "$@" ;;
             assign)   shift 2; cmd_opportunity_assign "$@" ;;
+            amount)   shift 2; cmd_opportunity_amount "$@" ;;
+            phase-prob) shift 2; cmd_opportunity_phase_prob "$@" ;;
             transition-date|td) shift 2; cmd_opportunity_transition_date "$@" ;;
             judge)    shift 2; cmd_opportunity_judge "$@" ;;
             due)      shift 2; cmd_opportunity_due "$@" ;;
             activity) shift 2; cmd_opportunity_activity "$@" ;;
             delete)   shift 2; cmd_opportunity_delete "$@" ;;
-            *)        echo "Usage: beacon opportunity [add|list|phase|assign|transition-date|judge|due|activity|delete]" ;;
+            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|phase-prob|transition-date|judge|due|activity|delete]" ;;
+        esac
+        ;;
+    sales)
+        case "${2:-}" in
+            target)  shift 2; cmd_sales_target "$@" ;;
+            *)       echo "Usage: beacon sales target <user> <amount> | list" ;;
         esac
         ;;
     phase)

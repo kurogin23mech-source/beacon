@@ -964,3 +964,68 @@ def test_account_auto_advance_records_history_note():
     hist = se.find_account(data, acc)["phase_history"]
     assert hist[-1]["phase"] == "未成約顧客"
     assert "自動昇格" in hist[-1]["note"]
+
+
+# --- ms-106 fb4: 商談金額 / フェーズ成約率 / 見込み売上 / メンバー目標 --------
+
+def test_seed_phase_probabilities():
+    data = _fresh()
+    probs = {p["name"]: p.get("probability") for p in data["opportunity_phases"]}
+    assert probs["商談準備"] == 10 and probs["提案準備"] == 20
+    assert probs["先方検討中"] == 40 and probs["合意済み"] == 80
+    assert probs["成約"] == 100 and probs["失注"] == 0 and probs["不成立"] == 0
+
+
+def test_set_opportunity_amount():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    se.set_opportunity_amount(data, opp, 1500000)
+    assert se.find_opportunity(data, opp)["goal_amount"] == 1500000
+    with pytest.raises(ValueError):
+        se.set_opportunity_amount(data, "opp-99", 1)
+
+
+def test_set_phase_probability():
+    data = _fresh()
+    se.set_phase_probability(data, "商談準備", 15)
+    assert se._find_phase_def(data["opportunity_phases"], "商談準備")["probability"] == 15
+    with pytest.raises(ValueError):
+        se.set_phase_probability(data, "存在しない", 10)
+
+
+def test_weighted_pipeline_total_and_per_assignee():
+    data = _fresh()
+    a = se.account_add(data, "A")
+    o1 = se.opportunity_add(data, "D1", account_id=a, assignee="kida")  # 商談準備 10%
+    se.set_opportunity_amount(data, o1, 1000000)
+    o2 = se.opportunity_add(data, "D2", account_id=a, assignee="kida")
+    se.phase_set(data, o2, "提案準備")  # 20%
+    se.set_opportunity_amount(data, o2, 2000000)
+    o3 = se.opportunity_add(data, "D3", account_id=a, assignee="sato")
+    se.phase_set(data, o3, "合意済み")  # 80%
+    se.set_opportunity_amount(data, o3, 5000000)
+    assert se.weighted_pipeline(data) == 4500000.0
+    assert se.weighted_pipeline(data, assignee="kida") == 500000.0
+    assert se.weighted_pipeline(data, assignee="sato") == 4000000.0
+
+
+def test_weighted_pipeline_excludes_terminal_and_amountless():
+    data = _fresh()
+    o = se.opportunity_add(data, "Won", assignee="kida")
+    se.set_opportunity_amount(data, o, 9000000)
+    se.phase_set(data, o, "成約")  # terminal → excluded
+    noamt = se.opportunity_add(data, "NoAmount", assignee="kida")  # 商談準備, no amount
+    se.phase_set(data, noamt, "提案準備")
+    assert se.weighted_pipeline(data) == 0.0
+
+
+def test_sales_targets_sparse_set_get_clear():
+    data = _fresh()
+    assert se.get_sales_target(data, "kida") is None  # unset member
+    se.set_sales_target(data, "kida", 3000000)
+    assert se.get_sales_target(data, "kida") == 3000000
+    assert se.get_sales_target(data, "sato") is None  # member added later, no entry
+    se.set_sales_target(data, "kida", None)  # clear
+    assert se.get_sales_target(data, "kida") is None
+    with pytest.raises(ValueError):
+        se.set_sales_target(data, "  ", 1)

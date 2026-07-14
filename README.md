@@ -261,6 +261,9 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon opportunity list [--json]` | List opportunities / 商談を一覧 |
 | `beacon opportunity phase <opp-id> <phase> [--note <text>]` | Move an opportunity to a new phase (recorded in history) / 商談のフェーズを変更（履歴に記録） |
 | `beacon opportunity assign <opp-id> <user>` | Set the assignee (担当ユーザー) on an opportunity / 商談の担当ユーザーを設定 |
+| `beacon opportunity amount <opp-id> <amount>` | Set the deal amount (金額) on an opportunity / 商談の金額を設定 |
+| `beacon opportunity phase-prob <phase> <n>` | Set a phase win probability (成約率 0-100) / フェーズの成約率を設定 |
+| `beacon sales target <user> <amount> \| list` | Set/list a member's sales quota (目標売上) + weighted pipeline / メンバーの目標売上を設定・一覧 |
 | `beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] \| --clear` | Set the 遷移日 (judgement date) for the current phase / 現フェーズの遷移日（判定予定日）を設定 |
 | `beacon opportunity judge <opp-id> advance\|retry\|terminal [<date\|terminal-phase>] [--note <text>]` | Judge a reached 遷移日 (3-way, human-confirmed) / 到達した遷移日を判定（次へ/やり直し/決着） |
 | `beacon opportunity due [--json]` | List opportunities awaiting a transition judgement / 判定待ち（遷移日 到達・超過）の商談を一覧 |

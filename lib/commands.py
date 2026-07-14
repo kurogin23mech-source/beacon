@@ -16426,6 +16426,10 @@ def cmd_help_json():
         {"command": "beacon account delete <acc-id>", "flags": ["--force"], "description": "Delete an account (--force orphans referencing opportunities)"},
         {"command": "beacon opportunity add <title>", "flags": ["--account <acc-id>", "--phase <p>", "--goal <n>", "--probability <n>", "--deadline <date>", "--ball self|counterpart", "--assignee <user>"], "description": "Add a sales opportunity (商談; 対象・有限)"},
         {"command": "beacon opportunity assign <opp-id> <user>", "flags": [], "description": "Set the 担当ユーザー (assignee) on an opportunity"},
+        {"command": "beacon opportunity amount <opp-id> <amount>", "flags": [], "description": "Set an opportunity's 金額 (goal_amount, 円)"},
+        {"command": "beacon opportunity phase-prob <phase> <n>", "flags": [], "description": "Set a phase's 成約率 (win probability 0-100; per-company funnel tuning)"},
+        {"command": "beacon sales target <user> <amount>", "flags": [], "description": "Set a member's 目標売上 (sales quota; empty amount clears)"},
+        {"command": "beacon sales target list", "flags": ["--json"], "description": "List members' 目標売上 with their 見込み売上 (weighted pipeline)"},
         {"command": "beacon opportunity list", "flags": ["--json"], "description": "List sales opportunities with phase / status / account"},
         {"command": "beacon opportunity phase <opp-id> <phase>", "flags": ["--note <text>"], "description": "Declare a phase transition (append-only phase_history; master=人間)"},
         {"command": "beacon opportunity transition-date <opp-id> <YYYY-MM-DD>", "flags": ["--note <text>", "--clear"], "description": "Set the 遷移日 (judgement date) for the current phase (append-only transition_date_history)"},
@@ -20961,6 +20965,67 @@ def cmd_opportunity_assign():
     print(f"Assigned {opp_id} → {assignee or '(cleared)'}")
 
 
+def cmd_opportunity_amount():
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    raw = os.environ.get("BEACON_OPP_AMOUNT", "")
+    amount = _parse_number(raw, "<amount>")
+    data = load_project()
+    try:
+        sales_entities.set_opportunity_amount(data, opp_id, amount)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Set amount on {opp_id}: {amount if amount is not None else '(cleared)'}")
+
+
+def cmd_opportunity_phase_prob():
+    import sales_entities
+    phase = os.environ.get("BEACON_PHASE_NAME", "")
+    raw = os.environ.get("BEACON_PHASE_PROB", "")
+    prob = _parse_number(raw, "<probability>")
+    data = load_project()
+    try:
+        sales_entities.set_phase_probability(data, phase, prob)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Set probability on phase {phase}: {prob}%")
+
+
+def cmd_sales_target():
+    import sales_entities
+    member = os.environ.get("BEACON_TARGET_MEMBER", "")
+    raw = os.environ.get("BEACON_TARGET_AMOUNT", "")
+    amount = _parse_number(raw, "<amount>") if raw.strip() else None
+    data = load_project()
+    try:
+        sales_entities.set_sales_target(data, member, amount)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Target for {member}: {amount if amount is not None else '(cleared)'}")
+
+
+def cmd_sales_target_list():
+    import sales_entities
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    targets = sales_entities.sales_targets(data)
+    if json_mode:
+        print(json.dumps(targets, ensure_ascii=False))
+        return
+    if not targets:
+        print("No sales targets set. Set one with: beacon sales target <user> <amount>")
+        return
+    for member, amt in targets.items():
+        pipe = sales_entities.weighted_pipeline(data, assignee=member)
+        print(f"  {member}: 目標 {amt} / 見込み {pipe:.0f}")
+
+
 def _parse_number(raw: str, flag: str):
     """Parse an optional numeric flag; empty → None, int-if-whole else float."""
     if not raw or not raw.strip():
@@ -21282,6 +21347,10 @@ if __name__ == "__main__":
         "opportunity_list": cmd_opportunity_list,
         "opportunity_phase": cmd_opportunity_phase,
         "opportunity_assign": cmd_opportunity_assign,
+        "opportunity_amount": cmd_opportunity_amount,
+        "opportunity_phase_prob": cmd_opportunity_phase_prob,
+        "sales_target": cmd_sales_target,
+        "sales_target_list": cmd_sales_target_list,
         "opportunity_transition_date": cmd_opportunity_transition_date,
         "opportunity_judge": cmd_opportunity_judge,
         "opportunity_due": cmd_opportunity_due,
