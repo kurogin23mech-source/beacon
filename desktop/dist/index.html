@@ -4744,7 +4744,7 @@ function renderMainContent() {
   const isSales = p.profession === 'sales';
   const effectiveTab = (isSales && state.activeTab === 'dashboard') ? 'opportunities' : state.activeTab;
   const salesTabBar = `
-      <button class="tab-btn ${effectiveTab === 'opportunities' ? 'active' : ''}" data-action="switch-tab" data-tab="opportunities">商談</button>
+      <button class="tab-btn ${effectiveTab === 'opportunities' ? 'active' : ''}" data-action="switch-tab" data-tab="opportunities">Opportunity</button>
       <button class="tab-btn ${effectiveTab === 'account' ? 'active' : ''}" data-action="switch-tab" data-tab="account">Account</button>
       <button class="tab-btn ${effectiveTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${effectiveTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Session</button>`;
@@ -5100,7 +5100,13 @@ function renderAccountsSection() {
   if (!accs.length) {
     return `<section class="sales-board fade-in"><div class="sales-empty">顧客 (Account) がありません。<code>beacon account add "&lt;会社名&gt;"</code> で追加できます。</div></section>`;
   }
-  const rows = accs.map(a => {
+  // ms-106 fb7: Account にも担当絞り込み (商談タブと同じ member 由来・state 共有)。
+  const filterBar = _renderAssigneeBar(accs);
+  const shown = accs.filter(a => !state.oppAssignee || (a.assignee || '') === state.oppAssignee);
+  if (!shown.length) {
+    return `<section class="sales-board fade-in">${filterBar}<div class="act-empty" style="padding:16px">該当する顧客がいません。</div></section>`;
+  }
+  const rows = shown.map(a => {
     const nc = (a.contacts || []).length;
     const nn = (a.nurturings || []).length;
     const expanded = state.expanded.has(a.id);
@@ -5118,7 +5124,7 @@ function renderAccountsSection() {
       </div>${body}
     </div>`;
   }).join('');
-  return `<section class="sales-board fade-in"><div class="acc-list">${rows}</div></section>`;
+  return `<section class="sales-board fade-in">${filterBar}<div class="acc-list">${rows}</div></section>`;
 }
 function renderAccountModal(accId) {
   const accs = (state.project && state.project.accounts) || [];
