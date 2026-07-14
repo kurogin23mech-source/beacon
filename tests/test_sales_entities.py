@@ -850,3 +850,182 @@ def test_awaiting_judgement_carries_ball_dimension():
     by_id = {r["id"]: r for r in rows}
     assert by_id[a]["who_has_the_ball"] == se.BALL_SELF
     assert by_id[b]["who_has_the_ball"] == se.BALL_COUNTERPART
+
+
+# --- ms-106 fb3: 担当ユーザー (assignee) on Opportunity + Account ------------
+
+def test_assignee_on_opportunity_and_account():
+    data = _fresh()
+    acc = se.account_add(data, "Globex", assignee="kida")
+    opp = se.opportunity_add(data, "Deal", account_id=acc, assignee="sato")
+    assert se.find_account(data, acc)["assignee"] == "kida"
+    assert se.find_opportunity(data, opp)["assignee"] == "sato"
+
+
+def test_set_assignee_dispatch_and_clear():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    opp = se.opportunity_add(data, "Deal", account_id=acc)
+    se.set_assignee(data, acc, "kida")
+    se.set_assignee(data, opp, "sato")
+    assert se.find_account(data, acc)["assignee"] == "kida"
+    assert se.find_opportunity(data, opp)["assignee"] == "sato"
+    se.set_assignee(data, opp, "")  # clear
+    assert se.find_opportunity(data, opp)["assignee"] == ""
+
+
+def test_set_assignee_unknown_target():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.set_assignee(data, "opp-99", "kida")
+    with pytest.raises(ValueError):
+        se.set_assignee(data, "xxx-1", "kida")
+
+
+# --- ms-106 fb3: Nurturing (継続関係の業務) on Account -----------------------
+
+def test_nurturing_add_nested_under_account():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    nid = se.nurturing_add(data, acc, "年賀状を送る", deadline="2026-12-25",
+                           created_at="T0")
+    assert nid == "nrt-1"
+    nurt = se.find_account(data, acc)["nurturings"]
+    assert nurt == [{"id": "nrt-1", "description": "年賀状を送る",
+                     "deadline": "2026-12-25", "status": "todo",
+                     "who_has_the_ball": se.BALL_SELF, "source": "",
+                     "created_at": "T0"}]
+
+
+def test_nurturing_add_requires_account_and_desc():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.nurturing_add(data, "acc-99", "x")
+    acc = se.account_add(data, "Globex")
+    with pytest.raises(ValueError):
+        se.nurturing_add(data, acc, "   ")
+
+
+def test_nurturing_ids_are_account_global():
+    data = _fresh()
+    a1 = se.account_add(data, "A")
+    a2 = se.account_add(data, "B")
+    assert se.nurturing_add(data, a1, "x") == "nrt-1"
+    assert se.nurturing_add(data, a2, "y") == "nrt-2"
+
+
+# --- ms-106 fb3 / e-3350: 顧客フェーズ ← 商談フェーズ の連動 -----------------
+
+def test_derive_account_phase_lead_when_no_or_prep_only_opps():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    assert se.derive_account_phase(data, acc) == "リード"  # no opps
+    se.opportunity_add(data, "Deal", account_id=acc)  # 商談準備 entry
+    assert se.derive_account_phase(data, acc) == "リード"
+
+
+def test_account_auto_advances_up_on_opportunity_progress():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    opp = se.opportunity_add(data, "Deal", account_id=acc, created_at="T0")
+    assert se.find_account(data, acc)["phase"] == "リード"
+    se.phase_set(data, opp, "提案準備", at="T1")
+    assert se.find_account(data, acc)["phase"] == "未成約顧客"
+    se.phase_set(data, opp, "成約", at="T2")
+    assert se.find_account(data, acc)["phase"] == "成約顧客"
+
+
+def test_account_phase_never_auto_downgrades():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    won = se.opportunity_add(data, "Won deal", account_id=acc, created_at="T0")
+    se.phase_set(data, won, "成約", at="T1")
+    assert se.find_account(data, acc)["phase"] == "成約顧客"
+    # a brand-new lead-stage deal must not pull the customer back to リード
+    fresh = se.opportunity_add(data, "New deal", account_id=acc, created_at="T2")
+    se.phase_set(data, fresh, "商談準備", at="T3")
+    assert se.find_account(data, acc)["phase"] == "成約顧客"
+
+
+def test_lost_deal_marks_account_as_prospect():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    opp = se.opportunity_add(data, "Deal", account_id=acc, created_at="T0")
+    se.phase_set(data, opp, "提案準備", at="T1")
+    se.phase_set(data, opp, "失注", at="T2")
+    assert se.find_account(data, acc)["phase"] == "未成約顧客"
+
+
+def test_account_auto_advance_records_history_note():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    opp = se.opportunity_add(data, "Deal", account_id=acc, created_at="T0")
+    se.phase_set(data, opp, "提案準備", at="T1")
+    hist = se.find_account(data, acc)["phase_history"]
+    assert hist[-1]["phase"] == "未成約顧客"
+    assert "自動昇格" in hist[-1]["note"]
+
+
+# --- ms-106 fb4: 商談金額 / フェーズ成約率 / 見込み売上 / メンバー目標 --------
+
+def test_seed_phase_probabilities():
+    data = _fresh()
+    probs = {p["name"]: p.get("probability") for p in data["opportunity_phases"]}
+    assert probs["商談準備"] == 10 and probs["提案準備"] == 20
+    assert probs["先方検討中"] == 40 and probs["合意済み"] == 80
+    assert probs["成約"] == 100 and probs["失注"] == 0 and probs["不成立"] == 0
+
+
+def test_set_opportunity_amount():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    se.set_opportunity_amount(data, opp, 1500000)
+    assert se.find_opportunity(data, opp)["goal_amount"] == 1500000
+    with pytest.raises(ValueError):
+        se.set_opportunity_amount(data, "opp-99", 1)
+
+
+def test_set_phase_probability():
+    data = _fresh()
+    se.set_phase_probability(data, "商談準備", 15)
+    assert se._find_phase_def(data["opportunity_phases"], "商談準備")["probability"] == 15
+    with pytest.raises(ValueError):
+        se.set_phase_probability(data, "存在しない", 10)
+
+
+def test_weighted_pipeline_total_and_per_assignee():
+    data = _fresh()
+    a = se.account_add(data, "A")
+    o1 = se.opportunity_add(data, "D1", account_id=a, assignee="kida")  # 商談準備 10%
+    se.set_opportunity_amount(data, o1, 1000000)
+    o2 = se.opportunity_add(data, "D2", account_id=a, assignee="kida")
+    se.phase_set(data, o2, "提案準備")  # 20%
+    se.set_opportunity_amount(data, o2, 2000000)
+    o3 = se.opportunity_add(data, "D3", account_id=a, assignee="sato")
+    se.phase_set(data, o3, "合意済み")  # 80%
+    se.set_opportunity_amount(data, o3, 5000000)
+    assert se.weighted_pipeline(data) == 4500000.0
+    assert se.weighted_pipeline(data, assignee="kida") == 500000.0
+    assert se.weighted_pipeline(data, assignee="sato") == 4000000.0
+
+
+def test_weighted_pipeline_excludes_terminal_and_amountless():
+    data = _fresh()
+    o = se.opportunity_add(data, "Won", assignee="kida")
+    se.set_opportunity_amount(data, o, 9000000)
+    se.phase_set(data, o, "成約")  # terminal → excluded
+    noamt = se.opportunity_add(data, "NoAmount", assignee="kida")  # 商談準備, no amount
+    se.phase_set(data, noamt, "提案準備")
+    assert se.weighted_pipeline(data) == 0.0
+
+
+def test_sales_targets_sparse_set_get_clear():
+    data = _fresh()
+    assert se.get_sales_target(data, "kida") is None  # unset member
+    se.set_sales_target(data, "kida", 3000000)
+    assert se.get_sales_target(data, "kida") == 3000000
+    assert se.get_sales_target(data, "sato") is None  # member added later, no entry
+    se.set_sales_target(data, "kida", None)  # clear
+    assert se.get_sales_target(data, "kida") is None
+    with pytest.raises(ValueError):
+        se.set_sales_target(data, "  ", 1)

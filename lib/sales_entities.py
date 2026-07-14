@@ -58,22 +58,22 @@ DEFAULT_ACCOUNT_PHASES = [
 # 出発点) であり enforce される定数ではない。
 DEFAULT_OPPORTUNITY_PHASES = [
     # 進行フェーズ: allowed_terminals = ここから宣言できる決着。
-    {"name": "商談準備", "probability": None, "terminal": False,
+    {"name": "商談準備", "probability": 10, "terminal": False,
      "allowed_terminals": ["不成立"],
      "goal": "初回面談の実施により、商談として進行可能な状態にする",
      "activity_template": ["初回面談を打診", "初回面談を実施", "提案の方向性を確定"],
      "transition_signal": "calendar_ended", "default_lead": 7},
-    {"name": "提案準備", "probability": None, "terminal": False,
+    {"name": "提案準備", "probability": 20, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "企画を作り提案を終え、先方が検討フェーズに入った状態にする",
      "activity_template": ["提案面談を打診", "提案面談を実施", "提案内容を準備"],
      "transition_signal": "calendar_ended", "default_lead": 14},
-    {"name": "先方検討中", "probability": None, "terminal": False,
+    {"name": "先方検討中", "probability": 40, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "先方の実行合意を取る",
      "activity_template": ["合意確認日を確定（必要なら面談設定）", "合意の確認を取る"],
      "transition_signal": "manual", "default_lead": 14},
-    {"name": "合意済み", "probability": None, "terminal": False,
+    {"name": "合意済み", "probability": 80, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "契約を締結する",
      "activity_template": ["契約書を送付", "締結"],
@@ -351,12 +351,18 @@ def find_opportunity(data: dict, opportunity_id: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
-                created_at: str = "") -> str:
+                assignee: str = "", created_at: str = "") -> str:
     """Append a new Account (対象・継続) and return its id.
 
     Account carries a lifecycle ``phase`` (リード → 未成約顧客 → 成約顧客) with
     an append-only ``phase_history``, plus the ``health`` relationship-value
     slot (SPEC §0 reified 候補, 枠のみ). It never reaches a terminal (継続).
+
+    ``assignee`` (担当ユーザー) is a target-class-generic slot mirroring
+    Milestone.assignee (ms-81); it names the project member who owns this
+    account. ``nurturings`` は 商談 (Opportunity) を持たない継続関係に対する
+    ナーチャリング業務 (業務・事前計画型) を Account に直接ぶら下げる入れ物
+    (ms-106 fb3、Opportunity.activities の継続 target 版)。
     """
     if not name or not name.strip():
         raise ValueError("Account name is required")
@@ -369,7 +375,9 @@ def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
         "phase": initial_phase,
         "phase_history": [{"phase": initial_phase, "at": created_at, "note": "initial"}],
         "health": health,
+        "assignee": assignee,
         "contacts": [],
+        "nurturings": [],
         "created_at": created_at,
     })
     return acc_id
@@ -388,6 +396,39 @@ def contact_add(data: dict, account_id: str, name: str, *,
     return contact
 
 
+def account_rename(data: dict, account_id: str, new_name: str) -> dict:
+    """Rename an Account (対象・継続). Returns the mutated account. The name is
+    a plain label (not history-tracked like phase), so this is an in-place edit."""
+    acc = find_account(data, account_id)
+    if acc is None:
+        raise ValueError(f"Account not found: {account_id}")
+    if not new_name or not new_name.strip():
+        raise ValueError("Account name is required")
+    acc["name"] = new_name.strip()
+    return acc
+
+
+def set_assignee(data: dict, target_id: str, assignee: str) -> dict:
+    """Set the 担当ユーザー (assignee) on an Opportunity (``opp-``) or Account
+    (``acc-``), dispatched by id prefix. Target-class-generic mutation that
+    mirrors Milestone.assignee (ms-81); ms-109 folds all three into one engine.
+
+    ``assignee`` is a free string (project member id / name); "" clears it.
+    Returns the mutated target.
+    """
+    if target_id.startswith("opp-"):
+        target = find_opportunity(data, target_id)
+    elif target_id.startswith("acc-"):
+        target = find_account(data, target_id)
+    else:
+        raise ValueError(
+            f"target id must start with 'opp-' or 'acc-', got {target_id!r}")
+    if target is None:
+        raise ValueError(f"Target not found: {target_id}")
+    target["assignee"] = assignee
+    return target
+
+
 # ---------------------------------------------------------------------------
 # Opportunity (対象・有限) — 参照 association → Account
 # ---------------------------------------------------------------------------
@@ -395,7 +436,8 @@ def contact_add(data: dict, account_id: str, name: str, *,
 def opportunity_add(data: dict, title: str, *, account_id: str = "",
                     phase: str = "", goal_amount=None, probability=None,
                     deadline: str = "", who_has_the_ball: str = BALL_SELF,
-                    transition_date: str = "", created_at: str = "") -> str:
+                    transition_date: str = "", assignee: str = "",
+                    created_at: str = "") -> str:
     """Append a new Opportunity (対象・有限) and return its id.
 
     ``account_id`` is a 参照 association (N:1 → Account) validated when given.
@@ -425,6 +467,7 @@ def opportunity_add(data: dict, title: str, *, account_id: str = "",
         "probability": probability,
         "deadline": deadline,
         "who_has_the_ball": who_has_the_ball,
+        "assignee": assignee,
         "transition_date": transition_date or "",
         "transition_date_history": (
             [{"transition_date": transition_date, "at": created_at, "note": "initial"}]
@@ -458,6 +501,11 @@ def phase_set(data: dict, target_id: str, new_phase: str, *,
         opp.setdefault("phase_history", []).append(record)
         opp["phase"] = new_phase
         opp["status"] = _opportunity_status_for_phase(data, new_phase)
+        # ms-106 fb3 / e-3350 — project the linked Account's lifecycle phase from
+        # its opportunities' furthest progress. Advance UP only (a customer who
+        # once closed stays 成約顧客); humans can still override via acc- phase_set.
+        if opp.get("account_id"):
+            _auto_advance_account_phase(data, opp["account_id"], at=at)
         return record
     if target_id.startswith("acc-"):
         acc = find_account(data, target_id)
@@ -469,6 +517,176 @@ def phase_set(data: dict, target_id: str, new_phase: str, *,
         return record
     raise ValueError(
         f"target id must start with 'opp-' or 'acc-', got {target_id!r}")
+
+
+# ---------------------------------------------------------------------------
+# Account phase projection (顧客フェーズ ← 商談フェーズ, ms-106 fb3 / e-3350)
+# ---------------------------------------------------------------------------
+# The account lifecycle (リード → 未成約顧客 → 成約顧客) is NOT independent state:
+# it is a *rollup* of the furthest progress across the account's opportunities.
+# This is sales-adapter-specific (the vocabulary + mapping are 営業固有); the
+# generic form ("継続 target の phase を子の有限 target 群の rollup で更新する")
+# is what ms-109 hoists into the target-class engine.
+
+def _opp_progress_signals(data: dict, opp: dict) -> tuple:
+    """Return ``(won, lost, max_nonterminal_idx)`` an opportunity ever reached,
+    scanning its ``phase_history`` + current phase. ``max_nonterminal_idx`` is
+    the furthest funnel position (0-based among non-terminal phases), -1 if
+    none. 不成立 (abandoned) counts as neither won nor lost — the seed only
+    allows it from the 商談準備 entry, so it is not "progress"."""
+    phases = opportunity_phases(data)
+    nonterm = [p.get("name") for p in phases if not p.get("terminal")]
+    won = lost = False
+    max_nt = -1
+    names = [e.get("phase") for e in opp.get("phase_history", [])]
+    if opp.get("phase"):
+        names.append(opp.get("phase"))
+    for name in names:
+        pdef = _find_phase_def(phases, name)
+        if pdef and pdef.get("terminal"):
+            outcome = pdef.get("outcome")
+            if outcome == "won":
+                won = True
+            elif outcome == "lost":
+                lost = True
+        elif name in nonterm:
+            max_nt = max(max_nt, nonterm.index(name))
+    return won, lost, max_nt
+
+
+def _account_phase_idx(data: dict, phase_name: str) -> int:
+    aps = account_phases(data) or DEFAULT_ACCOUNT_PHASES
+    for i, p in enumerate(aps):
+        if p.get("name") == phase_name:
+            return i
+    return -1
+
+
+def derive_account_phase(data: dict, account_id: str) -> Optional[str]:
+    """Project an Account's lifecycle phase from its opportunities' furthest
+    progress. Mapping is by *position* in ``account_phases`` so it stays
+    config-generic (works even if a company renames its stages):
+
+      idx 0 (リード):     商談なし / 全商談が商談準備以下 (未進行)
+      idx 1 (未成約顧客): 提案準備以降へ進んだ or 失注した商談が1つ以上、成約なし
+      idx 2 (成約顧客):   成約 (won) 商談が1つ以上
+
+    Returns the account phase NAME (clamped to the configured vocabulary), or
+    ``None`` when no account phases are configured.
+    """
+    aps = account_phases(data) or DEFAULT_ACCOUNT_PHASES
+    if not aps:
+        return None
+    won = lost = progressed = False
+    for o in data.get("opportunities", []):
+        if o.get("account_id") != account_id:
+            continue
+        w, l, max_nt = _opp_progress_signals(data, o)
+        won = won or w
+        lost = lost or l
+        if max_nt >= 1:
+            progressed = True
+    idx = 2 if won else (1 if (lost or progressed) else 0)
+    idx = min(idx, len(aps) - 1)
+    return aps[idx].get("name")
+
+
+def _auto_advance_account_phase(data: dict, account_id: str, *, at: str = "") -> Optional[dict]:
+    """Advance the account's stored phase to its derived value, but only UP the
+    funnel (never auto-downgrade). Records the transition in ``phase_history``
+    with an auto-note so the projection stays auditable. Returns the appended
+    record, or ``None`` if no advance happened."""
+    acc = find_account(data, account_id)
+    if acc is None:
+        return None
+    derived = derive_account_phase(data, account_id)
+    if not derived:
+        return None
+    cur_idx = _account_phase_idx(data, acc.get("phase"))
+    new_idx = _account_phase_idx(data, derived)
+    if new_idx > cur_idx:
+        record = {"phase": derived, "at": at,
+                  "note": "商談の進行により自動昇格 (derive_account_phase)"}
+        acc.setdefault("phase_history", []).append(record)
+        acc["phase"] = derived
+        return record
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Pipeline value & member targets (見込み売上 / メンバー別 目標売上, ms-106 fb4)
+# ---------------------------------------------------------------------------
+# 見込み売上 (weighted pipeline) = Σ over OPEN (non-terminal) opportunities of
+# goal_amount × phase.probability. Member targets (目標売上) live in a *sparse*
+# project-level map ``sales_targets`` {member: amount}: a member added later
+# simply has no entry (= 目標未設定) until one is set — additive, no migration.
+# This is L3 (sales-adapter) config; ms-109 generalizes it to "a target carries
+# a quota / KPI".
+
+def set_opportunity_amount(data: dict, opp_id: str, amount) -> dict:
+    """Set an opportunity's goal_amount (商談金額). ``amount`` is a number (円)
+    or None to clear. Returns the mutated opportunity."""
+    opp = find_opportunity(data, opp_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opp_id}")
+    opp["goal_amount"] = amount
+    return opp
+
+
+def set_phase_probability(data: dict, phase_name: str, probability) -> dict:
+    """Set a per-company win probability (成約率, 0-100) on an opportunity phase
+    definition. Config-level edit (per-company funnel tuning). Returns the def."""
+    pdef = _find_phase_def(opportunity_phases(data), phase_name)
+    if pdef is None:
+        raise ValueError(f"Opportunity phase not found: {phase_name}")
+    pdef["probability"] = probability
+    return pdef
+
+
+def sales_targets(data: dict) -> dict:
+    return data.get("sales_targets", {})
+
+
+def set_sales_target(data: dict, member: str, amount) -> dict:
+    """Set a member's 目標売上 (sales quota) in the sparse ``sales_targets`` map.
+    ``amount`` None removes the entry (= 目標未設定 に戻す). Returns the map."""
+    if not member or not str(member).strip():
+        raise ValueError("member is required")
+    key = str(member).strip()
+    targets = data.setdefault("sales_targets", {})
+    if amount is None:
+        targets.pop(key, None)
+    else:
+        targets[key] = amount
+    return targets
+
+
+def get_sales_target(data: dict, member: str):
+    return sales_targets(data).get(member)
+
+
+def _phase_probability(data: dict, phase_name: str) -> float:
+    pdef = _find_phase_def(opportunity_phases(data), phase_name)
+    p = pdef.get("probability") if pdef else None
+    return float(p) if isinstance(p, (int, float)) else 0.0
+
+
+def weighted_pipeline(data: dict, *, assignee: Optional[str] = None) -> float:
+    """見込み売上 = Σ (goal_amount × phase.probability / 100) over OPEN
+    (non-terminal) opportunities. ``assignee`` scopes it to one member's
+    pipeline. Deals with no amount or no phase probability contribute 0."""
+    phases = opportunity_phases(data)
+    term = {p.get("name") for p in phases if p.get("terminal")}
+    total = 0.0
+    for o in data.get("opportunities", []):
+        if o.get("phase") in term:
+            continue
+        if assignee is not None and (o.get("assignee") or "") != assignee:
+            continue
+        amt = o.get("goal_amount")
+        if isinstance(amt, (int, float)):
+            total += amt * _phase_probability(data, o.get("phase")) / 100.0
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -776,6 +994,44 @@ def activity_add(data: dict, opportunity_id: str, description: str, *,
         "created_at": created_at,
     })
     return act_id
+
+
+def next_nurturing_id(data: dict) -> str:
+    ids = []
+    for acc in data.get("accounts", []):
+        ids.extend(n.get("id", "") for n in acc.get("nurturings", []))
+    return _next_prefixed_id(ids, "nrt-")
+
+
+def nurturing_add(data: dict, account_id: str, description: str, *,
+                  deadline: str = "", who_has_the_ball: str = BALL_SELF,
+                  source: str = "", created_at: str = "") -> str:
+    """Append a Nurturing (継続関係の業務・事前計画型) under an Account, return
+    its id. The continuous-target twin of ``activity_add``: an Opportunity
+    carries 業務 as *activities*, an Account carries them as *nurturings*
+    (ms-106 fb3). Same shape (description / deadline / status / ball / source)
+    so the target-class engine (ms-109) can treat both uniformly; the naming
+    just reflects that account work is 関係維持 (nurturing), not deal advance.
+    """
+    acc = find_account(data, account_id)
+    if acc is None:
+        raise ValueError(f"Account not found: {account_id}")
+    if not description or not description.strip():
+        raise ValueError("Nurturing description is required")
+    if who_has_the_ball not in VALID_BALL:
+        raise ValueError(
+            f"who_has_the_ball must be one of {sorted(VALID_BALL)}, got {who_has_the_ball!r}")
+    nrt_id = next_nurturing_id(data)
+    acc.setdefault("nurturings", []).append({
+        "id": nrt_id,
+        "description": description.strip(),
+        "deadline": deadline,
+        "status": "todo",
+        "who_has_the_ball": who_has_the_ball,
+        "source": source,
+        "created_at": created_at,
+    })
+    return nrt_id
 
 
 def instantiate_phase_activities(data: dict, target_id: str, *,
