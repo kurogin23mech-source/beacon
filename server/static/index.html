@@ -3106,10 +3106,11 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .acc-card { display:flex; align-items:center; gap:10px; padding:11px 13px; cursor:pointer; }
 .acc-card:hover { background:var(--bg-hover); }
 .acc-body { padding:4px 13px 12px; border-top:1px solid var(--border-subtle); }
-.acc-detail-btn { margin-left:auto; background:var(--bg-raised); color:var(--text-secondary); border:1px solid var(--border); border-radius:5px; padding:4px 12px; font-family:var(--font-mono); font-size:11px; cursor:pointer; }
-.acc-detail-btn:hover { color:var(--accent); border-color:var(--accent-dim); }
+/* 明確に押せる見た目 (accent 縁 + hover 塗り、phase タグと差別化) */
+.acc-detail-btn { margin-left:auto; background:transparent; color:var(--accent); border:1px solid var(--accent-dim); border-radius:5px; padding:4px 12px; font-family:var(--font-mono); font-size:11px; cursor:pointer; }
+.acc-detail-btn:hover { background:var(--accent-glow); }
 .acc-name { color:var(--text-primary); font-size:14px; flex:1; }
-.acc-phase { font-size:11px; color:var(--text-secondary); border:1px solid var(--border); border-radius:4px; padding:2px 7px; }
+.acc-phase { font-size:11px; color:var(--text-dim); background:var(--bg-raised); border-radius:10px; padding:2px 9px; }  /* 受動ラベル (押せない見た目) */
 .acc-sub { font-size:11px; color:var(--text-dim); }
 .sales-modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:400; animation:fade-overlay .15s ease; }
 .sales-modal { background:var(--bg-surface); border:1px solid var(--border); border-radius:8px; width:min(520px,92vw); max-height:85vh; overflow:auto; padding:20px 22px; }
@@ -3208,6 +3209,7 @@ let state = {
   hiddenPhases: new Set(), // ms-106 fb2: 商談フィルタで隠している phase (dev の hiddenStatuses と同型)
   oppFilterInit: false,    // ms-106 fb2: 初回 render で terminal phase を default 非表示に seed したか
   oppAssignee: '',         // ms-106 fb3: 担当ユーザーでの絞り込み ('' = 全員)
+  salesMembers: null,      // ms-106 fb7: /members payload (project payload に無いので別取得)
   lastUpdate: null,
   // e-1273: Beacon server version (from /health). Shown in footer so the
   // running release can be cross-referenced to screen state. "" until fetched.
@@ -4383,7 +4385,7 @@ function _salesAcctChip(p, o) {
 // assignee(email) を member の表示名に解決。member でなければ生値。
 function _salesMemberLabel(p, email) {
   if (!email) return '';
-  const m = _salesProjectMembers(p).find(x => x.email === email);
+  const m = _salesProjectMembers().find(x => x.email === email);
   return m ? (m.name || m.email) : email;
 }
 function _salesOwnerChip(p, o) {
@@ -4496,21 +4498,21 @@ function _oppVisible(o) {
 // ms-106 fb7 (案A): 担当リストは *プロジェクトメンバー* (招待済ユーザー) 由来。
 // owner_email + members[].email を出所にし、無関係な文字列は出さない。
 // assignee 値は member の email。現在ユーザー (state.auth.email) は「(自分)」表示。
-function _salesProjectMembers(p) {
+function _salesProjectMembers() {
+  const sm = state.salesMembers;
+  if (!sm) return [];  // 未取得 (project payload には無い、/members 到着待ち)
   const seen = new Set(), out = [];
   const push = (email, name) => {
     const e = (email || '').trim();
     if (e && !seen.has(e)) { seen.add(e); out.push({ email: e, name: (name || '').trim() }); }
   };
-  if (p.owner_email) push(p.owner_email, p.owner_display_name);
-  (p.members || []).forEach(m => push(m.email, m.display_name));
+  if (sm.owner_email) push(sm.owner_email, sm.owner_display_name);
+  (sm.members || []).forEach(m => push(m.email, m.display_name));
   return out;
 }
-function _renderAssigneeBar(opps) {
-  const p = state.project;
-  const members = _salesProjectMembers(p);
-  const anyAssigned = (opps || []).some(o => o.assignee);
-  if (members.length < 2 && !anyAssigned) return '';  // 1人・未割当なら絞り込み不要
+function _renderAssigneeBar(_items) {
+  const members = _salesProjectMembers();
+  if (members.length < 2) return '';  // 案Y: メンバー2人未満は絞り込み不要 → 非表示
   const cur = state.oppAssignee || '';
   const meEmail = (state.auth && state.auth.email) || '';
   const chip = (val, label) =>
@@ -4633,7 +4635,7 @@ function renderAccountsSection() {
         ${a.assignee ? `<span class="opp-owner">${esc(_salesMemberLabel(p, a.assignee))}</span>` : ''}
         <span class="acc-sub">Contact ${nc}・ナーチャリング ${nn}</span>
         ${a.phase ? `<span class="acc-phase">${esc(a.phase)}</span>` : ''}
-        <button class="acc-detail-btn" data-action="open-account" data-acc-id="${esc(a.id)}">詳細</button>
+        <button class="acc-detail-btn" data-action="open-account" data-acc-id="${esc(a.id)}">詳細 ›</button>
       </div>${body}
     </div>`;
   }).join('');
@@ -9365,6 +9367,12 @@ async function menuSelectProject(projectId) {
 async function selectProject(projectId) {
   state.projectId = projectId;
   state.activeTab = 'dashboard';
+  // ms-106 fb7: メンバー一覧は project payload に無い (別 endpoint)。担当絞り込みを
+  // メンバー由来にするため並行取得して state にキャッシュ、到着したら再描画。
+  state.salesMembers = null;
+  dataSource.loadProjectMembers(projectId)
+    .then(m => { state.salesMembers = m; if (state.project) render(); })
+    .catch(() => {});
   // ms-43 / e-2220 — どの経路 (URL bootstrap / initial single-project /
   // settings 起点 / menu 起点) で project が選ばれても、 開いている Trek
   // detail は必ず閉じる。 これが無いと別 project へ切り替えた直後でも前
