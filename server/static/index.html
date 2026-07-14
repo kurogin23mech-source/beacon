@@ -3148,6 +3148,8 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .pipeline-sub { color:var(--text-dim); font-size:0.85em; }
 .pipeline-bar { height:5px; background:var(--bg-raised); border-radius:3px; margin-top:5px; overflow:hidden; max-width:240px; }
 .pipeline-bar-fill { height:100%; background:var(--accent); border-radius:3px; transition:width .3s; }
+.project-info-item.pipeline-row { flex-basis:100%; }   /* Objective の下に改行して配置 */
+.opp-weighted { font-size:11px; color:var(--accent); }
 /* --- ms-106 fb1: opportunity detail modal --- */
 .sm-detail { display:flex; flex-direction:column; gap:7px; margin:4px 0 6px; }
 .sm-drow { display:flex; gap:10px; font-size:12px; }
@@ -4381,6 +4383,19 @@ function _salesOwnerChip(o) {
 function _salesYen(n) {
   return '¥' + Math.round(n || 0).toLocaleString('ja-JP');
 }
+// ms-106 fb4: 商談個別の見込み売上 = 金額 × その商談フェーズの成約率。
+// open (non-terminal) かつ金額ありのときだけ数値、それ以外は null。
+function _salesOppWeighted(p, o) {
+  const d = (p.opportunity_phases || []).find(x => x.name === o.phase);
+  if (!d || d.terminal) return null;
+  if (typeof o.goal_amount !== 'number') return null;
+  const prob = typeof d.probability === 'number' ? d.probability : 0;
+  return o.goal_amount * prob / 100;
+}
+function _salesOppWeightedChip(p, o) {
+  const w = _salesOppWeighted(p, o);
+  return w != null ? `<span class="opp-weighted">見込 ${_salesYen(w)}</span>` : '';
+}
 function _salesWeightedPipeline(p, assignee) {
   const phases = p.opportunity_phases || [];
   const term = new Set(phases.filter(x => x.terminal).map(x => x.name));
@@ -4417,7 +4432,8 @@ function _renderSalesPipelineInfo(p) {
     valueHtml = _salesYen(pipeline);
   }
   const label = member ? `見込み売上 (${esc(member)})` : '見込み売上';
-  return `<div class="project-info-item"><span class="project-info-label">${label}</span><span class="project-info-value">${valueHtml}</span></div>`;
+  // pipeline-row = flex-basis:100% → Objective の次の行に改行して配置。
+  return `<div class="project-info-item pipeline-row"><span class="project-info-label">${label}</span><span class="project-info-value">${valueHtml}</span></div>`;
 }
 function renderOpportunitiesSection() {
   const p = state.project;
@@ -4494,7 +4510,7 @@ function _renderOppKanban(p) {
       return `<div class="kb-card" data-action="open-opp" data-opp-id="${esc(o.id)}">
         <div class="kb-card-title">${esc(o.title || '(no title)')}</div>
         <div class="kb-card-meta">${_salesAcctChip(p, o)}${_salesOwnerChip(o)}</div>
-        <div class="kb-card-meta">${badge}${_salesActsBadge(o)}</div>
+        <div class="kb-card-meta">${badge}${_salesActsBadge(o)}${_salesOppWeightedChip(p, o)}</div>
       </div>`;
     }).join('') || '<div class="kb-none">—</div>';
     cols += `<div class="kb-col ${ph.terminal ? 'terminal' : ''}">
@@ -4529,6 +4545,7 @@ function _renderOppList(p) {
         <span class="opp-ltitle">${esc(o.title || '(no title)')}${acct ? ` <span class="opp-acct">${esc(acct)}</span>` : ''}${_salesOwnerChip(o)}</span>
         ${term.has(o.phase) ? '' : _salesTransitionBadge(st, o.transition_date)}
         ${_salesActsBadge(o)}
+        ${_salesOppWeightedChip(p, o)}
       </div>${body}
     </div>`;
   }).join('');
@@ -4632,15 +4649,18 @@ function renderOpportunityModal(oppId) {
   const term = new Set(phases.filter(x => x.terminal).map(x => x.name));
   const acct = _salesAccountName(p, o.account_id);
   const row = (k, v) => v ? `<div class="sm-drow"><span class="sm-dkey">${k}</span><span class="sm-dval">${v}</span></div>` : '';
-  const money = (o.goal_amount != null && o.goal_amount !== '') ? esc(String(o.goal_amount)) : '';
-  const prob = (o.probability != null && o.probability !== '') ? esc(String(o.probability)) + '%' : '';
+  const money = (typeof o.goal_amount === 'number') ? _salesYen(o.goal_amount) : '';
+  const phaseDef = phases.find(x => x.name === o.phase);
+  const phaseProb = phaseDef && typeof phaseDef.probability === 'number' ? phaseDef.probability : null;
+  const wtd = _salesOppWeighted(p, o);
   const detail = `<div class="sm-detail">
     ${row('顧客', acct ? esc(acct) : '<span class="text-dim">未紐付け</span>')}
     ${row('担当', o.assignee ? esc(o.assignee) : '')}
     ${row('フェーズ', _salesPhaseBadge(o.phase, phases))}
     ${term.has(o.phase) ? '' : row('遷移日', _salesTransitionBadge(st, o.transition_date) || '—')}
-    ${row('目標金額', money)}
-    ${row('確度', prob)}
+    ${row('金額', money)}
+    ${row('成約率', phaseProb != null ? phaseProb + '%' : '')}
+    ${row('見込み', wtd != null ? `<span class="opp-weighted">${_salesYen(wtd)}</span>` : '')}
     ${row('期日', o.deadline ? esc(o.deadline) : '')}
     ${row('ステータス', esc(o.status || ''))}
   </div>`;
