@@ -11574,13 +11574,21 @@ def cmd_cloud_push():
         print("Not logged in. Run: beacon auth login")
         sys.exit(1)
 
+    # Capture the cloud/local state BEFORE _ensure_cloud_config() materializes
+    # cloud.json. e-1861 (ms-61) switched _is_cloud_mode() to key on cloud.json
+    # existence; since _ensure_cloud_config() writes cloud.json, checking
+    # _is_cloud_mode() *after* it always returns True and made the first-run
+    # migration abort with "already in cloud mode" (and silently skipped the
+    # initial docs/retros push below). first_run distinguishes the genuine
+    # local→cloud migration from a re-run after cut-over.
+    first_run = not _is_cloud_mode()
     config = _ensure_cloud_config()
     project_id = config["project_id"]
     api_url = _resolve_active_api_url()
 
-    # In cloud mode, CLI writes go directly to cloud — local project.json is stale.
-    # Pushing it would overwrite cloud state and cause data loss.
-    if _is_cloud_mode():
+    # A re-run in cloud mode would overwrite cloud state with a stale local
+    # project.json (data loss). The first-run migration is allowed through.
+    if not first_run:
         if not force:
             print("Error: already in cloud mode.")
             print("")
@@ -11624,8 +11632,10 @@ def cmd_cloud_push():
 
     # Push local documents and retros only on the initial push (local → cloud).
     # In cloud mode they are managed via the API; pushing local files would
-    # silently overwrite any edits made through the Web UI or CLI.
-    if not _is_cloud_mode():
+    # silently overwrite any edits made through the Web UI or CLI. Uses
+    # first_run (captured before cloud.json was materialized) — _is_cloud_mode()
+    # here is now always True, which previously skipped this block entirely.
+    if first_run:
         docs_dir = os.path.join(os.path.dirname(get_project_file()) or ".beacon", "documents")
         if os.path.isdir(docs_dir):
             import glob
