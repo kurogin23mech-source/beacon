@@ -21003,6 +21003,12 @@ def cmd_opportunity_judge():
                 data, opp_id, next_transition_date=arg, note=note, at=at)
             save_project(data)
             print(f"{opp_id} advance → phase {res['phase']}")
+            # e-3270: フェーズ固有の固定アンカー活動を自動起票 (あれば)。
+            for aid in res.get("activities", []):
+                act = next((a for a in sales_entities.find_opportunity(data, opp_id).get("activities", [])
+                            if a["id"] == aid), None)
+                if act:
+                    print(f"  + 活動 {aid}: {act['description']} (テンプレ)")
             if arg:
                 print(f"  次の遷移日: {arg}")
             elif sales_entities.needs_transition_date(data, opp_id):

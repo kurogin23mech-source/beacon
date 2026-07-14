@@ -593,7 +593,12 @@ def advance_transition(data: dict, target_id: str, *,
     phase_set(data, target_id, nxt, note=note, at=at)
     set_transition_date(data, target_id, next_transition_date,
                         note=note or "advance", at=at)
-    return {"phase": nxt, "transition_date": opp.get("transition_date", "")}
+    # e-3270: フェーズ入場でそのフェーズの固定アンカー活動を起こす (提案準備→提案
+    # 作成 等)。goal からの文脈生成は Skill 層が上乗せする (LLM 必要)。共通アンカー
+    # 「遷移日を置く」は needs_transition_date 促しで担い、ここでは重複させない。
+    created = instantiate_phase_activities(data, target_id, at=at)
+    return {"phase": nxt, "transition_date": opp.get("transition_date", ""),
+            "activities": created}
 
 
 def retry_transition(data: dict, target_id: str, new_transition_date: str, *,
@@ -684,8 +689,12 @@ def opportunities_awaiting_judgement(data: dict, today: str) -> list:
 
 def activity_add(data: dict, opportunity_id: str, description: str, *,
                  deadline: str = "", who_has_the_ball: str = BALL_SELF,
-                 created_at: str = "") -> str:
-    """Append an Activity (業務・事前計画型) under an Opportunity, return its id."""
+                 source: str = "", created_at: str = "") -> str:
+    """Append an Activity (業務・事前計画型) under an Opportunity, return its id.
+
+    ``source`` records where the activity came from (e.g. ``"template-anchor"``
+    for a phase's fixed step, ``"ai"`` for an AI-generated one, "" for a hand
+    -added one) so the origin stays auditable."""
     opp = find_opportunity(data, opportunity_id)
     if opp is None:
         raise ValueError(f"Opportunity not found: {opportunity_id}")
@@ -701,9 +710,40 @@ def activity_add(data: dict, opportunity_id: str, description: str, *,
         "deadline": deadline,
         "status": "todo",
         "who_has_the_ball": who_has_the_ball,
+        "source": source,
         "created_at": created_at,
     })
     return act_id
+
+
+def instantiate_phase_activities(data: dict, target_id: str, *,
+                                 at: str = "") -> list:
+    """Create the current phase's fixed anchor activities on a target (e-3270,
+    SPEC §4). Anchors come from the phase's ``activity_template`` — the company's
+    must-do steps for that phase (提案準備→提案作成, 合意済み→契約書送付 等). Returns
+    the created activity ids.
+
+    Idempotent by description: an anchor whose text already exists as a
+    non-done activity on this target is skipped, so re-entering a phase (or
+    calling twice) never duplicates. This layer is deterministic — the AI's
+    goal-driven activities (contextual, per-deal) are added on top by the Skill.
+    """
+    opp = find_opportunity(data, target_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {target_id}")
+    pdef = _find_phase_def(opportunity_phases(data), opp.get("phase", ""))
+    anchors = phase_activity_template(pdef)
+    existing = {(_norm(a.get("description")))
+                for a in opp.get("activities", []) if a.get("status") != "done"}
+    created = []
+    for desc in anchors:
+        text = str(desc).strip()
+        if not text or _norm(text) in existing:
+            continue
+        created.append(activity_add(data, target_id, text,
+                                    source="template-anchor", created_at=at))
+        existing.add(_norm(text))
+    return created
 
 
 # ---------------------------------------------------------------------------

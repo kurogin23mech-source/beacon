@@ -730,3 +730,58 @@ def test_overdue_persists_until_judged():
     # retry (place a new future date) clears the overdue state.
     se.retry_transition(data, opp, "2026-08-20", at="T1")
     assert se.transition_status(data, opp, "2026-08-10") == se.TRANSITION_SCHEDULED
+
+
+# --- phase-entry activity anchors (e-3270) ---------------------------------
+
+def _with_anchor(data, phase="提案準備", anchors=None):
+    pdef = se._find_phase_def(data["opportunity_phases"], phase)
+    pdef["activity_template"] = anchors if anchors is not None else ["提案書を作成する"]
+
+
+def test_advance_instantiates_next_phase_anchor_activities():
+    data = _fresh()
+    _with_anchor(data, "提案準備", ["提案書を作成する", "見積を用意する"])
+    opp = se.opportunity_add(data, "Deal", phase="商談準備", transition_date="2026-08-01", created_at="T0")
+    res = se.advance_transition(data, opp, at="T1")  # → 提案準備
+    assert res["phase"] == "提案準備"
+    acts = se.find_opportunity(data, opp)["activities"]
+    assert [a["description"] for a in acts] == ["提案書を作成する", "見積を用意する"]
+    assert all(a["source"] == "template-anchor" and a["status"] == "todo" for a in acts)
+    assert res["activities"] == [a["id"] for a in acts]
+
+
+def test_advance_into_phase_without_template_creates_nothing():
+    data = _fresh()  # seed carries no activity_template
+    opp = se.opportunity_add(data, "Deal", phase="商談準備", transition_date="2026-08-01", created_at="T0")
+    se.advance_transition(data, opp, at="T1")
+    assert se.find_opportunity(data, opp)["activities"] == []
+
+
+def test_instantiate_phase_activities_is_idempotent_by_description():
+    data = _fresh()
+    _with_anchor(data, "商談準備", ["面談を打診する"])
+    opp = se.opportunity_add(data, "Deal", phase="商談準備", created_at="T0")
+    first = se.instantiate_phase_activities(data, opp, at="T1")
+    second = se.instantiate_phase_activities(data, opp, at="T2")  # same anchor already present
+    assert len(first) == 1 and second == []
+    assert len(se.find_opportunity(data, opp)["activities"]) == 1
+
+
+def test_instantiate_skips_anchor_matching_existing_but_readds_if_done():
+    data = _fresh()
+    _with_anchor(data, "商談準備", ["面談を打診する"])
+    opp = se.opportunity_add(data, "Deal", phase="商談準備", created_at="T0")
+    aid = se.instantiate_phase_activities(data, opp, at="T1")[0]
+    # mark it done → the anchor is eligible to be re-created next entry.
+    se.find_opportunity(data, opp)["activities"][0]["status"] = "done"
+    again = se.instantiate_phase_activities(data, opp, at="T2")
+    assert len(again) == 1 and again[0] != aid
+
+
+def test_activity_add_records_source():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", created_at="T0")
+    a = se.activity_add(data, opp, "手動タスク", source="ai", created_at="T1")
+    act = se.find_opportunity(data, opp)["activities"][0]
+    assert act["source"] == "ai"
