@@ -3127,17 +3127,13 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .pp-won      { color:var(--done); }         /* 成約 = done */
 .pp-lost     { color:var(--observing); }    /* 失注 = observing */
 .pp-abandoned{ color:var(--cancelled); }    /* 不成立 = cancelled */
-/* --- ms-106 fb1: 商談タブ controls (filter + terminal toggle) --- */
-.opp-controls { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:2px 0 14px; }
-.opp-filter { background:var(--bg-surface); color:var(--text-dim); border:1px solid var(--border); border-radius:14px; padding:4px 12px; font-family:var(--font-mono); font-size:12px; cursor:pointer; }
-.opp-filter:hover { color:var(--text-secondary); }
-.opp-filter.active { background:var(--bg-hover); color:var(--accent); border-color:var(--accent-dim); }
-.opp-filter-label { font-size:11px; color:var(--text-dim); margin-right:2px; align-self:center; }
-.kb-toggle { background:var(--bg-surface); color:var(--text-dim); border:1px solid var(--border); border-radius:6px; padding:5px 12px; font-family:var(--font-mono); font-size:12px; cursor:pointer; margin-left:auto; }
-.kb-toggle.on { color:var(--accent); border-color:var(--accent-dim); }
 /* --- ms-106 fb1: account name chip on opp card --- */
 .opp-acct { font-size:11px; color:var(--info); }
 .opp-acct::before { content:"🏢 "; }
+/* --- ms-106 fb2: 期日超過 (overdue activity) の赤ハイライト --- */
+.opp-acts.overdue { color:var(--cancelled); }
+.act-due.overdue { color:var(--cancelled); font-weight:600; }
+.act-dot.overdue { background:var(--cancelled); }
 /* --- ms-106 fb1: opportunity detail modal --- */
 .sm-detail { display:flex; flex-direction:column; gap:7px; margin:4px 0 6px; }
 .sm-drow { display:flex; gap:10px; font-size:12px; }
@@ -3188,8 +3184,8 @@ let state = {
   oppView: 'kanban',       // ms-106: sales 商談タブの view — 'kanban' | 'list'
   openAccountId: null,     // ms-106: sales Account モーダルで開いている acc-id
   openOppId: null,         // ms-106 fb1: 商談モーダルで開いている opp-id (カンバン click)
-  oppPhaseFilter: '',      // ms-106 fb1: 商談の phase 絞り込み ('' = 全て)
-  showTerminalCols: false, // ms-106 fb1: カンバンの決着(成約/失注/不成立)列の表示切替
+  hiddenPhases: new Set(), // ms-106 fb2: 商談フィルタで隠している phase (dev の hiddenStatuses と同型)
+  oppFilterInit: false,    // ms-106 fb2: 初回 render で terminal phase を default 非表示に seed したか
   lastUpdate: null,
   // e-1273: Beacon server version (from /health). Shown in footer so the
   // running release can be cross-referenced to screen state. "" until fetched.
@@ -4320,6 +4316,19 @@ function _salesOppStatusOf(o, phases, today) {
 function _salesOpenActs(o) {
   return (o.activities || []).filter(a => a.status !== 'done').length;
 }
+// ms-106 fb2: 期日超過 = 未完了 かつ deadline が今日より前。カードや活動行を赤く出す。
+function _salesActOverdue(a, today) {
+  return a.status !== 'done' && !!a.deadline && a.deadline < today;
+}
+function _salesOverdueActs(o) {
+  const today = _salesTodayISO();
+  return (o.activities || []).filter(a => _salesActOverdue(a, today)).length;
+}
+// 活動カウントのバッジ。期日超過が 1 件でもあれば赤 + ⚠N を添える。
+function _salesActsBadge(o) {
+  const od = _salesOverdueActs(o);
+  return `<span class="opp-acts${od ? ' overdue' : ''}">活動 ${_salesOpenActs(o)}${od ? ` ⚠${od}` : ''}</span>`;
+}
 // ms-106 fb1: map a phase → color class. Target-class generic: derives from the
 // phase def's terminal/outcome + funnel position, never hardcoded 語彙.
 //   準備 (funnel entry, non-terminal[0]) → prep(todo) / それ以降 → active
@@ -4355,42 +4364,53 @@ function renderOpportunitiesSection() {
   if (!opps.length) {
     return `<section class="sales-board fade-in"><div class="sales-empty">商談がありません。<code>beacon opportunity add "&lt;タイトル&gt;"</code> で追加できます。</div></section>`;
   }
-  const view = state.oppView === 'list' ? 'list' : 'kanban';
   const phases = p.opportunity_phases || [];
+  // fb2: 初回 render のみ terminal (成約/失注/不成立) を default 非表示に seed。
+  // 以降は user の filter 操作を尊重 (dev の hiddenStatuses=['cancelled'] と同じ default 型)。
+  if (!state.oppFilterInit) {
+    state.hiddenPhases = new Set(phases.filter(x => x.terminal).map(x => x.name));
+    state.oppFilterInit = true;
+  }
+  const view = state.oppView === 'list' ? 'list' : 'kanban';
   const toggle = `<div class="opp-view-toggle">
       <button class="${view === 'list' ? 'active' : ''}" data-action="opp-view" data-view="list">リスト</button>
       <button class="${view === 'kanban' ? 'active' : ''}" data-action="opp-view" data-view="kanban">カンバン</button>
     </div>`;
-  const filter = _renderOppFilter(phases);
-  const termBtn = view === 'kanban'
-    ? `<button class="kb-toggle ${state.showTerminalCols ? 'on' : ''}" data-action="toggle-terminal-cols">${state.showTerminalCols ? '決着を隠す' : '決着(成約/失注/不成立)を表示'}</button>`
-    : '';
-  const controls = `<div class="opp-controls">${toggle}${filter}${termBtn}</div>`;
   const body = view === 'list' ? _renderOppList(p) : _renderOppKanban(p);
-  return `<section class="sales-board fade-in">${controls}${body}</section>`;
+  return `<section class="sales-board fade-in">${toggle}${_renderOppFilterBar(phases)}${body}</section>`;
 }
-// ms-106 fb1: phase filter chips (colored by phase category). '' = すべて.
-function _renderOppFilter(phases) {
-  const cur = state.oppPhaseFilter || '';
-  const chip = (name, label, extraCls) =>
-    `<button class="opp-filter ${extraCls || ''} ${cur === name ? 'active' : ''}" data-action="opp-filter" data-phase="${esc(name)}">${esc(label)}</button>`;
-  const chips = [chip('', 'すべて', '')]
-    .concat((phases || []).map(ph => chip(ph.name, ph.name, _salesPhaseClass(ph.name, phases))));
-  return `<span class="opp-filter-label">絞り込み</span>${chips.join('')}`;
+// ms-106 fb2: 開発 Beacon の Milestones フィルタ (filter-bar) と同じ挙動・レイアウト。
+// phase 別の hide toggle + all クリアで全表示。phase → 色は status filter の
+// f-* class に対応付けて、同じ CSS (.filter-btn.on.f-*) を再利用する。
+function _salesPhaseFilterClass(phaseName, phases) {
+  const c = _salesPhaseClass(phaseName, phases);
+  return { 'pp-prep': 'f-todo', 'pp-active': 'f-active', 'pp-won': 'f-done',
+           'pp-lost': 'f-observing', 'pp-abandoned': 'f-cancelled' }[c] || '';
 }
+function _renderOppFilterBar(phases) {
+  const allOn = state.hiddenPhases.size === 0;
+  const btns = (phases || []).map(ph => {
+    const isOn = !state.hiddenPhases.has(ph.name);
+    return `<button class="filter-btn ${isOn ? 'on' : 'off'} ${_salesPhaseFilterClass(ph.name, phases)}" data-action="opp-filter-phase" data-phase="${esc(ph.name)}">${esc(ph.name)}</button>`;
+  }).join('');
+  return `<div class="filter-bar">
+      <button class="filter-btn f-all ${allOn ? 'on' : 'off'}" data-action="opp-filter-all">all</button>
+      ${btns}
+    </div>`;
+}
+function _oppVisible(o) { return !state.hiddenPhases.has(o.phase); }
 function _renderOppKanban(p) {
   const phases = p.opportunity_phases || [];
   const opps = p.opportunities || [];
   const today = _salesTodayISO();
-  const filter = state.oppPhaseFilter || '';
   const byPhase = {};
   opps.forEach(o => { (byPhase[o.phase] = byPhase[o.phase] || []).push(o); });
   let cols = '';
   phases.forEach(ph => {
-    // Column visibility: with a filter, show only that column; otherwise show
-    // non-terminal always and terminal (成約/失注/不成立) only when toggled on.
-    if (filter) { if (ph.name !== filter) return; }
-    else if (ph.terminal && !state.showTerminalCols) return;
+    // Column visibility mirrors the dev Milestones filter: a phase hidden in the
+    // filter-bar (state.hiddenPhases) drops its whole column (terminal phases are
+    // default-hidden until the user turns them on).
+    if (state.hiddenPhases.has(ph.name)) return;
     const list = byPhase[ph.name] || [];
     const goal = ph.terminal ? (ph.outcome ? `決着 → ${esc(ph.outcome)}` : '決着') : (ph.goal ? esc(ph.goal) : '');
     const cards = list.map(o => {
@@ -4399,7 +4419,7 @@ function _renderOppKanban(p) {
       return `<div class="kb-card" data-action="open-opp" data-opp-id="${esc(o.id)}">
         <div class="kb-card-title">${esc(o.title || '(no title)')}</div>
         ${_salesAcctChip(p, o)}
-        <div class="kb-card-meta">${badge}<span class="opp-acts">活動 ${_salesOpenActs(o)}</span></div>
+        <div class="kb-card-meta">${badge}${_salesActsBadge(o)}</div>
       </div>`;
     }).join('') || '<div class="kb-none">—</div>';
     cols += `<div class="kb-col ${ph.terminal ? 'terminal' : ''}">
@@ -4416,9 +4436,8 @@ function _renderOppList(p) {
   const today = _salesTodayISO();
   const term = new Set(phases.filter(x => x.terminal).map(x => x.name));
   // active (non-terminal) first, then settled; mirrors the milestone list feel.
-  const filter = state.oppPhaseFilter || '';
   const opps = (p.opportunities || []).slice()
-    .filter(o => !filter || o.phase === filter)
+    .filter(_oppVisible)
     .sort((a, b) => {
       const at = term.has(a.phase) ? 1 : 0, bt = term.has(b.phase) ? 1 : 0;
       return at - bt;
@@ -4434,7 +4453,7 @@ function _renderOppList(p) {
         ${_salesPhaseBadge(o.phase, phases)}
         <span class="opp-ltitle">${esc(o.title || '(no title)')}${acct ? ` <span class="opp-acct">${esc(acct)}</span>` : ''}</span>
         ${term.has(o.phase) ? '' : _salesTransitionBadge(st, o.transition_date)}
-        <span class="opp-acts">活動 ${_salesOpenActs(o)}</span>
+        ${_salesActsBadge(o)}
       </div>${body}
     </div>`;
   }).join('');
@@ -4443,11 +4462,15 @@ function _renderOppList(p) {
 function _renderOppActivities(o) {
   const acts = o.activities || [];
   if (!acts.length) return `<div class="act-empty">活動はまだありません。</div>`;
+  const today = _salesTodayISO();
   const rows = acts.map(a => {
     const done = a.status === 'done';
-    const due = a.deadline ? `<span class="act-due">期日 ${esc(a.deadline)}</span>` : '';
+    const overdue = _salesActOverdue(a, today);
+    const due = a.deadline
+      ? `<span class="act-due${overdue ? ' overdue' : ''}">${overdue ? '⚠ 期日超過 ' : '期日 '}${esc(a.deadline)}</span>`
+      : '';
     return `<div class="act-row">
-      <span class="act-dot ${done ? 'done' : ''}"></span>
+      <span class="act-dot ${done ? 'done' : ''}${overdue ? ' overdue' : ''}"></span>
       <span class="act-desc ${done ? 'done' : ''}">${esc(a.description || '')}</span>
       ${due}
     </div>`;
@@ -8341,15 +8364,18 @@ function handleCommonAction(action, el) {
       state.openAccountId = el.dataset.accId; render(); return true;
     case 'close-account':
       state.openAccountId = null; render(); return true;
-    // ms-106 fb1: opportunity modal + phase filter + kanban terminal toggle
+    // ms-106 fb1/fb2: opportunity modal + phase filter (dev の filter-bar と同型)
     case 'open-opp':
       state.openOppId = el.dataset.oppId; render(); return true;
     case 'close-opp':
       state.openOppId = null; render(); return true;
-    case 'toggle-terminal-cols':
-      state.showTerminalCols = !state.showTerminalCols; render(); return true;
-    case 'opp-filter':
-      state.oppPhaseFilter = el.dataset.phase || ''; render(); return true;
+    case 'opp-filter-phase': {
+      const ph = el.dataset.phase || '';
+      state.hiddenPhases.has(ph) ? state.hiddenPhases.delete(ph) : state.hiddenPhases.add(ph);
+      render(); return true;
+    }
+    case 'opp-filter-all':
+      state.hiddenPhases.clear(); render(); return true;
     case 'sales-modal-noop':
       return true;  // swallow clicks inside the modal (don't close via backdrop)
     case 'set-session-view':
