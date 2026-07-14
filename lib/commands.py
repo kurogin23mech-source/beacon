@@ -16416,12 +16416,16 @@ def cmd_help_json():
         {"command": "beacon task update <entry-id>", "flags": ["--ms <ms-id>", "--description <text>", "--status <s>", "--detail <text>", "--motivation <text>", "--acceptance-criteria <text>", "--behavior <text>", "--priority <p>"], "description": "Update task fields (description / status / detail / motivation / acceptance_criteria / behavior / priority) or move to another milestone"},
         {"command": "beacon log [message]", "flags": ["--prepare", "--finalize", "-m <ms-id>", "--progress <n>", "--summary <text>"], "description": "Record HEAD commit to active milestone"},
         # ms-106 ② — sales job-template entities (profession=sales projects)
-        {"command": "beacon account add <name>", "flags": ["--health <text>"], "description": "Add a sales account (顧客; 対象・継続)"},
+        {"command": "beacon account add <name>", "flags": ["--health <text>", "--assignee <user>"], "description": "Add a sales account (顧客; 対象・継続)"},
         {"command": "beacon account list", "flags": ["--json"], "description": "List sales accounts and their contacts"},
         {"command": "beacon account contact <acc-id> <name>", "flags": ["--role <text>", "--email <text>", "--phone <text>"], "description": "Add a contact (担当者) nested under an account"},
         {"command": "beacon account phase <acc-id> <phase>", "flags": ["--note <text>"], "description": "Declare an account lifecycle phase transition (append-only)"},
+        {"command": "beacon account rename <acc-id> <new-name>", "flags": [], "description": "Rename an account (顧客名の変更)"},
+        {"command": "beacon account assign <acc-id> <user>", "flags": [], "description": "Set the 担当ユーザー (assignee) on an account"},
+        {"command": "beacon account nurturing <acc-id> <desc>", "flags": ["--deadline <date>", "--ball self|counterpart"], "description": "Add a nurturing (継続関係の業務; 商談なし顧客向け)"},
         {"command": "beacon account delete <acc-id>", "flags": ["--force"], "description": "Delete an account (--force orphans referencing opportunities)"},
-        {"command": "beacon opportunity add <title>", "flags": ["--account <acc-id>", "--phase <p>", "--goal <n>", "--probability <n>", "--deadline <date>", "--ball self|counterpart"], "description": "Add a sales opportunity (商談; 対象・有限)"},
+        {"command": "beacon opportunity add <title>", "flags": ["--account <acc-id>", "--phase <p>", "--goal <n>", "--probability <n>", "--deadline <date>", "--ball self|counterpart", "--assignee <user>"], "description": "Add a sales opportunity (商談; 対象・有限)"},
+        {"command": "beacon opportunity assign <opp-id> <user>", "flags": [], "description": "Set the 担当ユーザー (assignee) on an opportunity"},
         {"command": "beacon opportunity list", "flags": ["--json"], "description": "List sales opportunities with phase / status / account"},
         {"command": "beacon opportunity phase <opp-id> <phase>", "flags": ["--note <text>"], "description": "Declare a phase transition (append-only phase_history; master=人間)"},
         {"command": "beacon opportunity transition-date <opp-id> <YYYY-MM-DD>", "flags": ["--note <text>", "--clear"], "description": "Set the 遷移日 (judgement date) for the current phase (append-only transition_date_history)"},
@@ -20625,16 +20629,64 @@ def cmd_account_add():
     import sales_entities
     name = os.environ.get("BEACON_ACCOUNT_NAME", "")
     health = os.environ.get("BEACON_ACCOUNT_HEALTH", "")
+    assignee = os.environ.get("BEACON_ACCOUNT_ASSIGNEE", "")
     data = load_project()
     _require_sales_project(data)
     try:
         acc_id = sales_entities.account_add(data, name, health=health,
+                                            assignee=assignee,
                                             created_at=core._now_iso())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     save_project(data)
     print(f"Added account {acc_id}: {name}")
+
+
+def cmd_account_rename():
+    import sales_entities
+    account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
+    new_name = os.environ.get("BEACON_ACCOUNT_NAME", "")
+    data = load_project()
+    try:
+        sales_entities.account_rename(data, account_id, new_name)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Renamed {account_id} → {new_name.strip()}")
+
+
+def cmd_account_assign():
+    import sales_entities
+    account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
+    assignee = os.environ.get("BEACON_ASSIGNEE", "")
+    data = load_project()
+    try:
+        sales_entities.set_assignee(data, account_id, assignee)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Assigned {account_id} → {assignee or '(cleared)'}")
+
+
+def cmd_account_nurturing():
+    import sales_entities
+    account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
+    description = os.environ.get("BEACON_NURTURING_DESC", "")
+    deadline = os.environ.get("BEACON_NURTURING_DEADLINE", "")
+    ball = os.environ.get("BEACON_NURTURING_BALL", "") or sales_entities.BALL_SELF
+    data = load_project()
+    try:
+        nrt_id = sales_entities.nurturing_add(
+            data, account_id, description, deadline=deadline,
+            who_has_the_ball=ball, created_at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Added nurturing {nrt_id} to {account_id}: {description}")
 
 
 def cmd_account_list():
@@ -20873,6 +20925,7 @@ def cmd_opportunity_add():
     ball = os.environ.get("BEACON_OPP_BALL", "") or sales_entities.BALL_SELF
     goal_raw = os.environ.get("BEACON_OPP_GOAL", "")
     prob_raw = os.environ.get("BEACON_OPP_PROBABILITY", "")
+    assignee = os.environ.get("BEACON_OPP_ASSIGNEE", "")
     goal_amount = _parse_number(goal_raw, "--goal")
     probability = _parse_number(prob_raw, "--probability")
     data = load_project()
@@ -20881,7 +20934,7 @@ def cmd_opportunity_add():
         opp_id = sales_entities.opportunity_add(
             data, title, account_id=account_id, phase=phase,
             goal_amount=goal_amount, probability=probability,
-            deadline=deadline, who_has_the_ball=ball,
+            deadline=deadline, who_has_the_ball=ball, assignee=assignee,
             created_at=core._now_iso())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -20892,6 +20945,20 @@ def cmd_opportunity_add():
     if account_id:
         print(f"  account: {account_id}")
     print(f"  phase: {opp.get('phase', '') if opp else phase}")
+
+
+def cmd_opportunity_assign():
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    assignee = os.environ.get("BEACON_ASSIGNEE", "")
+    data = load_project()
+    try:
+        sales_entities.set_assignee(data, opp_id, assignee)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Assigned {opp_id} → {assignee or '(cleared)'}")
 
 
 def _parse_number(raw: str, flag: str):
@@ -21207,10 +21274,14 @@ if __name__ == "__main__":
         "account_list": cmd_account_list,
         "account_contact": cmd_account_contact,
         "account_phase": cmd_account_phase,
+        "account_rename": cmd_account_rename,
+        "account_assign": cmd_account_assign,
+        "account_nurturing": cmd_account_nurturing,
         "account_delete": cmd_account_delete,
         "opportunity_add": cmd_opportunity_add,
         "opportunity_list": cmd_opportunity_list,
         "opportunity_phase": cmd_opportunity_phase,
+        "opportunity_assign": cmd_opportunity_assign,
         "opportunity_transition_date": cmd_opportunity_transition_date,
         "opportunity_judge": cmd_opportunity_judge,
         "opportunity_due": cmd_opportunity_due,

@@ -3132,6 +3132,16 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .opp-acts.overdue { color:var(--cancelled); }
 .act-due.overdue { color:var(--cancelled); font-weight:600; }
 .act-dot.overdue { background:var(--cancelled); }
+/* --- ms-106 fb3: 担当ユーザー — owner chip + assignee 絞り込み --- */
+.opp-owner { font-size:11px; color:var(--text-secondary); }
+.opp-owner::before { content:"👤 "; }
+.assignee-bar { display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:10px 0 0; }
+.assignee-bar-label { font-size:11px; color:var(--text-dim); margin-right:2px; }
+.assignee-chip { font-family:var(--font-mono); font-size:0.75rem; padding:4px 12px; border:1px solid var(--border-subtle); border-radius:14px; background:transparent; color:var(--text-dim); cursor:pointer; }
+.assignee-chip:hover { color:var(--text-secondary); }
+.assignee-chip.active { color:var(--accent); border-color:var(--accent-dim); background:var(--accent-glow); }
+/* --- ms-106 fb3: Nurturing (継続関係の業務) — 見た目は activity と同じ --- */
+.sm-nurturing { margin-top:4px; }
 /* --- ms-106 fb1: opportunity detail modal --- */
 .sm-detail { display:flex; flex-direction:column; gap:7px; margin:4px 0 6px; }
 .sm-drow { display:flex; gap:10px; font-size:12px; }
@@ -4846,6 +4856,9 @@ function _salesAcctChip(p, o) {
   const n = _salesAccountName(p, o.account_id);
   return n ? `<span class="opp-acct">${esc(n)}</span>` : '';
 }
+function _salesOwnerChip(o) {
+  return o.assignee ? `<span class="opp-owner">${esc(o.assignee)}</span>` : '';
+}
 function renderOpportunitiesSection() {
   const p = state.project;
   const opps = p.opportunities || [];
@@ -4865,7 +4878,7 @@ function renderOpportunitiesSection() {
       <button class="${view === 'kanban' ? 'active' : ''}" data-action="opp-view" data-view="kanban">カンバン</button>
     </div>`;
   const body = view === 'list' ? _renderOppList(p) : _renderOppKanban(p);
-  return `<section class="sales-board fade-in">${toggle}${_renderOppFilterBar(phases)}${body}</section>`;
+  return `<section class="sales-board fade-in">${toggle}${_renderOppFilterBar(phases)}${_renderAssigneeBar(opps)}${body}</section>`;
 }
 // ms-106 fb2: 開発 Beacon の Milestones フィルタ (filter-bar) と同じ挙動・レイアウト。
 // phase 別の hide toggle + all クリアで全表示。phase → 色は status filter の
@@ -4886,13 +4899,27 @@ function _renderOppFilterBar(phases) {
       ${btns}
     </div>`;
 }
-function _oppVisible(o) { return !state.hiddenPhases.has(o.phase); }
+function _oppVisible(o) {
+  if (state.hiddenPhases.has(o.phase)) return false;
+  if (state.oppAssignee && (o.assignee || '') !== state.oppAssignee) return false;
+  return true;
+}
+// ms-106 fb3: 担当ユーザーでの絞り込みバー (検索とは別。営業が「自分の商談」を見る用)。
+// 商談に登場する assignee の distinct 集合 + すべて。単一選択。
+function _renderAssigneeBar(opps) {
+  const owners = [...new Set((opps || []).map(o => o.assignee).filter(Boolean))].sort();
+  if (!owners.length) return '';
+  const cur = state.oppAssignee || '';
+  const chip = (val, label) =>
+    `<button class="assignee-chip ${cur === val ? 'active' : ''}" data-action="opp-assignee" data-assignee="${esc(val)}">${esc(label)}</button>`;
+  return `<div class="assignee-bar"><span class="assignee-bar-label">担当</span>${chip('', 'すべて')}${owners.map(o => chip(o, o)).join('')}</div>`;
+}
 function _renderOppKanban(p) {
   const phases = p.opportunity_phases || [];
   const opps = p.opportunities || [];
   const today = _salesTodayISO();
   const byPhase = {};
-  opps.forEach(o => { (byPhase[o.phase] = byPhase[o.phase] || []).push(o); });
+  opps.forEach(o => { if (_oppVisible(o)) (byPhase[o.phase] = byPhase[o.phase] || []).push(o); });
   let cols = '';
   phases.forEach(ph => {
     // Column visibility mirrors the dev Milestones filter: a phase hidden in the
@@ -4906,7 +4933,7 @@ function _renderOppKanban(p) {
       const badge = ph.terminal ? '' : _salesTransitionBadge(st, o.transition_date);
       return `<div class="kb-card" data-action="open-opp" data-opp-id="${esc(o.id)}">
         <div class="kb-card-title">${esc(o.title || '(no title)')}</div>
-        ${_salesAcctChip(p, o)}
+        <div class="kb-card-meta">${_salesAcctChip(p, o)}${_salesOwnerChip(o)}</div>
         <div class="kb-card-meta">${badge}${_salesActsBadge(o)}</div>
       </div>`;
     }).join('') || '<div class="kb-none">—</div>';
@@ -4939,7 +4966,7 @@ function _renderOppList(p) {
     return `<div class="opp-lcard${expanded ? ' expanded' : ''}">
       <div class="opp-lhead" data-action="toggle-opp" data-opp-id="${esc(o.id)}">
         ${_salesPhaseBadge(o.phase, phases)}
-        <span class="opp-ltitle">${esc(o.title || '(no title)')}${acct ? ` <span class="opp-acct">${esc(acct)}</span>` : ''}</span>
+        <span class="opp-ltitle">${esc(o.title || '(no title)')}${acct ? ` <span class="opp-acct">${esc(acct)}</span>` : ''}${_salesOwnerChip(o)}</span>
         ${term.has(o.phase) ? '' : _salesTransitionBadge(st, o.transition_date)}
         ${_salesActsBadge(o)}
       </div>${body}
@@ -4947,11 +4974,11 @@ function _renderOppList(p) {
   }).join('');
   return `<div class="opp-list">${rows}</div>`;
 }
-function _renderOppActivities(o) {
-  const acts = o.activities || [];
-  if (!acts.length) return `<div class="act-empty">活動はまだありません。</div>`;
+// ms-106 fb3: shared row renderer for 業務・事前計画型 work items (Opportunity
+// の activity と Account の nurturing は同型)。期日超過は赤く出す。
+function _salesWorkRows(items) {
   const today = _salesTodayISO();
-  const rows = acts.map(a => {
+  return items.map(a => {
     const done = a.status === 'done';
     const overdue = _salesActOverdue(a, today);
     const due = a.deadline
@@ -4963,7 +4990,16 @@ function _renderOppActivities(o) {
       ${due}
     </div>`;
   }).join('');
-  return `<div class="opp-acts-head">活動 (${acts.length})</div>${rows}`;
+}
+function _renderOppActivities(o) {
+  const acts = o.activities || [];
+  if (!acts.length) return `<div class="act-empty">活動はまだありません。</div>`;
+  return `<div class="opp-acts-head">活動 (${acts.length})</div>${_salesWorkRows(acts)}`;
+}
+function _renderNurturings(a) {
+  const items = a.nurturings || [];
+  if (!items.length) return `<div class="act-empty">ナーチャリング業務はありません。</div>`;
+  return _salesWorkRows(items);
 }
 function renderAccountsSection() {
   const p = state.project;
@@ -5007,13 +5043,17 @@ function renderAccountModal(accId) {
     ? `<div class="sm-sec">${label} (${list.length})</div>${list.map(oppRow).join('')}`
     : `<div class="sm-sec">${label} (0)</div><div class="act-empty">なし</div>`;
   const phase = a.phase ? `<span>phase: ${esc(a.phase)}</span>` : '';
+  const owner = a.assignee ? `<span>担当: ${esc(a.assignee)}</span>` : '';
+  const nurturings = a.nurturings || [];
   return `<div class="sales-modal-bg" data-action="close-account">
     <div class="sales-modal" data-action="sales-modal-noop">
       <span class="sm-close" data-action="close-account">×</span>
       <div class="sm-head"><span class="sm-name">${esc(a.name || '(no name)')}</span></div>
-      <div class="sm-meta">${phase}</div>
+      <div class="sm-meta">${phase}${owner}</div>
       ${oppSection('現在の商談', current)}
       ${oppSection('過去の商談', past)}
+      <div class="sm-sec">ナーチャリング (${nurturings.length})</div>
+      <div class="sm-nurturing">${_renderNurturings(a)}</div>
       <div class="sm-sec">Contacts (${contacts.length})</div>
       ${contactHtml}
     </div>
@@ -5036,6 +5076,7 @@ function renderOpportunityModal(oppId) {
   const prob = (o.probability != null && o.probability !== '') ? esc(String(o.probability)) + '%' : '';
   const detail = `<div class="sm-detail">
     ${row('顧客', acct ? esc(acct) : '<span class="text-dim">未紐付け</span>')}
+    ${row('担当', o.assignee ? esc(o.assignee) : '')}
     ${row('フェーズ', _salesPhaseBadge(o.phase, phases))}
     ${term.has(o.phase) ? '' : row('遷移日', _salesTransitionBadge(st, o.transition_date) || '—')}
     ${row('目標金額', money)}
@@ -8444,6 +8485,8 @@ function handleCommonAction(action, el) {
     }
     case 'opp-filter-all':
       state.hiddenPhases.clear(); render(); return true;
+    case 'opp-assignee':
+      state.oppAssignee = el.dataset.assignee || ''; render(); return true;
     case 'sales-modal-noop':
       return true;  // swallow clicks inside the modal (don't close via backdrop)
     case 'set-session-view':

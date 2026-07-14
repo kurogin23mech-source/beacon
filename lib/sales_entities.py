@@ -396,6 +396,18 @@ def contact_add(data: dict, account_id: str, name: str, *,
     return contact
 
 
+def account_rename(data: dict, account_id: str, new_name: str) -> dict:
+    """Rename an Account (対象・継続). Returns the mutated account. The name is
+    a plain label (not history-tracked like phase), so this is an in-place edit."""
+    acc = find_account(data, account_id)
+    if acc is None:
+        raise ValueError(f"Account not found: {account_id}")
+    if not new_name or not new_name.strip():
+        raise ValueError("Account name is required")
+    acc["name"] = new_name.strip()
+    return acc
+
+
 def set_assignee(data: dict, target_id: str, assignee: str) -> dict:
     """Set the 担当ユーザー (assignee) on an Opportunity (``opp-``) or Account
     (``acc-``), dispatched by id prefix. Target-class-generic mutation that
