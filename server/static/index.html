@@ -3106,10 +3106,11 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .acc-card { display:flex; align-items:center; gap:10px; padding:11px 13px; cursor:pointer; }
 .acc-card:hover { background:var(--bg-hover); }
 .acc-body { padding:4px 13px 12px; border-top:1px solid var(--border-subtle); }
-.acc-detail-btn { margin-left:auto; background:var(--bg-raised); color:var(--text-secondary); border:1px solid var(--border); border-radius:5px; padding:4px 12px; font-family:var(--font-mono); font-size:11px; cursor:pointer; }
-.acc-detail-btn:hover { color:var(--accent); border-color:var(--accent-dim); }
+/* 明確に押せる見た目 (accent 縁 + hover 塗り、phase タグと差別化) */
+.acc-detail-btn { margin-left:auto; background:transparent; color:var(--accent); border:1px solid var(--accent-dim); border-radius:5px; padding:4px 12px; font-family:var(--font-mono); font-size:11px; cursor:pointer; }
+.acc-detail-btn:hover { background:var(--accent-glow); }
 .acc-name { color:var(--text-primary); font-size:14px; flex:1; }
-.acc-phase { font-size:11px; color:var(--text-secondary); border:1px solid var(--border); border-radius:4px; padding:2px 7px; }
+.acc-phase { font-size:11px; color:var(--text-dim); background:var(--bg-raised); border-radius:10px; padding:2px 9px; }  /* 受動ラベル (押せない見た目) */
 .acc-sub { font-size:11px; color:var(--text-dim); }
 .sales-modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:400; animation:fade-overlay .15s ease; }
 .sales-modal { background:var(--bg-surface); border:1px solid var(--border); border-radius:8px; width:min(520px,92vw); max-height:85vh; overflow:auto; padding:20px 22px; }
@@ -4634,7 +4635,7 @@ function renderAccountsSection() {
         ${a.assignee ? `<span class="opp-owner">${esc(_salesMemberLabel(p, a.assignee))}</span>` : ''}
         <span class="acc-sub">Contact ${nc}・ナーチャリング ${nn}</span>
         ${a.phase ? `<span class="acc-phase">${esc(a.phase)}</span>` : ''}
-        <button class="acc-detail-btn" data-action="open-account" data-acc-id="${esc(a.id)}">詳細</button>
+        <button class="acc-detail-btn" data-action="open-account" data-acc-id="${esc(a.id)}">詳細 ›</button>
       </div>${body}
     </div>`;
   }).join('');
