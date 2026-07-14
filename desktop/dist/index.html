@@ -4870,7 +4870,7 @@ function _salesAcctChip(p, o) {
 // assignee(email) を member の表示名に解決。member でなければ生値。
 function _salesMemberLabel(p, email) {
   if (!email) return '';
-  const m = _salesProjectMembers(p).find(x => x.email === email);
+  const m = _salesProjectMembers().find(x => x.email === email);
   return m ? (m.name || m.email) : email;
 }
 function _salesOwnerChip(p, o) {
@@ -4983,21 +4983,21 @@ function _oppVisible(o) {
 // ms-106 fb7 (案A): 担当リストは *プロジェクトメンバー* (招待済ユーザー) 由来。
 // owner_email + members[].email を出所にし、無関係な文字列は出さない。
 // assignee 値は member の email。現在ユーザー (state.auth.email) は「(自分)」表示。
-function _salesProjectMembers(p) {
+function _salesProjectMembers() {
+  const sm = state.salesMembers;
+  if (!sm) return [];  // 未取得 (project payload には無い、/members 到着待ち)
   const seen = new Set(), out = [];
   const push = (email, name) => {
     const e = (email || '').trim();
     if (e && !seen.has(e)) { seen.add(e); out.push({ email: e, name: (name || '').trim() }); }
   };
-  if (p.owner_email) push(p.owner_email, p.owner_display_name);
-  (p.members || []).forEach(m => push(m.email, m.display_name));
+  if (sm.owner_email) push(sm.owner_email, sm.owner_display_name);
+  (sm.members || []).forEach(m => push(m.email, m.display_name));
   return out;
 }
-function _renderAssigneeBar(opps) {
-  const p = state.project;
-  const members = _salesProjectMembers(p);
-  const anyAssigned = (opps || []).some(o => o.assignee);
-  if (members.length < 2 && !anyAssigned) return '';  // 1人・未割当なら絞り込み不要
+function _renderAssigneeBar(_items) {
+  const members = _salesProjectMembers();
+  if (members.length < 2) return '';  // 案Y: メンバー2人未満は絞り込み不要 → 非表示
   const cur = state.oppAssignee || '';
   const meEmail = (state.auth && state.auth.email) || '';
   const chip = (val, label) =>
