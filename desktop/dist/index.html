@@ -3164,6 +3164,14 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .comm-ball.self { color:var(--accent); background:var(--accent-glow); }
 .comm-ball.counterpart { color:var(--text-secondary); background:var(--bg-raised); }
 .comm-link { margin-left:8px; font-size:10px; color:var(--text-dim); white-space:nowrap; }
+/* --- e-3540/e-3541: activity/comm の型バッジ・ID・comm を活動配下にネスト --- */
+.work-item { padding:1px 0; }
+.comm-nested { margin-left:22px; padding-left:10px; border-left:2px solid var(--border-subtle); }
+.ent-type { flex:0 0 auto; font-size:9px; letter-spacing:.03em; padding:1px 6px; border-radius:9px; font-weight:600; white-space:nowrap; }
+.ent-type.act { color:var(--text-secondary); background:var(--bg-raised); }
+.ent-type.comm { color:var(--accent); background:var(--accent-glow); }
+.ent-id { flex:0 0 auto; font-size:10px; font-family:var(--font-mono, monospace); color:var(--text-dim); user-select:all; cursor:text; }
+.acts-sub { margin-left:8px; font-size:10px; color:var(--text-dim); font-weight:400; }
 /* --- ms-106 fb4: 見込み売上 / 目標進捗バー --- */
 .pipeline-sub { color:var(--text-dim); font-size:0.85em; }
 .pipeline-bar { height:5px; background:var(--bg-raised); border-radius:3px; margin-top:5px; overflow:hidden; max-width:240px; }
@@ -5070,7 +5078,7 @@ function _renderOppList(p) {
   const rows = opps.map(o => {
     const st = _salesOppStatusOf(o, phases, today);
     const expanded = state.expanded.has(o.id);
-    const body = expanded ? `<div class="opp-lbody">${_renderOppActivities(o)}</div>` : '';
+    const body = expanded ? `<div class="opp-lbody">${_renderOppActivities(o)}${_renderCommunications(o)}</div>` : '';
     const acct = _salesAccountName(p, o.account_id);
     return `<div class="opp-lcard${expanded ? ' expanded' : ''}">
       <div class="opp-lhead" data-action="toggle-opp" data-opp-id="${esc(o.id)}">
@@ -5086,18 +5094,28 @@ function _renderOppList(p) {
 }
 // ms-106 fb3: shared row renderer for 業務・事前計画型 work items (Opportunity
 // の activity と Account の nurturing は同型)。期日超過は赤く出す。
-function _salesWorkRows(items) {
+function _salesWorkRows(items, kind) {
   const today = _salesTodayISO();
+  const typeLabel = kind === 'nurturing' ? 'ナーチャリング' : '活動';
   return items.map(a => {
     const done = a.status === 'done';
     const overdue = _salesActOverdue(a, today);
     const due = a.deadline
       ? `<span class="act-due${overdue ? ' overdue' : ''}">${overdue ? '⚠ 期日超過 ' : '期日 '}${esc(a.deadline)}</span>`
       : '';
-    return `<div class="act-row">
-      <span class="act-dot ${done ? 'done' : ''}${overdue ? ' overdue' : ''}"></span>
-      <span class="act-desc ${done ? 'done' : ''}">${esc(a.description || '')}</span>
-      ${due}
+    // e-3541: a work item (act-/nrt-) shows the communications nested under it,
+    // so 「どの活動を果たした証跡か」 stays visible where it belongs (data model
+    // already nests them; we render to match instead of flattening).
+    const nested = _salesCommRows(_salesCommsOrdered(a), { nested: true });
+    return `<div class="work-item">
+      <div class="act-row">
+        <span class="act-dot ${done ? 'done' : ''}${overdue ? ' overdue' : ''}"></span>
+        <span class="ent-type act">${typeLabel}</span>
+        <span class="ent-id" title="${esc(a.id || '')}">${esc(a.id || '')}</span>
+        <span class="act-desc ${done ? 'done' : ''}">${esc(a.description || '')}</span>
+        ${due}
+      </div>
+      ${nested ? `<div class="comm-nested">${nested}</div>` : ''}
     </div>`;
   }).join('');
 }
@@ -5109,7 +5127,7 @@ function _renderOppActivities(o) {
 function _renderNurturings(a) {
   const items = a.nurturings || [];
   if (!items.length) return `<div class="act-empty">Nurturing はまだありません。</div>`;
-  return _salesWorkRows(items);
+  return _salesWorkRows(items, 'nurturing');
 }
 // ms-107 e-3432: Communication (証跡・事後記録型 = 営業の Commit). Activity が
 // 「予定」なのに対し、これは source を辿れる「事実」の追記ログ。oldest→newest
@@ -5155,6 +5173,9 @@ function _salesDeriveBall(target) {
 // commit→task resolves の営業版), falling back to the raw id.
 function _salesLinkedLabel(linkedId) {
   if (!linkedId) return '';
+  // Only work-item links (act-/nrt-) are meaningful here; a linked_id pointing
+  // at the deal/account container itself is not a "果たした予定", so show nothing.
+  if (linkedId.indexOf('act-') !== 0 && linkedId.indexOf('nrt-') !== 0) return '';
   const p = state.project || {};
   let desc = '';
   if (linkedId.indexOf('act-') === 0) {
@@ -5172,22 +5193,40 @@ function _salesLinkedLabel(linkedId) {
   const short = text.length > 20 ? text.slice(0, 20) + '…' : text;
   return `<span class="comm-link" title="${esc('この予定を果たした: ' + text)}">↳ ${esc(short)}</span>`;
 }
-function _salesCommRows(comms) {
+// e-3542 (UI half): make an existing email source-ref followable without
+// changing stored data. The skills store a message-id in source.ref; Gmail can
+// resolve it via an rfc822msgid search link. Only build one for an email ref
+// that looks like a message-id (contains '@'); a bare thread-id is left as text.
+// The proper stored permalink (source.url, with the right account index) is the
+// skill-side follow-up in e-3542.
+function _salesRefToHref(ref, channel) {
+  if (!ref) return '';
+  const ch = (channel || '').toLowerCase();
+  if ((ch === 'email' || ch === '') && ref.indexOf('@') !== -1) {
+    const id = ref.replace(/^<|>$/g, '');
+    return 'https://mail.google.com/mail/u/0/#search/' + encodeURIComponent('rfc822msgid:' + id);
+  }
+  return '';
+}
+function _salesCommRows(comms, opts) {
+  const nested = opts && opts.nested;
   return comms.map(c => {
     const inbound = c.direction === 'inbound';
     const arrow = inbound ? '←' : '→';
     const label = inbound ? '受信' : '送信';
     const src = c.source || {};
-    const href = src.url || '';
     const ref = src.ref || '';
-    const when = _salesCommTime(c);
+    const href = src.url || _salesRefToHref(ref, c.channel);
     const trace = href
-      ? `<a class="comm-src" href="${esc(href)}" target="_blank" rel="noopener">出典 ↗</a>`
+      ? `<a class="comm-src" href="${esc(href)}" target="_blank" rel="noopener" title="${esc(ref || href)}">出典 ↗</a>`
       : (ref ? `<span class="comm-src ref" title="${esc(ref)}">出典 ${esc(ref)}</span>` : '');
+    const when = _salesCommTime(c);
     return `<div class="comm-row ${inbound ? 'inbound' : 'outbound'}">
       <span class="comm-dir" title="${label}">${arrow}</span>
+      <span class="ent-type comm">やり取り</span>
+      <span class="ent-id" title="${esc(c.id || '')}">${esc(c.id || '')}</span>
       <span class="comm-ch">${esc(c.channel || 'other')}</span>
-      <span class="comm-summary">${esc(c.summary || '')}${_salesLinkedLabel(c.linked_id)}</span>
+      <span class="comm-summary">${esc(c.summary || '')}${nested ? '' : _salesLinkedLabel(c.linked_id)}</span>
       ${when ? `<span class="comm-when">${esc(_salesShortDate(when))}</span>` : ''}
       ${trace}
     </div>`;
@@ -5201,12 +5240,23 @@ function _salesShortDate(iso) {
   return m[2] ? `${m[1]} ${m[2]}` : m[1];
 }
 function _renderCommunications(target) {
-  const comms = _salesCommsOrdered(target);
-  if (!comms.length) return `<div class="act-empty">やり取り (Communication) はまだありません。</div>`;
+  // e-3541: communications that fulfilled a specific 活動/ナーチャリング now
+  // render nested under that work item (see _salesWorkRows). This section keeps
+  // the deal-level ball + total, and lists only the orphan communications that
+  // are attached to the deal/account directly (no linked work item).
+  const all = _salesCommsOrdered(target);
+  const orphans = _salesCommsOrdered({ communications: (target.communications || []) });
   const ball = _salesDeriveBall(target);
   const ballLabel = ball === 'self' ? '<span class="comm-ball self">ボール: 自分</span>'
     : ball === 'counterpart' ? '<span class="comm-ball counterpart">ボール: 相手</span>' : '';
-  return `<div class="opp-acts-head">やり取り (${comms.length})${ballLabel}</div>${_salesCommRows(comms)}`;
+  if (!all.length) {
+    return `<div class="opp-acts-head">やり取り (0)</div><div class="act-empty">やり取り (Communication) はまだありません。</div>`;
+  }
+  const head = `<div class="opp-acts-head">やり取り 総数 ${all.length}${ballLabel}<span class="acts-sub">活動に紐づかない ${orphans.length}</span></div>`;
+  const rows = orphans.length
+    ? _salesCommRows(orphans)
+    : `<div class="act-empty">すべて上の活動に紐づいています。</div>`;
+  return `${head}${rows}`;
 }
 function renderAccountsSection() {
   const p = state.project;
