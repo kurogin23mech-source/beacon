@@ -156,6 +156,33 @@ BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[メール送信済] 件名『<件名
 > v1 補足: 現状 activity は「予定 (todo)」型で記録される。送信済みを表す
 > 「起きた事実 (event)」型の記録は今後の精緻化対象 (description に [送信済] を明記して代替)。
 
+## Step 6.5: 証跡 (Communication) + 返信待ちなら watch を立てる (e-3432 / e-3437)
+
+送信は「実際に起きたやり取り」なので、事実の証跡 (Communication) としても残す。対象は
+その活動 (act-) にすると「どの予定を果たした送信か」まで辿れる (無ければ商談 opp-)。
+`--source-ref` に送信メールの message-id / thread-id を入れて出典を辿れるようにする:
+
+```bash
+BEACON_COMM_TARGET="<act-id または $OPP>" \
+  BEACON_COMM_SUMMARY="<送信内容の1行要約>" \
+  BEACON_COMM_DIRECTION="outbound" BEACON_COMM_CHANNEL="email" \
+  BEACON_COMM_SOURCE_REF="<message-id / thread-id>" \
+  python3 "$ROOT/lib/commands.py" communication_add
+```
+
+**このメールが返信を必要とする** (日程打診・確認依頼・見積送付後の返答待ち 等) なら、
+その活動に **watch を立てる** — 返信ウォッチャー (E, `/beacon-sales-reply-watch`) が
+hourly にこのスレッドを確認し、返信が来たら ball を自分に戻して通知する:
+
+```bash
+BEACON_WATCH_TARGET="<act-id>" BEACON_WATCH_CHANNEL="email" \
+  BEACON_WATCH_THREAD="<thread-id / message-id>" \
+  python3 "$ROOT/lib/commands.py" watch_set
+```
+
+返信不要の連絡 (お礼・案内のみ 等) では watch を立てない (無駄打ち防止)。返信が必要か
+どうかは送信内容から判断する (時間に敏感な打診・依頼 = watch 対象)。
+
 ## Step 7: 結果報告
 
 ユーザーに簡潔に報告:
