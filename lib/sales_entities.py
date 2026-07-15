@@ -1136,12 +1136,25 @@ KNOWN_COMM_CHANNELS = ("email", "slack", "meeting", "calendar", "phone",
 COMM_CHANNELS = KNOWN_COMM_CHANNELS
 
 
+def _gather_communications(target: dict) -> list:
+    """All communications of a target (opp/acc): its own target-level records
+    plus those nested under its work items (activities/nurturings). Insertion
+    order across the two levels is preserved for the stable-sort fallback in
+    ``communications_of``. e-3503."""
+    out = list((target or {}).get("communications", []) or [])
+    for child in (target or {}).get("activities", []) or []:
+        out.extend(child.get("communications", []) or [])
+    for child in (target or {}).get("nurturings", []) or []:
+        out.extend(child.get("communications", []) or [])
+    return out
+
+
 def next_communication_id(data: dict) -> str:
     ids = []
     for opp in data.get("opportunities", []):
-        ids.extend(c.get("id", "") for c in opp.get("communications", []))
+        ids.extend(c.get("id", "") for c in _gather_communications(opp))
     for acc in data.get("accounts", []):
-        ids.extend(c.get("id", "") for c in acc.get("communications", []))
+        ids.extend(c.get("id", "") for c in _gather_communications(acc))
     return _next_prefixed_id(ids, "comm-")
 
 
@@ -1308,11 +1321,13 @@ def communication_add(data: dict, target_id: str, summary: str, *,
     """Append a Communication (証跡・事後記録型) and return its id.
 
     ``target_id`` may be a target (opp-/acc-) or a planned work item
-    (act-/nrt-). Work items resolve to their parent deal/account as the storage
-    container and set ``linked_id`` to the item, so a communication can record
-    "this outbound email fulfilled that nurturing touch" — the sales twin of a
-    commit resolving a task, while still living under the target like a commit
-    lives under a milestone (resolve_communication_target).
+    (act-/nrt-). This mirrors the dev commit↔task model *including its nesting*
+    (ms-106 e-3503): a commit that resolves a task is stored **under that task**
+    (nested), and one that resolves nothing sits at milestone level. So here a
+    communication that fulfills an Activity/Nurturing is nested **under that
+    work item's own ``communications``**; one addressed to the deal/account
+    directly sits at the opp/acc level. ``linked_id`` still records which work
+    item it fulfilled, so the two grains stay traceable.
 
     ``direction`` (inbound/outbound) is required — it's what ball derivation and
     the reply-watcher (E) read. ``source`` is a free dict of trace pointers
@@ -1333,7 +1348,15 @@ def communication_add(data: dict, target_id: str, summary: str, *,
     # (messenger / line / 対面 …). Normalize only; empty → "other".
     ch = (channel or "").strip().lower() or "other"
     comm_id = next_communication_id(data)
-    container.setdefault("communications", []).append({
+    # e-3503 — nest under the fulfilled work item (act-/nrt-), else store at the
+    # target (opp/acc) level, mirroring commit-under-task vs commit-at-milestone.
+    if linked_id.startswith("act-"):
+        _, node = find_activity(data, linked_id)
+    elif linked_id.startswith("nrt-"):
+        _, node = find_nurturing(data, linked_id)
+    else:
+        node = container
+    node.setdefault("communications", []).append({
         "id": comm_id,
         "direction": direction,
         "channel": ch,
@@ -1351,8 +1374,13 @@ def communications_of(target: dict, *, linked_id: Optional[str] = None) -> list:
     Sort key is occurred_at, falling back to created_at then insertion order so
     records without a timestamp keep their append order (stable). Pass
     ``linked_id`` to keep only the communications that fulfilled that specific
-    Activity/Nurturing (= work-item grain view)."""
-    comms = (target or {}).get("communications", [])
+    Activity/Nurturing (= work-item grain view).
+
+    e-3503: gathers both the target-level records and those nested under the
+    target's work items (activities/nurturings), so the chronological log is
+    complete regardless of nesting. Old records stored flat at target level (pre
+    -nesting) are still included — read stays backward-compatible."""
+    comms = _gather_communications(target)
     if linked_id is not None:
         comms = [c for c in comms if c.get("linked_id") == linked_id]
 
