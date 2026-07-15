@@ -41,13 +41,6 @@ ROOT=$(beacon-find-root) && \
 `NOT_SALES` なら「営業プロジェクトでのみ使えます」と伝えて終了。内部コマンドは
 `python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ (watch は user 向け CLI 動詞ではない)。
 
-## Step 0: quiet hours の尊重
-
-まず現在時刻を取得 (カレンダー MCP の `get-current-time`、無ければシステム時刻)。
-**quiet hours (既定 20:00–08:00) はメール確認・通知をスキップ**し、「quiet hours の
-ためスキップ」とだけ記録して終了する。相手の生活時間に無配慮な深夜チェックを避ける
-(SPEC AC: quiet hours を尊重)。quiet hours はプロジェクト設定で上書き可能。
-
 ## Step 1: 確認対象スレッドの取得
 
 「watch あり かつ ball=相手 (= まだ返信待ち)」のスレッドだけを取る:
@@ -119,7 +112,6 @@ BEACON_WATCH_TARGET="<work_item_id>" python3 "$(beacon _lib-path)/commands.py" w
 ## 制約
 
 - **検知に徹する — 返信/送信はしない** (SPEC §3)。ball を戻して人に渡すところまで。
-- **quiet hours を尊重** (既定 20:00–08:00 はスキップ)。
 - **使うメール/Slack アカウントは台帳解決から取る** (手書きしない、取り違え防止 e-3365)。
 - **watch あり かつ ball=相手 のスレッドだけ確認** (SPEC §3、無駄打ち防止)。ball が
   自分に戻ったスレッドは自動で対象外 (二重検知しない)。
