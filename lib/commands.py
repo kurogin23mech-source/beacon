@@ -16444,6 +16444,7 @@ def cmd_help_json():
         {"command": "beacon meeting end <mtg-id>", "flags": [], "description": "Mark a meeting ended (idempotent; used by the end-detector Operation)"},
         {"command": "beacon meeting cancel <mtg-id>", "flags": [], "description": "Cancel a scheduled meeting"},
         {"command": "beacon meeting list <opp-id>", "flags": ["--json"], "description": "List an opportunity's meetings"},
+        {"command": "beacon meeting ended", "flags": ["--now <datetime>", "--json"], "description": "List meetings whose scheduled end has passed but are still scheduled (終了検知 Operation C の候補)"},
         {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity vocabulary)"},
         {"command": "beacon save <desc>", "flags": ["-m <ms-id>", "--hash <hash>", "--source manual", "--json"], "description": "Save a freeform entry to a milestone"},
         {"command": "beacon sync", "flags": [], "description": "Auto-sync recent git commits to active milestone"},
@@ -21484,6 +21485,39 @@ def cmd_meeting_list():
         print(line)
 
 
+def cmd_meeting_ended():
+    # ms-107 e-3434 (C) — 終了検知エンジン: 終了予定を過ぎた scheduled 面談を洗い出す。
+    # 検知 Skill がこの候補をカレンダーで突合してから meeting end する。
+    import sales_entities
+    now = os.environ.get("BEACON_MTG_NOW", "") or core._now_iso()
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    ended = sales_entities.scan_ended_meetings(data, now)
+    rows = []
+    for opp, m in ended:
+        rows.append({
+            "opportunity_id": opp.get("id"),
+            "opportunity_title": opp.get("title", ""),
+            "meeting_id": m.get("id"),
+            "scheduled_at": m.get("scheduled_at", ""),
+            "end_at": m.get("end_at", ""),
+            "calendar_event_id": m.get("calendar_event_id", ""),
+            "calendar_namespace": m.get("calendar_namespace", ""),
+            "calendar_account": m.get("calendar_account", ""),
+            "tag": sales_entities.meeting_calendar_tag(m.get("id", "")),
+        })
+    if as_json:
+        print(json.dumps({"now": now, "ended": rows}, ensure_ascii=False))
+        return
+    if not rows:
+        print("No ended meetings awaiting detection.")
+        return
+    for r in rows:
+        print(f"  {r['meeting_id']} ({r['opportunity_id']} {r['opportunity_title']}) "
+              f"ended {r['end_at'] or r['scheduled_at']} "
+              f"event={r['calendar_event_id'] or '—'}")
+
+
 # ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
@@ -21543,6 +21577,7 @@ if __name__ == "__main__":
         "meeting_end": cmd_meeting_end,
         "meeting_cancel": cmd_meeting_cancel,
         "meeting_list": cmd_meeting_list,
+        "meeting_ended": cmd_meeting_ended,
         "phase_list": cmd_phase_list,
         # ms-107 e-3353 — send identity pin (internal; called by sales Skills,
         # not exposed as a user CLI verb → no bin/beacon/README/dispatch.py entry)

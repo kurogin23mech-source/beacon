@@ -276,6 +276,7 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon meeting end <mtg-id>` | Mark a meeting ended (idempotent; used by the end-detector Operation) / 面談を終了扱いにする |
 | `beacon meeting cancel <mtg-id>` | Cancel a scheduled meeting / 面談を取消 |
 | `beacon meeting list <opp-id> [--json]` | List an opportunity's meetings / 商談の面談一覧 |
+| `beacon meeting ended [--now <datetime>] [--json]` | List meetings whose end passed but are still scheduled (終了検知 C の候補) / 終了予定を過ぎた未終了面談 |
 | `beacon phase list [--json]` | Show the configured phase funnels (account / opportunity vocabulary) / 設定済みフェーズファネルを表示 |
 
 ### Pull Requests

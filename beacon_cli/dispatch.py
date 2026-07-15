@@ -483,6 +483,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_mtg_list.add_argument("opp_id", nargs="?", default="")
     p_mtg_list.add_argument("--json", action="store_true")
 
+    p_mtg_ended = mtg_sub.add_parser("ended", add_help=False)
+    p_mtg_ended.add_argument("--now", default="")
+    p_mtg_ended.add_argument("--json", action="store_true")
+
     # ---- phase (ms-106: sales entities, profession=sales) ----
     p_phase = sub.add_parser(
         "phase", help="Sales phase funnel vocabulary", add_help=False,
@@ -2004,7 +2008,7 @@ def _handle_communication(root: Path, args: argparse.Namespace) -> int:
 
 def _handle_meeting(root: Path, args: argparse.Namespace) -> int:
     if args.show_help or args.mtg_cmd is None:
-        print("Usage: beacon meeting [schedule|reschedule|end|cancel|list] [options]")
+        print("Usage: beacon meeting [schedule|reschedule|end|cancel|list|ended] [options]")
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
         return rc
@@ -2056,7 +2060,10 @@ def _handle_meeting(root: Path, args: argparse.Namespace) -> int:
             return 1
         env = {"BEACON_MTG_OPP": args.opp_id or "", "BEACON_JSON": "1" if args.json else ""}
         return _run_commands_py(root, "meeting_list", env)
-    print("Usage: beacon meeting [schedule|reschedule|end|cancel|list] [options]")
+    if cmd == "ended":
+        env = {"BEACON_MTG_NOW": args.now or "", "BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "meeting_ended", env)
+    print("Usage: beacon meeting [schedule|reschedule|end|cancel|list|ended] [options]")
     return 2
 
 
