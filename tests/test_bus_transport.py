@@ -207,7 +207,16 @@ PROJECT_ID = "bus-test"
 
 
 @pytest.fixture(autouse=True)
-def reset_store():
+def reset_store(monkeypatch):
+    # ms-110 / e-3443: these tests post cross-user DMs directly to exercise
+    # transport/routing/receipts. The sender-consent backstop would 403 those
+    # unconfirmed cross-user posts; bypass it here (function-scoped so it does
+    # not leak to other files). The backstop is covered in
+    # test_sender_consent_backstop.py.
+    monkeypatch.setattr(
+        app_module.dm_consent_mod, "classify_send_consent",
+        lambda **k: (False, "transport-test-bypass"),
+    )
     # Re-apply firestore_client stubs every test in case another test module
     # (notably tests/test_api.py) has restored its own mocks at module import
     # time. Without this re-application the bus tests would see surprise side

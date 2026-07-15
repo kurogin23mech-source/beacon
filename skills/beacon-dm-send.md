@@ -312,6 +312,19 @@ reply mode で「代替候補に送る」を選んだ場合、`recipient_sid` �
 
 cross-project ケースで no を選ばれたら中止。
 
+### Step 3.1: cross-user consent フラグ (ms-110 / e-3443 = サーバ側で別ユーザー宛の誤送信を拒否する仕組み)
+
+cross-project (= 別プロジェクト = 別ユーザーの可能性がある相手) への **新規送信** で上の確認に yes した場合、Step 7 の送信 argv に **`--recipient-confirmed`** を必ず付ける。これは「人間がこの宛先を確認した」という証跡 (= recipient_confirmed claim) を CLI に載せさせるフラグ。サーバはこの証跡が無い cross-user DM を拒否するので、付け忘れると 403 で弾かれる (= 誤送信の構造防止、正規経路では必須)。
+
+| 条件 | `--recipient-confirmed` |
+|---|---|
+| cross-project かつ **新規送信** (reply でない) | **付ける** |
+| same-project (同一プロジェクト) | 付けない (= 自分の別セッション等、サーバも素通し) |
+| reply (`--in-reply-to` あり) | 付けない (= 宛先は親 envelope から導出、別人に飛ばない) |
+| Trek scope / Operation 経路 | 付けない (= 事前承認済み) |
+
+このフラグは「人間の宛先確認が済んだ」ことを CLI に伝えるだけで、確認そのものは Step 5c/5d の draft + force-confirm で人間が実際に宛先を見て承認する step が担う。フラグと承認 step は一体で扱う (= フラグだけ付けて承認を飛ばさない)。
+
 ---
 
 ## Step 4: budget gate の確認と自動 grant (reply mode のみ)
@@ -482,7 +495,7 @@ template:      pr-review / op-result / なし
 
 ----
 組み立て argv:
-  beacon bus send --channel dm --to <sid> --payload '{"text":"..."}' [--project <id>] [--in-reply-to <eid>] [--action ...] --json
+  beacon bus send --channel dm --to <sid> --payload '{"text":"..."}' [--project <id>] [--in-reply-to <eid>] [--action ...] [--recipient-confirmed (= cross-project 新規送信時のみ、Step 3.1)] --json
 
 送信しますか? (yes / edit / cancel)
 ```

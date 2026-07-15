@@ -4488,6 +4488,7 @@ EOF
         _bus_to_user=""
         _bus_action=""          # e-1290: comma-joined actions_authorized for T1 envelope
         _bus_no_envelope=""     # e-1290: opt-out of envelope path (debug legacy)
+        _bus_recipient_confirmed=""  # ms-110/e-3445: human confirmed recipient (set by /beacon-dm-send)
         # ms-94 / e-2291 (2026-07-06): `bus directory` の default 挙動を反転。
         # 今まで cwd project 限定 (= 他 project の live session が見えない) が
         # default だったので、user / AI が --all-projects と付けても phantom flag
@@ -4548,6 +4549,11 @@ EOF
                     fi
                     shift 2 ;;
                 --no-envelope)    _bus_no_envelope="1"; shift ;;
+                # ms-110 / e-3445: /beacon-dm-send sets this after the human
+                # confirms the recipient, so the CLI attaches the
+                # recipient_confirmed claim the server backstop (e-3443)
+                # requires for cross-user DMs. Not for hand use.
+                --recipient-confirmed) _bus_recipient_confirmed="1"; shift ;;
                 # Route help to the usage block via the dispatch `*)` arm so we
                 # don't duplicate the heredoc. `__help__` matches no real sub.
                 -h|--help)        _bus_sub="__help__"; shift ;;
@@ -4616,6 +4622,7 @@ print(m.group(1) if m else "")' || true)
                         BEACON_BUS_PROJECT_ID="$_bus_project_id" \
                         BEACON_BUS_ACTION="$_bus_action" \
                         BEACON_BUS_NO_ENVELOPE="$_bus_no_envelope" \
+                        BEACON_BUS_RECIPIENT_CONFIRMED="$_bus_recipient_confirmed" \
                         BEACON_JSON="$_bus_json" \
                         python3 "$COMMANDS_PY" bus_send
                 else
@@ -4636,6 +4643,7 @@ print(m.group(1) if m else "")' || true)
                             BEACON_BUS_PROJECT_ID="$_bus_project_id" \
                             BEACON_BUS_ACTION="$_bus_action" \
                             BEACON_BUS_NO_ENVELOPE="$_bus_no_envelope" \
+                            BEACON_BUS_RECIPIENT_CONFIRMED="$_bus_recipient_confirmed" \
                             BEACON_JSON="$_bus_json" \
                             python3 "$COMMANDS_PY" bus_send || _rc=$?
                     done <<< "$_bus_to_list"
@@ -4793,6 +4801,10 @@ delivery: auto-execute | propose-to-ai (default) | notify-user-only
 --no-envelope: (send) skip the envelope/issue → /bus round-trip and post on
                the legacy path directly. Useful for debugging the server's
                backward-compat lane. Envelope is on by default (e-1290).
+--recipient-confirmed: (send, internal) set by /beacon-dm-send after a human
+               confirms the recipient; stamps the recipient_confirmed claim the
+               server requires for cross-user DMs (ms-110/e-3445). Not for hand
+               use — call /beacon-dm-send instead.
 auto-execute:  receiver-side opt-in allowlist. Default empty ⇒ all auto-execute
                events get downgraded to propose-to-ai by the inbox hook.
 

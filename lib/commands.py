@@ -17901,6 +17901,55 @@ def cmd_bus_send():
             envelope_obj = None
             requested_action = None
 
+    # ms-110 / e-3445: attach the recipient_confirmed consent claim when the
+    # /beacon-dm-send Skill has confirmed the recipient with a human. The server
+    # backstop (e-3443) requires this claim for a cross-user DM; the Skill sets
+    # BEACON_BUS_RECIPIENT_CONFIRMED=1 only after its human-confirmation step.
+    # The claim is assembled here from the send's own target flags + the caller
+    # identity, and rides on the envelope under a key independent of
+    # actions_authorized (SPEC §4). A raw primitive call (no Skill, no flag)
+    # carries no claim and is rejected server-side — that is the whole point.
+    if os.environ.get("BEACON_BUS_RECIPIENT_CONFIRMED", "") == "1":
+        import dm_consent
+        try:
+            _cid_user, _cid_email, _ = _resolve_creator_identity()
+        except Exception:
+            _cid_user, _cid_email = "", ""
+        if not _cid_user:
+            print(
+                "Error: --recipient-confirmed requires a resolvable sender"
+                " identity (could not determine your user_id).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if envelope_obj is None:
+            # No envelope to carry the claim (--no-envelope or issuance failed).
+            # A cross-user send would be rejected server-side without the claim,
+            # so fail loudly rather than posting something that will 403.
+            print(
+                "Error: --recipient-confirmed needs an envelope to carry the"
+                " confirmation, but none was issued (--no-envelope or issuance"
+                " failed). Retry without --no-envelope.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        try:
+            _claim = dm_consent.build_recipient_confirmed_claim(
+                confirmed_by_user_id=_cid_user,
+                confirmed_by_email=_cid_email or "",
+                recipient_session_id=recipient or "",
+                recipient_user_id=recipient_user or "",
+                recipient_project_id=project_id or "",
+                channel=channel,
+            )
+        except ValueError as e:
+            print(
+                f"Error: cannot build recipient confirmation ({e}).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        envelope_obj = {**envelope_obj, dm_consent.CONSENT_CLAIM_KEY: _claim}
+
     # ms-90 / e-3246: 相談を「開始」する DM (= 返信でない) で背景 (context) が
     # 空なら、書くよう促す (= SPEC §設計方針3: promote、hard block しない)。
     # 返信 (in_reply_to あり) は継続なので促さない (= ノイズ回避、主役は開始の瞬間)。

@@ -167,6 +167,16 @@ def reset_store(monkeypatch):
     _sessions_store.clear()
     _event_seq[0] = 0
     monkeypatch.setattr(app_module, "_auth_enabled", True)
+    # ms-110 / e-3443: these tests post cross-user plain DMs directly as a
+    # fixture to exercise payload *visibility* (redaction), a separate
+    # subsystem. The ms-110 sender-consent backstop would (correctly) 403
+    # those unconfirmed cross-user posts; bypass it here so this file keeps
+    # testing visibility. The backstop itself is covered in
+    # test_sender_consent_backstop.py.
+    monkeypatch.setattr(
+        app_module.dm_consent_mod, "classify_send_consent",
+        lambda **k: (False, "visibility-test-bypass"),
+    )
     yield
     _bus_store.clear()
     _sessions_store.clear()
