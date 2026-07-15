@@ -25,7 +25,7 @@ PATH 上の古い `beacon` が新しい install を黙って隠すケースを�
 repo root を見つけて (= `beacon-find-root` の出力)、 resolver script を直接叩く:
 
 ```bash
-__ROOT=$(beacon-find-root) && python3 "$__ROOT/scripts/beacon-bin-resolver.py" 2>&1
+__ROOT=$(beacon-find-root) && python3 "$(beacon _install-root)/scripts/beacon-bin-resolver.py" 2>&1
 ```
 
 stdout は 1 行 JSON。 以下の field を読む:
@@ -89,7 +89,7 @@ legacy-mode-field / ms81 系) は doctor 経由でしか出ないため両方走
 Bash ツールで実行 (fail-safe、 daemon / hook が無ければ何も出ない):
 
 ```bash
-__ROOT=$(beacon-find-root) && python3 "$__ROOT/lib/version_skew.py" \
+__ROOT=$(beacon-find-root) && python3 "$(beacon _lib-path)/version_skew.py" \
   --current-version "$(beacon --version 2>/dev/null | tail -1)" \
   --cwd "$__ROOT" 2>/dev/null
 ```
@@ -322,7 +322,7 @@ session-start が走った cwd で beacon-bus channel が未 install だと、�
 Bash ツールで実行（fail-safe、常に終了コード 0）:
 
 ```bash
-python3 scripts/check-mcp-receive-capability.py 2>/dev/null
+python3 "$(beacon _install-root)/scripts/check-mcp-receive-capability.py" 2>/dev/null
 ```
 
 スクリプトが何も出力しなければ受信 bridge は健全（= 出力に含めない）。**stdout に「⚠ この cwd は「送信専用」の恐れ」で始まるバンドが出たら、それを Step 3 出力にそのまま転記する**。`detail:` 行に `NO_MCP_JSON` / `NO_BEACON_BUS_ENTRY` / `MCP_JSON_MALFORMED` のどれかが入る。判定ロジックとバンド文言は script 側 (`detect_status` / `format_warning`) が所管。
@@ -336,7 +336,7 @@ python3 scripts/check-mcp-receive-capability.py 2>/dev/null
 Bash ツールで実行 (fail-safe、出力がそのままユーザーへの警告になる、終了コードは常に 0):
 
 ```bash
-python3 scripts/check-branch-focus-divergence.py 2>&1
+python3 "$(beacon _install-root)/scripts/check-branch-focus-divergence.py" 2>&1
 ```
 
 スクリプトが何も出さなければ安全 (= warning 不要)。**stderr に「⚠ branch / workspace 乖離の警告」が含まれていたら、それを Step 3 の出力ヘッダ部分にそのまま転記する**。
@@ -378,7 +378,7 @@ session-start が start 時に取り込むべき DM は 2 系統ある:
 e-3180 でこの 2 系統を **1 スクリプトに統合**: project_id / user_id / id_token の解決を 1 回だけ行い、両セクションを 1 回の呼び出しで出す。Bash ツールで実行 (fail-safe、cloud 未設定 / endpoint 不在ならスキップ):
 
 ```bash
-python3 scripts/session-start-dm-inbox.py 2>/dev/null
+python3 "$(beacon _install-root)/scripts/session-start-dm-inbox.py" 2>/dev/null
 ```
 
 出力が空でなければ Step 3 の出力ヘッダ部に **そのまま転記** する (保留中 action → catch-up の順、両方あれば空行区切り)。空ならセクションごと省略。フェッチ統合 = `scripts/session-start-dm-inbox.py`、整形 = `lib/dm_pending.format_pending_dm_summary` / `filter_user_scoped_catchup` / `format_user_scoped_catchup` (単体テスト済み)。
@@ -398,7 +398,7 @@ Trek (= 缶詰の徹夜作業部屋、 user が join した瞬間に scope 内 a
 e-3180 でこの 2 つを **1 スクリプトに統合**: `beacon trek list --joined` を 1 回だけ叩き、active trek がある時だけ armed 判定用の `beacon bus auto-execute list` / `beacon bus budget show` を追加取得する。Bash ツールで実行:
 
 ```bash
-python3 scripts/session-start-trek-status.py 2>/dev/null
+python3 "$(beacon _install-root)/scripts/session-start-trek-status.py" 2>/dev/null
 ```
 
 出力が空ならセクションごと省略。空でなければ **Step 3 ヘッダにそのまま転記**。整形/判定は `lib/trek_status` (`format_joined_treks` / `has_active_trek` / `is_armed`、単体テスト済み) が所管し、以下を保証する:
@@ -463,7 +463,7 @@ Beacon の作業形態は「ターミナル + フロントエンド 並列表示
 session-start 時にフロントエンドを立ち上げ直す（既に開かれていれば既存ウィンドウ / タブが focus する）。
 
 ```bash
-python3 scripts/open-webui.py 2>/dev/null
+python3 "$(beacon _install-root)/scripts/open-webui.py" 2>/dev/null
 ```
 
 このスクリプトは **プロジェクトのモード (= どこにデータの真値があるか) に応じて起動先を選ぶ**。cloud プロジェクトの生きた front-end は Web UI (真値はサーバ)、local プロジェクトは desktop アプリ (サーバ URL が無い) — データを持つ側が、それを描画する front-end を決める (背景・macOS の URL handler 回避策は `scripts/open-webui.py` の docstring と ms-46 e-737 を参照):
