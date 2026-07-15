@@ -1342,3 +1342,57 @@ def test_scan_ended_meetings_bad_now_returns_empty():
     se.meeting_schedule(data, opp, "2026-07-20T10:00:00+00:00")
     assert se.scan_ended_meetings(data, "") == []
     assert se.scan_ended_meetings(data, "not-a-date") == []
+
+
+# --- Watch (返信待ち見張りフラグ, E e-3437) ---------------------------------
+
+def test_set_and_clear_watch_on_activity():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    act = se.activity_add(data, opp, "日程を打診")
+    w = se.set_watch(data, act, channel="Email", thread_ref="<thr-1>", cadence_minutes=60, at="T0")
+    assert w["enabled"] is True and w["channel"] == "email" and w["thread_ref"] == "<thr-1>"
+    a = se.find_opportunity(data, opp)["activities"][0]
+    assert a["watch"]["enabled"] is True
+    se.clear_watch(data, act, at="T1")
+    assert a["watch"]["enabled"] is False and a["watch"]["cleared_at"] == "T1"
+
+
+def test_set_watch_on_nurturing_and_unknown():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    nrt = se.nurturing_add(data, acc, "年始挨拶")
+    se.set_watch(data, nrt, channel="slack")
+    assert se.find_account(data, acc)["nurturings"][0]["watch"]["enabled"] is True
+    with pytest.raises(ValueError):
+        se.set_watch(data, "act-99", channel="email")
+    with pytest.raises(ValueError):
+        se.set_watch(data, nrt, channel="")  # channel required
+
+
+def test_watched_work_items_awaiting_reply_filter():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    act = se.activity_add(data, opp, "打診")
+    se.set_watch(data, act, channel="email")
+    # no communications yet → ball None → not "awaiting reply from counterpart"
+    assert se.watched_work_items(data) == [(se.find_opportunity(data, opp),
+                                            se.find_opportunity(data, opp)["activities"][0])] \
+        or len(se.watched_work_items(data)) == 1
+    assert se.watched_work_items(data, awaiting_reply_only=True) == []
+    # we send (outbound) → ball=counterpart → now awaiting reply
+    se.communication_add(data, act, "打診メール送信", direction="outbound", occurred_at="2026-07-15T09:00")
+    awaiting = se.watched_work_items(data, awaiting_reply_only=True)
+    assert [wi["id"] for _, wi in awaiting] == [act]
+    # reply arrives (inbound) → ball flips to self → drops out of awaiting
+    se.communication_add(data, act, "返信あり", direction="inbound", occurred_at="2026-07-15T14:00")
+    assert se.watched_work_items(data, awaiting_reply_only=True) == []
+
+
+def test_watched_work_items_excludes_disabled():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    nrt = se.nurturing_add(data, acc, "挨拶")
+    se.set_watch(data, nrt, channel="email")
+    se.clear_watch(data, nrt)
+    assert se.watched_work_items(data) == []

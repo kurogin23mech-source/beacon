@@ -21518,6 +21518,74 @@ def cmd_meeting_ended():
               f"event={r['calendar_event_id'] or '—'}")
 
 
+# ms-107 e-3437 — watch (返信待ち見張り) は内部コマンド。送信 Skill が arm し、
+# 返信ウォッチャー (E) が list/clear する。user 向け CLI 動詞ではない
+# (sales_identity_* と同じ内部専用、bin/beacon/README/dispatch には出さない)。
+
+def cmd_watch_set():
+    import sales_entities
+    wi_id = os.environ.get("BEACON_WATCH_TARGET", "")
+    channel = os.environ.get("BEACON_WATCH_CHANNEL", "")
+    thread_ref = os.environ.get("BEACON_WATCH_THREAD", "")
+    cadence = os.environ.get("BEACON_WATCH_CADENCE", "") or "60"
+    data = load_project()
+    try:
+        w = sales_entities.set_watch(data, wi_id, channel=channel,
+                                     thread_ref=thread_ref,
+                                     cadence_minutes=int(cadence),
+                                     at=core._now_iso())
+    except (ValueError, TypeError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Armed watch on {wi_id} ({w['channel']}, cadence {w['cadence_minutes']}m)")
+
+
+def cmd_watch_clear():
+    import sales_entities
+    wi_id = os.environ.get("BEACON_WATCH_TARGET", "")
+    data = load_project()
+    try:
+        sales_entities.clear_watch(data, wi_id, at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Cleared watch on {wi_id}")
+
+
+def cmd_watch_list():
+    import sales_entities
+    awaiting = os.environ.get("BEACON_WATCH_AWAITING", "") == "1"
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    items = sales_entities.watched_work_items(data, awaiting_reply_only=awaiting)
+    rows = []
+    for target, wi in items:
+        w = wi.get("watch", {})
+        rows.append({
+            "target_id": target.get("id"),
+            "target_title": target.get("title") or target.get("name", ""),
+            "work_item_id": wi.get("id"),
+            "work_item": wi.get("description", ""),
+            "channel": w.get("channel", ""),
+            "thread_ref": w.get("thread_ref", ""),
+            "cadence_minutes": w.get("cadence_minutes"),
+            "last_checked_at": w.get("last_checked_at", ""),
+            "ball": sales_entities.derive_ball(target),
+        })
+    if as_json:
+        print(json.dumps({"awaiting_reply_only": awaiting, "watches": rows},
+                         ensure_ascii=False))
+        return
+    if not rows:
+        print("No armed watches." if not awaiting else "No threads awaiting a reply.")
+        return
+    for r in rows:
+        print(f"  {r['work_item_id']} ({r['target_id']}) [{r['channel']}] "
+              f"{r['work_item']}  ball={r['ball']} thread={r['thread_ref'] or '—'}")
+
+
 # ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
@@ -21578,6 +21646,10 @@ if __name__ == "__main__":
         "meeting_cancel": cmd_meeting_cancel,
         "meeting_list": cmd_meeting_list,
         "meeting_ended": cmd_meeting_ended,
+        # ms-107 e-3437 — watch (返信待ち見張り, 内部専用: 送信 Skill arm / E read-clear)
+        "watch_set": cmd_watch_set,
+        "watch_clear": cmd_watch_clear,
+        "watch_list": cmd_watch_list,
         "phase_list": cmd_phase_list,
         # ms-107 e-3353 — send identity pin (internal; called by sales Skills,
         # not exposed as a user CLI verb → no bin/beacon/README/dispatch.py entry)

@@ -1163,6 +1163,85 @@ def find_nurturing(data: dict, nurturing_id: str):
     return None, None
 
 
+def find_work_item(data: dict, work_item_id: str):
+    """Resolve an Activity (act-) or Nurturing (nrt-) work item to
+    ``(target, work_item)``, or ``(None, None)``. Used by the reply-watcher
+    (E) which watches a specific 予定 for its counterpart's reply."""
+    if work_item_id.startswith("act-"):
+        return find_activity(data, work_item_id)
+    if work_item_id.startswith("nrt-"):
+        return find_nurturing(data, work_item_id)
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# Watch (返信待ちスレッドの見張りフラグ) — E (返信ウォッチャー) の状態
+# ---------------------------------------------------------------------------
+# ms-107 e-3437。時間に敏感なやり取り (日程打診など) を送った時、その予定
+# (Activity / Nurturing) に watch を立てる。返信ウォッチャー (E) が hourly に
+# 「watch あり かつ ball=相手 (= まだ返信待ち)」のスレッドだけ確認し、返信が
+# 来たら inbound Communication を残して ball を自分に戻す (= derive_ball が flip)。
+# 話題が完結したら watch を落とす。watch 自体は「どのスレッドを・どの媒体で
+# 見るか」を持つだけで、定期起動の判定は tick_scheduler が担う (関心の分離)。
+
+def set_watch(data: dict, work_item_id: str, *, channel: str,
+              thread_ref: str = "", cadence_minutes: int = 60,
+              at: str = "") -> dict:
+    """Arm a reply-watch on a work item (act-/nrt-). ``channel`` is the medium
+    to poll (email/slack…), ``thread_ref`` the thread/message id to look under
+    (from the outbound Communication's source). Returns the watch dict."""
+    target, wi = find_work_item(data, work_item_id)
+    if wi is None:
+        raise ValueError(f"Work item not found (act-/nrt-): {work_item_id}")
+    if not channel or not channel.strip():
+        raise ValueError("watch channel is required")
+    wi["watch"] = {
+        "enabled": True,
+        "channel": channel.strip().lower(),
+        "thread_ref": thread_ref,
+        "cadence_minutes": int(cadence_minutes) if cadence_minutes else 60,
+        "armed_at": at,
+        "last_checked_at": "",
+    }
+    return wi["watch"]
+
+
+def clear_watch(data: dict, work_item_id: str, *, at: str = "") -> None:
+    """Disarm a reply-watch (話題が完結した時). Kept as ``enabled: False`` so
+    the audit trail of "we were watching" survives (data-immutability-principle)."""
+    target, wi = find_work_item(data, work_item_id)
+    if wi is None:
+        raise ValueError(f"Work item not found (act-/nrt-): {work_item_id}")
+    w = wi.get("watch")
+    if w:
+        w["enabled"] = False
+        w["cleared_at"] = at
+
+
+def watched_work_items(data: dict, *, awaiting_reply_only: bool = False) -> list:
+    """List armed reply-watches as ``(target, work_item)``. With
+    ``awaiting_reply_only`` keep only those whose target's ball is the
+    counterpart (= we're still waiting) — that's the set E actually polls
+    ('ball=相手 かつ watch', SPEC §3). Others (ball already back to us) are
+    skipped until we send again."""
+    out = []
+    for opp in data.get("opportunities", []):
+        for a in opp.get("activities", []):
+            w = a.get("watch")
+            if w and w.get("enabled"):
+                if awaiting_reply_only and derive_ball(opp) != BALL_COUNTERPART:
+                    continue
+                out.append((opp, a))
+    for acc in data.get("accounts", []):
+        for n in acc.get("nurturings", []):
+            w = n.get("watch")
+            if w and w.get("enabled"):
+                if awaiting_reply_only and derive_ball(acc) != BALL_COUNTERPART:
+                    continue
+                out.append((acc, n))
+    return out
+
+
 def resolve_communication_target(data: dict, target_id: str):
     """Resolve where a Communication is stored and what planned item it fulfills.
 
