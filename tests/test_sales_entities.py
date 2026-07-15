@@ -1285,3 +1285,114 @@ def test_derive_ball_includes_work_item_linked_comms():
     se.communication_add(data, nrt, "sent greeting", direction="outbound", occurred_at="2026-07-15T09:00")
     # account-level ball reflects the nurturing-linked communication too
     assert se.derive_ball(se.find_account(data, acc)) == se.BALL_COUNTERPART
+
+
+# --- meeting end-detection core (C, e-3434) ---------------------------------
+
+def test_scan_ended_meetings_by_end_at_timezone_aware():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    # ended: end_at in the past (JST) vs now (UTC) — same-instant compare, not string
+    m_past = se.meeting_schedule(data, opp, "2026-07-20T14:00:00+09:00",
+                                 end_at="2026-07-20T15:00:00+09:00")
+    # future: end_at after now
+    se.meeting_schedule(data, opp, "2026-07-25T14:00:00+09:00",
+                        end_at="2026-07-25T15:00:00+09:00")
+    now = "2026-07-20T09:00:00+00:00"  # = 18:00 JST on the 20th → first meeting ended
+    ended = se.scan_ended_meetings(data, now)
+    assert [m["id"] for _, m in ended] == [m_past]
+
+
+def test_scan_ended_meetings_falls_back_to_scheduled_at_when_no_end():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    m = se.meeting_schedule(data, opp, "2026-07-20T10:00:00+00:00")  # no end_at
+    assert se.scan_ended_meetings(data, "2026-07-20T09:00:00+00:00") == []   # not yet
+    ended = se.scan_ended_meetings(data, "2026-07-20T11:00:00+00:00")        # past
+    assert [mm["id"] for _, mm in ended] == [m]
+
+
+def test_scan_ended_meetings_idempotent_by_status():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    m = se.meeting_schedule(data, opp, "2026-07-20T10:00:00+00:00")
+    now = "2026-07-20T12:00:00+00:00"
+    assert len(se.scan_ended_meetings(data, now)) == 1
+    se.meeting_mark_ended(data, m)  # C marks it → drops out (no double fire)
+    assert se.scan_ended_meetings(data, now) == []
+    # cancelled meetings never surface either
+    m2 = se.meeting_schedule(data, opp, "2026-07-20T10:00:00+00:00")
+    se.meeting_cancel(data, m2)
+    assert se.scan_ended_meetings(data, now) == []
+
+
+def test_scan_ended_meetings_ordered_earliest_end_first():
+    data = _fresh()
+    o1 = se.opportunity_add(data, "D1")
+    o2 = se.opportunity_add(data, "D2")
+    late = se.meeting_schedule(data, o1, "2026-07-20T10:00:00+00:00", end_at="2026-07-20T11:00:00+00:00")
+    early = se.meeting_schedule(data, o2, "2026-07-20T08:00:00+00:00", end_at="2026-07-20T09:00:00+00:00")
+    ended = se.scan_ended_meetings(data, "2026-07-20T12:00:00+00:00")
+    assert [m["id"] for _, m in ended] == [early, late]
+
+
+def test_scan_ended_meetings_bad_now_returns_empty():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    se.meeting_schedule(data, opp, "2026-07-20T10:00:00+00:00")
+    assert se.scan_ended_meetings(data, "") == []
+    assert se.scan_ended_meetings(data, "not-a-date") == []
+
+
+# --- Watch (返信待ち見張りフラグ, E e-3437) ---------------------------------
+
+def test_set_and_clear_watch_on_activity():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    act = se.activity_add(data, opp, "日程を打診")
+    w = se.set_watch(data, act, channel="Email", thread_ref="<thr-1>", cadence_minutes=60, at="T0")
+    assert w["enabled"] is True and w["channel"] == "email" and w["thread_ref"] == "<thr-1>"
+    a = se.find_opportunity(data, opp)["activities"][0]
+    assert a["watch"]["enabled"] is True
+    se.clear_watch(data, act, at="T1")
+    assert a["watch"]["enabled"] is False and a["watch"]["cleared_at"] == "T1"
+
+
+def test_set_watch_on_nurturing_and_unknown():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    nrt = se.nurturing_add(data, acc, "年始挨拶")
+    se.set_watch(data, nrt, channel="slack")
+    assert se.find_account(data, acc)["nurturings"][0]["watch"]["enabled"] is True
+    with pytest.raises(ValueError):
+        se.set_watch(data, "act-99", channel="email")
+    with pytest.raises(ValueError):
+        se.set_watch(data, nrt, channel="")  # channel required
+
+
+def test_watched_work_items_awaiting_reply_filter():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    act = se.activity_add(data, opp, "打診")
+    se.set_watch(data, act, channel="email")
+    # no communications yet → ball None → not "awaiting reply from counterpart"
+    assert se.watched_work_items(data) == [(se.find_opportunity(data, opp),
+                                            se.find_opportunity(data, opp)["activities"][0])] \
+        or len(se.watched_work_items(data)) == 1
+    assert se.watched_work_items(data, awaiting_reply_only=True) == []
+    # we send (outbound) → ball=counterpart → now awaiting reply
+    se.communication_add(data, act, "打診メール送信", direction="outbound", occurred_at="2026-07-15T09:00")
+    awaiting = se.watched_work_items(data, awaiting_reply_only=True)
+    assert [wi["id"] for _, wi in awaiting] == [act]
+    # reply arrives (inbound) → ball flips to self → drops out of awaiting
+    se.communication_add(data, act, "返信あり", direction="inbound", occurred_at="2026-07-15T14:00")
+    assert se.watched_work_items(data, awaiting_reply_only=True) == []
+
+
+def test_watched_work_items_excludes_disabled():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    nrt = se.nurturing_add(data, acc, "挨拶")
+    se.set_watch(data, nrt, channel="email")
+    se.clear_watch(data, nrt)
+    assert se.watched_work_items(data) == []

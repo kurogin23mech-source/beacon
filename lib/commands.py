@@ -16444,6 +16444,7 @@ def cmd_help_json():
         {"command": "beacon meeting end <mtg-id>", "flags": [], "description": "Mark a meeting ended (idempotent; used by the end-detector Operation)"},
         {"command": "beacon meeting cancel <mtg-id>", "flags": [], "description": "Cancel a scheduled meeting"},
         {"command": "beacon meeting list <opp-id>", "flags": ["--json"], "description": "List an opportunity's meetings"},
+        {"command": "beacon meeting ended", "flags": ["--now <datetime>", "--json"], "description": "List meetings whose scheduled end has passed but are still scheduled (終了検知 Operation C の候補)"},
         {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity vocabulary)"},
         {"command": "beacon save <desc>", "flags": ["-m <ms-id>", "--hash <hash>", "--source manual", "--json"], "description": "Save a freeform entry to a milestone"},
         {"command": "beacon sync", "flags": [], "description": "Auto-sync recent git commits to active milestone"},
@@ -16531,6 +16532,34 @@ def cmd_help_json():
 # ---------------------------------------------------------------------------
 # Operation / Run / Incident commands
 # ---------------------------------------------------------------------------
+
+def cmd_operation_server_tick():
+    # ms-107 e-3461 — Operation を server tick (trek tick 相乗り) の発火対象に
+    # opt-in する。meta.server_tick を on/off し、任意で cadence_minutes を設定。
+    # 内部専用: 有効化 setup 時に 1 回叩く (bin/beacon には出さない)。
+    op_id = os.environ.get("BEACON_OP_ID", "")
+    mode = (os.environ.get("BEACON_SERVER_TICK", "") or "on").strip().lower()
+    cadence = os.environ.get("BEACON_CADENCE", "")
+    data = load_project()
+    matches = core.find_operations(data, op_id)
+    if not matches:
+        print(f"Error: Operation not found: {op_id}", file=sys.stderr)
+        sys.exit(1)
+    op = matches[0]
+    meta = op.setdefault("meta", {})
+    meta["server_tick"] = mode in ("on", "1", "true", "yes")
+    if cadence:
+        try:
+            meta["cadence_minutes"] = int(cadence)
+        except ValueError:
+            print(f"Error: --cadence must be an integer, got {cadence!r}",
+                  file=sys.stderr)
+            sys.exit(1)
+    save_project(data, op={"type": "operation_update", "op_id": op_id})
+    state = "on" if meta["server_tick"] else "off"
+    cad = meta.get("cadence_minutes", "default 60")
+    print(f"Operation {op_id}: server_tick={state}, cadence_minutes={cad}")
+
 
 def cmd_operation_open():
     title = os.environ.get("BEACON_OPERATION_TITLE", "")
@@ -21533,6 +21562,107 @@ def cmd_meeting_list():
         print(line)
 
 
+def cmd_meeting_ended():
+    # ms-107 e-3434 (C) — 終了検知エンジン: 終了予定を過ぎた scheduled 面談を洗い出す。
+    # 検知 Skill がこの候補をカレンダーで突合してから meeting end する。
+    import sales_entities
+    now = os.environ.get("BEACON_MTG_NOW", "") or core._now_iso()
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    ended = sales_entities.scan_ended_meetings(data, now)
+    rows = []
+    for opp, m in ended:
+        rows.append({
+            "opportunity_id": opp.get("id"),
+            "opportunity_title": opp.get("title", ""),
+            "meeting_id": m.get("id"),
+            "scheduled_at": m.get("scheduled_at", ""),
+            "end_at": m.get("end_at", ""),
+            "calendar_event_id": m.get("calendar_event_id", ""),
+            "calendar_namespace": m.get("calendar_namespace", ""),
+            "calendar_account": m.get("calendar_account", ""),
+            "tag": sales_entities.meeting_calendar_tag(m.get("id", "")),
+        })
+    if as_json:
+        print(json.dumps({"now": now, "ended": rows}, ensure_ascii=False))
+        return
+    if not rows:
+        print("No ended meetings awaiting detection.")
+        return
+    for r in rows:
+        print(f"  {r['meeting_id']} ({r['opportunity_id']} {r['opportunity_title']}) "
+              f"ended {r['end_at'] or r['scheduled_at']} "
+              f"event={r['calendar_event_id'] or '—'}")
+
+
+# ms-107 e-3437 — watch (返信待ち見張り) は内部コマンド。送信 Skill が arm し、
+# 返信ウォッチャー (E) が list/clear する。user 向け CLI 動詞ではない
+# (sales_identity_* と同じ内部専用、bin/beacon/README/dispatch には出さない)。
+
+def cmd_watch_set():
+    import sales_entities
+    wi_id = os.environ.get("BEACON_WATCH_TARGET", "")
+    channel = os.environ.get("BEACON_WATCH_CHANNEL", "")
+    thread_ref = os.environ.get("BEACON_WATCH_THREAD", "")
+    cadence = os.environ.get("BEACON_WATCH_CADENCE", "") or "60"
+    data = load_project()
+    try:
+        w = sales_entities.set_watch(data, wi_id, channel=channel,
+                                     thread_ref=thread_ref,
+                                     cadence_minutes=int(cadence),
+                                     at=core._now_iso())
+    except (ValueError, TypeError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Armed watch on {wi_id} ({w['channel']}, cadence {w['cadence_minutes']}m)")
+
+
+def cmd_watch_clear():
+    import sales_entities
+    wi_id = os.environ.get("BEACON_WATCH_TARGET", "")
+    data = load_project()
+    try:
+        sales_entities.clear_watch(data, wi_id, at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Cleared watch on {wi_id}")
+
+
+def cmd_watch_list():
+    import sales_entities
+    awaiting = os.environ.get("BEACON_WATCH_AWAITING", "") == "1"
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    items = sales_entities.watched_work_items(data, awaiting_reply_only=awaiting)
+    rows = []
+    for target, wi in items:
+        w = wi.get("watch", {})
+        rows.append({
+            "target_id": target.get("id"),
+            "target_title": target.get("title") or target.get("name", ""),
+            "work_item_id": wi.get("id"),
+            "work_item": wi.get("description", ""),
+            "channel": w.get("channel", ""),
+            "thread_ref": w.get("thread_ref", ""),
+            "cadence_minutes": w.get("cadence_minutes"),
+            "last_checked_at": w.get("last_checked_at", ""),
+            "ball": sales_entities.derive_ball(target),
+        })
+    if as_json:
+        print(json.dumps({"awaiting_reply_only": awaiting, "watches": rows},
+                         ensure_ascii=False))
+        return
+    if not rows:
+        print("No armed watches." if not awaiting else "No threads awaiting a reply.")
+        return
+    for r in rows:
+        print(f"  {r['work_item_id']} ({r['target_id']}) [{r['channel']}] "
+              f"{r['work_item']}  ball={r['ball']} thread={r['thread_ref'] or '—'}")
+
+
 # ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
@@ -21592,6 +21722,11 @@ if __name__ == "__main__":
         "meeting_end": cmd_meeting_end,
         "meeting_cancel": cmd_meeting_cancel,
         "meeting_list": cmd_meeting_list,
+        "meeting_ended": cmd_meeting_ended,
+        # ms-107 e-3437 — watch (返信待ち見張り, 内部専用: 送信 Skill arm / E read-clear)
+        "watch_set": cmd_watch_set,
+        "watch_clear": cmd_watch_clear,
+        "watch_list": cmd_watch_list,
         "phase_list": cmd_phase_list,
         # ms-107 e-3353 — send identity pin (internal; called by sales Skills,
         # not exposed as a user CLI verb → no bin/beacon/README/dispatch.py entry)
@@ -21679,6 +21814,8 @@ if __name__ == "__main__":
         "issue_sync": cmd_issue_sync,
         "operation_open": cmd_operation_open,
         "operation_close": cmd_operation_close,
+        # ms-107 e-3461 — server tick opt-in (内部専用、有効化 setup で使う)
+        "operation_server_tick": cmd_operation_server_tick,
         "operation_set_status": cmd_operation_set_status,
         "operation_update": cmd_operation_update,
         "operation_task_add": cmd_operation_task_add,

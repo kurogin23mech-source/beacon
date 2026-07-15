@@ -37,6 +37,7 @@ import operations
 import redis_client  # ms-96 / e-2381: rate limit 用の揮発カウンタ (fail-open)
 import trek as trek_mod  # ms-69 / e-1656: trek schema + pure mutators
 import trek_scheduler as trek_scheduler_mod  # ms-83 / e-1997: progress-check cadence logic
+import tick_scheduler  # ms-107 e-3434/e-3461: target-agnostic periodic-tick cadence
 
 # debug=False is the default, but set explicitly to ensure stack traces are
 # never included in error responses in production.
@@ -9058,6 +9059,17 @@ def trek_scheduler_tick_endpoint(
                 "event_id": event_id,
             })
 
+    # ms-107 e-3434 chunk 3b ("trek tick 相乗り") — on this same Cloud-Scheduler
+    # tick, also fire due *scheduled* things (target-agnostic periodic-tick
+    # primitive, lib/tick_scheduler). Operation is the first source; Account
+    # 定期連絡 / short-lived watch tasks plug into the same seam later. Fully
+    # isolated + best-effort: any failure is captured, never touches the Trek
+    # fanout above.
+    try:
+        scheduled_fires = _fire_due_scheduled(now_iso)
+    except Exception as _op_exc:  # pragma: no cover - defensive isolation
+        scheduled_fires = [{"error": f"{type(_op_exc).__name__}: {_op_exc}"}]
+
     return {
         "now": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "candidates": len(candidate_treks),
@@ -9072,7 +9084,138 @@ def trek_scheduler_tick_endpoint(
         # so observers can tell "leader pulled the cord" apart from
         # "work is genuinely done".
         "halted": halted,
+        # ms-107 e-3434 chunk 3b — scheduled things fired on this tick.
+        "scheduled_fires": scheduled_fires,
     }
+
+
+def _find_operation_spec_doc(project: dict, op_id: str) -> str:
+    """Best-effort: the doc_id of the SPEC bound to an operation (scope=spec,
+    operation=op_id), so the execute Skill can fetch its procedure. '' if none."""
+    for doc in (project.get("documents", []) or []):
+        if not isinstance(doc, dict):
+            continue
+        if doc.get("operation") == op_id and doc.get("scope") == "spec":
+            return doc.get("doc_id", "") or doc.get("id", "") or ""
+    return ""
+
+
+def _operation_schedule_descriptor(op: dict) -> dict:
+    """Adapter: map an Operation to the entity-agnostic schedule descriptor
+    ``lib/tick_scheduler`` understands. An Operation is enabled for server-tick
+    firing when it is open AND opted in via ``meta.server_tick``. Keeping this
+    mapping here (not in tick_scheduler) is what decouples the tick from
+    Operation — Account 定期連絡 / short-lived watch tasks add their own adapter
+    without touching the scheduler."""
+    meta = op.get("meta") or {}
+    return {
+        "enabled": op.get("status") == "open" and tick_scheduler.truthy(meta.get("server_tick")),
+        "cadence_minutes": meta.get("cadence_minutes"),
+        "last_fired_at": meta.get("last_fired_at"),
+    }
+
+
+def _fire_operation(pid: str, project: dict, op: dict, now_iso: str) -> dict:
+    """Fire one due Operation by **reusing its pre-approved envelope** (minted by
+    the human at ``beacon operation approve``, stored in ``operation_envelopes/``)
+    — the server never mints here, it re-attaches the standing authorization.
+    Requires an active envelope (else delivery degrades to notify-user-only and
+    never auto-executes → skip). Returns a report dict; ``fired`` True means the
+    caller should stamp ``meta.last_fired_at``."""
+    op_id = op.get("id", "")
+    envelope = None
+    try:
+        envs = db.list_operation_envelopes(pid, op_id=op_id, status="active")
+        if envs:
+            envelope = (envs[0] or {}).get("envelope")
+    except Exception:
+        envelope = None
+    if not envelope:
+        return {"project_id": pid, "op_id": op_id, "fired": False,
+                "skipped": "no active envelope (approve first)"}
+    meta = op.get("meta") or {}
+    recipient = meta.get("claimer_session_id") or meta.get("open_by") or ""
+    payload = {
+        "op_id": op_id,
+        "log_source": op.get("log_source", op_id),
+        "spec_doc_id": _find_operation_spec_doc(project, op_id),
+        "trigger_name": f"operation_check_{op_id}",
+        "message": f"{op_id} の定期チェック (server tick)。"
+                   "/beacon-operation-execute で実行してください。",
+        "created_at": now_iso,
+    }
+    if recipient:
+        payload["recipient_session_id"] = recipient
+    bus_data = {
+        "channel": "operation-trigger",
+        "sender_session_id": "",
+        "payload": payload,
+        "envelope": envelope,
+        "delivery": "auto-execute",
+        "created_at": now_iso,
+    }
+    try:
+        db.append_bus_event(pid, bus_data)
+    except Exception as exc:
+        return {"project_id": pid, "op_id": op_id, "fired": False,
+                "error": f"append_bus_event: {type(exc).__name__}"}
+    return {"project_id": pid, "op_id": op_id, "fired": True,
+            "recipient": recipient or "(broadcast)"}
+
+
+def _fire_due_scheduled(now_iso: str) -> list:
+    """ms-107 e-3434 chunk 3b — fire due *scheduled* things on the shared Trek
+    scheduler tick ("相乗り"), using the target-agnostic ``lib/tick_scheduler``
+    primitive.
+
+    Source registry: each source yields ``(item, descriptor, fire)`` where the
+    descriptor is entity-free ({enabled, cadence_minutes, last_fired_at}) and
+    ``fire`` performs the source-specific activation. Today the only source is
+    **Operations** (dev/sales persistent target); Account 定期連絡 and
+    short-lived communication watch tasks plug in the same way later — the tick
+    stays unaware of what it is firing.
+
+    Best-effort throughout; a project's failure is captured and skipped. The
+    ``meta.last_fired_at`` stamp advances the cadence gate (the dedup that stops
+    double-firing). Returns a per-fire report for the tick response.
+
+    Scale note: iterates all projects (``list_all_projects`` + ``get_project``)
+    each tick — fine at dogfood scale; a project-level index of "has a
+    server-tick schedulable" is the follow-up when project count grows."""
+    report: list = []
+    try:
+        projects = db.list_all_projects()
+    except Exception as exc:  # pragma: no cover
+        return [{"error": f"list_all_projects: {type(exc).__name__}: {exc}"}]
+    for proj_meta in (projects or []):
+        pid = proj_meta.get("project_id") or proj_meta.get("id") or ""
+        if not pid:
+            continue
+        try:
+            project = db.get_project(pid)
+        except Exception:
+            continue
+        if not project:
+            continue
+        changed = False
+        # --- source: Operations (persistent targets opted into server-tick) ---
+        for op in (project.get("operations", []) or []):
+            if not tick_scheduler.is_due(_operation_schedule_descriptor(op), now_iso):
+                continue
+            result = _fire_operation(pid, project, op, now_iso)
+            report.append(result)
+            if result.get("fired"):
+                op.setdefault("meta", {})["last_fired_at"] = now_iso
+                changed = True
+        # --- future sources (Account 定期連絡 / short-lived watch tasks) plug
+        #     in here with their own descriptor adapter + fire callback ---
+        if changed:
+            try:
+                db.save_project(pid, project)
+            except Exception as exc:  # pragma: no cover
+                report.append({"project_id": pid,
+                               "error": f"save_project: {type(exc).__name__}"})
+    return report
 
 
 class CheckTaskAddRequest(BaseModel):
