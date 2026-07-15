@@ -21141,8 +21141,19 @@ def cmd_opportunity_phase():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-106 e-3502 — a manual phase move should seed the new phase's anchor
+    # activities too, so create / judge-advance / manual-phase all behave the
+    # same (the rep never lands in a phase with a blank next-steps list). CLI
+    # layer, opportunities only (accounts have no activity templates); idempotent
+    # by description via instantiate_phase_activities.
+    seeded = []
+    if opp_id.startswith("opp-"):
+        seeded = sales_entities.instantiate_phase_activities(
+            data, opp_id, at=core._now_iso())
     save_project(data)
     print(f"{opp_id} phase → {rec['phase']} (recorded in phase_history)")
+    if seeded:
+        print(f"  seeded {len(seeded)} フェーズ活動 (このフェーズの標準ステップ)")
 
 
 def cmd_opportunity_transition_date():
