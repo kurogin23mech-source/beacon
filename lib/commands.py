@@ -16437,8 +16437,8 @@ def cmd_help_json():
         {"command": "beacon opportunity due", "flags": ["--json"], "description": "List opportunities awaiting a transition judgement (遷移日 due/overdue)"},
         {"command": "beacon opportunity activity <opp-id> <desc>", "flags": ["--deadline <date>", "--ball self|counterpart"], "description": "Add an activity (業務・事前計画型) under an opportunity"},
         {"command": "beacon opportunity delete <opp-id>", "flags": [], "description": "Delete an opportunity and its activities"},
-        {"command": "beacon communication add <target-id> <summary>", "flags": ["--direction inbound|outbound", "--channel email|slack|meeting|calendar|phone|other", "--source-ref <id>", "--source-url <link>", "--occurred <datetime>"], "description": "Record a communication (証跡・事後記録型 = 営業の Commit) on an opportunity/account"},
-        {"command": "beacon communication list <target-id>", "flags": ["--json"], "description": "List a target's communications (証跡) oldest→newest + derived ball"},
+        {"command": "beacon communication add <target-id>", "flags": ["--direction inbound|outbound", "--channel email|slack|meeting|calendar|phone|other", "--source-ref <id>", "--source-url <link>", "--occurred <datetime>"], "description": "Record a communication (証跡・事後記録型 = 営業の Commit); target is opp-/acc- or act-/nrt- (act-/nrt- links the activity/nurturing it fulfilled)"},
+        {"command": "beacon communication list <target-id>", "flags": ["--json"], "description": "List communications (証跡) oldest→newest + derived ball; act-/nrt- lists only that work item's"},
         {"command": "beacon meeting schedule <opp-id>", "flags": ["--at <datetime>", "--end <datetime>", "--location <text>", "--event-id <id>", "--calendar-ns <ns>", "--calendar-account <acct>", "--set-transition"], "description": "Book a meeting (面談) with a Beacon 識別 ID; --set-transition moves the 遷移日 to the meeting date"},
         {"command": "beacon meeting reschedule <mtg-id>", "flags": ["--at <datetime>", "--end <datetime>", "--event-id <id>", "--set-transition"], "description": "Move a meeting (予定変更); --set-transition follows the 遷移日"},
         {"command": "beacon meeting end <mtg-id>", "flags": [], "description": "Mark a meeting ended (idempotent; used by the end-detector Operation)"},
@@ -21349,14 +21349,16 @@ def cmd_communication_list():
     target_id = os.environ.get("BEACON_COMM_TARGET", "")
     as_json = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
-    target = sales_entities.find_communication_target(data, target_id)
-    if target is None:
-        print(f"Error: Communication target not found (opp-… or acc-…): "
-              f"{target_id}", file=sys.stderr)
+    container, linked_id = sales_entities.resolve_communication_target(data, target_id)
+    if container is None:
+        print(f"Error: Communication target not found (opp-…/acc-… target or "
+              f"act-…/nrt-… work item): {target_id}", file=sys.stderr)
         sys.exit(1)
-    comms = sales_entities.communications_of(target)
+    # act-/nrt- id → only that work item's communications; opp-/acc- → all.
+    comms = sales_entities.communications_of(
+        container, linked_id=linked_id or None)
     if as_json:
-        ball = sales_entities.derive_ball(target)
+        ball = sales_entities.derive_ball(container)
         print(json.dumps({"target": target_id, "ball": ball,
                           "communications": comms}, ensure_ascii=False))
         return
@@ -21374,7 +21376,7 @@ def cmd_communication_list():
         print(line)
         if trace:
             print(f"      source: {trace}")
-    ball = sales_entities.derive_ball(target)
+    ball = sales_entities.derive_ball(container)
     if ball:
         who = "自分" if ball == sales_entities.BALL_SELF else "相手"
         print(f"  ball: {who} ({ball})")

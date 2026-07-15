@@ -1197,3 +1197,83 @@ def test_opportunity_meetings_ordered_by_scheduled_time():
     se.meeting_schedule(data, opp, "2026-07-20T10:00")
     ordered = se.opportunity_meetings(se.find_opportunity(data, opp))
     assert [m["scheduled_at"] for m in ordered] == ["2026-07-20T10:00", "2026-07-25T10:00"]
+
+
+# --- Communication ↔ work-item linkage (act-/nrt-, e-3451) ------------------
+
+def test_communication_links_to_activity_stored_under_opportunity():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    act = se.activity_add(data, opp, "提案書を送る")
+    cid = se.communication_add(data, act, "提案書を送付した", direction="outbound", channel="email")
+    # stored under the opportunity (container), links the activity
+    o = se.find_opportunity(data, opp)
+    assert [c["id"] for c in o["communications"]] == [cid]
+    assert o["communications"][0]["linked_id"] == act
+
+
+def test_communication_links_to_nurturing_stored_under_account():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    nrt = se.nurturing_add(data, acc, "年始の挨拶を送る")
+    cid = se.communication_add(data, nrt, "年賀メールを送った", direction="outbound", channel="email")
+    a = se.find_account(data, acc)
+    assert a["communications"][0]["id"] == cid
+    assert a["communications"][0]["linked_id"] == nrt
+
+
+def test_communication_target_grain_has_empty_linked_id():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    opp = se.opportunity_add(data, "Deal", account_id=acc)
+    c_acc = se.communication_add(data, acc, "a", direction="inbound")
+    c_opp = se.communication_add(data, opp, "b", direction="inbound")
+    assert se.find_account(data, acc)["communications"][0]["linked_id"] == ""
+    assert se.find_opportunity(data, opp)["communications"][0]["linked_id"] == ""
+
+
+def test_communications_of_filters_by_linked_id():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    n1 = se.nurturing_add(data, acc, "n1")
+    n2 = se.nurturing_add(data, acc, "n2")
+    se.communication_add(data, n1, "for n1", direction="outbound")
+    se.communication_add(data, acc, "account-level", direction="inbound")
+    se.communication_add(data, n2, "for n2", direction="outbound")
+    a = se.find_account(data, acc)
+    assert len(se.communications_of(a)) == 3               # all
+    only_n1 = se.communications_of(a, linked_id=n1)
+    assert [c["summary"] for c in only_n1] == ["for n1"]
+
+
+def test_resolve_communication_target_all_prefixes():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    opp = se.opportunity_add(data, "Deal", account_id=acc)
+    act = se.activity_add(data, opp, "call")
+    nrt = se.nurturing_add(data, acc, "greet")
+    assert se.resolve_communication_target(data, opp) == (se.find_opportunity(data, opp), "")
+    assert se.resolve_communication_target(data, acc) == (se.find_account(data, acc), "")
+    c_opp, l_act = se.resolve_communication_target(data, act)
+    assert c_opp["id"] == opp and l_act == act
+    c_acc, l_nrt = se.resolve_communication_target(data, nrt)
+    assert c_acc["id"] == acc and l_nrt == nrt
+    assert se.resolve_communication_target(data, "nrt-99") == (None, None)
+    assert se.resolve_communication_target(data, "mlst-1") == (None, None)
+
+
+def test_communication_unknown_work_item_raises():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.communication_add(data, "act-99", "x", direction="inbound")
+    with pytest.raises(ValueError):
+        se.communication_add(data, "nrt-99", "x", direction="inbound")
+
+
+def test_derive_ball_includes_work_item_linked_comms():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    nrt = se.nurturing_add(data, acc, "greet")
+    se.communication_add(data, nrt, "sent greeting", direction="outbound", occurred_at="2026-07-15T09:00")
+    # account-level ball reflects the nurturing-linked communication too
+    assert se.derive_ball(se.find_account(data, acc)) == se.BALL_COUNTERPART

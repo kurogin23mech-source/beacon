@@ -73,8 +73,8 @@ Sales (profession=sales):
   beacon opportunity due [--json]                            List opportunities awaiting a transition judgement (due/overdue)
   beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self|counterpart]   Log an activity on an opportunity
   beacon opportunity delete <opp-id>                         Delete an opportunity and its activities
-  beacon communication add <target-id> "<summary>" --direction inbound|outbound [--channel email|slack|meeting|calendar|phone|other] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]   Record a communication (証跡・営業の Commit) on an opportunity/account
-  beacon communication list <target-id> [--json]             List a target's communications (証跡) + derived ball
+  beacon communication add <opp-|acc-|act-|nrt-id> "<summary>" --direction inbound|outbound [--channel email|slack|meeting|calendar|phone|other] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]   Record a communication (証跡・営業の Commit); act-/nrt- links the specific activity/nurturing it fulfilled
+  beacon communication list <opp-|acc-|act-|nrt-id> [--json]  List communications (証跡) + derived ball; act-/nrt- lists only that work item's
   beacon meeting schedule <opp-id> --at <datetime> [--end <datetime>] [--location <text>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]   Book a meeting (面談) with a Beacon 識別 ID; --set-transition moves the 遷移日 too
   beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]   Move a meeting (予定変更); --set-transition follows the 遷移日
   beacon meeting end <mtg-id>                                 Mark a meeting ended (idempotent; used by the end-detector)

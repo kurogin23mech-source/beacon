@@ -1140,33 +1140,83 @@ def next_communication_id(data: dict) -> str:
     return _next_prefixed_id(ids, "comm-")
 
 
-def find_communication_target(data: dict, target_id: str) -> Optional[dict]:
-    """Resolve a Communication's parent — an Opportunity (opp-…) or, when the
-    deal doesn't exist yet, an Account (acc-…). Returns the target dict or None.
-    """
+def find_activity(data: dict, activity_id: str):
+    """Return ``(opportunity, activity)`` for an activity id, or ``(None, None)``."""
+    for opp in data.get("opportunities", []):
+        for a in opp.get("activities", []):
+            if a.get("id") == activity_id:
+                return opp, a
+    return None, None
+
+
+def find_nurturing(data: dict, nurturing_id: str):
+    """Return ``(account, nurturing)`` for a nurturing id, or ``(None, None)``."""
+    for acc in data.get("accounts", []):
+        for n in acc.get("nurturings", []):
+            if n.get("id") == nurturing_id:
+                return acc, n
+    return None, None
+
+
+def resolve_communication_target(data: dict, target_id: str):
+    """Resolve where a Communication is stored and what planned item it fulfills.
+
+    Mirrors the dev model where a commit is *stored under* a milestone yet can
+    *reference* a task (resolves). Here the "container" (where the record lives)
+    is always an Opportunity or Account; the optional "linked_id" points at the
+    specific Activity/Nurturing (= 予定) the communication fulfilled:
+
+      opp-…  → (opportunity, "")          # target grain, no work-item link
+      acc-…  → (account,     "")          # target grain, no work-item link
+      act-…  → (parent opp,  "act-…")     # stored on the deal, links the activity
+      nrt-…  → (parent acc,  "nrt-…")     # stored on the account, links the nurturing
+
+    Returns ``(container, linked_id)`` or ``(None, None)`` when unresolvable."""
     if target_id.startswith("opp-"):
-        return find_opportunity(data, target_id)
+        opp = find_opportunity(data, target_id)
+        return (opp, "") if opp is not None else (None, None)
     if target_id.startswith("acc-"):
-        return find_account(data, target_id)
-    return None
+        acc = find_account(data, target_id)
+        return (acc, "") if acc is not None else (None, None)
+    if target_id.startswith("act-"):
+        opp, act = find_activity(data, target_id)
+        return (opp, target_id) if act is not None else (None, None)
+    if target_id.startswith("nrt-"):
+        acc, nrt = find_nurturing(data, target_id)
+        return (acc, target_id) if nrt is not None else (None, None)
+    return None, None
+
+
+def find_communication_target(data: dict, target_id: str) -> Optional[dict]:
+    """The container (Opportunity/Account) that stores a Communication for the
+    given id — accepts opp-/acc- (target grain) and act-/nrt- (work-item grain,
+    resolved to the parent deal/account). Returns the container dict or None."""
+    container, _ = resolve_communication_target(data, target_id)
+    return container
 
 
 def communication_add(data: dict, target_id: str, summary: str, *,
                       direction: str, channel: str = "other",
                       source: Optional[dict] = None,
                       occurred_at: str = "", created_at: str = "") -> str:
-    """Append a Communication (証跡・事後記録型) under a target (Opportunity
-    opp-… preferred, or Account acc-… when there's no deal), return its id.
+    """Append a Communication (証跡・事後記録型) and return its id.
+
+    ``target_id`` may be a target (opp-/acc-) or a planned work item
+    (act-/nrt-). Work items resolve to their parent deal/account as the storage
+    container and set ``linked_id`` to the item, so a communication can record
+    "this outbound email fulfilled that nurturing touch" — the sales twin of a
+    commit resolving a task, while still living under the target like a commit
+    lives under a milestone (resolve_communication_target).
 
     ``direction`` (inbound/outbound) is required — it's what ball derivation and
     the reply-watcher (E) read. ``source`` is a free dict of trace pointers
     (typically ``{"ref": <message-id/thread>, "url": <permalink>}``) so the
-    origin stays auditable. Append-only: this never mutates an existing record
-    (data-immutability-principle)."""
-    target = find_communication_target(data, target_id)
-    if target is None:
+    origin stays auditable. Append-only: never mutates an existing record."""
+    container, linked_id = resolve_communication_target(data, target_id)
+    if container is None:
         raise ValueError(
-            f"Communication target not found (opp-… or acc-…): {target_id}")
+            "Communication target not found (opp-…/acc-… target or "
+            f"act-…/nrt-… work item): {target_id}")
     if not summary or not summary.strip():
         raise ValueError("Communication summary is required")
     if direction not in VALID_COMM_DIRECTION:
@@ -1178,23 +1228,28 @@ def communication_add(data: dict, target_id: str, summary: str, *,
         raise ValueError(
             f"channel must be one of {list(COMM_CHANNELS)}, got {ch!r}")
     comm_id = next_communication_id(data)
-    target.setdefault("communications", []).append({
+    container.setdefault("communications", []).append({
         "id": comm_id,
         "direction": direction,
         "channel": ch,
         "summary": summary.strip(),
         "source": dict(source) if source else {},
+        "linked_id": linked_id,
         "occurred_at": occurred_at,
         "created_at": created_at,
     })
     return comm_id
 
 
-def communications_of(target: dict) -> list:
+def communications_of(target: dict, *, linked_id: Optional[str] = None) -> list:
     """The target's communications in occurrence order (oldest → newest).
     Sort key is occurred_at, falling back to created_at then insertion order so
-    records without a timestamp keep their append order (stable)."""
+    records without a timestamp keep their append order (stable). Pass
+    ``linked_id`` to keep only the communications that fulfilled that specific
+    Activity/Nurturing (= work-item grain view)."""
     comms = (target or {}).get("communications", [])
+    if linked_id is not None:
+        comms = [c for c in comms if c.get("linked_id") == linked_id]
 
     def key(pair):
         idx, c = pair

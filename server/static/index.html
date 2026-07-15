@@ -3165,6 +3165,7 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .comm-ball { margin-left:8px; font-size:10px; padding:1px 8px; border-radius:10px; }
 .comm-ball.self { color:var(--accent); background:var(--accent-glow); }
 .comm-ball.counterpart { color:var(--text-secondary); background:var(--bg-raised); }
+.comm-link { margin-left:8px; font-size:10px; color:var(--text-dim); white-space:nowrap; }
 /* --- ms-106 fb4: 見込み売上 / 目標進捗バー --- */
 .pipeline-sub { color:var(--text-dim); font-size:0.85em; }
 .pipeline-bar { height:5px; background:var(--bg-raised); border-radius:3px; margin-top:5px; overflow:hidden; max-width:240px; }
@@ -4652,6 +4653,28 @@ function _salesDeriveBall(target) {
   if (dir === 'outbound') return 'counterpart';
   return '';
 }
+// e-3451: a communication may fulfill a specific 予定 (Activity / Nurturing).
+// Resolve its description so the row shows "どの予定を果たしたか" (dev の
+// commit→task resolves の営業版), falling back to the raw id.
+function _salesLinkedLabel(linkedId) {
+  if (!linkedId) return '';
+  const p = state.project || {};
+  let desc = '';
+  if (linkedId.indexOf('act-') === 0) {
+    for (const o of (p.opportunities || [])) {
+      const a = (o.activities || []).find(x => x.id === linkedId);
+      if (a) { desc = a.description || ''; break; }
+    }
+  } else if (linkedId.indexOf('nrt-') === 0) {
+    for (const a of (p.accounts || [])) {
+      const n = (a.nurturings || []).find(x => x.id === linkedId);
+      if (n) { desc = n.description || ''; break; }
+    }
+  }
+  const text = desc || linkedId;
+  const short = text.length > 20 ? text.slice(0, 20) + '…' : text;
+  return `<span class="comm-link" title="${esc('この予定を果たした: ' + text)}">↳ ${esc(short)}</span>`;
+}
 function _salesCommRows(comms) {
   return comms.map(c => {
     const inbound = c.direction === 'inbound';
@@ -4667,7 +4690,7 @@ function _salesCommRows(comms) {
     return `<div class="comm-row ${inbound ? 'inbound' : 'outbound'}">
       <span class="comm-dir" title="${label}">${arrow}</span>
       <span class="comm-ch">${esc(c.channel || 'other')}</span>
-      <span class="comm-summary">${esc(c.summary || '')}</span>
+      <span class="comm-summary">${esc(c.summary || '')}${_salesLinkedLabel(c.linked_id)}</span>
       ${when ? `<span class="comm-when">${esc(_salesShortDate(when))}</span>` : ''}
       ${trace}
     </div>`;
