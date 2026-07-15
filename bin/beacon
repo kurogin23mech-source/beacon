@@ -73,6 +73,8 @@ Sales (profession=sales):
   beacon opportunity due [--json]                            List opportunities awaiting a transition judgement (due/overdue)
   beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self|counterpart]   Log an activity on an opportunity
   beacon opportunity delete <opp-id>                         Delete an opportunity and its activities
+  beacon communication add <target-id> "<summary>" --direction inbound|outbound [--channel email|slack|meeting|calendar|phone|other] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]   Record a communication (証跡・営業の Commit) on an opportunity/account
+  beacon communication list <target-id> [--json]             List a target's communications (証跡) + derived ball
   beacon phase list [--json]                                 Show the configured phase funnels
 
 Pull Requests:
@@ -1418,6 +1420,51 @@ cmd_opportunity_activity() {
         python3 "$COMMANDS_PY" opportunity_activity
 }
 
+cmd_communication_add() {
+    ensure_project
+    local target_id="" summary="" direction="" channel="" ref="" url="" occurred=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --direction) direction="${2:-}"; shift 2 ;;
+            --channel)   channel="${2:-}"; shift 2 ;;
+            --source-ref) ref="${2:-}"; shift 2 ;;
+            --source-url) url="${2:-}"; shift 2 ;;
+            --occurred)  occurred="${2:-}"; shift 2 ;;
+            -?*) _guard_positional "$1" "Usage: beacon communication add <target-id> <summary> --direction inbound|outbound [--channel email|slack|meeting|calendar|phone|other] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]" ;;
+            *)
+                if [ -z "$target_id" ]; then target_id="$1"; else summary="$1"; fi
+                shift ;;
+        esac
+    done
+    if [ -z "$target_id" ] || [ -z "$summary" ] || [ -z "$direction" ]; then
+        echo "Usage: beacon communication add <target-id> <summary> --direction inbound|outbound [--channel email|slack|meeting|calendar|phone|other] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]"
+        exit 1
+    fi
+    BEACON_COMM_TARGET="$target_id" BEACON_COMM_SUMMARY="$summary" \
+        BEACON_COMM_DIRECTION="$direction" BEACON_COMM_CHANNEL="$channel" \
+        BEACON_COMM_SOURCE_REF="$ref" BEACON_COMM_SOURCE_URL="$url" \
+        BEACON_COMM_OCCURRED="$occurred" \
+        python3 "$COMMANDS_PY" communication_add
+}
+
+cmd_communication_list() {
+    ensure_project
+    local target_id="" json_flag=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_flag="1"; shift ;;
+            -?*)    _guard_positional "$1" "Usage: beacon communication list <target-id> [--json]" ;;
+            *)      target_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$target_id" ]; then
+        echo "Usage: beacon communication list <target-id> [--json]"
+        exit 1
+    fi
+    BEACON_COMM_TARGET="$target_id" BEACON_JSON="$json_flag" \
+        python3 "$COMMANDS_PY" communication_list
+}
+
 cmd_account_phase() {
     ensure_project
     local acc_id="" phase="" note=""
@@ -2632,6 +2679,13 @@ case "${1:-}" in
             activity) shift 2; cmd_opportunity_activity "$@" ;;
             delete)   shift 2; cmd_opportunity_delete "$@" ;;
             *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|phase-prob|transition-date|judge|due|activity|delete]" ;;
+        esac
+        ;;
+    communication|comm)
+        case "${2:-}" in
+            add)      shift 2; cmd_communication_add "$@" ;;
+            list|ls)  shift 2; cmd_communication_list "$@" ;;
+            *)        echo "Usage: beacon communication [add|list]" ;;
         esac
         ;;
     sales)

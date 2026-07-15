@@ -269,6 +269,8 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon opportunity due [--json]` | List opportunities awaiting a transition judgement / 判定待ち（遷移日 到達・超過）の商談を一覧 |
 | `beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self\|counterpart]` | Log an activity on an opportunity / 商談に活動を記録 |
 | `beacon opportunity delete <opp-id>` | Delete an opportunity and its activities / 商談と活動を削除 |
+| `beacon communication add <target-id> "<summary>" --direction inbound\|outbound [--channel email\|slack\|meeting\|calendar\|phone\|other] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]` | Record a communication (証跡・事後記録型 = 営業の Commit) on an opportunity/account / 商談・顧客にやり取りの証跡を記録 |
+| `beacon communication list <target-id> [--json]` | List a target's communications (証跡) oldest→newest + derived ball / やり取りの証跡一覧とボール導出 |
 | `beacon phase list [--json]` | Show the configured phase funnels (account / opportunity vocabulary) / 設定済みフェーズファネルを表示 |
 
 ### Pull Requests

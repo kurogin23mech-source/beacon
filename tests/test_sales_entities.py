@@ -1029,3 +1029,88 @@ def test_sales_targets_sparse_set_get_clear():
     assert se.get_sales_target(data, "kida") is None
     with pytest.raises(ValueError):
         se.set_sales_target(data, "  ", 1)
+
+
+# --- Communication (証跡・事後記録型 = 営業の Commit, e-3432) ---------------
+
+def test_communication_add_under_opportunity():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    cid = se.communication_add(data, opp, "日程を打診", direction="outbound",
+                               channel="email",
+                               source={"ref": "<m1@x>", "url": "https://x/1"},
+                               occurred_at="2026-07-15T10:00:00+09:00")
+    assert cid == "comm-1"
+    c = se.find_opportunity(data, opp)["communications"][0]
+    assert c["direction"] == "outbound" and c["channel"] == "email"
+    assert c["summary"] == "日程を打診"
+    assert c["source"] == {"ref": "<m1@x>", "url": "https://x/1"}
+    assert c["occurred_at"] == "2026-07-15T10:00:00+09:00"
+
+
+def test_communication_add_under_account():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    cid = se.communication_add(data, acc, "御礼メール受領", direction="inbound")
+    assert cid == "comm-1"
+    c = se.find_account(data, acc)["communications"][0]
+    assert c["channel"] == "other"  # default when unspecified
+    assert c["direction"] == "inbound"
+
+
+def test_communication_ids_global_across_targets():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    opp = se.opportunity_add(data, "Deal", account_id=acc)
+    assert se.communication_add(data, opp, "a", direction="outbound") == "comm-1"
+    assert se.communication_add(data, acc, "b", direction="inbound") == "comm-2"
+    assert se.communication_add(data, opp, "c", direction="inbound") == "comm-3"
+
+
+def test_communication_unknown_target():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.communication_add(data, "opp-9", "x", direction="inbound")
+    with pytest.raises(ValueError):
+        se.communication_add(data, "acc-9", "x", direction="inbound")
+    with pytest.raises(ValueError):
+        se.communication_add(data, "mlst-1", "x", direction="inbound")  # wrong prefix
+
+
+def test_communication_validates_direction_and_channel():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    with pytest.raises(ValueError):
+        se.communication_add(data, opp, "x", direction="sideways")
+    with pytest.raises(ValueError):
+        se.communication_add(data, opp, "x", direction="inbound", channel="carrier-pigeon")
+    with pytest.raises(ValueError):
+        se.communication_add(data, opp, "  ", direction="inbound")  # blank summary
+
+
+def test_communications_of_orders_by_occurred_then_insertion():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    se.communication_add(data, opp, "third", direction="inbound", occurred_at="2026-07-15T14:00")
+    se.communication_add(data, opp, "first", direction="outbound", occurred_at="2026-07-15T09:00")
+    se.communication_add(data, opp, "notime", direction="inbound")  # no timestamp → keeps insert order (last)
+    ordered = se.communications_of(se.find_opportunity(data, opp))
+    assert [c["summary"] for c in ordered] == ["first", "third", "notime"]
+
+
+def test_derive_ball_from_latest_communication():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    assert se.derive_ball(se.find_opportunity(data, opp)) is None  # no comms yet
+    se.communication_add(data, opp, "sent", direction="outbound", occurred_at="2026-07-15T09:00")
+    assert se.derive_ball(se.find_opportunity(data, opp)) == se.BALL_COUNTERPART
+    se.communication_add(data, opp, "reply", direction="inbound", occurred_at="2026-07-15T14:00")
+    assert se.derive_ball(se.find_opportunity(data, opp)) == se.BALL_SELF
+
+
+def test_opportunity_delete_removes_communications():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    se.communication_add(data, opp, "x", direction="inbound")
+    se.opportunity_delete(data, opp)
+    assert se.find_opportunity(data, opp) is None

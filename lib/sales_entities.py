@@ -1097,12 +1097,133 @@ def account_delete(data: dict, account_id: str, *, force: bool = False) -> list:
 
 
 def opportunity_delete(data: dict, opportunity_id: str) -> None:
-    """Remove an Opportunity and its composition children (activities go with
-    it — they have no life independent of the deal)."""
+    """Remove an Opportunity and its composition children (activities and
+    communications go with it — they have no life independent of the deal)."""
     if find_opportunity(data, opportunity_id) is None:
         raise ValueError(f"Opportunity not found: {opportunity_id}")
     data["opportunities"] = [o for o in data.get("opportunities", [])
                              if o.get("id") != opportunity_id]
+
+
+# ---------------------------------------------------------------------------
+# Communication (証跡・事後記録型) — 従属 composition → Opportunity or Account
+# ---------------------------------------------------------------------------
+# ms-107 e-3432 / SPEC o83GEljD8xeFMr95wLTh 設計方針 1: 営業の Commit。
+#
+# 開発の Task→Commit と同型で、営業の Activity (事前計画型) と対をなす事後記録型。
+# 「実際にこのメールを送り、こう返ってきた」を source を辿れる形 + AI 要約付きで
+# 残す証跡。フェーズ遷移の判定は「予定 (Activity)」でなく「事実 (Communication)」
+# を読むのが正しい (SPEC §1)。性質:
+#   - source を辿れる (message-id / thread / permalink / 議事録 doc / event link)
+#   - AI 要約付き (summary は 1 行)
+#   - 不変・追記のみ (data-immutability-principle — 一度残した証跡は書き換えない)
+#   - target (Opportunity 優先、商談が無ければ Account) の子。Activity と同じ子層。
+#
+# ms-109 含意: Commit ≡ Communication = target 横断で汎用な証跡 primitive。本 MS
+# では営業アダプタとして実装し、汎用化は ms-109 に委ねる。
+
+COMM_INBOUND = "inbound"        # 相手 → 自分 (受信): この後ボールは自分
+COMM_OUTBOUND = "outbound"      # 自分 → 相手 (送信): この後ボールは相手
+VALID_COMM_DIRECTION = {COMM_INBOUND, COMM_OUTBOUND}
+
+# やり取りの媒体。source.type と重複させず、媒体だけをここに持つ。"other" が
+# escape hatch なので新媒体でも block しない (ball 同様、validated set + other)。
+COMM_CHANNELS = ("email", "slack", "meeting", "calendar", "phone", "other")
+
+
+def next_communication_id(data: dict) -> str:
+    ids = []
+    for opp in data.get("opportunities", []):
+        ids.extend(c.get("id", "") for c in opp.get("communications", []))
+    for acc in data.get("accounts", []):
+        ids.extend(c.get("id", "") for c in acc.get("communications", []))
+    return _next_prefixed_id(ids, "comm-")
+
+
+def find_communication_target(data: dict, target_id: str) -> Optional[dict]:
+    """Resolve a Communication's parent — an Opportunity (opp-…) or, when the
+    deal doesn't exist yet, an Account (acc-…). Returns the target dict or None.
+    """
+    if target_id.startswith("opp-"):
+        return find_opportunity(data, target_id)
+    if target_id.startswith("acc-"):
+        return find_account(data, target_id)
+    return None
+
+
+def communication_add(data: dict, target_id: str, summary: str, *,
+                      direction: str, channel: str = "other",
+                      source: Optional[dict] = None,
+                      occurred_at: str = "", created_at: str = "") -> str:
+    """Append a Communication (証跡・事後記録型) under a target (Opportunity
+    opp-… preferred, or Account acc-… when there's no deal), return its id.
+
+    ``direction`` (inbound/outbound) is required — it's what ball derivation and
+    the reply-watcher (E) read. ``source`` is a free dict of trace pointers
+    (typically ``{"ref": <message-id/thread>, "url": <permalink>}``) so the
+    origin stays auditable. Append-only: this never mutates an existing record
+    (data-immutability-principle)."""
+    target = find_communication_target(data, target_id)
+    if target is None:
+        raise ValueError(
+            f"Communication target not found (opp-… or acc-…): {target_id}")
+    if not summary or not summary.strip():
+        raise ValueError("Communication summary is required")
+    if direction not in VALID_COMM_DIRECTION:
+        raise ValueError(
+            f"direction must be one of {sorted(VALID_COMM_DIRECTION)}, "
+            f"got {direction!r}")
+    ch = (channel or "other").strip() or "other"
+    if ch not in COMM_CHANNELS:
+        raise ValueError(
+            f"channel must be one of {list(COMM_CHANNELS)}, got {ch!r}")
+    comm_id = next_communication_id(data)
+    target.setdefault("communications", []).append({
+        "id": comm_id,
+        "direction": direction,
+        "channel": ch,
+        "summary": summary.strip(),
+        "source": dict(source) if source else {},
+        "occurred_at": occurred_at,
+        "created_at": created_at,
+    })
+    return comm_id
+
+
+def communications_of(target: dict) -> list:
+    """The target's communications in occurrence order (oldest → newest).
+    Sort key is occurred_at, falling back to created_at then insertion order so
+    records without a timestamp keep their append order (stable)."""
+    comms = (target or {}).get("communications", [])
+
+    def key(pair):
+        idx, c = pair
+        t = c.get("occurred_at") or c.get("created_at") or ""
+        # Untimed records (t == "") sort *after* all dated ones, then keep
+        # insertion order — a freshly-added note without a timestamp belongs at
+        # the tail of the chronological log, not the head.
+        return (t == "", t, idx)
+
+    ordered = sorted(enumerate(comms), key=key)
+    return [c for _, c in ordered]
+
+
+def derive_ball(target: dict) -> Optional[str]:
+    """Whose court the deal is in, derived from the latest Communication
+    (SPEC §6): the newest inbound means the counterpart just played → the ball
+    is ours (BALL_SELF); the newest outbound means we played → theirs
+    (BALL_COUNTERPART). Returns None when there's no communication to derive
+    from (ball is unknown, not a default). ball was removed from the UI but the
+    engine keeps it as the reply-watcher's (E) driver."""
+    comms = communications_of(target)
+    if not comms:
+        return None
+    latest = comms[-1]
+    if latest.get("direction") == COMM_INBOUND:
+        return BALL_SELF
+    if latest.get("direction") == COMM_OUTBOUND:
+        return BALL_COUNTERPART
+    return None
 
 
 # ---------------------------------------------------------------------------

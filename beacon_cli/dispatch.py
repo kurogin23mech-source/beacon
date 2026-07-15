@@ -427,6 +427,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_opp_delete = opp_sub.add_parser("delete", add_help=False)
     p_opp_delete.add_argument("opp_id", nargs="?", default="")
 
+    # ---- communication (ms-107 e-3432: 証跡・事後記録型 = 営業の Commit) ----
+    p_comm = sub.add_parser(
+        "communication", aliases=["comm"], help="Sales communication (証跡) operations",
+        add_help=False,
+    )
+    p_comm.add_argument("--help", "-h", action="store_true", dest="show_help")
+    comm_sub = p_comm.add_subparsers(dest="comm_cmd", metavar="<subcmd>")
+
+    p_comm_add = comm_sub.add_parser("add", add_help=False)
+    p_comm_add.add_argument("target_id", nargs="?", default="")
+    p_comm_add.add_argument("summary", nargs="?", default="")
+    p_comm_add.add_argument("--direction", default="")
+    p_comm_add.add_argument("--channel", default="")
+    p_comm_add.add_argument("--source-ref", dest="source_ref", default="")
+    p_comm_add.add_argument("--source-url", dest="source_url", default="")
+    p_comm_add.add_argument("--occurred", default="")
+
+    p_comm_list = comm_sub.add_parser("list", aliases=["ls"], add_help=False)
+    p_comm_list.add_argument("target_id", nargs="?", default="")
+    p_comm_list.add_argument("--json", action="store_true")
+
     # ---- phase (ms-106: sales entities, profession=sales) ----
     p_phase = sub.add_parser(
         "phase", help="Sales phase funnel vocabulary", add_help=False,
@@ -1905,6 +1926,44 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
         env = {"BEACON_OPP_ID": args.opp_id or ""}
         return _run_commands_py(root, "opportunity_delete", env)
     print("Usage: beacon opportunity [add|list|phase|activity|delete] [options]")
+    return 2
+
+
+def _handle_communication(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help or args.comm_cmd is None:
+        print("Usage: beacon communication [add|list] [options]")
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+
+    cmd = args.comm_cmd
+    if cmd == "add":
+        if not args.target_id or not args.summary or not args.direction:
+            print("Usage: beacon communication add <target-id> <summary> "
+                  "--direction inbound|outbound "
+                  "[--channel email|slack|meeting|calendar|phone|other] "
+                  "[--source-ref <id>] [--source-url <link>] [--occurred <datetime>]")
+            return 1
+        env = {
+            "BEACON_COMM_TARGET": args.target_id or "",
+            "BEACON_COMM_SUMMARY": args.summary or "",
+            "BEACON_COMM_DIRECTION": args.direction or "",
+            "BEACON_COMM_CHANNEL": args.channel or "",
+            "BEACON_COMM_SOURCE_REF": args.source_ref or "",
+            "BEACON_COMM_SOURCE_URL": args.source_url or "",
+            "BEACON_COMM_OCCURRED": args.occurred or "",
+        }
+        return _run_commands_py(root, "communication_add", env)
+    if cmd in ("list", "ls"):
+        if not args.target_id:
+            print("Usage: beacon communication list <target-id> [--json]")
+            return 1
+        env = {
+            "BEACON_COMM_TARGET": args.target_id or "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        return _run_commands_py(root, "communication_list", env)
+    print("Usage: beacon communication [add|list] [options]")
     return 2
 
 
@@ -4318,6 +4377,8 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "acc": _handle_account,
     "opportunity": _handle_opportunity,
     "opp": _handle_opportunity,
+    "communication": _handle_communication,
+    "comm": _handle_communication,
     "phase": _handle_phase,
     "sync": _handle_sync,
     "task": _handle_task,
