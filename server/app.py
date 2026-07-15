@@ -9029,13 +9029,23 @@ def _fire_operation(pid: str, project: dict, op: dict, now_iso: str) -> dict:
                 "skipped": "no active envelope (approve first)"}
     meta = op.get("meta") or {}
     recipient = meta.get("claimer_session_id") or meta.get("open_by") or ""
+    # ms-106 e-3504 — per-Operation fire target. An Operation is the periodic-
+    # execution primitive; which Skill it wakes on fire is the Operation's own
+    # property (``meta.execute_skill``), not hard-wired to the dev log-review
+    # Skill. Defaults to ``beacon-operation-execute`` so existing dev Operations
+    # are unaffected; the sales reply-watch Operation sets it to
+    # ``beacon-sales-reply-watch`` (detection-only). This is what lets the same
+    # tick primitive drive dev monitoring and sales watches from one seam.
+    execute_skill = (meta.get("execute_skill") or "beacon-operation-execute").strip() \
+        or "beacon-operation-execute"
     payload = {
         "op_id": op_id,
         "log_source": op.get("log_source", op_id),
         "spec_doc_id": _find_operation_spec_doc(project, op_id),
         "trigger_name": f"operation_check_{op_id}",
+        "execute_skill": execute_skill,
         "message": f"{op_id} の定期チェック (server tick)。"
-                   "/beacon-operation-execute で実行してください。",
+                   f"/{execute_skill} で実行してください。",
         "created_at": now_iso,
     }
     if recipient:
