@@ -81,6 +81,7 @@ def _is_trek_scoped_channel(channel: str) -> bool:
 # consent NOT required (send may proceed without a fresh recipient confirm):
 CONSENT_SKIP_SAME_USER = "same_user"
 CONSENT_SKIP_TREK_SCOPE = "trek_scoped_channel"
+CONSENT_SKIP_NON_DM = "non_dm_channel"
 CONSENT_SKIP_OPERATION = "operation_envelope"
 CONSENT_SKIP_REPLY = "reply_derived_recipient"
 CONSENT_SKIP_SHARED_TREK = "shared_trek_member"
@@ -123,8 +124,12 @@ def classify_send_consent(
         required. This is the fail-safe default: a send we cannot prove
         is safe must be confirmed by a human.
     channel : str
-        Bus channel. Trek-scoped / operation channels (operation-trigger,
-        trek-*) are a pre-approved scope and skip consent (§1).
+        Bus channel. Only the ``dm`` channel carries person-directed
+        messages that can misfire to the wrong human; broadcast /
+        coordination channels (claim-signal, ops, test-*) have no single
+        recipient and skip consent. Trek-scoped / operation channels
+        (operation-trigger, trek-*) are a pre-approved scope and also skip
+        (§1).
     is_reply : bool
         True when this send replies to a received DM (has ``in_reply_to``).
         The recipient is derived from the parent envelope, so it cannot
@@ -159,6 +164,14 @@ def classify_send_consent(
     # Rule 2: Trek-scoped / operation channel → pre-approved working scope.
     if _is_trek_scoped_channel(channel):
         return (False, CONSENT_SKIP_TREK_SCOPE)
+
+    # Rule 2b: only the ``dm`` channel is person-directed. Broadcast /
+    # coordination channels (claim-signal / ops / test-*) have no single
+    # recipient to misfire at, so they are outside this gate's scope. The
+    # accident this MS closes is a wrong-human *DM*; keeping the gate to dm
+    # avoids rejecting cross-user broadcasts (= ms-55 claim coordination).
+    if str(channel or "") != "dm":
+        return (False, CONSENT_SKIP_NON_DM)
 
     # Rule 3: Operation (T2 scope) envelope → pre-approved autonomous path.
     if operation_envelope:
@@ -404,6 +417,7 @@ def evaluate_send(
 __all__ = [
     "CONSENT_SKIP_SAME_USER",
     "CONSENT_SKIP_TREK_SCOPE",
+    "CONSENT_SKIP_NON_DM",
     "CONSENT_SKIP_OPERATION",
     "CONSENT_SKIP_REPLY",
     "CONSENT_SKIP_SHARED_TREK",

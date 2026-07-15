@@ -27,6 +27,7 @@ from starlette.responses import Response, JSONResponse
 import approved_actions as approved_actions_mod
 import core
 import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
+import dm_consent as dm_consent_mod  # ms-110 / e-3443: sender-side cross-user consent backstop
 import decision_event as decision_event_mod  # ms-90 / e-3246: decision-event 記録
 import envelope as envelope_mod
 import invitations as invitations_mod  # ms-78 e-1803/e-1804: token-based invites
@@ -7382,6 +7383,90 @@ async def post_bus_event(
         # (= surface in the AI context but do not auto-run).
         effective_delivery = "propose-to-ai"
         audit_record["effective_delivery"] = effective_delivery
+
+    # ms-110 / e-3443: sender-side cross-user consent backstop.
+    # ms-70 (above) protects the *receiver* — it holds an action DM for the
+    # receiver's human. This is the symmetric *sender*-side guard: the server
+    # refuses to accept a cross-user new-send whose recipient no human
+    # confirmed. It is the one choke point every client path (CLI / MCP reply /
+    # headless / cron) must pass, so it cannot be bypassed by calling a
+    # primitive directly, and cross-user is rejected when there is no envelope
+    # (= --no-envelope carries no consent claim). same-user / reply / Trek /
+    # Operation / non-dm are carved out so armed auto-reply, Trek协奏, and
+    # Operation autonomy do not regress (SPEC FZcvJ5ivhLu0UkEtw7Ew §1/§2/AC5).
+    consent_is_reply = bool((body.envelope or {}).get("in_reply_to")) or (
+        env_tier == envelope_mod.TIER_T3
+    )
+    consent_operation_env = env_tier in (
+        envelope_mod.TIER_T1_SYSTEM, envelope_mod.TIER_T2,
+    )
+    # Cheap classification first (no backend calls). Carve-outs (same-user /
+    # reply / Trek-channel / Operation / non-dm) return "not required" here and
+    # short-circuit — no claim check, no Trek lookup.
+    consent_required, consent_reason = dm_consent_mod.classify_send_consent(
+        sender_user_id=sender_uid,
+        recipient_user_id=receiver_uid,
+        channel=body.channel,
+        is_reply=consent_is_reply,
+        operation_envelope=consent_operation_env,
+        shared_trek=False,
+    )
+    consent_allow = not consent_required
+    if consent_required:
+        # Claim check is backend-free — a confirmed send (the common path via
+        # /beacon-dm-send) is allowed without paying for a Trek lookup.
+        consent_claim = (body.envelope or {}).get(dm_consent_mod.CONSENT_CLAIM_KEY)
+        _decision = dm_consent_mod.evaluate_send(
+            sender_user_id=sender_uid,
+            recipient_user_id=receiver_uid,
+            recipient_session_id=recipient_sid_for_gate,
+            channel=body.channel,
+            is_reply=consent_is_reply,
+            operation_envelope=consent_operation_env,
+            shared_trek=False,
+            consent_claim=consent_claim,
+        )
+        consent_allow = _decision["allow"]
+        consent_reason = _decision["reason"]
+        if not consent_allow and sender_uid and receiver_uid:
+            # Last resort before rejecting: a shared-Trek pair is pre-approved
+            # (§1). Only now pay for the Trek lookup (fresh per event — no
+            # cached membership). Reuse the same session-grain lookup ms-70
+            # built above.
+            _c_matched, _c_trek_id = gate_lookup(
+                sender_uid, receiver_uid,
+                body.sender_session_id or "", recipient_sid_for_gate,
+            )
+            if _c_matched:
+                consent_allow = True
+                consent_reason = dm_consent_mod.CONSENT_SKIP_SHARED_TREK
+    audit_record["sender_consent"] = {
+        "allow": consent_allow,
+        "consent_required": consent_required,
+        "reason": consent_reason,
+        "sender_user_id": sender_uid,
+        "receiver_user_id": receiver_uid,
+        "had_envelope": body.envelope is not None,
+    }
+    if not consent_allow:
+        # Cross-user new-send without a valid human recipient confirmation.
+        # Reject at the choke point so no client path can leak it to the wrong
+        # human. Audit before raising so the rejection is observable.
+        db.append_bus_audit(project_id, audit_record)
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "sender_consent_required",
+                "reason": consent_reason,
+                "hint": (
+                    "cross-user DM requires a human-confirmed recipient. "
+                    "Send via /beacon-dm-send (which confirms the recipient "
+                    "and issues the recipient_confirmed claim) instead of "
+                    "posting the bus primitive directly. --no-envelope is not "
+                    "permitted for cross-user DMs."
+                ),
+            },
+        )
 
     data = {
         "channel": body.channel,

@@ -102,6 +102,20 @@ def test_trek_scoped_channel_skips_consent(channel):
     assert reason == dm_consent.CONSENT_SKIP_TREK_SCOPE
 
 
+@pytest.mark.parametrize("channel", ["claim-signal", "ops", "test-broadcast"])
+def test_non_dm_channel_skips_consent(channel):
+    """Broadcast / coordination channels are not person-directed DMs → the
+    gate does not apply (else a cross-user claim-signal broadcast, which has
+    no single recipient, would be falsely rejected and break ms-55)."""
+    required, reason = dm_consent.classify_send_consent(
+        sender_user_id="uid-alice",
+        recipient_user_id="uid-bob",
+        channel=channel,
+    )
+    assert required is False
+    assert reason == dm_consent.CONSENT_SKIP_NON_DM
+
+
 # ---------------------------------------------------------------------------
 # Fail-safe: unknown recipient identity → treat as cross-user
 # ---------------------------------------------------------------------------
