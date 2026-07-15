@@ -16533,6 +16533,34 @@ def cmd_help_json():
 # Operation / Run / Incident commands
 # ---------------------------------------------------------------------------
 
+def cmd_operation_server_tick():
+    # ms-107 e-3461 — Operation を server tick (trek tick 相乗り) の発火対象に
+    # opt-in する。meta.server_tick を on/off し、任意で cadence_minutes を設定。
+    # 内部専用: 有効化 setup 時に 1 回叩く (bin/beacon には出さない)。
+    op_id = os.environ.get("BEACON_OP_ID", "")
+    mode = (os.environ.get("BEACON_SERVER_TICK", "") or "on").strip().lower()
+    cadence = os.environ.get("BEACON_CADENCE", "")
+    data = load_project()
+    matches = core.find_operations(data, op_id)
+    if not matches:
+        print(f"Error: Operation not found: {op_id}", file=sys.stderr)
+        sys.exit(1)
+    op = matches[0]
+    meta = op.setdefault("meta", {})
+    meta["server_tick"] = mode in ("on", "1", "true", "yes")
+    if cadence:
+        try:
+            meta["cadence_minutes"] = int(cadence)
+        except ValueError:
+            print(f"Error: --cadence must be an integer, got {cadence!r}",
+                  file=sys.stderr)
+            sys.exit(1)
+    save_project(data, op={"type": "operation_update", "op_id": op_id})
+    state = "on" if meta["server_tick"] else "off"
+    cad = meta.get("cadence_minutes", "default 60")
+    print(f"Operation {op_id}: server_tick={state}, cadence_minutes={cad}")
+
+
 def cmd_operation_open():
     title = os.environ.get("BEACON_OPERATION_TITLE", "")
     schedule = os.environ.get("BEACON_OPERATION_SCHEDULE", "weekdays")
@@ -21737,6 +21765,8 @@ if __name__ == "__main__":
         "issue_sync": cmd_issue_sync,
         "operation_open": cmd_operation_open,
         "operation_close": cmd_operation_close,
+        # ms-107 e-3461 — server tick opt-in (内部専用、有効化 setup で使う)
+        "operation_server_tick": cmd_operation_server_tick,
         "operation_set_status": cmd_operation_set_status,
         "operation_update": cmd_operation_update,
         "operation_task_add": cmd_operation_task_add,
