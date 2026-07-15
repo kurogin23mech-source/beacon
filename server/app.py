@@ -7387,71 +7387,92 @@ async def post_bus_event(
     # ms-110 / e-3443: sender-side cross-user consent backstop.
     # ms-70 (above) protects the *receiver* — it holds an action DM for the
     # receiver's human. This is the symmetric *sender*-side guard: the server
-    # refuses to accept a cross-user new-send whose recipient no human
+    # refuses to accept a *proven* cross-user new-send whose recipient no human
     # confirmed. It is the one choke point every client path (CLI / MCP reply /
-    # headless / cron) must pass, so it cannot be bypassed by calling a
-    # primitive directly, and cross-user is rejected when there is no envelope
-    # (= --no-envelope carries no consent claim). same-user / reply / Trek /
-    # Operation / non-dm are carved out so armed auto-reply, Trek协奏, and
-    # Operation autonomy do not regress (SPEC FZcvJ5ivhLu0UkEtw7Ew §1/§2/AC5).
-    consent_is_reply = bool((body.envelope or {}).get("in_reply_to")) or (
-        env_tier == envelope_mod.TIER_T3
-    )
-    consent_operation_env = env_tier in (
-        envelope_mod.TIER_T1_SYSTEM, envelope_mod.TIER_T2,
-    )
-    # Cheap classification first (no backend calls). Carve-outs (same-user /
-    # reply / Trek-channel / Operation / non-dm) return "not required" here and
-    # short-circuit — no claim check, no Trek lookup.
-    consent_required, consent_reason = dm_consent_mod.classify_send_consent(
-        sender_user_id=sender_uid,
-        recipient_user_id=receiver_uid,
-        channel=body.channel,
-        is_reply=consent_is_reply,
-        operation_envelope=consent_operation_env,
-        shared_trek=False,
-    )
-    consent_allow = not consent_required
-    if consent_required:
-        # Claim check is backend-free — a confirmed send (the common path via
-        # /beacon-dm-send) is allowed without paying for a Trek lookup.
-        consent_claim = (body.envelope or {}).get(dm_consent_mod.CONSENT_CLAIM_KEY)
-        _decision = dm_consent_mod.evaluate_send(
-            sender_user_id=sender_uid,
+    # headless / cron) must pass. same-user / reply / Trek / Operation / non-dm
+    # are carved out so armed auto-reply, Trek协奏, and Operation autonomy do
+    # not regress (SPEC FZcvJ5ivhLu0UkEtw7Ew §1/§2/AC5).
+    #
+    # e-3492 (P1 fix): this gate is behind a kill-switch and re-enabled only
+    # after the claim-issuing client is distributed. Two failures made the
+    # first cut break the same-user cross-project handoff flow in prod:
+    #   1. sender identity was resolved from the POST-target project's session
+    #      registry, but a cross-project sender's session is not there, so
+    #      sender_uid came back "" and the same-user carve-out never fired →
+    #      false cross-user → 403. Fixed: the sender is the *authenticated
+    #      caller* (user["sub"]), which is project-independent.
+    #   2. the distributed CLI (0.58.0) cannot issue the recipient_confirmed
+    #      claim the server requires, so every legit cross-user send would 403
+    #      with a misleading "use /beacon-dm-send" hint. Fixed: BEACON_SENDER_
+    #      CONSENT_ENABLED gates enforcement (default OFF); flip it on only once
+    #      a claim-capable client is rolled out.
+    consent_enforced = os.environ.get("BEACON_SENDER_CONSENT_ENABLED") == "1"
+    # Sender = the authenticated caller (project-independent). Fall back to the
+    # registry-resolved sender only in auth-disabled dev/test where the JWT sub
+    # is the "dev" placeholder.
+    _auth_sub = str((user or {}).get("sub") or "")
+    consent_sender_uid = _auth_sub if (_auth_enabled and _auth_sub) else sender_uid
+    consent_allow = True
+    consent_required = False
+    consent_reason = "gate_disabled"
+    if consent_enforced:
+        consent_is_reply = bool((body.envelope or {}).get("in_reply_to")) or (
+            env_tier == envelope_mod.TIER_T3
+        )
+        consent_operation_env = env_tier in (
+            envelope_mod.TIER_T1_SYSTEM, envelope_mod.TIER_T2,
+        )
+        # Cheap classification first (no backend calls). Carve-outs (same-user /
+        # unresolved / reply / Trek-channel / Operation / non-dm) return "not
+        # required" and short-circuit — no claim check, no Trek lookup.
+        consent_required, consent_reason = dm_consent_mod.classify_send_consent(
+            sender_user_id=consent_sender_uid,
             recipient_user_id=receiver_uid,
-            recipient_session_id=recipient_sid_for_gate,
             channel=body.channel,
             is_reply=consent_is_reply,
             operation_envelope=consent_operation_env,
             shared_trek=False,
-            consent_claim=consent_claim,
         )
-        consent_allow = _decision["allow"]
-        consent_reason = _decision["reason"]
-        if not consent_allow and sender_uid and receiver_uid:
-            # Last resort before rejecting: a shared-Trek pair is pre-approved
-            # (§1). Only now pay for the Trek lookup (fresh per event — no
-            # cached membership). Reuse the same session-grain lookup ms-70
-            # built above.
-            _c_matched, _c_trek_id = gate_lookup(
-                sender_uid, receiver_uid,
-                body.sender_session_id or "", recipient_sid_for_gate,
+        consent_allow = not consent_required
+        if consent_required:
+            # Claim check is backend-free — a confirmed send (the common path
+            # via /beacon-dm-send) is allowed without paying for a Trek lookup.
+            consent_claim = (body.envelope or {}).get(dm_consent_mod.CONSENT_CLAIM_KEY)
+            _decision = dm_consent_mod.evaluate_send(
+                sender_user_id=consent_sender_uid,
+                recipient_user_id=receiver_uid,
+                recipient_session_id=recipient_sid_for_gate,
+                channel=body.channel,
+                is_reply=consent_is_reply,
+                operation_envelope=consent_operation_env,
+                shared_trek=False,
+                consent_claim=consent_claim,
             )
-            if _c_matched:
-                consent_allow = True
-                consent_reason = dm_consent_mod.CONSENT_SKIP_SHARED_TREK
+            consent_allow = _decision["allow"]
+            consent_reason = _decision["reason"]
+            if not consent_allow and consent_sender_uid and receiver_uid:
+                # Last resort before rejecting: a shared-Trek pair is
+                # pre-approved (§1). Only now pay for the Trek lookup (fresh per
+                # event). Reuse the session-grain lookup ms-70 built above.
+                _c_matched, _c_trek_id = gate_lookup(
+                    consent_sender_uid, receiver_uid,
+                    body.sender_session_id or "", recipient_sid_for_gate,
+                )
+                if _c_matched:
+                    consent_allow = True
+                    consent_reason = dm_consent_mod.CONSENT_SKIP_SHARED_TREK
     audit_record["sender_consent"] = {
+        "enforced": consent_enforced,
         "allow": consent_allow,
         "consent_required": consent_required,
         "reason": consent_reason,
-        "sender_user_id": sender_uid,
+        "sender_user_id": consent_sender_uid,
         "receiver_user_id": receiver_uid,
         "had_envelope": body.envelope is not None,
     }
-    if not consent_allow:
-        # Cross-user new-send without a valid human recipient confirmation.
-        # Reject at the choke point so no client path can leak it to the wrong
-        # human. Audit before raising so the rejection is observable.
+    if consent_enforced and not consent_allow:
+        # Proven cross-user new-send without a valid human recipient
+        # confirmation. Reject at the choke point. Audit before raising.
         db.append_bus_audit(project_id, audit_record)
         raise HTTPException(
             status_code=403,

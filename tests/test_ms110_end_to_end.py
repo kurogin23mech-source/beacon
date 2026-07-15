@@ -136,6 +136,8 @@ def send(monkeypatch):
     monkeypatch.setattr(app_module, "_start_watcher", lambda pid: None)
     monkeypatch.setattr(app_module, "_stop_watcher", lambda pid: None)
     monkeypatch.setattr(app_module, "_auth_enabled", False)
+    # e-3492: gate is behind a kill-switch (default OFF); enable for these tests.
+    monkeypatch.setenv("BEACON_SENDER_CONSENT_ENABLED", "1")
 
     async def _noop(pid, ev):
         return None

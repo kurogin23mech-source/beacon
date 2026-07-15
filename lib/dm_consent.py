@@ -80,6 +80,7 @@ def _is_trek_scoped_channel(channel: str) -> bool:
 
 # consent NOT required (send may proceed without a fresh recipient confirm):
 CONSENT_SKIP_SAME_USER = "same_user"
+CONSENT_SKIP_UNRESOLVED = "unresolved_identity"
 CONSENT_SKIP_TREK_SCOPE = "trek_scoped_channel"
 CONSENT_SKIP_NON_DM = "non_dm_channel"
 CONSENT_SKIP_OPERATION = "operation_envelope"
@@ -119,10 +120,11 @@ def classify_send_consent(
         prove same-user, so it falls through toward requiring consent.
     recipient_user_id : str
         user_id of the human owning the recipient session. Empty =
-        "unknown recipient" — cannot be proven same-user, so (absent a
-        carve-out) the send is treated as cross-user and consent is
-        required. This is the fail-safe default: a send we cannot prove
-        is safe must be confirmed by a human.
+        "unknown recipient". e-3492: an unresolved recipient does NOT
+        require consent — we cannot prove it is a different human, and
+        requiring it there false-positived every same-user cross-project
+        send (whose sender resolves to "" against the post-target
+        registry). Consent is required only for a *proven* cross-user pair.
     channel : str
         Bus channel. Only the ``dm`` channel carries person-directed
         messages that can misfire to the wrong human; broadcast /
@@ -187,8 +189,21 @@ def classify_send_consent(
     if shared_trek:
         return (False, CONSENT_SKIP_SHARED_TREK)
 
-    # Default: a new-send whose target we cannot prove is same-user / Trek /
-    # Operation is treated as cross-user → a human must confirm the target.
+    # Rule 6 (e-3492 P1 fix): only a PROVEN cross-user pair may require
+    # consent — both identities resolved AND different. If either side is
+    # unresolved we cannot prove the recipient is a different human, and
+    # blocking here broke the same-user cross-project handoff (a session
+    # sending to its own user's other project, whose session is not in the
+    # post-target registry, so its user_id resolves to ""). Err toward
+    # allowing; the real accident (a resolvable *different* user, e.g. posting
+    # to their project where their session IS registered) still fires below.
+    # This reverses the earlier fail-safe: "cannot prove same-user" no longer
+    # means "block", because that false-positived every cross-project self-send.
+    if not (sender_user_id and recipient_user_id):
+        return (False, CONSENT_SKIP_UNRESOLVED)
+
+    # Default: a proven cross-user new-send (both ids resolved and different)
+    # with no carve-out → a human must confirm the target.
     return (True, CONSENT_REQUIRED_CROSS_USER)
 
 
@@ -416,6 +431,7 @@ def evaluate_send(
 
 __all__ = [
     "CONSENT_SKIP_SAME_USER",
+    "CONSENT_SKIP_UNRESOLVED",
     "CONSENT_SKIP_TREK_SCOPE",
     "CONSENT_SKIP_NON_DM",
     "CONSENT_SKIP_OPERATION",
