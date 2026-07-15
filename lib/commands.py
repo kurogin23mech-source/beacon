@@ -20979,12 +20979,20 @@ def cmd_opportunity_add():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-106 e-3502 — seed the entry phase's anchor activities so a new deal
+    # opens with its next steps instead of a blank list the rep must re-invent.
+    # Done at the CLI (= sales workflow entry), same engine as phase advance
+    # (instantiate_phase_activities, e-3270); idempotent by description.
+    seeded = sales_entities.instantiate_phase_activities(
+        data, opp_id, at=core._now_iso())
     save_project(data)
     opp = sales_entities.find_opportunity(data, opp_id)
     print(f"Added opportunity {opp_id}: {title}")
     if account_id:
         print(f"  account: {account_id}")
     print(f"  phase: {opp.get('phase', '') if opp else phase}")
+    if seeded:
+        print(f"  seeded {len(seeded)} フェーズ活動 (このフェーズの標準ステップ)")
 
 
 def cmd_opportunity_assign():
