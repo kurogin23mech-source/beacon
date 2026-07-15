@@ -3172,6 +3172,14 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .ent-type.comm { color:var(--accent); background:var(--accent-glow); }
 .ent-id { flex:0 0 auto; font-size:10px; font-family:var(--font-mono, monospace); color:var(--text-dim); user-select:all; cursor:text; }
 .acts-sub { margin-left:8px; font-size:10px; color:var(--text-dim); font-weight:400; }
+/* --- e-3544: Communication 行の詳細トグル + 詳細パネル --- */
+.comm-detail-btn { flex:0 0 auto; font-size:10px; color:var(--text-dim); background:none; border:1px solid var(--border-subtle); border-radius:9px; padding:1px 7px; cursor:pointer; white-space:nowrap; }
+.comm-detail-btn:hover { color:var(--text-primary); border-color:var(--border); }
+.comm-detail { margin:2px 0 8px 24px; padding:8px 10px; background:var(--bg-raised); border-radius:8px; border:1px solid var(--border-subtle); }
+.cd-row { display:flex; gap:10px; padding:2px 0; font-size:12px; }
+.cd-key { flex:0 0 84px; color:var(--text-dim); }
+.cd-val { flex:1; color:var(--text-primary); word-break:break-all; }
+.cd-body { font-size:12px; color:var(--text-primary); white-space:pre-wrap; margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid var(--border-subtle); }
 /* --- ms-106 fb4: 見込み売上 / 目標進捗バー --- */
 .pipeline-sub { color:var(--text-dim); font-size:0.85em; }
 .pipeline-bar { height:5px; background:var(--bg-raised); border-radius:3px; margin-top:5px; overflow:hidden; max-width:240px; }
@@ -5221,7 +5229,14 @@ function _salesCommRows(comms, opts) {
       ? `<a class="comm-src" href="${esc(href)}" target="_blank" rel="noopener" title="${esc(ref || href)}">出典 ↗</a>`
       : (ref ? `<span class="comm-src ref" title="${esc(ref)}">出典 ${esc(ref)}</span>` : '');
     const when = _salesCommTime(c);
-    return `<div class="comm-row ${inbound ? 'inbound' : 'outbound'}">
+    // e-3544 (UI): 詳細トグル。展開すると本文(あれば)＋全メタ情報を出す。本文欄
+    // (body/detail) は e-3544 skill 側で入る予定で、入れば最上部に自動表示される。
+    const expanded = c.id && state.expandedComms.has(c.id);
+    const detailBtn = c.id
+      ? `<button class="comm-detail-btn" data-action="toggle-comm" data-comm-id="${esc(c.id)}">${expanded ? '詳細 ▲' : '詳細 ▾'}</button>`
+      : '';
+    return `<div class="comm-item">
+      <div class="comm-row ${inbound ? 'inbound' : 'outbound'}">
       <span class="comm-dir" title="${label}">${arrow}</span>
       <span class="ent-type comm">やり取り</span>
       <span class="ent-id" title="${esc(c.id || '')}">${esc(c.id || '')}</span>
@@ -5229,8 +5244,44 @@ function _salesCommRows(comms, opts) {
       <span class="comm-summary">${esc(c.summary || '')}${nested ? '' : _salesLinkedLabel(c.linked_id)}</span>
       ${when ? `<span class="comm-when">${esc(_salesShortDate(when))}</span>` : ''}
       ${trace}
+      ${detailBtn}
+      </div>
+      ${expanded ? _salesCommDetail(c) : ''}
     </div>`;
   }).join('');
+}
+// e-3544 (UI): 1件の Communication の詳細パネル。行に収まらない全フィールドを出す。
+function _salesCommDetailRow(k, v) {
+  return `<div class="cd-row"><span class="cd-key">${esc(k)}</span><span class="cd-val">${v}</span></div>`;
+}
+function _salesCommDetail(c) {
+  const src = c.source || {};
+  const rows = [];
+  const body = c.body || c.detail || '';
+  if (body) rows.push(`<div class="cd-body">${esc(body)}</div>`);
+  rows.push(_salesCommDetailRow('要約', esc(c.summary || '—')));
+  const dir = c.direction === 'inbound' ? '受信 (相手 → 自分)'
+    : c.direction === 'outbound' ? '送信 (自分 → 相手)' : (c.direction || '—');
+  rows.push(_salesCommDetailRow('向き', esc(dir)));
+  rows.push(_salesCommDetailRow('媒体', esc(c.channel || 'other')));
+  if (c.occurred_at) rows.push(_salesCommDetailRow('発生日時', esc(c.occurred_at)));
+  if (c.created_at) rows.push(_salesCommDetailRow('記録日時', esc(c.created_at)));
+  if (c.linked_id) {
+    const label = _salesLinkedLabel(c.linked_id);
+    rows.push(_salesCommDetailRow('紐づく先', label || esc(c.linked_id)));
+  }
+  if (src.ref) {
+    const href = _salesRefToHref(src.ref, c.channel);
+    rows.push(_salesCommDetailRow('出典 ref', href
+      ? `<a class="comm-src" href="${esc(href)}" target="_blank" rel="noopener">${esc(src.ref)} ↗</a>`
+      : esc(src.ref)));
+  }
+  if (src.url) {
+    rows.push(_salesCommDetailRow('出典 URL',
+      `<a class="comm-src" href="${esc(src.url)}" target="_blank" rel="noopener">${esc(src.url)} ↗</a>`));
+  }
+  rows.push(_salesCommDetailRow('ID', `<span class="ent-id">${esc(c.id || '')}</span>`));
+  return `<div class="comm-detail">${rows.join('')}</div>`;
 }
 // Trim an ISO datetime to a compact date/time for the证跡 log (YYYY-MM-DD HH:MM).
 function _salesShortDate(iso) {
@@ -8748,6 +8799,11 @@ function handleCommonAction(action, el) {
     case 'toggle-opp': {
       const oid = el.dataset.oppId;
       state.expanded.has(oid) ? state.expanded.delete(oid) : state.expanded.add(oid);
+      render(); return true;
+    }
+    case 'toggle-comm': {
+      const cid = el.dataset.commId;
+      state.expandedComms.has(cid) ? state.expandedComms.delete(cid) : state.expandedComms.add(cid);
       render(); return true;
     }
     case 'open-account':
