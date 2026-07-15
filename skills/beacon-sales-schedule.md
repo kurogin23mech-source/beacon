@@ -13,8 +13,10 @@ triggers:
 # Beacon Sales Schedule
 
 > 営業 (profession=sales) プロジェクトで、商談 (Opportunity) の次のアポ (面談) を取る。
-> ms-107 e-3355。相手の都合を聞く前提で候補日時を出し、確定したら Google カレンダーに
-> 予定を作り、商談に活動記録 (証跡) を残す。
+> ms-107 e-3355 / e-3433。相手の都合を聞く前提で候補日時を出し、確定したら Google
+> カレンダーに予定を作り、**同じ日時で Beacon の遷移日も更新し、予定に Beacon 識別 ID を
+> 埋め込んだ Meeting レコードを残す** (遷移日とカレンダーの二重管理・ズレを構造的に防ぐ /
+> 後段の終了検知が識別 ID で商談を突き合わせられる)。商談に活動記録 (証跡) も残す。
 > 予定作成の自律度は **候補提示まで**、カレンダーへの登録は人間承認を経る (制約参照)。
 
 ## 文章の書き方 (Beacon 全体の哲学)
@@ -123,7 +125,7 @@ freebusy の空きから、面談に使えそうな時間帯を **2〜3 個**、
 相手都合が分かり、ユーザーが 1 つの日時を確定したら、その日時 (開始・終了・場所/
 オンライン別) を `$WHEN` として整理する。AI が勝手に確定しない — 確定はユーザーの言葉で。
 
-## Step 6: 予定作成 (人間承認後)
+## Step 6: 予定作成 (人間承認後) — 遷移日 + カレンダー + 識別 ID を束ねる
 
 確定した日時をユーザーに提示し、**カレンダーに登録してよいか明示的に確認**する。
 AI が自律でカレンダーに入れてはならない (制約参照)。
@@ -138,13 +140,56 @@ AI が自律でカレンダーに入れてはならない (制約参照)。
 登録しますか？ (登録する / 直す / やめる)
 ```
 
-ユーザーが「登録する」と答えたら、**Step 2 で解決した `$CALNS` の `create-event`**
-(例 `mcp__google-calendar__create-event`) で予定を作る。`account: $CALACCT` を渡す
-(alias が null なら省略)。タイトルは相手と用件が分かる形 (例:「[商談] ○○社 △△様 面談」)、
-説明に商談 ID を残す。「直す」なら Step 4 に戻り、「やめる」なら中止する。
+ユーザーが「登録する」と答えたら、以下を **この順で** 行う。ここが e-3433 (B) の核心 —
+面談を Beacon の Meeting レコードにも刻み、Beacon の遷移日 (= フェーズ達成を判定する
+予定日) と Google カレンダーを **1 つの識別 ID で束ねる**。後段の終了検知 (C) がこの
+識別 ID でカレンダー予定 → 商談を突き合わせる。
+
+1. **カレンダー予定を作る**: Step 2 で解決した `$CALNS` の `create-event`
+   (例 `mcp__google-calendar__create-event`) で予定を作る。`account: $CALACCT` を渡す
+   (alias が null なら省略)。タイトルは相手と用件が分かる形 (例:「[商談] ○○社 △△様 面談」)。
+   返ってきた **event id** を `$EVENT_ID` として保持する。
+
+2. **Meeting を予約し遷移日を同時更新**: 内部コマンドで Beacon 側に面談を刻む。
+   `--set-transition` 相当 (`BEACON_MTG_SET_TRANSITION=1`) で **商談の遷移日が面談日に
+   同時更新される** (二重管理を無くす)。
+
+   ```bash
+   BEACON_MTG_OPP="$OPP" BEACON_MTG_AT="$WHEN_START" BEACON_MTG_END="$WHEN_END" \
+     BEACON_MTG_LOCATION="$LOC" BEACON_MTG_EVENT_ID="$EVENT_ID" \
+     BEACON_MTG_CAL_NS="$CALNS" BEACON_MTG_CAL_ACCT="$CALACCT" \
+     BEACON_MTG_SET_TRANSITION=1 \
+     python3 "$ROOT/lib/commands.py" meeting_schedule
+   ```
+
+   stdout の `calendar tag (説明文に埋め込む): beacon-meeting-id: mtg-N` の行から、
+   埋め込む **識別 ID タグ** (`$TAG`) を読み取る。`mtg-N` が Beacon 識別 ID。
+
+3. **カレンダー予定の説明にタグを埋め込む**: `$CALNS` の `update-event` で、手順 1 の
+   `$EVENT_ID` の予定の **説明 (description) に `$TAG` を 1 行加える** (`account: $CALACCT`)。
+   これで終了検知 (C) がこの予定を商談に紐付けられる。既存の説明文がある場合は末尾に改行 +
+   `$TAG` を足す (上書きしない)。
+
+「直す」なら Step 4 に戻り、「やめる」なら中止する (Meeting も作らない)。
 
 > 使うカレンダー (namespace/account) は Step 2 の台帳解決の値をそのまま使い、別のものに
 > 差し替えない。会社用/個人用の取り違えは台帳解決で構造的に閉じる (e-3365)。
+
+### 予定変更のとき (再調整)
+
+すでに Meeting のある商談で日時が変わったら、**新規に作り直さず** 既存 `mtg-N` を動かす
+(識別 ID を保って追従させる)。カレンダー側は `update-event` で `$EVENT_ID` の時間を直し、
+Beacon 側は:
+
+```bash
+BEACON_MTG_ID="$MTG_ID" BEACON_MTG_AT="$NEW_WHEN_START" BEACON_MTG_END="$NEW_WHEN_END" \
+  BEACON_MTG_SET_TRANSITION=1 \
+  python3 "$ROOT/lib/commands.py" meeting_reschedule
+```
+
+これで遷移日もカレンダーも新しい日時に揃う (AC: 予定変更時も両者が追従)。対象の
+`mtg-N` は `BEACON_MTG_OPP="$OPP" BEACON_JSON=1 python3 "$ROOT/lib/commands.py" meeting_list`
+で引ける。
 
 ## Step 7: 活動記録 (証跡) を必ず残す
 
@@ -162,6 +207,7 @@ BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[アポ確定] <日時> <相手/場�
 
 ```
 📅 予定を登録しました ([WHEN] / [相手])
+  Meeting [mtg-N] を作成し、商談 [OPP] の遷移日を [面談日] に更新しました。
   商談 [OPP] に活動記録を残しました。
 ```
 
@@ -174,6 +220,9 @@ BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[アポ確定] <日時> <相手/場�
 - 相手へのメール送信は自動でしない (`/beacon-sales-email` に連携、送信はそちらの承認経路)。
 - **使うカレンダー (namespace/account) は必ず台帳解決 (Step 2) から取る**。namespace や
   account を手書きしない — 台帳を通らない経路を残さないのが取り違え防止の本質 (e-3365)。
+- **予定を作れたら必ず Meeting を刻み (Step 6-2)、カレンダー予定に識別 ID タグを埋め込む
+  (Step 6-3)**。この handshake を欠かすと後段の終了検知 (C) が商談を突き合わせられない。
 - **予定を作れたら必ず Step 7 の活動記録を残す** (証跡を欠かさない)。
+- 予定変更は既存 `mtg-N` を `meeting_reschedule` で動かす (新規作成しない = 識別 ID を保つ)。
 - `project.json` を直接書き換えない。内部コマンド / CLI 経由のみ。
 - 相手に見せる文面・日時は非開発者が読める自然な日本語で (社内略語を持ち込まない)。

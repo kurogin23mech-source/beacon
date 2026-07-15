@@ -1114,3 +1114,86 @@ def test_opportunity_delete_removes_communications():
     se.communication_add(data, opp, "x", direction="inbound")
     se.opportunity_delete(data, opp)
     assert se.find_opportunity(data, opp) is None
+
+
+# --- Meeting (面談・運用状態型 + 識別 ID handshake, e-3433) -----------------
+
+def test_meeting_schedule_sets_id_and_status():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    mid = se.meeting_schedule(data, opp, "2026-07-20T14:00:00+09:00",
+                              end_at="2026-07-20T15:00:00+09:00", location="オンライン",
+                              calendar_event_id="ev-abc", at="T0")
+    assert mid == "mtg-1"
+    o, m = se.find_meeting(data, mid)
+    assert o["id"] == opp and m["status"] == "scheduled"
+    assert m["calendar_event_id"] == "ev-abc"
+    assert m["history"][0]["action"] == "scheduled"
+
+
+def test_meeting_schedule_set_transition_updates_transition_date():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    se.meeting_schedule(data, opp, "2026-07-20T14:00:00+09:00",
+                        set_transition=True, at="T0")
+    # 遷移日 is the date portion of the meeting time
+    assert se.get_transition_date(data, opp) == "2026-07-20"
+
+
+def test_meeting_ids_global_across_opportunities():
+    data = _fresh()
+    o1 = se.opportunity_add(data, "D1")
+    o2 = se.opportunity_add(data, "D2")
+    assert se.meeting_schedule(data, o1, "2026-07-20T10:00") == "mtg-1"
+    assert se.meeting_schedule(data, o2, "2026-07-21T10:00") == "mtg-2"
+
+
+def test_meeting_schedule_requires_time_and_known_opp():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    with pytest.raises(ValueError):
+        se.meeting_schedule(data, opp, "  ")
+    with pytest.raises(ValueError):
+        se.meeting_schedule(data, "opp-9", "2026-07-20T10:00")
+
+
+def test_meeting_reschedule_moves_time_and_transition():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    mid = se.meeting_schedule(data, opp, "2026-07-20T14:00", set_transition=True, at="T0")
+    se.meeting_reschedule(data, mid, "2026-07-25T16:00", set_transition=True, at="T1")
+    _, m = se.find_meeting(data, mid)
+    assert m["scheduled_at"] == "2026-07-25T16:00"
+    assert m["history"][-1]["action"] == "rescheduled"
+    assert se.get_transition_date(data, opp) == "2026-07-25"
+
+
+def test_meeting_mark_ended_is_idempotent():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    mid = se.meeting_schedule(data, opp, "2026-07-20T14:00", at="T0")
+    se.meeting_mark_ended(data, mid, at="T1")
+    _, m = se.find_meeting(data, mid)
+    assert m["status"] == "ended"
+    hist_len = len(m["history"])
+    se.meeting_mark_ended(data, mid, at="T2")  # second call is a no-op
+    _, m2 = se.find_meeting(data, mid)
+    assert m2["status"] == "ended" and len(m2["history"]) == hist_len
+
+
+def test_meeting_calendar_tag_roundtrips():
+    tag = se.meeting_calendar_tag("mtg-7")
+    assert "mtg-7" in tag
+    desc = f"面談です。\n\n{tag}\nよろしくお願いします。"
+    assert se.parse_meeting_tag(desc) == "mtg-7"
+    assert se.parse_meeting_tag("no tag here") is None
+    assert se.parse_meeting_tag("beacon-meeting-id: garbage") is None
+
+
+def test_opportunity_meetings_ordered_by_scheduled_time():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    se.meeting_schedule(data, opp, "2026-07-25T10:00")
+    se.meeting_schedule(data, opp, "2026-07-20T10:00")
+    ordered = se.opportunity_meetings(se.find_opportunity(data, opp))
+    assert [m["scheduled_at"] for m in ordered] == ["2026-07-20T10:00", "2026-07-25T10:00"]

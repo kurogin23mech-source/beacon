@@ -75,6 +75,11 @@ Sales (profession=sales):
   beacon opportunity delete <opp-id>                         Delete an opportunity and its activities
   beacon communication add <target-id> "<summary>" --direction inbound|outbound [--channel email|slack|meeting|calendar|phone|other] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]   Record a communication (証跡・営業の Commit) on an opportunity/account
   beacon communication list <target-id> [--json]             List a target's communications (証跡) + derived ball
+  beacon meeting schedule <opp-id> --at <datetime> [--end <datetime>] [--location <text>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]   Book a meeting (面談) with a Beacon 識別 ID; --set-transition moves the 遷移日 too
+  beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]   Move a meeting (予定変更); --set-transition follows the 遷移日
+  beacon meeting end <mtg-id>                                 Mark a meeting ended (idempotent; used by the end-detector)
+  beacon meeting cancel <mtg-id>                              Cancel a scheduled meeting
+  beacon meeting list <opp-id> [--json]                       List an opportunity's meetings
   beacon phase list [--json]                                 Show the configured phase funnels
 
 Pull Requests:
@@ -1465,6 +1470,96 @@ cmd_communication_list() {
         python3 "$COMMANDS_PY" communication_list
 }
 
+cmd_meeting_schedule() {
+    ensure_project
+    local opp_id="" at="" end="" location="" event_id="" cal_ns="" cal_acct="" set_transition=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --at)              at="${2:-}"; shift 2 ;;
+            --end)             end="${2:-}"; shift 2 ;;
+            --location)        location="${2:-}"; shift 2 ;;
+            --event-id)        event_id="${2:-}"; shift 2 ;;
+            --calendar-ns)     cal_ns="${2:-}"; shift 2 ;;
+            --calendar-account) cal_acct="${2:-}"; shift 2 ;;
+            --set-transition)  set_transition="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon meeting schedule <opp-id> --at <datetime> [--end <datetime>] [--location <text>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]" ;;
+            *)   opp_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ] || [ -z "$at" ]; then
+        echo "Usage: beacon meeting schedule <opp-id> --at <datetime> [--end <datetime>] [--location <text>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]"
+        exit 1
+    fi
+    BEACON_MTG_OPP="$opp_id" BEACON_MTG_AT="$at" BEACON_MTG_END="$end" \
+        BEACON_MTG_LOCATION="$location" BEACON_MTG_EVENT_ID="$event_id" \
+        BEACON_MTG_CAL_NS="$cal_ns" BEACON_MTG_CAL_ACCT="$cal_acct" \
+        BEACON_MTG_SET_TRANSITION="$set_transition" \
+        python3 "$COMMANDS_PY" meeting_schedule
+}
+
+cmd_meeting_reschedule() {
+    ensure_project
+    local mtg_id="" at="" end="" event_id="" set_transition=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --at)             at="${2:-}"; shift 2 ;;
+            --end)            end="${2:-}"; shift 2 ;;
+            --event-id)       event_id="${2:-}"; shift 2 ;;
+            --set-transition) set_transition="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]" ;;
+            *)   mtg_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$mtg_id" ] || [ -z "$at" ]; then
+        echo "Usage: beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]"
+        exit 1
+    fi
+    BEACON_MTG_ID="$mtg_id" BEACON_MTG_AT="$at" BEACON_MTG_END="$end" \
+        BEACON_MTG_EVENT_ID="$event_id" BEACON_MTG_SET_TRANSITION="$set_transition" \
+        python3 "$COMMANDS_PY" meeting_reschedule
+}
+
+cmd_meeting_end() {
+    ensure_project
+    local mtg_id=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -?*) _guard_positional "$1" "Usage: beacon meeting end <mtg-id>" ;;
+            *)   mtg_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$mtg_id" ]; then echo "Usage: beacon meeting end <mtg-id>"; exit 1; fi
+    BEACON_MTG_ID="$mtg_id" python3 "$COMMANDS_PY" meeting_end
+}
+
+cmd_meeting_cancel() {
+    ensure_project
+    local mtg_id=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -?*) _guard_positional "$1" "Usage: beacon meeting cancel <mtg-id>" ;;
+            *)   mtg_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$mtg_id" ]; then echo "Usage: beacon meeting cancel <mtg-id>"; exit 1; fi
+    BEACON_MTG_ID="$mtg_id" python3 "$COMMANDS_PY" meeting_cancel
+}
+
+cmd_meeting_list() {
+    ensure_project
+    local opp_id="" json_flag=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json_flag="1"; shift ;;
+            -?*)    _guard_positional "$1" "Usage: beacon meeting list <opp-id> [--json]" ;;
+            *)      opp_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ]; then echo "Usage: beacon meeting list <opp-id> [--json]"; exit 1; fi
+    BEACON_MTG_OPP="$opp_id" BEACON_JSON="$json_flag" \
+        python3 "$COMMANDS_PY" meeting_list
+}
+
 cmd_account_phase() {
     ensure_project
     local acc_id="" phase="" note=""
@@ -2686,6 +2781,16 @@ case "${1:-}" in
             add)      shift 2; cmd_communication_add "$@" ;;
             list|ls)  shift 2; cmd_communication_list "$@" ;;
             *)        echo "Usage: beacon communication [add|list]" ;;
+        esac
+        ;;
+    meeting|mtg)
+        case "${2:-}" in
+            schedule)   shift 2; cmd_meeting_schedule "$@" ;;
+            reschedule) shift 2; cmd_meeting_reschedule "$@" ;;
+            end)        shift 2; cmd_meeting_end "$@" ;;
+            cancel)     shift 2; cmd_meeting_cancel "$@" ;;
+            list|ls)    shift 2; cmd_meeting_list "$@" ;;
+            *)          echo "Usage: beacon meeting [schedule|reschedule|end|cancel|list]" ;;
         esac
         ;;
     sales)

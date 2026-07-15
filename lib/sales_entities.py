@@ -1227,6 +1227,173 @@ def derive_ball(target: dict) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
+# Meeting (面談・運用状態型) — 従属 composition → Opportunity
+# ---------------------------------------------------------------------------
+# ms-107 e-3433 (B) / e-3374 の ID ハンドシェイク。予定確定側 (B) が生産し、
+# 終了検知側 (C = e-3434) が消費する共有基盤。
+#
+# 予定を確定しても Beacon の遷移日 (= フェーズ達成を判定する予定日) と Google
+# カレンダーが二重管理でズレる問題を、両者を 1 つの Meeting レコードで束ねて
+# 解消する。Communication (不変・事後の証跡) と違い、Meeting は運用状態型 —
+# scheduled → ended / cancelled と状態が動く。状態変化は history に追記して
+# 監査可能にする (data-immutability-principle は「証跡は消さない」の意)。
+#
+# 識別 ID (mtg-N) がカレンダー予定の説明文に埋め込む handshake token になる。
+# C はこの token でカレンダー予定 → 商談を突き合わせ、二重起動を status で防ぐ。
+
+MEETING_SCHEDULED = "scheduled"
+MEETING_ENDED = "ended"
+MEETING_CANCELLED = "cancelled"
+VALID_MEETING_STATUS = {MEETING_SCHEDULED, MEETING_ENDED, MEETING_CANCELLED}
+
+# handshake token 書式。B が埋め込み、C が parse する — 両者がこの 1 箇所を
+# 参照することで書式 drift を構造的に防ぐ (single source of truth)。
+_MEETING_TAG_PREFIX = "beacon-meeting-id:"
+
+
+def meeting_calendar_tag(meeting_id: str) -> str:
+    """The handshake token embedded in a calendar event's description so the
+    end-detector (C) can map the event back to this meeting/opportunity.
+    B writes it, C parses it — both call this one helper (書式の単一真値源)."""
+    return f"{_MEETING_TAG_PREFIX} {meeting_id}"
+
+
+def parse_meeting_tag(text: str) -> Optional[str]:
+    """Extract a meeting id (mtg-…) from a calendar event's description that was
+    stamped by :func:`meeting_calendar_tag`, or None when absent."""
+    if not text:
+        return None
+    marker = text.find(_MEETING_TAG_PREFIX)
+    if marker < 0:
+        return None
+    rest = text[marker + len(_MEETING_TAG_PREFIX):].strip()
+    token = rest.split()[0] if rest.split() else ""
+    return token if token.startswith("mtg-") else None
+
+
+def next_meeting_id(data: dict) -> str:
+    ids = []
+    for opp in data.get("opportunities", []):
+        ids.extend(m.get("id", "") for m in opp.get("meetings", []))
+    return _next_prefixed_id(ids, "mtg-")
+
+
+def find_meeting(data: dict, meeting_id: str):
+    """Return ``(opportunity, meeting)`` for a meeting id, or ``(None, None)``."""
+    for opp in data.get("opportunities", []):
+        for m in opp.get("meetings", []):
+            if m.get("id") == meeting_id:
+                return opp, m
+    return None, None
+
+
+def opportunity_meetings(opp: dict) -> list:
+    """A target's meetings in scheduled-time order (earliest → latest); untimed
+    records sort last, then insertion order (same rule as communications_of)."""
+    meetings = (opp or {}).get("meetings", [])
+    ordered = sorted(
+        enumerate(meetings),
+        key=lambda pair: (not (pair[1].get("scheduled_at") or ""),
+                          pair[1].get("scheduled_at") or "", pair[0]),
+    )
+    return [m for _, m in ordered]
+
+
+def meeting_schedule(data: dict, opportunity_id: str, scheduled_at: str, *,
+                     end_at: str = "", location: str = "",
+                     calendar_event_id: str = "", calendar_namespace: str = "",
+                     calendar_account: str = "", set_transition: bool = False,
+                     at: str = "") -> str:
+    """Book a Meeting under an Opportunity and return its id (mtg-…).
+
+    When ``set_transition`` is true the opportunity's 遷移日 (transition_date) is
+    moved to the meeting date in the *same* call, so the calendar plan and the
+    phase-judgement date never drift apart (AC: 遷移日とカレンダーが同時更新).
+    The returned id is the handshake token B stamps into the calendar event."""
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    if not scheduled_at or not scheduled_at.strip():
+        raise ValueError("Meeting scheduled_at is required")
+    mtg_id = next_meeting_id(data)
+    when = scheduled_at.strip()
+    opp.setdefault("meetings", []).append({
+        "id": mtg_id,
+        "scheduled_at": when,
+        "end_at": end_at,
+        "location": location,
+        "calendar_event_id": calendar_event_id,
+        "calendar_namespace": calendar_namespace,
+        "calendar_account": calendar_account,
+        "status": MEETING_SCHEDULED,
+        "created_at": at,
+        "history": [{"at": at, "action": "scheduled", "scheduled_at": when}],
+    })
+    if set_transition:
+        # meeting date drives the phase-judgement date (transition_signal =
+        # calendar_ended). Store the date portion (YYYY-MM-DD) as the 遷移日.
+        set_transition_date(data, opportunity_id, when[:10],
+                            note=f"面談確定 ({mtg_id})", at=at)
+    return mtg_id
+
+
+def meeting_reschedule(data: dict, meeting_id: str, scheduled_at: str, *,
+                       end_at: Optional[str] = None, location: Optional[str] = None,
+                       calendar_event_id: Optional[str] = None,
+                       set_transition: bool = False, at: str = "") -> dict:
+    """Move an existing meeting to a new time (予定変更), keeping the same
+    handshake id so the calendar event and Beacon stay linked. Logs the change
+    to ``history`` and, when ``set_transition``, moves the 遷移日 too so both
+    follow the reschedule (AC: 予定変更時も両者が追従)."""
+    opp, m = find_meeting(data, meeting_id)
+    if m is None:
+        raise ValueError(f"Meeting not found: {meeting_id}")
+    if not scheduled_at or not scheduled_at.strip():
+        raise ValueError("Meeting scheduled_at is required")
+    when = scheduled_at.strip()
+    m["scheduled_at"] = when
+    if end_at is not None:
+        m["end_at"] = end_at
+    if location is not None:
+        m["location"] = location
+    if calendar_event_id is not None:
+        m["calendar_event_id"] = calendar_event_id
+    m["status"] = MEETING_SCHEDULED  # rescheduling revives a cancelled slot
+    m.setdefault("history", []).append(
+        {"at": at, "action": "rescheduled", "scheduled_at": when})
+    if set_transition:
+        set_transition_date(data, opp["id"], when[:10],
+                            note=f"面談再調整 ({meeting_id})", at=at)
+    return m
+
+
+def meeting_mark_ended(data: dict, meeting_id: str, *, at: str = "") -> dict:
+    """Mark a meeting ended (C calls this after detecting the calendar event
+    finished). Idempotent: a meeting already ended stays ended and no duplicate
+    history row is appended — this is the double-trigger guard for C's Operation
+    (e-3434: 同じミーティングを二重起動しない)."""
+    opp, m = find_meeting(data, meeting_id)
+    if m is None:
+        raise ValueError(f"Meeting not found: {meeting_id}")
+    if m.get("status") == MEETING_ENDED:
+        return m  # already ended — no-op, keeps C idempotent
+    m["status"] = MEETING_ENDED
+    m.setdefault("history", []).append({"at": at, "action": "ended"})
+    return m
+
+
+def meeting_cancel(data: dict, meeting_id: str, *, at: str = "") -> dict:
+    """Cancel a scheduled meeting (予定取消). Logged to history; the calendar
+    event removal is the Skill's job (this is the Beacon-side state change)."""
+    opp, m = find_meeting(data, meeting_id)
+    if m is None:
+        raise ValueError(f"Meeting not found: {meeting_id}")
+    m["status"] = MEETING_CANCELLED
+    m.setdefault("history", []).append({"at": at, "action": "cancelled"})
+    return m
+
+
+# ---------------------------------------------------------------------------
 # Send identity pin (ms-107 e-3353 — 複数 Google アカウントの取り違え防止)
 # ---------------------------------------------------------------------------
 # 会社用 / 個人用など複数の Google アカウントがあり、取り違え送信は顧客との
