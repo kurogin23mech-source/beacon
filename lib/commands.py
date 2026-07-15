@@ -21350,6 +21350,25 @@ def cmd_opportunity_activity():
     print(f"Added activity {act_id} to {opp_id}: {desc}")
 
 
+def cmd_activity_done():
+    """Internal (Skill-invoked): mark a planned Activity done/todo.
+    Env: BEACON_ACT_ID, BEACON_ACT_STATUS (default 'done'). ms-106 e-3505 — a
+    send records the Communication (fact) and marks the plan it fulfilled done,
+    instead of leaving a lingering todo beside the证跡."""
+    import sales_entities
+    act_id = os.environ.get("BEACON_ACT_ID", "")
+    status = (os.environ.get("BEACON_ACT_STATUS", "") or "done").strip().lower()
+    data = load_project()
+    try:
+        act = sales_entities.activity_set_status(data, act_id, status,
+                                                  at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"activity {act_id} → {act['status']}")
+
+
 def cmd_communication_add():
     # ms-107 e-3432 — 営業の Commit: source を辿れる事後記録型の証跡を target
     # (opp-… 優先 / acc-…) の子として append-only で残す。
@@ -21671,6 +21690,7 @@ if __name__ == "__main__":
         "opportunity_judge": cmd_opportunity_judge,
         "opportunity_due": cmd_opportunity_due,
         "opportunity_activity": cmd_opportunity_activity,
+        "activity_done": cmd_activity_done,
         "opportunity_delete": cmd_opportunity_delete,
         # ms-107 e-3432 — Communication (証跡・事後記録型 = 営業の Commit)
         "communication_add": cmd_communication_add,

@@ -1154,6 +1154,28 @@ def find_activity(data: dict, activity_id: str):
     return None, None
 
 
+VALID_ACTIVITY_STATUS = {"todo", "done"}
+
+
+def activity_set_status(data: dict, activity_id: str, status: str, *,
+                        at: str = "") -> dict:
+    """Set an Activity's status (todo/done) and return it. Used when a send or
+    other Communication *fulfills* a planned Activity (ms-106 e-3505): the plan
+    is marked done rather than leaving a lingering todo sitting beside the
+    Communication fact — the send is recorded once (as the Communication), and
+    the plan it satisfied is closed, not duplicated as a second '[sent]' todo."""
+    opp, act = find_activity(data, activity_id)
+    if act is None:
+        raise ValueError(f"Activity not found: {activity_id}")
+    if status not in VALID_ACTIVITY_STATUS:
+        raise ValueError(
+            f"status must be one of {sorted(VALID_ACTIVITY_STATUS)}, got {status!r}")
+    act["status"] = status
+    if status == "done":
+        act["done_at"] = at
+    return act
+
+
 def find_nurturing(data: dict, nurturing_id: str):
     """Return ``(account, nurturing)`` for a nurturing id, or ``(None, None)``."""
     for acc in data.get("accounts", []):

@@ -1396,3 +1396,23 @@ def test_watched_work_items_excludes_disabled():
     se.set_watch(data, nrt, channel="email")
     se.clear_watch(data, nrt)
     assert se.watched_work_items(data) == []
+
+
+def test_activity_set_status_marks_done():
+    # ms-106 e-3505 — a send marks the fulfilled plan done, not a new todo.
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    aid = se.activity_add(data, opp, "初回面談を打診")
+    act = se.activity_set_status(data, aid, "done", at="T1")
+    assert act["status"] == "done" and act["done_at"] == "T1"
+
+
+def test_activity_set_status_validates():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    aid = se.activity_add(data, opp, "x")
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        se.activity_set_status(data, aid, "bogus")
+    with _pt.raises(ValueError):
+        se.activity_set_status(data, "act-999", "done")
