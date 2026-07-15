@@ -128,6 +128,9 @@ def wired(monkeypatch):
     monkeypatch.setattr(app_module, "_start_watcher", lambda project_id: None)
     monkeypatch.setattr(app_module, "_stop_watcher", lambda project_id: None)
     monkeypatch.setattr(app_module, "_auth_enabled", False)
+    # e-3492: the gate is behind a kill-switch (default OFF). These tests
+    # assert the enforcement behaviour, so turn it on for the harness.
+    monkeypatch.setenv("BEACON_SENDER_CONSENT_ENABLED", "1")
 
     async def _noop_fanout(project_id, event):
         return None
@@ -244,4 +247,42 @@ def test_operation_envelope_cross_user_passes(wired):
     """T1-system (Trek scheduler) / T2 (Operation) envelopes are pre-approved."""
     env = {"tier": "T1-system", "issuer": "beacon-system", "actions_authorized": []}
     resp = _post(wired, sender_sid="sv-alice", recipient_sid="sv-bob", envelope=env)
+    assert resp.status_code == 200, resp.text
+
+
+# ---------------------------------------------------------------------------
+# e-3492 P1 fix: kill-switch + cross-project same-user must not be blocked
+# ---------------------------------------------------------------------------
+
+def test_kill_switch_off_allows_cross_user_without_claim(wired, monkeypatch):
+    """Default OFF: with the gate disabled, nothing is enforced (version-skew
+    safety — a deploy must not break sends before the claim-capable client is
+    rolled out)."""
+    monkeypatch.setenv("BEACON_SENDER_CONSENT_ENABLED", "0")
+    resp = _post(wired, sender_sid="sv-alice", recipient_sid="sv-bob")
+    assert resp.status_code == 200, resp.text
+
+
+def test_cross_project_same_user_passes(wired, monkeypatch):
+    """THE P1 REGRESSION (e-3492): a session sending to its own user's other
+    project. The sender's session is NOT in the post-target project's registry,
+    so the old code resolved sender_uid='' → false cross-user → 403, breaking
+    the core cross-project handoff. The sender identity must come from the
+    authenticated caller (JWT sub), so same-user is recognised and it passes.
+    """
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(wired, "_auth_enabled", True)
+    monkeypatch.setattr(
+        wired, "_verify_id_token",
+        lambda tok: {"sub": "uid-alice", "email": "alice@example.com"})
+
+    client = TestClient(wired.app)
+    resp = client.post(f"/api/projects/{PROJECT_ID}/bus", json={
+        "channel": "dm",
+        # sender session lives in ANOTHER project → absent from _SESSIONS.
+        "sender_session_id": "sv-alice-in-profile-extractor",
+        "payload": {"recipient_session_id": "sv-alice2", "text": "handoff"},
+        "envelope": {"tier": "T1", "actions_authorized": []},  # no claim
+    }, headers={"Authorization": "Bearer t-alice"})
     assert resp.status_code == 200, resp.text

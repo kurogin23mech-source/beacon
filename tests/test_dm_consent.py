@@ -120,26 +120,39 @@ def test_non_dm_channel_skips_consent(channel):
 # Fail-safe: unknown recipient identity → treat as cross-user
 # ---------------------------------------------------------------------------
 
-def test_unknown_recipient_user_id_requires_consent():
-    """A send we cannot prove is same-user must be confirmed (fail-safe).
+def test_unknown_recipient_user_id_does_not_require_consent():
+    """e-3492: an unresolved recipient is NOT blocked.
 
-    This is exactly the accident shape: the primitive was called directly
-    with no resolved recipient identity. It must NOT slip through as
-    same-user just because the recipient uid is blank.
+    The earlier fail-safe (unknown → require) false-positived every same-user
+    cross-project send: the sender resolves to "" against the post-target
+    registry, so a self-send to one's own other project looked cross-user and
+    got 403. Consent now fires only for a *proven* cross-user pair, so an
+    unresolved recipient falls through to allow.
     """
     required, reason = dm_consent.classify_send_consent(
         sender_user_id="uid-alice",
         recipient_user_id="",
     )
-    assert required is True
-    assert reason == dm_consent.CONSENT_REQUIRED_CROSS_USER
+    assert required is False
+    assert reason == dm_consent.CONSENT_SKIP_UNRESOLVED
 
 
-def test_both_user_ids_empty_requires_consent():
-    """Both blank → cannot prove same-user → require confirmation."""
+def test_both_user_ids_empty_does_not_require_consent():
+    """Both blank → cannot prove cross-user → do not block (e-3492)."""
     required, reason = dm_consent.classify_send_consent(
         sender_user_id="",
         recipient_user_id="",
+    )
+    assert required is False
+    assert reason == dm_consent.CONSENT_SKIP_UNRESOLVED
+
+
+def test_proven_cross_user_still_requires_consent():
+    """The real accident shape — recipient IS resolvable to a different user
+    (posting to their project where their session is registered) — still fires."""
+    required, reason = dm_consent.classify_send_consent(
+        sender_user_id="uid-alice",
+        recipient_user_id="uid-bob",
     )
     assert required is True
     assert reason == dm_consent.CONSENT_REQUIRED_CROSS_USER
