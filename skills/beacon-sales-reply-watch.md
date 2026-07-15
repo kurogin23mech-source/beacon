@@ -39,7 +39,7 @@ ROOT=$(beacon-find-root) && \
 ```
 
 `NOT_SALES` なら「営業プロジェクトでのみ使えます」と伝えて終了。内部コマンドは
-`python3 "$ROOT/lib/commands.py" <cmd>` で呼ぶ (watch は user 向け CLI 動詞ではない)。
+`python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ (watch は user 向け CLI 動詞ではない)。
 
 ## Step 0: quiet hours の尊重
 
@@ -53,7 +53,7 @@ ROOT=$(beacon-find-root) && \
 「watch あり かつ ball=相手 (= まだ返信待ち)」のスレッドだけを取る:
 
 ```bash
-BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$ROOT/lib/commands.py" watch_list
+BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" watch_list
 ```
 
 `watches[]` が空なら「返信待ちのスレッドはありません」と記録して終了。各要素は
@@ -86,7 +86,7 @@ BEACON_COMM_TARGET="<work_item_id>" \
   BEACON_COMM_CHANNEL="<channel>" \
   BEACON_COMM_SOURCE_REF="<message-id>" BEACON_COMM_SOURCE_URL="<permalink>" \
   BEACON_COMM_OCCURRED="<返信の時刻>" \
-  python3 "$ROOT/lib/commands.py" communication_add
+  python3 "$(beacon _lib-path)/commands.py" communication_add
 ```
 
 ball が自分に戻ると、そのスレッドは次回 Step 1 の「返信待ち」から外れる (= 二重に拾わ
@@ -96,7 +96,7 @@ ball が自分に戻ると、そのスレッドは次回 Step 1 の「返信待�
 終える:
 
 ```bash
-BEACON_WATCH_TARGET="<work_item_id>" python3 "$ROOT/lib/commands.py" watch_clear
+BEACON_WATCH_TARGET="<work_item_id>" python3 "$(beacon _lib-path)/commands.py" watch_clear
 ```
 
 完結かどうか機械で決めきれない時は watch を残し、報告で人に委ねる。

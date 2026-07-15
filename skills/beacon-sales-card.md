@@ -26,7 +26,7 @@ triggers:
 Bash ツールで実行し、営業プロジェクトかを確認:
 
 ```bash
-ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$ROOT/lib/commands.py" account_list >/dev/null 2>&1 && \
+ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" account_list >/dev/null 2>&1 && \
   test "$(python3 -c "import json;print(json.load(open('$ROOT/.beacon/project.json')).get('profession',''))" 2>/dev/null)" = "sales" && echo "SALES_OK" || echo "NOT_SALES"
 ```
 

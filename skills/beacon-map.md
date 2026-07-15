@@ -63,7 +63,7 @@ beacon doc show application-map 2>/dev/null && echo "---EXISTS---" || echo "---M
 ### R1. 機械照合を走らせる
 
 ```bash
-python3 "$__ROOT/scripts/check-map-drift.py" --doc-id application-map
+python3 "$(beacon _install-root)/scripts/check-map-drift.py" --doc-id application-map
 ```
 
 出力の `書き漏れ (missing)` と `幽霊 (phantom)` を読む。
@@ -98,7 +98,7 @@ printf '%s' "<curate 済み本文>" | beacon doc update application-map --conten
 
 再照合して **書き漏れ0 / 幽霊0 (exit 0)** を確認:
 ```bash
-python3 "$__ROOT/scripts/check-map-drift.py" --doc-id application-map
+python3 "$(beacon _install-root)/scripts/check-map-drift.py" --doc-id application-map
 ```
 
 ゼロになるまで R2〜R3 を繰り返す。ゼロになったら結果をユーザーに 1 行報告して終了。
@@ -110,7 +110,7 @@ python3 "$__ROOT/scripts/check-map-drift.py" --doc-id application-map
 ### G1. 実在 surface を列挙する
 
 ```bash
-python3 "$__ROOT/scripts/check-map-drift.py" --enumerate --json
+python3 "$(beacon _install-root)/scripts/check-map-drift.py" --enumerate --json
 ```
 
 `cli` (dispatch dict のキー) / `api` (route) / `skill` (skills dir) の 3 集合が返る。これが**網羅すべき全 surface**。
@@ -146,7 +146,7 @@ milestone は「軌跡」なので、done / 廃止された機能は**現在地�
 
 初版本文を一時ファイルに書き、照合:
 ```bash
-python3 "$__ROOT/scripts/check-map-drift.py" /tmp/application-map-draft.md
+python3 "$(beacon _install-root)/scripts/check-map-drift.py" /tmp/application-map-draft.md
 ```
 `書き漏れ` が残れば足す、`幽霊` が残れば消す/直す。**書き漏れ0 / 幽霊0 (exit 0)** になるまで直す。
 これが「網羅した」ことの機械的保証 (= 目視での取りこぼしを塞ぐ)。
@@ -160,7 +160,7 @@ cat /tmp/application-map-draft.md | beacon doc add "アプリケーション全�
 
 登録後、live doc を再照合してゼロを確認:
 ```bash
-python3 "$__ROOT/scripts/check-map-drift.py" --doc-id application-map
+python3 "$(beacon _install-root)/scripts/check-map-drift.py" --doc-id application-map
 ```
 
 ユーザーに「初版を N surface で生成、drift ゼロ」と報告して終了。

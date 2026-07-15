@@ -25,14 +25,14 @@ triggers:
 Bash ツールで実行し、営業プロジェクトかを確認:
 
 ```bash
-ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$ROOT/lib/commands.py" account_list >/dev/null 2>&1 && \
+ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" account_list >/dev/null 2>&1 && \
   test "$(python3 -c "import json;print(json.load(open('$ROOT/.beacon/project.json')).get('profession',''))" 2>/dev/null)" = "sales" && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
 `NOT_SALES` の場合 (= 営業テンプレートでないプロジェクト)、この Skill は「営業プロジェクトでのみ使えます」と伝えて終了する。cloud mode で `project.json` を直接読めない場合は `beacon opportunity list` が動くかで代替判定してよい。
 
 以降、`$ROOT` は `beacon-find-root` の出力。内部コマンド (`sales_identity_*`) は
-ユーザー向け CLI 動詞ではないので `python3 "$ROOT/lib/commands.py" <cmd>` で呼ぶ。
+ユーザー向け CLI 動詞ではないので `python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。
 
 ## Step 1: 対象商談の特定
 
@@ -57,18 +57,18 @@ beacon account list
 namespace を手書きしない (= 取り違えが起きる経路を残さない)。まず台帳を確認:
 
 ```bash
-BEACON_JSON=1 python3 "$ROOT/lib/commands.py" sales_account_list
+BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" sales_account_list
 ```
 
 - **台帳が空** の場合、ユーザーに「どの Google アカウント (メールアドレス) で送りますか？
   会社用/個人用など呼び名 (label) も教えてください」と確認し、登録する:
 
 ```bash
-BEACON_SEND_LABEL="会社" BEACON_SEND_EMAIL="<アドレス>" python3 "$ROOT/lib/commands.py" sales_account_add
+BEACON_SEND_LABEL="会社" BEACON_SEND_EMAIL="<アドレス>" python3 "$(beacon _lib-path)/commands.py" sales_account_add
 BEACON_SEND_LABEL="会社" BEACON_SEND_SERVICE="gmail" BEACON_SEND_NAMESPACE="mcp__gmail" \
-  python3 "$ROOT/lib/commands.py" sales_account_route
+  python3 "$(beacon _lib-path)/commands.py" sales_account_route
 # 既定の送信元にするなら default label を pin (次回から $LABEL 省略で使える):
-BEACON_SEND_IDENTITY="会社" python3 "$ROOT/lib/commands.py" sales_identity_set
+BEACON_SEND_IDENTITY="会社" python3 "$(beacon _lib-path)/commands.py" sales_identity_set
 ```
 
 - **どの label で送るか**を決める。既定 (default label) でよければ `$LABEL` は空のまま。
@@ -79,7 +79,7 @@ BEACON_SEND_IDENTITY="会社" python3 "$ROOT/lib/commands.py" sales_identity_set
 
 ```bash
 BEACON_SEND_SERVICE="gmail" BEACON_SEND_LABEL="$LABEL" \
-  python3 "$ROOT/lib/commands.py" sales_account_resolve
+  python3 "$(beacon _lib-path)/commands.py" sales_account_resolve
 echo "RESOLVE_EXIT=$?"
 ```
 
@@ -110,7 +110,7 @@ Step 2 と同じ `$LABEL` を渡す (= 解決した route と同じアカウン�
 
 ```bash
 BEACON_SEND_FROM="$FROM" BEACON_SEND_LABEL="$LABEL" \
-  python3 "$ROOT/lib/commands.py" sales_identity_check
+  python3 "$(beacon _lib-path)/commands.py" sales_identity_check
 echo "GATE_EXIT=$?"
 ```
 
@@ -150,7 +150,7 @@ AI が自律で送信してはならない (SPEC §3: 送信は人間承認)。
 
 ```bash
 BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[メール送信済] 件名『<件名>』→ <宛先>" \
-  python3 "$ROOT/lib/commands.py" opportunity_activity
+  python3 "$(beacon _lib-path)/commands.py" opportunity_activity
 ```
 
 > v1 補足: 現状 activity は「予定 (todo)」型で記録される。送信済みを表す
@@ -167,7 +167,7 @@ BEACON_COMM_TARGET="<act-id または $OPP>" \
   BEACON_COMM_SUMMARY="<送信内容の1行要約>" \
   BEACON_COMM_DIRECTION="outbound" BEACON_COMM_CHANNEL="email" \
   BEACON_COMM_SOURCE_REF="<message-id / thread-id>" \
-  python3 "$ROOT/lib/commands.py" communication_add
+  python3 "$(beacon _lib-path)/commands.py" communication_add
 ```
 
 **このメールが返信を必要とする** (日程打診・確認依頼・見積送付後の返答待ち 等) なら、
@@ -177,7 +177,7 @@ hourly にこのスレッドを確認し、返信が来たら ball を自分に�
 ```bash
 BEACON_WATCH_TARGET="<act-id>" BEACON_WATCH_CHANNEL="email" \
   BEACON_WATCH_THREAD="<thread-id / message-id>" \
-  python3 "$ROOT/lib/commands.py" watch_set
+  python3 "$(beacon _lib-path)/commands.py" watch_set
 ```
 
 返信不要の連絡 (お礼・案内のみ 等) では watch を立てない (無駄打ち防止)。返信が必要か

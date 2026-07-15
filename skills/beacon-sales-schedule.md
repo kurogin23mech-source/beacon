@@ -30,14 +30,14 @@ triggers:
 Bash ツールで実行し、営業プロジェクトかを確認:
 
 ```bash
-ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$ROOT/lib/commands.py" account_list >/dev/null 2>&1 && \
+ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" account_list >/dev/null 2>&1 && \
   test "$(python3 -c "import json;print(json.load(open('$ROOT/.beacon/project.json')).get('profession',''))" 2>/dev/null)" = "sales" && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
 `NOT_SALES` の場合 (= 営業テンプレートでないプロジェクト)、この Skill は「営業プロジェクトでのみ使えます」と伝えて終了する。cloud mode で `project.json` を直接読めない場合は `beacon opportunity list` が動くかで代替判定してよい。
 
 以降、`$ROOT` は `beacon-find-root` の出力。内部コマンド (`opportunity_activity`) は
-ユーザー向け CLI 動詞ではないので `python3 "$ROOT/lib/commands.py" <cmd>` で呼ぶ。
+ユーザー向け CLI 動詞ではないので `python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。
 
 ## Step 1: 対象商談の特定
 
@@ -63,17 +63,17 @@ beacon account list
 台帳を通さず namespace を手書きしない (= 取り違え防止)。まず台帳を確認:
 
 ```bash
-BEACON_JSON=1 python3 "$ROOT/lib/commands.py" sales_account_list
+BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" sales_account_list
 ```
 
 - **台帳が空 / calendar route 未設定** の場合、ユーザーに「どの Google アカウントの
   カレンダーで調整しますか？」と確認して登録する (label が既にあれば route だけ足す):
 
 ```bash
-BEACON_SEND_LABEL="会社" BEACON_SEND_EMAIL="<アドレス>" python3 "$ROOT/lib/commands.py" sales_account_add
+BEACON_SEND_LABEL="会社" BEACON_SEND_EMAIL="<アドレス>" python3 "$(beacon _lib-path)/commands.py" sales_account_add
 BEACON_SEND_LABEL="会社" BEACON_SEND_SERVICE="calendar" \
   BEACON_SEND_NAMESPACE="mcp__google-calendar" BEACON_SEND_ALIAS="work" \
-  python3 "$ROOT/lib/commands.py" sales_account_route
+  python3 "$(beacon _lib-path)/commands.py" sales_account_route
 ```
 
 - 既定 (default label) でよければ `$LABEL` は空のまま。この 1 件だけ別アカウントの
@@ -83,7 +83,7 @@ calendar の route を台帳から解決する。**これが使うカレンダ�
 
 ```bash
 BEACON_SEND_SERVICE="calendar" BEACON_SEND_LABEL="$LABEL" \
-  python3 "$ROOT/lib/commands.py" sales_account_resolve
+  python3 "$(beacon _lib-path)/commands.py" sales_account_resolve
 echo "RESOLVE_EXIT=$?"
 ```
 
@@ -159,7 +159,7 @@ AI が自律でカレンダーに入れてはならない (制約参照)。
      BEACON_MTG_LOCATION="$LOC" BEACON_MTG_EVENT_ID="$EVENT_ID" \
      BEACON_MTG_CAL_NS="$CALNS" BEACON_MTG_CAL_ACCT="$CALACCT" \
      BEACON_MTG_SET_TRANSITION=1 \
-     python3 "$ROOT/lib/commands.py" meeting_schedule
+     python3 "$(beacon _lib-path)/commands.py" meeting_schedule
    ```
 
    stdout の `calendar tag (説明文に埋め込む): beacon-meeting-id: mtg-N` の行から、
@@ -184,11 +184,11 @@ Beacon 側は:
 ```bash
 BEACON_MTG_ID="$MTG_ID" BEACON_MTG_AT="$NEW_WHEN_START" BEACON_MTG_END="$NEW_WHEN_END" \
   BEACON_MTG_SET_TRANSITION=1 \
-  python3 "$ROOT/lib/commands.py" meeting_reschedule
+  python3 "$(beacon _lib-path)/commands.py" meeting_reschedule
 ```
 
 これで遷移日もカレンダーも新しい日時に揃う (AC: 予定変更時も両者が追従)。対象の
-`mtg-N` は `BEACON_MTG_OPP="$OPP" BEACON_JSON=1 python3 "$ROOT/lib/commands.py" meeting_list`
+`mtg-N` は `BEACON_MTG_OPP="$OPP" BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" meeting_list`
 で引ける。
 
 ## Step 7: 活動記録 (証跡) を必ず残す
@@ -198,7 +198,7 @@ BEACON_MTG_ID="$MTG_ID" BEACON_MTG_AT="$NEW_WHEN_START" BEACON_MTG_END="$NEW_WHE
 
 ```bash
 BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[アポ確定] <日時> <相手/場所>" \
-  python3 "$ROOT/lib/commands.py" opportunity_activity
+  python3 "$(beacon _lib-path)/commands.py" opportunity_activity
 ```
 
 ## Step 8: 結果報告

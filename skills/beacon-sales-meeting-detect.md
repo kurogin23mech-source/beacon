@@ -37,7 +37,7 @@ ROOT=$(beacon-find-root) && \
 ```
 
 `NOT_SALES` なら「営業プロジェクトでのみ使えます」と伝えて終了。以降 `$ROOT` は
-`beacon-find-root` の出力。内部コマンドは `python3 "$ROOT/lib/commands.py" <cmd>` で呼ぶ。
+`beacon-find-root` の出力。内部コマンドは `python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。
 
 ## Step 1: 現在時刻の取得 + 終了候補の洗い出し
 
@@ -65,7 +65,7 @@ beacon meeting ended --now "<現在時刻 ISO8601>" --json
 
 ```bash
 BEACON_SEND_SERVICE="calendar" BEACON_SEND_LABEL="" \
-  python3 "$ROOT/lib/commands.py" sales_account_resolve
+  python3 "$(beacon _lib-path)/commands.py" sales_account_resolve
 ```
 
 解決した namespace の MCP ツール群を `$CALNS`、account を `$CALACCT` とする。
@@ -92,7 +92,7 @@ BEACON_SEND_SERVICE="calendar" BEACON_SEND_LABEL="" \
 
 - **終了 (ended)**:
   ```bash
-  BEACON_MTG_ID="<mtg-id>" python3 "$ROOT/lib/commands.py" meeting_end
+  BEACON_MTG_ID="<mtg-id>" python3 "$(beacon _lib-path)/commands.py" meeting_end
   ```
   → status=ended。これが終了ワークフロー A の入力キューになる。
 
@@ -100,12 +100,12 @@ BEACON_SEND_SERVICE="calendar" BEACON_SEND_LABEL="" \
   ```bash
   BEACON_MTG_ID="<mtg-id>" BEACON_MTG_AT="<新 ISO8601>" BEACON_MTG_END="<新終了>" \
     BEACON_MTG_SET_TRANSITION=1 \
-    python3 "$ROOT/lib/commands.py" meeting_reschedule
+    python3 "$(beacon _lib-path)/commands.py" meeting_reschedule
   ```
 
 - **取消 (cancel)**:
   ```bash
-  BEACON_MTG_ID="<mtg-id>" python3 "$ROOT/lib/commands.py" meeting_cancel
+  BEACON_MTG_ID="<mtg-id>" python3 "$(beacon _lib-path)/commands.py" meeting_cancel
   ```
 
 ## Step 3.5: 終了ワークフロー A への引き渡し

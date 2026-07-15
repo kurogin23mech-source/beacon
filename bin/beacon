@@ -2687,7 +2687,7 @@ done
 # therefore relocate whenever neither marker is present in CWD, accepting
 # .beacon/cloud.json as a sufficient root signal as well.
 case "${1:-}" in
-    setup|init) ;;
+    setup|init|_lib-path|_install-root) ;;
     *)
         if [ ! -f "$BEACON_PROJECT_FILE" ] && [ ! -f ".beacon/cloud.json" ]; then
             _beacon_root="$(find_beacon_root || true)"
@@ -2702,6 +2702,22 @@ esac
 case "${1:-}" in
     ""|start)
         cmd_launch
+        ;;
+    _lib-path|_install-root)
+        # ms-106 e-3500 — expose the beacon *install* location so Skills can
+        # locate lib/commands.py and scripts/ from the running binary, NOT from
+        # beacon-find-root (= the project DATA dir). Those two coincide only in
+        # the beacon source repo; in real deployments the install (~/tools/beacon)
+        # and the project data (~/sales-dogfood) live in different directories,
+        # so `$ROOT=beacon-find-root; python3 "$ROOT/lib/commands.py"` breaks with
+        # "No such file". BEACON_DIR is the same root bin/beacon uses to find its
+        # own lib, so echoing it stays consistent with how this binary runs.
+        if [ "$1" = "_lib-path" ]; then
+            echo "$BEACON_DIR/lib"
+        else
+            echo "$BEACON_DIR"
+        fi
+        exit 0
         ;;
     setup)
         cmd_setup
