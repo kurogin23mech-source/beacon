@@ -1358,6 +1358,58 @@ def opportunity_meetings(opp: dict) -> list:
     return [m for _, m in ordered]
 
 
+def _parse_dt(value: str):
+    """Parse an ISO8601 datetime (offset or trailing Z) to an aware UTC
+    datetime, or None when empty / date-only / unparseable. Meeting times carry
+    a timezone offset, so string comparison is wrong (same instant, different
+    offset sorts differently) — the end-detector must compare real instants."""
+    if not value or not str(value).strip():
+        return None
+    import datetime
+    txt = str(value).strip().replace("Z", "+00:00")
+    try:
+        dt = datetime.datetime.fromisoformat(txt)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:  # naive → assume UTC (best effort)
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(datetime.timezone.utc)
+
+
+def meeting_effective_end(meeting: dict):
+    """When a meeting is considered over: its end_at, or (no end set) its
+    scheduled_at treated as a point-in-time. Returns an aware UTC datetime or
+    None when neither is a parseable timestamp."""
+    return _parse_dt(meeting.get("end_at")) or _parse_dt(meeting.get("scheduled_at"))
+
+
+def scan_ended_meetings(data: dict, now: str) -> list:
+    """The end-detector's (C, e-3434) core: meetings whose scheduled end has
+    passed but are still ``scheduled`` — candidates to confirm on the calendar
+    and hand to the follow-up workflow (A). Pure and timezone-aware.
+
+    Idempotent by status: a meeting already ``ended``/``cancelled`` drops out,
+    so re-running the detector never fires the same meeting twice (SPEC AC:
+    同じミーティングを二重起動しない). The engine still calls
+    :func:`meeting_mark_ended` (also idempotent) to record the transition.
+
+    Returns a list of ``(opportunity, meeting)`` for the ended candidates,
+    oldest end first (so the earliest-finished meeting is handled first)."""
+    now_dt = _parse_dt(now)
+    if now_dt is None:
+        return []
+    hits = []
+    for opp in data.get("opportunities", []):
+        for m in opp.get("meetings", []):
+            if m.get("status") != MEETING_SCHEDULED:
+                continue
+            end = meeting_effective_end(m)
+            if end is not None and end <= now_dt:
+                hits.append((opp, m, end))
+    hits.sort(key=lambda t: t[2])
+    return [(opp, m) for opp, m, _ in hits]
+
+
 def meeting_schedule(data: dict, opportunity_id: str, scheduled_at: str, *,
                      end_at: str = "", location: str = "",
                      calendar_event_id: str = "", calendar_namespace: str = "",
