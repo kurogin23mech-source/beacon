@@ -3180,6 +3180,17 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .cd-key { flex:0 0 84px; color:var(--text-dim); }
 .cd-val { flex:1; color:var(--text-primary); word-break:break-all; }
 .cd-body { font-size:12px; color:var(--text-primary); white-space:pre-wrap; margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid var(--border-subtle); }
+/* --- e-3547: 面談 (Meeting) 行 --- */
+.mtg-row { display:flex; align-items:baseline; gap:9px; padding:5px 0; border-bottom:1px solid var(--border-subtle); font-size:12px; }
+.mtg-row:last-child { border-bottom:none; }
+.ent-type.mtg { color:#c084fc; background:rgba(192,132,252,0.13); }
+.mtg-status { flex:0 0 auto; font-size:10px; padding:1px 7px; border-radius:9px; }
+.mtg-status.sched { color:var(--accent); background:var(--accent-glow); }
+.mtg-status.ended { color:var(--text-secondary); background:var(--bg-raised); }
+.mtg-status.cancd { color:var(--text-dim); background:var(--bg-raised); text-decoration:line-through; }
+.mtg-when { flex:0 0 auto; font-size:11px; color:var(--text-primary); font-family:var(--font-mono, monospace); }
+.mtg-when.warn { color:#fbbf24; }
+.mtg-loc { flex:1; color:var(--text-dim); }
 /* --- ms-106 fb4: 見込み売上 / 目標進捗バー --- */
 .pipeline-sub { color:var(--text-dim); font-size:0.85em; }
 .pipeline-bar { height:5px; background:var(--bg-raised); border-radius:3px; margin-top:5px; overflow:hidden; max-width:240px; }
@@ -5086,7 +5097,7 @@ function _renderOppList(p) {
   const rows = opps.map(o => {
     const st = _salesOppStatusOf(o, phases, today);
     const expanded = state.expanded.has(o.id);
-    const body = expanded ? `<div class="opp-lbody">${_renderOppActivities(o)}${_renderCommunications(o)}</div>` : '';
+    const body = expanded ? `<div class="opp-lbody">${_renderOppActivities(o)}${_renderMeetings(o)}${_renderCommunications(o)}</div>` : '';
     const acct = _salesAccountName(p, o.account_id);
     return `<div class="opp-lcard${expanded ? ' expanded' : ''}">
       <div class="opp-lhead" data-action="toggle-opp" data-opp-id="${esc(o.id)}">
@@ -5136,6 +5147,38 @@ function _renderNurturings(a) {
   const items = a.nurturings || [];
   if (!items.length) return `<div class="act-empty">Nurturing はまだありません。</div>`;
   return _salesWorkRows(items, 'nurturing');
+}
+// e-3547: 面談 (Meeting, mtg-) を商談詳細に忠実表示する。UI は証跡を一貫して全部
+// 出す方針なので、重複の是正は skill 側 (e-3536/e-3548) が担い、UI は隠さず出す。
+// meeting は現状 opp 直下 (活動 link 無し) なので opp レベルのセクションで出す。
+function _salesMeetingBadge(status) {
+  const map = { scheduled: ['予定', 'sched'], ended: ['実施済', 'ended'], cancelled: ['キャンセル', 'cancd'] };
+  const pair = map[status] || [status || '—', 'sched'];
+  return `<span class="mtg-status ${pair[1]}">${esc(pair[0])}</span>`;
+}
+function _renderMeetings(o) {
+  const mtgs = o.meetings || [];
+  if (!mtgs.length) return '';
+  const rows = mtgs.map(m => {
+    const sched = m.scheduled_at || '';
+    const endT = m.end_at ? _salesShortDate(m.end_at).replace(/^\d{4}-\d{2}-\d{2}\s*/, '') : '';
+    const whenHtml = sched
+      ? `<span class="mtg-when">${esc(_salesShortDate(sched))}${endT ? '〜' + esc(endT) : ''}</span>`
+      : `<span class="mtg-when warn">⚠ 予定未定</span>`;
+    const loc = m.location || '';
+    const url = (loc.match(/https?:\/\/[^\s)]+/) || [])[0] || '';
+    const locHtml = url
+      ? `<a class="comm-src" href="${esc(url)}" target="_blank" rel="noopener">${esc(loc.replace(/\s*\(?https?:\/\/[^\s)]+\)?/, '').trim() || 'リンク')} ↗</a>`
+      : (loc ? `<span class="mtg-loc">${esc(loc)}</span>` : '');
+    return `<div class="mtg-row">
+      <span class="ent-type mtg">面談</span>
+      <span class="ent-id" title="${esc(m.id || '')}">${esc(m.id || '')}</span>
+      ${_salesMeetingBadge(m.status)}
+      ${whenHtml}
+      ${locHtml}
+    </div>`;
+  }).join('');
+  return `<div class="opp-acts-head">面談 (Meeting) (${mtgs.length})</div>${rows}`;
 }
 // ms-107 e-3432: Communication (証跡・事後記録型 = 営業の Commit). Activity が
 // 「予定」なのに対し、これは source を辿れる「事実」の追記ログ。oldest→newest
@@ -5416,6 +5459,7 @@ function renderOpportunityModal(oppId) {
       <div class="sm-head"><span class="sm-name">${esc(o.title || '(no title)')}</span></div>
       ${detail}
       ${_renderOppActivities(o)}
+      ${_renderMeetings(o)}
       ${_renderCommunications(o)}
     </div>
   </div>`;
