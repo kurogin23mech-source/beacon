@@ -33,7 +33,7 @@ ROOT=$(beacon-find-root) && \
   && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
-`NOT_SALES` なら終了。内部コマンドは `python3 "$ROOT/lib/commands.py" <cmd>` で呼ぶ。
+`NOT_SALES` なら終了。内部コマンドは `python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。
 
 ## Step 1: その日のやり取りを集める
 
@@ -73,7 +73,7 @@ BEACON_COMM_TARGET="<target-id>" \
   BEACON_COMM_CHANNEL="<email / slack>" \
   BEACON_COMM_SOURCE_REF="<message-id / thread-id>" BEACON_COMM_SOURCE_URL="<permalink>" \
   BEACON_COMM_OCCURRED="<やり取りの時刻>" \
-  python3 "$ROOT/lib/commands.py" communication_add
+  python3 "$(beacon _lib-path)/commands.py" communication_add
 ```
 
 ## Step 4: 活動の消化・ボール更新

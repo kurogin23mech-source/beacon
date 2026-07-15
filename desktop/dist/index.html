@@ -5117,8 +5117,19 @@ function _renderNurturings(a) {
 function _salesCommTime(c) {
   return c.occurred_at || c.created_at || '';
 }
+function _salesCommsGather(target) {
+  // e-3503 — gather the target's own communications plus those nested under its
+  // work items (activities/nurturings), mirroring the model's
+  // _gather_communications so the log is complete regardless of nesting. Old
+  // flat records (pre-nesting) are still included via the target level.
+  const t = target || {};
+  const out = ((t.communications) || []).slice();
+  (t.activities || []).forEach(a => out.push(...((a.communications) || [])));
+  (t.nurturings || []).forEach(n => out.push(...((n.communications) || [])));
+  return out;
+}
 function _salesCommsOrdered(target) {
-  const comms = ((target || {}).communications || []).slice();
+  const comms = _salesCommsGather(target);
   return comms
     .map((c, i) => [c, i])
     .sort((x, y) => {

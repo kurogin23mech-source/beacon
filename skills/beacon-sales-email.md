@@ -25,14 +25,14 @@ triggers:
 Bash ツールで実行し、営業プロジェクトかを確認:
 
 ```bash
-ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$ROOT/lib/commands.py" account_list >/dev/null 2>&1 && \
+ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" account_list >/dev/null 2>&1 && \
   test "$(python3 -c "import json;print(json.load(open('$ROOT/.beacon/project.json')).get('profession',''))" 2>/dev/null)" = "sales" && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
 `NOT_SALES` の場合 (= 営業テンプレートでないプロジェクト)、この Skill は「営業プロジェクトでのみ使えます」と伝えて終了する。cloud mode で `project.json` を直接読めない場合は `beacon opportunity list` が動くかで代替判定してよい。
 
 以降、`$ROOT` は `beacon-find-root` の出力。内部コマンド (`sales_identity_*`) は
-ユーザー向け CLI 動詞ではないので `python3 "$ROOT/lib/commands.py" <cmd>` で呼ぶ。
+ユーザー向け CLI 動詞ではないので `python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。
 
 ## Step 1: 対象商談の特定
 
@@ -57,18 +57,18 @@ beacon account list
 namespace を手書きしない (= 取り違えが起きる経路を残さない)。まず台帳を確認:
 
 ```bash
-BEACON_JSON=1 python3 "$ROOT/lib/commands.py" sales_account_list
+BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" sales_account_list
 ```
 
 - **台帳が空** の場合、ユーザーに「どの Google アカウント (メールアドレス) で送りますか？
   会社用/個人用など呼び名 (label) も教えてください」と確認し、登録する:
 
 ```bash
-BEACON_SEND_LABEL="会社" BEACON_SEND_EMAIL="<アドレス>" python3 "$ROOT/lib/commands.py" sales_account_add
+BEACON_SEND_LABEL="会社" BEACON_SEND_EMAIL="<アドレス>" python3 "$(beacon _lib-path)/commands.py" sales_account_add
 BEACON_SEND_LABEL="会社" BEACON_SEND_SERVICE="gmail" BEACON_SEND_NAMESPACE="mcp__gmail" \
-  python3 "$ROOT/lib/commands.py" sales_account_route
+  python3 "$(beacon _lib-path)/commands.py" sales_account_route
 # 既定の送信元にするなら default label を pin (次回から $LABEL 省略で使える):
-BEACON_SEND_IDENTITY="会社" python3 "$ROOT/lib/commands.py" sales_identity_set
+BEACON_SEND_IDENTITY="会社" python3 "$(beacon _lib-path)/commands.py" sales_identity_set
 ```
 
 - **どの label で送るか**を決める。既定 (default label) でよければ `$LABEL` は空のまま。
@@ -79,7 +79,7 @@ BEACON_SEND_IDENTITY="会社" python3 "$ROOT/lib/commands.py" sales_identity_set
 
 ```bash
 BEACON_SEND_SERVICE="gmail" BEACON_SEND_LABEL="$LABEL" \
-  python3 "$ROOT/lib/commands.py" sales_account_resolve
+  python3 "$(beacon _lib-path)/commands.py" sales_account_resolve
 echo "RESOLVE_EXIT=$?"
 ```
 
@@ -103,6 +103,15 @@ echo "RESOLVE_EXIT=$?"
 生成したら self-review: (a) 相手が 1 度で意味を取れるか (b) 用件が件名 1 行で
 分かるか (c) 社内略語が残っていないか。違反があれば直す。
 
+### 営業メールのお作法 (soft guidance / e-3498)
+
+お作法は「お願い」であって絶対の強制ではない (顧客により例外あり)。だが既定は必ず守る:
+
+- **ボールはこちらが握って返す**: 相手に丸投げして判断待ちにしない。次アクションと期限をこちらから提示する。
+- **日程を打診するメールは、こちらから候補 (既定 3 枠、曜日・日付・時間帯を明記) を出す**。「ご都合はいかがですか？」と相手に候補日を出させるのは営業の鉄則違反。
+  - **重要**: 日程がらみのメールは、この Skill で手書きせず **`/beacon-sales-schedule` 経由で組む**。schedule が自分の空きから 3 枠を算出し、それをカレンダーに『仮押さえ』した上で候補入りの本文を用意する (仮押さえ→提示→確定枠を本予定化→残り解放、の一連は日程ドメインのお作法)。この Skill が日程メールを単発で書くと、候補算出も仮押さえも欠けて鉄則が漏れる。
+  - もしユーザーが明示的にこの Skill で日程メールを書けと指示した場合でも、本文が「候補をこちらから 3 枠出す」形になっているかを self-review で確認し、なっていなければ直す。
+
 ## Step 4: 送信前ゲート (identity 照合) — 必須
 
 送信に使う from が、選んだ label の identity と一致するかを、送信の **直前** に照合する。
@@ -110,7 +119,7 @@ Step 2 と同じ `$LABEL` を渡す (= 解決した route と同じアカウン�
 
 ```bash
 BEACON_SEND_FROM="$FROM" BEACON_SEND_LABEL="$LABEL" \
-  python3 "$ROOT/lib/commands.py" sales_identity_check
+  python3 "$(beacon _lib-path)/commands.py" sales_identity_check
 echo "GATE_EXIT=$?"
 ```
 
@@ -145,16 +154,23 @@ AI が自律で送信してはならない (SPEC §3: 送信は人間承認)。
 
 ## Step 6: 活動記録 (証跡) を必ず残す
 
-送信できたら、対象商談にメール送信を活動記録として残す (SPEC 受入条件 4)。
-これを飛ばすと「何をしたか」を後で辿れなくなるため必須:
+送信の**事実の記録は Step 6.5 の Communication (証跡) が担う**。ここでは
+**新しい活動を作らない** — 送信 1 回につき「予定 (todo) 活動」と「証跡」の 2 レコードが
+できて内容が重複し、しかも活動が todo のまま残って未消化に見える問題を避けるため
+(e-3505)。
+
+代わりに、**この送信が『計画していた活動』を果たした場合は、その活動を done にする**。
+対象商談の未消化活動 (フェーズ起票時に seed された `act-` 等) を `beacon opportunity list`
+等で確認し、今回の送信がどれを満たしたかを判断する:
 
 ```bash
-BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[メール送信済] 件名『<件名>』→ <宛先>" \
-  python3 "$ROOT/lib/commands.py" opportunity_activity
+# この送信が満たした計画活動 (例: 「初回面談を打診」) を done にする
+BEACON_ACT_ID="<満たした act-id>" \
+  python3 "$(beacon _lib-path)/commands.py" activity_done
 ```
 
-> v1 補足: 現状 activity は「予定 (todo)」型で記録される。送信済みを表す
-> 「起きた事実 (event)」型の記録は今後の精緻化対象 (description に [送信済] を明記して代替)。
+満たした計画活動が無い単発の送信 (突発の連絡 等) なら、活動の done 化は不要 —
+Step 6.5 の Communication だけが記録になる。**いずれにせよ新規 todo は作らない。**
 
 ## Step 6.5: 証跡 (Communication) + 返信待ちなら watch を立てる (e-3432 / e-3437)
 
@@ -167,7 +183,7 @@ BEACON_COMM_TARGET="<act-id または $OPP>" \
   BEACON_COMM_SUMMARY="<送信内容の1行要約>" \
   BEACON_COMM_DIRECTION="outbound" BEACON_COMM_CHANNEL="email" \
   BEACON_COMM_SOURCE_REF="<message-id / thread-id>" \
-  python3 "$ROOT/lib/commands.py" communication_add
+  python3 "$(beacon _lib-path)/commands.py" communication_add
 ```
 
 **このメールが返信を必要とする** (日程打診・確認依頼・見積送付後の返答待ち 等) なら、
@@ -177,8 +193,21 @@ hourly にこのスレッドを確認し、返信が来たら ball を自分に�
 ```bash
 BEACON_WATCH_TARGET="<act-id>" BEACON_WATCH_CHANNEL="email" \
   BEACON_WATCH_THREAD="<thread-id / message-id>" \
-  python3 "$ROOT/lib/commands.py" watch_set
+  python3 "$(beacon _lib-path)/commands.py" watch_set
 ```
+
+**watch を立てたら、それを hourly に回す Operation を必ず ensure する** (e-3504)。watch は
+「箱」で、それを叩く「時計」が Operation。ensure を飛ばすと watch が立つのに一度も
+チェックが回らない (dogfood 報告④の実害):
+
+```bash
+python3 "$(beacon _lib-path)/commands.py" sales_reply_watch_op_ensure
+```
+
+これは冪等 (返信ウォッチャー Operation が無ければ作り、あれば再利用)。出力に
+`beacon operation approve <op-id> --spec <doc-id>` の案内が出たら、**自動発火 (server tick
+が hourly に `/beacon-sales-reply-watch` を起こす) を有効にするには一度この承認が必要**である
+旨をユーザーに伝える。承認は人間が行う (自律実行の standing authorization を人が発行する境界)。
 
 返信不要の連絡 (お礼・案内のみ 等) では watch を立てない (無駄打ち防止)。返信が必要か
 どうかは送信内容から判断する (時間に敏感な打診・依頼 = watch 対象)。

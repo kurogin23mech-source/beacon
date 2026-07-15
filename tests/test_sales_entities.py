@@ -1214,10 +1214,14 @@ def test_communication_links_to_activity_stored_under_opportunity():
     opp = se.opportunity_add(data, "Deal")
     act = se.activity_add(data, opp, "提案書を送る")
     cid = se.communication_add(data, act, "提案書を送付した", direction="outbound", channel="email")
-    # stored under the opportunity (container), links the activity
+    # e-3503 — nested under the activity it fulfilled (commit-under-task), not at
+    # the opportunity level. communications_of(opp) still gathers it.
     o = se.find_opportunity(data, opp)
-    assert [c["id"] for c in o["communications"]] == [cid]
-    assert o["communications"][0]["linked_id"] == act
+    assert o.get("communications", []) == []
+    _, a = se.find_activity(data, act)
+    assert [c["id"] for c in a["communications"]] == [cid]
+    assert a["communications"][0]["linked_id"] == act
+    assert [c["id"] for c in se.communications_of(o)] == [cid]
 
 
 def test_communication_links_to_nurturing_stored_under_account():
@@ -1226,8 +1230,11 @@ def test_communication_links_to_nurturing_stored_under_account():
     nrt = se.nurturing_add(data, acc, "年始の挨拶を送る")
     cid = se.communication_add(data, nrt, "年賀メールを送った", direction="outbound", channel="email")
     a = se.find_account(data, acc)
-    assert a["communications"][0]["id"] == cid
-    assert a["communications"][0]["linked_id"] == nrt
+    assert a.get("communications", []) == []  # e-3503 — nested under nurturing
+    _, n = se.find_nurturing(data, nrt)
+    assert n["communications"][0]["id"] == cid
+    assert n["communications"][0]["linked_id"] == nrt
+    assert [c["id"] for c in se.communications_of(a)] == [cid]
 
 
 def test_communication_target_grain_has_empty_linked_id():
@@ -1396,3 +1403,23 @@ def test_watched_work_items_excludes_disabled():
     se.set_watch(data, nrt, channel="email")
     se.clear_watch(data, nrt)
     assert se.watched_work_items(data) == []
+
+
+def test_activity_set_status_marks_done():
+    # ms-106 e-3505 — a send marks the fulfilled plan done, not a new todo.
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    aid = se.activity_add(data, opp, "初回面談を打診")
+    act = se.activity_set_status(data, aid, "done", at="T1")
+    assert act["status"] == "done" and act["done_at"] == "T1"
+
+
+def test_activity_set_status_validates():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    aid = se.activity_add(data, opp, "x")
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        se.activity_set_status(data, aid, "bogus")
+    with _pt.raises(ValueError):
+        se.activity_set_status(data, "act-999", "done")

@@ -32,7 +32,7 @@ ROOT=$(beacon-find-root) && \
   && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
-`NOT_SALES` なら終了。内部コマンドは `python3 "$ROOT/lib/commands.py" <cmd>` で呼ぶ。
+`NOT_SALES` なら終了。内部コマンドは `python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。
 
 ## Step 1: 対象の終了面談を特定
 
@@ -65,7 +65,7 @@ BEACON_COMM_TARGET="<$OPP または act-id>" \
   BEACON_COMM_DIRECTION="inbound" BEACON_COMM_CHANNEL="meeting" \
   BEACON_COMM_SOURCE_URL="<議事録 doc の Drive リンク>" \
   BEACON_COMM_OCCURRED="<面談の日時>" \
-  python3 "$ROOT/lib/commands.py" communication_add
+  python3 "$(beacon _lib-path)/commands.py" communication_add
 ```
 
 ## Step 4: フェーズ遷移の判定案を出す (確定は人)

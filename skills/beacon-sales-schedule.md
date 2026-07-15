@@ -30,14 +30,14 @@ triggers:
 Bash ツールで実行し、営業プロジェクトかを確認:
 
 ```bash
-ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$ROOT/lib/commands.py" account_list >/dev/null 2>&1 && \
+ROOT=$(beacon-find-root) && BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" account_list >/dev/null 2>&1 && \
   test "$(python3 -c "import json;print(json.load(open('$ROOT/.beacon/project.json')).get('profession',''))" 2>/dev/null)" = "sales" && echo "SALES_OK" || echo "NOT_SALES"
 ```
 
 `NOT_SALES` の場合 (= 営業テンプレートでないプロジェクト)、この Skill は「営業プロジェクトでのみ使えます」と伝えて終了する。cloud mode で `project.json` を直接読めない場合は `beacon opportunity list` が動くかで代替判定してよい。
 
 以降、`$ROOT` は `beacon-find-root` の出力。内部コマンド (`opportunity_activity`) は
-ユーザー向け CLI 動詞ではないので `python3 "$ROOT/lib/commands.py" <cmd>` で呼ぶ。
+ユーザー向け CLI 動詞ではないので `python3 "$(beacon _lib-path)/commands.py" <cmd>` で呼ぶ。
 
 ## Step 1: 対象商談の特定
 
@@ -63,17 +63,17 @@ beacon account list
 台帳を通さず namespace を手書きしない (= 取り違え防止)。まず台帳を確認:
 
 ```bash
-BEACON_JSON=1 python3 "$ROOT/lib/commands.py" sales_account_list
+BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" sales_account_list
 ```
 
 - **台帳が空 / calendar route 未設定** の場合、ユーザーに「どの Google アカウントの
   カレンダーで調整しますか？」と確認して登録する (label が既にあれば route だけ足す):
 
 ```bash
-BEACON_SEND_LABEL="会社" BEACON_SEND_EMAIL="<アドレス>" python3 "$ROOT/lib/commands.py" sales_account_add
+BEACON_SEND_LABEL="会社" BEACON_SEND_EMAIL="<アドレス>" python3 "$(beacon _lib-path)/commands.py" sales_account_add
 BEACON_SEND_LABEL="会社" BEACON_SEND_SERVICE="calendar" \
   BEACON_SEND_NAMESPACE="mcp__google-calendar" BEACON_SEND_ALIAS="work" \
-  python3 "$ROOT/lib/commands.py" sales_account_route
+  python3 "$(beacon _lib-path)/commands.py" sales_account_route
 ```
 
 - 既定 (default label) でよければ `$LABEL` は空のまま。この 1 件だけ別アカウントの
@@ -83,7 +83,7 @@ calendar の route を台帳から解決する。**これが使うカレンダ�
 
 ```bash
 BEACON_SEND_SERVICE="calendar" BEACON_SEND_LABEL="$LABEL" \
-  python3 "$ROOT/lib/commands.py" sales_account_resolve
+  python3 "$(beacon _lib-path)/commands.py" sales_account_resolve
 echo "RESOLVE_EXIT=$?"
 ```
 
@@ -110,8 +110,18 @@ echo "RESOLVE_EXIT=$?"
 
 ## Step 4: 候補の提示 → 相手都合の確認
 
-freebusy の空きから、面談に使えそうな時間帯を **2〜3 個**、曜日込みで提示する
+freebusy の空きから、面談に使えそうな時間帯を **既定 3 枠**、曜日込みで提示する
 (例:「7/15 (火) 14:00〜15:00 / 7/16 (水) 10:00〜11:00 / 7/17 (木) 16:00〜17:00」)。
+枠数は顧客により 2〜4 もあり得る (お作法は「お願い」であって固定ではない) が、**既定は 3 枠**。
+
+### カレンダーのお作法 (soft guidance / e-3498)
+
+**顧客に提示する枠は、提示と同時にカレンダーへ『仮』で押さえる** (ダブルブッキング防止
+＋相手が選んだ枠を即確定できる)。相手が 1 枠を選んで確定したら、その枠を本予定化し
+(Step 6)、**残りの仮押さえは解放する**。この「3 枠算出→仮押さえ→提示→確定枠を本予定・
+残り解放」の一連が日程調整のお作法。3 枠を出す指示 (メール本文) の作法は email 側
+(`/beacon-sales-email` の Step 3) にも書かれており、日程メールは必ず schedule 経由で
+組む (email 単発で日程を書くと候補算出も仮押さえも欠ける)。
 
 この候補はあくまで**相手に投げる叩き台**。ユーザーに見せ、次のどれかに進む:
 
@@ -159,7 +169,7 @@ AI が自律でカレンダーに入れてはならない (制約参照)。
      BEACON_MTG_LOCATION="$LOC" BEACON_MTG_EVENT_ID="$EVENT_ID" \
      BEACON_MTG_CAL_NS="$CALNS" BEACON_MTG_CAL_ACCT="$CALACCT" \
      BEACON_MTG_SET_TRANSITION=1 \
-     python3 "$ROOT/lib/commands.py" meeting_schedule
+     python3 "$(beacon _lib-path)/commands.py" meeting_schedule
    ```
 
    stdout の `calendar tag (説明文に埋め込む): beacon-meeting-id: mtg-N` の行から、
@@ -184,11 +194,11 @@ Beacon 側は:
 ```bash
 BEACON_MTG_ID="$MTG_ID" BEACON_MTG_AT="$NEW_WHEN_START" BEACON_MTG_END="$NEW_WHEN_END" \
   BEACON_MTG_SET_TRANSITION=1 \
-  python3 "$ROOT/lib/commands.py" meeting_reschedule
+  python3 "$(beacon _lib-path)/commands.py" meeting_reschedule
 ```
 
 これで遷移日もカレンダーも新しい日時に揃う (AC: 予定変更時も両者が追従)。対象の
-`mtg-N` は `BEACON_MTG_OPP="$OPP" BEACON_JSON=1 python3 "$ROOT/lib/commands.py" meeting_list`
+`mtg-N` は `BEACON_MTG_OPP="$OPP" BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" meeting_list`
 で引ける。
 
 ## Step 7: 活動記録 (証跡) を必ず残す
@@ -198,7 +208,7 @@ BEACON_MTG_ID="$MTG_ID" BEACON_MTG_AT="$NEW_WHEN_START" BEACON_MTG_END="$NEW_WHE
 
 ```bash
 BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[アポ確定] <日時> <相手/場所>" \
-  python3 "$ROOT/lib/commands.py" opportunity_activity
+  python3 "$(beacon _lib-path)/commands.py" opportunity_activity
 ```
 
 ## Step 8: 結果報告

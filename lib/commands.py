@@ -21028,12 +21028,20 @@ def cmd_opportunity_add():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-106 e-3502 — seed the entry phase's anchor activities so a new deal
+    # opens with its next steps instead of a blank list the rep must re-invent.
+    # Done at the CLI (= sales workflow entry), same engine as phase advance
+    # (instantiate_phase_activities, e-3270); idempotent by description.
+    seeded = sales_entities.instantiate_phase_activities(
+        data, opp_id, at=core._now_iso())
     save_project(data)
     opp = sales_entities.find_opportunity(data, opp_id)
     print(f"Added opportunity {opp_id}: {title}")
     if account_id:
         print(f"  account: {account_id}")
     print(f"  phase: {opp.get('phase', '') if opp else phase}")
+    if seeded:
+        print(f"  seeded {len(seeded)} フェーズ活動 (このフェーズの標準ステップ)")
 
 
 def cmd_opportunity_assign():
@@ -21182,8 +21190,19 @@ def cmd_opportunity_phase():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-106 e-3502 — a manual phase move should seed the new phase's anchor
+    # activities too, so create / judge-advance / manual-phase all behave the
+    # same (the rep never lands in a phase with a blank next-steps list). CLI
+    # layer, opportunities only (accounts have no activity templates); idempotent
+    # by description via instantiate_phase_activities.
+    seeded = []
+    if opp_id.startswith("opp-"):
+        seeded = sales_entities.instantiate_phase_activities(
+            data, opp_id, at=core._now_iso())
     save_project(data)
     print(f"{opp_id} phase → {rec['phase']} (recorded in phase_history)")
+    if seeded:
+        print(f"  seeded {len(seeded)} フェーズ活動 (このフェーズの標準ステップ)")
 
 
 def cmd_opportunity_transition_date():
@@ -21389,6 +21408,66 @@ def cmd_opportunity_activity():
         sys.exit(1)
     save_project(data)
     print(f"Added activity {act_id} to {opp_id}: {desc}")
+
+
+def cmd_sales_reply_watch_op_ensure():
+    """Internal (Skill-invoked): ensure a reply-watch Operation exists so the
+    server tick drives ``/beacon-sales-reply-watch`` hourly (ms-106 e-3504
+    Phase 2). Idempotent — reuses an Operation whose ``meta.execute_skill`` is
+    the reply-watch skill, and repairs its tick flags if missing. Prints the
+    op-id and whether it still needs ``beacon operation approve`` to arm
+    auto-execute (the human mints the standing authorization once)."""
+    SKILL = "beacon-sales-reply-watch"
+    data = load_project()
+    op = None
+    for cand in data.get("operations", []) or []:
+        if (cand.get("meta") or {}).get("execute_skill") == SKILL:
+            op = cand
+            break
+    created = False
+    if op is None:
+        data, op = core.operation_open(
+            data, "返信ウォッチャー (自動)", schedule="weekdays", status="open",
+            author=_resolve_current_author(data))
+        created = True
+    meta = op.setdefault("meta", {})
+    changed = created
+    if meta.get("execute_skill") != SKILL:
+        meta["execute_skill"] = SKILL
+        changed = True
+    if not meta.get("server_tick"):
+        meta["server_tick"] = True
+        changed = True
+    if not meta.get("cadence_minutes"):
+        meta["cadence_minutes"] = 60
+        changed = True
+    if changed:
+        save_project(data, op={"type": "operation_open" if created
+                               else "operation_update", "op_id": op["id"]})
+    print(f"reply-watch operation: {op['id']} "
+          f"(execute_skill={SKILL}, cadence={meta.get('cadence_minutes')}m, "
+          f"{'created' if created else 'exists'})")
+    print(f"  → 自動発火を有効にするには承認が必要: "
+          f"beacon operation approve {op['id']} --spec <doc-id>")
+
+
+def cmd_activity_done():
+    """Internal (Skill-invoked): mark a planned Activity done/todo.
+    Env: BEACON_ACT_ID, BEACON_ACT_STATUS (default 'done'). ms-106 e-3505 — a
+    send records the Communication (fact) and marks the plan it fulfilled done,
+    instead of leaving a lingering todo beside the证跡."""
+    import sales_entities
+    act_id = os.environ.get("BEACON_ACT_ID", "")
+    status = (os.environ.get("BEACON_ACT_STATUS", "") or "done").strip().lower()
+    data = load_project()
+    try:
+        act = sales_entities.activity_set_status(data, act_id, status,
+                                                  at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"activity {act_id} → {act['status']}")
 
 
 def cmd_communication_add():
@@ -21712,6 +21791,8 @@ if __name__ == "__main__":
         "opportunity_judge": cmd_opportunity_judge,
         "opportunity_due": cmd_opportunity_due,
         "opportunity_activity": cmd_opportunity_activity,
+        "activity_done": cmd_activity_done,
+        "sales_reply_watch_op_ensure": cmd_sales_reply_watch_op_ensure,
         "opportunity_delete": cmd_opportunity_delete,
         # ms-107 e-3432 — Communication (証跡・事後記録型 = 営業の Commit)
         "communication_add": cmd_communication_add,
