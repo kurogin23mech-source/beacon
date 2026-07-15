@@ -21350,6 +21350,47 @@ def cmd_opportunity_activity():
     print(f"Added activity {act_id} to {opp_id}: {desc}")
 
 
+def cmd_sales_reply_watch_op_ensure():
+    """Internal (Skill-invoked): ensure a reply-watch Operation exists so the
+    server tick drives ``/beacon-sales-reply-watch`` hourly (ms-106 e-3504
+    Phase 2). Idempotent — reuses an Operation whose ``meta.execute_skill`` is
+    the reply-watch skill, and repairs its tick flags if missing. Prints the
+    op-id and whether it still needs ``beacon operation approve`` to arm
+    auto-execute (the human mints the standing authorization once)."""
+    SKILL = "beacon-sales-reply-watch"
+    data = load_project()
+    op = None
+    for cand in data.get("operations", []) or []:
+        if (cand.get("meta") or {}).get("execute_skill") == SKILL:
+            op = cand
+            break
+    created = False
+    if op is None:
+        data, op = core.operation_open(
+            data, "返信ウォッチャー (自動)", schedule="weekdays", status="open",
+            author=_resolve_current_author(data))
+        created = True
+    meta = op.setdefault("meta", {})
+    changed = created
+    if meta.get("execute_skill") != SKILL:
+        meta["execute_skill"] = SKILL
+        changed = True
+    if not meta.get("server_tick"):
+        meta["server_tick"] = True
+        changed = True
+    if not meta.get("cadence_minutes"):
+        meta["cadence_minutes"] = 60
+        changed = True
+    if changed:
+        save_project(data, op={"type": "operation_open" if created
+                               else "operation_update", "op_id": op["id"]})
+    print(f"reply-watch operation: {op['id']} "
+          f"(execute_skill={SKILL}, cadence={meta.get('cadence_minutes')}m, "
+          f"{'created' if created else 'exists'})")
+    print(f"  → 自動発火を有効にするには承認が必要: "
+          f"beacon operation approve {op['id']} --spec <doc-id>")
+
+
 def cmd_activity_done():
     """Internal (Skill-invoked): mark a planned Activity done/todo.
     Env: BEACON_ACT_ID, BEACON_ACT_STATUS (default 'done'). ms-106 e-3505 — a
@@ -21691,6 +21732,7 @@ if __name__ == "__main__":
         "opportunity_due": cmd_opportunity_due,
         "opportunity_activity": cmd_opportunity_activity,
         "activity_done": cmd_activity_done,
+        "sales_reply_watch_op_ensure": cmd_sales_reply_watch_op_ensure,
         "opportunity_delete": cmd_opportunity_delete,
         # ms-107 e-3432 — Communication (証跡・事後記録型 = 営業の Commit)
         "communication_add": cmd_communication_add,

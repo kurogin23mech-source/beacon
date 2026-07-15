@@ -196,6 +196,19 @@ BEACON_WATCH_TARGET="<act-id>" BEACON_WATCH_CHANNEL="email" \
   python3 "$(beacon _lib-path)/commands.py" watch_set
 ```
 
+**watch を立てたら、それを hourly に回す Operation を必ず ensure する** (e-3504)。watch は
+「箱」で、それを叩く「時計」が Operation。ensure を飛ばすと watch が立つのに一度も
+チェックが回らない (dogfood 報告④の実害):
+
+```bash
+python3 "$(beacon _lib-path)/commands.py" sales_reply_watch_op_ensure
+```
+
+これは冪等 (返信ウォッチャー Operation が無ければ作り、あれば再利用)。出力に
+`beacon operation approve <op-id> --spec <doc-id>` の案内が出たら、**自動発火 (server tick
+が hourly に `/beacon-sales-reply-watch` を起こす) を有効にするには一度この承認が必要**である
+旨をユーザーに伝える。承認は人間が行う (自律実行の standing authorization を人が発行する境界)。
+
 返信不要の連絡 (お礼・案内のみ 等) では watch を立てない (無駄打ち防止)。返信が必要か
 どうかは送信内容から判断する (時間に敏感な打診・依頼 = watch 対象)。
 
