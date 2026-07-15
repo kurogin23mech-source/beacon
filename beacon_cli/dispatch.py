@@ -427,6 +427,62 @@ def build_parser() -> argparse.ArgumentParser:
     p_opp_delete = opp_sub.add_parser("delete", add_help=False)
     p_opp_delete.add_argument("opp_id", nargs="?", default="")
 
+    # ---- communication (ms-107 e-3432: 証跡・事後記録型 = 営業の Commit) ----
+    p_comm = sub.add_parser(
+        "communication", aliases=["comm"], help="Sales communication (証跡) operations",
+        add_help=False,
+    )
+    p_comm.add_argument("--help", "-h", action="store_true", dest="show_help")
+    comm_sub = p_comm.add_subparsers(dest="comm_cmd", metavar="<subcmd>")
+
+    p_comm_add = comm_sub.add_parser("add", add_help=False)
+    p_comm_add.add_argument("target_id", nargs="?", default="")
+    p_comm_add.add_argument("summary", nargs="?", default="")
+    p_comm_add.add_argument("--direction", default="")
+    p_comm_add.add_argument("--channel", default="")
+    p_comm_add.add_argument("--source-ref", dest="source_ref", default="")
+    p_comm_add.add_argument("--source-url", dest="source_url", default="")
+    p_comm_add.add_argument("--occurred", default="")
+
+    p_comm_list = comm_sub.add_parser("list", aliases=["ls"], add_help=False)
+    p_comm_list.add_argument("target_id", nargs="?", default="")
+    p_comm_list.add_argument("--json", action="store_true")
+
+    # ---- meeting (ms-107 e-3433: 面談・運用状態型 + 識別 ID handshake) ----
+    p_mtg = sub.add_parser(
+        "meeting", aliases=["mtg"], help="Sales meeting (面談) operations",
+        add_help=False,
+    )
+    p_mtg.add_argument("--help", "-h", action="store_true", dest="show_help")
+    mtg_sub = p_mtg.add_subparsers(dest="mtg_cmd", metavar="<subcmd>")
+
+    p_mtg_sched = mtg_sub.add_parser("schedule", add_help=False)
+    p_mtg_sched.add_argument("opp_id", nargs="?", default="")
+    p_mtg_sched.add_argument("--at", default="")
+    p_mtg_sched.add_argument("--end", default="")
+    p_mtg_sched.add_argument("--location", default="")
+    p_mtg_sched.add_argument("--event-id", dest="event_id", default="")
+    p_mtg_sched.add_argument("--calendar-ns", dest="calendar_ns", default="")
+    p_mtg_sched.add_argument("--calendar-account", dest="calendar_account", default="")
+    p_mtg_sched.add_argument("--set-transition", dest="set_transition", action="store_true")
+
+    p_mtg_resched = mtg_sub.add_parser("reschedule", add_help=False)
+    p_mtg_resched.add_argument("mtg_id", nargs="?", default="")
+    p_mtg_resched.add_argument("--at", default="")
+    p_mtg_resched.add_argument("--end", default="")
+    p_mtg_resched.add_argument("--event-id", dest="event_id", default="")
+    p_mtg_resched.add_argument("--set-transition", dest="set_transition", action="store_true")
+
+    p_mtg_end = mtg_sub.add_parser("end", add_help=False)
+    p_mtg_end.add_argument("mtg_id", nargs="?", default="")
+
+    p_mtg_cancel = mtg_sub.add_parser("cancel", add_help=False)
+    p_mtg_cancel.add_argument("mtg_id", nargs="?", default="")
+
+    p_mtg_list = mtg_sub.add_parser("list", aliases=["ls"], add_help=False)
+    p_mtg_list.add_argument("opp_id", nargs="?", default="")
+    p_mtg_list.add_argument("--json", action="store_true")
+
     # ---- phase (ms-106: sales entities, profession=sales) ----
     p_phase = sub.add_parser(
         "phase", help="Sales phase funnel vocabulary", add_help=False,
@@ -1905,6 +1961,102 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
         env = {"BEACON_OPP_ID": args.opp_id or ""}
         return _run_commands_py(root, "opportunity_delete", env)
     print("Usage: beacon opportunity [add|list|phase|activity|delete] [options]")
+    return 2
+
+
+def _handle_communication(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help or args.comm_cmd is None:
+        print("Usage: beacon communication [add|list] [options]")
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+
+    cmd = args.comm_cmd
+    if cmd == "add":
+        if not args.target_id or not args.summary or not args.direction:
+            print("Usage: beacon communication add <target-id> <summary> "
+                  "--direction inbound|outbound "
+                  "[--channel email|slack|meeting|calendar|phone|other] "
+                  "[--source-ref <id>] [--source-url <link>] [--occurred <datetime>]")
+            return 1
+        env = {
+            "BEACON_COMM_TARGET": args.target_id or "",
+            "BEACON_COMM_SUMMARY": args.summary or "",
+            "BEACON_COMM_DIRECTION": args.direction or "",
+            "BEACON_COMM_CHANNEL": args.channel or "",
+            "BEACON_COMM_SOURCE_REF": args.source_ref or "",
+            "BEACON_COMM_SOURCE_URL": args.source_url or "",
+            "BEACON_COMM_OCCURRED": args.occurred or "",
+        }
+        return _run_commands_py(root, "communication_add", env)
+    if cmd in ("list", "ls"):
+        if not args.target_id:
+            print("Usage: beacon communication list <target-id> [--json]")
+            return 1
+        env = {
+            "BEACON_COMM_TARGET": args.target_id or "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        return _run_commands_py(root, "communication_list", env)
+    print("Usage: beacon communication [add|list] [options]")
+    return 2
+
+
+def _handle_meeting(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help or args.mtg_cmd is None:
+        print("Usage: beacon meeting [schedule|reschedule|end|cancel|list] [options]")
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+
+    cmd = args.mtg_cmd
+    if cmd == "schedule":
+        if not args.opp_id or not args.at:
+            print("Usage: beacon meeting schedule <opp-id> --at <datetime> "
+                  "[--end <datetime>] [--location <text>] [--event-id <id>] "
+                  "[--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]")
+            return 1
+        env = {
+            "BEACON_MTG_OPP": args.opp_id or "",
+            "BEACON_MTG_AT": args.at or "",
+            "BEACON_MTG_END": args.end or "",
+            "BEACON_MTG_LOCATION": args.location or "",
+            "BEACON_MTG_EVENT_ID": args.event_id or "",
+            "BEACON_MTG_CAL_NS": args.calendar_ns or "",
+            "BEACON_MTG_CAL_ACCT": args.calendar_account or "",
+            "BEACON_MTG_SET_TRANSITION": "1" if args.set_transition else "",
+        }
+        return _run_commands_py(root, "meeting_schedule", env)
+    if cmd == "reschedule":
+        if not args.mtg_id or not args.at:
+            print("Usage: beacon meeting reschedule <mtg-id> --at <datetime> "
+                  "[--end <datetime>] [--event-id <id>] [--set-transition]")
+            return 1
+        env = {
+            "BEACON_MTG_ID": args.mtg_id or "",
+            "BEACON_MTG_AT": args.at or "",
+            "BEACON_MTG_END": args.end or "",
+            "BEACON_MTG_EVENT_ID": args.event_id or "",
+            "BEACON_MTG_SET_TRANSITION": "1" if args.set_transition else "",
+        }
+        return _run_commands_py(root, "meeting_reschedule", env)
+    if cmd == "end":
+        if not args.mtg_id:
+            print("Usage: beacon meeting end <mtg-id>")
+            return 1
+        return _run_commands_py(root, "meeting_end", {"BEACON_MTG_ID": args.mtg_id or ""})
+    if cmd == "cancel":
+        if not args.mtg_id:
+            print("Usage: beacon meeting cancel <mtg-id>")
+            return 1
+        return _run_commands_py(root, "meeting_cancel", {"BEACON_MTG_ID": args.mtg_id or ""})
+    if cmd in ("list", "ls"):
+        if not args.opp_id:
+            print("Usage: beacon meeting list <opp-id> [--json]")
+            return 1
+        env = {"BEACON_MTG_OPP": args.opp_id or "", "BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "meeting_list", env)
+    print("Usage: beacon meeting [schedule|reschedule|end|cancel|list] [options]")
     return 2
 
 
@@ -4318,6 +4470,10 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "acc": _handle_account,
     "opportunity": _handle_opportunity,
     "opp": _handle_opportunity,
+    "communication": _handle_communication,
+    "comm": _handle_communication,
+    "meeting": _handle_meeting,
+    "mtg": _handle_meeting,
     "phase": _handle_phase,
     "sync": _handle_sync,
     "task": _handle_task,

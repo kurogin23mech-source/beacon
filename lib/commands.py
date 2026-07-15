@@ -16437,6 +16437,13 @@ def cmd_help_json():
         {"command": "beacon opportunity due", "flags": ["--json"], "description": "List opportunities awaiting a transition judgement (遷移日 due/overdue)"},
         {"command": "beacon opportunity activity <opp-id> <desc>", "flags": ["--deadline <date>", "--ball self|counterpart"], "description": "Add an activity (業務・事前計画型) under an opportunity"},
         {"command": "beacon opportunity delete <opp-id>", "flags": [], "description": "Delete an opportunity and its activities"},
+        {"command": "beacon communication add <target-id>", "flags": ["--direction inbound|outbound", "--channel <free-text: email/slack/messenger/line/in-person/…>", "--source-ref <id>", "--source-url <link>", "--occurred <datetime>"], "description": "Record a communication (証跡・事後記録型 = 営業の Commit); target is opp-/acc- or act-/nrt- (act-/nrt- links the activity/nurturing it fulfilled); channel is free-text for off-pipeline media"},
+        {"command": "beacon communication list <target-id>", "flags": ["--json"], "description": "List communications (証跡) oldest→newest + derived ball; act-/nrt- lists only that work item's"},
+        {"command": "beacon meeting schedule <opp-id>", "flags": ["--at <datetime>", "--end <datetime>", "--location <text>", "--event-id <id>", "--calendar-ns <ns>", "--calendar-account <acct>", "--set-transition"], "description": "Book a meeting (面談) with a Beacon 識別 ID; --set-transition moves the 遷移日 to the meeting date"},
+        {"command": "beacon meeting reschedule <mtg-id>", "flags": ["--at <datetime>", "--end <datetime>", "--event-id <id>", "--set-transition"], "description": "Move a meeting (予定変更); --set-transition follows the 遷移日"},
+        {"command": "beacon meeting end <mtg-id>", "flags": [], "description": "Mark a meeting ended (idempotent; used by the end-detector Operation)"},
+        {"command": "beacon meeting cancel <mtg-id>", "flags": [], "description": "Cancel a scheduled meeting"},
+        {"command": "beacon meeting list <opp-id>", "flags": ["--json"], "description": "List an opportunity's meetings"},
         {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity vocabulary)"},
         {"command": "beacon save <desc>", "flags": ["-m <ms-id>", "--hash <hash>", "--source manual", "--json"], "description": "Save a freeform entry to a milestone"},
         {"command": "beacon sync", "flags": [], "description": "Auto-sync recent git commits to active milestone"},
@@ -21355,6 +21362,177 @@ def cmd_opportunity_activity():
     print(f"Added activity {act_id} to {opp_id}: {desc}")
 
 
+def cmd_communication_add():
+    # ms-107 e-3432 — 営業の Commit: source を辿れる事後記録型の証跡を target
+    # (opp-… 優先 / acc-…) の子として append-only で残す。
+    import sales_entities
+    target_id = os.environ.get("BEACON_COMM_TARGET", "")
+    summary = os.environ.get("BEACON_COMM_SUMMARY", "")
+    direction = os.environ.get("BEACON_COMM_DIRECTION", "")
+    channel = os.environ.get("BEACON_COMM_CHANNEL", "") or "other"
+    source_ref = os.environ.get("BEACON_COMM_SOURCE_REF", "")
+    source_url = os.environ.get("BEACON_COMM_SOURCE_URL", "")
+    occurred_at = os.environ.get("BEACON_COMM_OCCURRED", "")
+    source = {}
+    if source_ref:
+        source["ref"] = source_ref
+    if source_url:
+        source["url"] = source_url
+    data = load_project()
+    try:
+        comm_id = sales_entities.communication_add(
+            data, target_id, summary, direction=direction, channel=channel,
+            source=source or None, occurred_at=occurred_at,
+            created_at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Recorded communication {comm_id} on {target_id} "
+          f"({direction}/{channel}): {summary}")
+
+
+def cmd_communication_list():
+    # List a target's communications (証跡) oldest→newest, or --json.
+    import sales_entities
+    target_id = os.environ.get("BEACON_COMM_TARGET", "")
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    container, linked_id = sales_entities.resolve_communication_target(data, target_id)
+    if container is None:
+        print(f"Error: Communication target not found (opp-…/acc-… target or "
+              f"act-…/nrt-… work item): {target_id}", file=sys.stderr)
+        sys.exit(1)
+    # act-/nrt- id → only that work item's communications; opp-/acc- → all.
+    comms = sales_entities.communications_of(
+        container, linked_id=linked_id or None)
+    if as_json:
+        ball = sales_entities.derive_ball(container)
+        print(json.dumps({"target": target_id, "ball": ball,
+                          "communications": comms}, ensure_ascii=False))
+        return
+    if not comms:
+        print(f"No communications on {target_id}.")
+        return
+    for c in comms:
+        arrow = "←" if c.get("direction") == sales_entities.COMM_INBOUND else "→"
+        when = c.get("occurred_at") or c.get("created_at") or ""
+        src = c.get("source") or {}
+        trace = src.get("url") or src.get("ref") or ""
+        line = f"  {c.get('id')} {arrow} [{c.get('channel')}] {c.get('summary')}"
+        if when:
+            line += f"  ({when})"
+        print(line)
+        if trace:
+            print(f"      source: {trace}")
+    ball = sales_entities.derive_ball(container)
+    if ball:
+        who = "自分" if ball == sales_entities.BALL_SELF else "相手"
+        print(f"  ball: {who} ({ball})")
+
+
+def cmd_meeting_schedule():
+    # ms-107 e-3433 (B) — 予定確定: 遷移日 + カレンダー予定 + 識別 ID を束ねる。
+    import sales_entities
+    opp_id = os.environ.get("BEACON_MTG_OPP", "")
+    at = os.environ.get("BEACON_MTG_AT", "")
+    end = os.environ.get("BEACON_MTG_END", "")
+    location = os.environ.get("BEACON_MTG_LOCATION", "")
+    event_id = os.environ.get("BEACON_MTG_EVENT_ID", "")
+    cal_ns = os.environ.get("BEACON_MTG_CAL_NS", "")
+    cal_acct = os.environ.get("BEACON_MTG_CAL_ACCT", "")
+    set_transition = os.environ.get("BEACON_MTG_SET_TRANSITION", "") == "1"
+    data = load_project()
+    try:
+        mtg_id = sales_entities.meeting_schedule(
+            data, opp_id, at, end_at=end, location=location,
+            calendar_event_id=event_id, calendar_namespace=cal_ns,
+            calendar_account=cal_acct, set_transition=set_transition,
+            at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    tag = sales_entities.meeting_calendar_tag(mtg_id)
+    print(f"Scheduled meeting {mtg_id} on {opp_id} at {at}")
+    if set_transition:
+        print(f"  遷移日 → {at[:10]}")
+    print(f"  calendar tag (説明文に埋め込む): {tag}")
+
+
+def cmd_meeting_reschedule():
+    import sales_entities
+    mtg_id = os.environ.get("BEACON_MTG_ID", "")
+    at = os.environ.get("BEACON_MTG_AT", "")
+    end = os.environ.get("BEACON_MTG_END", None) or None
+    event_id = os.environ.get("BEACON_MTG_EVENT_ID", None) or None
+    set_transition = os.environ.get("BEACON_MTG_SET_TRANSITION", "") == "1"
+    data = load_project()
+    try:
+        sales_entities.meeting_reschedule(
+            data, mtg_id, at, end_at=end, calendar_event_id=event_id,
+            set_transition=set_transition, at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Rescheduled meeting {mtg_id} → {at}")
+    if set_transition:
+        print(f"  遷移日 → {at[:10]}")
+
+
+def cmd_meeting_end():
+    import sales_entities
+    mtg_id = os.environ.get("BEACON_MTG_ID", "")
+    data = load_project()
+    try:
+        sales_entities.meeting_mark_ended(data, mtg_id, at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Meeting {mtg_id} marked ended")
+
+
+def cmd_meeting_cancel():
+    import sales_entities
+    mtg_id = os.environ.get("BEACON_MTG_ID", "")
+    data = load_project()
+    try:
+        sales_entities.meeting_cancel(data, mtg_id, at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Meeting {mtg_id} cancelled")
+
+
+def cmd_meeting_list():
+    import sales_entities
+    opp_id = os.environ.get("BEACON_MTG_OPP", "")
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    opp = sales_entities.find_opportunity(data, opp_id)
+    if opp is None:
+        print(f"Error: Opportunity not found: {opp_id}", file=sys.stderr)
+        sys.exit(1)
+    meetings = sales_entities.opportunity_meetings(opp)
+    if as_json:
+        print(json.dumps({"opportunity": opp_id, "meetings": meetings},
+                         ensure_ascii=False))
+        return
+    if not meetings:
+        print(f"No meetings on {opp_id}.")
+        return
+    for m in meetings:
+        line = f"  {m.get('id')} [{m.get('status')}] {m.get('scheduled_at')}"
+        if m.get("location"):
+            line += f" @ {m.get('location')}"
+        if m.get("calendar_event_id"):
+            line += f"  (event={m.get('calendar_event_id')})"
+        print(line)
+
+
 # ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
@@ -21405,6 +21583,15 @@ if __name__ == "__main__":
         "opportunity_due": cmd_opportunity_due,
         "opportunity_activity": cmd_opportunity_activity,
         "opportunity_delete": cmd_opportunity_delete,
+        # ms-107 e-3432 — Communication (証跡・事後記録型 = 営業の Commit)
+        "communication_add": cmd_communication_add,
+        "communication_list": cmd_communication_list,
+        # ms-107 e-3433 — Meeting (面談・運用状態型: 遷移日+カレンダー+識別ID の束)
+        "meeting_schedule": cmd_meeting_schedule,
+        "meeting_reschedule": cmd_meeting_reschedule,
+        "meeting_end": cmd_meeting_end,
+        "meeting_cancel": cmd_meeting_cancel,
+        "meeting_list": cmd_meeting_list,
         "phase_list": cmd_phase_list,
         # ms-107 e-3353 — send identity pin (internal; called by sales Skills,
         # not exposed as a user CLI verb → no bin/beacon/README/dispatch.py entry)

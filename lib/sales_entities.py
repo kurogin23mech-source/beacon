@@ -1097,12 +1097,359 @@ def account_delete(data: dict, account_id: str, *, force: bool = False) -> list:
 
 
 def opportunity_delete(data: dict, opportunity_id: str) -> None:
-    """Remove an Opportunity and its composition children (activities go with
-    it — they have no life independent of the deal)."""
+    """Remove an Opportunity and its composition children (activities and
+    communications go with it — they have no life independent of the deal)."""
     if find_opportunity(data, opportunity_id) is None:
         raise ValueError(f"Opportunity not found: {opportunity_id}")
     data["opportunities"] = [o for o in data.get("opportunities", [])
                              if o.get("id") != opportunity_id]
+
+
+# ---------------------------------------------------------------------------
+# Communication (証跡・事後記録型) — 従属 composition → Opportunity or Account
+# ---------------------------------------------------------------------------
+# ms-107 e-3432 / SPEC o83GEljD8xeFMr95wLTh 設計方針 1: 営業の Commit。
+#
+# 開発の Task→Commit と同型で、営業の Activity (事前計画型) と対をなす事後記録型。
+# 「実際にこのメールを送り、こう返ってきた」を source を辿れる形 + AI 要約付きで
+# 残す証跡。フェーズ遷移の判定は「予定 (Activity)」でなく「事実 (Communication)」
+# を読むのが正しい (SPEC §1)。性質:
+#   - source を辿れる (message-id / thread / permalink / 議事録 doc / event link)
+#   - AI 要約付き (summary は 1 行)
+#   - 不変・追記のみ (data-immutability-principle — 一度残した証跡は書き換えない)
+#   - target (Opportunity 優先、商談が無ければ Account) の子。Activity と同じ子層。
+#
+# ms-109 含意: Commit ≡ Communication = target 横断で汎用な証跡 primitive。本 MS
+# では営業アダプタとして実装し、汎用化は ms-109 に委ねる。
+
+COMM_INBOUND = "inbound"        # 相手 → 自分 (受信): この後ボールは自分
+COMM_OUTBOUND = "outbound"      # 自分 → 相手 (送信): この後ボールは相手
+VALID_COMM_DIRECTION = {COMM_INBOUND, COMM_OUTBOUND}
+
+# やり取りの媒体。e-3454: channel は自由記述 (現実の媒体は email/slack に収まらず
+# Facebook Messenger / LINE / 対面 / 電話 等と開いている)。下は UI hint / 補完候補
+# としての *既知* セットであって enforce される閉集合ではない。communication_add は
+# 任意の非空文字列を受け付け、正規化 (strip + lowercase) のみ行う (空なら "other")。
+KNOWN_COMM_CHANNELS = ("email", "slack", "meeting", "calendar", "phone",
+                       "messenger", "line", "in-person", "sms", "other")
+# 後方互換 alias (旧名参照コード用)。
+COMM_CHANNELS = KNOWN_COMM_CHANNELS
+
+
+def next_communication_id(data: dict) -> str:
+    ids = []
+    for opp in data.get("opportunities", []):
+        ids.extend(c.get("id", "") for c in opp.get("communications", []))
+    for acc in data.get("accounts", []):
+        ids.extend(c.get("id", "") for c in acc.get("communications", []))
+    return _next_prefixed_id(ids, "comm-")
+
+
+def find_activity(data: dict, activity_id: str):
+    """Return ``(opportunity, activity)`` for an activity id, or ``(None, None)``."""
+    for opp in data.get("opportunities", []):
+        for a in opp.get("activities", []):
+            if a.get("id") == activity_id:
+                return opp, a
+    return None, None
+
+
+def find_nurturing(data: dict, nurturing_id: str):
+    """Return ``(account, nurturing)`` for a nurturing id, or ``(None, None)``."""
+    for acc in data.get("accounts", []):
+        for n in acc.get("nurturings", []):
+            if n.get("id") == nurturing_id:
+                return acc, n
+    return None, None
+
+
+def resolve_communication_target(data: dict, target_id: str):
+    """Resolve where a Communication is stored and what planned item it fulfills.
+
+    Mirrors the dev model where a commit is *stored under* a milestone yet can
+    *reference* a task (resolves). Here the "container" (where the record lives)
+    is always an Opportunity or Account; the optional "linked_id" points at the
+    specific Activity/Nurturing (= 予定) the communication fulfilled:
+
+      opp-…  → (opportunity, "")          # target grain, no work-item link
+      acc-…  → (account,     "")          # target grain, no work-item link
+      act-…  → (parent opp,  "act-…")     # stored on the deal, links the activity
+      nrt-…  → (parent acc,  "nrt-…")     # stored on the account, links the nurturing
+
+    Returns ``(container, linked_id)`` or ``(None, None)`` when unresolvable."""
+    if target_id.startswith("opp-"):
+        opp = find_opportunity(data, target_id)
+        return (opp, "") if opp is not None else (None, None)
+    if target_id.startswith("acc-"):
+        acc = find_account(data, target_id)
+        return (acc, "") if acc is not None else (None, None)
+    if target_id.startswith("act-"):
+        opp, act = find_activity(data, target_id)
+        return (opp, target_id) if act is not None else (None, None)
+    if target_id.startswith("nrt-"):
+        acc, nrt = find_nurturing(data, target_id)
+        return (acc, target_id) if nrt is not None else (None, None)
+    return None, None
+
+
+def find_communication_target(data: dict, target_id: str) -> Optional[dict]:
+    """The container (Opportunity/Account) that stores a Communication for the
+    given id — accepts opp-/acc- (target grain) and act-/nrt- (work-item grain,
+    resolved to the parent deal/account). Returns the container dict or None."""
+    container, _ = resolve_communication_target(data, target_id)
+    return container
+
+
+def communication_add(data: dict, target_id: str, summary: str, *,
+                      direction: str, channel: str = "other",
+                      source: Optional[dict] = None,
+                      occurred_at: str = "", created_at: str = "") -> str:
+    """Append a Communication (証跡・事後記録型) and return its id.
+
+    ``target_id`` may be a target (opp-/acc-) or a planned work item
+    (act-/nrt-). Work items resolve to their parent deal/account as the storage
+    container and set ``linked_id`` to the item, so a communication can record
+    "this outbound email fulfilled that nurturing touch" — the sales twin of a
+    commit resolving a task, while still living under the target like a commit
+    lives under a milestone (resolve_communication_target).
+
+    ``direction`` (inbound/outbound) is required — it's what ball derivation and
+    the reply-watcher (E) read. ``source`` is a free dict of trace pointers
+    (typically ``{"ref": <message-id/thread>, "url": <permalink>}``) so the
+    origin stays auditable. Append-only: never mutates an existing record."""
+    container, linked_id = resolve_communication_target(data, target_id)
+    if container is None:
+        raise ValueError(
+            "Communication target not found (opp-…/acc-… target or "
+            f"act-…/nrt-… work item): {target_id}")
+    if not summary or not summary.strip():
+        raise ValueError("Communication summary is required")
+    if direction not in VALID_COMM_DIRECTION:
+        raise ValueError(
+            f"direction must be one of {sorted(VALID_COMM_DIRECTION)}, "
+            f"got {direction!r}")
+    # channel is free-text (e-3454): real-world channels are open-ended
+    # (messenger / line / 対面 …). Normalize only; empty → "other".
+    ch = (channel or "").strip().lower() or "other"
+    comm_id = next_communication_id(data)
+    container.setdefault("communications", []).append({
+        "id": comm_id,
+        "direction": direction,
+        "channel": ch,
+        "summary": summary.strip(),
+        "source": dict(source) if source else {},
+        "linked_id": linked_id,
+        "occurred_at": occurred_at,
+        "created_at": created_at,
+    })
+    return comm_id
+
+
+def communications_of(target: dict, *, linked_id: Optional[str] = None) -> list:
+    """The target's communications in occurrence order (oldest → newest).
+    Sort key is occurred_at, falling back to created_at then insertion order so
+    records without a timestamp keep their append order (stable). Pass
+    ``linked_id`` to keep only the communications that fulfilled that specific
+    Activity/Nurturing (= work-item grain view)."""
+    comms = (target or {}).get("communications", [])
+    if linked_id is not None:
+        comms = [c for c in comms if c.get("linked_id") == linked_id]
+
+    def key(pair):
+        idx, c = pair
+        t = c.get("occurred_at") or c.get("created_at") or ""
+        # Untimed records (t == "") sort *after* all dated ones, then keep
+        # insertion order — a freshly-added note without a timestamp belongs at
+        # the tail of the chronological log, not the head.
+        return (t == "", t, idx)
+
+    ordered = sorted(enumerate(comms), key=key)
+    return [c for _, c in ordered]
+
+
+def derive_ball(target: dict) -> Optional[str]:
+    """Whose court the deal is in, derived from the latest Communication
+    (SPEC §6): the newest inbound means the counterpart just played → the ball
+    is ours (BALL_SELF); the newest outbound means we played → theirs
+    (BALL_COUNTERPART). Returns None when there's no communication to derive
+    from (ball is unknown, not a default). ball was removed from the UI but the
+    engine keeps it as the reply-watcher's (E) driver."""
+    comms = communications_of(target)
+    if not comms:
+        return None
+    latest = comms[-1]
+    if latest.get("direction") == COMM_INBOUND:
+        return BALL_SELF
+    if latest.get("direction") == COMM_OUTBOUND:
+        return BALL_COUNTERPART
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Meeting (面談・運用状態型) — 従属 composition → Opportunity
+# ---------------------------------------------------------------------------
+# ms-107 e-3433 (B) / e-3374 の ID ハンドシェイク。予定確定側 (B) が生産し、
+# 終了検知側 (C = e-3434) が消費する共有基盤。
+#
+# 予定を確定しても Beacon の遷移日 (= フェーズ達成を判定する予定日) と Google
+# カレンダーが二重管理でズレる問題を、両者を 1 つの Meeting レコードで束ねて
+# 解消する。Communication (不変・事後の証跡) と違い、Meeting は運用状態型 —
+# scheduled → ended / cancelled と状態が動く。状態変化は history に追記して
+# 監査可能にする (data-immutability-principle は「証跡は消さない」の意)。
+#
+# 識別 ID (mtg-N) がカレンダー予定の説明文に埋め込む handshake token になる。
+# C はこの token でカレンダー予定 → 商談を突き合わせ、二重起動を status で防ぐ。
+
+MEETING_SCHEDULED = "scheduled"
+MEETING_ENDED = "ended"
+MEETING_CANCELLED = "cancelled"
+VALID_MEETING_STATUS = {MEETING_SCHEDULED, MEETING_ENDED, MEETING_CANCELLED}
+
+# handshake token 書式。B が埋め込み、C が parse する — 両者がこの 1 箇所を
+# 参照することで書式 drift を構造的に防ぐ (single source of truth)。
+_MEETING_TAG_PREFIX = "beacon-meeting-id:"
+
+
+def meeting_calendar_tag(meeting_id: str) -> str:
+    """The handshake token embedded in a calendar event's description so the
+    end-detector (C) can map the event back to this meeting/opportunity.
+    B writes it, C parses it — both call this one helper (書式の単一真値源)."""
+    return f"{_MEETING_TAG_PREFIX} {meeting_id}"
+
+
+def parse_meeting_tag(text: str) -> Optional[str]:
+    """Extract a meeting id (mtg-…) from a calendar event's description that was
+    stamped by :func:`meeting_calendar_tag`, or None when absent."""
+    if not text:
+        return None
+    marker = text.find(_MEETING_TAG_PREFIX)
+    if marker < 0:
+        return None
+    rest = text[marker + len(_MEETING_TAG_PREFIX):].strip()
+    token = rest.split()[0] if rest.split() else ""
+    return token if token.startswith("mtg-") else None
+
+
+def next_meeting_id(data: dict) -> str:
+    ids = []
+    for opp in data.get("opportunities", []):
+        ids.extend(m.get("id", "") for m in opp.get("meetings", []))
+    return _next_prefixed_id(ids, "mtg-")
+
+
+def find_meeting(data: dict, meeting_id: str):
+    """Return ``(opportunity, meeting)`` for a meeting id, or ``(None, None)``."""
+    for opp in data.get("opportunities", []):
+        for m in opp.get("meetings", []):
+            if m.get("id") == meeting_id:
+                return opp, m
+    return None, None
+
+
+def opportunity_meetings(opp: dict) -> list:
+    """A target's meetings in scheduled-time order (earliest → latest); untimed
+    records sort last, then insertion order (same rule as communications_of)."""
+    meetings = (opp or {}).get("meetings", [])
+    ordered = sorted(
+        enumerate(meetings),
+        key=lambda pair: (not (pair[1].get("scheduled_at") or ""),
+                          pair[1].get("scheduled_at") or "", pair[0]),
+    )
+    return [m for _, m in ordered]
+
+
+def meeting_schedule(data: dict, opportunity_id: str, scheduled_at: str, *,
+                     end_at: str = "", location: str = "",
+                     calendar_event_id: str = "", calendar_namespace: str = "",
+                     calendar_account: str = "", set_transition: bool = False,
+                     at: str = "") -> str:
+    """Book a Meeting under an Opportunity and return its id (mtg-…).
+
+    When ``set_transition`` is true the opportunity's 遷移日 (transition_date) is
+    moved to the meeting date in the *same* call, so the calendar plan and the
+    phase-judgement date never drift apart (AC: 遷移日とカレンダーが同時更新).
+    The returned id is the handshake token B stamps into the calendar event."""
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    if not scheduled_at or not scheduled_at.strip():
+        raise ValueError("Meeting scheduled_at is required")
+    mtg_id = next_meeting_id(data)
+    when = scheduled_at.strip()
+    opp.setdefault("meetings", []).append({
+        "id": mtg_id,
+        "scheduled_at": when,
+        "end_at": end_at,
+        "location": location,
+        "calendar_event_id": calendar_event_id,
+        "calendar_namespace": calendar_namespace,
+        "calendar_account": calendar_account,
+        "status": MEETING_SCHEDULED,
+        "created_at": at,
+        "history": [{"at": at, "action": "scheduled", "scheduled_at": when}],
+    })
+    if set_transition:
+        # meeting date drives the phase-judgement date (transition_signal =
+        # calendar_ended). Store the date portion (YYYY-MM-DD) as the 遷移日.
+        set_transition_date(data, opportunity_id, when[:10],
+                            note=f"面談確定 ({mtg_id})", at=at)
+    return mtg_id
+
+
+def meeting_reschedule(data: dict, meeting_id: str, scheduled_at: str, *,
+                       end_at: Optional[str] = None, location: Optional[str] = None,
+                       calendar_event_id: Optional[str] = None,
+                       set_transition: bool = False, at: str = "") -> dict:
+    """Move an existing meeting to a new time (予定変更), keeping the same
+    handshake id so the calendar event and Beacon stay linked. Logs the change
+    to ``history`` and, when ``set_transition``, moves the 遷移日 too so both
+    follow the reschedule (AC: 予定変更時も両者が追従)."""
+    opp, m = find_meeting(data, meeting_id)
+    if m is None:
+        raise ValueError(f"Meeting not found: {meeting_id}")
+    if not scheduled_at or not scheduled_at.strip():
+        raise ValueError("Meeting scheduled_at is required")
+    when = scheduled_at.strip()
+    m["scheduled_at"] = when
+    if end_at is not None:
+        m["end_at"] = end_at
+    if location is not None:
+        m["location"] = location
+    if calendar_event_id is not None:
+        m["calendar_event_id"] = calendar_event_id
+    m["status"] = MEETING_SCHEDULED  # rescheduling revives a cancelled slot
+    m.setdefault("history", []).append(
+        {"at": at, "action": "rescheduled", "scheduled_at": when})
+    if set_transition:
+        set_transition_date(data, opp["id"], when[:10],
+                            note=f"面談再調整 ({meeting_id})", at=at)
+    return m
+
+
+def meeting_mark_ended(data: dict, meeting_id: str, *, at: str = "") -> dict:
+    """Mark a meeting ended (C calls this after detecting the calendar event
+    finished). Idempotent: a meeting already ended stays ended and no duplicate
+    history row is appended — this is the double-trigger guard for C's Operation
+    (e-3434: 同じミーティングを二重起動しない)."""
+    opp, m = find_meeting(data, meeting_id)
+    if m is None:
+        raise ValueError(f"Meeting not found: {meeting_id}")
+    if m.get("status") == MEETING_ENDED:
+        return m  # already ended — no-op, keeps C idempotent
+    m["status"] = MEETING_ENDED
+    m.setdefault("history", []).append({"at": at, "action": "ended"})
+    return m
+
+
+def meeting_cancel(data: dict, meeting_id: str, *, at: str = "") -> dict:
+    """Cancel a scheduled meeting (予定取消). Logged to history; the calendar
+    event removal is the Skill's job (this is the Beacon-side state change)."""
+    opp, m = find_meeting(data, meeting_id)
+    if m is None:
+        raise ValueError(f"Meeting not found: {meeting_id}")
+    m["status"] = MEETING_CANCELLED
+    m.setdefault("history", []).append({"at": at, "action": "cancelled"})
+    return m
 
 
 # ---------------------------------------------------------------------------

@@ -269,6 +269,13 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon opportunity due [--json]` | List opportunities awaiting a transition judgement / 判定待ち（遷移日 到達・超過）の商談を一覧 |
 | `beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self\|counterpart]` | Log an activity on an opportunity / 商談に活動を記録 |
 | `beacon opportunity delete <opp-id>` | Delete an opportunity and its activities / 商談と活動を削除 |
+| `beacon communication add <opp-\|acc-\|act-\|nrt-id> "<summary>" --direction inbound\|outbound [--channel <free-text: email/slack/messenger/line/in-person/…>] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]` | Record a communication (証跡・事後記録型 = 営業の Commit); act-/nrt- links the activity/nurturing it fulfilled; channel is free-text for off-pipeline media (Messenger 等) / 商談・顧客・活動・ナーチャリングにやり取りの証跡を記録 |
+| `beacon communication list <opp-\|acc-\|act-\|nrt-id> [--json]` | List communications (証跡) + derived ball; act-/nrt- lists only that work item's / やり取りの証跡一覧とボール導出 |
+| `beacon meeting schedule <opp-id> --at <datetime> [--end <datetime>] [--location <text>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]` | Book a meeting (面談) with a Beacon 識別 ID; `--set-transition` moves the 遷移日 to the meeting date / 面談を予約し識別IDを付与、遷移日も同時更新 |
+| `beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]` | Move a meeting (予定変更); `--set-transition` follows the 遷移日 / 面談の予定変更、遷移日も追従 |
+| `beacon meeting end <mtg-id>` | Mark a meeting ended (idempotent; used by the end-detector Operation) / 面談を終了扱いにする |
+| `beacon meeting cancel <mtg-id>` | Cancel a scheduled meeting / 面談を取消 |
+| `beacon meeting list <opp-id> [--json]` | List an opportunity's meetings / 商談の面談一覧 |
 | `beacon phase list [--json]` | Show the configured phase funnels (account / opportunity vocabulary) / 設定済みフェーズファネルを表示 |
 
 ### Pull Requests

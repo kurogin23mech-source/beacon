@@ -1029,3 +1029,259 @@ def test_sales_targets_sparse_set_get_clear():
     assert se.get_sales_target(data, "kida") is None
     with pytest.raises(ValueError):
         se.set_sales_target(data, "  ", 1)
+
+
+# --- Communication (証跡・事後記録型 = 営業の Commit, e-3432) ---------------
+
+def test_communication_add_under_opportunity():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    cid = se.communication_add(data, opp, "日程を打診", direction="outbound",
+                               channel="email",
+                               source={"ref": "<m1@x>", "url": "https://x/1"},
+                               occurred_at="2026-07-15T10:00:00+09:00")
+    assert cid == "comm-1"
+    c = se.find_opportunity(data, opp)["communications"][0]
+    assert c["direction"] == "outbound" and c["channel"] == "email"
+    assert c["summary"] == "日程を打診"
+    assert c["source"] == {"ref": "<m1@x>", "url": "https://x/1"}
+    assert c["occurred_at"] == "2026-07-15T10:00:00+09:00"
+
+
+def test_communication_add_under_account():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    cid = se.communication_add(data, acc, "御礼メール受領", direction="inbound")
+    assert cid == "comm-1"
+    c = se.find_account(data, acc)["communications"][0]
+    assert c["channel"] == "other"  # default when unspecified
+    assert c["direction"] == "inbound"
+
+
+def test_communication_ids_global_across_targets():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    opp = se.opportunity_add(data, "Deal", account_id=acc)
+    assert se.communication_add(data, opp, "a", direction="outbound") == "comm-1"
+    assert se.communication_add(data, acc, "b", direction="inbound") == "comm-2"
+    assert se.communication_add(data, opp, "c", direction="inbound") == "comm-3"
+
+
+def test_communication_unknown_target():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.communication_add(data, "opp-9", "x", direction="inbound")
+    with pytest.raises(ValueError):
+        se.communication_add(data, "acc-9", "x", direction="inbound")
+    with pytest.raises(ValueError):
+        se.communication_add(data, "mlst-1", "x", direction="inbound")  # wrong prefix
+
+
+def test_communication_validates_direction_but_channel_is_free_text():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    with pytest.raises(ValueError):
+        se.communication_add(data, opp, "x", direction="sideways")
+    with pytest.raises(ValueError):
+        se.communication_add(data, opp, "  ", direction="inbound")  # blank summary
+    # e-3454: channel is free-text — off-pipeline channels are accepted and
+    # normalized (strip + lowercase); empty falls back to "other".
+    c1 = se.communication_add(data, opp, "Messengerで日程調整", direction="inbound",
+                              channel="Facebook Messenger")
+    c2 = se.communication_add(data, opp, "電話で確認", direction="inbound", channel="  LINE  ")
+    c3 = se.communication_add(data, opp, "媒体不明", direction="inbound", channel="")
+    comms = {c["id"]: c for c in se.find_opportunity(data, opp)["communications"]}
+    assert comms[c1]["channel"] == "facebook messenger"
+    assert comms[c2]["channel"] == "line"
+    assert comms[c3]["channel"] == "other"
+
+
+def test_communications_of_orders_by_occurred_then_insertion():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    se.communication_add(data, opp, "third", direction="inbound", occurred_at="2026-07-15T14:00")
+    se.communication_add(data, opp, "first", direction="outbound", occurred_at="2026-07-15T09:00")
+    se.communication_add(data, opp, "notime", direction="inbound")  # no timestamp → keeps insert order (last)
+    ordered = se.communications_of(se.find_opportunity(data, opp))
+    assert [c["summary"] for c in ordered] == ["first", "third", "notime"]
+
+
+def test_derive_ball_from_latest_communication():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    assert se.derive_ball(se.find_opportunity(data, opp)) is None  # no comms yet
+    se.communication_add(data, opp, "sent", direction="outbound", occurred_at="2026-07-15T09:00")
+    assert se.derive_ball(se.find_opportunity(data, opp)) == se.BALL_COUNTERPART
+    se.communication_add(data, opp, "reply", direction="inbound", occurred_at="2026-07-15T14:00")
+    assert se.derive_ball(se.find_opportunity(data, opp)) == se.BALL_SELF
+
+
+def test_opportunity_delete_removes_communications():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    se.communication_add(data, opp, "x", direction="inbound")
+    se.opportunity_delete(data, opp)
+    assert se.find_opportunity(data, opp) is None
+
+
+# --- Meeting (面談・運用状態型 + 識別 ID handshake, e-3433) -----------------
+
+def test_meeting_schedule_sets_id_and_status():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    mid = se.meeting_schedule(data, opp, "2026-07-20T14:00:00+09:00",
+                              end_at="2026-07-20T15:00:00+09:00", location="オンライン",
+                              calendar_event_id="ev-abc", at="T0")
+    assert mid == "mtg-1"
+    o, m = se.find_meeting(data, mid)
+    assert o["id"] == opp and m["status"] == "scheduled"
+    assert m["calendar_event_id"] == "ev-abc"
+    assert m["history"][0]["action"] == "scheduled"
+
+
+def test_meeting_schedule_set_transition_updates_transition_date():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    se.meeting_schedule(data, opp, "2026-07-20T14:00:00+09:00",
+                        set_transition=True, at="T0")
+    # 遷移日 is the date portion of the meeting time
+    assert se.get_transition_date(data, opp) == "2026-07-20"
+
+
+def test_meeting_ids_global_across_opportunities():
+    data = _fresh()
+    o1 = se.opportunity_add(data, "D1")
+    o2 = se.opportunity_add(data, "D2")
+    assert se.meeting_schedule(data, o1, "2026-07-20T10:00") == "mtg-1"
+    assert se.meeting_schedule(data, o2, "2026-07-21T10:00") == "mtg-2"
+
+
+def test_meeting_schedule_requires_time_and_known_opp():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    with pytest.raises(ValueError):
+        se.meeting_schedule(data, opp, "  ")
+    with pytest.raises(ValueError):
+        se.meeting_schedule(data, "opp-9", "2026-07-20T10:00")
+
+
+def test_meeting_reschedule_moves_time_and_transition():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    mid = se.meeting_schedule(data, opp, "2026-07-20T14:00", set_transition=True, at="T0")
+    se.meeting_reschedule(data, mid, "2026-07-25T16:00", set_transition=True, at="T1")
+    _, m = se.find_meeting(data, mid)
+    assert m["scheduled_at"] == "2026-07-25T16:00"
+    assert m["history"][-1]["action"] == "rescheduled"
+    assert se.get_transition_date(data, opp) == "2026-07-25"
+
+
+def test_meeting_mark_ended_is_idempotent():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    mid = se.meeting_schedule(data, opp, "2026-07-20T14:00", at="T0")
+    se.meeting_mark_ended(data, mid, at="T1")
+    _, m = se.find_meeting(data, mid)
+    assert m["status"] == "ended"
+    hist_len = len(m["history"])
+    se.meeting_mark_ended(data, mid, at="T2")  # second call is a no-op
+    _, m2 = se.find_meeting(data, mid)
+    assert m2["status"] == "ended" and len(m2["history"]) == hist_len
+
+
+def test_meeting_calendar_tag_roundtrips():
+    tag = se.meeting_calendar_tag("mtg-7")
+    assert "mtg-7" in tag
+    desc = f"面談です。\n\n{tag}\nよろしくお願いします。"
+    assert se.parse_meeting_tag(desc) == "mtg-7"
+    assert se.parse_meeting_tag("no tag here") is None
+    assert se.parse_meeting_tag("beacon-meeting-id: garbage") is None
+
+
+def test_opportunity_meetings_ordered_by_scheduled_time():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    se.meeting_schedule(data, opp, "2026-07-25T10:00")
+    se.meeting_schedule(data, opp, "2026-07-20T10:00")
+    ordered = se.opportunity_meetings(se.find_opportunity(data, opp))
+    assert [m["scheduled_at"] for m in ordered] == ["2026-07-20T10:00", "2026-07-25T10:00"]
+
+
+# --- Communication ↔ work-item linkage (act-/nrt-, e-3451) ------------------
+
+def test_communication_links_to_activity_stored_under_opportunity():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    act = se.activity_add(data, opp, "提案書を送る")
+    cid = se.communication_add(data, act, "提案書を送付した", direction="outbound", channel="email")
+    # stored under the opportunity (container), links the activity
+    o = se.find_opportunity(data, opp)
+    assert [c["id"] for c in o["communications"]] == [cid]
+    assert o["communications"][0]["linked_id"] == act
+
+
+def test_communication_links_to_nurturing_stored_under_account():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    nrt = se.nurturing_add(data, acc, "年始の挨拶を送る")
+    cid = se.communication_add(data, nrt, "年賀メールを送った", direction="outbound", channel="email")
+    a = se.find_account(data, acc)
+    assert a["communications"][0]["id"] == cid
+    assert a["communications"][0]["linked_id"] == nrt
+
+
+def test_communication_target_grain_has_empty_linked_id():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    opp = se.opportunity_add(data, "Deal", account_id=acc)
+    c_acc = se.communication_add(data, acc, "a", direction="inbound")
+    c_opp = se.communication_add(data, opp, "b", direction="inbound")
+    assert se.find_account(data, acc)["communications"][0]["linked_id"] == ""
+    assert se.find_opportunity(data, opp)["communications"][0]["linked_id"] == ""
+
+
+def test_communications_of_filters_by_linked_id():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    n1 = se.nurturing_add(data, acc, "n1")
+    n2 = se.nurturing_add(data, acc, "n2")
+    se.communication_add(data, n1, "for n1", direction="outbound")
+    se.communication_add(data, acc, "account-level", direction="inbound")
+    se.communication_add(data, n2, "for n2", direction="outbound")
+    a = se.find_account(data, acc)
+    assert len(se.communications_of(a)) == 3               # all
+    only_n1 = se.communications_of(a, linked_id=n1)
+    assert [c["summary"] for c in only_n1] == ["for n1"]
+
+
+def test_resolve_communication_target_all_prefixes():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    opp = se.opportunity_add(data, "Deal", account_id=acc)
+    act = se.activity_add(data, opp, "call")
+    nrt = se.nurturing_add(data, acc, "greet")
+    assert se.resolve_communication_target(data, opp) == (se.find_opportunity(data, opp), "")
+    assert se.resolve_communication_target(data, acc) == (se.find_account(data, acc), "")
+    c_opp, l_act = se.resolve_communication_target(data, act)
+    assert c_opp["id"] == opp and l_act == act
+    c_acc, l_nrt = se.resolve_communication_target(data, nrt)
+    assert c_acc["id"] == acc and l_nrt == nrt
+    assert se.resolve_communication_target(data, "nrt-99") == (None, None)
+    assert se.resolve_communication_target(data, "mlst-1") == (None, None)
+
+
+def test_communication_unknown_work_item_raises():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.communication_add(data, "act-99", "x", direction="inbound")
+    with pytest.raises(ValueError):
+        se.communication_add(data, "nrt-99", "x", direction="inbound")
+
+
+def test_derive_ball_includes_work_item_linked_comms():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    nrt = se.nurturing_add(data, acc, "greet")
+    se.communication_add(data, nrt, "sent greeting", direction="outbound", occurred_at="2026-07-15T09:00")
+    # account-level ball reflects the nurturing-linked communication too
+    assert se.derive_ball(se.find_account(data, acc)) == se.BALL_COUNTERPART

@@ -3148,6 +3148,22 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .assignee-chip.active { color:var(--accent); border-color:var(--accent-dim); background:var(--accent-glow); }
 /* --- ms-106 fb3: Nurturing (継続関係の業務) — 見た目は activity と同じ --- */
 .sm-nurturing { margin-top:4px; }
+/* --- ms-107 e-3432: Communication (証跡・事後記録型 = 営業の Commit) --- */
+.comm-row { display:flex; align-items:baseline; gap:9px; padding:5px 0; border-bottom:1px solid var(--border-subtle); font-size:12px; }
+.comm-row:last-child { border-bottom:none; }
+.comm-dir { flex:0 0 14px; text-align:center; font-weight:700; }
+.comm-row.inbound .comm-dir { color:var(--accent); }
+.comm-row.outbound .comm-dir { color:var(--text-secondary); }
+.comm-ch { flex:0 0 auto; font-size:10px; color:var(--text-dim); border:1px solid var(--border-subtle); border-radius:10px; padding:1px 7px; }
+.comm-summary { flex:1; color:var(--text-primary); }
+.comm-when { flex:0 0 auto; font-size:11px; color:var(--text-dim); font-family:var(--font-mono, monospace); }
+.comm-src { flex:0 0 auto; font-size:11px; color:var(--accent); text-decoration:none; }
+.comm-src:hover { text-decoration:underline; }
+.comm-src.ref { color:var(--text-dim); cursor:default; }
+.comm-ball { margin-left:8px; font-size:10px; padding:1px 8px; border-radius:10px; }
+.comm-ball.self { color:var(--accent); background:var(--accent-glow); }
+.comm-ball.counterpart { color:var(--text-secondary); background:var(--bg-raised); }
+.comm-link { margin-left:8px; font-size:10px; color:var(--text-dim); white-space:nowrap; }
 /* --- ms-106 fb4: 見込み売上 / 目標進捗バー --- */
 .pipeline-sub { color:var(--text-dim); font-size:0.85em; }
 .pipeline-bar { height:5px; background:var(--bg-raised); border-radius:3px; margin-top:5px; overflow:hidden; max-width:240px; }
@@ -5095,6 +5111,92 @@ function _renderNurturings(a) {
   if (!items.length) return `<div class="act-empty">Nurturing はまだありません。</div>`;
   return _salesWorkRows(items);
 }
+// ms-107 e-3432: Communication (証跡・事後記録型 = 営業の Commit). Activity が
+// 「予定」なのに対し、これは source を辿れる「事実」の追記ログ。oldest→newest
+// で並べ、送受信の向き・媒体・要約・出典リンクを出す。ball は最新の向きから導出。
+function _salesCommTime(c) {
+  return c.occurred_at || c.created_at || '';
+}
+function _salesCommsOrdered(target) {
+  const comms = ((target || {}).communications || []).slice();
+  return comms
+    .map((c, i) => [c, i])
+    .sort((x, y) => {
+      // Untimed records sort after all dated ones, then keep insertion order.
+      const a = _salesCommTime(x[0]), b = _salesCommTime(y[0]);
+      const ae = a === '', be = b === '';
+      if (ae !== be) return ae ? 1 : -1;
+      if (a !== b) return a < b ? -1 : 1;
+      return x[1] - y[1];
+    })
+    .map(pair => pair[0]);
+}
+function _salesDeriveBall(target) {
+  const comms = _salesCommsOrdered(target);
+  if (!comms.length) return '';
+  const dir = comms[comms.length - 1].direction;
+  if (dir === 'inbound') return 'self';
+  if (dir === 'outbound') return 'counterpart';
+  return '';
+}
+// e-3451: a communication may fulfill a specific 予定 (Activity / Nurturing).
+// Resolve its description so the row shows "どの予定を果たしたか" (dev の
+// commit→task resolves の営業版), falling back to the raw id.
+function _salesLinkedLabel(linkedId) {
+  if (!linkedId) return '';
+  const p = state.project || {};
+  let desc = '';
+  if (linkedId.indexOf('act-') === 0) {
+    for (const o of (p.opportunities || [])) {
+      const a = (o.activities || []).find(x => x.id === linkedId);
+      if (a) { desc = a.description || ''; break; }
+    }
+  } else if (linkedId.indexOf('nrt-') === 0) {
+    for (const a of (p.accounts || [])) {
+      const n = (a.nurturings || []).find(x => x.id === linkedId);
+      if (n) { desc = n.description || ''; break; }
+    }
+  }
+  const text = desc || linkedId;
+  const short = text.length > 20 ? text.slice(0, 20) + '…' : text;
+  return `<span class="comm-link" title="${esc('この予定を果たした: ' + text)}">↳ ${esc(short)}</span>`;
+}
+function _salesCommRows(comms) {
+  return comms.map(c => {
+    const inbound = c.direction === 'inbound';
+    const arrow = inbound ? '←' : '→';
+    const label = inbound ? '受信' : '送信';
+    const src = c.source || {};
+    const href = src.url || '';
+    const ref = src.ref || '';
+    const when = _salesCommTime(c);
+    const trace = href
+      ? `<a class="comm-src" href="${esc(href)}" target="_blank" rel="noopener">出典 ↗</a>`
+      : (ref ? `<span class="comm-src ref" title="${esc(ref)}">出典 ${esc(ref)}</span>` : '');
+    return `<div class="comm-row ${inbound ? 'inbound' : 'outbound'}">
+      <span class="comm-dir" title="${label}">${arrow}</span>
+      <span class="comm-ch">${esc(c.channel || 'other')}</span>
+      <span class="comm-summary">${esc(c.summary || '')}${_salesLinkedLabel(c.linked_id)}</span>
+      ${when ? `<span class="comm-when">${esc(_salesShortDate(when))}</span>` : ''}
+      ${trace}
+    </div>`;
+  }).join('');
+}
+// Trim an ISO datetime to a compact date/time for the证跡 log (YYYY-MM-DD HH:MM).
+function _salesShortDate(iso) {
+  if (!iso) return '';
+  const m = String(iso).match(/^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?/);
+  if (!m) return iso;
+  return m[2] ? `${m[1]} ${m[2]}` : m[1];
+}
+function _renderCommunications(target) {
+  const comms = _salesCommsOrdered(target);
+  if (!comms.length) return `<div class="act-empty">やり取り (Communication) はまだありません。</div>`;
+  const ball = _salesDeriveBall(target);
+  const ballLabel = ball === 'self' ? '<span class="comm-ball self">ボール: 自分</span>'
+    : ball === 'counterpart' ? '<span class="comm-ball counterpart">ボール: 相手</span>' : '';
+  return `<div class="opp-acts-head">やり取り (${comms.length})${ballLabel}</div>${_salesCommRows(comms)}`;
+}
 function renderAccountsSection() {
   const p = state.project;
   const accs = p.accounts || [];
@@ -5163,6 +5265,8 @@ function renderAccountModal(accId) {
       ${oppSection('過去の商談', past)}
       <div class="sm-sec">Contacts (${contacts.length})</div>
       ${contactHtml}
+      <div class="sm-sec">やり取り (Communication)</div>
+      ${_renderCommunications(a)}
     </div>
   </div>`;
 }
@@ -5200,6 +5304,7 @@ function renderOpportunityModal(oppId) {
       <div class="sm-head"><span class="sm-name">${esc(o.title || '(no title)')}</span></div>
       ${detail}
       ${_renderOppActivities(o)}
+      ${_renderCommunications(o)}
     </div>
   </div>`;
 }
