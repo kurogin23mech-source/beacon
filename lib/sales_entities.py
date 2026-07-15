@@ -1126,9 +1126,14 @@ COMM_INBOUND = "inbound"        # 相手 → 自分 (受信): この後ボール
 COMM_OUTBOUND = "outbound"      # 自分 → 相手 (送信): この後ボールは相手
 VALID_COMM_DIRECTION = {COMM_INBOUND, COMM_OUTBOUND}
 
-# やり取りの媒体。source.type と重複させず、媒体だけをここに持つ。"other" が
-# escape hatch なので新媒体でも block しない (ball 同様、validated set + other)。
-COMM_CHANNELS = ("email", "slack", "meeting", "calendar", "phone", "other")
+# やり取りの媒体。e-3454: channel は自由記述 (現実の媒体は email/slack に収まらず
+# Facebook Messenger / LINE / 対面 / 電話 等と開いている)。下は UI hint / 補完候補
+# としての *既知* セットであって enforce される閉集合ではない。communication_add は
+# 任意の非空文字列を受け付け、正規化 (strip + lowercase) のみ行う (空なら "other")。
+KNOWN_COMM_CHANNELS = ("email", "slack", "meeting", "calendar", "phone",
+                       "messenger", "line", "in-person", "sms", "other")
+# 後方互換 alias (旧名参照コード用)。
+COMM_CHANNELS = KNOWN_COMM_CHANNELS
 
 
 def next_communication_id(data: dict) -> str:
@@ -1223,10 +1228,9 @@ def communication_add(data: dict, target_id: str, summary: str, *,
         raise ValueError(
             f"direction must be one of {sorted(VALID_COMM_DIRECTION)}, "
             f"got {direction!r}")
-    ch = (channel or "other").strip() or "other"
-    if ch not in COMM_CHANNELS:
-        raise ValueError(
-            f"channel must be one of {list(COMM_CHANNELS)}, got {ch!r}")
+    # channel is free-text (e-3454): real-world channels are open-ended
+    # (messenger / line / 対面 …). Normalize only; empty → "other".
+    ch = (channel or "").strip().lower() or "other"
     comm_id = next_communication_id(data)
     container.setdefault("communications", []).append({
         "id": comm_id,

@@ -1077,15 +1077,23 @@ def test_communication_unknown_target():
         se.communication_add(data, "mlst-1", "x", direction="inbound")  # wrong prefix
 
 
-def test_communication_validates_direction_and_channel():
+def test_communication_validates_direction_but_channel_is_free_text():
     data = _fresh()
     opp = se.opportunity_add(data, "Deal")
     with pytest.raises(ValueError):
         se.communication_add(data, opp, "x", direction="sideways")
     with pytest.raises(ValueError):
-        se.communication_add(data, opp, "x", direction="inbound", channel="carrier-pigeon")
-    with pytest.raises(ValueError):
         se.communication_add(data, opp, "  ", direction="inbound")  # blank summary
+    # e-3454: channel is free-text — off-pipeline channels are accepted and
+    # normalized (strip + lowercase); empty falls back to "other".
+    c1 = se.communication_add(data, opp, "Messengerで日程調整", direction="inbound",
+                              channel="Facebook Messenger")
+    c2 = se.communication_add(data, opp, "電話で確認", direction="inbound", channel="  LINE  ")
+    c3 = se.communication_add(data, opp, "媒体不明", direction="inbound", channel="")
+    comms = {c["id"]: c for c in se.find_opportunity(data, opp)["communications"]}
+    assert comms[c1]["channel"] == "facebook messenger"
+    assert comms[c2]["channel"] == "line"
+    assert comms[c3]["channel"] == "other"
 
 
 def test_communications_of_orders_by_occurred_then_insertion():
