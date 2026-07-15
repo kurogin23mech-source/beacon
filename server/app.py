@@ -8952,6 +8952,15 @@ def trek_scheduler_tick_endpoint(
                 "event_id": event_id,
             })
 
+    # ms-107 e-3434 chunk 3b ("trek tick 相乗り") — on this same Cloud-Scheduler
+    # tick, also fire due server-tick Operations (e.g. the sales meeting-end
+    # detector). Fully isolated + best-effort: any failure is captured into the
+    # report and never touches the Trek fanout above.
+    try:
+        operations_fired = _fire_due_server_operations(now_iso)
+    except Exception as _op_exc:  # pragma: no cover - defensive isolation
+        operations_fired = [{"error": f"{type(_op_exc).__name__}: {_op_exc}"}]
+
     return {
         "now": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "candidates": len(candidate_treks),
@@ -8966,7 +8975,111 @@ def trek_scheduler_tick_endpoint(
         # so observers can tell "leader pulled the cord" apart from
         # "work is genuinely done".
         "halted": halted,
+        # ms-107 e-3434 chunk 3b — server-tick Operations fired this pass.
+        "operations": operations_fired,
     }
+
+
+def _find_operation_spec_doc(project: dict, op_id: str) -> str:
+    """Best-effort: the doc_id of the SPEC bound to an operation (scope=spec,
+    operation=op_id), so the execute Skill can fetch its procedure. '' if none."""
+    for doc in (project.get("documents", []) or []):
+        if not isinstance(doc, dict):
+            continue
+        if doc.get("operation") == op_id and doc.get("scope") == "spec":
+            return doc.get("doc_id", "") or doc.get("id", "") or ""
+    return ""
+
+
+def _fire_due_server_operations(now_iso: str) -> list:
+    """ms-107 e-3434 chunk 3b — fire due server-tick Operations on the shared
+    Trek scheduler tick ("相乗り").
+
+    For each project, select Operations that opt into server-tick firing
+    (``meta.server_tick``) and whose cadence has elapsed (pure decision in
+    ``lib/operation_scheduler``). Fire each by **reusing its pre-approved
+    operation envelope** (minted by the human at ``beacon operation approve``
+    and stored in ``operation_envelopes/``) — the server never mints here, it
+    just re-attaches the standing authorization. Only operations with an active
+    envelope fire (no envelope → skip, since delivery would degrade to
+    notify-user-only and never auto-execute). ``meta.last_fired_at`` is stamped
+    so the cadence gate advances (the dedup that stops double-firing).
+
+    Returns a per-fire report for the tick response (observability). Best-effort
+    throughout; a single project's failure is captured and skipped."""
+    import operation_scheduler
+    report: list = []
+    try:
+        projects = db.list_all_projects()
+    except Exception as exc:  # pragma: no cover
+        return [{"error": f"list_all_projects: {type(exc).__name__}: {exc}"}]
+    for proj_meta in (projects or []):
+        pid = proj_meta.get("project_id") or proj_meta.get("id") or ""
+        if not pid:
+            continue
+        try:
+            project = db.get_project(pid)
+        except Exception:
+            continue
+        if not project:
+            continue
+        ops = project.get("operations", []) or []
+        due = operation_scheduler.select_due_operations(ops, now_iso)
+        if not due:
+            continue
+        changed = False
+        for op in due:
+            op_id = op.get("id", "")
+            # Reuse the standing operation envelope; require one to fire.
+            envelope = None
+            try:
+                envs = db.list_operation_envelopes(pid, op_id=op_id, status="active")
+                if envs:
+                    envelope = (envs[0] or {}).get("envelope")
+            except Exception:
+                envelope = None
+            if not envelope:
+                report.append({"project_id": pid, "op_id": op_id,
+                               "skipped": "no active envelope (approve first)"})
+                continue
+            meta = op.get("meta") or {}
+            recipient = meta.get("claimer_session_id") or meta.get("open_by") or ""
+            payload = {
+                "op_id": op_id,
+                "log_source": op.get("log_source", op_id),
+                "spec_doc_id": _find_operation_spec_doc(project, op_id),
+                "trigger_name": f"operation_check_{op_id}",
+                "message": f"{op_id} の定期チェック (server tick)。"
+                           "/beacon-operation-execute で実行してください。",
+                "created_at": now_iso,
+            }
+            if recipient:
+                payload["recipient_session_id"] = recipient
+            bus_data = {
+                "channel": "operation-trigger",
+                "sender_session_id": "",
+                "payload": payload,
+                "envelope": envelope,
+                "delivery": "auto-execute",
+                "created_at": now_iso,
+            }
+            try:
+                db.append_bus_event(pid, bus_data)
+            except Exception as exc:
+                report.append({"project_id": pid, "op_id": op_id,
+                               "error": f"append_bus_event: {type(exc).__name__}"})
+                continue
+            op.setdefault("meta", {})["last_fired_at"] = now_iso
+            changed = True
+            report.append({"project_id": pid, "op_id": op_id,
+                           "recipient": recipient or "(broadcast)"})
+        if changed:
+            try:
+                db.save_project(pid, project)
+            except Exception as exc:  # pragma: no cover
+                report.append({"project_id": pid,
+                               "error": f"save_project: {type(exc).__name__}"})
+    return report
 
 
 class CheckTaskAddRequest(BaseModel):
