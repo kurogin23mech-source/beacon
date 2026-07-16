@@ -1605,3 +1605,80 @@ def test_nurturing_created_in_phase_from_account():
     nid = se.nurturing_add(data, acc, "定期フォロー")
     _, nrt = se.find_nurturing(data, nid)
     assert nrt["created_in_phase"] == cur
+
+
+# --- e-3548: meeting-type anchor seeds a 予定未定 Meeting (dup 根絶) ----------
+
+def _opp_phase_def(data, name):
+    return se._find_phase_def(se.opportunity_phases(data), name)
+
+
+def test_phase_activity_template_stays_string_list_backcompat():
+    data = _fresh()
+    tpl = se.phase_activity_template(_opp_phase_def(data, "商談準備"))
+    assert tpl == ["初回面談を打診", "初回面談を実施", "提案の方向性を確定"]
+
+
+def test_phase_activity_anchors_marks_meeting_kind():
+    data = _fresh()
+    anchors = se.phase_activity_anchors(_opp_phase_def(data, "商談準備"))
+    kinds = {a["desc"]: a["kind"] for a in anchors}
+    assert kinds["初回面談を実施"] == "meeting"
+    assert kinds["初回面談を打診"] == ""
+
+
+def test_phase_activity_anchors_tolerates_legacy_bare_strings():
+    pdef = {"activity_template": ["A面談を実施", "B"]}
+    assert se.phase_activity_anchors(pdef) == [
+        {"desc": "A面談を実施", "kind": ""}, {"desc": "B", "kind": ""}]
+
+
+def test_instantiate_seeds_unscheduled_meeting_for_meeting_anchor():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")  # starts in 商談準備
+    se.instantiate_phase_activities(data, oid)
+    opp = se.find_opportunity(data, oid)
+    meet_act = next(a for a in opp["activities"] if a["description"] == "初回面談を実施")
+    o, m = se.find_meeting_by_linked(data, meet_act["id"])
+    assert m is not None
+    assert m["status"] == se.MEETING_UNSCHEDULED
+    assert m["scheduled_at"] == ""
+    assert m["linked_id"] == meet_act["id"]
+    # a non-meeting anchor gets no Meeting
+    non = next(a for a in opp["activities"] if a["description"] == "初回面談を打診")
+    assert se.find_meeting_by_linked(data, non["id"]) == (None, None)
+
+
+def test_instantiate_idempotent_no_duplicate_meeting():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    se.instantiate_phase_activities(data, oid)
+    se.instantiate_phase_activities(data, oid)  # re-enter phase
+    opp = se.find_opportunity(data, oid)
+    assert len(opp.get("meetings", [])) == 1  # not duplicated
+
+
+def test_seeded_meeting_confirmed_by_reschedule_same_record():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    se.instantiate_phase_activities(data, oid)
+    opp = se.find_opportunity(data, oid)
+    mtg = opp["meetings"][0]
+    assert mtg["status"] == se.MEETING_UNSCHEDULED
+    se.meeting_reschedule(data, mtg["id"], "2026-08-01T10:00")
+    assert mtg["status"] == se.MEETING_SCHEDULED
+    assert mtg["scheduled_at"] == "2026-08-01T10:00"
+    assert len(opp["meetings"]) == 1  # updated, not newly created
+
+
+def test_scan_ended_meetings_ignores_unscheduled():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    se.instantiate_phase_activities(data, oid)  # seeds a 予定未定 meeting
+    assert se.scan_ended_meetings(data, "2030-01-01T00:00") == []
+
+
+def test_meeting_seed_unknown_opp_raises():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.meeting_seed(data, "opp-999")

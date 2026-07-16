@@ -160,20 +160,42 @@ AI が自律でカレンダーに入れてはならない (制約参照)。
    (alias が null なら省略)。タイトルは相手と用件が分かる形 (例:「[商談] ○○社 △△様 面談」)。
    返ってきた **event id** を `$EVENT_ID` として保持する。
 
-2. **Meeting を予約し遷移日を同時更新**: 内部コマンドで Beacon 側に面談を刻む。
-   `--set-transition` 相当 (`BEACON_MTG_SET_TRANSITION=1`) で **商談の遷移日が面談日に
-   同時更新される** (二重管理を無くす)。
+2. **Meeting を確定し遷移日を同時更新**: `--set-transition` 相当
+   (`BEACON_MTG_SET_TRANSITION=1`) で **商談の遷移日が面談日に同時更新される** (二重管理を無くす)。
+
+   フェーズ入場時に面談アンカー (例「初回面談を実施」) から **予定未定 (status=unscheduled)
+   の Meeting が seed 済み**のことがある (e-3548)。**新規作成の前に既存を探し、あればそれを
+   確定する** — こうすると「確定した面談」と「アポ確定を丸写しした活動」が二重に残る事故が
+   構造的に起きない。まず対象商談の Meeting を引く:
 
    ```bash
-   BEACON_MTG_OPP="$OPP" BEACON_MTG_AT="$WHEN_START" BEACON_MTG_END="$WHEN_END" \
-     BEACON_MTG_LOCATION="$LOC" BEACON_MTG_EVENT_ID="$EVENT_ID" \
-     BEACON_MTG_CAL_NS="$CALNS" BEACON_MTG_CAL_ACCT="$CALACCT" \
-     BEACON_MTG_SET_TRANSITION=1 \
-     python3 "$(beacon _lib-path)/commands.py" meeting_schedule
+   BEACON_MTG_OPP="$OPP" BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" meeting_list
    ```
 
-   stdout の `calendar tag (説明文に埋め込む): beacon-meeting-id: mtg-N` の行から、
-   埋め込む **識別 ID タグ** (`$TAG`) を読み取る。`mtg-N` が Beacon 識別 ID。
+   出力の meetings に `status == "unscheduled"` の `mtg-N` があるか確認する。
+
+   - **予定未定 mtg- がある → その同じレコードに日時とカレンダー情報を入れて確定** (新規作成
+     しない = 重複が構造的に不可能):
+
+     ```bash
+     BEACON_MTG_ID="$MTG_ID" BEACON_MTG_AT="$WHEN_START" BEACON_MTG_END="$WHEN_END" \
+       BEACON_MTG_EVENT_ID="$EVENT_ID" BEACON_MTG_CAL_NS="$CALNS" BEACON_MTG_CAL_ACCT="$CALACCT" \
+       BEACON_MTG_SET_TRANSITION=1 \
+       python3 "$(beacon _lib-path)/commands.py" meeting_reschedule
+     ```
+
+   - **予定未定 mtg- が無い (seed されていない商談) → 従来どおり新規に予約**:
+
+     ```bash
+     BEACON_MTG_OPP="$OPP" BEACON_MTG_AT="$WHEN_START" BEACON_MTG_END="$WHEN_END" \
+       BEACON_MTG_LOCATION="$LOC" BEACON_MTG_EVENT_ID="$EVENT_ID" \
+       BEACON_MTG_CAL_NS="$CALNS" BEACON_MTG_CAL_ACCT="$CALACCT" \
+       BEACON_MTG_SET_TRANSITION=1 \
+       python3 "$(beacon _lib-path)/commands.py" meeting_schedule
+     ```
+
+   確定した `mtg-N` が Beacon 識別 ID。埋め込む **識別 ID タグ** は
+   `beacon-meeting-id: mtg-N` の形 (`$TAG`)。
 
 3. **カレンダー予定の説明にタグを埋め込む**: `$CALNS` の `update-event` で、手順 1 の
    `$EVENT_ID` の予定の **説明 (description) に `$TAG` を 1 行加える** (`account: $CALACCT`)。
@@ -201,15 +223,14 @@ BEACON_MTG_ID="$MTG_ID" BEACON_MTG_AT="$NEW_WHEN_START" BEACON_MTG_END="$NEW_WHE
 `mtg-N` は `BEACON_MTG_OPP="$OPP" BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" meeting_list`
 で引ける。
 
-## Step 7: 活動記録 (証跡) を必ず残す
+## Step 7: 別途の「アポ確定」活動は作らない (e-3548 / e-3536)
 
-予定を作れたら、対象商談にアポ確定を活動記録として残す。これを飛ばすと「いつ次に
-会うか」を後で辿れなくなるため必須 (beacon-sales-email と同じ内部コマンド経路):
+**確定した面談は Step 6-2 の Meeting レコードそのものが記録**になる。以前はここで
+`[アポ確定] …` という活動を新規作成していたが、それだと確定 Meeting と丸写し活動が
+二重に残る (opp-6 で実際に起きた)。**もう活動は作らない** — 面談アンカーから seed した
+Meeting を確定するだけで、「いつ次に会うか」は Meeting から辿れる。
 
-```bash
-BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[アポ確定] <日時> <相手/場所>" \
-  python3 "$(beacon _lib-path)/commands.py" opportunity_activity
-```
+(予定未定 mtg- が無く新規予約した場合も同じ。Meeting が唯一の面談記録。)
 
 ## Step 8: 結果報告
 
@@ -217,8 +238,8 @@ BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[アポ確定] <日時> <相手/場�
 
 ```
 📅 予定を登録しました ([WHEN] / [相手])
-  Meeting [mtg-N] を作成し、商談 [OPP] の遷移日を [面談日] に更新しました。
-  商談 [OPP] に活動記録を残しました。
+  Meeting [mtg-N] を確定し、商談 [OPP] の遷移日を [面談日] に更新しました。
+  (seed 済みの予定未定 Meeting を確定 / 無ければ新規作成)
 ```
 
 登録を止めた場合 (ユーザーが「やめる」／相手都合が付かず保留) は、登録しなかった旨と
@@ -232,7 +253,9 @@ BEACON_OPP_ID="$OPP" BEACON_ACTIVITY_DESC="[アポ確定] <日時> <相手/場�
   account を手書きしない — 台帳を通らない経路を残さないのが取り違え防止の本質 (e-3365)。
 - **予定を作れたら必ず Meeting を刻み (Step 6-2)、カレンダー予定に識別 ID タグを埋め込む
   (Step 6-3)**。この handshake を欠かすと後段の終了検知 (C) が商談を突き合わせられない。
-- **予定を作れたら必ず Step 7 の活動記録を残す** (証跡を欠かさない)。
-- 予定変更は既存 `mtg-N` を `meeting_reschedule` で動かす (新規作成しない = 識別 ID を保つ)。
+- **確定した面談の記録は Meeting レコードそのもの。別途「アポ確定」活動を作らない** (e-3548
+  / e-3536 — 確定 Meeting と丸写し活動の二重化を構造的に断つ)。
+- **予定未定 (unscheduled) の seed 済み Meeting があれば新規作成せず必ずそれを確定する**
+  (`meeting_reschedule`)。予定変更のときも既存 `mtg-N` を動かす (新規作成しない = 識別 ID を保つ)。
 - `project.json` を直接書き換えない。内部コマンド / CLI 経由のみ。
 - 相手に見せる文面・日時は非開発者が読める自然な日本語で (社内略語を持ち込まない)。
