@@ -75,6 +75,8 @@ Sales (profession=sales):
   beacon opportunity delete <opp-id>                         Delete an opportunity and its activities
   beacon communication add <opp-|acc-|act-|nrt-id> "<summary>" --direction inbound|outbound [--channel <text, free: email/slack/messenger/line/in-person/…>] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]   Record a communication (証跡・営業の Commit); act-/nrt- links the specific activity/nurturing it fulfilled
   beacon communication list <opp-|acc-|act-|nrt-id> [--json]  List communications (証跡) + derived ball; act-/nrt- lists only that work item's
+  beacon communication cancel <comm-id> [--reason <text>]     Cancel (取消) a mis-recorded communication — soft, kept struck-through, excluded from ball/watch
+  beacon communication retarget <comm-id> <new opp-|acc-|act-|nrt->  Re-file a communication filed under the wrong work item (moves it; the evidence itself is unchanged)
   beacon meeting schedule <opp-id> --at <datetime> [--end <datetime>] [--location <text>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]   Book a meeting (面談) with a Beacon 識別 ID; --set-transition moves the 遷移日 too
   beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]   Move a meeting (予定変更); --set-transition follows the 遷移日
   beacon meeting end <mtg-id>                                 Mark a meeting ended (idempotent; used by the end-detector)
@@ -1471,6 +1473,41 @@ cmd_communication_list() {
         python3 "$COMMANDS_PY" communication_list
 }
 
+cmd_communication_cancel() {
+    ensure_project
+    local comm_id="" reason=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --reason) reason="$2"; shift 2 ;;
+            -?*)      _guard_positional "$1" "Usage: beacon communication cancel <comm-id> [--reason <text>]" ;;
+            *)        comm_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$comm_id" ]; then
+        echo "Usage: beacon communication cancel <comm-id> [--reason <text>]"
+        exit 1
+    fi
+    BEACON_COMM_ID="$comm_id" BEACON_COMM_REASON="$reason" \
+        python3 "$COMMANDS_PY" communication_cancel
+}
+
+cmd_communication_retarget() {
+    ensure_project
+    local comm_id="" new_target=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -?*) _guard_positional "$1" "Usage: beacon communication retarget <comm-id> <new-target: opp-|acc-|act-|nrt->" ;;
+            *)   if [ -z "$comm_id" ]; then comm_id="$1"; elif [ -z "$new_target" ]; then new_target="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$comm_id" ] || [ -z "$new_target" ]; then
+        echo "Usage: beacon communication retarget <comm-id> <new-target: opp-|acc-|act-|nrt->"
+        exit 1
+    fi
+    BEACON_COMM_ID="$comm_id" BEACON_COMM_TARGET="$new_target" \
+        python3 "$COMMANDS_PY" communication_retarget
+}
+
 cmd_meeting_schedule() {
     ensure_project
     local opp_id="" at="" end="" location="" event_id="" cal_ns="" cal_acct="" set_transition=""
@@ -2812,7 +2849,9 @@ case "${1:-}" in
         case "${2:-}" in
             add)      shift 2; cmd_communication_add "$@" ;;
             list|ls)  shift 2; cmd_communication_list "$@" ;;
-            *)        echo "Usage: beacon communication [add|list]" ;;
+            cancel)   shift 2; cmd_communication_cancel "$@" ;;
+            retarget) shift 2; cmd_communication_retarget "$@" ;;
+            *)        echo "Usage: beacon communication [add|list|cancel|retarget]" ;;
         esac
         ;;
     meeting|mtg)

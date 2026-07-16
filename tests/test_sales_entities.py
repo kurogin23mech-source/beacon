@@ -894,7 +894,8 @@ def test_nurturing_add_nested_under_account():
     assert nurt == [{"id": "nrt-1", "description": "年賀状を送る",
                      "deadline": "2026-12-25", "status": "todo",
                      "who_has_the_ball": se.BALL_SELF, "source": "",
-                     "created_at": "T0"}]
+                     "created_at": "T0",
+                     "created_in_phase": se.find_account(data, acc)["phase"]}]
 
 
 def test_nurturing_add_requires_account_and_desc():
@@ -1447,3 +1448,160 @@ def test_activity_cancel_unknown_id_raises():
     data = _fresh()
     with pytest.raises(ValueError):
         se.activity_cancel(data, "act-999")
+
+
+# --- e-3537: 誤起票の訂正 (communication cancel / retarget + reader filtering) --
+
+def test_communication_cancel_soft_and_excluded_from_ball(monkeypatch):
+    monkeypatch.setenv("BEACON_CLAUDE_CODE", "1")
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal", created_at="T0")
+    cid = se.communication_add(data, oid, "送ったつもりのメール",
+                               direction=se.COMM_OUTBOUND, created_at="T1")
+    out = se.communication_cancel(data, cid, reason="そもそも送ってない")
+    assert out["status"] == "cancelled"
+    assert out["meta"]["cancel_reason"] == "そもそも送ってない"
+    opp = se.find_opportunity(data, oid)
+    # 表示には残る (include_cancelled 既定 True)
+    assert any(c["id"] == cid for c in se.communications_of(opp))
+    # 判定 (ball) からは除外される — 有効な証跡が無いので None
+    assert se.communications_of(opp, include_cancelled=False) == []
+    assert se.derive_ball(opp) is None
+
+
+def test_ball_uses_latest_non_cancelled(monkeypatch):
+    monkeypatch.setenv("BEACON_CLAUDE_CODE", "1")
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal", created_at="T0")
+    se.communication_add(data, oid, "こちらから連絡",
+                         direction=se.COMM_OUTBOUND, occurred_at="2026-07-01")
+    c2 = se.communication_add(data, oid, "返信(実は誤記録)",
+                              direction=se.COMM_INBOUND, occurred_at="2026-07-02")
+    opp = se.find_opportunity(data, oid)
+    assert se.derive_ball(opp) == se.BALL_SELF  # 最新=inbound → 自分の番
+    se.communication_cancel(data, c2, reason="誤記録")
+    # 取消後は最新の有効証跡=outbound → 相手の番
+    assert se.derive_ball(opp) == se.BALL_COUNTERPART
+
+
+def test_communication_cancel_unknown_raises():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.communication_cancel(data, "comm-999")
+
+
+def test_communication_retarget_moves_record_fact_intact():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    a1 = se.activity_add(data, oid, "初回連絡")
+    a2 = se.activity_add(data, oid, "提案")
+    cid = se.communication_add(data, a1, "議事録", direction=se.COMM_INBOUND,
+                               channel="meeting", occurred_at="2026-07-03")
+    _, _, before = se.find_communication(data, cid)
+    assert before["linked_id"] == a1
+    se.communication_retarget(data, cid, a2)
+    _, _, after = se.find_communication(data, cid)
+    # 綴じ場所 (linked_id) だけ変わり、事実フィールドは不変
+    assert after["linked_id"] == a2
+    assert after["summary"] == "議事録"
+    assert after["direction"] == se.COMM_INBOUND
+    assert after["occurred_at"] == "2026-07-03"
+    # 重複しない (1レコードが移動しただけ)
+    opp = se.find_opportunity(data, oid)
+    assert len([c for c in se._gather_communications(opp) if c["id"] == cid]) == 1
+    act1 = next(a for a in opp["activities"] if a["id"] == a1)
+    act2 = next(a for a in opp["activities"] if a["id"] == a2)
+    assert not any(c["id"] == cid for c in act1.get("communications", []))
+    assert any(c["id"] == cid for c in act2.get("communications", []))
+
+
+def test_communication_retarget_to_target_grain():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    a1 = se.activity_add(data, oid, "初回連絡")
+    cid = se.communication_add(data, a1, "メール", direction=se.COMM_OUTBOUND)
+    se.communication_retarget(data, cid, oid)  # act- → opp- (target grain)
+    _, _, comm = se.find_communication(data, cid)
+    assert comm["linked_id"] == ""
+    opp = se.find_opportunity(data, oid)
+    assert any(c["id"] == cid for c in opp.get("communications", []))
+
+
+def test_communication_retarget_unknown_target_raises():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    cid = se.communication_add(data, oid, "x", direction=se.COMM_OUTBOUND)
+    with pytest.raises(ValueError):
+        se.communication_retarget(data, cid, "opp-999")
+
+
+def test_watched_work_items_skips_cancelled():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    a1 = se.activity_add(data, oid, "日程打診")
+    se.set_watch(data, a1, channel="email")
+    assert any(a["id"] == a1 for _, a in se.watched_work_items(data))
+    se.activity_cancel(data, a1, reason="誤り")
+    assert not any(a["id"] == a1 for _, a in se.watched_work_items(data))
+
+
+# --- e-3555: created_in_phase (set-once phase 帰属) ------------------------
+
+def test_activity_created_in_phase_defaults_to_current():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    cur = se.find_opportunity(data, oid)["phase"]
+    aid = se.activity_add(data, oid, "初回連絡")
+    _, act = se.find_activity(data, aid)
+    assert act["created_in_phase"] == cur
+
+
+def test_activity_created_in_phase_explicit_seed_wins():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    aid = se.activity_add(data, oid, "先出し", created_in_phase="提案準備")
+    _, act = se.find_activity(data, aid)
+    assert act["created_in_phase"] == "提案準備"
+
+
+def test_activity_created_in_phase_immutable_across_phase_change():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    opp = se.find_opportunity(data, oid)
+    first = opp["phase"]
+    aid = se.activity_add(data, oid, "x")
+    opp["phase"] = "別フェーズ"  # 商談が進んでも
+    _, act = se.find_activity(data, aid)
+    assert act["created_in_phase"] == first  # 活動の生誕フェーズは不変
+
+
+def test_communication_created_in_phase_from_container():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    cur = se.find_opportunity(data, oid)["phase"]
+    cid = se.communication_add(data, oid, "メール", direction=se.COMM_OUTBOUND)
+    _, _, comm = se.find_communication(data, cid)
+    assert comm["created_in_phase"] == cur
+
+
+def test_communication_created_in_phase_survives_retarget():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    opp = se.find_opportunity(data, oid)
+    cur = opp["phase"]
+    a1 = se.activity_add(data, oid, "初回")
+    cid = se.communication_add(data, a1, "議事録", direction=se.COMM_INBOUND)
+    opp["phase"] = "提案準備"
+    a2 = se.activity_add(data, oid, "提案")
+    se.communication_retarget(data, cid, a2)  # 綴じ替えても
+    _, _, comm = se.find_communication(data, cid)
+    assert comm["created_in_phase"] == cur  # set-once、不変
+
+
+def test_nurturing_created_in_phase_from_account():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    cur = se.find_account(data, acc)["phase"]
+    nid = se.nurturing_add(data, acc, "定期フォロー")
+    _, nrt = se.find_nurturing(data, nid)
+    assert nrt["created_in_phase"] == cur

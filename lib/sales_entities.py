@@ -38,6 +38,11 @@ from typing import Optional
 
 import work_base
 
+# 取消 (cancelled) 状態は基底 work_base の語彙に揃える (ms-109 e-3558)。営業の
+# activity / communication の「誤起票の訂正」(e-3537) と Meeting の cancelled が
+# 同じ status 値を使うことで、UI・判定の語彙が職種横断で一致する。
+CANCELLED_STATUS = work_base.CANCELLED_STATUS
+
 # --- default funnel seeds (first-user 実フロー, 2026-07-13) -----------------
 # Seeded into a fresh sales project.json by build_sales_project. Editable per
 # company afterwards (that's the point of storing them as config). These are
@@ -966,12 +971,22 @@ def opportunities_awaiting_judgement(data: dict, today: str) -> list:
 
 def activity_add(data: dict, opportunity_id: str, description: str, *,
                  deadline: str = "", who_has_the_ball: str = BALL_SELF,
-                 source: str = "", created_at: str = "") -> str:
+                 source: str = "", created_at: str = "",
+                 created_in_phase: str = "") -> str:
     """Append an Activity (業務・事前計画型) under an Opportunity, return its id.
 
     ``source`` records where the activity came from (e.g. ``"template-anchor"``
     for a phase's fixed step, ``"ai"`` for an AI-generated one, "" for a hand
-    -added one) so the origin stays auditable."""
+    -added one) so the origin stays auditable.
+
+    ``created_in_phase`` (e-3555) stamps which funnel phase this activity was
+    born in — set-once and never mutated afterwards. When left blank it defaults
+    to the opportunity's *current* phase (the hand-added / manual case); a caller
+    seeding activities for a specific phase ahead of time passes it explicitly
+    (the seed case). This lets the UI filter activities by phase and lets the
+    phase-fold step (e-3553) tell which phase's work an activity belongs to. It
+    is a SALES-instance field only — the occupation-agnostic base stays phase
+    -free (doc 5srt3fcamG59ljyRlNKn の層分界)."""
     opp = find_opportunity(data, opportunity_id)
     if opp is None:
         raise ValueError(f"Opportunity not found: {opportunity_id}")
@@ -989,6 +1004,7 @@ def activity_add(data: dict, opportunity_id: str, description: str, *,
         "who_has_the_ball": who_has_the_ball,
         "source": source,
         "created_at": created_at,
+        "created_in_phase": created_in_phase or opp.get("phase", ""),
     })
     return act_id
 
@@ -1002,7 +1018,8 @@ def next_nurturing_id(data: dict) -> str:
 
 def nurturing_add(data: dict, account_id: str, description: str, *,
                   deadline: str = "", who_has_the_ball: str = BALL_SELF,
-                  source: str = "", created_at: str = "") -> str:
+                  source: str = "", created_at: str = "",
+                  created_in_phase: str = "") -> str:
     """Append a Nurturing (継続関係の業務・事前計画型) under an Account, return
     its id. The continuous-target twin of ``activity_add``: an Opportunity
     carries 業務 as *activities*, an Account carries them as *nurturings*
@@ -1027,6 +1044,9 @@ def nurturing_add(data: dict, account_id: str, description: str, *,
         "who_has_the_ball": who_has_the_ball,
         "source": source,
         "created_at": created_at,
+        # e-3555: 活動(activity)の双子として同じ set-once の phase 帰属を持つ。
+        # 空なら Account の現フェーズを既定にする。
+        "created_in_phase": created_in_phase or acc.get("phase", ""),
     })
     return nrt_id
 
@@ -1280,6 +1300,8 @@ def watched_work_items(data: dict, *, awaiting_reply_only: bool = False) -> list
     out = []
     for opp in data.get("opportunities", []):
         for a in opp.get("activities", []):
+            if a.get("status") == CANCELLED_STATUS:  # e-3537: 取消済は監視しない
+                continue
             w = a.get("watch")
             if w and w.get("enabled"):
                 if awaiting_reply_only and derive_ball(opp) != BALL_COUNTERPART:
@@ -1287,6 +1309,8 @@ def watched_work_items(data: dict, *, awaiting_reply_only: bool = False) -> list
                 out.append((opp, a))
     for acc in data.get("accounts", []):
         for n in acc.get("nurturings", []):
+            if n.get("status") == CANCELLED_STATUS:  # e-3537: 取消済は監視しない
+                continue
             w = n.get("watch")
             if w and w.get("enabled"):
                 if awaiting_reply_only and derive_ball(acc) != BALL_COUNTERPART:
@@ -1332,10 +1356,96 @@ def find_communication_target(data: dict, target_id: str) -> Optional[dict]:
     return container
 
 
+def find_communication(data: dict, comm_id: str):
+    """Locate a Communication *record* by its id. Returns
+    ``(container, node, comm)`` where ``container`` is the owning Opportunity/
+    Account, ``node`` is the dict whose ``communications`` list physically holds
+    the record (the container itself, or a nested Activity/Nurturing), and
+    ``comm`` is the record. ``(None, None, None)`` when not found.
+
+    Unlike ``find_communication_target`` (which resolves a *target* id to its
+    container), this resolves a *communication* id to the record itself so it
+    can be cancelled or moved (e-3537)."""
+    def _scan(container):
+        for c in container.get("communications", []) or []:
+            if c.get("id") == comm_id:
+                return container, container, c
+        for child_key in ("activities", "nurturings"):
+            for child in container.get(child_key, []) or []:
+                for c in child.get("communications", []) or []:
+                    if c.get("id") == comm_id:
+                        return container, child, c
+        return None
+    for opp in data.get("opportunities", []):
+        hit = _scan(opp)
+        if hit:
+            return hit
+    for acc in data.get("accounts", []):
+        hit = _scan(acc)
+        if hit:
+            return hit
+    return None, None, None
+
+
+def communication_cancel(data: dict, comm_id: str, *, reason: str = "") -> dict:
+    """Cancel (取消) a mis-recorded Communication and return it.
+
+    Soft-cancel via the shared ``work_base.stamp_cancel`` (status=cancelled +
+    reason, append-only — the 証跡 is never physically deleted, per
+    data-immutability-principle). The record stays in the log (the UI shows it
+    struck-through) but is excluded from ball/phase derivation and reply-watch
+    (e-3537). Use this only for a communication that should not exist (recorded
+    an exchange that never happened). To fix a communication filed under the
+    *wrong* work item, use ``communication_retarget`` — that is a re-filing, not
+    a cancel."""
+    _, _, comm = find_communication(data, comm_id)
+    if comm is None:
+        raise ValueError(f"Communication not found: {comm_id}")
+    return work_base.stamp_cancel(comm, reason=reason)
+
+
+def communication_retarget(data: dict, comm_id: str, new_target_id: str) -> dict:
+    """Move a Communication to the correct target/work item and return it.
+
+    Re-filing a mis-attached 証跡 is a plain edit of *where it is filed*
+    (``linked_id`` + nesting), NOT a change to the evidence itself: the fact
+    fields (summary / source / direction / occurred_at) are untouched. So this
+    is a direct move, not a cancel + re-issue — per data-immutability the
+    immutable part is *what happened*, not *which work item it was filed under*,
+    and the who/when/why of the move is already captured by the surrounding
+    commit / beacon log (e-3537, user decision 2026-07-16).
+
+    ``new_target_id`` may be a target (opp-/acc-) or a work item (act-/nrt-);
+    the record is re-nested to mirror ``communication_add``'s placement."""
+    _, node, comm = find_communication(data, comm_id)
+    if comm is None:
+        raise ValueError(f"Communication not found: {comm_id}")
+    new_container, new_linked = resolve_communication_target(data, new_target_id)
+    if new_container is None:
+        raise ValueError(
+            "Communication target not found (opp-…/acc-… target or "
+            f"act-…/nrt-… work item): {new_target_id}")
+    # Detach from its current holder.
+    node["communications"] = [c for c in node.get("communications", [])
+                              if c.get("id") != comm_id]
+    # Re-file: mirror communication_add's nesting — act-/nrt- nests under that
+    # work item, a plain opp-/acc- target sits at the container level.
+    comm["linked_id"] = new_linked
+    if new_linked.startswith("act-"):
+        _, dest = find_activity(data, new_linked)
+    elif new_linked.startswith("nrt-"):
+        _, dest = find_nurturing(data, new_linked)
+    else:
+        dest = new_container
+    dest.setdefault("communications", []).append(comm)
+    return comm
+
+
 def communication_add(data: dict, target_id: str, summary: str, *,
                       direction: str, channel: str = "other",
                       source: Optional[dict] = None,
-                      occurred_at: str = "", created_at: str = "") -> str:
+                      occurred_at: str = "", created_at: str = "",
+                      created_in_phase: str = "") -> str:
     """Append a Communication (証跡・事後記録型) and return its id.
 
     ``target_id`` may be a target (opp-/acc-) or a planned work item
@@ -1383,11 +1493,15 @@ def communication_add(data: dict, target_id: str, summary: str, *,
         "linked_id": linked_id,
         "occurred_at": occurred_at,
         "created_at": created_at,
+        # e-3555: 証跡が生まれた時点の商談/顧客のフェーズを set-once で刻む。空なら
+        # container (opp/acc) の現フェーズを既定にする。retarget しても不変。
+        "created_in_phase": created_in_phase or container.get("phase", ""),
     })
     return comm_id
 
 
-def communications_of(target: dict, *, linked_id: Optional[str] = None) -> list:
+def communications_of(target: dict, *, linked_id: Optional[str] = None,
+                      include_cancelled: bool = True) -> list:
     """The target's communications in occurrence order (oldest → newest).
     Sort key is occurred_at, falling back to created_at then insertion order so
     records without a timestamp keep their append order (stable). Pass
@@ -1397,8 +1511,16 @@ def communications_of(target: dict, *, linked_id: Optional[str] = None) -> list:
     e-3503: gathers both the target-level records and those nested under the
     target's work items (activities/nurturings), so the chronological log is
     complete regardless of nesting. Old records stored flat at target level (pre
-    -nesting) are still included — read stays backward-compatible."""
+    -nesting) are still included — read stays backward-compatible.
+
+    ``include_cancelled`` (e-3537): the default (True) keeps cancelled (取消済)
+    records in the list so the display shows them faithfully (struck-through,
+    per the UI principle — a cancelled 証跡 is not hidden). Semantic readers
+    that ask "what is the *effective* state" (ball / phase derivation) pass
+    False so a mis-recorded, cancelled communication does not drive the deal."""
     comms = _gather_communications(target)
+    if not include_cancelled:
+        comms = [c for c in comms if c.get("status") != CANCELLED_STATUS]
     if linked_id is not None:
         comms = [c for c in comms if c.get("linked_id") == linked_id]
 
@@ -1420,8 +1542,11 @@ def derive_ball(target: dict) -> Optional[str]:
     is ours (BALL_SELF); the newest outbound means we played → theirs
     (BALL_COUNTERPART). Returns None when there's no communication to derive
     from (ball is unknown, not a default). ball was removed from the UI but the
-    engine keeps it as the reply-watcher's (E) driver."""
-    comms = communications_of(target)
+    engine keeps it as the reply-watcher's (E) driver.
+
+    e-3537: cancelled (取消済) communications are excluded — a mis-recorded
+    exchange must not decide whose court the deal is in."""
+    comms = communications_of(target, include_cancelled=False)
     if not comms:
         return None
     latest = comms[-1]
