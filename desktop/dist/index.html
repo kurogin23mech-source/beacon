@@ -3191,6 +3191,12 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .mtg-when { flex:0 0 auto; font-size:11px; color:var(--text-primary); font-family:var(--font-mono, monospace); }
 .mtg-when.warn { color:#fbbf24; }
 .mtg-loc { flex:1; color:var(--text-dim); }
+/* --- FB: 完了を隠すフィルタ + 活動配下 comm 折りたたみ --- */
+.acts-filter { margin-left:10px; font-size:10px; color:var(--text-dim); background:none; border:1px solid var(--border-subtle); border-radius:9px; padding:1px 8px; cursor:pointer; }
+.acts-filter:hover { color:var(--text-primary); border-color:var(--border); }
+.acts-filter.on { color:var(--accent); border-color:var(--accent); }
+.act-comm-toggle { flex:0 0 auto; font-size:10px; color:var(--text-dim); background:none; border:1px solid var(--border-subtle); border-radius:9px; padding:1px 7px; cursor:pointer; white-space:nowrap; }
+.act-comm-toggle:hover { color:var(--text-primary); border-color:var(--border); }
 /* --- ms-106 fb4: 見込み売上 / 目標進捗バー --- */
 .pipeline-sub { color:var(--text-dim); font-size:0.85em; }
 .pipeline-bar { height:5px; background:var(--bg-raised); border-radius:3px; margin-top:5px; overflow:hidden; max-width:240px; }
@@ -5125,7 +5131,13 @@ function _salesWorkRows(items, kind) {
     // e-3541: a work item (act-/nrt-) shows the communications nested under it,
     // so 「どの活動を果たした証跡か」 stays visible where it belongs (data model
     // already nests them; we render to match instead of flattening).
-    const nested = _salesCommRows(_salesCommsOrdered(a), { nested: true });
+    const comms = _salesCommsOrdered(a);
+    const nested = _salesCommRows(comms, { nested: true });
+    // FB: 活動配下の comm を畳めるトグル。noise を減らして「その活動/フェーズの状態」だけ見たい時用。
+    const collapsed = a.id && state.collapsedComms.has(a.id);
+    const commToggle = (comms.length && a.id)
+      ? `<button class="act-comm-toggle" data-action="toggle-act-comms" data-act-id="${esc(a.id)}">やり取り ${comms.length} ${collapsed ? '▸' : '▾'}</button>`
+      : '';
     return `<div class="work-item">
       <div class="act-row">
         <span class="act-dot ${done ? 'done' : ''}${overdue ? ' overdue' : ''}"></span>
@@ -5133,15 +5145,22 @@ function _salesWorkRows(items, kind) {
         <span class="ent-id" title="${esc(a.id || '')}">${esc(a.id || '')}</span>
         <span class="act-desc ${done ? 'done' : ''}">${esc(a.description || '')}</span>
         ${due}
+        ${commToggle}
       </div>
-      ${nested ? `<div class="comm-nested">${nested}</div>` : ''}
+      ${(nested && !collapsed) ? `<div class="comm-nested">${nested}</div>` : ''}
     </div>`;
   }).join('');
 }
 function _renderOppActivities(o) {
   const acts = o.activities || [];
   if (!acts.length) return `<div class="act-empty">Activity はまだありません。</div>`;
-  return `<div class="opp-acts-head">Activity (${acts.length})</div>${_salesWorkRows(acts)}`;
+  // FB: 完了を隠すフィルタ。todo だけ表示 = そのフェーズの残アクションが見える。
+  const hide = state.salesHideDone;
+  const shown = hide ? acts.filter(a => a.status !== 'done') : acts;
+  const doneN = acts.filter(a => a.status === 'done').length;
+  const toggle = `<button class="acts-filter${hide ? ' on' : ''}" data-action="sales-toggle-hide-done">${hide ? '完了を表示' : '完了を隠す'}${doneN ? ' (' + doneN + ')' : ''}</button>`;
+  const body = shown.length ? _salesWorkRows(shown) : `<div class="act-empty">未完了の活動はありません。</div>`;
+  return `<div class="opp-acts-head">Activity (${acts.length})${toggle}</div>${body}`;
 }
 function _renderNurturings(a) {
   const items = a.nurturings || [];
@@ -8850,6 +8869,13 @@ function handleCommonAction(action, el) {
       state.expandedComms.has(cid) ? state.expandedComms.delete(cid) : state.expandedComms.add(cid);
       render(); return true;
     }
+    case 'toggle-act-comms': {
+      const aid = el.dataset.actId;
+      state.collapsedComms.has(aid) ? state.collapsedComms.delete(aid) : state.collapsedComms.add(aid);
+      render(); return true;
+    }
+    case 'sales-toggle-hide-done':
+      state.salesHideDone = !state.salesHideDone; render(); return true;
     case 'open-account':
       state.openAccountId = el.dataset.accId; render(); return true;
     case 'close-account':
