@@ -971,12 +971,22 @@ def opportunities_awaiting_judgement(data: dict, today: str) -> list:
 
 def activity_add(data: dict, opportunity_id: str, description: str, *,
                  deadline: str = "", who_has_the_ball: str = BALL_SELF,
-                 source: str = "", created_at: str = "") -> str:
+                 source: str = "", created_at: str = "",
+                 created_in_phase: str = "") -> str:
     """Append an Activity (業務・事前計画型) under an Opportunity, return its id.
 
     ``source`` records where the activity came from (e.g. ``"template-anchor"``
     for a phase's fixed step, ``"ai"`` for an AI-generated one, "" for a hand
-    -added one) so the origin stays auditable."""
+    -added one) so the origin stays auditable.
+
+    ``created_in_phase`` (e-3555) stamps which funnel phase this activity was
+    born in — set-once and never mutated afterwards. When left blank it defaults
+    to the opportunity's *current* phase (the hand-added / manual case); a caller
+    seeding activities for a specific phase ahead of time passes it explicitly
+    (the seed case). This lets the UI filter activities by phase and lets the
+    phase-fold step (e-3553) tell which phase's work an activity belongs to. It
+    is a SALES-instance field only — the occupation-agnostic base stays phase
+    -free (doc 5srt3fcamG59ljyRlNKn の層分界)."""
     opp = find_opportunity(data, opportunity_id)
     if opp is None:
         raise ValueError(f"Opportunity not found: {opportunity_id}")
@@ -994,6 +1004,7 @@ def activity_add(data: dict, opportunity_id: str, description: str, *,
         "who_has_the_ball": who_has_the_ball,
         "source": source,
         "created_at": created_at,
+        "created_in_phase": created_in_phase or opp.get("phase", ""),
     })
     return act_id
 
@@ -1007,7 +1018,8 @@ def next_nurturing_id(data: dict) -> str:
 
 def nurturing_add(data: dict, account_id: str, description: str, *,
                   deadline: str = "", who_has_the_ball: str = BALL_SELF,
-                  source: str = "", created_at: str = "") -> str:
+                  source: str = "", created_at: str = "",
+                  created_in_phase: str = "") -> str:
     """Append a Nurturing (継続関係の業務・事前計画型) under an Account, return
     its id. The continuous-target twin of ``activity_add``: an Opportunity
     carries 業務 as *activities*, an Account carries them as *nurturings*
@@ -1032,6 +1044,9 @@ def nurturing_add(data: dict, account_id: str, description: str, *,
         "who_has_the_ball": who_has_the_ball,
         "source": source,
         "created_at": created_at,
+        # e-3555: 活動(activity)の双子として同じ set-once の phase 帰属を持つ。
+        # 空なら Account の現フェーズを既定にする。
+        "created_in_phase": created_in_phase or acc.get("phase", ""),
     })
     return nrt_id
 
@@ -1429,7 +1444,8 @@ def communication_retarget(data: dict, comm_id: str, new_target_id: str) -> dict
 def communication_add(data: dict, target_id: str, summary: str, *,
                       direction: str, channel: str = "other",
                       source: Optional[dict] = None,
-                      occurred_at: str = "", created_at: str = "") -> str:
+                      occurred_at: str = "", created_at: str = "",
+                      created_in_phase: str = "") -> str:
     """Append a Communication (証跡・事後記録型) and return its id.
 
     ``target_id`` may be a target (opp-/acc-) or a planned work item
@@ -1477,6 +1493,9 @@ def communication_add(data: dict, target_id: str, summary: str, *,
         "linked_id": linked_id,
         "occurred_at": occurred_at,
         "created_at": created_at,
+        # e-3555: 証跡が生まれた時点の商談/顧客のフェーズを set-once で刻む。空なら
+        # container (opp/acc) の現フェーズを既定にする。retarget しても不変。
+        "created_in_phase": created_in_phase or container.get("phase", ""),
     })
     return comm_id
 
