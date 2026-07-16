@@ -21612,11 +21612,14 @@ def cmd_meeting_reschedule():
     at = os.environ.get("BEACON_MTG_AT", "")
     end = os.environ.get("BEACON_MTG_END", None) or None
     event_id = os.environ.get("BEACON_MTG_EVENT_ID", None) or None
+    cal_ns = os.environ.get("BEACON_MTG_CAL_NS", None) or None
+    cal_acct = os.environ.get("BEACON_MTG_CAL_ACCT", None) or None
     set_transition = os.environ.get("BEACON_MTG_SET_TRANSITION", "") == "1"
     data = load_project()
     try:
         sales_entities.meeting_reschedule(
             data, mtg_id, at, end_at=end, calendar_event_id=event_id,
+            calendar_namespace=cal_ns, calendar_account=cal_acct,
             set_transition=set_transition, at=core._now_iso())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)

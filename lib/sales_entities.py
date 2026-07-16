@@ -68,12 +68,16 @@ DEFAULT_OPPORTUNITY_PHASES = [
     {"name": "商談準備", "probability": 10, "terminal": False,
      "allowed_terminals": ["不成立"],
      "goal": "初回面談の実施により、商談として進行可能な状態にする",
-     "activity_template": ["初回面談を打診", "初回面談を実施", "提案の方向性を確定"],
+     "activity_template": ["初回面談を打診",
+                           {"desc": "初回面談を実施", "kind": "meeting"},
+                           "提案の方向性を確定"],
      "transition_signal": "calendar_ended", "default_lead": 7},
     {"name": "提案準備", "probability": 20, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "企画を作り提案を終え、先方が検討フェーズに入った状態にする",
-     "activity_template": ["提案面談を打診", "提案面談を実施", "提案内容を準備"],
+     "activity_template": ["提案面談を打診",
+                           {"desc": "提案面談を実施", "kind": "meeting"},
+                           "提案内容を準備"],
      "transition_signal": "calendar_ended", "default_lead": 14},
     {"name": "先方検討中", "probability": 40, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
@@ -258,14 +262,54 @@ def phase_goal(phase_def: Optional[dict]) -> str:
     return (phase_def or {}).get("goal", "") or ""
 
 
+# Anchor "kind" markers (e-3548). A bare-string anchor is a plain activity; a
+# {"desc","kind":"meeting"} anchor also co-seeds a 予定未定 Meeting on phase entry
+# (see instantiate_phase_activities). This encodes the operating rule in the data
+# structure rather than asking a Skill to remember it (機構の硬さ = ルールの硬さ).
+ANCHOR_KIND_MEETING = "meeting"
+
+
+def _anchor_desc(anchor) -> str:
+    """The description text of a template anchor — tolerant of both the legacy
+    bare-string form and the structured {"desc","kind"} form (e-3548)."""
+    if isinstance(anchor, dict):
+        return str(anchor.get("desc", "")).strip()
+    return str(anchor or "").strip()
+
+
+def _anchor_kind(anchor) -> str:
+    """The kind marker of a template anchor ("meeting" etc.), or "" for a plain
+    bare-string anchor (e-3548)."""
+    if isinstance(anchor, dict):
+        return str(anchor.get("kind", "")).strip()
+    return ""
+
+
+def phase_activity_anchors(phase_def: Optional[dict]) -> list:
+    """The phase's anchors normalized to ``[{"desc","kind"}, ...]``, dropping
+    empty ones. Tolerant read (e-3548): accepts both the legacy bare-string
+    template and the structured form, so existing projects keep working while
+    new ones can mark meeting-type anchors."""
+    out = []
+    for a in (phase_def or {}).get("activity_template") or []:
+        desc = _anchor_desc(a)
+        if desc:
+            out.append({"desc": desc, "kind": _anchor_kind(a)})
+    return out
+
+
 def phase_activity_template(phase_def: Optional[dict]) -> list:
-    """The phase's expected-activity template (list), or [] when unset.
+    """The phase's expected-activity template as a list of description strings,
+    or [] when unset.
 
     SPEC §4: this is an *expectation*, not a fixed pipeline — the engine
     reconciles it against real meeting outcomes rather than enforcing it.
+
+    e-3548: structured anchors ({"desc","kind"}) are normalized to their ``desc``
+    here so existing consumers (status JSON / UI) keep receiving a string list;
+    the ``kind`` marker is read via ``phase_activity_anchors`` by the seeder.
     """
-    tpl = (phase_def or {}).get("activity_template")
-    return list(tpl) if tpl else []
+    return [a["desc"] for a in phase_activity_anchors(phase_def)]
 
 
 def phase_transition_signal(phase_def: Optional[dict]) -> str:
@@ -1067,17 +1111,24 @@ def instantiate_phase_activities(data: dict, target_id: str, *,
     if opp is None:
         raise ValueError(f"Opportunity not found: {target_id}")
     pdef = _find_phase_def(opportunity_phases(data), opp.get("phase", ""))
-    anchors = phase_activity_template(pdef)
+    anchors = phase_activity_anchors(pdef)
     existing = {(_norm(a.get("description")))
                 for a in opp.get("activities", []) if a.get("status") != "done"}
     created = []
-    for desc in anchors:
-        text = str(desc).strip()
+    for anchor in anchors:
+        text = anchor["desc"]
         if not text or _norm(text) in existing:
             continue
-        created.append(activity_add(data, target_id, text,
-                                    source="template-anchor", created_at=at))
+        act_id = activity_add(data, target_id, text,
+                              source="template-anchor", created_at=at)
+        created.append(act_id)
         existing.add(_norm(text))
+        # e-3548: a meeting-type anchor co-seeds a 予定未定 Meeting linked to it,
+        # so date-confirmation later *updates* that Meeting instead of spawning a
+        # duplicate activity. Idempotency flows from the activity guard above —
+        # a skipped anchor seeds no second Meeting.
+        if anchor["kind"] == ANCHOR_KIND_MEETING:
+            meeting_seed(data, target_id, linked_id=act_id, at=at)
     return created
 
 
@@ -1572,10 +1623,12 @@ def derive_ball(target: dict) -> Optional[str]:
 # 識別 ID (mtg-N) がカレンダー予定の説明文に埋め込む handshake token になる。
 # C はこの token でカレンダー予定 → 商談を突き合わせ、二重起動を status で防ぐ。
 
+MEETING_UNSCHEDULED = "unscheduled"  # 予定未定: seeded ahead, awaiting a date (e-3548)
 MEETING_SCHEDULED = "scheduled"
 MEETING_ENDED = "ended"
 MEETING_CANCELLED = "cancelled"
-VALID_MEETING_STATUS = {MEETING_SCHEDULED, MEETING_ENDED, MEETING_CANCELLED}
+VALID_MEETING_STATUS = {MEETING_UNSCHEDULED, MEETING_SCHEDULED, MEETING_ENDED,
+                        MEETING_CANCELLED}
 
 # handshake token 書式。B が埋め込み、C が parse する — 両者がこの 1 箇所を
 # 参照することで書式 drift を構造的に防ぐ (single source of truth)。
@@ -1709,6 +1762,7 @@ def meeting_schedule(data: dict, opportunity_id: str, scheduled_at: str, *,
         "calendar_namespace": calendar_namespace,
         "calendar_account": calendar_account,
         "status": MEETING_SCHEDULED,
+        "linked_id": "",  # e-3548: set when a meeting fulfills a seeded anchor activity
         "created_at": at,
         "history": [{"at": at, "action": "scheduled", "scheduled_at": when}],
     })
@@ -1720,14 +1774,66 @@ def meeting_schedule(data: dict, opportunity_id: str, scheduled_at: str, *,
     return mtg_id
 
 
+def meeting_seed(data: dict, opportunity_id: str, *, linked_id: str = "",
+                 at: str = "") -> str:
+    """Seed a 予定未定 (date-undecided) Meeting and return its id (mtg-…).
+
+    Created when a phase seeds a meeting-type anchor activity (e-3548): the
+    Meeting is made up-front with an empty ``scheduled_at`` and status
+    ``unscheduled``, linked to the anchor activity via ``linked_id``. When the
+    date is later confirmed the schedule Skill calls ``meeting_reschedule`` on
+    *this same* record instead of creating a new one — so a confirmed meeting and
+    a leftover "アポ確定" activity can no longer both exist (重複が構造的に不可能).
+
+    An unscheduled Meeting has no date, so the end-detection Operation (which only
+    looks at ``scheduled`` meetings) never fires on it prematurely."""
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    mtg_id = next_meeting_id(data)
+    opp.setdefault("meetings", []).append({
+        "id": mtg_id,
+        "scheduled_at": "",
+        "end_at": "",
+        "location": "",
+        "calendar_event_id": "",
+        "calendar_namespace": "",
+        "calendar_account": "",
+        "status": MEETING_UNSCHEDULED,
+        "linked_id": linked_id,
+        "created_at": at,
+        "history": [{"at": at, "action": "seeded", "linked_id": linked_id}],
+    })
+    return mtg_id
+
+
+def find_meeting_by_linked(data: dict, activity_id: str):
+    """Return ``(opportunity, meeting)`` for the Meeting whose ``linked_id`` is
+    ``activity_id``, or ``(None, None)``. Lets the schedule Skill find the seeded
+    予定未定 Meeting for an anchor activity so it updates (fills the date) rather
+    than creating a duplicate (e-3548)."""
+    for opp in data.get("opportunities", []):
+        for m in opp.get("meetings", []) or []:
+            if m.get("linked_id") == activity_id:
+                return opp, m
+    return None, None
+
+
 def meeting_reschedule(data: dict, meeting_id: str, scheduled_at: str, *,
                        end_at: Optional[str] = None, location: Optional[str] = None,
                        calendar_event_id: Optional[str] = None,
+                       calendar_namespace: Optional[str] = None,
+                       calendar_account: Optional[str] = None,
                        set_transition: bool = False, at: str = "") -> dict:
     """Move an existing meeting to a new time (予定変更), keeping the same
     handshake id so the calendar event and Beacon stay linked. Logs the change
     to ``history`` and, when ``set_transition``, moves the 遷移日 too so both
-    follow the reschedule (AC: 予定変更時も両者が追従)."""
+    follow the reschedule (AC: 予定変更時も両者が追従).
+
+    This is also the path that *confirms a seeded 予定未定 meeting* (e-3548): the
+    unscheduled Meeting gets its date + calendar handshake (event id / namespace /
+    account) filled in and flips to ``scheduled`` — updating the same record, so
+    no duplicate meeting is created."""
     opp, m = find_meeting(data, meeting_id)
     if m is None:
         raise ValueError(f"Meeting not found: {meeting_id}")
@@ -1741,7 +1847,11 @@ def meeting_reschedule(data: dict, meeting_id: str, scheduled_at: str, *,
         m["location"] = location
     if calendar_event_id is not None:
         m["calendar_event_id"] = calendar_event_id
-    m["status"] = MEETING_SCHEDULED  # rescheduling revives a cancelled slot
+    if calendar_namespace is not None:
+        m["calendar_namespace"] = calendar_namespace
+    if calendar_account is not None:
+        m["calendar_account"] = calendar_account
+    m["status"] = MEETING_SCHEDULED  # revive an unscheduled/cancelled slot
     m.setdefault("history", []).append(
         {"at": at, "action": "rescheduled", "scheduled_at": when})
     if set_transition:
