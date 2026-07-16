@@ -1682,3 +1682,139 @@ def test_meeting_seed_unknown_opp_raises():
     data = _fresh()
     with pytest.raises(ValueError):
         se.meeting_seed(data, "opp-999")
+
+
+# --- Advance gate (前進ゲート) — e-3579 entity + lifecycle ------------------
+
+def test_open_advance_gate_defaults_phase_and_shape():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal", phase="提案準備")
+    gid = se.open_advance_gate(data, oid, at="T0")
+    assert gid == "adv-1"
+    _, g = se.find_gate(data, gid)
+    assert g["status"] == se.GATE_OPEN
+    assert g["phase"] == "提案準備"       # defaults to the opp's current phase
+    assert g["anchor"] == "" and g["outcome"] is None
+    assert g["history"][0]["action"] == "opened"
+
+
+def test_open_second_gate_while_one_open_raises():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    se.open_advance_gate(data, oid, at="T0")
+    with pytest.raises(ValueError):
+        se.open_advance_gate(data, oid, at="T1")  # ≤1 open — structural (AC1)
+
+
+def test_settled_gate_frees_slot_for_next():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    g1 = se.open_advance_gate(data, oid, phase="商談準備", at="T0")
+    se.settle_gate(data, g1, outcome=se.GATE_ADVANCE, reason="初回面談OK",
+                   actor="alice", at="T1")
+    # a done gate no longer occupies the single open slot
+    assert se.current_gate(data, oid) is None
+    g2 = se.open_advance_gate(data, oid, phase="提案準備", at="T2")
+    assert g2 == "adv-2"
+    assert se.current_gate(data, oid)["id"] == "adv-2"
+
+
+def test_gate_ids_global_across_opportunities():
+    data = _fresh()
+    o1 = se.opportunity_add(data, "D1")
+    o2 = se.opportunity_add(data, "D2")
+    assert se.open_advance_gate(data, o1, at="T0") == "adv-1"
+    assert se.open_advance_gate(data, o2, at="T0") == "adv-2"
+
+
+def test_settle_gate_stamps_outcome_and_evidence():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    gid = se.open_advance_gate(data, oid, phase="商談準備", at="T0")
+    se.settle_gate(data, gid, outcome=se.GATE_RETRY, reason="返事待ち",
+                   actor="bob", at="T1")
+    _, g = se.find_gate(data, gid)
+    assert g["status"] == se.GATE_DONE and g["outcome"] == se.GATE_RETRY
+    row = g["history"][-1]
+    assert row["kind"] == "settled" and row["actor"] == "bob"
+    assert row["at"] == "T1" and row["reason"] == "返事待ち" and row["outcome"] == "retry"
+
+
+def test_settle_gate_rejects_bad_outcome_and_double_settle():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    gid = se.open_advance_gate(data, oid, at="T0")
+    with pytest.raises(ValueError):
+        se.settle_gate(data, gid, outcome="nope")
+    se.settle_gate(data, gid, outcome=se.GATE_TERMINAL, at="T1")
+    with pytest.raises(ValueError):
+        se.settle_gate(data, gid, outcome=se.GATE_ADVANCE)  # already done
+
+
+def test_ensure_open_gate_is_idempotent():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    g_a = se.ensure_open_gate(data, oid, at="T0")
+    g_b = se.ensure_open_gate(data, oid, at="T1")   # no second gate created
+    assert g_a["id"] == g_b["id"]
+    opp = se.find_opportunity(data, oid)
+    assert len(opp["gates"]) == 1
+
+
+def test_anchor_gate_links_work_item_and_validates():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    act = se.activity_add(data, oid, "初回面談を打診")
+    gid = se.open_advance_gate(data, oid, at="T0")
+    se.anchor_gate(data, gid, act, at="T1")
+    _, g = se.find_gate(data, gid)
+    assert g["anchor"] == act
+    assert g["history"][-1] == {"at": "T1", "action": "anchored", "anchor": act}
+    with pytest.raises(ValueError):
+        se.anchor_gate(data, gid, "opp-1")   # not a work item
+    with pytest.raises(ValueError):
+        se.anchor_gate(data, gid, "act-999")  # unknown work item
+
+
+def test_anchor_requires_open_gate():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    act = se.activity_add(data, oid, "act")
+    gid = se.open_advance_gate(data, oid, at="T0")
+    se.settle_gate(data, gid, outcome=se.GATE_ADVANCE, at="T1")
+    with pytest.raises(ValueError):
+        se.anchor_gate(data, gid, act)  # done gate can't be anchored
+
+
+def test_cancel_gate_frees_slot_and_is_audited():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    gid = se.open_advance_gate(data, oid, at="T0")
+    se.cancel_gate(data, gid, reason="商談中止")
+    _, g = se.find_gate(data, gid)
+    assert g["status"] == se.GATE_CANCELLED
+    assert g["meta"]["cancel_reason"] == "商談中止" and g["meta"]["cancelled_by"]
+    # a cancelled gate is not open, so a new one can be opened
+    assert se.current_gate(data, oid) is None
+    assert se.open_advance_gate(data, oid, at="T1") == "adv-2"
+
+
+def test_gate_history_returns_only_done_in_order():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    g1 = se.open_advance_gate(data, oid, phase="商談準備", at="T0")
+    se.settle_gate(data, g1, outcome=se.GATE_ADVANCE, at="T1")
+    g2 = se.open_advance_gate(data, oid, phase="提案準備", at="T2")
+    se.settle_gate(data, g2, outcome=se.GATE_ADVANCE, at="T3")
+    se.open_advance_gate(data, oid, phase="先方検討中", at="T4")  # still open
+    hist = se.gate_history(data, oid)
+    assert [g["phase"] for g in hist] == ["商談準備", "提案準備"]
+
+
+def test_current_gate_and_find_gate_unknown_raise_or_none():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    assert se.current_gate(data, oid) is None
+    assert se.find_gate(data, "adv-9") == (None, None)
+    with pytest.raises(ValueError):
+        se.current_gate(data, "opp-999")

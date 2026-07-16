@@ -1010,6 +1010,220 @@ def opportunities_awaiting_judgement(data: dict, today: str) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Advance gate (前進ゲート) — ms-106 SPEC XG1yBugcb3GRnamRljhx, task e-3579
+# ---------------------------------------------------------------------------
+# The "関門" through which an Opportunity leaves one phase for the next. Today
+# the判定 (advance / retry / terminal) is welded onto the Opportunity itself
+# (phase / transition_date live on the deal) and onto meetings (a meeting
+# ending drives a phase change). fable's independent review found "重複が構造的
+# に不可能" was only a Skill-手順書 promise, not a data constraint — the same
+# 思想ズレ we hit in Trek. This entity lifts the判定 into its own work item so
+# the structure — not a手順書 — guarantees the invariant.
+#
+# Structural guarantee this task (e-3579) owns:
+#   * ≤ 1 *open* gate per Opportunity  (商談は同時に1フェーズだけ進行中)
+#   * done gates accumulate            (= どのフェーズをどう抜けたかの履歴 = AC5)
+# The *wiring* (folding transition_date onto the gate = e-3580; firing判定 off
+# an anchored work-item's completion + dropping transition_signal = e-3581;
+# opening the empty gate on phase entry = e-3583) rides on these primitives and
+# is deliberately NOT done here — SPEC §6 実装順の含意 (動く的を先に具体化).
+#
+# The gate is the sales-instance shape of the class-layer WorkItem-subtype
+# "ステージ前進のゲート" (SPEC §6, e-3560 evidence-close の一適用): occupation
+# vocabulary (前進ゲート / advance / retry / terminal, anchor kinds mtg-/act-/
+# nrt-) stays here, while the invariant floor (id 採番 / append-only 監査 /
+# cancel) routes through ``work_base`` so ms-109 can hoist it cleanly.
+
+GATE_OPEN = "open"          # 進行中 — その商談で唯一 (≤1 の制約対象)
+GATE_DONE = "done"          # 判定済み — outcome + 判断証跡を刻んで積む (履歴)
+GATE_CANCELLED = work_base.CANCELLED_STATUS  # 取消 (商談中止 等で発火せず畳む)
+
+# outcome vocabulary — mirrors the three judgement branches (advance_transition /
+# retry_transition / terminal_transition). Stamped on a gate when it settles.
+GATE_ADVANCE = "advance"    # 前進 → 次フェーズへ
+GATE_RETRY = "retry"        # やり直し → 同フェーズで置き直す
+GATE_TERMINAL = "terminal"  # 決着 → 成約/失注/不成立
+VALID_GATE_OUTCOMES = {GATE_ADVANCE, GATE_RETRY, GATE_TERMINAL}
+
+
+def next_gate_id(data: dict) -> str:
+    """Allocate the next global ``adv-N`` id (unique across all opportunities,
+    like ``mtg-``). Gathers existing gate ids from every opportunity and defers
+    numbering to the shared ``work_base.next_suffixed_id`` (ms-109 e-3558)."""
+    ids = []
+    for opp in data.get("opportunities", []):
+        ids.extend(g.get("id", "") for g in opp.get("gates", []))
+    return work_base.next_suffixed_id(ids, "adv-")
+
+
+def opportunity_gates(opp: dict) -> list:
+    """The gate records nested under an Opportunity (append-only列), or []."""
+    return opp.get("gates", []) or []
+
+
+def find_gate(data: dict, gate_id: str):
+    """Return ``(opportunity, gate)`` for a gate id, or ``(None, None)``."""
+    for opp in data.get("opportunities", []):
+        for g in opp.get("gates", []):
+            if g.get("id") == gate_id:
+                return opp, g
+    return None, None
+
+
+def current_gate(data: dict, opportunity_id: str) -> Optional[dict]:
+    """The Opportunity's single *open* advance gate, or None when none is open.
+
+    The ≤1-open invariant (enforced by ``open_advance_gate``) means this is
+    unambiguous: there is at most one. Cancelled/done gates are ignored."""
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    for g in opp.get("gates", []):
+        if g.get("status") == GATE_OPEN:
+            return g
+    return None
+
+
+def open_advance_gate(data: dict, opportunity_id: str, *, phase: str = "",
+                      anchor: str = "", transition_date: str = "",
+                      at: str = "") -> str:
+    """Open a fresh advance gate on an Opportunity and return its id (``gate-N``).
+
+    Enforces the structural invariant this SPEC exists for: an Opportunity may
+    hold **at most one open gate at a time** — a second ``open_advance_gate``
+    while one is still open raises, so "商談内 open ≤1" is guaranteed by the
+    data layer, not by a Skill手順書 (SPEC AC1). done/cancelled gates don't
+    count, so a settled deal can open its next gate.
+
+    ``phase`` defaults to the opportunity's current funnel phase — the stage
+    this gate judges advancing *out of*. ``anchor`` (a work item mtg-/act-/nrt-
+    whose completion will prompt判定, "" = 人手判定) and ``transition_date`` are
+    optional at open time; the firing wiring (e-3581) and the date fold (e-3580)
+    fill them. Append-only ``history`` opens with an ``opened`` row.
+    """
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    if any(g.get("status") == GATE_OPEN for g in opp.get("gates", [])):
+        raise ValueError(
+            f"{opportunity_id} already has an open advance gate — a商談は同時に"
+            "1フェーズだけ進行中 (settle or cancel it before opening another)")
+    gate_id = next_gate_id(data)
+    opp.setdefault("gates", []).append({
+        "id": gate_id,
+        "status": GATE_OPEN,
+        "phase": phase or opp.get("phase", ""),
+        "anchor": anchor or "",
+        "transition_date": transition_date or "",
+        "outcome": None,
+        "created_at": at,
+        "history": [{"at": at, "action": "opened"}],
+        "meta": {},
+    })
+    return gate_id
+
+
+def ensure_open_gate(data: dict, opportunity_id: str, *, phase: str = "",
+                     at: str = "") -> dict:
+    """Idempotently guarantee the Opportunity has an open gate; return it.
+
+    Returns the existing open gate untouched when one is present, else opens a
+    fresh empty one. This is the "phase入場で空の前進ゲートを1つ置く" primitive
+    (SPEC 実装順ヒント1) that the phase-entry wiring (e-3583) will call — safe to
+    invoke repeatedly without ever creating a second open gate."""
+    existing = current_gate(data, opportunity_id)
+    if existing is not None:
+        return existing
+    gate_id = open_advance_gate(data, opportunity_id, phase=phase, at=at)
+    _, gate = find_gate(data, gate_id)
+    return gate
+
+
+def anchor_gate(data: dict, gate_id: str, work_item_id: str, *,
+                at: str = "") -> dict:
+    """Attach (or re-attach) the work item whose completion will prompt this
+    gate's判定, and return the gate. ``work_item_id`` is a meeting (``mtg-``),
+    activity (``act-``) or nurturing (``nrt-``) — the anchor whose done/ended
+    state becomes the発火源 (SPEC §2). Re-anchoring an open gate is how やり直し
+    re-points the *same* gate at a new work item, keeping ≤1 open naturally.
+
+    Only the completion-fires-判定 behaviour is deferred to e-3581; here we just
+    record the link (validated + append-only) so the entity carries the field.
+    """
+    opp, gate = find_gate(data, gate_id)
+    if gate is None:
+        raise ValueError(f"Advance gate not found: {gate_id}")
+    if gate.get("status") != GATE_OPEN:
+        raise ValueError(
+            f"{gate_id} is {gate.get('status')!r}, only an open gate can be anchored")
+    wi = (work_item_id or "").strip()
+    if not (wi.startswith("mtg-") or wi.startswith("act-") or wi.startswith("nrt-")):
+        raise ValueError(
+            f"anchor must be a work item (mtg-/act-/nrt-), got {work_item_id!r}")
+    if wi.startswith("mtg-"):
+        _, found = find_meeting(data, wi)
+    else:
+        _, found = find_work_item(data, wi)
+    if found is None:
+        raise ValueError(f"anchor work item not found: {work_item_id}")
+    gate["anchor"] = wi
+    gate.setdefault("history", []).append(
+        {"at": at, "action": "anchored", "anchor": wi})
+    return gate
+
+
+def settle_gate(data: dict, gate_id: str, *, outcome: str, reason: str = "",
+                actor: str = "", at: str = "") -> dict:
+    """Settle an open advance gate with its判定 outcome and evidence; return it.
+
+    ``outcome`` is one of advance / retry / terminal (the human's decision, SPEC
+    §3 — the gate records it, it doesn't decide). Stamps ``outcome`` + a
+    ``settled`` audit row (誰・いつ・なぜ via ``work_base.record_audit_event``,
+    SPEC AC5) and flips status to ``done``, leaving the gate on the append-only
+    列 as履歴. Applying the actual phase move (advance_transition 等) stays the
+    caller's job — this only closes the judgement work item.
+    """
+    if outcome not in VALID_GATE_OUTCOMES:
+        raise ValueError(
+            f"outcome must be one of {sorted(VALID_GATE_OUTCOMES)}, got {outcome!r}")
+    opp, gate = find_gate(data, gate_id)
+    if gate is None:
+        raise ValueError(f"Advance gate not found: {gate_id}")
+    if gate.get("status") != GATE_OPEN:
+        raise ValueError(
+            f"{gate_id} is already {gate.get('status')!r} — only an open gate settles")
+    gate["status"] = GATE_DONE
+    gate["outcome"] = outcome
+    work_base.record_audit_event(
+        gate.setdefault("history", []), kind="settled",
+        reason=reason, actor=actor, at=at, outcome=outcome)
+    return gate
+
+
+def cancel_gate(data: dict, gate_id: str, *, reason: str = "") -> dict:
+    """Soft-cancel an advance gate (商談中止・誤起票 等) and return it. Routes
+    through ``work_base.stamp_cancel`` (status=cancelled + audited meta,
+    append-only — never deleted, data-immutability-principle). A cancelled gate
+    frees the ≤1-open slot without pretending判定 happened."""
+    _, gate = find_gate(data, gate_id)
+    if gate is None:
+        raise ValueError(f"Advance gate not found: {gate_id}")
+    return work_base.stamp_cancel(gate, reason=reason)
+
+
+def gate_history(data: dict, opportunity_id: str) -> list:
+    """The settled (done) advance gates of an Opportunity, oldest first — the
+    phase-change history carried by the gate列 (SPEC AC5). Each row exposes its
+    phase / outcome / settled evidence, so どのフェーズをどう抜けたか is traceable
+    off the gates alone (the Opportunity need not hold phase history itself once
+    e-3580 folds it here)."""
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    return [g for g in opp.get("gates", []) if g.get("status") == GATE_DONE]
+
+
+# ---------------------------------------------------------------------------
 # Activity (業務・事前計画型) — 従属 composition → Opportunity
 # ---------------------------------------------------------------------------
 
