@@ -116,7 +116,9 @@ def test_opportunity_add_defaults_to_funnel_entry():
     o = se.find_opportunity(data, opp)
     assert o["phase"] == "商談準備"  # first non-terminal stage
     assert o["status"] == "open"
-    assert o["phase_history"] == [{"phase": "商談準備", "at": "T0", "note": "initial"}]
+    # e-3580 fold: 入場で初期フェーズの前進ゲートが1つ open (履歴は gate列)
+    g = se.current_gate(data, opp)
+    assert g is not None and g["phase"] == "商談準備" and g["status"] == se.GATE_OPEN
 
 
 def test_opportunity_reference_to_account_validated():
@@ -140,14 +142,18 @@ def test_opportunity_rejects_bad_ball():
 
 # --- append-only phase transitions + terminal status -----------------------
 
-def test_opportunity_phase_is_append_only():
+def test_opportunity_phase_advance_history_on_gates():
+    # e-3580 fold: the phase-change history lives on the done advance-gate列,
+    # reached via the structured advance path (not a raw phase_set on the deal).
     data = _fresh()
     opp = se.opportunity_add(data, "Deal", created_at="T0")
-    se.phase_set(data, opp, "提案準備", note="proposal drafting", at="T1")
-    se.phase_set(data, opp, "先方検討中", at="T2")
+    se.advance_transition(data, opp, at="T1")   # 商談準備 → 提案準備
+    se.advance_transition(data, opp, at="T2")   # 提案準備 → 先方検討中
     o = se.find_opportunity(data, opp)
     assert o["phase"] == "先方検討中"
-    assert [h["phase"] for h in o["phase_history"]] == ["商談準備", "提案準備", "先方検討中"]
+    assert "phase_history" not in o and "transition_date" not in o  # not on the deal
+    assert [g["phase"] for g in se.phase_change_history(data, opp)] == ["商談準備", "提案準備"]
+    assert se.current_gate(data, opp)["phase"] == "先方検討中"
 
 
 def test_terminal_phase_mirrors_outcome_status():
@@ -537,41 +543,41 @@ def test_opportunity_phase_is_terminal():
 # --- transition_date (遷移日) — ms-107 e-3371 ------------------------------
 
 def test_opportunity_add_defaults_transition_date_empty():
+    # e-3580 fold: the 遷移日 lives on the open gate, unset at creation.
     data = _fresh()
     opp = se.opportunity_add(data, "Deal", created_at="T0")
-    o = se.find_opportunity(data, opp)
-    assert o["transition_date"] == ""
-    assert o["transition_date_history"] == []
+    assert se.get_transition_date(data, opp) == ""
+    assert se.needs_transition_date(data, opp) is True
 
 
-def test_opportunity_add_with_transition_date_seeds_history():
+def test_opportunity_add_with_transition_date_seeds_gate():
     data = _fresh()
     opp = se.opportunity_add(data, "Deal", transition_date="2026-08-01", created_at="T0")
-    o = se.find_opportunity(data, opp)
-    assert o["transition_date"] == "2026-08-01"
-    assert o["transition_date_history"] == [
-        {"transition_date": "2026-08-01", "at": "T0", "note": "initial"}]
+    assert se.get_transition_date(data, opp) == "2026-08-01"
+    assert se.current_gate(data, opp)["transition_date"] == "2026-08-01"
 
 
-def test_set_and_get_transition_date_is_append_only():
+def test_set_and_get_transition_date_is_append_only_on_gate():
     data = _fresh()
     opp = se.opportunity_add(data, "Deal", created_at="T0")
     se.set_transition_date(data, opp, "2026-08-01", note="面談日", at="T1")
     se.set_transition_date(data, opp, "2026-08-10", note="reschedule", at="T2")
     assert se.get_transition_date(data, opp) == "2026-08-10"
-    hist = se.find_opportunity(data, opp)["transition_date_history"]
-    assert [h["transition_date"] for h in hist] == ["2026-08-01", "2026-08-10"]
-    assert hist[0]["note"] == "面談日" and hist[1]["at"] == "T2"
+    g = se.current_gate(data, opp)
+    dates = [h["transition_date"] for h in g["history"]
+             if h.get("action") == "transition-date"]
+    assert dates == ["2026-08-01", "2026-08-10"]
 
 
-def test_set_transition_date_clear_is_logged():
+def test_set_transition_date_clear_is_logged_on_gate():
     data = _fresh()
     opp = se.opportunity_add(data, "Deal", transition_date="2026-08-01", created_at="T0")
     rec = se.set_transition_date(data, opp, "", note="cleared", at="T1")
     assert rec["transition_date"] == ""
     assert se.get_transition_date(data, opp) == ""
-    # the clear is still recorded (append-only 証跡).
-    assert se.find_opportunity(data, opp)["transition_date_history"][-1]["note"] == "cleared"
+    # the clear is still recorded on the gate (append-only 証跡).
+    last = se.current_gate(data, opp)["history"][-1]
+    assert last["action"] == "transition-date" and last["note"] == "cleared"
 
 
 def test_transition_date_unknown_opportunity():
@@ -605,7 +611,7 @@ def test_needs_transition_date_false_once_set():
 def test_needs_transition_date_false_in_terminal_phase():
     data = _fresh()
     opp = se.opportunity_add(data, "Deal", created_at="T0")
-    se.phase_set(data, opp, "不成立", at="T1")  # terminal — deal is decided
+    se.terminal_transition(data, opp, "不成立", at="T1")  # terminal — deal decided
     assert se.needs_transition_date(data, opp) is False
 
 
@@ -664,8 +670,11 @@ def test_advance_moves_phase_and_clears_date_when_none_given():
     assert res["phase"] == "提案準備"
     o = se.find_opportunity(data, opp)
     assert o["phase"] == "提案準備"
-    assert o["transition_date"] == ""          # consumed → prompts for a new one
+    # new phase = fresh gate with no date yet → prompts for a new one
+    assert se.get_transition_date(data, opp) == ""
     assert se.needs_transition_date(data, opp) is True
+    # the advanced-from gate settled with outcome=advance
+    assert [g["outcome"] for g in se.phase_change_history(data, opp)] == ["advance"]
 
 
 def test_advance_sets_next_date_when_given():
@@ -687,7 +696,12 @@ def test_retry_keeps_phase_new_date_and_requires_date():
     opp = _opp_in_stage(data, date="2026-08-01")
     se.retry_transition(data, opp, "2026-08-20", note="粘る", at="T1")
     o = se.find_opportunity(data, opp)
-    assert o["phase"] == "商談準備" and o["transition_date"] == "2026-08-20"
+    assert o["phase"] == "商談準備"
+    assert se.get_transition_date(data, opp) == "2026-08-20"
+    # Option-3: retry settled the old gate (outcome=retry) + opened a fresh
+    # same-phase gate; the phase did NOT change, so no phase-change entry.
+    assert [g["outcome"] for g in se.gate_history(data, opp)] == ["retry"]
+    assert se.phase_change_history(data, opp) == []
     with pytest.raises(ValueError):
         se.retry_transition(data, opp, "", at="T2")
 
@@ -704,8 +718,12 @@ def test_terminal_transition_settles_and_clears_date():
     se.terminal_transition(data, opp, "失注", at="T1")
     o = se.find_opportunity(data, opp)
     assert o["phase"] == "失注" and o["status"] == "lost"
-    assert o["transition_date"] == ""
+    assert se.get_transition_date(data, opp) == ""      # no open gate after 決着
+    assert se.current_gate(data, opp) is None
     assert se.transition_status(data, opp, "2026-08-02") == se.TRANSITION_SETTLED
+    # the settled gate carries outcome=terminal (its phase was 提案準備)
+    last = se.gate_history(data, opp)[-1]
+    assert last["outcome"] == "terminal" and last["phase"] == "提案準備"
 
 
 def test_terminal_transition_rejects_non_terminal_phase():
@@ -1686,51 +1704,49 @@ def test_meeting_seed_unknown_opp_raises():
 
 # --- Advance gate (前進ゲート) — e-3579 entity + lifecycle ------------------
 
-def test_open_advance_gate_defaults_phase_and_shape():
+def test_opportunity_add_opens_initial_gate():
+    # e-3580 fold: creating a deal opens the initial phase's gate (adv-1).
     data = _fresh()
-    oid = se.opportunity_add(data, "Deal", phase="提案準備")
-    gid = se.open_advance_gate(data, oid, at="T0")
-    assert gid == "adv-1"
-    _, g = se.find_gate(data, gid)
-    assert g["status"] == se.GATE_OPEN
-    assert g["phase"] == "提案準備"       # defaults to the opp's current phase
+    oid = se.opportunity_add(data, "Deal", phase="提案準備", created_at="T0")
+    g = se.current_gate(data, oid)
+    assert g["id"] == "adv-1" and g["status"] == se.GATE_OPEN
+    assert g["phase"] == "提案準備"
     assert g["anchor"] == "" and g["outcome"] is None
     assert g["history"][0]["action"] == "opened"
 
 
 def test_open_second_gate_while_one_open_raises():
     data = _fresh()
-    oid = se.opportunity_add(data, "Deal")
-    se.open_advance_gate(data, oid, at="T0")
+    oid = se.opportunity_add(data, "Deal")  # already has an open gate
     with pytest.raises(ValueError):
         se.open_advance_gate(data, oid, at="T1")  # ≤1 open — structural (AC1)
 
 
 def test_settled_gate_frees_slot_for_next():
     data = _fresh()
-    oid = se.opportunity_add(data, "Deal")
-    g1 = se.open_advance_gate(data, oid, phase="商談準備", at="T0")
+    oid = se.opportunity_add(data, "Deal", phase="商談準備", created_at="T0")
+    g1 = se.current_gate(data, oid)["id"]
     se.settle_gate(data, g1, outcome=se.GATE_ADVANCE, reason="初回面談OK",
                    actor="alice", at="T1")
     # a done gate no longer occupies the single open slot
     assert se.current_gate(data, oid) is None
     g2 = se.open_advance_gate(data, oid, phase="提案準備", at="T2")
-    assert g2 == "adv-2"
-    assert se.current_gate(data, oid)["id"] == "adv-2"
+    assert se.current_gate(data, oid)["id"] == g2
 
 
 def test_gate_ids_global_across_opportunities():
     data = _fresh()
     o1 = se.opportunity_add(data, "D1")
     o2 = se.opportunity_add(data, "D2")
-    assert se.open_advance_gate(data, o1, at="T0") == "adv-1"
-    assert se.open_advance_gate(data, o2, at="T0") == "adv-2"
+    # each deal's initial gate gets a globally-unique id
+    assert se.current_gate(data, o1)["id"] == "adv-1"
+    assert se.current_gate(data, o2)["id"] == "adv-2"
 
 
 def test_settle_gate_stamps_outcome_and_evidence():
     data = _fresh()
-    oid = se.opportunity_add(data, "Deal")
-    gid = se.open_advance_gate(data, oid, phase="商談準備", at="T0")
+    oid = se.opportunity_add(data, "Deal", phase="商談準備", created_at="T0")
+    gid = se.current_gate(data, oid)["id"]
     se.settle_gate(data, gid, outcome=se.GATE_RETRY, reason="返事待ち",
                    actor="bob", at="T1")
     _, g = se.find_gate(data, gid)
@@ -1743,7 +1759,7 @@ def test_settle_gate_stamps_outcome_and_evidence():
 def test_settle_gate_rejects_bad_outcome_and_double_settle():
     data = _fresh()
     oid = se.opportunity_add(data, "Deal")
-    gid = se.open_advance_gate(data, oid, at="T0")
+    gid = se.current_gate(data, oid)["id"]
     with pytest.raises(ValueError):
         se.settle_gate(data, gid, outcome="nope")
     se.settle_gate(data, gid, outcome=se.GATE_TERMINAL, at="T1")
@@ -1753,7 +1769,7 @@ def test_settle_gate_rejects_bad_outcome_and_double_settle():
 
 def test_ensure_open_gate_is_idempotent():
     data = _fresh()
-    oid = se.opportunity_add(data, "Deal")
+    oid = se.opportunity_add(data, "Deal")   # opens adv-1
     g_a = se.ensure_open_gate(data, oid, at="T0")
     g_b = se.ensure_open_gate(data, oid, at="T1")   # no second gate created
     assert g_a["id"] == g_b["id"]
@@ -1765,7 +1781,7 @@ def test_anchor_gate_links_work_item_and_validates():
     data = _fresh()
     oid = se.opportunity_add(data, "Deal")
     act = se.activity_add(data, oid, "初回面談を打診")
-    gid = se.open_advance_gate(data, oid, at="T0")
+    gid = se.current_gate(data, oid)["id"]
     se.anchor_gate(data, gid, act, at="T1")
     _, g = se.find_gate(data, gid)
     assert g["anchor"] == act
@@ -1780,7 +1796,7 @@ def test_anchor_requires_open_gate():
     data = _fresh()
     oid = se.opportunity_add(data, "Deal")
     act = se.activity_add(data, oid, "act")
-    gid = se.open_advance_gate(data, oid, at="T0")
+    gid = se.current_gate(data, oid)["id"]
     se.settle_gate(data, gid, outcome=se.GATE_ADVANCE, at="T1")
     with pytest.raises(ValueError):
         se.anchor_gate(data, gid, act)  # done gate can't be anchored
@@ -1789,20 +1805,20 @@ def test_anchor_requires_open_gate():
 def test_cancel_gate_frees_slot_and_is_audited():
     data = _fresh()
     oid = se.opportunity_add(data, "Deal")
-    gid = se.open_advance_gate(data, oid, at="T0")
+    gid = se.current_gate(data, oid)["id"]
     se.cancel_gate(data, gid, reason="商談中止")
     _, g = se.find_gate(data, gid)
     assert g["status"] == se.GATE_CANCELLED
     assert g["meta"]["cancel_reason"] == "商談中止" and g["meta"]["cancelled_by"]
     # a cancelled gate is not open, so a new one can be opened
     assert se.current_gate(data, oid) is None
-    assert se.open_advance_gate(data, oid, at="T1") == "adv-2"
+    assert se.open_advance_gate(data, oid, at="T1")  # succeeds (returns a new id)
 
 
 def test_gate_history_returns_only_done_in_order():
     data = _fresh()
-    oid = se.opportunity_add(data, "Deal")
-    g1 = se.open_advance_gate(data, oid, phase="商談準備", at="T0")
+    oid = se.opportunity_add(data, "Deal", phase="商談準備", created_at="T0")
+    g1 = se.current_gate(data, oid)["id"]
     se.settle_gate(data, g1, outcome=se.GATE_ADVANCE, at="T1")
     g2 = se.open_advance_gate(data, oid, phase="提案準備", at="T2")
     se.settle_gate(data, g2, outcome=se.GATE_ADVANCE, at="T3")
@@ -1811,10 +1827,62 @@ def test_gate_history_returns_only_done_in_order():
     assert [g["phase"] for g in hist] == ["商談準備", "提案準備"]
 
 
-def test_current_gate_and_find_gate_unknown_raise_or_none():
+def test_current_gate_present_after_add_and_unknown_raises():
     data = _fresh()
     oid = se.opportunity_add(data, "Deal")
-    assert se.current_gate(data, oid) is None
+    assert se.current_gate(data, oid) is not None   # initial gate is open
     assert se.find_gate(data, "adv-9") == (None, None)
     with pytest.raises(ValueError):
         se.current_gate(data, "opp-999")
+
+
+# --- e-3580 migration: legacy deal (opp-held fields) → gate列 (AC8) ----------
+
+def _legacy_opp(data, *, phase, transition_date="", phase_seq=None):
+    """Append a pre-fold Opportunity carrying transition_date / phase_history
+    directly and no ``gates`` — the shape existing data has on disk."""
+    seq = phase_seq or [phase]
+    data.setdefault("opportunities", []).append({
+        "id": se.next_opportunity_id(data), "title": "Legacy", "account_id": None,
+        "phase": phase, "status": se._opportunity_status_for_phase(data, phase),
+        "phase_history": [{"phase": p, "at": f"T{i}", "note": ""}
+                          for i, p in enumerate(seq)],
+        "transition_date": transition_date,
+        "transition_date_history": ([{"transition_date": transition_date, "at": "T0"}]
+                                    if transition_date else []),
+        "activities": [],
+    })
+    return data["opportunities"][-1]["id"]
+
+
+def test_migration_non_terminal_folds_date_onto_open_gate():
+    data = _fresh()
+    oid = _legacy_opp(data, phase="提案準備", transition_date="2026-09-01",
+                      phase_seq=["商談準備", "提案準備"])
+    # touching a gate accessor migrates on the fly (AC8)
+    assert se.get_transition_date(data, oid) == "2026-09-01"
+    o = se.find_opportunity(data, oid)
+    assert "phase_history" not in o and "transition_date" not in o
+    assert "transition_date_history" not in o
+    # 商談準備 became a done(advance) gate; 提案準備 is the open gate w/ the date
+    g = se.current_gate(data, oid)
+    assert g["phase"] == "提案準備" and g["transition_date"] == "2026-09-01"
+    assert [x["phase"] for x in se.phase_change_history(data, oid)] == ["商談準備"]
+
+
+def test_migration_terminal_deal_has_no_open_gate():
+    data = _fresh()
+    oid = _legacy_opp(data, phase="失注", phase_seq=["商談準備", "提案準備", "失注"])
+    assert se.current_gate(data, oid) is None          # 決着済み — nothing open
+    hist = se.gate_history(data, oid)
+    # 提案準備 was where the deal was 決着 from → outcome=terminal
+    assert hist[-1]["phase"] == "提案準備" and hist[-1]["outcome"] == "terminal"
+    assert se.transition_status(data, oid, "2027-01-01") == se.TRANSITION_SETTLED
+
+
+def test_migration_is_idempotent_and_skips_new_deals():
+    data = _fresh()
+    new = se.opportunity_add(data, "New")   # already gated
+    gates_before = se.find_opportunity(data, new)["gates"]
+    se._migrate_opp_gates(data, se.find_opportunity(data, new))
+    assert se.find_opportunity(data, new)["gates"] is gates_before  # untouched

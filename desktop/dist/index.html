@@ -4868,9 +4868,17 @@ function _salesTransitionBadge(st, td) {
     default:          return '';
   }
 }
+// e-3580 fold: the 遷移日 now lives on the opportunity's *open* advance gate
+// (前進ゲート), not on the deal itself. Read it from there (legacy deals that
+// haven't been touched by the CLI yet may still carry o.transition_date).
+function _salesOppTransitionDate(o) {
+  const openGate = (o.gates || []).find(g => g.status === 'open');
+  if (openGate) return openGate.transition_date || '';
+  return o.transition_date || '';
+}
 function _salesOppStatusOf(o, phases, today) {
   const term = new Set(phases.filter(x => x.terminal).map(x => x.name));
-  return _salesTemporalStatus(o.transition_date, today, term.has(o.phase));
+  return _salesTemporalStatus(_salesOppTransitionDate(o), today, term.has(o.phase));
 }
 function _salesOpenActs(o) {
   return (o.activities || []).filter(a => a.status !== 'done').length;
@@ -5072,7 +5080,7 @@ function _renderOppKanban(p) {
     const goal = ph.terminal ? (ph.outcome ? `決着 → ${esc(ph.outcome)}` : '決着') : (ph.goal ? esc(ph.goal) : '');
     const cards = list.map(o => {
       const st = _salesOppStatusOf(o, phases, today);
-      const badge = ph.terminal ? '' : _salesTransitionBadge(st, o.transition_date);
+      const badge = ph.terminal ? '' : _salesTransitionBadge(st, _salesOppTransitionDate(o));
       return `<div class="kb-card" data-action="open-opp" data-opp-id="${esc(o.id)}">
         <div class="kb-card-title">${esc(o.title || '(no title)')}</div>
         <div class="kb-card-meta">${_salesAcctChip(p, o)}${_salesOwnerChip(p, o)}</div>
@@ -5109,7 +5117,7 @@ function _renderOppList(p) {
       <div class="opp-lhead" data-action="toggle-opp" data-opp-id="${esc(o.id)}">
         ${_salesPhaseBadge(o.phase, phases)}
         <span class="opp-ltitle">${esc(o.title || '(no title)')}${acct ? ` <span class="opp-acct">${esc(acct)}</span>` : ''}${_salesOwnerChip(p, o)}</span>
-        ${term.has(o.phase) ? '' : _salesTransitionBadge(st, o.transition_date)}
+        ${term.has(o.phase) ? '' : _salesTransitionBadge(st, _salesOppTransitionDate(o))}
         ${_salesActsBadge(o)}
         ${_salesOppWeightedChip(p, o)}
       </div>${body}
@@ -5465,7 +5473,7 @@ function renderOpportunityModal(oppId) {
     ${row('顧客', acct ? esc(acct) : '<span class="text-dim">未紐付け</span>')}
     ${row('担当', o.assignee ? esc(_salesMemberLabel(p, o.assignee)) : '')}
     ${row('フェーズ', _salesPhaseBadge(o.phase, phases))}
-    ${term.has(o.phase) ? '' : row('遷移日', _salesTransitionBadge(st, o.transition_date) || '—')}
+    ${term.has(o.phase) ? '' : row('遷移日', _salesTransitionBadge(st, _salesOppTransitionDate(o)) || '—')}
     ${row('金額', money)}
     ${row('成約率', phaseProb != null ? phaseProb + '%' : '')}
     ${row('見込み', wtd != null ? `<span class="opp-weighted">${_salesYen(wtd)}</span>` : '')}

@@ -21150,7 +21150,8 @@ def cmd_opportunity_list():
         acc = o.get("account_id") or "-"
         deadline = f" due {o['deadline']}" if o.get("deadline") else ""
         ball = o.get("who_has_the_ball", "")
-        td = o.get("transition_date") or ""
+        # e-3580 fold: 遷移日は商談ではなく open な前進ゲートが持つ。
+        td = sales_entities.get_transition_date(data, o["id"])
         # 遷移日 = 判定予定日 (SPEC §2/§3). 判定待ちの overdue/due は距離を強調して促す。
         st = sales_entities.transition_status(data, o["id"], today)
         if st == sales_entities.TRANSITION_OVERDUE:
