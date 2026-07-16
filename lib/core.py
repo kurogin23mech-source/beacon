@@ -10,26 +10,26 @@ from __future__ import annotations
 import datetime as _dt
 import re
 
+import work_base
+
 
 def _now_iso() -> str:
-    """Return current UTC time as ISO8601 string with seconds precision."""
-    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """Return current UTC time as ISO8601 string with seconds precision.
+
+    Thin wrapper over ``work_base.now_iso`` — the implementation moved to the
+    occupation-agnostic base (ms-109 e-3558); the name is kept so existing
+    callers and test monkeypatch targets in this module are unchanged.
+    """
+    return work_base.now_iso()
 
 
 def _get_actor() -> str:
-    """Return the current operator: 'claude' if running inside Claude Code, else git user email."""
-    import os as _os
-    if _os.environ.get("BEACON_CLAUDE_CODE") == "1":
-        return "claude"
-    try:
-        import subprocess
-        r = subprocess.run(["git", "config", "user.email"],
-                           capture_output=True, text=True, timeout=2)
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip()
-    except Exception:
-        pass
-    return _os.environ.get("USER", _os.environ.get("USERNAME", "unknown"))
+    """Return the current operator: 'claude' inside Claude Code, else git user email.
+
+    Thin wrapper over ``work_base.current_actor`` (implementation moved to the
+    shared base in ms-109 e-3558; name kept for backward compatibility).
+    """
+    return work_base.current_actor()
 
 
 def _clean_author(author: dict | None) -> dict:
@@ -333,40 +333,37 @@ def find_target_milestone(data: dict, ms_id: str = "", *, index: int | None = No
 
 
 def next_entry_id(data: dict) -> str:
-    """Generate next entry id across all milestones and operations (including nested)."""
-    max_id = 0
+    """Generate next entry id across all milestones and operations (including nested).
+
+    The ``max + 1`` allocation lives in ``work_base.next_suffixed_id`` (shared
+    with the sales allocators, ms-109 e-3558). This function's remaining job is
+    the development-specific part: gathering every entry id, walking the nested
+    ``entries`` tree.
+    """
+    ids: list[str] = []
     for ms in data["milestones"]:
         for entry in ms.get("entries", []):
-            max_id = _max_entry_id(entry, max_id)
+            _collect_entry_ids(entry, ids)
     for op in data.get("operations", []):
         for entry in op.get("entries", []):
-            max_id = _max_entry_id(entry, max_id)
-    return f"e-{max_id + 1}"
+            _collect_entry_ids(entry, ids)
+    return work_base.next_suffixed_id(ids, "e-")
 
 
 def next_op_id(data: dict) -> str:
     """Generate next operation id."""
-    max_id = 0
-    for op in data.get("operations", []):
-        oid = op.get("id", "")
-        if oid.startswith("op-"):
-            try:
-                max_id = max(max_id, int(oid[3:]))
-            except ValueError:
-                pass
-    return f"op-{max_id + 1}"
+    ids = [op.get("id", "") for op in data.get("operations", [])]
+    return work_base.next_suffixed_id(ids, "op-")
 
 
-def _max_entry_id(entry: dict, current_max: int) -> int:
+def _collect_entry_ids(entry: dict, out: list[str]) -> list[str]:
+    """Append this entry's id and all nested descendants' ids to ``out``."""
     eid = entry.get("id", "")
-    if eid.startswith("e-"):
-        try:
-            current_max = max(current_max, int(eid[2:]))
-        except ValueError:
-            pass
+    if eid:
+        out.append(eid)
     for child in entry.get("entries", []):
-        current_max = _max_entry_id(child, current_max)
-    return current_max
+        _collect_entry_ids(child, out)
+    return out
 
 
 def find_entry(data: dict, entry_id: str):
@@ -1200,18 +1197,17 @@ def task_update(data: dict, entry_id: str, *,
 
 
 def task_delete(data: dict, entry_id: str, *, reason: str = "") -> dict:
-    """Cancel an entry (soft delete). Returns the entry."""
+    """Cancel an entry (soft delete). Returns the entry.
+
+    Routes through ``work_base.stamp_cancel`` — the shared cancel vocabulary
+    (status=cancelled + reason/actor/timestamp, append-only) that sales
+    correction (e-3537) also uses (ms-109 e-3558).
+    """
     result = find_entry(data, entry_id)
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
     _, _, entry, _ = result
-    entry["status"] = "cancelled"
-    meta = entry.setdefault("meta", {})
-    meta["cancelled_at"] = _now_iso()
-    meta["cancelled_by"] = _get_actor()
-    if reason:
-        meta["cancel_reason"] = reason
-    return entry
+    return work_base.stamp_cancel(entry, reason=reason)
 
 
 def sweep_trashed_in_project(data: dict, *, days: int = 30,

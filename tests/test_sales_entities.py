@@ -1423,3 +1423,27 @@ def test_activity_set_status_validates():
         se.activity_set_status(data, aid, "bogus")
     with _pt.raises(ValueError):
         se.activity_set_status(data, "act-999", "done")
+
+
+# --- activity_cancel: sales-side cancel vocabulary (ms-109 e-3558, SPEC AC3) -
+
+def test_activity_cancel_soft_cancels_via_base(monkeypatch):
+    monkeypatch.setenv("BEACON_CLAUDE_CODE", "1")
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal", created_at="T0")
+    aid = se.activity_add(data, oid, "初回連絡", created_at="T0")
+    out = se.activity_cancel(data, aid, reason="誤起票")
+    assert out["status"] == "cancelled"
+    assert out["meta"]["cancelled_by"] == "claude"
+    assert out["meta"]["cancel_reason"] == "誤起票"
+    # Append-only: the activity is not removed from the opportunity.
+    _, act = se.find_activity(data, aid)
+    assert act is not None and act["status"] == "cancelled"
+    # Its own data survives (immutability).
+    assert act["description"] == "初回連絡"
+
+
+def test_activity_cancel_unknown_id_raises():
+    data = _fresh()
+    with pytest.raises(ValueError):
+        se.activity_cancel(data, "act-999")

@@ -36,6 +36,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+import work_base
+
 # --- default funnel seeds (first-user 実フロー, 2026-07-13) -----------------
 # Seeded into a fresh sales project.json by build_sales_project. Editable per
 # company afterwards (that's the point of storing them as config). These are
@@ -91,19 +93,14 @@ VALID_BALL = {BALL_SELF, BALL_COUNTERPART}
 
 
 # ---------------------------------------------------------------------------
-# ID allocation (sales-local counters; max(existing)+1 like the dev allocator).
+# ID allocation. The ``max(existing)+1`` algorithm now lives in the shared
+# ``work_base.next_suffixed_id`` (ms-109 e-3558) — the same one the development
+# allocator uses — instead of being re-implemented here. Only the sales-specific
+# part (which id list to hand it, per prefix) stays below.
 # ---------------------------------------------------------------------------
 
 def _next_prefixed_id(ids: list, prefix: str) -> str:
-    max_id = 0
-    plen = len(prefix)
-    for raw in ids:
-        if isinstance(raw, str) and raw.startswith(prefix):
-            try:
-                max_id = max(max_id, int(raw[plen:]))
-            except ValueError:
-                pass
-    return f"{prefix}{max_id + 1}"
+    return work_base.next_suffixed_id(ids, prefix)
 
 
 def next_account_id(data: dict) -> str:
@@ -1187,6 +1184,27 @@ def activity_set_status(data: dict, activity_id: str, status: str, *,
     if status == "done":
         act["done_at"] = at
     return act
+
+
+def activity_cancel(data: dict, activity_id: str, *, reason: str = "") -> dict:
+    """Cancel (取消) an Activity and return it — correcting a mis-recorded plan
+    without deleting it (data-immutability-principle).
+
+    Routes through the shared ``work_base.stamp_cancel`` (ms-109 e-3558): sets
+    ``status="cancelled"`` and stamps ``meta.cancelled_at / cancelled_by /
+    cancel_reason``, append-only. This is the sales side of the same cancel
+    vocabulary development uses (``core.task_delete``), closing the historical
+    gap where sales could only hard-delete (SPEC AC3).
+
+    Scope note (e-3558): this lands the cancel primitive for the Activity
+    work item. Turning the Account/Opportunity hard-deletes into soft-cancel,
+    the Communication delete/retarget path, and the reader-side filtering of
+    cancelled records belong to e-3537 (誤起票の訂正を primitive 化).
+    """
+    _, act = find_activity(data, activity_id)
+    if act is None:
+        raise ValueError(f"Activity not found: {activity_id}")
+    return work_base.stamp_cancel(act, reason=reason)
 
 
 def find_nurturing(data: dict, nurturing_id: str):
