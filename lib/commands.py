@@ -16439,6 +16439,8 @@ def cmd_help_json():
         {"command": "beacon opportunity delete <opp-id>", "flags": [], "description": "Delete an opportunity and its activities"},
         {"command": "beacon communication add <target-id>", "flags": ["--direction inbound|outbound", "--channel <free-text: email/slack/messenger/line/in-person/…>", "--source-ref <id>", "--source-url <link>", "--occurred <datetime>"], "description": "Record a communication (証跡・事後記録型 = 営業の Commit); target is opp-/acc- or act-/nrt- (act-/nrt- links the activity/nurturing it fulfilled); channel is free-text for off-pipeline media"},
         {"command": "beacon communication list <target-id>", "flags": ["--json"], "description": "List communications (証跡) oldest→newest + derived ball; act-/nrt- lists only that work item's"},
+        {"command": "beacon communication cancel <comm-id>", "flags": ["--reason <text>"], "description": "Cancel (取消) a mis-recorded communication — soft (status=cancelled + reason, kept struck-through); excluded from ball/watch derivation but shown in the log"},
+        {"command": "beacon communication retarget <comm-id> <new-target>", "flags": [], "description": "Re-file a communication onto the correct target/work item (opp-/acc-/act-/nrt-); moves it — the evidence itself (summary/source/direction) is unchanged"},
         {"command": "beacon meeting schedule <opp-id>", "flags": ["--at <datetime>", "--end <datetime>", "--location <text>", "--event-id <id>", "--calendar-ns <ns>", "--calendar-account <acct>", "--set-transition"], "description": "Book a meeting (面談) with a Beacon 識別 ID; --set-transition moves the 遷移日 to the meeting date"},
         {"command": "beacon meeting reschedule <mtg-id>", "flags": ["--at <datetime>", "--end <datetime>", "--event-id <id>", "--set-transition"], "description": "Move a meeting (予定変更); --set-transition follows the 遷移日"},
         {"command": "beacon meeting end <mtg-id>", "flags": [], "description": "Mark a meeting ended (idempotent; used by the end-detector Operation)"},
@@ -21500,6 +21502,40 @@ def cmd_communication_add():
           f"({direction}/{channel}): {summary}")
 
 
+def cmd_communication_cancel():
+    # e-3537 — 誤って記録した証跡を取消 (soft-cancel)。物理削除でなく
+    # status=cancelled + 理由で残す (data-immutability)。
+    import sales_entities
+    comm_id = os.environ.get("BEACON_COMM_ID", "")
+    reason = os.environ.get("BEACON_COMM_REASON", "")
+    data = load_project()
+    try:
+        sales_entities.communication_cancel(data, comm_id, reason=reason)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Cancelled communication {comm_id}"
+          + (f": {reason}" if reason else ""))
+
+
+def cmd_communication_retarget():
+    # e-3537 — 誤った活動に付けた証跡を正しい target/work item へ付け替える。
+    # 事実は不変、綴じ場所 (linked_id/nesting) のみ移動。
+    import sales_entities
+    comm_id = os.environ.get("BEACON_COMM_ID", "")
+    new_target = os.environ.get("BEACON_COMM_TARGET", "")
+    data = load_project()
+    try:
+        comm = sales_entities.communication_retarget(data, comm_id, new_target)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    linked = comm.get("linked_id") or "(target grain)"
+    print(f"Retargeted communication {comm_id} → {new_target} (linked_id={linked})")
+
+
 def cmd_communication_list():
     # List a target's communications (証跡) oldest→newest, or --json.
     import sales_entities
@@ -21527,7 +21563,9 @@ def cmd_communication_list():
         when = c.get("occurred_at") or c.get("created_at") or ""
         src = c.get("source") or {}
         trace = src.get("url") or src.get("ref") or ""
-        line = f"  {c.get('id')} {arrow} [{c.get('channel')}] {c.get('summary')}"
+        # e-3537: cancelled (取消済) 証跡は隠さず、印付きで忠実表示する。
+        mark = "[取消] " if c.get("status") == sales_entities.CANCELLED_STATUS else ""
+        line = f"  {c.get('id')} {arrow} [{c.get('channel')}] {mark}{c.get('summary')}"
         if when:
             line += f"  ({when})"
         print(line)
@@ -21797,6 +21835,8 @@ if __name__ == "__main__":
         # ms-107 e-3432 — Communication (証跡・事後記録型 = 営業の Commit)
         "communication_add": cmd_communication_add,
         "communication_list": cmd_communication_list,
+        "communication_cancel": cmd_communication_cancel,
+        "communication_retarget": cmd_communication_retarget,
         # ms-107 e-3433 — Meeting (面談・運用状態型: 遷移日+カレンダー+識別ID の束)
         "meeting_schedule": cmd_meeting_schedule,
         "meeting_reschedule": cmd_meeting_reschedule,

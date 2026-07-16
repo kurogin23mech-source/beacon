@@ -271,6 +271,8 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon opportunity delete <opp-id>` | Delete an opportunity and its activities / 商談と活動を削除 |
 | `beacon communication add <opp-\|acc-\|act-\|nrt-id> "<summary>" --direction inbound\|outbound [--channel <free-text: email/slack/messenger/line/in-person/…>] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]` | Record a communication (証跡・事後記録型 = 営業の Commit); act-/nrt- links the activity/nurturing it fulfilled; channel is free-text for off-pipeline media (Messenger 等) / 商談・顧客・活動・ナーチャリングにやり取りの証跡を記録 |
 | `beacon communication list <opp-\|acc-\|act-\|nrt-id> [--json]` | List communications (証跡) + derived ball; act-/nrt- lists only that work item's / やり取りの証跡一覧とボール導出 |
+| `beacon communication cancel <comm-id> [--reason <text>]` | Cancel (取消) a mis-recorded communication — soft, kept struck-through, excluded from ball/watch / 誤記録の証跡を取消（物理削除でなく status=cancelled、履歴に残す） |
+| `beacon communication retarget <comm-id> <new opp-\|acc-\|act-\|nrt->` | Re-file a communication filed under the wrong work item (moves it; the evidence is unchanged) / 誤った活動に付けた証跡を正しい活動へ付け替える |
 | `beacon meeting schedule <opp-id> --at <datetime> [--end <datetime>] [--location <text>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]` | Book a meeting (面談) with a Beacon 識別 ID; `--set-transition` moves the 遷移日 to the meeting date / 面談を予約し識別IDを付与、遷移日も同時更新 |
 | `beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]` | Move a meeting (予定変更); `--set-transition` follows the 遷移日 / 面談の予定変更、遷移日も追従 |
 | `beacon meeting end <mtg-id>` | Mark a meeting ended (idempotent; used by the end-detector Operation) / 面談を終了扱いにする |
