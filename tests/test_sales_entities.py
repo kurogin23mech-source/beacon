@@ -51,15 +51,15 @@ def test_sales_template_passes_shared_validator():
 
 
 def test_seed_phases_carry_methodology():
-    # ms-107 e-3375: the shipped base 4-phase seed now carries goal /
-    # activity_template / transition_signal / default_lead per phase.
+    # ms-107 e-3375 + e-3581: the shipped base 4-phase seed carries goal /
+    # activity_template / default_lead per phase. transition_signal was removed
+    # (e-3581): judgement fires off the gate's anchored work-item, not a phase field.
     data = _fresh()
     m = se.opportunity_phase_methodology(data, "商談準備")
-    assert m["goal"] and m["transition_signal"] == se.SIGNAL_CALENDAR_ENDED
+    assert m["goal"] and "transition_signal" not in m
     assert "初回面談を実施" in m["activity_template"] and m["default_lead"] == 7
     agree = se.opportunity_phase_methodology(data, "合意済み")
     assert agree["activity_template"] == ["契約書を送付", "締結"]
-    assert agree["transition_signal"] == se.SIGNAL_MANUAL
     kentou = se.opportunity_phase_methodology(data, "先方検討中")
     assert kentou["goal"] == "先方の実行合意を取る" and kentou["default_lead"] == 14
 
@@ -479,10 +479,11 @@ def test_check_send_from_ledger_mismatch_blocks():
 
 def test_phase_methodology_defaults_for_bare_phase():
     # The ms-106 seed carries no methodology; accessors default gracefully.
+    # e-3581: transition_signal is no longer a methodology field.
     m = se.phase_methodology({"name": "商談準備"})
     assert m["goal"] == ""
     assert m["activity_template"] == []
-    assert m["transition_signal"] == se.SIGNAL_MANUAL
+    assert "transition_signal" not in m
     assert m["on_fail"] is None
     assert m["default_lead"] is None
 
@@ -490,7 +491,7 @@ def test_phase_methodology_defaults_for_bare_phase():
 def test_phase_methodology_defaults_for_none():
     m = se.phase_methodology(None)
     assert m == {"goal": "", "activity_template": [], "on_fail": None,
-                 "default_lead": None, "transition_signal": se.SIGNAL_MANUAL}
+                 "default_lead": None}
 
 
 def test_phase_methodology_reads_configured_fields():
@@ -498,14 +499,13 @@ def test_phase_methodology_reads_configured_fields():
         "name": "提案準備", "terminal": False, "allowed_terminals": ["成約", "失注"],
         "goal": "提案内容に合意をとる",
         "activity_template": ["提案書ドラフト", "見積提示"],
-        "transition_signal": se.SIGNAL_CALENDAR_ENDED,
         "on_fail": {"terminals": ["失注"], "retry": True},
         "default_lead": 7,
     }
     m = se.phase_methodology(pdef)
     assert m["goal"] == "提案内容に合意をとる"
     assert m["activity_template"] == ["提案書ドラフト", "見積提示"]
-    assert m["transition_signal"] == se.SIGNAL_CALENDAR_ENDED
+    assert "transition_signal" not in m
     assert m["on_fail"] == {"terminals": ["失注"], "retry": True}
     assert m["default_lead"] == 7
 
@@ -1886,3 +1886,76 @@ def test_migration_is_idempotent_and_skips_new_deals():
     gates_before = se.find_opportunity(data, new)["gates"]
     se._migrate_opp_gates(data, se.find_opportunity(data, new))
     assert se.find_opportunity(data, new)["gates"] is gates_before  # untouched
+
+
+# --- e-3581: judgement fires off the gate's anchored work-item (SPEC §2) -----
+
+def test_transition_signal_vocabulary_removed():
+    # e-3581: the per-phase judgement-method branch is gone.
+    assert not hasattr(se, "SIGNAL_MANUAL")
+    assert not hasattr(se, "phase_transition_signal")
+    for p in se.DEFAULT_OPPORTUNITY_PHASES:
+        assert "transition_signal" not in p
+
+
+def test_work_item_completed_meeting_and_activity():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    mid = se.meeting_schedule(data, oid, "2026-08-01T14:00:00+09:00",
+                              end_at="2026-08-01T15:00:00+09:00", at="T0")
+    # scheduled but not yet past end
+    assert se.work_item_completed(data, mid, "2026-08-01T14:30:00+09:00") is False
+    # past its end → complete
+    assert se.work_item_completed(data, mid, "2026-08-01T16:00:00+09:00") is True
+    # explicitly ended → complete regardless of now
+    se.meeting_mark_ended(data, mid, at="T1")
+    assert se.work_item_completed(data, mid, "") is True
+    # activity: complete only when done
+    act = se.activity_add(data, oid, "提案書を準備")
+    assert se.work_item_completed(data, act, "") is False
+    se.activity_set_status(data, act, "done", at="T2")
+    assert se.work_item_completed(data, act, "") is True
+
+
+def test_gate_judgement_ready_only_fires_on_the_anchor():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    gid = se.current_gate(data, oid)["id"]
+    anchored = se.meeting_schedule(data, oid, "2026-08-01T14:00:00+09:00",
+                                   end_at="2026-08-01T15:00:00+09:00", at="T0")
+    stray = se.meeting_schedule(data, oid, "2026-08-02T14:00:00+09:00",
+                                end_at="2026-08-02T15:00:00+09:00", at="T0")
+    se.anchor_gate(data, gid, anchored, at="T0")
+    # a stray (unanchored) meeting ending does NOT make the gate ready (AC2).
+    # now is before the anchored meeting's own end, so only the stray is "over".
+    se.meeting_mark_ended(data, stray, at="T1")
+    assert se.gate_judgement_ready(data, oid, "2026-08-01T14:30:00+09:00") is False
+    # the anchored meeting ending does (AC2) — ended status fires regardless of now.
+    se.meeting_mark_ended(data, anchored, at="T2")
+    assert se.gate_judgement_ready(data, oid, "2026-08-01T14:30:00+09:00") is True
+
+
+def test_gate_judgement_ready_activity_anchor_and_date_fallback():
+    data = _fresh()
+    # dated activity anchor: its done fires judgement, same as a meeting (AC3)
+    oid = se.opportunity_add(data, "Deal")
+    gid = se.current_gate(data, oid)["id"]
+    act = se.activity_add(data, oid, "合意の確認を取る", deadline="2026-08-10")
+    se.anchor_gate(data, gid, act, at="T0")
+    assert se.get_transition_date(data, oid) == "2026-08-10"   # AC4 date sync
+    assert se.gate_judgement_ready(data, oid, "2026-08-11T00:00:00Z") is False
+    se.activity_set_status(data, act, "done", at="T1")
+    assert se.gate_judgement_ready(data, oid, "2026-08-11T00:00:00Z") is True
+    # unanchored gate falls back to 遷移日 due/overdue (縮退 manual)
+    oid2 = se.opportunity_add(data, "Deal2", transition_date="2026-08-01")
+    assert se.gate_judgement_ready(data, oid2, "2026-07-01T00:00:00Z") is False
+    assert se.gate_judgement_ready(data, oid2, "2026-08-01T00:00:00Z") is True
+
+
+def test_awaiting_gate_judgement_lists_ready_deals_oldest_first():
+    data = _fresh()
+    a = se.opportunity_add(data, "A", transition_date="2026-08-05")
+    b = se.opportunity_add(data, "B", transition_date="2026-08-01")
+    se.opportunity_add(data, "C", transition_date="2026-12-31")  # not due yet
+    rows = se.opportunities_awaiting_gate_judgement(data, "2026-08-10T00:00:00Z")
+    assert [r["id"] for r in rows] == [b, a]   # oldest 遷移日 first, C excluded

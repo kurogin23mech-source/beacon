@@ -21389,8 +21389,8 @@ def cmd_phase_list():
             print(f"      ゴール: {m['goal']}")
         if m["activity_template"]:
             print(f"      活動テンプレ: {', '.join(str(a) for a in m['activity_template'])}")
-        if p.get("transition_signal"):
-            print(f"      遷移判定: {m['transition_signal']}")
+        # e-3581: 遷移判定手段 (transition_signal) は撤去。判定は前進ゲートに
+        # 紐づけた work-item の完了が促す (フェーズ固定の分岐ではない)。
         if m["default_lead"] is not None:
             print(f"      遷移日リード: {m['default_lead']}日")
 

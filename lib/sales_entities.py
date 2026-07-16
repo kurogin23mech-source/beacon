@@ -56,13 +56,13 @@ DEFAULT_ACCOUNT_PHASES = [
 
 # 各進行フェーズは面談で区切られる (商談準備→初回面談→提案準備→提案面談→先方
 # 検討中→先方合意→合意済み、最低2回・同期合意なら3回の面談)。methodology
-# (goal / activity_template / transition_signal / default_lead) は ms-107 e-3375
-# でユーザー実務から確定した基本4フェーズの型。transition_signal の "calendar_ended"
-# は面談実施を、"manual" は人間判定を意味する (= SIGNAL_* 定数と同値)。default_lead
-# は面談未定時のフォールバック日数 (本命の遷移日は実際の面談日 = カレンダー由来)。
-# 詳細見積の提出は「提案段階の時も検討段階の時もある」状況依存のためテンプレに
-# 入れず、AI の文脈生成 (e-3373) が必要な時だけ足す。これらは SEED (編集可能な
-# 出発点) であり enforce される定数ではない。
+# (goal / activity_template / default_lead) は ms-107 e-3375 でユーザー実務から
+# 確定した基本4フェーズの型。判定手段は e-3581 で撤去 (transition_signal 廃止):
+# 「どう判定するか」はフェーズ固定ではなく前進ゲートに紐づけた work-item で決まる。
+# default_lead は面談未定時のフォールバック日数 (本命の遷移日は実際の面談日 =
+# カレンダー由来)。詳細見積の提出は「提案段階の時も検討段階の時もある」状況依存の
+# ためテンプレに入れず、AI の文脈生成 (e-3373) が必要な時だけ足す。これらは SEED
+# (編集可能な出発点) であり enforce される定数ではない。
 DEFAULT_OPPORTUNITY_PHASES = [
     # 進行フェーズ: allowed_terminals = ここから宣言できる決着。
     {"name": "商談準備", "probability": 10, "terminal": False,
@@ -71,24 +71,24 @@ DEFAULT_OPPORTUNITY_PHASES = [
      "activity_template": ["初回面談を打診",
                            {"desc": "初回面談を実施", "kind": "meeting"},
                            "提案の方向性を確定"],
-     "transition_signal": "calendar_ended", "default_lead": 7},
+     "default_lead": 7},
     {"name": "提案準備", "probability": 20, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "企画を作り提案を終え、先方が検討フェーズに入った状態にする",
      "activity_template": ["提案面談を打診",
                            {"desc": "提案面談を実施", "kind": "meeting"},
                            "提案内容を準備"],
-     "transition_signal": "calendar_ended", "default_lead": 14},
+     "default_lead": 14},
     {"name": "先方検討中", "probability": 40, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "先方の実行合意を取る",
      "activity_template": ["合意確認日を確定（必要なら面談設定）", "合意の確認を取る"],
-     "transition_signal": "manual", "default_lead": 14},
+     "default_lead": 14},
     {"name": "合意済み", "probability": 80, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "契約を締結する",
      "activity_template": ["契約書を送付", "締結"],
-     "transition_signal": "manual", "default_lead": 7},
+     "default_lead": 7},
     # 決着フェーズ (terminal): outcome は有限ターゲットの結末種別。
     {"name": "成約",       "probability": 100,  "terminal": True,  "outcome": "won"},
     {"name": "失注",       "probability": 0,    "terminal": True,  "outcome": "lost"},
@@ -228,9 +228,14 @@ def account_phase_warnings(data: dict, new_phase: str) -> list:
 #   goal              str   — このフェーズが達成したいゴール (1 行)
 #   activity_template list  — ゴールへ向かう期待活動のテンプレ (固定でなく「期待」,
 #                             SPEC §4: 面談 outcome で reconcile する)
-#   transition_signal str   — 遷移の判定手段 (どう判定するか, 下記 SIGNAL_*)
 #   on_fail           dict  — 判定が失敗した時の分岐設定 (下記 on_fail schema)
 #   default_lead      int   — フェーズ入場時に遷移日を置く既定リード日数
+#
+# 判定手段 (transition_signal) は e-3581 で撤去した: 「どう判定するか」はフェーズ
+# 固定の分岐ではなく、前進ゲートに紐づけた work-item (面談 / 活動) が何かで決まる。
+# 面談を紐づければ面談終了が、日程付き活動を紐づければその done が判定を促す。何も
+# 紐づけなければ遷移日が来たら人が判定する (旧 manual の縮退形)。判定の発火は
+# ``gate_judgement_ready`` / ``work_item_completed`` が一手に引き受ける (SPEC §2)。
 #
 # These are the *target-class generic* vocabulary (SPEC §7: engine core は
 # "商談" を語に焼き込まない). The accessors below read a phase_def dict without
@@ -242,19 +247,7 @@ def account_phase_warnings(data: dict, new_phase: str) -> list:
 # gracefully so live projects created before this task keep working.
 
 PHASE_METHODOLOGY_FIELDS = (
-    "goal", "activity_template", "transition_signal", "on_fail", "default_lead")
-
-# transition_signal vocabulary (SPEC §5: 決定的〜判断的 スペクトラム). The
-# detection wiring lands in later tasks (calendar auto-detect = e-3374); here we
-# only fix the vocabulary so config can name a signal and the engine can branch.
-SIGNAL_MANUAL = "manual"                    # 人間が遷移を宣言する (既定)
-SIGNAL_CALENDAR_ACCEPTED = "calendar_accepted"  # 相手が招待を accept → 面談確定
-SIGNAL_CALENDAR_ENDED = "calendar_ended"    # event.end < now → 面談実施済み
-SIGNAL_COUNTERPART_REPLY = "counterpart_reply"  # 先方からの返信 (メール等)
-VALID_TRANSITION_SIGNALS = {
-    SIGNAL_MANUAL, SIGNAL_CALENDAR_ACCEPTED, SIGNAL_CALENDAR_ENDED,
-    SIGNAL_COUNTERPART_REPLY,
-}
+    "goal", "activity_template", "on_fail", "default_lead")
 
 
 def phase_goal(phase_def: Optional[dict]) -> str:
@@ -312,12 +305,6 @@ def phase_activity_template(phase_def: Optional[dict]) -> list:
     return [a["desc"] for a in phase_activity_anchors(phase_def)]
 
 
-def phase_transition_signal(phase_def: Optional[dict]) -> str:
-    """How this phase's transition is judged. Defaults to SIGNAL_MANUAL — with
-    no signal configured the human declares the transition (master, SPEC §6)."""
-    return (phase_def or {}).get("transition_signal") or SIGNAL_MANUAL
-
-
 def phase_on_fail(phase_def: Optional[dict]) -> Optional[dict]:
     """The failure-branch config for this phase, or None.
 
@@ -354,7 +341,6 @@ def phase_methodology(phase_def: Optional[dict]) -> dict:
     return {
         "goal": phase_goal(phase_def),
         "activity_template": phase_activity_template(phase_def),
-        "transition_signal": phase_transition_signal(phase_def),
         "on_fail": phase_on_fail(phase_def),
         "default_lead": phase_default_lead(phase_def),
     }
@@ -1282,8 +1268,14 @@ def anchor_gate(data: dict, gate_id: str, work_item_id: str, *,
     if found is None:
         raise ValueError(f"anchor work item not found: {work_item_id}")
     gate["anchor"] = wi
+    # AC4: 遷移日は紐づく work-item の日時に同期する (予定日超過が gate から判る)。
+    anchor_date = _work_item_date(data, wi)
+    if anchor_date:
+        gate["transition_date"] = anchor_date
     gate.setdefault("history", []).append(
-        {"at": at, "action": "anchored", "anchor": wi})
+        {"at": at, "action": "anchored", "anchor": wi,
+         "transition_date": anchor_date} if anchor_date
+        else {"at": at, "action": "anchored", "anchor": wi})
     return gate
 
 
@@ -1347,6 +1339,98 @@ def phase_change_history(data: dict, opportunity_id: str) -> list:
     here, so this is the funnel timeline the deal walked."""
     return [g for g in gate_history(data, opportunity_id)
             if g.get("outcome") in (GATE_ADVANCE, GATE_TERMINAL)]
+
+
+# --- judgement firing (e-3581, SPEC §2) — anchored work-item completion ------
+# The old model branched on a per-phase ``transition_signal`` (calendar_ended /
+# manual). That is gone: how a phase is judged is now determined by *what* work
+# item the open gate is anchored to — a meeting's ending, a dated activity's
+# done, or (no anchor) the 遷移日 arriving. One firing surface, no phase branch.
+
+def _work_item_date(data: dict, work_item_id: str) -> str:
+    """The date (YYYY-MM-DD) a work item is planned for, or '' — a meeting's
+    scheduled_at, an activity/nurturing's deadline. Used to sync a gate's 遷移日
+    to its anchor (SPEC AC4)."""
+    wi = (work_item_id or "").strip()
+    if wi.startswith("mtg-"):
+        _, m = find_meeting(data, wi)
+        return (m.get("scheduled_at", "") or "")[:10] if m else ""
+    if wi.startswith("act-") or wi.startswith("nrt-"):
+        _, w = find_work_item(data, wi)
+        return (w.get("deadline", "") or "") if w else ""
+    return ""
+
+
+def work_item_completed(data: dict, work_item_id: str, now: str = "") -> bool:
+    """True when a work item (mtg-/act-/nrt-) has reached its completed state —
+    the signal that prompts its前進ゲート's phase judgement (e-3581, SPEC §2/AC3).
+
+    A meeting counts as complete when it is ``ended``, or still ``scheduled`` but
+    its effective end has passed ``now`` (a full timestamp). An activity or
+    nurturing counts when its status is ``done``. Any other id / state → False."""
+    wi = (work_item_id or "").strip()
+    if wi.startswith("mtg-"):
+        _, m = find_meeting(data, wi)
+        if m is None:
+            return False
+        if m.get("status") == MEETING_ENDED:
+            return True
+        if m.get("status") == MEETING_SCHEDULED and now:
+            end = meeting_effective_end(m)
+            now_dt = _parse_dt(now)
+            return bool(end is not None and now_dt is not None and end <= now_dt)
+        return False
+    if wi.startswith("act-") or wi.startswith("nrt-"):
+        _, w = find_work_item(data, wi)
+        return bool(w is not None and w.get("status") == "done")
+    return False
+
+
+def gate_judgement_ready(data: dict, opportunity_id: str, now: str = "") -> bool:
+    """True when the opportunity's open前進ゲート is ready for a phase judgement
+    (e-3581, SPEC §2). Firing is unified — no per-phase transition_signal:
+
+    * anchored gate  → ready once the anchored work-item has completed; an
+      unanchored臨時 meeting ending does NOT make it ready (AC2).
+    * unanchored gate→ ready once its 遷移日 is due/overdue as of ``now`` (the
+      縮退形 of old manual — a human judges on the date, AC3).
+
+    False when no gate is open (terminal / none). ``now`` is a timestamp; the
+    date comparison uses its date portion."""
+    gate = current_gate(data, opportunity_id)
+    if gate is None:
+        return False
+    anchor = (gate.get("anchor") or "").strip()
+    if anchor:
+        return work_item_completed(data, anchor, now)
+    td = (gate.get("transition_date") or "").strip()
+    if not td or not now:
+        return False
+    today = now[:10]
+    return temporal_status(td, today, settled=False) in (
+        TRANSITION_DUE, TRANSITION_OVERDUE)
+
+
+def opportunities_awaiting_gate_judgement(data: dict, now: str) -> list:
+    """The unified firing surface (e-3581): opportunities whose open gate is
+    ready to judge (anchor completed OR 遷移日 due/overdue), oldest 遷移日 first.
+    Each row carries id / title / phase / anchor / transition_date /
+    who_has_the_ball. This replaces the per-phase transition_signal branch as the
+    single "what needs judging now" list the sales skills read (SPEC §2)."""
+    out = []
+    for opp in data.get("opportunities", []):
+        oid = opp["id"]
+        if not gate_judgement_ready(data, oid, now):
+            continue
+        gate = current_gate(data, oid)
+        out.append({
+            "id": oid, "title": opp.get("title", ""), "phase": opp.get("phase", ""),
+            "anchor": (gate or {}).get("anchor", ""),
+            "transition_date": (gate or {}).get("transition_date", ""),
+            "who_has_the_ball": opp.get("who_has_the_ball", ""),
+        })
+    out.sort(key=lambda r: (r["transition_date"] or "9999-99-99"))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2107,8 +2191,9 @@ def meeting_schedule(data: dict, opportunity_id: str, scheduled_at: str, *,
         "history": [{"at": at, "action": "scheduled", "scheduled_at": when}],
     })
     if set_transition:
-        # meeting date drives the phase-judgement date (transition_signal =
-        # calendar_ended). Store the date portion (YYYY-MM-DD) as the 遷移日.
+        # meeting date drives the phase-judgement date (the open gate's 遷移日).
+        # Store the date portion (YYYY-MM-DD). e-3581: firing off the anchored
+        # meeting's *end* is gate_judgement_ready's job; this only pins the date.
         set_transition_date(data, opportunity_id, when[:10],
                             note=f"面談確定 ({mtg_id})", at=at)
     return mtg_id
