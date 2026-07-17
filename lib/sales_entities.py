@@ -1436,6 +1436,19 @@ def gate_judgement_ready(data: dict, opportunity_id: str, now: str = "") -> bool
         TRANSITION_DUE, TRANSITION_OVERDUE)
 
 
+def meeting_is_gate_anchor(data: dict, meeting_id: str) -> bool:
+    """True when this meeting is the anchor of its opportunity's open前進ゲート
+    (e-3581/e-3583). The meeting-end detector uses this to route structurally: an
+    anchored meeting ending prompts the phase judgement; a stray (unanchored)
+    meeting ending is minutes-only and never moves the phase (AC2) — the skill
+    reads this flag instead of deciding by手順書."""
+    opp, m = find_meeting(data, meeting_id)
+    if m is None:
+        return False
+    gate = current_gate(data, opp["id"])
+    return gate is not None and (gate.get("anchor") or "") == meeting_id
+
+
 def opportunities_awaiting_gate_judgement(data: dict, now: str) -> list:
     """The unified firing surface (e-3581): opportunities whose open gate is
     ready to judge (anchor completed OR 遷移日 due/overdue), oldest 遷移日 first.

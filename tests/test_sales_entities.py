@@ -1975,6 +1975,19 @@ def test_awaiting_gate_judgement_lists_ready_deals_oldest_first():
     assert [r["id"] for r in rows] == [b, a]   # oldest 遷移日 first, C excluded
 
 
+def test_meeting_is_gate_anchor_routes_structurally():
+    # e-3583: only the anchored meeting is a phase-judgement trigger.
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    gid = se.current_gate(data, oid)["id"]
+    anchored = se.meeting_schedule(data, oid, "2026-08-01T14:00:00+09:00", at="T0")
+    stray = se.meeting_schedule(data, oid, "2026-08-02T14:00:00+09:00", at="T0")
+    se.anchor_gate(data, gid, anchored, at="T0")
+    assert se.meeting_is_gate_anchor(data, anchored) is True
+    assert se.meeting_is_gate_anchor(data, stray) is False
+    assert se.meeting_is_gate_anchor(data, "mtg-999") is False
+
+
 def test_phase_entry_anchors_gate_to_seeded_meeting():
     # e-3583: entering a phase seeds its meeting anchor AND links the open gate
     # to it, so the seeded meeting's ending fires the phase judgement.

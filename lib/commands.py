@@ -21708,6 +21708,8 @@ def cmd_meeting_ended():
             "calendar_namespace": m.get("calendar_namespace", ""),
             "calendar_account": m.get("calendar_account", ""),
             "tag": sales_entities.meeting_calendar_tag(m.get("id", "")),
+            # e-3583: 紐づけ面談だけがフェーズ判定を促す (紐づけ外は議事録のみ)。
+            "is_gate_anchor": sales_entities.meeting_is_gate_anchor(data, m.get("id", "")),
         })
     if as_json:
         print(json.dumps({"now": now, "ended": rows}, ensure_ascii=False))
