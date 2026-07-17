@@ -1577,7 +1577,14 @@ def instantiate_phase_activities(data: dict, target_id: str, *,
         # duplicate activity. Idempotency flows from the activity guard above —
         # a skipped anchor seeds no second Meeting.
         if anchor["kind"] == ANCHOR_KIND_MEETING:
-            meeting_seed(data, target_id, linked_id=act_id, at=at)
+            mtg_id = meeting_seed(data, target_id, linked_id=act_id, at=at)
+            # e-3583: the seeded meeting is this phase's発火源 — anchor the open
+            # 前進ゲート to it so its ending prompts the phase judgement (SPEC §2).
+            # The 予定未定 meeting has no date yet, so the gate's 遷移日 stays unset
+            # until the schedule Skill confirms the meeting (which syncs it).
+            gate = current_gate(data, target_id)
+            if gate is not None and not (gate.get("anchor") or "").strip():
+                anchor_gate(data, gate["id"], mtg_id, at=at)
     return created
 
 

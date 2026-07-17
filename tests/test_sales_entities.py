@@ -1973,3 +1973,23 @@ def test_awaiting_gate_judgement_lists_ready_deals_oldest_first():
     se.opportunity_add(data, "C", transition_date="2026-12-31")  # not due yet
     rows = se.opportunities_awaiting_gate_judgement(data, "2026-08-10T00:00:00Z")
     assert [r["id"] for r in rows] == [b, a]   # oldest 遷移日 first, C excluded
+
+
+def test_phase_entry_anchors_gate_to_seeded_meeting():
+    # e-3583: entering a phase seeds its meeting anchor AND links the open gate
+    # to it, so the seeded meeting's ending fires the phase judgement.
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal", phase="商談準備", created_at="T0")
+    se.instantiate_phase_activities(data, oid, at="T0")
+    gate = se.current_gate(data, oid)
+    assert gate["anchor"].startswith("mtg-")            # anchored to the seed
+    mtg = gate["anchor"]
+    _, m = se.find_meeting(data, mtg)
+    assert m["status"] == se.MEETING_UNSCHEDULED         # still 予定未定 → not ready
+    assert se.gate_judgement_ready(data, oid, "2026-09-01T00:00:00Z") is False
+    # confirm the meeting date, then hold it → ending fires the judgement
+    se.meeting_reschedule(data, mtg, "2026-08-01T14:00:00+09:00",
+                          end_at="2026-08-01T15:00:00+09:00", set_transition=True, at="T1")
+    assert se.get_transition_date(data, oid) == "2026-08-01"   # gate date synced
+    se.meeting_mark_ended(data, mtg, at="T2")
+    assert se.gate_judgement_ready(data, oid, "2026-08-02T00:00:00+09:00") is True
