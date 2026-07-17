@@ -406,6 +406,15 @@ class Envelope:
 # automatically invalidate Phase 1 signatures (= correct behavior).
 _SIGNATURE_EXCLUDED = {"signature"}
 
+# ms-110 / e-3443: the sender-side ``recipient_confirmed`` consent claim rides
+# under this envelope key. It mirrors ``lib/dm_consent.CONSENT_CLAIM_KEY`` — the
+# two must stay in lock-step. Kept as a plain literal here so the server's
+# envelope module does not take a ``lib`` import dependency; the claim is a
+# regular signed field (NOT in ``_SIGNATURE_EXCLUDED``) so the signature covers
+# it and a grafted / forged claim is tamper-evident (= the fix for the
+# signature-order bug where the claim was appended *after* signing).
+CONSENT_CLAIM_KEY = "recipient_confirmed"
+
 
 def canonical_bytes(envelope: dict) -> bytes:
     """Return the canonical byte form of ``envelope`` for signature input.
@@ -536,6 +545,7 @@ def issue_envelope(
     ttl_seconds: int = 3600,
     disclosure_contract: Optional[dict] = None,
     disclosure_policy: Optional[dict] = None,
+    consent_claim: Optional[dict] = None,
 ) -> dict:
     """Issue a server-signed envelope.
 
@@ -626,6 +636,15 @@ def issue_envelope(
         "tokens": None,        # Phase 2 reservation
         "refill_policy": None, # Phase 2 reservation
     }
+    # ms-110 / e-3443: bake the recipient_confirmed consent claim INTO the
+    # signed body (not appended afterward). The signature must cover the claim
+    # so it is authentic + attributable + tamper-evident; grafting it after
+    # sign() (the original bug) invalidated the signature and made every
+    # --recipient-confirmed send degrade to T5 → 403. Placed before sign() so
+    # canonical_bytes includes it. A ``None`` claim is omitted so ordinary
+    # sends keep their exact prior signed shape (no signature drift).
+    if consent_claim is not None:
+        body[CONSENT_CLAIM_KEY] = consent_claim
     body["signature"] = sign(body)
     return body
 
