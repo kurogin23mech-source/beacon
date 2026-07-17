@@ -14,6 +14,7 @@ from typing import Optional, Tuple
 
 from store import get_store
 import core
+import work_model  # ms-109 e-3559: 職種非依存の Target 正準ラベルアクセサ
 
 # ---------------------------------------------------------------------------
 # Store helpers
@@ -198,7 +199,7 @@ def _check_ms_status_for_write(ms: dict, op_desc: str) -> bool:
     if os.environ.get("BEACON_BYPASS_STATUS_GATE", "") == "1":
         return True
 
-    title = ms.get("title", "")
+    title = work_model.target_label(ms)
     ms_id = ms.get("id", "")
     print(
         f"\n[ms-81 status gate] write to a {status} milestone\n"
@@ -1001,7 +1002,7 @@ def cmd_milestone_list():
             total_tasks, done_tasks = core.count_task_status(entries)
             ms_item = {
                 "id": ms["id"],
-                "title": ms.get("title", ""),
+                "title": work_model.target_label(ms),
                 "status": ms.get("status", "todo"),
                 "progress": ms.get("progress", 0),
                 "target_date": ms.get("target_date", ""),
@@ -1024,7 +1025,7 @@ def cmd_milestone_list():
                     recent_runs.append({"date": _local_date(r.get("date", "")), "status": r.get("status", "")})
                 output["operations"].append({
                     "id": op["id"],
-                    "title": op.get("title", ""),
+                    "title": work_model.target_label(op),
                     "status": op.get("status", "open"),
                     "log_source": op.get("log_source", ""),
                     "schedule": op.get("schedule", {}),
@@ -1043,7 +1044,7 @@ def cmd_milestone_list():
                 op_tasks_done = sum(1 for t in op_tasks if t.get("status") == "done")
                 output["pending_operations"].append({
                     "id": op["id"],
-                    "title": op.get("title", ""),
+                    "title": work_model.target_label(op),
                     "status": op.get("status", ""),
                     "log_source": op.get("log_source", ""),
                     "schedule": op.get("schedule", {}),
@@ -1748,7 +1749,7 @@ def cmd_milestone_show():
             if json_mode:
                 output = {
                     "id": ms["id"],
-                    "title": ms.get("title", ""),
+                    "title": work_model.target_label(ms),
                     "description": ms.get("description", ""),
                     "status": ms.get("status", "todo"),
                     "progress": ms.get("progress", 0),
@@ -2692,7 +2693,7 @@ def cmd_task_show():
     ms, _, entry, _ = result
 
     if json_mode:
-        output = {"milestone_id": ms["id"], "milestone_title": ms.get("title", "")}
+        output = {"milestone_id": ms["id"], "milestone_title": work_model.target_label(ms)}
         entry_json = core.entries_to_json([entry])[0]
         output.update(entry_json)
         print(json.dumps(output, ensure_ascii=False))
@@ -3681,7 +3682,7 @@ def cmd_session_fork():
     ms_title = ""
     for ms in data.get("milestones", []):
         if ms.get("id") == ms_id:
-            ms_title = ms.get("title", "")
+            ms_title = work_model.target_label(ms)
             break
     if not ms_title:
         print(f"Error: milestone not found: {ms_id}", file=sys.stderr)
@@ -5111,7 +5112,7 @@ def _collect_trek_local_aggregation(trek_doc: dict) -> dict:
     commits: list[dict] = []
     for ms in data.get("milestones", []) or []:
         ms_id = ms.get("id", "")
-        ms_title = ms.get("title", "")
+        ms_title = work_model.target_label(ms)
         for entry in ms.get("entries", []) or []:
             etype = entry.get("type", "")
             if etype == "commit":
@@ -5148,7 +5149,7 @@ def _collect_trek_local_aggregation(trek_doc: dict) -> dict:
         if _scope_matches_operation(scope, pid, op_id):
             ops_in_scope.append({
                 "id": op_id,
-                "title": op.get("title", ""),
+                "title": work_model.target_label(op),
                 "status": op.get("status", ""),
             })
     out["operations"] = ops_in_scope
