@@ -5095,7 +5095,6 @@ function renderOpportunityModal(oppId) {
     ${row('成約率', phaseProb != null ? phaseProb + '%' : '')}
     ${row('見込み', wtd != null ? `<span class="opp-weighted">${_salesYen(wtd)}</span>` : '')}
     ${row('期日', o.deadline ? esc(o.deadline) : '')}
-    ${row('ステータス', esc(o.status || ''))}
   </div>`;
   return `<div class="sales-modal-bg" data-action="close-opp">
     <div class="sales-modal" data-action="sales-modal-noop">

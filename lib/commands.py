@@ -21164,8 +21164,10 @@ def cmd_opportunity_list():
             td_str = " / ⚠ 遷移日 未設定"
         else:  # settled
             td_str = ""
+        # status は phase からの派生ミラーで参照ゼロ (表示のみ) だったため list から除外。
+        # 保存フィールドの整理はリファクタ時 (UI FB 2026-07-17)。
         print(f"[{o['id']}] {o['title']} — phase: {o.get('phase', '?')} "
-              f"/ status: {o.get('status', '?')} / account: {acc}"
+              f"/ account: {acc}"
               f"{deadline} / ball: {ball}{td_str} "
               f"/ activities: {len(o.get('activities', []))}")
         # e-3584: 前進ゲート (advance gate) の状態を一貫した呼称で見せる。
