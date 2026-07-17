@@ -60,9 +60,9 @@ Sales (profession=sales):
   beacon account rename <acc-id> <new-name>                  Rename an account
   beacon account assign <acc-id> <user>                      Set the assignee (担当ユーザー) on an account
   beacon account nurturing <acc-id> <desc> [--deadline <date>] [--ball self|counterpart]   Add a nurturing task (継続関係の業務)
-  beacon account delete <acc-id> [--force]                   Delete an account (--force orphans referencing opportunities)
+  beacon account delete <acc-id> [--force] [--reason <text>] Cancel (取消, soft) an account — record kept (--force orphans referencing opportunities)
   beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>]   Add a deal / opportunity
-  beacon opportunity list [--json]                           List opportunities
+  beacon opportunity list [--json] [--all]                   List opportunities (--all also shows 取消済 cancelled)
   beacon opportunity phase <opp-id> <phase> [--note <text>]  Move an opportunity to a new phase
   beacon opportunity assign <opp-id> <user>                  Set the assignee (担当ユーザー) on an opportunity
   beacon opportunity amount <opp-id> <amount>                Set the deal amount (金額, 円)
@@ -72,11 +72,11 @@ Sales (profession=sales):
   beacon opportunity judge <opp-id> advance|retry|terminal [<date|terminal-phase>] [--note <text>]   Judge a reached 遷移日 (3-way, human-confirmed)
   beacon opportunity due [--json]                            List opportunities awaiting a transition judgement (due/overdue)
   beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self|counterpart]   Log an activity on an opportunity
-  beacon opportunity delete <opp-id>                         Delete an opportunity and its activities
+  beacon opportunity delete <opp-id> [--reason <text>]       Cancel (取消, soft) an opportunity — 証跡 (活動/証跡) は残す
   beacon communication add <opp-|acc-|act-|nrt-id> "<summary>" --direction inbound|outbound [--channel <text, free: email/slack/messenger/line/in-person/…>] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]   Record a communication (証跡・営業の Commit); act-/nrt- links the specific activity/nurturing it fulfilled
   beacon communication list <opp-|acc-|act-|nrt-id> [--json]  List communications (証跡) + derived ball; act-/nrt- lists only that work item's
   beacon communication cancel <comm-id> [--reason <text>]     Cancel (取消) a mis-recorded communication — soft, kept struck-through, excluded from ball/watch
-  beacon communication retarget <comm-id> <new opp-|acc-|act-|nrt->  Re-file a communication filed under the wrong work item (moves it; the evidence itself is unchanged)
+  beacon communication retarget <comm-id> <new opp-|acc-|act-|nrt-> [--reason <text>]  Re-file a communication filed under the wrong work item (moves it; evidence unchanged; the move is audited)
   beacon meeting schedule <opp-id> --at <datetime> [--end <datetime>] [--location <text>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]   Book a meeting (面談) with a Beacon 識別 ID; --set-transition moves the 遷移日 too
   beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]   Move a meeting (予定変更); --set-transition follows the 遷移日
   beacon meeting end <mtg-id>                                 Mark a meeting ended (idempotent; used by the end-detector)
@@ -1315,14 +1315,16 @@ cmd_sales_target() {
 
 cmd_opportunity_list() {
     ensure_project
-    local json_flag=""
+    local json_flag="" all_flag=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
+            --all)  all_flag="1"; shift ;;   # e-3586: 取消済も含めて全件出す
             *)      shift ;;
         esac
     done
-    BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" opportunity_list
+    BEACON_JSON="$json_flag" BEACON_ALL="$all_flag" \
+        python3 "$COMMANDS_PY" opportunity_list
 }
 
 cmd_opportunity_phase() {
@@ -1493,18 +1495,19 @@ cmd_communication_cancel() {
 
 cmd_communication_retarget() {
     ensure_project
-    local comm_id="" new_target=""
+    local comm_id="" new_target="" reason=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -?*) _guard_positional "$1" "Usage: beacon communication retarget <comm-id> <new-target: opp-|acc-|act-|nrt->" ;;
+            --reason) reason="$2"; shift 2 ;;
+            -?*) _guard_positional "$1" "Usage: beacon communication retarget <comm-id> <new-target: opp-|acc-|act-|nrt-> [--reason <text>]" ;;
             *)   if [ -z "$comm_id" ]; then comm_id="$1"; elif [ -z "$new_target" ]; then new_target="$1"; fi; shift ;;
         esac
     done
     if [ -z "$comm_id" ] || [ -z "$new_target" ]; then
-        echo "Usage: beacon communication retarget <comm-id> <new-target: opp-|acc-|act-|nrt->"
+        echo "Usage: beacon communication retarget <comm-id> <new-target: opp-|acc-|act-|nrt-> [--reason <text>]"
         exit 1
     fi
-    BEACON_COMM_ID="$comm_id" BEACON_COMM_TARGET="$new_target" \
+    BEACON_COMM_ID="$comm_id" BEACON_COMM_TARGET="$new_target" BEACON_COMM_REASON="$reason" \
         python3 "$COMMANDS_PY" communication_retarget
 }
 
@@ -1635,36 +1638,39 @@ cmd_account_phase() {
 
 cmd_account_delete() {
     ensure_project
-    local acc_id="" force=""
+    local acc_id="" force="" reason=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --force) force="1"; shift ;;
-            -?*)     _guard_positional "$1" "Usage: beacon account delete <acc-id> [--force]" ;;
-            *)       acc_id="$1"; shift ;;
+            --force)  force="1"; shift ;;
+            --reason) reason="$2"; shift 2 ;;
+            -?*)      _guard_positional "$1" "Usage: beacon account delete <acc-id> [--force] [--reason <text>]" ;;
+            *)        acc_id="$1"; shift ;;
         esac
     done
     if [ -z "$acc_id" ]; then
-        echo "Usage: beacon account delete <acc-id> [--force]"
+        echo "Usage: beacon account delete <acc-id> [--force] [--reason <text>]"
         exit 1
     fi
-    BEACON_ACCOUNT_ID="$acc_id" BEACON_FORCE="$force" \
+    BEACON_ACCOUNT_ID="$acc_id" BEACON_FORCE="$force" BEACON_CANCEL_REASON="$reason" \
         python3 "$COMMANDS_PY" account_delete
 }
 
 cmd_opportunity_delete() {
     ensure_project
-    local opp_id=""
+    local opp_id="" reason=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -?*) _guard_positional "$1" "Usage: beacon opportunity delete <opp-id>" ;;
+            --reason) reason="$2"; shift 2 ;;
+            -?*) _guard_positional "$1" "Usage: beacon opportunity delete <opp-id> [--reason <text>]" ;;
             *)   opp_id="$1"; shift ;;
         esac
     done
     if [ -z "$opp_id" ]; then
-        echo "Usage: beacon opportunity delete <opp-id>"
+        echo "Usage: beacon opportunity delete <opp-id> [--reason <text>]"
         exit 1
     fi
-    BEACON_OPP_ID="$opp_id" python3 "$COMMANDS_PY" opportunity_delete
+    BEACON_OPP_ID="$opp_id" BEACON_CANCEL_REASON="$reason" \
+        python3 "$COMMANDS_PY" opportunity_delete
 }
 
 cmd_phase_list() {

@@ -645,7 +645,7 @@ def derive_account_phase(data: dict, account_id: str) -> Optional[str]:
     if not aps:
         return None
     won = lost = progressed = False
-    for o in data.get("opportunities", []):
+    for o in live_opportunities(data):  # e-3586: 取消済は顧客フェーズ導出に数えない
         if o.get("account_id") != account_id:
             continue
         w, l, max_nt = _opp_progress_signals(data, o)
@@ -745,7 +745,7 @@ def weighted_pipeline(data: dict, *, assignee: Optional[str] = None) -> float:
     phases = opportunity_phases(data)
     term = {p.get("name") for p in phases if p.get("terminal")}
     total = 0.0
-    for o in data.get("opportunities", []):
+    for o in live_opportunities(data):  # e-3586: 取消済は見込みに数えない
         if o.get("phase") in term:
             continue
         if assignee is not None and (o.get("assignee") or "") != assignee:
@@ -1052,7 +1052,8 @@ def opportunities_awaiting_judgement(data: dict, today: str) -> list:
     def settled_of(o):
         return opportunity_phase_is_terminal(data, o.get("phase", ""))
 
-    pairs = scan_overdue(data.get("opportunities", []), due_of, settled_of, today)
+    # e-3586: 取消済商談は判定待ちに出さない。
+    pairs = scan_overdue(live_opportunities(data), due_of, settled_of, today)
     return [{
         "id": o["id"],
         "title": o.get("title", ""),
@@ -1471,7 +1472,7 @@ def opportunities_awaiting_gate_judgement(data: dict, now: str) -> list:
     who_has_the_ball. This replaces the per-phase transition_signal branch as the
     single "what needs judging now" list the sales skills read (SPEC §2)."""
     out = []
-    for opp in data.get("opportunities", []):
+    for opp in live_opportunities(data):  # e-3586: 取消済は判定 firing surface に出さない
         oid = opp["id"]
         if not gate_judgement_ready(data, oid, now):
             continue
@@ -1617,44 +1618,71 @@ def instantiate_phase_activities(data: dict, target_id: str, *,
 
 
 # ---------------------------------------------------------------------------
-# Deletion (referential integrity: 参照 association is checked; composition
-# children are removed with their parent).
+# Cancellation (取消 — soft, append-only per data-immutability-principle).
+# e-3586: opportunities and accounts are never physically removed. Deleting a
+# deal would take its 証跡 (activities / communications — the immutable record of
+# what actually happened) with it, which is the largest remaining immutability
+# gap. Cancel instead stamps status=cancelled + 誰・いつ・なぜ (via
+# work_base.stamp_cancel) and leaves the record in the log; live_opportunities()
+# and every aggregation drop it from the default view. This is the same cancel
+# vocabulary Communications already route through (communication_cancel).
 # ---------------------------------------------------------------------------
 
-def account_delete(data: dict, account_id: str, *, force: bool = False) -> list:
-    """Remove an Account. Returns the list of opportunity ids that referenced
-    it (orphaned when ``force``).
+def live_opportunities(data: dict) -> list:
+    """Opportunities excluding soft-cancelled (取消済) ones — the default view and
+    the set every aggregation / attention derivation reads (e-3586). Cancelled
+    deals stay in ``data['opportunities']`` (append-only) but drop out of
+    pipeline value, ball / overdue derivation, and the default listing."""
+    return [o for o in data.get("opportunities", [])
+            if not work_model.is_cancelled(o)]
 
-    Because Opportunity → Account is a 参照 association (independent lifecycle),
-    deleting a referenced Account is refused unless ``force`` — with ``force``
-    the referencing opportunities are orphaned (``account_id`` set to None)
-    rather than cascade-deleted (a lost deal shouldn't vanish with its account).
-    """
+
+def opportunity_cancel(data: dict, opportunity_id: str, *, reason: str = "",
+                       actor: str = "", at: str = "") -> dict:
+    """Soft-cancel (取消) an Opportunity and return it (e-3586).
+
+    Routes through ``work_base.stamp_cancel`` (status=cancelled + audited meta:
+    誰・いつ・なぜ, append-only) so the deal — and its composition children
+    (activities / communications, the 証跡) — are never physically deleted. Its
+    open advance gate is cancelled too, freeing the ≤1-open slot and dropping the
+    deal out of the judgement queue. Cancelled deals leave the default view
+    (``live_opportunities``) but the record stays for audit / retrospection."""
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    gate = current_gate(data, opportunity_id)
+    if gate is not None:
+        work_base.stamp_cancel(gate, reason=reason or "商談取消",
+                               actor=actor, at=at)
+    return work_base.stamp_cancel(opp, reason=reason, actor=actor, at=at)
+
+
+def account_cancel(data: dict, account_id: str, *, reason: str = "",
+                   actor: str = "", at: str = "", force: bool = False) -> list:
+    """Soft-cancel (取消) an Account and return the ids of live opportunities that
+    referenced it (e-3586).
+
+    Mirrors the old delete's referential integrity but without physical removal:
+    Opportunity → Account is a 参照 association (independent lifecycle), so an
+    Account still referenced by *live* deals is refused unless ``force`` — with
+    ``force`` those deals are orphaned (``account_id`` → None) rather than
+    cancelled along with it (a live deal shouldn't be 取消 just because its
+    account was). Routes through ``work_base.stamp_cancel``."""
     acc = find_account(data, account_id)
     if acc is None:
         raise ValueError(f"Account not found: {account_id}")
-    referencing = [o["id"] for o in data.get("opportunities", [])
+    referencing = [o["id"] for o in live_opportunities(data)
                    if o.get("account_id") == account_id]
     if referencing and not force:
         raise ValueError(
-            f"Account {account_id} is referenced by {referencing}; reassign "
-            f"those opportunities or pass force=True to orphan them")
+            f"Account {account_id} is referenced by live opportunities "
+            f"{referencing}; reassign/cancel those or pass force=True to orphan them")
     if referencing and force:
         for o in data.get("opportunities", []):
             if o.get("account_id") == account_id:
                 o["account_id"] = None
-    data["accounts"] = [a for a in data.get("accounts", [])
-                        if a.get("id") != account_id]
+    work_base.stamp_cancel(acc, reason=reason, actor=actor, at=at)
     return referencing
-
-
-def opportunity_delete(data: dict, opportunity_id: str) -> None:
-    """Remove an Opportunity and its composition children (activities and
-    communications go with it — they have no life independent of the deal)."""
-    if find_opportunity(data, opportunity_id) is None:
-        raise ValueError(f"Opportunity not found: {opportunity_id}")
-    data["opportunities"] = [o for o in data.get("opportunities", [])
-                             if o.get("id") != opportunity_id]
 
 
 # ---------------------------------------------------------------------------
@@ -1834,6 +1862,8 @@ def watched_work_items(data: dict, *, awaiting_reply_only: bool = False) -> list
     skipped until we send again."""
     out = []
     for opp in data.get("opportunities", []):
+        if work_model.is_cancelled(opp):  # e-3586: 取消済商談は監視しない
+            continue
         for a in opp.get("activities", []):
             if a.get("status") == CANCELLED_STATUS:  # e-3537: 取消済は監視しない
                 continue
@@ -1939,16 +1969,21 @@ def communication_cancel(data: dict, comm_id: str, *, reason: str = "") -> dict:
     return work_base.stamp_cancel(comm, reason=reason)
 
 
-def communication_retarget(data: dict, comm_id: str, new_target_id: str) -> dict:
+def communication_retarget(data: dict, comm_id: str, new_target_id: str, *,
+                           reason: str = "", actor: str = "", at: str = "") -> dict:
     """Move a Communication to the correct target/work item and return it.
 
     Re-filing a mis-attached 証跡 is a plain edit of *where it is filed*
     (``linked_id`` + nesting), NOT a change to the evidence itself: the fact
     fields (summary / source / direction / occurred_at) are untouched. So this
     is a direct move, not a cancel + re-issue — per data-immutability the
-    immutable part is *what happened*, not *which work item it was filed under*,
-    and the who/when/why of the move is already captured by the surrounding
-    commit / beacon log (e-3537, user decision 2026-07-16).
+    immutable part is *what happened*, not *which work item it was filed under*.
+
+    e-3585: the move itself is audited on the record — an append-only
+    ``meta.retarget_history`` row (元 linked_id → 先 + 誰・いつ・なぜ via
+    ``work_base.record_audit_event``). The earlier "git に残る" rationale (e-3537)
+    doesn't hold for sales tenants, whose project.json is cloud-managed and git-
+    untracked, so the audit lives with the evidence rather than only in the log.
 
     ``new_target_id`` may be a target (opp-/acc-) or a work item (act-/nrt-);
     the record is re-nested to mirror ``communication_add``'s placement."""
@@ -1960,6 +1995,7 @@ def communication_retarget(data: dict, comm_id: str, new_target_id: str) -> dict
         raise ValueError(
             "Communication target not found (opp-…/acc-… target or "
             f"act-…/nrt-… work item): {new_target_id}")
+    prev_linked = comm.get("linked_id") or ""
     # Detach from its current holder.
     node["communications"] = [c for c in node.get("communications", [])
                               if c.get("id") != comm_id]
@@ -1973,6 +2009,12 @@ def communication_retarget(data: dict, comm_id: str, new_target_id: str) -> dict
     else:
         dest = new_container
     dest.setdefault("communications", []).append(comm)
+    # e-3585: stamp who/when/why of the re-filing onto the record (append-only),
+    # keeping the fact fields untouched — only the move's provenance is recorded.
+    work_base.record_audit_event(
+        comm.setdefault("meta", {}).setdefault("retarget_history", []),
+        kind="retarget", reason=reason, actor=actor, at=at,
+        from_linked=prev_linked, to_linked=new_linked)
     return comm
 
 
@@ -2209,6 +2251,8 @@ def scan_ended_meetings(data: dict, now: str) -> list:
         return []
     hits = []
     for opp in data.get("opportunities", []):
+        if work_model.is_cancelled(opp):  # e-3586: 取消済商談の面談は自動処理しない
+            continue
         for m in opp.get("meetings", []):
             if m.get("status") != MEETING_SCHEDULED:
                 continue
