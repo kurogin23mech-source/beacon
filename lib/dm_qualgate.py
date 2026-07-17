@@ -42,12 +42,27 @@ def is_trek_scoped_channel(channel: str) -> bool:
     return c.startswith("trek-") or c in TREK_SCOPED_CHANNELS
 
 
+def _same_user(sender_user_id: str, recipient_user_id: str) -> bool:
+    """True iff both identities are present and equal (case-insensitive).
+
+    The identity is the user's email (= how user identity surfaces everywhere:
+    the server directory keys on ``actor.email``, and same-user cross-project
+    is what the server dm_gate already permits). Blank on either side → not a
+    known same-user match, so the caller keeps the conservative 外部 default.
+    """
+    su = str(sender_user_id or "").strip().lower()
+    ru = str(recipient_user_id or "").strip().lower()
+    return bool(su) and su == ru
+
+
 def classify_outbound_reply(
     channel: str = "",
     sender_project_id: str = "",
     recipient_project_id: str = "",
     actions_authorized=None,
     confidential: bool = False,
+    sender_user_id: str = "",
+    recipient_user_id: str = "",
 ) -> str:
     """Classify an outbound reply. Mirrors bus-qualgate.mjs classifyOutboundReply.
 
@@ -55,7 +70,10 @@ def classify_outbound_reply(
       sniffing — that is ms-63 disclosure's job).
     - authorised actions -> action.
     - Trek-scoped channel -> normal_chat (pre-approved scope, even cross-project).
-    - plain DM to a different project -> external.
+    - plain DM to a different project by a DIFFERENT user -> external.
+    - plain DM to a different project by the SAME user -> normal_chat (e-3566):
+      the server dm_gate already permits same-user cross-project, so the client
+      must not over-block it as 外部宛. Identity is the sender/recipient email.
     - otherwise -> normal_chat.
     """
     if confidential:
@@ -68,6 +86,9 @@ def classify_outbound_reply(
         recipient_project_id and sender_project_id
         and recipient_project_id != sender_project_id
     ):
+        # e-3566: same user across their own projects is not "external".
+        if _same_user(sender_user_id, recipient_user_id):
+            return CAT_NORMAL
         return CAT_EXTERNAL
     return CAT_NORMAL
 

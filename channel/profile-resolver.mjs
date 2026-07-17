@@ -148,3 +148,19 @@ export function loadToken(profile, { env = process.env } = {}) {
   }
   return ''
 }
+
+// Read the logged-in user's email from the same credentials.json that
+// loadToken reads (the file carries both `token` and `email`). The Python side
+// reads this same `email` field in _read_credentials_for_identity; e-3566 needs
+// it on the JS side so the qual gate can recognise a same-user cross-project DM.
+// Same profile-dir → legacy fallback precedence as loadToken. env override wins.
+export function loadEmail(profile, { env = process.env } = {}) {
+  if (env.BEACON_USER_EMAIL) return env.BEACON_USER_EMAIL
+  const c = safeReadJson(profile.credentialsPath)
+  if (c.email) return String(c.email)
+  if (profile.name === DEFAULT_PROFILE) {
+    const legacy = safeReadJson(legacyCredentialsPath(env))
+    return legacy.email ? String(legacy.email) : ''
+  }
+  return ''
+}

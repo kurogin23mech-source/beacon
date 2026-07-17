@@ -50,12 +50,25 @@ export const CAT_EXTERNAL = 'external'
 export const CAT_ACTION = 'action'
 export const CAT_CONFIDENTIAL = 'confidential'
 
+// True iff both identities are present and equal (case-insensitive). Identity
+// is the user's email (= how user identity surfaces everywhere: the server
+// directory keys on actor.email, and same-user cross-project is what the server
+// dm_gate already permits). Blank on either side → not a known same-user match,
+// so the caller keeps the conservative 外部 default. Mirrors dm_qualgate._same_user.
+export function sameUser(senderUserId, recipientUserId) {
+  const su = String(senderUserId || '').trim().toLowerCase()
+  const ru = String(recipientUserId || '').trim().toLowerCase()
+  return !!su && su === ru
+}
+
 export function classifyOutboundReply({
   channel = '',
   senderProjectId = '',
   recipientProjectId = '',
   actionsAuthorized = null,
   confidential = false,
+  senderUserId = '',
+  recipientUserId = '',
 } = {}) {
   // Confidential wins (most restrictive) — but only when an explicit signal is
   // provided (ms-63 disclosure integration point; no content sniffing here).
@@ -70,6 +83,10 @@ export function classifyOutboundReply({
     recipientProjectId && senderProjectId &&
     recipientProjectId !== senderProjectId
   ) {
+    // e-3566: same user across their own projects is not "external" — only a
+    // DIFFERENT user is. The server dm_gate already permits same-user
+    // cross-project; the client must agree instead of over-blocking as 外部宛.
+    if (sameUser(senderUserId, recipientUserId)) return CAT_NORMAL
     return CAT_EXTERNAL
   }
   return CAT_NORMAL
