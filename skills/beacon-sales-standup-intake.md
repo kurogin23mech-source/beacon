@@ -1,5 +1,6 @@
 ---
 name: beacon-sales-standup-intake
+profession: sales
 description: その日のメール/Slack の営業関連のやり取りを、該当する商談・顧客の証跡(Communication)として恒久台帳に落とし、活動の消化・ボール更新・新規リード候補の提示を行う日次の取込。「日次取込」「今日のやり取り取り込み」「standup 取込」等で起動。営業専用。
 version: 1.0.0
 triggers:

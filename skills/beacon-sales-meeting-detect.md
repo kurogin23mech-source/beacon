@@ -1,5 +1,6 @@
 ---
 name: beacon-sales-meeting-detect
+profession: sales
 description: 終了予定を過ぎた面談を Google カレンダーで突合し、実際に終わったものを「終了」に落として次の終了ワークフロー(議事録→判定→次活動)へ渡す。定期発火(server tick)で自律実行、または「面談の終了チェック」等で手動起動。営業 (profession=sales) 専用。
 version: 1.0.0
 triggers:

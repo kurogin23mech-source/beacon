@@ -1,5 +1,6 @@
 ---
 name: beacon-sales-email
+profession: sales
 description: 営業の商談に紐づくメールを、下書き→送信アカウント(identity)の照合→人間承認→送信まで Beacon のコンソール上で完結させる。送信は必ず商談に活動記録(証跡)として残し、複数 Google アカウントの取り違えを送信前の照合で構造的に防ぐ。「営業メール送って」「商談のメール」「初回連絡のメール」等で起動。
 version: 1.0.0
 triggers:

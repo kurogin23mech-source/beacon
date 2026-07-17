@@ -1,5 +1,6 @@
 ---
 name: beacon-sales-communication
+profession: sales
 description: メール/Slack 以外の場所（Facebook Messenger・LINE・電話・対面など）で起きた顧客とのやり取りを、ユーザーの口頭報告から証跡として商談・顧客・活動・ナーチャリングに記録する。「Messengerで話した」「電話で確認した」「対面で会った」「やり取りを記録して」等で起動。
 version: 1.0.0
 triggers:

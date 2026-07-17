@@ -548,27 +548,94 @@ def _install_claude_hook():
     print("Installed Claude Code PostToolUse + PostCompact + Stop hooks")
 
 
+def _skill_profession_from_text(text: str) -> str:
+    """Return the ``profession:`` frontmatter value of a skill markdown, or
+    ``"core"`` when absent (ms-108 e-3364).
+
+    Skills carry an optional ``profession`` tag so install can gate them by job
+    template: a ``dev`` project should not receive the ``beacon-sales-*`` skills
+    and vice versa. Untagged skills are ``core`` (= install for every
+    profession). Companion files (``_*.md``) are not read here; they follow
+    their owning skill's install decision.
+    """
+    m = re.match(r"^---\n(.*?)\n---", text, re.S)
+    if not m:
+        return "core"
+    pm = re.search(r"^profession:\s*(\S+)", m.group(1), re.M)
+    return (pm.group(1).strip().lower() if pm else "core")
+
+
+def _requested_professions() -> set:
+    """Return the set of professions whose skills should be installed here.
+
+    Always includes ``"core"``. Adds the current project's ``profession`` (read
+    from the resolved project file, if any) and the ``BEACON_PROFESSION`` env
+    override. Install is **additive** — copying skills never removes previously
+    installed ones — so a user who works both a dev and a sales project ends up
+    with the union across their setups (ms-108 e-3364).
+    """
+    profs = {"core"}
+    env = (os.environ.get("BEACON_PROFESSION", "") or "").strip().lower()
+    if env:
+        profs.add(env)
+    try:
+        pf = get_project_file()
+        if pf and os.path.exists(pf):
+            with open(pf, encoding="utf-8") as f:
+                data = json.load(f) or {}
+            p = (data.get("profession") or "").strip().lower()
+            if p:
+                profs.add(p)
+    except Exception:
+        pass
+    return profs
+
+
+def _skill_is_installable(src_path: str, requested: set) -> bool:
+    """True when the skill at ``src_path`` should install for ``requested``
+    professions: its profession is ``core`` (always) or is in ``requested``."""
+    try:
+        prof = _skill_profession_from_text(
+            open(src_path, encoding="utf-8").read())
+    except Exception:
+        return True  # unreadable frontmatter → fail open (install), never hide a skill by error
+    return prof == "core" or prof in requested
+
+
 def _install_skills():
-    """Copy beacon skills to ~/.claude/skills/ for Claude Code integration."""
+    """Copy beacon skills to ~/.claude/skills/ for Claude Code integration.
+
+    ms-108 e-3364: profession-gated. Only ``core`` skills plus the skills of
+    the professions in ``_requested_professions()`` are installed, so a dev
+    project does not get the ``beacon-sales-*`` skills (and vice versa).
+    """
     skills_src = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "skills",
     )
     if not os.path.isdir(skills_src):
         return
+    requested = _requested_professions()
     skills_dst = os.path.join(_user_home(), ".claude", "skills")
     os.makedirs(skills_dst, exist_ok=True)
     installed = []
+    skipped = []
     for fname in os.listdir(skills_src):
         if not fname.endswith(".md"):
             continue
         skill_name = fname[:-3]  # beacon-log.md -> beacon-log
+        if not _skill_is_installable(os.path.join(skills_src, fname), requested):
+            skipped.append(skill_name)
+            continue
         dst_dir = os.path.join(skills_dst, skill_name)
         os.makedirs(dst_dir, exist_ok=True)
         shutil.copy2(os.path.join(skills_src, fname), os.path.join(dst_dir, "SKILL.md"))
         installed.append(skill_name)
     if installed:
         print(f"Installed skills: {', '.join(sorted(installed))}")
+    if skipped:
+        print(f"Skipped {len(skipped)} off-profession skills "
+              f"(professions installed: {', '.join(sorted(requested))})")
 
 
 def _maybe_prompt_initial_profile() -> Optional[str]:
@@ -13281,22 +13348,34 @@ def cmd_skill_install():
             skill_files.append(src_file)
 
     skill_names = [f[:-3] for f in skill_files]
+    # ms-108 e-3364: gate by profession so a dev project doesn't receive the
+    # beacon-sales-* skills (and vice versa). Additive across setups.
+    requested = _requested_professions()
 
     installed = []
+    skipped = []
     for src_file in skill_files:
         skill_name = src_file[:-3]
+        if not _skill_is_installable(os.path.join(skills_src, src_file), requested):
+            skipped.append(skill_name)
+            continue
         dest_dir = os.path.join(claude_skills, skill_name)
         os.makedirs(dest_dir, exist_ok=True)
         dest_file = os.path.join(dest_dir, "skill.md")
         shutil.copy2(os.path.join(skills_src, src_file), dest_file)
         installed.append(skill_name)
+    installed_set = set(installed)
 
     companion_installed = []
     for src_file in companion_files:
         base = src_file[1:-3]  # strip leading _ and trailing .md
-        # Find longest matching skill name as the owning skill
+        # Find longest matching skill name as the owning skill. A companion
+        # follows its owning skill's install decision (ms-108 e-3364): if the
+        # parent was gated out by profession, its companion is skipped too.
         match = ""
         for s in skill_names:
+            if s not in installed_set:
+                continue
             if (base == s or base.startswith(s + "-")) and len(s) > len(match):
                 match = s
         if not match:
@@ -13318,6 +13397,10 @@ def cmd_skill_install():
             print(f"  /{name}")
     else:
         print("No skills found to install.")
+    if skipped:
+        print(f"Skipped {len(skipped)} off-profession skill(s) "
+              f"(professions installed: {', '.join(sorted(requested))}). "
+              f"Set BEACON_PROFESSION or init that profession's project to include them.")
     if companion_installed:
         print(f"Installed {len(companion_installed)} companion file(s):")
         for path in companion_installed:
