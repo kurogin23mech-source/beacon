@@ -1,0 +1,19 @@
+# ms-96 e-2382 — MySQL スナップショットを S3 へ退避する oneshot ジョブ
+# (beacon-backup.timer から 6 時間毎に起動される)。
+# /etc/systemd/system/beacon-backup.service に配置する (docs/BACKUP_VPS.md 参照)。
+[Unit]
+Description=Beacon MySQL snapshot → S3 (6-hourly offsite backup)
+After=network-online.target mysql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/opt/beacon
+# MySQL 認証情報 (db.env, beacon-api.service と共用) + S3 退避設定 (backup.env)。
+EnvironmentFile=/etc/beacon/db.env
+EnvironmentFile=/etc/beacon/backup.env
+# repo 内スクリプトを直接実行 (git reset で自動更新される)。
+ExecStart=/opt/beacon/scripts/vps-backup.sh
+# 退避が 10 分以上かかったら異常とみなして止める。
+TimeoutStartSec=600
