@@ -3099,6 +3099,13 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .act-desc.done { color:var(--text-dim); text-decoration:line-through; }
 .act-due { font-size:11px; color:var(--text-dim); }
 .act-empty { color:var(--text-dim); font-size:12px; padding:6px 0; }
+/* e-3587: 取消済 (cancelled) の証跡・活動は取消線 + 小さな「取消」タグで区別する。 */
+.comm-row.cancelled .comm-summary { color:var(--text-dim); text-decoration:line-through; }
+.comm-row.cancelled { opacity:0.75; }
+.act-cancelled-tag, .comm-cancelled-tag {
+  font-size:10px; color:var(--cancelled); border:1px solid rgba(239,68,68,0.4);
+  border-radius:3px; padding:0 4px; margin-left:4px; white-space:nowrap;
+}
 /* --- account list + modal --- */
 .acc-list { display:flex; flex-direction:column; gap:8px; }
 .acc-lcard { background:var(--bg-surface); border:1px solid var(--border-subtle); border-radius:6px; overflow:hidden; }
@@ -4567,6 +4574,9 @@ function _renderOppFilterBar(phases) {
     </div>`;
 }
 function _oppVisible(o) {
+  // e-3586/e-3587: 取消済 (cancelled) 商談はボード既定から外す (エンジンの
+  // live_opportunities と判定を揃える)。dev 側の hiddenStatuses=['cancelled'] と同型。
+  if (o.status === 'cancelled') return false;
   if (state.hiddenPhases.has(o.phase)) return false;
   if (state.oppAssignee && (o.assignee || '') !== state.oppAssignee) return false;
   return true;
@@ -4668,7 +4678,10 @@ function _salesWorkRows(items, kind) {
   const typeLabel = kind === 'nurturing' ? 'ナーチャリング' : '活動';
   return items.map(a => {
     const done = a.status === 'done';
-    const overdue = _salesActOverdue(a, today);
+    // e-3587: 取消済 (cancelled) は完了と同じく取消線で見せ、期日超過も出さない。
+    const cancelled = a.status === 'cancelled';
+    const struck = done || cancelled;
+    const overdue = !cancelled && _salesActOverdue(a, today);
     const due = a.deadline
       ? `<span class="act-due${overdue ? ' overdue' : ''}">${overdue ? '⚠ 期日超過 ' : '期日 '}${esc(a.deadline)}</span>`
       : '';
@@ -4684,11 +4697,12 @@ function _salesWorkRows(items, kind) {
       : '';
     return `<div class="work-item">
       <div class="act-row">
-        <span class="act-dot ${done ? 'done' : ''}${overdue ? ' overdue' : ''}"></span>
+        <span class="act-dot ${struck ? 'done' : ''}${overdue ? ' overdue' : ''}"></span>
         <span class="ent-type act">${typeLabel}</span>
         <span class="ent-id" title="${esc(a.id || '')}">${esc(a.id || '')}</span>
-        <span class="act-desc ${done ? 'done' : ''}">${esc(a.description || '')}</span>
-        ${due}
+        <span class="act-desc ${struck ? 'done' : ''}">${esc(a.description || '')}</span>
+        ${cancelled ? '<span class="act-cancelled-tag">取消</span>' : ''}
+        ${cancelled ? '' : due}
         ${commToggle}
       </div>
       ${(nested && !collapsed) ? `<div class="comm-nested">${nested}</div>` : ''}
@@ -4700,8 +4714,9 @@ function _renderOppActivities(o) {
   if (!acts.length) return `<div class="act-empty">Activity はまだありません。</div>`;
   // FB: 完了を隠すフィルタ。todo だけ表示 = そのフェーズの残アクションが見える。
   const hide = state.salesHideDone;
-  const shown = hide ? acts.filter(a => a.status !== 'done') : acts;
-  const doneN = acts.filter(a => a.status === 'done').length;
+  // e-3587: 取消済 (cancelled) は未消化ではない — 「完了を隠す」時は done と同様に隠す。
+  const shown = hide ? acts.filter(a => a.status !== 'done' && a.status !== 'cancelled') : acts;
+  const doneN = acts.filter(a => a.status === 'done' || a.status === 'cancelled').length;
   const toggle = `<button class="acts-filter${hide ? ' on' : ''}" data-action="sales-toggle-hide-done">${hide ? '完了を表示' : '完了を隠す'}${doneN ? ' (' + doneN + ')' : ''}</button>`;
   const body = shown.length ? _salesWorkRows(shown) : `<div class="act-empty">未完了の活動はありません。</div>`;
   return `<div class="opp-acts-head">Activity (${acts.length})${toggle}</div>${body}`;
@@ -4856,7 +4871,8 @@ function _salesCommsOrdered(target) {
     .map(pair => pair[0]);
 }
 function _salesDeriveBall(target) {
-  const comms = _salesCommsOrdered(target);
+  // e-3587: 取消済 (cancelled) の証跡はボール導出に数えない (エンジンと一致)。
+  const comms = _salesCommsOrdered(target).filter(c => c.status !== 'cancelled');
   if (!comms.length) return '';
   const dir = comms[comms.length - 1].direction;
   if (dir === 'inbound') return 'self';
@@ -4907,6 +4923,7 @@ function _salesCommRows(comms, opts) {
   const nested = opts && opts.nested;
   return comms.map(c => {
     const inbound = c.direction === 'inbound';
+    const cancelled = c.status === 'cancelled';  // e-3587: 取消済証跡は取消線表示
     const arrow = inbound ? '←' : '→';
     const label = inbound ? '受信' : '送信';
     const src = c.source || {};
@@ -4923,12 +4940,12 @@ function _salesCommRows(comms, opts) {
       ? `<button class="comm-detail-btn" data-action="toggle-comm" data-comm-id="${esc(c.id)}">${expanded ? '詳細 ▲' : '詳細 ▾'}</button>`
       : '';
     return `<div class="comm-item">
-      <div class="comm-row ${inbound ? 'inbound' : 'outbound'}">
+      <div class="comm-row ${inbound ? 'inbound' : 'outbound'}${cancelled ? ' cancelled' : ''}">
       <span class="comm-dir" title="${label}">${arrow}</span>
       <span class="ent-type comm">やり取り</span>
       <span class="ent-id" title="${esc(c.id || '')}">${esc(c.id || '')}</span>
       <span class="comm-ch">${esc(c.channel || 'other')}</span>
-      <span class="comm-summary">${esc(c.summary || '')}${nested ? '' : _salesLinkedLabel(c.linked_id)}</span>
+      <span class="comm-summary">${esc(c.summary || '')}${cancelled ? ' <span class="comm-cancelled-tag">取消</span>' : ''}${nested ? '' : _salesLinkedLabel(c.linked_id)}</span>
       ${when ? `<span class="comm-when">${esc(_salesShortDate(when))}</span>` : ''}
       ${trace}
       ${detailBtn}
