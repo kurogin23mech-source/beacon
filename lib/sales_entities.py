@@ -139,6 +139,31 @@ def opportunity_phases(data: dict) -> list:
     return data.get("opportunity_phases", [])
 
 
+# Macro-frame (前進の枠組み) — e-3582, SPEC 方針5(A) / AC6. A funnel-level
+# natural-language framing that teaches the AI how to *read* the phases: a phase
+# is not a bucket to sit in but a stage to be pushed *out of*. "仕事を進める" =
+# advancing the deal's open phase through its前進ゲート to the next. Names carry
+# the per-object frame (前進ゲート / 空・確定); this carries the whole-funnel one.
+# The concept ("a target-class carries a macro-frame") is class-layer; the *text*
+# is the sales instance's, so it lives in config (seeded, editable per company).
+OPPORTUNITY_PHASE_MACRO_FRAME = (
+    "各フェーズは、そこに留まるための箱ではなく『次へ抜けさせるためのステージ』です。"
+    "仕事を進めるとは、いま進行中(open)のフェーズを前進ゲート(= 次へ進めてよいかを"
+    "判定する関門)を通して次のフェーズへ抜けさせること。前進ゲートに work-item(面談/"
+    "活動)を紐づけ、その完了で判定を促し、人が 前進 / やり直し / 決着 を決めます。"
+    "滞留は『放置してよい』ではなく『まだ抜けていない』状態を意味します。"
+)
+
+
+def opportunity_phase_frame(data: dict) -> str:
+    """The opportunity funnel's macro-frame text (e-3582): how the AI should read
+    the phases — as stages to advance *out of*, not buckets to rest in. Reads a
+    project's configured ``opportunity_phase_frame`` (editable per company), else
+    the shipped default ``OPPORTUNITY_PHASE_MACRO_FRAME``."""
+    return (data.get("opportunity_phase_frame") or "").strip() or \
+        OPPORTUNITY_PHASE_MACRO_FRAME
+
+
 def _phase_names(phases: list) -> list:
     return [p.get("name") for p in phases]
 
@@ -2545,6 +2570,9 @@ def build_sales_project(name: str, objective: str, *, retro_day: str = "monday",
         "accounts": [],
         "account_phases": [dict(p) for p in DEFAULT_ACCOUNT_PHASES],
         "opportunity_phases": [dict(p) for p in DEFAULT_OPPORTUNITY_PHASES],
+        # e-3582: 前進の macro-frame を config に seed する (企業ごと編集可)。AI が
+        # フェーズを読むとき「フェーズ = 次へ抜けさせるもの」と理解する枠組み。
+        "opportunity_phase_frame": OPPORTUNITY_PHASE_MACRO_FRAME,
         "retro_day": retro_day,
     }
     if disclosure_policy is not None:

@@ -21356,14 +21356,19 @@ def cmd_phase_list():
     data = load_project()
     acc_phases = sales_entities.account_phases(data)
     opp_phases = sales_entities.opportunity_phases(data)
+    frame = sales_entities.opportunity_phase_frame(data)  # e-3582: 前進の macro-frame
     if json_mode:
         print(json.dumps({"account_phases": acc_phases,
-                          "opportunity_phases": opp_phases},
+                          "opportunity_phases": opp_phases,
+                          "opportunity_phase_frame": frame},
                          ensure_ascii=False, indent=2))
         return
     if not acc_phases and not opp_phases:
         print("No phase funnel configured (not a sales project, or no phases set).")
         return
+    # e-3582: フェーズを読む前に「フェーズ = 次へ抜けさせるもの」の枠組みを刷り込む。
+    if opp_phases:
+        print(f"■ 前進の枠組み: {frame}\n")
     print("顧客 (Account) phases:")
     for p in acc_phases:
         print(f"  - {p.get('name')}")

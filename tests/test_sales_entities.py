@@ -50,6 +50,20 @@ def test_sales_template_passes_shared_validator():
     core.validate_project(se.build_sales_project("S", "obj"))
 
 
+def test_opportunity_phase_frame_seeded_and_configurable():
+    # e-3582: the funnel carries a macro-frame teaching "phase = advance out of".
+    data = _fresh()
+    assert data["opportunity_phase_frame"] == se.OPPORTUNITY_PHASE_MACRO_FRAME
+    frame = se.opportunity_phase_frame(data)
+    assert "前進ゲート" in frame and "次のフェーズへ抜けさせる" in frame
+    # a project may override the frame; a blank/missing one falls back to default.
+    data["opportunity_phase_frame"] = "自社の言葉での前進の定義"
+    assert se.opportunity_phase_frame(data) == "自社の言葉での前進の定義"
+    data["opportunity_phase_frame"] = ""
+    assert se.opportunity_phase_frame(data) == se.OPPORTUNITY_PHASE_MACRO_FRAME
+    assert se.opportunity_phase_frame({}) == se.OPPORTUNITY_PHASE_MACRO_FRAME
+
+
 def test_seed_phases_carry_methodology():
     # ms-107 e-3375 + e-3581: the shipped base 4-phase seed carries goal /
     # activity_template / default_lead per phase. transition_signal was removed
