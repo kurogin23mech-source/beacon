@@ -17940,7 +17940,8 @@ def cmd_bus_send():
     # owned by the same user. ms-95 / e-2280 lifts AI's per-send duty to
     # manually re-resolve via `bus directory --live` after observed
     # 2026-06-22 kyozai dolphin Trek dogfood (= 2 stale sends in 30 min).
-    swapped_recipient, swap_notice = _resolve_recipient_live(recipient, channel)
+    swapped_recipient, swap_notice, _recipient_email = _resolve_recipient_live(
+        recipient, channel)
     if swap_notice is not None and swapped_recipient != recipient:
         # Update payload + re-validate project routing for the new sid.
         # The new session may live in a different project (= different
@@ -18135,12 +18136,22 @@ def cmd_bus_send():
             a for a in os.environ.get("BEACON_BUS_ACTION", "").split(",")
             if a.strip()
         ]
+        # e-3566: pass sender + recipient identity (email) so a same-user
+        # cross-project DM is not over-blocked as 外部宛. Sender email comes from
+        # the login credentials; recipient email from the live check above (both
+        # reuse identity we already resolve — no extra network call).
+        try:
+            _, _sender_email, _ = _resolve_creator_identity()
+        except Exception:
+            _sender_email = ""
         _cat = dm_qualgate.classify_outbound_reply(
             channel=channel,
             sender_project_id=_sender_proj,
             recipient_project_id=project_id,
             actions_authorized=_actions,
             confidential=False,
+            sender_user_id=_sender_email,
+            recipient_user_id=_recipient_email,
         )
         _q = dm_qualgate.evaluate_outbound_qual_gate(_cat, armed=True)
         if _q["hold"]:
@@ -19139,9 +19150,12 @@ def _resolve_recipient_live(
     auditable, and conservative (only single-candidate swaps) so we
     never silently redirect cross-machine or cross-worktree.
 
-    Returns ``(new_recipient, swap_notice)`` where ``swap_notice`` is
-    ``None`` if no swap happened (= unchanged sid), or a short string
-    describing the swap (= caller can log / display).
+    Returns ``(new_recipient, swap_notice, recipient_email)`` where
+    ``swap_notice`` is ``None`` if no swap happened (= unchanged sid), or a
+    short string describing the swap (= caller can log / display).
+    ``recipient_email`` is the resolved recipient's ``actor.email`` when the
+    live check found them (or the swap target), else ``""`` — e-3566 uses it
+    so the qual gate can tell a same-user cross-project DM from a真の外部宛.
 
     Distinct from ``_validate_recipient_project`` (e-1362) which routes
     cross-project. This one is identity-grain (same user, new sid).
@@ -19157,9 +19171,9 @@ def _resolve_recipient_live(
         treat dead-sid sends as a bug rather than a soft hint.
     """
     if channel != "dm" or not recipient:
-        return (recipient, None)
+        return (recipient, None, "")
     if os.environ.get("BEACON_BUS_NO_LIVE_CHECK", "") == "1":
-        return (recipient, None)
+        return (recipient, None, "")
 
     try:
         import importlib
@@ -19170,18 +19184,22 @@ def _resolve_recipient_live(
         # No discovery module available — bypass silently. Mirrors the
         # defensive posture of _validate_recipient_project; a missing
         # helper shouldn't break the send.
-        return (recipient, None)
+        return (recipient, None, "")
 
     try:
         rows = helpers.discover_and_aggregate(healthy=True, since_min=10)
     except Exception:
         # Discovery raised (network / psutil / auth) — bypass rather than
         # turning a transient failure into a CLI footgun.
-        return (recipient, None)
+        return (recipient, None, "")
 
     for row in rows:
         if row.get("session_id") == recipient:
-            return (recipient, None)  # live + healthy, all good
+            # e-3566: surface the recipient's identity (actor.email) so the
+            # qual gate can recognise a same-user cross-project DM and not
+            # over-block it as 外部宛. This reuses the live-check we already ran.
+            row_email = str((row.get("actor") or {}).get("email") or "")
+            return (recipient, None, row_email)  # live + healthy, all good
 
     # Not in the live+healthy set. Try auto-swap before falling back to
     # the soft warning.
@@ -19204,7 +19222,8 @@ def _resolve_recipient_live(
             f"{new_sid[:24]}… (owner={ident_hint}, single live match)"
         )
         print(f"⇄ {notice}", file=sys.stderr)
-        return (new_sid, notice)
+        swap_email = str(actor.get("email") or "")
+        return (new_sid, notice, swap_email)
 
     # Stale + no swap candidate (= zero or multiple matches, or owner
     # identity not recoverable). Either soft-warn (default) or hard-
@@ -19228,7 +19247,7 @@ def _resolve_recipient_live(
         f"BEACON_BUS_REFUSE_STALE=1 to hard-refuse instead.)",
         file=sys.stderr,
     )
-    return (recipient, None)
+    return (recipient, None, "")
 
 
 def _check_recipient_live_health(recipient: str, channel: str) -> None:

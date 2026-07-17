@@ -50,6 +50,7 @@ import {
 import {
   resolveActiveProfile,
   loadToken as loadTokenFromProfile,
+  loadEmail as loadEmailFromProfile,
 } from './profile-resolver.mjs'
 
 // --- Config discovery --------------------------------------------------------
@@ -87,6 +88,36 @@ function loadToken() {
   // token is re-read on every call so `beacon auth login` takes effect
   // without restarting bus.mjs.
   return loadTokenFromProfile(PROFILE)
+}
+
+// e-3566: the logged-in user's own email, from the same credentials the token
+// comes from. Used by the reply qual gate to recognise a same-user cross-project
+// DM (mirrors the Python send path's _resolve_creator_identity). Best-effort:
+// returns '' if credentials carry no email (→ gate keeps the conservative 外部).
+function loadEmail() {
+  try { return loadEmailFromProfile(PROFILE) || '' } catch { return '' }
+}
+
+// e-3566: resolve a recipient session's owner email from the project directory
+// (server stamps actor.email from the bearer token). Lets the reply qual gate
+// compare sender vs recipient identity. Best-effort: any failure → '' so the
+// gate falls back to treating the cross-project send as 外部 (safe default).
+async function resolveRecipientEmail(recipientProjectId, recipientSessionId) {
+  if (!recipientProjectId || !recipientSessionId) return ''
+  try {
+    const rows = await apiGet(
+      `/api/projects/${encodeURIComponent(recipientProjectId)}/sessions`,
+    )
+    const list = Array.isArray(rows) ? rows : (rows && rows.sessions) || []
+    for (const s of list) {
+      if ((s.session_id || s.sessionId) === recipientSessionId) {
+        return String((s.actor && s.actor.email) || '')
+      }
+    }
+  } catch (e) {
+    log(`qual gate: recipient email lookup failed (non-fatal): ${e.message}`)
+  }
+  return ''
 }
 
 const cloud = safeLoadJSON(CLOUD_JSON)
@@ -827,6 +858,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     // Trek-scoped channels are pre-approved scope → not held. BEACON_QUALGATE_OFF=1
     // is an explicit escape hatch (mirrors BEACON_BUS_NO_LIVE_CHECK).
     if (process.env.BEACON_QUALGATE_OFF !== '1' && budgetConsumed) {
+      // e-3566: resolve sender + recipient identity so a same-user cross-project
+      // DM is recognised as normal (the server dm_gate already permits it) and
+      // not over-held as 外部宛. Both are best-effort — if either is unresolved
+      // the gate keeps the conservative 外部 default.
+      const senderEmail = loadEmail()
+      const recipientEmail = await resolveRecipientEmail(
+        recipient_project_id, recipient_session_id,
+      )
       const category = classifyOutboundReply({
         channel,
         senderProjectId: PROJECT_ID,
@@ -835,6 +874,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         // later and empty here. Confidential is deferred to ms-63 (no signal).
         actionsAuthorized: null,
         confidential: false,
+        senderUserId: senderEmail,
+        recipientUserId: recipientEmail,
       })
       const q = evaluateOutboundQualGate({ classification: category, armed: true })
       if (q.hold) {

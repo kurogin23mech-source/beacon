@@ -113,7 +113,7 @@ def test_stale_with_unique_same_user_swaps(capsys):
             },
         ],
     )
-    new_recipient, notice = commands._resolve_recipient_live(STALE_SID, "dm")
+    new_recipient, notice, _email = commands._resolve_recipient_live(STALE_SID, "dm")
     assert new_recipient == NEW_SID
     assert notice is not None
     err = capsys.readouterr().err
@@ -152,7 +152,7 @@ def test_swap_match_via_email_only(capsys):
             },
         ],
     )
-    new_recipient, notice = commands._resolve_recipient_live(STALE_SID, "dm")
+    new_recipient, notice, _email = commands._resolve_recipient_live(STALE_SID, "dm")
     assert new_recipient == NEW_SID
     assert notice is not None
     capsys.readouterr()  # drain
@@ -200,7 +200,7 @@ def test_stale_with_multiple_same_user_no_swap_soft_warn(capsys):
             },
         ],
     )
-    new_recipient, notice = commands._resolve_recipient_live(STALE_SID, "dm")
+    new_recipient, notice, _email = commands._resolve_recipient_live(STALE_SID, "dm")
     assert new_recipient == STALE_SID
     assert notice is None
     err = capsys.readouterr().err
@@ -231,7 +231,7 @@ def test_stale_with_zero_same_user_no_swap_soft_warn(capsys):
             },
         ],
     )
-    new_recipient, notice = commands._resolve_recipient_live(STALE_SID, "dm")
+    new_recipient, notice, _email = commands._resolve_recipient_live(STALE_SID, "dm")
     assert new_recipient == STALE_SID
     assert notice is None
     err = capsys.readouterr().err
@@ -259,7 +259,7 @@ def test_stale_with_unknown_owner_no_swap_soft_warn(capsys):
             },
         ],
     )
-    new_recipient, notice = commands._resolve_recipient_live(STALE_SID, "dm")
+    new_recipient, notice, _email = commands._resolve_recipient_live(STALE_SID, "dm")
     assert new_recipient == STALE_SID
     assert notice is None
     err = capsys.readouterr().err
@@ -295,7 +295,7 @@ def test_no_auto_swap_env_disables_swap_keeps_softwarn(monkeypatch, capsys):
             },
         ],
     )
-    new_recipient, notice = commands._resolve_recipient_live(STALE_SID, "dm")
+    new_recipient, notice, _email = commands._resolve_recipient_live(STALE_SID, "dm")
     assert new_recipient == STALE_SID
     assert notice is None
     err = capsys.readouterr().err
@@ -345,7 +345,7 @@ def test_refuse_stale_env_with_swap_candidate_swaps(monkeypatch, capsys):
         ],
     )
     # Should NOT raise SystemExit because swap recovered the send.
-    new_recipient, notice = commands._resolve_recipient_live(STALE_SID, "dm")
+    new_recipient, notice, _email = commands._resolve_recipient_live(STALE_SID, "dm")
     assert new_recipient == NEW_SID
     assert notice is not None
     capsys.readouterr()
@@ -364,14 +364,17 @@ def test_live_sid_returns_unchanged(capsys):
             "actor": {"email": EMAIL_A},
         },
     ])
-    new_recipient, notice = commands._resolve_recipient_live(NEW_SID, "dm")
+    new_recipient, notice, email = commands._resolve_recipient_live(NEW_SID, "dm")
     assert new_recipient == NEW_SID
     assert notice is None
+    # e-3566: the live match surfaces the recipient's actor.email so the qual
+    # gate can recognise a same-user cross-project DM.
+    assert email == EMAIL_A
     assert capsys.readouterr().err == ""
 
 
 def test_non_dm_channel_returns_unchanged(capsys):
-    new_recipient, notice = commands._resolve_recipient_live(
+    new_recipient, notice, _email = commands._resolve_recipient_live(
         STALE_SID, "operation-trigger"
     )
     assert new_recipient == STALE_SID
@@ -380,7 +383,7 @@ def test_non_dm_channel_returns_unchanged(capsys):
 
 
 def test_empty_recipient_returns_unchanged(capsys):
-    new_recipient, notice = commands._resolve_recipient_live("", "dm")
+    new_recipient, notice, _email = commands._resolve_recipient_live("", "dm")
     assert new_recipient == ""
     assert notice is None
     assert capsys.readouterr().err == ""
@@ -388,7 +391,7 @@ def test_empty_recipient_returns_unchanged(capsys):
 
 def test_no_live_check_env_returns_unchanged(monkeypatch, capsys):
     monkeypatch.setenv("BEACON_BUS_NO_LIVE_CHECK", "1")
-    new_recipient, notice = commands._resolve_recipient_live(STALE_SID, "dm")
+    new_recipient, notice, _email = commands._resolve_recipient_live(STALE_SID, "dm")
     assert new_recipient == STALE_SID
     assert notice is None
     assert capsys.readouterr().err == ""

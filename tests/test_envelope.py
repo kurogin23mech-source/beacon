@@ -274,6 +274,59 @@ def test_verify_step3_project_mismatch(nonce_store, parent_lookup):
     assert "project_match" in res.steps
 
 
+def test_verify_step3_cross_project_freetext_dm_soft_degrades(nonce_store, parent_lookup):
+    # e-3567: a free-text DM to *another* project mismatches project_id (the
+    # sender can only mint against their own project). It must NOT 403 — it
+    # soft-degrades to T5 (flows as notify-user) like the legacy path, so the
+    # downstream ms-70 dm_gate can handle cross-user approval.
+    e = _t1()  # project_id = PROJECT_ID
+    res = env_mod.verify(
+        e, project_id="other-project",
+        payload={"text": "hey, quick question about the deploy"},
+        requested_action=None,
+        nonce_store=nonce_store, parent_lookup=parent_lookup,
+        sender_session_id="s",
+    )
+    assert res.passed is False
+    assert res.effective_tier == env_mod.TIER_T5
+    # No rejection_reason → app.py does not 403 (the whole point of e-3567).
+    assert res.rejection_reason is None
+    assert "cross_project_dm_soft_degrade" in res.steps
+
+
+def test_verify_step3_cross_project_action_still_rejected(nonce_store, parent_lookup):
+    # The relaxation is free-text only: a cross-project envelope that requests
+    # an ACTION still hard-rejects (no cross-project action smuggling).
+    e = _t1()
+    res = env_mod.verify(
+        e, project_id="other-project",
+        payload={"text": "run it"},
+        requested_action="status_check",
+        nonce_store=nonce_store, parent_lookup=parent_lookup,
+        sender_session_id="s",
+    )
+    assert res.passed is False
+    assert res.effective_tier == env_mod.TIER_T5
+    assert res.rejection_reason is not None  # → 403
+
+
+def test_verify_signature_fail_freetext_still_rejected(nonce_store, parent_lookup):
+    # Guard: the relaxation is scoped to project_id mismatch only. A *different*
+    # verify failure (tampered signature) on free text must still hard-reject —
+    # a forged envelope is structurally suspicious, not a benign cross-project DM.
+    e = _t1()
+    e["issuer"] = "attacker@evil.example"  # mutate after signing → sig invalid
+    res = env_mod.verify(
+        e, project_id=PROJECT_ID,
+        payload={"text": "free text"},
+        requested_action=None,
+        nonce_store=nonce_store, parent_lookup=parent_lookup,
+        sender_session_id="s",
+    )
+    assert res.passed is False
+    assert res.rejection_reason is not None  # → 403, unchanged by e-3567
+
+
 def test_verify_step4_expired(nonce_store, parent_lookup):
     e = _t1(ttl_seconds=1)
     # Force "now" forward past the expiry.

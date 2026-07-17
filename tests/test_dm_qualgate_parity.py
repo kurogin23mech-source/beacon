@@ -63,6 +63,8 @@ def _py(meta: dict, armed: bool) -> dict:
         recipient_project_id=meta.get("recipientProjectId", ""),
         actions_authorized=meta.get("actionsAuthorized"),
         confidential=meta.get("confidential", False),
+        sender_user_id=meta.get("senderUserId", ""),
+        recipient_user_id=meta.get("recipientUserId", ""),
     )
     g = PY.evaluate_outbound_qual_gate(cat, armed=armed)
     return {"category": cat, "hold": g["hold"]}
@@ -78,6 +80,21 @@ CASES = [
     ({"channel": "dm", "senderProjectId": "p1", "recipientProjectId": "p1", "actionsAuthorized": ["task.add"]}, True),
     ({"channel": "dm", "senderProjectId": "p1", "recipientProjectId": "p2"}, False),
     ({"channel": "trek-foo", "senderProjectId": "p1", "recipientProjectId": "p2"}, True),
+    # e-3566: same user, cross-project → normal (not external).
+    ({"channel": "dm", "senderProjectId": "p1", "recipientProjectId": "p2",
+      "senderUserId": "kida@example.com", "recipientUserId": "kida@example.com"}, True),
+    # e-3566: same user but case-differing email → still same user.
+    ({"channel": "dm", "senderProjectId": "p1", "recipientProjectId": "p2",
+      "senderUserId": "Kida@Example.com", "recipientUserId": "kida@example.com"}, True),
+    # different user, cross-project → external (unchanged).
+    ({"channel": "dm", "senderProjectId": "p1", "recipientProjectId": "p2",
+      "senderUserId": "kida@example.com", "recipientUserId": "skmt3p@example.com"}, True),
+    # same user but same project → normal via the project-equality path (identity irrelevant).
+    ({"channel": "dm", "senderProjectId": "p1", "recipientProjectId": "p1",
+      "senderUserId": "kida@example.com", "recipientUserId": "kida@example.com"}, True),
+    # cross-project, recipient identity unknown (blank) → conservative external.
+    ({"channel": "dm", "senderProjectId": "p1", "recipientProjectId": "p2",
+      "senderUserId": "kida@example.com", "recipientUserId": ""}, True),
 ]
 
 
@@ -99,3 +116,20 @@ def test_same_project_armed_flows_both():
     meta = {"channel": "dm", "senderProjectId": "p1", "recipientProjectId": "p1"}
     assert _py(meta, True) == {"category": "normal_chat", "hold": False}
     assert _js(meta, True) == {"category": "normal_chat", "hold": False}
+
+
+def test_same_user_cross_project_flows_both():
+    # e-3566: same user's own two projects → normal_chat, not held.
+    meta = {"channel": "dm", "senderProjectId": "PE", "recipientProjectId": "LPS",
+            "senderUserId": "kurogin23mech@gmail.com",
+            "recipientUserId": "kurogin23mech@gmail.com"}
+    assert _py(meta, True) == {"category": "normal_chat", "hold": False}
+    assert _js(meta, True) == {"category": "normal_chat", "hold": False}
+
+
+def test_different_user_cross_project_still_holds_both():
+    meta = {"channel": "dm", "senderProjectId": "PE", "recipientProjectId": "other",
+            "senderUserId": "kurogin23mech@gmail.com",
+            "recipientUserId": "someone@else.com"}
+    assert _py(meta, True) == {"category": "external", "hold": True}
+    assert _js(meta, True) == {"category": "external", "hold": True}
