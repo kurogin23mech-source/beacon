@@ -377,7 +377,9 @@ def test_high_risk_action_rejected_at_t2():
     assert "high-risk" in (detail.get("reason") or "")
 
 
-def test_project_id_mismatch_rejected():
+def test_project_id_mismatch_action_rejected():
+    # A cross-project envelope that requests an ACTION is still rejected
+    # (no cross-project action smuggling) — unchanged by e-3567.
     env_resp = client.post(f"/api/projects/other-project/bus/envelope/issue", json={
         "tier": "T1",
         "actions_authorized": ["status_check"],
@@ -389,6 +391,25 @@ def test_project_id_mismatch_rejected():
         "envelope": env, "requested_action": "status_check",
     })
     assert resp.status_code == 403
+
+
+def test_cross_project_freetext_dm_flows():
+    # e-3567: a plain free-text DM minted against the sender's project and
+    # POSTed to another project must NOT 403 — it flows (soft-degraded to T5,
+    # delivered as a notification). Previously this returned 403 because the
+    # project_id mismatch hard-rejected any envelope-carrying free text.
+    env_resp = client.post(f"/api/projects/other-project/bus/envelope/issue", json={
+        "tier": "T1",
+        "actions_authorized": [],
+    })
+    env = env_resp.json()
+    resp = client.post(f"/api/projects/{PROJECT_ID}/bus", json={
+        "channel": "dm", "sender_session_id": "a",
+        "payload": {"text": "hey, quick question about the deploy"},
+        "envelope": env,
+    })
+    assert resp.status_code != 403, resp.text
+    assert resp.status_code in (200, 201), resp.text
 
 
 # ---------------------------------------------------------------------------

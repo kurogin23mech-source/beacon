@@ -967,8 +967,18 @@ def verify(
         steps["project_match"] = (
             f"envelope.project_id={envelope.get('project_id')!r} "
             f"!= receiving project_id={project_id!r}")
+        # e-3567: a cross-project DM legitimately mismatches here — an envelope
+        # can only be minted against a project the sender writes to (issue
+        # endpoint's owner/editor gate), so a send *to another project* always
+        # carries the sender's project_id, never the receiver's. The signature
+        # (server-global secret) already proved authenticity, and cross-USER
+        # authorization is handled downstream by the ms-70 dm_gate. So treat a
+        # project_id mismatch on a plain free-text DM like the legacy
+        # no-envelope path — soft-degrade to T5 (flows as notify-user) rather
+        # than 403. Action-carrying envelopes still hard-reject below (no
+        # cross-project action smuggling), and delivery stays capped at T5.
         return _degrade_to_t5(envelope, payload, requested_action, steps,
-                              "project_id mismatch")
+                              "project_id mismatch", cross_project_dm=True)
     steps["project_match"] = "ok"
 
     # Step 4: time window
@@ -1041,7 +1051,7 @@ def verify(
 
 def _degrade_to_t5(envelope: dict, payload: dict,
                    requested_action: Optional[str], steps: dict[str, str],
-                   reason: str) -> VerifyResult:
+                   reason: str, *, cross_project_dm: bool = False) -> VerifyResult:
     """Apply T5 degradation rule.
 
     Per CORE doc: any verify failure → degrade to T5. Outcomes:
@@ -1057,6 +1067,13 @@ def _degrade_to_t5(envelope: dict, payload: dict,
         audit trail records ``rejection_reason=reason``-style breadcrumb
         via the ``steps`` dict, leaving ``rejection_reason`` itself None so
         the upstream HTTP layer does not 403.
+
+    ``cross_project_dm`` (e-3567): set only by the Step 3 project_id-mismatch
+    path. A cross-project DM's project_id mismatch is *expected and benign*
+    (the sender can only mint against their own project), not a structurally
+    suspicious envelope. So a non-action free-text payload soft-degrades here
+    like the legacy no-envelope path instead of hard-rejecting. Actions are
+    still rejected above, so this never opens a cross-project action path.
     """
     if requested_action is not None:
         return VerifyResult(
@@ -1068,6 +1085,15 @@ def _degrade_to_t5(envelope: dict, payload: dict,
         )
     t5_check = validate_t5_payload(payload if isinstance(payload, dict) else {})
     if t5_check:
+        if cross_project_dm:
+            # Free-text cross-project DM: flow it (notify-user), don't 403.
+            steps["cross_project_dm_soft_degrade"] = t5_check
+            return VerifyResult(
+                passed=False,
+                effective_tier=TIER_T5,
+                steps=steps,
+                rejection_reason=None,
+            )
         return VerifyResult(
             passed=False,
             effective_tier=TIER_T5,
