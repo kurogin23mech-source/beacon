@@ -2,6 +2,8 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.59.1] - 2026-07-17
+
 ## [v0.60.0] - 2026-07-17
 
 - Merge pull request #442 from kurogin23mech-source/ms-108-profession-gate
