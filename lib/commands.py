@@ -21168,6 +21168,19 @@ def cmd_opportunity_list():
               f"/ status: {o.get('status', '?')} / account: {acc}"
               f"{deadline} / ball: {ball}{td_str} "
               f"/ activities: {len(o.get('activities', []))}")
+        # e-3584: 前進ゲート (advance gate) の状態を一貫した呼称で見せる。
+        # 空 = 発火源を確保せよ / 確定 = 完了に向けて準備せよ (SPEC 方針5B)。
+        gate = sales_entities.current_gate(data, o["id"])
+        done_n = len(sales_entities.gate_history(data, o["id"]))
+        if gate is None:
+            gate_str = ("決着済み"
+                        if sales_entities.opportunity_phase_is_terminal(data, o.get("phase", ""))
+                        else "無し")
+        elif (gate.get("anchor") or "").strip():
+            gate_str = f"確定 (発火源 {gate['anchor']})"
+        else:
+            gate_str = "空 (発火源 未紐づけ)"
+        print(f"    前進ゲート: {gate_str} / 通過フェーズ履歴: {done_n}")
 
 
 def cmd_opportunity_phase():
