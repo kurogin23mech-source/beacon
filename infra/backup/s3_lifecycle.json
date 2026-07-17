@@ -1,0 +1,12 @@
+{
+  "_comment": "ms-96 e-2382 — Beacon MySQL 退避物 (mysql/<env>/*.sql.gz) の保持ポリシー。aws s3api put-bucket-lifecycle-configuration --bucket <bucket> --lifecycle-configuration file://s3_lifecycle.json で適用する。6 時間毎 = 1 日 4 個 × 35 日 = 直近 ~140 世代を保持し、それ以降は自動失効。退避スクリプト側で古い世代を消さず、保持は S3 ライフサイクルに一元化する (= スクリプトに削除権限を持たせない最小権限)。",
+  "Rules": [
+    {
+      "ID": "expire-beacon-mysql-backups",
+      "Filter": { "Prefix": "mysql/" },
+      "Status": "Enabled",
+      "Expiration": { "Days": 35 },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 3 }
+    }
+  ]
+}

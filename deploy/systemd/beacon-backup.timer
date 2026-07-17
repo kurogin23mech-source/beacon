@@ -1,0 +1,17 @@
+# ms-96 e-2382 — MySQL スナップショット退避を 6 時間毎に起動する timer。
+# /etc/systemd/system/beacon-backup.timer に配置し `systemctl enable --now` する。
+[Unit]
+Description=Run Beacon MySQL → S3 backup every 6 hours
+
+[Timer]
+# 6 時間毎 (00:00 / 06:00 / 12:00 / 18:00 UTC 付近)。
+OnCalendar=00/6:00:00
+# 起動直後にも 1 回走らせ、初回退避まで最大 6 時間空くのを避ける。
+OnBootSec=10min
+# VPS を並べても退避が重ならないよう軽く散らす (単一構成では影響なし)。
+AccuracySec=2min
+# マシン停止中に退避時刻を跨いだら、起動後に取りこぼし分を 1 回走らせる。
+Persistent=true
+
+[Install]
+WantedBy=timers.target
