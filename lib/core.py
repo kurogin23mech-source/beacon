@@ -1257,7 +1257,7 @@ def sweep_trashed_in_project(data: dict, *, days: int = 30,
             cancelled_at = meta.get("cancelled_at", "")
             if (
                 e.get("type") == "task"
-                and e.get("status") == "cancelled"
+                and work_model.is_cancelled(e)
                 and cancelled_at
                 and cancelled_at < cutoff
             ):
@@ -2335,7 +2335,7 @@ def count_task_status(entries: list) -> tuple[int, int]:
                 if estatus in PR_DONE_STATUSES:
                     done += 1
             else:
-                if estatus in ("done", "cancelled"):
+                if estatus in (work_model.DONE_STATUS, work_model.CANCELLED_STATUS):
                     done += 1
         t, d = count_task_status(e.get("entries", []))
         total += t
@@ -2349,7 +2349,7 @@ def filter_cancelled(entries: list, show_all: bool = False) -> list:
         return entries
     result = []
     for e in entries:
-        if e.get("status") == "cancelled":
+        if work_model.is_cancelled(e):
             continue
         filtered = dict(e)
         children = e.get("entries", [])

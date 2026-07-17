@@ -1719,7 +1719,7 @@ def find_activity(data: dict, activity_id: str):
     return None, None
 
 
-VALID_ACTIVITY_STATUS = {"todo", "done"}
+VALID_ACTIVITY_STATUS = {work_model.TODO_STATUS, work_model.DONE_STATUS}
 
 
 def activity_set_status(data: dict, activity_id: str, status: str, *,
