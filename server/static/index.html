@@ -3193,6 +3193,21 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .mtg-when { flex:0 0 auto; font-size:11px; color:var(--text-primary); font-family:var(--font-mono, monospace); }
 .mtg-when.warn { color:#fbbf24; }
 .mtg-loc { flex:1; color:var(--text-dim); }
+/* --- 前進ゲート (advance gate): 状態 + 通過フェーズ履歴 --- */
+.gate-row { display:flex; align-items:baseline; gap:9px; padding:4px 0; border-bottom:1px solid var(--border-subtle); font-size:12px; }
+.gate-row:last-child { border-bottom:none; }
+.gate-row.open .gate-phase { color:var(--accent); font-weight:600; }
+.gate-icon { flex:0 0 auto; width:14px; text-align:center; color:var(--text-dim); }
+.gate-phase { flex:0 0 auto; color:var(--text-primary); }
+.gate-at { flex:1; text-align:right; font-size:11px; color:var(--text-dim); font-family:var(--font-mono, monospace); }
+.gate-oc { flex:0 0 auto; font-size:10px; padding:1px 7px; border-radius:9px; }
+.gate-oc.adv { color:var(--accent); background:var(--accent-glow); }
+.gate-oc.retry { color:#fbbf24; background:rgba(251,191,36,0.13); }
+.gate-oc.term { color:var(--text-secondary); background:var(--bg-raised); }
+.gate-oc.cur { color:var(--accent); background:var(--accent-glow); }
+.gate-state.confirmed { color:var(--accent); }
+.gate-state.empty { color:#fbbf24; }
+.gate-state.settled { color:var(--text-dim); }
 /* --- FB: 完了を隠すフィルタ + 活動配下 comm 折りたたみ --- */
 .acts-filter { margin-left:10px; font-size:10px; color:var(--text-dim); background:none; border:1px solid var(--border-subtle); border-radius:9px; padding:1px 8px; cursor:pointer; }
 .acts-filter:hover { color:var(--text-primary); border-color:var(--border); }
@@ -4700,9 +4715,77 @@ function _salesMeetingBadge(status) {
   const pair = map[status] || [status || '—', 'sched'];
   return `<span class="mtg-status ${pair[1]}">${esc(pair[0])}</span>`;
 }
+// 前進ゲート (advance gate) — 商談の判定関門。現在の状態 (空/確定/決着) を1行で、
+// done ゲート列を「通過フェーズ履歴」タイムラインで見せる (advance/retry/terminal)。
+function _salesOpenGate(o) {
+  return (o.gates || []).find(g => g.status === 'open') || null;
+}
+function _salesGateSettledAt(g) {
+  const row = (g.history || []).slice().reverse().find(h => h.kind === 'settled');
+  return (row && row.at) || g.created_at || '';
+}
+function _salesGateOutcomeBadge(outcome) {
+  switch (outcome) {
+    case 'advance':  return '<span class="gate-oc adv">→前進</span>';
+    case 'retry':    return '<span class="gate-oc retry">↺やり直し</span>';
+    case 'terminal': return '<span class="gate-oc term">→決着</span>';
+    default:         return '';
+  }
+}
+// 詳細ブロックの「前進ゲート」行 = 現在の状態。遷移日の temporal バッジを内包する
+// (空 = 発火源を確保せよ / 確定 = 完了に向け準備せよ, SPEC 方針5B)。
+function _salesGateStateRow(o, phases) {
+  const gates = o.gates || [];
+  if (!gates.length) return '';
+  const term = new Set(phases.filter(x => x.terminal).map(x => x.name));
+  if (term.has(o.phase)) return '<span class="gate-state settled">決着済み</span>';
+  const open = _salesOpenGate(o);
+  if (!open) return '';
+  const st = _salesOppStatusOf(o, phases, _salesTodayISO());
+  const badge = _salesTransitionBadge(st, _salesOppTransitionDate(o));
+  const anchor = (open.anchor || '').trim();
+  return anchor
+    ? `<span class="gate-state confirmed">● 確定</span> 発火源: ${esc(anchor)} ${badge}`
+    : `<span class="gate-state empty">○ 空</span> 発火源 未紐づけ ${badge}`;
+}
+// 通過フェーズ履歴 = done ゲート列 (古→新) + 進行中の open ゲート。完了を隠す時は
+// done ゲートを畳み、進行中だけ見せる (FB: 完了アイテムを隠す対象に含める)。
+function _renderAdvanceGate(o, phases) {
+  const gates = o.gates || [];
+  if (!gates.length) return '';
+  const hideDone = state.salesHideDone;
+  const done = gates.filter(g => g.status === 'done');
+  const open = _salesOpenGate(o);
+  const rows = [];
+  if (!hideDone) {
+    done.forEach(g => {
+      const icon = g.outcome === 'retry' ? '↺' : '✓';
+      rows.push(`<div class="gate-row">
+        <span class="gate-icon">${icon}</span>
+        <span class="gate-phase">${esc(g.phase || '')}</span>
+        ${_salesGateOutcomeBadge(g.outcome)}
+        <span class="gate-at">${esc(_salesShortDate(_salesGateSettledAt(g)))}</span>
+      </div>`);
+    });
+  }
+  if (open) {
+    rows.push(`<div class="gate-row open">
+      <span class="gate-icon">◐</span>
+      <span class="gate-phase">${esc(open.phase || '')}</span>
+      <span class="gate-oc cur">進行中</span>
+    </div>`);
+  }
+  if (!rows.length) return '';
+  const hidden = hideDone && done.length ? ` <span class="text-dim">(通過 ${done.length} 件を非表示)</span>` : '';
+  return `<div class="opp-acts-head">通過フェーズ履歴 (前進ゲート)${hidden}</div>${rows.join('')}`;
+}
 function _renderMeetings(o) {
-  const mtgs = o.meetings || [];
+  const all = o.meetings || [];
+  // FB: 完了を隠す時は終了/取消の面談を畳む (進行中の予定だけ見たい)。
+  const hideDone = state.salesHideDone;
+  const mtgs = hideDone ? all.filter(m => m.status === 'scheduled' || m.status === 'unscheduled') : all;
   if (!mtgs.length) return '';
+  const hiddenN = all.length - mtgs.length;
   const rows = mtgs.map(m => {
     const sched = m.scheduled_at || '';
     const endT = m.end_at ? _salesShortDate(m.end_at).replace(/^\d{4}-\d{2}-\d{2}\s*/, '') : '';
@@ -4722,7 +4805,8 @@ function _renderMeetings(o) {
       ${locHtml}
     </div>`;
   }).join('');
-  return `<div class="opp-acts-head">面談 (Meeting) (${mtgs.length})</div>${rows}`;
+  const hidden = hiddenN > 0 ? ` <span class="text-dim">(終了 ${hiddenN} 件を非表示)</span>` : '';
+  return `<div class="opp-acts-head">面談 (Meeting) (${mtgs.length})${hidden}</div>${rows}`;
 }
 // ms-107 e-3432: Communication (証跡・事後記録型 = 営業の Commit). Activity が
 // 「予定」なのに対し、これは source を辿れる「事実」の追記ログ。oldest→newest
@@ -4990,7 +5074,7 @@ function renderOpportunityModal(oppId) {
     ${row('顧客', acct ? esc(acct) : '<span class="text-dim">未紐付け</span>')}
     ${row('担当', o.assignee ? esc(_salesMemberLabel(p, o.assignee)) : '')}
     ${row('フェーズ', _salesPhaseBadge(o.phase, phases))}
-    ${term.has(o.phase) ? '' : row('遷移日', _salesTransitionBadge(st, _salesOppTransitionDate(o)) || '—')}
+    ${row('前進ゲート', _salesGateStateRow(o, phases))}
     ${row('金額', money)}
     ${row('成約率', phaseProb != null ? phaseProb + '%' : '')}
     ${row('見込み', wtd != null ? `<span class="opp-weighted">${_salesYen(wtd)}</span>` : '')}
@@ -5002,6 +5086,7 @@ function renderOpportunityModal(oppId) {
       <span class="sm-close" data-action="close-opp">×</span>
       <div class="sm-head"><span class="sm-name">${esc(o.title || '(no title)')}</span></div>
       ${detail}
+      ${_renderAdvanceGate(o, phases)}
       ${_renderOppActivities(o)}
       ${_renderMeetings(o)}
       ${_renderCommunications(o)}
