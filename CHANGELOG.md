@@ -2,6 +2,13 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.60.0] - 2026-07-17
+
+- Merge pull request #442 from kurogin23mech-source/ms-108-profession-gate
+- feat(ms-108): skill install を profession でゲート — dev に営業スキルを入れない (e-3364)
+- docs(release): update README/CHANGELOG for v0.59.0
+- chore(release): bump formula to 0.59.0
+
 ## [v0.59.0] - 2026-07-17
 
 - Merge pull request #441 from kurogin23mech-source/ms-109-1-target-class
