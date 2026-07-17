@@ -1304,6 +1304,20 @@ def anchor_gate(data: dict, gate_id: str, work_item_id: str, *,
     return gate
 
 
+def _anchor_open_gate_to_meeting(data: dict, opportunity_id: str,
+                                 meeting_id: str, *, at: str = "") -> None:
+    """Anchor the opportunity's open前進ゲート to ``meeting_id`` (its発火源) when a
+    meeting is confirmed with set_transition (e-3583 fix, dogfood #8). Idempotent:
+    skips when the gate already points at this meeting (no duplicate history row),
+    and silently no-ops when no gate is open (terminal / none). This closes the
+    gap where the phase-entry seed path anchored seeded meetings but a directly-
+    scheduled meeting (e.g. on a migrated gate) left the anchor empty."""
+    gate = current_gate(data, opportunity_id)
+    if gate is None or (gate.get("anchor") or "") == meeting_id:
+        return
+    anchor_gate(data, gate["id"], meeting_id, at=at)
+
+
 def settle_gate(data: dict, gate_id: str, *, outcome: str, reason: str = "",
                 actor: str = "", at: str = "") -> dict:
     """Settle an open advance gate with its判定 outcome and evidence; return it.
@@ -2241,6 +2255,11 @@ def meeting_schedule(data: dict, opportunity_id: str, scheduled_at: str, *,
         # meeting's *end* is gate_judgement_ready's job; this only pins the date.
         set_transition_date(data, opportunity_id, when[:10],
                             note=f"面談確定 ({mtg_id})", at=at)
+        # e-3583 fix (dogfood #8): a set_transition meeting IS the phase's発火源,
+        # so anchor the open gate to it here too — the seed path
+        # (instantiate_phase_activities) only covers meetings seeded on phase
+        # entry, leaving migrated / directly-scheduled gates unanchored.
+        _anchor_open_gate_to_meeting(data, opportunity_id, mtg_id, at=at)
     return mtg_id
 
 
@@ -2327,6 +2346,8 @@ def meeting_reschedule(data: dict, meeting_id: str, scheduled_at: str, *,
     if set_transition:
         set_transition_date(data, opp["id"], when[:10],
                             note=f"面談再調整 ({meeting_id})", at=at)
+        # e-3583 fix (dogfood #8): the rescheduled meeting is the開火源, anchor it.
+        _anchor_open_gate_to_meeting(data, opp["id"], meeting_id, at=at)
     return m
 
 
