@@ -2,6 +2,172 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.59.0] - 2026-07-17
+
+- Merge pull request #441 from kurogin23mech-source/ms-109-1-target-class
+- feat(ms-109): 残る task/activity の状態判定・語彙を work_model に寄せる (e-3559 reader 仕上げ)
+- Merge pull request #440 from kurogin23mech-source/ms-109-1-target-class
+- feat(ms-109): status --json / 出力ビルダの Target ラベル読みを work_model 経由に (e-3559 reader 継続)
+- Merge pull request #439 from kurogin23mech-source/ms-109-1-target-class
+- feat(ms-109): 開発インスタンスも work_model 経由に載せ替え — Target ラベル読み + open/done 判定を基底アクセサへ (e-3559 wiring)
+- feat(ms-109): 営業インスタンスを work_model 経由に載せ替え開始 — Target ラベル読み + done 判定を基底アクセサへ (e-3559 wiring)
+- feat(ms-109): work_model.py — 職種非依存の Target/WorkItem/Evidence 正準スキーマ + tolerant アクセサ (e-3559 expand 段)
+- Merge pull request #438 from kurogin23mech-source/fix/ms-110-e3613-consent-claim-signing
+- fix(ms-110): recipient_confirmed consent claim を署名前に含め署名破壊を解消 (e-3613)
+- Merge pull request #437 from kurogin23mech-source/ms-106-gate-anchor-fix
+- refactor(ms-106): 商談の「ステータス」表示を削除 — phase 派生で参照ゼロの冗長 (UI FB)
+- feat(ms-106): 商談リスト/カンバン行にも前進ゲート状態 chip を表示 (UI FB)
+- fix(ms-106): 面談確定時に前進ゲートの発火源(anchor)を紐づける — 直接予約/移行ゲートの穴を塞ぐ (e-3583 fix)
+- Merge pull request #436 from kurogin23mech-source/ms-106-advance-gate
+- feat(ms-106): 商談詳細 UI に前進ゲートを表示＋完了フィルタに終了面談/done ゲートを含める
+- feat(ms-106): 「前進ゲート(advance gate)」の呼称をCLIに一貫適用 (e-3584)
+- feat(ms-106): 営業スキルを前進ゲートの発火モデルに載せ替え (e-3583 後半・スキル適合)
+- feat(ms-106): フェーズ入場で seed した面談を前進ゲートの発火源に紐づける (e-3583 前半・構造配線)
+- feat(ms-106): 商談フェーズに「前進の枠組み(macro-frame)」説明文を持たせAIに進行の frame を刷り込む (e-3582)
+- feat(ms-106): 遷移判定の発火を前進ゲートの紐づけ work-item 完了に一本化・transition_signal 撤去 (e-3581)
+- feat(ms-106): 遷移日・フェーズ履歴を商談から前進ゲートへ畳む＋既存データ移行 (e-3580)
+- feat(ms-106): 前進ゲート(advance gate)エンティティとライフサイクルを新設 (e-3579)
+- Merge pull request #435 from kurogin23mech-source/ms-106-meeting-seed
+- feat(ms-106): 面談を予定未定で seed → 確定時に同レコード update、重複を根絶 (e-3548)
+- Merge pull request #434 from kurogin23mech-source/ms-106-ui-skill
+- feat(ms-106): 活動・証跡に created_in_phase (生誕フェーズ) を set-once で刻む (e-3555)
+- feat(ms-106): 誤起票した証跡の取消・付け替え primitive を追加 (e-3537)
+- Merge pull request #433 from kurogin23mech-source/ms-109-1-target-class
+- feat(ms-109): 基底の不変プリミティブ work_base.py を切り出す (e-3558)
+- Merge pull request #432 from kurogin23mech-source/ms-106-sales-followups
+- feat(ms-106): 商談詳細に「完了を隠す」フィルタと活動配下 comm の折りたたみを追加
+- Merge pull request #431 from kurogin23mech-source/ms-106-sales-followups
+- feat(ms-106): 商談詳細に面談(Meeting, mtg-)セクションを追加 (e-3547)
+- Merge pull request #430 from kurogin23mech-source/ms-106-sales-followups
+- feat(ms-106): やり取り(Communication) 行に「詳細」トグルを追加 (e-3544 UI半)
+- Merge pull request #429 from kurogin23mech-source/ms-106-sales-followups
+- feat(ms-106): 商談詳細で Communication を活動配下にネスト表示・型/ID/出典を明示 (e-3540/e-3541/e-3542 UI)
+- feat(ms-106): 返信ウォッチャーの quiet hours 制約を撤廃
+- Merge pull request #428 from kurogin23mech-source/ms-106-dogfood-fixes
+- fix(ms-106): Codex plugin の session-start コピーを再生成 (e-3500)
+- fix(ms-106): session-start の canonical shared copy をパス修正に追従 (e-3500)
+- fix(ms-106): 手動フェーズ移動でも標準活動を seed し全経路を揃える (e-3502)
+- feat(ms-106): 返信ウォッチャーを回す Operation を ensure する (e-3504 Phase 2)
+- fix(ms-106): Communication を commit↔task と一貫して入れ子化 + UI 描画 (e-3503)
+- feat(ms-106): 日程調整のお作法を capability に紐付け — 3枠統一 + カレンダー仮押さえ (e-3499)
+- feat(ms-106): 営業メールのお作法 + 送信の二重レコード解消 (e-3498, e-3505)
+- feat(ms-106): 商談をフェーズで起票すると標準活動が自動で並ぶ (e-3502)
+- feat(ms-106): Operation の発火先 Skill を per-Operation 指定可能に (e-3504 Phase 1)
+- fix(ms-106): split layout で Skill のスクリプトパスが壊れる問題を修正 (e-3500)
+- Merge pull request #425 from kurogin23mech-source/feat/ms-107-meeting-detect
+- Merge pull request #423 from kurogin23mech-source/feat/ms-107-communication
+- Merge pull request #426 from kurogin23mech-source/ms-110-fork-f879de
+- fix(ms-110): P1 — 同一ユーザーの cross-project DM が 403 で全滅する穴を塞ぐ (e-3492)
+- Merge pull request #424 from kurogin23mech-source/ms-110-fork-f879de
+- feat(ms-107): Operation を server tick 発火対象に opt-in する CLI (有効化 gap 解消) (e-3461)
+- feat(ms-107): D 一括取込 / A 終了ワークフロー / F 横断コックピット の Skill (e-3436, e-3435, e-3373)
+- feat(ms-107): E 返信ウォッチャー — watch モデル + 検知 Skill (tick の2人目の利用者) (e-3437)
+- refactor(ms-107): 定期tickを target 非依存の primitive に一般化 (Operation 専用を解体) (e-3461)
+- test(ms-110): CLI 送信 → サーバ backstop の end-to-end seam テスト
+- feat(ms-110): /beacon-dm-send が cross-project 送信で確認フラグを出す (e-3445 Skill 半分)
+- feat(ms-110): CLI が宛先確認 claim を envelope に載せる (e-3445 CLI 半分)
+- feat(ms-107): 終了検知を trek tick に相乗り発火 — server 配線 (C chunk 3b) (e-3461)
+- chore(ms-110): PreToolUse hook を棚上げ、サーバ backstop を唯一の門番に (e-3444 shelve)
+- feat(ms-110): PreToolUse hook で cross-user DM 直叩きを deny (e-3444)
+- feat(ms-107): server-fired Operation の cadence pure logic (C chunk 3a) (e-3434)
+- feat(ms-107): 終了検知の CLI (meeting ended) + 検知 Skill (C 実行側) (e-3434)
+- feat(ms-110): サーバ側 cross-user consent backstop (e-3443)
+- feat(ms-107): ミーティング終了検知の pure コア scan_ended_meetings (C 土台) (e-3434)
+- feat(ms-107): off-channel のやり取りを自由記述 channel + 報告 Skill で記録 (e-3454)
+- feat(ms-107): Communication を Activity/Nurturing にも紐づけ可能に (Commit→Task 対称) (e-3451)
+- feat(ms-110): sender-side cross-user DM consent gate データモデル (e-3442)
+- feat(ms-107): Meeting エンティティ = 予定確定で遷移日+カレンダー+識別IDを束ねる (B) (e-3433)
+- feat(ms-107): Communication エンティティ = 営業の Commit (model + CLI + 商談ボード UI) (e-3432)
+- Merge pull request #422 from kurogin23mech-source/feat/ms-106-sales-fb9
+- fix(ms-106): 固定 UI ラベルを英語統一 (活動→Activity / ナーチャリング→Nurturing) + 商談モーダルの「活動」重複を削除 (e-3394)
+- Merge pull request #421 from kurogin23mech-source/feat/ms-106-sales-fb8
+- fix(ms-106): Account の「詳細」ボタンと「リード」フェーズタグのデザインを差別化 (e-3394)
+- fix(ms-106): 担当絞り込みがメンバー未取得で常に「すべて」だけになるバグを修正 (案Y) (e-3394)
+- Merge pull request #420 from kurogin23mech-source/feat/ms-106-sales-fb7
+- feat(ms-106): Account タブにも担当絞り込み + 「商談」タブ名を Opportunity に (e-3394)
+- feat(ms-106): 担当絞り込みをプロジェクトメンバー由来に (案A) — 無関係ユーザーを出さない (e-3394)
+- Merge pull request #419 from kurogin23mech-source/feat/ms-106-sales-fb6
+- feat(ms-106): 遷移日ラベル削除 + Account を展開(ナーチャリング)/詳細ボタン(モーダル)に再構成 (e-3394)
+- Merge pull request #418 from kurogin23mech-source/feat/ms-106-sales-fb5
+- feat(ms-106): 商談個別の見込み売上を表示 + 全体見込みを Objective 下に改行配置 (e-3394)
+- Merge pull request #417 from kurogin23mech-source/feat/ms-106-sales-fb3
+- feat(ms-106): 見込み売上（加重パイプライン）+ フェーズ成約率 + 商談金額 + メンバー目標売上/進捗 (e-3394)
+- feat(ms-106): 営業 target の CLI + UI — 担当ユーザー / Nurturing / 担当絞り込み / account rename (e-3350, e-3394)
+- feat(ms-106): 営業 target のモデル拡張 — 担当ユーザー / Nurturing entity / 顧客フェーズ連動 (e-3350, e-3394)
+- Merge pull request #416 from kurogin23mech-source/feat/ms-106-sales-ui-fb2
+- feat(ms-106): 商談ボード FB2 — 絞り込みを開発 Beacon の filter-bar と同型に + 期日超過の赤ハイライト (e-3394)
+- Merge pull request #415 from kurogin23mech-source/feat/ms-106-sales-ui-fb1
+- feat(ms-106): 商談ボード FB1 — カンバンモーダル/フェーズ色分け/絞り込み/顧客紐付け表示/決着列トグル + Contact 電話番号 (e-3394)
+- Merge pull request #414 from kurogin23mech-source/feat/ms-106-sales-ui
+- feat(ms-106): 商談ボードを v2 に — リスト/カンバン トグル + Account タブ/モーダル (e-3394)
+- fix(ms-84): cloud upload-initial の初回移行が「already in cloud mode」で自爆する回帰を修正
+- feat(ms-106): 営業 商談ボード UI (read-only) を Web UI に追加 (e-3394)
+- Merge pull request #413 from kurogin23mech-source/feat/ms-107-sales-skills
+- feat(ms-107): 基本4フェーズの営業方法論を seed に確定 (e-3375)
+- feat(ms-107): 締切精査を target-class 汎用コアに + 相手ボール timeout を ball 分割で実現 (e-3271)
+- feat(ms-107): advance 時にフェーズ固定アンカー活動を自動起票 (e-3270)
+- feat(ms-107): 遷移日判定 engine (3分岐 advance/retry/terminal) + overdue 派生状態 (e-3372)
+- feat(ms-107): 遷移日 (transition_date) + フェーズ methodology の engine 土台 (e-3371)
+- feat(ms-107): 送信アカウント台帳に slack service を追加（namespace=workspace 切替）(e-3365)
+- feat(ms-107): 営業メール/カレンダー Skill を台帳解決の複垢リアルタイム切替に再構築 (e-3365)
+- feat(ms-107): 送信アカウント台帳 — bare email から label→email+MCP route へ格上げ (e-3365)
+- feat(ms-107): 営業実務 Skill 3本 — 名刺取込 / カレンダー日程調整 / Drive格納 (e-3363)
+- feat(ms-107): メール操作 Skill — 商談メールを下書き→identity照合→承認→送信→活動記録 (e-3362)
+- feat(ms-107): 複数 Google アカウントの取り違え防止の土台 — 送信 identity pin + from 照合ゲート (e-3361)
+- Merge pull request #412 from kurogin23mech-source/feat/ms-106-sales-entities
+- feat(ms-106): 営業データ層を閉じる — account phase / delete / opportunity delete / phase list (e-3351)
+- feat(ms-106): 商談/顧客のフェーズファネルを会社別設定に (案A) + 決着ルール (e-3349)
+- feat(ms-106): 営業エンティティを CLI から操作可能に (account/opportunity/activity) (e-3348)
+- feat(ms-106): 営業職種のエンティティ最小箱 + init 職種選択 (e-3347)
+- Merge pull request #411 from kurogin23mech-source/fix/ms-93-e3340-qualgate-cli-parity
+- feat(ms-93): 質的ゲートを CLI 送信経路にも入れ Codex armed を Claude と同等化 (e-3340)
+- Merge pull request #410 from kurogin23mech-source/fix/ms-100-armed-hardening
+- Merge remote-tracking branch 'origin/main' into fix/ms-100-armed-hardening
+- Merge pull request #406 from kurogin23mech-source/fix/session-start-local-desktop-launch
+- Merge pull request #409 from kurogin23mech-source/fix/ms-105-e3230-health-detect
+- Merge pull request #408 from kurogin23mech-source/fix/ms-105-e3231-deploy-rollback
+- Merge pull request #407 from kurogin23mech-source/fix/ms-105-deploy-health-tidy
+- feat(ms-105): デプロイ健全性の独立監視 + アラート配線 (e-3230 後半)
+- refactor(ms-100): armed から Monitor 配信複製を廃止し budget grant only に縮小 (e-3255)
+- fix(ms-100): 自律返信 budget を送信中断/失敗時に refund する (e-2999)
+- feat(ms-100): armed の通常会話返信を確認なしの構造既定にする (B芯, e-3309)
+- feat(ms-100): armed の自律返信に質的ゲートを追加 — 外部宛/機密/action付きを構造的に hold (e-3308)
+- fix(ms-100): budget gate の CLI/MCP 非対称を意図として明文化 + 契約テストで固定 (e-3310)
+- feat(ms-105): デプロイ健全性の検知 + アラート宛先解決の中核 (e-3230 前半)
+- feat(ms-105): デプロイ health 失敗時の auto-rollback + bad rev 隔離 (e-3231)
+- fix(ms-105): /health の必須設定チェックを宣言的 readiness に整理 (e-3312)
+- fix(ms-105): デプロイ設定雛形からハードコード client_id を削除 (e-3313)
+- fix(ms-85): session-start Step 2.7 に local mode の desktop 起動を復元
+- Merge pull request #405 from kurogin23mech-source/fix/ms-102-e3222-vps-restart-skip
+- Merge pull request #404 from kurogin23mech-source/fix/ms-78-e2236-dist-identity
+- fix(ms-102): VPS pull-deploy の restart-skip 永久 stuck を self-heal 化 (e-3222)
+- fix(ms-78): 配布参照を実在しない r-kida2 から実体 kurogin23mech-source へ統一 (e-2236)
+- Merge pull request #403 from kurogin23mech-source/fix/ms-61-e2900-trek-skill-release-ref
+- fix(ms-61): regenerate Codex plugin skill copy after e-2900 edit
+- fix(ms-61): beacon-trek-execute の存在しない beacon release 参照を除去 (e-2900)
+- Merge pull request #402 from kurogin23mech-source/fix/ms-96-e3196-e3197-oauth-env
+- Merge pull request #401 from kurogin23mech-source/fix/ms-96-e3240-dm-audit-mysql
+- fix(ms-96): OAuth client_id を env 真値源化 + 空を本番で loud 検出 (e-3196/e-3197)
+- fix(ms-96): DM 承認履歴の監査ビュー 500 を構造的に解消 (e-3240)
+- Merge pull request #400 from kurogin23mech-source/fix/ms-93-e3225-codex-posttool-hook
+- Merge origin/main into fix/ms-93-e3225 (resolve plugin.json conflict)
+- Merge pull request #399 from kurogin23mech-source/ms-90-decision-log
+- test(ms-90): dm-reply-no-context テストを hermetic 化 (stub _read_bus_budget)
+- feat(ms-90): 各決定経路に判断理由 (rationale) を通す (e-3241)
+- feat(ms-90): 残り3経路 (scope承認/trek-review/halt-resume) も decision-event 記録 (e-3247)
+- feat(ms-90): DM 発信を decision-event ストリームに記録する主役経路 (e-3246)
+- feat(ms-90): decision-event 統一スキーマ + 3 backend ストレージ primitive (e-3242)
+- Merge pull request #398 from kurogin23mech-source/ms-85-surface-area
+- refactor(ms-85): rationale 散文を doc/commit 参照化 (e-3181) + plugin cachebuster
+- refactor(ms-85): DM/trek 検出器を単一 inbox 取得に統合 (e-3180)
+- feat(ms-93): Codex plugin setupでAGENTS.mdへ常時ルールを反映 (e-3250)
+- refactor(ms-85): archaeology コンサルタントモードを別 skill に切り出し (e-3179)
+- refactor(ms-85): session-start の inline python を script/lib に抽出 (e-3178)
+- chore(ms-93): verify Codex PostToolUse auto-record hook
+- refactor(ms-85): session-start の不要ステップを削除 (e-3177)
+- docs(release): update README/CHANGELOG for v0.58.0
+- chore(release): bump formula to 0.58.0
+
 ## [v0.58.0] - 2026-07-11
 
 - Merge pull request #397 from kurogin23mech-source/feat/ms-104-application-map
