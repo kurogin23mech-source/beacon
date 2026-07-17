@@ -1056,7 +1056,7 @@ def opportunities_awaiting_judgement(data: dict, today: str) -> list:
     pairs = scan_overdue(live_opportunities(data), due_of, settled_of, today)
     return [{
         "id": o["id"],
-        "title": o.get("title", ""),
+        "title": work_model.target_label(o),
         "phase": o.get("phase", ""),
         "transition_date": get_transition_date(data, o["id"]),
         "transition_status": st,

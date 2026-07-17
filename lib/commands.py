@@ -1134,7 +1134,7 @@ def cmd_milestone_list():
         icon = icons.get(ms["status"], "?")
         active = " \u25c0 ACTIVE" if ms["status"] == "in_progress" else ""
         progress = ms.get("progress", 0)
-        print(f"  {icon} [{ms['id']}] {ms['title']} ({progress}%){active}")
+        print(f"  {icon} [{ms['id']}] {work_model.target_label(ms)} ({progress}%){active}")
 
 
 def cmd_milestone_start():
@@ -1280,7 +1280,7 @@ def cmd_milestone_start():
                 print(f"  warning: could not create/switch branch: {e}", file=sys.stderr)
 
     save_project(data)
-    print(f"Activated: {ms['title']}")
+    print(f"Activated: {work_model.target_label(ms)}")
     if actor_str and not no_assignee:
         print(f"  assignee: {actor_str}")
     if branch_name and branch_msg:
@@ -1554,7 +1554,7 @@ def cmd_milestone_done():
     _release_occupation_for_transition(data, ms_id, reason="done")
     save_project(data, op={"op": "milestone_done", "ms_id": ms_id, "reason": reason})
     _prompt_close_leftover_worktree(ms_id, "done")
-    print(f"Completed: {ms['title']}")
+    print(f"Completed: {work_model.target_label(ms)}")
     if reason:
         print(f"  Reason: {reason}")
 
@@ -1582,7 +1582,7 @@ def cmd_milestone_wait():
     save_project(data, op={"op": "milestone_wait", "ms_id": ms_id,
                            "reason": reason})
     _prompt_close_leftover_worktree(ms_id, "wait")
-    print(f"Waiting: [{ms['id']}] {ms['title']}")
+    print(f"Waiting: [{ms['id']}] {work_model.target_label(ms)}")
     if reason:
         print(f"  Reason: {reason}")
 
@@ -1696,7 +1696,7 @@ def cmd_milestone_observe():
     save_project(data, op={"op": "milestone_observe", "ms_id": ms_id,
                            "reason": reason})
     _prompt_close_leftover_worktree(ms_id, "observe")
-    print(f"Observing: [{ms['id']}] {ms['title']}")
+    print(f"Observing: [{ms['id']}] {work_model.target_label(ms)}")
     if reason:
         print(f"  Reason: {reason}")
 
@@ -1833,7 +1833,7 @@ def cmd_milestone_show():
                 icons = {"done": "\u25cf", "in_progress": "\u25d1", "todo": "\u25cb",
                          "waiting": "\u25cc", "in_review": "\u25d5", "cancelled": "\u2718"}
                 icon = icons.get(ms["status"], "?")
-                print(f"{icon} [{ms['id']}] {ms['title']}")
+                print(f"{icon} [{ms['id']}] {work_model.target_label(ms)}")
                 if ms.get("description"):
                     print(f"  {ms['description']}")
                 print(f"  Status: {ms['status']}  Progress: {ms.get('progress', 0)}%")
@@ -1897,11 +1897,11 @@ def cmd_milestone_update():
     changelog_op = {"op": f"milestone_{status}", "ms_id": ms_id, "reason": reason} if status else None
     save_project(data, op=changelog_op)
     if json_mode:
-        print(json.dumps({"id": ms["id"], "title": ms["title"],
+        print(json.dumps({"id": ms["id"], "title": work_model.target_label(ms),
                           "status": ms["status"], "progress": ms.get("progress", 0)},
                          ensure_ascii=False))
     else:
-        print(f"Updated: [{ms['id']}] {ms['title']}")
+        print(f"Updated: [{ms['id']}] {work_model.target_label(ms)}")
 
 
 def cmd_milestone_delete():
@@ -1922,7 +1922,7 @@ def cmd_milestone_delete():
     if json_mode:
         print(json.dumps({"id": ms["id"], "status": "cancelled"}, ensure_ascii=False))
     else:
-        print(f"Cancelled: [{ms['id']}] {ms['title']}")
+        print(f"Cancelled: [{ms['id']}] {work_model.target_label(ms)}")
         print(f"  Reason: {reason}")
 
 
@@ -2586,7 +2586,7 @@ def cmd_sync():
 
     if added:
         save_project(data)
-        print(f"Synced {added} new commits to: {target['title']}")
+        print(f"Synced {added} new commits to: {work_model.target_label(target)}")
     else:
         print("No new commits to sync.")
 
@@ -2619,7 +2619,7 @@ def cmd_task_add():
     if target.get("status") == "done":
         if sys.stdin.isatty():
             print(
-                f"\n[ms-81 re-open prompt] [{target['id']}] {target['title']} "
+                f"\n[ms-81 re-open prompt] [{target['id']}] {work_model.target_label(target)} "
                 f"is done. Adding a task here will leave it stuck (the "
                 f"write gate blocks commit / done on done milestones).",
                 file=sys.stderr,
@@ -2649,7 +2649,7 @@ def cmd_task_add():
         else:
             print(
                 f"[ms-81 re-open warning] adding to done MS [{target['id']}] "
-                f"{target['title']} — task will be stuck (write gate blocks "
+                f"{work_model.target_label(target)} — task will be stuck (write gate blocks "
                 f"future commits / done). Re-open with `beacon milestone start "
                 f"{ms_id}` or `beacon milestone observe {ms_id}` first.",
                 file=sys.stderr,
@@ -2667,7 +2667,7 @@ def cmd_task_add():
                         author=author or None)
     save_project(data)
     from_str = f" (from {requested_by})" if requested_by else ""
-    print(f"Added {entry_type} [{eid}] to {target['title']}: {description}{from_str}")
+    print(f"Added {entry_type} [{eid}] to {work_model.target_label(target)}: {description}{from_str}")
 
 
 def cmd_task_done():
@@ -2739,7 +2739,7 @@ def cmd_task_list():
         return
 
     if not entries:
-        print(f"No entries in {target['title']}")
+        print(f"No entries in {work_model.target_label(target)}")
         return
 
     icons = {"done": "\u25cf", "todo": "\u25cb", "cancelled": "\u2718"}
@@ -2771,7 +2771,7 @@ def cmd_task_show():
              "cancelled": "\u2718"}
     icon = icons.get(entry.get("status", "todo"), "?")
     print(f"{icon} [{entry['id']}] {entry.get('description', '')}")
-    print(f"  Milestone: [{ms['id']}] {ms['title']}")
+    print(f"  Milestone: [{ms['id']}] {work_model.target_label(ms)}")
     print(f"  Type: {entry.get('type', '?')}  Status: {entry.get('status', '?')}")
     priority = entry.get("meta", {}).get("priority", "")
     if priority:
@@ -8971,7 +8971,7 @@ def cmd_milestone_graph():
                     dep_str = f" <- {', '.join(deps)}" if deps else ""
                     status_icon = {"done": "●", "in_progress": "◐", "todo": "○",
                                    "waiting": "◌", "observing": "◔"}.get(node["status"], "?")
-                    lines.append(f"  {status_icon} {ms_id} {node['title']} ({node['progress']}%){dep_str}")
+                    lines.append(f"  {status_icon} {ms_id} {work_model.target_label(node)} ({node['progress']}%){dep_str}")
             print(f"Wave {wave_num}{cycle_marker}:")
             for line in lines:
                 print(line)
@@ -20933,7 +20933,7 @@ def cmd_account_list():
         phase = a.get("phase", "")
         phase_str = f"phase: {phase} / " if phase else ""
         suffix = f" [health: {health}]" if health else ""
-        print(f"[{a['id']}] {a['name']}{suffix} — {phase_str}contacts: {len(contacts)}")
+        print(f"[{a['id']}] {work_model.target_label(a)}{suffix} — {phase_str}contacts: {len(contacts)}")
         for c in contacts:
             role = f" ({c['role']})" if c.get("role") else ""
             email = f" <{c['email']}>" if c.get("email") else ""
@@ -21316,7 +21316,7 @@ def cmd_opportunity_list():
             td_str = ""
         # status は phase からの派生ミラーで参照ゼロ (表示のみ) だったため list から除外。
         # 保存フィールドの整理はリファクタ時 (UI FB 2026-07-17)。
-        print(f"[{o['id']}] {o['title']} — phase: {o.get('phase', '?')} "
+        print(f"[{o['id']}] {work_model.target_label(o)} — phase: {o.get('phase', '?')} "
               f"/ account: {acc}"
               f"{deadline} / ball: {ball}{td_str} "
               f"/ activities: {len(o.get('activities', []))}")
@@ -21940,7 +21940,7 @@ def cmd_watch_list():
         w = wi.get("watch", {})
         rows.append({
             "target_id": target.get("id"),
-            "target_title": target.get("title") or target.get("name", ""),
+            "target_title": work_model.target_label(target),
             "work_item_id": wi.get("id"),
             "work_item": wi.get("description", ""),
             "channel": w.get("channel", ""),
