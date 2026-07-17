@@ -11,6 +11,7 @@ import datetime as _dt
 import re
 
 import work_base
+import work_model  # ms-109 e-3559: 職種非依存の Target/WorkItem 正準アクセサ
 
 
 def _now_iso() -> str:
@@ -1165,7 +1166,7 @@ def task_update(data: dict, entry_id: str, *,
                 f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_STATUSES))}"
             )
         entry["status"] = status
-        if status == "done" and not entry.get("done_at"):
+        if status == work_model.DONE_STATUS and not entry.get("done_at"):
             entry["done_at"] = date
         changed = True
     if detail:
@@ -1520,7 +1521,7 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
         "hash": commit_hash,
         "entry_id": commit_entry["id"],
         "milestone": target["id"],
-        "milestone_title": target.get("title", ""),
+        "milestone_title": work_model.target_label(target),
         "progress": target.get("progress", 0),
     }
     if matched_task:
@@ -1570,7 +1571,7 @@ def _find_matching_task(entries: list, commit_text: str):
 
     candidates = []
     for entry in entries:
-        if entry.get("type") != "task" or entry.get("status") in ("done", "cancelled"):
+        if entry.get("type") != "task" or not work_model.is_open(entry):
             continue
         task_text = entry.get("description", "") + " " + entry.get("detail", "")
         task_tokens = _tokenize(task_text)
@@ -2220,7 +2221,7 @@ def milestone_graph(data: dict) -> dict:
         id_set.add(ms_id)
         nodes.append({
             "id": ms_id,
-            "title": ms.get("title", ""),
+            "title": work_model.target_label(ms),
             "status": ms.get("status", ""),
             "progress": ms.get("progress", 0),
             "workspace": ms.get("workspace"),
@@ -2369,12 +2370,12 @@ def milestone_prepare_info(ms: dict) -> dict:
 
     pending_tasks = []
     for e in entries:
-        if e.get("type") == "task" and e.get("status") not in ("done", "cancelled"):
+        if e.get("type") == "task" and work_model.is_open(e):
             pending_tasks.append({"id": e["id"], "description": e.get("description", "")})
 
     return {
         "id": ms["id"],
-        "title": ms.get("title", ""),
+        "title": work_model.target_label(ms),
         "status": ms.get("status", ""),
         "progress": ms.get("progress", 0),
         "total_tasks": total_tasks,
