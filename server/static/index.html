@@ -3208,6 +3208,9 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .gate-state.confirmed { color:var(--accent); }
 .gate-state.empty { color:#fbbf24; }
 .gate-state.settled { color:var(--text-dim); }
+.gate-chip { flex:0 0 auto; font-size:10px; padding:1px 7px; border-radius:9px; white-space:nowrap; }
+.gate-chip.empty { color:#fbbf24; background:rgba(251,191,36,0.13); }
+.gate-chip.confirmed { color:var(--accent); background:var(--accent-glow); }
 /* --- FB: 完了を隠すフィルタ + 活動配下 comm 折りたたみ --- */
 .acts-filter { margin-left:10px; font-size:10px; color:var(--text-dim); background:none; border:1px solid var(--border-subtle); border-radius:9px; padding:1px 8px; cursor:pointer; }
 .acts-filter:hover { color:var(--text-primary); border-color:var(--border); }
@@ -4616,7 +4619,7 @@ function _renderOppKanban(p) {
       return `<div class="kb-card" data-action="open-opp" data-opp-id="${esc(o.id)}">
         <div class="kb-card-title">${esc(o.title || '(no title)')}</div>
         <div class="kb-card-meta">${_salesAcctChip(p, o)}${_salesOwnerChip(p, o)}</div>
-        <div class="kb-card-meta">${badge}${_salesActsBadge(o)}${_salesOppWeightedChip(p, o)}</div>
+        <div class="kb-card-meta">${badge}${_salesGateChip(o, phases)}${_salesActsBadge(o)}${_salesOppWeightedChip(p, o)}</div>
       </div>`;
     }).join('') || '<div class="kb-none">—</div>';
     cols += `<div class="kb-col ${ph.terminal ? 'terminal' : ''}">
@@ -4650,6 +4653,7 @@ function _renderOppList(p) {
         ${_salesPhaseBadge(o.phase, phases)}
         <span class="opp-ltitle">${esc(o.title || '(no title)')}${acct ? ` <span class="opp-acct">${esc(acct)}</span>` : ''}${_salesOwnerChip(p, o)}</span>
         ${term.has(o.phase) ? '' : _salesTransitionBadge(st, _salesOppTransitionDate(o))}
+        ${_salesGateChip(o, phases)}
         ${_salesActsBadge(o)}
         ${_salesOppWeightedChip(p, o)}
       </div>${body}
@@ -4714,6 +4718,18 @@ function _salesMeetingBadge(status) {
   const map = { scheduled: ['予定', 'sched'], ended: ['実施済', 'ended'], cancelled: ['キャンセル', 'cancd'] };
   const pair = map[status] || [status || '—', 'sched'];
   return `<span class="mtg-status ${pair[1]}">${esc(pair[0])}</span>`;
+}
+// 前進ゲートのコンパクト chip — リスト/カンバン行用。空(発火源 未紐づけ = 要確保)を
+// warning 色で、確定を accent で。決着/未移行/gate 無しは何も出さない (行を汚さない)。
+function _salesGateChip(o, phases) {
+  if (!(o.gates || []).length) return '';
+  const term = new Set(phases.filter(x => x.terminal).map(x => x.name));
+  if (term.has(o.phase)) return '';
+  const open = _salesOpenGate(o);
+  if (!open) return '';
+  return (open.anchor || '').trim()
+    ? '<span class="gate-chip confirmed" title="前進ゲート: 確定 (発火源 ' + esc(open.anchor) + ')">● ゲート確定</span>'
+    : '<span class="gate-chip empty" title="前進ゲート: 空 (発火源 未紐づけ)">○ ゲート空</span>';
 }
 // 前進ゲート (advance gate) — 商談の判定関門。現在の状態 (空/確定/決着) を1行で、
 // done ゲート列を「通過フェーズ履歴」タイムラインで見せる (advance/retry/terminal)。
@@ -5079,7 +5095,6 @@ function renderOpportunityModal(oppId) {
     ${row('成約率', phaseProb != null ? phaseProb + '%' : '')}
     ${row('見込み', wtd != null ? `<span class="opp-weighted">${_salesYen(wtd)}</span>` : '')}
     ${row('期日', o.deadline ? esc(o.deadline) : '')}
-    ${row('ステータス', esc(o.status || ''))}
   </div>`;
   return `<div class="sales-modal-bg" data-action="close-opp">
     <div class="sales-modal" data-action="sales-modal-noop">

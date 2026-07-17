@@ -1975,6 +1975,29 @@ def test_awaiting_gate_judgement_lists_ready_deals_oldest_first():
     assert [r["id"] for r in rows] == [b, a]   # oldest 遷移日 first, C excluded
 
 
+def test_meeting_schedule_anchors_open_gate_when_set_transition():
+    # e-3583 fix (dogfood #8): a meeting confirmed with set_transition on an
+    # already-open gate (e.g. a migrated gate with no seed) must become the
+    # gate's発火源 (anchor), not just sync the date.
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal", phase="提案準備")
+    assert se.current_gate(data, oid)["anchor"] == ""   # no seed → empty anchor
+    mid = se.meeting_schedule(data, oid, "2026-07-22T14:00:00+09:00",
+                              end_at="2026-07-22T15:00:00+09:00",
+                              set_transition=True, at="T1")
+    g = se.current_gate(data, oid)
+    assert g["anchor"] == mid                       # now anchored to the meeting
+    assert g["transition_date"] == "2026-07-22"     # and the date synced
+    assert se.meeting_is_gate_anchor(data, mid) is True
+    # idempotent: re-confirming the same meeting doesn't stack anchor rows
+    n_anchor = sum(1 for h in g["history"] if h.get("action") == "anchored")
+    se.meeting_reschedule(data, mid, "2026-07-23T14:00:00+09:00",
+                          set_transition=True, at="T2")
+    g2 = se.current_gate(data, oid)
+    assert g2["anchor"] == mid
+    assert sum(1 for h in g2["history"] if h.get("action") == "anchored") == n_anchor
+
+
 def test_meeting_is_gate_anchor_routes_structurally():
     # e-3583: only the anchored meeting is a phase-judgement trigger.
     data = _fresh()
