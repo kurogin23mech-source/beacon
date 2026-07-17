@@ -56,13 +56,13 @@ DEFAULT_ACCOUNT_PHASES = [
 
 # 各進行フェーズは面談で区切られる (商談準備→初回面談→提案準備→提案面談→先方
 # 検討中→先方合意→合意済み、最低2回・同期合意なら3回の面談)。methodology
-# (goal / activity_template / transition_signal / default_lead) は ms-107 e-3375
-# でユーザー実務から確定した基本4フェーズの型。transition_signal の "calendar_ended"
-# は面談実施を、"manual" は人間判定を意味する (= SIGNAL_* 定数と同値)。default_lead
-# は面談未定時のフォールバック日数 (本命の遷移日は実際の面談日 = カレンダー由来)。
-# 詳細見積の提出は「提案段階の時も検討段階の時もある」状況依存のためテンプレに
-# 入れず、AI の文脈生成 (e-3373) が必要な時だけ足す。これらは SEED (編集可能な
-# 出発点) であり enforce される定数ではない。
+# (goal / activity_template / default_lead) は ms-107 e-3375 でユーザー実務から
+# 確定した基本4フェーズの型。判定手段は e-3581 で撤去 (transition_signal 廃止):
+# 「どう判定するか」はフェーズ固定ではなく前進ゲートに紐づけた work-item で決まる。
+# default_lead は面談未定時のフォールバック日数 (本命の遷移日は実際の面談日 =
+# カレンダー由来)。詳細見積の提出は「提案段階の時も検討段階の時もある」状況依存の
+# ためテンプレに入れず、AI の文脈生成 (e-3373) が必要な時だけ足す。これらは SEED
+# (編集可能な出発点) であり enforce される定数ではない。
 DEFAULT_OPPORTUNITY_PHASES = [
     # 進行フェーズ: allowed_terminals = ここから宣言できる決着。
     {"name": "商談準備", "probability": 10, "terminal": False,
@@ -71,24 +71,24 @@ DEFAULT_OPPORTUNITY_PHASES = [
      "activity_template": ["初回面談を打診",
                            {"desc": "初回面談を実施", "kind": "meeting"},
                            "提案の方向性を確定"],
-     "transition_signal": "calendar_ended", "default_lead": 7},
+     "default_lead": 7},
     {"name": "提案準備", "probability": 20, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "企画を作り提案を終え、先方が検討フェーズに入った状態にする",
      "activity_template": ["提案面談を打診",
                            {"desc": "提案面談を実施", "kind": "meeting"},
                            "提案内容を準備"],
-     "transition_signal": "calendar_ended", "default_lead": 14},
+     "default_lead": 14},
     {"name": "先方検討中", "probability": 40, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "先方の実行合意を取る",
      "activity_template": ["合意確認日を確定（必要なら面談設定）", "合意の確認を取る"],
-     "transition_signal": "manual", "default_lead": 14},
+     "default_lead": 14},
     {"name": "合意済み", "probability": 80, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "契約を締結する",
      "activity_template": ["契約書を送付", "締結"],
-     "transition_signal": "manual", "default_lead": 7},
+     "default_lead": 7},
     # 決着フェーズ (terminal): outcome は有限ターゲットの結末種別。
     {"name": "成約",       "probability": 100,  "terminal": True,  "outcome": "won"},
     {"name": "失注",       "probability": 0,    "terminal": True,  "outcome": "lost"},
@@ -137,6 +137,31 @@ def account_phases(data: dict) -> list:
 
 def opportunity_phases(data: dict) -> list:
     return data.get("opportunity_phases", [])
+
+
+# Macro-frame (前進の枠組み) — e-3582, SPEC 方針5(A) / AC6. A funnel-level
+# natural-language framing that teaches the AI how to *read* the phases: a phase
+# is not a bucket to sit in but a stage to be pushed *out of*. "仕事を進める" =
+# advancing the deal's open phase through its前進ゲート to the next. Names carry
+# the per-object frame (前進ゲート / 空・確定); this carries the whole-funnel one.
+# The concept ("a target-class carries a macro-frame") is class-layer; the *text*
+# is the sales instance's, so it lives in config (seeded, editable per company).
+OPPORTUNITY_PHASE_MACRO_FRAME = (
+    "各フェーズは、そこに留まるための箱ではなく『次へ抜けさせるためのステージ』です。"
+    "仕事を進めるとは、いま進行中(open)のフェーズを前進ゲート(= 次へ進めてよいかを"
+    "判定する関門)を通して次のフェーズへ抜けさせること。前進ゲートに work-item(面談/"
+    "活動)を紐づけ、その完了で判定を促し、人が 前進 / やり直し / 決着 を決めます。"
+    "滞留は『放置してよい』ではなく『まだ抜けていない』状態を意味します。"
+)
+
+
+def opportunity_phase_frame(data: dict) -> str:
+    """The opportunity funnel's macro-frame text (e-3582): how the AI should read
+    the phases — as stages to advance *out of*, not buckets to rest in. Reads a
+    project's configured ``opportunity_phase_frame`` (editable per company), else
+    the shipped default ``OPPORTUNITY_PHASE_MACRO_FRAME``."""
+    return (data.get("opportunity_phase_frame") or "").strip() or \
+        OPPORTUNITY_PHASE_MACRO_FRAME
 
 
 def _phase_names(phases: list) -> list:
@@ -228,9 +253,14 @@ def account_phase_warnings(data: dict, new_phase: str) -> list:
 #   goal              str   — このフェーズが達成したいゴール (1 行)
 #   activity_template list  — ゴールへ向かう期待活動のテンプレ (固定でなく「期待」,
 #                             SPEC §4: 面談 outcome で reconcile する)
-#   transition_signal str   — 遷移の判定手段 (どう判定するか, 下記 SIGNAL_*)
 #   on_fail           dict  — 判定が失敗した時の分岐設定 (下記 on_fail schema)
 #   default_lead      int   — フェーズ入場時に遷移日を置く既定リード日数
+#
+# 判定手段 (transition_signal) は e-3581 で撤去した: 「どう判定するか」はフェーズ
+# 固定の分岐ではなく、前進ゲートに紐づけた work-item (面談 / 活動) が何かで決まる。
+# 面談を紐づければ面談終了が、日程付き活動を紐づければその done が判定を促す。何も
+# 紐づけなければ遷移日が来たら人が判定する (旧 manual の縮退形)。判定の発火は
+# ``gate_judgement_ready`` / ``work_item_completed`` が一手に引き受ける (SPEC §2)。
 #
 # These are the *target-class generic* vocabulary (SPEC §7: engine core は
 # "商談" を語に焼き込まない). The accessors below read a phase_def dict without
@@ -242,19 +272,7 @@ def account_phase_warnings(data: dict, new_phase: str) -> list:
 # gracefully so live projects created before this task keep working.
 
 PHASE_METHODOLOGY_FIELDS = (
-    "goal", "activity_template", "transition_signal", "on_fail", "default_lead")
-
-# transition_signal vocabulary (SPEC §5: 決定的〜判断的 スペクトラム). The
-# detection wiring lands in later tasks (calendar auto-detect = e-3374); here we
-# only fix the vocabulary so config can name a signal and the engine can branch.
-SIGNAL_MANUAL = "manual"                    # 人間が遷移を宣言する (既定)
-SIGNAL_CALENDAR_ACCEPTED = "calendar_accepted"  # 相手が招待を accept → 面談確定
-SIGNAL_CALENDAR_ENDED = "calendar_ended"    # event.end < now → 面談実施済み
-SIGNAL_COUNTERPART_REPLY = "counterpart_reply"  # 先方からの返信 (メール等)
-VALID_TRANSITION_SIGNALS = {
-    SIGNAL_MANUAL, SIGNAL_CALENDAR_ACCEPTED, SIGNAL_CALENDAR_ENDED,
-    SIGNAL_COUNTERPART_REPLY,
-}
+    "goal", "activity_template", "on_fail", "default_lead")
 
 
 def phase_goal(phase_def: Optional[dict]) -> str:
@@ -312,12 +330,6 @@ def phase_activity_template(phase_def: Optional[dict]) -> list:
     return [a["desc"] for a in phase_activity_anchors(phase_def)]
 
 
-def phase_transition_signal(phase_def: Optional[dict]) -> str:
-    """How this phase's transition is judged. Defaults to SIGNAL_MANUAL — with
-    no signal configured the human declares the transition (master, SPEC §6)."""
-    return (phase_def or {}).get("transition_signal") or SIGNAL_MANUAL
-
-
 def phase_on_fail(phase_def: Optional[dict]) -> Optional[dict]:
     """The failure-branch config for this phase, or None.
 
@@ -354,7 +366,6 @@ def phase_methodology(phase_def: Optional[dict]) -> dict:
     return {
         "goal": phase_goal(phase_def),
         "activity_template": phase_activity_template(phase_def),
-        "transition_signal": phase_transition_signal(phase_def),
         "on_fail": phase_on_fail(phase_def),
         "default_lead": phase_default_lead(phase_def),
     }
@@ -487,10 +498,13 @@ def opportunity_add(data: dict, title: str, *, account_id: str = "",
     """Append a new Opportunity (対象・有限) and return its id.
 
     ``account_id`` is a 参照 association (N:1 → Account) validated when given.
-    ``phase`` defaults to the configured funnel entry and seeds phase_history.
-    ``transition_date`` (= 遷移日, SPEC §2) is the planned date on which this
-    phase's goal is judged; optional at creation (the engine prompts to place
-    it when the target enters a non-terminal phase without one).
+    ``phase`` defaults to the configured funnel entry. Entering a non-terminal
+    phase opens the phase's advance gate (前進ゲート, e-3580 fold): the 遷移日
+    and the phase-change history now live on the gate列, not on the Opportunity
+    (SPEC AC5 — the deal no longer holds transition_date / phase_history直接).
+    ``transition_date`` (= 遷移日, SPEC §2) is the planned judgement date; when
+    given it is placed on the initial gate, else the engine prompts for it via
+    ``needs_transition_date``.
     """
     if not title or not title.strip():
         raise ValueError("Opportunity title is required")
@@ -508,20 +522,21 @@ def opportunity_add(data: dict, title: str, *, account_id: str = "",
         "title": title.strip(),
         "account_id": account_id or None,
         "phase": initial_phase,
-        "phase_history": [{"phase": initial_phase, "at": created_at, "note": "initial"}],
         "goal_amount": goal_amount,
         "probability": probability,
         "deadline": deadline,
         "who_has_the_ball": who_has_the_ball,
         "assignee": assignee,
-        "transition_date": transition_date or "",
-        "transition_date_history": (
-            [{"transition_date": transition_date, "at": created_at, "note": "initial"}]
-            if transition_date else []),
         "status": _opportunity_status_for_phase(data, initial_phase),
         "created_at": created_at,
         "activities": [],
+        "gates": [],
     })
+    # 入場で空の前進ゲートを1つ置く (SPEC 実装順ヒント1) — non-terminal のみ。
+    # 遷移日はゲートが持つ (fold): 与えられていれば初期ゲートに載せる。
+    if not opportunity_phase_is_terminal(data, initial_phase):
+        open_advance_gate(data, opp_id, phase=initial_phase,
+                          transition_date=transition_date or "", at=created_at)
     return opp_id
 
 
@@ -530,10 +545,13 @@ def phase_set(data: dict, target_id: str, new_phase: str, *,
     """Declare a phase transition on an Opportunity (``opp-``) or Account
     (``acc-``), dispatched by id prefix (master = human, SPEC §5).
 
-    Appends to the target's append-only ``phase_history`` and updates its
-    exclusive ``phase`` (+ mirrored ``status`` for opportunities). Returns the
-    appended transition record. This is permissive: use
-    ``opportunity_phase_warnings`` / ``account_phase_warnings`` to surface
+    Updates the target's exclusive ``phase`` (+ mirrored ``status`` for
+    opportunities) and returns the transition record. For opportunities the
+    phase-change *history* now lives on the advance-gate列 (e-3580 fold), so this
+    only sets the exclusive phase — the gate lifecycle (advance/retry/terminal_
+    transition) records the history + evidence. Accounts still keep their own
+    append-only ``phase_history`` (they are outside the gate fold). Permissive:
+    use ``opportunity_phase_warnings`` / ``account_phase_warnings`` to surface
     vocabulary / terminal-rule violations to the caller.
     """
     if not new_phase or not new_phase.strip():
@@ -544,7 +562,6 @@ def phase_set(data: dict, target_id: str, new_phase: str, *,
         if opp is None:
             raise ValueError(f"Opportunity not found: {target_id}")
         record = {"phase": new_phase, "at": at, "note": note}
-        opp.setdefault("phase_history", []).append(record)
         opp["phase"] = new_phase
         opp["status"] = _opportunity_status_for_phase(data, new_phase)
         # ms-106 fb3 / e-3350 — project the linked Account's lifecycle phase from
@@ -576,15 +593,18 @@ def phase_set(data: dict, target_id: str, new_phase: str, *,
 
 def _opp_progress_signals(data: dict, opp: dict) -> tuple:
     """Return ``(won, lost, max_nonterminal_idx)`` an opportunity ever reached,
-    scanning its ``phase_history`` + current phase. ``max_nonterminal_idx`` is
-    the furthest funnel position (0-based among non-terminal phases), -1 if
-    none. 不成立 (abandoned) counts as neither won nor lost — the seed only
-    allows it from the 商談準備 entry, so it is not "progress"."""
+    scanning the phases its advance-gate列 covered + its current phase
+    (e-3580 fold: the phase timeline now lives on the gates, not on a
+    ``phase_history`` on the deal). ``max_nonterminal_idx`` is the furthest
+    funnel position (0-based among non-terminal phases), -1 if none. 不成立
+    (abandoned) counts as neither won nor lost — the seed only allows it from the
+    商談準備 entry, so it is not "progress"."""
+    _migrate_opp_gates(data, opp)
     phases = opportunity_phases(data)
     nonterm = [p.get("name") for p in phases if not p.get("terminal")]
     won = lost = False
     max_nt = -1
-    names = [e.get("phase") for e in opp.get("phase_history", [])]
+    names = [g.get("phase") for g in opp.get("gates", [])]
     if opp.get("phase"):
         names.append(opp.get("phase"))
     for name in names:
@@ -746,44 +766,52 @@ def weighted_pipeline(data: dict, *, assignee: Optional[str] = None) -> float:
 # Generic over targets that close (opp- today); accounts (対象・継続) never do.
 
 def get_transition_date(data: dict, target_id: str) -> str:
-    """Current transition_date of a target (opp-…), or '' when unset."""
+    """Current 遷移日 of a target (opp-…), or '' when unset. The date now lives
+    on the opportunity's open advance gate (e-3580 fold): this returns that
+    gate's transition_date, or '' when no gate is open (= terminal / none)."""
     if target_id.startswith("opp-"):
-        opp = find_opportunity(data, target_id)
-        if opp is None:
+        if find_opportunity(data, target_id) is None:
             raise ValueError(f"Opportunity not found: {target_id}")
-        return opp.get("transition_date", "") or ""
+        gate = current_gate(data, target_id)
+        return (gate.get("transition_date", "") or "") if gate else ""
     raise ValueError(
         f"transition_date targets an opportunity (opp-…), got {target_id!r}")
 
 
 def set_transition_date(data: dict, target_id: str, transition_date: str, *,
                         note: str = "", at: str = "") -> dict:
-    """Set (or clear) a target's transition_date and log it append-only.
+    """Set (or clear) the 遷移日 on the opportunity's open advance gate and log it
+    append-only on the gate's history (e-3580 fold — the date is a gate field).
 
-    Passing an empty ``transition_date`` clears the field (still logged, so the
-    clearing is auditable). Returns the appended history record. Permissive by
-    design — the engine (e-3372) decides *when* a date is placed; this is only
-    the storage primitive.
+    Requires an open gate (a judgement date is meaningless without an open phase
+    to judge); raises when none is open. Passing an empty date clears it (still
+    logged, so the clearing is auditable). Returns the appended history record.
     """
     if target_id.startswith("opp-"):
         opp = find_opportunity(data, target_id)
         if opp is None:
             raise ValueError(f"Opportunity not found: {target_id}")
+        gate = current_gate(data, target_id)
+        if gate is None:
+            raise ValueError(
+                f"{target_id} has no open advance gate to place a 遷移日 on "
+                "(terminal / not yet opened)")
         value = (transition_date or "").strip()
-        record = {"transition_date": value, "at": at, "note": note}
-        opp.setdefault("transition_date_history", []).append(record)
-        opp["transition_date"] = value
+        record = {"at": at, "action": "transition-date",
+                  "transition_date": value, "note": note}
+        gate.setdefault("history", []).append(record)
+        gate["transition_date"] = value
         return record
     raise ValueError(
         f"transition_date targets an opportunity (opp-…), got {target_id!r}")
 
 
 def needs_transition_date(data: dict, target_id: str) -> bool:
-    """True when a target sits in a non-terminal phase but has no transition_date
-    (SPEC §2: placing the 遷移日 is the top-priority activity on phase entry —
-    without a judgement date, preparation and follow-up can't be driven).
+    """True when the opportunity has an open advance gate with no 遷移日 placed
+    (SPEC §2: placing the 遷移日 is the top-priority step on phase entry — without
+    a judgement date, preparation and follow-up can't be driven).
 
-    Terminal-phase targets (決着済み) never need one, so this is False for them.
+    Terminal / gate-less opportunities never need one (no open gate), so False.
     """
     if not target_id.startswith("opp-"):
         return False
@@ -791,8 +819,11 @@ def needs_transition_date(data: dict, target_id: str) -> bool:
     if opp is None:
         return False
     if opportunity_phase_is_terminal(data, opp.get("phase", "")):
+        return False  # 決着済み — no judgement date needed (defensive vs stale gate)
+    gate = current_gate(data, target_id)
+    if gate is None:
         return False
-    return not (opp.get("transition_date") or "").strip()
+    return not (gate.get("transition_date") or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -862,13 +893,13 @@ def scan_overdue(items, due_date_of, settled_of, today: str) -> list:
 
 def transition_status(data: dict, target_id: str, today: str) -> str:
     """Derived judgement state of an opportunity relative to ``today`` — the
-    sales wrapper over ``temporal_status`` (due date = transition_date, settled =
-    terminal phase). Returns one of the TRANSITION_* constants."""
+    sales wrapper over ``temporal_status`` (due date = the open gate's 遷移日,
+    settled = terminal phase / no open gate). Returns a TRANSITION_* constant."""
     opp = find_opportunity(data, target_id)
     if opp is None:
         raise ValueError(f"Opportunity not found: {target_id}")
     return temporal_status(
-        opp.get("transition_date", ""), today,
+        get_transition_date(data, target_id), today,
         settled=opportunity_phase_is_terminal(data, opp.get("phase", "")))
 
 
@@ -894,11 +925,12 @@ def advance_transition(data: dict, target_id: str, *,
                        at: str = "") -> dict:
     """Advance a target to the next non-terminal phase (goal met, SPEC §3).
 
-    Consumes the current transition_date: sets ``next_transition_date`` on the
-    new phase when provided, else clears it so ``needs_transition_date`` prompts
-    for a fresh one (SPEC §2). Returns ``{"phase": <new>, "transition_date": …}``.
-    Raises ValueError when there is no next non-terminal phase (the caller should
-    use the terminal path — 成約 等 — instead of advance).
+    Settles the current open advance gate with ``outcome=advance`` (its 判断証跡)
+    and opens a fresh gate for the new phase carrying ``next_transition_date``
+    (blank → ``needs_transition_date`` prompts for one, SPEC §2). The done gate
+    joins the phase-change history列 (e-3580 fold). Returns ``{"phase": <new>,
+    "transition_date": …}``. Raises ValueError when there is no next non-terminal
+    phase (use the terminal path — 成約 等 — instead of advance).
     """
     opp = find_opportunity(data, target_id)
     if opp is None:
@@ -909,27 +941,42 @@ def advance_transition(data: dict, target_id: str, *,
         raise ValueError(
             f"'{cur}' は最終ステージです (次の非terminalフェーズがありません)。"
             "advance ではなく terminal (決着) を宣言してください")
+    gate = current_gate(data, target_id)
+    if gate is not None:
+        settle_gate(data, gate["id"], outcome=GATE_ADVANCE, reason=note, at=at)
     phase_set(data, target_id, nxt, note=note, at=at)
-    set_transition_date(data, target_id, next_transition_date,
-                        note=note or "advance", at=at)
+    open_advance_gate(data, target_id, phase=nxt,
+                      transition_date=next_transition_date, at=at)
     # e-3270: フェーズ入場でそのフェーズの固定アンカー活動を起こす (提案準備→提案
     # 作成 等)。goal からの文脈生成は Skill 層が上乗せする (LLM 必要)。共通アンカー
     # 「遷移日を置く」は needs_transition_date 促しで担い、ここでは重複させない。
     created = instantiate_phase_activities(data, target_id, at=at)
-    return {"phase": nxt, "transition_date": opp.get("transition_date", ""),
+    return {"phase": nxt, "transition_date": get_transition_date(data, target_id),
             "activities": created}
 
 
 def retry_transition(data: dict, target_id: str, new_transition_date: str, *,
                      note: str = "", at: str = "") -> dict:
-    """Stay in the same phase but place a new transition_date (未達だが粘る,
-    SPEC §3). ``new_transition_date`` is required — retry means 置き直す, so an
-    empty date is rejected (that would be a clear, not a retry). Returns the
-    appended transition_date_history record."""
+    """Stay in the same phase but re-place the 遷移日 (未達だが粘る, SPEC §3 +
+    2026-07-17 改訂 = Option 3). Settles the current gate with ``outcome=retry``
+    (its 判断証跡 — なぜやり直すか) and opens a *new* gate for the **same** phase
+    carrying ``new_transition_date``, so every judgement — advance / retry /
+    terminal — is a first-class done-gate record. ``new_transition_date`` is
+    required (retry means 置き直す; empty would be a clear). Returns
+    ``{"phase": <same>, "transition_date": …}``.
+    """
     if not (new_transition_date or "").strip():
         raise ValueError("retry requires a new transition_date (置き直す日付)")
-    return set_transition_date(data, target_id, new_transition_date,
-                               note=note or "retry", at=at)
+    opp = find_opportunity(data, target_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {target_id}")
+    cur = opp.get("phase", "")
+    gate = current_gate(data, target_id)
+    if gate is not None:
+        settle_gate(data, gate["id"], outcome=GATE_RETRY, reason=note, at=at)
+    open_advance_gate(data, target_id, phase=cur,
+                      transition_date=new_transition_date, at=at)
+    return {"phase": cur, "transition_date": get_transition_date(data, target_id)}
 
 
 def allowed_terminals_for(data: dict, target_id: str) -> list:
@@ -951,15 +998,20 @@ def terminal_transition(data: dict, target_id: str, terminal_phase: str, *,
     ``allowed_terminals`` is surfaced by ``opportunity_phase_warnings`` (caller's
     job), never blocked here. This helper only enforces that the target phase is
     actually terminal (a typo'd stage name would silently leave the deal open).
-    Returns the phase_history record.
+
+    Settles the current open gate with ``outcome=terminal`` (its 判断証跡) and
+    opens no new gate — the deal is 決着済み, so no phase is left in progress
+    (e-3580 fold: the 遷移日 was the gate's, and it retires with the gate).
+    Returns the phase_set record.
     """
     if not opportunity_phase_is_terminal(data, terminal_phase):
         raise ValueError(
             f"'{terminal_phase}' は terminal (決着) フェーズではありません "
             f"(既知の決着: {[p['name'] for p in opportunity_phases(data) if p.get('terminal')]})")
+    gate = current_gate(data, target_id)
+    if gate is not None:
+        settle_gate(data, gate["id"], outcome=GATE_TERMINAL, reason=note, at=at)
     rec = phase_set(data, target_id, terminal_phase, note=note or "terminal", at=at)
-    # 決着したら遷移日は用済み — 証跡を残して消す (settled は date を持たない)。
-    set_transition_date(data, target_id, "", note="settled", at=at)
     return rec
 
 
@@ -991,9 +1043,10 @@ def opportunities_awaiting_judgement(data: dict, today: str) -> list:
     * ball=counterpart → 相手待ちが期限超過 → 催促する (相手ボール timeout)
 
     Returns dicts with id / title / phase / transition_date / transition_status /
-    who_has_the_ball. This is the AI's catch surface for the ``overdue`` state."""
+    who_has_the_ball. This is the AI's catch surface for the ``overdue`` state.
+    The 遷移日 now comes from each deal's open advance gate (e-3580 fold)."""
     def due_of(o):
-        return o.get("transition_date", "")
+        return get_transition_date(data, o["id"])
 
     def settled_of(o):
         return opportunity_phase_is_terminal(data, o.get("phase", ""))
@@ -1003,10 +1056,419 @@ def opportunities_awaiting_judgement(data: dict, today: str) -> list:
         "id": o["id"],
         "title": o.get("title", ""),
         "phase": o.get("phase", ""),
-        "transition_date": o.get("transition_date", ""),
+        "transition_date": get_transition_date(data, o["id"]),
         "transition_status": st,
         "who_has_the_ball": o.get("who_has_the_ball", ""),
     } for o, st in pairs]
+
+
+# ---------------------------------------------------------------------------
+# Advance gate (前進ゲート) — ms-106 SPEC XG1yBugcb3GRnamRljhx, task e-3579
+# ---------------------------------------------------------------------------
+# The "関門" through which an Opportunity leaves one phase for the next. Today
+# the判定 (advance / retry / terminal) is welded onto the Opportunity itself
+# (phase / transition_date live on the deal) and onto meetings (a meeting
+# ending drives a phase change). fable's independent review found "重複が構造的
+# に不可能" was only a Skill-手順書 promise, not a data constraint — the same
+# 思想ズレ we hit in Trek. This entity lifts the判定 into its own work item so
+# the structure — not a手順書 — guarantees the invariant.
+#
+# Structural guarantee (e-3579):
+#   * ≤ 1 *open* gate per Opportunity  (商談は同時に1フェーズだけ進行中)
+#   * done gates accumulate            (= 全判定履歴。フェーズ変更履歴 = outcome
+#                                        ∈ {advance,terminal} でフィルタした派生ビュー)
+# The fold (e-3580): the 遷移日 and the phase-change history moved OFF the
+# Opportunity ONTO this列 — the deal no longer holds transition_date /
+# phase_history直接 (SPEC AC5). advance/retry/terminal_transition drive the gate
+# lifecycle (settle current → open next); ``_migrate_opp_gates`` converts legacy
+# deals on first touch (AC8). Firing判定 off an anchored work-item's completion +
+# dropping transition_signal = e-3581; replacing the meeting-seed on phase entry
+# with a gate = e-3583 — those ride on these primitives and are still ahead.
+#
+# The gate is the sales-instance shape of the class-layer WorkItem-subtype
+# "ステージ前進のゲート" (SPEC §6, e-3560 evidence-close の一適用): occupation
+# vocabulary (前進ゲート / advance / retry / terminal, anchor kinds mtg-/act-/
+# nrt-) stays here, while the invariant floor (id 採番 / append-only 監査 /
+# cancel) routes through ``work_base`` so ms-109 can hoist it cleanly.
+
+GATE_OPEN = "open"          # 進行中 — その商談で唯一 (≤1 の制約対象)
+GATE_DONE = "done"          # 判定済み — outcome + 判断証跡を刻んで積む (履歴)
+GATE_CANCELLED = work_base.CANCELLED_STATUS  # 取消 (商談中止 等で発火せず畳む)
+
+# outcome vocabulary — mirrors the three judgement branches (advance_transition /
+# retry_transition / terminal_transition). Stamped on a gate when it settles.
+GATE_ADVANCE = "advance"    # 前進 → 次フェーズへ
+GATE_RETRY = "retry"        # やり直し → 同フェーズで置き直す
+GATE_TERMINAL = "terminal"  # 決着 → 成約/失注/不成立
+VALID_GATE_OUTCOMES = {GATE_ADVANCE, GATE_RETRY, GATE_TERMINAL}
+
+
+def next_gate_id(data: dict) -> str:
+    """Allocate the next global ``adv-N`` id (unique across all opportunities,
+    like ``mtg-``). Gathers existing gate ids from every opportunity and defers
+    numbering to the shared ``work_base.next_suffixed_id`` (ms-109 e-3558)."""
+    ids = []
+    for opp in data.get("opportunities", []):
+        ids.extend(g.get("id", "") for g in opp.get("gates", []))
+    return work_base.next_suffixed_id(ids, "adv-")
+
+
+def _migrate_opp_gates(data: dict, opp: dict) -> None:
+    """Lazily convert a legacy Opportunity (holding ``transition_date`` /
+    ``transition_date_history`` / ``phase_history`` directly) to the advance-gate
+    列 (e-3580 fold, SPEC AC8). Idempotent: deals created after the fold already
+    carry ``gates`` and return immediately. Migrate-on-touch — the gate read/
+    write paths call this so existing data self-heals on first access and
+    persists on the next save, with no global load hook.
+
+    Reconstruction: each phase the deal passed through becomes a done gate with
+    ``outcome=advance`` (it was left by advancing); the current *non-terminal*
+    phase becomes the single open gate carrying the deal's live 遷移日; a terminal
+    current phase instead turns the last non-terminal gate into ``outcome=
+    terminal`` and opens nothing. Approximate but faithful — the phase timeline
+    and the live judgement date survive, and the legacy fields are dropped only
+    after the列 is built (no evidence deleted, data-immutability-principle).
+    """
+    if "gates" in opp:
+        return
+    ph = opp.get("phase_history") or []
+    seq = [e.get("phase") for e in ph if e.get("phase")]
+    times = [e.get("at", "") for e in ph]
+    cur = opp.get("phase", "")
+    if cur and (not seq or seq[-1] != cur):
+        seq.append(cur)
+        times.append("")
+    cur_td = (opp.get("transition_date", "") or "").strip()
+    cur_terminal = opportunity_phase_is_terminal(data, cur)
+    existing_ids = []
+    for o in data.get("opportunities", []):
+        existing_ids.extend(g.get("id", "") for g in o.get("gates", []))
+
+    def _alloc():
+        gid = work_base.next_suffixed_id(existing_ids, "adv-")
+        existing_ids.append(gid)
+        return gid
+
+    gates = []
+    for i, phase in enumerate(seq):
+        at = times[i] if i < len(times) else ""
+        is_last = (i == len(seq) - 1)
+        if is_last and not cur_terminal:
+            gates.append({
+                "id": _alloc(), "status": GATE_OPEN, "phase": phase, "anchor": "",
+                "transition_date": cur_td, "outcome": None, "created_at": at,
+                "history": [{"at": at, "action": "opened"},
+                            {"at": at, "action": "migrated"}], "meta": {}})
+        elif is_last and cur_terminal:
+            # terminal current phase: no gate FOR the terminal phase — the last
+            # non-terminal gate is where the deal was 決着 from.
+            if gates:
+                gates[-1]["status"] = GATE_DONE
+                gates[-1]["outcome"] = GATE_TERMINAL
+                gates[-1]["history"].append(
+                    {"kind": "settled", "outcome": GATE_TERMINAL, "at": at})
+        else:
+            gates.append({
+                "id": _alloc(), "status": GATE_DONE, "phase": phase, "anchor": "",
+                "transition_date": "", "outcome": GATE_ADVANCE, "created_at": at,
+                "history": [{"at": at, "action": "opened"},
+                            {"kind": "settled", "outcome": GATE_ADVANCE, "at": at}],
+                "meta": {}})
+    opp["gates"] = gates
+    for k in ("phase_history", "transition_date", "transition_date_history"):
+        opp.pop(k, None)
+
+
+def opportunity_gates(opp: dict) -> list:
+    """The gate records nested under an Opportunity (append-only列), or []."""
+    return opp.get("gates", []) or []
+
+
+def find_gate(data: dict, gate_id: str):
+    """Return ``(opportunity, gate)`` for a gate id, or ``(None, None)``."""
+    for opp in data.get("opportunities", []):
+        for g in opp.get("gates", []):
+            if g.get("id") == gate_id:
+                return opp, g
+    return None, None
+
+
+def current_gate(data: dict, opportunity_id: str) -> Optional[dict]:
+    """The Opportunity's single *open* advance gate, or None when none is open.
+
+    The ≤1-open invariant (enforced by ``open_advance_gate``) means this is
+    unambiguous: there is at most one. Cancelled/done gates are ignored."""
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    _migrate_opp_gates(data, opp)
+    for g in opp.get("gates", []):
+        if g.get("status") == GATE_OPEN:
+            return g
+    return None
+
+
+def open_advance_gate(data: dict, opportunity_id: str, *, phase: str = "",
+                      anchor: str = "", transition_date: str = "",
+                      at: str = "") -> str:
+    """Open a fresh advance gate on an Opportunity and return its id (``adv-N``).
+
+    Enforces the structural invariant this SPEC exists for: an Opportunity may
+    hold **at most one open gate at a time** — a second ``open_advance_gate``
+    while one is still open raises, so "商談内 open ≤1" is guaranteed by the
+    data layer, not by a Skill手順書 (SPEC AC1). done/cancelled gates don't
+    count, so a settled deal can open its next gate.
+
+    ``phase`` defaults to the opportunity's current funnel phase — the stage
+    this gate judges advancing *out of*. ``anchor`` (a work item mtg-/act-/nrt-
+    whose completion will prompt判定, "" = 人手判定) and ``transition_date`` are
+    optional at open time; the firing wiring (e-3581) and the date fold (e-3580)
+    fill them. Append-only ``history`` opens with an ``opened`` row.
+    """
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    _migrate_opp_gates(data, opp)
+    if any(g.get("status") == GATE_OPEN for g in opp.get("gates", [])):
+        raise ValueError(
+            f"{opportunity_id} already has an open advance gate — a商談は同時に"
+            "1フェーズだけ進行中 (settle or cancel it before opening another)")
+    gate_id = next_gate_id(data)
+    opp.setdefault("gates", []).append({
+        "id": gate_id,
+        "status": GATE_OPEN,
+        "phase": phase or opp.get("phase", ""),
+        "anchor": anchor or "",
+        "transition_date": transition_date or "",
+        "outcome": None,
+        "created_at": at,
+        "history": [{"at": at, "action": "opened"}],
+        "meta": {},
+    })
+    return gate_id
+
+
+def ensure_open_gate(data: dict, opportunity_id: str, *, phase: str = "",
+                     at: str = "") -> dict:
+    """Idempotently guarantee the Opportunity has an open gate; return it.
+
+    Returns the existing open gate untouched when one is present, else opens a
+    fresh empty one. This is the "phase入場で空の前進ゲートを1つ置く" primitive
+    (SPEC 実装順ヒント1) that the phase-entry wiring (e-3583) will call — safe to
+    invoke repeatedly without ever creating a second open gate."""
+    existing = current_gate(data, opportunity_id)
+    if existing is not None:
+        return existing
+    gate_id = open_advance_gate(data, opportunity_id, phase=phase, at=at)
+    _, gate = find_gate(data, gate_id)
+    return gate
+
+
+def anchor_gate(data: dict, gate_id: str, work_item_id: str, *,
+                at: str = "") -> dict:
+    """Attach (or re-attach) the work item whose completion will prompt this
+    gate's判定, and return the gate. ``work_item_id`` is a meeting (``mtg-``),
+    activity (``act-``) or nurturing (``nrt-``) — the anchor whose done/ended
+    state becomes the発火源 (SPEC §2). Re-anchoring an open gate corrects a
+    mis-linked anchor before settlement (やり直し does NOT re-anchor — under the
+    2026-07-17 Option-3 revision a retry settles this gate and opens a fresh one).
+
+    Only the completion-fires-判定 behaviour is deferred to e-3581; here we just
+    record the link (validated + append-only) so the entity carries the field.
+    """
+    opp, gate = find_gate(data, gate_id)
+    if gate is None:
+        raise ValueError(f"Advance gate not found: {gate_id}")
+    if gate.get("status") != GATE_OPEN:
+        raise ValueError(
+            f"{gate_id} is {gate.get('status')!r}, only an open gate can be anchored")
+    wi = (work_item_id or "").strip()
+    if not (wi.startswith("mtg-") or wi.startswith("act-") or wi.startswith("nrt-")):
+        raise ValueError(
+            f"anchor must be a work item (mtg-/act-/nrt-), got {work_item_id!r}")
+    if wi.startswith("mtg-"):
+        _, found = find_meeting(data, wi)
+    else:
+        _, found = find_work_item(data, wi)
+    if found is None:
+        raise ValueError(f"anchor work item not found: {work_item_id}")
+    gate["anchor"] = wi
+    # AC4: 遷移日は紐づく work-item の日時に同期する (予定日超過が gate から判る)。
+    anchor_date = _work_item_date(data, wi)
+    if anchor_date:
+        gate["transition_date"] = anchor_date
+    gate.setdefault("history", []).append(
+        {"at": at, "action": "anchored", "anchor": wi,
+         "transition_date": anchor_date} if anchor_date
+        else {"at": at, "action": "anchored", "anchor": wi})
+    return gate
+
+
+def settle_gate(data: dict, gate_id: str, *, outcome: str, reason: str = "",
+                actor: str = "", at: str = "") -> dict:
+    """Settle an open advance gate with its判定 outcome and evidence; return it.
+
+    ``outcome`` is one of advance / retry / terminal (the human's decision, SPEC
+    §3 — the gate records it, it doesn't decide). Stamps ``outcome`` + a
+    ``settled`` audit row (誰・いつ・なぜ via ``work_base.record_audit_event``,
+    SPEC AC5) and flips status to ``done``, leaving the gate on the append-only
+    列 as履歴. Applying the actual phase move (advance_transition 等) stays the
+    caller's job — this only closes the judgement work item.
+    """
+    if outcome not in VALID_GATE_OUTCOMES:
+        raise ValueError(
+            f"outcome must be one of {sorted(VALID_GATE_OUTCOMES)}, got {outcome!r}")
+    opp, gate = find_gate(data, gate_id)
+    if gate is None:
+        raise ValueError(f"Advance gate not found: {gate_id}")
+    if gate.get("status") != GATE_OPEN:
+        raise ValueError(
+            f"{gate_id} is already {gate.get('status')!r} — only an open gate settles")
+    gate["status"] = GATE_DONE
+    gate["outcome"] = outcome
+    work_base.record_audit_event(
+        gate.setdefault("history", []), kind="settled",
+        reason=reason, actor=actor, at=at, outcome=outcome)
+    return gate
+
+
+def cancel_gate(data: dict, gate_id: str, *, reason: str = "") -> dict:
+    """Soft-cancel an advance gate (商談中止・誤起票 等) and return it. Routes
+    through ``work_base.stamp_cancel`` (status=cancelled + audited meta,
+    append-only — never deleted, data-immutability-principle). A cancelled gate
+    frees the ≤1-open slot without pretending判定 happened."""
+    _, gate = find_gate(data, gate_id)
+    if gate is None:
+        raise ValueError(f"Advance gate not found: {gate_id}")
+    return work_base.stamp_cancel(gate, reason=reason)
+
+
+def gate_history(data: dict, opportunity_id: str) -> list:
+    """The settled (done) advance gates of an Opportunity, oldest first — the
+    full judgement history carried by the gate列 (e-3580 fold). Each row exposes
+    its phase / outcome / settled evidence. The *phase-change* history is this
+    filtered by ``outcome ∈ {advance, terminal}`` (a retry stays in the same
+    phase); use ``phase_change_history`` for that view (SPEC AC5, 2026-07-17
+    Option-3 revision)."""
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    _migrate_opp_gates(data, opp)
+    return [g for g in opp.get("gates", []) if g.get("status") == GATE_DONE]
+
+
+def phase_change_history(data: dict, opportunity_id: str) -> list:
+    """The phase-change history of an Opportunity: the done gates whose outcome
+    actually moved the phase (advance / terminal), oldest first (e-3580 fold,
+    SPEC AC5). Retries — same-phase 置き直し — are in ``gate_history`` but not
+    here, so this is the funnel timeline the deal walked."""
+    return [g for g in gate_history(data, opportunity_id)
+            if g.get("outcome") in (GATE_ADVANCE, GATE_TERMINAL)]
+
+
+# --- judgement firing (e-3581, SPEC §2) — anchored work-item completion ------
+# The old model branched on a per-phase ``transition_signal`` (calendar_ended /
+# manual). That is gone: how a phase is judged is now determined by *what* work
+# item the open gate is anchored to — a meeting's ending, a dated activity's
+# done, or (no anchor) the 遷移日 arriving. One firing surface, no phase branch.
+
+def _work_item_date(data: dict, work_item_id: str) -> str:
+    """The date (YYYY-MM-DD) a work item is planned for, or '' — a meeting's
+    scheduled_at, an activity/nurturing's deadline. Used to sync a gate's 遷移日
+    to its anchor (SPEC AC4)."""
+    wi = (work_item_id or "").strip()
+    if wi.startswith("mtg-"):
+        _, m = find_meeting(data, wi)
+        return (m.get("scheduled_at", "") or "")[:10] if m else ""
+    if wi.startswith("act-") or wi.startswith("nrt-"):
+        _, w = find_work_item(data, wi)
+        return (w.get("deadline", "") or "") if w else ""
+    return ""
+
+
+def work_item_completed(data: dict, work_item_id: str, now: str = "") -> bool:
+    """True when a work item (mtg-/act-/nrt-) has reached its completed state —
+    the signal that prompts its前進ゲート's phase judgement (e-3581, SPEC §2/AC3).
+
+    A meeting counts as complete when it is ``ended``, or still ``scheduled`` but
+    its effective end has passed ``now`` (a full timestamp). An activity or
+    nurturing counts when its status is ``done``. Any other id / state → False."""
+    wi = (work_item_id or "").strip()
+    if wi.startswith("mtg-"):
+        _, m = find_meeting(data, wi)
+        if m is None:
+            return False
+        if m.get("status") == MEETING_ENDED:
+            return True
+        if m.get("status") == MEETING_SCHEDULED and now:
+            end = meeting_effective_end(m)
+            now_dt = _parse_dt(now)
+            return bool(end is not None and now_dt is not None and end <= now_dt)
+        return False
+    if wi.startswith("act-") or wi.startswith("nrt-"):
+        _, w = find_work_item(data, wi)
+        return bool(w is not None and w.get("status") == "done")
+    return False
+
+
+def gate_judgement_ready(data: dict, opportunity_id: str, now: str = "") -> bool:
+    """True when the opportunity's open前進ゲート is ready for a phase judgement
+    (e-3581, SPEC §2). Firing is unified — no per-phase transition_signal:
+
+    * anchored gate  → ready once the anchored work-item has completed; an
+      unanchored臨時 meeting ending does NOT make it ready (AC2).
+    * unanchored gate→ ready once its 遷移日 is due/overdue as of ``now`` (the
+      縮退形 of old manual — a human judges on the date, AC3).
+
+    False when no gate is open (terminal / none). ``now`` is a timestamp; the
+    date comparison uses its date portion."""
+    gate = current_gate(data, opportunity_id)
+    if gate is None:
+        return False
+    anchor = (gate.get("anchor") or "").strip()
+    if anchor:
+        return work_item_completed(data, anchor, now)
+    td = (gate.get("transition_date") or "").strip()
+    if not td or not now:
+        return False
+    today = now[:10]
+    return temporal_status(td, today, settled=False) in (
+        TRANSITION_DUE, TRANSITION_OVERDUE)
+
+
+def meeting_is_gate_anchor(data: dict, meeting_id: str) -> bool:
+    """True when this meeting is the anchor of its opportunity's open前進ゲート
+    (e-3581/e-3583). The meeting-end detector uses this to route structurally: an
+    anchored meeting ending prompts the phase judgement; a stray (unanchored)
+    meeting ending is minutes-only and never moves the phase (AC2) — the skill
+    reads this flag instead of deciding by手順書."""
+    opp, m = find_meeting(data, meeting_id)
+    if m is None:
+        return False
+    gate = current_gate(data, opp["id"])
+    return gate is not None and (gate.get("anchor") or "") == meeting_id
+
+
+def opportunities_awaiting_gate_judgement(data: dict, now: str) -> list:
+    """The unified firing surface (e-3581): opportunities whose open gate is
+    ready to judge (anchor completed OR 遷移日 due/overdue), oldest 遷移日 first.
+    Each row carries id / title / phase / anchor / transition_date /
+    who_has_the_ball. This replaces the per-phase transition_signal branch as the
+    single "what needs judging now" list the sales skills read (SPEC §2)."""
+    out = []
+    for opp in data.get("opportunities", []):
+        oid = opp["id"]
+        if not gate_judgement_ready(data, oid, now):
+            continue
+        gate = current_gate(data, oid)
+        out.append({
+            "id": oid, "title": opp.get("title", ""), "phase": opp.get("phase", ""),
+            "anchor": (gate or {}).get("anchor", ""),
+            "transition_date": (gate or {}).get("transition_date", ""),
+            "who_has_the_ball": opp.get("who_has_the_ball", ""),
+        })
+    out.sort(key=lambda r: (r["transition_date"] or "9999-99-99"))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1128,7 +1590,14 @@ def instantiate_phase_activities(data: dict, target_id: str, *,
         # duplicate activity. Idempotency flows from the activity guard above —
         # a skipped anchor seeds no second Meeting.
         if anchor["kind"] == ANCHOR_KIND_MEETING:
-            meeting_seed(data, target_id, linked_id=act_id, at=at)
+            mtg_id = meeting_seed(data, target_id, linked_id=act_id, at=at)
+            # e-3583: the seeded meeting is this phase's発火源 — anchor the open
+            # 前進ゲート to it so its ending prompts the phase judgement (SPEC §2).
+            # The 予定未定 meeting has no date yet, so the gate's 遷移日 stays unset
+            # until the schedule Skill confirms the meeting (which syncs it).
+            gate = current_gate(data, target_id)
+            if gate is not None and not (gate.get("anchor") or "").strip():
+                anchor_gate(data, gate["id"], mtg_id, at=at)
     return created
 
 
@@ -1767,8 +2236,9 @@ def meeting_schedule(data: dict, opportunity_id: str, scheduled_at: str, *,
         "history": [{"at": at, "action": "scheduled", "scheduled_at": when}],
     })
     if set_transition:
-        # meeting date drives the phase-judgement date (transition_signal =
-        # calendar_ended). Store the date portion (YYYY-MM-DD) as the 遷移日.
+        # meeting date drives the phase-judgement date (the open gate's 遷移日).
+        # Store the date portion (YYYY-MM-DD). e-3581: firing off the anchored
+        # meeting's *end* is gate_judgement_ready's job; this only pins the date.
         set_transition_date(data, opportunity_id, when[:10],
                             note=f"面談確定 ({mtg_id})", at=at)
     return mtg_id
@@ -2120,6 +2590,9 @@ def build_sales_project(name: str, objective: str, *, retro_day: str = "monday",
         "accounts": [],
         "account_phases": [dict(p) for p in DEFAULT_ACCOUNT_PHASES],
         "opportunity_phases": [dict(p) for p in DEFAULT_OPPORTUNITY_PHASES],
+        # e-3582: 前進の macro-frame を config に seed する (企業ごと編集可)。AI が
+        # フェーズを読むとき「フェーズ = 次へ抜けさせるもの」と理解する枠組み。
+        "opportunity_phase_frame": OPPORTUNITY_PHASE_MACRO_FRAME,
         "retro_day": retro_day,
     }
     if disclosure_policy is not None:

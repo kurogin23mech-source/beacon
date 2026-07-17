@@ -21150,7 +21150,8 @@ def cmd_opportunity_list():
         acc = o.get("account_id") or "-"
         deadline = f" due {o['deadline']}" if o.get("deadline") else ""
         ball = o.get("who_has_the_ball", "")
-        td = o.get("transition_date") or ""
+        # e-3580 fold: 遷移日は商談ではなく open な前進ゲートが持つ。
+        td = sales_entities.get_transition_date(data, o["id"])
         # 遷移日 = 判定予定日 (SPEC §2/§3). 判定待ちの overdue/due は距離を強調して促す。
         st = sales_entities.transition_status(data, o["id"], today)
         if st == sales_entities.TRANSITION_OVERDUE:
@@ -21167,6 +21168,19 @@ def cmd_opportunity_list():
               f"/ status: {o.get('status', '?')} / account: {acc}"
               f"{deadline} / ball: {ball}{td_str} "
               f"/ activities: {len(o.get('activities', []))}")
+        # e-3584: 前進ゲート (advance gate) の状態を一貫した呼称で見せる。
+        # 空 = 発火源を確保せよ / 確定 = 完了に向けて準備せよ (SPEC 方針5B)。
+        gate = sales_entities.current_gate(data, o["id"])
+        done_n = len(sales_entities.gate_history(data, o["id"]))
+        if gate is None:
+            gate_str = ("決着済み"
+                        if sales_entities.opportunity_phase_is_terminal(data, o.get("phase", ""))
+                        else "無し")
+        elif (gate.get("anchor") or "").strip():
+            gate_str = f"確定 (発火源 {gate['anchor']})"
+        else:
+            gate_str = "空 (発火源 未紐づけ)"
+        print(f"    前進ゲート: {gate_str} / 通過フェーズ履歴: {done_n}")
 
 
 def cmd_opportunity_phase():
@@ -21355,14 +21369,19 @@ def cmd_phase_list():
     data = load_project()
     acc_phases = sales_entities.account_phases(data)
     opp_phases = sales_entities.opportunity_phases(data)
+    frame = sales_entities.opportunity_phase_frame(data)  # e-3582: 前進の macro-frame
     if json_mode:
         print(json.dumps({"account_phases": acc_phases,
-                          "opportunity_phases": opp_phases},
+                          "opportunity_phases": opp_phases,
+                          "opportunity_phase_frame": frame},
                          ensure_ascii=False, indent=2))
         return
     if not acc_phases and not opp_phases:
         print("No phase funnel configured (not a sales project, or no phases set).")
         return
+    # e-3582: フェーズを読む前に「フェーズ = 次へ抜けさせるもの」の枠組みを刷り込む。
+    if opp_phases:
+        print(f"■ 前進の枠組み: {frame}\n")
     print("顧客 (Account) phases:")
     for p in acc_phases:
         print(f"  - {p.get('name')}")
@@ -21388,8 +21407,8 @@ def cmd_phase_list():
             print(f"      ゴール: {m['goal']}")
         if m["activity_template"]:
             print(f"      活動テンプレ: {', '.join(str(a) for a in m['activity_template'])}")
-        if p.get("transition_signal"):
-            print(f"      遷移判定: {m['transition_signal']}")
+        # e-3581: 遷移判定手段 (transition_signal) は撤去。判定は前進ゲートに
+        # 紐づけた work-item の完了が促す (フェーズ固定の分岐ではない)。
         if m["default_lead"] is not None:
             print(f"      遷移日リード: {m['default_lead']}日")
 
@@ -21702,6 +21721,8 @@ def cmd_meeting_ended():
             "calendar_namespace": m.get("calendar_namespace", ""),
             "calendar_account": m.get("calendar_account", ""),
             "tag": sales_entities.meeting_calendar_tag(m.get("id", "")),
+            # e-3583: 紐づけ面談だけがフェーズ判定を促す (紐づけ外は議事録のみ)。
+            "is_gate_anchor": sales_entities.meeting_is_gate_anchor(data, m.get("id", "")),
         })
     if as_json:
         print(json.dumps({"now": now, "ended": rows}, ensure_ascii=False))
