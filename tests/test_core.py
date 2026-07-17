@@ -495,3 +495,28 @@ class TestSerialization:
         ]
         filtered = core.filter_cancelled(entries, show_all=True)
         assert len(filtered) == 2
+
+
+# ---------------------------------------------------------------------------
+# backfill_target_labels — dev half of the migrate step (ms-109 e-3625)
+# ---------------------------------------------------------------------------
+
+class TestBackfillTargetLabels:
+    def test_backfills_milestones_and_operations(self):
+        data = {
+            "milestones": [{"id": "ms-1", "title": "A"}, {"id": "ms-2", "title": "B", "label": "B"}],
+            "operations": [{"id": "op-1", "title": "Watch"}],
+        }
+        n = core.backfill_target_labels(data)
+        assert n == 2  # ms-1 + op-1; ms-2 already canonical
+        assert data["milestones"][0]["label"] == "A"
+        assert data["milestones"][1]["label"] == "B"
+        assert data["operations"][0]["label"] == "Watch"
+
+    def test_idempotent(self):
+        data = {"milestones": [{"id": "ms-1", "title": "A"}], "operations": []}
+        assert core.backfill_target_labels(data) == 1
+        assert core.backfill_target_labels(data) == 0
+
+    def test_missing_collections(self):
+        assert core.backfill_target_labels({}) == 0

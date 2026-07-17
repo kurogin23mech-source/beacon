@@ -123,6 +123,30 @@ def set_target_label(target: dict, label: str, *, dual_write: bool = False,
     return target
 
 
+def ensure_target_label(target: dict) -> bool:
+    """Idempotently backfill a Target's canonical ``label`` from its legacy key.
+
+    Returns ``True`` when a canonical ``label`` was newly written, ``False``
+    otherwise (already canonical, not a dict, or no label under any key). This
+    is the per-target unit of the migrate step (e-3625): once every stored
+    Target carries ``label``, the contract step (e-3626) can drop the legacy
+    fallback. Occupation-agnostic — it reads through the tolerant
+    ``target_label`` accessor, so it backfills a milestone / opportunity
+    (legacy ``title``) and an account (legacy ``name``) with the same code and
+    without knowing which occupation it is looking at. The legacy key is left
+    untouched (this is additive; dropping it is e-3626's job).
+    """
+    if not isinstance(target, dict):
+        return False
+    if target.get(LABEL):
+        return False
+    legacy = target_label(target)
+    if not legacy:
+        return False
+    target[LABEL] = legacy
+    return True
+
+
 # ---------------------------------------------------------------------------
 # WorkItem lifecycle — status reads and the canonical done stamp.
 #

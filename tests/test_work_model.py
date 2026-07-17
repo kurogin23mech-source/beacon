@@ -262,3 +262,45 @@ class TestCollectIds:
     def test_empty_and_none(self):
         assert work_model.collect_ids([]) == []
         assert work_model.collect_ids(None) == []
+
+
+# ---------------------------------------------------------------------------
+# ensure_target_label — idempotent backfill (migrate step, e-3625)
+# ---------------------------------------------------------------------------
+
+class TestEnsureTargetLabel:
+    def test_backfills_from_title(self):
+        t = {"id": "ms-1", "title": "Ship it"}
+        assert work_model.ensure_target_label(t) is True
+        assert t["label"] == "Ship it"
+        assert t["title"] == "Ship it"  # legacy key untouched (additive)
+
+    def test_backfills_from_name(self):
+        t = {"id": "a-1", "name": "Acme"}
+        assert work_model.ensure_target_label(t) is True
+        assert t["label"] == "Acme"
+        assert t["name"] == "Acme"
+
+    def test_noop_when_label_present(self):
+        t = {"id": "ms-1", "label": "Canon", "title": "Legacy"}
+        assert work_model.ensure_target_label(t) is False
+        assert t["label"] == "Canon"
+
+    def test_idempotent(self):
+        t = {"id": "ms-1", "title": "Ship it"}
+        assert work_model.ensure_target_label(t) is True
+        assert work_model.ensure_target_label(t) is False  # second run writes nothing
+
+    def test_noop_when_no_label_anywhere(self):
+        t = {"id": "ms-1"}
+        assert work_model.ensure_target_label(t) is False
+        assert "label" not in t
+
+    def test_non_dict(self):
+        assert work_model.ensure_target_label(None) is False
+        assert work_model.ensure_target_label("x") is False
+
+    def test_empty_title_not_backfilled(self):
+        t = {"id": "ms-1", "title": ""}
+        assert work_model.ensure_target_label(t) is False
+        assert "label" not in t

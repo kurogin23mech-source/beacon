@@ -430,6 +430,7 @@ def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
     data["accounts"].append({
         "id": acc_id,
         "name": name.strip(),
+        "label": name.strip(),  # ms-109 e-3625: canonical Target label (dual-write during skew)
         "phase": initial_phase,
         "phase_history": [{"phase": initial_phase, "at": created_at, "note": "initial"}],
         "health": health,
@@ -462,7 +463,7 @@ def account_rename(data: dict, account_id: str, new_name: str) -> dict:
         raise ValueError(f"Account not found: {account_id}")
     if not new_name or not new_name.strip():
         raise ValueError("Account name is required")
-    acc["name"] = new_name.strip()
+    work_model.set_target_label(acc, new_name.strip(), dual_write=True)  # ms-109 e-3625
     return acc
 
 
@@ -521,6 +522,7 @@ def opportunity_add(data: dict, title: str, *, account_id: str = "",
     data["opportunities"].append({
         "id": opp_id,
         "title": title.strip(),
+        "label": title.strip(),  # ms-109 e-3625: canonical Target label (dual-write during skew)
         "account_id": account_id or None,
         "phase": initial_phase,
         "goal_amount": goal_amount,
@@ -2664,3 +2666,24 @@ def build_sales_project(name: str, objective: str, *, retro_day: str = "monday",
     if disclosure_policy is not None:
         data["disclosure_policy"] = disclosure_policy
     return data
+
+
+def backfill_target_labels(data: dict) -> int:
+    """Backfill the canonical ``label`` on every sales Target — account and
+    opportunity — that lacks it, copying from the legacy key (``name`` for an
+    account, ``title`` for an opportunity). Returns the number of records newly
+    stamped. Idempotent.
+
+    Sales half of the ms-109 migrate step (e-3625); the development half is
+    ``core.backfill_target_labels``. Per-record stamping is delegated to
+    ``work_model.ensure_target_label`` so the occupation-agnostic base owns the
+    definition of a canonical label.
+    """
+    n = 0
+    for acc in data.get("accounts", []):
+        if work_model.ensure_target_label(acc):
+            n += 1
+    for opp in data.get("opportunities", []):
+        if work_model.ensure_target_label(opp):
+            n += 1
+    return n

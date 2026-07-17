@@ -452,6 +452,7 @@ def milestone_add(data: dict, title: str, target_date: str = "",
     ms = {
         "id": ms_id,
         "title": title,
+        "label": title,  # ms-109 e-3625: canonical Target label (dual-write during skew)
         "status": "todo",
         "target_date": target_date,
         "commits": [],
@@ -722,7 +723,7 @@ def milestone_update(data: dict, ms_id: str, *,
     for ms in data["milestones"]:
         if ms["id"] == ms_id:
             if title:
-                ms["title"] = title
+                work_model.set_target_label(ms, title, dual_write=True)  # ms-109 e-3625
             if description is not None and description != "":
                 ms["description"] = description
             if progress:
@@ -2482,6 +2483,7 @@ def operation_open(data: dict, title: str, *,
     op = {
         "id": op_id,
         "title": title,
+        "label": title,  # ms-109 e-3625: canonical Target label (dual-write during skew)
         "status": status,
         "opened_at": _now_iso() if status == "open" else None,
         "closed_at": None,
@@ -2533,7 +2535,7 @@ def operation_update(data: dict, op_id: str, *,
     """Update Operation metadata fields."""
     op = _find_operation(data, op_id)
     if title:
-        op["title"] = title
+        work_model.set_target_label(op, title, dual_write=True)  # ms-109 e-3625
     if schedule:
         if schedule not in SCHEDULE_DAYS:
             raise ValueError(f"Invalid schedule: {schedule}. Valid: {', '.join(sorted(SCHEDULE_DAYS))}")
@@ -2691,3 +2693,26 @@ def incident_escalate(data: dict, incident_id: str, ms_id: str) -> tuple[dict, d
     ms.setdefault("entries", []).append(task)
     incident["linked_ms_task"] = eid
     return op, incident, task
+
+
+def backfill_target_labels(data: dict) -> int:
+    """Backfill the canonical ``label`` on every development Target — milestone
+    and operation — that lacks it, copying from the legacy ``title``. Returns
+    the number of records newly stamped. Idempotent: a second run over the same
+    data writes nothing and returns 0.
+
+    This is the development half of the ms-109 migrate step (e-3625). The sales
+    half (account / opportunity) lives in ``sales_entities.backfill_target_labels``.
+    Once both have run over a project and all new writes dual-write ``label``,
+    the contract step (e-3626) can drop the legacy fallback safely. Per-record
+    stamping is delegated to ``work_model.ensure_target_label`` so the base
+    stays the single definition of what a canonical label is.
+    """
+    n = 0
+    for ms in data.get("milestones", []):
+        if work_model.ensure_target_label(ms):
+            n += 1
+    for op in data.get("operations", []):
+        if work_model.ensure_target_label(op):
+            n += 1
+    return n
