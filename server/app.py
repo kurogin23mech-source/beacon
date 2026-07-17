@@ -1168,6 +1168,13 @@ class EnvelopeIssueRequest(BaseModel):
     in_reply_to: Optional[str] = None
     chain_depth: int = 0
     ttl_seconds: int = 3600
+    # ms-110 / e-3443: optional recipient_confirmed consent claim. When present
+    # it is baked into the signed envelope so the claim is authentic (server
+    # HMAC covers it) and survives the receive-time verify pipeline. This is
+    # how a cross-user DM carries its human recipient-confirmation without
+    # breaking the signature (the claim used to be appended after signing,
+    # which invalidated it → T5 degrade → 403).
+    recipient_confirmed: Optional[dict] = None
 
 
 class OperationApproveRequest(BaseModel):
@@ -9470,6 +9477,7 @@ def issue_bus_envelope(
             in_reply_to=body.in_reply_to,
             chain_depth=body.chain_depth,
             ttl_seconds=body.ttl_seconds,
+            consent_claim=body.recipient_confirmed,
         )
     except ValueError as e:
         raise HTTPException(status_code=400,

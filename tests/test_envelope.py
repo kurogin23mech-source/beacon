@@ -80,6 +80,95 @@ def test_tampered_envelope_fails_signature():
 
 
 # ---------------------------------------------------------------------------
+# ms-110 / e-3443: recipient_confirmed consent claim signed IN at mint time.
+#
+# Regression guard for the bug where the CLI grafted the consent claim onto the
+# already-signed envelope (``envelope_obj = {**envelope_obj, key: claim}``).
+# Adding a key after ``sign()`` invalidated the signature, so the receive-time
+# verify degraded the DM to T5, and T5's ping-only payload schema then rejected
+# the free-text ``text`` key → 403 ``envelope_verify_rejected`` on every
+# --recipient-confirmed send. The fix mints the claim INTO the signed body.
+# ---------------------------------------------------------------------------
+
+_SAMPLE_CLAIM = {
+    "kind": "recipient_confirmed",
+    "confirmation_id": "rc-1700000000-abc123",
+    "confirmed_by": {"user_id": "uid-alice", "email": "alice@example.com"},
+    "confirmed_at": "2026-07-17T00:00:00Z",
+    "recipient": {"session_id": "sv-bob", "user_id": "uid-bob",
+                  "project_id": PROJECT_ID},
+    "channel": "dm",
+}
+
+
+def test_consent_claim_is_covered_by_signature():
+    """A claim passed to issue_envelope rides UNDER the signature (authentic)."""
+    e = env_mod.issue_envelope(
+        tier=env_mod.TIER_T1, issuer="alice@example.com", project_id=PROJECT_ID,
+        actions_authorized=[], data_class="free", consent_claim=_SAMPLE_CLAIM,
+    )
+    # The claim is present as a top-level envelope field...
+    assert e[env_mod.CONSENT_CLAIM_KEY] == _SAMPLE_CLAIM
+    # ...and the signature is valid *with* the claim included (not grafted after).
+    assert env_mod.verify_signature(e) is True
+    # Tampering the claim after signing must break the signature (tamper-evident).
+    tampered = dict(e)
+    tampered[env_mod.CONSENT_CLAIM_KEY] = {
+        **_SAMPLE_CLAIM,
+        "recipient": {"session_id": "sv-carol", "user_id": "uid-carol"},
+    }
+    assert env_mod.verify_signature(tampered) is False
+
+
+def test_confirmed_dm_verifies_as_t1_not_t5(nonce_store, parent_lookup):
+    """The repro: a free-text DM carrying a signed consent claim must pass the
+    full verify pipeline as T1 — NOT degrade to T5 (which would 403 the
+    free-text ``text`` payload under T5's ping-only allowlist)."""
+    e = env_mod.issue_envelope(
+        tier=env_mod.TIER_T1, issuer="alice@example.com", project_id=PROJECT_ID,
+        actions_authorized=[], data_class="free", consent_claim=_SAMPLE_CLAIM,
+    )
+    res = env_mod.verify(
+        e, project_id=PROJECT_ID,
+        # Free text — exactly the payload shape the T5 fallback rejects.
+        payload={"text": "hello", "recipient_session_id": "sv-bob",
+                 "source_project": PROJECT_ID},
+        requested_action=None,
+        nonce_store=nonce_store, parent_lookup=parent_lookup,
+        sender_session_id="s",
+    )
+    assert res.passed is True, res.steps
+    assert res.effective_tier == env_mod.TIER_T1
+    # The claim survives verify intact for the downstream consent backstop to read.
+    assert res.effective_tier != env_mod.TIER_T5
+
+
+def test_grafting_claim_after_signing_breaks_verify(nonce_store, parent_lookup):
+    """Documents the ORIGINAL bug: appending the claim AFTER sign() invalidates
+    the signature → T5 degrade → the free-text payload is rejected. This is the
+    behavior the fix eliminates; kept as a guard so the graft pattern can never
+    silently return."""
+    e = env_mod.issue_envelope(
+        tier=env_mod.TIER_T1, issuer="alice@example.com", project_id=PROJECT_ID,
+        actions_authorized=[], data_class="free",
+    )
+    # Reproduce the removed CLI line: graft onto the already-signed envelope.
+    e_grafted = {**e, env_mod.CONSENT_CLAIM_KEY: _SAMPLE_CLAIM}
+    assert env_mod.verify_signature(e_grafted) is False
+    res = env_mod.verify(
+        e_grafted, project_id=PROJECT_ID,
+        payload={"text": "hello"}, requested_action=None,
+        nonce_store=nonce_store, parent_lookup=parent_lookup,
+        sender_session_id="s",
+    )
+    assert res.passed is False
+    assert res.effective_tier == env_mod.TIER_T5
+    # And the rejection is exactly the T5-payload-allowlist failure from the field.
+    assert res.rejection_reason is not None
+    assert "T5 payload" in res.rejection_reason
+
+
+# ---------------------------------------------------------------------------
 # Issuance discipline
 # ---------------------------------------------------------------------------
 

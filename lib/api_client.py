@@ -679,12 +679,20 @@ class ApiClient:
                            conversation_id: str | None = None,
                            in_reply_to: str | None = None,
                            chain_depth: int = 0,
-                           ttl_seconds: int = 3600) -> dict:
+                           ttl_seconds: int = 3600,
+                           consent_claim: dict | None = None) -> dict:
         """Mint a server-signed bus envelope (ms-54 / e-1155 Phase 1).
 
         The returned dict is the full envelope (including ``signature``);
         callers embed it as the ``envelope`` field on a subsequent
         ``post_bus_event`` call.
+
+        ms-110 / e-3443: ``consent_claim`` (the ``recipient_confirmed``
+        cross-user consent claim) is passed to the mint endpoint so the
+        server signs the envelope *with* the claim included. This keeps the
+        claim authentic (covered by the server HMAC) and lets it survive the
+        receive-time verify pipeline. It must NOT be grafted onto the returned
+        envelope afterward — that invalidates the signature (the original bug).
         """
         body = {
             "tier": tier,
@@ -699,6 +707,8 @@ class ApiClient:
             body["conversation_id"] = conversation_id
         if in_reply_to is not None:
             body["in_reply_to"] = in_reply_to
+        if consent_claim is not None:
+            body["recipient_confirmed"] = consent_claim
         return self.post(f"/api/projects/{project_id}/bus/envelope/issue", body)
 
     # Operation fire claim (ms-95 / e-1668 + e-2350)

@@ -17890,6 +17890,60 @@ def cmd_bus_send():
     envelope_obj: dict | None = None
     requested_action: str | None = None
     no_envelope = os.environ.get("BEACON_BUS_NO_ENVELOPE", "") == "1"
+
+    # ms-110 / e-3445: build the recipient_confirmed consent claim BEFORE the
+    # envelope is minted, so it can be passed INTO the mint call and signed in.
+    # The claim used to be grafted onto the already-signed envelope afterward
+    # (see the removed block below), which invalidated the signature → the
+    # receive-time verify degraded the DM to T5 → 403 on every
+    # --recipient-confirmed send. Building it up-front and handing it to the
+    # server mint keeps the claim authentic (server HMAC covers it).
+    #
+    # The claim is required for a cross-user DM (server backstop e-3443); the
+    # /beacon-dm-send Skill sets BEACON_BUS_RECIPIENT_CONFIRMED=1 only after its
+    # human-confirmation step. A raw primitive call (no Skill, no flag) carries
+    # no claim and is rejected server-side — that is the whole point.
+    _consent_claim: dict | None = None
+    if os.environ.get("BEACON_BUS_RECIPIENT_CONFIRMED", "") == "1":
+        import dm_consent
+        try:
+            _cid_user, _cid_email, _ = _resolve_creator_identity()
+        except Exception:
+            _cid_user, _cid_email = "", ""
+        if not _cid_user:
+            print(
+                "Error: --recipient-confirmed requires a resolvable sender"
+                " identity (could not determine your user_id).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if no_envelope:
+            # No envelope will be minted (--no-envelope), so there is nothing to
+            # carry the claim. A cross-user send would be rejected server-side
+            # without it, so fail loudly rather than posting something that 403s.
+            print(
+                "Error: --recipient-confirmed needs an envelope to carry the"
+                " confirmation, but --no-envelope was set. Retry without"
+                " --no-envelope.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        try:
+            _consent_claim = dm_consent.build_recipient_confirmed_claim(
+                confirmed_by_user_id=_cid_user,
+                confirmed_by_email=_cid_email or "",
+                recipient_session_id=recipient or "",
+                recipient_user_id=recipient_user or "",
+                recipient_project_id=project_id or "",
+                channel=channel,
+            )
+        except ValueError as e:
+            print(
+                f"Error: cannot build recipient confirmation ({e}).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     if not no_envelope:
         actions_raw = os.environ.get("BEACON_BUS_ACTION", "").strip()
         actions_authorized = [
@@ -17903,11 +17957,19 @@ def cmd_bus_send():
         if len(actions_authorized) == 1:
             requested_action = actions_authorized[0]
         try:
+            # Pass consent_claim only when present so the ordinary send path
+            # calls issue_bus_envelope with the exact prior kwargs (keeps the
+            # legacy fallback + existing test stubs unchanged). Only the
+            # --recipient-confirmed path adds the extra kwarg.
+            _issue_kwargs = {}
+            if _consent_claim is not None:
+                _issue_kwargs["consent_claim"] = _consent_claim
             envelope_obj = client.issue_bus_envelope(
                 project_id,
                 tier="T1",
                 actions_authorized=actions_authorized,
                 data_class="free",
+                **_issue_kwargs,
             )
         except RuntimeError as e:
             # api_client wraps HTTPError as `RuntimeError("API error CODE: ...")`.
@@ -17939,54 +18001,26 @@ def cmd_bus_send():
             envelope_obj = None
             requested_action = None
 
-    # ms-110 / e-3445: attach the recipient_confirmed consent claim when the
-    # /beacon-dm-send Skill has confirmed the recipient with a human. The server
-    # backstop (e-3443) requires this claim for a cross-user DM; the Skill sets
-    # BEACON_BUS_RECIPIENT_CONFIRMED=1 only after its human-confirmation step.
-    # The claim is assembled here from the send's own target flags + the caller
-    # identity, and rides on the envelope under a key independent of
-    # actions_authorized (SPEC §4). A raw primitive call (no Skill, no flag)
-    # carries no claim and is rejected server-side — that is the whole point.
-    if os.environ.get("BEACON_BUS_RECIPIENT_CONFIRMED", "") == "1":
-        import dm_consent
-        try:
-            _cid_user, _cid_email, _ = _resolve_creator_identity()
-        except Exception:
-            _cid_user, _cid_email = "", ""
-        if not _cid_user:
-            print(
-                "Error: --recipient-confirmed requires a resolvable sender"
-                " identity (could not determine your user_id).",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        if envelope_obj is None:
-            # No envelope to carry the claim (--no-envelope or issuance failed).
-            # A cross-user send would be rejected server-side without the claim,
-            # so fail loudly rather than posting something that will 403.
-            print(
-                "Error: --recipient-confirmed needs an envelope to carry the"
-                " confirmation, but none was issued (--no-envelope or issuance"
-                " failed). Retry without --no-envelope.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        try:
-            _claim = dm_consent.build_recipient_confirmed_claim(
-                confirmed_by_user_id=_cid_user,
-                confirmed_by_email=_cid_email or "",
-                recipient_session_id=recipient or "",
-                recipient_user_id=recipient_user or "",
-                recipient_project_id=project_id or "",
-                channel=channel,
-            )
-        except ValueError as e:
-            print(
-                f"Error: cannot build recipient confirmation ({e}).",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        envelope_obj = {**envelope_obj, dm_consent.CONSENT_CLAIM_KEY: _claim}
+    # ms-110 / e-3445: the recipient_confirmed consent claim (built above) was
+    # passed INTO the mint call and signed in by the server, so it now rides on
+    # ``envelope_obj`` as a signed field. It is NO LONGER grafted here after
+    # signing — doing so invalidated the signature and 403'd every cross-user
+    # send (the bug this fix closes).
+    #
+    # Guard: if the claim was requested but the mint fell back to the legacy
+    # path (issuance 404/400/transport error → envelope_obj is None), there is
+    # no signed envelope to carry the claim. A cross-user send would be rejected
+    # server-side without it, so fail loudly rather than posting a bare event
+    # that will 403 with a confusing reason.
+    if _consent_claim is not None and envelope_obj is None:
+        print(
+            "Error: --recipient-confirmed needs a signed envelope to carry the"
+            " confirmation, but envelope issuance failed (server fell back to"
+            " the legacy path). The cross-user send would be rejected. Retry"
+            " once envelope issuance is available.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # ms-90 / e-3246: 相談を「開始」する DM (= 返信でない) で背景 (context) が
     # 空なら、書くよう促す (= SPEC §設計方針3: promote、hard block しない)。

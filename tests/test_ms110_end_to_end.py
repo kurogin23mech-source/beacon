@@ -85,9 +85,16 @@ class _BridgeClient:
 
     def issue_bus_envelope(self, project_id, *, tier, actions_authorized=None,
                            scope=None, data_class="free", conversation_id=None,
-                           in_reply_to=None, chain_depth=0, ttl_seconds=3600):
-        return {"tier": tier, "actions_authorized": list(actions_authorized or []),
-                "data_class": data_class, "signature": "stub-sig"}
+                           in_reply_to=None, chain_depth=0, ttl_seconds=3600,
+                           consent_claim=None):
+        env = {"tier": tier, "actions_authorized": list(actions_authorized or []),
+               "data_class": data_class, "signature": "stub-sig"}
+        # ms-110 fix: the claim is now minted INTO the envelope server-side
+        # (not grafted after signing). Mirror that here so the stored envelope
+        # carries the signed claim, matching the real mint endpoint's behavior.
+        if consent_claim is not None:
+            env["recipient_confirmed"] = consent_claim
+        return env
 
     def post_bus_event(self, project_id, channel, *, sender_session_id="",
                        payload=None, delivery="propose-to-ai", envelope=None,
