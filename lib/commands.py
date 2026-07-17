@@ -21092,17 +21092,20 @@ def cmd_account_phase():
 
 
 def cmd_account_delete():
+    # e-3586: 物理削除でなく soft-cancel (取消)。証跡は残す。
     import sales_entities
     account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
     force = os.environ.get("BEACON_FORCE", "") == "1"
+    reason = os.environ.get("BEACON_CANCEL_REASON", "")
     data = load_project()
     try:
-        orphaned = sales_entities.account_delete(data, account_id, force=force)
+        orphaned = sales_entities.account_cancel(
+            data, account_id, reason=reason, force=force)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     save_project(data)
-    print(f"Deleted account {account_id}")
+    print(f"Cancelled account {account_id}" + (f": {reason}" if reason else ""))
     if orphaned:
         print(f"  orphaned opportunities (account_id cleared): {', '.join(orphaned)}")
 
@@ -21252,19 +21255,29 @@ def _parse_number(raw: str, flag: str):
 
 
 def cmd_opportunity_list():
+    import sales_entities
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    show_all = os.environ.get("BEACON_ALL", "") == "1"  # e-3586: --all で取消済も出す
     data = load_project()
-    opps = data.get("opportunities", [])
+    # e-3586: 既定は取消済 (cancelled) を除外。--all で全件。
+    opps = (data.get("opportunities", []) if show_all
+            else sales_entities.live_opportunities(data))
     if json_mode:
         print(json.dumps(opps, ensure_ascii=False, indent=2))
         return
     if not opps:
         print("No opportunities yet. Add one with: beacon opportunity add \"<title>\"")
         return
-    import sales_entities
+    import work_model
     import datetime
     today = datetime.date.today().isoformat()
     for o in opps:
+        # e-3586: --all 時のみ現れる取消済は取消線相当のマーカーで区別する。
+        if work_model.is_cancelled(o):
+            reason = (o.get("meta", {}) or {}).get("cancel_reason", "")
+            print(f"[{o['id']}] ~~{o.get('title', '')}~~ (取消済"
+                  + (f": {reason}" if reason else "") + ")")
+            continue
         acc = o.get("account_id") or "-"
         deadline = f" due {o['deadline']}" if o.get("deadline") else ""
         ball = o.get("who_has_the_ball", "")
@@ -21468,16 +21481,18 @@ def cmd_opportunity_due():
 
 
 def cmd_opportunity_delete():
+    # e-3586: 物理削除でなく soft-cancel (取消)。中の証跡 (活動/証跡) を消さない。
     import sales_entities
     opp_id = os.environ.get("BEACON_OPP_ID", "")
+    reason = os.environ.get("BEACON_CANCEL_REASON", "")
     data = load_project()
     try:
-        sales_entities.opportunity_delete(data, opp_id)
+        sales_entities.opportunity_cancel(data, opp_id, reason=reason)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     save_project(data)
-    print(f"Deleted opportunity {opp_id}")
+    print(f"Cancelled opportunity {opp_id}" + (f": {reason}" if reason else ""))
 
 
 def cmd_phase_list():
@@ -21664,15 +21679,18 @@ def cmd_communication_retarget():
     import sales_entities
     comm_id = os.environ.get("BEACON_COMM_ID", "")
     new_target = os.environ.get("BEACON_COMM_TARGET", "")
+    reason = os.environ.get("BEACON_COMM_REASON", "")  # e-3585: 付け替え理由 (監査1行)
     data = load_project()
     try:
-        comm = sales_entities.communication_retarget(data, comm_id, new_target)
+        comm = sales_entities.communication_retarget(
+            data, comm_id, new_target, reason=reason)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     save_project(data)
     linked = comm.get("linked_id") or "(target grain)"
-    print(f"Retargeted communication {comm_id} → {new_target} (linked_id={linked})")
+    print(f"Retargeted communication {comm_id} → {new_target} (linked_id={linked})"
+          + (f" — {reason}" if reason else ""))
 
 
 def cmd_communication_list():

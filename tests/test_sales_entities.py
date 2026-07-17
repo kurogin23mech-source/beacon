@@ -252,56 +252,87 @@ def test_activity_unknown_opportunity():
         se.activity_add(data, "opp-9", "call")
 
 
-# --- deletion + referential integrity --------------------------------------
+# --- cancellation (soft, 取消) + referential integrity (e-3586) -------------
 
-def test_opportunity_delete_removes_it_and_activities():
+def test_opportunity_cancel_soft_keeps_record_and_children():
+    # e-3586: 削除は物理削除でなく取消 — 商談も中の証跡も残す。
     data = _fresh()
     opp = se.opportunity_add(data, "Deal")
     se.activity_add(data, opp, "call")
-    se.opportunity_delete(data, opp)
-    assert se.find_opportunity(data, opp) is None
-    assert data["opportunities"] == []
+    se.opportunity_cancel(data, opp, reason="重複起票")
+    rec = se.find_opportunity(data, opp)
+    assert rec is not None                       # record kept (append-only)
+    assert rec["status"] == se.work_base.CANCELLED_STATUS
+    assert rec["meta"]["cancel_reason"] == "重複起票"
+    assert rec["meta"].get("cancelled_by")       # who
+    assert rec["meta"].get("cancelled_at")       # when
+    assert rec["activities"]                      # children survive
+    # dropped from the default (live) view but still in the raw list
+    assert opp not in [o["id"] for o in se.live_opportunities(data)]
+    assert opp in [o["id"] for o in data["opportunities"]]
 
 
-def test_opportunity_delete_unknown():
+def test_opportunity_cancel_closes_open_gate():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    assert se.current_gate(data, opp) is not None
+    se.opportunity_cancel(data, opp)
+    # the ≤1-open slot is freed — no open gate remains
+    assert se.current_gate(data, opp) is None
+
+
+def test_opportunity_cancel_unknown():
     data = _fresh()
     with pytest.raises(ValueError):
-        se.opportunity_delete(data, "opp-9")
+        se.opportunity_cancel(data, "opp-9")
 
 
-def test_account_delete_unreferenced():
+def test_account_cancel_unreferenced():
     data = _fresh()
     acc = se.account_add(data, "Globex")
-    orphaned = se.account_delete(data, acc)
+    orphaned = se.account_cancel(data, acc, reason="重複")
     assert orphaned == []
-    assert se.find_account(data, acc) is None
+    rec = se.find_account(data, acc)
+    assert rec is not None
+    assert rec["status"] == se.work_base.CANCELLED_STATUS
 
 
-def test_account_delete_referenced_refused_without_force():
+def test_account_cancel_referenced_refused_without_force():
     data = _fresh()
     acc = se.account_add(data, "Globex")
     se.opportunity_add(data, "Deal", account_id=acc)
     with pytest.raises(ValueError):
-        se.account_delete(data, acc)
-    # account survives the refusal
-    assert se.find_account(data, acc) is not None
+        se.account_cancel(data, acc)
+    # account survives the refusal, un-cancelled
+    assert se.find_account(data, acc).get("status") != se.work_base.CANCELLED_STATUS
 
 
-def test_account_delete_force_orphans_opportunities():
+def test_account_cancel_force_orphans_opportunities():
     data = _fresh()
     acc = se.account_add(data, "Globex")
     opp = se.opportunity_add(data, "Deal", account_id=acc)
-    orphaned = se.account_delete(data, acc, force=True)
+    orphaned = se.account_cancel(data, acc, force=True)
     assert orphaned == [opp]
-    assert se.find_account(data, acc) is None
-    # the deal survives, now account-less (a lost deal shouldn't vanish)
+    assert se.find_account(data, acc)["status"] == se.work_base.CANCELLED_STATUS
+    # the deal survives, now account-less (a live deal shouldn't be取消 with it)
     assert se.find_opportunity(data, opp)["account_id"] is None
+    assert se.find_opportunity(data, opp)["status"] != se.work_base.CANCELLED_STATUS
 
 
-def test_account_delete_unknown():
+def test_account_cancel_referenced_by_cancelled_opp_allowed():
+    # a deal already 取消済 no longer counts as a live reference (e-3586)
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    opp = se.opportunity_add(data, "Deal", account_id=acc)
+    se.opportunity_cancel(data, opp)
+    orphaned = se.account_cancel(data, acc)  # not refused
+    assert orphaned == []
+
+
+def test_account_cancel_unknown():
     data = _fresh()
     with pytest.raises(ValueError):
-        se.account_delete(data, "acc-9")
+        se.account_cancel(data, "acc-9")
 
 
 # --- send identity pin (複垢取り違え防止) -----------------------------------
@@ -1149,12 +1180,17 @@ def test_derive_ball_from_latest_communication():
     assert se.derive_ball(se.find_opportunity(data, opp)) == se.BALL_SELF
 
 
-def test_opportunity_delete_removes_communications():
+def test_opportunity_cancel_keeps_communications():
+    # e-3586: 取消しても中の証跡 (communications) は残る — 不変性の穴を塞ぐ。
     data = _fresh()
     opp = se.opportunity_add(data, "Deal")
     se.communication_add(data, opp, "x", direction="inbound")
-    se.opportunity_delete(data, opp)
-    assert se.find_opportunity(data, opp) is None
+    se.opportunity_cancel(data, opp)
+    rec = se.find_opportunity(data, opp)
+    assert rec is not None
+    assert rec["status"] == se.work_base.CANCELLED_STATUS
+    assert rec.get("communications") or any(
+        c for a in rec.get("activities", []) for c in a.get("communications", []))
 
 
 # --- Meeting (面談・運用状態型 + 識別 ID handshake, e-3433) -----------------
@@ -1545,6 +1581,60 @@ def test_communication_retarget_moves_record_fact_intact():
     act2 = next(a for a in opp["activities"] if a["id"] == a2)
     assert not any(c["id"] == cid for c in act1.get("communications", []))
     assert any(c["id"] == cid for c in act2.get("communications", []))
+
+
+def test_communication_retarget_audits_the_move():
+    # e-3585: 付け替えは事実を変えないが、元→先・理由・実行者・日時を1行刻む。
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    a1 = se.activity_add(data, oid, "初回連絡")
+    a2 = se.activity_add(data, oid, "提案")
+    cid = se.communication_add(data, a1, "議事録", direction=se.COMM_INBOUND)
+    se.communication_retarget(data, cid, a2, reason="誤って初回連絡に紐づけた",
+                              actor="kida", at="2026-07-17")
+    _, _, comm = se.find_communication(data, cid)
+    hist = comm.get("meta", {}).get("retarget_history", [])
+    assert len(hist) == 1
+    row = hist[0]
+    assert row["kind"] == "retarget"
+    assert row["from_linked"] == a1
+    assert row["to_linked"] == a2
+    assert row["reason"] == "誤って初回連絡に紐づけた"
+    assert row["actor"] == "kida"
+    assert row["at"] == "2026-07-17"
+
+
+def test_communication_retarget_audit_defaults_actor_and_time():
+    # reason/actor/at 省略でも監査行は残る (actor/at は現在値でフォールバック)。
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    a1 = se.activity_add(data, oid, "初回連絡")
+    cid = se.communication_add(data, a1, "メール", direction=se.COMM_OUTBOUND)
+    se.communication_retarget(data, cid, oid)
+    _, _, comm = se.find_communication(data, cid)
+    hist = comm["meta"]["retarget_history"]
+    assert hist[-1]["from_linked"] == a1
+    assert hist[-1]["to_linked"] == ""       # target grain
+    assert hist[-1].get("actor")             # defaulted, non-empty
+    assert hist[-1].get("at")                # defaulted, non-empty
+
+
+def test_cancelled_opportunity_excluded_from_pipeline_and_attention():
+    # e-3586: 取消済商談は見込み売上・判定待ち firing surface から外れる。
+    data = _fresh()
+    live = se.opportunity_add(data, "Live", assignee="kida")
+    se.set_opportunity_amount(data, live, 1000000)
+    se.phase_set(data, live, "提案準備")
+    doomed = se.opportunity_add(data, "Doomed", assignee="kida")
+    se.set_opportunity_amount(data, doomed, 5000000)
+    se.phase_set(data, doomed, "提案準備")
+    before = se.weighted_pipeline(data)
+    se.opportunity_cancel(data, doomed, reason="流れた")
+    after = se.weighted_pipeline(data)
+    assert after < before                     # cancelled deal no longer counted
+    # and it is gone from the judgement firing surface
+    ready = se.opportunities_awaiting_gate_judgement(data, "2026-07-17")
+    assert doomed not in [r["id"] for r in ready]
 
 
 def test_communication_retarget_to_target_grain():
