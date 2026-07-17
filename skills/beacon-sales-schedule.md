@@ -1,5 +1,6 @@
 ---
 name: beacon-sales-schedule
+profession: sales
 description: 商談の次のアポイントを、空いている時間から候補を出して調整し、確定したら Google カレンダーに予定を作成、商談に活動記録として残す。「アポ取って」「日程調整」「次の面談」等で起動。
 version: 1.0.0
 triggers:

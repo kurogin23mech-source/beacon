@@ -1,5 +1,6 @@
 ---
 name: beacon-sales-reply-watch
+profession: sales
 description: 時間に敏感なやり取り（日程打診など）で「相手にボールがあり watch 中」のスレッドを高頻度で確認し、返信が来ていたら証跡(Communication)を残してボールを自分に戻し、人に通知する。検知に徹し、返信自体はしない。定期発火(hourly Operation)で自律実行、または「返信チェック」で手動起動。営業専用。
 version: 1.0.0
 triggers:

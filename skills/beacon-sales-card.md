@@ -1,5 +1,6 @@
 ---
 name: beacon-sales-card
+profession: sales
 description: 名刺の画像から会社・氏名・役職・連絡先を読み取り、顧客(Account)と担当者(Contact)として Beacon に起票する。スマホからのリモートモード利用を想定。「名刺取り込み」「名刺登録」等で起動。
 version: 1.0.0
 triggers:

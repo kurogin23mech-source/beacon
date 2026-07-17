@@ -1,5 +1,6 @@
 ---
 name: beacon-sales-drive
+profession: sales
 description: 商談に紐づく資料を Google ドライブに保管し、リンクを商談の記録として残す。資料の生成はせず保管・参照に徹する。「ドライブに格納」「資料を保管」「Driveに上げて」等で起動。
 version: 1.0.0
 triggers:

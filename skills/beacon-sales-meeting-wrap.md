@@ -1,5 +1,6 @@
 ---
 name: beacon-sales-meeting-wrap
+profession: sales
 description: 終わった面談について、Drive の議事録を取り込んで証跡(Communication)として残し、その内容からフェーズ遷移(次へ/やり直し/決着)の判定案と次にやるべき活動案を提示する。フェーズを進める確定は人が行う。終了検知(C)を起点に、または「面談の振り返り」等で起動。営業専用。
 version: 1.0.0
 triggers:
