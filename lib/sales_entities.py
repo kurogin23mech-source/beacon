@@ -37,6 +37,7 @@ from __future__ import annotations
 from typing import Optional
 
 import work_base
+import work_model  # ms-109 e-3559: 職種非依存の Target/WorkItem 正準アクセサ
 
 # 取消 (cancelled) 状態は基底 work_base の語彙に揃える (ms-109 e-3558)。営業の
 # activity / communication の「誤起票の訂正」(e-3537) と Meeting の cancelled が
@@ -1421,7 +1422,7 @@ def work_item_completed(data: dict, work_item_id: str, now: str = "") -> bool:
         return False
     if wi.startswith("act-") or wi.startswith("nrt-"):
         _, w = find_work_item(data, wi)
-        return bool(w is not None and w.get("status") == "done")
+        return work_model.is_done(w)
     return False
 
 
@@ -1476,7 +1477,7 @@ def opportunities_awaiting_gate_judgement(data: dict, now: str) -> list:
             continue
         gate = current_gate(data, oid)
         out.append({
-            "id": oid, "title": opp.get("title", ""), "phase": opp.get("phase", ""),
+            "id": oid, "title": work_model.target_label(opp), "phase": opp.get("phase", ""),
             "anchor": (gate or {}).get("anchor", ""),
             "transition_date": (gate or {}).get("transition_date", ""),
             "who_has_the_ball": opp.get("who_has_the_ball", ""),
@@ -1589,7 +1590,7 @@ def instantiate_phase_activities(data: dict, target_id: str, *,
     pdef = _find_phase_def(opportunity_phases(data), opp.get("phase", ""))
     anchors = phase_activity_anchors(pdef)
     existing = {(_norm(a.get("description")))
-                for a in opp.get("activities", []) if a.get("status") != "done"}
+                for a in opp.get("activities", []) if not work_model.is_done(a)}
     created = []
     for anchor in anchors:
         text = anchor["desc"]
@@ -1735,7 +1736,7 @@ def activity_set_status(data: dict, activity_id: str, status: str, *,
         raise ValueError(
             f"status must be one of {sorted(VALID_ACTIVITY_STATUS)}, got {status!r}")
     act["status"] = status
-    if status == "done":
+    if status == work_model.DONE_STATUS:
         act["done_at"] = at
     return act
 
