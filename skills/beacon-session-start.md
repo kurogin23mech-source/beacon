@@ -156,7 +156,13 @@ beacon status --json
 stdout に JSON が返る。以下のフィールドを使う:
 - `name`: プロジェクト名
 - `summary`: 前セッションの経緯・背景
-- `milestones[]`: 各MSの `id`, `title`, `status`, `progress`, `total_tasks`, `done_tasks`
+- `profession`: この instance の職種 (= `dev` / `sales` 等、無ければ `dev` 扱い)。以下の職種分岐の判定に使う
+- `milestones[]`: 各MSの `id`, `title`, `status`, `progress`, `total_tasks`, `done_tasks` (**開発 instance のみ**、営業では空)
+- `targets[]`: 職種非依存の「対象」投影 (ms-108 e-3269)。各要素は `id` / `label` / `status` / `kind` (`milestone` or `opportunity`) / `work_items_total` / `work_items_done` / `detail` (職種固有の付帯情報)。**開発では Milestone、営業では Opportunity (商談) が同じ形で並ぶ**
+
+**職種分岐 (ms-108 e-3269 / SPEC 方針6)**: session-start は③共有フレーム Skill なので、骨格 (文脈復元・次の一手) は職種不変だが「何を投影するか」が職種で変わる。以下を守る:
+- **`profession == "dev"` (または未設定)**: 従来通り `milestones[]` を主軸に読む。以降の全 Step は現行動作。
+- **`profession == "sales"` 等 (非 dev)**: `milestones[]` は空なので `targets[]` (= 商談) を主軸に読む。Step 2 (アクティブ MS 詳細) は「アクティブ商談 (`status` が進行中の Opportunity)」に読み替える。Step 2.9 の「次の一手」は **`/beacon-sales-cockpit` に委譲** する (SPEC 方針5 = 営業の『次の一手』は cockpit に一本化。session-start 側で商談ごとの next-action を再実装しない)。Step 3 出力は「Active」欄を商談 (`[opp-id] label — フェーズ / ball / 消化数`) に置き換える。
 
 ### 1b. git の最新コミット
 ```bash
@@ -510,6 +516,7 @@ Step 3 の出力末尾に「**次の一手**」を **AI が決定的に選ぶ** 
 3. **Step 1m で .beacon/fork.json から `target_ms_id` が取れた (ms-67 e-1551)** → その MS の最優先タスクを推奨アクションにする。fork は「この MS のために worktree を立てた」という直前の明示的意図そのものなので、session log より新しい強シグナル。
 4. **Step 1j で抽出した session log 由来 next-action がある** → その先頭項目を推奨アクションにする。**trigger より優先**。前セッションが意図的に積んだ次の塊を見落とさないため (2026-06-09 朝に実害発生、e-1360 で構造化)。
 5. **`beacon trigger check` で active なトリガーがある** → そのトリガーの推奨アクション
+5.5. **`profession` が非 dev (= 営業等) の場合 (ms-108 e-3269 / SPEC 方針5)** → next-action を `/beacon-sales-cockpit` に委譲する。以降の 6〜9 は「アクティブ MS のタスク / SPEC / MS 提案」という **開発 instance 専用**のロジックなので、営業では評価しない。営業の『今日やること・各商談の次の一手』は cockpit が商談を横断して出すのが正 (= session-start 側で商談ごとの next-action を再実装しない)。ただし項目 3 (fork) / 項目 4 (session log 由来 next-action) が取れている場合はそちらを優先する (職種に依らない強シグナルのため)。
 6. **アクティブ MS に未消化タスクが 1 つ以上ある**
    - そのうち `priority == "highest"` があればそれを最優先
    - 次に `in_progress` 状態のタスク
@@ -590,6 +597,13 @@ Active: [ms-id] [title] ([progress]%) [done_tasks]/[total_tasks]タスク完了
 他のマイルストーン:
   [status-icon] [ms-id] [title] ([progress]%)
   ...
+
+（営業 instance = `profession != dev` の場合: 上の「Active」「他のマイルストーン」を
+  `targets[]` (商談) に置き換える。ms-108 e-3269）
+アクティブ商談:
+  [opp-id] [label] — フェーズ:[detail.phase] / ball:[detail.who_has_the_ball] / 活動 [work_items_done]/[work_items_total]
+  ...
+  → 次の一手は `/beacon-sales-cockpit`（Step 2.9 項目 5.5）
 
 未記録のコミット: [git logのハッシュがbeaconエントリに存在しないもの]
 uncommitted changes: [git statusの結果があれば]

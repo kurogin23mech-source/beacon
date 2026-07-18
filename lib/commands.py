@@ -15,6 +15,7 @@ from typing import Optional, Tuple
 from store import get_store
 import core
 import work_model  # ms-109 e-3559: 職種非依存の Target 正準ラベルアクセサ
+import occupation  # ms-108 e-3269: ③共有フレームの職種プロジェクション registry
 
 # ---------------------------------------------------------------------------
 # Store helpers
@@ -1058,6 +1059,15 @@ def cmd_milestone_list():
         output = {
             "name": data.get("name", ""),
             "summary": data.get("summary", ""),
+            "profession": occupation.resolve_profession(data),
+            # ms-108 e-3269 — occupation-agnostic Target projection (③ shared
+            # frame). Development still emits the legacy ``milestones[]`` below
+            # unchanged (expand step); ``targets[]`` is the canonical view that
+            # projects Milestones (dev) OR Opportunities (sales) uniformly, so
+            # the shared frame / session-start can read one shape regardless of
+            # occupation. Sales projects — whose ``milestones[]`` is empty —
+            # finally surface their work here.
+            "targets": occupation.project_targets(data),
             "milestones": [],
             "operations": [],
             # ms-61 / e-1843 — pending Operations (= todo / in_progress)
@@ -1133,11 +1143,29 @@ def cmd_milestone_list():
     icons = {"done": "\u25cf", "in_progress": "\u25d1", "todo": "\u25cb",
              "waiting": "\u25cc", "in_review": "\u25d5", "observing": "\u25d5",
              "cancelled": "\u2718"}
-    for ms in milestones:
-        icon = icons.get(ms["status"], "?")
-        active = " \u25c0 ACTIVE" if ms["status"] == "in_progress" else ""
-        progress = ms.get("progress", 0)
-        print(f"  {icon} [{ms['id']}] {work_model.target_label(ms)} ({progress}%){active}")
+    # ms-108 e-3269 (\u5897\u5206B) \u2014 the human-readable status projects the
+    # occupation's Targets. Development keeps its exact line format
+    # (Milestone + progress %); sales and other occupations, whose
+    # ``milestones[]`` is empty, list their Targets (Opportunities) via the
+    # shared projection so ``beacon status`` is no longer blank for them.
+    if occupation.resolve_profession(data) == "dev":
+        for ms in milestones:
+            icon = icons.get(ms["status"], "?")
+            active = " \u25c0 ACTIVE" if ms["status"] == "in_progress" else ""
+            progress = ms.get("progress", 0)
+            print(f"  {icon} [{ms['id']}] {work_model.target_label(ms)} ({progress}%){active}")
+    else:
+        for t in occupation.project_targets(data):
+            # Occupations carry their own status vocabulary (sales: open /
+            # won / lost …), so fall back to a neutral bullet rather than the
+            # development "?" when a status is not in the dev icon map.
+            icon = icons.get(t["status"], "•")
+            phase = t.get("detail", {}).get("phase", "")
+            phase_note = f" [{phase}]" if phase else ""
+            done = t["work_items_done"]
+            total = t["work_items_total"]
+            print(f"  {icon} [{t['id']}] {t['label']} ({t['status']}){phase_note} "
+                  f"{done}/{total}")
 
 
 def cmd_milestone_start():
@@ -9616,7 +9644,10 @@ def _project_profession_safe() -> str:
         data = get_store().load_project()
     except Exception:
         return "dev"
-    return (data.get("profession") or "dev").strip().lower()
+    # ms-108 e-3701 (fable review B-6): one definition of "resolve profession"
+    # lives in occupation.resolve_profession — reuse it rather than re-inlining
+    # the ``(get("profession") or "dev").strip().lower()`` expression.
+    return occupation.resolve_profession(data)
 
 
 def _application_map_applies() -> bool:

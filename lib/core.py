@@ -2349,6 +2349,41 @@ def count_task_status(entries: list) -> tuple[int, int]:
     return total, done
 
 
+def project_targets(data: dict) -> list:
+    """③ shared-frame projection (ms-108 e-3269): map this development
+    project's Targets (Milestones) into the occupation-agnostic shape the
+    shared frame (status / session-start) consumes.
+
+    Each item carries the generic core every occupation shares — ``id`` /
+    ``label`` (via the tolerant ``work_model.target_label`` reader) /
+    ``status`` / ``kind`` and the WorkItem completion counts — plus a
+    ``detail`` blob for the occupation-specific fields the frame may render.
+    Development semantics (progress %, target date, priority) live only in
+    ``detail`` so the generic core stays occupation-neutral (SPEC AC4).
+
+    Cancelled (取消) Targets are excluded, matching the default status view.
+    """
+    targets = []
+    for ms in data.get("milestones", []):
+        if ms.get("status") == work_model.CANCELLED_STATUS:
+            continue
+        total, done = count_task_status(ms.get("entries", []))
+        targets.append({
+            "id": ms.get("id", ""),
+            "label": work_model.target_label(ms),
+            "status": ms.get("status", "todo"),
+            "kind": "milestone",
+            "work_items_total": total,
+            "work_items_done": done,
+            "detail": {
+                "progress": ms.get("progress", 0),
+                "target_date": ms.get("target_date", ""),
+                "priority": ms.get("priority", ""),
+            },
+        })
+    return targets
+
+
 def filter_cancelled(entries: list, show_all: bool = False) -> list:
     """Filter out cancelled entries recursively."""
     if show_all:

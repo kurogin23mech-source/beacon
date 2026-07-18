@@ -64,20 +64,35 @@ def _iter_entries(entries: list) -> list:
 
 
 def collect_project_entries(data: dict, session_id: str) -> dict:
-    """Walk all milestones' entries and return per-type id lists matching
+    """Walk every Target's entries and return per-type id lists matching
     ``meta.session_id == session_id``.
 
     Returns ``{commit_ids: [...], pr_ids: [...], commit_texts: [...], pr_texts: [...]}``.
     The ``*_texts`` lists power mechanical summary fallback so callers that
     don't have an AI on hand still produce a non-empty summary.
+
+    ms-108 e-3269/e-3701 — occupation-neutral. Previously this walked only
+    ``data["milestones"]`` (development Targets), so a sales project aggregated
+    nothing into its session log. This function is a ③ shared-frame aggregator
+    (it projects the occupation's Targets into a session log), NOT pure L1 —
+    the earlier ① classification was wrong (fable review B-1). It now asks the
+    occupation registry for the raw Target records instead of hardcoding the
+    collection names, so occupation knowledge stays in one place
+    (``occupation.iter_target_records``) rather than leaking into this module.
+
+    (Mapping the sales work-record — Communication/証跡 — into the commit slot
+    of the session log is a separate follow-up ``e-3702``: sales entries do not
+    stamp ``meta.session_id`` yet, so there is nothing to collect from them
+    here today.)
     """
     commit_ids: list[str] = []
     commit_texts: list[str] = []
     pr_ids: list[str] = []
     pr_texts: list[str] = []
 
-    for ms in data.get("milestones", []) or []:
-        for e in _iter_entries(ms.get("entries", [])):
+    import occupation
+    for tgt in occupation.iter_target_records(data):
+        for e in _iter_entries(tgt.get("entries", [])):
             meta = e.get("meta") or {}
             if meta.get("session_id") != session_id:
                 continue
