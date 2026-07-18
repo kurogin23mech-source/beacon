@@ -925,7 +925,7 @@ def next_opportunity_phase(data: dict, phase_name: str) -> Optional[str]:
 
 def advance_transition(data: dict, target_id: str, *,
                        next_transition_date: str = "", note: str = "",
-                       at: str = "") -> dict:
+                       at: str = "", actor: str = "") -> dict:
     """Advance a target to the next non-terminal phase (goal met, SPEC §3).
 
     Settles the current open advance gate with ``outcome=advance`` (its 判断証跡)
@@ -946,7 +946,7 @@ def advance_transition(data: dict, target_id: str, *,
             "advance ではなく terminal (決着) を宣言してください")
     gate = current_gate(data, target_id)
     if gate is not None:
-        settle_gate(data, gate["id"], outcome=GATE_ADVANCE, reason=note, at=at)
+        settle_gate(data, gate["id"], outcome=GATE_ADVANCE, reason=note, at=at, actor=actor)
     phase_set(data, target_id, nxt, note=note, at=at)
     open_advance_gate(data, target_id, phase=nxt,
                       transition_date=next_transition_date, at=at)
@@ -959,7 +959,7 @@ def advance_transition(data: dict, target_id: str, *,
 
 
 def retry_transition(data: dict, target_id: str, new_transition_date: str, *,
-                     note: str = "", at: str = "") -> dict:
+                     note: str = "", at: str = "", actor: str = "") -> dict:
     """Stay in the same phase but re-place the 遷移日 (未達だが粘る, SPEC §3 +
     2026-07-17 改訂 = Option 3). Settles the current gate with ``outcome=retry``
     (its 判断証跡 — なぜやり直すか) and opens a *new* gate for the **same** phase
@@ -976,7 +976,7 @@ def retry_transition(data: dict, target_id: str, new_transition_date: str, *,
     cur = opp.get("phase", "")
     gate = current_gate(data, target_id)
     if gate is not None:
-        settle_gate(data, gate["id"], outcome=GATE_RETRY, reason=note, at=at)
+        settle_gate(data, gate["id"], outcome=GATE_RETRY, reason=note, at=at, actor=actor)
     open_advance_gate(data, target_id, phase=cur,
                       transition_date=new_transition_date, at=at)
     return {"phase": cur, "transition_date": get_transition_date(data, target_id)}
@@ -994,7 +994,7 @@ def allowed_terminals_for(data: dict, target_id: str) -> list:
 
 
 def terminal_transition(data: dict, target_id: str, terminal_phase: str, *,
-                        note: str = "", at: str = "") -> dict:
+                        note: str = "", at: str = "", actor: str = "") -> dict:
     """Declare a terminal (決着) phase and consume the transition_date.
 
     Permissive (master=人間, SPEC §6): declaring a terminal outside the stage's
@@ -1013,8 +1013,46 @@ def terminal_transition(data: dict, target_id: str, terminal_phase: str, *,
             f"(既知の決着: {[p['name'] for p in opportunity_phases(data) if p.get('terminal')]})")
     gate = current_gate(data, target_id)
     if gate is not None:
-        settle_gate(data, gate["id"], outcome=GATE_TERMINAL, reason=note, at=at)
+        settle_gate(data, gate["id"], outcome=GATE_TERMINAL, reason=note, at=at, actor=actor)
     rec = phase_set(data, target_id, terminal_phase, note=note or "terminal", at=at)
+    return rec
+
+
+def jump_transition(data: dict, target_id: str, new_phase: str, *,
+                    note: str = "", at: str = "", actor: str = "") -> dict:
+    """Corrective manual phase jump for an Opportunity that still honors the
+    advance-gate model (ms-106 e-3688 / fable review C-1).
+
+    ``beacon opportunity phase <opp> <phase>`` used to call the low-level
+    ``phase_set`` directly, which set the exclusive phase but **settled no gate
+    and discarded the ``note``** — so the phase-change history and the "why"
+    were lost (SPEC AC5 violated), and the previous phase's open gate stayed
+    open and could mis-anchor the next phase's activities. This routes a manual
+    declaration through the SAME gate lifecycle as advance / terminal: settle
+    the current open gate with its outcome + note (its 判断証跡), set the phase,
+    and open a fresh gate unless the target phase is terminal (決着 = no phase
+    left in progress). Permissive on vocabulary (master = 人間, SPEC §5/§6) —
+    the CLI surfaces warnings, this never blocks.
+
+    ``phase_set`` stays the internal exclusive-phase primitive that
+    advance/retry/terminal_transition call *after* settling their gate; only
+    this corrective path is exposed to the raw CLI now, so no bypass remains.
+    """
+    opp = find_opportunity(data, target_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {target_id}")
+    if not new_phase or not new_phase.strip():
+        raise ValueError("new_phase is required")
+    new_phase = new_phase.strip()
+    terminal = opportunity_phase_is_terminal(data, new_phase)
+    gate = current_gate(data, target_id)
+    if gate is not None:
+        settle_gate(data, gate["id"],
+                    outcome=(GATE_TERMINAL if terminal else GATE_ADVANCE),
+                    reason=note or "manual phase jump", at=at, actor=actor)
+    rec = phase_set(data, target_id, new_phase, note=note, at=at)
+    if not terminal:
+        open_advance_gate(data, target_id, phase=new_phase, at=at)
     return rec
 
 
@@ -1062,7 +1100,11 @@ def opportunities_awaiting_judgement(data: dict, today: str) -> list:
         "phase": o.get("phase", ""),
         "transition_date": get_transition_date(data, o["id"]),
         "transition_status": st,
-        "who_has_the_ball": o.get("who_has_the_ball", ""),
+        # C-3 (e-3692): the live ball is derived from Communications; the static
+        # who_has_the_ball field is only the initial declaration and goes stale
+        # after an email exchange. Read derived-first so the 判定/催促 split is
+        # not a lie; fall back to the static field only when there is no comm.
+        "who_has_the_ball": derive_ball(o) or o.get("who_has_the_ball", ""),
     } for o, st in pairs]
 
 
@@ -1130,8 +1172,11 @@ def _migrate_opp_gates(data: dict, opp: dict) -> None:
     phase becomes the single open gate carrying the deal's live 遷移日; a terminal
     current phase instead turns the last non-terminal gate into ``outcome=
     terminal`` and opens nothing. Approximate but faithful — the phase timeline
-    and the live judgement date survive, and the legacy fields are dropped only
-    after the列 is built (no evidence deleted, data-immutability-principle).
+    and the live judgement date survive on the列, and the raw legacy fields
+    (with their notes / full transition_date_history) are **preserved verbatim
+    under ``meta.legacy_pre_gate_fold``**, not deleted (data-immutability-
+    principle, C-4 / e-3693); only the *active* top-level copies are cleared so
+    the gate列 is the single live source.
     """
     if "gates" in opp:
         return
@@ -1179,6 +1224,17 @@ def _migrate_opp_gates(data: dict, opp: dict) -> None:
                             {"kind": "settled", "outcome": GATE_ADVANCE, "at": at}],
                 "meta": {}})
     opp["gates"] = gates
+    # C-4 (e-3693): the reconstruction above approximates the timeline onto the
+    # gate列 but loses the phase_history *notes* (なぜ) and the whole
+    # transition_date_history. Physically deleting them violated
+    # data-immutability-principle (and contradicted this function's own "no
+    # evidence deleted" claim). Preserve the raw legacy fields under
+    # meta.legacy_pre_gate_fold, then clear the active top-level fields so the
+    # gate列 is the single live source.
+    legacy = {k: opp[k] for k in ("phase_history", "transition_date",
+                                  "transition_date_history") if k in opp}
+    if legacy:
+        opp.setdefault("meta", {})["legacy_pre_gate_fold"] = legacy
     for k in ("phase_history", "transition_date", "transition_date_history"):
         opp.pop(k, None)
 
@@ -1483,7 +1539,8 @@ def opportunities_awaiting_gate_judgement(data: dict, now: str) -> list:
             "id": oid, "title": work_model.target_label(opp), "phase": opp.get("phase", ""),
             "anchor": (gate or {}).get("anchor", ""),
             "transition_date": (gate or {}).get("transition_date", ""),
-            "who_has_the_ball": opp.get("who_has_the_ball", ""),
+            # C-3 (e-3692): derived-first ball (see opportunities_awaiting_judgement).
+            "who_has_the_ball": derive_ball(opp) or opp.get("who_has_the_ball", ""),
         })
     out.sort(key=lambda r: (r["transition_date"] or "9999-99-99"))
     return out

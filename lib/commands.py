@@ -21420,8 +21420,17 @@ def cmd_opportunity_phase():
     for w in warnings:
         print(f"  ⚠ {w}", file=sys.stderr)
     try:
-        rec = sales_entities.phase_set(data, opp_id, new_phase, note=note,
-                                       at=core._now_iso())
+        # ms-106 e-3688 (fable C-1) — an opportunity phase declaration must go
+        # through the advance-gate lifecycle so the change + note land as
+        # evidence on the gate列. jump_transition settles the current gate and
+        # opens a fresh one; only accounts (not gated) use the raw phase_set.
+        if opp_id.startswith("opp-"):
+            rec = sales_entities.jump_transition(data, opp_id, new_phase,
+                                                 note=note, at=core._now_iso(),
+                                                 actor=_human_actor())
+        else:
+            rec = sales_entities.phase_set(data, opp_id, new_phase, note=note,
+                                           at=core._now_iso())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -21435,7 +21444,11 @@ def cmd_opportunity_phase():
         seeded = sales_entities.instantiate_phase_activities(
             data, opp_id, at=core._now_iso())
     save_project(data)
-    print(f"{opp_id} phase → {rec['phase']} (recorded in phase_history)")
+    # C-6: opportunities record the change on the advance-gate列 (前進ゲート),
+    # not phase_history (that field left the opportunity in the e-3580 fold);
+    # accounts still keep an append-only phase_history.
+    where = "前進ゲート列に記録" if opp_id.startswith("opp-") else "recorded in phase_history"
+    print(f"{opp_id} phase → {rec['phase']} ({where})")
     if seeded:
         print(f"  seeded {len(seeded)} フェーズ活動 (このフェーズの標準ステップ)")
 
@@ -21465,6 +21478,33 @@ def cmd_opportunity_transition_date():
         print(f"{opp_id} transition_date cleared (recorded in transition_date_history)")
 
 
+def _human_actor() -> str:
+    """The human master's identity for a human-confirmed state transition
+    (phase judge / manual phase jump). ms-106 e-3691 (fable review C-2).
+
+    Unlike ``work_base.current_actor()`` — which stamps ``"claude"`` inside
+    Claude Code to mark AI-authored commits — a gate judgement is the human's
+    master decision (SPEC §3/§6, master=人間). The AI only *applies* what the
+    human confirmed in the Skill, so the gate's audit row must attribute the
+    decision to the person, not to the AI running the CLI. Resolves to
+    ``human:<git user.email>``, else ``human:<os user>``, else ``"human"``.
+    """
+    import subprocess
+    try:
+        email = subprocess.run(
+            ["git", "config", "user.email"],
+            capture_output=True, text=True, timeout=2).stdout.strip()
+        if email:
+            return f"human:{email}"
+    except Exception:
+        pass
+    try:
+        import getpass
+        return f"human:{getpass.getuser()}"
+    except Exception:
+        return "human"
+
+
 def cmd_opportunity_judge():
     """Judge a transition (ms-107 e-3372, SPEC §3): advance / retry / terminal.
 
@@ -21479,10 +21519,11 @@ def cmd_opportunity_judge():
     note = os.environ.get("BEACON_PHASE_NOTE", "")
     data = load_project()
     at = core._now_iso()
+    actor = _human_actor()  # C-2: the judgement is the human's master decision
     try:
         if decision == "advance":
             res = sales_entities.advance_transition(
-                data, opp_id, next_transition_date=arg, note=note, at=at)
+                data, opp_id, next_transition_date=arg, note=note, at=at, actor=actor)
             save_project(data)
             print(f"{opp_id} advance → phase {res['phase']}")
             # e-3270: フェーズ固有の固定アンカー活動を自動起票 (あれば)。
@@ -21501,7 +21542,7 @@ def cmd_opportunity_judge():
                 print(f"  ⚠ 次フェーズの遷移日が未設定です{hint} — "
                       f"beacon opportunity transition-date {opp_id} <YYYY-MM-DD>")
         elif decision == "retry":
-            sales_entities.retry_transition(data, opp_id, arg, note=note, at=at)
+            sales_entities.retry_transition(data, opp_id, arg, note=note, at=at, actor=actor)
             save_project(data)
             print(f"{opp_id} retry → 同フェーズ継続、新しい遷移日: {arg}")
         elif decision == "terminal":
@@ -21510,7 +21551,7 @@ def cmd_opportunity_judge():
             cur = opp.get("phase", "") if opp else ""
             for w in sales_entities.opportunity_phase_warnings(data, cur, arg):
                 print(f"  ⚠ {w}", file=sys.stderr)
-            sales_entities.terminal_transition(data, opp_id, arg, note=note, at=at)
+            sales_entities.terminal_transition(data, opp_id, arg, note=note, at=at, actor=actor)
             save_project(data)
             print(f"{opp_id} terminal → {arg} (決着、遷移日は用済みでクリア)")
         else:
