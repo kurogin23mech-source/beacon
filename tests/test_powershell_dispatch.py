@@ -1148,3 +1148,145 @@ def test_bus_help_shows_project_flag(project_dir, no_bash, captured_call, capsys
     out = capsys.readouterr().out
     # The usage block must mention --project as a flag for cross-project ops.
     assert "--project" in out
+
+
+# ---------------------------------------------------------------------------
+# ms-109 e-3562: sales sub-verb argparse parity (verbs the bash path had but
+# the Windows/pipx path lacked). Each asserts the exact BEACON_* contract and
+# the commands.py subcommand match bin/beacon so the two paths stay swappable.
+# ---------------------------------------------------------------------------
+
+
+def test_account_rename(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["account", "rename", "acc-1", "Acme Corp"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_ACCOUNT_ID"] == "acc-1"
+    assert env["BEACON_ACCOUNT_NAME"] == "Acme Corp"
+    assert captured_call["cmd"][-1] == "account_rename"
+
+
+def test_account_assign(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["account", "assign", "acc-1", "alice"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_ACCOUNT_ID"] == "acc-1"
+    assert env["BEACON_ASSIGNEE"] == "alice"
+    assert captured_call["cmd"][-1] == "account_assign"
+
+
+def test_account_nurturing(project_dir, no_bash, captured_call):
+    rc = main_mod.main([
+        "account", "nurturing", "acc-1", "follow up",
+        "--deadline", "2026-12-01", "--ball", "self",
+    ])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_ACCOUNT_ID"] == "acc-1"
+    assert env["BEACON_NURTURING_DESC"] == "follow up"
+    assert env["BEACON_NURTURING_DEADLINE"] == "2026-12-01"
+    assert env["BEACON_NURTURING_BALL"] == "self"
+    assert captured_call["cmd"][-1] == "account_nurturing"
+
+
+def test_opportunity_assign(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["opportunity", "assign", "opp-2", "bob"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_OPP_ID"] == "opp-2"
+    assert env["BEACON_ASSIGNEE"] == "bob"
+    assert captured_call["cmd"][-1] == "opportunity_assign"
+
+
+def test_opportunity_amount(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["opp", "amount", "opp-2", "500000"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_OPP_ID"] == "opp-2"
+    assert env["BEACON_OPP_AMOUNT"] == "500000"
+    assert captured_call["cmd"][-1] == "opportunity_amount"
+
+
+def test_opportunity_phase_prob(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["opportunity", "phase-prob", "提案準備", "30"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_PHASE_NAME"] == "提案準備"
+    assert env["BEACON_PHASE_PROB"] == "30"
+    assert captured_call["cmd"][-1] == "opportunity_phase_prob"
+
+
+def test_opportunity_transition_date(project_dir, no_bash, captured_call):
+    rc = main_mod.main([
+        "opportunity", "transition-date", "opp-2", "2026-12-15", "--note", "n",
+    ])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_OPP_ID"] == "opp-2"
+    assert env["BEACON_TRANSITION_DATE"] == "2026-12-15"
+    assert env["BEACON_PHASE_NOTE"] == "n"
+    assert captured_call["cmd"][-1] == "opportunity_transition_date"
+
+
+def test_opportunity_transition_date_clear(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["opp", "td", "opp-2", "--clear"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_OPP_ID"] == "opp-2"
+    assert env["BEACON_TRANSITION_DATE"] == ""  # --clear → empty date
+    assert captured_call["cmd"][-1] == "opportunity_transition_date"
+
+
+def test_opportunity_judge(project_dir, no_bash, captured_call):
+    rc = main_mod.main([
+        "opportunity", "judge", "opp-2", "advance", "2026-12-20", "--note", "n",
+    ])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_OPP_ID"] == "opp-2"
+    assert env["BEACON_JUDGE_DECISION"] == "advance"
+    assert env["BEACON_JUDGE_ARG"] == "2026-12-20"
+    assert env["BEACON_PHASE_NOTE"] == "n"
+    assert captured_call["cmd"][-1] == "opportunity_judge"
+
+
+def test_opportunity_due(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["opportunity", "due", "--json"])
+    assert rc == 0
+    assert captured_call["env"]["BEACON_JSON"] == "1"
+    assert captured_call["cmd"][-1] == "opportunity_due"
+
+
+def test_communication_cancel(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["communication", "cancel", "comm-3", "--reason", "dup"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_COMM_ID"] == "comm-3"
+    assert env["BEACON_COMM_REASON"] == "dup"
+    assert captured_call["cmd"][-1] == "communication_cancel"
+
+
+def test_communication_retarget(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["comm", "retarget", "comm-3", "opp-9", "--reason", "moved"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_COMM_ID"] == "comm-3"
+    assert env["BEACON_COMM_TARGET"] == "opp-9"
+    assert env["BEACON_COMM_REASON"] == "moved"
+    assert captured_call["cmd"][-1] == "communication_retarget"
+
+
+def test_sales_target_set(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["sales", "target", "alice", "1000000"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_TARGET_MEMBER"] == "alice"
+    assert env["BEACON_TARGET_AMOUNT"] == "1000000"
+    assert captured_call["cmd"][-1] == "sales_target"
+
+
+def test_sales_target_list(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["sales", "target", "list", "--json"])
+    assert rc == 0
+    assert captured_call["env"]["BEACON_JSON"] == "1"
+    assert captured_call["cmd"][-1] == "sales_target_list"
