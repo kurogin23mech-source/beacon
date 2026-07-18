@@ -66,12 +66,19 @@ class TestPresentLegacyLabelKey:
 
 
 class TestSetTargetLabel:
-    def test_canonical_only_by_default(self):
+    def test_dual_write_by_default(self):
+        # ms-109 e-3697 (fable A-5): the default is now the SAFE dual-write
+        # during the skew window, so a forgotten flag can't strand old clients.
         t = {"title": "old"}
         work_model.set_target_label(t, "new")
         assert t["label"] == "new"
-        # legacy untouched when not dual-writing
-        assert t["title"] == "old"
+        assert t["title"] == "new"  # legacy mirrored by default (safe side)
+
+    def test_canonical_only_when_opted_out(self):
+        t = {"title": "old"}
+        work_model.set_target_label(t, "new", dual_write=False)
+        assert t["label"] == "new"
+        assert t["title"] == "old"  # explicit opt-out leaves legacy untouched
 
     def test_dual_write_mirrors_present_legacy_key(self):
         t = {"name": "old"}  # account
@@ -337,3 +344,18 @@ class TestEvidenceClose:
         assert rwi["status"] == "done"
         assert rwi["done_at"] == "2026-07-18T00:00:00Z"
         assert rwi["meta"]["done_by"] == "claude"
+
+
+# ms-109 e-3697 (fable review A-5) — set_target_label defaults to the SAFE
+# dual-write during the skew window, so a caller forgetting the flag can't
+# write a label old clients cannot read.
+
+def test_set_target_label_default_dual_writes():
+    import work_model as wm
+    t = wm.set_target_label({}, "Deal X")           # no dual_write passed
+    assert t[wm.LABEL] == "Deal X"
+    assert t.get("title") == "Deal X"               # legacy mirror by default
+    # explicit opt-out writes canonical only (post-contract behaviour)
+    t2 = wm.set_target_label({}, "Y", dual_write=False)
+    assert t2[wm.LABEL] == "Y"
+    assert "title" not in t2
