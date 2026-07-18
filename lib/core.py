@@ -1121,17 +1121,18 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
     ms, _, entry, _ = result
-    entry["status"] = "done"
-    entry["done_at"] = date or _now_iso()
+    # ms-109 e-3696 (fable A-2): the generic done-stamp — status / done_at /
+    # meta.done_by / meta.done_reason — goes through the occupation-agnostic
+    # base so a development task and a sales activity close the same way. The
+    # dev-specific bits (the ``date`` mirror and the *human* ``done_by_user``
+    # identity) stay here.
+    work_model.mark_done(entry, at=date or _now_iso(), actor=_get_actor(),
+                         reason=reason)
     if not entry.get("date"):
         entry["date"] = entry["done_at"]
-    meta = entry.setdefault("meta", {})
-    meta["done_by"] = _get_actor()
     author_clean = _clean_author(author)
     if author_clean:
-        meta["done_by_user"] = author_clean
-    if reason:
-        meta["done_reason"] = reason
+        entry.setdefault("meta", {})["done_by_user"] = author_clean
     return ms, entry
 
 

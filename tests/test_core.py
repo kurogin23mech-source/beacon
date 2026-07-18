@@ -233,6 +233,26 @@ class TestTasks:
         with pytest.raises(ValueError, match="not found"):
             core.task_done(data, "e-99")
 
+    def test_done_stamps_done_by_via_base(self):
+        # ms-109 e-3696: the generic done-stamp (status/done_at/meta.done_by/
+        # done_reason) now routes through work_model.mark_done.
+        entry = make_entry("e-1", status="todo")
+        data = make_project(milestones=[make_ms(entries=[entry])])
+        _, e = core.task_done(data, "e-1", date="2026-05-11", reason="fixed it")
+        assert e["status"] == "done"
+        assert e["done_at"] == "2026-05-11"
+        assert e["meta"]["done_by"]  # stamped via the base
+        assert e["meta"]["done_reason"] == "fixed it"
+
+    def test_done_preserves_date_fallback_and_human_author(self):
+        entry = make_entry("e-1", status="todo")
+        data = make_project(milestones=[make_ms(entries=[entry])])
+        author = {"user_id": "u1", "email": "a@b.co", "display_name": "A"}
+        _, e = core.task_done(data, "e-1", date="2026-05-11", author=author)
+        # dev-specific bits still layered on top of the base stamp
+        assert e["date"] == "2026-05-11"  # date mirror when absent
+        assert e["meta"]["done_by_user"]["user_id"] == "u1"
+
     def test_update(self):
         entry = make_entry("e-1")
         ms = make_ms(entries=[entry])

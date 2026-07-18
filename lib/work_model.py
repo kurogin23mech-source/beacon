@@ -282,11 +282,15 @@ LINKED_ID = "linked_id"
 def evidence_linked_id(evidence: dict) -> str:
     """Return the id of the work item this Evidence closes, or ``""``.
 
-    Canonical key is ``linked_id``. Both occupations now stamp it through
-    ``link_evidence`` (e-3560): a sales communication records the activity /
-    nurturing it fulfilled, and a development commit records the task it
-    resolves. So this accessor reads the same field for both — the tolerant
-    ``.get`` keeps working for older records that predate the dev-side stamp.
+    Canonical key is ``linked_id``, written by each occupation on the same
+    field (ms-109 e-3560 / e-3696): a development commit stamps it through
+    ``link_evidence`` (in ``core.log_commit``); a sales communication
+    records it directly in ``sales_entities.communication_add``'s builder (kept
+    inline there so a target-level communication can carry an explicit empty
+    ``linked_id``). Both land on ``linked_id``, so this accessor reads the same
+    field for both — the tolerant ``.get`` also keeps working for older records
+    that predate the stamp. (The close half — marking the linked work item done
+    — is unified through ``mark_done``; see ``close_work_item_with_evidence``.)
     """
     if not isinstance(evidence, dict):
         return ""
@@ -318,12 +322,20 @@ def close_work_item_with_evidence(work_item: dict, evidence: dict, *,
     Performs the full evidence-close in one call: stamps the evidence's
     ``linked_id`` to point at ``work_item`` (via ``link_evidence``) and marks
     the work item done (via ``mark_done``, carrying ``at`` / ``actor`` /
-    ``reason``). Returns ``(work_item, evidence)``. This is the base primitive
-    for "a commit closes a task" and "a communication closes an activity" —
-    the relation the whole ms-109 fold is built to share (SPEC AC2). Callers
-    that only want the link (and let the AI judge done separately, as the dev
-    commit flow does) use ``link_evidence`` alone.
-    """
+    ``reason``). Returns ``(work_item, evidence)``.
+
+    This is an OPTIONAL composition of the two primitives that ARE wired into
+    production separately (ms-109 e-3696): the link half (``link_evidence``) is
+    used by ``core.log_commit``, and the done half (``mark_done``) by
+    ``core.task_done`` / ``sales_entities.activity_set_status``. Both real close
+    flows link and judge-done in DISTINCT steps — a dev commit records the task
+    it resolves but lets the AI judge done later; a sales send records the
+    communication and closes the fulfilled activity as two Skill steps — so
+    neither calls this bundled form today. It stays as the one-call primitive
+    for a future flow that genuinely has both the evidence and the work item in
+    hand at once. Do NOT read "no current caller" as "unwired": its two halves
+    are each wired (task-done-judgment-principle 原則6 — this note keeps the
+    docstring honest about what actually runs)."""
     link_evidence(evidence, work_item.get("id", ""))
     mark_done(work_item, at=at, actor=actor, reason=reason)
     return work_item, evidence

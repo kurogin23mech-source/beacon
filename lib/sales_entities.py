@@ -1822,9 +1822,15 @@ def activity_set_status(data: dict, activity_id: str, status: str, *,
     if status not in VALID_ACTIVITY_STATUS:
         raise ValueError(
             f"status must be one of {sorted(VALID_ACTIVITY_STATUS)}, got {status!r}")
-    act["status"] = status
     if status == work_model.DONE_STATUS:
-        act["done_at"] = at
+        # ms-109 e-3696 (fable A-2): close the Activity through the same
+        # occupation-agnostic base a development task done uses, so both stamp
+        # status / done_at / meta.done_by identically instead of each
+        # re-implementing it. Gives sales activities the done_by trail they
+        # previously lacked (task AC: 証跡が基底経由で刻まれる).
+        work_model.mark_done(act, at=at, actor=work_base.current_actor())
+    else:
+        act["status"] = status
     return act
 
 

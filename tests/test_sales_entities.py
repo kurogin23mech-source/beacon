@@ -1483,6 +1483,26 @@ def test_activity_set_status_marks_done():
     assert act["status"] == "done" and act["done_at"] == "T1"
 
 
+def test_activity_done_stamps_done_by_via_base():
+    # ms-109 e-3696 (fable A-2): closing an Activity now routes through
+    # work_model.mark_done, giving it the done_by trail dev tasks already had.
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    aid = se.activity_add(data, opp, "初回面談を打診")
+    act = se.activity_set_status(data, aid, "done", at="T1")
+    assert act["meta"]["done_by"]  # stamped through the occupation-agnostic base
+
+
+def test_activity_set_status_todo_does_not_stamp_done():
+    # the non-done branch must NOT stamp done_at / done_by.
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    aid = se.activity_add(data, opp, "初回面談を打診")
+    se.activity_set_status(data, aid, "done", at="T1")
+    act = se.activity_set_status(data, aid, "todo")
+    assert act["status"] == "todo"
+
+
 def test_activity_set_status_validates():
     data = _fresh()
     opp = se.opportunity_add(data, "Deal")
