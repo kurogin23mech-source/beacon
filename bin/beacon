@@ -2949,6 +2949,20 @@ case "${1:-}" in
         shift
         cmd_pr "$@"
         ;;
+    migrate)
+        ensure_project
+        case "${2:-}" in
+            target-labels)
+                python3 "$COMMANDS_PY" migrate_target_labels
+                ;;
+            *)
+                echo "Usage: beacon migrate target-labels"
+                echo "       Run the ms-109 target-label backfill (e-3695) over"
+                echo "       this project and record the execution trail the"
+                echo "       contract step (e-3626) gates on."
+                ;;
+        esac
+        ;;
     issue)
         ensure_project
         case "${2:-}" in

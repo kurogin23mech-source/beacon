@@ -19,9 +19,11 @@ This is the *expand* step of an expand → migrate → contract field unificatio
 adopted 2026-07-17). Readers become occupation-agnostic immediately via the
 tolerant accessor, WITHOUT a big-bang data migration: new writes are canonical
 (with an optional dual-write to the legacy key during the version-skew window),
-a later backfill task (e-3625) migrates stored data once tolerant readers are
-deployed everywhere, and a later contract task (e-3626) drops the legacy
-fallback once all data and clients are on canonical keys.
+a backfill task (e-3625/e-3695) migrates stored data once tolerant readers are
+deployed everywhere — run per project via ``beacon migrate target-labels``,
+which stamps the ``BACKFILL_MARKER`` execution trail — and a later contract
+task (e-3626) drops the legacy fallback once ``target_labels_backfilled`` is
+true for all data and no legacy-key client remains.
 
 Occupation SEMANTICS (phase, who_has_the_ball, pipeline, resolves, channel) are
 deliberately NOT here — they stay in each instance's adapter, per SPEC AC4
@@ -152,6 +154,60 @@ def ensure_target_label(target: dict) -> bool:
         return False
     target[LABEL] = legacy
     return True
+
+
+# ---------------------------------------------------------------------------
+# Backfill execution trail — the structural gate between the migrate step
+# (e-3625/e-3695) and the contract step (e-3626).
+#
+# ``ensure_target_label`` is the per-record migrate unit; the occupation
+# adapters wrap it in ``backfill_target_labels`` to sweep a whole project. But a
+# sweep function that exists is not a sweep that RAN: the contract step must not
+# drop the legacy fallback until it can PROVE every stored record was stamped
+# (task-done-judgment-principle 原則6 — 機構を書いた≠達成した). So the CLI
+# migrate verb records this marker after a successful sweep, and
+# ``target_labels_backfilled`` is the predicate e-3626 gates on.
+#
+# Why the reader-deployed → backfill ordering (task e-3695 AC3) is structurally
+# safe: the sweep is ADDITIVE — ``ensure_target_label`` writes the canonical
+# ``label`` and never removes the legacy ``title`` / ``name``. So no reader,
+# old (legacy-only) or new (tolerant), can be broken by running it. The
+# ordering hazard lives entirely in the CONTRACT step (dropping the legacy
+# key), which is why the gate belongs there: e-3626 requires both this marker
+# (data was swept) AND a confirmation that no legacy-key client remains.
+# ---------------------------------------------------------------------------
+
+BACKFILL_MARKER = "target_labels_backfill"
+
+
+def stamp_target_labels_backfill(data: dict, *, dev_count: int,
+                                 sales_count: int, version: str = "",
+                                 at: str = "") -> dict:
+    """Record on the project ``data`` that the target-label backfill has run,
+    in place, and return ``data``. Stores the timestamp, the beacon version that
+    ran it (so the contract step can confirm the sweep happened at or after the
+    version where tolerant readers shipped), and how many records each
+    occupation adapter stamped. ``at`` / ``version`` fall back to
+    ``work_base.now_iso()`` / ``""`` when blank."""
+    data[BACKFILL_MARKER] = {
+        "at": at or work_base.now_iso(),
+        "version": version,
+        "dev_count": dev_count,
+        "sales_count": sales_count,
+    }
+    return data
+
+
+def target_labels_backfilled(data: dict) -> bool:
+    """True when the target-label backfill (e-3695) has been recorded as run
+    over this project. The contract step (e-3626) MUST gate on this before it
+    drops the legacy fallback — a project whose stored records were never
+    stamped with canonical ``label`` would otherwise lose its labels the moment
+    the legacy read is removed."""
+    if not isinstance(data, dict):
+        return False
+    marker = data.get(BACKFILL_MARKER)
+    return isinstance(marker, dict) and bool(marker.get("at"))
 
 
 # ---------------------------------------------------------------------------

@@ -12069,6 +12069,49 @@ def cmd_cloud_migrate_from_local():
     print(f"To recover the old snapshot: mv {renamed} {pf}")
 
 
+def cmd_migrate_target_labels():
+    """`beacon migrate target-labels` — run the ms-109 target-label backfill
+    (e-3695) over this project and record the execution trail.
+
+    Sweeps every stored Target (development milestone/operation via
+    ``core.backfill_target_labels``; sales account/opportunity via
+    ``sales_entities.backfill_target_labels``), stamping the canonical ``label``
+    on any record that only carries the legacy ``title`` / ``name``. The sweep
+    is ADDITIVE — it never removes the legacy key — so it is safe to run
+    regardless of which readers are deployed (task e-3695 AC3). It is also
+    idempotent: a second run stamps nothing and reports 0.
+
+    On success it records ``work_model.BACKFILL_MARKER`` on the project, the
+    structural gate the contract step (e-3626) checks before it drops the legacy
+    fallback. Without this verb the two backfill functions had no production
+    caller, so no stored data was ever migrated (fable review A-1)."""
+    import sales_entities
+    data = load_project()
+    already = work_model.target_labels_backfilled(data)
+    dev = core.backfill_target_labels(data)
+    sales = sales_entities.backfill_target_labels(data)
+    work_model.stamp_target_labels_backfill(
+        data, dev_count=dev, sales_count=sales, version=__version__)
+    save_project(data, op={
+        "action": "migrate_target_labels",
+        "dev_count": dev,
+        "sales_count": sales,
+    })
+    total = dev + sales
+    if total:
+        print(f"target-label backfill: stamped canonical 'label' on {total} "
+              f"record(s) ({dev} development + {sales} sales).")
+    elif already:
+        print("target-label backfill: already complete — nothing to stamp "
+              "(idempotent re-run). Execution trail refreshed.")
+    else:
+        print("target-label backfill: every Target already carries a canonical "
+              "'label' — nothing to stamp. Execution trail recorded.")
+    print(f"  recorded: work_model.BACKFILL_MARKER (version {__version__}). "
+          f"The contract step (e-3626) gates on this before dropping the "
+          f"legacy fallback.")
+
+
 # ---------------------------------------------------------------------------
 # PR commands (ms-15)
 # ---------------------------------------------------------------------------
@@ -22189,6 +22232,7 @@ if __name__ == "__main__":
         "cloud_check_project": cmd_cloud_check_project,
         "cloud_join": cmd_cloud_join,
         "cloud_migrate_from_local": cmd_cloud_migrate_from_local,
+        "migrate_target_labels": cmd_migrate_target_labels,
         "common_setup": cmd_common_setup,
         "auth_check": cmd_auth_check,
         "auth_login": lambda: __import__("auth").login(),
