@@ -73,7 +73,7 @@ BEACON_COMM_TARGET="<$OPP または act-id>" \
 
 この面談は、その商談の **前進ゲート (= 次のフェーズへ進めてよいかを判定する関門)** に
 紐づいた発火源。面談が終わったので、いまがそのゲートの判定どき。議事録の内容と現フェーズの
-ゴール（`beacon opportunity phases` の methodology + 前進の枠組み）を照合し、**3 択の判定案**を
+ゴール（`beacon phase list` の methodology + 前進の枠組み）を照合し、**3 択の判定案**を
 根拠付きで提示する（`beacon opportunity judge` の 3 択と同じ語彙）:
 
 - **advance (次へ)**: このフェーズのゴールが達成された（例「先方が提案を受けて検討に入った」）。

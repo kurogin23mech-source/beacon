@@ -84,10 +84,11 @@ beacon session id
 
 UserPromptSubmit hook が context に injectした `BEACON BUS INBOX` セクション、もしくは現在のセッションが受け取った `<channel>` event をまず確認する。inject されていれば listen 経路を skip して直接 parse する (= e-1401 の旧 dm-reply 病理を避ける、hook と listen のダブルドレイン回避)。
 
-context に DM envelope 候補がなければ、CLI から pending 一覧を取る:
+context に DM envelope 候補がなければ、保留中 action DM を取り込む fetcher を直接叩く
+(= session-start Step 1n が使うのと同じ経路。専用の `beacon dm` サブコマンドは無い):
 
 ```bash
-beacon dm pending --json
+python3 "$(beacon _install-root)/scripts/session-start-dm-inbox.py"
 ```
 
 返ってきた JSON 配列を以下の形で表示:
@@ -115,7 +116,7 @@ beacon dm pending --json
 候補 0 件なら以下を返して終了:
 ```
 現在、未応答の DM envelope はありません。
-受信したら hook 経由で通知されるか、`beacon dm pending` で再確認してください。
+受信したら hook 経由で通知されるか、次回 session-start の catch-up (Step 1n) で再確認できます。
 ```
 
 選択された envelope の id を `envelope_id` として控える。
@@ -204,7 +205,7 @@ ms-68 / e-1641 補足 (= entry-writing principle の draft 表示) と同じ要�
 | `approve` / `a` / `y` | Step 4 へ (= approve コマンド組み立て) |
 | `deny` / `d` / `n` | Step 4 へ (= deny コマンド組み立て、deny は理由 1 行を任意で取る) |
 | `detail` | Step 2 の提示をもう 1 度全部出して Step 3 に戻る |
-| `skip` | envelope を pending のまま残し、user に「次回起動か `beacon dm pending` で再確認できます」と伝えて終了 |
+| `skip` | envelope を pending のまま残し、user に「次回起動時の catch-up (session-start Step 1n) で再確認できます」と伝えて終了 |
 | `cancel` | 何もせず終了 |
 
 `yes` だけだと「全文読んだか不明」のリスクが残るため、Skill 側は **detail の選択肢を必ず提示** する。
