@@ -828,7 +828,10 @@ def cmd_init():
 
     # ms-104 e-3153a: 必須インフラは init で箱を作る統一パターン。空の
     # application-map CORE doc を seed する (中身は /beacon-map が後で埋める)。
-    _seed_application_map_box(objective)
+    # ms-109 e-3404: application-map は開発インスタンスの surface 索引なので、
+    # 開発 profession のときだけ箱を作る (営業等は map を持たない)。
+    if profession in ("", "dev"):
+        _seed_application_map_box(objective)
 
     chosen = _maybe_prompt_initial_profile()
     if chosen:
@@ -9604,6 +9607,28 @@ def _auto_fire_release_due_trigger() -> None:
 _MAP_DRIFT_COMMIT_THRESHOLD = 20
 
 
+def _project_profession_safe() -> str:
+    """Best-effort read of the project's profession (e.g. ``dev`` / ``sales``),
+    defaulting to ``dev``. Used to gate development-only surfaces such as the
+    application-map (ms-109 e-3404) without hard-failing when the store is
+    unavailable."""
+    try:
+        data = get_store().load_project()
+    except Exception:
+        return "dev"
+    return (data.get("profession") or "dev").strip().lower()
+
+
+def _application_map_applies() -> bool:
+    """True when the application-map (= 全機能の現在地索引) applies to this
+    project. It is a development-instance surface: it maps code / CLI / Skill
+    entry points, which a sales project does not own. So map seeding, the
+    map-drift backstop, and the deploy-time reconcile prompt fire only for the
+    development instance (ms-109 e-3404). Other occupations get neither the
+    box at init nor the recurring nags."""
+    return _project_profession_safe() == "dev"
+
+
 def _map_drift_trigger_path() -> str:
     return os.path.join(_get_triggers_dir(), "map-drift.json")
 
@@ -9626,7 +9651,13 @@ def _auto_fire_map_drift_trigger() -> None:
     doc's updated_at (refreshed whenever /beacon-map rewrites it), so no
     separate marker file is needed. Degrades silently with no store / no map /
     outside a git repo.
+
+    Development-only: a non-dev project (e.g. sales) owns no application-map, so
+    the backstop never fires and clears any stale trigger (ms-109 e-3404).
     """
+    if not _application_map_applies():
+        _clear_map_drift_trigger_if_exists()
+        return
     try:
         doc = get_store().get_document("application-map")
     except Exception:
@@ -9704,7 +9735,12 @@ def _fire_map_reconcile_trigger() -> None:
     proposal's job. The reconcile itself is /beacon-map's work; this trigger
     only prompts it. General mechanism (fires for any project's deploy).
     Degrades silently with no store / no map / IO error.
+
+    Development-only: a non-dev project (e.g. sales) owns no application-map, so
+    the deploy-time reconcile prompt does not fire (ms-109 e-3404).
     """
+    if not _application_map_applies():
+        return
     try:
         doc = get_store().get_document("application-map")
     except Exception:
