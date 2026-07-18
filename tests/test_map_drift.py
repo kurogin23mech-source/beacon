@@ -250,3 +250,58 @@ def test_map_reconcile_skips_when_map_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(commands, "get_store", lambda: _FakeStore(None))
     commands._fire_map_reconcile_trigger()
     assert not (tmp_path / "map-reconcile.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# ms-109 e-3404: application-map is development-only; sales gets no seed / no
+# map-drift backstop / no deploy-time reconcile prompt.
+# ---------------------------------------------------------------------------
+
+class _FakeStoreWithProfession(_FakeStore):
+    def __init__(self, doc, profession):
+        super().__init__(doc)
+        self._profession = profession
+
+    def load_project(self):
+        return {"profession": self._profession, "milestones": []}
+
+
+def test_application_map_applies_only_to_dev(monkeypatch):
+    monkeypatch.setattr(commands, "get_store",
+                        lambda: _FakeStoreWithProfession(None, "dev"))
+    assert commands._application_map_applies() is True
+    monkeypatch.setattr(commands, "get_store",
+                        lambda: _FakeStoreWithProfession(None, "sales"))
+    assert commands._application_map_applies() is False
+
+
+def test_map_drift_does_not_fire_for_sales(tmp_path, monkeypatch):
+    monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(commands, "get_store",
+                        lambda: _FakeStoreWithProfession(
+                            {"updated_at": "2020-01-01T00:00:00"}, "sales"))
+    monkeypatch.setattr(commands.subprocess, "run",
+                        _fake_git(commands._MAP_DRIFT_COMMIT_THRESHOLD + 5))
+    commands._auto_fire_map_drift_trigger()
+    assert not (tmp_path / "map-drift.json").exists()
+
+
+def test_map_drift_sales_gate_clears_stale_trigger(tmp_path, monkeypatch):
+    # A trigger left over from before the profession gate must be cleared.
+    monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
+    stale = tmp_path / "map-drift.json"
+    stale.write_text('{"kind": "map-drift"}', encoding="utf-8")
+    monkeypatch.setattr(commands, "get_store",
+                        lambda: _FakeStoreWithProfession(
+                            {"updated_at": "2020-01-01T00:00:00"}, "sales"))
+    commands._auto_fire_map_drift_trigger()
+    assert not stale.exists()
+
+
+def test_map_reconcile_does_not_fire_for_sales(tmp_path, monkeypatch):
+    monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(commands, "get_store",
+                        lambda: _FakeStoreWithProfession(
+                            {"updated_at": "2020-01-01T00:00:00"}, "sales"))
+    commands._fire_map_reconcile_trigger()
+    assert not (tmp_path / "map-reconcile.json").exists()

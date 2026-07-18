@@ -4467,6 +4467,17 @@ function esc(s) {
   return el.innerHTML;
 }
 
+/* ms-109 e-3643 — occupation-agnostic Target display label.
+ * Reads canonical `label` first, then legacy `title` (development milestone /
+ * sales opportunity) / `name` (sales account). Mirrors
+ * lib/work_model.target_label so the UI shows a Target's name without
+ * branching on which occupation it is, and keeps working once writes move to
+ * the canonical `label` key (expand step; contract = e-3626 drops fallback). */
+function targetLabel(t) {
+  if (!t) return '';
+  return t.label || t.title || t.name || '';
+}
+
 /* ms-78 / e-1909 — human-friendly label for an author / member row.
  *
  * Returns escaped HTML where display_name is the primary label and email
@@ -4944,7 +4955,7 @@ function _salesPhaseBadge(phaseName, phases) {
 function _salesAccountName(p, accId) {
   if (!accId) return '';
   const a = (p.accounts || []).find(x => x.id === accId);
-  return a ? (a.name || '') : '';
+  return a ? targetLabel(a) : '';
 }
 function _salesAcctChip(p, o) {
   const n = _salesAccountName(p, o.account_id);
@@ -5110,7 +5121,7 @@ function _renderOppKanban(p) {
       const st = _salesOppStatusOf(o, phases, today);
       const badge = ph.terminal ? '' : _salesTransitionBadge(st, _salesOppTransitionDate(o));
       return `<div class="kb-card" data-action="open-opp" data-opp-id="${esc(o.id)}">
-        <div class="kb-card-title">${esc(o.title || '(no title)')}</div>
+        <div class="kb-card-title">${esc(targetLabel(o) || '(no title)')}</div>
         <div class="kb-card-meta">${_salesAcctChip(p, o)}${_salesOwnerChip(p, o)}</div>
         <div class="kb-card-meta">${badge}${_salesGateChip(o, phases)}${_salesActsBadge(o)}${_salesOppWeightedChip(p, o)}</div>
       </div>`;
@@ -5144,7 +5155,7 @@ function _renderOppList(p) {
     return `<div class="opp-lcard${expanded ? ' expanded' : ''}">
       <div class="opp-lhead" data-action="toggle-opp" data-opp-id="${esc(o.id)}">
         ${_salesPhaseBadge(o.phase, phases)}
-        <span class="opp-ltitle">${esc(o.title || '(no title)')}${acct ? ` <span class="opp-acct">${esc(acct)}</span>` : ''}${_salesOwnerChip(p, o)}</span>
+        <span class="opp-ltitle">${esc(targetLabel(o) || '(no title)')}${acct ? ` <span class="opp-acct">${esc(acct)}</span>` : ''}${_salesOwnerChip(p, o)}</span>
         ${term.has(o.phase) ? '' : _salesTransitionBadge(st, _salesOppTransitionDate(o))}
         ${_salesGateChip(o, phases)}
         ${_salesActsBadge(o)}
@@ -5518,7 +5529,7 @@ function renderAccountsSection() {
       </div>` : '';
     return `<div class="acc-lcard${expanded ? ' expanded' : ''}">
       <div class="acc-card" data-action="toggle-account" data-acc-id="${esc(a.id)}">
-        <span class="acc-name">${esc(a.name || '(no name)')}</span>
+        <span class="acc-name">${esc(targetLabel(a) || '(no name)')}</span>
         ${a.assignee ? `<span class="opp-owner">${esc(_salesMemberLabel(p, a.assignee))}</span>` : ''}
         <span class="acc-sub">Contact ${nc}・ナーチャリング ${nn}</span>
         ${a.phase ? `<span class="acc-phase">${esc(a.phase)}</span>` : ''}
@@ -5548,7 +5559,7 @@ function renderAccountModal(accId) {
   const past = accOpps.filter(o => term.has(o.phase));
   const oppRow = o => `<div class="sm-opp" data-action="open-opp" data-opp-id="${esc(o.id)}" style="cursor:pointer">
       ${_salesPhaseBadge(o.phase, phaseDefs)}
-      <span class="sm-opp-title">${esc(o.title || '(no title)')}</span>
+      <span class="sm-opp-title">${esc(targetLabel(o) || '(no title)')}</span>
     </div>`;
   const oppSection = (label, list) => list.length
     ? `<div class="sm-sec">${label} (${list.length})</div>${list.map(oppRow).join('')}`
@@ -5558,7 +5569,7 @@ function renderAccountModal(accId) {
   return `<div class="sales-modal-bg" data-action="close-account">
     <div class="sales-modal" data-action="sales-modal-noop">
       <span class="sm-close" data-action="close-account">×</span>
-      <div class="sm-head"><span class="sm-name">${esc(a.name || '(no name)')}</span></div>
+      <div class="sm-head"><span class="sm-name">${esc(targetLabel(a) || '(no name)')}</span></div>
       <div class="sm-meta">${phase}${owner}</div>
       ${oppSection('現在の商談', current)}
       ${oppSection('過去の商談', past)}
@@ -5599,7 +5610,7 @@ function renderOpportunityModal(oppId) {
   return `<div class="sales-modal-bg" data-action="close-opp">
     <div class="sales-modal" data-action="sales-modal-noop">
       <span class="sm-close" data-action="close-opp">×</span>
-      <div class="sm-head"><span class="sm-name">${esc(o.title || '(no title)')}</span></div>
+      <div class="sm-head"><span class="sm-name">${esc(targetLabel(o) || '(no title)')}</span></div>
       ${detail}
       ${_renderAdvanceGate(o, phases)}
       ${_renderOppActivities(o)}
@@ -5826,7 +5837,7 @@ function renderMilestoneCard(ms, index) {
         ${statusBadge(ms.status)}
         <div class="ms-title-row">
           <span class="ms-id">${ms.id}</span>
-          <span class="ms-title">${esc(ms.title)}${msPriorityBadge}${msMemberBadges}</span>
+          <span class="ms-title">${esc(targetLabel(ms))}${msPriorityBadge}${msMemberBadges}</span>
           ${msCreatorRow}
         </div>
         <div class="ms-meta">
@@ -6940,12 +6951,12 @@ function _trekLookupTask(scope, taskId) {
       let ms_title = '';
       if (ms_id) {
         const ms = (scope.milestones || []).find(x => x.id === ms_id);
-        ms_title = (ms && ms.title) || '';
+        ms_title = (ms && targetLabel(ms)) || '';
       }
       let op_title = '';
       if (op_id) {
         const op = (scope.operations || []).find(x => x.id === op_id);
-        op_title = (op && op.title) || '';
+        op_title = (op && targetLabel(op)) || '';
       }
       return {
         entry: tk,
@@ -7067,7 +7078,7 @@ function _renderTrekTaskRow(t, s, slotIndex, scope) {
   // Milestone (= expandable parent).
   if (s.milestone) {
     const lookup = _trekLookupMilestone(scope, s.milestone);
-    const msTitle = (lookup && lookup.ms && lookup.ms.title) || '';
+    const msTitle = (lookup && lookup.ms && lookup.targetLabel(ms)) || '';
     const tasks = lookup ? lookup.tasks : [];
     // Pick a representative state for the parent: the "most-advanced active"
     // child wins so the leader can see at a glance whether anything is in
@@ -7943,32 +7954,32 @@ function _localSearchFallback(q) {
     }
   }
   for (const ms of (state.project?.milestones || [])) {
-    const t = (ms.title || '').toLowerCase();
+    const t = (targetLabel(ms) || '').toLowerCase();
     const msId = (ms.id || '').toLowerCase();
     if (t.includes(q) || msId.includes(q)) {
       results.push({
-        entity_type: 'milestone', id: ms.id, title: ms.title,
-        snippet: ms.title, ms_id: ms.id, ms_title: ms.title,
+        entity_type: 'milestone', id: ms.id, title: targetLabel(ms),
+        snippet: targetLabel(ms), ms_id: ms.id, ms_title: targetLabel(ms),
         status: ms.status, created_at: '',
       });
     }
-    walk(ms.entries || [], { ms_id: ms.id, ms_title: ms.title || '' });
+    walk(ms.entries || [], { ms_id: ms.id, ms_title: targetLabel(ms) || '' });
   }
   // ms-46 e-1228: Operations live in a sibling collection but the server search
   // walks them too (lib/search.search_project line 129+). Mirror that so id-
   // based lookups for Operation entries (operation_task / run_record /
   // incident) also resolve in the Tauri local fallback.
   for (const op of (state.project?.operations || [])) {
-    const t = (op.title || '').toLowerCase();
+    const t = (targetLabel(op) || '').toLowerCase();
     const opId = (op.id || '').toLowerCase();
     if (t.includes(q) || opId.includes(q)) {
       results.push({
-        entity_type: 'operation', id: op.id, title: op.title,
-        snippet: op.title, op_id: op.id, op_title: op.title,
+        entity_type: 'operation', id: op.id, title: targetLabel(op),
+        snippet: targetLabel(op), op_id: op.id, op_title: targetLabel(op),
         status: op.status, created_at: '',
       });
     }
-    walk(op.entries || [], { op_id: op.id, op_title: op.title || '' });
+    walk(op.entries || [], { op_id: op.id, op_title: targetLabel(op) || '' });
   }
   return results;
 }
@@ -8512,7 +8523,7 @@ function renderOperationsSection() {
     <div class="op-card">
       <div class="op-header">
         <span class="op-id">${esc(op.id)}</span>
-        <span class="op-title">${esc(op.title||'')}</span>
+        <span class="op-title">${esc(targetLabel(op)||'')}</span>
         ${statusBadge}
         ${priorityBadge}
         <span class="op-badge">${esc((op.schedule||{}).frequency||'')}</span>

@@ -12,6 +12,19 @@ triggers:
 
 # Beacon Application Map
 
+## profession gate (ms-109 e-3404)
+
+まず `beacon status --json` の `profession` を確認する。`dev` 以外 (例 `sales`) の
+プロジェクトでは、全貌マップは **開発インスタンスの surface (= コード / CLI / Skill の入口) 索引** で
+あって当該職種の対象外なので、**何も生成・reconcile せず 1 行で断って終了する**:
+
+```
+全貌マップ (application-map) は開発インスタンス専用の索引です。この
+プロジェクト (profession=<値>) では対象外なので生成しません。
+```
+
+`profession` が `dev` または未設定のときのみ、以下の本編に進む。
+
 > **全貌マップ** = project-vision (目的地) / milestone 履歴 (軌跡) に続く **3 つ目の軸 = 現在地の断面**。
 > 「今このプロダクトが何であるか (= 何ができるか)」を写した索引。新機能を足す前にここを引いて
 > **二重実装を防ぐ** (= 似た機能が既にあるかを 1 発で確認できる) のが唯一の目的。

@@ -26,6 +26,7 @@ from starlette.responses import Response, JSONResponse
 
 import approved_actions as approved_actions_mod
 import core
+import work_model  # ms-109 e-3643: 職種非依存の Target 正準ラベル tolerant reader
 import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
 import dm_consent as dm_consent_mod  # ms-110 / e-3443: sender-side cross-user consent backstop
 import decision_event as decision_event_mod  # ms-90 / e-3246: decision-event 記録
@@ -2164,7 +2165,7 @@ def update_milestone(project_id: str, ms_id: str, body: MilestoneUpdate,
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {
-            "id": ms["id"], "title": ms["title"], "status": ms["status"],
+            "id": ms["id"], "title": work_model.target_label(ms), "status": ms["status"],
             "progress": ms.get("progress", 0),
         }
     return _apply_op_and_broadcast(
@@ -2196,7 +2197,7 @@ def done_milestone(project_id: str, ms_id: str,
             ms = core.milestone_done(data, ms_id)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        return data, {"id": ms["id"], "title": ms["title"], "status": "done"}
+        return data, {"id": ms["id"], "title": work_model.target_label(ms), "status": "done"}
     return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.done", actor=user.get("sub", ""),
     )
@@ -2248,7 +2249,7 @@ def purge_milestone(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         return data, {
-            "id": ms["id"], "title": ms.get("title", ""), "purged": True,
+            "id": ms["id"], "title": work_model.target_label(ms), "purged": True,
         }
     return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.purge", actor=user.get("sub", ""),
@@ -2609,7 +2610,7 @@ def purge_operation(
             raise HTTPException(status_code=400, detail=str(e))
         return data, {
             "id": purged.get("id", op_id),
-            "title": purged.get("title", ""),
+            "title": work_model.target_label(purged),
             "purged": True,
         }
     return _apply_op_and_broadcast(
@@ -6744,7 +6745,7 @@ def list_trek_scope_entries_endpoint(
             out_ms.append({
                 "project_id": pid,
                 "milestone_id": ms_id,
-                "milestone_title": ms.get("title", ""),
+                "milestone_title": work_model.target_label(ms),
                 "entries": core.entries_to_json(raw_entries),
             })
     return {

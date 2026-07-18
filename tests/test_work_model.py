@@ -262,3 +262,78 @@ class TestCollectIds:
     def test_empty_and_none(self):
         assert work_model.collect_ids([]) == []
         assert work_model.collect_ids(None) == []
+
+
+# ---------------------------------------------------------------------------
+# ensure_target_label — idempotent backfill (migrate step, e-3625)
+# ---------------------------------------------------------------------------
+
+class TestEnsureTargetLabel:
+    def test_backfills_from_title(self):
+        t = {"id": "ms-1", "title": "Ship it"}
+        assert work_model.ensure_target_label(t) is True
+        assert t["label"] == "Ship it"
+        assert t["title"] == "Ship it"  # legacy key untouched (additive)
+
+    def test_backfills_from_name(self):
+        t = {"id": "a-1", "name": "Acme"}
+        assert work_model.ensure_target_label(t) is True
+        assert t["label"] == "Acme"
+        assert t["name"] == "Acme"
+
+    def test_noop_when_label_present(self):
+        t = {"id": "ms-1", "label": "Canon", "title": "Legacy"}
+        assert work_model.ensure_target_label(t) is False
+        assert t["label"] == "Canon"
+
+    def test_idempotent(self):
+        t = {"id": "ms-1", "title": "Ship it"}
+        assert work_model.ensure_target_label(t) is True
+        assert work_model.ensure_target_label(t) is False  # second run writes nothing
+
+    def test_noop_when_no_label_anywhere(self):
+        t = {"id": "ms-1"}
+        assert work_model.ensure_target_label(t) is False
+        assert "label" not in t
+
+    def test_non_dict(self):
+        assert work_model.ensure_target_label(None) is False
+        assert work_model.ensure_target_label("x") is False
+
+    def test_empty_title_not_backfilled(self):
+        t = {"id": "ms-1", "title": ""}
+        assert work_model.ensure_target_label(t) is False
+        assert "label" not in t
+
+
+# ---------------------------------------------------------------------------
+# evidence-close — link_evidence / close_work_item_with_evidence (e-3560)
+# ---------------------------------------------------------------------------
+
+class TestEvidenceClose:
+    def test_link_evidence_stamps_canonical_key(self):
+        ev = {"id": "commit-1"}
+        work_model.link_evidence(ev, "e-42")
+        assert ev["linked_id"] == "e-42"
+        assert work_model.evidence_linked_id(ev) == "e-42"
+
+    def test_link_evidence_noop_on_empty_id(self):
+        ev = {"id": "commit-1"}
+        work_model.link_evidence(ev, "")
+        assert "linked_id" not in ev  # closes nothing → no stamp
+
+    def test_dev_and_sales_read_through_same_accessor(self):
+        commit = work_model.link_evidence({"id": "c1"}, "e-10")   # dev
+        comm = {"id": "comm-1", "linked_id": "act-3"}             # sales
+        assert work_model.evidence_linked_id(commit) == "e-10"
+        assert work_model.evidence_linked_id(comm) == "act-3"
+
+    def test_close_work_item_with_evidence_links_and_marks_done(self):
+        wi = {"id": "e-7", "status": "todo"}
+        ev = {"id": "commit-9"}
+        rwi, rev = work_model.close_work_item_with_evidence(
+            wi, ev, at="2026-07-18T00:00:00Z", actor="claude")
+        assert rev["linked_id"] == "e-7"
+        assert rwi["status"] == "done"
+        assert rwi["done_at"] == "2026-07-18T00:00:00Z"
+        assert rwi["meta"]["done_by"] == "claude"

@@ -2119,3 +2119,25 @@ def test_phase_entry_anchors_gate_to_seeded_meeting():
     assert se.get_transition_date(data, oid) == "2026-08-01"   # gate date synced
     se.meeting_mark_ended(data, mtg, at="T2")
     assert se.gate_judgement_ready(data, oid, "2026-08-02T00:00:00+09:00") is True
+
+
+# ---------------------------------------------------------------------------
+# backfill_target_labels — sales half of the migrate step (ms-109 e-3625)
+# ---------------------------------------------------------------------------
+
+class TestBackfillTargetLabels:
+    def test_backfills_accounts_and_opportunities(self):
+        data = {
+            "accounts": [{"id": "a-1", "name": "Acme"}],
+            "opportunities": [{"id": "o-1", "title": "Deal"}, {"id": "o-2", "title": "X", "label": "X"}],
+        }
+        n = se.backfill_target_labels(data)
+        assert n == 2  # a-1 (from name) + o-1 (from title); o-2 already canonical
+        assert data["accounts"][0]["label"] == "Acme"
+        assert data["opportunities"][0]["label"] == "Deal"
+
+    def test_idempotent_and_missing_collections(self):
+        data = {"accounts": [{"id": "a-1", "name": "Acme"}]}
+        assert se.backfill_target_labels(data) == 1
+        assert se.backfill_target_labels(data) == 0
+        assert se.backfill_target_labels({}) == 0
