@@ -353,15 +353,22 @@ def new_target(target_id: str, label: str, *, status: str = TODO_STATUS,
                assignee: str = "", **extra) -> dict:
     """Build the generic skeleton of a Target (canonical ``label``).
 
-    STAGED — not yet wired into the add paths (ms-109 e-3698 / fable A-4):
-    ``milestone_add`` / ``account_add`` / ``opportunity_add`` still build their
-    dicts by hand today, so SPEC AC1 ("追加が単一基底経由") is NOT yet met and
-    this constructor currently has no production caller. This is an intentional
-    staged step, not dead code: the fold rewires the add paths through here only
-    after the sales flow stabilises (SPEC 方針3, "まず具体で検証してから抽象へ"),
-    to avoid churning a moving target. Do NOT declare ms-109 / e-3698 done on
-    the strength of this function existing — done requires the add paths to
-    actually route through it (task-done-judgment-principle 原則6).
+    Wired into ``core.milestone_add`` (ms-109 e-3698 / fable A-4): the
+    development add-path builds its dict through here, so the base owns the
+    generic skeleton (id / label / status / created_at / created_by / assignee)
+    and its defaults for milestones.
+
+    STAGED for sales — ``account_add`` / ``opportunity_add`` do NOT route
+    through here yet. This is an intentional staged step, not an oversight
+    (SPEC 方針3, "まず具体で検証してから抽象へ"): the sales model is still moving
+    and diverges from the generic skeleton — an Account has no generic
+    ``status`` (継続 / never-terminal, tracked by phase) and an Opportunity's
+    ``status`` is phase-derived rather than the base default. Forcing them
+    through this constructor now would inject skeleton the sales model hasn't
+    settled on. They apply the base *defaults* piecemeal (e.g. ``created_at``)
+    and full routing is the remaining extraction. Per
+    task-done-judgment-principle 原則6, do not read "generic constructor exists"
+    as "all add-paths unified" — only the milestone path is.
 
     Occupation-specific fields (a milestone's ``target_date`` / ``commits``,
     an opportunity's ``phase`` / ``account_id`` / ``amount``, an account's

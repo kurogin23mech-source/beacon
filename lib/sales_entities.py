@@ -427,6 +427,13 @@ def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
     data.setdefault("accounts", [])
     acc_id = next_account_id(data)
     initial_phase = phase or default_account_phase(data)
+    # ms-109 e-3698 (fable A-4): apply the base default for ``created_at`` — a
+    # blank timestamps to now — so a direct/test caller that omits it does not
+    # persist an empty ``created_at`` (and an empty ``phase_history`` anchor).
+    # Account does not yet route through ``work_model.new_target`` because it
+    # has no generic ``status`` (継続 / never-terminal, tracked by phase); that
+    # extraction is staged pending the sales model stabilising (SPEC 方針3).
+    created_at = created_at or work_base.now_iso()
     data["accounts"].append({
         "id": acc_id,
         "name": name.strip(),
@@ -519,6 +526,11 @@ def opportunity_add(data: dict, title: str, *, account_id: str = "",
     data.setdefault("opportunities", [])
     opp_id = next_opportunity_id(data)
     initial_phase = phase or default_opportunity_phase(data)
+    # ms-109 e-3698 (fable A-4): base default for ``created_at`` (blank → now),
+    # so it is also the timestamp on the seeded advance gate below. Opportunity
+    # keeps its hand-built skeleton for now — its ``status`` is phase-derived
+    # (not the base default "todo") and the sales model is still moving (方針3).
+    created_at = created_at or work_base.now_iso()
     data["opportunities"].append({
         "id": opp_id,
         "title": title.strip(),

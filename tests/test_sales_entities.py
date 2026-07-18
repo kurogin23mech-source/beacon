@@ -95,6 +95,23 @@ def test_account_name_required():
         se.account_add(data, "   ")
 
 
+def test_account_add_created_at_defaults_when_omitted():
+    # ms-109 e-3698 (fable A-4): omitting created_at must not persist an empty
+    # timestamp — the base default (now) applies, incl. the phase_history anchor.
+    data = _fresh()
+    aid = se.account_add(data, "Globex")
+    acc = se.find_account(data, aid)
+    assert acc["created_at"]  # non-empty
+    assert acc["phase_history"][0]["at"] == acc["created_at"]
+
+
+def test_opportunity_add_created_at_defaults_when_omitted():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    opp = se.find_opportunity(data, oid)
+    assert opp["created_at"]  # non-empty base default
+
+
 def test_account_phase_transition_is_append_only():
     data = _fresh()
     acc = se.account_add(data, "Globex", created_at="T0")

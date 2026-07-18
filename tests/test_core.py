@@ -163,6 +163,25 @@ class TestMilestones:
         core.milestone_add(data, "No desc MS")
         assert "description" not in data["milestones"][0]
 
+    def test_add_builds_generic_skeleton_via_base(self):
+        # ms-109 e-3698: milestone_add builds its dict through
+        # work_model.new_target — base skeleton keys present with defaults.
+        data = make_project()
+        core.milestone_add(data, "New MS")
+        ms = data["milestones"][0]
+        assert ms["label"] == "New MS"        # canonical
+        assert ms["title"] == "New MS"        # legacy dual-write
+        assert ms["status"] == "todo"
+        assert "assignee" not in ms           # ms-81 no-pollution rule preserved
+        assert ms["created_by"]               # base default (work_base actor)
+        assert ms["created_at"]               # base default (work_base now)
+        assert ms["commits"] == [] and "target_date" in ms  # dev extras ride along
+
+    def test_add_with_assignee_flows_through_base(self):
+        data = make_project()
+        core.milestone_add(data, "New MS", assignee="alice")
+        assert data["milestones"][0]["assignee"] == "alice"
+
     def test_start_not_found(self):
         data = make_project(milestones=[make_ms()])
         with pytest.raises(ValueError):
