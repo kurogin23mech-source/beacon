@@ -2182,7 +2182,11 @@ def start_milestone(project_id: str, ms_id: str,
             ms = core.milestone_start(data, ms_id)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
-        return data, {"id": ms["id"], "title": ms["title"], "status": "in_progress"}
+        # ms-109 e-3697 (fable A-3): read the label through the tolerant reader,
+        # not ms["title"] directly — the other 5 sites in this file already do.
+        # A raw ["title"] would KeyError once the contract step (e-3626) drops
+        # the legacy key on canonical-only milestones.
+        return data, {"id": ms["id"], "title": work_model.target_label(ms), "status": "in_progress"}
     return _apply_op_and_broadcast(
         project_id, op, op_name="milestone.start", actor=user.get("sub", ""),
     )

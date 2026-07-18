@@ -104,17 +104,24 @@ def present_legacy_label_key(target: dict) -> str:
     return ""
 
 
-def set_target_label(target: dict, label: str, *, dual_write: bool = False,
+def set_target_label(target: dict, label: str, *, dual_write: bool = True,
                      legacy_key: str = "") -> dict:
     """Set a Target's canonical ``label`` in place and return the target.
 
     During the version-skew window (before tolerant readers are deployed
-    everywhere), pass ``dual_write=True`` to also mirror the value onto the
-    legacy key so older clients still read it. The legacy key is
-    ``legacy_key`` when given, else the one already present on the target
-    (``present_legacy_label_key``), else ``title`` as the safe default for a
-    brand-new canonical-only target. ``dual_write=False`` (the default) writes
-    canonical only — correct once the contract step (e-3626) is reached.
+    everywhere), the value is also mirrored onto the legacy key so older
+    clients still read it. The legacy key is ``legacy_key`` when given, else
+    the one already present on the target (``present_legacy_label_key``), else
+    ``title`` as the safe default for a brand-new canonical-only target.
+
+    ms-109 e-3697 (fable A-5): the default is ``dual_write=True`` — the SAFE
+    side during the skew window. Previously the default was ``False`` (canonical
+    only), so a single caller forgetting to pass ``dual_write=True`` would write
+    a label old clients cannot read. Defaulting to True closes that "please
+    remember the flag" footgun with a code default. Flip this default to
+    ``False`` at the contract step (e-3626), once tolerant readers are deployed
+    everywhere and the legacy key is being dropped; pass ``dual_write=False``
+    explicitly before then only when the caller is certain no old reader exists.
     """
     target[LABEL] = label
     if dual_write:
@@ -277,6 +284,16 @@ def new_target(target_id: str, label: str, *, status: str = TODO_STATUS,
                created_at: str = "", created_by: str = "",
                assignee: str = "", **extra) -> dict:
     """Build the generic skeleton of a Target (canonical ``label``).
+
+    STAGED — not yet wired into the add paths (ms-109 e-3698 / fable A-4):
+    ``milestone_add`` / ``account_add`` / ``opportunity_add`` still build their
+    dicts by hand today, so SPEC AC1 ("追加が単一基底経由") is NOT yet met and
+    this constructor currently has no production caller. This is an intentional
+    staged step, not dead code: the fold rewires the add paths through here only
+    after the sales flow stabilises (SPEC 方針3, "まず具体で検証してから抽象へ"),
+    to avoid churning a moving target. Do NOT declare ms-109 / e-3698 done on
+    the strength of this function existing — done requires the add paths to
+    actually route through it (task-done-judgment-principle 原則6).
 
     Occupation-specific fields (a milestone's ``target_date`` / ``commits``,
     an opportunity's ``phase`` / ``account_id`` / ``amount``, an account's
