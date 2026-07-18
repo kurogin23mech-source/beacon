@@ -60,3 +60,26 @@ def project_targets(data: dict) -> list:
     prof = resolve_profession(data)
     adapter = PROJECTION_ADAPTERS.get(prof, core.project_targets)
     return adapter(data)
+
+
+# The project.json keys under which each occupation stores its Target records.
+# This registry is the ONE place that knows "which collections are Targets"
+# across occupations; occupation-agnostic base code (work_model / work_base)
+# must NOT carry these names. Shared-frame code that needs the RAW Target
+# records (not the projected shape) — e.g. session_log aggregation — asks here
+# instead of hardcoding the collection names itself (ms-108 e-3701 / fable
+# review B-1: keep occupation knowledge in the registry layer).
+TARGET_COLLECTIONS = ("milestones", "opportunities")
+
+
+def iter_target_records(data: dict) -> list:
+    """Return every raw Target record across occupations (development
+    Milestones + sales Opportunities). A project only ever populates one of
+    these collections, so callers get exactly that occupation's Targets without
+    branching on profession. Used by shared-frame aggregators that walk Target
+    entries (session log). Unlike ``project_targets`` this returns the records
+    verbatim (with their nested ``entries``), not the projected shape."""
+    records = []
+    for coll in TARGET_COLLECTIONS:
+        records.extend(data.get(coll, []) or [])
+    return records

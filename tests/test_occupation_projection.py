@@ -165,3 +165,26 @@ def test_status_text_sales_lists_opportunities(monkeypatch, capsys):
     assert "[opp-1] Big Deal" in out
     assert "(open)" in out
     assert "1/3" in out  # 1 of 3 activities done (WorkItem counts)
+
+
+# ms-108 e-3701 (fable review B-5) — drift guard: the dev status text still
+# reads milestones directly (byte-for-byte), so pin that its progress agrees
+# with the canonical targets[] projection. If someone changes one path, this
+# fails rather than letting the two representations silently diverge.
+def test_dev_text_progress_matches_target_projection():
+    data = _dev_project()
+    proj = {t["id"]: t["detail"]["progress"] for t in core.project_targets(data)}
+    for ms in data["milestones"]:
+        if ms["status"] == "cancelled":
+            continue
+        assert proj[ms["id"]] == ms.get("progress", 0)
+
+
+# ms-108 e-3701 (fable review B-1) — the target-collection enumeration now
+# lives in the occupation registry, not hardcoded in session_log.
+def test_iter_target_records_is_occupation_neutral():
+    dev = {"milestones": [{"id": "ms-1"}], "opportunities": []}
+    sales = {"milestones": [], "opportunities": [{"id": "opp-1"}]}
+    assert [t["id"] for t in occupation.iter_target_records(dev)] == ["ms-1"]
+    assert [t["id"] for t in occupation.iter_target_records(sales)] == ["opp-1"]
+    assert occupation.iter_target_records({}) == []

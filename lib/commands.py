@@ -9644,7 +9644,10 @@ def _project_profession_safe() -> str:
         data = get_store().load_project()
     except Exception:
         return "dev"
-    return (data.get("profession") or "dev").strip().lower()
+    # ms-108 e-3701 (fable review B-6): one definition of "resolve profession"
+    # lives in occupation.resolve_profession — reuse it rather than re-inlining
+    # the ``(get("profession") or "dev").strip().lower()`` expression.
+    return occupation.resolve_profession(data)
 
 
 def _application_map_applies() -> bool:
