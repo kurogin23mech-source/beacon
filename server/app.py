@@ -3902,11 +3902,17 @@ class TrekInvite(BaseModel):
     email: str
 
 
+# ms-109 e-3699 (fable B-2): opportunity/account narrow a sales Trek scope, the
+# same way milestone/operation/task narrow a dev one. Both models carry the full
+# occupation-agnostic vocabulary; the endpoints copy whichever keys are present
+# via trek_mod.NARROWING_KEYS rather than naming them one by one.
 class TrekScopeOp(BaseModel):
     project: str
     milestone: Optional[str] = None
     operation: Optional[str] = None
     task: Optional[str] = None
+    opportunity: Optional[str] = None
+    account: Optional[str] = None
 
 
 # ms-99 / e-2830 — Trek slot schema v2 body models. Slot-specific verbs
@@ -3918,6 +3924,8 @@ class TrekSlotAdd(BaseModel):
     milestone: Optional[str] = None
     operation: Optional[str] = None
     task: Optional[str] = None
+    opportunity: Optional[str] = None
+    account: Optional[str] = None
     included_task_ids: Optional[list[str]] = None
 
 
@@ -4825,12 +4833,12 @@ def add_trek_scope_endpoint(trek_id: str, body: TrekScopeOp,
         if resolved:
             canonical_pid = resolved
     entry: dict = {"project": canonical_pid}
-    if body.milestone:
-        entry["milestone"] = body.milestone
-    if body.operation:
-        entry["operation"] = body.operation
-    if body.task:
-        entry["task"] = body.task
+    # ms-109 e-3699: copy whichever narrowing key is present, occupation-
+    # agnostic (dev milestone/operation/task + sales opportunity/account).
+    for _k in trek_mod.NARROWING_KEYS:
+        _v = getattr(body, _k, None)
+        if _v:
+            entry[_k] = _v
     # ms-97 / e-2659 (AC7 server layer): explicit strict-mode validation
     # so the project-wide rejection surfaces as HTTPException 400 with the
     # user-facing message, distinct from the 409 "already present" path
@@ -5065,30 +5073,29 @@ def add_trek_slot_endpoint(trek_id: str, body: TrekSlotAdd,
         if resolved:
             canonical_pid = resolved
     entry: dict = {"project": canonical_pid}
-    if body.milestone:
-        entry["milestone"] = body.milestone
-    if body.operation:
-        entry["operation"] = body.operation
-    if body.task:
-        entry["task"] = body.task
+    # ms-109 e-3699: occupation-agnostic narrowing (dev milestone/operation/
+    # task + sales opportunity/account), sourced from trek_mod.NARROWING_KEYS.
+    for _k in trek_mod.NARROWING_KEYS:
+        _v = getattr(body, _k, None)
+        if _v:
+            entry[_k] = _v
     # Reject empty narrowing at 400 (= same policy as add_trek_scope but
     # with the v2 slot verb error message). ``included_task_ids`` on a
-    # task/op slot is meaningless — refuse politely.
-    narrowing = [k for k in ("milestone", "operation", "task") if entry.get(k)]
+    # non-milestone slot is meaningless — refuse politely below.
+    narrowing = [k for k in trek_mod.NARROWING_KEYS if entry.get(k)]
+    _kinds = " | ".join(trek_mod.NARROWING_KEYS)
     if len(narrowing) == 0:
         raise HTTPException(
             status_code=400,
             detail=(
-                "slot add requires one narrowing key: milestone | operation "
-                "| task (= slot must narrow the project, ms-97 AC7)"
+                f"slot add requires one narrowing key: {_kinds} "
+                "(= slot must narrow the project, ms-97 AC7)"
             ),
         )
     if len(narrowing) > 1:
         raise HTTPException(
             status_code=400,
-            detail=(
-                "slot add accepts exactly one of milestone / operation / task"
-            ),
+            detail=f"slot add accepts exactly one of {_kinds}",
         )
     if body.included_task_ids is not None:
         if "milestone" not in entry:

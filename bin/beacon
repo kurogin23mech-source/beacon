@@ -144,8 +144,8 @@ Treks (cross-project / cross-session 協奏作業領域 — ms-69):
   beacon trek leave <trek-id>       Remove self (leader must transfer first)
   beacon trek plan <trek-id> --add-scope <project:ref> | --remove-scope <project:ref>
                                     Edit scope (ms-/op-/e- ref, or project-wide)
-  beacon trek scope-add <trek-id> --project <pid> [--milestone <ms-id> | --operation <op-id> | --task <e-id>]
-                                    Canonical scope-add verb (= flag-style alias of plan --add-scope, ms-97/AC23)
+  beacon trek scope-add <trek-id> --project <pid> [--milestone <ms-id> | --operation <op-id> | --task <e-id> | --opportunity <opp-id> | --account <acc-id>]
+                                    Canonical scope-add verb (= flag-style alias of plan --add-scope, ms-97/AC23; sales narrows by 商談/顧客)
   beacon trek scope-approve <trek-id> <pending-id>
                                     Commit a staged scope op (= apply add or remove, ms-97/AC25)
   beacon trek scope-reject <trek-id> <pending-id>
@@ -160,7 +160,7 @@ Treks (cross-project / cross-session 協奏作業領域 — ms-69):
                                     Drop a staged scope op (ms-97/AC25)
   beacon trek blanket-approve <trek-id> --category <cat>
                                     Pre-approve scope-add for a category (ms-97/AC24).
-                                    Category: operation | milestone | task | project:<pid> | milestone:<ms-id>
+                                    Category: milestone | operation | task | opportunity | account | project:<pid> | <kind>:<id>
   beacon trek blanket-revoke <trek-id> --category <cat>
                                     Drop a blanket pre-approval (ms-97/AC24)
   beacon trek plan <trek-id> --goal-state "<criterion>"
@@ -3404,12 +3404,16 @@ except ValueError as e:
             scope-add)
                 shift 2
                 trek_id="" sa_project="" sa_milestone="" sa_operation="" sa_task=""
+                sa_opportunity="" sa_account=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --project) sa_project="${2:-}"; shift 2 ;;
                         --milestone|--ms) sa_milestone="${2:-}"; shift 2 ;;
                         --operation|--op) sa_operation="${2:-}"; shift 2 ;;
                         --task|--e) sa_task="${2:-}"; shift 2 ;;
+                        # ms-109 e-3699 — sales narrowing (商談 / 顧客)
+                        --opportunity|--opp) sa_opportunity="${2:-}"; shift 2 ;;
+                        --account|--acc) sa_account="${2:-}"; shift 2 ;;
                         --json) export BEACON_JSON=1; shift ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
@@ -3419,8 +3423,9 @@ except ValueError as e:
                     exit 1
                 fi
                 # Pick the narrowing key. cmd_trek_plan rejects bare
-                # project-wide entries via parse_scope_arg (AC7 strict),
-                # so we require at least one narrowing flag here too.
+                # project-wide entries via parse_scope_arg (AC7 strict), which
+                # also infers the kind from the ref prefix (ms-/op-/e-/opp-/
+                # acc-), so we just forward whichever narrowing ref is set.
                 ref=""
                 if [[ -n "$sa_milestone" ]]; then
                     ref="$sa_milestone"
@@ -3428,8 +3433,12 @@ except ValueError as e:
                     ref="$sa_operation"
                 elif [[ -n "$sa_task" ]]; then
                     ref="$sa_task"
+                elif [[ -n "$sa_opportunity" ]]; then
+                    ref="$sa_opportunity"
+                elif [[ -n "$sa_account" ]]; then
+                    ref="$sa_account"
                 else
-                    echo "Error: one of --milestone | --operation | --task is required" >&2
+                    echo "Error: one of --milestone | --operation | --task | --opportunity | --account is required" >&2
                     exit 1
                 fi
                 BEACON_TREK_ID="$trek_id" \
