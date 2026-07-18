@@ -1018,6 +1018,44 @@ def terminal_transition(data: dict, target_id: str, terminal_phase: str, *,
     return rec
 
 
+def jump_transition(data: dict, target_id: str, new_phase: str, *,
+                    note: str = "", at: str = "") -> dict:
+    """Corrective manual phase jump for an Opportunity that still honors the
+    advance-gate model (ms-106 e-3688 / fable review C-1).
+
+    ``beacon opportunity phase <opp> <phase>`` used to call the low-level
+    ``phase_set`` directly, which set the exclusive phase but **settled no gate
+    and discarded the ``note``** — so the phase-change history and the "why"
+    were lost (SPEC AC5 violated), and the previous phase's open gate stayed
+    open and could mis-anchor the next phase's activities. This routes a manual
+    declaration through the SAME gate lifecycle as advance / terminal: settle
+    the current open gate with its outcome + note (its 判断証跡), set the phase,
+    and open a fresh gate unless the target phase is terminal (決着 = no phase
+    left in progress). Permissive on vocabulary (master = 人間, SPEC §5/§6) —
+    the CLI surfaces warnings, this never blocks.
+
+    ``phase_set`` stays the internal exclusive-phase primitive that
+    advance/retry/terminal_transition call *after* settling their gate; only
+    this corrective path is exposed to the raw CLI now, so no bypass remains.
+    """
+    opp = find_opportunity(data, target_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {target_id}")
+    if not new_phase or not new_phase.strip():
+        raise ValueError("new_phase is required")
+    new_phase = new_phase.strip()
+    terminal = opportunity_phase_is_terminal(data, new_phase)
+    gate = current_gate(data, target_id)
+    if gate is not None:
+        settle_gate(data, gate["id"],
+                    outcome=(GATE_TERMINAL if terminal else GATE_ADVANCE),
+                    reason=note or "manual phase jump", at=at)
+    rec = phase_set(data, target_id, new_phase, note=note, at=at)
+    if not terminal:
+        open_advance_gate(data, target_id, phase=new_phase, at=at)
+    return rec
+
+
 def suggest_transition_date(data: dict, phase_name: str,
                             base_date: str) -> Optional[str]:
     """Suggest a transition_date for a phase = ``base_date`` + the phase's

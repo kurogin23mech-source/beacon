@@ -2141,3 +2141,51 @@ class TestBackfillTargetLabels:
         assert se.backfill_target_labels(data) == 1
         assert se.backfill_target_labels(data) == 0
         assert se.backfill_target_labels({}) == 0
+
+
+# ms-106 e-3688 (fable review C-1) — the raw `beacon opportunity phase` path
+# must honor the advance-gate lifecycle, not bypass it.
+
+def _open_gates(data, opp_id):
+    opp = se.find_opportunity(data, opp_id)
+    return [g for g in opp.get("gates", []) if g.get("status") == "open"]
+
+
+def _done_gates(data, opp_id):
+    opp = se.find_opportunity(data, opp_id)
+    return [g for g in opp.get("gates", []) if g.get("status") == "done"]
+
+
+def test_jump_transition_settles_gate_and_preserves_note():
+    data = se.build_sales_project("Acme", "close")
+    oid = se.opportunity_add(data, "Deal")
+    phases = [p["name"] for p in se.opportunity_phases(data)
+              if not p.get("terminal")]
+    # jump to a later non-terminal phase with a note (the "why")
+    target = phases[-1] if len(phases) > 1 else phases[0]
+    se.jump_transition(data, oid, target, note="顧客都合で一気に前進", at="2026-07-18")
+    # the previous open gate is settled (advance) and carries the note as evidence
+    done = _done_gates(data, oid)
+    assert done, "manual jump must settle the previous open gate"
+    last_done = done[-1]
+    assert last_done["outcome"] == "advance"
+    hist = last_done.get("history", [])
+    assert any("顧客都合" in (h.get("reason") or "") for h in hist), \
+        "the note must survive as gate evidence (not discarded)"
+    # a fresh open gate exists for the new phase (≤1 open invariant holds)
+    opens = _open_gates(data, oid)
+    assert len(opens) == 1 and opens[0]["phase"] == target
+    assert se.find_opportunity(data, oid)["phase"] == target
+
+
+def test_jump_transition_to_terminal_opens_no_new_gate():
+    data = se.build_sales_project("Acme", "close")
+    oid = se.opportunity_add(data, "Deal")
+    terminals = [p["name"] for p in se.opportunity_phases(data)
+                 if p.get("terminal")]
+    if not terminals:
+        return  # funnel has no terminal phase configured
+    se.jump_transition(data, oid, terminals[0], note="失注", at="2026-07-18")
+    assert _open_gates(data, oid) == []  # 決着 → no phase left in progress
+    done = _done_gates(data, oid)
+    assert done and done[-1]["outcome"] == "terminal"

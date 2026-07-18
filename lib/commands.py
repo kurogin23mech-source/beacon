@@ -21389,8 +21389,16 @@ def cmd_opportunity_phase():
     for w in warnings:
         print(f"  ⚠ {w}", file=sys.stderr)
     try:
-        rec = sales_entities.phase_set(data, opp_id, new_phase, note=note,
-                                       at=core._now_iso())
+        # ms-106 e-3688 (fable C-1) — an opportunity phase declaration must go
+        # through the advance-gate lifecycle so the change + note land as
+        # evidence on the gate列. jump_transition settles the current gate and
+        # opens a fresh one; only accounts (not gated) use the raw phase_set.
+        if opp_id.startswith("opp-"):
+            rec = sales_entities.jump_transition(data, opp_id, new_phase,
+                                                 note=note, at=core._now_iso())
+        else:
+            rec = sales_entities.phase_set(data, opp_id, new_phase, note=note,
+                                           at=core._now_iso())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -21404,7 +21412,11 @@ def cmd_opportunity_phase():
         seeded = sales_entities.instantiate_phase_activities(
             data, opp_id, at=core._now_iso())
     save_project(data)
-    print(f"{opp_id} phase → {rec['phase']} (recorded in phase_history)")
+    # C-6: opportunities record the change on the advance-gate列 (前進ゲート),
+    # not phase_history (that field left the opportunity in the e-3580 fold);
+    # accounts still keep an append-only phase_history.
+    where = "前進ゲート列に記録" if opp_id.startswith("opp-") else "recorded in phase_history"
+    print(f"{opp_id} phase → {rec['phase']} ({where})")
     if seeded:
         print(f"  seeded {len(seeded)} フェーズ活動 (このフェーズの標準ステップ)")
 
