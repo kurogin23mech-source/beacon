@@ -66,11 +66,15 @@ beacon-find-root >/dev/null && echo "OK" || echo "NO_BEACON"
 beacon status --json
 ```
 
-### 1b. アクティブMSのタスク一覧
+**職種分岐 (ms-108 e-3269 / SPEC 方針6)**: session-end は③共有フレーム Skill。1a の結果の `profession` を見て分岐する:
+- **`profession == "dev"` (または未設定)**: 以降の 1b / Step 2.5 (MS・タスク棚卸し) をそのまま実行 (現行動作)。
+- **`profession == "sales"` 等 (非 dev)**: `milestones[]` は空なので 1b (アクティブ MS のタスク一覧) と Step 2.5 の **MS 棚卸し (milestone observe / close) はスキップ** する。代わりに `targets[]` (= 商談) と直近の活動 (activity) / 証跡 (communication) を読み、Step 3 のサマリーを「このセッションで動かした商談・活動」で構成する。商談のフェーズ確定 (advance / retry / terminal) は営業の別フロー (`/beacon-sales-cockpit` / `beacon opportunity judge`) の責務で、session-end では触らない (= session-start が『次の一手』を cockpit に委譲するのと対称)。session log への機械集約は職種非依存化済み (`collect_project_entries` が商談 Target も歩く、e-3269 増分C)。
+
+### 1b. アクティブMSのタスク一覧 (dev のみ)
 ```bash
 beacon task list --json --ms <active-ms-id>
 ```
-（active-ms-id が不明な場合は 1a の結果を待ってから実行）
+（active-ms-id が不明な場合は 1a の結果を待ってから実行。営業では milestones が無いのでスキップ）
 
 ### 1c. git 状態
 ```bash

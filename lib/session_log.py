@@ -64,20 +64,31 @@ def _iter_entries(entries: list) -> list:
 
 
 def collect_project_entries(data: dict, session_id: str) -> dict:
-    """Walk all milestones' entries and return per-type id lists matching
+    """Walk every Target's entries and return per-type id lists matching
     ``meta.session_id == session_id``.
 
     Returns ``{commit_ids: [...], pr_ids: [...], commit_texts: [...], pr_texts: [...]}``.
     The ``*_texts`` lists power mechanical summary fallback so callers that
     don't have an AI on hand still produce a non-empty summary.
+
+    ms-108 e-3269 (増分C) — occupation-neutral. Previously this walked only
+    ``data["milestones"]`` (development Targets), so a sales project — whose
+    Targets are ``data["opportunities"]`` and whose ``milestones`` is empty —
+    aggregated nothing into its session log. We now walk both Target
+    collections; a project only ever populates one, so development output is
+    unchanged. (Mapping the sales work-record — Communication/証跡 — into the
+    commit slot of the session log is a separate follow-up: sales entries do
+    not stamp ``meta.session_id`` yet, so there is nothing to collect from them
+    here today.)
     """
     commit_ids: list[str] = []
     commit_texts: list[str] = []
     pr_ids: list[str] = []
     pr_texts: list[str] = []
 
-    for ms in data.get("milestones", []) or []:
-        for e in _iter_entries(ms.get("entries", [])):
+    targets = (data.get("milestones", []) or []) + (data.get("opportunities", []) or [])
+    for tgt in targets:
+        for e in _iter_entries(tgt.get("entries", [])):
             meta = e.get("meta") or {}
             if meta.get("session_id") != session_id:
                 continue

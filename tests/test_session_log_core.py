@@ -99,6 +99,35 @@ def test_collect_project_entries_handles_missing_milestones_key():
     assert session_log.collect_project_entries({}, "S1")["commit_ids"] == []
 
 
+# ms-108 e-3269 — occupation-neutral Target walk (sales projects have no
+# milestones; their Targets are opportunities).
+
+def test_collect_project_entries_walks_opportunities_too():
+    """A sales project keeps its Targets under ``opportunities`` (``milestones``
+    is empty). Session-scoped entries nested there must still be collected."""
+    data = {
+        "milestones": [],
+        "opportunities": [
+            {"id": "opp-1", "entries": [
+                {"id": "e-9", "type": "commit",
+                 "meta": {"session_id": "S1", "message": "sales-side work"}},
+            ]},
+        ],
+    }
+    out = session_log.collect_project_entries(data, "S1")
+    assert out["commit_ids"] == ["e-9"]
+    assert out["commit_texts"] == ["sales-side work"]
+
+
+def test_collect_project_entries_sales_without_entries_is_empty_not_crash():
+    """A realistic sales project (opportunities carry activities/gates, not
+    ``entries``, and no ``milestones``) aggregates to empty without crashing."""
+    data = {"opportunities": [{"id": "opp-1", "activities": [], "gates": []}]}
+    assert session_log.collect_project_entries(data, "S1") == {
+        "commit_ids": [], "commit_texts": [], "pr_ids": [], "pr_texts": [],
+    }
+
+
 # ---------------------------------------------------------------------------
 # collect_local_notes
 # ---------------------------------------------------------------------------
