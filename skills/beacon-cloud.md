@@ -139,17 +139,18 @@ subaction 別の前提:
 
 `upload-initial` 名で起動された場合はこのステップをスキップ (= 意図が明確)。
 
-### 1-a: cloud 側の最新状態取得
+### 1-a: cloud project が既に在るかの確認
 
 ```bash
-beacon cloud diff --json
+beacon cloud status
 ```
 
-返る JSON から以下を抽出:
-- `cloud_last_modified_at`: cloud 側 (= 他マシン / 他メンバーの直近 push 時刻)
-- `cloud_last_modified_by`: 直近 push したマシン / メンバー
-- `local_pending_changes`: ローカルで未 push の変更 (= task / log / doc / config 等の差分)
-- `cloud_changes_since_local_pull`: 自分が最後に pull してから cloud 側で起きた変更
+ms-84 Phase 4 (e-2038) で push / pull / diff は廃止されたので、「他マシンの未 push 変更を
+検知する」概念は無い (= ローカルキャッシュを持たない設計に cut over 済)。upload-initial の
+唯一の危険は **既に在る cloud project をローカル状態で上書きする** ことなので、見るのは
+「この repo が既に cloud project に紐づいているか」だけ。出力を以下で読む:
+- `Cloud: not configured` → まだ cloud project に紐づいていない (= 新規 bootstrap で安全)
+- `Cloud: <project_id>` → 既に cloud project に紐づき済 (= upload-initial は上書き。1-c で中止 default)
 
 ### 1-b: 衝突可能性の表示 (= 必ず提示)
 
@@ -184,34 +185,27 @@ e-1777 (= 過去 incident 共通パターン memo doc、 並行作業中) の完
 「payload 肥大化」 の 3 軸は upload-initial が本質的に踏みうる経路。 cancel が default の理由。
 `````
 
-#### 自プロジェクトの cloud 側状況 (= diff の結果)
+#### cloud project の存在確認 (= status の結果)
 
 ```
 ─────────────────────────────────────────────
-  cloud 側の状況:
-    最終更新:   2026-06-15 13:42 by mac-mini.local (= 別マシン)
-    自分の最終 pull: 2026-06-15 10:00 (= 3 時間 42 分前)
+  cloud 接続状況 (beacon cloud status):
+    Cloud: <project_id  or  "not configured">
+    Auth:  <logged in / not logged in>
 
-    自分の最終 pull 以降、cloud 側で起きた変更:
-      - task done: 4 件
-      - log 追加: 7 件
-      - doc 追加: 1 件
-
-  ローカル側 (= これから push する内容):
-    未 push 変更: 12 件
-      - commit log: 6 件
-      - task done: 3 件
-      - doc 追加: 1 件
-      - config 変更: 2 件
-
-  衝突可能性: あり (= 別マシンが先に push しています)
+  判定:
+    - not configured   → 新規 bootstrap (= 上書き対象なし、比較的安全)
+    - <project_id> あり → 既に cloud project に紐づき済 (= upload-initial は
+                          ローカル状態で丸ごと上書き。他マシン / 他メンバーの変更を破壊しうる)
 ─────────────────────────────────────────────
 ```
 
-衝突可能性なしの場合 (= cloud_changes_since_local_pull が 0) は「衝突可能性: なし (= 別マシンからの push は検知されません)」と明示。
+`not configured` なら新規 bootstrap なので単段確認 (1-c) へ進む。既に `project_id` が在る場合は
+1-c の中止 default + force-overwrite 二段確認へ。
 
-ただし「衝突なし」 表示でも上記病理 B (= silent mode flip で local が空 cache 化、 cloud 側 diff が
-「無い」 ように見える) と病理 C (= bootstrap 時の payload size) は残るため、 cancel が安全。
+ただし `not configured` 表示でも上記病理 B (= silent mode flip で local が空 cache 化し、
+cloud 側が「無い」ように見える) と病理 C (= bootstrap 時の payload size 肥大化) は残るため、
+迷ったら cancel が安全。
 
 ### 1-c: 警告と二段確認
 
