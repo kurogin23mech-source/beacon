@@ -2189,3 +2189,58 @@ def test_jump_transition_to_terminal_opens_no_new_gate():
     assert _open_gates(data, oid) == []  # 決着 → no phase left in progress
     done = _done_gates(data, oid)
     assert done and done[-1]["outcome"] == "terminal"
+
+
+# ms-106 e-3691 (fable review C-2) — a gate judgement is the human's master
+# decision; its audit must attribute it to the human, not to "claude".
+
+def test_gate_settle_records_human_actor():
+    data = se.build_sales_project("Acme", "close")
+    oid = se.opportunity_add(data, "Deal")
+    se.advance_transition(data, oid, note="goal met", at="2026-07-18",
+                          actor="human:rep@example.com")
+    opp = se.find_opportunity(data, oid)
+    settled = [g for g in opp.get("gates", []) if g.get("status") == "done"]
+    assert settled, "advance must settle a gate"
+    rows = settled[-1].get("history", [])
+    actors = [r.get("actor") for r in rows]
+    assert "human:rep@example.com" in actors, \
+        f"the human actor must be on the gate audit, got {actors}"
+    assert "claude" not in actors
+
+
+# ms-106 e-3692 (fable review C-3) — the judgement surface reads the LIVE
+# (Communication-derived) ball, not the stale static field.
+
+def test_awaiting_judgement_uses_derived_ball():
+    data = se.build_sales_project("Acme", "close")
+    oid = se.opportunity_add(data, "Deal")
+    opp = se.find_opportunity(data, oid)
+    opp["who_has_the_ball"] = "self"                       # stale static declaration
+    se.communication_add(data, oid, "提案書を送付",
+                         direction="outbound", occurred_at="2026-07-10")
+    se.current_gate(data, oid)["transition_date"] = "2020-01-01"  # make it overdue
+    rows = se.opportunities_awaiting_judgement(data, "2026-07-18")
+    row = next(r for r in rows if r["id"] == oid)
+    assert row["who_has_the_ball"] == se.derive_ball(opp)  # derived, not static
+    assert row["who_has_the_ball"] != "self"               # stale value overridden
+
+
+# ms-106 e-3693 (fable review C-4) — legacy fields are preserved, not deleted.
+
+def test_migrate_opp_gates_preserves_legacy_evidence():
+    data = se.build_sales_project("Acme", "close")
+    opp = {"id": "opp-legacy", "phase": "商談準備",
+           "phase_history": [{"phase": "商談準備", "at": "2026-07-01",
+                              "note": "初回接触の理由"}],
+           "transition_date": "2026-07-10",
+           "transition_date_history": [{"date": "2026-07-10", "note": "打診"}]}
+    data.setdefault("opportunities", []).append(opp)
+    se._migrate_opp_gates(data, opp)
+    assert "gates" in opp
+    leg = opp.get("meta", {}).get("legacy_pre_gate_fold", {})
+    assert leg.get("phase_history", [{}])[0].get("note") == "初回接触の理由"
+    assert leg.get("transition_date") == "2026-07-10"
+    assert "transition_date_history" in leg
+    # the active top-level copies are cleared (gate列 = single live source)
+    assert "phase_history" not in opp and "transition_date" not in opp
