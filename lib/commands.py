@@ -1143,11 +1143,29 @@ def cmd_milestone_list():
     icons = {"done": "\u25cf", "in_progress": "\u25d1", "todo": "\u25cb",
              "waiting": "\u25cc", "in_review": "\u25d5", "observing": "\u25d5",
              "cancelled": "\u2718"}
-    for ms in milestones:
-        icon = icons.get(ms["status"], "?")
-        active = " \u25c0 ACTIVE" if ms["status"] == "in_progress" else ""
-        progress = ms.get("progress", 0)
-        print(f"  {icon} [{ms['id']}] {work_model.target_label(ms)} ({progress}%){active}")
+    # ms-108 e-3269 (\u5897\u5206B) \u2014 the human-readable status projects the
+    # occupation's Targets. Development keeps its exact line format
+    # (Milestone + progress %); sales and other occupations, whose
+    # ``milestones[]`` is empty, list their Targets (Opportunities) via the
+    # shared projection so ``beacon status`` is no longer blank for them.
+    if occupation.resolve_profession(data) == "dev":
+        for ms in milestones:
+            icon = icons.get(ms["status"], "?")
+            active = " \u25c0 ACTIVE" if ms["status"] == "in_progress" else ""
+            progress = ms.get("progress", 0)
+            print(f"  {icon} [{ms['id']}] {work_model.target_label(ms)} ({progress}%){active}")
+    else:
+        for t in occupation.project_targets(data):
+            # Occupations carry their own status vocabulary (sales: open /
+            # won / lost …), so fall back to a neutral bullet rather than the
+            # development "?" when a status is not in the dev icon map.
+            icon = icons.get(t["status"], "•")
+            phase = t.get("detail", {}).get("phase", "")
+            phase_note = f" [{phase}]" if phase else ""
+            done = t["work_items_done"]
+            total = t["work_items_total"]
+            print(f"  {icon} [{t['id']}] {t['label']} ({t['status']}){phase_note} "
+                  f"{done}/{total}")
 
 
 def cmd_milestone_start():

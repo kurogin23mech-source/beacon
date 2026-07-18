@@ -130,3 +130,38 @@ def test_generic_core_identical_across_occupations():
     sales_t = se.project_targets(_sales_project_with_opp()[0])[0]
     # both expose exactly the same generic-core key set
     assert set(dev_t.keys()) == set(sales_t.keys()) == GENERIC_KEYS
+
+
+# --------------------------------------------------------------------------
+# Human-readable `beacon status` text output (増分B)
+# --------------------------------------------------------------------------
+
+import commands  # noqa: E402
+
+
+def _run_status_text(monkeypatch, data, capsys):
+    monkeypatch.setattr(commands, "load_project", lambda: data)
+    monkeypatch.delenv("BEACON_JSON", raising=False)
+    monkeypatch.delenv("BEACON_ALL", raising=False)
+    monkeypatch.delenv("BEACON_MS_FILTER", raising=False)
+    commands.cmd_milestone_list()
+    return capsys.readouterr().out
+
+
+def test_status_text_dev_unchanged(monkeypatch, capsys):
+    out = _run_status_text(monkeypatch, _dev_project(), capsys)
+    # development keeps its exact line format: [id] label (progress%)
+    assert "[ms-1] First" in out
+    assert "(40%)" in out
+    assert "ACTIVE" in out           # ms-1 is in_progress
+    # cancelled milestone is not listed
+    assert "Cancelled one" not in out
+
+
+def test_status_text_sales_lists_opportunities(monkeypatch, capsys):
+    data, _ = _sales_project_with_opp()
+    out = _run_status_text(monkeypatch, data, capsys)
+    # a sales project's status is no longer blank — it lists the opportunity
+    assert "[opp-1] Big Deal" in out
+    assert "(open)" in out
+    assert "1/3" in out  # 1 of 3 activities done (WorkItem counts)
