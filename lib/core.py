@@ -1510,6 +1510,11 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
         matched_task = _find_matching_task(entries, commit_text)
 
     if matched_task:
+        # ms-109 e-3560: stamp the canonical evidence→work-item link so a dev
+        # commit records which task it closes the same way a sales communication
+        # records the activity it fulfilled (evidence_linked_id reads both). The
+        # nesting under the task is kept — this is the additive unified field.
+        work_model.link_evidence(commit_entry, matched_task["id"])
         matched_task.setdefault("entries", []).append(commit_entry)
     else:
         entries.append(commit_entry)

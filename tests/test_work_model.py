@@ -304,3 +304,36 @@ class TestEnsureTargetLabel:
         t = {"id": "ms-1", "title": ""}
         assert work_model.ensure_target_label(t) is False
         assert "label" not in t
+
+
+# ---------------------------------------------------------------------------
+# evidence-close — link_evidence / close_work_item_with_evidence (e-3560)
+# ---------------------------------------------------------------------------
+
+class TestEvidenceClose:
+    def test_link_evidence_stamps_canonical_key(self):
+        ev = {"id": "commit-1"}
+        work_model.link_evidence(ev, "e-42")
+        assert ev["linked_id"] == "e-42"
+        assert work_model.evidence_linked_id(ev) == "e-42"
+
+    def test_link_evidence_noop_on_empty_id(self):
+        ev = {"id": "commit-1"}
+        work_model.link_evidence(ev, "")
+        assert "linked_id" not in ev  # closes nothing → no stamp
+
+    def test_dev_and_sales_read_through_same_accessor(self):
+        commit = work_model.link_evidence({"id": "c1"}, "e-10")   # dev
+        comm = {"id": "comm-1", "linked_id": "act-3"}             # sales
+        assert work_model.evidence_linked_id(commit) == "e-10"
+        assert work_model.evidence_linked_id(comm) == "act-3"
+
+    def test_close_work_item_with_evidence_links_and_marks_done(self):
+        wi = {"id": "e-7", "status": "todo"}
+        ev = {"id": "commit-9"}
+        rwi, rev = work_model.close_work_item_with_evidence(
+            wi, ev, at="2026-07-18T00:00:00Z", actor="claude")
+        assert rev["linked_id"] == "e-7"
+        assert rwi["status"] == "done"
+        assert rwi["done_at"] == "2026-07-18T00:00:00Z"
+        assert rwi["meta"]["done_by"] == "claude"

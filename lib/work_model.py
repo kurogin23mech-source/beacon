@@ -219,15 +219,51 @@ LINKED_ID = "linked_id"
 def evidence_linked_id(evidence: dict) -> str:
     """Return the id of the work item this Evidence closes, or ``""``.
 
-    Canonical key is ``linked_id`` (sales communication already uses it). The
-    development commit expresses the same relation by *nesting* under the task
-    it resolves rather than by a field; unifying that into ``linked_id`` is the
-    evidence-close work of task e-3560, so this accessor is tolerant of its
-    absence today.
+    Canonical key is ``linked_id``. Both occupations now stamp it through
+    ``link_evidence`` (e-3560): a sales communication records the activity /
+    nurturing it fulfilled, and a development commit records the task it
+    resolves. So this accessor reads the same field for both — the tolerant
+    ``.get`` keeps working for older records that predate the dev-side stamp.
     """
     if not isinstance(evidence, dict):
         return ""
     return evidence.get(LINKED_ID, "")
+
+
+def link_evidence(evidence: dict, work_item_id: str) -> dict:
+    """Record on an Evidence which work item it closes, in place, and return it.
+
+    This is the occupation-agnostic half of evidence-close (e-3560): a commit
+    that resolves a task and a communication that fulfills an activity express
+    the *same* relation — "this thing that happened closes that planned unit of
+    work" — so both stamp it through one primitive under the canonical
+    ``linked_id`` key. A falsy ``work_item_id`` is a no-op (the evidence closes
+    nothing, e.g. a commit at milestone top level). Occupation-specific placement
+    (nesting the commit under the task, the communication under the activity)
+    stays in each instance's adapter; only the link field is unified here.
+    """
+    if work_item_id:
+        evidence[LINKED_ID] = work_item_id
+    return evidence
+
+
+def close_work_item_with_evidence(work_item: dict, evidence: dict, *,
+                                  at: str = "", actor: str = "",
+                                  reason: str = "") -> tuple:
+    """Close a WorkItem *with* the Evidence that closes it, occupation-agnostic.
+
+    Performs the full evidence-close in one call: stamps the evidence's
+    ``linked_id`` to point at ``work_item`` (via ``link_evidence``) and marks
+    the work item done (via ``mark_done``, carrying ``at`` / ``actor`` /
+    ``reason``). Returns ``(work_item, evidence)``. This is the base primitive
+    for "a commit closes a task" and "a communication closes an activity" —
+    the relation the whole ms-109 fold is built to share (SPEC AC2). Callers
+    that only want the link (and let the AI judge done separately, as the dev
+    commit flow does) use ``link_evidence`` alone.
+    """
+    link_evidence(evidence, work_item.get("id", ""))
+    mark_done(work_item, at=at, actor=actor, reason=reason)
+    return work_item, evidence
 
 
 # ---------------------------------------------------------------------------
