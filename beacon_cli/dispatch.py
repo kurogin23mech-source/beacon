@@ -392,6 +392,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_account_delete.add_argument("acc_id", nargs="?", default="")
     p_account_delete.add_argument("--force", action="store_true")
 
+    # ms-109 e-3562: argparse parity for the account sub-verbs the bash path had
+    # but the Windows/pipx path lacked (rename / assign / nurturing).
+    p_account_rename = account_sub.add_parser("rename", add_help=False)
+    p_account_rename.add_argument("acc_id", nargs="?", default="")
+    p_account_rename.add_argument("name", nargs="?", default="")
+
+    p_account_assign = account_sub.add_parser("assign", add_help=False)
+    p_account_assign.add_argument("acc_id", nargs="?", default="")
+    p_account_assign.add_argument("assignee", nargs="?", default="")
+
+    p_account_nurturing = account_sub.add_parser("nurturing", add_help=False)
+    p_account_nurturing.add_argument("acc_id", nargs="?", default="")
+    p_account_nurturing.add_argument("desc", nargs="?", default="")
+    p_account_nurturing.add_argument("--deadline", default="")
+    p_account_nurturing.add_argument("--ball", default="")
+
+    # ---- sales (ms-106: team-level 目標金額 = sales target) ----
+    p_sales = sub.add_parser("sales", help="Sales team-level operations", add_help=False)
+    p_sales.add_argument("--help", "-h", action="store_true", dest="show_help")
+    sales_sub = p_sales.add_subparsers(dest="sales_cmd", metavar="<subcmd>")
+    p_sales_target = sales_sub.add_parser("target", add_help=False)
+    # First positional may be the literal "list" (→ sales_target_list) or a member.
+    p_sales_target.add_argument("member", nargs="?", default="")
+    p_sales_target.add_argument("amount", nargs="?", default="")
+    p_sales_target.add_argument("--json", action="store_true")
+
     # ---- opportunity (ms-106: sales entities, profession=sales) ----
     p_opp = sub.add_parser(
         "opportunity", aliases=["opp"], help="Sales opportunity operations",
@@ -427,6 +453,36 @@ def build_parser() -> argparse.ArgumentParser:
     p_opp_delete = opp_sub.add_parser("delete", add_help=False)
     p_opp_delete.add_argument("opp_id", nargs="?", default="")
 
+    # ms-109 e-3562: argparse parity for opportunity sub-verbs missing on the
+    # Windows/pipx path (assign / amount / phase-prob / transition-date / judge / due).
+    p_opp_assign = opp_sub.add_parser("assign", add_help=False)
+    p_opp_assign.add_argument("opp_id", nargs="?", default="")
+    p_opp_assign.add_argument("assignee", nargs="?", default="")
+
+    p_opp_amount = opp_sub.add_parser("amount", add_help=False)
+    p_opp_amount.add_argument("opp_id", nargs="?", default="")
+    p_opp_amount.add_argument("amount", nargs="?", default="")
+
+    p_opp_phase_prob = opp_sub.add_parser("phase-prob", add_help=False)
+    p_opp_phase_prob.add_argument("phase", nargs="?", default="")
+    p_opp_phase_prob.add_argument("prob", nargs="?", default="")
+
+    p_opp_td = opp_sub.add_parser("transition-date", aliases=["td"], add_help=False)
+    p_opp_td.add_argument("opp_id", nargs="?", default="")
+    p_opp_td.add_argument("date", nargs="?", default="")
+    p_opp_td.add_argument("--note", default="")
+    p_opp_td.add_argument("--clear", action="store_true")
+
+    p_opp_judge = opp_sub.add_parser("judge", add_help=False)
+    p_opp_judge.add_argument("opp_id", nargs="?", default="")
+    p_opp_judge.add_argument("decision", nargs="?", default="")
+    p_opp_judge.add_argument("arg", nargs="?", default="")
+    p_opp_judge.add_argument("--note", default="")
+
+    opp_sub.add_parser("due", add_help=False).add_argument(
+        "--json", action="store_true"
+    )
+
     # ---- communication (ms-107 e-3432: 証跡・事後記録型 = 営業の Commit) ----
     p_comm = sub.add_parser(
         "communication", aliases=["comm"], help="Sales communication (証跡) operations",
@@ -447,6 +503,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_comm_list = comm_sub.add_parser("list", aliases=["ls"], add_help=False)
     p_comm_list.add_argument("target_id", nargs="?", default="")
     p_comm_list.add_argument("--json", action="store_true")
+
+    # ms-109 e-3562: argparse parity for communication cancel / retarget.
+    p_comm_cancel = comm_sub.add_parser("cancel", add_help=False)
+    p_comm_cancel.add_argument("comm_id", nargs="?", default="")
+    p_comm_cancel.add_argument("--reason", default="")
+
+    p_comm_retarget = comm_sub.add_parser("retarget", add_help=False)
+    p_comm_retarget.add_argument("comm_id", nargs="?", default="")
+    p_comm_retarget.add_argument("new_target", nargs="?", default="")
+    p_comm_retarget.add_argument("--reason", default="")
 
     # ---- meeting (ms-107 e-3433: 面談・運用状態型 + 識別 ID handshake) ----
     p_mtg = sub.add_parser(
@@ -1905,7 +1971,38 @@ def _handle_account(root: Path, args: argparse.Namespace) -> int:
             "BEACON_FORCE": "1" if args.force else "",
         }
         return _run_commands_py(root, "account_delete", env)
-    print("Usage: beacon account [add|list|contact|phase|delete] [options]")
+    if cmd == "rename":
+        if not args.acc_id or not args.name:
+            print("Usage: beacon account rename <acc-id> <new-name>")
+            return 1
+        env = {
+            "BEACON_ACCOUNT_ID": args.acc_id or "",
+            "BEACON_ACCOUNT_NAME": args.name or "",
+        }
+        return _run_commands_py(root, "account_rename", env)
+    if cmd == "assign":
+        if not args.acc_id:
+            print("Usage: beacon account assign <acc-id> <user>")
+            return 1
+        env = {
+            "BEACON_ACCOUNT_ID": args.acc_id or "",
+            "BEACON_ASSIGNEE": args.assignee or "",
+        }
+        return _run_commands_py(root, "account_assign", env)
+    if cmd == "nurturing":
+        if not args.acc_id or not args.desc:
+            print("Usage: beacon account nurturing <acc-id> <desc> "
+                  "[--deadline <date>] [--ball self|counterpart]")
+            return 1
+        env = {
+            "BEACON_ACCOUNT_ID": args.acc_id or "",
+            "BEACON_NURTURING_DESC": args.desc or "",
+            "BEACON_NURTURING_DEADLINE": args.deadline or "",
+            "BEACON_NURTURING_BALL": args.ball or "",
+        }
+        return _run_commands_py(root, "account_nurturing", env)
+    print("Usage: beacon account "
+          "[add|list|contact|phase|delete|rename|assign|nurturing] [options]")
     return 2
 
 
@@ -1964,7 +2061,64 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
             return 1
         env = {"BEACON_OPP_ID": args.opp_id or ""}
         return _run_commands_py(root, "opportunity_delete", env)
-    print("Usage: beacon opportunity [add|list|phase|activity|delete] [options]")
+    if cmd == "assign":
+        if not args.opp_id:
+            print("Usage: beacon opportunity assign <opp-id> <user>")
+            return 1
+        env = {
+            "BEACON_OPP_ID": args.opp_id or "",
+            "BEACON_ASSIGNEE": args.assignee or "",
+        }
+        return _run_commands_py(root, "opportunity_assign", env)
+    if cmd == "amount":
+        if not args.opp_id or not args.amount:
+            print("Usage: beacon opportunity amount <opp-id> <amount>")
+            return 1
+        env = {
+            "BEACON_OPP_ID": args.opp_id or "",
+            "BEACON_OPP_AMOUNT": args.amount or "",
+        }
+        return _run_commands_py(root, "opportunity_amount", env)
+    if cmd == "phase-prob":
+        if not args.phase or not args.prob:
+            print("Usage: beacon opportunity phase-prob <phase> <n>")
+            return 1
+        env = {
+            "BEACON_PHASE_NAME": args.phase or "",
+            "BEACON_PHASE_PROB": args.prob or "",
+        }
+        return _run_commands_py(root, "opportunity_phase_prob", env)
+    if cmd in ("transition-date", "td"):
+        # --clear passes an empty date through (set_transition_date treats it as clear).
+        date = "" if args.clear else (args.date or "")
+        if not args.opp_id or (not date and not args.clear):
+            print("Usage: beacon opportunity transition-date <opp-id> <YYYY-MM-DD> "
+                  "[--note <text>] | --clear")
+            return 1
+        env = {
+            "BEACON_OPP_ID": args.opp_id or "",
+            "BEACON_TRANSITION_DATE": date,
+            "BEACON_PHASE_NOTE": args.note or "",
+        }
+        return _run_commands_py(root, "opportunity_transition_date", env)
+    if cmd == "judge":
+        if not args.opp_id or not args.decision:
+            print("Usage: beacon opportunity judge <opp-id> advance|retry|terminal "
+                  "[<date|terminal-phase>] [--note <text>]")
+            return 1
+        env = {
+            "BEACON_OPP_ID": args.opp_id or "",
+            "BEACON_JUDGE_DECISION": args.decision or "",
+            "BEACON_JUDGE_ARG": args.arg or "",
+            "BEACON_PHASE_NOTE": args.note or "",
+        }
+        return _run_commands_py(root, "opportunity_judge", env)
+    if cmd == "due":
+        env = {"BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "opportunity_due", env)
+    print("Usage: beacon opportunity "
+          "[add|list|phase|activity|delete|assign|amount|phase-prob|"
+          "transition-date|judge|due] [options]")
     return 2
 
 
@@ -2002,7 +2156,51 @@ def _handle_communication(root: Path, args: argparse.Namespace) -> int:
             "BEACON_JSON": "1" if args.json else "",
         }
         return _run_commands_py(root, "communication_list", env)
-    print("Usage: beacon communication [add|list] [options]")
+    if cmd == "cancel":
+        if not args.comm_id:
+            print("Usage: beacon communication cancel <comm-id> [--reason <text>]")
+            return 1
+        env = {
+            "BEACON_COMM_ID": args.comm_id or "",
+            "BEACON_COMM_REASON": args.reason or "",
+        }
+        return _run_commands_py(root, "communication_cancel", env)
+    if cmd == "retarget":
+        if not args.comm_id or not args.new_target:
+            print("Usage: beacon communication retarget <comm-id> "
+                  "<new-target: opp-|acc-|act-|nrt-> [--reason <text>]")
+            return 1
+        env = {
+            "BEACON_COMM_ID": args.comm_id or "",
+            "BEACON_COMM_TARGET": args.new_target or "",
+            "BEACON_COMM_REASON": args.reason or "",
+        }
+        return _run_commands_py(root, "communication_retarget", env)
+    print("Usage: beacon communication [add|list|cancel|retarget] [options]")
+    return 2
+
+
+def _handle_sales(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help or args.sales_cmd is None:
+        print("Usage: beacon sales target <user> <amount> | list")
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+    if args.sales_cmd == "target":
+        # `sales target list [--json]` vs `sales target <user> <amount>`,
+        # mirroring the bash cmd_sales_target dispatch on the literal "list".
+        if (args.member or "") == "list":
+            env = {"BEACON_JSON": "1" if args.json else ""}
+            return _run_commands_py(root, "sales_target_list", env)
+        if not args.member:
+            print("Usage: beacon sales target <user> <amount> | list")
+            return 1
+        env = {
+            "BEACON_TARGET_MEMBER": args.member or "",
+            "BEACON_TARGET_AMOUNT": args.amount or "",
+        }
+        return _run_commands_py(root, "sales_target", env)
+    print("Usage: beacon sales target <user> <amount> | list")
     return 2
 
 
@@ -4481,6 +4679,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "comm": _handle_communication,
     "meeting": _handle_meeting,
     "mtg": _handle_meeting,
+    "sales": _handle_sales,
     "phase": _handle_phase,
     "sync": _handle_sync,
     "task": _handle_task,
