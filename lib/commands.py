@@ -15,6 +15,7 @@ from typing import Optional, Tuple
 from store import get_store
 import core
 import work_model  # ms-109 e-3559: 職種非依存の Target 正準ラベルアクセサ
+import occupation  # ms-108 e-3269: ③共有フレームの職種プロジェクション registry
 
 # ---------------------------------------------------------------------------
 # Store helpers
@@ -1058,6 +1059,15 @@ def cmd_milestone_list():
         output = {
             "name": data.get("name", ""),
             "summary": data.get("summary", ""),
+            "profession": occupation.resolve_profession(data),
+            # ms-108 e-3269 — occupation-agnostic Target projection (③ shared
+            # frame). Development still emits the legacy ``milestones[]`` below
+            # unchanged (expand step); ``targets[]`` is the canonical view that
+            # projects Milestones (dev) OR Opportunities (sales) uniformly, so
+            # the shared frame / session-start can read one shape regardless of
+            # occupation. Sales projects — whose ``milestones[]`` is empty —
+            # finally surface their work here.
+            "targets": occupation.project_targets(data),
             "milestones": [],
             "operations": [],
             # ms-61 / e-1843 — pending Operations (= todo / in_progress)

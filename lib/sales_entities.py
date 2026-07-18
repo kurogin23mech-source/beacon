@@ -2687,3 +2687,47 @@ def backfill_target_labels(data: dict) -> int:
         if work_model.ensure_target_label(opp):
             n += 1
     return n
+
+
+def project_targets(data: dict) -> list:
+    """③ shared-frame projection (ms-108 e-3269): map this sales project's
+    Targets (Opportunities) into the same occupation-agnostic shape the
+    development adapter (``core.project_targets``) emits, so the shared frame
+    (status / session-start) can render either occupation without knowing
+    which one it is looking at.
+
+    The generic core is identical to development — ``id`` / ``label`` (via the
+    tolerant ``work_model.target_label`` reader) / ``status`` / ``kind`` plus
+    the WorkItem completion counts (here WorkItems are the Opportunity's
+    activities/活動). Sales semantics — phase (フェーズ) / who_has_the_ball
+    (誰にボールがあるか) / goal_amount (目標金額) / probability (成約率) /
+    deadline / account link — live only in ``detail`` (SPEC AC4: the base stays
+    occupation-neutral).
+
+    Cancelled (取消) Opportunities are excluded, matching the default view.
+    """
+    targets = []
+    for opp in data.get("opportunities", []):
+        if opp.get("status") == work_model.CANCELLED_STATUS:
+            continue
+        activities = opp.get("activities", [])
+        total = len(activities)
+        done = sum(1 for a in activities
+                   if a.get("status") == work_model.DONE_STATUS)
+        targets.append({
+            "id": opp.get("id", ""),
+            "label": work_model.target_label(opp),
+            "status": opp.get("status", ""),
+            "kind": "opportunity",
+            "work_items_total": total,
+            "work_items_done": done,
+            "detail": {
+                "phase": opp.get("phase", ""),
+                "who_has_the_ball": opp.get("who_has_the_ball", ""),
+                "goal_amount": opp.get("goal_amount"),
+                "probability": opp.get("probability"),
+                "deadline": opp.get("deadline", ""),
+                "account_id": opp.get("account_id"),
+            },
+        })
+    return targets
