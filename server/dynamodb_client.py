@@ -419,6 +419,15 @@ def list_documents(project_id: str) -> list[dict]:
         operation = data.get("operation") or _extract_frontmatter_field(
             data.get("content", ""), "operation"
         )
+        # ms-109 e-3754: canonical target-class-agnostic linkage (acc-/opp-/…)
+        # so `doc list --account` etc. work in cloud mode; trek_id alongside
+        # (previously omitted) so the tolerant fallback is not cloud-blind.
+        target = data.get("target") or _extract_frontmatter_field(
+            data.get("content", ""), "target"
+        )
+        trek_id = data.get("trek_id") or _extract_frontmatter_field(
+            data.get("content", ""), "trek_id"
+        )
         entry = {
             "doc_id": data.get("doc_id", ""),
             "title": data.get("title", ""),
@@ -429,6 +438,10 @@ def list_documents(project_id: str) -> list[dict]:
             entry["milestone"] = milestone
         if operation:
             entry["operation"] = operation
+        if target:
+            entry["target"] = target
+        if trek_id:
+            entry["trek_id"] = trek_id
         result.append(entry)
     result.sort(key=lambda e: e.get("updated_at", ""), reverse=True)
     return result

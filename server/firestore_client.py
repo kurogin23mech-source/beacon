@@ -293,6 +293,14 @@ def list_documents(project_id: str) -> list[dict]:
         operation = data.get("operation") or _extract_frontmatter_field(
             data.get("content", ""), "operation"
         )
+        # ms-109 e-3754: canonical target-class-agnostic linkage (+ trek_id,
+        # previously omitted) so `doc list --account`/`--target` work in cloud.
+        target = data.get("target") or _extract_frontmatter_field(
+            data.get("content", ""), "target"
+        )
+        trek_id = data.get("trek_id") or _extract_frontmatter_field(
+            data.get("content", ""), "trek_id"
+        )
         entry = {
             "doc_id": doc.id,
             "title": data.get("title", ""),
@@ -303,6 +311,10 @@ def list_documents(project_id: str) -> list[dict]:
             entry["milestone"] = milestone
         if operation:
             entry["operation"] = operation
+        if target:
+            entry["target"] = target
+        if trek_id:
+            entry["trek_id"] = trek_id
         result.append(entry)
     return result
 

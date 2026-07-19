@@ -10871,7 +10871,7 @@ def _parse_frontmatter(text):
 
 
 def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
-                     drop_milestone=False, drop_operation=False):
+                     drop_milestone=False, drop_operation=False, target=""):
     """Prepend frontmatter to content, or update existing scope/milestone/operation/trek_id.
 
     List values are written as inline YAML arrays (``key: ["a", "b"]``) so
@@ -10882,6 +10882,12 @@ def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
     ``trek_id`` (ms-69 / e-1663) associates a doc with a cross-project trek;
     optional, defaults preserved on round-trip.
 
+    ``target`` (ms-109 e-3754) is the canonical, target-class-agnostic doc
+    linkage key (``acc-1`` / ``opp-3`` / ``ms-5`` …). When set it writes
+    ``target: <id>`` and, for Targets that predate it (milestone / operation /
+    trek), dual-writes the legacy key so existing readers keep working. New
+    Target classes (account / opportunity) carry ``target`` only.
+
     ``drop_milestone`` / ``drop_operation`` (e-1859) explicitly remove the
     matching key from existing frontmatter. ``cmd_doc_update`` sets these
     when the user switches a doc from milestone scope to operation scope
@@ -10889,6 +10895,7 @@ def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
     two-headed (= both milestone and operation set) frontmatter that
     silently misleads ``/beacon-operation-review`` discovery filters.
     """
+    import work_model
     meta, body = _parse_frontmatter(content)
     meta["scope"] = scope
     if drop_milestone:
@@ -10901,6 +10908,14 @@ def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
         meta["operation"] = operation
     if trek_id:
         meta["trek_id"] = trek_id
+    if target:
+        # ms-109 e-3754: canonical linkage + back-compat dual-write of the
+        # legacy key (milestone / operation / trek_id) when the Target is one
+        # of the classes that had one, so legacy readers/filters keep resolving.
+        meta["target"] = target
+        legacy_key = work_model.legacy_link_key_for(target)
+        if legacy_key:
+            meta[legacy_key] = target
     lines = ["---"]
     for k, v in meta.items():
         if isinstance(v, list):
@@ -10968,6 +10983,13 @@ def cmd_doc_list():
     # makes it usable from the CLI (= mirrors what the server-side
     # /api/treks/{tid}/documents lookup does for the Web UI).
     trek_filter = os.environ.get("BEACON_TREK_ID", "")
+    # ms-109 e-3754 — target-class-agnostic filter. --target / --account /
+    # --opportunity all resolve here and match a doc's linked Target via the
+    # tolerant ``doc_target`` read (canonical ``target`` first, legacy keys
+    # second), so ``doc list --account acc-1`` surfaces a customer's docs.
+    target_filter = (os.environ.get("BEACON_TARGET", "")
+                     or os.environ.get("BEACON_ACCOUNT", "")
+                     or os.environ.get("BEACON_OPPORTUNITY", ""))
     # Trashed docs are hidden by default — pass --include-trashed to see
     # them in line with active ones (ms-14 e-973).
     include_trashed = os.environ.get("BEACON_INCLUDE_TRASHED", "") == "1"
@@ -10987,6 +11009,9 @@ def cmd_doc_list():
         docs = [d for d in docs if d.get("operation") == op_filter]
     if trek_filter:
         docs = [d for d in docs if d.get("trek_id") == trek_filter]
+    if target_filter:
+        import work_model
+        docs = [d for d in docs if work_model.doc_target(d) == target_filter]
 
     if json_mode:
         print(json.dumps(docs, ensure_ascii=False))
@@ -11029,6 +11054,14 @@ def cmd_doc_add():
     milestone = os.environ.get("BEACON_MS", "")
     operation = os.environ.get("BEACON_OP", "")
     trek_id = os.environ.get("BEACON_TREK_ID", "")  # ms-69 / e-1663
+    # ms-109 e-3754 — canonical target-class-agnostic doc linkage. --account /
+    # --opportunity are new (sales Targets had no linkage key); --target is the
+    # generic form. --ms / --op / --trek continue to work via the legacy vars
+    # above and are resolved into ``target`` below.
+    account = os.environ.get("BEACON_ACCOUNT", "")
+    opportunity = os.environ.get("BEACON_OPPORTUNITY", "")
+    target = (os.environ.get("BEACON_TARGET", "") or account or opportunity
+              or milestone or operation or trek_id)
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not title:
@@ -11053,6 +11086,19 @@ def cmd_doc_add():
     if scope == "core":
         milestone = milestone or None
 
+    # ms-109 e-3754 — hard-validate the new Target classes (account /
+    # opportunity) exist before linking. ms / op / trek stay lenient (their
+    # pre-existing behavior); an unknown prefix is left to round-trip untouched.
+    if target:
+        import work_model
+        _kind = work_model.target_kind(target)
+        if _kind in ("account", "opportunity"):
+            _coll = "accounts" if _kind == "account" else "opportunities"
+            _data = load_project()
+            if target not in {x.get("id") for x in _data.get(_coll, [])}:
+                print(f"Error: {_kind} not found: {target}", file=sys.stderr)
+                sys.exit(1)
+
     content = _resolve_content_input(content)
 
     if not content:
@@ -11074,9 +11120,10 @@ def cmd_doc_add():
     except Exception:
         pass
 
-    # Add frontmatter with scope, milestone, operation, and trek_id
+    # Add frontmatter with scope, milestone, operation, trek_id, and the
+    # canonical ``target`` linkage (ms-109 e-3754).
     content = _add_frontmatter(content, scope, milestone or "", operation or "",
-                               trek_id or "")
+                               trek_id or "", target=target or "")
 
     if _is_cloud_mode():
         client, config = _get_api_client()
@@ -11095,10 +11142,15 @@ def cmd_doc_add():
             f.write(content)
 
     import datetime
+    import work_model
     data = load_project()
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # ms-109 e-3754 — account / opportunity docs have no milestone/operation
+    # legacy entry to record (they link via ``target`` only); skip the dev-era
+    # entry recording for them so we never call save_entry with an empty ms_id.
+    _is_sales_link = work_model.target_kind(target or "") in ("account", "opportunity")
     # core docs: skip MS/Op entry recording (they're project-wide)
-    if scope != "core":
+    if scope != "core" and not _is_sales_link:
         if operation:
             # Record in operation entries
             for op in data.get("operations", []):
@@ -11166,6 +11218,11 @@ def cmd_doc_update():
         sys.exit(1)
 
     operation = os.environ.get("BEACON_OP", "")
+    # ms-109 e-3754 — canonical target linkage inputs (account / opportunity are
+    # new sales Targets; --target is generic). Resolved into ``target`` below.
+    account = os.environ.get("BEACON_ACCOUNT", "")
+    opportunity = os.environ.get("BEACON_OPPORTUNITY", "")
+    target_in = os.environ.get("BEACON_TARGET", "") or account or opportunity
     # Use existing values as defaults
     if not title:
         title = existing.get("title", "")
@@ -11199,6 +11256,23 @@ def cmd_doc_update():
     if not content:
         content = existing.get("content", "")
 
+    # ms-109 e-3754 — resolve the canonical target: an explicitly passed
+    # account/opportunity/--target wins; otherwise fall back to the resolved
+    # milestone/operation/trek, then preserve the doc's existing ``target``.
+    import work_model
+    target = (target_in or milestone or operation or trek_id
+              or existing.get("target", ""))
+    # Hard-validate the new Target classes when they were explicitly passed
+    # (a preserved existing link was already validated at creation).
+    if target_in:
+        _kind = work_model.target_kind(target_in)
+        if _kind in ("account", "opportunity"):
+            _coll = "accounts" if _kind == "account" else "opportunities"
+            _data = load_project()
+            if target_in not in {x.get("id") for x in _data.get(_coll, [])}:
+                print(f"Error: {_kind} not found: {target_in}", file=sys.stderr)
+                sys.exit(1)
+
     # Rebuild with frontmatter. e-1859: _add_frontmatter is called with an
     # explicit "scope wipe" pass so the field we are dropping (= operation
     # under Mode 1, milestone under Mode 2) is removed from the existing
@@ -11207,6 +11281,7 @@ def cmd_doc_update():
         content, scope, milestone, operation, trek_id,
         drop_milestone=(op_explicit and not ms_explicit),
         drop_operation=(ms_explicit and not op_explicit),
+        target=target or "",
     )
 
     # Write path still branches per backend (Phase 3 で Store.save_document
@@ -11227,7 +11302,10 @@ def cmd_doc_update():
     # e-1859: mirror cmd_doc_add's scope-aware entry recording so an
     # op-scoped doc update lands in op.entries (not the milestone log).
     # core scope is project-wide and skips entry recording entirely.
-    if scope == "core":
+    # ms-109 e-3754: account / opportunity docs link via ``target`` only and
+    # have no milestone/operation legacy entry to record.
+    _is_sales_link = work_model.target_kind(target or "") in ("account", "opportunity")
+    if scope == "core" or _is_sales_link:
         pass
     elif operation:
         for op in data.get("operations", []):

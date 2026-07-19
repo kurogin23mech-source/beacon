@@ -2252,6 +2252,9 @@ cmd_doc() {
             local doc_ms=""
             local doc_op=""
             local doc_trek=""
+            local doc_account=""
+            local doc_opportunity=""
+            local doc_target=""
             local doc_bus_origin=""
 
             while [[ $# -gt 0 ]]; do
@@ -2261,6 +2264,9 @@ cmd_doc() {
                     --ms)         doc_ms="${2:-}"; shift 2 ;;
                     --op)         doc_op="${2:-}"; shift 2 ;;
                     --trek)       doc_trek="${2:-}"; shift 2 ;;
+                    --account|--acc)      doc_account="${2:-}"; shift 2 ;;
+                    --opportunity|--opp)  doc_opportunity="${2:-}"; shift 2 ;;
+                    --target)     doc_target="${2:-}"; shift 2 ;;
                     --json)       json_flag="1"; shift ;;
                     --content)    doc_content="${2:-}"; shift 2 ;;
                     --bus-origin) doc_bus_origin="1"; shift ;;
@@ -2270,7 +2276,7 @@ cmd_doc() {
             done
 
             if [ -z "$doc_title" ]; then
-                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--id slug] [--content text] [--json]"
+                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--account acc-id] [--opportunity opp-id] [--target id] [--id slug] [--content text] [--json]"
                 echo "  Content can also be piped via stdin."
                 exit 1
             fi
@@ -2278,6 +2284,8 @@ cmd_doc() {
                 BEACON_CONTENT="$doc_content" BEACON_SCOPE="$doc_scope" \
                 BEACON_MS="$doc_ms" BEACON_OP="$doc_op" \
                 BEACON_TREK_ID="$doc_trek" \
+                BEACON_ACCOUNT="$doc_account" BEACON_OPPORTUNITY="$doc_opportunity" \
+                BEACON_TARGET="$doc_target" \
                 BEACON_JSON="$json_flag" \
                 BEACON_BUS_ORIGIN="$doc_bus_origin" \
                 python3 "$COMMANDS_PY" doc_add
@@ -2289,6 +2297,9 @@ cmd_doc() {
             local ms_filter=""
             local op_filter=""
             local trek_filter=""
+            local account_filter=""
+            local opportunity_filter=""
+            local target_filter=""
             local include_trashed=""
             while [[ $# -gt 0 ]]; do
                 case "$1" in
@@ -2297,6 +2308,9 @@ cmd_doc() {
                     --ms)               ms_filter="${2:-}"; shift 2 ;;
                     --op)               op_filter="${2:-}"; shift 2 ;;
                     --trek)             trek_filter="${2:-}"; shift 2 ;;
+                    --account|--acc)      account_filter="${2:-}"; shift 2 ;;
+                    --opportunity|--opp)  opportunity_filter="${2:-}"; shift 2 ;;
+                    --target)           target_filter="${2:-}"; shift 2 ;;
                     --include-trashed)  include_trashed="1"; shift ;;
                     *) shift ;;
                 esac
@@ -2304,6 +2318,8 @@ cmd_doc() {
             BEACON_JSON="$json_flag" BEACON_SCOPE="$scope_filter" \
                 BEACON_MS="$ms_filter" BEACON_OP="$op_filter" \
                 BEACON_TREK_ID="$trek_filter" \
+                BEACON_ACCOUNT="$account_filter" BEACON_OPPORTUNITY="$opportunity_filter" \
+                BEACON_TARGET="$target_filter" \
                 BEACON_INCLUDE_TRASHED="$include_trashed" \
                 python3 "$COMMANDS_PY" doc_list
             ;;
@@ -2316,6 +2332,9 @@ cmd_doc() {
             local doc_ms=""
             local doc_op=""
             local doc_trek=""
+            local doc_account=""
+            local doc_opportunity=""
+            local doc_target=""
             local json_flag=""
             local doc_bus_origin=""
             # e-1859: distinguish "flag absent" from "flag passed empty".
@@ -2335,6 +2354,9 @@ cmd_doc() {
                     --ms)         doc_ms="${2:-}"; doc_ms_set="1"; shift 2 ;;
                     --op)         doc_op="${2:-}"; doc_op_set="1"; shift 2 ;;
                     --trek)       doc_trek="${2:-}"; shift 2 ;;
+                    --account|--acc)      doc_account="${2:-}"; shift 2 ;;
+                    --opportunity|--opp)  doc_opportunity="${2:-}"; shift 2 ;;
+                    --target)     doc_target="${2:-}"; shift 2 ;;
                     --json)       json_flag="1"; shift ;;
                     --bus-origin) doc_bus_origin="1"; shift ;;
                     --stdin)      shift ;;
@@ -2343,7 +2365,7 @@ cmd_doc() {
             done
 
             if [ -z "$doc_id" ]; then
-                echo "Usage: beacon doc update <doc-id> [--title text] [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--content text] [--json]"
+                echo "Usage: beacon doc update <doc-id> [--title text] [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--account acc-id] [--opportunity opp-id] [--target id] [--content text] [--json]"
                 echo "  Content can also be piped via stdin."
                 exit 1
             fi
@@ -2352,6 +2374,8 @@ cmd_doc() {
                 BEACON_MS="$doc_ms" BEACON_OP="$doc_op" \
                 BEACON_MS_SET="$doc_ms_set" BEACON_OP_SET="$doc_op_set" \
                 BEACON_TREK_ID="$doc_trek" \
+                BEACON_ACCOUNT="$doc_account" BEACON_OPPORTUNITY="$doc_opportunity" \
+                BEACON_TARGET="$doc_target" \
                 BEACON_JSON="$json_flag" \
                 BEACON_BUS_ORIGIN="$doc_bus_origin" \
                 python3 "$COMMANDS_PY" doc_update

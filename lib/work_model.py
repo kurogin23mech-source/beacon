@@ -127,6 +127,80 @@ def target_label(target: dict) -> str:
     return ""
 
 
+# ---------------------------------------------------------------------------
+# Target linkage — the canonical ``target`` frontmatter key generalising doc
+# linkage (ms-109 e-3754). Documents historically linked to a Target via one
+# of three HARDCODED keys — ``milestone`` / ``operation`` / ``trek_id`` — a set
+# frozen in the development era. Sales Targets (Account / Opportunity), added
+# later (ms-106/107), got no linkage key at all, so the asymmetry "docs link to
+# milestones but not customers" is just a wiring gap, not a design intent.
+#
+# The fix is one canonical ``target`` key holding a single prefixed id
+# (``acc-1`` / ``opp-3`` / ``ms-5`` / ``op-2`` / ``tk-…``); the target-class is
+# DERIVED from the id prefix, so no new key is needed when a Target class is
+# added. ``doc_target`` reads canonical-first, legacy-second (expand step) so
+# existing docs resolve with no data migration.
+# ---------------------------------------------------------------------------
+
+TARGET_LINK = "target"
+
+# Id-prefix → target-class. Prefixes are the substring before the first "-"
+# (``opp-3`` → ``opp``), so ``op-`` (operation) and ``opp-`` (opportunity) do
+# not collide.
+_TARGET_PREFIX_KIND = {
+    "ms": "milestone",
+    "op": "operation",
+    "opp": "opportunity",
+    "acc": "account",
+    "tk": "trek",
+}
+
+# Legacy doc-linkage keys, in tolerant-read order, for Targets that predate the
+# canonical ``target`` key. Sales classes (account / opportunity) never had one.
+_LEGACY_LINK_KEYS = ("milestone", "operation", "trek_id")
+
+# Target-class → its legacy doc-linkage key, for dual-writing during the
+# expand→contract window so legacy readers (operation SPEC discovery, the
+# ``--ms`` doc filter) keep working.
+_KIND_LEGACY_LINK_KEY = {
+    "milestone": "milestone",
+    "operation": "operation",
+    "trek": "trek_id",
+}
+
+
+def target_kind(target_id: str) -> str:
+    """Derive a Target's class from its id prefix (``acc-1`` → ``account``,
+    ``opp-3`` → ``opportunity``, ``ms-5`` → ``milestone`` …). Returns ``""`` for
+    an empty id or an unrecognised prefix."""
+    if not target_id or not isinstance(target_id, str):
+        return ""
+    prefix = target_id.split("-", 1)[0]
+    return _TARGET_PREFIX_KIND.get(prefix, "")
+
+
+def doc_target(meta: dict) -> str:
+    """Tolerant read of a document's linked Target id (ms-109 e-3754): canonical
+    ``target`` first, then legacy ``milestone`` / ``operation`` / ``trek_id``
+    (expand step). Returns ``""`` when the doc links to nothing."""
+    if not isinstance(meta, dict):
+        return ""
+    v = meta.get(TARGET_LINK)
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    for k in _LEGACY_LINK_KEYS:
+        v = meta.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def legacy_link_key_for(target_id: str) -> str:
+    """The legacy frontmatter key to dual-write for a Target id (back-compat),
+    or ``""`` for classes (account / opportunity) that never had a legacy key."""
+    return _KIND_LEGACY_LINK_KEY.get(target_kind(target_id), "")
+
+
 def present_legacy_label_key(target: dict) -> str:
     """Return whichever legacy label key (``title`` / ``name``) already carries
     a value on ``target``, or ``""`` if none does.
