@@ -8664,6 +8664,20 @@ function renderOnDataChange() {
   // detail. Skipping the re-render here preserves the Trek view
   // verbatim until the user explicitly closes it.
   if (state.openTrekId) return;
+  // ms-43 e-3746 — same reasoning as the Trek guard above, applied to the
+  // document / retro viewer. While the user is reading a doc (or a retro),
+  // ``renderDocumentsSection`` replaces #main-content with the viewer, and a
+  // project_changed WS frame carries only milestone / task / entry deltas —
+  // none of which the open viewer shows. The fall-through render() below
+  // rebuilds the shell (fresh ``.doc-content`` via marked.parse), which
+  // resets the reader's scrollTop to the top of the doc. Since the viewer's
+  // content lives in ``state.documentContent`` / ``state.retroContent`` (both
+  // untouched by fetchSlimProjectIfChanged), skipping the re-render loses no
+  // information: state.documents / state.retros are already fresh, so the
+  // next "back to list" shows the updated list without a fetch. Document
+  // *content* edits ride the dedicated document_change frame
+  // (applyDocumentChange), which is likewise gated on !state.documentContent.
+  if (state.documentContent || state.retroContent) return;
   const doRender = () => {
     // Use the partial #main-content swap (no header/search-box re-render)
     // whenever the project is loaded. When showing the dashboard MS list,
