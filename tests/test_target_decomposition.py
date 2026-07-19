@@ -181,3 +181,15 @@ def test_communications_table_shared_but_routed_by_target_prefix():
     acc_comms = {c["id"] for c in rebuilt["accounts"][0]["communications"]}
     assert opp_comms == {"comm-2"}
     assert acc_comms == {"comm-3"}
+
+
+# ms-109 e-3591 — drift guard: every collection/child table the registry
+# decomposes must be a declared MySQL entity, else create_mysql_tables would
+# not create it and reads would hit a missing table.
+def test_mysql_entities_cover_registry():
+    import mysql_client as mc
+    entities = set(mc.ENTITIES)
+    for coll in occupation.TARGET_DECOMPOSITION:
+        assert coll in entities, f"{coll} missing from mysql_client.ENTITIES"
+    for tbl in occupation.target_child_tables():
+        assert tbl in entities, f"{tbl} missing from mysql_client.ENTITIES"
