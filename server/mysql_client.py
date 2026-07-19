@@ -541,6 +541,113 @@ def _v3_decompose(data: dict) -> tuple[dict, dict, dict]:
     return meta, ms_map, entry_map
 
 
+# ---------------------------------------------------------------------------
+# Generic registry-driven decomposition (ms-109 e-3591 / SPEC F7mdrDA4djd3byyDbZAv)
+#
+# The milestone-specific _v3_decompose / _v3_assemble above are the DEVELOPMENT
+# instance of a general pattern: split a Target collection's fat arms into child
+# rows. These generic forms read ``occupation.TARGET_DECOMPOSITION`` so the SAME
+# code decomposes development milestones AND sales opportunities/accounts,
+# satisfying SPEC AC2 ("dev も同機構の1インスタンス"). They reproduce the
+# milestone split byte-for-byte (pinned by test) and round-trip sales Targets.
+#
+# NOT yet wired into the live atomic I/O path (apply/get/save_project_v3): that
+# switchover needs the child tables added to ENTITIES + a MySQL integration test
+# (Phase 2d harness) before it can touch the production write path. These pure
+# functions are the proven core that switchover will adopt.
+# ---------------------------------------------------------------------------
+
+def _target_sort_key(collection: str, target: dict):
+    """Sort key for a Target within its collection. Milestones keep the numeric
+    ms-N order (matching _v3_assemble); other collections order by created_at
+    then id (stable, deterministic). Keys are only ever compared within one
+    collection, so the per-collection tuple shapes never mix."""
+    import re  # noqa: PLC0415
+    tid = str(target.get("id", ""))
+    if collection == "milestones":
+        m = re.match(r"ms-(\d+)$", tid)
+        return (0, int(m.group(1)), "") if m else (1, 0, tid)
+    return (0, target.get("created_at", "") or "￿", tid)
+
+
+def decompose_project_targets(data: dict) -> tuple[dict, dict, dict]:
+    """Split a unified project dict into ``(meta, target_maps, child_maps)``,
+    registry-driven across occupations.
+
+    - ``meta``: everything except the Target collections, stamped
+      ``schema_version=3``.
+    - ``target_maps``: ``{collection: {target_id: target_row}}`` where
+      target_row is the Target minus its fat arms (bounded arms stay inline).
+    - ``child_maps``: ``{arm_table: {sk: child_dict}}`` — one entry per fat-arm
+      item, ``sk`` per the D2 rule (2-seg for single-arm collections like
+      milestones, 3-seg ``{tid}#{arm}#{cid}`` otherwise). Children nested inside
+      a fat-arm item stay inline in that item's dict (mirrors a dev commit nested
+      in its task's entry row)."""
+    import occupation  # noqa: PLC0415
+    colls = occupation.TARGET_DECOMPOSITION
+    meta = {k: v for k, v in (data or {}).items() if k not in colls}
+    meta["schema_version"] = SCHEMA_V3_ENTRY
+    target_maps: dict = {}
+    child_maps: dict = {}
+    for coll, spec in colls.items():
+        arms = spec["arms"]
+        single = len(arms) == 1
+        id_field = spec.get("id_field", "id")
+        tmap: dict = {}
+        for target in (data or {}).get(coll, []) or []:
+            tid = target.get(id_field, "")
+            if not tid:
+                continue
+            tmap[tid] = {k: v for k, v in target.items() if k not in arms}
+            for arm in arms:
+                for child in target.get(arm, []) or []:
+                    cid = child.get("id", "")
+                    if not cid:
+                        continue
+                    sk = f"{tid}#{cid}" if single else f"{tid}#{arm}#{cid}"
+                    child_maps.setdefault(arm, {})[sk] = dict(child)
+        target_maps[coll] = tmap
+    return meta, target_maps, child_maps
+
+
+def assemble_project_targets(meta: dict, target_maps: dict,
+                             child_maps: dict) -> dict:
+    """Inverse of ``decompose_project_targets``: rebuild the unified project
+    dict. Reattaches each Target's fat arms from ``child_maps`` (grouping by
+    target id + arm parsed from the sk), reproducing the nested shape CLI/UI
+    expect. Arm children are ordered by ``_v3_entry_sort_key``; Target
+    collections by ``_target_sort_key``."""
+    import occupation  # noqa: PLC0415
+    colls = occupation.TARGET_DECOMPOSITION
+    result = {k: v for k, v in (meta or {}).items() if k not in colls}
+    for coll, spec in colls.items():
+        arms = spec["arms"]
+        single = len(arms) == 1
+        by_target_arm: dict = {}
+        for arm in arms:
+            for sk, child in (child_maps.get(arm, {}) or {}).items():
+                if single:
+                    tid, _, _cid = sk.partition("#")
+                    a = arm
+                else:
+                    parts = sk.split("#", 2)
+                    if len(parts) != 3:
+                        continue
+                    tid, a, _cid = parts
+                by_target_arm.setdefault((tid, a), []).append(child)
+        targets = []
+        for tid, t_meta in (target_maps.get(coll, {}) or {}).items():
+            t = {k: v for k, v in t_meta.items() if k not in arms}
+            for arm in arms:
+                kids = sorted(by_target_arm.get((tid, arm), []),
+                              key=_v3_entry_sort_key)
+                t[arm] = kids
+            targets.append(t)
+        targets.sort(key=lambda x, _c=coll: _target_sort_key(_c, x))
+        result[coll] = targets
+    return result
+
+
 def get_project_v3(project_id: str) -> dict | None:
     """v3 project を read して unified dict shape で返す。
 

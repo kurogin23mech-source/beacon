@@ -83,3 +83,49 @@ def iter_target_records(data: dict) -> list:
     for coll in TARGET_COLLECTIONS:
         records.extend(data.get(coll, []) or [])
     return records
+
+
+# ---------------------------------------------------------------------------
+# Physical decomposition spec for row-oriented backends (ms-109 e-3591 / SPEC
+# F7mdrDA4djd3byyDbZAv). For a backend that stores each record as its own row
+# (MySQL v3), this declares — per Target collection — the id field and which
+# nested "arms" (child arrays) are FAT (unbounded growth → split into their own
+# rows) vs left inline in the Target row. This is the ONE place that knows the
+# physical decomposition shape, so the storage layer stays occupation-agnostic
+# (it reads this registry instead of hardcoding milestones/entries).
+#
+# sk rule (SPEC 方針 D2): a fat arm's child rows use sk = "{target_id}#{child_id}"
+# when the Target has ONE fat arm (arm name implicit), else
+# "{target_id}#{arm}#{child_id}". Development milestones have one arm (entries)
+# so they keep the legacy 2-segment sk unchanged; sales Targets have several so
+# they are arm-qualified. That the segment count differs by occupation is not an
+# inconsistency to iron out but the honest consequence of "a Target's shape
+# varies by occupation" (SPEC 方針 D2).
+#
+# Bounded arms (opportunity.gates, account.contacts / phase_history) are NOT
+# listed → they ride inline in the Target row. Children nested under a fat-arm
+# item (a communication under an activity) also stay inline in that item's row,
+# exactly as a development commit nested under a task stays inline in the task's
+# entry row. The unified attach-point model (SPEC 方針: Target↓Evidence /
+# WorkItem↓Evidence / WorkItem↓WorkItem) is expressed by ``linked_id`` + this
+# inline nesting, identically for both occupations.
+# ---------------------------------------------------------------------------
+
+TARGET_DECOMPOSITION = {
+    "milestones":    {"id_field": "id", "arms": ("entries",)},
+    "opportunities": {"id_field": "id", "arms": ("activities", "communications")},
+    "accounts":      {"id_field": "id", "arms": ("nurturings", "communications")},
+}
+
+
+def target_child_tables() -> tuple:
+    """Return the distinct child-table names across all Target collections (= the
+    union of fat arm names, de-duplicated in declaration order). ``communications``
+    is shared by the sales opportunity and account collections, so it appears
+    once. A row-oriented backend creates one child table per name here."""
+    seen: list = []
+    for spec in TARGET_DECOMPOSITION.values():
+        for arm in spec["arms"]:
+            if arm not in seen:
+                seen.append(arm)
+    return tuple(seen)
