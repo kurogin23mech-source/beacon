@@ -70,6 +70,17 @@ ENTITIES = [
     #   pk=project_id, sk=milestone_id / entries は sk="{ms_id}#{entry_id}" の composite。
     "milestones",
     "entries",
+    # ms-109 e-3591 (SPEC F7mdrDA4djd3byyDbZAv): sales Target collections +
+    # their fat child arms get the same row-split as milestones/entries, so a
+    # busy sales project's opportunities/communications no longer bloat the
+    # single projects row. Declared here (static, for create_mysql_tables); the
+    # authoritative "which collections/arms decompose" registry lives in
+    # occupation.TARGET_DECOMPOSITION and a drift test pins ENTITIES ⊇ it.
+    "opportunities",
+    "accounts",
+    "activities",
+    "communications",
+    "nurturings",
     # treks/{trek_id}/* subcollections
     # firestore は treks/{tid}/logs に永続化する (ms-97 e-2603)。dynamodb_client は
     # ここを in-memory fallback で握っていて再起動で消える既知の穴があるが、MySQL は
@@ -107,6 +118,14 @@ _SUBCOLLECTION_SK_NAMES = {
     # delete_project の cascade を成立させるため必ずこの map に入れる。
     "milestones": "milestone_id",
     "entries": "entry_composite_sk",  # sk = "{ms_id}#{entry_id}"
+    # ms-109 e-3591: sales Target rows (sk = target_id) + arm-qualified child
+    # rows (sk = "{target_id}#{arm}#{child_id}"). delete_project cascade walks
+    # these keys, same as milestones/entries.
+    "opportunities": "opportunity_id",
+    "accounts": "account_id",
+    "activities": "target_child_composite_sk",
+    "communications": "target_child_composite_sk",
+    "nurturings": "target_child_composite_sk",
     # ms-90 e-3242: project 配下 subcollection。delete_project の cascade 対象。
     "decision_events": "decision_id",
 }
@@ -541,19 +560,203 @@ def _v3_decompose(data: dict) -> tuple[dict, dict, dict]:
     return meta, ms_map, entry_map
 
 
-def get_project_v3(project_id: str) -> dict | None:
-    """v3 project を read して unified dict shape で返す。
+# ---------------------------------------------------------------------------
+# Generic registry-driven decomposition (ms-109 e-3591 / SPEC F7mdrDA4djd3byyDbZAv)
+#
+# The milestone-specific _v3_decompose / _v3_assemble above are the DEVELOPMENT
+# instance of a general pattern: split a Target collection's fat arms into child
+# rows. These generic forms read ``occupation.TARGET_DECOMPOSITION`` so the SAME
+# code decomposes development milestones AND sales opportunities/accounts,
+# satisfying SPEC AC2 ("dev も同機構の1インスタンス"). They reproduce the
+# milestone split byte-for-byte (pinned by test) and round-trip sales Targets.
+#
+# NOT yet wired into the live atomic I/O path (apply/get/save_project_v3): that
+# switchover needs the child tables added to ENTITIES + a MySQL integration test
+# (Phase 2d harness) before it can touch the production write path. These pure
+# functions are the proven core that switchover will adopt.
+# ---------------------------------------------------------------------------
 
-    v1/v2 の get_project(pid) と異なり、 milestones + entries を hydrate して
-    「1 project = 1 大きな dict」 の shape に戻す。 apply_operation の read 側や
-    load_project_consistent (= operations.py) から使う。 見つからなければ None。
-    """
+# Collections that assemble emits even when empty. Only "milestones" — it is the
+# one Target collection core.validate_project requires as a top-level key, so a
+# sales project (milestones: []) still validates. Kept minimal on purpose.
+_ALWAYS_EMIT_COLLECTIONS = {"milestones"}
+
+
+def _target_sort_key(collection: str, target: dict):
+    """Sort key for a Target within its collection. Milestones keep the numeric
+    ms-N order (matching _v3_assemble); other collections order by created_at
+    then id (stable, deterministic). Keys are only ever compared within one
+    collection, so the per-collection tuple shapes never mix."""
+    import re  # noqa: PLC0415
+    tid = str(target.get("id", ""))
+    if collection == "milestones":
+        m = re.match(r"ms-(\d+)$", tid)
+        return (0, int(m.group(1)), "") if m else (1, 0, tid)
+    return (0, target.get("created_at", "") or "￿", tid)
+
+
+def decompose_project_targets(data: dict) -> tuple[dict, dict, dict]:
+    """Split a unified project dict into ``(meta, target_maps, child_maps)``,
+    registry-driven across occupations.
+
+    - ``meta``: everything except the Target collections, stamped
+      ``schema_version=3``.
+    - ``target_maps``: ``{collection: {target_id: target_row}}`` where
+      target_row is the Target minus its fat arms (bounded arms stay inline).
+    - ``child_maps``: ``{arm_table: {sk: child_dict}}`` — one entry per fat-arm
+      item, ``sk`` per the D2 rule (2-seg for single-arm collections like
+      milestones, 3-seg ``{tid}#{arm}#{cid}`` otherwise). Children nested inside
+      a fat-arm item stay inline in that item's dict (mirrors a dev commit nested
+      in its task's entry row)."""
+    import occupation  # noqa: PLC0415
+    colls = occupation.TARGET_DECOMPOSITION
+    meta = {k: v for k, v in (data or {}).items() if k not in colls}
+    meta["schema_version"] = SCHEMA_V3_ENTRY
+    target_maps: dict = {}
+    child_maps: dict = {}
+    for coll, spec in colls.items():
+        arms = spec["arms"]
+        single = len(arms) == 1
+        id_field = spec.get("id_field", "id")
+        tmap: dict = {}
+        for target in (data or {}).get(coll, []) or []:
+            tid = target.get(id_field, "")
+            if not tid:
+                continue
+            tmap[tid] = {k: v for k, v in target.items() if k not in arms}
+            for arm in arms:
+                for child in target.get(arm, []) or []:
+                    cid = child.get("id", "")
+                    if not cid:
+                        continue
+                    sk = f"{tid}#{cid}" if single else f"{tid}#{arm}#{cid}"
+                    child_maps.setdefault(arm, {})[sk] = dict(child)
+        target_maps[coll] = tmap
+    return meta, target_maps, child_maps
+
+
+def assemble_project_targets(meta: dict, target_maps: dict,
+                             child_maps: dict) -> dict:
+    """Inverse of ``decompose_project_targets``: rebuild the unified project
+    dict. Reattaches each Target's fat arms from ``child_maps`` (grouping by
+    target id + arm parsed from the sk), reproducing the nested shape CLI/UI
+    expect. Arm children are ordered by ``_v3_entry_sort_key``; Target
+    collections by ``_target_sort_key``."""
+    import occupation  # noqa: PLC0415
+    colls = occupation.TARGET_DECOMPOSITION
+    result = {k: v for k, v in (meta or {}).items() if k not in colls}
+    for coll, spec in colls.items():
+        arms = spec["arms"]
+        single = len(arms) == 1
+        by_target_arm: dict = {}
+        for arm in arms:
+            for sk, child in (child_maps.get(arm, {}) or {}).items():
+                if single:
+                    tid, _, _cid = sk.partition("#")
+                    a = arm
+                else:
+                    parts = sk.split("#", 2)
+                    if len(parts) != 3:
+                        continue
+                    tid, a, _cid = parts
+                by_target_arm.setdefault((tid, a), []).append(child)
+        targets = []
+        for tid, t_meta in (target_maps.get(coll, {}) or {}).items():
+            t = {k: v for k, v in t_meta.items() if k not in arms}
+            for arm in arms:
+                kids = sorted(by_target_arm.get((tid, arm), []),
+                              key=_v3_entry_sort_key)
+                t[arm] = kids
+            targets.append(t)
+        targets.sort(key=lambda x, _c=coll: _target_sort_key(_c, x))
+        if targets:
+            result[coll] = targets
+        elif meta and meta.get(coll):
+            # ms-109 e-3591 read-through fallback: this project has NOT been
+            # migrated yet — its collection is still stored inline in the
+            # projects meta and no child rows exist. Read it through so no data
+            # is lost during the rollout window; the next write (decompose reads
+            # data.get(coll)) splits it into rows and strips it from meta
+            # (write-through migration). Once migrated, target_maps is non-empty
+            # and wins, so a stale inline copy is never preferred.
+            result[coll] = meta[coll]
+        elif coll in _ALWAYS_EMIT_COLLECTIONS:
+            # "milestones" must be present — core.validate_project requires it.
+            # Other empty collections are omitted so a development project's
+            # hydrated shape is byte-for-byte the milestone-specific output
+            # (sales code reads with .get/.setdefault, so absence == []).
+            result[coll] = targets
+    return result
+
+
+# ms-109 e-3591: change-detection diff helpers for the generic write paths.
+
+def _diff_map(old_map: dict, new_map: dict) -> tuple[dict, list]:
+    """Given the current and new {key: row} maps for one table, return
+    (upserts, deletes): upserts is the subset of new rows whose content changed
+    (or is new), deletes is the keys present before but gone now. Uses _v3_sig
+    so unchanged rows are skipped (= targeted writes, no full-table rewrite)."""
+    upserts = {k: v for k, v in new_map.items()
+               if k not in old_map or _v3_sig(old_map[k]) != _v3_sig(v)}
+    deletes = [k for k in old_map if k not in new_map]
+    return upserts, deletes
+
+
+def _v3_plan_writes(before_by_table: dict, new_data: dict) -> tuple[dict, dict, dict]:
+    """Pure planner for the atomic write path: given the current rows per table
+    (``{table: {sk: data}}``) and the new unified project dict, return
+    ``(meta, upserts_by_table, deletes_by_table)``. Occupation-agnostic — it
+    decomposes ``new_data`` via the registry and diffs every Target collection
+    table + child table. The ``projects`` meta is returned separately (always
+    upserted as the transaction anchor). Fully unit-testable without a DB."""
+    import occupation  # noqa: PLC0415
+    meta, target_maps, child_maps = decompose_project_targets(new_data)
+    upserts: dict = {}
+    deletes: dict = {}
+    for coll in occupation.TARGET_DECOMPOSITION:
+        up, dl = _diff_map(before_by_table.get(coll, {}), target_maps.get(coll, {}))
+        if up:
+            upserts[coll] = up
+        if dl:
+            deletes[coll] = dl
+    for table in occupation.target_child_tables():
+        up, dl = _diff_map(before_by_table.get(table, {}), child_maps.get(table, {}))
+        if up:
+            upserts[table] = up
+        if dl:
+            deletes[table] = dl
+    return meta, upserts, deletes
+
+
+def _v3_read_target_state(project_id: str) -> tuple | None:
+    """Read the projects meta + every Target collection row + child row into
+    ``(meta, target_maps, child_maps)`` via the row primitives (each table's
+    rows keyed by sk). Returns None when the project meta is absent."""
+    import occupation  # noqa: PLC0415
     meta = _get("projects", project_id)
     if meta is None:
         return None
-    ms_rows = _query_rows("milestones", project_id)
-    entry_rows = _query_rows("entries", project_id)
-    return _v3_assemble(meta, ms_rows, entry_rows)
+    target_maps = {coll: {sk: d for sk, d in _query_rows(coll, project_id)}
+                   for coll in occupation.TARGET_DECOMPOSITION}
+    child_maps = {table: {sk: d for sk, d in _query_rows(table, project_id)}
+                  for table in occupation.target_child_tables()}
+    return meta, target_maps, child_maps
+
+
+def get_project_v3(project_id: str) -> dict | None:
+    """v3 project を read して unified dict shape で返す。
+
+    v1/v2 の get_project(pid) と異なり、 Target collection (milestones /
+    opportunities / accounts) とその子 (entries / activities / communications /
+    nurturings) を hydrate して 「1 project = 1 大きな dict」 の shape に戻す
+    (ms-109 e-3591 で registry 駆動に一般化)。 apply_operation の read 側や
+    load_project_consistent (= operations.py) から使う。 見つからなければ None。
+    """
+    state = _v3_read_target_state(project_id)
+    if state is None:
+        return None
+    meta, target_maps, child_maps = state
+    return assemble_project_targets(meta, target_maps, child_maps)
 
 
 def save_project_v3(project_id: str, data: dict) -> None:
@@ -562,18 +765,17 @@ def save_project_v3(project_id: str, data: dict) -> None:
     replace_project_v3 と違い、 既存行との diff を取らず まっさら書き込みを想定
     (= migration 中の初回 insert / test fixture 準備等)。 transaction も張らない
     (= 呼び出し側が保証)。 通常運用の書き込みは apply_project_op_v3 or
-    replace_project_v3 を使うこと。
+    replace_project_v3 を使うこと。 ms-109 e-3591 で registry 駆動に一般化
+    (Target collection + 子テーブルを一律 upsert)。
     """
-    meta, ms_map, entry_map = _v3_decompose(data)
-    # meta に project_id を必ず入れる (= save_project と同じ contract)。
-    meta_with_pid = {**meta, "project_id": project_id}
-    _put("projects", project_id, meta_with_pid)
-    # milestones 行を全 upsert。
-    for ms_id, ms_data in ms_map.items():
-        _put("milestones", project_id, ms_data, sk=ms_id)
-    # entries 行を全 upsert (composite sk)。
-    for sk, entry_data in entry_map.items():
-        _put("entries", project_id, entry_data, sk=sk)
+    meta, target_maps, child_maps = decompose_project_targets(data)
+    _put("projects", project_id, {**meta, "project_id": project_id})
+    for coll, tmap in target_maps.items():
+        for tid, tdata in tmap.items():
+            _put(coll, project_id, tdata, sk=tid)
+    for table, cmap in child_maps.items():
+        for sk, cdata in cmap.items():
+            _put(table, project_id, cdata, sk=sk)
 
 
 def apply_project_op_v3(project_id: str, op) -> "any":  # type: ignore[valid-type]
@@ -596,9 +798,13 @@ def apply_project_op_v3(project_id: str, op) -> "any":  # type: ignore[valid-typ
       - op() の contract (= pure / side-effect free) は v1/v2 と同じ要求で維持する
         (= 後日 optimistic 化した時に壊れないため)。
     """
+    import occupation  # noqa: PLC0415
+    target_colls = tuple(occupation.TARGET_DECOMPOSITION.keys())
+    child_tables = occupation.target_child_tables()
     conn = _conn()
     conn.autocommit(False)
     try:
+        before_by_table: dict = {}
         with conn.cursor() as cur:
             # 1. meta 行を lock (= 存在しない project は LookupError)
             cur.execute(
@@ -611,23 +817,21 @@ def apply_project_op_v3(project_id: str, op) -> "any":  # type: ignore[valid-typ
                 raise LookupError(f"Project '{project_id}' not found")
             meta = json.loads(row["data"])
 
-            # 2. milestones + entries を同 transaction 内で read。
-            cur.execute(
-                f"SELECT sk, data FROM `{_table_name('milestones')}` "
-                f"WHERE pk=%s",
-                (project_id,),
-            )
-            ms_rows = [(r["sk"], json.loads(r["data"])) for r in cur.fetchall()]
-            cur.execute(
-                f"SELECT sk, data FROM `{_table_name('entries')}` WHERE pk=%s",
-                (project_id,),
-            )
-            entry_rows = [(r["sk"], json.loads(r["data"])) for r in cur.fetchall()]
+            # 2. 全 Target collection + 子テーブルを同 transaction 内で read
+            #    (ms-109 e-3591: milestones/entries 固定でなく registry 駆動)。
+            for t in (*target_colls, *child_tables):
+                cur.execute(
+                    f"SELECT sk, data FROM `{_table_name(t)}` WHERE pk=%s",
+                    (project_id,),
+                )
+                before_by_table[t] = {
+                    r["sk"]: json.loads(r["data"]) for r in cur.fetchall()
+                }
 
-        # 3. hydrate + snapshot signatures。
-        data = _v3_assemble(meta, ms_rows, entry_rows)
-        before_ms_sigs = {ms_id: _v3_sig(ms_data) for ms_id, ms_data in ms_rows}
-        before_entry_sigs = {sk: _v3_sig(entry_data) for sk, entry_data in entry_rows}
+        # 3. hydrate (= registry 駆動で再合成)。
+        target_maps = {c: before_by_table.get(c, {}) for c in target_colls}
+        child_maps = {t: before_by_table.get(t, {}) for t in child_tables}
+        data = assemble_project_targets(meta, target_maps, child_maps)
 
         # 4. op を実行 (= v1/v2 と同じ contract)。
         new_data, result = op(data)
@@ -636,56 +840,35 @@ def apply_project_op_v3(project_id: str, op) -> "any":  # type: ignore[valid-typ
         import core  # noqa: PLC0415
         core.validate_project(new_data)
 
-        # 6. 分解して targeted writes。
-        new_meta, new_ms_map, new_entry_map = _v3_decompose(new_data)
+        # 6. pure planner で targeted writes を算出 (テスト可能な純関数)。
+        new_meta, upserts, deletes = _v3_plan_writes(before_by_table, new_data)
         new_meta["project_id"] = project_id
 
         with conn.cursor() as cur:
-            # meta 行を書き戻し (= entries / milestones を除いた slim shape)。
+            # meta 行を書き戻し (= Target collection を除いた slim shape、anchor)。
             cur.execute(
                 f"INSERT INTO `{_table_name('projects')}` (pk, sk, data) "
                 f"VALUES (%s, %s, %s) "
                 f"ON DUPLICATE KEY UPDATE data=VALUES(data)",
                 (project_id, "", _dumps(new_meta)),
             )
-
-            # milestone 行の diff & write。
-            new_ms_ids = set(new_ms_map.keys())
-            old_ms_ids = set(before_ms_sigs.keys())
-            for ms_id, ms_data in new_ms_map.items():
-                new_sig = _v3_sig(ms_data)
-                if before_ms_sigs.get(ms_id) != new_sig:
+            # 変わった行のみ upsert (target row は sk=target_id、child は composite sk)。
+            for table, up in upserts.items():
+                for key, d in up.items():
                     cur.execute(
-                        f"INSERT INTO `{_table_name('milestones')}` "
-                        f"(pk, sk, data) VALUES (%s, %s, %s) "
+                        f"INSERT INTO `{_table_name(table)}` (pk, sk, data) "
+                        f"VALUES (%s, %s, %s) "
                         f"ON DUPLICATE KEY UPDATE data=VALUES(data)",
-                        (project_id, ms_id, _dumps(ms_data)),
+                        (project_id, key, _dumps(d)),
                     )
-            for ms_id in old_ms_ids - new_ms_ids:
-                cur.execute(
-                    f"DELETE FROM `{_table_name('milestones')}` "
-                    f"WHERE pk=%s AND sk=%s",
-                    (project_id, ms_id),
-                )
-
-            # entry 行の diff & write。
-            new_entry_sks = set(new_entry_map.keys())
-            old_entry_sks = set(before_entry_sigs.keys())
-            for sk, entry_data in new_entry_map.items():
-                new_sig = _v3_sig(entry_data)
-                if before_entry_sigs.get(sk) != new_sig:
+            # 消えた行のみ delete。
+            for table, dl in deletes.items():
+                for key in dl:
                     cur.execute(
-                        f"INSERT INTO `{_table_name('entries')}` "
-                        f"(pk, sk, data) VALUES (%s, %s, %s) "
-                        f"ON DUPLICATE KEY UPDATE data=VALUES(data)",
-                        (project_id, sk, _dumps(entry_data)),
+                        f"DELETE FROM `{_table_name(table)}` "
+                        f"WHERE pk=%s AND sk=%s",
+                        (project_id, key),
                     )
-            for sk in old_entry_sks - new_entry_sks:
-                cur.execute(
-                    f"DELETE FROM `{_table_name('entries')}` "
-                    f"WHERE pk=%s AND sk=%s",
-                    (project_id, sk),
-                )
 
         conn.commit()
         return result
@@ -719,19 +902,20 @@ def replace_project_v3(project_id: str, new_data: dict) -> None:
             )
             _ = cur.fetchone()
 
-            # 既存 milestone / entry の ID を retrieve (= 削除対象を求めるため)。
-            cur.execute(
-                f"SELECT sk FROM `{_table_name('milestones')}` WHERE pk=%s",
-                (project_id,),
-            )
-            existing_ms_ids = {r["sk"] for r in cur.fetchall()}
-            cur.execute(
-                f"SELECT sk FROM `{_table_name('entries')}` WHERE pk=%s",
-                (project_id,),
-            )
-            existing_entry_sks = {r["sk"] for r in cur.fetchall()}
+            # 既存 Target collection + 子行の sk を retrieve (= 削除対象算出用)。
+            # ms-109 e-3591: milestones/entries 固定でなく registry 駆動。
+            import occupation  # noqa: PLC0415
+            all_tables = (*occupation.TARGET_DECOMPOSITION.keys(),
+                          *occupation.target_child_tables())
+            existing_sks: dict = {}
+            for t in all_tables:
+                cur.execute(
+                    f"SELECT sk FROM `{_table_name(t)}` WHERE pk=%s",
+                    (project_id,),
+                )
+                existing_sks[t] = {r["sk"] for r in cur.fetchall()}
 
-            new_meta, new_ms_map, new_entry_map = _v3_decompose(new_data)
+            new_meta, target_maps, child_maps = decompose_project_targets(new_data)
             new_meta["project_id"] = project_id
 
             cur.execute(
@@ -741,35 +925,28 @@ def replace_project_v3(project_id: str, new_data: dict) -> None:
                 (project_id, "", _dumps(new_meta)),
             )
 
-            new_ms_ids = set(new_ms_map.keys())
-            for ms_id, ms_data in new_ms_map.items():
-                cur.execute(
-                    f"INSERT INTO `{_table_name('milestones')}` "
-                    f"(pk, sk, data) VALUES (%s, %s, %s) "
-                    f"ON DUPLICATE KEY UPDATE data=VALUES(data)",
-                    (project_id, ms_id, _dumps(ms_data)),
-                )
-            for ms_id in existing_ms_ids - new_ms_ids:
-                cur.execute(
-                    f"DELETE FROM `{_table_name('milestones')}` "
-                    f"WHERE pk=%s AND sk=%s",
-                    (project_id, ms_id),
-                )
-
-            new_entry_sks = set(new_entry_map.keys())
-            for sk, entry_data in new_entry_map.items():
-                cur.execute(
-                    f"INSERT INTO `{_table_name('entries')}` "
-                    f"(pk, sk, data) VALUES (%s, %s, %s) "
-                    f"ON DUPLICATE KEY UPDATE data=VALUES(data)",
-                    (project_id, sk, _dumps(entry_data)),
-                )
-            for sk in existing_entry_sks - new_entry_sks:
-                cur.execute(
-                    f"DELETE FROM `{_table_name('entries')}` "
-                    f"WHERE pk=%s AND sk=%s",
-                    (project_id, sk),
-                )
+            # 新行を upsert / 消えた行を delete (全 table 一律)。target row は
+            # sk=target_id、child は composite sk。
+            new_rows_by_table: dict = {
+                coll: target_maps.get(coll, {})
+                for coll in occupation.TARGET_DECOMPOSITION
+            }
+            for table in occupation.target_child_tables():
+                new_rows_by_table[table] = child_maps.get(table, {})
+            for table, rows in new_rows_by_table.items():
+                for key, d in rows.items():
+                    cur.execute(
+                        f"INSERT INTO `{_table_name(table)}` (pk, sk, data) "
+                        f"VALUES (%s, %s, %s) "
+                        f"ON DUPLICATE KEY UPDATE data=VALUES(data)",
+                        (project_id, key, _dumps(d)),
+                    )
+                for key in existing_sks.get(table, set()) - set(rows.keys()):
+                    cur.execute(
+                        f"DELETE FROM `{_table_name(table)}` "
+                        f"WHERE pk=%s AND sk=%s",
+                        (project_id, key),
+                    )
 
         conn.commit()
     except Exception:
