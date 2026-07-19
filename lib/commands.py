@@ -21356,6 +21356,7 @@ def cmd_opportunity_add():
     goal_raw = os.environ.get("BEACON_OPP_GOAL", "")
     prob_raw = os.environ.get("BEACON_OPP_PROBABILITY", "")
     assignee = os.environ.get("BEACON_OPP_ASSIGNEE", "")
+    description = os.environ.get("BEACON_OPP_DESCRIPTION", "")  # ms-106 e-3526
     goal_amount = _parse_number(goal_raw, "--goal")
     probability = _parse_number(prob_raw, "--probability")
     data = load_project()
@@ -21365,7 +21366,7 @@ def cmd_opportunity_add():
             data, title, account_id=account_id, phase=phase,
             goal_amount=goal_amount, probability=probability,
             deadline=deadline, who_has_the_ball=ball, assignee=assignee,
-            created_at=core._now_iso())
+            description=description, created_at=core._now_iso())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -21412,6 +21413,24 @@ def cmd_opportunity_amount():
         sys.exit(1)
     save_project(data)
     print(f"Set amount on {opp_id}: {amount if amount is not None else '(cleared)'}")
+
+
+def cmd_opportunity_describe():
+    """Set an opportunity's free-text 背景 / 経緯 / メモ (ms-106 e-3526)."""
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    description = os.environ.get("BEACON_OPP_DESCRIPTION", "")
+    data = load_project()
+    try:
+        sales_entities.opportunity_set_description(data, opp_id, description)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    if description.strip():
+        print(f"Set description on {opp_id}")
+    else:
+        print(f"Cleared description on {opp_id}")
 
 
 def cmd_opportunity_phase_prob():
@@ -21546,7 +21565,12 @@ def cmd_opportunity_phase():
     if opp_id.startswith("opp-"):
         opp = sales_entities.find_opportunity(data, opp_id)
         cur = opp.get("phase", "") if opp else ""
-        warnings = sales_entities.opportunity_phase_warnings(data, cur, new_phase)
+        # e-3527: pass the deal's 想定金額 (goal or amount) so require_amount
+        # phases can warn when neither is set.
+        warnings = sales_entities.opportunity_phase_warnings(
+            data, cur, new_phase,
+            goal_amount=(opp.get("goal_amount") if opp else None),
+            amount=(opp.get("amount") if opp else None))
     elif opp_id.startswith("acc-"):
         warnings = sales_entities.account_phase_warnings(data, new_phase)
     for w in warnings:
@@ -22243,6 +22267,7 @@ if __name__ == "__main__":
         "opportunity_phase": cmd_opportunity_phase,
         "opportunity_assign": cmd_opportunity_assign,
         "opportunity_amount": cmd_opportunity_amount,
+        "opportunity_describe": cmd_opportunity_describe,
         "opportunity_phase_prob": cmd_opportunity_phase_prob,
         "sales_target": cmd_sales_target,
         "sales_target_list": cmd_sales_target_list,

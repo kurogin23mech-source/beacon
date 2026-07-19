@@ -61,11 +61,12 @@ Sales (profession=sales):
   beacon account assign <acc-id> <user>                      Set the assignee (担当ユーザー) on an account
   beacon account nurturing <acc-id> <desc> [--deadline <date>] [--ball self|counterpart]   Add a nurturing task (継続関係の業務)
   beacon account delete <acc-id> [--force] [--reason <text>] Cancel (取消, soft) an account — record kept (--force orphans referencing opportunities)
-  beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>]   Add a deal / opportunity
+  beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>] [--description <text>]   Add a deal / opportunity
   beacon opportunity list [--json] [--all]                   List opportunities (--all also shows 取消済 cancelled)
   beacon opportunity phase <opp-id> <phase> [--note <text>]  Move an opportunity to a new phase
   beacon opportunity assign <opp-id> <user>                  Set the assignee (担当ユーザー) on an opportunity
   beacon opportunity amount <opp-id> <amount>                Set the deal amount (金額, 円)
+  beacon opportunity describe <opp-id> <text>                Set the 背景/経緯/メモ (free-text; empty clears)
   beacon opportunity phase-prob <phase> <n>                  Set a phase win probability (成約率 0-100)
   beacon sales target <user> <amount> | list                Set/list a member's sales quota (目標売上) with pipeline
   beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] | --clear   Set the 遷移日 (judgement date) for the current phase
@@ -1210,7 +1211,7 @@ cmd_account_contact() {
 
 cmd_opportunity_add() {
     ensure_project
-    local title="" account="" phase="" goal="" probability="" deadline="" ball="" assignee=""
+    local title="" account="" phase="" goal="" probability="" deadline="" ball="" assignee="" description=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --account)     account="${2:-}"; shift 2 ;;
@@ -1220,19 +1221,38 @@ cmd_opportunity_add() {
             --deadline)    deadline="${2:-}"; shift 2 ;;
             --ball)        ball="${2:-}"; shift 2 ;;
             --assignee)    assignee="${2:-}"; shift 2 ;;
-            -?*)           _guard_positional "$1" "Usage: beacon opportunity add \"<title>\" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>]" ;;
+            --description|--desc) description="${2:-}"; shift 2 ;;
+            -?*)           _guard_positional "$1" "Usage: beacon opportunity add \"<title>\" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>] [--description <text>]" ;;
             *)             title="$1"; shift ;;
         esac
     done
     if [ -z "$title" ]; then
-        echo "Usage: beacon opportunity add \"<title>\" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>]"
+        echo "Usage: beacon opportunity add \"<title>\" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>] [--description <text>]"
         exit 1
     fi
     BEACON_OPP_TITLE="$title" BEACON_OPP_ACCOUNT="$account" \
         BEACON_OPP_PHASE="$phase" BEACON_OPP_GOAL="$goal" \
         BEACON_OPP_PROBABILITY="$probability" BEACON_OPP_DEADLINE="$deadline" \
         BEACON_OPP_BALL="$ball" BEACON_OPP_ASSIGNEE="$assignee" \
+        BEACON_OPP_DESCRIPTION="$description" \
         python3 "$COMMANDS_PY" opportunity_add
+}
+
+cmd_opportunity_describe() {
+    ensure_project
+    local opp_id="" description=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -?*) _guard_positional "$1" "Usage: beacon opportunity describe <opp-id> <text>" ;;
+            *)   if [ -z "$opp_id" ]; then opp_id="$1"; else description="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ]; then
+        echo "Usage: beacon opportunity describe <opp-id> <text>   (背景/経緯/メモ; 空文字でクリア)"
+        exit 1
+    fi
+    BEACON_OPP_ID="$opp_id" BEACON_OPP_DESCRIPTION="$description" \
+        python3 "$COMMANDS_PY" opportunity_describe
 }
 
 cmd_opportunity_assign() {
@@ -2866,13 +2886,14 @@ case "${1:-}" in
             phase)    shift 2; cmd_opportunity_phase "$@" ;;
             assign)   shift 2; cmd_opportunity_assign "$@" ;;
             amount)   shift 2; cmd_opportunity_amount "$@" ;;
+            describe|desc) shift 2; cmd_opportunity_describe "$@" ;;
             phase-prob) shift 2; cmd_opportunity_phase_prob "$@" ;;
             transition-date|td) shift 2; cmd_opportunity_transition_date "$@" ;;
             judge)    shift 2; cmd_opportunity_judge "$@" ;;
             due)      shift 2; cmd_opportunity_due "$@" ;;
             activity) shift 2; cmd_opportunity_activity "$@" ;;
             delete)   shift 2; cmd_opportunity_delete "$@" ;;
-            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|phase-prob|transition-date|judge|due|activity|delete]" ;;
+            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|describe|phase-prob|transition-date|judge|due|activity|delete]" ;;
         esac
         ;;
     communication|comm)

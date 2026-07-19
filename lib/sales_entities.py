@@ -76,6 +76,10 @@ DEFAULT_OPPORTUNITY_PHASES = [
     {"name": "提案準備", "probability": 20, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "企画を作り提案を終え、先方が検討フェーズに入った状態にする",
+     # ms-106 e-3527: 提案準備に進む時点で提案の規模 = 想定金額が定まっているべき。
+     # require_amount は phase 定義側のフラグにして「どのフェーズから金額を課すか」を
+     # per-company に設定可能にする (block でなく警告、master = 人間)。
+     "require_amount": True,
      "activity_template": ["提案面談を打診",
                            {"desc": "提案面談を実施", "kind": "meeting"},
                            "提案内容を準備"],
@@ -83,11 +87,13 @@ DEFAULT_OPPORTUNITY_PHASES = [
     {"name": "先方検討中", "probability": 40, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "先方の実行合意を取る",
+     "require_amount": True,
      "activity_template": ["合意確認日を確定（必要なら面談設定）", "合意の確認を取る"],
      "default_lead": 14},
     {"name": "合意済み", "probability": 80, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "契約を締結する",
+     "require_amount": True,
      "activity_template": ["契約書を送付", "締結"],
      "default_lead": 7},
     # 決着フェーズ (terminal): outcome は有限ターゲットの結末種別。
@@ -202,13 +208,20 @@ def _opportunity_status_for_phase(data: dict, phase: str) -> str:
     return "open"
 
 
-def opportunity_phase_warnings(data: dict, current_phase: str, new_phase: str) -> list:
+def opportunity_phase_warnings(data: dict, current_phase: str, new_phase: str,
+                               *, goal_amount=None, amount=None) -> list:
     """Non-blocking checks for an opportunity phase transition (SPEC §5:
     master=人間 declares; we surface, never block). Returns warning strings:
 
-    * new_phase not in the configured vocabulary, and
+    * new_phase not in the configured vocabulary,
     * declaring a terminal that the current stage's ``allowed_terminals`` rule
-      does not permit (e.g. 商談準備 → 成約, which skips 提案).
+      does not permit (e.g. 商談準備 → 成約, which skips 提案), and
+    * (ms-106 e-3527) moving into a phase whose ``require_amount`` flag is set
+      while the deal has no 想定金額 — the proposal's size should be known by
+      提案準備. Either the goal (``goal_amount``, set at 起票 via --goal) OR the
+      deal amount (``amount``, set later via ``opportunity amount``) satisfies
+      it, so the rep can clear the warning on an existing deal. Both are passed
+      by the caller (which holds the opportunity); when omitted the check skips.
     """
     warnings: list = []
     phases = opportunity_phases(data)
@@ -228,7 +241,57 @@ def opportunity_phase_warnings(data: dict, current_phase: str, new_phase: str) -
             warnings.append(
                 f"'{current_phase}' から決着できるのは {allowed} のみです "
                 f"('{new_phase}' はルール外)")
+    # e-3527: 想定金額が要るフェーズへ進むのに未設定なら warning (block しない)。
+    # goal_amount (起票時の目標) か amount (後から設定する取引額) のどちらかがあれば可。
+    if _phase_requires_amount(new_def, new_phase) and \
+            _amount_is_unset(goal_amount) and _amount_is_unset(amount):
+        warnings.append(
+            f"'{new_phase}' に進むには想定金額 (goal_amount) を設定すべきです "
+            f"(提案の規模が未確定)。`beacon opportunity add --goal <円>` または "
+            f"既存商談は金額設定で入れてください")
     return warnings
+
+
+# Default phase names that carry require_amount (ms-106 e-3527). Used as a
+# tolerant backfill so projects whose opportunity_phases were seeded from the
+# shipped default BEFORE this flag existed still get the warning — no data
+# migration needed (same expand pattern as the target-advancement frame).
+_DEFAULT_REQUIRE_AMOUNT_PHASES = {
+    p["name"] for p in DEFAULT_OPPORTUNITY_PHASES if p.get("require_amount")
+}
+
+
+def _phase_requires_amount(new_def, new_phase: str) -> bool:
+    """Whether entering ``new_phase`` should have a 想定金額 set. Honors an
+    explicit ``require_amount`` on the configured phase def (True OR False —
+    a company can opt out); otherwise backfills from the shipped default by
+    phase name so pre-existing projects are covered without migration."""
+    if new_def is not None and "require_amount" in new_def:
+        return bool(new_def["require_amount"])
+    return new_phase in _DEFAULT_REQUIRE_AMOUNT_PHASES
+
+
+def _amount_is_unset(goal_amount) -> bool:
+    """想定金額が「未設定」か。None / 空文字 / 0 以下を未設定とみなす (0 円の提案は
+    無いので 0 も未設定扱い)。"""
+    if goal_amount is None or goal_amount == "":
+        return True
+    try:
+        return float(goal_amount) <= 0
+    except (TypeError, ValueError):
+        return True
+
+
+def opportunity_set_description(data: dict, opportunity_id: str,
+                               description: str) -> dict:
+    """Set an Opportunity's free-text 背景 / 経緯 / メモ (ms-106 e-3526). Empty
+    string clears it. Returns the updated opportunity dict. Raises ValueError
+    when the opportunity is unknown."""
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    opp["description"] = (description or "").strip()
+    return opp
 
 
 def account_phase_warnings(data: dict, new_phase: str) -> list:
@@ -503,7 +566,7 @@ def opportunity_add(data: dict, title: str, *, account_id: str = "",
                     phase: str = "", goal_amount=None, probability=None,
                     deadline: str = "", who_has_the_ball: str = BALL_SELF,
                     transition_date: str = "", assignee: str = "",
-                    created_at: str = "") -> str:
+                    description: str = "", created_at: str = "") -> str:
     """Append a new Opportunity (対象・有限) and return its id.
 
     ``account_id`` is a 参照 association (N:1 → Account) validated when given.
@@ -542,6 +605,9 @@ def opportunity_add(data: dict, title: str, *, account_id: str = "",
         "deadline": deadline,
         "who_has_the_ball": who_has_the_ball,
         "assignee": assignee,
+        # ms-106 e-3526: free-text 背景 / 経緯 / メモ。構造化フィールド (金額・確度
+        # 等) では拾えない「この商談はどういう経緯で・何がポイントか」を残す場所。
+        "description": (description or "").strip(),
         "status": _opportunity_status_for_phase(data, initial_phase),
         "created_at": created_at,
         "activities": [],
