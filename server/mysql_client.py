@@ -669,12 +669,22 @@ def assemble_project_targets(meta: dict, target_maps: dict,
                 t[arm] = kids
             targets.append(t)
         targets.sort(key=lambda x, _c=coll: _target_sort_key(_c, x))
-        # Emit an empty collection only for "milestones" — core.validate_project
-        # requires that key. Other empty collections (opportunities/accounts) are
-        # omitted so a development project's hydrated shape is byte-for-byte what
-        # the milestone-specific _v3_assemble produced (sales code reads its
-        # collections with .get/.setdefault, so absence is equivalent to []).
-        if targets or coll in _ALWAYS_EMIT_COLLECTIONS:
+        if targets:
+            result[coll] = targets
+        elif meta and meta.get(coll):
+            # ms-109 e-3591 read-through fallback: this project has NOT been
+            # migrated yet — its collection is still stored inline in the
+            # projects meta and no child rows exist. Read it through so no data
+            # is lost during the rollout window; the next write (decompose reads
+            # data.get(coll)) splits it into rows and strips it from meta
+            # (write-through migration). Once migrated, target_maps is non-empty
+            # and wins, so a stale inline copy is never preferred.
+            result[coll] = meta[coll]
+        elif coll in _ALWAYS_EMIT_COLLECTIONS:
+            # "milestones" must be present — core.validate_project requires it.
+            # Other empty collections are omitted so a development project's
+            # hydrated shape is byte-for-byte the milestone-specific output
+            # (sales code reads with .get/.setdefault, so absence == []).
             result[coll] = targets
     return result
 

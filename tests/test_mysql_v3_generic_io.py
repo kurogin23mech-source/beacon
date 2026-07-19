@@ -289,3 +289,48 @@ def test_plan_writes_deletes_removed_child():
         {"id": "ms-1", "title": "A", "entries": [{"id": "e-1"}]}]}  # e-2 gone
     _meta, _up, deletes = mc._v3_plan_writes(before, new_data)
     assert "ms-1#e-2" in deletes.get("entries", [])
+
+
+# ---------------------------------------------------------------------------
+# rollout safety: un-migrated (inline-in-meta) sales data reads through, and the
+# first write splits it into rows (write-through migration)
+# ---------------------------------------------------------------------------
+
+def _unmigrated_meta():
+    return {"project_id": "s2", "name": "Old", "profession": "sales",
+            "milestones": [],
+            "opportunities": [
+                {"id": "opp-7", "title": "Legacy",
+                 "activities": [{"id": "act-9", "description": "x",
+                                 "status": "todo", "created_at": "T"}],
+                 "communications": []}]}
+
+
+def test_unmigrated_sales_reads_through_fallback(fake_db):
+    store = fake_db["store"]
+    store[(mc._table_name("projects"), "s2", "")] = mc._dumps(_unmigrated_meta())
+    # no opportunity/activity rows exist yet — must NOT lose the inline data
+    got = mc.get_project_v3("s2")
+    assert got["opportunities"][0]["id"] == "opp-7"
+    assert got["opportunities"][0]["activities"][0]["id"] == "act-9"
+
+
+def test_first_write_migrates_inline_to_rows(fake_db):
+    store = fake_db["store"]
+    store[(mc._table_name("projects"), "s2", "")] = mc._dumps(_unmigrated_meta())
+
+    def op(data):
+        data["opportunities"][0]["title"] = "Migrated"
+        return data, "ok"
+
+    mc.apply_project_op_v3("s2", op)
+    # opportunity + its activity now have their own rows
+    assert any(k[2] == "opp-7" for k in store if k[0].endswith("opportunities"))
+    assert any(k[2] == "opp-7#activities#act-9"
+               for k in store if k[0].endswith("activities"))
+    # projects meta no longer carries opportunities inline
+    new_meta = json.loads(store[(mc._table_name("projects"), "s2", "")])
+    assert "opportunities" not in new_meta
+    # re-read is consistent and reflects the mutation
+    got = mc.get_project_v3("s2")
+    assert got["opportunities"][0]["title"] == "Migrated"
