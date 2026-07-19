@@ -83,3 +83,61 @@ def iter_target_records(data: dict) -> list:
     for coll in TARGET_COLLECTIONS:
         records.extend(data.get(coll, []) or [])
     return records
+
+
+# Trek scope narrowing vocabulary (ms-109 e-3699 / fable review B-2).
+#
+# A Trek scope entry narrows to a single target inside a project. Which target
+# KINDS are sliceable is occupation-specific: development slices by
+# milestone / operation / task; sales by opportunity / account. Trek is L1
+# (project-vision: L1 — the coordination substrate including Trek — is domain-
+# invariant), and a Trek can span a development and a sales project at once. A
+# scope entry carries only ``{project, <kind>: ref}`` — not the occupation —
+# so the recognised vocabulary is the UNION across occupations. Registering a
+# new occupation's kinds HERE (not editing trek.py) is what keeps Trek from
+# hardcoding development vocabulary — the exact L1 domain-leak fable B-2 caught.
+NARROWING_KINDS = {
+    "dev": ("milestone", "operation", "task"),
+    "sales": ("opportunity", "account"),
+}
+
+
+def all_narrowing_kinds() -> tuple:
+    """Return the union of every occupation's Trek scope narrowing kinds,
+    de-duplicated, in registration order (development first so the legacy
+    identity/target_kind resolution order — milestone, operation, task — is
+    unchanged for existing dev Treks; sales kinds append after)."""
+    out: list = []
+    for kinds in NARROWING_KINDS.values():
+        for k in kinds:
+            if k not in out:
+                out.append(k)
+    return tuple(out)
+
+
+# The id prefix each narrowing kind's target ids carry. Lets a CLI
+# ``project:ref`` scope argument infer the narrowing kind from the ref alone,
+# so the parser does not hardcode the vocabulary (ms-109 e-3699). Keeping this
+# beside NARROWING_KINDS means a new occupation registers its kinds AND their
+# id prefixes in one place.
+NARROWING_ID_PREFIXES = {
+    "milestone": "ms-",
+    "operation": "op-",
+    "task": "e-",
+    "opportunity": "opp-",
+    "account": "acc-",
+}
+
+
+def narrowing_kind_for_ref(ref: str) -> str:
+    """Return the narrowing kind whose id prefix ``ref`` matches, or ``""`` when
+    none does. Longest matching prefix wins so ``opp-3`` resolves to
+    ``opportunity`` rather than colliding with ``op-`` (operation) — though the
+    current prefixes are disjoint, the longest-match rule keeps it robust if a
+    future prefix nests inside another."""
+    ref = (ref or "").strip()
+    best_kind, best_len = "", -1
+    for kind, prefix in NARROWING_ID_PREFIXES.items():
+        if ref.startswith(prefix) and len(prefix) > best_len:
+            best_kind, best_len = kind, len(prefix)
+    return best_kind

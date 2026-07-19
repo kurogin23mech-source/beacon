@@ -339,3 +339,45 @@ class TestBlanketEndpoint:
                 )
         finally:
             app_module._auth_enabled = prior
+
+
+# ms-109 e-3699 (fable review B-2) — Trek scope narrowing + blanket approval are
+# occupation-agnostic: a sales Trek slices scope by opportunity/account, not
+# only dev milestone/operation/task.
+class TestSalesNarrowingE3699:
+    def test_opportunity_narrows_scope(self):
+        e = trek_mod.normalize_scope_entry({"project": "p1", "opportunity": "opp-3"})
+        assert e["opportunity"] == "opp-3"
+
+    def test_account_narrows_scope(self):
+        e = trek_mod.normalize_scope_entry({"project": "p1", "account": "acc-2"})
+        assert e["account"] == "acc-2"
+
+    def test_project_wide_still_rejected(self):
+        with pytest.raises(ValueError):
+            trek_mod.normalize_scope_entry({"project": "p1"}, strict=True)
+
+    def test_blanket_bare_opportunity(self):
+        assert trek_mod._normalised_blanket_category("opportunity") == "opportunity"
+        doc = {"meta": {"blanket_scope_approvals": ["opportunity"]}}
+        assert trek_mod.is_blanket_approved(
+            doc, {"project": "p1", "opportunity": "opp-3"}) is True
+        # a milestone entry is NOT covered by an opportunity blanket
+        assert trek_mod.is_blanket_approved(
+            doc, {"project": "p1", "milestone": "ms-1"}) is False
+
+    def test_blanket_id_scoped_opportunity(self):
+        assert trek_mod._normalised_blanket_category(
+            "opportunity:opp-3") == "opportunity:opp-3"
+        doc = {"meta": {"blanket_scope_approvals": ["opportunity:opp-3"]}}
+        assert trek_mod.is_blanket_approved(
+            doc, {"project": "p1", "opportunity": "opp-3"}) is True
+        assert trek_mod.is_blanket_approved(
+            doc, {"project": "p1", "opportunity": "opp-9"}) is False
+
+    def test_dev_milestone_id_scoped_still_works(self):
+        doc = {"meta": {"blanket_scope_approvals": ["milestone:ms-5"]}}
+        assert trek_mod.is_blanket_approved(
+            doc, {"project": "p1", "milestone": "ms-5"}) is True
+        assert trek_mod.is_blanket_approved(
+            doc, {"project": "p1", "milestone": "ms-9"}) is False

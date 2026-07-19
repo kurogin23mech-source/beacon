@@ -314,6 +314,47 @@ class TestEnsureTargetLabel:
 
 
 # ---------------------------------------------------------------------------
+# backfill execution trail — the gate between migrate (e-3695) and contract
+# (e-3626). stamp_target_labels_backfill / target_labels_backfilled
+# ---------------------------------------------------------------------------
+
+class TestBackfillMarker:
+    def test_not_backfilled_by_default(self):
+        assert work_model.target_labels_backfilled({}) is False
+        assert work_model.target_labels_backfilled({"name": "p"}) is False
+
+    def test_stamp_records_marker_and_gate_flips(self):
+        data = {"name": "p", "milestones": []}
+        assert work_model.target_labels_backfilled(data) is False
+        work_model.stamp_target_labels_backfill(
+            data, dev_count=3, sales_count=1, version="0.59.2")
+        assert work_model.target_labels_backfilled(data) is True
+        m = data[work_model.BACKFILL_MARKER]
+        assert m["dev_count"] == 3
+        assert m["sales_count"] == 1
+        assert m["version"] == "0.59.2"
+        assert m["at"]  # timestamp stamped
+
+    def test_stamp_returns_data_and_uses_explicit_at(self):
+        data = {}
+        out = work_model.stamp_target_labels_backfill(
+            data, dev_count=0, sales_count=0, at="2026-07-19T00:00:00Z")
+        assert out is data
+        assert data[work_model.BACKFILL_MARKER]["at"] == "2026-07-19T00:00:00Z"
+
+    def test_gate_false_for_non_dict(self):
+        assert work_model.target_labels_backfilled(None) is False
+        assert work_model.target_labels_backfilled("x") is False
+
+    def test_gate_false_when_marker_malformed(self):
+        # a marker without a timestamp is not proof of a completed sweep
+        assert work_model.target_labels_backfilled(
+            {work_model.BACKFILL_MARKER: {}}) is False
+        assert work_model.target_labels_backfilled(
+            {work_model.BACKFILL_MARKER: "yes"}) is False
+
+
+# ---------------------------------------------------------------------------
 # evidence-close — link_evidence / close_work_item_with_evidence (e-3560)
 # ---------------------------------------------------------------------------
 

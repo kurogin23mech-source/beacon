@@ -189,6 +189,9 @@ ALLOW_BASH_ONLY_DISPATCH: set[str] = {
     "incident",    # incident open/close (operation-coupled, not in Python yet)
     "sales",       # ms-106 fb4: sales quota/target verb, bash-only for now
                    # (Windows/dispatch.py parity for the sales CLI = follow-up)
+    "migrate",     # ms-109 e-3695: `migrate target-labels` one-shot backfill,
+                   # bash-only for now (dispatch.py parity = follow-up, same as
+                   # sales — a rare migration verb, not on the hot Windows path)
     # ms-73 e-1762/e-1763/e-1764 cleared the ms-55 coordination-signal
     # exempts (stop / resume / rollback / claim / stuck / morning) once
     # commit 3b5b64a (e-1735) landed their Python parity. Their entries

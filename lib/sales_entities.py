@@ -427,6 +427,13 @@ def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
     data.setdefault("accounts", [])
     acc_id = next_account_id(data)
     initial_phase = phase or default_account_phase(data)
+    # ms-109 e-3698 (fable A-4): apply the base default for ``created_at`` — a
+    # blank timestamps to now — so a direct/test caller that omits it does not
+    # persist an empty ``created_at`` (and an empty ``phase_history`` anchor).
+    # Account does not yet route through ``work_model.new_target`` because it
+    # has no generic ``status`` (継続 / never-terminal, tracked by phase); that
+    # extraction is staged pending the sales model stabilising (SPEC 方針3).
+    created_at = created_at or work_base.now_iso()
     data["accounts"].append({
         "id": acc_id,
         "name": name.strip(),
@@ -519,6 +526,11 @@ def opportunity_add(data: dict, title: str, *, account_id: str = "",
     data.setdefault("opportunities", [])
     opp_id = next_opportunity_id(data)
     initial_phase = phase or default_opportunity_phase(data)
+    # ms-109 e-3698 (fable A-4): base default for ``created_at`` (blank → now),
+    # so it is also the timestamp on the seeded advance gate below. Opportunity
+    # keeps its hand-built skeleton for now — its ``status`` is phase-derived
+    # (not the base default "todo") and the sales model is still moving (方針3).
+    created_at = created_at or work_base.now_iso()
     data["opportunities"].append({
         "id": opp_id,
         "title": title.strip(),
@@ -1822,9 +1834,15 @@ def activity_set_status(data: dict, activity_id: str, status: str, *,
     if status not in VALID_ACTIVITY_STATUS:
         raise ValueError(
             f"status must be one of {sorted(VALID_ACTIVITY_STATUS)}, got {status!r}")
-    act["status"] = status
     if status == work_model.DONE_STATUS:
-        act["done_at"] = at
+        # ms-109 e-3696 (fable A-2): close the Activity through the same
+        # occupation-agnostic base a development task done uses, so both stamp
+        # status / done_at / meta.done_by identically instead of each
+        # re-implementing it. Gives sales activities the done_by trail they
+        # previously lacked (task AC: 証跡が基底経由で刻まれる).
+        work_model.mark_done(act, at=at, actor=work_base.current_actor())
+    else:
+        act["status"] = status
     return act
 
 
