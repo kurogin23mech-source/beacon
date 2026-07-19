@@ -132,6 +132,18 @@ BEACON_COMM_TARGET="$TARGET" \
 `beacon communication list "$TARGET"` の導出ボールを 1 行添えると、「次に動くのは
 どちらか」がその場で分かる。
 
+## Step 5: 顧客ドキュメントへ知見を追記 (dossier 自動蓄積、ms-106 e-3550/e-3747)
+
+このやり取りから **顧客について新しく分かった持続的な知見** (組織構造 / 意思決定プロセス /
+課題 / 予算サイクル / キーパーソン / 嗜好 など) があれば、その顧客(Account)の顧客
+ドキュメント (dossier) に日時付きで追記する。証跡(Communication)は「何が起きたか」、dossier
+は「顧客について何が分かっているか」の蒸留 — 別物なので両方に残す。
+
+一過性の連絡事項 (日程・宿題など) は Communication で足りるので dossier には足さない。
+新しい知見があるときだけ、対象の `account_id` (= `$ACC`) を解決し (対象が acc- ならそれ、
+opp- なら `beacon opportunity list --json` で account_id を引く)、`/beacon-sales-dossier`
+の追記経路 (append-only、要点を 1〜数行に蒸留) に渡す。dossier が無ければ新規作成。
+
 ## 制約
 
 - **記録は人間確認を経る** (Step 3 の 1 prompt)。勝手に多数の証跡を書き込まない。
