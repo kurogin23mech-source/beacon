@@ -53,6 +53,43 @@ CANCELLED_STATUS = work_base.CANCELLED_STATUS  # "cancelled"
 
 
 # ---------------------------------------------------------------------------
+# Target-advancement macro-frame — the class-layer, occupation-agnostic reason
+# a Target/phase model exists at all: to make the AI agent read a Target as a
+# thing to *push forward*, not a bucket to sit in. "仕事を進める" = advancing
+# the currently-open Target to its next phase/state.
+#
+# This is the generalisation of the sales-only ``opportunity_phase_frame``
+# (``sales_entities`` e-3582) to EVERY occupation. The sales version teaches how
+# to read the opportunity *funnel*; this class-layer version teaches the same
+# forward-motion reading for Targets in general (milestone / opportunity /
+# operation / trek …). It rides on ``beacon status`` output so every project's
+# AI is reminded inline each session — a per-project CORE doc would only reach
+# THIS repo's sessions (ms-109 e-3751; CORE doc 0drGJ9f3UaKO7p0RrKQD 判断軌跡).
+#
+# The concept ("a target-class carries a macro-frame") is class-layer; the TEXT
+# is a shipped default overridable per project via ``target_advancement_frame``
+# in project.json (mirrors how ``opportunity_phase_frame`` is seeded+editable).
+# ---------------------------------------------------------------------------
+
+TARGET_ADVANCEMENT_FRAME = (
+    "target (= 進める対象: milestone / opportunity / operation / trek 等) は、"
+    "座って眺める箱ではなく前へ進めるものです。仕事を進めるとは、いま進行中の "
+    "target のフェーズ / 状態を次の段階へ前進させること。滞留は『放置してよい』"
+    "ではなく『まだ前進していない』状態を意味します。どの操作も最後に「この "
+    "target を次に前進させる一手」を意識してください。"
+)
+
+
+def target_advancement_frame(data: dict) -> str:
+    """The class-layer forward-motion frame text (ms-109 e-3751): how the AI
+    should read every Target — as a stage to advance *out of*, not a bucket to
+    rest in. Reads a project's configured ``target_advancement_frame`` (editable
+    per project), else the shipped default ``TARGET_ADVANCEMENT_FRAME``."""
+    return (data.get("target_advancement_frame") or "").strip() or \
+        TARGET_ADVANCEMENT_FRAME
+
+
+# ---------------------------------------------------------------------------
 # Target label — canonical ``label`` with a tolerant read over legacy keys.
 #
 # A Target is the aggregate a work instance drives (development milestone,
