@@ -10582,6 +10582,33 @@ async def _capture_event_loop():
 
 
 @app.on_event("startup")
+async def _ensure_mysql_schema():
+    """Create any missing MySQL tables at boot (ms-109 e-3591 incident,
+    2026-07-19).
+
+    The VPS deploy flow is ``git pull → pip install → systemctl restart`` — it
+    does NOT run ``create_mysql_tables``. So a code change that adds a new
+    entity/table (as the Target-decomposition split added opportunities /
+    accounts / activities / communications / nurturings) deploys code that
+    queries tables which do not exist yet, and every request 500s with
+    ``pymysql 1146 (Table ... doesn't exist)`` until someone manually creates
+    them. Ensuring the schema at boot means a schema addition can never again
+    outrun its DDL. ``CREATE TABLE IF NOT EXISTS`` makes this a no-op once the
+    tables exist. Non-fatal: a transient DB blip at boot must not crash-loop the
+    service; the next healthy restart creates them and the error is logged.
+    """
+    if os.environ.get("BEACON_STORE_BACKEND", "firestore").lower() != "mysql":
+        return
+    try:
+        import mysql_client  # noqa: PLC0415
+        created = mysql_client.create_mysql_tables()
+        _server_logger.info(
+            "[startup] mysql schema ensured (%s table(s) created)", created)
+    except Exception as e:  # noqa: BLE001 — never crash boot on a DB blip
+        _server_logger.error("[startup] create_mysql_tables failed: %s", e)
+
+
+@app.on_event("startup")
 async def _verify_envelope_secret_configured():
     """Refuse to start in production with the dev envelope-signing fallback (e-1291).
 
