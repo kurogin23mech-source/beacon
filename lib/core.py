@@ -449,16 +449,23 @@ def milestone_add(data: dict, title: str, target_date: str = "",
             f"Milestone ID collision: {ms_id} already exists. "
             "This indicates corrupted milestone IDs — run `beacon doctor`."
         )
-    ms = {
-        "id": ms_id,
-        "title": title,
-        "label": title,  # ms-109 e-3625: canonical Target label (dual-write during skew)
-        "status": "todo",
-        "target_date": target_date,
-        "commits": [],
-        "created_by": _get_actor(),
-        "created_at": _now_iso(),
-    }
+    # ms-109 e-3698 (fable A-4): build the generic Target skeleton (id / label /
+    # status / created_at / created_by / assignee) through the occupation-
+    # agnostic base so the dev add-path and the base share one definition and
+    # the base defaults (created_at / created_by via work_base) apply. The
+    # dev-specific fields — the legacy ``title`` dual-write, ``target_date``,
+    # and the ``commits`` list — ride along via ``extra``.
+    ms = work_model.new_target(
+        ms_id, title, status="todo",
+        created_at=_now_iso(), created_by=_get_actor(), assignee=assignee,
+        title=title, target_date=target_date, commits=[],
+    )
+    # Preserve the milestone no-pollution rule (ms-81): an empty assignee is
+    # dropped rather than persisted as ``""``. The base constructor always
+    # emits the generic slot; milestones opt out of the empty case so a doc
+    # only carries ``assignee`` once someone owns it.
+    if not assignee:
+        ms.pop("assignee", None)
     if description:
         ms["description"] = description
     if priority:
@@ -469,14 +476,13 @@ def milestone_add(data: dict, title: str, target_date: str = "",
         ms["objective"] = objective
     if acceptance_criteria:
         ms["acceptance_criteria"] = acceptance_criteria
-    # e-625: owner/assignee are recorded but NOT validated against members[]
-    # at this layer — that check belongs in the CLI/API surface, where we
-    # can produce a friendly "did you mean to `beacon member add` first?"
-    # message. Here we just store whatever string the caller provided.
+    # e-625: owner is recorded but NOT validated against members[] at this
+    # layer — that check belongs in the CLI/API surface, where we can produce a
+    # friendly "did you mean to `beacon member add` first?" message. Here we
+    # just store whatever string the caller provided. (``assignee`` is now part
+    # of the generic skeleton built by ``work_model.new_target`` above.)
     if owner:
         ms["owner"] = owner
-    if assignee:
-        ms["assignee"] = assignee
     # ms-43 / e-2246 — stamp the human author on the milestone so the UI
     # can surface a creator label (= 起票者) in MS lists / detail. Same
     # contract as task creation (ms-78 / e-1909). Stored under ``meta``
@@ -1121,17 +1127,18 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
     ms, _, entry, _ = result
-    entry["status"] = "done"
-    entry["done_at"] = date or _now_iso()
+    # ms-109 e-3696 (fable A-2): the generic done-stamp — status / done_at /
+    # meta.done_by / meta.done_reason — goes through the occupation-agnostic
+    # base so a development task and a sales activity close the same way. The
+    # dev-specific bits (the ``date`` mirror and the *human* ``done_by_user``
+    # identity) stay here.
+    work_model.mark_done(entry, at=date or _now_iso(), actor=_get_actor(),
+                         reason=reason)
     if not entry.get("date"):
         entry["date"] = entry["done_at"]
-    meta = entry.setdefault("meta", {})
-    meta["done_by"] = _get_actor()
     author_clean = _clean_author(author)
     if author_clean:
-        meta["done_by_user"] = author_clean
-    if reason:
-        meta["done_reason"] = reason
+        entry.setdefault("meta", {})["done_by_user"] = author_clean
     return ms, entry
 
 

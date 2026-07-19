@@ -188,3 +188,16 @@ def test_iter_target_records_is_occupation_neutral():
     assert [t["id"] for t in occupation.iter_target_records(dev)] == ["ms-1"]
     assert [t["id"] for t in occupation.iter_target_records(sales)] == ["opp-1"]
     assert occupation.iter_target_records({}) == []
+
+
+# ms-109 e-3699 (fable review B-2) — Trek scope narrowing vocabulary is sourced
+# from the occupation registry so Trek (L1) stays domain-invariant.
+def test_all_narrowing_kinds_is_occupation_union():
+    kinds = occupation.all_narrowing_kinds()
+    # dev vocabulary first (legacy identity/target_kind order preserved)...
+    assert kinds[:3] == ("milestone", "operation", "task")
+    # ...sales kinds appended, so商談/顧客 can slice a Trek scope.
+    assert "opportunity" in kinds
+    assert "account" in kinds
+    # de-duplicated
+    assert len(kinds) == len(set(kinds))

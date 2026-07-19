@@ -19,9 +19,11 @@ This is the *expand* step of an expand → migrate → contract field unificatio
 adopted 2026-07-17). Readers become occupation-agnostic immediately via the
 tolerant accessor, WITHOUT a big-bang data migration: new writes are canonical
 (with an optional dual-write to the legacy key during the version-skew window),
-a later backfill task (e-3625) migrates stored data once tolerant readers are
-deployed everywhere, and a later contract task (e-3626) drops the legacy
-fallback once all data and clients are on canonical keys.
+a backfill task (e-3625/e-3695) migrates stored data once tolerant readers are
+deployed everywhere — run per project via ``beacon migrate target-labels``,
+which stamps the ``BACKFILL_MARKER`` execution trail — and a later contract
+task (e-3626) drops the legacy fallback once ``target_labels_backfilled`` is
+true for all data and no legacy-key client remains.
 
 Occupation SEMANTICS (phase, who_has_the_ball, pipeline, resolves, channel) are
 deliberately NOT here — they stay in each instance's adapter, per SPEC AC4
@@ -155,6 +157,60 @@ def ensure_target_label(target: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Backfill execution trail — the structural gate between the migrate step
+# (e-3625/e-3695) and the contract step (e-3626).
+#
+# ``ensure_target_label`` is the per-record migrate unit; the occupation
+# adapters wrap it in ``backfill_target_labels`` to sweep a whole project. But a
+# sweep function that exists is not a sweep that RAN: the contract step must not
+# drop the legacy fallback until it can PROVE every stored record was stamped
+# (task-done-judgment-principle 原則6 — 機構を書いた≠達成した). So the CLI
+# migrate verb records this marker after a successful sweep, and
+# ``target_labels_backfilled`` is the predicate e-3626 gates on.
+#
+# Why the reader-deployed → backfill ordering (task e-3695 AC3) is structurally
+# safe: the sweep is ADDITIVE — ``ensure_target_label`` writes the canonical
+# ``label`` and never removes the legacy ``title`` / ``name``. So no reader,
+# old (legacy-only) or new (tolerant), can be broken by running it. The
+# ordering hazard lives entirely in the CONTRACT step (dropping the legacy
+# key), which is why the gate belongs there: e-3626 requires both this marker
+# (data was swept) AND a confirmation that no legacy-key client remains.
+# ---------------------------------------------------------------------------
+
+BACKFILL_MARKER = "target_labels_backfill"
+
+
+def stamp_target_labels_backfill(data: dict, *, dev_count: int,
+                                 sales_count: int, version: str = "",
+                                 at: str = "") -> dict:
+    """Record on the project ``data`` that the target-label backfill has run,
+    in place, and return ``data``. Stores the timestamp, the beacon version that
+    ran it (so the contract step can confirm the sweep happened at or after the
+    version where tolerant readers shipped), and how many records each
+    occupation adapter stamped. ``at`` / ``version`` fall back to
+    ``work_base.now_iso()`` / ``""`` when blank."""
+    data[BACKFILL_MARKER] = {
+        "at": at or work_base.now_iso(),
+        "version": version,
+        "dev_count": dev_count,
+        "sales_count": sales_count,
+    }
+    return data
+
+
+def target_labels_backfilled(data: dict) -> bool:
+    """True when the target-label backfill (e-3695) has been recorded as run
+    over this project. The contract step (e-3626) MUST gate on this before it
+    drops the legacy fallback — a project whose stored records were never
+    stamped with canonical ``label`` would otherwise lose its labels the moment
+    the legacy read is removed."""
+    if not isinstance(data, dict):
+        return False
+    marker = data.get(BACKFILL_MARKER)
+    return isinstance(marker, dict) and bool(marker.get("at"))
+
+
+# ---------------------------------------------------------------------------
 # WorkItem lifecycle — status reads and the canonical done stamp.
 #
 # A WorkItem is a planned unit of work (development task, sales activity /
@@ -226,11 +282,15 @@ LINKED_ID = "linked_id"
 def evidence_linked_id(evidence: dict) -> str:
     """Return the id of the work item this Evidence closes, or ``""``.
 
-    Canonical key is ``linked_id``. Both occupations now stamp it through
-    ``link_evidence`` (e-3560): a sales communication records the activity /
-    nurturing it fulfilled, and a development commit records the task it
-    resolves. So this accessor reads the same field for both — the tolerant
-    ``.get`` keeps working for older records that predate the dev-side stamp.
+    Canonical key is ``linked_id``, written by each occupation on the same
+    field (ms-109 e-3560 / e-3696): a development commit stamps it through
+    ``link_evidence`` (in ``core.log_commit``); a sales communication
+    records it directly in ``sales_entities.communication_add``'s builder (kept
+    inline there so a target-level communication can carry an explicit empty
+    ``linked_id``). Both land on ``linked_id``, so this accessor reads the same
+    field for both — the tolerant ``.get`` also keeps working for older records
+    that predate the stamp. (The close half — marking the linked work item done
+    — is unified through ``mark_done``; see ``close_work_item_with_evidence``.)
     """
     if not isinstance(evidence, dict):
         return ""
@@ -262,12 +322,20 @@ def close_work_item_with_evidence(work_item: dict, evidence: dict, *,
     Performs the full evidence-close in one call: stamps the evidence's
     ``linked_id`` to point at ``work_item`` (via ``link_evidence``) and marks
     the work item done (via ``mark_done``, carrying ``at`` / ``actor`` /
-    ``reason``). Returns ``(work_item, evidence)``. This is the base primitive
-    for "a commit closes a task" and "a communication closes an activity" —
-    the relation the whole ms-109 fold is built to share (SPEC AC2). Callers
-    that only want the link (and let the AI judge done separately, as the dev
-    commit flow does) use ``link_evidence`` alone.
-    """
+    ``reason``). Returns ``(work_item, evidence)``.
+
+    This is an OPTIONAL composition of the two primitives that ARE wired into
+    production separately (ms-109 e-3696): the link half (``link_evidence``) is
+    used by ``core.log_commit``, and the done half (``mark_done``) by
+    ``core.task_done`` / ``sales_entities.activity_set_status``. Both real close
+    flows link and judge-done in DISTINCT steps — a dev commit records the task
+    it resolves but lets the AI judge done later; a sales send records the
+    communication and closes the fulfilled activity as two Skill steps — so
+    neither calls this bundled form today. It stays as the one-call primitive
+    for a future flow that genuinely has both the evidence and the work item in
+    hand at once. Do NOT read "no current caller" as "unwired": its two halves
+    are each wired (task-done-judgment-principle 原則6 — this note keeps the
+    docstring honest about what actually runs)."""
     link_evidence(evidence, work_item.get("id", ""))
     mark_done(work_item, at=at, actor=actor, reason=reason)
     return work_item, evidence
@@ -285,15 +353,22 @@ def new_target(target_id: str, label: str, *, status: str = TODO_STATUS,
                assignee: str = "", **extra) -> dict:
     """Build the generic skeleton of a Target (canonical ``label``).
 
-    STAGED — not yet wired into the add paths (ms-109 e-3698 / fable A-4):
-    ``milestone_add`` / ``account_add`` / ``opportunity_add`` still build their
-    dicts by hand today, so SPEC AC1 ("追加が単一基底経由") is NOT yet met and
-    this constructor currently has no production caller. This is an intentional
-    staged step, not dead code: the fold rewires the add paths through here only
-    after the sales flow stabilises (SPEC 方針3, "まず具体で検証してから抽象へ"),
-    to avoid churning a moving target. Do NOT declare ms-109 / e-3698 done on
-    the strength of this function existing — done requires the add paths to
-    actually route through it (task-done-judgment-principle 原則6).
+    Wired into ``core.milestone_add`` (ms-109 e-3698 / fable A-4): the
+    development add-path builds its dict through here, so the base owns the
+    generic skeleton (id / label / status / created_at / created_by / assignee)
+    and its defaults for milestones.
+
+    STAGED for sales — ``account_add`` / ``opportunity_add`` do NOT route
+    through here yet. This is an intentional staged step, not an oversight
+    (SPEC 方針3, "まず具体で検証してから抽象へ"): the sales model is still moving
+    and diverges from the generic skeleton — an Account has no generic
+    ``status`` (継続 / never-terminal, tracked by phase) and an Opportunity's
+    ``status`` is phase-derived rather than the base default. Forcing them
+    through this constructor now would inject skeleton the sales model hasn't
+    settled on. They apply the base *defaults* piecemeal (e.g. ``created_at``)
+    and full routing is the remaining extraction. Per
+    task-done-judgment-principle 原則6, do not read "generic constructor exists"
+    as "all add-paths unified" — only the milestone path is.
 
     Occupation-specific fields (a milestone's ``target_date`` / ``commits``,
     an opportunity's ``phase`` / ``account_id`` / ``amount``, an account's

@@ -257,3 +257,28 @@ class TestServerEndpointRejects:
         assert body.get("pending_op", {}).get("action") == "scope_add"
         entry = body["pending_op"]["entry"]
         assert entry == {"project": "p-1", "milestone": "ms-3"}
+
+
+# ms-109 e-3699 (fable B-2) — the CLI project:ref parser infers sales narrowing
+# kinds (opportunity/account) from the ref prefix, occupation-agnostic.
+class TestParseScopeArgSales:
+    def test_opportunity_ref(self):
+        assert trek.parse_scope_arg("p1:opp-3") == {
+            "project": "p1", "opportunity": "opp-3"}
+
+    def test_account_ref(self):
+        assert trek.parse_scope_arg("p1:acc-1") == {
+            "project": "p1", "account": "acc-1"}
+
+    def test_operation_ref_not_confused_with_opportunity(self):
+        # op- (operation) and opp- (opportunity) must not collide
+        assert trek.parse_scope_arg("p1:op-2") == {
+            "project": "p1", "operation": "op-2"}
+
+    def test_dev_refs_unchanged(self):
+        assert trek.parse_scope_arg("p1:ms-5")["milestone"] == "ms-5"
+        assert trek.parse_scope_arg("p1:e-9")["task"] == "e-9"
+
+    def test_unknown_prefix_rejected(self):
+        with pytest.raises(ValueError, match="unknown ref prefix"):
+            trek.parse_scope_arg("p1:xyz-1")

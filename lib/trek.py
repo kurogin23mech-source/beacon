@@ -21,6 +21,13 @@ import datetime
 import secrets
 from typing import Iterable
 
+# ms-109 e-3699 (fable B-2): the Trek scope narrowing vocabulary is sourced from
+# the occupation registry so Trek (L1) does not hardcode development vocabulary.
+try:
+    import occupation
+except ImportError:  # pragma: no cover — packaged import path
+    from lib import occupation
+
 # Trek lifecycle: planning → active → archived  (3 states only)
 # - planning: scope/invites being staged, sessions not yet joining
 # - active: members can claim work, DM, run Operations under this trek
@@ -1529,7 +1536,11 @@ V2_SCOPE_KEYS: tuple = (
     "included_task_ids", "claim_session_id", "claimed_at",
 )
 
-NARROWING_KEYS: tuple = ("milestone", "operation", "task")
+# ms-109 e-3699 (fable B-2): occupation-agnostic. dev → milestone/operation/
+# task, sales → opportunity/account, sourced from the occupation registry (the
+# union across occupations, since a Trek can span both). Adding an occupation's
+# narrowing kinds happens in ``occupation.NARROWING_KINDS``, never here.
+NARROWING_KEYS: tuple = occupation.all_narrowing_kinds()
 
 
 def _scope_entry_identity_key(entry: dict) -> tuple:
@@ -1566,14 +1577,16 @@ def normalize_scope_entry(
     """Normalise a scope item.
 
     A scope entry MUST include ``project`` (= project_id) and MAY include
-    one of milestone / operation / task to narrow it. Unknown keys are
+    one narrowing key to slice it (development: milestone / operation / task;
+    sales: opportunity / account — the occupation-agnostic set is
+    ``occupation.all_narrowing_kinds()``, ms-109 e-3699). Unknown keys are
     dropped to keep the on-disk schema tight (= server side can validate
     against this normalisation, CLI side can also use it before posting).
 
     ms-97 / e-2659 (AC7 = scope strict mode):
 
     - ``strict=True`` (default): the entry MUST include at least one
-      narrowing key (= ``milestone`` / ``operation`` / ``task``).
+      narrowing key (= any of ``occupation.all_narrowing_kinds()``).
       Project-wide entries (= no narrowing) raise ``ValueError`` so the
       Trek's autonomous scope cannot accidentally cover an entire project.
       This is the only mode NEW callers (= CLI ``--add-scope`` parser,
@@ -1628,8 +1641,9 @@ def normalize_scope_entry(
             out[k] = entry[k]
     if strict and not any(k in out for k in NARROWING_KEYS):
         raise ValueError(
-            "scope entry requires narrowing key: milestone | operation | "
-            "task (= project-wide scope is no longer accepted; ms-97 AC7)"
+            "scope entry requires a narrowing key (one of: "
+            + " | ".join(NARROWING_KEYS)
+            + "; = project-wide scope is no longer accepted; ms-97 AC7)"
         )
     # ms-99 / e-2828: v2 output branch. Only fires when the input signals
     # v2 shape or the caller explicitly asks to mint a slot. Legacy inputs
@@ -2324,11 +2338,14 @@ def accept_invitation(trek_doc: dict, *, user_id: str,
 def parse_scope_arg(arg: str, *, strict: bool = True) -> dict:
     """Parse a CLI ``<project>[:<ref>]`` scope argument into a normalized entry.
 
-    ``ref`` is dispatched by prefix:
-    - ``ms-...`` → milestone
-    - ``op-...`` → operation
-    - ``e-...``  → task
-    - omitted    → project-wide scope (= no narrowing)
+    ``ref`` is dispatched by id prefix via ``occupation.narrowing_kind_for_ref``
+    (ms-109 e-3699 — the vocabulary is not hardcoded here):
+    - ``ms-...``  → milestone
+    - ``op-...``  → operation
+    - ``e-...``   → task
+    - ``opp-...`` → opportunity (sales 商談)
+    - ``acc-...`` → account (sales 顧客)
+    - omitted     → project-wide scope (= no narrowing)
 
     Returns the normalized scope dict ready to append to ``trek_doc.scope``.
     Raises ValueError on empty input or unknown ref prefix.
@@ -2352,16 +2369,14 @@ def parse_scope_arg(arg: str, *, strict: bool = True) -> dict:
         entry: dict = {"project": project}
         if not ref:
             return normalize_scope_entry(entry, strict=strict)
-        if ref.startswith("ms-"):
-            entry["milestone"] = ref
-        elif ref.startswith("op-"):
-            entry["operation"] = ref
-        elif ref.startswith("e-"):
-            entry["task"] = ref
+        kind = occupation.narrowing_kind_for_ref(ref)
+        if kind:
+            entry[kind] = ref
         else:
             raise ValueError(
-                f"unknown ref prefix in {arg!r} — expected ms-/op-/e- "
-                "(or omit ref for project-wide scope)"
+                f"unknown ref prefix in {arg!r} — expected one of "
+                + "/".join(occupation.NARROWING_ID_PREFIXES.values())
+                + " (or omit ref for project-wide scope)"
             )
         return normalize_scope_entry(entry, strict=strict)
     return normalize_scope_entry({"project": arg}, strict=strict)
@@ -3266,7 +3281,11 @@ def list_pending_scope_ops(trek_doc: dict) -> list[dict]:
 
 BLANKET_SCOPE_APPROVALS_META_KEY = "blanket_scope_approvals"
 
-_BLANKET_NARROWING_CATEGORIES = ("operation", "milestone", "task")
+# ms-109 e-3699 (fable B-2): bare-kind blanket categories track the narrowing
+# vocabulary (dev milestone/operation/task + sales opportunity/account), so a
+# sales Trek can blanket-approve by opportunity just as a dev Trek does by
+# milestone. Sourced from the same occupation registry as NARROWING_KEYS.
+_BLANKET_NARROWING_CATEGORIES = NARROWING_KEYS
 
 
 def _normalised_blanket_category(category: str) -> str:
@@ -3293,12 +3312,14 @@ def _normalised_blanket_category(category: str) -> str:
             )
         if prefix == "project":
             return f"project:{suffix}"
-        if prefix == "milestone":
-            return f"milestone:{suffix}"
+        # ms-109 e-3699 (fable B-2): any narrowing kind can be id-scoped
+        # (milestone:<ms-id>, opportunity:<opp-id>, ...), not just milestone.
+        if prefix in NARROWING_KEYS:
+            return f"{prefix}:{suffix}"
     raise ValueError(
         f"blanket category {category!r} not in supported forms: "
-        f"'operation' | 'milestone' | 'task' | 'project:<pid>' | "
-        f"'milestone:<ms-id>'"
+        f"a bare narrowing kind ({' | '.join(NARROWING_KEYS)}) | "
+        f"'project:<pid>' | '<kind>:<id>'"
     )
 
 
@@ -3327,21 +3348,19 @@ def is_blanket_approved(trek_doc: dict, entry: dict) -> bool:
     if not approvals:
         return False
     proj = entry.get("project") or ""
-    ms = entry.get("milestone") or ""
-    op = entry.get("operation") or ""
-    task = entry.get("task") or ""
     for cat in approvals:
-        if cat == "operation" and op:
-            return True
-        if cat == "milestone" and ms:
-            return True
-        if cat == "task" and task:
+        # bare narrowing-kind category (milestone / operation / task /
+        # opportunity / account): matches any entry carrying that kind.
+        if cat in NARROWING_KEYS and entry.get(cat):
             return True
         if cat.startswith("project:"):
             if proj and cat[len("project:"):] == proj:
                 return True
-        elif cat.startswith("milestone:"):
-            if ms and cat[len("milestone:"):] == ms:
+        elif ":" in cat:
+            # id-scoped category <kind>:<id> — matches an entry narrowed to
+            # that exact target (ms-109 e-3699: any kind, not just milestone).
+            prefix, _, suffix = cat.partition(":")
+            if prefix in NARROWING_KEYS and suffix and entry.get(prefix) == suffix:
                 return True
     return False
 

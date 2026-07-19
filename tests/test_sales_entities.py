@@ -95,6 +95,23 @@ def test_account_name_required():
         se.account_add(data, "   ")
 
 
+def test_account_add_created_at_defaults_when_omitted():
+    # ms-109 e-3698 (fable A-4): omitting created_at must not persist an empty
+    # timestamp — the base default (now) applies, incl. the phase_history anchor.
+    data = _fresh()
+    aid = se.account_add(data, "Globex")
+    acc = se.find_account(data, aid)
+    assert acc["created_at"]  # non-empty
+    assert acc["phase_history"][0]["at"] == acc["created_at"]
+
+
+def test_opportunity_add_created_at_defaults_when_omitted():
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+    opp = se.find_opportunity(data, oid)
+    assert opp["created_at"]  # non-empty base default
+
+
 def test_account_phase_transition_is_append_only():
     data = _fresh()
     acc = se.account_add(data, "Globex", created_at="T0")
@@ -1481,6 +1498,26 @@ def test_activity_set_status_marks_done():
     aid = se.activity_add(data, opp, "初回面談を打診")
     act = se.activity_set_status(data, aid, "done", at="T1")
     assert act["status"] == "done" and act["done_at"] == "T1"
+
+
+def test_activity_done_stamps_done_by_via_base():
+    # ms-109 e-3696 (fable A-2): closing an Activity now routes through
+    # work_model.mark_done, giving it the done_by trail dev tasks already had.
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    aid = se.activity_add(data, opp, "初回面談を打診")
+    act = se.activity_set_status(data, aid, "done", at="T1")
+    assert act["meta"]["done_by"]  # stamped through the occupation-agnostic base
+
+
+def test_activity_set_status_todo_does_not_stamp_done():
+    # the non-done branch must NOT stamp done_at / done_by.
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    aid = se.activity_add(data, opp, "初回面談を打診")
+    se.activity_set_status(data, aid, "done", at="T1")
+    act = se.activity_set_status(data, aid, "todo")
+    assert act["status"] == "todo"
 
 
 def test_activity_set_status_validates():
