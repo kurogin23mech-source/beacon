@@ -60,6 +60,10 @@ beacon meeting list <opp-id> --json    # status=ended のものが A の入力�
 議事録の要点を **1 行要約**にして、面談の実績として Communication に残す。対象は商談
 （無ければ該当活動 act-）。source に議事録 doc の Drive リンクを入れて出典を辿れるように:
 
+**スレッド集約の原則 (e-3535)**: 活動に紐づける時は、この面談を生んだ**起点の既存活動**
+(例「初回面談を実施」) を選ぶ。振り返り用に新しい活動を作らない — 1 スレッド (この面談) の
+証跡は 1 活動配下に集約する (fold・履歴が読めなくなるのを防ぐ)。
+
 ```bash
 BEACON_COMM_TARGET="<$OPP または act-id>" \
   BEACON_COMM_SUMMARY="<議事録の1行要約: 何が決まり何が宿題か>" \

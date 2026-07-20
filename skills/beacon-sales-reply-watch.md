@@ -73,6 +73,11 @@ BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" 
 残す。work item (act-/nrt-) を対象にすると、その予定に紐づく実績として記録され、
 **ball が自動で自分に戻る** (derive_ball が inbound で flip):
 
+**スレッド集約の原則 (e-3535)**: 対象は **watch を立てた元の work item (act-/nrt-)** を
+そのまま使う (= このスレッドの起点)。返信のたびに新しい活動を作らない — 1 スレッドの往復
+証跡は 1 活動配下に集約する。watch は元々スレッド起点に立っているので、通常はこれを守れば
+自然に集約される。
+
 ```bash
 BEACON_COMM_TARGET="<work_item_id>" \
   BEACON_COMM_SUMMARY="<相手の返信の1行要約>" \
