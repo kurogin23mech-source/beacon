@@ -21661,6 +21661,26 @@ def _human_actor() -> str:
         return "human"
 
 
+def _print_phase_fold(fold) -> None:
+    """Surface the e-3553 phase-fold result of a transition. Evidence-linked
+    activities were auto-closed (記帳=自動) — reported so the human sees what was
+    tidied; the evidence-less ones need a human call (done / cancel / carry) and
+    are listed with the exact commands. No-op when nothing was folded."""
+    if not isinstance(fold, dict):
+        return
+    auto = fold.get("auto_done") or []
+    pending = fold.get("needs_decision") or []
+    if auto:
+        print(f"  ✓ 前フェーズの活動 {len(auto)} 件を証跡ありで自動クローズ: "
+              f"{', '.join(auto)}")
+    for d in pending:
+        print(f"  ▸ 要判断 {d.get('id')}: {d.get('description')}")
+        print(f"      {d.get('reason')}")
+    if pending:
+        print("      → done: beacon activity done <id> / "
+              "cancel: beacon activity cancel <id> --reason <理由>")
+
+
 def cmd_opportunity_judge():
     """Judge a transition (ms-107 e-3372, SPEC §3): advance / retry / terminal.
 
@@ -21697,6 +21717,7 @@ def cmd_opportunity_judge():
                 hint = f" (候補: {sug})" if sug else ""
                 print(f"  ⚠ 次フェーズの遷移日が未設定です{hint} — "
                       f"beacon opportunity transition-date {opp_id} <YYYY-MM-DD>")
+            _print_phase_fold(res.get("fold"))
         elif decision == "retry":
             sales_entities.retry_transition(data, opp_id, arg, note=note, at=at, actor=actor)
             save_project(data)
@@ -21707,9 +21728,10 @@ def cmd_opportunity_judge():
             cur = opp.get("phase", "") if opp else ""
             for w in sales_entities.opportunity_phase_warnings(data, cur, arg):
                 print(f"  ⚠ {w}", file=sys.stderr)
-            sales_entities.terminal_transition(data, opp_id, arg, note=note, at=at, actor=actor)
+            trec = sales_entities.terminal_transition(data, opp_id, arg, note=note, at=at, actor=actor)
             save_project(data)
             print(f"{opp_id} terminal → {arg} (決着、遷移日は用済みでクリア)")
+            _print_phase_fold(trec.get("fold"))
         else:
             print(f"Error: decision must be advance|retry|terminal, got {decision!r}",
                   file=sys.stderr)

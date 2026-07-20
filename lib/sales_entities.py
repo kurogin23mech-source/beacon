@@ -1025,6 +1025,9 @@ def advance_transition(data: dict, target_id: str, *,
     gate = current_gate(data, target_id)
     if gate is not None:
         settle_gate(data, gate["id"], outcome=GATE_ADVANCE, reason=note, at=at, actor=actor)
+    # e-3553: fold the phase we are leaving BEFORE the exclusive phase moves —
+    # evidence-linked activities auto-close, the rest surface for a human call.
+    fold = fold_phase_activities(data, target_id, cur, at=at, actor=actor)
     phase_set(data, target_id, nxt, note=note, at=at)
     open_advance_gate(data, target_id, phase=nxt,
                       transition_date=next_transition_date, at=at)
@@ -1033,7 +1036,7 @@ def advance_transition(data: dict, target_id: str, *,
     # 「遷移日を置く」は needs_transition_date 促しで担い、ここでは重複させない。
     created = instantiate_phase_activities(data, target_id, at=at)
     return {"phase": nxt, "transition_date": get_transition_date(data, target_id),
-            "activities": created}
+            "activities": created, "fold": fold}
 
 
 def retry_transition(data: dict, target_id: str, new_transition_date: str, *,
@@ -1089,10 +1092,17 @@ def terminal_transition(data: dict, target_id: str, terminal_phase: str, *,
         raise ValueError(
             f"'{terminal_phase}' は terminal (決着) フェーズではありません "
             f"(既知の決着: {[p['name'] for p in opportunity_phases(data) if p.get('terminal')]})")
+    opp = find_opportunity(data, target_id)
+    cur = opp.get("phase", "") if opp else ""
     gate = current_gate(data, target_id)
     if gate is not None:
         settle_gate(data, gate["id"], outcome=GATE_TERMINAL, reason=note, at=at, actor=actor)
+    # e-3553: fold the phase being decided out of before the terminal phase is
+    # set. On a 決着 there is no "carry" (no next phase), but evidence-linked
+    # activities still auto-close and the rest surface for a done/cancel call.
+    fold = fold_phase_activities(data, target_id, cur, at=at, actor=actor)
     rec = phase_set(data, target_id, terminal_phase, note=note or "terminal", at=at)
+    rec["fold"] = fold
     return rec
 
 
@@ -1131,7 +1141,64 @@ def jump_transition(data: dict, target_id: str, new_phase: str, *,
     rec = phase_set(data, target_id, new_phase, note=note, at=at)
     if not terminal:
         open_advance_gate(data, target_id, phase=new_phase, at=at)
+    # No auto-fold here: jump is the *corrective* manual path (may go backward),
+    # so leaving-phase work is not necessarily "done" — fold is only wired to the
+    # forward judge outcomes (advance / terminal), see e-3553.
     return rec
+
+
+def fold_phase_activities(data: dict, opportunity_id: str, leaving_phase: str, *,
+                          at: str = "", actor: str = "") -> dict:
+    """Fold (後始末) the activities of the phase an opportunity is leaving (e-3553).
+
+    When a deal advances / jumps / decides-terminal, the phase it *leaves* often
+    has activities still sitting ``todo`` — the初回面談 that already happened, the
+    direction-fixing step whose outcome justified the advance, extras that were
+    seeded but never needed. Left alone they pile up and the activity log stops
+    being readable, which breaks the premise that the AI reads the trail to
+    propose the next move (opp-6 dogfood #8).
+
+    This does the ONE deterministic step (記帳=自動, SPEC の (a)): an activity that
+    already carries evidence — a Communication linked to it (``linked_id``) — is
+    closed as done (evidence-based close, no human needed, the sales twin of a
+    commit closing a task). Activities in the leaving phase carrying NO evidence
+    are returned as ``needs_decision`` for a human to resolve — done / cancel /
+    carry to the next phase ((b)/(c) は判断=人). The fold never cancels or carries
+    on its own; those are human calls surfaced to the Skill layer.
+
+    ``leaving_phase`` is passed explicitly (the caller runs this *before* moving
+    the exclusive phase, so it knows which phase is being left). An activity whose
+    ``created_in_phase`` is blank is treated as belonging to the leaving phase
+    (legacy / hand-added records stamped before e-3555). Returns
+    ``{"auto_done": [ids], "needs_decision": [{"id","description","reason"}]}``.
+    """
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    auto_done: list = []
+    needs_decision: list = []
+    for act in opp.get("activities", []):
+        if not work_model.is_open(act):
+            continue
+        born = act.get("created_in_phase", "") or leaving_phase
+        if born != leaving_phase:
+            continue
+        act_id = act.get("id", "")
+        has_evidence = bool(communications_of(opp, linked_id=act_id,
+                                              include_cancelled=False))
+        if has_evidence:
+            work_model.mark_done(
+                act, at=at, actor=actor or work_base.current_actor(),
+                reason="evidence-based close on phase fold (e-3553)")
+            auto_done.append(act_id)
+        else:
+            needs_decision.append({
+                "id": act_id,
+                "description": act.get("description", ""),
+                "reason": ("証跡が無い活動です。ゴール達成済みなら done、"
+                           "余計なら cancel、次フェーズに要るなら carry を人が選ぶ"),
+            })
+    return {"auto_done": auto_done, "needs_decision": needs_decision}
 
 
 def suggest_transition_date(data: dict, phase_name: str,

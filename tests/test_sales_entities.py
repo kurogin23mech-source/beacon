@@ -795,6 +795,44 @@ def test_terminal_transition_rejects_non_terminal_phase():
         se.terminal_transition(data, opp, "先方検討中")  # not terminal
 
 
+# --- e-3553 phase fold (前フェーズ活動の後始末) ------------------------------
+
+def test_fold_auto_closes_evidence_linked_and_surfaces_the_rest():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    opp = se.opportunity_add(data, "Deal", account_id=acc, phase="商談準備")
+    a_done = se.activity_add(data, opp, "初回面談を実施")   # will get evidence
+    a_open = se.activity_add(data, opp, "余計な準備")         # no evidence
+    se.communication_add(data, a_done, "面談の議事録",
+                         direction="inbound", channel="meeting")
+    res = se.advance_transition(data, opp, at="T1")
+    fold = res["fold"]
+    # evidence-linked activity auto-closed (記帳=自動)
+    assert fold["auto_done"] == [a_done]
+    _, done_act = se.find_activity(data, a_done)
+    assert done_act["status"] == "done"
+    # evidence-less activity surfaced for a human call, NOT auto-touched
+    assert [d["id"] for d in fold["needs_decision"]] == [a_open]
+    _, open_act = se.find_activity(data, a_open)
+    assert open_act["status"] == "todo"
+
+
+def test_fold_only_touches_the_leaving_phase():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", phase="商談準備")
+    a_prev = se.activity_add(data, opp, "旧フェーズの活動")
+    se.communication_add(data, a_prev, "証跡", direction="outbound", channel="email")
+    se.advance_transition(data, opp, at="T1")  # 商談準備 → 提案準備, folds 商談準備
+    # a fresh activity born in the NEW phase, with evidence, must NOT be folded
+    a_new = se.activity_add(data, opp, "新フェーズの活動")  # created_in_phase=提案準備
+    se.communication_add(data, a_new, "証跡2", direction="outbound", channel="email")
+    res = se.advance_transition(data, opp, at="T2")  # 提案準備 → 先方検討中
+    assert a_new in res["fold"]["auto_done"]
+    # the previous-phase activity was already closed in the first advance
+    _, prev = se.find_activity(data, a_prev)
+    assert prev["status"] == "done"
+
+
 def test_suggest_transition_date_from_default_lead():
     data = _fresh()
     prep = se._find_phase_def(data["opportunity_phases"], "提案準備")
