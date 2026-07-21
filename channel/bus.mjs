@@ -404,13 +404,22 @@ async function connectBusWs() {
 
   let backoff = 1000
   const BACKOFF_MAX = 30000
+  const STABLE_MS = 60000
+  // e-3834 — at most one reconnect chain may be in flight. Without this, an
+  // 'error'+'close' pair (or a double-fired 'close') each scheduled a fresh
+  // openOnce, so the chains multiplied and a single session opened >14k sockets,
+  // OOM-ing the server. This flag serialises reconnects to one at a time.
+  let reconnectPending = false
 
   const openOnce = () => {
     let ws
     let pingTimer = null
+    let stableTimer = null
+    let settled = false  // this socket has already scheduled its single reconnect
     const cleanup = () => {
       wsHealthy = false
       if (pingTimer) { clearInterval(pingTimer); pingTimer = null }
+      if (stableTimer) { clearTimeout(stableTimer); stableTimer = null }
       // ms-101 review fix — WS が切れて wsHealthy=false になったら、120s backstop
       // スリープ中かもしれない poll loop を即起こす。起こさないと最大 backstop ぶん
       // (120s) 次の pollOnce と writePollHeartbeat が走らず、last_poll_at と Redis
@@ -421,10 +430,18 @@ async function connectBusWs() {
       wakePoll()
     }
     const scheduleReconnect = () => {
+      if (settled) return          // this socket already scheduled its reconnect
+      settled = true
       cleanup()
+      // Release the underlying socket instead of abandoning it. Abandoned WS
+      // sockets lingered in the OS "Bound" state and leaked (13k+ observed in
+      // e-3834); closing them frees the ephemeral port.
+      try { if (ws) ws.close() } catch { /* already closing */ }
+      if (reconnectPending) return // another chain is already reconnecting
+      reconnectPending = true
       const delay = backoff
       backoff = Math.min(backoff * 2, BACKOFF_MAX)
-      setTimeout(openOnce, delay)
+      setTimeout(() => { reconnectPending = false; openOnce() }, delay)
     }
     try {
       ws = new WS(_busWsUrl())
@@ -435,8 +452,12 @@ async function connectBusWs() {
     }
     ws.addEventListener('open', () => {
       wsHealthy = true
-      backoff = 1000  // reset backoff on a healthy connection
       log('bus WS connected (push-accelerated poll)')
+      // e-3834 — reset backoff only after the connection has stayed up for
+      // STABLE_MS. Resetting on 'open' meant a socket that opened then closed
+      // immediately (server flap / saturation) pinned the backoff at its 1s
+      // floor, so reconnects hammered the server instead of backing off.
+      stableTimer = setTimeout(() => { backoff = 1000 }, STABLE_MS)
       // keepalive: server echoes "pong" to "ping" (app.py ws_project).
       pingTimer = setInterval(() => {
         try { ws.send('ping') } catch { /* close handler will reconnect */ }
