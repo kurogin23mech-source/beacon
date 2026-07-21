@@ -21162,7 +21162,10 @@ def _cmd_account_list_linked(json_mode: bool):
               "(.beacon/cloud.json が必要)。", file=sys.stderr)
         sys.exit(1)
     try:
-        client = _get_api_client()
+        # _get_api_client() は (client, config) の tuple を返す (e-3872 で
+        # tuple を client として扱い 'tuple' has no attribute 'get' で落ちた
+        # 実地バグ)。unpack して client だけ使う。
+        client, _config = _get_api_client()
         resp = client.get(f"/api/projects/{project_id}/disclosed-accounts")
     except Exception as e:
         print(f"Error: 開示 Account の取得に失敗しました: {e}", file=sys.stderr)
