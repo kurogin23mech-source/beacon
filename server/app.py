@@ -6856,8 +6856,15 @@ def upsert_session(
     ``machine/agent``. See firestore_client.stamp_session_actor_email for
     the field-path merge that preserves actor.machine/agent in the
     heartbeat (no-actor) path.
+
+    ms-98 (e-3836): this is the heartbeat path (CLI PUTs every few seconds).
+    Authorization only needs the project meta doc (owner/members live at the
+    top level), and the handler body never reads ``data["milestones"]`` — it
+    only writes via ``db.*``. Using ``_load_meta_only`` avoids re-hydrating the
+    entire milestones subcollection on every heartbeat, which was a dominant
+    source of memory churn in the 2026-07-21 hang incident.
     """
-    _load(project_id, user)
+    _load_meta_only(project_id, user)
     payload = {k: v for k, v in body.model_dump().items() if v is not None}
     email = user.get("email", "")
     uid = user.get("sub", "")
@@ -9534,8 +9541,13 @@ def list_pending_dm_actions(
     ``receiver_user_id`` (optional): restrict to "my pending". Empty
     string returns rows for all receivers in the project (used by web
     UI dashboards / debugging; the Skill always passes a value).
+
+    ms-98 (e-3836): polled by ``/beacon-session-start`` (and Web UI
+    dashboards) to surface pending DM actions. Membership-only gate reads the
+    meta doc; the handler never touches ``data["milestones"]``, so meta-only
+    load avoids the full-project rehydration on each poll.
     """
-    _load(project_id, user)
+    _load_meta_only(project_id, user)
     return db.list_pending_approvals(
         project_id,
         receiver_user_id=(receiver_user_id or None),
@@ -9870,8 +9882,13 @@ def list_bus_events(
     return when the caller is neither sender nor recipient. Sidecar metadata
     (event_id, channel, sender_session_id, created_at, receipt timestamps,
     envelope view) stays visible so audit/diagnostics tooling keeps working.
+
+    ms-98 (e-3836): polling catch-up path (callers hit it with ``since=`` on a
+    loop). The handler only needs the meta doc for the membership check — it
+    never reads ``data["milestones"]`` — so meta-only load avoids re-hydrating
+    the whole milestones/entries tree on every poll.
     """
-    _load(project_id, user)
+    _load_meta_only(project_id, user)
     events = db.list_bus_events(
         project_id, since=since, channel=channel, limit=limit,
     )
