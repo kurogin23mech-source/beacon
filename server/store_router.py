@@ -97,6 +97,11 @@ if _BACKEND == "dynamodb":
         save_trek,
         list_treks,
         delete_trek,
+        # Organizations (ms-113 / e-3731) — top-level tenancy entity
+        get_org,
+        save_org,
+        list_orgs_for_user,
+        delete_org,
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
         append_trek_log,
         list_trek_logs,
@@ -199,6 +204,11 @@ elif _BACKEND == "mysql":
         save_trek,
         list_treks,
         delete_trek,
+        # Organizations (ms-113 / e-3731) — top-level tenancy entity
+        get_org,
+        save_org,
+        list_orgs_for_user,
+        delete_org,
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
         append_trek_log,
         list_trek_logs,
@@ -304,6 +314,11 @@ elif _BACKEND == "firestore":
         save_trek,
         list_treks,
         delete_trek,
+        # Organizations (ms-113 / e-3731) — top-level tenancy entity
+        get_org,
+        save_org,
+        list_orgs_for_user,
+        delete_org,
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
         append_trek_log,
         list_trek_logs,

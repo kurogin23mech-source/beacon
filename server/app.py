@@ -26,6 +26,7 @@ from starlette.responses import Response, JSONResponse
 
 import approved_actions as approved_actions_mod
 import core
+import org as org_mod  # ms-113 / e-3731: Organization (組織) テナンシー primitives
 import work_model  # ms-109 e-3643: 職種非依存の Target 正準ラベル tolerant reader
 import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
 import dm_consent as dm_consent_mod  # ms-110 / e-3443: sender-side cross-user consent backstop
@@ -469,6 +470,40 @@ def _verify_id_token(token: str) -> dict:
     return claims
 
 
+# ms-113 / e-3731: personal org (= 個人組織) の lazy ensure。
+#
+# require_auth は毎リクエスト走る hot path なので、org doc の get を毎回叩くと
+# 直近のメモリ枯渇インシデント (= 高頻度経路の余計な store 読み) を再現しかねない。
+# そこで「この process 内でこの user の personal org を既に ensure 済か」を
+# in-process set でキャッシュし、store を叩くのは user あたり instance あたり
+# 最初の 1 回だけに抑える (= 冪等 & 有界な追加負荷)。決定的 org id ゆえ、複数
+# instance が同時に ensure しても同じ doc を指すので競合しても安全 (last-write
+# が同じ内容)。
+_ENSURED_PERSONAL_ORGS: set[str] = set()
+
+
+def _ensure_personal_org(user_id: str, email: str = "") -> None:
+    """user の personal org doc が無ければ作る (lazy retrofit, fail-safe)。
+
+    org ストアが未配線の backend や一過性エラーでも auth を止めない (= best
+    effort)。実際の認可は依然 project owner / members で判定するため、personal
+    org doc の生成失敗はこの時点のアクセスを壊さない。
+    """
+    if not user_id or user_id in _ENSURED_PERSONAL_ORGS:
+        return
+    try:
+        org_id = org_mod.personal_org_id(user_id)
+        if db.get_org(org_id) is None:
+            import datetime
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            db.save_org(org_id, org_mod.build_personal_org(user_id, email, now=now))
+        # 成功時のみキャッシュ (= 失敗は次リクエストで再試行させる)。
+        _ENSURED_PERSONAL_ORGS.add(user_id)
+    except Exception:
+        # best-effort: org backfill の失敗で auth を落とさない。
+        pass
+
+
 async def require_auth(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
@@ -486,6 +521,9 @@ async def require_auth(
     email = claims.get("email", "")
     if user_id:
         db.get_or_create_user(user_id, email)
+        # ms-113 / e-3731: ensure the user's personal org exists (cached, at
+        # most one store touch per user per instance — see _ensure_personal_org).
+        _ensure_personal_org(user_id, email)
     # Store for audit middleware
     request.state.audit_user_id = user_id
     request.state.audit_email = email
@@ -669,6 +707,12 @@ def _require_owner(data: dict, user: dict) -> None:
 
 
 def _save(project_id: str, data: dict) -> None:
+    # ms-113 / e-3731: lazy org retrofit. project が owner を持ち org_id 未設定
+    # なら、owner の personal org (= 決定的 id) を stamp する。純粋な文字列導出
+    # のみで store I/O は無い (O(1)) ため、全 write が通るこのチョークポイントで
+    # 毎回呼んでも安全 (= hot-path のメモリ churn を作らない)。既存挙動は不変:
+    # org_id が付いても認可は依然 owner / members で判定する (合成は e-3733)。
+    org_mod.stamp_project_org(data)
     core.validate_project(data)
     db.save_project(project_id, data)
 
