@@ -26,6 +26,11 @@ from starlette.responses import Response, JSONResponse
 
 import approved_actions as approved_actions_mod
 import core
+import org as org_mod  # ms-113 / e-3731: Organization (組織) テナンシー primitives
+import principal as principal_mod  # ms-113 / e-3732: 主体モデル + 実効スコープ合成
+# NOTE: lib/disclosure.py (e-3733/3738 開示プリミティブ) は現状 app.py に production
+# 呼び出し元が無い (= resource 層開示は ms-111 の Account 配線と連動)。unused import を
+# 避けるため、endpoint 配線が入るタイミングで import する (それまで lib 側で完結)。
 import work_model  # ms-109 e-3643: 職種非依存の Target 正準ラベル tolerant reader
 import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
 import dm_consent as dm_consent_mod  # ms-110 / e-3443: sender-side cross-user consent backstop
@@ -469,6 +474,90 @@ def _verify_id_token(token: str) -> dict:
     return claims
 
 
+# ms-113 / e-3731: personal org (= 個人組織) の lazy ensure。
+#
+# require_auth は毎リクエスト走る hot path なので、org doc の get を毎回叩くと
+# 直近のメモリ枯渇インシデント (= 高頻度経路の余計な store 読み) を再現しかねない。
+# そこで「この process 内でこの user の personal org を既に ensure 済か」を
+# in-process set でキャッシュし、store を叩くのは user あたり instance あたり
+# 最初の 1 回だけに抑える (= 冪等 & 有界な追加負荷)。決定的 org id ゆえ、複数
+# instance が同時に ensure しても同じ doc を指すので競合しても安全 (last-write
+# が同じ内容)。
+_ENSURED_PERSONAL_ORGS: set[str] = set()
+
+
+def _ensure_personal_org(user_id: str, email: str = "") -> None:
+    """user の personal org doc が無ければ作る (lazy retrofit, fail-safe)。
+
+    org ストアが未配線の backend や一過性エラーでも auth を止めない (= best
+    effort)。実際の認可は依然 project owner / members で判定するため、personal
+    org doc の生成失敗はこの時点のアクセスを壊さない。
+    """
+    if not user_id or user_id in _ENSURED_PERSONAL_ORGS:
+        return
+    try:
+        org_id = org_mod.personal_org_id(user_id)
+        if db.get_org(org_id) is None:
+            import datetime
+            now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            db.save_org(org_id, org_mod.build_personal_org(user_id, email, now=now))
+        # 成功時のみキャッシュ (= 失敗は次リクエストで再試行させる)。
+        _ENSURED_PERSONAL_ORGS.add(user_id)
+    except Exception:
+        # best-effort: org backfill の失敗で auth を落とさない。
+        pass
+
+
+# ---------------------------------------------------------------------------
+# Principal (主体) の解決と伝播 (ms-113 / e-3732, e-3733).
+#
+# principal は request の claims から **store I/O 無し** で組み立て、request.state
+# に載せて伝播させる (= require_auth の hot path を汚さない)。開示判定に必要な
+# 「実効スコープ (= 触れてよい project 集合)」は participation の解決を伴うので、
+# それが要る endpoint だけが _effective_scope_for を lazy に呼ぶ。
+# ---------------------------------------------------------------------------
+
+def _build_request_principal(claims: dict, *, focus: str | None = None,
+                             agent_kind: str = principal_mod.AGENT_CLIENT) -> dict:
+    """claims から client principal を組み立てる (cheap, no store I/O)。"""
+    uid = claims.get("sub", "") if claims else ""
+    org_id = org_mod.personal_org_id(uid) if uid else ""
+    return principal_mod.make_principal(
+        uid, org_id, agent_kind=agent_kind, focus=focus)
+
+
+def _user_participation(user_id: str) -> set[str]:
+    """user が参加している project 集合を返す (= 開示境界の真値)。
+
+    owner か members に居る project。``db.list_projects`` が既にこの可視性で絞る。
+    query 時に評価する (= 現在の membership で判定 ⇒ 剥奪即時 / grandfather しない、
+    e-3733)。fail-safe: 解決失敗は空集合 (= 何も開示しない安全側)。
+    """
+    if not user_id:
+        return set()
+    try:
+        projs = db.list_projects(user_id) or []
+    except Exception:
+        return set()
+    ids: set[str] = set()
+    for p in projs:
+        pid = p.get("project_id") or p.get("id")
+        if pid:
+            ids.add(pid)
+    return ids
+
+
+def _effective_scope_for(principal: dict) -> set[str]:
+    """principal の実効 project 集合を、いま解決した participation を用いて返す。
+
+    client principal 専用の facade (= endpoint が「この user に何が見えるか」を得る
+    入口)。backend principal の min 合成は work-unit / originating を持つ呼び出し
+    側が ``principal_mod.backend_effective_scope`` を直接使う。
+    """
+    participation = _user_participation((principal or {}).get("user_id", ""))
+    return principal_mod.client_effective_scope(principal or {}, participation)
+
+
 async def require_auth(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
@@ -477,7 +566,10 @@ async def require_auth(
     if not _auth_enabled:
         request.state.audit_user_id = "dev"
         request.state.audit_email = "dev@local"
-        return {"sub": "dev", "email": "dev@local"}
+        dev_claims = {"sub": "dev", "email": "dev@local"}
+        # ms-113 / e-3732: propagate a principal even in dev mode (cheap, no I/O).
+        request.state.principal = _build_request_principal(dev_claims)
+        return dev_claims
     if credentials is None:
         raise HTTPException(status_code=401, detail="Authorization header required")
     claims = _verify_id_token(credentials.credentials)
@@ -486,9 +578,16 @@ async def require_auth(
     email = claims.get("email", "")
     if user_id:
         db.get_or_create_user(user_id, email)
+        # ms-113 / e-3731: ensure the user's personal org exists (cached, at
+        # most one store touch per user per instance — see _ensure_personal_org).
+        _ensure_personal_org(user_id, email)
     # Store for audit middleware
     request.state.audit_user_id = user_id
     request.state.audit_email = email
+    # ms-113 / e-3732: build + propagate the client principal on request state.
+    # Cheap (no store I/O); endpoints resolve effective scope lazily via
+    # _effective_scope_for when they actually need disclosure filtering.
+    request.state.principal = _build_request_principal(claims)
     return claims
 
 
@@ -669,6 +768,12 @@ def _require_owner(data: dict, user: dict) -> None:
 
 
 def _save(project_id: str, data: dict) -> None:
+    # ms-113 / e-3731: lazy org retrofit. project が owner を持ち org_id 未設定
+    # なら、owner の personal org (= 決定的 id) を stamp する。純粋な文字列導出
+    # のみで store I/O は無い (O(1)) ため、全 write が通るこのチョークポイントで
+    # 毎回呼んでも安全 (= hot-path のメモリ churn を作らない)。既存挙動は不変:
+    # org_id が付いても認可は依然 owner / members で判定する (合成は e-3733)。
+    org_mod.stamp_project_org(data)
     core.validate_project(data)
     db.save_project(project_id, data)
 

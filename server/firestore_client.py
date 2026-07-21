@@ -23,6 +23,9 @@ PROJECT_ID = os.environ.get("BEACON_GCP_PROJECT_ID") or None
 _ENV = os.environ.get("BEACON_ENV", "dev")
 COLLECTION = "projects" if _ENV == "prod" else "projects-dev"
 USERS_COLLECTION = "users" if _ENV == "prod" else "users-dev"
+# ms-113 / e-3731: Organization (組織) = user → org → project → target の
+# テナンシー階層で project の所有境界を束ねる top-level エンティティ。
+ORGS_COLLECTION = "organizations" if _ENV == "prod" else "organizations-dev"
 
 
 def get_db() -> firestore.Client:
@@ -2104,6 +2107,59 @@ def delete_trek(trek_id: str) -> bool:
     when they land this function will cascade like ``delete_project``.
     """
     doc_ref = get_db().collection(TREKS_COLLECTION).document(trek_id)
+    if not doc_ref.get().exists:
+        return False
+    doc_ref.delete()
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Organizations (ms-113 / e-3731) — top-level entity, doc id = org_id.
+# Mirrors the trek store shape (get / save full-replace / list / delete).
+# The doc id is authoritative and merged in last so it wins over any stale
+# ``org_id`` field, exactly like ``get_trek`` / ``list_treks``.
+# ---------------------------------------------------------------------------
+
+def get_org(org_id: str) -> dict | None:
+    """Load an organization document. Returns None if not found."""
+    doc = get_db().collection(ORGS_COLLECTION).document(org_id).get()
+    if not doc.exists:
+        return None
+    return {**(doc.to_dict() or {}), "org_id": doc.id}
+
+
+def save_org(org_id: str, data: dict) -> None:
+    """Save an organization document (full replace, mirrors ``save_trek``).
+
+    ``org_id`` in ``data`` is ignored — the doc id is the truth.
+    """
+    payload = {k: v for k, v in data.items() if k != "org_id"}
+    get_db().collection(ORGS_COLLECTION).document(org_id).set(payload)
+
+
+def list_orgs_for_user(user_id: str | None = None) -> list[dict]:
+    """List organizations. ``user_id=None`` returns all (= admin view).
+
+    When set, only orgs where the user appears in ``members`` are returned
+    (= same membership-visibility model as ``list_treks`` / ``list_projects``).
+    """
+    docs = get_db().collection(ORGS_COLLECTION).stream()
+    result: list[dict] = []
+    for doc in docs:
+        data = doc.to_dict() or {}
+        if user_id:
+            members = [m.get("user_id") for m in data.get("members", []) or []]
+            if user_id not in members:
+                continue
+        result.append({**data, "org_id": doc.id})
+    result.sort(key=lambda o: (o.get("created_at", ""), o.get("org_id", "")),
+                reverse=True)
+    return result
+
+
+def delete_org(org_id: str) -> bool:
+    """Delete an organization. Returns True if it existed."""
+    doc_ref = get_db().collection(ORGS_COLLECTION).document(org_id)
     if not doc_ref.get().exists:
         return False
     doc_ref.delete()

@@ -90,6 +90,7 @@ TABLES = {
     "projects": f"{TABLE_PREFIX}-projects",
     "users": f"{TABLE_PREFIX}-users",
     "treks": f"{TABLE_PREFIX}-treks",  # ms-69 / e-1652 (PK=trek_id)
+    "organizations": f"{TABLE_PREFIX}-organizations",  # ms-113 / e-3731 (PK=org_id)
     # projects/{pid}/* subcollections
     "retros": f"{TABLE_PREFIX}-retros",
     "documents": f"{TABLE_PREFIX}-documents",
@@ -1643,6 +1644,43 @@ def delete_trek(trek_id: str) -> bool:
     # Phase 1: top-level delete only. Subcollection cascade follows the
     # delete_project pattern once e-1663 lands.
     _table("treks").delete_item(Key={"trek_id": trek_id})
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Organizations (ms-113 / e-3731) — top-level entity, PK=org_id.
+# Same schema as firestore_client. Scan is fine at dev scale.
+# ---------------------------------------------------------------------------
+
+def get_org(org_id: str) -> dict | None:
+    resp = _table("organizations").get_item(Key={"org_id": org_id})
+    return resp.get("Item")
+
+
+def save_org(org_id: str, data: dict) -> None:
+    item = {**data, "org_id": org_id}
+    _table("organizations").put_item(Item=item)
+
+
+def list_orgs_for_user(user_id: str | None = None) -> list[dict]:
+    """List organizations. See firestore_client.list_orgs_for_user semantics."""
+    items = _scan_all(_table("organizations"))
+    result: list[dict] = []
+    for item in items:
+        if user_id:
+            members = [m.get("user_id") for m in item.get("members", []) or []]
+            if user_id not in members:
+                continue
+        result.append(item)
+    result.sort(key=lambda o: (o.get("created_at", ""), o.get("org_id", "")),
+                reverse=True)
+    return result
+
+
+def delete_org(org_id: str) -> bool:
+    if get_org(org_id) is None:
+        return False
+    _table("organizations").delete_item(Key={"org_id": org_id})
     return True
 
 

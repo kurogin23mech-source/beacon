@@ -47,6 +47,10 @@ ENTITIES = [
     "projects",
     "users",
     "treks",
+    # ms-113 / e-3731: Organization (組織) top-level entity, pk=org_id, sk=''。
+    # 起動時 create_mysql_tables が CREATE TABLE IF NOT EXISTS で作る (schema が
+    # DDL を追い越さない = 無停止 retrofit)。
+    "organizations",
     # projects/{pid}/* subcollections
     "retros",
     "documents",
@@ -1995,6 +1999,43 @@ def delete_trek(trek_id: str) -> bool:
     if get_trek(trek_id) is None:
         return False
     _delete("treks", trek_id)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Organizations (ms-113 / e-3731) — top-level entity, PK=org_id, sk=''.
+# See firestore_client for semantics; MySQL persists via the generic
+# (pk, sk, data JSON) row model.
+# ---------------------------------------------------------------------------
+
+def get_org(org_id: str) -> dict | None:
+    return _get("organizations", org_id)
+
+
+def save_org(org_id: str, data: dict) -> None:
+    item = {**data, "org_id": org_id}
+    _put("organizations", org_id, item)
+
+
+def list_orgs_for_user(user_id: str | None = None) -> list[dict]:
+    """List organizations. See firestore_client.list_orgs_for_user semantics."""
+    items = _scan("organizations")
+    result: list[dict] = []
+    for item in items:
+        if user_id:
+            members = [m.get("user_id") for m in item.get("members", []) or []]
+            if user_id not in members:
+                continue
+        result.append(item)
+    result.sort(key=lambda o: (o.get("created_at", ""), o.get("org_id", "")),
+                reverse=True)
+    return result
+
+
+def delete_org(org_id: str) -> bool:
+    if get_org(org_id) is None:
+        return False
+    _delete("organizations", org_id)
     return True
 
 
