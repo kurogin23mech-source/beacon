@@ -54,7 +54,7 @@ Tasks & Progress:
 
 Sales (profession=sales):
   beacon account add "<name>" [--health <text>] [--assignee <user>]   Add an account (customer / company)
-  beacon account list [--json] [--as-project <id>]           List accounts (+contacts); --as-project shows only ones disclosed to that project
+  beacon account list [--json] [--as-project <id>] [--linked]   List accounts; --as-project = only ones disclosed to that project; --linked = accounts disclosed to THIS project from other org projects (cloud)
   beacon account link <acc-id> --project <id>                Disclose an account to another project (cross-project 参照を許可)
   beacon account unlink <acc-id> --project <id>              Revoke an account's disclosure to a project (剥奪即時)
   beacon account contact <acc-id> <name> [--role <text>] [--email <text>] [--phone <text>]   Add a contact to an account
@@ -1271,17 +1271,20 @@ cmd_account_nurturing() {
 
 cmd_account_list() {
     ensure_project
-    local json_flag="" as_project=""
+    local json_flag="" as_project="" linked=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
             # ms-113 e-3734: 「別 project から見たら何が見えるか」を実演する。
             # 指定 project の視点で開示可能な Account だけを fail-closed で絞る。
             --as-project) as_project="${2:-}"; shift 2 ;;
+            # ms-111 e-3872: 同じ組織の他 project に置かれ、この project に開示
+            # された Account を横断して取り込む (cross-project read, cloud mode)。
+            --linked) linked="1"; shift ;;
             *)      shift ;;
         esac
     done
-    BEACON_JSON="$json_flag" BEACON_AS_PROJECT="$as_project" \
+    BEACON_JSON="$json_flag" BEACON_AS_PROJECT="$as_project" BEACON_LINKED="$linked" \
         python3 "$COMMANDS_PY" account_list
 }
 

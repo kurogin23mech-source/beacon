@@ -28,9 +28,7 @@ import approved_actions as approved_actions_mod
 import core
 import org as org_mod  # ms-113 / e-3731: Organization (組織) テナンシー primitives
 import principal as principal_mod  # ms-113 / e-3732: 主体モデル + 実効スコープ合成
-# NOTE: lib/disclosure.py (e-3733/3738 開示プリミティブ) は現状 app.py に production
-# 呼び出し元が無い (= resource 層開示は ms-111 の Account 配線と連動)。unused import を
-# 避けるため、endpoint 配線が入るタイミングで import する (それまで lib 側で完結)。
+import disclosure as disclosure_mod  # ms-111 / e-3872: cross-project Account 開示の read 配線
 import work_model  # ms-109 e-3643: 職種非依存の Target 正準ラベル tolerant reader
 import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
 import dm_consent as dm_consent_mod  # ms-110 / e-3443: sender-side cross-user consent backstop
@@ -2129,6 +2127,46 @@ def get_project(project_id: str, slim: bool = False,
     # default は従来通り full 応答 (= CLI / Tauri IPC 等の既存 consumer 互換)。
     raw = _load(project_id, user)
     return _enrich_project_slim(raw) if slim else _enrich_project(raw)
+
+
+@app.get("/api/projects/{project_id}/disclosed-accounts")
+def get_disclosed_accounts(project_id: str, user: dict = Depends(require_auth)):
+    """現在のプロジェクト P に開示された、同じ組織の他プロジェクトの顧客(Account)を
+    横断して返す (ms-111 / e-3872 = cross-project read, 1 デプロイ内)。
+
+    ms-113 の開示モデルの read 側配線。P に link された Account を「P のメンバー」に
+    見せる。判定は各 Account の現在の ``project_links`` を ms-113 の開示プリミティブ
+    (``disclosure.can_disclose``) で評価する = 剥奪即時 / fail-closed。
+
+    スコープ (dogfood): 呼び出し user が member である同一 org の他プロジェクトから
+    集める (= 自分の営業/開発プロジェクト横断)。user が member でないプロジェクトに
+    住む Account を、link 先プロジェクト経由で読む「外部ゲスト cross-read」は本
+    endpoint の範囲外 (= 別 authz、follow-up)。ms-111 の cross-instance master store
+    は使わない (= 別デプロイ間同期は別途)。
+    """
+    # 1. lens プロジェクト P へのアクセス権を確認 (P の member でなければ 403/404)。
+    #    meta-only で足りる (milestones hydration 不要 = 高頻度経路の負荷を作らない)。
+    p_data = _load_meta_only(project_id, user)
+    lens_org = org_mod.project_org_id(p_data)
+    uid = user.get("sub", "")
+    disclosed: list[dict] = []
+    # 2. user が member の他プロジェクトを走査し、同一 org のものだけ対象にする。
+    for summ in (db.list_projects(uid) or []):
+        qid = summ.get("project_id") or summ.get("id")
+        if not qid or qid == project_id:
+            continue
+        q = db.get_project(qid)
+        if not q or org_mod.project_org_id(q) != lens_org:
+            continue
+        # 3. Q の Account のうち P に開示 (project_links に P を含む) されたものだけ。
+        for acc in q.get("accounts", []) or []:
+            if disclosure_mod.can_disclose(acc, {project_id}):
+                disclosed.append({
+                    **acc,
+                    "home_project_id": qid,
+                    "home_project_name": q.get("name", ""),
+                })
+    return {"project_id": project_id, "disclosed_accounts": disclosed}
 
 
 @app.get("/api/projects/{project_id}/milestones/{milestone_id}/entries")

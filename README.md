@@ -250,7 +250,7 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | Command | Description |
 |---------|-------------|
 | `beacon account add "<name>" [--health <text>]` | Add an account / 取引先を追加 |
-| `beacon account list [--json] [--as-project <id>]` | List accounts and their contacts; `--as-project` shows only accounts disclosed to that project (fail-closed) / 取引先を一覧、`--as-project` はそのプロジェクトから見える取引先だけ表示 |
+| `beacon account list [--json] [--as-project <id>] [--linked]` | List accounts; `--as-project` shows only accounts disclosed to that project (fail-closed); `--linked` pulls accounts disclosed to THIS project from other org projects (cloud) / 取引先を一覧、`--as-project` はそのプロジェクト視点、`--linked` は他プロジェクトからこのプロジェクトに開示された取引先を取り込み |
 | `beacon account contact <acc-id> <name> [--role <text>] [--email <text>] [--phone <text>]` | Add a contact to an account / 取引先に担当者を追加 |
 | `beacon account phase <acc-id> <phase> [--note <text>]` | Declare an account lifecycle phase transition (append-only) / 取引先のフェーズを記録（追記のみ） |
 | `beacon account rename <acc-id> <new-name>` | Rename an account / 取引先名を変更 |
