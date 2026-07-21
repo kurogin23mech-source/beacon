@@ -55,8 +55,8 @@ Tasks & Progress:
 Sales (profession=sales):
   beacon account add "<name>" [--health <text>] [--assignee <user>]   Add an account (customer / company)
   beacon account list [--json] [--as-project <id>] [--linked]   List accounts; --as-project = only ones disclosed to that project; --linked = accounts disclosed to THIS project from other org projects (cloud)
-  beacon account link <acc-id> --project <id>                Disclose an account to another project (cross-project 参照を許可)
-  beacon account unlink <acc-id> --project <id>              Revoke an account's disclosure to a project (剥奪即時)
+  beacon disclose <resource-id> --to-project <id>            Disclose any Target (account/opportunity/…) to another project (cross-project 参照を許可)
+  beacon undisclose <resource-id> --from-project <id>        Revoke a Target's disclosure to a project (剥奪即時)
   beacon account contact <acc-id> <name> [--role <text>] [--email <text>] [--phone <text>]   Add a contact to an account
   beacon account phase <acc-id> <phase> [--note <text>]      Declare an account lifecycle phase transition
   beacon account rename <acc-id> <new-name>                  Rename an account
@@ -1195,41 +1195,43 @@ cmd_account_rename() {
 }
 
 # ms-113 e-3734: Account の cross-project 開示リンク管理。
-cmd_account_link() {
+# ms-113 generalization: 任意の Target を cross-project 開示する汎用動詞。
+# 旧 `beacon account link/unlink` を id で任意 Target を引く形に持ち上げた。
+cmd_disclose() {
     ensure_project
-    local acc_id="" project=""
+    local resource_id="" project=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --project) project="${2:-}"; shift 2 ;;
-            -?*) _guard_positional "$1" "Usage: beacon account link <acc-id> --project <project-id>" ;;
-            *)   if [ -z "$acc_id" ]; then acc_id="$1"; fi; shift ;;
+            --to-project|--project) project="${2:-}"; shift 2 ;;
+            -?*) _guard_positional "$1" "Usage: beacon disclose <resource-id> --to-project <project-id>" ;;
+            *)   if [ -z "$resource_id" ]; then resource_id="$1"; fi; shift ;;
         esac
     done
-    if [ -z "$acc_id" ] || [ -z "$project" ]; then
-        echo "Usage: beacon account link <acc-id> --project <project-id>"
-        echo "  その project のメンバーが、この Account を参照できるようにする (cross-project 開示)。"
+    if [ -z "$resource_id" ] || [ -z "$project" ]; then
+        echo "Usage: beacon disclose <resource-id> --to-project <project-id>"
+        echo "  その project のメンバーが、この Target (顧客/商談/MS 等) を参照できるようにする (cross-project 開示)。"
         exit 1
     fi
-    BEACON_ACCOUNT_ID="$acc_id" BEACON_LINK_PROJECT="$project" \
-        python3 "$COMMANDS_PY" account_link
+    BEACON_DISCLOSE_ID="$resource_id" BEACON_DISCLOSE_PROJECT="$project" \
+        python3 "$COMMANDS_PY" disclose
 }
 
-cmd_account_unlink() {
+cmd_undisclose() {
     ensure_project
-    local acc_id="" project=""
+    local resource_id="" project=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --project) project="${2:-}"; shift 2 ;;
-            -?*) _guard_positional "$1" "Usage: beacon account unlink <acc-id> --project <project-id>" ;;
-            *)   if [ -z "$acc_id" ]; then acc_id="$1"; fi; shift ;;
+            --from-project|--project) project="${2:-}"; shift 2 ;;
+            -?*) _guard_positional "$1" "Usage: beacon undisclose <resource-id> --from-project <project-id>" ;;
+            *)   if [ -z "$resource_id" ]; then resource_id="$1"; fi; shift ;;
         esac
     done
-    if [ -z "$acc_id" ] || [ -z "$project" ]; then
-        echo "Usage: beacon account unlink <acc-id> --project <project-id>"
+    if [ -z "$resource_id" ] || [ -z "$project" ]; then
+        echo "Usage: beacon undisclose <resource-id> --from-project <project-id>"
         exit 1
     fi
-    BEACON_ACCOUNT_ID="$acc_id" BEACON_LINK_PROJECT="$project" \
-        python3 "$COMMANDS_PY" account_unlink
+    BEACON_DISCLOSE_ID="$resource_id" BEACON_DISCLOSE_PROJECT="$project" \
+        python3 "$COMMANDS_PY" undisclose
 }
 
 cmd_account_assign() {
@@ -3053,11 +3055,11 @@ case "${1:-}" in
             assign)  shift 2; cmd_account_assign "$@" ;;
             nurturing) shift 2; cmd_account_nurturing "$@" ;;
             delete)  shift 2; cmd_account_delete "$@" ;;
-            link)    shift 2; cmd_account_link "$@" ;;
-            unlink)  shift 2; cmd_account_unlink "$@" ;;
-            *)       echo "Usage: beacon account [add|list|contact|phase|rename|assign|nurturing|link|unlink|delete]" ;;
+            *)       echo "Usage: beacon account [add|list|contact|phase|rename|assign|nurturing|delete]  (cross-project 開示は: beacon disclose <acc-id> --to-project <id>)" ;;
         esac
         ;;
+    disclose)   shift; cmd_disclose "$@" ;;
+    undisclose) shift; cmd_undisclose "$@" ;;
     acquisition|acq)
         case "${2:-}" in
             add)      shift 2; cmd_acquisition_add "$@" ;;

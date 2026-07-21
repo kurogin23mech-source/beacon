@@ -495,8 +495,9 @@ def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
     ``owner_org_id`` 未指定なら project の org (``org.project_org_id``) から
     決定的に導出する。``project_links`` は空で始まる = 生成時点では **home
     project 内でのみ見える** (home project の read は既存の project 認可が
-    ゲートするので、空でも従来通り見える)。別 project から参照させたい時に
-    ``account_link_project`` で明示 link する (= opt-in の cross-project 開示)。
+    ゲートするので、空でも従来通り見える)。別 project から参照させたい時は
+    ``beacon disclose <acc-id> --to-project <P>`` (汎用 target_disclosure 層) で
+    明示リンクする (= opt-in の cross-project 開示)。
     """
     if not name or not name.strip():
         raise ValueError("Account name is required")
@@ -530,30 +531,10 @@ def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
     return acc_id
 
 
-def account_link_project(data: dict, account_id: str, project_id: str) -> bool:
-    """Account を別 project に開示リンクする (ms-113 e-3734)。
-
-    link した project のメンバーは、その project から Account を参照できるように
-    なる (= cross-project 開示の opt-in 付与)。追加したら True、既存なら False。
-    home project (Account が物理的に住む project) の read は既存 project 認可で
-    ゲートされるので link 不要 — link は「別 project から見せる」ためのもの。
-    """
-    acc = find_account(data, account_id)
-    if acc is None:
-        raise ValueError(f"Account not found: {account_id}")
-    return disclosure.link_resource_to_project(acc, project_id)
-
-
-def account_unlink_project(data: dict, account_id: str, project_id: str) -> bool:
-    """Account の project 開示リンクを外す (ms-113 e-3734)。
-
-    外した瞬間から、その project のメンバーは Account を参照できなくなる
-    (= query 時評価なので剥奪即時)。外したら True、無ければ False。
-    """
-    acc = find_account(data, account_id)
-    if acc is None:
-        raise ValueError(f"Account not found: {account_id}")
-    return disclosure.unlink_resource_from_project(acc, project_id)
+# ms-113 generalization: Account 専用だった link/unlink は、任意の Target を開示する
+# 汎用層 `target_disclosure.disclose_target` / `undisclose_target` に持ち上げた
+# (開示は project_links への add/remove で どの Target でも同一のため)。ここには
+# 読み出し側の listing フィルタ (accounts_disclosable_from) だけ残す。
 
 
 def accounts_disclosable_from(accounts: list, requesting_project_id: str,

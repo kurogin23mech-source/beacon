@@ -16,6 +16,9 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import sales_entities as se  # noqa: E402
+# ms-113 generalization: link/unlink は Account 専用 helper から、任意 Target を
+# 開示する汎用層 (target_disclosure) に移した。テストもそちら経由に更新。
+import target_disclosure as td  # noqa: E402
 import disclosure  # noqa: E402
 
 
@@ -61,7 +64,7 @@ def test_cross_project_unlinked_is_invisible_failclosed():
 def test_cross_project_linked_is_visible():
     data = _project()
     acc_id = se.account_add(data, "A", phase="リード")
-    assert se.account_link_project(data, acc_id, "proj-dev") is True
+    assert td.disclose_target(data, acc_id, "proj-dev") is True
     visible = se.accounts_disclosable_from(data["accounts"], "proj-dev", is_home=False)
     assert len(visible) == 1
     assert visible[0]["id"] == acc_id
@@ -72,18 +75,18 @@ def test_cross_project_linked_is_visible():
 def test_unlink_revokes_immediately():
     data = _project()
     acc_id = se.account_add(data, "A", phase="リード")
-    se.account_link_project(data, acc_id, "proj-dev")
+    td.disclose_target(data, acc_id, "proj-dev")
     assert len(se.accounts_disclosable_from(data["accounts"], "proj-dev")) == 1
     # unlink した瞬間 (次の query 評価) から見えない = 剥奪即時。
-    assert se.account_unlink_project(data, acc_id, "proj-dev") is True
+    assert td.undisclose_target(data, acc_id, "proj-dev") is True
     assert se.accounts_disclosable_from(data["accounts"], "proj-dev") == []
 
 
 def test_link_is_idempotent_and_identity_not_duplicated():
     data = _project()
     acc_id = se.account_add(data, "A", phase="リード")
-    assert se.account_link_project(data, acc_id, "proj-dev") is True
-    assert se.account_link_project(data, acc_id, "proj-dev") is False  # 既存 link
+    assert td.disclose_target(data, acc_id, "proj-dev") is True
+    assert td.disclose_target(data, acc_id, "proj-dev") is False  # 既存 link
     # Account は 1 個のまま (複製されない、複数 project に link されるだけ)。
     assert len(data["accounts"]) == 1
     assert set(se.find_account(data, acc_id)[disclosure.PROJECT_LINKS_FIELD]) == {"proj-dev"}
@@ -92,7 +95,7 @@ def test_link_is_idempotent_and_identity_not_duplicated():
 def test_link_unknown_account_raises():
     data = _project()
     try:
-        se.account_link_project(data, "acc-999", "proj-x")
+        td.disclose_target(data, "acc-999", "proj-x")
         assert False, "expected ValueError"
     except ValueError:
         pass

@@ -256,8 +256,8 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon account rename <acc-id> <new-name>` | Rename an account / 取引先名を変更 |
 | `beacon account assign <acc-id> <user>` | Set the assignee (担当ユーザー) on an account / 取引先の担当ユーザーを設定 |
 | `beacon account nurturing <acc-id> <desc> [--deadline <date>] [--ball self\|counterpart]` | Add a nurturing task on an account (継続関係の業務) / 取引先にナーチャリング業務を追加 |
-| `beacon account link <acc-id> --project <id>` | Disclose an account to another project so its members can reference it (cross-project 開示) / 取引先を別プロジェクトに開示（そのプロジェクトから参照可能に） |
-| `beacon account unlink <acc-id> --project <id>` | Revoke an account's disclosure to a project (剥奪即時) / 取引先の開示を取り消し（即時） |
+| `beacon disclose <resource-id> --to-project <id>` | Disclose any Target (account/opportunity/…) to another project so its members can reference it (cross-project 開示; generic) / 任意のターゲット（取引先・商談等）を別プロジェクトに開示 |
+| `beacon undisclose <resource-id> --from-project <id>` | Revoke a Target's disclosure to a project (剥奪即時) / ターゲットの開示を取り消し（即時） |
 | `beacon account delete <acc-id> [--force]` | Delete an account (--force orphans referencing opportunities) / 取引先を削除（--force で参照中の商談を孤立化） |
 | `beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self\|counterpart]` | Add a deal / 商談を追加 |
 | `beacon opportunity list [--json]` | List opportunities / 商談を一覧 |
