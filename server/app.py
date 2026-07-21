@@ -11299,15 +11299,19 @@ async def ws_project(websocket: WebSocket, project_id: str):
             await websocket.close(code=4429, reason="too_many_connections")
             return
 
-    await websocket.accept()
-
-    # accept 後の登録 (_ws_connections への追加 / ws_register / ws_ready 送信 /
-    # watcher 起動) を try の中で行い、途中で例外が出ても finally が必ず走って
+    # accept とその後の登録 (_ws_connections への追加 / ws_register / ws_ready
+    # 送信 / watcher 起動) を try の中で行い、途中で例外が出ても finally が必ず走って
     # in-process set と Redis 台帳の両方を後片付けする。登録を try の外でやると、
     # 例えば send_json 直後に client が TCP を切って例外が飛んだとき ws_unregister
     # が漏れ、死んだ session が最大 TTL(60s) 間 live=True と誤判定される
     # (ms-101 review finding の是正)。
+    # e-3834 — accept も try の内側に入れる。上で予約した接続数上限のスロット
+    # (_ws_session_conns) は、accept が例外を投げても finally で必ず解放される必要が
+    # ある。accept を try の外に置くと、ストーム中に client がハンドシェイク途中で
+    # 切って accept が投げたとき予約が台帳に漏れ、その session が幻の予約で恒久的に
+    # cap 超過扱いになり正常な再接続まで永久に弾かれる (self-review で発見)。
     try:
+        await websocket.accept()
         if project_id not in _ws_connections:
             _ws_connections[project_id] = set()
         _ws_connections[project_id].add(websocket)
