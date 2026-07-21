@@ -142,6 +142,18 @@ def remove_org_member(org: dict, user_id: str) -> bool:
     return True
 
 
+def is_external_guest(org: dict, user_id: str, *, participates_in_project: bool) -> bool:
+    """user が「外部ゲスト」か = 或る project に参加しているが org の member ではない
+    (ms-113 / e-3735, Notion guest 相当)。
+
+    開示は project 参加でのみ与えられる (e-3733) ので、org member にしなくても特定
+    project にだけ招待すれば、その guest は招待された project の情報だけが見える
+    (= 他 project は参加していないので開示されない)。本 helper はその状態を分類
+    するだけで、可否判定そのものは participation-gated な開示プリミティブが行う。
+    """
+    return bool(participates_in_project) and not is_org_member(org, user_id)
+
+
 def project_org_id(project: dict) -> str:
     """project の所属 org_id を返す (= lazy retrofit の純粋導出)。
 

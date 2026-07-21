@@ -27,6 +27,8 @@ from starlette.responses import Response, JSONResponse
 import approved_actions as approved_actions_mod
 import core
 import org as org_mod  # ms-113 / e-3731: Organization (組織) テナンシー primitives
+import principal as principal_mod  # ms-113 / e-3732: 主体モデル + 実効スコープ合成
+import disclosure as disclosure_mod  # ms-113 / e-3733: project 参加ベースの開示
 import work_model  # ms-109 e-3643: 職種非依存の Target 正準ラベル tolerant reader
 import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
 import dm_consent as dm_consent_mod  # ms-110 / e-3443: sender-side cross-user consent backstop
@@ -504,6 +506,56 @@ def _ensure_personal_org(user_id: str, email: str = "") -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# Principal (主体) の解決と伝播 (ms-113 / e-3732, e-3733).
+#
+# principal は request の claims から **store I/O 無し** で組み立て、request.state
+# に載せて伝播させる (= require_auth の hot path を汚さない)。開示判定に必要な
+# 「実効スコープ (= 触れてよい project 集合)」は participation の解決を伴うので、
+# それが要る endpoint だけが _effective_scope_for を lazy に呼ぶ。
+# ---------------------------------------------------------------------------
+
+def _build_request_principal(claims: dict, *, focus: str | None = None,
+                             agent_kind: str = principal_mod.AGENT_CLIENT) -> dict:
+    """claims から client principal を組み立てる (cheap, no store I/O)。"""
+    uid = claims.get("sub", "") if claims else ""
+    org_id = org_mod.personal_org_id(uid) if uid else ""
+    return principal_mod.make_principal(
+        uid, org_id, agent_kind=agent_kind, focus=focus)
+
+
+def _user_participation(user_id: str) -> set[str]:
+    """user が参加している project 集合を返す (= 開示境界の真値)。
+
+    owner か members に居る project。``db.list_projects`` が既にこの可視性で絞る。
+    query 時に評価する (= 現在の membership で判定 ⇒ 剥奪即時 / grandfather しない、
+    e-3733)。fail-safe: 解決失敗は空集合 (= 何も開示しない安全側)。
+    """
+    if not user_id:
+        return set()
+    try:
+        projs = db.list_projects(user_id) or []
+    except Exception:
+        return set()
+    ids: set[str] = set()
+    for p in projs:
+        pid = p.get("project_id") or p.get("id")
+        if pid:
+            ids.add(pid)
+    return ids
+
+
+def _effective_scope_for(principal: dict) -> set[str]:
+    """principal の実効 project 集合を、いま解決した participation を用いて返す。
+
+    client principal 専用の facade (= endpoint が「この user に何が見えるか」を得る
+    入口)。backend principal の min 合成は work-unit / originating を持つ呼び出し
+    側が ``principal_mod.backend_effective_scope`` を直接使う。
+    """
+    participation = _user_participation((principal or {}).get("user_id", ""))
+    return principal_mod.client_effective_scope(principal or {}, participation)
+
+
 async def require_auth(
     request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer_scheme),
@@ -512,7 +564,10 @@ async def require_auth(
     if not _auth_enabled:
         request.state.audit_user_id = "dev"
         request.state.audit_email = "dev@local"
-        return {"sub": "dev", "email": "dev@local"}
+        dev_claims = {"sub": "dev", "email": "dev@local"}
+        # ms-113 / e-3732: propagate a principal even in dev mode (cheap, no I/O).
+        request.state.principal = _build_request_principal(dev_claims)
+        return dev_claims
     if credentials is None:
         raise HTTPException(status_code=401, detail="Authorization header required")
     claims = _verify_id_token(credentials.credentials)
@@ -527,6 +582,10 @@ async def require_auth(
     # Store for audit middleware
     request.state.audit_user_id = user_id
     request.state.audit_email = email
+    # ms-113 / e-3732: build + propagate the client principal on request state.
+    # Cheap (no store I/O); endpoints resolve effective scope lazily via
+    # _effective_scope_for when they actually need disclosure filtering.
+    request.state.principal = _build_request_principal(claims)
     return claims
 
 
