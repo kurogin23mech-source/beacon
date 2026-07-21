@@ -38,6 +38,8 @@ from typing import Optional
 
 import work_base
 import work_model  # ms-109 e-3559: 職種非依存の Target/WorkItem 正準アクセサ
+import disclosure  # ms-113 e-3734: project 参加ベースの開示プリミティブ
+import org  # ms-113 e-3734: personal/team org id 導出
 
 # 取消 (cancelled) 状態は基底 work_base の語彙に揃える (ms-109 e-3558)。営業の
 # activity / communication の「誤起票の訂正」(e-3537) と Meeting の cancelled が
@@ -474,7 +476,8 @@ def find_opportunity(data: dict, opportunity_id: str) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
-                assignee: str = "", created_at: str = "") -> str:
+                assignee: str = "", created_at: str = "",
+                owner_org_id: str = "") -> str:
     """Append a new Account (対象・継続) and return its id.
 
     Account carries a lifecycle ``phase`` (リード → 未成約顧客 → 成約顧客) with
@@ -486,6 +489,14 @@ def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
     account. ``nurturings`` は 商談 (Opportunity) を持たない継続関係に対する
     ナーチャリング業務 (業務・事前計画型) を Account に直接ぶら下げる入れ物
     (ms-106 fb3、Opportunity.activities の継続 target 版)。
+
+    ms-113 e-3734 (顧客DBの cross-project 参照): Account に所有 org
+    (``owner_org_id``) と開示先 project 集合 (``project_links``) を持たせる。
+    ``owner_org_id`` 未指定なら project の org (``org.project_org_id``) から
+    決定的に導出する。``project_links`` は空で始まる = 生成時点では **home
+    project 内でのみ見える** (home project の read は既存の project 認可が
+    ゲートするので、空でも従来通り見える)。別 project から参照させたい時に
+    ``account_link_project`` で明示 link する (= opt-in の cross-project 開示)。
     """
     if not name or not name.strip():
         raise ValueError("Account name is required")
@@ -499,6 +510,8 @@ def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
     # has no generic ``status`` (継続 / never-terminal, tracked by phase); that
     # extraction is staged pending the sales model stabilising (SPEC 方針3).
     created_at = created_at or work_base.now_iso()
+    # ms-113 e-3734: 所有 org を project から導出 (明示指定が優先)。
+    owner_org = owner_org_id or org.project_org_id(data)
     data["accounts"].append({
         "id": acc_id,
         "name": name.strip(),
@@ -510,8 +523,55 @@ def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
         "contacts": [],
         "nurturings": [],
         "created_at": created_at,
+        # ms-113 e-3734: org 所有 identity + 開示先 project リンク集合。
+        disclosure.OWNER_ORG_FIELD: owner_org,
+        disclosure.PROJECT_LINKS_FIELD: [],
     })
     return acc_id
+
+
+def account_link_project(data: dict, account_id: str, project_id: str) -> bool:
+    """Account を別 project に開示リンクする (ms-113 e-3734)。
+
+    link した project のメンバーは、その project から Account を参照できるように
+    なる (= cross-project 開示の opt-in 付与)。追加したら True、既存なら False。
+    home project (Account が物理的に住む project) の read は既存 project 認可で
+    ゲートされるので link 不要 — link は「別 project から見せる」ためのもの。
+    """
+    acc = find_account(data, account_id)
+    if acc is None:
+        raise ValueError(f"Account not found: {account_id}")
+    return disclosure.link_resource_to_project(acc, project_id)
+
+
+def account_unlink_project(data: dict, account_id: str, project_id: str) -> bool:
+    """Account の project 開示リンクを外す (ms-113 e-3734)。
+
+    外した瞬間から、その project のメンバーは Account を参照できなくなる
+    (= query 時評価なので剥奪即時)。外したら True、無ければ False。
+    """
+    acc = find_account(data, account_id)
+    if acc is None:
+        raise ValueError(f"Account not found: {account_id}")
+    return disclosure.unlink_resource_from_project(acc, project_id)
+
+
+def accounts_disclosable_from(accounts: list, requesting_project_id: str,
+                              *, is_home: bool = False) -> list:
+    """別 project から参照したとき、開示してよい Account だけに絞る (ms-113 e-3734)。
+
+    - ``is_home=True`` (= 自 project の Account を自 project から読む) の場合は
+      **絞らない** (= home read は既存 project 認可がゲート、従来通り全件見える)。
+    - ``is_home=False`` (= cross-project 参照) の場合は fail-closed で、
+      ``project_links`` に ``requesting_project_id`` を含む Account だけ返す。
+      link されていない Account は「どうやっても見えない」(= あなたの要求どおり)。
+
+    判定は呼び出し時の現在の ``project_links`` で行う (= link 剥奪が即反映)。
+    """
+    if is_home:
+        return list(accounts or [])
+    scope = {requesting_project_id} if requesting_project_id else set()
+    return disclosure.filter_disclosable(accounts or [], scope)
 
 
 def contact_add(data: dict, account_id: str, name: str, *,
