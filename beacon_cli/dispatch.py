@@ -418,6 +418,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_sales_target.add_argument("amount", nargs="?", default="")
     p_sales_target.add_argument("--json", action="store_true")
 
+    # ---- acquisition (ms-115: 顧客獲得ターゲット, profession=sales) ----
+    p_acq = sub.add_parser(
+        "acquisition", aliases=["acq"], help="顧客獲得ターゲット operations",
+        add_help=False,
+    )
+    p_acq.add_argument("--help", "-h", action="store_true", dest="show_help")
+    acq_sub = p_acq.add_subparsers(dest="acq_cmd", metavar="<subcmd>")
+    p_acq_add = acq_sub.add_parser("add", add_help=False)
+    p_acq_add.add_argument("title", nargs="?", default="")
+    p_acq_add.add_argument("--description", "--desc", dest="description", default="")
+    p_acq_add.add_argument("--assignee", default="")
+    acq_sub.add_parser("list", aliases=["ls"], add_help=False).add_argument(
+        "--json", action="store_true"
+    )
+    p_acq_status = acq_sub.add_parser("status", add_help=False)
+    p_acq_status.add_argument("acq_id", nargs="?", default="")
+    p_acq_status.add_argument("status", nargs="?", default="")
+
     # ---- opportunity (ms-106: sales entities, profession=sales) ----
     p_opp = sub.add_parser(
         "opportunity", aliases=["opp"], help="Sales opportunity operations",
@@ -2003,6 +2021,40 @@ def _handle_account(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "account_nurturing", env)
     print("Usage: beacon account "
           "[add|list|contact|phase|delete|rename|assign|nurturing] [options]")
+    return 2
+
+
+def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
+    # ms-115 e-3786/e-3790: 顧客獲得ターゲット (取引先の無い獲得・準備作業の器)。
+    if args.show_help or args.acq_cmd is None:
+        print("Usage: beacon acquisition [add|list|status] [options]")
+        return 0 if args.show_help else 2
+    if (rc := _ensure_project()) is not None:
+        return rc
+    cmd = args.acq_cmd
+    if cmd == "add":
+        if not args.title:
+            print('Usage: beacon acquisition add "<title>" '
+                  '[--description <text>] [--assignee <user>]')
+            return 1
+        env = {
+            "BEACON_ACQ_TITLE": args.title or "",
+            "BEACON_ACQ_DESCRIPTION": args.description or "",
+            "BEACON_ACQ_ASSIGNEE": args.assignee or "",
+        }
+        return _run_commands_py(root, "acquisition_add", env)
+    if cmd in ("list", "ls"):
+        return _run_commands_py(root, "acquisition_list",
+                                {"BEACON_JSON": "1" if args.json else ""})
+    if cmd == "status":
+        if not args.acq_id or not args.status:
+            print("Usage: beacon acquisition status <acq-id> "
+                  "<todo|in_progress|observing|done>")
+            return 1
+        env = {"BEACON_ACQ_ID": args.acq_id or "",
+               "BEACON_ACQ_STATUS": args.status or ""}
+        return _run_commands_py(root, "acquisition_status", env)
+    print("Usage: beacon acquisition [add|list|status] [options]")
     return 2
 
 
@@ -4673,6 +4725,8 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     # ms-106: sales entities (profession=sales)
     "account": _handle_account,
     "acc": _handle_account,
+    "acquisition": _handle_acquisition,  # ms-115: 顧客獲得ターゲット
+    "acq": _handle_acquisition,
     "opportunity": _handle_opportunity,
     "opp": _handle_opportunity,
     "communication": _handle_communication,
