@@ -28,7 +28,9 @@ import approved_actions as approved_actions_mod
 import core
 import org as org_mod  # ms-113 / e-3731: Organization (組織) テナンシー primitives
 import principal as principal_mod  # ms-113 / e-3732: 主体モデル + 実効スコープ合成
-import disclosure as disclosure_mod  # ms-113 / e-3733: project 参加ベースの開示
+# NOTE: lib/disclosure.py (e-3733/3738 開示プリミティブ) は現状 app.py に production
+# 呼び出し元が無い (= resource 層開示は ms-111 の Account 配線と連動)。unused import を
+# 避けるため、endpoint 配線が入るタイミングで import する (それまで lib 側で完結)。
 import work_model  # ms-109 e-3643: 職種非依存の Target 正準ラベル tolerant reader
 import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
 import dm_consent as dm_consent_mod  # ms-110 / e-3443: sender-side cross-user consent backstop
