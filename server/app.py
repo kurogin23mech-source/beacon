@@ -10574,6 +10574,15 @@ _event_loop: asyncio.AbstractEventLoop | None = None
 # られるようにしてある。
 _WS_IDLE_TIMEOUT_SECONDS = 90
 
+# e-3834 — per-(project, session) の同時 WebSocket 接続数の上限。1 つのセッションの
+# bridge が再接続を暴走させ、接続を 14,000 本超まで積み上げて server を OOM→全
+# ユーザー 502 に落とした障害の構造防御。1 クライアントの異常再接続が他ユーザーの
+# HTTP を巻き添えにしないための負荷隔離でもある。正常な bridge は 1 接続 (再接続の
+# 重なりで一時的に 2)。8 は十分な余裕を持たせつつ OOM 域から遠い上限。session_id を
+# 申告しない Web UI 接続はこの台帳に載らない (= 上限の対象外、複数タブを許容)。
+_WS_MAX_CONNS_PER_SESSION = 8
+_ws_session_conns: dict[tuple[str, str], set[str]] = {}
+
 
 @app.on_event("startup")
 async def _capture_event_loop():
@@ -11214,6 +11223,13 @@ async def ws_project(websocket: WebSocket, project_id: str):
                                   should stop reconnecting and surface a
                                   clear "this project doesn't exist or has
                                   been deleted" message.
+      4429  TOO MANY CONNECTIONS — this (project, session) already holds the
+            (reason="too_many_connections")
+                                  per-session connection cap
+                                  (_WS_MAX_CONNS_PER_SESSION). Client MUST
+                                  back off hard before retrying — a runaway
+                                  reconnect once opened >14k sockets and
+                                  OOM-ed the server (e-3834).
 
     All codes are in the application-private range (4000–4999) so they do
     not collide with standard WebSocket close codes. The browser exposes them
@@ -11259,13 +11275,31 @@ async def ws_project(websocket: WebSocket, project_id: str):
             await websocket.close(code=4403, reason="forbidden")
         return
 
-    await websocket.accept()
-
-    # 接続の識別子。純粋な値計算 (I/O なし) なので try の前で確定させ、下の
-    # finally が discard / ws_unregister で参照できるようにする。
+    # 接続の識別子。純粋な値計算 (I/O なし)。finally が discard / ws_unregister で
+    # 参照するため try の前で確定させる。accept より前に確定させるのは、下の接続数
+    # 上限チェックを accept 前に行い、超過分は accept せず即 close するため。
     conn_id = uuid.uuid4().hex
     session_id = websocket.query_params.get("session_id") or ""
     _registry_enabled = bool(session_id)
+
+    # e-3834 — per-(project, session) 同時接続上限の enforce。reserve-then-check:
+    # 予約 (set への add) と判定を await を挟まない同期区間で行うことで、暴走
+    # クライアントの burst 接続が同時に上限チェックをすり抜けて超過するのを防ぐ。
+    # 超過なら予約を戻し、accept せず 4429 (too_many_connections) で閉じる。正常な
+    # クライアントはこの close code を受けて backoff する。session_id 申告なし (=
+    # Web UI) は対象外。ここで登録した conn_id は finally で必ず外す。
+    if _registry_enabled:
+        _sess_key = (project_id, session_id)
+        _sess_conns = _ws_session_conns.setdefault(_sess_key, set())
+        _sess_conns.add(conn_id)
+        if len(_sess_conns) > _WS_MAX_CONNS_PER_SESSION:
+            _sess_conns.discard(conn_id)
+            if not _sess_conns:
+                _ws_session_conns.pop(_sess_key, None)
+            await websocket.close(code=4429, reason="too_many_connections")
+            return
+
+    await websocket.accept()
 
     # accept 後の登録 (_ws_connections への追加 / ws_register / ws_ready 送信 /
     # watcher 起動) を try の中で行い、途中で例外が出ても finally が必ず走って
@@ -11341,6 +11375,14 @@ async def ws_project(websocket: WebSocket, project_id: str):
         _stop_watcher(project_id)
         if _registry_enabled:
             redis_client.ws_unregister(project_id, session_id, conn_id)
+            # e-3834 — 接続数上限台帳からも外す。空になった key は dict から除去して
+            # session 台帳が無限に増えないようにする。
+            _sess_key = (project_id, session_id)
+            _sess_set = _ws_session_conns.get(_sess_key)
+            if _sess_set is not None:
+                _sess_set.discard(conn_id)
+                if not _sess_set:
+                    _ws_session_conns.pop(_sess_key, None)
 
 
 # ---------------------------------------------------------------------------
