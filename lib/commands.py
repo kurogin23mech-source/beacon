@@ -19357,6 +19357,64 @@ def _find_swap_candidate(
     return None
 
 
+def _resolve_recipient_email_via_self_sessions(recipient: str) -> str:
+    """Return an email for ``recipient`` iff it is one of the caller's OWN sessions.
+
+    e-3880: the live-directory path (``_resolve_recipient_live``) only surfaces
+    ``actor.email`` when the recipient's session document happens to carry it —
+    and that field is stamped separately (``stamp_session_actor_email``), so a
+    session minted purely from a heartbeat (``machine=None`` etc.) can be live
+    yet have a blank email. When that happens, a same-user cross-project reply
+    (which the server dm_gate permits) gets misclassified as 外部宛 and held in
+    armed mode — the exact non-determinism this fixes.
+
+    The robust fallback: ``GET /api/me/sessions`` (``list_user_sessions``) returns
+    ONLY the calling user's own sessions across all their projects (the server
+    scopes it via ``db.list_projects(user_id=uid)``). So if the recipient sid is
+    present in that set, the recipient is — by construction — the SAME user as
+    the sender. We then return the sender's own login email as the recipient
+    identity, guaranteeing ``_same_user`` fires even when the session doc's
+    ``actor.email`` was never stamped. (If the found row does carry an
+    ``actor.email`` we prefer that, but the sender email is a safe floor since
+    membership already proves same-user.)
+
+    Returns ``""`` when the sid is NOT one of the caller's own sessions (= a
+    genuinely external recipient, or lookup unavailable) so the caller keeps the
+    conservative 外部 default. Never raises — any failure degrades to ``""``.
+    """
+    if not recipient:
+        return ""
+    try:
+        # BaseException, not Exception: _get_api_client does sys.exit(1) (=
+        # SystemExit) when there's no login / cloud.json. A best-effort
+        # identity resolver must degrade to "" there, never abort the send.
+        client, _config = _get_api_client()
+    except BaseException:
+        return ""
+    try:
+        # since_minutes only matters with live_only; unfiltered we get every
+        # session of the caller (across projects). 1 day keeps a just-stopped
+        # sibling visible without live-filtering it out.
+        my_sessions = client.list_user_sessions(since_minutes=1440)
+    except Exception:
+        return ""
+    for s in my_sessions or []:
+        if s.get("session_id") != recipient:
+            continue
+        # Same user by construction (this endpoint only returns the caller's
+        # own sessions). Prefer the row's stamped email if present, else fall
+        # back to the caller's own login email.
+        row_email = str((s.get("actor") or {}).get("email") or "").strip()
+        if row_email:
+            return row_email
+        try:
+            _, sender_email, _ = _resolve_creator_identity()
+        except Exception:
+            sender_email = ""
+        return str(sender_email or "").strip()
+    return ""
+
+
 def _resolve_recipient_live(
     recipient: str, channel: str
 ) -> Tuple[str, Optional[str]]:
@@ -19423,6 +19481,12 @@ def _resolve_recipient_live(
             # qual gate can recognise a same-user cross-project DM and not
             # over-block it as 外部宛. This reuses the live-check we already ran.
             row_email = str((row.get("actor") or {}).get("email") or "")
+            if not row_email:
+                # e-3880: the live directory row can lack a stamped
+                # actor.email (heartbeat-only session). Fall back to the
+                # sid→user resolution so a same-user cross-project reply is
+                # still recognised and not held in armed mode.
+                row_email = _resolve_recipient_email_via_self_sessions(recipient)
             return (recipient, None, row_email)  # live + healthy, all good
 
     # Not in the live+healthy set. Try auto-swap before falling back to
@@ -19447,6 +19511,10 @@ def _resolve_recipient_live(
         )
         print(f"⇄ {notice}", file=sys.stderr)
         swap_email = str(actor.get("email") or "")
+        if not swap_email:
+            # e-3880: swap target's row can also lack a stamped email; resolve
+            # via the caller's own sessions so same-user免除 still fires.
+            swap_email = _resolve_recipient_email_via_self_sessions(new_sid)
         return (new_sid, notice, swap_email)
 
     # Stale + no swap candidate (= zero or multiple matches, or owner
@@ -19471,7 +19539,11 @@ def _resolve_recipient_live(
         f"BEACON_BUS_REFUSE_STALE=1 to hard-refuse instead.)",
         file=sys.stderr,
     )
-    return (recipient, None, "")
+    # e-3880: the recipient may be a same-user session that simply isn't in the
+    # live+healthy set right now (just stopped, poll stale). Still resolve the
+    # identity via the caller's own sessions so a same-user cross-project reply
+    # is not held in armed mode purely because the target wasn't "healthy".
+    return (recipient, None, _resolve_recipient_email_via_self_sessions(recipient))
 
 
 def _check_recipient_live_health(recipient: str, channel: str) -> None:

@@ -103,7 +103,9 @@ function loadEmail() {
 // (server stamps actor.email from the bearer token). Lets the reply qual gate
 // compare sender vs recipient identity. Best-effort: any failure → '' so the
 // gate falls back to treating the cross-project send as 外部 (safe default).
-async function resolveRecipientEmail(recipientProjectId, recipientSessionId) {
+async function resolveRecipientEmail(
+  recipientProjectId, recipientSessionId, senderEmail = '',
+) {
   if (!recipientProjectId || !recipientSessionId) return ''
   try {
     const rows = await apiGet(
@@ -112,11 +114,32 @@ async function resolveRecipientEmail(recipientProjectId, recipientSessionId) {
     const list = Array.isArray(rows) ? rows : (rows && rows.sessions) || []
     for (const s of list) {
       if ((s.session_id || s.sessionId) === recipientSessionId) {
-        return String((s.actor && s.actor.email) || '')
+        const stamped = String((s.actor && s.actor.email) || '')
+        if (stamped) return stamped
+        break // found the row, but it has no stamped email → try the fallback
       }
     }
   } catch (e) {
     log(`qual gate: recipient email lookup failed (non-fatal): ${e.message}`)
+  }
+  // e-3880: the project directory row can lack a stamped actor.email (a
+  // heartbeat-only session). Fall back to /api/me/sessions, which returns ONLY
+  // the caller's own sessions across all their projects — so if the recipient
+  // sid is there, the recipient is the SAME user by construction and we can
+  // hand the gate the sender's own email. Without this, a same-user
+  // cross-project reply is misclassified as 外部宛 and held in armed mode.
+  try {
+    const mine = await apiGet('/api/me/sessions')
+    const list = Array.isArray(mine) ? mine : (mine && mine.sessions) || []
+    for (const s of list) {
+      if ((s.session_id || s.sessionId) === recipientSessionId) {
+        // Same user by construction. Prefer a stamped email if present, else
+        // fall back to the caller's own login email.
+        return String((s.actor && s.actor.email) || '') || String(senderEmail || '')
+      }
+    }
+  } catch (e) {
+    log(`qual gate: self-session fallback failed (non-fatal): ${e.message}`)
   }
   return ''
 }
@@ -833,7 +856,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       // the gate keeps the conservative 外部 default.
       const senderEmail = loadEmail()
       const recipientEmail = await resolveRecipientEmail(
-        recipient_project_id, recipient_session_id,
+        recipient_project_id, recipient_session_id, senderEmail,
       )
       const category = classifyOutboundReply({
         channel,
