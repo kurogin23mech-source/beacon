@@ -50,7 +50,9 @@ CANCELLED_STATUS = work_base.CANCELLED_STATUS
 # SEEDS, not enforced constants — the live vocabulary is always read from data.
 
 DEFAULT_ACCOUNT_PHASES = [
-    {"name": "リード"},          # 未接触 / 見込みのみ
+    {"name": "未接触"},          # ms-115 e-3787: 生リスト。まだ接触していない顧客候補
+                                 #   (= ターゲットリスト)。新規 Account の既定入口。
+    {"name": "リード"},          # 接触して関係が始まった見込み客
     {"name": "未成約顧客"},      # 商談はあるがまだ成約なし
     {"name": "成約顧客"},        # 成約実績のある継続顧客
 ]
@@ -618,6 +620,10 @@ def opportunity_add(data: dict, title: str, *, account_id: str = "",
     if not opportunity_phase_is_terminal(data, initial_phase):
         open_advance_gate(data, opp_id, phase=initial_phase,
                           transition_date=transition_date or "", at=created_at)
+    # ms-115 e-3787: 商談を起票した = その顧客に接触が始まった。Account を
+    # 未接触 → リード へ引き上げる (only-up; derive_account_phase の has_opp 信号)。
+    if account_id:
+        _auto_advance_account_phase(data, account_id, at=created_at)
     return opp_id
 
 
@@ -711,30 +717,44 @@ def _account_phase_idx(data: dict, phase_name: str) -> int:
 
 def derive_account_phase(data: dict, account_id: str) -> Optional[str]:
     """Project an Account's lifecycle phase from its opportunities' furthest
-    progress. Mapping is by *position* in ``account_phases`` so it stays
-    config-generic (works even if a company renames its stages):
+    progress. Mapping counts *from the end* of ``account_phases`` (成約 = 末尾)
+    so it stays config-generic AND survives adding a front phase (ms-115 e-3787
+    「未接触」). The same formula lands on the right stage for both the 3-stage
+    legacy funnel (リード/未成約顧客/成約顧客) and the 4-stage one
+    (未接触/リード/未成約顧客/成約顧客):
 
-      idx 0 (リード):     商談なし / 全商談が商談準備以下 (未進行)
-      idx 1 (未成約顧客): 提案準備以降へ進んだ or 失注した商談が1つ以上、成約なし
-      idx 2 (成約顧客):   成約 (won) 商談が1つ以上
+      末尾   (成約顧客):   成約 (won) 商談が1つ以上
+      末尾-1 (未成約顧客): 提案準備以降へ進んだ or 失注した商談が1つ以上、成約なし
+      末尾-2 (リード):     商談はあるが未進行 (= 接触済みだが deal はまだ)
+      先頭   (未接触):     商談が1つも無い (生リスト)。3段構成では リード に一致する
 
-    Returns the account phase NAME (clamped to the configured vocabulary), or
-    ``None`` when no account phases are configured.
+    Contact-without-a-deal (Communication はあるが Opportunity 未起票) を 未接触→
+    リード に上げるのは Opportunity 信号の外なので、ここでは扱わない (人手の
+    phase-set / 将来の拡張)。Returns the phase NAME, or ``None`` when unconfigured.
     """
     aps = account_phases(data) or DEFAULT_ACCOUNT_PHASES
     if not aps:
         return None
-    won = lost = progressed = False
+    n = len(aps)
+    won = lost = progressed = has_opp = False
     for o in live_opportunities(data):  # e-3586: 取消済は顧客フェーズ導出に数えない
         if o.get("account_id") != account_id:
             continue
+        has_opp = True
         w, l, max_nt = _opp_progress_signals(data, o)
         won = won or w
         lost = lost or l
         if max_nt >= 1:
             progressed = True
-    idx = 2 if won else (1 if (lost or progressed) else 0)
-    idx = min(idx, len(aps) - 1)
+    if won:
+        idx = n - 1
+    elif lost or progressed:
+        idx = n - 2
+    elif has_opp:
+        idx = n - 3
+    else:
+        idx = 0
+    idx = max(0, min(idx, n - 1))
     return aps[idx].get("name")
 
 
