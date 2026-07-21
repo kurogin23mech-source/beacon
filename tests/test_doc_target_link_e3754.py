@@ -76,20 +76,45 @@ def test_legacy_link_key_for_dual_write():
 
 @pytest.fixture
 def beacon_project(tmp_path, monkeypatch):
-    """Fresh local-mode project with 1 milestone, 1 account, 1 opportunity."""
+    """Fresh local-mode SALES project with 1 account + 1 opportunity.
+
+    ms-115 e-3785: a project is single-profession (a project owns only its
+    occupation's target-classes), so accounts/opportunities live in a *sales*
+    project — a milestone can no longer be created alongside them. The ``--ms``
+    linkage tests below target a bare ``ms-1`` id, which ``doc add`` accepts
+    leniently (only account/opportunity ids are existence-validated), so the
+    milestone need not exist for the doc-linkage behaviour under test.
+    """
     monkeypatch.chdir(tmp_path)
+    env = {**os.environ, "BEACON_PROFESSION": "sales"}
     # init prompt answers: name, objective, retro_day (5=Fri), storage (1=local).
     subprocess.run(
         [str(BEACON_BIN), "init"],
         input="e3754-test\nFix e3754\n5\n1\n",
-        text=True, check=True, capture_output=True,
+        text=True, check=True, capture_output=True, env=env,
     )
-    subprocess.run([str(BEACON_BIN), "milestone", "add", "Test MS"],
-                   check=True, capture_output=True)
     subprocess.run([str(BEACON_BIN), "account", "add", "Acme Corp"],
                    check=True, capture_output=True)
     subprocess.run([str(BEACON_BIN), "opportunity", "add", "Acme deal",
                     "--account", "acc-1"],
+                   check=True, capture_output=True)
+    return tmp_path
+
+
+@pytest.fixture
+def dev_project(tmp_path, monkeypatch):
+    """Fresh local-mode DEV project with 1 milestone (ms-1) — for the ``--ms``
+    dual-write path, which records a doc entry *under* the milestone and so
+    needs it to exist. ms-115: milestones live only in a dev project, so this is
+    a separate fixture from the sales ``beacon_project``.
+    """
+    monkeypatch.chdir(tmp_path)
+    subprocess.run(
+        [str(BEACON_BIN), "init"],
+        input="e3754-dev\nFix e3754\n5\n1\n",
+        text=True, check=True, capture_output=True,
+    )
+    subprocess.run([str(BEACON_BIN), "milestone", "add", "Test MS"],
                    check=True, capture_output=True)
     return tmp_path
 
@@ -134,9 +159,10 @@ def test_doc_add_account_writes_target_only(beacon_project):
 def test_doc_list_account_filter(beacon_project):
     _run("doc", "add", "Acme dossier", "--scope", "spec",
          "--account", "acc-1", "--content", "body")
-    # A doc linked to a different Target (a milestone) must be excluded.
+    # A doc linked to a different Target (the opportunity, a real target in this
+    # sales project) must be excluded from the account filter.
     _run("doc", "add", "Unrelated", "--scope", "spec",
-         "--ms", "ms-1", "--content", "body")
+         "--opportunity", "opp-1", "--content", "body")
     ids = {d["doc_id"] for d in _list_docs_json(["--account", "acc-1"])}
     assert "acme-dossier" in ids
     assert "unrelated" not in ids
@@ -171,10 +197,10 @@ def test_doc_add_opportunity_writes_target(beacon_project):
 # Back-compat: --ms dual-writes both the canonical target and the legacy
 # milestone key so existing readers (--ms filter, operation SPEC discovery)
 # keep working.
-def test_doc_add_ms_dual_writes_target_and_milestone(beacon_project):
+def test_doc_add_ms_dual_writes_target_and_milestone(dev_project):
     _run("doc", "add", "MS spec", "--scope", "spec",
          "--ms", "ms-1", "--content", "body")
-    fm = _read_frontmatter(beacon_project, "ms-spec")
+    fm = _read_frontmatter(dev_project, "ms-spec")
     assert fm.get("target") == "ms-1"
     assert fm.get("milestone") == "ms-1"
     # Legacy --ms filter still works …
