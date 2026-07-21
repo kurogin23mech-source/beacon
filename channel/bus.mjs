@@ -43,6 +43,7 @@ import {
 import { selectTierForBridge } from './bus-envelope.mjs'
 import { buildHeartbeatBody } from './bus-heartbeat.mjs'
 import { createLocalSessionHeartbeat } from './bus-local-heartbeat.mjs'
+import { isPidAlive, detectOtherAliveBridges } from './bridge_detect.mjs'
 import {
   buildAutonomousActionContent,
   shouldEmitAutonomousImperative,
@@ -126,73 +127,20 @@ const cloud = safeLoadJSON(CLOUD_JSON)
 // multiple bclaude in the same cwd can each own a distinct claim.
 const BRIDGES_DIR = path.join(CWD, '.beacon', 'bridges')
 
-function isPidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (e) {
-    // EPERM = process exists but belongs to another user → still alive.
-    if (e && e.code === 'EPERM') return true
-    return false
-  }
-}
-
-// e-1460: at cold-start, look at every existing bridge claim in this cwd
-// and decide whether *another* bclaude already owns one. If yes, this
-// bus.mjs belongs to a 2nd+ bclaude and must NOT inherit the existing
-// session_id via session.json freshness reuse — it must mint fresh.
-//
-// "Belongs to another bclaude" = the claim's parent_pid is alive AND
-// is not my own ppid (= my bclaude pid). Legacy single-claim
-// .beacon/bridge.json has no parent_pid; fall back to pid (= bus.mjs
-// pid) liveness to decide whether the legacy owner is still around.
-function detectOtherAliveBridges() {
-  const myPpid = process.ppid
-  const found = []
-  try {
-    if (fs.existsSync(BRIDGES_DIR)) {
-      for (const f of fs.readdirSync(BRIDGES_DIR)) {
-        if (!f.endsWith('.json')) continue
-        let data
-        try {
-          data = JSON.parse(fs.readFileSync(path.join(BRIDGES_DIR, f), 'utf8'))
-        } catch {
-          continue
-        }
-        const pp = data && Number.isInteger(data.parent_pid) ? data.parent_pid : 0
-        const bp = data && Number.isInteger(data.pid) ? data.pid : 0
-        if (pp && pp !== myPpid && isPidAlive(pp)) {
-          found.push(data)
-        } else if (!pp && bp && bp !== process.pid && isPidAlive(bp)) {
-          // Legacy-shaped per-sid file with no parent_pid — fall back to
-          // bridge pid liveness.
-          found.push(data)
-        }
-      }
-    }
-  } catch (e) {
-    log(`bridges scan failed (non-fatal): ${e.message}`)
-  }
-  // Legacy single-claim .beacon/bridge.json — if an alive bus.mjs other
-  // than us still owns it, treat it as another live bridge.
-  try {
-    const legacyPath = path.join(CWD, '.beacon', 'bridge.json')
-    if (fs.existsSync(legacyPath)) {
-      const data = JSON.parse(fs.readFileSync(legacyPath, 'utf8'))
-      const bp = Number.isInteger(data?.pid) ? data.pid : 0
-      if (bp && bp !== process.pid && isPidAlive(bp)) {
-        // Don't double-count if same sid already collected from bridges/.
-        if (!found.some(c => c.session_id === data.session_id)) {
-          found.push(data)
-        }
-      }
-    }
-  } catch {}
-  return found
-}
-
-const otherAliveBridges = detectOtherAliveBridges()
+// e-1460 / e-3858: at cold-start, decide whether *another* bclaude already owns
+// an ALIVE bridge in this cwd. If yes, this bus.mjs belongs to a 2nd+ bclaude
+// and must mint a fresh session_id rather than reuse the existing one. The
+// predicate keys on the BRIDGE process liveness (not merely its parent bclaude)
+// — see bridge_detect.mjs for why (a killed/crashed bridge's stale claim must
+// not force a divergent mint). isPidAlive / detectOtherAliveBridges are imported
+// from ./bridge_detect.mjs so the rule is unit-tested there.
+const otherAliveBridges = detectOtherAliveBridges({
+  bridgesDir: BRIDGES_DIR,
+  legacyPath: path.join(CWD, '.beacon', 'bridge.json'),
+  myPpid: process.ppid,
+  myPid: process.pid,
+  log,
+})
 const FORCE_MINT = otherAliveBridges.length > 0
 if (FORCE_MINT) {
   const labels = otherAliveBridges.map(c => `sid=${c.session_id} ppid=${c.parent_pid ?? '?'} pid=${c.pid ?? '?'}`).join(', ')
