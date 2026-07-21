@@ -6856,8 +6856,15 @@ def upsert_session(
     ``machine/agent``. See firestore_client.stamp_session_actor_email for
     the field-path merge that preserves actor.machine/agent in the
     heartbeat (no-actor) path.
+
+    ms-98 (e-3836): this is the heartbeat path (CLI PUTs every few seconds).
+    Authorization only needs the project meta doc (owner/members live at the
+    top level), and the handler body never reads ``data["milestones"]`` — it
+    only writes via ``db.*``. Using ``_load_meta_only`` avoids re-hydrating the
+    entire milestones subcollection on every heartbeat, which was a dominant
+    source of memory churn in the 2026-07-21 hang incident.
     """
-    _load(project_id, user)
+    _load_meta_only(project_id, user)
     payload = {k: v for k, v in body.model_dump().items() if v is not None}
     email = user.get("email", "")
     uid = user.get("sub", "")
@@ -9534,8 +9541,13 @@ def list_pending_dm_actions(
     ``receiver_user_id`` (optional): restrict to "my pending". Empty
     string returns rows for all receivers in the project (used by web
     UI dashboards / debugging; the Skill always passes a value).
+
+    ms-98 (e-3836): polled by ``/beacon-session-start`` (and Web UI
+    dashboards) to surface pending DM actions. Membership-only gate reads the
+    meta doc; the handler never touches ``data["milestones"]``, so meta-only
+    load avoids the full-project rehydration on each poll.
     """
-    _load(project_id, user)
+    _load_meta_only(project_id, user)
     return db.list_pending_approvals(
         project_id,
         receiver_user_id=(receiver_user_id or None),
@@ -9870,8 +9882,13 @@ def list_bus_events(
     return when the caller is neither sender nor recipient. Sidecar metadata
     (event_id, channel, sender_session_id, created_at, receipt timestamps,
     envelope view) stays visible so audit/diagnostics tooling keeps working.
+
+    ms-98 (e-3836): polling catch-up path (callers hit it with ``since=`` on a
+    loop). The handler only needs the meta doc for the membership check — it
+    never reads ``data["milestones"]`` — so meta-only load avoids re-hydrating
+    the whole milestones/entries tree on every poll.
     """
-    _load(project_id, user)
+    _load_meta_only(project_id, user)
     events = db.list_bus_events(
         project_id, since=since, channel=channel, limit=limit,
     )
@@ -10797,7 +10814,7 @@ def _enrich_project_active_only(
     return enriched
 
 
-async def _broadcast(project_id: str, data: dict):
+async def _broadcast(project_id: str, data: dict | None = None):
     """Notify subscribed WS clients that the project changed (ms-84 / e-2326).
 
     Signal-only payload (~30 bytes). The previous attempts (full payload →
@@ -10807,6 +10824,13 @@ async def _broadcast(project_id: str, data: dict):
     chasing the threshold by stripping more fields, we make the WS a pure
     signal channel: clients fetch the actual state via REST (which has no
     frame limit). This is a permanent fix to the frame-size class of bugs.
+
+    ms-98 (e-3837): ``data`` is IGNORED — the payload is signal-only. The
+    parameter is retained (optional) only so the legacy ``_on_snapshot``
+    caller (kept for a contract test) can still pass hydrated data without a
+    signature break. Callers should pass nothing; do NOT ``load_project_*``
+    just to feed this argument (that was the memory-churn dead-load removed
+    in the 2026-07-21 hang fix).
     """
     clients = _ws_connections.get(project_id, set()).copy()
     if not clients:
@@ -10873,24 +10897,26 @@ def _broadcast_project_after_write(project_id: str) -> None:
       * No-op when no WS clients are subscribed to ``project_id`` (= 速攻 return)
       * No-op when ``_event_loop`` is unset (= startup hook 未発火、 lambda
         lifespan=off 経路、 cold-start race)
-      * fail-safe: load_project_consistent 失敗 / broadcast 失敗で write 経路
-        を巻き戻さない、 caller 視点では fire-and-forget
+      * fail-safe: broadcast 失敗で write 経路を巻き戻さない、 caller 視点では
+        fire-and-forget
       * thread-safe: ``asyncio.run_coroutine_threadsafe`` で worker thread から
         event loop に乗せる (= apply_operation は同期 path で呼ばれる)
+
+    ms-98 (e-3837): ``_broadcast`` の payload は ms-84 の signal-only 化以降
+    ``{"type":"project_changed"}`` (~30 バイト) だけで、 渡した ``data`` を
+    完全に無視する。 以前はここで ``load_project_consistent`` を呼んで全
+    milestones/entries を再構成した dict を渡していたが、 それは 100% 捨てられる
+    dead-load だった (= 全書き込みで巨大 dict を生成・破棄 → 2026-07-21 本番
+    ハングのメモリ churn 副因)。 signal のみで broadcast し、 load 呼び出しは
+    削除する。 client は WS signal を受けて REST で最新状態を取り直す。
     """
     if not _ws_connections.get(project_id):
         return
     if _event_loop is None:
         return
     try:
-        data = operations.load_project_consistent(project_id)
-    except Exception:
-        # load 失敗で broadcast 諦め、 write の成功は影響させない (= UX 上の
-        # 遅延は許容、 listener fallback が後から拾うかもしれない)。
-        return
-    try:
         asyncio.run_coroutine_threadsafe(
-            _broadcast(project_id, data), _event_loop
+            _broadcast(project_id), _event_loop
         )
     except Exception:
         # event loop が閉じてる等の race。 fire-and-forget なので silent skip。
