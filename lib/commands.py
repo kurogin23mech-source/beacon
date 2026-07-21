@@ -16720,8 +16720,8 @@ def cmd_help_json():
         {"command": "beacon account rename <acc-id> <new-name>", "flags": [], "description": "Rename an account (顧客名の変更)"},
         {"command": "beacon account assign <acc-id> <user>", "flags": [], "description": "Set the 担当ユーザー (assignee) on an account"},
         {"command": "beacon account nurturing <acc-id> <desc>", "flags": ["--deadline <date>", "--ball self|counterpart"], "description": "Add a nurturing (継続関係の業務; 商談なし顧客向け)"},
-        {"command": "beacon account link <acc-id> --project <id>", "flags": ["--project <id>"], "description": "Disclose an account to another project so its members can reference it (cross-project 開示)"},
-        {"command": "beacon account unlink <acc-id> --project <id>", "flags": ["--project <id>"], "description": "Revoke an account's disclosure to a project (剥奪即時、query 時評価)"},
+        {"command": "beacon disclose <resource-id> --to-project <id>", "flags": ["--to-project <id>"], "description": "Disclose any Target (account/opportunity/milestone/…) to another project so its members can reference it (cross-project 開示)"},
+        {"command": "beacon undisclose <resource-id> --from-project <id>", "flags": ["--from-project <id>"], "description": "Revoke a Target's disclosure to a project (剥奪即時、query 時評価)"},
         {"command": "beacon account delete <acc-id>", "flags": ["--force"], "description": "Delete an account (--force orphans referencing opportunities)"},
         {"command": "beacon opportunity add <title>", "flags": ["--account <acc-id>", "--phase <p>", "--goal <n>", "--probability <n>", "--deadline <date>", "--ball self|counterpart", "--assignee <user>"], "description": "Add a sales opportunity (商談; 対象・有限)"},
         {"command": "beacon opportunity assign <opp-id> <user>", "flags": [], "description": "Set the 担当ユーザー (assignee) on an opportunity"},
@@ -21173,7 +21173,7 @@ def _cmd_account_list_linked(json_mode: bool):
         return
     if not accounts:
         print("この project に開示された(他 project の) Account はありません。"
-              "\n  他 project 側で: beacon account link <acc-id> --project "
+              "\n  他 project 側で: beacon disclose <acc-id> --to-project "
               f"{project_id}")
         return
     print(f"(他 project から この project '{project_id}' に開示された Account)")
@@ -21208,7 +21208,7 @@ def cmd_account_list():
     if not accounts:
         if as_project:
             print(f"No accounts disclosed to project '{as_project}'. "
-                  f"Link one with: beacon account link <acc-id> --project {as_project}")
+                  f"Disclose one with: beacon disclose <acc-id> --to-project {as_project}")
         else:
             print("No accounts yet. Add one with: beacon account add \"<name>\"")
         return
@@ -21230,42 +21230,46 @@ def cmd_account_list():
             print(f"    - {c.get('name', '?')}{role}{email}")
 
 
-def cmd_account_link():
-    """ms-113 e-3734: Account を別 project に開示リンクする。"""
-    import sales_entities
-    account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
-    project = os.environ.get("BEACON_LINK_PROJECT", "")
+def cmd_disclose():
+    """ms-113 generalization: 任意の Target を別 project に開示リンクする。
+
+    Account 専用だった `account link` を、id で任意の Target を引く汎用動詞に
+    持ち上げたもの (`beacon disclose <resource-id> --to-project <P>`)。
+    """
+    import target_disclosure
+    resource_id = os.environ.get("BEACON_DISCLOSE_ID", "")
+    project = os.environ.get("BEACON_DISCLOSE_PROJECT", "")
     data = load_project()
     try:
-        added = sales_entities.account_link_project(data, account_id, project)
+        added = target_disclosure.disclose_target(data, resource_id, project)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     save_project(data)
     if added:
-        print(f"Linked {account_id} → project {project} "
+        print(f"Disclosed {resource_id} → project {project} "
               f"(project {project} のメンバーが参照できるようになりました)")
     else:
-        print(f"{account_id} は既に project {project} にリンク済みです (no-op)")
+        print(f"{resource_id} は既に project {project} に開示済みです (no-op)")
 
 
-def cmd_account_unlink():
-    """ms-113 e-3734: Account の開示リンクを外す (剥奪即時)。"""
-    import sales_entities
-    account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
-    project = os.environ.get("BEACON_LINK_PROJECT", "")
+def cmd_undisclose():
+    """ms-113 generalization: 任意の Target の開示リンクを外す (剥奪即時)。"""
+    import target_disclosure
+    resource_id = os.environ.get("BEACON_DISCLOSE_ID", "")
+    project = os.environ.get("BEACON_DISCLOSE_PROJECT", "")
     data = load_project()
     try:
-        removed = sales_entities.account_unlink_project(data, account_id, project)
+        removed = target_disclosure.undisclose_target(data, resource_id, project)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     save_project(data)
     if removed:
-        print(f"Unlinked {account_id} from project {project} "
+        print(f"Undisclosed {resource_id} from project {project} "
               f"(project {project} からは参照できなくなりました)")
     else:
-        print(f"{account_id} は project {project} にリンクされていません (no-op)")
+        print(f"{resource_id} は project {project} に開示されていません (no-op)")
 
 
 def cmd_sales_identity_set():
@@ -22580,8 +22584,8 @@ if __name__ == "__main__":
         "account_assign": cmd_account_assign,
         "account_nurturing": cmd_account_nurturing,
         "account_delete": cmd_account_delete,
-        "account_link": cmd_account_link,      # ms-113 e-3734
-        "account_unlink": cmd_account_unlink,  # ms-113 e-3734
+        "disclose": cmd_disclose,      # ms-113 generalization (旧 account_link)
+        "undisclose": cmd_undisclose,  # ms-113 generalization (旧 account_unlink)
         "opportunity_add": cmd_opportunity_add,
         "opportunity_list": cmd_opportunity_list,
         "opportunity_phase": cmd_opportunity_phase,
