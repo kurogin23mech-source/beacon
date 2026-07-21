@@ -962,6 +962,7 @@ def cmd_milestone_add():
     owner = os.environ.get("BEACON_OWNER", "")
     assignee = os.environ.get("BEACON_ASSIGNEE", "")
     data = load_project()
+    _gate_target_class(data, "milestone")  # ms-115: block in non-dev projects
     # ms-43 / e-2281 — stamp the human author on the milestone so the Web
     # UI surfaces the creator label (= 起票者) instead of the legacy
     # ``"claude"`` literal in ``created_by``. Resolution falls back to
@@ -16859,6 +16860,7 @@ def cmd_operation_open():
         print("Error: operation title required")
         sys.exit(1)
     data = load_project()
+    _gate_target_class(data, "operation")  # ms-115: block in non-dev projects
     # ms-43 / e-2281 — stamp the human author on the Operation so the Web
     # UI surfaces the creator label (= 起票者) instead of the legacy
     # ``"claude"`` literal in ``created_by``. Same resolution path as
@@ -21042,14 +21044,22 @@ def _today_iso() -> str:
     return datetime.date.today().isoformat()
 
 
-def _require_sales_project(data: dict) -> None:
-    """Warn (not block) if run against a non-sales project. Sales commands
-    still work on any project — they just create the collections lazily — but
-    a wrong-profession invocation is almost always a mistake worth surfacing."""
-    prof = data.get("profession", "")
-    if prof and prof != "sales":
-        print(f"  note: this project's profession is '{prof}', not 'sales' "
-              f"(sales entities will still be created)", file=sys.stderr)
+# _require_sales_project (warn-only) was removed in ms-115 e-3785 — the sales
+# target-creating commands now go through the hard containment gate
+# (_gate_target_class → occupation.assert_target_class_owned) instead of a soft
+# warning, so a wrong-profession create fails structurally.
+
+
+def _gate_target_class(data: dict, kind: str) -> None:
+    """Enforce profession ⊃ target-class containment before creating a target
+    (ms-115 e-3785). Prints the guidance-rich block message and exits non-zero
+    when the project's profession does not own ``kind`` — so a wrong-profession
+    create fails structurally instead of producing an invisible ghost target."""
+    try:
+        occupation.assert_target_class_owned(data, kind)
+    except occupation.TargetClassProfessionError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_account_add():
@@ -21058,7 +21068,7 @@ def cmd_account_add():
     health = os.environ.get("BEACON_ACCOUNT_HEALTH", "")
     assignee = os.environ.get("BEACON_ACCOUNT_ASSIGNEE", "")
     data = load_project()
-    _require_sales_project(data)
+    _gate_target_class(data, "account")
     try:
         acc_id = sales_entities.account_add(data, name, health=health,
                                             assignee=assignee,
@@ -21360,7 +21370,7 @@ def cmd_opportunity_add():
     goal_amount = _parse_number(goal_raw, "--goal")
     probability = _parse_number(prob_raw, "--probability")
     data = load_project()
-    _require_sales_project(data)
+    _gate_target_class(data, "opportunity")
     try:
         opp_id = sales_entities.opportunity_add(
             data, title, account_id=account_id, phase=phase,

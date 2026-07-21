@@ -62,6 +62,73 @@ def project_targets(data: dict) -> list:
     return adapter(data)
 
 
+# ---------------------------------------------------------------------------
+# Profession ⊃ Target-class containment (ms-115 e-3785).
+#
+# The data model is "profession OWNS its set of target-classes": development
+# owns Milestone / Operation, sales owns Opportunity / Account (顧客獲得ターゲット
+# lands here in e-3786). Before this, the *projection* honored that ownership
+# but *mutation* did not — `beacon milestone add` ran unchecked in a sales
+# project and `beacon account add` only warned in a dev project, so a target of
+# the wrong occupation could be created and then never appear in its frame (a
+# "ghost"). This is the ONE place that knows which occupation owns which
+# target-class; the CLI entry points ask here before creating a target so the
+# containment is enforced structurally, not by prompt convention.
+# ---------------------------------------------------------------------------
+
+OWNED_TARGET_CLASSES = {
+    "dev": ("milestone", "operation"),
+    "sales": ("opportunity", "account"),
+}
+
+# The user-facing command that creates each target-class — surfaced in the block
+# message so a wrong-profession call names the right command instead of a bare
+# refusal (ms-115 方針5: 予防と発見性を block に添える).
+_TARGET_CLASS_ADD_HINT = {
+    "milestone": "beacon milestone add",
+    "operation": "beacon operation open",
+    "opportunity": "beacon opportunity add",
+    "account": "beacon account add",
+}
+
+
+class TargetClassProfessionError(ValueError):
+    """Raised when a command would create a target-class the project's
+    profession does not own (ms-115). Carries a human-facing, guidance-rich
+    message; CLI callers print it and exit non-zero."""
+
+
+def target_class_owner(kind: str) -> str:
+    """Return the profession that owns ``kind`` (e.g. ``"milestone"`` → ``"dev"``),
+    or ``""`` when no occupation claims it."""
+    for prof, kinds in OWNED_TARGET_CLASSES.items():
+        if kind in kinds:
+            return prof
+    return ""
+
+
+def assert_target_class_owned(data: dict, kind: str) -> None:
+    """Raise ``TargetClassProfessionError`` when this project's profession does
+    NOT own the target-class ``kind``; return None (allowed) otherwise.
+
+    This is the containment gate the target-creating CLI commands call before
+    mutating (ms-115 e-3785). The message names what the project's profession
+    CAN create and the exact command, so the user is guided to the right target
+    rather than merely blocked."""
+    prof = resolve_profession(data)
+    owned = OWNED_TARGET_CLASSES.get(prof, ())
+    if kind in owned:
+        return
+    owner = target_class_owner(kind)
+    owned_hints = " / ".join(_TARGET_CLASS_ADD_HINT.get(k, k) for k in owned)
+    owner_note = f"{owner} 職種の対象" if owner else "別職種の対象"
+    raise TargetClassProfessionError(
+        f"'{kind}' は{owner_note}です。このプロジェクトの職種は '{prof}' なので作成できません "
+        f"(職種はそれぞれ自分の対象だけを持ちます)。\n"
+        f"  '{prof}' で作れる対象: {', '.join(owned) if owned else '(なし)'}\n"
+        f"  使うコマンド: {owned_hints or '(なし)'}")
+
+
 # The project.json keys under which each occupation stores its Target records.
 # This registry is the ONE place that knows "which collections are Targets"
 # across occupations; occupation-agnostic base code (work_model / work_base)
