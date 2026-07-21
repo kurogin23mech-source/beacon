@@ -16749,6 +16749,10 @@ def cmd_help_json():
         {"command": "beacon meeting list <opp-id>", "flags": ["--json"], "description": "List an opportunity's meetings"},
         {"command": "beacon meeting ended", "flags": ["--now <datetime>", "--json"], "description": "List meetings whose scheduled end has passed but are still scheduled (終了検知 Operation C の候補)"},
         {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity vocabulary)"},
+        {"command": "beacon phase add <account|opportunity> <name>", "flags": ["--index <n>"], "description": "Add or insert a funnel stage"},
+        {"command": "beacon phase rename <account|opportunity> <old> <new>", "flags": [], "description": "Rename a funnel stage (references follow)"},
+        {"command": "beacon phase move <account|opportunity> <name> <index>", "flags": [], "description": "Reorder a funnel stage"},
+        {"command": "beacon phase remove <account|opportunity> <name>", "flags": [], "description": "Delete a funnel stage (blocked if non-empty)"},
         {"command": "beacon save <desc>", "flags": ["-m <ms-id>", "--hash <hash>", "--source manual", "--json"], "description": "Save a freeform entry to a milestone"},
         {"command": "beacon sync", "flags": [], "description": "Auto-sync recent git commits to active milestone"},
         {"command": "beacon summary <text>", "flags": [], "description": "Update project summary"},
@@ -21941,6 +21945,109 @@ def cmd_phase_list():
             print(f"      遷移日リード: {m['default_lead']}日")
 
 
+# --- phase funnel editing (ms-116) -----------------------------------------
+# Edit a running project's saved phase funnel (段の追加/挿入/改名/並べ替え/削除).
+# The <funnel> arg selects which target-class's funnel (account / opportunity).
+# Every edit routes through save_project so the change reaches cloud (MySQL
+# projects 行) and the Web UI payload just like any other sales mutation
+# (ms-116 方針2). Editing is gated by the ms-115 containment rule: only the
+# profession that owns the target-class may edit its funnel (方針5 / e-3822).
+
+_FUNNEL_KIND_ALIASES = {
+    "account": "account", "accounts": "account", "顧客": "account",
+    "opportunity": "opportunity", "opportunities": "opportunity",
+    "opp": "opportunity", "商談": "opportunity",
+}
+
+
+def _resolve_funnel_kind(raw: str) -> str:
+    kind = _FUNNEL_KIND_ALIASES.get((raw or "").strip().lower(), "")
+    if not kind:
+        print(f"Error: unknown funnel '{raw}' (expected: account | opportunity)",
+              file=sys.stderr)
+        sys.exit(1)
+    return kind
+
+
+def _guard_funnel_owned(data: dict, kind: str) -> None:
+    """Refuse to edit a funnel the project's profession does not own, reusing
+    the ms-115 containment gate. account / opportunity are sales-owned, so a
+    dev project is blocked with the same guidance-rich message target creation
+    uses (ms-116 e-3822 — enforce 職種 > 対象 for funnel edits too)."""
+    import occupation
+    try:
+        occupation.assert_target_class_owned(data, kind)
+    except occupation.TargetClassProfessionError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_phase_add():
+    """Add a stage to a funnel: append to the end, or insert at --index."""
+    import sales_entities
+    kind = _resolve_funnel_kind(os.environ.get("BEACON_FUNNEL_KIND", ""))
+    name = os.environ.get("BEACON_PHASE_NAME", "")
+    raw_index = os.environ.get("BEACON_PHASE_INDEX", "")
+    index = int(_parse_number(raw_index, "<index>")) if raw_index.strip() else None
+    data = load_project()
+    _guard_funnel_owned(data, kind)
+    try:
+        sales_entities.insert_phase(data, kind, name, index=index)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    where = f"index {index}" if index is not None else "end"
+    print(f"Added {kind} phase '{name}' ({where})")
+
+
+def cmd_phase_rename():
+    import sales_entities
+    kind = _resolve_funnel_kind(os.environ.get("BEACON_FUNNEL_KIND", ""))
+    old = os.environ.get("BEACON_PHASE_OLD", "")
+    new = os.environ.get("BEACON_PHASE_NEW", "")
+    data = load_project()
+    _guard_funnel_owned(data, kind)
+    try:
+        sales_entities.rename_phase(data, kind, old, new)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Renamed {kind} phase '{old}' → '{new}'")
+
+
+def cmd_phase_move():
+    import sales_entities
+    kind = _resolve_funnel_kind(os.environ.get("BEACON_FUNNEL_KIND", ""))
+    name = os.environ.get("BEACON_PHASE_NAME", "")
+    index = int(_parse_number(os.environ.get("BEACON_PHASE_INDEX", ""), "<index>"))
+    data = load_project()
+    _guard_funnel_owned(data, kind)
+    try:
+        sales_entities.move_phase(data, kind, name, index)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Moved {kind} phase '{name}' → index {index}")
+
+
+def cmd_phase_remove():
+    import sales_entities
+    kind = _resolve_funnel_kind(os.environ.get("BEACON_FUNNEL_KIND", ""))
+    name = os.environ.get("BEACON_PHASE_NAME", "")
+    data = load_project()
+    _guard_funnel_owned(data, kind)
+    try:
+        sales_entities.remove_phase(data, kind, name)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Removed {kind} phase '{name}'")
+
+
 def cmd_opportunity_activity():
     import sales_entities
     opp_id = os.environ.get("BEACON_OPP_ID", "")
@@ -22408,6 +22515,11 @@ if __name__ == "__main__":
         "watch_clear": cmd_watch_clear,
         "watch_list": cmd_watch_list,
         "phase_list": cmd_phase_list,
+        # ms-116 — edit a running project's saved phase funnel
+        "phase_add": cmd_phase_add,
+        "phase_rename": cmd_phase_rename,
+        "phase_move": cmd_phase_move,
+        "phase_remove": cmd_phase_remove,
         # ms-107 e-3353 — send identity pin (internal; called by sales Skills,
         # not exposed as a user CLI verb → no bin/beacon/README/dispatch.py entry)
         "sales_identity_set": cmd_sales_identity_set,

@@ -810,6 +810,137 @@ def set_phase_probability(data: dict, phase_name: str, probability) -> dict:
     return pdef
 
 
+# ---------------------------------------------------------------------------
+# Phase funnel editing (ms-116) — edit a *running* project's saved phase funnel.
+# ---------------------------------------------------------------------------
+# The funnel (段の並び) is per-company config stored in project.json
+# (``account_phases`` / ``opportunity_phases``). ms-115 added a "未接触" stage,
+# but only to the shipped SEED — a project that started earlier keeps its own
+# saved funnel and never receives it. These primitives let a running project's
+# saved funnel be edited (add / insert / rename / reorder / delete) so a funnel
+# can evolve without rebuilding the project (ms-116 SPEC 方針1: 保存書き換えに
+# 一本化, read-time expand は不採用).
+#
+# Order matters: the funnel entry (既定フェーズ) is the first stage —
+# ``default_account_phase`` returns ``ps[0]`` and ``default_opportunity_phase``
+# the first non-terminal. Those getters read the saved list at call time, so a
+# reorder/insert re-derives the entry with no extra step (SPEC 方針3 / AC4).
+# Deletion is blocked while a stage still holds live targets (SPEC 方針4 / AC3):
+# data must never go missing behind a vanished stage.
+
+_FUNNEL_KEYS = {"account": "account_phases", "opportunity": "opportunity_phases"}
+
+
+def _funnel_key(kind: str) -> str:
+    try:
+        return _FUNNEL_KEYS[kind]
+    except KeyError:
+        raise ValueError(
+            f"unknown funnel kind: {kind!r} (expected 'account' or 'opportunity')")
+
+
+def _funnel_targets(data: dict, kind: str) -> list:
+    """The target rows whose ``phase`` field points into this funnel."""
+    return data.get("accounts", []) if kind == "account" \
+        else data.get("opportunities", [])
+
+
+def phase_occupants(data: dict, kind: str, name: str) -> list:
+    """IDs of *live* (non-cancelled) targets currently sitting in phase ``name``.
+    Used to block deletion of a non-empty stage (SPEC AC3). Cancelled rows are
+    tombstones (誤起票の訂正) — they don't count as data you'd lose."""
+    return [t.get("id", "") for t in _funnel_targets(data, kind)
+            if t.get("phase") == name and t.get("status") != CANCELLED_STATUS]
+
+
+def insert_phase(data: dict, kind: str, name: str,
+                 index: Optional[int] = None, **attrs) -> dict:
+    """Insert a new stage ``name`` into the funnel at ``index`` (0 = 先頭 entry).
+    ``index`` None or past the end appends. Extra keyword attrs (probability /
+    terminal / goal … for opportunity stages) are stored on the stage def.
+    Raises ValueError on an empty or duplicate name, or an out-of-range index."""
+    key = _funnel_key(kind)
+    nm = (name or "").strip()
+    if not nm:
+        raise ValueError("phase name is required")
+    phases = data.setdefault(key, [])
+    if _find_phase_def(phases, nm) is not None:
+        raise ValueError(f"phase already exists: {nm}")
+    pdef = {"name": nm}
+    pdef.update({k: v for k, v in attrs.items() if v is not None})
+    if index is None or index >= len(phases):
+        phases.append(pdef)
+    elif index < 0:
+        raise ValueError(f"index out of range: {index}")
+    else:
+        phases.insert(index, pdef)
+    return pdef
+
+
+def add_phase(data: dict, kind: str, name: str, **attrs) -> dict:
+    """Append a new stage to the end of the funnel (= ``insert_phase`` at end)."""
+    return insert_phase(data, kind, name, index=None, **attrs)
+
+
+def rename_phase(data: dict, kind: str, old: str, new: str) -> dict:
+    """Rename stage ``old`` to ``new`` and follow every reference so no target
+    keeps a dead phase pointer (SPEC 方針3 / AC5). Tombstoned (cancelled) rows
+    are updated too, so stored data stays internally consistent. Returns the
+    stage def. Raises ValueError if ``old`` is missing or ``new`` collides."""
+    key = _funnel_key(kind)
+    nm = (new or "").strip()
+    if not nm:
+        raise ValueError("new phase name is required")
+    phases = data.get(key, [])
+    pdef = _find_phase_def(phases, old)
+    if pdef is None:
+        raise ValueError(f"phase not found: {old}")
+    if nm == old:
+        return pdef
+    if _find_phase_def(phases, nm) is not None:
+        raise ValueError(f"phase already exists: {nm}")
+    pdef["name"] = nm
+    for t in _funnel_targets(data, kind):
+        if t.get("phase") == old:
+            t["phase"] = nm
+    return pdef
+
+
+def move_phase(data: dict, kind: str, name: str, to_index: int) -> list:
+    """Move stage ``name`` to position ``to_index`` in the funnel and return the
+    reordered list. ``to_index`` is 0-based over the current stages (0 = 先頭 =
+    become the funnel entry). Raises ValueError if the stage is missing or the
+    index is out of range."""
+    key = _funnel_key(kind)
+    phases = data.get(key, [])
+    idx = next((i for i, p in enumerate(phases) if p.get("name") == name), None)
+    if idx is None:
+        raise ValueError(f"phase not found: {name}")
+    if to_index < 0 or to_index >= len(phases):
+        raise ValueError(f"index out of range: {to_index}")
+    phases.insert(to_index, phases.pop(idx))
+    return phases
+
+
+def remove_phase(data: dict, kind: str, name: str) -> dict:
+    """Delete stage ``name`` from the funnel. Blocked while live targets still
+    sit in it (SPEC 方針4 / AC3): the error names how many and which, so the
+    caller can move them first. Returns the removed stage def."""
+    key = _funnel_key(kind)
+    phases = data.get(key, [])
+    pdef = _find_phase_def(phases, name)
+    if pdef is None:
+        raise ValueError(f"phase not found: {name}")
+    occ = phase_occupants(data, kind, name)
+    if occ:
+        shown = ", ".join(occ[:8]) + ("…" if len(occ) > 8 else "")
+        raise ValueError(
+            f"cannot delete non-empty phase {name!r}: "
+            f"{len(occ)} target(s) still there ({shown}). Move them first.")
+    phases.remove(pdef)
+    return pdef
+
+
 def sales_targets(data: dict) -> dict:
     return data.get("sales_targets", {})
 

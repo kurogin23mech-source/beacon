@@ -284,6 +284,10 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon meeting list <opp-id> [--json]` | List an opportunity's meetings / 商談の面談一覧 |
 | `beacon meeting ended [--now <datetime>] [--json]` | List meetings whose end passed but are still scheduled (終了検知 C の候補) / 終了予定を過ぎた未終了面談 |
 | `beacon phase list [--json]` | Show the configured phase funnels (account / opportunity vocabulary) / 設定済みフェーズファネルを表示 |
+| `beacon phase add <account\|opportunity> <name> [--index N]` | Add or insert a funnel stage / フェーズ段を追加・挿入 |
+| `beacon phase rename <account\|opportunity> <old> <new>` | Rename a funnel stage (references follow) / フェーズ段を改名（参照も追随） |
+| `beacon phase move <account\|opportunity> <name> <index>` | Reorder a funnel stage / フェーズ段を並べ替え |
+| `beacon phase remove <account\|opportunity> <name>` | Delete a funnel stage (blocked if non-empty) / フェーズ段を削除（中身があれば拒否） |
 
 ### Pull Requests
 
