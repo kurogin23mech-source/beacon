@@ -61,6 +61,9 @@ Sales (profession=sales):
   beacon account assign <acc-id> <user>                      Set the assignee (担当ユーザー) on an account
   beacon account nurturing <acc-id> <desc> [--deadline <date>] [--ball self|counterpart]   Add a nurturing task (継続関係の業務)
   beacon account delete <acc-id> [--force] [--reason <text>] Cancel (取消, soft) an account — record kept (--force orphans referencing opportunities)
+  beacon acquisition add "<title>" [--description <text>] [--assignee <user>]   Add a 顧客獲得ターゲット (取引先の無い有限の獲得・準備作業: アカウント作成/資料整備/リスト精査 等)
+  beacon acquisition list [--json]                           List 顧客獲得ターゲット
+  beacon acquisition status <acq-id> <todo|in_progress|observing|done>   Move an acquisition along its lifecycle
   beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>] [--description <text>]   Add a deal / opportunity
   beacon opportunity list [--json] [--all]                   List opportunities (--all also shows 取消済 cancelled)
   beacon opportunity phase <opp-id> <phase> [--note <text>]  Move an opportunity to a new phase
@@ -1117,6 +1120,55 @@ cmd_account_add() {
     BEACON_ACCOUNT_NAME="$name" BEACON_ACCOUNT_HEALTH="$health" \
         BEACON_ACCOUNT_ASSIGNEE="$assignee" \
         python3 "$COMMANDS_PY" account_add
+}
+
+cmd_acquisition_add() {
+    ensure_project
+    local title="" description="" assignee=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --description|--desc) description="${2:-}"; shift 2 ;;
+            --assignee)           assignee="${2:-}"; shift 2 ;;
+            -?*) _guard_positional "$1" "Usage: beacon acquisition add \"<title>\" [--description <text>] [--assignee <user>]" ;;
+            *)   title="$1"; shift ;;
+        esac
+    done
+    if [ -z "$title" ]; then
+        echo "Usage: beacon acquisition add \"<title>\" [--description <text>] [--assignee <user>]"
+        exit 1
+    fi
+    BEACON_ACQ_TITLE="$title" BEACON_ACQ_DESCRIPTION="$description" \
+        BEACON_ACQ_ASSIGNEE="$assignee" \
+        python3 "$COMMANDS_PY" acquisition_add
+}
+
+cmd_acquisition_list() {
+    ensure_project
+    local json=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json="1"; shift ;;
+            *)      shift ;;
+        esac
+    done
+    BEACON_JSON="$json" python3 "$COMMANDS_PY" acquisition_list
+}
+
+cmd_acquisition_status() {
+    ensure_project
+    local acq_id="" status=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -?*) _guard_positional "$1" "Usage: beacon acquisition status <acq-id> <todo|in_progress|observing|done>" ;;
+            *)   if [ -z "$acq_id" ]; then acq_id="$1"; else status="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$acq_id" ] || [ -z "$status" ]; then
+        echo "Usage: beacon acquisition status <acq-id> <todo|in_progress|observing|done>"
+        exit 1
+    fi
+    BEACON_ACQ_ID="$acq_id" BEACON_ACQ_STATUS="$status" \
+        python3 "$COMMANDS_PY" acquisition_status
 }
 
 cmd_account_rename() {
@@ -2877,6 +2929,14 @@ case "${1:-}" in
             nurturing) shift 2; cmd_account_nurturing "$@" ;;
             delete)  shift 2; cmd_account_delete "$@" ;;
             *)       echo "Usage: beacon account [add|list|contact|phase|rename|assign|nurturing|delete]" ;;
+        esac
+        ;;
+    acquisition|acq)
+        case "${2:-}" in
+            add)      shift 2; cmd_acquisition_add "$@" ;;
+            list|ls)  shift 2; cmd_acquisition_list "$@" ;;
+            status)   shift 2; cmd_acquisition_status "$@" ;;
+            *)        echo "Usage: beacon acquisition [add|list|status]  (顧客獲得ターゲット: 取引先の無い獲得・準備作業)" ;;
         esac
         ;;
     opportunity|opp)

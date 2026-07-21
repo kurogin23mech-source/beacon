@@ -797,6 +797,49 @@ def test_terminal_transition_rejects_non_terminal_phase():
 
 # --- e-3553 phase fold (前フェーズ活動の後始末) ------------------------------
 
+# --- e-3786 顧客獲得ターゲット (Acquisition) --------------------------------
+
+def test_build_seeds_acquisitions_collection():
+    data = se.build_sales_project("S", "obj")
+    assert data["acquisitions"] == []
+
+
+def test_acquisition_add_uses_standard_lifecycle_and_prose_goal():
+    data = _fresh()
+    acq = se.acquisition_add(data, "Xアカウント整備",
+                             description="20社アタック→5社アポ")
+    rec = se.find_acquisition(data, acq)
+    assert rec["status"] == "todo"                 # 標準ライフサイクル開始点
+    assert rec["label"] == "Xアカウント整備"        # canonical label
+    assert rec["description"] == "20社アタック→5社アポ"  # 目標は散文
+    # phase funnel / won-lost / 構造化 goal フィールドは持たない (方針2)
+    assert "phase" not in rec and "goal_amount" not in rec
+
+
+def test_acquisition_status_transitions_and_rejects_unknown():
+    data = _fresh()
+    acq = se.acquisition_add(data, "資料整備")
+    se.acquisition_set_status(data, acq, "in_progress")
+    assert se.find_acquisition(data, acq)["status"] == "in_progress"
+    se.acquisition_set_status(data, acq, "done", at="T9")
+    done = se.find_acquisition(data, acq)
+    assert done["status"] == "done" and done.get("done_at") == "T9"
+    with pytest.raises(ValueError):
+        se.acquisition_set_status(data, acq, "成約")  # not a lifecycle status
+
+
+def test_acquisition_projects_as_separate_lane():
+    data = _fresh()
+    se.opportunity_add(data, "Acme商談")
+    acq = se.acquisition_add(data, "リスト精査", description="候補20社")
+    kinds = {t["kind"] for t in se.project_targets(data)}
+    assert kinds == {"opportunity", "acquisition"}
+    a = next(t for t in se.project_targets(data) if t["kind"] == "acquisition")
+    assert a["id"] == acq and a["status"] == "todo"
+    # acquisition の detail は目標 (description) のみ — phase 系は持ち込まない
+    assert a["detail"] == {"description": "候補20社"}
+
+
 def test_fold_auto_closes_evidence_linked_and_surfaces_the_rest():
     data = _fresh()
     acc = se.account_add(data, "Acme")

@@ -78,7 +78,7 @@ def project_targets(data: dict) -> list:
 
 OWNED_TARGET_CLASSES = {
     "dev": ("milestone", "operation"),
-    "sales": ("opportunity", "account"),
+    "sales": ("opportunity", "account", "acquisition"),
 }
 
 # The user-facing command that creates each target-class — surfaced in the block
@@ -89,6 +89,7 @@ _TARGET_CLASS_ADD_HINT = {
     "operation": "beacon operation open",
     "opportunity": "beacon opportunity add",
     "account": "beacon account add",
+    "acquisition": "beacon acquisition add",
 }
 
 
@@ -182,6 +183,10 @@ TARGET_DECOMPOSITION = {
     "milestones":    {"id_field": "id", "arms": ("entries",)},
     "opportunities": {"id_field": "id", "arms": ("activities", "communications")},
     "accounts":      {"id_field": "id", "arms": ("nurturings", "communications")},
+    # ms-115 e-3786: 顧客獲得ターゲット。work_items は少量なので fat arm にせず inline
+    # に残す (arms=() → 新しい子テーブルを増やさない)。Target 行そのものは独立させ、
+    # 忙しい獲得作業リストが projects 行を膨らませないようにする。
+    "acquisitions":  {"id_field": "id", "arms": ()},
 }
 
 

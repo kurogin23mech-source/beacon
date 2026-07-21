@@ -21195,6 +21195,67 @@ def cmd_sales_identity_check():
     sys.exit(1)
 
 
+# --- 顧客獲得ターゲット (Acquisition, ms-115 e-3786) ------------------------
+# 取引先の無い有限の獲得・準備作業の器。営業が own する target-class。
+
+def cmd_acquisition_add():
+    import sales_entities
+    title = os.environ.get("BEACON_ACQ_TITLE", "")
+    description = os.environ.get("BEACON_ACQ_DESCRIPTION", "")
+    assignee = os.environ.get("BEACON_ACQ_ASSIGNEE", "")
+    data = load_project()
+    _gate_target_class(data, "acquisition")
+    try:
+        acq_id = sales_entities.acquisition_add(
+            data, title, description=description, assignee=assignee,
+            created_at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Added acquisition {acq_id}: {title}")
+    if description:
+        print(f"  目標 / メモ: {description}")
+    print(f"  次: `beacon acquisition status {acq_id} in_progress` で着手 / "
+          f"`beacon acquisition list` で一覧")
+
+
+def cmd_acquisition_list():
+    import json as _json
+    data = load_project()
+    acqs = data.get("acquisitions", [])
+    if os.environ.get("BEACON_JSON") == "1":
+        print(_json.dumps(acqs, ensure_ascii=False))
+        return
+    if not acqs:
+        print('(顧客獲得ターゲットはまだありません — `beacon acquisition add "<title>"`)')
+        return
+    for a in acqs:
+        items = a.get("work_items", [])
+        done = sum(1 for w in items if w.get("status") == "done")
+        cnt = f" [{done}/{len(items)}]" if items else ""
+        label = a.get("label") or a.get("title", "")
+        print(f"{a.get('id')}  {a.get('status',''):<12} {label}{cnt}")
+        desc = a.get("description", "")
+        if desc:
+            print(f"    目標: {desc}")
+
+
+def cmd_acquisition_status():
+    import sales_entities
+    acq_id = os.environ.get("BEACON_ACQ_ID", "")
+    status = os.environ.get("BEACON_ACQ_STATUS", "")
+    data = load_project()
+    try:
+        sales_entities.acquisition_set_status(data, acq_id, status,
+                                              at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"{acq_id} → {status}")
+
+
 # --- send-account ledger (ms-107 e-3365) -----------------------------------
 # label → {email, routes{service:{namespace, alias}}}. Internal verbs invoked by
 # the sales Skills to register accounts and resolve the concrete MCP route a
@@ -22288,6 +22349,9 @@ if __name__ == "__main__":
         # ms-106 ② sales job-template entities
         "account_add": cmd_account_add,
         "account_list": cmd_account_list,
+        "acquisition_add": cmd_acquisition_add,
+        "acquisition_list": cmd_acquisition_list,
+        "acquisition_status": cmd_acquisition_status,
         "account_contact": cmd_account_contact,
         "account_phase": cmd_account_phase,
         "account_rename": cmd_account_rename,

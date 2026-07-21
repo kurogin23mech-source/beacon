@@ -2864,6 +2864,8 @@ def build_sales_project(name: str, objective: str, *, retro_day: str = "monday",
         "milestones": [],
         "opportunities": [],
         "accounts": [],
+        # ms-115 e-3786: 顧客獲得ターゲット (取引先の無い有限の獲得・準備作業の器)。
+        "acquisitions": [],
         "account_phases": [dict(p) for p in DEFAULT_ACCOUNT_PHASES],
         "opportunity_phases": [dict(p) for p in DEFAULT_OPPORTUNITY_PHASES],
         # e-3582: 前進の macro-frame を config に seed する (企業ごと編集可)。AI が
@@ -2874,6 +2876,78 @@ def build_sales_project(name: str, objective: str, *, retro_day: str = "monday",
     if disclosure_policy is not None:
         data["disclosure_policy"] = disclosure_policy
     return data
+
+
+# ---------------------------------------------------------------------------
+# 顧客獲得ターゲット (Acquisition) — ms-115 e-3786.
+#
+# 取引先の無い有限の獲得・準備作業 (X アカウント作成・自社サイト整備・打診 DM 文面・
+# リスト精査・獲得施策 等) の器。営業が own する target-class で、開発の Milestone と
+# 構造は同型 (finite・取引先なし・成約/失注なし) だが sales 所有なので dev の
+# Milestone は借りない (職種 ⊃ 対象 の封じ込め)。
+#
+# 方針 (ms-115 SPEC 方針2): opportunity のようなフェーズ funnel と 成約/失注 は持たず、
+# 全 target 共通の標準ライフサイクル (todo → in_progress → observing → done) だけ持つ。
+# 目標 (例「20 社アタック → 5 社アポ」) は description の散文で表す — 構造化フィールドは
+# 作らない (過剰設計回避、必要になれば後で field 昇格)。
+# ---------------------------------------------------------------------------
+
+# 標準ライフサイクル (開発 Milestone と同じ語彙)。フェーズ funnel ではない。
+ACQUISITION_STATUSES = ("todo", "in_progress", "observing", "done")
+
+
+def next_acquisition_id(data: dict) -> str:
+    ids = [a.get("id", "") for a in data.get("acquisitions", [])]
+    return _next_prefixed_id(ids, "acq-")
+
+
+def find_acquisition(data: dict, acquisition_id: str) -> Optional[dict]:
+    """Return the acquisition target for an id, or None."""
+    for a in data.get("acquisitions", []):
+        if a.get("id") == acquisition_id:
+            return a
+    return None
+
+
+def acquisition_add(data: dict, title: str, *, description: str = "",
+                    assignee: str = "", created_at: str = "",
+                    created_by: str = "") -> str:
+    """Append a 顧客獲得ターゲット (Acquisition) and return its id.
+
+    Routes through ``work_model.new_target`` — the acquisition is a clean finite
+    target that fits the generic skeleton (id / label / status / created_at /
+    created_by / assignee), unlike Opportunity/Account whose status is
+    phase-derived. Seeds ``description`` (the goal is prose here, not a field)
+    and an inline ``work_items`` list (empty at creation; sub-items are a later
+    step). Starts in ``todo``.
+    """
+    if not title or not title.strip():
+        raise ValueError("Acquisition title is required")
+    acq_id = next_acquisition_id(data)
+    acq = work_model.new_target(
+        acq_id, title.strip(), created_at=created_at, created_by=created_by,
+        assignee=assignee, description=(description or "").strip(),
+        work_items=[])
+    data.setdefault("acquisitions", []).append(acq)
+    return acq_id
+
+
+def acquisition_set_status(data: dict, acquisition_id: str, status: str, *,
+                           at: str = "") -> dict:
+    """Move an Acquisition along its standard lifecycle (todo → in_progress →
+    observing → done) and return it. This is the occupation-agnostic target
+    lifecycle — there is no phase funnel and no won/lost (ms-115 方針2)."""
+    acq = find_acquisition(data, acquisition_id)
+    if acq is None:
+        raise ValueError(f"Acquisition not found: {acquisition_id}")
+    if status not in ACQUISITION_STATUSES:
+        raise ValueError(
+            f"status must be one of {list(ACQUISITION_STATUSES)}, got {status!r}")
+    if status == work_model.DONE_STATUS:
+        work_model.mark_done(acq, at=at, actor=work_base.current_actor())
+    else:
+        acq["status"] = status
+    return acq
 
 
 def backfill_target_labels(data: dict) -> int:
@@ -2937,5 +3011,24 @@ def project_targets(data: dict) -> list:
                 "deadline": opp.get("deadline", ""),
                 "account_id": opp.get("account_id"),
             },
+        })
+    # ms-115 e-3786: 顧客獲得ターゲット (Acquisition) を商談とは別レーンとして同じ
+    # 投影 shape で並べる。phase funnel を持たないので detail は目標 (description) のみ。
+    # 進捗は標準ライフサイクル (status) で表し、work_items があればその消化数も出す。
+    for acq in data.get("acquisitions", []):
+        if acq.get("status") == work_model.CANCELLED_STATUS:
+            continue
+        items = acq.get("work_items", [])
+        total = len(items)
+        done = sum(1 for w in items
+                   if w.get("status") == work_model.DONE_STATUS)
+        targets.append({
+            "id": acq.get("id", ""),
+            "label": work_model.target_label(acq),
+            "status": acq.get("status", ""),
+            "kind": "acquisition",
+            "work_items_total": total,
+            "work_items_done": done,
+            "detail": {"description": acq.get("description", "")},
         })
     return targets

@@ -81,6 +81,10 @@ ENTITIES = [
     "activities",
     "communications",
     "nurturings",
+    # ms-115 e-3786: 顧客獲得ターゲット (取引先の無い獲得・準備作業の器)。arms=() で
+    # 子テーブルは増やさず、Target 行だけを独立テーブルに持つ。起動時 create_mysql_tables
+    # が CREATE TABLE IF NOT EXISTS で作る (schema が DDL を追い越さない)。
+    "acquisitions",
     # treks/{trek_id}/* subcollections
     # firestore は treks/{tid}/logs に永続化する (ms-97 e-2603)。dynamodb_client は
     # ここを in-memory fallback で握っていて再起動で消える既知の穴があるが、MySQL は
