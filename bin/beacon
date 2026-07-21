@@ -61,11 +61,15 @@ Sales (profession=sales):
   beacon account assign <acc-id> <user>                      Set the assignee (担当ユーザー) on an account
   beacon account nurturing <acc-id> <desc> [--deadline <date>] [--ball self|counterpart]   Add a nurturing task (継続関係の業務)
   beacon account delete <acc-id> [--force] [--reason <text>] Cancel (取消, soft) an account — record kept (--force orphans referencing opportunities)
-  beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>]   Add a deal / opportunity
+  beacon acquisition add "<title>" [--description <text>] [--assignee <user>]   Add a 顧客獲得ターゲット (取引先の無い有限の獲得・準備作業: アカウント作成/資料整備/リスト精査 等)
+  beacon acquisition list [--json]                           List 顧客獲得ターゲット
+  beacon acquisition status <acq-id> <todo|in_progress|observing|done>   Move an acquisition along its lifecycle
+  beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>] [--description <text>]   Add a deal / opportunity
   beacon opportunity list [--json] [--all]                   List opportunities (--all also shows 取消済 cancelled)
   beacon opportunity phase <opp-id> <phase> [--note <text>]  Move an opportunity to a new phase
   beacon opportunity assign <opp-id> <user>                  Set the assignee (担当ユーザー) on an opportunity
   beacon opportunity amount <opp-id> <amount>                Set the deal amount (金額, 円)
+  beacon opportunity describe <opp-id> <text>                Set the 背景/経緯/メモ (free-text; empty clears)
   beacon opportunity phase-prob <phase> <n>                  Set a phase win probability (成約率 0-100)
   beacon sales target <user> <amount> | list                Set/list a member's sales quota (目標売上) with pipeline
   beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] | --clear   Set the 遷移日 (judgement date) for the current phase
@@ -1118,6 +1122,55 @@ cmd_account_add() {
         python3 "$COMMANDS_PY" account_add
 }
 
+cmd_acquisition_add() {
+    ensure_project
+    local title="" description="" assignee=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --description|--desc) description="${2:-}"; shift 2 ;;
+            --assignee)           assignee="${2:-}"; shift 2 ;;
+            -?*) _guard_positional "$1" "Usage: beacon acquisition add \"<title>\" [--description <text>] [--assignee <user>]" ;;
+            *)   title="$1"; shift ;;
+        esac
+    done
+    if [ -z "$title" ]; then
+        echo "Usage: beacon acquisition add \"<title>\" [--description <text>] [--assignee <user>]"
+        exit 1
+    fi
+    BEACON_ACQ_TITLE="$title" BEACON_ACQ_DESCRIPTION="$description" \
+        BEACON_ACQ_ASSIGNEE="$assignee" \
+        python3 "$COMMANDS_PY" acquisition_add
+}
+
+cmd_acquisition_list() {
+    ensure_project
+    local json=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json="1"; shift ;;
+            *)      shift ;;
+        esac
+    done
+    BEACON_JSON="$json" python3 "$COMMANDS_PY" acquisition_list
+}
+
+cmd_acquisition_status() {
+    ensure_project
+    local acq_id="" status=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -?*) _guard_positional "$1" "Usage: beacon acquisition status <acq-id> <todo|in_progress|observing|done>" ;;
+            *)   if [ -z "$acq_id" ]; then acq_id="$1"; else status="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$acq_id" ] || [ -z "$status" ]; then
+        echo "Usage: beacon acquisition status <acq-id> <todo|in_progress|observing|done>"
+        exit 1
+    fi
+    BEACON_ACQ_ID="$acq_id" BEACON_ACQ_STATUS="$status" \
+        python3 "$COMMANDS_PY" acquisition_status
+}
+
 cmd_account_rename() {
     ensure_project
     local acc_id="" name=""
@@ -1210,7 +1263,7 @@ cmd_account_contact() {
 
 cmd_opportunity_add() {
     ensure_project
-    local title="" account="" phase="" goal="" probability="" deadline="" ball="" assignee=""
+    local title="" account="" phase="" goal="" probability="" deadline="" ball="" assignee="" description=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --account)     account="${2:-}"; shift 2 ;;
@@ -1220,19 +1273,38 @@ cmd_opportunity_add() {
             --deadline)    deadline="${2:-}"; shift 2 ;;
             --ball)        ball="${2:-}"; shift 2 ;;
             --assignee)    assignee="${2:-}"; shift 2 ;;
-            -?*)           _guard_positional "$1" "Usage: beacon opportunity add \"<title>\" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>]" ;;
+            --description|--desc) description="${2:-}"; shift 2 ;;
+            -?*)           _guard_positional "$1" "Usage: beacon opportunity add \"<title>\" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>] [--description <text>]" ;;
             *)             title="$1"; shift ;;
         esac
     done
     if [ -z "$title" ]; then
-        echo "Usage: beacon opportunity add \"<title>\" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>]"
+        echo "Usage: beacon opportunity add \"<title>\" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>] [--description <text>]"
         exit 1
     fi
     BEACON_OPP_TITLE="$title" BEACON_OPP_ACCOUNT="$account" \
         BEACON_OPP_PHASE="$phase" BEACON_OPP_GOAL="$goal" \
         BEACON_OPP_PROBABILITY="$probability" BEACON_OPP_DEADLINE="$deadline" \
         BEACON_OPP_BALL="$ball" BEACON_OPP_ASSIGNEE="$assignee" \
+        BEACON_OPP_DESCRIPTION="$description" \
         python3 "$COMMANDS_PY" opportunity_add
+}
+
+cmd_opportunity_describe() {
+    ensure_project
+    local opp_id="" description=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -?*) _guard_positional "$1" "Usage: beacon opportunity describe <opp-id> <text>" ;;
+            *)   if [ -z "$opp_id" ]; then opp_id="$1"; else description="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ]; then
+        echo "Usage: beacon opportunity describe <opp-id> <text>   (背景/経緯/メモ; 空文字でクリア)"
+        exit 1
+    fi
+    BEACON_OPP_ID="$opp_id" BEACON_OPP_DESCRIPTION="$description" \
+        python3 "$COMMANDS_PY" opportunity_describe
 }
 
 cmd_opportunity_assign() {
@@ -2252,6 +2324,9 @@ cmd_doc() {
             local doc_ms=""
             local doc_op=""
             local doc_trek=""
+            local doc_account=""
+            local doc_opportunity=""
+            local doc_target=""
             local doc_bus_origin=""
 
             while [[ $# -gt 0 ]]; do
@@ -2261,6 +2336,9 @@ cmd_doc() {
                     --ms)         doc_ms="${2:-}"; shift 2 ;;
                     --op)         doc_op="${2:-}"; shift 2 ;;
                     --trek)       doc_trek="${2:-}"; shift 2 ;;
+                    --account|--acc)      doc_account="${2:-}"; shift 2 ;;
+                    --opportunity|--opp)  doc_opportunity="${2:-}"; shift 2 ;;
+                    --target)     doc_target="${2:-}"; shift 2 ;;
                     --json)       json_flag="1"; shift ;;
                     --content)    doc_content="${2:-}"; shift 2 ;;
                     --bus-origin) doc_bus_origin="1"; shift ;;
@@ -2270,7 +2348,7 @@ cmd_doc() {
             done
 
             if [ -z "$doc_title" ]; then
-                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--id slug] [--content text] [--json]"
+                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--account acc-id] [--opportunity opp-id] [--target id] [--id slug] [--content text] [--json]"
                 echo "  Content can also be piped via stdin."
                 exit 1
             fi
@@ -2278,6 +2356,8 @@ cmd_doc() {
                 BEACON_CONTENT="$doc_content" BEACON_SCOPE="$doc_scope" \
                 BEACON_MS="$doc_ms" BEACON_OP="$doc_op" \
                 BEACON_TREK_ID="$doc_trek" \
+                BEACON_ACCOUNT="$doc_account" BEACON_OPPORTUNITY="$doc_opportunity" \
+                BEACON_TARGET="$doc_target" \
                 BEACON_JSON="$json_flag" \
                 BEACON_BUS_ORIGIN="$doc_bus_origin" \
                 python3 "$COMMANDS_PY" doc_add
@@ -2289,6 +2369,9 @@ cmd_doc() {
             local ms_filter=""
             local op_filter=""
             local trek_filter=""
+            local account_filter=""
+            local opportunity_filter=""
+            local target_filter=""
             local include_trashed=""
             while [[ $# -gt 0 ]]; do
                 case "$1" in
@@ -2297,6 +2380,9 @@ cmd_doc() {
                     --ms)               ms_filter="${2:-}"; shift 2 ;;
                     --op)               op_filter="${2:-}"; shift 2 ;;
                     --trek)             trek_filter="${2:-}"; shift 2 ;;
+                    --account|--acc)      account_filter="${2:-}"; shift 2 ;;
+                    --opportunity|--opp)  opportunity_filter="${2:-}"; shift 2 ;;
+                    --target)           target_filter="${2:-}"; shift 2 ;;
                     --include-trashed)  include_trashed="1"; shift ;;
                     *) shift ;;
                 esac
@@ -2304,6 +2390,8 @@ cmd_doc() {
             BEACON_JSON="$json_flag" BEACON_SCOPE="$scope_filter" \
                 BEACON_MS="$ms_filter" BEACON_OP="$op_filter" \
                 BEACON_TREK_ID="$trek_filter" \
+                BEACON_ACCOUNT="$account_filter" BEACON_OPPORTUNITY="$opportunity_filter" \
+                BEACON_TARGET="$target_filter" \
                 BEACON_INCLUDE_TRASHED="$include_trashed" \
                 python3 "$COMMANDS_PY" doc_list
             ;;
@@ -2316,6 +2404,9 @@ cmd_doc() {
             local doc_ms=""
             local doc_op=""
             local doc_trek=""
+            local doc_account=""
+            local doc_opportunity=""
+            local doc_target=""
             local json_flag=""
             local doc_bus_origin=""
             # e-1859: distinguish "flag absent" from "flag passed empty".
@@ -2335,6 +2426,9 @@ cmd_doc() {
                     --ms)         doc_ms="${2:-}"; doc_ms_set="1"; shift 2 ;;
                     --op)         doc_op="${2:-}"; doc_op_set="1"; shift 2 ;;
                     --trek)       doc_trek="${2:-}"; shift 2 ;;
+                    --account|--acc)      doc_account="${2:-}"; shift 2 ;;
+                    --opportunity|--opp)  doc_opportunity="${2:-}"; shift 2 ;;
+                    --target)     doc_target="${2:-}"; shift 2 ;;
                     --json)       json_flag="1"; shift ;;
                     --bus-origin) doc_bus_origin="1"; shift ;;
                     --stdin)      shift ;;
@@ -2343,7 +2437,7 @@ cmd_doc() {
             done
 
             if [ -z "$doc_id" ]; then
-                echo "Usage: beacon doc update <doc-id> [--title text] [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--content text] [--json]"
+                echo "Usage: beacon doc update <doc-id> [--title text] [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--account acc-id] [--opportunity opp-id] [--target id] [--content text] [--json]"
                 echo "  Content can also be piped via stdin."
                 exit 1
             fi
@@ -2352,6 +2446,8 @@ cmd_doc() {
                 BEACON_MS="$doc_ms" BEACON_OP="$doc_op" \
                 BEACON_MS_SET="$doc_ms_set" BEACON_OP_SET="$doc_op_set" \
                 BEACON_TREK_ID="$doc_trek" \
+                BEACON_ACCOUNT="$doc_account" BEACON_OPPORTUNITY="$doc_opportunity" \
+                BEACON_TARGET="$doc_target" \
                 BEACON_JSON="$json_flag" \
                 BEACON_BUS_ORIGIN="$doc_bus_origin" \
                 python3 "$COMMANDS_PY" doc_update
@@ -2835,6 +2931,14 @@ case "${1:-}" in
             *)       echo "Usage: beacon account [add|list|contact|phase|rename|assign|nurturing|delete]" ;;
         esac
         ;;
+    acquisition|acq)
+        case "${2:-}" in
+            add)      shift 2; cmd_acquisition_add "$@" ;;
+            list|ls)  shift 2; cmd_acquisition_list "$@" ;;
+            status)   shift 2; cmd_acquisition_status "$@" ;;
+            *)        echo "Usage: beacon acquisition [add|list|status]  (顧客獲得ターゲット: 取引先の無い獲得・準備作業)" ;;
+        esac
+        ;;
     opportunity|opp)
         case "${2:-}" in
             add)      shift 2; cmd_opportunity_add "$@" ;;
@@ -2842,13 +2946,14 @@ case "${1:-}" in
             phase)    shift 2; cmd_opportunity_phase "$@" ;;
             assign)   shift 2; cmd_opportunity_assign "$@" ;;
             amount)   shift 2; cmd_opportunity_amount "$@" ;;
+            describe|desc) shift 2; cmd_opportunity_describe "$@" ;;
             phase-prob) shift 2; cmd_opportunity_phase_prob "$@" ;;
             transition-date|td) shift 2; cmd_opportunity_transition_date "$@" ;;
             judge)    shift 2; cmd_opportunity_judge "$@" ;;
             due)      shift 2; cmd_opportunity_due "$@" ;;
             activity) shift 2; cmd_opportunity_activity "$@" ;;
             delete)   shift 2; cmd_opportunity_delete "$@" ;;
-            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|phase-prob|transition-date|judge|due|activity|delete]" ;;
+            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|describe|phase-prob|transition-date|judge|due|activity|delete]" ;;
         esac
         ;;
     communication|comm)

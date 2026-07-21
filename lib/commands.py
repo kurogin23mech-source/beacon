@@ -279,6 +279,8 @@ This project uses [Beacon](https://github.com/kurogin23mech-source/beacon) for m
 
 ### Rules / ルール
 
+- **Always advance the Target. A Target (milestone / opportunity / operation …) is a thing to push *forward*, not a bucket to sit in. "Making progress" means advancing the currently-open Target to its next phase/state. End every action by surfacing "the next move that advances this Target".**
+  常に target を前進させる。target (= milestone / opportunity / operation 等の進める対象) は座って眺める箱ではなく前へ進めるもの。「仕事を進める」とは、いま進行中の target を次のフェーズ / 状態へ前進させること。どの操作も最後に「この target を次に前進させる一手」を提示して終える。
 - **Never edit `.beacon/project.json` directly. Always use beacon CLI commands.**
   `.beacon/project.json` を直接編集しない。必ず beacon CLI を使うこと。
 - Before starting work, check milestones (`beacon status`) and confirm which milestone the work targets.
@@ -960,6 +962,7 @@ def cmd_milestone_add():
     owner = os.environ.get("BEACON_OWNER", "")
     assignee = os.environ.get("BEACON_ASSIGNEE", "")
     data = load_project()
+    _gate_target_class(data, "milestone")  # ms-115: block in non-dev projects
     # ms-43 / e-2281 — stamp the human author on the milestone so the Web
     # UI surfaces the creator label (= 起票者) instead of the legacy
     # ``"claude"`` literal in ``created_by``. Resolution falls back to
@@ -1060,6 +1063,16 @@ def cmd_milestone_list():
             "name": data.get("name", ""),
             "summary": data.get("summary", ""),
             "profession": occupation.resolve_profession(data),
+            # ms-115 e-3788 — 発見性: この職種が作れる target-class を session-start が
+            # 読む status に載せる。「この職種で作れるのは X」を最初から見せて、他職種の
+            # 対象を誤って作ろうとする前に自然に正しい入口へ導く (封じ込め block は最後の砦)。
+            "owned_target_classes": list(
+                occupation.OWNED_TARGET_CLASSES.get(
+                    occupation.resolve_profession(data), ())),
+            # ms-109 e-3751 — class-layer forward-motion frame, so every
+            # project's session-start reads "advance the target" inline (a
+            # per-project CORE doc would only reach this repo's sessions).
+            "target_advancement_frame": work_model.target_advancement_frame(data),
             # ms-108 e-3269 — occupation-agnostic Target projection (③ shared
             # frame). Development still emits the legacy ``milestones[]`` below
             # unchanged (expand step); ``targets[]`` is the canonical view that
@@ -1143,6 +1156,18 @@ def cmd_milestone_list():
     icons = {"done": "\u25cf", "in_progress": "\u25d1", "todo": "\u25cb",
              "waiting": "\u25cc", "in_review": "\u25d5", "observing": "\u25d5",
              "cancelled": "\u2718"}
+    # ms-109 e-3751 \u2014 imprint the forward-motion frame before listing Targets,
+    # so the AI reads "advance the target" every time it reads status (mirrors
+    # how sales ``phase list`` prints ``\u25a0 \u524d\u9032\u306e\u67a0\u7d44\u307f``). Class-agnostic, so it
+    # shows for dev and every occupation alike.
+    print(f"\u25a0 \u524d\u9032\u306e\u67a0\u7d44\u307f: {work_model.target_advancement_frame(data)}\n")
+    # ms-115 e-3788 \u2014 \u767a\u898b\u6027: \u975e\u958b\u767a\u8077\u7a2e\u3067\u306f\u300c\u3053\u306e\u8077\u7a2e\u3067\u4f5c\u308c\u308b\u5bfe\u8c61\u300d\u3092 1 \u884c\u6dfb\u3048\u308b\u3002
+    # \u55b6\u696d\u30e6\u30fc\u30b6\u30fc\u304c milestone \u3092\u63a2\u3057\u3066\u8ff7\u3046 / acquisition \u306e\u5b58\u5728\u306b\u6c17\u3065\u304b\u306a\u3044\u7a74\u3092\u57cb\u3081\u308b\u3002
+    _owned = occupation.OWNED_TARGET_CLASSES.get(
+        occupation.resolve_profession(data), ())
+    if occupation.resolve_profession(data) != "dev" and _owned:
+        print(f"  \u3053\u306e\u8077\u7a2e\u3067\u4f5c\u308c\u308b\u5bfe\u8c61: {', '.join(_owned)} "
+              f"(\u4ed6\u8077\u7a2e\u306e\u5bfe\u8c61\u306f\u4f5c\u6210\u3067\u304d\u307e\u305b\u3093)\n")
     # ms-108 e-3269 (\u5897\u5206B) \u2014 the human-readable status projects the
     # occupation's Targets. Development keeps its exact line format
     # (Milestone + progress %); sales and other occupations, whose
@@ -10860,7 +10885,7 @@ def _parse_frontmatter(text):
 
 
 def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
-                     drop_milestone=False, drop_operation=False):
+                     drop_milestone=False, drop_operation=False, target=""):
     """Prepend frontmatter to content, or update existing scope/milestone/operation/trek_id.
 
     List values are written as inline YAML arrays (``key: ["a", "b"]``) so
@@ -10871,6 +10896,12 @@ def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
     ``trek_id`` (ms-69 / e-1663) associates a doc with a cross-project trek;
     optional, defaults preserved on round-trip.
 
+    ``target`` (ms-109 e-3754) is the canonical, target-class-agnostic doc
+    linkage key (``acc-1`` / ``opp-3`` / ``ms-5`` …). When set it writes
+    ``target: <id>`` and, for Targets that predate it (milestone / operation /
+    trek), dual-writes the legacy key so existing readers keep working. New
+    Target classes (account / opportunity) carry ``target`` only.
+
     ``drop_milestone`` / ``drop_operation`` (e-1859) explicitly remove the
     matching key from existing frontmatter. ``cmd_doc_update`` sets these
     when the user switches a doc from milestone scope to operation scope
@@ -10878,6 +10909,7 @@ def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
     two-headed (= both milestone and operation set) frontmatter that
     silently misleads ``/beacon-operation-review`` discovery filters.
     """
+    import work_model
     meta, body = _parse_frontmatter(content)
     meta["scope"] = scope
     if drop_milestone:
@@ -10890,6 +10922,14 @@ def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
         meta["operation"] = operation
     if trek_id:
         meta["trek_id"] = trek_id
+    if target:
+        # ms-109 e-3754: canonical linkage + back-compat dual-write of the
+        # legacy key (milestone / operation / trek_id) when the Target is one
+        # of the classes that had one, so legacy readers/filters keep resolving.
+        meta["target"] = target
+        legacy_key = work_model.legacy_link_key_for(target)
+        if legacy_key:
+            meta[legacy_key] = target
     lines = ["---"]
     for k, v in meta.items():
         if isinstance(v, list):
@@ -10957,6 +10997,13 @@ def cmd_doc_list():
     # makes it usable from the CLI (= mirrors what the server-side
     # /api/treks/{tid}/documents lookup does for the Web UI).
     trek_filter = os.environ.get("BEACON_TREK_ID", "")
+    # ms-109 e-3754 — target-class-agnostic filter. --target / --account /
+    # --opportunity all resolve here and match a doc's linked Target via the
+    # tolerant ``doc_target`` read (canonical ``target`` first, legacy keys
+    # second), so ``doc list --account acc-1`` surfaces a customer's docs.
+    target_filter = (os.environ.get("BEACON_TARGET", "")
+                     or os.environ.get("BEACON_ACCOUNT", "")
+                     or os.environ.get("BEACON_OPPORTUNITY", ""))
     # Trashed docs are hidden by default — pass --include-trashed to see
     # them in line with active ones (ms-14 e-973).
     include_trashed = os.environ.get("BEACON_INCLUDE_TRASHED", "") == "1"
@@ -10976,6 +11023,9 @@ def cmd_doc_list():
         docs = [d for d in docs if d.get("operation") == op_filter]
     if trek_filter:
         docs = [d for d in docs if d.get("trek_id") == trek_filter]
+    if target_filter:
+        import work_model
+        docs = [d for d in docs if work_model.doc_target(d) == target_filter]
 
     if json_mode:
         print(json.dumps(docs, ensure_ascii=False))
@@ -11018,6 +11068,14 @@ def cmd_doc_add():
     milestone = os.environ.get("BEACON_MS", "")
     operation = os.environ.get("BEACON_OP", "")
     trek_id = os.environ.get("BEACON_TREK_ID", "")  # ms-69 / e-1663
+    # ms-109 e-3754 — canonical target-class-agnostic doc linkage. --account /
+    # --opportunity are new (sales Targets had no linkage key); --target is the
+    # generic form. --ms / --op / --trek continue to work via the legacy vars
+    # above and are resolved into ``target`` below.
+    account = os.environ.get("BEACON_ACCOUNT", "")
+    opportunity = os.environ.get("BEACON_OPPORTUNITY", "")
+    target = (os.environ.get("BEACON_TARGET", "") or account or opportunity
+              or milestone or operation or trek_id)
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not title:
@@ -11042,6 +11100,19 @@ def cmd_doc_add():
     if scope == "core":
         milestone = milestone or None
 
+    # ms-109 e-3754 — hard-validate the new Target classes (account /
+    # opportunity) exist before linking. ms / op / trek stay lenient (their
+    # pre-existing behavior); an unknown prefix is left to round-trip untouched.
+    if target:
+        import work_model
+        _kind = work_model.target_kind(target)
+        if _kind in ("account", "opportunity"):
+            _coll = "accounts" if _kind == "account" else "opportunities"
+            _data = load_project()
+            if target not in {x.get("id") for x in _data.get(_coll, [])}:
+                print(f"Error: {_kind} not found: {target}", file=sys.stderr)
+                sys.exit(1)
+
     content = _resolve_content_input(content)
 
     if not content:
@@ -11063,9 +11134,10 @@ def cmd_doc_add():
     except Exception:
         pass
 
-    # Add frontmatter with scope, milestone, operation, and trek_id
+    # Add frontmatter with scope, milestone, operation, trek_id, and the
+    # canonical ``target`` linkage (ms-109 e-3754).
     content = _add_frontmatter(content, scope, milestone or "", operation or "",
-                               trek_id or "")
+                               trek_id or "", target=target or "")
 
     if _is_cloud_mode():
         client, config = _get_api_client()
@@ -11084,10 +11156,15 @@ def cmd_doc_add():
             f.write(content)
 
     import datetime
+    import work_model
     data = load_project()
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # ms-109 e-3754 — account / opportunity docs have no milestone/operation
+    # legacy entry to record (they link via ``target`` only); skip the dev-era
+    # entry recording for them so we never call save_entry with an empty ms_id.
+    _is_sales_link = work_model.target_kind(target or "") in ("account", "opportunity")
     # core docs: skip MS/Op entry recording (they're project-wide)
-    if scope != "core":
+    if scope != "core" and not _is_sales_link:
         if operation:
             # Record in operation entries
             for op in data.get("operations", []):
@@ -11155,6 +11232,11 @@ def cmd_doc_update():
         sys.exit(1)
 
     operation = os.environ.get("BEACON_OP", "")
+    # ms-109 e-3754 — canonical target linkage inputs (account / opportunity are
+    # new sales Targets; --target is generic). Resolved into ``target`` below.
+    account = os.environ.get("BEACON_ACCOUNT", "")
+    opportunity = os.environ.get("BEACON_OPPORTUNITY", "")
+    target_in = os.environ.get("BEACON_TARGET", "") or account or opportunity
     # Use existing values as defaults
     if not title:
         title = existing.get("title", "")
@@ -11188,6 +11270,23 @@ def cmd_doc_update():
     if not content:
         content = existing.get("content", "")
 
+    # ms-109 e-3754 — resolve the canonical target: an explicitly passed
+    # account/opportunity/--target wins; otherwise fall back to the resolved
+    # milestone/operation/trek, then preserve the doc's existing ``target``.
+    import work_model
+    target = (target_in or milestone or operation or trek_id
+              or existing.get("target", ""))
+    # Hard-validate the new Target classes when they were explicitly passed
+    # (a preserved existing link was already validated at creation).
+    if target_in:
+        _kind = work_model.target_kind(target_in)
+        if _kind in ("account", "opportunity"):
+            _coll = "accounts" if _kind == "account" else "opportunities"
+            _data = load_project()
+            if target_in not in {x.get("id") for x in _data.get(_coll, [])}:
+                print(f"Error: {_kind} not found: {target_in}", file=sys.stderr)
+                sys.exit(1)
+
     # Rebuild with frontmatter. e-1859: _add_frontmatter is called with an
     # explicit "scope wipe" pass so the field we are dropping (= operation
     # under Mode 1, milestone under Mode 2) is removed from the existing
@@ -11196,6 +11295,7 @@ def cmd_doc_update():
         content, scope, milestone, operation, trek_id,
         drop_milestone=(op_explicit and not ms_explicit),
         drop_operation=(ms_explicit and not op_explicit),
+        target=target or "",
     )
 
     # Write path still branches per backend (Phase 3 で Store.save_document
@@ -11216,7 +11316,10 @@ def cmd_doc_update():
     # e-1859: mirror cmd_doc_add's scope-aware entry recording so an
     # op-scoped doc update lands in op.entries (not the milestone log).
     # core scope is project-wide and skips entry recording entirely.
-    if scope == "core":
+    # ms-109 e-3754: account / opportunity docs link via ``target`` only and
+    # have no milestone/operation legacy entry to record.
+    _is_sales_link = work_model.target_kind(target or "") in ("account", "opportunity")
+    if scope == "core" or _is_sales_link:
         pass
     elif operation:
         for op in data.get("operations", []):
@@ -16621,6 +16724,10 @@ def cmd_help_json():
         {"command": "beacon opportunity add <title>", "flags": ["--account <acc-id>", "--phase <p>", "--goal <n>", "--probability <n>", "--deadline <date>", "--ball self|counterpart", "--assignee <user>"], "description": "Add a sales opportunity (商談; 対象・有限)"},
         {"command": "beacon opportunity assign <opp-id> <user>", "flags": [], "description": "Set the 担当ユーザー (assignee) on an opportunity"},
         {"command": "beacon opportunity amount <opp-id> <amount>", "flags": [], "description": "Set an opportunity's 金額 (goal_amount, 円)"},
+        {"command": "beacon opportunity describe <opp-id> <text>", "flags": [], "description": "Set an opportunity's 背景/経緯/メモ (free-text; empty clears)"},
+        {"command": "beacon acquisition add <title>", "flags": ["--description <text>", "--assignee <user>"], "description": "Add a 顧客獲得ターゲット (取引先の無い有限の獲得・準備作業の器; 営業専用)"},
+        {"command": "beacon acquisition list", "flags": ["--json"], "description": "List 顧客獲得ターゲット with their lifecycle status"},
+        {"command": "beacon acquisition status <acq-id> <status>", "flags": [], "description": "Move a 顧客獲得ターゲット along its lifecycle (todo/in_progress/observing/done)"},
         {"command": "beacon opportunity phase-prob <phase> <n>", "flags": [], "description": "Set a phase's 成約率 (win probability 0-100; per-company funnel tuning)"},
         {"command": "beacon sales target <user> <amount>", "flags": [], "description": "Set a member's 目標売上 (sales quota; empty amount clears)"},
         {"command": "beacon sales target list", "flags": ["--json"], "description": "List members' 目標売上 with their 見込み売上 (weighted pipeline)"},
@@ -16770,6 +16877,7 @@ def cmd_operation_open():
         print("Error: operation title required")
         sys.exit(1)
     data = load_project()
+    _gate_target_class(data, "operation")  # ms-115: block in non-dev projects
     # ms-43 / e-2281 — stamp the human author on the Operation so the Web
     # UI surfaces the creator label (= 起票者) instead of the legacy
     # ``"claude"`` literal in ``created_by``. Same resolution path as
@@ -20953,14 +21061,22 @@ def _today_iso() -> str:
     return datetime.date.today().isoformat()
 
 
-def _require_sales_project(data: dict) -> None:
-    """Warn (not block) if run against a non-sales project. Sales commands
-    still work on any project — they just create the collections lazily — but
-    a wrong-profession invocation is almost always a mistake worth surfacing."""
-    prof = data.get("profession", "")
-    if prof and prof != "sales":
-        print(f"  note: this project's profession is '{prof}', not 'sales' "
-              f"(sales entities will still be created)", file=sys.stderr)
+# _require_sales_project (warn-only) was removed in ms-115 e-3785 — the sales
+# target-creating commands now go through the hard containment gate
+# (_gate_target_class → occupation.assert_target_class_owned) instead of a soft
+# warning, so a wrong-profession create fails structurally.
+
+
+def _gate_target_class(data: dict, kind: str) -> None:
+    """Enforce profession ⊃ target-class containment before creating a target
+    (ms-115 e-3785). Prints the guidance-rich block message and exits non-zero
+    when the project's profession does not own ``kind`` — so a wrong-profession
+    create fails structurally instead of producing an invisible ghost target."""
+    try:
+        occupation.assert_target_class_owned(data, kind)
+    except occupation.TargetClassProfessionError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 def cmd_account_add():
@@ -20969,7 +21085,7 @@ def cmd_account_add():
     health = os.environ.get("BEACON_ACCOUNT_HEALTH", "")
     assignee = os.environ.get("BEACON_ACCOUNT_ASSIGNEE", "")
     data = load_project()
-    _require_sales_project(data)
+    _gate_target_class(data, "account")
     try:
         acc_id = sales_entities.account_add(data, name, health=health,
                                             assignee=assignee,
@@ -21094,6 +21210,67 @@ def cmd_sales_identity_check():
         sys.exit(0)
     print(f"BLOCK: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+# --- 顧客獲得ターゲット (Acquisition, ms-115 e-3786) ------------------------
+# 取引先の無い有限の獲得・準備作業の器。営業が own する target-class。
+
+def cmd_acquisition_add():
+    import sales_entities
+    title = os.environ.get("BEACON_ACQ_TITLE", "")
+    description = os.environ.get("BEACON_ACQ_DESCRIPTION", "")
+    assignee = os.environ.get("BEACON_ACQ_ASSIGNEE", "")
+    data = load_project()
+    _gate_target_class(data, "acquisition")
+    try:
+        acq_id = sales_entities.acquisition_add(
+            data, title, description=description, assignee=assignee,
+            created_at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Added acquisition {acq_id}: {title}")
+    if description:
+        print(f"  目標 / メモ: {description}")
+    print(f"  次: `beacon acquisition status {acq_id} in_progress` で着手 / "
+          f"`beacon acquisition list` で一覧")
+
+
+def cmd_acquisition_list():
+    import json as _json
+    data = load_project()
+    acqs = data.get("acquisitions", [])
+    if os.environ.get("BEACON_JSON") == "1":
+        print(_json.dumps(acqs, ensure_ascii=False))
+        return
+    if not acqs:
+        print('(顧客獲得ターゲットはまだありません — `beacon acquisition add "<title>"`)')
+        return
+    for a in acqs:
+        items = a.get("work_items", [])
+        done = sum(1 for w in items if w.get("status") == "done")
+        cnt = f" [{done}/{len(items)}]" if items else ""
+        label = a.get("label") or a.get("title", "")
+        print(f"{a.get('id')}  {a.get('status',''):<12} {label}{cnt}")
+        desc = a.get("description", "")
+        if desc:
+            print(f"    目標: {desc}")
+
+
+def cmd_acquisition_status():
+    import sales_entities
+    acq_id = os.environ.get("BEACON_ACQ_ID", "")
+    status = os.environ.get("BEACON_ACQ_STATUS", "")
+    data = load_project()
+    try:
+        sales_entities.acquisition_set_status(data, acq_id, status,
+                                              at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"{acq_id} → {status}")
 
 
 # --- send-account ledger (ms-107 e-3365) -----------------------------------
@@ -21267,16 +21444,17 @@ def cmd_opportunity_add():
     goal_raw = os.environ.get("BEACON_OPP_GOAL", "")
     prob_raw = os.environ.get("BEACON_OPP_PROBABILITY", "")
     assignee = os.environ.get("BEACON_OPP_ASSIGNEE", "")
+    description = os.environ.get("BEACON_OPP_DESCRIPTION", "")  # ms-106 e-3526
     goal_amount = _parse_number(goal_raw, "--goal")
     probability = _parse_number(prob_raw, "--probability")
     data = load_project()
-    _require_sales_project(data)
+    _gate_target_class(data, "opportunity")
     try:
         opp_id = sales_entities.opportunity_add(
             data, title, account_id=account_id, phase=phase,
             goal_amount=goal_amount, probability=probability,
             deadline=deadline, who_has_the_ball=ball, assignee=assignee,
-            created_at=core._now_iso())
+            description=description, created_at=core._now_iso())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -21323,6 +21501,24 @@ def cmd_opportunity_amount():
         sys.exit(1)
     save_project(data)
     print(f"Set amount on {opp_id}: {amount if amount is not None else '(cleared)'}")
+
+
+def cmd_opportunity_describe():
+    """Set an opportunity's free-text 背景 / 経緯 / メモ (ms-106 e-3526)."""
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    description = os.environ.get("BEACON_OPP_DESCRIPTION", "")
+    data = load_project()
+    try:
+        sales_entities.opportunity_set_description(data, opp_id, description)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    if description.strip():
+        print(f"Set description on {opp_id}")
+    else:
+        print(f"Cleared description on {opp_id}")
 
 
 def cmd_opportunity_phase_prob():
@@ -21457,7 +21653,12 @@ def cmd_opportunity_phase():
     if opp_id.startswith("opp-"):
         opp = sales_entities.find_opportunity(data, opp_id)
         cur = opp.get("phase", "") if opp else ""
-        warnings = sales_entities.opportunity_phase_warnings(data, cur, new_phase)
+        # e-3527: pass the deal's 想定金額 (goal or amount) so require_amount
+        # phases can warn when neither is set.
+        warnings = sales_entities.opportunity_phase_warnings(
+            data, cur, new_phase,
+            goal_amount=(opp.get("goal_amount") if opp else None),
+            amount=(opp.get("amount") if opp else None))
     elif opp_id.startswith("acc-"):
         warnings = sales_entities.account_phase_warnings(data, new_phase)
     for w in warnings:
@@ -21548,6 +21749,26 @@ def _human_actor() -> str:
         return "human"
 
 
+def _print_phase_fold(fold) -> None:
+    """Surface the e-3553 phase-fold result of a transition. Evidence-linked
+    activities were auto-closed (記帳=自動) — reported so the human sees what was
+    tidied; the evidence-less ones need a human call (done / cancel / carry) and
+    are listed with the exact commands. No-op when nothing was folded."""
+    if not isinstance(fold, dict):
+        return
+    auto = fold.get("auto_done") or []
+    pending = fold.get("needs_decision") or []
+    if auto:
+        print(f"  ✓ 前フェーズの活動 {len(auto)} 件を証跡ありで自動クローズ: "
+              f"{', '.join(auto)}")
+    for d in pending:
+        print(f"  ▸ 要判断 {d.get('id')}: {d.get('description')}")
+        print(f"      {d.get('reason')}")
+    if pending:
+        print("      → done: beacon activity done <id> / "
+              "cancel: beacon activity cancel <id> --reason <理由>")
+
+
 def cmd_opportunity_judge():
     """Judge a transition (ms-107 e-3372, SPEC §3): advance / retry / terminal.
 
@@ -21584,6 +21805,7 @@ def cmd_opportunity_judge():
                 hint = f" (候補: {sug})" if sug else ""
                 print(f"  ⚠ 次フェーズの遷移日が未設定です{hint} — "
                       f"beacon opportunity transition-date {opp_id} <YYYY-MM-DD>")
+            _print_phase_fold(res.get("fold"))
         elif decision == "retry":
             sales_entities.retry_transition(data, opp_id, arg, note=note, at=at, actor=actor)
             save_project(data)
@@ -21594,9 +21816,10 @@ def cmd_opportunity_judge():
             cur = opp.get("phase", "") if opp else ""
             for w in sales_entities.opportunity_phase_warnings(data, cur, arg):
                 print(f"  ⚠ {w}", file=sys.stderr)
-            sales_entities.terminal_transition(data, opp_id, arg, note=note, at=at, actor=actor)
+            trec = sales_entities.terminal_transition(data, opp_id, arg, note=note, at=at, actor=actor)
             save_project(data)
             print(f"{opp_id} terminal → {arg} (決着、遷移日は用済みでクリア)")
+            _print_phase_fold(trec.get("fold"))
         else:
             print(f"Error: decision must be advance|retry|terminal, got {decision!r}",
                   file=sys.stderr)
@@ -22143,6 +22366,9 @@ if __name__ == "__main__":
         # ms-106 ② sales job-template entities
         "account_add": cmd_account_add,
         "account_list": cmd_account_list,
+        "acquisition_add": cmd_acquisition_add,
+        "acquisition_list": cmd_acquisition_list,
+        "acquisition_status": cmd_acquisition_status,
         "account_contact": cmd_account_contact,
         "account_phase": cmd_account_phase,
         "account_rename": cmd_account_rename,
@@ -22154,6 +22380,7 @@ if __name__ == "__main__":
         "opportunity_phase": cmd_opportunity_phase,
         "opportunity_assign": cmd_opportunity_assign,
         "opportunity_amount": cmd_opportunity_amount,
+        "opportunity_describe": cmd_opportunity_describe,
         "opportunity_phase_prob": cmd_opportunity_phase_prob,
         "sales_target": cmd_sales_target,
         "sales_target_list": cmd_sales_target_list,

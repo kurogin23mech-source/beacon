@@ -36,7 +36,7 @@ def test_sales_template_shape():
 
 def test_sales_template_seeds_phase_funnels():
     data = _fresh()
-    assert [p["name"] for p in data["account_phases"]] == ["リード", "未成約顧客", "成約顧客"]
+    assert [p["name"] for p in data["account_phases"]] == ["未接触", "リード", "未成約顧客", "成約顧客"]
     opp_names = [p["name"] for p in data["opportunity_phases"]]
     assert opp_names == ["商談準備", "提案準備", "先方検討中", "合意済み", "成約", "失注", "不成立"]
     # terminals carry an outcome; stages carry allowed_terminals.
@@ -85,8 +85,9 @@ def test_account_add_defaults_to_first_phase():
     a1 = se.account_add(data, "Globex", created_at="T0")
     assert a1 == "acc-1"
     acc = se.find_account(data, a1)
-    assert acc["phase"] == "リード"
-    assert acc["phase_history"] == [{"phase": "リード", "at": "T0", "note": "initial"}]
+    # ms-115 e-3787: 新規 Account は funnel 先頭「未接触」(= 生リスト) から始まる。
+    assert acc["phase"] == "未接触"
+    assert acc["phase_history"] == [{"phase": "未接触", "at": "T0", "note": "initial"}]
 
 
 def test_account_name_required():
@@ -119,7 +120,7 @@ def test_account_phase_transition_is_append_only():
     se.phase_set(data, acc, "成約顧客", at="T2")
     a = se.find_account(data, acc)
     assert a["phase"] == "成約顧客"
-    assert [h["phase"] for h in a["phase_history"]] == ["リード", "未成約顧客", "成約顧客"]
+    assert [h["phase"] for h in a["phase_history"]] == ["未接触", "未成約顧客", "成約顧客"]
 
 
 def test_contact_nested_under_account():
@@ -795,6 +796,87 @@ def test_terminal_transition_rejects_non_terminal_phase():
         se.terminal_transition(data, opp, "先方検討中")  # not terminal
 
 
+# --- e-3553 phase fold (前フェーズ活動の後始末) ------------------------------
+
+# --- e-3786 顧客獲得ターゲット (Acquisition) --------------------------------
+
+def test_build_seeds_acquisitions_collection():
+    data = se.build_sales_project("S", "obj")
+    assert data["acquisitions"] == []
+
+
+def test_acquisition_add_uses_standard_lifecycle_and_prose_goal():
+    data = _fresh()
+    acq = se.acquisition_add(data, "Xアカウント整備",
+                             description="20社アタック→5社アポ")
+    rec = se.find_acquisition(data, acq)
+    assert rec["status"] == "todo"                 # 標準ライフサイクル開始点
+    assert rec["label"] == "Xアカウント整備"        # canonical label
+    assert rec["description"] == "20社アタック→5社アポ"  # 目標は散文
+    # phase funnel / won-lost / 構造化 goal フィールドは持たない (方針2)
+    assert "phase" not in rec and "goal_amount" not in rec
+
+
+def test_acquisition_status_transitions_and_rejects_unknown():
+    data = _fresh()
+    acq = se.acquisition_add(data, "資料整備")
+    se.acquisition_set_status(data, acq, "in_progress")
+    assert se.find_acquisition(data, acq)["status"] == "in_progress"
+    se.acquisition_set_status(data, acq, "done", at="T9")
+    done = se.find_acquisition(data, acq)
+    assert done["status"] == "done" and done.get("done_at") == "T9"
+    with pytest.raises(ValueError):
+        se.acquisition_set_status(data, acq, "成約")  # not a lifecycle status
+
+
+def test_acquisition_projects_as_separate_lane():
+    data = _fresh()
+    se.opportunity_add(data, "Acme商談")
+    acq = se.acquisition_add(data, "リスト精査", description="候補20社")
+    kinds = {t["kind"] for t in se.project_targets(data)}
+    assert kinds == {"opportunity", "acquisition"}
+    a = next(t for t in se.project_targets(data) if t["kind"] == "acquisition")
+    assert a["id"] == acq and a["status"] == "todo"
+    # acquisition の detail は目標 (description) のみ — phase 系は持ち込まない
+    assert a["detail"] == {"description": "候補20社"}
+
+
+def test_fold_auto_closes_evidence_linked_and_surfaces_the_rest():
+    data = _fresh()
+    acc = se.account_add(data, "Acme")
+    opp = se.opportunity_add(data, "Deal", account_id=acc, phase="商談準備")
+    a_done = se.activity_add(data, opp, "初回面談を実施")   # will get evidence
+    a_open = se.activity_add(data, opp, "余計な準備")         # no evidence
+    se.communication_add(data, a_done, "面談の議事録",
+                         direction="inbound", channel="meeting")
+    res = se.advance_transition(data, opp, at="T1")
+    fold = res["fold"]
+    # evidence-linked activity auto-closed (記帳=自動)
+    assert fold["auto_done"] == [a_done]
+    _, done_act = se.find_activity(data, a_done)
+    assert done_act["status"] == "done"
+    # evidence-less activity surfaced for a human call, NOT auto-touched
+    assert [d["id"] for d in fold["needs_decision"]] == [a_open]
+    _, open_act = se.find_activity(data, a_open)
+    assert open_act["status"] == "todo"
+
+
+def test_fold_only_touches_the_leaving_phase():
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal", phase="商談準備")
+    a_prev = se.activity_add(data, opp, "旧フェーズの活動")
+    se.communication_add(data, a_prev, "証跡", direction="outbound", channel="email")
+    se.advance_transition(data, opp, at="T1")  # 商談準備 → 提案準備, folds 商談準備
+    # a fresh activity born in the NEW phase, with evidence, must NOT be folded
+    a_new = se.activity_add(data, opp, "新フェーズの活動")  # created_in_phase=提案準備
+    se.communication_add(data, a_new, "証跡2", direction="outbound", channel="email")
+    res = se.advance_transition(data, opp, at="T2")  # 提案準備 → 先方検討中
+    assert a_new in res["fold"]["auto_done"]
+    # the previous-phase activity was already closed in the first advance
+    _, prev = se.find_activity(data, a_prev)
+    assert prev["status"] == "done"
+
+
 def test_suggest_transition_date_from_default_lead():
     data = _fresh()
     prep = se._find_phase_def(data["opportunity_phases"], "提案準備")
@@ -997,23 +1079,44 @@ def test_nurturing_ids_are_account_global():
 
 # --- ms-106 fb3 / e-3350: 顧客フェーズ ← 商談フェーズ の連動 -----------------
 
-def test_derive_account_phase_lead_when_no_or_prep_only_opps():
+def test_derive_account_phase_untouched_then_lead_on_first_deal():
     data = _fresh()
     acc = se.account_add(data, "Globex")
-    assert se.derive_account_phase(data, acc) == "リード"  # no opps
+    # ms-115 e-3787: 商談が1件も無い = 生リスト → 未接触
+    assert se.derive_account_phase(data, acc) == "未接触"
     se.opportunity_add(data, "Deal", account_id=acc)  # 商談準備 entry
+    # 商談ができた = 接触が始まった → リード
     assert se.derive_account_phase(data, acc) == "リード"
 
 
 def test_account_auto_advances_up_on_opportunity_progress():
     data = _fresh()
     acc = se.account_add(data, "Globex")
+    assert se.find_account(data, acc)["phase"] == "未接触"  # 生リスト
     opp = se.opportunity_add(data, "Deal", account_id=acc, created_at="T0")
+    # 商談起票で 未接触 → リード へ自動昇格 (e-3787)
     assert se.find_account(data, acc)["phase"] == "リード"
     se.phase_set(data, opp, "提案準備", at="T1")
     assert se.find_account(data, acc)["phase"] == "未成約顧客"
     se.phase_set(data, opp, "成約", at="T2")
     assert se.find_account(data, acc)["phase"] == "成約顧客"
+
+
+def test_derive_maps_from_end_so_legacy_3phase_config_still_correct():
+    # ms-115 e-3787: derive counts from the funnel end, so a company still on the
+    # legacy 3-stage account funnel (リード/未成約顧客/成約顧客, no 未接触) keeps the
+    # right mapping — no 未接触 to fall into, so a no-deal account is リード.
+    data = _fresh()
+    data["account_phases"] = [{"name": "リード"}, {"name": "未成約顧客"},
+                              {"name": "成約顧客"}]
+    acc = se.account_add(data, "LegacyCo")
+    assert se.find_account(data, acc)["phase"] == "リード"   # first phase = entry
+    assert se.derive_account_phase(data, acc) == "リード"     # no opp, 3-phase → リード
+    opp = se.opportunity_add(data, "Deal", account_id=acc, created_at="T0")
+    se.phase_set(data, opp, "提案準備", at="T1")
+    assert se.derive_account_phase(data, acc) == "未成約顧客"  # progressed → end-1
+    se.phase_set(data, opp, "成約", at="T2")
+    assert se.derive_account_phase(data, acc) == "成約顧客"    # won → end
 
 
 def test_account_phase_never_auto_downgrades():

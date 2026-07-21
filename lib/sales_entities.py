@@ -50,7 +50,9 @@ CANCELLED_STATUS = work_base.CANCELLED_STATUS
 # SEEDS, not enforced constants — the live vocabulary is always read from data.
 
 DEFAULT_ACCOUNT_PHASES = [
-    {"name": "リード"},          # 未接触 / 見込みのみ
+    {"name": "未接触"},          # ms-115 e-3787: 生リスト。まだ接触していない顧客候補
+                                 #   (= ターゲットリスト)。新規 Account の既定入口。
+    {"name": "リード"},          # 接触して関係が始まった見込み客
     {"name": "未成約顧客"},      # 商談はあるがまだ成約なし
     {"name": "成約顧客"},        # 成約実績のある継続顧客
 ]
@@ -76,6 +78,10 @@ DEFAULT_OPPORTUNITY_PHASES = [
     {"name": "提案準備", "probability": 20, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "企画を作り提案を終え、先方が検討フェーズに入った状態にする",
+     # ms-106 e-3527: 提案準備に進む時点で提案の規模 = 想定金額が定まっているべき。
+     # require_amount は phase 定義側のフラグにして「どのフェーズから金額を課すか」を
+     # per-company に設定可能にする (block でなく警告、master = 人間)。
+     "require_amount": True,
      "activity_template": ["提案面談を打診",
                            {"desc": "提案面談を実施", "kind": "meeting"},
                            "提案内容を準備"],
@@ -83,11 +89,13 @@ DEFAULT_OPPORTUNITY_PHASES = [
     {"name": "先方検討中", "probability": 40, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "先方の実行合意を取る",
+     "require_amount": True,
      "activity_template": ["合意確認日を確定（必要なら面談設定）", "合意の確認を取る"],
      "default_lead": 14},
     {"name": "合意済み", "probability": 80, "terminal": False,
      "allowed_terminals": ["成約", "失注"],
      "goal": "契約を締結する",
+     "require_amount": True,
      "activity_template": ["契約書を送付", "締結"],
      "default_lead": 7},
     # 決着フェーズ (terminal): outcome は有限ターゲットの結末種別。
@@ -202,13 +210,20 @@ def _opportunity_status_for_phase(data: dict, phase: str) -> str:
     return "open"
 
 
-def opportunity_phase_warnings(data: dict, current_phase: str, new_phase: str) -> list:
+def opportunity_phase_warnings(data: dict, current_phase: str, new_phase: str,
+                               *, goal_amount=None, amount=None) -> list:
     """Non-blocking checks for an opportunity phase transition (SPEC §5:
     master=人間 declares; we surface, never block). Returns warning strings:
 
-    * new_phase not in the configured vocabulary, and
+    * new_phase not in the configured vocabulary,
     * declaring a terminal that the current stage's ``allowed_terminals`` rule
-      does not permit (e.g. 商談準備 → 成約, which skips 提案).
+      does not permit (e.g. 商談準備 → 成約, which skips 提案), and
+    * (ms-106 e-3527) moving into a phase whose ``require_amount`` flag is set
+      while the deal has no 想定金額 — the proposal's size should be known by
+      提案準備. Either the goal (``goal_amount``, set at 起票 via --goal) OR the
+      deal amount (``amount``, set later via ``opportunity amount``) satisfies
+      it, so the rep can clear the warning on an existing deal. Both are passed
+      by the caller (which holds the opportunity); when omitted the check skips.
     """
     warnings: list = []
     phases = opportunity_phases(data)
@@ -228,7 +243,57 @@ def opportunity_phase_warnings(data: dict, current_phase: str, new_phase: str) -
             warnings.append(
                 f"'{current_phase}' から決着できるのは {allowed} のみです "
                 f"('{new_phase}' はルール外)")
+    # e-3527: 想定金額が要るフェーズへ進むのに未設定なら warning (block しない)。
+    # goal_amount (起票時の目標) か amount (後から設定する取引額) のどちらかがあれば可。
+    if _phase_requires_amount(new_def, new_phase) and \
+            _amount_is_unset(goal_amount) and _amount_is_unset(amount):
+        warnings.append(
+            f"'{new_phase}' に進むには想定金額 (goal_amount) を設定すべきです "
+            f"(提案の規模が未確定)。`beacon opportunity add --goal <円>` または "
+            f"既存商談は金額設定で入れてください")
     return warnings
+
+
+# Default phase names that carry require_amount (ms-106 e-3527). Used as a
+# tolerant backfill so projects whose opportunity_phases were seeded from the
+# shipped default BEFORE this flag existed still get the warning — no data
+# migration needed (same expand pattern as the target-advancement frame).
+_DEFAULT_REQUIRE_AMOUNT_PHASES = {
+    p["name"] for p in DEFAULT_OPPORTUNITY_PHASES if p.get("require_amount")
+}
+
+
+def _phase_requires_amount(new_def, new_phase: str) -> bool:
+    """Whether entering ``new_phase`` should have a 想定金額 set. Honors an
+    explicit ``require_amount`` on the configured phase def (True OR False —
+    a company can opt out); otherwise backfills from the shipped default by
+    phase name so pre-existing projects are covered without migration."""
+    if new_def is not None and "require_amount" in new_def:
+        return bool(new_def["require_amount"])
+    return new_phase in _DEFAULT_REQUIRE_AMOUNT_PHASES
+
+
+def _amount_is_unset(goal_amount) -> bool:
+    """想定金額が「未設定」か。None / 空文字 / 0 以下を未設定とみなす (0 円の提案は
+    無いので 0 も未設定扱い)。"""
+    if goal_amount is None or goal_amount == "":
+        return True
+    try:
+        return float(goal_amount) <= 0
+    except (TypeError, ValueError):
+        return True
+
+
+def opportunity_set_description(data: dict, opportunity_id: str,
+                               description: str) -> dict:
+    """Set an Opportunity's free-text 背景 / 経緯 / メモ (ms-106 e-3526). Empty
+    string clears it. Returns the updated opportunity dict. Raises ValueError
+    when the opportunity is unknown."""
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    opp["description"] = (description or "").strip()
+    return opp
 
 
 def account_phase_warnings(data: dict, new_phase: str) -> list:
@@ -503,7 +568,7 @@ def opportunity_add(data: dict, title: str, *, account_id: str = "",
                     phase: str = "", goal_amount=None, probability=None,
                     deadline: str = "", who_has_the_ball: str = BALL_SELF,
                     transition_date: str = "", assignee: str = "",
-                    created_at: str = "") -> str:
+                    description: str = "", created_at: str = "") -> str:
     """Append a new Opportunity (対象・有限) and return its id.
 
     ``account_id`` is a 参照 association (N:1 → Account) validated when given.
@@ -542,6 +607,9 @@ def opportunity_add(data: dict, title: str, *, account_id: str = "",
         "deadline": deadline,
         "who_has_the_ball": who_has_the_ball,
         "assignee": assignee,
+        # ms-106 e-3526: free-text 背景 / 経緯 / メモ。構造化フィールド (金額・確度
+        # 等) では拾えない「この商談はどういう経緯で・何がポイントか」を残す場所。
+        "description": (description or "").strip(),
         "status": _opportunity_status_for_phase(data, initial_phase),
         "created_at": created_at,
         "activities": [],
@@ -552,6 +620,10 @@ def opportunity_add(data: dict, title: str, *, account_id: str = "",
     if not opportunity_phase_is_terminal(data, initial_phase):
         open_advance_gate(data, opp_id, phase=initial_phase,
                           transition_date=transition_date or "", at=created_at)
+    # ms-115 e-3787: 商談を起票した = その顧客に接触が始まった。Account を
+    # 未接触 → リード へ引き上げる (only-up; derive_account_phase の has_opp 信号)。
+    if account_id:
+        _auto_advance_account_phase(data, account_id, at=created_at)
     return opp_id
 
 
@@ -645,30 +717,44 @@ def _account_phase_idx(data: dict, phase_name: str) -> int:
 
 def derive_account_phase(data: dict, account_id: str) -> Optional[str]:
     """Project an Account's lifecycle phase from its opportunities' furthest
-    progress. Mapping is by *position* in ``account_phases`` so it stays
-    config-generic (works even if a company renames its stages):
+    progress. Mapping counts *from the end* of ``account_phases`` (成約 = 末尾)
+    so it stays config-generic AND survives adding a front phase (ms-115 e-3787
+    「未接触」). The same formula lands on the right stage for both the 3-stage
+    legacy funnel (リード/未成約顧客/成約顧客) and the 4-stage one
+    (未接触/リード/未成約顧客/成約顧客):
 
-      idx 0 (リード):     商談なし / 全商談が商談準備以下 (未進行)
-      idx 1 (未成約顧客): 提案準備以降へ進んだ or 失注した商談が1つ以上、成約なし
-      idx 2 (成約顧客):   成約 (won) 商談が1つ以上
+      末尾   (成約顧客):   成約 (won) 商談が1つ以上
+      末尾-1 (未成約顧客): 提案準備以降へ進んだ or 失注した商談が1つ以上、成約なし
+      末尾-2 (リード):     商談はあるが未進行 (= 接触済みだが deal はまだ)
+      先頭   (未接触):     商談が1つも無い (生リスト)。3段構成では リード に一致する
 
-    Returns the account phase NAME (clamped to the configured vocabulary), or
-    ``None`` when no account phases are configured.
+    Contact-without-a-deal (Communication はあるが Opportunity 未起票) を 未接触→
+    リード に上げるのは Opportunity 信号の外なので、ここでは扱わない (人手の
+    phase-set / 将来の拡張)。Returns the phase NAME, or ``None`` when unconfigured.
     """
     aps = account_phases(data) or DEFAULT_ACCOUNT_PHASES
     if not aps:
         return None
-    won = lost = progressed = False
+    n = len(aps)
+    won = lost = progressed = has_opp = False
     for o in live_opportunities(data):  # e-3586: 取消済は顧客フェーズ導出に数えない
         if o.get("account_id") != account_id:
             continue
+        has_opp = True
         w, l, max_nt = _opp_progress_signals(data, o)
         won = won or w
         lost = lost or l
         if max_nt >= 1:
             progressed = True
-    idx = 2 if won else (1 if (lost or progressed) else 0)
-    idx = min(idx, len(aps) - 1)
+    if won:
+        idx = n - 1
+    elif lost or progressed:
+        idx = n - 2
+    elif has_opp:
+        idx = n - 3
+    else:
+        idx = 0
+    idx = max(0, min(idx, n - 1))
     return aps[idx].get("name")
 
 
@@ -959,6 +1045,9 @@ def advance_transition(data: dict, target_id: str, *,
     gate = current_gate(data, target_id)
     if gate is not None:
         settle_gate(data, gate["id"], outcome=GATE_ADVANCE, reason=note, at=at, actor=actor)
+    # e-3553: fold the phase we are leaving BEFORE the exclusive phase moves —
+    # evidence-linked activities auto-close, the rest surface for a human call.
+    fold = fold_phase_activities(data, target_id, cur, at=at, actor=actor)
     phase_set(data, target_id, nxt, note=note, at=at)
     open_advance_gate(data, target_id, phase=nxt,
                       transition_date=next_transition_date, at=at)
@@ -967,7 +1056,7 @@ def advance_transition(data: dict, target_id: str, *,
     # 「遷移日を置く」は needs_transition_date 促しで担い、ここでは重複させない。
     created = instantiate_phase_activities(data, target_id, at=at)
     return {"phase": nxt, "transition_date": get_transition_date(data, target_id),
-            "activities": created}
+            "activities": created, "fold": fold}
 
 
 def retry_transition(data: dict, target_id: str, new_transition_date: str, *,
@@ -1023,10 +1112,17 @@ def terminal_transition(data: dict, target_id: str, terminal_phase: str, *,
         raise ValueError(
             f"'{terminal_phase}' は terminal (決着) フェーズではありません "
             f"(既知の決着: {[p['name'] for p in opportunity_phases(data) if p.get('terminal')]})")
+    opp = find_opportunity(data, target_id)
+    cur = opp.get("phase", "") if opp else ""
     gate = current_gate(data, target_id)
     if gate is not None:
         settle_gate(data, gate["id"], outcome=GATE_TERMINAL, reason=note, at=at, actor=actor)
+    # e-3553: fold the phase being decided out of before the terminal phase is
+    # set. On a 決着 there is no "carry" (no next phase), but evidence-linked
+    # activities still auto-close and the rest surface for a done/cancel call.
+    fold = fold_phase_activities(data, target_id, cur, at=at, actor=actor)
     rec = phase_set(data, target_id, terminal_phase, note=note or "terminal", at=at)
+    rec["fold"] = fold
     return rec
 
 
@@ -1065,7 +1161,64 @@ def jump_transition(data: dict, target_id: str, new_phase: str, *,
     rec = phase_set(data, target_id, new_phase, note=note, at=at)
     if not terminal:
         open_advance_gate(data, target_id, phase=new_phase, at=at)
+    # No auto-fold here: jump is the *corrective* manual path (may go backward),
+    # so leaving-phase work is not necessarily "done" — fold is only wired to the
+    # forward judge outcomes (advance / terminal), see e-3553.
     return rec
+
+
+def fold_phase_activities(data: dict, opportunity_id: str, leaving_phase: str, *,
+                          at: str = "", actor: str = "") -> dict:
+    """Fold (後始末) the activities of the phase an opportunity is leaving (e-3553).
+
+    When a deal advances / jumps / decides-terminal, the phase it *leaves* often
+    has activities still sitting ``todo`` — the初回面談 that already happened, the
+    direction-fixing step whose outcome justified the advance, extras that were
+    seeded but never needed. Left alone they pile up and the activity log stops
+    being readable, which breaks the premise that the AI reads the trail to
+    propose the next move (opp-6 dogfood #8).
+
+    This does the ONE deterministic step (記帳=自動, SPEC の (a)): an activity that
+    already carries evidence — a Communication linked to it (``linked_id``) — is
+    closed as done (evidence-based close, no human needed, the sales twin of a
+    commit closing a task). Activities in the leaving phase carrying NO evidence
+    are returned as ``needs_decision`` for a human to resolve — done / cancel /
+    carry to the next phase ((b)/(c) は判断=人). The fold never cancels or carries
+    on its own; those are human calls surfaced to the Skill layer.
+
+    ``leaving_phase`` is passed explicitly (the caller runs this *before* moving
+    the exclusive phase, so it knows which phase is being left). An activity whose
+    ``created_in_phase`` is blank is treated as belonging to the leaving phase
+    (legacy / hand-added records stamped before e-3555). Returns
+    ``{"auto_done": [ids], "needs_decision": [{"id","description","reason"}]}``.
+    """
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    auto_done: list = []
+    needs_decision: list = []
+    for act in opp.get("activities", []):
+        if not work_model.is_open(act):
+            continue
+        born = act.get("created_in_phase", "") or leaving_phase
+        if born != leaving_phase:
+            continue
+        act_id = act.get("id", "")
+        has_evidence = bool(communications_of(opp, linked_id=act_id,
+                                              include_cancelled=False))
+        if has_evidence:
+            work_model.mark_done(
+                act, at=at, actor=actor or work_base.current_actor(),
+                reason="evidence-based close on phase fold (e-3553)")
+            auto_done.append(act_id)
+        else:
+            needs_decision.append({
+                "id": act_id,
+                "description": act.get("description", ""),
+                "reason": ("証跡が無い活動です。ゴール達成済みなら done、"
+                           "余計なら cancel、次フェーズに要るなら carry を人が選ぶ"),
+            })
+    return {"auto_done": auto_done, "needs_decision": needs_decision}
 
 
 def suggest_transition_date(data: dict, phase_name: str,
@@ -2731,6 +2884,8 @@ def build_sales_project(name: str, objective: str, *, retro_day: str = "monday",
         "milestones": [],
         "opportunities": [],
         "accounts": [],
+        # ms-115 e-3786: 顧客獲得ターゲット (取引先の無い有限の獲得・準備作業の器)。
+        "acquisitions": [],
         "account_phases": [dict(p) for p in DEFAULT_ACCOUNT_PHASES],
         "opportunity_phases": [dict(p) for p in DEFAULT_OPPORTUNITY_PHASES],
         # e-3582: 前進の macro-frame を config に seed する (企業ごと編集可)。AI が
@@ -2741,6 +2896,78 @@ def build_sales_project(name: str, objective: str, *, retro_day: str = "monday",
     if disclosure_policy is not None:
         data["disclosure_policy"] = disclosure_policy
     return data
+
+
+# ---------------------------------------------------------------------------
+# 顧客獲得ターゲット (Acquisition) — ms-115 e-3786.
+#
+# 取引先の無い有限の獲得・準備作業 (X アカウント作成・自社サイト整備・打診 DM 文面・
+# リスト精査・獲得施策 等) の器。営業が own する target-class で、開発の Milestone と
+# 構造は同型 (finite・取引先なし・成約/失注なし) だが sales 所有なので dev の
+# Milestone は借りない (職種 ⊃ 対象 の封じ込め)。
+#
+# 方針 (ms-115 SPEC 方針2): opportunity のようなフェーズ funnel と 成約/失注 は持たず、
+# 全 target 共通の標準ライフサイクル (todo → in_progress → observing → done) だけ持つ。
+# 目標 (例「20 社アタック → 5 社アポ」) は description の散文で表す — 構造化フィールドは
+# 作らない (過剰設計回避、必要になれば後で field 昇格)。
+# ---------------------------------------------------------------------------
+
+# 標準ライフサイクル (開発 Milestone と同じ語彙)。フェーズ funnel ではない。
+ACQUISITION_STATUSES = ("todo", "in_progress", "observing", "done")
+
+
+def next_acquisition_id(data: dict) -> str:
+    ids = [a.get("id", "") for a in data.get("acquisitions", [])]
+    return _next_prefixed_id(ids, "acq-")
+
+
+def find_acquisition(data: dict, acquisition_id: str) -> Optional[dict]:
+    """Return the acquisition target for an id, or None."""
+    for a in data.get("acquisitions", []):
+        if a.get("id") == acquisition_id:
+            return a
+    return None
+
+
+def acquisition_add(data: dict, title: str, *, description: str = "",
+                    assignee: str = "", created_at: str = "",
+                    created_by: str = "") -> str:
+    """Append a 顧客獲得ターゲット (Acquisition) and return its id.
+
+    Routes through ``work_model.new_target`` — the acquisition is a clean finite
+    target that fits the generic skeleton (id / label / status / created_at /
+    created_by / assignee), unlike Opportunity/Account whose status is
+    phase-derived. Seeds ``description`` (the goal is prose here, not a field)
+    and an inline ``work_items`` list (empty at creation; sub-items are a later
+    step). Starts in ``todo``.
+    """
+    if not title or not title.strip():
+        raise ValueError("Acquisition title is required")
+    acq_id = next_acquisition_id(data)
+    acq = work_model.new_target(
+        acq_id, title.strip(), created_at=created_at, created_by=created_by,
+        assignee=assignee, description=(description or "").strip(),
+        work_items=[])
+    data.setdefault("acquisitions", []).append(acq)
+    return acq_id
+
+
+def acquisition_set_status(data: dict, acquisition_id: str, status: str, *,
+                           at: str = "") -> dict:
+    """Move an Acquisition along its standard lifecycle (todo → in_progress →
+    observing → done) and return it. This is the occupation-agnostic target
+    lifecycle — there is no phase funnel and no won/lost (ms-115 方針2)."""
+    acq = find_acquisition(data, acquisition_id)
+    if acq is None:
+        raise ValueError(f"Acquisition not found: {acquisition_id}")
+    if status not in ACQUISITION_STATUSES:
+        raise ValueError(
+            f"status must be one of {list(ACQUISITION_STATUSES)}, got {status!r}")
+    if status == work_model.DONE_STATUS:
+        work_model.mark_done(acq, at=at, actor=work_base.current_actor())
+    else:
+        acq["status"] = status
+    return acq
 
 
 def backfill_target_labels(data: dict) -> int:
@@ -2804,5 +3031,24 @@ def project_targets(data: dict) -> list:
                 "deadline": opp.get("deadline", ""),
                 "account_id": opp.get("account_id"),
             },
+        })
+    # ms-115 e-3786: 顧客獲得ターゲット (Acquisition) を商談とは別レーンとして同じ
+    # 投影 shape で並べる。phase funnel を持たないので detail は目標 (description) のみ。
+    # 進捗は標準ライフサイクル (status) で表し、work_items があればその消化数も出す。
+    for acq in data.get("acquisitions", []):
+        if acq.get("status") == work_model.CANCELLED_STATUS:
+            continue
+        items = acq.get("work_items", [])
+        total = len(items)
+        done = sum(1 for w in items
+                   if w.get("status") == work_model.DONE_STATUS)
+        targets.append({
+            "id": acq.get("id", ""),
+            "label": work_model.target_label(acq),
+            "status": acq.get("status", ""),
+            "kind": "acquisition",
+            "work_items_total": total,
+            "work_items_done": done,
+            "detail": {"description": acq.get("description", "")},
         })
     return targets

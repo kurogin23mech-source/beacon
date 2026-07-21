@@ -95,6 +95,36 @@ BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" 
   … 待ち: N 件（予定通り・相手ボール）
 ```
 
+## Step 3.5: 顧客ドキュメント(dossier)の薄さ検知（ms-106 e-3763）
+
+商談の次の一手とは別に、**顧客資産のメンテ漏れ**を軽く surface する。dossier（顧客に
+分かったことを積み上げる文書）は面談・やり取りのたびに自動追記される（meeting-wrap /
+communication に配線済）が、**商談が動いているのに中身が薄い/更新が止まっている顧客**は
+「次の一手の質」が上がらないので、深掘りを促す。
+
+判定（軽く、nag にしない）— **商談が進行中(open)の Account** についてのみ:
+
+```bash
+beacon doc list --account <acc-id> --scope spec --json   # dossier-<acc-id> の有無・更新日
+```
+
+- dossier が**無い**、直近の面談/やり取りより**明らかに古い**、または dossier を読んで
+  **提案(商談 description の3行要約)が顧客の課題・勝ち筋と噛み合っていない**気配がある
+  Account を最大 2〜3 件だけ拾う。全件は出さない（毎日同じ顔ぶれで催促しない）。
+- 提示は「今日やること」の**下に一段下げて**、低優先の**気づき**として添える（宿題でない）:
+
+```
+🗂 顧客理解の深掘り余地（任意・気づき）
+  顧客○○社: 商談 opp-3 が動いているが、現場の課題がまだ薄い
+    → 次の面談で自然に触れられたら /beacon-sales-dossier に書き足せます
+  顧客△△社: 提案の3行要約が、dossier の勝ち筋(なぜ買うか)とややズレている
+    → 次に提案を触るとき整えると刺さりやすくなります
+```
+
+「今日やるべき」商談アクションを押しのけない（あくまで下段の任意の気づき）。ここも AI は
+**気づかせるだけ** — 追記は面談振り返り時の自動蓄積か、ユーザーが選んで dossier Skill で行う。
+**「◯◯を聞いてこい」と宿題を出さない**（引き出された情報を後で自然に振り分ける前提）。
+
 ## Step 4: 実行に繋ぐ（人間承認は既存 Skill が担保）
 
 ユーザーが「これをやる」と選んだら、対応する既存 Skill を起動する。**送信・予約・フェーズ
@@ -118,4 +148,5 @@ BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" 
 - `/beacon-sales-schedule` / `/beacon-sales-email` / `/beacon-sales-meeting-wrap` /
   `/beacon-sales-drive` — 実行を担う既存 Skill 群
 - `/beacon-sales-reply-watch` (E) — 返信待ちの自動確認（コックピットは超過を可視化）
+- `/beacon-sales-dossier` — 顧客ドキュメントの追記先（コックピットは薄さを surface）
 - SPEC `o83GEljD8xeFMr95wLTh` 設計方針 2 / 6・スコープ（ms-107 実運用 engine）

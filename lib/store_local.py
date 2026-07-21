@@ -136,7 +136,7 @@ class LocalStore:
                 "scope": scope,
                 "updated_at": updated_at,
             }
-            for k in ("milestone", "operation", "trek_id", "status",
+            for k in ("target", "milestone", "operation", "trek_id", "status",
                       "trashed_at", "trashed_by", "trash_reason"):
                 if meta.get(k):
                     entry[k] = meta[k]

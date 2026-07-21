@@ -5515,9 +5515,14 @@ function renderAccountsSection() {
   }
   // ms-106 fb7: Account にも担当絞り込み (商談タブと同じ member 由来・state 共有)。
   const filterBar = _renderAssigneeBar(accs);
-  const shown = accs.filter(a => !state.oppAssignee || (a.assignee || '') === state.oppAssignee);
+  // ms-115 e-3789: 顧客フェーズ (未接触/リード/未成約顧客/成約顧客) で絞り込む。未接触
+  // (生リスト) が増えても一覧を読めるようにする。商談の phase フィルタと同型。
+  const phaseFilterBar = _renderAccountPhaseFilterBar(p.account_phases);
+  const shown = accs
+    .filter(a => !state.oppAssignee || (a.assignee || '') === state.oppAssignee)
+    .filter(a => !state.hiddenAccountPhases.has(a.phase || ''));
   if (!shown.length) {
-    return `<section class="sales-board fade-in">${filterBar}<div class="act-empty" style="padding:16px">該当する顧客がいません。</div></section>`;
+    return `<section class="sales-board fade-in">${filterBar}${phaseFilterBar}<div class="act-empty" style="padding:16px">該当する顧客がいません。</div></section>`;
   }
   const rows = shown.map(a => {
     const nc = (a.contacts || []).length;
@@ -5537,7 +5542,22 @@ function renderAccountsSection() {
       </div>${body}
     </div>`;
   }).join('');
-  return `<section class="sales-board fade-in">${filterBar}<div class="acc-list">${rows}</div></section>`;
+  return `<section class="sales-board fade-in">${filterBar}${phaseFilterBar}<div class="acc-list">${rows}</div></section>`;
+}
+// ms-115 e-3789: 顧客フェーズ絞り込みバー (商談の _renderOppFilterBar と同型)。
+// account_phases が無い / 1 段以下なら出さない (絞る意味がない)。
+function _renderAccountPhaseFilterBar(phases) {
+  const names = (phases || []).map(p => p.name);
+  if (names.length < 2) return '';
+  const allOn = state.hiddenAccountPhases.size === 0;
+  const btns = names.map(nm => {
+    const isOn = !state.hiddenAccountPhases.has(nm);
+    return `<button class="filter-btn ${isOn ? 'on' : 'off'}" data-action="acc-filter-phase" data-phase="${esc(nm)}">${esc(nm)}</button>`;
+  }).join('');
+  return `<div class="filter-bar">
+      <button class="filter-btn f-all ${allOn ? 'on' : 'off'}" data-action="acc-filter-all">all</button>
+      ${btns}
+    </div>`;
 }
 function renderAccountModal(accId) {
   const accs = (state.project && state.project.accounts) || [];
@@ -9042,6 +9062,13 @@ function handleCommonAction(action, el) {
     }
     case 'opp-filter-all':
       state.hiddenPhases.clear(); render(); return true;
+    case 'acc-filter-phase': {  // ms-115 e-3789: 顧客フェーズ絞り込み
+      const ph = el.dataset.phase || '';
+      state.hiddenAccountPhases.has(ph) ? state.hiddenAccountPhases.delete(ph) : state.hiddenAccountPhases.add(ph);
+      render(); return true;
+    }
+    case 'acc-filter-all':
+      state.hiddenAccountPhases.clear(); render(); return true;
     case 'opp-assignee':
       state.oppAssignee = el.dataset.assignee || ''; render(); return true;
     case 'sales-modal-noop':

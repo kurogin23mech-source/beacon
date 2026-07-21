@@ -53,6 +53,43 @@ CANCELLED_STATUS = work_base.CANCELLED_STATUS  # "cancelled"
 
 
 # ---------------------------------------------------------------------------
+# Target-advancement macro-frame — the class-layer, occupation-agnostic reason
+# a Target/phase model exists at all: to make the AI agent read a Target as a
+# thing to *push forward*, not a bucket to sit in. "仕事を進める" = advancing
+# the currently-open Target to its next phase/state.
+#
+# This is the generalisation of the sales-only ``opportunity_phase_frame``
+# (``sales_entities`` e-3582) to EVERY occupation. The sales version teaches how
+# to read the opportunity *funnel*; this class-layer version teaches the same
+# forward-motion reading for Targets in general (milestone / opportunity /
+# operation / trek …). It rides on ``beacon status`` output so every project's
+# AI is reminded inline each session — a per-project CORE doc would only reach
+# THIS repo's sessions (ms-109 e-3751; CORE doc 0drGJ9f3UaKO7p0RrKQD 判断軌跡).
+#
+# The concept ("a target-class carries a macro-frame") is class-layer; the TEXT
+# is a shipped default overridable per project via ``target_advancement_frame``
+# in project.json (mirrors how ``opportunity_phase_frame`` is seeded+editable).
+# ---------------------------------------------------------------------------
+
+TARGET_ADVANCEMENT_FRAME = (
+    "target (= 進める対象: milestone / opportunity / operation / trek 等) は、"
+    "座って眺める箱ではなく前へ進めるものです。仕事を進めるとは、いま進行中の "
+    "target のフェーズ / 状態を次の段階へ前進させること。滞留は『放置してよい』"
+    "ではなく『まだ前進していない』状態を意味します。どの操作も最後に「この "
+    "target を次に前進させる一手」を意識してください。"
+)
+
+
+def target_advancement_frame(data: dict) -> str:
+    """The class-layer forward-motion frame text (ms-109 e-3751): how the AI
+    should read every Target — as a stage to advance *out of*, not a bucket to
+    rest in. Reads a project's configured ``target_advancement_frame`` (editable
+    per project), else the shipped default ``TARGET_ADVANCEMENT_FRAME``."""
+    return (data.get("target_advancement_frame") or "").strip() or \
+        TARGET_ADVANCEMENT_FRAME
+
+
+# ---------------------------------------------------------------------------
 # Target label — canonical ``label`` with a tolerant read over legacy keys.
 #
 # A Target is the aggregate a work instance drives (development milestone,
@@ -88,6 +125,80 @@ def target_label(target: dict) -> str:
         if v:
             return v
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Target linkage — the canonical ``target`` frontmatter key generalising doc
+# linkage (ms-109 e-3754). Documents historically linked to a Target via one
+# of three HARDCODED keys — ``milestone`` / ``operation`` / ``trek_id`` — a set
+# frozen in the development era. Sales Targets (Account / Opportunity), added
+# later (ms-106/107), got no linkage key at all, so the asymmetry "docs link to
+# milestones but not customers" is just a wiring gap, not a design intent.
+#
+# The fix is one canonical ``target`` key holding a single prefixed id
+# (``acc-1`` / ``opp-3`` / ``ms-5`` / ``op-2`` / ``tk-…``); the target-class is
+# DERIVED from the id prefix, so no new key is needed when a Target class is
+# added. ``doc_target`` reads canonical-first, legacy-second (expand step) so
+# existing docs resolve with no data migration.
+# ---------------------------------------------------------------------------
+
+TARGET_LINK = "target"
+
+# Id-prefix → target-class. Prefixes are the substring before the first "-"
+# (``opp-3`` → ``opp``), so ``op-`` (operation) and ``opp-`` (opportunity) do
+# not collide.
+_TARGET_PREFIX_KIND = {
+    "ms": "milestone",
+    "op": "operation",
+    "opp": "opportunity",
+    "acc": "account",
+    "tk": "trek",
+}
+
+# Legacy doc-linkage keys, in tolerant-read order, for Targets that predate the
+# canonical ``target`` key. Sales classes (account / opportunity) never had one.
+_LEGACY_LINK_KEYS = ("milestone", "operation", "trek_id")
+
+# Target-class → its legacy doc-linkage key, for dual-writing during the
+# expand→contract window so legacy readers (operation SPEC discovery, the
+# ``--ms`` doc filter) keep working.
+_KIND_LEGACY_LINK_KEY = {
+    "milestone": "milestone",
+    "operation": "operation",
+    "trek": "trek_id",
+}
+
+
+def target_kind(target_id: str) -> str:
+    """Derive a Target's class from its id prefix (``acc-1`` → ``account``,
+    ``opp-3`` → ``opportunity``, ``ms-5`` → ``milestone`` …). Returns ``""`` for
+    an empty id or an unrecognised prefix."""
+    if not target_id or not isinstance(target_id, str):
+        return ""
+    prefix = target_id.split("-", 1)[0]
+    return _TARGET_PREFIX_KIND.get(prefix, "")
+
+
+def doc_target(meta: dict) -> str:
+    """Tolerant read of a document's linked Target id (ms-109 e-3754): canonical
+    ``target`` first, then legacy ``milestone`` / ``operation`` / ``trek_id``
+    (expand step). Returns ``""`` when the doc links to nothing."""
+    if not isinstance(meta, dict):
+        return ""
+    v = meta.get(TARGET_LINK)
+    if isinstance(v, str) and v.strip():
+        return v.strip()
+    for k in _LEGACY_LINK_KEYS:
+        v = meta.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return ""
+
+
+def legacy_link_key_for(target_id: str) -> str:
+    """The legacy frontmatter key to dual-write for a Target id (back-compat),
+    or ``""`` for classes (account / opportunity) that never had a legacy key."""
+    return _KIND_LEGACY_LINK_KEY.get(target_kind(target_id), "")
 
 
 def present_legacy_label_key(target: dict) -> str:

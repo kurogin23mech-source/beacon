@@ -22,6 +22,8 @@ This project uses [Beacon](https://github.com/kurogin23mech-source/beacon) for m
 
 ### Rules / ルール
 
+- **Always advance the Target. A Target (milestone / opportunity / operation …) is a thing to push *forward*, not a bucket to sit in. "Making progress" means advancing the currently-open Target to its next phase/state. End every action by surfacing "the next move that advances this Target".**
+  常に target を前進させる。target (= milestone / opportunity / operation 等の進める対象) は座って眺める箱ではなく前へ進めるもの。「仕事を進める」とは、いま進行中の target を次のフェーズ / 状態へ前進させること。どの操作も最後に「この target を次に前進させる一手」を提示して終える。
 - **Never edit `.beacon/project.json` directly. Always use beacon CLI commands.**
   `.beacon/project.json` を直接編集しない。必ず beacon CLI を使うこと。
 - Before starting work, check milestones (`beacon status`) and confirm which milestone the work targets.

@@ -81,6 +81,10 @@ ENTITIES = [
     "activities",
     "communications",
     "nurturings",
+    # ms-115 e-3786: 顧客獲得ターゲット (取引先の無い獲得・準備作業の器)。arms=() で
+    # 子テーブルは増やさず、Target 行だけを独立テーブルに持つ。起動時 create_mysql_tables
+    # が CREATE TABLE IF NOT EXISTS で作る (schema が DDL を追い越さない)。
+    "acquisitions",
     # treks/{trek_id}/* subcollections
     # firestore は treks/{tid}/logs に永続化する (ms-97 e-2603)。dynamodb_client は
     # ここを in-memory fallback で握っていて再起動で消える既知の穴があるが、MySQL は
@@ -1088,6 +1092,16 @@ def list_documents(project_id: str) -> list[dict]:
         operation = data.get("operation") or _extract_frontmatter_field(
             data.get("content", ""), "operation"
         )
+        # ms-109 e-3754 — surface the canonical target-class-agnostic linkage
+        # (``acc-1`` / ``opp-3`` / …) so ``doc list --account`` etc. work in
+        # cloud mode. ``trek_id`` is extracted alongside for the same reason
+        # (it had been omitted here, so the tolerant fallback was cloud-blind).
+        target = data.get("target") or _extract_frontmatter_field(
+            data.get("content", ""), "target"
+        )
+        trek_id = data.get("trek_id") or _extract_frontmatter_field(
+            data.get("content", ""), "trek_id"
+        )
         entry = {
             "doc_id": data.get("doc_id") or sk,
             "title": data.get("title", ""),
@@ -1098,6 +1112,10 @@ def list_documents(project_id: str) -> list[dict]:
             entry["milestone"] = milestone
         if operation:
             entry["operation"] = operation
+        if target:
+            entry["target"] = target
+        if trek_id:
+            entry["trek_id"] = trek_id
         result.append(entry)
     result.sort(key=lambda e: e.get("updated_at", ""), reverse=True)
     return result
