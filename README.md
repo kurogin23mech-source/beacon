@@ -250,12 +250,14 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | Command | Description |
 |---------|-------------|
 | `beacon account add "<name>" [--health <text>]` | Add an account / 取引先を追加 |
-| `beacon account list [--json]` | List accounts and their contacts / 取引先と担当者を一覧 |
+| `beacon account list [--json] [--as-project <id>]` | List accounts and their contacts; `--as-project` shows only accounts disclosed to that project (fail-closed) / 取引先を一覧、`--as-project` はそのプロジェクトから見える取引先だけ表示 |
 | `beacon account contact <acc-id> <name> [--role <text>] [--email <text>] [--phone <text>]` | Add a contact to an account / 取引先に担当者を追加 |
 | `beacon account phase <acc-id> <phase> [--note <text>]` | Declare an account lifecycle phase transition (append-only) / 取引先のフェーズを記録（追記のみ） |
 | `beacon account rename <acc-id> <new-name>` | Rename an account / 取引先名を変更 |
 | `beacon account assign <acc-id> <user>` | Set the assignee (担当ユーザー) on an account / 取引先の担当ユーザーを設定 |
 | `beacon account nurturing <acc-id> <desc> [--deadline <date>] [--ball self\|counterpart]` | Add a nurturing task on an account (継続関係の業務) / 取引先にナーチャリング業務を追加 |
+| `beacon account link <acc-id> --project <id>` | Disclose an account to another project so its members can reference it (cross-project 開示) / 取引先を別プロジェクトに開示（そのプロジェクトから参照可能に） |
+| `beacon account unlink <acc-id> --project <id>` | Revoke an account's disclosure to a project (剥奪即時) / 取引先の開示を取り消し（即時） |
 | `beacon account delete <acc-id> [--force]` | Delete an account (--force orphans referencing opportunities) / 取引先を削除（--force で参照中の商談を孤立化） |
 | `beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self\|counterpart]` | Add a deal / 商談を追加 |
 | `beacon opportunity list [--json]` | List opportunities / 商談を一覧 |

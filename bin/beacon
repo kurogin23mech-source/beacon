@@ -54,7 +54,9 @@ Tasks & Progress:
 
 Sales (profession=sales):
   beacon account add "<name>" [--health <text>] [--assignee <user>]   Add an account (customer / company)
-  beacon account list [--json]                               List accounts + their contacts
+  beacon account list [--json] [--as-project <id>]           List accounts (+contacts); --as-project shows only ones disclosed to that project
+  beacon account link <acc-id> --project <id>                Disclose an account to another project (cross-project 参照を許可)
+  beacon account unlink <acc-id> --project <id>              Revoke an account's disclosure to a project (剥奪即時)
   beacon account contact <acc-id> <name> [--role <text>] [--email <text>] [--phone <text>]   Add a contact to an account
   beacon account phase <acc-id> <phase> [--note <text>]      Declare an account lifecycle phase transition
   beacon account rename <acc-id> <new-name>                  Rename an account
@@ -1192,6 +1194,44 @@ cmd_account_rename() {
         python3 "$COMMANDS_PY" account_rename
 }
 
+# ms-113 e-3734: Account の cross-project 開示リンク管理。
+cmd_account_link() {
+    ensure_project
+    local acc_id="" project=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project) project="${2:-}"; shift 2 ;;
+            -?*) _guard_positional "$1" "Usage: beacon account link <acc-id> --project <project-id>" ;;
+            *)   if [ -z "$acc_id" ]; then acc_id="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$acc_id" ] || [ -z "$project" ]; then
+        echo "Usage: beacon account link <acc-id> --project <project-id>"
+        echo "  その project のメンバーが、この Account を参照できるようにする (cross-project 開示)。"
+        exit 1
+    fi
+    BEACON_ACCOUNT_ID="$acc_id" BEACON_LINK_PROJECT="$project" \
+        python3 "$COMMANDS_PY" account_link
+}
+
+cmd_account_unlink() {
+    ensure_project
+    local acc_id="" project=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --project) project="${2:-}"; shift 2 ;;
+            -?*) _guard_positional "$1" "Usage: beacon account unlink <acc-id> --project <project-id>" ;;
+            *)   if [ -z "$acc_id" ]; then acc_id="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$acc_id" ] || [ -z "$project" ]; then
+        echo "Usage: beacon account unlink <acc-id> --project <project-id>"
+        exit 1
+    fi
+    BEACON_ACCOUNT_ID="$acc_id" BEACON_LINK_PROJECT="$project" \
+        python3 "$COMMANDS_PY" account_unlink
+}
+
 cmd_account_assign() {
     ensure_project
     local acc_id="" assignee=""
@@ -1231,14 +1271,18 @@ cmd_account_nurturing() {
 
 cmd_account_list() {
     ensure_project
-    local json_flag=""
+    local json_flag="" as_project=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
+            # ms-113 e-3734: 「別 project から見たら何が見えるか」を実演する。
+            # 指定 project の視点で開示可能な Account だけを fail-closed で絞る。
+            --as-project) as_project="${2:-}"; shift 2 ;;
             *)      shift ;;
         esac
     done
-    BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" account_list
+    BEACON_JSON="$json_flag" BEACON_AS_PROJECT="$as_project" \
+        python3 "$COMMANDS_PY" account_list
 }
 
 cmd_account_contact() {
@@ -3006,7 +3050,9 @@ case "${1:-}" in
             assign)  shift 2; cmd_account_assign "$@" ;;
             nurturing) shift 2; cmd_account_nurturing "$@" ;;
             delete)  shift 2; cmd_account_delete "$@" ;;
-            *)       echo "Usage: beacon account [add|list|contact|phase|rename|assign|nurturing|delete]" ;;
+            link)    shift 2; cmd_account_link "$@" ;;
+            unlink)  shift 2; cmd_account_unlink "$@" ;;
+            *)       echo "Usage: beacon account [add|list|contact|phase|rename|assign|nurturing|link|unlink|delete]" ;;
         esac
         ;;
     acquisition|acq)

@@ -16714,12 +16714,14 @@ def cmd_help_json():
         {"command": "beacon log [message]", "flags": ["--prepare", "--finalize", "-m <ms-id>", "--progress <n>", "--summary <text>"], "description": "Record HEAD commit to active milestone"},
         # ms-106 ② — sales job-template entities (profession=sales projects)
         {"command": "beacon account add <name>", "flags": ["--health <text>", "--assignee <user>"], "description": "Add a sales account (顧客; 対象・継続)"},
-        {"command": "beacon account list", "flags": ["--json"], "description": "List sales accounts and their contacts"},
+        {"command": "beacon account list", "flags": ["--json", "--as-project <id>"], "description": "List sales accounts (+contacts); --as-project shows only accounts disclosed to that project (fail-closed)"},
         {"command": "beacon account contact <acc-id> <name>", "flags": ["--role <text>", "--email <text>", "--phone <text>"], "description": "Add a contact (担当者) nested under an account"},
         {"command": "beacon account phase <acc-id> <phase>", "flags": ["--note <text>"], "description": "Declare an account lifecycle phase transition (append-only)"},
         {"command": "beacon account rename <acc-id> <new-name>", "flags": [], "description": "Rename an account (顧客名の変更)"},
         {"command": "beacon account assign <acc-id> <user>", "flags": [], "description": "Set the 担当ユーザー (assignee) on an account"},
         {"command": "beacon account nurturing <acc-id> <desc>", "flags": ["--deadline <date>", "--ball self|counterpart"], "description": "Add a nurturing (継続関係の業務; 商談なし顧客向け)"},
+        {"command": "beacon account link <acc-id> --project <id>", "flags": ["--project <id>"], "description": "Disclose an account to another project so its members can reference it (cross-project 開示)"},
+        {"command": "beacon account unlink <acc-id> --project <id>", "flags": ["--project <id>"], "description": "Revoke an account's disclosure to a project (剥奪即時、query 時評価)"},
         {"command": "beacon account delete <acc-id>", "flags": ["--force"], "description": "Delete an account (--force orphans referencing opportunities)"},
         {"command": "beacon opportunity add <title>", "flags": ["--account <acc-id>", "--phase <p>", "--goal <n>", "--probability <n>", "--deadline <date>", "--ball self|counterpart", "--assignee <user>"], "description": "Add a sales opportunity (商談; 対象・有限)"},
         {"command": "beacon opportunity assign <opp-id> <user>", "flags": [], "description": "Set the 担当ユーザー (assignee) on an opportunity"},
@@ -21148,26 +21150,81 @@ def cmd_account_nurturing():
 
 
 def cmd_account_list():
+    import sales_entities
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    # ms-113 e-3734: --as-project <P> は「別 project P から見たら何が見えるか」を
+    # 実演する。指定時は P の視点で開示可能な Account だけを fail-closed で絞る
+    # (= link されていない Account は返らない)。未指定は home read = 全件。
+    as_project = os.environ.get("BEACON_AS_PROJECT", "")
     data = load_project()
     accounts = data.get("accounts", [])
+    if as_project:
+        accounts = sales_entities.accounts_disclosable_from(
+            accounts, as_project, is_home=False)
     if json_mode:
         print(json.dumps(accounts, ensure_ascii=False, indent=2))
         return
     if not accounts:
-        print("No accounts yet. Add one with: beacon account add \"<name>\"")
+        if as_project:
+            print(f"No accounts disclosed to project '{as_project}'. "
+                  f"Link one with: beacon account link <acc-id> --project {as_project}")
+        else:
+            print("No accounts yet. Add one with: beacon account add \"<name>\"")
         return
+    if as_project:
+        print(f"(project '{as_project}' の視点で開示される Account のみ表示)")
     for a in accounts:
         contacts = a.get("contacts", [])
         health = a.get("health", "")
         phase = a.get("phase", "")
         phase_str = f"phase: {phase} / " if phase else ""
         suffix = f" [health: {health}]" if health else ""
-        print(f"[{a['id']}] {work_model.target_label(a)}{suffix} — {phase_str}contacts: {len(contacts)}")
+        # ms-113 e-3734: 開示リンク先 project を可視化 (どこから見えるか)。
+        links = a.get("project_links", []) or []
+        links_str = f" / linked: {', '.join(links)}" if links else ""
+        print(f"[{a['id']}] {work_model.target_label(a)}{suffix} — {phase_str}contacts: {len(contacts)}{links_str}")
         for c in contacts:
             role = f" ({c['role']})" if c.get("role") else ""
             email = f" <{c['email']}>" if c.get("email") else ""
             print(f"    - {c.get('name', '?')}{role}{email}")
+
+
+def cmd_account_link():
+    """ms-113 e-3734: Account を別 project に開示リンクする。"""
+    import sales_entities
+    account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
+    project = os.environ.get("BEACON_LINK_PROJECT", "")
+    data = load_project()
+    try:
+        added = sales_entities.account_link_project(data, account_id, project)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    if added:
+        print(f"Linked {account_id} → project {project} "
+              f"(project {project} のメンバーが参照できるようになりました)")
+    else:
+        print(f"{account_id} は既に project {project} にリンク済みです (no-op)")
+
+
+def cmd_account_unlink():
+    """ms-113 e-3734: Account の開示リンクを外す (剥奪即時)。"""
+    import sales_entities
+    account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
+    project = os.environ.get("BEACON_LINK_PROJECT", "")
+    data = load_project()
+    try:
+        removed = sales_entities.account_unlink_project(data, account_id, project)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    if removed:
+        print(f"Unlinked {account_id} from project {project} "
+              f"(project {project} からは参照できなくなりました)")
+    else:
+        print(f"{account_id} は project {project} にリンクされていません (no-op)")
 
 
 def cmd_sales_identity_set():
@@ -22482,6 +22539,8 @@ if __name__ == "__main__":
         "account_assign": cmd_account_assign,
         "account_nurturing": cmd_account_nurturing,
         "account_delete": cmd_account_delete,
+        "account_link": cmd_account_link,      # ms-113 e-3734
+        "account_unlink": cmd_account_unlink,  # ms-113 e-3734
         "opportunity_add": cmd_opportunity_add,
         "opportunity_list": cmd_opportunity_list,
         "opportunity_phase": cmd_opportunity_phase,
