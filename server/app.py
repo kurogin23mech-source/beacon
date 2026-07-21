@@ -10814,7 +10814,7 @@ def _enrich_project_active_only(
     return enriched
 
 
-async def _broadcast(project_id: str, data: dict):
+async def _broadcast(project_id: str, data: dict | None = None):
     """Notify subscribed WS clients that the project changed (ms-84 / e-2326).
 
     Signal-only payload (~30 bytes). The previous attempts (full payload →
@@ -10824,6 +10824,13 @@ async def _broadcast(project_id: str, data: dict):
     chasing the threshold by stripping more fields, we make the WS a pure
     signal channel: clients fetch the actual state via REST (which has no
     frame limit). This is a permanent fix to the frame-size class of bugs.
+
+    ms-98 (e-3837): ``data`` is IGNORED — the payload is signal-only. The
+    parameter is retained (optional) only so the legacy ``_on_snapshot``
+    caller (kept for a contract test) can still pass hydrated data without a
+    signature break. Callers should pass nothing; do NOT ``load_project_*``
+    just to feed this argument (that was the memory-churn dead-load removed
+    in the 2026-07-21 hang fix).
     """
     clients = _ws_connections.get(project_id, set()).copy()
     if not clients:
@@ -10890,24 +10897,26 @@ def _broadcast_project_after_write(project_id: str) -> None:
       * No-op when no WS clients are subscribed to ``project_id`` (= 速攻 return)
       * No-op when ``_event_loop`` is unset (= startup hook 未発火、 lambda
         lifespan=off 経路、 cold-start race)
-      * fail-safe: load_project_consistent 失敗 / broadcast 失敗で write 経路
-        を巻き戻さない、 caller 視点では fire-and-forget
+      * fail-safe: broadcast 失敗で write 経路を巻き戻さない、 caller 視点では
+        fire-and-forget
       * thread-safe: ``asyncio.run_coroutine_threadsafe`` で worker thread から
         event loop に乗せる (= apply_operation は同期 path で呼ばれる)
+
+    ms-98 (e-3837): ``_broadcast`` の payload は ms-84 の signal-only 化以降
+    ``{"type":"project_changed"}`` (~30 バイト) だけで、 渡した ``data`` を
+    完全に無視する。 以前はここで ``load_project_consistent`` を呼んで全
+    milestones/entries を再構成した dict を渡していたが、 それは 100% 捨てられる
+    dead-load だった (= 全書き込みで巨大 dict を生成・破棄 → 2026-07-21 本番
+    ハングのメモリ churn 副因)。 signal のみで broadcast し、 load 呼び出しは
+    削除する。 client は WS signal を受けて REST で最新状態を取り直す。
     """
     if not _ws_connections.get(project_id):
         return
     if _event_loop is None:
         return
     try:
-        data = operations.load_project_consistent(project_id)
-    except Exception:
-        # load 失敗で broadcast 諦め、 write の成功は影響させない (= UX 上の
-        # 遅延は許容、 listener fallback が後から拾うかもしれない)。
-        return
-    try:
         asyncio.run_coroutine_threadsafe(
-            _broadcast(project_id, data), _event_loop
+            _broadcast(project_id), _event_loop
         )
     except Exception:
         # event loop が閉じてる等の race。 fire-and-forget なので silent skip。
