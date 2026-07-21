@@ -16714,7 +16714,7 @@ def cmd_help_json():
         {"command": "beacon log [message]", "flags": ["--prepare", "--finalize", "-m <ms-id>", "--progress <n>", "--summary <text>"], "description": "Record HEAD commit to active milestone"},
         # ms-106 ② — sales job-template entities (profession=sales projects)
         {"command": "beacon account add <name>", "flags": ["--health <text>", "--assignee <user>"], "description": "Add a sales account (顧客; 対象・継続)"},
-        {"command": "beacon account list", "flags": ["--json", "--as-project <id>"], "description": "List sales accounts (+contacts); --as-project shows only accounts disclosed to that project (fail-closed)"},
+        {"command": "beacon account list", "flags": ["--json", "--as-project <id>", "--linked"], "description": "List sales accounts (+contacts); --as-project shows only accounts disclosed to that project (fail-closed); --linked pulls accounts disclosed to THIS project from other org projects (cloud mode)"},
         {"command": "beacon account contact <acc-id> <name>", "flags": ["--role <text>", "--email <text>", "--phone <text>"], "description": "Add a contact (担当者) nested under an account"},
         {"command": "beacon account phase <acc-id> <phase>", "flags": ["--note <text>"], "description": "Declare an account lifecycle phase transition (append-only)"},
         {"command": "beacon account rename <acc-id> <new-name>", "flags": [], "description": "Rename an account (顧客名の変更)"},
@@ -21149,6 +21149,41 @@ def cmd_account_nurturing():
     print(f"Added nurturing {nrt_id} to {account_id}: {description}")
 
 
+def _cmd_account_list_linked(json_mode: bool):
+    """ms-111 e-3872: 同じ組織の他 project に開示された Account を横断して一覧する。
+
+    サーバの ``GET /api/projects/{P}/disclosed-accounts`` を叩く (cloud mode 専用)。
+    P に link された Account だけが返る (fail-closed、剥奪即時はサーバ側 disclosure
+    プリミティブが担保)。
+    """
+    project_id = _current_project_id()
+    if not project_id:
+        print("Error: cross-project の Account 一覧は cloud mode 専用です "
+              "(.beacon/cloud.json が必要)。", file=sys.stderr)
+        sys.exit(1)
+    try:
+        client = _get_api_client()
+        resp = client.get(f"/api/projects/{project_id}/disclosed-accounts")
+    except Exception as e:
+        print(f"Error: 開示 Account の取得に失敗しました: {e}", file=sys.stderr)
+        sys.exit(1)
+    accounts = (resp or {}).get("disclosed_accounts", [])
+    if json_mode:
+        print(json.dumps(accounts, ensure_ascii=False, indent=2))
+        return
+    if not accounts:
+        print("この project に開示された(他 project の) Account はありません。"
+              "\n  他 project 側で: beacon account link <acc-id> --project "
+              f"{project_id}")
+        return
+    print(f"(他 project から この project '{project_id}' に開示された Account)")
+    for a in accounts:
+        home = a.get("home_project_name") or a.get("home_project_id", "?")
+        phase = a.get("phase", "")
+        phase_str = f"phase: {phase} / " if phase else ""
+        print(f"[{a.get('id')}] {a.get('name', '?')} — {phase_str}home: {home}")
+
+
 def cmd_account_list():
     import sales_entities
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
@@ -21156,6 +21191,12 @@ def cmd_account_list():
     # 実演する。指定時は P の視点で開示可能な Account だけを fail-closed で絞る
     # (= link されていない Account は返らない)。未指定は home read = 全件。
     as_project = os.environ.get("BEACON_AS_PROJECT", "")
+    # ms-111 e-3872: --linked は同じ組織の他 project に置かれ、この project に開示
+    # された Account を横断して取り込む (cross-project read)。cloud mode 専用
+    # (= 他 project の read はサーバ経由。local mode には他 project が無い)。
+    if os.environ.get("BEACON_LINKED", "") == "1":
+        _cmd_account_list_linked(json_mode)
+        return
     data = load_project()
     accounts = data.get("accounts", [])
     if as_project:
