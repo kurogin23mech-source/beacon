@@ -443,10 +443,12 @@ cmd_milestone_done() {
     local ms_id=""
     local reason=""
     local reason_set=0
+    local acknowledge=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -r|--reason) reason="${2:-}"; reason_set=1; shift 2 ;;
+            --acknowledge) acknowledge="1"; shift ;;
             -?*)           _guard_flag "$1" ;;
             *)           ms_id="$1";     shift   ;;
         esac
@@ -460,9 +462,9 @@ cmd_milestone_done() {
     # gate (_require_reason_or_skip) refuses missing env, so the dispatcher
     # must not silently set an empty default.
     if [ "$reason_set" = "1" ]; then
-        BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" python3 "$COMMANDS_PY" milestone_done
+        BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" milestone_done
     else
-        BEACON_MS_ID="$ms_id" python3 "$COMMANDS_PY" milestone_done
+        BEACON_MS_ID="$ms_id" BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" milestone_done
     fi
 }
 
@@ -492,10 +494,12 @@ cmd_milestone_observe() {
     local ms_id=""
     local reason=""
     local reason_set=0
+    local acknowledge=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -r|--reason) reason="${2:-}"; reason_set=1; shift 2 ;;
+            --acknowledge) acknowledge="1"; shift ;;
             -?*)           _guard_flag "$1" ;;
             *)           ms_id="$1";     shift   ;;
         esac
@@ -510,10 +514,10 @@ cmd_milestone_observe() {
     # internally, so behavior other than the gate is identical.
     if [ "$reason_set" = "1" ]; then
         BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" \
-            python3 "$COMMANDS_PY" milestone_observe
+            BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" milestone_observe
     else
         BEACON_MS_ID="$ms_id" \
-            python3 "$COMMANDS_PY" milestone_observe
+            BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" milestone_observe
     fi
 }
 
@@ -555,10 +559,12 @@ cmd_milestone_wait() {
     local ms_id=""
     local reason=""
     local reason_set=0
+    local acknowledge=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -r|--reason) reason="${2:-}"; reason_set=1; shift 2 ;;
+            --acknowledge) acknowledge="1"; shift ;;
             -?*)           _guard_flag "$1" ;;
             *)           ms_id="$1";     shift   ;;
         esac
@@ -570,10 +576,10 @@ cmd_milestone_wait() {
     fi
     if [ "$reason_set" = "1" ]; then
         BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" \
-            python3 "$COMMANDS_PY" milestone_wait
+            BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" milestone_wait
     else
         BEACON_MS_ID="$ms_id" \
-            python3 "$COMMANDS_PY" milestone_wait
+            BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" milestone_wait
     fi
 }
 
@@ -1960,11 +1966,13 @@ cmd_task_done() {
     local progress=""
     local reason=""
     local reason_set=0
+    local acknowledge=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -p|--progress) progress="${2:-}"; shift 2 ;;
             -r|--reason)   reason="${2:-}";   reason_set=1; shift 2 ;;
+            --acknowledge) acknowledge="1"; shift ;;
             -?*)           _guard_flag "$1" ;;
             *)             entry_id="$1";     shift   ;;
         esac
@@ -1979,10 +1987,10 @@ cmd_task_done() {
     # "operator passed --reason ''" (explicit waiver, accepted but discouraged).
     if [ "$reason_set" = "1" ]; then
         BEACON_ENTRY_ID="$entry_id" BEACON_PROGRESS="$progress" BEACON_REASON="$reason" \
-            python3 "$COMMANDS_PY" task_done
+            BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" task_done
     else
         BEACON_ENTRY_ID="$entry_id" BEACON_PROGRESS="$progress" \
-            python3 "$COMMANDS_PY" task_done
+            BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" task_done
     fi
 }
 

@@ -141,37 +141,44 @@ def _append_changelog(op: dict) -> None:
         pass  # changelog is best-effort; never block operations
 
 
+_ACKNOWLEDGED_REASON = "(acknowledged: no detailed reason given)"
+
+
 def _require_reason_or_skip(verb: str) -> str:
-    """Gate state-transition verbs (done / observe / restore / etc.) on a
-    written reason being present in the BEACON_REASON env var (e-976).
+    """Gate state-transition / destructive verbs on an unambiguous audit entry.
 
-    Three cases:
+    ms-120 e-3906 (option B): the old design accepted ``--reason ""`` as a
+    silent waiver, but an empty string is ambiguous at read time (deliberate
+    waiver vs. an AI padding the flag to pass the gate) — and a warning never
+    stops an AI that reads exit 0 as success. So the gate now admits exactly two
+    unambiguous states, and rejects the ambiguous empty:
 
-    - ``BEACON_REASON`` not in environ → refuse with exit 1. The CLI dispatcher
-      only sets this env var when ``--reason`` is passed, so a missing var
-      means the operator did not pass the flag at all.
-    - ``BEACON_REASON`` present but empty (``--reason ""``) → accept. The
-      operator has explicitly waived the gate. Discouraged but allowed so the
-      audit trail records a deliberate "no reason" rather than silently going
-      back to the pre-gate behavior.
-    - Any non-empty value → accept and return it unchanged.
+    - Non-empty ``BEACON_REASON`` (``--reason "..."``) → accept, return it.
+    - ``BEACON_ACKNOWLEDGE=1`` (``--acknowledge``) → accept, return a sentinel
+      recording a *deliberate* no-reason. The intent is explicit, not inferred
+      from an empty string.
+    - Neither, or an empty ``BEACON_REASON`` → refuse with exit 1 and a
+      recoverable message (原則 3) naming both valid paths.
 
     Args:
         verb: Human-facing verb for the error message (e.g. ``"task done"``).
 
     Returns:
-        The reason string (possibly empty when explicitly waived).
+        The reason string, or the acknowledgment sentinel.
     """
-    if "BEACON_REASON" not in os.environ:
-        print(
-            f"Error: --reason is required for `{verb}`. "
-            f"Pass --reason \"...\" to record why, or --reason \"\" to "
-            f"acknowledge the action without a written reason "
-            f"(discouraged — retro becomes harder).",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    return os.environ.get("BEACON_REASON", "")
+    if os.environ.get("BEACON_ACKNOWLEDGE") == "1":
+        return _ACKNOWLEDGED_REASON
+    reason = os.environ.get("BEACON_REASON", "")
+    if reason.strip():
+        return reason
+    print(
+        f"Error: `{verb}` requires an audit entry. Pass --reason \"...\" to "
+        f"record why, or --acknowledge to deliberately proceed without a "
+        f"written reason. An empty --reason \"\" is no longer accepted "
+        f"(it was ambiguous — use --acknowledge to waive on purpose).",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 # ms-81 e-1916: forcing function — warn (don't block) when a write targets
