@@ -4818,7 +4818,19 @@ EOF
     bus)
         ensure_project
         _bus_sub="${2:-}"
-        shift 2 || true
+        # ms-120 e-3898: drop the tokens we consumed explicitly. The old
+        # `shift 2 || true` failed as a unit when `beacon bus` had no
+        # subcommand (only 1 positional), leaving "bus" behind — the generic
+        # flag loop then reported it as "unexpected argument 'bus' for
+        # 'beacon bus '" (the command named as its own bad arg, 原則 3). Shift
+        # 'bus' always, and the subcommand only when it was actually present.
+        shift || true
+        if [[ -n "$_bus_sub" ]]; then
+            shift || true
+        else
+            # No subcommand → show usage rather than the self-referential error.
+            _bus_sub="__help__"
+        fi
         # `budget` has a 2nd-level subcommand (grant/show/clear) — extract it
         # before the generic arg-parsing loop eats it as an unknown positional.
         _bud_sub=""
