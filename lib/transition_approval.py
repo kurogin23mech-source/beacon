@@ -123,6 +123,61 @@ def build_transition_approval(*, entry_id, target_id, target_kind, old_state,
     }
 
 
+def assess_completion_criteria(*, has_spec, objective="", acceptance="", intent=""):
+    """Surface gaps in a target's completion criteria (ms-119 / e-3911 §5 AC6).
+
+    The 目的達成 review works best when the target carries written, reviewable
+    success criteria (a SPEC 原典, an objective, or acceptance criteria). When
+    it doesn't, the review-request must NOT hard-block — it should still be
+    created — but it should *gently surface the gap* so the human approver
+    knows there's nothing solid to check the completion claim against, and that
+    the AI is inferring intent rather than reading a written condition.
+
+    Returns a list of gap reason codes (empty = the target has enough written
+    criteria to review against):
+      - ``"no_written_criteria"``: no SPEC, no objective, no acceptance — the
+        completion claim can't be checked against anything written.
+      - ``"no_intent"``: the requester supplied no intent, so even the inferred
+        "why is this done" is missing.
+
+    Pure: takes primitive fields, not the target dict, so it is trivial to test
+    and decoupled from target-kind-specific shapes.
+    """
+    reasons = []
+    if not has_spec and not (objective or "").strip() and not (acceptance or "").strip():
+        reasons.append("no_written_criteria")
+    if not (intent or "").strip():
+        reasons.append("no_intent")
+    return reasons
+
+
+_CRITERIA_GAP_TEXT = {
+    "no_written_criteria": (
+        "完了条件 (SPEC / 目的 / 受入条件) が原典に一つも記載されていません。"
+        "何を満たせば done かが書かれていないので、承認前に基準を確認してください"
+    ),
+    "no_intent": (
+        "達成理由 (intent) が渡されていません。「なぜ done と考えるか」を明示すると "
+        "レビュアーが判断しやすくなります"
+    ),
+}
+
+
+def format_criteria_gap(reasons, *, target_id):
+    """Render a non-blocking gap warning for a target's weak completion criteria.
+
+    Returns "" when there are no gaps (契約は format_pending_dm_summary と同じ:
+    空なら呼び出し側がセクションごと省略する)."""
+    if not reasons:
+        return ""
+    lines = [f"⚠ 完了条件の gap ({target_id}) — hard-block はしません、依頼は作成済:"]
+    for r in reasons:
+        text = _CRITERIA_GAP_TEXT.get(r)
+        if text:
+            lines.append(f"  - {text}")
+    return "\n".join(lines)
+
+
 def append_verdict(entry, *, status, rationale="", actor="", at):
     """Record a human verdict on a transition-approval entry.
 

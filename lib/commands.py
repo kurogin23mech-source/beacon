@@ -1703,6 +1703,16 @@ def _route_completion_to_review(data: dict, ms_id: str, *, reason: str) -> None:
     print(f"  {ms_id}: {old_state} -> {new_state} (完了主張、人間承認待ち)")
     if reason:
         print(f"  intent: {reason}")
+    # ms-119 e-3911 §5 AC6: weak-AC gap surfacing (hard-block しない)
+    _gap = _ta.format_criteria_gap(
+        _ta.assess_completion_criteria(
+            has_spec=_spec_exists_for_ms(ms_id),
+            objective=target.get("objective", ""),
+            acceptance=target.get("acceptance_criteria", ""),
+            intent=reason),
+        target_id=ms_id)
+    if _gap:
+        print(_gap)
     print(f"  確定 (= 遷移実行): beacon target approve {eid} [--rationale <text>]")
     print(f"  却下 (= 遷移せず): beacon target reject {eid} [--rationale <text>]")
 
@@ -1757,6 +1767,19 @@ def cmd_target_review_request():
         print(f"  intent: {intent}")
     if evidence:
         print(f"  evidence: {', '.join(evidence)}")
+    # ms-119 e-3911 §5 AC6: weak-AC な target では gap を gentle に炙り出す
+    # (hard-block しない — 依頼は既に作成済)。原典が無ければ何を満たせば done かを
+    # 承認前に確認するよう促す forcing function。
+    _gap = _ta.format_criteria_gap(
+        _ta.assess_completion_criteria(
+            has_spec=_spec_exists_for_ms(target_id) if kind == "milestone"
+            else _spec_exists_for_op(target_id) if kind == "operation" else False,
+            objective=target.get("objective", ""),
+            acceptance=target.get("acceptance_criteria", ""),
+            intent=intent),
+        target_id=target_id)
+    if _gap:
+        print(_gap)
     print(f"  確定 (= 遷移実行): beacon target approve {eid} [--rationale <text>]")
     print(f"  却下 (= 遷移せず): beacon target reject {eid} [--rationale <text>]")
 

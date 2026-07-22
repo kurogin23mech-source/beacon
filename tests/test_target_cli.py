@@ -17,6 +17,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import commands  # noqa: E402
+import transition_approval as _ta  # noqa: E402
 
 
 def _write_project(tmp_path, milestones, operations=None):
@@ -186,6 +187,57 @@ def test_milestone_done_review_routes_to_gate(proj, monkeypatch, capsys):
     assert len(entries) == 1
     assert entries[0]["meta"]["new_state"] == "done"
     assert entries[0]["meta"]["intent"] == "完了主張"
+
+
+# --- weak-AC gap surfacing (e-3911 §5 AC6) ---------------------------------
+
+def test_assess_criteria_strong_when_spec_present():
+    # A SPEC 原典 is enough written criteria → no gap (intent still required).
+    assert _ta.assess_completion_criteria(has_spec=True, intent="done") == []
+
+
+def test_assess_criteria_flags_no_written_criteria_and_no_intent():
+    gaps = _ta.assess_completion_criteria(
+        has_spec=False, objective="", acceptance="", intent="")
+    assert "no_written_criteria" in gaps
+    assert "no_intent" in gaps
+
+
+def test_assess_criteria_objective_counts_as_written():
+    gaps = _ta.assess_completion_criteria(
+        has_spec=False, objective="本番2週 incident ゼロ", intent="ok")
+    assert gaps == []  # objective は書かれた基準としてカウント
+
+
+def test_format_criteria_gap_empty_when_no_reasons():
+    assert _ta.format_criteria_gap([], target_id="ms-5") == ""
+
+
+def test_review_request_surfaces_gap_for_weak_target(proj, monkeypatch, capsys):
+    # ms-5 in the fixture has no SPEC (get_store empty), no objective/AC.
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("BEACON_TARGET_ID", "ms-5")
+    monkeypatch.setenv("BEACON_NEW_STATE", "done")
+    # no intent → both gaps; request is still created (non-blocking).
+    commands.cmd_target_review_request()
+    out = capsys.readouterr().out
+    assert "完了条件の gap" in out
+    assert "hard-block はしません" in out
+    # The pending request WAS created despite the gap.
+    assert len(_entries(_reload(proj), "ms-5")) == 1
+
+
+def test_review_request_no_gap_when_objective_set(proj, monkeypatch, capsys):
+    # Give ms-5 an objective → strong enough, no gap warning.
+    data = commands.load_project()
+    next(m for m in data["milestones"] if m["id"] == "ms-5")["objective"] = "AC 明確"
+    commands.save_project(data, op={"op": "test-set-objective"})
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("BEACON_TARGET_ID", "ms-5")
+    monkeypatch.setenv("BEACON_NEW_STATE", "done")
+    monkeypatch.setenv("BEACON_INTENT", "本番稼働2週")
+    commands.cmd_target_review_request()
+    assert "完了条件の gap" not in capsys.readouterr().out
 
 
 def test_milestone_done_default_applies_directly(proj, monkeypatch):
