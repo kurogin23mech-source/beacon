@@ -79,9 +79,12 @@ def project_dir(tmp_path):
 
 
 def test_200k_model_uses_200000_denominator(project_dir, tmp_path):
-    """Models without [1m] suffix should report against 200K."""
+    """Legacy Claude 1/2/3 models report against 200K (e-3942).
+
+    現行世代 (sonnet-4-5 等) は 1M なので、200K 判定の対象は旧世代 (claude-3 系) だけ。
+    """
     transcript = tmp_path / "transcript.jsonl"
-    _write_transcript(transcript, model="claude-sonnet-4-5", input_tokens=100000)
+    _write_transcript(transcript, model="claude-3-5-sonnet-20241022", input_tokens=100000)
 
     out = _run_monitor(transcript, project_dir)
     # 100K / 200K = 50%
@@ -116,14 +119,19 @@ def test_env_var_override_takes_precedence(project_dir, tmp_path):
     assert "percent=20%" in out
 
 
-def test_fallback_to_200k_when_model_unknown(project_dir, tmp_path):
-    """Unknown / empty model string falls back to 200K (safe legacy default)."""
+def test_fallback_to_1m_when_model_unknown(project_dir, tmp_path):
+    """Unknown / empty model string falls back to 1M (e-3942).
+
+    旧実装は 200K 既定だったが、現行世代が軒並み 1M で、200K 既定だと実 20% でも
+    100% と誤表示して警告が誤発火した。未知は大きい既定 (1M) に倒す (kurogin 承認)。
+    """
     transcript = tmp_path / "transcript.jsonl"
     _write_transcript(transcript, model="", input_tokens=80000)
 
     out = _run_monitor(transcript, project_dir)
-    assert "context_limit=200000" in out
-    assert "percent=40%" in out
+    # 80K / 1M = 8%
+    assert "context_limit=1000000" in out
+    assert "percent=8%" in out
 
 
 def test_no_skip_at_300k_with_1m_model(project_dir, tmp_path):

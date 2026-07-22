@@ -119,7 +119,7 @@ def test_auto_note_has_no_legacy_placeholder_text(project_dir, tmp_path):
     enrichment logic regressed."""
     transcript = tmp_path / "transcript.jsonl"
     # 40K / 200K = 20% — triggers the first threshold.
-    _write_transcript(transcript, model="claude-sonnet-4-5", input_tokens=40000)
+    _write_transcript(transcript, model="claude-sonnet-4-5", input_tokens=200000)
     _run_monitor(transcript, project_dir)
     notes = _read_notes(project_dir)
     assert notes, "expected at least one auto-note to be persisted"
@@ -131,7 +131,7 @@ def test_auto_note_has_no_legacy_placeholder_text(project_dir, tmp_path):
 
 def test_auto_note_includes_recent_commits_section(project_dir, tmp_path):
     transcript = tmp_path / "transcript.jsonl"
-    _write_transcript(transcript, model="claude-sonnet-4-5", input_tokens=40000)
+    _write_transcript(transcript, model="claude-sonnet-4-5", input_tokens=200000)
     _run_monitor(transcript, project_dir)
     body = _read_notes(project_dir)[-1]["text"]
     assert "### 直近のコミット" in body
@@ -141,7 +141,7 @@ def test_auto_note_includes_recent_commits_section(project_dir, tmp_path):
 
 def test_auto_note_includes_pending_tasks_section(project_dir, tmp_path):
     transcript = tmp_path / "transcript.jsonl"
-    _write_transcript(transcript, model="claude-sonnet-4-5", input_tokens=40000)
+    _write_transcript(transcript, model="claude-sonnet-4-5", input_tokens=200000)
     _run_monitor(transcript, project_dir)
     body = _read_notes(project_dir)[-1]["text"]
     assert "### Active MS の未消化タスク" in body
@@ -162,7 +162,7 @@ def test_auto_note_body_contains_only_auto_captured_state(project_dir, tmp_path)
     （任意 — Claude が追記）' as a placeholder that Claude rarely filled in.
     """
     transcript = tmp_path / "transcript.jsonl"
-    _write_transcript(transcript, model="claude-sonnet-4-5", input_tokens=40000)
+    _write_transcript(transcript, model="claude-sonnet-4-5", input_tokens=200000)
     _run_monitor(transcript, project_dir)
     body = _read_notes(project_dir)[-1]["text"]
     # The script note must have the 3 auto-captured sections.
@@ -182,7 +182,7 @@ def test_auto_note_fires_once_per_threshold(project_dir, tmp_path):
     """Don't re-fire the same threshold within one session — state file
     in .claude/ tracks notified_thresholds."""
     transcript = tmp_path / "transcript.jsonl"
-    _write_transcript(transcript, model="claude-sonnet-4-5", input_tokens=40000)
+    _write_transcript(transcript, model="claude-sonnet-4-5", input_tokens=200000)
     _run_monitor(transcript, project_dir)
     _run_monitor(transcript, project_dir)
     notes = _read_notes(project_dir)
