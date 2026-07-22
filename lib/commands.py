@@ -4936,14 +4936,20 @@ def cmd_trek_create():
     if not email:
         print(
             "Error: BEACON_USER_EMAIL is required to create a trek "
-            "(= recorded as creator/leader member email)",
+            "(= recorded as creator/leader member email).\n"
+            "  How to set: it is normally inherited from a logged-in session — "
+            "run `beacon auth login` (or from an active bclaude session), or "
+            "export BEACON_USER_EMAIL=<you@example.com> for a scripted call.",
             file=sys.stderr,
         )
         sys.exit(1)
     if not session_id:
         print(
             "Error: BEACON_SESSION_ID is required to create a trek "
-            "(= the session that creates becomes initial leader; SPEC 方針 9)",
+            "(= the session that creates becomes initial leader; SPEC 方針 9).\n"
+            "  How to set: it is minted per bclaude session — run this from an "
+            "active bclaude session, or export BEACON_SESSION_ID=<session-id> "
+            "(see `beacon session id`) for a scripted call.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -16707,9 +16713,9 @@ def _help_registry():
         {"command": "beacon milestone occupations", "flags": ["--ms <id>", "--json"], "description": "List occupation event log (ms-81)"},
         {"command": "beacon milestone rename <id> <title>", "flags": [], "description": "Rename a milestone"},
         {"command": "beacon milestone depends <id> --on <id>", "flags": [], "description": "Declare milestone dependency"},
-        {"command": "beacon milestone purge <id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete a milestone record (recovery for duplicate-ID corruption; Issue #14)"},
-        {"command": "beacon entry purge <e-id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete an entry record (recovery for duplicate-ID corruption; e-863)"},
-        {"command": "beacon operation purge <op-id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete an operation record (recovery for duplicate-ID corruption; e-863)"},
+        {"command": "beacon milestone purge <id> --reason <text>", "flags": ["--index <n: 1-based, which duplicate to remove>", "--json"], "description": "Hard-delete a milestone record (recovery for duplicate-ID corruption; Issue #14). --index is required only when the id appears more than once; it selects which copy (1-based)."},
+        {"command": "beacon entry purge <e-id> --reason <text>", "flags": ["--index <n: 1-based, which duplicate to remove>", "--json"], "description": "Hard-delete an entry record (recovery for duplicate-ID corruption; e-863). --index is required only when the id appears more than once; it selects which copy (1-based)."},
+        {"command": "beacon operation purge <op-id> --reason <text>", "flags": ["--index <n: 1-based, which duplicate to remove>", "--json"], "description": "Hard-delete an operation record (recovery for duplicate-ID corruption; e-863). --index is required only when the id appears more than once; it selects which copy (1-based)."},
         {"command": "beacon operation approve <op-id> --spec <doc-id>", "flags": ["--expires-at YYYY-MM-DD", "--ttl-seconds N", "--json"], "description": "Mint T2 envelope from SPEC doc's approved_actions list (ms-60 / e-1339)"},
         {"command": "beacon operation revoke <op-id>", "flags": ["--envelope-id ENV", "--reason TEXT", "--json"], "description": "Invalidate the active T2 envelope (auto-picks active if --envelope-id omitted)"},
         {"command": "beacon operation envelope verify <op-id> <action>", "flags": ["--json"], "description": "AI self-check: is <action> permitted by the active envelope's approved_actions? (ms-60 / e-1340)"},
@@ -16791,7 +16797,7 @@ def _help_registry():
         {"command": "beacon skill install", "flags": [], "description": "Install Claude Code Skills to ~/.claude/skills/"},
         {"command": "beacon monitor context", "flags": ["--dry-run"], "description": "Stop hook: context-usage threshold monitor (e-854); --dry-run skips note/state writes"},
         # ms-69 e-1652+: Trek = cross-project / cross-session collaboration area
-        {"command": "beacon trek create <title>", "flags": ["--type temporary|persistent", "--description <text>", "--goal-state <criterion>", "--json"], "description": "Create a trek (cross-project協奏作業領域); caller becomes leader (ms-69). --goal-state は ms-75/e-1865 完了マーカー"},
+        {"command": "beacon trek create <title>", "flags": ["--type temporary|persistent (default persistent)", "--description <text>", "--goal-state <criterion>", "--json"], "description": "Create a trek (cross-project協奏作業領域). Requires an identified live session (the caller's session/email becomes the trek leader, ms-69) — run it from a real bclaude session, not a bare script. --goal-state は ms-75/e-1865 完了マーカー"},
         {"command": "beacon trek list", "flags": ["--status <s>", "--include-archived", "--all-actors", "--joined", "--json"], "description": "List treks visible to the caller. --joined で自分が join 済の trek だけ"},
         {"command": "beacon trek show <trek-id>", "flags": ["--all", "--json"], "description": "Show trek detail + 集約ビュー (task / commit / doc, ms-75/e-1864). --all で cap 解除"},
         {"command": "beacon trek timeline <trek-id>", "flags": ["--limit N", "--json"], "description": "Trek の lifecycle / commit / task done / doc を時系列で参照 (ms-75/e-1867)"},

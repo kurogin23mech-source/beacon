@@ -4337,7 +4337,7 @@ EOF
                 --json)       _ses_json="1"; shift ;;
                 -h|--help)
                     cat <<'EOF'
-Usage: beacon sessions [list] [--live] [--healthy] [--since-min <N>] [--machine <name>] [--agent <name>] [--json]
+Usage: beacon sessions [list] [--live] [--healthy] [--since-min <minutes; default 5>] [--machine <name>] [--agent <name>] [--json]
 
 Cross-project session directory. Lists the calling user's bclaude sessions
 across ALL projects they own or are a member of. Use this when you need
@@ -5122,7 +5122,7 @@ print(m.group(1) if m else "")' || true)
                         ;;
                     *)
                         cat <<'EOF'
-Usage: beacon bus budget grant --turns <N> [--json]
+Usage: beacon bus budget grant --turns <N: auto-reply turns to grant, N>=1> [--json]
        beacon bus budget show [--json]
        beacon bus budget clear
 EOF
@@ -5159,13 +5159,13 @@ EOF
                 ;;
             *)
                 cat <<'EOF'
-Usage: beacon bus send         --channel <ch> [--to <session_id>]... [--to-trek <trek-id>] [--payload '<json>'] [--sender <id>] [--delivery <mode>] [--in-reply-to <event_id>] [--action <name>]... [--no-envelope] [--project <id>]
+Usage: beacon bus send         --channel <ch> [--to <session_id>]... [--to-trek <trek-id>] [--payload '<json>'] [--sender <id>] [--delivery <auto-execute|propose-to-ai|notify-user-only; default propose-to-ai>] [--in-reply-to <event_id>] [--action <name>]... [--no-envelope] [--project <id>]
        beacon bus listen       [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once] [--project <id>]
        beacon bus receive      [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack] [--project <id>]
        beacon bus ack          [--recipient <id>] (--last-seen-at <iso8601> | --event <event_id>) [--project <id>]
        beacon bus status       <event_id> [--project <id>] [--json]
-       beacon bus directory    [--user <email>] [--machine <name>] [--agent <name>] [--live] [--healthy] [--since-min <N>] [--project <id>] [--cwd-only] [--json]
-       beacon bus budget       grant --turns <N>  |  show  |  clear
+       beacon bus directory    [--user <email>] [--machine <name>] [--agent <name>] [--live] [--healthy] [--since-min <minutes>] [--project <id>] [--cwd-only] [--json]
+       beacon bus budget       grant --turns <N>=1>  |  show  |  clear
        beacon bus auto-execute add --channel <name>  |  remove --channel <name>  |  list
 
 delivery: auto-execute | propose-to-ai (default) | notify-user-only
