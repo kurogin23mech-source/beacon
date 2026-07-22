@@ -3135,6 +3135,11 @@ def acquisition_set_status(data: dict, acquisition_id: str, status: str, *,
     if status not in ACQUISITION_STATUSES:
         raise ValueError(
             f"status must be one of {list(ACQUISITION_STATUSES)}, got {status!r}")
+    # ms-120 e-3908: guard the from→to transition via the shared lifecycle
+    # mechanism (illegal jumps like done→todo raise). Lazy import avoids a
+    # module-load cycle. All named verbs (start/observe/done) flow through here.
+    import core
+    core.validate_lifecycle_transition("acquisition", acq.get("status", ""), status)
     if status == work_model.DONE_STATUS:
         work_model.mark_done(acq, at=at, actor=work_base.current_actor())
     else:

@@ -2558,12 +2558,65 @@ def operation_open(data: dict, title: str, *,
     return data, op
 
 
+# ms-120 e-3908: one guarded transition mechanism for standard-lifecycle target
+# entities. Each entity kind maps a from-status to the set of legal to-statuses;
+# an illegal jump raises with the allowed set (原則 3 recoverable / 原則 6 make
+# illegal states unrepresentable). Generalized from trek.validate_transition
+# (the proven model). The tables are MONOTONIC-FORWARD: forward skips are
+# allowed, but backward / reopen-terminal moves are not — recovery from a
+# terminal state goes through `purge` or a manual edit, not a standing unguarded
+# write path (ms-120 決定). `opportunity` is intentionally absent: SPEC §5 makes
+# its phase a human-declared master, not a guarded machine — kinds without a
+# table are unguarded by design.
+LIFECYCLE_TRANSITIONS: dict[str, dict[str, frozenset[str]]] = {
+    "operation": {
+        "todo": frozenset({"in_progress", "open", "closed"}),
+        "in_progress": frozenset({"open", "closed"}),
+        "open": frozenset({"closed"}),
+        "closed": frozenset(),  # terminal
+    },
+    "acquisition": {
+        "todo": frozenset({"in_progress", "observing", "done"}),
+        "in_progress": frozenset({"observing", "done"}),
+        "observing": frozenset({"done"}),
+        "done": frozenset(),  # terminal
+    },
+}
+
+
+def validate_lifecycle_transition(kind: str, from_status: str, to_status: str) -> None:
+    """Raise ValueError if ``from_status → to_status`` is illegal for ``kind``.
+
+    A kind with no table (e.g. ``opportunity``) is unguarded by design. Same
+    from/to is a no-op and always allowed. The error lists the legal moves so a
+    caller can recover (原則 3)."""
+    table = LIFECYCLE_TRANSITIONS.get(kind)
+    if table is None:
+        return
+    if from_status == to_status:
+        return
+    allowed = table.get(from_status, frozenset())
+    if to_status not in allowed:
+        legal = sorted(allowed) if allowed else "none (terminal state)"
+        raise ValueError(
+            f"illegal {kind} transition {from_status!r} → {to_status!r}. "
+            f"Allowed from {from_status!r}: {legal}. "
+            f"(To revive a terminal record use `purge` / manual edit.)"
+        )
+
+
 def operation_set_status(data: dict, op_id: str, status: str) -> dict:
-    """Transition an Operation's status. Records timestamp for open transitions."""
+    """Transition an Operation's status. Records timestamp for open transitions.
+
+    ms-120 e-3908: the from→to transition is now validated by the shared
+    lifecycle guard (illegal jumps like closed→open raise), not just the target
+    enum. All named verbs (start/activate/close) and the deprecated status-write
+    flow through here, so the guard cannot be bypassed."""
     if status not in VALID_OP_STATUSES:
         raise ValueError(f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_OP_STATUSES))}")
     op = _find_operation(data, op_id)
     prev = op["status"]
+    validate_lifecycle_transition("operation", prev, status)
     op["status"] = status
     if status == "open" and not op.get("opened_at"):
         op["opened_at"] = _now_iso()
