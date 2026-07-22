@@ -123,19 +123,41 @@ async function resolveRecipientEmail(
     log(`qual gate: recipient email lookup failed (non-fatal): ${e.message}`)
   }
   // e-3880: the project directory row can lack a stamped actor.email (a
-  // heartbeat-only session). Fall back to /api/me/sessions, which returns ONLY
-  // the caller's own sessions across all their projects — so if the recipient
-  // sid is there, the recipient is the SAME user by construction and we can
-  // hand the gate the sender's own email. Without this, a same-user
-  // cross-project reply is misclassified as 外部宛 and held in armed mode.
+  // heartbeat-only session). Fall back to /api/me/sessions (the caller's
+  // projects' sessions across all projects).
+  //
+  // e-3880 review fix (over-relaxation): /api/me/sessions returns EVERY session
+  // in the caller's projects — INCLUDING a co-member's session in a shared
+  // project. Project co-membership is NOT same-user. So we must positively
+  // confirm the matched row's owner user_id equals the CALLER's own uid before
+  // treating the recipient as same-user. We derive the caller's uid from the
+  // same response (the row whose stamped email == senderEmail). A different
+  // user's row must NOT return senderEmail — that would let a cross-user DM
+  // bypass the armed 外部宛 hold ms-110 enforces.
   try {
     const mine = await apiGet('/api/me/sessions')
     const list = Array.isArray(mine) ? mine : (mine && mine.sessions) || []
+    let callerUid = ''
+    if (senderEmail) {
+      for (const s of list) {
+        if (String((s.actor && s.actor.email) || '') === senderEmail) {
+          callerUid = String(s.user_id || ''); break
+        }
+      }
+    }
     for (const s of list) {
       if ((s.session_id || s.sessionId) === recipientSessionId) {
-        // Same user by construction. Prefer a stamped email if present, else
-        // fall back to the caller's own login email.
-        return String((s.actor && s.actor.email) || '') || String(senderEmail || '')
+        const rowUid = String(s.user_id || '')
+        const rowEmail = String((s.actor && s.actor.email) || '')
+        if (callerUid && rowUid && rowUid === callerUid) {
+          // Confirmed same user by owner uid — prefer the row's stamped email,
+          // fall back to the sender's own email so same-user holds even when
+          // actor.email was never stamped.
+          return rowEmail || senderEmail || ''
+        }
+        // Different / unconfirmable user: their stamped email (→ 外部宛) or ''.
+        // Never senderEmail here.
+        return rowEmail
       }
     }
   } catch (e) {

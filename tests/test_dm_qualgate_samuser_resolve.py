@@ -156,6 +156,34 @@ def test_fallback_found_with_email_prefers_row_email(monkeypatch):
     assert email == SENDER_EMAIL
 
 
+def test_fallback_comember_without_email_stays_external(monkeypatch):
+    """e-3880 review fix (over-relaxation): /api/me/sessions returns EVERY session
+    in the caller's projects — INCLUDING a co-member's session in a shared project.
+    A co-member (different owner user_id) whose session has NO stamped email must
+    NOT be treated as same-user: return "" (external), never the caller's email.
+    Without this guard a cross-user DM would bypass the armed 外部宛 hold."""
+    _stub_api(monkeypatch, [
+        {"session_id": RECIP_SID, "user_id": "user-OTHER", "actor": {}},
+    ])
+    _stub_identity(monkeypatch, SENDER_EMAIL)  # caller uid = "user-self"
+    email = commands._resolve_recipient_email_via_self_sessions(RECIP_SID)
+    assert email == ""
+    assert email != SENDER_EMAIL
+
+
+def test_fallback_comember_with_email_returns_their_email(monkeypatch):
+    """A co-member WITH a stamped email → return THEIR email (→ _same_user False
+    → 外部宛), never the caller's. Distinguishes users correctly."""
+    _stub_api(monkeypatch, [
+        {"session_id": RECIP_SID, "user_id": "user-OTHER",
+         "actor": {"email": "other@example.com"}},
+    ])
+    _stub_identity(monkeypatch, SENDER_EMAIL)
+    email = commands._resolve_recipient_email_via_self_sessions(RECIP_SID)
+    assert email == "other@example.com"
+    assert email != SENDER_EMAIL
+
+
 def test_fallback_not_found_returns_blank(monkeypatch):
     """AC3: recipient sid is NOT one of the caller's own sessions → blank, so
     the gate keeps the conservative external default (no over-relax to a

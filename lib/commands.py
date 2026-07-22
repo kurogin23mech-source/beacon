@@ -19398,20 +19398,34 @@ def _resolve_recipient_email_via_self_sessions(recipient: str) -> str:
         my_sessions = client.list_user_sessions(since_minutes=1440)
     except Exception:
         return ""
+    # e-3880 review fix (over-relaxation): /api/me/sessions returns EVERY session
+    # in the caller's projects — including a *co-member's* session in a shared
+    # project. Project co-membership is NOT same-user. So we must positively
+    # confirm the matched row's owner ``user_id`` equals the caller's own uid;
+    # only then is it safe to treat the recipient as same-user (and hand the
+    # caller's own email to _same_user). A different user's row must NOT return
+    # the caller's email — that would misclassify a cross-user DM as 内部 and let
+    # it bypass the armed 外部宛 hold that ms-110 exists to enforce.
+    try:
+        caller_uid, caller_email, _ = _resolve_creator_identity()
+    except Exception:
+        caller_uid, caller_email = "", ""
+    caller_uid = str(caller_uid or "").strip()
+    caller_email = str(caller_email or "").strip()
     for s in my_sessions or []:
         if s.get("session_id") != recipient:
             continue
-        # Same user by construction (this endpoint only returns the caller's
-        # own sessions). Prefer the row's stamped email if present, else fall
-        # back to the caller's own login email.
+        row_uid = str(s.get("user_id") or "").strip()
         row_email = str((s.get("actor") or {}).get("email") or "").strip()
-        if row_email:
-            return row_email
-        try:
-            _, sender_email, _ = _resolve_creator_identity()
-        except Exception:
-            sender_email = ""
-        return str(sender_email or "").strip()
+        if caller_uid and row_uid and row_uid == caller_uid:
+            # Confirmed same user (by owner user_id). Prefer the row's stamped
+            # email (authoritative); fall back to the caller's own email so the
+            # same-user identity holds even when actor.email was never stamped.
+            return row_email or caller_email or ""
+        # Different / unconfirmable user: return their stamped email if present
+        # (→ _same_user False → 外部宛), else "" (external default). Never the
+        # caller's email here.
+        return row_email
     return ""
 
 
