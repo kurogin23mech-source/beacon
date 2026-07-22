@@ -5328,6 +5328,26 @@ EOF
         _dm_sub="${2:-}"
         shift 2 || true
         case "$_dm_sub" in
+            # ms-120 / e-3899: `beacon dm send` is the canonical verb for the
+            # DM domain. A context-free AI reaches for `dm send` first (the
+            # feature is "DM"), but historically the only way to send was
+            # `bus send --channel dm` — split across the bus transport surface
+            # where it was undiscoverable. This delegates to that same
+            # implementation (single source of truth for flag parsing, incl.
+            # --to / --to-user / --in-reply-to / --manual / --recipient-confirmed
+            # / --payload / --action / --project / --json), so the dm domain
+            # owns the verb while bus stays the transport. --channel is implicit
+            # (dm); passing it is rejected to keep the two surfaces from drifting.
+            send)
+                for _a in "$@"; do
+                    if [[ "$_a" == "--channel" ]]; then
+                        echo "Error: 'beacon dm send' targets the dm channel implicitly; do not pass --channel." >&2
+                        echo "       For other channels use 'beacon bus send --channel <ch>'." >&2
+                        exit 2
+                    fi
+                done
+                exec "$BEACON_DIR/bin/beacon" bus send --channel dm "$@"
+                ;;
             respond)
                 # Two positional forms are accepted to match both the helper
                 # hint string (= `beacon dm respond approve|deny <event_id>`)
@@ -5360,9 +5380,20 @@ EOF
             # ms-70 / e-1923 (e-1718 AC 4): audit history viewer in the
             # terminal. Same endpoint and rows as the Web UI's Settings >
             # Audit table; 6 columns sized for typical terminal widths.
-            # Usage: `beacon dm log [<project_id>] [--limit N] [--json]
-            #                       [--project <id>]`
-            log)
+            #
+            # ms-120 / e-3899: canonical verb is `dm audit` (a READ). The old
+            # `dm log` name collided head-on with `beacon log` (a WRITE that
+            # records commit progress) — the same word "log" meant write in one
+            # place and read in another, the exact read/write polarity confusion
+            # e-3907 targets. `dm log` stays as a deprecated alias (SPEC 方針2:
+            # single canonical name + alias everywhere, no breaking rename) with
+            # a one-line stderr nudge toward `dm audit`.
+            # Usage: `beacon dm audit [<project_id>] [--limit N] [--json]
+            #                         [--project <id>]`
+            audit|log)
+                if [[ "$_dm_sub" == "log" ]]; then
+                    echo "Note: 'beacon dm log' は 'beacon dm audit' に改名されました (e-3899: 'log'=書く/'audit'=読む の語義衝突解消)。log は当面 alias として動きます。" >&2
+                fi
                 _dm_log_project_positional=""
                 _dm_log_limit=""
                 _dm_log_json=""
@@ -5374,7 +5405,8 @@ EOF
                         --project) _dm_log_project_override="${2:-}"; shift 2 ;;
                         -h|--help)
                             cat <<'EOF'
-Usage: beacon dm log [<project_id>] [--limit N] [--project <id>] [--json]
+Usage: beacon dm audit [<project_id>] [--limit N] [--project <id>] [--json]
+       (alias: beacon dm log — deprecated, e-3899)
 
 Print the 6-column DM-approval audit log (event_id / sender / receiver /
 status / decision_at / decision_by) for decided rows only — pending and
@@ -5410,19 +5442,25 @@ EOF
                 ;;
             *)
                 cat <<'EOF'
-Usage: beacon dm respond approve <event_id> [--project <id>] [--json]
+Usage: beacon dm send    --to <sid> --payload '<json>' [--in-reply-to <eid>] [--manual] [--recipient-confirmed] [--action <name>]... [--project <id>] [--json]
+       beacon dm respond approve <event_id> [--project <id>] [--json]
        beacon dm respond deny    <event_id> [--project <id>] [--json]
-       beacon dm log    [<project_id>] [--limit N] [--project <id>] [--json]
+       beacon dm audit  [<project_id>] [--limit N] [--project <id>] [--json]
 
-Decide a pending cross-user DM action envelope. Only the intended
-receiver (= the addressee on the sidecar) can press approve / deny;
-the server enforces this via the Bearer token's sub claim, so the
+`dm send` is the canonical DM verb (e-3899): it delegates to
+`bus send --channel dm`, so the dm domain owns the verb while bus stays
+the transport. --channel is implicit; all bus-send flags apply.
+
+`dm respond` decides a pending cross-user DM action envelope. Only the
+intended receiver (= the addressee on the sidecar) can press approve /
+deny; the server enforces this via the Bearer token's sub claim, so the
 CLI argument cannot forge a different actor (SPEC 設計方針 3:
 承認は terminal Claude Code 内での user 直接判断のみ).
 
-`dm log` is the read-only audit mirror of the Web UI's Settings >
+`dm audit` is the read-only audit mirror of the Web UI's Settings >
 Audit table — same endpoint, same rows, 6 fixed columns for terminal
-scanning.
+scanning. (`dm log` is a deprecated alias — 'log' now means write-only,
+see `beacon log`.)
 
 --project: override the cwd's project_id for cross-project decisions
            (same semantics as `beacon bus --project <id>`).

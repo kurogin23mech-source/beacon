@@ -17704,6 +17704,31 @@ def _bus_budget_consume_one() -> tuple[bool, dict]:
     return True, {**b, "armed": True}
 
 
+def _bus_channel_missing_reason(cwd: str) -> Optional[str]:
+    """Return a 1-line reason if ``cwd`` has no beacon-bus MCP channel wired,
+    else None (ms-120 / e-3899).
+
+    The beacon-bus "channel" (the MCP receive bridge) and the "bus" (the event
+    transport) are confusingly-named separate surfaces. When the channel is
+    absent, `bus listen` still receives (it polls), but there is no idle-wake
+    reception outside that explicit listen — the send-only asymmetry of e-1173.
+    Detection mirrors scripts/check-mcp-receive-capability.py detect_status()
+    (.mcp.json in cwd + a ``beacon-bus`` entry under ``mcpServers``). Kept as a
+    small pure helper so the recovery-hint wiring in cmd_bus_listen is testable.
+    """
+    mcp_path = os.path.join(cwd, ".mcp.json")
+    if not os.path.exists(mcp_path):
+        return "この cwd に .mcp.json がありません"
+    try:
+        with open(mcp_path, "r", encoding="utf-8") as f:
+            servers = (json.load(f) or {}).get("mcpServers") or {}
+    except (OSError, json.JSONDecodeError):
+        return ".mcp.json が読めません (壊れている可能性)"
+    if not isinstance(servers, dict) or "beacon-bus" not in servers:
+        return ".mcp.json に beacon-bus エントリがありません"
+    return None
+
+
 def _bus_is_armed() -> bool:
     """True iff an auto-reply budget is granted (= autonomous mode active).
 
@@ -18711,6 +18736,32 @@ def cmd_bus_listen():
     # the contract simple — no module state, no test fixture juggling.
     backoff_seconds = 1
     backoff_cap = 30
+
+    # ms-120 / e-3899: recovery hint for the send-only asymmetry (e-1173). The
+    # "channel" (the beacon-bus MCP receive bridge) and the "bus" (the event
+    # transport) are different surfaces with confusingly similar names. If this
+    # cwd has no beacon-bus channel wired, `bus listen` still streams here (it
+    # polls directly), but stopping it leaves NO idle-wake reception — a
+    # context-free operator can't derive that from the silence. Surface the
+    # relationship + recovery path once at startup. Skipped for --once (a
+    # transient peek, e.g. /beacon-dm-send reply mode, shouldn't nag). Any
+    # failure is swallowed so this never blocks listen.
+    if not once:
+        try:
+            _chan_reason = _bus_channel_missing_reason(os.getcwd())
+            if _chan_reason:
+                print(
+                    "[bus listen] Note: beacon-bus channel が未設置です "
+                    f"({_chan_reason})。この explicit listen は動きますが、"
+                    "止めると他セッションからの DM で自動起床 (idle-wake) しません "
+                    "(= 送信専用の非対称、e-1173)。回復: この cwd で "
+                    "`beacon channel install` を実行してください。",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        except Exception:
+            pass
+
     try:
         while True:
             try:

@@ -1484,6 +1484,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_bus_send.add_argument("--to-trek", dest="bus_to_trek", default="")
     p_bus_send.add_argument("--action", dest="bus_action",
                              action="append", default=[])
+    # ms-120 / e-3901: explicit human-approved manual override of the armed
+    # auto-reply gate. Mirror of bin/beacon so Windows pipx users get the same
+    # escape hatch (without it, an armed Windows session would be gated with no
+    # way to send a one-off — fail-closed but stuck).
+    p_bus_send.add_argument("--manual", dest="bus_manual", action="store_true")
     p_bus_send.add_argument("--no-envelope", dest="no_envelope",
                              action="store_true")
     p_bus_send.add_argument("--json", action="store_true")
@@ -1562,6 +1567,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_dm_respond.add_argument("respond_args", nargs="*", default=[])
     p_dm_respond.add_argument("--project", dest="dm_project_id", default="")
     p_dm_respond.add_argument("--json", action="store_true")
+
+    # ms-120 / e-3899: `dm send` is the canonical DM verb. On Windows pipx it
+    # must exist too, or `beacon dm send` hits argparse `invalid choice: 'send'`
+    # (the exact 2026-06-07 cross-machine DM breakage class). It reuses the
+    # bus-send handler with channel forced to dm (see _handle_dm), so the flag
+    # surface mirrors `bus send` (minus --channel, which is implicit).
+    p_dm_send = dm_sub.add_parser("send", add_help=False)
+    p_dm_send.add_argument("--payload", default="")
+    p_dm_send.add_argument("--sender", default="")
+    p_dm_send.add_argument("--delivery", default="")
+    p_dm_send.add_argument("--in-reply-to", dest="in_reply_to", default="")
+    p_dm_send.add_argument("--project", dest="bus_project_id", default="")
+    p_dm_send.add_argument("--to", dest="bus_to", action="append", default=[])
+    p_dm_send.add_argument("--to-trek", dest="bus_to_trek", default="")
+    p_dm_send.add_argument("--action", dest="bus_action",
+                            action="append", default=[])
+    p_dm_send.add_argument("--manual", dest="bus_manual", action="store_true")
+    p_dm_send.add_argument("--no-envelope", dest="no_envelope",
+                            action="store_true")
+    p_dm_send.add_argument("--json", action="store_true")
+
+    # ms-120 / e-3899: `dm audit` is the canonical read verb (was `dm log`,
+    # which collided with the write-verb `beacon log`). `dm log` stays as a
+    # deprecated alias — identical args, a nudge printed in _handle_dm.
+    p_dm_audit = dm_sub.add_parser("audit", add_help=False)
+    p_dm_audit.add_argument("project_id", nargs="?", default="")
+    p_dm_audit.add_argument("--limit", default="")
+    p_dm_audit.add_argument("--project", dest="dm_project_id", default="")
+    p_dm_audit.add_argument("--json", action="store_true")
 
     p_dm_log = dm_sub.add_parser("log", add_help=False)
     p_dm_log.add_argument("project_id", nargs="?", default="")
@@ -4535,6 +4569,8 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
             "BEACON_BUS_RECIPIENT_SESSION": "",
             "BEACON_BUS_ACTION": bus_action_csv,
             "BEACON_BUS_NO_ENVELOPE": "1" if getattr(args, "no_envelope", False) else "",
+            # ms-120 / e-3901: armed-gate manual override (parity with bin/beacon).
+            "BEACON_BUS_MANUAL": "1" if getattr(args, "bus_manual", False) else "",
             "BEACON_JSON": "1" if args.json else "",
         }
         if project_id:
@@ -4660,19 +4696,30 @@ def _handle_dm(root: Path, args: argparse.Namespace) -> int:
     `dm respond` argv nor `dm log` argv can spoof a different actor.
     """
     if args.show_help or getattr(args, "dm_cmd", None) is None:
-        print("Usage: beacon dm respond approve <event_id> [--project <id>] [--json]")
+        print("Usage: beacon dm send    --to <sid> --payload '<json>' [--in-reply-to <eid>] [--manual] [--action <name>]... [--project <id>] [--json]")
+        print("       beacon dm respond approve <event_id> [--project <id>] [--json]")
         print("       beacon dm respond deny    <event_id> [--project <id>] [--json]")
-        print("       beacon dm log    [<project_id>] [--limit N] [--project <id>] [--json]")
+        print("       beacon dm audit  [<project_id>] [--limit N] [--project <id>] [--json]")
         print("")
-        print("Decide a pending cross-user DM action envelope (respond), or")
-        print("scroll the audit log of already-decided rows (log).")
+        print("Send a DM (send = bus send --channel dm), decide a pending")
+        print("cross-user DM action envelope (respond), or scroll the audit")
+        print("trail of already-decided rows (audit).")
         print("")
+        print("send:    canonical DM verb (e-3899); delegates to bus send --channel dm.")
         print("respond: only the intended receiver can press approve / deny;")
         print("         the server enforces this via the Bearer token.")
-        print("log:     read-only mirror of the Web UI Settings > Audit table.")
+        print("audit:   read-only mirror of the Web UI Settings > Audit table.")
+        print("         (`dm log` is a deprecated alias — 'log' now means write.)")
         return 0 if args.show_help else 2
 
     cmd = args.dm_cmd
+
+    if cmd == "send":
+        # ms-120 / e-3899: dm send == bus send --channel dm. Reuse the bus send
+        # handler so flag parsing / fan-out / envelope logic stay single-source.
+        args.channel = "dm"
+        args.bus_cmd = "send"
+        return _handle_bus(root, args)
 
     if cmd == "respond":
         # Parse the flexible positional pair: accept either
@@ -4693,7 +4740,16 @@ def _handle_dm(root: Path, args: argparse.Namespace) -> int:
         }
         return _run_commands_py(root, "dm_respond", env)
 
-    if cmd == "log":
+    if cmd in ("audit", "log"):
+        # ms-120 / e-3899: `dm audit` is the canonical read verb; `dm log` is a
+        # deprecated alias (the word "log" now means write, see `beacon log`).
+        if cmd == "log":
+            print(
+                "Note: 'beacon dm log' は 'beacon dm audit' に改名されました "
+                "(e-3899: 'log'=書く/'audit'=読む の語義衝突解消)。"
+                "log は当面 alias として動きます。",
+                file=sys.stderr,
+            )
         # `--project <id>` (override) wins over the positional project_id;
         # both feed _resolve_bus_project_id in commands.py (matches the
         # bash dispatch precedence).
