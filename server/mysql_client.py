@@ -161,6 +161,42 @@ def _table_name(entity: str) -> str:
 #   スレッドは使い回されるので接続数はプール上限 (≒40) に収まり、毎回張り直さない。
 _LOCAL = threading.local()
 
+# ms-96 / e-3052 — 総 DB 接続数の観測。PR #349 で thread-local 化して並行破損
+# (`'NoneType'...settimeout`) を消したが、これが再発 (= 誰かが module-global 共有に
+# 戻す等) したら気付けるようにする。live 接続を thread ident でレジストリに載せ、
+# `connection_stats()` で「今この process が保持している接続数」と「累計 open 数」を
+# 公開する。thread は使い回されるので live 数は anyio スレッドプール上限 (≒40) に
+# 収まるのが健全 = これを大きく超えたら並行/リーク異常のシグナル。
+_CONN_LOCK = threading.Lock()
+_LIVE_CONNS: dict[int, object] = {}
+_OPENED_TOTAL = 0
+
+
+def _register_conn(conn: object) -> None:
+    """このスレッド専用接続をレジストリに登録し、累計 open 数を増やす。"""
+    global _OPENED_TOTAL
+    with _CONN_LOCK:
+        _LIVE_CONNS[threading.get_ident()] = conn
+        _OPENED_TOTAL += 1
+
+
+def connection_stats() -> dict:
+    """DB 接続の観測値を返す (ms-96 / e-3052).
+
+    - ``live_connections``: 今この process が保持している thread-local 接続数
+      (= 概ね稼働スレッド数、健全なら anyio プール上限 ≒40 以内)。
+    - ``opened_total``: プロセス起動以降に張った接続の累計 (= 再接続が多いほど増える)。
+    - ``backend``: "mysql" (= 呼び出し側が backend を判別できるように)。
+
+    pymysql 不在 (= MySQL backend 未使用) でも例外を投げず 0 を返す (fail-safe)。
+    """
+    with _CONN_LOCK:
+        return {
+            "backend": "mysql",
+            "live_connections": len(_LIVE_CONNS),
+            "opened_total": _OPENED_TOTAL,
+        }
+
 
 def _env(*names: str, default: str | None = None) -> str | None:
     """最初に見つかった env var を返す (= 別名フォールバック)。
@@ -198,6 +234,7 @@ def _conn():
     if conn is None:
         conn = _connect()
         _LOCAL.conn = conn
+        _register_conn(conn)  # ms-96 / e-3052: 接続数レジストリに登録
         return conn
     try:
         conn.ping(reconnect=True)
@@ -210,6 +247,7 @@ def _conn():
             pass
         conn = _connect()
         _LOCAL.conn = conn
+        _register_conn(conn)  # ms-96 / e-3052: 張り直しも累計 open として記録
     return conn
 
 
