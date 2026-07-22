@@ -7936,7 +7936,7 @@ def cmd_trek_task_add():
       BEACON_TREK_ID                (required, e.g. tk-abcd1234)
       BEACON_TREK_TASK_TARGET       (required, "<project-id>:<ms-id>")
       BEACON_DESCRIPTION            (required, the task description)
-      BEACON_PRIORITY               (optional, lowest/low/middle/high/highest)
+      BEACON_PRIORITY               (optional, lowest/low/medium/high/highest; middle=alias)
       BEACON_MOTIVATION             (optional)
       BEACON_ACCEPTANCE_CRITERIA    (optional)
       BEACON_TYPE                   (optional, default "task")

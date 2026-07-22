@@ -63,7 +63,24 @@ VALID_PR_STATUSES = {"open", "in_review", "approved", "merged", "closed"}
 VALID_REVIEW_STATUSES = {"pending", "approved", "changes_requested", "rejected"}
 VALID_RUN_STATUSES = {"ok", "warning", "error"}
 VALID_INCIDENT_STATUSES = {"open", "resolved"}
-VALID_PRIORITIES = {"highest", "high", "middle", "low", "lowest"}
+VALID_PRIORITIES = {"highest", "high", "medium", "low", "lowest"}
+# ms-120 / e-3895: `medium` is the canonical mid-tier priority — it matches
+# every priority system an AI has a prior for (Jira / GitHub / monitoring all
+# use medium/med). `middle` is a positional word, not a severity word, and was
+# the old local name; it stays accepted as a deprecated alias so nothing breaks,
+# but input normalizes to `medium` for storage and help/errors show `medium`.
+_PRIORITY_ALIASES = {"middle": "medium"}
+_ACCEPTED_PRIORITIES = VALID_PRIORITIES | set(_PRIORITY_ALIASES)
+
+
+def normalize_priority(priority: str) -> str:
+    """Canonicalize a priority value, mapping deprecated aliases (middle→medium).
+
+    Returns the canonical value unchanged if already canonical. Does NOT validate
+    (callers guard against ``_ACCEPTED_PRIORITIES`` first); an unknown value is
+    returned as-is so the caller's own "Invalid priority" error still fires.
+    """
+    return _PRIORITY_ALIASES.get(priority, priority)
 # Member roles (e-624): defines permissions in 2-5 person team context.
 # - owner: project owner, all permissions including delete project
 # - maintainer: can manage milestones / merge PRs / approve operations
@@ -469,9 +486,9 @@ def milestone_add(data: dict, title: str, target_date: str = "",
     if description:
         ms["description"] = description
     if priority:
-        if priority not in VALID_PRIORITIES:
+        if priority not in _ACCEPTED_PRIORITIES:
             raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
-        ms["priority"] = priority
+        ms["priority"] = normalize_priority(priority)
     if objective:
         ms["objective"] = objective
     if acceptance_criteria:
@@ -740,9 +757,9 @@ def milestone_update(data: dict, ms_id: str, *,
             if target_date:
                 ms["target_date"] = target_date
             if priority:
-                if priority not in VALID_PRIORITIES:
+                if priority not in _ACCEPTED_PRIORITIES:
                     raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
-                ms["priority"] = priority
+                ms["priority"] = normalize_priority(priority)
             if objective:
                 ms["objective"] = objective
             if acceptance_criteria:
@@ -1086,9 +1103,9 @@ def task_add(data: dict, ms_id: str, description: str, *,
     if requested_by:
         meta["requested_by"] = requested_by
     if priority:
-        if priority not in VALID_PRIORITIES:
+        if priority not in _ACCEPTED_PRIORITIES:
             raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
-        meta["priority"] = priority
+        meta["priority"] = normalize_priority(priority)
     now = _now_iso()
     meta["created_by"] = _get_actor()
     author_clean = _clean_author(author)
@@ -1190,12 +1207,12 @@ def task_update(data: dict, entry_id: str, *,
         entry["behavior"] = behavior
         changed = True
     if priority:
-        if priority not in VALID_PRIORITIES:
+        if priority not in _ACCEPTED_PRIORITIES:
             raise ValueError(
                 f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}"
             )
         meta = entry.setdefault("meta", {})
-        meta["priority"] = priority
+        meta["priority"] = normalize_priority(priority)
         changed = True
     if changed:
         author_clean = _clean_author(author)
@@ -2524,7 +2541,7 @@ def operation_open(data: dict, title: str, *,
         raise ValueError(f"Invalid schedule: {schedule}. Valid: {', '.join(sorted(SCHEDULE_DAYS))}")
     if status not in VALID_OP_STATUSES:
         raise ValueError(f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_OP_STATUSES))}")
-    if priority and priority not in VALID_PRIORITIES:
+    if priority and priority not in _ACCEPTED_PRIORITIES:
         raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
     op_id = next_op_id(data)
     op = {
@@ -2548,7 +2565,7 @@ def operation_open(data: dict, title: str, *,
     if acceptance_criteria:
         op["acceptance_criteria"] = acceptance_criteria
     if priority:
-        op["priority"] = priority
+        op["priority"] = normalize_priority(priority)
     # ms-43 / e-2246 — stamp the human author on the Operation so the UI
     # can surface a creator label (= 起票者) in Operation lists / detail.
     author_clean = _clean_author(author)
@@ -2647,9 +2664,9 @@ def operation_update(data: dict, op_id: str, *,
     if acceptance_criteria:
         op["acceptance_criteria"] = acceptance_criteria
     if priority:
-        if priority not in VALID_PRIORITIES:
+        if priority not in _ACCEPTED_PRIORITIES:
             raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
-        op["priority"] = priority
+        op["priority"] = normalize_priority(priority)
     if log_source:
         op["log_source"] = log_source
     return op
@@ -2670,7 +2687,7 @@ def operation_task_add(data: dict, op_id: str, description: str, *,
                        acceptance_criteria: str = "") -> tuple[dict, dict]:
     """Add an operation_task entry to an Operation. Returns (operation, entry)."""
     op = _find_operation(data, op_id)
-    if priority and priority not in VALID_PRIORITIES:
+    if priority and priority not in _ACCEPTED_PRIORITIES:
         raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
     eid = next_entry_id(data)
     entry = {
@@ -2683,7 +2700,7 @@ def operation_task_add(data: dict, op_id: str, description: str, *,
         "meta": {"created_by": _get_actor()},
     }
     if priority:
-        entry["meta"]["priority"] = priority
+        entry["meta"]["priority"] = normalize_priority(priority)
     if motivation:
         entry["motivation"] = motivation
     if acceptance_criteria:
@@ -2732,7 +2749,7 @@ def incident_open(data: dict, op_id: str, *,
     """Open an Incident in an Operation. Returns (operation, entry)."""
     op = _find_operation(data, op_id)
     eid = next_entry_id(data)
-    if priority and priority not in VALID_PRIORITIES:
+    if priority and priority not in _ACCEPTED_PRIORITIES:
         raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
     entry = {
         "id": eid,
@@ -2747,7 +2764,7 @@ def incident_open(data: dict, op_id: str, *,
         "meta": {"created_by": _get_actor()},
     }
     if priority:
-        entry["priority"] = priority
+        entry["priority"] = normalize_priority(priority)
     op.setdefault("entries", []).append(entry)
     return op, entry
 

@@ -416,7 +416,7 @@ cmd_milestone_add() {
         read -rp "Title: " title
         read -rp "Target date (YYYY-MM-DD): " target_date
         read -rp "Description: " description
-        read -rp "Priority (highest/high/middle/low/lowest): " priority
+        read -rp "Priority (highest/high/medium/low/lowest): " priority
         read -rp "Objective (what becomes possible): " objective
         read -rp "Acceptance criteria (when is it done): " acceptance_criteria
     fi
@@ -1992,7 +1992,7 @@ cmd_task_update() {
     if [ -z "$entry_id" ]; then
         echo "Usage: beacon task update <entry-id> [--description D] [--status S] [--detail D] [--ms MS-ID]"
         echo "                                     [--motivation TEXT] [--acceptance-criteria TEXT]"
-        echo "                                     [--behavior TEXT] [--priority highest|high|middle|low|lowest]"
+        echo "                                     [--behavior TEXT] [--priority highest|high|medium|low|lowest]"
         echo "                                     [--json]"
         exit 1
     fi
@@ -2399,7 +2399,10 @@ cmd_doc() {
                     --account|--acc)      account_filter="${2:-}"; shift 2 ;;
                     --opportunity|--opp)  opportunity_filter="${2:-}"; shift 2 ;;
                     --target)           target_filter="${2:-}"; shift 2 ;;
-                    --include-trashed)  include_trashed="1"; shift ;;
+                    # e-3895: `--all` is the universal "show hidden too" flag
+                    # (parallels milestone --all / incident --all); the
+                    # self-describing --include-trashed stays as an alias.
+                    --all|--include-trashed)  include_trashed="1"; shift ;;
                     -?*) _guard_flag "$1" ;;
                     *) shift ;;
                 esac
@@ -4229,7 +4232,9 @@ except ValueError as e:
                     case "$1" in
                         -o|--op)         op_id="${2:-}"; shift 2 ;;
                         --status)        status="${2:-}"; shift 2 ;;
-                        --include-closed) include_closed="1"; shift ;;
+                        # e-3895: `--all` is the universal "show hidden too" flag;
+                        # --include-closed stays as a self-describing alias.
+                        --all|--include-closed) include_closed="1"; shift ;;
                         --json)          json_mode="1"; shift ;;
                         -?*) _guard_flag "$1" ;;
                         *) shift ;;
@@ -5132,6 +5137,18 @@ EOF
                     ;;
             esac
         done
+        # e-3895: `--to` (send: the addressee) and `--recipient` (receive/listen/
+        # ack: whose inbox) are the same thing — a session id — split across two
+        # flag names. Cross-alias them so an AI never picks the wrong one: on
+        # send, a stray --recipient fills the addressee; on the read verbs, a
+        # stray --to fills the inbox. The canonical per-verb name still shows in
+        # help; this only rescues the mismatched choice.
+        if [[ "$_bus_sub" == "send" && -z "$_bus_to_list" && -z "$_bus_to" && -n "$_bus_recipient" ]]; then
+            _bus_to="$_bus_recipient"; _bus_to_list="${_bus_recipient}"$'\n'
+        elif [[ ("$_bus_sub" == "listen" || "$_bus_sub" == "receive" || "$_bus_sub" == "ack") \
+                && -z "$_bus_recipient" && -n "$_bus_to" ]]; then
+            _bus_recipient="$_bus_to"
+        fi
         case "$_bus_sub" in
             send)
                 # ms-75 / e-1858: --to repeatable + --to-trek expansion.
