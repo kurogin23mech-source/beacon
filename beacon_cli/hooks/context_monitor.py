@@ -75,9 +75,20 @@ DEFAULT_CONTEXT_LIMIT_200K: int = 200_000
 DEFAULT_CONTEXT_LIMIT_1M: int = 1_000_000
 """Model-class denominators. ``[1m]`` suffix in the model id forces 1M."""
 
-# A model is the 1M class if its id matches any of these. Bash uses
-# ``grep -qE '\[1m\]|-1m$|1m-'`` — replicated exactly.
-_ONE_M_MODEL_RE = re.compile(r"\[1m\]|-1m$|1m-")
+# 200K 窓と判定する「旧世代」モデル (e-3942)。
+#
+# 旧実装は ``[1m]`` / ``-1m`` マーカーが付く時だけ 1M、それ以外は 200K としていた。
+# これは 1M が opt-in ベータ (id に ``[1m]`` が付いた時代) の名残で、現行の 1M 窓
+# モデル (``claude-opus-4-8`` / ``claude-sonnet-4-5`` / ``claude-sonnet-5`` /
+# ``fable-5`` 等) は id にマーカーを持たないため全部 200K 分母に落ち、実使用が 1M の
+# 20% でも 100% と誤表示して「上限接近」警告が誤発火していた。
+#
+# 現行世代 (Opus/Sonnet 4.x・Claude 5 family 等) と未知モデルは 1M を既定にし、
+# **200K は明確な旧世代 (Claude 1/2/3 系) だけ** に限定する (kurogin 承認方針:
+# 不明は大きい既定へ倒す — 新モデルは 1M 前提が主流で、旧 200K 系のみ例外列挙)。
+# 200K 系が増えたらここに足すか ``BEACON_CONTEXT_LIMIT`` env で上書きする。
+# bash 版 (bin/context-usage-monitor.sh) の grep パターンと一致させること。
+_LEGACY_200K_RE = re.compile(r"claude-[0-3][.\-]", re.IGNORECASE)
 
 STATE_FILE_REL = Path(".claude") / "context-usage-state.json"
 """Per-project state file. Same path as the bash script."""
@@ -123,16 +134,18 @@ def _latest_assistant_usage(transcript_path: str) -> Tuple[Optional[dict], str]:
 
 
 def _resolve_context_limit(model_name: str) -> int:
-    """Apply the three-step priority: env var > model inference > 200K."""
+    """Apply the priority: env var > model inference. 旧世代 (Claude 1/2/3) は
+    200K、現行世代 & 未知は 1M を既定とする (e-3942)。"""
     env_limit = os.environ.get("BEACON_CONTEXT_LIMIT", "").strip()
     if env_limit:
         try:
             return int(env_limit)
         except ValueError:
             pass  # malformed env var: fall through to inference
-    if model_name and _ONE_M_MODEL_RE.search(model_name):
-        return DEFAULT_CONTEXT_LIMIT_1M
-    return DEFAULT_CONTEXT_LIMIT_200K
+    # e-3942: 旧世代 (Claude 1/2/3 系) だけ 200K、現行世代 & 未知は 1M を既定にする。
+    if model_name and _LEGACY_200K_RE.search(model_name):
+        return DEFAULT_CONTEXT_LIMIT_200K
+    return DEFAULT_CONTEXT_LIMIT_1M
 
 
 def _current_context_tokens(usage: dict) -> int:

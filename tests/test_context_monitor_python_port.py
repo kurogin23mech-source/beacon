@@ -42,17 +42,39 @@ from beacon_cli.hooks import context_monitor as cm  # noqa: E402
 @pytest.mark.parametrize(
     "model,expected",
     [
+        # e-3942: 現行世代 & 未知は 1M が既定。旧世代 (Claude 1/2/3) だけ 200K。
         ("claude-opus-4-7[1m]", cm.DEFAULT_CONTEXT_LIMIT_1M),
         ("claude-sonnet-4-6[1m]", cm.DEFAULT_CONTEXT_LIMIT_1M),
-        ("claude-sonnet-4-5", cm.DEFAULT_CONTEXT_LIMIT_200K),
-        ("claude-opus-4", cm.DEFAULT_CONTEXT_LIMIT_200K),
-        ("", cm.DEFAULT_CONTEXT_LIMIT_200K),
+        ("claude-sonnet-4-5", cm.DEFAULT_CONTEXT_LIMIT_1M),   # 4.5+ は 1M (旧: 誤って 200K)
+        ("claude-opus-4", cm.DEFAULT_CONTEXT_LIMIT_1M),       # Opus 4.x は 1M (旧: 誤って 200K)
+        ("claude-opus-4-8", cm.DEFAULT_CONTEXT_LIMIT_1M),     # 実測で 1M 確認済 (e-3942)
+        ("claude-sonnet-5", cm.DEFAULT_CONTEXT_LIMIT_1M),     # Claude 5 family は 1M
+        ("claude-fable-5", cm.DEFAULT_CONTEXT_LIMIT_1M),
+        ("", cm.DEFAULT_CONTEXT_LIMIT_1M),                    # 未知は大きい既定 (1M)
         ("foo-1m-bar", cm.DEFAULT_CONTEXT_LIMIT_1M),
+        # 旧世代 (Claude 1/2/3) は 200K のまま。
+        ("claude-3-5-sonnet-20241022", cm.DEFAULT_CONTEXT_LIMIT_200K),
+        ("claude-3-opus-20240229", cm.DEFAULT_CONTEXT_LIMIT_200K),
+        ("claude-3-7-sonnet-20250219", cm.DEFAULT_CONTEXT_LIMIT_200K),
+        ("claude-2.1", cm.DEFAULT_CONTEXT_LIMIT_200K),
     ],
 )
 def test_resolve_context_limit_model_inference(monkeypatch, model, expected):
     monkeypatch.delenv("BEACON_CONTEXT_LIMIT", raising=False)
     assert cm._resolve_context_limit(model) == expected
+
+
+def test_reported_bug_scenario_opus_4_8_not_over_100(monkeypatch):
+    """e-3942 の報告バグそのもの: claude-opus-4-8 で実コンテキスト 588,965 tokens
+    (= 実測値) のとき、旧実装は 200K 分母で 294% と算出し「上限超過」扱いだった。
+    修正後は 1M 分母で ~59% になり、100% 未満 = 誤発火しないこと。"""
+    monkeypatch.delenv("BEACON_CONTEXT_LIMIT", raising=False)
+    limit = cm._resolve_context_limit("claude-opus-4-8")
+    assert limit == cm.DEFAULT_CONTEXT_LIMIT_1M
+    tokens = 588_965  # このセッションの実測 (input 2 + cache_read 586,865 + cc 2,098)
+    percent = tokens * 100 // limit
+    assert percent == 58        # 旧: 294% (200K) → 新: 58% (1M)
+    assert percent < 100        # 誤って「上限超過/区切り推奨」を出さない
 
 
 def test_resolve_context_limit_env_var_overrides_model(monkeypatch):
@@ -66,7 +88,7 @@ def test_resolve_context_limit_env_var_malformed_falls_through(monkeypatch):
     """Garbage env var must NOT crash — fall back to inference / default."""
     monkeypatch.setenv("BEACON_CONTEXT_LIMIT", "not-a-number")
     assert cm._resolve_context_limit("claude-opus-4-7[1m]") == cm.DEFAULT_CONTEXT_LIMIT_1M
-    assert cm._resolve_context_limit("") == cm.DEFAULT_CONTEXT_LIMIT_200K
+    assert cm._resolve_context_limit("") == cm.DEFAULT_CONTEXT_LIMIT_1M
 
 
 # ---------------------------------------------------------------------------
@@ -360,8 +382,9 @@ def test_main_dry_run_emits_hook_output_but_no_side_effects(
                 "message": {
                     "role": "assistant",
                     "model": "claude-sonnet-4-5",
+                    # e-3942: sonnet-4-5 は 1M 窓。20% 閾値を跨ぐには 200K tokens。
                     "usage": {
-                        "input_tokens": 40_000,
+                        "input_tokens": 200_000,
                         "cache_read_input_tokens": 0,
                         "cache_creation_input_tokens": 0,
                     },
@@ -420,7 +443,9 @@ def test_main_skips_when_percent_over_100(beacon_project, tmp_path, monkeypatch)
             {
                 "message": {
                     "role": "assistant",
-                    "model": "claude-sonnet-4-5",
+                    # e-3942: >100% を作るには 200K 窓の旧世代モデルを使う
+                    # (現行 sonnet-4-5 は 1M 窓なので 300K では 30% にしかならない)。
+                    "model": "claude-3-5-sonnet-20241022",
                     "usage": {"input_tokens": 300_000},  # 150% of 200K
                 }
             }
@@ -456,7 +481,8 @@ def test_main_emits_no_output_when_already_notified(
                 "message": {
                     "role": "assistant",
                     "model": "claude-sonnet-4-5",
-                    "usage": {"input_tokens": 40_000},  # 20%
+                    # e-3942: sonnet-4-5 は 1M 窓。20% 閾値に乗せるには 200K tokens。
+                    "usage": {"input_tokens": 200_000},  # 20% of 1M
                 }
             }
         ],
