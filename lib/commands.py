@@ -16906,7 +16906,11 @@ def cmd_help_render():
                 if e.get("description"):
                     print(f"      {e['description'].strip()}")
             return
-        # no match → fall through to full help (recoverable)
+        # No registry match for a specific query. Exit 3 (print nothing) so the
+        # bash dispatcher can fall through to that command's own --help handling
+        # (ms-120 e-3897: bash-only commands like `bus` keep their bespoke help
+        # rather than being overridden with the full top-level help).
+        sys.exit(3)
 
     # Full top-level help, grouped by noun in first-seen order.
     print("Beacon - Milestone-driven project management\n")

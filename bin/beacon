@@ -2781,8 +2781,12 @@ for _a in "$@"; do
     esac
 done
 if [ -n "$_beacon_wants_help" ]; then
-    BEACON_HELP_QUERY="$_BEACON_CMD" python3 "$COMMANDS_PY" help_render
-    exit 0
+    # Render from the registry. Exit 0 = handled (registry match or top help).
+    # Exit 3 = no registry entry for this specific command, so fall through to
+    # the command's own --help handling (bash-only commands keep bespoke help).
+    if BEACON_HELP_QUERY="$_BEACON_CMD" python3 "$COMMANDS_PY" help_render; then
+        exit 0
+    fi
 fi
 
 # Relocate to the project root before dispatch. `setup`/`init` operate on the

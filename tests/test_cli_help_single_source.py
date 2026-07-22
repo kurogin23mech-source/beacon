@@ -129,6 +129,18 @@ def test_noun_help_lists_subcommands(proj):
 
 
 @pytestmark_bash
+def test_bash_only_command_keeps_its_own_help(proj):
+    """`bus` isn't in the registry — the central --help reservation must fall
+    through to its bespoke bash help, not override it with the top-level help
+    (ms-120 e-3897 regression guard)."""
+    r = _run(proj, "bus", "--help")
+    assert r.returncode == 0
+    assert "beacon bus" in r.stdout
+    # must NOT be the generic top-level banner
+    assert "Usage: beacon <command>" not in r.stdout
+
+
+@pytestmark_bash
 def test_top_help_renders_from_registry(proj):
     r = _run(proj, "--help")
     assert r.returncode == 0
