@@ -19469,7 +19469,9 @@ def _resolve_recipient_live(
     if channel != "dm" or not recipient:
         return (recipient, None, "")
     if os.environ.get("BEACON_BUS_NO_LIVE_CHECK", "") == "1":
-        return (recipient, None, "")
+        # Liveness check opted out, but identity resolution is independent and
+        # still needed for the qual gate's same-user recognition (e-3880).
+        return (recipient, None, _resolve_recipient_email_via_self_sessions(recipient))
 
     try:
         import importlib
@@ -19477,17 +19479,19 @@ def _resolve_recipient_live(
             "beacon_cli.skills_helpers.dm_discover"
         )
     except Exception:
-        # No discovery module available — bypass silently. Mirrors the
-        # defensive posture of _validate_recipient_project; a missing
-        # helper shouldn't break the send.
-        return (recipient, None, "")
+        # No discovery module available (e.g. beacon_cli not on the CLI
+        # subprocess's sys.path) — bypass the liveness check, but still resolve
+        # identity via the api client so same-user recognition (the qual gate)
+        # does not depend on the dm_discover helper importing (e-3880).
+        return (recipient, None, _resolve_recipient_email_via_self_sessions(recipient))
 
     try:
         rows = helpers.discover_and_aggregate(healthy=True, since_min=10)
     except Exception:
-        # Discovery raised (network / psutil / auth) — bypass rather than
-        # turning a transient failure into a CLI footgun.
-        return (recipient, None, "")
+        # Discovery raised (network / psutil / auth) — bypass the liveness
+        # check, but still resolve identity: same-user recognition (the qual
+        # gate) must not depend on local bridge discovery succeeding (e-3880).
+        return (recipient, None, _resolve_recipient_email_via_self_sessions(recipient))
 
     for row in rows:
         if row.get("session_id") == recipient:
