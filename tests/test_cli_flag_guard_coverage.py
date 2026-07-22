@@ -112,3 +112,17 @@ def test_valid_id_is_not_mistaken_for_a_flag(proj):
     r = _run(proj, "milestone", "start", "ms-1", "--no-branch", "--no-assignee")
     assert "not a valid flag" not in r.stderr
     assert r.returncode == 0
+
+
+@pytestmark_bash
+def test_unresolved_ms_reference_is_clean_error_not_traceback(proj):
+    # e-3896: an unresolved -m/--ms (a well-formed flag whose VALUE names no
+    # milestone) used to bubble a raw Python traceback out of the commands.py
+    # dispatcher. It must surface as a clean 1-line error + exit 1, never a
+    # stacktrace.
+    for args in (("task", "list", "-m", "ms-999"),
+                 ("task", "add", "x", "-m", "ms-999")):
+        r = _run(proj, *args)
+        assert r.returncode == 1, args
+        assert "Milestone not found" in r.stderr, args
+        assert "Traceback" not in (r.stdout + r.stderr), args

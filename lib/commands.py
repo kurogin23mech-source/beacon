@@ -23212,7 +23212,21 @@ if __name__ == "__main__":
     # in the CLI (`beacon session id` pure getter); mint+heartbeat = bridge;
     # lifecycle close = `beacon session end`.
     if fn:
-        fn()
+        try:
+            fn()
+        except ValueError as e:
+            # ms-120 / e-3896: domain / user-input errors are raised as
+            # ValueError throughout (e.g. "Milestone not found: ms-999" from an
+            # unresolved -m/--ms reference). Before this they bubbled up as a raw
+            # Python traceback — non-zero, but the "cause" was buried in a
+            # stacktrace, exactly the silent-ish failure e-3896 targets. Command
+            # handlers that already catch ValueError and print a tailored message
+            # exit before reaching here; this is the uniform safety net for the
+            # ones that don't, so an unresolved reference can never dump a
+            # stacktrace at the operator. Programming bugs raise other exception
+            # types and still surface with a full traceback.
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
     else:
         print(f"Unknown command: {cmd}")
         sys.exit(1)
