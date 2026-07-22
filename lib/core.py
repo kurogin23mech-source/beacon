@@ -2677,6 +2677,13 @@ def operation_close(data: dict, op_id: str) -> dict:
     op = _find_operation(data, op_id)
     if op["status"] == "closed":
         raise ValueError(f"Operation {op_id} is already closed")
+    # ms-120 e-3908: route the close verb through the SAME single transition
+    # guard as operation_set_status instead of writing status directly. Closing
+    # is always a legal forward move to the terminal state, so behaviour is
+    # unchanged — but this removes the last direct-write path that bypassed the
+    # guard, so every operation transition now flows through one mechanism (no
+    # backdoor). Done-when: "ガードを迂回する状態直接設定 backdoor が存在しない".
+    validate_lifecycle_transition("operation", op.get("status", ""), "closed")
     op["status"] = "closed"
     op["closed_at"] = _now_iso()
     return op

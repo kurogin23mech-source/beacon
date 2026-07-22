@@ -76,3 +76,32 @@ def test_operation_set_status_allows_legal_forward():
                             "meta": {}}]}
     core.operation_set_status(data, "op-1", "open")
     assert data["operations"][0]["status"] == "open"
+
+
+# --- operation_close is on the SAME guard (e-3908: no direct-write backdoor) --
+
+def test_operation_close_routes_through_the_guard(monkeypatch):
+    """The `close` verb must flow through validate_lifecycle_transition too, not
+    write status directly — else it is a guard-bypassing backdoor. We spy on the
+    guard and assert operation_close consults it (closing is always legal, so
+    behaviour is unchanged; this pins the *mechanism*, not the outcome)."""
+    calls = []
+    real = core.validate_lifecycle_transition
+
+    def spy(kind, frm, to):
+        calls.append((kind, frm, to))
+        return real(kind, frm, to)
+
+    monkeypatch.setattr(core, "validate_lifecycle_transition", spy)
+    data = {"operations": [{"id": "op-1", "title": "x", "status": "open",
+                            "meta": {}}]}
+    core.operation_close(data, "op-1")
+    assert ("operation", "open", "closed") in calls
+    assert data["operations"][0]["status"] == "closed"
+
+
+def test_operation_close_already_closed_rejects():
+    data = {"operations": [{"id": "op-1", "title": "x", "status": "closed",
+                            "meta": {}}]}
+    with pytest.raises(ValueError):
+        core.operation_close(data, "op-1")
