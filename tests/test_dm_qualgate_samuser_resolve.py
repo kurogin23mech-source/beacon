@@ -256,6 +256,44 @@ def test_live_row_without_email_backfills_via_fallback(monkeypatch, capsys):
     capsys.readouterr()
 
 
+def test_helper_import_failure_still_resolves_identity(monkeypatch):
+    """e-3880 live end-to-end fix: when the dm_discover helper cannot be imported
+    (beacon_cli not on the `beacon bus send` subprocess's sys.path), the liveness
+    check bypasses — but _resolve_recipient_live MUST still resolve the recipient
+    identity via the sid→user fallback (which uses the api client, not the helper)
+    so a same-user reply is recognised and not held in armed mode. This is the
+    failure the isolated unit tests missed (they had beacon_cli importable)."""
+    import importlib
+    real_import = importlib.import_module
+
+    def fake_import(name, *a, **k):
+        if name == "beacon_cli.skills_helpers.dm_discover":
+            raise ImportError("simulated: beacon_cli not on subprocess sys.path")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(importlib, "import_module", fake_import)
+    monkeypatch.delenv("BEACON_BUS_NO_LIVE_CHECK", raising=False)
+    _stub_api(monkeypatch, [
+        {"session_id": RECIP_SID, "user_id": "user-self", "actor": {}},
+    ])
+    _stub_identity(monkeypatch, SENDER_EMAIL)  # caller uid = user-self
+    _new, notice, email = commands._resolve_recipient_live(RECIP_SID, "dm")
+    # Resolved via fallback despite the helper import failing — NOT "".
+    assert email == SENDER_EMAIL
+
+
+def test_no_live_check_env_still_resolves_identity(monkeypatch):
+    """BEACON_BUS_NO_LIVE_CHECK=1 opts out of the liveness check but must still
+    resolve identity (independent concern) so the qual gate keeps working."""
+    monkeypatch.setenv("BEACON_BUS_NO_LIVE_CHECK", "1")
+    _stub_api(monkeypatch, [
+        {"session_id": RECIP_SID, "user_id": "user-self", "actor": {}},
+    ])
+    _stub_identity(monkeypatch, SENDER_EMAIL)
+    _new, notice, email = commands._resolve_recipient_live(RECIP_SID, "dm")
+    assert email == SENDER_EMAIL
+
+
 def test_live_row_with_email_does_not_call_fallback(monkeypatch, capsys):
     """A live row that already carries actor.email returns it directly and does
     NOT pay the extra sid→user round-trip (no regression to the fast path)."""
