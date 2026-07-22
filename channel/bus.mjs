@@ -103,7 +103,9 @@ function loadEmail() {
 // (server stamps actor.email from the bearer token). Lets the reply qual gate
 // compare sender vs recipient identity. Best-effort: any failure → '' so the
 // gate falls back to treating the cross-project send as 外部 (safe default).
-async function resolveRecipientEmail(recipientProjectId, recipientSessionId) {
+async function resolveRecipientEmail(
+  recipientProjectId, recipientSessionId, senderEmail = '',
+) {
   if (!recipientProjectId || !recipientSessionId) return ''
   try {
     const rows = await apiGet(
@@ -112,11 +114,54 @@ async function resolveRecipientEmail(recipientProjectId, recipientSessionId) {
     const list = Array.isArray(rows) ? rows : (rows && rows.sessions) || []
     for (const s of list) {
       if ((s.session_id || s.sessionId) === recipientSessionId) {
-        return String((s.actor && s.actor.email) || '')
+        const stamped = String((s.actor && s.actor.email) || '')
+        if (stamped) return stamped
+        break // found the row, but it has no stamped email → try the fallback
       }
     }
   } catch (e) {
     log(`qual gate: recipient email lookup failed (non-fatal): ${e.message}`)
+  }
+  // e-3880: the project directory row can lack a stamped actor.email (a
+  // heartbeat-only session). Fall back to /api/me/sessions (the caller's
+  // projects' sessions across all projects).
+  //
+  // e-3880 review fix (over-relaxation): /api/me/sessions returns EVERY session
+  // in the caller's projects — INCLUDING a co-member's session in a shared
+  // project. Project co-membership is NOT same-user. So we must positively
+  // confirm the matched row's owner user_id equals the CALLER's own uid before
+  // treating the recipient as same-user. We derive the caller's uid from the
+  // same response (the row whose stamped email == senderEmail). A different
+  // user's row must NOT return senderEmail — that would let a cross-user DM
+  // bypass the armed 外部宛 hold ms-110 enforces.
+  try {
+    const mine = await apiGet('/api/me/sessions')
+    const list = Array.isArray(mine) ? mine : (mine && mine.sessions) || []
+    let callerUid = ''
+    if (senderEmail) {
+      for (const s of list) {
+        if (String((s.actor && s.actor.email) || '') === senderEmail) {
+          callerUid = String(s.user_id || ''); break
+        }
+      }
+    }
+    for (const s of list) {
+      if ((s.session_id || s.sessionId) === recipientSessionId) {
+        const rowUid = String(s.user_id || '')
+        const rowEmail = String((s.actor && s.actor.email) || '')
+        if (callerUid && rowUid && rowUid === callerUid) {
+          // Confirmed same user by owner uid — prefer the row's stamped email,
+          // fall back to the sender's own email so same-user holds even when
+          // actor.email was never stamped.
+          return rowEmail || senderEmail || ''
+        }
+        // Different / unconfirmable user: their stamped email (→ 外部宛) or ''.
+        // Never senderEmail here.
+        return rowEmail
+      }
+    }
+  } catch (e) {
+    log(`qual gate: self-session fallback failed (non-fatal): ${e.message}`)
   }
   return ''
 }
@@ -833,7 +878,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       // the gate keeps the conservative 外部 default.
       const senderEmail = loadEmail()
       const recipientEmail = await resolveRecipientEmail(
-        recipient_project_id, recipient_session_id,
+        recipient_project_id, recipient_session_id, senderEmail,
       )
       const category = classifyOutboundReply({
         channel,
