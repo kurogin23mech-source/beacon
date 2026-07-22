@@ -16683,9 +16683,16 @@ def _doctor_warning_to_signal(warn_text: str) -> dict:
     }
 
 
-def cmd_help_json():
-    """Output beacon CLI command reference as machine-readable JSON."""
-    commands = [
+def _help_registry():
+    """Single source of truth for the CLI command reference (ms-120 e-3897).
+
+    Every help surface — machine-readable `beacon help --json`, the top-level
+    `beacon --help` text, and each subcommand's `--help` — renders from THIS
+    one list. There is no second hand-maintained help text to drift against
+    (AX 原則 1/3: ヘルプが信頼できないと AI は毎回ソースを読む羽目になる /
+    原則 6: 乖離は検出でなく構造で不能にする)。
+    """
+    return [
         {"command": "beacon init", "flags": [], "description": "Initialize .beacon/ in current directory"},
         {"command": "beacon setup", "flags": [], "description": "First-time setup wizard (auth + hooks + project)"},
         {"command": "beacon status", "flags": ["--json", "--ms <id>"], "description": "Show current status"},
@@ -16835,7 +16842,92 @@ def cmd_help_json():
         {"command": "beacon morning", "flags": ["--since-hours N", "--events-file <path>", "--no-doc", "--json"], "description": "4-bucket digest of recent autonomous activity (完了 / 停止 / skip / 介入要望); auto-saves as scope=report doc"},
         {"command": "beacon help", "flags": ["--json"], "description": "Show help (--json for machine-readable output)"},
     ]
-    print(json.dumps({"version": __version__, "commands": commands}, ensure_ascii=False, indent=2))
+
+
+def cmd_help_json():
+    """Output beacon CLI command reference as machine-readable JSON."""
+    print(json.dumps({"version": __version__, "commands": _help_registry()},
+                     ensure_ascii=False, indent=2))
+
+
+def _help_command_noun(command: str) -> str:
+    """Return the grouping noun for a registry command (2nd token after
+    'beacon'), e.g. 'beacon milestone start <id>' -> 'milestone'. Falls back to
+    the 1st token for single-verb commands like 'beacon status'."""
+    parts = command.split()
+    # parts[0] == 'beacon'
+    return parts[1] if len(parts) > 1 else command
+
+
+def _render_command_usage(entry: dict) -> str:
+    """One command's usage block: the invocation + its flags + description."""
+    cmd = entry["command"]
+    flags = entry.get("flags") or []
+    line = f"Usage: {cmd}"
+    if flags:
+        line += " " + " ".join(f"[{f}]" for f in flags)
+    return f"{line}\n  {entry.get('description', '').strip()}"
+
+
+def cmd_help_render():
+    """Human-readable help, rendered from _help_registry() (ms-120 e-3897).
+
+    BEACON_HELP_QUERY selects scope:
+      - empty       -> the full top-level help, grouped by command noun.
+      - "<noun>"    -> every subcommand under that noun (e.g. "milestone").
+      - "<noun sub>"-> the single matching command's usage block.
+
+    Matching is prefix-based against the registry's "beacon <command>" strings,
+    so both `beacon milestone --help` (noun) and `beacon milestone start --help`
+    (specific) resolve without a second lookup table. Unknown queries fall back
+    to the full top help rather than erroring (原則 3: 回復経路を残す)。
+    """
+    registry = _help_registry()
+    query = (os.environ.get("BEACON_HELP_QUERY") or "").strip()
+
+    if query:
+        needle = query if query.startswith("beacon ") else f"beacon {query}"
+        needle_tokens = needle.split()
+        matches = []
+        for e in registry:
+            cmd_tokens = e["command"].split()
+            # prefix match: registry command starts with the query tokens
+            if cmd_tokens[: len(needle_tokens)] == needle_tokens:
+                matches.append(e)
+        if len(matches) == 1:
+            print(_render_command_usage(matches[0]))
+            return
+        if len(matches) > 1:
+            print(f"beacon {query} — subcommands:\n")
+            for e in matches:
+                flags = e.get("flags") or []
+                suffix = ("  " + " ".join(f"[{f}]" for f in flags)) if flags else ""
+                print(f"  {e['command']}{suffix}")
+                if e.get("description"):
+                    print(f"      {e['description'].strip()}")
+            return
+        # no match → fall through to full help (recoverable)
+
+    # Full top-level help, grouped by noun in first-seen order.
+    print("Beacon - Milestone-driven project management\n")
+    print("Usage: beacon <command> [subcommand] [flags]\n")
+    groups: dict = {}
+    order: list = []
+    for e in registry:
+        noun = _help_command_noun(e["command"])
+        if noun not in groups:
+            groups[noun] = []
+            order.append(noun)
+        groups[noun].append(e)
+    for noun in order:
+        print(f"{noun}:")
+        for e in groups[noun]:
+            flags = e.get("flags") or []
+            suffix = ("  " + " ".join(f"[{f}]" for f in flags)) if flags else ""
+            print(f"  {e['command']}{suffix}")
+        print()
+    print("Run 'beacon <command> --help' for a single command's flags.")
+    print("Run 'beacon help --json' for machine-readable output.")
 
 
 # ---------------------------------------------------------------------------
@@ -22934,6 +23026,7 @@ if __name__ == "__main__":
         "trek_timeline": cmd_trek_timeline,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
+        "help_render": cmd_help_render,
         "doctor": cmd_doctor,
     }
     fn = commands.get(cmd)

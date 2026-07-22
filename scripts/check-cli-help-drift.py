@@ -61,6 +61,8 @@ import argparse
 import importlib.util
 import io
 import json
+import os
+import subprocess
 import re
 import sys
 from contextlib import redirect_stdout
@@ -286,16 +288,32 @@ def _extract_verb(line: str) -> str | None:
 
 
 def parse_bin_beacon(path: Path = BIN_BEACON) -> set[str]:
-    """Extract the verb set from the bash dispatcher's usage() text.
+    """Extract the verb set actually printed by ``beacon --help``.
 
-    We look for lines indented with two spaces inside the heredoc that
-    begin with ``beacon ``. Skip the closing ``EOF`` and section headers.
+    ms-120 e-3897: bin/beacon's ``usage()`` no longer holds a hand-maintained
+    heredoc — it renders the top-level help from ``lib/commands.py``'s
+    ``_help_registry`` (the same source ``beacon help --json`` uses). So instead
+    of scraping bash source, we render the real help text and parse the verbs
+    the user/AI actually sees. Because both this and ``parse_help_json`` derive
+    from that one registry, they align by construction (a single source can't
+    drift from itself); the checker's live value is now the README and
+    dispatch-parity comparisons below. If the renderer breaks, this surface goes
+    empty and the drift shows up here — so the render path stays under test.
     """
-    if not path.exists():
+    commands_py = path.parent.parent / "lib" / "commands.py"
+    if not commands_py.exists():
+        return set()
+    env = dict(os.environ)
+    env.pop("BEACON_HELP_QUERY", None)  # empty query -> full top-level help
+    try:
+        out = subprocess.run(
+            [sys.executable, str(commands_py), "help_render"],
+            capture_output=True, text=True, env=env, timeout=30,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
         return set()
     verbs: set[str] = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
-        # usage() block lines look like:  "  beacon milestone add ..."
+    for line in out.splitlines():
         if not line.startswith("  beacon"):
             continue
         verb = _extract_verb(line.strip())
@@ -521,7 +539,6 @@ def collect_drift(
 
     union = bin_verbs | json_verbs | readme_verbs
 
-    bin_missing: set[str] = set()
     json_missing: set[str] = set()
     readme_missing: set[str] = set()
 
@@ -530,15 +547,21 @@ def collect_drift(
             # Bare `beacon` (dashboard launch) — appears as different rows in
             # all three sources but isn't a "subcommand". Skip entirely.
             continue
-        in_bin = v in bin_verbs
         in_json = v in json_verbs
         in_readme = v in readme_verbs
-        if not in_bin and v not in ALLOW_MISSING_FROM_BIN_HELP:
-            bin_missing.add(v)
         if not in_json and v not in ALLOW_MISSING_FROM_HELP_JSON:
             json_missing.add(v)
         if not in_readme and v not in ALLOW_MISSING_FROM_README:
             readme_missing.add(v)
+
+    # ms-120 e-3897: `beacon --help` now RENDERS the cmd_help_json registry, so
+    # bin_verbs and json_verbs share one source and cannot drift by hand. The
+    # only failure mode left is a broken renderer that drops registry commands
+    # from the printed help — that is what bin_missing now guards (registry
+    # commands absent from rendered `--help`). No allowlist: every registry
+    # command must appear. (Pre-existing README/registry gaps are reported by
+    # json_missing / readme_missing above, not here.)
+    bin_missing = {v for v in (json_verbs - bin_verbs) if v != ""}
 
     # ms-44 e-1171: bash main case vs Python _HANDLERS parity.
     dispatch_drift = collect_dispatch_drift(bin_path, python_dispatch_path)

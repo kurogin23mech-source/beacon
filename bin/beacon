@@ -7,293 +7,11 @@ COMMANDS_PY="$BEACON_DIR/lib/commands.py"
 export BEACON_PROJECT_FILE=".beacon/project.json"
 
 usage() {
-    cat <<'EOF'
-Beacon - Milestone-driven project management
-
-Usage:
-  beacon                        Show status + pointers to Tauri Desktop App / Web UI
-  beacon setup                  First-time setup wizard (auth + hooks + project)
-  beacon init                   Initialize .beacon/ in current directory
-  beacon status                 Show current milestone status
-
-Milestones:
-  beacon milestone add "title" [--priority P] [--objective O] [--ac A]   Add a new milestone
-  beacon milestone list         List milestones
-  beacon milestone start <id>   Activate + auto-create ms-XX-<slug> branch + self-add as assignee
-  beacon milestone join <id> [--checkout]  Add self as assignee (and optionally switch branch)
-  beacon milestone close <id>   Close milestone (keeps current progress)
-  beacon milestone observe <id> Set milestone to observing
-  beacon milestone wait <id> --reason <text>   Pause an active/observing milestone (ms-81)
-  beacon milestone release <id> Release occupation claim without changing status (ms-81)
-  beacon milestone occupations [--ms <id>] [--json]   List occupation event log (ms-81)
-  beacon milestone update <id>  Update title/progress/status/description/priority/objective/ac
-  beacon milestone delete <id>  Delete (soft) a milestone
-  beacon milestone purge <id> --reason <text> [--index <n>]   Hard delete (recovery only; Issue #14)
-  beacon milestone depends <id> Set milestone dependencies
-  beacon milestone graph        Show dependency graph
-  beacon milestone add ... [--owner U] [--assignee U]   Set owner/assignee at creation
-  beacon milestone update <id> [--owner U] [--assignee U]   Change owner/assignee
-
-Members (2-5 person teams):
-  beacon member add <id> [--name N] [--email E] [--role R]   Add a project member
-  beacon member list [--json]                                 List members
-  beacon member remove <id> --reason <text>                   Remove (audit required)
-  beacon member role <id> <role>                              Change role
-
-Tasks & Progress:
-  beacon task add "desc" [-m <ms-id>]   Add a task to a milestone
-  beacon task done <entry-id>           Mark task as done
-  beacon task list [-m <ms-id>]         List tasks
-  beacon task update <entry-id>         Update task description/status
-  beacon task cancel <entry-id>         Cancel a task
-  beacon entry purge <e-id> --reason <text> [--index <n>]   Hard delete an entry (recovery; e-863)
-  beacon log [message]                  Record HEAD commit to active milestone
-  beacon save "desc" [-m <ms-id>]       Record a manual progress note
-  beacon sync                           Auto-sync recent git commits
-  beacon summary "text"                 Update the project summary
-
-Sales (profession=sales):
-  beacon account add "<name>" [--health <text>] [--assignee <user>]   Add an account (customer / company)
-  beacon account list [--json] [--as-project <id>] [--linked]   List accounts; --as-project = only ones disclosed to that project; --linked = accounts disclosed to THIS project from other org projects (cloud)
-  beacon disclose <resource-id> --to-project <id>            Disclose any Target (account/opportunity/…) to another project (cross-project 参照を許可)
-  beacon undisclose <resource-id> --from-project <id>        Revoke a Target's disclosure to a project (剥奪即時)
-  beacon account contact <acc-id> <name> [--role <text>] [--email <text>] [--phone <text>]   Add a contact to an account
-  beacon account phase <acc-id> <phase> [--note <text>]      Declare an account lifecycle phase transition
-  beacon account rename <acc-id> <new-name>                  Rename an account
-  beacon account assign <acc-id> <user>                      Set the assignee (担当ユーザー) on an account
-  beacon account nurturing <acc-id> <desc> [--deadline <date>] [--ball self|counterpart]   Add a nurturing task (継続関係の業務)
-  beacon account delete <acc-id> [--force] [--reason <text>] Cancel (取消, soft) an account — record kept (--force orphans referencing opportunities)
-  beacon acquisition add "<title>" [--description <text>] [--assignee <user>]   Add a 顧客獲得ターゲット (取引先の無い有限の獲得・準備作業: アカウント作成/資料整備/リスト精査 等)
-  beacon acquisition list [--json]                           List 顧客獲得ターゲット
-  beacon acquisition status <acq-id> <todo|in_progress|observing|done>   Move an acquisition along its lifecycle
-  beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>] [--description <text>]   Add a deal / opportunity
-  beacon opportunity list [--json] [--all]                   List opportunities (--all also shows 取消済 cancelled)
-  beacon opportunity phase <opp-id> <phase> [--note <text>]  Move an opportunity to a new phase
-  beacon opportunity assign <opp-id> <user>                  Set the assignee (担当ユーザー) on an opportunity
-  beacon opportunity amount <opp-id> <amount>                Set the deal amount (金額, 円)
-  beacon opportunity describe <opp-id> <text>                Set the 背景/経緯/メモ (free-text; empty clears)
-  beacon opportunity phase-prob <phase> <n>                  Set a phase win probability (成約率 0-100)
-  beacon sales target <user> <amount> | list                Set/list a member's sales quota (目標売上) with pipeline
-  beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] | --clear   Set the 遷移日 (judgement date) for the current phase
-  beacon opportunity judge <opp-id> advance|retry|terminal [<date|terminal-phase>] [--note <text>]   Judge a reached 遷移日 (3-way, human-confirmed)
-  beacon opportunity due [--json]                            List opportunities awaiting a transition judgement (due/overdue)
-  beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self|counterpart]   Log an activity on an opportunity
-  beacon opportunity delete <opp-id> [--reason <text>]       Cancel (取消, soft) an opportunity — 証跡 (活動/証跡) は残す
-  beacon communication add <opp-|acc-|act-|nrt-id> "<summary>" --direction inbound|outbound [--channel <text, free: email/slack/messenger/line/in-person/…>] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]   Record a communication (証跡・営業の Commit); act-/nrt- links the specific activity/nurturing it fulfilled
-  beacon communication list <opp-|acc-|act-|nrt-id> [--json]  List communications (証跡) + derived ball; act-/nrt- lists only that work item's
-  beacon communication cancel <comm-id> [--reason <text>]     Cancel (取消) a mis-recorded communication — soft, kept struck-through, excluded from ball/watch
-  beacon communication retarget <comm-id> <new opp-|acc-|act-|nrt-> [--reason <text>]  Re-file a communication filed under the wrong work item (moves it; evidence unchanged; the move is audited)
-  beacon meeting schedule <opp-id> --at <datetime> [--end <datetime>] [--location <text>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]   Book a meeting (面談) with a Beacon 識別 ID; --set-transition moves the 遷移日 too
-  beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]   Move a meeting (予定変更); --set-transition follows the 遷移日
-  beacon meeting end <mtg-id>                                 Mark a meeting ended (idempotent; used by the end-detector)
-  beacon meeting cancel <mtg-id>                              Cancel a scheduled meeting
-  beacon meeting list <opp-id> [--json]                       List an opportunity's meetings
-  beacon meeting ended [--now <datetime>] [--json]            List meetings whose end passed but are still scheduled (終了検知 C の候補)
-  beacon phase list [--json]                                 Show the configured phase funnels
-  beacon phase add <account|opportunity> <name> [--index N]  Add / insert a funnel stage
-  beacon phase rename <account|opportunity> <old> <new>      Rename a funnel stage (references follow)
-  beacon phase move <account|opportunity> <name> <index>     Reorder a funnel stage
-  beacon phase remove <account|opportunity> <name>           Delete a funnel stage (blocked if non-empty)
-
-Pull Requests:
-  beacon pr create [-m <ms-id>] [gh flags...]  Create PR and record it
-  beacon pr add <url> [-m <ms-id>]             Register an existing PR
-  beacon pr show <id|number|url> [--json]      Show PR detail (intent / commits)
-  beacon pr approve <entry-id>                 Approve a PR
-  beacon pr request-changes <entry-id>         Request changes on a PR
-  beacon pr reject <entry-id>                  Reject a PR
-  beacon pr merge <entry-id>                   Mark PR as merged
-  beacon pr close <entry-id>                   Close PR without merging
-  beacon pr sync [--dry-run]                   Sync beacon PR entries with GitHub state (merged/closed)
-
-Documents:
-  beacon doc add "title" [--scope core|spec|memo|retro|report]  Create a document
-  beacon doc list [--scope <scope>]                List all documents
-  beacon doc show <doc-id>                         Show document content
-  beacon doc update <doc-id>                       Update a document
-  beacon doc delete <doc-id>                       Delete a document
-  beacon doc image-upload <local-file>             Upload image, get markdown img tag
-  (doc add / doc update support --bus-origin to refuse bus-derived
-   writes — persistence poisoning defense, ms-54 / e-1293)
-
-Operations:
-  beacon operation open "<title>" [--schedule daily|weekdays|weekly] [--log-source <name>]
-  beacon operation close <op-id>
-  beacon operation purge <op-id> --reason <text> [--index <n>]   Hard delete an operation (recovery; e-863)
-  beacon operation list [--json]
-  beacon operation show <op-id> [--json]
-  beacon operation approve <op-id> --spec <doc-id> [--expires-at YYYY-MM-DD]  Mint T2 envelope from SPEC (ms-60)
-  beacon operation revoke <op-id> [--envelope-id ENV] [--reason TEXT]         Invalidate the active envelope
-  beacon operation envelope verify <op-id> <action>                           Self-check: is action permitted by the active envelope?
-  beacon run record -o <op-id> --batch <name> --status ok|warning|error --desc "..."
-  beacon run list -o <op-id> [--json]
-  beacon incident open "<title>" -o <op-id> [--desc "..."]
-  beacon incident close <id> --resolution "..."
-  beacon incident escalate <id> -m <ms-id>
-
-Treks (cross-project / cross-session 協奏作業領域 — ms-69):
-  beacon trek create "<title>" [--type temporary|persistent] [--description "..."]
-                              [--goal-state "<criterion>"]
-                                    Create a trek; caller becomes leader.
-                                    --goal-state は ms-75/e-1865 で追加: trek の
-                                    完了マーカー (acceptance_criteria 相当).
-  beacon trek list [--status s] [--include-archived] [--all-actors] [--joined] [--json]
-                                    List treks visible to the caller. --joined
-                                    で自分が join 済の trek だけに絞る.
-  beacon trek show <trek-id> [--all] [--json]
-                                    Show members / scope / status / halt と、
-                                    scope に紐付く task / commit / 配下 doc
-                                    の集約ビュー (ms-75/e-1864). --all で
-                                    要約 cap を解除.
-  beacon trek start <trek-id>       Transition planning → active
-  beacon trek archive <trek-id>     Archive (= terminal; restart by new trek)
-  beacon trek invite <trek-id> --actor <email> [--notify]
-                                    Invite by email
-  beacon trek join <trek-id> [--no-arm]
-                                    Accept own invitation (auto-arms by default — ms-75/e-2047)
-  beacon trek leave <trek-id>       Remove self (leader must transfer first)
-  beacon trek plan <trek-id> --add-scope <project:ref> | --remove-scope <project:ref>
-                                    Edit scope (ms-/op-/e- ref, or project-wide)
-  beacon trek scope-add <trek-id> --project <pid> [--milestone <ms-id> | --operation <op-id> | --task <e-id> | --opportunity <opp-id> | --account <acc-id>]
-                                    Canonical scope-add verb (= flag-style alias of plan --add-scope, ms-97/AC23; sales narrows by 商談/顧客)
-  beacon trek scope-approve <trek-id> <pending-id>
-                                    Commit a staged scope op (= apply add or remove, ms-97/AC25)
-  beacon trek scope-reject <trek-id> <pending-id>
-  beacon trek slot add <trek-id> --project <pid> --milestone|--task|--operation <id> [--children e-A,e-B]
-                                    (ms-99/e-2829) Stage a slot-add with a fresh sl-<8hex> id.
-  beacon trek slot amend <trek-id> <slot-id> [--add-child <e-id> ...] [--remove-child <e-id> ...]
-                                    (ms-99/e-2829) Stage a child-list edit on an existing MS slot.
-  beacon trek slot claim <trek-id> <slot-id> [--session <sid> | --unclaim]
-                                    (ms-99/e-2829) Stage a claim stamp (state-free, SPEC 方針 4).
-  beacon trek slot list  <trek-id> [--json]
-                                    (ms-99/e-2829) Materialise slot rows for the trek.
-                                    Drop a staged scope op (ms-97/AC25)
-  beacon trek blanket-approve <trek-id> --category <cat>
-                                    Pre-approve scope-add for a category (ms-97/AC24).
-                                    Category: milestone | operation | task | opportunity | account | project:<pid> | <kind>:<id>
-  beacon trek blanket-revoke <trek-id> --category <cat>
-                                    Drop a blanket pre-approval (ms-97/AC24)
-  beacon trek plan <trek-id> --goal-state "<criterion>"
-                                    Set / clear (空文字で clear) trek の完了マーカー.
-  beacon trek timeline <trek-id> [--limit N] [--json]
-                                    Trek の lifecycle / scope 内 commit /
-                                    task done / 配下 doc を時系列で参照 (ms-75/e-1867).
-  beacon trek stop <trek-id> [--reason "..."]
-                                    Pull the Andon cord (halt signal)
-  beacon trek resume <trek-id>      Clear the halt signal
-  beacon trek transfer-leader <trek-id> --to <session-id>
-                                    Hand off leader_session_id
-  beacon trek take-over <trek-id>   Fresh session (= same user, leader role) を
-                                    新 leader_session_id に bind し直す
-                                    (= dead session 引き継ぎ、ms-88 e-2089)
-  beacon trek kickoff <trek-id> [--session-id X] [--kickoff-dm-event-id Y]
-                                    Kickoff Ritual の完了 stamp
-                                    (= /beacon-trek-pulse Step 0.4、ms-88 e-2138)
-  beacon trek reconcile <trek-id> [--apply]
-                                    task pool ↔ Trek stamp の乖離を修復
-                                    (= default dry-run、--apply で実適用、ms-88 e-2167)
-
-Stop signal (ms-55: Andon cord — anyone can broadcast a halt):
-  beacon stop scoped --target <kind>:<id> [--reason "..."] [--reason-kind X]
-                                    Halt sessions matching kind:id (ms|task|session)
-  beacon stop global [--reason "..."] [--reason-kind X]
-                                    Halt every active autonomous session in the project
-  beacon stop status [--json]       List currently active stop signals
-  beacon resume scoped --target <kind>:<id> [--reason "..."]
-                                    Clear a scoped stop signal
-  beacon resume global [--reason "..."]
-                                    Clear the global stop signal
-
-Rollback (ms-55: safe boundary — local-only is auto, pushed is report-only):
-  beacon rollback [--commits N] [--reason "..."] [--dry-run] [--json]
-                                    Stash dirty edits + git reset --soft un-pushed
-                                    commits; pushed history surfaces as
-                                    compensation proposals (= revert PR etc.)
-
-Claim primitives (ms-55: who is taking what work — coordination):
-  beacon claim post    --target <kind>:<id> [--intent "..."]
-                                    Broadcast "I'm taking X" (first-publisher-wins)
-  beacon claim request --target <kind>:<id> --to <sid> [--intent "..."]
-                                    Ask a specific session to take X
-  beacon claim handoff --target <kind>:<id> --to <sid> [--intent "..."]
-                                    Hand off in-progress X to another session
-  beacon claim respond <claim_id> [--accept|--decline] [--reason "..."]
-                                    Reply to a request/handoff
-  beacon claim release <claim_id> [--outcome completed|abandoned]
-                                    Mark a claim done
-  beacon claim list    [--mine] [--target <kind>:<id>]
-                                    List local active claims (= restart recovery)
-  beacon stuck check   (--telemetry-inline '<json>' | --telemetry-file <path>)
-                       [--timeout-minutes N] [--dry-run] [--json]
-                                    Detect silent sessions (= idle > N min) and
-                                    emit STUCK signals (= stop with reason="stuck")
-  beacon morning [--since-hours N] [--events-file <path>] [--json]
-                                    4-bucket digest of recent autonomous activity:
-                                    完了 / 停止 / skip / 介入要望
-
-Releases & Deploys:
-  beacon deploy record [--revision <rev>] [--semver <v>] [--version <tag>] [--desc <text>]
-  beacon deploy list
-  beacon deploy void <id> --reason <text>
-  beacon push record [--from <hash>] [--to <hash>] [--desc <text>] [--version <tag>] [-m <ms-id>]
-  beacon push list
-
-Cloud:
-  beacon cloud                       Open cloud project (interactive select; daily op)
-  beacon cloud open <id>             Open a specific cloud project in web UI (daily op)
-  beacon cloud status                Show cloud config status (read-only, daily op)
-  beacon cloud list                  List accessible cloud projects (read-only)
-  beacon cloud join <id>             Join an existing cloud project
-  beacon cloud upload-initial        Initial bootstrap upload to a new cloud project (one-shot migration)
-  beacon cloud migrate-from-local --confirm <id>
-                                     Retire a stale .beacon/project.json that survived a prior cloud
-                                     cut-over (ms-95 / e-2339). Pre-flight verifies cloud has every
-                                     local entry before renaming to project.json.before-cloud-YYYYMMDD
-  beacon cloud off --confirm <id>    Switch back to local mode (sandbox / verification only;
-                                     e-1861/ms-61: archives cloud.json to .beacon/.trash/, no data loss)
-  # ms-84 Phase 4 (e-2038): `push` / `pull` / `force-pull` were removed.
-  # Cloud is the sole truth source, so the round-trip is structurally impossible.
-
-Server (maintainer only):
-  gcloud run deploy beacon-api-prod --source . --region asia-northeast1 \
-    --build-arg CACHE_BUST=$(date +%s)
-
-DM Channel (multi-session messaging):
-  beacon channel install            Install the beacon-bus MCP entry into .mcp.json
-  beacon channel uninstall [--purge-files|--keep-files]
-                                    Remove MCP entry; --purge-files also wipes channel/node_modules
-  beacon channel opt-out [--project|--global]
-                                    Block install / auto-install (persists across runs)
-  beacon channel opt-in  [--project|--global]
-                                    Lift the opt-out flag
-  beacon channel status             Show install / files / opt-out / next-action state
-
-Other:
-  beacon note "<text>" [--context "<label>"]   Add a session note (ephemeral, cleared at session-end)
-                                               (also accepts --bus-origin to refuse bus-derived
-                                                writes — persistence poisoning defense, ms-54 / e-1293)
-  beacon note list                             Show session notes
-  beacon note clear                            Clear all session notes
-  beacon trigger fire [--trek <id>] <name> [msg]  Fire a named trigger (--trek = ms-75 Trek-aware)
-  beacon trigger check              Check pending triggers
-  beacon trigger clear <name>       Clear a trigger
-  beacon retro                      Prepare weekly retro
-  beacon search "query"             Search milestones and entries
-  beacon doctor                     Check PATH, hooks, skills, token, cloud.json
-  beacon reset                      Move .beacon/ to timestamped backup (reversible)
-  beacon auth login                 Sign in with Google (use this, not 'cloud login')
-  beacon auth logout                Remove cached credentials
-  beacon auth status                Show login status
-  beacon skill install              Install legacy Claude Code Skills
-  beacon skill install --target claude|codex|both --name <name>
-                                    Install a canonical shared Skill
-  beacon monitor context [--dry-run]
-                                    Stop hook: context-usage threshold monitor (e-854)
-  beacon update [--check] [--skill-only] [--yes]
-                                    Self-update: brew upgrade + skill install (one shot)
-  beacon help                       Show this help
-  beacon --version                  Show version
-EOF
+    # ms-120 e-3897: render the top-level help from the single registry
+    # (lib/commands.py _help_registry) so this text can never drift from
+    # `beacon help --json` or any subcommand's --help. There is no second
+    # hand-maintained help copy to fall out of sync (AX 原則 1/3/6).
+    python3 "$COMMANDS_PY" help_render
 }
 
 ensure_project() {
@@ -345,8 +63,17 @@ _guard_positional() {
 _guard_flag() {
     local tok="$1"
     local caller="${FUNCNAME[1]:-}"
-    local cmd="${caller#cmd_}"
-    cmd="${cmd//_/ }"
+    local cmd
+    if [ "${caller#cmd_}" != "$caller" ]; then
+        # Called from a cmd_<noun>_<verb> function: derive the path from it.
+        cmd="${caller#cmd_}"
+        cmd="${cmd//_/ }"
+    else
+        # Inline command arm (trek / bus / cycle …) has no cmd_* frame; use the
+        # command path captured at dispatch (ms-120 e-3897, avoids the empty
+        # "beacon " / "beacon main" mis-label in the error).
+        cmd="${_BEACON_CMD:-beacon}"
+    fi
     case "$tok" in
         -h|--help)
             # Full single-source usage is e-3897's job; until then point at the
@@ -3025,6 +2752,38 @@ while [ "${1:-}" = "--profile" ]; do
     export BEACON_PROFILE="$2"
     shift 2
 done
+
+# ms-120 e-3897: reserve -h/--help at top priority for EVERY subcommand.
+# A standalone -h/--help anywhere in the args renders usage from the single
+# registry (lib/commands.py _help_registry) and exits, before any command
+# parser runs. This is the structural form of "--help を全 subcommand で
+# パーサ最優先に予約する": help can never diverge from `beacon help --json`
+# (same registry) and `--help` works on every command — including ones whose
+# parser would otherwise mis-read it (task update --help の "Entry not found"
+# 破れの恒久修正)。Rendered from the registry, so it needs no project dir.
+# Command path = the leading non-flag tokens (verb path, e.g. "milestone
+# start"). Positional ids beyond the 2nd verb token are dropped so
+# `task update e-1 --help` still resolves to "task update". Computed once and
+# reused by the --help renderer and by _guard_flag's inline-command errors.
+_BEACON_CMD=""
+_beacon_cmd_n=0
+_beacon_wants_help=""
+for _a in "$@"; do
+    case "$_a" in
+        -h|--help) _beacon_wants_help=1 ;;
+        -*) : ;;
+        *)
+            if [ "$_beacon_cmd_n" -lt 2 ]; then
+                _BEACON_CMD="${_BEACON_CMD:+$_BEACON_CMD }$_a"
+                _beacon_cmd_n=$((_beacon_cmd_n + 1))
+            fi
+            ;;
+    esac
+done
+if [ -n "$_beacon_wants_help" ]; then
+    BEACON_HELP_QUERY="$_BEACON_CMD" python3 "$COMMANDS_PY" help_render
+    exit 0
+fi
 
 # Relocate to the project root before dispatch. `setup`/`init` operate on the
 # current directory by design, so they are exempt.
