@@ -378,8 +378,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p_account_contact = account_sub.add_parser("contact", add_help=False)
+    # e-3907: canonical form is `account contact add <acc> <name>` (verb). The
+    # bare `account contact <acc> <name>` stays as an alias. A third optional
+    # positional absorbs the leading `add` token; the handler shifts it off.
     p_account_contact.add_argument("acc_id", nargs="?", default="")
     p_account_contact.add_argument("name", nargs="?", default="")
+    p_account_contact.add_argument("extra", nargs="?", default="")
     p_account_contact.add_argument("--role", default="")
     p_account_contact.add_argument("--email", default="")
 
@@ -2003,13 +2007,17 @@ def _handle_account(root: Path, args: argparse.Namespace) -> int:
         env = {"BEACON_JSON": "1" if args.json else ""}
         return _run_commands_py(root, "account_list", env)
     if cmd == "contact":
-        if not args.acc_id or not args.name:
-            print("Usage: beacon account contact <acc-id> <name> "
+        # e-3907: shift off a leading `add` (canonical verb form).
+        acc_id, name = args.acc_id or "", args.name or ""
+        if acc_id == "add":
+            acc_id, name = name, (args.extra or "")
+        if not acc_id or not name:
+            print("Usage: beacon account contact add <acc-id> <name> "
                   "[--role <text>] [--email <text>]")
             return 1
         env = {
-            "BEACON_ACCOUNT_ID": args.acc_id or "",
-            "BEACON_CONTACT_NAME": args.name or "",
+            "BEACON_ACCOUNT_ID": acc_id,
+            "BEACON_CONTACT_NAME": name,
             "BEACON_CONTACT_ROLE": args.role or "",
             "BEACON_CONTACT_EMAIL": args.email or "",
         }

@@ -251,7 +251,7 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 |---------|-------------|
 | `beacon account add "<name>" [--health <text>]` | Add an account / 取引先を追加 |
 | `beacon account list [--json] [--as-project <id>] [--linked]` | List accounts; `--as-project` shows only accounts disclosed to that project (fail-closed); `--linked` pulls accounts disclosed to THIS project from other org projects (cloud) / 取引先を一覧、`--as-project` はそのプロジェクト視点、`--linked` は他プロジェクトからこのプロジェクトに開示された取引先を取り込み |
-| `beacon account contact <acc-id> <name> [--role <text>] [--email <text>] [--phone <text>]` | Add a contact to an account / 取引先に担当者を追加 |
+| `beacon account contact add <acc-id> <name> [--role <text>] [--email <text>] [--phone <text>]` | Add a contact to an account / 取引先に担当者を追加 (e-3907; bare form deprecated alias) |
 | `beacon account phase <acc-id> <phase> [--note <text>]` | Declare an account lifecycle phase transition (append-only) / 取引先のフェーズを記録（追記のみ） |
 | `beacon account rename <acc-id> <new-name>` | Rename an account / 取引先名を変更 |
 | `beacon account assign <acc-id> <user>` | Set the assignee (担当ユーザー) on an account / 取引先の担当ユーザーを設定 |
@@ -378,7 +378,7 @@ Operations track recurring operational workloads (daily batch jobs, incident man
 
 | Command | Description |
 |---------|-------------|
-| `beacon operation open "title" [--schedule daily\|weekdays\|weekly] [--log-source name]` | Start a new Operation cycle / 新しいOperationを開始 |
+| `beacon operation create "title" [--status open] [--schedule daily\|weekdays\|weekly] [--log-source name]` | Create an Operation (--status open to start active) / Operation を作成 (e-3907; alias: operation open) |
 | `beacon operation close <op-id>` | Close an Operation cycle / クローズ |
 | `beacon operation purge <op-id> --reason "..." [--index <n>]` | Hard delete an operation record — recovery for duplicate-ID corruption (e-863) / ハード削除（重複ID復旧用） |
 | `beacon operation list [--json]` | List Operations / 一覧 |
@@ -388,7 +388,7 @@ Operations track recurring operational workloads (daily batch jobs, incident man
 | `beacon operation envelope verify <op-id> <action> [--json]` | AI self-check used by `/beacon-operation-execute` — is the action permitted by the active envelope? (ms-60 / e-1340) / 指定 action が envelope の許可範囲か判定 |
 | `beacon run record -o <op-id> --batch <name> --status ok\|warning\|error --desc "..."` | Record a batch run result / バッチ実行結果を記録 |
 | `beacon run list -o <op-id> [--json]` | List run records / 実行記録一覧 |
-| `beacon incident open "title" -o <op-id> [--desc "..."]` | Open an incident / インシデント起票 |
+| `beacon incident add "title" -o <op-id> [--desc "..."]` | Create an incident / インシデント起票 (e-3907; alias: incident open) |
 | `beacon incident close <id> --resolution "..."` | Resolve an incident / インシデント解決 |
 | `beacon incident escalate <id> -m <ms-id>` | Escalate incident to a Milestone task / Milestoneタスクに昇格 |
 

@@ -1109,6 +1109,15 @@ cmd_account_list() {
 
 cmd_account_contact() {
     ensure_project
+    # ms-120 / e-3907: canonical form is `account contact add <acc-id> <name>`
+    # (verb). `contact` is a noun; the bare `account contact <acc> <name>` form
+    # mutates (creates a contact) without naming the action. The bare form stays
+    # as a deprecated alias with a nudge.
+    if [ "${1:-}" = "add" ]; then
+        shift
+    elif [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+        echo "Note: 'beacon account contact <acc> <name>' は 'beacon account contact add <acc> <name>' に統一されました (e-3907: contact は名詞、add が作成動詞)。旧形は当面 alias として動きます。" >&2
+    fi
     local acc_id="" name="" role="" email="" phone=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1867,6 +1876,13 @@ cmd_summary() {
     ensure_project
     local text=""
     local json_flag=""
+
+    # ms-120 / e-3907 note: `summary` was flagged as a noun-mutate to verbify,
+    # but it is already a LOUD-deprecated no-op (ms-57 / e-1040 retired the
+    # write; the command prints "IGNORED" and changes nothing). Since it no
+    # longer mutates, there is nothing to verbify — no `summary set` alias is
+    # added. The deprecation message below is the AX-correct surface (it names
+    # the replacement paths). Left as-is intentionally.
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -3186,6 +3202,13 @@ case "${1:-}" in
                 cmd_operation_purge "$@"
                 ;;
             open)
+                # ms-120 / e-3907: `open` is a lifecycle STATE value, not a
+                # command verb. Creating an Operation directly in the open state
+                # is `operation create --status open` (create already takes
+                # --status). This alias stays for back-compat with a nudge so
+                # the word `open` stops meaning three things (create-verb / state
+                # value / activate-target).
+                echo "Note: 'beacon operation open' は 'beacon operation create --status open' に統一されました (e-3907: open は状態値でありコマンド動詞ではない)。open は当面 alias として動きます。" >&2
                 shift 2
                 title="" schedule="weekdays" log_source="" status="open"
                 activation_hint="" objective="" ac="" priority=""
@@ -4142,7 +4165,14 @@ except ValueError as e:
     incident)
         ensure_project
         case "${2:-}" in
-            open)
+            # ms-120 / e-3907: `add` is the canonical create verb (parallels
+            # milestone/opportunity/account add). `open` stays as a deprecated
+            # alias with a nudge so the word `open` stops doubling as a create
+            # verb and a lifecycle state value.
+            add|open)
+                if [ "${2:-}" = "open" ]; then
+                    echo "Note: 'beacon incident open' は 'beacon incident add' に統一されました (e-3907: open は状態値、add が作成動詞)。open は当面 alias として動きます。" >&2
+                fi
                 shift 2
                 op_id=""
                 title=""
@@ -4210,7 +4240,7 @@ except ValueError as e:
                     python3 "$COMMANDS_PY" incident_list
                 ;;
             *)
-                echo "Usage: beacon incident open \"<title>\" -o <op-id> [--desc \"...\"]"
+                echo "Usage: beacon incident add \"<title>\" -o <op-id> [--desc \"...\"]   (alias: incident open)"
                 echo "       beacon incident close <id> --resolution \"...\""
                 echo "       beacon incident escalate <id> -m <ms-id>"
                 echo "       beacon incident list [-o <op-id>] [--status open|closed] [--include-closed] [--json]"
