@@ -2813,14 +2813,23 @@ def meeting_mark_ended(data: dict, meeting_id: str, *, at: str = "") -> dict:
     return m
 
 
-def meeting_cancel(data: dict, meeting_id: str, *, at: str = "") -> dict:
+def meeting_cancel(data: dict, meeting_id: str, *, at: str = "",
+                   reason: str = "") -> dict:
     """Cancel a scheduled meeting (予定取消). Logged to history; the calendar
-    event removal is the Skill's job (this is the Beacon-side state change)."""
+    event removal is the Skill's job (this is the Beacon-side state change).
+
+    ms-120 e-3906 danger-class: cancelling a meeting is destructive to the
+    schedule/trail, so the CLI now requires an audit entry. ``reason`` is
+    recorded on both the meeting and its history line so the cancellation is
+    never a silent state flip."""
     opp, m = find_meeting(data, meeting_id)
     if m is None:
         raise ValueError(f"Meeting not found: {meeting_id}")
     m["status"] = MEETING_CANCELLED
-    m.setdefault("history", []).append({"at": at, "action": "cancelled"})
+    if reason:
+        m["cancel_reason"] = reason
+    m.setdefault("history", []).append(
+        {"at": at, "action": "cancelled", "reason": reason})
     return m
 
 

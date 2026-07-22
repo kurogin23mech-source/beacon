@@ -101,6 +101,26 @@ _deprecate_status_write() {
     echo "      Use a named verb instead: $2" >&2
 }
 
+# ms-120 e-3906 danger-class: destructive / irreversible operations require an
+# audit entry — a non-empty --reason, or an explicit --acknowledge. Mirrors the
+# server-side _require_reason_or_skip gate (option B: no ambiguous empty).
+# Called as a statement (not $(...)) so `exit 1` stops the caller directly.
+# $1 = verb (for the message), $2 = reason, $3 = acknowledge flag ("1"/"").
+# When neither is supplied it exits 1; otherwise returns 0. The caller maps an
+# empty reason (= acknowledge was used) to the sentinel with:
+#   [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
+_require_audit_reason() {
+    local verb="$1" reason="$2" ack="$3"
+    if [ -n "$reason" ] || [ "$ack" = "1" ]; then
+        return 0
+    fi
+    echo "Error: \`beacon $verb\` is destructive and requires an audit entry." >&2
+    echo "  Pass --reason \"...\" to record why, or --acknowledge to proceed" >&2
+    echo "  deliberately without a written reason." >&2
+    exit 1
+}
+BEACON_ACK_SENTINEL="(acknowledged: no detailed reason given)"
+
 cmd_init() {
     if [ -f "$BEACON_PROJECT_FILE" ]; then
         echo ".beacon/project.json already exists."
@@ -1401,18 +1421,21 @@ cmd_communication_list() {
 
 cmd_communication_cancel() {
     ensure_project
-    local comm_id="" reason=""
+    local comm_id="" reason="" acknowledge=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --reason) reason="$2"; shift 2 ;;
-            -?*)      _guard_positional "$1" "Usage: beacon communication cancel <comm-id> [--reason <text>]" ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*)      _guard_positional "$1" "Usage: beacon communication cancel <comm-id> --reason <text> | --acknowledge" ;;
             *)        comm_id="$1"; shift ;;
         esac
     done
     if [ -z "$comm_id" ]; then
-        echo "Usage: beacon communication cancel <comm-id> [--reason <text>]"
+        echo "Usage: beacon communication cancel <comm-id> --reason <text> | --acknowledge"
         exit 1
     fi
+    _require_audit_reason "communication cancel" "$reason" "$acknowledge"
+    [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
     BEACON_COMM_ID="$comm_id" BEACON_COMM_REASON="$reason" \
         python3 "$COMMANDS_PY" communication_cancel
 }
@@ -1499,15 +1522,20 @@ cmd_meeting_end() {
 
 cmd_meeting_cancel() {
     ensure_project
-    local mtg_id=""
+    local mtg_id="" reason="" acknowledge=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -?*) _guard_positional "$1" "Usage: beacon meeting cancel <mtg-id>" ;;
+            --reason) reason="$2"; shift 2 ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon meeting cancel <mtg-id> (--reason <text> | --acknowledge)" ;;
             *)   mtg_id="$1"; shift ;;
         esac
     done
-    if [ -z "$mtg_id" ]; then echo "Usage: beacon meeting cancel <mtg-id>"; exit 1; fi
-    BEACON_MTG_ID="$mtg_id" python3 "$COMMANDS_PY" meeting_cancel
+    if [ -z "$mtg_id" ]; then echo "Usage: beacon meeting cancel <mtg-id> (--reason <text> | --acknowledge)"; exit 1; fi
+    _require_audit_reason "meeting cancel" "$reason" "$acknowledge"
+    [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
+    BEACON_MTG_ID="$mtg_id" BEACON_MTG_CANCEL_REASON="$reason" \
+        python3 "$COMMANDS_PY" meeting_cancel
 }
 
 cmd_meeting_list() {
@@ -1562,37 +1590,43 @@ cmd_account_phase() {
 
 cmd_account_delete() {
     ensure_project
-    local acc_id="" force="" reason=""
+    local acc_id="" force="" reason="" acknowledge=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --force)  force="1"; shift ;;
             --reason) reason="$2"; shift 2 ;;
-            -?*)      _guard_positional "$1" "Usage: beacon account delete <acc-id> [--force] [--reason <text>]" ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*)      _guard_positional "$1" "Usage: beacon account delete <acc-id> [--force] (--reason <text> | --acknowledge)" ;;
             *)        acc_id="$1"; shift ;;
         esac
     done
     if [ -z "$acc_id" ]; then
-        echo "Usage: beacon account delete <acc-id> [--force] [--reason <text>]"
+        echo "Usage: beacon account delete <acc-id> [--force] (--reason <text> | --acknowledge)"
         exit 1
     fi
+    _require_audit_reason "account delete" "$reason" "$acknowledge"
+    [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
     BEACON_ACCOUNT_ID="$acc_id" BEACON_FORCE="$force" BEACON_CANCEL_REASON="$reason" \
         python3 "$COMMANDS_PY" account_delete
 }
 
 cmd_opportunity_delete() {
     ensure_project
-    local opp_id="" reason=""
+    local opp_id="" reason="" acknowledge=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --reason) reason="$2"; shift 2 ;;
-            -?*) _guard_positional "$1" "Usage: beacon opportunity delete <opp-id> [--reason <text>]" ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon opportunity delete <opp-id> (--reason <text> | --acknowledge)" ;;
             *)   opp_id="$1"; shift ;;
         esac
     done
     if [ -z "$opp_id" ]; then
-        echo "Usage: beacon opportunity delete <opp-id> [--reason <text>]"
+        echo "Usage: beacon opportunity delete <opp-id> (--reason <text> | --acknowledge)"
         exit 1
     fi
+    _require_audit_reason "opportunity delete" "$reason" "$acknowledge"
+    [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
     BEACON_OPP_ID="$opp_id" BEACON_CANCEL_REASON="$reason" \
         python3 "$COMMANDS_PY" opportunity_delete
 }
@@ -2563,7 +2597,7 @@ cmd_pr() {
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --rationale)    rationale="${2:-}"; shift 2 ;;
+                    --rationale|--reason)    rationale="${2:-}"; shift 2 ;;
                     --json)         json_flag="1"; shift ;;
                     --no-auto-done) no_auto_done_flag="1"; shift ;;
                     -?*)           _guard_flag "$1" ;;
@@ -2587,7 +2621,7 @@ cmd_pr() {
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --rationale) rationale="${2:-}"; shift 2 ;;
+                    --rationale|--reason) rationale="${2:-}"; shift 2 ;;
                     --json)      json_flag="1"; shift ;;
                     -?*)           _guard_flag "$1" ;;
                     *)           entry_id="$1"; shift ;;
@@ -2658,7 +2692,7 @@ cmd_pr() {
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --rationale) rationale="${2:-}"; shift 2 ;;
+                    --rationale|--reason) rationale="${2:-}"; shift 2 ;;
                     --json)      json_flag="1"; shift ;;
                     -?*)           _guard_flag "$1" ;;
                     *)           entry_id="$1"; shift ;;
@@ -4096,7 +4130,7 @@ except ValueError as e:
                 resolution=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
-                        --resolution) resolution="${2:-}"; shift 2 ;;
+                        --resolution|--reason) resolution="${2:-}"; shift 2 ;;
                         -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$incident_id" ]] && incident_id="$1"; shift ;;
                     esac
@@ -4975,7 +5009,7 @@ EOF
                 --turns|-n)       _bud_turns="${2:-}"; shift 2 ;;
                 --in-reply-to)    _bus_in_reply_to="${2:-}"; shift 2 ;;
                 --context)        _bus_context="${2:-}"; shift 2 ;;
-                --rationale)      _bus_rationale="${2:-}"; shift 2 ;;
+                --rationale|--reason)      _bus_rationale="${2:-}"; shift 2 ;;
                 --project)        _bus_project_id="${2:-}"; shift 2 ;;
                 # ms-94 / e-2291: opt-in cwd 限定モード (bus directory の逆 default)。
                 --cwd-only)       _bus_cwd_only="1"; shift ;;

@@ -22609,9 +22609,11 @@ def cmd_meeting_end():
 def cmd_meeting_cancel():
     import sales_entities
     mtg_id = os.environ.get("BEACON_MTG_ID", "")
+    reason = os.environ.get("BEACON_MTG_CANCEL_REASON", "")
     data = load_project()
     try:
-        sales_entities.meeting_cancel(data, mtg_id, at=core._now_iso())
+        sales_entities.meeting_cancel(data, mtg_id, at=core._now_iso(),
+                                      reason=reason)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
