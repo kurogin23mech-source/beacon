@@ -10247,7 +10247,8 @@ def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
         elif b["review"] == review_spine.REVIEW_PHILOSOPHY:
             parts.append(
                 f"思想レビュー (実装が原典 = SPEC / vision 通りか、助言・非 blocking): "
-                f"独立 judge に SPEC を渡して drift を確認してください。")
+                f"`/philosophy-review` で文脈ゼロの独立 judge に SPEC を渡し "
+                f"{target_id} の実装 drift を確認してください。")
     import datetime
     trigger_data = {
         "name": f"review-due-{target_id}",
