@@ -17704,6 +17704,22 @@ def _bus_budget_consume_one() -> tuple[bool, dict]:
     return True, {**b, "armed": True}
 
 
+def _bus_is_armed() -> bool:
+    """True iff an auto-reply budget is granted (= autonomous mode active).
+
+    e-3901: "armed" is the durable, human-set signal that this session is in
+    autonomous mode — a budget file present with ``total > 0`` (granted via
+    ``beacon bus budget grant`` / ``/beacon-bus-armed`` / Trek auto-arm). The
+    send gate keys off THIS send-context signal rather than the per-send
+    ``--in-reply-to`` flag, so an armed autonomous loop cannot bypass the gate
+    by omitting the flag. Mirrors the armed semantics of
+    ``_bus_budget_consume_one`` (file present AND total > 0; total<=0 is a
+    cleared budget = not armed).
+    """
+    b = _read_bus_budget()
+    return b is not None and int(b.get("total", 0)) > 0
+
+
 def _bus_budget_refund_one() -> bool:
     """Give back one consumed budget slot (ms-100 e-2999).
 
@@ -18168,32 +18184,47 @@ def cmd_bus_send():
             file=sys.stderr,
         )
 
-    # e-1000: budget gate.
+    # e-1000 / e-3901: autonomous-send gate.
     #
-    # The gate applies ONLY when `--in-reply-to` is set, i.e. this send is an
-    # AI-authored reply to a specific incoming event. The inbox hook
-    # instructs the AI to always include the flag when replying, so any
-    # autonomous loop necessarily passes through the gate. Manual one-off
-    # CLI sends (no --in-reply-to) bypass the gate — the human typing the
-    # command IS the approval.
+    # POLARITY (e-3901): the gate triggers on the *autonomous context* of the
+    # send, NOT on the presence of `--in-reply-to`. Before e-3901 the gate
+    # fired ONLY when `--in-reply-to` was set, so an armed autonomous loop
+    # could bypass BOTH the budget cap AND the cross-user HOLD by simply
+    # omitting the flag — a safety boundary broken by a missing flag is a
+    # prompt-level ("please pass the flag") constraint, exactly what AX
+    # principle 6 forbids. The inbox-hook instruction to "always pass the
+    # flag" was the sole thing standing between an autonomous loop and an
+    # ungated send.
+    #
+    # A send is "autonomous" when EITHER:
+    #   * `--in-reply-to` is set (an explicit reply — preserves the historical
+    #     default-OFF behaviour: a reply with no granted budget is REFUSED), OR
+    #   * the session is armed (a budget was granted ⇒ autonomous mode is
+    #     active) — THIS branch closes the omit-the-flag hole: an armed loop is
+    #     gated regardless of whether it remembered `--in-reply-to`.
+    # The gate is suppressed ONLY by an explicit, audited `--manual` override:
+    # a human hand-composing a send while armed IS the approval (recorded on
+    # the payload for the decision-event trail). Manual sends from a
+    # non-armed session need nothing — the human typing the command is the
+    # approval, same as before.
     #
     # When the gate applies:
-    #   * no budget granted at all → REFUSE. Default state is "AI cannot
-    #     auto-reply"; the human must explicitly `bus budget grant N` to
-    #     authorize N auto-replies. This matches the user's safety stance:
-    #     "until a turn limit is explicitly set, replies require human
-    #     approval."
-    #   * budget granted but exhausted → REFUSE. Same path as above; the
-    #     human must re-grant.
+    #   * no budget granted at all (autonomous only via --in-reply-to) → REFUSE.
+    #   * budget granted but exhausted → REFUSE. The human must re-grant.
     #   * budget granted and remaining > 0 → decrement, then send. The
     #     decrement happens *before* the cloud call so a network failure
     #     can't smuggle an extra send past the gate. If the send then fails
     #     the slot is refunded (e-2999) so a failed send doesn't burn a turn.
+    manual = os.environ.get("BEACON_BUS_MANUAL", "").strip() == "1"
+    armed = _bus_is_armed()
+    autonomous = bool(in_reply_to) or armed
+    gate_applies = autonomous and not manual
+
     budget: dict = {"armed": False}
     # ms-100 e-2999: True once a real budget slot was decremented (not a Trek
     # bypass), so a failed send below can refund exactly that slot.
     _budget_slot_consumed = False
-    if in_reply_to:
+    if gate_applies:
         # ms-75 / e-2044: Trek-internal sends bypass the budget gate. Trek
         # is an opt-in pre-approval scope (= 缶詰の作業部屋), so the budget
         # cap (= runaway-autonomy guardrail) is structurally redundant for
@@ -18217,11 +18248,15 @@ def cmd_bus_send():
         else:
             b = _read_bus_budget()
             if b is None:
+                # Reachable only when autonomous via --in-reply-to but not armed
+                # (no budget file): _bus_is_armed() guarantees a file when armed.
+                # Preserves the historical default-OFF: a reply needs a grant.
                 print(
-                    "Error: this is a reply (--in-reply-to set) but no auto-reply "
-                    "budget is granted. Default state requires human approval per "
-                    "reply. Run `beacon bus budget grant <N>` to authorize N "
-                    "auto-replies, or omit --in-reply-to for a manual send.",
+                    "Error: this is an autonomous send (--in-reply-to set) but no "
+                    "auto-reply budget is granted. Default state requires human "
+                    "approval. Run `beacon bus budget grant <N>` to authorize N "
+                    "auto-sends, or pass --manual for an explicit human-approved "
+                    "one-off send.",
                     file=sys.stderr,
                 )
                 sys.exit(1)
@@ -18231,14 +18266,24 @@ def cmd_bus_send():
                 used = int(budget.get("used", 0))
                 print(
                     f"Error: auto-reply budget exhausted ({used}/{total} used). "
-                    "Run `beacon bus budget grant <N>` to re-grant before "
-                    "sending again.",
+                    "Run `beacon bus budget grant <N>` to re-grant, or pass "
+                    "--manual for an explicit human-approved one-off send.",
                     file=sys.stderr,
                 )
                 sys.exit(1)
             # A real slot was decremented (armed budget, not a Trek bypass).
             # Remember so the send failure path can refund it (e-2999).
             _budget_slot_consumed = bool(budget.get("armed"))
+    elif manual and armed:
+        # e-3901: an explicit --manual override of the armed gate. Stamp the
+        # payload so the decision-event trail shows a human deliberately
+        # bypassed the autonomous gate (audit), and surface a one-line note.
+        payload = {**payload, "manual_override": True}
+        print(
+            "Note: --manual override — this send bypasses the armed auto-reply "
+            "gate (recorded as a human-approved override).",
+            file=sys.stderr,
+        )
 
     if in_reply_to:
         # Thread the reply by stamping the parent event_id on the payload.
@@ -18454,15 +18499,17 @@ def cmd_bus_send():
         )
 
     # Qualitative gate (ms-93 e-3340 — mirrors channel/bus-qualgate.mjs).
-    # When this is an armed autonomous reply (in_reply_to + a real budget slot
-    # was consumed), HOLD 外部宛 / 機密 / action付き sends for the human instead
-    # of letting them go out. This brings the CLI send path — how a Codex armed
-    # session replies (codex_receive_loop builds `beacon bus send`) — to parity
-    # with bus.mjs's MCP reply gate, so e-3308's qualitative safety isn't
-    # Claude-only. Held sends refund the slot (e-2999). BEACON_QUALGATE_OFF=1
-    # opts out (same escape hatch as the JS side).
+    # When a real budget slot was consumed (= this is an armed autonomous send,
+    # e-3901 no longer requires --in-reply-to to reach here), HOLD 外部宛 / 機密
+    # / action付き sends for the human instead of letting them go out. This
+    # brings the CLI send path — how a Codex armed session replies
+    # (codex_receive_loop builds `beacon bus send`) — to parity with bus.mjs's
+    # MCP reply gate, so e-3308's qualitative safety isn't Claude-only. A
+    # consumed slot implies gate_applies was True (Trek bypass / --manual never
+    # set it). Held sends refund the slot (e-2999). BEACON_QUALGATE_OFF=1 opts
+    # out (same escape hatch as the JS side).
     if (
-        in_reply_to and _budget_slot_consumed
+        _budget_slot_consumed
         and os.environ.get("BEACON_QUALGATE_OFF") != "1"
     ):
         import dm_qualgate
