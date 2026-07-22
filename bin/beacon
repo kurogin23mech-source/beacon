@@ -786,7 +786,7 @@ cmd_milestone_occupations() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
-            --ms)   ms_id="${2:-}"; shift 2 ;;
+            -m|--ms)   ms_id="${2:-}"; shift 2 ;;
             -?*)           _guard_flag "$1" ;;
             *)      ms_id="$1"; shift ;;
         esac
@@ -2395,7 +2395,7 @@ cmd_status() {
         case "$1" in
             --json) json_flag="1"; shift ;;
             --all|-a) all_flag="1"; shift ;;
-            --ms)
+            -m|--ms)
                 if [ -n "$ms_filter" ]; then
                     ms_filter="$ms_filter,${2:-}"
                 else
@@ -2523,7 +2523,7 @@ cmd_doc() {
                 case "$1" in
                     --id)         doc_id="${2:-}"; shift 2 ;;
                     --scope|-s)   doc_scope="${2:-}"; shift 2 ;;
-                    --ms)         doc_ms="${2:-}"; shift 2 ;;
+                    -m|--ms)         doc_ms="${2:-}"; shift 2 ;;
                     --op)         doc_op="${2:-}"; shift 2 ;;
                     --trek)       doc_trek="${2:-}"; shift 2 ;;
                     --account|--acc)      doc_account="${2:-}"; shift 2 ;;
@@ -2568,7 +2568,7 @@ cmd_doc() {
                 case "$1" in
                     --json)             json_flag="1"; shift ;;
                     --scope|-s)         scope_filter="${2:-}"; shift 2 ;;
-                    --ms)               ms_filter="${2:-}"; shift 2 ;;
+                    -m|--ms)               ms_filter="${2:-}"; shift 2 ;;
                     --op)               op_filter="${2:-}"; shift 2 ;;
                     --trek)             trek_filter="${2:-}"; shift 2 ;;
                     --account|--acc)      account_filter="${2:-}"; shift 2 ;;
@@ -2615,7 +2615,7 @@ cmd_doc() {
                     --content)    doc_content="${2:-}"; shift 2 ;;
                     --title)      doc_title="${2:-}"; shift 2 ;;
                     --scope|-s)   doc_scope="${2:-}"; shift 2 ;;
-                    --ms)         doc_ms="${2:-}"; doc_ms_set="1"; shift 2 ;;
+                    -m|--ms)         doc_ms="${2:-}"; doc_ms_set="1"; shift 2 ;;
                     --op)         doc_op="${2:-}"; doc_op_set="1"; shift 2 ;;
                     --trek)       doc_trek="${2:-}"; shift 2 ;;
                     --account|--acc)      doc_account="${2:-}"; shift 2 ;;
@@ -3745,7 +3745,7 @@ except ValueError as e:
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --project) sa_project="${2:-}"; shift 2 ;;
-                        --milestone|--ms) sa_milestone="${2:-}"; shift 2 ;;
+                        -m|--milestone|--ms) sa_milestone="${2:-}"; shift 2 ;;
                         --operation|--op) sa_operation="${2:-}"; shift 2 ;;
                         --task|--e) sa_task="${2:-}"; shift 2 ;;
                         # ms-109 e-3699 — sales narrowing (商談 / 顧客)
@@ -3833,7 +3833,7 @@ except ValueError as e:
                         while [[ $# -gt 0 ]]; do
                             case "$1" in
                                 --project) project="${2:-}"; shift 2 ;;
-                                --milestone|--ms) ms="${2:-}"; shift 2 ;;
+                                -m|--milestone|--ms) ms="${2:-}"; shift 2 ;;
                                 --operation|--op) op="${2:-}"; shift 2 ;;
                                 --task|--e) task="${2:-}"; shift 2 ;;
                                 --children) children="${2:-}"; shift 2 ;;
@@ -4158,7 +4158,7 @@ except ValueError as e:
                                 --target) target="${2:-}"; shift 2 ;;
                                 --priority) priority="${2:-}"; shift 2 ;;
                                 --motivation) motivation="${2:-}"; shift 2 ;;
-                                --acceptance-criteria) acceptance_criteria="${2:-}"; shift 2 ;;
+                                --acceptance-criteria|--ac) acceptance_criteria="${2:-}"; shift 2 ;;
                                 --type) entry_type="${2:-task}"; shift 2 ;;
                                 --json) export BEACON_JSON=1; shift ;;
                                 *)
