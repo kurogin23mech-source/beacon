@@ -56,7 +56,7 @@ def _clean_author(author: dict | None) -> dict:
 
 
 VALID_STATUSES = {"todo", "in_progress", "in_review", "approved", "waiting", "done", "observing", "cancelled"}
-VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr", "run_record", "incident", "operation_task"}
+VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr", "run_record", "incident", "operation_task", "target-transition-approval"}
 
 # PR lifecycle: in_review → approved → merged (or closed/rejected)
 # "open" is reserved for Phase 2 auto-detection via GitHub API (external PRs not yet picked up by beacon)
@@ -64,6 +64,9 @@ VALID_PR_STATUSES = {"open", "in_review", "approved", "merged", "closed"}
 VALID_REVIEW_STATUSES = {"pending", "approved", "changes_requested", "rejected"}
 VALID_RUN_STATUSES = {"ok", "warning", "error"}
 VALID_INCIDENT_STATUSES = {"open", "resolved"}
+# ms-119 e-3912: 目的達成レビュー entry のライフサイクル (build=pending →
+# approve=approved / reject=cancelled、lib/transition_approval.append_verdict)。
+VALID_TRANSITION_APPROVAL_STATUSES = {"pending", "approved", "cancelled"}
 VALID_PRIORITIES = {"highest", "high", "middle", "low", "lowest"}
 # Member roles (e-624): defines permissions in 2-5 person team context.
 # - owner: project owner, all permissions including delete project
@@ -262,6 +265,8 @@ def _validate_entry(entry: dict, ms_id: str, seen_entry_ids: dict[str, int] | No
             valid_statuses = VALID_RUN_STATUSES
         elif entry_type == "incident":
             valid_statuses = VALID_INCIDENT_STATUSES
+        elif entry_type == "target-transition-approval":
+            valid_statuses = VALID_TRANSITION_APPROVAL_STATUSES
         else:
             valid_statuses = VALID_STATUSES
         if status not in valid_statuses:

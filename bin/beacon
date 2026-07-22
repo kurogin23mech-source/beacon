@@ -33,6 +33,13 @@ Milestones:
   beacon milestone graph        Show dependency graph
   beacon milestone add ... [--owner U] [--assignee U]   Set owner/assignee at creation
   beacon milestone update <id> [--owner U] [--assignee U]   Change owner/assignee
+  beacon milestone done <id> --reason <text> [--review]   Complete (--review routes through 目的達成レビュー)
+
+Target reviews (目的達成レビュー — target 遷移の人間承認, ms-119):
+  beacon target review-request <id> --new-state <s> [--old-state <s>] [--intent <text>] [--evidence e-1,e-2]   Request human approval for a target transition
+  beacon target approve <entry-id> [--rationale <text>]   Approve (= executes the transition)
+  beacon target reject <entry-id> [--rationale <text>]    Reject (= transition does NOT execute)
+  beacon target list [--target <id>] [--pending] [--json]  List transition-approval requests
 
 Members (2-5 person teams):
   beacon member add <id> [--name N] [--email E] [--role R]   Add a project member
@@ -669,26 +676,91 @@ cmd_milestone_done() {
     local ms_id=""
     local reason=""
     local reason_set=0
+    local review=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -r|--reason) reason="${2:-}"; reason_set=1; shift 2 ;;
+            --review)    review=1;        shift ;;
             *)           ms_id="$1";     shift   ;;
         esac
     done
 
     if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone done <ms-id> --reason <text>"
+        echo "Usage: beacon milestone done <ms-id> --reason <text> [--review]"
         exit 1
     fi
     # e-976: forward BEACON_REASON only when --reason was passed. The python
     # gate (_require_reason_or_skip) refuses missing env, so the dispatcher
     # must not silently set an empty default.
+    # ms-119 e-3912: --review routes the completion through the 目的達成レビュー
+    # gate (human approval) instead of applying it directly.
     if [ "$reason_set" = "1" ]; then
-        BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" python3 "$COMMANDS_PY" milestone_done
+        BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" BEACON_REVIEW="$review" python3 "$COMMANDS_PY" milestone_done
     else
-        BEACON_MS_ID="$ms_id" python3 "$COMMANDS_PY" milestone_done
+        BEACON_MS_ID="$ms_id" BEACON_REVIEW="$review" python3 "$COMMANDS_PY" milestone_done
     fi
+}
+
+cmd_target_review_request() {
+    ensure_project
+    local target_id="" new_state="" old_state="" intent="" evidence=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --new-state) new_state="${2:-}"; shift 2 ;;
+            --old-state) old_state="${2:-}"; shift 2 ;;
+            --intent)    intent="${2:-}";    shift 2 ;;
+            --evidence)  evidence="${2:-}";  shift 2 ;;
+            -?*)         _guard_positional "$1" "Usage: beacon target review-request <target-id> --new-state <state> [--old-state <state>] [--intent <text>] [--evidence e-1,e-2]" ;;
+            *)           target_id="$1";     shift ;;
+        esac
+    done
+    BEACON_TARGET_ID="$target_id" BEACON_NEW_STATE="$new_state" \
+        BEACON_OLD_STATE="$old_state" BEACON_INTENT="$intent" \
+        BEACON_EVIDENCE="$evidence" python3 "$COMMANDS_PY" target_review_request
+}
+
+cmd_target_approve() {
+    ensure_project
+    local entry_id="" rationale=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --rationale) rationale="${2:-}"; shift 2 ;;
+            -?*)         _guard_positional "$1" "Usage: beacon target approve <entry-id> [--rationale <text>]" ;;
+            *)           entry_id="$1";      shift ;;
+        esac
+    done
+    BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" \
+        python3 "$COMMANDS_PY" target_approve
+}
+
+cmd_target_reject() {
+    ensure_project
+    local entry_id="" rationale=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --rationale) rationale="${2:-}"; shift 2 ;;
+            -?*)         _guard_positional "$1" "Usage: beacon target reject <entry-id> [--rationale <text>]" ;;
+            *)           entry_id="$1";      shift ;;
+        esac
+    done
+    BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" \
+        python3 "$COMMANDS_PY" target_reject
+}
+
+cmd_target_list() {
+    ensure_project
+    local target_id="" pending=0 json=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --target)  target_id="${2:-}"; shift 2 ;;
+            --pending) pending=1;          shift ;;
+            --json)    json=1;             shift ;;
+            *)         shift ;;
+        esac
+    done
+    BEACON_TARGET_ID="$target_id" BEACON_PENDING="$pending" BEACON_JSON="$json" \
+        python3 "$COMMANDS_PY" target_list
 }
 
 cmd_milestone_join() {
@@ -3035,6 +3107,15 @@ case "${1:-}" in
             workspace-cleanup) shift 2; cmd_milestone_workspace_cleanup "$@" ;;
             graph) shift 2; cmd_milestone_graph "$@" ;;
             *)      echo "Usage: beacon milestone [add|list|start|join|close|observe|wait|release|occupations|done|show|update|rename|delete|purge|depends|workspace|workspace-cleanup|graph]" ;;
+        esac
+        ;;
+    target|tgt)
+        case "${2:-}" in
+            review-request|review) shift 2; cmd_target_review_request "$@" ;;
+            approve)  shift 2; cmd_target_approve "$@" ;;
+            reject)   shift 2; cmd_target_reject "$@" ;;
+            list|ls)  shift 2; cmd_target_list "$@" ;;
+            *)        echo "Usage: beacon target [review-request|approve|reject|list]  (目的達成レビュー: target 遷移の人間承認)" ;;
         esac
         ;;
     log)
