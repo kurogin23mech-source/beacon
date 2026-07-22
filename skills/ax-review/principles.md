@@ -147,7 +147,7 @@ medium の間**: 失敗は見えるが、エラー文言が真因から AI を�
 - **破れの具体**: 何がどう原則を破っているか (diff の該当箇所)
 - **なぜ AI が誤るか**: この破れが文脈ゼロのエージェントをどう誤らせるか
 - **構造的修正案**: 原則 6 に従い、踏み外しようがなくする修正
-- **severity**: high / medium / low (§4)
+- **severity**: high / misleading / medium / low (§4)
 
 ---
 
@@ -179,6 +179,29 @@ medium の間**: 失敗は見えるが、エラー文言が真因から AI を�
   ファイル** として置く。
 - ここに書く原則は普遍的 (どの CLI / API にも当たる)。Beacon 固有なのは §6 の
   L2 prior だけで、それも optional。
+
+---
+
+## 8. 良い AX の例 (full-surface レビューで surface から回収)
+
+原則 3 の「良い実例も基準になる」に従い、計器が拾った良い surface を残す。
+新しい surface を設計するときの手本 (= positive_observations の還元先):
+
+- **context-free な安全弁**: `whoami` のような引数ゼロ・読み取り専用・自己記述的な
+  identity/role 確認。破壊操作の前に文脈ゼロで叩ける。
+- **enum を Usage 行にインライン列挙**: `--status ok|warning|error` /
+  `--ball self|counterpart` / `--direction inbound|outbound`。閉じた値域が
+  silent 誤分類を防ぐ。
+- **ビジネスルールを必須フラグで構造化**: `operation approve --spec <doc-id>`
+  (承認は必ず SPEC に紐づく、をプロンプトでなく必須フラグで強制)。
+- **状態遷移ガードを Usage に開示**: `operation activate (todo/in_progress -> open)`
+  — 状態機械が surface だけから読める。
+- **日付書式を placeholder で固定**: `<YYYY-MM-DD>` は書式推測を構造的に消す。
+  他の裸の `<date>` / `<datetime>` はこれに倣うべき手本。
+- **必須は角括弧なしで明示**: `member remove --reason` のように必須フラグを
+  非 optional 表記にすると、実行時エラーなしで必須が伝わる。
+- **副作用を名前 / help で開示**: `pr sync --dry-run` / `member join` の
+  "bind this cwd"。
 
 ---
 
