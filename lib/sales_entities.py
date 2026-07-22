@@ -298,6 +298,23 @@ def opportunity_set_description(data: dict, opportunity_id: str,
     return opp
 
 
+def opportunity_set_title(data: dict, opportunity_id: str, title: str) -> dict:
+    """Rename an Opportunity (ms-120 e-3909). Before this there was no path to
+    fix a title after creation — `describe` only sets the free-text 背景, not the
+    name (parallel to `milestone rename`). Returns the updated opportunity dict.
+    Raises ValueError when the opportunity is unknown or the title is empty
+    (unlike description, a title cannot be cleared — every opportunity needs a
+    name)."""
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    new_title = (title or "").strip()
+    if not new_title:
+        raise ValueError("title must not be empty (an opportunity always needs a name)")
+    opp["title"] = new_title
+    return opp
+
+
 def account_phase_warnings(data: dict, new_phase: str) -> list:
     warnings: list = []
     phases = account_phases(data)

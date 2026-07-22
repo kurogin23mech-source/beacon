@@ -16747,6 +16747,7 @@ def _help_registry():
         {"command": "beacon opportunity assign <opp-id> <user>", "flags": [], "description": "Set the 担当ユーザー (assignee) on an opportunity"},
         {"command": "beacon opportunity amount <opp-id> <amount>", "flags": [], "description": "Set an opportunity's 金額 (goal_amount, 円)"},
         {"command": "beacon opportunity describe <opp-id> <text>", "flags": [], "description": "Set an opportunity's 背景/経緯/メモ (free-text; empty clears)"},
+        {"command": "beacon opportunity rename <opp-id> <new-title>", "flags": [], "description": "Rename an opportunity's title (e-3909; parallels milestone rename)"},
         {"command": "beacon acquisition add <title>", "flags": ["--description <text>", "--assignee <user>"], "description": "Add a 顧客獲得ターゲット (取引先の無い有限の獲得・準備作業の器; 営業専用)"},
         {"command": "beacon acquisition list", "flags": ["--json"], "description": "List 顧客獲得ターゲット with their lifecycle status"},
         {"command": "beacon acquisition start <acq-id>", "flags": [], "description": "Move a 顧客獲得ターゲット to in_progress (着手). Named lifecycle verb (ms-120 e-3907); status stays read-only."},
@@ -16770,8 +16771,8 @@ def _help_registry():
         {"command": "beacon meeting reschedule <mtg-id>", "flags": ["--at <datetime>", "--end <datetime>", "--event-id <id>", "--set-transition"], "description": "Move a meeting (予定変更); --set-transition follows the 遷移日"},
         {"command": "beacon meeting end <mtg-id>", "flags": [], "description": "Mark a meeting ended (idempotent; used by the end-detector Operation)"},
         {"command": "beacon meeting cancel <mtg-id>", "flags": [], "description": "Cancel a scheduled meeting"},
-        {"command": "beacon meeting list <opp-id>", "flags": ["--json"], "description": "List an opportunity's meetings"},
-        {"command": "beacon meeting ended", "flags": ["--now <datetime>", "--json"], "description": "List meetings whose scheduled end has passed but are still scheduled (終了検知 Operation C の候補)"},
+        {"command": "beacon meeting list [<opp-id>]", "flags": ["--json"], "description": "List meetings; <opp-id> optional — omit to list across all opportunities (e-3909)"},
+        {"command": "beacon meeting list-ended", "flags": ["--now <datetime>", "--json"], "description": "List meetings whose scheduled end has passed but are still scheduled (終了検知 Operation C の候補; e-3909 canonical read verb, alias: meeting ended)"},
         {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity vocabulary)"},
         {"command": "beacon phase add <account|opportunity> <name>", "flags": ["--index <n>"], "description": "Add or insert a funnel stage"},
         {"command": "beacon phase rename <account|opportunity> <old> <new>", "flags": [], "description": "Rename a funnel stage (references follow)"},
@@ -21911,6 +21912,26 @@ def cmd_opportunity_amount():
     print(f"Set amount on {opp_id}: {amount if amount is not None else '(cleared)'}")
 
 
+def cmd_opportunity_rename():
+    """Rename an opportunity's title (ms-120 e-3909).
+
+    Before this the only post-creation edits were describe (背景) / assign /
+    amount / phase — there was no way to fix the *name*, so a typo'd title was
+    permanent. Parallels `milestone rename`. Env: BEACON_OPP_ID, BEACON_TITLE.
+    """
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    title = os.environ.get("BEACON_TITLE", "")
+    data = load_project()
+    try:
+        opp = sales_entities.opportunity_set_title(data, opp_id, title)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Renamed {opp_id} → {opp['title']}")
+
+
 def cmd_opportunity_describe():
     """Set an opportunity's free-text 背景 / 経緯 / メモ (ms-106 e-3526)."""
     import sales_entities
@@ -22189,6 +22210,22 @@ def cmd_opportunity_judge():
     decision = os.environ.get("BEACON_JUDGE_DECISION", "")
     arg = os.environ.get("BEACON_JUDGE_ARG", "")
     note = os.environ.get("BEACON_PHASE_NOTE", "")
+    # e-3909: the trailing positional (BEACON_JUDGE_ARG) means a DIFFERENT thing
+    # per verb, so validate it per verb instead of leaving the AI to guess the
+    # shape from a single opaque positional:
+    #   advance  → optional next transition date (YYYY-MM-DD)
+    #   retry    → REQUIRED new transition date (retry = 未達だが継続, 遷移日を置き直す)
+    #   terminal → REQUIRED terminal phase (決着先, from allowed_terminals)
+    if decision == "retry" and not arg.strip():
+        print("Error: `opportunity judge <opp> retry <YYYY-MM-DD>` requires a new "
+              "transition date — retry keeps the same phase but re-sets the "
+              "transition date.", file=sys.stderr)
+        sys.exit(1)
+    if decision == "terminal" and not arg.strip():
+        print("Error: `opportunity judge <opp> terminal <terminal-phase>` requires a "
+              "terminal phase (決着先). Run `beacon opportunity judge <opp>` with no "
+              "decision to see the allowed terminals.", file=sys.stderr)
+        sys.exit(1)
     data = load_project()
     at = core._now_iso()
     actor = _human_actor()  # C-2: the judgement is the human's master decision
@@ -22724,20 +22761,36 @@ def cmd_meeting_list():
     opp_id = os.environ.get("BEACON_MTG_OPP", "")
     as_json = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
-    opp = sales_entities.find_opportunity(data, opp_id)
-    if opp is None:
-        print(f"Error: Opportunity not found: {opp_id}", file=sys.stderr)
-        sys.exit(1)
-    meetings = sales_entities.opportunity_meetings(opp)
+    # e-3909: <opp-id> is now OPTIONAL — omitting it lists meetings across ALL
+    # opportunities, symmetric with `opportunity list` / `account list` (which
+    # are global). Previously the arg was required, so `meeting list` alone
+    # errored — asymmetric with every other `list` verb and with the global
+    # `meeting list-ended` sweep.
+    if opp_id:
+        opp = sales_entities.find_opportunity(data, opp_id)
+        if opp is None:
+            print(f"Error: Opportunity not found: {opp_id}", file=sys.stderr)
+            sys.exit(1)
+        scoped = [(opp, m) for m in sales_entities.opportunity_meetings(opp)]
+    else:
+        scoped = []
+        for o in data.get("opportunities", []):
+            for m in sales_entities.opportunity_meetings(o):
+                scoped.append((o, m))
     if as_json:
-        print(json.dumps({"opportunity": opp_id, "meetings": meetings},
+        out = [{"opportunity_id": o.get("id"),
+                "opportunity_title": o.get("title", ""), "meeting": m}
+               for o, m in scoped]
+        print(json.dumps({"opportunity": opp_id or None, "meetings": out},
                          ensure_ascii=False))
         return
-    if not meetings:
-        print(f"No meetings on {opp_id}.")
+    if not scoped:
+        print(f"No meetings on {opp_id}." if opp_id else "No meetings.")
         return
-    for m in meetings:
+    for o, m in scoped:
         line = f"  {m.get('id')} [{m.get('status')}] {m.get('scheduled_at')}"
+        if not opp_id:
+            line += f"  ({o.get('id')} {o.get('title', '')})"
         if m.get("location"):
             line += f" @ {m.get('location')}"
         if m.get("calendar_event_id"):
@@ -22896,6 +22949,7 @@ if __name__ == "__main__":
         "opportunity_assign": cmd_opportunity_assign,
         "opportunity_amount": cmd_opportunity_amount,
         "opportunity_describe": cmd_opportunity_describe,
+        "opportunity_rename": cmd_opportunity_rename,
         "opportunity_phase_prob": cmd_opportunity_phase_prob,
         "sales_target": cmd_sales_target,
         "sales_target_list": cmd_sales_target_list,

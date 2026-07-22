@@ -1177,6 +1177,25 @@ cmd_opportunity_describe() {
         python3 "$COMMANDS_PY" opportunity_describe
 }
 
+cmd_opportunity_rename() {
+    # e-3909: post-creation title edit. Before this an opportunity's name was
+    # permanent (describe sets 背景, not the title). Parallels `milestone rename`.
+    ensure_project
+    local opp_id="" title=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -?*) _guard_positional "$1" "Usage: beacon opportunity rename <opp-id> <new-title>" ;;
+            *)   if [ -z "$opp_id" ]; then opp_id="$1"; else title="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ] || [ -z "$title" ]; then
+        echo "Usage: beacon opportunity rename <opp-id> <new-title>"
+        exit 1
+    fi
+    BEACON_OPP_ID="$opp_id" BEACON_TITLE="$title" \
+        python3 "$COMMANDS_PY" opportunity_rename
+}
+
 cmd_opportunity_assign() {
     ensure_project
     local opp_id="" assignee=""
@@ -1292,24 +1311,32 @@ cmd_opportunity_phase() {
 
 cmd_opportunity_transition_date() {
     ensure_project
-    local opp_id="" date="" note=""
+    # e-3909: <YYYY-MM-DD> と --clear は「遷移日を設定する / クリアする」で意味が
+    # 排他。旧実装は両者を同じ変数に流し込んでいたため、両方渡すと順序依存で
+    # 静かにどちらかが勝つ曖昧さがあった。別変数で受けて明示的に排他判定する。
+    local opp_id="" pos_date="" note="" clear_flag=""
+    local _usage="Usage: beacon opportunity transition-date <opp-id> (<YYYY-MM-DD> | --clear) [--note <text>]"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --note) note="${2:-}"; shift 2 ;;
-            --clear) date="__CLEAR__"; shift ;;
-            -?*)    _guard_positional "$1" "Usage: beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] | --clear" ;;
+            --clear) clear_flag="1"; shift ;;
+            -?*)    _guard_positional "$1" "$_usage" ;;
             *)
-                if [ -z "$opp_id" ]; then opp_id="$1"; else date="$1"; fi
+                if [ -z "$opp_id" ]; then opp_id="$1"; else pos_date="$1"; fi
                 shift ;;
         esac
     done
-    if [ -z "$opp_id" ] || [ -z "$date" ]; then
-        echo "Usage: beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] | --clear"
+    if [ -n "$clear_flag" ] && [ -n "$pos_date" ]; then
+        echo "Error: <YYYY-MM-DD> と --clear は排他です (遷移日を設定する か クリアする かのどちらか一方)。" >&2
+        echo "       $_usage" >&2
+        exit 2
+    fi
+    if [ -z "$opp_id" ] || { [ -z "$clear_flag" ] && [ -z "$pos_date" ]; }; then
+        echo "$_usage"
         exit 1
     fi
     # --clear passes an empty date through (set_transition_date treats it as clear).
-    [ "$date" = "__CLEAR__" ] && date=""
-    BEACON_OPP_ID="$opp_id" BEACON_TRANSITION_DATE="$date" BEACON_PHASE_NOTE="$note" \
+    BEACON_OPP_ID="$opp_id" BEACON_TRANSITION_DATE="$pos_date" BEACON_PHASE_NOTE="$note" \
         python3 "$COMMANDS_PY" opportunity_transition_date
 }
 
@@ -1540,15 +1567,16 @@ cmd_meeting_cancel() {
 
 cmd_meeting_list() {
     ensure_project
+    # e-3909: <opp-id> is OPTIONAL — omit it to list meetings across ALL
+    # opportunities (symmetric with `opportunity list` / the global list-ended).
     local opp_id="" json_flag=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
-            -?*)    _guard_positional "$1" "Usage: beacon meeting list <opp-id> [--json]" ;;
+            -?*)    _guard_positional "$1" "Usage: beacon meeting list [<opp-id>] [--json]" ;;
             *)      opp_id="$1"; shift ;;
         esac
     done
-    if [ -z "$opp_id" ]; then echo "Usage: beacon meeting list <opp-id> [--json]"; exit 1; fi
     BEACON_MTG_OPP="$opp_id" BEACON_JSON="$json_flag" \
         python3 "$COMMANDS_PY" meeting_list
 }
@@ -2983,13 +3011,14 @@ case "${1:-}" in
             assign)   shift 2; cmd_opportunity_assign "$@" ;;
             amount)   shift 2; cmd_opportunity_amount "$@" ;;
             describe|desc) shift 2; cmd_opportunity_describe "$@" ;;
+            rename)   shift 2; cmd_opportunity_rename "$@" ;;
             phase-prob) shift 2; cmd_opportunity_phase_prob "$@" ;;
             transition-date|td) shift 2; cmd_opportunity_transition_date "$@" ;;
             judge)    shift 2; cmd_opportunity_judge "$@" ;;
             due)      shift 2; cmd_opportunity_due "$@" ;;
             activity) shift 2; cmd_opportunity_activity "$@" ;;
             delete)   shift 2; cmd_opportunity_delete "$@" ;;
-            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|describe|phase-prob|transition-date|judge|due|activity|delete]" ;;
+            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|describe|rename|phase-prob|transition-date|judge|due|activity|delete]" ;;
         esac
         ;;
     communication|comm)
@@ -3008,8 +3037,16 @@ case "${1:-}" in
             end)        shift 2; cmd_meeting_end "$@" ;;
             cancel)     shift 2; cmd_meeting_cancel "$@" ;;
             list|ls)    shift 2; cmd_meeting_list "$@" ;;
-            ended)      shift 2; cmd_meeting_ended "$@" ;;
-            *)          echo "Usage: beacon meeting [schedule|reschedule|end|cancel|list|ended]" ;;
+            # e-3909: `list-ended` is the canonical READ verb — it lists meetings
+            # whose scheduled end has passed (no mutation). The old name `ended`
+            # was a minimal pair with the WRITE verb `end` (mark one ended), so
+            # you couldn't tell read from write by the word. `ended` stays as a
+            # deprecated alias with a nudge.
+            list-ended) shift 2; cmd_meeting_ended "$@" ;;
+            ended)
+                echo "Note: 'beacon meeting ended' は 'beacon meeting list-ended' に改名されました (e-3909: 書く end と読む ended の紛らわしさ解消)。ended は当面 alias として動きます。" >&2
+                shift 2; cmd_meeting_ended "$@" ;;
+            *)          echo "Usage: beacon meeting [schedule|reschedule|end|cancel|list [<opp-id>]|list-ended]" ;;
         esac
         ;;
     sales)

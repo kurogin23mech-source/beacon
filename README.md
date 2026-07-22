@@ -265,6 +265,7 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon opportunity assign <opp-id> <user>` | Set the assignee (担当ユーザー) on an opportunity / 商談の担当ユーザーを設定 |
 | `beacon opportunity amount <opp-id> <amount>` | Set the deal amount (金額) on an opportunity / 商談の金額を設定 |
 | `beacon opportunity describe <opp-id> <text>` | Set an opportunity's 背景/経緯/メモ (free-text; empty clears) / 商談の背景メモを設定 |
+| `beacon opportunity rename <opp-id> <new-title>` | Rename an opportunity's title / 商談名の変更 (e-3909) |
 | `beacon acquisition add "<title>" [--description <text>] [--assignee <user>]` | Add a 顧客獲得ターゲット (取引先の無い獲得・準備作業の器) / 顧客獲得ターゲットを追加 |
 | `beacon acquisition list [--json]` | List 顧客獲得ターゲット / 顧客獲得ターゲットを一覧 |
 | `beacon acquisition start <acq-id>` | Move a 顧客獲得ターゲット to in_progress / 顧客獲得ターゲットに着手 |
@@ -285,8 +286,8 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]` | Move a meeting (予定変更); `--set-transition` follows the 遷移日 / 面談の予定変更、遷移日も追従 |
 | `beacon meeting end <mtg-id>` | Mark a meeting ended (idempotent; used by the end-detector Operation) / 面談を終了扱いにする |
 | `beacon meeting cancel <mtg-id>` | Cancel a scheduled meeting / 面談を取消 |
-| `beacon meeting list <opp-id> [--json]` | List an opportunity's meetings / 商談の面談一覧 |
-| `beacon meeting ended [--now <datetime>] [--json]` | List meetings whose end passed but are still scheduled (終了検知 C の候補) / 終了予定を過ぎた未終了面談 |
+| `beacon meeting list [<opp-id>] [--json]` | List meetings; opp-id optional — omit for all opportunities / 面談一覧 (opp-id 省略で全商談横断, e-3909) |
+| `beacon meeting list-ended [--now <datetime>] [--json]` | List meetings whose end passed but are still scheduled (終了検知 C の候補) / 終了予定を過ぎた未終了面談 (e-3909 正式名, alias: meeting ended) |
 | `beacon phase list [--json]` | Show the configured phase funnels (account / opportunity vocabulary) / 設定済みフェーズファネルを表示 |
 | `beacon phase add <account\|opportunity> <name> [--index N]` | Add or insert a funnel stage / フェーズ段を追加・挿入 |
 | `beacon phase rename <account\|opportunity> <old> <new>` | Rename a funnel stage (references follow) / フェーズ段を改名（参照も追随） |

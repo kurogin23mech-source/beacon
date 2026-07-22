@@ -497,6 +497,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_opp_judge.add_argument("arg", nargs="?", default="")
     p_opp_judge.add_argument("--note", default="")
 
+    # e-3909: post-creation title edit (Windows parity for `opportunity rename`).
+    p_opp_rename = opp_sub.add_parser("rename", add_help=False)
+    p_opp_rename.add_argument("opp_id", nargs="?", default="")
+    p_opp_rename.add_argument("title", nargs="?", default="")
+
     opp_sub.add_parser("due", add_help=False).add_argument(
         "--json", action="store_true"
     )
@@ -567,9 +572,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_mtg_list.add_argument("opp_id", nargs="?", default="")
     p_mtg_list.add_argument("--json", action="store_true")
 
+    # e-3909: `list-ended` is the canonical READ verb; `ended` a deprecated
+    # alias (minimal pair with the WRITE verb `end`). Same args on both.
     p_mtg_ended = mtg_sub.add_parser("ended", add_help=False)
     p_mtg_ended.add_argument("--now", default="")
     p_mtg_ended.add_argument("--json", action="store_true")
+    p_mtg_list_ended = mtg_sub.add_parser("list-ended", add_help=False)
+    p_mtg_list_ended.add_argument("--now", default="")
+    p_mtg_list_ended.add_argument("--json", action="store_true")
 
     # ---- phase (ms-106: sales entities, profession=sales) ----
     p_phase = sub.add_parser(
@@ -2175,11 +2185,17 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
         }
         return _run_commands_py(root, "opportunity_phase_prob", env)
     if cmd in ("transition-date", "td"):
+        # e-3909: <YYYY-MM-DD> and --clear are mutually exclusive (set vs clear
+        # the transition date). Reject both — parity with bin/beacon.
+        if args.clear and args.date:
+            print("Error: <YYYY-MM-DD> と --clear は排他です (遷移日を設定する か "
+                  "クリアする かのどちらか一方)。", file=sys.stderr)
+            return 2
         # --clear passes an empty date through (set_transition_date treats it as clear).
         date = "" if args.clear else (args.date or "")
         if not args.opp_id or (not date and not args.clear):
-            print("Usage: beacon opportunity transition-date <opp-id> <YYYY-MM-DD> "
-                  "[--note <text>] | --clear")
+            print("Usage: beacon opportunity transition-date <opp-id> "
+                  "(<YYYY-MM-DD> | --clear) [--note <text>]")
             return 1
         env = {
             "BEACON_OPP_ID": args.opp_id or "",
@@ -2187,6 +2203,13 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
             "BEACON_PHASE_NOTE": args.note or "",
         }
         return _run_commands_py(root, "opportunity_transition_date", env)
+    if cmd == "rename":
+        # e-3909: post-creation title edit (Windows parity).
+        if not args.opp_id or not args.title:
+            print("Usage: beacon opportunity rename <opp-id> <new-title>")
+            return 1
+        env = {"BEACON_OPP_ID": args.opp_id or "", "BEACON_TITLE": args.title or ""}
+        return _run_commands_py(root, "opportunity_rename", env)
     if cmd == "judge":
         if not args.opp_id or not args.decision:
             print("Usage: beacon opportunity judge <opp-id> advance|retry|terminal "
@@ -2339,15 +2362,18 @@ def _handle_meeting(root: Path, args: argparse.Namespace) -> int:
             return 1
         return _run_commands_py(root, "meeting_cancel", {"BEACON_MTG_ID": args.mtg_id or ""})
     if cmd in ("list", "ls"):
-        if not args.opp_id:
-            print("Usage: beacon meeting list <opp-id> [--json]")
-            return 1
+        # e-3909: <opp-id> optional — omit to list across all opportunities.
         env = {"BEACON_MTG_OPP": args.opp_id or "", "BEACON_JSON": "1" if args.json else ""}
         return _run_commands_py(root, "meeting_list", env)
-    if cmd == "ended":
+    if cmd in ("list-ended", "ended"):
+        # e-3909: canonical read verb is list-ended; ended is a deprecated alias.
+        if cmd == "ended":
+            print("Note: 'beacon meeting ended' は 'beacon meeting list-ended' に改名"
+                  "されました (e-3909: 書く end と読む ended の紛らわしさ解消)。"
+                  "ended は当面 alias として動きます。", file=sys.stderr)
         env = {"BEACON_MTG_NOW": args.now or "", "BEACON_JSON": "1" if args.json else ""}
         return _run_commands_py(root, "meeting_ended", env)
-    print("Usage: beacon meeting [schedule|reschedule|end|cancel|list|ended] [options]")
+    print("Usage: beacon meeting [schedule|reschedule|end|cancel|list [<opp-id>]|list-ended] [options]")
     return 2
 
 
