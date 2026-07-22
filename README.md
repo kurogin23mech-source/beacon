@@ -267,7 +267,9 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon opportunity describe <opp-id> <text>` | Set an opportunity's 背景/経緯/メモ (free-text; empty clears) / 商談の背景メモを設定 |
 | `beacon acquisition add "<title>" [--description <text>] [--assignee <user>]` | Add a 顧客獲得ターゲット (取引先の無い獲得・準備作業の器) / 顧客獲得ターゲットを追加 |
 | `beacon acquisition list [--json]` | List 顧客獲得ターゲット / 顧客獲得ターゲットを一覧 |
-| `beacon acquisition status <acq-id> <todo\|in_progress\|observing\|done>` | Move a 顧客獲得ターゲット along its lifecycle / 顧客獲得ターゲットの状態を進める |
+| `beacon acquisition start <acq-id>` | Move a 顧客獲得ターゲット to in_progress / 顧客獲得ターゲットに着手 |
+| `beacon acquisition observe <acq-id>` | Move a 顧客獲得ターゲット to observing / 顧客獲得ターゲットを見守りに |
+| `beacon acquisition done <acq-id>` | Mark a 顧客獲得ターゲット done / 顧客獲得ターゲットを完了 |
 | `beacon opportunity phase-prob <phase> <n>` | Set a phase win probability (成約率 0-100) / フェーズの成約率を設定 |
 | `beacon sales target <user> <amount> \| list` | Set/list a member's sales quota (目標売上) + weighted pipeline / メンバーの目標売上を設定・一覧 |
 | `beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] \| --clear` | Set the 遷移日 (judgement date) for the current phase / 現フェーズの遷移日（判定予定日）を設定 |

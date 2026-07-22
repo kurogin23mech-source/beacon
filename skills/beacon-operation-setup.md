@@ -393,8 +393,9 @@ OperationTasksの準備が完了したら、再度 /beacon-operation-setup で�
 
 OperationTasks を `in_progress` にしたい場合、ユーザーは:
 ```bash
-cd "$PROJECT_DIR" && beacon operation status <op-id> in_progress
+cd "$PROJECT_DIR" && beacon operation start <op-id>
 ```
+（ms-120 e-3907: 状態変更は名前付き動詞で。旧 `operation status <op-id> in_progress` は deprecated だが後方互換で動く）
 
 ## Step 6: 完了メッセージ
 

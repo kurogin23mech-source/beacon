@@ -89,6 +89,18 @@ _guard_flag() {
     esac
 }
 
+# ms-120 e-3907: `<entity> status <id> <state>` writes state, which reverses
+# the polarity of the read-only `beacon status`. The canonical path is a named
+# intent verb (activate / close / start / observe / done) — the verb names what
+# happens, and illegal transitions simply have no verb. The old status-write
+# form still works for backward compatibility but prints this notice and is no
+# longer advertised in help. $1 = entity, $2 = the verbs to use instead.
+_deprecate_status_write() {
+    echo "note: 'beacon $1 status <id> <state>' is deprecated — 'status' now" \
+         "means read-only (like 'beacon status')." >&2
+    echo "      Use a named verb instead: $2" >&2
+}
+
 cmd_init() {
     if [ -f "$BEACON_PROJECT_FILE" ]; then
         echo ".beacon/project.json already exists."
@@ -2907,8 +2919,18 @@ case "${1:-}" in
         case "${2:-}" in
             add)      shift 2; cmd_acquisition_add "$@" ;;
             list|ls)  shift 2; cmd_acquisition_list "$@" ;;
-            status)   shift 2; cmd_acquisition_status "$@" ;;
-            *)        echo "Usage: beacon acquisition [add|list|status]  (顧客獲得ターゲット: 取引先の無い獲得・準備作業)" ;;
+            # ms-120 e-3907: named intent verbs for the lifecycle
+            # (todo → in_progress → observing → done). status is read-only.
+            start)    BEACON_ACQ_ID="${3:-}" BEACON_ACQ_STATUS="in_progress" python3 "$COMMANDS_PY" acquisition_status ;;
+            observe)  BEACON_ACQ_ID="${3:-}" BEACON_ACQ_STATUS="observing"   python3 "$COMMANDS_PY" acquisition_status ;;
+            done)     BEACON_ACQ_ID="${3:-}" BEACON_ACQ_STATUS="done"        python3 "$COMMANDS_PY" acquisition_status ;;
+            status)
+                # Deprecated write form (kept for backward compatibility).
+                shift 2
+                _deprecate_status_write acquisition "beacon acquisition start|observe|done <acq-id>"
+                cmd_acquisition_status "$@"
+                ;;
+            *)        echo "Usage: beacon acquisition [add|list|start|observe|done|show]  (顧客獲得ターゲット: 取引先の無い獲得・準備作業。状態遷移は名前付き動詞で)" ;;
         esac
         ;;
     opportunity|opp)
@@ -3139,11 +3161,22 @@ case "${1:-}" in
                     BEACON_PRIORITY="$priority" \
                     python3 "$COMMANDS_PY" operation_open
                 ;;
+            start)
+                # ms-120 e-3907: named verb for the prep transition (→in_progress)
+                # so operation setup has a non-deprecated path (todo → in_progress).
+                BEACON_OPERATION_ID="${3:-}" BEACON_OPERATION_STATUS="in_progress" \
+                    python3 "$COMMANDS_PY" operation_set_status
+                ;;
             activate)
                 BEACON_OPERATION_ID="${3:-}" BEACON_OPERATION_STATUS="open" \
                     python3 "$COMMANDS_PY" operation_set_status
                 ;;
             status)
+                # ms-120 e-3907: deprecated write form. `activate` (→open) and
+                # `close` (→closed) are the canonical named verbs; `status` now
+                # reads (like `beacon status`). Kept for backward compatibility
+                # (incl. prep todo/in_progress transitions) but warns.
+                _deprecate_status_write operation "beacon operation activate|close <op-id>"
                 BEACON_OPERATION_ID="${3:-}" BEACON_OPERATION_STATUS="${4:-}" \
                     python3 "$COMMANDS_PY" operation_set_status
                 ;;
@@ -3315,10 +3348,11 @@ except ValueError as e:
                 echo "                                [--status todo|in_progress|open|closed]"
                 echo "                                [--activation-hint H --objective O --ac A --priority P]"
                 echo "       beacon operation create \"<title>\" ...    (alias for open --status todo)"
+                echo "       beacon operation start <op-id>              (todo → in_progress; 準備着手)"
                 echo "       beacon operation activate <op-id>          (todo/in_progress → open)"
-                echo "       beacon operation status <op-id> <status>   (any transition)"
+                echo "       beacon operation close <op-id>              (→ closed)"
+                echo "       beacon operation status <op-id> <status>   (DEPRECATED: use start/activate/close; status now reads)"
                 echo "       beacon operation update <op-id> [--title --schedule --hint --objective --ac --priority]"
-                echo "       beacon operation close <op-id>"
                 echo "       beacon operation list [--json]"
                 echo "       beacon operation show <op-id> [--json]"
                 echo "       beacon operation approve <op-id> --spec <doc-id> [--expires-at YYYY-MM-DD] [--json]"
