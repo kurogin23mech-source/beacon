@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Beacon CLI commands - thin adapter over core.py logic."""
 
-__version__ = "0.60.2"
+__version__ = "0.60.3"
 
 import json
 import os
