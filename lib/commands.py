@@ -1621,6 +1621,27 @@ def cmd_milestone_done():
     if os.environ.get("BEACON_REVIEW", "") == "1":
         _route_completion_to_review(data, ms_id, reason=reason)
         return
+    # ms-119 / e-4008 — the completion gate must not be bypassable by simply
+    # omitting --review. A direct done from an AI session is refused; the AI must
+    # route through the 目的達成 gate (--review → human approve). Humans keep the
+    # straight path (they own the verdict). Escape hatches are the explicit human
+    # signals below.
+    if _ai_session_direct_completion_ban_active():
+        print(
+            f"Error: completing {ms_id} directly (without the review gate) from "
+            "an AI session is refused (ms-119 / e-4008 structural guard).\n"
+            "  『構造発火・非迂回』requires the completion gate to be "
+            "non-bypassable for AI sessions — a bare `done` skipped the review.\n"
+            "  Paths forward (= one of these):\n"
+            f"    1. beacon milestone done {ms_id} --review — route through the "
+            "目的達成 gate (AI assembles evidence, human approves).\n"
+            "    2. BEACON_TARGET_COMPLETE_USER_OVERRIDE=1 — explicit user opt-in "
+            "for a one-off straight completion.\n"
+            "    3. BEACON_SESSION_KIND=human — declare the calling session is "
+            "human-driven (= straight terminal use).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     old_state = ""
     for _m in data.get("milestones", []):
         if _m.get("id") == ms_id:
@@ -1800,6 +1821,24 @@ def cmd_target_approve():
         print("Usage: beacon target approve <entry-id> [--rationale <text>]",
               file=sys.stderr)
         sys.exit(1)
+    # ms-119 / e-4006 — the 目的達成 verdict is the human's (SPEC § 方針2). An AI
+    # session may assemble evidence and open the review-request, but pressing
+    # approve (= confirming the target met its goal AND executing the transition)
+    # is human-gated. Refuse unless an explicit human signal is present.
+    if _ai_session_attainment_approve_ban_active():
+        print(
+            "Error: approving a 目的達成 (target attainment) verdict from an AI "
+            "session is refused (ms-119 / e-4006 structural guard).\n"
+            "  SPEC § 方針2: the verdict that a target met its goal is *owned* by "
+            "the human, not the AI. The AI assembles evidence; the human confirms.\n"
+            "  Bypass paths (= one of these makes the approval proceed):\n"
+            "    1. BEACON_TARGET_APPROVE_USER_OVERRIDE=1 — explicit user opt-in "
+            "for this approval.\n"
+            "    2. BEACON_SESSION_KIND=human — declare the calling session is "
+            "human-driven (= straight terminal use).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     data = load_project()
     try:
         entry, new_state = core.target_transition_approval_approve(
@@ -13418,6 +13457,68 @@ def _ai_session_merge_ban_active() -> bool:
     return True
 
 
+def _session_kind_is_human() -> bool:
+    """True when the calling session declares itself human-driven.
+
+    Default (unset ``BEACON_SESSION_KIND``) is treated as AI for safety, the
+    same convention as the PR merge ban (see ``_ai_session_merge_ban_active``).
+    """
+    return (os.environ.get("BEACON_SESSION_KIND", "") or "").strip().lower() == "human"
+
+
+def _ai_session_attainment_approve_ban_active() -> bool:
+    """ms-119 / e-4006 — refuse AI-session self-approval of a 目的達成 verdict.
+
+    `beacon target approve` records the *owned* verdict that a target met its
+    goal and then executes the transition. SPEC § 方針2 says that verdict is the
+    human's, not the AI's — but the CLI had no structural guard, so an AI session
+    could assemble evidence AND press the button on the same target (the exact
+    self-approval this session did to ms-119 before an independent judge caught
+    it). This is the approval-side twin of ``_ai_session_merge_ban_active`` (the
+    AI writes / proposes; the human confirms).
+
+    Ban fires by default for AI sessions; bypassed only by an explicit human
+    signal:
+
+      * ``BEACON_TARGET_APPROVE_USER_OVERRIDE=1`` — user explicit opt-in (the
+        user prompt authorised this specific approval).
+      * ``BEACON_SESSION_KIND=human`` — non-AI session (straight terminal use).
+
+    Both env vars are per-process (not persisted), so a stale value can't turn
+    a future AI session into a self-approver. Returns True if the ban fires.
+    """
+    if os.environ.get("BEACON_TARGET_APPROVE_USER_OVERRIDE", "") == "1":
+        return False
+    return not _session_kind_is_human()
+
+
+def _ai_session_direct_completion_ban_active() -> bool:
+    """ms-119 / e-4008 — refuse an AI session's gate-bypassing direct completion.
+
+    The 目的達成 approval gate (e-3912) was *opt-in*: `beacon milestone done`
+    (and `beacon operation close`) applied the completion immediately and only
+    left an advisory nudge, so the blocking review was skippable by just not
+    passing ``--review``. The independent attainment review flagged this
+    (AC2 gap(a)): "構造発火・非迂回" cannot hold while the default completion
+    path bypasses the gate.
+
+    This makes the gate non-bypassable *for AI sessions*: a direct completion
+    (no ``--review``) is refused unless an explicit human signal is present.
+    Humans still own the straight-line path (they own the verdict); the AI must
+    route through the gate (``--review`` → human ``beacon target approve``).
+
+      * ``BEACON_TARGET_COMPLETE_USER_OVERRIDE=1`` — user explicit opt-in for a
+        one-off straight completion.
+      * ``BEACON_SESSION_KIND=human`` — non-AI session (straight terminal use).
+
+    Returns True if the ban fires. The ``--review`` gated path never reaches
+    this check (it is the sanctioned route), so it is unaffected.
+    """
+    if os.environ.get("BEACON_TARGET_COMPLETE_USER_OVERRIDE", "") == "1":
+        return False
+    return not _session_kind_is_human()
+
+
 def cmd_pr_merge():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
@@ -17658,6 +17759,21 @@ def cmd_operation_close():
     if not op_id:
         print("Error: operation id required")
         sys.exit(1)
+    # ms-119 / e-4008 — operation retirement is a completion claim; the same
+    # non-bypassable gate applies. An AI session cannot close an operation
+    # directly (route through the 目的達成 gate or declare a human signal).
+    if _ai_session_direct_completion_ban_active():
+        print(
+            f"Error: closing {op_id} directly (without the review gate) from an "
+            "AI session is refused (ms-119 / e-4008 structural guard).\n"
+            "  Paths forward (= one of these):\n"
+            f"    1. beacon target review-request {op_id} --new-state closed "
+            "--intent ... — route through the 目的達成 gate (human approves).\n"
+            "    2. BEACON_TARGET_COMPLETE_USER_OVERRIDE=1 — explicit user opt-in.\n"
+            "    3. BEACON_SESSION_KIND=human — declare the session human-driven.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     data = load_project()
     old_state = ""
     for _o in data.get("operations", []):
