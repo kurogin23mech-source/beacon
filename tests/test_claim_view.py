@@ -208,3 +208,18 @@ class TestRobustness:
         ms = _ms(occupation={"machine": "mac"})  # no session_id
         v = claim_view.build_claim_view(ms)
         assert v["live"] == []
+
+
+# ms-112 AX finding: a nonexistent / non-walked target must not read as unclaimed.
+
+def test_exists_false_forces_not_unclaimed():
+    v = claim_view.build_claim_view({"id": "ms-999"}, live_session_ids=set(),
+                                    exists=False)
+    assert v["exists"] is False
+    assert v["flags"]["unclaimed"] is False
+
+
+def test_exists_true_is_default_and_can_be_unclaimed():
+    v = claim_view.build_claim_view({"id": "ms-1"}, live_session_ids=set())
+    assert v["exists"] is True
+    assert v["flags"]["unclaimed"] is True

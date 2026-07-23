@@ -92,8 +92,16 @@ def build_claim_view(
     live_session_ids: Optional[Iterable[str]] = None,
     my_session_id: str = "",
     my_identities: Iterable[str] = (),
+    exists: bool = True,
 ) -> dict:
     """Bundle a single Target's LIVE + persistent claim state into one view.
+
+    ``exists`` (ms-112 AX finding): whether this id names a real, claim-walked
+    Target. A miss (unknown id, or a kind this view does not walk — task /
+    operation / trek) MUST NOT read as ``unclaimed=true`` ("free to grab"),
+    because this view is the double-work-prevention source of truth and a typo
+    would otherwise become a dangerous false negative. When ``exists`` is False
+    the view carries ``exists: false`` and ``unclaimed`` is forced False.
 
     Args:
       target: a raw Target record (development milestone / sales opportunity /
@@ -180,6 +188,7 @@ def build_claim_view(
         "target_id": target_id,
         "target_kind": kind,
         "label": label,
+        "exists": bool(exists),
         "live": live,
         "assignees": assignees,
         "flags": {
@@ -189,7 +198,9 @@ def build_claim_view(
             "assigned": assigned,
             "assigned_to_me": assigned_to_me,
             "assigned_to_others": assigned_to_others,
-            "unclaimed": (not any_live) and (not assigned),
+            # A nonexistent / non-walked target is NOT "free to grab" — only a
+            # real, live-free, unassigned target is (ms-112 AX finding).
+            "unclaimed": bool(exists) and (not any_live) and (not assigned),
         },
     }
 

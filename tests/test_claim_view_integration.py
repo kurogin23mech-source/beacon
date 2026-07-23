@@ -234,9 +234,10 @@ class TestCmdClaimViewIOShell:
         assert CONSUMER_FLAG_KEYS <= set(view["flags"])
         assert view["flags"]["assigned"] is True
 
-    def test_missing_target_returns_unclaimed_view(self, monkeypatch, capsys):
-        # A --target that isn't in the project still yields a well-formed
-        # unclaimed view (callers don't special-case a miss).
+    def test_missing_target_is_not_unclaimed(self, monkeypatch, capsys):
+        # ms-112 AX finding: a --target that isn't a real walked target must
+        # NOT read as unclaimed=true (= free to grab). It carries exists=false
+        # and unclaimed=false so a typo can't become a false "safe to claim".
         fixture = {"name": "smoke", "profession": "dev", "milestones": []}
         commands = self._load_commands(monkeypatch, fixture, live_ids=set())
         monkeypatch.setenv("BEACON_JSON", "1")
@@ -245,4 +246,5 @@ class TestCmdClaimViewIOShell:
         commands.cmd_claim_view()
         view = json.loads(capsys.readouterr().out)
         assert view["target_id"] == "ms-999"
-        assert view["flags"]["unclaimed"] is True
+        assert view["exists"] is False
+        assert view["flags"]["unclaimed"] is False

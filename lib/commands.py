@@ -22261,6 +22261,23 @@ def cmd_claim_view():
     ti = os.environ.get("BEACON_CLAIM_TARGET_ID", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
+    # ms-112 AX+maintainability consensus: the <kind> in --target <kind>:<id>
+    # was read then never used by `view` — `--target opp:ms-1` passed silently.
+    # Validate it against the id's derived kind (fail-fast, before any cloud
+    # call) so a mismatch is rejected instead of ignored (kind stops being dead
+    # input).
+    if ti and tk:
+        _alias = {"ms": "milestone", "milestone": "milestone",
+                  "opp": "opportunity", "opportunity": "opportunity",
+                  "acc": "account", "account": "account"}
+        _declared = _alias.get(tk.lower())
+        _actual = work_model.target_kind(ti)
+        if _declared and _actual and _declared != _actual:
+            print(f"Error: --target の kind '{tk}' が id '{ti}' (= {_actual}) と "
+                  f"一致しません。<kind>:<id> は同じ対象を指してください。",
+                  file=sys.stderr)
+            sys.exit(1)
+
     data = load_project()
     my_session_id = _resolve_session_id()
     # "me" for the assignee layer: the assignee auto-add on `milestone start`
@@ -22297,11 +22314,15 @@ def cmd_claim_view():
         if view is None:
             # The target isn't in project.json — still return a well-formed
             # (unclaimed) view so callers don't special-case a miss.
+            # ms-112 AX finding: a miss (unknown id, or a kind this view does
+            # not walk — task/operation/trek) is NOT "unclaimed=free to grab".
+            # Mark exists=False so a typo can't read as a safe claim target.
             view = _claim_view.build_claim_view(
                 {"id": ti},
                 live_session_ids=live_ids,
                 my_session_id=my_session_id,
                 my_identities=my_identities,
+                exists=False,
             )
         if json_mode:
             print(json.dumps(view, ensure_ascii=False))
@@ -22309,7 +22330,12 @@ def cmd_claim_view():
         line = _claim_view.format_claim_line(view)
         label = view.get("label") or view.get("target_id")
         print(f"{view.get('target_id')} {label}")
-        print(f"  {line}" if line else "  (未 claim — 誰も作業中でなく担当も未設定)")
+        if not view.get("exists", True):
+            print("  ⚠ この id の target は見つかりません (claim 対象は milestone / "
+                  "opportunity / account。task / operation / trek はこの view の"
+                  "対象外)。unclaimed とは扱いません。")
+        else:
+            print(f"  {line}" if line else "  (未 claim — 誰も作業中でなく担当も未設定)")
         if live_ids is None:
             print("  ※ liveness 未確認 (local mode / directory 不通) — LIVE claim は"
                   "健全性未検証で表示")
