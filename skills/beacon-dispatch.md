@@ -229,6 +229,35 @@ Dispatch: 実行可能なマイルストーンがありません。
 ```
 と表示し、待機中MSがあれば一覧を表示して終了。
 
+## Step 2.2: 2層 claim-aware 割り当てフィルタ (ms-112 e-3676)
+
+実行可能 MS (Runnable) が確定したら、**サブエージェントに振る前に各 MS の 2層 claim 状態 (= いま別セッションが LIVE 作業中か + 誰が永続担当か) を読む**。dispatch は「自分ひとりが全 target を割り当てる」個人前提で組まれていたため、チームで別セッションが既に触っている MS に無自覚にサブエージェントを重ねる二重作業が起きうる。それを claim ベースで避ける (非排他 = 機械的な除外ではなく、順位下げと警告)。
+
+### 取得
+
+```bash
+beacon claim view --json
+```
+
+返り JSON は target-id をキーに各 MS の `flags` (`live_by_others` / `assigned_to_others` / `assigned_to_me` / `unclaimed` …) を持つ。実行可能 MS のぶんだけ参照する。
+
+### 割り当てポリシー (SPEC 設計方針3 / AC3、非排他)
+
+各 Runnable MS を以下で仕分ける。**候補集合から機械的に除外 (block) はしない** — 順位付けと警告に留め、最終判断は user に委ねる:
+
+- `live_by_others == true` (他セッションが今 LIVE 作業中) → **並列起動の第一候補から外す** (二重作業の恐れ)。どうしても回したい時は Step 4 で「⚠ ms-XX は別セッションが LIVE 作業中。重ねて dispatch しますか？」と確認する。
+- `assigned_to_others == true` かつ `assigned_to_me == false` (他人の永続担当) → 優先度を下げる。`unclaimed` / `assigned_to_me` の MS を優先的に選ぶ。
+- `unclaimed` / `assigned_to_me` → 通常通り最優先で dispatch 対象にする (空き or 自分担当、衝突なし)。
+- `※ liveness 未確認` (local mode で directory 不通) → LIVE 判定は「可能性」として弱め、warn は出すが除外しない。
+
+Task-level dispatch (Step 0.0) の場合も同様に、各 task の親 MS / task が指す target に対して `beacon claim view --target <kind>:<id> --json` を引き、他セッションが LIVE 作業中の task を第一候補から外す。
+
+### 2層 fallback (AC6)
+
+LIVE claimer が居なくても `assigned` を読む。「LIVE で空いている」ように見えても他人の永続担当なら優先度を下げる。逆に、assignee 未設定でも LIVE で誰も作業していなければ堂々と割り当ててよい。
+
+`beacon claim view` が失敗したら (cloud 不通等) この filter は skip し、従来の依存グラフだけで割り当てる (best-effort、dispatch を止めない)。
+
 ## Step 2.5: 選択MS間の依存関係チェック
 
 実行可能MSが2つ以上ある場合、それらの**相互の依存関係**を確認する。

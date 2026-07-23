@@ -506,11 +506,32 @@ Step 3 の出力末尾に「**次の一手**」を **AI が決定的に選ぶ** 
 8. **アクティブ MS が無い** → 「次のマイルストーンを決めましょう」(コンサルタントモード Step 2.5 と同じ)
 9. **どれも該当しない** → 「観察モード: 直近 retro を見直すか、cleanup 作業に着手するか」
 
+### 2層 claim フィルタ (ms-112 e-3675) — 候補を決めた後に必ず通す
+
+上の優先順位で「次の一手」の候補 target / task を 1 つ選んだら、**その target の 2層 claim 状態 (= いま誰が作業中か + 誰が永続担当か) を読んでから推奨を確定する**。「自分ひとりが全 target を見る」個人前提を、チームで同じプロジェクトを触っても壊さないための claim-aware 化。
+
+1. 候補 target (task の場合はその親 MS / task が指す target) の claim を取得:
+   ```bash
+   beacon claim view --target <kind>:<target-id> --json
+   ```
+   `kind` は milestone=`ms` / opportunity=`opp` / account=`acc`。全 target を横断で見たいときは `beacon claim view --json`。
+
+2. 返り JSON の `flags` を読んで推奨を調整する。**非排他が大原則 — 候補を外す (block) ことはしない。警告と別案の提示に留める** (SPEC 設計方針3 / AC5):
+   - `live_by_others == true` (他セッションが今 LIVE 作業中) → 推奨は残すが「根拠」に **⚠ 別セッションが作業中 (二重作業の恐れ)** を明記し、「別の選択肢」に未 claim の task / MS を 1 つ添える。協働してよい旨も 1 行。
+   - `assigned_to_others == true` かつ `assigned_to_me == false` (他人の永続担当) → 「根拠」に **担当は <assignees>** を明記。自分担当 or 未 claim の候補が他にあれば、そちらの優先度を上げて推奨を差し替える。
+   - `live_by_me` / `assigned_to_me` / `unclaimed` のいずれか → 衝突なし。そのまま推奨する。
+   - `※ liveness 未確認` (local mode で directory 不通) が出た → LIVE 警告は「作業中の可能性」と可能性表現に弱める (健全性を検証できていないため)。
+
+3. **2層 fallback (AC6)**: LIVE な claimer が居なくても `assigned` を必ず読む。「LIVE で誰も居ない=空いている」と即断せず、他人の永続担当なら上の警告を出す。自分担当 / 未担当ならそのまま。
+
+`beacon claim view` が cloud 不通等で失敗したら、この filter は skip して従来通り推奨する (best-effort、session-start を止めない)。
+
 ### 出力フォーマット
 
 ```
 次の一手: [推奨アクション (短く、1 行)]
   根拠: [なぜこれを推奨するか — 上記優先順位のどれにヒットしたか]
+  claim: [2層 claim フィルタの結果 — 衝突 (⚠) があれば明記、衝突なしなら省略] (ms-112 e-3675)
   別の選択肢: [候補 2 つを箇条書き、なければ省略]
 ```
 
