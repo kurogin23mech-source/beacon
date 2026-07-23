@@ -515,7 +515,7 @@ cmd_target_approve() {
     local entry_id="" rationale=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --rationale) rationale="${2:-}"; shift 2 ;;
+            --rationale|--reason) rationale="${2:-}"; shift 2 ;;
             -?*)         _guard_positional "$1" "Usage: beacon target approve <entry-id> [--rationale <text>]" ;;
             *)           entry_id="$1";      shift ;;
         esac
@@ -529,7 +529,7 @@ cmd_target_reject() {
     local entry_id="" rationale=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --rationale) rationale="${2:-}"; shift 2 ;;
+            --rationale|--reason) rationale="${2:-}"; shift 2 ;;
             -?*)         _guard_positional "$1" "Usage: beacon target reject <entry-id> [--rationale <text>]" ;;
             *)           entry_id="$1";      shift ;;
         esac
