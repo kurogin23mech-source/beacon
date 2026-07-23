@@ -46,7 +46,13 @@ def _flag_loop_catchall_lines() -> list[tuple[int, str]]:
         pure_drop = re.match(r"^\*\)\s*shift\s*;;", s)
         if not (assigns_positional or pure_drop):
             continue
-        window = lines[max(0, i - 14):i]
+        # e-3896 (PR #475 review): the window must reach back past a long
+        # inline `--help` heredoc between `case "$1" in` and the catch-all —
+        # 14 lines missed search / sessions / rollback / morning (30+ line help
+        # blocks). Widen to 70 so those loops are in scope. To avoid matching a
+        # *different* command's earlier case, stop at the enclosing function/case
+        # boundary heuristically by requiring the nearest `case "$1" in` above.
+        window = lines[max(0, i - 70):i]
         in_flag_loop = any(re.search(r'case\s+"\$1"\s+in', w) for w in window)
         if not in_flag_loop:
             continue

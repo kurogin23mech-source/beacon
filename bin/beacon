@@ -4497,6 +4497,7 @@ For "who in this project is live" use `beacon bus directory --live` instead.
 EOF
                     exit 0
                     ;;
+                -?*) _guard_flag "$1" ;;   # e-3896: no silent unknown-flag drop
                 *) shift ;;
             esac
         done
@@ -4663,6 +4664,7 @@ Flags:
 EOF
                     exit 0
                     ;;
+                -?*) _guard_flag "$1" ;;   # e-3896: no silent unknown-flag drop
                 *) shift ;;
             esac
         done
@@ -4767,6 +4769,7 @@ Flags:
 EOF
                     exit 0
                     ;;
+                -?*) _guard_flag "$1" ;;   # e-3896: no silent unknown-flag drop
                 *) shift ;;
             esac
         done
@@ -6356,6 +6359,9 @@ EOF
                 --include-bus-dm)       search_inc_bus_dm="1"; shift ;;
                 --include-session-logs) search_inc_session_logs="1"; shift ;;
                 --include-trek)         search_inc_trek="1"; shift ;;
+                # e-3896: reject unknown flags instead of absorbing them into the
+                # query (silent no-op); a bare positional is the search query.
+                -?*) _guard_positional "$1" "Usage: beacon search <query> [--ms <id>] [--scope <s>] [--type <t>] [--json] ..." ;;
                 *) [[ -z "$search_query" ]] && search_query="$1"; shift ;;
             esac
         done

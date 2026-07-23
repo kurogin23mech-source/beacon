@@ -48,6 +48,18 @@ export function readBusBudget(projectRoot) {
   }
 }
 
+export function isArmed(projectRoot) {
+  // ms-120 / e-3901: True iff an auto-reply budget is granted (a present budget
+  // file with total > 0) — the durable "autonomous mode active" signal the send
+  // gate keys off, so an armed loop can't bypass the gate by omitting
+  // --in-reply-to. Mirrors lib/commands.py _bus_is_armed(). Lives here (not
+  // inlined in bus.mjs) so the unwrap is unit-tested: reading readBusBudget()'s
+  // { state, data } shape wrong once silently disarmed the whole MCP path.
+  const read = readBusBudget(projectRoot)
+  return read.state === 'present'
+    && Number.parseInt(read.data?.total ?? 0, 10) > 0
+}
+
 export function consumeBusBudgetOne(projectRoot) {
   // Returns { allowed, reason?, budget? }.
   //

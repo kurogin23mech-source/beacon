@@ -35,7 +35,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import {
-  consumeBusBudgetOne, refundBusBudgetOne, refuseMessage, readBusBudget,
+  consumeBusBudgetOne, refundBusBudgetOne, refuseMessage, isArmed,
 } from './bus-budget.mjs'
 import {
   classifyOutboundReply, evaluateOutboundQualGate, qualHoldMessage,
@@ -857,8 +857,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   // loop that drops in_reply_to is still gated. There is no --manual bypass on
   // the MCP path (that override is a human-only CLI affordance). Mirrors
   // lib/commands.py cmd_bus_send.
-  const busBudget = readBusBudget(CWD)
-  const armed = !!(busBudget && Number.parseInt(busBudget.total ?? 0, 10) > 0)
+  // e-3901: armed = a granted budget (autonomous mode active). Delegated to
+  // isArmed() which correctly unwraps readBusBudget()'s { state, data } shape —
+  // an earlier inline `busBudget.total` read was undefined, so armed was always
+  // false and `autonomous` silently degraded to `!!in_reply_to`, re-opening the
+  // omit-the-flag hole on the MCP path only. (Caught by parent review of PR #475.)
+  const armed = isArmed(CWD)
   const autonomous = !!in_reply_to || armed
   // Track whether the pessimistic budget decrement committed a slot, so a
   // held / failed send can refund it (ms-100 e-2999) instead of burning a turn.

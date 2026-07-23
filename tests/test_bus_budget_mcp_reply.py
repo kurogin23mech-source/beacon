@@ -55,7 +55,7 @@ def _run_probe(project_root: Path, action: str) -> dict:
     the module surfaces as a probe failure (no test-private duplicate).
     """
     script = textwrap.dedent(f"""
-        import {{ consumeBusBudgetOne, readBusBudget, refuseMessage }} from '{BUS_BUDGET_MJS.as_posix()}'
+        import {{ consumeBusBudgetOne, readBusBudget, refuseMessage, isArmed }} from '{BUS_BUDGET_MJS.as_posix()}'
         // With `node --input-type=module -e <src> -- ARG1 ARG2`:
         //   argv[0] = node, argv[1] = ARG1, argv[2] = ARG2
         // (the -e content is not a positional script file).
@@ -66,6 +66,8 @@ def _run_probe(project_root: Path, action: str) -> dict:
             out = consumeBusBudgetOne(root)
         }} else if (action === 'read') {{
             out = readBusBudget(root)
+        }} else if (action === 'armed') {{
+            out = {{ armed: isArmed(root) }}
         }} else if (action === 'refuse_not_granted') {{
             out = {{ message: refuseMessage('not_granted', null) }}
         }} else if (action === 'refuse_exhausted') {{
@@ -255,3 +257,34 @@ def test_read_classifies_corrupt(project_root):
         "not json at all", encoding="utf-8")
     r = _run_probe(project_root, "read")
     assert r == {"state": "corrupt"}
+
+
+# ---------------------------------------------------------------------------
+# isArmed — e-3901 MCP-path armed detection (PR #475 review regression)
+# ---------------------------------------------------------------------------
+# The reply tool (channel/bus.mjs) gates on `isArmed(CWD) || in_reply_to`. An
+# earlier inline read used readBusBudget().total (undefined — the dict is under
+# .data), so armed was ALWAYS false and an armed loop that omitted --in-reply-to
+# slid past both the budget cap and the cross-user HOLD on the MCP path. These
+# pin that isArmed unwraps { state, data } correctly so the gate actually fires.
+
+def test_is_armed_true_when_budget_present(project_root):
+    _write_budget(project_root, total=3)
+    assert _run_probe(project_root, "armed") == {"armed": True}
+
+
+def test_is_armed_false_when_no_budget_file(project_root):
+    # missing file → not armed (the omit-the-flag path stays ungated only when
+    # the human never armed the session, which is the intended manual default).
+    assert _run_probe(project_root, "armed") == {"armed": False}
+
+
+def test_is_armed_false_when_total_zero(project_root):
+    _write_budget(project_root, total=0)
+    assert _run_probe(project_root, "armed") == {"armed": False}
+
+
+def test_is_armed_false_when_corrupt(project_root):
+    (project_root / ".beacon" / "bus-budget.json").write_text(
+        "not json", encoding="utf-8")
+    assert _run_probe(project_root, "armed") == {"armed": False}

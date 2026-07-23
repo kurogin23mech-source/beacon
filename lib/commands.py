@@ -16734,6 +16734,9 @@ def _help_registry():
         {"command": "beacon task list", "flags": ["--json", "--ms <id>"], "description": "List tasks"},
         {"command": "beacon task update <entry-id>", "flags": ["--ms <ms-id>", "--description <text>", "--status <s>", "--detail <text>", "--motivation <text>", "--acceptance-criteria <text>", "--behavior <text>", "--priority <p>"], "description": "Update task fields (description / status / detail / motivation / acceptance_criteria / behavior / priority) or move to another milestone"},
         {"command": "beacon log [message]", "flags": ["--prepare", "--finalize", "-m <ms-id>", "--progress <n>", "--summary <text>"], "description": "Record HEAD commit to active milestone"},
+        {"command": "beacon dm send", "flags": ["--to <sid>", "--to-user <uid>", "--payload <json>", "--in-reply-to <eid>", "--manual", "--recipient-confirmed", "--action <name>", "--project <id>", "--json"], "description": "Send a DM (canonical DM verb; delegates to bus send --channel dm; e-3899)"},
+        {"command": "beacon dm respond <approve|deny> <event_id>", "flags": ["--project <id>", "--json"], "description": "Decide a pending cross-user DM action envelope (receiver-side; ms-70)"},
+        {"command": "beacon dm audit", "flags": ["--limit <n>", "--project <id>", "--json"], "description": "Read the DM-approval audit log (e-3899 canonical; alias: dm log)"},
         # ms-106 ② — sales job-template entities (profession=sales projects)
         {"command": "beacon account add <name>", "flags": ["--health <text>", "--assignee <user>"], "description": "Add a sales account (顧客; 対象・継続)"},
         {"command": "beacon account list", "flags": ["--json", "--as-project <id>", "--linked"], "description": "List sales accounts (+contacts); --as-project shows only accounts disclosed to that project (fail-closed); --linked pulls accounts disclosed to THIS project from other org projects (cloud mode)"},
