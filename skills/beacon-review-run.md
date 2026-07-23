@@ -58,13 +58,27 @@ kernel を呼ぶ。
 
 ## 手順
 
-### Step 1: 前提チェック
+### Step 1: 前提チェック (command 不在 と root 不在を分けて診断する — e-3989)
 
-Bash で:
+`beacon-find-root` の非 0 終了を一律「Beacon ルートで実行を」と診断すると、実際には
+`beacon` が PATH に無いだけ (install / PATH の問題) の人を誤誘導する。**存在確認を
+先に**行い、2 つの失敗を別々に案内する。Bash で:
+
 ```bash
-beacon-find-root >/dev/null && echo OK || echo NO_BEACON
+if ! command -v beacon-find-root >/dev/null 2>&1; then
+  echo NO_COMMAND
+elif ! beacon-find-root >/dev/null 2>&1; then
+  echo NO_ROOT
+else
+  echo OK
+fi
 ```
-`NO_BEACON` なら「Beacon プロジェクトのルートで実行してください」と返して終了。
+
+- `NO_COMMAND` → 「`beacon` が PATH にありません。install / PATH を確認してください
+  (例: `pipx install beacon` または repo の `bin/` を PATH に追加)」と返して終了。
+  **「ルートで実行を」とは言わない** (原因が違う)。
+- `NO_ROOT` → 「Beacon プロジェクトのルートで実行してください」と返して終了。
+- `OK` → 続行。
 
 ### Step 2: review-kernel bundle を組み立てる (原典 + 機械採取 diff だけ)
 
@@ -106,9 +120,14 @@ stdout に 1 行 JSON が返る (`origin` / `artifact` / `independence_contract`
 意図説明、「本当はこうするつもり」、実装者の弁明。bundle の
 `independence_contract` を判定エージェントのプロンプト冒頭にも明示的に置く。
 
-**モデルの独立性 (e-3947 / e-3890)**:
+**モデルの独立性 (e-3947 / e-3890 / e-3988)**:
 - Agent tool の `model` を **実装者 (あなた = 通常 opus) と別**にする。既定は
   `fable`。
+- **構造チェック (e-3988)**: kernel を呼ぶとき `BEACON_IMPLEMENTER_MODEL=<あなたの
+  モデル>` を渡すと、bundle に `implementer_model` が載る。判定モデルを決めたら
+  `implementer_model` と一致していないか必ず確認する (一致 = 共有の盲点が残り独立性
+  が弱い)。一致していたら別モデルに切り替えるか、ユーザーが明示的に「同一モデルで
+  よい」と言った場合だけ続行する。散文のお願いでなく、bundle が運ぶ事実で照合する。
 - `--models` が複数なら、その各モデルで **並列に** サブエージェントを起動し
   (1 メッセージ内で複数 Agent 呼び出し)、多視点パネルにする。同一モデルでも
   プロンプト末尾に視点ラベル (例: 「命名の一貫性を最優先で見よ」「silent no-op
@@ -134,10 +153,11 @@ judge に入れると bundle の外から実装者由来の文脈が再流入し
 > 断じた *お願いベースの抑止* に依っている点で矛盾する、と指摘した。構造で閉じる原則
 > に従い、prior 注入経路を撤去した。
 >
-> application-map のような **実装者 session に依らない外部の事実索引** を将来 judge に
-> 見せたい場合は、ad-hoc なプロンプト注入でなく **kernel bundle に named external
-> reference として機械的に組み込む** 形でのみ許す (= bundle が判定の完全な入力である
-> 不変条件を保ったまま拡張する)。これは follow-up 設計。
+> application-map のような **実装者 session に依らない外部の事実索引** を judge に
+> 見せたい場合は、ad-hoc なプロンプト注入でなく **kernel bundle の
+> `external_references` slot** に named reference として機械的に載せる (e-3997 で実装)。
+> bundle が判定の完全な入力である不変条件を保ったまま拡張できる唯一の経路。載せて
+> よいのは repo / registry 由来の事実だけ (= 実装者 session の会話・L2 記憶は不可)。
 
 ### Step 4: findings を集約して提示する
 

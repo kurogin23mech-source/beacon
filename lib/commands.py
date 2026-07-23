@@ -1922,6 +1922,49 @@ def cmd_target_list():
             print(f"      intent: {m.get('intent')}")
 
 
+# Default command groups probed by the AX full-surface snapshot. These are
+# *group* commands (they dispatch to subcommands), so probing them with an
+# unknown subcommand exercises the usage / error / exit-code surface WITHOUT
+# executing real logic (no cloud calls, no state change) — safe to run on demand.
+_SURFACE_SNAPSHOT_COMMANDS = [
+    "milestone", "task", "doc", "pr", "target", "review", "bus", "trigger",
+    "operation", "note", "session", "member", "claim",
+]
+
+
+def _collect_surface_snapshot(commands_list=None) -> list:
+    """Probe the CLI command surface for the AX full-surface audit (e-3987).
+
+    For each command group, run it with an unknown subcommand and capture the
+    usage/error output + exit code. A silent no-op (exit 0 with no guidance on a
+    bogus subcommand) is exactly the AX defect this snapshot lets the judge see.
+    Mechanical: no interpretation, just the raw surface. Best-effort — a probe
+    that times out / errors is recorded with an ``error`` note rather than
+    aborting the whole snapshot.
+    """
+    install_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    beacon_bin = os.path.join(install_root, "bin", "beacon")
+    if not os.path.isfile(beacon_bin):
+        beacon_bin = "beacon"  # fall back to PATH
+    cmds = commands_list if commands_list is not None else _SURFACE_SNAPSHOT_COMMANDS
+    probes = []
+    bogus = "__ax_surface_probe__"
+    for c in cmds:
+        entry = {"cmd": c, "probe_argv": f"{c} {bogus}"}
+        try:
+            p = subprocess.run([beacon_bin, c, bogus], capture_output=True,
+                               text=True, timeout=20)
+            entry["exit_code"] = p.returncode
+            entry["stdout"] = (p.stdout or "")[:2000]
+            entry["stderr"] = (p.stderr or "")[:2000]
+            # a bogus subcommand that exits 0 with no stderr is a silent no-op
+            entry["silent_no_op"] = (p.returncode == 0 and not (p.stderr or "").strip())
+        except (subprocess.TimeoutExpired, OSError) as e:
+            entry["error"] = f"{type(e).__name__}: {e}"
+        probes.append(entry)
+    return probes
+
+
 def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = "") -> None:
     """Emit the 目的達成 evidence-generation bundle for a context-zero judge
     (ms-119 / e-4005).
@@ -2009,6 +2052,7 @@ def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = ""
         target_ref=target_ref,
         diff_text=diff_text,
         gaps=gaps,
+        implementer_model=os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip(),
     )
     print(json.dumps(bundle, ensure_ascii=False))
 
@@ -2059,17 +2103,12 @@ def cmd_review_context():
     # catch). Each guard rejects with a clean `Error:` + exit 1 (never a silent
     # win, never a raw traceback), so an automation loop reading exit codes can
     # tell a mistake happened at the point it happened. ---
-    if mode != "diff":
-        # This collector only produces a diff artifact. `full-surface` (a
-        # multi-command surface snapshot) needs a surface collector that does
-        # not exist yet — advertising it would hand the judge a bundle whose
-        # `mode` label contradicts its diff artifact. Reject rather than lie.
-        if mode == "full-surface":
-            print("Error: --mode full-surface is not supported by this command "
-                  "(it only collects diffs). A surface-snapshot collector is a "
-                  "follow-up; use --mode diff for now.", file=sys.stderr)
-        else:
-            print(f"Error: --mode must be 'diff', got {mode!r}.", file=sys.stderr)
+    # ms-119 / e-3987: full-surface is now supported — a surface-snapshot
+    # collector probes each command's help / representative error / exit code so
+    # the AX judge can audit the whole command surface, not only this PR's diff.
+    if mode not in ("diff", "full-surface"):
+        print(f"Error: --mode must be 'diff' or 'full-surface', got {mode!r}.",
+              file=sys.stderr)
         sys.exit(1)
     if pr and diff_ref:
         print("Error: --pr and --diff-ref are mutually exclusive; pass exactly "
@@ -2139,23 +2178,37 @@ def cmd_review_context():
               file=sys.stderr)
         sys.exit(1)
 
-    # --- artifact (diff) collection: mechanical git / gh, no interpretation ---
-    if pr:
-        target_ref = f"PR #{pr}"
-        proc = subprocess.run(["gh", "pr", "diff", pr], capture_output=True, text=True)
-    elif diff_ref:
-        target_ref = diff_ref
-        proc = subprocess.run(["git", "diff", diff_ref], capture_output=True, text=True)
+    # --- artifact collection: mechanical, no interpretation ---
+    diff_text = ""
+    artifact = None
+    if mode == "full-surface":
+        # ms-119 / e-3987: probe the command surface (help / representative error
+        # / exit code) instead of a diff, so the AX judge audits the whole
+        # surface. --pr / --diff-ref are ignored here (surface, not change-scoped).
+        probes = _collect_surface_snapshot()
+        target_ref = "full-surface (CLI command surface)"
+        artifact = review_spine.surface_snapshot_artifact(probes, target_ref=target_ref)
+        if not probes:
+            gaps.append("surface snapshot が空です (コマンド surface を採取できません"
+                        "でした)。")
     else:
-        print("Error: pass --pr <n> or --diff-ref <base...head> to collect the diff.",
-              file=sys.stderr)
-        sys.exit(1)
-    if proc.returncode != 0:
-        print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
-        sys.exit(1)
-    diff_text = proc.stdout
-    if not diff_text.strip():
-        gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
+        if pr:
+            target_ref = f"PR #{pr}"
+            proc = subprocess.run(["gh", "pr", "diff", pr], capture_output=True, text=True)
+        elif diff_ref:
+            target_ref = diff_ref
+            proc = subprocess.run(["git", "diff", diff_ref], capture_output=True, text=True)
+        else:
+            print("Error: pass --pr <n> or --diff-ref <base...head> to collect the "
+                  "diff (or --mode full-surface to snapshot the command surface).",
+                  file=sys.stderr)
+            sys.exit(1)
+        if proc.returncode != 0:
+            print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+        diff_text = proc.stdout
+        if not diff_text.strip():
+            gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
 
     bundle = review_spine.assemble_review_context(
         review_type,
@@ -2166,6 +2219,8 @@ def cmd_review_context():
         target_ref=target_ref,
         gaps=gaps,
         known_judge_types=set(registry.keys()),
+        implementer_model=os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip(),
+        artifact=artifact,
     )
     print(json.dumps(bundle, ensure_ascii=False))
 

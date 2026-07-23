@@ -126,9 +126,28 @@ INDEPENDENCE_CONTRACT = (
 )
 
 
+def surface_snapshot_artifact(probes, *, target_ref):
+    """Shape a surface-snapshot artifact from mechanically-collected CLI probes
+    (ms-119 / e-3987).
+
+    AX 原典 §3 wants a *full-surface* audit (every command's help / error / exit
+    code), not just a diff — the diff mode misses defects in code that didn't
+    change this PR. Each probe is a dict like
+    ``{"cmd": "milestone", "help": "...", "error_probe": "...", "exit_code": 0}``.
+    Pure: the caller runs the probes; this only shapes the artifact so the shaping
+    is unit-testable without spawning subprocesses.
+    """
+    return {
+        "kind": "surface-snapshot",
+        "ref": target_ref,
+        "probes": list(probes or []),
+    }
+
+
 def assemble_review_context(review_type, *, origin_id, origin_content,
                             diff_text, mode, target_ref, gaps=None,
-                            known_judge_types=None):
+                            known_judge_types=None, external_references=None,
+                            implementer_model="", artifact=None):
     """Assemble the review-kernel bundle handed to an independent judge subagent.
 
     This is the *structural* enforcement of reviewer independence (ms-119
@@ -155,6 +174,13 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
             to the on-disk registry (ms-119 / e-4009 — data-driven, not a
             hardcoded pair). Passing an explicit set keeps this function pure for
             unit tests that don't want disk IO.
+        external_references: optional list of named external facts to expose to
+            the judge (ms-119 / e-3997) — e.g. an application-map index. This is
+            the ONLY sanctioned way to add non-diff context: it must be an
+            implementer-session-INDEPENDENT fact (a repo/registry artifact),
+            never the implementer's narrative / L2 memory (that would reopen the
+            self-review hole the kernel exists to close). Each item is a dict
+            like ``{"id": ..., "kind": ..., "content": ...}``.
     """
     if known_judge_types is None:
         known_judge_types = set(judge_run_review_types().keys())
@@ -169,13 +195,19 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
     if mode not in ("diff", "full-surface"):
         raise ValueError(f"assemble_review_context: mode must be 'diff' or "
                          f"'full-surface', got {mode!r}.")
+    if artifact is None:
+        # default artifact is the mechanically-collected diff (diff mode). A
+        # full-surface caller passes a surface_snapshot_artifact() instead.
+        artifact = {"kind": "diff", "ref": target_ref, "content": diff_text}
     return {
         "review_type": review_type,
         "mode": mode,
         "target_ref": target_ref,
         "origin": {"id": origin_id, "content": origin_content},
-        "artifact": {"kind": "diff", "ref": target_ref, "content": diff_text},
+        "artifact": artifact,
         "independence_contract": INDEPENDENCE_CONTRACT,
+        "external_references": list(external_references or []),
+        "implementer_model": implementer_model or "",
         "gaps": list(gaps or []),
     }
 
@@ -199,8 +231,37 @@ ATTAINMENT_JUDGE_CONTRACT = (
 )
 
 
+def judge_model_independence(implementer_model, judge_model):
+    """Structural check that the judge model differs from the implementer model
+    (ms-119 / e-3988).
+
+    Reviewer independence (AX 原典 §2) is weaker when the same model both writes
+    and judges — a shared prior blind spot survives. The /beacon-review-run Skill
+    defaults the judge to a different model, but that was散文-only; this makes the
+    check callable so it can run structurally.
+
+    Returns a dict: ``{"ok": bool, "reason": str}``. ``ok`` is False (independence
+    at risk) when both models are known and equal. Unknown implementer model
+    (``""``) → ``ok`` True with an advisory reason (can't compare), so the check
+    never hard-blocks on missing info.
+    """
+    im = (implementer_model or "").strip().lower()
+    jm = (judge_model or "").strip().lower()
+    if not im:
+        return {"ok": True, "reason": "implementer_model unknown — cannot compare "
+                "(set BEACON_IMPLEMENTER_MODEL to enable the check)."}
+    if not jm:
+        return {"ok": True, "reason": "judge_model unknown — cannot compare."}
+    if im == jm:
+        return {"ok": False, "reason": f"judge model ({jm}) == implementer model "
+                f"({im}); a shared prior blind spot survives. Pick a different "
+                f"judge model (--models) or confirm explicitly."}
+    return {"ok": True, "reason": f"judge ({jm}) != implementer ({im})."}
+
+
 def assemble_attainment_context(*, target_id, spec_origin_id, spec_content,
-                                criteria, target_ref, diff_text="", gaps=None):
+                                criteria, target_ref, diff_text="", gaps=None,
+                                implementer_model=""):
     """Assemble the 目的達成 evidence-generation bundle for an independent judge
     (ms-119 / e-4005).
 
@@ -234,6 +295,7 @@ def assemble_attainment_context(*, target_id, spec_origin_id, spec_content,
         "verdict_ownership": "human",
         "judge_contract": ATTAINMENT_JUDGE_CONTRACT,
         "independence_contract": INDEPENDENCE_CONTRACT,
+        "implementer_model": implementer_model or "",
         "gaps": list(gaps or []),
     }
 

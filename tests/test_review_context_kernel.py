@@ -128,11 +128,16 @@ def test_cli_rejects_origin_doc_with_ax():
     assert "skills/ax-review/principles.md" in p.stderr
 
 
-def test_cli_rejects_unsupported_full_surface_mode():
+def test_cli_full_surface_mode_now_supported():
+    # ms-119 / e-3987: full-surface was a rejected follow-up; it now collects a
+    # surface snapshot. --pr is ignored in this mode (surface, not change-scoped).
     p = _run_review_context({"BEACON_REVIEW_TYPE": "ax", "BEACON_PR": "1",
                              "BEACON_MODE": "full-surface"})
-    assert p.returncode == 1
-    assert "full-surface" in p.stderr
+    assert p.returncode == 0, p.stderr
+    import json as _json
+    bundle = _json.loads(p.stdout)
+    assert bundle["mode"] == "full-surface"
+    assert bundle["artifact"]["kind"] == "surface-snapshot"
 
 
 def test_cli_rejects_unknown_mode_cleanly_not_traceback():
