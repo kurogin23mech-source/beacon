@@ -126,18 +126,40 @@ class TestDisposableProject(unittest.TestCase):
         self.assertEqual(["p-3"], seen)
         self.assertEqual([], c.archived)  # default cleanup NOT used
 
-    def test_cleanup_failure_does_not_mask_body(self):
+    def test_custom_cleanup_exception_propagates(self):
+        # ms-123 review: a custom teardown that raises must NOT be hidden — it
+        # propagates out of the context manager (the failure is visible).
         c = _FakeClient()
 
         def boom_cleanup(cl, pid):
             raise RuntimeError("cleanup failed")
 
-        # The default cleanup swallows errors; a custom one that raises would
-        # propagate, but the body result should still surface first. Here we
-        # verify the default path swallows so the body's success is preserved.
-        with cwg.disposable_project(c, "p-4", "temp"):
-            pass
-        self.assertEqual(["p-4"], c.archived)
+        with self.assertRaises(RuntimeError):
+            with cwg.disposable_project(c, "p-4", "temp", cleanup=boom_cleanup):
+                pass
+
+    def test_default_cleanup_swallows_but_warns_on_failure(self):
+        # ms-123 review (AX+maintainability consensus): the DEFAULT cleanup
+        # swallows so it never masks the test body's result, but it must SURFACE
+        # the failure on stderr (a failed cleanup is the leak this guards) with a
+        # manual-recovery command — not silently swallow.
+        import io
+        import contextlib
+
+        class _FailingCleanupClient(_FakeClient):
+            def issue_bus_envelope(self, project_id, *, tier, actions_authorized):
+                raise RuntimeError("envelope refused")
+
+        c = _FailingCleanupClient()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with cwg.disposable_project(c, "p-5", "temp"):
+                pass
+        msg = err.getvalue()
+        self.assertIn("p-5", msg)
+        self.assertIn("FAILED", msg)
+        self.assertIn("beacon project cleanup --confirm", msg)
+        self.assertEqual([], c.archived)  # archive never happened
 
 
 if __name__ == "__main__":

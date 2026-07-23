@@ -11,7 +11,7 @@ garbage accumulates again. So this module closes the tap in two layers, per
 the user's "構造で防ぐ" principle (close it with a code constraint, not a
 prompt request):
 
-  第一層 (structure) — ``guard_project_create``: a hard barrier at the single
+  第一層 (structure) — ``guard_prod_project_write``: a hard barrier at the single
     choke point (``ApiClient.create_project``). In a test context, creating a
     project on the production cloud raises instead of writing. A test
     physically cannot leak a prod project. This is the primary defense.
@@ -106,8 +106,16 @@ def _default_cleanup(client, project_id: str) -> None:
             project_id, tier="T1", actions_authorized=["project.archive"],
         )
         client.archive_project(project_id, env)
-    except Exception:
-        pass
+    except Exception as e:
+        # ms-123 review (AX + maintainability consensus): swallow so a teardown
+        # failure never masks the test's own result, but NEVER silently — a
+        # failed cleanup IS the leak this module exists to prevent, so surface
+        # the fact + the manual recovery command. Silent-swallow made the leak
+        # recur under a "guarded" label.
+        import sys as _sys
+        print(f"cloud_write_guard: cleanup of {project_id} FAILED ({e}). "
+              f"手動で archive してください: beacon project cleanup --confirm",
+              file=_sys.stderr)
 
 
 @contextlib.contextmanager
@@ -127,7 +135,7 @@ def disposable_project(
     envelope path). The teardown is a ``finally``, so a crashing test body
     still cleans up: the leak vector is structurally removed.
 
-    Note: ``create_project`` still routes through :func:`guard_project_create`,
+    Note: ``create_project`` still routes through :func:`guard_prod_project_write`,
     so pointing this at the production cloud from a test remains blocked unless
     the author has explicitly set ``BEACON_ALLOW_PROD_TEST_WRITE=1``.
     """

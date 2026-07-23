@@ -15965,9 +15965,22 @@ def cmd_project_cleanup():
 
     confirm = os.environ.get("BEACON_CLEANUP_CONFIRM", "") == "1"
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
-    try:
-        limit = int(os.environ.get("BEACON_CLEANUP_LIMIT", "") or 0)
-    except ValueError:
+    # ms-123 AX finding: fail-closed on a bad --limit. Previously a non-numeric
+    # value fell to limit=0 → "no limit" → --confirm mass-archived ALL candidates.
+    # An invalid value now errors; only an ABSENT limit means "no cap" (explicit).
+    _limit_raw = (os.environ.get("BEACON_CLEANUP_LIMIT", "") or "").strip()
+    if _limit_raw:
+        try:
+            limit = int(_limit_raw)
+        except ValueError:
+            print(f"Error: --limit の値が不正です: '{_limit_raw}'. 正の整数を "
+                  f"指定してください (例: --limit 5)。", file=sys.stderr)
+            sys.exit(1)
+        if limit <= 0:
+            print(f"Error: --limit は正の整数です (受領: {limit})。",
+                  file=sys.stderr)
+            sys.exit(1)
+    else:
         limit = 0
     plan = project_cleanup.build_archive_plan(candidates, limit=limit or None)
 

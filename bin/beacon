@@ -6360,7 +6360,19 @@ EOF
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
                         --confirm) _confirm="1"; shift ;;
-                        --limit) _limit="${2:-}"; shift 2 ;;
+                        --limit)
+                            # ms-123 AX finding: fail-closed on a bad --limit so a
+                            # typo can't degrade the safety valve to "unlimited"
+                            # and mass-archive under --confirm. Require a positive
+                            # integer; reject empty / non-numeric with Usage.
+                            _limit="${2:-}"
+                            case "$_limit" in
+                                ''|*[!0-9]*)
+                                    echo "Error: --limit は正の整数が必要です (受領: '${_limit}')" >&2
+                                    echo "Usage: beacon project cleanup [--confirm] [--limit N] [--json]" >&2
+                                    exit 1 ;;
+                            esac
+                            shift 2 ;;
                         --json) _json="1"; shift ;;
                         -h|--help)
                             echo "Usage: beacon project cleanup [--confirm] [--limit N] [--json]"
@@ -6368,7 +6380,9 @@ EOF
                             echo "  Default is DRY-RUN (shows the plan, changes nothing)."
                             echo "  --confirm actually archives (envelope-signed, reversible via unarchive)."
                             exit 0 ;;
-                        *) echo "Unknown flag: $1"; exit 1 ;;
+                        *) echo "Unknown flag: $1" >&2
+                           echo "Usage: beacon project cleanup [--confirm] [--limit N] [--json]" >&2
+                           exit 1 ;;
                     esac
                 done
                 BEACON_JSON="$_json" BEACON_CLEANUP_CONFIRM="$_confirm" \
