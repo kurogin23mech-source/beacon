@@ -16015,6 +16015,31 @@ def cmd_push_list():
             print(f"  {p['summary']}")
 
 
+def cmd_project_rename():
+    """Rename the project — change its display name after creation (ms-122
+    e-4033).
+
+    beacon project rename <new-name>
+
+    A project's name is set once at ``beacon init`` and could not be changed
+    afterward, so a project whose purpose drifted kept a stale name. This
+    updates the display name in place. In cloud mode ``save_project`` writes the
+    whole project document, so the server-side display name (dashboard / Web UI
+    / project directory) follows the same rename — no separate step."""
+    new_name = os.environ.get("BEACON_NEW_NAME", "").strip()
+    if not new_name:
+        print("Usage: beacon project rename <new-name>", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    old = data.get("name", "")
+    if new_name == old:
+        print(f"プロジェクト名は既に '{new_name}' です (変更なし)。")
+        return
+    data["name"] = new_name
+    save_project(data, op={"op": "project_rename", "old": old, "new": new_name})
+    print(f"プロジェクト名を変更しました: {old or '(無名)'} → {new_name}")
+
+
 def cmd_project_archive():
     """Archive the current project (sets archived: true in project.json)."""
     data = load_project()
@@ -24249,6 +24274,7 @@ if __name__ == "__main__":
         "update": cmd_update,
         "search": cmd_search,
         "cycle_status": cmd_cycle_status,
+        "project_rename": cmd_project_rename,      # ms-122 e-4033
         "project_archive": cmd_project_archive,
         "deploy_record": cmd_deploy_record,
         "deploy_list": cmd_deploy_list,
