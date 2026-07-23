@@ -206,20 +206,29 @@ def build_claim_views(
     my_identities: Iterable[str] = (),
 ) -> dict[str, dict]:
     """Build the claim view for EVERY Target across occupations, keyed by
-    target id. Walks ``occupation.iter_target_records`` (milestones +
-    opportunities + …) so the caller gets the whole project's claim map without
-    branching on profession. Targets without an ``id`` are skipped."""
+    target id.
+
+    Walks every Target collection the decomposition registry knows about
+    (``occupation.TARGET_DECOMPOSITION``: milestones + opportunities + accounts
+    + …) so the map covers milestone / 商談 / 顧客 alike — SPEC AC1 asks for the
+    顧客 = account class explicitly. This is deliberately WIDER than
+    ``occupation.iter_target_records`` (milestones + opportunities only — its
+    contract is session-log aggregation, where accounts are not "targets"). A
+    new occupation's Target collection is picked up automatically once it
+    registers in the decomposition registry, with no change here. Targets
+    without an ``id`` are skipped."""
     views: dict[str, dict] = {}
-    for target in occupation.iter_target_records(data):
-        view = build_claim_view(
-            target,
-            live_session_ids=live_session_ids,
-            my_session_id=my_session_id,
-            my_identities=my_identities,
-        )
-        tid = view["target_id"]
-        if tid:
-            views[tid] = view
+    for coll in occupation.TARGET_DECOMPOSITION:
+        for target in data.get(coll, []) or []:
+            view = build_claim_view(
+                target,
+                live_session_ids=live_session_ids,
+                my_session_id=my_session_id,
+                my_identities=my_identities,
+            )
+            tid = view["target_id"]
+            if tid:
+                views[tid] = view
     return views
 
 
