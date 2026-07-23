@@ -1922,6 +1922,97 @@ def cmd_target_list():
             print(f"      intent: {m.get('intent')}")
 
 
+def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = "") -> None:
+    """Emit the 目的達成 evidence-generation bundle for a context-zero judge
+    (ms-119 / e-4005).
+
+    Resolves the target's SPEC 原典 + criteria mechanically and prints the bundle
+    as JSON, so /beacon-review-run (attainment mode) can hand it to a fresh
+    subagent that verifies each criterion against real code. The bundle carries
+    no implementer narrative — the whole point is that the evidence is NOT the
+    implementer's self-report.
+    """
+    import review_spine
+    if not target_id:
+        print("Error: --type attainment needs --target <ms-XX|op-X> (its 原典 is "
+              "the target's SPEC, resolved automatically).", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        target = core._find_approval_target(data, target_id)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    kind = core._approval_target_kind(target_id)
+
+    gaps = []
+    spec_doc = _spec_doc_for_target(target_id, kind)
+    if spec_doc:
+        spec_origin_id = spec_doc.get("doc_id", "") or spec_doc.get("id", "")
+        # list_documents() may return metadata without the body — fetch the full
+        # doc so the judge gets the whole SPEC 原典, never a truncated one.
+        spec_content = spec_doc.get("content", "") or ""
+        if not spec_content.strip() and spec_origin_id:
+            try:
+                full = get_store().get_document(spec_origin_id)
+                if full:
+                    spec_content = full.get("content", "") or ""
+            except Exception:
+                pass
+        if not spec_content.strip():
+            gaps.append(f"SPEC 原典 {spec_origin_id} は本文が空です。目的達成の照合"
+                        f"基準が弱く、judge は intent 推定に留まります (SPEC § 方針5)。")
+    else:
+        spec_origin_id = ""
+        spec_content = ""
+        gaps.append(f"{target_id} に SPEC 原典が紐づいていません。判定は target の "
+                    f"objective / acceptance と実コードだけが根拠になります "
+                    f"(hard-block しない、SPEC § 方針5)。")
+
+    # criteria: the target's own written success conditions, if any. The SPEC
+    # (origin) carries §やる / 受入条件 the judge extracts; these are extra
+    # structured criteria surfaced explicitly.
+    criteria = []
+    if (target.get("objective") or "").strip():
+        criteria.append({"source": "objective", "text": target["objective"].strip()})
+    if (target.get("acceptance_criteria") or "").strip():
+        criteria.append({"source": "acceptance_criteria",
+                         "text": target["acceptance_criteria"].strip()})
+
+    # optional supporting diff (attainment verifies against full code, so the
+    # diff is supplementary, not the sole artifact).
+    diff_text = ""
+    target_ref = target_id
+    if pr and diff_ref:
+        print("Error: --pr and --diff-ref are mutually exclusive.", file=sys.stderr)
+        sys.exit(1)
+    if pr:
+        target_ref = f"{target_id} (PR #{pr})"
+        proc = subprocess.run(["gh", "pr", "diff", pr], capture_output=True, text=True)
+        if proc.returncode != 0:
+            print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+        diff_text = proc.stdout
+    elif diff_ref:
+        target_ref = f"{target_id} ({diff_ref})"
+        proc = subprocess.run(["git", "diff", diff_ref], capture_output=True, text=True)
+        if proc.returncode != 0:
+            print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+        diff_text = proc.stdout
+
+    bundle = review_spine.assemble_attainment_context(
+        target_id=target_id,
+        spec_origin_id=spec_origin_id,
+        spec_content=spec_content,
+        criteria=criteria,
+        target_ref=target_ref,
+        diff_text=diff_text,
+        gaps=gaps,
+    )
+    print(json.dumps(bundle, ensure_ascii=False))
+
+
 def cmd_review_context():
     """Assemble the review-kernel bundle for an independent judge (ms-119 e-3947).
 
@@ -1932,12 +2023,14 @@ def cmd_review_context():
     their own intent into the judge's input.
 
     Env:
-        BEACON_REVIEW_TYPE: "ax" | "philosophy".
+        BEACON_REVIEW_TYPE: "ax" | "philosophy" | "attainment".
         BEACON_DIFF_REF:    git ref range (e.g. "origin/main...HEAD"); or
         BEACON_PR:          a PR number (uses `gh pr diff`).
         BEACON_ORIGIN_DOC:  doc-id of the 原典 (required for philosophy; the SPEC
                             / vision the implementation is checked against;
                             rejected with --type ax, whose 原典 is fixed).
+        BEACON_TARGET_ID:   target id (ms-XX / op-X) — required for attainment
+                            (its 原典 = the target's SPEC, resolved automatically).
         BEACON_MODE:        "diff" (only supported value; full-surface needs a
                             surface-snapshot collector that is a follow-up).
     """
@@ -1946,9 +2039,20 @@ def cmd_review_context():
     diff_ref = os.environ.get("BEACON_DIFF_REF", "").strip()
     pr = os.environ.get("BEACON_PR", "").strip()
     origin_doc = os.environ.get("BEACON_ORIGIN_DOC", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
     mode = os.environ.get("BEACON_MODE", "diff").strip() or "diff"
 
     gaps = []
+
+    # ms-119 / e-4005: 目的達成 evidence generation. Unlike ax / philosophy
+    # (advisory findings), attainment hands a context-zero judge the target's
+    # SPEC + criteria so it verifies attainment against REAL code and produces
+    # met/partial/not-met evidence — the human then owns the verdict (approve is
+    # e-4006-gated). Handled as a self-contained branch (its 原典 is the target's
+    # SPEC, resolved from --target, not --origin-doc).
+    if review_type == review_spine.REVIEW_ATTAINMENT:
+        _emit_attainment_context(target_id, pr=pr, diff_ref=diff_ref)
+        return
 
     # --- early input validation (ms-119 e-3947 dogfood: close silent no-ops so
     # the review capability's own CLI doesn't ship the defects it exists to
@@ -10412,6 +10516,25 @@ def _spec_exists_for_ms(ms_id: str) -> bool:
         if doc.get("scope") == "spec" and doc.get("milestone") == ms_id:
             return True
     return False
+
+
+def _spec_doc_for_target(target_id: str, kind: str) -> Optional[dict]:
+    """Return the first spec-scoped document attached to a target, or None.
+
+    ms-119 / e-4005: the 目的達成 judge needs the SPEC 原典 (its §やる / 受入条件)
+    to verify attainment against. Milestones carry a ``milestone`` field on the
+    doc; operations carry ``operation``. Best-effort: transport failure → None."""
+    if not target_id:
+        return None
+    field = "milestone" if kind == "milestone" else "operation"
+    try:
+        docs = get_store().list_documents()
+    except Exception:
+        return None
+    for doc in docs:
+        if doc.get("scope") == "spec" and doc.get(field) == target_id:
+            return doc
+    return None
 
 
 def _spec_exists_for_op(op_id: str) -> bool:

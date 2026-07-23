@@ -557,20 +557,21 @@ cmd_review_context() {
     # ms-119 e-3947: emit the review-kernel bundle (原典 + mechanical diff only)
     # for an independent judge subagent. See /beacon-review-run.
     ensure_project
-    local review_type="" diff_ref="" pr="" origin_doc="" mode="diff"
+    local review_type="" diff_ref="" pr="" origin_doc="" mode="diff" target=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --type)       review_type="${2:-}"; shift 2 ;;
             --diff-ref)   diff_ref="${2:-}";    shift 2 ;;
             --pr)         pr="${2:-}";          shift 2 ;;
             --origin-doc) origin_doc="${2:-}";  shift 2 ;;
+            --target)     target="${2:-}";      shift 2 ;;
             --mode)       mode="${2:-}";        shift 2 ;;
             -?*)          _guard_flag "$1" ;;
-            *)            _guard_positional "$1" "Usage: beacon review context --type <ax|philosophy> [--pr <n> | --diff-ref <base...head>] [--origin-doc <doc-id>] [--mode diff]  (このコマンドは flag のみを取ります。--type <値> の形で渡してください)" ;;
+            *)            _guard_positional "$1" "Usage: beacon review context --type <ax|philosophy|attainment> [--pr <n> | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--mode diff]  (このコマンドは flag のみを取ります。--type <値> の形で渡してください)" ;;
         esac
     done
     BEACON_REVIEW_TYPE="$review_type" BEACON_DIFF_REF="$diff_ref" BEACON_PR="$pr" \
-        BEACON_ORIGIN_DOC="$origin_doc" BEACON_MODE="$mode" \
+        BEACON_ORIGIN_DOC="$origin_doc" BEACON_TARGET_ID="$target" BEACON_MODE="$mode" \
         python3 "$COMMANDS_PY" review_context
 }
 
@@ -3079,8 +3080,8 @@ case "${1:-}" in
     review)
         case "${2:-}" in
             context)  shift 2; cmd_review_context "$@" ;;
-            *)        echo "Usage: beacon review context --type <ax|philosophy> [--pr <n> | --diff-ref <base...head>] [--origin-doc <doc-id>] [--mode diff]  (独立 judge 用の review-kernel bundle を出力; ms-119)" >&2
-                      echo "  注: この review は judge を走らせる bundle 生成のみ。目的達成レビュー(target 遷移の人間承認)は 'beacon target'、完了ゲートは 'beacon milestone done --review'。" >&2
+            *)        echo "Usage: beacon review context --type <ax|philosophy|attainment> [--pr <n> | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--mode diff]  (独立 judge 用の review-kernel bundle を出力; ms-119)" >&2
+                      echo "  注: ax/philosophy は助言 judge の bundle、attainment は目的達成の証拠を独立 judge に生成させる bundle (verdict は human: 'beacon target approve')。完了ゲートは 'beacon milestone done --review'。" >&2
                       exit 1 ;;
         esac
         ;;

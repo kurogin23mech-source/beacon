@@ -180,6 +180,64 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
     }
 
 
+# The attainment judge's contract (ms-119 / e-4005). Unlike AX / philosophy
+# (which produce advisory findings), the attainment judge produces the *evidence*
+# a human weighs before pressing approve. Two invariants make this non-circular:
+# the judge verifies each SPEC criterion against REAL code / behavior (not the
+# implementer's self-report), and it owns ONLY the evidence — the final verdict
+# stays with the human (SPEC § 方針2, enforced by the e-4006 approve guard).
+ATTAINMENT_JUDGE_CONTRACT = (
+    "あなたは、対象 target が SPEC の目的 (§やる) / 受入条件を実際に満たしたかを、"
+    "実装者の自己申告ではなく実コード・実挙動から独立に検証する judge です。"
+    "この bundle (SPEC 原典 + 受入条件 + 対象参照 + 任意の差分) を入力に、各受入条件を "
+    "met / partial / not-met で判定し、判定ごとに『どのコード / テスト / 実挙動を"
+    "確認したか』の根拠を必ず添え、総合 verdict (attained / not-attained) を出して"
+    "ください。重要: 最終 verdict の確定権は human にあります (SPEC 方針2)。あなたは"
+    "証拠と判定案を生成するだけで、target の状態遷移を確定させません。実装者セッション"
+    "の会話文脈・コミットの意図説明・『本当はこうするつもり』を一切参照しないでください "
+    "(文脈ゼロの計器)。"
+)
+
+
+def assemble_attainment_context(*, target_id, spec_origin_id, spec_content,
+                                criteria, target_ref, diff_text="", gaps=None):
+    """Assemble the 目的達成 evidence-generation bundle for an independent judge
+    (ms-119 / e-4005).
+
+    The 目的達成 review's verdict is the human's, but its *evidence* must not be
+    the implementer's self-report (this session over-claimed ms-119 done before
+    an independent judge caught it). This bundle carries ONLY the SPEC 原典, the
+    criteria to check, and an optional supporting diff — never implementer
+    narrative — so a context-zero subagent can verify each criterion against real
+    code and produce met/partial/not-met evidence. The human then approves via
+    ``beacon target approve`` (human-gated by e-4006).
+
+    Pure: callers collect spec_content / diff_text mechanically and pass them in.
+
+    Args:
+        target_id: the target being reviewed (ms-XX / op-X).
+        spec_origin_id: doc-id of the SPEC 原典 (or "" if the target has none).
+        spec_content: full SPEC text (never a summary); "" if no SPEC.
+        criteria: list of criterion dicts to verify, e.g.
+            ``[{"source": "acceptance_criteria", "text": "..."}]``.
+        target_ref: what was reviewed (target id / ref range).
+        diff_text: optional mechanically-collected diff for supporting context.
+        gaps: optional gentle gaps (e.g. missing SPEC 原典, 方針5).
+    """
+    return {
+        "review_type": REVIEW_ATTAINMENT,
+        "target_id": target_id,
+        "target_ref": target_ref,
+        "origin": {"id": spec_origin_id, "content": spec_content},
+        "criteria": list(criteria or []),
+        "artifact": {"kind": "diff", "ref": target_ref, "content": diff_text},
+        "verdict_ownership": "human",
+        "judge_contract": ATTAINMENT_JUDGE_CONTRACT,
+        "independence_contract": INDEPENDENCE_CONTRACT,
+        "gaps": list(gaps or []),
+    }
+
+
 def review_bindings_for_transition(target_kind, old_state, new_state, *,
                                    has_spec=False, gated=False):
     """Return the review bindings that apply to a target lifecycle transition.
