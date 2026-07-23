@@ -810,6 +810,16 @@ def cmd_init():
         data = sales_entities.build_sales_project(
             name, objective, retro_day=retro_day,
             disclosure_policy=disclosure_policy)
+    elif profession in ("backoffice", "back-office"):
+        # ms-122 e-3958: back-office is the first DATA-defined occupation — its
+        # target-classes (契約 / 評価 / 月次決算 / 勤怠ウォッチ) come from a
+        # descriptor seed, not a code container. This supersedes the ms-121
+        # milestone-流用 stub. The owner edits target_classes afterwards to
+        # tailor fields / phases without touching Beacon code.
+        import backoffice_seed
+        data = backoffice_seed.build_backoffice_project(
+            name, objective, retro_day=retro_day,
+            disclosure_policy=disclosure_policy)
     elif profession in ("", "dev"):
         data = {
             "name": name,
@@ -820,8 +830,8 @@ def cmd_init():
             "disclosure_policy": disclosure_policy,
         }
     else:
-        print(f"Error: unknown profession '{profession}' (valid: dev, sales)",
-              file=sys.stderr)
+        print(f"Error: unknown profession '{profession}' "
+              "(valid: dev, sales, backoffice)", file=sys.stderr)
         sys.exit(1)
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -829,6 +839,9 @@ def cmd_init():
     print(f"Created {pf}")
     if profession == "sales":
         print("  profession = sales (営業スキーマ: opportunities / accounts)")
+    elif profession in ("backoffice", "back-office"):
+        print("  profession = backoffice (記述子で定義: 契約 / 評価 / 月次決算 / "
+              "勤怠ウォッチ)")
     # Visible feedback on the chosen posture (SPEC § acceptance 2 + 3):
     # default-high is silent-but-printed so the user notices, opt-in low
     # gets a single-line confirmation that the OSS-friendly mode is active.
@@ -853,6 +866,9 @@ def cmd_init():
 
     if profession == "sales":
         print("Next: beacon account add / beacon opportunity add")
+    elif profession in ("backoffice", "back-office"):
+        print("Next: beacon target create --class contract --label <名前> "
+              "--field counterparty=<相手方>")
     else:
         print("Next: beacon milestone add")
 
