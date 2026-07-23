@@ -173,6 +173,22 @@ def test_cross_descriptor_duplicate_prefix_flagged():
     assert any("id_prefix" in p for p in result.get("(重複)", []))
 
 
+def test_phase_field_required_is_rejected():
+    # ms-122 AX finding: required on a PHASE field has no enforcement path yet,
+    # so it must be rejected rather than silently ignored.
+    desc = dict(CONTRACT, phases=[
+        {"key": "p1", "label": "P1",
+         "fields": [{"key": "x", "label": "X", "required": True}]},
+    ])
+    problems = td.validate_descriptor(desc)
+    assert any("required" in p and "x" in p for p in problems)
+
+
+def test_base_field_required_still_allowed():
+    # base field required is fine (enforced at create_target).
+    assert td.validate_descriptor(CONTRACT) == []  # counterparty is required base
+
+
 def test_validation_never_raises_on_garbage():
     # Loaders and validators must survive arbitrary shapes.
     assert td.validate_descriptor("not a dict")

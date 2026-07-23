@@ -6411,7 +6411,21 @@ EOF
         case "${2:-}" in
             rename)
                 shift 2
-                BEACON_NEW_NAME="$*" python3 "$COMMANDS_PY" project_rename ;;
+                # ms-122 AX finding: guard flag-shaped args so `beacon project
+                # rename --help` can't rename the project to "--help" (sibling
+                # target commands guard the same way). `--` ends option parsing
+                # so a name that legitimately starts with '-' can still be set.
+                _rn_end=0 _rn_parts=""
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --) _rn_end=1; shift ;;
+                        -?*) if [ "$_rn_end" = "0" ]; then
+                                 _guard_positional "$1" "Usage: beacon project rename <new-name>  (先頭が '-' の名前は -- の後に置いてください)"
+                             else _rn_parts="${_rn_parts:+$_rn_parts }$1"; shift; fi ;;
+                        *) _rn_parts="${_rn_parts:+$_rn_parts }$1"; shift ;;
+                    esac
+                done
+                BEACON_NEW_NAME="$_rn_parts" python3 "$COMMANDS_PY" project_rename ;;
             archive)   python3 "$COMMANDS_PY" project_archive ;;
             unarchive) python3 "$COMMANDS_PY" project_unarchive ;;
             export)

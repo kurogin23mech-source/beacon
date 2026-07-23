@@ -111,8 +111,10 @@ def create_target(data: dict, desc: dict, *, label: str,
                 f"ありません)")
         field_vals[key] = val
 
-    # Required BASE fields must be present at create (per-phase required fields
-    # are checked when their phase is reached, not here).
+    # Required BASE fields must be present at create. (Per-phase fields cannot
+    # be marked required — target_descriptor.validate rejects that — because
+    # there is no advance-time field path to satisfy/enforce them yet, ms-122 AX
+    # finding. So the only 'required' the engine enforces is on base fields.)
     for f in td.base_fields(desc):
         if f.get("required") and not (field_vals.get(f.get("key")) or "") \
                 and field_vals.get(f.get("key")) not in (0, False):

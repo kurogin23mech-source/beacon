@@ -1974,6 +1974,20 @@ def _resolve_descriptor(data: dict, kind: str) -> dict:
                   f"(このプロジェクトは target_classes を1つも宣言していません)",
                   file=sys.stderr)
         sys.exit(1)
+    # ms-122 AX finding: validate the descriptor at the point of use so a
+    # malformed record (unknown field type / duplicate keys / required on a
+    # phase field / missing required keys) fails loudly here instead of silently
+    # producing wrong results downstream. The validator was previously dead code
+    # (no CLI caller); this wires it into every descriptor-driven command.
+    problems = _td.validate_descriptor(desc)
+    if problems:
+        print(f"Error: target-class '{kind}' の記述子に問題があります:",
+              file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        print("  project.json の target_classes を修正してください。",
+              file=sys.stderr)
+        sys.exit(1)
     return desc
 
 

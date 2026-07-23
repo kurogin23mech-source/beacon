@@ -212,15 +212,25 @@ def validate_descriptor(desc: dict) -> list:
         problems.extend(
             _validate_fields(
                 [f for f in (phase.get("fields") or []) if isinstance(f, dict)],
-                label, where=f"phase '{pkey}'"))
+                label, where=f"phase '{pkey}'", allow_required=False))
 
     return problems
 
 
-def _validate_fields(fields: list, label: str, where: str) -> list:
+def _validate_fields(fields: list, label: str, where: str,
+                     *, allow_required: bool = True) -> list:
     """Return problems for a field list: each field needs a non-empty ``key``,
     field keys must be unique within their scope, and a declared ``type`` must
-    be in ``ALLOWED_FIELD_TYPES``."""
+    be in ``ALLOWED_FIELD_TYPES``.
+
+    ``allow_required=False`` additionally rejects ``required: true`` on a field.
+    Used for PHASE fields (ms-122 AX finding): a base field's ``required`` is
+    enforced at ``create_target``, but there is no mechanism yet to SET or
+    enforce a phase field on ``advance`` — so declaring ``required`` on a phase
+    field would be a silent no-op (the descriptor author believes it is
+    enforced, nothing enforces it). Rejecting it in validation turns that false
+    promise into an explicit, discoverable error until an advance-time field
+    path exists (follow-up)."""
     problems: list = []
     seen: set = set()
     for field in fields:
@@ -237,6 +247,11 @@ def _validate_fields(fields: list, label: str, where: str) -> list:
             problems.append(
                 f"[{label}] {where} の field '{fkey}' の type '{ftype}' は未知です "
                 f"(許可: {' / '.join(ALLOWED_FIELD_TYPES)})")
+        if not allow_required and field.get("required"):
+            problems.append(
+                f"[{label}] {where} の field '{fkey}' に required は指定できません "
+                f"(phase field を必須にする充足経路が未実装 — base field で必須化するか "
+                f"advance --field 対応を待ってください)")
     return problems
 
 
