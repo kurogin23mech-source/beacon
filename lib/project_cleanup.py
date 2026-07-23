@@ -132,6 +132,30 @@ def detect_orphan_candidates(
     return candidates
 
 
+def build_archive_plan(
+    candidates: list[dict],
+    *,
+    limit: int | None = None,
+) -> list[dict]:
+    """The ordered list of candidates to archive (ms-123 / e-4028).
+
+    Pure: takes the read-only candidates from ``detect_orphan_candidates``
+    and returns the subset that a confirmed run would archive, in order.
+    ``limit`` (when a positive int) caps the batch — a safety valve so a
+    first confirmed run can archive, say, 5 projects and be inspected before
+    the full sweep. ``None`` / non-positive means "no cap" (whole batch).
+
+    This function decides *what* would be archived; it never archives
+    anything itself (no I/O). The confirm gate (whether to execute the plan
+    at all) lives in the CLI command, mirroring the
+    ``BEACON_PR_MERGE_USER_OVERRIDE`` human-confirmation pattern.
+    """
+    plan = list(candidates)
+    if isinstance(limit, int) and limit > 0:
+        plan = plan[:limit]
+    return plan
+
+
 def format_orphan_report(candidates: list[dict], total_scanned: int) -> str:
     """Human-readable, read-only report of cleanup candidates.
 

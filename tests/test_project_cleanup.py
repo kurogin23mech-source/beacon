@@ -137,6 +137,37 @@ class TestDetectCandidates(unittest.TestCase):
         self.assertEqual(before, batch)  # input rows untouched
 
 
+class TestBuildArchivePlan(unittest.TestCase):
+    def _cands(self, n):
+        return [
+            {"project_id": f"phase4-test-{i}", "name": "phase4-test",
+             "owner": "u", "signals": ["test_named"], "confidence": "medium"}
+            for i in range(n)
+        ]
+
+    def test_no_limit_returns_all(self):
+        cands = self._cands(48)
+        self.assertEqual(48, len(pc.build_archive_plan(cands)))
+        self.assertEqual(48, len(pc.build_archive_plan(cands, limit=None)))
+        self.assertEqual(48, len(pc.build_archive_plan(cands, limit=0)))
+
+    def test_positive_limit_caps_batch(self):
+        cands = self._cands(48)
+        plan = pc.build_archive_plan(cands, limit=5)
+        self.assertEqual(5, len(plan))
+        self.assertEqual(cands[:5], plan)
+
+    def test_limit_larger_than_batch_is_safe(self):
+        cands = self._cands(3)
+        self.assertEqual(3, len(pc.build_archive_plan(cands, limit=99)))
+
+    def test_pure_no_mutation(self):
+        cands = self._cands(4)
+        before = [dict(c) for c in cands]
+        pc.build_archive_plan(cands, limit=2)
+        self.assertEqual(before, cands)
+
+
 class TestFormatReport(unittest.TestCase):
     def test_empty_states_no_change(self):
         out = pc.format_orphan_report([], total_scanned=54)

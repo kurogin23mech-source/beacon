@@ -6352,6 +6352,29 @@ EOF
                 done
                 BEACON_JSON="$_json" python3 "$COMMANDS_PY" project_orphans
                 ;;
+            cleanup)
+                shift 2
+                _json="0"
+                _confirm="0"
+                _limit=""
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --confirm) _confirm="1"; shift ;;
+                        --limit) _limit="${2:-}"; shift 2 ;;
+                        --json) _json="1"; shift ;;
+                        -h|--help)
+                            echo "Usage: beacon project cleanup [--confirm] [--limit N] [--json]"
+                            echo "  Archive throwaway/orphan projects (ms-123 e-4028)."
+                            echo "  Default is DRY-RUN (shows the plan, changes nothing)."
+                            echo "  --confirm actually archives (envelope-signed, reversible via unarchive)."
+                            exit 0 ;;
+                        *) echo "Unknown flag: $1"; exit 1 ;;
+                    esac
+                done
+                BEACON_JSON="$_json" BEACON_CLEANUP_CONFIRM="$_confirm" \
+                    BEACON_CLEANUP_LIMIT="$_limit" \
+                    python3 "$COMMANDS_PY" project_cleanup
+                ;;
             export)
                 shift 2
                 _out=""
@@ -6392,7 +6415,7 @@ EOF
                 BEACON_INPUT="$_in" BEACON_TARGET="$_target" BEACON_FORCE="$_force" BEACON_JSON="$_json" \
                     python3 "$COMMANDS_PY" project_import
                 ;;
-            *) echo "Usage: beacon project archive|unarchive|orphans|export|import" ;;
+            *) echo "Usage: beacon project archive|unarchive|orphans|cleanup|export|import" ;;
         esac
         ;;
     reset)
