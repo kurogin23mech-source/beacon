@@ -325,6 +325,19 @@ cross-project (= 別プロジェクト = 別ユーザーの可能性がある相
 
 このフラグは「人間の宛先確認が済んだ」ことを CLI に伝えるだけで、確認そのものは Step 5c/5d の draft + force-confirm で人間が実際に宛先を見て承認する step が担う。フラグと承認 step は一体で扱う (= フラグだけ付けて承認を飛ばさない)。
 
+### Step 3.2: send mode の armed gate 免除フラグ (ms-120 / e-3901 = 自律応答ゲートをフラグ非依存に)
+
+**send mode (= 新規送信、`--in-reply-to` なし) では Step 7 の送信 argv に必ず `--manual` を付ける。**
+
+背景: e-3901 で自律応答ゲートは「`--in-reply-to` の有無」ではなく「session が armed か (= budget 付与済 = 自律モード)」で発火するようになった。これにより armed な自律ループが `--in-reply-to` を省いてゲートを回避する穴が塞がれた反面、**armed session で人間が新規 DM を送る**と（本 Skill 起動 = 人間の明示意思なのに）budget を消費したり cross-user が HOLD されうる。`--manual` は「これは人間が承認した手動送信だ」と CLI に伝え、armed ゲートを免除する（`manual_override` として監査記録に残る）。
+
+| モード | `--manual` |
+|---|---|
+| send mode (新規送信、`--in-reply-to` なし) | **付ける** (= 人間が本 Skill を起動した = 手動承認) |
+| reply mode (`--in-reply-to` あり) | 付けない (= budget gate で連発を抑える。Step 4 で自動 grant する経路が担う) |
+
+non-armed session では `--manual` は無害（ゲート自体が非発火）。cross-user 新規送信では `--manual` と `--recipient-confirmed` を両方付ける (前者=client 側 armed ゲート免除、後者=server 側 consent claim。責務が別なので併存する)。
+
 ---
 
 ## Step 4: budget gate の確認と自動 grant (reply mode のみ)
@@ -495,7 +508,7 @@ template:      pr-review / op-result / なし
 
 ----
 組み立て argv:
-  beacon bus send --channel dm --to <sid> --payload '{"text":"..."}' [--project <id>] [--in-reply-to <eid>] [--action ...] [--recipient-confirmed (= cross-project 新規送信時のみ、Step 3.1)] --json
+  beacon bus send --channel dm --to <sid> --payload '{"text":"..."}' [--project <id>] [--in-reply-to <eid>] [--manual (= send mode 時、Step 3.2)] [--action ...] [--recipient-confirmed (= cross-project 新規送信時のみ、Step 3.1)] --json
 
 送信しますか? (yes / edit / cancel)
 ```

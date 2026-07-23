@@ -141,37 +141,44 @@ def _append_changelog(op: dict) -> None:
         pass  # changelog is best-effort; never block operations
 
 
+_ACKNOWLEDGED_REASON = "(acknowledged: no detailed reason given)"
+
+
 def _require_reason_or_skip(verb: str) -> str:
-    """Gate state-transition verbs (done / observe / restore / etc.) on a
-    written reason being present in the BEACON_REASON env var (e-976).
+    """Gate state-transition / destructive verbs on an unambiguous audit entry.
 
-    Three cases:
+    ms-120 e-3906 (option B): the old design accepted ``--reason ""`` as a
+    silent waiver, but an empty string is ambiguous at read time (deliberate
+    waiver vs. an AI padding the flag to pass the gate) — and a warning never
+    stops an AI that reads exit 0 as success. So the gate now admits exactly two
+    unambiguous states, and rejects the ambiguous empty:
 
-    - ``BEACON_REASON`` not in environ → refuse with exit 1. The CLI dispatcher
-      only sets this env var when ``--reason`` is passed, so a missing var
-      means the operator did not pass the flag at all.
-    - ``BEACON_REASON`` present but empty (``--reason ""``) → accept. The
-      operator has explicitly waived the gate. Discouraged but allowed so the
-      audit trail records a deliberate "no reason" rather than silently going
-      back to the pre-gate behavior.
-    - Any non-empty value → accept and return it unchanged.
+    - Non-empty ``BEACON_REASON`` (``--reason "..."``) → accept, return it.
+    - ``BEACON_ACKNOWLEDGE=1`` (``--acknowledge``) → accept, return a sentinel
+      recording a *deliberate* no-reason. The intent is explicit, not inferred
+      from an empty string.
+    - Neither, or an empty ``BEACON_REASON`` → refuse with exit 1 and a
+      recoverable message (原則 3) naming both valid paths.
 
     Args:
         verb: Human-facing verb for the error message (e.g. ``"task done"``).
 
     Returns:
-        The reason string (possibly empty when explicitly waived).
+        The reason string, or the acknowledgment sentinel.
     """
-    if "BEACON_REASON" not in os.environ:
-        print(
-            f"Error: --reason is required for `{verb}`. "
-            f"Pass --reason \"...\" to record why, or --reason \"\" to "
-            f"acknowledge the action without a written reason "
-            f"(discouraged — retro becomes harder).",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    return os.environ.get("BEACON_REASON", "")
+    if os.environ.get("BEACON_ACKNOWLEDGE") == "1":
+        return _ACKNOWLEDGED_REASON
+    reason = os.environ.get("BEACON_REASON", "")
+    if reason.strip():
+        return reason
+    print(
+        f"Error: `{verb}` requires an audit entry. Pass --reason \"...\" to "
+        f"record why, or --acknowledge to deliberately proceed without a "
+        f"written reason. An empty --reason \"\" is no longer accepted "
+        f"(it was ambiguous — use --acknowledge to waive on purpose).",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 # ms-81 e-1916: forcing function — warn (don't block) when a write targets
@@ -4936,14 +4943,20 @@ def cmd_trek_create():
     if not email:
         print(
             "Error: BEACON_USER_EMAIL is required to create a trek "
-            "(= recorded as creator/leader member email)",
+            "(= recorded as creator/leader member email).\n"
+            "  How to set: it is normally inherited from a logged-in session — "
+            "run `beacon auth login` (or from an active bclaude session), or "
+            "export BEACON_USER_EMAIL=<you@example.com> for a scripted call.",
             file=sys.stderr,
         )
         sys.exit(1)
     if not session_id:
         print(
             "Error: BEACON_SESSION_ID is required to create a trek "
-            "(= the session that creates becomes initial leader; SPEC 方針 9)",
+            "(= the session that creates becomes initial leader; SPEC 方針 9).\n"
+            "  How to set: it is minted per bclaude session — run this from an "
+            "active bclaude session, or export BEACON_SESSION_ID=<session-id> "
+            "(see `beacon session id`) for a scripted call.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -7923,7 +7936,7 @@ def cmd_trek_task_add():
       BEACON_TREK_ID                (required, e.g. tk-abcd1234)
       BEACON_TREK_TASK_TARGET       (required, "<project-id>:<ms-id>")
       BEACON_DESCRIPTION            (required, the task description)
-      BEACON_PRIORITY               (optional, lowest/low/middle/high/highest)
+      BEACON_PRIORITY               (optional, lowest/low/medium/high/highest; middle=alias)
       BEACON_MOTIVATION             (optional)
       BEACON_ACCEPTANCE_CRITERIA    (optional)
       BEACON_TYPE                   (optional, default "task")
@@ -16683,9 +16696,16 @@ def _doctor_warning_to_signal(warn_text: str) -> dict:
     }
 
 
-def cmd_help_json():
-    """Output beacon CLI command reference as machine-readable JSON."""
-    commands = [
+def _help_registry():
+    """Single source of truth for the CLI command reference (ms-120 e-3897).
+
+    Every help surface — machine-readable `beacon help --json`, the top-level
+    `beacon --help` text, and each subcommand's `--help` — renders from THIS
+    one list. There is no second hand-maintained help text to drift against
+    (AX 原則 1/3: ヘルプが信頼できないと AI は毎回ソースを読む羽目になる /
+    原則 6: 乖離は検出でなく構造で不能にする)。
+    """
+    return [
         {"command": "beacon init", "flags": [], "description": "Initialize .beacon/ in current directory"},
         {"command": "beacon setup", "flags": [], "description": "First-time setup wizard (auth + hooks + project)"},
         {"command": "beacon status", "flags": ["--json", "--ms <id>"], "description": "Show current status"},
@@ -16700,9 +16720,11 @@ def cmd_help_json():
         {"command": "beacon milestone occupations", "flags": ["--ms <id>", "--json"], "description": "List occupation event log (ms-81)"},
         {"command": "beacon milestone rename <id> <title>", "flags": [], "description": "Rename a milestone"},
         {"command": "beacon milestone depends <id> --on <id>", "flags": [], "description": "Declare milestone dependency"},
-        {"command": "beacon milestone purge <id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete a milestone record (recovery for duplicate-ID corruption; Issue #14)"},
-        {"command": "beacon entry purge <e-id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete an entry record (recovery for duplicate-ID corruption; e-863)"},
-        {"command": "beacon operation purge <op-id> --reason <text>", "flags": ["--index <n>", "--json"], "description": "Hard-delete an operation record (recovery for duplicate-ID corruption; e-863)"},
+        {"command": "beacon milestone purge <id> --reason <text>", "flags": ["--index <n: 1-based, which duplicate to remove>", "--json"], "description": "Hard-delete a milestone record (recovery for duplicate-ID corruption; Issue #14). --index is required only when the id appears more than once; it selects which copy (1-based)."},
+        {"command": "beacon entry purge <e-id> --reason <text>", "flags": ["--index <n: 1-based, which duplicate to remove>", "--json"], "description": "Hard-delete an entry record (recovery for duplicate-ID corruption; e-863). --index is required only when the id appears more than once; it selects which copy (1-based)."},
+        {"command": "beacon operation purge <op-id> --reason <text>", "flags": ["--index <n: 1-based, which duplicate to remove>", "--json"], "description": "Hard-delete an operation record (recovery for duplicate-ID corruption; e-863). --index is required only when the id appears more than once; it selects which copy (1-based)."},
+        {"command": "beacon operation create <title>", "flags": ["--status <todo|open>", "--schedule <daily|weekdays|weekly>", "--log-source <name>", "--activation-hint <text>", "--objective <text>", "--acceptance-criteria <text>", "--priority <p>"], "description": "Create an Operation (--status open to start active; e-3907 — alias: operation open)"},
+        {"command": "beacon incident add <title> -o <op-id>", "flags": ["--desc <text>", "--priority <p>"], "description": "Create an incident under an Operation (e-3907 — alias: incident open)"},
         {"command": "beacon operation approve <op-id> --spec <doc-id>", "flags": ["--expires-at YYYY-MM-DD", "--ttl-seconds N", "--json"], "description": "Mint T2 envelope from SPEC doc's approved_actions list (ms-60 / e-1339)"},
         {"command": "beacon operation revoke <op-id>", "flags": ["--envelope-id ENV", "--reason TEXT", "--json"], "description": "Invalidate the active T2 envelope (auto-picks active if --envelope-id omitted)"},
         {"command": "beacon operation envelope verify <op-id> <action>", "flags": ["--json"], "description": "AI self-check: is <action> permitted by the active envelope's approved_actions? (ms-60 / e-1340)"},
@@ -16712,10 +16734,13 @@ def cmd_help_json():
         {"command": "beacon task list", "flags": ["--json", "--ms <id>"], "description": "List tasks"},
         {"command": "beacon task update <entry-id>", "flags": ["--ms <ms-id>", "--description <text>", "--status <s>", "--detail <text>", "--motivation <text>", "--acceptance-criteria <text>", "--behavior <text>", "--priority <p>"], "description": "Update task fields (description / status / detail / motivation / acceptance_criteria / behavior / priority) or move to another milestone"},
         {"command": "beacon log [message]", "flags": ["--prepare", "--finalize", "-m <ms-id>", "--progress <n>", "--summary <text>"], "description": "Record HEAD commit to active milestone"},
+        {"command": "beacon dm send", "flags": ["--to <sid>", "--to-user <uid>", "--payload <json>", "--in-reply-to <eid>", "--manual", "--recipient-confirmed", "--action <name>", "--project <id>", "--json"], "description": "Send a DM (canonical DM verb; delegates to bus send --channel dm; e-3899)"},
+        {"command": "beacon dm respond <approve|deny> <event_id>", "flags": ["--project <id>", "--json"], "description": "Decide a pending cross-user DM action envelope (receiver-side; ms-70)"},
+        {"command": "beacon dm audit", "flags": ["--limit <n>", "--project <id>", "--json"], "description": "Read the DM-approval audit log (e-3899 canonical; alias: dm log)"},
         # ms-106 ② — sales job-template entities (profession=sales projects)
         {"command": "beacon account add <name>", "flags": ["--health <text>", "--assignee <user>"], "description": "Add a sales account (顧客; 対象・継続)"},
         {"command": "beacon account list", "flags": ["--json", "--as-project <id>", "--linked"], "description": "List sales accounts (+contacts); --as-project shows only accounts disclosed to that project (fail-closed); --linked pulls accounts disclosed to THIS project from other org projects (cloud mode)"},
-        {"command": "beacon account contact <acc-id> <name>", "flags": ["--role <text>", "--email <text>", "--phone <text>"], "description": "Add a contact (担当者) nested under an account"},
+        {"command": "beacon account contact add <acc-id> <name>", "flags": ["--role <text>", "--email <text>", "--phone <text>"], "description": "Add a contact (担当者) nested under an account (e-3907; bare `contact` form is a deprecated alias)"},
         {"command": "beacon account phase <acc-id> <phase>", "flags": ["--note <text>"], "description": "Declare an account lifecycle phase transition (append-only)"},
         {"command": "beacon account rename <acc-id> <new-name>", "flags": [], "description": "Rename an account (顧客名の変更)"},
         {"command": "beacon account assign <acc-id> <user>", "flags": [], "description": "Set the 担当ユーザー (assignee) on an account"},
@@ -16727,9 +16752,12 @@ def cmd_help_json():
         {"command": "beacon opportunity assign <opp-id> <user>", "flags": [], "description": "Set the 担当ユーザー (assignee) on an opportunity"},
         {"command": "beacon opportunity amount <opp-id> <amount>", "flags": [], "description": "Set an opportunity's 金額 (goal_amount, 円)"},
         {"command": "beacon opportunity describe <opp-id> <text>", "flags": [], "description": "Set an opportunity's 背景/経緯/メモ (free-text; empty clears)"},
+        {"command": "beacon opportunity rename <opp-id> <new-title>", "flags": [], "description": "Rename an opportunity's title (e-3909; parallels milestone rename)"},
         {"command": "beacon acquisition add <title>", "flags": ["--description <text>", "--assignee <user>"], "description": "Add a 顧客獲得ターゲット (取引先の無い有限の獲得・準備作業の器; 営業専用)"},
         {"command": "beacon acquisition list", "flags": ["--json"], "description": "List 顧客獲得ターゲット with their lifecycle status"},
-        {"command": "beacon acquisition status <acq-id> <status>", "flags": [], "description": "Move a 顧客獲得ターゲット along its lifecycle (todo/in_progress/observing/done)"},
+        {"command": "beacon acquisition start <acq-id>", "flags": [], "description": "Move a 顧客獲得ターゲット to in_progress (着手). Named lifecycle verb (ms-120 e-3907); status stays read-only."},
+        {"command": "beacon acquisition observe <acq-id>", "flags": [], "description": "Move a 顧客獲得ターゲット to observing (見守り)."},
+        {"command": "beacon acquisition done <acq-id>", "flags": [], "description": "Mark a 顧客獲得ターゲット done (完了)."},
         {"command": "beacon opportunity phase-prob <phase> <n>", "flags": [], "description": "Set a phase's 成約率 (win probability 0-100; per-company funnel tuning)"},
         {"command": "beacon sales target <user> <amount>", "flags": [], "description": "Set a member's 目標売上 (sales quota; empty amount clears)"},
         {"command": "beacon sales target list", "flags": ["--json"], "description": "List members' 目標売上 with their 見込み売上 (weighted pipeline)"},
@@ -16748,8 +16776,8 @@ def cmd_help_json():
         {"command": "beacon meeting reschedule <mtg-id>", "flags": ["--at <datetime>", "--end <datetime>", "--event-id <id>", "--set-transition"], "description": "Move a meeting (予定変更); --set-transition follows the 遷移日"},
         {"command": "beacon meeting end <mtg-id>", "flags": [], "description": "Mark a meeting ended (idempotent; used by the end-detector Operation)"},
         {"command": "beacon meeting cancel <mtg-id>", "flags": [], "description": "Cancel a scheduled meeting"},
-        {"command": "beacon meeting list <opp-id>", "flags": ["--json"], "description": "List an opportunity's meetings"},
-        {"command": "beacon meeting ended", "flags": ["--now <datetime>", "--json"], "description": "List meetings whose scheduled end has passed but are still scheduled (終了検知 Operation C の候補)"},
+        {"command": "beacon meeting list [<opp-id>]", "flags": ["--json"], "description": "List meetings; <opp-id> optional — omit to list across all opportunities (e-3909)"},
+        {"command": "beacon meeting list-ended", "flags": ["--now <datetime>", "--json"], "description": "List meetings whose scheduled end has passed but are still scheduled (終了検知 Operation C の候補; e-3909 canonical read verb, alias: meeting ended)"},
         {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity vocabulary)"},
         {"command": "beacon phase add <account|opportunity> <name>", "flags": ["--index <n>"], "description": "Add or insert a funnel stage"},
         {"command": "beacon phase rename <account|opportunity> <old> <new>", "flags": [], "description": "Rename a funnel stage (references follow)"},
@@ -16784,7 +16812,7 @@ def cmd_help_json():
         {"command": "beacon skill install", "flags": [], "description": "Install Claude Code Skills to ~/.claude/skills/"},
         {"command": "beacon monitor context", "flags": ["--dry-run"], "description": "Stop hook: context-usage threshold monitor (e-854); --dry-run skips note/state writes"},
         # ms-69 e-1652+: Trek = cross-project / cross-session collaboration area
-        {"command": "beacon trek create <title>", "flags": ["--type temporary|persistent", "--description <text>", "--goal-state <criterion>", "--json"], "description": "Create a trek (cross-project協奏作業領域); caller becomes leader (ms-69). --goal-state は ms-75/e-1865 完了マーカー"},
+        {"command": "beacon trek create <title>", "flags": ["--type temporary|persistent (default persistent)", "--description <text>", "--goal-state <criterion>", "--json"], "description": "Create a trek (cross-project協奏作業領域). Requires an identified live session (the caller's session/email becomes the trek leader, ms-69) — run it from a real bclaude session, not a bare script. --goal-state は ms-75/e-1865 完了マーカー"},
         {"command": "beacon trek list", "flags": ["--status <s>", "--include-archived", "--all-actors", "--joined", "--json"], "description": "List treks visible to the caller. --joined で自分が join 済の trek だけ"},
         {"command": "beacon trek show <trek-id>", "flags": ["--all", "--json"], "description": "Show trek detail + 集約ビュー (task / commit / doc, ms-75/e-1864). --all で cap 解除"},
         {"command": "beacon trek timeline <trek-id>", "flags": ["--limit N", "--json"], "description": "Trek の lifecycle / commit / task done / doc を時系列で参照 (ms-75/e-1867)"},
@@ -16835,7 +16863,96 @@ def cmd_help_json():
         {"command": "beacon morning", "flags": ["--since-hours N", "--events-file <path>", "--no-doc", "--json"], "description": "4-bucket digest of recent autonomous activity (完了 / 停止 / skip / 介入要望); auto-saves as scope=report doc"},
         {"command": "beacon help", "flags": ["--json"], "description": "Show help (--json for machine-readable output)"},
     ]
-    print(json.dumps({"version": __version__, "commands": commands}, ensure_ascii=False, indent=2))
+
+
+def cmd_help_json():
+    """Output beacon CLI command reference as machine-readable JSON."""
+    print(json.dumps({"version": __version__, "commands": _help_registry()},
+                     ensure_ascii=False, indent=2))
+
+
+def _help_command_noun(command: str) -> str:
+    """Return the grouping noun for a registry command (2nd token after
+    'beacon'), e.g. 'beacon milestone start <id>' -> 'milestone'. Falls back to
+    the 1st token for single-verb commands like 'beacon status'."""
+    parts = command.split()
+    # parts[0] == 'beacon'
+    return parts[1] if len(parts) > 1 else command
+
+
+def _render_command_usage(entry: dict) -> str:
+    """One command's usage block: the invocation + its flags + description."""
+    cmd = entry["command"]
+    flags = entry.get("flags") or []
+    line = f"Usage: {cmd}"
+    if flags:
+        line += " " + " ".join(f"[{f}]" for f in flags)
+    return f"{line}\n  {entry.get('description', '').strip()}"
+
+
+def cmd_help_render():
+    """Human-readable help, rendered from _help_registry() (ms-120 e-3897).
+
+    BEACON_HELP_QUERY selects scope:
+      - empty       -> the full top-level help, grouped by command noun.
+      - "<noun>"    -> every subcommand under that noun (e.g. "milestone").
+      - "<noun sub>"-> the single matching command's usage block.
+
+    Matching is prefix-based against the registry's "beacon <command>" strings,
+    so both `beacon milestone --help` (noun) and `beacon milestone start --help`
+    (specific) resolve without a second lookup table. Unknown queries fall back
+    to the full top help rather than erroring (原則 3: 回復経路を残す)。
+    """
+    registry = _help_registry()
+    query = (os.environ.get("BEACON_HELP_QUERY") or "").strip()
+
+    if query:
+        needle = query if query.startswith("beacon ") else f"beacon {query}"
+        needle_tokens = needle.split()
+        matches = []
+        for e in registry:
+            cmd_tokens = e["command"].split()
+            # prefix match: registry command starts with the query tokens
+            if cmd_tokens[: len(needle_tokens)] == needle_tokens:
+                matches.append(e)
+        if len(matches) == 1:
+            print(_render_command_usage(matches[0]))
+            return
+        if len(matches) > 1:
+            print(f"beacon {query} — subcommands:\n")
+            for e in matches:
+                flags = e.get("flags") or []
+                suffix = ("  " + " ".join(f"[{f}]" for f in flags)) if flags else ""
+                print(f"  {e['command']}{suffix}")
+                if e.get("description"):
+                    print(f"      {e['description'].strip()}")
+            return
+        # No registry match for a specific query. Exit 3 (print nothing) so the
+        # bash dispatcher can fall through to that command's own --help handling
+        # (ms-120 e-3897: bash-only commands like `bus` keep their bespoke help
+        # rather than being overridden with the full top-level help).
+        sys.exit(3)
+
+    # Full top-level help, grouped by noun in first-seen order.
+    print("Beacon - Milestone-driven project management\n")
+    print("Usage: beacon <command> [subcommand] [flags]\n")
+    groups: dict = {}
+    order: list = []
+    for e in registry:
+        noun = _help_command_noun(e["command"])
+        if noun not in groups:
+            groups[noun] = []
+            order.append(noun)
+        groups[noun].append(e)
+    for noun in order:
+        print(f"{noun}:")
+        for e in groups[noun]:
+            flags = e.get("flags") or []
+            suffix = ("  " + " ".join(f"[{f}]" for f in flags)) if flags else ""
+            print(f"  {e['command']}{suffix}")
+        print()
+    print("Run 'beacon <command> --help' for a single command's flags.")
+    print("Run 'beacon help --json' for machine-readable output.")
 
 
 # ---------------------------------------------------------------------------
@@ -17593,6 +17710,47 @@ def _bus_budget_consume_one() -> tuple[bool, dict]:
     return True, {**b, "armed": True}
 
 
+def _bus_channel_missing_reason(cwd: str) -> Optional[str]:
+    """Return a 1-line reason if ``cwd`` has no beacon-bus MCP channel wired,
+    else None (ms-120 / e-3899).
+
+    The beacon-bus "channel" (the MCP receive bridge) and the "bus" (the event
+    transport) are confusingly-named separate surfaces. When the channel is
+    absent, `bus listen` still receives (it polls), but there is no idle-wake
+    reception outside that explicit listen — the send-only asymmetry of e-1173.
+    Detection mirrors scripts/check-mcp-receive-capability.py detect_status()
+    (.mcp.json in cwd + a ``beacon-bus`` entry under ``mcpServers``). Kept as a
+    small pure helper so the recovery-hint wiring in cmd_bus_listen is testable.
+    """
+    mcp_path = os.path.join(cwd, ".mcp.json")
+    if not os.path.exists(mcp_path):
+        return "この cwd に .mcp.json がありません"
+    try:
+        with open(mcp_path, "r", encoding="utf-8") as f:
+            servers = (json.load(f) or {}).get("mcpServers") or {}
+    except (OSError, json.JSONDecodeError):
+        return ".mcp.json が読めません (壊れている可能性)"
+    if not isinstance(servers, dict) or "beacon-bus" not in servers:
+        return ".mcp.json に beacon-bus エントリがありません"
+    return None
+
+
+def _bus_is_armed() -> bool:
+    """True iff an auto-reply budget is granted (= autonomous mode active).
+
+    e-3901: "armed" is the durable, human-set signal that this session is in
+    autonomous mode — a budget file present with ``total > 0`` (granted via
+    ``beacon bus budget grant`` / ``/beacon-bus-armed`` / Trek auto-arm). The
+    send gate keys off THIS send-context signal rather than the per-send
+    ``--in-reply-to`` flag, so an armed autonomous loop cannot bypass the gate
+    by omitting the flag. Mirrors the armed semantics of
+    ``_bus_budget_consume_one`` (file present AND total > 0; total<=0 is a
+    cleared budget = not armed).
+    """
+    b = _read_bus_budget()
+    return b is not None and int(b.get("total", 0)) > 0
+
+
 def _bus_budget_refund_one() -> bool:
     """Give back one consumed budget slot (ms-100 e-2999).
 
@@ -18057,32 +18215,47 @@ def cmd_bus_send():
             file=sys.stderr,
         )
 
-    # e-1000: budget gate.
+    # e-1000 / e-3901: autonomous-send gate.
     #
-    # The gate applies ONLY when `--in-reply-to` is set, i.e. this send is an
-    # AI-authored reply to a specific incoming event. The inbox hook
-    # instructs the AI to always include the flag when replying, so any
-    # autonomous loop necessarily passes through the gate. Manual one-off
-    # CLI sends (no --in-reply-to) bypass the gate — the human typing the
-    # command IS the approval.
+    # POLARITY (e-3901): the gate triggers on the *autonomous context* of the
+    # send, NOT on the presence of `--in-reply-to`. Before e-3901 the gate
+    # fired ONLY when `--in-reply-to` was set, so an armed autonomous loop
+    # could bypass BOTH the budget cap AND the cross-user HOLD by simply
+    # omitting the flag — a safety boundary broken by a missing flag is a
+    # prompt-level ("please pass the flag") constraint, exactly what AX
+    # principle 6 forbids. The inbox-hook instruction to "always pass the
+    # flag" was the sole thing standing between an autonomous loop and an
+    # ungated send.
+    #
+    # A send is "autonomous" when EITHER:
+    #   * `--in-reply-to` is set (an explicit reply — preserves the historical
+    #     default-OFF behaviour: a reply with no granted budget is REFUSED), OR
+    #   * the session is armed (a budget was granted ⇒ autonomous mode is
+    #     active) — THIS branch closes the omit-the-flag hole: an armed loop is
+    #     gated regardless of whether it remembered `--in-reply-to`.
+    # The gate is suppressed ONLY by an explicit, audited `--manual` override:
+    # a human hand-composing a send while armed IS the approval (recorded on
+    # the payload for the decision-event trail). Manual sends from a
+    # non-armed session need nothing — the human typing the command is the
+    # approval, same as before.
     #
     # When the gate applies:
-    #   * no budget granted at all → REFUSE. Default state is "AI cannot
-    #     auto-reply"; the human must explicitly `bus budget grant N` to
-    #     authorize N auto-replies. This matches the user's safety stance:
-    #     "until a turn limit is explicitly set, replies require human
-    #     approval."
-    #   * budget granted but exhausted → REFUSE. Same path as above; the
-    #     human must re-grant.
+    #   * no budget granted at all (autonomous only via --in-reply-to) → REFUSE.
+    #   * budget granted but exhausted → REFUSE. The human must re-grant.
     #   * budget granted and remaining > 0 → decrement, then send. The
     #     decrement happens *before* the cloud call so a network failure
     #     can't smuggle an extra send past the gate. If the send then fails
     #     the slot is refunded (e-2999) so a failed send doesn't burn a turn.
+    manual = os.environ.get("BEACON_BUS_MANUAL", "").strip() == "1"
+    armed = _bus_is_armed()
+    autonomous = bool(in_reply_to) or armed
+    gate_applies = autonomous and not manual
+
     budget: dict = {"armed": False}
     # ms-100 e-2999: True once a real budget slot was decremented (not a Trek
     # bypass), so a failed send below can refund exactly that slot.
     _budget_slot_consumed = False
-    if in_reply_to:
+    if gate_applies:
         # ms-75 / e-2044: Trek-internal sends bypass the budget gate. Trek
         # is an opt-in pre-approval scope (= 缶詰の作業部屋), so the budget
         # cap (= runaway-autonomy guardrail) is structurally redundant for
@@ -18106,11 +18279,15 @@ def cmd_bus_send():
         else:
             b = _read_bus_budget()
             if b is None:
+                # Reachable only when autonomous via --in-reply-to but not armed
+                # (no budget file): _bus_is_armed() guarantees a file when armed.
+                # Preserves the historical default-OFF: a reply needs a grant.
                 print(
-                    "Error: this is a reply (--in-reply-to set) but no auto-reply "
-                    "budget is granted. Default state requires human approval per "
-                    "reply. Run `beacon bus budget grant <N>` to authorize N "
-                    "auto-replies, or omit --in-reply-to for a manual send.",
+                    "Error: this is an autonomous send (--in-reply-to set) but no "
+                    "auto-reply budget is granted. Default state requires human "
+                    "approval. Run `beacon bus budget grant <N>` to authorize N "
+                    "auto-sends, or pass --manual for an explicit human-approved "
+                    "one-off send.",
                     file=sys.stderr,
                 )
                 sys.exit(1)
@@ -18120,14 +18297,24 @@ def cmd_bus_send():
                 used = int(budget.get("used", 0))
                 print(
                     f"Error: auto-reply budget exhausted ({used}/{total} used). "
-                    "Run `beacon bus budget grant <N>` to re-grant before "
-                    "sending again.",
+                    "Run `beacon bus budget grant <N>` to re-grant, or pass "
+                    "--manual for an explicit human-approved one-off send.",
                     file=sys.stderr,
                 )
                 sys.exit(1)
             # A real slot was decremented (armed budget, not a Trek bypass).
             # Remember so the send failure path can refund it (e-2999).
             _budget_slot_consumed = bool(budget.get("armed"))
+    elif manual and armed:
+        # e-3901: an explicit --manual override of the armed gate. Stamp the
+        # payload so the decision-event trail shows a human deliberately
+        # bypassed the autonomous gate (audit), and surface a one-line note.
+        payload = {**payload, "manual_override": True}
+        print(
+            "Note: --manual override — this send bypasses the armed auto-reply "
+            "gate (recorded as a human-approved override).",
+            file=sys.stderr,
+        )
 
     if in_reply_to:
         # Thread the reply by stamping the parent event_id on the payload.
@@ -18343,15 +18530,17 @@ def cmd_bus_send():
         )
 
     # Qualitative gate (ms-93 e-3340 — mirrors channel/bus-qualgate.mjs).
-    # When this is an armed autonomous reply (in_reply_to + a real budget slot
-    # was consumed), HOLD 外部宛 / 機密 / action付き sends for the human instead
-    # of letting them go out. This brings the CLI send path — how a Codex armed
-    # session replies (codex_receive_loop builds `beacon bus send`) — to parity
-    # with bus.mjs's MCP reply gate, so e-3308's qualitative safety isn't
-    # Claude-only. Held sends refund the slot (e-2999). BEACON_QUALGATE_OFF=1
-    # opts out (same escape hatch as the JS side).
+    # When a real budget slot was consumed (= this is an armed autonomous send,
+    # e-3901 no longer requires --in-reply-to to reach here), HOLD 外部宛 / 機密
+    # / action付き sends for the human instead of letting them go out. This
+    # brings the CLI send path — how a Codex armed session replies
+    # (codex_receive_loop builds `beacon bus send`) — to parity with bus.mjs's
+    # MCP reply gate, so e-3308's qualitative safety isn't Claude-only. A
+    # consumed slot implies gate_applies was True (Trek bypass / --manual never
+    # set it). Held sends refund the slot (e-2999). BEACON_QUALGATE_OFF=1 opts
+    # out (same escape hatch as the JS side).
     if (
-        in_reply_to and _budget_slot_consumed
+        _budget_slot_consumed
         and os.environ.get("BEACON_QUALGATE_OFF") != "1"
     ):
         import dm_qualgate
@@ -18553,6 +18742,32 @@ def cmd_bus_listen():
     # the contract simple — no module state, no test fixture juggling.
     backoff_seconds = 1
     backoff_cap = 30
+
+    # ms-120 / e-3899: recovery hint for the send-only asymmetry (e-1173). The
+    # "channel" (the beacon-bus MCP receive bridge) and the "bus" (the event
+    # transport) are different surfaces with confusingly similar names. If this
+    # cwd has no beacon-bus channel wired, `bus listen` still streams here (it
+    # polls directly), but stopping it leaves NO idle-wake reception — a
+    # context-free operator can't derive that from the silence. Surface the
+    # relationship + recovery path once at startup. Skipped for --once (a
+    # transient peek, e.g. /beacon-dm-send reply mode, shouldn't nag). Any
+    # failure is swallowed so this never blocks listen.
+    if not once:
+        try:
+            _chan_reason = _bus_channel_missing_reason(os.getcwd())
+            if _chan_reason:
+                print(
+                    "[bus listen] Note: beacon-bus channel が未設置です "
+                    f"({_chan_reason})。この explicit listen は動きますが、"
+                    "止めると他セッションからの DM で自動起床 (idle-wake) しません "
+                    "(= 送信専用の非対称、e-1173)。回復: この cwd で "
+                    "`beacon channel install` を実行してください。",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        except Exception:
+            pass
+
     try:
         while True:
             try:
@@ -21702,6 +21917,26 @@ def cmd_opportunity_amount():
     print(f"Set amount on {opp_id}: {amount if amount is not None else '(cleared)'}")
 
 
+def cmd_opportunity_rename():
+    """Rename an opportunity's title (ms-120 e-3909).
+
+    Before this the only post-creation edits were describe (背景) / assign /
+    amount / phase — there was no way to fix the *name*, so a typo'd title was
+    permanent. Parallels `milestone rename`. Env: BEACON_OPP_ID, BEACON_TITLE.
+    """
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    title = os.environ.get("BEACON_TITLE", "")
+    data = load_project()
+    try:
+        opp = sales_entities.opportunity_set_title(data, opp_id, title)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Renamed {opp_id} → {opp['title']}")
+
+
 def cmd_opportunity_describe():
     """Set an opportunity's free-text 背景 / 経緯 / メモ (ms-106 e-3526)."""
     import sales_entities
@@ -21980,6 +22215,22 @@ def cmd_opportunity_judge():
     decision = os.environ.get("BEACON_JUDGE_DECISION", "")
     arg = os.environ.get("BEACON_JUDGE_ARG", "")
     note = os.environ.get("BEACON_PHASE_NOTE", "")
+    # e-3909: the trailing positional (BEACON_JUDGE_ARG) means a DIFFERENT thing
+    # per verb, so validate it per verb instead of leaving the AI to guess the
+    # shape from a single opaque positional:
+    #   advance  → optional next transition date (YYYY-MM-DD)
+    #   retry    → REQUIRED new transition date (retry = 未達だが継続, 遷移日を置き直す)
+    #   terminal → REQUIRED terminal phase (決着先, from allowed_terminals)
+    if decision == "retry" and not arg.strip():
+        print("Error: `opportunity judge <opp> retry <YYYY-MM-DD>` requires a new "
+              "transition date — retry keeps the same phase but re-sets the "
+              "transition date.", file=sys.stderr)
+        sys.exit(1)
+    if decision == "terminal" and not arg.strip():
+        print("Error: `opportunity judge <opp> terminal <terminal-phase>` requires a "
+              "terminal phase (決着先). Run `beacon opportunity judge <opp>` with no "
+              "decision to see the allowed terminals.", file=sys.stderr)
+        sys.exit(1)
     data = load_project()
     at = core._now_iso()
     actor = _human_actor()  # C-2: the judgement is the human's master decision
@@ -22498,9 +22749,11 @@ def cmd_meeting_end():
 def cmd_meeting_cancel():
     import sales_entities
     mtg_id = os.environ.get("BEACON_MTG_ID", "")
+    reason = os.environ.get("BEACON_MTG_CANCEL_REASON", "")
     data = load_project()
     try:
-        sales_entities.meeting_cancel(data, mtg_id, at=core._now_iso())
+        sales_entities.meeting_cancel(data, mtg_id, at=core._now_iso(),
+                                      reason=reason)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -22513,20 +22766,36 @@ def cmd_meeting_list():
     opp_id = os.environ.get("BEACON_MTG_OPP", "")
     as_json = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
-    opp = sales_entities.find_opportunity(data, opp_id)
-    if opp is None:
-        print(f"Error: Opportunity not found: {opp_id}", file=sys.stderr)
-        sys.exit(1)
-    meetings = sales_entities.opportunity_meetings(opp)
+    # e-3909: <opp-id> is now OPTIONAL — omitting it lists meetings across ALL
+    # opportunities, symmetric with `opportunity list` / `account list` (which
+    # are global). Previously the arg was required, so `meeting list` alone
+    # errored — asymmetric with every other `list` verb and with the global
+    # `meeting list-ended` sweep.
+    if opp_id:
+        opp = sales_entities.find_opportunity(data, opp_id)
+        if opp is None:
+            print(f"Error: Opportunity not found: {opp_id}", file=sys.stderr)
+            sys.exit(1)
+        scoped = [(opp, m) for m in sales_entities.opportunity_meetings(opp)]
+    else:
+        scoped = []
+        for o in data.get("opportunities", []):
+            for m in sales_entities.opportunity_meetings(o):
+                scoped.append((o, m))
     if as_json:
-        print(json.dumps({"opportunity": opp_id, "meetings": meetings},
+        out = [{"opportunity_id": o.get("id"),
+                "opportunity_title": o.get("title", ""), "meeting": m}
+               for o, m in scoped]
+        print(json.dumps({"opportunity": opp_id or None, "meetings": out},
                          ensure_ascii=False))
         return
-    if not meetings:
-        print(f"No meetings on {opp_id}.")
+    if not scoped:
+        print(f"No meetings on {opp_id}." if opp_id else "No meetings.")
         return
-    for m in meetings:
+    for o, m in scoped:
         line = f"  {m.get('id')} [{m.get('status')}] {m.get('scheduled_at')}"
+        if not opp_id:
+            line += f"  ({o.get('id')} {o.get('title', '')})"
         if m.get("location"):
             line += f" @ {m.get('location')}"
         if m.get("calendar_event_id"):
@@ -22685,6 +22954,7 @@ if __name__ == "__main__":
         "opportunity_assign": cmd_opportunity_assign,
         "opportunity_amount": cmd_opportunity_amount,
         "opportunity_describe": cmd_opportunity_describe,
+        "opportunity_rename": cmd_opportunity_rename,
         "opportunity_phase_prob": cmd_opportunity_phase_prob,
         "sales_target": cmd_sales_target,
         "sales_target_list": cmd_sales_target_list,
@@ -22934,6 +23204,7 @@ if __name__ == "__main__":
         "trek_timeline": cmd_trek_timeline,
         "version": lambda: print(f"beacon {__version__}"),
         "help_json": cmd_help_json,
+        "help_render": cmd_help_render,
         "doctor": cmd_doctor,
     }
     fn = commands.get(cmd)
@@ -22946,7 +23217,21 @@ if __name__ == "__main__":
     # in the CLI (`beacon session id` pure getter); mint+heartbeat = bridge;
     # lifecycle close = `beacon session end`.
     if fn:
-        fn()
+        try:
+            fn()
+        except ValueError as e:
+            # ms-120 / e-3896: domain / user-input errors are raised as
+            # ValueError throughout (e.g. "Milestone not found: ms-999" from an
+            # unresolved -m/--ms reference). Before this they bubbled up as a raw
+            # Python traceback — non-zero, but the "cause" was buried in a
+            # stacktrace, exactly the silent-ish failure e-3896 targets. Command
+            # handlers that already catch ValueError and print a tailored message
+            # exit before reaching here; this is the uniform safety net for the
+            # ones that don't, so an unresolved reference can never dump a
+            # stacktrace at the operator. Programming bugs raise other exception
+            # types and still surface with a full traceback.
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
     else:
         print(f"Unknown command: {cmd}")
         sys.exit(1)

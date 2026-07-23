@@ -7,293 +7,11 @@ COMMANDS_PY="$BEACON_DIR/lib/commands.py"
 export BEACON_PROJECT_FILE=".beacon/project.json"
 
 usage() {
-    cat <<'EOF'
-Beacon - Milestone-driven project management
-
-Usage:
-  beacon                        Show status + pointers to Tauri Desktop App / Web UI
-  beacon setup                  First-time setup wizard (auth + hooks + project)
-  beacon init                   Initialize .beacon/ in current directory
-  beacon status                 Show current milestone status
-
-Milestones:
-  beacon milestone add "title" [--priority P] [--objective O] [--ac A]   Add a new milestone
-  beacon milestone list         List milestones
-  beacon milestone start <id>   Activate + auto-create ms-XX-<slug> branch + self-add as assignee
-  beacon milestone join <id> [--checkout]  Add self as assignee (and optionally switch branch)
-  beacon milestone close <id>   Close milestone (keeps current progress)
-  beacon milestone observe <id> Set milestone to observing
-  beacon milestone wait <id> --reason <text>   Pause an active/observing milestone (ms-81)
-  beacon milestone release <id> Release occupation claim without changing status (ms-81)
-  beacon milestone occupations [--ms <id>] [--json]   List occupation event log (ms-81)
-  beacon milestone update <id>  Update title/progress/status/description/priority/objective/ac
-  beacon milestone delete <id>  Delete (soft) a milestone
-  beacon milestone purge <id> --reason <text> [--index <n>]   Hard delete (recovery only; Issue #14)
-  beacon milestone depends <id> Set milestone dependencies
-  beacon milestone graph        Show dependency graph
-  beacon milestone add ... [--owner U] [--assignee U]   Set owner/assignee at creation
-  beacon milestone update <id> [--owner U] [--assignee U]   Change owner/assignee
-
-Members (2-5 person teams):
-  beacon member add <id> [--name N] [--email E] [--role R]   Add a project member
-  beacon member list [--json]                                 List members
-  beacon member remove <id> --reason <text>                   Remove (audit required)
-  beacon member role <id> <role>                              Change role
-
-Tasks & Progress:
-  beacon task add "desc" [-m <ms-id>]   Add a task to a milestone
-  beacon task done <entry-id>           Mark task as done
-  beacon task list [-m <ms-id>]         List tasks
-  beacon task update <entry-id>         Update task description/status
-  beacon task cancel <entry-id>         Cancel a task
-  beacon entry purge <e-id> --reason <text> [--index <n>]   Hard delete an entry (recovery; e-863)
-  beacon log [message]                  Record HEAD commit to active milestone
-  beacon save "desc" [-m <ms-id>]       Record a manual progress note
-  beacon sync                           Auto-sync recent git commits
-  beacon summary "text"                 Update the project summary
-
-Sales (profession=sales):
-  beacon account add "<name>" [--health <text>] [--assignee <user>]   Add an account (customer / company)
-  beacon account list [--json] [--as-project <id>] [--linked]   List accounts; --as-project = only ones disclosed to that project; --linked = accounts disclosed to THIS project from other org projects (cloud)
-  beacon disclose <resource-id> --to-project <id>            Disclose any Target (account/opportunity/…) to another project (cross-project 参照を許可)
-  beacon undisclose <resource-id> --from-project <id>        Revoke a Target's disclosure to a project (剥奪即時)
-  beacon account contact <acc-id> <name> [--role <text>] [--email <text>] [--phone <text>]   Add a contact to an account
-  beacon account phase <acc-id> <phase> [--note <text>]      Declare an account lifecycle phase transition
-  beacon account rename <acc-id> <new-name>                  Rename an account
-  beacon account assign <acc-id> <user>                      Set the assignee (担当ユーザー) on an account
-  beacon account nurturing <acc-id> <desc> [--deadline <date>] [--ball self|counterpart]   Add a nurturing task (継続関係の業務)
-  beacon account delete <acc-id> [--force] [--reason <text>] Cancel (取消, soft) an account — record kept (--force orphans referencing opportunities)
-  beacon acquisition add "<title>" [--description <text>] [--assignee <user>]   Add a 顧客獲得ターゲット (取引先の無い有限の獲得・準備作業: アカウント作成/資料整備/リスト精査 等)
-  beacon acquisition list [--json]                           List 顧客獲得ターゲット
-  beacon acquisition status <acq-id> <todo|in_progress|observing|done>   Move an acquisition along its lifecycle
-  beacon opportunity add "<title>" [--account <acc-id>] [--phase <p>] [--goal <n>] [--probability <n>] [--deadline <date>] [--ball self|counterpart] [--assignee <user>] [--description <text>]   Add a deal / opportunity
-  beacon opportunity list [--json] [--all]                   List opportunities (--all also shows 取消済 cancelled)
-  beacon opportunity phase <opp-id> <phase> [--note <text>]  Move an opportunity to a new phase
-  beacon opportunity assign <opp-id> <user>                  Set the assignee (担当ユーザー) on an opportunity
-  beacon opportunity amount <opp-id> <amount>                Set the deal amount (金額, 円)
-  beacon opportunity describe <opp-id> <text>                Set the 背景/経緯/メモ (free-text; empty clears)
-  beacon opportunity phase-prob <phase> <n>                  Set a phase win probability (成約率 0-100)
-  beacon sales target <user> <amount> | list                Set/list a member's sales quota (目標売上) with pipeline
-  beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] | --clear   Set the 遷移日 (judgement date) for the current phase
-  beacon opportunity judge <opp-id> advance|retry|terminal [<date|terminal-phase>] [--note <text>]   Judge a reached 遷移日 (3-way, human-confirmed)
-  beacon opportunity due [--json]                            List opportunities awaiting a transition judgement (due/overdue)
-  beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self|counterpart]   Log an activity on an opportunity
-  beacon opportunity delete <opp-id> [--reason <text>]       Cancel (取消, soft) an opportunity — 証跡 (活動/証跡) は残す
-  beacon communication add <opp-|acc-|act-|nrt-id> "<summary>" --direction inbound|outbound [--channel <text, free: email/slack/messenger/line/in-person/…>] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]   Record a communication (証跡・営業の Commit); act-/nrt- links the specific activity/nurturing it fulfilled
-  beacon communication list <opp-|acc-|act-|nrt-id> [--json]  List communications (証跡) + derived ball; act-/nrt- lists only that work item's
-  beacon communication cancel <comm-id> [--reason <text>]     Cancel (取消) a mis-recorded communication — soft, kept struck-through, excluded from ball/watch
-  beacon communication retarget <comm-id> <new opp-|acc-|act-|nrt-> [--reason <text>]  Re-file a communication filed under the wrong work item (moves it; evidence unchanged; the move is audited)
-  beacon meeting schedule <opp-id> --at <datetime> [--end <datetime>] [--location <text>] [--event-id <id>] [--calendar-ns <ns>] [--calendar-account <acct>] [--set-transition]   Book a meeting (面談) with a Beacon 識別 ID; --set-transition moves the 遷移日 too
-  beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]   Move a meeting (予定変更); --set-transition follows the 遷移日
-  beacon meeting end <mtg-id>                                 Mark a meeting ended (idempotent; used by the end-detector)
-  beacon meeting cancel <mtg-id>                              Cancel a scheduled meeting
-  beacon meeting list <opp-id> [--json]                       List an opportunity's meetings
-  beacon meeting ended [--now <datetime>] [--json]            List meetings whose end passed but are still scheduled (終了検知 C の候補)
-  beacon phase list [--json]                                 Show the configured phase funnels
-  beacon phase add <account|opportunity> <name> [--index N]  Add / insert a funnel stage
-  beacon phase rename <account|opportunity> <old> <new>      Rename a funnel stage (references follow)
-  beacon phase move <account|opportunity> <name> <index>     Reorder a funnel stage
-  beacon phase remove <account|opportunity> <name>           Delete a funnel stage (blocked if non-empty)
-
-Pull Requests:
-  beacon pr create [-m <ms-id>] [gh flags...]  Create PR and record it
-  beacon pr add <url> [-m <ms-id>]             Register an existing PR
-  beacon pr show <id|number|url> [--json]      Show PR detail (intent / commits)
-  beacon pr approve <entry-id>                 Approve a PR
-  beacon pr request-changes <entry-id>         Request changes on a PR
-  beacon pr reject <entry-id>                  Reject a PR
-  beacon pr merge <entry-id>                   Mark PR as merged
-  beacon pr close <entry-id>                   Close PR without merging
-  beacon pr sync [--dry-run]                   Sync beacon PR entries with GitHub state (merged/closed)
-
-Documents:
-  beacon doc add "title" [--scope core|spec|memo|retro|report]  Create a document
-  beacon doc list [--scope <scope>]                List all documents
-  beacon doc show <doc-id>                         Show document content
-  beacon doc update <doc-id>                       Update a document
-  beacon doc delete <doc-id>                       Delete a document
-  beacon doc image-upload <local-file>             Upload image, get markdown img tag
-  (doc add / doc update support --bus-origin to refuse bus-derived
-   writes — persistence poisoning defense, ms-54 / e-1293)
-
-Operations:
-  beacon operation open "<title>" [--schedule daily|weekdays|weekly] [--log-source <name>]
-  beacon operation close <op-id>
-  beacon operation purge <op-id> --reason <text> [--index <n>]   Hard delete an operation (recovery; e-863)
-  beacon operation list [--json]
-  beacon operation show <op-id> [--json]
-  beacon operation approve <op-id> --spec <doc-id> [--expires-at YYYY-MM-DD]  Mint T2 envelope from SPEC (ms-60)
-  beacon operation revoke <op-id> [--envelope-id ENV] [--reason TEXT]         Invalidate the active envelope
-  beacon operation envelope verify <op-id> <action>                           Self-check: is action permitted by the active envelope?
-  beacon run record -o <op-id> --batch <name> --status ok|warning|error --desc "..."
-  beacon run list -o <op-id> [--json]
-  beacon incident open "<title>" -o <op-id> [--desc "..."]
-  beacon incident close <id> --resolution "..."
-  beacon incident escalate <id> -m <ms-id>
-
-Treks (cross-project / cross-session 協奏作業領域 — ms-69):
-  beacon trek create "<title>" [--type temporary|persistent] [--description "..."]
-                              [--goal-state "<criterion>"]
-                                    Create a trek; caller becomes leader.
-                                    --goal-state は ms-75/e-1865 で追加: trek の
-                                    完了マーカー (acceptance_criteria 相当).
-  beacon trek list [--status s] [--include-archived] [--all-actors] [--joined] [--json]
-                                    List treks visible to the caller. --joined
-                                    で自分が join 済の trek だけに絞る.
-  beacon trek show <trek-id> [--all] [--json]
-                                    Show members / scope / status / halt と、
-                                    scope に紐付く task / commit / 配下 doc
-                                    の集約ビュー (ms-75/e-1864). --all で
-                                    要約 cap を解除.
-  beacon trek start <trek-id>       Transition planning → active
-  beacon trek archive <trek-id>     Archive (= terminal; restart by new trek)
-  beacon trek invite <trek-id> --actor <email> [--notify]
-                                    Invite by email
-  beacon trek join <trek-id> [--no-arm]
-                                    Accept own invitation (auto-arms by default — ms-75/e-2047)
-  beacon trek leave <trek-id>       Remove self (leader must transfer first)
-  beacon trek plan <trek-id> --add-scope <project:ref> | --remove-scope <project:ref>
-                                    Edit scope (ms-/op-/e- ref, or project-wide)
-  beacon trek scope-add <trek-id> --project <pid> [--milestone <ms-id> | --operation <op-id> | --task <e-id> | --opportunity <opp-id> | --account <acc-id>]
-                                    Canonical scope-add verb (= flag-style alias of plan --add-scope, ms-97/AC23; sales narrows by 商談/顧客)
-  beacon trek scope-approve <trek-id> <pending-id>
-                                    Commit a staged scope op (= apply add or remove, ms-97/AC25)
-  beacon trek scope-reject <trek-id> <pending-id>
-  beacon trek slot add <trek-id> --project <pid> --milestone|--task|--operation <id> [--children e-A,e-B]
-                                    (ms-99/e-2829) Stage a slot-add with a fresh sl-<8hex> id.
-  beacon trek slot amend <trek-id> <slot-id> [--add-child <e-id> ...] [--remove-child <e-id> ...]
-                                    (ms-99/e-2829) Stage a child-list edit on an existing MS slot.
-  beacon trek slot claim <trek-id> <slot-id> [--session <sid> | --unclaim]
-                                    (ms-99/e-2829) Stage a claim stamp (state-free, SPEC 方針 4).
-  beacon trek slot list  <trek-id> [--json]
-                                    (ms-99/e-2829) Materialise slot rows for the trek.
-                                    Drop a staged scope op (ms-97/AC25)
-  beacon trek blanket-approve <trek-id> --category <cat>
-                                    Pre-approve scope-add for a category (ms-97/AC24).
-                                    Category: milestone | operation | task | opportunity | account | project:<pid> | <kind>:<id>
-  beacon trek blanket-revoke <trek-id> --category <cat>
-                                    Drop a blanket pre-approval (ms-97/AC24)
-  beacon trek plan <trek-id> --goal-state "<criterion>"
-                                    Set / clear (空文字で clear) trek の完了マーカー.
-  beacon trek timeline <trek-id> [--limit N] [--json]
-                                    Trek の lifecycle / scope 内 commit /
-                                    task done / 配下 doc を時系列で参照 (ms-75/e-1867).
-  beacon trek stop <trek-id> [--reason "..."]
-                                    Pull the Andon cord (halt signal)
-  beacon trek resume <trek-id>      Clear the halt signal
-  beacon trek transfer-leader <trek-id> --to <session-id>
-                                    Hand off leader_session_id
-  beacon trek take-over <trek-id>   Fresh session (= same user, leader role) を
-                                    新 leader_session_id に bind し直す
-                                    (= dead session 引き継ぎ、ms-88 e-2089)
-  beacon trek kickoff <trek-id> [--session-id X] [--kickoff-dm-event-id Y]
-                                    Kickoff Ritual の完了 stamp
-                                    (= /beacon-trek-pulse Step 0.4、ms-88 e-2138)
-  beacon trek reconcile <trek-id> [--apply]
-                                    task pool ↔ Trek stamp の乖離を修復
-                                    (= default dry-run、--apply で実適用、ms-88 e-2167)
-
-Stop signal (ms-55: Andon cord — anyone can broadcast a halt):
-  beacon stop scoped --target <kind>:<id> [--reason "..."] [--reason-kind X]
-                                    Halt sessions matching kind:id (ms|task|session)
-  beacon stop global [--reason "..."] [--reason-kind X]
-                                    Halt every active autonomous session in the project
-  beacon stop status [--json]       List currently active stop signals
-  beacon resume scoped --target <kind>:<id> [--reason "..."]
-                                    Clear a scoped stop signal
-  beacon resume global [--reason "..."]
-                                    Clear the global stop signal
-
-Rollback (ms-55: safe boundary — local-only is auto, pushed is report-only):
-  beacon rollback [--commits N] [--reason "..."] [--dry-run] [--json]
-                                    Stash dirty edits + git reset --soft un-pushed
-                                    commits; pushed history surfaces as
-                                    compensation proposals (= revert PR etc.)
-
-Claim primitives (ms-55: who is taking what work — coordination):
-  beacon claim post    --target <kind>:<id> [--intent "..."]
-                                    Broadcast "I'm taking X" (first-publisher-wins)
-  beacon claim request --target <kind>:<id> --to <sid> [--intent "..."]
-                                    Ask a specific session to take X
-  beacon claim handoff --target <kind>:<id> --to <sid> [--intent "..."]
-                                    Hand off in-progress X to another session
-  beacon claim respond <claim_id> [--accept|--decline] [--reason "..."]
-                                    Reply to a request/handoff
-  beacon claim release <claim_id> [--outcome completed|abandoned]
-                                    Mark a claim done
-  beacon claim list    [--mine] [--target <kind>:<id>]
-                                    List local active claims (= restart recovery)
-  beacon stuck check   (--telemetry-inline '<json>' | --telemetry-file <path>)
-                       [--timeout-minutes N] [--dry-run] [--json]
-                                    Detect silent sessions (= idle > N min) and
-                                    emit STUCK signals (= stop with reason="stuck")
-  beacon morning [--since-hours N] [--events-file <path>] [--json]
-                                    4-bucket digest of recent autonomous activity:
-                                    完了 / 停止 / skip / 介入要望
-
-Releases & Deploys:
-  beacon deploy record [--revision <rev>] [--semver <v>] [--version <tag>] [--desc <text>]
-  beacon deploy list
-  beacon deploy void <id> --reason <text>
-  beacon push record [--from <hash>] [--to <hash>] [--desc <text>] [--version <tag>] [-m <ms-id>]
-  beacon push list
-
-Cloud:
-  beacon cloud                       Open cloud project (interactive select; daily op)
-  beacon cloud open <id>             Open a specific cloud project in web UI (daily op)
-  beacon cloud status                Show cloud config status (read-only, daily op)
-  beacon cloud list                  List accessible cloud projects (read-only)
-  beacon cloud join <id>             Join an existing cloud project
-  beacon cloud upload-initial        Initial bootstrap upload to a new cloud project (one-shot migration)
-  beacon cloud migrate-from-local --confirm <id>
-                                     Retire a stale .beacon/project.json that survived a prior cloud
-                                     cut-over (ms-95 / e-2339). Pre-flight verifies cloud has every
-                                     local entry before renaming to project.json.before-cloud-YYYYMMDD
-  beacon cloud off --confirm <id>    Switch back to local mode (sandbox / verification only;
-                                     e-1861/ms-61: archives cloud.json to .beacon/.trash/, no data loss)
-  # ms-84 Phase 4 (e-2038): `push` / `pull` / `force-pull` were removed.
-  # Cloud is the sole truth source, so the round-trip is structurally impossible.
-
-Server (maintainer only):
-  gcloud run deploy beacon-api-prod --source . --region asia-northeast1 \
-    --build-arg CACHE_BUST=$(date +%s)
-
-DM Channel (multi-session messaging):
-  beacon channel install            Install the beacon-bus MCP entry into .mcp.json
-  beacon channel uninstall [--purge-files|--keep-files]
-                                    Remove MCP entry; --purge-files also wipes channel/node_modules
-  beacon channel opt-out [--project|--global]
-                                    Block install / auto-install (persists across runs)
-  beacon channel opt-in  [--project|--global]
-                                    Lift the opt-out flag
-  beacon channel status             Show install / files / opt-out / next-action state
-
-Other:
-  beacon note "<text>" [--context "<label>"]   Add a session note (ephemeral, cleared at session-end)
-                                               (also accepts --bus-origin to refuse bus-derived
-                                                writes — persistence poisoning defense, ms-54 / e-1293)
-  beacon note list                             Show session notes
-  beacon note clear                            Clear all session notes
-  beacon trigger fire [--trek <id>] <name> [msg]  Fire a named trigger (--trek = ms-75 Trek-aware)
-  beacon trigger check              Check pending triggers
-  beacon trigger clear <name>       Clear a trigger
-  beacon retro                      Prepare weekly retro
-  beacon search "query"             Search milestones and entries
-  beacon doctor                     Check PATH, hooks, skills, token, cloud.json
-  beacon reset                      Move .beacon/ to timestamped backup (reversible)
-  beacon auth login                 Sign in with Google (use this, not 'cloud login')
-  beacon auth logout                Remove cached credentials
-  beacon auth status                Show login status
-  beacon skill install              Install legacy Claude Code Skills
-  beacon skill install --target claude|codex|both --name <name>
-                                    Install a canonical shared Skill
-  beacon monitor context [--dry-run]
-                                    Stop hook: context-usage threshold monitor (e-854)
-  beacon update [--check] [--skill-only] [--yes]
-                                    Self-update: brew upgrade + skill install (one shot)
-  beacon help                       Show this help
-  beacon --version                  Show version
-EOF
+    # ms-120 e-3897: render the top-level help from the single registry
+    # (lib/commands.py _help_registry) so this text can never drift from
+    # `beacon help --json` or any subcommand's --help. There is no second
+    # hand-maintained help copy to fall out of sync (AX 原則 1/3/6).
+    python3 "$COMMANDS_PY" help_render
 }
 
 ensure_project() {
@@ -327,6 +45,81 @@ _guard_positional() {
             ;;
     esac
 }
+
+# Reject a flag-like token that a `*)` positional catch-all would otherwise
+# swallow as a value (ms-120 e-3896, AX 原則 2 = silent no-op 禁止 / 原則 6 =
+# 構造で塞ぐ). Unlike _guard_positional this needs no per-site usage string: it
+# derives the command path from the calling cmd_* function, so every ID-taking
+# parser gets a consistent, self-describing rejection with one shared helper
+# instead of 70+ bespoke strings.
+#
+# Root cause it closes: `beacon milestone start --reason x` used to store
+# "--reason" (then "x") into ms_id via the `*)` arm and fail with a misleading
+# "Milestone not found: x" (e-3898). Now the flag-like token stops with its
+# real cause. IDs (ms-120, e-3896, op-1) start with a letter, never `-`, so
+# they are never caught here; a lone "-" is a valid value (only `-?*` matches).
+#
+# $1 = the offending token (already matched `-?*` at the call site).
+_guard_flag() {
+    local tok="$1"
+    local caller="${FUNCNAME[1]:-}"
+    local cmd
+    if [ "${caller#cmd_}" != "$caller" ]; then
+        # Called from a cmd_<noun>_<verb> function: derive the path from it.
+        cmd="${caller#cmd_}"
+        cmd="${cmd//_/ }"
+    else
+        # Inline command arm (trek / bus / cycle …) has no cmd_* frame; use the
+        # command path captured at dispatch (ms-120 e-3897, avoids the empty
+        # "beacon " / "beacon main" mis-label in the error).
+        cmd="${_BEACON_CMD:-beacon}"
+    fi
+    case "$tok" in
+        -h|--help)
+            # Full single-source usage is e-3897's job; until then point at the
+            # command's own help rather than mis-parsing --help as a value.
+            echo "beacon ${cmd} — run 'beacon ${cmd% *} --help' for usage."
+            exit 0
+            ;;
+        *)
+            echo "Error: '${tok}' is not a valid flag for 'beacon ${cmd}'." >&2
+            echo "Run 'beacon ${cmd% *} --help' to see valid flags." >&2
+            exit 1
+            ;;
+    esac
+}
+
+# ms-120 e-3907: `<entity> status <id> <state>` writes state, which reverses
+# the polarity of the read-only `beacon status`. The canonical path is a named
+# intent verb (activate / close / start / observe / done) — the verb names what
+# happens, and illegal transitions simply have no verb. The old status-write
+# form still works for backward compatibility but prints this notice and is no
+# longer advertised in help. $1 = entity, $2 = the verbs to use instead.
+_deprecate_status_write() {
+    echo "note: 'beacon $1 status <id> <state>' is deprecated — 'status' now" \
+         "means read-only (like 'beacon status')." >&2
+    echo "      Use a named verb instead: $2" >&2
+}
+
+# ms-120 e-3906 danger-class: destructive / irreversible operations require an
+# audit entry — a non-empty --reason, or an explicit --acknowledge. Mirrors the
+# server-side _require_reason_or_skip gate (option B: no ambiguous empty).
+# Called as a statement (not $(...)) so `exit 1` stops the caller directly.
+# $1 = verb (for the message), $2 = reason, $3 = acknowledge flag ("1"/"").
+# When neither is supplied it exits 1; otherwise returns 0. The caller maps an
+# empty reason (= acknowledge was used) to the sentinel with:
+#   [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
+_require_audit_reason() {
+    local verb="$1" reason="$2" ack="$3"
+    if [ -n "$reason" ] || [ "$ack" = "1" ]; then
+        return 0
+    fi
+    echo "Error: \`beacon $verb\` is destructive and requires an audit entry." >&2
+    echo "  Pass --reason \"...\" to record why, or --acknowledge to proceed" >&2
+    echo "  deliberately without a written reason." >&2
+    exit 1
+}
+BEACON_ACK_SENTINEL="(acknowledged: no detailed reason given)"
 
 cmd_init() {
     if [ -f "$BEACON_PROJECT_FILE" ]; then
@@ -623,7 +416,7 @@ cmd_milestone_add() {
         read -rp "Title: " title
         read -rp "Target date (YYYY-MM-DD): " target_date
         read -rp "Description: " description
-        read -rp "Priority (highest/high/middle/low/lowest): " priority
+        read -rp "Priority (highest/high/medium/low/lowest): " priority
         read -rp "Objective (what becomes possible): " objective
         read -rp "Acceptance criteria (when is it done): " acceptance_criteria
     fi
@@ -650,6 +443,7 @@ cmd_milestone_start() {
         case "$1" in
             --no-branch)   no_branch="1"; shift ;;
             --no-assignee) no_assignee="1"; shift ;;
+            -?*)           _guard_flag "$1" ;;
             *)             ms_id="$1"; shift ;;
         esac
     done
@@ -669,10 +463,13 @@ cmd_milestone_done() {
     local ms_id=""
     local reason=""
     local reason_set=0
+    local acknowledge=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -r|--reason) reason="${2:-}"; reason_set=1; shift 2 ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*)           _guard_flag "$1" ;;
             *)           ms_id="$1";     shift   ;;
         esac
     done
@@ -685,9 +482,9 @@ cmd_milestone_done() {
     # gate (_require_reason_or_skip) refuses missing env, so the dispatcher
     # must not silently set an empty default.
     if [ "$reason_set" = "1" ]; then
-        BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" python3 "$COMMANDS_PY" milestone_done
+        BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" milestone_done
     else
-        BEACON_MS_ID="$ms_id" python3 "$COMMANDS_PY" milestone_done
+        BEACON_MS_ID="$ms_id" BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" milestone_done
     fi
 }
 
@@ -699,6 +496,7 @@ cmd_milestone_join() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --checkout) checkout="1"; shift ;;
+            -?*)           _guard_flag "$1" ;;
             *)          ms_id="$1";   shift ;;
         esac
     done
@@ -716,10 +514,13 @@ cmd_milestone_observe() {
     local ms_id=""
     local reason=""
     local reason_set=0
+    local acknowledge=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -r|--reason) reason="${2:-}"; reason_set=1; shift 2 ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*)           _guard_flag "$1" ;;
             *)           ms_id="$1";     shift   ;;
         esac
     done
@@ -733,10 +534,10 @@ cmd_milestone_observe() {
     # internally, so behavior other than the gate is identical.
     if [ "$reason_set" = "1" ]; then
         BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" \
-            python3 "$COMMANDS_PY" milestone_observe
+            BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" milestone_observe
     else
         BEACON_MS_ID="$ms_id" \
-            python3 "$COMMANDS_PY" milestone_observe
+            BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" milestone_observe
     fi
 }
 
@@ -748,7 +549,8 @@ cmd_milestone_occupations() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
-            --ms)   ms_id="${2:-}"; shift 2 ;;
+            -m|--ms)   ms_id="${2:-}"; shift 2 ;;
+            -?*)           _guard_flag "$1" ;;
             *)      ms_id="$1"; shift ;;
         esac
     done
@@ -777,10 +579,13 @@ cmd_milestone_wait() {
     local ms_id=""
     local reason=""
     local reason_set=0
+    local acknowledge=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -r|--reason) reason="${2:-}"; reason_set=1; shift 2 ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*)           _guard_flag "$1" ;;
             *)           ms_id="$1";     shift   ;;
         esac
     done
@@ -791,10 +596,10 @@ cmd_milestone_wait() {
     fi
     if [ "$reason_set" = "1" ]; then
         BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" \
-            python3 "$COMMANDS_PY" milestone_wait
+            BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" milestone_wait
     else
         BEACON_MS_ID="$ms_id" \
-            python3 "$COMMANDS_PY" milestone_wait
+            BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" milestone_wait
     fi
 }
 
@@ -806,6 +611,7 @@ cmd_milestone_show() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
+            -?*)           _guard_flag "$1" ;;
             *)      ms_id="$1"; shift ;;
         esac
     done
@@ -847,6 +653,7 @@ cmd_milestone_update() {
             --owner)        owner="${2:-}"; shift 2 ;;
             --assignee)     assignee="${2:-}"; shift 2 ;;
             -r|--reason)    reason="${2:-}"; shift 2 ;;
+            -?*)           _guard_flag "$1" ;;
             *)              ms_id="$1"; shift ;;
         esac
     done
@@ -876,6 +683,7 @@ cmd_milestone_delete() {
         case "$1" in
             --json)      json_flag="1";    shift   ;;
             -r|--reason) reason="${2:-}";  shift 2 ;;
+            -?*)           _guard_flag "$1" ;;
             *)           ms_id="$1";       shift   ;;
         esac
     done
@@ -902,6 +710,7 @@ cmd_milestone_purge() {
             --json)      json_flag="1";    shift   ;;
             -r|--reason) reason="${2:-}";  shift 2 ;;
             --index)     index="${2:-}";   shift 2 ;;
+            -?*)           _guard_flag "$1" ;;
             *)           ms_id="$1";       shift   ;;
         esac
     done
@@ -928,6 +737,7 @@ cmd_entry_purge() {
             --json)      json_flag="1";    shift   ;;
             -r|--reason) reason="${2:-}";  shift 2 ;;
             --index)     index="${2:-}";   shift 2 ;;
+            -?*)           _guard_flag "$1" ;;
             *)           entry_id="$1";    shift   ;;
         esac
     done
@@ -951,6 +761,7 @@ cmd_operation_purge() {
             --json)      json_flag="1";    shift   ;;
             -r|--reason) reason="${2:-}";  shift 2 ;;
             --index)     index="${2:-}";   shift 2 ;;
+            -?*)           _guard_flag "$1" ;;
             *)           op_id="$1";       shift   ;;
         esac
     done
@@ -984,6 +795,7 @@ cmd_milestone_depends() {
                 shift 2 ;;
             --clear) clear="1"; shift ;;
             --json)  json_flag="1"; shift ;;
+            -?*)           _guard_flag "$1" ;;
             *)       ms_id="$1"; shift ;;
         esac
     done
@@ -1018,6 +830,7 @@ cmd_milestone_workspace() {
             --json)     json_flag="1"; shift ;;
             --executor) executor="${2:-}"; shift 2 ;;
             --no-git)   no_git="1"; shift ;;
+            -?*)           _guard_flag "$1" ;;
             *)          ms_id="$1"; shift ;;
         esac
     done
@@ -1046,6 +859,7 @@ cmd_milestone_workspace_cleanup() {
         case "$1" in
             --merge-to) merge_to="${2:-}"; shift 2 ;;
             --json)     json_flag="1"; shift ;;
+            -?*)           _guard_flag "$1" ;;
             *)          ms_id="$1"; shift ;;
         esac
     done
@@ -1065,6 +879,7 @@ cmd_milestone_graph() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
+            -?*) _guard_flag "$1" ;;
             *)      shift ;;
         esac
     done
@@ -1154,6 +969,7 @@ cmd_acquisition_list() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json="1"; shift ;;
+            -?*) _guard_flag "$1" ;;
             *)      shift ;;
         esac
     done
@@ -1283,6 +1099,7 @@ cmd_account_list() {
             # ms-111 e-3872: 同じ組織の他 project に置かれ、この project に開示
             # された Account を横断して取り込む (cross-project read, cloud mode)。
             --linked) linked="1"; shift ;;
+            -?*) _guard_flag "$1" ;;
             *)      shift ;;
         esac
     done
@@ -1292,6 +1109,15 @@ cmd_account_list() {
 
 cmd_account_contact() {
     ensure_project
+    # ms-120 / e-3907: canonical form is `account contact add <acc-id> <name>`
+    # (verb). `contact` is a noun; the bare `account contact <acc> <name>` form
+    # mutates (creates a contact) without naming the action. The bare form stays
+    # as a deprecated alias with a nudge.
+    if [ "${1:-}" = "add" ]; then
+        shift
+    elif [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+        echo "Note: 'beacon account contact <acc> <name>' は 'beacon account contact add <acc> <name>' に統一されました (e-3907: contact は名詞、add が作成動詞)。旧形は当面 alias として動きます。" >&2
+    fi
     local acc_id="" name="" role="" email="" phone=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -1358,6 +1184,25 @@ cmd_opportunity_describe() {
     fi
     BEACON_OPP_ID="$opp_id" BEACON_OPP_DESCRIPTION="$description" \
         python3 "$COMMANDS_PY" opportunity_describe
+}
+
+cmd_opportunity_rename() {
+    # e-3909: post-creation title edit. Before this an opportunity's name was
+    # permanent (describe sets 背景, not the title). Parallels `milestone rename`.
+    ensure_project
+    local opp_id="" title=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -?*) _guard_positional "$1" "Usage: beacon opportunity rename <opp-id> <new-title>" ;;
+            *)   if [ -z "$opp_id" ]; then opp_id="$1"; else title="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ] || [ -z "$title" ]; then
+        echo "Usage: beacon opportunity rename <opp-id> <new-title>"
+        exit 1
+    fi
+    BEACON_OPP_ID="$opp_id" BEACON_TITLE="$title" \
+        python3 "$COMMANDS_PY" opportunity_rename
 }
 
 cmd_opportunity_assign() {
@@ -1445,6 +1290,7 @@ cmd_opportunity_list() {
         case "$1" in
             --json) json_flag="1"; shift ;;
             --all)  all_flag="1"; shift ;;   # e-3586: 取消済も含めて全件出す
+            -?*) _guard_flag "$1" ;;
             *)      shift ;;
         esac
     done
@@ -1474,24 +1320,32 @@ cmd_opportunity_phase() {
 
 cmd_opportunity_transition_date() {
     ensure_project
-    local opp_id="" date="" note=""
+    # e-3909: <YYYY-MM-DD> と --clear は「遷移日を設定する / クリアする」で意味が
+    # 排他。旧実装は両者を同じ変数に流し込んでいたため、両方渡すと順序依存で
+    # 静かにどちらかが勝つ曖昧さがあった。別変数で受けて明示的に排他判定する。
+    local opp_id="" pos_date="" note="" clear_flag=""
+    local _usage="Usage: beacon opportunity transition-date <opp-id> (<YYYY-MM-DD> | --clear) [--note <text>]"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --note) note="${2:-}"; shift 2 ;;
-            --clear) date="__CLEAR__"; shift ;;
-            -?*)    _guard_positional "$1" "Usage: beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] | --clear" ;;
+            --clear) clear_flag="1"; shift ;;
+            -?*)    _guard_positional "$1" "$_usage" ;;
             *)
-                if [ -z "$opp_id" ]; then opp_id="$1"; else date="$1"; fi
+                if [ -z "$opp_id" ]; then opp_id="$1"; else pos_date="$1"; fi
                 shift ;;
         esac
     done
-    if [ -z "$opp_id" ] || [ -z "$date" ]; then
-        echo "Usage: beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] | --clear"
+    if [ -n "$clear_flag" ] && [ -n "$pos_date" ]; then
+        echo "Error: <YYYY-MM-DD> と --clear は排他です (遷移日を設定する か クリアする かのどちらか一方)。" >&2
+        echo "       $_usage" >&2
+        exit 2
+    fi
+    if [ -z "$opp_id" ] || { [ -z "$clear_flag" ] && [ -z "$pos_date" ]; }; then
+        echo "$_usage"
         exit 1
     fi
     # --clear passes an empty date through (set_transition_date treats it as clear).
-    [ "$date" = "__CLEAR__" ] && date=""
-    BEACON_OPP_ID="$opp_id" BEACON_TRANSITION_DATE="$date" BEACON_PHASE_NOTE="$note" \
+    BEACON_OPP_ID="$opp_id" BEACON_TRANSITION_DATE="$pos_date" BEACON_PHASE_NOTE="$note" \
         python3 "$COMMANDS_PY" opportunity_transition_date
 }
 
@@ -1527,6 +1381,7 @@ cmd_opportunity_due() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
+            -?*) _guard_flag "$1" ;;
             *)      shift ;;
         esac
     done
@@ -1602,18 +1457,21 @@ cmd_communication_list() {
 
 cmd_communication_cancel() {
     ensure_project
-    local comm_id="" reason=""
+    local comm_id="" reason="" acknowledge=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --reason) reason="$2"; shift 2 ;;
-            -?*)      _guard_positional "$1" "Usage: beacon communication cancel <comm-id> [--reason <text>]" ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*)      _guard_positional "$1" "Usage: beacon communication cancel <comm-id> --reason <text> | --acknowledge" ;;
             *)        comm_id="$1"; shift ;;
         esac
     done
     if [ -z "$comm_id" ]; then
-        echo "Usage: beacon communication cancel <comm-id> [--reason <text>]"
+        echo "Usage: beacon communication cancel <comm-id> --reason <text> | --acknowledge"
         exit 1
     fi
+    _require_audit_reason "communication cancel" "$reason" "$acknowledge"
+    [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
     BEACON_COMM_ID="$comm_id" BEACON_COMM_REASON="$reason" \
         python3 "$COMMANDS_PY" communication_cancel
 }
@@ -1700,28 +1558,34 @@ cmd_meeting_end() {
 
 cmd_meeting_cancel() {
     ensure_project
-    local mtg_id=""
+    local mtg_id="" reason="" acknowledge=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -?*) _guard_positional "$1" "Usage: beacon meeting cancel <mtg-id>" ;;
+            --reason) reason="$2"; shift 2 ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon meeting cancel <mtg-id> (--reason <text> | --acknowledge)" ;;
             *)   mtg_id="$1"; shift ;;
         esac
     done
-    if [ -z "$mtg_id" ]; then echo "Usage: beacon meeting cancel <mtg-id>"; exit 1; fi
-    BEACON_MTG_ID="$mtg_id" python3 "$COMMANDS_PY" meeting_cancel
+    if [ -z "$mtg_id" ]; then echo "Usage: beacon meeting cancel <mtg-id> (--reason <text> | --acknowledge)"; exit 1; fi
+    _require_audit_reason "meeting cancel" "$reason" "$acknowledge"
+    [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
+    BEACON_MTG_ID="$mtg_id" BEACON_MTG_CANCEL_REASON="$reason" \
+        python3 "$COMMANDS_PY" meeting_cancel
 }
 
 cmd_meeting_list() {
     ensure_project
+    # e-3909: <opp-id> is OPTIONAL — omit it to list meetings across ALL
+    # opportunities (symmetric with `opportunity list` / the global list-ended).
     local opp_id="" json_flag=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
-            -?*)    _guard_positional "$1" "Usage: beacon meeting list <opp-id> [--json]" ;;
+            -?*)    _guard_positional "$1" "Usage: beacon meeting list [<opp-id>] [--json]" ;;
             *)      opp_id="$1"; shift ;;
         esac
     done
-    if [ -z "$opp_id" ]; then echo "Usage: beacon meeting list <opp-id> [--json]"; exit 1; fi
     BEACON_MTG_OPP="$opp_id" BEACON_JSON="$json_flag" \
         python3 "$COMMANDS_PY" meeting_list
 }
@@ -1763,37 +1627,43 @@ cmd_account_phase() {
 
 cmd_account_delete() {
     ensure_project
-    local acc_id="" force="" reason=""
+    local acc_id="" force="" reason="" acknowledge=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --force)  force="1"; shift ;;
             --reason) reason="$2"; shift 2 ;;
-            -?*)      _guard_positional "$1" "Usage: beacon account delete <acc-id> [--force] [--reason <text>]" ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*)      _guard_positional "$1" "Usage: beacon account delete <acc-id> [--force] (--reason <text> | --acknowledge)" ;;
             *)        acc_id="$1"; shift ;;
         esac
     done
     if [ -z "$acc_id" ]; then
-        echo "Usage: beacon account delete <acc-id> [--force] [--reason <text>]"
+        echo "Usage: beacon account delete <acc-id> [--force] (--reason <text> | --acknowledge)"
         exit 1
     fi
+    _require_audit_reason "account delete" "$reason" "$acknowledge"
+    [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
     BEACON_ACCOUNT_ID="$acc_id" BEACON_FORCE="$force" BEACON_CANCEL_REASON="$reason" \
         python3 "$COMMANDS_PY" account_delete
 }
 
 cmd_opportunity_delete() {
     ensure_project
-    local opp_id="" reason=""
+    local opp_id="" reason="" acknowledge=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --reason) reason="$2"; shift 2 ;;
-            -?*) _guard_positional "$1" "Usage: beacon opportunity delete <opp-id> [--reason <text>]" ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon opportunity delete <opp-id> (--reason <text> | --acknowledge)" ;;
             *)   opp_id="$1"; shift ;;
         esac
     done
     if [ -z "$opp_id" ]; then
-        echo "Usage: beacon opportunity delete <opp-id> [--reason <text>]"
+        echo "Usage: beacon opportunity delete <opp-id> (--reason <text> | --acknowledge)"
         exit 1
     fi
+    _require_audit_reason "opportunity delete" "$reason" "$acknowledge"
+    [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
     BEACON_OPP_ID="$opp_id" BEACON_CANCEL_REASON="$reason" \
         python3 "$COMMANDS_PY" opportunity_delete
 }
@@ -1804,6 +1674,7 @@ cmd_phase_list() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
+            -?*) _guard_flag "$1" ;;
             *)      shift ;;
         esac
     done
@@ -1924,6 +1795,7 @@ cmd_log() {
             --hash)        explicit_hash="${2:-}";   shift 2 ;;
             --behavior)    behavior="${2:-}";        shift 2 ;;
             --resolves)    resolves="${2:-}"; resolves_set="1"; shift 2 ;;
+            -?*)           _guard_flag "$1" ;;
             *)             custom_summary="$1";      shift   ;;
         esac
     done
@@ -2005,6 +1877,13 @@ cmd_summary() {
     local text=""
     local json_flag=""
 
+    # ms-120 / e-3907 note: `summary` was flagged as a noun-mutate to verbify,
+    # but it is already a LOUD-deprecated no-op (ms-57 / e-1040 retired the
+    # write; the command prints "IGNORED" and changes nothing). Since it no
+    # longer mutates, there is nothing to verbify — no `summary set` alias is
+    # added. The deprecation message below is the AX-correct surface (it names
+    # the replacement paths). Left as-is intentionally.
+
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json)
@@ -2069,6 +1948,7 @@ cmd_task_show() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
+            -?*)           _guard_flag "$1" ;;
             *)      entry_id="$1"; shift ;;
         esac
     done
@@ -2104,6 +1984,7 @@ cmd_task_update() {
             --acceptance-criteria|--ac) acceptance_criteria="${2:-}"; shift 2 ;;
             --behavior)                 behavior="${2:-}"; shift 2 ;;
             --priority|-p)              priority="${2:-}"; shift 2 ;;
+            -?*)           _guard_flag "$1" ;;
             *)                          entry_id="$1"; shift ;;
         esac
     done
@@ -2111,7 +1992,7 @@ cmd_task_update() {
     if [ -z "$entry_id" ]; then
         echo "Usage: beacon task update <entry-id> [--description D] [--status S] [--detail D] [--ms MS-ID]"
         echo "                                     [--motivation TEXT] [--acceptance-criteria TEXT]"
-        echo "                                     [--behavior TEXT] [--priority highest|high|middle|low|lowest]"
+        echo "                                     [--behavior TEXT] [--priority highest|high|medium|low|lowest]"
         echo "                                     [--json]"
         exit 1
     fi
@@ -2133,6 +2014,7 @@ cmd_task_delete() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json_flag="1"; shift ;;
+            -?*)           _guard_flag "$1" ;;
             *)      entry_id="$1"; shift ;;
         esac
     done
@@ -2162,11 +2044,14 @@ cmd_task_done() {
     local progress=""
     local reason=""
     local reason_set=0
+    local acknowledge=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -p|--progress) progress="${2:-}"; shift 2 ;;
             -r|--reason)   reason="${2:-}";   reason_set=1; shift 2 ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*)           _guard_flag "$1" ;;
             *)             entry_id="$1";     shift   ;;
         esac
     done
@@ -2180,10 +2065,10 @@ cmd_task_done() {
     # "operator passed --reason ''" (explicit waiver, accepted but discouraged).
     if [ "$reason_set" = "1" ]; then
         BEACON_ENTRY_ID="$entry_id" BEACON_PROGRESS="$progress" BEACON_REASON="$reason" \
-            python3 "$COMMANDS_PY" task_done
+            BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" task_done
     else
         BEACON_ENTRY_ID="$entry_id" BEACON_PROGRESS="$progress" \
-            python3 "$COMMANDS_PY" task_done
+            BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" task_done
     fi
 }
 
@@ -2195,6 +2080,7 @@ cmd_task_cancel() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -r|--reason) reason="${2:-}"; shift 2 ;;
+            -?*)           _guard_flag "$1" ;;
             *)           entry_id="$1";  shift   ;;
         esac
     done
@@ -2279,6 +2165,7 @@ cmd_retro() {
             --until) until="${2:-}"; shift 2 ;;
             --prepare) shift ;;
             --catch-up) catch_up="1"; shift ;;
+            -?*) _guard_flag "$1" ;;
             *) shift ;;
         esac
     done
@@ -2333,13 +2220,14 @@ cmd_status() {
         case "$1" in
             --json) json_flag="1"; shift ;;
             --all|-a) all_flag="1"; shift ;;
-            --ms)
+            -m|--ms)
                 if [ -n "$ms_filter" ]; then
                     ms_filter="$ms_filter,${2:-}"
                 else
                     ms_filter="${2:-}"
                 fi
                 shift 2 ;;
+            -?*) _guard_flag "$1" ;;
             *) shift ;;
         esac
     done
@@ -2460,7 +2348,7 @@ cmd_doc() {
                 case "$1" in
                     --id)         doc_id="${2:-}"; shift 2 ;;
                     --scope|-s)   doc_scope="${2:-}"; shift 2 ;;
-                    --ms)         doc_ms="${2:-}"; shift 2 ;;
+                    -m|--ms)         doc_ms="${2:-}"; shift 2 ;;
                     --op)         doc_op="${2:-}"; shift 2 ;;
                     --trek)       doc_trek="${2:-}"; shift 2 ;;
                     --account|--acc)      doc_account="${2:-}"; shift 2 ;;
@@ -2470,6 +2358,7 @@ cmd_doc() {
                     --content)    doc_content="${2:-}"; shift 2 ;;
                     --bus-origin) doc_bus_origin="1"; shift ;;
                     --stdin)      shift ;;  # stdin is handled by Python side
+                    -?*)           _guard_flag "$1" ;;
                     *)            doc_title="$1"; shift ;;
                 esac
             done
@@ -2504,13 +2393,17 @@ cmd_doc() {
                 case "$1" in
                     --json)             json_flag="1"; shift ;;
                     --scope|-s)         scope_filter="${2:-}"; shift 2 ;;
-                    --ms)               ms_filter="${2:-}"; shift 2 ;;
+                    -m|--ms)               ms_filter="${2:-}"; shift 2 ;;
                     --op)               op_filter="${2:-}"; shift 2 ;;
                     --trek)             trek_filter="${2:-}"; shift 2 ;;
                     --account|--acc)      account_filter="${2:-}"; shift 2 ;;
                     --opportunity|--opp)  opportunity_filter="${2:-}"; shift 2 ;;
                     --target)           target_filter="${2:-}"; shift 2 ;;
-                    --include-trashed)  include_trashed="1"; shift ;;
+                    # e-3895: `--all` is the universal "show hidden too" flag
+                    # (parallels milestone --all / incident --all); the
+                    # self-describing --include-trashed stays as an alias.
+                    --all|--include-trashed)  include_trashed="1"; shift ;;
+                    -?*) _guard_flag "$1" ;;
                     *) shift ;;
                 esac
             done
@@ -2550,7 +2443,7 @@ cmd_doc() {
                     --content)    doc_content="${2:-}"; shift 2 ;;
                     --title)      doc_title="${2:-}"; shift 2 ;;
                     --scope|-s)   doc_scope="${2:-}"; shift 2 ;;
-                    --ms)         doc_ms="${2:-}"; doc_ms_set="1"; shift 2 ;;
+                    -m|--ms)         doc_ms="${2:-}"; doc_ms_set="1"; shift 2 ;;
                     --op)         doc_op="${2:-}"; doc_op_set="1"; shift 2 ;;
                     --trek)       doc_trek="${2:-}"; shift 2 ;;
                     --account|--acc)      doc_account="${2:-}"; shift 2 ;;
@@ -2559,6 +2452,7 @@ cmd_doc() {
                     --json)       json_flag="1"; shift ;;
                     --bus-origin) doc_bus_origin="1"; shift ;;
                     --stdin)      shift ;;
+                    -?*)           _guard_flag "$1" ;;
                     *)            doc_id="$1"; shift ;;
                 esac
             done
@@ -2586,6 +2480,7 @@ cmd_doc() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --json) json_flag="1"; shift ;;
+                    -?*)           _guard_flag "$1" ;;
                     *)      doc_id="$1"; shift ;;
                 esac
             done
@@ -2604,6 +2499,7 @@ cmd_doc() {
                 case "$1" in
                     -r|--reason) doc_reason="${2:-}"; shift 2 ;;
                     --json)      json_flag="1"; shift ;;
+                    -?*)           _guard_flag "$1" ;;
                     *)           doc_id="$1"; shift ;;
                 esac
             done
@@ -2626,6 +2522,7 @@ cmd_doc() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --rev)       rev="${2:-}"; shift 2 ;;
+                    -?*)           _guard_flag "$1" ;;
                     *)           [[ -z "$doc_id" ]] && doc_id="$1"; shift ;;
                 esac
             done
@@ -2640,6 +2537,7 @@ cmd_doc() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --json) json_flag="1"; shift ;;
+                    -?*)           _guard_flag "$1" ;;
                     *)      [[ -z "$image_path" ]] && image_path="$1"; shift ;;
                 esac
             done
@@ -2676,6 +2574,7 @@ cmd_pr() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --json) json_flag="1"; shift ;;
+                    -?*)           _guard_flag "$1" ;;
                     *)      ident="$1"; shift ;;
                 esac
             done
@@ -2700,6 +2599,7 @@ cmd_pr() {
                     --intent)      intent="${2:-}"; shift 2 ;;
                     --author)      author="${2:-}"; shift 2 ;;
                     --json)        json_flag="1"; shift ;;
+                    -?*)           _guard_flag "$1" ;;
                     *)             url="$1"; shift ;;
                 esac
             done
@@ -2724,6 +2624,7 @@ cmd_pr() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --json) json_flag="1"; shift ;;
+                    -?*)           _guard_flag "$1" ;;
                     *)      entry_id="$1"; shift ;;
                 esac
             done
@@ -2743,9 +2644,10 @@ cmd_pr() {
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --rationale)    rationale="${2:-}"; shift 2 ;;
+                    --rationale|--reason)    rationale="${2:-}"; shift 2 ;;
                     --json)         json_flag="1"; shift ;;
                     --no-auto-done) no_auto_done_flag="1"; shift ;;
+                    -?*)           _guard_flag "$1" ;;
                     *)              entry_id="$1"; shift ;;
                 esac
             done
@@ -2766,8 +2668,9 @@ cmd_pr() {
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --rationale) rationale="${2:-}"; shift 2 ;;
+                    --rationale|--reason) rationale="${2:-}"; shift 2 ;;
                     --json)      json_flag="1"; shift ;;
+                    -?*)           _guard_flag "$1" ;;
                     *)           entry_id="$1"; shift ;;
                 esac
             done
@@ -2817,6 +2720,7 @@ cmd_pr() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --json) json_flag="1"; shift ;;
+                    -?*)           _guard_flag "$1" ;;
                     *)      entry_id="$1"; shift ;;
                 esac
             done
@@ -2835,8 +2739,9 @@ cmd_pr() {
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --rationale) rationale="${2:-}"; shift 2 ;;
+                    --rationale|--reason) rationale="${2:-}"; shift 2 ;;
                     --json)      json_flag="1"; shift ;;
+                    -?*)           _guard_flag "$1" ;;
                     *)           entry_id="$1"; shift ;;
                 esac
             done
@@ -2860,6 +2765,7 @@ cmd_pr() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --json) json_flag="1"; shift ;;
+                    -?*)           _guard_flag "$1" ;;
                     *)      entry_id="$1"; shift ;;
                 esac
             done
@@ -2881,6 +2787,7 @@ cmd_pr() {
                 case "$1" in
                     --json)    json_flag="1"; shift ;;
                     --dry-run) dry_run_flag="1"; shift ;;
+                    -?*) _guard_flag "$1" ;;
                     *)         shift ;;
                 esac
             done
@@ -2947,6 +2854,42 @@ while [ "${1:-}" = "--profile" ]; do
     shift 2
 done
 
+# ms-120 e-3897: reserve -h/--help at top priority for EVERY subcommand.
+# A standalone -h/--help anywhere in the args renders usage from the single
+# registry (lib/commands.py _help_registry) and exits, before any command
+# parser runs. This is the structural form of "--help を全 subcommand で
+# パーサ最優先に予約する": help can never diverge from `beacon help --json`
+# (same registry) and `--help` works on every command — including ones whose
+# parser would otherwise mis-read it (task update --help の "Entry not found"
+# 破れの恒久修正)。Rendered from the registry, so it needs no project dir.
+# Command path = the leading non-flag tokens (verb path, e.g. "milestone
+# start"). Positional ids beyond the 2nd verb token are dropped so
+# `task update e-1 --help` still resolves to "task update". Computed once and
+# reused by the --help renderer and by _guard_flag's inline-command errors.
+_BEACON_CMD=""
+_beacon_cmd_n=0
+_beacon_wants_help=""
+for _a in "$@"; do
+    case "$_a" in
+        -h|--help) _beacon_wants_help=1 ;;
+        -*) : ;;
+        *)
+            if [ "$_beacon_cmd_n" -lt 2 ]; then
+                _BEACON_CMD="${_BEACON_CMD:+$_BEACON_CMD }$_a"
+                _beacon_cmd_n=$((_beacon_cmd_n + 1))
+            fi
+            ;;
+    esac
+done
+if [ -n "$_beacon_wants_help" ]; then
+    # Render from the registry. Exit 0 = handled (registry match or top help).
+    # Exit 3 = no registry entry for this specific command, so fall through to
+    # the command's own --help handling (bash-only commands keep bespoke help).
+    if BEACON_HELP_QUERY="$_BEACON_CMD" python3 "$COMMANDS_PY" help_render; then
+        exit 0
+    fi
+fi
+
 # Relocate to the project root before dispatch. `setup`/`init` operate on the
 # current directory by design, so they are exempt.
 # ms-84 Phase 3 (e-2037): cloud mode has no local project.json. We
@@ -3002,6 +2945,7 @@ case "${1:-}" in
                 --retro-day)   _init_retro_day="${2:-}"; shift 2 ;;
                 --storage)     _init_storage="${2:-}"; shift 2 ;;
                 --sensitivity) _init_sensitivity="${2:-}"; shift 2 ;;
+                -?*) _guard_flag "$1" ;;
                 *) shift ;;
             esac
         done
@@ -3064,8 +3008,18 @@ case "${1:-}" in
         case "${2:-}" in
             add)      shift 2; cmd_acquisition_add "$@" ;;
             list|ls)  shift 2; cmd_acquisition_list "$@" ;;
-            status)   shift 2; cmd_acquisition_status "$@" ;;
-            *)        echo "Usage: beacon acquisition [add|list|status]  (顧客獲得ターゲット: 取引先の無い獲得・準備作業)" ;;
+            # ms-120 e-3907: named intent verbs for the lifecycle
+            # (todo → in_progress → observing → done). status is read-only.
+            start)    BEACON_ACQ_ID="${3:-}" BEACON_ACQ_STATUS="in_progress" python3 "$COMMANDS_PY" acquisition_status ;;
+            observe)  BEACON_ACQ_ID="${3:-}" BEACON_ACQ_STATUS="observing"   python3 "$COMMANDS_PY" acquisition_status ;;
+            done)     BEACON_ACQ_ID="${3:-}" BEACON_ACQ_STATUS="done"        python3 "$COMMANDS_PY" acquisition_status ;;
+            status)
+                # Deprecated write form (kept for backward compatibility).
+                shift 2
+                _deprecate_status_write acquisition "beacon acquisition start|observe|done <acq-id>"
+                cmd_acquisition_status "$@"
+                ;;
+            *)        echo "Usage: beacon acquisition [add|list|start|observe|done|show]  (顧客獲得ターゲット: 取引先の無い獲得・準備作業。状態遷移は名前付き動詞で)" ;;
         esac
         ;;
     opportunity|opp)
@@ -3076,13 +3030,14 @@ case "${1:-}" in
             assign)   shift 2; cmd_opportunity_assign "$@" ;;
             amount)   shift 2; cmd_opportunity_amount "$@" ;;
             describe|desc) shift 2; cmd_opportunity_describe "$@" ;;
+            rename)   shift 2; cmd_opportunity_rename "$@" ;;
             phase-prob) shift 2; cmd_opportunity_phase_prob "$@" ;;
             transition-date|td) shift 2; cmd_opportunity_transition_date "$@" ;;
             judge)    shift 2; cmd_opportunity_judge "$@" ;;
             due)      shift 2; cmd_opportunity_due "$@" ;;
             activity) shift 2; cmd_opportunity_activity "$@" ;;
             delete)   shift 2; cmd_opportunity_delete "$@" ;;
-            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|describe|phase-prob|transition-date|judge|due|activity|delete]" ;;
+            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|describe|rename|phase-prob|transition-date|judge|due|activity|delete]" ;;
         esac
         ;;
     communication|comm)
@@ -3101,8 +3056,16 @@ case "${1:-}" in
             end)        shift 2; cmd_meeting_end "$@" ;;
             cancel)     shift 2; cmd_meeting_cancel "$@" ;;
             list|ls)    shift 2; cmd_meeting_list "$@" ;;
-            ended)      shift 2; cmd_meeting_ended "$@" ;;
-            *)          echo "Usage: beacon meeting [schedule|reschedule|end|cancel|list|ended]" ;;
+            # e-3909: `list-ended` is the canonical READ verb — it lists meetings
+            # whose scheduled end has passed (no mutation). The old name `ended`
+            # was a minimal pair with the WRITE verb `end` (mark one ended), so
+            # you couldn't tell read from write by the word. `ended` stays as a
+            # deprecated alias with a nudge.
+            list-ended) shift 2; cmd_meeting_ended "$@" ;;
+            ended)
+                echo "Note: 'beacon meeting ended' は 'beacon meeting list-ended' に改名されました (e-3909: 書く end と読む ended の紛らわしさ解消)。ended は当面 alias として動きます。" >&2
+                shift 2; cmd_meeting_ended "$@" ;;
+            *)          echo "Usage: beacon meeting [schedule|reschedule|end|cancel|list [<opp-id>]|list-ended]" ;;
         esac
         ;;
     sales)
@@ -3214,6 +3177,7 @@ case "${1:-}" in
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         -m|--ms) ms="${2:-}"; shift 2 ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -3241,6 +3205,13 @@ case "${1:-}" in
                 cmd_operation_purge "$@"
                 ;;
             open)
+                # ms-120 / e-3907: `open` is a lifecycle STATE value, not a
+                # command verb. Creating an Operation directly in the open state
+                # is `operation create --status open` (create already takes
+                # --status). This alias stays for back-compat with a nudge so
+                # the word `open` stops meaning three things (create-verb / state
+                # value / activate-target).
+                echo "Note: 'beacon operation open' は 'beacon operation create --status open' に統一されました (e-3907: open は状態値でありコマンド動詞ではない)。open は当面 alias として動きます。" >&2
                 shift 2
                 title="" schedule="weekdays" log_source="" status="open"
                 activation_hint="" objective="" ac="" priority=""
@@ -3253,6 +3224,7 @@ case "${1:-}" in
                         --objective) objective="${2:-}"; shift 2 ;;
                         --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
                         --priority) priority="${2:-}"; shift 2 ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$title" ]] && title="$1"; shift ;;
                     esac
                 done
@@ -3280,6 +3252,7 @@ case "${1:-}" in
                         --objective) objective="${2:-}"; shift 2 ;;
                         --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
                         --priority) priority="${2:-}"; shift 2 ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$title" ]] && title="$1"; shift ;;
                     esac
                 done
@@ -3293,11 +3266,22 @@ case "${1:-}" in
                     BEACON_PRIORITY="$priority" \
                     python3 "$COMMANDS_PY" operation_open
                 ;;
+            start)
+                # ms-120 e-3907: named verb for the prep transition (→in_progress)
+                # so operation setup has a non-deprecated path (todo → in_progress).
+                BEACON_OPERATION_ID="${3:-}" BEACON_OPERATION_STATUS="in_progress" \
+                    python3 "$COMMANDS_PY" operation_set_status
+                ;;
             activate)
                 BEACON_OPERATION_ID="${3:-}" BEACON_OPERATION_STATUS="open" \
                     python3 "$COMMANDS_PY" operation_set_status
                 ;;
             status)
+                # ms-120 e-3907: deprecated write form. `activate` (→open) and
+                # `close` (→closed) are the canonical named verbs; `status` now
+                # reads (like `beacon status`). Kept for backward compatibility
+                # (incl. prep todo/in_progress transitions) but warns.
+                _deprecate_status_write operation "beacon operation activate|close <op-id>"
                 BEACON_OPERATION_ID="${3:-}" BEACON_OPERATION_STATUS="${4:-}" \
                     python3 "$COMMANDS_PY" operation_set_status
                 ;;
@@ -3312,6 +3296,7 @@ case "${1:-}" in
                         --objective) obj="${2:-}"; shift 2 ;;
                         --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
                         --priority) priority="${2:-}"; shift 2 ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
                     esac
                 done
@@ -3342,6 +3327,7 @@ case "${1:-}" in
                         --expires-at) expires_at="${2:-}"; shift 2 ;;
                         --ttl-seconds) ttl_seconds="${2:-}"; shift 2 ;;
                         --json) json_flag="1"; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
                     esac
                 done
@@ -3375,6 +3361,7 @@ except ValueError as e:
                         --envelope-id) env_id="${2:-}"; shift 2 ;;
                         -r|--reason) reason="${2:-}"; shift 2 ;;
                         --json) json_flag="1"; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
                     esac
                 done
@@ -3391,6 +3378,7 @@ except ValueError as e:
                         while [[ $# -gt 0 ]]; do
                             case "$1" in
                                 --json) json_flag="1"; shift ;;
+                                -?*)           _guard_flag "$1" ;;
                                 *) if [[ -z "$op_id" ]]; then op_id="$1"
                                    elif [[ -z "$action" ]]; then action="$1"
                                    fi; shift ;;
@@ -3417,6 +3405,7 @@ except ValueError as e:
                                 --priority) priority="${2:-}"; shift 2 ;;
                                 --motivation|--why) motivation="${2:-}"; shift 2 ;;
                                 --acceptance-criteria|--ac) ac="${2:-}"; shift 2 ;;
+                                -?*)           _guard_flag "$1" ;;
                                 *) [[ -z "$desc" ]] && desc="$1"; shift ;;
                             esac
                         done
@@ -3432,6 +3421,7 @@ except ValueError as e:
                         while [[ $# -gt 0 ]]; do
                             case "$1" in
                                 -r|--reason) reason="${2:-}"; shift 2 ;;
+                                -?*)           _guard_flag "$1" ;;
                                 *) [[ -z "$entry_id" ]] && entry_id="$1"; shift ;;
                             esac
                         done
@@ -3463,10 +3453,11 @@ except ValueError as e:
                 echo "                                [--status todo|in_progress|open|closed]"
                 echo "                                [--activation-hint H --objective O --ac A --priority P]"
                 echo "       beacon operation create \"<title>\" ...    (alias for open --status todo)"
+                echo "       beacon operation start <op-id>              (todo → in_progress; 準備着手)"
                 echo "       beacon operation activate <op-id>          (todo/in_progress → open)"
-                echo "       beacon operation status <op-id> <status>   (any transition)"
+                echo "       beacon operation close <op-id>              (→ closed)"
+                echo "       beacon operation status <op-id> <status>   (DEPRECATED: use start/activate/close; status now reads)"
                 echo "       beacon operation update <op-id> [--title --schedule --hint --objective --ac --priority]"
-                echo "       beacon operation close <op-id>"
                 echo "       beacon operation list [--json]"
                 echo "       beacon operation show <op-id> [--json]"
                 echo "       beacon operation approve <op-id> --spec <doc-id> [--expires-at YYYY-MM-DD] [--json]"
@@ -3490,6 +3481,7 @@ except ValueError as e:
                         --description|--desc) desc="${2:-}"; shift 2 ;;
                         --goal-state) goal_state="${2:-}"; shift 2 ;;
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$title" ]] && title="$1"; shift ;;
                     esac
                 done
@@ -3509,6 +3501,7 @@ except ValueError as e:
                         --all-actors) all_actors="1"; shift ;;
                         --joined) joined_only="1"; shift ;;
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -3525,6 +3518,7 @@ except ValueError as e:
                     case "$1" in
                         --all|--detail) show_all="1"; shift ;;
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3537,6 +3531,7 @@ except ValueError as e:
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3548,6 +3543,7 @@ except ValueError as e:
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3561,6 +3557,7 @@ except ValueError as e:
                         --actor) actor="${2:-}"; shift 2 ;;
                         --notify) notify="1"; shift ;;
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3583,6 +3580,7 @@ except ValueError as e:
                         # BEACON_TREK_CONSENT_ACK を上書きしない (= bot / fixture
                         # 経由の env-based bypass と独立 / 共存可)。
                         --i-understand-the-implications) export BEACON_TREK_CONSENT_ACK=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3596,6 +3594,7 @@ except ValueError as e:
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3610,6 +3609,7 @@ except ValueError as e:
                         --remove-scope) scope_remove="${2:-}"; shift 2 ;;
                         --goal-state) goal_state="${2:-}"; goal_state_set="1"; shift 2 ;;
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3627,6 +3627,7 @@ except ValueError as e:
                     case "$1" in
                         --limit) limit="${2:-50}"; shift 2 ;;
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3646,13 +3647,14 @@ except ValueError as e:
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --project) sa_project="${2:-}"; shift 2 ;;
-                        --milestone|--ms) sa_milestone="${2:-}"; shift 2 ;;
+                        -m|--milestone|--ms) sa_milestone="${2:-}"; shift 2 ;;
                         --operation|--op) sa_operation="${2:-}"; shift 2 ;;
                         --task|--e) sa_task="${2:-}"; shift 2 ;;
                         # ms-109 e-3699 — sales narrowing (商談 / 顧客)
                         --opportunity|--opp) sa_opportunity="${2:-}"; shift 2 ;;
                         --account|--acc) sa_account="${2:-}"; shift 2 ;;
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3733,11 +3735,12 @@ except ValueError as e:
                         while [[ $# -gt 0 ]]; do
                             case "$1" in
                                 --project) project="${2:-}"; shift 2 ;;
-                                --milestone|--ms) ms="${2:-}"; shift 2 ;;
+                                -m|--milestone|--ms) ms="${2:-}"; shift 2 ;;
                                 --operation|--op) op="${2:-}"; shift 2 ;;
                                 --task|--e) task="${2:-}"; shift 2 ;;
                                 --children) children="${2:-}"; shift 2 ;;
                                 --json) export BEACON_JSON=1; shift ;;
+                                -?*)           _guard_flag "$1" ;;
                                 *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                             esac
                         done
@@ -3813,6 +3816,7 @@ except ValueError as e:
                         while [[ $# -gt 0 ]]; do
                             case "$1" in
                                 --json) export BEACON_JSON=1; shift ;;
+                                -?*)           _guard_flag "$1" ;;
                                 *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                             esac
                         done
@@ -3834,6 +3838,7 @@ except ValueError as e:
                     case "$1" in
                         --category) category="${2:-}"; shift 2 ;;
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3852,6 +3857,7 @@ except ValueError as e:
                     case "$1" in
                         --reason) reason="${2:-}"; shift 2 ;;
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3864,6 +3870,7 @@ except ValueError as e:
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3876,6 +3883,7 @@ except ValueError as e:
                     case "$1" in
                         --to) to_sid="${2:-}"; shift 2 ;;
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3890,6 +3898,7 @@ except ValueError as e:
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3907,6 +3916,7 @@ except ValueError as e:
                         --json) export BEACON_JSON=1; shift ;;
                         --session-id) session_override="${2:-}"; shift 2 ;;
                         --kickoff-dm-event-id) kickoff_dm_event_id="${2:-}"; shift 2 ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3945,6 +3955,7 @@ except ValueError as e:
                             ;;
                         --needs-leader-judgment) needs_leader=1; shift ;;
                         --time-on-task) time_on_task="${2:-0}"; shift 2 ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -3968,6 +3979,7 @@ except ValueError as e:
                     case "$1" in
                         --json) export BEACON_JSON=1; shift ;;
                         --apply) export BEACON_TREK_APPLY=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -4026,6 +4038,7 @@ except ValueError as e:
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --json) export BEACON_JSON=1; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
                     esac
                 done
@@ -4047,7 +4060,7 @@ except ValueError as e:
                                 --target) target="${2:-}"; shift 2 ;;
                                 --priority) priority="${2:-}"; shift 2 ;;
                                 --motivation) motivation="${2:-}"; shift 2 ;;
-                                --acceptance-criteria) acceptance_criteria="${2:-}"; shift 2 ;;
+                                --acceptance-criteria|--ac) acceptance_criteria="${2:-}"; shift 2 ;;
                                 --type) entry_type="${2:-task}"; shift 2 ;;
                                 --json) export BEACON_JSON=1; shift ;;
                                 *)
@@ -4125,6 +4138,7 @@ except ValueError as e:
                         --batch) batch="${2:-}"; shift 2 ;;
                         --status) status="${2:-}"; shift 2 ;;
                         --desc) desc="${2:-}"; shift 2 ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -4139,6 +4153,7 @@ except ValueError as e:
                     case "$1" in
                         -o|--op) op_id="${2:-}"; shift 2 ;;
                         --json) BEACON_JSON=1; shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -4153,7 +4168,14 @@ except ValueError as e:
     incident)
         ensure_project
         case "${2:-}" in
-            open)
+            # ms-120 / e-3907: `add` is the canonical create verb (parallels
+            # milestone/opportunity/account add). `open` stays as a deprecated
+            # alias with a nudge so the word `open` stops doubling as a create
+            # verb and a lifecycle state value.
+            add|open)
+                if [ "${2:-}" = "open" ]; then
+                    echo "Note: 'beacon incident open' は 'beacon incident add' に統一されました (e-3907: open は状態値、add が作成動詞)。open は当面 alias として動きます。" >&2
+                fi
                 shift 2
                 op_id=""
                 title=""
@@ -4164,6 +4186,7 @@ except ValueError as e:
                         -o|--op)    op_id="${2:-}";    shift 2 ;;
                         --desc)     desc="${2:-}";     shift 2 ;;
                         --priority) priority="${2:-}"; shift 2 ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$title" ]] && title="$1"; shift ;;
                     esac
                 done
@@ -4177,7 +4200,8 @@ except ValueError as e:
                 resolution=""
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
-                        --resolution) resolution="${2:-}"; shift 2 ;;
+                        --resolution|--reason) resolution="${2:-}"; shift 2 ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$incident_id" ]] && incident_id="$1"; shift ;;
                     esac
                 done
@@ -4191,6 +4215,7 @@ except ValueError as e:
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         -m|--ms) ms_id="${2:-}"; shift 2 ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$incident_id" ]] && incident_id="$1"; shift ;;
                     esac
                 done
@@ -4207,8 +4232,11 @@ except ValueError as e:
                     case "$1" in
                         -o|--op)         op_id="${2:-}"; shift 2 ;;
                         --status)        status="${2:-}"; shift 2 ;;
-                        --include-closed) include_closed="1"; shift ;;
+                        # e-3895: `--all` is the universal "show hidden too" flag;
+                        # --include-closed stays as a self-describing alias.
+                        --all|--include-closed) include_closed="1"; shift ;;
                         --json)          json_mode="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -4217,7 +4245,7 @@ except ValueError as e:
                     python3 "$COMMANDS_PY" incident_list
                 ;;
             *)
-                echo "Usage: beacon incident open \"<title>\" -o <op-id> [--desc \"...\"]"
+                echo "Usage: beacon incident add \"<title>\" -o <op-id> [--desc \"...\"]   (alias: incident open)"
                 echo "       beacon incident close <id> --resolution \"...\""
                 echo "       beacon incident escalate <id> -m <ms-id>"
                 echo "       beacon incident list [-o <op-id>] [--status open|closed] [--include-closed] [--json]"
@@ -4239,6 +4267,7 @@ except ValueError as e:
                         --session-id) _se_session_id="${2:-}"; shift 2 ;;
                         --json)       _se_json="1"; shift ;;
                         --bus-origin) _se_bus_origin="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -4252,6 +4281,7 @@ except ValueError as e:
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --json) _sr_json="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -4267,6 +4297,7 @@ except ValueError as e:
                             case "$1" in
                                 --limit) _sl_limit="${2:-0}"; shift 2 ;;
                                 --json)  _sl_json="1"; shift ;;
+                                -?*) _guard_flag "$1" ;;
                                 *) shift ;;
                             esac
                         done
@@ -4280,6 +4311,7 @@ except ValueError as e:
                         while [[ $# -gt 0 ]]; do
                             case "$1" in
                                 --json) _ss_json="1"; shift ;;
+                                -?*)           _guard_flag "$1" ;;
                                 *) _ss_id="$1"; shift ;;
                             esac
                         done
@@ -4332,6 +4364,7 @@ except ValueError as e:
                     case "$1" in
                         --set)  _sa_set="${2:-}"; shift 2 ;;
                         --json) _sa_json="1";     shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *)      shift ;;
                     esac
                 done
@@ -4351,6 +4384,7 @@ except ValueError as e:
                     while [[ $# -gt 0 ]]; do
                         case "$1" in
                             --json) _sfl_json="1"; shift ;;
+                            -?*) _guard_flag "$1" ;;
                             *) shift ;;
                         esac
                     done
@@ -4367,6 +4401,7 @@ except ValueError as e:
                                     _sfork_ms_id="$1"
                                 fi
                                 shift ;;
+                            -?*) _guard_flag "$1" ;;
                             *) shift ;;
                         esac
                     done
@@ -4413,6 +4448,7 @@ also shows whether credentials.json is present and the resolved api_url.
 EOF
                     exit 0
                     ;;
+                -?*) _guard_flag "$1" ;;
                 *) shift ;;
             esac
         done
@@ -4449,7 +4485,7 @@ EOF
                 --json)       _ses_json="1"; shift ;;
                 -h|--help)
                     cat <<'EOF'
-Usage: beacon sessions [list] [--live] [--healthy] [--since-min <N>] [--machine <name>] [--agent <name>] [--json]
+Usage: beacon sessions [list] [--live] [--healthy] [--since-min <minutes; default 5>] [--machine <name>] [--agent <name>] [--json]
 
 Cross-project session directory. Lists the calling user's bclaude sessions
 across ALL projects they own or are a member of. Use this when you need
@@ -4461,6 +4497,7 @@ For "who in this project is live" use `beacon bus directory --live` instead.
 EOF
                     exit 0
                     ;;
+                -?*) _guard_flag "$1" ;;   # e-3896: no silent unknown-flag drop
                 *) shift ;;
             esac
         done
@@ -4495,6 +4532,7 @@ EOF
                     case "$1" in
                         --context)    note_context="${2:-}"; shift 2 ;;
                         --bus-origin) note_bus_origin="1"; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *) [[ -z "$note_text" ]] && note_text="$1"; shift ;;
                     esac
                 done
@@ -4524,6 +4562,7 @@ EOF
                 --reason-kind)    _stop_reason_kind="${2:-}"; shift 2 ;;
                 --machine-reason) _stop_machine_reason="${2:-}"; shift 2 ;;
                 --json)           _stop_json="1"; shift ;;
+                -?*) _guard_flag "$1" ;;
                 *) shift ;;
             esac
         done
@@ -4625,6 +4664,7 @@ Flags:
 EOF
                     exit 0
                     ;;
+                -?*) _guard_flag "$1" ;;   # e-3896: no silent unknown-flag drop
                 *) shift ;;
             esac
         done
@@ -4649,6 +4689,7 @@ EOF
                 --target) _res_target="${2:-}"; shift 2 ;;
                 --reason) _res_reason="${2:-}"; shift 2 ;;
                 --json)   _res_json="1"; shift ;;
+                -?*) _guard_flag "$1" ;;
                 *) shift ;;
             esac
         done
@@ -4728,6 +4769,7 @@ Flags:
 EOF
                     exit 0
                     ;;
+                -?*) _guard_flag "$1" ;;   # e-3896: no silent unknown-flag drop
                 *) shift ;;
             esac
         done
@@ -4757,6 +4799,7 @@ EOF
                 --timeout-minutes)  _stuck_timeout="${2:-}"; shift 2 ;;
                 --dry-run)          _stuck_dry_run="1"; shift ;;
                 --json)             _stuck_json="1"; shift ;;
+                -?*) _guard_flag "$1" ;;
                 *) shift ;;
             esac
         done
@@ -4836,6 +4879,7 @@ EOF
                 --outcome) _claim_outcome="${2:-}"; shift 2 ;;
                 --mine)    _claim_mine="1"; shift ;;
                 --json)    _claim_json="1"; shift ;;
+                -?*) _guard_flag "$1" ;;
                 *) shift ;;
             esac
         done
@@ -4925,7 +4969,19 @@ EOF
     bus)
         ensure_project
         _bus_sub="${2:-}"
-        shift 2 || true
+        # ms-120 e-3898: drop the tokens we consumed explicitly. The old
+        # `shift 2 || true` failed as a unit when `beacon bus` had no
+        # subcommand (only 1 positional), leaving "bus" behind — the generic
+        # flag loop then reported it as "unexpected argument 'bus' for
+        # 'beacon bus '" (the command named as its own bad arg, 原則 3). Shift
+        # 'bus' always, and the subcommand only when it was actually present.
+        shift || true
+        if [[ -n "$_bus_sub" ]]; then
+            shift || true
+        else
+            # No subcommand → show usage rather than the self-referential error.
+            _bus_sub="__help__"
+        fi
         # `budget` has a 2nd-level subcommand (grant/show/clear) — extract it
         # before the generic arg-parsing loop eats it as an unknown positional.
         _bud_sub=""
@@ -4987,6 +5043,11 @@ EOF
         _bus_action=""          # e-1290: comma-joined actions_authorized for T1 envelope
         _bus_no_envelope=""     # e-1290: opt-out of envelope path (debug legacy)
         _bus_recipient_confirmed=""  # ms-110/e-3445: human confirmed recipient (set by /beacon-dm-send)
+        # ms-120 / e-3901: explicit human-approved manual override of the armed
+        # auto-reply gate. Absent by default; only a human (or the /beacon-dm-send
+        # send-mode path) sets it so an armed session's autonomous loop cannot
+        # forge a bypass. Threaded to cmd_bus_send as BEACON_BUS_MANUAL.
+        _bus_manual=""
         # ms-94 / e-2291 (2026-07-06): `bus directory` の default 挙動を反転。
         # 今まで cwd project 限定 (= 他 project の live session が見えない) が
         # default だったので、user / AI が --all-projects と付けても phantom flag
@@ -5028,7 +5089,7 @@ EOF
                 --turns|-n)       _bud_turns="${2:-}"; shift 2 ;;
                 --in-reply-to)    _bus_in_reply_to="${2:-}"; shift 2 ;;
                 --context)        _bus_context="${2:-}"; shift 2 ;;
-                --rationale)      _bus_rationale="${2:-}"; shift 2 ;;
+                --rationale|--reason)      _bus_rationale="${2:-}"; shift 2 ;;
                 --project)        _bus_project_id="${2:-}"; shift 2 ;;
                 # ms-94 / e-2291: opt-in cwd 限定モード (bus directory の逆 default)。
                 --cwd-only)       _bus_cwd_only="1"; shift ;;
@@ -5052,6 +5113,8 @@ EOF
                 # recipient_confirmed claim the server backstop (e-3443)
                 # requires for cross-user DMs. Not for hand use.
                 --recipient-confirmed) _bus_recipient_confirmed="1"; shift ;;
+                # ms-120 / e-3901: explicit manual override of the armed gate.
+                --manual)         _bus_manual="1"; shift ;;
                 # Route help to the usage block via the dispatch `*)` arm so we
                 # don't duplicate the heredoc. `__help__` matches no real sub.
                 -h|--help)        _bus_sub="__help__"; shift ;;
@@ -5077,6 +5140,18 @@ EOF
                     ;;
             esac
         done
+        # e-3895: `--to` (send: the addressee) and `--recipient` (receive/listen/
+        # ack: whose inbox) are the same thing — a session id — split across two
+        # flag names. Cross-alias them so an AI never picks the wrong one: on
+        # send, a stray --recipient fills the addressee; on the read verbs, a
+        # stray --to fills the inbox. The canonical per-verb name still shows in
+        # help; this only rescues the mismatched choice.
+        if [[ "$_bus_sub" == "send" && -z "$_bus_to_list" && -z "$_bus_to" && -n "$_bus_recipient" ]]; then
+            _bus_to="$_bus_recipient"; _bus_to_list="${_bus_recipient}"$'\n'
+        elif [[ ("$_bus_sub" == "listen" || "$_bus_sub" == "receive" || "$_bus_sub" == "ack") \
+                && -z "$_bus_recipient" && -n "$_bus_to" ]]; then
+            _bus_recipient="$_bus_to"
+        fi
         case "$_bus_sub" in
             send)
                 # ms-75 / e-1858: --to repeatable + --to-trek expansion.
@@ -5121,6 +5196,7 @@ print(m.group(1) if m else "")' || true)
                         BEACON_BUS_ACTION="$_bus_action" \
                         BEACON_BUS_NO_ENVELOPE="$_bus_no_envelope" \
                         BEACON_BUS_RECIPIENT_CONFIRMED="$_bus_recipient_confirmed" \
+                        BEACON_BUS_MANUAL="$_bus_manual" \
                         BEACON_JSON="$_bus_json" \
                         python3 "$COMMANDS_PY" bus_send
                 else
@@ -5142,6 +5218,7 @@ print(m.group(1) if m else "")' || true)
                             BEACON_BUS_ACTION="$_bus_action" \
                             BEACON_BUS_NO_ENVELOPE="$_bus_no_envelope" \
                             BEACON_BUS_RECIPIENT_CONFIRMED="$_bus_recipient_confirmed" \
+                            BEACON_BUS_MANUAL="$_bus_manual" \
                             BEACON_JSON="$_bus_json" \
                             python3 "$COMMANDS_PY" bus_send || _rc=$?
                     done <<< "$_bus_to_list"
@@ -5229,7 +5306,7 @@ print(m.group(1) if m else "")' || true)
                         ;;
                     *)
                         cat <<'EOF'
-Usage: beacon bus budget grant --turns <N> [--json]
+Usage: beacon bus budget grant --turns <N: auto-reply turns to grant, N>=1> [--json]
        beacon bus budget show [--json]
        beacon bus budget clear
 EOF
@@ -5266,13 +5343,13 @@ EOF
                 ;;
             *)
                 cat <<'EOF'
-Usage: beacon bus send         --channel <ch> [--to <session_id>]... [--to-trek <trek-id>] [--payload '<json>'] [--sender <id>] [--delivery <mode>] [--in-reply-to <event_id>] [--action <name>]... [--no-envelope] [--project <id>]
+Usage: beacon bus send         --channel <ch> [--to <session_id>]... [--to-trek <trek-id>] [--payload '<json>'] [--sender <id>] [--delivery <auto-execute|propose-to-ai|notify-user-only; default propose-to-ai>] [--in-reply-to <event_id>] [--manual] [--action <name>]... [--no-envelope] [--project <id>]
        beacon bus listen       [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once] [--project <id>]
        beacon bus receive      [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack] [--project <id>]
        beacon bus ack          [--recipient <id>] (--last-seen-at <iso8601> | --event <event_id>) [--project <id>]
        beacon bus status       <event_id> [--project <id>] [--json]
-       beacon bus directory    [--user <email>] [--machine <name>] [--agent <name>] [--live] [--healthy] [--since-min <N>] [--project <id>] [--cwd-only] [--json]
-       beacon bus budget       grant --turns <N>  |  show  |  clear
+       beacon bus directory    [--user <email>] [--machine <name>] [--agent <name>] [--live] [--healthy] [--since-min <minutes>] [--project <id>] [--cwd-only] [--json]
+       beacon bus budget       grant --turns <N>=1>  |  show  |  clear
        beacon bus auto-execute add --channel <name>  |  remove --channel <name>  |  list
 
 delivery: auto-execute | propose-to-ai (default) | notify-user-only
@@ -5281,9 +5358,16 @@ delivery: auto-execute | propose-to-ai (default) | notify-user-only
                rather than broadcasting to every dm-subscribed session.
                (e-1402) directory に live+healthy で見えない sid を渡すと stderr に
                警告 (soft-warn、送信は続行)。BEACON_BUS_NO_LIVE_CHECK=1 で抑制。
---in-reply-to: mark as AI-authored reply. Requires `bus budget grant N` first.
-               Without it, sends bypass the budget gate (manual mode).
-               The same gate applies via the MCP reply tool (channel/bus.mjs).
+--in-reply-to: thread this send onto an inbound event_id (stamps payload.in_reply_to).
+               (e-3901) This is a THREADING marker, not the safety gate: the
+               auto-reply gate now fires whenever the session is ARMED (a budget
+               was granted), regardless of --in-reply-to, so an autonomous loop
+               cannot bypass the budget cap / cross-user HOLD by omitting it.
+--manual:      explicitly mark this as a human-approved manual send. Only effect
+               is to bypass the armed auto-reply gate (recorded as an audited
+               override). A non-armed session needs no flag — the human typing
+               the command is the approval. The same gate applies via the MCP
+               reply tool (channel/bus.mjs).
 --project:     override the cwd's project_id (e-1151) for cross-project DM/directory.
                Auth + API URL still come from the current project; only the
                target project_id in the API call changes.
@@ -5331,6 +5415,26 @@ EOF
         _dm_sub="${2:-}"
         shift 2 || true
         case "$_dm_sub" in
+            # ms-120 / e-3899: `beacon dm send` is the canonical verb for the
+            # DM domain. A context-free AI reaches for `dm send` first (the
+            # feature is "DM"), but historically the only way to send was
+            # `bus send --channel dm` — split across the bus transport surface
+            # where it was undiscoverable. This delegates to that same
+            # implementation (single source of truth for flag parsing, incl.
+            # --to / --to-user / --in-reply-to / --manual / --recipient-confirmed
+            # / --payload / --action / --project / --json), so the dm domain
+            # owns the verb while bus stays the transport. --channel is implicit
+            # (dm); passing it is rejected to keep the two surfaces from drifting.
+            send)
+                for _a in "$@"; do
+                    if [[ "$_a" == "--channel" ]]; then
+                        echo "Error: 'beacon dm send' targets the dm channel implicitly; do not pass --channel." >&2
+                        echo "       For other channels use 'beacon bus send --channel <ch>'." >&2
+                        exit 2
+                    fi
+                done
+                exec "$BEACON_DIR/bin/beacon" bus send --channel dm "$@"
+                ;;
             respond)
                 # Two positional forms are accepted to match both the helper
                 # hint string (= `beacon dm respond approve|deny <event_id>`)
@@ -5363,9 +5467,20 @@ EOF
             # ms-70 / e-1923 (e-1718 AC 4): audit history viewer in the
             # terminal. Same endpoint and rows as the Web UI's Settings >
             # Audit table; 6 columns sized for typical terminal widths.
-            # Usage: `beacon dm log [<project_id>] [--limit N] [--json]
-            #                       [--project <id>]`
-            log)
+            #
+            # ms-120 / e-3899: canonical verb is `dm audit` (a READ). The old
+            # `dm log` name collided head-on with `beacon log` (a WRITE that
+            # records commit progress) — the same word "log" meant write in one
+            # place and read in another, the exact read/write polarity confusion
+            # e-3907 targets. `dm log` stays as a deprecated alias (SPEC 方針2:
+            # single canonical name + alias everywhere, no breaking rename) with
+            # a one-line stderr nudge toward `dm audit`.
+            # Usage: `beacon dm audit [<project_id>] [--limit N] [--json]
+            #                         [--project <id>]`
+            audit|log)
+                if [[ "$_dm_sub" == "log" ]]; then
+                    echo "Note: 'beacon dm log' は 'beacon dm audit' に改名されました (e-3899: 'log'=書く/'audit'=読む の語義衝突解消)。log は当面 alias として動きます。" >&2
+                fi
                 _dm_log_project_positional=""
                 _dm_log_limit=""
                 _dm_log_json=""
@@ -5377,7 +5492,8 @@ EOF
                         --project) _dm_log_project_override="${2:-}"; shift 2 ;;
                         -h|--help)
                             cat <<'EOF'
-Usage: beacon dm log [<project_id>] [--limit N] [--project <id>] [--json]
+Usage: beacon dm audit [<project_id>] [--limit N] [--project <id>] [--json]
+       (alias: beacon dm log — deprecated, e-3899)
 
 Print the 6-column DM-approval audit log (event_id / sender / receiver /
 status / decision_at / decision_by) for decided rows only — pending and
@@ -5413,19 +5529,25 @@ EOF
                 ;;
             *)
                 cat <<'EOF'
-Usage: beacon dm respond approve <event_id> [--project <id>] [--json]
+Usage: beacon dm send    --to <sid> --payload '<json>' [--in-reply-to <eid>] [--manual] [--recipient-confirmed] [--action <name>]... [--project <id>] [--json]
+       beacon dm respond approve <event_id> [--project <id>] [--json]
        beacon dm respond deny    <event_id> [--project <id>] [--json]
-       beacon dm log    [<project_id>] [--limit N] [--project <id>] [--json]
+       beacon dm audit  [<project_id>] [--limit N] [--project <id>] [--json]
 
-Decide a pending cross-user DM action envelope. Only the intended
-receiver (= the addressee on the sidecar) can press approve / deny;
-the server enforces this via the Bearer token's sub claim, so the
+`dm send` is the canonical DM verb (e-3899): it delegates to
+`bus send --channel dm`, so the dm domain owns the verb while bus stays
+the transport. --channel is implicit; all bus-send flags apply.
+
+`dm respond` decides a pending cross-user DM action envelope. Only the
+intended receiver (= the addressee on the sidecar) can press approve /
+deny; the server enforces this via the Bearer token's sub claim, so the
 CLI argument cannot forge a different actor (SPEC 設計方針 3:
 承認は terminal Claude Code 内での user 直接判断のみ).
 
-`dm log` is the read-only audit mirror of the Web UI's Settings >
+`dm audit` is the read-only audit mirror of the Web UI's Settings >
 Audit table — same endpoint, same rows, 6 fixed columns for terminal
-scanning.
+scanning. (`dm log` is a deprecated alias — 'log' now means write-only,
+see `beacon log`.)
 
 --project: override the cwd's project_id for cross-project decisions
            (same semantics as `beacon bus --project <id>`).
@@ -5450,6 +5572,7 @@ EOF
                         --content) _retro_content="${2:-}"; shift 2 ;;
                         --json)    _retro_json="1"; shift ;;
                         --stdin)   shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -5641,6 +5764,7 @@ EOF
                         --dev)   _auth_dev="1";        shift ;;
                         --email) _auth_email="${2:-}"; shift 2 ;;
                         --name)  _auth_name="${2:-}";  shift 2 ;;
+                        -?*) _guard_flag "$1" ;;
                         *)       shift ;;
                     esac
                 done
@@ -5701,6 +5825,7 @@ EOF
                     case "$1" in
                         --purge-files) _ch_purge="1"; shift ;;
                         --keep-files)  shift ;;  # default, no flag needed
+                        -?*) _guard_flag "$1" ;;
                         *)             shift ;;
                     esac
                 done
@@ -5714,6 +5839,7 @@ EOF
                     case "$1" in
                         --global)  _ch_scope="global";  shift ;;
                         --project) _ch_scope="project"; shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *)         shift ;;
                     esac
                 done
@@ -5727,6 +5853,7 @@ EOF
                     case "$1" in
                         --global)  _ch_scope="global";  shift ;;
                         --project) _ch_scope="project"; shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *)         shift ;;
                     esac
                 done
@@ -5761,6 +5888,7 @@ EOF
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --dry-run) dry="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *)         shift ;;
                     esac
                 done
@@ -5794,6 +5922,7 @@ EOF
                         --email) memail="${2:-}"; shift 2 ;;
                         --role)  mrole="${2:-}"; shift 2 ;;
                         --json)  mjson="1"; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *)       [[ -z "$mid" ]] && mid="$1"; shift ;;
                     esac
                 done
@@ -5812,6 +5941,7 @@ EOF
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --json) mjson="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -5824,6 +5954,7 @@ EOF
                     case "$1" in
                         -r|--reason) reason="${2:-}"; shift 2 ;;
                         --json)      mjson="1"; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *)           [[ -z "$mid" ]] && mid="$1"; shift ;;
                     esac
                 done
@@ -5853,6 +5984,7 @@ EOF
                     case "$1" in
                         --role) mrole="${2:-}"; shift 2 ;;
                         --json) mjson="1"; shift ;;
+                        -?*)           _guard_flag "$1" ;;
                         *)      [[ -z "$memail" ]] && memail="$1"; shift ;;
                     esac
                 done
@@ -5873,6 +6005,7 @@ EOF
                         while [[ $# -gt 0 ]]; do
                             case "$1" in
                                 --json) mjson="1"; shift ;;
+                                -?*) _guard_flag "$1" ;;
                                 *) shift ;;
                             esac
                         done
@@ -5885,6 +6018,7 @@ EOF
                         while [[ $# -gt 0 ]]; do
                             case "$1" in
                                 --json) mjson="1"; shift ;;
+                                -?*)           _guard_flag "$1" ;;
                                 *) [[ -z "$iid" ]] && iid="$1"; shift ;;
                             esac
                         done
@@ -5909,6 +6043,7 @@ EOF
                         --token)         itoken="${2:-}"; shift 2 ;;
                         --display-name)  dname="${2:-}"; shift 2 ;;
                         --json)          mjson="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -5927,6 +6062,7 @@ EOF
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --json) mjson="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -5963,6 +6099,7 @@ EOF
                     echo "  -y, --yes     Skip interactive confirmation."
                     exit 0
                     ;;
+                -?*) _guard_flag "$1" ;;
                 *) shift ;;
             esac
         done
@@ -5991,6 +6128,7 @@ EOF
                         --type)          type="${2:-}";     shift 2 ;;
                         --env)           env="${2:-}";      shift 2 ;;
                         --backend)       backend="${2:-}";  shift 2 ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -6009,6 +6147,7 @@ EOF
                         --env)     env="${2:-}";     shift 2 ;;
                         --backend) backend="${2:-}"; shift 2 ;;
                         --json)    json="1";         shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -6022,6 +6161,7 @@ EOF
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         -r|--reason) _void_reason="${2:-}"; shift 2 ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -6037,6 +6177,7 @@ EOF
                         --execute)    rb_execute="1"; shift ;;
                         --service)    rb_service="${2:-}"; shift 2 ;;
                         --json)       rb_json="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -6068,6 +6209,7 @@ EOF
                         --desc)     desc="${2:-}"; shift 2 ;;
                         --version)  version="${2:-}"; shift 2 ;;
                         -m|--ms)    ms="${2:-}"; shift 2 ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done
@@ -6217,6 +6359,9 @@ EOF
                 --include-bus-dm)       search_inc_bus_dm="1"; shift ;;
                 --include-session-logs) search_inc_session_logs="1"; shift ;;
                 --include-trek)         search_inc_trek="1"; shift ;;
+                # e-3896: reject unknown flags instead of absorbing them into the
+                # query (silent no-op); a bare positional is the search query.
+                -?*) _guard_positional "$1" "Usage: beacon search <query> [--ms <id>] [--scope <s>] [--type <t>] [--json] ..." ;;
                 *) [[ -z "$search_query" ]] && search_query="$1"; shift ;;
             esac
         done
@@ -6257,6 +6402,7 @@ EOF
                 while [[ $# -gt 0 ]]; do
                     case "$1" in
                         --json) cycle_json_flag="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
                         *) shift ;;
                     esac
                 done

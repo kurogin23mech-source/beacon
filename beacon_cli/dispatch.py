@@ -378,8 +378,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     p_account_contact = account_sub.add_parser("contact", add_help=False)
+    # e-3907: canonical form is `account contact add <acc> <name>` (verb). The
+    # bare `account contact <acc> <name>` stays as an alias. A third optional
+    # positional absorbs the leading `add` token; the handler shifts it off.
     p_account_contact.add_argument("acc_id", nargs="?", default="")
     p_account_contact.add_argument("name", nargs="?", default="")
+    p_account_contact.add_argument("extra", nargs="?", default="")
     p_account_contact.add_argument("--role", default="")
     p_account_contact.add_argument("--email", default="")
 
@@ -497,6 +501,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_opp_judge.add_argument("arg", nargs="?", default="")
     p_opp_judge.add_argument("--note", default="")
 
+    # e-3909: post-creation title edit (Windows parity for `opportunity rename`).
+    p_opp_rename = opp_sub.add_parser("rename", add_help=False)
+    p_opp_rename.add_argument("opp_id", nargs="?", default="")
+    p_opp_rename.add_argument("title", nargs="?", default="")
+
     opp_sub.add_parser("due", add_help=False).add_argument(
         "--json", action="store_true"
     )
@@ -567,9 +576,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_mtg_list.add_argument("opp_id", nargs="?", default="")
     p_mtg_list.add_argument("--json", action="store_true")
 
+    # e-3909: `list-ended` is the canonical READ verb; `ended` a deprecated
+    # alias (minimal pair with the WRITE verb `end`). Same args on both.
     p_mtg_ended = mtg_sub.add_parser("ended", add_help=False)
     p_mtg_ended.add_argument("--now", default="")
     p_mtg_ended.add_argument("--json", action="store_true")
+    p_mtg_list_ended = mtg_sub.add_parser("list-ended", add_help=False)
+    p_mtg_list_ended.add_argument("--now", default="")
+    p_mtg_list_ended.add_argument("--json", action="store_true")
 
     # ---- phase (ms-106: sales entities, profession=sales) ----
     p_phase = sub.add_parser(
@@ -1484,6 +1498,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_bus_send.add_argument("--to-trek", dest="bus_to_trek", default="")
     p_bus_send.add_argument("--action", dest="bus_action",
                              action="append", default=[])
+    # ms-120 / e-3901: explicit human-approved manual override of the armed
+    # auto-reply gate. Mirror of bin/beacon so Windows pipx users get the same
+    # escape hatch (without it, an armed Windows session would be gated with no
+    # way to send a one-off — fail-closed but stuck).
+    p_bus_send.add_argument("--manual", dest="bus_manual", action="store_true")
     p_bus_send.add_argument("--no-envelope", dest="no_envelope",
                              action="store_true")
     p_bus_send.add_argument("--json", action="store_true")
@@ -1562,6 +1581,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_dm_respond.add_argument("respond_args", nargs="*", default=[])
     p_dm_respond.add_argument("--project", dest="dm_project_id", default="")
     p_dm_respond.add_argument("--json", action="store_true")
+
+    # ms-120 / e-3899: `dm send` is the canonical DM verb. On Windows pipx it
+    # must exist too, or `beacon dm send` hits argparse `invalid choice: 'send'`
+    # (the exact 2026-06-07 cross-machine DM breakage class). It reuses the
+    # bus-send handler with channel forced to dm (see _handle_dm), so the flag
+    # surface mirrors `bus send` (minus --channel, which is implicit).
+    p_dm_send = dm_sub.add_parser("send", add_help=False)
+    p_dm_send.add_argument("--payload", default="")
+    p_dm_send.add_argument("--sender", default="")
+    p_dm_send.add_argument("--delivery", default="")
+    p_dm_send.add_argument("--in-reply-to", dest="in_reply_to", default="")
+    p_dm_send.add_argument("--project", dest="bus_project_id", default="")
+    p_dm_send.add_argument("--to", dest="bus_to", action="append", default=[])
+    p_dm_send.add_argument("--to-trek", dest="bus_to_trek", default="")
+    p_dm_send.add_argument("--action", dest="bus_action",
+                            action="append", default=[])
+    p_dm_send.add_argument("--manual", dest="bus_manual", action="store_true")
+    p_dm_send.add_argument("--no-envelope", dest="no_envelope",
+                            action="store_true")
+    p_dm_send.add_argument("--json", action="store_true")
+
+    # ms-120 / e-3899: `dm audit` is the canonical read verb (was `dm log`,
+    # which collided with the write-verb `beacon log`). `dm log` stays as a
+    # deprecated alias — identical args, a nudge printed in _handle_dm.
+    p_dm_audit = dm_sub.add_parser("audit", add_help=False)
+    p_dm_audit.add_argument("project_id", nargs="?", default="")
+    p_dm_audit.add_argument("--limit", default="")
+    p_dm_audit.add_argument("--project", dest="dm_project_id", default="")
+    p_dm_audit.add_argument("--json", action="store_true")
 
     p_dm_log = dm_sub.add_parser("log", add_help=False)
     p_dm_log.add_argument("project_id", nargs="?", default="")
@@ -1959,13 +2007,17 @@ def _handle_account(root: Path, args: argparse.Namespace) -> int:
         env = {"BEACON_JSON": "1" if args.json else ""}
         return _run_commands_py(root, "account_list", env)
     if cmd == "contact":
-        if not args.acc_id or not args.name:
-            print("Usage: beacon account contact <acc-id> <name> "
+        # e-3907: shift off a leading `add` (canonical verb form).
+        acc_id, name = args.acc_id or "", args.name or ""
+        if acc_id == "add":
+            acc_id, name = name, (args.extra or "")
+        if not acc_id or not name:
+            print("Usage: beacon account contact add <acc-id> <name> "
                   "[--role <text>] [--email <text>]")
             return 1
         env = {
-            "BEACON_ACCOUNT_ID": args.acc_id or "",
-            "BEACON_CONTACT_NAME": args.name or "",
+            "BEACON_ACCOUNT_ID": acc_id,
+            "BEACON_CONTACT_NAME": name,
             "BEACON_CONTACT_ROLE": args.role or "",
             "BEACON_CONTACT_EMAIL": args.email or "",
         }
@@ -2141,11 +2193,17 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
         }
         return _run_commands_py(root, "opportunity_phase_prob", env)
     if cmd in ("transition-date", "td"):
+        # e-3909: <YYYY-MM-DD> and --clear are mutually exclusive (set vs clear
+        # the transition date). Reject both — parity with bin/beacon.
+        if args.clear and args.date:
+            print("Error: <YYYY-MM-DD> と --clear は排他です (遷移日を設定する か "
+                  "クリアする かのどちらか一方)。", file=sys.stderr)
+            return 2
         # --clear passes an empty date through (set_transition_date treats it as clear).
         date = "" if args.clear else (args.date or "")
         if not args.opp_id or (not date and not args.clear):
-            print("Usage: beacon opportunity transition-date <opp-id> <YYYY-MM-DD> "
-                  "[--note <text>] | --clear")
+            print("Usage: beacon opportunity transition-date <opp-id> "
+                  "(<YYYY-MM-DD> | --clear) [--note <text>]")
             return 1
         env = {
             "BEACON_OPP_ID": args.opp_id or "",
@@ -2153,6 +2211,13 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
             "BEACON_PHASE_NOTE": args.note or "",
         }
         return _run_commands_py(root, "opportunity_transition_date", env)
+    if cmd == "rename":
+        # e-3909: post-creation title edit (Windows parity).
+        if not args.opp_id or not args.title:
+            print("Usage: beacon opportunity rename <opp-id> <new-title>")
+            return 1
+        env = {"BEACON_OPP_ID": args.opp_id or "", "BEACON_TITLE": args.title or ""}
+        return _run_commands_py(root, "opportunity_rename", env)
     if cmd == "judge":
         if not args.opp_id or not args.decision:
             print("Usage: beacon opportunity judge <opp-id> advance|retry|terminal "
@@ -2305,15 +2370,18 @@ def _handle_meeting(root: Path, args: argparse.Namespace) -> int:
             return 1
         return _run_commands_py(root, "meeting_cancel", {"BEACON_MTG_ID": args.mtg_id or ""})
     if cmd in ("list", "ls"):
-        if not args.opp_id:
-            print("Usage: beacon meeting list <opp-id> [--json]")
-            return 1
+        # e-3909: <opp-id> optional — omit to list across all opportunities.
         env = {"BEACON_MTG_OPP": args.opp_id or "", "BEACON_JSON": "1" if args.json else ""}
         return _run_commands_py(root, "meeting_list", env)
-    if cmd == "ended":
+    if cmd in ("list-ended", "ended"):
+        # e-3909: canonical read verb is list-ended; ended is a deprecated alias.
+        if cmd == "ended":
+            print("Note: 'beacon meeting ended' は 'beacon meeting list-ended' に改名"
+                  "されました (e-3909: 書く end と読む ended の紛らわしさ解消)。"
+                  "ended は当面 alias として動きます。", file=sys.stderr)
         env = {"BEACON_MTG_NOW": args.now or "", "BEACON_JSON": "1" if args.json else ""}
         return _run_commands_py(root, "meeting_ended", env)
-    print("Usage: beacon meeting [schedule|reschedule|end|cancel|list|ended] [options]")
+    print("Usage: beacon meeting [schedule|reschedule|end|cancel|list [<opp-id>]|list-ended] [options]")
     return 2
 
 
@@ -4535,6 +4603,8 @@ def _handle_bus(root: Path, args: argparse.Namespace) -> int:
             "BEACON_BUS_RECIPIENT_SESSION": "",
             "BEACON_BUS_ACTION": bus_action_csv,
             "BEACON_BUS_NO_ENVELOPE": "1" if getattr(args, "no_envelope", False) else "",
+            # ms-120 / e-3901: armed-gate manual override (parity with bin/beacon).
+            "BEACON_BUS_MANUAL": "1" if getattr(args, "bus_manual", False) else "",
             "BEACON_JSON": "1" if args.json else "",
         }
         if project_id:
@@ -4660,19 +4730,30 @@ def _handle_dm(root: Path, args: argparse.Namespace) -> int:
     `dm respond` argv nor `dm log` argv can spoof a different actor.
     """
     if args.show_help or getattr(args, "dm_cmd", None) is None:
-        print("Usage: beacon dm respond approve <event_id> [--project <id>] [--json]")
+        print("Usage: beacon dm send    --to <sid> --payload '<json>' [--in-reply-to <eid>] [--manual] [--action <name>]... [--project <id>] [--json]")
+        print("       beacon dm respond approve <event_id> [--project <id>] [--json]")
         print("       beacon dm respond deny    <event_id> [--project <id>] [--json]")
-        print("       beacon dm log    [<project_id>] [--limit N] [--project <id>] [--json]")
+        print("       beacon dm audit  [<project_id>] [--limit N] [--project <id>] [--json]")
         print("")
-        print("Decide a pending cross-user DM action envelope (respond), or")
-        print("scroll the audit log of already-decided rows (log).")
+        print("Send a DM (send = bus send --channel dm), decide a pending")
+        print("cross-user DM action envelope (respond), or scroll the audit")
+        print("trail of already-decided rows (audit).")
         print("")
+        print("send:    canonical DM verb (e-3899); delegates to bus send --channel dm.")
         print("respond: only the intended receiver can press approve / deny;")
         print("         the server enforces this via the Bearer token.")
-        print("log:     read-only mirror of the Web UI Settings > Audit table.")
+        print("audit:   read-only mirror of the Web UI Settings > Audit table.")
+        print("         (`dm log` is a deprecated alias — 'log' now means write.)")
         return 0 if args.show_help else 2
 
     cmd = args.dm_cmd
+
+    if cmd == "send":
+        # ms-120 / e-3899: dm send == bus send --channel dm. Reuse the bus send
+        # handler so flag parsing / fan-out / envelope logic stay single-source.
+        args.channel = "dm"
+        args.bus_cmd = "send"
+        return _handle_bus(root, args)
 
     if cmd == "respond":
         # Parse the flexible positional pair: accept either
@@ -4693,7 +4774,16 @@ def _handle_dm(root: Path, args: argparse.Namespace) -> int:
         }
         return _run_commands_py(root, "dm_respond", env)
 
-    if cmd == "log":
+    if cmd in ("audit", "log"):
+        # ms-120 / e-3899: `dm audit` is the canonical read verb; `dm log` is a
+        # deprecated alias (the word "log" now means write, see `beacon log`).
+        if cmd == "log":
+            print(
+                "Note: 'beacon dm log' は 'beacon dm audit' に改名されました "
+                "(e-3899: 'log'=書く/'audit'=読む の語義衝突解消)。"
+                "log は当面 alias として動きます。",
+                file=sys.stderr,
+            )
         # `--project <id>` (override) wins over the positional project_id;
         # both feed _resolve_bus_project_id in commands.py (matches the
         # bash dispatch precedence).

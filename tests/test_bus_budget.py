@@ -48,7 +48,8 @@ def project_dir(tmp_path, monkeypatch):
 def _clear_bus_env(monkeypatch):
     for k in ("BEACON_BUS_BUDGET_N", "BEACON_BUS_CHANNEL",
               "BEACON_BUS_PAYLOAD", "BEACON_BUS_SENDER",
-              "BEACON_BUS_DELIVERY", "BEACON_JSON"):
+              "BEACON_BUS_DELIVERY", "BEACON_JSON",
+              "BEACON_BUS_IN_REPLY_TO", "BEACON_BUS_MANUAL"):
         monkeypatch.delenv(k, raising=False)
 
 
@@ -306,10 +307,14 @@ def test_reply_refused_when_budget_exhausted(project_dir, monkeypatch, capsys,
 def test_manual_send_still_works_even_with_budget_exhausted(project_dir,
                                                               monkeypatch, capsys,
                                                               stub_client):
-    """The gate must NOT lock out manual sends. Even with budget at 0/0, a
-    human-typed `bus send` (no --in-reply-to) goes through. Otherwise a
-    safety feature becomes a hostage situation when the user wants to send
-    a one-off DM after the autonomous budget ran out."""
+    """The gate must NOT lock out human one-off sends — but e-3901 changed HOW.
+
+    Before e-3901 a bare send (no --in-reply-to) bypassed the gate (fail-open) —
+    exactly the hole an armed autonomous loop could exploit by omitting the flag.
+    Now the escape is an EXPLICIT, audited `--manual`: with the budget exhausted
+    a bare send is REFUSED (armed ⇒ gated), while `--manual` sends the one-off.
+    The human keeps their escape hatch; the autonomous loop cannot forge a silent
+    bypass by dropping a flag."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "1")
     commands.cmd_bus_budget_grant()
@@ -318,12 +323,64 @@ def test_manual_send_still_works_even_with_budget_exhausted(project_dir,
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ch")
     monkeypatch.setenv("BEACON_BUS_IN_REPLY_TO", "e-x")
     commands.cmd_bus_send()
-    # Now omit --in-reply-to; manual send must succeed despite exhausted budget.
+    capsys.readouterr()
+    # e-3901: a bare send while armed+exhausted (no --in-reply-to, no --manual)
+    # is now GATED — the old fail-open bypass is closed.
     monkeypatch.delenv("BEACON_BUS_IN_REPLY_TO", raising=False)
+    with pytest.raises(SystemExit) as exc:
+        commands.cmd_bus_send()
+    assert exc.value.code == 1
+    assert "budget exhausted" in capsys.readouterr().err
+    assert len(stub_client.calls) == 1, "gated bare send must not reach the client"
+    # The explicit human escape: --manual sends the one-off despite exhaustion,
+    # recorded as an audited override.
+    monkeypatch.setenv("BEACON_BUS_MANUAL", "1")
     commands.cmd_bus_send()
     out = capsys.readouterr().out
     assert "Sent:" in out
     assert len(stub_client.calls) == 2
+
+
+def test_armed_bare_send_is_gated_without_in_reply_to(project_dir, monkeypatch,
+                                                      capsys, stub_client):
+    """e-3901 core regression: an armed session (budget granted) that sends
+    WITHOUT --in-reply-to is still gated — a budget slot is consumed. Before
+    e-3901 the gate keyed off --in-reply-to, so an autonomous loop could drop
+    the flag to bypass the budget cap AND the cross-user HOLD. Pins that the
+    send context (armed), not the presence of the flag, triggers the gate."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_BUDGET_N", "3")
+    commands.cmd_bus_budget_grant()
+    capsys.readouterr()
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "ch")
+    # No BEACON_BUS_IN_REPLY_TO — the exact shape an autonomous loop would use
+    # to escape the pre-e-3901 gate.
+    commands.cmd_bus_send()
+    assert "Sent:" in capsys.readouterr().out
+    budget = json.loads(
+        (project_dir / ".beacon" / "bus-budget.json").read_text())
+    assert budget["used"] == 1, "armed bare send must consume a budget slot"
+
+
+def test_armed_manual_override_bypasses_gate(project_dir, monkeypatch, capsys,
+                                              stub_client):
+    """e-3901: --manual is the explicit, audited escape from the armed gate. An
+    armed bare send with --manual does NOT consume the budget and stamps
+    manual_override on the payload for the decision-event trail. Unlike the
+    old fail-open bypass (drop --in-reply-to), this leaves a loud audit record."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_BUDGET_N", "2")
+    commands.cmd_bus_budget_grant()
+    capsys.readouterr()
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "ch")
+    monkeypatch.setenv("BEACON_BUS_MANUAL", "1")
+    commands.cmd_bus_send()
+    capsys.readouterr()
+    budget = json.loads(
+        (project_dir / ".beacon" / "bus-budget.json").read_text())
+    assert budget["used"] == 0, "--manual override must not consume budget"
+    assert stub_client.calls, "manual send must reach the client"
+    assert stub_client.calls[-1]["payload"].get("manual_override") is True
 
 
 def test_reply_json_mode_includes_budget_state(project_dir, monkeypatch, capsys,
