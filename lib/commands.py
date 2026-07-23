@@ -10488,6 +10488,76 @@ def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
         f.write("\n")
 
 
+def _pr_number_from_url(url: str) -> str:
+    """PR number as a string from a GitHub PR URL, or "" if none.
+
+    Delegates to the canonical parser (``core._extract_pr_number_from_url``) so
+    the two never drift; returns a string for use in the trigger filename."""
+    n = core._extract_pr_number_from_url(url)
+    return str(n) if n is not None else ""
+
+
+def _fire_ax_review_due_trigger(pr_number: str, pr_title: str, pr_url: str) -> None:
+    """Fire an 'ax-review-due' trigger when a PR is recorded (ms-119 / e-4003).
+
+    This is the missing PR-open leg of the review firing spine. AX 原典 §2 binds
+    AX to *interface-change* events (a PR / diff), not to a target lifecycle
+    transition — so ``_fire_review_due_trigger`` (which fires on completion
+    claims) deliberately never carries AX. Beacon learns of an interface change
+    at the moment a PR is recorded (``beacon pr add`` — the beacon-owned
+    PR-open 契機), so AX auto-binds here.
+
+    The trigger is a persistent file re-surfaced by ``beacon trigger check`` and
+    session-start until the review runs or the PR closes (see
+    ``_clear_ax_review_due_trigger``). This is what makes AX fire *structurally*
+    at the 節目 instead of only when a human remembers to run /beacon-review-run.
+
+    Advisory only — never blocks. Best-effort: a bad PR number / IO error is
+    swallowed so recording a PR never fails over a trigger write.
+    """
+    if not pr_number:
+        return
+    try:
+        triggers_dir = _get_triggers_dir()
+        os.makedirs(triggers_dir, exist_ok=True)
+        import datetime
+        trigger_data = {
+            "name": f"ax-review-due-{pr_number}",
+            "kind": "ax-review-due",
+            "pr_number": pr_number,
+            "pr_url": pr_url,
+            "review": "ax",
+            "message": (
+                f"PR #{pr_number} \"{pr_title or pr_url}\" が作成されました "
+                f"(interface 変更 = AX レビューの節目)。文脈ゼロの独立 judge に "
+                f"AX 原典と差分を渡して AI 体験の drift を確認してください: "
+                f"`/beacon-review-run --type ax --pr {pr_number}` "
+                f"(または `beacon review context --type ax --pr {pr_number}`)。"
+            ),
+            "created_at": datetime.datetime.now().isoformat(),
+        }
+        trigger_path = os.path.join(triggers_dir, f"ax-review-due-{pr_number}.json")
+        with open(trigger_path, "w", encoding="utf-8") as f:
+            json.dump(trigger_data, f, ensure_ascii=False)
+            f.write("\n")
+    except OSError:
+        return
+
+
+def _clear_ax_review_due_trigger(pr_number: str) -> None:
+    """Remove the ax-review-due trigger for a PR once it closes / merges — the
+    interface-change 節目 is resolved, so the AX nudge should stop re-surfacing
+    (ms-119 / e-4003). Best-effort; a missing file is fine."""
+    if not pr_number:
+        return
+    try:
+        path = os.path.join(_get_triggers_dir(), f"ax-review-due-{pr_number}.json")
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        return
+
+
 def _cleanup_spec_needed_triggers() -> None:
     """Remove spec-needed triggers for milestones that now have SPEC docs,
     or for milestones that no longer exist (cancelled/deleted)."""
@@ -12883,6 +12953,11 @@ def cmd_pr_add():
         sys.exit(1)
     save_project(data)
 
+    # ms-119 e-4003: a recorded PR is the beacon-owned PR-open 契機 — auto-bind
+    # AX review to this interface change so it fires structurally at the 節目
+    # (not only when a human remembers /beacon-review-run). Advisory, non-blocking.
+    _fire_ax_review_due_trigger(_pr_number_from_url(url), title, url)
+
     # ms-80 e-1821: 同一 MS に並列で open PR が他にもあれば claim 競合の可能性
     # を author に知らせる (= 警告のみ、block しない)。
     conflicts = _detect_pr_claim_conflict(data, ms_id, eid)
@@ -13074,6 +13149,9 @@ def cmd_pr_close():
         print(str(e), file=sys.stderr)
         sys.exit(1)
     save_project(data)
+    # ms-119 e-4003: the interface-change 節目 is resolved — stop re-surfacing the
+    # AX review nudge for this PR.
+    _clear_ax_review_due_trigger(_pr_number_from_url(entry.get("meta", {}).get("url", "")))
 
     if json_mode:
         print(json.dumps({"entry_id": entry_id, "pr_status": "closed"}, ensure_ascii=False))
@@ -13575,6 +13653,8 @@ def cmd_pr_merge():
         print(str(e), file=sys.stderr)
         sys.exit(1)
     save_project(data)
+    # ms-119 e-4003: PR merged — interface change resolved, clear its AX nudge.
+    _clear_ax_review_due_trigger(_pr_number_from_url(entry.get("meta", {}).get("url", "")))
     if json_mode:
         print(json.dumps({"entry_id": entry_id, "pr_status": "merged"}, ensure_ascii=False))
     else:
