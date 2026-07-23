@@ -199,7 +199,9 @@ def test_project_target_shape():
                            fields={"counterparty": "A社"})
     proj = te.project_target(CONTRACT, rec)
     assert proj == {"id": "ctr-1", "label": "A社 NDA", "status": "todo",
-                    "kind": "contract", "phase": "drafting"}
+                    "kind": "contract", "work_items_total": 0,
+                    "work_items_done": 0,
+                    "detail": {"phase": "drafting", "type": "single-shot"}}
 
 
 # ---------------------------------------------------------------------------

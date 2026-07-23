@@ -216,16 +216,24 @@ def close_target(data: dict, desc: dict, target_id: str, *, actor: str = "",
 # ---------------------------------------------------------------------------
 
 def project_target(desc: dict, rec: dict) -> dict:
-    """Return the occupation-agnostic shared-frame projection of one record:
-    ``id`` / ``label`` / ``status`` / ``kind`` / ``phase``. This mirrors the
-    shape ``core.project_targets`` / ``sales_entities.project_targets`` emit, so
-    when e-3957 wires data-defined classes into the registry the shared frame
-    (session-start / status) can show them beside milestones / opportunities
-    without special-casing."""
+    """Return the occupation-agnostic shared-frame projection of one record.
+
+    Matches the shape ``core.project_targets`` / ``sales_entities.project_targets``
+    emit — ``id`` / ``label`` / ``status`` / ``kind`` / ``work_items_total`` /
+    ``work_items_done`` / ``detail`` — so when the registry wires data-defined
+    classes in (e-3957) the shared frame (session-start / status) shows them
+    beside milestones / opportunities without special-casing. A data-defined
+    target has no nested WorkItems in this MVP, so the counts are 0; the phase
+    and descriptor type ride in ``detail``."""
     return {
         "id": rec.get("id", ""),
         "label": work_model.target_label(rec),
-        "status": work_model.work_item_status(rec),
+        "status": work_model.work_item_status(rec) or "todo",
         "kind": rec.get("kind") or desc.get("kind", ""),
-        "phase": current_phase(rec),
+        "work_items_total": 0,
+        "work_items_done": 0,
+        "detail": {
+            "phase": current_phase(rec),
+            "type": desc.get("type", ""),
+        },
     }
