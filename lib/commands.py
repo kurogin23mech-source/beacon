@@ -15865,6 +15865,57 @@ def cmd_project_unarchive():
     print(f"Unarchived: [{data.get('name', '')}]")
 
 
+def cmd_project_orphans():
+    """List throwaway / orphan project cleanup candidates (ms-123 / e-4030).
+
+    Read-only. Scans the projects the current user can see in the cloud and
+    flags the ones that look like test residue (``phase4-test`` etc.), using
+    the multi-signal classifier in ``lib/project_cleanup``. Changes nothing —
+    the actual archive step is a separate, human-confirmed command (e-4028).
+
+    ``BEACON_JSON=1`` emits the raw candidate list for scripting.
+    """
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login")
+        sys.exit(1)
+
+    api_url = _resolve_active_api_url()
+    from api_client import ApiClient
+    client = ApiClient(api_url, _extract_token(creds))
+
+    try:
+        projects = client.list_projects() or []
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    # Never propose archiving the project we're running from.
+    current_pid = ""
+    try:
+        cfg_path = _get_cloud_config_path()
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                current_pid = (json.load(f) or {}).get("project_id", "")
+    except Exception:
+        current_pid = ""
+
+    import project_cleanup
+    candidates = project_cleanup.detect_orphan_candidates(
+        projects, current_project_id=current_pid or None,
+    )
+
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if json_mode:
+        print(json.dumps(
+            {"total_scanned": len(projects), "candidates": candidates},
+            ensure_ascii=False,
+        ))
+        return
+    print(project_cleanup.format_orphan_report(candidates, len(projects)))
+
+
 # ---------------------------------------------------------------------------
 # Project export / import (ms-14 e-828): full-snapshot backup
 # ---------------------------------------------------------------------------
@@ -24082,6 +24133,7 @@ if __name__ == "__main__":
         "push_record": cmd_push_record,
         "push_list": cmd_push_list,
         "project_unarchive": cmd_project_unarchive,
+        "project_orphans": cmd_project_orphans,
         "project_export": cmd_project_export,
         "project_import": cmd_project_import,
         "pr_add": cmd_pr_add,

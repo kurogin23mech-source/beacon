@@ -6337,6 +6337,21 @@ EOF
         case "${2:-}" in
             archive)   python3 "$COMMANDS_PY" project_archive ;;
             unarchive) python3 "$COMMANDS_PY" project_unarchive ;;
+            orphans)
+                shift 2
+                _json="0"
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --json) _json="1"; shift ;;
+                        -h|--help)
+                            echo "Usage: beacon project orphans [--json]"
+                            echo "  Read-only: list throwaway/orphan project cleanup candidates (ms-123 e-4030)."
+                            exit 0 ;;
+                        *) echo "Unknown flag: $1"; exit 1 ;;
+                    esac
+                done
+                BEACON_JSON="$_json" python3 "$COMMANDS_PY" project_orphans
+                ;;
             export)
                 shift 2
                 _out=""
@@ -6377,7 +6392,7 @@ EOF
                 BEACON_INPUT="$_in" BEACON_TARGET="$_target" BEACON_FORCE="$_force" BEACON_JSON="$_json" \
                     python3 "$COMMANDS_PY" project_import
                 ;;
-            *) echo "Usage: beacon project archive|unarchive|export|import" ;;
+            *) echo "Usage: beacon project archive|unarchive|orphans|export|import" ;;
         esac
         ;;
     reset)
