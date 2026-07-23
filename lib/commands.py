@@ -1897,8 +1897,10 @@ def cmd_review_context():
         BEACON_DIFF_REF:    git ref range (e.g. "origin/main...HEAD"); or
         BEACON_PR:          a PR number (uses `gh pr diff`).
         BEACON_ORIGIN_DOC:  doc-id of the 原典 (required for philosophy; the SPEC
-                            / vision the implementation is checked against).
-        BEACON_MODE:        "diff" (default) | "full-surface".
+                            / vision the implementation is checked against;
+                            rejected with --type ax, whose 原典 is fixed).
+        BEACON_MODE:        "diff" (only supported value; full-surface needs a
+                            surface-snapshot collector that is a follow-up).
     """
     import review_spine
     review_type = os.environ.get("BEACON_REVIEW_TYPE", "").strip()
@@ -1909,9 +1911,39 @@ def cmd_review_context():
 
     gaps = []
 
+    # --- early input validation (ms-119 e-3947 dogfood: close silent no-ops so
+    # the review capability's own CLI doesn't ship the defects it exists to
+    # catch). Each guard rejects with a clean `Error:` + exit 1 (never a silent
+    # win, never a raw traceback), so an automation loop reading exit codes can
+    # tell a mistake happened at the point it happened. ---
+    if mode != "diff":
+        # This collector only produces a diff artifact. `full-surface` (a
+        # multi-command surface snapshot) needs a surface collector that does
+        # not exist yet — advertising it would hand the judge a bundle whose
+        # `mode` label contradicts its diff artifact. Reject rather than lie.
+        if mode == "full-surface":
+            print("Error: --mode full-surface is not supported by this command "
+                  "(it only collects diffs). A surface-snapshot collector is a "
+                  "follow-up; use --mode diff for now.", file=sys.stderr)
+        else:
+            print(f"Error: --mode must be 'diff', got {mode!r}.", file=sys.stderr)
+        sys.exit(1)
+    if pr and diff_ref:
+        print("Error: --pr and --diff-ref are mutually exclusive; pass exactly "
+              "one (the Usage brackets mean 'one of', not 'both').",
+              file=sys.stderr)
+        sys.exit(1)
+
     # --- origin (原典) resolution: mechanical, never implementer prose ---
     if review_type == review_spine.REVIEW_AX:
         # AX 原典 is a repo file that travels with the capability (Layer 3).
+        if origin_doc:
+            # --origin-doc is a philosophy-only flag; AX origin is fixed. Silently
+            # ignoring it would let the caller believe their doc became the 原典.
+            print("Error: --origin-doc is only valid with --type philosophy "
+                  "(the AX 原典 is fixed to skills/ax-review/principles.md).",
+                  file=sys.stderr)
+            sys.exit(1)
         install_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         origin_path = os.path.join(install_root, "skills", "ax-review", "principles.md")
         origin_id = "skills/ax-review/principles.md"
@@ -17222,7 +17254,7 @@ def _help_registry():
         {"command": "beacon target approve <entry-id>", "flags": ["--rationale <text>", "--reason <text>"], "description": "Approve a pending target transition (= executes the transition; --reason alias of --rationale, e-3906)"},
         {"command": "beacon target reject <entry-id>", "flags": ["--rationale <text>", "--reason <text>"], "description": "Reject a pending target transition (= transition does NOT execute; --reason alias of --rationale, e-3906)"},
         {"command": "beacon target list", "flags": ["--target <id>", "--pending", "--json"], "description": "List target transition-approval requests"},
-        {"command": "beacon review context --type <ax|philosophy>", "flags": ["--pr <n>", "--diff-ref <base...head>", "--origin-doc <id>", "--mode <diff|full-surface>"], "description": "Emit the review-kernel bundle (原典 + mechanical diff only) for an independent judge subagent (ms-119 e-3947; see /beacon-review-run)"},
+        {"command": "beacon review context --type <ax|philosophy>", "flags": ["--pr <n>", "--diff-ref <base...head>", "--origin-doc <doc-id>", "--mode diff"], "description": "Emit the review-kernel bundle (原典 + mechanical diff only) for an independent judge subagent (ms-119 e-3947; see /beacon-review-run)"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": [], "description": "Mark task as done"},
         {"command": "beacon task list", "flags": ["--json", "--ms <id>"], "description": "List tasks"},

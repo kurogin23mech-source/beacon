@@ -41,7 +41,7 @@ owned な判定なので `beacon target review-request` → 人間 approve で�
 - `--models <m1,m2,...>`: 判定サブエージェントのモデル。既定は実装者と別の 1 体
   (`fable`)。複数指定でパネル化 (fan-out、多視点)。指定可能: `fable` / `haiku` /
   `sonnet` / `opus`。
-- `--mode <diff|full-surface>`: 既定 `diff`。full-surface は棚卸し監査 (網羅的)。
+- `--mode diff`: 既定かつ現状唯一の対応値。full-surface (棚卸し監査) は surface snapshot 採取器が要るため follow-up。
 
 引数が省略されていれば対話で埋める。ただし **type と target は必ず確定してから**
 kernel を呼ぶ。

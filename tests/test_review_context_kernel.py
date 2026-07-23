@@ -89,3 +89,51 @@ def test_gaps_are_carried_for_missing_origin():
         gaps=["原典が空です"],
     )
     assert b["gaps"] == ["原典が空です"]
+
+
+# --- CLI guard tests (ms-119 e-3947 dogfood): the review capability's own CLI
+# must not ship the silent-no-op defects it exists to catch. Each guard fires
+# BEFORE any git/store access, so these run without a project or a real diff. ---
+import subprocess
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+COMMANDS = os.path.join(REPO, "lib", "commands.py")
+
+
+def _run_review_context(env_extra):
+    env = dict(os.environ)
+    env.update(env_extra)
+    return subprocess.run(
+        [sys.executable, COMMANDS, "review_context"],
+        capture_output=True, text=True, env=env, cwd=REPO,
+    )
+
+
+def test_cli_rejects_pr_and_diff_ref_together():
+    p = _run_review_context({"BEACON_REVIEW_TYPE": "ax", "BEACON_PR": "1",
+                             "BEACON_DIFF_REF": "a...b"})
+    assert p.returncode == 1
+    assert "mutually exclusive" in p.stderr
+    assert p.stdout.strip() == ""  # no bundle emitted — nothing to misparse as JSON
+
+
+def test_cli_rejects_origin_doc_with_ax():
+    p = _run_review_context({"BEACON_REVIEW_TYPE": "ax", "BEACON_PR": "1",
+                             "BEACON_ORIGIN_DOC": "someDoc"})
+    assert p.returncode == 1
+    assert "--origin-doc" in p.stderr and "philosophy" in p.stderr
+
+
+def test_cli_rejects_unsupported_full_surface_mode():
+    p = _run_review_context({"BEACON_REVIEW_TYPE": "ax", "BEACON_PR": "1",
+                             "BEACON_MODE": "full-surface"})
+    assert p.returncode == 1
+    assert "full-surface" in p.stderr
+
+
+def test_cli_rejects_unknown_mode_cleanly_not_traceback():
+    p = _run_review_context({"BEACON_REVIEW_TYPE": "ax", "BEACON_PR": "1",
+                             "BEACON_MODE": "audit"})
+    assert p.returncode == 1
+    assert "Error:" in p.stderr
+    assert "Traceback" not in p.stderr  # a clean CLI error, not a raw stack trace

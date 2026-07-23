@@ -566,7 +566,7 @@ cmd_review_context() {
             --origin-doc) origin_doc="${2:-}";  shift 2 ;;
             --mode)       mode="${2:-}";        shift 2 ;;
             -?*)          _guard_flag "$1" ;;
-            *)            shift ;;
+            *)            _guard_positional "$1" "Usage: beacon review context --type <ax|philosophy> [--pr <n> | --diff-ref <base...head>] [--origin-doc <doc-id>] [--mode diff]  (このコマンドは flag のみを取ります。--type <値> の形で渡してください)" ;;
         esac
     done
     BEACON_REVIEW_TYPE="$review_type" BEACON_DIFF_REF="$diff_ref" BEACON_PR="$pr" \
@@ -3079,7 +3079,9 @@ case "${1:-}" in
     review)
         case "${2:-}" in
             context)  shift 2; cmd_review_context "$@" ;;
-            *)        echo "Usage: beacon review context --type <ax|philosophy> [--pr <n> | --diff-ref <base...head>] [--origin-doc <id>] [--mode <diff|full-surface>]  (独立 judge 用の review-kernel bundle を出力; ms-119)" ;;
+            *)        echo "Usage: beacon review context --type <ax|philosophy> [--pr <n> | --diff-ref <base...head>] [--origin-doc <doc-id>] [--mode diff]  (独立 judge 用の review-kernel bundle を出力; ms-119)" >&2
+                      echo "  注: この review は judge を走らせる bundle 生成のみ。目的達成レビュー(target 遷移の人間承認)は 'beacon target'、完了ゲートは 'beacon milestone done --review'。" >&2
+                      exit 1 ;;
         esac
         ;;
     log)
