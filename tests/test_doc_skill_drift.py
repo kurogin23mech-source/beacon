@@ -273,8 +273,14 @@ def cmd_help_json():
         readme_path=tmp_path / "README.md",
     )
     assert "brandnew foo" in report["missing_from_readme"]
-    # And "old thing" is missing from bin/help_json and we expect that too:
-    assert "old thing" in report["missing_from_bin_help"]
+    # "old thing" is documented in README but absent from the cmd_help_json
+    # registry. ms-120 e-3897 made `beacon --help` RENDER that registry, so
+    # bin help and the registry share one source: "missing from help" now means
+    # "absent from the canonical registry", surfaced as missing_from_help_json
+    # (not missing_from_bin_help, which is reserved for registry commands the
+    # renderer drops). The README/registry gap is still detected — just in the
+    # bucket that matches the post-e-3897 single-source model.
+    assert "old thing" in report["missing_from_help_json"]
 
 
 def test_cli_drift_warn_vs_strict_exit_codes(tmp_path, cli_drift):
