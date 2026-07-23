@@ -16273,6 +16273,176 @@ def cmd_project_unarchive():
     print(f"Unarchived: [{data.get('name', '')}]")
 
 
+def cmd_project_orphans():
+    """List throwaway / orphan project cleanup candidates (ms-123 / e-4030).
+
+    Read-only. Scans the projects the current user can see in the cloud and
+    flags the ones that look like test residue (``phase4-test`` etc.), using
+    the multi-signal classifier in ``lib/project_cleanup``. Changes nothing —
+    the actual archive step is a separate, human-confirmed command (e-4028).
+
+    ``BEACON_JSON=1`` emits the raw candidate list for scripting.
+    """
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login")
+        sys.exit(1)
+
+    api_url = _resolve_active_api_url()
+    from api_client import ApiClient
+    client = ApiClient(api_url, _extract_token(creds))
+
+    try:
+        projects = client.list_projects() or []
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    # Never propose archiving the project we're running from.
+    current_pid = _resolve_current_project_id_from_cloud_json()
+
+    import project_cleanup
+    candidates = project_cleanup.detect_orphan_candidates(
+        projects, current_project_id=current_pid or None,
+    )
+
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if json_mode:
+        print(json.dumps(
+            {"total_scanned": len(projects), "candidates": candidates},
+            ensure_ascii=False,
+        ))
+        return
+    print(project_cleanup.format_orphan_report(candidates, len(projects)))
+
+
+def _resolve_current_project_id_from_cloud_json() -> str:
+    """Read the cwd's cloud.json project_id (best-effort, "" on any miss)."""
+    try:
+        cfg_path = _get_cloud_config_path()
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                return (json.load(f) or {}).get("project_id", "") or ""
+    except Exception:
+        pass
+    return ""
+
+
+def cmd_project_cleanup():
+    """Archive throwaway / orphan projects, human-confirmed (ms-123 / e-4028).
+
+    Two-phase by design (SPEC ms-123 方針 2), because ``project.archive`` is
+    owner-only + envelope-gated but a terminal AI holds the human's token —
+    so the real safety valve is a human confirmation checkpoint in the flow,
+    not the server gate. The pattern mirrors ``BEACON_PR_MERGE_USER_OVERRIDE``:
+
+      * No confirm flag  → DRY-RUN. Print exactly what would be archived and
+        stop. Nothing is issued or archived.
+      * ``--confirm`` (BEACON_CLEANUP_CONFIRM=1) → for each candidate, mint a
+        T1 envelope authorizing ``project.archive`` (the calling user's token
+        is the human-signature proof) and archive it, carrying the signed
+        envelope in the ``X-Beacon-Envelope`` header. Raw API calls never
+        happen by hand.
+
+    ``--limit N`` caps the batch (safety: inspect a small first sweep before
+    the full run). ``BEACON_JSON=1`` emits a machine-readable result.
+    """
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login")
+        sys.exit(1)
+
+    api_url = _resolve_active_api_url()
+    from api_client import ApiClient
+    client = ApiClient(api_url, _extract_token(creds))
+
+    try:
+        projects = client.list_projects() or []
+    except RuntimeError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+    current_pid = _resolve_current_project_id_from_cloud_json()
+
+    import project_cleanup
+    candidates = project_cleanup.detect_orphan_candidates(
+        projects, current_project_id=current_pid or None,
+    )
+
+    confirm = os.environ.get("BEACON_CLEANUP_CONFIRM", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    # ms-123 AX finding: fail-closed on a bad --limit. Previously a non-numeric
+    # value fell to limit=0 → "no limit" → --confirm mass-archived ALL candidates.
+    # An invalid value now errors; only an ABSENT limit means "no cap" (explicit).
+    _limit_raw = (os.environ.get("BEACON_CLEANUP_LIMIT", "") or "").strip()
+    if _limit_raw:
+        try:
+            limit = int(_limit_raw)
+        except ValueError:
+            print(f"Error: --limit の値が不正です: '{_limit_raw}'. 正の整数を "
+                  f"指定してください (例: --limit 5)。", file=sys.stderr)
+            sys.exit(1)
+        if limit <= 0:
+            print(f"Error: --limit は正の整数です (受領: {limit})。",
+                  file=sys.stderr)
+            sys.exit(1)
+    else:
+        limit = 0
+    plan = project_cleanup.build_archive_plan(candidates, limit=limit or None)
+
+    # ---- DRY-RUN (default): show the plan, change nothing ----------------
+    if not confirm:
+        if json_mode:
+            print(json.dumps({
+                "mode": "dry-run", "total_scanned": len(projects),
+                "would_archive": plan,
+            }, ensure_ascii=False))
+            return
+        if not plan:
+            print(project_cleanup.format_orphan_report(candidates, len(projects)))
+            return
+        print(project_cleanup.format_orphan_report(plan, len(projects)))
+        print()
+        print(
+            f"⚠ これは DRY-RUN です。上記 {len(plan)} 件はまだ archive していません。\n"
+            "  実際に archive するには、候補を目視で確認したうえで再実行してください:\n"
+            "    beacon project cleanup --confirm"
+            + (f" --limit {limit}" if limit else "")
+        )
+        return
+
+    # ---- CONFIRMED: issue envelope + archive, one project at a time ------
+    results = {"archived": [], "failed": []}
+    for c in plan:
+        pid = c["project_id"]
+        try:
+            env = client.issue_bus_envelope(
+                pid, tier="T1", actions_authorized=["project.archive"],
+            )
+            client.archive_project(pid, env)
+            results["archived"].append(pid)
+            if not json_mode:
+                print(f"  ✓ archived {pid}  «{c['name']}»")
+        except (RuntimeError, ConnectionError) as e:
+            results["failed"].append({"project_id": pid, "error": str(e)})
+            if not json_mode:
+                print(f"  ✗ FAILED   {pid}  «{c['name']}» — {e}")
+
+    if json_mode:
+        print(json.dumps({"mode": "confirmed", **results}, ensure_ascii=False))
+        return
+    print()
+    print(
+        f"完了: {len(results['archived'])} 件 archive、"
+        f"{len(results['failed'])} 件 失敗。"
+    )
+    if results["failed"]:
+        print("  失敗分は owner/envelope/ネットワークを確認して再実行してください。")
+    print("  取り消しは各 project で `beacon project unarchive`（復元可能）。")
+
+
 # ---------------------------------------------------------------------------
 # Project export / import (ms-14 e-828): full-snapshot backup
 # ---------------------------------------------------------------------------
@@ -24641,6 +24811,8 @@ if __name__ == "__main__":
         "push_record": cmd_push_record,
         "push_list": cmd_push_list,
         "project_unarchive": cmd_project_unarchive,
+        "project_orphans": cmd_project_orphans,
+        "project_cleanup": cmd_project_cleanup,
         "project_export": cmd_project_export,
         "project_import": cmd_project_import,
         "pr_add": cmd_pr_add,

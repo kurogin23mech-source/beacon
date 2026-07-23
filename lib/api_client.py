@@ -193,7 +193,8 @@ class ApiClient:
             return self._token()
         return self._token
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+    def _request(self, method: str, path: str, body: dict | None = None,
+                 *, extra_headers: dict | None = None) -> dict:
         # ms-98 / e-2777: fail fast when a recent 429 storm has opened
         # the circuit. Kept ahead of URL / body assembly so an already-
         # tripped breaker never even builds a request object.
@@ -203,6 +204,11 @@ class ApiClient:
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method)
         req.add_header("Content-Type", "application/json")
+        # ms-123 / e-4028: caller-supplied headers (e.g. X-Beacon-Envelope for
+        # envelope-gated destructive endpoints like project.archive). Added
+        # before auth below so a caller can never clobber Authorization.
+        for _hk, _hv in (extra_headers or {}).items():
+            req.add_header(_hk, _hv)
         token = self._get_token()
         if token:
             req.add_header("Authorization", f"Bearer {token}")
@@ -267,7 +273,16 @@ class ApiClient:
     def get(self, path: str) -> dict:
         return self._request("GET", path)
 
-    def post(self, path: str, body: dict | None = None) -> dict:
+    def post(self, path: str, body: dict | None = None,
+             *, extra_headers: dict | None = None) -> dict:
+        # ms-123: only thread extra_headers through when a caller actually
+        # supplies them. Forwarding extra_headers=None unconditionally broke
+        # every test that stubs `_request` with a double lacking the kwarg
+        # (test_bus_transport / test_trek_cli_cloud / …). Normal callers keep
+        # the pre-existing 3-arg call shape; only the envelope-gated archive
+        # path (the sole extra_headers user) takes the 4-arg branch.
+        if extra_headers is not None:
+            return self._request("POST", path, body, extra_headers=extra_headers)
         return self._request("POST", path, body)
 
     def put(self, path: str, body: dict) -> dict:
@@ -346,9 +361,19 @@ class ApiClient:
         return self.get(f"/api/projects/{project_id}")
 
     def put_project(self, project_id: str, data: dict) -> dict:
+        # ms-123 / e-4029: PUT upserts to /api/projects/{id}, so it can
+        # materialize a new project just like create_project — guard the same
+        # leak vector (e.g. `beacon cloud upload-initial` → cmd_cloud_push).
+        import cloud_write_guard
+        cloud_write_guard.guard_prod_project_write(self._base_url)
         return self.put(f"/api/projects/{project_id}", data)
 
     def create_project(self, project_id: str, name: str, objective: str = "") -> dict:
+        # ms-123 / e-4029: structural leak guard. A test context creating a
+        # project on the production cloud is the exact path that left 48
+        # phase4-test residue projects behind — block it at the choke point.
+        import cloud_write_guard
+        cloud_write_guard.guard_prod_project_write(self._base_url)
         return self.post(f"/api/projects/{project_id}",
                          {"name": name, "objective": objective})
 
@@ -710,6 +735,27 @@ class ApiClient:
         if consent_claim is not None:
             body["recipient_confirmed"] = consent_claim
         return self.post(f"/api/projects/{project_id}/bus/envelope/issue", body)
+
+    def archive_project(self, project_id: str, envelope: dict) -> dict:
+        """Archive (soft-delete) a project, presenting a signed envelope.
+
+        ms-123 / e-4028. ``POST /api/projects/{id}/archive`` is gated by
+        ``require_envelope_for_action("project.archive")`` — owner-only PLUS a
+        verified envelope whose ``actions_authorized`` includes
+        ``project.archive``. The envelope must be minted for THIS project
+        (via ``issue_bus_envelope``) because the server verify pipeline binds
+        it to ``project_id``. It travels in the ``X-Beacon-Envelope`` header
+        as base64-encoded JSON (the canonical header transport).
+        """
+        import base64 as _b64
+        env_b64 = _b64.b64encode(
+            json.dumps(envelope).encode("utf-8")
+        ).decode("ascii")
+        return self.post(
+            f"/api/projects/{project_id}/archive",
+            None,
+            extra_headers={"X-Beacon-Envelope": env_b64},
+        )
 
     # Operation fire claim (ms-95 / e-1668 + e-2350)
 
