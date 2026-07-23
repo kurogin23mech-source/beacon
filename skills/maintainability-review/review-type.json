@@ -1,0 +1,12 @@
+{
+  "id": "maintainability",
+  "judge_run": true,
+  "label": "Maintainability (AI がコードを変更する体験)",
+  "origin": {
+    "kind": "repo-file",
+    "ref": "skills/maintainability-review/principles.md"
+  },
+  "fires_on": "pr-open",
+  "default_judge_model": "sonnet",
+  "_note": "ms-119 — AX の兄弟レビュー。AX が『AI がツールを使う体験』を測るのに対し、これは『AI がコードを変更する体験(保守性)』を測る。origin.kind=repo-file で原典(principles.md)が capability に随伴する。fires_on=pr-open: interface/コード変更の節目(PR 作成)で AX と並んで自動発火する(e-4003 の発火経路を registry 駆動で共有)。この type 追加はコード改修ゼロ = ms-119 e-4009 の data 駆動 registry の実証。"
+}

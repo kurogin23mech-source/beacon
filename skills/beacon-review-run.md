@@ -42,15 +42,24 @@ triggers:
 
 `/beacon-review-run <type> <target> [options]`
 
-- `type`: `ax` | `philosophy` | `both` | `attainment` (既定 `ax`)
+- `type`: `ax` | `philosophy` | `both` | `attainment` | `maintainability` (既定 `ax`)。
+  `maintainability` (= AX の兄弟、AI がコードを**変更する**体験) は AX と同じく
+  `--pr` / `--diff-ref` を取り、原典は固定 (principles.md)。PR 作成時に AX と並んで
+  自動発火する (fires_on=pr-open)。
 - `target`: `--pr <n>` または `--diff-ref <base...head>` (ax/philosophy でどちらか
   必須)。`attainment` では `--target <ms-XX|op-X>` が必須 (原典 = その target の
   SPEC を自動解決)、`--pr` / `--diff-ref` は任意の補助差分。
 - `--origin-doc <doc-id>`: 思想レビューの原典 (対象 target の SPEC doc)。`philosophy`
   / `both` で必須。AX では不要 (原典は principles.md 固定)。
-- `--models <m1,m2,...>`: 判定サブエージェントのモデル。既定は実装者と別の 1 体
-  (`fable`)。複数指定でパネル化 (fan-out、多視点)。指定可能: `fable` / `haiku` /
-  `sonnet` / `opus`。
+- `--models <m1,m2,...>`: 判定サブエージェントのモデル。**既定は type ごとに記述子の
+  `default_judge_model`** (skills/<type>/review-type.json)。現状: `philosophy` = `fable`、
+  `ax` / `maintainability` = `sonnet`。設計意図: **独立性 (= 文脈ゼロの別プロセス) が本体**
+  で、そこは全 type 共通。頻繁に発火し機械層 (full-surface / lint / drift ガード) が
+  下支えする ax / maintainability は capable だが軽めの `sonnet`、判断勝負で稀にしか
+  発火しない philosophy は `fable`、とコストを type で階層化する (安さのために `haiku`
+  まで落とさない — 独立でも判定が甘いと計器にならない)。`--models` で明示上書き可、
+  複数指定でパネル化 (fan-out、多視点)。実装者と同一モデルは避ける (e-3988、kernel が
+  警告を bundle に載せる)。
 - `--mode diff | full-surface`: 既定 `diff` (変更差分をレビュー)。`full-surface`
   (e-3987) は AX 用の棚卸し監査で、各コマンド群の help / エラー / exit code を機械採取
   した surface-snapshot を artifact にする (差分に現れない既存コードの AX 欠陥も拾う)。

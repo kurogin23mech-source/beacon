@@ -89,15 +89,15 @@ def test_gate_record_human_session():
 
 def test_model_independence_gap_when_same_model():
     with _Env({"BEACON_JUDGE_MODEL": "opus", "BEACON_IMPLEMENTER_MODEL": "opus"}):
-        g = commands._model_independence_gap(review_spine)
+        g = commands._model_independence_gap()
     assert g is not None and "モデル独立性" in g
 
 
 def test_no_gap_when_models_differ():
     with _Env({"BEACON_JUDGE_MODEL": "fable", "BEACON_IMPLEMENTER_MODEL": "opus"}):
-        assert commands._model_independence_gap(review_spine) is None
+        assert commands._model_independence_gap() is None
 
 
 def test_no_gap_when_judge_model_absent():
     with _Env({"BEACON_JUDGE_MODEL": None, "BEACON_IMPLEMENTER_MODEL": "opus"}):
-        assert commands._model_independence_gap(review_spine) is None
+        assert commands._model_independence_gap() is None

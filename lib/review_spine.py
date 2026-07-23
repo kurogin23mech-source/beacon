@@ -132,8 +132,11 @@ def surface_snapshot_artifact(probes, *, target_ref):
 
     AX 原典 §3 wants a *full-surface* audit (every command's help / error / exit
     code), not just a diff — the diff mode misses defects in code that didn't
-    change this PR. Each probe is a dict like
-    ``{"cmd": "milestone", "help": "...", "error_probe": "...", "exit_code": 0}``.
+    change this PR. Each probe is a dict as produced by
+    ``commands._collect_surface_snapshot``:
+    ``{"cmd": "milestone", "probe_argv": "milestone __ax_surface_probe__",
+    "exit_code": 0, "stdout": "...", "stderr": "...", "silent_no_op": true}``
+    (or ``{"cmd": ..., "probe_argv": ..., "error": "..."}`` if the probe failed).
     Pure: the caller runs the probes; this only shapes the artifact so the shaping
     is unit-testable without spawning subprocesses.
     """
