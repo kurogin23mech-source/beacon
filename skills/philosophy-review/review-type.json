@@ -6,5 +6,6 @@
     "kind": "doc",
     "required": true
   },
+  "default_judge_model": "fable",
   "_note": "ms-119 / e-4009 — review-type descriptor. origin.kind=doc means the 原典 is a target's SPEC / vision document supplied at review time via --origin-doc (required). Registering a new doc-origin review type needs only this data file + a SKILL, no code edit to the whitelist."
 }

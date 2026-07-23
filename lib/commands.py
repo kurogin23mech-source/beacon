@@ -1974,7 +1974,7 @@ def _collect_surface_snapshot(commands_list=None) -> list:
     return probes
 
 
-def _model_independence_gap(review_spine):
+def _model_independence_gap():
     """ms-119 / e-3988 wire-up (思想レビュー finding ②) — run the judge/implementer
     model independence check in the kernel and return a gap string if they match.
 
@@ -1986,6 +1986,7 @@ def _model_independence_gap(review_spine):
     judge_model = os.environ.get("BEACON_JUDGE_MODEL", "").strip()
     if not judge_model:
         return None
+    import review_spine  # local import — matches this file's module-import idiom
     impl_model = os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip()
     verdict = review_spine.judge_model_independence(impl_model, judge_model)
     return None if verdict["ok"] else ("⚠ モデル独立性: " + verdict["reason"])
@@ -2070,7 +2071,7 @@ def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = ""
             sys.exit(1)
         diff_text = proc.stdout
 
-    _mi = _model_independence_gap(review_spine)
+    _mi = _model_independence_gap()
     if _mi:
         gaps.append(_mi)
 
@@ -2240,7 +2241,7 @@ def cmd_review_context():
         if not diff_text.strip():
             gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
 
-    _mi = _model_independence_gap(review_spine)
+    _mi = _model_independence_gap()
     if _mi:
         gaps.append(_mi)
 
@@ -10586,33 +10587,18 @@ def _auto_fire_release_marker_trigger() -> None:
         f.write("\n")
 
 
-def _spec_exists_for_ms(ms_id: str) -> bool:
-    """Return True if any spec-scoped document is attached to ms_id.
-
-    ms-84 Phase 2: ``_is_cloud_mode()`` 分岐を Store 経由に統一。 LocalStore /
-    StoreApi の list_documents() がどちらも scope / milestone を含む同形
-    dict 列を返すため、 CLI 側 (= ここ) は backend を意識せず post-filter
-    だけで判定できる。 cloud transport 失敗は StoreApi 側で [] に丸める
-    best-effort 契約 (= 既存挙動と等価)。
-    """
-    if not ms_id:
-        return False
-    try:
-        docs = get_store().list_documents()
-    except Exception:
-        return False
-    for doc in docs:
-        if doc.get("scope") == "spec" and doc.get("milestone") == ms_id:
-            return True
-    return False
-
-
 def _spec_doc_for_target(target_id: str, kind: str) -> Optional[dict]:
     """Return the first spec-scoped document attached to a target, or None.
 
-    ms-119 / e-4005: the 目的達成 judge needs the SPEC 原典 (its §やる / 受入条件)
-    to verify attainment against. Milestones carry a ``milestone`` field on the
-    doc; operations carry ``operation``. Best-effort: transport failure → None."""
+    Single source of truth for the "spec doc attached to a target" scan (ms-119 —
+    maintainability finding §2): both ``_spec_exists_for_ms`` / ``_spec_exists_for_op``
+    delegate here so the scan rule (scope=="spec" + milestone/operation field
+    match, transport failure swallowed) lives in exactly one place.
+
+    Milestones carry a ``milestone`` field on the doc; operations carry
+    ``operation``. Best-effort: transport failure → None (StoreApi rounds cloud
+    transport failure to []).
+    """
     if not target_id:
         return None
     field = "milestone" if kind == "milestone" else "operation"
@@ -10626,21 +10612,16 @@ def _spec_doc_for_target(target_id: str, kind: str) -> Optional[dict]:
     return None
 
 
-def _spec_exists_for_op(op_id: str) -> bool:
-    """Return True if any spec-scoped document is attached to op_id.
+def _spec_exists_for_ms(ms_id: str) -> bool:
+    """True if any spec-scoped document is attached to ms_id (delegates to the
+    single-source scan _spec_doc_for_target)."""
+    return _spec_doc_for_target(ms_id, "milestone") is not None
 
-    Sibling of _spec_exists_for_ms for the operation target kind (docs carry an
-    ``operation`` field when scoped to an Operation)."""
-    if not op_id:
-        return False
-    try:
-        docs = get_store().list_documents()
-    except Exception:
-        return False
-    for doc in docs:
-        if doc.get("scope") == "spec" and doc.get("operation") == op_id:
-            return True
-    return False
+
+def _spec_exists_for_op(op_id: str) -> bool:
+    """True if any spec-scoped document is attached to op_id (delegates to the
+    single-source scan _spec_doc_for_target)."""
+    return _spec_doc_for_target(op_id, "operation") is not None
 
 
 def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
@@ -10721,23 +10702,14 @@ def _pr_number_from_url(url: str) -> str:
     return str(n) if n is not None else ""
 
 
-def _fire_ax_review_due_trigger(pr_number: str, pr_title: str, pr_url: str) -> None:
-    """Fire an 'ax-review-due' trigger when a PR is recorded (ms-119 / e-4003).
+def _fire_review_due_for_pr(review_type: str, label: str, pr_number: str,
+                            pr_title: str, pr_url: str) -> None:
+    """Write a '<type>-review-due' trigger for a PR-bound review (ms-119).
 
-    This is the missing PR-open leg of the review firing spine. AX 原典 §2 binds
-    AX to *interface-change* events (a PR / diff), not to a target lifecycle
-    transition — so ``_fire_review_due_trigger`` (which fires on completion
-    claims) deliberately never carries AX. Beacon learns of an interface change
-    at the moment a PR is recorded (``beacon pr add`` — the beacon-owned
-    PR-open 契機), so AX auto-binds here.
-
-    The trigger is a persistent file re-surfaced by ``beacon trigger check`` and
-    session-start until the review runs or the PR closes (see
-    ``_clear_ax_review_due_trigger``). This is what makes AX fire *structurally*
-    at the 節目 instead of only when a human remembers to run /beacon-review-run.
-
-    Advisory only — never blocks. Best-effort: a bad PR number / IO error is
-    swallowed so recording a PR never fails over a trigger write.
+    One trigger file per review type so each re-surfaces (via ``beacon trigger
+    check`` / session-start) and clears independently. Advisory only — never
+    blocks. Best-effort: a bad PR number / IO error is swallowed so recording a
+    PR never fails over a trigger write.
     """
     if not pr_number:
         return
@@ -10746,21 +10718,21 @@ def _fire_ax_review_due_trigger(pr_number: str, pr_title: str, pr_url: str) -> N
         os.makedirs(triggers_dir, exist_ok=True)
         import datetime
         trigger_data = {
-            "name": f"ax-review-due-{pr_number}",
-            "kind": "ax-review-due",
+            "name": f"{review_type}-review-due-{pr_number}",
+            "kind": f"{review_type}-review-due",
             "pr_number": pr_number,
             "pr_url": pr_url,
-            "review": "ax",
+            "review": review_type,
             "message": (
                 f"PR #{pr_number} \"{pr_title or pr_url}\" が作成されました "
-                f"(interface 変更 = AX レビューの節目)。文脈ゼロの独立 judge に "
-                f"AX 原典と差分を渡して AI 体験の drift を確認してください: "
-                f"`/beacon-review-run --type ax --pr {pr_number}` "
-                f"(または `beacon review context --type ax --pr {pr_number}`)。"
+                f"({label} の節目)。文脈ゼロの独立 judge に原典と差分を渡して "
+                f"drift を確認してください: "
+                f"`/beacon-review-run --type {review_type} --pr {pr_number}` "
+                f"(または `beacon review context --type {review_type} --pr {pr_number}`)。"
             ),
             "created_at": datetime.datetime.now().isoformat(),
         }
-        trigger_path = os.path.join(triggers_dir, f"ax-review-due-{pr_number}.json")
+        trigger_path = os.path.join(triggers_dir, f"{review_type}-review-due-{pr_number}.json")
         with open(trigger_path, "w", encoding="utf-8") as f:
             json.dump(trigger_data, f, ensure_ascii=False)
             f.write("\n")
@@ -10768,18 +10740,59 @@ def _fire_ax_review_due_trigger(pr_number: str, pr_title: str, pr_url: str) -> N
         return
 
 
-def _clear_ax_review_due_trigger(pr_number: str) -> None:
-    """Remove the ax-review-due trigger for a PR once it closes / merges — the
-    interface-change 節目 is resolved, so the AX nudge should stop re-surfacing
-    (ms-119 / e-4003). Best-effort; a missing file is fine."""
+def _clear_review_due_for_pr(review_type: str, pr_number: str) -> None:
+    """Remove a '<type>-review-due' trigger once the PR closes / merges — the
+    interface / code-change 節目 is resolved (ms-119). Best-effort."""
     if not pr_number:
         return
     try:
-        path = os.path.join(_get_triggers_dir(), f"ax-review-due-{pr_number}.json")
+        path = os.path.join(_get_triggers_dir(), f"{review_type}-review-due-{pr_number}.json")
         if os.path.isfile(path):
             os.remove(path)
     except OSError:
         return
+
+
+def _fire_pr_open_review_triggers(pr_number: str, pr_title: str, pr_url: str) -> None:
+    """Fire a review-due trigger for EVERY judge-run review type that binds to the
+    PR-open 節目 (ms-119 / e-4003 + maintainability).
+
+    Data-driven: the set of PR-bound reviews is read from the review-type registry
+    (descriptor ``fires_on == "pr-open"``), so adding a new PR-bound review type
+    (drop a review-type.json with fires_on=pr-open) makes it auto-fire here with
+    **no code change** — e-4009's data-driven registry, extended from *assembly*
+    to *firing*. Today AX and maintainability both bind here; philosophy /
+    attainment bind to target transitions instead (see _fire_review_due_trigger).
+    """
+    if not pr_number:
+        return
+    import review_spine
+    for tid, desc in review_spine.judge_run_review_types().items():
+        if desc.get("fires_on") != "pr-open":
+            continue
+        _fire_review_due_for_pr(tid, desc.get("label", tid), pr_number, pr_title, pr_url)
+
+
+def _clear_pr_open_review_triggers(pr_number: str) -> None:
+    """Clear all PR-open review-due triggers for a PR (ms-119). Mirrors
+    _fire_pr_open_review_triggers over the same registry set."""
+    if not pr_number:
+        return
+    import review_spine
+    for tid, desc in review_spine.judge_run_review_types().items():
+        if desc.get("fires_on") != "pr-open":
+            continue
+        _clear_review_due_for_pr(tid, pr_number)
+
+
+# --- backward-compat shims (existing e-4003 tests pin these AX-specific names) ---
+def _fire_ax_review_due_trigger(pr_number: str, pr_title: str, pr_url: str) -> None:
+    _fire_review_due_for_pr("ax", "AX (AI-Experience interface drift)",
+                            pr_number, pr_title, pr_url)
+
+
+def _clear_ax_review_due_trigger(pr_number: str) -> None:
+    _clear_review_due_for_pr("ax", pr_number)
 
 
 def _cleanup_spec_needed_triggers() -> None:
@@ -13178,9 +13191,10 @@ def cmd_pr_add():
     save_project(data)
 
     # ms-119 e-4003: a recorded PR is the beacon-owned PR-open 契機 — auto-bind
-    # AX review to this interface change so it fires structurally at the 節目
-    # (not only when a human remembers /beacon-review-run). Advisory, non-blocking.
-    _fire_ax_review_due_trigger(_pr_number_from_url(url), title, url)
+    # every PR-bound review (AX + maintainability, data-driven from the registry)
+    # so they fire structurally at the 節目 (not only when a human remembers
+    # /beacon-review-run). Advisory, non-blocking.
+    _fire_pr_open_review_triggers(_pr_number_from_url(url), title, url)
 
     # ms-80 e-1821: 同一 MS に並列で open PR が他にもあれば claim 競合の可能性
     # を author に知らせる (= 警告のみ、block しない)。
@@ -13375,7 +13389,7 @@ def cmd_pr_close():
     save_project(data)
     # ms-119 e-4003: the interface-change 節目 is resolved — stop re-surfacing the
     # AX review nudge for this PR.
-    _clear_ax_review_due_trigger(_pr_number_from_url(entry.get("meta", {}).get("url", "")))
+    _clear_pr_open_review_triggers(_pr_number_from_url(entry.get("meta", {}).get("url", "")))
 
     if json_mode:
         print(json.dumps({"entry_id": entry_id, "pr_status": "closed"}, ensure_ascii=False))
@@ -13907,7 +13921,7 @@ def cmd_pr_merge():
         sys.exit(1)
     save_project(data)
     # ms-119 e-4003: PR merged — interface change resolved, clear its AX nudge.
-    _clear_ax_review_due_trigger(_pr_number_from_url(entry.get("meta", {}).get("url", "")))
+    _clear_pr_open_review_triggers(_pr_number_from_url(entry.get("meta", {}).get("url", "")))
     if json_mode:
         print(json.dumps({"entry_id": entry_id, "pr_status": "merged"}, ensure_ascii=False))
     else:
