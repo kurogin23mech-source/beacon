@@ -10969,6 +10969,14 @@ def _clear_pr_open_review_triggers(pr_number: str) -> None:
         if desc.get("fires_on") != "pr-open":
             continue
         _clear_review_due_for_pr(tid, pr_number)
+    # ms-119 e-4060: PR resolved (merged/closed) → drop the reviewed done-marker
+    # too, so the trigger dir does not accumulate stale markers.
+    try:
+        marker = _pr_open_reviewed_marker_path(pr_number)
+        if os.path.exists(marker):
+            os.remove(marker)
+    except OSError:
+        pass
 
 
 # --- backward-compat shims (existing e-4003 tests pin these AX-specific names) ---
@@ -10979,6 +10987,180 @@ def _fire_ax_review_due_trigger(pr_number: str, pr_title: str, pr_url: str) -> N
 
 def _clear_ax_review_due_trigger(pr_number: str) -> None:
     _clear_review_due_for_pr("ax", pr_number)
+
+
+# ---------------------------------------------------------------------------
+# Review-as-merge-gate (ms-119 e-4060).
+#
+# Before this, a PR-open fired a review-due trigger into a file, but NOTHING
+# forced it to be consumed: unlike commit/push/deploy (each woken by the
+# post-commit hook's "MUST run" nudge), the review trigger only re-surfaced on a
+# voluntary `beacon trigger check`, buried among spec-needed noise — so AX /
+# maintainability reviews fired into a void and were skipped. Two structural
+# closes, mirroring the loops that already work:
+#   * WAKE — the post-commit hook now emits a MUST-run on PR-open (bin change).
+#   * GATE — the review-due trigger is repurposed as the "review still owed"
+#     signal: `beacon review done` clears it (called by /beacon-review-run when
+#     a judge produces its verdict), and beacon pr approve/merge REFUSE while any
+#     remain. The trigger already survives approve (only close/merge cleaned it),
+#     so it is a faithful "outstanding" marker. Override is possible but leaves
+#     an audit line (e-4006 「隠せなくする」 pattern), never a silent bypass.
+# ---------------------------------------------------------------------------
+
+_REVIEW_DUE_SUFFIX = "-review-due-"
+
+
+def _pending_review_types_for_pr(pr_number: str) -> list:
+    """Return the review types whose review-due trigger is still present for this
+    PR — i.e. independent reviews (AX / maintainability) that fired at PR-open
+    and have NOT been run/cleared yet. Empty when none outstanding. This is the
+    single gate signal beacon pr approve/merge read (ms-119 e-4060)."""
+    pr_number = str(pr_number or "").strip()
+    if not pr_number:
+        return []
+    tail = f"{_REVIEW_DUE_SUFFIX}{pr_number}.json"
+    out: list = []
+    try:
+        for fn in sorted(os.listdir(_get_triggers_dir())):
+            if not fn.endswith(tail):
+                continue
+            rtype = fn[:-len(tail)]
+            try:
+                with open(os.path.join(_get_triggers_dir(), fn),
+                          encoding="utf-8") as f:
+                    rtype = json.load(f).get("review") or rtype
+            except (OSError, ValueError):
+                pass
+            if rtype:
+                out.append(rtype)
+    except OSError:
+        return []
+    return out
+
+
+def _review_gate_check(pr_number: str, *, action: str) -> None:
+    """Refuse ``action`` (approve / merge) while independent reviews are still
+    owed for this PR, unless BEACON_PR_REVIEW_OVERRIDE=1 (which proceeds but
+    prints an audit line). Exits 2 on block. ms-119 e-4060."""
+    pending = _pending_review_types_for_pr(pr_number)
+    if not pending:
+        return
+    if os.environ.get("BEACON_PR_REVIEW_OVERRIDE") == "1":
+        print(f"⚠ 独立レビュー未実施のまま PR #{pr_number} を {action} します "
+              f"(未実施: {', '.join(pending)}) — この {action} は override であり "
+              f"監査対象です。", file=sys.stderr)
+        return
+    runs = "\n".join(
+        f"    /beacon-review-run --type {t} --pr {pr_number}" for t in pending)
+    print(
+        f"Error: PR #{pr_number} は独立レビューが未実施のため {action} できません "
+        f"(未実施: {', '.join(pending)})。\n"
+        f"  ms-119 e-4060: レビューは PR-open の節目で発火し、実行するまで "
+        f"approve/merge を構造的に塞ぎます (発火だけで消費されない穴の是正)。\n"
+        f"  文脈ゼロの独立 judge に原典+差分を渡して実行:\n{runs}\n"
+        f"  実行後は `beacon review done --type <type> --pr {pr_number}` で解消 "
+        f"(/beacon-review-run が最後に自動で叩きます)。\n"
+        f"  やむを得ず飛ばす場合のみ: BEACON_PR_REVIEW_OVERRIDE=1 "
+        f"(監査痕跡が残ります)。",
+        file=sys.stderr)
+    sys.exit(2)
+
+
+def cmd_review_done():
+    """Mark an independent review as RUN for a PR — clears its review-due trigger
+    so beacon pr approve/merge no longer blocks on it (ms-119 e-4060).
+
+    beacon review done --type <ax|maintainability|...> --pr <N>
+
+    Called by /beacon-review-run after a judge produces its verdict, so running
+    the review is what unblocks the PR (the loop closes on the review, not on the
+    approve). Idempotent: clearing an absent trigger is a no-op."""
+    review_type = os.environ.get("BEACON_REVIEW_TYPE", "").strip()
+    pr_number = os.environ.get("BEACON_PR_NUMBER", "").strip()
+    if not review_type or not pr_number:
+        print("Usage: beacon review done --type <ax|maintainability|...> "
+              "--pr <N>", file=sys.stderr)
+        sys.exit(1)
+    _clear_review_due_for_pr(review_type, pr_number)
+    remaining = _pending_review_types_for_pr(pr_number)
+    print(f"レビュー実施を記録: {review_type} / PR #{pr_number} (review-due 解消)")
+    if remaining:
+        print(f"  残りの未実施レビュー: {', '.join(remaining)}")
+    else:
+        # All reviews for this PR have run — stamp a done-marker so the tick
+        # anchor does NOT re-fire review-due for this (now review-less) PR.
+        try:
+            os.makedirs(_get_triggers_dir(), exist_ok=True)
+            with open(_pr_open_reviewed_marker_path(pr_number), "w",
+                      encoding="utf-8") as f:
+                f.write(review_type)
+        except OSError:
+            pass
+        print(f"  PR #{pr_number} の独立レビューは全て実施済み "
+              f"— approve/merge の gate を通過できます。")
+
+
+def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
+    """Anchor firing to the real PR-open event (ms-119 e-4060): scan GitHub's
+    OPEN PRs and fire the pr-open review-due triggers for any that lack them.
+
+    Fixes the path-dependence hole — `_fire_pr_open_review_triggers` only ran
+    from `beacon pr add/create`, so a PR opened via `gh pr create` / the GitHub
+    UI never fired its review-due and slipped past the gate. Running here (in
+    `trigger tick`, which session-start / log call) means every open PR ends up
+    gated regardless of how it was opened. Best-effort: any gh / parse failure
+    is swallowed so a tick never fails over this."""
+    # Fast skip: under test (no live GitHub) or when gh is not installed, do
+    # nothing — the gate still works for beacon-pr-add-fired triggers; the
+    # anchor only adds coverage for gh-direct / UI PRs on real machines.
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("BEACON_TEST_MODE"):
+        return
+    if not shutil.which("gh"):
+        return
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["gh", "pr", "list", "--state", "open", "--json",
+             "number,title,url"],
+            capture_output=True, text=True, timeout=15)
+        if r.returncode != 0 or not r.stdout.strip():
+            return
+        open_prs = json.loads(r.stdout)
+    except Exception:
+        return
+    for pr in open_prs:
+        num = str(pr.get("number") or "").strip()
+        if not num:
+            continue
+        # Only fire types not already present (don't clobber a running review's
+        # cleared state — a cleared trigger means "reviewed", must NOT re-fire).
+        # We detect "already handled" by the presence OR a done-marker; here we
+        # simply skip if the trigger file exists (present = still owed) and rely
+        # on _fire being idempotent. To avoid re-firing a review already done,
+        # only fire when NO review-due file for this PR exists at all yet (fresh
+        # PR). A PR mid-review keeps its remaining triggers from the first fire.
+        try:
+            existing = os.listdir(_get_triggers_dir())
+        except OSError:
+            existing = []
+        if any(fn.endswith(f"{_REVIEW_DUE_SUFFIX}{num}.json") for fn in existing):
+            continue
+        # Fresh open PR with no review-due yet → fire the pr-open set.
+        if _pr_open_reviewed_marker_exists(num):
+            continue
+        _fire_pr_open_review_triggers(num, pr.get("title") or "",
+                                      pr.get("url") or "")
+
+
+def _pr_open_reviewed_marker_path(pr_number: str) -> str:
+    return os.path.join(_get_triggers_dir(), f".reviewed-pr-{pr_number}")
+
+
+def _pr_open_reviewed_marker_exists(pr_number: str) -> bool:
+    """True when this PR's reviews were already run once (a done-marker exists),
+    so the anchor must NOT re-fire review-due for it. `beacon review done`
+    stamps this marker the first time all of a PR's reviews clear."""
+    return os.path.exists(_pr_open_reviewed_marker_path(pr_number))
 
 
 def _cleanup_spec_needed_triggers() -> None:
@@ -11813,6 +11995,7 @@ def cmd_trigger_tick():
     _auto_fire_release_due_trigger()
     _auto_fire_release_marker_trigger()
     _auto_fire_map_drift_trigger()
+    _auto_fire_pr_open_review_triggers_for_open_prs()  # ms-119 e-4060 anchor
     _cleanup_stale_triggers()
     # Touch the stamp so subsequent ``check`` calls within the TTL window
     # skip the auto-tick gate. Mirrors what ``_maybe_auto_tick`` writes on
@@ -13777,6 +13960,14 @@ def cmd_pr_approve():
         print(str(e), file=sys.stderr)
         sys.exit(1)
 
+    # ms-119 e-4060: refuse to approve while independent reviews (AX /
+    # maintainability) are still owed for this PR. Runs BEFORE save_project, so a
+    # blocked approve persists nothing (the in-memory pr_approve is discarded on
+    # exit). This is the GATE half of closing the review loop — firing a review
+    # trigger is meaningless unless approve/merge structurally wait on it.
+    _review_gate_check(_pr_number_from_url(entry.get("meta", {}).get("url", "")),
+                       action="approve")
+
     # ms-95 / e-2369 — auto-done tasks bound to this PR's commits via
     # `meta.resolves` (or `e-XXX` mention in the commit messages). HIGH
     # confidence → done with explicit `done_reason`; MID → surface as a
@@ -14105,6 +14296,12 @@ def cmd_pr_merge():
     except ValueError as e:
         print(str(e), file=sys.stderr)
         sys.exit(1)
+    # ms-119 e-4060: refuse to merge while independent reviews are still owed for
+    # this PR (same gate as approve). BEFORE save_project so a blocked merge
+    # persists nothing. The Trek-finalize / user-override escape hatches above
+    # are orthogonal (they gate the AI-merge-autonomy boundary, not the review).
+    _review_gate_check(_pr_number_from_url(entry.get("meta", {}).get("url", "")),
+                       action="merge")
     save_project(data)
     # ms-119 e-4003: PR merged — interface change resolved, clear its AX nudge.
     _clear_pr_open_review_triggers(_pr_number_from_url(entry.get("meta", {}).get("url", "")))
@@ -24303,6 +24500,8 @@ if __name__ == "__main__":
         "target_close": cmd_target_close,         # ms-122 e-3956
         "target_instances": cmd_target_instances,  # ms-122 e-3956
         "review_context": cmd_review_context,
+        "review_done": cmd_review_done,      # ms-119 e-4060
+
         "milestone_observe": cmd_milestone_observe,
         "milestone_wait": cmd_milestone_wait,
         "milestone_release": cmd_milestone_release,

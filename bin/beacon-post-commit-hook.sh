@@ -123,6 +123,14 @@ if echo "$CMD_BARE" | grep -qE 'git commit '; then
 elif echo "$CMD_BARE" | grep -qE 'git push'; then
   emit "BEACON: Push detected. You MUST now run /beacon-push Skill to record this push."
   SKILL="/beacon-push"
+elif echo "$CMD_BARE" | grep -qE 'beacon pr (add|create)|gh pr create'; then
+  # ms-119 e-4060: a PR-open is a review 節目. Before this branch the review-due
+  # trigger fired into a file but nothing WOKE the AI to consume it (unlike
+  # commit/push/deploy, which each have a MUST-run wake here) — so AX /
+  # maintainability reviews fired into a void and were skipped. This closes that
+  # gap by giving PR-open the same forcing-function wake.
+  emit "BEACON: PR opened. AX + maintainability review are due (文脈ゼロの独立 judge に原典+差分を渡す節目). You MUST now run 'beacon trigger check' to see the pending <type>-review-due triggers, then run /beacon-review-run --type ax --pr <N> and --type maintainability --pr <N> for the PR. Approving/merging before these run is blocked by beacon pr approve."
+  SKILL="/beacon-review-run"
 elif echo "$CMD_BARE" | grep -qE 'gcloud run deploy|gcloud app deploy|scripts/deploy\.sh'; then
   emit "BEACON: Deploy detected. You MUST now run /beacon-deploy Skill to record this deployment."
   SKILL="/beacon-deploy"

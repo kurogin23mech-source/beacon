@@ -3156,7 +3156,20 @@ case "${1:-}" in
     review)
         case "${2:-}" in
             context)  shift 2; cmd_review_context "$@" ;;
+            done)
+                shift 2
+                _rd_type="" _rd_pr=""
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --type) _rd_type="${2:-}"; shift 2 ;;
+                        --pr)   _rd_pr="${2:-}";   shift 2 ;;
+                        *)      shift ;;
+                    esac
+                done
+                BEACON_REVIEW_TYPE="$_rd_type" BEACON_PR_NUMBER="$_rd_pr" \
+                    python3 "$COMMANDS_PY" review_done ;;
             *)        echo "Usage: beacon review context --type <ax|philosophy|attainment> [--pr <n> | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--mode diff]  (独立 judge 用の review-kernel bundle を出力; ms-119)" >&2
+                      echo "       beacon review done --type <ax|maintainability> --pr <n>  (レビュー実施を記録し approve/merge gate を解消; ms-119 e-4060)" >&2
                       echo "  注: ax/philosophy は助言 judge の bundle、attainment は目的達成の証拠を独立 judge に生成させる bundle (verdict は human: 'beacon target approve')。完了ゲートは 'beacon milestone done --review'。" >&2
                       exit 1 ;;
         esac
