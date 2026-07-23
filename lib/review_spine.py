@@ -26,12 +26,92 @@ events, not to a target lifecycle transition. A milestone going done is not an
 interface change.
 """
 
+import json as _json
+import os as _os
+
 import transition_approval as _ta
 
 # Review-type identifiers (stable strings — trigger payloads persist them).
 REVIEW_ATTAINMENT = "attainment"   # 目的達成: owned verdict, human approval
 REVIEW_PHILOSOPHY = "philosophy"   # 思想: drift vs SPEC / vision (advisory)
 REVIEW_AX = "ax"                   # AX: AI-Experience interface drift (advisory)
+
+# --- data-driven review-type registry (ms-119 / e-4009) -------------------
+# The judge-run review types are NOT a hardcoded whitelist. Each is described by
+# a `skills/<type>/review-type.json` descriptor discovered on disk, so a NEW
+# review type is added by dropping a descriptor (+ its 原典 + SKILL) with no edit
+# to this module or commands.py (AC5: 原典差し替えだけで review type を追加できる
+# plug-in 構造). The built-ins below are only a fallback for pure unit tests /
+# partial checkouts where the skills tree is absent — on-disk descriptors are
+# authoritative and override them.
+_BUILTIN_REVIEW_TYPES = {
+    REVIEW_AX: {
+        "id": REVIEW_AX,
+        "judge_run": True,
+        "label": "AX (AI-Experience interface drift)",
+        "origin": {"kind": "repo-file", "ref": "skills/ax-review/principles.md"},
+    },
+    REVIEW_PHILOSOPHY: {
+        "id": REVIEW_PHILOSOPHY,
+        "judge_run": True,
+        "label": "思想 (drift vs SPEC / vision)",
+        "origin": {"kind": "doc", "required": True},
+    },
+}
+
+
+def _install_root():
+    return _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+
+
+def _default_skills_dir():
+    return _os.path.join(_install_root(), "skills")
+
+
+def load_review_types(skills_dir=None):
+    """Discover review-type descriptors from ``skills/*/review-type.json``.
+
+    Returns ``{id: descriptor}``. On-disk descriptors override the built-in
+    fallback, so adding a NEW judge-run review type requires only a new
+    descriptor file (+ 原典 + SKILL) — no code edit here or in commands.py.
+
+    A descriptor is a dict: ``{"id", "judge_run", "label", "origin": {...}}``.
+    ``origin.kind`` is ``"repo-file"`` (原典 is a fixed repo file that travels
+    with the capability) or ``"doc"`` (原典 is a doc supplied at review time via
+    ``--origin-doc``).
+
+    Malformed / unreadable descriptors are skipped (best-effort discovery must
+    not crash a review over one bad file).
+    """
+    reg = {k: dict(v) for k, v in _BUILTIN_REVIEW_TYPES.items()}
+    d = skills_dir or _default_skills_dir()
+    try:
+        names = _os.listdir(d)
+    except OSError:
+        return reg
+    for name in names:
+        path = _os.path.join(d, name, "review-type.json")
+        if not _os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                desc = _json.load(f)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(desc, dict):
+            continue
+        tid = (desc.get("id") or "").strip()
+        if not tid:
+            continue
+        reg[tid] = desc
+    return reg
+
+
+def judge_run_review_types(skills_dir=None):
+    """The subset of the registry whose reviews are run by an independent judge
+    subagent (``judge_run: true``). Human-gated 目的達成 is intentionally absent."""
+    return {k: v for k, v in load_review_types(skills_dir).items()
+            if v.get("judge_run")}
 
 # The independence contract handed to the judge subagent. It is the *structural*
 # form of AX 原典 §2 (計器の必然): the judge is a context-zero instrument, so the
@@ -47,7 +127,8 @@ INDEPENDENCE_CONTRACT = (
 
 
 def assemble_review_context(review_type, *, origin_id, origin_content,
-                            diff_text, mode, target_ref, gaps=None):
+                            diff_text, mode, target_ref, gaps=None,
+                            known_judge_types=None):
     """Assemble the review-kernel bundle handed to an independent judge subagent.
 
     This is the *structural* enforcement of reviewer independence (ms-119
@@ -70,12 +151,20 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
         target_ref: what was reviewed (PR number / ref range / target id).
         gaps: optional list of gentle gaps to surface (e.g. philosophy review of
             a SPEC-less target — the missing 原典 is itself a finding, 方針5).
+        known_judge_types: optional set of allowed judge-run type ids. Defaults
+            to the on-disk registry (ms-119 / e-4009 — data-driven, not a
+            hardcoded pair). Passing an explicit set keeps this function pure for
+            unit tests that don't want disk IO.
     """
-    if review_type not in (REVIEW_AX, REVIEW_PHILOSOPHY):
+    if known_judge_types is None:
+        known_judge_types = set(judge_run_review_types().keys())
+    if review_type not in known_judge_types:
+        allowed = ", ".join(sorted(repr(t) for t in known_judge_types)) or "(none)"
         raise ValueError(
             f"assemble_review_context: unsupported review_type {review_type!r} "
-            f"(judge-run reviews are {REVIEW_AX!r} / {REVIEW_PHILOSOPHY!r}; "
-            f"{REVIEW_ATTAINMENT!r} is human-gated, not a subagent judge)."
+            f"(judge-run reviews are {allowed}; register a new one by adding a "
+            f"skills/<type>/review-type.json descriptor; {REVIEW_ATTAINMENT!r} "
+            f"is human-gated, not a subagent judge)."
         )
     if mode not in ("diff", "full-surface"):
         raise ValueError(f"assemble_review_context: mode must be 'diff' or "

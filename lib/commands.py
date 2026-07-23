@@ -1974,30 +1974,50 @@ def cmd_review_context():
         sys.exit(1)
 
     # --- origin (原典) resolution: mechanical, never implementer prose ---
-    if review_type == review_spine.REVIEW_AX:
-        # AX 原典 is a repo file that travels with the capability (Layer 3).
+    # ms-119 / e-4009: the accepted types + how each resolves its 原典 come from
+    # the data-driven registry (skills/*/review-type.json), not a hardcoded
+    # if/elif whitelist. A new judge-run review type is added by dropping a
+    # descriptor + 原典 + SKILL — this command needs no edit.
+    registry = review_spine.judge_run_review_types()
+    desc = registry.get(review_type)
+    if not desc:
+        allowed = ", ".join(sorted(registry.keys())) or "(none registered)"
+        print(f"Error: --type must be one of: {allowed}; got {review_type!r}. "
+              f"(目的達成 review is human-gated via `beacon target`, not a judge "
+              f"run. Register a new type with a skills/<type>/review-type.json "
+              f"descriptor.)", file=sys.stderr)
+        sys.exit(1)
+    origin_spec = desc.get("origin", {}) if isinstance(desc.get("origin"), dict) else {}
+    origin_kind = origin_spec.get("kind", "")
+    if origin_kind == "repo-file":
+        # 原典 is a fixed repo file that travels with the capability (Layer 3).
+        # --origin-doc does not apply; silently ignoring it would let the caller
+        # believe their doc became the 原典 — reject instead.
+        ref = origin_spec.get("ref", "")
+        if not ref:
+            print(f"Error: review type {review_type!r} descriptor has origin.kind"
+                  f"=repo-file but no 'ref' (skills/<type>/review-type.json is "
+                  f"malformed).", file=sys.stderr)
+            sys.exit(1)
         if origin_doc:
-            # --origin-doc is a philosophy-only flag; AX origin is fixed. Silently
-            # ignoring it would let the caller believe their doc became the 原典.
-            print("Error: --origin-doc is only valid with --type philosophy "
-                  "(the AX 原典 is fixed to skills/ax-review/principles.md).",
-                  file=sys.stderr)
+            print(f"Error: --origin-doc is not valid for --type {review_type} "
+                  f"(its 原典 is fixed to {ref}).", file=sys.stderr)
             sys.exit(1)
         install_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        origin_path = os.path.join(install_root, "skills", "ax-review", "principles.md")
-        origin_id = "skills/ax-review/principles.md"
+        origin_path = os.path.join(install_root, *ref.split("/"))
+        origin_id = ref
         try:
             with open(origin_path, encoding="utf-8") as f:
                 origin_content = f.read()
         except OSError as e:
-            print(f"Error: AX 原典 not found at {origin_id}: {e}", file=sys.stderr)
+            print(f"Error: 原典 not found at {origin_id}: {e}", file=sys.stderr)
             sys.exit(1)
-    elif review_type == review_spine.REVIEW_PHILOSOPHY:
-        # 思想 原典 is the target's SPEC / vision doc. Absence is itself a finding
-        # (SPEC § 方針5): surface it as a gap instead of hard-failing.
+    elif origin_kind == "doc":
+        # 原典 is a document supplied at review time (a target's SPEC / vision).
+        # Absence is itself a finding (SPEC § 方針5): surface as a gap, don't lie.
         if not origin_doc:
-            print("Error: philosophy review needs --origin-doc <spec-doc-id> "
-                  "(the SPEC / vision the implementation is checked against).",
+            print(f"Error: --type {review_type} needs --origin-doc <doc-id> "
+                  f"(the SPEC / vision the implementation is checked against).",
                   file=sys.stderr)
             sys.exit(1)
         doc = get_store().get_document(origin_doc)
@@ -2007,11 +2027,11 @@ def cmd_review_context():
         origin_id = origin_doc
         origin_content = doc.get("content", "")
         if not origin_content.strip():
-            gaps.append(f"原典 {origin_doc} は本文が空です。思想 drift の照合基準が"
+            gaps.append(f"原典 {origin_doc} は本文が空です。drift の照合基準が"
                         f"無いため、findings は intent 推定に留まります (SPEC § 方針5)。")
     else:
-        print(f"Error: --type must be 'ax' or 'philosophy', got {review_type!r}. "
-              f"(目的達成 review is human-gated via `beacon target`, not a judge run.)",
+        print(f"Error: review type {review_type!r} descriptor has unknown "
+              f"origin.kind {origin_kind!r} (expected 'repo-file' or 'doc').",
               file=sys.stderr)
         sys.exit(1)
 
@@ -2041,6 +2061,7 @@ def cmd_review_context():
         mode=mode,
         target_ref=target_ref,
         gaps=gaps,
+        known_judge_types=set(registry.keys()),
     )
     print(json.dumps(bundle, ensure_ascii=False))
 
