@@ -275,7 +275,15 @@ class ApiClient:
 
     def post(self, path: str, body: dict | None = None,
              *, extra_headers: dict | None = None) -> dict:
-        return self._request("POST", path, body, extra_headers=extra_headers)
+        # ms-123: only thread extra_headers through when a caller actually
+        # supplies them. Forwarding extra_headers=None unconditionally broke
+        # every test that stubs `_request` with a double lacking the kwarg
+        # (test_bus_transport / test_trek_cli_cloud / …). Normal callers keep
+        # the pre-existing 3-arg call shape; only the envelope-gated archive
+        # path (the sole extra_headers user) takes the 4-arg branch.
+        if extra_headers is not None:
+            return self._request("POST", path, body, extra_headers=extra_headers)
+        return self._request("POST", path, body)
 
     def put(self, path: str, body: dict) -> dict:
         return self._request("PUT", path, body)
