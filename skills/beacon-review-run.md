@@ -275,6 +275,23 @@ PR レビュー (`/review` / `/code-review`) の中で「この変更の AX は�
 は既存の PR レビューが担う)。実装者本人の PR でも、このスキルは別視座の
 サブエージェントに投げるので self-review にならない。
 
+### Step P: レビュー実施を記録して gate を解消 (`--pr` 指定時のみ、ms-119 e-4060)
+
+`--pr <n>` 付きで走らせた場合、judge の verdict をユーザーに提示した**あと**に、
+そのレビューが実施済みであることを記録する:
+
+```bash
+beacon review done --type <ax|maintainability> --pr <n>
+```
+
+これは PR-open で発火した `<type>-review-due` トリガーを消し、`beacon pr
+approve` / `beacon pr merge` の**レビュー未実施ブロックを解消**する。ms-119 e-4060:
+レビューは「発火するだけ」では意味がなく、approve/merge が実施を構造的に待つ
+(未実施なら refuse)。だから **走らせたら必ず done を記録する** ことでループが
+閉じる。findings が request-changes 相当でも「レビューは実施した」ので done は
+記録してよい (verdict の内容と、レビューを走らせた事実は別)。複数種別 (AX +
+maintainability) が発火している PR は、各種別を走らせるたびに done を記録する。
+
 ## 制約
 
 - **実装者セッションでレビューを inline で書かない**。必ず Step 3 の fresh
