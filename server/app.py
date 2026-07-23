@@ -11637,11 +11637,22 @@ def health():
             status_code=503,
             detail="degraded: " + "; ".join(_failures),
         )
-    return {
+    resp = {
         "status": "ok",
         "env": _env,
         "version": _beacon_version,
     }
+    # ms-96 / e-3052: 総 DB 接続数を観測フィールドとして加える。status 判定には
+    # 一切影響させない (= /health の 200/503 契約と deploy health check を壊さない)。
+    # mysql backend の時だけ、接続レジストリの値を fail-safe に載せる (取得失敗は
+    # 黙って省略 = 観測フィールドが health 本体を落とさない)。
+    try:
+        if os.environ.get("BEACON_STORE_BACKEND", "").lower() == "mysql":
+            import mysql_client as _mysql_client
+            resp["db"] = _mysql_client.connection_stats()
+    except Exception:
+        pass
+    return resp
 
 
 @app.get("/api/auth/config")

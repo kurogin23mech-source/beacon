@@ -35,7 +35,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import {
-  consumeBusBudgetOne, refundBusBudgetOne, refuseMessage,
+  consumeBusBudgetOne, refundBusBudgetOne, refuseMessage, isArmed,
 } from './bus-budget.mjs'
 import {
   classifyOutboundReply, evaluateOutboundQualGate, qualHoldMessage,
@@ -848,14 +848,26 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const payload = { recipient_session_id, text, source_project: PROJECT_ID }
   if (in_reply_to) payload.in_reply_to = in_reply_to
 
-  // Budget gate fires only when this is a reply (in_reply_to set). A bare
-  // post (no in_reply_to) is a manual send — the human composing the tool
-  // call IS the approval, same as the CLI's manual-send path. Without this
-  // distinction the CLI and MCP semantics diverge again.
+  // e-3901: the budget gate fires on the AUTONOMOUS CONTEXT of the send, not
+  // on the presence of in_reply_to. The MCP reply tool is always AI-authored
+  // (no human types through it), so a send is autonomous when in_reply_to is
+  // set (an explicit reply — preserves default-OFF: consumeBusBudgetOne
+  // REFUSES on a missing budget file) OR when the session is armed (a budget
+  // was granted). The armed branch closes the omit-the-flag hole: an armed
+  // loop that drops in_reply_to is still gated. There is no --manual bypass on
+  // the MCP path (that override is a human-only CLI affordance). Mirrors
+  // lib/commands.py cmd_bus_send.
+  // e-3901: armed = a granted budget (autonomous mode active). Delegated to
+  // isArmed() which correctly unwraps readBusBudget()'s { state, data } shape —
+  // an earlier inline `busBudget.total` read was undefined, so armed was always
+  // false and `autonomous` silently degraded to `!!in_reply_to`, re-opening the
+  // omit-the-flag hole on the MCP path only. (Caught by parent review of PR #475.)
+  const armed = isArmed(CWD)
+  const autonomous = !!in_reply_to || armed
   // Track whether the pessimistic budget decrement committed a slot, so a
   // held / failed send can refund it (ms-100 e-2999) instead of burning a turn.
   let budgetConsumed = false
-  if (in_reply_to) {
+  if (autonomous) {
     const gate = consumeBusBudgetOne(CWD)
     if (!gate.allowed) {
       const msg = refuseMessage(gate.reason, gate.budget)

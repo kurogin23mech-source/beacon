@@ -264,7 +264,7 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 |---------|-------------|
 | `beacon account add "<name>" [--health <text>]` | Add an account / 取引先を追加 |
 | `beacon account list [--json] [--as-project <id>] [--linked]` | List accounts; `--as-project` shows only accounts disclosed to that project (fail-closed); `--linked` pulls accounts disclosed to THIS project from other org projects (cloud) / 取引先を一覧、`--as-project` はそのプロジェクト視点、`--linked` は他プロジェクトからこのプロジェクトに開示された取引先を取り込み |
-| `beacon account contact <acc-id> <name> [--role <text>] [--email <text>] [--phone <text>]` | Add a contact to an account / 取引先に担当者を追加 |
+| `beacon account contact add <acc-id> <name> [--role <text>] [--email <text>] [--phone <text>]` | Add a contact to an account / 取引先に担当者を追加 (e-3907; bare form deprecated alias) |
 | `beacon account phase <acc-id> <phase> [--note <text>]` | Declare an account lifecycle phase transition (append-only) / 取引先のフェーズを記録（追記のみ） |
 | `beacon account rename <acc-id> <new-name>` | Rename an account / 取引先名を変更 |
 | `beacon account assign <acc-id> <user>` | Set the assignee (担当ユーザー) on an account / 取引先の担当ユーザーを設定 |
@@ -278,9 +278,12 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon opportunity assign <opp-id> <user>` | Set the assignee (担当ユーザー) on an opportunity / 商談の担当ユーザーを設定 |
 | `beacon opportunity amount <opp-id> <amount>` | Set the deal amount (金額) on an opportunity / 商談の金額を設定 |
 | `beacon opportunity describe <opp-id> <text>` | Set an opportunity's 背景/経緯/メモ (free-text; empty clears) / 商談の背景メモを設定 |
+| `beacon opportunity rename <opp-id> <new-title>` | Rename an opportunity's title / 商談名の変更 (e-3909) |
 | `beacon acquisition add "<title>" [--description <text>] [--assignee <user>]` | Add a 顧客獲得ターゲット (取引先の無い獲得・準備作業の器) / 顧客獲得ターゲットを追加 |
 | `beacon acquisition list [--json]` | List 顧客獲得ターゲット / 顧客獲得ターゲットを一覧 |
-| `beacon acquisition status <acq-id> <todo\|in_progress\|observing\|done>` | Move a 顧客獲得ターゲット along its lifecycle / 顧客獲得ターゲットの状態を進める |
+| `beacon acquisition start <acq-id>` | Move a 顧客獲得ターゲット to in_progress / 顧客獲得ターゲットに着手 |
+| `beacon acquisition observe <acq-id>` | Move a 顧客獲得ターゲット to observing / 顧客獲得ターゲットを見守りに |
+| `beacon acquisition done <acq-id>` | Mark a 顧客獲得ターゲット done / 顧客獲得ターゲットを完了 |
 | `beacon opportunity phase-prob <phase> <n>` | Set a phase win probability (成約率 0-100) / フェーズの成約率を設定 |
 | `beacon sales target <user> <amount> \| list` | Set/list a member's sales quota (目標売上) + weighted pipeline / メンバーの目標売上を設定・一覧 |
 | `beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] \| --clear` | Set the 遷移日 (judgement date) for the current phase / 現フェーズの遷移日（判定予定日）を設定 |
@@ -296,8 +299,8 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon meeting reschedule <mtg-id> --at <datetime> [--end <datetime>] [--event-id <id>] [--set-transition]` | Move a meeting (予定変更); `--set-transition` follows the 遷移日 / 面談の予定変更、遷移日も追従 |
 | `beacon meeting end <mtg-id>` | Mark a meeting ended (idempotent; used by the end-detector Operation) / 面談を終了扱いにする |
 | `beacon meeting cancel <mtg-id>` | Cancel a scheduled meeting / 面談を取消 |
-| `beacon meeting list <opp-id> [--json]` | List an opportunity's meetings / 商談の面談一覧 |
-| `beacon meeting ended [--now <datetime>] [--json]` | List meetings whose end passed but are still scheduled (終了検知 C の候補) / 終了予定を過ぎた未終了面談 |
+| `beacon meeting list [<opp-id>] [--json]` | List meetings; opp-id optional — omit for all opportunities / 面談一覧 (opp-id 省略で全商談横断, e-3909) |
+| `beacon meeting list-ended [--now <datetime>] [--json]` | List meetings whose end passed but are still scheduled (終了検知 C の候補) / 終了予定を過ぎた未終了面談 (e-3909 正式名, alias: meeting ended) |
 | `beacon phase list [--json]` | Show the configured phase funnels (account / opportunity vocabulary) / 設定済みフェーズファネルを表示 |
 | `beacon phase add <account\|opportunity> <name> [--index N]` | Add or insert a funnel stage / フェーズ段を追加・挿入 |
 | `beacon phase rename <account\|opportunity> <old> <new>` | Rename a funnel stage (references follow) / フェーズ段を改名（参照も追随） |
@@ -388,7 +391,7 @@ Operations track recurring operational workloads (daily batch jobs, incident man
 
 | Command | Description |
 |---------|-------------|
-| `beacon operation open "title" [--schedule daily\|weekdays\|weekly] [--log-source name]` | Start a new Operation cycle / 新しいOperationを開始 |
+| `beacon operation create "title" [--status open] [--schedule daily\|weekdays\|weekly] [--log-source name]` | Create an Operation (--status open to start active) / Operation を作成 (e-3907; alias: operation open) |
 | `beacon operation close <op-id>` | Close an Operation cycle / クローズ |
 | `beacon operation purge <op-id> --reason "..." [--index <n>]` | Hard delete an operation record — recovery for duplicate-ID corruption (e-863) / ハード削除（重複ID復旧用） |
 | `beacon operation list [--json]` | List Operations / 一覧 |
@@ -398,7 +401,7 @@ Operations track recurring operational workloads (daily batch jobs, incident man
 | `beacon operation envelope verify <op-id> <action> [--json]` | AI self-check used by `/beacon-operation-execute` — is the action permitted by the active envelope? (ms-60 / e-1340) / 指定 action が envelope の許可範囲か判定 |
 | `beacon run record -o <op-id> --batch <name> --status ok\|warning\|error --desc "..."` | Record a batch run result / バッチ実行結果を記録 |
 | `beacon run list -o <op-id> [--json]` | List run records / 実行記録一覧 |
-| `beacon incident open "title" -o <op-id> [--desc "..."]` | Open an incident / インシデント起票 |
+| `beacon incident add "title" -o <op-id> [--desc "..."]` | Create an incident / インシデント起票 (e-3907; alias: incident open) |
 | `beacon incident close <id> --resolution "..."` | Resolve an incident / インシデント解決 |
 | `beacon incident escalate <id> -m <ms-id>` | Escalate incident to a Milestone task / Milestoneタスクに昇格 |
 
@@ -477,6 +480,9 @@ walkthrough.
 
 | Command | Description |
 |---------|-------------|
+| `beacon dm send --to <sid> --payload '<json>' [--manual] [--in-reply-to <eid>]` | Send a DM (canonical verb; delegates to `bus send --channel dm`) / DM 送信 (e-3899) |
+| `beacon dm respond <approve\|deny> <event_id>` | Decide a pending cross-user DM action envelope / 受信側の承認判断 |
+| `beacon dm audit [--limit N] [--json]` | Read the DM-approval audit log (alias: `dm log`) / DM 監査ログ |
 | `beacon channel install` | Install beacon-bus MCP entry into `.mcp.json` / DM 機能を有効化 |
 | `beacon channel uninstall [--purge-files\|--keep-files]` | Remove MCP entry; `--purge-files` also moves `channel/node_modules` to `.trash/` |
 | `beacon channel opt-out [--project\|--global]` | Block install / auto-install (persistent flag) |

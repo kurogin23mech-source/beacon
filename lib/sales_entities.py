@@ -298,6 +298,23 @@ def opportunity_set_description(data: dict, opportunity_id: str,
     return opp
 
 
+def opportunity_set_title(data: dict, opportunity_id: str, title: str) -> dict:
+    """Rename an Opportunity (ms-120 e-3909). Before this there was no path to
+    fix a title after creation — `describe` only sets the free-text 背景, not the
+    name (parallel to `milestone rename`). Returns the updated opportunity dict.
+    Raises ValueError when the opportunity is unknown or the title is empty
+    (unlike description, a title cannot be cleared — every opportunity needs a
+    name)."""
+    opp = find_opportunity(data, opportunity_id)
+    if opp is None:
+        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    new_title = (title or "").strip()
+    if not new_title:
+        raise ValueError("title must not be empty (an opportunity always needs a name)")
+    opp["title"] = new_title
+    return opp
+
+
 def account_phase_warnings(data: dict, new_phase: str) -> list:
     warnings: list = []
     phases = account_phases(data)
@@ -2813,14 +2830,23 @@ def meeting_mark_ended(data: dict, meeting_id: str, *, at: str = "") -> dict:
     return m
 
 
-def meeting_cancel(data: dict, meeting_id: str, *, at: str = "") -> dict:
+def meeting_cancel(data: dict, meeting_id: str, *, at: str = "",
+                   reason: str = "") -> dict:
     """Cancel a scheduled meeting (予定取消). Logged to history; the calendar
-    event removal is the Skill's job (this is the Beacon-side state change)."""
+    event removal is the Skill's job (this is the Beacon-side state change).
+
+    ms-120 e-3906 danger-class: cancelling a meeting is destructive to the
+    schedule/trail, so the CLI now requires an audit entry. ``reason`` is
+    recorded on both the meeting and its history line so the cancellation is
+    never a silent state flip."""
     opp, m = find_meeting(data, meeting_id)
     if m is None:
         raise ValueError(f"Meeting not found: {meeting_id}")
     m["status"] = MEETING_CANCELLED
-    m.setdefault("history", []).append({"at": at, "action": "cancelled"})
+    if reason:
+        m["cancel_reason"] = reason
+    m.setdefault("history", []).append(
+        {"at": at, "action": "cancelled", "reason": reason})
     return m
 
 
@@ -3135,6 +3161,11 @@ def acquisition_set_status(data: dict, acquisition_id: str, status: str, *,
     if status not in ACQUISITION_STATUSES:
         raise ValueError(
             f"status must be one of {list(ACQUISITION_STATUSES)}, got {status!r}")
+    # ms-120 e-3908: guard the from→to transition via the shared lifecycle
+    # mechanism (illegal jumps like done→todo raise). Lazy import avoids a
+    # module-load cycle. All named verbs (start/observe/done) flow through here.
+    import core
+    core.validate_lifecycle_transition("acquisition", acq.get("status", ""), status)
     if status == work_model.DONE_STATUS:
         work_model.mark_done(acq, at=at, actor=work_base.current_actor())
     else:

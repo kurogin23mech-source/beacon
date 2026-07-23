@@ -121,8 +121,10 @@ class TestTaskDoneReason:
         data = _read_project(project_dir)
         assert data["milestones"][0]["entries"][0]["status"] == "todo"
 
-    def test_explicit_empty_waives(self, project_dir, monkeypatch, capsys):
-        """BEACON_REASON='' → accept, record empty reason (explicit waiver)."""
+    def test_explicit_empty_rejected(self, project_dir, monkeypatch, capsys):
+        """BEACON_REASON='' → refuse (ms-120 e-3906 option B: empty is ambiguous —
+        deliberate waiver vs. padding to pass the gate — so it is no longer a
+        silent waiver; use --acknowledge to waive on purpose)."""
         _write_project(project_dir, {
             "name": "t",
             "milestones": [_ms_with_task("ms-1", "e-2")],
@@ -130,6 +132,26 @@ class TestTaskDoneReason:
         monkeypatch.setenv("BEACON_ENTRY_ID", "e-2")
         monkeypatch.setenv("BEACON_PROGRESS", "")
         monkeypatch.setenv("BEACON_REASON", "")
+        monkeypatch.delenv("BEACON_ACKNOWLEDGE", raising=False)
+
+        import commands  # type: ignore
+        with pytest.raises(SystemExit):
+            commands.cmd_task_done()
+
+        data = _read_project(project_dir)
+        assert data["milestones"][0]["entries"][0]["status"] != "done"
+
+    def test_acknowledge_waives_and_is_recorded(self, project_dir, monkeypatch):
+        """BEACON_ACKNOWLEDGE=1 → accept, and record the explicit-waiver sentinel
+        so the trail shows a *deliberate* no-reason (better than the old empty)."""
+        _write_project(project_dir, {
+            "name": "t",
+            "milestones": [_ms_with_task("ms-1", "e-2")],
+        })
+        monkeypatch.setenv("BEACON_ENTRY_ID", "e-2")
+        monkeypatch.setenv("BEACON_PROGRESS", "")
+        monkeypatch.delenv("BEACON_REASON", raising=False)
+        monkeypatch.setenv("BEACON_ACKNOWLEDGE", "1")
 
         import commands  # type: ignore
         commands.cmd_task_done()  # must not raise
@@ -137,10 +159,7 @@ class TestTaskDoneReason:
         data = _read_project(project_dir)
         entry = data["milestones"][0]["entries"][0]
         assert entry["status"] == "done"
-        # When reason is empty the meta key must NOT be set (core.task_done
-        # only writes the field when reason is truthy) — recording an empty
-        # string is worse than absence because it claims a reason exists.
-        assert "done_reason" not in entry.get("meta", {})
+        assert "acknowledged" in entry["meta"].get("done_reason", "").lower()
 
     def test_non_empty_records_reason(self, project_dir, monkeypatch, capsys):
         """BEACON_REASON='actual text' → accept and persist the text."""
@@ -188,7 +207,8 @@ class TestMilestoneDoneReason:
         # Status must remain unchanged.
         assert _read_project(project_dir)["milestones"][0]["status"] == "in_progress"
 
-    def test_explicit_empty_waives(self, project_dir, monkeypatch):
+    def test_explicit_empty_rejected(self, project_dir, monkeypatch):
+        """ms-120 e-3906 option B: empty --reason is refused, not a silent waiver."""
         _write_project(project_dir, {
             "name": "t",
             "milestones": [{
@@ -198,13 +218,32 @@ class TestMilestoneDoneReason:
         })
         monkeypatch.setenv("BEACON_MS_ID", "ms-3")
         monkeypatch.setenv("BEACON_REASON", "")
+        monkeypatch.delenv("BEACON_ACKNOWLEDGE", raising=False)
+
+        import commands  # type: ignore
+        with pytest.raises(SystemExit):
+            commands.cmd_milestone_done()
+
+        assert _read_project(project_dir)["milestones"][0]["status"] == "in_progress"
+
+    def test_acknowledge_waives(self, project_dir, monkeypatch):
+        _write_project(project_dir, {
+            "name": "t",
+            "milestones": [{
+                "id": "ms-3", "title": "y", "status": "in_progress",
+                "target_date": "", "commits": [], "entries": [],
+            }],
+        })
+        monkeypatch.setenv("BEACON_MS_ID", "ms-3")
+        monkeypatch.delenv("BEACON_REASON", raising=False)
+        monkeypatch.setenv("BEACON_ACKNOWLEDGE", "1")
 
         import commands  # type: ignore
         commands.cmd_milestone_done()  # must not raise
 
         ms = _read_project(project_dir)["milestones"][0]
         assert ms["status"] == "done"
-        assert "done_reason" not in ms.get("meta", {})
+        assert "acknowledged" in ms["meta"].get("done_reason", "").lower()
 
     def test_non_empty_records_reason(self, project_dir, monkeypatch):
         _write_project(project_dir, {
@@ -251,7 +290,8 @@ class TestMilestoneObserveReason:
         assert "milestone observe" in err
         assert _read_project(project_dir)["milestones"][0]["status"] == "in_progress"
 
-    def test_explicit_empty_waives(self, project_dir, monkeypatch):
+    def test_explicit_empty_rejected(self, project_dir, monkeypatch):
+        """ms-120 e-3906 option B: empty --reason is refused, not a silent waiver."""
         _write_project(project_dir, {
             "name": "t",
             "milestones": [{
@@ -261,13 +301,31 @@ class TestMilestoneObserveReason:
         })
         monkeypatch.setenv("BEACON_MS_ID", "ms-6")
         monkeypatch.setenv("BEACON_REASON", "")
+        monkeypatch.delenv("BEACON_ACKNOWLEDGE", raising=False)
+
+        import commands  # type: ignore
+        with pytest.raises(SystemExit):
+            commands.cmd_milestone_observe()
+
+        assert _read_project(project_dir)["milestones"][0]["status"] == "in_progress"
+
+    def test_acknowledge_waives(self, project_dir, monkeypatch):
+        _write_project(project_dir, {
+            "name": "t",
+            "milestones": [{
+                "id": "ms-6", "title": "q", "status": "in_progress",
+                "target_date": "", "commits": [], "entries": [],
+            }],
+        })
+        monkeypatch.setenv("BEACON_MS_ID", "ms-6")
+        monkeypatch.delenv("BEACON_REASON", raising=False)
+        monkeypatch.setenv("BEACON_ACKNOWLEDGE", "1")
 
         import commands  # type: ignore
         commands.cmd_milestone_observe()
 
         ms = _read_project(project_dir)["milestones"][0]
         assert ms["status"] == "observing"
-        assert "observing_reason" not in ms.get("meta", {})
 
     def test_non_empty_records_reason(self, project_dir, monkeypatch):
         _write_project(project_dir, {

@@ -84,12 +84,15 @@ MODEL_NAME=$(echo "$USAGE_AND_MODEL" | jq -r '.model // ""')
 # 優先順位: BEACON_CONTEXT_LIMIT env var > model 名から推定 > 200K fallback.
 CONTEXT_LIMIT="${BEACON_CONTEXT_LIMIT:-}"
 if [ -z "$CONTEXT_LIMIT" ]; then
-  # Claude 4.7 / 4.x の 1M ベータ系は model id に "[1m]" を含む
-  # 例: "claude-opus-4-7[1m]", "claude-sonnet-4-6[1m]"
-  if echo "$MODEL_NAME" | grep -qE '\[1m\]|-1m$|1m-'; then
-    CONTEXT_LIMIT=1000000
-  else
+  # e-3942: 現行の 1M 窓モデル (claude-opus-4-8 / sonnet-4-5 / sonnet-5 / fable-5 等)
+  # は id に "[1m]" マーカーを持たない。旧来の [1m] 判定だけだと全部 200K 分母に落ち、
+  # 実使用が 1M の 20% でも 100% と誤表示して「上限接近」警告が誤発火する。そこで
+  # **旧世代 (Claude 1/2/3 系) だけ 200K**、現行世代 & 未知は 1M を既定にする
+  # (python 版 context_monitor.py の _LEGACY_200K_RE と一致させること)。
+  if echo "$MODEL_NAME" | grep -qiE 'claude-[0-3][.\-]'; then
     CONTEXT_LIMIT=200000
+  else
+    CONTEXT_LIMIT=1000000
   fi
 fi
 log "context_limit=$CONTEXT_LIMIT (model=${MODEL_NAME:-unknown})"

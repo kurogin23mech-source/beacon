@@ -67,7 +67,24 @@ VALID_INCIDENT_STATUSES = {"open", "resolved"}
 # ms-119 e-3912: 目的達成レビュー entry のライフサイクル (build=pending →
 # approve=approved / reject=cancelled、lib/transition_approval.append_verdict)。
 VALID_TRANSITION_APPROVAL_STATUSES = {"pending", "approved", "cancelled"}
-VALID_PRIORITIES = {"highest", "high", "middle", "low", "lowest"}
+VALID_PRIORITIES = {"highest", "high", "medium", "low", "lowest"}
+# ms-120 / e-3895: `medium` is the canonical mid-tier priority — it matches
+# every priority system an AI has a prior for (Jira / GitHub / monitoring all
+# use medium/med). `middle` is a positional word, not a severity word, and was
+# the old local name; it stays accepted as a deprecated alias so nothing breaks,
+# but input normalizes to `medium` for storage and help/errors show `medium`.
+_PRIORITY_ALIASES = {"middle": "medium"}
+_ACCEPTED_PRIORITIES = VALID_PRIORITIES | set(_PRIORITY_ALIASES)
+
+
+def normalize_priority(priority: str) -> str:
+    """Canonicalize a priority value, mapping deprecated aliases (middle→medium).
+
+    Returns the canonical value unchanged if already canonical. Does NOT validate
+    (callers guard against ``_ACCEPTED_PRIORITIES`` first); an unknown value is
+    returned as-is so the caller's own "Invalid priority" error still fires.
+    """
+    return _PRIORITY_ALIASES.get(priority, priority)
 # Member roles (e-624): defines permissions in 2-5 person team context.
 # - owner: project owner, all permissions including delete project
 # - maintainer: can manage milestones / merge PRs / approve operations
@@ -475,9 +492,9 @@ def milestone_add(data: dict, title: str, target_date: str = "",
     if description:
         ms["description"] = description
     if priority:
-        if priority not in VALID_PRIORITIES:
+        if priority not in _ACCEPTED_PRIORITIES:
             raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
-        ms["priority"] = priority
+        ms["priority"] = normalize_priority(priority)
     if objective:
         ms["objective"] = objective
     if acceptance_criteria:
@@ -746,9 +763,9 @@ def milestone_update(data: dict, ms_id: str, *,
             if target_date:
                 ms["target_date"] = target_date
             if priority:
-                if priority not in VALID_PRIORITIES:
+                if priority not in _ACCEPTED_PRIORITIES:
                     raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
-                ms["priority"] = priority
+                ms["priority"] = normalize_priority(priority)
             if objective:
                 ms["objective"] = objective
             if acceptance_criteria:
@@ -1092,9 +1109,9 @@ def task_add(data: dict, ms_id: str, description: str, *,
     if requested_by:
         meta["requested_by"] = requested_by
     if priority:
-        if priority not in VALID_PRIORITIES:
+        if priority not in _ACCEPTED_PRIORITIES:
             raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
-        meta["priority"] = priority
+        meta["priority"] = normalize_priority(priority)
     now = _now_iso()
     meta["created_by"] = _get_actor()
     author_clean = _clean_author(author)
@@ -1196,12 +1213,12 @@ def task_update(data: dict, entry_id: str, *,
         entry["behavior"] = behavior
         changed = True
     if priority:
-        if priority not in VALID_PRIORITIES:
+        if priority not in _ACCEPTED_PRIORITIES:
             raise ValueError(
                 f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}"
             )
         meta = entry.setdefault("meta", {})
-        meta["priority"] = priority
+        meta["priority"] = normalize_priority(priority)
         changed = True
     if changed:
         author_clean = _clean_author(author)
@@ -2618,7 +2635,7 @@ def operation_open(data: dict, title: str, *,
         raise ValueError(f"Invalid schedule: {schedule}. Valid: {', '.join(sorted(SCHEDULE_DAYS))}")
     if status not in VALID_OP_STATUSES:
         raise ValueError(f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_OP_STATUSES))}")
-    if priority and priority not in VALID_PRIORITIES:
+    if priority and priority not in _ACCEPTED_PRIORITIES:
         raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
     op_id = next_op_id(data)
     op = {
@@ -2642,7 +2659,7 @@ def operation_open(data: dict, title: str, *,
     if acceptance_criteria:
         op["acceptance_criteria"] = acceptance_criteria
     if priority:
-        op["priority"] = priority
+        op["priority"] = normalize_priority(priority)
     # ms-43 / e-2246 — stamp the human author on the Operation so the UI
     # can surface a creator label (= 起票者) in Operation lists / detail.
     author_clean = _clean_author(author)
@@ -2652,12 +2669,65 @@ def operation_open(data: dict, title: str, *,
     return data, op
 
 
+# ms-120 e-3908: one guarded transition mechanism for standard-lifecycle target
+# entities. Each entity kind maps a from-status to the set of legal to-statuses;
+# an illegal jump raises with the allowed set (原則 3 recoverable / 原則 6 make
+# illegal states unrepresentable). Generalized from trek.validate_transition
+# (the proven model). The tables are MONOTONIC-FORWARD: forward skips are
+# allowed, but backward / reopen-terminal moves are not — recovery from a
+# terminal state goes through `purge` or a manual edit, not a standing unguarded
+# write path (ms-120 決定). `opportunity` is intentionally absent: SPEC §5 makes
+# its phase a human-declared master, not a guarded machine — kinds without a
+# table are unguarded by design.
+LIFECYCLE_TRANSITIONS: dict[str, dict[str, frozenset[str]]] = {
+    "operation": {
+        "todo": frozenset({"in_progress", "open", "closed"}),
+        "in_progress": frozenset({"open", "closed"}),
+        "open": frozenset({"closed"}),
+        "closed": frozenset(),  # terminal
+    },
+    "acquisition": {
+        "todo": frozenset({"in_progress", "observing", "done"}),
+        "in_progress": frozenset({"observing", "done"}),
+        "observing": frozenset({"done"}),
+        "done": frozenset(),  # terminal
+    },
+}
+
+
+def validate_lifecycle_transition(kind: str, from_status: str, to_status: str) -> None:
+    """Raise ValueError if ``from_status → to_status`` is illegal for ``kind``.
+
+    A kind with no table (e.g. ``opportunity``) is unguarded by design. Same
+    from/to is a no-op and always allowed. The error lists the legal moves so a
+    caller can recover (原則 3)."""
+    table = LIFECYCLE_TRANSITIONS.get(kind)
+    if table is None:
+        return
+    if from_status == to_status:
+        return
+    allowed = table.get(from_status, frozenset())
+    if to_status not in allowed:
+        legal = sorted(allowed) if allowed else "none (terminal state)"
+        raise ValueError(
+            f"illegal {kind} transition {from_status!r} → {to_status!r}. "
+            f"Allowed from {from_status!r}: {legal}. "
+            f"(To revive a terminal record use `purge` / manual edit.)"
+        )
+
+
 def operation_set_status(data: dict, op_id: str, status: str) -> dict:
-    """Transition an Operation's status. Records timestamp for open transitions."""
+    """Transition an Operation's status. Records timestamp for open transitions.
+
+    ms-120 e-3908: the from→to transition is now validated by the shared
+    lifecycle guard (illegal jumps like closed→open raise), not just the target
+    enum. All named verbs (start/activate/close) and the deprecated status-write
+    flow through here, so the guard cannot be bypassed."""
     if status not in VALID_OP_STATUSES:
         raise ValueError(f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_OP_STATUSES))}")
     op = _find_operation(data, op_id)
     prev = op["status"]
+    validate_lifecycle_transition("operation", prev, status)
     op["status"] = status
     if status == "open" and not op.get("opened_at"):
         op["opened_at"] = _now_iso()
@@ -2688,9 +2758,9 @@ def operation_update(data: dict, op_id: str, *,
     if acceptance_criteria:
         op["acceptance_criteria"] = acceptance_criteria
     if priority:
-        if priority not in VALID_PRIORITIES:
+        if priority not in _ACCEPTED_PRIORITIES:
             raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
-        op["priority"] = priority
+        op["priority"] = normalize_priority(priority)
     if log_source:
         op["log_source"] = log_source
     return op
@@ -2701,6 +2771,13 @@ def operation_close(data: dict, op_id: str) -> dict:
     op = _find_operation(data, op_id)
     if op["status"] == "closed":
         raise ValueError(f"Operation {op_id} is already closed")
+    # ms-120 e-3908: route the close verb through the SAME single transition
+    # guard as operation_set_status instead of writing status directly. Closing
+    # is always a legal forward move to the terminal state, so behaviour is
+    # unchanged — but this removes the last direct-write path that bypassed the
+    # guard, so every operation transition now flows through one mechanism (no
+    # backdoor). Done-when: "ガードを迂回する状態直接設定 backdoor が存在しない".
+    validate_lifecycle_transition("operation", op.get("status", ""), "closed")
     op["status"] = "closed"
     op["closed_at"] = _now_iso()
     return op
@@ -2711,7 +2788,7 @@ def operation_task_add(data: dict, op_id: str, description: str, *,
                        acceptance_criteria: str = "") -> tuple[dict, dict]:
     """Add an operation_task entry to an Operation. Returns (operation, entry)."""
     op = _find_operation(data, op_id)
-    if priority and priority not in VALID_PRIORITIES:
+    if priority and priority not in _ACCEPTED_PRIORITIES:
         raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
     eid = next_entry_id(data)
     entry = {
@@ -2724,7 +2801,7 @@ def operation_task_add(data: dict, op_id: str, description: str, *,
         "meta": {"created_by": _get_actor()},
     }
     if priority:
-        entry["meta"]["priority"] = priority
+        entry["meta"]["priority"] = normalize_priority(priority)
     if motivation:
         entry["motivation"] = motivation
     if acceptance_criteria:
@@ -2773,7 +2850,7 @@ def incident_open(data: dict, op_id: str, *,
     """Open an Incident in an Operation. Returns (operation, entry)."""
     op = _find_operation(data, op_id)
     eid = next_entry_id(data)
-    if priority and priority not in VALID_PRIORITIES:
+    if priority and priority not in _ACCEPTED_PRIORITIES:
         raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
     entry = {
         "id": eid,
@@ -2788,7 +2865,7 @@ def incident_open(data: dict, op_id: str, *,
         "meta": {"created_by": _get_actor()},
     }
     if priority:
-        entry["priority"] = priority
+        entry["priority"] = normalize_priority(priority)
     op.setdefault("entries", []).append(entry)
     return op, entry
 
