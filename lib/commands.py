@@ -1621,6 +1621,27 @@ def cmd_milestone_done():
     if os.environ.get("BEACON_REVIEW", "") == "1":
         _route_completion_to_review(data, ms_id, reason=reason)
         return
+    # ms-119 / e-4008 — the completion gate must not be bypassable by simply
+    # omitting --review. A direct done from an AI session is refused; the AI must
+    # route through the 目的達成 gate (--review → human approve). Humans keep the
+    # straight path (they own the verdict). Escape hatches are the explicit human
+    # signals below.
+    if _ai_session_direct_completion_ban_active():
+        print(
+            f"Error: completing {ms_id} directly (without the review gate) from "
+            "an AI session is refused (ms-119 / e-4008 structural guard).\n"
+            "  『構造発火・非迂回』requires the completion gate to be "
+            "non-bypassable for AI sessions — a bare `done` skipped the review.\n"
+            "  Paths forward (= one of these):\n"
+            f"    1. beacon milestone done {ms_id} --review — route through the "
+            "目的達成 gate (AI assembles evidence, human approves).\n"
+            "    2. BEACON_TARGET_COMPLETE_USER_OVERRIDE=1 — explicit user opt-in "
+            "for a one-off straight completion.\n"
+            "    3. BEACON_SESSION_KIND=human — declare the calling session is "
+            "human-driven (= straight terminal use).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     old_state = ""
     for _m in data.get("milestones", []):
         if _m.get("id") == ms_id:
@@ -1800,10 +1821,29 @@ def cmd_target_approve():
         print("Usage: beacon target approve <entry-id> [--rationale <text>]",
               file=sys.stderr)
         sys.exit(1)
+    # ms-119 / e-4006 — the 目的達成 verdict is the human's (SPEC § 方針2). An AI
+    # session may assemble evidence and open the review-request, but pressing
+    # approve (= confirming the target met its goal AND executing the transition)
+    # is human-gated. Refuse unless an explicit human signal is present.
+    if _ai_session_attainment_approve_ban_active():
+        print(
+            "Error: approving a 目的達成 (target attainment) verdict from an AI "
+            "session is refused (ms-119 / e-4006 structural guard).\n"
+            "  SPEC § 方針2: the verdict that a target met its goal is *owned* by "
+            "the human, not the AI. The AI assembles evidence; the human confirms.\n"
+            "  Bypass paths (= one of these makes the approval proceed):\n"
+            "    1. BEACON_TARGET_APPROVE_USER_OVERRIDE=1 — explicit user opt-in "
+            "for this approval.\n"
+            "    2. BEACON_SESSION_KIND=human — declare the calling session is "
+            "human-driven (= straight terminal use).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     data = load_project()
     try:
         entry, new_state = core.target_transition_approval_approve(
-            data, entry_id, rationale=rationale, actor=_actor_str())
+            data, entry_id, rationale=rationale, actor=_actor_str(),
+            gate=_approval_gate_record())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1818,6 +1858,14 @@ def cmd_target_approve():
     print(f"承認: {target_id} を {new_state} に遷移しました ({entry_id})")
     if rationale:
         print(f"  rationale: {rationale}")
+    # ms-119 e-4006 audit: surface HOW the gate was passed so an override
+    # approval is visible at the point of use, not just in the record.
+    _gate = entry["meta"].get("approval_gate", {})
+    if _gate:
+        _es = f", evidence={_gate['evidence_source']}" if _gate.get("evidence_source") else ""
+        print(f"  gate: {_gate.get('signal')} (session_kind={_gate.get('session_kind')}{_es})")
+        if _gate.get("signal") == "user-override" and _gate.get("session_kind") != "human":
+            print("  ⚠ AI セッションが override で承認しました — この遷移は監査対象です。")
 
 
 def cmd_target_reject():
@@ -1883,6 +1931,162 @@ def cmd_target_list():
             print(f"      intent: {m.get('intent')}")
 
 
+# Default command groups probed by the AX full-surface snapshot. These are
+# *group* commands (they dispatch to subcommands), so probing them with an
+# unknown subcommand exercises the usage / error / exit-code surface WITHOUT
+# executing real logic (no cloud calls, no state change) — safe to run on demand.
+_SURFACE_SNAPSHOT_COMMANDS = [
+    "milestone", "task", "doc", "pr", "target", "review", "bus", "trigger",
+    "operation", "note", "session", "member", "claim",
+]
+
+
+def _collect_surface_snapshot(commands_list=None) -> list:
+    """Probe the CLI command surface for the AX full-surface audit (e-3987).
+
+    For each command group, run it with an unknown subcommand and capture the
+    usage/error output + exit code. A silent no-op (exit 0 with no guidance on a
+    bogus subcommand) is exactly the AX defect this snapshot lets the judge see.
+    Mechanical: no interpretation, just the raw surface. Best-effort — a probe
+    that times out / errors is recorded with an ``error`` note rather than
+    aborting the whole snapshot.
+    """
+    install_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    beacon_bin = os.path.join(install_root, "bin", "beacon")
+    if not os.path.isfile(beacon_bin):
+        beacon_bin = "beacon"  # fall back to PATH
+    cmds = commands_list if commands_list is not None else _SURFACE_SNAPSHOT_COMMANDS
+    probes = []
+    bogus = "__ax_surface_probe__"
+    for c in cmds:
+        entry = {"cmd": c, "probe_argv": f"{c} {bogus}"}
+        try:
+            p = subprocess.run([beacon_bin, c, bogus], capture_output=True,
+                               text=True, timeout=20)
+            entry["exit_code"] = p.returncode
+            entry["stdout"] = (p.stdout or "")[:2000]
+            entry["stderr"] = (p.stderr or "")[:2000]
+            # a bogus subcommand that exits 0 with no stderr is a silent no-op
+            entry["silent_no_op"] = (p.returncode == 0 and not (p.stderr or "").strip())
+        except (subprocess.TimeoutExpired, OSError) as e:
+            entry["error"] = f"{type(e).__name__}: {e}"
+        probes.append(entry)
+    return probes
+
+
+def _model_independence_gap(review_spine):
+    """ms-119 / e-3988 wire-up (思想レビュー finding ②) — run the judge/implementer
+    model independence check in the kernel and return a gap string if they match.
+
+    The check used to be a callable with no caller (enforcement was skill prose).
+    Running it here bakes the warning into the bundle's gaps, so the judge itself
+    sees "judge model == implementer model" in its input — structural, not prose.
+    Returns None when no judge model was supplied or the models differ.
+    """
+    judge_model = os.environ.get("BEACON_JUDGE_MODEL", "").strip()
+    if not judge_model:
+        return None
+    impl_model = os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip()
+    verdict = review_spine.judge_model_independence(impl_model, judge_model)
+    return None if verdict["ok"] else ("⚠ モデル独立性: " + verdict["reason"])
+
+
+def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = "") -> None:
+    """Emit the 目的達成 evidence-generation bundle for a context-zero judge
+    (ms-119 / e-4005).
+
+    Resolves the target's SPEC 原典 + criteria mechanically and prints the bundle
+    as JSON, so /beacon-review-run (attainment mode) can hand it to a fresh
+    subagent that verifies each criterion against real code. The bundle carries
+    no implementer narrative — the whole point is that the evidence is NOT the
+    implementer's self-report.
+    """
+    import review_spine
+    if not target_id:
+        print("Error: --type attainment needs --target <ms-XX|op-X> (its 原典 is "
+              "the target's SPEC, resolved automatically).", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        target = core._find_approval_target(data, target_id)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    kind = core._approval_target_kind(target_id)
+
+    gaps = []
+    spec_doc = _spec_doc_for_target(target_id, kind)
+    if spec_doc:
+        spec_origin_id = spec_doc.get("doc_id", "") or spec_doc.get("id", "")
+        # list_documents() may return metadata without the body — fetch the full
+        # doc so the judge gets the whole SPEC 原典, never a truncated one.
+        spec_content = spec_doc.get("content", "") or ""
+        if not spec_content.strip() and spec_origin_id:
+            try:
+                full = get_store().get_document(spec_origin_id)
+                if full:
+                    spec_content = full.get("content", "") or ""
+            except Exception:
+                pass
+        if not spec_content.strip():
+            gaps.append(f"SPEC 原典 {spec_origin_id} は本文が空です。目的達成の照合"
+                        f"基準が弱く、judge は intent 推定に留まります (SPEC § 方針5)。")
+    else:
+        spec_origin_id = ""
+        spec_content = ""
+        gaps.append(f"{target_id} に SPEC 原典が紐づいていません。判定は target の "
+                    f"objective / acceptance と実コードだけが根拠になります "
+                    f"(hard-block しない、SPEC § 方針5)。")
+
+    # criteria: the target's own written success conditions, if any. The SPEC
+    # (origin) carries §やる / 受入条件 the judge extracts; these are extra
+    # structured criteria surfaced explicitly.
+    criteria = []
+    if (target.get("objective") or "").strip():
+        criteria.append({"source": "objective", "text": target["objective"].strip()})
+    if (target.get("acceptance_criteria") or "").strip():
+        criteria.append({"source": "acceptance_criteria",
+                         "text": target["acceptance_criteria"].strip()})
+
+    # optional supporting diff (attainment verifies against full code, so the
+    # diff is supplementary, not the sole artifact).
+    diff_text = ""
+    target_ref = target_id
+    if pr and diff_ref:
+        print("Error: --pr and --diff-ref are mutually exclusive.", file=sys.stderr)
+        sys.exit(1)
+    if pr:
+        target_ref = f"{target_id} (PR #{pr})"
+        proc = subprocess.run(["gh", "pr", "diff", pr], capture_output=True, text=True)
+        if proc.returncode != 0:
+            print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+        diff_text = proc.stdout
+    elif diff_ref:
+        target_ref = f"{target_id} ({diff_ref})"
+        proc = subprocess.run(["git", "diff", diff_ref], capture_output=True, text=True)
+        if proc.returncode != 0:
+            print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+        diff_text = proc.stdout
+
+    _mi = _model_independence_gap(review_spine)
+    if _mi:
+        gaps.append(_mi)
+
+    bundle = review_spine.assemble_attainment_context(
+        target_id=target_id,
+        spec_origin_id=spec_origin_id,
+        spec_content=spec_content,
+        criteria=criteria,
+        target_ref=target_ref,
+        diff_text=diff_text,
+        gaps=gaps,
+        implementer_model=os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip(),
+    )
+    print(json.dumps(bundle, ensure_ascii=False))
+
+
 def cmd_review_context():
     """Assemble the review-kernel bundle for an independent judge (ms-119 e-3947).
 
@@ -1893,12 +2097,14 @@ def cmd_review_context():
     their own intent into the judge's input.
 
     Env:
-        BEACON_REVIEW_TYPE: "ax" | "philosophy".
+        BEACON_REVIEW_TYPE: "ax" | "philosophy" | "attainment".
         BEACON_DIFF_REF:    git ref range (e.g. "origin/main...HEAD"); or
         BEACON_PR:          a PR number (uses `gh pr diff`).
         BEACON_ORIGIN_DOC:  doc-id of the 原典 (required for philosophy; the SPEC
                             / vision the implementation is checked against;
                             rejected with --type ax, whose 原典 is fixed).
+        BEACON_TARGET_ID:   target id (ms-XX / op-X) — required for attainment
+                            (its 原典 = the target's SPEC, resolved automatically).
         BEACON_MODE:        "diff" (only supported value; full-surface needs a
                             surface-snapshot collector that is a follow-up).
     """
@@ -1907,26 +2113,32 @@ def cmd_review_context():
     diff_ref = os.environ.get("BEACON_DIFF_REF", "").strip()
     pr = os.environ.get("BEACON_PR", "").strip()
     origin_doc = os.environ.get("BEACON_ORIGIN_DOC", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
     mode = os.environ.get("BEACON_MODE", "diff").strip() or "diff"
 
     gaps = []
+
+    # ms-119 / e-4005: 目的達成 evidence generation. Unlike ax / philosophy
+    # (advisory findings), attainment hands a context-zero judge the target's
+    # SPEC + criteria so it verifies attainment against REAL code and produces
+    # met/partial/not-met evidence — the human then owns the verdict (approve is
+    # e-4006-gated). Handled as a self-contained branch (its 原典 is the target's
+    # SPEC, resolved from --target, not --origin-doc).
+    if review_type == review_spine.REVIEW_ATTAINMENT:
+        _emit_attainment_context(target_id, pr=pr, diff_ref=diff_ref)
+        return
 
     # --- early input validation (ms-119 e-3947 dogfood: close silent no-ops so
     # the review capability's own CLI doesn't ship the defects it exists to
     # catch). Each guard rejects with a clean `Error:` + exit 1 (never a silent
     # win, never a raw traceback), so an automation loop reading exit codes can
     # tell a mistake happened at the point it happened. ---
-    if mode != "diff":
-        # This collector only produces a diff artifact. `full-surface` (a
-        # multi-command surface snapshot) needs a surface collector that does
-        # not exist yet — advertising it would hand the judge a bundle whose
-        # `mode` label contradicts its diff artifact. Reject rather than lie.
-        if mode == "full-surface":
-            print("Error: --mode full-surface is not supported by this command "
-                  "(it only collects diffs). A surface-snapshot collector is a "
-                  "follow-up; use --mode diff for now.", file=sys.stderr)
-        else:
-            print(f"Error: --mode must be 'diff', got {mode!r}.", file=sys.stderr)
+    # ms-119 / e-3987: full-surface is now supported — a surface-snapshot
+    # collector probes each command's help / representative error / exit code so
+    # the AX judge can audit the whole command surface, not only this PR's diff.
+    if mode not in ("diff", "full-surface"):
+        print(f"Error: --mode must be 'diff' or 'full-surface', got {mode!r}.",
+              file=sys.stderr)
         sys.exit(1)
     if pr and diff_ref:
         print("Error: --pr and --diff-ref are mutually exclusive; pass exactly "
@@ -1935,30 +2147,50 @@ def cmd_review_context():
         sys.exit(1)
 
     # --- origin (原典) resolution: mechanical, never implementer prose ---
-    if review_type == review_spine.REVIEW_AX:
-        # AX 原典 is a repo file that travels with the capability (Layer 3).
+    # ms-119 / e-4009: the accepted types + how each resolves its 原典 come from
+    # the data-driven registry (skills/*/review-type.json), not a hardcoded
+    # if/elif whitelist. A new judge-run review type is added by dropping a
+    # descriptor + 原典 + SKILL — this command needs no edit.
+    registry = review_spine.judge_run_review_types()
+    desc = registry.get(review_type)
+    if not desc:
+        allowed = ", ".join(sorted(registry.keys())) or "(none registered)"
+        print(f"Error: --type must be one of: {allowed}; got {review_type!r}. "
+              f"(目的達成 review is human-gated via `beacon target`, not a judge "
+              f"run. Register a new type with a skills/<type>/review-type.json "
+              f"descriptor.)", file=sys.stderr)
+        sys.exit(1)
+    origin_spec = desc.get("origin", {}) if isinstance(desc.get("origin"), dict) else {}
+    origin_kind = origin_spec.get("kind", "")
+    if origin_kind == "repo-file":
+        # 原典 is a fixed repo file that travels with the capability (Layer 3).
+        # --origin-doc does not apply; silently ignoring it would let the caller
+        # believe their doc became the 原典 — reject instead.
+        ref = origin_spec.get("ref", "")
+        if not ref:
+            print(f"Error: review type {review_type!r} descriptor has origin.kind"
+                  f"=repo-file but no 'ref' (skills/<type>/review-type.json is "
+                  f"malformed).", file=sys.stderr)
+            sys.exit(1)
         if origin_doc:
-            # --origin-doc is a philosophy-only flag; AX origin is fixed. Silently
-            # ignoring it would let the caller believe their doc became the 原典.
-            print("Error: --origin-doc is only valid with --type philosophy "
-                  "(the AX 原典 is fixed to skills/ax-review/principles.md).",
-                  file=sys.stderr)
+            print(f"Error: --origin-doc is not valid for --type {review_type} "
+                  f"(its 原典 is fixed to {ref}).", file=sys.stderr)
             sys.exit(1)
         install_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        origin_path = os.path.join(install_root, "skills", "ax-review", "principles.md")
-        origin_id = "skills/ax-review/principles.md"
+        origin_path = os.path.join(install_root, *ref.split("/"))
+        origin_id = ref
         try:
             with open(origin_path, encoding="utf-8") as f:
                 origin_content = f.read()
         except OSError as e:
-            print(f"Error: AX 原典 not found at {origin_id}: {e}", file=sys.stderr)
+            print(f"Error: 原典 not found at {origin_id}: {e}", file=sys.stderr)
             sys.exit(1)
-    elif review_type == review_spine.REVIEW_PHILOSOPHY:
-        # 思想 原典 is the target's SPEC / vision doc. Absence is itself a finding
-        # (SPEC § 方針5): surface it as a gap instead of hard-failing.
+    elif origin_kind == "doc":
+        # 原典 is a document supplied at review time (a target's SPEC / vision).
+        # Absence is itself a finding (SPEC § 方針5): surface as a gap, don't lie.
         if not origin_doc:
-            print("Error: philosophy review needs --origin-doc <spec-doc-id> "
-                  "(the SPEC / vision the implementation is checked against).",
+            print(f"Error: --type {review_type} needs --origin-doc <doc-id> "
+                  f"(the SPEC / vision the implementation is checked against).",
                   file=sys.stderr)
             sys.exit(1)
         doc = get_store().get_document(origin_doc)
@@ -1968,31 +2200,49 @@ def cmd_review_context():
         origin_id = origin_doc
         origin_content = doc.get("content", "")
         if not origin_content.strip():
-            gaps.append(f"原典 {origin_doc} は本文が空です。思想 drift の照合基準が"
+            gaps.append(f"原典 {origin_doc} は本文が空です。drift の照合基準が"
                         f"無いため、findings は intent 推定に留まります (SPEC § 方針5)。")
     else:
-        print(f"Error: --type must be 'ax' or 'philosophy', got {review_type!r}. "
-              f"(目的達成 review is human-gated via `beacon target`, not a judge run.)",
+        print(f"Error: review type {review_type!r} descriptor has unknown "
+              f"origin.kind {origin_kind!r} (expected 'repo-file' or 'doc').",
               file=sys.stderr)
         sys.exit(1)
 
-    # --- artifact (diff) collection: mechanical git / gh, no interpretation ---
-    if pr:
-        target_ref = f"PR #{pr}"
-        proc = subprocess.run(["gh", "pr", "diff", pr], capture_output=True, text=True)
-    elif diff_ref:
-        target_ref = diff_ref
-        proc = subprocess.run(["git", "diff", diff_ref], capture_output=True, text=True)
+    # --- artifact collection: mechanical, no interpretation ---
+    diff_text = ""
+    artifact = None
+    if mode == "full-surface":
+        # ms-119 / e-3987: probe the command surface (help / representative error
+        # / exit code) instead of a diff, so the AX judge audits the whole
+        # surface. --pr / --diff-ref are ignored here (surface, not change-scoped).
+        probes = _collect_surface_snapshot()
+        target_ref = "full-surface (CLI command surface)"
+        artifact = review_spine.surface_snapshot_artifact(probes, target_ref=target_ref)
+        if not probes:
+            gaps.append("surface snapshot が空です (コマンド surface を採取できません"
+                        "でした)。")
     else:
-        print("Error: pass --pr <n> or --diff-ref <base...head> to collect the diff.",
-              file=sys.stderr)
-        sys.exit(1)
-    if proc.returncode != 0:
-        print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
-        sys.exit(1)
-    diff_text = proc.stdout
-    if not diff_text.strip():
-        gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
+        if pr:
+            target_ref = f"PR #{pr}"
+            proc = subprocess.run(["gh", "pr", "diff", pr], capture_output=True, text=True)
+        elif diff_ref:
+            target_ref = diff_ref
+            proc = subprocess.run(["git", "diff", diff_ref], capture_output=True, text=True)
+        else:
+            print("Error: pass --pr <n> or --diff-ref <base...head> to collect the "
+                  "diff (or --mode full-surface to snapshot the command surface).",
+                  file=sys.stderr)
+            sys.exit(1)
+        if proc.returncode != 0:
+            print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+        diff_text = proc.stdout
+        if not diff_text.strip():
+            gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
+
+    _mi = _model_independence_gap(review_spine)
+    if _mi:
+        gaps.append(_mi)
 
     bundle = review_spine.assemble_review_context(
         review_type,
@@ -2002,6 +2252,9 @@ def cmd_review_context():
         mode=mode,
         target_ref=target_ref,
         gaps=gaps,
+        known_judge_types=set(registry.keys()),
+        implementer_model=os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip(),
+        artifact=artifact,
     )
     print(json.dumps(bundle, ensure_ascii=False))
 
@@ -10354,6 +10607,25 @@ def _spec_exists_for_ms(ms_id: str) -> bool:
     return False
 
 
+def _spec_doc_for_target(target_id: str, kind: str) -> Optional[dict]:
+    """Return the first spec-scoped document attached to a target, or None.
+
+    ms-119 / e-4005: the 目的達成 judge needs the SPEC 原典 (its §やる / 受入条件)
+    to verify attainment against. Milestones carry a ``milestone`` field on the
+    doc; operations carry ``operation``. Best-effort: transport failure → None."""
+    if not target_id:
+        return None
+    field = "milestone" if kind == "milestone" else "operation"
+    try:
+        docs = get_store().list_documents()
+    except Exception:
+        return None
+    for doc in docs:
+        if doc.get("scope") == "spec" and doc.get(field) == target_id:
+            return doc
+    return None
+
+
 def _spec_exists_for_op(op_id: str) -> bool:
     """Return True if any spec-scoped document is attached to op_id.
 
@@ -10397,17 +10669,29 @@ def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
     parts = []
     for b in bindings:
         if b["review"] == review_spine.REVIEW_ATTAINMENT:
-            parts.append(
-                f"目的達成レビュー (target が目的を果たしたか、人間承認): 完了主張が"
-                f"レビューを経ずに適用されました。次からは `beacon milestone done "
-                f"{target_id} --review` でゲート経由に、または今から `beacon target "
-                f"review-request {target_id} --new-state {new_state} --intent ...` "
-                f"で振り返りを。")
+            # ms-119 e-4005: the 目的達成 review auto-fires at the close 節目 and
+            # points at the INDEPENDENT evidence generation (a context-zero judge
+            # verifies the SPEC against real code); the human owns the verdict.
+            if b.get("gated"):
+                parts.append(
+                    f"目的達成レビュー (target が目的を果たしたか、証拠は独立 judge・"
+                    f"verdict は人間): {target_id} の完了は承認待ちです。"
+                    f"`/beacon-review-run --type attainment --target {target_id}` で"
+                    f"文脈ゼロの独立 judge に SPEC × 実コードを検証させ証拠を作り、"
+                    f"人間が `beacon target approve` で確定してください。")
+            else:
+                parts.append(
+                    f"目的達成レビュー (target が目的を果たしたか、証拠は独立 judge・"
+                    f"verdict は人間): 完了主張がゲートを経ずに適用されました。"
+                    f"`/beacon-review-run --type attainment --target {target_id}` で"
+                    f"独立 judge に振り返り証拠を作らせ、次からは `beacon milestone done "
+                    f"{target_id} --review` でゲート経由に。")
         elif b["review"] == review_spine.REVIEW_PHILOSOPHY:
             parts.append(
-                f"思想レビュー (実装が原典 = SPEC / vision 通りか、助言・非 blocking): "
-                f"`/philosophy-review` で文脈ゼロの独立 judge に SPEC を渡し "
-                f"{target_id} の実装 drift を確認してください。")
+                f"思想レビュー (実装が原典 = SPEC / vision の精神通りか、助言・非 "
+                f"blocking): `/beacon-review-run --type philosophy --origin-doc "
+                f"<spec-doc-id>` で文脈ゼロの独立 judge に SPEC を渡し {target_id} の"
+                f"実装 drift を確認してください。")
     import datetime
     trigger_data = {
         "name": f"review-due-{target_id}",
@@ -10426,6 +10710,76 @@ def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
     with open(trigger_path, "w", encoding="utf-8") as f:
         json.dump(trigger_data, f, ensure_ascii=False)
         f.write("\n")
+
+
+def _pr_number_from_url(url: str) -> str:
+    """PR number as a string from a GitHub PR URL, or "" if none.
+
+    Delegates to the canonical parser (``core._extract_pr_number_from_url``) so
+    the two never drift; returns a string for use in the trigger filename."""
+    n = core._extract_pr_number_from_url(url)
+    return str(n) if n is not None else ""
+
+
+def _fire_ax_review_due_trigger(pr_number: str, pr_title: str, pr_url: str) -> None:
+    """Fire an 'ax-review-due' trigger when a PR is recorded (ms-119 / e-4003).
+
+    This is the missing PR-open leg of the review firing spine. AX 原典 §2 binds
+    AX to *interface-change* events (a PR / diff), not to a target lifecycle
+    transition — so ``_fire_review_due_trigger`` (which fires on completion
+    claims) deliberately never carries AX. Beacon learns of an interface change
+    at the moment a PR is recorded (``beacon pr add`` — the beacon-owned
+    PR-open 契機), so AX auto-binds here.
+
+    The trigger is a persistent file re-surfaced by ``beacon trigger check`` and
+    session-start until the review runs or the PR closes (see
+    ``_clear_ax_review_due_trigger``). This is what makes AX fire *structurally*
+    at the 節目 instead of only when a human remembers to run /beacon-review-run.
+
+    Advisory only — never blocks. Best-effort: a bad PR number / IO error is
+    swallowed so recording a PR never fails over a trigger write.
+    """
+    if not pr_number:
+        return
+    try:
+        triggers_dir = _get_triggers_dir()
+        os.makedirs(triggers_dir, exist_ok=True)
+        import datetime
+        trigger_data = {
+            "name": f"ax-review-due-{pr_number}",
+            "kind": "ax-review-due",
+            "pr_number": pr_number,
+            "pr_url": pr_url,
+            "review": "ax",
+            "message": (
+                f"PR #{pr_number} \"{pr_title or pr_url}\" が作成されました "
+                f"(interface 変更 = AX レビューの節目)。文脈ゼロの独立 judge に "
+                f"AX 原典と差分を渡して AI 体験の drift を確認してください: "
+                f"`/beacon-review-run --type ax --pr {pr_number}` "
+                f"(または `beacon review context --type ax --pr {pr_number}`)。"
+            ),
+            "created_at": datetime.datetime.now().isoformat(),
+        }
+        trigger_path = os.path.join(triggers_dir, f"ax-review-due-{pr_number}.json")
+        with open(trigger_path, "w", encoding="utf-8") as f:
+            json.dump(trigger_data, f, ensure_ascii=False)
+            f.write("\n")
+    except OSError:
+        return
+
+
+def _clear_ax_review_due_trigger(pr_number: str) -> None:
+    """Remove the ax-review-due trigger for a PR once it closes / merges — the
+    interface-change 節目 is resolved, so the AX nudge should stop re-surfacing
+    (ms-119 / e-4003). Best-effort; a missing file is fine."""
+    if not pr_number:
+        return
+    try:
+        path = os.path.join(_get_triggers_dir(), f"ax-review-due-{pr_number}.json")
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        return
 
 
 def _cleanup_spec_needed_triggers() -> None:
@@ -12823,6 +13177,11 @@ def cmd_pr_add():
         sys.exit(1)
     save_project(data)
 
+    # ms-119 e-4003: a recorded PR is the beacon-owned PR-open 契機 — auto-bind
+    # AX review to this interface change so it fires structurally at the 節目
+    # (not only when a human remembers /beacon-review-run). Advisory, non-blocking.
+    _fire_ax_review_due_trigger(_pr_number_from_url(url), title, url)
+
     # ms-80 e-1821: 同一 MS に並列で open PR が他にもあれば claim 競合の可能性
     # を author に知らせる (= 警告のみ、block しない)。
     conflicts = _detect_pr_claim_conflict(data, ms_id, eid)
@@ -13014,6 +13373,9 @@ def cmd_pr_close():
         print(str(e), file=sys.stderr)
         sys.exit(1)
     save_project(data)
+    # ms-119 e-4003: the interface-change 節目 is resolved — stop re-surfacing the
+    # AX review nudge for this PR.
+    _clear_ax_review_due_trigger(_pr_number_from_url(entry.get("meta", {}).get("url", "")))
 
     if json_mode:
         print(json.dumps({"entry_id": entry_id, "pr_status": "closed"}, ensure_ascii=False))
@@ -13418,6 +13780,97 @@ def _ai_session_merge_ban_active() -> bool:
     return True
 
 
+def _session_kind_is_human() -> bool:
+    """True when the calling session declares itself human-driven.
+
+    Default (unset ``BEACON_SESSION_KIND``) is treated as AI for safety, the
+    same convention as the PR merge ban (see ``_ai_session_merge_ban_active``).
+    """
+    return (os.environ.get("BEACON_SESSION_KIND", "") or "").strip().lower() == "human"
+
+
+def _ai_session_attainment_approve_ban_active() -> bool:
+    """ms-119 / e-4006 — refuse AI-session self-approval of a 目的達成 verdict.
+
+    `beacon target approve` records the *owned* verdict that a target met its
+    goal and then executes the transition. SPEC § 方針2 says that verdict is the
+    human's, not the AI's — but the CLI had no structural guard, so an AI session
+    could assemble evidence AND press the button on the same target (the exact
+    self-approval this session did to ms-119 before an independent judge caught
+    it). This is the approval-side twin of ``_ai_session_merge_ban_active`` (the
+    AI writes / proposes; the human confirms).
+
+    Ban fires by default for AI sessions; bypassed only by an explicit human
+    signal:
+
+      * ``BEACON_TARGET_APPROVE_USER_OVERRIDE=1`` — user explicit opt-in (the
+        user prompt authorised this specific approval).
+      * ``BEACON_SESSION_KIND=human`` — non-AI session (straight terminal use).
+
+    Both env vars are per-process (not persisted), so a stale value can't turn
+    a future AI session into a self-approver. Returns True if the ban fires.
+    """
+    if os.environ.get("BEACON_TARGET_APPROVE_USER_OVERRIDE", "") == "1":
+        return False
+    return not _session_kind_is_human()
+
+
+def _ai_session_direct_completion_ban_active() -> bool:
+    """ms-119 / e-4008 — refuse an AI session's gate-bypassing direct completion.
+
+    The 目的達成 approval gate (e-3912) was *opt-in*: `beacon milestone done`
+    (and `beacon operation close`) applied the completion immediately and only
+    left an advisory nudge, so the blocking review was skippable by just not
+    passing ``--review``. The independent attainment review flagged this
+    (AC2 gap(a)): "構造発火・非迂回" cannot hold while the default completion
+    path bypasses the gate.
+
+    This makes the gate non-bypassable *for AI sessions*: a direct completion
+    (no ``--review``) is refused unless an explicit human signal is present.
+    Humans still own the straight-line path (they own the verdict); the AI must
+    route through the gate (``--review`` → human ``beacon target approve``).
+
+      * ``BEACON_TARGET_COMPLETE_USER_OVERRIDE=1`` — user explicit opt-in for a
+        one-off straight completion.
+      * ``BEACON_SESSION_KIND=human`` — non-AI session (straight terminal use).
+
+    Returns True if the ban fires. The ``--review`` gated path never reaches
+    this check (it is the sanctioned route), so it is unaffected.
+    """
+    if os.environ.get("BEACON_TARGET_COMPLETE_USER_OVERRIDE", "") == "1":
+        return False
+    return not _session_kind_is_human()
+
+
+def _approval_gate_record() -> dict:
+    """ms-119 / e-4006 audit (思想レビュー finding ①b) — capture HOW an approval
+    passed the human-only guard.
+
+    The env guard is a self-report, so this MS's value is not "an AI can't
+    approve" but "an AI that approves cannot HIDE it". Recording which signal
+    opened the gate turns an autonomous AI self-approval from something
+    indistinguishable in the record into a grep-able footprint (an
+    ``ai-session`` actor + ``user-override`` signal is the smoking gun).
+
+    ``evidence_source`` is an optional, self-declared provenance string the Skill
+    sets after actually running the independent judge (e.g.
+    ``independent-judge:fable``) — a recorded claim, not a lock.
+    """
+    override = os.environ.get("BEACON_TARGET_APPROVE_USER_OVERRIDE", "") == "1"
+    if override:
+        signal = "user-override"
+    elif _session_kind_is_human():
+        signal = "human-session"
+    else:
+        # Defensive: the approve ban should have refused before we get here.
+        signal = "ai-session-unguarded"
+    return {
+        "signal": signal,
+        "session_kind": (os.environ.get("BEACON_SESSION_KIND", "") or "").strip() or "unset",
+        "evidence_source": (os.environ.get("BEACON_EVIDENCE_SOURCE", "") or "").strip(),
+    }
+
+
 def cmd_pr_merge():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
@@ -13453,6 +13906,8 @@ def cmd_pr_merge():
         print(str(e), file=sys.stderr)
         sys.exit(1)
     save_project(data)
+    # ms-119 e-4003: PR merged — interface change resolved, clear its AX nudge.
+    _clear_ax_review_due_trigger(_pr_number_from_url(entry.get("meta", {}).get("url", "")))
     if json_mode:
         print(json.dumps({"entry_id": entry_id, "pr_status": "merged"}, ensure_ascii=False))
     else:
@@ -17658,6 +18113,21 @@ def cmd_operation_close():
     if not op_id:
         print("Error: operation id required")
         sys.exit(1)
+    # ms-119 / e-4008 — operation retirement is a completion claim; the same
+    # non-bypassable gate applies. An AI session cannot close an operation
+    # directly (route through the 目的達成 gate or declare a human signal).
+    if _ai_session_direct_completion_ban_active():
+        print(
+            f"Error: closing {op_id} directly (without the review gate) from an "
+            "AI session is refused (ms-119 / e-4008 structural guard).\n"
+            "  Paths forward (= one of these):\n"
+            f"    1. beacon target review-request {op_id} --new-state closed "
+            "--intent ... — route through the 目的達成 gate (human approves).\n"
+            "    2. BEACON_TARGET_COMPLETE_USER_OVERRIDE=1 — explicit user opt-in.\n"
+            "    3. BEACON_SESSION_KIND=human — declare the session human-driven.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     data = load_project()
     old_state = ""
     for _o in data.get("operations", []):

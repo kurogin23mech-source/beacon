@@ -2019,11 +2019,15 @@ def target_transition_approval_add(data: dict, target_id: str, *, old_state: str
 
 
 def target_transition_approval_approve(data: dict, entry_id: str, *,
-                                       rationale: str = "", actor: str = ""):
+                                       rationale: str = "", actor: str = "",
+                                       gate: dict = None):
     """Approve a pending transition. Returns (entry, new_state_to_apply).
 
     approve は verdict を記録するだけで、実際の状態遷移は呼び出し側が
     new_state_to_apply を使って適用する (milestone_update / operation_set_status)。
+
+    ``gate`` (ms-119 e-4006 audit): how the approval passed the human-only guard,
+    recorded so an AI-session override approval cannot hide (思想 finding ①b).
     """
     result = find_entry(data, entry_id)
     if not result:
@@ -2032,12 +2036,13 @@ def target_transition_approval_approve(data: dict, entry_id: str, *,
     if entry.get("type") != "target-transition-approval":
         raise ValueError(f"Entry {entry_id} is not a transition-approval entry")
     new_state = _ta.append_verdict(entry, status="approved", rationale=rationale,
-                                   actor=actor, at=_now_iso())
+                                   actor=actor, at=_now_iso(), gate=gate)
     return entry, new_state
 
 
 def target_transition_approval_reject(data: dict, entry_id: str, *,
-                                      rationale: str = "", actor: str = "") -> dict:
+                                      rationale: str = "", actor: str = "",
+                                      gate: dict = None) -> dict:
     """Reject a pending transition (it does NOT execute). Returns the entry."""
     result = find_entry(data, entry_id)
     if not result:
@@ -2046,7 +2051,7 @@ def target_transition_approval_reject(data: dict, entry_id: str, *,
     if entry.get("type") != "target-transition-approval":
         raise ValueError(f"Entry {entry_id} is not a transition-approval entry")
     _ta.append_verdict(entry, status="rejected", rationale=rationale, actor=actor,
-                       at=_now_iso())
+                       at=_now_iso(), gate=gate)
     return entry
 
 

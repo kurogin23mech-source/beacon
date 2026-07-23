@@ -194,6 +194,18 @@ beacon pr create -m ms-42 --intent "..." -- --title "..." --body-file /tmp/pr-bo
   - merge 時は `gh pr merge --merge` を使う (= hash 保持、CORE doc 0KqFUbmJ7V0lmJZcW230 参照)
 ```
 
+### AX レビューの自動発火 (= ms-119 e-4003)
+
+`beacon pr add` (= `beacon pr create` が内部で行う PR 記録) は、PR 作成を「interface 変更の節目」とみなして **AX レビューを自動 bind** する (`.beacon/triggers/ax-review-due-<num>.json` を書き出す)。AX 原典は AX を interface 変更 (= PR / 差分) に紐づけるため、target のライフサイクル遷移ではなく PR 作成がその発火点になる。
+
+この trigger は消えずに残り、`beacon trigger check` と session-start が毎回再提示するので「人が思い出した時だけ走る」状態にならない。PR が close / merge されると自動でクリアされる。作成直後にその場で走らせたい場合は:
+
+```
+/beacon-review-run --type ax --pr <num>
+```
+
+を実行すると、文脈ゼロの独立 judge に AX 原典と差分を渡して AI 体験の drift を確認できる。
+
 ## 取り込み戦略の構造防御 (= ms-80 e-1823)
 
 PR を merge する時は **`gh pr merge --merge`** で merge commit を作る (= linear branch + fast-forward 風)。

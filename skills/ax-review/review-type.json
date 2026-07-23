@@ -1,0 +1,10 @@
+{
+  "id": "ax",
+  "judge_run": true,
+  "label": "AX (AI-Experience interface drift)",
+  "origin": {
+    "kind": "repo-file",
+    "ref": "skills/ax-review/principles.md"
+  },
+  "_note": "ms-119 / e-4009 — review-type descriptor. A judge-run review type is registered by this data file (+ its 原典 + SKILL.md), not by a hardcoded whitelist in review_spine.py / commands.py. origin.kind=repo-file means the 原典 travels with the capability (a fixed repo file); --origin-doc is therefore rejected for this type."
+}

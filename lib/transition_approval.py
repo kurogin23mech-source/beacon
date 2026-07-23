@@ -178,24 +178,36 @@ def format_criteria_gap(reasons, *, target_id):
     return "\n".join(lines)
 
 
-def append_verdict(entry, *, status, rationale="", actor="", at):
+def append_verdict(entry, *, status, rationale="", actor="", at, gate=None):
     """Record a human verdict on a transition-approval entry.
 
     Mirrors the PR review-history pattern (append-only audit + status flip).
     Returns the `new_state` to apply if approved, else None (so the caller knows
     whether to execute the pending transition).
+
+    ms-119 / e-4006 audit (思想レビュー finding ①b): ``gate`` records HOW the
+    approval passed the human-only guard — which signal opened it
+    (``BEACON_SESSION_KIND=human`` vs ``BEACON_TARGET_APPROVE_USER_OVERRIDE=1``),
+    the raw session kind, and any declared evidence provenance. The env guard is
+    a self-report, so the value of this MS is not "AI can't approve" but "an AI
+    that approves cannot HIDE it" — an AI-session override approval leaves a
+    grep-able footprint in the record instead of looking identical to a human's.
     """
     if status not in ("approved", "rejected"):
         raise ValueError("invalid verdict status: %r" % (status,))
     m = entry["meta"]
     m["approval_status"] = status
     m["approval_rationale"] = rationale
-    m["approval_history"].append({
+    hist = {
         "status": status,
         "rationale": rationale,
         "actor": actor,
         "at": at,
-    })
+    }
+    if gate:
+        hist["gate"] = gate
+        m["approval_gate"] = gate
+    m["approval_history"].append(hist)
     entry["status"] = "approved" if status == "approved" else "cancelled"
     entry["done_at"] = at
     return m["new_state"] if status == "approved" else None

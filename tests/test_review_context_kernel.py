@@ -118,17 +118,26 @@ def test_cli_rejects_pr_and_diff_ref_together():
 
 
 def test_cli_rejects_origin_doc_with_ax():
+    # ms-119 / e-4009: ax is a repo-file-origin type (原典 fixed), so --origin-doc
+    # is rejected. The message now names the fixed 原典 ref (the whitelist that
+    # used to hardcode "philosophy" is gone — types are data-driven).
     p = _run_review_context({"BEACON_REVIEW_TYPE": "ax", "BEACON_PR": "1",
                              "BEACON_ORIGIN_DOC": "someDoc"})
     assert p.returncode == 1
-    assert "--origin-doc" in p.stderr and "philosophy" in p.stderr
+    assert "--origin-doc" in p.stderr
+    assert "skills/ax-review/principles.md" in p.stderr
 
 
-def test_cli_rejects_unsupported_full_surface_mode():
+def test_cli_full_surface_mode_now_supported():
+    # ms-119 / e-3987: full-surface was a rejected follow-up; it now collects a
+    # surface snapshot. --pr is ignored in this mode (surface, not change-scoped).
     p = _run_review_context({"BEACON_REVIEW_TYPE": "ax", "BEACON_PR": "1",
                              "BEACON_MODE": "full-surface"})
-    assert p.returncode == 1
-    assert "full-surface" in p.stderr
+    assert p.returncode == 0, p.stderr
+    import json as _json
+    bundle = _json.loads(p.stdout)
+    assert bundle["mode"] == "full-surface"
+    assert bundle["artifact"]["kind"] == "surface-snapshot"
 
 
 def test_cli_rejects_unknown_mode_cleanly_not_traceback():
