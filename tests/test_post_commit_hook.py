@@ -298,3 +298,48 @@ def test_unrelated_command_no_emit(beacon_project_dir):
     result = _run(beacon_project_dir, "ls -la")
     assert result.returncode == 0
     assert result.stdout.strip() == ""
+
+
+# ---------------------------------------------------------------------------
+# ms-119 review wake branches (e-4060 PR-open / e-4077 target-close).
+# ---------------------------------------------------------------------------
+
+def test_pr_add_triggers_review(beacon_project_dir):
+    result = _run(beacon_project_dir, "beacon pr add https://github.com/x/y/pull/9 -m ms-1")
+    assert "PR opened" in result.stdout
+    assert "/beacon-review-run" in result.stdout
+
+
+def test_gh_pr_create_triggers_review(beacon_project_dir):
+    result = _run(beacon_project_dir, "gh pr create --title x")
+    assert "PR opened" in result.stdout
+
+
+def test_milestone_done_triggers_review(beacon_project_dir):
+    result = _run(beacon_project_dir, "beacon milestone done ms-1 --reason x")
+    assert "Target close command detected" in result.stdout
+    assert "/beacon-review-run" in result.stdout
+
+
+def test_milestone_close_and_operation_close_trigger_review(beacon_project_dir):
+    assert "Target close" in _run(beacon_project_dir, "beacon milestone close ms-2").stdout
+    assert "Target close" in _run(beacon_project_dir, "beacon operation close op-3").stdout
+
+
+def test_milestone_doneish_does_not_falsematch(beacon_project_dir):
+    # word-anchored: `done`/`close` must be a whole token, not a prefix.
+    result = _run(beacon_project_dir, "beacon milestone doneish ms-1")
+    assert "Target close" not in result.stdout
+
+
+def test_milestone_update_is_routine_no_wake(beacon_project_dir):
+    result = _run(beacon_project_dir, "beacon milestone update ms-1 --progress 50")
+    assert "Target close" not in result.stdout
+
+
+def test_commit_message_mentioning_milestone_done_is_commit_not_close(beacon_project_dir):
+    # CMD_BARE strips quoted strings, so a commit whose message mentions the
+    # phrase must read as a commit, not a target-close (false-positive guard).
+    result = _run(beacon_project_dir, "git commit -m 'fix: after beacon milestone done'")
+    assert "Commit detected" in result.stdout
+    assert "Target close" not in result.stdout
