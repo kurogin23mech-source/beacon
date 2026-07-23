@@ -229,6 +229,19 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon milestone workspace <id> [--executor ai\|human]` | Create git worktree for isolated development / worktree作成 |
 | `beacon milestone workspace-cleanup <id>` | Remove worktree after work completes / worktree削除 |
 
+### Target Reviews (目的達成レビュー / ms-119)
+
+Human-approval gate for a target's goal-attainment transition (milestone done/close, operation close). The AI assembles intent + evidence; the human owns the verdict. `approve` executes the transition, `reject` does not.
+target が目的を達成したかの遷移（マイルストーン完了・オペレーション終了）に人間承認を挟む。AI が根拠を揃え、確定は人間。approve で遷移実行、reject で遷移せず記録。
+
+| Command | Description |
+|---------|-------------|
+| `beacon target review-request <id> --new-state <s> [--old-state <s>] [--intent <text>] [--evidence e-1,e-2]` | Request approval for a target transition / 遷移の承認依頼 |
+| `beacon target approve <entry-id> [--rationale <text>]` | Approve (= executes the transition) / 承認（遷移実行） |
+| `beacon target reject <entry-id> [--rationale <text>]` | Reject (= transition does NOT execute) / 却下（遷移せず） |
+| `beacon target list [--target <id>] [--pending] [--json]` | List transition-approval requests / 承認依頼一覧 |
+| `beacon milestone done <id> --review` | Route completion through the review gate / 完了をレビュー経由に |
+
 ### Tasks & Entries
 
 | Command | Description |

@@ -12,6 +12,7 @@ import re
 
 import work_base
 import work_model  # ms-109 e-3559: 職種非依存の Target/WorkItem 正準アクセサ
+import transition_approval as _ta  # ms-119 e-3912: 職種中立な目的達成レビュー primitive
 
 
 def _now_iso() -> str:
@@ -55,7 +56,7 @@ def _clean_author(author: dict | None) -> dict:
 
 
 VALID_STATUSES = {"todo", "in_progress", "in_review", "approved", "waiting", "done", "observing", "cancelled"}
-VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr", "run_record", "incident", "operation_task"}
+VALID_ENTRY_TYPES = {"commit", "task", "note", "save", "pr", "run_record", "incident", "operation_task", "target-transition-approval"}
 
 # PR lifecycle: in_review → approved → merged (or closed/rejected)
 # "open" is reserved for Phase 2 auto-detection via GitHub API (external PRs not yet picked up by beacon)
@@ -63,6 +64,9 @@ VALID_PR_STATUSES = {"open", "in_review", "approved", "merged", "closed"}
 VALID_REVIEW_STATUSES = {"pending", "approved", "changes_requested", "rejected"}
 VALID_RUN_STATUSES = {"ok", "warning", "error"}
 VALID_INCIDENT_STATUSES = {"open", "resolved"}
+# ms-119 e-3912: 目的達成レビュー entry のライフサイクル (build=pending →
+# approve=approved / reject=cancelled、lib/transition_approval.append_verdict)。
+VALID_TRANSITION_APPROVAL_STATUSES = {"pending", "approved", "cancelled"}
 VALID_PRIORITIES = {"highest", "high", "medium", "low", "lowest"}
 # ms-120 / e-3895: `medium` is the canonical mid-tier priority — it matches
 # every priority system an AI has a prior for (Jira / GitHub / monitoring all
@@ -278,6 +282,8 @@ def _validate_entry(entry: dict, ms_id: str, seen_entry_ids: dict[str, int] | No
             valid_statuses = VALID_RUN_STATUSES
         elif entry_type == "incident":
             valid_statuses = VALID_INCIDENT_STATUSES
+        elif entry_type == "target-transition-approval":
+            valid_statuses = VALID_TRANSITION_APPROVAL_STATUSES
         else:
             valid_statuses = VALID_STATUSES
         if status not in valid_statuses:
@@ -1954,6 +1960,94 @@ def pr_reject(data: dict, entry_id: str, *, rationale: str = "") -> tuple[dict, 
         meta["review_rationale"] = rationale
     _append_review_history(meta, status="rejected", rationale=rationale)
     return ms, entry
+
+
+# --- 目的達成レビュー = 職種中立な target 遷移承認 (ms-119 / e-3912) ---
+# lib/transition_approval.py の pure primitive を entry-id 採番 + target 探索 +
+# 永続化に配線する。今は dev(milestone) + ops(operation) をエンフォース。sales
+# opportunity は既存 meeting-wrap -> judge がこのレビューの projection なので、
+# ここでは二重ゲートしない (requires_spine_approval が False を返す)。
+
+_APPROVAL_TARGET_KINDS = {
+    "ms": "milestone", "op": "operation", "opp": "opportunity", "acc": "account",
+}
+
+
+def _approval_target_kind(target_id: str) -> str:
+    return _APPROVAL_TARGET_KINDS.get(target_id.split("-", 1)[0], "")
+
+
+def _find_approval_target(data: dict, target_id: str) -> dict:
+    """Locate the target (milestone / operation) that owns transition-approval
+    entries. Profession-neutral dispatch by id prefix."""
+    kind = _approval_target_kind(target_id)
+    if kind == "milestone":
+        return find_target_milestone(data, target_id)
+    if kind == "operation":
+        ops = find_operations(data, target_id)
+        if not ops:
+            raise ValueError(f"Operation not found: {target_id}")
+        return ops[0]
+    raise ValueError(
+        f"transition approval not supported for target {target_id!r} "
+        f"(kind={kind or 'unknown'}); sales opportunity は既存 judge 経路で確定する"
+    )
+
+
+def target_transition_approval_add(data: dict, target_id: str, *, old_state: str,
+                                   new_state: str, intent: str = "",
+                                   evidence: list = None, actor: str = "",
+                                   session_id: str = "") -> str:
+    """Create a pending transition-approval on a target. Returns entry_id.
+
+    目的達成レビュー (= target が目的を達成したかを人間が確定する承認) の永続化
+    入口。approve で遷移が実行され、reject で実行されない。呼び出し側は先に
+    transition_approval.requires_spine_approval() で「そもそも承認を挟むべき
+    遷移か」を判定してから呼ぶ (routine 遷移を過剰にゲートしないため)。
+    """
+    target = _find_approval_target(data, target_id)
+    entry = _ta.build_transition_approval(
+        entry_id=next_entry_id(data), target_id=target_id,
+        target_kind=_approval_target_kind(target_id),
+        old_state=old_state, new_state=new_state, intent=intent,
+        evidence=evidence, actor=actor, created_at=_now_iso(),
+    )
+    if session_id:
+        entry["meta"]["session_id"] = session_id
+    target.setdefault("entries", []).append(entry)
+    return entry["id"]
+
+
+def target_transition_approval_approve(data: dict, entry_id: str, *,
+                                       rationale: str = "", actor: str = ""):
+    """Approve a pending transition. Returns (entry, new_state_to_apply).
+
+    approve は verdict を記録するだけで、実際の状態遷移は呼び出し側が
+    new_state_to_apply を使って適用する (milestone_update / operation_set_status)。
+    """
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    _, _, entry, _ = result
+    if entry.get("type") != "target-transition-approval":
+        raise ValueError(f"Entry {entry_id} is not a transition-approval entry")
+    new_state = _ta.append_verdict(entry, status="approved", rationale=rationale,
+                                   actor=actor, at=_now_iso())
+    return entry, new_state
+
+
+def target_transition_approval_reject(data: dict, entry_id: str, *,
+                                      rationale: str = "", actor: str = "") -> dict:
+    """Reject a pending transition (it does NOT execute). Returns the entry."""
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    _, _, entry, _ = result
+    if entry.get("type") != "target-transition-approval":
+        raise ValueError(f"Entry {entry_id} is not a transition-approval entry")
+    _ta.append_verdict(entry, status="rejected", rationale=rationale, actor=actor,
+                       at=_now_iso())
+    return entry
 
 
 def _extract_pr_number_from_url(url: str) -> int | None:

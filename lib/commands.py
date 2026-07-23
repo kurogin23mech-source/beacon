@@ -14,6 +14,7 @@ from typing import Optional, Tuple
 
 from store import get_store
 import core
+import transition_approval as _ta  # ms-119 e-3912: 目的達成レビュー primitive
 import work_model  # ms-109 e-3559: 職種非依存の Target 正準ラベルアクセサ
 import occupation  # ms-108 e-3269: ③共有フレームの職種プロジェクション registry
 
@@ -1613,13 +1614,273 @@ def cmd_milestone_done():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     reason = _require_reason_or_skip("milestone done")
     data = load_project()
+    # ms-119 e-3912: opt-in routing — with --review, a completion transition is
+    # not applied directly; instead it is routed through the profession-neutral
+    # 目的達成レビュー (target が目的を達成したかを人間が確定する承認). The default
+    # path (no --review) is unchanged so existing done/close flows never break.
+    if os.environ.get("BEACON_REVIEW", "") == "1":
+        _route_completion_to_review(data, ms_id, reason=reason)
+        return
+    old_state = ""
+    for _m in data.get("milestones", []):
+        if _m.get("id") == ms_id:
+            old_state = _m.get("status", "")
+            break
     ms = core.milestone_done(data, ms_id, reason=reason)
     _release_occupation_for_transition(data, ms_id, reason="done")
     save_project(data, op={"op": "milestone_done", "ms_id": ms_id, "reason": reason})
+    # ms-119 e-3911: this completion did NOT go through the review gate — fire a
+    # review-due nudge (目的達成 toward the gate + 思想 if the MS has a SPEC).
+    _fire_review_due_trigger(ms_id, "milestone", old_state, "done",
+                             target_title=work_model.target_label(ms),
+                             has_spec=_spec_exists_for_ms(ms_id), gated=False)
     _prompt_close_leftover_worktree(ms_id, "done")
     print(f"Completed: {work_model.target_label(ms)}")
     if reason:
         print(f"  Reason: {reason}")
+
+
+# --- 目的達成レビュー CLI surface (ms-119 / e-3912) ---
+# 職種中立な target 遷移承認 primitive (lib/transition_approval.py + core.py の
+# 永続化層) を CLI に露出する。開発 (milestone) / 運用 (operation) の完了主張遷移
+# を、人間承認を挟んで確定させる。approve = 遷移実行、reject = 遷移せず記録。
+
+def _actor_str() -> str:
+    """Best-effort machine/agent identity string for the audit trail."""
+    try:
+        import agent as _agent_for_actor
+        act = _agent_for_actor.get_actor()
+        m, a = act.get("machine", ""), act.get("agent", "")
+        return f"{m}/{a}" if (m or a) else ""
+    except Exception:
+        return ""
+
+
+def _apply_transition(data: dict, target_id: str, new_state: str, *,
+                      reason: str = "") -> None:
+    """Execute an approved target transition on the concrete target.
+
+    The approval primitive records the verdict but leaves execution to the
+    caller (per lib/transition_approval.append_verdict). This maps the
+    profession-neutral new_state back onto the target-kind-specific mutator.
+    milestone completion (done / closed) → milestone_done (this codebase treats
+    close as done); operation retirement (closed) → operation_close.
+    """
+    kind = core._approval_target_kind(target_id)
+    if kind == "milestone":
+        core.milestone_done(data, target_id, reason=reason)
+        _release_occupation_for_transition(data, target_id, reason="done")
+    elif kind == "operation":
+        core.operation_close(data, target_id)
+    else:
+        raise ValueError(
+            f"transition apply not supported for target {target_id!r} "
+            f"(kind={kind or 'unknown'})")
+
+
+def _route_completion_to_review(data: dict, ms_id: str, *, reason: str) -> None:
+    """Route a milestone completion through the 目的達成レビュー gate instead of
+    applying it directly (ms-119 e-3912 opt-in path)."""
+    try:
+        target = core._find_approval_target(data, ms_id)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    old_state = target.get("status", "")
+    new_state = "done"
+    if not _ta.requires_spine_approval("milestone", old_state, new_state):
+        print(
+            f"Error: {ms_id} の {old_state} → {new_state} は目的達成レビュー対象外です "
+            f"(完了主張の遷移ではありません)。",
+            file=sys.stderr)
+        sys.exit(1)
+    eid = core.target_transition_approval_add(
+        data, ms_id, old_state=old_state, new_state=new_state,
+        intent=reason, actor=_actor_str(),
+        session_id=_resolve_session_id() or "")
+    save_project(data, op={"op": "target_transition_approval_add",
+                           "target_id": ms_id, "entry_id": eid})
+    # ms-119 e-3911: the 目的達成 review is already in-flight (the pending
+    # approval), so fire only the 思想 advisory here (gated=True suppresses the
+    # attainment nudge) — and only if the MS has a SPEC 原典 to check against.
+    _fire_review_due_trigger(ms_id, "milestone", old_state, new_state,
+                             target_title=target.get("title", ""),
+                             has_spec=_spec_exists_for_ms(ms_id), gated=True)
+    print(f"目的達成レビュー依頼を作成: {eid}")
+    print(f"  {ms_id}: {old_state} -> {new_state} (完了主張、人間承認待ち)")
+    if reason:
+        print(f"  intent: {reason}")
+    # ms-119 e-3911 §5 AC6: weak-AC gap surfacing (hard-block しない)
+    _gap = _ta.format_criteria_gap(
+        _ta.assess_completion_criteria(
+            has_spec=_spec_exists_for_ms(ms_id),
+            objective=target.get("objective", ""),
+            acceptance=target.get("acceptance_criteria", ""),
+            intent=reason),
+        target_id=ms_id)
+    if _gap:
+        print(_gap)
+    print(f"  確定 (= 遷移実行): beacon target approve {eid} [--rationale <text>]")
+    print(f"  却下 (= 遷移せず): beacon target reject {eid} [--rationale <text>]")
+
+
+def _parse_evidence() -> list:
+    raw = os.environ.get("BEACON_EVIDENCE", "").strip()
+    if not raw:
+        return []
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def cmd_target_review_request():
+    """Create a pending 目的達成レビュー on a target transition (e-3912).
+
+    beacon target review-request <target-id> --new-state <state>
+        [--old-state <state>] [--intent <text>] [--evidence e-1,e-2]
+    """
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    new_state = os.environ.get("BEACON_NEW_STATE", "").strip()
+    old_state = os.environ.get("BEACON_OLD_STATE", "").strip()
+    intent = os.environ.get("BEACON_INTENT", "").strip()
+    evidence = _parse_evidence()
+    if not target_id or not new_state:
+        print("Usage: beacon target review-request <target-id> --new-state "
+              "<state> [--old-state <state>] [--intent <text>] "
+              "[--evidence e-1,e-2]", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        target = core._find_approval_target(data, target_id)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    if not old_state:
+        old_state = target.get("status", "")
+    kind = core._approval_target_kind(target_id)
+    if not _ta.requires_spine_approval(kind, old_state, new_state):
+        print(
+            f"Error: {target_id} の {old_state} → {new_state} は目的達成レビュー"
+            f"対象外です (完了主張でない routine 遷移、または sales opportunity は"
+            f"既存 judge 経路)。", file=sys.stderr)
+        sys.exit(1)
+    eid = core.target_transition_approval_add(
+        data, target_id, old_state=old_state, new_state=new_state,
+        intent=intent, evidence=evidence, actor=_actor_str(),
+        session_id=_resolve_session_id() or "")
+    save_project(data, op={"op": "target_transition_approval_add",
+                           "target_id": target_id, "entry_id": eid})
+    print(f"目的達成レビュー依頼を作成: {eid}")
+    print(f"  {target_id}: {old_state} -> {new_state} (人間承認待ち)")
+    if intent:
+        print(f"  intent: {intent}")
+    if evidence:
+        print(f"  evidence: {', '.join(evidence)}")
+    # ms-119 e-3911 §5 AC6: weak-AC な target では gap を gentle に炙り出す
+    # (hard-block しない — 依頼は既に作成済)。原典が無ければ何を満たせば done かを
+    # 承認前に確認するよう促す forcing function。
+    _gap = _ta.format_criteria_gap(
+        _ta.assess_completion_criteria(
+            has_spec=_spec_exists_for_ms(target_id) if kind == "milestone"
+            else _spec_exists_for_op(target_id) if kind == "operation" else False,
+            objective=target.get("objective", ""),
+            acceptance=target.get("acceptance_criteria", ""),
+            intent=intent),
+        target_id=target_id)
+    if _gap:
+        print(_gap)
+    print(f"  確定 (= 遷移実行): beacon target approve {eid} [--rationale <text>]")
+    print(f"  却下 (= 遷移せず): beacon target reject {eid} [--rationale <text>]")
+
+
+def cmd_target_approve():
+    """Approve a pending target transition — records the verdict AND executes
+    the transition on the target (e-3912)."""
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "").strip()
+    rationale = os.environ.get("BEACON_RATIONALE", "").strip()
+    if not entry_id:
+        print("Usage: beacon target approve <entry-id> [--rationale <text>]",
+              file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        entry, new_state = core.target_transition_approval_approve(
+            data, entry_id, rationale=rationale, actor=_actor_str())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    target_id = entry["meta"]["target_id"]
+    try:
+        _apply_transition(data, target_id, new_state, reason=rationale)
+    except ValueError as e:
+        print(f"Error applying transition: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_transition_approval_approve",
+                           "entry_id": entry_id, "target_id": target_id})
+    print(f"承認: {target_id} を {new_state} に遷移しました ({entry_id})")
+    if rationale:
+        print(f"  rationale: {rationale}")
+
+
+def cmd_target_reject():
+    """Reject a pending target transition — records the verdict; the transition
+    does NOT execute (e-3912)."""
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "").strip()
+    rationale = os.environ.get("BEACON_RATIONALE", "").strip()
+    if not entry_id:
+        print("Usage: beacon target reject <entry-id> [--rationale <text>]",
+              file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        entry = core.target_transition_approval_reject(
+            data, entry_id, rationale=rationale, actor=_actor_str())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    meta = entry["meta"]
+    save_project(data, op={"op": "target_transition_approval_reject",
+                           "entry_id": entry_id,
+                           "target_id": meta["target_id"]})
+    print(f"却下: {meta['target_id']} の {meta['old_state']} -> "
+          f"{meta['new_state']} 遷移は実行されません ({entry_id})")
+    if rationale:
+        print(f"  rationale: {rationale}")
+
+
+def cmd_target_list():
+    """List target transition-approval requests (e-3912).
+
+    beacon target list [--target <target-id>] [--pending] [--json]
+    """
+    target_filter = os.environ.get("BEACON_TARGET_ID", "").strip()
+    pending_only = os.environ.get("BEACON_PENDING", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    rows = []
+    containers = list(data.get("milestones", [])) + list(data.get("operations", []))
+    for c in containers:
+        for e in c.get("entries", []):
+            if e.get("type") != "target-transition-approval":
+                continue
+            m = e.get("meta", {})
+            if target_filter and m.get("target_id") != target_filter:
+                continue
+            if pending_only and m.get("approval_status") != "pending":
+                continue
+            rows.append(e)
+    if json_mode:
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+    if not rows:
+        print("(no transition-approval requests)")
+        return
+    for e in rows:
+        m = e.get("meta", {})
+        st = m.get("approval_status", "?")
+        icon = {"pending": "◌", "approved": "●", "rejected": "✗"}.get(st, st)
+        print(f"  {icon} [{e.get('id')}] {m.get('target_id')}: "
+              f"{m.get('old_state')} -> {m.get('new_state')} [{st}]")
+        if m.get("intent"):
+            print(f"      intent: {m.get('intent')}")
 
 
 def cmd_milestone_wait():
@@ -9970,6 +10231,80 @@ def _spec_exists_for_ms(ms_id: str) -> bool:
     return False
 
 
+def _spec_exists_for_op(op_id: str) -> bool:
+    """Return True if any spec-scoped document is attached to op_id.
+
+    Sibling of _spec_exists_for_ms for the operation target kind (docs carry an
+    ``operation`` field when scoped to an Operation)."""
+    if not op_id:
+        return False
+    try:
+        docs = get_store().list_documents()
+    except Exception:
+        return False
+    for doc in docs:
+        if doc.get("scope") == "spec" and doc.get("operation") == op_id:
+            return True
+    return False
+
+
+def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
+                             new_state: str, *, target_title: str = "",
+                             has_spec: bool = False, gated: bool = False) -> None:
+    """Fire a 'review-due' trigger for a target lifecycle transition
+    (ms-119 / e-3911 — the review firing spine).
+
+    Beacon owns the target lifecycle, so a phase transition / close is a
+    trigger GitHub cannot emit. On a completion-claim transition this surfaces
+    the bound review(s) (see review_spine.review_bindings_for_transition):
+    the 目的達成 nudge (only when the transition bypassed the approval gate) and
+    the 思想 advisory (only when the target has a SPEC 原典). Empty bindings =
+    no file written (routine / reversible transitions fire nothing).
+
+    Advisory only — never blocks the transition. The blocking mechanism for
+    目的達成 is the approval entry from e-3912, not this trigger.
+    """
+    import review_spine
+    bindings = review_spine.review_bindings_for_transition(
+        target_kind, old_state, new_state, has_spec=has_spec, gated=gated)
+    if not bindings:
+        return
+    triggers_dir = _get_triggers_dir()
+    os.makedirs(triggers_dir, exist_ok=True)
+    parts = []
+    for b in bindings:
+        if b["review"] == review_spine.REVIEW_ATTAINMENT:
+            parts.append(
+                f"目的達成レビュー (target が目的を果たしたか、人間承認): 完了主張が"
+                f"レビューを経ずに適用されました。次からは `beacon milestone done "
+                f"{target_id} --review` でゲート経由に、または今から `beacon target "
+                f"review-request {target_id} --new-state {new_state} --intent ...` "
+                f"で振り返りを。")
+        elif b["review"] == review_spine.REVIEW_PHILOSOPHY:
+            parts.append(
+                f"思想レビュー (実装が原典 = SPEC / vision 通りか、助言・非 blocking): "
+                f"`/philosophy-review` で文脈ゼロの独立 judge に SPEC を渡し "
+                f"{target_id} の実装 drift を確認してください。")
+    import datetime
+    trigger_data = {
+        "name": f"review-due-{target_id}",
+        "kind": "review-due",
+        "target_id": target_id,
+        "target_kind": target_kind,
+        "old_state": old_state,
+        "new_state": new_state,
+        "bindings": [b["review"] for b in bindings],
+        "gated": gated,
+        "message": f"{target_id} \"{target_title}\" が {old_state} -> {new_state} "
+                   f"(完了主張) に遷移しました。節目のレビュー: " + " / ".join(parts),
+        "created_at": datetime.datetime.now().isoformat(),
+    }
+    trigger_path = os.path.join(triggers_dir, f"review-due-{target_id}.json")
+    with open(trigger_path, "w", encoding="utf-8") as f:
+        json.dump(trigger_data, f, ensure_ascii=False)
+        f.write("\n")
+
+
 def _cleanup_spec_needed_triggers() -> None:
     """Remove spec-needed triggers for milestones that now have SPEC docs,
     or for milestones that no longer exist (cancelled/deleted)."""
@@ -9996,6 +10331,67 @@ def _cleanup_spec_needed_triggers() -> None:
                 pass
 
 
+def _cleanup_review_due_triggers() -> None:
+    """Remove review-due triggers once they no longer represent a live 節目
+    (ms-119 / e-3911).
+
+    A review nudge is time-sensitive — "you just completed X, review it now".
+    Cleared when:
+      - the target no longer exists,
+      - (gated = went through the approval gate) the pending approval was
+        resolved (approved / rejected), so the review is no longer in-flight,
+      - (non-gated) the completion was undone (target re-opened), OR the nudge
+        has aged past the day it fired (bounds indefinite accumulation, matches
+        the moment-in-time nature of a 節目 reminder).
+    """
+    import datetime
+    today = datetime.date.today()
+    triggers_dir = _get_triggers_dir()
+    if not os.path.isdir(triggers_dir):
+        return
+    try:
+        data = load_project()
+    except Exception:
+        return
+    status_by_id = {}
+    pending_targets = set()
+    for c in list(data.get("milestones", [])) + list(data.get("operations", [])):
+        status_by_id[c.get("id")] = c.get("status")
+        for e in c.get("entries", []):
+            if (e.get("type") == "target-transition-approval"
+                    and e.get("meta", {}).get("approval_status") == "pending"):
+                pending_targets.add(e.get("meta", {}).get("target_id"))
+    for fname in os.listdir(triggers_dir):
+        if not fname.startswith("review-due-") or not fname.endswith(".json"):
+            continue
+        fpath = os.path.join(triggers_dir, fname)
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                trig = json.load(f)
+        except (json.JSONDecodeError, IOError, UnicodeDecodeError):
+            continue
+        tid = trig.get("target_id")
+        remove = False
+        if tid not in status_by_id:
+            remove = True  # target gone
+        elif trig.get("gated"):
+            if tid not in pending_targets:
+                remove = True  # approval resolved
+        else:
+            try:
+                aged = datetime.date.fromisoformat(
+                    trig.get("created_at", "")[:10]) < today
+            except ValueError:
+                aged = False
+            if status_by_id.get(tid) not in ("done", "closed") or aged:
+                remove = True  # completion undone, or nudge aged out
+        if remove:
+            try:
+                os.remove(fpath)
+            except OSError:
+                pass
+
+
 def _cleanup_stale_triggers():
     import datetime
     today = datetime.date.today()
@@ -10004,6 +10400,8 @@ def _cleanup_stale_triggers():
         return
     # Clean up stale spec-needed triggers (MS gone or SPEC now exists)
     _cleanup_spec_needed_triggers()
+    # ms-119 e-3911: clear review-due nudges that no longer represent a live 節目
+    _cleanup_review_due_triggers()
     # NOTE (e-575): Do NOT auto-delete retro.json by age. The retro trigger now
     # persists across days until `beacon retro done` (cmd_retro_done) explicitly
     # removes it. _auto_fire_retro_trigger refreshes the message daily so the
@@ -16729,6 +17127,10 @@ def _help_registry():
         {"command": "beacon operation revoke <op-id>", "flags": ["--envelope-id ENV", "--reason TEXT", "--json"], "description": "Invalidate the active T2 envelope (auto-picks active if --envelope-id omitted)"},
         {"command": "beacon operation envelope verify <op-id> <action>", "flags": ["--json"], "description": "AI self-check: is <action> permitted by the active envelope's approved_actions? (ms-60 / e-1340)"},
         {"command": "beacon milestone graph", "flags": ["--json"], "description": "Show dependency graph"},
+        {"command": "beacon target review-request <target-id>", "flags": ["--new-state <s>", "--old-state <s>", "--intent <text>", "--evidence e-1,e-2"], "description": "Request human approval for a target transition (目的達成レビュー; ms-119)"},
+        {"command": "beacon target approve <entry-id>", "flags": ["--rationale <text>", "--reason <text>"], "description": "Approve a pending target transition (= executes the transition; --reason alias of --rationale, e-3906)"},
+        {"command": "beacon target reject <entry-id>", "flags": ["--rationale <text>", "--reason <text>"], "description": "Reject a pending target transition (= transition does NOT execute; --reason alias of --rationale, e-3906)"},
+        {"command": "beacon target list", "flags": ["--target <id>", "--pending", "--json"], "description": "List target transition-approval requests"},
         {"command": "beacon task add <desc>", "flags": ["-m <ms-id>"], "description": "Add a task to a milestone"},
         {"command": "beacon task done <entry-id>", "flags": [], "description": "Mark task as done"},
         {"command": "beacon task list", "flags": ["--json", "--ms <id>"], "description": "List tasks"},
@@ -17133,8 +17535,18 @@ def cmd_operation_close():
         print("Error: operation id required")
         sys.exit(1)
     data = load_project()
+    old_state = ""
+    for _o in data.get("operations", []):
+        if _o.get("id") == op_id:
+            old_state = _o.get("status", "")
+            break
     op = core.operation_close(data, op_id)
     save_project(data, op={"type": "operation_close", "op_id": op_id})
+    # ms-119 e-3911: operation retirement is a completion claim — fire the
+    # review-due nudge (目的達成 + 思想 if the operation has a SPEC).
+    _fire_review_due_trigger(op_id, "operation", old_state, "closed",
+                             target_title=op.get("title", ""),
+                             has_spec=_spec_exists_for_op(op_id), gated=False)
     print(f"Operation closed: {op_id} \"{op.get('title', '')}\"")
 
 
@@ -22919,6 +23331,10 @@ if __name__ == "__main__":
         "milestone_list": cmd_milestone_list,
         "milestone_start": cmd_milestone_start,
         "milestone_done": cmd_milestone_done,
+        "target_review_request": cmd_target_review_request,
+        "target_approve": cmd_target_approve,
+        "target_reject": cmd_target_reject,
+        "target_list": cmd_target_list,
         "milestone_observe": cmd_milestone_observe,
         "milestone_wait": cmd_milestone_wait,
         "milestone_release": cmd_milestone_release,
