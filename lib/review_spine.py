@@ -312,7 +312,10 @@ def review_bindings_for_transition(target_kind, old_state, new_state, *,
     the downstream message can explain what the review compares against.
 
     Empty list = no review fires (routine / reversible transitions like
-    todo -> active, -> waiting, -> observing carry no completion claim).
+    todo -> active, -> waiting carry no completion claim). Note: -> observing
+    DOES carry a completion claim in this codebase (運用改善フェーズ =
+    基本目的達成が前提) and fires the reviews like done — see
+    transition_approval module docstring.
 
     Args:
         target_kind: "milestone" / "operation" / "opportunity" (prefix-derived).

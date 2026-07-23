@@ -347,6 +347,76 @@ class TestMilestoneObserveReason:
 
 
 # ---------------------------------------------------------------------------
+# ms-119: observing is a completion claim → same e-4008 gate parity as done.
+# An AI session's bare `milestone observe` must be refused (抜け穴を塞ぐ);
+# --review routes to the human approval gate instead of landing directly.
+# ---------------------------------------------------------------------------
+
+
+class TestMilestoneObserveCompletionGate:
+    def test_ai_session_bare_observe_refused(self, project_dir, monkeypatch, capsys):
+        _write_project(project_dir, {
+            "name": "t",
+            "milestones": [{
+                "id": "ms-5", "title": "p", "status": "in_progress",
+                "target_date": "", "commits": [], "entries": [],
+            }],
+        })
+        monkeypatch.setenv("BEACON_MS_ID", "ms-5")
+        monkeypatch.setenv("BEACON_REASON", "運用に回す")
+        # AI session (not human) and no explicit override → ban must fire.
+        monkeypatch.setenv("BEACON_SESSION_KIND", "claude")
+        monkeypatch.delenv("BEACON_TARGET_COMPLETE_USER_OVERRIDE", raising=False)
+        monkeypatch.delenv("BEACON_REVIEW", raising=False)
+
+        import commands  # type: ignore
+        with pytest.raises(SystemExit) as ei:
+            commands.cmd_milestone_observe()
+        assert ei.value.code == 2
+        err = capsys.readouterr().err
+        assert "e-4008" in err
+        # status must NOT have changed (bare observe blocked).
+        assert _read_project(project_dir)["milestones"][0]["status"] == "in_progress"
+
+    def test_user_override_allows_direct_observe(self, project_dir, monkeypatch):
+        _write_project(project_dir, {
+            "name": "t",
+            "milestones": [{
+                "id": "ms-5", "title": "p", "status": "in_progress",
+                "target_date": "", "commits": [], "entries": [],
+            }],
+        })
+        monkeypatch.setenv("BEACON_MS_ID", "ms-5")
+        monkeypatch.setenv("BEACON_REASON", "運用に回す")
+        monkeypatch.setenv("BEACON_SESSION_KIND", "claude")
+        monkeypatch.setenv("BEACON_TARGET_COMPLETE_USER_OVERRIDE", "1")
+
+        import commands  # type: ignore
+        commands.cmd_milestone_observe()
+        assert _read_project(project_dir)["milestones"][0]["status"] == "observing"
+
+    def test_review_routes_to_approval_gate_not_direct(self, project_dir, monkeypatch, capsys):
+        _write_project(project_dir, {
+            "name": "t",
+            "milestones": [{
+                "id": "ms-5", "title": "p", "status": "in_progress",
+                "target_date": "", "commits": [], "entries": [],
+            }],
+        })
+        monkeypatch.setenv("BEACON_MS_ID", "ms-5")
+        monkeypatch.setenv("BEACON_REASON", "運用に回す")
+        monkeypatch.setenv("BEACON_SESSION_KIND", "claude")
+        monkeypatch.setenv("BEACON_REVIEW", "1")
+
+        import commands  # type: ignore
+        commands.cmd_milestone_observe()
+        # --review creates a pending approval; it does NOT land observing directly.
+        assert _read_project(project_dir)["milestones"][0]["status"] == "in_progress"
+        out = capsys.readouterr().out
+        assert "承認待ち" in out
+
+
+# ---------------------------------------------------------------------------
 # regression: milestone delete still gates (pre-existing behavior)
 # ---------------------------------------------------------------------------
 

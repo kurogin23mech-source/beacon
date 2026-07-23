@@ -20,14 +20,15 @@ from lib import transition_approval as ta
 def test_milestone_completion_is_attainment():
     assert ta.is_attainment_transition("milestone", "in_progress", "done")
     assert ta.is_attainment_transition("milestone", "in_progress", "closed")
+    # ms-119: observing is a completion claim in this codebase (運用改善フェーズ =
+    # 基本目的達成が前提), so it is an attainment transition like done.
+    assert ta.is_attainment_transition("milestone", "in_progress", "observing")
 
 
 def test_milestone_routine_is_not_attainment():
     # the user's example: todo -> active needs no gate
     assert not ta.is_attainment_transition("milestone", "todo", "in_progress")
     assert not ta.is_attainment_transition("milestone", "in_progress", "waiting")
-    # observing is a soft / reversible monitoring state, not a completion claim
-    assert not ta.is_attainment_transition("milestone", "in_progress", "observing")
 
 
 def test_operation_close_is_attainment():
@@ -49,11 +50,13 @@ def test_opportunity_forward_and_terminal_are_attainment():
 def test_spine_enforces_dev_and_ops_completion():
     assert ta.requires_spine_approval("milestone", "in_progress", "done")
     assert ta.requires_spine_approval("operation", "open", "closed")
+    # ms-119: observing is a completion claim → gated like done (抜け穴を塞ぐ)
+    assert ta.requires_spine_approval("milestone", "in_progress", "observing")
 
 
 def test_spine_does_not_overgate_routine():
     assert not ta.requires_spine_approval("milestone", "todo", "in_progress")
-    assert not ta.requires_spine_approval("milestone", "in_progress", "observing")
+    assert not ta.requires_spine_approval("milestone", "in_progress", "waiting")
 
 
 def test_spine_does_not_double_gate_sales():

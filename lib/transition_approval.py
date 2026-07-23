@@ -10,16 +10,21 @@ does today.
 Design razor — avoid over-gating and double-gating:
 
 - **Gate** only transitions that assert goal-attainment:
-    - dev milestone  → done / closed        (completion claim)
+    - dev milestone  → done / closed / observing   (completion claim)
+      NOTE on observing: in this codebase `observing` is NOT a soft/reversible
+      "monitoring" pause — it is the 運用改善フェーズ that *presupposes the
+      milestone's basic goal is already reached* (you only put a milestone into
+      operation once it works). So moving to observing carries the same
+      "目的を果たした" claim as done: if a 目的達成 / 思想 deviation existed you
+      would NOT put it into operation (= would not observe it). It is therefore
+      an attainment transition and is gated like done.
     - ops operation  → closed               (retirement claim)
     - sales opportunity → forward funnel advance, or terminal (each funnel step
       is "we earned the right to advance" — reviewed against the meeting
       evidence)
-- **Do NOT gate** transitions that merely *begin* or *pause* work, or move to a
-  soft / reversible monitoring state:
-    - todo → active / in_progress (start), → waiting (pause), → observing
-      (monitoring). These carry no attainment claim; the AI / user just does
-      them.
+- **Do NOT gate** transitions that merely *begin* or *pause* work:
+    - todo → active / in_progress (start), → waiting (pause). These carry no
+      attainment claim; the AI / user just does them.
 
 Projections (who enforces the gate today):
 
@@ -39,7 +44,9 @@ double-gate sales.
 
 # Terminal-completion states per target kind that carry a goal-attainment claim.
 _COMPLETION_STATES = {
-    "milestone": frozenset({"done", "closed"}),
+    # observing is a completion claim in this codebase (運用改善フェーズ =
+    # 基本目的達成が前提), not a reversible pause — see module docstring.
+    "milestone": frozenset({"done", "closed", "observing"}),
     "operation": frozenset({"closed"}),
 }
 
@@ -57,9 +64,10 @@ def is_attainment_transition(target_kind, old_state, new_state, *, funnel=None):
     """Does this transition assert the target reached / advanced toward its goal?
 
     Profession-neutral truth, independent of who enforces the gate. True for
-    completion (dev / ops) and funnel-advance / terminal (sales). False for
-    entry (todo -> active), pause (-> waiting), and soft monitoring
-    (-> observing).
+    completion (dev milestone → done / closed / observing; ops → closed) and
+    funnel-advance / terminal (sales). False for entry (todo -> active) and
+    pause (-> waiting). (observing is a completion claim here, not a pause —
+    see the module docstring.)
 
     `funnel` (optional): ordered list of the opportunity's phase names, so a
     "forward" move can be distinguished from a corrective backward jump.

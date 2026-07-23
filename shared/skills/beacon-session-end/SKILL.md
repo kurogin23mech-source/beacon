@@ -99,15 +99,14 @@ Step 1a の結果を読み、以下を自動整理する。
 完了候補と思われる MS:
   - [ms-XX] [title]
     シグナル: progress=100 / 全タスク消化 / 直近 7 日でコミット 5 件
-    → observing にしますか？ done にしますか？ それともまだ作業継続？
+    → まだ作業継続ですか？ 区切りが付いていれば別途 close/observe してください。
 ```
 
-ユーザー承認後に **Bash ツール** で実行:
+**observe への遷移は session-end では行わない (ms-119)**。`observing` は「基本目的は達成済み・運用に回してよい」という**完了主張**であり、目的達成 / 思想レビューのゲート対象になった。「セッションが終わること」と「MS を完了主張として閉じること」の間に相関はないので、session-end が observe を実行するのは miswiring。session-end はあくまで **完了候補を surface するだけ** に留め、実際の遷移は本人が `beacon milestone observe <ms-id> --review`（= 人間承認ゲート経由）を意図的に走らせる。
+
+done にする場合 (進行中マイルストーン状態を「閉じる」) は、区切りが明確なら session-end からでも実行してよい:
 
 ```bash
-# observing にする場合
-beacon milestone observe <ms-id>
-# done にする場合 (進行中マイルストーン状態を「閉じる」)
 beacon milestone close <ms-id>
 ```
 

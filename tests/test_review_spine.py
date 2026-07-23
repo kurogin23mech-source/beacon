@@ -20,10 +20,20 @@ import commands  # noqa: E402
 # --- pure binding table ---------------------------------------------------
 
 def test_routine_transitions_bind_nothing():
-    # start / pause / soft-monitoring carry no completion claim.
+    # start / pause carry no completion claim.
     assert review_spine.review_bindings_for_transition("milestone", "todo", "in_progress") == []
     assert review_spine.review_bindings_for_transition("milestone", "in_progress", "waiting") == []
-    assert review_spine.review_bindings_for_transition("milestone", "in_progress", "observing") == []
+
+
+def test_observing_is_a_completion_claim_and_binds_reviews():
+    # ms-119: observing is a completion claim in this codebase (運用改善フェーズ =
+    # 基本目的達成が前提), so it binds the reviews like done — not [].
+    b = review_spine.review_bindings_for_transition("milestone", "in_progress", "observing")
+    assert [x["review"] for x in b] == [review_spine.REVIEW_ATTAINMENT]
+    b2 = review_spine.review_bindings_for_transition(
+        "milestone", "in_progress", "observing", has_spec=True)
+    assert [x["review"] for x in b2] == [
+        review_spine.REVIEW_ATTAINMENT, review_spine.REVIEW_PHILOSOPHY]
 
 
 def test_attainment_without_gate_or_spec_binds_attainment_only():
