@@ -315,20 +315,25 @@ def review_bindings_for_transition(target_kind, old_state, new_state, *,
         target_kind: "milestone" / "operation" / "opportunity" (prefix-derived).
         old_state / new_state: the transition's endpoints.
         has_spec: whether the target has a SPEC / vision 原典 attached.
-        gated: True when this transition is already going through the 目的達成
-            approval gate (``beacon target ... --review``). Suppresses the
-            attainment nudge so the spine never double-surfaces it.
+        gated: True when this transition is going through the 目的達成 approval
+            gate (``beacon target ... --review``). Both reviews still bind (ms-119
+            e-4005: the 目的達成 evidence review must auto-fire at the close 節目
+            too, alongside 思想); ``gated`` only changes the attainment message —
+            "evidence for the pending approval" vs "retrospective / you bypassed
+            the gate". Carried on the binding so the trigger writer can phrase it.
     """
     if not _ta.is_attainment_transition(target_kind, old_state, new_state):
         return []
-    bindings = []
-    if not gated:
-        # Completion applied without the review gate — advisory nudge toward it.
-        bindings.append({
-            "review": REVIEW_ATTAINMENT,
-            "blocking": False,
-            "origin": "owner intent (target が目的を果たしたか)",
-        })
+    # Both 目的達成 and 思想 fire at the completion 節目 (ms-119 e-4005). They share
+    # the SPEC 原典 and the moment: 目的達成 = did we reach the goal (evidence for a
+    # human verdict); 思想 = did we honour the SPEC's spirit getting there
+    # (advisory). Neither is suppressed — the human wants both auto-fired at close.
+    bindings = [{
+        "review": REVIEW_ATTAINMENT,
+        "blocking": False,
+        "origin": "owner intent (target が目的を果たしたか)",
+        "gated": gated,
+    }]
     if has_spec:
         bindings.append({
             "review": REVIEW_PHILOSOPHY,

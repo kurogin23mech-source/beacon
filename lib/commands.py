@@ -10635,17 +10635,29 @@ def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
     parts = []
     for b in bindings:
         if b["review"] == review_spine.REVIEW_ATTAINMENT:
-            parts.append(
-                f"目的達成レビュー (target が目的を果たしたか、人間承認): 完了主張が"
-                f"レビューを経ずに適用されました。次からは `beacon milestone done "
-                f"{target_id} --review` でゲート経由に、または今から `beacon target "
-                f"review-request {target_id} --new-state {new_state} --intent ...` "
-                f"で振り返りを。")
+            # ms-119 e-4005: the 目的達成 review auto-fires at the close 節目 and
+            # points at the INDEPENDENT evidence generation (a context-zero judge
+            # verifies the SPEC against real code); the human owns the verdict.
+            if b.get("gated"):
+                parts.append(
+                    f"目的達成レビュー (target が目的を果たしたか、証拠は独立 judge・"
+                    f"verdict は人間): {target_id} の完了は承認待ちです。"
+                    f"`/beacon-review-run --type attainment --target {target_id}` で"
+                    f"文脈ゼロの独立 judge に SPEC × 実コードを検証させ証拠を作り、"
+                    f"人間が `beacon target approve` で確定してください。")
+            else:
+                parts.append(
+                    f"目的達成レビュー (target が目的を果たしたか、証拠は独立 judge・"
+                    f"verdict は人間): 完了主張がゲートを経ずに適用されました。"
+                    f"`/beacon-review-run --type attainment --target {target_id}` で"
+                    f"独立 judge に振り返り証拠を作らせ、次からは `beacon milestone done "
+                    f"{target_id} --review` でゲート経由に。")
         elif b["review"] == review_spine.REVIEW_PHILOSOPHY:
             parts.append(
-                f"思想レビュー (実装が原典 = SPEC / vision 通りか、助言・非 blocking): "
-                f"`/philosophy-review` で文脈ゼロの独立 judge に SPEC を渡し "
-                f"{target_id} の実装 drift を確認してください。")
+                f"思想レビュー (実装が原典 = SPEC / vision の精神通りか、助言・非 "
+                f"blocking): `/beacon-review-run --type philosophy --origin-doc "
+                f"<spec-doc-id>` で文脈ゼロの独立 judge に SPEC を渡し {target_id} の"
+                f"実装 drift を確認してください。")
     import datetime
     trigger_data = {
         "name": f"review-due-{target_id}",

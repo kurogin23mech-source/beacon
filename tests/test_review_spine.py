@@ -39,14 +39,18 @@ def test_attainment_with_spec_binds_attainment_and_philosophy():
         review_spine.REVIEW_ATTAINMENT, review_spine.REVIEW_PHILOSOPHY]
 
 
-def test_gated_suppresses_attainment_keeps_philosophy():
-    # Going through the approval gate: attainment is in-flight, don't re-fire it.
+def test_gated_binds_both_attainment_and_philosophy():
+    # ms-119 e-4005: the 目的達成 evidence review auto-fires at the close 節目 on
+    # the gated (--review) path too, alongside 思想 — both are wanted at close.
     b = review_spine.review_bindings_for_transition(
         "milestone", "in_progress", "done", has_spec=True, gated=True)
-    assert [x["review"] for x in b] == [review_spine.REVIEW_PHILOSOPHY]
-    # Without a SPEC, a gated transition fires nothing new.
-    assert review_spine.review_bindings_for_transition(
-        "milestone", "in_progress", "done", gated=True) == []
+    assert [x["review"] for x in b] == [
+        review_spine.REVIEW_ATTAINMENT, review_spine.REVIEW_PHILOSOPHY]
+    assert b[0]["gated"] is True  # carried so the message can phrase it
+    # Without a SPEC, a gated completion still fires the attainment evidence review.
+    b2 = review_spine.review_bindings_for_transition(
+        "milestone", "in_progress", "done", gated=True)
+    assert [x["review"] for x in b2] == [review_spine.REVIEW_ATTAINMENT]
 
 
 def test_operation_close_is_attainment():
@@ -104,18 +108,20 @@ def test_milestone_done_fires_review_due(proj, monkeypatch):
     assert t["gated"] is False
 
 
-def test_gated_done_fires_nothing_without_spec(proj, monkeypatch):
-    # --review path, no SPEC: attainment is in-flight (approval entry), and
-    # there's no 思想 原典 → no review-due trigger.
+def test_gated_done_fires_attainment_without_spec(proj, monkeypatch):
+    # --review path, no SPEC: the 目的達成 evidence review still auto-fires at the
+    # close 節目 (ms-119 e-4005). No 思想 原典 → philosophy absent.
     _clear_env(monkeypatch)
     monkeypatch.setenv("BEACON_MS_ID", "ms-5")
     monkeypatch.setenv("BEACON_REASON", "完了主張")
     monkeypatch.setenv("BEACON_REVIEW", "1")
     commands.cmd_milestone_done()
-    assert "review-due-ms-5.json" not in _triggers(proj)
+    t = _triggers(proj)["review-due-ms-5.json"]
+    assert t["bindings"] == [review_spine.REVIEW_ATTAINMENT]
+    assert t["gated"] is True
 
 
-def test_gated_done_fires_philosophy_with_spec(proj, monkeypatch):
+def test_gated_done_fires_attainment_and_philosophy_with_spec(proj, monkeypatch):
     monkeypatch.setattr(commands, "_spec_exists_for_ms", lambda _id: True)
     _clear_env(monkeypatch)
     monkeypatch.setenv("BEACON_MS_ID", "ms-5")
@@ -123,7 +129,8 @@ def test_gated_done_fires_philosophy_with_spec(proj, monkeypatch):
     monkeypatch.setenv("BEACON_REVIEW", "1")
     commands.cmd_milestone_done()
     t = _triggers(proj)["review-due-ms-5.json"]
-    assert t["bindings"] == [review_spine.REVIEW_PHILOSOPHY]
+    assert t["bindings"] == [
+        review_spine.REVIEW_ATTAINMENT, review_spine.REVIEW_PHILOSOPHY]
     assert t["gated"] is True
 
 
