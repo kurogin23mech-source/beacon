@@ -83,4 +83,6 @@ def test_firing_spine_names_the_skill(proj, monkeypatch):
     trig = json.loads(
         (proj / ".beacon" / "triggers" / "review-due-ms-5.json").read_text())
     assert "philosophy" in trig["bindings"]
-    assert "/philosophy-review" in trig["message"]
+    # ms-119 e-4005: the trigger points at the unified independent-judge entry
+    # (/beacon-review-run --type philosophy), not the old /philosophy-review alias.
+    assert "/beacon-review-run --type philosophy" in trig["message"]
