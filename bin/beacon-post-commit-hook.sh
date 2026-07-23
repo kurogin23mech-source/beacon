@@ -131,6 +131,15 @@ elif echo "$CMD_BARE" | grep -qE 'beacon pr (add|create)|gh pr create'; then
   # gap by giving PR-open the same forcing-function wake.
   emit "BEACON: PR opened. AX + maintainability review are due (文脈ゼロの独立 judge に原典+差分を渡す節目). You MUST now run 'beacon trigger check' to see the pending <type>-review-due triggers, then run /beacon-review-run --type ax --pr <N> and --type maintainability --pr <N> for the PR. Approving/merging before these run is blocked by beacon pr approve."
   SKILL="/beacon-review-run"
+elif echo "$CMD_BARE" | grep -qE 'beacon (milestone (done|close)|operation close)'; then
+  # ms-119 e-4077: closing a target (milestone / operation) is the OTHER review
+  # 節目 — it fires 思想 (philosophy) + 目的達成 (attainment) review-due (see
+  # commands.py _fire_review_due_trigger). e-4060 only wired the PR-open wake, so
+  # this transition path fired into the same void. Same forcing-function wake:
+  # check the fired triggers and run the review. Routine/reversible transitions
+  # fire nothing, so `trigger check` just shows no review-due — no false nag.
+  emit "BEACON: Target closed. 思想(philosophy) + 目的達成(attainment) review may be due. You MUST now run 'beacon trigger check'; if a <type>-review-due トリガー fired, run /beacon-review-run --type philosophy --target <id> for the 思想 review, and 'beacon target review-request <id>' to assemble the 目的達成 evidence for human approval (SPEC 方針2: attainment verdict は人間所有)."
+  SKILL="/beacon-review-run"
 elif echo "$CMD_BARE" | grep -qE 'gcloud run deploy|gcloud app deploy|scripts/deploy\.sh'; then
   emit "BEACON: Deploy detected. You MUST now run /beacon-deploy Skill to record this deployment."
   SKILL="/beacon-deploy"
