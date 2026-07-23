@@ -5115,6 +5115,14 @@ EOF
                     BEACON_JSON="$_claim_json" \
                     python3 "$COMMANDS_PY" claim_list
                 ;;
+            view)
+                # ms-112 e-3674: 2-layer claim view (LIVE occupation + persistent
+                # assignee). Read-only; --target narrows to one target.
+                BEACON_CLAIM_TARGET_KIND="$_claim_tk" \
+                    BEACON_CLAIM_TARGET_ID="$_claim_ti" \
+                    BEACON_JSON="$_claim_json" \
+                    python3 "$COMMANDS_PY" claim_view
+                ;;
             "")
                 cat <<'EOF'
 Usage:
@@ -5135,6 +5143,12 @@ Usage:
                                     List active claims in the local cache.
                                     Use --mine after session restart to
                                     recover what you were in the middle of.
+  beacon claim view     [--target <kind>:<id>] [--json]
+                                    Read the 2-layer claim state of targets:
+                                    WHO is LIVE working (occupation) + WHO is
+                                    the persistent assignee. Read-only, never
+                                    blocks. --target narrows to one target;
+                                    omit for every target. (ms-112)
 
 target kind: ms | task | operation | trek | free
 EOF
