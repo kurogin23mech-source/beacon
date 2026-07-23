@@ -110,18 +110,24 @@ stdout に 1 行 JSON が返る (`origin` / `artifact` / `independence_contract`
 `subagent_type` は `Explore` などの読み取り系ではなく、汎用 (`general-purpose`)
 を使う (findings を構造化して返させるため)。
 
-#### Step 3.1 (任意, e-3893): prior の増強
+#### Step 3.1: prior は判定プロンプトに注入しない (独立性の構造保証)
 
-ユーザーが明示的に望む場合のみ、判定プロンプトに **optional な prior** を足せる
-(既定は足さない — 計器はまず素の原典 + diff で判定するのが基本)。
+**判定エージェントへ渡すのは kernel bundle (原典 + 機械採取 diff) だけ**。それ以外の
+prior — とりわけ **L2 記憶層 (failure / surprise)** — を判定プロンプトに足しては
+ならない。L2 記憶は **実装者自身の過去セッションから蒸留された文脈**であり、それを
+judge に入れると bundle の外から実装者由来の文脈が再流入し、self-review の穴が別ドア
+から開く (= このスキルが塞ぐはずの独立性を、prior が壊す)。
 
-- **L2 記憶層の failure / surprise**: 過去に同種の interface で踏んだ失敗があれば、
-  「この観点は過去に踏んでいる」というヒントとして添える。
-- **application-map** (`beacon doc show application-map`): 「近い既存機能があるか」
-  の索引。二重実装・命名衝突の finding を補強する prior。
-
-prior はあくまで増強で、原典を置き換えない。足したら bundle にその旨を注記する
-(判定エージェントが「原典 vs prior」を取り違えないように)。
+> **経緯 (ms-119 思想レビュー finding, 2026-07-23)**: 当初この Step は「optional な
+> prior を既定 off + 注記で足せる」としていた (旧 e-3893)。だが独立2体の思想レビュー
+> が、これは「文脈ゼロでない judge は無効」という原典 §2 と、SPEC 方針7 が『弱い』と
+> 断じた *お願いベースの抑止* に依っている点で矛盾する、と指摘した。構造で閉じる原則
+> に従い、prior 注入経路を撤去した。
+>
+> application-map のような **実装者 session に依らない外部の事実索引** を将来 judge に
+> 見せたい場合は、ad-hoc なプロンプト注入でなく **kernel bundle に named external
+> reference として機械的に組み込む** 形でのみ許す (= bundle が判定の完全な入力である
+> 不変条件を保ったまま拡張する)。これは follow-up 設計。
 
 ### Step 4: findings を集約して提示する
 
