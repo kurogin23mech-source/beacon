@@ -22218,6 +22218,124 @@ def cmd_claim_list():
             print(f"   {intent_suffix.strip()}")
 
 
+def _resolve_healthy_session_ids():
+    """Return the set of currently LIVE + healthy session ids for the current
+    project, or ``None`` when liveness cannot be verified (local mode / the
+    directory is unreachable). ``None`` is meaningful to the claim view: it
+    means "assume occupation claims are live" (conservative, non-blocking),
+    whereas an empty set means "verified — nobody is live".
+
+    Best-effort: any failure (no cloud, auth error, network) collapses to
+    ``None`` so ``beacon claim view`` still works offline off the raw
+    occupation claims on project.json.
+    """
+    try:
+        client, config = _get_api_client()
+        project_id = _resolve_bus_project_id(config)
+        if not project_id:
+            return None
+        sessions = client.list_sessions(
+            project_id, live_only=True, healthy_only=True, since_minutes=5)
+    except Exception:
+        return None
+    ids = {s.get("session_id") for s in (sessions or []) if s.get("session_id")}
+    return ids
+
+
+def cmd_claim_view():
+    """beacon claim view [--target <k>:<id>] [--json]
+
+    Read the 2-layer claim state (ms-112 e-3674): for a target, WHO is LIVE
+    working on it (occupation claim, liveness-checked against the bus
+    directory) + WHO is the persistent assignee — bundled into one view,
+    across target-classes (milestone / opportunity / account).
+
+    Non-exclusive (SPEC 設計方針 3): this is a READ. It never blocks work; it
+    surfaces flags/warnings so consumers (session-start「次の一手」/ dispatch /
+    cockpit) can組み立てる claim-aware without stopping anyone. With ``--target``
+    it emits a single view; without, the view for every target keyed by id.
+    """
+    import claim_view as _claim_view
+
+    tk = os.environ.get("BEACON_CLAIM_TARGET_KIND", "").strip()
+    ti = os.environ.get("BEACON_CLAIM_TARGET_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    data = load_project()
+    my_session_id = _resolve_session_id()
+    # "me" for the assignee layer: the assignee auto-add on `milestone start`
+    # writes ``agent.get_actor()["agent"]`` (e.g. "MACHINE-claude"), so match
+    # against that first, plus machine / email / the git-actor handle, so a
+    # target assigned to any of my aliases reads as assigned_to_me.
+    my_identities: set = set()
+    try:
+        import agent as _agent
+        actor = _agent.get_actor()
+        for key in ("agent", "machine", "email"):
+            v = (actor.get(key) or "").strip()
+            if v:
+                my_identities.add(v)
+    except Exception:
+        pass
+    try:
+        import work_base
+        my_identities.add(work_base.current_actor())
+    except Exception:
+        pass
+
+    live_ids = _resolve_healthy_session_ids()
+
+    views = _claim_view.build_claim_views(
+        data,
+        live_session_ids=live_ids,
+        my_session_id=my_session_id,
+        my_identities=my_identities,
+    )
+
+    if ti:
+        view = views.get(ti)
+        if view is None:
+            # The target isn't in project.json — still return a well-formed
+            # (unclaimed) view so callers don't special-case a miss.
+            view = _claim_view.build_claim_view(
+                {"id": ti},
+                live_session_ids=live_ids,
+                my_session_id=my_session_id,
+                my_identities=my_identities,
+            )
+        if json_mode:
+            print(json.dumps(view, ensure_ascii=False))
+            return
+        line = _claim_view.format_claim_line(view)
+        label = view.get("label") or view.get("target_id")
+        print(f"{view.get('target_id')} {label}")
+        print(f"  {line}" if line else "  (未 claim — 誰も作業中でなく担当も未設定)")
+        if live_ids is None:
+            print("  ※ liveness 未確認 (local mode / directory 不通) — LIVE claim は"
+                  "健全性未検証で表示")
+        return
+
+    if json_mode:
+        print(json.dumps(views, ensure_ascii=False))
+        return
+
+    if not views:
+        print("(no targets)")
+        return
+    shown = 0
+    for tid, view in views.items():
+        line = _claim_view.format_claim_line(view)
+        if not line:
+            continue  # unclaimed targets are noise in the human view
+        label = view.get("label") or tid
+        print(f"{tid} {label}: {line}")
+        shown += 1
+    if shown == 0:
+        print("(claim 済みの target はありません — 全 target が未 claim)")
+    if live_ids is None:
+        print("※ liveness 未確認 (local mode / directory 不通)")
+
+
 def cmd_resume_global():
     """Broadcast a global resume."""
     import stop_signal as _stop
@@ -24154,6 +24272,10 @@ if __name__ == "__main__":
         "claim_respond": cmd_claim_respond,
         "claim_release": cmd_claim_release,
         "claim_list": cmd_claim_list,
+        # ms-112 e-3674: 2-layer claim view. Reads occupation (LIVE session) +
+        # assignee (persistent) into one claim-aware view, target-class 横断.
+        # The consuming layer session-start / dispatch / cockpit read this.
+        "claim_view": cmd_claim_view,
         # ms-55 e-1649: STUCK detector. Idle-timeout based emission of
         # stop signals with reason_kind="stuck", same protocol as e-1646.
         "stuck_check": cmd_stuck_check,
