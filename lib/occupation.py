@@ -28,9 +28,47 @@ from __future__ import annotations
 
 import core
 import sales_entities
+import work_model as _wm
+import target_descriptor as _td   # ms-122 e-3957: data 定義 target-class 記述子
+import target_engine as _te       # ms-122 e-3957: 記述子駆動 target の投影
 
 
 DEFAULT_PROFESSION = "dev"
+
+
+# ---------------------------------------------------------------------------
+# Descriptor-derived registry augmentation (ms-122 e-3957).
+#
+# The six registries below (PROJECTION_ADAPTERS / OWNED_TARGET_CLASSES /
+# TARGET_COLLECTIONS / TARGET_DECOMPOSITION / NARROWING_KINDS /
+# NARROWING_ID_PREFIXES) each hardcode the two built-in occupations (dev /
+# sales). Before ms-122, adding a third occupation meant editing all six. Now a
+# data-defined target-class (a descriptor under project.json ``target_classes``)
+# contributes to each registry at read time: the accessor functions MERGE the
+# built-in seed with descriptor-derived entries computed from ``data``. dev /
+# sales behaviour is unchanged (a project with no descriptors merges nothing),
+# and a new occupation (e.g. back-office: 契約 / 評価 / 月次決算) becomes visible
+# in the shared frame + storage registries WITHOUT editing this file.
+#
+# Scope note (honest limitation, not silent): the shared-frame path
+# (project_targets / iter_target_records / owned_target_classes) and the
+# storage decomposition / narrowing LOOKUPS are descriptor-aware here. The
+# server MySQL child-table DDL (server/mysql_client.py) and Trek scope
+# narrowing (trek.py) still consult the built-in seed at import time; wiring
+# THOSE to descriptors for a new occupation is a follow-up (descriptor targets
+# ride additively in the document store meanwhile, per the compat contract).
+# ---------------------------------------------------------------------------
+
+def _descriptors_owned_by(data: dict, profession: str) -> list:
+    """Return the well-formed descriptors whose ``profession`` matches (lower-
+    cased). Empty for a dev / sales project (they declare no descriptors)."""
+    want = (profession or "").strip().lower()
+    out = []
+    for desc in _td.load_descriptors(data):
+        if isinstance(desc, dict) \
+                and (desc.get("profession") or "").strip().lower() == want:
+            out.append(desc)
+    return out
 
 
 def resolve_profession(data: dict) -> str:
@@ -53,13 +91,29 @@ PROJECTION_ADAPTERS = {
 
 def project_targets(data: dict) -> list:
     """Return the project's Targets in the occupation-agnostic shape the shared
-    frame consumes, dispatched by profession. Unknown professions fall back to
-    the development projection (fail-open: show *something* rather than an empty
-    frame). Each item shape is defined by the adapters — see
-    ``core.project_targets`` / ``sales_entities.project_targets``."""
+    frame consumes, dispatched by profession, PLUS any data-defined target-class
+    instances owned by that profession (ms-122 e-3957).
+
+    A dev / sales project resolves to its built-in adapter exactly as before. A
+    profession whose targets are descriptor-defined (e.g. back-office) has no
+    built-in adapter, so its rows come entirely from the descriptor projection.
+    An unknown profession with no descriptors still falls back to the
+    development projection (fail-open: show *something*). Item shape matches
+    ``core.project_targets`` (id / label / status / kind / work_items_* /
+    detail)."""
     prof = resolve_profession(data)
-    adapter = PROJECTION_ADAPTERS.get(prof, core.project_targets)
-    return adapter(data)
+    rows: list = []
+    adapter = PROJECTION_ADAPTERS.get(prof)
+    if adapter is not None:
+        rows.extend(adapter(data))
+    for desc in _descriptors_owned_by(data, prof):
+        for rec in _te.list_targets(data, desc):
+            if _wm.is_cancelled(rec):   # match the default status view
+                continue
+            rows.append(_te.project_target(desc, rec))
+    if not rows and adapter is None:
+        rows = core.project_targets(data)
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -99,12 +153,34 @@ class TargetClassProfessionError(ValueError):
     message; CLI callers print it and exit non-zero."""
 
 
-def target_class_owner(kind: str) -> str:
+def owned_target_classes(data: dict, profession: str) -> tuple:
+    """Return every target-class the ``profession`` owns in THIS project: the
+    built-in seed for dev / sales PLUS the kinds of any descriptors declared for
+    that profession (ms-122 e-3957). A dev / sales project (no descriptors)
+    returns exactly the built-in tuple, so existing behaviour is unchanged."""
+    prof = (profession or "").strip().lower()
+    builtin = OWNED_TARGET_CLASSES.get(prof, ())
+    out = list(builtin)
+    for desc in _descriptors_owned_by(data, prof):
+        kind = (desc.get("kind") or "").strip()
+        if kind and kind not in out:
+            out.append(kind)
+    return tuple(out)
+
+
+def target_class_owner(kind: str, data: dict | None = None) -> str:
     """Return the profession that owns ``kind`` (e.g. ``"milestone"`` → ``"dev"``),
-    or ``""`` when no occupation claims it."""
+    or ``""`` when no occupation claims it. When ``data`` is given, a descriptor-
+    defined class also resolves to its declared ``profession`` (ms-122 e-3957);
+    without ``data`` only the built-in dev / sales classes are known (keeps the
+    old single-argument call sites working)."""
     for prof, kinds in OWNED_TARGET_CLASSES.items():
         if kind in kinds:
             return prof
+    if data is not None:
+        for desc in _td.load_descriptors(data):
+            if isinstance(desc, dict) and (desc.get("kind") or "").strip() == kind:
+                return (desc.get("profession") or "").strip().lower()
     return ""
 
 
@@ -115,13 +191,17 @@ def assert_target_class_owned(data: dict, kind: str) -> None:
     This is the containment gate the target-creating CLI commands call before
     mutating (ms-115 e-3785). The message names what the project's profession
     CAN create and the exact command, so the user is guided to the right target
-    rather than merely blocked."""
+    rather than merely blocked. Descriptor-defined classes are owned by their
+    declared profession, so a data-defined class in the right project passes
+    (ms-122 e-3957)."""
     prof = resolve_profession(data)
-    owned = OWNED_TARGET_CLASSES.get(prof, ())
+    owned = owned_target_classes(data, prof)
     if kind in owned:
         return
-    owner = target_class_owner(kind)
-    owned_hints = " / ".join(_TARGET_CLASS_ADD_HINT.get(k, k) for k in owned)
+    owner = target_class_owner(kind, data)
+    owned_hints = " / ".join(
+        _TARGET_CLASS_ADD_HINT.get(k, f"beacon target create --class {k}")
+        for k in owned)
     owner_note = f"{owner} 職種の対象" if owner else "別職種の対象"
     raise TargetClassProfessionError(
         f"'{kind}' は{owner_note}です。このプロジェクトの職種は '{prof}' なので作成できません "
@@ -140,15 +220,33 @@ def assert_target_class_owned(data: dict, kind: str) -> None:
 TARGET_COLLECTIONS = ("milestones", "opportunities")
 
 
+def target_collections(data: dict | None = None) -> tuple:
+    """Return the project.json keys that hold Target records. Without ``data``,
+    the built-in seed (milestones / opportunities). With ``data``, the seed PLUS
+    each descriptor's ``collection`` (ms-122 e-3957), so a data-defined
+    occupation's records are walked by the same aggregators without editing this
+    registry."""
+    if not data:
+        return TARGET_COLLECTIONS
+    out = list(TARGET_COLLECTIONS)
+    for desc in _td.load_descriptors(data):
+        coll = (desc.get("collection") or "").strip() \
+            if isinstance(desc, dict) else ""
+        if coll and coll not in out:
+            out.append(coll)
+    return tuple(out)
+
+
 def iter_target_records(data: dict) -> list:
     """Return every raw Target record across occupations (development
-    Milestones + sales Opportunities). A project only ever populates one of
-    these collections, so callers get exactly that occupation's Targets without
+    Milestones + sales Opportunities + any data-defined target-class records,
+    ms-122 e-3957). A project only ever populates the collections of its own
+    occupation, so callers get exactly that occupation's Targets without
     branching on profession. Used by shared-frame aggregators that walk Target
     entries (session log). Unlike ``project_targets`` this returns the records
     verbatim (with their nested ``entries``), not the projected shape."""
     records = []
-    for coll in TARGET_COLLECTIONS:
+    for coll in target_collections(data):
         records.extend(data.get(coll, []) or [])
     return records
 
@@ -190,13 +288,38 @@ TARGET_DECOMPOSITION = {
 }
 
 
-def target_child_tables() -> tuple:
+def target_decomposition(data: dict | None = None) -> dict:
+    """Return the physical decomposition spec per Target collection. Without
+    ``data``, the built-in seed. With ``data``, the seed merged with each
+    descriptor's ``decomposition`` (``{id_field, arms}``) keyed by its
+    ``collection`` (ms-122 e-3957). A descriptor with no ``decomposition``
+    defaults to ``{id_field: "id", arms: ()}`` (its records ride inline, no new
+    child table). Built-in collections are never overridden by a descriptor."""
+    if not data:
+        return dict(TARGET_DECOMPOSITION)
+    merged = dict(TARGET_DECOMPOSITION)
+    for desc in _td.load_descriptors(data):
+        if not isinstance(desc, dict):
+            continue
+        coll = (desc.get("collection") or "").strip()
+        if not coll or coll in merged:
+            continue
+        dec = desc.get("decomposition") or {}
+        merged[coll] = {
+            "id_field": dec.get("id_field", "id"),
+            "arms": tuple(dec.get("arms") or ()),
+        }
+    return merged
+
+
+def target_child_tables(data: dict | None = None) -> tuple:
     """Return the distinct child-table names across all Target collections (= the
     union of fat arm names, de-duplicated in declaration order). ``communications``
     is shared by the sales opportunity and account collections, so it appears
-    once. A row-oriented backend creates one child table per name here."""
+    once. A row-oriented backend creates one child table per name here. With
+    ``data``, descriptor collections' arms are included too (ms-122 e-3957)."""
     seen: list = []
-    for spec in TARGET_DECOMPOSITION.values():
+    for spec in target_decomposition(data).values():
         for arm in spec["arms"]:
             if arm not in seen:
                 seen.append(arm)
@@ -220,15 +343,22 @@ NARROWING_KINDS = {
 }
 
 
-def all_narrowing_kinds() -> tuple:
+def all_narrowing_kinds(data: dict | None = None) -> tuple:
     """Return the union of every occupation's Trek scope narrowing kinds,
     de-duplicated, in registration order (development first so the legacy
     identity/target_kind resolution order — milestone, operation, task — is
-    unchanged for existing dev Treks; sales kinds append after)."""
+    unchanged for existing dev Treks; sales kinds append after). With ``data``,
+    descriptor-defined kinds append after the built-ins (ms-122 e-3957); without
+    it, only the built-in seed (keeps trek.py's import-time call unchanged)."""
     out: list = []
     for kinds in NARROWING_KINDS.values():
         for k in kinds:
             if k not in out:
+                out.append(k)
+    if data:
+        for desc in _td.load_descriptors(data):
+            k = (desc.get("kind") or "").strip() if isinstance(desc, dict) else ""
+            if k and k not in out:
                 out.append(k)
     return tuple(out)
 
@@ -247,15 +377,33 @@ NARROWING_ID_PREFIXES = {
 }
 
 
-def narrowing_kind_for_ref(ref: str) -> str:
+def narrowing_id_prefixes(data: dict | None = None) -> dict:
+    """Return the ``kind -> id prefix`` map. Without ``data``, the built-in
+    seed; with ``data``, plus each descriptor's ``kind -> id_prefix`` (ms-122
+    e-3957). Built-in kinds are never overridden."""
+    if not data:
+        return dict(NARROWING_ID_PREFIXES)
+    merged = dict(NARROWING_ID_PREFIXES)
+    for desc in _td.load_descriptors(data):
+        if not isinstance(desc, dict):
+            continue
+        kind = (desc.get("kind") or "").strip()
+        prefix = (desc.get("id_prefix") or "").strip()
+        if kind and prefix and kind not in merged:
+            merged[kind] = prefix
+    return merged
+
+
+def narrowing_kind_for_ref(ref: str, data: dict | None = None) -> str:
     """Return the narrowing kind whose id prefix ``ref`` matches, or ``""`` when
     none does. Longest matching prefix wins so ``opp-3`` resolves to
     ``opportunity`` rather than colliding with ``op-`` (operation) — though the
     current prefixes are disjoint, the longest-match rule keeps it robust if a
-    future prefix nests inside another."""
+    future prefix nests inside another. With ``data``, descriptor id prefixes
+    are considered too (ms-122 e-3957)."""
     ref = (ref or "").strip()
     best_kind, best_len = "", -1
-    for kind, prefix in NARROWING_ID_PREFIXES.items():
+    for kind, prefix in narrowing_id_prefixes(data).items():
         if ref.startswith(prefix) and len(prefix) > best_len:
             best_kind, best_len = kind, len(prefix)
     return best_kind

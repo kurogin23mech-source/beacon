@@ -77,10 +77,44 @@ BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" 
 
 各商談の現フェーズのゴール（methodology）を添えて、「なぜ今それか」を 1 行で示す。
 
+## Step 2.7: 2層 claim-aware フィルタ (ms-112 e-3677)
+
+「今日やること」を並べる前に、**各商談 / 顧客の 2層 claim 状態（= いま別セッションが LIVE 作業中か
+＋誰が永続担当か）を読む**。cockpit は「自分ひとりが全商談を見る」個人前提だったので、チームで複数の
+営業が同じ組織を触ると、他の担当が今まさに動かしている商談に重ねて「次の一手」を出してしまう。それを
+claim ベースで避ける（非排他 = 消さずに、印と順位で表す）。
+
+### 取得
+
+```bash
+beacon claim view --json
+```
+
+target-id（`opp-…` / `acc-…`）をキーに各商談・顧客の `flags`（`assigned_to_others` /
+`assigned_to_me` / `live_by_others` / `unclaimed` …）が返る。
+
+### 反映ポリシー（SPEC 設計方針3 / AC4・AC5、非排他）
+
+- `assigned_to_others == true` かつ `assigned_to_me == false`（他の営業担当の商談）→ 自分の分に絞る
+  ときは順位を下げ、横断表示では別担当と分かる印（👤<assignee>）を付ける。消しはしない。
+- `live_by_others == true`（他セッションが今まさに作業中）→ その行に **⚠ 別セッションが対応中** を
+  添え、重複対応を促さない。
+- `assigned_to_me` / `unclaimed` → 自分の担当 or 未割り当て。通常通り最優先で「今日やること」に出す。
+- **2層 fallback（AC6）**: LIVE claimer が居なくても assignee を読む。「今 LIVE で誰も居ない＝自分が
+  やってよい」と即断せず、他営業の担当なら印を付ける。
+
+**注（現状の source）**: 商談 / 顧客の LIVE 層（占有 claim）は、現時点では milestone にしか書き込み
+経路が無いため通常は空になる（= `live_*` は false）。cockpit の claim-aware は当面 **assignee（永続
+担当）層が主役**。商談にも占有 claim を書く経路が入れば LIVE 層も自動で効く（`beacon claim view` 側は
+既に target-class 横断で対応済み）。
+
+`beacon claim view` が失敗したら（cloud 不通等）この filter は skip し、従来通り全商談で「今日やること」
+を出す（best-effort）。
+
 ## Step 3: 横断で「今日やるべき」を優先度順に提示
 
 全商談の次の一手を、緊急度（遷移日超過 > 遷移日 due > 返信待ち超過 > 準備活動 > その他）で
-並べて提示する。担当（assignee）で絞れる場合は自分の分に絞ってよい:
+並べて提示する。担当（assignee）で絞れる場合は自分の分に絞ってよい（Step 2.7 の claim を反映）:
 
 ```
 🎯 今日やること (営業コックピット)

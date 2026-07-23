@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Beacon CLI commands - thin adapter over core.py logic."""
 
-__version__ = "0.60.0"
+__version__ = "0.60.1"
 
 import json
 import os
@@ -17,6 +17,8 @@ import core
 import transition_approval as _ta  # ms-119 e-3912: 目的達成レビュー primitive
 import work_model  # ms-109 e-3559: 職種非依存の Target 正準ラベルアクセサ
 import occupation  # ms-108 e-3269: ③共有フレームの職種プロジェクション registry
+import target_descriptor as _td  # ms-122 e-3954: data 定義 target-class 記述子
+import target_engine as _te  # ms-122 e-3956: 記述子駆動 target の汎用機構
 
 # ---------------------------------------------------------------------------
 # Store helpers
@@ -808,6 +810,16 @@ def cmd_init():
         data = sales_entities.build_sales_project(
             name, objective, retro_day=retro_day,
             disclosure_policy=disclosure_policy)
+    elif profession in ("backoffice", "back-office"):
+        # ms-122 e-3958: back-office is the first DATA-defined occupation — its
+        # target-classes (契約 / 評価 / 月次決算 / 勤怠ウォッチ) come from a
+        # descriptor seed, not a code container. This supersedes the ms-121
+        # milestone-流用 stub. The owner edits target_classes afterwards to
+        # tailor fields / phases without touching Beacon code.
+        import backoffice_seed
+        data = backoffice_seed.build_backoffice_project(
+            name, objective, retro_day=retro_day,
+            disclosure_policy=disclosure_policy)
     elif profession in ("", "dev"):
         data = {
             "name": name,
@@ -818,8 +830,8 @@ def cmd_init():
             "disclosure_policy": disclosure_policy,
         }
     else:
-        print(f"Error: unknown profession '{profession}' (valid: dev, sales)",
-              file=sys.stderr)
+        print(f"Error: unknown profession '{profession}' "
+              "(valid: dev, sales, backoffice)", file=sys.stderr)
         sys.exit(1)
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -827,6 +839,9 @@ def cmd_init():
     print(f"Created {pf}")
     if profession == "sales":
         print("  profession = sales (営業スキーマ: opportunities / accounts)")
+    elif profession in ("backoffice", "back-office"):
+        print("  profession = backoffice (記述子で定義: 契約 / 評価 / 月次決算 / "
+              "勤怠ウォッチ)")
     # Visible feedback on the chosen posture (SPEC § acceptance 2 + 3):
     # default-high is silent-but-printed so the user notices, opt-in low
     # gets a single-line confirmation that the OSS-friendly mode is active.
@@ -851,6 +866,9 @@ def cmd_init():
 
     if profession == "sales":
         print("Next: beacon account add / beacon opportunity add")
+    elif profession in ("backoffice", "back-office"):
+        print("Next: beacon target create --class contract --label <名前> "
+              "--field counterparty=<相手方>")
     else:
         print("Next: beacon milestone add")
 
@@ -1929,6 +1947,174 @@ def cmd_target_list():
               f"{m.get('old_state')} -> {m.get('new_state')} [{st}]")
         if m.get("intent"):
             print(f"      intent: {m.get('intent')}")
+
+
+# ---------------------------------------------------------------------------
+# Descriptor-driven target verbs (ms-122 e-3956) — create / advance / close /
+# instances for a data-defined target-class. These operate on the descriptor's
+# own collection and are orthogonal to the ms-119 review gate above.
+# ---------------------------------------------------------------------------
+
+def _resolve_descriptor(data: dict, kind: str) -> dict:
+    """Return the descriptor for ``kind`` or print a guidance error + exit. When
+    the project declares no descriptors at all, the message says so; otherwise
+    it lists the kinds that ARE declared so a typo names its neighbours."""
+    kind = (kind or "").strip()
+    if not kind:
+        print("Error: --class <kind> は必須です", file=sys.stderr)
+        sys.exit(1)
+    desc = _td.get_descriptor(data, kind)
+    if desc is None:
+        kinds = _td.descriptor_kinds(data)
+        if kinds:
+            print(f"Error: target-class '{kind}' の記述子がありません "
+                  f"(宣言済: {', '.join(kinds)})", file=sys.stderr)
+        else:
+            print(f"Error: target-class '{kind}' の記述子がありません "
+                  f"(このプロジェクトは target_classes を1つも宣言していません)",
+                  file=sys.stderr)
+        sys.exit(1)
+    # ms-122 AX finding: validate the descriptor at the point of use so a
+    # malformed record (unknown field type / duplicate keys / required on a
+    # phase field / missing required keys) fails loudly here instead of silently
+    # producing wrong results downstream. The validator was previously dead code
+    # (no CLI caller); this wires it into every descriptor-driven command.
+    problems = _td.validate_descriptor(desc)
+    if problems:
+        print(f"Error: target-class '{kind}' の記述子に問題があります:",
+              file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        print("  project.json の target_classes を修正してください。",
+              file=sys.stderr)
+        sys.exit(1)
+    return desc
+
+
+def _parse_field_pairs() -> dict:
+    """Parse BEACON_FIELDS (newline-joined ``key=value`` rows, set by bin/beacon
+    from repeated ``--field key=value``) into a dict. Splits on the FIRST ``=``
+    so a value may contain ``=``. Blank rows are skipped."""
+    out: dict = {}
+    raw = os.environ.get("BEACON_FIELDS", "")
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if "=" not in line:
+            print(f"Error: --field は key=value 形式です (受領: {line!r})",
+                  file=sys.stderr)
+            sys.exit(1)
+        key, val = line.split("=", 1)
+        out[key.strip()] = val.strip()
+    return out
+
+
+def cmd_target_create():
+    """Create a data-defined target of a given class (ms-122 e-3956).
+
+    beacon target create --class <kind> --label <text> [--field key=value ...]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    label = os.environ.get("BEACON_LABEL", "").strip()
+    if not label:
+        print("Usage: beacon target create --class <kind> --label <text> "
+              "[--field key=value ...]", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    fields = _parse_field_pairs()
+    try:
+        rec = _te.create_target(data, desc, label=label, fields=fields,
+                                actor=_actor_str())
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_create", "kind": kind,
+                           "target_id": rec["id"]})
+    phase = rec.get("phase", "")
+    print(f"作成: [{rec['id']}] {label} (class={kind})")
+    if phase:
+        print(f"  phase: {phase}")
+
+
+def cmd_target_advance():
+    """Advance a data-defined target to its next (or a named) phase (e-3956).
+
+    beacon target advance --class <kind> <target-id> [--to <phase>] [--reason <text>]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    to_phase = os.environ.get("BEACON_TO_PHASE", "").strip()
+    reason = os.environ.get("BEACON_REASON", "").strip()
+    if not target_id:
+        print("Usage: beacon target advance --class <kind> <target-id> "
+              "[--to <phase>] [--reason <text>]", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    try:
+        rec, old, new = _te.advance_target(data, desc, target_id,
+                                           to_phase=to_phase,
+                                           actor=_actor_str(), reason=reason)
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_advance", "kind": kind,
+                           "target_id": target_id})
+    print(f"フェーズ進行: [{target_id}] {old} -> {new}")
+    if _te.is_terminal_phase(desc, new):
+        print(f"  ※ '{new}' は最終フェーズです。完了は "
+              f"beacon target close --class {kind} {target_id}")
+
+
+def cmd_target_close():
+    """Close (mark done) a data-defined target (e-3956).
+
+    beacon target close --class <kind> <target-id> [--reason <text>]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    reason = os.environ.get("BEACON_REASON", "").strip()
+    if not target_id:
+        print("Usage: beacon target close --class <kind> <target-id> "
+              "[--reason <text>]", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    try:
+        _te.close_target(data, desc, target_id, actor=_actor_str(),
+                         reason=reason)
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_close", "kind": kind,
+                           "target_id": target_id})
+    print(f"完了: [{target_id}] を done にしました")
+    if reason:
+        print(f"  reason: {reason}")
+
+
+def cmd_target_instances():
+    """List the instances of a data-defined target-class (e-3956).
+
+    beacon target instances --class <kind> [--json]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    rows = [_te.project_target(desc, r) for r in _te.list_targets(data, desc)]
+    if json_mode:
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+    if not rows:
+        print(f"(class '{kind}' の target はまだありません)")
+        return
+    for r in rows:
+        icon = "●" if r["status"] == work_model.DONE_STATUS else "○"
+        phase = f" [{r['phase']}]" if r["phase"] else ""
+        print(f"  {icon} [{r['id']}] {r['label']}{phase} — {r['status']}")
 
 
 # Default command groups probed by the AX full-surface snapshot. These are
@@ -15843,6 +16029,31 @@ def cmd_push_list():
             print(f"  {p['summary']}")
 
 
+def cmd_project_rename():
+    """Rename the project — change its display name after creation (ms-122
+    e-4033).
+
+    beacon project rename <new-name>
+
+    A project's name is set once at ``beacon init`` and could not be changed
+    afterward, so a project whose purpose drifted kept a stale name. This
+    updates the display name in place. In cloud mode ``save_project`` writes the
+    whole project document, so the server-side display name (dashboard / Web UI
+    / project directory) follows the same rename — no separate step."""
+    new_name = os.environ.get("BEACON_NEW_NAME", "").strip()
+    if not new_name:
+        print("Usage: beacon project rename <new-name>", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    old = data.get("name", "")
+    if new_name == old:
+        print(f"プロジェクト名は既に '{new_name}' です (変更なし)。")
+        return
+    data["name"] = new_name
+    save_project(data, op={"op": "project_rename", "old": old, "new": new_name})
+    print(f"プロジェクト名を変更しました: {old or '(無名)'} → {new_name}")
+
+
 def cmd_project_archive():
     """Archive the current project (sets archived: true in project.json)."""
     data = load_project()
@@ -22388,6 +22599,150 @@ def cmd_claim_list():
             print(f"   {intent_suffix.strip()}")
 
 
+def _resolve_healthy_session_ids():
+    """Return the set of currently LIVE + healthy session ids for the current
+    project, or ``None`` when liveness cannot be verified (local mode / the
+    directory is unreachable). ``None`` is meaningful to the claim view: it
+    means "assume occupation claims are live" (conservative, non-blocking),
+    whereas an empty set means "verified — nobody is live".
+
+    Best-effort: any failure (no cloud, auth error, network) collapses to
+    ``None`` so ``beacon claim view`` still works offline off the raw
+    occupation claims on project.json.
+    """
+    try:
+        client, config = _get_api_client()
+        project_id = _resolve_bus_project_id(config)
+        if not project_id:
+            return None
+        sessions = client.list_sessions(
+            project_id, live_only=True, healthy_only=True, since_minutes=5)
+    except Exception:
+        return None
+    ids = {s.get("session_id") for s in (sessions or []) if s.get("session_id")}
+    return ids
+
+
+def cmd_claim_view():
+    """beacon claim view [--target <k>:<id>] [--json]
+
+    Read the 2-layer claim state (ms-112 e-3674): for a target, WHO is LIVE
+    working on it (occupation claim, liveness-checked against the bus
+    directory) + WHO is the persistent assignee — bundled into one view,
+    across target-classes (milestone / opportunity / account).
+
+    Non-exclusive (SPEC 設計方針 3): this is a READ. It never blocks work; it
+    surfaces flags/warnings so consumers (session-start「次の一手」/ dispatch /
+    cockpit) can組み立てる claim-aware without stopping anyone. With ``--target``
+    it emits a single view; without, the view for every target keyed by id.
+    """
+    import claim_view as _claim_view
+
+    tk = os.environ.get("BEACON_CLAIM_TARGET_KIND", "").strip()
+    ti = os.environ.get("BEACON_CLAIM_TARGET_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    # ms-112 AX+maintainability consensus: the <kind> in --target <kind>:<id>
+    # was read then never used by `view` — `--target opp:ms-1` passed silently.
+    # Validate it against the id's derived kind (fail-fast, before any cloud
+    # call) so a mismatch is rejected instead of ignored (kind stops being dead
+    # input).
+    if ti and tk:
+        _alias = {"ms": "milestone", "milestone": "milestone",
+                  "opp": "opportunity", "opportunity": "opportunity",
+                  "acc": "account", "account": "account"}
+        _declared = _alias.get(tk.lower())
+        _actual = work_model.target_kind(ti)
+        if _declared and _actual and _declared != _actual:
+            print(f"Error: --target の kind '{tk}' が id '{ti}' (= {_actual}) と "
+                  f"一致しません。<kind>:<id> は同じ対象を指してください。",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    data = load_project()
+    my_session_id = _resolve_session_id()
+    # "me" for the assignee layer: the assignee auto-add on `milestone start`
+    # writes ``agent.get_actor()["agent"]`` (e.g. "MACHINE-claude"), so match
+    # against that first, plus machine / email / the git-actor handle, so a
+    # target assigned to any of my aliases reads as assigned_to_me.
+    my_identities: set = set()
+    try:
+        import agent as _agent
+        actor = _agent.get_actor()
+        for key in ("agent", "machine", "email"):
+            v = (actor.get(key) or "").strip()
+            if v:
+                my_identities.add(v)
+    except Exception:
+        pass
+    try:
+        import work_base
+        my_identities.add(work_base.current_actor())
+    except Exception:
+        pass
+
+    live_ids = _resolve_healthy_session_ids()
+
+    views = _claim_view.build_claim_views(
+        data,
+        live_session_ids=live_ids,
+        my_session_id=my_session_id,
+        my_identities=my_identities,
+    )
+
+    if ti:
+        view = views.get(ti)
+        if view is None:
+            # The target isn't in project.json — still return a well-formed
+            # (unclaimed) view so callers don't special-case a miss.
+            # ms-112 AX finding: a miss (unknown id, or a kind this view does
+            # not walk — task/operation/trek) is NOT "unclaimed=free to grab".
+            # Mark exists=False so a typo can't read as a safe claim target.
+            view = _claim_view.build_claim_view(
+                {"id": ti},
+                live_session_ids=live_ids,
+                my_session_id=my_session_id,
+                my_identities=my_identities,
+                exists=False,
+            )
+        if json_mode:
+            print(json.dumps(view, ensure_ascii=False))
+            return
+        line = _claim_view.format_claim_line(view)
+        label = view.get("label") or view.get("target_id")
+        print(f"{view.get('target_id')} {label}")
+        if not view.get("exists", True):
+            print("  ⚠ この id の target は見つかりません (claim 対象は milestone / "
+                  "opportunity / account。task / operation / trek はこの view の"
+                  "対象外)。unclaimed とは扱いません。")
+        else:
+            print(f"  {line}" if line else "  (未 claim — 誰も作業中でなく担当も未設定)")
+        if live_ids is None:
+            print("  ※ liveness 未確認 (local mode / directory 不通) — LIVE claim は"
+                  "健全性未検証で表示")
+        return
+
+    if json_mode:
+        print(json.dumps(views, ensure_ascii=False))
+        return
+
+    if not views:
+        print("(no targets)")
+        return
+    shown = 0
+    for tid, view in views.items():
+        line = _claim_view.format_claim_line(view)
+        if not line:
+            continue  # unclaimed targets are noise in the human view
+        label = view.get("label") or tid
+        print(f"{tid} {label}: {line}")
+        shown += 1
+    if shown == 0:
+        print("(claim 済みの target はありません — 全 target が未 claim)")
+    if live_ids is None:
+        print("※ liveness 未確認 (local mode / directory 不通)")
+
+
 def cmd_resume_global():
     """Broadcast a global resume."""
     import stop_signal as _stop
@@ -24113,6 +24468,10 @@ if __name__ == "__main__":
         "target_approve": cmd_target_approve,
         "target_reject": cmd_target_reject,
         "target_list": cmd_target_list,
+        "target_create": cmd_target_create,      # ms-122 e-3956
+        "target_advance": cmd_target_advance,     # ms-122 e-3956
+        "target_close": cmd_target_close,         # ms-122 e-3956
+        "target_instances": cmd_target_instances,  # ms-122 e-3956
         "review_context": cmd_review_context,
         "milestone_observe": cmd_milestone_observe,
         "milestone_wait": cmd_milestone_wait,
@@ -24243,6 +24602,7 @@ if __name__ == "__main__":
         "update": cmd_update,
         "search": cmd_search,
         "cycle_status": cmd_cycle_status,
+        "project_rename": cmd_project_rename,      # ms-122 e-4033
         "project_archive": cmd_project_archive,
         "deploy_record": cmd_deploy_record,
         "deploy_list": cmd_deploy_list,
@@ -24326,6 +24686,10 @@ if __name__ == "__main__":
         "claim_respond": cmd_claim_respond,
         "claim_release": cmd_claim_release,
         "claim_list": cmd_claim_list,
+        # ms-112 e-3674: 2-layer claim view. Reads occupation (LIVE session) +
+        # assignee (persistent) into one claim-aware view, target-class 横断.
+        # The consuming layer session-start / dispatch / cockpit read this.
+        "claim_view": cmd_claim_view,
         # ms-55 e-1649: STUCK detector. Idle-timeout based emission of
         # stop signals with reason_kind="stuck", same protocol as e-1646.
         "stuck_check": cmd_stuck_check,
