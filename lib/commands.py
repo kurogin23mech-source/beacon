@@ -1842,7 +1842,8 @@ def cmd_target_approve():
     data = load_project()
     try:
         entry, new_state = core.target_transition_approval_approve(
-            data, entry_id, rationale=rationale, actor=_actor_str())
+            data, entry_id, rationale=rationale, actor=_actor_str(),
+            gate=_approval_gate_record())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1857,6 +1858,14 @@ def cmd_target_approve():
     print(f"承認: {target_id} を {new_state} に遷移しました ({entry_id})")
     if rationale:
         print(f"  rationale: {rationale}")
+    # ms-119 e-4006 audit: surface HOW the gate was passed so an override
+    # approval is visible at the point of use, not just in the record.
+    _gate = entry["meta"].get("approval_gate", {})
+    if _gate:
+        _es = f", evidence={_gate['evidence_source']}" if _gate.get("evidence_source") else ""
+        print(f"  gate: {_gate.get('signal')} (session_kind={_gate.get('session_kind')}{_es})")
+        if _gate.get("signal") == "user-override" and _gate.get("session_kind") != "human":
+            print("  ⚠ AI セッションが override で承認しました — この遷移は監査対象です。")
 
 
 def cmd_target_reject():
@@ -1965,6 +1974,23 @@ def _collect_surface_snapshot(commands_list=None) -> list:
     return probes
 
 
+def _model_independence_gap(review_spine):
+    """ms-119 / e-3988 wire-up (思想レビュー finding ②) — run the judge/implementer
+    model independence check in the kernel and return a gap string if they match.
+
+    The check used to be a callable with no caller (enforcement was skill prose).
+    Running it here bakes the warning into the bundle's gaps, so the judge itself
+    sees "judge model == implementer model" in its input — structural, not prose.
+    Returns None when no judge model was supplied or the models differ.
+    """
+    judge_model = os.environ.get("BEACON_JUDGE_MODEL", "").strip()
+    if not judge_model:
+        return None
+    impl_model = os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip()
+    verdict = review_spine.judge_model_independence(impl_model, judge_model)
+    return None if verdict["ok"] else ("⚠ モデル独立性: " + verdict["reason"])
+
+
 def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = "") -> None:
     """Emit the 目的達成 evidence-generation bundle for a context-zero judge
     (ms-119 / e-4005).
@@ -2043,6 +2069,10 @@ def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = ""
             print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
             sys.exit(1)
         diff_text = proc.stdout
+
+    _mi = _model_independence_gap(review_spine)
+    if _mi:
+        gaps.append(_mi)
 
     bundle = review_spine.assemble_attainment_context(
         target_id=target_id,
@@ -2209,6 +2239,10 @@ def cmd_review_context():
         diff_text = proc.stdout
         if not diff_text.strip():
             gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
+
+    _mi = _model_independence_gap(review_spine)
+    if _mi:
+        gaps.append(_mi)
 
     bundle = review_spine.assemble_review_context(
         review_type,
@@ -13806,6 +13840,35 @@ def _ai_session_direct_completion_ban_active() -> bool:
     if os.environ.get("BEACON_TARGET_COMPLETE_USER_OVERRIDE", "") == "1":
         return False
     return not _session_kind_is_human()
+
+
+def _approval_gate_record() -> dict:
+    """ms-119 / e-4006 audit (思想レビュー finding ①b) — capture HOW an approval
+    passed the human-only guard.
+
+    The env guard is a self-report, so this MS's value is not "an AI can't
+    approve" but "an AI that approves cannot HIDE it". Recording which signal
+    opened the gate turns an autonomous AI self-approval from something
+    indistinguishable in the record into a grep-able footprint (an
+    ``ai-session`` actor + ``user-override`` signal is the smoking gun).
+
+    ``evidence_source`` is an optional, self-declared provenance string the Skill
+    sets after actually running the independent judge (e.g.
+    ``independent-judge:fable``) — a recorded claim, not a lock.
+    """
+    override = os.environ.get("BEACON_TARGET_APPROVE_USER_OVERRIDE", "") == "1"
+    if override:
+        signal = "user-override"
+    elif _session_kind_is_human():
+        signal = "human-session"
+    else:
+        # Defensive: the approve ban should have refused before we get here.
+        signal = "ai-session-unguarded"
+    return {
+        "signal": signal,
+        "session_kind": (os.environ.get("BEACON_SESSION_KIND", "") or "").strip() or "unset",
+        "evidence_source": (os.environ.get("BEACON_EVIDENCE_SOURCE", "") or "").strip(),
+    }
 
 
 def cmd_pr_merge():

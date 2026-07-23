@@ -51,7 +51,14 @@ triggers:
 - `--models <m1,m2,...>`: 判定サブエージェントのモデル。既定は実装者と別の 1 体
   (`fable`)。複数指定でパネル化 (fan-out、多視点)。指定可能: `fable` / `haiku` /
   `sonnet` / `opus`。
-- `--mode diff`: 既定かつ現状唯一の対応値。full-surface (棚卸し監査) は surface snapshot 採取器が要るため follow-up。
+- `--mode diff | full-surface`: 既定 `diff` (変更差分をレビュー)。`full-surface`
+  (e-3987) は AX 用の棚卸し監査で、各コマンド群の help / エラー / exit code を機械採取
+  した surface-snapshot を artifact にする (差分に現れない既存コードの AX 欠陥も拾う)。
+
+**モデル独立性を kernel に照合させる (e-3988)**: kernel を呼ぶとき
+`--judge-model <使う判定モデル>` と `BEACON_IMPLEMENTER_MODEL=<あなたのモデル>` を渡すと、
+両者が一致した場合に bundle の `gaps` に警告が **機械的に** 載る (散文のお願いでなく、
+判定エージェントの入力そのものに警告が届く)。一致警告が出たら別モデルに切り替える。
 
 引数が省略されていれば対話で埋める。ただし **type と target は必ず確定してから**
 kernel を呼ぶ。
@@ -238,6 +245,11 @@ judge が返した証拠 (各 criterion の met/partial/not-met + 根拠 + overa
 - **確定 (approve) は人間**: `beacon target approve <entry-id>` は e-4006 で AI セッション
   を拒否する。人間が証拠を見て `BEACON_SESSION_KIND=human`（または明示 override）で
   approve するか、却下する。あなたはここで止まり、人間の判断を待つ。
+- **監査痕跡 (e-4006 audit)**: 承認は「どの signal でゲートを通ったか」を記録する。独立
+  judge が証拠を作った場合は approve 時に `BEACON_EVIDENCE_SOURCE=independent-judge:<model>`
+  を渡すと、その出所が承認記録に残る。AI セッションが override で承認すると記録に
+  `⚠ AI セッションが override で承認` と刻まれ、自己承認は隠せず必ず後から見つかる
+  (この MS の核心 = 「やれなくする」ではなく「隠せなくする」)。
 
 ### A-4. 自己検証 (dogfood)
 
