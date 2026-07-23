@@ -553,6 +553,69 @@ cmd_target_list() {
         python3 "$COMMANDS_PY" target_list
 }
 
+cmd_target_create() {
+    ensure_project
+    local kind="" label="" fields=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --class)  kind="${2:-}";  shift 2 ;;
+            --label)  label="${2:-}"; shift 2 ;;
+            --field)  fields="${fields}${2:-}"$'\n'; shift 2 ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target create --class <kind> --label <text> [--field key=value ...]" ;;
+            *)        shift ;;
+        esac
+    done
+    BEACON_TARGET_CLASS="$kind" BEACON_LABEL="$label" BEACON_FIELDS="$fields" \
+        python3 "$COMMANDS_PY" target_create
+}
+
+cmd_target_advance() {
+    ensure_project
+    local kind="" target_id="" to_phase="" reason=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --class)  kind="${2:-}";     shift 2 ;;
+            --to)     to_phase="${2:-}"; shift 2 ;;
+            --reason) reason="${2:-}";   shift 2 ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target advance --class <kind> <target-id> [--to <phase>] [--reason <text>]" ;;
+            *)        target_id="$1";    shift ;;
+        esac
+    done
+    BEACON_TARGET_CLASS="$kind" BEACON_TARGET_ID="$target_id" \
+        BEACON_TO_PHASE="$to_phase" BEACON_REASON="$reason" \
+        python3 "$COMMANDS_PY" target_advance
+}
+
+cmd_target_close() {
+    ensure_project
+    local kind="" target_id="" reason=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --class)  kind="${2:-}";   shift 2 ;;
+            --reason) reason="${2:-}"; shift 2 ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target close --class <kind> <target-id> [--reason <text>]" ;;
+            *)        target_id="$1";  shift ;;
+        esac
+    done
+    BEACON_TARGET_CLASS="$kind" BEACON_TARGET_ID="$target_id" \
+        BEACON_REASON="$reason" python3 "$COMMANDS_PY" target_close
+}
+
+cmd_target_instances() {
+    ensure_project
+    local kind="" json=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --class)  kind="${2:-}"; shift 2 ;;
+            --json)   json=1;        shift ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target instances --class <kind> [--json]" ;;
+            *)        shift ;;
+        esac
+    done
+    BEACON_TARGET_CLASS="$kind" BEACON_JSON="$json" \
+        python3 "$COMMANDS_PY" target_instances
+}
+
 cmd_review_context() {
     # ms-119 e-3947: emit the review-kernel bundle (原典 + mechanical diff only)
     # for an independent judge subagent. See /beacon-review-run.
@@ -3076,7 +3139,18 @@ case "${1:-}" in
             approve)  shift 2; cmd_target_approve "$@" ;;
             reject)   shift 2; cmd_target_reject "$@" ;;
             list|ls)  shift 2; cmd_target_list "$@" ;;
-            *)        echo "Usage: beacon target [review-request|approve|reject|list]  (目的達成レビュー: target 遷移の人間承認)" ;;
+            create)   shift 2; cmd_target_create "$@" ;;
+            advance)  shift 2; cmd_target_advance "$@" ;;
+            close)    shift 2; cmd_target_close "$@" ;;
+            instances) shift 2; cmd_target_instances "$@" ;;
+            *)        echo "Usage: beacon target <subcommand>
+  目的達成レビュー (target 遷移の人間承認):
+    review-request | approve | reject | list
+  記述子駆動 target (data 定義 target-class の操作, ms-122):
+    create --class <kind> --label <text> [--field key=value ...]
+    advance --class <kind> <target-id> [--to <phase>] [--reason <text>]
+    close --class <kind> <target-id> [--reason <text>]
+    instances --class <kind> [--json]" ;;
         esac
         ;;
     review)

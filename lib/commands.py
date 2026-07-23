@@ -17,6 +17,8 @@ import core
 import transition_approval as _ta  # ms-119 e-3912: 目的達成レビュー primitive
 import work_model  # ms-109 e-3559: 職種非依存の Target 正準ラベルアクセサ
 import occupation  # ms-108 e-3269: ③共有フレームの職種プロジェクション registry
+import target_descriptor as _td  # ms-122 e-3954: data 定義 target-class 記述子
+import target_engine as _te  # ms-122 e-3956: 記述子駆動 target の汎用機構
 
 # ---------------------------------------------------------------------------
 # Store helpers
@@ -1929,6 +1931,160 @@ def cmd_target_list():
               f"{m.get('old_state')} -> {m.get('new_state')} [{st}]")
         if m.get("intent"):
             print(f"      intent: {m.get('intent')}")
+
+
+# ---------------------------------------------------------------------------
+# Descriptor-driven target verbs (ms-122 e-3956) — create / advance / close /
+# instances for a data-defined target-class. These operate on the descriptor's
+# own collection and are orthogonal to the ms-119 review gate above.
+# ---------------------------------------------------------------------------
+
+def _resolve_descriptor(data: dict, kind: str) -> dict:
+    """Return the descriptor for ``kind`` or print a guidance error + exit. When
+    the project declares no descriptors at all, the message says so; otherwise
+    it lists the kinds that ARE declared so a typo names its neighbours."""
+    kind = (kind or "").strip()
+    if not kind:
+        print("Error: --class <kind> は必須です", file=sys.stderr)
+        sys.exit(1)
+    desc = _td.get_descriptor(data, kind)
+    if desc is None:
+        kinds = _td.descriptor_kinds(data)
+        if kinds:
+            print(f"Error: target-class '{kind}' の記述子がありません "
+                  f"(宣言済: {', '.join(kinds)})", file=sys.stderr)
+        else:
+            print(f"Error: target-class '{kind}' の記述子がありません "
+                  f"(このプロジェクトは target_classes を1つも宣言していません)",
+                  file=sys.stderr)
+        sys.exit(1)
+    return desc
+
+
+def _parse_field_pairs() -> dict:
+    """Parse BEACON_FIELDS (newline-joined ``key=value`` rows, set by bin/beacon
+    from repeated ``--field key=value``) into a dict. Splits on the FIRST ``=``
+    so a value may contain ``=``. Blank rows are skipped."""
+    out: dict = {}
+    raw = os.environ.get("BEACON_FIELDS", "")
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if "=" not in line:
+            print(f"Error: --field は key=value 形式です (受領: {line!r})",
+                  file=sys.stderr)
+            sys.exit(1)
+        key, val = line.split("=", 1)
+        out[key.strip()] = val.strip()
+    return out
+
+
+def cmd_target_create():
+    """Create a data-defined target of a given class (ms-122 e-3956).
+
+    beacon target create --class <kind> --label <text> [--field key=value ...]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    label = os.environ.get("BEACON_LABEL", "").strip()
+    if not label:
+        print("Usage: beacon target create --class <kind> --label <text> "
+              "[--field key=value ...]", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    fields = _parse_field_pairs()
+    try:
+        rec = _te.create_target(data, desc, label=label, fields=fields,
+                                actor=_actor_str())
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_create", "kind": kind,
+                           "target_id": rec["id"]})
+    phase = rec.get("phase", "")
+    print(f"作成: [{rec['id']}] {label} (class={kind})")
+    if phase:
+        print(f"  phase: {phase}")
+
+
+def cmd_target_advance():
+    """Advance a data-defined target to its next (or a named) phase (e-3956).
+
+    beacon target advance --class <kind> <target-id> [--to <phase>] [--reason <text>]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    to_phase = os.environ.get("BEACON_TO_PHASE", "").strip()
+    reason = os.environ.get("BEACON_REASON", "").strip()
+    if not target_id:
+        print("Usage: beacon target advance --class <kind> <target-id> "
+              "[--to <phase>] [--reason <text>]", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    try:
+        rec, old, new = _te.advance_target(data, desc, target_id,
+                                           to_phase=to_phase,
+                                           actor=_actor_str(), reason=reason)
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_advance", "kind": kind,
+                           "target_id": target_id})
+    print(f"フェーズ進行: [{target_id}] {old} -> {new}")
+    if _te.is_terminal_phase(desc, new):
+        print(f"  ※ '{new}' は最終フェーズです。完了は "
+              f"beacon target close --class {kind} {target_id}")
+
+
+def cmd_target_close():
+    """Close (mark done) a data-defined target (e-3956).
+
+    beacon target close --class <kind> <target-id> [--reason <text>]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    reason = os.environ.get("BEACON_REASON", "").strip()
+    if not target_id:
+        print("Usage: beacon target close --class <kind> <target-id> "
+              "[--reason <text>]", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    try:
+        _te.close_target(data, desc, target_id, actor=_actor_str(),
+                         reason=reason)
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_close", "kind": kind,
+                           "target_id": target_id})
+    print(f"完了: [{target_id}] を done にしました")
+    if reason:
+        print(f"  reason: {reason}")
+
+
+def cmd_target_instances():
+    """List the instances of a data-defined target-class (e-3956).
+
+    beacon target instances --class <kind> [--json]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    rows = [_te.project_target(desc, r) for r in _te.list_targets(data, desc)]
+    if json_mode:
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+    if not rows:
+        print(f"(class '{kind}' の target はまだありません)")
+        return
+    for r in rows:
+        icon = "●" if r["status"] == work_model.DONE_STATUS else "○"
+        phase = f" [{r['phase']}]" if r["phase"] else ""
+        print(f"  {icon} [{r['id']}] {r['label']}{phase} — {r['status']}")
 
 
 # Default command groups probed by the AX full-surface snapshot. These are
@@ -23943,6 +24099,10 @@ if __name__ == "__main__":
         "target_approve": cmd_target_approve,
         "target_reject": cmd_target_reject,
         "target_list": cmd_target_list,
+        "target_create": cmd_target_create,      # ms-122 e-3956
+        "target_advance": cmd_target_advance,     # ms-122 e-3956
+        "target_close": cmd_target_close,         # ms-122 e-3956
+        "target_instances": cmd_target_instances,  # ms-122 e-3956
         "review_context": cmd_review_context,
         "milestone_observe": cmd_milestone_observe,
         "milestone_wait": cmd_milestone_wait,
