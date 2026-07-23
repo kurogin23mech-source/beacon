@@ -17,6 +17,8 @@ import core
 import transition_approval as _ta  # ms-119 e-3912: 目的達成レビュー primitive
 import work_model  # ms-109 e-3559: 職種非依存の Target 正準ラベルアクセサ
 import occupation  # ms-108 e-3269: ③共有フレームの職種プロジェクション registry
+import target_descriptor as _td  # ms-122 e-3954: data 定義 target-class 記述子
+import target_engine as _te  # ms-122 e-3956: 記述子駆動 target の汎用機構
 
 # ---------------------------------------------------------------------------
 # Store helpers
@@ -808,6 +810,16 @@ def cmd_init():
         data = sales_entities.build_sales_project(
             name, objective, retro_day=retro_day,
             disclosure_policy=disclosure_policy)
+    elif profession in ("backoffice", "back-office"):
+        # ms-122 e-3958: back-office is the first DATA-defined occupation — its
+        # target-classes (契約 / 評価 / 月次決算 / 勤怠ウォッチ) come from a
+        # descriptor seed, not a code container. This supersedes the ms-121
+        # milestone-流用 stub. The owner edits target_classes afterwards to
+        # tailor fields / phases without touching Beacon code.
+        import backoffice_seed
+        data = backoffice_seed.build_backoffice_project(
+            name, objective, retro_day=retro_day,
+            disclosure_policy=disclosure_policy)
     elif profession in ("", "dev"):
         data = {
             "name": name,
@@ -818,8 +830,8 @@ def cmd_init():
             "disclosure_policy": disclosure_policy,
         }
     else:
-        print(f"Error: unknown profession '{profession}' (valid: dev, sales)",
-              file=sys.stderr)
+        print(f"Error: unknown profession '{profession}' "
+              "(valid: dev, sales, backoffice)", file=sys.stderr)
         sys.exit(1)
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
@@ -827,6 +839,9 @@ def cmd_init():
     print(f"Created {pf}")
     if profession == "sales":
         print("  profession = sales (営業スキーマ: opportunities / accounts)")
+    elif profession in ("backoffice", "back-office"):
+        print("  profession = backoffice (記述子で定義: 契約 / 評価 / 月次決算 / "
+              "勤怠ウォッチ)")
     # Visible feedback on the chosen posture (SPEC § acceptance 2 + 3):
     # default-high is silent-but-printed so the user notices, opt-in low
     # gets a single-line confirmation that the OSS-friendly mode is active.
@@ -851,6 +866,9 @@ def cmd_init():
 
     if profession == "sales":
         print("Next: beacon account add / beacon opportunity add")
+    elif profession in ("backoffice", "back-office"):
+        print("Next: beacon target create --class contract --label <名前> "
+              "--field counterparty=<相手方>")
     else:
         print("Next: beacon milestone add")
 
@@ -1929,6 +1947,174 @@ def cmd_target_list():
               f"{m.get('old_state')} -> {m.get('new_state')} [{st}]")
         if m.get("intent"):
             print(f"      intent: {m.get('intent')}")
+
+
+# ---------------------------------------------------------------------------
+# Descriptor-driven target verbs (ms-122 e-3956) — create / advance / close /
+# instances for a data-defined target-class. These operate on the descriptor's
+# own collection and are orthogonal to the ms-119 review gate above.
+# ---------------------------------------------------------------------------
+
+def _resolve_descriptor(data: dict, kind: str) -> dict:
+    """Return the descriptor for ``kind`` or print a guidance error + exit. When
+    the project declares no descriptors at all, the message says so; otherwise
+    it lists the kinds that ARE declared so a typo names its neighbours."""
+    kind = (kind or "").strip()
+    if not kind:
+        print("Error: --class <kind> は必須です", file=sys.stderr)
+        sys.exit(1)
+    desc = _td.get_descriptor(data, kind)
+    if desc is None:
+        kinds = _td.descriptor_kinds(data)
+        if kinds:
+            print(f"Error: target-class '{kind}' の記述子がありません "
+                  f"(宣言済: {', '.join(kinds)})", file=sys.stderr)
+        else:
+            print(f"Error: target-class '{kind}' の記述子がありません "
+                  f"(このプロジェクトは target_classes を1つも宣言していません)",
+                  file=sys.stderr)
+        sys.exit(1)
+    # ms-122 AX finding: validate the descriptor at the point of use so a
+    # malformed record (unknown field type / duplicate keys / required on a
+    # phase field / missing required keys) fails loudly here instead of silently
+    # producing wrong results downstream. The validator was previously dead code
+    # (no CLI caller); this wires it into every descriptor-driven command.
+    problems = _td.validate_descriptor(desc)
+    if problems:
+        print(f"Error: target-class '{kind}' の記述子に問題があります:",
+              file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        print("  project.json の target_classes を修正してください。",
+              file=sys.stderr)
+        sys.exit(1)
+    return desc
+
+
+def _parse_field_pairs() -> dict:
+    """Parse BEACON_FIELDS (newline-joined ``key=value`` rows, set by bin/beacon
+    from repeated ``--field key=value``) into a dict. Splits on the FIRST ``=``
+    so a value may contain ``=``. Blank rows are skipped."""
+    out: dict = {}
+    raw = os.environ.get("BEACON_FIELDS", "")
+    for line in raw.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        if "=" not in line:
+            print(f"Error: --field は key=value 形式です (受領: {line!r})",
+                  file=sys.stderr)
+            sys.exit(1)
+        key, val = line.split("=", 1)
+        out[key.strip()] = val.strip()
+    return out
+
+
+def cmd_target_create():
+    """Create a data-defined target of a given class (ms-122 e-3956).
+
+    beacon target create --class <kind> --label <text> [--field key=value ...]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    label = os.environ.get("BEACON_LABEL", "").strip()
+    if not label:
+        print("Usage: beacon target create --class <kind> --label <text> "
+              "[--field key=value ...]", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    fields = _parse_field_pairs()
+    try:
+        rec = _te.create_target(data, desc, label=label, fields=fields,
+                                actor=_actor_str())
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_create", "kind": kind,
+                           "target_id": rec["id"]})
+    phase = rec.get("phase", "")
+    print(f"作成: [{rec['id']}] {label} (class={kind})")
+    if phase:
+        print(f"  phase: {phase}")
+
+
+def cmd_target_advance():
+    """Advance a data-defined target to its next (or a named) phase (e-3956).
+
+    beacon target advance --class <kind> <target-id> [--to <phase>] [--reason <text>]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    to_phase = os.environ.get("BEACON_TO_PHASE", "").strip()
+    reason = os.environ.get("BEACON_REASON", "").strip()
+    if not target_id:
+        print("Usage: beacon target advance --class <kind> <target-id> "
+              "[--to <phase>] [--reason <text>]", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    try:
+        rec, old, new = _te.advance_target(data, desc, target_id,
+                                           to_phase=to_phase,
+                                           actor=_actor_str(), reason=reason)
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_advance", "kind": kind,
+                           "target_id": target_id})
+    print(f"フェーズ進行: [{target_id}] {old} -> {new}")
+    if _te.is_terminal_phase(desc, new):
+        print(f"  ※ '{new}' は最終フェーズです。完了は "
+              f"beacon target close --class {kind} {target_id}")
+
+
+def cmd_target_close():
+    """Close (mark done) a data-defined target (e-3956).
+
+    beacon target close --class <kind> <target-id> [--reason <text>]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    reason = os.environ.get("BEACON_REASON", "").strip()
+    if not target_id:
+        print("Usage: beacon target close --class <kind> <target-id> "
+              "[--reason <text>]", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    try:
+        _te.close_target(data, desc, target_id, actor=_actor_str(),
+                         reason=reason)
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_close", "kind": kind,
+                           "target_id": target_id})
+    print(f"完了: [{target_id}] を done にしました")
+    if reason:
+        print(f"  reason: {reason}")
+
+
+def cmd_target_instances():
+    """List the instances of a data-defined target-class (e-3956).
+
+    beacon target instances --class <kind> [--json]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    rows = [_te.project_target(desc, r) for r in _te.list_targets(data, desc)]
+    if json_mode:
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+    if not rows:
+        print(f"(class '{kind}' の target はまだありません)")
+        return
+    for r in rows:
+        icon = "●" if r["status"] == work_model.DONE_STATUS else "○"
+        phase = f" [{r['phase']}]" if r["phase"] else ""
+        print(f"  {icon} [{r['id']}] {r['label']}{phase} — {r['status']}")
 
 
 # Default command groups probed by the AX full-surface snapshot. These are
@@ -15843,6 +16029,31 @@ def cmd_push_list():
             print(f"  {p['summary']}")
 
 
+def cmd_project_rename():
+    """Rename the project — change its display name after creation (ms-122
+    e-4033).
+
+    beacon project rename <new-name>
+
+    A project's name is set once at ``beacon init`` and could not be changed
+    afterward, so a project whose purpose drifted kept a stale name. This
+    updates the display name in place. In cloud mode ``save_project`` writes the
+    whole project document, so the server-side display name (dashboard / Web UI
+    / project directory) follows the same rename — no separate step."""
+    new_name = os.environ.get("BEACON_NEW_NAME", "").strip()
+    if not new_name:
+        print("Usage: beacon project rename <new-name>", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    old = data.get("name", "")
+    if new_name == old:
+        print(f"プロジェクト名は既に '{new_name}' です (変更なし)。")
+        return
+    data["name"] = new_name
+    save_project(data, op={"op": "project_rename", "old": old, "new": new_name})
+    print(f"プロジェクト名を変更しました: {old or '(無名)'} → {new_name}")
+
+
 def cmd_project_archive():
     """Archive the current project (sets archived: true in project.json)."""
     data = load_project()
@@ -23943,6 +24154,10 @@ if __name__ == "__main__":
         "target_approve": cmd_target_approve,
         "target_reject": cmd_target_reject,
         "target_list": cmd_target_list,
+        "target_create": cmd_target_create,      # ms-122 e-3956
+        "target_advance": cmd_target_advance,     # ms-122 e-3956
+        "target_close": cmd_target_close,         # ms-122 e-3956
+        "target_instances": cmd_target_instances,  # ms-122 e-3956
         "review_context": cmd_review_context,
         "milestone_observe": cmd_milestone_observe,
         "milestone_wait": cmd_milestone_wait,
@@ -24073,6 +24288,7 @@ if __name__ == "__main__":
         "update": cmd_update,
         "search": cmd_search,
         "cycle_status": cmd_cycle_status,
+        "project_rename": cmd_project_rename,      # ms-122 e-4033
         "project_archive": cmd_project_archive,
         "deploy_record": cmd_deploy_record,
         "deploy_list": cmd_deploy_list,
