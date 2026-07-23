@@ -18,3 +18,10 @@ import os
 # propagates to subprocess children (tests that invoke the `beacon` CLI), so
 # both in-process command calls and subprocess runs inherit it.
 os.environ.setdefault("BEACON_SESSION_KIND", "human")
+
+# ms-123 / e-4029: mark the whole suite as a test context so the cloud write
+# guard (lib/cloud_write_guard.py) refuses to create projects on the
+# production cloud. This is what closes the leak that left 48 phase4-test
+# residue projects behind. setdefault (not a hard set) so a test that
+# deliberately clears it can. Propagates to `beacon` CLI subprocess children.
+os.environ.setdefault("BEACON_TEST_MODE", "1")

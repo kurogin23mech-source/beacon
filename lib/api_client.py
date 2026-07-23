@@ -356,6 +356,11 @@ class ApiClient:
         return self.put(f"/api/projects/{project_id}", data)
 
     def create_project(self, project_id: str, name: str, objective: str = "") -> dict:
+        # ms-123 / e-4029: structural leak guard. A test context creating a
+        # project on the production cloud is the exact path that left 48
+        # phase4-test residue projects behind — block it at the choke point.
+        import cloud_write_guard
+        cloud_write_guard.guard_project_create(self._base_url)
         return self.post(f"/api/projects/{project_id}",
                          {"name": name, "objective": objective})
 
