@@ -65,8 +65,13 @@ def is_prod_api_url(url: str) -> bool:
     return any(host.endswith(sfx) for sfx in _PROD_HOST_SUFFIXES)
 
 
-def guard_project_create(base_url: str) -> None:
-    """Raise if a test context is about to create a project on production.
+def guard_prod_project_write(base_url: str) -> None:
+    """Raise if a test context is about to write a project to production.
+
+    Covers every project-creating write path: ``create_project`` (POST) and
+    ``put_project`` (PUT upsert) both land on ``/api/projects/{id}`` and both
+    can materialize a new project, so both are guarded. Guarding only one
+    would leave the other as a leak bypass.
 
     No-op outside a test context (normal CLI use is unaffected) and no-op for
     non-prod targets (local mode, staging, a sandbox cloud). The escape hatch
@@ -80,7 +85,7 @@ def guard_project_create(base_url: str) -> None:
     if os.environ.get("BEACON_ALLOW_PROD_TEST_WRITE") == "1":
         return
     raise RuntimeError(
-        "cloud_write_guard: refusing to create a project on the production "
+        "cloud_write_guard: refusing to write a project to the production "
         f"cloud ({base_url}) from a test context. Tests must use local mode "
         "or a sandbox/staging cloud. If this test genuinely must hit prod, "
         "set BEACON_ALLOW_PROD_TEST_WRITE=1 AND wrap creation in "

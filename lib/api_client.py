@@ -353,6 +353,11 @@ class ApiClient:
         return self.get(f"/api/projects/{project_id}")
 
     def put_project(self, project_id: str, data: dict) -> dict:
+        # ms-123 / e-4029: PUT upserts to /api/projects/{id}, so it can
+        # materialize a new project just like create_project — guard the same
+        # leak vector (e.g. `beacon cloud upload-initial` → cmd_cloud_push).
+        import cloud_write_guard
+        cloud_write_guard.guard_prod_project_write(self._base_url)
         return self.put(f"/api/projects/{project_id}", data)
 
     def create_project(self, project_id: str, name: str, objective: str = "") -> dict:
@@ -360,7 +365,7 @@ class ApiClient:
         # project on the production cloud is the exact path that left 48
         # phase4-test residue projects behind — block it at the choke point.
         import cloud_write_guard
-        cloud_write_guard.guard_project_create(self._base_url)
+        cloud_write_guard.guard_prod_project_write(self._base_url)
         return self.post(f"/api/projects/{project_id}",
                          {"name": name, "objective": objective})
 

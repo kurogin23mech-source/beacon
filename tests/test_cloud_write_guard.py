@@ -3,7 +3,7 @@
 The 48 ``phase4-test`` residue projects leaked because a test created projects
 on the production cloud without teardown. This suite pins the two-layer fix:
 
-  第一層 — ``guard_project_create`` raises in a test context targeting prod,
+  第一層 — ``guard_prod_project_write`` raises in a test context targeting prod,
            and is a no-op for local/staging or normal (non-test) CLI use.
   第二層 — ``disposable_project`` always cleans up on exit, even when the test
            body raises (teardown can't be forgotten).
@@ -59,21 +59,21 @@ class TestGuardProjectCreate(unittest.TestCase):
 
     def test_blocks_prod_in_test_context(self):
         with self.assertRaises(RuntimeError):
-            cwg.guard_project_create("https://beacon-ai.dev")
+            cwg.guard_prod_project_write("https://beacon-ai.dev")
 
     def test_allows_local_in_test_context(self):
-        cwg.guard_project_create("http://localhost:8000")  # no raise
+        cwg.guard_prod_project_write("http://localhost:8000")  # no raise
 
     def test_escape_hatch_allows_prod(self):
         os.environ["BEACON_ALLOW_PROD_TEST_WRITE"] = "1"
-        cwg.guard_project_create("https://beacon-ai.dev")  # no raise
+        cwg.guard_prod_project_write("https://beacon-ai.dev")  # no raise
 
     def test_noop_outside_test_context(self):
         # Not a test context → guard is inert even against prod.
         os.environ.pop("BEACON_TEST_MODE", None)
         os.environ.pop("PYTEST_CURRENT_TEST", None)
         try:
-            cwg.guard_project_create("https://beacon-ai.dev")  # no raise
+            cwg.guard_prod_project_write("https://beacon-ai.dev")  # no raise
         finally:
             os.environ["BEACON_TEST_MODE"] = "1"
 
@@ -87,7 +87,7 @@ class _FakeClient:
         self.archived = []
 
     def create_project(self, project_id, name, objective=""):
-        cwg.guard_project_create(self._base_url)
+        cwg.guard_prod_project_write(self._base_url)
         self.created.append(project_id)
         return {"project_id": project_id}
 
