@@ -339,13 +339,44 @@ def _query(entity: str, pk: str) -> list[dict]:
     return [data for _sk, data in _query_rows(entity, pk)]
 
 
-def _scan(entity: str) -> list[dict]:
-    """Whole-table scan (= list_all_projects / list_users 用)。"""
+def _scan(entity: str, id_field: str | None = None) -> list[dict]:
+    """Whole-table scan (= list_all_projects / list_users 用)。
+
+    ms-96: ``id_field`` を渡すと、各行の PK カラムを ``data[id_field]``
+    に stamp して返す。これは Firestore → MySQL 移行行が抱える silent なデータ
+    欠落を塞ぐための parity 回復。
+
+    背景: Firestore は id を doc.id として保持し ``data`` blob には含めない
+    (``firestore_client.save_project`` は ``.set(data)`` で id を data に入れない)。
+    そのため移行行の ``data`` には ``project_id`` フィールドが無く、
+    ``list_projects`` が ``item.get("project_id")`` で読むと **空文字列** になる。
+    下流の cross-project directory (``/api/me/sessions``) は ``if not pid: continue``
+    で空 id の project を丸ごと落とすため、移行済 project がセッション directory・
+    dm 宛先ピッカー・**disclosure 境界の真値** (``list_projects``) から不可視化する。
+    ``firestore_client.list_projects`` は ``doc.id`` を使うので、こちらも PK を
+    真値にして parity を回復する。
+
+    MySQL-native の write (``save_project``) は既に ``data`` へ id を注入するので、
+    PK == ``data[id_field]`` となり overwrite しても無害。``id_field=None`` (既定)
+    は従来挙動そのまま (= 呼び出し元非互換なし)。
+
+    同種の潜在バグは ``users`` / ``treks`` / ``organizations`` の scan にもあるが
+    (移行行があれば id が空になる)、本 fix は確認済みの ``projects`` 経路に絞る。
+    それらは各 id フィールド名を渡して同様に opt-in できる。
+    """
     conn = _conn()
     with conn.cursor() as cur:
-        cur.execute(f"SELECT data FROM `{_table_name(entity)}`")
+        cols = "pk, data" if id_field else "data"
+        cur.execute(f"SELECT {cols} FROM `{_table_name(entity)}`")
         rows = cur.fetchall()
-    return [json.loads(r["data"]) for r in rows]
+    out: list[dict] = []
+    for r in rows:
+        d = json.loads(r["data"])
+        if id_field:
+            # PK を真値として stamp (移行行は data に id を持たない)。
+            d[id_field] = r["pk"]
+        out.append(d)
+    return out
 
 
 def _now_iso_utc() -> str:
@@ -412,7 +443,7 @@ def list_projects(user_id: str | None = None,
     - 各行に owner / owner_email を additive で載せる (= beacon cloud list が
       N+1 なしで所有者を描画するため)。owner_email は per-call cache で解決。
     """
-    items = _scan("projects")
+    items = _scan("projects", id_field="project_id")
     _email_cache: dict[str, str] = {}
 
     def _resolve_owner_email(owner_uid: str) -> str:
@@ -453,7 +484,7 @@ def list_projects(user_id: str | None = None,
 
 
 def list_all_projects() -> list[dict]:
-    items = _scan("projects")
+    items = _scan("projects", id_field="project_id")
     return [
         {
             "project_id": item.get("project_id", ""),
