@@ -241,6 +241,7 @@ target が目的を達成したかの遷移（マイルストーン完了・オ�
 | `beacon target reject <entry-id> [--rationale <text>]` | Reject (= transition does NOT execute) / 却下（遷移せず） |
 | `beacon target list [--target <id>] [--pending] [--json]` | List transition-approval requests / 承認依頼一覧 |
 | `beacon milestone done <id> --review` | Route completion through the review gate / 完了をレビュー経由に |
+| `beacon review context --type <ax\|philosophy> [--pr <n> \| --diff-ref <base...head>] [--origin-doc <id>] [--mode <diff\|full-surface>]` | Emit the review-kernel bundle (原典 + mechanical diff) for an independent judge / 独立 judge 用の review-kernel bundle を出力 |
 
 ### Tasks & Entries
 
