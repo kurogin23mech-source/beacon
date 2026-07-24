@@ -314,6 +314,31 @@ def test_tick_no_active_treks_returns_empty_fired():
 
 
 # ---------------------------------------------------------------------------
+# e-1391 (ms-66) — tick records last_tick_at; /api/system/tick-health reads it
+# ---------------------------------------------------------------------------
+
+def test_tick_health_reports_recent_after_a_tick():
+    # A tick (even with no treks) must stamp last_tick_at so the external
+    # watchdog sees the driver is alive.
+    client.post("/api/system/trek-scheduler/tick", json={}, headers=HEADERS_OK)
+    resp = client.get("/api/system/tick-health")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["last_tick_at"]  # non-empty ISO string
+    assert body["seconds_since"] is not None and body["seconds_since"] < 60
+    # the tiny report summary is carried alongside for observability
+    assert "last_tick_report" in body
+
+
+def test_tick_health_is_unauthenticated_readonly():
+    # Read-only liveness must be pollable without the scheduler key (external
+    # watchdog polls it from GitHub Actions), unlike the write tick endpoint.
+    resp = client.get("/api/system/tick-health")
+    assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
 # (3) Due trek fires; envelope + bus event + last_progress_check_at stamped
 # ---------------------------------------------------------------------------
 

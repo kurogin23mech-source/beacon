@@ -42,6 +42,14 @@ import redis_client  # ms-96 / e-2381: rate limit 用の揮発カウンタ (fail
 import trek as trek_mod  # ms-69 / e-1656: trek schema + pure mutators
 import trek_scheduler as trek_scheduler_mod  # ms-83 / e-1997: progress-check cadence logic
 import tick_scheduler  # ms-107 e-3434/e-3461: target-agnostic periodic-tick cadence
+import tick_health as tick_health_mod  # e-1391 / ms-66: tick-liveness evaluation
+
+# e-1391 (ms-66) — last successful periodic tick, recorded by the
+# trek-scheduler tick endpoint and read back by /api/system/tick-health so an
+# external watchdog can catch a silently-dead tick driver. In-memory (per
+# process): a restart resets it and the next tick re-baselines within ≤1 min.
+_last_tick_at: str = ""
+_last_tick_report: dict = {}
 
 # debug=False is the default, but set explicitly to ensure stack traces are
 # never included in error responses in production.
@@ -9239,6 +9247,23 @@ def trek_scheduler_tick_endpoint(
     except Exception as _op_exc:  # pragma: no cover - defensive isolation
         scheduled_fires = [{"error": f"{type(_op_exc).__name__}: {_op_exc}"}]
 
+    # e-1391 (ms-66) — record that a tick just completed so an *external*
+    # watchdog (scripts/tick-health-monitor.py) can notice when the driver
+    # dies. The 2026-07 Cloud Run → VPS migration silently dropped the tick
+    # driver and it was only caught by accident; last_tick_at + the
+    # /api/system/tick-health endpoint make a dead tick loud from outside the
+    # box. In-memory is sufficient: on process restart it resets and the next
+    # tick (≤1 min) re-baselines it.
+    global _last_tick_at, _last_tick_report
+    _last_tick_at = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    _last_tick_report = {
+        "candidates": len(candidate_treks),
+        "due": len(due_treks),
+        "fired": len(fired) if isinstance(fired, list) else fired,
+        "scheduled_fires": len(scheduled_fires)
+        if isinstance(scheduled_fires, list) else 0,
+    }
+
     return {
         "now": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "candidates": len(candidate_treks),
@@ -9255,6 +9280,31 @@ def trek_scheduler_tick_endpoint(
         "halted": halted,
         # ms-107 e-3434 chunk 3b — scheduled things fired on this tick.
         "scheduled_fires": scheduled_fires,
+    }
+
+
+@app.get("/api/system/tick-health")
+def tick_health_endpoint():
+    """Report when the server last ran a periodic tick (e-1391 / ms-66).
+
+    Read-only and unauthenticated (like ``/api/version``): it exposes only
+    operational liveness, no user data, and must be cheaply pollable by an
+    *external* watchdog (``scripts/tick-health-monitor.py`` on GitHub Actions
+    cron). The migration incident that motivated this — the tick driver
+    silently dropped in the Cloud Run → VPS move — is exactly a failure a
+    down/misconfigured box cannot self-report, so the observer has to live
+    outside the box and read this from over the network.
+
+    ``last_tick_at`` is in-memory per process (see the module global), so a
+    just-restarted server reports ``status=never`` until its first tick lands
+    (≤1 min). The pure classification lives in ``lib/tick_health.py``.
+    """
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    health = tick_health_mod.evaluate_tick_health(_last_tick_at, now)
+    return {
+        **health,
+        "last_tick_report": _last_tick_report,
     }
 
 

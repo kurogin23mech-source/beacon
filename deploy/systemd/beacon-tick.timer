@@ -1,0 +1,20 @@
+# e-1391 (ms-66) — 定期ティックを 1 分毎に起動する timer。
+# /etc/systemd/system/beacon-tick.timer に配置し `systemctl enable --now` する。
+[Unit]
+Description=Run Beacon periodic scheduler tick every minute
+
+[Timer]
+# 起動 1 分後から動き出し、以降 1 分間隔で tick endpoint を叩く。
+# tick endpoint は due な Trek/Operation のみ発火するので、cadence (Trek 既定
+# 10 分 / Operation 個別) より細かく叩いても空振りが安いだけで害はない。1 分
+# 粒度にすることで Operation の hourly watch や Trek idle escalation が時刻に
+# 対して遅れず発火する。
+OnBootSec=1min
+OnUnitActiveSec=1min
+# 複数 VPS を並べても負荷が偏らないよう軽く散らす (単一構成では影響なし)。
+AccuracySec=10s
+# マシン停止中に tick 時刻を跨いでも、起動後に取りこぼしを 1 回走らせる。
+Persistent=true
+
+[Install]
+WantedBy=timers.target
