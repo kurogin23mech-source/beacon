@@ -682,6 +682,38 @@ def test_is_trek_internal_send_returns_false_when_trek_not_active(project_dir,
     assert bypass is False
 
 
+def test_is_trek_internal_send_returns_false_for_halted_trek(project_dir,
+                                                             monkeypatch):
+    """e-4116 follow-up (PR #491 parent review 1 / fork M1): a halted trek —
+    active but with the Andon cord pulled — must NOT grant budget bypass, even
+    when both users are joined members. Mirrors the server-side dm_gate skip
+    that the CLI mirror was missing."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(commands, "_resolve_creator_identity",
+                         lambda: ("u-sender", "sender@x", "sv-1"))
+
+    class _FakeClient:
+        def list_sessions(self, _p):
+            return [{"session_id": "sv-r",
+                     "actor": {"user_id": "u-recipient"}}]
+        def list_treks(self):
+            return [{
+                "trek_id": "tk",
+                "status": "active",
+                "halt": {"issued_by_session_id": "sv-1"},  # Andon cord pulled
+                "members": [
+                    {"user_id": "u-sender", "joined_at": "x"},
+                    {"user_id": "u-recipient", "joined_at": "x"},
+                ],
+            }]
+    monkeypatch.setattr(commands, "_get_api_client",
+                         lambda: (_FakeClient(), {"project_id": "p"}))
+    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, _ = commands._is_trek_internal_send("sv-r")
+    assert bypass is False
+
+
 def test_is_trek_internal_send_bypasses_for_same_user_trek_members(
     project_dir, monkeypatch
 ):

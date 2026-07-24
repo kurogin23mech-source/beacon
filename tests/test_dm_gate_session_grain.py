@@ -41,6 +41,26 @@ import dm_gate  # noqa: E402
 # Helpers
 # ---------------------------------------------------------------------------
 
+_DEFAULT_JOINED_AT = "2026-06-18T00:00:00.000000Z"
+
+
+def _with_joined_at(members: list[dict]) -> list[dict]:
+    """Default every member to *joined* unless it explicitly sets ``joined_at``.
+
+    e-4116 follow-up (PR #491 parent review 1): the shared-Trek bypass now
+    requires ``joined_at`` (an invited-but-not-joined session must NOT grant
+    bypass). These fixtures represent real, joined members, which always carry
+    ``joined_at`` in production — so inject the default here. A test that wants
+    an invited-but-not-joined member sets ``joined_at`` to "" explicitly.
+    """
+    out = []
+    for m in members:
+        if "joined_at" not in m:
+            m = {**m, "joined_at": _DEFAULT_JOINED_AT}
+        out.append(m)
+    return out
+
+
 def _trek_phase_a(*, trek_id: str, members: list[dict]) -> dict:
     """Phase A trek doc shape (= meta.migration_phase = 'A').
 
@@ -54,7 +74,7 @@ def _trek_phase_a(*, trek_id: str, members: list[dict]) -> dict:
         "creator_actor": {
             "user_id": members[0].get("user_id") if members else "",
         },
-        "members": members,
+        "members": _with_joined_at(members),
         "meta": {"migration_phase": "A"},
     }
 
@@ -70,7 +90,7 @@ def _trek_pre_a(*, trek_id: str, members: list[dict]) -> dict:
         "creator_actor": {
             "user_id": members[0].get("user_id") if members else "",
         },
-        "members": members,
+        "members": _with_joined_at(members),
         # NB: meta intentionally absent so get_migration_phase returns
         # the default "pre-A".
     }

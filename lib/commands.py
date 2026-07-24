@@ -19559,6 +19559,13 @@ def _is_trek_internal_send(recipient_sid: str) -> tuple[bool, str]:
         for trek in my_treks:
             if trek.get("status") != "active":
                 continue
+            # e-4116 follow-up (PR #491 parent review 1): a halted trek must
+            # NOT grant bypass — leader pulled the Andon cord. This mirrors
+            # the server-side dm_gate lookup, which skips halted treks; the
+            # CLI mirror was missing it (fork finding M1), so a halted-but-
+            # active trek still bypassed budget on the CLI send path.
+            if trek.get("halt"):
+                continue
             members = trek.get("members") or []
             am_member = any(
                 _trek_member_matches(m, my_session_id, my_user_id)

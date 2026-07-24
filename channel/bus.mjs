@@ -38,6 +38,9 @@ import {
   consumeBusBudgetOne, refundBusBudgetOne, refuseMessage, isArmed,
 } from './bus-budget.mjs'
 import {
+  checkAndRecordTrekReply, rateHoldMessage,
+} from './trek-rate.mjs'
+import {
   classifyOutboundReply, evaluateOutboundQualGate, qualHoldMessage,
 } from './bus-qualgate.mjs'
 import { selectTierForBridge } from './bus-envelope.mjs'
@@ -899,16 +902,39 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   // an active Trek never deadlock on budget exhaustion. Fail-closed on error
   // (checkTrekInternalReply returns not-internal), so the gate stays in force.
   let trekInternal = false
+  let trekInternalId = ''
   if (autonomous) {
     try {
       const ti = await checkTrekInternalReply(recipient_project_id, recipient_session_id)
       trekInternal = !!(ti && ti.trek_internal)
+      trekInternalId = (ti && ti.trek_id) || ''
       if (trekInternal) {
-        log(`reply Trek-internal (trek_id=${ti.trek_id || '?'}) → budget/qual gate bypassed`)
+        log(`reply Trek-internal (trek_id=${trekInternalId || '?'}) → budget + qual gate bypassed, per-trek rate brake applied`)
       }
     } catch (e) {
       trekInternal = false
       log(`trek-internal check failed (${e.message}); budget gate stays in force`)
+    }
+  }
+  // e-4116 follow-up (PR #491 review 2): Trek-internal replies bypass BOTH the
+  // budget cap and the qual gate, so they'd otherwise have no volume brake at
+  // all — a leader↔executor loop could spin unbounded until manual halt / 24h
+  // TTL. Apply a per-trek rolling rate cap instead: past N replies / window,
+  // HOLD for the human. Self-healing (sliding window) so it never deadlocks
+  // normal coordination. BEACON_TREK_RATE_OFF=1 is the escape hatch.
+  if (autonomous && trekInternal && process.env.BEACON_TREK_RATE_OFF !== '1' && trekInternalId) {
+    const capEnv = Number.parseInt(process.env.BEACON_TREK_RATE_CAP ?? '', 10)
+    const winEnv = Number.parseInt(process.env.BEACON_TREK_RATE_WINDOW_SEC ?? '', 10)
+    const rate = checkAndRecordTrekReply(CWD, trekInternalId, {
+      cap: Number.isFinite(capEnv) && capEnv > 0 ? capEnv : undefined,
+      windowSec: Number.isFinite(winEnv) && winEnv > 0 ? winEnv : undefined,
+    })
+    if (!rate.allowed) {
+      log(`reply HELD by Trek rate brake: trek=${trekInternalId} ${rate.count}/${rate.cap}`)
+      return {
+        content: [{ type: 'text', text: rateHoldMessage(trekInternalId, rate.count, rate.cap) }],
+        isError: true,
+      }
     }
   }
   if (autonomous && !trekInternal) {

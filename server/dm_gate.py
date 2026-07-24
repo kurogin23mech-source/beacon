@@ -310,10 +310,14 @@ def build_shared_trek_lookup_from_lists(
             # しかなければ通常の cross-user budget gate に fallback する。
             if t.get("halt"):
                 continue
-            # archived trek も bypass 根拠に使わない (= 終わった作業領域
-            # は AI action 同意の根拠にならない)。 ms-70 originally caller-
-            # side filter に任せていたが、 halt と同列に明示する。
-            if (t.get("status") or "") == "archived":
+            # ms-75 e-4116 follow-up (PR #491 parent review 1): only an
+            # ACTIVE trek grants bypass. Previously only ``archived`` was
+            # excluded, which let a ``planning`` trek (still being set up,
+            # not yet a live pre-approved work scope) grant the bypass. A
+            # non-active trek is not a consented AI-action scope, so it must
+            # not short-circuit the cross-user gate / budget. This also
+            # subsumes the old archived exclusion.
+            if (t.get("status") or "") != "active":
                 continue
 
             trek_id = t.get("trek_id") or ""
@@ -326,6 +330,11 @@ def build_shared_trek_lookup_from_lists(
                 # members[]. The user_id is informational (= same human
                 # can have multiple sessions in the same trek; only the
                 # listed ones grant bypass).
+                #
+                # e-4116 follow-up (parent review 1): a member only counts
+                # once ``joined_at`` is set. An invited-but-not-joined entry
+                # (session_id present, joined_at empty) has NOT accepted the
+                # pre-approval scope, so it must not grant bypass.
                 if not sender_sid or not receiver_sid:
                     # Missing session ids — cannot verify session-grain
                     # membership; fall through to next trek.
@@ -333,6 +342,8 @@ def build_shared_trek_lookup_from_lists(
                 sender_in = False
                 receiver_in = False
                 for m in members:
+                    if not m.get("joined_at"):
+                        continue
                     msid = m.get("session_id") or ""
                     if msid and msid == sender_sid:
                         sender_in = True
@@ -345,11 +356,15 @@ def build_shared_trek_lookup_from_lists(
                 # Not in this trek — try next one.
                 continue
 
-            # pre-A trek: user_id grain (legacy behaviour preserved).
-            if creator_uid == receiver_uid:
+            # pre-A trek: user_id grain (legacy behaviour preserved). The
+            # creator is a joined member by construction (they open the
+            # trek); non-creator members must carry ``joined_at`` to count
+            # (e-4116 follow-up — parity with the phase-A joined_at rule and
+            # the CLI ``_trek_member_matches`` check).
+            if creator_uid and creator_uid == receiver_uid:
                 return (True, trek_id)
             for m in members:
-                if m.get("user_id") == receiver_uid:
+                if m.get("user_id") == receiver_uid and m.get("joined_at"):
                     return (True, trek_id)
         return (False, "")
     return _lookup

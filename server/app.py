@@ -9343,6 +9343,7 @@ def trek_internal_send_endpoint(
     sender_session_id: str,
     recipient_session_id: str,
     recipient_project_id: str = "",
+    user: dict = Depends(require_auth),
 ):
     """Answer whether an autonomous DM reply is Trek-internal (e-4116 / ms-75).
 
@@ -9366,12 +9367,14 @@ def trek_internal_send_endpoint(
     id so a failed lookup keeps the budget gate in force — never a silent
     relaxation.
 
-    Unauthenticated (like ``/api/system/tick-health``): it returns only a
-    boolean + trek_id given two session ids and drives a *client-side* budget
-    optimization. The real security boundary — the dm_gate action
-    authorization on the actual bus POST — is unaffected and still enforced,
-    so a spoofed ``true`` here at most lets a caller skip their own
-    self-imposed autonomy budget (not a cross-user privilege).
+    Requires auth (PR #491 review 2a): although it returns only a boolean +
+    trek_id, an *unauthenticated* endpoint would be a membership oracle — anyone
+    holding two session ids could probe whether they share a Trek (and get the
+    trek_id), and hammer the per-call ``list_sessions`` + ``list_treks`` scan as
+    a cheap DoS amplifier. Gating it behind ``require_auth`` (the MCP bridge
+    already sends its bearer token) removes the anonymous oracle. The real
+    action-authorization boundary remains the dm_gate check on the bus POST;
+    this endpoint only drives a *client-side* budget optimization.
     """
     if not sender_session_id or not recipient_session_id:
         return {"trek_internal": False, "trek_id": ""}
