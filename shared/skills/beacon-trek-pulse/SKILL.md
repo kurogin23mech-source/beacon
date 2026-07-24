@@ -23,7 +23,7 @@ Layer 3 (= server-side TTL 罰則) が動作している前提でこの Layer 2 
 
 以下のいずれか:
 
-1. **bus inbox に `channel=trek-progress-check`, `delivery=auto-execute` の event が届いた** (= 通常経路): bus.mjs hardcode 経由で「pulse Skill 推奨」 narrative が context に入っている。 ms-88 / e-2105 で narrative が「12 分以内に pulse / execute / task-state いずれか必須」 と consequence 明示になった。
+1. **bus inbox に `channel=trek-progress-check`, `delivery=auto-execute` の event が届いた** (= 通常経路): bus.mjs hardcode 経由で「pulse Skill 推奨」 narrative が context に入っている。 ms-88 / e-2105 で narrative が「TTL (= 既定 24 時間 / 1440 分、server が `ttl_minutes` で渡す) 以内に pulse / execute / task-state いずれか必須」 と consequence 明示になった (e-4117: enforcement `DEFAULT_WORKING_TTL_MINUTES=1440` に一致させ、旧「12 分」表記は enforcement の 120× 過大で narrative の信頼性を損なうため撤去)。
 2. **user が `/beacon-trek-pulse tk-XXXX` を直接呼ぶ**: dogfood / 動作確認用。
 3. **`/beacon-trek-execute` Skill の途中で「pulse だけ打って継続」 判断**: executor が working 継続を server に伝えたいだけの場合、 本 Skill を inline 呼び出しせず直接 `beacon trek task-state` で working stamp + 後述 `beacon trek pulse-ack` を直接叩いてよい (= 同等)。
 
