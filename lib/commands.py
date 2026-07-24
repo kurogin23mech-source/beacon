@@ -22889,6 +22889,57 @@ def _resolve_healthy_session_ids():
     return ids
 
 
+def _resolve_focus_directory(live_ids):
+    """Return ``target_id -> [ {session_id, machine, agent, focused_at}, … ]``
+    for the live sessions the bus directory reports as focused on each target,
+    or ``None`` when the directory cannot be consulted (ms-125 e-4094).
+
+    This is the second, independent LIVE source the claim view consumes (the
+    first being the occupation claim on the target record). Each live session
+    heartbeats its ``focus.milestone`` into the directory; we invert that into a
+    per-target map so ``claim_view`` can flag "someone is focused on this target
+    now" even when the one-time occupation claim has gone stale.
+
+    ``live_ids is None`` means liveness could not be verified (local mode /
+    directory unreachable) — there is no directory to read a focus from, so we
+    return ``None`` and the claim view falls back to occupation-only. Any failure
+    (no cloud, auth error, network) also collapses to ``None`` so the command
+    keeps working; the focus source is a bonus, never a hard dependency.
+    """
+    if live_ids is None:
+        return None
+    try:
+        client, config = _get_api_client()
+        project_id = _resolve_bus_project_id(config)
+        if not project_id:
+            return None
+        sessions = client.list_sessions(
+            project_id, live_only=True, healthy_only=True, since_minutes=5)
+    except Exception:
+        return None
+
+    directory: dict = {}
+    for s in sessions or ():
+        if not isinstance(s, dict):
+            continue
+        sid = s.get("session_id")
+        if not sid:
+            continue
+        focus = s.get("focus") or {}
+        milestone = (focus.get("milestone") or {}) if isinstance(focus, dict) else {}
+        target_id = (milestone.get("id") or "").strip() if isinstance(milestone, dict) else ""
+        if not target_id:
+            continue
+        actor = s.get("actor") or {}
+        directory.setdefault(target_id, []).append({
+            "session_id": sid,
+            "machine": actor.get("machine") or "",
+            "agent": actor.get("agent") or "",
+            "focused_at": s.get("last_heartbeat_at") or s.get("last_active") or "",
+        })
+    return directory
+
+
 def cmd_claim_view():
     """beacon claim view [--target <k>:<id>] [--json]
 
@@ -22948,10 +22999,14 @@ def cmd_claim_view():
         pass
 
     live_ids = _resolve_healthy_session_ids()
+    # Second LIVE source (ms-125 e-4094): the bus-directory focus. Best-effort —
+    # None (local mode / unreachable) collapses the claim view to occupation-only.
+    focus_directory = _resolve_focus_directory(live_ids)
 
     views = _claim_view.build_claim_views(
         data,
         live_session_ids=live_ids,
+        focus_directory=focus_directory,
         my_session_id=my_session_id,
         my_identities=my_identities,
     )
@@ -22967,6 +23022,7 @@ def cmd_claim_view():
             view = _claim_view.build_claim_view(
                 {"id": ti},
                 live_session_ids=live_ids,
+                focus_sessions=(focus_directory or {}).get(ti),
                 my_session_id=my_session_id,
                 my_identities=my_identities,
                 exists=False,
