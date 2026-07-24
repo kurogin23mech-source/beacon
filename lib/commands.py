@@ -2094,7 +2094,8 @@ def cmd_target_create():
 def cmd_target_advance():
     """Advance a data-defined target to its next (or a named) phase (e-3956).
 
-    beacon target advance --class <kind> <target-id> [--to <phase>] [--reason <text>]
+    beacon target advance --class <kind> <target-id> [--to <phase>]
+                          [--field key=value ...] [--reason <text>]
     """
     kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
     target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
@@ -2106,9 +2107,10 @@ def cmd_target_advance():
         sys.exit(1)
     data = load_project()
     desc = _resolve_descriptor(data, kind)
+    fields = _parse_field_pairs()
     try:
         rec, old, new = _te.advance_target(data, desc, target_id,
-                                           to_phase=to_phase,
+                                           to_phase=to_phase, fields=fields,
                                            actor=_actor_str(), reason=reason)
     except _te.TargetEngineError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -2116,6 +2118,8 @@ def cmd_target_advance():
     save_project(data, op={"op": "target_advance", "kind": kind,
                            "target_id": target_id})
     print(f"フェーズ進行: [{target_id}] {old} -> {new}")
+    for k, v in fields.items():
+        print(f"  {k} = {v}")
     if _te.is_terminal_phase(desc, new):
         print(f"  ※ '{new}' は最終フェーズです。完了は "
               f"beacon target close --class {kind} {target_id}")

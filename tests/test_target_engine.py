@@ -162,6 +162,91 @@ def test_is_terminal_phase():
 
 
 # ---------------------------------------------------------------------------
+# Per-phase field set on advance (ms-124 e-4090).
+# ---------------------------------------------------------------------------
+
+def test_advance_sets_phase_field():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    # the reviewer field belongs to legal_review; you can only set it on entry
+    out, _, new = te.advance_target(data, CONTRACT, rec["id"],
+                                    fields={"reviewer": "外部法律事務所"})
+    assert new == "legal_review"
+    assert out["reviewer"] == "外部法律事務所"
+
+
+def test_advance_rejects_field_not_visible_at_new_phase():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    # 'reviewer' is a legal_review field; it is NOT visible when we would land
+    # on... actually create is at drafting; advancing to legal_review makes it
+    # visible. Try setting a field that no phase declares.
+    try:
+        te.advance_target(data, CONTRACT, rec["id"],
+                          fields={"ghostfield": "x"})
+        assert False, "expected TargetEngineError"
+    except te.TargetEngineError as e:
+        assert "ghostfield" in str(e)
+
+
+def test_advance_accepts_base_field_too():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    # base fields stay visible at every phase — updatable on advance
+    out, _, _ = te.advance_target(data, CONTRACT, rec["id"],
+                                  fields={"note": "更新済"})
+    assert out["note"] == "更新済"
+
+
+REQ_PHASE = {
+    "kind": "req_contract", "label": "必須付き契約", "profession": "backoffice",
+    "type": "single-shot", "id_prefix": "rq-", "collection": "req_contracts",
+    "fields": [{"key": "counterparty", "label": "相手方", "type": "string",
+                "required": True}],
+    "phases": [
+        {"key": "drafting", "label": "起草"},
+        {"key": "legal_review", "label": "法務レビュー",
+         "fields": [{"key": "reviewer", "label": "レビュー依頼先",
+                     "type": "string", "required": True}]},
+        {"key": "signed", "label": "締結", "terminal": True},
+    ],
+}
+
+
+def test_advance_enforces_required_phase_field():
+    data = _data()
+    rec = te.create_target(data, REQ_PHASE, label="c",
+                           fields={"counterparty": "X"})
+    # entering legal_review without its required 'reviewer' must fail
+    try:
+        te.advance_target(data, REQ_PHASE, rec["id"])
+        assert False, "expected TargetEngineError for missing required field"
+    except te.TargetEngineError as e:
+        assert "reviewer" in str(e)
+    # supplying it lets the advance through
+    out, _, new = te.advance_target(data, REQ_PHASE, rec["id"],
+                                    fields={"reviewer": "外部"})
+    assert new == "legal_review"
+    assert out["reviewer"] == "外部"
+
+
+def test_required_phase_field_satisfied_by_prior_value():
+    data = _data()
+    rec = te.create_target(data, REQ_PHASE, label="c",
+                           fields={"counterparty": "X"})
+    te.advance_target(data, REQ_PHASE, rec["id"], fields={"reviewer": "外部"})
+    te.advance_target(data, REQ_PHASE, rec["id"])                # → signed
+    # kicked back to legal_review: reviewer already set, no re-supply needed
+    out, _, new = te.advance_target(data, REQ_PHASE, rec["id"],
+                                    to_phase="legal_review")
+    assert new == "legal_review"
+    assert out["reviewer"] == "外部"
+
+
+# ---------------------------------------------------------------------------
 # Close.
 # ---------------------------------------------------------------------------
 

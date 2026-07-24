@@ -122,10 +122,9 @@ def create_target(data: dict, desc: dict, *, label: str,
                 f"ありません)")
         field_vals[key] = val
 
-    # Required BASE fields must be present at create. (Per-phase fields cannot
-    # be marked required — target_descriptor.validate rejects that — because
-    # there is no advance-time field path to satisfy/enforce them yet, ms-122 AX
-    # finding. So the only 'required' the engine enforces is on base fields.)
+    # Required BASE fields must be present at create. Required PHASE fields are
+    # enforced separately, at advance_target when entering that phase (ms-124
+    # e-4090) — you can't supply a later phase's field before you reach it.
     for f in td.base_fields(desc):
         if f.get("required") and not (field_vals.get(f.get("key")) or "") \
                 and field_vals.get(f.get("key")) not in (0, False):
@@ -163,8 +162,8 @@ def current_phase(rec: dict) -> str:
 
 
 def advance_target(data: dict, desc: dict, target_id: str, *,
-                  to_phase: str = "", actor: str = "",
-                  reason: str = "") -> tuple:
+                  to_phase: str = "", fields: Optional[dict] = None,
+                  actor: str = "", reason: str = "") -> tuple:
     """Move a target to its next declared phase (or to ``to_phase`` when given)
     and record the change on its append-only ``phase_history``. Returns
     ``(record, old_phase, new_phase)``.
@@ -175,7 +174,16 @@ def advance_target(data: dict, desc: dict, target_id: str, *,
     declared phase; it may move forward OR back (a phase can be re-opened, e.g.
     a contract kicked back from 締結 to 弁護士レビュー) — the engine records the
     transition rather than policing direction, matching Beacon's "transitions
-    are permissive, the human is the master" stance."""
+    are permissive, the human is the master" stance.
+
+    ``fields`` supplies the values a phase surfaces (SPEC §4 per-phase fields):
+    a contract entering 法務レビュー can record its「レビュー依頼先」/「想定リスク」
+    only once it reaches that phase (ms-124 e-4090). Only keys the descriptor
+    declares as visible at the NEW phase (its base fields + that phase's own)
+    are accepted; an undeclared key raises. Any field the new phase declares
+    ``required`` must then hold a value — supplied here or already on the record
+    — else the advance raises, so a required phase field is a real promise, not
+    a silent no-op."""
     rec = find_target(data, desc, target_id)
     if rec is None:
         raise TargetEngineError(f"target が見つかりません: {target_id}")
@@ -202,11 +210,42 @@ def advance_target(data: dict, desc: dict, target_id: str, *,
                 f"(完了は beacon target close)")
         new = phases[idx + 1]
 
+    # Apply per-phase field values (validated against what the NEW phase makes
+    # visible), then enforce that new phase's required fields are satisfied.
+    _apply_phase_fields(desc, rec, new, fields or {})
+
     rec["phase"] = new
     history = rec.setdefault("phase_history", [])
     work_base.record_audit_event(history, kind="phase_change", actor=actor,
                                  reason=reason, **{"from": old, "to": new})
     return rec, old, new
+
+
+def _apply_phase_fields(desc: dict, rec: dict, new_phase: str,
+                        fields: dict) -> None:
+    """Set ``fields`` on ``rec`` for the phase being entered and enforce that
+    phase's required fields. Only keys visible at ``new_phase`` (base + the
+    phase's own extension) may be set; an undeclared key raises. After applying,
+    every field the phase's OWN extension marks ``required`` must hold a value
+    (from ``fields`` or already on the record)."""
+    visible = {f.get("key") for f in td.fields_at_phase(desc, new_phase)}
+    for key, val in fields.items():
+        if key not in visible:
+            raise TargetEngineError(
+                f"phase '{new_phase}' で未知の field '{key}' です "
+                f"(この phase で有効: {', '.join(sorted(k for k in visible if k))})")
+        rec[key] = val
+    phase = td.get_phase(desc, new_phase) or {}
+    for f in phase.get("fields") or []:
+        if not isinstance(f, dict) or not f.get("required"):
+            continue
+        key = (f.get("key") or "").strip()
+        val = rec.get(key)
+        if not (val or "") and val not in (0, False):
+            raise TargetEngineError(
+                f"phase '{new_phase}' に入るには必須 field '{key}' "
+                f"({f.get('label') or key}) が必要です "
+                f"(--field {key}=... で指定してください)")
 
 
 def is_terminal_phase(desc: dict, phase_key: str) -> bool:

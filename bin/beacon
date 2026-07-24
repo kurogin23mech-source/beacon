@@ -571,18 +571,19 @@ cmd_target_create() {
 
 cmd_target_advance() {
     ensure_project
-    local kind="" target_id="" to_phase="" reason=""
+    local kind="" target_id="" to_phase="" reason="" fields=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --class)  kind="${2:-}";     shift 2 ;;
             --to)     to_phase="${2:-}"; shift 2 ;;
+            --field)  fields="${fields}${2:-}"$'\n'; shift 2 ;;
             --reason) reason="${2:-}";   shift 2 ;;
-            -?*)      _guard_positional "$1" "Usage: beacon target advance --class <kind> <target-id> [--to <phase>] [--reason <text>]" ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target advance --class <kind> <target-id> [--to <phase>] [--field key=value ...] [--reason <text>]" ;;
             *)        target_id="$1";    shift ;;
         esac
     done
     BEACON_TARGET_CLASS="$kind" BEACON_TARGET_ID="$target_id" \
-        BEACON_TO_PHASE="$to_phase" BEACON_REASON="$reason" \
+        BEACON_TO_PHASE="$to_phase" BEACON_REASON="$reason" BEACON_FIELDS="$fields" \
         python3 "$COMMANDS_PY" target_advance
 }
 
@@ -3212,7 +3213,7 @@ case "${1:-}" in
     review-request | approve | reject | list
   記述子駆動 target (data 定義 target-class の操作, ms-122):
     create --class <kind> --label <text> [--field key=value ...]
-    advance --class <kind> <target-id> [--to <phase>] [--reason <text>]
+    advance --class <kind> <target-id> [--to <phase>] [--field key=value ...] [--reason <text>]
     close --class <kind> <target-id> [--reason <text>]
     instances --class <kind> [--json]
   厚い認知フレーム (WorkItem / Evidence / ball, ms-124):
