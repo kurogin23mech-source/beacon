@@ -303,6 +303,35 @@ def assemble_attainment_context(*, target_id, spec_origin_id, spec_content,
     }
 
 
+def build_surface_index_reference(map_content, *, updated_at="", stale=False):
+    """Shape an application-map surface-index external reference for the judge
+    bundle (ms-119 / e-4096).
+
+    A context-zero judge is stronger when it knows WHAT the product's surface is
+    (where features live, what already exists) — otherwise it either misses that
+    a diff duplicates an existing surface, or it reaches into the repo (tainting
+    the instrument). The application-map (CORE doc `application-map`) is exactly
+    that index and is an implementer-INDEPENDENT artifact, so it is the sanctioned
+    non-diff context (see assemble_review_context.external_references). This
+    shapes it as one reference; the caller reads the map content mechanically.
+
+    Returns None when there is no map content (the caller then records a gap so
+    the judge knows the surface index is absent, not silently complete).
+    """
+    if not (map_content or "").strip():
+        return None
+    return {
+        "id": "application-map",
+        "kind": "surface-index",
+        "content": map_content,
+        "updated_at": updated_at or "",
+        "stale": bool(stale),
+        "note": ("プロダクトの全 surface (機能の入口) 索引。judge が『この差分に近い"
+                 "既存機能があるか』『surface が重複していないか』を repo を読まずに"
+                 "判定するための、実装者非依存の参照。stale=true の時は地図が古い可能性。"),
+    }
+
+
 def build_review_skip_record(*, review_type, ref_kind, ref, reason, actor,
                              gate, at):
     """Build a durable audit record for a HUMAN-intended review skip (ms-119 /

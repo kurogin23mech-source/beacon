@@ -2852,7 +2852,12 @@ def cmd_review_context():
             proc = subprocess.run(["gh", "pr", "diff", pr], capture_output=True, text=True)
         elif diff_ref:
             target_ref = diff_ref
-            proc = subprocess.run(["git", "diff", diff_ref], capture_output=True, text=True)
+            # ms-119 / e-4096: widen the diff context so surrounding code travels
+            # with the change. git defaults to 3 lines — too few for a repo-blind
+            # judge to see the enclosing function; -U25 lets it judge the diff in
+            # context without opening files (which would taint the instrument).
+            proc = subprocess.run(["git", "diff", "-U25", diff_ref],
+                                  capture_output=True, text=True)
         else:
             print("Error: pass --pr <n> or --diff-ref <base...head> to collect the "
                   "diff (or --mode full-surface to snapshot the command surface).",
@@ -2869,6 +2874,18 @@ def cmd_review_context():
     if _mi:
         gaps.append(_mi)
 
+    # ms-119 / e-4096: attach the application-map surface index so the judge can
+    # raise accuracy (spot a diff that duplicates an existing surface) WITHOUT
+    # reaching into the repo — the sanctioned implementer-independent context.
+    external_references = []
+    surface_ref = _review_surface_index_reference()
+    if surface_ref is not None:
+        external_references.append(surface_ref)
+    else:
+        gaps.append("application-map (全 surface 索引) が未生成のため、judge は "
+                    "『既存機能と重複していないか』を repo 参照なしには確認できません "
+                    "(/beacon-map で生成すると review 精度が上がります)。")
+
     bundle = review_spine.assemble_review_context(
         review_type,
         origin_id=origin_id,
@@ -2880,8 +2897,32 @@ def cmd_review_context():
         known_judge_types=set(registry.keys()),
         implementer_model=os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip(),
         artifact=artifact,
+        external_references=external_references,
     )
     print(json.dumps(bundle, ensure_ascii=False))
+
+
+def _review_surface_index_reference():
+    """Read the application-map CORE doc and shape it as the judge bundle's
+    surface-index external reference (ms-119 / e-4096), or None when absent.
+
+    Best-effort: a transport failure / missing map returns None (the caller then
+    records a gap), never crashes a review."""
+    import review_spine
+    try:
+        doc = get_store().get_document("application-map")
+    except Exception:
+        return None
+    if not doc:
+        return None
+    # Stale when the map-drift trigger says the surface moved since it was mapped.
+    stale = False
+    try:
+        stale = os.path.isfile(os.path.join(_get_triggers_dir(), "map-drift.json"))
+    except OSError:
+        stale = False
+    return review_spine.build_surface_index_reference(
+        doc.get("content", ""), updated_at=doc.get("updated_at", ""), stale=stale)
 
 
 def cmd_milestone_wait():
