@@ -173,15 +173,16 @@ def test_cross_descriptor_duplicate_prefix_flagged():
     assert any("id_prefix" in p for p in result.get("(重複)", []))
 
 
-def test_phase_field_required_is_rejected():
-    # ms-122 AX finding: required on a PHASE field has no enforcement path yet,
-    # so it must be rejected rather than silently ignored.
+def test_phase_field_required_is_now_accepted():
+    # ms-124 e-4090: a required PHASE field now has an enforcement path
+    # (advance_target enforces it when entering the phase), so validation no
+    # longer rejects it — the ms-122 fence is closed.
     desc = dict(CONTRACT, phases=[
         {"key": "p1", "label": "P1",
          "fields": [{"key": "x", "label": "X", "required": True}]},
     ])
     problems = td.validate_descriptor(desc)
-    assert any("required" in p and "x" in p for p in problems)
+    assert problems == []
 
 
 def test_base_field_required_still_allowed():
@@ -194,3 +195,60 @@ def test_validation_never_raises_on_garbage():
     assert td.validate_descriptor("not a dict")
     assert td.validate_descriptor(123)
     td.validate_target_classes({"target_classes": ["x", 1, None, {}]})
+
+
+# ---------------------------------------------------------------------------
+# Authoring — build + append a descriptor (ms-124 e-4091 no-code onboarding).
+# ---------------------------------------------------------------------------
+
+def test_build_descriptor_shape_and_default_arms():
+    desc = td.build_descriptor(
+        kind="ringi", label="稟議", profession="legal", dtype="single-shot",
+        id_prefix="rg-", collection="ringis",
+        fields=[{"key": "amount", "label": "金額", "type": "money"}],
+        phases=[{"key": "draft", "label": "起案"},
+                {"key": "approved", "label": "決裁", "terminal": True}])
+    assert desc["kind"] == "ringi"
+    assert desc["type"] == "single-shot"
+    # authored classes inherit the thick-frame arms so their targets get
+    # WorkItems / Evidence like the built-in seed
+    assert desc["decomposition"]["arms"] == ["work_items", "evidence"]
+    assert td.validate_descriptor(desc) == []
+
+
+def test_append_descriptor_writes_and_is_readable():
+    data = {"name": "t", "profession": "legal"}
+    desc = td.build_descriptor(
+        kind="ringi", label="稟議", profession="legal", dtype="single-shot",
+        id_prefix="rg-", collection="ringis")
+    problems = td.append_descriptor(data, desc)
+    assert problems == []
+    assert td.descriptor_kinds(data) == ["ringi"]
+    assert td.get_descriptor(data, "ringi")["label"] == "稟議"
+
+
+def test_append_descriptor_rejects_invalid_without_writing():
+    data = {"name": "t"}
+    bad = td.build_descriptor(kind="", label="x", profession="legal",
+                              dtype="bogus", id_prefix="rg", collection="")
+    problems = td.append_descriptor(data, bad)
+    assert problems  # kind/type/id_prefix/collection all flagged
+    assert td.load_descriptors(data) == []   # nothing written
+
+
+def test_append_descriptor_rejects_duplicate_kind_and_prefix():
+    data = {"name": "t"}
+    first = td.build_descriptor(kind="ringi", label="稟議", profession="legal",
+                                dtype="single-shot", id_prefix="rg-",
+                                collection="ringis")
+    assert td.append_descriptor(data, first) == []
+    dup_kind = td.build_descriptor(kind="ringi", label="別", profession="legal",
+                                   dtype="single-shot", id_prefix="rg2-",
+                                   collection="ringis2")
+    assert any("kind" in p for p in td.append_descriptor(data, dup_kind))
+    dup_prefix = td.build_descriptor(kind="other", label="別", profession="legal",
+                                     dtype="single-shot", id_prefix="rg-",
+                                     collection="others")
+    assert any("id_prefix" in p for p in td.append_descriptor(data, dup_prefix))
+    # only the first descriptor was actually written
+    assert td.descriptor_kinds(data) == ["ringi"]

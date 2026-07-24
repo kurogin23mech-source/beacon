@@ -67,7 +67,19 @@ def test_sales_profession_case_insensitive(project_cwd, monkeypatch):
     assert _read(project_cwd)["profession"] == "sales"
 
 
-def test_unknown_profession_errors(project_cwd, monkeypatch):
-    monkeypatch.setenv("BEACON_PROFESSION", "marketing")
-    with pytest.raises(SystemExit):
-        commands.cmd_init()
+def test_data_defined_profession_creates_descriptor_skeleton(project_cwd,
+                                                             monkeypatch,
+                                                             capsys):
+    # ms-124 e-4091: a profession is no longer a hardcoded enum. An unrecognised
+    # name creates a data-defined occupation skeleton (empty target_classes),
+    # which the owner fills with `beacon target-class add` — no code change.
+    monkeypatch.setenv("BEACON_PROFESSION", "legal")
+    commands.cmd_init()
+    data = _read(project_cwd)
+    assert data["profession"] == "legal"
+    assert data["milestones"] == []       # validator-compat
+    assert data["target_classes"] == []   # targets come from descriptors
+    core.validate_project(data)
+    out = capsys.readouterr().out
+    assert "profession = legal" in out
+    assert "beacon target-class add" in out

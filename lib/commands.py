@@ -830,9 +830,22 @@ def cmd_init():
             "disclosure_policy": disclosure_policy,
         }
     else:
-        print(f"Error: unknown profession '{profession}' "
-              "(valid: dev, sales, backoffice)", file=sys.stderr)
-        sys.exit(1)
+        # ms-124 e-4091: a profession is no longer a hardcoded enum. Any other
+        # name (legal / hr / …) creates a DATA-defined occupation skeleton: a
+        # bare project carrying that profession and an empty target_classes list,
+        # which the owner fills with `beacon target-class add` — no Beacon code
+        # change to load a new occupation. milestones:[] keeps the shared
+        # validator passing; target_classes:[] declares "targets come from
+        # descriptors" (occupation registry resolves them, e-3957).
+        data = {
+            "name": name,
+            "objective": objective,
+            "profession": profession,
+            "milestones": [],
+            "target_classes": [],
+            "retro_day": retro_day,
+            "disclosure_policy": disclosure_policy,
+        }
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
@@ -869,8 +882,14 @@ def cmd_init():
     elif profession in ("backoffice", "back-office"):
         print("Next: beacon target create --class contract --label <名前> "
               "--field counterparty=<相手方>")
-    else:
+    elif profession in ("", "dev"):
         print("Next: beacon milestone add")
+    else:
+        # data-defined profession (ms-124 e-4091): no target-classes yet
+        print(f"  profession = {profession} (記述子で定義: target-class 未登録)")
+        print("Next: beacon target-class add --kind <種類> --label <名前> "
+              f"--profession {profession} --type single-shot "
+              "--id-prefix <pfx-> --collection <coll>")
 
 
 def cmd_common_setup():
@@ -2094,7 +2113,8 @@ def cmd_target_create():
 def cmd_target_advance():
     """Advance a data-defined target to its next (or a named) phase (e-3956).
 
-    beacon target advance --class <kind> <target-id> [--to <phase>] [--reason <text>]
+    beacon target advance --class <kind> <target-id> [--to <phase>]
+                          [--field key=value ...] [--reason <text>]
     """
     kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
     target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
@@ -2106,9 +2126,10 @@ def cmd_target_advance():
         sys.exit(1)
     data = load_project()
     desc = _resolve_descriptor(data, kind)
+    fields = _parse_field_pairs()
     try:
         rec, old, new = _te.advance_target(data, desc, target_id,
-                                           to_phase=to_phase,
+                                           to_phase=to_phase, fields=fields,
                                            actor=_actor_str(), reason=reason)
     except _te.TargetEngineError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -2116,6 +2137,8 @@ def cmd_target_advance():
     save_project(data, op={"op": "target_advance", "kind": kind,
                            "target_id": target_id})
     print(f"フェーズ進行: [{target_id}] {old} -> {new}")
+    for k, v in fields.items():
+        print(f"  {k} = {v}")
     if _te.is_terminal_phase(desc, new):
         print(f"  ※ '{new}' は最終フェーズです。完了は "
               f"beacon target close --class {kind} {target_id}")
@@ -2166,12 +2189,349 @@ def cmd_target_instances():
         return
     for r in rows:
         icon = "●" if r["status"] == work_model.DONE_STATUS else "○"
-        # ms-125 e-4088 (ms-122 目的達成レビュー指摘): project_target nests phase
-        # under detail (to match the shared-frame shape), so r["phase"] KeyError'd
-        # and crashed the non-JSON listing whenever an instance existed.
-        r_phase = (r.get("detail") or {}).get("phase") or ""
-        phase = f" [{r_phase}]" if r_phase else ""
-        print(f"  {icon} [{r['id']}] {r['label']}{phase} — {r['status']}")
+        detail = r.get("detail", {})
+        phase = f" [{detail.get('phase')}]" if detail.get("phase") else ""
+        counts = ""
+        if r.get("work_items_total"):
+            counts = f" WorkItem {r.get('work_items_done', 0)}/{r['work_items_total']}"
+        if detail.get("evidence_total"):
+            counts += f" Evidence {detail['evidence_total']}"
+        ball = detail.get("who_has_the_ball")
+        ball_str = f" ball:{ball}" if ball else ""
+        print(f"  {icon} [{r['id']}] {r['label']}{phase}{counts}{ball_str} — "
+              f"{r['status']}")
+        if detail.get("next_move"):
+            print(f"      次の一手: {detail['next_move']}")
+
+
+# ---------------------------------------------------------------------------
+# Thick-frame verbs on a data-defined target (ms-124 e-4089): WorkItems,
+# Evidence, ball. These let a descriptor target carry the same cognitive
+# primitives (units of doing / records of what happened / whose turn) a
+# milestone or opportunity does, instead of being a bare phase machine.
+# ---------------------------------------------------------------------------
+
+def cmd_target_work_item():
+    """Add / complete / list a WorkItem on a data-defined target (e-4089).
+
+    beacon target work-item add   --class <kind> <target-id> --desc <text>
+    beacon target work-item done  --class <kind> <target-id> <item-id> [--reason <text>]
+    beacon target work-item list  --class <kind> <target-id> [--json]
+    """
+    action = os.environ.get("BEACON_WI_ACTION", "").strip()
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    item_id = os.environ.get("BEACON_WI_ITEM_ID", "").strip()
+    desc_text = os.environ.get("BEACON_WI_DESC", "").strip()
+    reason = os.environ.get("BEACON_REASON", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not target_id:
+        print("Usage: beacon target work-item <add|done|list> --class <kind> "
+              "<target-id> ...", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    try:
+        if action == "add":
+            if not desc_text:
+                # ms-124 AX review: the body is a --desc flag, not a positional
+                # (unlike `beacon task add "text"`). Say so instead of the bare
+                # "description は必須" the engine would raise.
+                print("Error: WorkItem の説明は --desc <text> で指定してください "
+                      "(positional は target-id のみ)", file=sys.stderr)
+                sys.exit(1)
+            item = _te.add_work_item(data, desc, target_id, desc_text,
+                                     actor=_actor_str())
+            save_project(data, op={"op": "target_work_item_add", "kind": kind,
+                                   "target_id": target_id, "item_id": item["id"]})
+            print(f"WorkItem 追加: [{item['id']}] {desc_text}")
+        elif action == "done":
+            item = _te.complete_work_item(data, desc, target_id, item_id,
+                                          actor=_actor_str(), reason=reason)
+            save_project(data, op={"op": "target_work_item_done", "kind": kind,
+                                   "target_id": target_id, "item_id": item_id})
+            print(f"WorkItem 完了: [{item_id}]")
+        elif action == "list":
+            rec = _te.find_target(data, desc, target_id)
+            if rec is None:
+                print(f"Error: target が見つかりません: {target_id}",
+                      file=sys.stderr)
+                sys.exit(1)
+            items = _te.list_work_items(rec)
+            if json_mode:
+                print(json.dumps(items, ensure_ascii=False))
+                return
+            if not items:
+                print(f"({target_id} に WorkItem はまだありません)")
+                return
+            for it in items:
+                icon = "●" if work_model.is_done(it) else "○"
+                print(f"  {icon} [{it.get('id')}] {it.get('description', '')}")
+        else:
+            print("Usage: beacon target work-item <add|done|list> ...",
+                  file=sys.stderr)
+            sys.exit(1)
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_target_evidence():
+    """Attach / list Evidence records on a data-defined target (e-4089).
+
+    beacon target evidence add  --class <kind> <target-id> [--summary <text>]
+                                [--for <work-item-id>]
+    beacon target evidence list --class <kind> <target-id> [--json]
+
+    ms-124 AX review: Evidence mirrors work-item's ``<add|list>`` action shape
+    (rather than an implicit bare add) so the two child primitives read alike,
+    and a written Evidence can be read back from the CLI.
+    """
+    action = os.environ.get("BEACON_EV_ACTION", "").strip()
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    summary = os.environ.get("BEACON_EV_SUMMARY", "").strip()
+    linked_id = os.environ.get("BEACON_EV_FOR", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not target_id:
+        print("Usage: beacon target evidence <add|list> --class <kind> "
+              "<target-id> [--summary <text>] [--for <work-item-id>] [--json]",
+              file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    try:
+        if action in ("", "add"):
+            ev = _te.add_evidence(data, desc, target_id, summary=summary,
+                                  linked_id=linked_id, actor=_actor_str())
+            save_project(data, op={"op": "target_evidence_add", "kind": kind,
+                                   "target_id": target_id,
+                                   "evidence_id": ev["id"]})
+            link = f" → {linked_id}" if linked_id else ""
+            print(f"Evidence 追加: [{ev['id']}]{link}")
+        elif action == "list":
+            rec = _te.find_target(data, desc, target_id)
+            if rec is None:
+                print(f"Error: target が見つかりません: {target_id}",
+                      file=sys.stderr)
+                sys.exit(1)
+            evs = _te.list_evidence(rec)
+            if json_mode:
+                print(json.dumps(evs, ensure_ascii=False))
+                return
+            if not evs:
+                print(f"({target_id} に Evidence はまだありません)")
+                return
+            for ev in evs:
+                link = f" → {ev['linked_id']}" if ev.get("linked_id") else ""
+                print(f"  [{ev.get('id')}] {ev.get('summary', '')}{link}")
+        else:
+            print("Usage: beacon target evidence <add|list> ...",
+                  file=sys.stderr)
+            sys.exit(1)
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_target_ball():
+    """Set whose court a data-defined target's next move is in (e-4089).
+
+    beacon target ball --class <kind> <target-id> <self|counterpart|none>
+                       [--reason <text>]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    ball = os.environ.get("BEACON_BALL", "").strip()
+    reason = os.environ.get("BEACON_REASON", "").strip()
+    if not target_id or not ball:
+        print("Usage: beacon target ball --class <kind> <target-id> "
+              "<self|counterpart|none> [--reason <text>]", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    try:
+        rec = _te.set_ball(data, desc, target_id, ball, actor=_actor_str(),
+                           reason=reason)
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_ball", "kind": kind,
+                           "target_id": target_id})
+    now = rec.get(_te.BALL_KEY) or "none"
+    print(f"ball 更新: [{target_id}] → {now}")
+
+
+# ---------------------------------------------------------------------------
+# Target-class authoring (ms-124 e-4091) — declare a new target-class into
+# project.json via CLI, the no-code onboarding path. Hand-editing project.json
+# is forbidden by the project rules, so a person who can't write Beacon code
+# still needs a sanctioned way to add their own kind of work (契約 / 稟議 / …).
+# ---------------------------------------------------------------------------
+
+def _parse_spec_lines(env_key: str) -> list:
+    """Split a newline-joined env value (set by bin/beacon from repeated flags)
+    into stripped non-empty lines."""
+    return [ln.strip() for ln in os.environ.get(env_key, "").split("\n")
+            if ln.strip()]
+
+
+def _field_from_spec(raw: str, *, required: bool) -> dict:
+    """Parse a ``key:label[:type]`` field spec into a descriptor field dict.
+    Type defaults to ``string``. Raises SystemExit with guidance on a malformed
+    spec (an empty key can't be recovered from)."""
+    parts = raw.split(":")
+    key = parts[0].strip()
+    if not key:
+        print(f"Error: field 指定に key がありません: {raw!r} "
+              "(key:label:type 形式)", file=sys.stderr)
+        sys.exit(1)
+    # ms-124 AX review: target-class add's --field is a SCHEMA declaration
+    # (key:label:type), NOT the value assignment (key=value) that target
+    # create/advance use. Reject a key that looks like the value grammar so a
+    # transferred `--field counterparty=相手方` fails loudly here instead of
+    # registering a garbage field key that only errors far downstream.
+    if "=" in key or any(c.isspace() for c in key):
+        print(f"Error: field の key '{key}' が不正です: {raw!r} は "
+              "key:label:type 形式です (key=value は target create/advance 用)",
+              file=sys.stderr)
+        sys.exit(1)
+    field = {"key": key, "label": (parts[1].strip() if len(parts) > 1 else key)}
+    ftype = parts[2].strip() if len(parts) > 2 and parts[2].strip() else "string"
+    field["type"] = ftype
+    if required:
+        field["required"] = True
+    return field
+
+
+def _phase_from_spec(raw: str, *, terminal: bool) -> dict:
+    """Parse a ``key:label`` phase spec into a descriptor phase dict."""
+    parts = raw.split(":")
+    key = parts[0].strip()
+    if not key:
+        print(f"Error: phase 指定に key がありません: {raw!r} (key:label 形式)",
+              file=sys.stderr)
+        sys.exit(1)
+    phase = {"key": key, "label": (parts[1].strip() if len(parts) > 1 else key)}
+    if terminal:
+        phase["terminal"] = True
+    return phase
+
+
+def cmd_target_class_add():
+    """Declare a new data-defined target-class into project.json (e-4091).
+
+    beacon target-class add --kind <k> --label <l> --profession <p>
+        --type <single-shot|persistent> --id-prefix <pfx-> --collection <coll>
+        [--field key:label:type ...] [--required-field key:label:type ...]
+        [--phase key:label ...] [--terminal-phase key:label ...]
+    beacon target-class add --stdin        # full descriptor as JSON on stdin
+    """
+    data = load_project()
+    if os.environ.get("BEACON_TC_STDIN", "") == "1":
+        # ms-124 AX review: --stdin takes the whole descriptor as JSON; the
+        # per-field flags are ignored in that path. Reject the hybrid rather
+        # than silently dropping the flags the caller thought would apply.
+        conflicting = [n for n, e in (
+            ("--kind", "BEACON_TC_KIND"), ("--label", "BEACON_TC_LABEL"),
+            ("--type", "BEACON_TC_TYPE"), ("--id-prefix", "BEACON_TC_ID_PREFIX"),
+            ("--collection", "BEACON_TC_COLLECTION"),
+            ("--field", "BEACON_TC_FIELDS"),
+            ("--required-field", "BEACON_TC_REQUIRED_FIELDS"),
+            ("--phase", "BEACON_TC_PHASES"),
+            ("--terminal-phase", "BEACON_TC_TERMINAL_PHASES"))
+            if os.environ.get(e, "").strip()]
+        if conflicting:
+            print(f"Error: --stdin 使用時は他の記述子フラグを指定できません "
+                  f"(競合: {', '.join(conflicting)})", file=sys.stderr)
+            sys.exit(1)
+        raw = sys.stdin.read()
+        try:
+            desc = json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f"Error: --stdin の JSON を解釈できません: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(desc, dict):
+            print("Error: --stdin の JSON は 1 つの記述子オブジェクトである必要が"
+                  "あります", file=sys.stderr)
+            sys.exit(1)
+    else:
+        kind = os.environ.get("BEACON_TC_KIND", "").strip()
+        label = os.environ.get("BEACON_TC_LABEL", "").strip()
+        profession = os.environ.get("BEACON_TC_PROFESSION", "").strip() \
+            or (data.get("profession") or "").strip()
+        dtype = os.environ.get("BEACON_TC_TYPE", "").strip()
+        id_prefix = os.environ.get("BEACON_TC_ID_PREFIX", "").strip()
+        collection = os.environ.get("BEACON_TC_COLLECTION", "").strip()
+        missing = [n for n, v in (("--kind", kind), ("--label", label),
+                                  ("--type", dtype), ("--id-prefix", id_prefix),
+                                  ("--collection", collection)) if not v]
+        if missing:
+            print(f"Usage: beacon target-class add --kind <k> --label <l> "
+                  f"--type <single-shot|persistent> --id-prefix <pfx-> "
+                  f"--collection <coll> [--profession <p>] ...\n"
+                  f"  (--profession 省略時はプロジェクトの profession を継承)\n"
+                  f"  未指定: {', '.join(missing)}", file=sys.stderr)
+            sys.exit(1)
+        fields = [_field_from_spec(s, required=False)
+                  for s in _parse_spec_lines("BEACON_TC_FIELDS")]
+        fields += [_field_from_spec(s, required=True)
+                   for s in _parse_spec_lines("BEACON_TC_REQUIRED_FIELDS")]
+        phases = [_phase_from_spec(s, terminal=False)
+                  for s in _parse_spec_lines("BEACON_TC_PHASES")]
+        phases += [_phase_from_spec(s, terminal=True)
+                   for s in _parse_spec_lines("BEACON_TC_TERMINAL_PHASES")]
+        desc = _td.build_descriptor(
+            kind=kind, label=label, profession=profession, dtype=dtype,
+            id_prefix=id_prefix, collection=collection, fields=fields,
+            phases=phases)
+    problems = _td.append_descriptor(data, desc)
+    if problems:
+        print("Error: 記述子を登録できません:", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_class_add",
+                           "kind": desc.get("kind")})
+    print(f"target-class 登録: [{desc.get('kind')}] {desc.get('label')} "
+          f"(profession={desc.get('profession')}, type={desc.get('type')})")
+    print(f"  次: beacon target create --class {desc.get('kind')} "
+          f"--label <名前>")
+
+
+def cmd_target_class_list():
+    """List the data-defined target-classes declared in this project (e-4091).
+
+    beacon target-class list [--json]
+    """
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    descriptors = _td.load_descriptors(data)
+    problems_by_kind = _td.validate_target_classes(data)
+    if json_mode:
+        # ms-124 AX review: carry the validation problems in the JSON too, so a
+        # consumer sees WHAT is wrong, not just a "⚠" it can't act on.
+        print(json.dumps({"descriptors": descriptors,
+                          "problems": problems_by_kind}, ensure_ascii=False))
+        return
+    if not descriptors:
+        print("(このプロジェクトは target-class を宣言していません — "
+              "beacon target-class add で追加できます)")
+        return
+    for desc in descriptors:
+        if not isinstance(desc, dict):
+            continue
+        kind = (desc.get("kind") or "?").strip() or "?"
+        phases = _td.phase_keys(desc)
+        ph = f" phases: {' → '.join(phases)}" if phases else " (phase なし)"
+        problems = problems_by_kind.get(kind)
+        flag = " ⚠ 要修正" if problems else ""
+        print(f"  [{kind}] {desc.get('label', '')} "
+              f"(profession={desc.get('profession', '')}, "
+              f"type={desc.get('type', '')}){ph}{flag}")
+        # ms-124 AX review: show the actual problems, not just the ⚠ marker.
+        for p in (problems or []):
+            print(f"      - {p}")
 
 
 # Default command groups probed by the AX full-surface snapshot. These are
@@ -24940,6 +25300,11 @@ if __name__ == "__main__":
         "target_advance": cmd_target_advance,     # ms-122 e-3956
         "target_close": cmd_target_close,         # ms-122 e-3956
         "target_instances": cmd_target_instances,  # ms-122 e-3956
+        "target_work_item": cmd_target_work_item,  # ms-124 e-4089
+        "target_evidence": cmd_target_evidence,    # ms-124 e-4089
+        "target_ball": cmd_target_ball,            # ms-124 e-4089
+        "target_class_add": cmd_target_class_add,  # ms-124 e-4091
+        "target_class_list": cmd_target_class_list,  # ms-124 e-4091
         "review_context": cmd_review_context,
         "review_done": cmd_review_done,      # ms-119 e-4060
 

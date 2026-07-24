@@ -198,6 +198,11 @@ ALLOW_BASH_ONLY_DISPATCH: set[str] = {
     "tgt",         # (目的達成レビュー). bash-only for now; dispatch.py Windows
                    # parity = follow-up, same precedent as sales/migrate — a
                    # dev/ops review verb, not on the hot Windows path.
+    "target-class",  # ms-124 e-4091: `target-class add/list` declares a
+    "tclass",        # data-defined target-class (no-code onboarding). bash-only
+                     # for now; dispatch.py Windows parity = follow-up, same
+                     # precedent as target — a back-office authoring verb, not on
+                     # the hot Windows path.
     "review",      # ms-119 e-3947: `review context` emits the review-kernel
                    # bundle for an independent judge. bash-only for now;
                    # dispatch.py Windows parity = follow-up, same precedent as

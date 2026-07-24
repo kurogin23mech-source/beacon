@@ -212,25 +212,21 @@ def validate_descriptor(desc: dict) -> list:
         problems.extend(
             _validate_fields(
                 [f for f in (phase.get("fields") or []) if isinstance(f, dict)],
-                label, where=f"phase '{pkey}'", allow_required=False))
+                label, where=f"phase '{pkey}'"))
 
     return problems
 
 
-def _validate_fields(fields: list, label: str, where: str,
-                     *, allow_required: bool = True) -> list:
+def _validate_fields(fields: list, label: str, where: str) -> list:
     """Return problems for a field list: each field needs a non-empty ``key``,
     field keys must be unique within their scope, and a declared ``type`` must
     be in ``ALLOWED_FIELD_TYPES``.
 
-    ``allow_required=False`` additionally rejects ``required: true`` on a field.
-    Used for PHASE fields (ms-122 AX finding): a base field's ``required`` is
-    enforced at ``create_target``, but there is no mechanism yet to SET or
-    enforce a phase field on ``advance`` — so declaring ``required`` on a phase
-    field would be a silent no-op (the descriptor author believes it is
-    enforced, nothing enforces it). Rejecting it in validation turns that false
-    promise into an explicit, discoverable error until an advance-time field
-    path exists (follow-up)."""
+    A phase field MAY be marked ``required`` (ms-124 e-4090): it is enforced at
+    ``advance_target`` — advancing INTO a phase demands that phase's required
+    fields be supplied (``advance --field``) or already set. This closes the
+    ms-122 fence, where phase ``required`` was rejected because no advance-time
+    field path existed; now that it does, the promise is real, not silent."""
     problems: list = []
     seen: set = set()
     for field in fields:
@@ -247,12 +243,74 @@ def _validate_fields(fields: list, label: str, where: str,
             problems.append(
                 f"[{label}] {where} の field '{fkey}' の type '{ftype}' は未知です "
                 f"(許可: {' / '.join(ALLOWED_FIELD_TYPES)})")
-        if not allow_required and field.get("required"):
-            problems.append(
-                f"[{label}] {where} の field '{fkey}' に required は指定できません "
-                f"(phase field を必須にする充足経路が未実装 — base field で必須化するか "
-                f"advance --field 対応を待ってください)")
     return problems
+
+
+# ---------------------------------------------------------------------------
+# Authoring — build a descriptor and append it to a project (ms-124 e-4091).
+# The no-code onboarding path: a new target-class enters via this builder + the
+# CLI that drives it, NOT by hand-editing project.json (which the project rules
+# forbid). The builder is a pure transform; appending validates before writing.
+# ---------------------------------------------------------------------------
+
+# Default child arms a freshly-authored descriptor carries so its targets
+# inherit the thick cognitive frame (WorkItems / Evidence, ms-124 e-4089).
+_DEFAULT_ARMS = ["work_items", "evidence"]
+
+
+def build_descriptor(*, kind: str, label: str, profession: str, dtype: str,
+                     id_prefix: str, collection: str,
+                     fields: Optional[list] = None,
+                     phases: Optional[list] = None) -> dict:
+    """Build a target-class descriptor dict from its parts (pure, no I/O). The
+    shape matches what ``backoffice_seed`` hand-writes: kind / label /
+    profession / type / id_prefix / collection / decomposition / fields /
+    phases. ``fields`` and ``phases`` are passed through verbatim (the caller
+    built them from CLI flags or JSON). ``decomposition.arms`` defaults to the
+    thick-frame arms so authored classes get WorkItems / Evidence like the
+    built-in seed. This does NOT validate — the caller runs ``validate_*``."""
+    return {
+        "kind": (kind or "").strip(),
+        "label": (label or "").strip(),
+        "profession": (profession or "").strip(),
+        "type": (dtype or "").strip(),
+        "id_prefix": (id_prefix or "").strip(),
+        "collection": (collection or "").strip(),
+        "decomposition": {"id_field": "id", "arms": list(_DEFAULT_ARMS)},
+        "fields": list(fields or []),
+        "phases": list(phases or []),
+    }
+
+
+def append_descriptor(data: dict, desc: dict) -> list:
+    """Append ``desc`` to the project's ``target_classes`` and return the
+    problem list (empty = appended OK). Validates the descriptor in isolation
+    AND against the project's existing descriptors (a duplicate kind / id_prefix
+    / collection would collide) BEFORE mutating; when problems are found nothing
+    is written. The additive/tolerant compat contract holds: the key is created
+    on first use, existing readers ignore it."""
+    problems = validate_descriptor(desc)
+    # Cross-descriptor collision against what's already declared.
+    kind = (desc.get("kind") or "").strip()
+    prefix = (desc.get("id_prefix") or "").strip()
+    coll = (desc.get("collection") or "").strip()
+    for existing in load_descriptors(data):
+        if not isinstance(existing, dict):
+            continue
+        if kind and (existing.get("kind") or "").strip() == kind:
+            problems.append(f"kind '{kind}' は既に宣言済みです")
+        if prefix and (existing.get("id_prefix") or "").strip() == prefix:
+            problems.append(f"id_prefix '{prefix}' は既に別の記述子が使用中です")
+        if coll and (existing.get("collection") or "").strip() == coll:
+            problems.append(f"collection '{coll}' は既に別の記述子が使用中です")
+    if problems:
+        return problems
+    lst = data.get(TARGET_CLASSES_KEY)
+    if not isinstance(lst, list):
+        lst = []
+        data[TARGET_CLASSES_KEY] = lst
+    lst.append(desc)
+    return []
 
 
 def validate_target_classes(data: dict) -> dict:

@@ -38,7 +38,7 @@ BACKOFFICE_TARGET_CLASSES = [
         "type": "single-shot",
         "id_prefix": "ctr-",
         "collection": "contracts",
-        "decomposition": {"id_field": "id", "arms": []},
+        "decomposition": {"id_field": "id", "arms": ["work_items", "evidence"]},
         "fields": [
             {"key": "counterparty", "label": "相手方", "type": "string",
              "required": True},
@@ -61,7 +61,7 @@ BACKOFFICE_TARGET_CLASSES = [
         "type": "single-shot",
         "id_prefix": "ev-",
         "collection": "evaluations",
-        "decomposition": {"id_field": "id", "arms": []},
+        "decomposition": {"id_field": "id", "arms": ["work_items", "evidence"]},
         "fields": [
             {"key": "subject", "label": "対象者", "type": "string",
              "required": True},
@@ -79,7 +79,7 @@ BACKOFFICE_TARGET_CLASSES = [
         "type": "persistent",
         "id_prefix": "mc-",
         "collection": "monthly_closes",
-        "decomposition": {"id_field": "id", "arms": []},
+        "decomposition": {"id_field": "id", "arms": ["work_items", "evidence"]},
         "fields": [
             {"key": "period", "label": "対象月", "type": "string",
              "required": True},
@@ -97,7 +97,7 @@ BACKOFFICE_TARGET_CLASSES = [
         "type": "persistent",
         "id_prefix": "aw-",
         "collection": "attendance_watches",
-        "decomposition": {"id_field": "id", "arms": []},
+        "decomposition": {"id_field": "id", "arms": ["work_items", "evidence"]},
         "fields": [
             {"key": "department", "label": "対象部署", "type": "string"},
         ],

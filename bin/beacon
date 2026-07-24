@@ -571,18 +571,19 @@ cmd_target_create() {
 
 cmd_target_advance() {
     ensure_project
-    local kind="" target_id="" to_phase="" reason=""
+    local kind="" target_id="" to_phase="" reason="" fields=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --class)  kind="${2:-}";     shift 2 ;;
             --to)     to_phase="${2:-}"; shift 2 ;;
+            --field)  fields="${fields}${2:-}"$'\n'; shift 2 ;;
             --reason) reason="${2:-}";   shift 2 ;;
-            -?*)      _guard_positional "$1" "Usage: beacon target advance --class <kind> <target-id> [--to <phase>] [--reason <text>]" ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target advance --class <kind> <target-id> [--to <phase>] [--field key=value ...] [--reason <text>]" ;;
             *)        target_id="$1";    shift ;;
         esac
     done
     BEACON_TARGET_CLASS="$kind" BEACON_TARGET_ID="$target_id" \
-        BEACON_TO_PHASE="$to_phase" BEACON_REASON="$reason" \
+        BEACON_TO_PHASE="$to_phase" BEACON_REASON="$reason" BEACON_FIELDS="$fields" \
         python3 "$COMMANDS_PY" target_advance
 }
 
@@ -614,6 +615,125 @@ cmd_target_instances() {
     done
     BEACON_TARGET_CLASS="$kind" BEACON_JSON="$json" \
         python3 "$COMMANDS_PY" target_instances
+}
+
+cmd_target_work_item() {
+    ensure_project
+    local action="${1:-}"; [[ $# -gt 0 ]] && shift
+    local kind="" target_id="" item_id="" desc="" reason="" json=0
+    local _pos=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --class)  kind="${2:-}";   shift 2 ;;
+            --desc)   desc="${2:-}";   shift 2 ;;
+            --reason) reason="${2:-}"; shift 2 ;;
+            --json)   json=1;          shift ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target work-item <add|done|list> --class <kind> <target-id> ..." ;;
+            *)        # ms-124 AX review: reject excess positional instead of
+                      # silently overwriting target-id / item-id.
+                      if [[ $_pos -eq 0 ]]; then target_id="$1";
+                      elif [[ $_pos -eq 1 ]]; then item_id="$1";
+                      else echo "Error: 余分な引数 '$1' (Usage: beacon target work-item <add|done|list> --class <kind> <target-id> [<item-id>])" >&2; exit 1; fi
+                      _pos=$((_pos+1)); shift ;;
+        esac
+    done
+    BEACON_WI_ACTION="$action" BEACON_TARGET_CLASS="$kind" \
+        BEACON_TARGET_ID="$target_id" BEACON_WI_ITEM_ID="$item_id" \
+        BEACON_WI_DESC="$desc" BEACON_REASON="$reason" BEACON_JSON="$json" \
+        python3 "$COMMANDS_PY" target_work_item
+}
+
+cmd_target_evidence() {
+    ensure_project
+    # First token may be an action (add|list); default to add when the first
+    # token is a flag or a target-id (back-compat with the bare-add form).
+    local action=""
+    case "${1:-}" in add|list) action="$1"; shift ;; esac
+    local kind="" target_id="" summary="" ev_for="" json=0 _pos=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --class)   kind="${2:-}";    shift 2 ;;
+            --summary) summary="${2:-}"; shift 2 ;;
+            --for)     ev_for="${2:-}";  shift 2 ;;
+            --json)    json=1;           shift ;;
+            -?*)       _guard_positional "$1" "Usage: beacon target evidence <add|list> --class <kind> <target-id> [--summary <text>] [--for <item-id>] [--json]" ;;
+            *)         # ms-124 AX review: reject excess positional instead of
+                       # last-wins silently mis-recording to another target.
+                       if [[ $_pos -eq 0 ]]; then target_id="$1";
+                       else echo "Error: 余分な引数 '$1' (Usage: beacon target evidence <add|list> --class <kind> <target-id> ...)" >&2; exit 1; fi
+                       _pos=$((_pos+1)); shift ;;
+        esac
+    done
+    BEACON_EV_ACTION="$action" BEACON_TARGET_CLASS="$kind" \
+        BEACON_TARGET_ID="$target_id" BEACON_EV_SUMMARY="$summary" \
+        BEACON_EV_FOR="$ev_for" BEACON_JSON="$json" \
+        python3 "$COMMANDS_PY" target_evidence
+}
+
+cmd_target_ball() {
+    ensure_project
+    local kind="" target_id="" ball="" reason="" _pos=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --class)  kind="${2:-}";   shift 2 ;;
+            --reason) reason="${2:-}"; shift 2 ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target ball --class <kind> <target-id> <self|counterpart|none> [--reason <text>]" ;;
+            *)        # ms-124 AX review: reject excess positional.
+                      if [[ $_pos -eq 0 ]]; then target_id="$1";
+                      elif [[ $_pos -eq 1 ]]; then ball="$1";
+                      else echo "Error: 余分な引数 '$1' (Usage: beacon target ball --class <kind> <target-id> <self|counterpart|none>)" >&2; exit 1; fi
+                      _pos=$((_pos+1)); shift ;;
+        esac
+    done
+    BEACON_TARGET_CLASS="$kind" BEACON_TARGET_ID="$target_id" \
+        BEACON_BALL="$ball" BEACON_REASON="$reason" \
+        python3 "$COMMANDS_PY" target_ball
+}
+
+cmd_target_class_add() {
+    ensure_project
+    local kind="" label="" profession="" dtype="" id_prefix="" collection=""
+    local fields="" req_fields="" phases="" term_phases="" stdin=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --kind|--class)   kind="${2:-}";       shift 2 ;;  # --class alias (target 側と語彙統一)
+            --label)          label="${2:-}";      shift 2 ;;
+            --profession)     profession="${2:-}"; shift 2 ;;
+            --type)           dtype="${2:-}";      shift 2 ;;
+            --id-prefix)      id_prefix="${2:-}";  shift 2 ;;
+            --collection)     collection="${2:-}"; shift 2 ;;
+            --field)          fields="${fields}${2:-}"$'\n'; shift 2 ;;
+            --required-field) req_fields="${req_fields}${2:-}"$'\n'; shift 2 ;;
+            --phase)          phases="${phases}${2:-}"$'\n'; shift 2 ;;
+            --terminal-phase) term_phases="${term_phases}${2:-}"$'\n'; shift 2 ;;
+            --stdin)          stdin=1;             shift ;;
+            -?*)              _guard_positional "$1" "Usage: beacon target-class add --kind <k> --label <l> --profession <p> --type <single-shot|persistent> --id-prefix <pfx-> --collection <coll> [...]" ;;
+            *)                # ms-124 AX review: reject stray positional instead
+                              # of silently discarding it (a bare kind is a
+                              # common mistake for --kind).
+                              echo "Error: 余分な引数 '$1' — target-class add はフラグで指定します (--kind/--class <k> --label <l> ...)" >&2; exit 1 ;;
+        esac
+    done
+    BEACON_TC_KIND="$kind" BEACON_TC_LABEL="$label" \
+        BEACON_TC_PROFESSION="$profession" BEACON_TC_TYPE="$dtype" \
+        BEACON_TC_ID_PREFIX="$id_prefix" BEACON_TC_COLLECTION="$collection" \
+        BEACON_TC_FIELDS="$fields" BEACON_TC_REQUIRED_FIELDS="$req_fields" \
+        BEACON_TC_PHASES="$phases" BEACON_TC_TERMINAL_PHASES="$term_phases" \
+        BEACON_TC_STDIN="$stdin" \
+        python3 "$COMMANDS_PY" target_class_add
+}
+
+cmd_target_class_list() {
+    ensure_project
+    local json=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=1; shift ;;
+            -?*)    _guard_positional "$1" "Usage: beacon target-class list [--json]" ;;
+            *)      echo "Error: 余分な引数 '$1' (Usage: beacon target-class list [--json])" >&2; exit 1 ;;
+        esac
+    done
+    BEACON_JSON="$json" python3 "$COMMANDS_PY" target_class_list
 }
 
 cmd_review_context() {
@@ -3151,14 +3271,36 @@ case "${1:-}" in
             advance)  shift 2; cmd_target_advance "$@" ;;
             close)    shift 2; cmd_target_close "$@" ;;
             instances) shift 2; cmd_target_instances "$@" ;;
+            work-item) shift 2; cmd_target_work_item "$@" ;;
+            evidence)  shift 2; cmd_target_evidence "$@" ;;
+            ball)      shift 2; cmd_target_ball "$@" ;;
             *)        echo "Usage: beacon target <subcommand>
   目的達成レビュー (target 遷移の人間承認):
     review-request | approve | reject | list
   記述子駆動 target (data 定義 target-class の操作, ms-122):
     create --class <kind> --label <text> [--field key=value ...]
-    advance --class <kind> <target-id> [--to <phase>] [--reason <text>]
+    advance --class <kind> <target-id> [--to <phase>] [--field key=value ...] [--reason <text>]
     close --class <kind> <target-id> [--reason <text>]
-    instances --class <kind> [--json]" ;;
+    instances --class <kind> [--json]
+  厚い認知フレーム (WorkItem / Evidence / ball, ms-124):
+    work-item add  --class <kind> <target-id> --desc <text>
+    work-item done --class <kind> <target-id> <item-id> [--reason <text>]
+    work-item list --class <kind> <target-id> [--json]
+    evidence add  --class <kind> <target-id> [--summary <text>] [--for <item-id>]
+    evidence list --class <kind> <target-id> [--json]
+    ball --class <kind> <target-id> <self|counterpart|none> [--reason <text>]" ;;
+        esac
+        ;;
+    target-class|tclass)
+        case "${2:-}" in
+            add)      shift 2; cmd_target_class_add "$@" ;;
+            list|ls)  shift 2; cmd_target_class_list "$@" ;;
+            *)        echo "Usage: beacon target-class <subcommand>  (data 定義 target-class をコード無しで追加, ms-124)
+    add --kind <k> --label <l> --type <single-shot|persistent> --id-prefix <pfx-> --collection <coll> [--profession <p>]
+        [--field key:label:type ...] [--required-field key:label:type ...]
+        [--phase key:label ...] [--terminal-phase key:label ...]
+    add --stdin        # 記述子全体を JSON で stdin から渡す
+    list [--json]" ;;
         esac
         ;;
     review)
@@ -3171,6 +3313,7 @@ case "${1:-}" in
                     case "$1" in
                         --type) _rd_type="${2:-}"; shift 2 ;;
                         --pr)   _rd_pr="${2:-}";   shift 2 ;;
+                        -?*)    _guard_flag "$1" ;;
                         *)      shift ;;
                     esac
                 done

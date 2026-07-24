@@ -357,6 +357,29 @@ def is_open(item: dict) -> bool:
     return work_item_status(item) not in (DONE_STATUS, CANCELLED_STATUS)
 
 
+# ---------------------------------------------------------------------------
+# Ball — whose court the work is in. Part of the thick cognitive frame every
+# occupation shares (ms-124 e-4089): sales names it who_has_the_ball on an
+# Opportunity; development leaves it implicit (a task in flight is always "ours").
+# The canonical vocabulary lives here so a data-defined target-class inherits the
+# same "whose turn is it" concept as code-defined ones rather than re-inventing a
+# thinner one. sales_entities keeps its own historical copy (behavior-preserving,
+# not refactored here); new descriptor-driven targets read these.
+# ---------------------------------------------------------------------------
+
+BALL_SELF = "self"            # our turn — we owe the next move
+BALL_COUNTERPART = "counterpart"  # the other party's turn — we are waiting on them
+BALL_NONE = ""                # no ball in play (target done / not yet started)
+VALID_BALL = (BALL_SELF, BALL_COUNTERPART, BALL_NONE)
+
+
+def normalize_ball(value: str) -> str:
+    """Return ``value`` if it is a recognised ball state, else ``BALL_NONE``.
+    Tolerant read: an unknown / missing ball never raises, it degrades to "no
+    ball in play" so a projection over legacy data stays well-formed."""
+    return value if value in VALID_BALL else BALL_NONE
+
+
 def mark_done(item: dict, *, at: str = "", actor: str = "",
               reason: str = "") -> dict:
     """Mark a WorkItem done in place and return it.

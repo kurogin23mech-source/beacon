@@ -282,3 +282,36 @@ class TestParseScopeArgSales:
     def test_unknown_prefix_rejected(self):
         with pytest.raises(ValueError, match="unknown ref prefix"):
             trek.parse_scope_arg("p1:xyz-1")
+
+
+# ms-124 e-4091 — a descriptor-defined kind is a recognised narrowing key when
+# the project data is passed, so a Trek can scope to a data-defined target.
+class TestNarrowingDataAware:
+    _PROJ = {
+        "name": "legal-shop",
+        "profession": "legal",
+        "target_classes": [{
+            "kind": "contract", "label": "契約", "profession": "legal",
+            "type": "single-shot", "id_prefix": "ctr-", "collection": "contracts",
+        }],
+    }
+
+    def test_descriptor_kind_dropped_without_data(self):
+        # default (no data) keeps the built-in set — 'contract' unrecognised, so
+        # strict mode rejects an entry narrowed only by it
+        with pytest.raises(ValueError, match="narrowing key"):
+            trek.normalize_scope_entry({"project": "p-1", "contract": "ctr-1"})
+
+    def test_descriptor_kind_accepted_with_data(self):
+        out = trek.normalize_scope_entry(
+            {"project": "p-1", "contract": "ctr-1"}, data=self._PROJ)
+        assert out == {"project": "p-1", "contract": "ctr-1"}
+
+    def test_narrowing_keys_helper_includes_descriptor(self):
+        assert "contract" in trek.narrowing_keys(self._PROJ)
+        assert "contract" not in trek.narrowing_keys()   # no data = built-ins
+
+    def test_builtin_kinds_still_work_with_data(self):
+        out = trek.normalize_scope_entry(
+            {"project": "p-1", "milestone": "ms-3"}, data=self._PROJ)
+        assert out == {"project": "p-1", "milestone": "ms-3"}
