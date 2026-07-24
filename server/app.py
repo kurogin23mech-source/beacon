@@ -10871,6 +10871,43 @@ async def _verify_envelope_secret_configured():
         )
 
 
+@app.on_event("startup")
+async def _verify_scheduler_key_configured():
+    """Refuse to start in production with the dev scheduler-tick key (e-4115).
+
+    Twin guard to ``_verify_envelope_secret_configured`` for the *other*
+    internal secret. ``BEACON_SCHEDULER_INTERNAL_KEY`` gates
+    ``POST /api/system/trek-scheduler/tick`` (which drives Trek / Operation
+    autonomy) and the T1-system envelope mint path. Its dev fallback
+    (``server/envelope.py:_DEV_FALLBACK_SCHEDULER_KEY``) is visible in the
+    public repo, so booting production with the key unset would let anyone who
+    reads the source drive the tick / mint endpoints. Fail fast at boot (which
+    reddens the pull-deploy health check) rather than silently at first
+    unauthorized tick.
+
+    Same posture gate as the envelope-secret guard: only enforced when
+    ``_auth_enabled`` (production-ish, ``BEACON_API_AUTH`` != "0"). Local dev /
+    unit tests (``BEACON_API_AUTH=0``) may use the fallback; we only log INFO.
+    """
+    if _auth_enabled and envelope_mod.is_using_dev_scheduler_key():
+        msg = (
+            "BEACON_SCHEDULER_INTERNAL_KEY not configured for production "
+            "(BEACON_API_AUTH=1 but the scheduler tick / mint endpoints would "
+            "accept the dev fallback key visible in the public repo). Set "
+            "BEACON_SCHEDULER_INTERNAL_KEY to a random 32+ byte value in "
+            "/etc/beacon/app.env before deploying — e.g. "
+            "`BEACON_SCHEDULER_INTERNAL_KEY=$(openssl rand -hex 32)` — and "
+            "restart beacon-api. See docs/DEPLOY_VPS.md『定期ティック』."
+        )
+        _server_logger.error(msg)
+        raise RuntimeError(msg)
+    if envelope_mod.is_using_dev_scheduler_key():
+        _server_logger.info(
+            "scheduler tick key using dev fallback "
+            "(BEACON_API_AUTH=0 — local dev / test posture)"
+        )
+
+
 def _hydrate_v2_milestones(project_id: str, data: dict) -> dict:
     """Re-attach milestones from the v2 subcollection before broadcasting.
 

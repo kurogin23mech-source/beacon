@@ -469,6 +469,27 @@ def scheduler_internal_key() -> str:
     )
 
 
+def is_using_dev_scheduler_key() -> bool:
+    """Return True iff the scheduler tick key would use the hard-coded dev value.
+
+    Twin of ``is_using_dev_fallback()`` for the *other* internal secret. The
+    scheduler key gates ``POST /api/system/trek-scheduler/tick`` (which fires
+    Trek / Operation autonomy) and the T1-system envelope mint path; the dev
+    fallback (``_DEV_FALLBACK_SCHEDULER_KEY``) is visible in the public repo,
+    so booting production with it would let anyone drive the tick / mint
+    endpoints. Production startup checks this and refuses to boot (e-4115).
+
+    "Using the dev fallback" means ``BEACON_SCHEDULER_INTERNAL_KEY`` is **unset
+    or empty** (``scheduler_internal_key()`` then returns the placeholder), or
+    is explicitly set to the same public placeholder string — forgetting to
+    rotate from the committed placeholder is exactly what this guard catches.
+    """
+    configured = os.environ.get("BEACON_SCHEDULER_INTERNAL_KEY", "")
+    if not configured:
+        return True
+    return configured == _DEV_FALLBACK_SCHEDULER_KEY
+
+
 def is_using_dev_fallback() -> bool:
     """Return True iff envelope signing would use the hard-coded dev secret.
 
