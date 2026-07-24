@@ -116,14 +116,19 @@ emit() {
     "$msg" "$BEACON_ROOT"
 }
 
+# e-4080: the two review 節目 grep patterns below are the SINGLE SOURCE'd copy of
+# lib/review_nodes.py REVIEW_NODES[*].grep_pattern. Keep them byte-identical —
+# tests/test_review_node_manifest_drift.py fails the build if they diverge (a
+# silent wake loss is exactly the drift this review machinery exists to prevent).
 SKILL=""
+NODE=""
 if echo "$CMD_BARE" | grep -qE 'git commit '; then
   emit "BEACON: Commit detected. You MUST now run /beacon-log Skill to record this commit."
   SKILL="/beacon-log"
 elif echo "$CMD_BARE" | grep -qE 'git push'; then
   emit "BEACON: Push detected. You MUST now run /beacon-push Skill to record this push."
   SKILL="/beacon-push"
-elif echo "$CMD_BARE" | grep -qE 'beacon pr (add|create)|gh pr create'; then
+elif echo "$CMD_BARE" | grep -qE 'beacon pr (add|create)|gh pr create'; then  # review_nodes.py id=pr-open
   # ms-119 e-4060: a PR-open is a review 節目. Before this branch the review-due
   # trigger fired into a file but nothing WOKE the AI to consume it (unlike
   # commit/push/deploy, which each have a MUST-run wake here) — so AX /
@@ -131,7 +136,8 @@ elif echo "$CMD_BARE" | grep -qE 'beacon pr (add|create)|gh pr create'; then
   # gap by giving PR-open the same forcing-function wake.
   emit "BEACON: PR opened. AX + maintainability review are due (文脈ゼロの独立 judge に原典+差分を渡す節目). You MUST now run 'beacon trigger check' to see the pending <type>-review-due triggers, then run /beacon-review-run --type ax --pr <N> and --type maintainability --pr <N> for the PR. Approving/merging before these run is blocked by beacon pr approve."
   SKILL="/beacon-review-run"
-elif echo "$CMD_BARE" | grep -qE 'beacon (milestone (done|close|observe)|operation close)( |$)'; then
+  NODE="pr-open"
+elif echo "$CMD_BARE" | grep -qE 'beacon (milestone (done|close|observe)|operation close)( |$)'; then  # review_nodes.py id=target-close
   # ms-119 e-4077: closing a target (milestone / operation) is the OTHER review
   # 節目 — it fires 思想 (philosophy) + 目的達成 (attainment) review-due (see
   # commands.py _fire_review_due_trigger). e-4060 only wired the PR-open wake, so
@@ -142,6 +148,7 @@ elif echo "$CMD_BARE" | grep -qE 'beacon (milestone (done|close|observe)|operati
   # this codebase (運用改善フェーズ = 基本目的達成が前提), not a reversible pause.
   emit "BEACON: Target close command detected (成否は未確認). 思想(philosophy) + 目的達成(attainment) review may be due. You MUST now run 'beacon trigger check'; if a <type>-review-due トリガー fired, run /beacon-review-run --type philosophy --target <target-id> for the 思想 review, and 'beacon target review-request <target-id>' to assemble the 目的達成 evidence for human approval (SPEC 方針2: attainment verdict は人間所有). No review-due トリガー = 何もしなくてよい (close 失敗 / 誤マッチ含む)."
   SKILL="/beacon-review-run"
+  NODE="target-close"
 elif echo "$CMD_BARE" | grep -qE 'gcloud run deploy|gcloud app deploy|scripts/deploy\.sh'; then
   emit "BEACON: Deploy detected. You MUST now run /beacon-deploy Skill to record this deployment."
   SKILL="/beacon-deploy"
@@ -157,7 +164,9 @@ elif echo "$CMD_BARE" | grep -qE 'kubectl apply|cdk deploy|serverless deploy|sls
 fi
 
 if [ -n "$SKILL" ]; then
-  _hook_debug "matched:$SKILL" "$BEACON_ROOT" "$CMD"
+  # e-4080: append the review-node id (pr-open / target-close) when set, so the
+  # debug log distinguishes the two review 節目 that share /beacon-review-run.
+  _hook_debug "matched:$SKILL${NODE:+:$NODE}" "$BEACON_ROOT" "$CMD"
 else
   _hook_debug "no-match" "$BEACON_ROOT" "$CMD"
 fi

@@ -2142,6 +2142,16 @@ def cmd_target_advance():
     if _te.is_terminal_phase(desc, new):
         print(f"  ※ '{new}' は最終フェーズです。完了は "
               f"beacon target close --class {kind} {target_id}")
+        # ms-119 e-4087: reaching a terminal phase is a completion claim for a
+        # data-defined target, same 節目 as a milestone going done — fire the
+        # 目的達成 + 思想 review-due so descriptor targets are reviewed too. One
+        # trigger file per target_id, so a later `target close` just overwrites
+        # it (no double-fire accumulation).
+        label = (rec.get("label") or rec.get("title") or "") if isinstance(rec, dict) else ""
+        _fire_review_due_trigger(
+            target_id, kind, old, new, target_title=label,
+            has_spec=_spec_exists_for_descriptor_target(target_id),
+            is_completion=True)
 
 
 def cmd_target_close():
@@ -2169,6 +2179,17 @@ def cmd_target_close():
     print(f"完了: [{target_id}] を done にしました")
     if reason:
         print(f"  reason: {reason}")
+    # ms-119 e-4087: closing a data-defined target is a completion claim — the
+    # same 節目 that fires 目的達成 + 思想 review-due for a milestone. Descriptor
+    # targets were previously invisible to the review spine; wire them in.
+    rec_closed = _te.find_target(data, desc, target_id)
+    label = (rec_closed.get("label") or rec_closed.get("title") or "") \
+        if isinstance(rec_closed, dict) else ""
+    prev_phase = _te.current_phase(rec_closed) if isinstance(rec_closed, dict) else ""
+    _fire_review_due_trigger(
+        target_id, kind, prev_phase or "open", "done", target_title=label,
+        has_spec=_spec_exists_for_descriptor_target(target_id),
+        is_completion=True)
 
 
 def cmd_target_instances():
@@ -2831,7 +2852,12 @@ def cmd_review_context():
             proc = subprocess.run(["gh", "pr", "diff", pr], capture_output=True, text=True)
         elif diff_ref:
             target_ref = diff_ref
-            proc = subprocess.run(["git", "diff", diff_ref], capture_output=True, text=True)
+            # ms-119 / e-4096: widen the diff context so surrounding code travels
+            # with the change. git defaults to 3 lines — too few for a repo-blind
+            # judge to see the enclosing function; -U25 lets it judge the diff in
+            # context without opening files (which would taint the instrument).
+            proc = subprocess.run(["git", "diff", "-U25", diff_ref],
+                                  capture_output=True, text=True)
         else:
             print("Error: pass --pr <n> or --diff-ref <base...head> to collect the "
                   "diff (or --mode full-surface to snapshot the command surface).",
@@ -2848,6 +2874,18 @@ def cmd_review_context():
     if _mi:
         gaps.append(_mi)
 
+    # ms-119 / e-4096: attach the application-map surface index so the judge can
+    # raise accuracy (spot a diff that duplicates an existing surface) WITHOUT
+    # reaching into the repo — the sanctioned implementer-independent context.
+    external_references = []
+    surface_ref = _review_surface_index_reference()
+    if surface_ref is not None:
+        external_references.append(surface_ref)
+    else:
+        gaps.append("application-map (全 surface 索引) が未生成のため、judge は "
+                    "『既存機能と重複していないか』を repo 参照なしには確認できません "
+                    "(/beacon-map で生成すると review 精度が上がります)。")
+
     bundle = review_spine.assemble_review_context(
         review_type,
         origin_id=origin_id,
@@ -2859,8 +2897,134 @@ def cmd_review_context():
         known_judge_types=set(registry.keys()),
         implementer_model=os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip(),
         artifact=artifact,
+        external_references=external_references,
     )
     print(json.dumps(bundle, ensure_ascii=False))
+
+
+def _repo_file_origin(desc):
+    """(origin_id, origin_content) for a repo-file 原典 descriptor, or exit with a
+    clean error. Used by the BATCH review-context path (e-4125); the single-type
+    path (cmd_review_context) resolves its origin inline because it also handles
+    the doc-origin kind. Extracting the full single-path collection into a shared
+    helper is a worthwhile follow-up (e-4125 maint review)."""
+    origin_spec = desc.get("origin", {}) if isinstance(desc.get("origin"), dict) else {}
+    ref = origin_spec.get("ref", "")
+    if origin_spec.get("kind") != "repo-file" or not ref:
+        print(f"Error: batch は原典が repo-file の review type のみ対象です "
+              f"(descriptor: {desc.get('id')})。", file=sys.stderr)
+        sys.exit(1)
+    install_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    origin_path = os.path.join(install_root, *ref.split("/"))
+    try:
+        with open(origin_path, encoding="utf-8") as f:
+            return ref, f.read()
+    except OSError as e:
+        print(f"Error: 原典 not found at {ref}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_review_batch_context():
+    """Emit ALL review bundles that fire together at a 節目, in one call
+    (ms-119 / e-4125).
+
+    beacon review context --batch --pr <N>
+
+    A 節目 fires a PAIR of reviews (a PR-open fires AX + maintainability). Running
+    them as two separate one-off calls means two judge invocations the caller
+    must orchestrate by hand and two disconnected reports. This emits one
+    envelope carrying every judge-run bundle bound to the node — the
+    /beacon-review-run Skill fans the judges out in parallel over one shared diff
+    + surface index, then folds their findings into one deduped, consensus-scored
+    report (review_spine.aggregate_review_reports).
+
+    Today only the PR-open node (--pr) is a pure judge-run fan-out. The
+    target-close pair (思想 + 目的達成) mixes a judge-run review with a
+    human-gated one, so it is orchestrated per-type by the Skill using
+    review_spine.batch_review_types_for_node("target-close").
+    """
+    import review_spine
+    pr = os.environ.get("BEACON_PR", "").strip()
+    if not pr:
+        print("Usage: beacon review context --batch --pr <N>  "
+              "(PR-open の節目に発火する全レビュー[AX+保守性]の bundle を1回で出力)",
+              file=sys.stderr)
+        sys.exit(1)
+    node = "pr-open"
+    due = review_spine.batch_review_types_for_node(
+        node, registry=review_spine.load_review_types())
+    due = [d for d in due if d["judge_run"]]
+    if not due:
+        print("Error: PR-open の節目に発火する judge-run review type がありません "
+              "(skills/*/review-type.json の fires_on=pr-open を確認)。",
+              file=sys.stderr)
+        sys.exit(1)
+
+    target_ref = f"PR #{pr}"
+    proc = subprocess.run(["gh", "pr", "diff", pr], capture_output=True, text=True)
+    if proc.returncode != 0:
+        print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+    diff_text = proc.stdout
+    shared_gaps = []
+    if not diff_text.strip():
+        shared_gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
+
+    external_references = []
+    surface_ref = _review_surface_index_reference()
+    if surface_ref is not None:
+        external_references.append(surface_ref)
+    else:
+        shared_gaps.append("application-map (全 surface 索引) が未生成のため、judge は "
+                           "既存機能との重複を repo 参照なしには確認できません "
+                           "(/beacon-map で生成すると review 精度が上がります)。")
+
+    registry = review_spine.load_review_types()
+    implementer_model = os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip()
+    reviews = []
+    for d in due:
+        rtype = d["review"]
+        origin_id, origin_content = _repo_file_origin(registry.get(rtype, {}))
+        bundle = review_spine.assemble_review_context(
+            rtype, origin_id=origin_id, origin_content=origin_content,
+            diff_text=diff_text, mode="diff", target_ref=target_ref,
+            gaps=list(shared_gaps),
+            known_judge_types=set(review_spine.judge_run_review_types().keys()),
+            implementer_model=implementer_model,
+            external_references=external_references)
+        reviews.append({"review_type": rtype, "judge_run": True, "bundle": bundle})
+
+    print(json.dumps({
+        "node": node,
+        "target_ref": target_ref,
+        "reviews": reviews,
+        "aggregate_hint": ("各 review を独立 judge に並列で走らせ、findings を "
+                           "beacon が aggregate_review_reports で dedup + consensus "
+                           "して1レポートに畳んでください (review_spine)。"),
+    }, ensure_ascii=False))
+
+
+def _review_surface_index_reference():
+    """Read the application-map CORE doc and shape it as the judge bundle's
+    surface-index external reference (ms-119 / e-4096), or None when absent.
+
+    Best-effort: a transport failure / missing map returns None (the caller then
+    records a gap), never crashes a review."""
+    import review_spine
+    try:
+        doc = get_store().get_document("application-map")
+    except Exception:
+        return None
+    if not doc:
+        return None
+    # Stale when the map-drift trigger says the surface moved since it was mapped.
+    stale = False
+    try:
+        stale = os.path.isfile(os.path.join(_get_triggers_dir(), "map-drift.json"))
+    except OSError:
+        stale = False
+    return review_spine.build_surface_index_reference(
+        doc.get("content", ""), updated_at=doc.get("updated_at", ""), stale=stale)
 
 
 def cmd_milestone_wait():
@@ -11243,9 +11407,30 @@ def _spec_exists_for_op(op_id: str) -> bool:
     return _spec_doc_for_target(op_id, "operation") is not None
 
 
+def _spec_exists_for_descriptor_target(target_id: str) -> bool:
+    """True if a spec-scoped document is attached to a data-defined (descriptor)
+    target (ms-119 / e-4087).
+
+    Descriptor targets are not milestones/operations, so they don't carry the
+    ``milestone`` / ``operation`` doc field; a SPEC is linked via the generic
+    ``target`` field. This lets the 思想 (philosophy) review bind at a descriptor
+    target's completion when it has a written 原典, mirroring milestones."""
+    if not target_id:
+        return False
+    try:
+        docs = get_store().list_documents()
+    except Exception:
+        return False
+    for doc in docs:
+        if doc.get("scope") == "spec" and doc.get("target") == target_id:
+            return True
+    return False
+
+
 def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
                              new_state: str, *, target_title: str = "",
-                             has_spec: bool = False, gated: bool = False) -> None:
+                             has_spec: bool = False, gated: bool = False,
+                             is_completion: "Optional[bool]" = None) -> None:
     """Fire a 'review-due' trigger for a target lifecycle transition
     (ms-119 / e-3911 — the review firing spine).
 
@@ -11256,12 +11441,29 @@ def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
     the 思想 advisory (only when the target has a SPEC 原典). Empty bindings =
     no file written (routine / reversible transitions fire nothing).
 
+    ``is_completion`` (ms-119 / e-4087):
+      * ``None`` (default) — a BUILT-IN milestone / operation transition: whether
+        it is a completion claim is decided by the transition_approval truth
+        table (review_bindings_for_transition).
+      * ``True`` — a data-defined (descriptor) target reaching done / a terminal
+        phase. Its KIND is a descriptor class name the built-in truth table does
+        not know, but the 節目 is the same completion claim, so bind the reviews
+        directly (review_bindings_for_completion).
+      * ``False`` — a descriptor transition that is NOT a completion (early phase
+        advance): fire nothing.
+
     Advisory only — never blocks the transition. The blocking mechanism for
     目的達成 is the approval entry from e-3912, not this trigger.
     """
     import review_spine
-    bindings = review_spine.review_bindings_for_transition(
-        target_kind, old_state, new_state, has_spec=has_spec, gated=gated)
+    if is_completion is None:
+        bindings = review_spine.review_bindings_for_transition(
+            target_kind, old_state, new_state, has_spec=has_spec, gated=gated)
+    elif is_completion:
+        bindings = review_spine.review_bindings_for_completion(
+            has_spec=has_spec, gated=gated)
+    else:
+        bindings = []
     if not bindings:
         return
     triggers_dir = _get_triggers_dir()
@@ -11531,6 +11733,216 @@ def cmd_review_done():
             pass
         print(f"  PR #{pr_number} の独立レビューは全て実施済み "
               f"— approve/merge の gate を通過できます。")
+        # ms-119 e-4073 (scaffold, opt-in): flip the CI gate status to success so
+        # a branch-protection required check unblocks the merge button on ALL
+        # routes (gh/UI/beacon), not just `beacon pr merge`. Guarded by
+        # BEACON_REVIEW_GATE_CI=1 + a resolvable head SHA so default behavior and
+        # tests are unchanged; best-effort (a failed gh post never breaks `done`).
+        _ci_flip_review_gate_success(pr_number)
+
+
+def _ci_flip_review_gate_success(pr_number: str) -> None:
+    """Best-effort: set the `beacon-review-gate` commit status to success for the
+    PR head (ms-119 e-4073). No-op unless BEACON_REVIEW_GATE_CI=1 (default OFF —
+    the CI gate is opt-in scaffolding). Never raises."""
+    if os.environ.get("BEACON_REVIEW_GATE_CI", "") != "1":
+        return
+    try:
+        sha = subprocess.run(
+            ["gh", "pr", "view", pr_number, "--json", "headRefOid",
+             "--jq", ".headRefOid"],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        if not sha:
+            return
+        script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "scripts", "review-gate-ci.py")
+        subprocess.run(["python3", script, "set", "--state", "success",
+                        "--sha", sha, "--pr", pr_number],
+                       capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return
+
+
+def _review_skips_log_path() -> str:
+    """Durable append-only audit of human-intended review skips (ms-119 e-4124).
+
+    Lives in .beacon/ (not the ephemeral triggers/ dir) so a waiver survives the
+    trigger that it cleared — the skip decision is a permanent governance record,
+    the trigger is a transient 'still owed' marker."""
+    return os.path.join(os.path.dirname(get_project_file()), "review-skips.jsonl")
+
+
+def _review_skip_gate_record() -> dict:
+    """Capture HOW a review skip passed the human-intent guard (ms-119 e-4124).
+
+    Mirrors _approval_gate_record (e-4006): the skip is meant to be a human's
+    deliberate waiver, but the env signal is a self-report — so record which
+    signal opened it (explicit user override vs human session) rather than
+    trusting it. An AI-recorded skip then leaves a grep-able footprint (an
+    ``ai-session-unguarded`` signal) instead of looking identical to a human's.
+    This is a DIFFERENT env var from the AI-ban / merge-override flags on
+    purpose: skipping a review is a distinct act from forcing a merge past one
+    that is still owed (BEACON_PR_REVIEW_OVERRIDE)."""
+    override = os.environ.get("BEACON_REVIEW_SKIP_USER_OVERRIDE", "") == "1"
+    if override:
+        signal = "user-override"
+    elif _session_kind_is_human():
+        signal = "human-session"
+    else:
+        signal = "ai-session-unguarded"
+    return {
+        "signal": signal,
+        "session_kind": (os.environ.get("BEACON_SESSION_KIND", "") or "").strip() or "unset",
+    }
+
+
+def cmd_review_skip():
+    """Record a HUMAN's deliberate decision to skip an owed review (ms-119 e-4124).
+
+    beacon review skip --type <ax|maintainability|philosophy|...> \\
+        (--pr <N> | --target <ms-XX|op-X>) --reason "<なぜ省くか>"
+
+    First-class, reason-bearing, audited — semantically distinct from
+    BEACON_PR_REVIEW_OVERRIDE (force a merge PAST a review that is still owed).
+    A skip *waives* the obligation with an owner and a reason; it clears the
+    review-due trigger (so approve/merge proceeds) AND appends a durable record
+    to .beacon/review-skips.jsonl. --reason is mandatory: a waiver with no
+    recorded reason is exactly the silent skip this MS exists to prevent."""
+    review_type = os.environ.get("BEACON_REVIEW_TYPE", "").strip()
+    pr_number = os.environ.get("BEACON_PR_NUMBER", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    reason = (os.environ.get("BEACON_REASON", "") or "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not review_type or not (pr_number or target_id):
+        print("Usage: beacon review skip --type <ax|maintainability|philosophy|...> "
+              "(--pr <N> | --target <ms-XX|op-X>) --reason \"<なぜ省くか>\"",
+              file=sys.stderr)
+        sys.exit(1)
+    if pr_number and target_id:
+        print("Error: --pr と --target は同時に指定できません (どちらか一方)。",
+              file=sys.stderr)
+        sys.exit(1)
+    if not reason:
+        print("Error: review skip には --reason が必須です。人間が『なぜこのレビューを"
+              "省くか』を残さない waiver は、この仕組みが防ごうとしている silent skip "
+              "そのものです。", file=sys.stderr)
+        sys.exit(1)
+
+    import review_spine
+    import datetime
+    # e-4124 AX/maint review: reject an unknown --type. Without this a typo'd type
+    # (e.g. "maintainabilty") matches no review-due, clears nothing, yet prints
+    # success — a silent no-op in the very command meant to make skipping visible.
+    valid_types = (set(review_spine.load_review_types().keys())
+                   | {review_spine.REVIEW_ATTAINMENT})
+    if review_type not in valid_types:
+        print(f"Error: 未知の review type: {review_type!r} "
+              f"(有効: {', '.join(sorted(valid_types))})。typo の skip は義務を消さない"
+              f"のに成功に見える silent no-op になるため拒否します。", file=sys.stderr)
+        sys.exit(1)
+
+    # Peek BEFORE mutating: does a matching owed review actually exist? A skip of a
+    # non-existent obligation (wrong PR / target id) must not look successful.
+    if pr_number:
+        owed = os.path.isfile(os.path.join(
+            _get_triggers_dir(), f"{review_type}-review-due-{pr_number}.json"))
+    else:
+        owed = _target_review_due_has_binding(target_id, review_type)
+
+    gate = _review_skip_gate_record()
+    ref_kind = "pr" if pr_number else "target"
+    ref = pr_number or target_id
+    record = review_spine.build_review_skip_record(
+        review_type=review_type, ref_kind=ref_kind, ref=ref, reason=reason,
+        actor=_actor_str(), gate=gate, at=datetime.datetime.now().isoformat())
+    record["waived_obligation"] = owed  # honest audit: was anything actually owed?
+
+    # Durable audit first (the record must survive even if trigger clearing
+    # races); then clear ONLY this type's review-due obligation.
+    try:
+        with open(_review_skips_log_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as e:
+        print(f"Error: skip 監査ログを書けませんでした: {e}", file=sys.stderr)
+        sys.exit(1)
+    if pr_number:
+        # One file per (type, PR); removing it waives exactly this type.
+        _clear_review_due_for_pr(review_type, pr_number)
+    else:
+        # The target review-due trigger is ONE file carrying ALL bindings that
+        # fired at the completion 節目 (e.g. philosophy + attainment). A per-type
+        # skip must remove only this type's binding — deleting the whole file
+        # would silently waive the others too (e-4124 AX/maint review finding).
+        _remove_binding_from_target_review_due(target_id, review_type)
+
+    where = f"PR #{pr_number}" if pr_number else target_id
+    if json_mode:
+        print(json.dumps(record, ensure_ascii=False))
+    else:
+        print(f"レビュー skip を記録 (人間の意図的省略): {review_type} / {where}")
+        print(f"  理由: {reason}")
+        print(f"  監査: .beacon/review-skips.jsonl (signal={gate['signal']}, "
+              f"actor={record['actor'] or 'unknown'})")
+        if gate["signal"] == "ai-session-unguarded":
+            print("  ⚠ このセッションは human と申告していません "
+                  "(BEACON_SESSION_KIND=human も BEACON_REVIEW_SKIP_USER_OVERRIDE=1 も無し)。"
+                  "skip は記録されましたが、監査に ai-session-unguarded として残ります。",
+                  file=sys.stderr)
+    if not owed:
+        # Recorded, but nothing matched — say so (both output modes) instead of
+        # implying an obligation was cleared. Non-zero exit so an automation loop
+        # can tell the skip hit no target.
+        print(f"⚠ 一致する review-due が見つかりませんでした ({review_type} / {where})。"
+              f"skip は監査に記録しましたが、解消した義務はありません "
+              f"(型 / PR番号 / target-id の typo を確認してください)。", file=sys.stderr)
+        sys.exit(3)
+
+
+def _target_review_due_has_binding(target_id: str, review_type: str) -> bool:
+    """True if the target's review-due trigger currently owes ``review_type``
+    (ms-119 e-4124). Read-only peek (no mutation)."""
+    try:
+        with open(os.path.join(_get_triggers_dir(),
+                               f"review-due-{target_id}.json"), encoding="utf-8") as f:
+            return review_type in (json.load(f).get("bindings") or [])
+    except (OSError, ValueError):
+        return False
+
+
+def _remove_binding_from_target_review_due(target_id: str, review_type: str) -> bool:
+    """Remove ONE review type's binding from a target's review-due trigger,
+    preserving the others (ms-119 e-4124).
+
+    The target review-due trigger is a single file whose ``bindings`` list holds
+    every review that fired at the completion 節目. A per-type skip must drop only
+    ``review_type``: rewrite the file with the reduced bindings, and delete it
+    only when the skipped type was the sole binding. Returns True when the type
+    was present (an obligation was actually waived). Best-effort: IO errors leave
+    the trigger as-is and return False (the gate stays honest — a failed clear
+    does not look like a success)."""
+    path = os.path.join(_get_triggers_dir(), f"review-due-{target_id}.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    bindings = data.get("bindings") or []
+    if review_type not in bindings:
+        return False
+    remaining = [b for b in bindings if b != review_type]
+    try:
+        if remaining:
+            data["bindings"] = remaining
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+                f.write("\n")
+        else:
+            os.remove(path)
+    except OSError:
+        return False
+    return True
 
 
 def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
@@ -25306,7 +25718,9 @@ if __name__ == "__main__":
         "target_class_add": cmd_target_class_add,  # ms-124 e-4091
         "target_class_list": cmd_target_class_list,  # ms-124 e-4091
         "review_context": cmd_review_context,
+        "review_batch_context": cmd_review_batch_context,  # ms-119 e-4125
         "review_done": cmd_review_done,      # ms-119 e-4060
+        "review_skip": cmd_review_skip,      # ms-119 e-4124
 
         "milestone_observe": cmd_milestone_observe,
         "milestone_wait": cmd_milestone_wait,

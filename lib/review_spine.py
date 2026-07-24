@@ -303,6 +303,170 @@ def assemble_attainment_context(*, target_id, spec_origin_id, spec_content,
     }
 
 
+def batch_review_types_for_node(node, *, registry=None):
+    """Which reviews fire together at a 節目 (ms-119 / e-4125).
+
+    A 節目 fires a PAIR, not a single review: a PR-open fires AX + maintainability
+    (interface + change-experience drift); a target-close fires 目的達成 +
+    思想 (goal + spirit). Running them as separate one-off invocations means the
+    human sees two reports and no consensus across them. This returns the review
+    ids that bind to a node so a single batch call can fan them out in parallel.
+
+    ``node``: "pr-open" (data-driven: every judge-run type whose descriptor
+    ``fires_on == "pr-open"``) or "target-close" (思想 [judge-run, needs SPEC]
+    + 目的達成 [human-gated evidence review]).
+
+    Returns a list of ``{"review": id, "judge_run": bool}`` in a stable order.
+    """
+    if node == "pr-open":
+        reg = judge_run_review_types() if registry is None else {
+            k: v for k, v in registry.items() if v.get("judge_run")}
+        out = [{"review": tid, "judge_run": True}
+               for tid, desc in sorted(reg.items())
+               if desc.get("fires_on") == "pr-open"]
+        return out
+    if node == "target-close":
+        # This is the MENU (which review types CAN bind at a completion 節目),
+        # not the per-target firing decision. review_bindings_for_transition /
+        # review_bindings_for_completion make 思想 conditional on the target
+        # actually having a SPEC 原典 (has_spec) — so a SPEC-less target fires
+        # only 目的達成. Keep the two in step: whatever type is listed here must
+        # be a type that CAN bind in review_bindings_for_completion (asserted by
+        # tests/test_review_batch_fold.py). 思想 is judge-run; 目的達成 is
+        # human-gated (judge produces evidence, human owns the verdict — see
+        # ATTAINMENT_JUDGE_CONTRACT).
+        return [
+            {"review": REVIEW_PHILOSOPHY, "judge_run": True},
+            {"review": REVIEW_ATTAINMENT, "judge_run": False},
+        ]
+    return []
+
+
+def _finding_key(finding):
+    """Normalized dedup key for a finding: (file, line, lowercased title stripped
+    of trailing punctuation/whitespace). Pure."""
+    f = (finding.get("file") or "").strip()
+    line = finding.get("line")
+    line = str(line).strip() if line is not None else ""
+    title = " ".join((finding.get("title") or "").lower().split()).rstrip(".。 ")
+    return (f, line, title)
+
+
+def aggregate_review_reports(reports):
+    """Fold N per-review reports into ONE deduped, consensus-scored report
+    (ms-119 / e-4125).
+
+    Each report is ``{"review_type": id, "findings": [ {title, file?, line?,
+    severity?}, ... ]}``. Findings that the SAME 節目's reviews independently
+    raise (same file/line/title) are merged into one, carrying which review
+    types flagged it and a ``consensus`` count — a finding two independent judges
+    both raise is stronger signal than one raised alone. Pure: the caller (the
+    /beacon-review-run Skill) runs the judges and hands their structured findings
+    here; this only folds them so the fold is unit-testable without subagents.
+
+    Returns ``{"findings": [...], "by_type": {id: count}, "reviews": [ids]}``,
+    findings ordered by descending consensus then first-seen.
+    """
+    merged = {}
+    order = []
+    by_type = {}
+    review_ids = []
+    for rep in reports or []:
+        rtype = rep.get("review_type") or rep.get("review") or "?"
+        if rtype not in review_ids:
+            review_ids.append(rtype)
+        findings = rep.get("findings") or []
+        by_type[rtype] = len(findings)
+        for fnd in findings:
+            key = _finding_key(fnd)
+            if key not in merged:
+                merged[key] = {
+                    "title": fnd.get("title", ""),
+                    "file": fnd.get("file", ""),
+                    "line": fnd.get("line"),
+                    "severity": fnd.get("severity", ""),
+                    "raised_by": [],
+                    "consensus": 0,
+                }
+                order.append(key)
+            m = merged[key]
+            if rtype not in m["raised_by"]:
+                m["raised_by"].append(rtype)
+                m["consensus"] = len(m["raised_by"])
+            # keep the FIRST non-empty severity seen (severity strings aren't
+            # orderable lexically, so don't attempt a max; detailed ranking is
+            # left to the Skill that presents the folded report).
+            if not m["severity"] and fnd.get("severity"):
+                m["severity"] = fnd["severity"]
+    findings = [merged[k] for k in order]
+    findings.sort(key=lambda m: -m["consensus"])
+    return {"findings": findings, "by_type": by_type, "reviews": review_ids}
+
+
+def build_surface_index_reference(map_content, *, updated_at="", stale=False):
+    """Shape an application-map surface-index external reference for the judge
+    bundle (ms-119 / e-4096).
+
+    A context-zero judge is stronger when it knows WHAT the product's surface is
+    (where features live, what already exists) — otherwise it either misses that
+    a diff duplicates an existing surface, or it reaches into the repo (tainting
+    the instrument). The application-map (CORE doc `application-map`) is exactly
+    that index and is an implementer-INDEPENDENT artifact, so it is the sanctioned
+    non-diff context (see assemble_review_context.external_references). This
+    shapes it as one reference; the caller reads the map content mechanically.
+
+    Returns None when there is no map content (the caller then records a gap so
+    the judge knows the surface index is absent, not silently complete).
+    """
+    if not (map_content or "").strip():
+        return None
+    return {
+        "id": "application-map",
+        "kind": "surface-index",
+        "content": map_content,
+        "updated_at": updated_at or "",
+        "stale": bool(stale),
+        "note": ("プロダクトの全 surface (機能の入口) 索引。judge が『この差分に近い"
+                 "既存機能があるか』『surface が重複していないか』を repo を読まずに"
+                 "判定するための、実装者非依存の参照。stale=true の時は地図が古い可能性。"),
+    }
+
+
+def build_review_skip_record(*, review_type, ref_kind, ref, reason, actor,
+                             gate, at):
+    """Build a durable audit record for a HUMAN-intended review skip (ms-119 /
+    e-4124).
+
+    A skip is a first-class governance decision — "a human looked at this 節目
+    and decided this particular review is not needed, here is why" — and is
+    semantically DISTINCT from ``BEACON_PR_REVIEW_OVERRIDE`` (the AI-ban
+    circumvention flag, which means "force a merge past an review that is still
+    owed"). The two must not be conflated: an override forces past an unmet
+    obligation; a skip records that the obligation was deliberately waived, with
+    a reason and an owner.
+
+    Like the approval gate record (e-4006), the value is not "an AI cannot skip"
+    but "a skip cannot HIDE who waived it and why": ``gate`` carries the signal
+    that authorised the skip (human-session vs explicit user override) so an
+    AI-recorded skip leaves a grep-able footprint rather than looking identical
+    to a human's.
+
+    Pure: returns the record dict; the caller owns persistence (append to the
+    durable ``.beacon/review-skips.jsonl`` audit) and clearing the review-due
+    trigger.
+    """
+    return {
+        "kind": "review-skip",
+        "review_type": review_type,
+        "ref_kind": ref_kind,          # "pr" | "target"
+        "ref": ref,                    # PR number / target id
+        "reason": reason,
+        "actor": actor,
+        "gate": gate,                  # {signal, session_kind} — see e-4006
+        "at": at,
+    }
+
+
 def review_bindings_for_transition(target_kind, old_state, new_state, *,
                                    has_spec=False, gated=False):
     """Return the review bindings that apply to a target lifecycle transition.
@@ -330,10 +494,26 @@ def review_bindings_for_transition(target_kind, old_state, new_state, *,
     """
     if not _ta.is_attainment_transition(target_kind, old_state, new_state):
         return []
-    # Both 目的達成 and 思想 fire at the completion 節目 (ms-119 e-4005). They share
-    # the SPEC 原典 and the moment: 目的達成 = did we reach the goal (evidence for a
-    # human verdict); 思想 = did we honour the SPEC's spirit getting there
-    # (advisory). Neither is suppressed — the human wants both auto-fired at close.
+    return review_bindings_for_completion(has_spec=has_spec, gated=gated)
+
+
+def review_bindings_for_completion(*, has_spec=False, gated=False):
+    """The review bindings for a completion-claim 節目, independent of target
+    KIND (ms-119 / e-4087).
+
+    ``review_bindings_for_transition`` decides *whether* a built-in milestone /
+    operation transition is a completion claim (via the transition_approval
+    truth table) and then delegates here for *which* reviews bind. A
+    data-defined target (ms-122 記述子で定義した職種の対象) reaching done / a
+    terminal phase is the same completion claim — its KIND is a descriptor class
+    name the built-in truth table doesn't know, but the 節目 is identical — so it
+    calls this directly with ``has_spec`` resolved from its own SPEC lookup.
+
+    Both 目的達成 and 思想 fire at the completion 節目 (ms-119 e-4005). They share
+    the SPEC 原典 and the moment: 目的達成 = did we reach the goal (evidence for a
+    human verdict); 思想 = did we honour the SPEC's spirit getting there
+    (advisory). Neither is suppressed — the human wants both auto-fired at close.
+    """
     bindings = [{
         "review": REVIEW_ATTAINMENT,
         "blocking": False,
