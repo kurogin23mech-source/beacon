@@ -1570,9 +1570,21 @@ def _scope_entry_identity_matches(a: dict, b: dict) -> bool:
     return _scope_entry_identity_key(a) == _scope_entry_identity_key(b)
 
 
+def narrowing_keys(data: dict | None = None) -> tuple:
+    """Return the recognised scope-narrowing keys. Without ``data``, the
+    import-time built-in set (``NARROWING_KEYS``); with a project ``data`` dict,
+    the built-ins PLUS that project's descriptor-defined kinds (ms-124 e-4091)
+    so a Trek can scope to a data-defined target (e.g. a ``contract``), not just
+    milestones / opportunities. The import-time constant stays the default so
+    existing callers are byte-for-byte unchanged."""
+    if not data:
+        return NARROWING_KEYS
+    return occupation.all_narrowing_kinds(data)
+
+
 def normalize_scope_entry(
     entry: dict, *, strict: bool = True, resolve: bool = False,
-    db_or_lister=None, mint_slot: bool = False,
+    db_or_lister=None, mint_slot: bool = False, data: dict | None = None,
 ) -> dict:
     """Normalise a scope item.
 
@@ -1635,14 +1647,19 @@ def normalize_scope_entry(
         except ImportError:
             from lib.project_ref import resolve_project_ref as _resolve
         project_ref = _resolve(project_ref, db_or_lister=db_or_lister)
+    # Recognised narrowing keys are data-aware (ms-124 e-4091): when the caller
+    # passes the project ``data`` a descriptor-defined kind is accepted instead
+    # of being silently dropped. Default (no data) = the built-in set, so every
+    # existing caller is unchanged.
+    keys = narrowing_keys(data)
     out: dict = {"project": project_ref}
-    for k in NARROWING_KEYS:
+    for k in keys:
         if entry.get(k):
             out[k] = entry[k]
-    if strict and not any(k in out for k in NARROWING_KEYS):
+    if strict and not any(k in out for k in keys):
         raise ValueError(
             "scope entry requires a narrowing key (one of: "
-            + " | ".join(NARROWING_KEYS)
+            + " | ".join(keys)
             + "; = project-wide scope is no longer accepted; ms-97 AC7)"
         )
     # ms-99 / e-2828: v2 output branch. Only fires when the input signals
@@ -1665,7 +1682,7 @@ def normalize_scope_entry(
         # materialize_slots (Phase 2) index slots without re-inspecting
         # the legacy key. Absent when no narrowing key exists (= only
         # possible when strict=False + legacy project-wide row).
-        for kind in NARROWING_KEYS:
+        for kind in keys:
             if kind in out:
                 out["target_kind"] = kind
                 out["target_id"] = out[kind]

@@ -830,9 +830,22 @@ def cmd_init():
             "disclosure_policy": disclosure_policy,
         }
     else:
-        print(f"Error: unknown profession '{profession}' "
-              "(valid: dev, sales, backoffice)", file=sys.stderr)
-        sys.exit(1)
+        # ms-124 e-4091: a profession is no longer a hardcoded enum. Any other
+        # name (legal / hr / …) creates a DATA-defined occupation skeleton: a
+        # bare project carrying that profession and an empty target_classes list,
+        # which the owner fills with `beacon target-class add` — no Beacon code
+        # change to load a new occupation. milestones:[] keeps the shared
+        # validator passing; target_classes:[] declares "targets come from
+        # descriptors" (occupation registry resolves them, e-3957).
+        data = {
+            "name": name,
+            "objective": objective,
+            "profession": profession,
+            "milestones": [],
+            "target_classes": [],
+            "retro_day": retro_day,
+            "disclosure_policy": disclosure_policy,
+        }
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
@@ -869,8 +882,14 @@ def cmd_init():
     elif profession in ("backoffice", "back-office"):
         print("Next: beacon target create --class contract --label <名前> "
               "--field counterparty=<相手方>")
-    else:
+    elif profession in ("", "dev"):
         print("Next: beacon milestone add")
+    else:
+        # data-defined profession (ms-124 e-4091): no target-classes yet
+        print(f"  profession = {profession} (記述子で定義: target-class 未登録)")
+        print("Next: beacon target-class add --kind <種類> --label <名前> "
+              f"--profession {profession} --type single-shot "
+              "--id-prefix <pfx-> --collection <coll>")
 
 
 def cmd_common_setup():
@@ -2302,6 +2321,144 @@ def cmd_target_ball():
                            "target_id": target_id})
     now = rec.get("who_has_the_ball") or "none"
     print(f"ball 更新: [{target_id}] → {now}")
+
+
+# ---------------------------------------------------------------------------
+# Target-class authoring (ms-124 e-4091) — declare a new target-class into
+# project.json via CLI, the no-code onboarding path. Hand-editing project.json
+# is forbidden by the project rules, so a person who can't write Beacon code
+# still needs a sanctioned way to add their own kind of work (契約 / 稟議 / …).
+# ---------------------------------------------------------------------------
+
+def _parse_spec_lines(env_key: str) -> list:
+    """Split a newline-joined env value (set by bin/beacon from repeated flags)
+    into stripped non-empty lines."""
+    return [ln.strip() for ln in os.environ.get(env_key, "").split("\n")
+            if ln.strip()]
+
+
+def _field_from_spec(raw: str, *, required: bool) -> dict:
+    """Parse a ``key:label[:type]`` field spec into a descriptor field dict.
+    Type defaults to ``string``. Raises SystemExit with guidance on a malformed
+    spec (an empty key can't be recovered from)."""
+    parts = raw.split(":")
+    key = parts[0].strip()
+    if not key:
+        print(f"Error: field 指定に key がありません: {raw!r} "
+              "(key:label:type 形式)", file=sys.stderr)
+        sys.exit(1)
+    field = {"key": key, "label": (parts[1].strip() if len(parts) > 1 else key)}
+    ftype = parts[2].strip() if len(parts) > 2 and parts[2].strip() else "string"
+    field["type"] = ftype
+    if required:
+        field["required"] = True
+    return field
+
+
+def _phase_from_spec(raw: str, *, terminal: bool) -> dict:
+    """Parse a ``key:label`` phase spec into a descriptor phase dict."""
+    parts = raw.split(":")
+    key = parts[0].strip()
+    if not key:
+        print(f"Error: phase 指定に key がありません: {raw!r} (key:label 形式)",
+              file=sys.stderr)
+        sys.exit(1)
+    phase = {"key": key, "label": (parts[1].strip() if len(parts) > 1 else key)}
+    if terminal:
+        phase["terminal"] = True
+    return phase
+
+
+def cmd_target_class_add():
+    """Declare a new data-defined target-class into project.json (e-4091).
+
+    beacon target-class add --kind <k> --label <l> --profession <p>
+        --type <single-shot|persistent> --id-prefix <pfx-> --collection <coll>
+        [--field key:label:type ...] [--required-field key:label:type ...]
+        [--phase key:label ...] [--terminal-phase key:label ...]
+    beacon target-class add --stdin        # full descriptor as JSON on stdin
+    """
+    data = load_project()
+    if os.environ.get("BEACON_TC_STDIN", "") == "1":
+        raw = sys.stdin.read()
+        try:
+            desc = json.loads(raw)
+        except json.JSONDecodeError as e:
+            print(f"Error: --stdin の JSON を解釈できません: {e}", file=sys.stderr)
+            sys.exit(1)
+        if not isinstance(desc, dict):
+            print("Error: --stdin の JSON は 1 つの記述子オブジェクトである必要が"
+                  "あります", file=sys.stderr)
+            sys.exit(1)
+    else:
+        kind = os.environ.get("BEACON_TC_KIND", "").strip()
+        label = os.environ.get("BEACON_TC_LABEL", "").strip()
+        profession = os.environ.get("BEACON_TC_PROFESSION", "").strip() \
+            or (data.get("profession") or "").strip()
+        dtype = os.environ.get("BEACON_TC_TYPE", "").strip()
+        id_prefix = os.environ.get("BEACON_TC_ID_PREFIX", "").strip()
+        collection = os.environ.get("BEACON_TC_COLLECTION", "").strip()
+        missing = [n for n, v in (("--kind", kind), ("--label", label),
+                                  ("--type", dtype), ("--id-prefix", id_prefix),
+                                  ("--collection", collection)) if not v]
+        if missing:
+            print(f"Usage: beacon target-class add --kind <k> --label <l> "
+                  f"--profession <p> --type <single-shot|persistent> "
+                  f"--id-prefix <pfx-> --collection <coll> ...\n"
+                  f"  未指定: {', '.join(missing)}", file=sys.stderr)
+            sys.exit(1)
+        fields = [_field_from_spec(s, required=False)
+                  for s in _parse_spec_lines("BEACON_TC_FIELDS")]
+        fields += [_field_from_spec(s, required=True)
+                   for s in _parse_spec_lines("BEACON_TC_REQUIRED_FIELDS")]
+        phases = [_phase_from_spec(s, terminal=False)
+                  for s in _parse_spec_lines("BEACON_TC_PHASES")]
+        phases += [_phase_from_spec(s, terminal=True)
+                   for s in _parse_spec_lines("BEACON_TC_TERMINAL_PHASES")]
+        desc = _td.build_descriptor(
+            kind=kind, label=label, profession=profession, dtype=dtype,
+            id_prefix=id_prefix, collection=collection, fields=fields,
+            phases=phases)
+    problems = _td.append_descriptor(data, desc)
+    if problems:
+        print("Error: 記述子を登録できません:", file=sys.stderr)
+        for p in problems:
+            print(f"  - {p}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_class_add",
+                           "kind": desc.get("kind")})
+    print(f"target-class 登録: [{desc.get('kind')}] {desc.get('label')} "
+          f"(profession={desc.get('profession')}, type={desc.get('type')})")
+    print(f"  次: beacon target create --class {desc.get('kind')} "
+          f"--label <名前>")
+
+
+def cmd_target_class_list():
+    """List the data-defined target-classes declared in this project (e-4091).
+
+    beacon target-class list [--json]
+    """
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    descriptors = _td.load_descriptors(data)
+    problems_by_kind = _td.validate_target_classes(data)
+    if json_mode:
+        print(json.dumps(descriptors, ensure_ascii=False))
+        return
+    if not descriptors:
+        print("(このプロジェクトは target-class を宣言していません — "
+              "beacon target-class add で追加できます)")
+        return
+    for desc in descriptors:
+        if not isinstance(desc, dict):
+            continue
+        kind = (desc.get("kind") or "?").strip() or "?"
+        phases = _td.phase_keys(desc)
+        ph = f" phases: {' → '.join(phases)}" if phases else " (phase なし)"
+        flag = " ⚠ 要修正" if problems_by_kind.get(kind) else ""
+        print(f"  [{kind}] {desc.get('label', '')} "
+              f"(profession={desc.get('profession', '')}, "
+              f"type={desc.get('type', '')}){ph}{flag}")
 
 
 # Default command groups probed by the AX full-surface snapshot. These are
@@ -24875,6 +25032,8 @@ if __name__ == "__main__":
         "target_work_item": cmd_target_work_item,  # ms-124 e-4089
         "target_evidence": cmd_target_evidence,    # ms-124 e-4089
         "target_ball": cmd_target_ball,            # ms-124 e-4089
+        "target_class_add": cmd_target_class_add,  # ms-124 e-4091
+        "target_class_list": cmd_target_class_list,  # ms-124 e-4091
         "review_context": cmd_review_context,
         "review_done": cmd_review_done,      # ms-119 e-4060
 

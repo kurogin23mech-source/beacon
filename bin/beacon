@@ -670,6 +670,49 @@ cmd_target_ball() {
         python3 "$COMMANDS_PY" target_ball
 }
 
+cmd_target_class_add() {
+    ensure_project
+    local kind="" label="" profession="" dtype="" id_prefix="" collection=""
+    local fields="" req_fields="" phases="" term_phases="" stdin=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --kind)           kind="${2:-}";       shift 2 ;;
+            --label)          label="${2:-}";      shift 2 ;;
+            --profession)     profession="${2:-}"; shift 2 ;;
+            --type)           dtype="${2:-}";      shift 2 ;;
+            --id-prefix)      id_prefix="${2:-}";  shift 2 ;;
+            --collection)     collection="${2:-}"; shift 2 ;;
+            --field)          fields="${fields}${2:-}"$'\n'; shift 2 ;;
+            --required-field) req_fields="${req_fields}${2:-}"$'\n'; shift 2 ;;
+            --phase)          phases="${phases}${2:-}"$'\n'; shift 2 ;;
+            --terminal-phase) term_phases="${term_phases}${2:-}"$'\n'; shift 2 ;;
+            --stdin)          stdin=1;             shift ;;
+            -?*)              _guard_positional "$1" "Usage: beacon target-class add --kind <k> --label <l> --profession <p> --type <single-shot|persistent> --id-prefix <pfx-> --collection <coll> [...]" ;;
+            *)                shift ;;
+        esac
+    done
+    BEACON_TC_KIND="$kind" BEACON_TC_LABEL="$label" \
+        BEACON_TC_PROFESSION="$profession" BEACON_TC_TYPE="$dtype" \
+        BEACON_TC_ID_PREFIX="$id_prefix" BEACON_TC_COLLECTION="$collection" \
+        BEACON_TC_FIELDS="$fields" BEACON_TC_REQUIRED_FIELDS="$req_fields" \
+        BEACON_TC_PHASES="$phases" BEACON_TC_TERMINAL_PHASES="$term_phases" \
+        BEACON_TC_STDIN="$stdin" \
+        python3 "$COMMANDS_PY" target_class_add
+}
+
+cmd_target_class_list() {
+    ensure_project
+    local json=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=1; shift ;;
+            -?*)    _guard_positional "$1" "Usage: beacon target-class list [--json]" ;;
+            *)      shift ;;
+        esac
+    done
+    BEACON_JSON="$json" python3 "$COMMANDS_PY" target_class_list
+}
+
 cmd_review_context() {
     # ms-119 e-3947: emit the review-kernel bundle (原典 + mechanical diff only)
     # for an independent judge subagent. See /beacon-review-run.
@@ -3222,6 +3265,18 @@ case "${1:-}" in
     work-item list --class <kind> <target-id> [--json]
     evidence --class <kind> <target-id> [--summary <text>] [--for <item-id>]
     ball --class <kind> <target-id> <self|counterpart|none> [--reason <text>]" ;;
+        esac
+        ;;
+    target-class|tclass)
+        case "${2:-}" in
+            add)      shift 2; cmd_target_class_add "$@" ;;
+            list|ls)  shift 2; cmd_target_class_list "$@" ;;
+            *)        echo "Usage: beacon target-class <subcommand>  (data 定義 target-class をコード無しで追加, ms-124)
+    add --kind <k> --label <l> --profession <p> --type <single-shot|persistent> --id-prefix <pfx-> --collection <coll>
+        [--field key:label:type ...] [--required-field key:label:type ...]
+        [--phase key:label ...] [--terminal-phase key:label ...]
+    add --stdin        # 記述子全体を JSON で stdin から渡す
+    list [--json]" ;;
         esac
         ;;
     review)
