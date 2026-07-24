@@ -2166,7 +2166,11 @@ def cmd_target_instances():
         return
     for r in rows:
         icon = "●" if r["status"] == work_model.DONE_STATUS else "○"
-        phase = f" [{r['phase']}]" if r["phase"] else ""
+        # ms-125 e-4088 (ms-122 目的達成レビュー指摘): project_target nests phase
+        # under detail (to match the shared-frame shape), so r["phase"] KeyError'd
+        # and crashed the non-JSON listing whenever an instance existed.
+        r_phase = (r.get("detail") or {}).get("phase") or ""
+        phase = f" [{r_phase}]" if r_phase else ""
         print(f"  {icon} [{r['id']}] {r['label']}{phase} — {r['status']}")
 
 
@@ -22876,14 +22880,23 @@ def _resolve_healthy_session_ids():
     ``None`` so ``beacon claim view`` still works offline off the raw
     occupation claims on project.json.
     """
+    # ms-125 e-4092 (ms-112 目的達成レビュー指摘): in local mode (no cloud.json)
+    # liveness is unverifiable — return None (assume occupation claims are live)
+    # WITHOUT calling _get_api_client(), which prints a diagnostic to stdout and
+    # sys.exit(1)s. The precondition check keeps `--json` output clean; the
+    # SystemExit in the except is the belt-and-suspenders for the not-logged-in
+    # case (sys.exit is a BaseException, so a bare `except Exception` misses it
+    # and would abort the whole command instead of degrading).
     try:
+        if not os.path.exists(_get_cloud_config_path()):
+            return None
         client, config = _get_api_client()
         project_id = _resolve_bus_project_id(config)
         if not project_id:
             return None
         sessions = client.list_sessions(
             project_id, live_only=True, healthy_only=True, since_minutes=5)
-    except Exception:
+    except (Exception, SystemExit):
         return None
     ids = {s.get("session_id") for s in (sessions or []) if s.get("session_id")}
     return ids
