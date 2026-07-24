@@ -303,6 +303,98 @@ def assemble_attainment_context(*, target_id, spec_origin_id, spec_content,
     }
 
 
+def batch_review_types_for_node(node, *, registry=None):
+    """Which reviews fire together at a 節目 (ms-119 / e-4125).
+
+    A 節目 fires a PAIR, not a single review: a PR-open fires AX + maintainability
+    (interface + change-experience drift); a target-close fires 目的達成 +
+    思想 (goal + spirit). Running them as separate one-off invocations means the
+    human sees two reports and no consensus across them. This returns the review
+    ids that bind to a node so a single batch call can fan them out in parallel.
+
+    ``node``: "pr-open" (data-driven: every judge-run type whose descriptor
+    ``fires_on == "pr-open"``) or "target-close" (思想 [judge-run, needs SPEC]
+    + 目的達成 [human-gated evidence review]).
+
+    Returns a list of ``{"review": id, "judge_run": bool}`` in a stable order.
+    """
+    if node == "pr-open":
+        reg = judge_run_review_types() if registry is None else {
+            k: v for k, v in registry.items() if v.get("judge_run")}
+        out = [{"review": tid, "judge_run": True}
+               for tid, desc in sorted(reg.items())
+               if desc.get("fires_on") == "pr-open"]
+        return out
+    if node == "target-close":
+        # 思想 is judge-run; 目的達成 is human-gated (judge produces evidence,
+        # human owns the verdict — see ATTAINMENT_JUDGE_CONTRACT).
+        return [
+            {"review": REVIEW_PHILOSOPHY, "judge_run": True},
+            {"review": REVIEW_ATTAINMENT, "judge_run": False},
+        ]
+    return []
+
+
+def _finding_key(finding):
+    """Normalized dedup key for a finding: (file, line, lowercased title stripped
+    of trailing punctuation/whitespace). Pure."""
+    f = (finding.get("file") or "").strip()
+    line = finding.get("line")
+    line = str(line).strip() if line is not None else ""
+    title = " ".join((finding.get("title") or "").lower().split()).rstrip(".。 ")
+    return (f, line, title)
+
+
+def aggregate_review_reports(reports):
+    """Fold N per-review reports into ONE deduped, consensus-scored report
+    (ms-119 / e-4125).
+
+    Each report is ``{"review_type": id, "findings": [ {title, file?, line?,
+    severity?}, ... ]}``. Findings that the SAME 節目's reviews independently
+    raise (same file/line/title) are merged into one, carrying which review
+    types flagged it and a ``consensus`` count — a finding two independent judges
+    both raise is stronger signal than one raised alone. Pure: the caller (the
+    /beacon-review-run Skill) runs the judges and hands their structured findings
+    here; this only folds them so the fold is unit-testable without subagents.
+
+    Returns ``{"findings": [...], "by_type": {id: count}, "reviews": [ids]}``,
+    findings ordered by descending consensus then first-seen.
+    """
+    merged = {}
+    order = []
+    by_type = {}
+    review_ids = []
+    for rep in reports or []:
+        rtype = rep.get("review_type") or rep.get("review") or "?"
+        if rtype not in review_ids:
+            review_ids.append(rtype)
+        findings = rep.get("findings") or []
+        by_type[rtype] = len(findings)
+        for fnd in findings:
+            key = _finding_key(fnd)
+            if key not in merged:
+                merged[key] = {
+                    "title": fnd.get("title", ""),
+                    "file": fnd.get("file", ""),
+                    "line": fnd.get("line"),
+                    "severity": fnd.get("severity", ""),
+                    "raised_by": [],
+                    "consensus": 0,
+                }
+                order.append(key)
+            m = merged[key]
+            if rtype not in m["raised_by"]:
+                m["raised_by"].append(rtype)
+                m["consensus"] = len(m["raised_by"])
+            # keep the highest severity seen (lexical max is not meaningful, so
+            # prefer a non-empty severity; leave detailed ranking to the Skill).
+            if not m["severity"] and fnd.get("severity"):
+                m["severity"] = fnd["severity"]
+    findings = [merged[k] for k in order]
+    findings.sort(key=lambda m: -m["consensus"])
+    return {"findings": findings, "by_type": by_type, "reviews": review_ids}
+
+
 def build_surface_index_reference(map_content, *, updated_at="", stale=False):
     """Shape an application-map surface-index external reference for the judge
     bundle (ms-119 / e-4096).

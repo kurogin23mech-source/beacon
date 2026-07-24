@@ -2902,6 +2902,104 @@ def cmd_review_context():
     print(json.dumps(bundle, ensure_ascii=False))
 
 
+def _repo_file_origin(desc):
+    """(origin_id, origin_content) for a repo-file 原典 descriptor, or exit with a
+    clean error. Shared by the single and batch review-context paths (e-4125)."""
+    origin_spec = desc.get("origin", {}) if isinstance(desc.get("origin"), dict) else {}
+    ref = origin_spec.get("ref", "")
+    if origin_spec.get("kind") != "repo-file" or not ref:
+        print(f"Error: batch は原典が repo-file の review type のみ対象です "
+              f"(descriptor: {desc.get('id')})。", file=sys.stderr)
+        sys.exit(1)
+    install_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    origin_path = os.path.join(install_root, *ref.split("/"))
+    try:
+        with open(origin_path, encoding="utf-8") as f:
+            return ref, f.read()
+    except OSError as e:
+        print(f"Error: 原典 not found at {ref}: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_review_batch_context():
+    """Emit ALL review bundles that fire together at a 節目, in one call
+    (ms-119 / e-4125).
+
+    beacon review context --batch --pr <N>
+
+    A 節目 fires a PAIR of reviews (a PR-open fires AX + maintainability). Running
+    them as two separate one-off calls means two judge invocations the caller
+    must orchestrate by hand and two disconnected reports. This emits one
+    envelope carrying every judge-run bundle bound to the node — the
+    /beacon-review-run Skill fans the judges out in parallel over one shared diff
+    + surface index, then folds their findings into one deduped, consensus-scored
+    report (review_spine.aggregate_review_reports).
+
+    Today only the PR-open node (--pr) is a pure judge-run fan-out. The
+    target-close pair (思想 + 目的達成) mixes a judge-run review with a
+    human-gated one, so it is orchestrated per-type by the Skill using
+    review_spine.batch_review_types_for_node("target-close").
+    """
+    import review_spine
+    pr = os.environ.get("BEACON_PR", "").strip()
+    if not pr:
+        print("Usage: beacon review context --batch --pr <N>  "
+              "(PR-open の節目に発火する全レビュー[AX+保守性]の bundle を1回で出力)",
+              file=sys.stderr)
+        sys.exit(1)
+    node = "pr-open"
+    due = review_spine.batch_review_types_for_node(
+        node, registry=review_spine.load_review_types())
+    due = [d for d in due if d["judge_run"]]
+    if not due:
+        print("Error: PR-open の節目に発火する judge-run review type がありません "
+              "(skills/*/review-type.json の fires_on=pr-open を確認)。",
+              file=sys.stderr)
+        sys.exit(1)
+
+    target_ref = f"PR #{pr}"
+    proc = subprocess.run(["gh", "pr", "diff", pr], capture_output=True, text=True)
+    if proc.returncode != 0:
+        print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+    diff_text = proc.stdout
+    shared_gaps = []
+    if not diff_text.strip():
+        shared_gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
+
+    external_references = []
+    surface_ref = _review_surface_index_reference()
+    if surface_ref is not None:
+        external_references.append(surface_ref)
+    else:
+        shared_gaps.append("application-map (全 surface 索引) が未生成のため、judge は "
+                           "既存機能との重複を repo 参照なしには確認できません。")
+
+    registry = review_spine.load_review_types()
+    implementer_model = os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip()
+    reviews = []
+    for d in due:
+        rtype = d["review"]
+        origin_id, origin_content = _repo_file_origin(registry.get(rtype, {}))
+        bundle = review_spine.assemble_review_context(
+            rtype, origin_id=origin_id, origin_content=origin_content,
+            diff_text=diff_text, mode="diff", target_ref=target_ref,
+            gaps=list(shared_gaps),
+            known_judge_types=set(review_spine.judge_run_review_types().keys()),
+            implementer_model=implementer_model,
+            external_references=external_references)
+        reviews.append({"review_type": rtype, "judge_run": True, "bundle": bundle})
+
+    print(json.dumps({
+        "node": node,
+        "target_ref": target_ref,
+        "reviews": reviews,
+        "aggregate_hint": ("各 review を独立 judge に並列で走らせ、findings を "
+                           "beacon が aggregate_review_reports で dedup + consensus "
+                           "して1レポートに畳んでください (review_spine)。"),
+    }, ensure_ascii=False))
+
+
 def _review_surface_index_reference():
     """Read the application-map CORE doc and shape it as the judge bundle's
     surface-index external reference (ms-119 / e-4096), or None when absent.
@@ -25516,6 +25614,7 @@ if __name__ == "__main__":
         "target_class_add": cmd_target_class_add,  # ms-124 e-4091
         "target_class_list": cmd_target_class_list,  # ms-124 e-4091
         "review_context": cmd_review_context,
+        "review_batch_context": cmd_review_batch_context,  # ms-119 e-4125
         "review_done": cmd_review_done,      # ms-119 e-4060
         "review_skip": cmd_review_skip,      # ms-119 e-4124
 

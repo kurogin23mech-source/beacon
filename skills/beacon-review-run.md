@@ -108,7 +108,39 @@ beacon review context --type philosophy --origin-doc <spec-doc-id> --pr <n>
 ```
 
 stdout に 1 行 JSON が返る (`origin` / `artifact` / `independence_contract` /
-`mode` / `gaps`)。`both` の場合は 2 回叩いて 2 bundle を得る。
+`mode` / `external_references` / `gaps`)。`both` の場合は 2 回叩いて 2 bundle を得る。
+
+#### Step 2b (推奨): 節目バッチモード — ペアを1発火に畳む (ms-119 e-4125)
+
+節目はレビューを**ペアで**発火する (PR-open → AX + 保守性)。1 種別ずつ叩くと judge
+起動を手で 2 回まわし、2 つの分離レポートをユーザーが突き合わせる羽目になる。
+バッチで一括取得する:
+
+```bash
+beacon review context --batch --pr <n>
+```
+
+stdout は `{node, target_ref, reviews: [{review_type, judge_run, bundle}, ...]}`。
+各 `bundle` は Step 2 と同型 (1 つの diff + 全貌マップ index を共有)。これを使うと:
+
+1. **並列 fan-out**: `reviews[]` の各 bundle を、1 メッセージ内で複数 Agent 呼び出し
+   (別モデル) に渡して**同時に**走らせる (Step 3 の独立性契約はそのまま各 judge に)。
+2. **自動集約 (dedup + consensus)**: 各 judge が返した findings を集めて
+   `beacon` に畳ませる。findings を JSON 配列で渡すと、同一 (file, line, title) を
+   1 件にまとめ、複数 judge が同時に挙げた finding に `consensus` を付けた 1 レポート
+   が返る (2 体が独立に挙げた指摘は 1 体より強いシグナル):
+   ```bash
+   python3 -c 'import sys,json; sys.path.insert(0,"'"$(beacon _lib-path)"'"); \
+     import review_spine; print(json.dumps(review_spine.aggregate_review_reports(json.load(sys.stdin)),ensure_ascii=False))' <<'JSON'
+   [{"review_type":"ax","findings":[...]}, {"review_type":"maintainability","findings":[...]}]
+   JSON
+   ```
+3. ユーザーには畳んだ 1 レポート (`consensus` 降順) を出す。個別 judge の生 findings は
+   参照用に温存。
+
+target-close のペア (思想 + 目的達成) は judge-run と人間ゲートが混ざるので、
+`review_spine.batch_review_types_for_node("target-close")` の並びに従って種別ごとに
+回す (思想は Step 2/3、目的達成は下の attainment モード)。
 
 - `gaps` が非空 (例: 思想レビューで SPEC 本文が空 / diff が空) なら、その gap を
   ユーザーにそのまま伝えてから続行するか確認する (方針5 の gentle forcing
