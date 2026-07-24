@@ -48,7 +48,7 @@ Bash で並列実行:
 
 ```bash
 beacon trek show <trek_id> --json
-beacon task list --json --ms <ms_id>   # task の所属 MS を trek scope から推定
+beacon task list --json -m <ms_id>     # task の所属 MS を trek scope から推定 (task 系は -m。--ms は milestone 専用で silent 無視される)
 git log --oneline -10                    # executor の作業履歴
 ```
 
