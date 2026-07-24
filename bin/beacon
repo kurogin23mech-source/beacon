@@ -3313,6 +3313,7 @@ case "${1:-}" in
                     case "$1" in
                         --type) _rd_type="${2:-}"; shift 2 ;;
                         --pr)   _rd_pr="${2:-}";   shift 2 ;;
+                        -?*)    _guard_flag "$1" ;;
                         *)      shift ;;
                     esac
                 done
