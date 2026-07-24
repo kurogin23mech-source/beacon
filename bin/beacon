@@ -667,29 +667,37 @@ cmd_milestone_observe() {
     local reason=""
     local reason_set=0
     local acknowledge=0
+    local review=0
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -r|--reason) reason="${2:-}"; reason_set=1; shift 2 ;;
             --acknowledge) acknowledge="1"; shift ;;
+            --review)    review=1;        shift ;;
             -?*)           _guard_flag "$1" ;;
             *)           ms_id="$1";     shift   ;;
         esac
     done
 
     if [ -z "$ms_id" ]; then
-        echo "Usage: beacon milestone observe <ms-id> --reason <text>"
+        echo "Usage: beacon milestone observe <ms-id> --reason <text> [--review]"
         exit 1
     fi
     # e-976: route observe to the dedicated milestone_observe handler so the
     # --reason gate applies. The handler still forwards to core.milestone_update
     # internally, so behavior other than the gate is identical.
+    # ms-119: observing is a completion claim, so --review must be parsed and
+    # forwarded here exactly like `milestone done` — otherwise the Python-side
+    # BEACON_REVIEW gate is unreachable from the CLI and the error/SKILL docs
+    # that advertise `observe --review` point at a dead flag.
     if [ "$reason_set" = "1" ]; then
         BEACON_MS_ID="$ms_id" BEACON_REASON="$reason" \
-            BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" milestone_observe
+            BEACON_ACKNOWLEDGE="$acknowledge" BEACON_REVIEW="$review" \
+            python3 "$COMMANDS_PY" milestone_observe
     else
         BEACON_MS_ID="$ms_id" \
-            BEACON_ACKNOWLEDGE="$acknowledge" python3 "$COMMANDS_PY" milestone_observe
+            BEACON_ACKNOWLEDGE="$acknowledge" BEACON_REVIEW="$review" \
+            python3 "$COMMANDS_PY" milestone_observe
     fi
 }
 

@@ -27,13 +27,18 @@ def test_routine_transitions_bind_nothing():
 
 def test_observing_is_a_completion_claim_and_binds_reviews():
     # ms-119: observing is a completion claim in this codebase (運用改善フェーズ =
-    # 基本目的達成が前提), so it binds the reviews like done — not [].
+    # 基本目的達成が前提) when it comes from a work state, so it binds the reviews
+    # like done — not [].
     b = review_spine.review_bindings_for_transition("milestone", "in_progress", "observing")
     assert [x["review"] for x in b] == [review_spine.REVIEW_ATTAINMENT]
     b2 = review_spine.review_bindings_for_transition(
         "milestone", "in_progress", "observing", has_spec=True)
     assert [x["review"] for x in b2] == [
         review_spine.REVIEW_ATTAINMENT, review_spine.REVIEW_PHILOSOPHY]
+    # ... but a routine old_state (todo -> observing, done -> observing re-open)
+    # attains nothing and binds no review (AX/保守性 review of PR #487).
+    assert review_spine.review_bindings_for_transition("milestone", "todo", "observing") == []
+    assert review_spine.review_bindings_for_transition("milestone", "done", "observing") == []
 
 
 def test_attainment_without_gate_or_spec_binds_attainment_only():

@@ -1628,43 +1628,85 @@ def _release_occupation_for_transition(data, ms_id, *, reason):
         )
 
 
+# ms-119 / e-4008 — completion-gate refusal messages (done / observe share the
+# same 目的達成 gate, so their AI-direct-completion refusals share one shape and
+# differ only in the verb wording; {ms_id} is filled per call). Kept as module
+# constants so the two verbs cannot drift in what escape hatches they advertise.
+_DONE_BAN_ERROR = (
+    "Error: completing {ms_id} directly (without the review gate) from "
+    "an AI session is refused (ms-119 / e-4008 structural guard).\n"
+    "  『構造発火・非迂回』requires the completion gate to be "
+    "non-bypassable for AI sessions — a bare `done` skipped the review.\n"
+    "  Paths forward (= one of these):\n"
+    "    1. beacon milestone done {ms_id} --review — route through the "
+    "目的達成 gate (AI assembles evidence, human approves).\n"
+    "    2. BEACON_TARGET_COMPLETE_USER_OVERRIDE=1 — explicit user opt-in "
+    "for a one-off straight completion.\n"
+    "    3. BEACON_SESSION_KIND=human — declare the calling session is "
+    "human-driven (= straight terminal use)."
+)
+_OBSERVE_BAN_ERROR = (
+    "Error: moving {ms_id} to observing directly (without the review gate) "
+    "from an AI session is refused (ms-119 / e-4008 structural guard).\n"
+    "  observing は『基本目的は達成済み・運用に回してよい』という完了主張なので、"
+    "done と同じくゲートを迂回できません (observe で素通り着地する抜け穴を塞ぐ)。\n"
+    "  Paths forward (= one of these):\n"
+    "    1. beacon milestone observe {ms_id} --review — route through the "
+    "目的達成 gate (AI assembles evidence, human approves).\n"
+    "    2. BEACON_TARGET_COMPLETE_USER_OVERRIDE=1 — explicit user opt-in "
+    "for a one-off straight observe.\n"
+    "    3. BEACON_SESSION_KIND=human — declare the calling session is "
+    "human-driven (= straight terminal use)."
+)
+
+
+def _milestone_status(data: dict, ms_id: str) -> str:
+    """Current status string of a milestone, or "" if not found."""
+    for _m in data.get("milestones", []):
+        if _m.get("id") == ms_id:
+            return _m.get("status", "")
+    return ""
+
+
+def _completion_gate_or_route(data: dict, ms_id: str, *, old_state: str,
+                              new_state: str, reason: str, ban_error: str) -> bool:
+    """Shared completion-gate for milestone done / observe (ms-119).
+
+    A milestone completion claim (-> done/closed, or -> observing from a work
+    state) must pass the 目的達成 gate. This centralizes the two rules that MUST
+    stay identical across done/observe so they cannot drift:
+      1. --review (BEACON_REVIEW=1) routes to the human-approval gate (e-3912).
+      2. an AI session's direct (non-review) completion is refused (e-4008).
+    Routine transitions that assert no completion (e.g. todo -> observing, or a
+    done -> observing re-open) are NOT gated and pass straight through.
+
+    Returns True if the caller should STOP (routed to the review gate); False if
+    the caller should apply the transition directly (routine, or the ban passed
+    for a human / override session).
+    """
+    if not _ta.is_attainment_transition("milestone", old_state, new_state):
+        return False  # not a completion claim → apply directly, no gate
+    if os.environ.get("BEACON_REVIEW", "") == "1":
+        _route_completion_to_review(data, ms_id, reason=reason,
+                                    new_state=new_state)
+        return True
+    if _ai_session_direct_completion_ban_active():
+        print(ban_error.format(ms_id=ms_id), file=sys.stderr)
+        sys.exit(2)
+    return False
+
+
 def cmd_milestone_done():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     reason = _require_reason_or_skip("milestone done")
     data = load_project()
-    # ms-119 e-3912: opt-in routing — with --review, a completion transition is
-    # not applied directly; instead it is routed through the profession-neutral
-    # 目的達成レビュー (target が目的を達成したかを人間が確定する承認). The default
-    # path (no --review) is unchanged so existing done/close flows never break.
-    if os.environ.get("BEACON_REVIEW", "") == "1":
-        _route_completion_to_review(data, ms_id, reason=reason)
+    # ms-119 e-3912/e-4008: --review routes to the 目的達成 gate; a bare AI-session
+    # completion is refused (non-bypassable). Routine/human paths pass through.
+    old_state = _milestone_status(data, ms_id)
+    if _completion_gate_or_route(data, ms_id, old_state=old_state,
+                                 new_state="done", reason=reason,
+                                 ban_error=_DONE_BAN_ERROR):
         return
-    # ms-119 / e-4008 — the completion gate must not be bypassable by simply
-    # omitting --review. A direct done from an AI session is refused; the AI must
-    # route through the 目的達成 gate (--review → human approve). Humans keep the
-    # straight path (they own the verdict). Escape hatches are the explicit human
-    # signals below.
-    if _ai_session_direct_completion_ban_active():
-        print(
-            f"Error: completing {ms_id} directly (without the review gate) from "
-            "an AI session is refused (ms-119 / e-4008 structural guard).\n"
-            "  『構造発火・非迂回』requires the completion gate to be "
-            "non-bypassable for AI sessions — a bare `done` skipped the review.\n"
-            "  Paths forward (= one of these):\n"
-            f"    1. beacon milestone done {ms_id} --review — route through the "
-            "目的達成 gate (AI assembles evidence, human approves).\n"
-            "    2. BEACON_TARGET_COMPLETE_USER_OVERRIDE=1 — explicit user opt-in "
-            "for a one-off straight completion.\n"
-            "    3. BEACON_SESSION_KIND=human — declare the calling session is "
-            "human-driven (= straight terminal use).",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    old_state = ""
-    for _m in data.get("milestones", []):
-        if _m.get("id") == ms_id:
-            old_state = _m.get("status", "")
-            break
     ms = core.milestone_done(data, ms_id, reason=reason)
     _release_occupation_for_transition(data, ms_id, reason="done")
     save_project(data, op={"op": "milestone_done", "ms_id": ms_id, "reason": reason})
@@ -2580,44 +2622,20 @@ def cmd_milestone_observe():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     reason = _require_reason_or_skip("milestone observe")
     if not ms_id:
-        print("Usage: beacon milestone observe <ms-id> --reason <text>",
+        print("Usage: beacon milestone observe <ms-id> --reason <text> [--review]",
               file=sys.stderr)
         sys.exit(1)
     data = load_project()
     # ms-119: observing is a completion claim (運用改善フェーズ = 基本目的達成が
-    # 前提。目的達成 / 思想の逸脱があれば運用に回さない = observe しない) so it goes
-    # through the same 目的達成レビューゲート as done. --review routes to human
-    # approval; the review-due nudge fires at this 節目 like done.
-    if os.environ.get("BEACON_REVIEW", "") == "1":
-        _route_completion_to_review(data, ms_id, reason=reason,
-                                    new_state="observing")
+    # 前提。目的達成 / 思想の逸脱があれば運用に回さない = observe しない) when it
+    # comes from a work state, so it passes the same 目的達成 gate as done. The
+    # shared helper handles --review routing + the e-4008 AI-direct ban, and lets
+    # routine transitions (e.g. todo -> observing) through ungated.
+    old_state = _milestone_status(data, ms_id)
+    if _completion_gate_or_route(data, ms_id, old_state=old_state,
+                                 new_state="observing", reason=reason,
+                                 ban_error=_OBSERVE_BAN_ERROR):
         return
-    # ms-119 / e-4008 structural guard — the completion gate must not be
-    # bypassable by observing instead of done. An AI session's direct observe is
-    # refused (observe is a completion claim); it must route through the gate.
-    if _ai_session_direct_completion_ban_active():
-        print(
-            f"Error: moving {ms_id} to observing directly (without the review "
-            "gate) from an AI session is refused (ms-119 / e-4008 structural "
-            "guard).\n"
-            "  observing は『基本目的は達成済み・運用に回してよい』という完了主張"
-            "なので、done と同じくゲートを迂回できません (observe で素通り着地する"
-            "抜け穴を塞ぐ)。\n"
-            "  Paths forward (= one of these):\n"
-            f"    1. beacon milestone observe {ms_id} --review — route through "
-            "the 目的達成 gate (AI assembles evidence, human approves).\n"
-            "    2. BEACON_TARGET_COMPLETE_USER_OVERRIDE=1 — explicit user opt-in "
-            "for a one-off straight observe.\n"
-            "    3. BEACON_SESSION_KIND=human — declare the calling session is "
-            "human-driven (= straight terminal use).",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    old_state = ""
-    for _m in data.get("milestones", []):
-        if _m.get("id") == ms_id:
-            old_state = _m.get("status", "")
-            break
     try:
         ms = core.milestone_update(data, ms_id, status="observing",
                                    reason=reason)
@@ -2627,8 +2645,9 @@ def cmd_milestone_observe():
     _release_occupation_for_transition(data, ms_id, reason="observe")
     save_project(data, op={"op": "milestone_observe", "ms_id": ms_id,
                            "reason": reason})
-    # ms-119: this observe did NOT go through the review gate — fire a review-due
-    # nudge (目的達成 toward the gate + 思想 if the MS has a SPEC), mirroring done.
+    # ms-119: fire the review-due nudge (目的達成 + 思想 if SPEC), mirroring done.
+    # For a routine old_state (todo/done -> observing) the binding is empty, so
+    # nothing fires — consistent with the gate above passing it through.
     _fire_review_due_trigger(ms_id, "milestone", old_state, "observing",
                              target_title=work_model.target_label(ms),
                              has_spec=_spec_exists_for_ms(ms_id), gated=False)

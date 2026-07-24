@@ -17,7 +17,10 @@ Design razor — avoid over-gating and double-gating:
       operation once it works). So moving to observing carries the same
       "目的を果たした" claim as done: if a 目的達成 / 思想 deviation existed you
       would NOT put it into operation (= would not observe it). It is therefore
-      an attainment transition and is gated like done.
+      an attainment transition and is gated like done — BUT only when it comes
+      from a state where work actually happened. todo -> observing attains
+      nothing, and done/closed/cancelled -> observing is a re-open, so those are
+      routine (not gated). See _OBSERVING_NON_ATTAINMENT_FROM.
     - ops operation  → closed               (retirement claim)
     - sales opportunity → forward funnel advance, or terminal (each funnel step
       is "we earned the right to advance" — reviewed against the meeting
@@ -50,6 +53,15 @@ _COMPLETION_STATES = {
     "operation": frozenset({"closed"}),
 }
 
+# For a milestone, -> observing is a completion claim only when it comes FROM a
+# state where work actually happened. The claim (運用改善フェーズ = 基本目的達成が
+# 前提) presupposes prior work, so:
+#   - todo -> observing attains nothing (never started) → routine, not a claim.
+#   - done/closed/cancelled -> observing is a re-open (already terminal), not a
+#     fresh completion claim.
+# Everything else (in_progress / active / waiting / in_review) implies prior work.
+_OBSERVING_NON_ATTAINMENT_FROM = frozenset({"todo", "done", "closed", "cancelled"})
+
 # Opportunity terminal-verdict states (funnel-independent).
 _OPPORTUNITY_TERMINAL = frozenset({"terminal", "closed_won", "closed_lost", "lost", "won"})
 
@@ -73,6 +85,11 @@ def is_attainment_transition(target_kind, old_state, new_state, *, funnel=None):
     "forward" move can be distinguished from a corrective backward jump.
     """
     if new_state in _COMPLETION_STATES.get(target_kind, ()):
+        # -> observing is a completion claim only from a work state (see
+        # _OBSERVING_NON_ATTAINMENT_FROM): todo -> observing attains nothing,
+        # done -> observing is a re-open. done/closed are unconditional claims.
+        if target_kind == "milestone" and new_state == "observing":
+            return old_state not in _OBSERVING_NON_ATTAINMENT_FROM
         return True
     if target_kind == "opportunity":
         if new_state in _OPPORTUNITY_TERMINAL:

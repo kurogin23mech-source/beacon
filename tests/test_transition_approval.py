@@ -21,8 +21,24 @@ def test_milestone_completion_is_attainment():
     assert ta.is_attainment_transition("milestone", "in_progress", "done")
     assert ta.is_attainment_transition("milestone", "in_progress", "closed")
     # ms-119: observing is a completion claim in this codebase (運用改善フェーズ =
-    # 基本目的達成が前提), so it is an attainment transition like done.
+    # 基本目的達成が前提), so it is an attainment transition like done — but only
+    # FROM a work state (see test_observing_attainment_depends_on_old_state).
     assert ta.is_attainment_transition("milestone", "in_progress", "observing")
+    assert ta.is_attainment_transition("milestone", "active", "observing")
+    assert ta.is_attainment_transition("milestone", "waiting", "observing")
+
+
+def test_observing_attainment_depends_on_old_state():
+    # ms-119 (AX/保守性 review of PR #487): -> observing is a completion claim
+    # only when work happened. todo -> observing attains nothing; done ->
+    # observing is a re-open. Neither is a fresh completion claim.
+    assert not ta.is_attainment_transition("milestone", "todo", "observing")
+    assert not ta.is_attainment_transition("milestone", "done", "observing")
+    assert not ta.is_attainment_transition("milestone", "closed", "observing")
+    assert not ta.is_attainment_transition("milestone", "cancelled", "observing")
+    # ... and the spine does not gate those routine moves either.
+    assert not ta.requires_spine_approval("milestone", "todo", "observing")
+    assert not ta.requires_spine_approval("milestone", "done", "observing")
 
 
 def test_milestone_routine_is_not_attainment():
