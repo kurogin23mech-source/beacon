@@ -6626,9 +6626,29 @@ EOF
                 _json="0"
                 _confirm="0"
                 _limit=""
+                _ids=""
+                # ms-125 review (L3): one Usage string, referenced everywhere,
+                # so a new flag can't drift the four copies out of sync.
+                _cleanup_usage="Usage: beacon project cleanup [--confirm --ids <a,b,…>] [--limit N] [--json]"
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
                         --confirm) _confirm="1"; shift ;;
+                        --ids)
+                            # ms-125 e-4095: bind --confirm to the exact set the
+                            # dry-run printed. The dry-run emits the ready-to-paste
+                            # `--ids <comma-list>`; a confirmed run archives ONLY
+                            # those ids, never a freshly-recomputed candidate set.
+                            # ms-125 review (AX): validate the value like --limit —
+                            # a missing value or a swallowed next-flag would else
+                            # run the wrong mode silently. Require a present,
+                            # non-flag value.
+                            if [ "$#" -lt 2 ] || case "${2:-}" in ''|-*) true ;; *) false ;; esac; then
+                                echo "Error: --ids には値 (project id をカンマ区切り) が必要です" >&2
+                                echo "$_cleanup_usage" >&2
+                                exit 1
+                            fi
+                            _ids="$2"
+                            shift 2 ;;
                         --limit)
                             # ms-123 AX finding: fail-closed on a bad --limit so a
                             # typo can't degrade the safety valve to "unlimited"
@@ -6638,24 +6658,24 @@ EOF
                             case "$_limit" in
                                 ''|*[!0-9]*)
                                     echo "Error: --limit は正の整数が必要です (受領: '${_limit}')" >&2
-                                    echo "Usage: beacon project cleanup [--confirm] [--limit N] [--json]" >&2
+                                    echo "$_cleanup_usage" >&2
                                     exit 1 ;;
                             esac
                             shift 2 ;;
                         --json) _json="1"; shift ;;
                         -h|--help)
-                            echo "Usage: beacon project cleanup [--confirm] [--limit N] [--json]"
+                            echo "$_cleanup_usage"
                             echo "  Archive throwaway/orphan projects (ms-123 e-4028)."
-                            echo "  Default is DRY-RUN (shows the plan, changes nothing)."
-                            echo "  --confirm actually archives (envelope-signed, reversible via unarchive)."
+                            echo "  Default is DRY-RUN (shows the plan + the exact --ids to paste, changes nothing)."
+                            echo "  --confirm --ids <a,b,…> archives ONLY those ids (ms-125 e-4095: bound to the reviewed set)."
                             exit 0 ;;
                         *) echo "Unknown flag: $1" >&2
-                           echo "Usage: beacon project cleanup [--confirm] [--limit N] [--json]" >&2
+                           echo "$_cleanup_usage" >&2
                            exit 1 ;;
                     esac
                 done
                 BEACON_JSON="$_json" BEACON_CLEANUP_CONFIRM="$_confirm" \
-                    BEACON_CLEANUP_LIMIT="$_limit" \
+                    BEACON_CLEANUP_LIMIT="$_limit" BEACON_CLEANUP_CONFIRM_IDS="$_ids" \
                     python3 "$COMMANDS_PY" project_cleanup
                 ;;
             export)

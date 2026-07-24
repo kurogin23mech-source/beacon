@@ -33,6 +33,11 @@ def _occ(session_id="sv-a", machine="mac", agent="claude"):
             "claimed_at": "2026-07-23T00:00:00Z"}
 
 
+def _focus(session_id="sv-f", machine="mac", agent="claude"):
+    return {"session_id": session_id, "machine": machine, "agent": agent,
+            "focused_at": "2026-07-24T00:00:00Z"}
+
+
 class TestSplitAssigneesParity:
     """The inlined ``_split_assignees`` must stay byte-identical in behaviour to
     ``core._split_assignees`` (the docstring promises parity)."""
@@ -208,6 +213,116 @@ class TestRobustness:
         ms = _ms(occupation={"machine": "mac"})  # no session_id
         v = claim_view.build_claim_view(ms)
         assert v["live"] == []
+
+
+class TestFocusLiveSource:
+    """ms-125 e-4094: the bus-directory focus is the second, independent LIVE
+    source. The occupation claim is a one-time soft claim that goes stale; focus
+    is refreshed every heartbeat, so it catches live work the occupation misses."""
+
+    def test_focus_alone_reads_as_live(self):
+        # No occupation claim at all, but a live session is focused here.
+        v = claim_view.build_claim_view(
+            _ms(), live_session_ids={"sv-f"}, focus_sessions=[_focus("sv-f")],
+            my_session_id="sv-me")
+        assert v["flags"]["live"] is True
+        assert v["flags"]["live_by_others"] is True
+        assert v["flags"]["unclaimed"] is False
+        assert len(v["live"]) == 1
+        assert v["live"][0]["source"] == "focus"
+        assert v["live"][0]["healthy"] is True
+
+    def test_focus_detects_live_when_occupation_is_stale(self):
+        # Occupation held by a DEAD session (sv-dead not in healthy set) — the
+        # occupation source alone would read "nobody live". A different live
+        # session focused on the target rescues the LIVE reading (AC2).
+        ms = _ms(occupation=_occ("sv-dead"))
+        v = claim_view.build_claim_view(
+            ms, live_session_ids={"sv-live"},
+            focus_sessions=[_focus("sv-live")], my_session_id="sv-me")
+        occ = [e for e in v["live"] if e["source"] == "occupation"][0]
+        foc = [e for e in v["live"] if e["source"] == "focus"][0]
+        assert occ["healthy"] is False       # stale occupation does NOT count
+        assert foc["healthy"] is True        # focus counts
+        assert v["flags"]["live"] is True
+        assert v["flags"]["live_by_others"] is True
+
+    def test_focus_by_me(self):
+        v = claim_view.build_claim_view(
+            _ms(), live_session_ids={"sv-me"}, focus_sessions=[_focus("sv-me")],
+            my_session_id="sv-me")
+        assert v["flags"]["live_by_me"] is True
+        assert v["flags"]["live_by_others"] is False
+
+    def test_dedup_same_session_in_both_sources(self):
+        # A session that both holds the occupation AND heartbeats focus must
+        # yield ONE live row, not two.
+        ms = _ms(occupation=_occ("sv-x"))
+        v = claim_view.build_claim_view(
+            ms, live_session_ids={"sv-x"}, focus_sessions=[_focus("sv-x")],
+            my_session_id="sv-me")
+        assert len(v["live"]) == 1
+        assert v["live"][0]["source"] == "occupation"  # occupation kept
+
+    def test_focus_ignored_malformed(self):
+        v = claim_view.build_claim_view(
+            _ms(), live_session_ids=set(),
+            focus_sessions=[{}, {"session_id": ""}, None])
+        assert v["live"] == []
+        assert v["flags"]["unclaimed"] is True
+
+    def test_build_views_routes_focus_by_target_id(self):
+        data = {"milestones": [_ms("ms-1"), _ms("ms-2")]}
+        directory = {"ms-2": [_focus("sv-f")]}
+        views = claim_view.build_claim_views(
+            data, live_session_ids={"sv-f"}, focus_directory=directory,
+            my_session_id="sv-me")
+        assert views["ms-1"]["flags"]["live"] is False
+        assert views["ms-2"]["flags"]["live"] is True
+        assert views["ms-2"]["live"][0]["source"] == "focus"
+
+    def test_focus_none_is_occupation_only(self):
+        # Backward compat: no focus arg behaves exactly as before.
+        ms = _ms(occupation=_occ("sv-o"))
+        v = claim_view.build_claim_view(ms, live_session_ids={"sv-o"})
+        assert len(v["live"]) == 1
+        assert v["live"][0]["source"] == "occupation"
+
+    def test_live_row_uses_source_neutral_as_of(self):
+        # ms-125 review: the live-row timestamp is `as_of` (not `claimed_at`),
+        # honest for both sources. occupation → claim time, focus → heartbeat.
+        ms = _ms(occupation=_occ("sv-o"))
+        v = claim_view.build_claim_view(
+            ms, live_session_ids={"sv-o", "sv-f"},
+            focus_sessions=[_focus("sv-f")])
+        for e in v["live"]:
+            assert "as_of" in e and "claimed_at" not in e
+        occ = [e for e in v["live"] if e["source"] == "occupation"][0]
+        foc = [e for e in v["live"] if e["source"] == "focus"][0]
+        assert occ["as_of"] == "2026-07-23T00:00:00Z"   # claim time
+        assert foc["as_of"] == "2026-07-24T00:00:00Z"   # heartbeat time
+
+    def test_focus_healthy_cross_checked_not_stamped_on_trust(self):
+        # ms-125 review (AX/maint): a focus session that raced OUT of the
+        # verified healthy set is NOT stamped live on trust.
+        v = claim_view.build_claim_view(
+            _ms(), live_session_ids={"sv-other"},  # sv-f NOT healthy
+            focus_sessions=[_focus("sv-f")])
+        foc = [e for e in v["live"] if e["source"] == "focus"][0]
+        assert foc["healthy"] is False
+        assert v["flags"]["live"] is False  # does not count
+
+    def test_dedup_same_session_consistent_healthy(self):
+        # Same session holds the occupation claim AND heartbeats focus: one row,
+        # and because both sources read the SAME healthy set, the kept row's
+        # liveness is consistent (no live fact lost, no phantom double-count).
+        ms = _ms(occupation=_occ("sv-x"))
+        v = claim_view.build_claim_view(
+            ms, live_session_ids={"sv-x"}, focus_sessions=[_focus("sv-x")])
+        assert len(v["live"]) == 1
+        assert v["live"][0]["source"] == "occupation"
+        assert v["live"][0]["healthy"] is True
+        assert v["flags"]["live"] is True
 
 
 # ms-112 AX finding: a nonexistent / non-walked target must not read as unclaimed.
