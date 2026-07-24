@@ -11729,6 +11729,35 @@ def cmd_review_done():
             pass
         print(f"  PR #{pr_number} の独立レビューは全て実施済み "
               f"— approve/merge の gate を通過できます。")
+        # ms-119 e-4073 (scaffold, opt-in): flip the CI gate status to success so
+        # a branch-protection required check unblocks the merge button on ALL
+        # routes (gh/UI/beacon), not just `beacon pr merge`. Guarded by
+        # BEACON_REVIEW_GATE_CI=1 + a resolvable head SHA so default behavior and
+        # tests are unchanged; best-effort (a failed gh post never breaks `done`).
+        _ci_flip_review_gate_success(pr_number)
+
+
+def _ci_flip_review_gate_success(pr_number: str) -> None:
+    """Best-effort: set the `beacon-review-gate` commit status to success for the
+    PR head (ms-119 e-4073). No-op unless BEACON_REVIEW_GATE_CI=1 (default OFF —
+    the CI gate is opt-in scaffolding). Never raises."""
+    if os.environ.get("BEACON_REVIEW_GATE_CI", "") != "1":
+        return
+    try:
+        sha = subprocess.run(
+            ["gh", "pr", "view", pr_number, "--json", "headRefOid",
+             "--jq", ".headRefOid"],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        if not sha:
+            return
+        script = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "scripts", "review-gate-ci.py")
+        subprocess.run(["python3", script, "set", "--state", "success",
+                        "--sha", sha, "--pr", pr_number],
+                       capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return
 
 
 def _review_skips_log_path() -> str:

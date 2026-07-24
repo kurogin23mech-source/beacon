@@ -1,0 +1,44 @@
+name: Review gate (ms-119 e-4073)
+
+# Makes the independent-review gate PATH-INDEPENDENT. e-4060's gate only refuses
+# inside `beacon pr merge`; `gh pr merge` and the GitHub UI merge button bypass
+# it. This posts a `beacon-review-gate` commit status that a branch-protection
+# required check enforces, so no merge route can complete until the PR's required
+# reviews (AX + maintainability) are recorded.
+#
+# SAFE TO MERGE — this is a SCAFFOLD, default OFF (ms-119 e-4073):
+#   * the job is gated on the `BEACON_REVIEW_CI_ENABLED` repo *variable* being
+#     "1", so it is skipped (no-op, zero cost) until a maintainer opts in;
+#   * it does NOT run an LLM in CI (that is the deferred chunk — needs an
+#     ANTHROPIC_API_KEY secret + per-PR API cost + a blocking-policy decision).
+#     It only sets the gate to `pending`; the LOCAL review flow
+#     (`beacon review done`) flips it to `success` via gh once a judge has run.
+#
+# Activation (repo-admin — see docs/review-gate-ci.md):
+#   1. repo variable  BEACON_REVIEW_CI_ENABLED = 1
+#   2. branch protection: require the status check `beacon-review-gate`
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  statuses: write        # to POST the commit status
+  contents: read
+
+jobs:
+  set-pending:
+    # default OFF: skipped until the maintainer sets the repo variable.
+    if: vars.BEACON_REVIEW_CI_ENABLED == '1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set beacon-review-gate = pending on the PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 scripts/review-gate-ci.py set \
+            --state pending \
+            --sha "${{ github.event.pull_request.head.sha }}" \
+            --pr "${{ github.event.pull_request.number }}"
