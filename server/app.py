@@ -50,6 +50,10 @@ import tick_health as tick_health_mod  # e-1391 / ms-66: tick-liveness evaluatio
 # process): a restart resets it and the next tick re-baselines within ≤1 min.
 _last_tick_at: str = ""
 _last_tick_report: dict = {}
+# e-1391 follow-up (review H1) — process start time, so tick-health can tell a
+# just-booted server (never ticked yet = fine) from one up long enough that a
+# missing/dead tick driver is overdue (= alert). In-memory like _last_tick_at.
+_server_start_at: "datetime.datetime | None" = None
 
 # debug=False is the default, but set explicitly to ensure stack traces are
 # never included in error responses in production.
@@ -9301,7 +9305,15 @@ def tick_health_endpoint():
     """
     import datetime
     now = datetime.datetime.now(datetime.timezone.utc)
-    health = tick_health_mod.evaluate_tick_health(_last_tick_at, now)
+    # e-1391 follow-up (review H1): pass uptime so evaluate_tick_health can
+    # promote a persistent ``never`` (server up but driver never ticked = the
+    # migration failure) to ``stale``, instead of staying silent forever.
+    uptime_seconds = None
+    if _server_start_at is not None:
+        uptime_seconds = (now - _server_start_at).total_seconds()
+    health = tick_health_mod.evaluate_tick_health(
+        _last_tick_at, now, uptime_seconds=uptime_seconds,
+    )
     return {
         **health,
         "last_tick_report": _last_tick_report,
@@ -10866,8 +10878,11 @@ _ws_session_conns: dict[tuple[str, str], set[str]] = {}
 
 @app.on_event("startup")
 async def _capture_event_loop():
-    global _event_loop
+    global _event_loop, _server_start_at
     _event_loop = asyncio.get_event_loop()
+    # e-1391 follow-up (review H1): stamp boot time for tick-health uptime.
+    import datetime as _dt
+    _server_start_at = _dt.datetime.now(_dt.timezone.utc)
 
 
 @app.on_event("startup")

@@ -33,6 +33,16 @@ from typing import Optional
 # flapping on a single slow tick / deploy restart.
 DEFAULT_STALE_AFTER_SECONDS = 600
 
+# e-1391 follow-up (AX/maint review H1): a server that is reachable but has
+# NEVER ticked is the exact migration failure this watchdog exists to catch
+# (tick driver not installed / dead). We can't alert on ``never`` immediately —
+# a just-booted server legitimately shows ``never`` until its first tick lands.
+# So we grace-window it against the server's uptime: once the process has been
+# up longer than this and STILL never ticked, the driver is overdue and we
+# promote ``never`` → ``stale`` so the alert fires. Comfortably above the 1-min
+# driver cadence + a deploy's startup slack.
+DEFAULT_NEVER_GRACE_SECONDS = 300
+
 
 def _parse_iso(value: str) -> Optional[datetime.datetime]:
     """Parse an ISO8601 timestamp (Beacon convention = ``Z`` suffix)."""
@@ -52,32 +62,53 @@ def evaluate_tick_health(
     last_tick_at: str,
     now: datetime.datetime,
     stale_after_seconds: int = DEFAULT_STALE_AFTER_SECONDS,
+    uptime_seconds: Optional[float] = None,
+    never_grace_seconds: int = DEFAULT_NEVER_GRACE_SECONDS,
 ) -> dict:
     """Classify tick liveness from the last-tick timestamp.
 
     ``last_tick_at`` is the ISO8601 string the server records at the end of
     each successful tick (empty / missing = the process has not ticked since
-    it started). ``now`` must be timezone-aware UTC.
+    it started). ``now`` must be timezone-aware UTC. ``uptime_seconds`` is how
+    long the server process has been up (from ``/api/system/tick-health``);
+    when provided it lets a *persistent* ``never`` be caught (see below).
 
     Returns a dict with:
       * ``status``: ``"ok"`` | ``"stale"`` | ``"never"``
       * ``seconds_since``: float seconds since the last tick, or ``None`` when
         never ticked
       * ``last_tick_at``: echoed back (normalized ISO, or ``""``)
-      * ``stale_after_seconds``: the threshold used
+      * ``stale_after_seconds`` / ``never_grace_seconds`` / ``uptime_seconds``
+      * ``detail``: a short reason string for the never/stale case
 
     ``never`` (no tick since boot) is distinguished from ``stale`` (ticked
-    once, then stopped) because a just-restarted process legitimately shows
-    ``never`` for up to one cadence window — the caller can grace-window it,
-    whereas ``stale`` after prior liveness is unambiguously a dead driver.
+    once, then stopped): a just-restarted process legitimately shows ``never``
+    for up to one cadence window. But a server that has been UP longer than
+    ``never_grace_seconds`` and STILL never ticked is the migration failure
+    (driver not installed / dead), so we **promote never → stale** in that case
+    — otherwise a driver that never starts would stay silent forever (the exact
+    hole this watchdog exists to close). Without a known uptime we stay
+    conservative and report ``never`` (the caller can't tell boot from dead).
     """
     parsed = _parse_iso(last_tick_at)
     if parsed is None:
+        overdue = (
+            uptime_seconds is not None
+            and never_grace_seconds is not None
+            and uptime_seconds > never_grace_seconds
+        )
         return {
-            "status": "never",
+            "status": "stale" if overdue else "never",
             "seconds_since": None,
             "last_tick_at": "",
             "stale_after_seconds": stale_after_seconds,
+            "never_grace_seconds": never_grace_seconds,
+            "uptime_seconds": uptime_seconds,
+            "detail": (
+                "reachable but never ticked and past the grace window "
+                "(driver not installed / dead)"
+                if overdue else "never ticked yet (within boot grace window)"
+            ),
         }
     seconds_since = (now - parsed).total_seconds()
     status = "stale" if seconds_since > stale_after_seconds else "ok"
@@ -86,20 +117,23 @@ def evaluate_tick_health(
         "seconds_since": seconds_since,
         "last_tick_at": parsed.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "stale_after_seconds": stale_after_seconds,
+        "uptime_seconds": uptime_seconds,
+        "detail": "",
     }
 
 
 def should_alert(health: dict, reachable: bool) -> bool:
     """Decide whether a tick-health condition warrants an alert.
 
-    Alert when the endpoint is unreachable (box down / endpoint removed) or
-    the tick is ``stale`` (driver died after prior liveness). ``never`` alone
-    does NOT alert: a freshly restarted server reports ``never`` until its
-    first tick lands, so alerting on it would false-positive on every deploy.
-    Persistent ``never`` is caught by ``unreachable`` semantics only if the
-    caller treats a never-ticking-yet-reachable box specially; by default we
-    stay quiet and let the next window promote it to ``stale`` once a boot
-    baseline exists.
+    Alert when the endpoint is unreachable (box down / endpoint removed) or the
+    tick is ``stale``. ``stale`` covers two cases that ``evaluate_tick_health``
+    collapses into it: (1) the tick ran before and then stopped, and (2) the
+    server has been up past ``never_grace_seconds`` and STILL never ticked
+    (= driver not installed / dead — ``never`` is promoted to ``stale`` there).
+    A plain ``never`` — still within the boot grace window, or with unknown
+    uptime — does NOT alert, so a fresh deploy doesn't false-positive before
+    its first tick lands. This is the honest behaviour: promotion happens in
+    ``evaluate_tick_health`` (given uptime), not "some later window" by magic.
     """
     if not reachable:
         return True
@@ -125,6 +159,17 @@ def format_alert_message(reachable: bool, health: dict, prod_url: str) -> str:
             f"⚠ 本番の定期ティックが確認できません ({prod_url}/api/system/"
             f"tick-health が unreachable)。Trek/Operation の自律発火が止まって "
             f"いる恐れ。beacon-tick.timer / beacon-api.service を確認してください。"
+        )
+    # never-overdue case (promoted never → stale): no prior tick at all.
+    if not health.get("last_tick_at"):
+        up = health.get("uptime_seconds")
+        up_min = f"{up / 60:.0f}分" if isinstance(up, (int, float)) else "?"
+        return (
+            f"⚠ 本番の定期ティックが一度も発火していません (server 起動から "
+            f"{up_min} 経過、tick 0 回)。beacon-tick.timer が未設置 / 停止の "
+            f"恐れ (= VPS 移行で driver を配線し忘れた形)。Trek/Operation 自律が "
+            f"駆動されていません。{prod_url}/api/system/tick-health を確認して "
+            f"ください。"
         )
     secs = health.get("seconds_since")
     mins = f"{secs / 60:.0f}分" if isinstance(secs, (int, float)) else "?"

@@ -52,6 +52,31 @@ def test_never_when_empty():
     assert h["last_tick_at"] == ""
 
 
+def test_never_within_boot_grace_stays_never():
+    # Server just booted (uptime < grace) and hasn't ticked yet → not an alert.
+    h = th.evaluate_tick_health("", NOW, uptime_seconds=60, never_grace_seconds=300)
+    assert h["status"] == "never"
+    assert th.should_alert(h, reachable=True) is False
+
+
+def test_never_past_grace_promotes_to_stale_and_alerts():
+    # H1: server up past the grace window but STILL never ticked = driver not
+    # installed / dead (the migration failure). Must promote to stale + alert.
+    h = th.evaluate_tick_health("", NOW, uptime_seconds=1000, never_grace_seconds=300)
+    assert h["status"] == "stale"
+    assert th.should_alert(h, reachable=True) is True
+    # message must name the "never fired at all" nature, not a stale duration.
+    msg = th.format_alert_message(True, h, "https://x")
+    assert "一度も発火していません" in msg
+
+
+def test_never_without_uptime_stays_conservative():
+    # Unknown uptime → can't tell boot from dead → stay never (no false alert).
+    h = th.evaluate_tick_health("", NOW, uptime_seconds=None)
+    assert h["status"] == "never"
+    assert th.should_alert(h, reachable=True) is False
+
+
 def test_never_when_unparseable():
     h = th.evaluate_tick_health("not-a-timestamp", NOW)
     assert h["status"] == "never"

@@ -132,9 +132,14 @@ def decide_and_alert(
     (unreachable ↔ stale), so a steady-state dead tick alerts once.
     """
     if reachable:
+        # e-1391 follow-up (review H1): thread uptime through so a reachable
+        # box that never ticked past the grace window is caught (promoted to
+        # stale), not silently ignored as a plain ``never``.
+        uptime = payload.get("uptime_seconds")
         health = th.evaluate_tick_health(
             str(payload.get("last_tick_at", "")), now,
             stale_after_seconds=stale_after_seconds,
+            uptime_seconds=uptime if isinstance(uptime, (int, float)) else None,
         )
     else:
         health = {"status": "unreachable", "seconds_since": None,
