@@ -11533,6 +11533,116 @@ def cmd_review_done():
               f"— approve/merge の gate を通過できます。")
 
 
+def _review_skips_log_path() -> str:
+    """Durable append-only audit of human-intended review skips (ms-119 e-4124).
+
+    Lives in .beacon/ (not the ephemeral triggers/ dir) so a waiver survives the
+    trigger that it cleared — the skip decision is a permanent governance record,
+    the trigger is a transient 'still owed' marker."""
+    return os.path.join(os.path.dirname(get_project_file()), "review-skips.jsonl")
+
+
+def _review_skip_gate_record() -> dict:
+    """Capture HOW a review skip passed the human-intent guard (ms-119 e-4124).
+
+    Mirrors _approval_gate_record (e-4006): the skip is meant to be a human's
+    deliberate waiver, but the env signal is a self-report — so record which
+    signal opened it (explicit user override vs human session) rather than
+    trusting it. An AI-recorded skip then leaves a grep-able footprint (an
+    ``ai-session-unguarded`` signal) instead of looking identical to a human's.
+    This is a DIFFERENT env var from the AI-ban / merge-override flags on
+    purpose: skipping a review is a distinct act from forcing a merge past one
+    that is still owed (BEACON_PR_REVIEW_OVERRIDE)."""
+    override = os.environ.get("BEACON_REVIEW_SKIP_USER_OVERRIDE", "") == "1"
+    if override:
+        signal = "user-override"
+    elif _session_kind_is_human():
+        signal = "human-session"
+    else:
+        signal = "ai-session-unguarded"
+    return {
+        "signal": signal,
+        "session_kind": (os.environ.get("BEACON_SESSION_KIND", "") or "").strip() or "unset",
+    }
+
+
+def cmd_review_skip():
+    """Record a HUMAN's deliberate decision to skip an owed review (ms-119 e-4124).
+
+    beacon review skip --type <ax|maintainability|philosophy|...> \\
+        (--pr <N> | --target <ms-XX|op-X>) --reason "<なぜ省くか>"
+
+    First-class, reason-bearing, audited — semantically distinct from
+    BEACON_PR_REVIEW_OVERRIDE (force a merge PAST a review that is still owed).
+    A skip *waives* the obligation with an owner and a reason; it clears the
+    review-due trigger (so approve/merge proceeds) AND appends a durable record
+    to .beacon/review-skips.jsonl. --reason is mandatory: a waiver with no
+    recorded reason is exactly the silent skip this MS exists to prevent."""
+    review_type = os.environ.get("BEACON_REVIEW_TYPE", "").strip()
+    pr_number = os.environ.get("BEACON_PR_NUMBER", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    reason = (os.environ.get("BEACON_REASON", "") or "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not review_type or not (pr_number or target_id):
+        print("Usage: beacon review skip --type <ax|maintainability|philosophy|...> "
+              "(--pr <N> | --target <ms-XX|op-X>) --reason \"<なぜ省くか>\"",
+              file=sys.stderr)
+        sys.exit(1)
+    if pr_number and target_id:
+        print("Error: --pr と --target は同時に指定できません (どちらか一方)。",
+              file=sys.stderr)
+        sys.exit(1)
+    if not reason:
+        print("Error: review skip には --reason が必須です。人間が『なぜこのレビューを"
+              "省くか』を残さない waiver は、この仕組みが防ごうとしている silent skip "
+              "そのものです。", file=sys.stderr)
+        sys.exit(1)
+
+    import review_spine
+    import datetime
+    gate = _review_skip_gate_record()
+    ref_kind = "pr" if pr_number else "target"
+    ref = pr_number or target_id
+    record = review_spine.build_review_skip_record(
+        review_type=review_type, ref_kind=ref_kind, ref=ref, reason=reason,
+        actor=_actor_str(), gate=gate, at=datetime.datetime.now().isoformat())
+
+    # Durable audit first (the record must survive even if trigger clearing
+    # races); then clear the review-due trigger so the gate stops blocking.
+    try:
+        with open(_review_skips_log_path(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as e:
+        print(f"Error: skip 監査ログを書けませんでした: {e}", file=sys.stderr)
+        sys.exit(1)
+    if pr_number:
+        _clear_review_due_for_pr(review_type, pr_number)
+    else:
+        # target-transition review-due is one file per target (all bindings),
+        # so a per-type skip removes it only when it was the sole owed review.
+        try:
+            path = os.path.join(_get_triggers_dir(), f"review-due-{target_id}.json")
+            if os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            pass
+
+    if json_mode:
+        print(json.dumps(record, ensure_ascii=False))
+        return
+    where = f"PR #{pr_number}" if pr_number else target_id
+    print(f"レビュー skip を記録 (人間の意図的省略): {review_type} / {where}")
+    print(f"  理由: {reason}")
+    print(f"  監査: .beacon/review-skips.jsonl (signal={gate['signal']}, "
+          f"actor={record['actor'] or 'unknown'})")
+    if gate["signal"] == "ai-session-unguarded":
+        print("  ⚠ このセッションは human と申告していません "
+              "(BEACON_SESSION_KIND=human も BEACON_REVIEW_SKIP_USER_OVERRIDE=1 も無し)。"
+              "skip は記録されましたが、監査に ai-session-unguarded として残ります。",
+              file=sys.stderr)
+
+
 def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:
     """Anchor firing to the real PR-open event (ms-119 e-4060): scan GitHub's
     OPEN PRs and fire the pr-open review-due triggers for any that lack them.
@@ -25307,6 +25417,7 @@ if __name__ == "__main__":
         "target_class_list": cmd_target_class_list,  # ms-124 e-4091
         "review_context": cmd_review_context,
         "review_done": cmd_review_done,      # ms-119 e-4060
+        "review_skip": cmd_review_skip,      # ms-119 e-4124
 
         "milestone_observe": cmd_milestone_observe,
         "milestone_wait": cmd_milestone_wait,

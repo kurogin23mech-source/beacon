@@ -3319,8 +3319,26 @@ case "${1:-}" in
                 done
                 BEACON_REVIEW_TYPE="$_rd_type" BEACON_PR_NUMBER="$_rd_pr" \
                     python3 "$COMMANDS_PY" review_done ;;
+            skip)
+                shift 2
+                _rs_type="" _rs_pr="" _rs_target="" _rs_reason="" _rs_json=""
+                while [ "$#" -gt 0 ]; do
+                    case "$1" in
+                        --type)   _rs_type="${2:-}";   shift 2 ;;
+                        --pr)     _rs_pr="${2:-}";      shift 2 ;;
+                        --target) _rs_target="${2:-}";  shift 2 ;;
+                        --reason) _rs_reason="${2:-}";  shift 2 ;;
+                        --json)   _rs_json="1";         shift ;;
+                        -?*)      _guard_flag "$1" ;;
+                        *)        shift ;;
+                    esac
+                done
+                BEACON_REVIEW_TYPE="$_rs_type" BEACON_PR_NUMBER="$_rs_pr" \
+                    BEACON_TARGET_ID="$_rs_target" BEACON_REASON="$_rs_reason" \
+                    BEACON_JSON="$_rs_json" python3 "$COMMANDS_PY" review_skip ;;
             *)        echo "Usage: beacon review context --type <ax|philosophy|attainment> [--pr <n> | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--mode diff]  (独立 judge 用の review-kernel bundle を出力; ms-119)" >&2
                       echo "       beacon review done --type <ax|maintainability> --pr <n>  (レビュー実施を記録し approve/merge gate を解消; ms-119 e-4060)" >&2
+                      echo "       beacon review skip --type <t> (--pr <n> | --target <ms-XX|op-X>) --reason \"...\"  (人間が意図的にレビューを省く一級経路、監査に理由を残す; ms-119 e-4124)" >&2
                       echo "  注: ax/philosophy は助言 judge の bundle、attainment は目的達成の証拠を独立 judge に生成させる bundle (verdict は human: 'beacon target approve')。完了ゲートは 'beacon milestone done --review'。" >&2
                       exit 1 ;;
         esac

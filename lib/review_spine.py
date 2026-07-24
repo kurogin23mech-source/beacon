@@ -303,6 +303,41 @@ def assemble_attainment_context(*, target_id, spec_origin_id, spec_content,
     }
 
 
+def build_review_skip_record(*, review_type, ref_kind, ref, reason, actor,
+                             gate, at):
+    """Build a durable audit record for a HUMAN-intended review skip (ms-119 /
+    e-4124).
+
+    A skip is a first-class governance decision — "a human looked at this 節目
+    and decided this particular review is not needed, here is why" — and is
+    semantically DISTINCT from ``BEACON_PR_REVIEW_OVERRIDE`` (the AI-ban
+    circumvention flag, which means "force a merge past an review that is still
+    owed"). The two must not be conflated: an override forces past an unmet
+    obligation; a skip records that the obligation was deliberately waived, with
+    a reason and an owner.
+
+    Like the approval gate record (e-4006), the value is not "an AI cannot skip"
+    but "a skip cannot HIDE who waived it and why": ``gate`` carries the signal
+    that authorised the skip (human-session vs explicit user override) so an
+    AI-recorded skip leaves a grep-able footprint rather than looking identical
+    to a human's.
+
+    Pure: returns the record dict; the caller owns persistence (append to the
+    durable ``.beacon/review-skips.jsonl`` audit) and clearing the review-due
+    trigger.
+    """
+    return {
+        "kind": "review-skip",
+        "review_type": review_type,
+        "ref_kind": ref_kind,          # "pr" | "target"
+        "ref": ref,                    # PR number / target id
+        "reason": reason,
+        "actor": actor,
+        "gate": gate,                  # {signal, session_kind} — see e-4006
+        "at": at,
+    }
+
+
 def review_bindings_for_transition(target_kind, old_state, new_state, *,
                                    has_spec=False, gated=False):
     """Return the review bindings that apply to a target lifecycle transition.
