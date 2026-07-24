@@ -290,7 +290,8 @@ def test_project_target_shape():
                     "work_items_done": 0,
                     "detail": {"phase": "drafting", "type": "single-shot",
                                "who_has_the_ball": "self",
-                               "next_move": "次フェーズへ進める: 弁護士レビュー"}}
+                               "next_move": "次フェーズへ進める: 弁護士レビュー",
+                               "evidence_total": 0}}
 
 
 # ---------------------------------------------------------------------------
@@ -366,7 +367,9 @@ def test_evidence_rejects_unknown_linked_id():
         te.add_evidence(data, CONTRACT, rec["id"], linked_id="ctr-1-w9")
         assert False
     except te.TargetEngineError as e:
-        assert "linked_id" in str(e)
+        # error speaks the surface vocabulary (WorkItem / --for), not the
+        # internal field name (ms-124 AX review)
+        assert "WorkItem" in str(e) and "ctr-1-w9" in str(e)
 
 
 def test_evidence_without_link_is_allowed():

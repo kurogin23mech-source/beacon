@@ -140,7 +140,7 @@ def create_target(data: dict, desc: dict, *, label: str,
     # arms. These are the same cognitive primitives a milestone or an
     # opportunity carries; a data-defined class inherits them rather than
     # projecting hardcoded zeros.
-    extra["who_has_the_ball"] = work_model.BALL_SELF
+    extra[BALL_KEY] = work_model.BALL_SELF
     extra.update(field_vals)
 
     rec = work_model.new_target(new_id, label, created_by=actor, created_at=at,
@@ -225,27 +225,35 @@ def _apply_phase_fields(desc: dict, rec: dict, new_phase: str,
                         fields: dict) -> None:
     """Set ``fields`` on ``rec`` for the phase being entered and enforce that
     phase's required fields. Only keys visible at ``new_phase`` (base + the
-    phase's own extension) may be set; an undeclared key raises. After applying,
-    every field the phase's OWN extension marks ``required`` must hold a value
-    (from ``fields`` or already on the record)."""
+    phase's own extension) may be set; an undeclared key raises. Every field the
+    phase's OWN extension marks ``required`` must hold a value (from ``fields``
+    or already on the record) or the advance raises.
+
+    Validate-before-mutate (ms-124 e-4089 maintainability review): all checks run
+    against the incoming ``fields`` + current record BEFORE anything is written,
+    so a rejected advance leaves ``rec`` untouched — no partial mutation a caller
+    could accidentally persist."""
     visible = {f.get("key") for f in td.fields_at_phase(desc, new_phase)}
-    for key, val in fields.items():
+    for key in fields:
         if key not in visible:
             raise TargetEngineError(
                 f"phase '{new_phase}' で未知の field '{key}' です "
                 f"(この phase で有効: {', '.join(sorted(k for k in visible if k))})")
-        rec[key] = val
     phase = td.get_phase(desc, new_phase) or {}
     for f in phase.get("fields") or []:
         if not isinstance(f, dict) or not f.get("required"):
             continue
         key = (f.get("key") or "").strip()
-        val = rec.get(key)
+        # required is satisfied by an incoming value OR one already on the record
+        val = fields[key] if key in fields else rec.get(key)
         if not (val or "") and val not in (0, False):
             raise TargetEngineError(
                 f"phase '{new_phase}' に入るには必須 field '{key}' "
                 f"({f.get('label') or key}) が必要です "
                 f"(--field {key}=... で指定してください)")
+    # All checks passed — now write.
+    for key, val in fields.items():
+        rec[key] = val
 
 
 def is_terminal_phase(desc: dict, phase_key: str) -> bool:
@@ -345,8 +353,8 @@ def add_evidence(data: dict, desc: dict, target_id: str, *, summary: str = "",
     linked = (linked_id or "").strip()
     if linked and work_model.find_by_id(list_work_items(rec), linked) is None:
         raise TargetEngineError(
-            f"linked_id '{linked}' に一致する WorkItem がありません "
-            f"(target {target_id})")
+            f"指定された WorkItem '{linked}' が見つかりません "
+            f"(target {target_id} の work-item list で確認してください)")
     evs = rec.setdefault(EVIDENCE_KEY, [])
     new_id = work_base.next_suffixed_id(work_model.collect_ids(evs),
                                         f"{rec.get('id', target_id)}-ev")
@@ -443,5 +451,6 @@ def project_target(desc: dict, rec: dict) -> dict:
             "type": desc.get("type", ""),
             "who_has_the_ball": work_model.normalize_ball(rec.get(BALL_KEY, "")),
             "next_move": infer_next_move(desc, rec),
+            "evidence_total": len(list_evidence(rec)),
         },
     }

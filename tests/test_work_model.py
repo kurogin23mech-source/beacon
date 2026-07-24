@@ -400,3 +400,16 @@ def test_set_target_label_default_dual_writes():
     t2 = wm.set_target_label({}, "Y", dual_write=False)
     assert t2[wm.LABEL] == "Y"
     assert "title" not in t2
+
+
+# ms-124 e-4089 (maintainability review): the ball vocabulary lives canonically
+# in work_model; sales_entities keeps a historical copy (behavior-preserving).
+# This parity test machine-guards the implicit "keep them in sync" contract so a
+# future edit to one side that forgets the other fails loudly instead of silently
+# splitting how "whose turn is it" is interpreted across occupations.
+def test_ball_vocabulary_parity_with_sales_entities():
+    import sales_entities as se
+    assert work_model.BALL_SELF == se.BALL_SELF
+    assert work_model.BALL_COUNTERPART == se.BALL_COUNTERPART
+    # sales' recognised set must be a subset of work_model's (which adds NONE)
+    assert set(se.VALID_BALL) <= set(work_model.VALID_BALL)

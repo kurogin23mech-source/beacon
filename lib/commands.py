@@ -2193,7 +2193,9 @@ def cmd_target_instances():
         phase = f" [{detail.get('phase')}]" if detail.get("phase") else ""
         counts = ""
         if r.get("work_items_total"):
-            counts = f" 活動 {r.get('work_items_done', 0)}/{r['work_items_total']}"
+            counts = f" WorkItem {r.get('work_items_done', 0)}/{r['work_items_total']}"
+        if detail.get("evidence_total"):
+            counts += f" Evidence {detail['evidence_total']}"
         ball = detail.get("who_has_the_ball")
         ball_str = f" ball:{ball}" if ball else ""
         print(f"  {icon} [{r['id']}] {r['label']}{phase}{counts}{ball_str} — "
@@ -2231,6 +2233,13 @@ def cmd_target_work_item():
     desc = _resolve_descriptor(data, kind)
     try:
         if action == "add":
+            if not desc_text:
+                # ms-124 AX review: the body is a --desc flag, not a positional
+                # (unlike `beacon task add "text"`). Say so instead of the bare
+                # "description は必須" the engine would raise.
+                print("Error: WorkItem の説明は --desc <text> で指定してください "
+                      "(positional は target-id のみ)", file=sys.stderr)
+                sys.exit(1)
             item = _te.add_work_item(data, desc, target_id, desc_text,
                                      actor=_actor_str())
             save_project(data, op={"op": "target_work_item_add", "kind": kind,
@@ -2268,31 +2277,61 @@ def cmd_target_work_item():
 
 
 def cmd_target_evidence():
-    """Attach an Evidence record to a data-defined target (e-4089).
+    """Attach / list Evidence records on a data-defined target (e-4089).
 
-    beacon target evidence --class <kind> <target-id> [--summary <text>]
-                           [--for <work-item-id>]
+    beacon target evidence add  --class <kind> <target-id> [--summary <text>]
+                                [--for <work-item-id>]
+    beacon target evidence list --class <kind> <target-id> [--json]
+
+    ms-124 AX review: Evidence mirrors work-item's ``<add|list>`` action shape
+    (rather than an implicit bare add) so the two child primitives read alike,
+    and a written Evidence can be read back from the CLI.
     """
+    action = os.environ.get("BEACON_EV_ACTION", "").strip()
     kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
     target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
     summary = os.environ.get("BEACON_EV_SUMMARY", "").strip()
     linked_id = os.environ.get("BEACON_EV_FOR", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
     if not target_id:
-        print("Usage: beacon target evidence --class <kind> <target-id> "
-              "[--summary <text>] [--for <work-item-id>]", file=sys.stderr)
+        print("Usage: beacon target evidence <add|list> --class <kind> "
+              "<target-id> [--summary <text>] [--for <work-item-id>] [--json]",
+              file=sys.stderr)
         sys.exit(1)
     data = load_project()
     desc = _resolve_descriptor(data, kind)
     try:
-        ev = _te.add_evidence(data, desc, target_id, summary=summary,
-                              linked_id=linked_id, actor=_actor_str())
+        if action in ("", "add"):
+            ev = _te.add_evidence(data, desc, target_id, summary=summary,
+                                  linked_id=linked_id, actor=_actor_str())
+            save_project(data, op={"op": "target_evidence_add", "kind": kind,
+                                   "target_id": target_id,
+                                   "evidence_id": ev["id"]})
+            link = f" → {linked_id}" if linked_id else ""
+            print(f"Evidence 追加: [{ev['id']}]{link}")
+        elif action == "list":
+            rec = _te.find_target(data, desc, target_id)
+            if rec is None:
+                print(f"Error: target が見つかりません: {target_id}",
+                      file=sys.stderr)
+                sys.exit(1)
+            evs = _te.list_evidence(rec)
+            if json_mode:
+                print(json.dumps(evs, ensure_ascii=False))
+                return
+            if not evs:
+                print(f"({target_id} に Evidence はまだありません)")
+                return
+            for ev in evs:
+                link = f" → {ev['linked_id']}" if ev.get("linked_id") else ""
+                print(f"  [{ev.get('id')}] {ev.get('summary', '')}{link}")
+        else:
+            print("Usage: beacon target evidence <add|list> ...",
+                  file=sys.stderr)
+            sys.exit(1)
     except _te.TargetEngineError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    save_project(data, op={"op": "target_evidence_add", "kind": kind,
-                           "target_id": target_id, "evidence_id": ev["id"]})
-    link = f" → {linked_id}" if linked_id else ""
-    print(f"Evidence 追加: [{ev['id']}]{link}")
 
 
 def cmd_target_ball():
@@ -2319,7 +2358,7 @@ def cmd_target_ball():
         sys.exit(1)
     save_project(data, op={"op": "target_ball", "kind": kind,
                            "target_id": target_id})
-    now = rec.get("who_has_the_ball") or "none"
+    now = rec.get(_te.BALL_KEY) or "none"
     print(f"ball 更新: [{target_id}] → {now}")
 
 
@@ -2346,6 +2385,16 @@ def _field_from_spec(raw: str, *, required: bool) -> dict:
     if not key:
         print(f"Error: field 指定に key がありません: {raw!r} "
               "(key:label:type 形式)", file=sys.stderr)
+        sys.exit(1)
+    # ms-124 AX review: target-class add's --field is a SCHEMA declaration
+    # (key:label:type), NOT the value assignment (key=value) that target
+    # create/advance use. Reject a key that looks like the value grammar so a
+    # transferred `--field counterparty=相手方` fails loudly here instead of
+    # registering a garbage field key that only errors far downstream.
+    if "=" in key or any(c.isspace() for c in key):
+        print(f"Error: field の key '{key}' が不正です: {raw!r} は "
+              "key:label:type 形式です (key=value は target create/advance 用)",
+              file=sys.stderr)
         sys.exit(1)
     field = {"key": key, "label": (parts[1].strip() if len(parts) > 1 else key)}
     ftype = parts[2].strip() if len(parts) > 2 and parts[2].strip() else "string"
@@ -2380,6 +2429,22 @@ def cmd_target_class_add():
     """
     data = load_project()
     if os.environ.get("BEACON_TC_STDIN", "") == "1":
+        # ms-124 AX review: --stdin takes the whole descriptor as JSON; the
+        # per-field flags are ignored in that path. Reject the hybrid rather
+        # than silently dropping the flags the caller thought would apply.
+        conflicting = [n for n, e in (
+            ("--kind", "BEACON_TC_KIND"), ("--label", "BEACON_TC_LABEL"),
+            ("--type", "BEACON_TC_TYPE"), ("--id-prefix", "BEACON_TC_ID_PREFIX"),
+            ("--collection", "BEACON_TC_COLLECTION"),
+            ("--field", "BEACON_TC_FIELDS"),
+            ("--required-field", "BEACON_TC_REQUIRED_FIELDS"),
+            ("--phase", "BEACON_TC_PHASES"),
+            ("--terminal-phase", "BEACON_TC_TERMINAL_PHASES"))
+            if os.environ.get(e, "").strip()]
+        if conflicting:
+            print(f"Error: --stdin 使用時は他の記述子フラグを指定できません "
+                  f"(競合: {', '.join(conflicting)})", file=sys.stderr)
+            sys.exit(1)
         raw = sys.stdin.read()
         try:
             desc = json.loads(raw)
@@ -2403,8 +2468,9 @@ def cmd_target_class_add():
                                   ("--collection", collection)) if not v]
         if missing:
             print(f"Usage: beacon target-class add --kind <k> --label <l> "
-                  f"--profession <p> --type <single-shot|persistent> "
-                  f"--id-prefix <pfx-> --collection <coll> ...\n"
+                  f"--type <single-shot|persistent> --id-prefix <pfx-> "
+                  f"--collection <coll> [--profession <p>] ...\n"
+                  f"  (--profession 省略時はプロジェクトの profession を継承)\n"
                   f"  未指定: {', '.join(missing)}", file=sys.stderr)
             sys.exit(1)
         fields = [_field_from_spec(s, required=False)
@@ -2443,7 +2509,10 @@ def cmd_target_class_list():
     descriptors = _td.load_descriptors(data)
     problems_by_kind = _td.validate_target_classes(data)
     if json_mode:
-        print(json.dumps(descriptors, ensure_ascii=False))
+        # ms-124 AX review: carry the validation problems in the JSON too, so a
+        # consumer sees WHAT is wrong, not just a "⚠" it can't act on.
+        print(json.dumps({"descriptors": descriptors,
+                          "problems": problems_by_kind}, ensure_ascii=False))
         return
     if not descriptors:
         print("(このプロジェクトは target-class を宣言していません — "
@@ -2455,10 +2524,14 @@ def cmd_target_class_list():
         kind = (desc.get("kind") or "?").strip() or "?"
         phases = _td.phase_keys(desc)
         ph = f" phases: {' → '.join(phases)}" if phases else " (phase なし)"
-        flag = " ⚠ 要修正" if problems_by_kind.get(kind) else ""
+        problems = problems_by_kind.get(kind)
+        flag = " ⚠ 要修正" if problems else ""
         print(f"  [{kind}] {desc.get('label', '')} "
               f"(profession={desc.get('profession', '')}, "
               f"type={desc.get('type', '')}){ph}{flag}")
+        # ms-124 AX review: show the actual problems, not just the ⚠ marker.
+        for p in (problems or []):
+            print(f"      - {p}")
 
 
 # Default command groups probed by the AX full-surface snapshot. These are
