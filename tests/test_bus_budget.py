@@ -682,11 +682,18 @@ def test_is_trek_internal_send_returns_false_when_trek_not_active(project_dir,
     assert bypass is False
 
 
-def test_is_trek_internal_send_returns_false_for_same_user(project_dir, monkeypatch):
-    """Same user is handled by the higher-level same_user rule, not by
-    Trek scope. Returning False here defers to that — the budget gate
-    itself also doesn't fire (no in_reply_to is a same-user CLI send),
-    so we keep our scope narrow to the actual Trek case."""
+def test_is_trek_internal_send_bypasses_for_same_user_trek_members(
+    project_dir, monkeypatch
+):
+    """e-4116 (ms-75): the same-user leader↔fork case IS the primary
+    Trek-internal case and MUST bypass the budget gate.
+
+    Solo-dev dogfood runs both the leader and the fork as one cloud user;
+    the old code excluded ``recipient_user_id == my_user_id`` and so denied
+    the bypass to exactly that configuration, deadlocking Trek coordination
+    on budget exhaustion (observed 2026-07-24). With the fix, membership —
+    not user distinctness — gates the bypass. This case uses a legacy
+    user_id-grain member row (no session_id)."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
     monkeypatch.setattr(commands, "_resolve_creator_identity",
@@ -701,8 +708,66 @@ def test_is_trek_internal_send_returns_false_for_same_user(project_dir, monkeypa
     monkeypatch.setattr(commands, "_get_api_client",
                          lambda: (_FakeClient(), {"project_id": "p"}))
     monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, trek_id = commands._is_trek_internal_send("sv-r")
+    assert bypass is True
+    assert trek_id == "tk"
+
+
+def test_is_trek_internal_send_session_grain_requires_both_joined(
+    project_dir, monkeypatch
+):
+    """Session-grain (phase-A) treks: a same-user send to a session that is
+    NOT a joined member is still gated, even though the user is in the Trek.
+
+    Two distinct member rows keyed by session_id (ms-88/e-2109). The sender
+    session sv-1 is a member; the recipient session sv-r is the SAME user but
+    NOT in members[]. Bypass must NOT fire — membership is checked at session
+    grain, so being the same user is insufficient on its own."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(commands, "_resolve_creator_identity",
+                         lambda: ("u-same", "x", "sv-1"))
+
+    class _FakeClient:
+        def list_sessions(self, _p):
+            return [{"session_id": "sv-r", "actor": {"user_id": "u-same"}}]
+        def list_treks(self):
+            return [{"trek_id": "tk", "status": "active", "members": [
+                {"session_id": "sv-1", "user_id": "u-same", "joined_at": "x"},
+                {"session_id": "sv-other", "user_id": "u-same", "joined_at": "x"},
+            ]}]
+    monkeypatch.setattr(commands, "_get_api_client",
+                         lambda: (_FakeClient(), {"project_id": "p"}))
+    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
     bypass, _ = commands._is_trek_internal_send("sv-r")
     assert bypass is False
+
+
+def test_is_trek_internal_send_session_grain_both_joined(
+    project_dir, monkeypatch
+):
+    """Session-grain (phase-A): same user, BOTH sessions joined members →
+    bypass. Leader (sv-1) + fork (sv-r) as two distinct member rows of one
+    user — the real solo-dev dogfood shape."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(commands, "_resolve_creator_identity",
+                         lambda: ("u-same", "x", "sv-1"))
+
+    class _FakeClient:
+        def list_sessions(self, _p):
+            return [{"session_id": "sv-r", "actor": {"user_id": "u-same"}}]
+        def list_treks(self):
+            return [{"trek_id": "tk", "status": "active", "members": [
+                {"session_id": "sv-1", "user_id": "u-same", "joined_at": "x"},
+                {"session_id": "sv-r", "user_id": "u-same", "joined_at": "x"},
+            ]}]
+    monkeypatch.setattr(commands, "_get_api_client",
+                         lambda: (_FakeClient(), {"project_id": "p"}))
+    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, trek_id = commands._is_trek_internal_send("sv-r")
+    assert bypass is True
+    assert trek_id == "tk"
 
 
 def test_is_trek_internal_send_fails_safe_when_api_throws(project_dir, monkeypatch):

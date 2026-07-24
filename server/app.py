@@ -9308,6 +9308,76 @@ def tick_health_endpoint():
     }
 
 
+def _sid_to_uid(project_id: str, session_id: str) -> str:
+    """Resolve a session_id → user_id from a project's session registry.
+
+    Single-session variant of ``_resolve_bus_event_user_ids`` (same
+    ``projects/{pid}/sessions/{sid}.user_id`` source). Empty on any miss.
+    """
+    if not project_id or not session_id:
+        return ""
+    try:
+        for s in db.list_sessions(project_id) or []:
+            if (s.get("session_id") or "") == session_id:
+                return str(s.get("user_id") or "")
+    except Exception:
+        return ""
+    return ""
+
+
+@app.get("/api/system/trek-internal-send")
+def trek_internal_send_endpoint(
+    sender_project_id: str,
+    sender_session_id: str,
+    recipient_session_id: str,
+    recipient_project_id: str = "",
+):
+    """Answer whether an autonomous DM reply is Trek-internal (e-4116 / ms-75).
+
+    The MCP reply path (``channel/bus.mjs``) consumes the auto-reply budget
+    before posting, but a reply between two members of the same active Trek
+    must NOT cost budget — a Trek is a pre-approved scope with its own TTL /
+    halt controls, so the runaway-cap is structurally redundant for
+    member-to-member coordination. Before e-4116 the MCP path had no Trek
+    awareness at all, so leader↔executor DMs exhausted the budget and Trek
+    coordination deadlocked (observed 2026-07-24). bus.mjs cannot see Trek
+    membership (it is server-side state), so it pre-flights this endpoint
+    before consuming budget.
+
+    Single source of truth: reuses ``dm_gate``'s session-grain shared-Trek
+    lookup (``build_shared_trek_lookup_from_lists``) — the SAME rule the
+    receiver-side action gate applies (halt / archived filtered, phase-A
+    session grain, live per-call trek fetch). Covers cross-project replies via
+    ``recipient_project_id``.
+
+    Read-only. Best-effort: returns ``trek_internal=false`` on any unresolved
+    id so a failed lookup keeps the budget gate in force — never a silent
+    relaxation.
+
+    Unauthenticated (like ``/api/system/tick-health``): it returns only a
+    boolean + trek_id given two session ids and drives a *client-side* budget
+    optimization. The real security boundary — the dm_gate action
+    authorization on the actual bus POST — is unaffected and still enforced,
+    so a spoofed ``true`` here at most lets a caller skip their own
+    self-imposed autonomy budget (not a cross-user privilege).
+    """
+    if not sender_session_id or not recipient_session_id:
+        return {"trek_internal": False, "trek_id": ""}
+    rpid = recipient_project_id or sender_project_id
+    sender_uid = _sid_to_uid(sender_project_id, sender_session_id)
+    receiver_uid = _sid_to_uid(rpid, recipient_session_id)
+    if not sender_uid or not receiver_uid:
+        return {"trek_internal": False, "trek_id": ""}
+    lookup = dm_gate_mod.build_shared_trek_lookup_from_lists(
+        lambda uid: db.list_treks(actor_id=uid) if uid else [],
+    )
+    matched, trek_id = dm_gate_mod._coerce_lookup_result(
+        lookup(sender_uid, receiver_uid,
+               sender_session_id, recipient_session_id)
+    )
+    return {"trek_internal": bool(matched), "trek_id": trek_id or ""}
+
+
 def _find_operation_spec_doc(project: dict, op_id: str) -> str:
     """Best-effort: the doc_id of the SPEC bound to an operation (scope=spec,
     operation=op_id), so the execute Skill can fetch its procedure. '' if none."""

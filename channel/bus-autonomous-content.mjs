@@ -128,6 +128,7 @@ function _buildTrekProgressContent(evt) {
   }
   lines.push('')
   lines.push('budget が枯渇していたら Skill 側 (Step 4.5) が自動で停止 → incident open → note 残しに降格する。Skill の責務なのでこの inject 側で事前判定はしない。')
+  lines.push('> Note (= e-4116 / ms-75): この Trek 内の member 間 DM (leader↔executor、同一ユーザーの複数 session を含む) は auto-reply budget を **消費しない** (= server 側で Trek-internal と判定されると bypass)。budget 枯渇の心配は Trek 外向きの送信だけに当たる。')
   lines.push('')
   lines.push('> Note (= ms-88 CORE 5nfTSmCDVUzD4SLzIhI5): この narrative は 3 層強制構造の Layer 1 (= 明示的 consequence 提示)。 Layer 2 (= /beacon-trek-pulse による observable ack) と Layer 3 (= server TTL 罰則) と組合さって初めて「実質的強制」 が成立する。 narrative 単独では AI compliance 依存。')
   return lines.join('\n')

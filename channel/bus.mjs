@@ -726,6 +726,33 @@ async function apiPut(p, body) {
   return r.json()
 }
 
+// e-4116 (ms-75): ask the server whether an autonomous reply is Trek-internal
+// (= both this session and the recipient session are joined members of the
+// same active Trek). Such replies bypass the auto-reply budget: a Trek is a
+// pre-approved scope with its own TTL / halt controls, so the runaway cap is
+// structurally redundant for member-to-member coordination. Before this the
+// MCP path had no Trek awareness and leader↔executor DMs exhausted the budget,
+// deadlocking Trek coordination (observed 2026-07-24).
+//
+// The judgment lives server-side (single source of truth = dm_gate's
+// session-grain shared-Trek lookup); bus.mjs only asks. Fail-closed: any error
+// returns not-internal so the budget gate stays in force (never a silent
+// relaxation). BEACON_TREK_BYPASS_OFF=1 is an explicit escape hatch (mirrors
+// BEACON_QUALGATE_OFF / BEACON_BUS_NO_LIVE_CHECK).
+async function checkTrekInternalReply(recipientProjectId, recipientSessionId) {
+  if (process.env.BEACON_TREK_BYPASS_OFF === '1') return { trek_internal: false }
+  if (!PROJECT_ID || !SESSION_ID || !recipientSessionId) {
+    return { trek_internal: false }
+  }
+  const qs = new URLSearchParams({
+    sender_project_id: PROJECT_ID,
+    sender_session_id: SESSION_ID,
+    recipient_session_id: recipientSessionId,
+    recipient_project_id: recipientProjectId || '',
+  })
+  return await apiGet(`/api/system/trek-internal-send?${qs.toString()}`)
+}
+
 // e-1667: per-iteration watchdog wrapper. Caps any awaited promise at
 // ITERATION_WATCHDOG_MS so a hung pollOnce / scheduler / heartbeat cannot
 // wedge the loop. Returns the promise's result on time, or rejects with a
@@ -867,7 +894,24 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   // Track whether the pessimistic budget decrement committed a slot, so a
   // held / failed send can refund it (ms-100 e-2999) instead of burning a turn.
   let budgetConsumed = false
+  // e-4116 (ms-75): Trek-internal replies bypass the budget gate entirely.
+  // Checked server-side before consuming budget so leader↔executor DMs inside
+  // an active Trek never deadlock on budget exhaustion. Fail-closed on error
+  // (checkTrekInternalReply returns not-internal), so the gate stays in force.
+  let trekInternal = false
   if (autonomous) {
+    try {
+      const ti = await checkTrekInternalReply(recipient_project_id, recipient_session_id)
+      trekInternal = !!(ti && ti.trek_internal)
+      if (trekInternal) {
+        log(`reply Trek-internal (trek_id=${ti.trek_id || '?'}) → budget/qual gate bypassed`)
+      }
+    } catch (e) {
+      trekInternal = false
+      log(`trek-internal check failed (${e.message}); budget gate stays in force`)
+    }
+  }
+  if (autonomous && !trekInternal) {
     const gate = consumeBusBudgetOne(CWD)
     if (!gate.allowed) {
       const msg = refuseMessage(gate.reason, gate.budget)

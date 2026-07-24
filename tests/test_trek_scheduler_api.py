@@ -339,6 +339,88 @@ def test_tick_health_is_unauthenticated_readonly():
 
 
 # ---------------------------------------------------------------------------
+# e-4116 (ms-75) — /api/system/trek-internal-send (MCP budget-bypass preflight)
+# ---------------------------------------------------------------------------
+
+def _seed_two_session_trek(trek_id="tk-internal"):
+    """A trek whose leader + executor are two distinct session-keyed members
+    (ms-88/e-2109 grain), plus both sessions in the registry."""
+    _treks[trek_id] = {
+        "trek_id": trek_id, "title": "t", "status": "active",
+        "creator_actor": {"user_id": "uid-leader"},
+        "leader_session_id": "sv-leader",
+        "members": [
+            {"session_id": "sv-leader", "user_id": "uid-leader",
+             "joined_at": "2026-06-18T00:00:00Z"},
+            {"session_id": "sv-exec", "user_id": "uid-exec",
+             "joined_at": "2026-06-18T00:00:00Z"},
+        ],
+        "scope": [{"project": "beacon-test", "milestone": "ms-75"}],
+        "halt": None, "meta": {}, "archived_at": None,
+    }
+    _sessions_by_project["beacon-test"] = [
+        {"session_id": "sv-leader", "user_id": "uid-leader"},
+        {"session_id": "sv-exec", "user_id": "uid-exec"},
+    ]
+
+
+def test_trek_internal_send_true_for_shared_active_trek():
+    _seed_two_session_trek()
+    resp = client.get("/api/system/trek-internal-send", params={
+        "sender_project_id": "beacon-test",
+        "sender_session_id": "sv-leader",
+        "recipient_session_id": "sv-exec",
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["trek_internal"] is True
+    assert body["trek_id"] == "tk-internal"
+
+
+def test_trek_internal_send_false_when_recipient_not_member():
+    _seed_two_session_trek()
+    # A third session of no trek → not internal.
+    _sessions_by_project["beacon-test"].append(
+        {"session_id": "sv-stranger", "user_id": "uid-stranger"})
+    resp = client.get("/api/system/trek-internal-send", params={
+        "sender_project_id": "beacon-test",
+        "sender_session_id": "sv-leader",
+        "recipient_session_id": "sv-stranger",
+    })
+    assert resp.json()["trek_internal"] is False
+
+
+def test_trek_internal_send_false_on_unresolved_session():
+    _seed_two_session_trek()
+    resp = client.get("/api/system/trek-internal-send", params={
+        "sender_project_id": "beacon-test",
+        "sender_session_id": "sv-leader",
+        "recipient_session_id": "sv-does-not-exist",
+    })
+    assert resp.json()["trek_internal"] is False
+
+
+def test_trek_internal_send_20_roundtrips_never_flip(
+):
+    """e-4116 regression: 20 leader↔executor round-trips must ALL be judged
+    Trek-internal, so a client that pre-flights this never consumes a single
+    budget slot → zero exhaustion across a long coordination burst. The
+    lookup is live (re-fetched per call), so this also guards against a
+    stateful drift that would start gating mid-burst."""
+    _seed_two_session_trek()
+    for i in range(20):
+        # Alternate direction each turn (leader→exec, then exec→leader).
+        a, b = ("sv-leader", "sv-exec") if i % 2 == 0 else ("sv-exec", "sv-leader")
+        resp = client.get("/api/system/trek-internal-send", params={
+            "sender_project_id": "beacon-test",
+            "sender_session_id": a,
+            "recipient_session_id": b,
+        })
+        assert resp.status_code == 200
+        assert resp.json()["trek_internal"] is True, f"flipped at turn {i}"
+
+
+# ---------------------------------------------------------------------------
 # (3) Due trek fires; envelope + bus event + last_progress_check_at stamped
 # ---------------------------------------------------------------------------
 
