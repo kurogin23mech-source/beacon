@@ -470,7 +470,7 @@ def scheduler_internal_key() -> str:
 
 
 def is_using_dev_scheduler_key() -> bool:
-    """Return True iff the scheduler tick key would use the hard-coded dev value.
+    """Return True iff the scheduler tick key is unsafe for production.
 
     Twin of ``is_using_dev_fallback()`` for the *other* internal secret. The
     scheduler key gates ``POST /api/system/trek-scheduler/tick`` (which fires
@@ -479,15 +479,31 @@ def is_using_dev_scheduler_key() -> bool:
     so booting production with it would let anyone drive the tick / mint
     endpoints. Production startup checks this and refuses to boot (e-4115).
 
-    "Using the dev fallback" means ``BEACON_SCHEDULER_INTERNAL_KEY`` is **unset
-    or empty** (``scheduler_internal_key()`` then returns the placeholder), or
-    is explicitly set to the same public placeholder string — forgetting to
-    rotate from the committed placeholder is exactly what this guard catches.
+    "Unsafe" means ``BEACON_SCHEDULER_INTERNAL_KEY`` is any of:
+      * **unset or empty** (``scheduler_internal_key()`` returns the placeholder);
+      * the committed dev fallback string ``_DEV_FALLBACK_SCHEDULER_KEY``;
+      * a **template placeholder that was never filled in** — i.e. still wrapped
+        in ``<...>`` angle brackets.
+
+    The last case closes an AX-review hole (H2, e-4115 follow-up): the required
+    env template ``deploy/app.env.example`` ships
+    ``BEACON_SCHEDULER_INTERNAL_KEY=<generate-with-openssl-rand-hex-32-do-not-commit>``
+    and promises that copying it verbatim will fail loud at boot. But an
+    ``<...>`` placeholder is neither empty nor equal to the dev fallback, so the
+    old guard let it through — production would boot with a public-repo string
+    as the key, silently. Rejecting angle-bracket-wrapped values makes the
+    template's "placeholder → refuse-to-boot" promise actually true.
     """
     configured = os.environ.get("BEACON_SCHEDULER_INTERNAL_KEY", "")
     if not configured:
         return True
-    return configured == _DEV_FALLBACK_SCHEDULER_KEY
+    if configured == _DEV_FALLBACK_SCHEDULER_KEY:
+        return True
+    # Unfilled template placeholder (e.g. "<generate-with-openssl-rand-hex-32-…>").
+    stripped = configured.strip()
+    if stripped.startswith("<") and stripped.endswith(">"):
+        return True
+    return False
 
 
 def is_using_dev_fallback() -> bool:

@@ -115,6 +115,42 @@ def test_helper_false_for_real_key(monkeypatch):
     assert envelope_mod.is_using_dev_scheduler_key() is False
 
 
+def test_helper_true_for_unfilled_template_placeholder(monkeypatch):
+    """H2 (AX review): the app.env.example placeholder must trip the guard so
+    copying the template verbatim fails loud at boot (as the template promises),
+    instead of booting prod with a public-repo string as the key."""
+    monkeypatch.setenv(
+        "BEACON_SCHEDULER_INTERNAL_KEY",
+        "<generate-with-openssl-rand-hex-32-do-not-commit>",
+    )
+    assert envelope_mod.is_using_dev_scheduler_key() is True
+
+
+def test_helper_matches_shipped_app_env_example_placeholder(monkeypatch):
+    """Pin against the ACTUAL placeholder shipped in deploy/app.env.example, so
+    if the template value changes the guard is re-checked to still reject it."""
+    import re
+    from pathlib import Path
+    example = Path(__file__).resolve().parents[1] / "deploy" / "app.env.example"
+    text = example.read_text(encoding="utf-8")
+    m = re.search(r"^BEACON_SCHEDULER_INTERNAL_KEY=(.+)$", text, re.MULTILINE)
+    assert m, "app.env.example must declare BEACON_SCHEDULER_INTERNAL_KEY"
+    monkeypatch.setenv("BEACON_SCHEDULER_INTERNAL_KEY", m.group(1).strip())
+    assert envelope_mod.is_using_dev_scheduler_key() is True
+
+
+def test_startup_refuses_when_auth_enabled_and_key_is_template_placeholder(
+    monkeypatch, _restore_auth_flag
+):
+    monkeypatch.setenv(
+        "BEACON_SCHEDULER_INTERNAL_KEY",
+        "<generate-with-openssl-rand-hex-32-do-not-commit>",
+    )
+    app_module._auth_enabled = True
+    with pytest.raises(RuntimeError, match="BEACON_SCHEDULER_INTERNAL_KEY"):
+        _run_startup_guard()
+
+
 def test_envelope_and_scheduler_secrets_are_independent(monkeypatch):
     """Leaking/rotating one internal secret must not affect the other."""
     monkeypatch.setenv("BEACON_ENVELOPE_SECRET", "real-envelope-secret")
