@@ -16375,15 +16375,23 @@ def cmd_project_orphans():
     candidates = project_cleanup.detect_orphan_candidates(
         projects, current_project_id=current_pid or None,
     )
+    # ms-125 e-4095: name which signals are degraded on this scan so the human
+    # doesn't trust a phantom redundancy (in prod only test_named fires).
+    coverage = project_cleanup.assess_signal_coverage(projects)
 
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     if json_mode:
         print(json.dumps(
-            {"total_scanned": len(projects), "candidates": candidates},
+            {"total_scanned": len(projects), "candidates": candidates,
+             "signal_coverage": coverage},
             ensure_ascii=False,
         ))
         return
     print(project_cleanup.format_orphan_report(candidates, len(projects)))
+    note = project_cleanup.format_coverage_note(coverage)
+    if note:
+        print()
+        print(note)
 
 
 def _resolve_current_project_id_from_cloud_json() -> str:
@@ -16406,16 +16414,23 @@ def cmd_project_cleanup():
     so the real safety valve is a human confirmation checkpoint in the flow,
     not the server gate. The pattern mirrors ``BEACON_PR_MERGE_USER_OVERRIDE``:
 
-      * No confirm flag  → DRY-RUN. Print exactly what would be archived and
-        stop. Nothing is issued or archived.
-      * ``--confirm`` (BEACON_CLEANUP_CONFIRM=1) → for each candidate, mint a
-        T1 envelope authorizing ``project.archive`` (the calling user's token
-        is the human-signature proof) and archive it, carrying the signed
-        envelope in the ``X-Beacon-Envelope`` header. Raw API calls never
-        happen by hand.
+      * No confirm flag  → DRY-RUN. Print exactly what would be archived, the
+        signal-coverage note, and the ready-to-paste ``--confirm --ids <…>``
+        command. Nothing is issued or archived.
+      * ``--confirm --ids <a,b,…>`` (BEACON_CLEANUP_CONFIRM=1 +
+        BEACON_CLEANUP_CONFIRM_IDS) → archive ONLY the ids the dry-run printed
+        (ms-125 e-4095). For each, mint a T1 envelope authorizing
+        ``project.archive`` (the calling user's token is the human-signature
+        proof) and archive it, carrying the signed envelope in the
+        ``X-Beacon-Envelope`` header. Raw API calls never happen by hand.
 
-    ``--limit N`` caps the batch (safety: inspect a small first sweep before
-    the full run). ``BEACON_JSON=1`` emits a machine-readable result.
+    Binding the confirm to the reviewed ids (ms-125 e-4095) closes the hole
+    where the confirm step re-fetched + re-detected candidates: a project that
+    became a candidate *after* the dry-run would otherwise be archived without
+    ever having been shown to the human. ``--confirm`` without ``--ids`` now
+    fails closed. ``--limit N`` caps the batch (safety: inspect a small first
+    sweep before the full run). ``BEACON_JSON=1`` emits a machine-readable
+    result.
     """
     from auth import load_credentials
     creds = load_credentials()
@@ -16439,9 +16454,15 @@ def cmd_project_cleanup():
     candidates = project_cleanup.detect_orphan_candidates(
         projects, current_project_id=current_pid or None,
     )
+    coverage = project_cleanup.assess_signal_coverage(projects)
 
     confirm = os.environ.get("BEACON_CLEANUP_CONFIRM", "") == "1"
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    # ms-125 e-4095: the ids the dry-run showed, carried into --confirm so the
+    # archive is bound to the reviewed set (comma / whitespace separated).
+    confirm_ids_raw = (os.environ.get("BEACON_CLEANUP_CONFIRM_IDS", "") or "").strip()
+    confirm_ids = [s.strip() for s in confirm_ids_raw.replace(",", " ").split()
+                   if s.strip()]
     # ms-123 AX finding: fail-closed on a bad --limit. Previously a non-numeric
     # value fell to limit=0 → "no limit" → --confirm mass-archived ALL candidates.
     # An invalid value now errors; only an ABSENT limit means "no cap" (explicit).
@@ -16463,27 +16484,77 @@ def cmd_project_cleanup():
 
     # ---- DRY-RUN (default): show the plan, change nothing ----------------
     if not confirm:
+        plan_ids = [c["project_id"] for c in plan]
         if json_mode:
             print(json.dumps({
                 "mode": "dry-run", "total_scanned": len(projects),
-                "would_archive": plan,
+                "would_archive": plan, "confirm_ids": plan_ids,
+                "signal_coverage": coverage,
             }, ensure_ascii=False))
             return
         if not plan:
             print(project_cleanup.format_orphan_report(candidates, len(projects)))
+            note = project_cleanup.format_coverage_note(coverage)
+            if note:
+                print()
+                print(note)
             return
         print(project_cleanup.format_orphan_report(plan, len(projects)))
+        note = project_cleanup.format_coverage_note(coverage)
+        if note:
+            print()
+            print(note)
         print()
+        # ms-125 e-4095: the confirm run is bound to THESE ids. Emit them so the
+        # human archives exactly what they just reviewed — not a set recomputed
+        # later (which could sweep up a candidate that appeared in between).
         print(
             f"⚠ これは DRY-RUN です。上記 {len(plan)} 件はまだ archive していません。\n"
-            "  実際に archive するには、候補を目視で確認したうえで再実行してください:\n"
-            "    beacon project cleanup --confirm"
+            "  実際に archive するには、候補を目視で確認したうえで、以下をそのまま実行してください\n"
+            "  (この --ids は今表示した候補に束縛されます。後から新たに候補化した project は\n"
+            "   このコマンドでは archive されません):\n"
+            f"    beacon project cleanup --confirm --ids {','.join(plan_ids)}"
             + (f" --limit {limit}" if limit else "")
         )
         return
 
-    # ---- CONFIRMED: issue envelope + archive, one project at a time ------
-    results = {"archived": [], "failed": []}
+    # ---- CONFIRMED: bind to the reviewed --ids, then archive -------------
+    # ms-125 e-4095: a confirmed run MUST carry the ids the dry-run printed.
+    # Without them we'd re-archive a recomputed set — the exact hole where a
+    # project that became a candidate after the dry-run gets swept up unseen.
+    # Fail-closed: no --ids → stop and point back at the dry-run.
+    if not confirm_ids:
+        msg = ("Error: --confirm には --ids が必要です (ms-125 e-4095)。\n"
+               "  まず dry-run で候補を確認してください:\n"
+               "    beacon project cleanup\n"
+               "  出力末尾に表示される `--confirm --ids <…>` をそのまま実行すると、\n"
+               "  目視した候補だけが archive されます。")
+        if json_mode:
+            print(json.dumps({"mode": "confirmed", "error": "ids_required",
+                              "archived": [], "failed": []}, ensure_ascii=False))
+        else:
+            print(msg, file=sys.stderr)
+        sys.exit(1)
+
+    bound = project_cleanup.bind_confirmed_plan(
+        candidates, confirm_ids, limit=limit or None,
+    )
+    plan = bound["plan"]
+
+    # Surface what the binding refused / skipped, so a confirmed run is never
+    # silently narrower or wider than the human expects.
+    if not json_mode:
+        for pid in bound["skipped_missing"]:
+            print(f"  ⟳ skip {pid} — dry-run 時の候補が現在は候補でない "
+                  "(既 archive / owner 出現 等)。archive しません。")
+        for c in bound["unreviewed_new"]:
+            print(f"  ⛔ refuse {c['project_id']}  «{c['name']}» — dry-run 未提示の"
+                  "新規候補。再度 dry-run で確認してください。archive しません。")
+
+    results = {"archived": [], "failed": [],
+               "skipped_missing": bound["skipped_missing"],
+               "refused_unreviewed": [c["project_id"]
+                                      for c in bound["unreviewed_new"]]}
     for c in plan:
         pid = c["project_id"]
         try:
