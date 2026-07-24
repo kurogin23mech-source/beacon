@@ -2142,6 +2142,16 @@ def cmd_target_advance():
     if _te.is_terminal_phase(desc, new):
         print(f"  ※ '{new}' は最終フェーズです。完了は "
               f"beacon target close --class {kind} {target_id}")
+        # ms-119 e-4087: reaching a terminal phase is a completion claim for a
+        # data-defined target, same 節目 as a milestone going done — fire the
+        # 目的達成 + 思想 review-due so descriptor targets are reviewed too. One
+        # trigger file per target_id, so a later `target close` just overwrites
+        # it (no double-fire accumulation).
+        label = (rec.get("label") or rec.get("title") or "") if isinstance(rec, dict) else ""
+        _fire_review_due_trigger(
+            target_id, kind, old, new, target_title=label,
+            has_spec=_spec_exists_for_descriptor_target(target_id),
+            is_completion=True)
 
 
 def cmd_target_close():
@@ -2169,6 +2179,17 @@ def cmd_target_close():
     print(f"完了: [{target_id}] を done にしました")
     if reason:
         print(f"  reason: {reason}")
+    # ms-119 e-4087: closing a data-defined target is a completion claim — the
+    # same 節目 that fires 目的達成 + 思想 review-due for a milestone. Descriptor
+    # targets were previously invisible to the review spine; wire them in.
+    rec_closed = _te.find_target(data, desc, target_id)
+    label = (rec_closed.get("label") or rec_closed.get("title") or "") \
+        if isinstance(rec_closed, dict) else ""
+    prev_phase = _te.current_phase(rec_closed) if isinstance(rec_closed, dict) else ""
+    _fire_review_due_trigger(
+        target_id, kind, prev_phase or "open", "done", target_title=label,
+        has_spec=_spec_exists_for_descriptor_target(target_id),
+        is_completion=True)
 
 
 def cmd_target_instances():
@@ -11243,9 +11264,30 @@ def _spec_exists_for_op(op_id: str) -> bool:
     return _spec_doc_for_target(op_id, "operation") is not None
 
 
+def _spec_exists_for_descriptor_target(target_id: str) -> bool:
+    """True if a spec-scoped document is attached to a data-defined (descriptor)
+    target (ms-119 / e-4087).
+
+    Descriptor targets are not milestones/operations, so they don't carry the
+    ``milestone`` / ``operation`` doc field; a SPEC is linked via the generic
+    ``target`` field. This lets the 思想 (philosophy) review bind at a descriptor
+    target's completion when it has a written 原典, mirroring milestones."""
+    if not target_id:
+        return False
+    try:
+        docs = get_store().list_documents()
+    except Exception:
+        return False
+    for doc in docs:
+        if doc.get("scope") == "spec" and doc.get("target") == target_id:
+            return True
+    return False
+
+
 def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
                              new_state: str, *, target_title: str = "",
-                             has_spec: bool = False, gated: bool = False) -> None:
+                             has_spec: bool = False, gated: bool = False,
+                             is_completion: "Optional[bool]" = None) -> None:
     """Fire a 'review-due' trigger for a target lifecycle transition
     (ms-119 / e-3911 — the review firing spine).
 
@@ -11256,12 +11298,29 @@ def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
     the 思想 advisory (only when the target has a SPEC 原典). Empty bindings =
     no file written (routine / reversible transitions fire nothing).
 
+    ``is_completion`` (ms-119 / e-4087):
+      * ``None`` (default) — a BUILT-IN milestone / operation transition: whether
+        it is a completion claim is decided by the transition_approval truth
+        table (review_bindings_for_transition).
+      * ``True`` — a data-defined (descriptor) target reaching done / a terminal
+        phase. Its KIND is a descriptor class name the built-in truth table does
+        not know, but the 節目 is the same completion claim, so bind the reviews
+        directly (review_bindings_for_completion).
+      * ``False`` — a descriptor transition that is NOT a completion (early phase
+        advance): fire nothing.
+
     Advisory only — never blocks the transition. The blocking mechanism for
     目的達成 is the approval entry from e-3912, not this trigger.
     """
     import review_spine
-    bindings = review_spine.review_bindings_for_transition(
-        target_kind, old_state, new_state, has_spec=has_spec, gated=gated)
+    if is_completion is None:
+        bindings = review_spine.review_bindings_for_transition(
+            target_kind, old_state, new_state, has_spec=has_spec, gated=gated)
+    elif is_completion:
+        bindings = review_spine.review_bindings_for_completion(
+            has_spec=has_spec, gated=gated)
+    else:
+        bindings = []
     if not bindings:
         return
     triggers_dir = _get_triggers_dir()

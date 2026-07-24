@@ -365,10 +365,26 @@ def review_bindings_for_transition(target_kind, old_state, new_state, *,
     """
     if not _ta.is_attainment_transition(target_kind, old_state, new_state):
         return []
-    # Both 目的達成 and 思想 fire at the completion 節目 (ms-119 e-4005). They share
-    # the SPEC 原典 and the moment: 目的達成 = did we reach the goal (evidence for a
-    # human verdict); 思想 = did we honour the SPEC's spirit getting there
-    # (advisory). Neither is suppressed — the human wants both auto-fired at close.
+    return review_bindings_for_completion(has_spec=has_spec, gated=gated)
+
+
+def review_bindings_for_completion(*, has_spec=False, gated=False):
+    """The review bindings for a completion-claim 節目, independent of target
+    KIND (ms-119 / e-4087).
+
+    ``review_bindings_for_transition`` decides *whether* a built-in milestone /
+    operation transition is a completion claim (via the transition_approval
+    truth table) and then delegates here for *which* reviews bind. A
+    data-defined target (ms-122 記述子で定義した職種の対象) reaching done / a
+    terminal phase is the same completion claim — its KIND is a descriptor class
+    name the built-in truth table doesn't know, but the 節目 is identical — so it
+    calls this directly with ``has_spec`` resolved from its own SPEC lookup.
+
+    Both 目的達成 and 思想 fire at the completion 節目 (ms-119 e-4005). They share
+    the SPEC 原典 and the moment: 目的達成 = did we reach the goal (evidence for a
+    human verdict); 思想 = did we honour the SPEC's spirit getting there
+    (advisory). Neither is suppressed — the human wants both auto-fired at close.
+    """
     bindings = [{
         "review": REVIEW_ATTAINMENT,
         "blocking": False,
