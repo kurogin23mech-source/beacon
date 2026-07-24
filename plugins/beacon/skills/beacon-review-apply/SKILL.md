@@ -165,11 +165,15 @@ beacon milestone start <選んだms-id>
 
 session-start の trigger check で「新 MS 起票後 N 日経過しても親 MS が todo のまま放置されている」 ケースを検知する補助 trigger (= `meta-review-parent-stale`) も理想形だが、 本 PR では Skill 改修を優先する。 trigger 側は別 task で扱う (= e-1892 split candidate、 完了報告で明示)。
 
-## Step 5: レビューMS を observe 化
+## Step 5: レビューMS を observe 化（目的達成ゲート経由）
+
+`observing` は「基本目的は達成済み・運用に回してよい」という**完了主張**であり、目的達成 / 思想レビューのゲート対象 (ms-119)。ここは完了主張として正当（UC 全レビューを完遂した = そのレビュー MS の目的を果たした）なので、bare observe ではなく `--review` でゲートを通す。AI セッションの直接 observe は構造的に拒否される (e-4008)。
 
 ```bash
-beacon milestone observe <レビューMS-id> --reason "UC全レビュー完了、メタレビュー実施、MS再分割を適用済み。タスク本体は新MS群へ移動した。レビューMS本体は方法論の参照記録として残置"
+beacon milestone observe <レビューMS-id> --review --reason "UC全レビュー完了、メタレビュー実施、MS再分割を適用済み。タスク本体は新MS群へ移動した。レビューMS本体は方法論の参照記録として残置"
 ```
+
+これは即座に observing へ遷移させず、**目的達成レビュー依頼（人間承認待ち）** を作成する。承認されると observing に遷移する。承認前は `in_progress` のまま。
 
 ## Step 6: 完了報告
 
@@ -182,7 +186,7 @@ MS再分割完了。
   ...
 
 旧レビューMS:
-  <レビューMS-id> [observing]
+  <レビューMS-id> [observe を目的達成ゲートに依頼済み — 人間承認で observing に遷移]
   配下タスクは新MS群へ移動済み
 
 次の実装フェーズは、優先度順に新MSから着手することをおすすめします:

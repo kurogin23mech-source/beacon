@@ -326,10 +326,19 @@ def test_milestone_close_and_operation_close_trigger_review(beacon_project_dir):
     assert "Target close" in _run(beacon_project_dir, "beacon operation close op-3").stdout
 
 
+def test_milestone_observe_triggers_review(beacon_project_dir):
+    # ms-119: observing is a completion claim (運用改善フェーズ = 基本目的達成が
+    # 前提), so the wake branch must fire the review-run 節目 like done/close.
+    result = _run(beacon_project_dir, "beacon milestone observe ms-1 --reason x")
+    assert "Target close command detected" in result.stdout
+    assert "/beacon-review-run" in result.stdout
+
+
 def test_milestone_doneish_does_not_falsematch(beacon_project_dir):
-    # word-anchored: `done`/`close` must be a whole token, not a prefix.
+    # word-anchored: `done`/`close`/`observe` must be a whole token, not a prefix.
     result = _run(beacon_project_dir, "beacon milestone doneish ms-1")
     assert "Target close" not in result.stdout
+    assert "Target close" not in _run(beacon_project_dir, "beacon milestone observedish ms-1").stdout
 
 
 def test_milestone_update_is_routine_no_wake(beacon_project_dir):
