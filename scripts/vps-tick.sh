@@ -36,11 +36,17 @@ main() {
 
   # -fsS: 非 2xx で失敗し (systemd unit を failed に)、進捗バーは出さずエラーは出す。
   # レスポンス body (tick report JSON) は journal に残して観測できるようにする。
+  # PR #491 review 2b: the scheduler key is a SECRET, so it must NOT go on the
+  # curl argv (`-H "X-...: $KEY"` would expose it in /proc/<pid>/cmdline to any
+  # local user for the life of the request). Pass it through a curl --config
+  # file supplied via process substitution instead: the value travels through
+  # an anonymous pipe (/dev/fd/N), and `printf` is a shell builtin so the key
+  # never appears in any process's argv. No temp file → nothing to clean up.
   local body http_code
   body=$(curl -fsS \
     --max-time "$TIMEOUT" \
     -X POST \
-    -H "X-Beacon-Scheduler-Key: ${KEY}" \
+    --config <(printf 'header = "X-Beacon-Scheduler-Key: %s"\n' "$KEY") \
     -H "Content-Type: application/json" \
     -w $'\n%{http_code}' \
     -d '{}' \
