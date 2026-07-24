@@ -128,3 +128,52 @@ def test_dry_run_emits_paste_ready_ids(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "--confirm --ids phase4-test-a" in out
     assert "DRY-RUN" in out
+
+
+def test_ids_without_confirm_fails_closed(monkeypatch, capsys):
+    # ms-125 review (AX high): --ids on a dry-run is not a silent no-op.
+    projects = [{"project_id": "phase4-test-a", "name": "phase4-test",
+                 "owner": "u", "archived": False}]
+    stub = _wire(monkeypatch, projects)
+    _reset_env(monkeypatch)
+    monkeypatch.setenv("BEACON_CLEANUP_CONFIRM_IDS", "phase4-test-a")  # no --confirm
+    with pytest.raises(SystemExit) as ei:
+        commands.cmd_project_cleanup()
+    assert ei.value.code == 1
+    assert stub.archived == []
+    assert "ids" in capsys.readouterr().err.lower()
+
+
+def test_confirm_limit_reports_dropped_ids(monkeypatch, capsys):
+    # ms-125 review (AX): ids cut by --limit are reported, not silently skipped.
+    projects = [
+        {"project_id": f"phase4-test-{i}", "name": "phase4-test",
+         "owner": "u", "archived": False} for i in ("a", "b", "c")
+    ]
+    stub = _wire(monkeypatch, projects)
+    _reset_env(monkeypatch)
+    monkeypatch.setenv("BEACON_CLEANUP_CONFIRM", "1")
+    monkeypatch.setenv("BEACON_CLEANUP_CONFIRM_IDS",
+                       "phase4-test-a,phase4-test-b,phase4-test-c")
+    monkeypatch.setenv("BEACON_CLEANUP_LIMIT", "1")
+    monkeypatch.setenv("BEACON_JSON", "1")
+    commands.cmd_project_cleanup()
+    out = json.loads(capsys.readouterr().out)
+    assert stub.archived == ["phase4-test-a"]
+    assert set(out["dropped_by_limit"]) == {"phase4-test-b", "phase4-test-c"}
+
+
+def test_ids_required_json_error_carries_hint(monkeypatch, capsys):
+    # ms-125 review (AX low): the JSON error tells an automated caller HOW to
+    # recover, not just that ids are missing.
+    projects = [{"project_id": "phase4-test-a", "name": "phase4-test",
+                 "owner": "u", "archived": False}]
+    _wire(monkeypatch, projects)
+    _reset_env(monkeypatch)
+    monkeypatch.setenv("BEACON_CLEANUP_CONFIRM", "1")  # confirm but no ids
+    monkeypatch.setenv("BEACON_JSON", "1")
+    with pytest.raises(SystemExit):
+        commands.cmd_project_cleanup()
+    out = json.loads(capsys.readouterr().out)
+    assert out["error"] == "ids_required"
+    assert "hint" in out and out["hint"]

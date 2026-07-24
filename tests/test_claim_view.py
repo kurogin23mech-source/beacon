@@ -288,6 +288,42 @@ class TestFocusLiveSource:
         assert len(v["live"]) == 1
         assert v["live"][0]["source"] == "occupation"
 
+    def test_live_row_uses_source_neutral_as_of(self):
+        # ms-125 review: the live-row timestamp is `as_of` (not `claimed_at`),
+        # honest for both sources. occupation → claim time, focus → heartbeat.
+        ms = _ms(occupation=_occ("sv-o"))
+        v = claim_view.build_claim_view(
+            ms, live_session_ids={"sv-o", "sv-f"},
+            focus_sessions=[_focus("sv-f")])
+        for e in v["live"]:
+            assert "as_of" in e and "claimed_at" not in e
+        occ = [e for e in v["live"] if e["source"] == "occupation"][0]
+        foc = [e for e in v["live"] if e["source"] == "focus"][0]
+        assert occ["as_of"] == "2026-07-23T00:00:00Z"   # claim time
+        assert foc["as_of"] == "2026-07-24T00:00:00Z"   # heartbeat time
+
+    def test_focus_healthy_cross_checked_not_stamped_on_trust(self):
+        # ms-125 review (AX/maint): a focus session that raced OUT of the
+        # verified healthy set is NOT stamped live on trust.
+        v = claim_view.build_claim_view(
+            _ms(), live_session_ids={"sv-other"},  # sv-f NOT healthy
+            focus_sessions=[_focus("sv-f")])
+        foc = [e for e in v["live"] if e["source"] == "focus"][0]
+        assert foc["healthy"] is False
+        assert v["flags"]["live"] is False  # does not count
+
+    def test_dedup_same_session_consistent_healthy(self):
+        # Same session holds the occupation claim AND heartbeats focus: one row,
+        # and because both sources read the SAME healthy set, the kept row's
+        # liveness is consistent (no live fact lost, no phantom double-count).
+        ms = _ms(occupation=_occ("sv-x"))
+        v = claim_view.build_claim_view(
+            ms, live_session_ids={"sv-x"}, focus_sessions=[_focus("sv-x")])
+        assert len(v["live"]) == 1
+        assert v["live"][0]["source"] == "occupation"
+        assert v["live"][0]["healthy"] is True
+        assert v["flags"]["live"] is True
+
 
 # ms-112 AX finding: a nonexistent / non-walked target must not read as unclaimed.
 

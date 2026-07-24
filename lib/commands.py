@@ -16463,6 +16463,30 @@ def cmd_project_cleanup():
     confirm_ids_raw = (os.environ.get("BEACON_CLEANUP_CONFIRM_IDS", "") or "").strip()
     confirm_ids = [s.strip() for s in confirm_ids_raw.replace(",", " ").split()
                    if s.strip()]
+
+    # ms-125 review (AX high): --ids only means something WITH --confirm. Without
+    # it the dry-run ignored --ids entirely — a silent no-op that reads as "narrowed
+    # to these ids" when it actually shows every candidate. Fail-closed instead.
+    if confirm_ids and not confirm:
+        msg = ("Error: --ids は --confirm と併用する時だけ有効です (ms-125 e-4095)。\n"
+               "  dry-run (確認表示) は候補を絞り込めません。--ids を外して\n"
+               "  `beacon project cleanup` で全候補を確認するか、`--confirm --ids <…>` で\n"
+               "  実行してください。")
+        if json_mode:
+            print(json.dumps({"mode": "dry-run", "error": "ids_without_confirm",
+                              "hint": "run `beacon project cleanup` (no --ids) for the dry-run"},
+                             ensure_ascii=False))
+        else:
+            print(msg, file=sys.stderr)
+        sys.exit(1)
+
+    def _emit_coverage_note():
+        """ms-125 review: one place for the 'print a blank line + coverage note
+        if any signal is degraded' block (was copy-pasted at 3 call sites)."""
+        note = project_cleanup.format_coverage_note(coverage)
+        if note:
+            print()
+            print(note)
     # ms-123 AX finding: fail-closed on a bad --limit. Previously a non-numeric
     # value fell to limit=0 → "no limit" → --confirm mass-archived ALL candidates.
     # An invalid value now errors; only an ABSENT limit means "no cap" (explicit).
@@ -16494,16 +16518,10 @@ def cmd_project_cleanup():
             return
         if not plan:
             print(project_cleanup.format_orphan_report(candidates, len(projects)))
-            note = project_cleanup.format_coverage_note(coverage)
-            if note:
-                print()
-                print(note)
+            _emit_coverage_note()
             return
         print(project_cleanup.format_orphan_report(plan, len(projects)))
-        note = project_cleanup.format_coverage_note(coverage)
-        if note:
-            print()
-            print(note)
+        _emit_coverage_note()
         print()
         # ms-125 e-4095: the confirm run is bound to THESE ids. Emit them so the
         # human archives exactly what they just reviewed — not a set recomputed
@@ -16530,7 +16548,11 @@ def cmd_project_cleanup():
                "  出力末尾に表示される `--confirm --ids <…>` をそのまま実行すると、\n"
                "  目視した候補だけが archive されます。")
         if json_mode:
+            # ms-125 review (AX low): carry a recovery hint in the JSON error so
+            # an automated caller learns HOW to obtain the ids, not just that
+            # they're missing (the dry-run JSON exposes them as `confirm_ids`).
             print(json.dumps({"mode": "confirmed", "error": "ids_required",
+                              "hint": "run `beacon project cleanup` (dry-run) and use its confirm_ids",
                               "archived": [], "failed": []}, ensure_ascii=False))
         else:
             print(msg, file=sys.stderr)
@@ -16541,8 +16563,10 @@ def cmd_project_cleanup():
     )
     plan = bound["plan"]
 
-    # Surface what the binding refused / skipped, so a confirmed run is never
-    # silently narrower or wider than the human expects.
+    # Surface what the binding refused / skipped / capped, so a confirmed run is
+    # never silently narrower or wider than the human expects (ms-125 review: a
+    # limit-dropped id was previously in no bucket, so "no error" read as "all
+    # archived").
     if not json_mode:
         for pid in bound["skipped_missing"]:
             print(f"  ⟳ skip {pid} — dry-run 時の候補が現在は候補でない "
@@ -16550,11 +16574,15 @@ def cmd_project_cleanup():
         for c in bound["unreviewed_new"]:
             print(f"  ⛔ refuse {c['project_id']}  «{c['name']}» — dry-run 未提示の"
                   "新規候補。再度 dry-run で確認してください。archive しません。")
+        for pid in bound["dropped_by_limit"]:
+            print(f"  ✂ limit 超過 {pid} — --limit {limit} を超えたため今回は "
+                  "archive しません (残りは再実行してください)。")
 
     results = {"archived": [], "failed": [],
                "skipped_missing": bound["skipped_missing"],
                "refused_unreviewed": [c["project_id"]
-                                      for c in bound["unreviewed_new"]]}
+                                      for c in bound["unreviewed_new"]],
+               "dropped_by_limit": bound["dropped_by_limit"]}
     for c in plan:
         pid = c["project_id"]
         try:
@@ -22960,35 +22988,15 @@ def _resolve_healthy_session_ids():
     return ids
 
 
-def _resolve_focus_directory(live_ids):
-    """Return ``target_id -> [ {session_id, machine, agent, focused_at}, … ]``
-    for the live sessions the bus directory reports as focused on each target,
-    or ``None`` when the directory cannot be consulted (ms-125 e-4094).
-
-    This is the second, independent LIVE source the claim view consumes (the
-    first being the occupation claim on the target record). Each live session
-    heartbeats its ``focus.milestone`` into the directory; we invert that into a
-    per-target map so ``claim_view`` can flag "someone is focused on this target
-    now" even when the one-time occupation claim has gone stale.
-
-    ``live_ids is None`` means liveness could not be verified (local mode /
-    directory unreachable) — there is no directory to read a focus from, so we
-    return ``None`` and the claim view falls back to occupation-only. Any failure
-    (no cloud, auth error, network) also collapses to ``None`` so the command
-    keeps working; the focus source is a bonus, never a hard dependency.
+def _invert_focus_directory(sessions):
+    """Pure: invert directory session records into ``target_id -> [ {session_id,
+    machine, agent, focused_at}, … ]`` keyed by each session's focus milestone
+    (ms-125 e-4094). No I/O — split out from ``_resolve_focus_directory`` so the
+    inversion (focus.milestone dig-out, actor shaping) is directly unit-testable
+    and its bugs surface as exceptions instead of being swallowed by the
+    cloud-call ``except`` (ms-125 review: a blanket except over both the call and
+    the transform hid transform bugs behind a silent occupation-only fallback).
     """
-    if live_ids is None:
-        return None
-    try:
-        client, config = _get_api_client()
-        project_id = _resolve_bus_project_id(config)
-        if not project_id:
-            return None
-        sessions = client.list_sessions(
-            project_id, live_only=True, healthy_only=True, since_minutes=5)
-    except Exception:
-        return None
-
     directory: dict = {}
     for s in sessions or ():
         if not isinstance(s, dict):
@@ -23009,6 +23017,39 @@ def _resolve_focus_directory(live_ids):
             "focused_at": s.get("last_heartbeat_at") or s.get("last_active") or "",
         })
     return directory
+
+
+def _resolve_focus_directory(live_ids):
+    """Return ``target_id -> [ {session_id, machine, agent, focused_at}, … ]``
+    for the live sessions the bus directory reports as focused on each target,
+    or ``None`` when the directory cannot be consulted (ms-125 e-4094).
+
+    This is the second, independent LIVE source the claim view consumes (the
+    first being the occupation claim on the target record). Each live session
+    heartbeats its ``focus.milestone`` into the directory; we invert that into a
+    per-target map so ``claim_view`` can flag "someone is focused on this target
+    now" even when the one-time occupation claim has gone stale.
+
+    ``live_ids is None`` means liveness could not be verified (local mode /
+    directory unreachable) — there is no directory to read a focus from, so we
+    return ``None`` and the claim view falls back to occupation-only. A failure
+    of the cloud CALL (no cloud, auth error, network) also collapses to ``None``
+    so the command keeps working; the focus source is a bonus, never a hard
+    dependency. The ``except`` wraps ONLY the cloud call — the pure inversion is
+    outside it so a transform bug is not masked as "focus unavailable".
+    """
+    if live_ids is None:
+        return None
+    try:
+        client, config = _get_api_client()
+        project_id = _resolve_bus_project_id(config)
+        if not project_id:
+            return None
+        sessions = client.list_sessions(
+            project_id, live_only=True, healthy_only=True, since_minutes=5)
+    except Exception:
+        return None
+    return _invert_focus_directory(sessions)
 
 
 def cmd_claim_view():
@@ -23082,6 +23123,22 @@ def cmd_claim_view():
         my_identities=my_identities,
     )
 
+    # ms-125 review (AX): disclose whether the focus source was actually
+    # consulted, so a transient focus outage reads as "focus unavailable" instead
+    # of silently collapsing to "nobody live" (the exact mis-read e-4094 set out
+    # to fix). Mirrors cleanup's signal_coverage disclosure. Additive per-view
+    # key, so existing consumers of the view map are unaffected.
+    if live_ids is None:
+        focus_status = "unverified"   # local mode: no directory to read focus
+    elif focus_directory is None:
+        focus_status = "unavailable"  # liveness verified but focus fetch failed
+    else:
+        focus_status = "checked"
+    for _v in views.values():
+        _v["focus_source"] = focus_status
+    _focus_note = ("  ※ focus source 取得不可 — 別セッションの focus 作業を取りこぼす"
+                   "可能性 (occupation のみで判定)") if focus_status == "unavailable" else ""
+
     if ti:
         view = views.get(ti)
         if view is None:
@@ -23098,6 +23155,7 @@ def cmd_claim_view():
                 my_identities=my_identities,
                 exists=False,
             )
+            view["focus_source"] = focus_status
         if json_mode:
             print(json.dumps(view, ensure_ascii=False))
             return
@@ -23110,6 +23168,8 @@ def cmd_claim_view():
                   "対象外)。unclaimed とは扱いません。")
         else:
             print(f"  {line}" if line else "  (未 claim — 誰も作業中でなく担当も未設定)")
+        if _focus_note:
+            print(_focus_note)
         if live_ids is None:
             print("  ※ liveness 未確認 (local mode / directory 不通) — LIVE claim は"
                   "健全性未検証で表示")
@@ -23132,6 +23192,8 @@ def cmd_claim_view():
         shown += 1
     if shown == 0:
         print("(claim 済みの target はありません — 全 target が未 claim)")
+    if _focus_note:
+        print(_focus_note.lstrip())
     if live_ids is None:
         print("※ liveness 未確認 (local mode / directory 不通)")
 

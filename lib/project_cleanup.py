@@ -321,6 +321,11 @@ def bind_confirmed_plan(
       * ``unreviewed_new``  — projects that are candidates now but were NOT in
                               the confirmed set. Refused: they must go through a
                               fresh dry-run before they can be archived.
+      * ``dropped_by_limit``— confirmed candidates that ``limit`` cut from the
+                              plan. Reported (never silently narrower than the
+                              reviewed set) so the caller can surface "N of your
+                              ids were NOT archived this run" instead of letting
+                              "no error" read as "all archived" (ms-125 review).
 
     Pure: no I/O, no mutation of inputs. ``limit`` caps only ``plan`` (same
     contract as ``build_archive_plan``: None / non-positive = no cap).
@@ -329,9 +334,13 @@ def bind_confirmed_plan(
     by_id = {c.get("project_id", ""): c for c in candidates}
     candidate_ids = set(by_id)
 
-    plan = [c for c in candidates if c.get("project_id", "") in confirmed]
+    matched = [c for c in candidates if c.get("project_id", "") in confirmed]
     if isinstance(limit, int) and limit > 0:
-        plan = plan[:limit]
+        plan = matched[:limit]
+        dropped_by_limit = [c.get("project_id", "") for c in matched[limit:]]
+    else:
+        plan = matched
+        dropped_by_limit = []
 
     skipped_missing = sorted(confirmed - candidate_ids)
     unreviewed_new = [c for c in candidates
@@ -341,4 +350,5 @@ def bind_confirmed_plan(
         "plan": plan,
         "skipped_missing": skipped_missing,
         "unreviewed_new": unreviewed_new,
+        "dropped_by_limit": dropped_by_limit,
     }

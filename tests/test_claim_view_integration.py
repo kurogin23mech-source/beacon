@@ -295,3 +295,61 @@ class TestCmdClaimViewIOShell:
         view = json.loads(capsys.readouterr().out)
         assert view["flags"]["live"] is True
         assert view["live"][0]["source"] == "focus"
+
+    def test_focus_source_status_disclosed(self, monkeypatch, capsys):
+        # ms-125 review (AX): when liveness is verified but the focus source
+        # could NOT be fetched, the view discloses focus_source=unavailable
+        # instead of silently reading occupation-only.
+        fixture = {"name": "smoke", "profession": "dev",
+                   "milestones": [{"id": "ms-1", "title": "Foo"}]}
+        commands = self._load_commands(
+            monkeypatch, fixture, live_ids={"sv-x"}, focus_directory=None)
+        monkeypatch.setenv("BEACON_JSON", "1")
+        monkeypatch.delenv("BEACON_CLAIM_TARGET_ID", raising=False)
+        monkeypatch.delenv("BEACON_CLAIM_TARGET_KIND", raising=False)
+        commands.cmd_claim_view()
+        views = json.loads(capsys.readouterr().out)
+        assert views["ms-1"]["focus_source"] == "unavailable"
+
+
+class TestInvertFocusDirectory:
+    """ms-125 review (maint): the directory→per-target inversion is a pure
+    function, unit-tested directly (not hidden behind a stubbed cloud call)."""
+
+    def _load(self):
+        sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
+        import commands
+        return commands
+
+    def test_inverts_by_focus_milestone(self):
+        commands = self._load()
+        sessions = [
+            {"session_id": "sv-a", "focus": {"milestone": {"id": "ms-1"}},
+             "actor": {"machine": "mac", "agent": "claude"},
+             "last_heartbeat_at": "2026-07-24T00:00:00Z"},
+            {"session_id": "sv-b", "focus": {"milestone": {"id": "ms-1"}},
+             "actor": {"machine": "win", "agent": "codex"},
+             "last_heartbeat_at": "2026-07-24T00:01:00Z"},
+        ]
+        out = commands._invert_focus_directory(sessions)
+        assert set(out) == {"ms-1"}
+        assert {e["session_id"] for e in out["ms-1"]} == {"sv-a", "sv-b"}
+        assert out["ms-1"][0]["machine"] == "mac"
+
+    def test_skips_sessions_without_focus_or_sid(self):
+        commands = self._load()
+        sessions = [
+            {"session_id": "sv-a"},                       # no focus
+            {"focus": {"milestone": {"id": "ms-1"}}},     # no session_id
+            {"session_id": "sv-c", "focus": {}},          # empty focus
+            None,                                          # malformed
+        ]
+        assert commands._invert_focus_directory(sessions) == {}
+
+    def test_falls_back_to_last_active_for_timestamp(self):
+        commands = self._load()
+        sessions = [{"session_id": "sv-a",
+                     "focus": {"milestone": {"id": "ms-2"}},
+                     "last_active": "2026-07-24T09:00:00Z"}]
+        out = commands._invert_focus_directory(sessions)
+        assert out["ms-2"][0]["focused_at"] == "2026-07-24T09:00:00Z"

@@ -267,6 +267,18 @@ class TestBindConfirmedPlan(unittest.TestCase):
         out = pc.bind_confirmed_plan(cands, ["a", "b", "c", "d"], limit=2)
         self.assertEqual(["a", "b"], [c["project_id"] for c in out["plan"]])
 
+    def test_limit_dropped_ids_are_reported(self):
+        # ms-125 review: ids cut by --limit must not vanish silently — they land
+        # in dropped_by_limit so the caller can say "N NOT archived this run".
+        cands = self._cands("a", "b", "c", "d")
+        out = pc.bind_confirmed_plan(cands, ["a", "b", "c", "d"], limit=2)
+        self.assertEqual(["c", "d"], out["dropped_by_limit"])
+
+    def test_no_limit_drops_nothing(self):
+        cands = self._cands("a", "b")
+        out = pc.bind_confirmed_plan(cands, ["a", "b"])
+        self.assertEqual([], out["dropped_by_limit"])
+
     def test_empty_confirmed_archives_nothing(self):
         cands = self._cands("a", "b")
         out = pc.bind_confirmed_plan(cands, [])

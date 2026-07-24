@@ -24,9 +24,10 @@ Two layers (SPEC 設計方針 2):
          each session's ``focus.milestone`` heartbeat, refreshed every cadence).
          This catches the case the occupation claim misses: a *different* live
          session working the target, or the claiming session having died while
-         another picked the work up. A focus entry only reaches here after the
-         I/O shell has already liveness-filtered the directory, so it always
-         counts as live (``healthy=True``).
+         another picked the work up. A focus entry's ``healthy`` is cross-checked
+         against the SAME verified healthy set as occupation (ms-125 review) —
+         the two sources can never disagree on what "live" means, and a focus
+         session that raced out of the healthy set is not stamped live on trust.
 
     A claim can go stale (the session died without releasing), so when the caller
     supplies the set of currently-healthy session ids (from the bus directory) we
@@ -149,7 +150,9 @@ def build_claim_view(
         "target_kind": str,          # milestone / opportunity / account / ...
         "label":       str,
         "live": [                    # LIVE session layer (occupation + focus)
-          {"session_id", "machine", "agent", "claimed_at",
+          {"session_id", "machine", "agent",
+           "as_of",                  # source-neutral: occupation=claim time,
+                                     # focus=last-heartbeat time (read via source)
            "source": "occupation" | "focus",
            "healthy": bool | None, "is_me": bool},
         ],
@@ -179,50 +182,60 @@ def build_claim_view(
     me_sid = (my_session_id or "").strip()
     me_idents = _norm_identities(my_identities)
 
+    # Liveness of a claiming session id, code-derived from the verified healthy
+    # set — NOT asserted by the caller. ``verified`` False (local / directory
+    # unreachable) → None (assume live, non-blocking, surface a warning). A live
+    # entry "counts" (someone is working now) when this is not False.
+    def _healthy(sid: str):
+        return (sid in healthy_set) if verified else None
+
     # --- LIVE layer: two independent sources (ms-125 e-4094). --------------
     # Source 1 — the occupation claim on the target record, liveness-checked.
+    # ``as_of`` is a source-neutral timestamp (ms-125 review): for occupation it
+    # is the one-time claim time; for focus it is the last-heartbeat time. The
+    # meaning is read off ``source``, so no name promises a semantics it lacks.
     live: list[dict] = []
-    seen_sids: set[str] = set()
+    by_sid: dict[str, int] = {}  # sid -> index in `live`, for cross-source dedup
     occ = target.get("occupation")
     if isinstance(occ, dict) and occ.get("session_id"):
         sid = occ.get("session_id") or ""
-        healthy = (sid in healthy_set) if verified else None
         live.append({
             "session_id": sid,
             "machine": occ.get("machine") or "",
             "agent": occ.get("agent") or "",
-            "claimed_at": occ.get("claimed_at") or "",
+            "as_of": occ.get("claimed_at") or "",
             "source": "occupation",
-            "healthy": healthy,
+            "healthy": _healthy(sid),
             "is_me": bool(me_sid) and sid == me_sid,
         })
-        seen_sids.add(sid)
+        by_sid[sid] = len(live) - 1
 
     # Source 2 — bus-directory focus: sessions the directory reports as focused
-    # on THIS target right now. Already liveness-filtered by the I/O shell, so
-    # each counts as live (healthy=True). This is the source that makes a stale
-    # occupation claim non-fatal: a different live session, or a picked-up-after-
-    # death session, still surfaces as "someone working now". De-duplicated
-    # against the occupation source so one session never yields two live rows.
+    # on THIS target right now. Liveness is cross-checked against the SAME healthy
+    # set as occupation (``_healthy``) — NOT stamped True on trust — so the two
+    # sources can never disagree on what "live" means, and a focus session that
+    # raced out of the healthy set is not counted (ms-125 review). This is the
+    # source that makes a stale occupation claim non-fatal: a *different* live
+    # session, or a picked-up-after-death session, still surfaces as "someone
+    # working now". A session already present via occupation is skipped (same sid,
+    # same ``_healthy`` verdict → nothing new to add, no live fact lost).
     for fs in focus_sessions or ():
         if not isinstance(fs, dict):
             continue
         sid = (fs.get("session_id") or "").strip()
-        if not sid or sid in seen_sids:
+        if not sid or sid in by_sid:
             continue
         live.append({
             "session_id": sid,
             "machine": fs.get("machine") or "",
             "agent": fs.get("agent") or "",
-            "claimed_at": fs.get("focused_at") or "",
+            "as_of": fs.get("focused_at") or "",
             "source": "focus",
-            "healthy": True,
+            "healthy": _healthy(sid),
             "is_me": bool(me_sid) and sid == me_sid,
         })
-        seen_sids.add(sid)
+        by_sid[sid] = len(live) - 1
 
-    # A live entry "counts" (someone is working now) when it is healthy, or
-    # when we could not verify (healthy is None → assume live, non-blocking).
     def _counts(entry: dict) -> bool:
         return entry["healthy"] is not False
 
