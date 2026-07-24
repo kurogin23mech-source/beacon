@@ -2166,8 +2166,138 @@ def cmd_target_instances():
         return
     for r in rows:
         icon = "●" if r["status"] == work_model.DONE_STATUS else "○"
-        phase = f" [{r['phase']}]" if r["phase"] else ""
-        print(f"  {icon} [{r['id']}] {r['label']}{phase} — {r['status']}")
+        detail = r.get("detail", {})
+        phase = f" [{detail.get('phase')}]" if detail.get("phase") else ""
+        counts = ""
+        if r.get("work_items_total"):
+            counts = f" 活動 {r.get('work_items_done', 0)}/{r['work_items_total']}"
+        ball = detail.get("who_has_the_ball")
+        ball_str = f" ball:{ball}" if ball else ""
+        print(f"  {icon} [{r['id']}] {r['label']}{phase}{counts}{ball_str} — "
+              f"{r['status']}")
+        if detail.get("next_move"):
+            print(f"      次の一手: {detail['next_move']}")
+
+
+# ---------------------------------------------------------------------------
+# Thick-frame verbs on a data-defined target (ms-124 e-4089): WorkItems,
+# Evidence, ball. These let a descriptor target carry the same cognitive
+# primitives (units of doing / records of what happened / whose turn) a
+# milestone or opportunity does, instead of being a bare phase machine.
+# ---------------------------------------------------------------------------
+
+def cmd_target_work_item():
+    """Add / complete / list a WorkItem on a data-defined target (e-4089).
+
+    beacon target work-item add   --class <kind> <target-id> --desc <text>
+    beacon target work-item done  --class <kind> <target-id> <item-id> [--reason <text>]
+    beacon target work-item list  --class <kind> <target-id> [--json]
+    """
+    action = os.environ.get("BEACON_WI_ACTION", "").strip()
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    item_id = os.environ.get("BEACON_WI_ITEM_ID", "").strip()
+    desc_text = os.environ.get("BEACON_WI_DESC", "").strip()
+    reason = os.environ.get("BEACON_REASON", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not target_id:
+        print("Usage: beacon target work-item <add|done|list> --class <kind> "
+              "<target-id> ...", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    try:
+        if action == "add":
+            item = _te.add_work_item(data, desc, target_id, desc_text,
+                                     actor=_actor_str())
+            save_project(data, op={"op": "target_work_item_add", "kind": kind,
+                                   "target_id": target_id, "item_id": item["id"]})
+            print(f"WorkItem 追加: [{item['id']}] {desc_text}")
+        elif action == "done":
+            item = _te.complete_work_item(data, desc, target_id, item_id,
+                                          actor=_actor_str(), reason=reason)
+            save_project(data, op={"op": "target_work_item_done", "kind": kind,
+                                   "target_id": target_id, "item_id": item_id})
+            print(f"WorkItem 完了: [{item_id}]")
+        elif action == "list":
+            rec = _te.find_target(data, desc, target_id)
+            if rec is None:
+                print(f"Error: target が見つかりません: {target_id}",
+                      file=sys.stderr)
+                sys.exit(1)
+            items = _te.list_work_items(rec)
+            if json_mode:
+                print(json.dumps(items, ensure_ascii=False))
+                return
+            if not items:
+                print(f"({target_id} に WorkItem はまだありません)")
+                return
+            for it in items:
+                icon = "●" if work_model.is_done(it) else "○"
+                print(f"  {icon} [{it.get('id')}] {it.get('description', '')}")
+        else:
+            print("Usage: beacon target work-item <add|done|list> ...",
+                  file=sys.stderr)
+            sys.exit(1)
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_target_evidence():
+    """Attach an Evidence record to a data-defined target (e-4089).
+
+    beacon target evidence --class <kind> <target-id> [--summary <text>]
+                           [--for <work-item-id>]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    summary = os.environ.get("BEACON_EV_SUMMARY", "").strip()
+    linked_id = os.environ.get("BEACON_EV_FOR", "").strip()
+    if not target_id:
+        print("Usage: beacon target evidence --class <kind> <target-id> "
+              "[--summary <text>] [--for <work-item-id>]", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    try:
+        ev = _te.add_evidence(data, desc, target_id, summary=summary,
+                              linked_id=linked_id, actor=_actor_str())
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_evidence_add", "kind": kind,
+                           "target_id": target_id, "evidence_id": ev["id"]})
+    link = f" → {linked_id}" if linked_id else ""
+    print(f"Evidence 追加: [{ev['id']}]{link}")
+
+
+def cmd_target_ball():
+    """Set whose court a data-defined target's next move is in (e-4089).
+
+    beacon target ball --class <kind> <target-id> <self|counterpart|none>
+                       [--reason <text>]
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    ball = os.environ.get("BEACON_BALL", "").strip()
+    reason = os.environ.get("BEACON_REASON", "").strip()
+    if not target_id or not ball:
+        print("Usage: beacon target ball --class <kind> <target-id> "
+              "<self|counterpart|none> [--reason <text>]", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    try:
+        rec = _te.set_ball(data, desc, target_id, ball, actor=_actor_str(),
+                           reason=reason)
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_ball", "kind": kind,
+                           "target_id": target_id})
+    now = rec.get("who_has_the_ball") or "none"
+    print(f"ball 更新: [{target_id}] → {now}")
 
 
 # Default command groups probed by the AX full-surface snapshot. These are
@@ -24738,6 +24868,9 @@ if __name__ == "__main__":
         "target_advance": cmd_target_advance,     # ms-122 e-3956
         "target_close": cmd_target_close,         # ms-122 e-3956
         "target_instances": cmd_target_instances,  # ms-122 e-3956
+        "target_work_item": cmd_target_work_item,  # ms-124 e-4089
+        "target_evidence": cmd_target_evidence,    # ms-124 e-4089
+        "target_ball": cmd_target_ball,            # ms-124 e-4089
         "review_context": cmd_review_context,
         "review_done": cmd_review_done,      # ms-119 e-4060
 

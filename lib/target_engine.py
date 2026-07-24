@@ -40,6 +40,17 @@ class TargetEngineError(ValueError):
     human-facing message; the CLI prints it and exits non-zero."""
 
 
+# The child-arm keys a descriptor-driven target record carries as part of the
+# thick cognitive frame (ms-124 e-4089). WorkItems are the unit of doing (a
+# task / activity equivalent); Evidence is the append-only record of something
+# that happened (a commit / communication equivalent). Both are ordinary
+# collections declared as ``decomposition.arms`` so the storage layer can split
+# them the same way it splits milestone.entries / opportunity.activities.
+WORK_ITEMS_KEY = "work_items"
+EVIDENCE_KEY = "evidence"
+BALL_KEY = "who_has_the_ball"
+
+
 # ---------------------------------------------------------------------------
 # Collection access — tolerant reads, create-on-write.
 # ---------------------------------------------------------------------------
@@ -125,11 +136,19 @@ def create_target(data: dict, desc: dict, *, label: str,
     extra: dict = {"kind": desc.get("kind")}
     if initial_phase:
         extra["phase"] = initial_phase
+    # Thick-frame inheritance (ms-124 e-4089): a fresh target starts with the
+    # ball in OUR court (there is a move we owe) and empty WorkItem / Evidence
+    # arms. These are the same cognitive primitives a milestone or an
+    # opportunity carries; a data-defined class inherits them rather than
+    # projecting hardcoded zeros.
+    extra["who_has_the_ball"] = work_model.BALL_SELF
     extra.update(field_vals)
 
     rec = work_model.new_target(new_id, label, created_by=actor, created_at=at,
                                 **extra)
     rec["phase_history"] = []
+    rec[WORK_ITEMS_KEY] = []
+    rec[EVIDENCE_KEY] = []
     coll.append(rec)
     return rec
 
@@ -214,6 +233,145 @@ def close_target(data: dict, desc: dict, target_id: str, *, actor: str = "",
 
 
 # ---------------------------------------------------------------------------
+# Thick cognitive frame (ms-124 e-4089) — WorkItems, Evidence, ball, next-move.
+# A milestone carries tasks/commits and a whose-turn sense; an opportunity
+# carries activities/communications and who_has_the_ball. A data-defined class
+# inherits the SAME primitives here instead of projecting hardcoded zeros: it
+# can hold WorkItems (units of doing), Evidence (append-only records of what
+# happened), a ball (whose court the move is in) and derive its own next move.
+# All are pure transforms over the record; every id is allocated under the
+# target's own id so children are unambiguously scoped to their target.
+# ---------------------------------------------------------------------------
+
+def list_work_items(rec: dict) -> list:
+    """Return the target's WorkItems (raw records, stored order). Empty when the
+    arm is absent (tolerant read — a target created before this feature reads as
+    no work items)."""
+    got = rec.get(WORK_ITEMS_KEY) if isinstance(rec, dict) else None
+    return got if isinstance(got, list) else []
+
+
+def add_work_item(data: dict, desc: dict, target_id: str, description: str, *,
+                  actor: str = "", at: str = "") -> dict:
+    """Append a WorkItem to a target and return it. The id is allocated under
+    ``<target_id>-w`` so it is unambiguously a child of this target. Built via
+    the shared ``work_model.new_work_item`` skeleton so a descriptor WorkItem is
+    the same shape as a development task / sales activity."""
+    if not (description or "").strip():
+        raise TargetEngineError("WorkItem の description は必須です")
+    rec = find_target(data, desc, target_id)
+    if rec is None:
+        raise TargetEngineError(f"target が見つかりません: {target_id}")
+    items = rec.setdefault(WORK_ITEMS_KEY, [])
+    new_id = work_base.next_suffixed_id(work_model.collect_ids(items),
+                                        f"{rec.get('id', target_id)}-w")
+    item = work_model.new_work_item(new_id, description, created_at=at)
+    if actor:
+        item["created_by"] = actor
+    items.append(item)
+    return item
+
+
+def complete_work_item(data: dict, desc: dict, target_id: str, item_id: str, *,
+                       actor: str = "", reason: str = "") -> dict:
+    """Mark one of a target's WorkItems done (shared ``work_model.mark_done``)
+    and return it. Raises when the target or the item is unknown."""
+    rec = find_target(data, desc, target_id)
+    if rec is None:
+        raise TargetEngineError(f"target が見つかりません: {target_id}")
+    item = work_model.find_by_id(list_work_items(rec), (item_id or "").strip())
+    if item is None:
+        raise TargetEngineError(
+            f"WorkItem が見つかりません: {item_id} (target {target_id})")
+    work_model.mark_done(item, actor=actor, reason=reason)
+    return item
+
+
+def list_evidence(rec: dict) -> list:
+    """Return the target's Evidence records (raw, stored order). Empty when the
+    arm is absent (tolerant read)."""
+    got = rec.get(EVIDENCE_KEY) if isinstance(rec, dict) else None
+    return got if isinstance(got, list) else []
+
+
+def add_evidence(data: dict, desc: dict, target_id: str, *, summary: str = "",
+                 linked_id: str = "", actor: str = "", at: str = "") -> dict:
+    """Append an Evidence record to a target and return it. When ``linked_id``
+    names one of the target's WorkItems the evidence is tied to it (mirroring a
+    commit closing a task); an unknown ``linked_id`` raises so a typo can't
+    silently orphan the evidence. Id allocated under ``<target_id>-ev``."""
+    rec = find_target(data, desc, target_id)
+    if rec is None:
+        raise TargetEngineError(f"target が見つかりません: {target_id}")
+    linked = (linked_id or "").strip()
+    if linked and work_model.find_by_id(list_work_items(rec), linked) is None:
+        raise TargetEngineError(
+            f"linked_id '{linked}' に一致する WorkItem がありません "
+            f"(target {target_id})")
+    evs = rec.setdefault(EVIDENCE_KEY, [])
+    new_id = work_base.next_suffixed_id(work_model.collect_ids(evs),
+                                        f"{rec.get('id', target_id)}-ev")
+    ev = work_model.new_evidence(new_id, linked_id=linked, created_at=at)
+    if summary:
+        ev["summary"] = summary
+    if actor:
+        ev["created_by"] = actor
+    evs.append(ev)
+    return ev
+
+
+def set_ball(data: dict, desc: dict, target_id: str, ball: str, *,
+             actor: str = "", reason: str = "") -> dict:
+    """Set whose court the target's next move is in and record the change on the
+    append-only phase_history. ``ball`` must be a recognised state
+    (``self`` / ``counterpart``); ``none`` clears it. Returns the record."""
+    rec = find_target(data, desc, target_id)
+    if rec is None:
+        raise TargetEngineError(f"target が見つかりません: {target_id}")
+    want = "" if (ball or "").strip().lower() in ("none", "") else ball.strip()
+    if want and want not in work_model.VALID_BALL:
+        raise TargetEngineError(
+            f"未知の ball '{ball}' です "
+            f"(有効: {work_model.BALL_SELF} / {work_model.BALL_COUNTERPART} / none)")
+    old = rec.get(BALL_KEY, "")
+    rec[BALL_KEY] = want
+    history = rec.setdefault("phase_history", [])
+    work_base.record_audit_event(history, kind="ball_change", actor=actor,
+                                 reason=reason, **{"from": old, "to": want})
+    return rec
+
+
+def infer_next_move(desc: dict, rec: dict) -> str:
+    """Derive the target's "次の一手" — a one-line suggestion of what advances it
+    next. Occupation-agnostic reasoning over the thick frame:
+
+    - a done / cancelled target has no next move (``""``);
+    - an open WorkItem is the most concrete next move (finish it);
+    - otherwise, a target mid-phase advances to its next phase, and one at a
+      terminal phase is ready to close.
+
+    This is inference, not policy — it never mutates, and the human stays free
+    to do something else. It exists so the shared frame can show a data-defined
+    target the same "what now" hint milestones/opportunities get."""
+    if not isinstance(rec, dict):
+        return ""
+    if work_model.is_done(rec) or work_model.is_cancelled(rec):
+        return ""
+    for w in list_work_items(rec):
+        if work_model.is_open(w):
+            return f"WorkItem を進める: {w.get('description', '')}".rstrip()
+    phases = td.phase_keys(desc)
+    cur = current_phase(rec)
+    if phases and cur in phases:
+        if is_terminal_phase(desc, cur):
+            return f"完了する (beacon target close --class {desc.get('kind', '')})"
+        nxt = phases[phases.index(cur) + 1]
+        label = (td.get_phase(desc, nxt) or {}).get("label") or nxt
+        return f"次フェーズへ進める: {label}"
+    return ""
+
+
+# ---------------------------------------------------------------------------
 # Projection — the shared-frame shape a descriptor-defined target presents.
 # ---------------------------------------------------------------------------
 
@@ -222,20 +380,29 @@ def project_target(desc: dict, rec: dict) -> dict:
 
     Matches the shape ``core.project_targets`` / ``sales_entities.project_targets``
     emit — ``id`` / ``label`` / ``status`` / ``kind`` / ``work_items_total`` /
-    ``work_items_done`` / ``detail`` — so when the registry wires data-defined
-    classes in (e-3957) the shared frame (session-start / status) shows them
-    beside milestones / opportunities without special-casing. A data-defined
-    target has no nested WorkItems in this MVP, so the counts are 0; the phase
-    and descriptor type ride in ``detail``."""
+    ``work_items_done`` / ``detail`` — so the shared frame (session-start /
+    status) shows a data-defined target beside milestones / opportunities
+    without special-casing.
+
+    The WorkItem counts are derived from the target's own WorkItem arm (ms-124
+    e-4089 — no longer hardcoded 0), and ``detail`` carries the rest of the
+    thick frame: phase, descriptor type, whose-turn ball, and the inferred next
+    move, so a data-defined target presents the same cognitive surface a
+    milestone or an opportunity does."""
+    items = list_work_items(rec)
+    total = len(items)
+    done = sum(1 for w in items if work_model.is_done(w))
     return {
         "id": rec.get("id", ""),
         "label": work_model.target_label(rec),
         "status": work_model.work_item_status(rec) or "todo",
         "kind": rec.get("kind") or desc.get("kind", ""),
-        "work_items_total": 0,
-        "work_items_done": 0,
+        "work_items_total": total,
+        "work_items_done": done,
         "detail": {
             "phase": current_phase(rec),
             "type": desc.get("type", ""),
+            "who_has_the_ball": work_model.normalize_ball(rec.get(BALL_KEY, "")),
+            "next_move": infer_next_move(desc, rec),
         },
     }

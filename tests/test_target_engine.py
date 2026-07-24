@@ -198,10 +198,164 @@ def test_project_target_shape():
     rec = te.create_target(data, CONTRACT, label="A社 NDA",
                            fields={"counterparty": "A社"})
     proj = te.project_target(CONTRACT, rec)
+    # Thick frame (ms-124 e-4089): a fresh target has the ball in our court and
+    # its next move inferred as the phase after the initial one.
     assert proj == {"id": "ctr-1", "label": "A社 NDA", "status": "todo",
                     "kind": "contract", "work_items_total": 0,
                     "work_items_done": 0,
-                    "detail": {"phase": "drafting", "type": "single-shot"}}
+                    "detail": {"phase": "drafting", "type": "single-shot",
+                               "who_has_the_ball": "self",
+                               "next_move": "次フェーズへ進める: 弁護士レビュー"}}
+
+
+# ---------------------------------------------------------------------------
+# Thick cognitive frame (ms-124 e-4089) — WorkItems, Evidence, ball, next-move.
+# ---------------------------------------------------------------------------
+
+def test_work_items_inherited_and_counted():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    # a fresh target starts with the empty arm (no longer projects hardcoded 0)
+    assert te.list_work_items(rec) == []
+    w1 = te.add_work_item(data, CONTRACT, rec["id"], "相手方に初稿を送る",
+                          actor="claude")
+    w2 = te.add_work_item(data, CONTRACT, rec["id"], "先方の赤入れを反映")
+    assert w1["id"] == "ctr-1-w1"
+    assert w2["id"] == "ctr-1-w2"
+    assert w1["created_by"] == "claude"
+    proj = te.project_target(CONTRACT, rec)
+    assert (proj["work_items_total"], proj["work_items_done"]) == (2, 0)
+    te.complete_work_item(data, CONTRACT, rec["id"], "ctr-1-w1", actor="claude",
+                          reason="送付済")
+    proj = te.project_target(CONTRACT, rec)
+    assert (proj["work_items_total"], proj["work_items_done"]) == (2, 1)
+
+
+def test_add_work_item_requires_description_and_known_target():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    for bad in ("", "  "):
+        try:
+            te.add_work_item(data, CONTRACT, rec["id"], bad)
+            assert False, "expected TargetEngineError"
+        except te.TargetEngineError:
+            pass
+    try:
+        te.add_work_item(data, CONTRACT, "ctr-99", "x")
+        assert False
+    except te.TargetEngineError:
+        pass
+
+
+def test_complete_unknown_work_item_raises():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    try:
+        te.complete_work_item(data, CONTRACT, rec["id"], "ctr-1-w9")
+        assert False
+    except te.TargetEngineError as e:
+        assert "WorkItem" in str(e)
+
+
+def test_evidence_links_to_work_item():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    te.add_work_item(data, CONTRACT, rec["id"], "初稿送付")
+    ev = te.add_evidence(data, CONTRACT, rec["id"], summary="メール送信済",
+                         linked_id="ctr-1-w1", actor="claude")
+    assert ev["id"] == "ctr-1-ev1"
+    assert ev["linked_id"] == "ctr-1-w1"
+    assert ev["summary"] == "メール送信済"
+    assert te.list_evidence(rec) == [ev]
+
+
+def test_evidence_rejects_unknown_linked_id():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    try:
+        te.add_evidence(data, CONTRACT, rec["id"], linked_id="ctr-1-w9")
+        assert False
+    except te.TargetEngineError as e:
+        assert "linked_id" in str(e)
+
+
+def test_evidence_without_link_is_allowed():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    ev = te.add_evidence(data, CONTRACT, rec["id"], summary="キックオフ")
+    assert ev["linked_id"] == ""
+
+
+def test_set_ball_and_history():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    assert rec["who_has_the_ball"] == "self"       # inherited default
+    te.set_ball(data, CONTRACT, rec["id"], "counterpart", actor="claude",
+                reason="先方レビュー待ち")
+    assert rec["who_has_the_ball"] == "counterpart"
+    ball_events = [h for h in rec["phase_history"] if h["kind"] == "ball_change"]
+    assert ball_events[-1]["from"] == "self"
+    assert ball_events[-1]["to"] == "counterpart"
+    # 'none' clears it
+    te.set_ball(data, CONTRACT, rec["id"], "none")
+    assert rec["who_has_the_ball"] == ""
+
+
+def test_set_ball_rejects_unknown():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    try:
+        te.set_ball(data, CONTRACT, rec["id"], "bogus")
+        assert False
+    except te.TargetEngineError as e:
+        assert "bogus" in str(e)
+
+
+def test_project_ball_tolerant_of_legacy_record():
+    # a record written before the ball field reads as no-ball, not a crash
+    legacy = {"id": "ctr-1", "kind": "contract", "phase": "drafting"}
+    proj = te.project_target(CONTRACT, legacy)
+    assert proj["detail"]["who_has_the_ball"] == ""
+
+
+def test_infer_next_move_prefers_open_work_item():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    te.add_work_item(data, CONTRACT, rec["id"], "初稿を書く")
+    assert te.infer_next_move(CONTRACT, rec) == "WorkItem を進める: 初稿を書く"
+
+
+def test_infer_next_move_advances_phase_when_no_open_items():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    assert te.infer_next_move(CONTRACT, rec) == "次フェーズへ進める: 弁護士レビュー"
+
+
+def test_infer_next_move_terminal_phase_suggests_close():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    te.advance_target(data, CONTRACT, rec["id"])   # → legal_review
+    te.advance_target(data, CONTRACT, rec["id"])   # → signed (terminal)
+    assert "close" in te.infer_next_move(CONTRACT, rec)
+
+
+def test_infer_next_move_empty_when_done():
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="c",
+                           fields={"counterparty": "X"})
+    te.close_target(data, CONTRACT, rec["id"])
+    assert te.infer_next_move(CONTRACT, rec) == ""
 
 
 # ---------------------------------------------------------------------------
