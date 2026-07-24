@@ -2904,7 +2904,10 @@ def cmd_review_context():
 
 def _repo_file_origin(desc):
     """(origin_id, origin_content) for a repo-file 原典 descriptor, or exit with a
-    clean error. Shared by the single and batch review-context paths (e-4125)."""
+    clean error. Used by the BATCH review-context path (e-4125); the single-type
+    path (cmd_review_context) resolves its origin inline because it also handles
+    the doc-origin kind. Extracting the full single-path collection into a shared
+    helper is a worthwhile follow-up (e-4125 maint review)."""
     origin_spec = desc.get("origin", {}) if isinstance(desc.get("origin"), dict) else {}
     ref = origin_spec.get("ref", "")
     if origin_spec.get("kind") != "repo-file" or not ref:
@@ -2973,7 +2976,8 @@ def cmd_review_batch_context():
         external_references.append(surface_ref)
     else:
         shared_gaps.append("application-map (全 surface 索引) が未生成のため、judge は "
-                           "既存機能との重複を repo 参照なしには確認できません。")
+                           "既存機能との重複を repo 参照なしには確認できません "
+                           "(/beacon-map で生成すると review 精度が上がります)。")
 
     registry = review_spine.load_review_types()
     implementer_model = os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip()
@@ -11828,15 +11832,35 @@ def cmd_review_skip():
 
     import review_spine
     import datetime
+    # e-4124 AX/maint review: reject an unknown --type. Without this a typo'd type
+    # (e.g. "maintainabilty") matches no review-due, clears nothing, yet prints
+    # success — a silent no-op in the very command meant to make skipping visible.
+    valid_types = (set(review_spine.load_review_types().keys())
+                   | {review_spine.REVIEW_ATTAINMENT})
+    if review_type not in valid_types:
+        print(f"Error: 未知の review type: {review_type!r} "
+              f"(有効: {', '.join(sorted(valid_types))})。typo の skip は義務を消さない"
+              f"のに成功に見える silent no-op になるため拒否します。", file=sys.stderr)
+        sys.exit(1)
+
+    # Peek BEFORE mutating: does a matching owed review actually exist? A skip of a
+    # non-existent obligation (wrong PR / target id) must not look successful.
+    if pr_number:
+        owed = os.path.isfile(os.path.join(
+            _get_triggers_dir(), f"{review_type}-review-due-{pr_number}.json"))
+    else:
+        owed = _target_review_due_has_binding(target_id, review_type)
+
     gate = _review_skip_gate_record()
     ref_kind = "pr" if pr_number else "target"
     ref = pr_number or target_id
     record = review_spine.build_review_skip_record(
         review_type=review_type, ref_kind=ref_kind, ref=ref, reason=reason,
         actor=_actor_str(), gate=gate, at=datetime.datetime.now().isoformat())
+    record["waived_obligation"] = owed  # honest audit: was anything actually owed?
 
     # Durable audit first (the record must survive even if trigger clearing
-    # races); then clear the review-due trigger so the gate stops blocking.
+    # races); then clear ONLY this type's review-due obligation.
     try:
         with open(_review_skips_log_path(), "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -11844,30 +11868,81 @@ def cmd_review_skip():
         print(f"Error: skip 監査ログを書けませんでした: {e}", file=sys.stderr)
         sys.exit(1)
     if pr_number:
+        # One file per (type, PR); removing it waives exactly this type.
         _clear_review_due_for_pr(review_type, pr_number)
     else:
-        # target-transition review-due is one file per target (all bindings),
-        # so a per-type skip removes it only when it was the sole owed review.
-        try:
-            path = os.path.join(_get_triggers_dir(), f"review-due-{target_id}.json")
-            if os.path.isfile(path):
-                os.remove(path)
-        except OSError:
-            pass
+        # The target review-due trigger is ONE file carrying ALL bindings that
+        # fired at the completion 節目 (e.g. philosophy + attainment). A per-type
+        # skip must remove only this type's binding — deleting the whole file
+        # would silently waive the others too (e-4124 AX/maint review finding).
+        _remove_binding_from_target_review_due(target_id, review_type)
 
+    where = f"PR #{pr_number}" if pr_number else target_id
     if json_mode:
         print(json.dumps(record, ensure_ascii=False))
-        return
-    where = f"PR #{pr_number}" if pr_number else target_id
-    print(f"レビュー skip を記録 (人間の意図的省略): {review_type} / {where}")
-    print(f"  理由: {reason}")
-    print(f"  監査: .beacon/review-skips.jsonl (signal={gate['signal']}, "
-          f"actor={record['actor'] or 'unknown'})")
-    if gate["signal"] == "ai-session-unguarded":
-        print("  ⚠ このセッションは human と申告していません "
-              "(BEACON_SESSION_KIND=human も BEACON_REVIEW_SKIP_USER_OVERRIDE=1 も無し)。"
-              "skip は記録されましたが、監査に ai-session-unguarded として残ります。",
-              file=sys.stderr)
+    else:
+        print(f"レビュー skip を記録 (人間の意図的省略): {review_type} / {where}")
+        print(f"  理由: {reason}")
+        print(f"  監査: .beacon/review-skips.jsonl (signal={gate['signal']}, "
+              f"actor={record['actor'] or 'unknown'})")
+        if gate["signal"] == "ai-session-unguarded":
+            print("  ⚠ このセッションは human と申告していません "
+                  "(BEACON_SESSION_KIND=human も BEACON_REVIEW_SKIP_USER_OVERRIDE=1 も無し)。"
+                  "skip は記録されましたが、監査に ai-session-unguarded として残ります。",
+                  file=sys.stderr)
+    if not owed:
+        # Recorded, but nothing matched — say so (both output modes) instead of
+        # implying an obligation was cleared. Non-zero exit so an automation loop
+        # can tell the skip hit no target.
+        print(f"⚠ 一致する review-due が見つかりませんでした ({review_type} / {where})。"
+              f"skip は監査に記録しましたが、解消した義務はありません "
+              f"(型 / PR番号 / target-id の typo を確認してください)。", file=sys.stderr)
+        sys.exit(3)
+
+
+def _target_review_due_has_binding(target_id: str, review_type: str) -> bool:
+    """True if the target's review-due trigger currently owes ``review_type``
+    (ms-119 e-4124). Read-only peek (no mutation)."""
+    try:
+        with open(os.path.join(_get_triggers_dir(),
+                               f"review-due-{target_id}.json"), encoding="utf-8") as f:
+            return review_type in (json.load(f).get("bindings") or [])
+    except (OSError, ValueError):
+        return False
+
+
+def _remove_binding_from_target_review_due(target_id: str, review_type: str) -> bool:
+    """Remove ONE review type's binding from a target's review-due trigger,
+    preserving the others (ms-119 e-4124).
+
+    The target review-due trigger is a single file whose ``bindings`` list holds
+    every review that fired at the completion 節目. A per-type skip must drop only
+    ``review_type``: rewrite the file with the reduced bindings, and delete it
+    only when the skipped type was the sole binding. Returns True when the type
+    was present (an obligation was actually waived). Best-effort: IO errors leave
+    the trigger as-is and return False (the gate stays honest — a failed clear
+    does not look like a success)."""
+    path = os.path.join(_get_triggers_dir(), f"review-due-{target_id}.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return False
+    bindings = data.get("bindings") or []
+    if review_type not in bindings:
+        return False
+    remaining = [b for b in bindings if b != review_type]
+    try:
+        if remaining:
+            data["bindings"] = remaining
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+                f.write("\n")
+        else:
+            os.remove(path)
+    except OSError:
+        return False
+    return True
 
 
 def _auto_fire_pr_open_review_triggers_for_open_prs() -> None:

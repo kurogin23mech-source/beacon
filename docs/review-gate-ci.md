@@ -36,7 +36,7 @@ recorded — gh, UI, and beacon alike.
    variables → Actions → Variables):
 
    ```
-   BEACON_REVIEW_CI_ENABLED = 1
+   BEACON_REVIEW_GATE_CI = 1
    ```
 
    Until this is `1` the workflow job is skipped (no runs, no cost).

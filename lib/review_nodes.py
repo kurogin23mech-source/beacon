@@ -18,8 +18,14 @@ Each node declares:
                     byte-identical to the hook line so the drift guard is a plain
                     substring check (no regex-equivalence guessing).
   ``skill``         the MUST-run wake skill the hook injects.
-  ``fires``         the review types this 節目 fires — documentation + a hook
-                    for cross-checking against the commands.py firing spine.
+  ``fires``         the review types this 節目 fires. This is NOT the firing
+                    authority (pr-open firing is data-driven from
+                    skills/*/review-type.json ``fires_on``; target-close from
+                    review_spine.review_bindings_for_completion) — it is a
+                    declared expectation that
+                    tests/test_review_node_manifest_drift.py cross-checks against
+                    those authorities, so this list cannot silently go stale when
+                    a new pr-open review type is added.
   ``commands``      the concrete CLI command spellings this node covers (for the
                     target-close node these are the lifecycle commands whose
                     ``commands.py`` handlers call ``_fire_review_due_trigger``).

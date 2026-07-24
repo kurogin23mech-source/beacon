@@ -121,3 +121,58 @@ def test_pr_and_target_mutually_exclusive(proj):
              {"BEACON_SESSION_KIND": "human"})
     assert r.returncode != 0
     assert "--pr" in r.stderr and "--target" in r.stderr
+
+
+# --- e-4124 AX/maint review fixes -------------------------------------------
+
+def test_unknown_type_is_rejected(proj):
+    """A typo'd review type must be rejected — otherwise it clears nothing yet
+    prints success (silent no-op in the very command meant to make skips visible)."""
+    _seed_pr_review_due(proj, "ax", "42")
+    r = _run(proj, ["review", "skip", "--type", "maintainabilty", "--pr", "42",
+                    "--reason", "typo"], {"BEACON_SESSION_KIND": "human"})
+    assert r.returncode != 0
+    assert "未知の review type" in r.stderr
+    # the real trigger is untouched.
+    assert (proj / ".beacon" / "triggers" / "ax-review-due-42.json").exists()
+
+
+def test_skip_of_non_owed_review_warns_and_exits_nonzero(proj):
+    """Skipping a review that is not owed (wrong PR) records the waiver but must
+    NOT look like it cleared an obligation."""
+    r = _run(proj, ["review", "skip", "--type", "ax", "--pr", "999",
+                    "--reason", "nothing here"], {"BEACON_SESSION_KIND": "human"})
+    assert r.returncode == 3
+    assert "一致する review-due が見つかりません" in r.stderr
+    rec = json.loads((proj / ".beacon" / "review-skips.jsonl").read_text().strip())
+    assert rec["waived_obligation"] is False
+
+
+def _seed_target_review_due(proj_dir, target_id, bindings):
+    trig = proj_dir / ".beacon" / "triggers"
+    trig.mkdir(parents=True, exist_ok=True)
+    (trig / f"review-due-{target_id}.json").write_text(json.dumps(
+        {"name": f"review-due-{target_id}", "bindings": list(bindings),
+         "target_id": target_id}))
+
+
+def test_per_type_target_skip_preserves_other_bindings(proj):
+    """A per-type skip on a target must remove ONLY that type's binding — the
+    target review-due file carries all bindings (philosophy + attainment), so
+    deleting the whole file would silently waive attainment too."""
+    _seed_target_review_due(proj, "ms-1", ["philosophy", "attainment"])
+    r = _run(proj, ["review", "skip", "--type", "philosophy", "--target", "ms-1",
+                    "--reason", "no spec drift possible"],
+             {"BEACON_SESSION_KIND": "human"})
+    assert r.returncode == 0, r.stderr
+    f = proj / ".beacon" / "triggers" / "review-due-ms-1.json"
+    assert f.exists(), "trigger must survive — attainment is still owed"
+    assert json.loads(f.read_text())["bindings"] == ["attainment"]
+
+
+def test_sole_binding_target_skip_removes_file(proj):
+    _seed_target_review_due(proj, "ms-2", ["attainment"])
+    r = _run(proj, ["review", "skip", "--type", "attainment", "--target", "ms-2",
+                    "--reason", "owner waived"], {"BEACON_SESSION_KIND": "human"})
+    assert r.returncode == 0, r.stderr
+    assert not (proj / ".beacon" / "triggers" / "review-due-ms-2.json").exists()

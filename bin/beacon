@@ -758,6 +758,12 @@ cmd_review_context() {
     if [[ -n "$batch" ]]; then
         # ms-119 e-4125: emit every review bundle that fires at this 節目 in one
         # call (PR-open → AX + 保守性) for parallel judge fan-out + aggregation.
+        # --batch honors only --pr; reject the flags it would silently ignore
+        # (e-4125 AX review: accepted-but-ignored input is a silent no-op).
+        if [[ -n "$review_type" || -n "$diff_ref" || -n "$origin_doc" || -n "$target" || -n "$judge_model" || "$mode" != "diff" ]]; then
+            echo "Error: --batch は --pr のみを取ります。--type / --mode / --origin-doc / --target / --judge-model は無視されるため拒否します (batch は節目の全 review 種別を自動で出します)。" >&2
+            exit 1
+        fi
         BEACON_PR="$pr" BEACON_IMPLEMENTER_MODEL="${BEACON_IMPLEMENTER_MODEL:-}" \
             python3 "$COMMANDS_PY" review_batch_context
         return
@@ -3338,15 +3344,15 @@ case "${1:-}" in
                         --reason) _rs_reason="${2:-}";  shift 2 ;;
                         --json)   _rs_json="1";         shift ;;
                         -?*)      _guard_flag "$1" ;;
-                        *)        shift ;;
+                        *)        _guard_positional "$1" "Usage: beacon review skip --type <ax|maintainability|philosophy|...> (--pr <n> | --target <ms-XX|op-X>) --reason \"...\"  (このコマンドは flag のみを取ります)" ;;
                     esac
                 done
                 BEACON_REVIEW_TYPE="$_rs_type" BEACON_PR_NUMBER="$_rs_pr" \
                     BEACON_TARGET_ID="$_rs_target" BEACON_REASON="$_rs_reason" \
                     BEACON_JSON="$_rs_json" python3 "$COMMANDS_PY" review_skip ;;
-            *)        echo "Usage: beacon review context --type <ax|philosophy|attainment> [--pr <n> | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--mode diff]  (独立 judge 用の review-kernel bundle を出力; ms-119)" >&2
+            *)        echo "Usage: beacon review context [--batch] --type <ax|maintainability|philosophy|attainment> [--pr <n> | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--judge-model <m>] [--mode diff]  (独立 judge 用の review-kernel bundle を出力; ms-119。--batch は節目の全 review 種別を --pr で一括出力)" >&2
                       echo "       beacon review done --type <ax|maintainability> --pr <n>  (レビュー実施を記録し approve/merge gate を解消; ms-119 e-4060)" >&2
-                      echo "       beacon review skip --type <t> (--pr <n> | --target <ms-XX|op-X>) --reason \"...\"  (人間が意図的にレビューを省く一級経路、監査に理由を残す; ms-119 e-4124)" >&2
+                      echo "       beacon review skip --type <ax|maintainability|philosophy|...> (--pr <n> | --target <ms-XX|op-X>) --reason \"...\"  (人間が意図的にレビューを省く一級経路、監査に理由を残す; ms-119 e-4124)" >&2
                       echo "  注: ax/philosophy は助言 judge の bundle、attainment は目的達成の証拠を独立 judge に生成させる bundle (verdict は human: 'beacon target approve')。完了ゲートは 'beacon milestone done --review'。" >&2
                       exit 1 ;;
         esac

@@ -326,8 +326,15 @@ def batch_review_types_for_node(node, *, registry=None):
                if desc.get("fires_on") == "pr-open"]
         return out
     if node == "target-close":
-        # 思想 is judge-run; 目的達成 is human-gated (judge produces evidence,
-        # human owns the verdict — see ATTAINMENT_JUDGE_CONTRACT).
+        # This is the MENU (which review types CAN bind at a completion 節目),
+        # not the per-target firing decision. review_bindings_for_transition /
+        # review_bindings_for_completion make 思想 conditional on the target
+        # actually having a SPEC 原典 (has_spec) — so a SPEC-less target fires
+        # only 目的達成. Keep the two in step: whatever type is listed here must
+        # be a type that CAN bind in review_bindings_for_completion (asserted by
+        # tests/test_review_batch_fold.py). 思想 is judge-run; 目的達成 is
+        # human-gated (judge produces evidence, human owns the verdict — see
+        # ATTAINMENT_JUDGE_CONTRACT).
         return [
             {"review": REVIEW_PHILOSOPHY, "judge_run": True},
             {"review": REVIEW_ATTAINMENT, "judge_run": False},
@@ -386,8 +393,9 @@ def aggregate_review_reports(reports):
             if rtype not in m["raised_by"]:
                 m["raised_by"].append(rtype)
                 m["consensus"] = len(m["raised_by"])
-            # keep the highest severity seen (lexical max is not meaningful, so
-            # prefer a non-empty severity; leave detailed ranking to the Skill).
+            # keep the FIRST non-empty severity seen (severity strings aren't
+            # orderable lexically, so don't attempt a max; detailed ranking is
+            # left to the Skill that presents the folded report).
             if not m["severity"] and fnd.get("severity"):
                 m["severity"] = fnd["severity"]
     findings = [merged[k] for k in order]

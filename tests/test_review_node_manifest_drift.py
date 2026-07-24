@@ -24,6 +24,7 @@ LIB = ROOT / "lib"
 
 sys.path.insert(0, str(LIB))
 import review_nodes  # noqa: E402
+import review_spine  # noqa: E402
 
 
 def _hook_text() -> str:
@@ -50,6 +51,28 @@ def test_hook_greps_each_manifest_pattern_verbatim():
             f"  expected substring: {needle!r}\n"
             f"  → keep bin/beacon-post-commit-hook.sh and lib/review_nodes.py in sync."
         )
+
+
+def test_manifest_fires_matches_the_firing_authority():
+    """`fires` is a declared expectation, not the firing authority — this ties it
+    to the real authorities so it cannot silently go stale (e-4124 maint review):
+      * pr-open   → the data-driven registry (fires_on == "pr-open")
+      * target-close → review_bindings_for_completion (+ human-gated attainment)
+    """
+    pr_open = review_nodes.node_by_id("pr-open")
+    registry_pr_open = {tid for tid, d in review_spine.judge_run_review_types().items()
+                        if d.get("fires_on") == "pr-open"}
+    assert set(pr_open["fires"]) == registry_pr_open, (
+        "review_nodes.py pr-open `fires` drifted from the review-type registry "
+        f"(manifest={sorted(pr_open['fires'])}, registry={sorted(registry_pr_open)})"
+    )
+    tclose = review_nodes.node_by_id("target-close")
+    # philosophy must be a type review_bindings_for_completion can bind; the
+    # human-gated attainment is always part of the completion pair.
+    completion_reviews = {b["review"] for b in
+                          review_spine.review_bindings_for_completion(has_spec=True)}
+    assert review_spine.REVIEW_ATTAINMENT in set(tclose["fires"])
+    assert set(tclose["fires"]) - {review_spine.REVIEW_ATTAINMENT} <= completion_reviews
 
 
 def test_hook_sets_branch_specific_node_label():

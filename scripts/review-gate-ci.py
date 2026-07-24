@@ -76,14 +76,11 @@ def _post_status(sha, payload):
     False otherwise (never raises — a CI/local status flip must not break the
     caller)."""
     repo = os.environ.get("GITHUB_REPOSITORY", "").strip()
-    api = f"/repos/{repo}/statuses/{sha}" if repo else None
-    argv = ["gh", "api", "-X", "POST"]
-    if api:
-        argv.append(api)
-    else:
-        # without an explicit repo, gh infers it from the cwd remote.
-        argv.append("statuses/" + sha)  # gh api resolves {owner}/{repo} in-repo
-        argv = ["gh", "api", "-X", "POST", f"repos/{{owner}}/{{repo}}/statuses/{sha}"]
+    # With GITHUB_REPOSITORY set (CI), address the repo explicitly; otherwise let
+    # gh resolve {owner}/{repo} from the cwd remote (local `beacon review done`).
+    endpoint = (f"/repos/{repo}/statuses/{sha}" if repo
+                else f"repos/{{owner}}/{{repo}}/statuses/{sha}")
+    argv = ["gh", "api", "-X", "POST", endpoint]
     argv += ["-f", f"state={payload['state']}",
              "-f", f"context={payload['context']}",
              "-f", f"description={payload['description']}"]
