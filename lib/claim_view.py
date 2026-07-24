@@ -10,15 +10,33 @@ consumer reads, occupation-agnostically (milestone / opportunity / account).
 
 Two layers (SPEC 設計方針 2):
 
-  * **LIVE session layer** — "who is sitting at this target right now". Sourced
-    from the occupation claim (``target["occupation"]`` = ms-81 soft claim: a
-    session ``{session_id, machine, agent, claimed_at}``). A claim can go stale
-    (the session died without releasing), so when the caller supplies the set of
-    currently-healthy session ids (from the bus directory) we mark each claim
-    ``healthy`` and only healthy claims count as "someone working now". When the
-    caller can NOT verify liveness (local mode / directory unreachable) we treat
-    the claim as live (``healthy=None``) — conservative: surface the warning
-    rather than silently drop it.
+  * **LIVE session layer** — "who is sitting at this target right now". Two
+    INDEPENDENT sources feed this layer (ms-125 e-4094 — the SPEC named both but
+    only the first was wired, so a stale occupation claim made the layer read
+    "nobody live" while a real session was working under a focus heartbeat):
+
+      1. the **occupation claim** (``target["occupation"]`` = ms-81 soft claim: a
+         session ``{session_id, machine, agent, claimed_at}``), written once at
+         ``milestone start`` and never refreshed — so it goes stale the moment
+         the session dies or moves on, and it only exists for milestones.
+      2. the **bus-directory focus** (``focus_sessions`` = the live sessions the
+         directory reports as *focused on this target right now*, sourced from
+         each session's ``focus.milestone`` heartbeat, refreshed every cadence).
+         This catches the case the occupation claim misses: a *different* live
+         session working the target, or the claiming session having died while
+         another picked the work up. A focus entry's ``healthy`` is cross-checked
+         against the SAME verified healthy set as occupation (ms-125 review) —
+         the two sources can never disagree on what "live" means, and a focus
+         session that raced out of the healthy set is not stamped live on trust.
+
+    A claim can go stale (the session died without releasing), so when the caller
+    supplies the set of currently-healthy session ids (from the bus directory) we
+    mark each occupation claim ``healthy`` and only healthy claims count as
+    "someone working now". When the caller can NOT verify liveness (local mode /
+    directory unreachable) we treat the occupation claim as live
+    (``healthy=None``) — conservative: surface the warning rather than silently
+    drop it — and there are simply no focus entries (focus lives only in the
+    reachable directory).
 
   * **user persistent layer** — "who is the standing assignee". Sourced from
     ``target["assignee"]`` (ms-81 e-1918), the existing members-unverified owner
@@ -90,6 +108,7 @@ def build_claim_view(
     target: dict,
     *,
     live_session_ids: Optional[Iterable[str]] = None,
+    focus_sessions: Optional[Iterable[dict]] = None,
     my_session_id: str = "",
     my_identities: Iterable[str] = (),
     exists: bool = True,
@@ -113,6 +132,14 @@ def build_claim_view(
         verified (local mode / directory unreachable) → occupation claims read
         as live with ``healthy=None`` (conservative, non-blocking). An empty
         iterable = verified and nobody is live → occupation claims read as stale.
+      focus_sessions: the live sessions the bus directory reports as focused on
+        THIS target (ms-125 e-4094), each a dict
+        ``{session_id, machine, agent, focused_at}`` already liveness-filtered by
+        the I/O shell. This is the second, independent LIVE source: it detects a
+        session working the target even when the occupation claim is stale or was
+        never written. ``None`` / empty = no focus signal (local mode, or nobody
+        is focused here). Entries whose ``session_id`` is already present via the
+        occupation claim are de-duplicated (one session, one live row).
       my_session_id: this session's id, to flag a live claim as mine.
       my_identities: aliases for "me" (actor name / email / user_id) matched
         case-insensitively against the assignee list.
@@ -122,9 +149,12 @@ def build_claim_view(
         "target_id":   str,
         "target_kind": str,          # milestone / opportunity / account / ...
         "label":       str,
-        "live": [                    # LIVE session layer (0..1 today: 1 claim)
-          {"session_id", "machine", "agent", "claimed_at",
-           "source": "occupation", "healthy": bool | None, "is_me": bool},
+        "live": [                    # LIVE session layer (occupation + focus)
+          {"session_id", "machine", "agent",
+           "as_of",                  # source-neutral: occupation=claim time,
+                                     # focus=last-heartbeat time (read via source)
+           "source": "occupation" | "focus",
+           "healthy": bool | None, "is_me": bool},
         ],
         "assignees": [str, ...],     # persistent layer
         "flags": {
@@ -152,24 +182,60 @@ def build_claim_view(
     me_sid = (my_session_id or "").strip()
     me_idents = _norm_identities(my_identities)
 
-    # --- LIVE layer: the occupation claim, liveness-checked. ---------------
+    # Liveness of a claiming session id, code-derived from the verified healthy
+    # set — NOT asserted by the caller. ``verified`` False (local / directory
+    # unreachable) → None (assume live, non-blocking, surface a warning). A live
+    # entry "counts" (someone is working now) when this is not False.
+    def _healthy(sid: str):
+        return (sid in healthy_set) if verified else None
+
+    # --- LIVE layer: two independent sources (ms-125 e-4094). --------------
+    # Source 1 — the occupation claim on the target record, liveness-checked.
+    # ``as_of`` is a source-neutral timestamp (ms-125 review): for occupation it
+    # is the one-time claim time; for focus it is the last-heartbeat time. The
+    # meaning is read off ``source``, so no name promises a semantics it lacks.
     live: list[dict] = []
+    by_sid: dict[str, int] = {}  # sid -> index in `live`, for cross-source dedup
     occ = target.get("occupation")
     if isinstance(occ, dict) and occ.get("session_id"):
         sid = occ.get("session_id") or ""
-        healthy = (sid in healthy_set) if verified else None
         live.append({
             "session_id": sid,
             "machine": occ.get("machine") or "",
             "agent": occ.get("agent") or "",
-            "claimed_at": occ.get("claimed_at") or "",
+            "as_of": occ.get("claimed_at") or "",
             "source": "occupation",
-            "healthy": healthy,
+            "healthy": _healthy(sid),
             "is_me": bool(me_sid) and sid == me_sid,
         })
+        by_sid[sid] = len(live) - 1
 
-    # A live entry "counts" (someone is working now) when it is healthy, or
-    # when we could not verify (healthy is None → assume live, non-blocking).
+    # Source 2 — bus-directory focus: sessions the directory reports as focused
+    # on THIS target right now. Liveness is cross-checked against the SAME healthy
+    # set as occupation (``_healthy``) — NOT stamped True on trust — so the two
+    # sources can never disagree on what "live" means, and a focus session that
+    # raced out of the healthy set is not counted (ms-125 review). This is the
+    # source that makes a stale occupation claim non-fatal: a *different* live
+    # session, or a picked-up-after-death session, still surfaces as "someone
+    # working now". A session already present via occupation is skipped (same sid,
+    # same ``_healthy`` verdict → nothing new to add, no live fact lost).
+    for fs in focus_sessions or ():
+        if not isinstance(fs, dict):
+            continue
+        sid = (fs.get("session_id") or "").strip()
+        if not sid or sid in by_sid:
+            continue
+        live.append({
+            "session_id": sid,
+            "machine": fs.get("machine") or "",
+            "agent": fs.get("agent") or "",
+            "as_of": fs.get("focused_at") or "",
+            "source": "focus",
+            "healthy": _healthy(sid),
+            "is_me": bool(me_sid) and sid == me_sid,
+        })
+        by_sid[sid] = len(live) - 1
+
     def _counts(entry: dict) -> bool:
         return entry["healthy"] is not False
 
@@ -213,6 +279,7 @@ def build_claim_views(
     data: dict,
     *,
     live_session_ids: Optional[Iterable[str]] = None,
+    focus_directory: Optional[dict] = None,
     my_session_id: str = "",
     my_identities: Iterable[str] = (),
 ) -> dict[str, dict]:
@@ -227,13 +294,22 @@ def build_claim_views(
     contract is session-log aggregation, where accounts are not "targets"). A
     new occupation's Target collection is picked up automatically once it
     registers in the decomposition registry, with no change here. Targets
-    without an ``id`` are skipped."""
+    without an ``id`` are skipped.
+
+    ``focus_directory`` (ms-125 e-4094): an optional map ``target_id -> [session
+    dict, …]`` of the live sessions focused on each target (from the bus
+    directory). Each target's slice is handed to ``build_claim_view`` as its
+    ``focus_sessions`` second LIVE source. ``None`` = no focus signal available
+    (local mode / directory unreachable)."""
+    focus_directory = focus_directory or {}
     views: dict[str, dict] = {}
     for coll in occupation.TARGET_DECOMPOSITION:
         for target in data.get(coll, []) or []:
+            tid_raw = (target or {}).get("id") if isinstance(target, dict) else ""
             view = build_claim_view(
                 target,
                 live_session_ids=live_session_ids,
+                focus_sessions=focus_directory.get(tid_raw or ""),
                 my_session_id=my_session_id,
                 my_identities=my_identities,
             )

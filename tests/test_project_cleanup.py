@@ -185,5 +185,114 @@ class TestFormatReport(unittest.TestCase):
         self.assertIn("archive", out.lower())
 
 
+class TestSignalCoverage(unittest.TestCase):
+    """ms-125 e-4095: name which signals are degraded so the human doesn't
+    trust a phantom redundancy (in prod only test_named effectively fires)."""
+
+    def test_name_pattern_always_effective(self):
+        cov = pc.assess_signal_coverage([_proj("p", "phase4-test")])
+        self.assertEqual("effective", cov["test_named"]["status"])
+
+    def test_ownerless_degraded_when_none_visible(self):
+        # A non-admin scan never receives ownerless rows → can't fire.
+        cov = pc.assess_signal_coverage([_proj("p", "Real", owner="u-1")])
+        self.assertEqual("degraded", cov["ownerless"]["status"])
+
+    def test_ownerless_effective_when_present(self):
+        cov = pc.assess_signal_coverage([_proj("p", "Ghost", owner="")])
+        self.assertEqual("effective", cov["ownerless"]["status"])
+
+    def test_created_at_degraded_when_field_absent(self):
+        # The standard listing carries no created_at at all.
+        cov = pc.assess_signal_coverage([_proj("p", "Real")])
+        self.assertEqual("degraded", cov["empty_created_at"]["status"])
+
+    def test_created_at_effective_when_field_present(self):
+        cov = pc.assess_signal_coverage(
+            [_proj("p", "Real", created_at="2026-01-01")])
+        self.assertEqual("effective", cov["empty_created_at"]["status"])
+
+    def test_note_flags_degraded_signals(self):
+        cov = pc.assess_signal_coverage([_proj("p", "Real", owner="u-1")])
+        note = pc.format_coverage_note(cov)
+        self.assertIn("縮退", note)
+        self.assertIn("ownerless", note)
+        self.assertIn("empty_created_at", note)
+
+    def test_note_reassuring_when_all_effective(self):
+        # Ownerless present + created_at present → nothing degraded.
+        cov = pc.assess_signal_coverage(
+            [_proj("p", "Ghost", owner="", created_at="")])
+        note = pc.format_coverage_note(cov)
+        self.assertNotIn("縮退", note)
+        self.assertIn("有効", note)
+
+    def test_note_empty_on_empty_coverage(self):
+        self.assertEqual("", pc.format_coverage_note({}))
+
+
+class TestBindConfirmedPlan(unittest.TestCase):
+    """ms-125 e-4095: a confirmed run archives EXACTLY the reviewed ids — never
+    a freshly recomputed candidate set."""
+
+    def _cands(self, *ids):
+        return [
+            {"project_id": i, "name": i, "owner": "u",
+             "signals": ["test_named"], "confidence": "medium"}
+            for i in ids
+        ]
+
+    def test_plan_is_intersection_in_order(self):
+        cands = self._cands("a", "b", "c")
+        out = pc.bind_confirmed_plan(cands, ["c", "a"])
+        self.assertEqual(["a", "c"], [c["project_id"] for c in out["plan"]])
+
+    def test_new_candidate_refused(self):
+        # 'z' became a candidate after the dry-run (human confirmed only a,b).
+        cands = self._cands("a", "b", "z")
+        out = pc.bind_confirmed_plan(cands, ["a", "b"])
+        self.assertEqual(["a", "b"], [c["project_id"] for c in out["plan"]])
+        self.assertEqual(["z"],
+                         [c["project_id"] for c in out["unreviewed_new"]])
+
+    def test_confirmed_but_gone_is_skipped(self):
+        # Human confirmed 'x' but it's no longer a candidate.
+        cands = self._cands("a")
+        out = pc.bind_confirmed_plan(cands, ["a", "x"])
+        self.assertEqual(["a"], [c["project_id"] for c in out["plan"]])
+        self.assertEqual(["x"], out["skipped_missing"])
+
+    def test_limit_caps_plan_only(self):
+        cands = self._cands("a", "b", "c", "d")
+        out = pc.bind_confirmed_plan(cands, ["a", "b", "c", "d"], limit=2)
+        self.assertEqual(["a", "b"], [c["project_id"] for c in out["plan"]])
+
+    def test_limit_dropped_ids_are_reported(self):
+        # ms-125 review: ids cut by --limit must not vanish silently — they land
+        # in dropped_by_limit so the caller can say "N NOT archived this run".
+        cands = self._cands("a", "b", "c", "d")
+        out = pc.bind_confirmed_plan(cands, ["a", "b", "c", "d"], limit=2)
+        self.assertEqual(["c", "d"], out["dropped_by_limit"])
+
+    def test_no_limit_drops_nothing(self):
+        cands = self._cands("a", "b")
+        out = pc.bind_confirmed_plan(cands, ["a", "b"])
+        self.assertEqual([], out["dropped_by_limit"])
+
+    def test_empty_confirmed_archives_nothing(self):
+        cands = self._cands("a", "b")
+        out = pc.bind_confirmed_plan(cands, [])
+        self.assertEqual([], out["plan"])
+        # everything is 'unreviewed' → nothing gets archived
+        self.assertEqual(["a", "b"],
+                         [c["project_id"] for c in out["unreviewed_new"]])
+
+    def test_pure_no_mutation(self):
+        cands = self._cands("a", "b")
+        before = [dict(c) for c in cands]
+        pc.bind_confirmed_plan(cands, ["a"])
+        self.assertEqual(before, cands)
+
+
 if __name__ == "__main__":
     unittest.main()

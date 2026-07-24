@@ -189,13 +189,18 @@ class TestCmdClaimViewIOShell:
     offline session hits. This exercises the whole shell: JSON assembly, the
     all-targets vs ``--target`` branch, and the flag contract in output."""
 
-    def _load_commands(self, monkeypatch, fixture, *, live_ids=None):
+    def _load_commands(self, monkeypatch, fixture, *, live_ids=None,
+                       focus_directory=None):
         sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
         import commands
         monkeypatch.setattr(commands, "load_project", lambda: fixture)
         monkeypatch.setattr(commands, "_resolve_session_id", lambda: "sv-me")
         monkeypatch.setattr(
             commands, "_resolve_healthy_session_ids", lambda: live_ids)
+        # ms-125 e-4094: stub the second LIVE source (bus-directory focus) so the
+        # shell stays hermetic — otherwise it would attempt a cloud round-trip.
+        monkeypatch.setattr(
+            commands, "_resolve_focus_directory", lambda _live: focus_directory)
         return commands
 
     def test_all_targets_json(self, monkeypatch, capsys):
@@ -248,3 +253,103 @@ class TestCmdClaimViewIOShell:
         assert view["target_id"] == "ms-999"
         assert view["exists"] is False
         assert view["flags"]["unclaimed"] is False
+
+    def test_focus_directory_flows_through_shell(self, monkeypatch, capsys):
+        # ms-125 e-4094: the shell must structurally consult BOTH LIVE sources.
+        # ms-1 has no occupation claim, but a live session is focused on it via
+        # the bus directory — the view must read it as live (not unclaimed).
+        fixture = {
+            "name": "smoke", "profession": "dev",
+            "milestones": [{"id": "ms-1", "title": "Foo"}],
+        }
+        commands = self._load_commands(
+            monkeypatch, fixture, live_ids={"sv-other"},
+            focus_directory={"ms-1": [{
+                "session_id": "sv-other", "machine": "mac",
+                "agent": "claude", "focused_at": "2026-07-24T00:00:00Z"}]},
+        )
+        monkeypatch.setenv("BEACON_JSON", "1")
+        monkeypatch.delenv("BEACON_CLAIM_TARGET_ID", raising=False)
+        monkeypatch.delenv("BEACON_CLAIM_TARGET_KIND", raising=False)
+        commands.cmd_claim_view()
+        views = json.loads(capsys.readouterr().out)
+        assert views["ms-1"]["flags"]["live"] is True
+        assert views["ms-1"]["flags"]["live_by_others"] is True
+        assert views["ms-1"]["flags"]["unclaimed"] is False
+        assert views["ms-1"]["live"][0]["source"] == "focus"
+
+    def test_missing_target_reads_focus(self, monkeypatch, capsys):
+        # A --target that isn't in project.json still consults the focus source,
+        # so a session focused on it surfaces rather than reading unclaimed.
+        fixture = {"name": "smoke", "profession": "dev", "milestones": []}
+        commands = self._load_commands(
+            monkeypatch, fixture, live_ids={"sv-other"},
+            focus_directory={"ms-7": [{
+                "session_id": "sv-other", "machine": "mac",
+                "agent": "claude", "focused_at": "2026-07-24T00:00:00Z"}]},
+        )
+        monkeypatch.setenv("BEACON_JSON", "1")
+        monkeypatch.setenv("BEACON_CLAIM_TARGET_ID", "ms-7")
+        monkeypatch.setenv("BEACON_CLAIM_TARGET_KIND", "ms")
+        commands.cmd_claim_view()
+        view = json.loads(capsys.readouterr().out)
+        assert view["flags"]["live"] is True
+        assert view["live"][0]["source"] == "focus"
+
+    def test_focus_source_status_disclosed(self, monkeypatch, capsys):
+        # ms-125 review (AX): when liveness is verified but the focus source
+        # could NOT be fetched, the view discloses focus_source=unavailable
+        # instead of silently reading occupation-only.
+        fixture = {"name": "smoke", "profession": "dev",
+                   "milestones": [{"id": "ms-1", "title": "Foo"}]}
+        commands = self._load_commands(
+            monkeypatch, fixture, live_ids={"sv-x"}, focus_directory=None)
+        monkeypatch.setenv("BEACON_JSON", "1")
+        monkeypatch.delenv("BEACON_CLAIM_TARGET_ID", raising=False)
+        monkeypatch.delenv("BEACON_CLAIM_TARGET_KIND", raising=False)
+        commands.cmd_claim_view()
+        views = json.loads(capsys.readouterr().out)
+        assert views["ms-1"]["focus_source"] == "unavailable"
+
+
+class TestInvertFocusDirectory:
+    """ms-125 review (maint): the directory→per-target inversion is a pure
+    function, unit-tested directly (not hidden behind a stubbed cloud call)."""
+
+    def _load(self):
+        sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
+        import commands
+        return commands
+
+    def test_inverts_by_focus_milestone(self):
+        commands = self._load()
+        sessions = [
+            {"session_id": "sv-a", "focus": {"milestone": {"id": "ms-1"}},
+             "actor": {"machine": "mac", "agent": "claude"},
+             "last_heartbeat_at": "2026-07-24T00:00:00Z"},
+            {"session_id": "sv-b", "focus": {"milestone": {"id": "ms-1"}},
+             "actor": {"machine": "win", "agent": "codex"},
+             "last_heartbeat_at": "2026-07-24T00:01:00Z"},
+        ]
+        out = commands._invert_focus_directory(sessions)
+        assert set(out) == {"ms-1"}
+        assert {e["session_id"] for e in out["ms-1"]} == {"sv-a", "sv-b"}
+        assert out["ms-1"][0]["machine"] == "mac"
+
+    def test_skips_sessions_without_focus_or_sid(self):
+        commands = self._load()
+        sessions = [
+            {"session_id": "sv-a"},                       # no focus
+            {"focus": {"milestone": {"id": "ms-1"}}},     # no session_id
+            {"session_id": "sv-c", "focus": {}},          # empty focus
+            None,                                          # malformed
+        ]
+        assert commands._invert_focus_directory(sessions) == {}
+
+    def test_falls_back_to_last_active_for_timestamp(self):
+        commands = self._load()
+        sessions = [{"session_id": "sv-a",
+                     "focus": {"milestone": {"id": "ms-2"}},
+                     "last_active": "2026-07-24T09:00:00Z"}]
+        out = commands._invert_focus_directory(sessions)
+        assert out["ms-2"][0]["focused_at"] == "2026-07-24T09:00:00Z"

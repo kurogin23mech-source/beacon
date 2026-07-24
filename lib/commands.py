@@ -16379,15 +16379,23 @@ def cmd_project_orphans():
     candidates = project_cleanup.detect_orphan_candidates(
         projects, current_project_id=current_pid or None,
     )
+    # ms-125 e-4095: name which signals are degraded on this scan so the human
+    # doesn't trust a phantom redundancy (in prod only test_named fires).
+    coverage = project_cleanup.assess_signal_coverage(projects)
 
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     if json_mode:
         print(json.dumps(
-            {"total_scanned": len(projects), "candidates": candidates},
+            {"total_scanned": len(projects), "candidates": candidates,
+             "signal_coverage": coverage},
             ensure_ascii=False,
         ))
         return
     print(project_cleanup.format_orphan_report(candidates, len(projects)))
+    note = project_cleanup.format_coverage_note(coverage)
+    if note:
+        print()
+        print(note)
 
 
 def _resolve_current_project_id_from_cloud_json() -> str:
@@ -16410,16 +16418,23 @@ def cmd_project_cleanup():
     so the real safety valve is a human confirmation checkpoint in the flow,
     not the server gate. The pattern mirrors ``BEACON_PR_MERGE_USER_OVERRIDE``:
 
-      * No confirm flag  → DRY-RUN. Print exactly what would be archived and
-        stop. Nothing is issued or archived.
-      * ``--confirm`` (BEACON_CLEANUP_CONFIRM=1) → for each candidate, mint a
-        T1 envelope authorizing ``project.archive`` (the calling user's token
-        is the human-signature proof) and archive it, carrying the signed
-        envelope in the ``X-Beacon-Envelope`` header. Raw API calls never
-        happen by hand.
+      * No confirm flag  → DRY-RUN. Print exactly what would be archived, the
+        signal-coverage note, and the ready-to-paste ``--confirm --ids <…>``
+        command. Nothing is issued or archived.
+      * ``--confirm --ids <a,b,…>`` (BEACON_CLEANUP_CONFIRM=1 +
+        BEACON_CLEANUP_CONFIRM_IDS) → archive ONLY the ids the dry-run printed
+        (ms-125 e-4095). For each, mint a T1 envelope authorizing
+        ``project.archive`` (the calling user's token is the human-signature
+        proof) and archive it, carrying the signed envelope in the
+        ``X-Beacon-Envelope`` header. Raw API calls never happen by hand.
 
-    ``--limit N`` caps the batch (safety: inspect a small first sweep before
-    the full run). ``BEACON_JSON=1`` emits a machine-readable result.
+    Binding the confirm to the reviewed ids (ms-125 e-4095) closes the hole
+    where the confirm step re-fetched + re-detected candidates: a project that
+    became a candidate *after* the dry-run would otherwise be archived without
+    ever having been shown to the human. ``--confirm`` without ``--ids`` now
+    fails closed. ``--limit N`` caps the batch (safety: inspect a small first
+    sweep before the full run). ``BEACON_JSON=1`` emits a machine-readable
+    result.
     """
     from auth import load_credentials
     creds = load_credentials()
@@ -16443,9 +16458,39 @@ def cmd_project_cleanup():
     candidates = project_cleanup.detect_orphan_candidates(
         projects, current_project_id=current_pid or None,
     )
+    coverage = project_cleanup.assess_signal_coverage(projects)
 
     confirm = os.environ.get("BEACON_CLEANUP_CONFIRM", "") == "1"
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    # ms-125 e-4095: the ids the dry-run showed, carried into --confirm so the
+    # archive is bound to the reviewed set (comma / whitespace separated).
+    confirm_ids_raw = (os.environ.get("BEACON_CLEANUP_CONFIRM_IDS", "") or "").strip()
+    confirm_ids = [s.strip() for s in confirm_ids_raw.replace(",", " ").split()
+                   if s.strip()]
+
+    # ms-125 review (AX high): --ids only means something WITH --confirm. Without
+    # it the dry-run ignored --ids entirely — a silent no-op that reads as "narrowed
+    # to these ids" when it actually shows every candidate. Fail-closed instead.
+    if confirm_ids and not confirm:
+        msg = ("Error: --ids は --confirm と併用する時だけ有効です (ms-125 e-4095)。\n"
+               "  dry-run (確認表示) は候補を絞り込めません。--ids を外して\n"
+               "  `beacon project cleanup` で全候補を確認するか、`--confirm --ids <…>` で\n"
+               "  実行してください。")
+        if json_mode:
+            print(json.dumps({"mode": "dry-run", "error": "ids_without_confirm",
+                              "hint": "run `beacon project cleanup` (no --ids) for the dry-run"},
+                             ensure_ascii=False))
+        else:
+            print(msg, file=sys.stderr)
+        sys.exit(1)
+
+    def _emit_coverage_note():
+        """ms-125 review: one place for the 'print a blank line + coverage note
+        if any signal is degraded' block (was copy-pasted at 3 call sites)."""
+        note = project_cleanup.format_coverage_note(coverage)
+        if note:
+            print()
+            print(note)
     # ms-123 AX finding: fail-closed on a bad --limit. Previously a non-numeric
     # value fell to limit=0 → "no limit" → --confirm mass-archived ALL candidates.
     # An invalid value now errors; only an ABSENT limit means "no cap" (explicit).
@@ -16467,27 +16512,81 @@ def cmd_project_cleanup():
 
     # ---- DRY-RUN (default): show the plan, change nothing ----------------
     if not confirm:
+        plan_ids = [c["project_id"] for c in plan]
         if json_mode:
             print(json.dumps({
                 "mode": "dry-run", "total_scanned": len(projects),
-                "would_archive": plan,
+                "would_archive": plan, "confirm_ids": plan_ids,
+                "signal_coverage": coverage,
             }, ensure_ascii=False))
             return
         if not plan:
             print(project_cleanup.format_orphan_report(candidates, len(projects)))
+            _emit_coverage_note()
             return
         print(project_cleanup.format_orphan_report(plan, len(projects)))
+        _emit_coverage_note()
         print()
+        # ms-125 e-4095: the confirm run is bound to THESE ids. Emit them so the
+        # human archives exactly what they just reviewed — not a set recomputed
+        # later (which could sweep up a candidate that appeared in between).
         print(
             f"⚠ これは DRY-RUN です。上記 {len(plan)} 件はまだ archive していません。\n"
-            "  実際に archive するには、候補を目視で確認したうえで再実行してください:\n"
-            "    beacon project cleanup --confirm"
+            "  実際に archive するには、候補を目視で確認したうえで、以下をそのまま実行してください\n"
+            "  (この --ids は今表示した候補に束縛されます。後から新たに候補化した project は\n"
+            "   このコマンドでは archive されません):\n"
+            f"    beacon project cleanup --confirm --ids {','.join(plan_ids)}"
             + (f" --limit {limit}" if limit else "")
         )
         return
 
-    # ---- CONFIRMED: issue envelope + archive, one project at a time ------
-    results = {"archived": [], "failed": []}
+    # ---- CONFIRMED: bind to the reviewed --ids, then archive -------------
+    # ms-125 e-4095: a confirmed run MUST carry the ids the dry-run printed.
+    # Without them we'd re-archive a recomputed set — the exact hole where a
+    # project that became a candidate after the dry-run gets swept up unseen.
+    # Fail-closed: no --ids → stop and point back at the dry-run.
+    if not confirm_ids:
+        msg = ("Error: --confirm には --ids が必要です (ms-125 e-4095)。\n"
+               "  まず dry-run で候補を確認してください:\n"
+               "    beacon project cleanup\n"
+               "  出力末尾に表示される `--confirm --ids <…>` をそのまま実行すると、\n"
+               "  目視した候補だけが archive されます。")
+        if json_mode:
+            # ms-125 review (AX low): carry a recovery hint in the JSON error so
+            # an automated caller learns HOW to obtain the ids, not just that
+            # they're missing (the dry-run JSON exposes them as `confirm_ids`).
+            print(json.dumps({"mode": "confirmed", "error": "ids_required",
+                              "hint": "run `beacon project cleanup` (dry-run) and use its confirm_ids",
+                              "archived": [], "failed": []}, ensure_ascii=False))
+        else:
+            print(msg, file=sys.stderr)
+        sys.exit(1)
+
+    bound = project_cleanup.bind_confirmed_plan(
+        candidates, confirm_ids, limit=limit or None,
+    )
+    plan = bound["plan"]
+
+    # Surface what the binding refused / skipped / capped, so a confirmed run is
+    # never silently narrower or wider than the human expects (ms-125 review: a
+    # limit-dropped id was previously in no bucket, so "no error" read as "all
+    # archived").
+    if not json_mode:
+        for pid in bound["skipped_missing"]:
+            print(f"  ⟳ skip {pid} — dry-run 時の候補が現在は候補でない "
+                  "(既 archive / owner 出現 等)。archive しません。")
+        for c in bound["unreviewed_new"]:
+            print(f"  ⛔ refuse {c['project_id']}  «{c['name']}» — dry-run 未提示の"
+                  "新規候補。再度 dry-run で確認してください。archive しません。")
+        for pid in bound["dropped_by_limit"]:
+            print(f"  ✂ limit 超過 {pid} — --limit {limit} を超えたため今回は "
+                  "archive しません (残りは再実行してください)。")
+
+    results = {"archived": [], "failed": [],
+               "skipped_missing": bound["skipped_missing"],
+               "refused_unreviewed": [c["project_id"]
+                                      for c in bound["unreviewed_new"]],
+               "dropped_by_limit": bound["dropped_by_limit"]}
     for c in plan:
         pid = c["project_id"]
         try:
@@ -22902,6 +23001,70 @@ def _resolve_healthy_session_ids():
     return ids
 
 
+def _invert_focus_directory(sessions):
+    """Pure: invert directory session records into ``target_id -> [ {session_id,
+    machine, agent, focused_at}, … ]`` keyed by each session's focus milestone
+    (ms-125 e-4094). No I/O — split out from ``_resolve_focus_directory`` so the
+    inversion (focus.milestone dig-out, actor shaping) is directly unit-testable
+    and its bugs surface as exceptions instead of being swallowed by the
+    cloud-call ``except`` (ms-125 review: a blanket except over both the call and
+    the transform hid transform bugs behind a silent occupation-only fallback).
+    """
+    directory: dict = {}
+    for s in sessions or ():
+        if not isinstance(s, dict):
+            continue
+        sid = s.get("session_id")
+        if not sid:
+            continue
+        focus = s.get("focus") or {}
+        milestone = (focus.get("milestone") or {}) if isinstance(focus, dict) else {}
+        target_id = (milestone.get("id") or "").strip() if isinstance(milestone, dict) else ""
+        if not target_id:
+            continue
+        actor = s.get("actor") or {}
+        directory.setdefault(target_id, []).append({
+            "session_id": sid,
+            "machine": actor.get("machine") or "",
+            "agent": actor.get("agent") or "",
+            "focused_at": s.get("last_heartbeat_at") or s.get("last_active") or "",
+        })
+    return directory
+
+
+def _resolve_focus_directory(live_ids):
+    """Return ``target_id -> [ {session_id, machine, agent, focused_at}, … ]``
+    for the live sessions the bus directory reports as focused on each target,
+    or ``None`` when the directory cannot be consulted (ms-125 e-4094).
+
+    This is the second, independent LIVE source the claim view consumes (the
+    first being the occupation claim on the target record). Each live session
+    heartbeats its ``focus.milestone`` into the directory; we invert that into a
+    per-target map so ``claim_view`` can flag "someone is focused on this target
+    now" even when the one-time occupation claim has gone stale.
+
+    ``live_ids is None`` means liveness could not be verified (local mode /
+    directory unreachable) — there is no directory to read a focus from, so we
+    return ``None`` and the claim view falls back to occupation-only. A failure
+    of the cloud CALL (no cloud, auth error, network) also collapses to ``None``
+    so the command keeps working; the focus source is a bonus, never a hard
+    dependency. The ``except`` wraps ONLY the cloud call — the pure inversion is
+    outside it so a transform bug is not masked as "focus unavailable".
+    """
+    if live_ids is None:
+        return None
+    try:
+        client, config = _get_api_client()
+        project_id = _resolve_bus_project_id(config)
+        if not project_id:
+            return None
+        sessions = client.list_sessions(
+            project_id, live_only=True, healthy_only=True, since_minutes=5)
+    except Exception:
+        return None
+    return _invert_focus_directory(sessions)
+
+
 def cmd_claim_view():
     """beacon claim view [--target <k>:<id>] [--json]
 
@@ -22961,13 +23124,33 @@ def cmd_claim_view():
         pass
 
     live_ids = _resolve_healthy_session_ids()
+    # Second LIVE source (ms-125 e-4094): the bus-directory focus. Best-effort —
+    # None (local mode / unreachable) collapses the claim view to occupation-only.
+    focus_directory = _resolve_focus_directory(live_ids)
 
     views = _claim_view.build_claim_views(
         data,
         live_session_ids=live_ids,
+        focus_directory=focus_directory,
         my_session_id=my_session_id,
         my_identities=my_identities,
     )
+
+    # ms-125 review (AX): disclose whether the focus source was actually
+    # consulted, so a transient focus outage reads as "focus unavailable" instead
+    # of silently collapsing to "nobody live" (the exact mis-read e-4094 set out
+    # to fix). Mirrors cleanup's signal_coverage disclosure. Additive per-view
+    # key, so existing consumers of the view map are unaffected.
+    if live_ids is None:
+        focus_status = "unverified"   # local mode: no directory to read focus
+    elif focus_directory is None:
+        focus_status = "unavailable"  # liveness verified but focus fetch failed
+    else:
+        focus_status = "checked"
+    for _v in views.values():
+        _v["focus_source"] = focus_status
+    _focus_note = ("  ※ focus source 取得不可 — 別セッションの focus 作業を取りこぼす"
+                   "可能性 (occupation のみで判定)") if focus_status == "unavailable" else ""
 
     if ti:
         view = views.get(ti)
@@ -22980,10 +23163,12 @@ def cmd_claim_view():
             view = _claim_view.build_claim_view(
                 {"id": ti},
                 live_session_ids=live_ids,
+                focus_sessions=(focus_directory or {}).get(ti),
                 my_session_id=my_session_id,
                 my_identities=my_identities,
                 exists=False,
             )
+            view["focus_source"] = focus_status
         if json_mode:
             print(json.dumps(view, ensure_ascii=False))
             return
@@ -22996,6 +23181,8 @@ def cmd_claim_view():
                   "対象外)。unclaimed とは扱いません。")
         else:
             print(f"  {line}" if line else "  (未 claim — 誰も作業中でなく担当も未設定)")
+        if _focus_note:
+            print(_focus_note)
         if live_ids is None:
             print("  ※ liveness 未確認 (local mode / directory 不通) — LIVE claim は"
                   "健全性未検証で表示")
@@ -23018,6 +23205,8 @@ def cmd_claim_view():
         shown += 1
     if shown == 0:
         print("(claim 済みの target はありません — 全 target が未 claim)")
+    if _focus_note:
+        print(_focus_note.lstrip())
     if live_ids is None:
         print("※ liveness 未確認 (local mode / directory 不通)")
 
