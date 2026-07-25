@@ -48,8 +48,8 @@ ROOT=$(beacon-find-root) && \
 
 - `acc-XX` が分かればそれを使う。
 - 顧客名だけなら `beacon account list --json` で照合して `acc-id` を確定する。
-- **まだ顧客が無い**場合は、先に顧客を作る必要がある。`beacon account add "<会社名>"` を
-  促すか、名刺があれば `/beacon-sales-card` を案内する。
+- **まだ顧客が無い**場合は、先に顧客を作る必要がある。`BEACON_SALES_SKILL_CALL=1 beacon account add "<会社名>"`
+  を実行する (token は e-3760 の直叩き誘導を自身の正規呼び出しで抑える印)。名刺があれば `/beacon-sales-card` を案内する。
 
 顧客が特定できたら `$ACC` として保持する。顧客紐付けは強く推奨 (紐付けのない商談は
 後で顧客資産・パイプラインに乗らない) だが、どうしても不明なら紐付けなしも許容する。
@@ -87,7 +87,9 @@ ROOT=$(beacon-find-root) && \
 が自動で seed するので、起票直後から「次にやること」が並ぶ。
 
 ```bash
-beacon opportunity add "<タイトル>" \
+# BEACON_SALES_SKILL_CALL=1 は「これはスキル経由の正規起票」の印 (e-3760)。
+# これにより直叩き誘導 nudge を自身の呼び出しでは出さない (作法は既にこのスキルで担保済)。
+BEACON_SALES_SKILL_CALL=1 beacon opportunity add "<タイトル>" \
   --account "$ACC" \
   [--phase "<開始フェーズ>"] \
   [--goal <想定金額(円)>] \

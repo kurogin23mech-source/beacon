@@ -13193,6 +13193,12 @@ def cmd_doc_add():
               or milestone or operation or trek_id)
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
+    # e-3760 — 顧客 (Account) に紐づく doc の直叩きは dossier スキルへ soft 誘導する。
+    # ``account`` が立っている時だけ (= dev/一般 doc add には影響しない)。
+    if account:
+        _sales_skill_nudge("顧客ドキュメント (dossier)", "/beacon-sales-dossier",
+                           "面談やり取りごとの知見を見出しに振り分けて資産化できます")
+
     if not title:
         print("Error: title required")
         sys.exit(1)
@@ -24235,11 +24241,26 @@ def _gate_target_class(data: dict, kind: str) -> None:
         sys.exit(1)
 
 
+def _sales_skill_nudge(what: str, skill: str, detail: str) -> None:
+    """営業エンティティの user-facing verb を直叩きしたとき、対応する対話スキルへ soft に
+    誘導する (e-3760)。**hard block はしない** (master=人間) ので nudge を stderr に出して
+    実行はそのまま続ける。スキル自身の正規呼び出しは ``BEACON_SALES_SKILL_CALL=1`` を
+    立てるので nudge は出さない (= dev の `beacon pr review`→`/review` 誘導と対称、ただし
+    こちらは同じ verb を skill も使うため bypass token で自身の呼び出しを素通しにする)。
+    stderr に出すので ``--json`` の stdout は汚さない。"""
+    if os.environ.get("BEACON_SALES_SKILL_CALL") == "1":
+        return
+    print(f"💡 {what}は {skill} で対話的に進めると{detail}。"
+          f"このまま直接続行します (master=人間)。", file=sys.stderr)
+
+
 def cmd_account_add():
     import sales_entities
     name = os.environ.get("BEACON_ACCOUNT_NAME", "")
     health = os.environ.get("BEACON_ACCOUNT_HEALTH", "")
     assignee = os.environ.get("BEACON_ACCOUNT_ASSIGNEE", "")
+    _sales_skill_nudge("顧客 (Account)", "/beacon-sales-card",
+                       "名刺から会社と担当者(Contact)をまとめて起票できます")
     data = load_project()
     _gate_target_class(data, "account")
     try:
@@ -24706,6 +24727,8 @@ def cmd_opportunity_add():
     description = os.environ.get("BEACON_OPP_DESCRIPTION", "")  # ms-106 e-3526
     goal_amount = _parse_number(goal_raw, "--goal")
     probability = _parse_number(prob_raw, "--probability")
+    _sales_skill_nudge("商談 (Opportunity)", "/beacon-sales-opportunity",
+                       "顧客紐付け・開始フェーズ・想定金額・背景が起票の瞬間に揃います")
     data = load_project()
     _gate_target_class(data, "opportunity")
     try:

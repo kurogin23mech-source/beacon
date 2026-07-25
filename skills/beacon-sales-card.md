@@ -64,7 +64,8 @@ beacon account list
 - 無ければ新規に起票し、出力に出る `acc-id` を控える:
 
 ```bash
-beacon account add "<会社名>"
+# BEACON_SALES_SKILL_CALL=1 = スキル経由の正規起票の印 (e-3760、直叩き誘導 nudge を抑える)
+BEACON_SALES_SKILL_CALL=1 beacon account add "<会社名>"
 ```
 
 読み取った会社名の表記が既存とわずかに違う (略称・法人格の有無など) 場合は、
