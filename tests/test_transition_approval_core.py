@@ -46,8 +46,10 @@ def test_approve_returns_new_state_for_caller_to_apply():
     eid = core.target_transition_approval_add(
         data, "ms-5", old_state="in_progress", new_state="done", intent="…",
     )
+    # this test pins the return-state contract, not the e-4205 evidence gate — so it
+    # ack's the (absent) evidence explicitly rather than attaching a record.
     entry, new_state = core.target_transition_approval_approve(
-        data, eid, rationale="OK", actor="kida",
+        data, eid, rationale="OK", actor="kida", allow_no_evidence=True,
     )
     assert new_state == "done"                 # caller executes milestone_update(status="done")
     assert entry["status"] == "approved"

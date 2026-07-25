@@ -2018,9 +2018,19 @@ def target_transition_approval_add(data: dict, target_id: str, *, old_state: str
     return entry["id"]
 
 
+class EvidenceRequiredError(ValueError):
+    """Raised when a target-transition approval is attempted with no review-evidence
+    attached and no explicit acknowledgement (ms-119 / e-4205 #504 maint review).
+
+    A ValueError subclass so existing ``except ValueError`` sites still catch it, but
+    a distinct type so the CLI can render the friendly "attach evidence or ack"
+    recovery path instead of a generic error."""
+
+
 def target_transition_approval_approve(data: dict, entry_id: str, *,
                                        rationale: str = "", actor: str = "",
-                                       gate: dict = None):
+                                       gate: dict = None,
+                                       allow_no_evidence: bool = False):
     """Approve a pending transition. Returns (entry, new_state_to_apply).
 
     approve は verdict を記録するだけで、実際の状態遷移は呼び出し側が
@@ -2028,6 +2038,14 @@ def target_transition_approval_approve(data: dict, entry_id: str, *,
 
     ``gate`` (ms-119 e-4006 audit): how the approval passed the human-only guard,
     recorded so an AI-session override approval cannot hide (思想 finding ①b).
+
+    ``allow_no_evidence`` (ms-119 / e-4205, #504 maint review): the "no SILENT
+    approval without review-evidence" invariant lives HERE — at the choke point every
+    approval path (CLI, and any future API caller) must pass — not in a single CLI-
+    layer guard that a new caller could bypass (which would re-open the very hole this
+    closes). Empty evidence + not allowed → EvidenceRequiredError. Empty evidence +
+    allowed → proceeds AND stamps ``no_evidence_ack`` on the gate so the conscious
+    bypass is audited.
     """
     result = find_entry(data, entry_id)
     if not result:
@@ -2035,9 +2053,40 @@ def target_transition_approval_approve(data: dict, entry_id: str, *,
     _, _, entry, _ = result
     if entry.get("type") != "target-transition-approval":
         raise ValueError(f"Entry {entry_id} is not a transition-approval entry")
+    if not _ta.has_review_evidence(entry):
+        if not allow_no_evidence:
+            raise EvidenceRequiredError(entry_id)
+        gate = dict(gate or {})
+        gate["no_evidence_ack"] = True
     new_state = _ta.append_verdict(entry, status="approved", rationale=rationale,
                                    actor=actor, at=_now_iso(), gate=gate)
     return entry, new_state
+
+
+def target_transition_approval_attach_evidence(data: dict, entry_id: str, *,
+                                               verdict: str, summary: str,
+                                               source: str = "",
+                                               actor: str = "") -> dict:
+    """Attach an INDEPENDENT review's evidence to a pending transition-approval
+    (ms-119 / e-4205). Returns the entry.
+
+    Evidence attaches BEFORE the verdict: once approved/rejected the request is
+    terminal, so a non-pending entry is refused (attaching after the fact would be
+    back-dating the record the approval was supposed to rest on).
+    """
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    _, _, entry, _ = result
+    if entry.get("type") != "target-transition-approval":
+        raise ValueError(f"Entry {entry_id} is not a transition-approval entry")
+    if entry.get("status") != "pending":
+        raise ValueError(
+            f"Entry {entry_id} is not pending (status={entry.get('status')}); "
+            f"独立レビュー証拠は verdict の前に添付します")
+    _ta.append_review_evidence(entry, verdict=verdict, summary=summary,
+                               source=source, actor=actor, at=_now_iso())
+    return entry
 
 
 def target_transition_approval_reject(data: dict, entry_id: str, *,

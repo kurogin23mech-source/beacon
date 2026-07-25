@@ -104,6 +104,13 @@ def test_approve_executes_milestone_completion(proj, monkeypatch):
     commands.cmd_target_review_request()
     eid = _entries(_reload(proj), "ms-5")[0]["id"]
 
+    # ms-119 / e-4205: approve now needs independent evidence attached first
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("BEACON_ENTRY_ID", eid)
+    monkeypatch.setenv("BEACON_EV_VERDICT", "attained")
+    monkeypatch.setenv("BEACON_EV_SUMMARY", "全 AC met (独立 judge)")
+    commands.cmd_target_attach_evidence()
+
     _clear_env(monkeypatch)
     monkeypatch.setenv("BEACON_ENTRY_ID", eid)
     monkeypatch.setenv("BEACON_RATIONALE", "owner 承認")
@@ -122,6 +129,13 @@ def test_approve_executes_operation_close(proj, monkeypatch):
     monkeypatch.setenv("BEACON_NEW_STATE", "closed")
     commands.cmd_target_review_request()
     eid = _entries(_reload(proj), "op-3")[0]["id"]
+
+    # ms-119 / e-4205: approve now needs independent evidence attached first
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("BEACON_ENTRY_ID", eid)
+    monkeypatch.setenv("BEACON_EV_VERDICT", "attained")
+    monkeypatch.setenv("BEACON_EV_SUMMARY", "運用終了条件を満たす (独立 judge)")
+    commands.cmd_target_attach_evidence()
 
     _clear_env(monkeypatch)
     monkeypatch.setenv("BEACON_ENTRY_ID", eid)
