@@ -1242,6 +1242,27 @@ def test_communication_add_under_account():
     assert c["direction"] == "inbound"
 
 
+def test_communication_body_optional_and_forward_compatible():
+    # e-3544: 本文欄 (body) は非空のときだけ記録され、空なら key ごと省かれる
+    # (前方互換 — 既存の body なし record と byte 一致)。
+    data = _fresh()
+    opp = se.opportunity_add(data, "Deal")
+    # 本文ありは stored、前後空白は trim
+    c1 = se.communication_add(data, opp, "議事録", direction="inbound",
+                              channel="meeting", body="  論点A\n宿題B  ")
+    rec1 = se.find_opportunity(data, opp)["communications"][0]
+    assert rec1["body"] == "論点A\n宿題B"
+    # 本文なし (省略) は body key を持たない
+    se.communication_add(data, opp, "短い連絡", direction="outbound")
+    rec2 = se.find_opportunity(data, opp)["communications"][1]
+    assert "body" not in rec2
+    # 空白のみも省かれる
+    se.communication_add(data, opp, "空本文", direction="outbound", body="   ")
+    rec3 = se.find_opportunity(data, opp)["communications"][2]
+    assert "body" not in rec3
+    assert c1 == "comm-1"
+
+
 def test_communication_ids_global_across_targets():
     data = _fresh()
     acc = se.account_add(data, "Acme")

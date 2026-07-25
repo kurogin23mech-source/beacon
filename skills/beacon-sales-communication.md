@@ -85,6 +85,7 @@ beacon account list
 | **direction (向き)** | `inbound` (相手→自分/受信) か `outbound` (自分→相手/送信) | 報告の動詞で推定 (「返事が来た」=inbound /「連絡した」=outbound)。両方向あるやり取りは **最後の向き** を採る (ボール導出の起点になるため) |
 | **channel (媒体)** | 自由記述。`messenger` / `line` / `電話` / `対面` / `sms` 等そのまま | 報告から抽出。不明なら聞く |
 | **summary (要約)** | 何が起きたかの 1 行 | AI が報告を 1 行に圧縮 (相手・用件・結果) |
+| **body (本文/内容要約)** | やり取りの中身をもう少し厚く数行で (任意, e-3544) | 報告に具体の中身 (相手の発言・決まったこと・宿題) があれば数行にまとめる。無ければ空でよい — その場合 1 行要約だけ残る |
 | **occurred_at (発生日時)** | いつのやり取りか (ISO8601 目安) | 報告に日時があればそれ、無ければ「今日」でよいか確認 |
 | **source (出典)** | 辿れるリンク / スレッド ID があれば | Messenger/LINE のスレッド URL 等。無ければ空でよい (対面/電話は出典なしが普通) |
 
@@ -101,6 +102,7 @@ beacon account list
   向き:   [受信 / 送信]
   媒体:   [channel]
   要約:   [summary]
+  本文:   [body の冒頭 / なし]
   日時:   [occurred_at]
   出典:   [source URL / なし]
 
@@ -114,6 +116,7 @@ BEACON_COMM_TARGET="$TARGET" \
   BEACON_COMM_SUMMARY="$SUMMARY" \
   BEACON_COMM_DIRECTION="$DIRECTION" \
   BEACON_COMM_CHANNEL="$CHANNEL" \
+  BEACON_COMM_BODY="$BODY" \
   BEACON_COMM_SOURCE_URL="$SOURCE_URL" \
   BEACON_COMM_SOURCE_REF="$SOURCE_REF" \
   BEACON_COMM_OCCURRED="$OCCURRED" \
@@ -122,7 +125,8 @@ BEACON_COMM_TARGET="$TARGET" \
 
 - `$TARGET` が `act-` / `nrt-` の場合、内部で親商談 / 親顧客に格納され、その予定を
   「果たした」実績として紐づく (linked_id)。ユーザーは意識しなくてよい。
-- `$SOURCE_URL` / `$SOURCE_REF` / `$OCCURRED` は無ければ空文字で渡す。
+- `$BODY` / `$SOURCE_URL` / `$SOURCE_REF` / `$OCCURRED` は無ければ空文字で渡す
+  (`$BODY` は中身の厚い要約、Web UI 詳細で読める。1 行要約しか無いやり取りは空でよい)。
 - 「直す」なら Step 2 に戻り、「やめる」なら記録せず終了する。
 
 複数往復を分けて記録する場合は、この Step を件数分繰り返す。

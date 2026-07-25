@@ -2439,6 +2439,7 @@ def communication_retarget(data: dict, comm_id: str, new_target_id: str, *,
 
 def communication_add(data: dict, target_id: str, summary: str, *,
                       direction: str, channel: str = "other",
+                      body: str = "",
                       source: Optional[dict] = None,
                       occurred_at: str = "", created_at: str = "",
                       created_in_phase: str = "") -> str:
@@ -2456,7 +2457,12 @@ def communication_add(data: dict, target_id: str, summary: str, *,
     ``direction`` (inbound/outbound) is required — it's what ball derivation and
     the reply-watcher (E) read. ``source`` is a free dict of trace pointers
     (typically ``{"ref": <message-id/thread>, "url": <permalink>}``) so the
-    origin stays auditable. Append-only: never mutates an existing record."""
+    origin stays auditable. Append-only: never mutates an existing record.
+
+    ``body`` (e-3544, 任意) is a fuller free-text 内容要約 — the骨子 of a mail /
+    the 要点 of a議事録 — kept separate from ``summary`` (the 1-行 log line). It is
+    stored only when non-empty so old records stay byte-identical (前方互換), and
+    is shown in the UI's per-証跡 detail toggle (最上部) when present."""
     container, linked_id = resolve_communication_target(data, target_id)
     if container is None:
         raise ValueError(
@@ -2480,7 +2486,7 @@ def communication_add(data: dict, target_id: str, summary: str, *,
         _, node = find_nurturing(data, linked_id)
     else:
         node = container
-    node.setdefault("communications", []).append({
+    record = {
         "id": comm_id,
         "direction": direction,
         "channel": ch,
@@ -2492,7 +2498,12 @@ def communication_add(data: dict, target_id: str, summary: str, *,
         # e-3555: 証跡が生まれた時点の商談/顧客のフェーズを set-once で刻む。空なら
         # container (opp/acc) の現フェーズを既定にする。retarget しても不変。
         "created_in_phase": created_in_phase or container.get("phase", ""),
-    })
+    }
+    # e-3544: 本文欄は非空のときだけ書く (空なら key ごと省いて前方互換を保つ)。
+    body_txt = (body or "").strip()
+    if body_txt:
+        record["body"] = body_txt
+    node.setdefault("communications", []).append(record)
     return comm_id
 
 

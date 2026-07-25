@@ -57,8 +57,12 @@ beacon meeting list <opp-id> --json    # status=ended のものが A の入力�
 
 ## Step 3: 議事録を証跡 (Communication) として残す
 
-議事録の要点を **1 行要約**にして、面談の実績として Communication に残す。対象は商談
-（無ければ該当活動 act-）。source に議事録 doc の Drive リンクを入れて出典を辿れるように:
+議事録の要点を **1 行要約** (`--summary`) にして、面談の実績として Communication に残す。
+対象は商談（無ければ該当活動 act-）。source に議事録 doc の Drive リンクを入れて出典を辿れる
+ように。加えて、議事録の**骨子 (誰が何を言ったか・決まったこと・宿題)** を数行にまとめて
+`--body` (`BEACON_COMM_BODY`, 任意・複数行) に入れる — これは 1 行要約より厚い『どういう
+内容だったか』の要約で、Web UI のやり取り行『詳細』を開くと最上部に表示される (e-3544)。
+1 行要約は一覧の見出し、body は展開時に読む中身、と役割を分ける。
 
 **スレッド集約の原則 (e-3535)**: 活動に紐づける時は、この面談を生んだ**起点の既存活動**
 (例「初回面談を実施」) を選ぶ。振り返り用に新しい活動を作らない — 1 スレッド (この面談) の
@@ -69,6 +73,7 @@ BEACON_COMM_TARGET="<$OPP または act-id>" \
   BEACON_COMM_SUMMARY="<議事録の1行要約: 何が決まり何が宿題か>" \
   BEACON_COMM_DIRECTION="inbound" BEACON_COMM_CHANNEL="meeting" \
   BEACON_COMM_SOURCE_URL="<議事録 doc の Drive リンク>" \
+  BEACON_COMM_BODY="<議事録の骨子を数行で: 論点・合意事項・宿題>" \
   BEACON_COMM_OCCURRED="<面談の日時>" \
   python3 "$(beacon _lib-path)/commands.py" communication_add
 ```

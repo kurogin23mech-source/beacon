@@ -1706,27 +1706,29 @@ cmd_opportunity_activity() {
 
 cmd_communication_add() {
     ensure_project
-    local target_id="" summary="" direction="" channel="" ref="" url="" occurred=""
+    local target_id="" summary="" direction="" channel="" ref="" url="" body="" occurred=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --direction) direction="${2:-}"; shift 2 ;;
             --channel)   channel="${2:-}"; shift 2 ;;
             --source-ref) ref="${2:-}"; shift 2 ;;
             --source-url) url="${2:-}"; shift 2 ;;
+            --body)      body="${2:-}"; shift 2 ;;
             --occurred)  occurred="${2:-}"; shift 2 ;;
-            -?*) _guard_positional "$1" "Usage: beacon communication add <target-id> <summary> --direction inbound|outbound [--channel email|slack|meeting|calendar|phone|other] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]" ;;
+            -?*) _guard_positional "$1" "Usage: beacon communication add <target-id> <summary> --direction inbound|outbound [--channel email|slack|meeting|calendar|phone|other] [--source-ref <id>] [--source-url <link>] [--body <内容要約>] [--occurred <datetime>]" ;;
             *)
                 if [ -z "$target_id" ]; then target_id="$1"; else summary="$1"; fi
                 shift ;;
         esac
     done
     if [ -z "$target_id" ] || [ -z "$summary" ] || [ -z "$direction" ]; then
-        echo "Usage: beacon communication add <target-id> <summary> --direction inbound|outbound [--channel email|slack|meeting|calendar|phone|other] [--source-ref <id>] [--source-url <link>] [--occurred <datetime>]"
+        echo "Usage: beacon communication add <target-id> <summary> --direction inbound|outbound [--channel email|slack|meeting|calendar|phone|other] [--source-ref <id>] [--source-url <link>] [--body <内容要約>] [--occurred <datetime>]"
         exit 1
     fi
     BEACON_COMM_TARGET="$target_id" BEACON_COMM_SUMMARY="$summary" \
         BEACON_COMM_DIRECTION="$direction" BEACON_COMM_CHANNEL="$channel" \
         BEACON_COMM_SOURCE_REF="$ref" BEACON_COMM_SOURCE_URL="$url" \
+        BEACON_COMM_BODY="$body" \
         BEACON_COMM_OCCURRED="$occurred" \
         python3 "$COMMANDS_PY" communication_add
 }
