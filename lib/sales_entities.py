@@ -2991,6 +2991,45 @@ def set_account_route(data: dict, label: str, service: str,
     return route
 
 
+def set_account_signature(data: dict, label: str, signature: str, *,
+                          clear: bool = False) -> dict:
+    """Set the mail signature on a send-account ledger entry (e-3529).
+
+    署名は送信 identity ごとに違う (会社用 / 個人用 …) ので、台帳の各エントリに
+    ``signature`` として持たせる。email skill が解決した identity の署名を本文末尾に
+    付ける。中身は user が運用しながら育てる soft guidance で、システムは置き場と
+    読み込みだけを持つ。
+
+    #496 review (AX high): **空文字での暗黙 clear を禁止する**。以前は空 signature が
+    署名を消していたため、渡し忘れ/typo/quoting ミス (= 最頻の失敗) が『設定するつもり』
+    で既存署名を silent に消していた。今は:
+    - ``clear=True`` → 署名を消す (key ごと省いて前方互換)。**消すのは明示意図のときだけ**。
+    - 非空 ``signature`` → 設定 (trim)。
+    - 空 ``signature`` かつ ``clear`` でない → ``ValueError`` (既存署名は保持)。
+
+    #496 再レビュー (AX high): **clear と設定値の共存を拒否**。``clear=True`` かつ非空
+    ``signature`` → ``ValueError``。stale な clear フラグ (前回 export した CLEAR=1 が次の
+    呼び出しに残る) が『set のつもりを delete に化けさせる』経路を塞ぐ。clear と設定は
+    どちらか一方。"""
+    a = get_send_account(data, label)
+    if a is None:
+        raise ValueError(f"send account not found: {label}")
+    sig = (signature or "").strip()
+    if clear:
+        if sig:
+            raise ValueError(
+                "clear と署名の値が同時に渡されています — どちらか一方にしてください "
+                "(clear は署名を消すだけ、設定は clear なしで)")
+        a.pop("signature", None)
+        return a
+    if not sig:
+        raise ValueError(
+            "signature が空です — 設定するなら値を渡してください。"
+            "署名を消すのは明示 clear のときだけです (空文字では消しません)")
+    a["signature"] = sig
+    return a
+
+
 def remove_send_account(data: dict, label: str) -> None:
     """Remove a ledger entry by label (or email). Raises if not found."""
     key = _norm(label)
@@ -3006,10 +3045,12 @@ def resolve_route(data: dict, service: str, label: str = "") -> Optional[dict]:
     """Resolve the concrete MCP routing for ``service`` for a given label
     (or the default send label when ``label`` is empty).
 
-    Returns ``{label, email, service, namespace, alias}`` or ``None`` when the
-    account or its route for that service is not configured. **This is the only
-    sanctioned way a send/操作 Skill obtains a namespace** — a Skill must never
-    free-hand one (that would reopen the取り違え hole, SPEC §2).
+    Returns ``{label, email, service, namespace, alias, signature}`` or ``None``
+    when the account or its route for that service is not configured. **This is
+    the only sanctioned way a send/操作 Skill obtains a namespace** — a Skill must
+    never free-hand one (that would reopen the取り違え hole, SPEC §2). ``signature``
+    (e-3529) is the identity's mail signature ("" when unset) so the email skill
+    can append it without a second lookup.
     """
     if service not in SEND_SERVICES:
         raise ValueError(f"unknown service '{service}' (expected one of {list(SEND_SERVICES)})")
@@ -3026,6 +3067,7 @@ def resolve_route(data: dict, service: str, label: str = "") -> Optional[dict]:
         "service": service,
         "namespace": route.get("namespace"),
         "alias": route.get("alias"),
+        "signature": a.get("signature", ""),
     }
 
 
