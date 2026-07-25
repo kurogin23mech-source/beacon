@@ -675,7 +675,9 @@ class ApiClient:
                        delivery: str = "propose-to-ai",
                        envelope: dict | None = None,
                        requested_action: str | None = None,
-                       context: str = "", rationale: str = "") -> dict:
+                       context: str = "", rationale: str = "",
+                       client_event_id: str = "",
+                       max_retries: int = 2) -> dict:
         body = {
             "channel": channel,
             "sender_session_id": sender_session_id,
@@ -695,7 +697,30 @@ class ApiClient:
             body["context"] = context
         if rationale:
             body["rationale"] = rationale
-        return self.post(f"/api/projects/{project_id}/bus", body)
+        # ms-110 / e-4001: idempotent send. Generate a stable key for this
+        # logical send (once) and, on an *ambiguous* failure (timeout /
+        # disconnect — we don't know whether the server processed it), retry
+        # with the SAME key + is_retry so the server dedups instead of double-
+        # delivering. HTTPError (a definite server response like 403/500) is
+        # NOT ambiguous, so it is not retried. Older servers ignore the extra
+        # body fields, so this degrades to a plain single POST.
+        import secrets as _secrets
+        import time as _time
+        key = client_event_id or f"ce-{int(_time.time())}-{_secrets.token_hex(4)}"
+        body["client_event_id"] = key
+        path = f"/api/projects/{project_id}/bus"
+        attempt = 0
+        while True:
+            try:
+                return self.post(path, body)
+            except ConnectionError:
+                # Ambiguous: the request may or may not have landed. Retry the
+                # same key with is_retry so a landed-but-unacked send is deduped.
+                attempt += 1
+                if attempt > max_retries:
+                    raise
+                body["is_retry"] = True
+                _time.sleep(min(2 ** attempt, 4))
 
     def issue_bus_envelope(self, project_id: str, *, tier: str,
                            actions_authorized: list[str] | None = None,

@@ -1261,6 +1261,16 @@ class BusEventCreate(BaseModel):
     # context は主役だが未指定でも送信は通す (= hard block しない)。
     context: str = ""
     rationale: str = ""
+    # ms-110 / e-4001: DM 重複配信を構造で防ぐ冪等キー。
+    # ``client_event_id`` はクライアントが 1 回の論理送信につき 1 つ生成する安定した
+    # 識別子。送信結果が曖昧 (= ハング / timeout / 接続断で ack を受け取れず、サーバが
+    # 処理したか不明) なとき、クライアントは同じ ``client_event_id`` で再送する。
+    # サーバは初回送信でこのキーをイベントに刻み、``is_retry`` 付きの再送では同じキー
+    # を持つ既存イベントを探して「重複を作らず既存を返す」(idempotent replay)。
+    # 初回送信 (is_retry=False) には走査コストを一切かけない (= クライアントが「今は
+    # 再送だ」と知っている唯一の主体なので、その申告に従う)。空なら従来どおり毎回新規。
+    client_event_id: str = ""
+    is_retry: bool = False
 
 
 class EnvelopeIssueRequest(BaseModel):
@@ -7402,6 +7412,35 @@ def _resolve_bus_event_user_ids(
     return (sender_uid, receiver_uid)
 
 
+def _find_bus_event_by_client_id(
+    project_id: str, client_event_id: str, channel: str = "",
+) -> dict | None:
+    """Find a previously-recorded bus event carrying ``client_event_id``.
+
+    ms-110 / e-4001 idempotency lookup. The first send stamps
+    ``client_event_id`` into the event ``data`` (persisted verbatim by
+    ``append_bus_event``), so a retry can recover the original event instead
+    of creating a duplicate. Scans only the recent window (event_ids are
+    timestamp-prefixed, and a retry follows an ambiguous failure by seconds/
+    minutes, so the match is near the top) and only on the retry path, so the
+    common first-send path pays nothing. Returns the event dict (with
+    ``event_id``) or None if no match / backend unavailable.
+    """
+    if not client_event_id:
+        return None
+    try:
+        recent = db.list_bus_events(project_id, channel=channel, limit=100)
+    except Exception:
+        # Backend hiccup: treat as "not found". The caller then proceeds to
+        # create the event — favouring delivery over dedup on a rare scan
+        # failure is the safe bias (a lost message is worse than a rare dup).
+        return None
+    for ev in recent:
+        if str(ev.get("client_event_id") or "") == client_event_id:
+            return ev
+    return None
+
+
 @app.post("/api/projects/{project_id}/bus")
 async def post_bus_event(
     project_id: str,
@@ -7500,6 +7539,28 @@ async def post_bus_event(
                 "steps": verify_result.steps,
             },
         )
+
+    # ms-110 / e-4001: idempotent-retry short-circuit. Placed AFTER verify (so a
+    # replay of a request that would itself be rejected is not treated as a
+    # successful prior send) and BEFORE the gate / append / sidecar / fanout (so
+    # a genuine retry does none of those a second time). Only the client-flagged
+    # retry path scans; the first send skips this entirely. If the original
+    # event is found, return it verbatim with an ``idempotent_replay`` marker —
+    # no duplicate event, no duplicate side-effects. If NOT found (the original
+    # never landed, e.g. it failed before append), fall through and create it,
+    # so an ambiguous failure that truly dropped the message is not silently
+    # lost. This is the structural half of "safe to resend on ambiguous result".
+    if body.client_event_id and body.is_retry:
+        _dup = _find_bus_event_by_client_id(
+            project_id, body.client_event_id, channel=body.channel,
+        )
+        if _dup is not None:
+            audit_record["idempotent_replay"] = {
+                "client_event_id": body.client_event_id,
+                "event_id": _dup.get("event_id"),
+            }
+            db.append_bus_audit(project_id, audit_record)
+            return {**_dup, "idempotent_replay": True}
 
     # ms-70 / e-1713: cross-user DM action authorization gate.
     # Resolve sender / receiver user_ids from the project session registry,
@@ -7686,6 +7747,12 @@ async def post_bus_event(
         data["envelope"] = body.envelope
     if body.requested_action is not None:
         data["requested_action"] = body.requested_action
+    # ms-110 / e-4001: stamp the idempotency key onto the event so a later
+    # retry (``_find_bus_event_by_client_id``) can recover this exact event and
+    # dedup instead of creating a duplicate. Benign metadata — receivers read
+    # ``payload``, not this field.
+    if body.client_event_id:
+        data["client_event_id"] = body.client_event_id
     # ms-97 C3 (= review finding H3): stamp a pending-approval marker on the
     # event itself when the ms-70 gate held it for receiver consent. The
     # approval *record* lives in the sidecar (below), but the sidecar is not
