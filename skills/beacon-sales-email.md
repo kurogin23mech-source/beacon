@@ -187,16 +187,24 @@ Step 6.5 の Communication だけが記録になる。**いずれにせよ新規
 Message-ID を `$MSGID`、Step 2 で解決した送信 identity のメールアドレスを `$FROM` として渡す:
 
 ```bash
-SOURCE_URL=$(BEACON_SEND_FROM="$FROM" BEACON_MSGID="<送信メールの Message-ID>" \
+SOURCE_URL=$(BEACON_SEND_FROM="$FROM" BEACON_RFC822_MSGID="<送信メールの rfc822 Message-ID>" \
   python3 "$(beacon _lib-path)/commands.py" sales_gmail_permalink)
+PERMALINK_EXIT=$?
 ```
 
-- 出力が **非空** → その URL を下の `--source-url` に渡す。`$FROM` を `u/` に使うので複数
-  Google アカウントでも Gmail が正しい受信箱を開く (index `u/0` は使わない)。角括弧の除去・
-  URL エンコードはビルダーが行う。
-- 出力が **空** → permalink を組めない場合 (`$FROM` 未設定 / Message-ID 不在 / 渡したのが
-  thread-id で Message-ID でない)。**`--source-url` は付けず** `--source-ref` に持っている
-  ref を残す (UI は ref 表示にフォールバック)。**死にリンクを台帳に記録しない**のが要点。
+終了コードで 3 通りを区別する (e-4185: 失敗因を黙って空に畳まない):
+
+- `PERMALINK_EXIT != 0` → **`$FROM` 未解決 (配線ミス)**。stderr の理由をユーザーに転記し、
+  Step 2 の台帳解決を見直す。これは「正当にリンク無し」ではなく直すべきバグなので黙って
+  進めない。`--source-url` は付けない。
+- `PERMALINK_EXIT == 0` かつ `$SOURCE_URL` が **非空** → その URL を下の `--source-url` に渡す。
+  `$FROM` を `u/` に使うので複数 Google アカウントでも Gmail が正しい受信箱を開く (index `u/0`
+  は使わない)。角括弧除去・URL エンコードはビルダーが行う。
+- `PERMALINK_EXIT == 0` かつ `$SOURCE_URL` が **空** → 正当に permalink を組めない場合
+  (Message-ID 不在 / 渡したのが thread-id で rfc822 Message-ID でない)。**`--source-url` は
+  付けず** `--source-ref` に持っている ref を残す (UI は ref 表示にフォールバック)。**死に
+  リンクを台帳に記録しない**のが要点。渡すのは thread-id でなく **rfc822 Message-ID** (例
+  `<abc@mail.gmail.com>`) にする — thread-id では辿れる link を組めない。
 
 **スレッド集約の原則 (e-3535)**: 紐づけ先の活動は、この送信が属する会話スレッドの**起点と
 なる既存の活動**を選ぶ。返信の往復ごとに新しい活動を作って散らさない — 1 スレッドの証跡は

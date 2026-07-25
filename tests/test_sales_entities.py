@@ -483,11 +483,14 @@ def test_gmail_permalink_happy_strips_brackets_and_encodes():
                    "rfc822msgid%3Aabc.123%40mail.gmail.com")
 
 
-def test_gmail_permalink_empty_from_returns_empty_no_broken_url():
-    # AX-high: empty $FROM must NOT yield a broken u// URL — return "" so the
-    # caller records the ref only, never a dead link.
-    assert se.build_gmail_permalink("", "<abc@x>") == ""
-    assert se.build_gmail_permalink("   ", "<abc@x>") == ""
+def test_gmail_permalink_empty_from_raises_wiring_bug():
+    # e-4185: empty $FROM is a WIRING BUG, not a legitimate no-link — it must be
+    # surfaced (raise), not collapsed into the silent "" path. (Still never yields
+    # a broken u// URL, the original AX-high concern.)
+    with pytest.raises(se.PermalinkIdentityMissing):
+        se.build_gmail_permalink("", "<abc@x>")
+    with pytest.raises(se.PermalinkIdentityMissing):
+        se.build_gmail_permalink("   ", "<abc@x>")
 
 
 def test_gmail_permalink_empty_message_id_returns_empty():
