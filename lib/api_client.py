@@ -713,9 +713,14 @@ class ApiClient:
         while True:
             try:
                 return self.post(path, body)
-            except ConnectionError:
-                # Ambiguous: the request may or may not have landed. Retry the
+            except (ConnectionError, TimeoutError):
+                # Ambiguous transport failure: the request may or may not have
+                # landed. ``post`` wraps most url/socket errors as
+                # ConnectionError, but a bare socket timeout during read can
+                # surface as TimeoutError — both are ambiguous, so retry the
                 # same key with is_retry so a landed-but-unacked send is deduped.
+                # (A definite server response raises RuntimeError, which is NOT
+                # caught here — it is not ambiguous and must not be resent.)
                 attempt += 1
                 if attempt > max_retries:
                     raise

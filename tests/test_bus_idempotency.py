@@ -249,3 +249,58 @@ def test_client_does_not_retry_definite_httperror(monkeypatch):
     with pytest.raises(RuntimeError):
         fake.post_bus_event(PROJECT_ID, "dm", payload={"text": "hi"})
     assert len(calls) == 1   # a definite server response is NOT ambiguous
+
+
+def test_client_retries_same_key_on_timeouterror(monkeypatch):
+    # review e-4001 (AX): ``post`` wraps most url/socket errors as
+    # ConnectionError, but a bare socket-read timeout can surface as
+    # TimeoutError. That is equally ambiguous (the request may have landed), so
+    # the retry loop must treat it the same — otherwise the declared "retry on
+    # timeout" silently does not fire and the double-delivery returns.
+    import api_client as ac
+    monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
+    fake = ac.ApiClient("http://testserver", token="")
+
+    calls = []
+
+    def flaky_post(path, body):
+        calls.append(copy.deepcopy(body))
+        if len(calls) == 1:
+            raise TimeoutError("read timed out")
+        return {"event_id": "ev-ok", **body}
+
+    fake.post = flaky_post
+    out = fake.post_bus_event(PROJECT_ID, "dm", payload={"text": "hi"})
+
+    assert out["event_id"] == "ev-ok"
+    assert len(calls) == 2
+    assert calls[0]["client_event_id"] == calls[1]["client_event_id"]
+    assert calls[1]["is_retry"] is True
+
+
+# ---------------------------------------------------------------------------
+# Server: reject the silent-failure edges of the dedup interface (review e-4001)
+# ---------------------------------------------------------------------------
+
+def test_retry_without_key_is_rejected_422(wired):
+    # is_retry=true with no client_event_id is a contradiction: the client says
+    # "resend" but gives nothing to dedup on. Falling through would silently
+    # create a NEW event (the double-delivery this feature prevents). Reject.
+    resp = _post(wired, is_retry=True)   # no client_event_id
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"]["error"] == "is_retry_requires_client_event_id"
+    assert len(_bus_store.get(PROJECT_ID, [])) == 0   # nothing created
+
+
+def test_retry_same_key_different_payload_conflicts_409(wired):
+    # Reusing a key with a DIFFERENT payload must not silently return the old
+    # event (dropping the new content). A reused key means "same logical send";
+    # a different payload means the caller reused a key by mistake.
+    first = _post(wired, client_event_id="ce-dup", text="original")
+    assert first.status_code == 200, first.text
+
+    conflict = _post(wired, client_event_id="ce-dup", is_retry=True,
+                     text="DIFFERENT body")
+    assert conflict.status_code == 409, conflict.text
+    assert conflict.json()["detail"]["error"] == "client_event_id_payload_mismatch"
+    assert len(_bus_store[PROJECT_ID]) == 1   # no duplicate, new content rejected

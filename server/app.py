@@ -7550,11 +7550,45 @@ async def post_bus_event(
     # never landed, e.g. it failed before append), fall through and create it,
     # so an ambiguous failure that truly dropped the message is not silently
     # lost. This is the structural half of "safe to resend on ambiguous result".
+    # ms-110 / e-4001 (review e-4001 AX): a retry that carries no key is a
+    # contradiction — the client claims "this is a resend" but gives the server
+    # nothing to dedup on, so it would silently create a NEW event (the very
+    # double-delivery this feature prevents). Reject loudly with a recovery
+    # path instead of falling through to a silent create.
+    if body.is_retry and not body.client_event_id:
+        db.append_bus_audit(project_id, audit_record)
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "is_retry_requires_client_event_id",
+                "reason": "is_retry=true was sent without client_event_id; "
+                          "resend with the same client_event_id used on the "
+                          "first attempt so the server can dedup.",
+            },
+        )
+
     if body.client_event_id and body.is_retry:
         _dup = _find_bus_event_by_client_id(
             project_id, body.client_event_id, channel=body.channel,
         )
         if _dup is not None:
+            # ms-110 / e-4001 (review e-4001 AX): guard against key reuse with a
+            # *different* payload. Returning the stored event verbatim would
+            # silently drop the new content (a silent no-op). A reused key must
+            # mean "the same logical send"; a different payload means the caller
+            # reused a key by mistake — fail loudly so they mint a fresh key.
+            if (_dup.get("payload") or {}) != (body.payload or {}):
+                db.append_bus_audit(project_id, audit_record)
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "error": "client_event_id_payload_mismatch",
+                        "reason": "client_event_id was already used with a "
+                                  "different payload; generate a new "
+                                  "client_event_id per distinct logical send.",
+                        "event_id": _dup.get("event_id"),
+                    },
+                )
             audit_record["idempotent_replay"] = {
                 "client_event_id": body.client_event_id,
                 "event_id": _dup.get("event_id"),
