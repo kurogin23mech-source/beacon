@@ -82,6 +82,12 @@ services:
       # envelope 署名鍵。BEACON_API_AUTH=1 のとき起動ガードが設定を要求する
       # (= 本番で dev fallback 鍵を使わせない安全装置)。ローカル固定値で満たす。
       BEACON_ENVELOPE_SECRET: "local-dev-envelope-secret"
+      # ms-110 / e-3497: 別ユーザー宛 DM の送信側 consent gate を有効化する
+      # (= cross-user の新規 DM は「人間が宛先を確認した」証跡が無いとサーバが拒否)。
+      # e-3886 で送信者判定を JWT 本人軸に一本化した後なので、同一ユーザーの別
+      # プロジェクト宛 DM (dev では全員 sub="dev" = same-user) は素通りし、誤発火
+      # しない。dev/本番でゲート挙動を揃えて回帰を早期に捕まえる (parity + dogfood)。
+      BEACON_SENDER_CONSENT_ENABLED: "1"
       # ストレージバックエンド: ローカル検証は DynamoDB Local (= 永続化)。
       BEACON_STORE_BACKEND: "dynamodb"
       # DynamoDB Local の接続先 (server/dynamodb_client.py が endpoint_url に使う)。
