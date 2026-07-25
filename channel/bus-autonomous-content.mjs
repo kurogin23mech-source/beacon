@@ -92,6 +92,21 @@ function _buildTrekProgressContent(evt) {
   const ttlDeadline = String(payload.ttl_deadline_at || '')
   const lastActivityAt = String(payload.last_activity_at || '')
   const ttlMinutes = payload.ttl_minutes
+  // e-4117 (ms-88): the narrative TTL MUST match the real enforcement TTL.
+  // Enforcement is DEFAULT_WORKING_TTL_MINUTES = 1440 (24h; lib/trek_scheduler.py,
+  // re-relaxed from 12 min on 2026-06-28 after prep-waiting false-stalls). The
+  // old narrative hardcoded "12 分" — a 120× overstatement threatening a
+  // deadline Layer 3 no longer enforces, which is exactly the "AI learns the
+  // narrative is bluffing and ignores it" failure the 3-layer design warns of.
+  // Derive the display from the server-passed ttl_minutes, falling back to the
+  // enforcement default, so this can never drift from enforcement again.
+  const DEFAULT_TTL_MIN = 1440
+  const effTtlMin = (typeof ttlMinutes === 'number' && ttlMinutes > 0)
+    ? ttlMinutes
+    : DEFAULT_TTL_MIN
+  const ttlDisplay = (effTtlMin % 60 === 0)
+    ? `${effTtlMin / 60} 時間 (= ${effTtlMin} 分)`
+    : `${effTtlMin} 分`
   // ms-88 / e-2105 (Phase 1 narrative 強化, ms-88 CORE doc 5nfTSmCDVUzD4SLzIhI5):
   // 旧 narrative (= 「確認を取らず autonomous に実行する」) は AI compliance
   // に依存する soft recommendation だった。 dogfood (= tk-40b0b27c) で executor
@@ -103,11 +118,11 @@ function _buildTrekProgressContent(evt) {
   // Layer 1 (= narrative) の責務に集中する。 「narrative だけで動く保証はない」
   // ことを前提に、 narrative はあくまで 3 層の最も柔らかい層として機能する。
   const lines = [
-    '## ⚠ TREK ACTION REQUIRED — 12 分以内に実行 (= 怠ると auto-stall)',
+    '## ⚠ TREK ACTION REQUIRED — ' + ttlDisplay + '以内に実行 (= 怠ると auto-stall)',
     '',
     '以下の ' + channel + ' event は Trek scope (= 缶詰の徹夜作業部屋、 事前承認スコープ) 内の作業継続経路。',
     '',
-    '**必須アクション** (= 12 分以内、 怠ると server-side TTL safety net (= ms-88 / e-2107) が当該 session の **全 working task を一括 leader_review に強制遷移** し、 leader review DM を発火する):',
+    '**必須アクション** (= ' + ttlDisplay + '以内、 怠ると server-side TTL safety net (= ms-88 / e-2107) が当該 session の **全 working task を一括 leader_review に強制遷移** し、 leader review DM を発火する):',
     '',
     '  a. `/beacon-trek-pulse ' + trekId + '` を起動 (= 推奨経路、 5 択 picker: terminal / continue / dm-leader / dm-peer (= 横向き相談、 ms-88 / e-2140 peer-first) / no-op)',
     '  b. または `/beacon-trek-execute ' + trekId + '` を継続 (= 既存 executor loop)',
@@ -128,6 +143,7 @@ function _buildTrekProgressContent(evt) {
   }
   lines.push('')
   lines.push('budget が枯渇していたら Skill 側 (Step 4.5) が自動で停止 → incident open → note 残しに降格する。Skill の責務なのでこの inject 側で事前判定はしない。')
+  lines.push('> Note (= e-4116 / ms-75): この Trek 内の member 間 DM (leader↔executor、同一ユーザーの複数 session を含む) は auto-reply budget を **消費しない** (= server 側で Trek-internal と判定されると bypass)。budget 枯渇の心配は Trek 外向きの送信だけに当たる。')
   lines.push('')
   lines.push('> Note (= ms-88 CORE 5nfTSmCDVUzD4SLzIhI5): この narrative は 3 層強制構造の Layer 1 (= 明示的 consequence 提示)。 Layer 2 (= /beacon-trek-pulse による observable ack) と Layer 3 (= server TTL 罰則) と組合さって初めて「実質的強制」 が成立する。 narrative 単独では AI compliance 依存。')
   return lines.join('\n')

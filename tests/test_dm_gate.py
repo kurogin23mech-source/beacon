@@ -194,9 +194,12 @@ def test_shared_trek_lookup_detects_receiver_in_members_list():
             {
                 "trek_id": "tk-aaa",
                 "creator_actor": {"user_id": "user-alice"},
+                "status": "active",
                 "members": [
-                    {"user_id": "user-alice", "role": "leader"},
-                    {"user_id": "user-bob", "role": "member"},
+                    {"user_id": "user-alice", "role": "leader",
+                     "joined_at": "2026-06-18T00:00:00Z"},
+                    {"user_id": "user-bob", "role": "member",
+                     "joined_at": "2026-06-18T00:00:00Z"},
                 ],
             }
         ],
@@ -221,8 +224,10 @@ def test_shared_trek_lookup_detects_receiver_as_creator():
             {
                 "trek_id": "tk-bbb",
                 "creator_actor": {"user_id": "user-bob"},  # receiver
+                "status": "active",
                 "members": [
-                    {"user_id": "user-alice", "role": "member"},
+                    {"user_id": "user-alice", "role": "member",
+                     "joined_at": "2026-06-18T00:00:00Z"},
                 ],
             }
         ],
@@ -310,8 +315,10 @@ def test_shared_trek_lookup_multi_trek_only_one_active_still_grants_bypass():
                 "trek_id": "tk-active",
                 "creator_actor": {"user_id": "user-alice"},
                 "members": [
-                    {"user_id": "user-alice"},
-                    {"user_id": "user-bob"},
+                    {"user_id": "user-alice",
+                     "joined_at": "2026-06-18T00:00:00Z"},
+                    {"user_id": "user-bob",
+                     "joined_at": "2026-06-18T00:00:00Z"},
                 ],
                 "status": "active",
             },
@@ -324,6 +331,66 @@ def test_shared_trek_lookup_multi_trek_only_one_active_still_grants_bypass():
     matched, trek_id = lookup("user-alice", "user-bob")
     assert matched is True
     assert trek_id == "tk-active"
+
+
+def test_shared_trek_lookup_skips_planning_trek():
+    """e-4116 follow-up (PR #491 parent review 1): a non-active (e.g.
+    ``planning``) trek must NOT grant bypass — it is not yet a live
+    pre-approved work scope. Previously only ``archived`` was excluded."""
+    treks_by_uid = {
+        "user-alice": [
+            {
+                "trek_id": "tk-planning",
+                "creator_actor": {"user_id": "user-alice"},
+                "status": "planning",
+                "members": [
+                    {"user_id": "user-alice",
+                     "joined_at": "2026-06-18T00:00:00Z"},
+                    {"user_id": "user-bob",
+                     "joined_at": "2026-06-18T00:00:00Z"},
+                ],
+            }
+        ],
+    }
+    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+        lambda uid: treks_by_uid.get(uid, [])
+    )
+    matched, _ = lookup("user-alice", "user-bob")
+    assert matched is False
+
+
+def test_shared_trek_lookup_skips_invited_not_joined_member_phase_a():
+    """e-4116 follow-up (PR #491 parent re-review): an invited-but-not-joined
+    member does NOT grant bypass — and the session_id grain is what enforces it.
+
+    Per ``trek.accept_invitation``, an invite placeholder carries NEITHER a
+    session_id NOR a joined_at; joining writes both together. So a phase-A
+    invite placeholder (no session_id) simply never matches the requester's
+    session_id, and the bypass is denied structurally — no separate joined_at
+    check needed. Here user-bob was invited (placeholder, no session_id) but
+    the DM targets session sv-bob, which is not in members[]."""
+    treks_by_uid = {
+        "user-alice": [
+            {
+                "trek_id": "tk-invited",
+                "creator_actor": {"user_id": "user-alice"},
+                "status": "active",
+                "meta": {"migration_phase": "A"},
+                "members": [
+                    {"user_id": "user-alice", "session_id": "sv-alice",
+                     "role": "leader", "joined_at": "2026-06-18T00:00:00Z"},
+                    # user-bob invited but never joined: no session_id, joined_at "".
+                    {"user_id": "user-bob", "role": "member",
+                     "invited_at": "2026-06-18T00:00:00Z", "joined_at": ""},
+                ],
+            }
+        ],
+    }
+    lookup = dm_gate.build_shared_trek_lookup_from_lists(
+        lambda uid: treks_by_uid.get(uid, [])
+    )
+    matched, _ = lookup("user-alice", "user-bob", "sv-alice", "sv-bob")
+    assert matched is False
 
 
 def test_shared_trek_lookup_empty_user_ids_return_false():

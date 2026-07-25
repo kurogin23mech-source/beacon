@@ -46,7 +46,8 @@ def _trek_phase_a(*, trek_id: str, members: list[dict]) -> dict:
 
     members[] entries are session_id keyed: each carries ``session_id`` and
     ``user_id`` (the latter is informational; the gate ignores it for the
-    grain check in phase A+).
+    grain check in phase A+). Presence of ``session_id`` ⟺ joined (an invite
+    placeholder has no session_id), so no separate ``joined_at`` is needed.
     """
     return {
         "trek_id": trek_id,

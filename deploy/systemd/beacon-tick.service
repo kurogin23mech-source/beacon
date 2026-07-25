@@ -1,0 +1,20 @@
+# e-1391 (ms-66) — 本番の定期ティック駆動 (Trek/Operation 自律発火のドライバ)。
+# beacon-tick.timer から oneshot で起動される。Cloud Run 廃止 → VPS 移行で消えた
+# tick ドライバの復旧 (2026-07-24 Trek review で発覚)。
+# /etc/systemd/system/beacon-tick.service に配置する (docs/DEPLOY_VPS.md 参照)。
+[Unit]
+Description=Beacon periodic scheduler tick (drive Trek/Operation autonomy)
+After=network-online.target beacon-api.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/opt/beacon
+# BEACON_SCHEDULER_INTERNAL_KEY を tick endpoint のヘッダに渡すため、beacon-api と
+# 同じ app.env を読む (鍵は app と scheduler で同値でなければならない)。
+EnvironmentFile=/etc/beacon/app.env
+# repo 内スクリプトを直接実行する (git reset で自動更新される)。
+ExecStart=/opt/beacon/scripts/vps-tick.sh
+# 1 tick が 30 秒以上かかったら異常とみなして止める (curl 側 --max-time と整合)。
+TimeoutStartSec=45

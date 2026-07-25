@@ -310,10 +310,14 @@ def build_shared_trek_lookup_from_lists(
             # しかなければ通常の cross-user budget gate に fallback する。
             if t.get("halt"):
                 continue
-            # archived trek も bypass 根拠に使わない (= 終わった作業領域
-            # は AI action 同意の根拠にならない)。 ms-70 originally caller-
-            # side filter に任せていたが、 halt と同列に明示する。
-            if (t.get("status") or "") == "archived":
+            # ms-75 e-4116 follow-up (PR #491 parent review 1): only an
+            # ACTIVE trek grants bypass. Previously only ``archived`` was
+            # excluded, which let a ``planning`` trek (still being set up,
+            # not yet a live pre-approved work scope) grant the bypass. A
+            # non-active trek is not a consented AI-action scope, so it must
+            # not short-circuit the cross-user gate / budget. This also
+            # subsumes the old archived exclusion.
+            if (t.get("status") or "") != "active":
                 continue
 
             trek_id = t.get("trek_id") or ""
@@ -326,6 +330,16 @@ def build_shared_trek_lookup_from_lists(
                 # members[]. The user_id is informational (= same human
                 # can have multiple sessions in the same trek; only the
                 # listed ones grant bypass).
+                #
+                # e-4116 follow-up (PR #491 parent re-review): matching by
+                # session_id presence is ITSELF the invited-vs-joined guard.
+                # ``accept_invitation`` writes ``session_id`` and ``joined_at``
+                # together on join, while an invite placeholder has neither, so
+                # a member carrying a session_id is already a joined member. An
+                # earlier fix added a separate ``joined_at`` requirement here;
+                # that broke every joined member whose fixture / legacy row
+                # omits joined_at (regressed test_audit_log_trek_id), so it is
+                # removed — the session_id match is the correct grain.
                 if not sender_sid or not receiver_sid:
                     # Missing session ids — cannot verify session-grain
                     # membership; fall through to next trek.
@@ -345,8 +359,20 @@ def build_shared_trek_lookup_from_lists(
                 # Not in this trek — try next one.
                 continue
 
-            # pre-A trek: user_id grain (legacy behaviour preserved).
-            if creator_uid == receiver_uid:
+            # pre-A trek: user_id grain (legacy behaviour preserved verbatim).
+            #
+            # e-4116 follow-up (PR #491 parent re-review): ``joined_at`` is
+            # deliberately NOT required here. The invited-but-not-joined hole is
+            # a *session-grain* concept — only phase-A members carry both a
+            # session_id and a joined_at, so only there can we distinguish an
+            # invited-but-not-joined session from a joined one. A pre-A
+            # (legacy, user_id-keyed) member predates joined_at tracking; by the
+            # legacy contract it is already a joined member. Imposing joined_at
+            # here would 403 the DMs of any trek whose members were recorded
+            # before joined_at existed (a backward-compat break — regressed
+            # tests/test_sender_consent_backstop.py). The active + halt filters
+            # above still apply to pre-A treks.
+            if creator_uid and creator_uid == receiver_uid:
                 return (True, trek_id)
             for m in members:
                 if m.get("user_id") == receiver_uid:

@@ -42,6 +42,18 @@ import redis_client  # ms-96 / e-2381: rate limit 用の揮発カウンタ (fail
 import trek as trek_mod  # ms-69 / e-1656: trek schema + pure mutators
 import trek_scheduler as trek_scheduler_mod  # ms-83 / e-1997: progress-check cadence logic
 import tick_scheduler  # ms-107 e-3434/e-3461: target-agnostic periodic-tick cadence
+import tick_health as tick_health_mod  # e-1391 / ms-66: tick-liveness evaluation
+
+# e-1391 (ms-66) — last successful periodic tick, recorded by the
+# trek-scheduler tick endpoint and read back by /api/system/tick-health so an
+# external watchdog can catch a silently-dead tick driver. In-memory (per
+# process): a restart resets it and the next tick re-baselines within ≤1 min.
+_last_tick_at: str = ""
+_last_tick_report: dict = {}
+# e-1391 follow-up (review H1) — process start time, so tick-health can tell a
+# just-booted server (never ticked yet = fine) from one up long enough that a
+# missing/dead tick driver is overdue (= alert). In-memory like _last_tick_at.
+_server_start_at: "datetime.datetime | None" = None
 
 # debug=False is the default, but set explicitly to ensure stack traces are
 # never included in error responses in production.
@@ -9239,6 +9251,23 @@ def trek_scheduler_tick_endpoint(
     except Exception as _op_exc:  # pragma: no cover - defensive isolation
         scheduled_fires = [{"error": f"{type(_op_exc).__name__}: {_op_exc}"}]
 
+    # e-1391 (ms-66) — record that a tick just completed so an *external*
+    # watchdog (scripts/tick-health-monitor.py) can notice when the driver
+    # dies. The 2026-07 Cloud Run → VPS migration silently dropped the tick
+    # driver and it was only caught by accident; last_tick_at + the
+    # /api/system/tick-health endpoint make a dead tick loud from outside the
+    # box. In-memory is sufficient: on process restart it resets and the next
+    # tick (≤1 min) re-baselines it.
+    global _last_tick_at, _last_tick_report
+    _last_tick_at = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    _last_tick_report = {
+        "candidates": len(candidate_treks),
+        "due": len(due_treks),
+        "fired": len(fired) if isinstance(fired, list) else fired,
+        "scheduled_fires": len(scheduled_fires)
+        if isinstance(scheduled_fires, list) else 0,
+    }
+
     return {
         "now": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
         "candidates": len(candidate_treks),
@@ -9256,6 +9285,112 @@ def trek_scheduler_tick_endpoint(
         # ms-107 e-3434 chunk 3b — scheduled things fired on this tick.
         "scheduled_fires": scheduled_fires,
     }
+
+
+@app.get("/api/system/tick-health")
+def tick_health_endpoint():
+    """Report when the server last ran a periodic tick (e-1391 / ms-66).
+
+    Read-only and unauthenticated (like ``/api/version``): it exposes only
+    operational liveness, no user data, and must be cheaply pollable by an
+    *external* watchdog (``scripts/tick-health-monitor.py`` on GitHub Actions
+    cron). The migration incident that motivated this — the tick driver
+    silently dropped in the Cloud Run → VPS move — is exactly a failure a
+    down/misconfigured box cannot self-report, so the observer has to live
+    outside the box and read this from over the network.
+
+    ``last_tick_at`` is in-memory per process (see the module global), so a
+    just-restarted server reports ``status=never`` until its first tick lands
+    (≤1 min). The pure classification lives in ``lib/tick_health.py``.
+    """
+    import datetime
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # e-1391 follow-up (review H1): pass uptime so evaluate_tick_health can
+    # promote a persistent ``never`` (server up but driver never ticked = the
+    # migration failure) to ``stale``, instead of staying silent forever.
+    uptime_seconds = None
+    if _server_start_at is not None:
+        uptime_seconds = (now - _server_start_at).total_seconds()
+    health = tick_health_mod.evaluate_tick_health(
+        _last_tick_at, now, uptime_seconds=uptime_seconds,
+    )
+    return {
+        **health,
+        "last_tick_report": _last_tick_report,
+    }
+
+
+def _sid_to_uid(project_id: str, session_id: str) -> str:
+    """Resolve a session_id → user_id from a project's session registry.
+
+    Single-session variant of ``_resolve_bus_event_user_ids`` (same
+    ``projects/{pid}/sessions/{sid}.user_id`` source). Empty on any miss.
+    """
+    if not project_id or not session_id:
+        return ""
+    try:
+        for s in db.list_sessions(project_id) or []:
+            if (s.get("session_id") or "") == session_id:
+                return str(s.get("user_id") or "")
+    except Exception:
+        return ""
+    return ""
+
+
+@app.get("/api/system/trek-internal-send")
+def trek_internal_send_endpoint(
+    sender_project_id: str,
+    sender_session_id: str,
+    recipient_session_id: str,
+    recipient_project_id: str = "",
+    user: dict = Depends(require_auth),
+):
+    """Answer whether an autonomous DM reply is Trek-internal (e-4116 / ms-75).
+
+    The MCP reply path (``channel/bus.mjs``) consumes the auto-reply budget
+    before posting, but a reply between two members of the same active Trek
+    must NOT cost budget — a Trek is a pre-approved scope with its own TTL /
+    halt controls, so the runaway-cap is structurally redundant for
+    member-to-member coordination. Before e-4116 the MCP path had no Trek
+    awareness at all, so leader↔executor DMs exhausted the budget and Trek
+    coordination deadlocked (observed 2026-07-24). bus.mjs cannot see Trek
+    membership (it is server-side state), so it pre-flights this endpoint
+    before consuming budget.
+
+    Single source of truth: reuses ``dm_gate``'s session-grain shared-Trek
+    lookup (``build_shared_trek_lookup_from_lists``) — the SAME rule the
+    receiver-side action gate applies (halt / archived filtered, phase-A
+    session grain, live per-call trek fetch). Covers cross-project replies via
+    ``recipient_project_id``.
+
+    Read-only. Best-effort: returns ``trek_internal=false`` on any unresolved
+    id so a failed lookup keeps the budget gate in force — never a silent
+    relaxation.
+
+    Requires auth (PR #491 review 2a): although it returns only a boolean +
+    trek_id, an *unauthenticated* endpoint would be a membership oracle — anyone
+    holding two session ids could probe whether they share a Trek (and get the
+    trek_id), and hammer the per-call ``list_sessions`` + ``list_treks`` scan as
+    a cheap DoS amplifier. Gating it behind ``require_auth`` (the MCP bridge
+    already sends its bearer token) removes the anonymous oracle. The real
+    action-authorization boundary remains the dm_gate check on the bus POST;
+    this endpoint only drives a *client-side* budget optimization.
+    """
+    if not sender_session_id or not recipient_session_id:
+        return {"trek_internal": False, "trek_id": ""}
+    rpid = recipient_project_id or sender_project_id
+    sender_uid = _sid_to_uid(sender_project_id, sender_session_id)
+    receiver_uid = _sid_to_uid(rpid, recipient_session_id)
+    if not sender_uid or not receiver_uid:
+        return {"trek_internal": False, "trek_id": ""}
+    lookup = dm_gate_mod.build_shared_trek_lookup_from_lists(
+        lambda uid: db.list_treks(actor_id=uid) if uid else [],
+    )
+    matched, trek_id = dm_gate_mod._coerce_lookup_result(
+        lookup(sender_uid, receiver_uid,
+               sender_session_id, recipient_session_id)
+    )
+    return {"trek_internal": bool(matched), "trek_id": trek_id or ""}
 
 
 def _find_operation_spec_doc(project: dict, op_id: str) -> str:
@@ -10746,8 +10881,11 @@ _ws_session_conns: dict[tuple[str, str], set[str]] = {}
 
 @app.on_event("startup")
 async def _capture_event_loop():
-    global _event_loop
+    global _event_loop, _server_start_at
     _event_loop = asyncio.get_event_loop()
+    # e-1391 follow-up (review H1): stamp boot time for tick-health uptime.
+    import datetime as _dt
+    _server_start_at = _dt.datetime.now(_dt.timezone.utc)
 
 
 @app.on_event("startup")
@@ -10817,6 +10955,43 @@ async def _verify_envelope_secret_configured():
     if envelope_mod.is_using_dev_fallback():
         _server_logger.info(
             "envelope signing using dev fallback secret "
+            "(BEACON_API_AUTH=0 — local dev / test posture)"
+        )
+
+
+@app.on_event("startup")
+async def _verify_scheduler_key_configured():
+    """Refuse to start in production with the dev scheduler-tick key (e-4115).
+
+    Twin guard to ``_verify_envelope_secret_configured`` for the *other*
+    internal secret. ``BEACON_SCHEDULER_INTERNAL_KEY`` gates
+    ``POST /api/system/trek-scheduler/tick`` (which drives Trek / Operation
+    autonomy) and the T1-system envelope mint path. Its dev fallback
+    (``server/envelope.py:_DEV_FALLBACK_SCHEDULER_KEY``) is visible in the
+    public repo, so booting production with the key unset would let anyone who
+    reads the source drive the tick / mint endpoints. Fail fast at boot (which
+    reddens the pull-deploy health check) rather than silently at first
+    unauthorized tick.
+
+    Same posture gate as the envelope-secret guard: only enforced when
+    ``_auth_enabled`` (production-ish, ``BEACON_API_AUTH`` != "0"). Local dev /
+    unit tests (``BEACON_API_AUTH=0``) may use the fallback; we only log INFO.
+    """
+    if _auth_enabled and envelope_mod.is_using_dev_scheduler_key():
+        msg = (
+            "BEACON_SCHEDULER_INTERNAL_KEY not configured for production "
+            "(BEACON_API_AUTH=1 but the scheduler tick / mint endpoints would "
+            "accept the dev fallback key visible in the public repo). Set "
+            "BEACON_SCHEDULER_INTERNAL_KEY to a random 32+ byte value in "
+            "/etc/beacon/app.env before deploying — e.g. "
+            "`BEACON_SCHEDULER_INTERNAL_KEY=$(openssl rand -hex 32)` — and "
+            "restart beacon-api. See docs/DEPLOY_VPS.md『定期ティック』."
+        )
+        _server_logger.error(msg)
+        raise RuntimeError(msg)
+    if envelope_mod.is_using_dev_scheduler_key():
+        _server_logger.info(
+            "scheduler tick key using dev fallback "
             "(BEACON_API_AUTH=0 — local dev / test posture)"
         )
 

@@ -761,9 +761,9 @@ cd $MS_WORKTREE && git worktree add .worktrees/<task-id> <task-id>/work   # -b �
 
 ### T5.5: Trek-scoped task の TTL 延長 (ms-95 / e-2308)
 
-**前提判定**: 親 MS が Trek の scope (= 缶詰の作業部屋 / 自律的計画的タスク実行の作業空間) に含まれている場合、 dispatch する各 task は Trek task でもある。 この場合 Trek 側の **TTL safety net** (= 12 分間 reaffirm が無いと auto-stall して `leader_review` に強制遷移) が subagent 動作中に false-positive で発火する構造問題がある (= 2026-06-23 dogfood で実体験、 e-2308 起票)。
+**前提判定**: 親 MS が Trek の scope (= 缶詰の作業部屋 / 自律的計画的タスク実行の作業空間) に含まれている場合、 dispatch する各 task は Trek task でもある。 この場合 Trek 側の **TTL safety net** (= 既定 24 時間 (= 1440 分、`DEFAULT_WORKING_TTL_MINUTES`) reaffirm が無いと auto-stall して `leader_review` に強制遷移) が subagent 動作中に false-positive で発火しうる構造問題がある (= 2026-06-23 dogfood で実体験、 e-2308 起票。 当時 TTL は 12 分で高頻度発火だったが e-4117 時点は 24h に緩和済で頻度は低い。 ただし非 member session が pulse 経路に入れない構造要因は残る)。
 
-**理由**: Agent tool subagent は別 `session_id` で起動され、 Trek の joined member ではない (= `beacon trek task-state working` が 403 で reject される)。 main session (= leader) も Agent tool 完了待ちで pulse 経路に入れない。 結果 12 分経過時点で TTL が走り、 動作中の task が `leader_review` に降格される。
+**理由**: Agent tool subagent は別 `session_id` で起動され、 Trek の joined member ではない (= `beacon trek task-state working` が 403 で reject される)。 main session (= leader) も Agent tool 完了待ちで pulse 経路に入れない。 結果 TTL (= 既定 24 時間) 経過時点で auto-stall が走り、 動作中の task が `leader_review` に降格される。
 
 **対処**: T6 で各 subagent を起動する **直前** に、 leader 代行で TTL 延長を打つ:
 

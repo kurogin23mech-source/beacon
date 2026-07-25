@@ -280,9 +280,11 @@ def test_gate_blocks_all_trek_channels_when_opt_out_env_set():
 
 def test_trek_progress_check_content_carries_launch_directive():
     # ms-88 / e-2105 (Phase 1 narrative 強化) で header と本文が更新された。
-    # 新仕様: 「必須アクション」 + 「12 分以内」 + auto-stall 罰則明示 + 3 経路
+    # 新仕様: 「必須アクション」 + TTL 期限 + auto-stall 罰則明示 + 3 経路
     # (= pulse / execute / task-state) を提示する。 旧 "Run this autonomously"
     # は consequence 強度が足りなかったため置換。
+    # e-4117: 期限は enforcement TTL (= 既定 1440 分 / 24h) に一致。旧「12 分」
+    # 表記は enforcement の 120× 過大だったので撤去 (narrative の空手形防止)。
     out = _probe_content({
         "event_id": "evt-trek-1",
         "channel": "trek-progress-check",
@@ -294,7 +296,9 @@ def test_trek_progress_check_content_carries_launch_directive():
     assert "TREK ACTION REQUIRED" in out
     # consequence 明示 (= 怠ると auto-stall) は narrative 強度の核
     assert "auto-stall" in out
-    assert "12 分以内" in out or "12分以内" in out
+    # TTL は enforcement 既定 (24h) にフォールバックし、旧「12 分」は出ない
+    assert "24 時間 (= 1440 分)以内" in out
+    assert "12 分" not in out
     # 3 経路 (pulse 推奨 + execute 既存 + task-state manual) が出る
     assert "/beacon-trek-pulse tk-abc" in out
     assert "/beacon-trek-execute tk-abc" in out
@@ -407,3 +411,56 @@ def test_unknown_channel_falls_back_to_operation_format():
     })
     assert "## AUTONOMOUS ACTION" in out
     assert "/beacon-operation-execute op-1" in out
+
+
+# -----------------------------------------------------------------------------
+# e-4117 (ms-88): Trek TTL narrative must match the real enforcement TTL, and
+# must not drift from lib/trek_scheduler.DEFAULT_WORKING_TTL_MINUTES.
+# -----------------------------------------------------------------------------
+
+def _enforcement_default_ttl_min() -> int:
+    """Read the enforcement default straight from the Python source of truth."""
+    import sys
+    sys.path.insert(0, str(REPO_ROOT / "lib"))
+    import trek_scheduler  # noqa: PLC0415
+    return int(trek_scheduler.DEFAULT_WORKING_TTL_MINUTES)
+
+
+def test_trek_narrative_uses_server_passed_ttl_minutes():
+    """When the server passes ttl_minutes, the narrative shows exactly that —
+    not a hardcoded value."""
+    out = _probe_content({
+        "event_id": "e1", "channel": "trek-progress-check",
+        "payload": {"trek_id": "tk-1", "ttl_minutes": 30},
+    })
+    assert "30 分以内に実行" in out
+    assert "12 分" not in out  # the old hardcoded, drifted value is gone
+
+
+def test_trek_narrative_falls_back_to_enforcement_default_not_12min():
+    """No ttl_minutes in the payload → the narrative falls back to the REAL
+    enforcement default (1440 min = 24h), never the stale 12-min figure.
+
+    This is the drift guard: the mjs fallback constant is asserted equal to
+    lib/trek_scheduler.DEFAULT_WORKING_TTL_MINUTES, so bumping the enforcement
+    TTL without updating the narrative fallback fails here."""
+    out = _probe_content({
+        "event_id": "e2", "channel": "trek-progress-check",
+        "payload": {"trek_id": "tk-1"},  # no ttl_minutes
+    })
+    default_min = _enforcement_default_ttl_min()
+    assert default_min == 1440  # pin the current enforcement value explicitly
+    # 1440 min renders as "24 時間 (= 1440 分)".
+    assert f"{default_min // 60} 時間 (= {default_min} 分)以内に実行" in out
+    assert "12 分" not in out
+
+
+def test_trek_narrative_header_and_action_line_agree_on_ttl():
+    """Both the header and the 必須アクション line must quote the same TTL —
+    a half-updated narrative (header says X, body says Y) is its own drift."""
+    out = _probe_content({
+        "event_id": "e3", "channel": "trek-progress-check",
+        "payload": {"trek_id": "tk-1", "ttl_minutes": 1440},
+    })
+    # Appears in the header AND the 必須アクション bullet.
+    assert out.count("24 時間 (= 1440 分)以内") >= 2

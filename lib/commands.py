@@ -20344,18 +20344,56 @@ def _record_bus_budget_trek_bypass(trek_id: str) -> None:
         return
 
 
+def _trek_has_joined_member(
+    members: list, *, phase_a: bool, session_id: str, user_id: str
+) -> bool:
+    """True iff a *joined* member of ``members[]`` identifies (session_id, user_id).
+
+    Branches on the trek's phase, mirroring the server-side ``dm_gate``
+    shared-Trek lookup exactly (PR #491 parent re-review). The invited-vs-joined
+    distinction is structural, NOT a separate ``joined_at`` check:
+
+      * **phase-A (session_id keyed)**: match by ``session_id`` presence.
+        ``trek.accept_invitation`` writes ``session_id`` and ``joined_at``
+        together on join, while an invite placeholder has NEITHER — so a member
+        carrying a session_id is already joined, and an invite placeholder (no
+        session_id) simply never matches a real session id.
+      * **pre-A (legacy user_id grain)**: match by ``user_id``. A
+        pre-session-grain member predates ``joined_at`` tracking and is joined
+        by the legacy contract; imposing ``joined_at`` here would drop existing
+        treks (the regression this re-review corrected).
+    """
+    if phase_a:
+        if not session_id:
+            return False
+        return any((m.get("session_id") or "") == session_id for m in members)
+    return bool(user_id) and any(
+        (m.get("user_id") or "") == user_id for m in members
+    )
+
+
 def _is_trek_internal_send(recipient_sid: str) -> tuple[bool, str]:
     """Decide whether the current --in-reply-to send is Trek-internal.
 
-    Returns ``(True, trek_id)`` iff both the caller and ``recipient_sid``
-    are joined members of the same active Trek; otherwise ``(False, "")``.
+    Returns ``(True, trek_id)`` iff both the caller's session and
+    ``recipient_sid`` are joined members of the same active Trek; otherwise
+    ``(False, "")``.
 
     Detection material (= mirror of server-side
-    ``dm_gate.should_gate_dm_action`` shared_trek_member rule):
-      * caller's user_id from the cloud identity (auth.json / credentials.json)
+    ``dm_gate.should_gate_dm_action`` shared_trek_member rule, session grain):
+      * caller's user_id + session_id from the cloud identity
       * recipient's user_id resolved from the project session registry
-      * caller's joined active treks; intersect ``members[]`` with the
-        recipient_user_id
+      * caller's joined active treks; both sender session and recipient
+        session must appear as joined ``members[]`` of the same trek
+
+    e-4116 (ms-75): the same-user leader↔fork case (= solo-dev dogfood, both
+    sessions owned by one cloud user) is the PRIMARY Trek-internal case and
+    MUST bypass. The old code excluded ``recipient_user_id == my_user_id``,
+    which structurally denied the bypass to exactly that case and made Trek
+    coordination deadlock on budget exhaustion. Membership is checked at
+    session grain (``_trek_member_matches``), so same-user is included via two
+    distinct member entries while a same-user send to a *non-member* session
+    is still correctly gated.
 
     Best-effort: any exception or missing material returns ``(False, "")``
     so the regular budget gate stays in force. The bypass MUST NOT fire
@@ -20369,7 +20407,7 @@ def _is_trek_internal_send(recipient_sid: str) -> tuple[bool, str]:
         # (= no bypass), the safer side of the SPEC.
         return False, ""
     try:
-        my_user_id, _, _ = _resolve_creator_identity()
+        my_user_id, _, my_session_id = _resolve_creator_identity()
         if not my_user_id:
             return False, ""
         client, config = _get_api_client()
@@ -20385,9 +20423,13 @@ def _is_trek_internal_send(recipient_sid: str) -> tuple[bool, str]:
                 actor = s.get("actor") or {}
                 recipient_user_id = actor.get("user_id") or ""
                 break
-        if not recipient_user_id or recipient_user_id == my_user_id:
+        # e-4116: NO same-user exclusion. A single user's leader/fork sessions
+        # coordinating inside a Trek are the main case to bypass; membership
+        # (below) is what gates it, not user distinctness.
+        if not recipient_user_id:
             return False, ""
-        # Walk my joined active treks.
+        # Walk my joined active treks. Both my session AND the recipient
+        # session must be joined members of the same active trek.
         try:
             my_treks = client.list_treks() or []
         except Exception:
@@ -20395,18 +20437,36 @@ def _is_trek_internal_send(recipient_sid: str) -> tuple[bool, str]:
         for trek in my_treks:
             if trek.get("status") != "active":
                 continue
-            # Caller must be a joined member of this trek (= joined_at non
-            # empty). Pure invitation does not grant Trek scope yet.
-            am_member = False
-            for m in trek.get("members") or []:
-                if m.get("user_id") == my_user_id and m.get("joined_at"):
-                    am_member = True
-                    break
+            # e-4116 follow-up (PR #491 parent review 1): a halted trek must
+            # NOT grant bypass — leader pulled the Andon cord. This mirrors
+            # the server-side dm_gate lookup, which skips halted treks; the
+            # CLI mirror was missing it (fork finding M1), so a halted-but-
+            # active trek still bypassed budget on the CLI send path.
+            if trek.get("halt"):
+                continue
+            members = trek.get("members") or []
+            # Branch on trek phase once (mirror server _is_phase_a_plus), then
+            # match both endpoints at that grain. Doing it per-trek (not
+            # per-member) is what lets a phase-A invite placeholder — no
+            # session_id — be correctly excluded instead of falling through to
+            # a legacy user match.
+            try:
+                import trek as _trek_mod
+                phase_a = _trek_mod.is_session_id_keyed(trek)
+            except Exception:
+                phase_a = False
+            am_member = _trek_has_joined_member(
+                members, phase_a=phase_a,
+                session_id=my_session_id, user_id=my_user_id,
+            )
             if not am_member:
                 continue
-            for m in trek.get("members") or []:
-                if m.get("user_id") == recipient_user_id and m.get("joined_at"):
-                    return True, str(trek.get("trek_id") or "")
+            recipient_is_member = _trek_has_joined_member(
+                members, phase_a=phase_a,
+                session_id=recipient_sid, user_id=recipient_user_id,
+            )
+            if recipient_is_member:
+                return True, str(trek.get("trek_id") or "")
         return False, ""
     except Exception:
         return False, ""

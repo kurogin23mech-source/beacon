@@ -96,6 +96,54 @@ sudo systemctl restart beacon-api.service
 curl -fsS https://beacon-ai.dev/health
 ```
 
+## 定期ティック (Trek/Operation 自律の駆動) — e-1391 / ms-66
+
+Trek と Operation の server-side 自律発火は、`POST /api/system/trek-scheduler/tick`
+を **定期的に叩く外部ドライバ** に依存する (endpoint 自体は Trek fanout に加えて
+`lib/tick_scheduler` 経由で due な Operation も相乗り発火する = 単一 endpoint が
+自律の全駆動)。Cloud Run 時代は Cloud Scheduler がこれを叩いていたが、VPS 移行
+(ms-102/ms-96) でこのドライバが**無音で消失**し、本番で Trek/Operation が発火
+しなくなっていた (2026-07-24 Trek review で発覚)。復旧のため systemd timer で叩く。
+
+### セットアップ (VPS で 1 回だけ)
+
+```bash
+ssh ubuntu@beacon-ai.dev
+cd /opt/beacon
+git fetch && git reset --hard origin/main
+chmod +x scripts/vps-tick.sh
+
+# 内部認証キーを app.env に設定 (未設定だと app が起動拒否 = e-4115)。
+#   openssl rand -hex 32 で生成し /etc/beacon/app.env に追記:
+#   BEACON_SCHEDULER_INTERNAL_KEY=<生成した値>
+# app と tick timer の双方がこの同じ app.env を読む。
+sudo systemctl restart beacon-api.service    # 鍵反映のため再起動
+
+# tick unit / timer を設置
+sudo cp deploy/systemd/beacon-tick.service /etc/systemd/system/
+sudo cp deploy/systemd/beacon-tick.timer   /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now beacon-tick.timer
+
+# 動作確認
+sudo systemctl start beacon-tick.service       # 手動で 1 回叩く
+journalctl -t beacon-tick -n 20 --no-pager     # "tick ok (HTTP 200): {...}" を確認
+curl -fsS http://127.0.0.1:8000/api/system/tick-health | python3 -m json.tool
+```
+
+### 死活監視 (out-of-box watchdog)
+
+tick が**再び無音で止まる**のを検知するため、GitHub Actions cron
+(`.github/workflows/deploy-health-monitor.yml`) が 10 分毎に
+`GET /api/system/tick-health` を polling し、`status=stale` / `unreachable` なら
+所有者へ beacon-bus DM で通知する (`scripts/tick-health-monitor.py` +
+`lib/tick_health.py`)。deploy 鮮度監視の twin。box の外で走るので box 全体が
+落ちても検知できる (自分の停止は自分で報告できない、が設計原則)。
+
+- **一時停止**: `sudo systemctl disable --now beacon-tick.timer`。
+- **間隔変更**: `beacon-tick.timer` の `OnUnitActiveSec` を編集 → daemon-reload。
+- **ログ**: `journalctl -t beacon-tick` または `journalctl -u beacon-tick.service`。
+
 ## 注意
 
 - 更新対象は **サーバ (server/lib)** のみ。bridge 側 (`channel/bus.mjs`) は pip
@@ -140,6 +188,7 @@ WantedBy=multi-user.target
 | env | 必須 | 説明 |
 |-----|------|------|
 | `BEACON_OAUTH_CLIENT_ID` | ✅ (provider=firebase) | Web UI ログインの Google OAuth client_id (PUBLIC 値)。空だとログインボタンが消える。 |
+| `BEACON_SCHEDULER_INTERNAL_KEY` | ✅ (SECRET) | 定期ティック内部認証キー (e-1391 / e-4115)。beacon-tick.timer と app が同値で照合。未設定だと prod は起動拒否 (refuse-to-boot)。`openssl rand -hex 32` で生成。**repo に実値を書かない。** → 下の「定期ティック」節参照。 |
 
 **beacon-ai.dev 本番の実値** (PUBLIC 値、secret ではない):
 
