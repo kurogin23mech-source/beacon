@@ -40,7 +40,7 @@ def _pending_entry(with_evidence=False):
 def test_build_carries_empty_review_evidence_slot():
     e = _pending_entry()
     assert e["meta"]["review_evidence"] == []
-    assert _ta.has_independent_evidence(e) is False
+    assert _ta.has_review_evidence(e) is False
 
 
 def test_append_review_evidence_is_observable():
@@ -50,7 +50,17 @@ def test_append_review_evidence_is_observable():
     rec = e["meta"]["review_evidence"][0]
     assert rec == {"verdict": "attained", "summary": "s", "source": "j",
                    "actor": "a", "at": "t"}
-    assert _ta.has_independent_evidence(e) is True
+    assert _ta.has_review_evidence(e) is True
+
+
+def test_append_review_evidence_rejects_invalid_verdict():
+    # #504 AX review: an unchecked verdict was silent corruption — `--verdict ok`
+    # entered the ledger AND unlocked the gate. The closed enum is now enforced.
+    e = _pending_entry()
+    with pytest.raises(ValueError):
+        _ta.append_review_evidence(e, verdict="ok", summary="s", source="j",
+                                   actor="a", at="t")
+    assert e["meta"]["review_evidence"] == []  # nothing entered the ledger
 
 
 # --- core attach -----------------------------------------------------------
@@ -74,6 +84,20 @@ def test_core_attach_evidence_refuses_non_pending():
     with pytest.raises(ValueError):
         core.target_transition_approval_attach_evidence(
             data, "e-1", verdict="attained", summary="s")
+
+
+def test_core_approve_enforces_evidence_at_the_choke_point():
+    # #504 maint review: the "no silent approval without evidence" invariant lives in
+    # core (the choke point every path passes), so a future non-CLI caller (API)
+    # cannot bypass it — not only in the CLI guard.
+    data = _data(_pending_entry(with_evidence=False))
+    with pytest.raises(core.EvidenceRequiredError):
+        core.target_transition_approval_approve(data, "e-1", allow_no_evidence=False)
+    # the explicit ack proceeds AND stamps the gate for audit
+    entry, new_state = core.target_transition_approval_approve(
+        data, "e-1", allow_no_evidence=True, gate={"signal": "human-session"})
+    assert new_state == "observing"
+    assert entry["meta"]["approval_gate"]["no_evidence_ack"] is True
 
 
 # --- CLI approve guard -----------------------------------------------------

@@ -1785,6 +1785,38 @@ def _apply_transition(data: dict, target_id: str, new_state: str, *,
             f"(kind={kind or 'unknown'})")
 
 
+def _print_evidence_guidance(eid: str, target_id: str) -> None:
+    """Print the 'attach independent review evidence' guidance for a pending approval
+    (ms-119 / e-4205, #504 maint review — this text was copied across the completion
+    route, review-request, and the approve error; rendered once here). Interpolates
+    the concrete target-id and enumerates the verdict vocabulary from its single
+    source (#504 AX review — no bare <id> / <v> placeholders)."""
+    verdicts = "|".join(_ta.REVIEW_EVIDENCE_VERDICTS)
+    print(f"  独立証拠 (= 承認の前提, ms-119/e-4205): "
+          f"`beacon review context --type attainment --target {target_id}` で判定を"
+          f"生成し、")
+    print(f"    `beacon target attach-review-evidence {eid} --verdict <{verdicts}> "
+          f"--summary <text>` で記録 (無ければ approve は --acknowledge-no-evidence を要求)")
+
+
+def _evidence_required_message(eid: str, target_id: str) -> str:
+    """The approve-refusal message when a pending approval has no review-evidence
+    (ms-119 / e-4205). Shares the vocabulary + command spelling with
+    _print_evidence_guidance so the two cannot drift."""
+    verdicts = "|".join(_ta.REVIEW_EVIDENCE_VERDICTS)
+    return (
+        f"Error: 承認依頼 {eid} に独立レビューの証拠が添付されていません "
+        f"(ms-119 / e-4205)。承認は実装者の自己申告 intent だけでは通りません。\n"
+        f"  次のいずれかを:\n"
+        f"    1. 独立 judge を回して証拠を添付する — "
+        f"`beacon review context --type attainment --target {target_id}` で判定を"
+        f"生成し、\n"
+        f"       `beacon target attach-review-evidence {eid} --verdict <{verdicts}> "
+        f"--summary <text>` で記録する。\n"
+        f"    2. 独立証拠なしで承認すると明示する — `--acknowledge-no-evidence` "
+        f"(監査に記録が残ります)。\n")
+
+
 def _route_completion_to_review(data: dict, ms_id: str, *, reason: str,
                                 new_state: str = "done") -> None:
     """Route a milestone completion through the 目的達成レビュー gate instead of
@@ -1831,10 +1863,7 @@ def _route_completion_to_review(data: dict, ms_id: str, *, reason: str,
         target_id=ms_id)
     if _gap:
         print(_gap)
-    print(f"  独立証拠 (= 承認の前提, ms-119/e-4205): `beacon review context --type "
-          f"attainment --target <id>` で judge を回し `beacon target attach-evidence "
-          f"{eid} --verdict <v> --summary <s>` で記録 (無ければ approve は "
-          f"--acknowledge-no-evidence を要求)")
+    _print_evidence_guidance(eid, ms_id)
     print(f"  確定 (= 遷移実行): beacon target approve {eid} [--rationale <text>]")
     print(f"  却下 (= 遷移せず): beacon target reject {eid} [--rationale <text>]")
 
@@ -1902,10 +1931,7 @@ def cmd_target_review_request():
         target_id=target_id)
     if _gap:
         print(_gap)
-    print(f"  独立証拠 (= 承認の前提, ms-119/e-4205): `beacon review context --type "
-          f"attainment --target <id>` で judge を回し `beacon target attach-evidence "
-          f"{eid} --verdict <v> --summary <s>` で記録 (無ければ approve は "
-          f"--acknowledge-no-evidence を要求)")
+    _print_evidence_guidance(eid, target_id)
     print(f"  確定 (= 遷移実行): beacon target approve {eid} [--rationale <text>]")
     print(f"  却下 (= 遷移せず): beacon target reject {eid} [--rationale <text>]")
 
@@ -1938,35 +1964,22 @@ def cmd_target_approve():
         )
         sys.exit(2)
     data = load_project()
-    # ms-119 / e-4205: an attainment approval must not pass on the implementer's
-    # self-asserted intent alone. If no INDEPENDENT review evidence is attached, the
-    # human must EXPLICITLY acknowledge that (a conscious choice) — the SILENT path
-    # is refused. The verdict itself stays the human's; this only forbids silence.
-    _res = core.find_entry(data, entry_id)
-    _entry = _res[2] if _res else None
+    # ms-119 / e-4205: the "no SILENT approval without review-evidence" invariant is
+    # enforced in core.target_transition_approval_approve (the choke point every
+    # approval path passes), NOT here — a CLI-only guard would be bypassed by a future
+    # API caller, re-opening the very hole this closes (#504 maint review). Here we
+    # only translate --acknowledge-no-evidence → allow_no_evidence and render the
+    # recovery path when core refuses.
     _ack_no_ev = os.environ.get("BEACON_ACK_NO_EVIDENCE", "") == "1"
-    _has_ev = bool(_entry and _ta.has_independent_evidence(_entry))
-    if (_entry and _entry.get("type") == "target-transition-approval"
-            and not _has_ev and not _ack_no_ev):
-        print(
-            f"Error: 承認依頼 {entry_id} に独立レビューの証拠が添付されていません "
-            f"(ms-119 / e-4205)。承認は実装者の自己申告 intent だけでは通りません。\n"
-            f"  次のいずれかを:\n"
-            f"    1. 独立 judge を回して証拠を添付する — "
-            f"`beacon review context --type attainment --target <target-id>` で判定を"
-            f"生成し、`beacon target attach-evidence {entry_id} --verdict "
-            f"<attained|partial|not-attained> --summary <要約>` で記録する。\n"
-            f"    2. 独立証拠なしで承認すると明示する — `--acknowledge-no-evidence` "
-            f"(監査に記録が残ります)。",
-            file=sys.stderr)
-        sys.exit(2)
-    _gate = _approval_gate_record()
-    if not _has_ev and _ack_no_ev:
-        _gate["no_evidence_ack"] = True
     try:
         entry, new_state = core.target_transition_approval_approve(
             data, entry_id, rationale=rationale, actor=_actor_str(),
-            gate=_gate)
+            gate=_approval_gate_record(), allow_no_evidence=_ack_no_ev)
+    except core.EvidenceRequiredError:
+        _r = core.find_entry(data, entry_id)
+        _tid = (_r[2]["meta"].get("target_id") if _r else "") or "<target-id>"
+        sys.stderr.write(_evidence_required_message(entry_id, _tid))
+        sys.exit(2)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1995,30 +2008,32 @@ def cmd_target_approve():
 
 
 def cmd_target_attach_evidence():
-    """Attach an independent review's evidence to a pending transition-approval
+    """Attach a 目的達成 review's evidence to a pending transition-approval
     (ms-119 / e-4205).
 
-    beacon target attach-evidence <entry-id> --verdict <attained|partial|not-attained>
-        --summary <text> [--source <text>]
+    beacon target attach-review-evidence <entry-id> --verdict
+        <attained|partial|not-attained> --summary <text> [--source <text>]
 
-    Records the INDEPENDENT 目的達成 judge's verdict + grounds onto the pending
-    approval, so `beacon target approve` no longer refuses it for lack of evidence.
-    The verdict recorded here is the JUDGE's proposal; the human's own verdict is
-    still pressed via `beacon target approve` (SPEC § 方針2)."""
+    Records the 目的達成 judge's verdict + grounds onto the pending approval, so
+    `beacon target approve` no longer refuses it for lack of evidence. The verdict
+    recorded here is the JUDGE's proposal; the human's own verdict is still pressed
+    via `beacon target approve` (SPEC § 方針2). ``--source`` is the self-declared
+    provenance — recorded verbatim (no fabricated "independent-judge" default; #504
+    AX review), since independence is operational, not structurally verified."""
     entry_id = os.environ.get("BEACON_ENTRY_ID", "").strip()
     verdict = os.environ.get("BEACON_EV_VERDICT", "").strip()
     summary = os.environ.get("BEACON_EV_SUMMARY", "").strip()
     source = os.environ.get("BEACON_EV_SOURCE", "").strip()
+    _verdicts = "|".join(_ta.REVIEW_EVIDENCE_VERDICTS)
     if not entry_id or not verdict or not summary:
-        print("Usage: beacon target attach-evidence <entry-id> --verdict "
-              "<attained|partial|not-attained> --summary <text> [--source <text>]",
-              file=sys.stderr)
+        print(f"Usage: beacon target attach-review-evidence <entry-id> --verdict "
+              f"<{_verdicts}> --summary <text> [--source <text>]", file=sys.stderr)
         sys.exit(1)
     data = load_project()
     try:
         entry = core.target_transition_approval_attach_evidence(
             data, entry_id, verdict=verdict, summary=summary,
-            source=source or "independent-judge", actor=_actor_str())
+            source=source, actor=_actor_str())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

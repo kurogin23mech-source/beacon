@@ -534,7 +534,7 @@ cmd_target_attach_evidence() {
             --verdict)  verdict="${2:-}"; shift 2 ;;
             --summary)  summary="${2:-}"; shift 2 ;;
             --source)   source="${2:-}";  shift 2 ;;
-            -?*)        _guard_positional "$1" "Usage: beacon target attach-evidence <entry-id> --verdict <attained|partial|not-attained> --summary <text> [--source <text>]" ;;
+            -?*)        _guard_positional "$1" "Usage: beacon target attach-review-evidence <entry-id> --verdict <attained|partial|not-attained> --summary <text> [--source <text>]" ;;
             *)          entry_id="$1";    shift ;;
         esac
     done
@@ -3301,7 +3301,7 @@ case "${1:-}" in
         case "${2:-}" in
             review-request|review) shift 2; cmd_target_review_request "$@" ;;
             approve)  shift 2; cmd_target_approve "$@" ;;
-            attach-evidence) shift 2; cmd_target_attach_evidence "$@" ;;
+            attach-review-evidence) shift 2; cmd_target_attach_evidence "$@" ;;
             reject)   shift 2; cmd_target_reject "$@" ;;
             list|ls)  shift 2; cmd_target_list "$@" ;;
             create)   shift 2; cmd_target_create "$@" ;;

@@ -153,23 +153,40 @@ def build_transition_approval(*, entry_id, target_id, target_kind, old_state,
     }
 
 
+# ms-119 / e-4205: the closed value domain for a review-evidence verdict. It is the
+# single source of the vocabulary — the CLI usage / error / guidance strings render
+# from it and append_review_evidence REJECTS anything else, so an unvalidated verdict
+# (`--verdict ok`) can neither enter the append-only audit ledger nor unlock the
+# approve gate (#504 AX+maint review: an unchecked enum was silent corruption).
+REVIEW_EVIDENCE_VERDICTS = ("attained", "partial", "not-attained")
+
+
 def append_review_evidence(entry, *, verdict, summary, source, actor, at):
-    """Record an INDEPENDENT review's evidence onto a pending transition-approval
-    (ms-119 / e-4205).
+    """Record a review's evidence onto a pending transition-approval (ms-119 /
+    e-4205).
 
     Distinct from ``meta["intent"]`` (the implementer's completion CLAIM) and
-    ``meta["evidence"]`` (implementer-supplied refs): this slot holds the verdict +
-    grounds an INDEPENDENT judge produced against the target's SPEC (the 目的達成
-    review). e-4005 required the evidence not be the implementer's self-report, but
-    nothing tied "an independent judge actually ran" to the approval — so a
-    completion could be approved on the implementer's word alone (observed with
-    e-4198). This slot + the approve guard (``has_independent_evidence``) close the
-    SILENT path: the human still owns the verdict, but approving with no independent
-    evidence now requires an explicit acknowledgement, never silence.
+    ``meta["evidence"]`` (implementer-supplied refs): this slot holds a verdict +
+    grounds produced by a 目的達成 review judge against the target's SPEC. e-4005
+    required the evidence not be the implementer's self-report, but nothing tied "a
+    review judge actually ran" to the approval — so a completion could be approved on
+    the implementer's word alone (observed with e-4198). This slot + the approve
+    guard (``has_review_evidence``) close the SILENT path: approving with no evidence
+    now needs an explicit acknowledgement, never silence.
+
+    ``verdict`` is validated against ``REVIEW_EVIDENCE_VERDICTS`` — an invalid value
+    raises ValueError rather than entering the append-only ledger. ``source`` is the
+    self-declared provenance (recorded, NOT structurally verified to be independent —
+    see ``has_review_evidence``); the caller passes it verbatim (no fabricated
+    default).
 
     Append-only (audit): each record is ``{verdict, summary, source, actor, at}``.
     Pure — the caller owns persistence.
     """
+    if verdict not in REVIEW_EVIDENCE_VERDICTS:
+        raise ValueError(
+            "invalid review-evidence verdict %r (expected one of %s)"
+            % (verdict, ", ".join(REVIEW_EVIDENCE_VERDICTS)))
     rec = {
         "verdict": verdict,
         "summary": summary,
@@ -181,11 +198,19 @@ def append_review_evidence(entry, *, verdict, summary, source, actor, at):
     return entry
 
 
-def has_independent_evidence(entry):
-    """True if the approval carries ≥1 independent review-evidence record (ms-119 /
-    e-4205). The approve path uses this so a completion cannot be approved on the
-    implementer's intent alone unless the human EXPLICITLY acknowledges the absence
-    — a conscious choice, never silent."""
+def has_review_evidence(entry):
+    """True if the approval carries ≥1 review-evidence record (ms-119 / e-4205).
+
+    NAME IS DELIBERATELY MODEST (#504 AX+maint review): this checks only that a
+    record EXISTS, not that it is genuinely INDEPENDENT. Independence is an
+    OPERATIONAL property of how the record got attached (a Skill running a
+    context-zero judge, then `beacon target attach-review-evidence`), NOT a
+    structural guarantee — an implementer could attach their own judgement and it
+    would pass, exactly like the env-based approve guard is a self-report. What is
+    structural is: the absence of a record cannot pass SILENTLY (the approve gate
+    refuses), and the record's provenance (source + actor) is on the ledger, so a
+    self-attached one is grep-able rather than hidden. Do not rename this back to
+    imply a guarantee the structure does not make."""
     return bool((entry.get("meta") or {}).get("review_evidence"))
 
 
