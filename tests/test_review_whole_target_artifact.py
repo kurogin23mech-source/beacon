@@ -125,10 +125,39 @@ def test_collect_walks_dedups_and_tolerates_missing(monkeypatch):
     by_hash = {c["hash"]: c for c in artifact["commits"]}
     assert by_hash["aaaaaaa1111"]["diff"] == "+A"
     assert by_hash["aaaaaaa1111"]["subject"] == "feat A"
+    # the folded duplicate (e-4, same 7-char prefix) is recorded, not silently lost
+    assert by_hash["aaaaaaa1111"]["deduped"] == ["aaaaaaa9999"]
     # the unfetchable commit is carried with an error, not silently dropped
     assert "error" in by_hash["ccccccc3333"]
     assert artifact["truncated"] is False
-    assert gaps == []
+    # a fetch failure MUST surface as a gap so "gaps empty = complete input" holds
+    assert len(gaps) == 1 and "取得できません" in gaps[0]
+
+
+def test_collect_unknown_target_raises_not_exits(monkeypatch):
+    # ms-119 / e-4196 maint review: the collector is reusable, so a bad target id
+    # raises ValueError (the CLI layer converts it to an exit) — it never sys.exits.
+    data = {"milestones": []}
+    _install_fakes(monkeypatch, data, {})
+    with pytest.raises(ValueError):
+        commands._collect_whole_target_artifact("ms-nope")
+
+
+def test_collect_merge_and_empty_diff_are_marked(monkeypatch):
+    # ms-119 / e-4196 AX review: a successful-but-empty diff must be tagged so a
+    # judge doesn't read "" as "changed nothing" (the merge-commit / empty-commit
+    # completeness hole). The collector uses -m --first-parent so merges DO produce a
+    # diff; a genuinely empty result carries empty_reason.
+    data = {"milestones": [{"id": "ms-M", "status": "in_progress", "title": "M",
+             "entries": [
+                 {"id": "e-1", "type": "commit", "description": "empty one",
+                  "meta": {"hash": "deadbee0000"}},
+             ]}]}
+    _install_fakes(monkeypatch, data, {"deadbee0000": ""})  # git show returns empty
+    artifact, gaps = commands._collect_whole_target_artifact("ms-M")
+    c = artifact["commits"][0]
+    assert c["diff"] == ""
+    assert "empty_reason" in c
 
 
 def test_collect_empty_ledger_surfaces_gap(monkeypatch):
@@ -169,18 +198,41 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 COMMANDS = os.path.join(REPO, "lib", "commands.py")
 
 
-def test_cli_missing_artifact_source_names_target(monkeypatch):
+def _run_ctx(env_extra):
     import subprocess
     env = dict(os.environ)
-    # philosophy needs an origin doc; give a bogus one so origin resolution fails
-    # BEFORE artifact collection would run — we only assert the else-branch text is
-    # reachable, so instead drive a type whose origin is repo-file (ax) with no
-    # --pr/--diff-ref/--target to hit the artifact else-branch cleanly.
-    env.update({"BEACON_REVIEW_TYPE": "ax"})
-    for k in ("BEACON_PR", "BEACON_DIFF_REF", "BEACON_TARGET_ID"):
+    for k in ("BEACON_PR", "BEACON_DIFF_REF", "BEACON_TARGET_ID", "BEACON_MODE",
+              "BEACON_ORIGIN_DOC"):
         env.pop(k, None)
-    p = subprocess.run([sys.executable, COMMANDS, "review_context"],
-                       capture_output=True, text=True, env=env, cwd=REPO)
+    env.update(env_extra)
+    return subprocess.run([sys.executable, COMMANDS, "review_context"],
+                          capture_output=True, text=True, env=env, cwd=REPO)
+
+
+def test_cli_missing_artifact_source_names_target():
+    # ax's 原典 is a repo-file, so with no --pr/--diff-ref/--target it reaches the
+    # artifact else-branch cleanly; assert that branch's error advertises --target.
+    p = _run_ctx({"BEACON_REVIEW_TYPE": "ax"})
     assert p.returncode == 1
     assert "--target" in p.stderr
+    assert p.stdout.strip() == ""
+
+
+def test_cli_target_with_pr_is_rejected():
+    # ms-119 / e-4196 AX review: --target (whole-target) + --pr (change-scoped) must
+    # not silently let --pr win and drop the whole-target scope.
+    p = _run_ctx({"BEACON_REVIEW_TYPE": "philosophy", "BEACON_TARGET_ID": "ms-1",
+                  "BEACON_PR": "1"})
+    assert p.returncode == 1
+    assert "同時指定できません" in p.stderr
+    assert p.stdout.strip() == ""
+
+
+def test_cli_pr_open_type_rejects_whole_target():
+    # ms-119 / e-4196 AX review: a pr-open review type (ax) has no whole-target
+    # question in its instrument, so --target is routed away, not handed a mode the
+    # judge instrument doesn't know.
+    p = _run_ctx({"BEACON_REVIEW_TYPE": "ax", "BEACON_TARGET_ID": "ms-1"})
+    assert p.returncode == 1
+    assert "philosophy" in p.stderr
     assert p.stdout.strip() == ""
