@@ -183,10 +183,15 @@ Step 6.5 の Communication だけが記録になる。**いずれにせよ新規
 なる既存の活動**を選ぶ。返信の往復ごとに新しい活動を作って散らさない — 1 スレッドの証跡は
 1 活動配下に集約する (打診と確定が別活動に割れると fold・履歴が読めなくなる)。
 
+送信メールの**件名 + 本文の骨子**を `--body` (`BEACON_COMM_BODY`, 任意・複数行) にも入れる
+(e-3544)。1 行要約は一覧の見出し、body は Web UI 詳細で読む『何を送ったか』の中身。定型の
+短い連絡なら空でよい。
+
 ```bash
 BEACON_COMM_TARGET="<act-id または $OPP>" \
   BEACON_COMM_SUMMARY="<送信内容の1行要約>" \
   BEACON_COMM_DIRECTION="outbound" BEACON_COMM_CHANNEL="email" \
+  BEACON_COMM_BODY="<件名 + 本文の骨子>" \
   BEACON_COMM_SOURCE_REF="<message-id / thread-id>" \
   python3 "$(beacon _lib-path)/commands.py" communication_add
 ```

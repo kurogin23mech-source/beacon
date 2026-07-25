@@ -77,10 +77,14 @@ BEACON_COMM_TARGET="<target-id>" \
   BEACON_COMM_SUMMARY="<やり取りの1行要約>" \
   BEACON_COMM_DIRECTION="<inbound: 相手発 / outbound: 自分発>" \
   BEACON_COMM_CHANNEL="<email / slack>" \
+  BEACON_COMM_BODY="<本文の骨子を数行で (任意, 用件が厚いときだけ)>" \
   BEACON_COMM_SOURCE_REF="<message-id / thread-id>" BEACON_COMM_SOURCE_URL="<permalink>" \
   BEACON_COMM_OCCURRED="<やり取りの時刻>" \
   python3 "$(beacon _lib-path)/commands.py" communication_add
 ```
+
+`--body` (`BEACON_COMM_BODY`, 任意) はメール/Slack 本文の骨子を数行でまとめる欄
+(e-3544)。1 行要約は一覧の見出し、body は Web UI 詳細で読む中身。短い一言のやり取りは空でよい。
 
 ## Step 4: 活動の消化・ボール更新
 

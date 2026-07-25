@@ -25428,6 +25428,7 @@ def cmd_communication_add():
     source_ref = os.environ.get("BEACON_COMM_SOURCE_REF", "")
     source_url = os.environ.get("BEACON_COMM_SOURCE_URL", "")
     occurred_at = os.environ.get("BEACON_COMM_OCCURRED", "")
+    body = os.environ.get("BEACON_COMM_BODY", "")  # e-3544: 任意の内容本文/要約
     source = {}
     if source_ref:
         source["ref"] = source_ref
@@ -25437,7 +25438,7 @@ def cmd_communication_add():
     try:
         comm_id = sales_entities.communication_add(
             data, target_id, summary, direction=direction, channel=channel,
-            source=source or None, occurred_at=occurred_at,
+            body=body, source=source or None, occurred_at=occurred_at,
             created_at=core._now_iso())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
