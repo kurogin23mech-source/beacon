@@ -597,6 +597,97 @@ def account_rename(data: dict, account_id: str, new_name: str) -> dict:
     return acc
 
 
+# ---------------------------------------------------------------------------
+# Account.transcript_source — 議事録取得元の宣言的 override (e-3552, テナント層)
+# ---------------------------------------------------------------------------
+# 議事録 (文字起こし) のソースと置き場は顧客ごとに違う: Meet+Workspace は自動
+# 生成物がカレンダーイベント添付 / Drive の Meet Recordings に入るが、無料 Google
+# や Zoom/tl;dv/Otter は任意フォルダ・任意命名。meeting-wrap が『Drive の Meet
+# Recordings にある』を前提化すると壊れる。そこで **顧客別に最小の宣言** を持たせ、
+# skill は宣言から解決する (汎用 config エンジンは作らない = 過汎用化回避, rule of
+# three)。structured field 採用理由: skill が決定論的に読んで動くには NL でなく
+# 構造データが要る (人間向け narrative の dossier とは別物)。
+VALID_TRANSCRIPT_SOURCE_TYPES = (
+    "meet_calendar",  # Meet+Workspace: mtg- の calendar_event_id から添付を辿る (第一候補)
+    "drive_folder",   # 任意の Drive フォルダに置かれる (folder_id で場所を宣言)
+    "external",       # Zoom/tl;dv/Otter 等の外部ツール (tool/naming で手掛かりを宣言)
+    "manual",         # 自動生成物なし、毎回人に Drive リンクを聞く (無料アカウント等)
+)
+
+
+def set_account_transcript_source(data: dict, account_id: str, source_type: str, *,
+                                  folder_id: str = "", naming: str = "",
+                                  tool: str = "", clear: bool = False) -> dict:
+    """Declare where an Account's 議事録 (文字起こし) comes from (e-3552, テナント層).
+
+    ``source_type`` must be one of ``VALID_TRANSCRIPT_SOURCE_TYPES``. Optional
+    ``folder_id`` (drive_folder 用), ``naming`` (命名規則の手掛かり), ``tool``
+    (external の道具名) are stored only when 非空. The declaration is written
+    atomically (one unit — the skill passes all its fields together, not a partial
+    merge). Returns the mutated account.
+
+    #498 review fixes:
+    - **AX high — 空 type での暗黙 clear を禁止**。渡し忘れ/typo が既存宣言を silent に
+      消す事故を防ぐ。空 type かつ ``clear`` でない → ``ValueError`` (既存は保持)。
+    - **AX high (再レビュー) — clear と設定値の共存を拒否**。``clear=True`` かつ type/
+      folder_id/naming/tool のいずれかが非空 → ``ValueError``。stale な ``clear`` フラグが
+      設定意図を silent に delete へ化けさせる (『set のつもりが残留 clear で delete』)
+      経路を塞ぐ。clear と設定はどちらか一方。
+    - **type 組合せ検証**: ``drive_folder`` は ``folder_id`` 必須、``external`` は ``tool``
+      必須 (無ければ手掛かりが無く ``manual`` と同挙動になる別名なので、``manual`` に倒す)。
+      場所/道具を特定できない脆い宣言を作らせない。
+    - **VALID_TRANSCRIPT_SOURCE_TYPES が type 集合の唯一の真値源**。docstring/skill md に
+      列挙をコピーしない (drift ガード test が双方向で一致を固定する)。"""
+    acc = find_account(data, account_id)
+    if acc is None:
+        raise ValueError(f"Account not found: {account_id}")
+    st = (source_type or "").strip()
+    fid = (folder_id or "").strip()
+    nm = (naming or "").strip()
+    tl = (tool or "").strip()
+    if clear:
+        if st or fid or nm or tl:
+            raise ValueError(
+                "clear と設定値が同時に渡されています — どちらか一方にしてください "
+                "(clear は宣言を消すだけ、設定は clear なしで)")
+        acc.pop("transcript_source", None)
+        return acc
+    if not st:
+        raise ValueError(
+            "transcript_source type が空です — 宣言するなら type を渡してください。"
+            "宣言を消すのは明示 clear のときだけです (空 type では消しません)")
+    if st not in VALID_TRANSCRIPT_SOURCE_TYPES:
+        raise ValueError(
+            f"transcript_source type must be one of "
+            f"{list(VALID_TRANSCRIPT_SOURCE_TYPES)}, got {st!r}")
+    if st == "drive_folder" and not fid:
+        raise ValueError(
+            "transcript_source type='drive_folder' には folder_id が必須です "
+            "(場所を特定できない宣言は脆い Drive 総当たりに落ちるため)")
+    if st == "external" and not tl:
+        raise ValueError(
+            "transcript_source type='external' には tool が必須です "
+            "(道具を特定できない external は manual と同挙動なので manual を使ってください)")
+    ts = {"type": st}
+    if fid:
+        ts["folder_id"] = fid
+    if nm:
+        ts["naming"] = nm
+    if tl:
+        ts["tool"] = tl
+    acc["transcript_source"] = ts
+    return acc
+
+
+def get_account_transcript_source(data: dict, account_id: str) -> Optional[dict]:
+    """Return an Account's transcript_source declaration, or None if unset (e-3552)."""
+    acc = find_account(data, account_id)
+    if acc is None:
+        raise ValueError(f"Account not found: {account_id}")
+    ts = acc.get("transcript_source")
+    return dict(ts) if ts else None
+
+
 def set_assignee(data: dict, target_id: str, assignee: str) -> dict:
     """Set the 担当ユーザー (assignee) on an Opportunity (``opp-``) or Account
     (``acc-``), dispatched by id prefix. Target-class-generic mutation that

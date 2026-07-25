@@ -96,6 +96,106 @@ def test_account_name_required():
         se.account_add(data, "   ")
 
 
+def test_account_transcript_source_declare_read_and_validate():
+    # e-3552: 議事録取得元の宣言的 override。未宣言=None、宣言=最小フィールド、不正 type 拒否。
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    assert se.get_account_transcript_source(data, acc) is None
+    # drive_folder 宣言 (optional フィールドは非空のみ格納、trim)
+    se.set_account_transcript_source(data, acc, "drive_folder",
+                                     folder_id="  1AbC  ", naming="議事録_")
+    assert se.get_account_transcript_source(data, acc) == {
+        "type": "drive_folder", "folder_id": "1AbC", "naming": "議事録_"}
+    # 空 optional は key を作らない
+    se.set_account_transcript_source(data, acc, "meet_calendar")
+    assert se.get_account_transcript_source(data, acc) == {"type": "meet_calendar"}
+    # 不正 type は拒否
+    with pytest.raises(ValueError):
+        se.set_account_transcript_source(data, acc, "dropbox")
+    # 未知 account は ValueError
+    with pytest.raises(ValueError):
+        se.set_account_transcript_source(data, "acc-99", "manual")
+
+
+def test_transcript_source_blank_type_no_longer_silently_clears():
+    # #498 review (AX high): 空 type での暗黙 clear を禁止。渡し忘れ/typo で宣言が飛ばない。
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    se.set_account_transcript_source(data, acc, "meet_calendar")
+    for blank in ("", "   "):
+        with pytest.raises(ValueError):
+            se.set_account_transcript_source(data, acc, blank)
+    # 既存宣言は保持されたまま
+    assert se.get_account_transcript_source(data, acc) == {"type": "meet_calendar"}
+
+
+def test_transcript_source_explicit_clear():
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    se.set_account_transcript_source(data, acc, "manual")
+    se.set_account_transcript_source(data, acc, "", clear=True)
+    assert "transcript_source" not in se.find_account(data, acc)
+    assert se.get_account_transcript_source(data, acc) is None
+
+
+def test_transcript_source_drive_folder_requires_folder_id():
+    # #498 review: drive_folder を folder_id 無しで宣言できると場所を特定できず脆い総当たりに
+    # 落ちる。folder_id 必須で拒否する。
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    with pytest.raises(ValueError):
+        se.set_account_transcript_source(data, acc, "drive_folder")
+    with pytest.raises(ValueError):
+        se.set_account_transcript_source(data, acc, "drive_folder", folder_id="  ")
+    # folder_id ありなら OK
+    se.set_account_transcript_source(data, acc, "drive_folder", folder_id="F1")
+    assert se.get_account_transcript_source(data, acc)["folder_id"] == "F1"
+
+
+def test_transcript_source_type_list_matches_skill_doc_no_drift():
+    # #498 review (保守性): type 集合の drift を **双方向** で固定する。skill md 分岐表の
+    # 行頭 `| \`<type>\` |` から type を抽出し、VALID_TRANSCRIPT_SOURCE_TYPES と集合==で一致。
+    # 片方に足すともう片方が落ちて test が割れる (tuple が唯一の真値源)。
+    import re
+    from pathlib import Path
+    md = (Path(__file__).parent.parent / "skills"
+          / "beacon-sales-meeting-wrap.md").read_text(encoding="utf-8")
+    md_types = set(re.findall(r"^\|\s*`(\w+)`\s*\|", md, re.MULTILINE))
+    md_types.discard("type")  # 表ヘッダ `| \`type\` | 取得のしかた |` の列名は値でない
+    assert md_types == set(se.VALID_TRANSCRIPT_SOURCE_TYPES)
+
+
+def test_transcript_source_clear_rejects_coexisting_value():
+    # #498 再レビュー (AX high): clear と設定値の共存を拒否。stale env の CLEAR が set を
+    # silent に delete へ化けさせる経路を塞ぐ。
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    se.set_account_transcript_source(data, acc, "meet_calendar")
+    for kw in (dict(source_type="drive_folder", folder_id="F"),
+               dict(source_type="manual"),
+               dict(source_type="", folder_id="F"),
+               dict(source_type="", tool="tl;dv")):
+        with pytest.raises(ValueError):
+            se.set_account_transcript_source(data, acc, clear=True, **kw)
+    # 既存宣言は保持 (共存拒否で何も起きない)
+    assert se.get_account_transcript_source(data, acc) == {"type": "meet_calendar"}
+    # 純粋な clear (値なし) は通る
+    se.set_account_transcript_source(data, acc, "", clear=True)
+    assert se.get_account_transcript_source(data, acc) is None
+
+
+def test_transcript_source_external_requires_tool():
+    # #498 再レビュー: external は tool 必須 (無ければ manual と同挙動の別名になる)。
+    data = _fresh()
+    acc = se.account_add(data, "Globex")
+    with pytest.raises(ValueError):
+        se.set_account_transcript_source(data, acc, "external")
+    with pytest.raises(ValueError):
+        se.set_account_transcript_source(data, acc, "external", naming="rec_")  # tool 無し
+    se.set_account_transcript_source(data, acc, "external", tool="tl;dv")
+    assert se.get_account_transcript_source(data, acc) == {"type": "external", "tool": "tl;dv"}
+
+
 def test_account_add_created_at_defaults_when_omitted():
     # ms-109 e-3698 (fable A-4): omitting created_at must not persist an empty
     # timestamp — the base default (now) applies, incl. the phase_history anchor.
