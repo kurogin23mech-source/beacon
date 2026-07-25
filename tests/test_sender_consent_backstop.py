@@ -286,3 +286,41 @@ def test_cross_project_same_user_passes(wired, monkeypatch):
         "envelope": {"tier": "T1", "actions_authorized": []},  # no claim
     }, headers={"Authorization": "Bearer t-alice"})
     assert resp.status_code == 200, resp.text
+
+
+def test_cross_project_same_user_action_not_held(wired, monkeypatch):
+    """THE ms-70-side of the same root (e-3886): a same-user cross-project DM
+    carrying an *action* must NOT be held for receiver approval.
+
+    The old code resolved the sender from the POST-target project's registry.
+    A cross-project sender is absent there, so ``sender_uid=''`` and the ms-70
+    gate's same-user carve-out (``sender_user_id and sender==receiver``) could
+    never fire → an action DM to the user's own other project was falsely
+    held (downgraded to propose-to-ai), which is the armed-handoff breakage
+    behind e-3566 / e-3880. With the sender resolved from the JWT sub, the gate
+    sees same-user and lets the action ride at full delivery.
+
+    This is the regression the consent-path test above cannot catch: with an
+    empty ``actions_authorized`` the ms-70 gate short-circuits on
+    ``no_actions`` regardless of who the sender is.
+    """
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(wired, "_auth_enabled", True)
+    monkeypatch.setattr(
+        wired, "_verify_id_token",
+        lambda tok: {"sub": "uid-alice", "email": "alice@example.com"})
+
+    client = TestClient(wired.app)
+    resp = client.post(f"/api/projects/{PROJECT_ID}/bus", json={
+        "channel": "dm",
+        "sender_session_id": "sv-alice-in-profile-extractor",  # another project
+        "payload": {"recipient_session_id": "sv-alice2", "text": "run it"},
+        "envelope": {"tier": "T1", "actions_authorized": ["task.done"]},
+    }, headers={"Authorization": "Bearer t-alice"})
+    assert resp.status_code == 200, resp.text
+    # The ms-70 gate must have recognised same-user and NOT gated the action.
+    gate = _audit_store[-1]["dm_gate"]
+    assert gate["should_gate"] is False, gate
+    assert gate["reason"] == "same_user", gate
+    assert gate["sender_user_id"] == "uid-alice", gate

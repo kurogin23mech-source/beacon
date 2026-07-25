@@ -7512,6 +7512,23 @@ async def post_bus_event(
         sender_session_id=body.sender_session_id,
         payload=body.payload,
     )
+    # ms-110 / e-3886: the SENDER is the authenticated caller, which is
+    # project-independent. Resolving the sender from the POST-target project's
+    # session registry (``_resolve_bus_event_user_ids``, above) leaks the
+    # *project* axis into what must be a *user_id* decision: a cross-project
+    # sender's session is not in the target project's registry, so
+    # ``sender_uid`` comes back "" and the same-user carve-out (both this
+    # ms-70 gate and the sender-consent backstop below) cannot fire. That is
+    # the single root cause behind e-3492 / e-3531 / e-3566 / e-3567 / e-3880 —
+    # five same-user cross-project false-holds/false-403s, each previously
+    # patched locally. Fix the structure once: use ``user["sub"]`` (the JWT
+    # subject) as the authoritative sender for BOTH gates. Fall back to the
+    # registry-resolved value only in auth-disabled dev/test, where ``sub`` is
+    # the shared "dev" placeholder and the registry is the real discriminator.
+    _auth_sub = str((user or {}).get("sub") or "")
+    authoritative_sender_uid = (
+        _auth_sub if (_auth_enabled and _auth_sub) else sender_uid
+    )
     env_actions = (body.envelope or {}).get("actions_authorized") or []
     env_tier = (body.envelope or {}).get("tier", "") or ""
     env_issuer = (body.envelope or {}).get("issuer", "") or ""
@@ -7534,7 +7551,7 @@ async def post_bus_event(
     # ms-83 / e-1995: pass tier+issuer so the gate can recognise
     # T1-system server-mint envelopes as T1-equivalent (= bypass).
     should_gate, gate_reason, gate_trek_id = dm_gate_mod.should_gate_dm_action(
-        sender_user_id=sender_uid,
+        sender_user_id=authoritative_sender_uid,
         receiver_user_id=receiver_uid,
         actions_authorized=env_actions,
         shared_trek_lookup=gate_lookup,
@@ -7546,7 +7563,7 @@ async def post_bus_event(
     audit_record["dm_gate"] = {
         "should_gate": should_gate,
         "reason": gate_reason,
-        "sender_user_id": sender_uid,
+        "sender_user_id": authoritative_sender_uid,
         "receiver_user_id": receiver_uid,
         # ms-97 / e-2659 Phase 3 (AC19): bypass flag + matched trek_id.
         # bypass=True when the gate let an action-bearing cross-user
@@ -7589,11 +7606,10 @@ async def post_bus_event(
     #      CONSENT_ENABLED gates enforcement (default OFF); flip it on only once
     #      a claim-capable client is rolled out.
     consent_enforced = os.environ.get("BEACON_SENDER_CONSENT_ENABLED") == "1"
-    # Sender = the authenticated caller (project-independent). Fall back to the
-    # registry-resolved sender only in auth-disabled dev/test where the JWT sub
-    # is the "dev" placeholder.
-    _auth_sub = str((user or {}).get("sub") or "")
-    consent_sender_uid = _auth_sub if (_auth_enabled and _auth_sub) else sender_uid
+    # Sender = the authoritative (project-independent) identity resolved once
+    # above (e-3886). The ms-70 gate and this backstop now share exactly one
+    # sender axis, so they can never diverge on "who is sending".
+    consent_sender_uid = authoritative_sender_uid
     consent_allow = True
     consent_required = False
     consent_reason = "gate_disabled"
