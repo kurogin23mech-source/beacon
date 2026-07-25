@@ -24700,6 +24700,60 @@ def cmd_sales_account_remove():
     print(f"send account removed: {label}")
 
 
+def cmd_sales_account_transcript_source_set():
+    """Internal (Skill-invoked): declare an Account's 議事録取得元 (e-3552).
+    Env: BEACON_ACCOUNT_ID, BEACON_TS_TYPE (meet_calendar|drive_folder|external|
+    manual), optional BEACON_TS_FOLDER_ID / BEACON_TS_NAMING / BEACON_TS_TOOL.
+
+    #498 review (AX high): **空 BEACON_TS_TYPE での暗黙 clear を禁止** + **clear と設定値の
+    共存を拒否**。消すには明示 **BEACON_TS_CLEAR=1**、かつそのとき type/folder_id/naming/tool
+    を同時指定してはならない (stale env の CLEAR が set を silent に delete へ化けさせる経路を
+    塞ぐ)。空/未設定 type かつ clear でない → exit1 (既存宣言は保持)。"""
+    import sales_entities
+    account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
+    clear = os.environ.get("BEACON_TS_CLEAR", "").strip().lower() in ("1", "true", "yes")
+    source_type = os.environ.get("BEACON_TS_TYPE", "")
+    folder_id = os.environ.get("BEACON_TS_FOLDER_ID", "")
+    naming = os.environ.get("BEACON_TS_NAMING", "")
+    tool = os.environ.get("BEACON_TS_TOOL", "")
+    data = load_project()
+    if not clear and not source_type.strip():
+        print("Error: BEACON_TS_TYPE が未設定/空です。宣言するなら type を、消すなら "
+              "BEACON_TS_CLEAR=1 を渡してください (空 type では既存宣言を消しません)。",
+              file=sys.stderr)
+        sys.exit(1)
+    try:
+        # clear のとき type/folder/naming/tool を渡すと lib が共存拒否で raise する
+        # (stale env で set が delete に化けるのを防ぐ、単一の enforcement 点)。
+        acc = sales_entities.set_account_transcript_source(
+            data, account_id, source_type,
+            folder_id=folder_id, naming=naming, tool=tool, clear=clear)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    ts = acc.get("transcript_source")
+    if ts:
+        print(f"transcript source: {account_id} → {json.dumps(ts, ensure_ascii=False)}")
+    else:
+        print(f"transcript source cleared: {account_id}")
+
+
+def cmd_sales_account_transcript_source_get():
+    """Internal (Skill-invoked): read an Account's 議事録取得元 declaration (e-3552).
+    Env: BEACON_ACCOUNT_ID. Prints the JSON declaration (or `null` when unset)
+    so meeting-wrap can resolve deterministically."""
+    import sales_entities
+    account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
+    data = load_project()
+    try:
+        ts = sales_entities.get_account_transcript_source(data, account_id)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps(ts, ensure_ascii=False))
+
+
 def cmd_account_phase():
     import sales_entities
     account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
@@ -25930,6 +25984,8 @@ if __name__ == "__main__":
         "sales_account_resolve": cmd_sales_account_resolve,
         "sales_account_remove": cmd_sales_account_remove,
         "sales_gmail_permalink": cmd_sales_gmail_permalink,
+        "sales_account_transcript_source_set": cmd_sales_account_transcript_source_set,
+        "sales_account_transcript_source_get": cmd_sales_account_transcript_source_get,
         "task_add": cmd_task_add,
         "task_done": cmd_task_done,
         "task_list": cmd_task_list,

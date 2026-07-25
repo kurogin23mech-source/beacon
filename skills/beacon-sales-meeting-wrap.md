@@ -46,14 +46,63 @@ beacon meeting list <opp-id> --json    # status=ended のものが A の入力�
 
 対象商談を `$OPP`、面談を `$MTG` として保持。相手 (Account/Contact) も把握する。
 
-## Step 2: 議事録を取り込む (Drive)
+## Step 2: 議事録を取り込む (取得元は宣言から解決する — source-agnostic, e-3552)
 
-議事録の取得元は **Google Drive の議事録 doc**。面談後に Drive に置かれた議事録を拾う
-（`/beacon-sales-drive` と同じ Drive MCP 経路、台帳解決でアカウントを取る）。面談の
-識別子（`$MTG` / カレンダー event / 日付 + 相手名）で該当 doc を探し、本文を読む。
+議事録 (文字起こし) のソースと置き場は**顧客ごとに違う**。Meet+Workspace は自動生成物が
+カレンダーイベント添付 / Drive の Meet Recordings に入るが、無料 Google や Zoom/tl;dv/Otter
+は任意フォルダ・任意命名になる。だから **「Drive の Meet Recordings にある」を前提化しない**。
+取得元を宣言から解決し、無ければ人に聞く。以下の 3 層を上から順に試す:
 
-議事録が見つからない場合は、ユーザーに「議事録の Drive リンクを教えてください / 要点を
-貼ってください」と促す（手動起点にフォールバック）。
+### 層1: 構造的既定 (職種層・厚く) — mtg- の calendar_event_id から辿る
+
+面談 `$MTG` が `calendar_event_id` を持っていれば (確定時 e-3374 で保持済)、まずその
+**カレンダーイベントの添付 (Meet Recording / 文字起こし)** を辿る。`beacon-meeting-id`
+タグと突合し、Meet 利用時はこれが最も堅い第一候補。`/beacon-sales-drive` と同じ Drive/
+カレンダー MCP 経路を使い、アカウントは台帳解決から取る (手書きしない, e-3365)。
+
+### 層2: 顧客別 override (テナント層・最小・宣言的) — Account.transcript_source を読む
+
+層1 で取れない / この顧客は Meet でない場合、その顧客 (Account) が宣言している取得元を読む:
+
+```bash
+BEACON_ACCOUNT_ID="$ACC" \
+  python3 "$(beacon _lib-path)/commands.py" sales_account_transcript_source_get
+```
+
+返る JSON (`null` なら未宣言) の `type` で分岐する:
+
+| `type` | 取得のしかた |
+|---|---|
+| `meet_calendar` | 層1 と同じ (Meet のカレンダー添付)。層1 で拾えていればここは skip |
+| `drive_folder` | 宣言された `folder_id` の Drive フォルダを見る。`naming` があれば命名規則で該当 doc を絞る |
+| `external` | Zoom/tl;dv/Otter 等 (`tool` 必須=道具名、`naming` は任意の手掛かり)。連携が無ければ層3 に落ちて人に聞く (道具名が無いなら `manual` を使う) |
+| `manual` | 自動生成物なし。層3 (人に聞く) に直行する |
+
+宣言が無い (`null`) 顧客は、無理に Drive 総当たり検索をしない (脆いので前提化しない) —
+層3 に落ちる。**この顧客の取得元が毎回同じなら、一度宣言しておくと次回から自動で辿れる**
+ことをユーザーに促してよい (宣言は最小: type と、必要なら folder_id / naming / tool):
+
+```bash
+# type と、必要なら folder_id / naming / tool を「まとめて」渡す (宣言は 1 単位で書き替わる)。
+# drive_folder は folder_id 必須 (場所を特定できない宣言は作れない)。
+BEACON_ACCOUNT_ID="$ACC" BEACON_TS_TYPE="drive_folder" \
+  BEACON_TS_FOLDER_ID="<Drive フォルダ ID>" BEACON_TS_NAMING="<命名の手掛かり (任意)>" \
+  python3 "$(beacon _lib-path)/commands.py" sales_account_transcript_source_set
+```
+
+**宣言を消すのは明示 clear のときだけ** (#498 review: 空 `BEACON_TS_TYPE` を渡しても
+エラーになるだけで既存宣言は消えない — 渡し忘れ/typo で宣言が飛ぶ事故を防ぐ):
+
+```bash
+BEACON_ACCOUNT_ID="$ACC" BEACON_TS_CLEAR=1 \
+  python3 "$(beacon _lib-path)/commands.py" sales_account_transcript_source_set
+```
+
+### 層3: fallback — 人に Drive リンク / 要点を聞く (現行踏襲)
+
+層1・層2 で議事録が取れない (無料アカウント等で生成物が無い、外部ツール未連携) 場合は、
+ユーザーに「議事録の Drive リンクを教えてください / 要点を貼ってください」と促す
+(手動起点にフォールバック)。ここで得たリンクは Step 3 の `--source-url` に入れる。
 
 ## Step 3: 議事録を証跡 (Communication) として残す
 
