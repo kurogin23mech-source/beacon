@@ -474,6 +474,41 @@ def test_resolve_route_unknown_account_returns_none():
     assert se.resolve_route(data, "gmail", "存在しない") is None
 
 
+# --- build_gmail_permalink (e-3542 PR #495 review fix) ---------------------
+
+def test_gmail_permalink_happy_strips_brackets_and_encodes():
+    url = se.build_gmail_permalink("sales@corp.example", "<abc.123@mail.gmail.com>")
+    # u/<from> (not u/0), brackets stripped, rfc822msgid query URL-encoded
+    assert url == ("https://mail.google.com/mail/u/sales@corp.example/#search/"
+                   "rfc822msgid%3Aabc.123%40mail.gmail.com")
+
+
+def test_gmail_permalink_empty_from_returns_empty_no_broken_url():
+    # AX-high: empty $FROM must NOT yield a broken u// URL — return "" so the
+    # caller records the ref only, never a dead link.
+    assert se.build_gmail_permalink("", "<abc@x>") == ""
+    assert se.build_gmail_permalink("   ", "<abc@x>") == ""
+
+
+def test_gmail_permalink_empty_message_id_returns_empty():
+    assert se.build_gmail_permalink("me@x.example", "") == ""
+    assert se.build_gmail_permalink("me@x.example", "  <>  ") == ""
+
+
+def test_gmail_permalink_threadid_without_at_returns_empty():
+    # AX-medium: a thread-id (no '@') would 0-hit an rfc822msgid search; refuse it
+    # so a dead link is never recorded as success.
+    assert se.build_gmail_permalink("me@x.example", "1899abcdef0123") == ""
+
+
+def test_gmail_permalink_encodes_special_chars():
+    url = se.build_gmail_permalink("a@b.example", "id+with/special@h.example")
+    assert url.startswith("https://mail.google.com/mail/u/a@b.example/#search/")
+    assert "rfc822msgid%3A" in url
+    assert "%2F" in url  # '/' encoded
+    assert "%2B" in url  # '+' encoded
+
+
 def test_resolve_route_slack_namespace_only():
     data = _fresh()
     se.add_send_account(data, "会社", "sales@corp.example",

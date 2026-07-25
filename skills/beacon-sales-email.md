@@ -177,7 +177,26 @@ Step 6.5 の Communication だけが記録になる。**いずれにせよ新規
 
 送信は「実際に起きたやり取り」なので、事実の証跡 (Communication) としても残す。対象は
 その活動 (act-) にすると「どの予定を果たした送信か」まで辿れる (無ければ商談 opp-)。
-`--source-ref` に送信メールの message-id / thread-id を入れて出典を辿れるようにする:
+`--source-ref` に送信メールの message-id / thread-id を入れて出典を辿れるようにする。
+
+**加えて、辿れる Gmail permalink を `--source-url` に入れる (e-3542)**。ref だけだと UI 上は
+「出典 <message-id>」のプレーン文字列で Gmail に飛べない。permalink があれば UI がクリック
+可能なリンクにする。**URL はスキルで手組みせず、下の内部コマンドに組み立てさせる** (PR #495
+レビュー修正 e-3542: 手組みは `$FROM` 未設定で壊れ URL を silent 記録する等の穴を生むため、
+正準ビルダー `build_gmail_permalink` に一本化した)。送信結果 (MCP `send_email` の戻り) の
+Message-ID を `$MSGID`、Step 2 で解決した送信 identity のメールアドレスを `$FROM` として渡す:
+
+```bash
+SOURCE_URL=$(BEACON_SEND_FROM="$FROM" BEACON_MSGID="<送信メールの Message-ID>" \
+  python3 "$(beacon _lib-path)/commands.py" sales_gmail_permalink)
+```
+
+- 出力が **非空** → その URL を下の `--source-url` に渡す。`$FROM` を `u/` に使うので複数
+  Google アカウントでも Gmail が正しい受信箱を開く (index `u/0` は使わない)。角括弧の除去・
+  URL エンコードはビルダーが行う。
+- 出力が **空** → permalink を組めない場合 (`$FROM` 未設定 / Message-ID 不在 / 渡したのが
+  thread-id で Message-ID でない)。**`--source-url` は付けず** `--source-ref` に持っている
+  ref を残す (UI は ref 表示にフォールバック)。**死にリンクを台帳に記録しない**のが要点。
 
 **スレッド集約の原則 (e-3535)**: 紐づけ先の活動は、この送信が属する会話スレッドの**起点と
 なる既存の活動**を選ぶ。返信の往復ごとに新しい活動を作って散らさない — 1 スレッドの証跡は
@@ -188,11 +207,13 @@ Step 6.5 の Communication だけが記録になる。**いずれにせよ新規
 短い連絡なら空でよい。
 
 ```bash
+# $SOURCE_URL は上の sales_gmail_permalink の出力 (空なら --source-url は実質無効な空文字)。
 BEACON_COMM_TARGET="<act-id または $OPP>" \
   BEACON_COMM_SUMMARY="<送信内容の1行要約>" \
   BEACON_COMM_DIRECTION="outbound" BEACON_COMM_CHANNEL="email" \
   BEACON_COMM_BODY="<件名 + 本文の骨子>" \
   BEACON_COMM_SOURCE_REF="<message-id / thread-id>" \
+  BEACON_COMM_SOURCE_URL="$SOURCE_URL" \
   python3 "$(beacon _lib-path)/commands.py" communication_add
 ```
 
