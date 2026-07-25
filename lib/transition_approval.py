@@ -140,12 +140,53 @@ def build_transition_approval(*, entry_id, target_id, target_kind, old_state,
             "new_state": new_state,
             "intent": intent,
             "evidence": list(evidence or []),
+            # ms-119 / e-4205: slot for INDEPENDENT review evidence (the 目的達成
+            # judge's verdict + grounds), distinct from `intent` (the implementer's
+            # completion CLAIM) and `evidence` (implementer-supplied refs). Empty at
+            # creation; the approve path refuses a SILENT approval while it is empty.
+            "review_evidence": [],
             "approval_status": "pending",
             "approval_rationale": None,
             "approval_history": [],
             "actor": actor,
         },
     }
+
+
+def append_review_evidence(entry, *, verdict, summary, source, actor, at):
+    """Record an INDEPENDENT review's evidence onto a pending transition-approval
+    (ms-119 / e-4205).
+
+    Distinct from ``meta["intent"]`` (the implementer's completion CLAIM) and
+    ``meta["evidence"]`` (implementer-supplied refs): this slot holds the verdict +
+    grounds an INDEPENDENT judge produced against the target's SPEC (the 目的達成
+    review). e-4005 required the evidence not be the implementer's self-report, but
+    nothing tied "an independent judge actually ran" to the approval — so a
+    completion could be approved on the implementer's word alone (observed with
+    e-4198). This slot + the approve guard (``has_independent_evidence``) close the
+    SILENT path: the human still owns the verdict, but approving with no independent
+    evidence now requires an explicit acknowledgement, never silence.
+
+    Append-only (audit): each record is ``{verdict, summary, source, actor, at}``.
+    Pure — the caller owns persistence.
+    """
+    rec = {
+        "verdict": verdict,
+        "summary": summary,
+        "source": source,
+        "actor": actor,
+        "at": at,
+    }
+    entry.setdefault("meta", {}).setdefault("review_evidence", []).append(rec)
+    return entry
+
+
+def has_independent_evidence(entry):
+    """True if the approval carries ≥1 independent review-evidence record (ms-119 /
+    e-4205). The approve path uses this so a completion cannot be approved on the
+    implementer's intent alone unless the human EXPLICITLY acknowledges the absence
+    — a conscious choice, never silent."""
+    return bool((entry.get("meta") or {}).get("review_evidence"))
 
 
 def assess_completion_criteria(*, has_spec, objective="", acceptance="", intent=""):

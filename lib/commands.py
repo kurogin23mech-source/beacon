@@ -1831,6 +1831,10 @@ def _route_completion_to_review(data: dict, ms_id: str, *, reason: str,
         target_id=ms_id)
     if _gap:
         print(_gap)
+    print(f"  独立証拠 (= 承認の前提, ms-119/e-4205): `beacon review context --type "
+          f"attainment --target <id>` で judge を回し `beacon target attach-evidence "
+          f"{eid} --verdict <v> --summary <s>` で記録 (無ければ approve は "
+          f"--acknowledge-no-evidence を要求)")
     print(f"  確定 (= 遷移実行): beacon target approve {eid} [--rationale <text>]")
     print(f"  却下 (= 遷移せず): beacon target reject {eid} [--rationale <text>]")
 
@@ -1898,6 +1902,10 @@ def cmd_target_review_request():
         target_id=target_id)
     if _gap:
         print(_gap)
+    print(f"  独立証拠 (= 承認の前提, ms-119/e-4205): `beacon review context --type "
+          f"attainment --target <id>` で judge を回し `beacon target attach-evidence "
+          f"{eid} --verdict <v> --summary <s>` で記録 (無ければ approve は "
+          f"--acknowledge-no-evidence を要求)")
     print(f"  確定 (= 遷移実行): beacon target approve {eid} [--rationale <text>]")
     print(f"  却下 (= 遷移せず): beacon target reject {eid} [--rationale <text>]")
 
@@ -1930,10 +1938,35 @@ def cmd_target_approve():
         )
         sys.exit(2)
     data = load_project()
+    # ms-119 / e-4205: an attainment approval must not pass on the implementer's
+    # self-asserted intent alone. If no INDEPENDENT review evidence is attached, the
+    # human must EXPLICITLY acknowledge that (a conscious choice) — the SILENT path
+    # is refused. The verdict itself stays the human's; this only forbids silence.
+    _res = core.find_entry(data, entry_id)
+    _entry = _res[2] if _res else None
+    _ack_no_ev = os.environ.get("BEACON_ACK_NO_EVIDENCE", "") == "1"
+    _has_ev = bool(_entry and _ta.has_independent_evidence(_entry))
+    if (_entry and _entry.get("type") == "target-transition-approval"
+            and not _has_ev and not _ack_no_ev):
+        print(
+            f"Error: 承認依頼 {entry_id} に独立レビューの証拠が添付されていません "
+            f"(ms-119 / e-4205)。承認は実装者の自己申告 intent だけでは通りません。\n"
+            f"  次のいずれかを:\n"
+            f"    1. 独立 judge を回して証拠を添付する — "
+            f"`beacon review context --type attainment --target <target-id>` で判定を"
+            f"生成し、`beacon target attach-evidence {entry_id} --verdict "
+            f"<attained|partial|not-attained> --summary <要約>` で記録する。\n"
+            f"    2. 独立証拠なしで承認すると明示する — `--acknowledge-no-evidence` "
+            f"(監査に記録が残ります)。",
+            file=sys.stderr)
+        sys.exit(2)
+    _gate = _approval_gate_record()
+    if not _has_ev and _ack_no_ev:
+        _gate["no_evidence_ack"] = True
     try:
         entry, new_state = core.target_transition_approval_approve(
             data, entry_id, rationale=rationale, actor=_actor_str(),
-            gate=_approval_gate_record())
+            gate=_gate)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -1956,6 +1989,44 @@ def cmd_target_approve():
         print(f"  gate: {_gate.get('signal')} (session_kind={_gate.get('session_kind')}{_es})")
         if _gate.get("signal") == "user-override" and _gate.get("session_kind") != "human":
             print("  ⚠ AI セッションが override で承認しました — この遷移は監査対象です。")
+        if _gate.get("no_evidence_ack"):
+            print("  ⚠ 独立レビュー証拠なしで承認されました "
+                  "(--acknowledge-no-evidence) — この遷移は監査対象です (ms-119 / e-4205)。")
+
+
+def cmd_target_attach_evidence():
+    """Attach an independent review's evidence to a pending transition-approval
+    (ms-119 / e-4205).
+
+    beacon target attach-evidence <entry-id> --verdict <attained|partial|not-attained>
+        --summary <text> [--source <text>]
+
+    Records the INDEPENDENT 目的達成 judge's verdict + grounds onto the pending
+    approval, so `beacon target approve` no longer refuses it for lack of evidence.
+    The verdict recorded here is the JUDGE's proposal; the human's own verdict is
+    still pressed via `beacon target approve` (SPEC § 方針2)."""
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "").strip()
+    verdict = os.environ.get("BEACON_EV_VERDICT", "").strip()
+    summary = os.environ.get("BEACON_EV_SUMMARY", "").strip()
+    source = os.environ.get("BEACON_EV_SOURCE", "").strip()
+    if not entry_id or not verdict or not summary:
+        print("Usage: beacon target attach-evidence <entry-id> --verdict "
+              "<attained|partial|not-attained> --summary <text> [--source <text>]",
+              file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        entry = core.target_transition_approval_attach_evidence(
+            data, entry_id, verdict=verdict, summary=summary,
+            source=source or "independent-judge", actor=_actor_str())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_transition_approval_attach_evidence",
+                           "entry_id": entry_id})
+    n = len(entry["meta"].get("review_evidence", []))
+    print(f"独立レビュー証拠を添付: {entry_id} (verdict={verdict}, 計 {n} 件)")
+    print(f"  承認へ: beacon target approve {entry_id} [--rationale <text>]")
 
 
 def cmd_target_reject():
@@ -25933,6 +26004,7 @@ if __name__ == "__main__":
         "milestone_done": cmd_milestone_done,
         "target_review_request": cmd_target_review_request,
         "target_approve": cmd_target_approve,
+        "target_attach_evidence": cmd_target_attach_evidence,
         "target_reject": cmd_target_reject,
         "target_list": cmd_target_list,
         "target_create": cmd_target_create,      # ms-122 e-3956

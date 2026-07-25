@@ -2040,6 +2040,32 @@ def target_transition_approval_approve(data: dict, entry_id: str, *,
     return entry, new_state
 
 
+def target_transition_approval_attach_evidence(data: dict, entry_id: str, *,
+                                               verdict: str, summary: str,
+                                               source: str = "",
+                                               actor: str = "") -> dict:
+    """Attach an INDEPENDENT review's evidence to a pending transition-approval
+    (ms-119 / e-4205). Returns the entry.
+
+    Evidence attaches BEFORE the verdict: once approved/rejected the request is
+    terminal, so a non-pending entry is refused (attaching after the fact would be
+    back-dating the record the approval was supposed to rest on).
+    """
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    _, _, entry, _ = result
+    if entry.get("type") != "target-transition-approval":
+        raise ValueError(f"Entry {entry_id} is not a transition-approval entry")
+    if entry.get("status") != "pending":
+        raise ValueError(
+            f"Entry {entry_id} is not pending (status={entry.get('status')}); "
+            f"独立レビュー証拠は verdict の前に添付します")
+    _ta.append_review_evidence(entry, verdict=verdict, summary=summary,
+                               source=source, actor=actor, at=_now_iso())
+    return entry
+
+
 def target_transition_approval_reject(data: dict, entry_id: str, *,
                                       rationale: str = "", actor: str = "",
                                       gate: dict = None) -> dict:
