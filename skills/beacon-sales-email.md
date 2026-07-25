@@ -84,10 +84,30 @@ BEACON_SEND_SERVICE="gmail" BEACON_SEND_LABEL="$LABEL" \
 echo "RESOLVE_EXIT=$?"
 ```
 
-- `RESOLVE_EXIT=0` → JSON `{label,email,namespace,alias}` が返る。`email` を `$FROM`、
-  `namespace` を `$NS` (使う Gmail MCP ツール群。現状 `mcp__gmail`) として保持。
+- `RESOLVE_EXIT=0` → JSON `{label,email,namespace,alias,signature}` が返る。`email` を
+  `$FROM`、`namespace` を `$NS` (使う Gmail MCP ツール群。現状 `mcp__gmail`)、`signature`
+  を `$SIGNATURE` (この送信 identity の署名、未設定なら空) として保持。
 - `RESOLVE_EXIT=1` (BLOCK) → その label の gmail route が台帳に無い。**送信しない**。
   上の `sales_account_add` / `sales_account_route` で登録してから再開する。
+
+**署名 (signature) の育成 (e-3529)**: 署名は送信 identity ごとに異なる (会社用 / 個人用)
+ので台帳の各エントリに持たせる。`$SIGNATURE` が空で、ユーザーが署名を使いたそうなら
+「この送信元 (`$LABEL`) の署名を登録しますか？ 一度登録すれば以後の下書きに自動で付きます」
+と 1 度だけ促し、登録する (中身はユーザーが決める soft guidance、システムは置き場だけ持つ):
+
+```bash
+BEACON_SEND_LABEL="$LABEL" BEACON_SEND_SIGNATURE="<署名の複数行テキスト>" \
+  python3 "$(beacon _lib-path)/commands.py" sales_account_signature
+```
+
+空のままでも送信は妨げない (署名なしで進む)。ユーザーが不要と言えば以後聞かない。
+**空の `BEACON_SEND_SIGNATURE` を渡してもエラーになるだけで既存署名は消えない** (#496
+review: 渡し忘れ/typo が署名を消す事故を防ぐため)。署名を**消す**のは明示 clear のときだけ:
+
+```bash
+BEACON_SEND_LABEL="$LABEL" BEACON_SEND_SIGNATURE_CLEAR=1 \
+  python3 "$(beacon _lib-path)/commands.py" sales_account_signature
+```
 
 > Gmail は `send_email` に account 引数が無いため、アカウント切替 = **namespace 切替**
 > (別サーバ)。現状この環境は `mcp__gmail` 単一サーバなので実切替先は 1 つ。2 つ目の
@@ -101,8 +121,36 @@ echo "RESOLVE_EXIT=$?"
 メールアドレス (account list に出る) を使う。ユーザーが宛先や用件を指定して
 いればそれに従う。
 
+### ユーザー指針 (guidelines) の反映 (e-3529)
+
+下書きを書く前に、ユーザーが育てる**営業メール指針** (トーン・定型文・やること /
+やらないこと) を読んで反映する。指針は Beacon doc `sales-email-guidelines` に置き、
+初期は空 (未作成) で出発する — システムは置き場と読み込みだけを用意し、中身はユーザーが
+運用しながら書き足す (ハードコードしない soft guidance):
+
+```bash
+GUIDE=$(beacon doc show sales-email-guidelines 2>&1); GUIDE_RC=$?
+```
+
+**終了コードで「未作成(正常)」と「取得失敗」を区別する** (#496 review: `2>/dev/null` で潰すと
+lookup 障害時にユーザーが育てた指針が silent 無視され、指針なしで下書きが進む穴になる):
+
+- `GUIDE_RC == 0` → `$GUIDE` が指針本文。下書きのトーン・言い回し・定型文に反映する
+  (お作法と衝突する場合は下の「営業メールのお作法」を優先し、ユーザー指針はその範囲内で適用)。
+- `GUIDE_RC == 3` → **doc 未作成 (正常)**。指針なしで通常どおり書く。ユーザーが「署名や
+  定型文を覚えておいて」と言ったら `beacon doc add --id sales-email-guidelines --scope core
+  --title "sales-email-guidelines"` で作る (or 既存を `beacon doc update`) ことを案内してよい。
+- `GUIDE_RC` がその他 (非 0 かつ非 3) → **取得失敗** (cloud 到達不能 等)。`$GUIDE` の
+  エラーをユーザーに転記し、**指針を silent に無視して進まない** (育てた指針が効かないまま
+  送るのを防ぐ)。取得できるまで待つか、ユーザーの明示了解で指針なし続行を選ぶ。
+
+### 署名の付与 (e-3529)
+
+Step 2 で `$SIGNATURE` が非空なら、**本文末尾に署名を付ける**。署名は送信 identity ごとに
+違う (会社用 / 個人用) ので、解決した identity のものをそのまま使う。空なら付けない。
+
 生成したら self-review: (a) 相手が 1 度で意味を取れるか (b) 用件が件名 1 行で
-分かるか (c) 社内略語が残っていないか。違反があれば直す。
+分かるか (c) 社内略語が残っていないか (d) 署名は正しい identity のものか。違反があれば直す。
 
 ### 営業メールのお作法 (soft guidance / e-3498)
 

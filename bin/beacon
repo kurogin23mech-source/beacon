@@ -2782,6 +2782,7 @@ cmd_doc() {
             done
             if [ -z "$doc_id" ]; then
                 echo "Usage: beacon doc show <doc-id> [--json]"
+                echo "  exit: 0=found / 3=not found / その他非ゼロ=lookup 失敗 (API 障害等)"
                 exit 1
             fi
             BEACON_DOC_ID="$doc_id" BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" doc_show

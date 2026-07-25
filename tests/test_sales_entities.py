@@ -512,6 +512,54 @@ def test_gmail_permalink_encodes_special_chars():
     assert "%2B" in url  # '+' encoded
 
 
+def test_send_account_signature_set_and_resolve():
+    # e-3529: 署名は台帳エントリに持ち、resolve_route の出力に載る。
+    data = _with_ledger()
+    # 未設定時は resolve が空文字を返す (key は常に在る)
+    assert se.resolve_route(data, "gmail", "会社")["signature"] == ""
+    # 設定 → trim して保存、resolve に反映
+    a = se.set_account_signature(data, "会社", "  ── 営業部 太郎\ncorp.example  ")
+    assert a["signature"] == "── 営業部 太郎\ncorp.example"
+    assert se.resolve_route(data, "gmail", "会社")["signature"] == "── 営業部 太郎\ncorp.example"
+    # 別 identity は独立 (個人には付かない)
+    assert se.resolve_route(data, "calendar", "個人")["signature"] == ""
+    # 未知 label は ValueError
+    with pytest.raises(ValueError):
+        se.set_account_signature(data, "存在しない", "x")
+
+
+def test_send_account_signature_blank_no_longer_silently_clears():
+    # #496 review (AX high): 空文字での暗黙 clear を物理的に不可能にする。空 signature は
+    # 「消す」ではなく ValueError。既存署名は消えない (渡し忘れ/typo で消える事故を封じる)。
+    data = _with_ledger()
+    se.set_account_signature(data, "会社", "既存署名")
+    for blank in ("", "   ", "\n"):
+        with pytest.raises(ValueError):
+            se.set_account_signature(data, "会社", blank)
+    # 既存は保持されたまま
+    assert se.get_send_account(data, "会社")["signature"] == "既存署名"
+
+
+def test_send_account_signature_explicit_clear():
+    # clear は明示 clear=True でのみ。key ごと消えて前方互換。
+    data = _with_ledger()
+    se.set_account_signature(data, "会社", "署名A")
+    se.set_account_signature(data, "会社", "", clear=True)
+    assert "signature" not in se.get_send_account(data, "会社")
+    assert se.resolve_route(data, "gmail", "会社")["signature"] == ""
+
+
+def test_send_account_signature_clear_rejects_coexisting_value():
+    # #496 再レビュー (AX high): clear と署名値の共存を拒否 (stale env の CLEAR が set を
+    # silent に delete へ化けさせる経路を塞ぐ)。
+    data = _with_ledger()
+    se.set_account_signature(data, "会社", "既存")
+    with pytest.raises(ValueError):
+        se.set_account_signature(data, "会社", "新しい署名", clear=True)
+    # 既存は保持 (共存拒否で何も起きない)
+    assert se.get_send_account(data, "会社")["signature"] == "既存"
+
+
 def test_resolve_route_slack_namespace_only():
     data = _fresh()
     se.add_send_account(data, "会社", "sales@corp.example",

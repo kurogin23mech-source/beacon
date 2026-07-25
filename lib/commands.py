@@ -13154,6 +13154,12 @@ def cmd_doc_list():
             print(f"  {icon} [{doc.get('scope', 'memo')}] {doc['doc_id']}: {doc['title']}")
 
 
+# #496 review: doc show の「not-found」専用 exit code に名前を付ける (散文でなく定数で
+# 自己記述)。「lookup 失敗 (API 障害等 = 例外→その他非ゼロ)」と区別するための値。send-account
+# resolve の BLOCK (exit1) は『route が未設定』という別 semantic なのでここには寄せない。
+EXIT_DOC_NOT_FOUND = 3
+
+
 def cmd_doc_show():
     doc_id = os.environ.get("BEACON_DOC_ID", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
@@ -13164,10 +13170,14 @@ def cmd_doc_show():
 
     # ms-84 Phase 2: Store 経由で local / cloud を統一。 Store.get_document は
     # 両 backend で同形 ({} on not-found / full dict on hit) を返す契約。
+    # 例外 (API 障害 / cloud 到達不能 等) はここで raise され非ゼロ終了する — つまり
+    # 「not-found」と「lookup 失敗」は別物。呼び出し側がそれを区別できるよう、not-found は
+    # **専用の EXIT_DOC_NOT_FOUND (=3)** を返す (skill が『未作成(正常)=3』と『障害=その他
+    # 非ゼロ』を分けられる。従来同様 exit は非ゼロなので `|| fallback` する既存呼び出しは不変)。
     doc = get_store().get_document(doc_id)
     if not doc:
         print(f"Document not found: {doc_id}")
-        sys.exit(1)
+        sys.exit(EXIT_DOC_NOT_FOUND)
 
     if json_mode:
         print(json.dumps(doc, ensure_ascii=False))
@@ -24594,6 +24604,41 @@ def cmd_sales_account_route():
     print(f"route set: {label}/{service} → {route['namespace']}{tail}")
 
 
+def cmd_sales_account_signature():
+    """Internal (Skill-invoked): set/clear the mail signature on a send account (e-3529).
+
+    Env: BEACON_SEND_LABEL, BEACON_SEND_SIGNATURE (署名テキスト).
+    #496 review (AX high): **空文字での暗黙 clear を禁止** + **clear と設定値の共存を拒否**。
+    消すには明示 **BEACON_SEND_SIGNATURE_CLEAR=1**、かつそのとき非空 BEACON_SEND_SIGNATURE を
+    同時に渡してはならない (stale env の CLEAR が set を silent に delete へ化けさせる経路を塞ぐ)。
+    - BEACON_SEND_SIGNATURE_CLEAR=1 (値なし) → 署名を消す。
+    - BEACON_SEND_SIGNATURE 非空 (clear なし) → 設定。
+    - どちらも無い / 空 → エラー (exit1、既存署名は保持)。CLEAR と値の同時指定も exit1。"""
+    import sales_entities
+    label = os.environ.get("BEACON_SEND_LABEL", "")
+    clear = os.environ.get("BEACON_SEND_SIGNATURE_CLEAR", "").strip().lower() in (
+        "1", "true", "yes")
+    signature = os.environ.get("BEACON_SEND_SIGNATURE", "")
+    data = load_project()
+    if not clear and not signature.strip():
+        # env 未設定 / 空 = 設定するつもりの渡し忘れ。silent clear せず止める。
+        print("Error: BEACON_SEND_SIGNATURE が未設定/空です。署名を設定するなら値を、"
+              "消すなら BEACON_SEND_SIGNATURE_CLEAR=1 を渡してください "
+              "(空文字では既存署名を消しません)。", file=sys.stderr)
+        sys.exit(1)
+    try:
+        # clear のとき非空 signature を渡すと lib が共存拒否で raise する (単一 enforcement 点)。
+        a = sales_entities.set_account_signature(data, label, signature, clear=clear)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    if not a.get("signature"):
+        print(f"signature cleared: {a['label']}")
+        return
+    print(f"signature set: {a['label']} ({len(a['signature'])} chars)")
+
+
 def cmd_sales_account_list():
     """Internal (Skill-invoked): list the send-account ledger.
     BEACON_JSON=1 for machine output."""
@@ -25926,6 +25971,7 @@ if __name__ == "__main__":
         # ms-107 e-3365 — send-account ledger (label→email+per-service MCP route)
         "sales_account_add": cmd_sales_account_add,
         "sales_account_route": cmd_sales_account_route,
+        "sales_account_signature": cmd_sales_account_signature,
         "sales_account_list": cmd_sales_account_list,
         "sales_account_resolve": cmd_sales_account_resolve,
         "sales_account_remove": cmd_sales_account_remove,
