@@ -2598,6 +2598,89 @@ def _collect_surface_snapshot(commands_list=None) -> list:
     return probes
 
 
+# ms-119 / e-4196: byte budget for the whole-target 思想 artifact. A milestone
+# can carry ~100 commits; attaching every full diff would overflow a judge's
+# context. Per-commit diffs are attached oldest-first until this budget is spent,
+# then the remaining commits carry subject-only and the artifact is flagged
+# truncated (never silently short).
+_WHOLE_TARGET_DIFF_BUDGET = 300_000
+
+
+def _collect_whole_target_artifact(target_id: str):
+    """Collect a whole-target 思想 artifact from the target's recorded commits
+    (ms-119 / e-4196).
+
+    A target-close philosophy review had no artifact source: --pr / --diff-ref are
+    change-scoped, so a whole-MS close reviewed against nothing (照合対象が空). A
+    target owns its implementation ledger — every commit is logged under it — and
+    that recorded set is the mechanically-collectable "what this target changed",
+    independent of the implementer's narrative (git history + project ledger). This
+    walks the target's commit entries (ledger order = oldest-first), collects each
+    commit's diff via ``git show``, and shapes the whole-target artifact bounded by
+    ``_WHOLE_TARGET_DIFF_BUDGET``. The commit *subject* comes from the ledger entry
+    (already recorded), so only the diff needs a git call.
+
+    Returns ``(artifact, gaps)``. Best-effort per commit: a commit recorded but not
+    present locally (logged on another machine, unfetched) is carried with an
+    ``error`` note rather than aborting the whole artifact.
+    """
+    import review_spine
+    data = load_project()
+    try:
+        target = core._find_approval_target(data, target_id)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    gaps = []
+    # Walk recorded commit entries. Dedup by 7-char hash so a commit logged twice
+    # (e.g. via pr_add child + beacon log) counts once; keep first-seen order.
+    seen = set()
+    refs = []  # [(hash, subject)]
+    for ent in core._iter_all_entries(target.get("entries", []) or []):
+        if not isinstance(ent, dict) or ent.get("type") != "commit":
+            continue
+        h = ((ent.get("meta") or {}).get("hash") or "").strip()
+        if not h:
+            continue
+        key = h[:7]
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append((h, ent.get("description", "") or ""))
+    commits = []
+    spent = 0
+    truncated = False
+    for h, subject in refs:
+        if spent >= _WHOLE_TARGET_DIFF_BUDGET:
+            commits.append({"hash": h, "subject": subject, "diff": "",
+                            "omitted": True})
+            truncated = True
+            continue
+        # `--format=` suppresses the commit header, leaving only the diff (the
+        # subject already travels from the ledger). -U15 widens context so a
+        # repo-blind judge sees the enclosing code without opening files.
+        proc = subprocess.run(["git", "show", "--format=", "-U15", h],
+                              capture_output=True, text=True)
+        if proc.returncode != 0:
+            commits.append({"hash": h, "subject": subject,
+                            "error": (proc.stderr or "").strip()[:200]})
+            continue
+        diff = proc.stdout or ""
+        spent += len(diff)
+        commits.append({"hash": h, "subject": subject, "diff": diff})
+    if not refs:
+        gaps.append(f"{target_id} に記録された commit がありません。whole-target の "
+                    f"照合対象が空です — この target の実装が beacon log されていないか、"
+                    f"変更を伴わない target です (SPEC § 方針5、hard-block しない)。")
+    if truncated:
+        gaps.append(f"whole-target artifact が大きいため diff を {_WHOLE_TARGET_DIFF_BUDGET} "
+                    f"文字で打ち切りました。以降の commit は subject のみです — 全体の "
+                    f"drift を精査するには PR 単位で `--pr` レビューしてください。")
+    artifact = review_spine.whole_target_artifact(commits, target_id=target_id,
+                                                  truncated=truncated)
+    return artifact, gaps
+
+
 def _model_independence_gap():
     """ms-119 / e-3988 wire-up (思想レビュー finding ②) — run the judge/implementer
     model independence check in the kernel and return a gap string if they match.
@@ -2728,8 +2811,12 @@ def cmd_review_context():
         BEACON_ORIGIN_DOC:  doc-id of the 原典 (required for philosophy; the SPEC
                             / vision the implementation is checked against;
                             rejected with --type ax, whose 原典 is fixed).
-        BEACON_TARGET_ID:   target id (ms-XX / op-X) — required for attainment
-                            (its 原典 = the target's SPEC, resolved automatically).
+        BEACON_TARGET_ID:   target id (ms-XX / op-X). Required for attainment (its
+                            原典 = the target's SPEC, resolved automatically). For
+                            judge-run reviews (ax / philosophy) in diff mode it is
+                            the whole-target artifact source (e-4196): a close 節目
+                            has no --pr / --diff-ref, so the target's recorded
+                            commit ledger is collected as the artifact.
         BEACON_MODE:        "diff" (only supported value; full-surface needs a
                             surface-snapshot collector that is a follow-up).
     """
@@ -2858,17 +2945,30 @@ def cmd_review_context():
             # context without opening files (which would taint the instrument).
             proc = subprocess.run(["git", "diff", "-U25", diff_ref],
                                   capture_output=True, text=True)
+        elif target_id:
+            # ms-119 / e-4196: whole-target 思想 artifact. A close 節目 has no
+            # --pr / --diff-ref (it reviews the WHOLE target, not one change), so
+            # the target's own commit ledger is the mechanically-collected change
+            # source. Sets `artifact` directly (diff_text stays "").
+            artifact, tgaps = _collect_whole_target_artifact(target_id)
+            target_ref = f"{target_id} (whole-target)"
+            gaps.extend(tgaps)
+            # ms-119 / e-4196 (self-review skill_gap): the artifact is the whole
+            # target ledger, not this-PR's diff — reflect that in the mode label so
+            # a judge isn't told "diff" while handed a whole-target commit series.
+            mode = "whole-target"
         else:
-            print("Error: pass --pr <n> or --diff-ref <base...head> to collect the "
-                  "diff (or --mode full-surface to snapshot the command surface).",
-                  file=sys.stderr)
+            print("Error: pass --pr <n> or --diff-ref <base...head> or --target "
+                  "<ms-XX|op-X> to collect the artifact (or --mode full-surface to "
+                  "snapshot the command surface).", file=sys.stderr)
             sys.exit(1)
-        if proc.returncode != 0:
-            print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
-            sys.exit(1)
-        diff_text = proc.stdout
-        if not diff_text.strip():
-            gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
+        if pr or diff_ref:
+            if proc.returncode != 0:
+                print(f"Error: diff collection failed: {proc.stderr.strip()}", file=sys.stderr)
+                sys.exit(1)
+            diff_text = proc.stdout
+            if not diff_text.strip():
+                gaps.append(f"{target_ref} の差分が空です (レビュー対象の変更がありません)。")
 
     _mi = _model_independence_gap()
     if _mi:

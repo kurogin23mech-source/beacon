@@ -147,6 +147,39 @@ def surface_snapshot_artifact(probes, *, target_ref):
     }
 
 
+def whole_target_artifact(commits, *, target_id, truncated=False):
+    """Shape a whole-target artifact from a target's recorded commits (ms-119 /
+    e-4196).
+
+    A target-close 思想 (philosophy) review checks the WHOLE target's
+    implementation against its SPEC, but the diff artifact was change-scoped
+    (--pr / --diff-ref). A whole-MS close had neither, so the review ran against
+    nothing (照合対象が空) — the hole this closes. A target OWNS its
+    implementation ledger: Beacon logs every commit under the target as an entry.
+    That recorded commit set IS the mechanically-collectable "what this target
+    changed", and it is implementer-session-INDEPENDENT (git history + the project
+    ledger, never the implementer's narrative), so it satisfies the same
+    independence contract (§2 計器の必然) as a diff.
+
+    Each commit is a dict: ``{"hash", "subject", "diff"}`` (or ``{"hash",
+    "subject", "error"}`` if the commit is recorded but could not be shown locally
+    — logged on another machine, not fetched; or ``{"hash", "subject", "diff": "",
+    "omitted": true}`` when the byte budget was spent and only the subject travels).
+    Pure: the caller runs ``git show`` and shapes each commit; this only shells the
+    envelope so the shaping is unit-testable without a repo.
+
+    ``truncated``: True when the caller stopped attaching per-commit diffs after a
+    byte budget (later commits carry subject-only). The judge is then told the
+    artifact is partial in ``gaps``, never silently short.
+    """
+    return {
+        "kind": "whole-target",
+        "ref": target_id,
+        "commits": list(commits or []),
+        "truncated": bool(truncated),
+    }
+
+
 def assemble_review_context(review_type, *, origin_id, origin_content,
                             diff_text, mode, target_ref, gaps=None,
                             known_judge_types=None, external_references=None,
@@ -195,9 +228,9 @@ def assemble_review_context(review_type, *, origin_id, origin_content,
             f"skills/<type>/review-type.json descriptor; {REVIEW_ATTAINMENT!r} "
             f"is human-gated, not a subagent judge)."
         )
-    if mode not in ("diff", "full-surface"):
-        raise ValueError(f"assemble_review_context: mode must be 'diff' or "
-                         f"'full-surface', got {mode!r}.")
+    if mode not in ("diff", "full-surface", "whole-target"):
+        raise ValueError(f"assemble_review_context: mode must be 'diff', "
+                         f"'full-surface' or 'whole-target', got {mode!r}.")
     if artifact is None:
         # default artifact is the mechanically-collected diff (diff mode). A
         # full-surface caller passes a surface_snapshot_artifact() instead.
