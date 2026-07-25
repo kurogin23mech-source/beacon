@@ -3018,6 +3018,38 @@ def resolve_route(data: dict, service: str, label: str = "") -> Optional[dict]:
     }
 
 
+def build_gmail_permalink(from_addr: str, message_id: str) -> str:
+    """Canonical builder for a followable Gmail permalink from a sent mail's
+    rfc822 Message-ID (e-3542, PR #495 review fix).
+
+    **This is the single source of truth** for the permalink recipe — the email
+    skill passes only ``from_addr`` (resolved send identity) and ``message_id``
+    and never hand-assembles the URL in prose (which produced broken/ambiguous
+    links). The UI's ``_salesRefToHref`` (server/static/index.html) is the legacy
+    ref-only fallback for records that predate a stored ``source.url``; keep the
+    two algorithmically consistent (strip surrounding ``<>`` + URL-encode the
+    ``rfc822msgid:…`` query).
+
+    Returns ``""`` (→ caller records the ref only, never a dead link) when:
+    - ``from_addr`` is empty — would yield a broken ``u//`` URL (review AX-high);
+    - ``message_id`` is empty; or
+    - the id is not an rfc822 Message-ID (no ``@``) — a thread-id would 0-hit and
+      record a dead link as success (review AX-medium). Mirrors the UI's ``@`` guard.
+
+    Form: ``https://mail.google.com/mail/u/<from_addr>/#search/<enc>`` where
+    ``<from_addr>`` (the identity email, not a login-order ``u/0`` index) makes
+    Gmail open the right mailbox across accounts, and ``<enc>`` is the
+    URL-encoded ``rfc822msgid:<message-id-sans-brackets>``.
+    """
+    frm = (from_addr or "").strip()
+    mid = (message_id or "").strip().strip("<>").strip()
+    if not frm or not mid or "@" not in mid:
+        return ""
+    from urllib.parse import quote
+    query = quote("rfc822msgid:" + mid, safe="")
+    return f"https://mail.google.com/mail/u/{frm}/#search/{query}"
+
+
 def check_send_from(data: dict, from_value: str, label: str = "") -> tuple:
     """Compare a proposed send ``from`` against the resolved send identity.
 

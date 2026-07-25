@@ -5398,12 +5398,13 @@ function _salesLinkedLabel(linkedId) {
   const short = text.length > 20 ? text.slice(0, 20) + '…' : text;
   return `<span class="comm-link" title="${esc('この予定を果たした: ' + text)}">↳ ${esc(short)}</span>`;
 }
-// e-3542 (UI half): make an existing email source-ref followable without
-// changing stored data. The skills store a message-id in source.ref; Gmail can
-// resolve it via an rfc822msgid search link. Only build one for an email ref
-// that looks like a message-id (contains '@'); a bare thread-id is left as text.
-// The proper stored permalink (source.url, with the right account index) is the
-// skill-side follow-up in e-3542.
+// e-3542: LEGACY ref-only fallback. Records written after PR #495 store a proper
+// permalink in source.url, built by the canonical `build_gmail_permalink`
+// (lib/sales_entities.py) — the single source of truth. This function only runs
+// for older records that have a source.ref but no source.url, so it uses the
+// login-order `u/0` (no send identity is available on those rows). Keep it
+// algorithmically consistent with the canonical builder: strip surrounding `<>`,
+// require an '@' (a bare thread-id 0-hits), and URL-encode the rfc822msgid query.
 function _salesRefToHref(ref, channel) {
   if (!ref) return '';
   const ch = (channel || '').toLowerCase();

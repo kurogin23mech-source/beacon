@@ -24537,6 +24537,19 @@ def cmd_sales_account_list():
         print(f"  {a.get('label')} <{a.get('email')}>{mark}  [{routes}]")
 
 
+def cmd_sales_gmail_permalink():
+    """Internal (Skill-invoked): build the canonical Gmail permalink for a sent
+    mail (e-3542, PR #495 review fix). Env: BEACON_SEND_FROM (resolved identity
+    email), BEACON_MSGID (rfc822 Message-ID). Prints the URL, or an **empty line**
+    when it cannot build a valid link (empty from / empty id / not a Message-ID).
+    The skill treats empty output as 'no --source-url' (record the ref only,
+    never a dead link) — so the URL recipe lives in code, not skill prose."""
+    import sales_entities
+    from_addr = os.environ.get("BEACON_SEND_FROM", "")
+    message_id = os.environ.get("BEACON_MSGID", "")
+    print(sales_entities.build_gmail_permalink(from_addr, message_id))
+
+
 def cmd_sales_account_resolve():
     """Internal (Skill-invoked): resolve the concrete MCP route for a service.
     Env: BEACON_SEND_SERVICE (gmail|calendar|drive), optional BEACON_SEND_LABEL
@@ -25801,6 +25814,7 @@ if __name__ == "__main__":
         "sales_account_list": cmd_sales_account_list,
         "sales_account_resolve": cmd_sales_account_resolve,
         "sales_account_remove": cmd_sales_account_remove,
+        "sales_gmail_permalink": cmd_sales_gmail_permalink,
         "task_add": cmd_task_add,
         "task_done": cmd_task_done,
         "task_list": cmd_task_list,
