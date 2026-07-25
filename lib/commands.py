@@ -19469,29 +19469,32 @@ def _record_bus_budget_trek_bypass(trek_id: str) -> None:
         return
 
 
-def _trek_member_matches(member: dict, session_id: str, user_id: str) -> bool:
-    """True iff a joined ``members[]`` entry identifies (session_id, user_id).
+def _trek_has_joined_member(
+    members: list, *, phase_a: bool, session_id: str, user_id: str
+) -> bool:
+    """True iff a *joined* member of ``members[]`` identifies (session_id, user_id).
 
-    Session-grain first (ms-88 / e-2109 keyed ``members[]`` by session_id, so a
-    single human's leader + fork sessions are TWO distinct entries), with a
-    user_id fallback for legacy member rows that predate the session grain
-    (``session_id`` empty). A member only counts once ``joined_at`` is set —
-    a pending invitation does not grant Trek scope. Mirrors the server-side
-    ``dm_gate`` shared-Trek lookup's session/user grain.
+    Branches on the trek's phase, mirroring the server-side ``dm_gate``
+    shared-Trek lookup exactly (PR #491 parent re-review). The invited-vs-joined
+    distinction is structural, NOT a separate ``joined_at`` check:
+
+      * **phase-A (session_id keyed)**: match by ``session_id`` presence.
+        ``trek.accept_invitation`` writes ``session_id`` and ``joined_at``
+        together on join, while an invite placeholder has NEITHER — so a member
+        carrying a session_id is already joined, and an invite placeholder (no
+        session_id) simply never matches a real session id.
+      * **pre-A (legacy user_id grain)**: match by ``user_id``. A
+        pre-session-grain member predates ``joined_at`` tracking and is joined
+        by the legacy contract; imposing ``joined_at`` here would drop existing
+        treks (the regression this re-review corrected).
     """
-    if not member.get("joined_at"):
-        return False
-    m_sid = member.get("session_id") or ""
-    m_uid = member.get("user_id") or ""
-    if m_sid and session_id:
-        if m_sid == session_id:
-            return True
-        # A session_id-keyed row that isn't mine can still match on user_id
-        # only when it carries no session grain; a different session of the
-        # same user is a *different* member, so do NOT user-match here.
-        return False
-    # Legacy / session-less row → fall back to user grain.
-    return bool(m_uid) and m_uid == user_id
+    if phase_a:
+        if not session_id:
+            return False
+        return any((m.get("session_id") or "") == session_id for m in members)
+    return bool(user_id) and any(
+        (m.get("user_id") or "") == user_id for m in members
+    )
 
 
 def _is_trek_internal_send(recipient_sid: str) -> tuple[bool, str]:
@@ -19567,15 +19570,25 @@ def _is_trek_internal_send(recipient_sid: str) -> tuple[bool, str]:
             if trek.get("halt"):
                 continue
             members = trek.get("members") or []
-            am_member = any(
-                _trek_member_matches(m, my_session_id, my_user_id)
-                for m in members
+            # Branch on trek phase once (mirror server _is_phase_a_plus), then
+            # match both endpoints at that grain. Doing it per-trek (not
+            # per-member) is what lets a phase-A invite placeholder — no
+            # session_id — be correctly excluded instead of falling through to
+            # a legacy user match.
+            try:
+                import trek as _trek_mod
+                phase_a = _trek_mod.is_session_id_keyed(trek)
+            except Exception:
+                phase_a = False
+            am_member = _trek_has_joined_member(
+                members, phase_a=phase_a,
+                session_id=my_session_id, user_id=my_user_id,
             )
             if not am_member:
                 continue
-            recipient_is_member = any(
-                _trek_member_matches(m, recipient_sid, recipient_user_id)
-                for m in members
+            recipient_is_member = _trek_has_joined_member(
+                members, phase_a=phase_a,
+                session_id=recipient_sid, user_id=recipient_user_id,
             )
             if recipient_is_member:
                 return True, str(trek.get("trek_id") or "")

@@ -359,20 +359,29 @@ def test_shared_trek_lookup_skips_planning_trek():
     assert matched is False
 
 
-def test_shared_trek_lookup_skips_invited_not_joined_member():
-    """e-4116 follow-up (PR #491 parent review 1): a member who was invited
-    but has not joined (``joined_at`` empty) has NOT accepted the pre-approval
-    scope, so must NOT grant bypass — pre-A user grain."""
+def test_shared_trek_lookup_skips_invited_not_joined_member_phase_a():
+    """e-4116 follow-up (PR #491 parent re-review): an invited-but-not-joined
+    member does NOT grant bypass — and the session_id grain is what enforces it.
+
+    Per ``trek.accept_invitation``, an invite placeholder carries NEITHER a
+    session_id NOR a joined_at; joining writes both together. So a phase-A
+    invite placeholder (no session_id) simply never matches the requester's
+    session_id, and the bypass is denied structurally — no separate joined_at
+    check needed. Here user-bob was invited (placeholder, no session_id) but
+    the DM targets session sv-bob, which is not in members[]."""
     treks_by_uid = {
         "user-alice": [
             {
                 "trek_id": "tk-invited",
                 "creator_actor": {"user_id": "user-alice"},
                 "status": "active",
+                "meta": {"migration_phase": "A"},
                 "members": [
-                    {"user_id": "user-alice",
-                     "joined_at": "2026-06-18T00:00:00Z"},
-                    {"user_id": "user-bob", "joined_at": ""},  # invited, not joined
+                    {"user_id": "user-alice", "session_id": "sv-alice",
+                     "role": "leader", "joined_at": "2026-06-18T00:00:00Z"},
+                    # user-bob invited but never joined: no session_id, joined_at "".
+                    {"user_id": "user-bob", "role": "member",
+                     "invited_at": "2026-06-18T00:00:00Z", "joined_at": ""},
                 ],
             }
         ],
@@ -380,7 +389,7 @@ def test_shared_trek_lookup_skips_invited_not_joined_member():
     lookup = dm_gate.build_shared_trek_lookup_from_lists(
         lambda uid: treks_by_uid.get(uid, [])
     )
-    matched, _ = lookup("user-alice", "user-bob")
+    matched, _ = lookup("user-alice", "user-bob", "sv-alice", "sv-bob")
     assert matched is False
 
 

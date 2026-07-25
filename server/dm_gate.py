@@ -331,10 +331,15 @@ def build_shared_trek_lookup_from_lists(
                 # can have multiple sessions in the same trek; only the
                 # listed ones grant bypass).
                 #
-                # e-4116 follow-up (parent review 1): a member only counts
-                # once ``joined_at`` is set. An invited-but-not-joined entry
-                # (session_id present, joined_at empty) has NOT accepted the
-                # pre-approval scope, so it must not grant bypass.
+                # e-4116 follow-up (PR #491 parent re-review): matching by
+                # session_id presence is ITSELF the invited-vs-joined guard.
+                # ``accept_invitation`` writes ``session_id`` and ``joined_at``
+                # together on join, while an invite placeholder has neither, so
+                # a member carrying a session_id is already a joined member. An
+                # earlier fix added a separate ``joined_at`` requirement here;
+                # that broke every joined member whose fixture / legacy row
+                # omits joined_at (regressed test_audit_log_trek_id), so it is
+                # removed — the session_id match is the correct grain.
                 if not sender_sid or not receiver_sid:
                     # Missing session ids — cannot verify session-grain
                     # membership; fall through to next trek.
@@ -342,8 +347,6 @@ def build_shared_trek_lookup_from_lists(
                 sender_in = False
                 receiver_in = False
                 for m in members:
-                    if not m.get("joined_at"):
-                        continue
                     msid = m.get("session_id") or ""
                     if msid and msid == sender_sid:
                         sender_in = True
@@ -356,15 +359,23 @@ def build_shared_trek_lookup_from_lists(
                 # Not in this trek — try next one.
                 continue
 
-            # pre-A trek: user_id grain (legacy behaviour preserved). The
-            # creator is a joined member by construction (they open the
-            # trek); non-creator members must carry ``joined_at`` to count
-            # (e-4116 follow-up — parity with the phase-A joined_at rule and
-            # the CLI ``_trek_member_matches`` check).
+            # pre-A trek: user_id grain (legacy behaviour preserved verbatim).
+            #
+            # e-4116 follow-up (PR #491 parent re-review): ``joined_at`` is
+            # deliberately NOT required here. The invited-but-not-joined hole is
+            # a *session-grain* concept — only phase-A members carry both a
+            # session_id and a joined_at, so only there can we distinguish an
+            # invited-but-not-joined session from a joined one. A pre-A
+            # (legacy, user_id-keyed) member predates joined_at tracking; by the
+            # legacy contract it is already a joined member. Imposing joined_at
+            # here would 403 the DMs of any trek whose members were recorded
+            # before joined_at existed (a backward-compat break — regressed
+            # tests/test_sender_consent_backstop.py). The active + halt filters
+            # above still apply to pre-A treks.
             if creator_uid and creator_uid == receiver_uid:
                 return (True, trek_id)
             for m in members:
-                if m.get("user_id") == receiver_uid and m.get("joined_at"):
+                if m.get("user_id") == receiver_uid:
                     return (True, trek_id)
         return (False, "")
     return _lookup

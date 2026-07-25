@@ -624,8 +624,15 @@ def test_is_trek_internal_send_returns_true_for_shared_active_trek(project_dir,
 
 def test_is_trek_internal_send_returns_false_when_only_one_side_joined(project_dir,
                                                                        monkeypatch):
-    """Pending invitation (= joined_at missing) does not count. Trek scope
-    requires both sides to have actually accepted membership."""
+    """Session-grain (phase-A): a pending invitation (= joined_at empty) does
+    not count — both sides must have accepted membership.
+
+    e-4116 follow-up (PR #491 parent re-review): this guarantee is session-grain
+    only. Members carry a session_id here, so an invited-but-not-joined session
+    is distinguishable and excluded. (For legacy user-grain members — no
+    session_id — joined_at is not tracked, so they are treated as joined by the
+    legacy contract; that path is covered by test_dm_gate's pre-A tests and
+    test_sender_consent_backstop.)"""
     _clear_bus_env(monkeypatch)
     monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
     monkeypatch.setattr(commands, "_resolve_creator_identity",
@@ -641,9 +648,14 @@ def test_is_trek_internal_send_returns_false_when_only_one_side_joined(project_d
             return [{
                 "trek_id": "tk",
                 "status": "active",
+                "meta": {"migration_phase": "A"},
                 "members": [
-                    {"user_id": "u-sender", "joined_at": "2026-06-19Z"},
-                    {"user_id": "u-recipient", "joined_at": ""},  # not yet joined
+                    {"user_id": "u-sender", "session_id": "sv-1",
+                     "joined_at": "2026-06-19Z"},
+                    # u-recipient invited but never joined = invite placeholder:
+                    # NO session_id (accept_invitation writes session_id+joined_at
+                    # together), so its session sv-recipient is not a member.
+                    {"user_id": "u-recipient", "joined_at": ""},
                 ],
             }]
     monkeypatch.setattr(commands, "_get_api_client",
@@ -764,7 +776,8 @@ def test_is_trek_internal_send_session_grain_requires_both_joined(
         def list_sessions(self, _p):
             return [{"session_id": "sv-r", "actor": {"user_id": "u-same"}}]
         def list_treks(self):
-            return [{"trek_id": "tk", "status": "active", "members": [
+            return [{"trek_id": "tk", "status": "active",
+                     "meta": {"migration_phase": "A"}, "members": [
                 {"session_id": "sv-1", "user_id": "u-same", "joined_at": "x"},
                 {"session_id": "sv-other", "user_id": "u-same", "joined_at": "x"},
             ]}]
