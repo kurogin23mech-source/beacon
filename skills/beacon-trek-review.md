@@ -1,6 +1,6 @@
 ---
 name: beacon-trek-review
-description: Trek scope 内の task が review 対象 state (= done / user_review / leader_review) に遷移した時、 leader が forced 3-択 (approve / re-work / forward-to-user) で review する Skill。 ms-75 / e-2048 の leader 強制 review 経路 (ms-88 5-state 語彙: todo / working / leader_review / user_review / done)。
+description: Trek scope 内の task が review 対象 state (= done / user_review / leader_review) に遷移した時、 leader が forced 3-択 (approve / re-work / forward-to-user) で review する Skill。 ms-75 / e-2048 の leader 強制 review 経路 (ms-88 5-state 語彙 = todo / working / leader_review / user_review / done)。
 version: 0.2.0
 triggers:
   - /beacon-trek-review
