@@ -8052,6 +8052,14 @@ def trek_scheduler_tick_endpoint(
     import copy
     import datetime
     now = datetime.datetime.now(datetime.timezone.utc)
+    # ms-66 fix: bind now_iso UNCONDITIONALLY here. It is read below by
+    # _fire_due_scheduled(now_iso) (operation firing), but its only other binding
+    # is inside the trek-quiesce conditional branch — so on every tick where that
+    # branch does not run (the common case), now_iso was unbound at the call site
+    # → UnboundLocalError, swallowed by the try/except below → the server tick's
+    # Operation-firing path silently died on every tick since ms-107 (804dfa16).
+    # Trek fanout was unaffected (it calls trek_mod.utcnow_iso() directly).
+    now_iso = trek_mod.utcnow_iso()
     # Fan out across active treks. Without project scoping we list every
     # trek in the backend (admin-style enumeration); the scheduler tick is
     # an internal service, not a user-driven query, so this is acceptable
@@ -9249,6 +9257,13 @@ def trek_scheduler_tick_endpoint(
     try:
         scheduled_fires = _fire_due_scheduled(now_iso)
     except Exception as _op_exc:  # pragma: no cover - defensive isolation
+        # ms-66 fix: this bare except previously masked an UnboundLocalError for
+        # ~every tick (see now_iso note above) so the dead Operation-firing path
+        # was invisible in logs. Log to stderr so this class of silent failure is
+        # visible in VPS journalctl; still isolated (never breaks the Trek fanout).
+        _server_logger.error(
+            "scheduled-fire tick error (operation firing skipped this tick): "
+            "%s: %s", type(_op_exc).__name__, _op_exc)
         scheduled_fires = [{"error": f"{type(_op_exc).__name__}: {_op_exc}"}]
 
     # e-1391 (ms-66) — record that a tick just completed so an *external*
