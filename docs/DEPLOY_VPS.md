@@ -171,6 +171,9 @@ EnvironmentFile=/etc/beacon/db.env
 EnvironmentFile=/etc/beacon/app.env
 Environment=BEACON_STORE_BACKEND=mysql
 Environment=BEACON_ENV=prod
+# ms-110 / e-3497: 別ユーザー宛 DM の送信側 consent gate を本番で有効化。
+# (app.env にも書けるが、全 prod で同一の固定フラグなので unit に直書きしておく)
+Environment=BEACON_SENDER_CONSENT_ENABLED=1
 ExecStart=/opt/beacon/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000
 Restart=on-failure
 RestartSec=3
@@ -189,7 +192,7 @@ WantedBy=multi-user.target
 |-----|------|------|
 | `BEACON_OAUTH_CLIENT_ID` | ✅ (provider=firebase) | Web UI ログインの Google OAuth client_id (PUBLIC 値)。空だとログインボタンが消える。 |
 | `BEACON_SCHEDULER_INTERNAL_KEY` | ✅ (SECRET) | 定期ティック内部認証キー (e-1391 / e-4115)。beacon-tick.timer と app が同値で照合。未設定だと prod は起動拒否 (refuse-to-boot)。`openssl rand -hex 32` で生成。**repo に実値を書かない。** → 下の「定期ティック」節参照。 |
-
+| `BEACON_SENDER_CONSENT_ENABLED` | ✅ (ms-110 / e-3497) | 別ユーザー宛 DM の送信側 consent gate を有効化 (`"1"` で ON)。前提: e-3886 (送信者を JWT 本人軸で判定) が入っていること。上の unit で `Environment=` 直書きするか、この app.env に `BEACON_SENDER_CONSENT_ENABLED=1` を置く。反映には `systemctl restart beacon-api` が必要。 |
 **beacon-ai.dev 本番の実値** (PUBLIC 値、secret ではない):
 
 ```
@@ -226,3 +229,29 @@ curl -fsS https://beacon-ai.dev/health   # 200 なら OK、503 なら env 欠落
 > ⚠ ハードコード default を撤去した変更 (e-3196/e-3197) を deploy する **前** に
 > `/etc/beacon/app.env` へ `BEACON_OAUTH_CLIENT_ID` を入れておくこと。先に入れて
 > おけば無停止で切り替わる。入れ忘れると (狙い通り) deploy が 503 で止まる。
+
+### 別ユーザー宛 DM の consent gate を有効化する (ms-110 / e-3497)
+
+`vps-pull-deploy.sh` は `git pull` + `pip` + `systemctl restart` しかせず、
+systemd unit や `/etc/beacon/app.env` を repo から再同期しない。よって
+`BEACON_SENDER_CONSENT_ENABLED` は **本番マシン上で 1 度だけ手で有効化** する
+(= `BEACON_OAUTH_CLIENT_ID` と同じ運用)。有効化前に e-3886 (送信者を JWT 本人軸で
+判定する server 修正) が本番の serving revision に入っていることを確認すること。
+
+```bash
+# 方式 A: systemd unit に直書き (推奨、全 prod で同一の固定フラグ)
+sudo sed -i '/Environment=BEACON_ENV=prod/a Environment=BEACON_SENDER_CONSENT_ENABLED=1' \
+  /etc/systemd/system/beacon-api.service
+sudo systemctl daemon-reload
+# 方式 B: app.env に置く場合
+#   echo 'BEACON_SENDER_CONSENT_ENABLED=1' | sudo tee -a /etc/beacon/app.env
+
+sudo systemctl restart beacon-api
+# 確認: 同一ユーザーの別プロジェクト宛 DM が通り (200)、別ユーザー宛の claim 無し
+# 新規 DM が 403 (sender_consent_required) になること (= e-3447 実機 dogfood)。
+```
+
+> ⚠ e-3886 が入る前に有効化すると、同一ユーザーの別プロジェクト宛 DM を「別ユーザー」
+> と誤判定して弾く回帰 (e-3492/3531/3566/3567/3880) が再発する。順序厳守。
+> また、claim を発行できる新しい CLI が全端末に配布済 (e-3496) でないと、正規の
+> cross-user 送信が古いクライアントから 403 になりうる点に注意。
