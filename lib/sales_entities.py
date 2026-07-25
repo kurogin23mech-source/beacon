@@ -3029,6 +3029,17 @@ def resolve_route(data: dict, service: str, label: str = "") -> Optional[dict]:
     }
 
 
+class PermalinkIdentityMissing(ValueError):
+    """``build_gmail_permalink`` was called with an empty ``from_addr`` (e-4185).
+
+    This is a **wiring bug**, not a legitimate no-link: the send identity is
+    always resolved (email skill Step 2) before an email trace is recorded, so an
+    empty value means the caller failed to thread ``$FROM`` through. It must be
+    surfaced (the command layer exits non-zero) rather than folded into the silent
+    no-link path — otherwise a mis-wired caller would drop permalinks forever with
+    no signal."""
+
+
 def build_gmail_permalink(from_addr: str, message_id: str) -> str:
     """Canonical builder for a followable Gmail permalink from a sent mail's
     rfc822 Message-ID (e-3542, PR #495 review fix).
@@ -3041,11 +3052,15 @@ def build_gmail_permalink(from_addr: str, message_id: str) -> str:
     two algorithmically consistent (strip surrounding ``<>`` + URL-encode the
     ``rfc822msgid:…`` query).
 
-    Returns ``""`` (→ caller records the ref only, never a dead link) when:
-    - ``from_addr`` is empty — would yield a broken ``u//`` URL (review AX-high);
-    - ``message_id`` is empty; or
-    - the id is not an rfc822 Message-ID (no ``@``) — a thread-id would 0-hit and
-      record a dead link as success (review AX-medium). Mirrors the UI's ``@`` guard.
+    e-4185 — the three "cannot build" causes are **not** collapsed into one silent
+    empty return; they are told apart so a wiring bug cannot hide:
+    - ``from_addr`` empty → **raises ``PermalinkIdentityMissing``** (wiring bug;
+      an empty value would yield a broken ``u//`` URL, review AX-high). The caller
+      must surface it, not swallow it.
+    - ``message_id`` empty, or not an rfc822 Message-ID (no ``@`` — e.g. a Gmail
+      thread-id / API id, which would 0-hit an rfc822msgid search, review
+      AX-medium) → returns ``""`` (a *legitimate* no-link; caller records the ref
+      only). Mirrors the UI's ``@`` guard.
 
     Form: ``https://mail.google.com/mail/u/<from_addr>/#search/<enc>`` where
     ``<from_addr>`` (the identity email, not a login-order ``u/0`` index) makes
@@ -3053,8 +3068,12 @@ def build_gmail_permalink(from_addr: str, message_id: str) -> str:
     URL-encoded ``rfc822msgid:<message-id-sans-brackets>``.
     """
     frm = (from_addr or "").strip()
+    if not frm:
+        raise PermalinkIdentityMissing(
+            "from_addr (送信 identity) が空です — 送信元は証跡記録前に台帳解決済みのはず。"
+            "呼び出し側の配線ミスの可能性があります")
     mid = (message_id or "").strip().strip("<>").strip()
-    if not frm or not mid or "@" not in mid:
+    if not mid or "@" not in mid:
         return ""
     from urllib.parse import quote
     query = quote("rfc822msgid:" + mid, safe="")

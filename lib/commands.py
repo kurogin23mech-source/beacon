@@ -24599,15 +24599,46 @@ def cmd_sales_account_list():
 
 def cmd_sales_gmail_permalink():
     """Internal (Skill-invoked): build the canonical Gmail permalink for a sent
-    mail (e-3542, PR #495 review fix). Env: BEACON_SEND_FROM (resolved identity
-    email), BEACON_MSGID (rfc822 Message-ID). Prints the URL, or an **empty line**
-    when it cannot build a valid link (empty from / empty id / not a Message-ID).
-    The skill treats empty output as 'no --source-url' (record the ref only,
-    never a dead link) — so the URL recipe lives in code, not skill prose."""
+    mail (e-3542; failure-mode split e-4185).
+
+    Env: BEACON_SEND_FROM (resolved identity email), BEACON_RFC822_MSGID (rfc822
+    Message-ID — old BEACON_MSGID kept as a back-compat alias; the new name says
+    which id type is expected so a Gmail thread-id / API id is not passed by mistake).
+
+    The three "cannot build" causes are told apart instead of all collapsing to a
+    silent empty exit (e-4185):
+    - empty BEACON_SEND_FROM = **wiring bug** → stderr + **exit 1** (the skill stops
+      and surfaces it; a mis-wired caller can't drop permalinks unnoticed).
+    - empty Message-ID, or a non-rfc822 id (no '@' = thread-id / API id) =
+      **legitimate no-link** → **exit 0**, reason on stderr, empty stdout (the skill
+      records the ref only, never a dead link).
+    - success → URL on stdout, exit 0.
+    """
     import sales_entities
     from_addr = os.environ.get("BEACON_SEND_FROM", "")
-    message_id = os.environ.get("BEACON_MSGID", "")
-    print(sales_entities.build_gmail_permalink(from_addr, message_id))
+    # e-4185: renamed to name the id type; old var still honoured for back-compat.
+    message_id = (os.environ.get("BEACON_RFC822_MSGID")
+                  or os.environ.get("BEACON_MSGID", ""))
+    try:
+        url = sales_entities.build_gmail_permalink(from_addr, message_id)
+    except sales_entities.PermalinkIdentityMissing as e:
+        print(f"Error: {e}。permalink は記録しません — Step 2 の台帳解決 ($FROM) を"
+              "見直してください。", file=sys.stderr)
+        sys.exit(1)
+    if url:
+        print(url)
+        return
+    # legitimate no-link: exit 0, tell the human *why* (which of the two), empty stdout.
+    mid = (message_id or "").strip().strip("<>").strip()
+    if not mid:
+        print("no-link: rfc822 Message-ID が空です — permalink 無し、ref のみ記録します。",
+              file=sys.stderr)
+    else:
+        print("no-link: 渡された値は rfc822 Message-ID ではありません ('@' が無く、Gmail の "
+              "thread-id / API id の可能性)。rfc822 Message-ID (例 <abc@mail.gmail.com>) を "
+              "BEACON_RFC822_MSGID に渡すと辿れます。今回は ref のみ記録します。",
+              file=sys.stderr)
+    print("")  # empty stdout = no --source-url
 
 
 def cmd_sales_account_resolve():
