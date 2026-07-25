@@ -177,7 +177,25 @@ Step 6.5 の Communication だけが記録になる。**いずれにせよ新規
 
 送信は「実際に起きたやり取り」なので、事実の証跡 (Communication) としても残す。対象は
 その活動 (act-) にすると「どの予定を果たした送信か」まで辿れる (無ければ商談 opp-)。
-`--source-ref` に送信メールの message-id / thread-id を入れて出典を辿れるようにする:
+`--source-ref` に送信メールの message-id / thread-id を入れて出典を辿れるようにする。
+
+**加えて、辿れる Gmail permalink を組み立てて `--source-url` に入れる (e-3542)**。ref だけ
+だと UI 上は「出典 <message-id>」のプレーン文字列で Gmail に飛べない。permalink があれば
+UI がクリック可能なリンクにする。permalink は送信 identity の Gmail 受信箱を message-id で
+検索する URL として組む:
+
+```
+https://mail.google.com/mail/u/<$FROM>/#search/rfc822msgid:<message-id>
+```
+
+- **`u/` の位置には Step 2 で解決した送信 identity のメールアドレス `$FROM` を入れる**。
+  複数 Google アカウントを使い分けている場合でも、`u/0` のような index でなく `$FROM`
+  (メールアドレス) を入れれば Gmail 側が正しいアカウントの受信箱を開くので、アカウント
+  跨ぎでも取り違えない (index はログイン順で変わるため使わない)。
+- `<message-id>` は送信結果 (MCP `send_email` の戻り) の Message-ID。前後の山括弧
+  (`<`…`>`) は URL 上そのまま入れてよい (Gmail の rfc822msgid 検索が受け付ける)。
+- thread-id しか無い場合は permalink を組めないので `--source-url` は省き、`--source-ref`
+  に thread-id を残す (UI は ref 表示にフォールバックする)。
 
 **スレッド集約の原則 (e-3535)**: 紐づけ先の活動は、この送信が属する会話スレッドの**起点と
 なる既存の活動**を選ぶ。返信の往復ごとに新しい活動を作って散らさない — 1 スレッドの証跡は
@@ -188,6 +206,7 @@ BEACON_COMM_TARGET="<act-id または $OPP>" \
   BEACON_COMM_SUMMARY="<送信内容の1行要約>" \
   BEACON_COMM_DIRECTION="outbound" BEACON_COMM_CHANNEL="email" \
   BEACON_COMM_SOURCE_REF="<message-id / thread-id>" \
+  BEACON_COMM_SOURCE_URL="https://mail.google.com/mail/u/$FROM/#search/rfc822msgid:<message-id>" \
   python3 "$(beacon _lib-path)/commands.py" communication_add
 ```
 
