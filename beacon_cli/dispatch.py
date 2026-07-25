@@ -525,7 +525,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_comm_add.add_argument("--channel", default="")
     p_comm_add.add_argument("--source-ref", dest="source_ref", default="")
     p_comm_add.add_argument("--source-url", dest="source_url", default="")
-    p_comm_add.add_argument("--body", default="")  # e-3544: 任意の内容本文/要約
+    p_comm_add.add_argument("--body", default="")  # e-3544: summary(1行見出し)より厚い数行の骨子。任意
     p_comm_add.add_argument("--occurred", default="")
 
     p_comm_list = comm_sub.add_parser("list", aliases=["ls"], add_help=False)
@@ -2253,7 +2253,7 @@ def _handle_communication(root: Path, args: argparse.Namespace) -> int:
             print("Usage: beacon communication add <target-id> <summary> "
                   "--direction inbound|outbound "
                   "[--channel email|slack|meeting|calendar|phone|other] "
-                  "[--source-ref <id>] [--source-url <link>] [--body <内容要約>] "
+                  "[--source-ref <id>] [--source-url <link>] [--body <multi-line-digest>] "
                   "[--occurred <datetime>]")
             return 1
         env = {
