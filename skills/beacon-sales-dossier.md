@@ -146,8 +146,9 @@ dossier は 2 層構造で扱う:
 4. **既存の所感・経緯は一切書き換えず**、全体を書き戻す:
 
    ```bash
+   # BEACON_SALES_SKILL_CALL=1 = スキル経由の正規起票の印 (e-3760、直叩き誘導 nudge を抑える)
    # 新規作成 (テンプレ骨格を content に)
-   beacon doc add --id dossier-$ACC --scope spec --account "$ACC" \
+   BEACON_SALES_SKILL_CALL=1 beacon doc add --id dossier-$ACC --scope spec --account "$ACC" \
      --content "$NEW_FULL_CONTENT" --title "顧客ドキュメント: $ACC_NAME"
    # 既存更新 (構造化セクション更新 + 所感 append を反映した全文)
    beacon doc update dossier-$ACC --account "$ACC" --content "$NEW_FULL_CONTENT"
