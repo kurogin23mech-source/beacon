@@ -155,6 +155,18 @@ def test_account_read_view_unlinked_preserves_shape_and_values():
     assert view["home_project_id"] == "P2" and view["home_project_name"] == "営業"
 
 
+def test_account_read_view_extra_cannot_override_resolved_identity():
+    """extra に identity キーを混ぜても resolver 値が勝つ (一本化の抜け穴を作らない)。"""
+    acc = {"id": "acc-1", "name": "Acme", "label": "Acme", "contacts": []}
+    # 悪意/事故で extra に name/label/contacts を渡しても上書きできない。
+    view = mp.account_read_view(acc, None, {"name": "SPOOF", "label": "SPOOF",
+                                            "contacts": [{"name": "ghost"}],
+                                            "home_project_id": "P2"})
+    assert view["name"] == "Acme" and view["label"] == "Acme"   # resolver 値が勝つ
+    assert view["contacts"] == []                                # resolver 由来が勝つ
+    assert view["home_project_id"] == "P2"                       # 非 identity は通る
+
+
 def test_account_read_view_linked_routes_identity_through_master(adapter):
     """link 済なら name/label/contact identity が master 経由に差し替わる (shape 不変)。"""
     data = _project()

@@ -24992,6 +24992,18 @@ def _sales_skill_nudge(what: str, skill: str, detail: str) -> None:
           f"このまま直接続行します (master=人間)。", file=sys.stderr)
 
 
+def _master_adapter():
+    """CLI から見た master adapter の唯一の定義点 (ms-111 e-3621 chunk2b).
+
+    CLI プロセスには server 側 backend に配線済みの master adapter が無いので、現状は
+    常に None (= 投影 fallback で従来値を返す)。将来 CLI にも adapter を配線する時
+    (e-3622 以降) は **この 1 関数だけ差し替えれば** 全 CLI read site が一斉に master
+    経由になる。散在する None リテラルを 1 箇所に閉じ、「一部だけ master 経由」の
+    部分 swap (= stale と master が混ざる不整合) を構造的に防ぐ。
+    """
+    return None
+
+
 def cmd_account_add():
     import sales_entities
     name = os.environ.get("BEACON_ACCOUNT_NAME", "")
@@ -25093,9 +25105,9 @@ def _cmd_account_list_linked(json_mode: bool):
         home = a.get("home_project_name") or a.get("home_project_id", "?")
         phase = a.get("phase", "")
         phase_str = f"phase: {phase} / " if phase else ""
-        # ms-111 e-3621 chunk2b: identity は master 経由の resolver で読む。CLI には
-        # server 側 master adapter が無いので adapter=None → 投影 fallback (= 従来値)。
-        name = master_projection.resolve_account_identity(a, None) or "?"
+        # ms-111 e-3621 chunk2b: identity は master 経由の resolver で読む。adapter の
+        # 出所は _master_adapter() に一本化 (CLI は現状 None → 投影 fallback = 従来値)。
+        name = master_projection.resolve_account_identity(a, _master_adapter()) or "?"
         print(f"[{a.get('id')}] {name} — {phase_str}home: {home}")
 
 
@@ -25139,11 +25151,12 @@ def cmd_account_list():
         links = a.get("project_links", []) or []
         links_str = f" / linked: {', '.join(links)}" if links else ""
         # ms-111 e-3621 chunk2b: account/contact の identity を master 経由 resolver で
-        # 読む。CLI は adapter=None → 投影 fallback (= 従来の target_label / 投影値)。
-        acc_name = master_projection.resolve_account_identity(a, None)
+        # 読む。adapter の出所は _master_adapter() に一本化 (CLI は現状 None → 投影値)。
+        adapter = _master_adapter()
+        acc_name = master_projection.resolve_account_identity(a, adapter)
         print(f"[{a['id']}] {acc_name}{suffix} — {phase_str}contacts: {len(contacts)}{links_str}")
         for c in contacts:
-            ident = master_projection.resolve_contact_identity(c, None)
+            ident = master_projection.resolve_contact_identity(c, adapter)
             role = f" ({ident['role']})" if ident.get("role") else ""
             email = f" <{ident['email']}>" if ident.get("email") else ""
             print(f"    - {ident.get('name') or '?'}{role}{email}")
