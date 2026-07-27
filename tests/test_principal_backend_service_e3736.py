@@ -74,6 +74,18 @@ def test_backend_principal_focus_is_preserved():
     assert p["focus"] == "p2"
 
 
+def test_backend_principal_shape_is_make_principal_plus_service_id():
+    # docstring の「make_principal の戻り値に service_id を 1 つ加えた形」を機械 pin する
+    # (= make_principal に field 追加があってもこの test が drift を検出する)。
+    svc = principal.make_service_identity("op-runner", {"p1"}, org_id="org-9")
+    base = principal.make_principal(
+        "u1", "org-9", agent_kind=principal.AGENT_BACKEND,
+        declared_scope={"p1"}, focus=None,
+    )
+    p = principal.backend_principal(svc, work_unit_scope={"p1"}, delegating_user_id="u1")
+    assert set(p) == set(base) | {"service_id"}
+
+
 # ---------------------------------------------------------------------------
 # backend_work_unit_effective_scope — the ms-114 connection seam
 # ---------------------------------------------------------------------------
@@ -81,7 +93,7 @@ def test_backend_principal_focus_is_preserved():
 def test_seam_is_min_of_service_workunit_originating():
     svc = principal.make_service_identity("op-runner", {"p1", "p2", "p3"})
     eff = principal.backend_work_unit_effective_scope(
-        svc, work_unit_scope={"p1", "p2"}, originating_effective={"p2", "p3"}
+        svc, work_unit_scope={"p1", "p2"}, originating_scope={"p2", "p3"}
     )
     assert eff == {"p2"}  # 天井∩宣言∩呼び出し元 = {p1,p2,p3}∩{p1,p2}∩{p2,p3}
 
@@ -90,7 +102,7 @@ def test_seam_work_unit_cannot_exceed_service_ceiling():
     # 宣言 scope が天井を超えても、天井までしか触れない。
     svc = principal.make_service_identity("op-runner", {"p1"})
     eff = principal.backend_work_unit_effective_scope(
-        svc, work_unit_scope={"p1", "p2", "p9"}, originating_effective={"p1", "p2", "p9"}
+        svc, work_unit_scope={"p1", "p2", "p9"}, originating_scope={"p1", "p2", "p9"}
     )
     assert eff == {"p1"}
 
@@ -99,7 +111,7 @@ def test_seam_cannot_exceed_originating_confused_deputy():
     # 混乱した代理人: 呼び出し元が p1 のみなら、天井・宣言が広くても p1 止まり。
     svc = principal.make_service_identity("op-runner", {"p1", "p2", "p3"})
     eff = principal.backend_work_unit_effective_scope(
-        svc, work_unit_scope={"p1", "p2", "p3"}, originating_effective={"p1"}
+        svc, work_unit_scope={"p1", "p2", "p3"}, originating_scope={"p1"}
     )
     assert eff == {"p1"}
 
@@ -107,9 +119,26 @@ def test_seam_cannot_exceed_originating_confused_deputy():
 def test_seam_empty_grant_is_fail_closed():
     svc = principal.make_service_identity("op-runner", set())
     eff = principal.backend_work_unit_effective_scope(
-        svc, work_unit_scope={"p1"}, originating_effective={"p1"}
+        svc, work_unit_scope={"p1"}, originating_scope={"p1"}
     )
     assert eff == set()
+
+
+def test_seam_rejects_non_service_identity():
+    # malformed な identity は seam の入口でも backend_principal と同一契約で弾く
+    # (= 黙って空 grant として飲まない。silent no-op を作らない)。
+    with pytest.raises(ValueError):
+        principal.backend_work_unit_effective_scope(
+            {"not": "a service"}, work_unit_scope={"p1"}, originating_scope={"p1"}
+        )
+
+
+def test_seam_rejects_identity_missing_grant_key():
+    # service_grant キーを欠く手組み dict も入口で見える (= 偽の「空 grant」を作らない)。
+    with pytest.raises(ValueError):
+        principal.backend_work_unit_effective_scope(
+            {"service_id": "op-runner"}, work_unit_scope={"p1"}, originating_scope={"p1"}
+        )
 
 
 def test_seam_matches_facade_effective_scope():
@@ -124,6 +153,6 @@ def test_seam_matches_facade_effective_scope():
         originating_scope={"p2", "p3"},
     )
     via_seam = principal.backend_work_unit_effective_scope(
-        svc, work_unit_scope=p["declared_scope"], originating_effective={"p2", "p3"}
+        svc, work_unit_scope=p["declared_scope"], originating_scope={"p2", "p3"}
     )
     assert via_facade == via_seam == {"p2"}

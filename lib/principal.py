@@ -160,8 +160,10 @@ def make_service_identity(
     - `service_id`    : サービスの識別子 (= 監査で「どのサービスが動いたか」を辿る鍵)
     - `service_grant` : このサービスが **未来永劫触れてよい project 集合の天井**。
                         実行時の実効はこれを超えられない (backend_effective_scope の min)。
-    - `org_id`        : このサービスが属する組織 (= テナンシー階層の所属先)。org を跨いだ
-                        roaming を authz で塞ぐための所属アンカー。
+    - `org_id`        : このサービスが属する組織 (= テナンシー階層の所属先)。org 境界の
+                        enforce 自体はこの層では行わない (= 呼び出し元 principal の実効
+                        scope を組む上位層が org 境界を織り込む)。ここでは「どの org に
+                        属すか」を principal に転記して監査で辿れるようにする所属アンカー。
 
     service_grant は「天井」なので、空集合 = 何にも触れない (= 最も安全側) を意味する。
     """
@@ -172,6 +174,24 @@ def make_service_identity(
         "service_grant": sorted(set(service_grant or ())),
         "org_id": org_id,
     }
+
+
+def _require_service_identity(service_identity: dict) -> dict:
+    """service_identity が make_service_identity 経由で作られた正規の値かを入口で検証する。
+
+    backend の 2 入口 (backend_principal / backend_work_unit_effective_scope) が
+    **同一の契約** で malformed な identity を弾くための単一検証点。壊れた identity
+    (dict でない / `service_id` 欠落 / `service_grant` キー欠落) を黙って「空 grant」
+    として飲むと、権限ゼロの正当なサービスと表面上区別が付かず、真因 (identity の
+    組み立てミス) に到達できない (= silent no-op)。必ず入口で raise して可視化する。
+    """
+    if (
+        not isinstance(service_identity, dict)
+        or not service_identity.get("service_id")
+        or "service_grant" not in service_identity
+    ):
+        raise ValueError("service_identity must be built via make_service_identity")
+    return service_identity
 
 
 def backend_principal(
@@ -192,10 +212,10 @@ def backend_principal(
     - `delegating_user_id`  : この backend を起動した委任元の人間 (= 監査用、無ければ空)
     - `focus`               : いま焦点を当てる単一 project (= あれば実効をそこに絞る)
 
-    戻り値は make_principal と同じ 5 要素に、監査用の `service_id` を添えた形。
+    戻り値は make_principal の戻り値に、監査用の `service_id` キーを 1 つ加えた形
+    (= フィールド構成は make_principal を単一の真実源とし、ここでは個数を重複記述しない)。
     """
-    if not isinstance(service_identity, dict) or not service_identity.get("service_id"):
-        raise ValueError("service_identity must be built via make_service_identity")
+    _require_service_identity(service_identity)
     p = make_principal(
         delegating_user_id,
         service_identity.get("org_id", ""),
@@ -211,23 +231,34 @@ def backend_principal(
 def backend_work_unit_effective_scope(
     service_identity: dict,
     work_unit_scope: Iterable[str],
-    originating_effective: Iterable[str],
+    originating_scope: Iterable[str],
 ) -> set[str]:
     """backend の 1 作業単位が実際に触れてよい project 集合を返す = ms-114 との接続 seam。
 
     ms-114 のサーバサイド authoring はこの 1 関数を呼ぶだけでよい:
-      - `service_identity`      : 動かすサービスの identity (= 天井 service_grant を持つ)
-      - `work_unit_scope`       : この authoring 作業で宣言する scope
-      - `originating_effective` : 呼び出し元 principal の **実効** scope
-                                  (client なら client_effective_scope、上位 backend なら
-                                  その backend_work_unit_effective_scope の結果)
+      - `service_identity`  : 動かすサービスの identity (= 天井 service_grant を持つ)
+      - `work_unit_scope`   : この authoring 作業で宣言する scope
+      - `originating_scope` : 呼び出し元 principal の **実効** scope
+                              (client なら client_effective_scope、上位 backend なら
+                              その backend_work_unit_effective_scope の結果)。既存の
+                              backend_effective_scope / effective_scope と同名 (= 同概念
+                              には同名) にして、隣接関数からの引数名の取り違えを防ぐ。
 
-    3 者の min を取るので、強い backend を踏み台にした権限昇格・org 横断 roaming は
-    構造的に不可能 (= 混乱した代理人問題への構造的回答)。天井 (service_grant) は
-    service_identity から解決するので、呼び出し側が誤って広い grant を渡す余地が無い。
+    3 者の min を取るので、**scope の昇格** (= 宣言・天井・呼び出し元より広い project へ
+    触れること) は構造的に不可能。天井 (service_grant) は service_identity から解決する
+    ので、呼び出し側が誤って広い grant を渡す余地も無い。
+
+    org 境界について: この関数は org 情報を演算に使わない (scope 集合 3 者の min のみ)。
+    「org 横断 roaming が起きない」保証は、**`originating_scope` が上位層で既に org 境界を
+    織り込んで組まれている**ことを前提とする (= org enforce は上流の責務)。この前提が
+    崩れる originating_scope を渡すと、この層では org 越境を検出しない点に注意。
+
+    malformed な service_identity (= make_service_identity を経ていない値) は入口で
+    ValueError にして弾く (backend_principal と同一契約、silent no-op を作らない)。
     """
+    _require_service_identity(service_identity)
     return backend_effective_scope(
-        service_identity.get("service_grant", ()),
+        service_identity["service_grant"],
         work_unit_scope,
-        originating_effective,
+        originating_scope,
     )
