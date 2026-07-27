@@ -131,3 +131,134 @@ def effective_scope(
 def can_access_project(effective: Iterable[str], project_id: str) -> bool:
     """実効スコープに project_id が含まれるか (= その project に従事してよいか)。"""
     return bool(project_id) and project_id in set(effective or ())
+
+
+# ---------------------------------------------------------------------------
+# Service identity (= backend authz 主体) — ms-113 / e-3736
+#
+# backend principal は「サービス identity (= 人間ではない自律アクター)」の grant を
+# 天井にして動く。ここで言う service identity は authz (認可) 概念であり、profile.py の
+# Profile (= どの API endpoint / 認証情報で喋るかのデプロイ identity) とは別物。混同しない:
+#   - Profile          : どこに繋ぐか (deployment / endpoint / credentials)
+#   - ServiceIdentity  : どこまで触れてよいか (authz / grant ceiling / org 所属)
+#
+# 本層は純関数のみ (値の組み立てと集合演算)。service identity を「どこに登録し・どう
+# 保存するか」(= registry / store) は server 側の責務 (org.py と同型の分離)。ms-114 の
+# サーバサイド authoring (e-3742/e-3745) が、この層の `backend_work_unit_effective_scope`
+# を seam (= 継ぎ目) として呼び、宣言した work-unit scope の下で backend principal を動かす。
+# ---------------------------------------------------------------------------
+
+
+def make_service_identity(
+    service_id: str,
+    service_grant: Iterable[str],
+    *,
+    org_id: str = "",
+) -> dict:
+    """backend サービス identity を組み立てる。
+
+    - `service_id`    : サービスの識別子 (= 監査で「どのサービスが動いたか」を辿る鍵)
+    - `service_grant` : このサービスが **未来永劫触れてよい project 集合の天井**。
+                        実行時の実効はこれを超えられない (backend_effective_scope の min)。
+    - `org_id`        : このサービスが属する組織 (= テナンシー階層の所属先)。org 境界の
+                        enforce 自体はこの層では行わない (= 呼び出し元 principal の実効
+                        scope を組む上位層が org 境界を織り込む)。ここでは「どの org に
+                        属すか」を principal に転記して監査で辿れるようにする所属アンカー。
+
+    service_grant は「天井」なので、空集合 = 何にも触れない (= 最も安全側) を意味する。
+    """
+    if not service_id:
+        raise ValueError("service_id must be non-empty")
+    return {
+        "service_id": service_id,
+        "service_grant": sorted(set(service_grant or ())),
+        "org_id": org_id,
+    }
+
+
+def _require_service_identity(service_identity: dict) -> dict:
+    """service_identity が make_service_identity 経由で作られた正規の値かを入口で検証する。
+
+    backend の 2 入口 (backend_principal / backend_work_unit_effective_scope) が
+    **同一の契約** で malformed な identity を弾くための単一検証点。壊れた identity
+    (dict でない / `service_id` 欠落 / `service_grant` キー欠落) を黙って「空 grant」
+    として飲むと、権限ゼロの正当なサービスと表面上区別が付かず、真因 (identity の
+    組み立てミス) に到達できない (= silent no-op)。必ず入口で raise して可視化する。
+    """
+    if (
+        not isinstance(service_identity, dict)
+        or not service_identity.get("service_id")
+        or "service_grant" not in service_identity
+    ):
+        raise ValueError("service_identity must be built via make_service_identity")
+    return service_identity
+
+
+def backend_principal(
+    service_identity: dict,
+    *,
+    work_unit_scope: Iterable[str],
+    delegating_user_id: str = "",
+    focus: Optional[str] = None,
+) -> dict:
+    """service identity から、1 作業単位 (= work unit) 用の backend principal を組み立てる。
+
+    backend principal は `agent_kind="backend"` で、この作業単位で宣言した
+    `work_unit_scope` を `declared_scope` に載せて運ぶ。実行中はこの宣言を **拡張しない**
+    (= backend_effective_scope の min により、宣言・天井・呼び出し元のどれよりも広くならない)。
+
+    - `service_identity`    : make_service_identity の戻り値
+    - `work_unit_scope`     : この作業単位で「従事する」と宣言する project 集合
+    - `delegating_user_id`  : この backend を起動した委任元の人間 (= 監査用、無ければ空)
+    - `focus`               : いま焦点を当てる単一 project (= あれば実効をそこに絞る)
+
+    戻り値は make_principal の戻り値に、監査用の `service_id` キーを 1 つ加えた形
+    (= フィールド構成は make_principal を単一の真実源とし、ここでは個数を重複記述しない)。
+    """
+    _require_service_identity(service_identity)
+    p = make_principal(
+        delegating_user_id,
+        service_identity.get("org_id", ""),
+        agent_kind=AGENT_BACKEND,
+        declared_scope=work_unit_scope,
+        focus=focus,
+    )
+    # どの service identity が動かしているかを principal に刻む (= 監査で辿れるように)。
+    p["service_id"] = service_identity["service_id"]
+    return p
+
+
+def backend_work_unit_effective_scope(
+    service_identity: dict,
+    work_unit_scope: Iterable[str],
+    originating_scope: Iterable[str],
+) -> set[str]:
+    """backend の 1 作業単位が実際に触れてよい project 集合を返す = ms-114 との接続 seam。
+
+    ms-114 のサーバサイド authoring はこの 1 関数を呼ぶだけでよい:
+      - `service_identity`  : 動かすサービスの identity (= 天井 service_grant を持つ)
+      - `work_unit_scope`   : この authoring 作業で宣言する scope
+      - `originating_scope` : 呼び出し元 principal の **実効** scope
+                              (client なら client_effective_scope、上位 backend なら
+                              その backend_work_unit_effective_scope の結果)。既存の
+                              backend_effective_scope / effective_scope と同名 (= 同概念
+                              には同名) にして、隣接関数からの引数名の取り違えを防ぐ。
+
+    3 者の min を取るので、**scope の昇格** (= 宣言・天井・呼び出し元より広い project へ
+    触れること) は構造的に不可能。天井 (service_grant) は service_identity から解決する
+    ので、呼び出し側が誤って広い grant を渡す余地も無い。
+
+    org 境界について: この関数は org 情報を演算に使わない (scope 集合 3 者の min のみ)。
+    「org 横断 roaming が起きない」保証は、**`originating_scope` が上位層で既に org 境界を
+    織り込んで組まれている**ことを前提とする (= org enforce は上流の責務)。この前提が
+    崩れる originating_scope を渡すと、この層では org 越境を検出しない点に注意。
+
+    malformed な service_identity (= make_service_identity を経ていない値) は入口で
+    ValueError にして弾く (backend_principal と同一契約、silent no-op を作らない)。
+    """
+    _require_service_identity(service_identity)
+    return backend_effective_scope(
+        service_identity["service_grant"],
+        work_unit_scope,
+        originating_scope,
+    )
