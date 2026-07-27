@@ -10276,6 +10276,38 @@ def _build_owner_row(data: dict) -> Optional[dict]:
     }
 
 
+def _member_identity(m: dict) -> str:
+    """member row から org 照合に使う user 識別子を取り出す (cloud=user_id / local=id)。"""
+    return (m.get("user_id") or m.get("id") or "") if isinstance(m, dict) else ""
+
+
+def _annotate_external_guests(project: dict, members: list) -> None:
+    """各 member row に ``external_guest: bool`` を in-place で付ける (ms-118 / e-4235).
+
+    外部ゲスト = project 参加者のうち、project が属する team org に所属していない人
+    (ms-113 / e-3735)。判定は org.external_guest_user_ids に一本化する (= team org
+    限定・単一真実源)。org のロードは best-effort: 解決できない (personal org /
+    org file 不在 / cloud エラー) 場合は全員 ``external_guest=False`` にして、member
+    一覧の表示そのものは決して妨げない (= 可視化は付加情報)。
+    """
+    import org as org_mod
+    for m in members:
+        if isinstance(m, dict):
+            m["external_guest"] = False
+    org_id = org_mod.project_org_id(project)
+    if not org_id or not org_mod.is_team_org_id(org_id):
+        return  # personal org / org 不明 → 外部ゲストの概念が無い
+    try:
+        org = get_store().get_org(org_id)
+    except (ValueError, RuntimeError):
+        return  # ロード不能でも一覧は出す (best-effort)
+    guest_ids = org_mod.external_guest_user_ids(
+        org, [_member_identity(m) for m in members if isinstance(m, dict)])
+    for m in members:
+        if isinstance(m, dict) and _member_identity(m) in guest_ids:
+            m["external_guest"] = True
+
+
 def cmd_member_list():
     """List members of the project.
 
@@ -10312,6 +10344,12 @@ def cmd_member_list():
         if not already_in_members:
             members = [owner_row, *members]
 
+    # ms-118 / e-4235: 外部ゲスト (= project 参加だが org 非所属) を可視化する。
+    # project が team org に属する場合のみ意味を持つ (= 個人 project の共同編集者は
+    # guest ではない)。org のロードは best-effort — 失敗しても member 一覧は出す
+    # (= 可視化の付加情報であって、一覧表示の前提条件ではない)。
+    _annotate_external_guests(data, members)
+
     if json_mode:
         print(json.dumps(members, ensure_ascii=False, indent=2))
         return
@@ -10335,6 +10373,9 @@ def cmd_member_list():
         extras = []
         if email and email != lbl:
             extras.append(email)
+        # e-4235: org 非所属の参加者は「外部ゲスト」と明示する (= 社内 member と区別)。
+        if m.get("external_guest"):
+            extras.append("external guest")
         extras_str = f"  ({', '.join(extras)})" if extras else ""
         print(f"  {str(lbl):<{width}} {role:<11}{extras_str}")
 
