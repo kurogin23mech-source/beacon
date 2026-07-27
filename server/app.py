@@ -4644,6 +4644,52 @@ def delete_org_endpoint(org_id: str, user: dict = Depends(require_auth)):
     return {"org_id": org_id, "deleted": True}
 
 
+@app.get("/api/orgs/{org_id}/overview")
+def org_overview_endpoint(org_id: str, user: dict = Depends(require_auth)):
+    """org 俯瞰: この org に属する project と各 project の member を返す (ms-118 / e-4236).
+
+    最小 UI (= read-only の俯瞰、SPEC 受入条件7「どの org に どの project と member が
+    あり、誰がどの project に参加しているか」) が消費するデータ。caller が member の
+    org について、caller が参加している project のうち org_id 所属のものだけを列挙し、
+    各 project の member を role + external_guest (= org 非所属の外部ゲスト、e-4235)
+    付きで返す。
+
+    participation-only 準拠: caller が参加していない project は列挙しない (= 開示は
+    現在の参加でのみ与えられる)。非 member の org は 404 で存在を漏らさない
+    (``_load_org_for_member`` 経由)。project は一切書き換えない read-only。
+    """
+    org = _load_org_for_member(org_id, user)
+    uid = user.get("sub", "")
+    projects_out = []
+    for summ in (db.list_projects(uid) or []):
+        qid = summ.get("project_id") or summ.get("id")
+        if not qid:
+            continue
+        q = db.get_project(qid)
+        if not q or org_mod.project_org_id(q) != org_id:
+            continue
+        # owner (top-level) + members[] を 1 リストに畳む (owner 重複は除く)。
+        rows, seen = [], set()
+        owner_id = q.get("owner")
+        if owner_id:
+            rows.append({"user_id": owner_id, "role": "owner"})
+            seen.add(owner_id)
+        for m in (q.get("members") or []):
+            mid = m.get("user_id")
+            if not mid or mid in seen:
+                continue
+            seen.add(mid)
+            rows.append({"user_id": mid, "role": m.get("role", "viewer")})
+        # 外部ゲスト判定は e-4235 の helper に一本化 (team org 限定)。
+        guest_ids = org_mod.external_guest_user_ids(org, [r["user_id"] for r in rows])
+        for r in rows:
+            r["external_guest"] = r["user_id"] in guest_ids
+        projects_out.append({"project_id": qid, "name": q.get("name", ""),
+                             "members": rows})
+    return {"org_id": org_id, "name": org.get("name", ""),
+            "projects": projects_out}
+
+
 class ProjectRehome(BaseModel):
     org_id: str
 
