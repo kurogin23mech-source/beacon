@@ -16,6 +16,7 @@ from store import get_store
 import core
 import transition_approval as _ta  # ms-119 e-3912: 目的達成レビュー primitive
 import work_model  # ms-109 e-3559: 職種非依存の Target 正準ラベルアクセサ
+import master_projection  # ms-111 e-3621: 投影 Account/Contact の identity を master 経由で解決
 import occupation  # ms-108 e-3269: ③共有フレームの職種プロジェクション registry
 import target_descriptor as _td  # ms-122 e-3954: data 定義 target-class 記述子
 import target_engine as _te  # ms-122 e-3956: 記述子駆動 target の汎用機構
@@ -25092,7 +25093,10 @@ def _cmd_account_list_linked(json_mode: bool):
         home = a.get("home_project_name") or a.get("home_project_id", "?")
         phase = a.get("phase", "")
         phase_str = f"phase: {phase} / " if phase else ""
-        print(f"[{a.get('id')}] {a.get('name', '?')} — {phase_str}home: {home}")
+        # ms-111 e-3621 chunk2b: identity は master 経由の resolver で読む。CLI には
+        # server 側 master adapter が無いので adapter=None → 投影 fallback (= 従来値)。
+        name = master_projection.resolve_account_identity(a, None) or "?"
+        print(f"[{a.get('id')}] {name} — {phase_str}home: {home}")
 
 
 def cmd_account_list():
@@ -25134,11 +25138,15 @@ def cmd_account_list():
         # ms-113 e-3734: 開示リンク先 project を可視化 (どこから見えるか)。
         links = a.get("project_links", []) or []
         links_str = f" / linked: {', '.join(links)}" if links else ""
-        print(f"[{a['id']}] {work_model.target_label(a)}{suffix} — {phase_str}contacts: {len(contacts)}{links_str}")
+        # ms-111 e-3621 chunk2b: account/contact の identity を master 経由 resolver で
+        # 読む。CLI は adapter=None → 投影 fallback (= 従来の target_label / 投影値)。
+        acc_name = master_projection.resolve_account_identity(a, None)
+        print(f"[{a['id']}] {acc_name}{suffix} — {phase_str}contacts: {len(contacts)}{links_str}")
         for c in contacts:
-            role = f" ({c['role']})" if c.get("role") else ""
-            email = f" <{c['email']}>" if c.get("email") else ""
-            print(f"    - {c.get('name', '?')}{role}{email}")
+            ident = master_projection.resolve_contact_identity(c, None)
+            role = f" ({ident['role']})" if ident.get("role") else ""
+            email = f" <{ident['email']}>" if ident.get("email") else ""
+            print(f"    - {ident.get('name') or '?'}{role}{email}")
 
 
 def cmd_disclose():

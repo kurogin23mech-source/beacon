@@ -163,6 +163,27 @@ def resolve_contact_identity(contact: dict, adapter=None) -> dict:
     return {k: str(c.get(k) or "") for k in ("name", "email", "phone", "role")}
 
 
+def account_read_view(account: dict, adapter=None, extra: Optional[dict] = None) -> dict:
+    """投影 Account を master 経由の identity で解決した read 用 dict にする (e-3621 chunk2b).
+
+    **shape 不変**: 既存キーはすべて保ち、identity 由来の値の出所だけ master 経由に
+    差し替える (= account の name/label、各 contact の name/email/phone/role)。link 済 +
+    adapter あれば master が真値、未 link / adapter=None は投影 fallback (= 従来値、
+    regression なし)。``extra`` は home project 等の付帯情報を上書き結合する。
+
+    server の read endpoint (投影 Account を返す経路) が「全 read site を漏れなく
+    resolver 経由に」する時の 1 箇所化: 部分 swap で stale (投影) と master が混ざる
+    バグ (= HIGH) を、この 1 helper に集約して塞ぐ。
+    """
+    name = resolve_account_identity(account, adapter)
+    contacts = [
+        {**c, **resolve_contact_identity(c, adapter)}
+        for c in ((account or {}).get("contacts") or [])
+    ]
+    return {**(account or {}), "name": name, "label": name, "contacts": contacts,
+            **(extra or {})}
+
+
 # ---------------------------------------------------------------------------
 # 生成時の link: 投影を作った直後に master record を起こして参照を張る
 #   pure 関数 (adapter への put も含むが I/O は adapter に委譲)。呼び出し側

@@ -29,6 +29,8 @@ import core
 import org as org_mod  # ms-113 / e-3731: Organization (組織) テナンシー primitives
 import principal as principal_mod  # ms-113 / e-3732: 主体モデル + 実効スコープ合成
 import disclosure as disclosure_mod  # ms-111 / e-3872: cross-project Account 開示の read 配線
+import master_projection  # ms-111 / e-3621: 投影 Account/Contact identity を master 経由で解決
+import master_adapter  # ms-111 / e-3621: backend 配線済み Beacon-default master adapter
 import work_model  # ms-109 e-3643: 職種非依存の Target 正準ラベル tolerant reader
 import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
 import dm_consent as dm_consent_mod  # ms-110 / e-3443: sender-side cross-user consent backstop
@@ -2176,6 +2178,11 @@ def get_disclosed_accounts(project_id: str, user: dict = Depends(require_auth)):
     p_data = _load_meta_only(project_id, user)
     lens_org = org_mod.project_org_id(p_data)
     uid = user.get("sub", "")
+    # ms-111 e-3621 chunk2b: identity (会社名 / 担当者) の read を master 経由の
+    # resolver に一本化する。server 側は backend 配線済み adapter を持てるので、
+    # link 済 Account は master が真値、未 link は投影 fallback (= 従来値・shape 不変)。
+    # cross-deploy の master 同期 (別デプロイ間) は本 endpoint の範囲外のまま (e-3622)。
+    adapter = master_adapter.get_master_adapter()
     disclosed: list[dict] = []
     # 2. user が member の他プロジェクトを走査し、同一 org のものだけ対象にする。
     for summ in (db.list_projects(uid) or []):
@@ -2188,11 +2195,11 @@ def get_disclosed_accounts(project_id: str, user: dict = Depends(require_auth)):
         # 3. Q の Account のうち P に開示 (project_links に P を含む) されたものだけ。
         for acc in q.get("accounts", []) or []:
             if disclosure_mod.can_disclose(acc, {project_id}):
-                disclosed.append({
-                    **acc,
+                # shape 不変・identity のみ master 経由に (未 link は投影 fallback)。
+                disclosed.append(master_projection.account_read_view(acc, adapter, {
                     "home_project_id": qid,
                     "home_project_name": q.get("name", ""),
-                })
+                }))
     return {"project_id": project_id, "disclosed_accounts": disclosed}
 
 
