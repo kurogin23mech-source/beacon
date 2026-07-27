@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Optional
 
 import master_identity as mi
+import work_model
 
 # 投影 Account/Contact 上に置く「マスター行への参照鍵」フィールド名。
 # master record 側の `external_ref` (= マスター→外部 system of record) とは向きが逆:
@@ -122,3 +123,85 @@ def project_contact_to_master(contact: dict, *, org_id: str, master_account_id: 
         role=str(c.get("role") or ""), master_contact_id=master_contact_id,
         external_ref=mi.new_external_ref(system, ""),
     )
+
+
+# ---------------------------------------------------------------------------
+# 読み出しのマスター一本化 (= e-3621 part2 後半の核): master 経由で identity を読む
+#   投影が master に link 済なら「誰が誰か」は master が真値なので master から読む。
+#   未 link (= 既存 account / adapter 無し) は投影自身の値にフォールバックする
+#   (work_model.target_label と同じ寛容な読み。local mode や移行途中でも壊れない)。
+#   これにより「account.name の read が master 経由になる」 (SPEC「投影は identity 実体を
+#   持たない」に向けた読み替え) を、既存データを壊さず段階導入する。
+# ---------------------------------------------------------------------------
+def resolve_account_identity(account: dict, adapter=None) -> str:
+    """投影 Account の canonical name を master 経由で解決する (未 link は投影へ fallback)。
+
+    - `adapter` : MasterIdentityAdapter (lib/master_store)。None なら常に fallback。
+    master が真値源 (SPEC §7) なので、link 済なら投影側の name/label でなく master の
+    name を返す。これが「投影が identity 実体を持たない」読み出しの入口。
+    """
+    if adapter is not None and is_account_linked(account):
+        rec = adapter.get_account(linked_master_account_id(account))
+        if rec:
+            return mi.master_account_name(rec)
+    # fallback: 投影自身の tolerant read (label → title → name)
+    return work_model.target_label(account or {})
+
+
+def resolve_contact_identity(contact: dict, adapter=None) -> dict:
+    """投影 Contact の identity (name/email/phone/role) を master 経由で解決する。
+
+    link 済 + adapter あれば master の値、無ければ投影自身の値。返り値は表示用の
+    正規化 dict (欠損キーは空文字)。
+    """
+    ref = contact_master_ref(contact)
+    if adapter is not None and ref:
+        rec = adapter.get_contact(ref[_CONTACT_ID_KEY])
+        if rec:
+            return {k: str(rec.get(k) or "") for k in ("name", "email", "phone", "role")}
+    c = contact or {}
+    return {k: str(c.get(k) or "") for k in ("name", "email", "phone", "role")}
+
+
+# ---------------------------------------------------------------------------
+# 生成時の link: 投影を作った直後に master record を起こして参照を張る
+#   pure 関数 (adapter への put も含むが I/O は adapter に委譲)。呼び出し側
+#   (server endpoint / CLI-with-store) が account_add 後にこれを呼ぶ想定。
+# ---------------------------------------------------------------------------
+def link_new_account_to_master(account: dict, adapter, *, org_id: str, now: str,
+                               system: str = BEACON_DEFAULT_SYSTEM) -> dict:
+    """投影 Account から master record を起こし、adapter に保存して投影に参照を張る。
+
+    戻り値は保存された master record。既に link 済なら二重起票せず既存を返す
+    (= 冪等、重複 master を作らない)。
+    """
+    existing = account_master_ref(account)
+    if existing:
+        rec = adapter.get_account(existing[_ACCOUNT_ID_KEY])
+        if rec:
+            return rec
+    master = project_account_to_master(account, org_id=org_id, now=now, system=system)
+    saved = adapter.put_account(master, now=now)
+    link_account_to_master(account, saved[mi.MASTER_ACCOUNT_ID_FIELD], system=system)
+    return saved
+
+
+def link_new_contact_to_master(contact: dict, adapter, *, org_id: str,
+                               master_account_id: str, now: str,
+                               system: str = BEACON_DEFAULT_SYSTEM) -> dict:
+    """投影 Contact から master record を起こし、adapter に保存して投影に参照を張る。
+
+    親会社 (master_account_id) に紐付ける。link 済なら冪等に既存を返す。
+    """
+    existing = contact_master_ref(contact)
+    if existing:
+        rec = adapter.get_contact(existing[_CONTACT_ID_KEY])
+        if rec:
+            return rec
+    master = project_contact_to_master(contact, org_id=org_id,
+                                       master_account_id=master_account_id,
+                                       now=now, system=system)
+    saved = adapter.put_contact(master, now=now)
+    link_contact_to_master(contact, saved[mi.MASTER_CONTACT_ID_FIELD],
+                           master_account_id, system=system)
+    return saved
