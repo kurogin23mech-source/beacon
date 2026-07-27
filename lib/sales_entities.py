@@ -494,8 +494,15 @@ def find_opportunity(data: dict, opportunity_id: str) -> Optional[dict]:
 
 def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
                 assignee: str = "", created_at: str = "",
-                owner_org_id: str = "") -> str:
+                owner_org_id: str = "", master_adapter=None) -> str:
     """Append a new Account (対象・継続) and return its id.
+
+    ms-111 e-3621 chunk2b (additive seam): ``master_adapter`` を渡すと、生成した
+    投影 Account を共有マスター (= 顧客 identity の真値源) に link する
+    (``master_projection.link_new_account_to_master``)。既定 (None) では link せず
+    従来動作のまま = 投影のみ。実 linking (write-through) を駆動する adapter の配線は
+    e-3622 (bus 変更イベント同期) が担い、本 seam は「渡されたら link する」層だけを
+    先に用意する (呼び元は現状 None のみ = inert、SPEC A 採用の staged migration)。
 
     Account carries a lifecycle ``phase`` (リード → 未成約顧客 → 成約顧客) with
     an append-only ``phase_history``, plus the ``health`` relationship-value
@@ -545,6 +552,11 @@ def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
         disclosure.OWNER_ORG_FIELD: owner_org,
         disclosure.PROJECT_LINKS_FIELD: [],
     })
+    # ms-111 e-3621 chunk2b: adapter があればマスターへ link (無ければ inert)。
+    if master_adapter is not None:
+        import master_projection
+        master_projection.link_new_account_to_master(
+            data["accounts"][-1], master_adapter, org_id=owner_org, now=created_at)
     return acc_id
 
 
@@ -573,8 +585,16 @@ def accounts_disclosable_from(accounts: list, requesting_project_id: str,
 
 
 def contact_add(data: dict, account_id: str, name: str, *,
-                role: str = "", email: str = "", phone: str = "") -> dict:
-    """Append a Contact under an Account (nested sub-entity) and return it."""
+                role: str = "", email: str = "", phone: str = "",
+                master_adapter=None, now: str = "") -> dict:
+    """Append a Contact under an Account (nested sub-entity) and return it.
+
+    ms-111 e-3621 chunk2b (additive seam): ``master_adapter`` を渡すと、生成した
+    投影 Contact を親会社のマスター担当者に link する
+    (``master_projection.link_new_contact_to_master``)。親 Account が既に master に
+    link 済ならその master_account_id に紐付く。既定 (None) では link せず従来動作。
+    実 linking の駆動は e-3622 が担う (本 seam は inert、SPEC A 採用)。
+    """
     acc = find_account(data, account_id)
     if acc is None:
         raise ValueError(f"Account not found: {account_id}")
@@ -582,6 +602,17 @@ def contact_add(data: dict, account_id: str, name: str, *,
         raise ValueError("Contact name is required")
     contact = {"name": name.strip(), "role": role, "email": email, "phone": phone}
     acc.setdefault("contacts", []).append(contact)
+    # ms-111 e-3621 chunk2b: adapter があればマスターへ link (無ければ inert)。
+    # org 束縛軸は親会社の owner org に揃える (親 Account が link された org と一致、
+    # SPEC §8)。未設定なら project の org へ fallback。
+    if master_adapter is not None:
+        import master_projection
+        contact_org = acc.get(disclosure.OWNER_ORG_FIELD) or org.project_org_id(data)
+        master_projection.link_new_contact_to_master(
+            contact, master_adapter,
+            org_id=contact_org,
+            master_account_id=master_projection.linked_master_account_id(acc),
+            now=now or work_base.now_iso())
     return contact
 
 
