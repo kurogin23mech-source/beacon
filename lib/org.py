@@ -39,6 +39,32 @@ ORG_DESTRUCTIVE_ROLES = {ORG_ROLE_OWNER}
 INVITABLE_ORG_ROLES = {ORG_ROLE_MEMBER, ORG_ROLE_ADMIN}
 
 
+def is_destructive_allowed(org: dict, user_id: str) -> bool:
+    """破壊的操作 (org 削除 / member 削除) を ``user_id`` が行えるか (ms-118 / e-4234)。
+
+    許すのは owner のみ (= ``ORG_DESTRUCTIVE_ROLES``、SPEC 受入条件6)。admin は
+    member の追加 (= 非破壊的な add-member) はできるが、削除系はできない。local /
+    cloud の両経路がこの単一関数で owner 判定を共有し、片方だけ緩い穴を作らない。
+    """
+    return org_member_role(org, user_id) in ORG_DESTRUCTIVE_ROLES
+
+
+def assert_org_deletable(org: dict) -> None:
+    """org を削除してよい形か構造検証する (ms-118 / e-4234)。不可なら ``ValueError``。
+
+    personal org (= 自動生成の個人組織) は user の器そのものなので削除させない
+    (= 消すと owner の所属先が消え、既存 project の org 導出が壊れる)。team org
+    (明示的に立てた組織) だけが削除対象。認可 (= 誰が消せるか) は
+    ``is_destructive_allowed`` が別途担う (= 構造可否と権限可否の分離)。
+    """
+    if not org:
+        raise ValueError("org not found")
+    if org.get("personal") or is_personal_org_id(org.get("org_id", "")):
+        raise ValueError(
+            "personal org (個人組織) は削除できません "
+            "(自動生成の器のため。team org のみ削除可)")
+
+
 def validate_invitable_role(role: str) -> str:
     """org に member を足すとき指定できる role を検証する (member / admin のみ)。
 
@@ -252,6 +278,35 @@ def project_org_id(project: dict) -> str:
     if owner:
         return personal_org_id(owner)
     return ""
+
+
+def rehome_project(project: dict, target_org_id: str) -> str:
+    """project の所属 org を ``target_org_id`` へ張り替える (= re-home、ms-118 / e-4233)。
+
+    project の identity (project_id) と履歴 (milestones / members / 記録) には一切
+    触れず、``org_id`` リンクだけを差し替える (SPEC 方針3: identity は作り直さない)。
+    戻り値は張り替え前の所属 org_id (= ``project_org_id`` の導出値。呼び出し側が
+    「どこから移したか」を表示できる)。
+
+    開示の即時再評価は本 helper の外で自動的に成立する: ms-113 の開示は project の
+    現在の org_id (``project_org_id``) を request 時に live 参照するため (server の
+    ``get_disclosed_accounts`` を参照)、org_id を書き換えた瞬間から新 org 基準で
+    判定される (= キャッシュ無し / 剥奪即時。SPEC 受入条件4)。
+
+    ``target_org_id`` は非空で、personal (``org-p-``) か team (``org-t-``) の org id
+    形式でなければ ``ValueError`` (= 任意文字列を org 所属に流し込ませない。存在確認
+    そのものは store I/O を持つ呼び出し側 = server / LocalStore が行う)。
+    """
+    if not target_org_id or not target_org_id.strip():
+        raise ValueError("target org_id is required to re-home a project")
+    target_org_id = target_org_id.strip()
+    if not (is_personal_org_id(target_org_id) or is_team_org_id(target_org_id)):
+        raise ValueError(
+            f"invalid org id '{target_org_id}' "
+            "(personal 'org-p-…' か team 'org-t-…' の id を指定してください)")
+    previous = project_org_id(project)
+    project["org_id"] = target_org_id
+    return previous
 
 
 def stamp_project_org(project: dict) -> bool:

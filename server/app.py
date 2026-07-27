@@ -4599,18 +4599,18 @@ def add_org_member_endpoint(org_id: str, body: OrgMemberAdd,
 @app.delete("/api/orgs/{org_id}/members/{target}")
 def remove_org_member_endpoint(org_id: str, target: str,
                                user: dict = Depends(require_auth)):
-    """Remove a member (user_id or email) from an org. Owner / admin only.
+    """Remove a member (user_id or email) from an org — 破壊的操作なので owner のみ (e-4234).
 
-    厳格な owner-only 化と org 削除との統一ガードは e-4234 が担う。ここでは破壊的
-    操作を最低限 owner / admin に絞る (= 平 member による他 member 除去を防ぐ)。
+    ms-118 SPEC 受入条件6: 「org 削除 / member 削除は owner のみ」。e-4232 は暫定で
+    owner / admin に緩めていたが、e-4234 で org 削除と同じ ``is_destructive_allowed``
+    (= owner のみ) に統一する。admin は member の **追加** (非破壊的な add-member) は
+    できるが、削除はできない (= 破壊的操作は owner に集約)。
     """
     org = _load_org_for_member(org_id, user)
-    if _auth_enabled:
-        caller_role = org_mod.org_member_role(org, user.get("sub", ""))
-        if caller_role not in (org_mod.ORG_ROLE_OWNER, org_mod.ORG_ROLE_ADMIN):
-            raise HTTPException(
-                status_code=403,
-                detail="removing an org member requires owner or admin")
+    if _auth_enabled and not org_mod.is_destructive_allowed(org, user.get("sub", "")):
+        raise HTTPException(
+            status_code=403,
+            detail="removing an org member requires owner")
     member = org_mod.find_org_member(org, target)
     if not member:
         raise HTTPException(status_code=404,
@@ -4622,6 +4622,66 @@ def remove_org_member_endpoint(org_id: str, target: str,
         raise HTTPException(status_code=400, detail=str(e))
     db.save_org(org["org_id"], org)
     return org
+
+
+@app.delete("/api/orgs/{org_id}")
+def delete_org_endpoint(org_id: str, user: dict = Depends(require_auth)):
+    """Delete a team org — 破壊的操作なので owner のみ (ms-118 / e-4234, SPEC 受入条件6).
+
+    member 削除と同じ ``is_destructive_allowed`` (= owner only) ガードを共有する。
+    personal org (= 個人組織) は構造的に削除不可 (= 自動生成の器を消させない、400)。
+    非 member には org の存在を漏らさない (404、``_load_org_for_member`` 経由)。
+    """
+    org = _load_org_for_member(org_id, user)
+    if _auth_enabled and not org_mod.is_destructive_allowed(org, user.get("sub", "")):
+        raise HTTPException(status_code=403,
+                            detail="deleting an org requires owner")
+    try:
+        org_mod.assert_org_deletable(org)  # personal org は消せない
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    db.delete_org(org_id)  # project は触らない (org 所属リンクの後始末は re-home の担当)
+    return {"org_id": org_id, "deleted": True}
+
+
+class ProjectRehome(BaseModel):
+    org_id: str
+
+
+@app.post("/api/projects/{project_id}/rehome")
+def rehome_project_endpoint(project_id: str, body: ProjectRehome,
+                            user: dict = Depends(require_auth)):
+    """Re-home a project into a different org — org 所属リンクだけ張り替える (ms-118 / e-4233).
+
+    project の identity (project_id) と履歴は不変で、``org_id`` リンクのみ差し替える
+    (SPEC 方針3)。開示は移動後の org 基準で即座に再評価される: ms-113 の開示は
+    ``project_org_id`` を request 時に live 参照する (get_disclosed_accounts) ので、
+    org_id を書き換えた瞬間から新 org 基準になる (= キャッシュ無し / 剥奪即時、受入条件4)。
+
+    認可 (2 条件の AND):
+      - 呼び出し user が project の **owner** であること (= 自分の project しか動かせない。
+        editor では不可。破壊的操作の owner-only 統一厳格化は e-4234)。
+      - target org が実在し、呼び出し user がその org の **member** であること
+        (= 所属していない org に project を吸わせない。非 member / 不在 org は 404 で秘匿)。
+    """
+    target_org_id = (body.org_id or "").strip()
+    if not target_org_id:
+        raise HTTPException(status_code=400, detail="org_id is required")
+    # target org 実在 + caller が member であることを保証 (非 member / 不在は 404)。
+    _load_org_for_member(target_org_id, user)
+    # project owner 限定で full doc をロードする (org_id は top-level なので meta-only で足りる)。
+    data, _role = _require_project_role(
+        project_id, user, allowed=("owner",), hydrate_milestones=False)
+    try:
+        previous = org_mod.rehome_project(data, target_org_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _save(project_id, data)
+    return {
+        "project_id": project_id,
+        "org_id": target_org_id,
+        "previous_org_id": previous,
+    }
 
 
 @app.patch("/api/treks/{trek_id}")

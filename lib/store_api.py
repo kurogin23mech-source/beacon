@@ -495,6 +495,35 @@ class StoreApi:
                 raise ValueError(str(e)) from e
             raise
 
+    def delete_org(self, org_id: str) -> dict:
+        """Delete a team org via the cloud API (owner-only server-side, ms-118 / e-4234).
+
+        404 (unknown org / non-member) → ``ValueError``; auth / 403 (not owner) /
+        400 (personal org) / transport → ``RuntimeError``.
+        """
+        try:
+            return self._client.delete_org(org_id)
+        except RuntimeError as e:
+            if "404" in str(e):
+                raise ValueError(str(e)) from e
+            raise
+
+    def rehome_project(self, project_id: str, *, target_org_id: str) -> dict:
+        """Re-home a project into an org via the cloud API (ms-118 / e-4233).
+
+        Server checks the caller owns the project and is a member of the target
+        org, then rewrites only the project's ``org_id`` (disclosure re-evaluates
+        live). 404 (unknown project / org, or non-member of the target org) →
+        ``ValueError``; auth / 403 / transport → ``RuntimeError``.
+        """
+        try:
+            return self._client.rehome_project(
+                project_id, target_org_id=target_org_id)
+        except RuntimeError as e:
+            if "404" in str(e):
+                raise ValueError(str(e)) from e
+            raise
+
     def list_documents(self) -> list:
         """List documents from cloud API."""
         try:

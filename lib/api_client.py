@@ -1018,6 +1018,24 @@ class ApiClient:
             f"/api/orgs/{urllib.parse.quote(org_id, safe='')}/members/"
             f"{urllib.parse.quote(target, safe='')}")
 
+    def delete_org(self, org_id: str) -> dict:
+        """Delete a team org (ms-118 / e-4234). Owner-only server-side.
+
+        personal org は削除不可 (400)、owner でない caller は 403。
+        """
+        return self.delete(
+            f"/api/orgs/{urllib.parse.quote(org_id, safe='')}")
+
+    def rehome_project(self, project_id: str, *, target_org_id: str) -> dict:
+        """Re-home a project into an org (ms-118 / e-4233). Project-owner-only server-side.
+
+        Only the project's ``org_id`` link is rewritten; identity and history
+        are preserved and disclosure re-evaluates live against the new org.
+        """
+        return self.post(
+            f"/api/projects/{urllib.parse.quote(project_id, safe='')}/rehome",
+            {"org_id": target_org_id})
+
     def patch_trek(self, trek_id: str, *, title: str | None = None,
                    description: str | None = None, type_: str | None = None) -> dict:
         """Update title / description / type. Leader-only."""
