@@ -301,6 +301,34 @@ class LocalStore:
         org_store.save_org(org)
         return org
 
+    def rehome_project(self, project_id: str, *, target_org_id: str) -> dict:
+        """Re-home the local project into ``target_org_id`` (ms-118 / e-4233).
+
+        Local mode is single-project: this store front-ends exactly one
+        ``project.json``, so re-home only accepts the project id that file
+        carries (mismatched ids raise ``ValueError`` rather than silently
+        re-homing the wrong project). The target org must already exist in the
+        local org_store (= 存在しない org に project を吸わせない). Only the
+        ``org_id`` link is rewritten; identity and history are untouched.
+        """
+        import org as org_mod
+        import org_store
+        if org_store.load_org(target_org_id) is None:
+            raise ValueError(f"org '{target_org_id}' not found")
+        data = self.load_project()
+        current_id = data.get("project_id") or data.get("id")
+        if project_id and current_id and project_id != current_id:
+            raise ValueError(
+                f"project '{project_id}' not found in this workspace "
+                f"(local mode manages only '{current_id}')")
+        previous = org_mod.rehome_project(data, target_org_id)
+        self.save_project(data)
+        return {
+            "project_id": current_id,
+            "org_id": target_org_id,
+            "previous_org_id": previous,
+        }
+
     def start_watching(self) -> None:
         pass
 

@@ -4624,6 +4624,46 @@ def remove_org_member_endpoint(org_id: str, target: str,
     return org
 
 
+class ProjectRehome(BaseModel):
+    org_id: str
+
+
+@app.post("/api/projects/{project_id}/rehome")
+def rehome_project_endpoint(project_id: str, body: ProjectRehome,
+                            user: dict = Depends(require_auth)):
+    """Re-home a project into a different org — org 所属リンクだけ張り替える (ms-118 / e-4233).
+
+    project の identity (project_id) と履歴は不変で、``org_id`` リンクのみ差し替える
+    (SPEC 方針3)。開示は移動後の org 基準で即座に再評価される: ms-113 の開示は
+    ``project_org_id`` を request 時に live 参照する (get_disclosed_accounts) ので、
+    org_id を書き換えた瞬間から新 org 基準になる (= キャッシュ無し / 剥奪即時、受入条件4)。
+
+    認可 (2 条件の AND):
+      - 呼び出し user が project の **owner** であること (= 自分の project しか動かせない。
+        editor では不可。破壊的操作の owner-only 統一厳格化は e-4234)。
+      - target org が実在し、呼び出し user がその org の **member** であること
+        (= 所属していない org に project を吸わせない。非 member / 不在 org は 404 で秘匿)。
+    """
+    target_org_id = (body.org_id or "").strip()
+    if not target_org_id:
+        raise HTTPException(status_code=400, detail="org_id is required")
+    # target org 実在 + caller が member であることを保証 (非 member / 不在は 404)。
+    _load_org_for_member(target_org_id, user)
+    # project owner 限定で full doc をロードする (org_id は top-level なので meta-only で足りる)。
+    data, _role = _require_project_role(
+        project_id, user, allowed=("owner",), hydrate_milestones=False)
+    try:
+        previous = org_mod.rehome_project(data, target_org_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    _save(project_id, data)
+    return {
+        "project_id": project_id,
+        "org_id": target_org_id,
+        "previous_org_id": previous,
+    }
+
+
 @app.patch("/api/treks/{trek_id}")
 def update_trek_endpoint(trek_id: str, body: TrekUpdate, request: Request,
                          user: dict = Depends(require_auth)):

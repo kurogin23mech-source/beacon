@@ -266,6 +266,22 @@ class Store(Protocol):
         """
         ...
 
+    def rehome_project(self, project_id: str, *, target_org_id: str) -> dict:
+        """project の所属 org を ``target_org_id`` へ張り替える (re-home、ms-118 / e-4233)。
+
+        project の identity (project_id) と履歴は保ったまま ``org_id`` リンクだけを
+        差し替える。開示は移動後の org 基準で即座に再評価される (= ms-113 の開示は
+        現在の org_id を live 参照するのでキャッシュ無し)。戻り値は更新後の結果 dict::
+
+            {"project_id": ..., "org_id": <new>, "previous_org_id": <old>}
+
+        ``target_org_id`` が実在しない org を指す場合は ``ValueError`` (= 存在しない
+        org に project を吸わせない)。cloud では project owner かつ target org の
+        member でなければ拒否される (= owner-only の統一厳格化は e-4234)。transport /
+        auth / 権限エラーは ``RuntimeError`` として伝播する。
+        """
+        ...
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。

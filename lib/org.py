@@ -254,6 +254,35 @@ def project_org_id(project: dict) -> str:
     return ""
 
 
+def rehome_project(project: dict, target_org_id: str) -> str:
+    """project の所属 org を ``target_org_id`` へ張り替える (= re-home、ms-118 / e-4233)。
+
+    project の identity (project_id) と履歴 (milestones / members / 記録) には一切
+    触れず、``org_id`` リンクだけを差し替える (SPEC 方針3: identity は作り直さない)。
+    戻り値は張り替え前の所属 org_id (= ``project_org_id`` の導出値。呼び出し側が
+    「どこから移したか」を表示できる)。
+
+    開示の即時再評価は本 helper の外で自動的に成立する: ms-113 の開示は project の
+    現在の org_id (``project_org_id``) を request 時に live 参照するため (server の
+    ``get_disclosed_accounts`` を参照)、org_id を書き換えた瞬間から新 org 基準で
+    判定される (= キャッシュ無し / 剥奪即時。SPEC 受入条件4)。
+
+    ``target_org_id`` は非空で、personal (``org-p-``) か team (``org-t-``) の org id
+    形式でなければ ``ValueError`` (= 任意文字列を org 所属に流し込ませない。存在確認
+    そのものは store I/O を持つ呼び出し側 = server / LocalStore が行う)。
+    """
+    if not target_org_id or not target_org_id.strip():
+        raise ValueError("target org_id is required to re-home a project")
+    target_org_id = target_org_id.strip()
+    if not (is_personal_org_id(target_org_id) or is_team_org_id(target_org_id)):
+        raise ValueError(
+            f"invalid org id '{target_org_id}' "
+            "(personal 'org-p-…' か team 'org-t-…' の id を指定してください)")
+    previous = project_org_id(project)
+    project["org_id"] = target_org_id
+    return previous
+
+
 def stamp_project_org(project: dict) -> bool:
     """project に org_id 未設定 かつ owner ありなら、決定的に org_id を stamp する。
 
