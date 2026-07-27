@@ -266,6 +266,17 @@ class Store(Protocol):
         """
         ...
 
+    def delete_org(self, org_id: str) -> dict:
+        """team org を削除する (ms-118 / e-4234)。破壊的操作なので **owner のみ**。
+
+        戻り値は ``{"org_id": ..., "deleted": True}``。personal org (= 個人組織) は
+        削除できない (``ValueError``、= 自動生成の器を消させない)。存在しない org も
+        ``ValueError``。cloud では owner でない caller は 403 (= ``RuntimeError``)。
+        member 削除と同じ owner-only ガード (``org.is_destructive_allowed``) を
+        共有し、片方だけ緩い穴を作らない。transport / auth / 権限は ``RuntimeError``。
+        """
+        ...
+
     def rehome_project(self, project_id: str, *, target_org_id: str) -> dict:
         """project の所属 org を ``target_org_id`` へ張り替える (re-home、ms-118 / e-4233)。
 

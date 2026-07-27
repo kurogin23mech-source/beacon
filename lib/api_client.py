@@ -1018,6 +1018,14 @@ class ApiClient:
             f"/api/orgs/{urllib.parse.quote(org_id, safe='')}/members/"
             f"{urllib.parse.quote(target, safe='')}")
 
+    def delete_org(self, org_id: str) -> dict:
+        """Delete a team org (ms-118 / e-4234). Owner-only server-side.
+
+        personal org は削除不可 (400)、owner でない caller は 403。
+        """
+        return self.delete(
+            f"/api/orgs/{urllib.parse.quote(org_id, safe='')}")
+
     def rehome_project(self, project_id: str, *, target_org_id: str) -> dict:
         """Re-home a project into an org (ms-118 / e-4233). Project-owner-only server-side.
 

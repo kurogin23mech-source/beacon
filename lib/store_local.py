@@ -301,6 +301,24 @@ class LocalStore:
         org_store.save_org(org)
         return org
 
+    def delete_org(self, org_id: str) -> dict:
+        """Delete a team org from the local org_store (ms-118 / e-4234).
+
+        Local mode is single-user, so the caller is always the owner of their
+        own store — the owner-only *authorization* is enforced on cloud (via the
+        auth token). Here we still enforce the *structural* guard: personal orgs
+        (= 自動生成の個人組織) cannot be deleted, and unknown ids raise so the CLI
+        shows a uniform not-found message regardless of backend.
+        """
+        import org as org_mod
+        import org_store
+        org = org_store.load_org(org_id)
+        if org is None:
+            raise ValueError(f"org '{org_id}' not found")
+        org_mod.assert_org_deletable(org)  # personal org は消せない
+        org_store.delete_org(org_id)
+        return {"org_id": org_id, "deleted": True}
+
     def rehome_project(self, project_id: str, *, target_org_id: str) -> dict:
         """Re-home the local project into ``target_org_id`` (ms-118 / e-4233).
 

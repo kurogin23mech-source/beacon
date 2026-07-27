@@ -55,6 +55,23 @@ def save_org(org: dict) -> None:
         f.write("\n")
 
 
+def delete_org(org_id: str) -> bool:
+    """org file を物理削除する (ms-118 / e-4234)。消したら True、無ければ False。
+
+    構造可否 (= personal org は消せない) と認可 (= owner のみ) の判定は呼び出し側
+    (LocalStore.delete_org / server endpoint) が済ませてから呼ぶ前提の低レベル I/O。
+    削除は ``.trash`` へ退避せず file を除くが、org は cloud が真値源のため local の
+    org file は端末ローカルの写しに過ぎない (= 復元は再同期で足りる)。
+    """
+    if not org_id:
+        return False
+    path = _path_for(org_id)
+    if not os.path.exists(path):
+        return False
+    os.remove(path)
+    return True
+
+
 def list_orgs(*, user_id: str | None = None) -> list[dict]:
     """org を一覧する。``user_id`` 指定時は「その user が member の org」だけ返す。
 

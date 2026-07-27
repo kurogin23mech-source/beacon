@@ -39,6 +39,32 @@ ORG_DESTRUCTIVE_ROLES = {ORG_ROLE_OWNER}
 INVITABLE_ORG_ROLES = {ORG_ROLE_MEMBER, ORG_ROLE_ADMIN}
 
 
+def is_destructive_allowed(org: dict, user_id: str) -> bool:
+    """破壊的操作 (org 削除 / member 削除) を ``user_id`` が行えるか (ms-118 / e-4234)。
+
+    許すのは owner のみ (= ``ORG_DESTRUCTIVE_ROLES``、SPEC 受入条件6)。admin は
+    member の追加 (= 非破壊的な add-member) はできるが、削除系はできない。local /
+    cloud の両経路がこの単一関数で owner 判定を共有し、片方だけ緩い穴を作らない。
+    """
+    return org_member_role(org, user_id) in ORG_DESTRUCTIVE_ROLES
+
+
+def assert_org_deletable(org: dict) -> None:
+    """org を削除してよい形か構造検証する (ms-118 / e-4234)。不可なら ``ValueError``。
+
+    personal org (= 自動生成の個人組織) は user の器そのものなので削除させない
+    (= 消すと owner の所属先が消え、既存 project の org 導出が壊れる)。team org
+    (明示的に立てた組織) だけが削除対象。認可 (= 誰が消せるか) は
+    ``is_destructive_allowed`` が別途担う (= 構造可否と権限可否の分離)。
+    """
+    if not org:
+        raise ValueError("org not found")
+    if org.get("personal") or is_personal_org_id(org.get("org_id", "")):
+        raise ValueError(
+            "personal org (個人組織) は削除できません "
+            "(自動生成の器のため。team org のみ削除可)")
+
+
 def validate_invitable_role(role: str) -> str:
     """org に member を足すとき指定できる role を検証する (member / admin のみ)。
 
