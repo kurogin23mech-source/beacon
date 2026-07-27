@@ -78,6 +78,10 @@ def project_dir(tmp_path, monkeypatch):
     # Point BEACON_HOME at a clean tmp so the helper's legacy-credentials
     # fallback does not accidentally read the developer's real creds.
     monkeypatch.setenv("BEACON_HOME", str(tmp_path / ".beacon_home"))
+    # ms-126: these tests exercise author (creator) stamping, not priority
+    # triage. Opt into the untriaged sentinel so cmd_milestone_add /
+    # cmd_task_add don't reject the empty priority they never set.
+    monkeypatch.setenv("BEACON_ALLOW_UNTRIAGED", "1")
     return tmp_path
 
 

@@ -199,7 +199,7 @@ def test_post_milestones_broadcasts_to_subscribed_ws_client():
         ws.receive_json()  # initial (= ws_ready)
         resp = client.post(
             f"/api/projects/{pid}/milestones",
-            json={"title": "Granular MS", "target_date": ""},
+            json={"title": "Granular MS", "target_date": "", "priority": "medium"},
         )
         assert resp.status_code == 200, resp.text
         update = ws.receive_json()
@@ -254,7 +254,7 @@ def test_broadcast_reaches_all_subscribers():
             ws2.receive_json()  # ws_ready
             resp = client.post(
                 f"/api/projects/{pid}/milestones",
-                json={"title": "Multi-Sub MS", "target_date": ""},
+                json={"title": "Multi-Sub MS", "target_date": "", "priority": "medium"},
             )
             assert resp.status_code == 200, resp.text
             u1 = ws1.receive_json()

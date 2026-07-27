@@ -87,7 +87,7 @@ class TestOriginalBugRepro:
 class TestMilestoneAddCollisionGuard:
     def test_add_assigns_max_plus_one(self):
         data = _project([_ms("ms-1"), _ms("ms-5")])
-        new_id = core.milestone_add(data, "New")
+        new_id = core.milestone_add(data, "New", allow_untriaged=True)
         assert new_id == "ms-6"
         ids = [m["id"] for m in data["milestones"]]
         # Original list is preserved and new one appended
@@ -96,14 +96,14 @@ class TestMilestoneAddCollisionGuard:
 
     def test_add_into_empty_project(self):
         data = _project([])
-        assert core.milestone_add(data, "First") == "ms-1"
+        assert core.milestone_add(data, "First", allow_untriaged=True) == "ms-1"
 
     def test_add_does_not_collide_with_cancelled(self):
         # Used to be: cancelled MS exists with ms-3, length 1 → new ID
         # would also be ms-2 → no collision yet — but the bug surfaces
         # when more are added. Here we focus on direct repro.
         data = _project([_ms("ms-1"), _ms("ms-2", status="cancelled")])
-        new_id = core.milestone_add(data, "Third")
+        new_id = core.milestone_add(data, "Third", allow_untriaged=True)
         assert new_id == "ms-3"
         assert sum(1 for m in data["milestones"] if m["id"] == "ms-3") == 1
 

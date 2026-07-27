@@ -1069,6 +1069,11 @@ class EntryCreate(BaseModel):
     type: str = "task"
     date: str = ""
     detail: str = ""
+    # ms-126: priority is required for task entries (the human web form must
+    # supply one of the 5 severities). Empty + type=="task" is rejected by
+    # core.task_add and surfaced as a 400 below. Non-task entries (commit /
+    # note) ignore it.
+    priority: str = ""
 
 class EntryUpdate(BaseModel):
     description: str = ""
@@ -2443,6 +2448,7 @@ def create_entry(project_id: str, ms_id: str, body: EntryCreate,
             eid = core.task_add(
                 data, ms_id, body.description,
                 entry_type=body.type, date=body.date, detail=body.detail,
+                priority=body.priority,
                 author=author,
             )
         except ValueError as e:

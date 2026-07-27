@@ -270,6 +270,7 @@ def test_task_add_stamps_meta_author():
     data = _empty_project()
     eid = core.task_add(
         data, "ms-1", "do work",
+        allow_untriaged=True,
         author={
             "user_id": "u-bob",
             "email": "bob@example.com",
@@ -288,7 +289,7 @@ def test_task_add_stamps_meta_author():
 
 def test_task_done_stamps_done_by_user():
     data = _empty_project()
-    eid = core.task_add(data, "ms-1", "do work")
+    eid = core.task_add(data, "ms-1", "do work", allow_untriaged=True)
     core.task_done(
         data, eid,
         author={
@@ -311,7 +312,7 @@ def test_task_done_stamps_done_by_user():
 
 def test_task_update_stamps_updated_by_user_only_when_changed():
     data = _empty_project()
-    eid = core.task_add(data, "ms-1", "do work")
+    eid = core.task_add(data, "ms-1", "do work", allow_untriaged=True)
     # No-op call: nothing changes → updated_by_user must NOT be stamped.
     core.task_update(
         data, eid,
@@ -376,7 +377,7 @@ def test_api_log_commit_threads_display_name_to_meta_author():
 def test_api_create_entry_threads_display_name_to_meta_author():
     r = client.post(
         f"/api/projects/{PROJECT_ID}/milestones/ms-1/entries",
-        json={"description": "do thing", "type": "task"},
+        json={"description": "do thing", "type": "task", "priority": "medium"},
     )
     assert r.status_code == 200, r.text
     project = _store[PROJECT_ID]

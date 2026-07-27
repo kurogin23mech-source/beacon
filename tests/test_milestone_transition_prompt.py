@@ -32,6 +32,10 @@ def project_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("BEACON_DESCRIPTION", "follow-up task")
     monkeypatch.setenv("BEACON_MS_ID", "ms-1")
     monkeypatch.setenv("BEACON_TYPE", "task")
+    # ms-126: priority is mandatory. This test exercises the done-MS re-open
+    # prompt, not priority triage, so opt into the untriaged sentinel to keep
+    # the add path unblocked.
+    monkeypatch.setenv("BEACON_ALLOW_UNTRIAGED", "1")
     return tmp_path
 
 

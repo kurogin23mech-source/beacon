@@ -145,7 +145,7 @@ class TestLookups:
 class TestMilestones:
     def test_add(self):
         data = make_project()
-        ms_id = core.milestone_add(data, "New MS", "2026-12-31")
+        ms_id = core.milestone_add(data, "New MS", "2026-12-31", allow_untriaged=True)
         assert ms_id == "ms-1"
         assert len(data["milestones"]) == 1
         assert data["milestones"][0]["title"] == "New MS"
@@ -154,20 +154,20 @@ class TestMilestones:
 
     def test_add_with_description(self):
         data = make_project()
-        ms_id = core.milestone_add(data, "New MS", description="A detailed goal")
+        ms_id = core.milestone_add(data, "New MS", description="A detailed goal", allow_untriaged=True)
         assert ms_id == "ms-1"
         assert data["milestones"][0]["description"] == "A detailed goal"
 
     def test_add_without_description_omits_key(self):
         data = make_project()
-        core.milestone_add(data, "No desc MS")
+        core.milestone_add(data, "No desc MS", allow_untriaged=True)
         assert "description" not in data["milestones"][0]
 
     def test_add_builds_generic_skeleton_via_base(self):
         # ms-109 e-3698: milestone_add builds its dict through
         # work_model.new_target — base skeleton keys present with defaults.
         data = make_project()
-        core.milestone_add(data, "New MS")
+        core.milestone_add(data, "New MS", allow_untriaged=True)
         ms = data["milestones"][0]
         assert ms["label"] == "New MS"        # canonical
         assert ms["title"] == "New MS"        # legacy dual-write
@@ -179,7 +179,7 @@ class TestMilestones:
 
     def test_add_with_assignee_flows_through_base(self):
         data = make_project()
-        core.milestone_add(data, "New MS", assignee="alice")
+        core.milestone_add(data, "New MS", assignee="alice", allow_untriaged=True)
         assert data["milestones"][0]["assignee"] == "alice"
 
     def test_start_not_found(self):
@@ -228,7 +228,7 @@ class TestTasks:
     def test_add(self):
         ms = make_ms(ms_id="ms-1", status="in_progress")
         data = make_project(milestones=[ms])
-        eid = core.task_add(data, "ms-1", "Do something", date="2026-05-11")
+        eid = core.task_add(data, "ms-1", "Do something", date="2026-05-11", allow_untriaged=True)
         assert eid == "e-1"
         assert len(ms["entries"]) == 1
         assert ms["entries"][0]["description"] == "Do something"
@@ -236,7 +236,7 @@ class TestTasks:
     def test_add_with_detail(self):
         ms = make_ms(ms_id="ms-1", status="in_progress")
         data = make_project(milestones=[ms])
-        eid = core.task_add(data, "ms-1", "Task", detail="Some detail")
+        eid = core.task_add(data, "ms-1", "Task", detail="Some detail", allow_untriaged=True)
         assert ms["entries"][0]["detail"] == "Some detail"
 
     def test_done(self):

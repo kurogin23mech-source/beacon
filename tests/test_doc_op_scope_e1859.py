@@ -52,7 +52,7 @@ def beacon_project(tmp_path, monkeypatch):
         check=True,
         capture_output=True,
     )
-    subprocess.run([str(BEACON_BIN), "milestone", "add", "Test MS"],
+    subprocess.run([str(BEACON_BIN), "milestone", "add", "Test MS", "--untriaged"],
                    check=True, capture_output=True)
     subprocess.run([str(BEACON_BIN), "operation", "open", "Op One"],
                    check=True, capture_output=True)
