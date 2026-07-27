@@ -132,6 +132,26 @@ def test_invite_invalid_role_is_400():
     assert r.status_code == 400
 
 
+def test_invite_userid_instead_of_email_is_400():
+    oid = _seed_org("u1")
+    _impersonate("u1")
+    r = client.post(f"/api/orgs/{oid}/members", json={"email": "uid-bob"})
+    assert r.status_code == 400  # add-member は email を受ける (user-id 不可)
+
+
+def test_invite_existing_member_is_409_no_silent_demote():
+    _users["bob@x"] = ("uid-bob", {"email": "bob@x"})
+    oid = _seed_org("u1")
+    _impersonate("u1")
+    client.post(f"/api/orgs/{oid}/members", json={"email": "bob@x", "role": "admin"})
+    # 再追加 (role 未指定=member) は 409 で弾き、admin を silent 降格しない。
+    r = client.post(f"/api/orgs/{oid}/members", json={"email": "bob@x"})
+    assert r.status_code == 409
+    show = client.get(f"/api/orgs/{oid}").json()
+    bob = [m for m in show["members"] if m["user_id"] == "uid-bob"][0]
+    assert bob["role"] == "admin"  # 元の role が保たれる
+
+
 def test_remove_member_by_owner_ok():
     _users["bob@x"] = ("uid-bob", {"email": "bob@x"})
     oid = _seed_org("u1")

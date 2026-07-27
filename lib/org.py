@@ -34,6 +34,22 @@ VALID_ORG_ROLES = {ORG_ROLE_OWNER, ORG_ROLE_ADMIN, ORG_ROLE_MEMBER}
 # 破壊的操作 (member 削除 / org 削除) を許すのは owner のみ (受入条件7)。
 ORG_DESTRUCTIVE_ROLES = {ORG_ROLE_OWNER}
 
+# add-member (社員を org に足す) で指定できる role。owner は含めない = 二人目の
+# owner を add-member 経由で mint しない (owner 昇格 / 移譲は専用動詞の担当)。
+INVITABLE_ORG_ROLES = {ORG_ROLE_MEMBER, ORG_ROLE_ADMIN}
+
+
+def validate_invitable_role(role: str) -> str:
+    """org に member を足すとき指定できる role を検証する (member / admin のみ)。
+
+    local / cloud の両経路が同じ値域を強制するための単一真実源 (ms-118 / e-4232)。
+    不正な role は ``ValueError``。owner を弾くのは add-member で二人目 owner を
+    作らせないため。
+    """
+    if role not in INVITABLE_ORG_ROLES:
+        raise ValueError(f"invalid role '{role}' (member or admin)")
+    return role
+
 _PERSONAL_ORG_PREFIX = "org-p-"
 
 

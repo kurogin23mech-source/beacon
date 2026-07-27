@@ -1005,9 +1005,9 @@ class ApiClient:
         """Fetch a single org by id. 404 if caller is not a member (= 存在を漏らさない)."""
         return self.get(f"/api/orgs/{urllib.parse.quote(org_id, safe='')}")
 
-    def invite_org_member(self, org_id: str, *, email: str,
-                          role: str = "member") -> dict:
-        """Invite a member into an org (participation-only). Caller must be a member."""
+    def add_org_member(self, org_id: str, *, email: str,
+                       role: str = "member") -> dict:
+        """Add a member into an org (participation-only). Caller must be a member."""
         return self.post(
             f"/api/orgs/{urllib.parse.quote(org_id, safe='')}/members",
             {"email": email, "role": role})
