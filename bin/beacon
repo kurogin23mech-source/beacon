@@ -6398,11 +6398,66 @@ EOF
                 BEACON_ORG_ID="$oid" BEACON_JSON="$ojson" \
                     python3 "$COMMANDS_PY" org_show
                 ;;
+            add-member|invite)
+                # add-member is the canonical verb (= 即時追加、承諾フロー無し)。
+                # `invite` は後方互換の別名 (project 側 token+accept 招待とは別物)。
+                shift 2
+                oid="" oemail="" orole="" ojson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --role) orole="${2:-}"; shift 2 ;;
+                        --json) ojson="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *)
+                            if [ -z "$oid" ]; then oid="$1"
+                            elif [ -z "$oemail" ]; then oemail="$1"
+                            else
+                                echo "Error: unexpected extra argument '$1'." >&2
+                                exit 1
+                            fi
+                            shift ;;
+                    esac
+                done
+                if [ -z "$oid" ] || [ -z "$oemail" ]; then
+                    echo "Usage: beacon org add-member <org-id> <email> [--role member|admin] [--json]"
+                    exit 1
+                fi
+                BEACON_ORG_ID="$oid" BEACON_ORG_EMAIL="$oemail" \
+                    BEACON_ORG_ROLE="$orole" BEACON_JSON="$ojson" \
+                    python3 "$COMMANDS_PY" org_add_member
+                ;;
+            remove-member)
+                shift 2
+                oid="" omember="" ojson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) ojson="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *)
+                            if [ -z "$oid" ]; then oid="$1"
+                            elif [ -z "$omember" ]; then omember="$1"
+                            else
+                                echo "Error: unexpected extra argument '$1'." >&2
+                                exit 1
+                            fi
+                            shift ;;
+                    esac
+                done
+                if [ -z "$oid" ] || [ -z "$omember" ]; then
+                    echo "Usage: beacon org remove-member <org-id> <email-or-userid> [--json]"
+                    exit 1
+                fi
+                BEACON_ORG_ID="$oid" BEACON_ORG_MEMBER="$omember" \
+                    BEACON_JSON="$ojson" \
+                    python3 "$COMMANDS_PY" org_remove_member
+                ;;
             *)
-                echo "Usage: beacon org [create|list|show]"
-                echo "  create \"<名前>\"        Create a team org (作成者が owner になる)"
-                echo "  list [--all]           List orgs you belong to (自分が member の org)"
-                echo "  show <org-id>          Show one org's members"
+                echo "Usage: beacon org [create|list|show|add-member|remove-member]"
+                echo "  create \"<名前>\"                Create a team org (作成者が owner になる)"
+                echo "  list [--all]                   List orgs you belong to (自分が member の org)"
+                echo "  show <org-id>                  Show one org's members"
+                echo "  add-member <org-id> <email>    Add a member (即時・所属のみ、role は --role member|admin; 別名 invite)"
+                echo "  remove-member <org-id> <who>   Remove a member (who = email or user-id; owner/admin)"
                 echo ""
                 echo "  org 所属はアクセスを与えません (participation-only): 社員を org に"
                 echo "  招いた上で、必要な project に beacon member add で参加させて初めて"

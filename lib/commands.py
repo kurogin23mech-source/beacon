@@ -6764,6 +6764,72 @@ def cmd_org_show():
         print(f"    - {m.get('email') or m.get('user_id')} ({m.get('role')})")
 
 
+def cmd_org_add_member():
+    """Add a member into an org — 所属だけ与えアクセスは付けない (ms-118 / e-4232).
+
+    CLI verb は `beacon org add-member` (別名 `invite`)。承諾フローは無く即時に
+    member になる (= project 側の token+accept 招待とは別物)。
+
+    Reads from env:
+      BEACON_ORG_ID     (required) target org id
+      BEACON_ORG_EMAIL  (required) member email (user-id は不可)
+      BEACON_ORG_ROLE   member | admin (default member)
+      BEACON_JSON       "1" → emit json
+    """
+    org_id = os.environ.get("BEACON_ORG_ID", "").strip()
+    email = os.environ.get("BEACON_ORG_EMAIL", "").strip()
+    role = os.environ.get("BEACON_ORG_ROLE", "").strip() or "member"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not org_id or not email:
+        print("Usage: beacon org add-member <org-id> <email> [--role member|admin]",
+              file=sys.stderr)
+        sys.exit(1)
+    try:
+        org = get_store().add_org_member(org_id, email=email, role=role)
+    except (ValueError, RuntimeError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(org, ensure_ascii=False))
+    else:
+        print(f"Added {email} to org {org.get('org_id')} "
+              f"\"{org.get('name')}\" (role={role})")
+        print("  所属のみ付与しました (即時、承諾フローなし)。"
+              "この社員はまだどの project も見えません。")
+        print("  アクセスは必要な project で `beacon member add` を実行して初めて付きます "
+              "(participation-only)。")
+
+
+def cmd_org_remove_member():
+    """Remove a member from an org (ms-118 / e-4232).
+
+    Reads from env:
+      BEACON_ORG_ID      (required) target org id
+      BEACON_ORG_MEMBER  (required) member to remove (user_id or email)
+      BEACON_JSON        "1" → emit json
+    """
+    org_id = os.environ.get("BEACON_ORG_ID", "").strip()
+    target = os.environ.get("BEACON_ORG_MEMBER", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not org_id or not target:
+        print("Usage: beacon org remove-member <org-id> <email-or-userid>",
+              file=sys.stderr)
+        sys.exit(1)
+    try:
+        org = get_store().remove_org_member(org_id, target=target)
+    except (ValueError, RuntimeError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(org, ensure_ascii=False))
+    else:
+        print(f"Removed {target} from org {org.get('org_id')} "
+              f"\"{org.get('name')}\"")
+        print(f"  remaining members: {len(org.get('members') or [])}")
+
+
 def cmd_trek_create():
     """Create a new trek (= top-level cross-project collaboration area).
 
@@ -26765,6 +26831,9 @@ if __name__ == "__main__":
         "org_create": cmd_org_create,
         "org_list": cmd_org_list,
         "org_show": cmd_org_show,
+        # ms-118 e-4232: org membership — add-member (所属のみ) / remove-member.
+        "org_add_member": cmd_org_add_member,
+        "org_remove_member": cmd_org_remove_member,
         "trek_create": cmd_trek_create,
         "trek_list": cmd_trek_list,
         "trek_show": cmd_trek_show,

@@ -4530,6 +4530,100 @@ def get_org_endpoint(org_id: str, user: dict = Depends(require_auth)):
     return doc
 
 
+def _load_org_for_member(org_id: str, user: dict) -> dict:
+    """org を読み、caller が member であることを保証する (非 member は 404 で秘匿)。
+
+    get_org_endpoint と同じ開示規則を org 変更系 endpoint で再利用する。
+    """
+    doc = db.get_org(org_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="org not found")
+    if _auth_enabled and not org_mod.is_org_member(doc, user.get("sub", "")):
+        raise HTTPException(status_code=404, detail="org not found")
+    return doc
+
+
+class OrgMemberAdd(BaseModel):
+    email: str
+    role: str = "member"
+
+
+@app.post("/api/orgs/{org_id}/members")
+def add_org_member_endpoint(org_id: str, body: OrgMemberAdd,
+                            user: dict = Depends(require_auth)):
+    """Add a member into an org — 所属だけを与え、アクセスは付けない (CLI: org add-member)。
+
+    participation-only (ms-113 / SPEC 方針2): この endpoint は org doc の members[]
+    にしか書かず、どの project の participation (= 参加 = アクセス) も変えない。追加された
+    社員は org の member になるが、必要な project に別途参加させるまで何も見えない。
+    承諾フローは無い即時追加 (= project 側の token+accept 招待とは別物)。
+    """
+    import datetime
+    org = _load_org_for_member(org_id, user)
+    email = (body.email or "").strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="email is required")
+    if "@" not in email:
+        # user-id を渡された誤診を防ぐ (add-member は email を受ける)。
+        raise HTTPException(
+            status_code=400,
+            detail="add-member takes an email address, not a user-id")
+    # mint できる role は member / admin のみ。値域検証は lib/org.py に一本化し、
+    # local (LocalStore.add_org_member) と物理的に一致させる。
+    try:
+        org_mod.validate_invitable_role(body.role)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    # email を実 user に解決する。存在しなければ 404 (= まだ Beacon アカウントが無い)。
+    found = db.find_user_by_email(email)
+    if not found:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no Beacon user for email '{email}' "
+                   "(先に相手がサインアップする必要があります)")
+    invitee_uid, _ = found
+    # add-only: 既に member なら role を silent 上書きせず 409 で弾く (= 冪等のつもりの
+    # 再追加で admin が member に降格する事故を防ぐ)。role 変更は別操作。
+    if org_mod.is_org_member(org, invitee_uid):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{email} is already a member "
+                   "(role の変更は add-member ではなく別操作で行います)")
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    org_mod.add_org_member(org, invitee_uid, role=body.role, email=email,
+                           added_by=user.get("sub", ""), now=now)
+    db.save_org(org["org_id"], org)  # ← project は一切触らない (participation-only)
+    return org
+
+
+@app.delete("/api/orgs/{org_id}/members/{target}")
+def remove_org_member_endpoint(org_id: str, target: str,
+                               user: dict = Depends(require_auth)):
+    """Remove a member (user_id or email) from an org. Owner / admin only.
+
+    厳格な owner-only 化と org 削除との統一ガードは e-4234 が担う。ここでは破壊的
+    操作を最低限 owner / admin に絞る (= 平 member による他 member 除去を防ぐ)。
+    """
+    org = _load_org_for_member(org_id, user)
+    if _auth_enabled:
+        caller_role = org_mod.org_member_role(org, user.get("sub", ""))
+        if caller_role not in (org_mod.ORG_ROLE_OWNER, org_mod.ORG_ROLE_ADMIN):
+            raise HTTPException(
+                status_code=403,
+                detail="removing an org member requires owner or admin")
+    member = org_mod.find_org_member(org, target)
+    if not member:
+        raise HTTPException(status_code=404,
+                            detail=f"org member '{target}' not found")
+    try:
+        org_mod.remove_org_member(org, member.get("user_id"))
+    except ValueError as e:
+        # last-owner 保護 (= org を owner 不在にしない)
+        raise HTTPException(status_code=400, detail=str(e))
+    db.save_org(org["org_id"], org)
+    return org
+
+
 @app.patch("/api/treks/{trek_id}")
 def update_trek_endpoint(trek_id: str, body: TrekUpdate, request: Request,
                          user: dict = Depends(require_auth)):

@@ -235,6 +235,37 @@ class Store(Protocol):
         """
         ...
 
+    def add_org_member(self, org_id: str, *, email: str,
+                       role: str = "member") -> dict:
+        """org に社員を「所属」させる (= org member にする、ms-118 / e-4232)。
+
+        CLI では ``beacon org add-member`` (別名 ``invite``)。承諾フローは無く即時に
+        member になる (= project 側の token+accept 招待とは別物)。
+
+        **所属だけを与え、アクセスは付けない (participation-only)**: この操作は org doc の
+        members[] にしか触れず、どの project の participation (= 参加 = アクセス) も変えない。
+        追加された社員は org の member になるが、必要な project に別途参加させるまで
+        どの project も見えない。
+
+        **add-only**: 既に member の相手を再追加すると ``ValueError`` (= role の silent
+        上書き / 降格を防ぐ)。role は member / admin のみ (owner は add-member で作らない、
+        ``validate_invitable_role`` が値域を local/cloud で一致させる)。入力は email
+        (user-id は不可)。cloud では server が email を実 user に解決し、未登録なら
+        ``ValueError``。戻り値は更新後の org doc。transport / auth / 権限 / 既存 member
+        (409) は ``RuntimeError`` として伝播する。
+        """
+        ...
+
+    def remove_org_member(self, org_id: str, *, target: str) -> dict:
+        """org から member を外す (ms-118 / e-4232)。``target`` は user_id か email。
+
+        最後の owner は外せない (= org を owner 不在にしない安全弁、``ValueError``)。
+        cloud では owner / admin だけが実行できる (= 破壊的操作の owner-only 厳格化と
+        org 削除との統一ガードは e-4234)。存在しない member は ``ValueError``。戻り値は
+        更新後の org doc。transport / auth / 権限エラーは ``RuntimeError``。
+        """
+        ...
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。

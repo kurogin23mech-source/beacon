@@ -471,6 +471,30 @@ class StoreApi:
                 raise ValueError(f"org '{org_id}' not found") from e
             raise
 
+    def add_org_member(self, org_id: str, *, email: str,
+                       role: str = "member") -> dict:
+        """Add an org member via the cloud API (participation-only).
+
+        Server resolves email → user, checks the caller is an org member, and
+        writes only the org doc. 404 (unknown org / email) → ``ValueError``;
+        auth / 403 / 409 / transport → ``RuntimeError`` (= 既存 cloud path と一致)。
+        """
+        try:
+            return self._client.add_org_member(org_id, email=email, role=role)
+        except RuntimeError as e:
+            if "404" in str(e):
+                raise ValueError(str(e)) from e
+            raise
+
+    def remove_org_member(self, org_id: str, *, target: str) -> dict:
+        """Remove an org member via the cloud API (owner/admin only server-side)."""
+        try:
+            return self._client.remove_org_member(org_id, target=target)
+        except RuntimeError as e:
+            if "404" in str(e):
+                raise ValueError(str(e)) from e
+            raise
+
     def list_documents(self) -> list:
         """List documents from cloud API."""
         try:
