@@ -4486,10 +4486,20 @@ def create_org_endpoint(body: OrgCreate, user: dict = Depends(require_auth)):
     import datetime
     if not body.name or not body.name.strip():
         raise HTTPException(status_code=400, detail="org name is required")
+    creator = user.get("sub", "")
+    if not creator:
+        # auth 無効モード等で sub が空だと new_org が ValueError を投げ、捕捉が
+        # 無いと unhandled 500 になる。org 作成は認証された user を要するので、
+        # ここで明示的に 400 にして回復経路を示す (list の _auth_enabled 分岐と対称)。
+        raise HTTPException(
+            status_code=400,
+            detail="creating an org requires an authenticated user "
+                   "(auth 無効モードでは org を作成できません)",
+        )
     now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     doc = org_mod.new_org(
         body.name,
-        creator_user_id=user.get("sub", ""),
+        creator_user_id=creator,
         creator_email=user.get("email", ""),
         now=now,
     )

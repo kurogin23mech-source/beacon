@@ -6337,7 +6337,17 @@ EOF
                     case "$1" in
                         --json) ojson="1"; shift ;;
                         -?*) _guard_flag "$1" ;;
-                        *) [[ -z "$oname" ]] && oname="$1"; shift ;;
+                        *)
+                            if [ -z "$oname" ]; then
+                                oname="$1"
+                            else
+                                # 2 個目以降の positional を黙って捨てない (= 引用符落ちの
+                                # 複数語名で名前が切り詰められる silent no-op を構造で塞ぐ)。
+                                echo "Error: unexpected extra argument '$1'." >&2
+                                echo "  名前に空白を含む場合は引用符で囲んでください: beacon org create \"$oname $1\"" >&2
+                                exit 1
+                            fi
+                            shift ;;
                     esac
                 done
                 if [ -z "$oname" ]; then
@@ -6355,7 +6365,10 @@ EOF
                         --json) ojson="1"; shift ;;
                         --all)  oall="1"; shift ;;
                         -?*) _guard_flag "$1" ;;
-                        *) shift ;;
+                        *)
+                            # list は positional を取らない。黙って無視せず拒否する。
+                            echo "Error: unexpected argument '$1' (beacon org list は位置引数を取りません; 全件は --all)." >&2
+                            exit 1 ;;
                     esac
                 done
                 BEACON_JSON="$ojson" BEACON_ORG_ALL="$oall" \
@@ -6368,7 +6381,14 @@ EOF
                     case "$1" in
                         --json) ojson="1"; shift ;;
                         -?*) _guard_flag "$1" ;;
-                        *) [[ -z "$oid" ]] && oid="$1"; shift ;;
+                        *)
+                            if [ -z "$oid" ]; then
+                                oid="$1"
+                            else
+                                echo "Error: unexpected extra argument '$1' (beacon org show は org-id を 1 つだけ取ります)." >&2
+                                exit 1
+                            fi
+                            shift ;;
                     esac
                 done
                 if [ -z "$oid" ]; then

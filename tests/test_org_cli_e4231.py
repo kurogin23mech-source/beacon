@@ -130,3 +130,33 @@ def test_localstore_create_org_requires_creator_in_local_mode(local_store):
     # (= we must not fabricate an owner silently).
     with pytest.raises(ValueError):
         local_store.create_org(name="Acme", creator_user_id="")
+
+
+# ---------------------------------------------------------------------------
+# cmd_org_list guards (AX finding: --all sentinel は silent 昇格しない)
+# ---------------------------------------------------------------------------
+
+def test_cmd_org_list_rejects_all_in_cloud(monkeypatch):
+    import commands
+    monkeypatch.setenv("BEACON_ORG_ALL", "1")
+    monkeypatch.delenv("BEACON_JSON", raising=False)
+    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    # --all は local 専用。cloud では get_store に到達する前に exit する。
+    monkeypatch.setattr(commands, "get_store",
+                        lambda *a, **k: pytest.fail("must exit before get_store"))
+    with pytest.raises(SystemExit) as ei:
+        commands.cmd_org_list()
+    assert ei.value.code == 1
+
+
+def test_cmd_org_list_rejects_unresolved_identity(monkeypatch):
+    import commands
+    monkeypatch.delenv("BEACON_ORG_ALL", raising=False)
+    monkeypatch.delenv("BEACON_JSON", raising=False)
+    # identity 未解決 (uid 空) のとき、黙って全件 admin view に昇格せず exit する。
+    monkeypatch.setattr(commands, "_resolve_creator_identity", lambda: ("", "", ""))
+    monkeypatch.setattr(commands, "get_store",
+                        lambda *a, **k: pytest.fail("must exit before get_store"))
+    with pytest.raises(SystemExit) as ei:
+        commands.cmd_org_list()
+    assert ei.value.code == 1

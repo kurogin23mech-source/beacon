@@ -108,6 +108,16 @@ def test_create_org_rejects_empty_name():
     assert client.post("/api/orgs", json={"name": "   "}).status_code == 400
 
 
+def test_create_org_requires_authenticated_user():
+    # sub 空 (= auth 無効モード等) は unhandled 500 でなく明示 400 で弾く。
+    def _empty_auth():
+        return {"sub": "", "email": ""}
+    app_module.app.dependency_overrides[app_module.require_auth] = _empty_auth
+    r = client.post("/api/orgs", json={"name": "Acme"})
+    assert r.status_code == 400, r.text
+    assert "authenticated user" in r.text
+
+
 def test_list_orgs_filters_by_membership():
     _impersonate("u1")
     client.post("/api/orgs", json={"name": "A"})

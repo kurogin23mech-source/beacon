@@ -221,13 +221,17 @@ class Store(Protocol):
         ...
 
     def get_org(self, org_id: str) -> dict:
-        """org を id で 1 件取る。
-
-        member でない / 存在しない org は ``ValueError`` (= LocalStore: ファイル
-        不在、StoreApi: API 404) にして、CLI が backend 非依存に ``org 'X' not
-        found`` を出せるようにする。member-only の 404 は「存在を漏らさない」
-        設計 (= trailnode get_org と同じ)。その他の transport / auth error は
+        """org を id で 1 件取る。存在しない org は ``ValueError`` (CLI が backend
+        非依存に ``org 'X' not found`` を出せるように)。transport / auth error は
         ``RuntimeError`` として伝播する。
+
+        **membership の強制は cloud (server) の責務**: StoreApi 経由 (cloud) では、
+        member でない実在 org も 404 → ``ValueError`` になる (= 存在を漏らさない、
+        trailnode get_org と同方針)。一方 **LocalStore (local mode) は単一ユーザーの
+        store** (= ``~/.beacon/orgs/`` はその端末の本人だけの器) なので、show では
+        membership を強制せず id 一致だけで返す。この非対称は「local = 単一ユーザー、
+        開示境界の真値は cloud」という設計の帰結であり、silent な穴ではない
+        (list は local でも user_id filter を持つが、show は single-user 前提)。
         """
         ...
 

@@ -63,6 +63,7 @@ def list_orgs(*, user_id: str | None = None) -> list[dict]:
     participation-only の開示境界とは別レイヤー (= org 所属の一覧であって、org が
     束ねる project の可視性ではない)。
     """
+    import org as org_mod  # membership 判定は lib/org.py を単一真実源にする
     d = get_org_dir()
     if not os.path.isdir(d):
         return []
@@ -75,10 +76,10 @@ def list_orgs(*, user_id: str | None = None) -> list[dict]:
                 org = json.load(f)
         except (OSError, json.JSONDecodeError):
             continue  # 読めない / 壊れた file は skip (best-effort listing)
-        if user_id:
-            members = [m.get("user_id") for m in org.get("members", []) or []]
-            if user_id not in members:
-                continue
+        # membership の意味 (= 誰が member か) を inline に再実装せず org_mod に寄せる。
+        # server 側 (is_org_member 経由) と判定が食い違わないための単一真実源。
+        if user_id and not org_mod.is_org_member(org, user_id):
+            continue
         out.append(org)
     # 新しい順 (= server 側の並びと合わせる)
     out.sort(key=lambda x: (x.get("created_at", ""), x.get("org_id", "")),

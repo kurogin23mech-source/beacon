@@ -6657,9 +6657,12 @@ def cmd_org_create():
         print(f"Created org {doc['org_id']} \"{doc['name']}\"")
         owner = (doc.get("members") or [{}])[0]
         print(f"  owner: {owner.get('email') or owner.get('user_id')}")
-        print("  次の一手: `beacon org invite <email>` で社員を org に招く "
-              "(所属のみ、まだ project は見えない) → 必要な project に "
-              "`beacon member add` で参加させて初めてアクセスが付く")
+        # 招待は所属だけを与え、アクセスは別途 project 参加で付く (participation-only)。
+        # `org invite` は後続タスク e-4232 で追加予定なので、未実装のコマンドを
+        # 案内しない (= ツールが実在しない次アクションを指し示さない)。
+        print("  組織に社員を招く導線 (org invite) は後続 e-4232 で追加予定です。"
+              "招いても所属だけで、必要な project に `beacon member add` で参加させて"
+              "初めてその project が見えます (participation-only)。")
 
 
 def cmd_org_list():
@@ -6675,10 +6678,26 @@ def cmd_org_list():
     all_orgs = os.environ.get("BEACON_ORG_ALL", "") == "1"
 
     if all_orgs:
+        # --all (= 全件 admin view) は local mode 専用。cloud は auth token で
+        # サーバ側 filter されるため --all を渡しても効かない → 黙って素通り
+        # させず明示拒否する (= 全件を見たつもりが自分の org しか見えない誤解を防ぐ)。
+        if _is_cloud_mode():
+            print("Error: --all は local mode 専用です "
+                  "(cloud では自分が member の org のみ表示されます)。",
+                  file=sys.stderr)
+            sys.exit(1)
         user_id = None
     else:
         uid, _, _ = _resolve_creator_identity()
-        user_id = uid or None
+        # identity が解決できないときに黙って全件 admin view へ昇格しない
+        # (= help は「自分が member の org」と謳っているので、他 user の org を
+        # 混ぜて返すのは silent な開示違反)。
+        if not uid:
+            print("Error: 自分の identity が解決できませんでした (member 一覧を絞れません)。\n"
+                  "  `beacon member whoami` で確認するか、全件を見るなら --all を指定してください。",
+                  file=sys.stderr)
+            sys.exit(1)
+        user_id = uid
 
     try:
         orgs = get_store().list_orgs(user_id=user_id)
@@ -6720,7 +6739,15 @@ def cmd_org_show():
 
     try:
         doc = get_store().get_org(org_id)
-    except (ValueError, RuntimeError) as e:
+    except ValueError as e:
+        # not found: 有効な id を知る導線を添える。cloud では「member でない実在 org」も
+        # 同じ not found になる (= 存在を漏らさない業務規則) 点も明かし、id 綴りの
+        # 誤診で当て推量リトライに入るのを防ぐ。
+        print(f"Error: {e}", file=sys.stderr)
+        print("  自分が member の org は `beacon org list` で確認できます "
+              "(member でない org も not found として扱われます)。", file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
