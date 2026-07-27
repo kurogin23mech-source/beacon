@@ -40,6 +40,7 @@ import work_base
 import work_model  # ms-109 e-3559: 職種非依存の Target/WorkItem 正準アクセサ
 import disclosure  # ms-113 e-3734: project 参加ベースの開示プリミティブ
 import org  # ms-113 e-3734: personal/team org id 導出
+import master_projection  # ms-111 e-3621: Account/Contact 生成時の master link seam
 
 # 取消 (cancelled) 状態は基底 work_base の語彙に揃える (ms-109 e-3558)。営業の
 # activity / communication の「誤起票の訂正」(e-3537) と Meeting の cancelled が
@@ -554,7 +555,6 @@ def account_add(data: dict, name: str, *, health: str = "", phase: str = "",
     })
     # ms-111 e-3621 chunk2b: adapter があればマスターへ link (無ければ inert)。
     if master_adapter is not None:
-        import master_projection
         master_projection.link_new_account_to_master(
             data["accounts"][-1], master_adapter, org_id=owner_org, now=created_at)
     return acc_id
@@ -594,6 +594,9 @@ def contact_add(data: dict, account_id: str, name: str, *,
     (``master_projection.link_new_contact_to_master``)。親 Account が既に master に
     link 済ならその master_account_id に紐付く。既定 (None) では link せず従来動作。
     実 linking の駆動は e-3622 が担う (本 seam は inert、SPEC A 採用)。
+
+    ``now`` : link 時刻 (ISO8601)。空なら現在時刻を補う。``link_new_contact_to_master``
+    の ``now`` 引数にそのまま渡す (master 側の書き込み時刻の単一入力)。
     """
     acc = find_account(data, account_id)
     if acc is None:
@@ -606,7 +609,6 @@ def contact_add(data: dict, account_id: str, name: str, *,
     # org 束縛軸は親会社の owner org に揃える (親 Account が link された org と一致、
     # SPEC §8)。未設定なら project の org へ fallback。
     if master_adapter is not None:
-        import master_projection
         contact_org = acc.get(disclosure.OWNER_ORG_FIELD) or org.project_org_id(data)
         master_projection.link_new_contact_to_master(
             contact, master_adapter,

@@ -169,19 +169,26 @@ def account_read_view(account: dict, adapter=None, extra: Optional[dict] = None)
     **shape 不変**: 既存キーはすべて保ち、identity 由来の値の出所だけ master 経由に
     差し替える (= account の name/label、各 contact の name/email/phone/role)。link 済 +
     adapter あれば master が真値、未 link / adapter=None は投影 fallback (= 従来値、
-    regression なし)。``extra`` は home project 等の付帯情報を上書き結合する。
+    regression なし)。
 
-    server の read endpoint (投影 Account を返す経路) が「全 read site を漏れなく
-    resolver 経由に」する時の 1 箇所化: 部分 swap で stale (投影) と master が混ざる
-    バグ (= HIGH) を、この 1 helper に集約して塞ぐ。
+    ``extra`` は home project 等の **identity 以外の付帯情報** を重ねる。identity キー
+    (name/label/contacts) は resolver 値が **常に優先** され、extra では上書きできない
+    (= identity 一本化の抜け穴を作らない。extra は identity キーより先に merge する)。
+
+    対象は **dict を返す read 経路** (server endpoint 等) の 1 箇所化。CLI の表示は dict
+    でなく整形印字なので本 helper を通さず ``resolve_account_identity`` /
+    ``resolve_contact_identity`` を直接呼ぶ (どちらも同じ resolver を経由するので identity
+    の出所ルールは 1 つ)。部分 swap で stale (投影) と master が混ざるバグを、resolver
+    への一本化で塞ぐ。
     """
     name = resolve_account_identity(account, adapter)
     contacts = [
         {**c, **resolve_contact_identity(c, adapter)}
         for c in ((account or {}).get("contacts") or [])
     ]
-    return {**(account or {}), "name": name, "label": name, "contacts": contacts,
-            **(extra or {})}
+    # extra を先に、identity を後に merge → resolver 値が extra に勝つ (上書き不可)。
+    return {**(account or {}), **(extra or {}),
+            "name": name, "label": name, "contacts": contacts}
 
 
 # ---------------------------------------------------------------------------
