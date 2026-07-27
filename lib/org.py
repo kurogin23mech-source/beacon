@@ -264,6 +264,26 @@ def is_external_guest(org: dict, user_id: str, *, participates_in_project: bool)
     return bool(participates_in_project) and not is_org_member(org, user_id)
 
 
+def external_guest_user_ids(org: dict, member_user_ids) -> set:
+    """project 参加者のうち「外部ゲスト」= org 非所属の user_id 集合を返す (ms-118 / e-4235)。
+
+    外部ゲスト = その project には参加しているが、project が属する **team org** の
+    member ではない人 (ms-113 / e-3735, Notion guest 相当)。開示は project 参加で
+    のみ与えられるので、org member にしなくても特定 project にだけ招けば、その guest
+    は招かれた project の情報だけが見える。本 helper はその「参加者のうち誰が org
+    外か」を集合で返す可視化プリミティブで、可否判定そのものは participation-gated
+    な開示プリミティブ (disclosure.can_disclose) が行う。
+
+    **team org 限定**: personal org (= 個人 project) や org 不明時は「外部ゲスト」の
+    概念が成り立たない (= 個人 project の共同編集者は org スコープの guest ではない)
+    ので空集合を返す。これにより個人 project の参加者を誤って guest 扱いしない。
+    """
+    if not org or not is_team_org_id(org.get("org_id", "")):
+        return set()
+    org_ids = {m.get("user_id") for m in (org.get("members") or []) if m.get("user_id")}
+    return {uid for uid in (member_user_ids or []) if uid and uid not in org_ids}
+
+
 def project_org_id(project: dict) -> str:
     """project の所属 org_id を返す (= lazy retrofit の純粋導出)。
 

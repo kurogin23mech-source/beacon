@@ -412,6 +412,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_account_nurturing.add_argument("--deadline", default="")
     p_account_nurturing.add_argument("--ball", default="")
 
+    # ---- org (ms-118: 組織 tenancy operations — bin/beacon の org noun と parity) ----
+    p_org = sub.add_parser("org", help="Organization (組織) operations", add_help=False)
+    p_org.add_argument("--help", "-h", action="store_true", dest="show_help")
+    org_sub = p_org.add_subparsers(dest="org_cmd", metavar="<subcmd>")
+
+    p_org_create = org_sub.add_parser("create", add_help=False)
+    p_org_create.add_argument("name", nargs="?", default="")
+    p_org_create.add_argument("--json", action="store_true")
+
+    p_org_list = org_sub.add_parser("list", aliases=["ls"], add_help=False)
+    p_org_list.add_argument("--all", action="store_true")
+    p_org_list.add_argument("--json", action="store_true")
+
+    p_org_show = org_sub.add_parser("show", add_help=False)
+    p_org_show.add_argument("org_id", nargs="?", default="")
+    p_org_show.add_argument("--json", action="store_true")
+
+    p_org_addmember = org_sub.add_parser("add-member", aliases=["invite"], add_help=False)
+    p_org_addmember.add_argument("org_id", nargs="?", default="")
+    p_org_addmember.add_argument("email", nargs="?", default="")
+    p_org_addmember.add_argument("--role", default="")
+    p_org_addmember.add_argument("--json", action="store_true")
+
+    p_org_removemember = org_sub.add_parser("remove-member", add_help=False)
+    p_org_removemember.add_argument("org_id", nargs="?", default="")
+    p_org_removemember.add_argument("member", nargs="?", default="")
+    p_org_removemember.add_argument("--json", action="store_true")
+
+    p_org_rehome = org_sub.add_parser("rehome", add_help=False)
+    p_org_rehome.add_argument("project_id", nargs="?", default="")
+    p_org_rehome.add_argument("--to", dest="to_org", default="")
+    p_org_rehome.add_argument("--json", action="store_true")
+
+    p_org_delete = org_sub.add_parser("delete", aliases=["rm"], add_help=False)
+    p_org_delete.add_argument("org_id", nargs="?", default="")
+    p_org_delete.add_argument("--json", action="store_true")
+
     # ---- sales (ms-106: team-level 目標金額 = sales target) ----
     p_sales = sub.add_parser("sales", help="Sales team-level operations", add_help=False)
     p_sales.add_argument("--help", "-h", action="store_true", dest="show_help")
@@ -2080,6 +2117,75 @@ def _handle_account(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "account_nurturing", env)
     print("Usage: beacon account "
           "[add|list|contact|phase|delete|rename|assign|nurturing] [options]")
+    return 2
+
+
+def _handle_org(root: Path, args: argparse.Namespace) -> int:
+    """`beacon org` (ms-118) — bin/beacon の org noun を Windows/pipx 経路に配線する。
+
+    org は project 横断の tenancy entity で、local backend は ~/.beacon/orgs/、cloud
+    backend は /api/orgs を経由する (= project binding 不要)。bin/beacon の org case が
+    `ensure_project` を呼ばないのと同じく、ここでも project gate はしない。各 subcommand
+    は commands.py の org_* handler へ env 経由で渡す (= bin/beacon と同じ env 契約)。
+    """
+    _USAGE = ("Usage: beacon org "
+              "[create|list|show|add-member|remove-member|rehome|delete] [options]")
+    if args.show_help or args.org_cmd is None:
+        print(_USAGE)
+        return 0 if args.show_help else 2
+    cmd = args.org_cmd
+    if cmd == "create":
+        if not args.name:
+            print('Usage: beacon org create "<名前>" [--json]')
+            return 1
+        env = {"BEACON_ORG_NAME": args.name or "",
+               "BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "org_create", env)
+    if cmd in ("list", "ls"):
+        env = {"BEACON_JSON": "1" if args.json else "",
+               "BEACON_ORG_ALL": "1" if args.all else ""}
+        return _run_commands_py(root, "org_list", env)
+    if cmd == "show":
+        if not args.org_id:
+            print("Usage: beacon org show <org-id> [--json]")
+            return 1
+        env = {"BEACON_ORG_ID": args.org_id or "",
+               "BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "org_show", env)
+    if cmd in ("add-member", "invite"):
+        if not args.org_id or not args.email:
+            print("Usage: beacon org add-member <org-id> <email> "
+                  "[--role member|admin] [--json]")
+            return 1
+        env = {"BEACON_ORG_ID": args.org_id or "",
+               "BEACON_ORG_EMAIL": args.email or "",
+               "BEACON_ORG_ROLE": args.role or "",
+               "BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "org_add_member", env)
+    if cmd == "remove-member":
+        if not args.org_id or not args.member:
+            print("Usage: beacon org remove-member <org-id> <email-or-userid> [--json]")
+            return 1
+        env = {"BEACON_ORG_ID": args.org_id or "",
+               "BEACON_ORG_MEMBER": args.member or "",
+               "BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "org_remove_member", env)
+    if cmd == "rehome":
+        if not args.project_id or not args.to_org:
+            print("Usage: beacon org rehome <project-id> --to <org-id> [--json]")
+            return 1
+        env = {"BEACON_ORG_REHOME_PROJECT": args.project_id or "",
+               "BEACON_ORG_REHOME_TARGET": args.to_org or "",
+               "BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "org_rehome", env)
+    if cmd in ("delete", "rm"):
+        if not args.org_id:
+            print("Usage: beacon org delete <org-id> [--json]")
+            return 1
+        env = {"BEACON_ORG_ID": args.org_id or "",
+               "BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "org_delete", env)
+    print(_USAGE)
     return 2
 
 
@@ -4837,6 +4943,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "meeting": _handle_meeting,
     "mtg": _handle_meeting,
     "sales": _handle_sales,
+    "org": _handle_org,  # ms-118: 組織 tenancy (bin/beacon parity)
     "phase": _handle_phase,
     "sync": _handle_sync,
     "task": _handle_task,
