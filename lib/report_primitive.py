@@ -34,6 +34,7 @@ expand/contract migration, 方針7); wiring live verbs is a later task (e-3743).
 
 from __future__ import annotations
 
+import json
 from typing import Callable, Optional
 
 
@@ -114,7 +115,10 @@ def make_report(*, kind: str, actor: str, payload: Optional[dict] = None,
         raise ValueError("report.kind must be a non-empty string")
     if not (actor or "").strip():
         raise ValueError("report.actor must be a non-empty string")
-    report = {
+    # Every optional field is present-but-empty (never absent) so the envelope
+    # has one stable shape — a consumer can read report["idempotency_key"] etc.
+    # without a KeyError/.get() split (report_key already treats "" as "derive").
+    return {
         "mode": REPORT,
         "kind": kind.strip(),
         "actor": actor.strip(),
@@ -125,10 +129,8 @@ def make_report(*, kind: str, actor: str, payload: Optional[dict] = None,
         "origin_verb": origin_verb or "",
         "session_id": session_id or "",
         "source": source or "",
+        "idempotency_key": idempotency_key or "",
     }
-    if idempotency_key:
-        report["idempotency_key"] = idempotency_key
-    return report
 
 
 def make_request(*, action: str, actor: str, subject: str = "",
@@ -206,79 +208,110 @@ def validate_request(request: dict) -> list:
 
 def report_key(report: dict) -> str:
     """The dedup key for a report: the explicit ``idempotency_key`` when set,
-    else a deterministic derivation from kind + subject + a stable payload
-    signature. Lets the server author a report exactly once even if the client
-    re-emits it (network retry / re-run), mirroring ``beacon log``'s
-    "Already logged: <hash>" dedup."""
+    else a deterministic derivation from kind + subject + a signature over the
+    WHOLE payload. Lets the server author a report exactly once even if the
+    client re-emits it (network retry / re-run), mirroring ``beacon log``'s
+    "Already logged: <hash>" dedup.
+
+    The signature is canonical JSON (``sort_keys``) of the full payload, so two
+    reports that differ only in a nested value (e.g. ``resolves: ["e-1"]`` vs
+    ``["e-2"]``) get distinct keys — an earlier scalar-only signature silently
+    collapsed those into one and dropped the second as a false duplicate. A
+    payload value that is not JSON-serialisable falls back to its ``repr`` so the
+    derivation never raises (``default=str``)."""
     if report.get("idempotency_key"):
         return str(report["idempotency_key"])
     kind = report.get("kind", "")
     subject = report.get("subject", "")
     payload = report.get("payload") or {}
-    # a stable signature over payload: sorted key=value pairs of scalar items.
-    sig = ";".join(f"{k}={payload[k]}" for k in sorted(payload)
-                   if isinstance(payload[k], (str, int, float, bool)))
+    sig = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     return f"{kind}|{subject}|{sig}"
 
 
 # --- authoring dispatch skeleton (interface only; rules land in e-3742) -----
 
-# An authoring rule is ``(data, report) -> result`` — it applies a report's facts
-# to the project ``data`` as canonical mutations and returns a result dict. The
+# An authoring rule is ``(project_data, report) -> result`` — it applies a
+# report's facts to the project data (the parsed project.json the CLI/server
+# already passes around) as canonical mutations and returns a result dict. The
 # concrete rules (commit → log entry + progress + task resolve, etc.) are NOT
 # defined here; this module only provides the registry + dispatcher so a report
 # can be routed to the right author. e-3742 registers the first real rule by
 # re-homing ``beacon log``'s internal logic behind ``kind="commit"``.
+#
+# There is deliberately NO module-level default registry: a mutable module global
+# would let an import-time ``register_authoring_rule`` change an unrelated
+# ``apply_report`` call's behaviour (remote action). Every caller owns its
+# registry (build one with ``new_authoring_registry``) and passes it explicitly.
 
 AuthoringRule = Callable[[dict, dict], dict]
 
-_DEFAULT_RULES: dict = {}
+
+def new_authoring_registry() -> dict:
+    """Return a fresh, empty authoring-rule registry (``kind`` → rule). The
+    server / a verb builds one, registers its rules into it, and threads it
+    through ``apply_report`` — there is no shared global to collide on."""
+    return {}
 
 
-def register_authoring_rule(kind: str, fn: AuthoringRule, *,
-                            rules: Optional[dict] = None) -> None:
-    """Register an authoring rule for a report ``kind``. Writes into ``rules``
-    when given (caller-owned registry, preferred for tests / server wiring),
-    else the module-level default registry."""
+def register_authoring_rule(rules: dict, kind: str, fn: AuthoringRule, *,
+                            replace: bool = False) -> None:
+    """Register an authoring rule for a report ``kind`` into the caller-owned
+    ``rules`` registry. Re-registering an existing ``kind`` raises unless
+    ``replace=True`` — a silent overwrite would swap out a live authoring rule
+    (every later report of that kind then produces a different mutation) with no
+    signal at registration time, so the overwrite must be made explicit."""
+    if not isinstance(rules, dict):
+        raise ValueError("rules must be a registry dict (see new_authoring_registry)")
     if not (kind or "").strip():
         raise ValueError("authoring rule kind must be non-empty")
     if not callable(fn):
         raise ValueError("authoring rule must be callable")
-    (rules if rules is not None else _DEFAULT_RULES)[kind.strip()] = fn
+    k = kind.strip()
+    if k in rules and not replace:
+        raise ValueError(
+            f"authoring rule for kind '{k}' is already registered "
+            f"(pass replace=True to intentionally swap it)")
+    rules[k] = fn
 
 
-def authoring_rule_for(kind: str, *, rules: Optional[dict] = None) -> Optional[AuthoringRule]:
-    """Return the authoring rule registered for ``kind`` (or None)."""
-    return (rules if rules is not None else _DEFAULT_RULES).get((kind or "").strip())
+def authoring_rule_for(rules: dict, kind: str) -> Optional[AuthoringRule]:
+    """Return the authoring rule registered for ``kind`` in ``rules`` (or None)."""
+    return rules.get((kind or "").strip())
 
 
-def apply_report(data: dict, report: dict, *, rules: Optional[dict] = None,
-                 seen: Optional[dict] = None) -> dict:
+def apply_report(project_data: dict, report: dict, *, rules: dict,
+                 seen: dict) -> dict:
     """Route a report to its authoring rule — the server-side entry the client's
     ``report`` primitive lands on. Returns a result dict with a ``status``:
 
     - ``"invalid"``   — report failed schema validation (``problems`` listed);
     - ``"duplicate"`` — a report with the same ``report_key`` was already
       authored (recorded in ``seen``); no rule is run (idempotent replay);
-    - ``"no_rule"``   — no authoring rule registered for ``kind`` (the default
-      until e-3742 registers rules); the report is well-formed but unhandled;
+    - ``"no_rule"``   — no authoring rule registered for ``kind`` in ``rules``
+      (until e-3742 registers rules); the report is well-formed but unhandled;
     - ``"authored"``  — the rule ran; its return is under ``result``.
 
-    Pure dispatch: it validates, dedups via ``seen`` (a caller-owned key→key
-    ledger), and delegates the actual mutation to the rule. It never does I/O.
-    ``rules`` / ``seen`` are injectable so a verb or the server owns its own
-    registry and dedup ledger; unset ``rules`` falls back to the module default.
+    ``rules`` and ``seen`` are BOTH required (no defaults): the exactly-once
+    guarantee this module advertises is real only when a caller-owned dedup
+    ledger is threaded through, so the dedup path cannot be silently skipped.
+    ``seen`` is a dict (key → key), validated up front — passing a set would only
+    fail on the post-mutation write, leaving a mutation applied but unrecorded
+    (a retry would then double-author). Pure dispatch: validate → dedup → delegate
+    the mutation to the rule; never does I/O.
     """
+    if not isinstance(seen, dict):
+        raise ValueError(
+            "seen must be a dict (key→key dedup ledger); a set fails only after "
+            "the mutation is applied. Build one with an empty {}.")
     problems = validate_report(report)
     if problems:
         return {"status": "invalid", "problems": problems}
     key = report_key(report)
-    if seen is not None and key in seen:
+    if key in seen:
         return {"status": "duplicate", "report_key": key}
-    rule = authoring_rule_for(report.get("kind", ""), rules=rules)
+    rule = authoring_rule_for(rules, report.get("kind", ""))
     if rule is None:
         return {"status": "no_rule", "kind": report.get("kind", ""), "report_key": key}
-    result = rule(data, report)
-    if seen is not None:
-        seen[key] = key
+    result = rule(project_data, report)
+    seen[key] = key
     return {"status": "authored", "report_key": key, "result": result}

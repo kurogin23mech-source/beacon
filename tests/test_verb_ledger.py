@@ -9,6 +9,8 @@ import importlib.util
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import verb_ledger as vl  # noqa: E402
@@ -45,12 +47,12 @@ def test_surface_matches_check_map_drift():
 def test_every_entry_wellformed():
     for verb, entry in vl.VERB_LEDGER.items():
         assert entry.get("cls") in VALID_CLASSES, f"{verb}: bad cls {entry.get('cls')}"
-        fused = entry.get("fused")
-        assert isinstance(fused, list), f"{verb}: fused must be a list"
-        for f in fused:
-            assert f in VALID_CLASSES, f"{verb}: bad fused class {f}"
-        # a verb should not list its own primary class as a fusion seam
-        assert entry["cls"] not in fused, f"{verb}: primary class duplicated in fused"
+        secondary = entry.get("secondary")
+        assert isinstance(secondary, list), f"{verb}: secondary must be a list"
+        for s in secondary:
+            assert s in VALID_CLASSES, f"{verb}: bad secondary class {s}"
+        # a verb should not list its own primary class as a secondary system
+        assert entry["cls"] not in secondary, f"{verb}: primary class duplicated in secondary"
         assert isinstance(entry.get("note", ""), str)
 
 
@@ -59,23 +61,52 @@ def test_classify_hit_and_miss():
     assert vl.classify("no_such_verb") is None
 
 
+def test_classify_returns_defensive_copy():
+    """Mutating a classify() result must not pollute the VERB_LEDGER constant."""
+    entry = vl.classify("task_done")
+    entry["cls"] = "TAMPERED"
+    entry["secondary"].append("X")
+    fresh = vl.classify("task_done")
+    assert fresh["cls"] == "R" and "X" not in fresh["secondary"]
+
+
 def test_log_is_the_report_prototype():
-    """`beacon log` is the SPEC's R系統 雛形: report(R) fused with server author(B)."""
+    """`beacon log` is the SPEC's R系統 雛形: report(R) with server author(B) as secondary."""
     entry = vl.classify("log")
-    assert entry["cls"] == "R" and "B" in entry["fused"]
+    assert entry["cls"] == "R" and "B" in entry["secondary"]
 
 
-# --- seams / summary -------------------------------------------------------
+# --- seams / class membership / summary ------------------------------------
 
-def test_fusion_seams_are_only_fused_verbs():
+def test_fusion_seams_are_only_seam_verbs():
     seams = vl.fusion_seams()
-    assert seams, "there should be fused verbs (the decomposition work queue)"
+    assert seams, "there should be seam verbs (the decomposition work queue)"
     for s in seams:
-        assert s["fused"], f"{s['verb']} listed as a seam but has no fused classes"
-    # the canonical fused examples from the memo table are present
+        assert s["secondary"], f"{s['verb']} listed as a seam but has no secondary classes"
+    # the canonical seam examples from the memo table are present
     verbs = {s["verb"] for s in seams}
     for expected in ("log", "task_done", "milestone_start", "pr_merge"):
         assert expected in verbs
+
+
+def test_verbs_in_class_is_primary_only_and_validated():
+    r_primary = vl.verbs_in_class("R")
+    # pr_merge is primary C (secondary R) — NOT returned by verbs_in_class("R")
+    assert "pr_merge" not in r_primary
+    assert "task_add" in r_primary
+    with pytest.raises(ValueError):
+        vl.verbs_in_class("r")  # lowercase / invalid class must raise, not return []
+
+
+def test_verbs_involving_includes_secondary():
+    """verbs_involving(cls) catches fused verbs that touch cls in the secondary
+    slot, so folding 'all R verbs' into the report primitive misses nothing."""
+    r_involved = vl.verbs_involving("R")
+    assert "pr_merge" in r_involved          # primary C, secondary R
+    assert "task_add" in r_involved          # primary R
+    assert set(vl.verbs_in_class("R")).issubset(set(r_involved))
+    with pytest.raises(ValueError):
+        vl.verbs_involving("bogus")
 
 
 def test_verbs_in_class_partition():

@@ -25,9 +25,18 @@ def test_make_report_defaults_and_mode():
     assert r["kind"] == "commit"
     assert r["actor"] == "alice"
     assert r["payload"] == {"hash": "abc123", "message": "feat: x"}
-    # optional fields default to empty, not missing (stable shape for the server)
-    for k in ("subject", "evidence", "occurred_at", "origin_verb", "session_id", "source"):
+    # every optional field defaults to empty, not missing (one stable shape) —
+    # including idempotency_key (report_key treats "" as "derive")
+    for k in ("subject", "evidence", "occurred_at", "origin_verb", "session_id",
+              "source", "idempotency_key"):
         assert k in r
+
+
+def test_make_report_envelope_shape_matches_schema():
+    """The constructor's output keys equal the schema fields (+ mode) so the two
+    can't drift: adding a schema field without wiring the constructor is caught."""
+    r = rp.make_report(kind="commit", actor="a", payload={"hash": "x"})
+    assert set(r) == set(rp.REPORT_SCHEMA) | {"mode"}
 
 
 def test_make_report_requires_kind_and_actor():
@@ -123,34 +132,63 @@ def test_report_key_differs_on_different_facts():
     assert rp.report_key(r1) != rp.report_key(r2)
 
 
+def test_report_key_distinguishes_nested_payload():
+    """A scalar-only signature silently collapsed reports that differ only in a
+    nested value; canonical-JSON signing keeps them distinct."""
+    r1 = rp.make_report(kind="commit", actor="a", payload={"resolves": ["e-1"]})
+    r2 = rp.make_report(kind="commit", actor="a", payload={"resolves": ["e-2"]})
+    assert rp.report_key(r1) != rp.report_key(r2)
+
+
 # --- authoring dispatch skeleton -------------------------------------------
 
+def test_new_authoring_registry_is_empty():
+    assert rp.new_authoring_registry() == {}
+
+
 def test_apply_report_no_rule():
-    rules = {}
+    rules = rp.new_authoring_registry()
     r = rp.make_report(kind="commit", actor="a", payload={"hash": "x"})
-    out = rp.apply_report({}, r, rules=rules)
+    out = rp.apply_report({}, r, rules=rules, seen={})
     assert out["status"] == "no_rule"
 
 
 def test_apply_report_invalid():
-    out = rp.apply_report({}, {"kind": "commit"}, rules={})
+    out = rp.apply_report({}, {"kind": "commit"}, rules={}, seen={})
     assert out["status"] == "invalid"
     assert out["problems"]
 
 
-def test_register_and_authoring_rule_for_isolated_registry():
-    rules = {}
-    rp.register_authoring_rule("commit", lambda d, r: {"ok": True}, rules=rules)
-    assert rp.authoring_rule_for("commit", rules=rules) is not None
-    # a different (default) registry is unaffected
-    assert rp.authoring_rule_for("commit", rules={}) is None
+def test_apply_report_requires_seen_dict():
+    """`seen` must be a dict, validated BEFORE any rule runs — a set would only
+    fail on the post-mutation write, leaving a mutation applied but unrecorded."""
+    rules = rp.new_authoring_registry()
+    rp.register_authoring_rule(rules, "commit", lambda d, r: {"ok": True})
+    r = rp.make_report(kind="commit", actor="a", payload={"hash": "x"})
+    with pytest.raises(ValueError):
+        rp.apply_report({}, r, rules=rules, seen=set())  # a set, not a dict
 
 
-def test_register_rule_validation():
+def test_register_rule_isolated_and_validated():
+    rules = rp.new_authoring_registry()
+    rp.register_authoring_rule(rules, "commit", lambda d, r: {"ok": True})
+    assert rp.authoring_rule_for(rules, "commit") is not None
+    assert rp.authoring_rule_for({}, "commit") is None  # a different registry
     with pytest.raises(ValueError):
-        rp.register_authoring_rule("", lambda d, r: {}, rules={})
+        rp.register_authoring_rule(rules, "", lambda d, r: {})
     with pytest.raises(ValueError):
-        rp.register_authoring_rule("commit", "not-callable", rules={})
+        rp.register_authoring_rule(rules, "commit2", "not-callable")
+
+
+def test_register_rule_no_silent_overwrite():
+    """Re-registering a kind raises unless replace=True — a silent swap of a live
+    authoring rule would change every later report's mutation with no signal."""
+    rules = rp.new_authoring_registry()
+    rp.register_authoring_rule(rules, "commit", lambda d, r: {"v": 1})
+    with pytest.raises(ValueError):
+        rp.register_authoring_rule(rules, "commit", lambda d, r: {"v": 2})
+    rp.register_authoring_rule(rules, "commit", lambda d, r: {"v": 2}, replace=True)
+    assert rp.authoring_rule_for(rules, "commit")({}, {}) == {"v": 2}
 
 
 def test_apply_report_authored_and_idempotent():
@@ -158,14 +196,14 @@ def test_apply_report_authored_and_idempotent():
     canonical mutation an existing write verb would, and re-applying the same
     report authors it exactly once (mirrors `beacon log`'s 'Already logged')."""
     # a stand-in authoring rule that mimics `beacon log`: append a ledger entry.
-    def author_commit(data, report):
+    def author_commit(project_data, report):
         entry = {"hash": report["payload"]["hash"], "actor": report["actor"]}
-        data.setdefault("log", []).append(entry)
+        project_data.setdefault("log", []).append(entry)
         return entry
 
-    rules = {}
+    rules = rp.new_authoring_registry()
     seen = {}
-    rp.register_authoring_rule("commit", author_commit, rules=rules)
+    rp.register_authoring_rule(rules, "commit", author_commit)
     data = {}
     r = rp.make_report(kind="commit", actor="alice", subject="ms-1",
                        payload={"hash": "abc"}, idempotency_key="commit-abc")
