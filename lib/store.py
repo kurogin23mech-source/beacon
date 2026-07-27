@@ -193,6 +193,44 @@ class Store(Protocol):
         """
         ...
 
+    # ------------------------------------------------------------------
+    # Organizations (ms-118 / e-4231) — top-level tenancy entity.
+    # trek と同型: org は project.json の外に住む cross-project entity なので、
+    # local backend は ~/.beacon/orgs/ の file、cloud backend は /api/orgs を
+    # 経由する。CLI から backend 分岐を消すため Store に集約する。
+    # ------------------------------------------------------------------
+
+    def create_org(self, *, name: str, creator_user_id: str = "",
+                   creator_email: str = "") -> dict:
+        """team org (= 明示的に立てる組織) を作り、作成者を owner にする。
+
+        ``creator_user_id`` / ``creator_email`` は **local backend のみ**が使う
+        (= ローカルには auth token が無いので呼び出し側の identity を渡す)。cloud
+        backend はこれを無視し、作成者を server が Bearer token から解決する (=
+        client が owner を詐称できない)。戻り値は作られた org doc。
+        """
+        ...
+
+    def list_orgs(self, *, user_id: str | None = None) -> list[dict]:
+        """caller が member の org を一覧する。
+
+        ``user_id`` は **local backend のみ**の可視性 filter (= cloud は server が
+        token から解決)。``None`` は local では全件 (= admin view)。cloud transport /
+        403 は RuntimeError として伝播する (= 既存 cloud path と一致)。
+        """
+        ...
+
+    def get_org(self, org_id: str) -> dict:
+        """org を id で 1 件取る。
+
+        member でない / 存在しない org は ``ValueError`` (= LocalStore: ファイル
+        不在、StoreApi: API 404) にして、CLI が backend 非依存に ``org 'X' not
+        found`` を出せるようにする。member-only の 404 は「存在を漏らさない」
+        設計 (= trailnode get_org と同じ)。その他の transport / auth error は
+        ``RuntimeError`` として伝播する。
+        """
+        ...
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。

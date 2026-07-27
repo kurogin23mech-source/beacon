@@ -4462,6 +4462,64 @@ def get_trek_endpoint(trek_id: str, user: dict = Depends(require_auth)):
     return _load_trek_for_read(trek_id, user)
 
 
+# ---------------------------------------------------------------------------
+# Organizations (ms-118 / e-4231) — top-level tenancy entity.
+#
+# ms-113 が org データモデル / store (db.get_org / save_org / list_orgs_for_user)
+# と participation-only の開示エンジンを入れた。ここはその store に client から
+# 到達する REST の口 (= trek の /api/treks と同型)。owner 判定・membership は
+# lib/org.py が持つので再実装しない。org 招待 / project 付け替え / owner ガード /
+# 最小 UI は後続タスク (e-4232〜e-4237)。
+# ---------------------------------------------------------------------------
+class OrgCreate(BaseModel):
+    name: str
+
+
+@app.post("/api/orgs")
+def create_org_endpoint(body: OrgCreate, user: dict = Depends(require_auth)):
+    """Create a team org. Caller becomes owner.
+
+    作成者 identity は auth token から解決する (= client が owner を詐称できない、
+    trek の create と同型)。org 所属はアクセスを与えない — participation-only なので
+    社員は別途 project に参加させて初めてその project が見える (SPEC 方針2)。
+    """
+    import datetime
+    if not body.name or not body.name.strip():
+        raise HTTPException(status_code=400, detail="org name is required")
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    doc = org_mod.new_org(
+        body.name,
+        creator_user_id=user.get("sub", ""),
+        creator_email=user.get("email", ""),
+        now=now,
+    )
+    db.save_org(doc["org_id"], doc)
+    return doc
+
+
+@app.get("/api/orgs")
+def list_orgs_endpoint(user: dict = Depends(require_auth)):
+    """List orgs the caller is a member of.
+
+    可視性は org membership で絞る (= 自分が所属する org だけ)。org を跨いだ
+    相互可視は participation-only の外なので、ここでは出さない。
+    """
+    user_filter = user.get("sub") if _auth_enabled else None
+    return db.list_orgs_for_user(user_filter)
+
+
+@app.get("/api/orgs/{org_id}")
+def get_org_endpoint(org_id: str, user: dict = Depends(require_auth)):
+    """Get a single org by id. Member only — 非 member は 404 で存在を漏らさない。"""
+    doc = db.get_org(org_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="org not found")
+    if _auth_enabled and not org_mod.is_org_member(doc, user.get("sub", "")):
+        # 存在を漏らさない (= trailnode get_org / 高リスク endpoint と同方針)
+        raise HTTPException(status_code=404, detail="org not found")
+    return doc
+
+
 @app.patch("/api/treks/{trek_id}")
 def update_trek_endpoint(trek_id: str, body: TrekUpdate, request: Request,
                          user: dict = Depends(require_auth)):

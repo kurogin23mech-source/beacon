@@ -215,6 +215,45 @@ class LocalStore:
             raise ValueError(f"trek '{trek_id}' not found")
         return doc
 
+    # ms-118 / e-4231 — Organizations (local file store, ~/.beacon/orgs/)
+
+    def create_org(self, *, name: str, creator_user_id: str = "",
+                   creator_email: str = "") -> dict:
+        """Build a team org doc and persist it to the local org_store."""
+        import datetime
+        import org as org_mod
+        import org_store
+        if not creator_user_id:
+            raise ValueError(
+                "creator_user_id is required to create an org in local mode "
+                "(= no auth token to resolve the owner from)")
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        doc = org_mod.new_org(
+            name,
+            creator_user_id=creator_user_id,
+            creator_email=creator_email,
+            now=now,
+        )
+        org_store.save_org(doc)
+        return doc
+
+    def list_orgs(self, *, user_id: str | None = None) -> list[dict]:
+        """List org docs from the local org_store directory."""
+        import org_store
+        return org_store.list_orgs(user_id=user_id)
+
+    def get_org(self, org_id: str) -> dict:
+        """Load an org doc from the local org_store directory.
+
+        Raises ``ValueError`` when unknown so the CLI shows a uniform
+        ``org '<id>' not found`` message regardless of backend.
+        """
+        import org_store
+        doc = org_store.load_org(org_id)
+        if doc is None:
+            raise ValueError(f"org '{org_id}' not found")
+        return doc
+
     def start_watching(self) -> None:
         pass
 

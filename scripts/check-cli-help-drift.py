@@ -207,6 +207,10 @@ ALLOW_BASH_ONLY_DISPATCH: set[str] = {
                    # bundle for an independent judge. bash-only for now;
                    # dispatch.py Windows parity = follow-up, same precedent as
                    # target — a dev/ops review verb, not on the hot Windows path.
+    "org",         # ms-118 e-4231: `org create/list/show` — team org (tenancy)
+                   # foundation. bash-only for now; dispatch.py Windows parity =
+                   # follow-up (e-4242), same precedent as target/review — a
+                   # back-office tenancy verb, not on the hot Windows path.
     # ms-73 e-1762/e-1763/e-1764 cleared the ms-55 coordination-signal
     # exempts (stop / resume / rollback / claim / stuck / morning) once
     # commit 3b5b64a (e-1735) landed their Python parity. Their entries

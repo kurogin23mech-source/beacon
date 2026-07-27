@@ -435,6 +435,42 @@ class StoreApi:
                 raise ValueError(f"trek '{trek_id}' not found") from e
             raise
 
+    # ms-118 / e-4231 — Organizations (cloud API, /api/orgs)
+
+    def create_org(self, *, name: str, creator_user_id: str = "",
+                   creator_email: str = "") -> dict:
+        """Create a team org via the cloud API.
+
+        ``creator_user_id`` / ``creator_email`` are ignored on cloud (= the
+        server resolves the owner from the auth token so the client can't
+        spoof it); they exist for LocalStore parity。Auth / transport errors
+        propagate as RuntimeError.
+        """
+        return self._client.create_org(name=name)
+
+    def list_orgs(self, *, user_id: str | None = None) -> list[dict]:
+        """List orgs via the cloud API.
+
+        ``user_id`` is ignored on cloud (= server filters by the auth token's
+        user). 403 / transport errors propagate as RuntimeError, matching the
+        legacy cloud branch behavior.
+        """
+        return self._client.list_orgs()
+
+    def get_org(self, org_id: str) -> dict:
+        """Match LocalStore.get_org shape, sourced from the cloud API.
+
+        Maps HTTP 404 → ``ValueError`` (= member でない / 存在しない org は
+        存在を漏らさず not found)。Auth / transport errors propagate as
+        RuntimeError.
+        """
+        try:
+            return self._client.get_org(org_id)
+        except RuntimeError as e:
+            if "404" in str(e):
+                raise ValueError(f"org '{org_id}' not found") from e
+            raise
+
     def list_documents(self) -> list:
         """List documents from cloud API."""
         try:
