@@ -278,3 +278,8 @@ def master_external_ref(record: dict) -> dict:
 def master_contact_parent_id(record: dict) -> str:
     """マスター Contact の親会社 (master_account_id) を返す。"""
     return str((record or {}).get(MASTER_ACCOUNT_ID_FIELD) or "")
+
+
+def master_contact_org_id(record: dict) -> str:
+    """マスター Contact の束縛 org_id を返す (無ければ空文字、親 Account と同じ軸)。"""
+    return str((record or {}).get(ORG_ID_FIELD) or "")

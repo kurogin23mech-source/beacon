@@ -108,7 +108,10 @@ def test_project_account_to_master_is_pure():
 # 読み出しのマスター一本化: link 済は master、未 link/adapter 無しは投影 fallback
 # ---------------------------------------------------------------------------
 def test_resolve_account_identity_reads_master_when_linked(adapter):
-    acc = {"id": "acc-1", "name": "旧名 (投影)", "label": "旧名 (投影)", "phase": "リード"}
+    # ms-111 e-3622: master を採用する条件に org 一致が加わったので、投影 Account は
+    # 自身の所有 org (owner_org_id) を ORG で宣言する (= same-org、fail-closed の対)。
+    acc = {"id": "acc-1", "name": "旧名 (投影)", "label": "旧名 (投影)", "phase": "リード",
+           "owner_org_id": ORG}
     mp.link_new_account_to_master(acc, adapter, org_id=ORG, now=NOW)
     # master 側の name を後から変える (= master が真値源)
     mid = mp.linked_master_account_id(acc)

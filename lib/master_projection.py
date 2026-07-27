@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+import disclosure  # ms-111 e-3622: 投影 Account の所有 org (owner_org_id) を読む
 import master_identity as mi
 import work_model
 
@@ -125,6 +126,27 @@ def project_contact_to_master(contact: dict, *, org_id: str, master_account_id: 
     )
 
 
+def projection_account_org(account: dict) -> str:
+    """投影 Account の所有 org (owner_org_id) を返す (無ければ空文字、e-3622).
+
+    束縛軸の照合基準。master link の org はこの org と一致していなければならない
+    (= same-org)。空 (= 所有 org 未定) の投影が master に link 済なのは異常なので、
+    照合側は「照合できない = 信用しない」 (fail-closed) 扱いにする。
+    """
+    return str((account or {}).get(disclosure.OWNER_ORG_FIELD) or "")
+
+
+def _org_matches(master_org: str, expected_org: str) -> bool:
+    """master record の org と投影側 org が **両方非空で一致** するか (e-3622 fail-closed).
+
+    どちらかが空、または不一致なら False → 呼び出し側は master を信用せず投影 fallback。
+    「org-A の投影が org-B の master を指す」 poisoning を read 時に無効化する
+    (link は org 必須生成で same-org by construction だが、参照鍵の取り違え / 将来の
+    外部 adapter 混線に対する second line として read 側でも fail-closed に閉じる)。
+    """
+    return bool(master_org) and bool(expected_org) and master_org == expected_org
+
+
 # ---------------------------------------------------------------------------
 # 読み出しのマスター一本化 (= e-3621 part2 後半の核): master 経由で identity を読む
 #   投影が master に link 済なら「誰が誰か」は master が真値なので master から読む。
@@ -132,32 +154,38 @@ def project_contact_to_master(contact: dict, *, org_id: str, master_account_id: 
 #   (work_model.target_label と同じ寛容な読み。local mode や移行途中でも壊れない)。
 #   これにより「account.name の read が master 経由になる」 (SPEC「投影は identity 実体を
 #   持たない」に向けた読み替え) を、既存データを壊さず段階導入する。
+#   ms-111 e-3622: master を採用する条件に **org 一致** を足す (fail-closed)。org-A の
+#   投影が org-B の master を指していたら master を無視して投影へ落とす (cross-org leak 防止)。
 # ---------------------------------------------------------------------------
 def resolve_account_identity(account: dict, adapter=None) -> str:
-    """投影 Account の canonical name を master 経由で解決する (未 link は投影へ fallback)。
+    """投影 Account の canonical name を master 経由で解決する (未 link / org 不一致は投影へ fallback)。
 
     - `adapter` : MasterIdentityAdapter (lib/master_store)。None なら常に fallback。
-    master が真値源 (SPEC §7) なので、link 済なら投影側の name/label でなく master の
-    name を返す。これが「投影が identity 実体を持たない」読み出しの入口。
+    master が真値源 (SPEC §7) なので、link 済 **かつ master の org が投影の所有 org と
+    一致** する時だけ master の name を返す。org 不一致 (= cross-org poisoning の疑い) は
+    master を採らず投影 fallback する (e-3622、fail-closed)。
     """
     if adapter is not None and is_account_linked(account):
         rec = adapter.get_account(linked_master_account_id(account))
-        if rec:
+        if rec and _org_matches(mi.master_account_org_id(rec),
+                                projection_account_org(account)):
             return mi.master_account_name(rec)
     # fallback: 投影自身の tolerant read (label → title → name)
     return work_model.target_label(account or {})
 
 
-def resolve_contact_identity(contact: dict, adapter=None) -> dict:
+def resolve_contact_identity(contact: dict, adapter=None, *, expected_org: str = "") -> dict:
     """投影 Contact の identity (name/email/phone/role) を master 経由で解決する。
 
-    link 済 + adapter あれば master の値、無ければ投影自身の値。返り値は表示用の
-    正規化 dict (欠損キーは空文字)。
+    link 済 + adapter + **master の org が expected_org と一致** の時だけ master の値、
+    それ以外は投影自身の値。Contact は自身に org を持たない (親 Account の束縛軸を継ぐ)
+    ので、呼び出し側が親 Account の所有 org を ``expected_org`` で渡す。空 (= 照合材料
+    なし) や不一致は fail-closed で投影 fallback (e-3622)。返り値は表示用の正規化 dict。
     """
     ref = contact_master_ref(contact)
     if adapter is not None and ref:
         rec = adapter.get_contact(ref[_CONTACT_ID_KEY])
-        if rec:
+        if rec and _org_matches(mi.master_contact_org_id(rec), expected_org):
             return {k: str(rec.get(k) or "") for k in ("name", "email", "phone", "role")}
     c = contact or {}
     return {k: str(c.get(k) or "") for k in ("name", "email", "phone", "role")}
@@ -181,9 +209,12 @@ def account_read_view(account: dict, adapter=None, extra: Optional[dict] = None)
     の出所ルールは 1 つ)。部分 swap で stale (投影) と master が混ざるバグを、resolver
     への一本化で塞ぐ。
     """
+    # contact は自身に org を持たないので、親 Account の所有 org を org 照合基準に渡す
+    # (e-3622 fail-closed: cross-org の master contact を read で採らない)。
+    account_org = projection_account_org(account)
     name = resolve_account_identity(account, adapter)
     contacts = [
-        {**c, **resolve_contact_identity(c, adapter)}
+        {**c, **resolve_contact_identity(c, adapter, expected_org=account_org)}
         for c in ((account or {}).get("contacts") or [])
     ]
     # extra を先に、identity を後に merge → resolver 値が extra に勝つ (上書き不可)。
@@ -202,7 +233,18 @@ def link_new_account_to_master(account: dict, adapter, *, org_id: str, now: str,
 
     戻り値は保存された master record。既に link 済なら二重起票せず既存を返す
     (= 冪等、重複 master を作らない)。
+
+    ms-111 e-3622 (leader caveat 1 = same-org linking): 投影 Account が所有 org を
+    宣言しているなら、link 先 org はそれと一致しなければならない。不一致は「org-A の
+    account を org-B の master に link する」cross-org poisoning の入口なので構造で拒否
+    する (= read 側 fail-closed の対になる write 側ガード)。所有 org 未宣言の account は
+    照合材料が無いので拒否せず org_id をそのまま採る (read 側が fail-closed で守る)。
     """
+    owner_org = projection_account_org(account)
+    if owner_org and org_id and owner_org != org_id:
+        raise ValueError(
+            f"same-org linking violation: account owner_org={owner_org!r} != "
+            f"link org_id={org_id!r} (ms-111 e-3622)")
     existing = account_master_ref(account)
     if existing:
         rec = adapter.get_account(existing[_ACCOUNT_ID_KEY])
