@@ -2167,6 +2167,34 @@ def delete_org(org_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Master identity store (ms-111 / e-3620) — 汎用プリミティブ。
+# entity (master_accounts / master_contacts) をそれぞれ top-level collection に
+# 対応させ (env で -dev 接尾)、record を pk (= canonical id) の doc に丸ごと保存する。
+# 問い合わせ・書き込み意味論は lib/master_store.BeaconDefaultAdapter が持つので、
+# ここは raw get/put/scan のみ。record は id を内包するので doc.id 再構成は不要。
+# ---------------------------------------------------------------------------
+
+def _master_collection(entity: str) -> str:
+    return entity if _ENV == "prod" else f"{entity}-dev"
+
+
+def master_get(entity: str, pk: str) -> dict | None:
+    doc = get_db().collection(_master_collection(entity)).document(pk).get()
+    if not doc.exists:
+        return None
+    return dict(doc.to_dict() or {})
+
+
+def master_put(entity: str, pk: str, data: dict) -> None:
+    get_db().collection(_master_collection(entity)).document(pk).set(dict(data))
+
+
+def master_scan(entity: str) -> list[dict]:
+    return [dict(d.to_dict() or {})
+            for d in get_db().collection(_master_collection(entity)).stream()]
+
+
+# ---------------------------------------------------------------------------
 # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
 # Subcollection: treks/{trek_id}/logs/{log_id}
 # Retention: indefinite (MVP).

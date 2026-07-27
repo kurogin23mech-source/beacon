@@ -51,6 +51,13 @@ ENTITIES = [
     # 起動時 create_mysql_tables が CREATE TABLE IF NOT EXISTS で作る (schema が
     # DDL を追い越さない = 無停止 retrofit)。
     "organizations",
+    # ms-111 / e-3620: 共有マスター identity の top-level entity。
+    # master_accounts pk=master_account_id / master_contacts pk=master_contact_id、
+    # どちらも sk=''。project 配下ではない (= org 単位で cross-project 共有される
+    # 真値源) ので _SUBCOLLECTION_SK_NAMES には載せず delete_project cascade の
+    # 対象外にする (organizations と同じ扱い)。起動時 create_mysql_tables が作る。
+    "master_accounts",
+    "master_contacts",
     # projects/{pid}/* subcollections
     "retros",
     "documents",
@@ -2106,6 +2113,26 @@ def delete_org(org_id: str) -> bool:
         return False
     _delete("organizations", org_id)
     return True
+
+
+# ---------------------------------------------------------------------------
+# Master identity store (ms-111 / e-3620) — 汎用プリミティブ。
+# 問い合わせロジック (org 束縛での絞り込み・external_ref 逆引き・master 権威の
+# 書き込み) は lib/master_store.BeaconDefaultAdapter が持つので、backend は
+# entity 単位の raw get/put/scan だけを提供する (= 3 backend で重複させない)。
+# pk = master record の canonical id、sk='' の top-level entity。
+# ---------------------------------------------------------------------------
+
+def master_get(entity: str, pk: str) -> dict | None:
+    return _get(entity, pk)
+
+
+def master_put(entity: str, pk: str, data: dict) -> None:
+    _put(entity, pk, data)
+
+
+def master_scan(entity: str) -> list[dict]:
+    return _scan(entity)
 
 
 # ---------------------------------------------------------------------------

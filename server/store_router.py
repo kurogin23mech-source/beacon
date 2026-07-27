@@ -102,6 +102,10 @@ if _BACKEND == "dynamodb":
         save_org,
         list_orgs_for_user,
         delete_org,
+        # Master identity store (ms-111 / e-3620) — 汎用 get/put/scan プリミティブ
+        master_get,
+        master_put,
+        master_scan,
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
         append_trek_log,
         list_trek_logs,
@@ -209,6 +213,10 @@ elif _BACKEND == "mysql":
         save_org,
         list_orgs_for_user,
         delete_org,
+        # Master identity store (ms-111 / e-3620) — 汎用 get/put/scan プリミティブ
+        master_get,
+        master_put,
+        master_scan,
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
         append_trek_log,
         list_trek_logs,
@@ -319,6 +327,10 @@ elif _BACKEND == "firestore":
         save_org,
         list_orgs_for_user,
         delete_org,
+        # Master identity store (ms-111 / e-3620) — 汎用 get/put/scan プリミティブ
+        master_get,
+        master_put,
+        master_scan,
         # Trek structured logs (ms-97 Phase 7-C, AC26 / AC27, e-2603)
         append_trek_log,
         list_trek_logs,

@@ -91,6 +91,9 @@ TABLES = {
     "users": f"{TABLE_PREFIX}-users",
     "treks": f"{TABLE_PREFIX}-treks",  # ms-69 / e-1652 (PK=trek_id)
     "organizations": f"{TABLE_PREFIX}-organizations",  # ms-113 / e-3731 (PK=org_id)
+    # ms-111 / e-3620: 共有マスター identity (top-level, org 単位で cross-project 共有)
+    "master_accounts": f"{TABLE_PREFIX}-master_accounts",   # PK=master_account_id
+    "master_contacts": f"{TABLE_PREFIX}-master_contacts",   # PK=master_contact_id
     # projects/{pid}/* subcollections
     "retros": f"{TABLE_PREFIX}-retros",
     "documents": f"{TABLE_PREFIX}-documents",
@@ -128,6 +131,9 @@ TABLE_KEY_SCHEMA: dict[str, tuple[str, str | None]] = {
     "projects": ("project_id", None),
     "users": ("user_id", None),
     "treks": ("trek_id", None),
+    # ms-111 / e-3620: 共有マスター identity (PK = record 自身の canonical id)
+    "master_accounts": ("master_account_id", None),
+    "master_contacts": ("master_contact_id", None),
     # users/{uid}/* subcollections
     "machines": ("user_id", "fingerprint_id"),
     # projects/{pid}/active_claims (_SUBCOLLECTION_SK_NAMES には載らないが
@@ -1682,6 +1688,35 @@ def delete_org(org_id: str) -> bool:
         return False
     _table("organizations").delete_item(Key={"org_id": org_id})
     return True
+
+
+# ---------------------------------------------------------------------------
+# Master identity store (ms-111 / e-3620) — 汎用プリミティブ。
+# 問い合わせ・書き込み意味論は lib/master_store.BeaconDefaultAdapter が持つので、
+# ここは raw get/put/scan のみ。PK 属性名は entity ごとに record の canonical id
+# (master_account_id / master_contact_id) を使う (= 余計な "pk" field を record に
+# 混ぜず、再 put 時の identity-only 検証を壊さない)。
+# ---------------------------------------------------------------------------
+
+_MASTER_KEY_ATTR = {
+    "master_accounts": "master_account_id",
+    "master_contacts": "master_contact_id",
+}
+
+
+def master_get(entity: str, pk: str) -> dict | None:
+    key_attr = _MASTER_KEY_ATTR[entity]
+    resp = _table(entity).get_item(Key={key_attr: pk})
+    return resp.get("Item")
+
+
+def master_put(entity: str, pk: str, data: dict) -> None:
+    key_attr = _MASTER_KEY_ATTR[entity]
+    _table(entity).put_item(Item={**data, key_attr: pk})
+
+
+def master_scan(entity: str) -> list[dict]:
+    return _scan_all(_table(entity))
 
 
 # ---------------------------------------------------------------------------
