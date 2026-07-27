@@ -62,16 +62,35 @@ class TestMilestoneAddPriorityForcing:
             core.milestone_add(data, "M", priority="bogus")
 
     def test_human_cannot_type_untriaged_literal(self):
-        # A human typing "untriaged" is not choosing a severity — treated as
-        # the same forcing-function failure.
+        # AX#3: a human typing "untriaged" is naming the sentinel, not choosing a
+        # severity — the error says exactly that (not the misleading
+        # "Priority is required", which reads as "you passed nothing").
         data = make_project()
-        with pytest.raises(ValueError, match="Priority is required"):
+        with pytest.raises(ValueError, match="sentinel, not a severity"):
             core.milestone_add(data, "M", priority="untriaged")
 
     def test_machine_may_pass_untriaged_literal(self):
         data = make_project()
         core.milestone_add(data, "M", priority="untriaged", allow_untriaged=True)
         assert data["milestones"][0]["priority"] == core.UNTRIAGED_PRIORITY
+
+    def test_untriaged_and_explicit_priority_are_mutually_exclusive(self):
+        # AX#2: passing both --untriaged (allow_untriaged) and an explicit
+        # severity is contradictory — reject loudly instead of silently letting
+        # the severity win and dropping the untriaged intent.
+        data = make_project()
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            core.milestone_add(data, "M", priority="high", allow_untriaged=True)
+        assert data["milestones"] == []
+
+    def test_required_message_lists_severities_in_scale_order(self):
+        # AX#6: the enum is listed in severity-scale order (highest…lowest), NOT
+        # alphabetical (sorted()), so the name alone carries the ordered axis.
+        try:
+            core.milestone_add(make_project(), "M")
+        except ValueError as e:
+            msg = str(e)
+        assert "highest, high, medium, low, lowest" in msg
 
 
 # ---------------------------------------------------------------------------

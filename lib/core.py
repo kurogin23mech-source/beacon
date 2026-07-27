@@ -94,12 +94,35 @@ UNTRIAGED_PRIORITY = "untriaged"
 # is never presented as a choosable severity in help / errors).
 _STORABLE_PRIORITIES = _ACCEPTED_PRIORITIES | {UNTRIAGED_PRIORITY}
 
+# ms-126 (AX#6): the canonical *scale* order for listing the 5 severities. Every
+# surface (error / prompt / trigger / help) lists them in this order so the name
+# alone carries "this is an ordered severity axis". Never list via ``sorted()``
+# (alphabetical) — that destroys the scale signal.
+_PRIORITY_SCALE_ORDER = ["highest", "high", "medium", "low", "lowest"]
+
 # Shared message for the "you must pick a priority" rejection so the CLI human
 # paths (milestone add / task add) speak with one voice and always list the 5.
 _PRIORITY_REQUIRED_MSG = (
     "Priority is required. Choose one of: "
-    + ", ".join(sorted(VALID_PRIORITIES))
+    + ", ".join(_PRIORITY_SCALE_ORDER)
     + " (highest = 大目的への寄与が最大 / lowest = 最小)."
+)
+
+# ms-126 (AX#3): a human passing the literal "untriaged" is NOT choosing a
+# severity — untriaged is a machine sentinel. Say so precisely instead of the
+# misleading "Priority is required" (which reads as "you passed nothing").
+_UNTRIAGED_NOT_SEVERITY_MSG = (
+    "'untriaged' is a sentinel, not a severity. Choose one of: "
+    + ", ".join(_PRIORITY_SCALE_ORDER)
+    + " (machine callers use --untriaged / allow_untriaged instead)."
+)
+
+# ms-126 (AX#2): --untriaged means "no priority judged yet"; an explicit
+# severity means "judged". Passing both is contradictory — reject loudly instead
+# of silently letting the severity win and dropping the untriaged intent (which
+# would quietly remove the entry from untriaged-backlog tracking).
+_PRIORITY_MUTUALLY_EXCLUSIVE_MSG = (
+    "--untriaged and an explicit priority are mutually exclusive; pass one or the other."
 )
 
 
@@ -116,37 +139,52 @@ def normalize_priority(priority: str) -> str:
     return _PRIORITY_ALIASES.get(priority, priority)
 
 
-def _resolve_priority_for_write(priority: str, *, allow_untriaged: bool) -> str:
+def _resolve_priority_for_write(priority: str, *, allow_untriaged: bool,
+                                required: bool = True) -> str:
     """Resolve the ``priority`` value a write-path should persist (ms-126).
 
-    Central helper so ``milestone_add`` / ``task_add`` share one rule:
+    Single source of truth so every write-path (``milestone_add`` / ``task_add``
+    for tasks AND for non-task entries) shares one rule — no branch re-implements
+    validation inline (Maint#1):
 
+    * ``allow_untriaged`` + an explicit severity → ``ValueError`` (AX#2): the two
+      are mutually exclusive, so the untriaged intent can never be silently
+      dropped.
     * Non-empty value → validate against the real severities (unknown → the
-      existing "Invalid priority" ``ValueError``); ``untriaged`` is accepted
-      only from machine callers (``allow_untriaged``) and stored as-is.
-    * Empty value + ``allow_untriaged=False`` (human path) → ``ValueError``
-      forcing the caller to pick one of the 5 severities.
-    * Empty value + ``allow_untriaged=True`` (machine path) → the
-      ``untriaged`` sentinel, so the un-judged priority becomes visible debt.
+      existing "Invalid priority" ``ValueError``); ``untriaged`` is accepted only
+      from machine callers (``allow_untriaged``) and stored as-is. A human typing
+      "untriaged" gets a precise sentinel-not-a-severity error (AX#3).
+    * Empty value + ``allow_untriaged=True`` (machine path) → the ``untriaged``
+      sentinel, so the un-judged priority becomes visible debt.
+    * Empty value + ``allow_untriaged=False`` + ``required=True`` (human work
+      item) → ``ValueError`` forcing the caller to pick one of the 5 severities.
+    * Empty value + ``required=False`` (non-task entry: commit / note / …) →
+      ``""`` (no severity stored — those entries carry none).
 
-    Returns the string to store (never empty).
+    Returns the string to store, or ``""`` meaning "store no priority".
     """
+    # AX#2: reject contradictory "untriaged + explicit severity" up front, before
+    # either could win. (untriaged + literal "untriaged" is not contradictory.)
+    if allow_untriaged and priority and priority != UNTRIAGED_PRIORITY:
+        raise ValueError(_PRIORITY_MUTUALLY_EXCLUSIVE_MSG)
     if priority:
         if priority == UNTRIAGED_PRIORITY:
             if not allow_untriaged:
-                # A human explicitly typing "untriaged" is not choosing a
-                # severity; treat it as the same forcing-function failure.
-                raise ValueError(_PRIORITY_REQUIRED_MSG)
+                # AX#3: a human typing "untriaged" is naming the sentinel, not
+                # choosing a severity — say exactly that.
+                raise ValueError(_UNTRIAGED_NOT_SEVERITY_MSG)
             return UNTRIAGED_PRIORITY
         if priority not in _ACCEPTED_PRIORITIES:
             raise ValueError(
-                f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}"
+                f"Invalid priority: {priority}. Valid: {', '.join(_PRIORITY_SCALE_ORDER)}"
             )
         return normalize_priority(priority)
     # Empty priority.
     if allow_untriaged:
         return UNTRIAGED_PRIORITY
-    raise ValueError(_PRIORITY_REQUIRED_MSG)
+    if required:
+        raise ValueError(_PRIORITY_REQUIRED_MSG)
+    return ""
 # Member roles (e-624): defines permissions in 2-5 person team context.
 # - owner: project owner, all permissions including delete project
 # - maintainer: can manage milestones / merge PRs / approve operations
@@ -1182,19 +1220,16 @@ def task_add(data: dict, ms_id: str, description: str, *,
     # False) rejects an empty value; machine paths (allow_untriaged=True) store
     # the ``untriaged`` sentinel as visible debt. Non-task entries keep the old
     # permissive rule: validate only when a value is present.
-    if entry_type == "task":
-        meta["priority"] = _resolve_priority_for_write(
-            priority, allow_untriaged=allow_untriaged
-        )
-    elif priority:
-        if priority == UNTRIAGED_PRIORITY:
-            meta["priority"] = UNTRIAGED_PRIORITY
-        elif priority not in _ACCEPTED_PRIORITIES:
-            raise ValueError(
-                f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}"
-            )
-        else:
-            meta["priority"] = normalize_priority(priority)
+    # ms-126 (Maint#1): route BOTH the task path (priority required) and the
+    # non-task path (commit / note — priority optional) through the one resolver,
+    # so validation / sentinel-gating / mutual-exclusion live in a single place
+    # and can never drift between branches.
+    resolved_priority = _resolve_priority_for_write(
+        priority, allow_untriaged=allow_untriaged,
+        required=(entry_type == "task"),
+    )
+    if resolved_priority:
+        meta["priority"] = resolved_priority
     now = _now_iso()
     meta["created_by"] = _get_actor()
     author_clean = _clean_author(author)

@@ -11539,10 +11539,11 @@ def _count_untriaged_active(data: dict) -> tuple[int, int]:
     a task's on ``entry["meta"]["priority"]`` (see core.task_add). Legacy
     entries with no priority field are NOT counted (no-backfill).
     """
-    try:
-        from core import UNTRIAGED_PRIORITY as _UNTRIAGED
-    except Exception:
-        _UNTRIAGED = "untriaged"
+    # ms-126 (Maint#2): read the sentinel from its single source of truth. No
+    # fallback literal — commands.py already depends on ``core`` module-wide, so
+    # a duplicated "untriaged" constant would only silently diverge if core's
+    # value ever changed.
+    _UNTRIAGED = core.UNTRIAGED_PRIORITY
     ms_count = 0
     task_count = 0
     for ms in data.get("milestones", []):
