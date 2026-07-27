@@ -6830,6 +6830,74 @@ def cmd_org_remove_member():
         print(f"  remaining members: {len(org.get('members') or [])}")
 
 
+def cmd_org_delete():
+    """Delete a team org — 破壊的操作なので owner のみ (ms-118 / e-4234).
+
+    二段確認 (= 誤発火防止) は `/beacon-member` Skill 側の責務。CLI は primitive として
+    owner-only ガード (cloud は server が token で enforce) と personal org 削除禁止を
+    保証する。project の org 所属リンクの後始末はしない (= re-home で先に移すのが前提)。
+
+    Reads from env:
+      BEACON_ORG_ID  (required) the org id to delete
+      BEACON_JSON    "1" → emit json
+    """
+    org_id = os.environ.get("BEACON_ORG_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not org_id:
+        print("Error: org id is required (beacon org delete <org-id>)",
+              file=sys.stderr)
+        sys.exit(1)
+    try:
+        result = get_store().delete_org(org_id)
+    except (ValueError, RuntimeError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"Deleted org {result.get('org_id')}")
+        print("  この org に home していた project があれば、所属 org が無くなります。"
+              "先に `beacon org rehome <project> --to <別org>` で移しておくのが安全です。")
+
+
+def cmd_org_rehome():
+    """Re-home a project into an org — org 所属リンクだけ張り替える (ms-118 / e-4233).
+
+    既存 project の identity (project_id) と履歴は保ったまま所属 org を差し替える。
+    開示は移動後の org 基準で即座に再評価される (= ms-113 の開示は現在の org_id を
+    live 参照。participation-only なので、参加していない社員には引き続き見えない)。
+
+    Reads from env:
+      BEACON_ORG_REHOME_PROJECT  (required) project id to move (= 付け替える project)
+      BEACON_ORG_REHOME_TARGET   (required) destination org id (`--to`)
+      BEACON_JSON                "1" → emit json
+    """
+    project_id = os.environ.get("BEACON_ORG_REHOME_PROJECT", "").strip()
+    target_org_id = os.environ.get("BEACON_ORG_REHOME_TARGET", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not project_id or not target_org_id:
+        print("Usage: beacon org rehome <project-id> --to <org-id> [--json]",
+              file=sys.stderr)
+        sys.exit(1)
+    try:
+        result = get_store().rehome_project(
+            project_id, target_org_id=target_org_id)
+    except (ValueError, RuntimeError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        prev = result.get("previous_org_id") or "(none)"
+        print(f"Re-homed project {result.get('project_id')} "
+              f"→ org {result.get('org_id')} (was: {prev})")
+        print("  project の identity と履歴は保たれています (org_id リンクのみ変更)。")
+        print("  開示は移動後の org 基準で即座に再評価されます "
+              "(参加していない社員には引き続き見えません = participation-only)。")
+
+
 def cmd_trek_create():
     """Create a new trek (= top-level cross-project collaboration area).
 
@@ -26834,6 +26902,8 @@ if __name__ == "__main__":
         # ms-118 e-4232: org membership — add-member (所属のみ) / remove-member.
         "org_add_member": cmd_org_add_member,
         "org_remove_member": cmd_org_remove_member,
+        "org_delete": cmd_org_delete,
+        "org_rehome": cmd_org_rehome,
         "trek_create": cmd_trek_create,
         "trek_list": cmd_trek_list,
         "trek_show": cmd_trek_show,

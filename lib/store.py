@@ -266,6 +266,33 @@ class Store(Protocol):
         """
         ...
 
+    def delete_org(self, org_id: str) -> dict:
+        """team org を削除する (ms-118 / e-4234)。破壊的操作なので **owner のみ**。
+
+        戻り値は ``{"org_id": ..., "deleted": True}``。personal org (= 個人組織) は
+        削除できない (``ValueError``、= 自動生成の器を消させない)。存在しない org も
+        ``ValueError``。cloud では owner でない caller は 403 (= ``RuntimeError``)。
+        member 削除と同じ owner-only ガード (``org.is_destructive_allowed``) を
+        共有し、片方だけ緩い穴を作らない。transport / auth / 権限は ``RuntimeError``。
+        """
+        ...
+
+    def rehome_project(self, project_id: str, *, target_org_id: str) -> dict:
+        """project の所属 org を ``target_org_id`` へ張り替える (re-home、ms-118 / e-4233)。
+
+        project の identity (project_id) と履歴は保ったまま ``org_id`` リンクだけを
+        差し替える。開示は移動後の org 基準で即座に再評価される (= ms-113 の開示は
+        現在の org_id を live 参照するのでキャッシュ無し)。戻り値は更新後の結果 dict::
+
+            {"project_id": ..., "org_id": <new>, "previous_org_id": <old>}
+
+        ``target_org_id`` が実在しない org を指す場合は ``ValueError`` (= 存在しない
+        org に project を吸わせない)。cloud では project owner かつ target org の
+        member でなければ拒否される (= owner-only の統一厳格化は e-4234)。transport /
+        auth / 権限エラーは ``RuntimeError`` として伝播する。
+        """
+        ...
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。
