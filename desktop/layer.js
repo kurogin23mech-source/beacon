@@ -231,6 +231,23 @@ const dataSource = {
   updateMyProfile: async (_displayName) => {
     throw new Error('Profile editing is Web-only in this build. Open the Web UI to set your display name.');
   },
+  // ms-118 / e-4236 slice2 — org 俯瞰 (read-only) の Tauri 側 parity。
+  // Web は HTTP (GET /api/orgs, /api/orgs/{id}/overview) を叩くが、Tauri は
+  // 全 backend アクセスを Rust invoke() 経由にする設計なので、org 用の Rust
+  // binding (cloud_list_orgs / cloud_org_overview) が要る。それは follow-up
+  // として切り出し、この build では安全側の no-op (= 空 state を置く) にする。
+  // これにより SHARED の openSettings が呼ぶ dataSource.loadOrgs /
+  // loadOrgOverviews は Tauri でも存在し (= method parity)、俯瞰セクションは
+  // 「所属している法人組織はまだありません」の空表示に degrade する
+  // (= loadMyProfile と同じ「Rust binding 未着地は空 state で inert 化」pattern)。
+  loadOrgs: async () => {
+    // No-op: leave state.orgs empty until the org Rust bindings land.
+    state.orgs = [];
+  },
+  loadOrgOverviews: async () => {
+    // No-op: no team-org overviews to fetch without the Rust bindings.
+    state.orgOverviews = state.orgOverviews || {};
+  },
   // ms-72 e-1779 — Member admin + invitation flow wired to Rust commands.
   // Was a "Web-only" throw stub before the Rust layer landed (= ms-72 prior).
   // SHARED Settings > Members tab now reaches the real backend through these

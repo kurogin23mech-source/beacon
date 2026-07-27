@@ -5426,6 +5426,36 @@ const dataSource = {
       state.myProjects = [];
     }
   },
+  // ms-118 / e-4236 slice2 — org 俯瞰 (read-only) が消費する 2 本の取得。
+  // loadOrgs   : caller が member の org 一覧 (= GET /api/orgs)。
+  // loadOrgOverviews : team org ごとに GET /api/orgs/{id}/overview を並列取得し、
+  //   org_id → {org_id, name, projects:[{project_id, name, members:[{user_id,
+  //   role, external_guest}]}]} を state.orgOverviews に積む。overview endpoint
+  //   は participation-only 準拠 (= caller が参加している project のみ列挙) なので、
+  //   ここでの表示も「org 所属だけでは project は見えない」を自然に反映する。
+  //   個別 org の失敗は null に落として他 org の描画を止めない (= 部分開示に強い)。
+  loadOrgs: async () => {
+    try {
+      state.orgs = await api('/api/orgs');
+    } catch (_e) {
+      state.orgs = [];
+    }
+  },
+  loadOrgOverviews: async () => {
+    state.orgOverviews = state.orgOverviews || {};
+    // 俯瞰の対象は team org (= 明示的に立てた法人 org、org-t-*) のみ。personal org
+    // (org-p-*) は user 個人の器なので俯瞰 UI には出さない (SPEC 受入条件7 の意図)。
+    const teamOrgs = (state.orgs || []).filter(
+      o => o && typeof (o.org_id || '') === 'string' && (o.org_id || '').startsWith('org-t-'));
+    await Promise.all(teamOrgs.map(async (o) => {
+      const oid = o.org_id;
+      try {
+        state.orgOverviews[oid] = await api(`/api/orgs/${encodeURIComponent(oid)}/overview`);
+      } catch (_e) {
+        state.orgOverviews[oid] = null;
+      }
+    }));
+  },
   // ms-43 e-631: unified cross-entity search.
   // Returns {results, total, facets, limit, offset}. Caller manages state.search* fields.
   searchProject: async (params) => {
@@ -6011,6 +6041,13 @@ async function openSettings(tab) {
     } else {
       _resolveMyRole();
     }
+    // ms-118 / e-4236 slice2 — org 俯瞰 (read-only) のデータも Members タブで
+    // 一緒に読む。orgs 一覧 → team org ごとの overview を順に取り、揃ったら
+    // 再描画する (= 「shell を先に出し、fetch 解決で slot を埋める」既存 Members /
+    // Audit タブと同じ非同期パターン)。失敗は握り潰して俯瞰セクションを空表示に。
+    dataSource.loadOrgs().catch(() => {})
+      .then(() => dataSource.loadOrgOverviews().catch(() => {}))
+      .then(() => renderSettings());
   }
   // Ensure data is loaded so the two tabs have something to render.
   if (state.settingsTab === 'agents'
@@ -6150,6 +6187,86 @@ function _renderSettingsMembersTab() {
           <span class="beacon-tooltip-icon">?</span>
         </span>
       </div>
+    </div>
+    ${_renderSettingsOrgsSection()}`;
+}
+
+// ms-118 / e-4236 slice2 — 組織 (org) の俯瞰 (read-only)。
+//
+// 「どの org に どの project と member があり、誰がどの project に参加しているか」
+// (SPEC 受入条件7) を 1 望する read-only セクション。書き込み操作 (作成 / 招待 /
+// 付け替え) は当面 CLI / AI 代行に委ね (SPEC 方針5 + CORE doc ux-principle-no-terminal)、
+// ここは俯瞰に徹する — 従って data-action は 1 つも持たない (= handler parity 不要)。
+//
+// 表示は team org (= 明示的に立てた法人 org、org-t-*) のみ。各 project の member は
+// role と external_guest (= org 非所属の外部ゲスト、e-4235) 付き。overview endpoint
+// が participation-only で絞る (= caller が参加している project のみ) ため、この俯瞰も
+// 「org 所属だけでは何も見えない」を素直に映す。
+function _renderSettingsOrgsSection() {
+  const orgs = (state.orgs || []).filter(
+    o => o && typeof (o.org_id || '') === 'string' && (o.org_id || '').startsWith('org-t-'));
+  const overviews = state.orgOverviews || {};
+  const tip = 'org 所属はアクセスを与えません (participation-only)。'
+    + 'ここに出る project は、あなたが参加している project だけです。'
+    + '作成 / 招待 / 付け替えは beacon org CLI (AI 代行) で行います。';
+  let body;
+  if (!orgs.length) {
+    body = `<div style="font-size:0.72rem;color:var(--text-dim);">
+        所属している法人組織 (team org) はまだありません。
+        <code style="color:var(--text-secondary);">beacon org create "法人名"</code> で立てられます。
+      </div>`;
+  } else {
+    body = orgs.map((o) => {
+      const oid = o.org_id;
+      const ov = overviews[oid];
+      const orgName = esc(o.name || (ov && ov.name) || oid);
+      let projHtml;
+      if (ov === undefined) {
+        projHtml = `<div style="font-size:0.7rem;color:var(--text-dim);padding:4px 0;">Loading…</div>`;
+      } else if (ov === null) {
+        projHtml = `<div style="font-size:0.7rem;color:var(--text-dim);padding:4px 0;">俯瞰を取得できませんでした。</div>`;
+      } else if (!ov.projects || !ov.projects.length) {
+        projHtml = `<div style="font-size:0.7rem;color:var(--text-dim);padding:4px 0;">
+            あなたが参加している project はこの org にありません (participation-only)。
+          </div>`;
+      } else {
+        projHtml = ov.projects.map((p) => {
+          const members = (p.members || []).map((m) => {
+            const guest = m.external_guest
+              ? ` <span style="color:var(--text-dim);border:1px solid var(--border-subtle);border-radius:2px;padding:0 4px;font-size:0.62rem;">外部ゲスト</span>`
+              : '';
+            return `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:3px;padding:2px 6px;margin:2px 4px 2px 0;font-size:0.68rem;">
+                <span style="color:var(--text-secondary);">${esc(m.user_id || '')}</span>
+                <span style="color:var(--text-dim);">[${esc(m.role || 'viewer')}]</span>${guest}
+              </span>`;
+          }).join('');
+          return `<div style="margin:6px 0 6px 10px;padding-left:8px;border-left:2px solid var(--border-subtle);">
+              <div style="font-size:0.74rem;color:var(--text-primary);">
+                ${esc(p.name || '')}
+                <span style="color:var(--text-dim);font-size:0.66rem;">${esc(p.project_id || '')}</span>
+              </div>
+              <div style="margin-top:3px;">${members || `<span style="font-size:0.68rem;color:var(--text-dim);">(member なし)</span>`}</div>
+            </div>`;
+        }).join('');
+      }
+      return `<div style="margin-bottom:12px;padding:8px 10px;background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:4px;">
+          <div style="font-size:0.82rem;color:var(--accent);font-family:var(--font-mono);">
+            ${orgName}
+            <span style="color:var(--text-dim);font-size:0.66rem;">${esc(oid)}</span>
+          </div>
+          ${projHtml}
+        </div>`;
+    }).join('');
+  }
+  return `
+    <div class="settings-section">
+      <div class="label">
+        Organizations (組織の俯瞰 — read-only)
+        <span class="beacon-tooltip" data-tooltip="${esc(tip)}">
+          <span class="beacon-tooltip-icon">?</span>
+        </span>
+      </div>
+      ${body}
     </div>`;
 }
 
