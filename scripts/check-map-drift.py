@@ -40,28 +40,23 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# --- dispatch key のうち user-facing でない内部専用 (= 地図の覆う義務なし) ---
-CLI_INTERNAL = {
-    "auth_check", "common_setup", "cloud_check_project",
-    "retro_default_since", "help_json", "version",
-}
+# CLI surface enumeration lives in lib/cli_surface.py (the single source of truth
+# shared with lib/verb_ledger.py) so the two readers can never drift (ms-114
+# e-3740). This lint imports it rather than keeping its own copy.
+sys.path.insert(0, os.path.join(REPO, "lib"))
+from cli_surface import enumerate_cli_verbs  # noqa: E402
+
 # --- 不規則綴りの exact 楔 → dispatch key の alias (= 綴りが key と機械変換で一致しない分) ---
 CLI_SPELLING_ALIAS = {
     "cloud upload-initial": "cloud_push",
     "setup": "common_setup",
 }
-# --- dispatch dict に無く bin/beacon が直接捌く top-level user command ---
-CLI_SHELL_TOPLEVEL = {"status", "reset"}
 
 
 def enumerate_cli() -> set[str]:
-    """lib/commands.py の dispatch dict キー + bin/beacon 直処理の top-level を列挙。"""
-    src = open(os.path.join(REPO, "lib", "commands.py"), encoding="utf-8").read()
-    m = re.search(r"\n    commands = \{(.*?)\n    \}", src, re.S)
-    if not m:
-        raise SystemExit("FATAL: dispatch dict `commands = {...}` を lib/commands.py に見つけられません")
-    keys = set(re.findall(r'"([a-z0-9_]+)":', m.group(1)))
-    return ({k for k in keys if k not in CLI_INTERNAL}) | CLI_SHELL_TOPLEVEL
+    """lib/commands.py の dispatch dict キー + bin/beacon 直処理の top-level を列挙
+    (= 共有の cli_surface.enumerate_cli_verbs)。"""
+    return enumerate_cli_verbs(os.path.join(REPO, "lib", "commands.py"))
 
 
 def cli_noun(key: str) -> str:
