@@ -167,7 +167,7 @@ def test_member_set_role_raises_when_not_found():
 
 def test_milestone_add_accepts_owner_and_assignee():
     data = empty_project()
-    ms_id = core.milestone_add(data, "test", owner="alice", assignee="bob")
+    ms_id = core.milestone_add(data, "test", owner="alice", assignee="bob", allow_untriaged=True)
     ms = data["milestones"][0]
     assert ms["id"] == ms_id
     assert ms["owner"] == "alice"
@@ -177,7 +177,7 @@ def test_milestone_add_accepts_owner_and_assignee():
 def test_milestone_add_omits_fields_when_unset():
     """Don't pollute the doc with empty owner/assignee fields."""
     data = empty_project()
-    core.milestone_add(data, "test")
+    core.milestone_add(data, "test", allow_untriaged=True)
     ms = data["milestones"][0]
     assert "owner" not in ms
     assert "assignee" not in ms
@@ -185,7 +185,7 @@ def test_milestone_add_omits_fields_when_unset():
 
 def test_milestone_update_sets_owner_assignee():
     data = empty_project()
-    core.milestone_add(data, "test")
+    core.milestone_add(data, "test", allow_untriaged=True)
     ms_id = data["milestones"][0]["id"]
     ms = core.milestone_update(data, ms_id, owner="alice", assignee="bob")
     assert ms["owner"] == "alice"
@@ -195,7 +195,7 @@ def test_milestone_update_sets_owner_assignee():
 def test_milestone_update_clears_owner_with_dash():
     """`--owner -` is the convention for clearing the field."""
     data = empty_project()
-    core.milestone_add(data, "test", owner="alice")
+    core.milestone_add(data, "test", owner="alice", allow_untriaged=True)
     ms_id = data["milestones"][0]["id"]
     ms = core.milestone_update(data, ms_id, owner="-")
     assert ms["owner"] == ""
@@ -203,7 +203,7 @@ def test_milestone_update_clears_owner_with_dash():
 
 def test_milestone_update_leaves_owner_unchanged_when_omitted():
     data = empty_project()
-    core.milestone_add(data, "test", owner="alice")
+    core.milestone_add(data, "test", owner="alice", allow_untriaged=True)
     ms_id = data["milestones"][0]["id"]
     ms = core.milestone_update(data, ms_id, title="new title")
     assert ms["owner"] == "alice"  # untouched

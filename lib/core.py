@@ -76,6 +76,55 @@ VALID_PRIORITIES = {"highest", "high", "medium", "low", "lowest"}
 _PRIORITY_ALIASES = {"middle": "medium"}
 _ACCEPTED_PRIORITIES = VALID_PRIORITIES | set(_PRIORITY_ALIASES)
 
+# ms-126: `untriaged` is a *sentinel*, not a severity. It records "a machine
+# created this entry and no human has judged its priority yet". It is stored in
+# the same ``priority`` field, but deliberately kept OUT of ``VALID_PRIORITIES``
+# / ``_ACCEPTED_PRIORITIES`` so it can never be confused with a real severity
+# and ``normalize_priority`` never maps it to ``medium``. The machine paths
+# (issue import / review-apply / roadmap bulk / dispatch) pass this in via
+# ``allow_untriaged=True`` when they cannot supply a human-judged severity, so
+# the missing judgement becomes *visible debt* (surfaced by the
+# ``untriaged-backlog`` trigger) instead of a silent empty field. The human
+# entry paths (``beacon milestone add`` / ``beacon task add``) leave
+# ``allow_untriaged=False`` and are hard-rejected on an empty priority — a
+# forcing function that makes a person actually pick one of the 5 severities.
+UNTRIAGED_PRIORITY = "untriaged"
+# The set the core write-paths accept when a value is present. ``untriaged``
+# joins here (so a machine may store it) but NOT in ``VALID_PRIORITIES`` (so it
+# is never presented as a choosable severity in help / errors).
+_STORABLE_PRIORITIES = _ACCEPTED_PRIORITIES | {UNTRIAGED_PRIORITY}
+
+# ms-126 (AX#6): the canonical *scale* order for listing the 5 severities. Every
+# surface (error / prompt / trigger / help) lists them in this order so the name
+# alone carries "this is an ordered severity axis". Never list via ``sorted()``
+# (alphabetical) — that destroys the scale signal.
+_PRIORITY_SCALE_ORDER = ["highest", "high", "medium", "low", "lowest"]
+
+# Shared message for the "you must pick a priority" rejection so the CLI human
+# paths (milestone add / task add) speak with one voice and always list the 5.
+_PRIORITY_REQUIRED_MSG = (
+    "Priority is required. Choose one of: "
+    + ", ".join(_PRIORITY_SCALE_ORDER)
+    + " (highest = 大目的への寄与が最大 / lowest = 最小)."
+)
+
+# ms-126 (AX#3): a human passing the literal "untriaged" is NOT choosing a
+# severity — untriaged is a machine sentinel. Say so precisely instead of the
+# misleading "Priority is required" (which reads as "you passed nothing").
+_UNTRIAGED_NOT_SEVERITY_MSG = (
+    "'untriaged' is a sentinel, not a severity. Choose one of: "
+    + ", ".join(_PRIORITY_SCALE_ORDER)
+    + " (machine callers use --untriaged / allow_untriaged instead)."
+)
+
+# ms-126 (AX#2): --untriaged means "no priority judged yet"; an explicit
+# severity means "judged". Passing both is contradictory — reject loudly instead
+# of silently letting the severity win and dropping the untriaged intent (which
+# would quietly remove the entry from untriaged-backlog tracking).
+_PRIORITY_MUTUALLY_EXCLUSIVE_MSG = (
+    "--untriaged and an explicit priority are mutually exclusive; pass one or the other."
+)
+
 
 def normalize_priority(priority: str) -> str:
     """Canonicalize a priority value, mapping deprecated aliases (middle→medium).
@@ -83,8 +132,59 @@ def normalize_priority(priority: str) -> str:
     Returns the canonical value unchanged if already canonical. Does NOT validate
     (callers guard against ``_ACCEPTED_PRIORITIES`` first); an unknown value is
     returned as-is so the caller's own "Invalid priority" error still fires.
+
+    ms-126: ``untriaged`` is a sentinel, not an alias — it passes through
+    unchanged and is NEVER mapped to a severity.
     """
     return _PRIORITY_ALIASES.get(priority, priority)
+
+
+def _resolve_priority_for_write(priority: str, *, allow_untriaged: bool,
+                                required: bool = True) -> str:
+    """Resolve the ``priority`` value a write-path should persist (ms-126).
+
+    Single source of truth so every write-path (``milestone_add`` / ``task_add``
+    for tasks AND for non-task entries) shares one rule — no branch re-implements
+    validation inline (Maint#1):
+
+    * ``allow_untriaged`` + an explicit severity → ``ValueError`` (AX#2): the two
+      are mutually exclusive, so the untriaged intent can never be silently
+      dropped.
+    * Non-empty value → validate against the real severities (unknown → the
+      existing "Invalid priority" ``ValueError``); ``untriaged`` is accepted only
+      from machine callers (``allow_untriaged``) and stored as-is. A human typing
+      "untriaged" gets a precise sentinel-not-a-severity error (AX#3).
+    * Empty value + ``allow_untriaged=True`` (machine path) → the ``untriaged``
+      sentinel, so the un-judged priority becomes visible debt.
+    * Empty value + ``allow_untriaged=False`` + ``required=True`` (human work
+      item) → ``ValueError`` forcing the caller to pick one of the 5 severities.
+    * Empty value + ``required=False`` (non-task entry: commit / note / …) →
+      ``""`` (no severity stored — those entries carry none).
+
+    Returns the string to store, or ``""`` meaning "store no priority".
+    """
+    # AX#2: reject contradictory "untriaged + explicit severity" up front, before
+    # either could win. (untriaged + literal "untriaged" is not contradictory.)
+    if allow_untriaged and priority and priority != UNTRIAGED_PRIORITY:
+        raise ValueError(_PRIORITY_MUTUALLY_EXCLUSIVE_MSG)
+    if priority:
+        if priority == UNTRIAGED_PRIORITY:
+            if not allow_untriaged:
+                # AX#3: a human typing "untriaged" is naming the sentinel, not
+                # choosing a severity — say exactly that.
+                raise ValueError(_UNTRIAGED_NOT_SEVERITY_MSG)
+            return UNTRIAGED_PRIORITY
+        if priority not in _ACCEPTED_PRIORITIES:
+            raise ValueError(
+                f"Invalid priority: {priority}. Valid: {', '.join(_PRIORITY_SCALE_ORDER)}"
+            )
+        return normalize_priority(priority)
+    # Empty priority.
+    if allow_untriaged:
+        return UNTRIAGED_PRIORITY
+    if required:
+        raise ValueError(_PRIORITY_REQUIRED_MSG)
+    return ""
 # Member roles (e-624): defines permissions in 2-5 person team context.
 # - owner: project owner, all permissions including delete project
 # - maintainer: can manage milestones / merge PRs / approve operations
@@ -447,7 +547,8 @@ def milestone_add(data: dict, title: str, target_date: str = "",
                    description: str = "", priority: str = "",
                    objective: str = "", acceptance_criteria: str = "",
                    owner: str = "", assignee: str = "",
-                   author: dict | None = None) -> str:
+                   author: dict | None = None,
+                   allow_untriaged: bool = False) -> str:
     """Add a milestone. Returns the new ms_id.
 
     Issue #14: the ID is computed via `next_milestone_id` (max + 1) and we
@@ -491,10 +592,13 @@ def milestone_add(data: dict, title: str, target_date: str = "",
         ms.pop("assignee", None)
     if description:
         ms["description"] = description
-    if priority:
-        if priority not in _ACCEPTED_PRIORITIES:
-            raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
-        ms["priority"] = normalize_priority(priority)
+    # ms-126: priority is now mandatory. The human path leaves
+    # allow_untriaged=False and an empty value is rejected here; machine paths
+    # pass allow_untriaged=True and an empty value becomes the ``untriaged``
+    # sentinel (visible debt), never a silent blank.
+    ms["priority"] = _resolve_priority_for_write(
+        priority, allow_untriaged=allow_untriaged
+    )
     if objective:
         ms["objective"] = objective
     if acceptance_criteria:
@@ -1093,7 +1197,8 @@ def task_add(data: dict, ms_id: str, description: str, *,
              detail: str = "", requested_by: str = "",
              priority: str = "", motivation: str = "",
              acceptance_criteria: str = "",
-             author: dict | None = None) -> str:
+             author: dict | None = None,
+             allow_untriaged: bool = False) -> str:
     """Add an entry to a milestone. Returns the new entry id.
 
     ``author`` (ms-78 / e-1909): optional ``{"user_id", "email",
@@ -1108,10 +1213,23 @@ def task_add(data: dict, ms_id: str, description: str, *,
     meta = {}
     if requested_by:
         meta["requested_by"] = requested_by
-    if priority:
-        if priority not in _ACCEPTED_PRIORITIES:
-            raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
-        meta["priority"] = normalize_priority(priority)
+    # ms-126: priority is mandatory — but ONLY for actual work items
+    # (``task``). Other entry types (commit / note / …) carry no severity, so
+    # forcing one on them would be nonsense and would break the Web UI's
+    # commit/note create path. For a task: the human path (allow_untriaged=
+    # False) rejects an empty value; machine paths (allow_untriaged=True) store
+    # the ``untriaged`` sentinel as visible debt. Non-task entries keep the old
+    # permissive rule: validate only when a value is present.
+    # ms-126 (Maint#1): route BOTH the task path (priority required) and the
+    # non-task path (commit / note — priority optional) through the one resolver,
+    # so validation / sentinel-gating / mutual-exclusion live in a single place
+    # and can never drift between branches.
+    resolved_priority = _resolve_priority_for_write(
+        priority, allow_untriaged=allow_untriaged,
+        required=(entry_type == "task"),
+    )
+    if resolved_priority:
+        meta["priority"] = resolved_priority
     now = _now_iso()
     meta["created_by"] = _get_actor()
     author_clean = _clean_author(author)
@@ -1672,6 +1790,12 @@ def issue_import(data: dict, *, ms_id: str = "", number: int, url: str,
             "issue_number": number,
             "issue_url": url,
             "created_by": _get_actor(),
+            # ms-126: importing a GitHub Issue is a machine path — no human has
+            # judged its priority yet. Stamp the ``untriaged`` sentinel so the
+            # imported task surfaces in the untriaged-backlog debt trigger and a
+            # human is prompted to triage it, rather than silently landing with
+            # no priority.
+            "priority": UNTRIAGED_PRIORITY,
         },
     }
     if body and body.strip():

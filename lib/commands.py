@@ -1006,6 +1006,12 @@ def cmd_milestone_add():
     acceptance_criteria = os.environ.get("BEACON_ACCEPTANCE_CRITERIA", "")
     owner = os.environ.get("BEACON_OWNER", "")
     assignee = os.environ.get("BEACON_ASSIGNEE", "")
+    # ms-126: priority is now mandatory on the human path. Machine callers
+    # (issue import / review-apply / roadmap bulk / dispatch) opt into the
+    # ``untriaged`` sentinel by passing ``--untriaged`` (BEACON_ALLOW_UNTRIAGED=1)
+    # when they cannot supply a human-judged severity. The bare human command
+    # leaves it unset and an empty priority is rejected with the 5-value list.
+    allow_untriaged = os.environ.get("BEACON_ALLOW_UNTRIAGED", "") == "1"
     data = load_project()
     _gate_target_class(data, "milestone")  # ms-115: block in non-dev projects
     # ms-43 / e-2281 — stamp the human author on the milestone so the Web
@@ -1014,11 +1020,18 @@ def cmd_milestone_add():
     # env > credentials.json > project members[]; unauthenticated local
     # mode returns ``{}`` and the create proceeds without ``meta.author``.
     author = _resolve_current_author(data)
-    ms_id = core.milestone_add(data, title, target_date, description=description,
-                               priority=priority, objective=objective,
-                               acceptance_criteria=acceptance_criteria,
-                               owner=owner, assignee=assignee,
-                               author=author or None)
+    try:
+        ms_id = core.milestone_add(data, title, target_date, description=description,
+                                   priority=priority, objective=objective,
+                                   acceptance_criteria=acceptance_criteria,
+                                   owner=owner, assignee=assignee,
+                                   author=author or None,
+                                   allow_untriaged=allow_untriaged)
+    except ValueError as e:
+        # ms-126: surface the "priority is required" forcing function (and the
+        # existing "Invalid priority") as a clean CLI error, not a traceback.
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     save_project(data)
     print(f"Added milestone {ms_id}: {title}")
     if owner or assignee:
@@ -4357,6 +4370,9 @@ def cmd_task_add():
     priority = os.environ.get("BEACON_PRIORITY", "")
     motivation = os.environ.get("BEACON_MOTIVATION", "")
     acceptance_criteria = os.environ.get("BEACON_ACCEPTANCE_CRITERIA", "")
+    # ms-126: priority mandatory on the human path; machine callers opt into the
+    # ``untriaged`` sentinel via ``--untriaged`` (BEACON_ALLOW_UNTRIAGED=1).
+    allow_untriaged = os.environ.get("BEACON_ALLOW_UNTRIAGED", "") == "1"
 
     data = load_project()
     target = core.find_target_milestone(data, ms_id)
@@ -4412,11 +4428,18 @@ def cmd_task_add():
     # ``"claude"`` literal in ``meta.created_by``. Same resolution path
     # as cmd_milestone_add / cmd_operation_open.
     author = _resolve_current_author(data)
-    eid = core.task_add(data, ms_id, description, entry_type=entry_type,
-                        date=date, detail=detail, requested_by=requested_by,
-                        priority=priority, motivation=motivation,
-                        acceptance_criteria=acceptance_criteria,
-                        author=author or None)
+    try:
+        eid = core.task_add(data, ms_id, description, entry_type=entry_type,
+                            date=date, detail=detail, requested_by=requested_by,
+                            priority=priority, motivation=motivation,
+                            acceptance_criteria=acceptance_criteria,
+                            author=author or None,
+                            allow_untriaged=allow_untriaged)
+    except ValueError as e:
+        # ms-126: clean CLI error for the "priority is required" forcing
+        # function (and the existing "Invalid priority").
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     save_project(data)
     from_str = f" (from {requested_by})" if requested_by else ""
     print(f"Added {entry_type} [{eid}] to {work_model.target_label(target)}: {description}{from_str}")
@@ -11484,6 +11507,123 @@ def _auto_fire_map_drift_trigger() -> None:
         f.write("\n")
 
 
+# untriaged-backlog trigger (ms-126). Surfaces the debt created by the new
+# untriaged sentinel: entries a machine created without a human-judged priority.
+# We count only *active* work (todo / in_progress MS + task) whose priority is
+# the explicit ``untriaged`` sentinel — NOT legacy entries that merely lack a
+# priority field. That legacy-exclusion is deliberate: retro-fitting a debt
+# count onto pre-ms-126 data would flood the trigger with entries no one chose
+# to leave untriaged (and would violate the no-backfill rule).
+_UNTRIAGED_ACTIVE_STATUSES = {"todo", "in_progress"}
+
+
+def _untriaged_backlog_trigger_path() -> str:
+    return os.path.join(_get_triggers_dir(), "untriaged-backlog.json")
+
+
+def _clear_untriaged_backlog_trigger_if_exists() -> None:
+    path = _untriaged_backlog_trigger_path()
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _count_untriaged_active(data: dict) -> tuple[int, int]:
+    """Count active entries carrying the explicit ``untriaged`` sentinel.
+
+    Returns ``(ms_count, task_count)``. Only ``todo`` / ``in_progress``
+    milestones and tasks are considered (finished / observing / cancelled work
+    is not actionable debt). A milestone's priority lives on ``ms["priority"]``;
+    a task's on ``entry["meta"]["priority"]`` (see core.task_add). Legacy
+    entries with no priority field are NOT counted (no-backfill).
+    """
+    # ms-126 (Maint#2): read the sentinel from its single source of truth. No
+    # fallback literal — commands.py already depends on ``core`` module-wide, so
+    # a duplicated "untriaged" constant would only silently diverge if core's
+    # value ever changed.
+    _UNTRIAGED = core.UNTRIAGED_PRIORITY
+    ms_count = 0
+    task_count = 0
+    for ms in data.get("milestones", []):
+        if ms.get("status") in _UNTRIAGED_ACTIVE_STATUSES:
+            if ms.get("priority") == _UNTRIAGED:
+                ms_count += 1
+        for entry in ms.get("entries", []):
+            if entry.get("type") != "task":
+                continue
+            if entry.get("status") not in _UNTRIAGED_ACTIVE_STATUSES:
+                continue
+            if (entry.get("meta") or {}).get("priority") == _UNTRIAGED:
+                task_count += 1
+    return ms_count, task_count
+
+
+def _auto_fire_untriaged_backlog_trigger() -> None:
+    """Fire an 'untriaged-backlog' trigger when active entries carry the
+    ``untriaged`` sentinel (ms-126).
+
+    Mirrors the map-drift / release-due backstops: it only surfaces the count,
+    it never mutates priorities on its own (that is a human judgement). Cleared
+    when the count drops to zero. Degrades silently if the store is unavailable.
+    """
+    try:
+        data = get_store().load_project()
+    except Exception:
+        return
+    ms_count, task_count = _count_untriaged_active(data)
+    total = ms_count + task_count
+    if total <= 0:
+        _clear_untriaged_backlog_trigger_if_exists()
+        return
+
+    triggers_dir = _get_triggers_dir()
+    os.makedirs(triggers_dir, exist_ok=True)
+    trigger_path = _untriaged_backlog_trigger_path()
+
+    existing = None
+    if os.path.exists(trigger_path):
+        try:
+            with open(trigger_path, "r", encoding="utf-8") as f:
+                existing = json.load(f)
+        except (json.JSONDecodeError, IOError, UnicodeDecodeError):
+            existing = None
+
+    import datetime
+    now_iso = datetime.datetime.now().isoformat()
+    # Keep the original created_at so the user sees how long the debt has been
+    # pending; only reset it if there was no prior trigger.
+    created_at = (existing or {}).get("created_at", now_iso)
+
+    parts = []
+    if ms_count:
+        parts.append(f"マイルストーン {ms_count} 件")
+    if task_count:
+        parts.append(f"タスク {task_count} 件")
+    breakdown = " / ".join(parts)
+    message = (
+        f"優先度が未 triage (= 機械が起票し人がまだ優先度を判断していない) の "
+        f"active な項目が {total} 件あります ({breakdown})。"
+        f"`beacon status` で確認し、`beacon milestone update <id> --priority <P>` / "
+        f"`beacon task update <id> --priority <P>` で 5 段階 "
+        f"(highest / high / medium / low / lowest) のいずれかを付けてください。"
+    )
+    trigger_data = {
+        "name": "untriaged-backlog",
+        "kind": "untriaged-backlog",
+        "ms_count": ms_count,
+        "task_count": task_count,
+        "total": total,
+        "message": message,
+        "created_at": created_at,
+        "refreshed_at": now_iso,
+    }
+    with open(trigger_path, "w", encoding="utf-8") as f:
+        json.dump(trigger_data, f, ensure_ascii=False)
+        f.write("\n")
+
+
 def _fire_map_reconcile_trigger() -> None:
     """Fire a 'map-reconcile' trigger at deploy time (ms-104 e-3154).
 
@@ -13000,6 +13140,7 @@ def _maybe_auto_tick(*, verbose: bool = False) -> bool:
         _auto_fire_release_due_trigger()
         _auto_fire_release_marker_trigger()
         _auto_fire_map_drift_trigger()
+        _auto_fire_untriaged_backlog_trigger()  # ms-126
         _cleanup_stale_triggers()
         # Touch stamp so subsequent checks within TTL skip the tick.
         try:
@@ -13108,6 +13249,7 @@ def cmd_trigger_tick():
     _auto_fire_release_due_trigger()
     _auto_fire_release_marker_trigger()
     _auto_fire_map_drift_trigger()
+    _auto_fire_untriaged_backlog_trigger()  # ms-126
     _auto_fire_pr_open_review_triggers_for_open_prs()  # ms-119 e-4060 anchor
     _cleanup_stale_triggers()
     # Touch the stamp so subsequent ``check`` calls within the TTL window

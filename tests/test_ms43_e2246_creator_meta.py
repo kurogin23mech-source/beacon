@@ -49,7 +49,7 @@ class TestMilestoneAuthor:
             "email": "alice@example.com",
             "display_name": "Alice",
         }
-        ms_id = core.milestone_add(data, "Plan v1", author=author)
+        ms_id = core.milestone_add(data, "Plan v1", author=author, allow_untriaged=True)
         ms = data["milestones"][0]
         assert ms["id"] == ms_id
         assert ms["meta"]["author"] == author
@@ -59,7 +59,7 @@ class TestMilestoneAuthor:
         # not gain a ``meta.author`` field; the UI then falls back to
         # ``created_by`` / leaves the column blank.
         data = _project()
-        core.milestone_add(data, "Local-only MS")
+        core.milestone_add(data, "Local-only MS", allow_untriaged=True)
         ms = data["milestones"][0]
         assert "author" not in ms.get("meta", {})
 
@@ -70,6 +70,7 @@ class TestMilestoneAuthor:
         core.milestone_add(
             data, "Sparse author MS",
             author={"user_id": "u-bob", "email": "", "display_name": None},
+            allow_untriaged=True,
         )
         ms = data["milestones"][0]
         assert ms["meta"]["author"] == {"user_id": "u-bob"}
@@ -78,7 +79,7 @@ class TestMilestoneAuthor:
         # _clean_author returns {} for non-dict input, which means no
         # author key is written — same shape as the no-author case.
         data = _project()
-        core.milestone_add(data, "Robust", author="not-a-dict")  # type: ignore[arg-type]
+        core.milestone_add(data, "Robust", author="not-a-dict", allow_untriaged=True)  # type: ignore[arg-type]
         ms = data["milestones"][0]
         assert "author" not in ms.get("meta", {})
 
@@ -93,6 +94,7 @@ class TestMilestoneAuthor:
                 "user_id": "u-c", "email": "c@x", "display_name": "C",
                 "role": "owner", "secret": "no",
             },
+            allow_untriaged=True,
         )
         ms = data["milestones"][0]
         assert set(ms["meta"]["author"].keys()) == {"user_id", "email", "display_name"}

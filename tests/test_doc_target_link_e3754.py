@@ -114,7 +114,7 @@ def dev_project(tmp_path, monkeypatch):
         input="e3754-dev\nFix e3754\n5\n1\n",
         text=True, check=True, capture_output=True,
     )
-    subprocess.run([str(BEACON_BIN), "milestone", "add", "Test MS"],
+    subprocess.run([str(BEACON_BIN), "milestone", "add", "Test MS", "--untriaged"],
                    check=True, capture_output=True)
     return tmp_path
 

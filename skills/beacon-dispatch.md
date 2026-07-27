@@ -534,7 +534,7 @@ cd "[abs_workspace_path]" && /beacon-session-start [ms-id]
 2. 全ての Bash 呼び出しに `cwd=[abs_workspace_path]` または `cd "[abs_workspace_path]" && ...` を明示する
 3. タスクを完了したら `beacon task done <entry-id> --reason "..."` で記録する (reason 必須)
 4. コミット後は `/beacon-log` で進捗を記録する (PostToolUse hook で自動)
-5. 新しいタスクが必要になったら `beacon task add "description" -m [ms-id] --motivation "..." --acceptance-criteria "..."` で追加する
+5. 新しいタスクが必要になったら `beacon task add "description" -m [ms-id] --untriaged --motivation "..." --acceptance-criteria "..."` で追加する (ms-126: サブエージェントは優先度を判断していないので `--untriaged` sentinel で起票 = 後で人間が triage)
 6. **書き込み系コードを新規追加する場合**は `lib/operations.py` の `apply_operation` を経由させる（lost-update protection）
 7. 作業完了後、以下を **親エージェントへの報告として** 含める:
    - 完了タスク ID 一覧 + 残タスク ID 一覧

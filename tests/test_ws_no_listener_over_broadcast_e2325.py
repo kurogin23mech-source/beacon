@@ -187,7 +187,7 @@ def test_single_write_produces_single_broadcast():
             ws.receive_json()  # consume ws_ready
             resp = client.post(
                 f"/api/projects/{pid}/milestones",
-                json={"title": "Single Broadcast MS", "target_date": ""},
+                json={"title": "Single Broadcast MS", "target_date": "", "priority": "medium"},
             )
             assert resp.status_code == 200, resp.text
             # Drain any pending WS frames so the broadcast coroutine actually

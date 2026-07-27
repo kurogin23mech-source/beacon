@@ -106,6 +106,8 @@ beacon status --json
 
 タスクの性質（バグ修正・新機能・改善・ドキュメント等）と影響範囲から判断する。
 
+**priority は必須 (ms-126)**: `beacon task add` は優先度未指定 (= 空) を拒否する (= 5 段階のいずれかを必ず付ける forcing function)。人が優先度を判断する経路ではこの Skill が常に `--priority` を付けるので問題にならない。人が判断していない機械生成経路 (issue import / roadmap 一括 / dispatch 由来など) だけが `--untriaged` フラグで「未 triage」sentinel を明示的に立てられる。この Skill (= 人の判断経路) では `--untriaged` を使わない。
+
 #### Step 2.5 (add): draft 表示 → ユーザー確認 → 実行
 
 `beacon task add` を実行する **前** に、生成した description / motivation / acceptance_criteria / priority を **平文で 1 度ユーザーに見せて確認** する。silent な書き込みは Web UI で読み手が見るまで違反に気付けないため、書き込み前に touchpoint を 1 つ挟む。

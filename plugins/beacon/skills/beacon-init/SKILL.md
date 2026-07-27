@@ -357,7 +357,7 @@ dir に何もないので Archaeology / code reading の素材がない。**い�
 | ユーザー応答 | 動作 |
 |---|---|
 | 「提案して」「お任せ」「分からない」「ぼんやり」等 | → `/beacon-roadmap` (ミニマム提案モード) を起動 |
-| 具体的な MS イメージ (「○○から始めたい」「△△を作る」等) | → 即 `beacon milestone add "[ユーザー発話を MS タイトル化]"` を実行。SPEC・vision チェインはしない (ユーザーが明示的に欲しがれば後で呼ぶ) |
+| 具体的な MS イメージ (「○○から始めたい」「△△を作る」等) | → 即 `beacon milestone add "[ユーザー発話を MS タイトル化]" --priority <重要度>` を実行 (ms-126: 優先度は必須。ユーザーの温度感から highest/high/medium/low/lowest を選ぶ、不明なら一言確認)。SPEC・vision チェインはしない (ユーザーが明示的に欲しがれば後で呼ぶ) |
 | 「ちょっと考える」「まだ決めてない」等 | → 「決まったら `beacon milestone add` で起票できます。`/beacon-roadmap` を呼べばこちらから提案もできます」と案内だけして待機 |
 
 ### B. Step 5a で mkdir しなかった場合 (既存 dir で /beacon-init を叩いた)

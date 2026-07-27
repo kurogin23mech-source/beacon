@@ -385,7 +385,7 @@ def test_put_project_invalid():
 
 def test_create_milestone():
     r = client.post(f"/api/projects/{PROJECT_ID}/milestones",
-                    json={"title": "New MS", "target_date": "2026-12-31"})
+                    json={"title": "New MS", "target_date": "2026-12-31", "priority": "medium"})
     assert r.status_code == 200
     assert r.json()["ms_id"] == "ms-3"
     assert len(_store[PROJECT_ID]["milestones"]) == 3
@@ -393,7 +393,7 @@ def test_create_milestone():
 
 def test_create_milestone_with_description():
     r = client.post(f"/api/projects/{PROJECT_ID}/milestones",
-                    json={"title": "Desc MS", "description": "A goal"})
+                    json={"title": "Desc MS", "description": "A goal", "priority": "medium"})
     assert r.status_code == 200
     ms_id = r.json()["ms_id"]
     ms = next(m for m in _store[PROJECT_ID]["milestones"] if m["id"] == ms_id)
@@ -452,14 +452,14 @@ def test_delete_milestone():
 
 def test_create_entry():
     r = client.post(f"/api/projects/{PROJECT_ID}/milestones/ms-1/entries",
-                    json={"description": "New task", "date": "2026-05-11"})
+                    json={"description": "New task", "date": "2026-05-11", "priority": "medium"})
     assert r.status_code == 200
     assert r.json()["entry_id"] == "e-2"
 
 
 def test_create_entry_with_detail():
     r = client.post(f"/api/projects/{PROJECT_ID}/milestones/ms-1/entries",
-                    json={"description": "Detailed task", "detail": "Some details"})
+                    json={"description": "Detailed task", "detail": "Some details", "priority": "medium"})
     assert r.status_code == 200
     entries = _store[PROJECT_ID]["milestones"][0]["entries"]
     assert entries[-1]["detail"] == "Some details"

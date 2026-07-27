@@ -619,6 +619,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_task_add.add_argument("-d", "--detail", default=None)
     p_task_add.add_argument("--from", dest="requested_by", default=None)
     p_task_add.add_argument("--priority", default=None)
+    # ms-126: machine opt-in to the untriaged sentinel (empty priority allowed).
+    p_task_add.add_argument("--untriaged", action="store_true",
+                            dest="allow_untriaged")
     p_task_add.add_argument("--motivation", "--why", dest="motivation", default=None)
     p_task_add.add_argument(
         "--acceptance-criteria", "--ac", dest="acceptance_criteria", default=None
@@ -678,6 +681,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--description", "--desc", dest="description", default=""
     )
     p_ms_add.add_argument("--priority", default="")
+    # ms-126: machine opt-in to the untriaged sentinel (empty priority allowed).
+    p_ms_add.add_argument("--untriaged", action="store_true",
+                          dest="allow_untriaged")
     p_ms_add.add_argument("--objective", default="")
     p_ms_add.add_argument(
         "--acceptance-criteria", "--ac", dest="acceptance_criteria", default=""
@@ -2447,6 +2453,8 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
             env["BEACON_REQUESTED_BY"] = args.requested_by
         if args.priority is not None:
             env["BEACON_PRIORITY"] = args.priority
+        if getattr(args, "allow_untriaged", False):
+            env["BEACON_ALLOW_UNTRIAGED"] = "1"
         if args.motivation is not None:
             env["BEACON_MOTIVATION"] = args.motivation
         if args.acceptance_criteria is not None:
@@ -2577,6 +2585,8 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
             "BEACON_OWNER": args.owner or "",
             "BEACON_ASSIGNEE": args.assignee or "",
         }
+        if getattr(args, "allow_untriaged", False):
+            env["BEACON_ALLOW_UNTRIAGED"] = "1"
         return _run_commands_py(root, "milestone_add", env)
 
     if cmd in ("list", "ls"):

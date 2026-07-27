@@ -148,21 +148,22 @@ cat package.json 2>/dev/null; cat Cargo.toml 2>/dev/null; cat pyproject.toml 2>/
 # 1. Objective をサマリーに設定
 beacon summary "<推測したobjective>"
 
+# ms-126: milestone add は優先度必須。過去/完了フェーズは medium、進行中・次MSは重要度を判断して付ける
 # 2. 過去完了フェーズを登録（古い順に）
-beacon milestone add "<フェーズ1タイトル>"
+beacon milestone add "<フェーズ1タイトル>" --priority medium
 # → 返り値の ms-id を使って
 beacon milestone done <ms-id>
 
-beacon milestone add "<フェーズ2タイトル>"
+beacon milestone add "<フェーズ2タイトル>" --priority medium
 beacon milestone done <ms-id>
 # ... 完了分をすべて登録
 
 # 3. 現在進行中フェーズを登録・開始
-beacon milestone add "<現在進行中フェーズ>"
+beacon milestone add "<現在進行中フェーズ>" --priority <重要度>
 beacon milestone start <ms-id>
 
 # 4. 次MS候補を登録（todo 状態）
-beacon milestone add "<次MS提案1>"
+beacon milestone add "<次MS提案1>" --priority <重要度>
 # （提案2があれば続けて追加）
 ```
 

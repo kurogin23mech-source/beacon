@@ -101,7 +101,7 @@ def test_task_add_done_list_e2e(capfd, fresh_dir):
     main_mod.main([
         "init", "--name", "smoke", "--objective", "obj", "--retro-day", "monday",
     ])
-    main_mod.main(["milestone", "add", "MS"])
+    main_mod.main(["milestone", "add", "MS", "--untriaged"])
     capfd.readouterr()
 
     # Find the MS id from status --json
@@ -113,7 +113,7 @@ def test_task_add_done_list_e2e(capfd, fresh_dir):
 
     capfd.readouterr()
     rc = main_mod.main([
-        "task", "add", "do the thing", "-m", ms_id,
+        "task", "add", "do the thing", "-m", ms_id, "--untriaged",
         "--motivation", "because we must",
         "--ac", "thing is done",
     ])
@@ -175,7 +175,7 @@ def test_doc_add_list_show_e2e(capfd, fresh_dir):
         "init", "--name", "smoke", "--objective", "obj", "--retro-day", "monday",
     ])
     # doc_add via save_entry requires an active milestone — create one.
-    main_mod.main(["milestone", "add", "MS for docs"])
+    main_mod.main(["milestone", "add", "MS for docs", "--untriaged"])
     capfd.readouterr()
     rc = main_mod.main(["status", "--json"])
     assert rc == 0
@@ -221,7 +221,7 @@ def test_doc_add_retro_and_report_scopes_e2e(capfd, fresh_dir):
     main_mod.main([
         "init", "--name", "smoke", "--objective", "obj", "--retro-day", "monday",
     ])
-    main_mod.main(["milestone", "add", "MS for docs"])
+    main_mod.main(["milestone", "add", "MS for docs", "--untriaged"])
     capfd.readouterr()
     rc = main_mod.main(["status", "--json"])
     assert rc == 0

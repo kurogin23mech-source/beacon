@@ -1069,6 +1069,11 @@ class EntryCreate(BaseModel):
     type: str = "task"
     date: str = ""
     detail: str = ""
+    # ms-126: priority is required for task entries (the human web form must
+    # supply one of the 5 severities). Empty + type=="task" is rejected by
+    # core.task_add and surfaced as a 400 below. Non-task entries (commit /
+    # note) ignore it.
+    priority: str = ""
 
 class EntryUpdate(BaseModel):
     description: str = ""
@@ -2443,6 +2448,7 @@ def create_entry(project_id: str, ms_id: str, body: EntryCreate,
             eid = core.task_add(
                 data, ms_id, body.description,
                 entry_type=body.type, date=body.date, detail=body.detail,
+                priority=body.priority,
                 author=author,
             )
         except ValueError as e:
@@ -6437,12 +6443,17 @@ def add_trek_task_endpoint(
         # CLI surfaces that locally; cross-project we trust the Trek
         # scope owner's intent.
         try:
+            # ms-126: a Trek executor sprouting a task is a machine path — it
+            # may not have judged priority. If it supplies one, we use it; if
+            # empty, allow_untriaged=True records the ``untriaged`` sentinel as
+            # visible debt rather than rejecting the autonomous write.
             eid = core.task_add(
                 data, body.target_milestone, body.description,
                 entry_type=body.type, priority=body.priority,
                 motivation=body.motivation,
                 acceptance_criteria=body.acceptance_criteria,
                 author=author,
+                allow_untriaged=True,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
