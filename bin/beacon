@@ -6325,6 +6325,92 @@ EOF
             *)   echo "Unknown monitor subcommand: ${2:-}"; echo "Usage: beacon monitor context [--dry-run]" ;;
         esac
         ;;
+    org)
+        # ms-118 e-4231: organizations are a top-level tenancy entity (like
+        # treks), stored in ~/.beacon/orgs/ (local mode) or via /api/orgs
+        # (cloud). No project binding is required, so no ensure_project.
+        case "${2:-}" in
+            create)
+                shift 2
+                oname="" ojson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) ojson="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *)
+                            if [ -z "$oname" ]; then
+                                oname="$1"
+                            else
+                                # 2 個目以降の positional を黙って捨てない (= 引用符落ちの
+                                # 複数語名で名前が切り詰められる silent no-op を構造で塞ぐ)。
+                                echo "Error: unexpected extra argument '$1'." >&2
+                                echo "  名前に空白を含む場合は引用符で囲んでください: beacon org create \"$oname $1\"" >&2
+                                exit 1
+                            fi
+                            shift ;;
+                    esac
+                done
+                if [ -z "$oname" ]; then
+                    echo "Usage: beacon org create \"<名前>\" [--json]"
+                    exit 1
+                fi
+                BEACON_ORG_NAME="$oname" BEACON_JSON="$ojson" \
+                    python3 "$COMMANDS_PY" org_create
+                ;;
+            list|ls)
+                shift 2
+                ojson="" oall=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) ojson="1"; shift ;;
+                        --all)  oall="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *)
+                            # list は positional を取らない。黙って無視せず拒否する。
+                            echo "Error: unexpected argument '$1' (beacon org list は位置引数を取りません; 全件は --all)." >&2
+                            exit 1 ;;
+                    esac
+                done
+                BEACON_JSON="$ojson" BEACON_ORG_ALL="$oall" \
+                    python3 "$COMMANDS_PY" org_list
+                ;;
+            show)
+                shift 2
+                oid="" ojson=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) ojson="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *)
+                            if [ -z "$oid" ]; then
+                                oid="$1"
+                            else
+                                echo "Error: unexpected extra argument '$1' (beacon org show は org-id を 1 つだけ取ります)." >&2
+                                exit 1
+                            fi
+                            shift ;;
+                    esac
+                done
+                if [ -z "$oid" ]; then
+                    echo "Usage: beacon org show <org-id> [--json]"
+                    exit 1
+                fi
+                BEACON_ORG_ID="$oid" BEACON_JSON="$ojson" \
+                    python3 "$COMMANDS_PY" org_show
+                ;;
+            *)
+                echo "Usage: beacon org [create|list|show]"
+                echo "  create \"<名前>\"        Create a team org (作成者が owner になる)"
+                echo "  list [--all]           List orgs you belong to (自分が member の org)"
+                echo "  show <org-id>          Show one org's members"
+                echo ""
+                echo "  org 所属はアクセスを与えません (participation-only): 社員を org に"
+                echo "  招いた上で、必要な project に beacon member add で参加させて初めて"
+                echo "  その project が見えます。"
+                exit 1
+                ;;
+        esac
+        ;;
     member)
         # ms-78 e-1805: `member join` / `whoami` and the help banner can be
         # invoked before any project is bound to this cwd — they're how a

@@ -6622,6 +6622,148 @@ def _resolve_creator_identity() -> tuple[str, str, str]:
     return user_id, email, session_id
 
 
+def cmd_org_create():
+    """Create a team org (= 明示的に立てる組織). Caller becomes owner (ms-118 / e-4231).
+
+    Reads from env:
+      BEACON_ORG_NAME    (required) org display name (法人名など)
+      BEACON_USER_ID     creator user_id (local mode; cloud resolves from token)
+      BEACON_USER_EMAIL  creator email (local mode; cloud resolves from token)
+      BEACON_JSON        "1" → emit json instead of human text
+
+    org 所属はアクセスを与えない (participation-only): 作った org に社員を招いても、
+    社員は別途 project に参加させて初めてその project が見える。
+    """
+    name = os.environ.get("BEACON_ORG_NAME", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not name:
+        print("Error: org name is required (beacon org create \"名前\")",
+              file=sys.stderr)
+        sys.exit(1)
+
+    # local mode は auth token が無いので作成者 identity を渡す (cloud は無視して
+    # server が token から解決する)。
+    user_id, email, _ = _resolve_creator_identity()
+    try:
+        doc = get_store().create_org(
+            name=name, creator_user_id=user_id, creator_email=email)
+    except (ValueError, RuntimeError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(doc, ensure_ascii=False))
+    else:
+        print(f"Created org {doc['org_id']} \"{doc['name']}\"")
+        owner = (doc.get("members") or [{}])[0]
+        print(f"  owner: {owner.get('email') or owner.get('user_id')}")
+        # 招待は所属だけを与え、アクセスは別途 project 参加で付く (participation-only)。
+        # `org invite` は後続タスク e-4232 で追加予定なので、未実装のコマンドを
+        # 案内しない (= ツールが実在しない次アクションを指し示さない)。
+        print("  組織に社員を招く導線 (org invite) は後続 e-4232 で追加予定です。"
+              "招いても所属だけで、必要な project に `beacon member add` で参加させて"
+              "初めてその project が見えます (participation-only)。")
+
+
+def cmd_org_list():
+    """List orgs the caller is a member of (ms-118 / e-4231).
+
+    Reads from env:
+      BEACON_USER_ID   visibility filter (defaults to current user; org は自分が
+                       member のものだけ出す)
+      BEACON_ORG_ALL   "1" → disable the actor filter (admin view, local only)
+      BEACON_JSON      "1" → emit json
+    """
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    all_orgs = os.environ.get("BEACON_ORG_ALL", "") == "1"
+
+    if all_orgs:
+        # --all (= 全件 admin view) は local mode 専用。cloud は auth token で
+        # サーバ側 filter されるため --all を渡しても効かない → 黙って素通り
+        # させず明示拒否する (= 全件を見たつもりが自分の org しか見えない誤解を防ぐ)。
+        if _is_cloud_mode():
+            print("Error: --all は local mode 専用です "
+                  "(cloud では自分が member の org のみ表示されます)。",
+                  file=sys.stderr)
+            sys.exit(1)
+        user_id = None
+    else:
+        uid, _, _ = _resolve_creator_identity()
+        # identity が解決できないときに黙って全件 admin view へ昇格しない
+        # (= help は「自分が member の org」と謳っているので、他 user の org を
+        # 混ぜて返すのは silent な開示違反)。
+        if not uid:
+            print("Error: 自分の identity が解決できませんでした (member 一覧を絞れません)。\n"
+                  "  `beacon member whoami` で確認するか、全件を見るなら --all を指定してください。",
+                  file=sys.stderr)
+            sys.exit(1)
+        user_id = uid
+
+    try:
+        orgs = get_store().list_orgs(user_id=user_id)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(orgs, ensure_ascii=False, indent=2))
+        return
+
+    if not orgs:
+        print("(no orgs yet — `beacon org create \"名前\"` で最初の組織を立てる)")
+        return
+
+    print(f"Orgs ({len(orgs)}):")
+    for o in orgs:
+        members = o.get("members") or []
+        personal = " [personal]" if o.get("personal") else ""
+        print(f"  {o.get('org_id')} \"{o.get('name')}\"{personal} "
+              f"— members: {len(members)}")
+
+
+def cmd_org_show():
+    """Show a single org by id (ms-118 / e-4231).
+
+    Reads from env:
+      BEACON_ORG_ID  (required) the org id to show
+      BEACON_JSON    "1" → emit json
+
+    member でない org は not found として扱う (= 存在を漏らさない)。
+    """
+    org_id = os.environ.get("BEACON_ORG_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not org_id:
+        print("Error: org id is required (beacon org show <org-id>)",
+              file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        doc = get_store().get_org(org_id)
+    except ValueError as e:
+        # not found: 有効な id を知る導線を添える。cloud では「member でない実在 org」も
+        # 同じ not found になる (= 存在を漏らさない業務規則) 点も明かし、id 綴りの
+        # 誤診で当て推量リトライに入るのを防ぐ。
+        print(f"Error: {e}", file=sys.stderr)
+        print("  自分が member の org は `beacon org list` で確認できます "
+              "(member でない org も not found として扱われます)。", file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    if json_mode:
+        print(json.dumps(doc, ensure_ascii=False, indent=2))
+        return
+
+    personal = " [personal]" if doc.get("personal") else ""
+    print(f"Org {doc.get('org_id')} \"{doc.get('name')}\"{personal}")
+    print(f"  created: {doc.get('created_at', '')}")
+    members = doc.get("members") or []
+    print(f"  members ({len(members)}):")
+    for m in members:
+        print(f"    - {m.get('email') or m.get('user_id')} ({m.get('role')})")
+
+
 def cmd_trek_create():
     """Create a new trek (= top-level cross-project collaboration area).
 
@@ -26619,6 +26761,10 @@ if __name__ == "__main__":
         "member_invitation_cancel": cmd_member_invitation_cancel,
         "member_join": cmd_member_join,
         "member_whoami": cmd_member_whoami,
+        # ms-118 e-4231: organizations (top-level tenancy) — create/list/show.
+        "org_create": cmd_org_create,
+        "org_list": cmd_org_list,
+        "org_show": cmd_org_show,
         "trek_create": cmd_trek_create,
         "trek_list": cmd_trek_list,
         "trek_show": cmd_trek_show,

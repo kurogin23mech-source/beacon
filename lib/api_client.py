@@ -985,6 +985,26 @@ class ApiClient:
         """Fetch a single trek by id. 403 if caller is neither creator nor member."""
         return self.get(f"/api/treks/{urllib.parse.quote(trek_id, safe='')}")
 
+    # ------------------------------------------------------------------
+    # Organizations (ms-118 / e-4231) — top-level tenancy entity.
+    # Mirrors the trek methods above: create/list/show over /api/orgs.
+    # ------------------------------------------------------------------
+    def create_org(self, *, name: str) -> dict:
+        """Create a team org. Caller (= auth token's user) becomes owner.
+
+        Creator identity is resolved server-side from the Bearer token, so
+        only ``name`` is sent (= client can't spoof the owner)。
+        """
+        return self.post("/api/orgs", {"name": name})
+
+    def list_orgs(self) -> list:
+        """List orgs the caller is a member of (= server filters by token)."""
+        return self.get("/api/orgs")
+
+    def get_org(self, org_id: str) -> dict:
+        """Fetch a single org by id. 404 if caller is not a member (= 存在を漏らさない)."""
+        return self.get(f"/api/orgs/{urllib.parse.quote(org_id, safe='')}")
+
     def patch_trek(self, trek_id: str, *, title: str | None = None,
                    description: str | None = None, type_: str | None = None) -> dict:
         """Update title / description / type. Leader-only."""

@@ -37,6 +37,60 @@ ORG_DESTRUCTIVE_ROLES = {ORG_ROLE_OWNER}
 _PERSONAL_ORG_PREFIX = "org-p-"
 
 
+_TEAM_ORG_PREFIX = "org-t-"
+
+
+def mint_org_id() -> str:
+    """team org (= 明示的に立てるチーム組織) の新しい id を発行する。
+
+    `org-t-{hex}` 形式。personal org (= 個人組織) の決定的 `org-p-{user_id}`
+    (personal_org_id) とは prefix で区別する — team org は複数社員を束ねる器で、
+    作成のたびに一意な id を持つ (personal のような決定的導出はしない)。
+    """
+    import secrets
+    return f"{_TEAM_ORG_PREFIX}{secrets.token_hex(4)}"
+
+
+def is_team_org_id(org_id: str) -> bool:
+    """org_id が team org (明示的に立てた組織) の id かどうか。"""
+    return isinstance(org_id, str) and org_id.startswith(_TEAM_ORG_PREFIX)
+
+
+def new_org(name: str, *, creator_user_id: str, creator_email: str = "",
+            now: str, org_id: str = "") -> dict:
+    """team org (= 明示的に立てるチーム組織) の doc を組み立てる (I/O 無し、未永続化)。
+
+    作成者は owner membership 1 件として載る (build_personal_org と同型)。`personal`
+    は False で、自動生成の個人組織 (build_personal_org) と構造的に区別する。
+
+    - `name`            : 組織の表示名 (法人名など)。空は不可
+    - `creator_user_id` : 作成者 (= owner になる)。空は不可
+    - `creator_email`   : 作成者の email (監査 / 表示用、無くても可)
+    - `now`             : ISO8601 timestamp を呼び出し側から渡す (= argless datetime を
+                          lib 内で呼ばず決定的にテスト可能にする、build_personal_org と同方針)
+    - `org_id`          : 明示指定があればそれを使う (= テストの決定性用)。無ければ発行する
+    """
+    if not name or not name.strip():
+        raise ValueError("org name is required")
+    if not creator_user_id:
+        raise ValueError("creator_user_id is required to create an org")
+    return {
+        "org_id": org_id or mint_org_id(),
+        "name": name.strip(),
+        "personal": False,
+        "members": [
+            {
+                "user_id": creator_user_id,
+                "email": creator_email,
+                "role": ORG_ROLE_OWNER,
+                "added_at": now,
+                "added_by": creator_user_id,
+            }
+        ],
+        "created_at": now,
+    }
+
+
 def personal_org_id(user_id: str) -> str:
     """user の personal org (個人組織) の決定的 id を返す。
 

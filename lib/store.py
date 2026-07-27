@@ -193,6 +193,48 @@ class Store(Protocol):
         """
         ...
 
+    # ------------------------------------------------------------------
+    # Organizations (ms-118 / e-4231) — top-level tenancy entity.
+    # trek と同型: org は project.json の外に住む cross-project entity なので、
+    # local backend は ~/.beacon/orgs/ の file、cloud backend は /api/orgs を
+    # 経由する。CLI から backend 分岐を消すため Store に集約する。
+    # ------------------------------------------------------------------
+
+    def create_org(self, *, name: str, creator_user_id: str = "",
+                   creator_email: str = "") -> dict:
+        """team org (= 明示的に立てる組織) を作り、作成者を owner にする。
+
+        ``creator_user_id`` / ``creator_email`` は **local backend のみ**が使う
+        (= ローカルには auth token が無いので呼び出し側の identity を渡す)。cloud
+        backend はこれを無視し、作成者を server が Bearer token から解決する (=
+        client が owner を詐称できない)。戻り値は作られた org doc。
+        """
+        ...
+
+    def list_orgs(self, *, user_id: str | None = None) -> list[dict]:
+        """caller が member の org を一覧する。
+
+        ``user_id`` は **local backend のみ**の可視性 filter (= cloud は server が
+        token から解決)。``None`` は local では全件 (= admin view)。cloud transport /
+        403 は RuntimeError として伝播する (= 既存 cloud path と一致)。
+        """
+        ...
+
+    def get_org(self, org_id: str) -> dict:
+        """org を id で 1 件取る。存在しない org は ``ValueError`` (CLI が backend
+        非依存に ``org 'X' not found`` を出せるように)。transport / auth error は
+        ``RuntimeError`` として伝播する。
+
+        **membership の強制は cloud (server) の責務**: StoreApi 経由 (cloud) では、
+        member でない実在 org も 404 → ``ValueError`` になる (= 存在を漏らさない、
+        trailnode get_org と同方針)。一方 **LocalStore (local mode) は単一ユーザーの
+        store** (= ``~/.beacon/orgs/`` はその端末の本人だけの器) なので、show では
+        membership を強制せず id 一致だけで返す。この非対称は「local = 単一ユーザー、
+        開示境界の真値は cloud」という設計の帰結であり、silent な穴ではない
+        (list は local でも user_id filter を持つが、show は single-user 前提)。
+        """
+        ...
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。
