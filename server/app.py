@@ -6437,12 +6437,17 @@ def add_trek_task_endpoint(
         # CLI surfaces that locally; cross-project we trust the Trek
         # scope owner's intent.
         try:
+            # ms-126: a Trek executor sprouting a task is a machine path — it
+            # may not have judged priority. If it supplies one, we use it; if
+            # empty, allow_untriaged=True records the ``untriaged`` sentinel as
+            # visible debt rather than rejecting the autonomous write.
             eid = core.task_add(
                 data, body.target_milestone, body.description,
                 entry_type=body.type, priority=body.priority,
                 motivation=body.motivation,
                 acceptance_criteria=body.acceptance_criteria,
                 author=author,
+                allow_untriaged=True,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))

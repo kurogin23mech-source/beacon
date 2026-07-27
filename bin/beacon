@@ -395,17 +395,19 @@ cmd_milestone_add() {
     local acceptance_criteria=""
     local owner=""
     local assignee=""
+    local allow_untriaged=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -d)                         target_date="${2:-}";          shift 2 ;;
             --description|--desc)       description="${2:-}";          shift 2 ;;
             --priority)                 priority="${2:-}";             shift 2 ;;
+            --untriaged)                allow_untriaged="1";           shift   ;;
             --objective)                objective="${2:-}";            shift 2 ;;
             --acceptance-criteria|--ac) acceptance_criteria="${2:-}";  shift 2 ;;
             --owner)                    owner="${2:-}";                shift 2 ;;
             --assignee)                 assignee="${2:-}";             shift 2 ;;
-            -?*)                        _guard_positional "$1" "Usage: beacon milestone add \"<title>\" [-d <date>] [--priority P] [--objective O] [--ac A] [--owner U] [--assignee U]" ;;
+            -?*)                        _guard_positional "$1" "Usage: beacon milestone add \"<title>\" [-d <date>] --priority P [--untriaged] [--objective O] [--ac A] [--owner U] [--assignee U]" ;;
             *)                          title="$1";                    shift   ;;
         esac
     done
@@ -416,13 +418,18 @@ cmd_milestone_add() {
         read -rp "Title: " title
         read -rp "Target date (YYYY-MM-DD): " target_date
         read -rp "Description: " description
-        read -rp "Priority (highest/high/medium/low/lowest): " priority
+        # ms-126: priority is mandatory. Loop until the user picks one of the 5
+        # severities so the interactive path can never fall through empty.
+        while [ -z "$priority" ]; do
+            read -rp "Priority (highest/high/medium/low/lowest): " priority
+        done
         read -rp "Objective (what becomes possible): " objective
         read -rp "Acceptance criteria (when is it done): " acceptance_criteria
     fi
 
     BEACON_TITLE="$title" BEACON_TARGET_DATE="$target_date" \
         BEACON_DESCRIPTION="$description" BEACON_PRIORITY="$priority" \
+        BEACON_ALLOW_UNTRIAGED="$allow_untriaged" \
         BEACON_OBJECTIVE="$objective" BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
         BEACON_OWNER="$owner" BEACON_ASSIGNEE="$assignee" \
         python3 "$COMMANDS_PY" milestone_add
@@ -2229,6 +2236,7 @@ cmd_task_add() {
     local priority=""
     local motivation=""
     local acceptance_criteria=""
+    local allow_untriaged=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -2237,9 +2245,10 @@ cmd_task_add() {
             -d|--detail)                detail="${2:-}";               shift 2 ;;
             --from)                     requested_by="${2:-}";         shift 2 ;;
             --priority)                 priority="${2:-}";             shift 2 ;;
+            --untriaged)                allow_untriaged="1";           shift   ;;
             --motivation|--why)         motivation="${2:-}";           shift 2 ;;
             --acceptance-criteria|--ac) acceptance_criteria="${2:-}";  shift 2 ;;
-            -?*)                        _guard_positional "$1" "Usage: beacon task add \"<description>\" [-m <ms-id>] [-t <type>] [-d <detail>] [--priority P] [--motivation W] [--ac A]" ;;
+            -?*)                        _guard_positional "$1" "Usage: beacon task add \"<description>\" [-m <ms-id>] [-t <type>] [-d <detail>] --priority P [--untriaged] [--motivation W] [--ac A]" ;;
             *)                          description="$1";              shift   ;;
         esac
     done
@@ -2251,6 +2260,7 @@ cmd_task_add() {
         BEACON_TYPE="$entry_type" BEACON_DATE="$date_str" \
         BEACON_DETAIL="$detail" BEACON_REQUESTED_BY="$requested_by" \
         BEACON_PRIORITY="$priority" BEACON_MOTIVATION="$motivation" \
+        BEACON_ALLOW_UNTRIAGED="$allow_untriaged" \
         BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
         python3 "$COMMANDS_PY" task_add
 }
