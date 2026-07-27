@@ -238,7 +238,9 @@ findings を対象リポ / チームに運べる形に配線する。ユーザ�
 - **レポート doc**: `beacon doc add --scope report --title "AX review: <target>"
   --stdin` で監査可能な記録として保存。
 - **Beacon task 化 (optional 増強)**: high / misleading の finding を
-  `beacon task add "<structural_fix>" -m <ms-id>` で follow-up task にする。既定
+  `beacon task add "<structural_fix>" -m <ms-id> --untriaged` で follow-up task にする
+  (ms-126: レビュー由来の派生タスクは優先度未判断なので `--untriaged` sentinel で起票 =
+  untriaged-backlog トリガーが後で triage を促す)。既定
   では task 化しない (レビューは task queue を勝手に膨らませない — /beacon-log と
   /beacon-task の責務分界)。ユーザーが望んだ finding だけ task 化する。
 

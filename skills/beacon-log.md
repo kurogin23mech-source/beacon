@@ -241,9 +241,9 @@ cd "$PROJECT_DIR" && beacon task done <entry-id> --reason "<判断軌跡 1〜2 �
 - AC 未定義のとき: 「AC 未定義。description『○○』とコミット内容が一致、entry-id 明示で HIGH 確信」
 - 複数 AC を 1 コミットで満たす場合: 「AC 全 N 項目（○○・△△・▲▲）をコミット <hash:7> で達成」
 
-**△ PARTIAL**: done を実行 **しない**。代わりに follow-up task を起票:
+**△ PARTIAL**: done を実行 **しない**。代わりに follow-up task を起票 (ms-126: 派生タスクは優先度未判断なので `--untriaged` で起票する = untriaged-backlog トリガーが後で triage を促す):
 ```bash
-cd "$PROJECT_DIR" && beacon task add "残: <未達 AC 項目を具体化>" -m <ms-id> \
+cd "$PROJECT_DIR" && beacon task add "残: <未達 AC 項目を具体化>" -m <ms-id> --untriaged \
   --motivation "<元タスク description> の AC のうち <未達項目> が未達" \
   --acceptance-criteria "<未達項目を測定可能な形で>"
 ```
