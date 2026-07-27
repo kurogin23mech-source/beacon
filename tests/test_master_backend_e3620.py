@@ -142,7 +142,7 @@ def test_beacon_default_over_mysql_roundtrip(mysql_persistence):
     # get / list(org) / external_ref 逆引きが mysql プリミティブ越しに通る
     assert adapter.get_account("macc-1")["name"] == "Acme"
     assert [r["master_account_id"] for r in adapter.list_accounts(ORG)] == ["macc-1"]
-    assert adapter.resolve_by_external_ref("salesforce", "SF-1")["master_account_id"] == "macc-1"
+    assert adapter.resolve_by_external_ref(ORG, "salesforce", "SF-1")["master_account_id"] == "macc-1"
     assert adapter.list_accounts("org-other") == []
 
 

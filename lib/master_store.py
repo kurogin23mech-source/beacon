@@ -112,8 +112,13 @@ class MasterIdentityAdapter(abc.ABC):
         """親会社 (master_account_id) に属す担当者を一覧する。"""
 
     @abc.abstractmethod
-    def resolve_by_external_ref(self, system: str, ref_id: str) -> Optional[dict]:
-        """外部システムの参照 (system, ref_id) から会社を逆引きする (adapter 突合の鍵)。"""
+    def resolve_by_external_ref(self, org_id: str, system: str, ref_id: str) -> Optional[dict]:
+        """org 内で外部システム参照 (system, ref_id) から会社を逆引きする (adapter 突合の鍵)。
+
+        org_id は必須。異なる org が同じ外部システム (例: 両者 Salesforce) で同じ ref_id
+        を持ちうるため、org 束縛 (SPEC §8) で絞らないと cross-org leak (別 org の identity
+        が漏れる) になる。participation-only 原則 (e-3733) と整合させ org を跨がない。
+        """
 
 
 # ---------------------------------------------------------------------------
@@ -147,10 +152,13 @@ class BeaconDefaultAdapter(MasterIdentityAdapter):
                 if mi.master_account_org_id(r) == org_id]
         return _sorted_by_created(rows)
 
-    def resolve_by_external_ref(self, system: str, ref_id: str) -> Optional[dict]:
-        if not system or not ref_id:
+    def resolve_by_external_ref(self, org_id: str, system: str, ref_id: str) -> Optional[dict]:
+        if not org_id or not system or not ref_id:
             return None
         for r in self._db.scan(ENTITY_MASTER_ACCOUNTS):
+            # org 束縛でまず絞る (= cross-org leak を構造的に塞ぐ、SPEC §8 / e-3733)。
+            if mi.master_account_org_id(r) != org_id:
+                continue
             ref = mi.master_external_ref(r)
             if ref.get("system") == system and ref.get("ref_id") == ref_id:
                 return r

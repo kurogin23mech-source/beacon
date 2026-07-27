@@ -88,12 +88,29 @@ def test_resolve_by_external_ref(adapter):
         external_ref={"system": "salesforce", "ref_id": "SF-42"},
     )
     adapter.put_account(acc, now=T1)
-    found = adapter.resolve_by_external_ref("salesforce", "SF-42")
+    found = adapter.resolve_by_external_ref(ORG_A, "salesforce", "SF-42")
     assert found is not None and found["master_account_id"] == "macc-1"
-    # 別 system / 別 ref は当たらない
-    assert adapter.resolve_by_external_ref("hubspot", "SF-42") is None
-    assert adapter.resolve_by_external_ref("salesforce", "SF-99") is None
-    assert adapter.resolve_by_external_ref("", "") is None
+    # 別 system / 別 ref / 別 org は当たらない
+    assert adapter.resolve_by_external_ref(ORG_A, "hubspot", "SF-42") is None
+    assert adapter.resolve_by_external_ref(ORG_A, "salesforce", "SF-99") is None
+    assert adapter.resolve_by_external_ref(ORG_B, "salesforce", "SF-42") is None  # 別 org
+    assert adapter.resolve_by_external_ref("", "salesforce", "SF-42") is None     # org 必須
+
+
+def test_resolve_by_external_ref_is_org_scoped_no_cross_org_leak(adapter):
+    # Org A と Org B が両方 Salesforce 連携で同じ ref (SF-42) を持つ衝突ケース。
+    # org 指定で正しく分離され、別 org の identity が漏れない (cross-org leak 防止)。
+    adapter.put_account(mi.new_master_account(
+        "Acme (A)", org_id=ORG_A, now=T1, master_account_id="macc-a",
+        external_ref={"system": "salesforce", "ref_id": "SF-42"}), now=T1)
+    adapter.put_account(mi.new_master_account(
+        "Acme (B)", org_id=ORG_B, now=T1, master_account_id="macc-b",
+        external_ref={"system": "salesforce", "ref_id": "SF-42"}), now=T1)
+    a = adapter.resolve_by_external_ref(ORG_A, "salesforce", "SF-42")
+    b = adapter.resolve_by_external_ref(ORG_B, "salesforce", "SF-42")
+    assert a["master_account_id"] == "macc-a"   # A は A の identity だけ
+    assert b["master_account_id"] == "macc-b"   # B は B の identity だけ
+    assert a["org_id"] == ORG_A and b["org_id"] == ORG_B
 
 
 # ---------------------------------------------------------------------------
