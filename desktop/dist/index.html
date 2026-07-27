@@ -3487,6 +3487,23 @@ const dataSource = {
   updateMyProfile: async (_displayName) => {
     throw new Error('Profile editing is Web-only in this build. Open the Web UI to set your display name.');
   },
+  // ms-118 / e-4236 slice2 — org 俯瞰 (read-only) の Tauri 側 parity。
+  // Web は HTTP (GET /api/orgs, /api/orgs/{id}/overview) を叩くが、Tauri は
+  // 全 backend アクセスを Rust invoke() 経由にする設計なので、org 用の Rust
+  // binding (cloud_list_orgs / cloud_org_overview) が要る。それは follow-up
+  // として切り出し、この build では安全側の no-op (= 空 state を置く) にする。
+  // これにより SHARED の openSettings が呼ぶ dataSource.loadOrgs /
+  // loadOrgOverviews は Tauri でも存在し (= method parity)、俯瞰セクションは
+  // 「所属している法人組織はまだありません」の空表示に degrade する
+  // (= loadMyProfile と同じ「Rust binding 未着地は空 state で inert 化」pattern)。
+  loadOrgs: async () => {
+    // No-op: leave state.orgs empty until the org Rust bindings land.
+    state.orgs = [];
+  },
+  loadOrgOverviews: async () => {
+    // No-op: no team-org overviews to fetch without the Rust bindings.
+    state.orgOverviews = state.orgOverviews || {};
+  },
   // ms-72 e-1779 — Member admin + invitation flow wired to Rust commands.
   // Was a "Web-only" throw stub before the Rust layer landed (= ms-72 prior).
   // SHARED Settings > Members tab now reaches the real backend through these
@@ -6073,6 +6090,13 @@ async function openSettings(tab) {
     } else {
       _resolveMyRole();
     }
+    // ms-118 / e-4236 slice2 — org 俯瞰 (read-only) のデータも Members タブで
+    // 一緒に読む。orgs 一覧 → team org ごとの overview を順に取り、揃ったら
+    // 再描画する (= 「shell を先に出し、fetch 解決で slot を埋める」既存 Members /
+    // Audit タブと同じ非同期パターン)。失敗は握り潰して俯瞰セクションを空表示に。
+    dataSource.loadOrgs().catch(() => {})
+      .then(() => dataSource.loadOrgOverviews().catch(() => {}))
+      .then(() => renderSettings());
   }
   // Ensure data is loaded so the two tabs have something to render.
   if (state.settingsTab === 'agents'
@@ -6212,6 +6236,86 @@ function _renderSettingsMembersTab() {
           <span class="beacon-tooltip-icon">?</span>
         </span>
       </div>
+    </div>
+    ${_renderSettingsOrgsSection()}`;
+}
+
+// ms-118 / e-4236 slice2 — 組織 (org) の俯瞰 (read-only)。
+//
+// 「どの org に どの project と member があり、誰がどの project に参加しているか」
+// (SPEC 受入条件7) を 1 望する read-only セクション。書き込み操作 (作成 / 招待 /
+// 付け替え) は当面 CLI / AI 代行に委ね (SPEC 方針5 + CORE doc ux-principle-no-terminal)、
+// ここは俯瞰に徹する — 従って data-action は 1 つも持たない (= handler parity 不要)。
+//
+// 表示は team org (= 明示的に立てた法人 org、org-t-*) のみ。各 project の member は
+// role と external_guest (= org 非所属の外部ゲスト、e-4235) 付き。overview endpoint
+// が participation-only で絞る (= caller が参加している project のみ) ため、この俯瞰も
+// 「org 所属だけでは何も見えない」を素直に映す。
+function _renderSettingsOrgsSection() {
+  const orgs = (state.orgs || []).filter(
+    o => o && typeof (o.org_id || '') === 'string' && (o.org_id || '').startsWith('org-t-'));
+  const overviews = state.orgOverviews || {};
+  const tip = 'org 所属はアクセスを与えません (participation-only)。'
+    + 'ここに出る project は、あなたが参加している project だけです。'
+    + '作成 / 招待 / 付け替えは beacon org CLI (AI 代行) で行います。';
+  let body;
+  if (!orgs.length) {
+    body = `<div style="font-size:0.72rem;color:var(--text-dim);">
+        所属している法人組織 (team org) はまだありません。
+        <code style="color:var(--text-secondary);">beacon org create "法人名"</code> で立てられます。
+      </div>`;
+  } else {
+    body = orgs.map((o) => {
+      const oid = o.org_id;
+      const ov = overviews[oid];
+      const orgName = esc(o.name || (ov && ov.name) || oid);
+      let projHtml;
+      if (ov === undefined) {
+        projHtml = `<div style="font-size:0.7rem;color:var(--text-dim);padding:4px 0;">Loading…</div>`;
+      } else if (ov === null) {
+        projHtml = `<div style="font-size:0.7rem;color:var(--text-dim);padding:4px 0;">俯瞰を取得できませんでした。</div>`;
+      } else if (!ov.projects || !ov.projects.length) {
+        projHtml = `<div style="font-size:0.7rem;color:var(--text-dim);padding:4px 0;">
+            あなたが参加している project はこの org にありません (participation-only)。
+          </div>`;
+      } else {
+        projHtml = ov.projects.map((p) => {
+          const members = (p.members || []).map((m) => {
+            const guest = m.external_guest
+              ? ` <span style="color:var(--text-dim);border:1px solid var(--border-subtle);border-radius:2px;padding:0 4px;font-size:0.62rem;">外部ゲスト</span>`
+              : '';
+            return `<span style="display:inline-flex;align-items:center;gap:4px;background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:3px;padding:2px 6px;margin:2px 4px 2px 0;font-size:0.68rem;">
+                <span style="color:var(--text-secondary);">${esc(m.user_id || '')}</span>
+                <span style="color:var(--text-dim);">[${esc(m.role || 'viewer')}]</span>${guest}
+              </span>`;
+          }).join('');
+          return `<div style="margin:6px 0 6px 10px;padding-left:8px;border-left:2px solid var(--border-subtle);">
+              <div style="font-size:0.74rem;color:var(--text-primary);">
+                ${esc(p.name || '')}
+                <span style="color:var(--text-dim);font-size:0.66rem;">${esc(p.project_id || '')}</span>
+              </div>
+              <div style="margin-top:3px;">${members || `<span style="font-size:0.68rem;color:var(--text-dim);">(member なし)</span>`}</div>
+            </div>`;
+        }).join('');
+      }
+      return `<div style="margin-bottom:12px;padding:8px 10px;background:var(--bg-surface);border:1px solid var(--border-subtle);border-radius:4px;">
+          <div style="font-size:0.82rem;color:var(--accent);font-family:var(--font-mono);">
+            ${orgName}
+            <span style="color:var(--text-dim);font-size:0.66rem;">${esc(oid)}</span>
+          </div>
+          ${projHtml}
+        </div>`;
+    }).join('');
+  }
+  return `
+    <div class="settings-section">
+      <div class="label">
+        Organizations (組織の俯瞰 — read-only)
+        <span class="beacon-tooltip" data-tooltip="${esc(tip)}">
+          <span class="beacon-tooltip-icon">?</span>
+        </span>
+      </div>
+      ${body}
     </div>`;
 }
 
