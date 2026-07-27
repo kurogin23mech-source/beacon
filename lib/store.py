@@ -235,6 +235,32 @@ class Store(Protocol):
         """
         ...
 
+    def invite_org_member(self, org_id: str, *, email: str,
+                          role: str = "member") -> dict:
+        """org に社員を「所属」させる (= org member にする、ms-118 / e-4232)。
+
+        **所属だけを与え、アクセスは付けない (participation-only)**: この操作は org doc の
+        members[] にしか触れず、どの project の participation (= 参加 = アクセス) も変えない。
+        招かれた社員は org の member になるが、必要な project に別途参加させるまで
+        どの project も見えない。
+
+        cloud では server が email を実 user に解決し (存在しなければ ``ValueError``)、
+        呼び出し元が org member であることを検査する。local (単一ユーザー) では email を
+        識別子として member に加える。戻り値は更新後の org doc。role は member / admin。
+        transport / auth / 権限エラーは ``RuntimeError`` として伝播する。
+        """
+        ...
+
+    def remove_org_member(self, org_id: str, *, target: str) -> dict:
+        """org から member を外す (ms-118 / e-4232)。``target`` は user_id か email。
+
+        最後の owner は外せない (= org を owner 不在にしない安全弁、``ValueError``)。
+        cloud では owner / admin だけが実行できる (= 破壊的操作の owner-only 厳格化と
+        org 削除との統一ガードは e-4234)。存在しない member は ``ValueError``。戻り値は
+        更新後の org doc。transport / auth / 権限エラーは ``RuntimeError``。
+        """
+        ...
+
     def purge_milestone(self, ms_id: str, *,
                         reason: str, index: int | None = None) -> dict:
         """Hard-delete a milestone record (= 物理削除、duplicate-ID 回復用、Issue #14)。

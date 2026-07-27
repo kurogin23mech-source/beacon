@@ -1005,6 +1005,19 @@ class ApiClient:
         """Fetch a single org by id. 404 if caller is not a member (= 存在を漏らさない)."""
         return self.get(f"/api/orgs/{urllib.parse.quote(org_id, safe='')}")
 
+    def invite_org_member(self, org_id: str, *, email: str,
+                          role: str = "member") -> dict:
+        """Invite a member into an org (participation-only). Caller must be a member."""
+        return self.post(
+            f"/api/orgs/{urllib.parse.quote(org_id, safe='')}/members",
+            {"email": email, "role": role})
+
+    def remove_org_member(self, org_id: str, *, target: str) -> dict:
+        """Remove a member (user_id or email) from an org. Owner/admin only server-side."""
+        return self.delete(
+            f"/api/orgs/{urllib.parse.quote(org_id, safe='')}/members/"
+            f"{urllib.parse.quote(target, safe='')}")
+
     def patch_trek(self, trek_id: str, *, title: str | None = None,
                    description: str | None = None, type_: str | None = None) -> dict:
         """Update title / description / type. Leader-only."""

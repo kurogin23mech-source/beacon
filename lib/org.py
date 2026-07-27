@@ -149,6 +149,20 @@ def is_org_member(org: dict, user_id: str) -> bool:
     return bool(org_member_role(org, user_id))
 
 
+def find_org_member(org: dict, ident: str) -> dict:
+    """org member を user_id **または** email で引く (ms-118 / e-4232)。無ければ {}。
+
+    remove / role 操作の宛先解決を 1 箇所に寄せる (= user_id を知らなくても
+    email で member を指せる)。member entry (dict) を返す。
+    """
+    if not org or not ident:
+        return {}
+    for m in org.get("members", []) or []:
+        if m.get("user_id") == ident or (m.get("email") and m.get("email") == ident):
+            return m
+    return {}
+
+
 def add_org_member(org: dict, user_id: str, *, role: str = ORG_ROLE_MEMBER,
                    email: str = "", added_by: str = "", now: str) -> dict:
     """org に member を追加する (既存 user なら role / email を更新)。

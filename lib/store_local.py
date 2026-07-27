@@ -254,6 +254,44 @@ class LocalStore:
             raise ValueError(f"org '{org_id}' not found")
         return doc
 
+    def invite_org_member(self, org_id: str, *, email: str,
+                          role: str = "member") -> dict:
+        """Add a member to a local org (participation-only, touches no project).
+
+        Local mode is single-user and has no user directory, so the email is
+        used as the member identifier. Only the org doc is written — no
+        project participation is granted.
+        """
+        import datetime
+        import org as org_mod
+        import org_store
+        if not email:
+            raise ValueError("email is required to invite an org member")
+        org = org_store.load_org(org_id)
+        if org is None:
+            raise ValueError(f"org '{org_id}' not found")
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        # local: email を識別子として使う (単一ユーザー機なので user directory が無い)。
+        org_mod.add_org_member(org, email, role=role, email=email,
+                               added_by=email, now=now)
+        org_store.save_org(org)
+        return org
+
+    def remove_org_member(self, org_id: str, *, target: str) -> dict:
+        """Remove a member (by user_id or email) from a local org."""
+        import org as org_mod
+        import org_store
+        org = org_store.load_org(org_id)
+        if org is None:
+            raise ValueError(f"org '{org_id}' not found")
+        member = org_mod.find_org_member(org, target)
+        if not member:
+            raise ValueError(f"org member '{target}' not found in {org_id}")
+        # last-owner 保護は remove_org_member 内 (= ValueError)。owner-only 厳格化は e-4234。
+        org_mod.remove_org_member(org, member.get("user_id"))
+        org_store.save_org(org)
+        return org
+
     def start_watching(self) -> None:
         pass
 
