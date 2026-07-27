@@ -21,9 +21,15 @@ sys.path.insert(0, str(REPO / "lib"))
 
 import master_identity as mi  # noqa: E402
 import master_projection as mp  # noqa: E402
+import master_store as ms  # noqa: E402
 
 ORG = "org-p-u1"
 NOW = "2026-07-27T00:00:00+00:00"
+
+
+@pytest.fixture
+def adapter():
+    return ms.BeaconDefaultAdapter(ms.InMemoryMasterStore())
 
 
 # ---------------------------------------------------------------------------
@@ -96,3 +102,47 @@ def test_project_account_to_master_is_pure():
     acc = {"id": "acc-1", "name": "Acme", "phase": "リード"}
     mp.project_account_to_master(acc, org_id=ORG, now=NOW, master_account_id="macc-1")
     assert "master_ref" not in acc and acc["phase"] == "リード"
+
+
+# ---------------------------------------------------------------------------
+# 読み出しのマスター一本化: link 済は master、未 link/adapter 無しは投影 fallback
+# ---------------------------------------------------------------------------
+def test_resolve_account_identity_reads_master_when_linked(adapter):
+    acc = {"id": "acc-1", "name": "旧名 (投影)", "label": "旧名 (投影)", "phase": "リード"}
+    mp.link_new_account_to_master(acc, adapter, org_id=ORG, now=NOW)
+    # master 側の name を後から変える (= master が真値源)
+    mid = mp.linked_master_account_id(acc)
+    adapter.put_account({**adapter.get_account(mid), "name": "新名 (master)"}, now=NOW)
+    # 投影の name は "旧名" のままだが、resolve は master 経由で "新名" を返す
+    assert acc["name"] == "旧名 (投影)"
+    assert mp.resolve_account_identity(acc, adapter) == "新名 (master)"
+
+
+def test_resolve_account_identity_falls_back_when_unlinked(adapter):
+    acc = {"id": "acc-1", "name": "Acme", "label": "Acme"}
+    # 未 link → 投影の tolerant read
+    assert mp.resolve_account_identity(acc, adapter) == "Acme"
+    # adapter 無し (local mode) でも投影へ fallback
+    assert mp.resolve_account_identity(acc, None) == "Acme"
+    # label 優先の tolerant 挙動 (work_model.target_label 準拠)
+    assert mp.resolve_account_identity({"name": "N", "label": "L"}, None) == "L"
+
+
+def test_link_new_account_is_idempotent(adapter):
+    acc = {"id": "acc-1", "name": "Acme"}
+    a = mp.link_new_account_to_master(acc, adapter, org_id=ORG, now=NOW)
+    b = mp.link_new_account_to_master(acc, adapter, org_id=ORG, now=NOW)
+    assert a["master_account_id"] == b["master_account_id"]   # 二重起票しない
+    assert len(adapter.list_accounts(ORG)) == 1
+
+
+def test_link_new_contact_and_resolve(adapter):
+    acc = {"id": "acc-1", "name": "Acme"}
+    master_acc = mp.link_new_account_to_master(acc, adapter, org_id=ORG, now=NOW)
+    c = {"name": "Taro", "email": "t@acme.example", "role": "CTO", "phone": "03"}
+    mp.link_new_contact_to_master(c, adapter, org_id=ORG,
+                                  master_account_id=master_acc["master_account_id"], now=NOW)
+    ident = mp.resolve_contact_identity(c, adapter)
+    assert ident == {"name": "Taro", "email": "t@acme.example", "phone": "03", "role": "CTO"}
+    # 未 link contact は投影 fallback
+    assert mp.resolve_contact_identity({"name": "X"}, adapter)["name"] == "X"
