@@ -554,6 +554,139 @@ def add_blocker(trek_doc: dict, *, target_id: str, blocker_target_id: str,
     return trek_doc
 
 
+def blockers_all_satisfied(trek_doc: dict, target_id: str) -> bool:
+    """Return True iff every blocker of ``target_id`` has reached a satisfied state.
+
+    "Satisfied" = ``leader_review`` or beyond (= 取り込み済み). A target with no
+    blockers is vacuously satisfied (= nothing gates it). This is the AND
+    predicate that drives auto-unblock (方針4).
+    """
+    blockers = get_blockers(trek_doc, target_id)
+    return all(blocker_is_satisfied(trek_doc, b) for b in blockers)
+
+
+def reconcile_blocks(trek_doc: dict, *, updated_by_session_id: str = "server",
+                     now: datetime.datetime | None = None) -> dict:
+    """Reconcile every target's block state against the live dependency graph.
+
+    ms-128 方針4 (e-4365) — the server calls this each tick. Edges persist after
+    unblock (the ledger is the durable dependency record), so this function is
+    the single idempotent place that keeps the ``block`` *state* consistent with
+    the *edges*:
+
+      * **AND auto-unblock**: a ``block`` target whose blockers are *all*
+        satisfied (each at leader_review+) → ``block → todo`` (= 全 blocker が
+        取り込み済みに達したら自動再開).
+      * **Rollback cascade** (方針4: "取り込み済みだから安全" とは無条件宣言
+        しない): if a blocker later regresses below satisfied, a dependent that
+        was already unblocked but *not yet started* (state ``todo``) is
+        re-blocked (``todo → block``); a dependent already ``working`` is **not**
+        yanked mid-flight — it is surfaced as a warning for the leader to judge.
+
+    Only targets that carry edges are considered. Targets past their own
+    hand-off (leader_review / user_review) are left untouched — their own work
+    is merged, so their dependencies no longer gate them.
+
+    Returns ``{"unblocked": [...], "reblocked": [...], "warnings": [...]}`` where
+    each warning is ``{"target": id, "unsatisfied": [blocker_id, ...]}``. Pure
+    w.r.t. clock (``now`` accepted for symmetry with the halt path; unused today
+    but kept so the server tick can pass a single injected clock).
+    """
+    graph = trek_doc.get(TARGET_BLOCKERS_KEY) or {}
+    unblocked: list[str] = []
+    reblocked: list[str] = []
+    warnings: list[dict] = []
+
+    # Sort for deterministic order (tests + audit logs don't depend on dict
+    # insertion quirks).
+    for target_id in sorted(graph.keys()):
+        if not (graph.get(target_id) or []):
+            continue  # no live edges
+        state = get_task_state(trek_doc, target_id)
+        all_ok = blockers_all_satisfied(trek_doc, target_id)
+
+        if state == "block":
+            if all_ok:
+                set_task_state(trek_doc, task_id=target_id, state="todo",
+                               updated_by_session_id=updated_by_session_id,
+                               note="auto-unblock: all blockers satisfied")
+                unblocked.append(target_id)
+            # else: still waiting on ≥1 blocker → leave blocked.
+        elif state == "todo":
+            if not all_ok:
+                # Was unblocked earlier, a blocker regressed, and this dependent
+                # hasn't started → safe to re-block.
+                set_task_state(trek_doc, task_id=target_id, state="block",
+                               updated_by_session_id=updated_by_session_id,
+                               note="rollback: a blocker regressed below satisfied")
+                reblocked.append(target_id)
+        elif state == "working":
+            if not all_ok:
+                # In flight — don't yank. Surface for the leader (方針4).
+                unsatisfied = [
+                    b for b in get_blockers(trek_doc, target_id)
+                    if not blocker_is_satisfied(trek_doc, b)
+                ]
+                warnings.append({"target": target_id, "unsatisfied": unsatisfied})
+        # leader_review / user_review: hand-off done, deps no longer gate → skip.
+
+    return {"unblocked": unblocked, "reblocked": reblocked, "warnings": warnings}
+
+
+def detect_blocker_cycles(trek_doc: dict) -> list[list[str]]:
+    """Return any dependency cycles present in the blocker graph.
+
+    ms-128 方針4 二段循環検知 第 (ii) 段 — ``add_blocker`` rejects cycles at write
+    time, so a healthy graph returns ``[]``. This whole-graph re-scan is the
+    defensive second stage the server runs at reconcile time to catch a dynamic
+    cycle that could only arise from concurrent interleaving (unblock + re-block)
+    or a ledger written outside ``add_blocker``. Each cycle is returned as the
+    list of target-ids on the loop (canonicalised to start at its smallest id so
+    the output is stable for tests / dedup).
+
+    Uses iterative DFS with a recursion stack (white/grey/black colouring).
+    """
+    adjacency = _blocker_adjacency(trek_doc)
+    nodes = set(adjacency.keys())
+    for deps in adjacency.values():
+        nodes.update(deps)
+
+    WHITE, GREY, BLACK = 0, 1, 2
+    colour = {n: WHITE for n in nodes}
+    cycles: list[list[str]] = []
+    seen_cycles: set[tuple] = set()
+
+    def _canonical(loop: list[str]) -> list[str]:
+        i = loop.index(min(loop))
+        return loop[i:] + loop[:i]
+
+    for root in sorted(nodes):
+        if colour[root] != WHITE:
+            continue
+        # stack holds (node, path-to-node). Grey = on current path.
+        stack: list[tuple[str, list[str]]] = [(root, [root])]
+        colour[root] = GREY
+        while stack:
+            node, path = stack[-1]
+            advanced = False
+            for dep in adjacency.get(node, ()):
+                if colour.get(dep, WHITE) == GREY and dep in path:
+                    loop = _canonical(path[path.index(dep):])
+                    key = tuple(loop)
+                    if key not in seen_cycles:
+                        seen_cycles.add(key)
+                        cycles.append(loop)
+                elif colour.get(dep, WHITE) == WHITE:
+                    colour[dep] = GREY
+                    stack.append((dep, path + [dep]))
+                    advanced = True
+                    break
+            if not advanced:
+                colour[node] = BLACK
+                stack.pop()
+    return cycles
+
+
 def session_has_active_claim(trek_doc: dict, *, session_id: str) -> bool:
     """Return True iff ``session_id`` has at least one non-terminal claim (ms-88 / e-2109).
 
