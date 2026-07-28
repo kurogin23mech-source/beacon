@@ -995,6 +995,62 @@ def cmd_cloud_join():
 
 
 # ---------------------------------------------------------------------------
+# ms-126 / e-4222 — untriaged is a MACHINE capability, not a human escape hatch
+# ---------------------------------------------------------------------------
+#
+# The ms-126 forcing function makes priority mandatory on the human entry path
+# (`beacon task add` / `beacon milestone add`): an empty priority is rejected so
+# a person actually picks one of the 5 severities. Machine call sites that
+# genuinely have not judged a priority yet (issue import / review-derived /
+# roadmap bulk / dispatch-derived) opt into the `untriaged` sentinel instead, so
+# the missing judgement becomes *visible debt* (the untriaged-backlog trigger)
+# rather than a silent empty field.
+#
+# The gap this closes: `--untriaged` (→ BEACON_ALLOW_UNTRIAGED=1) was reachable
+# on the HUMAN CLI path too, so a person at a straight terminal could type
+# `beacon task add "…" --untriaged` (or `export BEACON_ALLOW_UNTRIAGED=1`) and
+# skip the "pick a priority" forcing function entirely — a hole straight through
+# the human=mandatory design line.
+#
+# The fix is an actor-based gate, reusing the established BEACON_SESSION_KIND
+# convention (see `_session_kind_is_human` and the ms-119 approval guards):
+#   * A NON-human session (SESSION_KIND unset / "ai") — Claude Code and the
+#     Skill-driven machine paths (dispatch / review-run / roadmap / log
+#     follow-up), plus in-process core call sites — may set untriaged.
+#   * A HUMAN session (SESSION_KIND=human, = a person at a straight terminal)
+#     that passes `--untriaged` / BEACON_ALLOW_UNTRIAGED=1 is REFUSED: the human
+#     owns the priority judgement and must make it. The untriaged sentinel is a
+#     machine deferral, never a human "I'll decide later".
+#
+# Note the polarity is inverted from the ms-119 approval guards (there the AI is
+# banned by default and a human bypasses). Here the *human* is the one refused
+# untriaged, because untriaged means "no human has judged this yet" — a
+# self-contradiction when the actor IS the human.
+def _human_untriaged_bypass_refused() -> bool:
+    """True when a human session is trying to use the untriaged escape hatch.
+
+    Returns True iff BOTH: the process asked for untriaged
+    (BEACON_ALLOW_UNTRIAGED=1, set by the `--untriaged` flag or a manual export)
+    AND the calling session declares itself human (BEACON_SESSION_KIND=human).
+    In that case the caller MUST be forced back onto the priority forcing
+    function. Machine / AI sessions (the default) are unaffected.
+    """
+    allow_untriaged = os.environ.get("BEACON_ALLOW_UNTRIAGED", "") == "1"
+    return allow_untriaged and _session_kind_is_human()
+
+
+# The human-facing rejection when a human session tries `--untriaged`. Speaks
+# with the same "pick one of the 5, untriaged is machine-only" voice as
+# core._UNTRIAGED_NOT_SEVERITY_MSG so the two forcing-function surfaces agree.
+_HUMAN_UNTRIAGED_REFUSED_MSG = (
+    "Priority is required. '--untriaged' is a machine-only sentinel (issue "
+    "import / review-derived / roadmap / dispatch); a human session cannot use "
+    "it to defer the judgement. Choose one of: highest, high, medium, low, "
+    "lowest (highest = 大目的への寄与が最大 / lowest = 最小)."
+)
+
+
+# ---------------------------------------------------------------------------
 # Milestone commands
 # ---------------------------------------------------------------------------
 
@@ -1013,6 +1069,14 @@ def cmd_milestone_add():
     # when they cannot supply a human-judged severity. The bare human command
     # leaves it unset and an empty priority is rejected with the 5-value list.
     allow_untriaged = os.environ.get("BEACON_ALLOW_UNTRIAGED", "") == "1"
+    # ms-126 / e-4222: untriaged is a machine-only sentinel. A human session
+    # (BEACON_SESSION_KIND=human) that passes --untriaged is refused here — the
+    # human owns the priority judgement and must pick one of the 5. Machine / AI
+    # sessions (default) keep the untriaged capability. This closes the hole
+    # where a person could bypass the mandatory-priority forcing function.
+    if _human_untriaged_bypass_refused():
+        print(f"Error: {_HUMAN_UNTRIAGED_REFUSED_MSG}", file=sys.stderr)
+        sys.exit(1)
     data = load_project()
     _gate_target_class(data, "milestone")  # ms-115: block in non-dev projects
     # ms-43 / e-2281 — stamp the human author on the milestone so the Web
@@ -4374,6 +4438,14 @@ def cmd_task_add():
     # ms-126: priority mandatory on the human path; machine callers opt into the
     # ``untriaged`` sentinel via ``--untriaged`` (BEACON_ALLOW_UNTRIAGED=1).
     allow_untriaged = os.environ.get("BEACON_ALLOW_UNTRIAGED", "") == "1"
+    # ms-126 / e-4222: refuse the untriaged escape hatch on a human session — a
+    # person must pick a real priority; only machine / AI paths may defer with
+    # the untriaged sentinel. See _human_untriaged_bypass_refused. Checked before
+    # the ms-81 re-open prompt so a human --untriaged is rejected up front,
+    # regardless of the target milestone's state.
+    if _human_untriaged_bypass_refused():
+        print(f"Error: {_HUMAN_UNTRIAGED_REFUSED_MSG}", file=sys.stderr)
+        sys.exit(1)
 
     data = load_project()
     target = core.find_target_milestone(data, ms_id)
