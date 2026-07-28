@@ -100,22 +100,23 @@ if _trek_for_constants is not None:
         DEFAULT_TASK_STATE = _trek_for_constants.DEFAULT_TASK_STATE  # (= "todo")
         # ms-128 方針5: done を Trek 状態機械から除去、user_review が唯一の terminal。
         TERMINAL_TASK_STATES = _trek_for_constants.TERMINAL_TASK_STATES  # (= ("user_review",))
+        # ms-128 方針 (e-4287): 二層 tick の executor 発火集合。状態機械の正典
+        # (lib/trek.py) から import し、分割の定義を 1 ファイルに集約する。
+        EXECUTOR_ACTIVE_STATES = _trek_for_constants.EXECUTOR_ACTIVE_STATES  # (= ("todo","working"))
     except AttributeError:
         DEFAULT_TASK_STATE = "todo"
         TERMINAL_TASK_STATES = ("user_review",)
+        EXECUTOR_ACTIVE_STATES = ("todo", "working")
 else:
     DEFAULT_TASK_STATE = "todo"
     TERMINAL_TASK_STATES = ("user_review",)
+    EXECUTOR_ACTIVE_STATES = ("todo", "working")
 del _trek_for_constants
 
 WORKING_TASK_STATE = "working"
 
-# ms-128 方針 (e-4287) — 二層 tick の executor 側停止条件。executor が「まだ手を
-# 動かす」状態 = todo (claim 済未着手) / working (作業中) の 2 つ。leader_review
-# (hand-off 済) と user_review (terminal) は executor にとって done なので、この
-# 集合に入らない = executor tick が発火しない。leader tick が leader_review 以降を
-# 引き取る (should_fire_leader_tick)。
-EXECUTOR_ACTIVE_STATES = (DEFAULT_TASK_STATE, WORKING_TASK_STATE)
+# (EXECUTOR_ACTIVE_STATES は上の _trek_for_constants 経路で lib/trek.py の状態機械
+#  正典から import 済 = 二層 tick の分割定義を 1 ファイルに集約。)
 
 # ms-75 / e-2067 + ms-88 / e-2107 + ms-95 / e-2646 — server-side TTL safety
 # net default. **24h (= 1440 min)** baseline (was 12 min, was 30 min).
@@ -424,17 +425,24 @@ def should_fire_executor_tick(
 ) -> bool:
     """Lazy-start decision for one executor's progress-check tick.
 
-    ms-99 / e-2833 — Phase 2 refactor: slot-inventory based. Returns True iff:
-      * The executor holds an active claim on a slot (= slot.owner_session_id
-        equals ``session_id`` AND slot.resolved_state is non-terminal;
-        source may be unstamped — the executor explicitly claimed it), OR
+    ms-99 / e-2833 — Phase 2 refactor: slot-inventory based.
+    ms-128 / e-4287 — 二層 tick: executor tick は claim が
+    ``EXECUTOR_ACTIVE_STATES`` (= todo / working) にある時だけ発火する。
+    Returns True iff:
+      * The executor holds a claim on a slot (= slot.owner_session_id
+        equals ``session_id``) whose resolved_state is in
+        ``EXECUTOR_ACTIVE_STATES`` (todo / working — executor がまだ手を
+        動かす状態), OR
       * The trek has an unclaim todo slot with a real cache/pool signal
         the executor could pick up.
 
-    Returns False when the executor's claims are all terminal AND no
-    unclaim todo signal remains (= AC33 stop condition). The server
-    orchestrator falls back to a minimal broadcast if every executor's
-    decision is False so no complete silence occurs.
+    Returns False when the executor's claims are all beyond
+    ``EXECUTOR_ACTIVE_STATES`` — i.e. handed off to the leader
+    (``leader_review``) or terminal (``user_review``) — AND no unclaim
+    todo signal remains. leader_review 以降は leader tick
+    (``should_fire_leader_tick``) が引き取る。The server orchestrator
+    falls back to a minimal broadcast if every executor's decision is
+    False so no complete silence occurs.
     """
     slots = materialize_slots(trek_doc, get_project=get_project)
     for slot in slots:
