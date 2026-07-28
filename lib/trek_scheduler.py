@@ -110,6 +110,13 @@ del _trek_for_constants
 
 WORKING_TASK_STATE = "working"
 
+# ms-128 方針 (e-4287) — 二層 tick の executor 側停止条件。executor が「まだ手を
+# 動かす」状態 = todo (claim 済未着手) / working (作業中) の 2 つ。leader_review
+# (hand-off 済) と user_review (terminal) は executor にとって done なので、この
+# 集合に入らない = executor tick が発火しない。leader tick が leader_review 以降を
+# 引き取る (should_fire_leader_tick)。
+EXECUTOR_ACTIVE_STATES = (DEFAULT_TASK_STATE, WORKING_TASK_STATE)
+
 # ms-75 / e-2067 + ms-88 / e-2107 + ms-95 / e-2646 — server-side TTL safety
 # net default. **24h (= 1440 min)** baseline (was 12 min, was 30 min).
 #
@@ -433,7 +440,14 @@ def should_fire_executor_tick(
     for slot in slots:
         if slot.owner_session_id != session_id:
             continue
-        if slot.resolved_state not in TERMINAL_TASK_STATES:
+        # ms-128 方針 (e-4287) — 二層 tick: 実行 tick は leader_review で止める。
+        # executor が slot を leader_review に倒した (= 完成し PR 化して hand-off
+        # した) 時点で、その slot に対する executor の仕事は終わり (= leader が
+        # review へ引き取る)。よって executor tick が still 発火するのは、自分が
+        # まだ手を動かす状態 (todo = claim 済未着手 / working = 作業中) の claim を
+        # 持つ時だけ。leader_review (hand-off 済) と user_review (terminal) は
+        # どちらも「executor はもうやることが無い」= silent。
+        if slot.resolved_state in EXECUTOR_ACTIVE_STATES:
             return True
     # No active claim → fall through to the unclaim-todo pickup check.
     for slot in _signal_slots(slots):

@@ -228,6 +228,28 @@ class TestShouldFireExecutorTick:
             t, session_id="sv-exec1", get_project=_empty_gp,
         ) is False
 
+    def test_executor_with_leader_review_claim_silent(self):
+        """ms-128 方針 (e-4287) — 二層 tick: executor が slot を leader_review に
+        倒した (= 完成し PR 化して hand-off した) 時点で executor tick は止まる。
+        leader tick が leader_review 以降を引き取る。leader_review は executor に
+        とって「もうやることが無い」状態。"""
+        t = _trek_with_states({
+            "e-1": {"state": "leader_review", "updated_by_session_id": "sv-exec1"},
+        })
+        assert trek_scheduler_mod.should_fire_executor_tick(
+            t, session_id="sv-exec1", get_project=_empty_gp,
+        ) is False
+
+    def test_executor_with_working_claim_fires(self):
+        """ms-128 方針 (e-4287) — 対照: まだ working (作業中) の claim を持つ
+        executor は発火し続ける (leader_review に倒すまでが executor の仕事)。"""
+        t = _trek_with_states({
+            "e-1": {"state": "working", "updated_by_session_id": "sv-exec1"},
+        })
+        assert trek_scheduler_mod.should_fire_executor_tick(
+            t, session_id="sv-exec1", get_project=_empty_gp,
+        ) is True
+
     def test_executor_terminal_claims_fires_if_unclaim_todo(self):
         """Even with all-terminal claims, fire if there's unclaim todo
         the executor could pick up next."""
