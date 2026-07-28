@@ -105,8 +105,8 @@ def test_set_binding_rejects_empty_system():
 #   ms-111 の linking go-live 時に行い、その際このセクションを更新する。
 # ---------------------------------------------------------------------------
 def test_module_carries_experimental_marker():
-    """EXPERIMENTAL = True マーカーを持ち、docstring がその状態を明示している。"""
-    assert getattr(mb, "EXPERIMENTAL", None) is True
+    """WIRED_TO_PRODUCTION = False マーカーを持ち、docstring がその状態を明示している。"""
+    assert getattr(mb, "WIRED_TO_PRODUCTION", "missing") is False
     doc = mb.__doc__ or ""
     assert "experimental" in doc.lower()
     assert "go-live" in doc.lower()  # wire のタイミングが docstring に明記されている
@@ -124,7 +124,7 @@ def test_master_binding_is_not_wired_into_production():
     参照していないことを固定する (= 意図的未配線)。
 
     go-live で配線する時はこのテストを更新する。ここで落ちたら「未配線契約」が破れた
-    (= どこかから呼び始めた) 合図であり、docstring / EXPERIMENTAL マーカーの見直しが要る。
+    (= どこかから呼び始めた) 合図であり、docstring / WIRED_TO_PRODUCTION マーカーの見直しが要る。
     """
     for src in _production_sources():
         assert "master_binding" not in src, (
