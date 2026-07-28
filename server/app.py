@@ -8129,6 +8129,41 @@ async def post_bus_event(
             event_id, _dec_exc,
         )
 
+    # ms-111 e-3622 chunk2a: master-sync event の consumer (outbound write-through)。
+    # 投影 rename が発行した master-sync event を受け、master の canonical name を更新する。
+    # authz anchor (leader guard): payload の org_id は信用せず (送信者が詐称できる)、
+    # 認証済み送信者 (JWT sub) が master の実 org の member か org membership で照合してから
+    # apply する。unauthorized / 未知 master / 空 name は drop し、audit として log に残す
+    # (silent にしない = mis-route/攻撃兆候の観測)。書き込み失敗は post を壊してはならない
+    # (bus event は既に永続化済) ので握り潰してログするだけ。
+    try:
+        _ms_payload = body.payload or {}
+        if (_ms_payload.get("kind") == "master_sync"
+                and _ms_payload.get("entity") == "account"):
+            _ms_sender = user.get("sub", "")
+            _ms_sender_orgs = {
+                (o.get("org_id") or o.get("id"))
+                for o in (db.list_orgs_for_user(_ms_sender) or [])
+            }
+            _ms_sender_orgs.discard(None)
+            _ms_sender_orgs.discard("")
+            _ms_rec, _ms_reason = master_projection.apply_master_name_sync(
+                master_adapter.get_master_adapter(),
+                master_account_id=str(_ms_payload.get("master_account_id") or ""),
+                new_name=str(_ms_payload.get("new_name") or ""),
+                sender_org_ids=_ms_sender_orgs,
+                now=data.get("created_at") or "",
+            )
+            if _ms_reason:
+                logging.getLogger(__name__).info(
+                    "master_sync drop event_id=%s reason=%s sender=%s",
+                    event_id, _ms_reason, _ms_sender,
+                )
+    except Exception as _ms_exc:  # pragma: no cover - defensive
+        logging.getLogger(__name__).warning(
+            "master_sync apply failed for event_id=%s: %s", event_id, _ms_exc,
+        )
+
     # Sidecar write must happen *after* append_bus_event so the parent
     # event_id exists. Pending is the only status we record from this
     # path; approved / denied land via the receiver's CLI/Skill, and

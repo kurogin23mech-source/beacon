@@ -275,3 +275,91 @@ def link_new_contact_to_master(contact: dict, adapter, *, org_id: str,
     link_contact_to_master(contact, saved[mi.MASTER_CONTACT_ID_FIELD],
                            master_account_id, system=system)
     return saved
+
+
+# ---------------------------------------------------------------------------
+# write-through: 投影 identity の編集を master へ透過する (master 権威、e-3622 chunk2a)
+#   leader 合意 guard: user の rename は投影を直接 authoritative にせず、必ず master へ
+#   透過する (投影 name は cache、master が唯一の真値 → divergence source を作らない)。
+#   data-immutability (guard 1): master 側変更の追跡は上位の master-sync bus event log
+#   (append-only) が担い、本関数は master record への適用 (master-wins) だけを持つ。
+# ---------------------------------------------------------------------------
+def write_through_account_name(account: dict, adapter, new_name: str, *,
+                               now: str) -> Optional[dict]:
+    """投影 Account の rename を master の canonical name へ write-through する。
+
+    戻り値は更新後の master record。write-through 対象外なら None:
+    - `adapter` が None / 未 link: master 実体が無いので透過先が無い → None
+      (呼び出し側は投影のみ更新。master 化前の account は投影が唯一の source)。
+    - link 済 + same-org: master の name を new_name に更新し put (master-wins)。
+    - org 不一致 (= cross-org poisoning の疑い): fail-closed で拒否 (ValueError)。
+      別 org の master を書き換えさせない (chunk1 read/write 境界と一貫)。
+    - new_name が空: ValueError (identity を空にする write-through は無効)。
+    """
+    if adapter is None or not is_account_linked(account):
+        return None
+    name = str(new_name or "").strip()
+    if not name:
+        raise ValueError("write-through name cannot be empty")
+    rec = adapter.get_account(linked_master_account_id(account))
+    if not rec:
+        return None
+    if not _org_matches(mi.master_account_org_id(rec), projection_account_org(account)):
+        raise ValueError(
+            "cross-org write-through refused: master org != account owner_org "
+            "(ms-111 e-3622)")
+    return adapter.put_account({**rec, "name": name}, now=now)
+
+
+def apply_master_name_sync(adapter, *, master_account_id: str, new_name: str,
+                           sender_org_ids, now: str):
+    """master-sync event を master へ適用する server 側 consumer core (e-3622 chunk2a part2).
+
+    outbound write-through の bus 経路: CLI が rename 時に発行した master-sync event を
+    server が受け、master の canonical name を更新する。``write_through_account_name`` が
+    **投影 account を持つ context** (CLI / project doc) 用なのに対し、こちらは **event
+    payload + 認証済み送信者しか持たない server consumer** 用の姉妹。
+
+    **authz anchor (leader guard、e-3622)**: 権威は payload の org_id ではなく、**認証済み
+    送信者 (JWT sub 等) が実際に member である org 集合** (``sender_org_ids``) に置く。
+    master record 自身の org が ``sender_org_ids`` に含まれる時だけ適用する。payload に
+    org を詐称しても、送信者がその org の member でなければ弾く (= crafted event による
+    他 org master の poisoning を封じる)。payload の org_id は「どの master か」の hint に
+    留め、authz には使わない (server 側は master record の org を真値に取る)。
+
+    event 経路なので不適用は例外でなく **(None, reason)** を返す (= drop、event ループを
+    壊さない)。``reason`` は audit/log 用 (leader minor guard: silent にせず観測可能に):
+    ``''`` = 適用 / ``'empty_or_no_id'`` / ``'unknown_master'`` / ``'not_authorized'``。
+    戻り値は ``(updated_record_or_None, reason)``。
+    """
+    name = str(new_name or "").strip()
+    if not master_account_id or not name:
+        return None, "empty_or_no_id"
+    rec = adapter.get_account(master_account_id)
+    if not rec:
+        return None, "unknown_master"
+    master_org = mi.master_account_org_id(rec)
+    if not master_org or master_org not in (sender_org_ids or set()):
+        return None, "not_authorized"   # 送信者が master の org の member でない
+    return adapter.put_account({**rec, "name": name}, now=now), ""
+
+
+def master_sync_payload(account: dict, new_name: str) -> Optional[dict]:
+    """投影 rename から master-sync event の payload を組み立てる (CLI producer 用、chunk2a).
+
+    投影 account の master 参照 (master_account_id) と所有 org (owner_org_id) を読み、
+    server consumer (apply_master_name_sync) が同 org 検証して適用できる最小 payload に
+    する。未 link (= master 実体なし) は None (= 発行不要、投影のみで完結)。
+    """
+    if not is_account_linked(account):
+        return None
+    name = str(new_name or "").strip()
+    if not name:
+        return None
+    return {
+        "kind": "master_sync",
+        "entity": "account",
+        "master_account_id": linked_master_account_id(account),
+        "new_name": name,
+        "org_id": projection_account_org(account),
+    }

@@ -25024,6 +25024,36 @@ def cmd_account_add():
     print(f"Added account {acc_id}: {name}")
 
 
+def _emit_master_sync_account_rename(data, account_id, new_name):
+    """rename を master へ write-through する master-sync event を発行 (ms-111 e-3622 chunk2a).
+
+    投影 account が master に link 済のときだけ発行 (未 link は master 実体が無いので投影
+    のみで完結 = 現状の常態、payload=None で早期 return)。cloud mode + login 済のときだけ
+    実発行する (local mode は master server が無い / _get_api_client の sys.exit を避けるため
+    先に login/cloud を確認)。best-effort: 発行失敗は rename を壊さない (投影は保存済、master
+    同期は付随。server 側 consumer が送信者 org を authz して apply する)。
+    """
+    try:
+        import sales_entities
+        acc = sales_entities.find_account(data, account_id)
+        if acc is None:
+            return
+        payload = master_projection.master_sync_payload(acc, new_name)
+        if not payload:
+            return  # 未 link → 発行不要
+        from auth import load_credentials
+        if load_credentials() is None or not os.path.exists(_get_cloud_config_path()):
+            return  # local / 未 login → master server 無し
+        client, config = _get_api_client()
+        project_id = _resolve_bus_project_id(config)
+        client.post_bus_event(
+            project_id, "master-sync",
+            sender_session_id=os.environ.get("BEACON_SESSION_ID", ""),
+            payload=payload, delivery="propose-to-ai")
+    except Exception:
+        return  # best-effort
+
+
 def cmd_account_rename():
     import sales_entities
     account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
@@ -25036,6 +25066,8 @@ def cmd_account_rename():
         sys.exit(1)
     save_project(data)
     print(f"Renamed {account_id} → {new_name.strip()}")
+    # ms-111 e-3622 chunk2a: link 済なら rename を master へ write-through (best-effort)。
+    _emit_master_sync_account_rename(data, account_id, new_name)
 
 
 def cmd_account_assign():
