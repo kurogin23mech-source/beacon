@@ -363,3 +363,31 @@ def master_sync_payload(account: dict, new_name: str) -> Optional[dict]:
         "new_name": name,
         "org_id": projection_account_org(account),
     }
+
+
+# ---------------------------------------------------------------------------
+# inbound sync: master の name 変更を投影 doc の cache に反映する (e-3622 chunk2b)
+#   master が真値 (chunk2a の consumer で更新済)。同 org の各投影は master を写す cache な
+#   ので、master-changed を受けて投影 account の cached name を更新する。server read は
+#   resolve が master を live 読みするので本来不要だが、CLI は adapter=None で投影 cache を
+#   読むため、この inbound write-back で新鮮さを保つ (hybrid sync-cache、leader 承認)。
+#   guard 2 と整合: 投影 name は cache、master が真値。更新は master → 投影の一方向のみ。
+# ---------------------------------------------------------------------------
+def sync_master_name_into_projection(project_data, master_account_id: str,
+                                     new_name: str) -> bool:
+    """master name 変更を投影 doc の該当 account の cache に反映する (dict を mutate)。
+
+    ``master_account_id`` に link された投影 account を ``project_data`` から探し、その
+    cached name/label を ``new_name`` に更新する。更新したら True、該当 account 無し /
+    空 name / 既に同値なら False (no-op)。投影は master の写しなので write-back は一方向。
+    """
+    name = str(new_name or "").strip()
+    if not name or not master_account_id:
+        return False
+    for acc in (project_data or {}).get("accounts", []) or []:
+        if linked_master_account_id(acc) == master_account_id:
+            if work_model.target_label(acc) == name:
+                return False   # 既に同値 → no-op
+            work_model.set_target_label(acc, name, dual_write=True)
+            return True
+    return False

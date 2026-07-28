@@ -8159,6 +8159,14 @@ async def post_bus_event(
                     "master_sync drop event_id=%s reason=%s sender=%s",
                     event_id, _ms_reason, _ms_sender,
                 )
+            elif _ms_rec is not None:
+                # ms-111 e-3622 chunk2b: master 更新成功 → 同 org の該当 projection doc へ
+                # inbound fan-out (bounded)。
+                _fanout_master_name_to_projections(
+                    master_account_id=str(_ms_payload.get("master_account_id") or ""),
+                    new_name=str(_ms_payload.get("new_name") or ""),
+                    master_org=str((_ms_rec or {}).get("org_id") or ""),
+                )
     except Exception as _ms_exc:  # pragma: no cover - defensive
         logging.getLogger(__name__).warning(
             "master_sync apply failed for event_id=%s: %s", event_id, _ms_exc,
@@ -8198,6 +8206,37 @@ async def post_bus_event(
     # (Redis 不通時は同プロセスのローカル配信に fallback)。
     await _fanout_bus_event(project_id, event)
     return event
+
+
+def _fanout_master_name_to_projections(*, master_account_id: str, new_name: str,
+                                       master_org: str) -> int:
+    """master name 変更を、同 org でその master を参照する projection doc へ write-back する
+    (ms-111 e-3622 chunk2b、master-authority consumer の一部)。
+
+    leader refine で write amplification を bound する:
+      (1) 参照 filter: 該当 account を投影している project だけ write (sync が変化時のみ True)。
+      (2) idempotent: 同名 re-apply は no-op (sync が False を返し save しない)。
+      (3) 各 write は save_project で追跡 (data-immutability)、変化した project のみ。
+      (4) org-scoped + 受信側 org 整合: project の org が master の org と一致する時のみ。
+    offline session は次 load 時に既に fresh。戻り値 = 実際に write した project 数。
+    server が他 project doc を書くのは master-authority (master-wins / org-scoped) の正当な
+    操作なので authz 問題は無い (leader 判断)。
+    """
+    if not master_org or not master_account_id:
+        return 0
+    written = 0
+    for _summ in (db.list_projects() or []):
+        _pid = _summ.get("project_id") or _summ.get("id")
+        if not _pid:
+            continue
+        _pdata = db.get_project(_pid)
+        if not _pdata or org_mod.project_org_id(_pdata) != master_org:
+            continue   # (4) 同 org のみ
+        if master_projection.sync_master_name_into_projection(
+                _pdata, master_account_id, new_name):
+            db.save_project(_pid, _pdata)   # (1)(2)(3): 参照あり & 変化時のみ tracked write
+            written += 1
+    return written
 
 
 def _envelope_audit_view(env: Optional[dict]) -> Optional[dict]:
