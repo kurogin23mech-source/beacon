@@ -167,7 +167,8 @@ def test_operation_slot_uses_pool_when_no_cache_entry():
         "p-1": _project(operations=[("op-9", "done")]),
     })
     out = ts.materialize_slots(trek_doc, get_project=gp)
-    assert out[0].resolved_state == "done"
+    # ms-128 方針5: pool-done は Trek の terminal 等価 = user_review に写す。
+    assert out[0].resolved_state == "user_review"
     assert out[0].resolved_state_source == "pool"
 
 
@@ -275,7 +276,8 @@ def test_legacy_null_ms_terminal_when_all_pool_done():
         ),
     })
     out = ts.materialize_slots(trek_doc, get_project=gp)
-    assert out[0].resolved_state == "done"
+    # ms-128 方針5: 全 pool-done の legacy null MS は user_review terminal に写す。
+    assert out[0].resolved_state == "user_review"
     # Auto-mirror stamped both, so at least one child registers as
     # auto_mirror source; priority pick returns pool > auto_mirror.
     assert out[0].resolved_state_source in {"pool", "auto_mirror"}

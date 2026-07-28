@@ -89,9 +89,14 @@ KICKOFF_HISTORY_KEY = "kickoff_status"
 # Trek 完遂判定: 全 task が `done` OR `user_review` に至った時点で完遂。
 # todo / working / leader_review が 1 つでもあれば scheduler + leader は
 # 走り続ける (= leader_review は中途中継、 user_review は terminal 扱い)。
-VALID_TASK_STATES = ("todo", "working", "leader_review", "user_review", "done")
+# ms-128 方針5 (e-4366) — done を Trek 状態機械から除去。done = 配置 = 顧客到達 =
+# 人間の判断境界で、Trek の外の 1 レイヤー上。Trek は user_review で打ち止める
+# (「手前まで運ぶ」)。既存の done stamp は遡行変更せず read-time migrate
+# (done→user_review、下記 LEGACY_TASK_STATE_MIGRATIONS) で吸収する。
+VALID_TASK_STATES = ("todo", "working", "leader_review", "user_review")
 DEFAULT_TASK_STATE = "todo"
-TERMINAL_TASK_STATES = ("done", "user_review")
+# user_review が唯一の terminal (= Trek 完遂 = 走り続け停止)。done は Trek 外。
+TERMINAL_TASK_STATES = ("user_review",)
 
 # ms-97 / e-2706 — review-notify trigger set (= TERMINAL_TASK_STATES の意味的分離)。
 # `TERMINAL_TASK_STATES` (= done / user_review) は「Trek 完遂判定 = 走り続け停止」
@@ -103,7 +108,7 @@ TERMINAL_TASK_STATES = ("done", "user_review")
 # leader に notify event が届かない構造 bug が dogfood (2026-06-28) で顕在化。
 # server/app.py set_trek_task_state_endpoint は本集合で trek-task-review event
 # 発火を判定する (= AC1)。
-REVIEW_TRIGGER_STATES = ("done", "user_review", "leader_review")
+REVIEW_TRIGGER_STATES = ("user_review", "leader_review")
 
 # Backward compat (= ms-88 / e-2107 migration). 旧 `waiting-review` で書かれた
 # 既存データは server-forced auto-stall 経路 (= old e-2067) からのものが多く、
@@ -113,6 +118,11 @@ REVIEW_TRIGGER_STATES = ("done", "user_review", "leader_review")
 # して呼び出し側に新 token を返す。
 LEGACY_TASK_STATE_MIGRATIONS = {
     "waiting-review": "leader_review",
+    # ms-128 方針5 (e-4366) — done は Trek 状態機械から外れた。既存の done stamp
+    # は read-time に user_review (= Trek の打ち止め) として解釈する。書き込み時も
+    # migrate されるので「Trek 内で done にしようとする」試みは user_review に
+    # 吸収される (= Trek は線を越えない、越えるのは user + deploy)。
+    "done": "user_review",
 }
 
 # ms-75 / e-2067 + ms-88 / e-2107 + ms-95 / e-2646 — server-side TTL safety net.
@@ -127,20 +137,21 @@ LEGACY_TASK_STATE_MIGRATIONS = {
 # task_states[*].meta.working_pause_until (ISO8601) で立てる (= e-2646)。
 DEFAULT_WORKING_TTL_MINUTES = 1440
 
-# Allowed transitions (5 状態、 計 10 経路 + idempotent no-op):
-# - claim 1 経路: todo → working
-# - executor 3 経路 (= pulse Skill の terminal 選択): working → {done, leader_review, user_review}
-# - leader 3 経路 (= /beacon-trek-review forced picker): leader_review → {done, user_review, working}
-# - user 2 経路 (= 会話 + leader CLI 代行): user_review → {done, working}
-# - server 強制 1 経路 (= 罰則): working → leader_review (= 全 working 一括)
-#
+# Allowed transitions (ms-128 方針5: 4 状態、done 除去、user_review 打ち止め):
+# - claim: todo → working
+# - executor: working → {leader_review (= terminalize / 完成 PR 化), user_review}
+# - server 強制 (halt): working → leader_review (e-4309)
+# - leader (自律 stamp): leader_review → {user_review (思想/目的達成レビュー合格),
+#     working (re-work 差し戻し / halt 救済 re-open)}
+# - user 却下 (leader CLI 代行): user_review → working
+# done は Trek 外 (= 配置境界)。既存 done stamp は read-time に user_review へ
+# migrate される (LEGACY_TASK_STATE_MIGRATIONS) ので from-state に done は現れない。
 # CORE doc `5nfTSmCDVUzD4SLzIhI5` § "1 枚 transition diagram" 参照。
 VALID_TASK_STATE_TRANSITIONS = {
     "todo": ("working",),
-    "working": ("done", "leader_review", "user_review"),
-    "leader_review": ("done", "user_review", "working"),
-    "user_review": ("done", "working"),
-    "done": ("working",),
+    "working": ("leader_review", "user_review"),
+    "leader_review": ("user_review", "working"),
+    "user_review": ("working",),
 }
 
 DEFAULT_STATUS = "planning"
@@ -1157,18 +1168,19 @@ def aggregate_task_state(trek_doc: dict, *, task_ids: list[str]) -> dict:
         overall = "empty"
     elif non_terminal_count > 0:
         overall = "active"
-    elif counts["done"] == total:
-        overall = "all-done"
-    elif counts["user_review"] == total:
-        overall = "all-user-review"
     else:
-        overall = "all-terminal-mixed"
+        # ms-128 方針5: done は Trek 外。user_review が唯一の terminal なので、
+        # 非 active で total>0 なら全 Target が user_review (= all-user-review)。
+        # 旧 "all-done" / "all-terminal-mixed" は done 除去で消滅した。
+        overall = "all-user-review"
     return {
         "todo": counts["todo"],
         "working": counts["working"],
         "leader_review": counts["leader_review"],
         "user_review": counts["user_review"],
-        "done": counts["done"],
+        # ms-128 方針5: done は状態集合から除去。read-time に user_review へ
+        # migrate されるので常に 0。後方互換のため key は残す。
+        "done": 0,
         "total": total,
         "overall": overall,
         # Legacy alias for callers still reading old key.
@@ -1188,11 +1200,13 @@ def compute_ms_slot_state(task_states_for_slot: list[dict]) -> str:
     terminal states cascade"):
 
       1. any child in ``leader_review``        → ``"leader_review"``
-      2. else all children in {``done``}       → ``"done"``
-      3. else all children in {``done``,
-            ``user_review``}                   → ``"user_review"``
-      4. else any child in ``working``         → ``"working"``
-      5. else (all children todo or empty)     → ``"todo"``
+      2. else all children in {``user_review``} → ``"user_review"``
+      3. else any child in ``working``         → ``"working"``
+      4. else (all children todo or empty)     → ``"todo"``
+
+    (ms-128 方針5: ``done`` は Trek 状態機械から除去。legacy ``done`` stamp は
+    read-time に ``user_review`` へ migrate されるので、この header 集約でも
+    ``user_review`` が唯一の terminal になる。)
 
     Empty slot returns ``"todo"`` (= "no work yet, ready to start").
     Untracked / malformed entries collapse to ``todo`` for counting so
@@ -1218,15 +1232,16 @@ def compute_ms_slot_state(task_states_for_slot: list[dict]) -> str:
         if not isinstance(entry, dict):
             states.append("todo")
             continue
-        s = entry.get("state") or "todo"
+        # ms-128 方針5: migrate done→user_review BEFORE the valid-state check —
+        # else a raw legacy "done" stamp would wrongly collapse to todo.
+        s = migrate_legacy_task_state(entry.get("state") or "todo")
         if s not in VALID_TASK_STATES:
             s = "todo"
         states.append(s)
     if "leader_review" in states:
         return "leader_review"
-    if all(s == "done" for s in states):
-        return "done"
-    if all(s in ("done", "user_review") for s in states):
+    # ms-128 方針5: user_review が唯一の terminal (done は Trek 外に migrate 済)。
+    if all(s == "user_review" for s in states):
         return "user_review"
     if "working" in states:
         return "working"

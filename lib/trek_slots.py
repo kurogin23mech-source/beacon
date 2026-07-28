@@ -34,11 +34,13 @@ try:
     from trek import (  # type: ignore
         NARROWING_KEYS, TERMINAL_TASK_STATES,
         _scope_entry_identity_key, utcnow_iso,
+        migrate_legacy_task_state,
     )
 except ImportError:  # pragma: no cover — flat-layout import fallback
     from lib.trek import (  # type: ignore
         NARROWING_KEYS, TERMINAL_TASK_STATES,
         _scope_entry_identity_key, utcnow_iso,
+        migrate_legacy_task_state,
     )
 
 
@@ -271,14 +273,18 @@ def _materialize_atomic_slot(
     """Task or op slot — no expansion; resolve state cache-first then pool."""
     cache_entry = task_states.get(target_id)
     if isinstance(cache_entry, dict) and cache_entry.get("state"):
-        resolved_state = str(cache_entry.get("state") or "")
+        # ms-128 方針5: read-time migrate legacy "done" → "user_review"。
+        resolved_state = migrate_legacy_task_state(
+            str(cache_entry.get("state") or "")
+        )
         source = "cache"
     else:
         pool_status = _pool_status(project_doc, kind, target_id)
         if pool_status is None:
             resolved_state, source = "todo", "unstamped"
         elif pool_status == "done":
-            resolved_state, source = "done", "pool"
+            # ms-128 方針5: pool-done = Trek terminal 等価 = user_review。
+            resolved_state, source = "user_review", "pool"
         else:
             resolved_state, source = "todo", "pool"
     return Slot(
@@ -394,7 +400,9 @@ def _resolve_child_state(
     """Return ``(state, source)`` for a single MS child task."""
     cache_entry = task_states.get(eid)
     if isinstance(cache_entry, dict) and cache_entry.get("state"):
-        state = str(cache_entry.get("state") or "")
+        # ms-128 方針5: read-time migrate legacy "done" → "user_review"
+        # (Trek は user_review で打ち止め、done は Trek 外)。
+        state = migrate_legacy_task_state(str(cache_entry.get("state") or ""))
         # A task_states entry stamped by auto-mirror still counts as
         # auto_mirror-sourced downstream, so the diag can tell it apart
         # from human decisions.
@@ -408,7 +416,9 @@ def _resolve_child_state(
         return "todo", "unstamped"
     pool_status = task.get("status") or ""
     if pool_status == "done":
-        return "done", "pool"
+        # ms-128 方針5: pool-done = Trek の terminal 等価 = user_review
+        # (= 「pool で done = 手前まで運び終えた」を Trek 状態に写す)。
+        return "user_review", "pool"
     return "todo", "pool"
 
 

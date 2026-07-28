@@ -280,7 +280,9 @@ class TestTaskStateWritesOutcomeLog:
         outcomes = [r for r in rows if r["kind"] == "outcome"]
         assert len(outcomes) == 1
         assert outcomes[0]["payload"]["task_id"] == "e-1"
-        assert outcomes[0]["payload"]["state"] == "done"
+        # ms-128 方針5: done は user_review に migrate され、outcome log も
+        # effective_state (= user_review) を記録する。
+        assert outcomes[0]["payload"]["state"] == "user_review"
 
     def test_non_terminal_transition_does_not_write_outcome(self):
         _seed_trek()
