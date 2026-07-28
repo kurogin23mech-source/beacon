@@ -13,6 +13,7 @@ import re
 import work_base
 import work_model  # ms-109 e-3559: 職種非依存の Target/WorkItem 正準アクセサ
 import transition_approval as _ta  # ms-119 e-3912: 職種中立な目的達成レビュー primitive
+import report_primitive  # ms-114 e-3742: report→server-authoring の継ぎ目
 
 
 def _now_iso() -> str:
@@ -1591,8 +1592,117 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
     the calling user record; the Web UI then has a 1-hop label for the
     author column without walking the users collection. Empty / unset
     fields are dropped so the persisted shape stays tight.
+
+    ms-114 e-3742 — record-authoring seam: this function no longer authors the
+    ledger mutations directly. It builds a ``kind="commit"`` *report* (the raw
+    fact the client observed) and routes it through
+    ``report_primitive.apply_report``, which dispatches to
+    :func:`commit_authoring_rule` (the *author*). The client-facing signature,
+    stdout contract, and local-mode behaviour are unchanged (SPEC 方針7
+    expand/contract の expand step): all three callers (CLI ``cmd_log`` /
+    ``cmd_log_finalize`` / the API ``project.log`` endpoint) keep passing the
+    same kwargs. What changes is *who authors*: separating actor from author is
+    the structural fix for "機構を書いた≠達成した" (ms-109 fable review). This
+    slice moves the commit-entry construction and the task-resolution
+    interpretation server-side; ``progress`` stays a client-reported value (its
+    server-side derivation is a later slice — see :func:`commit_authoring_rule`).
     """
-    target = find_target_milestone(data, ms_id)
+    report = report_primitive.make_report(
+        kind="commit",
+        actor=_commit_report_actor(actor, session_id),
+        payload={
+            "hash": commit_hash,
+            "message": message,
+            "date": date,
+            "summary": summary,
+            "progress": progress,
+            "behavior": behavior,
+            "resolves": resolves,
+            "resolves_explicit": resolves_explicit,
+            "ms_id": ms_id,
+            # Rich provenance the commit rule persists but the generic report
+            # schema doesn't model (actor = machine/agent pair, author = human
+            # identity). They travel in the payload because only the commit
+            # authoring rule understands them.
+            "actor": actor or {},
+            "author": author or {},
+        },
+        subject=ms_id,
+        session_id=session_id,
+        source=source,
+        occurred_at=date or "",
+        origin_verb="log",
+        evidence=[commit_hash] if commit_hash else [],
+    )
+    rules = report_primitive.new_authoring_registry()
+    report_primitive.register_authoring_rule(rules, "commit", commit_authoring_rule)
+    # Two-layer dedup (SPEC 方針7 / e-3742 承認点3): the authoritative dedup is
+    # the in-ledger hash scan inside the rule (persisted commits from prior
+    # runs). ``seen`` is apply_report's *replay* idempotency ledger — fresh per
+    # call here, so it never masks the hash-based check; it only guarantees a
+    # single report object isn't authored twice within this call.
+    outcome = report_primitive.apply_report(data, report, rules=rules, seen={})
+    if outcome.get("status") == "authored":
+        return outcome["result"]
+    # Structurally unreachable: the report is always valid (fixed kind, non-empty
+    # actor, dict payload) and the rule is always registered, and ``seen`` starts
+    # empty. Refuse rather than return a malformed result (data-immutability).
+    raise RuntimeError(f"commit report was not authored: {outcome}")
+
+
+def _commit_report_actor(actor: dict | None, session_id: str) -> str:
+    """Derive the report-level ``actor`` string (a required, non-empty field) for
+    a commit report. The rich ``{machine, agent}`` pair travels in the payload;
+    this is just a stable label for the report envelope. Falls back through
+    machine → agent → session_id → ``"cli"`` so it is never blank."""
+    label = ""
+    if isinstance(actor, dict):
+        label = actor.get("machine") or actor.get("agent") or ""
+    return label or session_id or "cli"
+
+
+def commit_authoring_rule(project_data: dict, report: dict) -> dict:
+    """Server-side authoring rule for a ``kind="commit"`` report (ms-114 e-3742).
+
+    The first concrete authoring rule re-homed from ``beacon log``'s internal
+    logic behind the report/request seam (``lib/report_primitive.py``). The
+    client emits a *report* of the raw commit fact; this rule — the *author* —
+    fans it out to the canonical ledger mutations: build the commit entry,
+    resolve which task the commit closes, derive progress, refresh the summary.
+
+    Signature matches ``report_primitive.AuthoringRule`` = ``(project_data,
+    report) -> result``. Pure business logic: mutates ``project_data`` in place
+    and returns a result dict, no I/O. ``report["payload"]`` carries the commit
+    facts + rich provenance (actor/author dicts); ``report["subject"]`` is the
+    target milestone ref (empty → auto-pick, same as before); ``session_id`` /
+    ``source`` are generic provenance.
+
+    e-3742 scope boundary (leader-approved): the **task-resolution** here is the
+    server-authored interpretation — the executor no longer authors which task
+    its own commit closes (SPEC AC5, task-resolve dimension; AC3 "authoring 段が
+    1 つ以上動く"). ``progress`` is still a *client-reported* value in
+    ``payload["progress"]`` (the /beacon-log Skill's AI evaluation). Deriving
+    progress server-side — which would close AC5 in the progress dimension too —
+    is deliberately a later slice: it needs a backend interpreter, which ms-114
+    scopes out ("やらない: backend LLM 基盤"). This rule re-homes the mechanism
+    and moves task-resolution authoring server-side; progress stays reported.
+    """
+    payload = report.get("payload") or {}
+    ms_id = report.get("subject", "") or payload.get("ms_id", "")
+    commit_hash = payload.get("hash", "")
+    message = payload.get("message", "")
+    date = payload.get("date", "")
+    summary = payload.get("summary", "")
+    progress = payload.get("progress", "")
+    behavior = payload.get("behavior", "")
+    resolves = payload.get("resolves", "")
+    resolves_explicit = bool(payload.get("resolves_explicit", False))
+    actor = payload.get("actor") or None
+    author = payload.get("author") or None
+    session_id = report.get("session_id", "")
+    source = report.get("source", "")
+
+    target = find_target_milestone(project_data, ms_id)
     entries = target.setdefault("entries", [])
 
     if check_duplicate_commit(entries, commit_hash):
@@ -1628,7 +1738,7 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
         # See `_clean_author` for the field allowlist.
         meta["author"] = author_clean
     commit_entry = {
-        "id": next_entry_id(data),
+        "id": next_entry_id(project_data),
         "type": "commit",
         "description": summary or message,
         "date": date or now,
@@ -1668,7 +1778,7 @@ def log_commit(data: dict, *, ms_id: str = "", commit_hash: str,
         entries.append(commit_entry)
 
     update_progress(target, progress)
-    auto_update_summary(data)
+    auto_update_summary(project_data)
 
     result = {
         "status": "logged",
