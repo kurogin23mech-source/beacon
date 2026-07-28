@@ -31,6 +31,7 @@ import principal as principal_mod  # ms-113 / e-3732: 主体モデル + 実効�
 import disclosure as disclosure_mod  # ms-111 / e-3872: cross-project Account 開示の read 配線
 import master_projection  # ms-111 / e-3621: 投影 Account/Contact identity を master 経由で解決
 import master_adapter  # ms-111 / e-3621: backend 配線済み Beacon-default master adapter
+import master_binding  # ms-111 / e-3621 chunk2b: project の master 束縛宣言 (org_id 軸) を ingest で読む
 import work_model  # ms-109 e-3643: 職種非依存の Target 正準ラベル tolerant reader
 import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
 import dm_consent as dm_consent_mod  # ms-110 / e-3443: sender-side cross-user consent backstop
@@ -2249,6 +2250,52 @@ def get_project_worktree_sessions(project_id: str,
     return {"worktree_sessions": raw.get("worktree_sessions", [])}
 
 
+def _master_linking_enabled() -> bool:
+    """master linking (ms-111 linking go-live) が本番活性化されているか (default OFF)。
+
+    本番投下は user のゲート (SPEC ms-111 安全策)。この env flag を deploy 時に明示 ON に
+    するまで、server ingest は投影を master に link せず従来どおり (= projection が唯一の
+    source、regression なし)。ON にすると put_project ingest が全 Account を Beacon-default
+    master に link し、read 側 resolver (既配線) が master 真値を返すようになる。
+    """
+    return os.environ.get("BEACON_MASTER_LINKING_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _link_body_accounts_to_master(body: dict) -> None:
+    """whole-project write ingest の choke point で全 Account/Contact を master に link する
+    (ms-111 e-3621 chunk2b / AC1・AC2, flag-gated)。
+
+    linking の go-live は user ゲート (``_master_linking_enabled``)。ON の時だけ:
+      1. project の master_binding (AC2 / SPEC §5・§8) を resolve し束縛軸 org_id と system
+         を得る。Beacon-default master 以外 (外部 CRM = 未実装) と org 未定 ("") は対象外で skip。
+      2. backend 配線済み adapter (server 側のみ持てる) で全 Account/Contact を link する
+         (AC1 = project DB を external_ref 参照化)。
+
+    CLI は backend adapter を持てない (store_router は server 専用) ので linking は必ずこの
+    server ingest に集約する = 「一部 site だけ master 経由」の部分 swap を構造的に防ぐ。
+    失敗は write を壊してはならない (投影は既に valid)。observe 用に log するだけ。
+    """
+    if not _master_linking_enabled():
+        return
+    try:
+        binding = master_binding.resolve_master_binding(body)
+        system = binding.get("system", "")
+        org_id = binding.get("org_id", "")
+        # 本 MS の scope は Beacon-default master のみ (外部 CRM adapter は未実装)。
+        # org 未定 ("") は束縛軸が無く link 不可 → どちらも従来どおり投影のまま。
+        if system != master_binding.BEACON_DEFAULT_SYSTEM or not org_id:
+            return
+        adapter = master_adapter.get_master_adapter()
+        result = master_projection.link_project_accounts(
+            body, adapter, org_id=org_id, now=core._now_iso(), system=system)
+        if result.get("skipped"):
+            logging.getLogger(__name__).info(
+                "master linking skipped entries=%s", result["skipped"])
+    except Exception as exc:  # linking must never break the project write
+        logging.getLogger(__name__).warning("master linking failed: %s", exc)
+
+
 @app.put("/api/projects/{project_id}")
 def put_project(project_id: str, body: dict,
                 user: dict = Depends(require_auth)):
@@ -2261,6 +2308,10 @@ def put_project(project_id: str, body: dict,
     # Auto-set owner if missing (e.g. cloud push from local)
     if not body.get("owner") and _auth_enabled:
         body["owner"] = user.get("sub", "")
+    # ms-111 e-3621 chunk2b: whole-project write は全 Account が通る唯一の choke point。
+    # ここで (flag ON 時のみ) master に link し external_ref を張る。owner 補完後に呼ぶ
+    # (org_id 導出が owner に依存するため)。default OFF なので従来挙動は不変。
+    _link_body_accounts_to_master(body)
     operations.replace_project(
         project_id, body,
         actor=user.get("sub", ""),

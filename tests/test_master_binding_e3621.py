@@ -98,18 +98,18 @@ def test_set_binding_rejects_empty_system():
 
 
 # ---------------------------------------------------------------------------
-# experimental / 意図的未配線 の固定 (e-4360)
-#   master_binding は宣言層で、production 経路 (lib/commands.py / server/app.py) から
-#   *まだ* 呼ばれていない。「呼び元ゼロ = dead module」と誤読して削除されるのを防ぐため、
-#   experimental マーカーの存在と、未配線であること自体をテストで固定する。wire は
-#   ms-111 の linking go-live 時に行い、その際このセクションを更新する。
+# linking go-live 配線の固定 (e-3621 chunk2b / AC2)
+#   master_binding は宣言層で、server の whole-project write ingest (server/app.py の
+#   _link_body_accounts_to_master) から resolve_master_binding が呼ばれる = 配線済み。
+#   実際に link を実行するかは env flag BEACON_MASTER_LINKING_ENABLED が user ゲートする
+#   (default OFF)。ここでは「配線されている事実」を固定する (= 逆に未配線に戻ったら検知)。
 # ---------------------------------------------------------------------------
-def test_module_carries_experimental_marker():
-    """WIRED_TO_PRODUCTION = False マーカーを持ち、docstring がその状態を明示している。"""
-    assert getattr(mb, "WIRED_TO_PRODUCTION", "missing") is False
+def test_module_is_wired_to_production():
+    """WIRED_TO_PRODUCTION = True マーカーを持ち、docstring が配線済みを明示している。"""
+    assert getattr(mb, "WIRED_TO_PRODUCTION", "missing") is True
     doc = mb.__doc__ or ""
-    assert "experimental" in doc.lower()
-    assert "go-live" in doc.lower()  # wire のタイミングが docstring に明記されている
+    assert "go-live" in doc.lower()  # 配線の文脈 (linking go-live) が docstring に明記
+    assert "BEACON_MASTER_LINKING_ENABLED" in doc  # 本番活性化の user ゲートを明示
 
 
 def _production_sources() -> list[str]:
@@ -119,15 +119,16 @@ def _production_sources() -> list[str]:
     return [p.read_text(encoding="utf-8") for p in paths if p.exists()]
 
 
-def test_master_binding_is_not_wired_into_production():
-    """production コード (lib/commands.py / server/app.py) が master_binding を import /
-    参照していないことを固定する (= 意図的未配線)。
+def test_master_binding_is_wired_into_production():
+    """production コード (server/app.py の ingest) が master_binding を参照していることを
+    固定する (= linking go-live 配線済み、AC2)。
 
-    go-live で配線する時はこのテストを更新する。ここで落ちたら「未配線契約」が破れた
-    (= どこかから呼び始めた) 合図であり、docstring / WIRED_TO_PRODUCTION マーカーの見直しが要る。
+    ここで落ちたら「配線契約」が破れた (= 誰かが ingest 経路から master_binding 参照を
+    外した) 合図であり、docstring / WIRED_TO_PRODUCTION マーカーの見直しが要る。
     """
-    for src in _production_sources():
-        assert "master_binding" not in src, (
-            "master_binding が production 経路から参照され始めた。"
-            "go-live 配線なら本テストと experimental マーカーを更新すること。"
-        )
+    server_src = (REPO / "server" / "app.py").read_text(encoding="utf-8")
+    assert "master_binding" in server_src, (
+        "server/app.py の ingest から master_binding 参照が消えた。"
+        "未配線に戻すなら本テストと WIRED_TO_PRODUCTION マーカーを併せて更新すること。"
+    )
+    assert "resolve_master_binding" in server_src  # 束縛軸 (org_id/system) を実際に読む配線

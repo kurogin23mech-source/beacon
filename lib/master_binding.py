@@ -1,22 +1,20 @@
 """lib/master_binding.py — project ごとの「マスター束縛」宣言 (ms-111 / e-3621 その1).
 
 ────────────────────────────────────────────────────────────────────────────
-【重要 / experimental モジュール — まだ本番の処理経路につながっていません】(e-4360)
+【配線済み / linking go-live 経路に接続されています】(e-3621 chunk2b / AC1・AC2)
 
-このモジュールは「意図的に未配線 (= production コードから呼ばれていない)」の
-experimental 層です。宣言のための純関数だけを持ち、本番の CLI (lib/commands.py) や
-サーバー (server/app.py) からは *まだ* 一度も呼ばれていません。呼び元が無いことは
-「不要な死んだコード (dead module)」だからではなく、**linking go-live (= マスター
-共有の本番稼働) を始めるその時に初めて配線する** という ms-111 の設計順序によるもの
-です。よって「呼び元ゼロだから削除してよい」と誤読しないでください。マーカー定数
-``WIRED_TO_PRODUCTION = False`` が「本番未配線」を名前で予告しています (go-live で True に変える)。
+このモジュールは server の whole-project write ingest (server/app.py の put_project →
+``_link_body_accounts_to_master``) から呼ばれています。ingest は ``resolve_master_binding``
+で束縛軸 (org_id) と system を読み、Beacon-default master に対して全 Account/Contact を
+link します (SPEC ms-111 §5 master_binding / §8 org スコープ)。宣言のための純関数だけを
+持つ設計は変えていません — store I/O は server (backend 配線済み adapter) が担い、本
+モジュールは「どの project がどのマスターに属すか」の純粋計算に徹します。
 
-現状 (linking go-live の手前): マスターの本番活性化 (adapter の実体化など) はまだ
-行いません。この宣言層は「どの project がどのマスターに属すか」を表す純粋な計算を
-先に整備しておくためのもので、実際に project.json へ束縛を書き込む / 参照する配線は
-go-live 時に別タスクで足します。それまでの間、本モジュールを守るのはこの docstring と
-``WIRED_TO_PRODUCTION`` マーカー、および tests/test_master_binding_e3621.py の未配線を固定する
-テストです。
+本番活性化 (実際に link を実行するか) は env flag ``BEACON_MASTER_LINKING_ENABLED``
+で user がゲートします (default OFF = 従来どおり投影が唯一の source、regression なし)。
+つまり「配線は済み (WIRED_TO_PRODUCTION = True)、本番 ON は user の一手」という 2 段構え
+です。マーカー定数 ``WIRED_TO_PRODUCTION = True`` は「production 経路に接続済み」を名前で
+表明し、tests/test_master_binding_e3621.py が配線されている事実を固定します。
 ────────────────────────────────────────────────────────────────────────────
 
 各 project (= インスタンス) が「自分の顧客 identity のマスター (= 真値源) は誰か」を
@@ -42,12 +40,11 @@ from __future__ import annotations
 import master_identity as mi
 import org as org_mod
 
-# 未配線マーカー (e-4360): 本モジュールが本番の処理経路に配線されていないことを名前で予告する。
-# production 経路 (lib/commands.py / server/app.py) から呼ばれておらず、wire は ms-111 の
-# linking go-live 時に行う。docstring 冒頭の注記と整合させること。False である限り
-# 「呼び元ゼロ = dead module」という誤読で削除してはならない (tests が未配線を固定する)。
-# go-live で配線する時に True へ変える。
-WIRED_TO_PRODUCTION = False
+# 配線済みマーカー (e-3621 chunk2b): 本モジュールが production 経路 (server/app.py の
+# put_project ingest = _link_body_accounts_to_master) に配線されていることを名前で表明する。
+# 実際に link を実行するかは env flag BEACON_MASTER_LINKING_ENABLED で user がゲートする
+# (default OFF)。docstring 冒頭の注記と整合させること。tests が配線されている事実を固定する。
+WIRED_TO_PRODUCTION = True
 
 # project.json 上の宣言フィールド名 + その下の key。
 MASTER_BINDING_FIELD = "master_binding"
