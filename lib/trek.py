@@ -112,6 +112,29 @@ TERMINAL_TASK_STATES = ("user_review",)
 # 発火を判定する (= AC1)。
 REVIEW_TRIGGER_STATES = ("user_review", "leader_review")
 
+# ms-128 方針 (e-4287) — 二層 tick の状態空間分割。VALID_TASK_STATES を「誰が
+# 前進の主体か」で 3 領域に分ける:
+#   - EXECUTOR_ACTIVE_STATES: executor がまだ手を動かす (todo=claim済未着手 /
+#     working=作業中)。executor tick はこの集合の claim だけで発火する。
+#   - LEADER_OWNED_STATES: executor が hand-off 済で leader が引き取る
+#     (leader_review)。executor tick は silent、leader tick が駆動する。
+#   - TERMINAL_TASK_STATES: user_review (= Trek の打ち止め)。
+# scheduler (should_fire_executor_tick) はこの正典を import して使う (= 分割の
+# 定義を 1 ファイルに集約し、2 ファイル間の暗黙同期義務を作らない)。
+EXECUTOR_ACTIVE_STATES = ("todo", "working")
+LEADER_OWNED_STATES = ("leader_review",)
+# 分割の完全性を import 時に構造で保証する: どの層も拾わない state を作ると
+# (= 新状態を足して分割への登録を忘れると) ここで即 fail する。silent stall は
+# ms-128 が最も嫌う失敗なので、被覆漏れは「翌日気づく」でなく「起動時に落ちる」。
+assert (
+    set(EXECUTOR_ACTIVE_STATES)
+    | set(LEADER_OWNED_STATES)
+    | set(TERMINAL_TASK_STATES)
+) == set(VALID_TASK_STATES), (
+    "Trek task-state partition (executor/leader/terminal) が "
+    "VALID_TASK_STATES を覆っていません"
+)
+
 # Backward compat (= ms-88 / e-2107 migration). 旧 `waiting-review` で書かれた
 # 既存データは server-forced auto-stall 経路 (= old e-2067) からのものが多く、
 # semantic 的には新 `leader_review` (= 「leader 判断要請、 server 強制」) に

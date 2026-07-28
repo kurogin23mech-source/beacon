@@ -228,6 +228,50 @@ class TestShouldFireExecutorTick:
             t, session_id="sv-exec1", get_project=_empty_gp,
         ) is False
 
+    def test_executor_with_leader_review_claim_silent(self):
+        """ms-128 方針 (e-4287) — 二層 tick: executor が slot を leader_review に
+        倒した (= 完成し PR 化して hand-off した) 時点で executor tick は止まる。
+        leader tick が leader_review 以降を引き取る。leader_review は executor に
+        とって「もうやることが無い」状態。"""
+        t = _trek_with_states({
+            "e-1": {"state": "leader_review", "updated_by_session_id": "sv-exec1"},
+        })
+        assert trek_scheduler_mod.should_fire_executor_tick(
+            t, session_id="sv-exec1", get_project=_empty_gp,
+        ) is False
+
+    def test_executor_with_working_claim_fires(self):
+        """ms-128 方針 (e-4287) — 対照: まだ working (作業中) の claim を持つ
+        executor は発火し続ける (leader_review に倒すまでが executor の仕事)。"""
+        t = _trek_with_states({
+            "e-1": {"state": "working", "updated_by_session_id": "sv-exec1"},
+        })
+        assert trek_scheduler_mod.should_fire_executor_tick(
+            t, session_id="sv-exec1", get_project=_empty_gp,
+        ) is True
+
+    def test_two_layer_tick_state_partition_is_total(self):
+        """ms-128 方針 (e-4287) — 二層 tick の状態空間分割が VALID_TASK_STATES を
+        漏れなく覆うことを構造で pin する (独立レビュー #533 の指摘)。どの層も拾わ
+        ない state を作ると executor/leader のどちらの tick も駆動せず silent stall
+        になるため、被覆漏れをテストで捕まえる。scheduler が import した
+        EXECUTOR_ACTIVE_STATES が正典と一致することも確認する。"""
+        import trek as trek_mod
+        partition = (
+            set(trek_mod.EXECUTOR_ACTIVE_STATES)
+            | set(trek_mod.LEADER_OWNED_STATES)
+            | set(trek_mod.TERMINAL_TASK_STATES)
+        )
+        assert partition == set(trek_mod.VALID_TASK_STATES)
+        # 3 領域は互いに素 (= 1 state が 2 層に属さない)
+        assert not (set(trek_mod.EXECUTOR_ACTIVE_STATES)
+                    & set(trek_mod.LEADER_OWNED_STATES))
+        assert not (set(trek_mod.EXECUTOR_ACTIVE_STATES)
+                    & set(trek_mod.TERMINAL_TASK_STATES))
+        # scheduler が import した値が正典と一致 (2 ファイル間の drift 防止)
+        assert (set(trek_scheduler_mod.EXECUTOR_ACTIVE_STATES)
+                == set(trek_mod.EXECUTOR_ACTIVE_STATES))
+
     def test_executor_terminal_claims_fires_if_unclaim_todo(self):
         """Even with all-terminal claims, fire if there's unclaim todo
         the executor could pick up next."""
