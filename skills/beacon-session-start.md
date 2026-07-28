@@ -419,6 +419,18 @@ python3 "$(beacon _install-root)/scripts/session-start-dm-inbox.py" 2>/dev/null
 
 local mode (= `.beacon/cloud.json` 不在) / 未認証 / endpoint タイムアウトはすべて silent skip。session-start を中断しない。この Step は **読み取り専用**。
 
+## Step 1n-3: master-sync outbox の定期 drain (ms-111 e-4399)
+
+投影 Account の rename を master (= 顧客 identity の真値源) へ透過 (write-through) する master-sync event は、bus 一時不通 / 未 login 明けなどで emit が失敗することがある。失敗分は e-4355 の outbox (= 未配送を表す pending マーカー) に残り、従来は「次の `beacon account rename` の折」でしか再送されなかった。rename の後にたまたま別操作が無いと、未配送分が master に届かず遅延する。
+
+session-start は日々確実に発火する経路なので、ここで **操作を待たずに outbox を drain** する。「rename 後に別の CLI 操作が無くても、次にセッションを開いた時点で未配送分が master へ届く」を成立させる。Bash ツールで実行 (fail-safe):
+
+```bash
+python3 "$(beacon _install-root)/scripts/session-start-master-sync-drain.py" 2>/dev/null
+```
+
+内部で `beacon master-sync drain` を呼び、`lib/commands._drain_master_sync_outbox` が pending を抱える投影 Account の master-sync を再発行する。書き込みは通常の `save_project` (cloud lost-update guard 付き) を経由し、同時編集を握り潰さない。出力が空でなければ「未配送分を再送した」1 行なのでそのまま転記する。pending 無し / local mode / 未 login はすべて silent no-op。この Step は書き込みを起こしうるが、内容は既存 pending の再送のみ (新規 identity 変更はしない)。
+
 ## Step 1o / 1o-2: Trek 状態の取得 (ms-75 e-1813 + e-1854 + e-2047、ms-85 e-3180 で統合)
 
 Trek (= 缶詰の徹夜作業部屋、 user が join した瞬間に scope 内 action が事前承認スコープになる作業空間) に関する 2 つの可視化を session-start で行う:
