@@ -1882,10 +1882,76 @@ def _iter_all_entries(entries: list):
 
 def issue_import(data: dict, *, ms_id: str = "", number: int, url: str,
                  title: str = "", body: str = "", date: str = "") -> str:
-    """Import a GitHub Issue as a task entry. Returns the new entry id."""
-    target = find_target_milestone(data, ms_id)
+    """Import a GitHub Issue as a task entry. Returns the new entry id.
+
+    ms-114 e-3743 — record-authoring seam (second inward-machine verb after the
+    commit rule, e-3742): this function no longer authors the task entry
+    directly. It builds a ``kind="issue_import"`` *report* (the raw external
+    fact: an Issue's number / url / title / body) and routes it through
+    ``report_primitive.apply_report`` → :func:`issue_import_authoring_rule` (the
+    *author*). The client-facing signature and return value (the new entry id)
+    are unchanged; the three callers in ``commands.py`` (single import + the sync
+    loop) keep working, and the CLI-level "already imported" dedup guard is
+    untouched. This is the *intake* dimension of "client reports, server authors"
+    (SPEC AC4/AC5): the interpretation — building ``"#N: title"``, stamping the
+    untriaged sentinel — now lives server-side, not in the client that observed
+    the Issue."""
+    report = report_primitive.make_report(
+        kind="issue_import",
+        actor=_get_actor() or "cli",
+        payload={
+            "number": number,
+            "url": url,
+            "title": title,
+            "body": body,
+            "date": date,
+            "ms_id": ms_id,
+            # Provenance the rule stamps on the entry; resolved here (the CLI
+            # side) so the authoring rule stays a pure transform.
+            "created_by": _get_actor(),
+        },
+        subject=ms_id,
+        occurred_at=date or "",
+        origin_verb="issue_import",
+        evidence=[url] if url else [],
+    )
+    rules = report_primitive.new_authoring_registry()
+    report_primitive.register_authoring_rule(
+        rules, "issue_import", issue_import_authoring_rule)
+    outcome = report_primitive.apply_report(data, report, rules=rules, seen={})
+    if outcome.get("status") == "authored":
+        return outcome["result"]["entry_id"]
+    # Structurally unreachable (fixed kind, non-empty actor, dict payload, fresh
+    # seen). Refuse rather than return a malformed id (data-immutability).
+    raise RuntimeError(f"issue_import report was not authored: {outcome}")
+
+
+def issue_import_authoring_rule(project_data: dict, report: dict) -> dict:
+    """Server-side authoring rule for a ``kind="issue_import"`` report
+    (ms-114 e-3743). Authors a task entry from a reported GitHub Issue — the
+    second concrete authoring rule after :func:`commit_authoring_rule`, following
+    the same ``report_primitive.AuthoringRule`` = ``(project_data, report) ->
+    result`` shape (pure: mutates ``project_data`` in place, no I/O).
+
+    ``report["payload"]`` carries the raw Issue facts (number / url / title /
+    body) the client observed; ``subject`` is the target milestone ref (empty →
+    auto-pick). The *interpretation* — the ``"#N: title"`` description and the
+    untriaged-priority sentinel — is authored HERE, server-side, so the client
+    that fetched the Issue no longer authors the ledger record of it (SPEC AC4/AC5,
+    intake dimension). Returns ``{"status": "imported", "entry_id": <eid>, ...}``;
+    the ``issue_import`` adapter unwraps ``entry_id`` to preserve its str return."""
+    payload = report.get("payload") or {}
+    ms_id = report.get("subject", "") or payload.get("ms_id", "")
+    number = payload.get("number")
+    url = payload.get("url", "")
+    title = payload.get("title", "")
+    body = payload.get("body", "")
+    date = payload.get("date", "")
+    created_by = payload.get("created_by") or _get_actor()
+
+    target = find_target_milestone(project_data, ms_id)
     entries = target.setdefault("entries", [])
-    eid = next_entry_id(data)
+    eid = next_entry_id(project_data)
     now = _now_iso()
     description = f"#{number}: {title}" if title else f"Issue #{number}"
     entry = {
@@ -1899,7 +1965,7 @@ def issue_import(data: dict, *, ms_id: str = "", number: int, url: str,
         "meta": {
             "issue_number": number,
             "issue_url": url,
-            "created_by": _get_actor(),
+            "created_by": created_by,
             # ms-126: importing a GitHub Issue is a machine path — no human has
             # judged its priority yet. Stamp the ``untriaged`` sentinel so the
             # imported task surfaces in the untriaged-backlog debt trigger and a
@@ -1911,7 +1977,8 @@ def issue_import(data: dict, *, ms_id: str = "", number: int, url: str,
     if body and body.strip():
         entry["detail"] = body.strip()[:500]
     entries.append(entry)
-    return eid
+    return {"status": "imported", "entry_id": eid,
+            "issue_number": number, "milestone": target["id"]}
 
 
 # PR entry (ms-15)
