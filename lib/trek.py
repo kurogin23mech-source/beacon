@@ -3528,6 +3528,158 @@ def _parse_iso_to_dt(value: str) -> datetime.datetime | None:
     return dt
 
 
+# ---------------------------------------------------------------------------
+# ms-128 方針6 (e-4367) — per-target halt 機械検知。
+#
+# halt は独立した「状態」ではなく working な Target に付く「属性 (タグ)」。検知は
+# サーバーに一元化し、trek_doc の task_states[task_id] に per-target の
+# ``last_response_fingerprint`` / ``last_commit_count`` / ``progress_last_
+# advanced_at`` を持たせて前回値と比較する。2 面で判定する:
+#   (i)  進捗停滞 = 直近の応答が前回と同一 (fingerprint 一致) かつ commit 増分
+#        ゼロ (commit_count 不変) が一定時間継続。
+#   (ii) 生存断絶 = 最後の pulse から一定時間経過。
+# 旧 TTL=24h は 4h halt を救えないため流用しない (= 別機構、SPEC 方針6)。閾値は
+# cadence × N で ~4h の滞留を検知できる値。halt を「状態」でなく属性にするので、
+# 検知しても Target は working のまま halt_reason タグが付くだけ (= 遷移は
+# サーバーが別途 leader_review へ倒す、e-4309)。
+HALT_PULSE_TIMEOUT_MINUTES = 240   # 生存断絶: 最後の pulse から 4h で halt
+HALT_STALL_TIMEOUT_MINUTES = 240   # 進捗停滞: 同一応答 + commit 増分ゼロが 4h 継続
+HALT_REASON_LIVENESS = "liveness-timeout"   # 生存断絶 (pulse 途絶)
+HALT_REASON_STALL = "progress-stall"        # 進捗停滞 (同一応答 + commit 不変)
+
+
+def compute_response_fingerprint(pulse_entry: dict) -> str:
+    """Normalised hash of a session's latest tick response (ms-128 e-4367).
+
+    Two ticks with the same fingerprint mean the session said the same thing
+    twice (= no new signal). Combined with a zero commit increment this is
+    the "progress stall" half of halt detection. We hash the *content* the
+    executor self-reported (picked_choice / state_summary / blockers), not
+    the timestamp, so a re-pulse with identical content collapses to the
+    same fingerprint. ``no-op`` / empty responses fingerprint stably too, so
+    a session that keeps waiting is naturally caught as stalled.
+    """
+    import hashlib
+    entry = pulse_entry or {}
+    blockers = entry.get("last_blockers") or entry.get("blockers") or []
+    if isinstance(blockers, (list, tuple)):
+        blockers_s = "\x1e".join(str(b).strip().lower() for b in blockers)
+    else:
+        blockers_s = str(blockers).strip().lower()
+    parts = [
+        str(entry.get("last_picked_choice") or entry.get("picked_choice") or "").strip().lower(),
+        str(entry.get("last_state_summary") or entry.get("state_summary") or "").strip().lower(),
+        blockers_s,
+    ]
+    norm = "\x1f".join(parts)
+    return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
+
+
+def get_target_halt_reason(trek_doc: dict, task_id: str) -> str | None:
+    """Return the halt_reason tag on a Target (ms-128 e-4367), or None.
+
+    halt is an attribute of the working Target, not a state — so this reads
+    ``task_states[task_id].halt_reason`` without touching ``state``.
+    """
+    entry = (trek_doc.get("task_states") or {}).get(task_id) or {}
+    return entry.get("halt_reason") or None
+
+
+def clear_target_halt(trek_doc: dict, task_id: str) -> dict:
+    """Drop the halt_reason tag on a Target (ms-128 e-4367).
+
+    Called when a Target advances again (e.g. leader re-opens after a halt
+    rescue, or the executor resumes and the next evaluate clears it).
+    """
+    states = trek_doc.get("task_states") or {}
+    entry = states.get(task_id)
+    if entry and entry.get("halt_reason"):
+        entry["halt_reason"] = None
+        trek_doc["updated_at"] = utcnow_iso()
+    return trek_doc
+
+
+def evaluate_target_halt(
+    trek_doc: dict,
+    task_id: str,
+    *,
+    current_fingerprint: str,
+    current_commit_count: int,
+    last_pulse_at: str = "",
+    now: datetime.datetime | None = None,
+    pulse_timeout_minutes: int = HALT_PULSE_TIMEOUT_MINUTES,
+    stall_timeout_minutes: int = HALT_STALL_TIMEOUT_MINUTES,
+) -> str | None:
+    """Update per-target halt tracking and return the halt_reason (or None).
+
+    ms-128 e-4367 — called by the server tick for each *working* Target. It
+    compares this tick's ``current_fingerprint`` / ``current_commit_count``
+    against the values stored on ``task_states[task_id]`` from the previous
+    tick:
+
+      * If either advanced (fingerprint changed OR commit count increased)
+        → the Target made progress: refresh the stored values, stamp
+        ``progress_last_advanced_at = now``, clear any halt_reason, return
+        None.
+      * If neither advanced → the Target is idle. If it has been idle past
+        ``stall_timeout_minutes`` → tag ``progress-stall``. Independently, if
+        the last pulse is older than ``pulse_timeout_minutes`` → tag
+        ``liveness-timeout`` (takes precedence, = the session is likely dead,
+        not merely stuck).
+
+    Pure w.r.t. clock: ``now`` is injected (server tick passes UTC now, the
+    e2e harness a fake clock). Mutates ``task_states[task_id]`` in place and
+    returns the resolved halt_reason so the caller can decide to force the
+    working→leader_review transition (e-4309).
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    states = trek_doc.setdefault("task_states", {})
+    entry = states.get(task_id)
+    if entry is None:
+        # No task_state yet → nothing to evaluate against; seed baseline.
+        entry = {
+            "state": DEFAULT_TASK_STATE,
+            "updated_at": utcnow_iso(),
+            "last_activity_at": utcnow_iso(),
+        }
+        states[task_id] = entry
+
+    last_fp = entry.get("last_response_fingerprint", "")
+    last_cc = int(entry.get("last_commit_count") or 0)
+    advanced = (current_fingerprint != last_fp) or (
+        int(current_commit_count or 0) > last_cc
+    )
+
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    if advanced or not last_fp:
+        # Progress this tick (or first observation) → reset the stall clock.
+        entry["last_response_fingerprint"] = current_fingerprint
+        entry["last_commit_count"] = int(current_commit_count or 0)
+        entry["progress_last_advanced_at"] = now_iso
+        entry["halt_reason"] = None
+        states[task_id] = entry
+        trek_doc["updated_at"] = now_iso
+        return None
+
+    # No advance this tick. Resolve the two halt faces.
+    reason: str | None = None
+    pulse_dt = _parse_iso_to_dt(last_pulse_at) if last_pulse_at else None
+    if pulse_dt is not None:
+        if (now - pulse_dt) >= datetime.timedelta(minutes=pulse_timeout_minutes):
+            reason = HALT_REASON_LIVENESS
+    if reason is None:
+        advanced_dt = _parse_iso_to_dt(entry.get("progress_last_advanced_at") or "")
+        if advanced_dt is not None and (
+            now - advanced_dt
+        ) >= datetime.timedelta(minutes=stall_timeout_minutes):
+            reason = HALT_REASON_STALL
+
+    entry["halt_reason"] = reason
+    states[task_id] = entry
+    trek_doc["updated_at"] = now_iso
+    return reason
+
+
 def detect_unresponsive_leader(
     trek_doc: dict,
     now: datetime.datetime,
