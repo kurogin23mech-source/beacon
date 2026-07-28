@@ -35,7 +35,13 @@ def project_dir(tmp_path, monkeypatch):
     # ms-126: priority is mandatory. This test exercises the done-MS re-open
     # prompt, not priority triage, so opt into the untriaged sentinel to keep
     # the add path unblocked.
+    # ms-126 / e-4222: the untriaged sentinel is now a *machine-only* capability
+    # — a human session (conftest defaults BEACON_SESSION_KIND=human) that passes
+    # --untriaged is refused. This fixture seeds data as a machine caller, not a
+    # human deferring a priority judgement, so it declares a non-human session
+    # for the untriaged add to be honoured.
     monkeypatch.setenv("BEACON_ALLOW_UNTRIAGED", "1")
+    monkeypatch.delenv("BEACON_SESSION_KIND", raising=False)
     return tmp_path
 
 

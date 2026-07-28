@@ -109,6 +109,12 @@ def dev_project(tmp_path, monkeypatch):
     a separate fixture from the sales ``beacon_project``.
     """
     monkeypatch.chdir(tmp_path)
+    # ms-126 / e-4222: the milestone below is seeded with --untriaged as a setup
+    # convenience (this suite tests doc↔target linkage, not priority triage).
+    # untriaged is now a machine-only capability — a human session (conftest
+    # defaults BEACON_SESSION_KIND=human, propagated to subprocess children) is
+    # refused — so declare this seeding a machine session.
+    monkeypatch.delenv("BEACON_SESSION_KIND", raising=False)
     subprocess.run(
         [str(BEACON_BIN), "init"],
         input="e3754-dev\nFix e3754\n5\n1\n",

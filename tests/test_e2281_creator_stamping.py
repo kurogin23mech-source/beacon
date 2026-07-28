@@ -81,7 +81,13 @@ def project_dir(tmp_path, monkeypatch):
     # ms-126: these tests exercise author (creator) stamping, not priority
     # triage. Opt into the untriaged sentinel so cmd_milestone_add /
     # cmd_task_add don't reject the empty priority they never set.
+    # ms-126 / e-4222: untriaged is now a machine-only capability — a human
+    # session (conftest defaults BEACON_SESSION_KIND=human) that passes
+    # --untriaged is refused. These fixtures seed data as a machine caller (not a
+    # human deferring priority), so they declare a non-human session for the
+    # untriaged add to be honoured.
     monkeypatch.setenv("BEACON_ALLOW_UNTRIAGED", "1")
+    monkeypatch.delenv("BEACON_SESSION_KIND", raising=False)
     return tmp_path
 
 

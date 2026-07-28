@@ -34,6 +34,12 @@ from beacon_cli import main as main_mod  # noqa: E402
 def fresh_dir(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("BEACON_PROJECT_FILE", ".beacon/project.json")
+    # ms-126 / e-4222: these smokes seed milestones/tasks with --untriaged as a
+    # setup convenience (they test the CLI plumbing, not priority triage).
+    # untriaged is now a machine-only capability — a human session (conftest
+    # defaults BEACON_SESSION_KIND=human) is refused — so declare this a machine
+    # session for the seeding to be honoured.
+    monkeypatch.delenv("BEACON_SESSION_KIND", raising=False)
     # Simulate Windows / PowerShell: no bash, no bin/beacon found.
     monkeypatch.setattr(main_mod, "_find_bash", lambda: None)
     monkeypatch.setattr(main_mod, "_find_bin_beacon", lambda root: None)
