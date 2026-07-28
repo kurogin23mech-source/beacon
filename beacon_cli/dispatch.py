@@ -2575,7 +2575,10 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
             env["BEACON_REQUESTED_BY"] = args.requested_by
         if args.priority is not None:
             env["BEACON_PRIORITY"] = args.priority
-        if getattr(args, "allow_untriaged", False):
+        # e-4226: 直接参照で dest 配線漏れを fail-fast にする。getattr(..., False)
+        # は --untriaged の dest が切れても silent に False を返し、flag が黙って
+        # 無効化される穴になる (周囲の args.priority 等も直接参照で一貫)。
+        if args.allow_untriaged:
             env["BEACON_ALLOW_UNTRIAGED"] = "1"
         if args.motivation is not None:
             env["BEACON_MOTIVATION"] = args.motivation
@@ -2707,7 +2710,10 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
             "BEACON_OWNER": args.owner or "",
             "BEACON_ASSIGNEE": args.assignee or "",
         }
-        if getattr(args, "allow_untriaged", False):
+        # e-4226: 直接参照で dest 配線漏れを fail-fast にする。getattr(..., False)
+        # は --untriaged の dest が切れても silent に False を返し、flag が黙って
+        # 無効化される穴になる (周囲の args.priority 等も直接参照で一貫)。
+        if args.allow_untriaged:
             env["BEACON_ALLOW_UNTRIAGED"] = "1"
         return _run_commands_py(root, "milestone_add", env)
 
