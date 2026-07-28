@@ -1,5 +1,24 @@
 """lib/master_binding.py — project ごとの「マスター束縛」宣言 (ms-111 / e-3621 その1).
 
+────────────────────────────────────────────────────────────────────────────
+【重要 / experimental モジュール — まだ本番の処理経路につながっていません】(e-4360)
+
+このモジュールは「意図的に未配線 (= production コードから呼ばれていない)」の
+experimental 層です。宣言のための純関数だけを持ち、本番の CLI (lib/commands.py) や
+サーバー (server/app.py) からは *まだ* 一度も呼ばれていません。呼び元が無いことは
+「不要な死んだコード (dead module)」だからではなく、**linking go-live (= マスター
+共有の本番稼働) を始めるその時に初めて配線する** という ms-111 の設計順序によるもの
+です。よって「呼び元ゼロだから削除してよい」と誤読しないでください。マーカー定数
+``WIRED_TO_PRODUCTION = False`` が「本番未配線」を名前で予告しています (go-live で True に変える)。
+
+現状 (linking go-live の手前): マスターの本番活性化 (adapter の実体化など) はまだ
+行いません。この宣言層は「どの project がどのマスターに属すか」を表す純粋な計算を
+先に整備しておくためのもので、実際に project.json へ束縛を書き込む / 参照する配線は
+go-live 時に別タスクで足します。それまでの間、本モジュールを守るのはこの docstring と
+``WIRED_TO_PRODUCTION`` マーカー、および tests/test_master_binding_e3621.py の未配線を固定する
+テストです。
+────────────────────────────────────────────────────────────────────────────
+
 各 project (= インスタンス) が「自分の顧客 identity のマスター (= 真値源) は誰か」を
 宣言する層 (SPEC ms-111 §5 master_binding)。既定は Beacon-default master、外部 CRM
 (顧客管理システム) に接続する時はその system を指す。束縛軸は org_id (SPEC §8 案 B):
@@ -22,6 +41,13 @@ from __future__ import annotations
 
 import master_identity as mi
 import org as org_mod
+
+# 未配線マーカー (e-4360): 本モジュールが本番の処理経路に配線されていないことを名前で予告する。
+# production 経路 (lib/commands.py / server/app.py) から呼ばれておらず、wire は ms-111 の
+# linking go-live 時に行う。docstring 冒頭の注記と整合させること。False である限り
+# 「呼び元ゼロ = dead module」という誤読で削除してはならない (tests が未配線を固定する)。
+# go-live で配線する時に True へ変える。
+WIRED_TO_PRODUCTION = False
 
 # project.json 上の宣言フィールド名 + その下の key。
 MASTER_BINDING_FIELD = "master_binding"

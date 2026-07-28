@@ -25220,6 +25220,30 @@ def cmd_account_rename():
         save_project(data)
 
 
+def cmd_master_sync_drain():
+    """未配送で残った rename の master-sync を、CLI 操作を待たず定期経路から再発行する (e-4399).
+
+    背景: e-4355 の outbox (未同期 pending マーカー) は従来 cmd_account_rename の末尾で
+    しか drain されず、「次の CLI 操作」駆動だった。rename 後に別操作が無いと未配送分が
+    master に届かず遅延する。本サブコマンドは drain を account_rename から独立させ、操作
+    非依存の定期経路 (session-start helper 等) から呼べる entrypoint にする。
+
+    load_project → _drain_master_sync_outbox → 変化があれば save_project の順で回す。
+    save_project は cloud mode の lost-update guard (concurrent 変更で ConflictError) を
+    通すため、定期 drain でも同時編集を握り潰さない。drain 自体は既存 pending マーカーを
+    clear するだけ (新規 identity 変更を起こさない) なので apply_operation の changelog は
+    要らないが、書き込み経路は通常の save_project (guard 付き) を必ず経由する。
+
+    出力契約: pending が無い / 未 login / local mode では静かに no-op (発行できない環境で
+    エラーにしない)。1 件以上再配送して投影 doc を更新したら要旨を 1 行出す。常に exit 0。
+    """
+    data = load_project()
+    if _drain_master_sync_outbox(data):
+        save_project(data)
+        print("master-sync outbox: 未配送分を再送しました")
+    # pending 無し / 発行不可 (local / 未 login) は静かに no-op (定期経路のノイズを避ける)。
+
+
 def cmd_account_assign():
     import sales_entities
     account_id = os.environ.get("BEACON_ACCOUNT_ID", "")
@@ -26906,6 +26930,7 @@ if __name__ == "__main__":
         "account_contact": cmd_account_contact,
         "account_phase": cmd_account_phase,
         "account_rename": cmd_account_rename,
+        "master_sync_drain": cmd_master_sync_drain,  # e-4399: 操作非依存の定期 drain
         "account_assign": cmd_account_assign,
         "account_nurturing": cmd_account_nurturing,
         "account_delete": cmd_account_delete,

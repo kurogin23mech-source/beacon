@@ -1330,6 +1330,17 @@ cmd_account_rename() {
         python3 "$COMMANDS_PY" account_rename
 }
 
+# ms-111 e-4399: master-sync outbox を CLI 操作を待たず定期経路から drain する。
+# `beacon master-sync drain` を session-start helper 等の操作非依存経路から呼び、
+# rename 後に別操作が無くても未配送の master-sync を再発行して at-least-once に寄せる。
+cmd_master_sync() {
+    ensure_project
+    case "${1:-}" in
+        drain) python3 "$COMMANDS_PY" master_sync_drain ;;
+        *)     echo "Usage: beacon master-sync drain" ;;
+    esac
+}
+
 # ms-113 e-3734: Account の cross-project 開示リンク管理。
 # ms-113 generalization: 任意の Target を cross-project 開示する汎用動詞。
 # 旧 `beacon account link/unlink` を id で任意 Target を引く形に持ち上げた。
@@ -3413,6 +3424,7 @@ case "${1:-}" in
         ;;
     disclose)   shift; cmd_disclose "$@" ;;
     undisclose) shift; cmd_undisclose "$@" ;;
+    master-sync) shift; cmd_master_sync "$@" ;;
     acquisition|acq)
         case "${2:-}" in
             add)      shift 2; cmd_acquisition_add "$@" ;;

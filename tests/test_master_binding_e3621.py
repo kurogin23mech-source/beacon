@@ -95,3 +95,39 @@ def test_set_binding_rejects_empty_system():
     # system="" は「変えない」= 現在の beacon-default を保つので raise しない
     mb.set_master_binding(proj, system="")
     assert proj["master_binding"]["system"] == "beacon-default"
+
+
+# ---------------------------------------------------------------------------
+# experimental / 意図的未配線 の固定 (e-4360)
+#   master_binding は宣言層で、production 経路 (lib/commands.py / server/app.py) から
+#   *まだ* 呼ばれていない。「呼び元ゼロ = dead module」と誤読して削除されるのを防ぐため、
+#   experimental マーカーの存在と、未配線であること自体をテストで固定する。wire は
+#   ms-111 の linking go-live 時に行い、その際このセクションを更新する。
+# ---------------------------------------------------------------------------
+def test_module_carries_experimental_marker():
+    """WIRED_TO_PRODUCTION = False マーカーを持ち、docstring がその状態を明示している。"""
+    assert getattr(mb, "WIRED_TO_PRODUCTION", "missing") is False
+    doc = mb.__doc__ or ""
+    assert "experimental" in doc.lower()
+    assert "go-live" in doc.lower()  # wire のタイミングが docstring に明記されている
+
+
+def _production_sources() -> list[str]:
+    lib_dir = REPO / "lib"
+    server_dir = REPO / "server"
+    paths = [lib_dir / "commands.py", server_dir / "app.py"]
+    return [p.read_text(encoding="utf-8") for p in paths if p.exists()]
+
+
+def test_master_binding_is_not_wired_into_production():
+    """production コード (lib/commands.py / server/app.py) が master_binding を import /
+    参照していないことを固定する (= 意図的未配線)。
+
+    go-live で配線する時はこのテストを更新する。ここで落ちたら「未配線契約」が破れた
+    (= どこかから呼び始めた) 合図であり、docstring / WIRED_TO_PRODUCTION マーカーの見直しが要る。
+    """
+    for src in _production_sources():
+        assert "master_binding" not in src, (
+            "master_binding が production 経路から参照され始めた。"
+            "go-live 配線なら本テストと experimental マーカーを更新すること。"
+        )
