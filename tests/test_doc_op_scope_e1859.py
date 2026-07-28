@@ -42,6 +42,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 def beacon_project(tmp_path, monkeypatch):
     """Init a fresh local-mode beacon project with 1 milestone and 2 operations."""
     monkeypatch.chdir(tmp_path)
+    # ms-126 / e-4222: the milestone below is seeded with --untriaged as a setup
+    # convenience (this suite tests doc scoping, not priority triage). Since
+    # untriaged is now a machine-only capability — a human session
+    # (conftest defaults BEACON_SESSION_KIND=human, propagated to subprocess
+    # children) is refused — declare this seeding a machine session so the
+    # --untriaged add is honoured.
+    monkeypatch.delenv("BEACON_SESSION_KIND", raising=False)
     # Pipe answers into `beacon init` interactive prompt:
     # name, objective, retro_day (5=Fri), storage (1=local).
     init_in = "e1859-test\nFix e-1859\n5\n1\n"

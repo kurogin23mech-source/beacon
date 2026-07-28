@@ -995,6 +995,62 @@ def cmd_cloud_join():
 
 
 # ---------------------------------------------------------------------------
+# ms-126 / e-4222 — untriaged is a MACHINE capability, not a human escape hatch
+# ---------------------------------------------------------------------------
+#
+# The ms-126 forcing function makes priority mandatory on the human entry path
+# (`beacon task add` / `beacon milestone add`): an empty priority is rejected so
+# a person actually picks one of the 5 severities. Machine call sites that
+# genuinely have not judged a priority yet (issue import / review-derived /
+# roadmap bulk / dispatch-derived) opt into the `untriaged` sentinel instead, so
+# the missing judgement becomes *visible debt* (the untriaged-backlog trigger)
+# rather than a silent empty field.
+#
+# The gap this closes: `--untriaged` (→ BEACON_ALLOW_UNTRIAGED=1) was reachable
+# on the HUMAN CLI path too, so a person at a straight terminal could type
+# `beacon task add "…" --untriaged` (or `export BEACON_ALLOW_UNTRIAGED=1`) and
+# skip the "pick a priority" forcing function entirely — a hole straight through
+# the human=mandatory design line.
+#
+# The fix is an actor-based gate, reusing the established BEACON_SESSION_KIND
+# convention (see `_session_kind_is_human` and the ms-119 approval guards):
+#   * A NON-human session (SESSION_KIND unset / "ai") — Claude Code and the
+#     Skill-driven machine paths (dispatch / review-run / roadmap / log
+#     follow-up), plus in-process core call sites — may set untriaged.
+#   * A HUMAN session (SESSION_KIND=human, = a person at a straight terminal)
+#     that passes `--untriaged` / BEACON_ALLOW_UNTRIAGED=1 is REFUSED: the human
+#     owns the priority judgement and must make it. The untriaged sentinel is a
+#     machine deferral, never a human "I'll decide later".
+#
+# Note the polarity is inverted from the ms-119 approval guards (there the AI is
+# banned by default and a human bypasses). Here the *human* is the one refused
+# untriaged, because untriaged means "no human has judged this yet" — a
+# self-contradiction when the actor IS the human.
+def _human_untriaged_bypass_refused() -> bool:
+    """True when a human session is trying to use the untriaged escape hatch.
+
+    Returns True iff BOTH: the process asked for untriaged
+    (BEACON_ALLOW_UNTRIAGED=1, set by the `--untriaged` flag or a manual export)
+    AND the calling session declares itself human (BEACON_SESSION_KIND=human).
+    In that case the caller MUST be forced back onto the priority forcing
+    function. Machine / AI sessions (the default) are unaffected.
+    """
+    allow_untriaged = os.environ.get("BEACON_ALLOW_UNTRIAGED", "") == "1"
+    return allow_untriaged and _session_kind_is_human()
+
+
+# The human-facing rejection when a human session tries `--untriaged`. Speaks
+# with the same "pick one of the 5, untriaged is machine-only" voice as
+# core._UNTRIAGED_NOT_SEVERITY_MSG so the two forcing-function surfaces agree.
+_HUMAN_UNTRIAGED_REFUSED_MSG = (
+    "Priority is required. '--untriaged' is a machine-only sentinel (issue "
+    "import / review-derived / roadmap / dispatch); a human session cannot use "
+    "it to defer the judgement. Choose one of: highest, high, medium, low, "
+    "lowest (highest = 大目的への寄与が最大 / lowest = 最小)."
+)
+
+
+# ---------------------------------------------------------------------------
 # Milestone commands
 # ---------------------------------------------------------------------------
 
@@ -1013,6 +1069,14 @@ def cmd_milestone_add():
     # when they cannot supply a human-judged severity. The bare human command
     # leaves it unset and an empty priority is rejected with the 5-value list.
     allow_untriaged = os.environ.get("BEACON_ALLOW_UNTRIAGED", "") == "1"
+    # ms-126 / e-4222: untriaged is a machine-only sentinel. A human session
+    # (BEACON_SESSION_KIND=human) that passes --untriaged is refused here — the
+    # human owns the priority judgement and must pick one of the 5. Machine / AI
+    # sessions (default) keep the untriaged capability. This closes the hole
+    # where a person could bypass the mandatory-priority forcing function.
+    if _human_untriaged_bypass_refused():
+        print(f"Error: {_HUMAN_UNTRIAGED_REFUSED_MSG}", file=sys.stderr)
+        sys.exit(1)
     data = load_project()
     _gate_target_class(data, "milestone")  # ms-115: block in non-dev projects
     # ms-43 / e-2281 — stamp the human author on the milestone so the Web
@@ -4374,6 +4438,14 @@ def cmd_task_add():
     # ms-126: priority mandatory on the human path; machine callers opt into the
     # ``untriaged`` sentinel via ``--untriaged`` (BEACON_ALLOW_UNTRIAGED=1).
     allow_untriaged = os.environ.get("BEACON_ALLOW_UNTRIAGED", "") == "1"
+    # ms-126 / e-4222: refuse the untriaged escape hatch on a human session — a
+    # person must pick a real priority; only machine / AI paths may defer with
+    # the untriaged sentinel. See _human_untriaged_bypass_refused. Checked before
+    # the ms-81 re-open prompt so a human --untriaged is rejected up front,
+    # regardless of the target milestone's state.
+    if _human_untriaged_bypass_refused():
+        print(f"Error: {_HUMAN_UNTRIAGED_REFUSED_MSG}", file=sys.stderr)
+        sys.exit(1)
 
     data = load_project()
     target = core.find_target_milestone(data, ms_id)
@@ -25043,34 +25115,87 @@ def cmd_account_add():
     print(f"Added account {acc_id}: {name}")
 
 
-def _emit_master_sync_account_rename(data, account_id, new_name):
-    """rename を master へ write-through する master-sync event を発行 (ms-111 e-3622 chunk2a).
+def _post_master_sync_event(payload):
+    """master-sync event を 1 件だけ実発行する (ms-111 e-4355 で emit を pure に切り出し).
 
-    投影 account が master に link 済のときだけ発行 (未 link は master 実体が無いので投影
-    のみで完結 = 現状の常態、payload=None で早期 return)。cloud mode + login 済のときだけ
-    実発行する (local mode は master server が無い / _get_api_client の sys.exit を避けるため
-    先に login/cloud を確認)。best-effort: 発行失敗は rename を壊さない (投影は保存済、master
-    同期は付随。server 側 consumer が送信者 org を authz して apply する)。
+    cloud mode + login 済のときだけ実発行する (local mode は master server が無い /
+    _get_api_client の sys.exit を避けるため先に login/cloud を確認)。発行できたら True、
+    未 login / local / 発行例外なら False を返す (呼び出し側が outbox 判断に使う)。
+
+    従来はこの emit を握り潰していた (best-effort、silent) が、silent 失敗は
+    「master 反映漏れ → 後続 fan-out で local rename が revert = lost edit」の入口
+    (e-4355)。成否を返し値で surface し、呼び出し側が pending マーカー (outbox) に
+    落とせるようにする。
     """
+    if not payload:
+        return False
     try:
-        import sales_entities
-        acc = sales_entities.find_account(data, account_id)
-        if acc is None:
-            return
-        payload = master_projection.master_sync_payload(acc, new_name)
-        if not payload:
-            return  # 未 link → 発行不要
         from auth import load_credentials
         if load_credentials() is None or not os.path.exists(_get_cloud_config_path()):
-            return  # local / 未 login → master server 無し
+            return False  # local / 未 login → master server 無し (= 未配送)
         client, config = _get_api_client()
         project_id = _resolve_bus_project_id(config)
         client.post_bus_event(
             project_id, "master-sync",
             sender_session_id=os.environ.get("BEACON_SESSION_ID", ""),
             payload=payload, delivery="propose-to-ai")
+        return True
     except Exception:
-        return  # best-effort
+        return False  # bus 不通 / 認証エラー等 → 未配送 (outbox に残す)
+
+
+def _emit_master_sync_account_rename(data, account_id, new_name):
+    """rename を master へ write-through する master-sync event を発行する (ms-111 e-3622 / e-4355).
+
+    投影 account が master に link 済のときだけ発行 (未 link は master 実体が無いので投影
+    のみで完結 = 現状の常態)。**at-least-once (e-4355)**: 発行に失敗したら投影 account に
+    未同期 (unsynced) の pending マーカーを立てて data を返す (呼び出し側が save して次操作で
+    再発行する = outbox)。発行成功なら既存マーカーを消す。
+
+    戻り値 ``(delivered, changed)``:
+      - ``delivered`` : master-sync event を実配送できたか。
+      - ``changed``   : 投影 account の pending マーカーを変更したか (True なら save 要)。
+    """
+    try:
+        import sales_entities
+        acc = sales_entities.find_account(data, account_id)
+        if acc is None:
+            return False, False
+        payload = master_projection.master_sync_payload(acc, new_name)
+        if not payload:
+            return False, False  # 未 link → 発行不要 (同期対象外)
+        if _post_master_sync_event(payload):
+            # 配送成功 → 未同期マーカーがあれば回収 (この rename も過去の残置も済み)。
+            had = master_projection.is_sync_pending(acc)
+            master_projection.clear_sync_pending(acc)
+            return True, had
+        # 配送失敗 → outbox: 未同期マーカーを立てて retry 源にする (lost edit 防止)。
+        before = master_projection.sync_pending_name(acc)
+        master_projection.mark_sync_pending(acc, new_name)
+        return False, master_projection.sync_pending_name(acc) != before
+    except Exception:
+        return False, False  # 防御的: emit 経路の想定外例外は rename を壊さない
+
+
+def _drain_master_sync_outbox(data):
+    """未配送で残った rename (pending マーカー付き投影) の master-sync を再発行する (e-4355 outbox).
+
+    linking を live にすると emit は時々失敗する (bus 一時不通等)。失敗を放置すると
+    master 反映漏れ → fan-out revert (lost edit)。この drain を CLI 操作の折に呼び、
+    pending を抱える account の master-sync を再発行して at-least-once に寄せる。
+    戻り値は data を変更したか (= save 要)。
+    """
+    changed = False
+    try:
+        for acc in master_projection.pending_sync_accounts(data):
+            payload = master_projection.master_sync_payload(
+                acc, master_projection.sync_pending_name(acc))
+            if payload and _post_master_sync_event(payload):
+                master_projection.clear_sync_pending(acc)
+                changed = True
+    except Exception:
+        pass  # 防御的: drain は best-effort、失敗は次回に持ち越す
+    return changed
 
 
 def cmd_account_rename():
@@ -25085,8 +25210,14 @@ def cmd_account_rename():
         sys.exit(1)
     save_project(data)
     print(f"Renamed {account_id} → {new_name.strip()}")
-    # ms-111 e-3622 chunk2a: link 済なら rename を master へ write-through (best-effort)。
-    _emit_master_sync_account_rename(data, account_id, new_name)
+    # ms-111 e-3622 chunk2a / e-4355: link 済なら rename を master へ write-through。
+    # emit が失敗したら pending マーカー (outbox) を残し、過去分の未配送も drain する
+    # (at-least-once)。マーカーが変わったら投影 doc を再保存する。
+    _, changed = _emit_master_sync_account_rename(data, account_id, new_name)
+    if _drain_master_sync_outbox(data):
+        changed = True
+    if changed:
+        save_project(data)
 
 
 def cmd_account_assign():
