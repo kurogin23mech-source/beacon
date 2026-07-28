@@ -494,6 +494,135 @@ def should_fire_leader_tick(
 
 
 # ---------------------------------------------------------------------------
+# Leader-digest heartbeat (ms-128 / e-4284)
+#
+# should_fire_leader_tick は「消費すべき signal がある時だけ」発火する
+# (leader_review queue / todo float / completion imminent)。しかし dogfood で、
+# 全 executor が working のまま silent に滞留 (= signal ゼロ) すると leader digest
+# が 1 度も発火せず、leader は stall を観測できないまま autonomous ループが
+# self-heal できなかった。signal 駆動だけでは「何も起きていないこと」自体が
+# leader に届かない。
+#
+# 対策: signal gate が閉じていても、遅い cadence (= cadence × 3 ≒ 30 分) で leader
+# digest を heartbeat として発火する。これで silent stall が必ず leader の目に入る
+# 一方、毎 tick 発火の noise は避ける。完遂済 trek (summary_sent + completion
+# notified) は server 側の halted_by_summary で別途止まるので heartbeat も止まる。
+# ---------------------------------------------------------------------------
+
+LEADER_DIGEST_HEARTBEAT_MULTIPLIER = 3
+
+
+def get_last_leader_digest_at(
+    trek_doc: dict,
+) -> Optional[datetime.datetime]:
+    """Return the trek's last leader-digest fire time, or None if never."""
+    meta = trek_doc.get("meta") or {}
+    return _parse_iso(meta.get("last_leader_digest_at", ""))
+
+
+def is_leader_digest_heartbeat_due(
+    trek_doc: dict,
+    *,
+    now: datetime.datetime,
+    default_cadence_minutes: int = DEFAULT_CADENCE_MINUTES,
+    multiplier: int = LEADER_DIGEST_HEARTBEAT_MULTIPLIER,
+) -> bool:
+    """Decide whether the leader digest should fire as a heartbeat (e-4284).
+
+    Purpose: surface a silently-stalled trek to the leader even when the
+    signal gate (``should_fire_leader_tick``) is closed. Fires on a slow
+    cadence so the leader gets a periodic pulse without per-tick noise.
+
+    Invariant (= what "heartbeat fired" means to the reader): the leader
+    digest heartbeats iff the trek has been **quiet for at least
+    ``cadence * multiplier``** (default 10 × 3 = 30 min). "Quiet" is
+    measured from the most recent of {last leader digest, last progress
+    check} — i.e. the last time the trek surfaced anything. This holds
+    uniformly, including the never-digested case (no interval-zero first
+    pulse), so "heartbeat" always denotes cadence×N of silence.
+
+    Rules (mirror ``is_trek_idle``'s guards):
+      * Only ``status == 'active'`` treks heartbeat (planning / archived
+        have no ongoing work to pulse about).
+      * ``halt`` set → no heartbeat (leader pulled the cord deliberately).
+      * Anchor = last_leader_digest_at, falling back to
+        last_progress_check_at when no digest has fired yet. Due iff
+        ``now - anchor >= cadence * multiplier``. A trek never ticked
+        (no anchor at all) is not due — its first tick starts the clock.
+
+    Pure so unit tests pin it without HTTP. The server ORs this into
+    ``leader_should_fire`` alongside the signal gate and completion_ready.
+    """
+    if trek_doc.get("status") != "active":
+        return False
+    if trek_doc.get("halt"):
+        return False
+    cadence = get_cadence_minutes(trek_doc, default=default_cadence_minutes)
+    threshold = datetime.timedelta(minutes=cadence * multiplier)
+    now = _ensure_utc(now)
+    # Anchor on the last time the trek surfaced anything: a digest if one
+    # has fired, else the progress-check that proves the trek is live.
+    anchor = get_last_leader_digest_at(trek_doc) or get_last_progress_check_at(
+        trek_doc
+    )
+    if anchor is None:
+        # Never ticked at all → no clock yet; the first tick starts it.
+        return False
+    anchor = _ensure_utc(anchor)
+    return (now - anchor) >= threshold
+
+
+def is_leader_halted_by_summary(trek_doc: dict) -> bool:
+    """Return True iff the trek's completion has already been handed off.
+
+    ms-97 / Phase 7-A / AC21 — 完遂宣言が済んだ (leader が user へ summary DM を
+    送信 = ``meta.summary_sent_at`` stamped、 かつ completion_ready が 1 回 fire
+    済 = ``meta.completion_notified_at`` stamped) trek には leader digest を打ち
+    続けない。片方だけ stamped の状態では従来通り fire し続ける。
+
+    ms-128 / e-4284 — この停止条件は heartbeat / signal どちらの発火経路にも
+    等しく効く必要がある。判定を 1 か所に集約し、server と
+    ``compose_leader_fire_decision`` の両方から呼べるようにする (= 完遂済 trek に
+    heartbeat を撃ち続ける事故を、停止条件の 2 ファイル分散でなく単一定義で防ぐ)。
+    """
+    meta = trek_doc.get("meta") or {}
+    return bool(meta.get("summary_sent_at")) and bool(
+        meta.get("completion_notified_at")
+    )
+
+
+def compose_leader_fire_decision(
+    *,
+    signal_fire: bool,
+    heartbeat_due: bool,
+    halted_by_summary: bool,
+) -> tuple[bool, list[str]]:
+    """Combine the leader-digest fire inputs into ``(should_fire, fire_reasons)``.
+
+    ms-128 / e-4284 — 発火判断を endpoint のインライン式から純関数へ切り出し、
+    OR 合成と発火理由タグを 1 行ずつ unit test で pin できるようにする
+    (= 約 1300 行の tick endpoint の中腹に埋めない)。
+
+    - ``halted_by_summary`` が最優先の停止条件 (= 完遂済 trek は何があっても
+      digest しない)。
+    - それ以外は ``signal_fire`` / ``heartbeat_due`` の OR で発火する。
+    - ``fire_reasons`` は **常に存在する閉じた列挙** (``["signal"]`` /
+      ``["heartbeat"]`` / 両方) を返す。発火理由を optional bool の有無で運ぶと
+      受信側 (leader digest を読む AI) が欠落の意味を推測する余地が残るため、
+      値域を閉じた list にして「なぜ発火したか」を明示する (独立 AX レビュー
+      #536 指摘)。should_fire=False の時は空 list。
+    """
+    if halted_by_summary:
+        return False, []
+    reasons: list[str] = []
+    if signal_fire:
+        reasons.append("signal")
+    if heartbeat_due:
+        reasons.append("heartbeat")
+    return (len(reasons) > 0), reasons
+
+
+# ---------------------------------------------------------------------------
 # Completion-ready signal (ms-97 / Phase 7-A, AC20)
 # ---------------------------------------------------------------------------
 
