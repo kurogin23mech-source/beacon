@@ -275,3 +275,37 @@ def link_new_contact_to_master(contact: dict, adapter, *, org_id: str,
     link_contact_to_master(contact, saved[mi.MASTER_CONTACT_ID_FIELD],
                            master_account_id, system=system)
     return saved
+
+
+# ---------------------------------------------------------------------------
+# write-through: 投影 identity の編集を master へ透過する (master 権威、e-3622 chunk2a)
+#   leader 合意 guard: user の rename は投影を直接 authoritative にせず、必ず master へ
+#   透過する (投影 name は cache、master が唯一の真値 → divergence source を作らない)。
+#   data-immutability (guard 1): master 側変更の追跡は上位の master-sync bus event log
+#   (append-only) が担い、本関数は master record への適用 (master-wins) だけを持つ。
+# ---------------------------------------------------------------------------
+def write_through_account_name(account: dict, adapter, new_name: str, *,
+                               now: str) -> Optional[dict]:
+    """投影 Account の rename を master の canonical name へ write-through する。
+
+    戻り値は更新後の master record。write-through 対象外なら None:
+    - `adapter` が None / 未 link: master 実体が無いので透過先が無い → None
+      (呼び出し側は投影のみ更新。master 化前の account は投影が唯一の source)。
+    - link 済 + same-org: master の name を new_name に更新し put (master-wins)。
+    - org 不一致 (= cross-org poisoning の疑い): fail-closed で拒否 (ValueError)。
+      別 org の master を書き換えさせない (chunk1 read/write 境界と一貫)。
+    - new_name が空: ValueError (identity を空にする write-through は無効)。
+    """
+    if adapter is None or not is_account_linked(account):
+        return None
+    name = str(new_name or "").strip()
+    if not name:
+        raise ValueError("write-through name cannot be empty")
+    rec = adapter.get_account(linked_master_account_id(account))
+    if not rec:
+        return None
+    if not _org_matches(mi.master_account_org_id(rec), projection_account_org(account)):
+        raise ValueError(
+            "cross-org write-through refused: master org != account owner_org "
+            "(ms-111 e-3622)")
+    return adapter.put_account({**rec, "name": name}, now=now)
