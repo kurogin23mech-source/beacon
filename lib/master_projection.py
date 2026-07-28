@@ -309,3 +309,50 @@ def write_through_account_name(account: dict, adapter, new_name: str, *,
             "cross-org write-through refused: master org != account owner_org "
             "(ms-111 e-3622)")
     return adapter.put_account({**rec, "name": name}, now=now)
+
+
+def apply_master_name_sync(adapter, *, master_account_id: str, new_name: str,
+                           expected_org: str, now: str) -> Optional[dict]:
+    """master-sync event を master へ適用する server 側 consumer core (e-3622 chunk2a part2).
+
+    outbound write-through の bus 経路: CLI が rename 時に発行した master-sync event を
+    server が受け、その payload (master_account_id / new_name / expected_org=発行元投影の
+    owner_org) から master の canonical name を更新する。``write_through_account_name`` が
+    **投影 account を持つ context** (CLI / project doc) 用なのに対し、こちらは **event
+    payload しか持たない server consumer** 用の姉妹。両者は master 側の適用意味論
+    (same-org 検証 + master-wins) を共有する。
+
+    event 経路なので、不適用 (未知 id / org 不一致 / 空 name) は **例外でなく None を返す**
+    (= silent drop、呼び出し元の event ループを壊さない。cross-org は攻撃かノイズなので
+    握りつぶす)。戻り値は更新後の master record、適用しなければ None。
+    """
+    name = str(new_name or "").strip()
+    if not master_account_id or not name:
+        return None
+    rec = adapter.get_account(master_account_id)
+    if not rec:
+        return None
+    if not _org_matches(mi.master_account_org_id(rec), expected_org):
+        return None   # fail-closed: cross-org は drop (event 経路なので raise しない)
+    return adapter.put_account({**rec, "name": name}, now=now)
+
+
+def master_sync_payload(account: dict, new_name: str) -> Optional[dict]:
+    """投影 rename から master-sync event の payload を組み立てる (CLI producer 用、chunk2a).
+
+    投影 account の master 参照 (master_account_id) と所有 org (owner_org_id) を読み、
+    server consumer (apply_master_name_sync) が同 org 検証して適用できる最小 payload に
+    する。未 link (= master 実体なし) は None (= 発行不要、投影のみで完結)。
+    """
+    if not is_account_linked(account):
+        return None
+    name = str(new_name or "").strip()
+    if not name:
+        return None
+    return {
+        "kind": "master_sync",
+        "entity": "account",
+        "master_account_id": linked_master_account_id(account),
+        "new_name": name,
+        "org_id": projection_account_org(account),
+    }

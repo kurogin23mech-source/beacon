@@ -97,3 +97,60 @@ def test_write_through_preserves_created_at(adapter):
     updated = mp.write_through_account_name(acc, adapter, "Acme Inc.", now=T2)
     assert updated["created_at"] == before["created_at"]   # 作成時刻は不変
     assert updated["updated_at"] == T2                      # 書き込みで進む
+
+
+# ---------------------------------------------------------------------------
+# part2: server consumer core (apply_master_name_sync) + CLI producer (payload)
+# ---------------------------------------------------------------------------
+def test_apply_master_name_sync_same_org_updates(adapter):
+    acc = _linked_account(adapter, org=ORG_A, name="Acme")
+    mid = mp.linked_master_account_id(acc)
+    out = mp.apply_master_name_sync(adapter, master_account_id=mid,
+                                    new_name="Acme Inc.", expected_org=ORG_A, now=T2)
+    assert out is not None and out["name"] == "Acme Inc."
+    assert adapter.get_account(mid)["name"] == "Acme Inc."
+
+
+def test_apply_master_name_sync_cross_org_drops_silently(adapter):
+    """event 経路: cross-org は raise せず None で drop、master は不変。"""
+    m_a = mi.new_master_account("A-name", org_id=ORG_A, now=T1, master_account_id="macc-a")
+    adapter.put_account(m_a, now=T1)
+    out = mp.apply_master_name_sync(adapter, master_account_id="macc-a",
+                                    new_name="Hijack", expected_org=ORG_B, now=T2)
+    assert out is None
+    assert adapter.get_account("macc-a")["name"] == "A-name"   # 書き換わっていない
+
+
+def test_apply_master_name_sync_unknown_id_or_empty_drops(adapter):
+    assert mp.apply_master_name_sync(adapter, master_account_id="nope",
+                                     new_name="X", expected_org=ORG_A, now=T2) is None
+    assert mp.apply_master_name_sync(adapter, master_account_id="",
+                                     new_name="X", expected_org=ORG_A, now=T2) is None
+    acc = _linked_account(adapter, org=ORG_A, name="Acme")
+    mid = mp.linked_master_account_id(acc)
+    assert mp.apply_master_name_sync(adapter, master_account_id=mid,
+                                     new_name="  ", expected_org=ORG_A, now=T2) is None
+
+
+def test_master_sync_payload_from_linked_account(adapter):
+    acc = _linked_account(adapter, org=ORG_A, name="Acme")
+    payload = mp.master_sync_payload(acc, "Acme Inc.")
+    assert payload["kind"] == "master_sync" and payload["entity"] == "account"
+    assert payload["master_account_id"] == mp.linked_master_account_id(acc)
+    assert payload["new_name"] == "Acme Inc." and payload["org_id"] == ORG_A
+
+
+def test_master_sync_payload_unlinked_or_empty_is_none(adapter):
+    assert mp.master_sync_payload({"id": "a", "name": "X"}, "New") is None   # 未 link
+    acc = _linked_account(adapter, org=ORG_A, name="Acme")
+    assert mp.master_sync_payload(acc, "   ") is None                        # 空 name
+
+
+def test_payload_roundtrips_through_apply(adapter):
+    """producer→consumer 一巡: payload を apply に通すと master が更新される。"""
+    acc = _linked_account(adapter, org=ORG_A, name="Acme")
+    payload = mp.master_sync_payload(acc, "Roundtrip Co.")
+    out = mp.apply_master_name_sync(adapter, master_account_id=payload["master_account_id"],
+                                    new_name=payload["new_name"],
+                                    expected_org=payload["org_id"], now=T2)
+    assert out["name"] == "Roundtrip Co."
