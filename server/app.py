@@ -6370,17 +6370,30 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     from_state = trek_mod.get_task_state(t, body.task_id)
     if from_state in ("leader_review", "user_review"):
         _require_trek_leader_session(t, user, request)
-    # ms-97 / e-2650 — phantom done 構造防御。 Trek slot を done に flip
+    # ms-128 方針5 (e-4366) — done は Trek 状態機械から除去され、書き込みは
+    # user_review へ migrate される。以降の「状態の意味」判定 (terminal 判定 /
+    # gate 発火 / review-trigger / decision 写像 / event payload) は、client が
+    # 送った生の body.state ではなく、実際に保存される effective_state を見る。
+    # これで legacy "done" 書き込みも user_review として一貫して扱われ、terminal
+    # 集合 (TERMINAL_TASK_STATES) と migration 写像を唯一の真実源にできる
+    # (= gate 条件にリテラルタプルを直書きしない)。
+    effective_state = trek_mod.migrate_legacy_task_state(body.state)
+    # ms-97 / e-2650 — phantom done 構造防御。 Trek slot を terminal に flip
     # する前に、 真値源である project pool の task status が done である
-    # ことを必須条件として check する (= 「view 側だけ done になる経路」 を
-    # server で構造的に reject)。 状態が done 以外なら check skip (= todo
-    # / working / *_review への遷移は従来通り 5-state machine だけで判定、
-    # done だけが evidence-backed terminal なので明示防御の対象)。
+    # ことを必須条件として check する (= 「view 側だけ terminal になる経路」 を
+    # server で構造的に reject)。
+    # ms-128 方針5 (e-4366) — terminal が done → user_review に移ったので、
+    # gate は effective_state が terminal (= user_review) かどうかで発火する。
+    # user_review が唯一の terminal (= 「手前まで運んだ」= slot 完了)。 done だけを
+    # gate すると literal "user_review" 書き込みが pool-done 検証を素通りして
+    # phantom-done の穴が再び開くため、 terminal 集合そのもので gate する
+    # (option A、 user 合意 2026-07-28)。 terminal 以外 (todo / working /
+    # leader_review への遷移) は状態機械だけで判定する。
     # 旧コード (= 2026-06-28 以前) ではこの check が無く、 e-710 のような
     # 「commit ゼロで Trek slot だけ done」 が成立していた。 ms-97 SPEC
-    # AC10 / AC30 補強の構造実装、 詳細は lib/trek.py
+    # AC10 / AC30 補強 + ms-128 方針5 の構造実装、 詳細は lib/trek.py
     # ``check_slot_done_precondition`` の docstring を参照。
-    if body.state == "done":
+    if effective_state in trek_mod.TERMINAL_TASK_STATES:
         allowed, reason_code, message = trek_mod.check_slot_done_precondition(
             t,
             task_id=body.task_id,
@@ -6411,7 +6424,7 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     # (= AC "per-quiesce 1 回だけ" is per lifecycle, not per lifetime).
     # The mark stamping happens in the scheduler tick's quiesce branch;
     # here we only reset when a resume-like transition lands.
-    if body.state not in trek_mod.TERMINAL_TASK_STATES:
+    if effective_state not in trek_mod.TERMINAL_TASK_STATES:
         meta_after = t.setdefault("meta", {})
         if meta_after.get("quiesced_at"):
             meta_after["quiesced_at"] = None
@@ -6431,7 +6444,7 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
                     _review_pid,
                     decision_event_mod.decision_event_from_trek_review(
                         decision=decision_event_mod
-                        .trek_review_decision_from_state(body.state),
+                        .trek_review_decision_from_state(effective_state),
                         trek_id=trek_id,
                         task_id=body.task_id,
                         decider_session_id=caller_sid,
@@ -6459,7 +6472,7 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     # 正常化する。 outcome log row は元来 terminal 状態にのみ書く design なので
     # 同じ trigger 集合に乗せる (= leader_review も「leader 判断要請」 という
     # 意味で 1 つの outcome event として記録に値する)。
-    if body.state in trek_mod.REVIEW_TRIGGER_STATES:
+    if effective_state in trek_mod.REVIEW_TRIGGER_STATES:
         # ms-97 / Phase 7-C / AC26 — outcome log row at review-trigger state.
         # Recorded BEFORE the DM fanout so the log row exists even if
         # leader notification fails (= durable audit trail).
@@ -6468,7 +6481,7 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
             "session_id": caller_sid,
             "payload": {
                 "task_id": body.task_id,
-                "state": body.state,
+                "state": effective_state,
                 "note": (body.note or "")[:500],
             },
             "created_at": trek_mod.utcnow_iso(),
@@ -6492,7 +6505,7 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
             suppressions = meta.setdefault("review_suppressions", [])
             suppressions.append({
                 "task_id": body.task_id,
-                "state": body.state,
+                "state": effective_state,
                 "suppression_reason": "self_judgment",
                 "suppressed_at": trek_mod.utcnow_iso(),
                 "caller_session_id": caller_sid,
@@ -6518,13 +6531,13 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
                 "kind": "trek-task-review",
                 "trek_id": trek_id,
                 "task_id": body.task_id,
-                "state": body.state,
+                "state": effective_state,
                 "note": body.note or "",
                 "updated_by_session_id": caller_sid,
                 "recipient_session_id": leader_sid,
                 "body": (
                     f"[Trek task review required] trek_id={trek_id} "
-                    f"task_id={body.task_id} state={body.state}\n"
+                    f"task_id={body.task_id} state={effective_state}\n"
                     f"executor note: {(body.note or '').strip()[:200]}\n"
                     f"次の action: /beacon-trek-review {trek_id} {body.task_id} "
                     f"で approve / re-work / forward-to-user の 3 択を実行してください。"

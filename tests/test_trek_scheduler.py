@@ -978,8 +978,10 @@ def test_task_state_aggregate_counts_each_state_bucket():
         "e-e": {"state": "user_review", "updated_at": "2026-06-25T04:00:00Z"},
     })
     agg = scheduler.build_task_state_aggregate(t)
+    # ms-128 方針5: done は Trek 状態機械から除去され read-time に user_review へ
+    # migrate される。done×2 + user_review×1 は user_review=3 に畳まれ done=0。
     assert agg["counts"] == {
-        "leader_review": 0, "done": 2, "user_review": 1,
+        "leader_review": 0, "done": 0, "user_review": 3,
         "working": 1, "todo": 1,
     }
     # overall_state: 1 working → "working" wins per AC10 precedence

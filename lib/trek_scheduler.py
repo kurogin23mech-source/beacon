@@ -98,13 +98,14 @@ _trek_for_constants = _import_trek()
 if _trek_for_constants is not None:
     try:
         DEFAULT_TASK_STATE = _trek_for_constants.DEFAULT_TASK_STATE  # (= "todo")
-        TERMINAL_TASK_STATES = _trek_for_constants.TERMINAL_TASK_STATES  # (= ("done", "user_review"))
+        # ms-128 方針5: done を Trek 状態機械から除去、user_review が唯一の terminal。
+        TERMINAL_TASK_STATES = _trek_for_constants.TERMINAL_TASK_STATES  # (= ("user_review",))
     except AttributeError:
         DEFAULT_TASK_STATE = "todo"
-        TERMINAL_TASK_STATES = ("done", "user_review")
+        TERMINAL_TASK_STATES = ("user_review",)
 else:
     DEFAULT_TASK_STATE = "todo"
-    TERMINAL_TASK_STATES = ("done", "user_review")
+    TERMINAL_TASK_STATES = ("user_review",)
 del _trek_for_constants
 
 WORKING_TASK_STATE = "working"
@@ -1099,11 +1100,12 @@ def build_task_state_aggregate(trek_doc: dict) -> dict:
         overall_state = _compute(children)
     elif children:
         # Local fallback mirrors lib.trek.compute_ms_slot_state precedence.
+        # ms-128 方針5: done は Trek 状態機械から除去。import 失敗時は
+        # _task_state_of が migrate せず raw "done" が cs に混じりうるので、
+        # ここで done を user_review と同一視して terminal に畳む。
         cs = [c["state"] for c in children]
         if "leader_review" in cs:
             overall_state = "leader_review"
-        elif all(s == "done" for s in cs):
-            overall_state = "done"
         elif all(s in ("done", "user_review") for s in cs):
             overall_state = "user_review"
         elif "working" in cs:

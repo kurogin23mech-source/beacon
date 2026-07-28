@@ -539,7 +539,13 @@ def test_get_task_state_returns_default_for_unknown():
 
 
 def test_set_task_state_records_state_and_metadata():
-    """ms-88 / e-2107: 5 状態 model 経由でメタデータが残る (claim → done)。"""
+    """ms-88 / e-2107 + ms-128 方針5: state model 経由でメタデータが残る。
+
+    ms-128 方針5: legacy "done" 書き込みは user_review に migrate される
+    (= Trek は user_review で打ち止め、done は Trek 外)。メタデータ記録の
+    契約は不変なので、書き込み内容 (done) と保存状態 (user_review) の
+    migration を同時に検証する。
+    """
     t = trek.new_trek(
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
@@ -551,7 +557,8 @@ def test_set_task_state_records_state_and_metadata():
         updated_by_session_id="sv-exec", note="phase 2 land",
     )
     entry = t["task_states"]["e-100"]
-    assert entry["state"] == "done"
+    # ms-128 方針5: done → user_review に migrate 済
+    assert entry["state"] == "user_review"
     assert entry["updated_by_session_id"] == "sv-exec"
     assert entry["note"] == "phase 2 land"
     assert entry["updated_at"]
@@ -633,17 +640,24 @@ def test_aggregate_task_state_active_when_default_state():
 
 
 def test_aggregate_task_state_all_done():
+    """ms-128 方針5: legacy "done" 書き込みは user_review に migrate される。
+
+    旧 "all-done" 集約は消滅し、done×2 の書き込みは all-user-review に畳まれる
+    (= Trek は done を持たず user_review で打ち止め、done は Trek 外の配置境界)。
+    done カウントは常に 0。
+    """
     t = trek.new_trek(
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
     )
-    # todo → working → done (= claim 経路を通る)
+    # todo → working → done (= claim 経路を通る、done は user_review に migrate)
     for tid in ("e-1", "e-2"):
         trek.set_task_state(t, task_id=tid, state="working")
         trek.set_task_state(t, task_id=tid, state="done")
     agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
-    assert agg["overall"] == "all-done"
-    assert agg["done"] == 2
+    assert agg["overall"] == "all-user-review"
+    assert agg["done"] == 0
+    assert agg["user_review"] == 2
 
 
 def test_aggregate_task_state_all_user_review():
@@ -673,7 +687,11 @@ def test_aggregate_task_state_leader_review_keeps_trek_active():
 
 
 def test_aggregate_task_state_all_terminal_mixed():
-    """ms-88 / e-2107: terminal mixed は done + user_review の組合せ。"""
+    """ms-128 方針5: 旧 "all-terminal-mixed" (done + user_review) は消滅した。
+
+    done は書き込み時に user_review へ migrate されるので、done + user_review の
+    混在は all-user-review に畳まれる (= user_review が唯一の terminal)。
+    """
     t = trek.new_trek(
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
@@ -683,11 +701,11 @@ def test_aggregate_task_state_all_terminal_mixed():
     trek.set_task_state(t, task_id="e-2", state="working")
     trek.set_task_state(t, task_id="e-2", state="user_review")
     agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
-    assert agg["overall"] == "all-terminal-mixed"
-    assert agg["done"] == 1
-    assert agg["user_review"] == 1
+    assert agg["overall"] == "all-user-review"
+    assert agg["done"] == 0
+    assert agg["user_review"] == 2
     # backward-compat alias: waiting-review = leader_review + user_review
-    assert agg["waiting-review"] == 1
+    assert agg["waiting-review"] == 2
 
 
 def test_aggregate_task_state_active_when_any_working():
@@ -696,12 +714,13 @@ def test_aggregate_task_state_active_when_any_working():
         creator_session_id="sv-1",
     )
     trek.set_task_state(t, task_id="e-1", state="working")
-    trek.set_task_state(t, task_id="e-1", state="done")
+    trek.set_task_state(t, task_id="e-1", state="done")  # → user_review (方針5 migrate)
     # e-2 stays at default todo
     agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
     assert agg["overall"] == "active"
     assert agg["todo"] == 1
-    assert agg["done"] == 1
+    assert agg["user_review"] == 1  # 方針5: done → user_review
+    assert agg["done"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -725,9 +744,13 @@ def test_compute_ms_slot_state_leader_review_wins():
 
 
 def test_compute_ms_slot_state_all_done():
-    """precedence #2: all done → slot is done."""
+    """precedence #2 (ms-128 方針5): legacy done children は user_review に migrate。
+
+    done は Trek 状態機械から除去され read-time に user_review へ migrate される
+    ので、全 child が done の slot は "user_review" に畳まれる (旧 "done" は消滅)。
+    """
     children = [{"state": "done"}, {"state": "done"}]
-    assert trek.compute_ms_slot_state(children) == "done"
+    assert trek.compute_ms_slot_state(children) == "user_review"
 
 
 def test_compute_ms_slot_state_mixed_terminal_user_review():
@@ -833,7 +856,10 @@ def test_resolve_session_home_project_handles_lister_failure():
 # ---------------------------------------------------------------------------
 
 def test_5_state_machine_full_executor_path():
-    """todo → working → done の executor 経路が通る。"""
+    """ms-128 方針5: todo → working → done、done は user_review に migrate。
+
+    executor が "done" を書いても Trek は user_review で打ち止める (done は Trek 外)。
+    """
     t = trek.new_trek(
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
@@ -842,11 +868,11 @@ def test_5_state_machine_full_executor_path():
     trek.set_task_state(t, task_id="e-x", state="working")
     assert trek.get_task_state(t, "e-x") == "working"
     trek.set_task_state(t, task_id="e-x", state="done")
-    assert trek.get_task_state(t, "e-x") == "done"
+    assert trek.get_task_state(t, "e-x") == "user_review"
 
 
 def test_5_state_machine_leader_review_path():
-    """working → leader_review → done (= leader approve) の経路。"""
+    """ms-128 方針5: working → leader_review → done、done は user_review に migrate。"""
     t = trek.new_trek(
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
@@ -854,11 +880,15 @@ def test_5_state_machine_leader_review_path():
     trek.set_task_state(t, task_id="e-x", state="working")
     trek.set_task_state(t, task_id="e-x", state="leader_review")
     trek.set_task_state(t, task_id="e-x", state="done")
-    assert trek.get_task_state(t, "e-x") == "done"
+    assert trek.get_task_state(t, "e-x") == "user_review"
 
 
 def test_5_state_machine_leader_forward_to_user_path():
-    """working → leader_review → user_review → done (= leader forward + user OK)。"""
+    """ms-128 方針5: working → leader_review → user_review、以降 done は no-op migrate。
+
+    user_review が terminal。さらに "done" を書いても user_review へ migrate され
+    (user_review → user_review の idempotent) 状態は user_review のまま。
+    """
     t = trek.new_trek(
         title="t", creator_user_id="u-1", creator_email="a@b.com",
         creator_session_id="sv-1",
@@ -867,7 +897,7 @@ def test_5_state_machine_leader_forward_to_user_path():
     trek.set_task_state(t, task_id="e-x", state="leader_review")
     trek.set_task_state(t, task_id="e-x", state="user_review")
     trek.set_task_state(t, task_id="e-x", state="done")
-    assert trek.get_task_state(t, "e-x") == "done"
+    assert trek.get_task_state(t, "e-x") == "user_review"
 
 
 def test_5_state_machine_leader_rework_path():

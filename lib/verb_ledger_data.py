@@ -158,6 +158,9 @@ VERB_LEDGER = {
     "log_finalize": {"cls": "R", "secondary": ["B"], "note": ""},
     "log_prepare": {"cls": "Q", "secondary": [], "note": ""},
 
+    # --- master (post-memo, ms-111 identity master-sync) ---
+    "master_sync_drain": {"cls": "B", "secondary": [], "note": "[post-memo] identity master-sync の未配送 outbox を操作非依存の定期経路から再送する machinery (e-4399)。plumbing なので B"},
+
     # --- meeting ---
     "meeting_cancel": {"cls": "R", "secondary": ["C"], "note": "cancel報告(R)/外向き通知(C)"},
     "meeting_end": {"cls": "R", "secondary": [], "note": ""},

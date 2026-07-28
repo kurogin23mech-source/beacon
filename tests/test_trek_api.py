@@ -1034,9 +1034,10 @@ class TestLeaderSelfLoopSuppress:
         assert len(suppressions) == 1
         assert suppressions[0]["suppression_reason"] == "self_judgment"
         assert suppressions[0]["task_id"] == "e-x"
-        assert suppressions[0]["state"] == "done"
-        # State transition preserved
-        assert (t.get("task_states") or {}).get("e-x", {}).get("state") == "done"
+        # ms-128 方針5: done は user_review に migrate される (Trek 打ち止め)。
+        assert suppressions[0]["state"] == "user_review"
+        # State transition preserved (done → user_review に migrate 済)
+        assert (t.get("task_states") or {}).get("e-x", {}).get("state") == "user_review"
 
     def test_non_leader_member_stamp_emits_review_event(self):
         """control: non-leader member が stamp → review event 発火 (= 既存挙動)。"""
@@ -1163,11 +1164,18 @@ class TestReviewTriggerStatesEmit:
             e for e in bus if e.get("channel") == "trek-task-review"
         ]
         assert len(review_events) == 1
-        assert (review_events[0].get("payload") or {}).get("state") == "done"
+        # ms-128 方針5: done は user_review に migrate され、event payload も
+        # effective_state (= user_review) を載せる。
+        assert (review_events[0].get("payload") or {}).get("state") == "user_review"
 
     def test_member_stamp_user_review_still_emits_review_event(self):
         """control 2: user_review への遷移も依然 event 発火 (= 既存挙動)。"""
         trek_id = self._seed_with_member_working("e-user-rev-control")
+        # ms-128 方針5 + option A: user_review が terminal になり、slot-done
+        # precondition (= pool-done evidence) が user_review 書き込みにも適用される。
+        # phantom-done を防ぐため pool 側を done で seed する。
+        _seed_pool_task("beacon-test", "ms-97", "e-user-rev-control",
+                        status="done")
         _impersonate(MEMBER_UID, MEMBER_EMAIL)
         r = client.patch(
             f"/api/treks/{trek_id}/task-state",
@@ -1637,8 +1645,10 @@ class TestSlotDonePrecondition:
                 headers={"X-Beacon-Session": "sv-member"},
             )
         assert r.status_code == 200, r.text
+        # ms-128 方針5: pool-done gate は通るが、保存状態は done → user_review に
+        # migrate される (Trek は user_review で打ち止め)。
         assert (
-            _treks[trek_id]["task_states"]["e-pool-done"]["state"] == "done"
+            _treks[trek_id]["task_states"]["e-pool-done"]["state"] == "user_review"
         )
 
     def test_ms_ref_slot_done_allowed_when_all_children_done(self):
