@@ -289,6 +289,57 @@ def link_new_contact_to_master(contact: dict, adapter, *, org_id: str,
     return saved
 
 
+def link_project_accounts(project_data: dict, adapter, *, org_id: str, now: str,
+                          system: str = BEACON_DEFAULT_SYSTEM) -> dict:
+    """project の全 Account/Contact を master に一括 link する ingest choke point (e-3621 chunk2b).
+
+    server の whole-project write ingest (put_project) が呼ぶ「全 site を漏れなく link」の
+    一本化点。未 link の Account を master に起こし、配下 Contact も親 Account の master に
+    紐付ける。link 済は冪等に skip (``link_new_*`` が既存を返し二重起票しない)。
+
+    ``project_data`` を in-place で変更し (投影に external_ref を張る)、集計を返す。CLI は
+    backend adapter を持てない (store_router は server 専用) ため linking は必ずこの server
+    ingest に集約する = 「一部 site だけ master 経由」の部分 swap (stale と master の混在)
+    を構造的に不能にする。
+
+    per-account の same-org 違反 (``link_new_account_to_master`` の ValueError = cross-org
+    poisoning の疑い) は、その account だけ skip して他は続ける (1 件の異常で project 全体の
+    write を壊さない)。skip は戻り値 ``skipped`` で観測できる (silent にしない)。
+
+    戻り値: ``{"linked_accounts": int, "linked_contacts": int, "skipped": [(id, reason), ...]}``
+    """
+    linked_accounts = 0
+    linked_contacts = 0
+    skipped: list = []
+    for acc in ((project_data or {}).get("accounts") or []):
+        was_linked = is_account_linked(acc)
+        try:
+            link_new_account_to_master(acc, adapter, org_id=org_id, now=now, system=system)
+        except ValueError as exc:
+            skipped.append((str((acc or {}).get("id") or ""), str(exc)))
+            continue
+        if not is_account_linked(acc):
+            # 起票も既 link もされなかった (= 想定外)。配下 contact も張らず skip。
+            continue
+        if not was_linked:
+            linked_accounts += 1
+        master_account_id = linked_master_account_id(acc)
+        for contact in ((acc.get("contacts") or [])):
+            was_c_linked = bool(contact_master_ref(contact))
+            try:
+                link_new_contact_to_master(
+                    contact, adapter, org_id=org_id,
+                    master_account_id=master_account_id, now=now, system=system)
+            except ValueError as exc:
+                skipped.append((str((contact or {}).get("id") or ""), str(exc)))
+                continue
+            if not was_c_linked and bool(contact_master_ref(contact)):
+                linked_contacts += 1
+    return {"linked_accounts": linked_accounts,
+            "linked_contacts": linked_contacts,
+            "skipped": skipped}
+
+
 # ---------------------------------------------------------------------------
 # write-through: 投影 identity の編集を master へ透過する (master 権威、e-3622 chunk2a)
 #   leader 合意 guard: user の rename は投影を直接 authoritative にせず、必ず master へ
