@@ -18,6 +18,7 @@ schema can be exercised in unit tests without standing up a DB mock.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import secrets
 from typing import Iterable
 
@@ -457,51 +458,20 @@ def force_stall_session_working_tasks(trek_doc: dict, *,
 # compliance rate per session cheaply (= no scan).
 PULSE_ACK_HISTORY_CAP = 20
 
-# ms-88 / e-2139 — 5-choice executor picker (= /beacon-trek-pulse Step body).
-# 'dm-peer' は ms-88 / e-2140 で導入された peer-first culture の構造実装:
-# 詰まった時の default action を「user に問う」 から「peer に相談する」 に
-# 移すことで、 user 起床まで Trek が autonomous に走り続ける経路を作る。
-# 元の 4 択 (terminal / continue / dm-leader / no-op) のうち dm-leader が
-# 「上向き相談」、 dm-peer が「横向き相談」 で responsibility 分担される。
-VALID_PULSE_PICKED_CHOICES = (
-    "terminal",       # executor declared a terminal transition this tick
-    "continue",       # executor continues working
-    "dm-leader",      # executor asked leader for judgment (= 上向き相談)
-    "dm-peer",        # executor asked a peer executor for judgment (= 横向き相談、 ms-88 / e-2140)
-    "no-op",          # explicit "I see the tick but nothing to act on"
-    "",               # unspecified (= legacy / minimum-info pulse)
-)
-
-
-def validate_pulse_picked_choice(choice: str) -> str:
-    """Validate the picked_choice token (ms-88 / e-2106)."""
-    if choice not in VALID_PULSE_PICKED_CHOICES:
-        raise ValueError(
-            f"invalid pulse picked_choice {choice!r} — expected one of "
-            f"{VALID_PULSE_PICKED_CHOICES}"
-        )
-    return choice
-
-
-# ms-128 方針1 (e-4372) — typed tick-response protocol.
+# ms-128 方針1 (e-4372) — typed tick-response protocol. SINGLE SOURCE OF TRUTH
+# for the executor picker tokens (ms-119 review consensus e-4389: the legal
+# token set is derived from this taxonomy so a future edit can't drift a
+# second copy).
 #
 # A tick response is an *action that advances the Target*. "Waiting" is not a
-# valid response: a session that responds ``no-op`` / ``""`` (= "I see the
-# tick but I'll sit here") is classified as **no-response** and handed to
-# server intervention (= 方針6 halt 機械検知 / e-4309 forced-action tick),
-# exactly as if no pulse had arrived. This closes the structural hole where
-# an LLM could reply "待ちます" and stall the Trek indefinitely. We classify
-# rather than hard-reject (SPEC 方針1: "「無応答」に分類し、サーバー介入へ
-# 直行させる") so observability stays honest — the attempt is recorded, it
-# just does not count as compliance.
+# valid response: a session that responds ``no-op`` / ``""`` is classified as
+# **no-response** and handed to server intervention (方針6 halt / e-4309),
+# exactly as if no pulse had arrived. We classify rather than hard-reject
+# (SPEC 方針1) so observability stays honest — the attempt is recorded, it just
+# does not count as compliance.
 #
-# The 4 advancing actions are the existing picker tokens minus ``no-op``:
-#   continue    — keep working the claimed Target
-#   terminal    — declare a terminal transition (= terminalize to leader_review)
-#   dm-leader   — escalate a judgment to the leader (上向き相談, e-4281)
-#   dm-peer     — ask a peer executor (横向き相談, ms-88 / e-2140)
-# (Token names stay as-is here; the agent-visible Slot→Target vocabulary
-# pass is 方針3 / e-4363.)
+# The 4 advancing actions are the picker tokens minus ``no-op`` (dm-leader =
+# 上向き相談, dm-peer = 横向き相談, ms-88 / e-2140):
 TICK_RESPONSE_ACTIONS = ("continue", "terminal", "dm-leader", "dm-peer")
 # Tokens that mean "no advancing action taken this tick" → no-response.
 TICK_NO_RESPONSE_TOKENS = ("no-op", "")
@@ -509,6 +479,31 @@ TICK_NO_RESPONSE_TOKENS = ("no-op", "")
 # response_class values stamped on each pulse-ack record.
 TICK_RESPONSE_CLASS_ACTION = "action"
 TICK_RESPONSE_CLASS_NO_RESPONSE = "no-response"
+
+# ms-88 / e-2139 — the legal picker token set is DERIVED (not a second literal)
+# so it can't drift from the taxonomy: a token is legal iff it is an advancing
+# action or an explicit no-response.
+VALID_PULSE_PICKED_CHOICES = TICK_RESPONSE_ACTIONS + TICK_NO_RESPONSE_TOKENS
+
+
+def _fmt_tokens(tokens) -> str:
+    """Human/AI-legible token list (pipe-joined, no Python tuple repr).
+
+    ms-119 AX review (e-4389): error messages embedding a raw tuple repr
+    (= ``('continue', ...)``) read as an unclear enum boundary to an AI
+    parsing the message. Pipe-join with ``<empty>`` for the "" token.
+    """
+    return "|".join(t if t else "<empty>" for t in tokens)
+
+
+def validate_pulse_picked_choice(choice: str) -> str:
+    """Validate the picked_choice token (ms-88 / e-2106)."""
+    if choice not in VALID_PULSE_PICKED_CHOICES:
+        raise ValueError(
+            f"invalid pulse picked_choice {choice!r} — expected one of: "
+            f"{_fmt_tokens(VALID_PULSE_PICKED_CHOICES)}"
+        )
+    return choice
 
 
 def classify_tick_response(choice: str) -> str:
@@ -519,8 +514,9 @@ def classify_tick_response(choice: str) -> str:
     minimum-info). Raises ``ValueError`` for tokens outside the known
     taxonomy so a typo can't silently be read as compliance.
 
-    This is the read-side truth the server tick (e-4309) consumes to decide
-    whether a session actually advanced the Target this tick.
+    This is the read-side truth the server tick (e-4309) and succession
+    detection (``_is_miss``) consume to decide whether a session actually
+    advanced the Target this tick.
     """
     c = (choice or "").strip()
     if c in TICK_RESPONSE_ACTIONS:
@@ -528,11 +524,11 @@ def classify_tick_response(choice: str) -> str:
     if c in TICK_NO_RESPONSE_TOKENS:
         return TICK_RESPONSE_CLASS_NO_RESPONSE
     raise ValueError(
-        f"unknown tick response {choice!r} — expected one of "
-        f"{TICK_RESPONSE_ACTIONS} (advancing action) or "
-        f"{TICK_NO_RESPONSE_TOKENS} (no-response). Waiting is not a valid "
-        "response (ms-128 方針1): if nothing to do, pick up an unclaimed "
-        "Target (continue), DM the leader (dm-leader), or terminalize."
+        f"unknown tick response {choice!r} — expected one of: "
+        f"{_fmt_tokens(TICK_RESPONSE_ACTIONS)} (advancing action) or "
+        f"{_fmt_tokens(TICK_NO_RESPONSE_TOKENS)} (no-response). Waiting is not "
+        "a valid response (ms-128 方針1): if nothing to do, pick up an "
+        "unclaimed Target (continue), DM the leader (dm-leader), or terminalize."
     )
 
 
@@ -3559,7 +3555,6 @@ def compute_response_fingerprint(pulse_entry: dict) -> str:
     same fingerprint. ``no-op`` / empty responses fingerprint stably too, so
     a session that keeps waiting is naturally caught as stalled.
     """
-    import hashlib
     entry = pulse_entry or {}
     blockers = entry.get("last_blockers") or entry.get("blockers") or []
     if isinstance(blockers, (list, tuple)):
@@ -3575,24 +3570,29 @@ def compute_response_fingerprint(pulse_entry: dict) -> str:
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:16]
 
 
-def get_target_halt_reason(trek_doc: dict, task_id: str) -> str | None:
+# NOTE (ms-119 review e-4389): these halt helpers take ``target_id`` — the id
+# of the Trek Target (= a target-entity: milestone / operation id), which is
+# also the key into the ``task_states`` map. The arg was named ``task_id``
+# before 方針3 split task ≠ target; renamed for clarity so callers pass the
+# Target id, not a sub-task id.
+def get_target_halt_reason(trek_doc: dict, target_id: str) -> str | None:
     """Return the halt_reason tag on a Target (ms-128 e-4367), or None.
 
     halt is an attribute of the working Target, not a state — so this reads
-    ``task_states[task_id].halt_reason`` without touching ``state``.
+    ``task_states[target_id].halt_reason`` without touching ``state``.
     """
-    entry = (trek_doc.get("task_states") or {}).get(task_id) or {}
+    entry = (trek_doc.get("task_states") or {}).get(target_id) or {}
     return entry.get("halt_reason") or None
 
 
-def clear_target_halt(trek_doc: dict, task_id: str) -> dict:
+def clear_target_halt(trek_doc: dict, target_id: str) -> dict:
     """Drop the halt_reason tag on a Target (ms-128 e-4367).
 
     Called when a Target advances again (e.g. leader re-opens after a halt
     rescue, or the executor resumes and the next evaluate clears it).
     """
     states = trek_doc.get("task_states") or {}
-    entry = states.get(task_id)
+    entry = states.get(target_id)
     if entry and entry.get("halt_reason"):
         entry["halt_reason"] = None
         trek_doc["updated_at"] = utcnow_iso()
@@ -3601,7 +3601,7 @@ def clear_target_halt(trek_doc: dict, task_id: str) -> dict:
 
 def evaluate_target_halt(
     trek_doc: dict,
-    task_id: str,
+    target_id: str,
     *,
     current_fingerprint: str,
     current_commit_count: int,
@@ -3614,7 +3614,7 @@ def evaluate_target_halt(
 
     ms-128 e-4367 — called by the server tick for each *working* Target. It
     compares this tick's ``current_fingerprint`` / ``current_commit_count``
-    against the values stored on ``task_states[task_id]`` from the previous
+    against the values stored on ``task_states[target_id]`` from the previous
     tick:
 
       * If either advanced (fingerprint changed OR commit count increased)
@@ -3628,13 +3628,13 @@ def evaluate_target_halt(
         not merely stuck).
 
     Pure w.r.t. clock: ``now`` is injected (server tick passes UTC now, the
-    e2e harness a fake clock). Mutates ``task_states[task_id]`` in place and
+    e2e harness a fake clock). Mutates ``task_states[target_id]`` in place and
     returns the resolved halt_reason so the caller can decide to force the
     working→leader_review transition (e-4309).
     """
     now = now or datetime.datetime.now(datetime.timezone.utc)
     states = trek_doc.setdefault("task_states", {})
-    entry = states.get(task_id)
+    entry = states.get(target_id)
     if entry is None:
         # No task_state yet → nothing to evaluate against; seed baseline.
         entry = {
@@ -3642,7 +3642,7 @@ def evaluate_target_halt(
             "updated_at": utcnow_iso(),
             "last_activity_at": utcnow_iso(),
         }
-        states[task_id] = entry
+        states[target_id] = entry
 
     last_fp = entry.get("last_response_fingerprint", "")
     last_cc = int(entry.get("last_commit_count") or 0)
@@ -3657,7 +3657,7 @@ def evaluate_target_halt(
         entry["last_commit_count"] = int(current_commit_count or 0)
         entry["progress_last_advanced_at"] = now_iso
         entry["halt_reason"] = None
-        states[task_id] = entry
+        states[target_id] = entry
         trek_doc["updated_at"] = now_iso
         return None
 
@@ -3675,7 +3675,7 @@ def evaluate_target_halt(
             reason = HALT_REASON_STALL
 
     entry["halt_reason"] = reason
-    states[task_id] = entry
+    states[target_id] = entry
     trek_doc["updated_at"] = now_iso
     return reason
 
@@ -3769,8 +3769,11 @@ def detect_unresponsive_leader(
         return leader_sid
 
     def _is_miss(record: dict) -> bool:
+        # ms-119 review (e-4389): use the single no-response taxonomy so a
+        # future non-advancing token propagates here automatically, instead of
+        # this raw ("", "no-op") copy drifting from classify_tick_response.
         choice = (record.get("picked_choice") or "").strip()
-        return choice in ("", "no-op")
+        return choice in TICK_NO_RESPONSE_TOKENS
 
     if all(_is_miss(h) for h in recent):
         return leader_sid

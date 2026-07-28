@@ -1,6 +1,6 @@
 ---
 name: beacon-trek-pulse
-description: Trek autonomous loop の 1 tick に対する executor の自己申告 + 5 択 picker (terminal / continue / dm-leader / dm-peer / no-op)。/beacon-trek-execute と並列に存在する短時間 Skill で、 server に「Skill が実際 invoke された」 ground truth を渡す (= Layer 2 observability)。 trek-progress-check event 由来 でも user 引数 `/beacon-trek-pulse <trek-id>` 由来でも起動する。 1 tick = 1 pulse の運用。
+description: Trek autonomous loop の 1 tick に対する executor の自己申告 + 4 択 picker (terminal / continue / dm-leader / dm-peer)。応答は必ず Target を前進させる action で、待機(旧 no-op)は廃止 (ms-128 方針1)。/beacon-trek-execute と並列に存在する短時間 Skill で、 server に「Skill が実際 invoke された」 ground truth を渡す (= Layer 2 observability)。 trek-progress-check event 由来 でも user 引数 `/beacon-trek-pulse <trek-id>` 由来でも起動する。 1 tick = 1 pulse の運用。
 version: 0.1.0
 ---
 
@@ -146,19 +146,20 @@ cd "$PROJECT_DIR" && beacon trek kickoff "<trek-id>" \
 
 確定したら以降は user に「この trek でいいですか?」 を聞かない。
 
-## Step 2: 5 択 picker (= executor の行動の選択肢を AI 自身に提示)
+## Step 2: 4 択 picker (= executor が取る「前進 action」を AI 自身に提示、ms-128 方針1/2)
 
-CORE doc `5nfTSmCDVUzD4SLzIhI5` の executor 行動の 5 択 (= terminal / continue / dm-leader / dm-peer / no-op)。 排他選択ではなく、 1 つ以上を選ぶ。 「terminal + dm-leader」 「continue + dm-peer」 等の組合せ可、 「terminal + continue」 と「dm-leader + dm-peer」 のみ禁止 (= 前者は 1 task state を 1 つに collapse できない / 後者は同じ判断要請を 2 経路同送するのは noise)。
+**この tick の目的 (telos)**: あなたの仕事は担当 Target を leader_review / user_review まで**前進**させること。tick は状態報告の合図ではなく前進の合図。だから応答は必ず「前進 action」であり、**「待ちます」「今回は何もしない」は応答として存在しない** (ms-128 方針1)。何も手が無いように見えても、未 claim の Target を拾う (continue) / leader に相談する (dm-leader) / peer に相談する (dm-peer) / 完成として leader_review へ倒す (terminal) のいずれかを必ず取る。
+
+executor 行動の 4 択 (= terminal / continue / dm-leader / dm-peer)。 排他選択ではなく、 1 つ以上を選ぶ。 「terminal + dm-leader」 「continue + dm-peer」 等の組合せ可、 「terminal + continue」 と「dm-leader + dm-peer」 のみ禁止 (= 前者は 1 task state を 1 つに collapse できない / 後者は同じ判断要請を 2 経路同送するのは noise)。
 
 | picked_choice | 意味 | server に渡す値 | 続きの action |
 |---|---|---|---|
-| `terminal` | 自分の task を `done` / `leader_review` / `user_review` のいずれかに遷移 | `terminal` | `beacon trek task-state` を打つ |
-| `continue` | 自走継続、 state は `working` 維持、 stamp 更新で TTL リセット | `continue` | `beacon trek task-state <trek> <task> working --note "..."` で stamp 更新 |
+| `terminal` | 自分の task を `leader_review` / `user_review` のいずれかに遷移 (= terminalize、完成を倒す) | `terminal` | `beacon trek task-state` を打つ |
+| `continue` | 自走継続、 state は `working` 維持、 stamp 更新で TTL リセット。手が空いたら未 claim Target を拾うのもここ | `continue` | `beacon trek task-state <trek> <task> working --note "..."` で stamp 更新 |
 | `dm-leader` | working のまま leader に judgment 要請 (= 「上向き相談」 行動) | `dm-leader` | `/beacon-dm-send` Skill で leader 宛 DM、 channel=`dm` |
 | `dm-peer` | working のまま peer (= 別 executor) に judgment 要請 (= 「横向き相談」 行動、 ms-88 / e-2140 peer-first culture) | `dm-peer` | `/beacon-dm-send` Skill で peer 宛 DM、 channel=`dm` |
-| `no-op` | tick を見たが今回は何もしない (= 明示的に観測したことだけ記録) | `no-op` | 何もしない |
 
-AI 自己判断で 1 つ以上を選ぶ。 user に picker を見せない (= 自律実行の意味)。
+AI 自己判断で 1 つ以上を選ぶ。 user に picker を見せない (= 自律実行の意味)。**旧 `no-op` (= 待機) は廃止** (ms-128 方針1)。もし誤って `no-op` / 空を server に投げると、server はそれを「無応答」に分類し (= 前進していない)、強制介入経路 (e-4309) に載せる — つまり待機しても得は無く、必ず上の 4 択で前進する方が構造的に正しい。
 
 ### stuck 時の default は「user に問う」 ではなく「peer に DM 相談」 (= ms-88 / e-2140)
 
@@ -170,9 +171,9 @@ AI 自己判断で 1 つ以上を選ぶ。 user に picker を見せない (= �
 2. **`dm-peer` (= 横向き相談、 第一の DM 経路)**: peer (= 同 Trek 内の別 executor session) に判断を持ちかける。 leader が忙しい / coordination overhead 過多な状況で詰まらせない。 peer 同士で同等知識を期待できる場合に default
 3. **`dm-leader` (= 上向き相談、 第二の DM 経路)**: leader 固有判断 (= deploy 順序 / cross-trek 影響 / scope 境界の最終決定) が必要な時のみ
 4. **`continue` (= 自走継続)**: 上の 1-3 で答えが出ないなら、 試行的に進めて結果で学ぶ (= 安全な範囲なら fail forward)
-5. **user 戻り次第判断待ち (= 真の停止、 例外経路)**: 不可逆 / 嗜好 / cross-Trek 副作用 / 権限 secret のみ。 上の 1-4 で済む判断を user に振らない
+5. **`dm-leader` で leader へ escalate (= 例外経路、 真の停止はしない)**: 不可逆 / 嗜好 / cross-Trek 副作用 / 権限 secret のみ。 これらも**端末の user に聞いて停止するのでなく leader に DM で渡す** (ms-128 e-4281 = executor は端末の人間に判断を投げない)。leader が必要なら user へ escalate する (方針8)。executor 側は待機せず dm-leader を打って working を続ける。
 
-「念のため user に聞く」 は 1 ターンの無駄を 30 分単位で積み上げる病理。 Trek 自律権限の存在意義は、 こうした AI 間決定経路を user 介入なしで通すこと。 詳細は /beacon-trek-execute Skill body の「判断境界の優先順」 section も併読。
+「念のため user に聞いて止まる」 は 1 ターンの無駄を 30 分単位で積み上げる病理であり、 かつ端末の人間待ちは modal-block でセッションを殺す (2026-07-27 dogfood で観測)。 Trek 自律権限の存在意義は、 こうした AI 間決定経路を user 介入なしで通すこと。 詳細は /beacon-trek-execute Skill body の「判断境界の優先順」 section も併読。
 
 ## Step 3: pulse-ack を server に投げる (= Layer 2 observability の核)
 
@@ -216,9 +217,11 @@ beacon trek pulse-ack tk-xxx --picked-choice dm-leader \
   --blocker "rolled back 3 attempts, root cause unclear" \
   --needs-leader-judgment --time-on-task 5400
 
-# 3. idle (= no-op choice、 time_on_task=0)
-beacon trek pulse-ack tk-xxx --picked-choice no-op \
-  --state-summary "idle, waiting for kickoff-DM ack from peer-X" --time-on-task 0
+# 3. 手が空いた (= 待機せず前進する。旧 no-op は廃止、ms-128 方針1)。
+#    自分の task が全て leader_review に出ていて手空きなら、待つのでなく
+#    未 claim Target を拾って continue するか、peer に次を相談する (dm-peer)。
+beacon trek pulse-ack tk-xxx --picked-choice continue \
+  --state-summary "picked up unclaimed Target e-2301 while e-2165 in review" --time-on-task 0
 
 # 4. terminal (= done を宣言、 続けて task-state も叩く)
 beacon trek pulse-ack tk-xxx --picked-choice terminal \
@@ -277,12 +280,9 @@ print('\n'.join(peers))
 
 peer 選定のヒント:
 - **担当領域で選ぶ**: 相談したい file / MS の担当 peer を kickoff DM (= Step 0) で宣言済の場合はそこから
-- **手が空いてそうな peer**: 直近 pulse-ack history で `no-op` が多い peer は手が空いている可能性
+- **手が空いてそうな peer**: 直近 pulse-ack history で `continue` の state-summary が短い / 進捗が薄い peer は余力がある可能性
 
 peer が複数 + 誰に振ればいいか分からない時は、 leader に「peer assignment の help を要求」 形で `dm-leader` に倒す (= peer-first が default だが leader が peer 選定の指導役にも回れる)。
-
-### no-op
-何もしない (= pulse-ack 記録だけ残る)。
 
 組合せ (= terminal + dm-leader 等) は順次実行で OK。 但し `dm-leader + dm-peer` の同送は noise なので避ける (= 同じ判断要請を 2 経路に同送するなら、 まず peer に投げて返事を待ってから leader に escalate する直列順を取る)。
 
@@ -292,7 +292,7 @@ peer が複数 + 誰に振ればいいか分からない時は、 leader に「p
 
 ```
 ✓ pulse-ack 記録: choice=<choice>, total_acks=<N>, last_at=<timestamp>
-  action 実行: <terminal / continue / dm-leader / dm-peer / no-op の要約>
+  action 実行: <terminal / continue / dm-leader / dm-peer の要約>
 ```
 
 長い report は不要。 「観測された」 ことが伝わればよい。
@@ -311,5 +311,7 @@ peer が複数 + 誰に振ればいいか分からない時は、 leader に「p
 → 「Skill が実際 invoke された」 ground truth を server に渡す経路として本 Skill が生まれた。 self-report の form は最小: 1 ack = 1 POST。 これで「N tick 中 M 回 pulse fire (= M/N compliance 率)」 が measurable な指標になる。 dogfood 後の retrospect が indirect signal だけだった問題を構造的に解消する。
 
 2026-06-20 tk-3045b8d1 dogfood で更に追加 (= ms-88 / e-2139 / e-2140): 旧 4 択 (terminal / continue / dm-leader / no-op) に **dm-peer** を加えた 5 択に拡張。 詰まった時の default action を「user に問う」 から「peer に DM 相談」 に移すことで、 user 起床まで Trek が autonomous に走り続ける経路を作る。 既存の `dm-leader` が「上向き相談」、 新規 `dm-peer` が「横向き相談」 で responsibility が分担される (= leader 1 名集中ではなく peer-first culture)。
+
+2026-07-28 (= ms-128 方針1 / e-4372): `no-op` (= 待機) を picker から除去し、応答を「前進 action」 4 択 (terminal / continue / dm-leader / dm-peer) に閉じた。2026-07-27 dogfood (tk-9d4b53ed) で executor が「待ちます」で 4h 以上 silent stall した観測を受け、待機を有効な応答から構造的に外す。server は no-op / 空を `response_class="no-response"` に分類し (= 前進していない)、強制介入 (e-4309) へ載せる。CORE doc `5nfTSmCDVUzD4SLzIhI5` (executor 行動の選択肢) も 4 択へ更新が要る (follow-up)。
 
 詳細は SPEC ms-88 (= 「Trek における自律性を担保するハーネス設計」) と CORE doc `5nfTSmCDVUzD4SLzIhI5`。
