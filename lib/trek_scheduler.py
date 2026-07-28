@@ -1273,6 +1273,83 @@ def build_task_state_aggregate(trek_doc: dict) -> dict:
     }
 
 
+# ms-128 / e-4307 — working target が「commit も leader_review も PR も出さずに」
+# 一定時間 silent (= deliberate pause / session-end handoff) だと「停滞」扱いに
+# する閾値。idle window (= cadence × 3 ≒ 30 分) と揃える。leader digest の表示
+# ラベル用であって gate ではないので固定分で足りる。
+STALLED_WORKING_TARGET_MINUTES = 30
+
+
+def build_working_targets_recency(
+    trek_doc: dict,
+    *,
+    now: datetime.datetime,
+    migrate_state: "Callable[[str], str]",
+    stalled_after_minutes: int = STALLED_WORKING_TARGET_MINUTES,
+) -> list[dict]:
+    """Per working-target の commit recency + halt_reason を leader 用に集約 (e-4307).
+
+    2026-07-27 dogfood: executor が ``working`` のまま「fresh session を待つ」
+    「形態判断で deliberate pause」等で silent に止まると、PR も leader_review も
+    task-state 変化も出さないため leader が stall を見逃した (4.5h)。leader が
+    PR / leader_review だけ見て commit recency を見ていなかったのが原因。
+
+    そこで各 working target について「最後に前進 (= commit 数増 or fingerprint
+    変化) した時刻 (``progress_last_advanced_at``、 halt 検知 e-4367 が stamp)」
+    からの経過分を出し、digest に載せる。これで「working だが N 分 commit が無い」
+    silent stall が leader の survey に必ず現れる。
+
+    Returns a list (stalest first) of::
+
+        {"target_id": str, "state": "working",
+         "minutes_since_progress": int | None,   # None = anchor 不明
+         "is_stalled": bool,                      # >= stalled_after_minutes
+         "halt_reason": str | None,               # halt 検知が付けたタグ
+         "last_commit_count": int}
+
+    Pure (clock injected). ``migrate_state`` は legacy state token を正規化する
+    callable (= ``trek.migrate_legacy_task_state``) を注入し、モジュール間の
+    重複写像を避ける。
+    """
+    now = _ensure_utc(now)
+    states = trek_doc.get("task_states") or {}
+    out: list[dict] = []
+    for target_id, entry in states.items():
+        if not isinstance(entry, dict):
+            continue
+        state = migrate_state(entry.get("state") or DEFAULT_TASK_STATE)
+        if state != WORKING_TASK_STATE:
+            continue
+        anchor = (
+            _parse_iso(entry.get("progress_last_advanced_at", ""))
+            or _parse_iso(entry.get("last_activity_at", ""))
+            or _parse_iso(entry.get("updated_at", ""))
+        )
+        minutes: Optional[int] = None
+        if anchor is not None:
+            minutes = int((now - _ensure_utc(anchor)).total_seconds() // 60)
+        out.append({
+            "target_id": target_id,
+            "state": WORKING_TASK_STATE,
+            "minutes_since_progress": minutes,
+            "is_stalled": (
+                minutes is not None and minutes >= stalled_after_minutes
+            ),
+            "halt_reason": entry.get("halt_reason"),
+            "last_commit_count": int(entry.get("last_commit_count") or 0),
+        })
+    # Stalest first (unknown-anchor entries sort last) so the leader's eye
+    # lands on the longest-silent working target.
+    out.sort(
+        key=lambda r: (
+            r["minutes_since_progress"] is not None,
+            r["minutes_since_progress"] or 0,
+        ),
+        reverse=True,
+    )
+    return out
+
+
 def build_leader_digest_payload(
     trek_doc: dict,
     *,
