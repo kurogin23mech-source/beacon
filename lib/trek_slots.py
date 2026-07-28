@@ -178,6 +178,31 @@ def _materialize_one_slot(
 
     project_doc = project_cache.get(project) or {}
 
+    if kind == "task":
+        # ms-128 方針3 (v2.1): Trek Targets are target-entities (target-class
+        # instances = milestone / operation / …), never sub-tasks. A single
+        # task carries no review lifecycle (leader_review / user_review are
+        # target-level), so a task-kind slot would force the state machine to
+        # special-case it. Read-time migrate a legacy task-scoped entry to an
+        # MS slot narrowed to that one task via included_task_ids — intent is
+        # preserved ("Trek just this task") with no on-disk rewrite (=
+        # 遡行変更禁止と整合). A ghost task (parent MS missing) grandfathers to
+        # an atomic slot below so a stale entry never crashes the tick.
+        parent_ms = _find_task_parent_ms(project_doc, target_id)
+        if parent_ms:
+            migrated = dict(entry)
+            migrated.pop("task", None)
+            migrated["target_kind"] = "milestone"
+            migrated["target_id"] = parent_ms
+            migrated["milestone"] = parent_ms
+            migrated["included_task_ids"] = (target_id,)
+            return _materialize_ms_slot(
+                entry=migrated, project=project, project_doc=project_doc,
+                target_id=parent_ms, slot_id=slot_id,
+                owner_sid=owner_sid, claimed_at=claimed_at,
+                task_states=task_states,
+            )
+
     if kind == "milestone":
         return _materialize_ms_slot(
             entry=entry, project=project, project_doc=project_doc,
@@ -185,9 +210,10 @@ def _materialize_one_slot(
             owner_sid=owner_sid, claimed_at=claimed_at,
             task_states=task_states,
         )
-    # Non-MS narrowing: task or operation. There's no child list; the
-    # slot's resolved_state comes from the task_states cache directly,
-    # or from the pool as a fallback when un-stamped.
+    # Non-MS narrowing: operation (target-entity), or a ghost task that could
+    # not be migrated above. There's no child list; the slot's resolved_state
+    # comes from the task_states cache directly, or from the pool as a
+    # fallback when un-stamped.
     return _materialize_atomic_slot(
         project=project, kind=kind, target_id=target_id,
         slot_id=slot_id, owner_sid=owner_sid, claimed_at=claimed_at,
@@ -277,6 +303,25 @@ def _pool_ms_tasks(project_doc: dict, ms_id: str) -> dict[str, dict]:
     out: dict[str, dict] = {}
     _collect_tasks(ms.get("entries") or [], out)
     return out
+
+
+def _find_task_parent_ms(project_doc: dict, task_id: str) -> str | None:
+    """Return the milestone id that owns ``task_id``, or None (ghost).
+
+    ms-128 方針3 (v2.1): used to read-time migrate a legacy task-scoped Trek
+    slot up to its parent target-entity (the milestone). Every Beacon task
+    lives under exactly one milestone, so a task's "Trek this task" intent is
+    losslessly expressible as an MS slot narrowed via included_task_ids.
+    """
+    if not task_id:
+        return None
+    for ms in project_doc.get("milestones") or []:
+        ms_id = ms.get("id") or ms.get("entry_id") or ""
+        if not ms_id:
+            continue
+        if task_id in _pool_ms_tasks(project_doc, ms_id):
+            return ms_id
+    return None
 
 
 def _find_milestone(project_doc: dict, ms_id: str) -> dict | None:

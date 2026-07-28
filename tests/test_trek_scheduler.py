@@ -201,7 +201,7 @@ def test_payload_all_done_with_latest_done_anchor():
     payload = scheduler.build_progress_check_payload(
         t, project_data=project_data, now=_utc(),
     )
-    assert "todo task が見当たりません" in payload["body"]
+    assert "todo Target が見当たりません" in payload["body"]
     # AC 3: payload contains at least one trek-scope-internal entry id.
     assert len(payload["target_entries"]) >= 1
     assert payload["target_entries"][0] in {"e-1994", "e-1995"}
@@ -370,7 +370,7 @@ def test_payload_unknown_scope_falls_to_all_done():
     payload = scheduler.build_progress_check_payload(
         t, project_data=project_data, now=_utc(),
     )
-    assert "todo task が見当たりません" in payload["body"]
+    assert "todo Target が見当たりません" in payload["body"]
     # No matching todo + no matching done → no anchor.
     assert payload["target_entries"] == []
 

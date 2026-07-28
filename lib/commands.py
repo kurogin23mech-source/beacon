@@ -9430,9 +9430,12 @@ def cmd_trek_slot_add():
     Env:
       BEACON_TREK_ID          (required)
       BEACON_SLOT_PROJECT     (required — project_id the slot lives in)
-      BEACON_SLOT_MILESTONE   optional narrowing key (one of the three)
+      BEACON_SLOT_MILESTONE   narrowing key (one of the two target-entities)
       BEACON_SLOT_OPERATION
-      BEACON_SLOT_TASK
+      BEACON_SLOT_TASK        DEPRECATED (ms-128 方針3): a Trek Target is a
+                              target-entity, not a single task. Passing this is
+                              rejected with guidance to use --milestone (+
+                              --children to narrow to specific tasks).
       BEACON_SLOT_CHILDREN    optional comma-separated e-ids for MS slots
       BEACON_JSON             "1" → json output
     """
@@ -9453,17 +9456,33 @@ def cmd_trek_slot_add():
     if not project:
         print("Error: --project <pid> is required", file=sys.stderr)
         sys.exit(1)
-    narrowing_count = sum(1 for v in (milestone, operation, task) if v)
+    if task:
+        # ms-128 方針3 (v2.1): Trek の Target は target-entity (target-class
+        # インスタンス = milestone / operation …) に限る。単一タスクは固有の
+        # レビュー lifecycle (leader_review / user_review は target 粒度) を
+        # 持たないので Target にできない。特定タスクに絞りたい場合は親
+        # milestone を --milestone で指定し、--children e-XXX で絞る (= 既存の
+        # included_task_ids 機構、機能損失なし)。
+        print(
+            "Error: Trek の Target は target-entity (milestone / operation) "
+            "です。単一タスクは scope できません。親 milestone を --milestone "
+            "で指定し、特定タスクに絞るなら --children e-XXX を併用してください "
+            "(ms-128 方針3)。",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    narrowing_count = sum(1 for v in (milestone, operation) if v)
     if narrowing_count == 0:
         print(
-            "Error: one of --milestone | --operation | --task is required "
-            "(= slot must narrow the project, ms-97 AC7)",
+            "Error: one of --milestone | --operation is required "
+            "(= slot must narrow the project to a target-entity, "
+            "ms-97 AC7 / ms-128 方針3)",
             file=sys.stderr,
         )
         sys.exit(1)
     if narrowing_count > 1:
         print(
-            "Error: pass exactly one of --milestone / --operation / --task",
+            "Error: pass exactly one of --milestone / --operation",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -20155,12 +20174,12 @@ def _help_registry():
         {"command": "beacon trek join <trek-id>", "flags": ["--json"], "description": "Accept own invitation"},
         {"command": "beacon trek leave <trek-id>", "flags": ["--json"], "description": "Remove self from the trek (leader must transfer first)"},
         {"command": "beacon trek plan <trek-id>", "flags": ["--add-scope <project:ref>", "--remove-scope <project:ref>", "--goal-state <criterion>", "--json"], "description": "Edit trek scope or goal_state (ms-75/e-1865)"},
-        {"command": "beacon trek scope-add <trek-id>", "flags": ["--project <pid>", "--milestone <ms-id>", "--operation <op-id>", "--task <e-id>", "--json"], "description": "Canonical scope-add verb (= flag-style alias of plan --add-scope, ms-97/AC23 e-2626)"},
+        {"command": "beacon trek scope-add <trek-id>", "flags": ["--project <pid>", "--milestone <ms-id>", "--operation <op-id>", "--json"], "description": "Canonical scope-add verb (= flag-style alias of plan --add-scope, ms-97/AC23 e-2626). Target = target-entity; legacy task refs are auto-migrated to their parent milestone at read (ms-128 方針3)"},
         {"command": "beacon trek scope-approve <trek-id> <pending-id>", "flags": ["--json"], "description": "Commit a staged scope op (= apply add or remove, ms-97/AC25 e-2611)"},
         {"command": "beacon trek scope-reject <trek-id> <pending-id>", "flags": ["--json"], "description": "Drop a staged scope op (ms-97/AC25)"},
         {"command": "beacon trek blanket-approve <trek-id> --category <cat>", "flags": ["--json"], "description": "Pre-approve scope-add for a category (ms-97/AC24 e-2603). Category: operation | milestone | task | project:<pid> | milestone:<ms-id>"},
         {"command": "beacon trek blanket-revoke <trek-id> --category <cat>", "flags": ["--json"], "description": "Drop a blanket pre-approval (ms-97/AC24)"},
-        {"command": "beacon trek slot add <trek-id>", "flags": ["--project <pid>", "--milestone <ms-id>", "--task <e-id>", "--operation <op-id>", "--children e-A,e-B", "--json"], "description": "(ms-99/e-2829) Stage a slot-add with a fresh sl-<8hex> id"},
+        {"command": "beacon trek slot add <trek-id>", "flags": ["--project <pid>", "--milestone <ms-id>", "--operation <op-id>", "--children e-A,e-B", "--json"], "description": "(ms-99/e-2829) Stage a slot-add with a fresh sl-<8hex> id. Target = target-entity (milestone/operation); --task is rejected (ms-128 方針3, narrow via --children)"},
         {"command": "beacon trek slot amend <trek-id> <slot-id>", "flags": ["--add-child <e-id>", "--remove-child <e-id>", "--json"], "description": "(ms-99/e-2829) Stage a child-list edit on an existing MS slot"},
         {"command": "beacon trek slot claim <trek-id> <slot-id>", "flags": ["--session <sid>", "--unclaim", "--json"], "description": "(ms-99/e-2829) Stage a claim stamp (state-free, SPEC 方針 4)"},
         {"command": "beacon trek slot list <trek-id>", "flags": ["--json"], "description": "(ms-99/e-2829) Materialise slot rows for the trek"},

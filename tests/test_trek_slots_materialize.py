@@ -144,33 +144,42 @@ def test_get_project_exception_degrades_to_ghost_slot():
 # Atomic slot (task / op)
 # ---------------------------------------------------------------------------
 
-def test_task_slot_uses_cache_when_stamped():
-    scope = [{"project": "p-1", "task": "e-9"}]
-    trek_doc = {"scope": scope, "task_states": {"e-9": {"state": "working"}}}
+def test_operation_slot_uses_cache_when_stamped():
+    # ms-128 方針3 (v2.1): operation is the surviving atomic target-entity —
+    # task slots now migrate to their parent MS, so the atomic cache-first
+    # resolution contract is pinned here on an operation.
+    scope = [{"project": "p-1", "operation": "op-9"}]
+    trek_doc = {"scope": scope, "task_states": {"op-9": {"state": "working"}}}
     gp = _make_get_project({
-        "p-1": _project(tasks=[("e-9", "todo")]),
+        "p-1": _project(operations=[("op-9", "open")]),
     })
     out = ts.materialize_slots(trek_doc, get_project=gp)
+    assert out[0].target_kind == "operation"
     assert out[0].resolved_state == "working"
     assert out[0].resolved_state_source == "cache"
 
 
-def test_task_slot_uses_pool_when_no_cache_entry():
-    scope = [{"project": "p-1", "task": "e-9"}]
+def test_operation_slot_uses_pool_when_no_cache_entry():
+    # ms-128 方針3: atomic pool-fallback resolution pinned on an operation.
+    scope = [{"project": "p-1", "operation": "op-9"}]
     trek_doc = {"scope": scope, "task_states": {}}
     gp = _make_get_project({
-        "p-1": _project(tasks=[("e-9", "done")]),
+        "p-1": _project(operations=[("op-9", "done")]),
     })
     out = ts.materialize_slots(trek_doc, get_project=gp)
     assert out[0].resolved_state == "done"
     assert out[0].resolved_state_source == "pool"
 
 
-def test_task_slot_missing_from_pool_is_unstamped():
+def test_orphan_task_slot_missing_from_pool_is_unstamped():
+    # ms-128 方針3: a task whose parent MS is absent from the pool cannot be
+    # migrated, so it grandfathers to an atomic task slot (never crashes the
+    # tick) and resolves unstamped when also absent from task_states.
     scope = [{"project": "p-1", "task": "e-nope"}]
     trek_doc = {"scope": scope}
     gp = _make_get_project({"p-1": _project(tasks=[("e-1", "todo")])})
     out = ts.materialize_slots(trek_doc, get_project=gp)
+    assert out[0].target_kind == "task"
     assert out[0].resolved_state == "todo"
     assert out[0].resolved_state_source == "unstamped"
 
@@ -397,4 +406,9 @@ def test_mixed_scope_returns_slot_per_entry():
     })
     out = ts.materialize_slots(trek_doc, get_project=gp)
     kinds = [s.target_kind for s in out]
-    assert kinds == ["milestone", "task", "operation"]
+    # ms-128 方針3 (v2.1): the task-scoped entry (e-solo, parent ms-3) is
+    # read-time migrated up to an MS slot narrowed to that task, so the
+    # middle entry is now a "milestone" kind (not "task").
+    assert kinds == ["milestone", "milestone", "operation"]
+    assert out[1].target_id == "ms-3"
+    assert out[1].included_task_ids == ("e-solo",)

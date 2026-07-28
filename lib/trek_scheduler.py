@@ -842,14 +842,27 @@ def build_idle_escalation_payload(
 # Template constants — tests pin substrings of these so accidental
 # wording drift surfaces in CI rather than silently changing the
 # user-visible DM body.
-_PROGRESS_HEADER = "Trek 進捗確認 (= server-mint T1-system)"
+# ms-128 方針2 (e-4364) — tick 文面を「監査(進捗確認)」から「前進指示」へ。
+# ヘッダの最初の語が全体を枠づける (「確認」は状態報告を、「前進」は行動を
+# priming する)。作業単位が目的を運ばない以上、tick が毎回 telos を明示しないと
+# エージェントは状態チェックとしか読まない。待機フォールバック (「次の cadence を
+# 待って」) は廃止し、scope 空 / 全 done でも行動 (未 claim Target を拾う / leader
+# へ DM / clean 自己終了 / handoff) に流す。
+_PROGRESS_HEADER = "Trek 前進指示 (= server-mint T1-system)"
+# 毎 body に注入する telos (= 目的)。状態報告フレームへの誤読を防ぐ。
+_PROGRESS_TELOS = (
+    "あなたの仕事はこの Target を leader_review / user_review まで前進させること"
+    "です。この tick は状態報告でなく前進の合図。待機は応答ではありません。"
+)
 _PROGRESS_EMPTY_SCOPE = (
-    "Trek の scope が空です。 `beacon trek scope-add` で MS / task / "
-    "Operation を追加してから次の cadence を待ってください。"
+    "Trek の scope が空です。待機せず、 `beacon trek scope-add` で Target "
+    "(milestone / operation 等) を追加するか、 追加すべきものが無ければ leader に "
+    "DM (dm-leader) で次の一手を仰いでください。"
 )
 _PROGRESS_ALL_DONE = (
-    "Trek scope 内の todo task が見当たりません。 goal_state 達成済か、 "
-    "新規タスク追加を検討してください。"
+    "Trek scope 内に着手可能な todo Target が見当たりません。待機せず、 次の "
+    "いずれかを取ってください: 未 claim の Target を拾う / leader に完遂 handoff を "
+    "相談 (dm-leader) / clean に自己終了。"
 )
 # ms-75 / e-2048 — Trek task state machine integration. When the aggregate
 # of Trek-internal task_states reaches terminal (= all done /
@@ -944,6 +957,7 @@ def build_progress_check_payload(
     if not scope:
         body = (
             f"[{_PROGRESS_HEADER}] trek_id={trek_id}\n"
+            f"{_PROGRESS_TELOS}\n"
             f"{_PROGRESS_EMPTY_SCOPE}"
         )
         return _payload(trek_id, body, [], now)
@@ -970,6 +984,7 @@ def build_progress_check_payload(
         latest_done = done[0].get("id", "") if done else ""
         body = (
             f"[{_PROGRESS_HEADER}] trek_id={trek_id}\n"
+            f"{_PROGRESS_TELOS}\n"
             f"{_PROGRESS_ALL_DONE}"
         )
         if latest_done:
@@ -986,7 +1001,8 @@ def build_progress_check_payload(
     target_entries = [head.get("id", "")]
     lines = [
         f"[{_PROGRESS_HEADER}] trek_id={trek_id}",
-        f"次やってください: {head.get('id', '')} — "
+        _PROGRESS_TELOS,
+        f"次 前進させてください: {head.get('id', '')} — "
         f"{(head.get('description') or '').strip()[:120]}",
     ]
     if rest:

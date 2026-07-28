@@ -8504,6 +8504,61 @@ def _build_executor_targets_session_grain(
     return targets
 
 
+def _count_milestone_commits(project_doc: dict, ms_id: str) -> int:
+    """Number of commit-type entries under milestone ``ms_id`` (ms-128 e-4367).
+
+    The commit count is one half of the halt "progress stall" signal (= zero
+    commit increment between ticks). Returns 0 when the milestone / project is
+    missing so the sweep degrades to fingerprint-only detection rather than
+    throwing into the tick loop.
+    """
+    for ms in (project_doc or {}).get("milestones") or []:
+        if (ms.get("id") or ms.get("entry_id")) == ms_id:
+            return sum(
+                1 for e in (ms.get("entries") or [])
+                if (e or {}).get("type") == "commit"
+            )
+    return 0
+
+
+def _sweep_trek_target_halts(trek_doc: dict, *, now):
+    """Run the ms-128 方針6/e-4309 halt sweep for one trek on the server tick.
+
+    Builds ``commit_count_for`` from the trek's scope (target → project) and the
+    live project pool, then delegates the pure halt evaluation + forced
+    working→leader_review transitions to ``trek_mod.sweep_working_target_halts``.
+    Returns the list of forced transitions (``[{target_id, halt_reason}]``).
+    """
+    scope = trek_doc.get("scope") or []
+    target_project: dict = {}
+    for s in scope:
+        pid = (s or {}).get("project") or ""
+        if not pid:
+            continue
+        for key in ("target_id", "milestone", "operation"):
+            tid = (s or {}).get(key)
+            if tid:
+                target_project.setdefault(tid, pid)
+    _proj_cache: dict = {}
+
+    def commit_count_for(target_id: str) -> int:
+        pid = target_project.get(target_id)
+        if not pid:
+            return 0
+        pd = _proj_cache.get(pid)
+        if pd is None:
+            try:
+                pd = db.get_project(pid) or {}
+            except Exception:
+                pd = {}
+            _proj_cache[pid] = pd
+        return _count_milestone_commits(pd, target_id)
+
+    return trek_mod.sweep_working_target_halts(
+        trek_doc, commit_count_for=commit_count_for, now=now,
+    )
+
+
 @app.post("/api/system/trek-scheduler/tick")
 def trek_scheduler_tick_endpoint(
     body: TrekSchedulerTickRequest,
@@ -9628,6 +9683,21 @@ def trek_scheduler_tick_endpoint(
         # 明示的に skip する (= 多層 defence)。
         if trek_mod.is_halted(trek_doc):
             continue
+        # ms-128 方針6/e-4309 — per-target halt sweep (response fingerprint +
+        # commit increment + pulse timeout, 4h). Runs alongside the legacy
+        # TTL auto-stall below and forces stalled / dead working Targets to
+        # leader_review with a halt_reason tag (so the leader's verdict set can
+        # branch 完成レビュー vs halt 救済). A no-op-repeating session trips this
+        # via its unchanging fingerprint = the "無応答 → 介入" contract.
+        try:
+            forced_halts = _sweep_trek_target_halts(trek_doc, now=now)
+        except Exception:
+            forced_halts = []
+        if forced_halts:
+            try:
+                db.save_trek(trek_id, trek_doc)
+            except Exception:
+                pass
         stalled = trek_scheduler_mod.detect_auto_stalled_tasks(
             trek_doc, now=now,
         )
