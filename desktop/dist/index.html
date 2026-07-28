@@ -3119,6 +3119,9 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .acc-sub { font-size:11px; color:var(--text-dim); }
 .sales-modal-bg { position:fixed; inset:0; background:rgba(0,0,0,.55); display:flex; align-items:center; justify-content:center; z-index:400; animation:fade-overlay .15s ease; }
 .sales-modal { background:var(--bg-surface); border:1px solid var(--border); border-radius:8px; width:min(520px,92vw); max-height:85vh; overflow:auto; padding:20px 22px; }
+/* e-4381: 商談(opportunity)モーダルは面談まとめ・要約など横幅を要する内容が入る。
+   520px だと折り返しが増えて縦長・読みづらくなるため、専用に広げる (entry-modal-wide と同型)。 */
+.sales-modal.sales-modal-wide { width:min(880px,94vw); }
 .sm-head { display:flex; align-items:baseline; gap:10px; margin-bottom:4px; }
 .sm-name { font-size:17px; color:var(--accent); font-weight:600; }
 .sm-meta { color:var(--text-dim); font-size:12px; margin-bottom:16px; display:flex; gap:12px; flex-wrap:wrap; }
@@ -3185,7 +3188,7 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .comm-detail { margin:2px 0 8px 24px; padding:8px 10px; background:var(--bg-raised); border-radius:8px; border:1px solid var(--border-subtle); }
 .cd-row { display:flex; gap:10px; padding:2px 0; font-size:12px; }
 .cd-key { flex:0 0 84px; color:var(--text-dim); }
-.cd-val { flex:1; color:var(--text-primary); word-break:break-all; }
+.cd-val { flex:1; color:var(--text-primary); overflow-wrap:anywhere; }  /* e-4381: break-all は単語途中でも切って読みづらい。長トークン(URL等)だけ折る overflow-wrap:anywhere に。 */
 .cd-body { font-size:12px; color:var(--text-primary); white-space:pre-wrap; margin-bottom:8px; padding-bottom:8px; border-bottom:1px solid var(--border-subtle); }
 /* --- e-3547: 面談 (Meeting) 行 --- */
 .mtg-row { display:flex; align-items:baseline; gap:9px; padding:5px 0; border-bottom:1px solid var(--border-subtle); font-size:12px; }
@@ -5646,7 +5649,7 @@ function renderOpportunityModal(oppId) {
     ${row('期日', o.deadline ? esc(o.deadline) : '')}
   </div>`;
   return `<div class="sales-modal-bg" data-action="close-opp">
-    <div class="sales-modal" data-action="sales-modal-noop">
+    <div class="sales-modal sales-modal-wide" data-action="sales-modal-noop">
       <span class="sm-close" data-action="close-opp">×</span>
       <div class="sm-head"><span class="sm-name">${esc(targetLabel(o) || '(no title)')}</span></div>
       ${detail}
