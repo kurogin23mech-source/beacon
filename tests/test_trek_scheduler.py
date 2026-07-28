@@ -974,12 +974,13 @@ def test_digest_surfaces_waiting_on_leader():
     working = next(
         s for s in payload["sessions"] if s["session_id"] == "sv-working")
     assert working["waiting_on_leader"] is False
-    assert payload["summary"]["waiting_on_leader"] == 1
+    assert payload["summary"]["waiting_on_leader_count"] == 1
 
 
-def test_working_targets_recency_flags_stalled_commit():
+def test_working_targets_recency_flags_silent_commit():
     """A working target whose progress last advanced 45 min ago (> 30) is
-    surfaced as stalled with its minutes-since-progress (commit recency)."""
+    surfaced as silent with its minutes-since-progress (commit recency).
+    Anchor is progress_last_advanced_at ONLY (no updated_at fallback)."""
     t = trek_mod.new_trek(
         title="recency", creator_user_id="u", creator_email="a@b.com",
         creator_session_id="sv-leader",
@@ -1000,28 +1001,80 @@ def test_working_targets_recency_flags_stalled_commit():
     )
     # Only working targets (user_review excluded)
     ids = [r["target_id"] for r in rec]
-    assert ids == ["e-stale", "e-fresh"]  # stalest first
+    assert ids == ["e-stale", "e-fresh"]  # silentest first
     stale = rec[0]
+    assert stale["progress_anchor_known"] is True
     assert stale["minutes_since_progress"] == 45
-    assert stale["is_stalled"] is True
+    assert stale["is_silent"] is True
     fresh = rec[1]
     assert fresh["minutes_since_progress"] == 5
-    assert fresh["is_stalled"] is False
+    assert fresh["is_silent"] is False
 
 
-def test_digest_summary_counts_stalled_working_targets():
+def test_working_targets_recency_no_updated_at_fallback_masking():
+    """AX #537: a working target with NO progress anchor but a recent
+    updated_at must NOT look 'freshly progressed' — it is surfaced as
+    unknown (observation gap), sorted first, not silently healthy."""
+    t = trek_mod.new_trek(
+        title="mask", creator_user_id="u", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    t["task_states"] = {
+        # No progress_last_advanced_at, but a very recent updated_at that
+        # the OLD fallback would have read as "1 min ago progressed".
+        "e-unknown": {"state": "working",
+                      "updated_at": "2026-06-18T11:59:00.000000Z"},
+        "e-known": {"state": "working",
+                    "progress_last_advanced_at": "2026-06-18T11:50:00.000000Z"},
+    }
+    rec = scheduler.build_working_targets_recency(
+        t, now=_utc(hour=12, minute=0),
+        migrate_state=trek_mod.migrate_legacy_task_state,
+    )
+    unk = next(r for r in rec if r["target_id"] == "e-unknown")
+    assert unk["progress_anchor_known"] is False
+    assert unk["minutes_since_progress"] is None  # not masked by updated_at
+    assert unk["is_silent"] is False              # unknown != silent, but…
+    # …unknown is surfaced first (most invisible = needs attention)
+    assert rec[0]["target_id"] == "e-unknown"
+
+
+def test_digest_summary_counts_silent_and_unknown_working_targets():
     t = _trek_with_pulse_acks()
-    # Add a stale working target to the same trek.
     t.setdefault("task_states", {})["e-stale"] = {
         "state": "working",
-        "progress_last_advanced_at": "2026-06-18T11:15:00.000000Z",
+        "progress_last_advanced_at": "2026-06-18T11:15:00.000000Z",  # 45 min
     }
+    t["task_states"]["e-unknown"] = {"state": "working"}  # no progress anchor
     payload = scheduler.build_leader_digest_payload(t, now=_utc(hour=12))
-    assert payload["summary"]["stalled_working_targets"] == 1
+    assert payload["summary"]["silent_working_targets"] == 1
+    assert payload["summary"]["unknown_progress_targets"] == 1
     rec_ids = [r["target_id"] for r in payload["working_targets_recency"]]
-    assert "e-stale" in rec_ids
-    # body surfaces the silent-wait line
+    assert "e-stale" in rec_ids and "e-unknown" in rec_ids
+    # body surfaces the silent-wait line with payload-key-matching tokens
     assert "silent wait" in payload["body"]
+    assert "silent_working_targets=1" in payload["body"]
+
+
+def test_digest_fallback_and_main_payload_have_same_top_level_keys():
+    """maint #537: the trek-module-unavailable fallback payload and the main
+    payload must expose the same top-level keys (+ summary keys), so a
+    consumer never hits a KeyError on the rare fallback path. Pins the
+    3-way shape (docstring / fallback / main) against silent drift."""
+    import trek_scheduler as ts_mod
+
+    # main path (trek module available)
+    main = scheduler.build_leader_digest_payload(_trek_with_pulse_acks())
+    # fallback path: force _import_trek to return None
+    orig = ts_mod._import_trek
+    try:
+        ts_mod._import_trek = lambda: None
+        fb = scheduler.build_leader_digest_payload(
+            {"trek_id": "tk-x", "task_states": {}})
+    finally:
+        ts_mod._import_trek = orig
+    assert set(main.keys()) == set(fb.keys())
+    assert set(main["summary"].keys()) == set(fb["summary"].keys())
 
 
 def test_leader_digest_payload_excludes_placeholder_sessions():
