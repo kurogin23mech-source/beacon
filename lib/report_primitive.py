@@ -280,25 +280,41 @@ def authoring_rule_for(rules: dict, kind: str) -> Optional[AuthoringRule]:
 
 
 def apply_report(project_data: dict, report: dict, *, rules: dict,
-                 seen: dict) -> dict:
+                 seen: dict, authorizing_scope: Optional[set] = None,
+                 target_project_id: str = "") -> dict:
     """Route a report to its authoring rule — the server-side entry the client's
     ``report`` primitive lands on. Returns a result dict with a ``status``:
 
-    - ``"invalid"``   — report failed schema validation (``problems`` listed);
-    - ``"duplicate"`` — a report with the same ``report_key`` was already
+    - ``"invalid"``      — report failed schema validation (``problems`` listed);
+    - ``"out_of_scope"`` — a backend work-unit scope was declared
+      (``authorizing_scope`` given) and ``target_project_id`` is not in it; the
+      rule never runs (ms-114 e-3745, see below);
+    - ``"duplicate"``    — a report with the same ``report_key`` was already
       authored (recorded in ``seen``); no rule is run (idempotent replay);
-    - ``"no_rule"``   — no authoring rule registered for ``kind`` in ``rules``
-      (until e-3742 registers rules); the report is well-formed but unhandled;
-    - ``"authored"``  — the rule ran; its return is under ``result``.
+    - ``"no_rule"``      — no authoring rule registered for ``kind`` in ``rules``;
+      the report is well-formed but unhandled;
+    - ``"authored"``     — the rule ran; its return is under ``result``.
 
     ``rules`` and ``seen`` are BOTH required (no defaults): the exactly-once
     guarantee this module advertises is real only when a caller-owned dedup
     ledger is threaded through, so the dedup path cannot be silently skipped.
     ``seen`` is a dict (key → key), validated up front — passing a set would only
     fail on the post-mutation write, leaving a mutation applied but unrecorded
-    (a retry would then double-author). Pure dispatch: validate → dedup → delegate
-    the mutation to the rule; never does I/O.
-    """
+    (a retry would then double-author). Pure dispatch: validate → scope → dedup →
+    delegate the mutation to the rule; never does I/O.
+
+    ms-114 e-3745 — backend work-unit scope gate: when ``authorizing_scope`` is
+    provided (the set of project ids a backend principal may author into,
+    computed by ``principal.backend_work_unit_effective_scope`` = min of service
+    grant, declared work-unit scope, and the originating principal's effective
+    scope), a report whose ``target_project_id`` lies outside that scope is
+    REFUSED with ``status="out_of_scope"`` and the rule never runs — server-side
+    backend authoring can't be tricked into writing into a project beyond its
+    declared work-unit (confused-deputy defense). ``authorizing_scope=None`` (the
+    default, = the local/CLI path with no backend principal) skips the gate
+    entirely, so local mode is unaffected (SPEC AC6). The composition with the
+    principal model lives in ``lib/backend_authoring.py`` so this module stays
+    dependency-free (the gate here is a plain set-membership check)."""
     if not isinstance(seen, dict):
         raise ValueError(
             "seen must be a dict (key→key dedup ledger); a set fails only after "
@@ -306,6 +322,13 @@ def apply_report(project_data: dict, report: dict, *, rules: dict,
     problems = validate_report(report)
     if problems:
         return {"status": "invalid", "problems": problems}
+    if authorizing_scope is not None and target_project_id:
+        # Gate BEFORE dedup / rule so an out-of-scope report never mutates and
+        # never consumes a dedup slot (a later in-scope retry must still author).
+        if target_project_id not in authorizing_scope:
+            return {"status": "out_of_scope",
+                    "target_project_id": target_project_id,
+                    "authorizing_scope": sorted(authorizing_scope)}
     key = report_key(report)
     if key in seen:
         return {"status": "duplicate", "report_key": key}
