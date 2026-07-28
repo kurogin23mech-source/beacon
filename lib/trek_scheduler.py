@@ -1273,6 +1273,94 @@ def build_task_state_aggregate(trek_doc: dict) -> dict:
     }
 
 
+# ms-128 / e-4307 — working target が「commit も leader_review も PR も出さずに」
+# 一定時間 silent (= deliberate pause / session-end handoff) だと leader survey で
+# 「無 commit」ラベルを付ける閾値。**独立閾値** (= gate ではなく digest の表示用)
+# なので固定分で足りる。auto-stall の GATE 機構 (detect_auto_stalled_tasks、meta
+# 上書き可 TTL 1440 分、pause/TTL-extension を skip) とは別物で、意図的に別語彙
+# (silent) を使う (独立レビュー #537 保守性指摘)。
+SILENT_WORKING_TARGET_MINUTES = 30
+
+
+def build_working_targets_recency(
+    trek_doc: dict,
+    *,
+    now: datetime.datetime,
+    migrate_state: "Callable[[str], str]",
+    silent_after_minutes: int = SILENT_WORKING_TARGET_MINUTES,
+) -> list[dict]:
+    """Per working-target の commit recency を leader digest 用に集約 (e-4307).
+
+    2026-07-27 dogfood: executor が ``working`` のまま「fresh session を待つ」
+    「形態判断で deliberate pause」等で silent に止まると、PR も leader_review も
+    task-state 変化も出さないため leader が stall を見逃した (4.5h)。leader が
+    PR / leader_review だけ見て commit recency を見ていなかったのが原因。
+
+    各 working target について「最後に前進 (= commit 数増 or fingerprint 変化) した
+    時刻」からの経過分を出し digest に載せる。これで「working だが N 分 commit が
+    無い」silent stall が leader survey に必ず現れる。
+
+    **進行 anchor は ``progress_last_advanced_at`` のみ** (= halt 検知 e-4367 が
+    commit 数増/fingerprint 変化を観測した時に stamp)。``updated_at`` /
+    ``last_activity_at`` へは fallback しない — それらは非進行の touch でも動くため
+    「commit が無いのに前進したように見せて stall をマスク」してしまうから
+    (独立 AX レビュー #537)。進行 stamp が無い target は ``progress_anchor_known
+    = False`` / ``minutes_since_progress = None`` として **観測不能を明示** し、
+    sort で先頭に置く (= 最も見えていない = 要注意。健全に見える位置に沈めない)。
+
+    ``is_silent`` は auto-stall の GATE (``detect_auto_stalled_tasks``) とは別概念
+    (= digest 表示上の「無 commit」観測) なので語を分ける。
+
+    Returns a list (unknown-anchor first, then longest-silent first) of::
+
+        {"target_id": str, "state": "working",
+         "progress_anchor_known": bool,           # False = 進行 stamp 無し
+         "minutes_since_progress": int | None,    # None = anchor 不明 (観測不能)
+         "is_silent": bool,                        # anchor 有 & >= silent_after_minutes
+         "halt_reason": str | None,   # halt 検知タグ: "progress-stall"|"liveness-timeout"|None
+         "last_commit_count": int}
+
+    Pure (clock injected). ``migrate_state`` は legacy state token を正規化する
+    callable (= ``trek.migrate_legacy_task_state``) を注入し、モジュール間の
+    重複写像を避ける。
+    """
+    now = _ensure_utc(now)
+    states = trek_doc.get("task_states") or {}
+    out: list[dict] = []
+    for target_id, entry in states.items():
+        if not isinstance(entry, dict):
+            continue
+        state = migrate_state(entry.get("state") or DEFAULT_TASK_STATE)
+        if state != WORKING_TASK_STATE:
+            continue
+        anchor = _parse_iso(entry.get("progress_last_advanced_at", ""))
+        anchor_known = anchor is not None
+        minutes: Optional[int] = None
+        if anchor_known:
+            minutes = int((now - _ensure_utc(anchor)).total_seconds() // 60)
+        out.append({
+            "target_id": target_id,
+            "state": WORKING_TASK_STATE,
+            "progress_anchor_known": anchor_known,
+            "minutes_since_progress": minutes,
+            "is_silent": (
+                minutes is not None and minutes >= silent_after_minutes
+            ),
+            "halt_reason": entry.get("halt_reason"),
+            "last_commit_count": int(entry.get("last_commit_count") or 0),
+        })
+    # 観測不能 (anchor 無し) を先頭に (= 最も見えていない = 要注意)、その後は
+    # 経過分の長い順。silent stall を「健全に見える位置」に沈めない (AX #537)。
+    out.sort(
+        key=lambda r: (
+            not r["progress_anchor_known"],
+            r["minutes_since_progress"] or 0,
+        ),
+        reverse=True,
+    )
+    return out
+
+
 def build_leader_digest_payload(
     trek_doc: dict,
     *,
@@ -1302,6 +1390,9 @@ def build_leader_digest_payload(
             "stuck": int,
             "idle": int,
             "needs_leader_judgment": int,
+            "waiting_on_leader_count": int,    # e-4307: dm-leader 待ちの session 数
+            "silent_working_targets": int,     # e-4307: commit 停滞 working target 数
+            "unknown_progress_targets": int,   # e-4307: 進行 stamp 無し (観測不能) 数
             "total_acks_across_sessions": int,
           },
           "sessions": [
@@ -1310,11 +1401,22 @@ def build_leader_digest_payload(
               "state_summary": str,
               "blockers": [str, ...],
               "needs_leader_judgment": bool,
+              # e-4307: **直近 pulse で** dm-leader を選んだか。leader 返信時に
+              # clear されないので、鮮度は last_pulse_ack_at と突き合わせて読む。
+              "waiting_on_leader": bool,
               "time_on_task_seconds": int,
               "last_pulse_ack_at": ISO,
               "last_picked_choice": str,
               "total_acks": int,
             },
+            ...
+          ],
+          # e-4307: working target の commit recency (観測不能→経過分長い順)。
+          "working_targets_recency": [
+            {"target_id": str, "state": "working",
+             "progress_anchor_known": bool,
+             "minutes_since_progress": int | None, "is_silent": bool,
+             "halt_reason": str | None, "last_commit_count": int},
             ...
           ],
           "body": "<one-paragraph human-readable fallback so the
@@ -1343,6 +1445,10 @@ def build_leader_digest_payload(
             "summary": {
                 "active": 0, "stuck": 0, "idle": 0,
                 "needs_leader_judgment": 0,
+                # ms-128 / e-4307 — shape 一貫性のため degenerate path でも key を出す。
+                "waiting_on_leader_count": 0,
+                "silent_working_targets": 0,
+                "unknown_progress_targets": 0,
                 "leader_review_queue_count": len(
                     task_state_aggregate["leader_review_queue"]
                 ),
@@ -1350,6 +1456,7 @@ def build_leader_digest_payload(
             },
             "sessions": [],
             "task_state_aggregate": task_state_aggregate,
+            "working_targets_recency": [],
             "body": (
                 f"[{_LEADER_DIGEST_HEADER}] trek_id={trek_doc.get('trek_id', '')}\n"
                 "  (trek module unavailable — digest skipped this tick)"
@@ -1368,14 +1475,20 @@ def build_leader_digest_payload(
             # excludes them from aggregate counts but keeps them in
             # the per-session dict for completeness.)
             continue
+        picked = entry.get("last_picked_choice") or ""
         sessions_list.append({
             "session_id": sid,
             "state_summary": entry.get("state_summary") or "",
             "blockers": list(entry.get("blockers") or []),
             "needs_leader_judgment": bool(entry.get("needs_leader_judgment")),
+            # ms-128 / e-4307 — executor が「leader へ問い合わせて返答待ち」に
+            # 入った (= 型付き tick 応答で dm-leader を選んだ) ことを leader に
+            # 明示する。PR も leader_review も出さない silent な judgment-wait を
+            # survey に載せる直接シグナル。
+            "waiting_on_leader": picked == "dm-leader",
             "time_on_task_seconds": int(entry.get("time_on_task_seconds") or 0),
             "last_pulse_ack_at": entry.get("last_pulse_ack_at") or "",
-            "last_picked_choice": entry.get("last_picked_choice") or "",
+            "last_picked_choice": picked,
             "total_acks": int(entry.get("total_acks") or 0),
         })
     # Sort by time_on_task descending so "longest stuck" surfaces first —
@@ -1390,6 +1503,21 @@ def build_leader_digest_payload(
     # can read it without recomputing.
     task_state_aggregate = build_task_state_aggregate(trek_doc)
 
+    # ms-128 / e-4307 — working target の commit recency + halt_reason。
+    # migrate callable は trek_mod のものを注入 (この分岐は trek_mod 有効)。
+    working_targets_recency = build_working_targets_recency(
+        trek_doc, now=now, migrate_state=trek_mod.migrate_legacy_task_state,
+    )
+    waiting_on_leader_count = sum(
+        1 for s in sessions_list if s.get("waiting_on_leader")
+    )
+    silent_working_count = sum(
+        1 for r in working_targets_recency if r.get("is_silent")
+    )
+    unknown_progress_count = sum(
+        1 for r in working_targets_recency if not r.get("progress_anchor_known")
+    )
+
     summary_block = {
         "active": int(summary.get("active_session_count") or 0),
         "stuck": int(summary.get("stuck_session_count") or 0),
@@ -1397,6 +1525,16 @@ def build_leader_digest_payload(
         "needs_leader_judgment": int(
             summary.get("needs_leader_judgment_count") or 0
         ),
+        # ms-128 / e-4307 — leader が PR / leader_review だけ見て見逃す silent
+        # wait の 3 面。count は全て *_count (int) で統一 (session の bool
+        # waiting_on_leader と名前衝突しない、独立レビュー #537)。
+        # waiting_on_leader_count = executor が明示的に leader 返答待ち。
+        # silent_working_targets = working だが commit が一定時間止まっている。
+        # unknown_progress_targets = working だが進行 stamp が無く観測不能
+        # (= 最悪の見えなさ。健全と誤認させないため count を独立に出す)。
+        "waiting_on_leader_count": waiting_on_leader_count,
+        "silent_working_targets": silent_working_count,
+        "unknown_progress_targets": unknown_progress_count,
         # ms-97 / e-2707 — task_state-derived parallel to needs_leader_judgment.
         # needs_leader_judgment is pulse-ack self-report (= executor remembers
         # to flag it); leader_review_queue_count is structural (= counted
@@ -1419,7 +1557,9 @@ def build_leader_digest_payload(
         for s in sessions_list[:6]:  # cap to 6 lines for readability
             tag = ""
             if s["blockers"]:
-                tag = " [stuck]"
+                tag = " [stuck]"  # 具体的 blocker が最も actionable
+            elif s.get("waiting_on_leader"):
+                tag = " [waiting on leader]"  # e-4307: blocker 無しの明示 judgment-wait
             elif "idle" in (s["state_summary"] or "").lower():
                 tag = " [idle]"
             elif s["needs_leader_judgment"]:
@@ -1447,6 +1587,30 @@ def build_leader_digest_payload(
             f"— invoke /beacon-trek-review NOW"
         )
 
+    # ms-128 / e-4307 — silent wait 面。executor が leader 返答待ち、または
+    # working だが commit が止まっている/観測不能な target を、count 非ゼロ時のみ
+    # 1 行で。body の token は payload summary key と同一文字列にして、人間可読
+    # fallback から構造 payload へ grep で辿れるようにする (独立レビュー #537)。
+    wait_line = ""
+    if (waiting_on_leader_count or silent_working_count
+            or unknown_progress_count):
+        silentest = next(
+            (r for r in working_targets_recency if r.get("is_silent")), None
+        )
+        silentest_str = ""
+        if silentest is not None:
+            silentest_str = (
+                f" (silentest: {silentest['target_id']} "
+                f"{silentest['minutes_since_progress']}分 commit 無し)"
+            )
+        wait_line = (
+            f"\n⏳ silent wait: waiting_on_leader_count={waiting_on_leader_count}"
+            f" / silent_working_targets={silent_working_count}"
+            f" / unknown_progress_targets={unknown_progress_count}"
+            f"{silentest_str} "
+            f"— PR / leader_review に現れない待ちを確認してください"
+        )
+
     body = (
         f"[{_LEADER_DIGEST_HEADER}] trek_id={trek_id}\n"
         f"active={summary_block['active']} "
@@ -1454,7 +1618,7 @@ def build_leader_digest_payload(
         f"idle={summary_block['idle']} "
         f"needs_leader_judgment={summary_block['needs_leader_judgment']} "
         f"leader_review_queue={summary_block['leader_review_queue_count']}"
-        f"{lr_line}\n"
+        f"{lr_line}{wait_line}\n"
         f"{sessions_block_str}"
     )
 
@@ -1465,6 +1629,9 @@ def build_leader_digest_payload(
         "summary": summary_block,
         "sessions": sessions_list,
         "task_state_aggregate": task_state_aggregate,
+        # ms-128 / e-4307 — commit recency 面 (working だが N 分 commit 無しの
+        # silent stall を leader survey に載せる)。
+        "working_targets_recency": working_targets_recency,
         "body": body,
     }
 
