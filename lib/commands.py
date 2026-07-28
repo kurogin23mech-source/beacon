@@ -9381,17 +9381,33 @@ def cmd_trek_slot_add():
     if not project:
         print("Error: --project <pid> is required", file=sys.stderr)
         sys.exit(1)
-    narrowing_count = sum(1 for v in (milestone, operation, task) if v)
+    if task:
+        # ms-128 方針3 (v2.1): Trek の Target は target-entity (target-class
+        # インスタンス = milestone / operation …) に限る。単一タスクは固有の
+        # レビュー lifecycle (leader_review / user_review は target 粒度) を
+        # 持たないので Target にできない。特定タスクに絞りたい場合は親
+        # milestone を --milestone で指定し、--children e-XXX で絞る (= 既存の
+        # included_task_ids 機構、機能損失なし)。
+        print(
+            "Error: Trek の Target は target-entity (milestone / operation) "
+            "です。単一タスクは scope できません。親 milestone を --milestone "
+            "で指定し、特定タスクに絞るなら --children e-XXX を併用してください "
+            "(ms-128 方針3)。",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    narrowing_count = sum(1 for v in (milestone, operation) if v)
     if narrowing_count == 0:
         print(
-            "Error: one of --milestone | --operation | --task is required "
-            "(= slot must narrow the project, ms-97 AC7)",
+            "Error: one of --milestone | --operation is required "
+            "(= slot must narrow the project to a target-entity, "
+            "ms-97 AC7 / ms-128 方針3)",
             file=sys.stderr,
         )
         sys.exit(1)
     if narrowing_count > 1:
         print(
-            "Error: pass exactly one of --milestone / --operation / --task",
+            "Error: pass exactly one of --milestone / --operation",
             file=sys.stderr,
         )
         sys.exit(1)
