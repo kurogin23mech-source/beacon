@@ -1379,6 +1379,8 @@ def build_leader_digest_payload(
             "stuck": int,
             "idle": int,
             "needs_leader_judgment": int,
+            "waiting_on_leader": int,          # e-4307: dm-leader 待ちの session 数
+            "stalled_working_targets": int,    # e-4307: commit 停滞 working target 数
             "total_acks_across_sessions": int,
           },
           "sessions": [
@@ -1387,11 +1389,19 @@ def build_leader_digest_payload(
               "state_summary": str,
               "blockers": [str, ...],
               "needs_leader_judgment": bool,
+              "waiting_on_leader": bool,       # e-4307: last_picked_choice==dm-leader
               "time_on_task_seconds": int,
               "last_pulse_ack_at": ISO,
               "last_picked_choice": str,
               "total_acks": int,
             },
+            ...
+          ],
+          # e-4307: working target の commit recency (stalest first)。
+          "working_targets_recency": [
+            {"target_id": str, "state": "working",
+             "minutes_since_progress": int | None, "is_stalled": bool,
+             "halt_reason": str | None, "last_commit_count": int},
             ...
           ],
           "body": "<one-paragraph human-readable fallback so the
@@ -1420,6 +1430,9 @@ def build_leader_digest_payload(
             "summary": {
                 "active": 0, "stuck": 0, "idle": 0,
                 "needs_leader_judgment": 0,
+                # ms-128 / e-4307 — shape 一貫性のため degenerate path でも key を出す。
+                "waiting_on_leader": 0,
+                "stalled_working_targets": 0,
                 "leader_review_queue_count": len(
                     task_state_aggregate["leader_review_queue"]
                 ),
@@ -1427,6 +1440,7 @@ def build_leader_digest_payload(
             },
             "sessions": [],
             "task_state_aggregate": task_state_aggregate,
+            "working_targets_recency": [],
             "body": (
                 f"[{_LEADER_DIGEST_HEADER}] trek_id={trek_doc.get('trek_id', '')}\n"
                 "  (trek module unavailable — digest skipped this tick)"
@@ -1445,14 +1459,20 @@ def build_leader_digest_payload(
             # excludes them from aggregate counts but keeps them in
             # the per-session dict for completeness.)
             continue
+        picked = entry.get("last_picked_choice") or ""
         sessions_list.append({
             "session_id": sid,
             "state_summary": entry.get("state_summary") or "",
             "blockers": list(entry.get("blockers") or []),
             "needs_leader_judgment": bool(entry.get("needs_leader_judgment")),
+            # ms-128 / e-4307 — executor が「leader へ問い合わせて返答待ち」に
+            # 入った (= 型付き tick 応答で dm-leader を選んだ) ことを leader に
+            # 明示する。PR も leader_review も出さない silent な judgment-wait を
+            # survey に載せる直接シグナル。
+            "waiting_on_leader": picked == "dm-leader",
             "time_on_task_seconds": int(entry.get("time_on_task_seconds") or 0),
             "last_pulse_ack_at": entry.get("last_pulse_ack_at") or "",
-            "last_picked_choice": entry.get("last_picked_choice") or "",
+            "last_picked_choice": picked,
             "total_acks": int(entry.get("total_acks") or 0),
         })
     # Sort by time_on_task descending so "longest stuck" surfaces first —
@@ -1467,6 +1487,18 @@ def build_leader_digest_payload(
     # can read it without recomputing.
     task_state_aggregate = build_task_state_aggregate(trek_doc)
 
+    # ms-128 / e-4307 — working target の commit recency + halt_reason。
+    # migrate callable は trek_mod のものを注入 (この分岐は trek_mod 有効)。
+    working_targets_recency = build_working_targets_recency(
+        trek_doc, now=now, migrate_state=trek_mod.migrate_legacy_task_state,
+    )
+    waiting_on_leader_count = sum(
+        1 for s in sessions_list if s.get("waiting_on_leader")
+    )
+    stalled_working_targets_count = sum(
+        1 for r in working_targets_recency if r.get("is_stalled")
+    )
+
     summary_block = {
         "active": int(summary.get("active_session_count") or 0),
         "stuck": int(summary.get("stuck_session_count") or 0),
@@ -1474,6 +1506,12 @@ def build_leader_digest_payload(
         "needs_leader_judgment": int(
             summary.get("needs_leader_judgment_count") or 0
         ),
+        # ms-128 / e-4307 — leader が PR / leader_review だけ見て見逃す silent
+        # wait の 2 面。waiting_on_leader = executor が明示的に leader 返答待ち。
+        # stalled_working_targets = working だが commit が一定時間止まっている
+        # (= deliberate pause / handoff-wait の間接シグナル)。
+        "waiting_on_leader": waiting_on_leader_count,
+        "stalled_working_targets": stalled_working_targets_count,
         # ms-97 / e-2707 — task_state-derived parallel to needs_leader_judgment.
         # needs_leader_judgment is pulse-ack self-report (= executor remembers
         # to flag it); leader_review_queue_count is structural (= counted
@@ -1496,7 +1534,9 @@ def build_leader_digest_payload(
         for s in sessions_list[:6]:  # cap to 6 lines for readability
             tag = ""
             if s["blockers"]:
-                tag = " [stuck]"
+                tag = " [stuck]"  # 具体的 blocker が最も actionable
+            elif s.get("waiting_on_leader"):
+                tag = " [waiting on leader]"  # e-4307: blocker 無しの明示 judgment-wait
             elif "idle" in (s["state_summary"] or "").lower():
                 tag = " [idle]"
             elif s["needs_leader_judgment"]:
@@ -1524,6 +1564,25 @@ def build_leader_digest_payload(
             f"— invoke /beacon-trek-review NOW"
         )
 
+    # ms-128 / e-4307 — silent wait 面。executor が leader 返答待ち、または
+    # working だが commit が止まっている target を、count 非ゼロ時のみ 1 行で。
+    wait_line = ""
+    if waiting_on_leader_count or stalled_working_targets_count:
+        stalest = next(
+            (r for r in working_targets_recency if r.get("is_stalled")), None
+        )
+        stalest_str = ""
+        if stalest is not None:
+            stalest_str = (
+                f" (stalest: {stalest['target_id']} "
+                f"{stalest['minutes_since_progress']}分 commit 無し)"
+            )
+        wait_line = (
+            f"\n⏳ silent wait: waiting_on_leader={waiting_on_leader_count} / "
+            f"stalled_working={stalled_working_targets_count}{stalest_str} "
+            f"— PR / leader_review に現れない待ちを確認してください"
+        )
+
     body = (
         f"[{_LEADER_DIGEST_HEADER}] trek_id={trek_id}\n"
         f"active={summary_block['active']} "
@@ -1531,7 +1590,7 @@ def build_leader_digest_payload(
         f"idle={summary_block['idle']} "
         f"needs_leader_judgment={summary_block['needs_leader_judgment']} "
         f"leader_review_queue={summary_block['leader_review_queue_count']}"
-        f"{lr_line}\n"
+        f"{lr_line}{wait_line}\n"
         f"{sessions_block_str}"
     )
 
@@ -1542,6 +1601,9 @@ def build_leader_digest_payload(
         "summary": summary_block,
         "sessions": sessions_list,
         "task_state_aggregate": task_state_aggregate,
+        # ms-128 / e-4307 — commit recency 面 (working だが N 分 commit 無しの
+        # silent stall を leader survey に載せる)。
+        "working_targets_recency": working_targets_recency,
         "body": body,
     }
 

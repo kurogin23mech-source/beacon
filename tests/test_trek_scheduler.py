@@ -960,6 +960,70 @@ def test_leader_digest_payload_body_carries_human_readable_summary():
     assert "[idle]" in body
 
 
+# ---------------------------------------------------------------------------
+# ms-128 / e-4307 — executor-waiting-on-leader + commit recency in digest
+# ---------------------------------------------------------------------------
+
+def test_digest_surfaces_waiting_on_leader():
+    """sv-stuck picked dm-leader → waiting_on_leader per session + summary
+    count, so the leader sees the judgment-wait even without a leader_review."""
+    t = _trek_with_pulse_acks()
+    payload = scheduler.build_leader_digest_payload(t)
+    stuck = next(s for s in payload["sessions"] if s["session_id"] == "sv-stuck")
+    assert stuck["waiting_on_leader"] is True
+    working = next(
+        s for s in payload["sessions"] if s["session_id"] == "sv-working")
+    assert working["waiting_on_leader"] is False
+    assert payload["summary"]["waiting_on_leader"] == 1
+
+
+def test_working_targets_recency_flags_stalled_commit():
+    """A working target whose progress last advanced 45 min ago (> 30) is
+    surfaced as stalled with its minutes-since-progress (commit recency)."""
+    t = trek_mod.new_trek(
+        title="recency", creator_user_id="u", creator_email="a@b.com",
+        creator_session_id="sv-leader",
+    )
+    t["task_states"] = {
+        "e-stale": {"state": "working",
+                    "progress_last_advanced_at": "2026-06-18T11:15:00.000000Z",
+                    "last_commit_count": 2},
+        "e-fresh": {"state": "working",
+                    "progress_last_advanced_at": "2026-06-18T11:55:00.000000Z",
+                    "last_commit_count": 5},
+        "e-done": {"state": "user_review",
+                   "progress_last_advanced_at": "2026-06-18T10:00:00.000000Z"},
+    }
+    rec = scheduler.build_working_targets_recency(
+        t, now=_utc(hour=12, minute=0),
+        migrate_state=trek_mod.migrate_legacy_task_state,
+    )
+    # Only working targets (user_review excluded)
+    ids = [r["target_id"] for r in rec]
+    assert ids == ["e-stale", "e-fresh"]  # stalest first
+    stale = rec[0]
+    assert stale["minutes_since_progress"] == 45
+    assert stale["is_stalled"] is True
+    fresh = rec[1]
+    assert fresh["minutes_since_progress"] == 5
+    assert fresh["is_stalled"] is False
+
+
+def test_digest_summary_counts_stalled_working_targets():
+    t = _trek_with_pulse_acks()
+    # Add a stale working target to the same trek.
+    t.setdefault("task_states", {})["e-stale"] = {
+        "state": "working",
+        "progress_last_advanced_at": "2026-06-18T11:15:00.000000Z",
+    }
+    payload = scheduler.build_leader_digest_payload(t, now=_utc(hour=12))
+    assert payload["summary"]["stalled_working_targets"] == 1
+    rec_ids = [r["target_id"] for r in payload["working_targets_recency"]]
+    assert "e-stale" in rec_ids
+    # body surfaces the silent-wait line
+    assert "silent wait" in payload["body"]
+
+
 def test_leader_digest_payload_excludes_placeholder_sessions():
     """pulse_acks entry with total_acks=0 (= legacy placeholder) is filtered out."""
     t = trek_mod.new_trek(
