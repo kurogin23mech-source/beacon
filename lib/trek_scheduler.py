@@ -494,6 +494,76 @@ def should_fire_leader_tick(
 
 
 # ---------------------------------------------------------------------------
+# Leader-digest heartbeat (ms-128 / e-4284)
+#
+# should_fire_leader_tick は「消費すべき signal がある時だけ」発火する
+# (leader_review queue / todo float / completion imminent)。しかし dogfood で、
+# 全 executor が working のまま silent に滞留 (= signal ゼロ) すると leader digest
+# が 1 度も発火せず、leader は stall を観測できないまま autonomous ループが
+# self-heal できなかった。signal 駆動だけでは「何も起きていないこと」自体が
+# leader に届かない。
+#
+# 対策: signal gate が閉じていても、遅い cadence (= cadence × 3 ≒ 30 分) で leader
+# digest を heartbeat として発火する。これで silent stall が必ず leader の目に入る
+# 一方、毎 tick 発火の noise は避ける。完遂済 trek (summary_sent + completion
+# notified) は server 側の halted_by_summary で別途止まるので heartbeat も止まる。
+# ---------------------------------------------------------------------------
+
+LEADER_DIGEST_HEARTBEAT_MULTIPLIER = 3
+
+
+def get_last_leader_digest_at(
+    trek_doc: dict,
+) -> Optional[datetime.datetime]:
+    """Return the trek's last leader-digest fire time, or None if never."""
+    meta = trek_doc.get("meta") or {}
+    return _parse_iso(meta.get("last_leader_digest_at", ""))
+
+
+def is_leader_digest_heartbeat_due(
+    trek_doc: dict,
+    *,
+    now: datetime.datetime,
+    default_cadence: int = DEFAULT_CADENCE_MINUTES,
+    multiplier: int = LEADER_DIGEST_HEARTBEAT_MULTIPLIER,
+) -> bool:
+    """Decide whether the leader digest should fire as a heartbeat (e-4284).
+
+    Purpose: surface a silently-stalled trek to the leader even when the
+    signal gate (``should_fire_leader_tick``) is closed. Fires on a slow
+    cadence so the leader gets a periodic pulse without per-tick noise.
+
+    Rules (mirror ``is_trek_idle``'s guards):
+      * Only ``status == 'active'`` treks heartbeat (planning / archived
+        have no ongoing work to pulse about).
+      * ``halt`` set → no heartbeat (leader pulled the cord deliberately).
+      * If a digest has fired before, due iff ``now - last_leader_digest_at
+        >= cadence * multiplier``.
+      * If a digest has NEVER fired, due once the trek has actually started
+        (= ``last_progress_check_at`` is set), so a quiet-from-birth trek
+        still gets its first leader pulse instead of staying invisible.
+
+    Pure so unit tests pin it without HTTP. The server ORs this into
+    ``leader_should_fire`` alongside the signal gate and completion_ready.
+    """
+    if trek_doc.get("status") != "active":
+        return False
+    if trek_doc.get("halt"):
+        return False
+    cadence = get_cadence_minutes(trek_doc, default=default_cadence)
+    threshold = datetime.timedelta(minutes=cadence * multiplier)
+    now = _ensure_utc(now)
+    last_digest = get_last_leader_digest_at(trek_doc)
+    if last_digest is None:
+        # Never digested — pulse once the trek has started (has a
+        # progress-check anchor). A brand-new trek not yet ticked stays
+        # silent until its first tick starts the clock.
+        return get_last_progress_check_at(trek_doc) is not None
+    last_digest = _ensure_utc(last_digest)
+    return (now - last_digest) >= threshold
+
+
+# ---------------------------------------------------------------------------
 # Completion-ready signal (ms-97 / Phase 7-A, AC20)
 # ---------------------------------------------------------------------------
 

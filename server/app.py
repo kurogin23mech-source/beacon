@@ -9492,14 +9492,22 @@ def trek_scheduler_tick_endpoint(
                 fanout_trek_doc, get_project=db.get_project,
             )
         )
+        # ms-97 / e-2613 — signal gate (leader が消費すべき signal がある時)。
+        leader_signal_fire = (
+            trek_scheduler_mod.should_fire_leader_tick(
+                fanout_trek_doc, get_project=db.get_project,
+            )
+            or completion_ready_now
+        )
+        # ms-128 / e-4284 — leader-digest heartbeat。signal gate が閉じていても
+        # 遅い cadence で発火し、silent stall (= 全 executor が working のまま沈黙)
+        # を leader に必ず surface する。
+        leader_heartbeat_due = trek_scheduler_mod.is_leader_digest_heartbeat_due(
+            fanout_trek_doc, now=now,
+        )
         leader_should_fire = (
             (not leader_halted_by_summary)
-            and (
-                trek_scheduler_mod.should_fire_leader_tick(
-                    fanout_trek_doc, get_project=db.get_project,
-                )
-                or completion_ready_now
-            )
+            and (leader_signal_fire or leader_heartbeat_due)
         )
         completion_ready_fanned_out = False
         if leader_targets and leader_should_fire:
@@ -9508,6 +9516,11 @@ def trek_scheduler_tick_endpoint(
             )
             if completion_ready_now:
                 base_digest_payload["completion_ready"] = True
+            # ms-128 / e-4284 — signal 無しで heartbeat だけで発火した時は payload に
+            # 明示し、leader 側が「これは stall 検知用の定期 pulse であって新しい
+            # signal ではない」と区別できるようにする。
+            if not leader_signal_fire and leader_heartbeat_due:
+                base_digest_payload["heartbeat"] = True
             for target in leader_targets:
                 lsid = target["session_id"]
                 lpid = target["home_project_id"]

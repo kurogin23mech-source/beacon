@@ -298,6 +298,65 @@ def test_idle_progress_check_only_used_as_fallback():
     assert scheduler.is_trek_idle(t, now=_utc(hour=12, minute=0)) is True
 
 
+# ---------------------------------------------------------------------------
+# ms-128 / e-4284 — leader-digest heartbeat
+# ---------------------------------------------------------------------------
+
+def test_leader_heartbeat_inactive_trek_not_due():
+    """planning / archived treks don't heartbeat (no ongoing work)."""
+    t = _build_trek(status="planning",
+                    last_at="2026-06-18T10:00:00.000000Z")
+    assert scheduler.is_leader_digest_heartbeat_due(t, now=_utc()) is False
+
+
+def test_leader_heartbeat_halted_trek_not_due():
+    """Halted trek is intentionally paused — no heartbeat."""
+    t = _build_trek(
+        status="active",
+        last_at="2026-06-18T10:00:00.000000Z",
+        halt={"issued_by_session_id": "sv-leader", "reason": "STOP",
+              "issued_at": "2026-06-18T00:00:00.000000Z"},
+    )
+    assert scheduler.is_leader_digest_heartbeat_due(t, now=_utc()) is False
+
+
+def test_leader_heartbeat_never_digested_but_started_is_due():
+    """Never fired a digest but the trek has been progress-checked
+    (= started) → a first leader pulse is due (quiet-from-birth stall)."""
+    t = _build_trek(status="active", cadence_minutes=10,
+                    last_at="2026-06-18T11:00:00.000000Z")
+    assert scheduler.is_leader_digest_heartbeat_due(
+        t, now=_utc(hour=12, minute=0)) is True
+
+
+def test_leader_heartbeat_never_ticked_not_due():
+    """Brand-new trek not yet progress-checked → no heartbeat until its
+    first tick starts the clock."""
+    t = _build_trek(status="active", cadence_minutes=10)
+    assert scheduler.is_leader_digest_heartbeat_due(
+        t, now=_utc(hour=12, minute=0)) is False
+
+
+def test_leader_heartbeat_recent_digest_not_due():
+    """cadence=10 → heartbeat interval = 30 min. Last digest 20 min ago
+    → not due yet (avoids per-tick noise)."""
+    t = _build_trek(status="active", cadence_minutes=10,
+                    last_at="2026-06-18T10:00:00.000000Z")
+    t["meta"]["last_leader_digest_at"] = "2026-06-18T11:40:00.000000Z"  # 20 min
+    assert scheduler.is_leader_digest_heartbeat_due(
+        t, now=_utc(hour=12, minute=0)) is False
+
+
+def test_leader_heartbeat_stale_digest_is_due():
+    """Last digest 30 min ago (= cadence×3) → heartbeat due so a silent
+    stall surfaces to the leader."""
+    t = _build_trek(status="active", cadence_minutes=10,
+                    last_at="2026-06-18T10:00:00.000000Z")
+    t["meta"]["last_leader_digest_at"] = "2026-06-18T11:30:00.000000Z"  # 30 min
+    assert scheduler.is_leader_digest_heartbeat_due(
+        t, now=_utc(hour=12, minute=0)) is True
+
+
 def test_should_fire_idle_escalation_first_time():
     t = _build_trek(status="active", cadence_minutes=10)
     t.setdefault("meta", {})["last_session_response_at"] = (
