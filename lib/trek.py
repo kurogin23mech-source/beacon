@@ -93,8 +93,12 @@ KICKOFF_HISTORY_KEY = "kickoff_status"
 # Trek の外の 1 レイヤー上。Trek は user_review で打ち止める (「手前まで運ぶ」)。
 # 既存の done stamp は遡行変更せず read-time migrate (done→user_review、下記
 # LEGACY_TASK_STATE_MIGRATIONS) で吸収する。
-# (旧: done も terminal だった。ms-88 で 5 状態化、ms-128 で done 除去し 4 状態。)
-VALID_TASK_STATES = ("todo", "working", "leader_review", "user_review")
+# (旧: done も terminal だった。ms-88 で 5 状態化、ms-128 で done 除去し 4 状態、
+#  ms-128 方針4 (e-4365) で block を加えて 5 状態化 = {block, todo, working,
+#  leader_review, user_review}。block = 依存先 (blocker) が未解決で着手できない
+#  待機状態。全 blocker が leader_review (= 取り込み済み) に達すると server が AND
+#  で block → todo に自動復帰させる。詳細は下記 BLOCKED_STATES / 状態遷移表参照。)
+VALID_TASK_STATES = ("block", "todo", "working", "leader_review", "user_review")
 DEFAULT_TASK_STATE = "todo"
 # user_review が唯一の terminal (= Trek 完遂 = 走り続け停止)。done は Trek 外。
 TERMINAL_TASK_STATES = ("user_review",)
@@ -119,10 +123,16 @@ REVIEW_TRIGGER_STATES = ("user_review", "leader_review")
 #   - LEADER_OWNED_STATES: executor が hand-off 済で leader が引き取る
 #     (leader_review)。executor tick は silent、leader tick が駆動する。
 #   - TERMINAL_TASK_STATES: user_review (= Trek の打ち止め)。
+#   - BLOCKED_STATES: block (= 依存先待ちで着手不能、ms-128 方針4 e-4365)。
+#     executor tick も leader review も駆動しない中立の待機。全 blocker が
+#     leader_review に達すると server が block → todo に自動復帰させる (= AND
+#     auto-unblock、scheduler が所管)。block は「前進の主体が今いない」状態
+#     なので、どの駆動層にも属さない第 4 の区画として明示的に登録する。
 # scheduler (should_fire_executor_tick) はこの正典を import して使う (= 分割の
 # 定義を 1 ファイルに集約し、2 ファイル間の暗黙同期義務を作らない)。
 EXECUTOR_ACTIVE_STATES = ("todo", "working")
 LEADER_OWNED_STATES = ("leader_review",)
+BLOCKED_STATES = ("block",)
 # 分割の完全性を import 時に構造で保証する: どの層も拾わない state を作ると
 # (= 新状態を足して分割への登録を忘れると) ここで即 fail する。silent stall は
 # ms-128 が最も嫌う失敗なので、被覆漏れは「翌日気づく」でなく「起動時に落ちる」。
@@ -130,8 +140,9 @@ assert (
     set(EXECUTOR_ACTIVE_STATES)
     | set(LEADER_OWNED_STATES)
     | set(TERMINAL_TASK_STATES)
+    | set(BLOCKED_STATES)
 ) == set(VALID_TASK_STATES), (
-    "Trek task-state partition (executor/leader/terminal) が "
+    "Trek task-state partition (executor/leader/terminal/blocked) が "
     "VALID_TASK_STATES を覆っていません"
 )
 
@@ -162,19 +173,27 @@ LEGACY_TASK_STATE_MIGRATIONS = {
 # task_states[*].meta.working_pause_until (ISO8601) で立てる (= e-2646)。
 DEFAULT_WORKING_TTL_MINUTES = 1440
 
-# Allowed transitions (ms-128 方針5: 4 状態、done 除去、user_review 打ち止め):
+# Allowed transitions (ms-128 方針4/5: 5 状態、done 除去、block 追加、
+# user_review 打ち止め):
+# - block 化: {todo, working} → block (= leader が依存発見の DM を受け blocker を
+#     張る。循環検査を通過した場合のみ。書き込み経路は方針4 の set-blocker)
+# - auto-unblock: block → todo (= server が全 blocker の leader_review 到達を AND
+#     判定して自動復帰。scheduler 所管)
 # - claim: todo → working
 # - executor: working → {leader_review (= terminalize / 完成 PR 化), user_review}
 # - server 強制 (halt): working → leader_review (e-4309)
 # - leader (自律 stamp): leader_review → {user_review (思想/目的達成レビュー合格),
 #     working (re-work 差し戻し / halt 救済 re-open)}
 # - user 却下 (leader CLI 代行): user_review → working
+# block からの脱出は todo のみ (= 一旦解けたら通常フローに戻る)。循環検知時の
+# escalate は状態遷移ではなく DM/notify なので、この表には現れない (方針4)。
 # done は Trek 外 (= 配置境界)。既存 done stamp は read-time に user_review へ
 # migrate される (LEGACY_TASK_STATE_MIGRATIONS) ので from-state に done は現れない。
 # CORE doc `5nfTSmCDVUzD4SLzIhI5` § "1 枚 transition diagram" 参照。
 VALID_TASK_STATE_TRANSITIONS = {
-    "todo": ("working",),
-    "working": ("leader_review", "user_review"),
+    "block": ("todo",),
+    "todo": ("working", "block"),
+    "working": ("leader_review", "user_review", "block"),
     "leader_review": ("user_review", "working"),
     "user_review": ("working",),
 }

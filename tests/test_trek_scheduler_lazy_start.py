@@ -255,19 +255,30 @@ class TestShouldFireExecutorTick:
         漏れなく覆うことを構造で pin する (独立レビュー #533 の指摘)。どの層も拾わ
         ない state を作ると executor/leader のどちらの tick も駆動せず silent stall
         になるため、被覆漏れをテストで捕まえる。scheduler が import した
-        EXECUTOR_ACTIVE_STATES が正典と一致することも確認する。"""
+        EXECUTOR_ACTIVE_STATES が正典と一致することも確認する。
+
+        ms-128 方針4 (e-4365): block を第 4 区画 BLOCKED_STATES として追加。block
+        は executor tick も leader review も駆動しない中立の待機なので、totality は
+        4 区画の union で成立する (被覆は保つが block はどの駆動層にも属さない)。"""
         import trek as trek_mod
         partition = (
             set(trek_mod.EXECUTOR_ACTIVE_STATES)
             | set(trek_mod.LEADER_OWNED_STATES)
             | set(trek_mod.TERMINAL_TASK_STATES)
+            | set(trek_mod.BLOCKED_STATES)
         )
         assert partition == set(trek_mod.VALID_TASK_STATES)
-        # 3 領域は互いに素 (= 1 state が 2 層に属さない)
+        # 4 領域は互いに素 (= 1 state が 2 層に属さない)
         assert not (set(trek_mod.EXECUTOR_ACTIVE_STATES)
                     & set(trek_mod.LEADER_OWNED_STATES))
         assert not (set(trek_mod.EXECUTOR_ACTIVE_STATES)
                     & set(trek_mod.TERMINAL_TASK_STATES))
+        assert not (set(trek_mod.BLOCKED_STATES)
+                    & (set(trek_mod.EXECUTOR_ACTIVE_STATES)
+                       | set(trek_mod.LEADER_OWNED_STATES)
+                       | set(trek_mod.TERMINAL_TASK_STATES)))
+        # block は駆動層のどれにも属さない (= tick を発火させない中立待機)
+        assert "block" in trek_mod.BLOCKED_STATES
         # scheduler が import した値が正典と一致 (2 ファイル間の drift 防止)
         assert (set(trek_scheduler_mod.EXECUTOR_ACTIVE_STATES)
                 == set(trek_mod.EXECUTOR_ACTIVE_STATES))
