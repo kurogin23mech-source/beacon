@@ -55,6 +55,17 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from ._version import __version__
 
 
+# ms-126 (e-4223): priority の choices / help を、bash ``bin/beacon`` の必須 5 択
+# プロンプトと python surface (この dispatcher) で揃えるための単一定義。空文字は
+# sentinel ではなく無効値なので choices で弾き、未判断は ``--untriaged`` で明示
+# opt-in させる (= AX: 誤値を早期に helpful に reject、機械の未判断は sentinel 経路)。
+_PRIORITY_CHOICES = ("highest", "high", "medium", "low", "lowest")
+_PRIORITY_HELP = (
+    "優先度 (highest=大目的への寄与が最大 … lowest=最小)。"
+    "未判断なら --untriaged を使う (機械 caller 向け sentinel)。"
+)
+
+
 # ---------------------------------------------------------------------------
 # Subprocess helper — single point of truth for invoking commands.py
 # ---------------------------------------------------------------------------
@@ -655,7 +666,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_task_add.add_argument("-t", "--type", dest="entry_type", default=None)
     p_task_add.add_argument("-d", "--detail", default=None)
     p_task_add.add_argument("--from", dest="requested_by", default=None)
-    p_task_add.add_argument("--priority", default=None)
+    p_task_add.add_argument("--priority", default=None,
+                            choices=_PRIORITY_CHOICES, help=_PRIORITY_HELP)
     # ms-126: machine opt-in to the untriaged sentinel (empty priority allowed).
     p_task_add.add_argument("--untriaged", action="store_true",
                             dest="allow_untriaged")
@@ -696,7 +708,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--acceptance-criteria", "--ac", dest="acceptance_criteria", default=""
     )
     p_task_update.add_argument("--behavior", default="")
-    p_task_update.add_argument("--priority", "-p", default="")
+    # e-4223: 省略時は default="" で「変更なし」。値を渡すなら 5 択で validate。
+    p_task_update.add_argument("--priority", "-p", default="",
+                               choices=_PRIORITY_CHOICES, help=_PRIORITY_HELP)
 
     p_task_cancel = task_sub.add_parser("cancel", add_help=False)
     p_task_cancel.add_argument("entry_id", nargs="?", default="")
@@ -717,7 +731,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ms_add.add_argument(
         "--description", "--desc", dest="description", default=""
     )
-    p_ms_add.add_argument("--priority", default="")
+    p_ms_add.add_argument("--priority", default="",
+                          choices=_PRIORITY_CHOICES, help=_PRIORITY_HELP)
     # ms-126: machine opt-in to the untriaged sentinel (empty priority allowed).
     p_ms_add.add_argument("--untriaged", action="store_true",
                           dest="allow_untriaged")
@@ -764,7 +779,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ms_update.add_argument(
         "--description", "--desc", dest="description", default=""
     )
-    p_ms_update.add_argument("--priority", default="")
+    p_ms_update.add_argument("--priority", default="",
+                             choices=_PRIORITY_CHOICES, help=_PRIORITY_HELP)
     p_ms_update.add_argument("--objective", default="")
     p_ms_update.add_argument(
         "--acceptance-criteria", "--ac", dest="acceptance_criteria", default=""

@@ -252,3 +252,55 @@ class TestUntriagedBacklogTriggerFile:
         monkeypatch.setattr(commands, "get_store", lambda: _Store(data_clear))
         commands._auto_fire_untriaged_backlog_trigger()
         assert not trigger_file.exists()
+
+
+# ---------------------------------------------------------------------------
+# e-4223: python surface (beacon_cli.dispatch argparse) が bash bin/beacon の
+# 必須 5 択と表面契約を揃える — --priority に choices/help を付け、無効値を早期に
+# helpful に reject する。
+# ---------------------------------------------------------------------------
+
+def _dispatch_parser():
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from beacon_cli import dispatch
+    return dispatch, dispatch.build_parser()
+
+
+def test_dispatch_priority_choices_reject_invalid():
+    """python surface: 無効な priority は argparse が SystemExit(2) で弾く
+    (= silent に不正値を通さない、bash の 5 択プロンプトと契約一致)。"""
+    _, p = _dispatch_parser()
+    for argv in (
+        ["milestone", "add", "x", "--priority", "bogus"],
+        ["task", "add", "x", "--priority", "urgent"],
+        ["milestone", "update", "ms-1", "--priority", "P1"],
+        ["task", "update", "e-1", "--priority", "hi"],
+    ):
+        with pytest.raises(SystemExit) as ei:
+            p.parse_args(argv)
+        assert ei.value.code == 2
+
+
+def test_dispatch_priority_choices_accept_valid_and_omit():
+    """有効な 5 値は通り、省略は default (変更/未設定なし) で通る。
+    untriaged sentinel は --untriaged で opt-in する (choices とは独立)。"""
+    _, p = _dispatch_parser()
+    for lvl in ("highest", "high", "medium", "low", "lowest"):
+        ns = p.parse_args(["milestone", "add", "x", "--priority", lvl])
+        assert ns.priority == lvl
+    # 省略 → default
+    ns = p.parse_args(["task", "add", "x"])
+    assert ns.priority is None
+    ns = p.parse_args(["milestone", "add", "x"])
+    assert ns.priority == ""
+    # untriaged は choices を経由しない別経路
+    ns = p.parse_args(["task", "add", "x", "--untriaged"])
+    assert ns.allow_untriaged is True
+
+
+def test_dispatch_priority_choices_single_source():
+    """choices/help は 1 定義 (_PRIORITY_CHOICES) から来る = surface 間 drift 防止。"""
+    dispatch, _ = _dispatch_parser()
+    assert dispatch._PRIORITY_CHOICES == (
+        "highest", "high", "medium", "low", "lowest")
+    assert set(dispatch._PRIORITY_CHOICES) == core.VALID_PRIORITIES
