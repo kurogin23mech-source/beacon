@@ -133,6 +133,20 @@ REVIEW_TRIGGER_STATES = ("user_review", "leader_review")
 EXECUTOR_ACTIVE_STATES = ("todo", "working")
 LEADER_OWNED_STATES = ("leader_review",)
 BLOCKED_STATES = ("block",)
+# ms-128 方針4 (e-4365) — blocker (= 依存先) が「解決した」と見なす state 集合。
+# unblock は blocker が leader_review (= 取り込み済み = main に載った) に達した
+# 時点で発火する (方針4: 依存元が要るのは blocker の成果が main に載っていること
+# であって user の最終確認ではない)。user_review は leader_review の先なので当然
+# 解決済み扱い。この 2 状態のどちらかに達した blocker は依存を満たす。
+SATISFIED_BLOCKER_STATES = ("leader_review", "user_review")
+# blocker edge の台帳キー (= 依存グラフ)。task_states とは独立した top-level 構造:
+# state (= 「今ブロックされているか」= task_states[id].state == "block") と
+# edges (= 「何に依存するか」= target_blockers[id]) を分離する。set_task_state は
+# entry を丸ごと置換する (halt tracking field を wipe するのと同じ挙動) ため、
+# edge を task_states 上に置くと状態遷移のたびに消える。独立台帳にすることで
+# edge の寿命を state 遷移から切り離し、かつ全 target 横断の循環検知・AND
+# 自動解除スキャンを 1 つのグラフ構造で回せる。
+TARGET_BLOCKERS_KEY = "target_blockers"
 # 分割の完全性を import 時に構造で保証する: どの層も拾わない state を作ると
 # (= 新状態を足して分割への登録を忘れると) ここで即 fail する。silent stall は
 # ms-128 が最も嫌う失敗なので、被覆漏れは「翌日気づく」でなく「起動時に落ちる」。
@@ -410,6 +424,133 @@ def set_task_state(trek_doc: dict, *, task_id: str, state: str,
         "last_activity_at": now,
     }
     trek_doc["updated_at"] = now
+    return trek_doc
+
+
+# ---------------------------------------------------------------------------
+# ms-128 方針4 (e-4365) — blocker edges (= 相互ブロックの依存グラフ)
+#
+# 依存グラフは有向: エッジ ``target → blocker`` = 「target は blocker に依存する
+# (= blocker が取り込まれるまで target を進められない)」。edge は独立台帳
+# ``trek_doc[TARGET_BLOCKERS_KEY]`` = {target_id: [blocker_target_id, ...]} に
+# 持つ。循環 (A→B→A) はデッドロックなので、edge を張る瞬間に有向グラフの到達
+# 可能性テスト (DFS) で拒否する (方針4 の二段循環検知の第 (i) 段。第 (ii) 段の
+# 自動解除時の再検査は後続 chunk の scheduler 側)。
+# ---------------------------------------------------------------------------
+
+
+def get_blockers(trek_doc: dict, target_id: str) -> list[str]:
+    """Return the list of blocker target-ids that ``target_id`` depends on.
+
+    Returns a copy (= callers can't mutate the stored ledger). An untracked
+    target (= no edges) returns an empty list.
+    """
+    graph = trek_doc.get(TARGET_BLOCKERS_KEY) or {}
+    return list(graph.get(target_id) or [])
+
+
+def _blocker_adjacency(trek_doc: dict) -> dict[str, list[str]]:
+    """Return the raw dependency adjacency map ``{target: [blockers]}``.
+
+    Direction: an edge ``a → b`` means ``a`` depends on ``b`` (``a`` is blocked
+    by ``b``). Used for reachability / cycle checks.
+    """
+    graph = trek_doc.get(TARGET_BLOCKERS_KEY) or {}
+    return {k: list(v or []) for k, v in graph.items()}
+
+
+def _reaches(adjacency: dict[str, list[str]], start: str, goal: str) -> bool:
+    """Return True iff ``goal`` is reachable from ``start`` following edges.
+
+    Iterative DFS over the ``a depends-on b`` adjacency. ``start == goal`` is
+    treated as reachable (a node trivially reaches itself), which lets the
+    caller fold the self-block check into the same test.
+    """
+    if start == goal:
+        return True
+    seen: set[str] = set()
+    stack = [start]
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        seen.add(node)
+        for nxt in adjacency.get(node, ()):  # nxt = something `node` depends on
+            if nxt == goal:
+                return True
+            if nxt not in seen:
+                stack.append(nxt)
+    return False
+
+
+def blocker_is_satisfied(trek_doc: dict, blocker_target_id: str) -> bool:
+    """Return True iff ``blocker_target_id`` has reached a satisfied state.
+
+    A blocker is satisfied once it reaches ``leader_review`` (= 取り込み済み =
+    merged to main) or beyond (``user_review``). This is the AND-unblock
+    predicate (方針4): a target's block clears when *every* blocker is satisfied.
+    """
+    return get_task_state(trek_doc, blocker_target_id) in SATISFIED_BLOCKER_STATES
+
+
+def add_blocker(trek_doc: dict, *, target_id: str, blocker_target_id: str,
+                updated_by_session_id: str = "", note: str = "") -> dict:
+    """Draw a blocker edge ``target_id → blocker_target_id`` and block the target.
+
+    This is the leader-owned "依存発見の DM を受け blocker を張る" operation
+    (方針4). It atomically (1) records the dependency edge and (2) transitions
+    the target to ``block`` (via ``set_task_state``, so the transition table
+    validates {todo, working} → block; a handed-off target in leader_review /
+    user_review is not blockable and raises).
+
+    Guards, in order:
+      * empty ids → ValueError.
+      * self-block (target == blocker) → ValueError (a target cannot depend on
+        itself).
+      * blocker already satisfied (leader_review / user_review) → **no-op**: the
+        dependency is already met, so no edge is drawn and the target's state is
+        left untouched (方針4: "到達済みの entity を blocker に指定したら即
+        no-op"). Returns trek_doc unchanged for that edge.
+      * cycle: if ``blocker_target_id`` already (transitively) depends on
+        ``target_id``, drawing this edge would close a cycle (A→…→A) → ValueError
+        (方針4 二段循環検知 第 (i) 段: 書き込みを拒否する = 張れない).
+
+    Idempotent for an already-recorded, still-unsatisfied edge (re-affirming
+    keeps the single edge + block state). Returns the mutated trek_doc.
+    """
+    if not target_id:
+        raise ValueError("target_id is required")
+    if not blocker_target_id:
+        raise ValueError("blocker_target_id is required")
+    if target_id == blocker_target_id:
+        raise ValueError(
+            f"a target cannot block itself ({target_id!r} → {target_id!r})"
+        )
+
+    # Already-satisfied blocker → the dependency is a no-op (don't record, don't
+    # block). Nothing to wait on.
+    if blocker_is_satisfied(trek_doc, blocker_target_id):
+        return trek_doc
+
+    # Cycle guard: would target → blocker close a loop? That happens iff blocker
+    # can already reach target through the existing edges.
+    adjacency = _blocker_adjacency(trek_doc)
+    if _reaches(adjacency, blocker_target_id, target_id):
+        raise ValueError(
+            f"blocker edge {target_id!r} → {blocker_target_id!r} would create a "
+            f"dependency cycle (blocker already depends on target)"
+        )
+
+    graph = trek_doc.setdefault(TARGET_BLOCKERS_KEY, {})
+    edges = graph.setdefault(target_id, [])
+    if blocker_target_id not in edges:
+        edges.append(blocker_target_id)
+
+    # Transition target → block (validates todo/working → block; idempotent if
+    # already blocked). This is where a non-blockable state (leader_review /
+    # user_review) surfaces a ValueError.
+    set_task_state(trek_doc, task_id=target_id, state="block",
+                   updated_by_session_id=updated_by_session_id, note=note)
     return trek_doc
 
 
