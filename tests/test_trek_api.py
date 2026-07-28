@@ -1973,3 +1973,66 @@ class TestSlotDonePreconditionHelper:
         )
         assert allowed is True
         assert code == trek_mod.SLOT_DONE_ALLOWED
+
+
+class TestAddBlockerEndpoint:
+    """ms-128 方針4 (e-4365) — POST /api/treks/{id}/blocker (leader-only)."""
+
+    def test_leader_draws_blocker_and_target_blocks(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/blocker",
+            json={"target_id": "ms-A", "blocker_target_id": "ms-B"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 200, r.text
+        doc = r.json()
+        assert doc["task_states"]["ms-A"]["state"] == "block"
+        assert doc["target_blockers"]["ms-A"] == ["ms-B"]
+
+    def test_non_leader_member_forbidden(self):
+        trek_id = _create_seed_trek()
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/blocker",
+            json={"target_id": "ms-A", "blocker_target_id": "ms-B"},
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 403, r.text
+
+    def test_self_block_rejected_400(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/blocker",
+            json={"target_id": "ms-A", "blocker_target_id": "ms-A"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 400, r.text
+
+    def test_cycle_rejected_409(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r1 = client.post(
+            f"/api/treks/{trek_id}/blocker",
+            json={"target_id": "ms-A", "blocker_target_id": "ms-B"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r1.status_code == 200, r1.text
+        r2 = client.post(
+            f"/api/treks/{trek_id}/blocker",
+            json={"target_id": "ms-B", "blocker_target_id": "ms-A"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r2.status_code == 409, r2.text
+
+    def test_missing_ids_rejected_400(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/blocker",
+            json={"target_id": "", "blocker_target_id": "ms-B"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 400, r.text

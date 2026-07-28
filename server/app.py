@@ -4181,6 +4181,19 @@ class TrekTaskStateSet(BaseModel):
     note: Optional[str] = ""
 
 
+class TrekBlockerSet(BaseModel):
+    """ms-128 方針4 (e-4365) — draw a blocker edge target_id → blocker_target_id.
+
+    The leader records that ``target_id`` depends on ``blocker_target_id`` (=
+    cannot proceed until the blocker is 取り込み済み). Recording the edge blocks
+    the target; the server rejects self-blocks and dependency cycles at write
+    time and no-ops when the blocker is already satisfied.
+    """
+    target_id: str
+    blocker_target_id: str
+    note: Optional[str] = ""
+
+
 class TrekHaltSet(BaseModel):
     issued_by_session_id: str
     reason: str = ""
@@ -6609,6 +6622,46 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
                 # Best-effort notification; the leader can still discover
                 # the terminal state via `beacon trek show` polling.
                 pass
+    return t
+
+
+@app.post("/api/treks/{trek_id}/blocker")
+def add_trek_blocker_endpoint(trek_id: str, body: TrekBlockerSet,
+                              request: Request,
+                              user: dict = Depends(require_auth)):
+    """Draw a blocker edge ``target_id → blocker_target_id`` (ms-128 方針4 / e-4365).
+
+    Leader-only: the leader owns the dependency ledger (方針7), so only the
+    leader session may declare that one target depends on another. Records the
+    edge and transitions the target to ``block``. The server rejects self-blocks
+    and dependency cycles (二段循環検知 第 (i) 段) at write time, no-ops when the
+    blocker is already satisfied (leader_review+), and 409s when the target is
+    not in a blockable state (todo / working). Returns the updated trek doc.
+    """
+    t = _load_trek_for_read(trek_id, user, request)
+    _reject_if_trek_archived(t)
+    _require_trek_leader_session(t, user, request)
+    if not body.target_id:
+        raise HTTPException(status_code=400, detail="target_id required")
+    if not body.blocker_target_id:
+        raise HTTPException(status_code=400, detail="blocker_target_id required")
+    caller_sid = request.headers.get("X-Beacon-Session", "") or ""
+    try:
+        trek_mod.add_blocker(
+            t,
+            target_id=body.target_id,
+            blocker_target_id=body.blocker_target_id,
+            updated_by_session_id=caller_sid,
+            note=body.note or "",
+        )
+    except ValueError as e:
+        # self-block / cycle / non-blockable state → client error. 409 for the
+        # cycle case (= conflict with existing edges), 400 otherwise.
+        msg = str(e)
+        code = 409 if "cycle" in msg else 400
+        raise HTTPException(status_code=code, detail=msg)
+    t["updated_at"] = trek_mod.utcnow_iso()
+    db.save_trek(trek_id, t)
     return t
 
 

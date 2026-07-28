@@ -9047,6 +9047,160 @@ def cmd_trek_task_state():
         )
 
 
+def cmd_trek_block():
+    """Draw a blocker edge on a Trek target (ms-128 方針4 / e-4365).
+
+    Env:
+      BEACON_TREK_ID          (required)
+      BEACON_TREK_TARGET_ID   (required, the dependent target)
+      BEACON_TREK_BLOCKER_IDS (required, newline-joined blocker target ids)
+      BEACON_TREK_NOTE        (optional)
+      BEACON_JSON             "1" → json output
+
+    Records that TARGET depends on each BLOCKER (= cannot proceed until the
+    blocker is 取り込み済み) and blocks the target. Leader-only. Self-blocks and
+    dependency cycles are rejected; an already-satisfied blocker is a no-op.
+    Multiple --on blockers are applied in order (each independently guarded).
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    target_id = os.environ.get("BEACON_TREK_TARGET_ID", "").strip()
+    blockers_raw = os.environ.get("BEACON_TREK_BLOCKER_IDS", "")
+    note = os.environ.get("BEACON_TREK_NOTE", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    blocker_ids = [b.strip() for b in blockers_raw.split("\n") if b.strip()]
+
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+    if not target_id:
+        print("Error: target_id is required (e.g. ms-42 or e-2034)",
+              file=sys.stderr)
+        sys.exit(1)
+    if not blocker_ids:
+        print("Error: at least one --on <blocker-target-id> is required",
+              file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = None
+            for b in blocker_ids:
+                t = client.add_trek_blocker(
+                    trek_id, target_id=target_id,
+                    blocker_target_id=b, note=note,
+                )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        if json_mode:
+            print(json.dumps(t, ensure_ascii=False))
+        else:
+            print(
+                f"Blocked trek {trek_id} target {target_id} on "
+                f"{', '.join(blocker_ids)}"
+            )
+            print(
+                "  依存先が leader_review (= 取り込み済み) に達すると自動で "
+                "再開します (= AND auto-unblock)。"
+            )
+        return
+
+    t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    caller_sid = os.environ.get("BEACON_SESSION_ID", "")
+    for b in blocker_ids:
+        try:
+            trek.add_blocker(
+                t, target_id=target_id, blocker_target_id=b,
+                updated_by_session_id=caller_sid, note=note,
+            )
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    trek_store.save_trek(t)
+    if json_mode:
+        print(json.dumps(t, ensure_ascii=False))
+    else:
+        print(
+            f"Blocked trek {trek_id} target {target_id} on "
+            f"{', '.join(blocker_ids)} (local mode)"
+        )
+
+
+def cmd_trek_blockers():
+    """Show the blocked targets of a Trek and what each is waiting on (e-4365).
+
+    Env:
+      BEACON_TREK_ID   (required)
+      BEACON_JSON      "1" → json output (the blocked_queue list)
+
+    Reads the trek's dependency ledger + task states and prints, per blocked
+    target, its blockers and the ones still unsatisfied. Read-only.
+    """
+    import trek_store
+    import trek_scheduler
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not trek_id:
+        print("Error: trek_id is required", file=sys.stderr)
+        sys.exit(1)
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = client.get_trek(trek_id)
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+    if t is None:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+
+    agg = trek_scheduler.build_task_state_aggregate(t)
+    blocked = agg.get("blocked_queue") or []
+    cycles = []
+    try:
+        import trek as _trek
+        cycles = _trek.detect_blocker_cycles(t)
+    except Exception:
+        cycles = []
+
+    if json_mode:
+        print(json.dumps(
+            {"blocked_queue": blocked, "blocker_cycles": cycles},
+            ensure_ascii=False,
+        ))
+        return
+
+    if not blocked and not cycles:
+        print(f"trek {trek_id}: 依存待ち (block) の target はありません。")
+        return
+    if blocked:
+        print(f"trek {trek_id}: {len(blocked)} 件が依存待ち (block):")
+        for row in blocked:
+            unsat = ", ".join(row.get("unsatisfied") or []) or "(none)"
+            allb = ", ".join(row.get("blockers") or [])
+            print(f"  - {row['task_id']}: 待ち {unsat}  (全依存: {allb})")
+    if cycles:
+        print(f"⚠ 依存の循環 {len(cycles)} 件:")
+        for c in cycles:
+            print(f"  - {' → '.join(c)} → {c[0]}")
+        print(
+            "  まずリーダーが自律解消 (target 分割 / 順序強制 / blocker 一本外し) "
+            "を試み、解けない時のみユーザーへ escalate してください。"
+        )
+
+
 def cmd_trek_extend_ttl():
     """Postpone TTL safety net deadline on a Trek task (ms-95 / e-2308).
 
@@ -27196,6 +27350,8 @@ if __name__ == "__main__":
         "trek_blanket_approve": cmd_trek_blanket_approve,
         "trek_blanket_revoke": cmd_trek_blanket_revoke,
         "trek_task_state": cmd_trek_task_state,
+        "trek_block": cmd_trek_block,
+        "trek_blockers": cmd_trek_blockers,
         "trek_extend_ttl": cmd_trek_extend_ttl,
         # ms-97 / Phase 7-A / AC21 — leader が user summary DM 送信後
         # に meta.summary_sent_at を stamp する CLI wrapper。

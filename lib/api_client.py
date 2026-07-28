@@ -1295,6 +1295,24 @@ class ApiClient:
             {"task_id": task_id, "state": state, "note": note},
         )
 
+    def add_trek_blocker(self, trek_id: str, *, target_id: str,
+                         blocker_target_id: str, note: str = "") -> dict:
+        """ms-128 方針4 (e-4365) — draw a blocker edge target → blocker.
+
+        Leader-only (= server-side check). Records that ``target_id`` depends
+        on ``blocker_target_id`` and blocks the target. The server rejects
+        self-blocks + dependency cycles at write time and no-ops when the
+        blocker is already satisfied. Returns the updated trek doc.
+        """
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/blocker",
+            {
+                "target_id": target_id,
+                "blocker_target_id": blocker_target_id,
+                "note": note or "",
+            },
+        )
+
     def extend_trek_task_ttl(self, trek_id: str, *, task_id: str,
                              minutes: int, reason: str = "") -> dict:
         """ms-95 / e-2308 — Postpone TTL safety net deadline on a task.
