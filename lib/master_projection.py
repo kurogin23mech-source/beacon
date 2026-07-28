@@ -312,29 +312,36 @@ def write_through_account_name(account: dict, adapter, new_name: str, *,
 
 
 def apply_master_name_sync(adapter, *, master_account_id: str, new_name: str,
-                           expected_org: str, now: str) -> Optional[dict]:
+                           sender_org_ids, now: str):
     """master-sync event を master へ適用する server 側 consumer core (e-3622 chunk2a part2).
 
     outbound write-through の bus 経路: CLI が rename 時に発行した master-sync event を
-    server が受け、その payload (master_account_id / new_name / expected_org=発行元投影の
-    owner_org) から master の canonical name を更新する。``write_through_account_name`` が
+    server が受け、master の canonical name を更新する。``write_through_account_name`` が
     **投影 account を持つ context** (CLI / project doc) 用なのに対し、こちらは **event
-    payload しか持たない server consumer** 用の姉妹。両者は master 側の適用意味論
-    (same-org 検証 + master-wins) を共有する。
+    payload + 認証済み送信者しか持たない server consumer** 用の姉妹。
 
-    event 経路なので、不適用 (未知 id / org 不一致 / 空 name) は **例外でなく None を返す**
-    (= silent drop、呼び出し元の event ループを壊さない。cross-org は攻撃かノイズなので
-    握りつぶす)。戻り値は更新後の master record、適用しなければ None。
+    **authz anchor (leader guard、e-3622)**: 権威は payload の org_id ではなく、**認証済み
+    送信者 (JWT sub 等) が実際に member である org 集合** (``sender_org_ids``) に置く。
+    master record 自身の org が ``sender_org_ids`` に含まれる時だけ適用する。payload に
+    org を詐称しても、送信者がその org の member でなければ弾く (= crafted event による
+    他 org master の poisoning を封じる)。payload の org_id は「どの master か」の hint に
+    留め、authz には使わない (server 側は master record の org を真値に取る)。
+
+    event 経路なので不適用は例外でなく **(None, reason)** を返す (= drop、event ループを
+    壊さない)。``reason`` は audit/log 用 (leader minor guard: silent にせず観測可能に):
+    ``''`` = 適用 / ``'empty_or_no_id'`` / ``'unknown_master'`` / ``'not_authorized'``。
+    戻り値は ``(updated_record_or_None, reason)``。
     """
     name = str(new_name or "").strip()
     if not master_account_id or not name:
-        return None
+        return None, "empty_or_no_id"
     rec = adapter.get_account(master_account_id)
     if not rec:
-        return None
-    if not _org_matches(mi.master_account_org_id(rec), expected_org):
-        return None   # fail-closed: cross-org は drop (event 経路なので raise しない)
-    return adapter.put_account({**rec, "name": name}, now=now)
+        return None, "unknown_master"
+    master_org = mi.master_account_org_id(rec)
+    if not master_org or master_org not in (sender_org_ids or set()):
+        return None, "not_authorized"   # 送信者が master の org の member でない
+    return adapter.put_account({**rec, "name": name}, now=now), ""
 
 
 def master_sync_payload(account: dict, new_name: str) -> Optional[dict]:

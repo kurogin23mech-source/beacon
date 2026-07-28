@@ -102,34 +102,47 @@ def test_write_through_preserves_created_at(adapter):
 # ---------------------------------------------------------------------------
 # part2: server consumer core (apply_master_name_sync) + CLI producer (payload)
 # ---------------------------------------------------------------------------
-def test_apply_master_name_sync_same_org_updates(adapter):
+def test_apply_master_name_sync_member_updates(adapter):
+    """認証済み送信者が master の org の member → 適用 (reason='')。"""
     acc = _linked_account(adapter, org=ORG_A, name="Acme")
     mid = mp.linked_master_account_id(acc)
-    out = mp.apply_master_name_sync(adapter, master_account_id=mid,
-                                    new_name="Acme Inc.", expected_org=ORG_A, now=T2)
-    assert out is not None and out["name"] == "Acme Inc."
+    out, reason = mp.apply_master_name_sync(adapter, master_account_id=mid,
+                                            new_name="Acme Inc.",
+                                            sender_org_ids={ORG_A}, now=T2)
+    assert reason == "" and out["name"] == "Acme Inc."
     assert adapter.get_account(mid)["name"] == "Acme Inc."
 
 
-def test_apply_master_name_sync_cross_org_drops_silently(adapter):
-    """event 経路: cross-org は raise せず None で drop、master は不変。"""
+def test_apply_master_name_sync_non_member_is_rejected(adapter):
+    """送信者が master の org の member でない (payload org を詐称しても弾く) → drop。"""
     m_a = mi.new_master_account("A-name", org_id=ORG_A, now=T1, master_account_id="macc-a")
     adapter.put_account(m_a, now=T1)
-    out = mp.apply_master_name_sync(adapter, master_account_id="macc-a",
-                                    new_name="Hijack", expected_org=ORG_B, now=T2)
-    assert out is None
+    # 送信者は org-B の member だが master は org-A → not_authorized。
+    out, reason = mp.apply_master_name_sync(adapter, master_account_id="macc-a",
+                                            new_name="Hijack", sender_org_ids={ORG_B}, now=T2)
+    assert out is None and reason == "not_authorized"
     assert adapter.get_account("macc-a")["name"] == "A-name"   # 書き換わっていない
 
 
-def test_apply_master_name_sync_unknown_id_or_empty_drops(adapter):
-    assert mp.apply_master_name_sync(adapter, master_account_id="nope",
-                                     new_name="X", expected_org=ORG_A, now=T2) is None
-    assert mp.apply_master_name_sync(adapter, master_account_id="",
-                                     new_name="X", expected_org=ORG_A, now=T2) is None
+def test_apply_master_name_sync_multi_org_member_updates(adapter):
+    """送信者が複数 org member で master の org を含む → 適用。"""
     acc = _linked_account(adapter, org=ORG_A, name="Acme")
     mid = mp.linked_master_account_id(acc)
-    assert mp.apply_master_name_sync(adapter, master_account_id=mid,
-                                     new_name="  ", expected_org=ORG_A, now=T2) is None
+    out, reason = mp.apply_master_name_sync(adapter, master_account_id=mid,
+                                            new_name="Acme Inc.",
+                                            sender_org_ids={ORG_B, ORG_A}, now=T2)
+    assert reason == "" and out["name"] == "Acme Inc."
+
+
+def test_apply_master_name_sync_unknown_id_or_empty_drops(adapter):
+    assert mp.apply_master_name_sync(adapter, master_account_id="nope", new_name="X",
+                                     sender_org_ids={ORG_A}, now=T2) == (None, "unknown_master")
+    assert mp.apply_master_name_sync(adapter, master_account_id="", new_name="X",
+                                     sender_org_ids={ORG_A}, now=T2) == (None, "empty_or_no_id")
+    acc = _linked_account(adapter, org=ORG_A, name="Acme")
+    mid = mp.linked_master_account_id(acc)
+    assert mp.apply_master_name_sync(adapter, master_account_id=mid, new_name="  ",
+                                     sender_org_ids={ORG_A}, now=T2) == (None, "empty_or_no_id")
 
 
 def test_master_sync_payload_from_linked_account(adapter):
@@ -147,10 +160,11 @@ def test_master_sync_payload_unlinked_or_empty_is_none(adapter):
 
 
 def test_payload_roundtrips_through_apply(adapter):
-    """producer→consumer 一巡: payload を apply に通すと master が更新される。"""
+    """producer→consumer 一巡: 送信者が org member なら payload 経由で master が更新される。"""
     acc = _linked_account(adapter, org=ORG_A, name="Acme")
     payload = mp.master_sync_payload(acc, "Roundtrip Co.")
-    out = mp.apply_master_name_sync(adapter, master_account_id=payload["master_account_id"],
-                                    new_name=payload["new_name"],
-                                    expected_org=payload["org_id"], now=T2)
-    assert out["name"] == "Roundtrip Co."
+    # server は payload の org_id を authz に使わず、sender の認証 membership を使う。
+    out, reason = mp.apply_master_name_sync(
+        adapter, master_account_id=payload["master_account_id"],
+        new_name=payload["new_name"], sender_org_ids={ORG_A}, now=T2)
+    assert reason == "" and out["name"] == "Roundtrip Co."
