@@ -137,9 +137,10 @@ lookup 障害時にユーザーが育てた指針が silent 無視され、指�
 
 - `GUIDE_RC == 0` → `$GUIDE` が指針本文。下書きのトーン・言い回し・定型文に反映する
   (お作法と衝突する場合は下の「営業メールのお作法」を優先し、ユーザー指針はその範囲内で適用)。
-- `GUIDE_RC == 3` → **doc 未作成 (正常)**。指針なしで通常どおり書く。ユーザーが「署名や
-  定型文を覚えておいて」と言ったら `beacon doc add --id sales-email-guidelines --scope core
-  --title "sales-email-guidelines"` で作る (or 既存を `beacon doc update`) ことを案内してよい。
+- `GUIDE_RC == 3` → **指針 未登録 (正常)**。指針なしで通常どおり書く。ユーザーが「署名や
+  定型文を覚えておいて」と言ったら、**この Skill が自動で登録・反映します** — ユーザーが手で
+  コマンドを打つ必要はありません。[^guide-store] 一度覚えれば、次回以降のメールに自動で
+  反映されます。
 - `GUIDE_RC` がその他 (非 0 かつ非 3) → **取得失敗** (cloud 到達不能 等)。`$GUIDE` の
   エラーをユーザーに転記し、**指針を silent に無視して進まない** (育てた指針が効かないまま
   送るのを防ぐ)。取得できるまで待つか、ユーザーの明示了解で指針なし続行を選ぶ。
@@ -320,3 +321,7 @@ python3 "$(beacon _lib-path)/commands.py" sales_reply_watch_op_ensure
 - **送信できたら必ず Step 6 の活動記録を残す** (証跡を欠かさない)。
 - `project.json` を直接書き換えない。内部コマンド / CLI 経由のみ。
 - 顧客宛て本文は非開発者が読める自然な日本語で (社内略語を持ち込まない)。
+
+[^guide-store]: 実装上は指針を Beacon doc `sales-email-guidelines` に保存する。ユーザーが
+「覚えておいて」と言ったら Skill が内部で `beacon doc add`/`beacon doc update` を呼んで書き込む
+(未作成なら新規作成、既存なら追記) — ユーザーが手でコマンドを打つ導線ではない。

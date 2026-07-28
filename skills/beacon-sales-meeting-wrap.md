@@ -46,63 +46,45 @@ beacon meeting list <opp-id> --json    # status=ended のものが A の入力�
 
 対象商談を `$OPP`、面談を `$MTG` として保持。相手 (Account/Contact) も把握する。
 
-## Step 2: 議事録を取り込む (取得元は宣言から解決する — source-agnostic, e-3552)
+## Step 2: 議事録を取り込む (在処は顧客ごとに一度決めれば以後は自動で探す, e-3552)
 
-議事録 (文字起こし) のソースと置き場は**顧客ごとに違う**。Meet+Workspace は自動生成物が
-カレンダーイベント添付 / Drive の Meet Recordings に入るが、無料 Google や Zoom/tl;dv/Otter
-は任意フォルダ・任意命名になる。だから **「Drive の Meet Recordings にある」を前提化しない**。
-取得元を宣言から解決し、無ければ人に聞く。以下の 3 層を上から順に試す:
+議事録 (文字起こし) の在処は**顧客ごとに違う**。Meet + Google Workspace なら自動生成物が
+カレンダーの予定の添付や Drive の Meet 録画フォルダに入るが、無料の Google アカウントや
+Zoom / tl;dv / Otter 等の外部ツールは置き場も名前もまちまちになる。だから「いつも同じ場所に
+ある」を前提にしない。**議事録の在処を顧客ごとに一度決めておけば、次回以降は自動で探す**。
+以下の順に上から試す:
 
-### 層1: 構造的既定 (職種層・厚く) — mtg- の calendar_event_id から辿る
+### 探し方1: Meet の予定に添付された議事録を辿る
 
-面談 `$MTG` が `calendar_event_id` を持っていれば (確定時 e-3374 で保持済)、まずその
-**カレンダーイベントの添付 (Meet Recording / 文字起こし)** を辿る。`beacon-meeting-id`
-タグと突合し、Meet 利用時はこれが最も堅い第一候補。`/beacon-sales-drive` と同じ Drive/
-カレンダー MCP 経路を使い、アカウントは台帳解決から取る (手書きしない, e-3365)。
+面談 `$MTG` に紐づくカレンダーの予定があれば、まずその**予定に添付された議事録 (Meet の録画・
+文字起こし)** を辿る。Meet を使っている面談ではこれが最も確実な第一候補。使う Google アカウントは
+台帳(送信アカウント一覧)から解決する (手書きしない, e-3365)。[^wrap-cal]
 
-### 層2: 顧客別 override (テナント層・最小・宣言的) — Account.transcript_source を読む
+### 探し方2: 顧客ごとに決めておいた在処を見る
 
-層1 で取れない / この顧客は Meet でない場合、その顧客 (Account) が宣言している取得元を読む:
+探し方1 で取れない、またはこの顧客が Meet でない場合、その顧客について**あらかじめ決めておいた
+議事録の在処**を読む: [^wrap-source-get]
 
-```bash
-BEACON_ACCOUNT_ID="$ACC" \
-  python3 "$(beacon _lib-path)/commands.py" sales_account_transcript_source_get
-```
+在処には次の種類がある:
 
-返る JSON (`null` なら未宣言) の `type` で分岐する:
-
-| `type` | 取得のしかた |
+| 在処の種類 | 探し方 |
 |---|---|
-| `meet_calendar` | 層1 と同じ (Meet のカレンダー添付)。層1 で拾えていればここは skip |
-| `drive_folder` | 宣言された `folder_id` の Drive フォルダを見る。`naming` があれば命名規則で該当 doc を絞る |
-| `external` | Zoom/tl;dv/Otter 等 (`tool` 必須=道具名、`naming` は任意の手掛かり)。連携が無ければ層3 に落ちて人に聞く (道具名が無いなら `manual` を使う) |
-| `manual` | 自動生成物なし。層3 (人に聞く) に直行する |
+| Meet の予定添付 | 探し方1 と同じ。すでに拾えていればここは飛ばす |
+| Drive の特定フォルダ | 決めておいた Drive フォルダを見る。ファイル名の手掛かりがあれば該当議事録を絞る |
+| 外部ツール (Zoom / tl;dv / Otter 等) | 道具名を手掛かりに探す。連携が無ければ探し方3 (人に聞く) に落ちる |
+| 手動 | 自動生成物なし。探し方3 (人に聞く) に直行する |
 
-宣言が無い (`null`) 顧客は、無理に Drive 総当たり検索をしない (脆いので前提化しない) —
-層3 に落ちる。**この顧客の取得元が毎回同じなら、一度宣言しておくと次回から自動で辿れる**
-ことをユーザーに促してよい (宣言は最小: type と、必要なら folder_id / naming / tool):
+在処が未設定の顧客は、無理に Drive を総当たり検索しない (取り違えの元) — 探し方3 に落ちる。
+**この顧客の議事録の在処が毎回同じなら、一度決めておけば次回から自動で辿れる**ことをユーザーに
+促してよい。ユーザーが「この顧客の議事録は◯◯にある」と教えてくれれば、この Skill が
+その在処を顧客に覚えさせる (在処の種類と、必要ならフォルダの場所やファイル名の手掛かり、
+道具名)。[^wrap-source-set]
 
-```bash
-# type と、必要なら folder_id / naming / tool を「まとめて」渡す (宣言は 1 単位で書き替わる)。
-# drive_folder は folder_id 必須 (場所を特定できない宣言は作れない)。
-BEACON_ACCOUNT_ID="$ACC" BEACON_TS_TYPE="drive_folder" \
-  BEACON_TS_FOLDER_ID="<Drive フォルダ ID>" BEACON_TS_NAMING="<命名の手掛かり (任意)>" \
-  python3 "$(beacon _lib-path)/commands.py" sales_account_transcript_source_set
-```
+### 探し方3: 人に議事録リンク / 要点を聞く
 
-**宣言を消すのは明示 clear のときだけ** (#498 review: 空 `BEACON_TS_TYPE` を渡しても
-エラーになるだけで既存宣言は消えない — 渡し忘れ/typo で宣言が飛ぶ事故を防ぐ):
-
-```bash
-BEACON_ACCOUNT_ID="$ACC" BEACON_TS_CLEAR=1 \
-  python3 "$(beacon _lib-path)/commands.py" sales_account_transcript_source_set
-```
-
-### 層3: fallback — 人に Drive リンク / 要点を聞く (現行踏襲)
-
-層1・層2 で議事録が取れない (無料アカウント等で生成物が無い、外部ツール未連携) 場合は、
-ユーザーに「議事録の Drive リンクを教えてください / 要点を貼ってください」と促す
-(手動起点にフォールバック)。ここで得たリンクは Step 3 の `--source-url` に入れる。
+探し方1・2 で議事録が取れない (無料アカウント等で自動生成物が無い、外部ツール未連携) 場合は、
+ユーザーに「議事録の Drive リンクを教えてください / 要点を貼ってください」と促す。ここで得た
+リンクは Step 3 の出典として残す。
 
 ## Step 3: 議事録を証跡 (Communication) として残す
 
@@ -200,3 +182,18 @@ dossier の見出し (顧客の課題[経営/部署/現場] / 勝ち筋 / キー
 - `/beacon-sales-drive` — 議事録 doc の取得（Drive MCP 経路）
 - `/beacon-sales-schedule` / `/beacon-sales-email` — 次活動の実行（送信・予約は人間承認）
 - SPEC `o83GEljD8xeFMr95wLTh` §5 / A（議事録取込 e-3359 を内包）
+
+[^wrap-cal]: 実装上は面談 `$MTG` の `calendar_event_id` (確定時 e-3374 で保持済) から
+カレンダーの予定を辿り、`beacon-meeting-id` タグと突合する。Drive / カレンダー MCP 経路は
+`/beacon-sales-drive` と同じ。
+
+[^wrap-source-get]: 実装上は顧客 (Account) に宣言された取得元を読む:
+`BEACON_ACCOUNT_ID="$ACC" python3 "$(beacon _lib-path)/commands.py" sales_account_transcript_source_get`。
+返る JSON (`null` なら未宣言) の `type` (`meet_calendar` / `drive_folder` / `external` / `manual`) で
+上表の分岐に対応する。
+
+[^wrap-source-set]: 実装上は在処を顧客に書き込む (種類と、必要なら folder_id / naming / tool を
+まとめて渡す。宣言は 1 単位で書き替わる。`drive_folder` は folder_id 必須):
+`BEACON_ACCOUNT_ID="$ACC" BEACON_TS_TYPE="drive_folder" BEACON_TS_FOLDER_ID="<Drive フォルダ ID>" BEACON_TS_NAMING="<命名の手掛かり (任意)>" python3 "$(beacon _lib-path)/commands.py" sales_account_transcript_source_set`。
+宣言を消すのは明示 clear (`BEACON_TS_CLEAR=1`) のときだけ (#498 review: 空 `BEACON_TS_TYPE` は
+エラーになるだけで既存宣言は消えない — 渡し忘れ/typo で宣言が飛ぶ事故を防ぐ)。
