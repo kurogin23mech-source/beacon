@@ -6370,24 +6370,30 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     from_state = trek_mod.get_task_state(t, body.task_id)
     if from_state in ("leader_review", "user_review"):
         _require_trek_leader_session(t, user, request)
+    # ms-128 方針5 (e-4366) — done は Trek 状態機械から除去され、書き込みは
+    # user_review へ migrate される。以降の「状態の意味」判定 (terminal 判定 /
+    # gate 発火 / review-trigger / decision 写像 / event payload) は、client が
+    # 送った生の body.state ではなく、実際に保存される effective_state を見る。
+    # これで legacy "done" 書き込みも user_review として一貫して扱われ、terminal
+    # 集合 (TERMINAL_TASK_STATES) と migration 写像を唯一の真実源にできる
+    # (= gate 条件にリテラルタプルを直書きしない)。
+    effective_state = trek_mod.migrate_legacy_task_state(body.state)
     # ms-97 / e-2650 — phantom done 構造防御。 Trek slot を terminal に flip
     # する前に、 真値源である project pool の task status が done である
     # ことを必須条件として check する (= 「view 側だけ terminal になる経路」 を
     # server で構造的に reject)。
     # ms-128 方針5 (e-4366) — terminal が done → user_review に移ったので、
-    # gate の発火条件も done だけでなく user_review 書き込みに拡張する。 方針5 で
-    # user_review が唯一の terminal (= 「手前まで運んだ」= slot 完了) になり、 かつ
-    # legacy "done" は書き込み時に user_review へ migrate されるため、 done だけを
+    # gate は effective_state が terminal (= user_review) かどうかで発火する。
+    # user_review が唯一の terminal (= 「手前まで運んだ」= slot 完了)。 done だけを
     # gate すると literal "user_review" 書き込みが pool-done 検証を素通りして
-    # phantom-done の穴が再び開く。 両方を gate して新 terminal でも commit
-    # evidence を必須に保つ (option A、 user 合意 2026-07-28)。 terminal 以外
-    # (todo / working / leader_review への遷移) は従来通り 5-state machine だけで
-    # 判定する。
+    # phantom-done の穴が再び開くため、 terminal 集合そのもので gate する
+    # (option A、 user 合意 2026-07-28)。 terminal 以外 (todo / working /
+    # leader_review への遷移) は状態機械だけで判定する。
     # 旧コード (= 2026-06-28 以前) ではこの check が無く、 e-710 のような
     # 「commit ゼロで Trek slot だけ done」 が成立していた。 ms-97 SPEC
     # AC10 / AC30 補強 + ms-128 方針5 の構造実装、 詳細は lib/trek.py
     # ``check_slot_done_precondition`` の docstring を参照。
-    if body.state in ("done", "user_review"):
+    if effective_state in trek_mod.TERMINAL_TASK_STATES:
         allowed, reason_code, message = trek_mod.check_slot_done_precondition(
             t,
             task_id=body.task_id,
@@ -6413,12 +6419,6 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    # ms-128 方針5 (e-4366) — done は Trek 状態機械から除去され、set_task_state は
-    # 書き込み時に done → user_review へ migrate する。以降の「状態の意味」判定
-    # (terminal 判定 / review-trigger 発火 / decision 写像 / event payload) は、
-    # client が送った生の body.state ではなく、実際に保存された effective_state を
-    # 見る。これで legacy "done" 書き込みも user_review として一貫して扱われる。
-    effective_state = trek_mod.migrate_legacy_task_state(body.state)
     # ms-99 / e-2834 — clear quiesce marks when a state transitions OUT
     # of terminal. This lets the next quiesce lifecycle fire a fresh DM
     # (= AC "per-quiesce 1 回だけ" is per lifecycle, not per lifetime).

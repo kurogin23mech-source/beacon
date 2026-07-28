@@ -34,13 +34,13 @@ try:
     from trek import (  # type: ignore
         NARROWING_KEYS, TERMINAL_TASK_STATES,
         _scope_entry_identity_key, utcnow_iso,
-        migrate_legacy_task_state,
+        migrate_legacy_task_state, pool_status_to_trek_state,
     )
 except ImportError:  # pragma: no cover — flat-layout import fallback
     from lib.trek import (  # type: ignore
         NARROWING_KEYS, TERMINAL_TASK_STATES,
         _scope_entry_identity_key, utcnow_iso,
-        migrate_legacy_task_state,
+        migrate_legacy_task_state, pool_status_to_trek_state,
     )
 
 
@@ -282,11 +282,10 @@ def _materialize_atomic_slot(
         pool_status = _pool_status(project_doc, kind, target_id)
         if pool_status is None:
             resolved_state, source = "todo", "unstamped"
-        elif pool_status == "done":
-            # ms-128 方針5: pool-done = Trek terminal 等価 = user_review。
-            resolved_state, source = "user_review", "pool"
         else:
-            resolved_state, source = "todo", "pool"
+            # ms-128 方針5: pool→Trek 状態の写像は単一関数に集約
+            # (pool-done = terminal 等価 = user_review)。
+            resolved_state, source = pool_status_to_trek_state(pool_status), "pool"
     return Slot(
         slot_id=slot_id, project=project, target_kind=kind,
         target_id=target_id, resolved_state=resolved_state,
@@ -414,12 +413,9 @@ def _resolve_child_state(
         # Ghost: mentioned by included_task_ids but not present in pool
         # (SPEC edge case 19).
         return "todo", "unstamped"
-    pool_status = task.get("status") or ""
-    if pool_status == "done":
-        # ms-128 方針5: pool-done = Trek の terminal 等価 = user_review
-        # (= 「pool で done = 手前まで運び終えた」を Trek 状態に写す)。
-        return "user_review", "pool"
-    return "todo", "pool"
+    # ms-128 方針5: pool→Trek 状態の写像は単一関数に集約
+    # (pool-done = Trek の terminal 等価 = user_review)。
+    return pool_status_to_trek_state(task.get("status") or ""), "pool"
 
 
 def _aggregate_ms_state(

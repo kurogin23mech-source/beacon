@@ -86,22 +86,24 @@ KICKOFF_HISTORY_KEY = "kickoff_status"
 # 『user 介入要請』) を選ばざるを得ず混乱」 が露呈した。 5 状態に厳密化して
 # leader / user 判断境界を構造的に分離する。
 #
-# Trek 完遂判定: 全 task が `done` OR `user_review` に至った時点で完遂。
-# todo / working / leader_review が 1 つでもあれば scheduler + leader は
-# 走り続ける (= leader_review は中途中継、 user_review は terminal 扱い)。
-# ms-128 方針5 (e-4366) — done を Trek 状態機械から除去。done = 配置 = 顧客到達 =
-# 人間の判断境界で、Trek の外の 1 レイヤー上。Trek は user_review で打ち止める
-# (「手前まで運ぶ」)。既存の done stamp は遡行変更せず read-time migrate
-# (done→user_review、下記 LEGACY_TASK_STATE_MIGRATIONS) で吸収する。
+# ms-128 方針5 (e-4366) — Trek 完遂判定: 全 task が `user_review` に至った時点で
+# 完遂 (= 唯一の terminal)。todo / working / leader_review が 1 つでもあれば
+# scheduler + leader は走り続ける (= leader_review は中途中継)。
+# done は Trek 状態機械から除去した。done = 配置 = 顧客到達 = 人間の判断境界で、
+# Trek の外の 1 レイヤー上。Trek は user_review で打ち止める (「手前まで運ぶ」)。
+# 既存の done stamp は遡行変更せず read-time migrate (done→user_review、下記
+# LEGACY_TASK_STATE_MIGRATIONS) で吸収する。
+# (旧: done も terminal だった。ms-88 で 5 状態化、ms-128 で done 除去し 4 状態。)
 VALID_TASK_STATES = ("todo", "working", "leader_review", "user_review")
 DEFAULT_TASK_STATE = "todo"
 # user_review が唯一の terminal (= Trek 完遂 = 走り続け停止)。done は Trek 外。
 TERMINAL_TASK_STATES = ("user_review",)
 
 # ms-97 / e-2706 — review-notify trigger set (= TERMINAL_TASK_STATES の意味的分離)。
-# `TERMINAL_TASK_STATES` (= done / user_review) は「Trek 完遂判定 = 走り続け停止」
+# `TERMINAL_TASK_STATES` (= user_review のみ) は「Trek 完遂判定 = 走り続け停止」
 # semantic で使う (= trek.py § 完遂判定、 mirror/reconcile 経路)。
-# 一方、 leader への「review が要る」 notify は `leader_review` 含み 3 状態が真。
+# 一方、 leader への「review が要る」 notify は `leader_review` を含めた 2 状態
+# (= user_review / leader_review = REVIEW_TRIGGER_STATES) が真。
 # 旧 SPEC では `waiting-review` (= 現 `leader_review`) を含めた notify 意図だったが、
 # ms-88 e-2107 の 5-state 移行 (waiting-review → leader_review) で check 条件が
 # 連動せず、 LPS exec が e-373 を `working → leader_review` に stamp しても
@@ -239,13 +241,29 @@ def validate_role(r: str) -> str:
 
 
 def migrate_legacy_task_state(s: str) -> str:
-    """Translate legacy task-state tokens to the 5-state model (ms-88 / e-2107).
+    """Translate legacy task-state tokens to the current model.
 
     Maps old ``waiting-review`` → ``leader_review`` (= the semantic match
-    for past server-forced auto-stalls). Unknown tokens pass through
-    unchanged so downstream validation can flag them properly.
+    for past server-forced auto-stalls) and ms-128 方針5 の ``done`` →
+    ``user_review`` (= Trek は user_review で打ち止め、done は Trek 外)。
+    Unknown tokens pass through unchanged so downstream validation can flag
+    them properly.
     """
     return LEGACY_TASK_STATE_MIGRATIONS.get(s, s)
+
+
+def pool_status_to_trek_state(pool_status: str | None) -> str:
+    """Map a project-pool task/op status to its Trek task-state equivalent.
+
+    ms-128 方針5 (e-4366): 真値源である project pool の status を Trek 状態機械に
+    写す唯一の関数。pool の ``done`` は Trek の terminal 等価 = ``user_review``
+    (= 「pool で done = 手前まで運び終えた」)。それ以外 (todo / in_progress /
+    None) は ``todo`` 扱い (= まだ拾える仕事)。slot materialize の各所がこの 1
+    関数を呼ぶことで、pool→Trek 写像が単一真実源になり drift しない。
+    """
+    if pool_status == "done":
+        return "user_review"
+    return DEFAULT_TASK_STATE
 
 
 def validate_task_state(s: str) -> str:
@@ -1124,13 +1142,12 @@ def get_working_ttl_minutes(trek_doc: dict,
 def aggregate_task_state(trek_doc: dict, *, task_ids: list[str]) -> dict:
     """Summarise Trek state across the given task IDs (5 状態、 ms-88 / e-2107).
 
-    Returns counts per state + an overall classification:
+    Returns counts per state + an overall classification (ms-128 方針5):
 
         {
           "todo": N0, "working": N1, "leader_review": N2,
-          "user_review": N3, "done": N4, "total": T,
-          "overall": "active" | "all-done" | "all-user-review" |
-                     "all-terminal-mixed" | "empty",
+          "user_review": N3, "done": 0, "total": T,
+          "overall": "active" | "all-user-review" | "empty",
 
           # Backward-compat alias for callers that still read the old
           # "waiting-review" key — combines leader_review + user_review
@@ -1138,21 +1155,23 @@ def aggregate_task_state(trek_doc: dict, *, task_ids: list[str]) -> dict:
           "waiting-review": N2 + N3,
         }
 
+    ms-128 方針5: done は Trek 状態機械から除去され read-time に user_review へ
+    migrate される。よって "done" カウントは常に 0 (後方互換のため key は残す)、
+    旧 overall 値 "all-done" / "all-terminal-mixed" は消滅した。
+
     "active":  at least one task is `todo` / `working` / `leader_review`
                — scheduler keeps firing for some executor or leader queue.
-    "all-done": every task reached `done` — Trek complete, archive candidate.
-    "all-user-review": every task waiting for user judgment — terminal at
-               Trek-completion granularity, pending external decision.
-    "all-terminal-mixed": all tasks terminal but mix of done + user_review
-               — Trek complete enough for archive after user消化.
+    "all-user-review": every task reached `user_review` (唯一の terminal)
+               — Trek complete at Trek-completion granularity, pending the
+               external human/deploy decision. legacy done は migrate 済。
     "empty":   no task IDs supplied.
 
     Untracked tasks collapse to `todo` (= default), so a freshly-added
     scope task keeps Trek active until claimed (todo → working).
 
     Trek 完遂判定 (= scheduler / leader 走り続け判定): `todo` / `working` /
-    `leader_review` のいずれかが 1 つでもあれば走り続ける、 全部 `done` OR
-    `user_review` で停止 (= CORE doc 5nfTSmCDVUzD4SLzIhI5 § "Trek 完遂判定")。
+    `leader_review` のいずれかが 1 つでもあれば走り続ける、 全部 `user_review`
+    で停止 (= CORE doc 5nfTSmCDVUzD4SLzIhI5 § "Trek 完遂判定")。
     """
     counts = {s: 0 for s in VALID_TASK_STATES}
     total = 0
@@ -2500,7 +2519,13 @@ def check_slot_done_precondition(
     task_id: str,
     get_project,
 ) -> tuple[bool, str, str]:
-    """Verify that a Trek slot ``done`` transition is backed by project pool truth.
+    """Verify that a Trek slot **terminal** transition is backed by project pool truth.
+
+    ms-128 方針5 (e-4366): done は Trek 状態機械から除去され、terminal は
+    ``user_review`` になった。この gate は endpoint から ``done`` / ``user_review``
+    (= migrate 後の terminal) 書き込み時に呼ばれ、真値源の project pool の task が
+    ``status == "done"`` であることを必須にする (関数名は歴史的に ``done`` を
+    冠するが、実際には terminal 化 = user_review への到達を gate する)。
 
     Pure(-ish) function: side-effectful only via the injected
     ``get_project(pid) -> dict | None`` callable (= server passes
