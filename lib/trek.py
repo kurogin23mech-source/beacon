@@ -20,7 +20,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import secrets
-from typing import Iterable
+from typing import Callable, Iterable
 
 # ms-109 e-3699 (fable B-2): the Trek scope narrowing vocabulary is sourced from
 # the occupation registry so Trek (L1) does not hardcode development vocabulary.
@@ -3678,6 +3678,114 @@ def evaluate_target_halt(
     states[target_id] = entry
     trek_doc["updated_at"] = now_iso
     return reason
+
+
+def force_halt_to_leader_review(
+    trek_doc: dict,
+    target_id: str,
+    *,
+    halt_reason: str,
+    now: datetime.datetime | None = None,
+) -> dict:
+    """Force a halted working Target to ``leader_review``, keeping halt_reason.
+
+    ms-128 e-4309/方針6 — the server tick calls this when ``evaluate_target_halt``
+    tags a halt. Unlike ``set_task_state`` (which REPLACES the task_states entry
+    and would wipe the halt_reason tag + tracking fields), this mutates in place
+    so the leader sees the target in ``leader_review`` **with** its halt_reason —
+    that is what lets the leader's verdict set branch between 完成レビュー and
+    halt 救済 (方針6). Idempotent: a target already in leader_review is left as-is
+    (its halt_reason preserved). Only ``working → leader_review`` is performed.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    states = trek_doc.setdefault("task_states", {})
+    entry = states.get(target_id)
+    if entry is None:
+        return trek_doc
+    current = entry.get("state") or DEFAULT_TASK_STATE
+    if current == "leader_review":
+        # Already escalated; keep the (existing) halt_reason, no-op the state.
+        entry.setdefault("halt_reason", halt_reason)
+        states[target_id] = entry
+        return trek_doc
+    if current != "working":
+        # Only working targets are force-halted (a terminal / todo target is
+        # not "stuck"). Leave other states untouched.
+        return trek_doc
+    validate_task_state_transition("working", "leader_review")
+    entry["state"] = "leader_review"
+    entry["halt_reason"] = halt_reason
+    entry["updated_at"] = now_iso
+    entry["last_activity_at"] = now_iso
+    entry["updated_by_session_id"] = "trek-scheduler"
+    entry["note"] = (
+        f"server-forced to leader_review (halt: {halt_reason}, ms-128 e-4309)"
+    )
+    states[target_id] = entry
+    trek_doc["updated_at"] = now_iso
+    return trek_doc
+
+
+def sweep_working_target_halts(
+    trek_doc: dict,
+    *,
+    commit_count_for: "Callable[[str], int]",
+    now: datetime.datetime | None = None,
+    pulse_timeout_minutes: int = HALT_PULSE_TIMEOUT_MINUTES,
+    stall_timeout_minutes: int = HALT_STALL_TIMEOUT_MINUTES,
+) -> list[dict]:
+    """Evaluate halt for every working Target and force the halted ones.
+
+    ms-128 e-4309/方針6 — the tick-side orchestration over ``evaluate_target_halt``.
+    For each Target whose ``task_states[*].state == "working"`` it:
+
+      1. reads the owner session's latest pulse (for the response fingerprint)
+         and this tick's commit count (``commit_count_for(target_id)`` injected
+         so this stays pure w.r.t. storage),
+      2. calls ``evaluate_target_halt`` (updates tracking, returns halt_reason),
+      3. if halted, forces ``working → leader_review`` with the halt_reason tag.
+
+    ``no-op`` responses need no special case: a session that keeps replying
+    ``no-op`` produces an unchanging fingerprint + zero commit increment, so it
+    trips ``progress-stall`` here exactly like silence does — that is how the
+    "無応答 → サーバー介入" contract (e-4309) is realised.
+
+    Returns ``[{"target_id": ..., "halt_reason": ...}, ...]`` for the forced
+    transitions (so the caller can surface them to the leader / audit). Mutates
+    ``trek_doc`` in place; caller persists.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    states = trek_doc.get("task_states") or {}
+    forced: list[dict] = []
+    pulse_acks = trek_doc.get("pulse_acks") or {}
+    # Snapshot ids first — we mutate state inside the loop.
+    for target_id, entry in list(states.items()):
+        if (entry or {}).get("state") != "working":
+            continue
+        owner_sid = (entry.get("owner_session_id")
+                     or entry.get("updated_by_session_id") or "")
+        pulse_entry = pulse_acks.get(owner_sid) or {}
+        fingerprint = compute_response_fingerprint(pulse_entry)
+        last_pulse_at = pulse_entry.get("last_pulse_ack_at", "") or ""
+        try:
+            commit_count = int(commit_count_for(target_id) or 0)
+        except Exception:
+            commit_count = 0
+        reason = evaluate_target_halt(
+            trek_doc, target_id,
+            current_fingerprint=fingerprint,
+            current_commit_count=commit_count,
+            last_pulse_at=last_pulse_at,
+            now=now,
+            pulse_timeout_minutes=pulse_timeout_minutes,
+            stall_timeout_minutes=stall_timeout_minutes,
+        )
+        if reason:
+            force_halt_to_leader_review(
+                trek_doc, target_id, halt_reason=reason, now=now)
+            forced.append({"target_id": target_id, "halt_reason": reason})
+    return forced
 
 
 def detect_unresponsive_leader(

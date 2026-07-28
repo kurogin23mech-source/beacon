@@ -147,3 +147,87 @@ def test_halt_is_attribute_not_state():
         now=_dt(h=5))
     assert doc["task_states"]["e-1"]["state"] == "working"
     assert doc["task_states"]["e-1"]["halt_reason"] == "progress-stall"
+
+
+# ---------------------------------------------------------------------------
+# ms-128 e-4309/方針6 — sweep + forced working→leader_review transition.
+# ---------------------------------------------------------------------------
+
+def _working_entry(owner, fp, cc=0, advanced_at=None):
+    return {
+        "state": "working",
+        "owner_session_id": owner,
+        "last_response_fingerprint": fp,
+        "last_commit_count": cc,
+        "progress_last_advanced_at": _iso(advanced_at or _dt()),
+    }
+
+
+def test_force_halt_preserves_reason_and_sets_leader_review():
+    doc = {"task_states": {"ms-1": {"state": "working", "note": "x"}}}
+    trek.force_halt_to_leader_review(doc, "ms-1", halt_reason="progress-stall",
+                                     now=_dt(h=5))
+    e = doc["task_states"]["ms-1"]
+    assert e["state"] == "leader_review"
+    assert e["halt_reason"] == "progress-stall"  # NOT wiped by the transition
+
+
+def test_force_halt_idempotent_on_leader_review():
+    doc = {"task_states": {"ms-1": {"state": "leader_review",
+                                    "halt_reason": "liveness-timeout"}}}
+    trek.force_halt_to_leader_review(doc, "ms-1", halt_reason="progress-stall",
+                                     now=_dt(h=5))
+    # already escalated → keep existing reason, don't re-transition.
+    assert doc["task_states"]["ms-1"]["state"] == "leader_review"
+    assert doc["task_states"]["ms-1"]["halt_reason"] == "liveness-timeout"
+
+
+def test_sweep_forces_stalled_working_target():
+    pulse = {"last_picked_choice": "no-op", "last_state_summary": "idle",
+             "last_pulse_ack_at": _iso(_dt(h=5))}
+    fp = trek.compute_response_fingerprint(pulse)
+    doc = {
+        "task_states": {"ms-1": _working_entry("sv-x", fp, cc=0)},
+        "pulse_acks": {"sv-x": pulse},
+    }
+    forced = trek.sweep_working_target_halts(
+        doc, commit_count_for=lambda t: 0, now=_dt(h=5))
+    assert forced == [{"target_id": "ms-1", "halt_reason": "progress-stall"}]
+    assert doc["task_states"]["ms-1"]["state"] == "leader_review"
+    assert doc["task_states"]["ms-1"]["halt_reason"] == "progress-stall"
+
+
+def test_sweep_no_op_repeat_is_intervened_e4309():
+    # A session that keeps replying no-op = unchanging fingerprint + zero
+    # commit → trips progress-stall exactly like silence (e-4309 contract).
+    pulse = {"last_picked_choice": "no-op", "last_pulse_ack_at": _iso(_dt(h=5))}
+    fp = trek.compute_response_fingerprint(pulse)
+    doc = {"task_states": {"ms-1": _working_entry("sv-x", fp)},
+           "pulse_acks": {"sv-x": pulse}}
+    forced = trek.sweep_working_target_halts(
+        doc, commit_count_for=lambda t: 0, now=_dt(h=5))
+    assert len(forced) == 1
+    assert doc["task_states"]["ms-1"]["state"] == "leader_review"
+
+
+def test_sweep_advancing_target_not_forced():
+    pulse = {"last_picked_choice": "continue", "last_pulse_ack_at": _iso(_dt(h=5))}
+    fp = trek.compute_response_fingerprint(pulse)
+    doc = {"task_states": {"ms-1": _working_entry("sv-x", fp, cc=2)},
+           "pulse_acks": {"sv-x": pulse}}
+    # commit count increased 2 → 5 → advanced, no halt.
+    forced = trek.sweep_working_target_halts(
+        doc, commit_count_for=lambda t: 5, now=_dt(h=5))
+    assert forced == []
+    assert doc["task_states"]["ms-1"]["state"] == "working"
+
+
+def test_sweep_ignores_non_working_targets():
+    doc = {"task_states": {
+        "ms-1": {"state": "leader_review"},
+        "ms-2": {"state": "todo"},
+        "ms-3": {"state": "user_review"},
+    }, "pulse_acks": {}}
+    forced = trek.sweep_working_target_halts(
+        doc, commit_count_for=lambda t: 0, now=_dt(h=5))
+    assert forced == []
