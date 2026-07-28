@@ -483,6 +483,59 @@ def validate_pulse_picked_choice(choice: str) -> str:
     return choice
 
 
+# ms-128 方針1 (e-4372) — typed tick-response protocol.
+#
+# A tick response is an *action that advances the Target*. "Waiting" is not a
+# valid response: a session that responds ``no-op`` / ``""`` (= "I see the
+# tick but I'll sit here") is classified as **no-response** and handed to
+# server intervention (= 方針6 halt 機械検知 / e-4309 forced-action tick),
+# exactly as if no pulse had arrived. This closes the structural hole where
+# an LLM could reply "待ちます" and stall the Trek indefinitely. We classify
+# rather than hard-reject (SPEC 方針1: "「無応答」に分類し、サーバー介入へ
+# 直行させる") so observability stays honest — the attempt is recorded, it
+# just does not count as compliance.
+#
+# The 4 advancing actions are the existing picker tokens minus ``no-op``:
+#   continue    — keep working the claimed Target
+#   terminal    — declare a terminal transition (= terminalize to leader_review)
+#   dm-leader   — escalate a judgment to the leader (上向き相談, e-4281)
+#   dm-peer     — ask a peer executor (横向き相談, ms-88 / e-2140)
+# (Token names stay as-is here; the agent-visible Slot→Target vocabulary
+# pass is 方針3 / e-4363.)
+TICK_RESPONSE_ACTIONS = ("continue", "terminal", "dm-leader", "dm-peer")
+# Tokens that mean "no advancing action taken this tick" → no-response.
+TICK_NO_RESPONSE_TOKENS = ("no-op", "")
+
+# response_class values stamped on each pulse-ack record.
+TICK_RESPONSE_CLASS_ACTION = "action"
+TICK_RESPONSE_CLASS_NO_RESPONSE = "no-response"
+
+
+def classify_tick_response(choice: str) -> str:
+    """Classify a tick-response token as advancing action vs no-response.
+
+    Returns ``TICK_RESPONSE_CLASS_ACTION`` for the 4 advancing actions,
+    ``TICK_RESPONSE_CLASS_NO_RESPONSE`` for ``no-op`` / ``""`` (= waiting /
+    minimum-info). Raises ``ValueError`` for tokens outside the known
+    taxonomy so a typo can't silently be read as compliance.
+
+    This is the read-side truth the server tick (e-4309) consumes to decide
+    whether a session actually advanced the Target this tick.
+    """
+    c = (choice or "").strip()
+    if c in TICK_RESPONSE_ACTIONS:
+        return TICK_RESPONSE_CLASS_ACTION
+    if c in TICK_NO_RESPONSE_TOKENS:
+        return TICK_RESPONSE_CLASS_NO_RESPONSE
+    raise ValueError(
+        f"unknown tick response {choice!r} — expected one of "
+        f"{TICK_RESPONSE_ACTIONS} (advancing action) or "
+        f"{TICK_NO_RESPONSE_TOKENS} (no-response). Waiting is not a valid "
+        "response (ms-128 方針1): if nothing to do, pick up an unclaimed "
+        "Target (continue), DM the leader (dm-leader), or terminalize."
+    )
+
+
 # ms-92 / e-2165 — pulse-ack payload structured fields. The free-form
 # `note` keeps working for backward compatibility, but executors are
 # encouraged to populate the structured fields so the leader-digest
@@ -586,10 +639,16 @@ def record_pulse_ack(trek_doc: dict, *, session_id: str,
         "last_picked_choice": "",
         "history": [],
     }
+    # ms-128 方針1 (e-4372) — classify this response as advancing action vs
+    # no-response (= waiting). Stamped on every record so the server tick can
+    # mechanically tell "advanced the Target" from "sat here", without
+    # re-deriving from the raw token. no-op / "" → no-response → intervention.
+    response_class = classify_tick_response(picked_choice)
     now = utcnow_iso()
     record = {
         "timestamp": now,
         "picked_choice": picked_choice,
+        "response_class": response_class,
         "note": (note or "")[:200],
         # Structured fields (= e-2165). Always present in records so the
         # digest can rely on the keys without per-record existence checks.
@@ -601,6 +660,7 @@ def record_pulse_ack(trek_doc: dict, *, session_id: str,
     entry["total_acks"] = int(entry.get("total_acks") or 0) + 1
     entry["last_pulse_ack_at"] = now
     entry["last_picked_choice"] = picked_choice
+    entry["last_response_class"] = response_class
     # Mirror the structured fields on the session-level summary so a
     # digest can read "latest snapshot per session" without scanning
     # history. Same backward-compat guarantee — pre-e-2165 callers leave
