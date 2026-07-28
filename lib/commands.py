@@ -25152,11 +25152,13 @@ def cmd_account_list():
         links_str = f" / linked: {', '.join(links)}" if links else ""
         # ms-111 e-3621 chunk2b: account/contact の identity を master 経由 resolver で
         # 読む。adapter の出所は _master_adapter() に一本化 (CLI は現状 None → 投影値)。
+        # e-3622: contact は親 Account の所有 org を org 照合基準として渡す (fail-closed)。
         adapter = _master_adapter()
+        acc_org = master_projection.projection_account_org(a)
         acc_name = master_projection.resolve_account_identity(a, adapter)
         print(f"[{a['id']}] {acc_name}{suffix} — {phase_str}contacts: {len(contacts)}{links_str}")
         for c in contacts:
-            ident = master_projection.resolve_contact_identity(c, adapter)
+            ident = master_projection.resolve_contact_identity(c, adapter, expected_org=acc_org)
             role = f" ({ident['role']})" if ident.get("role") else ""
             email = f" <{ident['email']}>" if ident.get("email") else ""
             print(f"    - {ident.get('name') or '?'}{role}{email}")
