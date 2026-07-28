@@ -357,6 +357,73 @@ def test_leader_heartbeat_stale_digest_is_due():
         t, now=_utc(hour=12, minute=0)) is True
 
 
+def test_leader_heartbeat_never_digested_but_recent_not_due():
+    """ms-128 #536 review: never-digested must ALSO require cadence×3 of
+    silence (no interval-zero first pulse). Progress-checked 10 min ago
+    (< 30 min threshold) → not due, so a freshly-started trek doesn't get
+    a false 'stalled' heartbeat."""
+    t = _build_trek(status="active", cadence_minutes=10,
+                    last_at="2026-06-18T11:50:00.000000Z")  # 10 min before 12:00
+    assert scheduler.is_leader_digest_heartbeat_due(
+        t, now=_utc(hour=12, minute=0)) is False
+
+
+# ---------------------------------------------------------------------------
+# ms-128 / e-4284 — is_leader_halted_by_summary + compose_leader_fire_decision
+# ---------------------------------------------------------------------------
+
+def test_is_leader_halted_by_summary_both_stamped():
+    t = _build_trek(status="active")
+    t.setdefault("meta", {})["summary_sent_at"] = "2026-06-18T11:00:00.000000Z"
+    t["meta"]["completion_notified_at"] = "2026-06-18T11:00:00.000000Z"
+    assert scheduler.is_leader_halted_by_summary(t) is True
+
+
+def test_is_leader_halted_by_summary_only_one_stamped():
+    """片方だけ stamped では halt しない (= 従来通り fire し続ける)。"""
+    t = _build_trek(status="active")
+    t.setdefault("meta", {})["summary_sent_at"] = "2026-06-18T11:00:00.000000Z"
+    assert scheduler.is_leader_halted_by_summary(t) is False
+
+
+def test_compose_leader_fire_halted_wins():
+    """halted_by_summary は signal / heartbeat があっても発火を止める。"""
+    fire, reasons = scheduler.compose_leader_fire_decision(
+        signal_fire=True, heartbeat_due=True, halted_by_summary=True)
+    assert fire is False
+    assert reasons == []
+
+
+def test_compose_leader_fire_signal_only():
+    fire, reasons = scheduler.compose_leader_fire_decision(
+        signal_fire=True, heartbeat_due=False, halted_by_summary=False)
+    assert fire is True
+    assert reasons == ["signal"]
+
+
+def test_compose_leader_fire_heartbeat_only():
+    fire, reasons = scheduler.compose_leader_fire_decision(
+        signal_fire=False, heartbeat_due=True, halted_by_summary=False)
+    assert fire is True
+    assert reasons == ["heartbeat"]
+
+
+def test_compose_leader_fire_both_reasons_present():
+    """signal と heartbeat が同時 due の時、理由は両方 list に載る (フラグ欠落で
+    理由を失わない)。"""
+    fire, reasons = scheduler.compose_leader_fire_decision(
+        signal_fire=True, heartbeat_due=True, halted_by_summary=False)
+    assert fire is True
+    assert reasons == ["signal", "heartbeat"]
+
+
+def test_compose_leader_fire_no_reason_no_fire():
+    fire, reasons = scheduler.compose_leader_fire_decision(
+        signal_fire=False, heartbeat_due=False, halted_by_summary=False)
+    assert fire is False
+    assert reasons == []
+
+
 def test_should_fire_idle_escalation_first_time():
     t = _build_trek(status="active", cadence_minutes=10)
     t.setdefault("meta", {})["last_session_response_at"] = (

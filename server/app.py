@@ -9476,11 +9476,11 @@ def trek_scheduler_tick_endpoint(
         # の状態では leader-digest tick を停止する。 「完遂宣言が
         # 終わった trek に digest を打ち続けない」 ための停止条件。
         # 片方だけ stamped の状態では従来通り fire し続ける。
-        leader_meta_snapshot = trek_doc.get("meta") or {}
-        leader_halted_by_summary = bool(
-            leader_meta_snapshot.get("summary_sent_at")
-        ) and bool(
-            leader_meta_snapshot.get("completion_notified_at")
+        # ms-97 / Phase 7-A / AC21 + ms-128 / e-4284 — 完遂済 trek の停止条件。
+        # 判定は trek_scheduler の単一定義に集約 (= signal / heartbeat どちらの
+        # 発火経路にも等しく効かせ、停止条件を 2 ファイルに分散させない)。
+        leader_halted_by_summary = trek_scheduler_mod.is_leader_halted_by_summary(
+            trek_doc
         )
         # ms-97 / Phase 7-A / AC20 — completion_ready シグナル。
         # 全 task_states terminal + Op slot 不在 + 未通知 の時 1 回限り
@@ -9505,9 +9505,14 @@ def trek_scheduler_tick_endpoint(
         leader_heartbeat_due = trek_scheduler_mod.is_leader_digest_heartbeat_due(
             fanout_trek_doc, now=now,
         )
-        leader_should_fire = (
-            (not leader_halted_by_summary)
-            and (leader_signal_fire or leader_heartbeat_due)
+        # ms-128 / e-4284 — OR 合成 + 発火理由の閉じた列挙を純関数で決定
+        # (= endpoint のインライン式でなく unit test 可能な 1 か所に集約)。
+        leader_should_fire, leader_fire_reasons = (
+            trek_scheduler_mod.compose_leader_fire_decision(
+                signal_fire=leader_signal_fire,
+                heartbeat_due=leader_heartbeat_due,
+                halted_by_summary=leader_halted_by_summary,
+            )
         )
         completion_ready_fanned_out = False
         if leader_targets and leader_should_fire:
@@ -9516,11 +9521,11 @@ def trek_scheduler_tick_endpoint(
             )
             if completion_ready_now:
                 base_digest_payload["completion_ready"] = True
-            # ms-128 / e-4284 — signal 無しで heartbeat だけで発火した時は payload に
-            # 明示し、leader 側が「これは stall 検知用の定期 pulse であって新しい
-            # signal ではない」と区別できるようにする。
-            if not leader_signal_fire and leader_heartbeat_due:
-                base_digest_payload["heartbeat"] = True
+            # ms-128 / e-4284 — 発火理由を常在の閉じた列挙 (["signal"] /
+            # ["heartbeat"] / 両方) で payload に載せる。leader 側は "heartbeat"
+            # のみ (= signal 無し) を「新 signal でなく stall 検知の定期 pulse」と
+            # 区別できる。optional bool の有無で理由を運ばない (AX レビュー #536)。
+            base_digest_payload["fire_reason"] = leader_fire_reasons
             for target in leader_targets:
                 lsid = target["session_id"]
                 lpid = target["home_project_id"]
@@ -9594,6 +9599,11 @@ def trek_scheduler_tick_endpoint(
         # ms-92 / e-2164 — record the latest leader-digest fire so the
         # dashboard can show "last leader digest at X". Sits next to
         # last_progress_check_at since they are co-scheduled.
+        # ms-128 / e-4284 — ⚠ この stamp は is_leader_digest_heartbeat_due の
+        # cooldown 時計を兼ねる load-bearing フィールドになった: heartbeat は
+        # ``now - last_leader_digest_at >= cadence × 3`` で次回発火を決める。
+        # dashboard 都合でこの stamp を条件付き化 / 移動 / 削除すると heartbeat の
+        # 抑制が消え、leader digest が毎 tick 発火する firehose になる。
         if leader_digest_event_id:
             meta["last_leader_digest_at"] = now.strftime(
                 "%Y-%m-%dT%H:%M:%S.%fZ"
