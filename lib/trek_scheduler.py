@@ -1220,8 +1220,19 @@ def build_task_state_aggregate(trek_doc: dict) -> dict:
         "user_review": 0,
         "working": 0,
         "todo": 0,
+        # ms-128 方針4 (e-4365) — block を集計に含める。含めないと _task_state_of
+        # が返す "block" が下の `state not in counts` 分岐で todo に潰れ、依存待ちの
+        # target が「未着手」に化けて leader から見えなくなる。
+        "block": 0,
     }
     leader_review_queue: list[dict] = []
+    # ms-128 方針4 (e-4365) — block の target を専用 queue で surface する。
+    # overall_state (compute_ms_slot_state) は block を todo に畳む (= 多数の
+    # 消費者が読む token の意味を変えない) ので、依存待ちの可視化はこの専用
+    # field が担う。各 entry に blocker と「まだ満たされていない blocker」を添えて
+    # leader が「何待ちか」を polling 無しで読めるようにする。
+    blocked_queue: list[dict] = []
+    blockers_ledger = trek_doc.get("target_blockers") or {}
     # Build the children list for compute_ms_slot_state in one pass.
     children: list[dict] = []
     for tid, entry in states.items():
@@ -1240,10 +1251,24 @@ def build_task_state_aggregate(trek_doc: dict) -> dict:
                 "updated_at": entry.get("updated_at") or "",
                 "note": (entry.get("note") or "")[:500],
             })
+        if state == "block":
+            blockers = list(blockers_ledger.get(tid) or [])
+            unsatisfied = [
+                b for b in blockers
+                if _task_state_of(trek_doc, b, states.get(b) or {})
+                not in ("leader_review", "user_review")
+            ]
+            blocked_queue.append({
+                "task_id": tid,
+                "blockers": blockers,
+                "unsatisfied": unsatisfied,
+                "updated_at": entry.get("updated_at") or "",
+            })
     # Stable ordering: oldest leader_review first so the leader's eye lands
     # on the one that has been waiting longest (= same intent as the
     # sessions[] sort by time_on_task desc).
     leader_review_queue.sort(key=lambda r: r.get("updated_at") or "")
+    blocked_queue.sort(key=lambda r: r.get("updated_at") or "")
 
     _trek = _import_trek()
     _compute = getattr(_trek, "compute_ms_slot_state", None) if _trek else None
@@ -1269,6 +1294,7 @@ def build_task_state_aggregate(trek_doc: dict) -> dict:
     return {
         "counts": counts,
         "leader_review_queue": leader_review_queue,
+        "blocked_queue": blocked_queue,
         "overall_state": overall_state,
     }
 
@@ -1452,11 +1478,15 @@ def build_leader_digest_payload(
                 "leader_review_queue_count": len(
                     task_state_aggregate["leader_review_queue"]
                 ),
+                # ms-128 方針4 (e-4365) — degenerate path でも shape 一貫のため出す。
+                "blocked_queue_count": len(task_state_aggregate["blocked_queue"]),
+                "blocker_cycle_count": 0,
                 "total_acks_across_sessions": 0,
             },
             "sessions": [],
             "task_state_aggregate": task_state_aggregate,
             "working_targets_recency": [],
+            "blocker_cycles": [],
             "body": (
                 f"[{_LEADER_DIGEST_HEADER}] trek_id={trek_doc.get('trek_id', '')}\n"
                 "  (trek module unavailable — digest skipped this tick)"
@@ -1508,6 +1538,13 @@ def build_leader_digest_payload(
     working_targets_recency = build_working_targets_recency(
         trek_doc, now=now, migrate_state=trek_mod.migrate_legacy_task_state,
     )
+    # ms-128 方針4 (e-4365) — 依存グラフの循環を毎 digest で再検査する
+    # (二段循環検知 第 (ii) 段の観測面)。add_blocker が書き込み時に弾くので健全
+    # なら []。detect_blocker_cycles を持たない旧 trek module でも落ちないよう
+    # getattr で guard する。
+    _detect_cycles = getattr(trek_mod, "detect_blocker_cycles", None)
+    blocker_cycles = _detect_cycles(trek_doc) if _detect_cycles else []
+
     waiting_on_leader_count = sum(
         1 for s in sessions_list if s.get("waiting_on_leader")
     )
@@ -1544,6 +1581,11 @@ def build_leader_digest_payload(
         "leader_review_queue_count": len(
             task_state_aggregate["leader_review_queue"]
         ),
+        # ms-128 方針4 (e-4365) — 依存待ち (block) の target 数と、依存グラフに
+        # 循環がある数。循環は「まずリーダーが自律解消を試みる」対象なので
+        # (方針4)、digest に載せることがリーダーへの一次 escalation surface。
+        "blocked_queue_count": len(task_state_aggregate["blocked_queue"]),
+        "blocker_cycle_count": len(blocker_cycles),
         "total_acks_across_sessions": int(
             summary.get("total_acks_across_sessions") or 0
         ),
@@ -1611,6 +1653,25 @@ def build_leader_digest_payload(
             f"— PR / leader_review に現れない待ちを確認してください"
         )
 
+    # ms-128 方針4 (e-4365) — 依存待ち (block) と循環を非ゼロ時のみ 1 行で。循環は
+    # 「まずリーダーが自律解消 (= 循環を構成する target の分割 / 順序強制 / blocker
+    # 一本外し) を試みる」対象なので、明示的に行動を促す文面にする。
+    block_line = ""
+    blocked_q = task_state_aggregate["blocked_queue"]
+    if blocked_q:
+        b_ids = ", ".join(r["task_id"] for r in blocked_q[:3])
+        b_more = f" (+{len(blocked_q) - 3} more)" if len(blocked_q) > 3 else ""
+        block_line = (
+            f"\nblocked (依存待ち): {len(blocked_q)} 件 [{b_ids}{b_more}]"
+        )
+    if blocker_cycles:
+        cyc_str = "; ".join(" → ".join(c) for c in blocker_cycles[:2])
+        block_line += (
+            f"\n⚠ 依存の循環 {len(blocker_cycles)} 件 [{cyc_str}] "
+            f"— まずリーダーが自律解消 (target 分割 / 順序強制 / blocker 一本外し) "
+            f"を試み、解けない時のみユーザーへ escalate してください"
+        )
+
     body = (
         f"[{_LEADER_DIGEST_HEADER}] trek_id={trek_id}\n"
         f"active={summary_block['active']} "
@@ -1618,7 +1679,7 @@ def build_leader_digest_payload(
         f"idle={summary_block['idle']} "
         f"needs_leader_judgment={summary_block['needs_leader_judgment']} "
         f"leader_review_queue={summary_block['leader_review_queue_count']}"
-        f"{lr_line}{wait_line}\n"
+        f"{lr_line}{wait_line}{block_line}\n"
         f"{sessions_block_str}"
     )
 
@@ -1632,6 +1693,9 @@ def build_leader_digest_payload(
         # ms-128 / e-4307 — commit recency 面 (working だが N 分 commit 無しの
         # silent stall を leader survey に載せる)。
         "working_targets_recency": working_targets_recency,
+        # ms-128 方針4 (e-4365) — 依存グラフの循環 (= [[target_id, ...], ...])。
+        # 健全なら空。リーダーの自律解消 → 人間 escalate の入力。
+        "blocker_cycles": blocker_cycles,
         "body": body,
     }
 

@@ -9785,6 +9785,20 @@ def trek_scheduler_tick_endpoint(
                 db.save_trek(trek_id, trek_doc)
             except Exception:
                 pass
+        # ms-128 方針4/e-4365 — block reconcile. AND auto-unblock (全 blocker が
+        # leader_review 到達で block→todo) と rollback (blocker 差し戻しで未着手の
+        # 依存元を再 block、作業中は warning) を毎 tick 回す。edge は台帳に永続する
+        # ので、これが block 状態を依存グラフに突き合わせる唯一の choke-point。
+        try:
+            block_result = trek_mod.reconcile_blocks(trek_doc, now=now)
+        except Exception:
+            block_result = None
+        if block_result and (block_result.get("unblocked")
+                             or block_result.get("reblocked")):
+            try:
+                db.save_trek(trek_id, trek_doc)
+            except Exception:
+                pass
         stalled = trek_scheduler_mod.detect_auto_stalled_tasks(
             trek_doc, now=now,
         )
