@@ -153,15 +153,18 @@ def test_transcript_source_drive_folder_requires_folder_id():
 
 
 def test_transcript_source_type_list_matches_skill_doc_no_drift():
-    # #498 review (保守性): type 集合の drift を **双方向** で固定する。skill md 分岐表の
-    # 行頭 `| \`<type>\` |` から type を抽出し、VALID_TRANSCRIPT_SOURCE_TYPES と集合==で一致。
-    # 片方に足すともう片方が落ちて test が割れる (tuple が唯一の真値源)。
+    # #498 review (保守性): type 集合の drift を **双方向** で固定する。ms-107 で分岐表を
+    # 営業パーソン向けの散文に作り替えたため、skill md の `type` (`a` / `b` / ...) 列挙
+    # (括弧内の backtick 語) から type を抽出し、VALID_TRANSCRIPT_SOURCE_TYPES と集合==で
+    # 一致させる。片方に足すともう片方が落ちて test が割れる (tuple が唯一の真値源)。
     import re
     from pathlib import Path
     md = (Path(__file__).parent.parent / "skills"
           / "beacon-sales-meeting-wrap.md").read_text(encoding="utf-8")
-    md_types = set(re.findall(r"^\|\s*`(\w+)`\s*\|", md, re.MULTILINE))
-    md_types.discard("type")  # 表ヘッダ `| \`type\` | 取得のしかた |` の列名は値でない
+    # `type` (`meet_calendar` / `drive_folder` / `external` / `manual`) の括弧内を拾う
+    m = re.search(r"`type`\s*\(([^)]*)\)", md)
+    assert m is not None, "skill md に `type` (...) の type 列挙が見つからない (doc drift)"
+    md_types = set(re.findall(r"`(\w+)`", m.group(1)))
     assert md_types == set(se.VALID_TRANSCRIPT_SOURCE_TYPES)
 
 
