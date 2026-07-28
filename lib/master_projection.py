@@ -36,6 +36,18 @@ _CONTACT_ID_KEY = "master_contact_id"
 
 BEACON_DEFAULT_SYSTEM = mi.BEACON_DEFAULT_SYSTEM
 
+# 投影 Account 上に置く「未同期 (unsynced) local edit の pending マーカー」フィールド名
+# (ms-111 e-4355)。CLI rename が投影を先に更新した後、その rename を master へ透過する
+# master-sync event の発行に **失敗** した (bus 不通 / 未 login / 認証エラー) とき、
+# 「この投影の name はまだ master に届いていない local-only の編集だ」と印を残す。
+# この印は 2 つの役割を持つ:
+#   (1) fan-out revert 防御: master が別経由で変わり inbound fan-out が走っても、pending
+#       中の投影を master の (この edit を含まない) stale name で上書きさせない
+#       (= lost edit を構造で塞ぐ)。
+#   (2) outbox retry の源: 次の CLI 操作でこの印を持つ account を拾い、master-sync event
+#       を再発行する (at-least-once delivery)。発行成功で印を消す。
+PENDING_SYNC_FIELD = "master_sync_pending"
+
 
 # ---------------------------------------------------------------------------
 # link / read: 投影 → マスターの参照鍵
@@ -366,6 +378,54 @@ def master_sync_payload(account: dict, new_name: str) -> Optional[dict]:
 
 
 # ---------------------------------------------------------------------------
+# outbox + revert 防御: 未同期 (unsynced) local edit の pending マーカー (e-4355)
+#   linking を live にすると「emit 失敗 → master 反映漏れ → 後続 fan-out で revert
+#   (lost edit)」が data-loss vector になる。この段は 2 本の防御を pure-lib に足す:
+#     (b) outbox: emit 失敗時に pending マーカーを投影 account に残し、次操作で再発行
+#         (at-least-once delivery)。発行成功でマーカーを消す。
+#     (c) revert 防御: inbound fan-out (sync_master_name_into_projection) が pending 中の
+#         投影を、その edit を含まない master の stale name で上書きするのを拒否する。
+#   両者は同じマーカーを源にする (1 concept 1 field)。
+# ---------------------------------------------------------------------------
+def mark_sync_pending(account: dict, new_name: str) -> None:
+    """投影 Account に「この local rename はまだ master へ届いていない」印を立てる (e-4355).
+
+    link 済 account のみ対象 (未 link は master 実体が無く同期の概念が無い → no-op)。
+    ``new_name`` は透過したい canonical name。同 name で再 mark は上書き (最新の意図を保持)。
+    """
+    name = str(new_name or "").strip()
+    if not name or not is_account_linked(account):
+        return
+    account[PENDING_SYNC_FIELD] = {
+        "new_name": name,
+        "master_account_id": linked_master_account_id(account),
+    }
+
+
+def clear_sync_pending(account: dict) -> None:
+    """投影 Account の未同期マーカーを消す (emit 成功時、e-4355)。"""
+    if isinstance(account, dict):
+        account.pop(PENDING_SYNC_FIELD, None)
+
+
+def sync_pending_name(account: dict) -> str:
+    """投影 Account に立っている未同期 local edit の name を返す (無ければ "")。"""
+    p = (account or {}).get(PENDING_SYNC_FIELD)
+    return str(p.get("new_name") or "").strip() if isinstance(p, dict) else ""
+
+
+def is_sync_pending(account: dict) -> bool:
+    """投影 Account が未同期 local edit を抱えているか (e-4355)。"""
+    return bool(sync_pending_name(account))
+
+
+def pending_sync_accounts(project_data) -> list:
+    """project doc の中で未同期マーカーを持つ投影 account を列挙する (outbox drain 用)。"""
+    return [acc for acc in ((project_data or {}).get("accounts") or [])
+            if is_sync_pending(acc)]
+
+
+# ---------------------------------------------------------------------------
 # inbound sync: master の name 変更を投影 doc の cache に反映する (e-3622 chunk2b)
 #   master が真値 (chunk2a の consumer で更新済)。同 org の各投影は master を写す cache な
 #   ので、master-changed を受けて投影 account の cached name を更新する。server read は
@@ -386,6 +446,19 @@ def sync_master_name_into_projection(project_data, master_account_id: str,
         return False
     for acc in (project_data or {}).get("accounts", []) or []:
         if linked_master_account_id(acc) == master_account_id:
+            # e-4355 revert 防御: この投影が未同期 (unsynced) local edit を抱えている
+            # なら、その edit を master へ届ける前の inbound fan-out が来ても上書きしない。
+            # master の name がこの pending edit と一致する = 自分の edit がついに master に
+            # 反映されて戻ってきた場合だけ、pending を解消して受け入れる。それ以外
+            # (= master がこの edit を含まない stale name) は、上書きすると user の rename が
+            # revert = lost edit になるので拒否する (no-op)。
+            pending = sync_pending_name(acc)
+            if pending and pending != name:
+                return False   # 未同期 edit を stale master name で revert させない
+            if pending and pending == name:
+                clear_sync_pending(acc)   # 自分の edit が master に反映済 → 印を回収
+                if work_model.target_label(acc) == name:
+                    return True   # cache は既に pending 値と同じだが印は消えた → 変化あり
             if work_model.target_label(acc) == name:
                 return False   # 既に同値 → no-op
             work_model.set_target_label(acc, name, dual_write=True)
