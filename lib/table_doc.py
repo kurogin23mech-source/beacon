@@ -130,11 +130,20 @@ def normalize_columns(columns) -> list:
             raise TableDocError(f"列 key が重複しています: {key!r}")
         seen.add(key)
         ctype = str(col.get("type", "text")).strip() or "text"
-        normalized.append({
+        out = {
             "key": key,
             "label": str(col.get("label", "") or key),
             "type": ctype,
-        })
+        }
+        # Preserve any extra column config beyond the core triple so typed
+        # columns can carry their own settings — e.g. ``values`` (the allowed
+        # set for an enum) or ``ref`` (the referenced entity kind). The core
+        # model stores them opaquely; the type-checking layer (ms-131 e-4495)
+        # interprets them. Forward-compatible: unknown keys round-trip untouched.
+        for k, v in col.items():
+            if k not in out:
+                out[k] = v
+        normalized.append(out)
     return normalized
 
 
