@@ -2065,12 +2065,12 @@ cmd_phase_add() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --index|--at) index="${2:-}"; shift 2 ;;
-            -?*) _guard_positional "$1" "Usage: beacon phase add <account|opportunity> <name> [--index N]" ;;
+            -?*) _guard_positional "$1" "Usage: beacon phase add <account|opportunity|prospect> <name> [--index N]" ;;
             *)   if [ -z "$funnel" ]; then funnel="$1"; else name="$1"; fi; shift ;;
         esac
     done
     if [ -z "$funnel" ] || [ -z "$name" ]; then
-        echo "Usage: beacon phase add <account|opportunity> <name> [--index N]"
+        echo "Usage: beacon phase add <account|opportunity|prospect> <name> [--index N]"
         exit 1
     fi
     BEACON_FUNNEL_KIND="$funnel" BEACON_PHASE_NAME="$name" BEACON_PHASE_INDEX="$index" \
@@ -2082,13 +2082,13 @@ cmd_phase_rename() {
     local funnel="" old="" new=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -?*) _guard_positional "$1" "Usage: beacon phase rename <account|opportunity> <old> <new>" ;;
+            -?*) _guard_positional "$1" "Usage: beacon phase rename <account|opportunity|prospect> <old> <new>" ;;
             *)   if [ -z "$funnel" ]; then funnel="$1";
                  elif [ -z "$old" ]; then old="$1"; else new="$1"; fi; shift ;;
         esac
     done
     if [ -z "$funnel" ] || [ -z "$old" ] || [ -z "$new" ]; then
-        echo "Usage: beacon phase rename <account|opportunity> <old> <new>"
+        echo "Usage: beacon phase rename <account|opportunity|prospect> <old> <new>"
         exit 1
     fi
     BEACON_FUNNEL_KIND="$funnel" BEACON_PHASE_OLD="$old" BEACON_PHASE_NEW="$new" \
@@ -2100,13 +2100,13 @@ cmd_phase_move() {
     local funnel="" name="" index=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -?*) _guard_positional "$1" "Usage: beacon phase move <account|opportunity> <name> <index>" ;;
+            -?*) _guard_positional "$1" "Usage: beacon phase move <account|opportunity|prospect> <name> <index>" ;;
             *)   if [ -z "$funnel" ]; then funnel="$1";
                  elif [ -z "$name" ]; then name="$1"; else index="$1"; fi; shift ;;
         esac
     done
     if [ -z "$funnel" ] || [ -z "$name" ] || [ -z "$index" ]; then
-        echo "Usage: beacon phase move <account|opportunity> <name> <index>"
+        echo "Usage: beacon phase move <account|opportunity|prospect> <name> <index>"
         exit 1
     fi
     BEACON_FUNNEL_KIND="$funnel" BEACON_PHASE_NAME="$name" BEACON_PHASE_INDEX="$index" \
@@ -2118,12 +2118,12 @@ cmd_phase_remove() {
     local funnel="" name=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -?*) _guard_positional "$1" "Usage: beacon phase remove <account|opportunity> <name>" ;;
+            -?*) _guard_positional "$1" "Usage: beacon phase remove <account|opportunity|prospect> <name>" ;;
             *)   if [ -z "$funnel" ]; then funnel="$1"; else name="$1"; fi; shift ;;
         esac
     done
     if [ -z "$funnel" ] || [ -z "$name" ]; then
-        echo "Usage: beacon phase remove <account|opportunity> <name>"
+        echo "Usage: beacon phase remove <account|opportunity|prospect> <name>"
         exit 1
     fi
     BEACON_FUNNEL_KIND="$funnel" BEACON_PHASE_NAME="$name" \

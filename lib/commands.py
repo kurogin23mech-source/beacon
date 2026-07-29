@@ -20862,11 +20862,11 @@ def _help_registry():
         {"command": "beacon meeting cancel <mtg-id>", "flags": [], "description": "Cancel a scheduled meeting"},
         {"command": "beacon meeting list [<opp-id>]", "flags": ["--json"], "description": "List meetings; <opp-id> optional — omit to list across all opportunities (e-3909)"},
         {"command": "beacon meeting list-ended", "flags": ["--now <datetime>", "--json"], "description": "List meetings whose scheduled end has passed but are still scheduled (終了検知 Operation C の候補; e-3909 canonical read verb, alias: meeting ended)"},
-        {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity vocabulary)"},
-        {"command": "beacon phase add <account|opportunity> <name>", "flags": ["--index <n>"], "description": "Add or insert a funnel stage"},
-        {"command": "beacon phase rename <account|opportunity> <old> <new>", "flags": [], "description": "Rename a funnel stage (references follow)"},
-        {"command": "beacon phase move <account|opportunity> <name> <index>", "flags": [], "description": "Reorder a funnel stage"},
-        {"command": "beacon phase remove <account|opportunity> <name>", "flags": [], "description": "Delete a funnel stage (blocked if non-empty)"},
+        {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity / prospect vocabulary)"},
+        {"command": "beacon phase add <account|opportunity|prospect> <name>", "flags": ["--index <n>"], "description": "Add or insert a funnel stage"},
+        {"command": "beacon phase rename <account|opportunity|prospect> <old> <new>", "flags": [], "description": "Rename a funnel stage (references follow)"},
+        {"command": "beacon phase move <account|opportunity|prospect> <name> <index>", "flags": [], "description": "Reorder a funnel stage"},
+        {"command": "beacon phase remove <account|opportunity|prospect> <name>", "flags": [], "description": "Delete a funnel stage (blocked if non-empty)"},
         {"command": "beacon save <desc>", "flags": ["-m <ms-id>", "--hash <hash>", "--source manual", "--json"], "description": "Save a freeform entry to a milestone"},
         {"command": "beacon sync", "flags": [], "description": "Auto-sync recent git commits to active milestone"},
         {"command": "beacon summary <text>", "flags": [], "description": "Update project summary"},
@@ -26303,9 +26303,17 @@ def cmd_acquisition_attach_list():
     # Validate the施策 exists up-front so the error names the acquisition (the
     # delegated create path re-checks, but this keeps the message on the acq-).
     _validate_sales_target_exists(acq_id)
-    phases = [p.strip() for p in phases_raw.split(",") if p.strip()] or None
+    # Phase funnel resolution (ms-132 e-4502): an explicit --phases override wins;
+    # otherwise bake the project's *configured* prospect funnel so a company that
+    # edited `beacon phase prospect ...` gets its own vocabulary; falling back to
+    # the shipped default when unset.
+    phases = [p.strip() for p in phases_raw.split(",") if p.strip()]
+    if not phases:
+        import sales_entities
+        configured = sales_entities.prospect_phases(load_project())
+        phases = [p.get("name") for p in configured if p.get("name")]
     try:
-        columns = attack_list.attack_list_columns(phases)
+        columns = attack_list.attack_list_columns(phases or None)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -27185,14 +27193,16 @@ def cmd_phase_list():
     data = load_project()
     acc_phases = sales_entities.account_phases(data)
     opp_phases = sales_entities.opportunity_phases(data)
+    prospect_phases = sales_entities.prospect_phases(data)  # ms-132 e-4502
     frame = sales_entities.opportunity_phase_frame(data)  # e-3582: 前進の macro-frame
     if json_mode:
         print(json.dumps({"account_phases": acc_phases,
                           "opportunity_phases": opp_phases,
+                          "prospect_phases": prospect_phases,
                           "opportunity_phase_frame": frame},
                          ensure_ascii=False, indent=2))
         return
-    if not acc_phases and not opp_phases:
+    if not acc_phases and not opp_phases and not prospect_phases:
         print("No phase funnel configured (not a sales project, or no phases set).")
         return
     # e-3582: フェーズを読む前に「フェーズ = 次へ抜けさせるもの」の枠組みを刷り込む。
@@ -27227,6 +27237,11 @@ def cmd_phase_list():
         # 紐づけた work-item の完了が促す (フェーズ固定の分岐ではない)。
         if m["default_lead"] is not None:
             print(f"      遷移日リード: {m['default_lead']}日")
+    # ms-132 e-4502: 打診フェーズ funnel — attack-list の相手ごとの状態語彙。
+    if prospect_phases:
+        print("打診 (attack-list prospect) phases:")
+        for p in prospect_phases:
+            print(f"  - {p.get('name')}")
 
 
 # --- phase funnel editing (ms-116) -----------------------------------------
@@ -27241,26 +27256,37 @@ _FUNNEL_KIND_ALIASES = {
     "account": "account", "accounts": "account", "顧客": "account",
     "opportunity": "opportunity", "opportunities": "opportunity",
     "opp": "opportunity", "商談": "opportunity",
+    # ms-132 e-4502: 打診フェーズ funnel (attack-list の相手ごとの状態)。
+    "prospect": "prospect", "prospects": "prospect", "打診": "prospect",
+}
+
+# The target-class whose ownership gates editing each funnel. account / opportunity
+# are themselves target-classes; the prospect funnel governs attack-lists that hang
+# off Acquisitions, so it is gated by acquisition ownership (ms-132 e-4502).
+_FUNNEL_OWNING_CLASS = {
+    "account": "account", "opportunity": "opportunity", "prospect": "acquisition",
 }
 
 
 def _resolve_funnel_kind(raw: str) -> str:
     kind = _FUNNEL_KIND_ALIASES.get((raw or "").strip().lower(), "")
     if not kind:
-        print(f"Error: unknown funnel '{raw}' (expected: account | opportunity)",
-              file=sys.stderr)
+        print(f"Error: unknown funnel '{raw}' "
+              f"(expected: account | opportunity | prospect)", file=sys.stderr)
         sys.exit(1)
     return kind
 
 
 def _guard_funnel_owned(data: dict, kind: str) -> None:
     """Refuse to edit a funnel the project's profession does not own, reusing
-    the ms-115 containment gate. account / opportunity are sales-owned, so a
+    the ms-115 containment gate. account / opportunity / prospect are all
+    sales-owned (prospect maps to the acquisition target-class it governs), so a
     dev project is blocked with the same guidance-rich message target creation
     uses (ms-116 e-3822 — enforce 職種 > 対象 for funnel edits too)."""
     import occupation
+    owning_class = _FUNNEL_OWNING_CLASS.get(kind, kind)
     try:
-        occupation.assert_target_class_owned(data, kind)
+        occupation.assert_target_class_owned(data, owning_class)
     except occupation.TargetClassProfessionError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

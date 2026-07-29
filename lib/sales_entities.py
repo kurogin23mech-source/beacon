@@ -41,6 +41,7 @@ import work_model  # ms-109 e-3559: 職種非依存の Target/WorkItem 正準ア
 import disclosure  # ms-113 e-3734: project 参加ベースの開示プリミティブ
 import org  # ms-113 e-3734: personal/team org id 導出
 import master_projection  # ms-111 e-3621: Account/Contact 生成時の master link seam
+import attack_list  # ms-132 e-4501/e-4502: 打診フェーズ funnel の既定語彙 source of truth
 
 # 取消 (cancelled) 状態は基底 work_base の語彙に揃える (ms-109 e-3558)。営業の
 # activity / communication の「誤起票の訂正」(e-3537) と Meeting の cancelled が
@@ -107,6 +108,15 @@ DEFAULT_OPPORTUNITY_PHASES = [
     {"name": "不成立",     "probability": 0,    "terminal": True,  "outcome": "abandoned"},
 ]
 
+# 打診フェーズ funnel (ms-132 e-4502): インサイドセールスの attack-list (= 一括打診
+# リスト) の各行が辿る状態 (未接触 → 連絡済 → 返信あり → アポ)。account / opportunity
+# funnel と同じく per-company config として project.json (``prospect_phases``) に保存され
+# ``beacon phase prospect ...`` で編集できる。語彙の source of truth は
+# ``attack_list.DEFAULT_PROSPECT_PHASES`` (依存の無い pure leaf module) に一本化し、ここは
+# それを funnel-def 形式 ({"name": ...}) に包んで seed するだけ (一つの既定語彙を二重定義
+# しない)。attack-list の行 phase は table-doc の enum 列がこの語彙で検査する。
+DEFAULT_PROSPECT_PHASES = [{"name": n} for n in attack_list.DEFAULT_PROSPECT_PHASES]
+
 # who_has_the_ball (SPEC §4): whose court the deal is in. Data only in ms-106.
 BALL_SELF = "self"
 BALL_COUNTERPART = "counterpart"
@@ -149,6 +159,13 @@ def account_phases(data: dict) -> list:
 
 def opportunity_phases(data: dict) -> list:
     return data.get("opportunity_phases", [])
+
+
+def prospect_phases(data: dict) -> list:
+    """The打診フェーズ funnel (ms-132 e-4502): the per-company vocabulary an
+    attack-list's row phase advances through. Read from saved config, like the
+    account / opportunity funnels."""
+    return data.get("prospect_phases", [])
 
 
 # Macro-frame (前進の枠組み) — e-3582, SPEC 方針5(A) / AC6. A funnel-level
@@ -202,6 +219,14 @@ def default_opportunity_phase(data: dict) -> str:
     if ps:
         return ps[0]["name"]
     return DEFAULT_OPPORTUNITY_PHASES[0]["name"]
+
+
+def default_prospect_phase(data: dict) -> str:
+    """First stage of the prospect funnel (= 生リストの未接触 entry). Falls back to
+    the shipped seed's first name when a project has no saved prospect funnel
+    (ms-132 e-4502)."""
+    ps = prospect_phases(data)
+    return ps[0]["name"] if ps else attack_list.INITIAL_PROSPECT_PHASE
 
 
 def _opportunity_status_for_phase(data: dict, phase: str) -> str:
@@ -1010,7 +1035,8 @@ def set_phase_probability(data: dict, phase_name: str, probability) -> dict:
 # Deletion is blocked while a stage still holds live targets (SPEC 方針4 / AC3):
 # data must never go missing behind a vanished stage.
 
-_FUNNEL_KEYS = {"account": "account_phases", "opportunity": "opportunity_phases"}
+_FUNNEL_KEYS = {"account": "account_phases", "opportunity": "opportunity_phases",
+                "prospect": "prospect_phases"}
 
 
 def _funnel_key(kind: str) -> str:
@@ -1018,13 +1044,26 @@ def _funnel_key(kind: str) -> str:
         return _FUNNEL_KEYS[kind]
     except KeyError:
         raise ValueError(
-            f"unknown funnel kind: {kind!r} (expected 'account' or 'opportunity')")
+            f"unknown funnel kind: {kind!r} "
+            f"(expected 'account', 'opportunity' or 'prospect')")
 
 
 def _funnel_targets(data: dict, kind: str) -> list:
-    """The target rows whose ``phase`` field points into this funnel."""
-    return data.get("accounts", []) if kind == "account" \
-        else data.get("opportunities", [])
+    """The target rows whose ``phase`` field points into this funnel.
+
+    account / opportunity phases are live fields on project.json entities, so
+    their occupants come from those collections. The *prospect* funnel is
+    different (ms-132 e-4502): it is the default vocabulary a new attack-list is
+    seeded from, and an attack-list is a self-describing ms-131 table-doc (it
+    bakes its own enum column) rather than a project.json entity. So no
+    project.json row's live phase reads against the prospect funnel — editing or
+    deleting a prospect stage never orphans an existing list (each keeps its own
+    columns). Hence an empty occupant set here."""
+    if kind == "account":
+        return data.get("accounts", [])
+    if kind == "opportunity":
+        return data.get("opportunities", [])
+    return []  # prospect (and any future config-only funnel)
 
 
 def phase_occupants(data: dict, kind: str, name: str) -> list:
@@ -3314,6 +3353,8 @@ def build_sales_project(name: str, objective: str, *, retro_day: str = "monday",
         "acquisitions": [],
         "account_phases": [dict(p) for p in DEFAULT_ACCOUNT_PHASES],
         "opportunity_phases": [dict(p) for p in DEFAULT_OPPORTUNITY_PHASES],
+        # ms-132 e-4502: attack-list の打診フェーズ funnel (未接触→連絡済→返信あり→アポ)。
+        "prospect_phases": [dict(p) for p in DEFAULT_PROSPECT_PHASES],
         # e-3582: 前進の macro-frame を config に seed する (企業ごと編集可)。AI が
         # フェーズを読むとき「フェーズ = 次へ抜けさせるもの」と理解する枠組み。
         "opportunity_phase_frame": OPPORTUNITY_PHASE_MACRO_FRAME,
