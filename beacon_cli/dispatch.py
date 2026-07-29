@@ -859,6 +859,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc_update.add_argument("--ms", dest="doc_ms", default="")
     p_doc_update.add_argument("--op", dest="doc_op", default="")
     p_doc_update.add_argument("--trek", dest="doc_trek", default="")
+    # ms-131 e-4497 — canonical --target linkage (previously bash-only). default
+    # None distinguishes "absent" from "--target '' " (detach).
+    p_doc_update.add_argument("--target", dest="doc_target", default=None)
     p_doc_update.add_argument("--json", action="store_true")
     p_doc_update.add_argument("--stdin", action="store_true")
     # ms-54 / e-1293: persistence poisoning defense.
@@ -2923,6 +2926,7 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
                 "ms-54 / e-1293)"
             )
             return 1
+        _doc_target = getattr(args, "doc_target", None)
         env = {
             "BEACON_DOC_ID": args.doc_id,
             "BEACON_TITLE": args.title or "",
@@ -2931,6 +2935,10 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
             "BEACON_MS": args.doc_ms or "",
             "BEACON_OP": args.doc_op or "",
             "BEACON_TREK_ID": getattr(args, "doc_trek", "") or "",
+            # ms-131 e-4497 — forward --target + the absent-vs-empty marker so
+            # Windows users can relink and detach like the bash path.
+            "BEACON_TARGET": _doc_target or "",
+            "BEACON_TARGET_SET": "1" if _doc_target is not None else "",
             "BEACON_JSON": "1" if args.json else "",
             "BEACON_BUS_ORIGIN": "1" if getattr(args, "bus_origin", False) else "",
         }

@@ -2773,6 +2773,9 @@ cmd_doc() {
             # if empty (= clear the field)".
             local doc_ms_set=""
             local doc_op_set=""
+            # ms-131 e-4497: same absent-vs-empty marker for --target so
+            # `--target ""` detaches (clears the linkage).
+            local doc_target_set=""
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
@@ -2784,7 +2787,7 @@ cmd_doc() {
                     --trek)       doc_trek="${2:-}"; shift 2 ;;
                     --account|--acc)      doc_account="${2:-}"; shift 2 ;;
                     --opportunity|--opp)  doc_opportunity="${2:-}"; shift 2 ;;
-                    --target)     doc_target="${2:-}"; shift 2 ;;
+                    --target)     doc_target="${2:-}"; doc_target_set="1"; shift 2 ;;
                     --json)       json_flag="1"; shift ;;
                     --bus-origin) doc_bus_origin="1"; shift ;;
                     --stdin)      shift ;;
@@ -2802,6 +2805,7 @@ cmd_doc() {
                 BEACON_CONTENT="$doc_content" BEACON_SCOPE="$doc_scope" \
                 BEACON_MS="$doc_ms" BEACON_OP="$doc_op" \
                 BEACON_MS_SET="$doc_ms_set" BEACON_OP_SET="$doc_op_set" \
+                BEACON_TARGET_SET="$doc_target_set" \
                 BEACON_TREK_ID="$doc_trek" \
                 BEACON_ACCOUNT="$doc_account" BEACON_OPPORTUNITY="$doc_opportunity" \
                 BEACON_TARGET="$doc_target" \

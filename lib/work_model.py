@@ -152,6 +152,7 @@ _TARGET_PREFIX_KIND = {
     "op": "operation",
     "opp": "opportunity",
     "acc": "account",
+    "acq": "acquisition",
     "tk": "trek",
 }
 

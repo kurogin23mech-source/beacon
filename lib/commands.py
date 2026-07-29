@@ -14059,7 +14059,7 @@ def _parse_frontmatter(text):
 
 def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
                      drop_milestone=False, drop_operation=False, target="",
-                     doc_format=""):
+                     doc_format="", drop_target=False):
     """Prepend frontmatter to content, or update existing scope/milestone/operation/trek_id.
 
     List values are written as inline YAML arrays (``key: ["a", "b"]``) so
@@ -14102,7 +14102,14 @@ def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
         meta["operation"] = operation
     if trek_id:
         meta["trek_id"] = trek_id
-    if target:
+    if drop_target:
+        # ms-131 e-4497: detach — remove the canonical target and any legacy
+        # mirror so ``doc update <id> --target ""`` fully unlinks the doc.
+        prior = meta.pop("target", "")
+        prior_legacy = work_model.legacy_link_key_for(prior)
+        if prior_legacy:
+            meta.pop(prior_legacy, None)
+    elif target:
         # ms-109 e-3754: canonical linkage + back-compat dual-write of the
         # legacy key (milestone / operation / trek_id) when the Target is one
         # of the classes that had one, so legacy readers/filters keep resolving.
@@ -14255,6 +14262,47 @@ def cmd_doc_show():
         print(doc.get("content", ""))
 
 
+# ---------------------------------------------------------------------------
+# Sales-Target doc linkage helpers (ms-109 e-3754, generalized for ms-131 e-4497).
+#
+# Account / opportunity / acquisition are the non-dev Target classes a doc can
+# link to via the canonical ``target`` key. They differ from milestone/operation
+# in two ways the doc write paths must honor: (1) they are hard-validated to
+# exist before linking, and (2) they carry no dev-era milestone/operation entry
+# log, so doc create/update must NOT try to record a save_entry against them.
+# Centralized here so cmd_doc_add / cmd_doc_update / cmd_doc_table_create stay in
+# step (ms-131 added ``acquisition`` — the acq- Target that table-doc links to).
+# ---------------------------------------------------------------------------
+
+_SALES_TARGET_COLLECTION = {
+    "account": "accounts",
+    "opportunity": "opportunities",
+    "acquisition": "acquisitions",
+}
+
+
+def _is_sales_target(target: str) -> bool:
+    """True when ``target`` is a non-dev sales Target (account/opportunity/
+    acquisition) — the classes with no milestone/operation entry log."""
+    import work_model
+    return work_model.target_kind(target or "") in _SALES_TARGET_COLLECTION
+
+
+def _validate_sales_target_exists(target: str) -> None:
+    """Hard-validate that a sales Target id refers to an existing entity; exit
+    with a clear error if not. No-op for dev Targets / unknown prefixes (they
+    keep the pre-existing lenient round-trip behavior)."""
+    import work_model
+    kind = work_model.target_kind(target or "")
+    coll = _SALES_TARGET_COLLECTION.get(kind)
+    if not coll:
+        return
+    data = load_project()
+    if target not in {x.get("id") for x in data.get(coll, [])}:
+        print(f"Error: {kind} not found: {target}", file=sys.stderr)
+        sys.exit(1)
+
+
 def cmd_doc_add():
     title = os.environ.get("BEACON_TITLE", "")
     content = os.environ.get("BEACON_CONTENT", "")
@@ -14301,18 +14349,12 @@ def cmd_doc_add():
     if scope == "core":
         milestone = milestone or None
 
-    # ms-109 e-3754 — hard-validate the new Target classes (account /
-    # opportunity) exist before linking. ms / op / trek stay lenient (their
-    # pre-existing behavior); an unknown prefix is left to round-trip untouched.
+    # ms-109 e-3754 / ms-131 e-4497 — hard-validate the sales Target classes
+    # (account / opportunity / acquisition) exist before linking. ms / op / trek
+    # stay lenient (their pre-existing behavior); an unknown prefix is left to
+    # round-trip untouched.
     if target:
-        import work_model
-        _kind = work_model.target_kind(target)
-        if _kind in ("account", "opportunity"):
-            _coll = "accounts" if _kind == "account" else "opportunities"
-            _data = load_project()
-            if target not in {x.get("id") for x in _data.get(_coll, [])}:
-                print(f"Error: {_kind} not found: {target}", file=sys.stderr)
-                sys.exit(1)
+        _validate_sales_target_exists(target)
 
     content = _resolve_content_input(content)
 
@@ -14360,10 +14402,11 @@ def cmd_doc_add():
     import work_model
     data = load_project()
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # ms-109 e-3754 — account / opportunity docs have no milestone/operation
-    # legacy entry to record (they link via ``target`` only); skip the dev-era
-    # entry recording for them so we never call save_entry with an empty ms_id.
-    _is_sales_link = work_model.target_kind(target or "") in ("account", "opportunity")
+    # ms-109 e-3754 / ms-131 e-4497 — account / opportunity / acquisition docs
+    # have no milestone/operation legacy entry to record (they link via
+    # ``target`` only); skip the dev-era entry recording for them so we never
+    # call save_entry with an empty ms_id.
+    _is_sales_link = _is_sales_target(target)
     # core docs: skip MS/Op entry recording (they're project-wide)
     if scope != "core" and not _is_sales_link:
         if operation:
@@ -14409,6 +14452,12 @@ def cmd_doc_update():
     # /beacon-operation-review discovery filter can't reason about.
     ms_explicit = os.environ.get("BEACON_MS_SET", "") == "1"
     op_explicit = os.environ.get("BEACON_OP_SET", "") == "1"
+    # ms-131 e-4497: same "flag absent vs passed empty" distinction for --target,
+    # so ``doc update <id> --target ""`` can *detach* (clear the linkage) instead
+    # of silently preserving the doc's existing target. Extends the shared doc
+    # linkage uniformly (= 既存機構踏襲) so 付け外し works for every doc, tables
+    # included.
+    target_explicit = os.environ.get("BEACON_TARGET_SET", "") == "1"
 
     if not doc_id:
         print("Error: doc_id required")
@@ -14471,32 +14520,35 @@ def cmd_doc_update():
     if not content:
         content = existing.get("content", "")
 
-    # ms-109 e-3754 — resolve the canonical target: an explicitly passed
-    # account/opportunity/--target wins; otherwise fall back to the resolved
-    # milestone/operation/trek, then preserve the doc's existing ``target``.
+    # ms-109 e-3754 / ms-131 e-4497 — resolve the canonical target. An explicit
+    # ``--target ""`` (target_explicit + empty) detaches: clear the linkage
+    # rather than preserving the existing one. Otherwise an explicitly passed
+    # account/opportunity/acquisition/--target wins, then the resolved
+    # milestone/operation/trek, then the doc's existing ``target``.
     import work_model
-    target = (target_in or milestone or operation or trek_id
-              or existing.get("target", ""))
-    # Hard-validate the new Target classes when they were explicitly passed
-    # (a preserved existing link was already validated at creation).
+    detach_target = target_explicit and not (target_in or milestone
+                                             or operation or trek_id)
+    if detach_target:
+        target = ""
+    else:
+        target = (target_in or milestone or operation or trek_id
+                  or existing.get("target", ""))
+    # Hard-validate the sales Target classes when explicitly passed (a preserved
+    # existing link was already validated at creation).
     if target_in:
-        _kind = work_model.target_kind(target_in)
-        if _kind in ("account", "opportunity"):
-            _coll = "accounts" if _kind == "account" else "opportunities"
-            _data = load_project()
-            if target_in not in {x.get("id") for x in _data.get(_coll, [])}:
-                print(f"Error: {_kind} not found: {target_in}", file=sys.stderr)
-                sys.exit(1)
+        _validate_sales_target_exists(target_in)
 
     # Rebuild with frontmatter. e-1859: _add_frontmatter is called with an
     # explicit "scope wipe" pass so the field we are dropping (= operation
     # under Mode 1, milestone under Mode 2) is removed from the existing
     # frontmatter dict instead of being left behind alongside the new field.
+    # e-4497: drop_target removes the ``target`` (and its legacy mirror) on detach.
     content = _add_frontmatter(
         content, scope, milestone, operation, trek_id,
         drop_milestone=(op_explicit and not ms_explicit),
         drop_operation=(ms_explicit and not op_explicit),
         target=target or "",
+        drop_target=detach_target,
     )
 
     # Write path still branches per backend (Phase 3 で Store.save_document
@@ -14517,10 +14569,13 @@ def cmd_doc_update():
     # e-1859: mirror cmd_doc_add's scope-aware entry recording so an
     # op-scoped doc update lands in op.entries (not the milestone log).
     # core scope is project-wide and skips entry recording entirely.
-    # ms-109 e-3754: account / opportunity docs link via ``target`` only and
-    # have no milestone/operation legacy entry to record.
-    _is_sales_link = work_model.target_kind(target or "") in ("account", "opportunity")
-    if scope == "core" or _is_sales_link:
+    # ms-109 e-3754 / ms-131 e-4497: account / opportunity / acquisition docs
+    # link via ``target`` only and have no milestone/operation legacy entry.
+    # ms-131 e-4497: a detach (--target "") leaves the doc with no dev Target, so
+    # there is nothing to record — skip rather than fall through to save_entry,
+    # which would error with "No active milestone".
+    _is_sales_link = _is_sales_target(target)
+    if scope == "core" or _is_sales_link or detach_target:
         pass
     elif operation:
         for op in data.get("operations", []):
@@ -14670,6 +14725,11 @@ def cmd_doc_table_create():
         print(f"Error: 列定義が不正です: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    # ms-131 e-4497 — hard-validate a sales Target (account/opportunity/
+    # acquisition) exists before linking, mirroring cmd_doc_add.
+    if target:
+        _validate_sales_target_exists(target)
+
     if scope == "core":
         milestone = milestone or None
 
@@ -14694,14 +14754,20 @@ def cmd_doc_table_create():
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
 
+    # Entry recording resolves the dev Target this table-doc belongs to. A
+    # table-doc can be linked to any Target (方針6): milestone/operation get the
+    # dev entry log; sales Targets (account/opportunity/acquisition) and generic
+    # links carry none, so we skip rather than record against an empty ms_id.
     import work_model
     data = load_project()
     today = _now_iso()
-    _is_sales_link = work_model.target_kind(target or "") in ("account", "opportunity")
-    if scope != "core" and not _is_sales_link:
-        if operation:
+    _tkind = work_model.target_kind(target or "")
+    op_id = operation or (target if _tkind == "operation" else "")
+    ms_id = milestone or (target if _tkind == "milestone" else "")
+    if scope != "core" and not _is_sales_target(target):
+        if op_id:
             for op in data.get("operations", []):
-                if op.get("id") == operation:
+                if op.get("id") == op_id:
                     eid = core.next_entry_id(data)
                     op.setdefault("entries", []).append({
                         "id": eid, "type": "save",
@@ -14710,12 +14776,15 @@ def cmd_doc_table_create():
                         "meta": {"revision_id": doc_id, "source": "auto"},
                     })
                     break
-        else:
-            core.save_entry(data, ms_id=milestone,
+            save_project(data)
+        elif ms_id:
+            core.save_entry(data, ms_id=ms_id,
                             description=f"table-doc create: {title} ({scope})",
                             source="auto", date=today, revision_id=doc_id,
                             url=None, hash=None, progress=None)
-        save_project(data)
+            save_project(data)
+        # else: generic / no dev Target — nothing to record (linkage lives in
+        # the doc's frontmatter, surfaced via `doc list --target`).
 
     if json_mode:
         print(json.dumps({"doc_id": doc_id, "title": title, "scope": scope,
