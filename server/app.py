@@ -8746,6 +8746,67 @@ def _sweep_trek_target_halts(trek_doc: dict, *, now):
     )
 
 
+def _post_trek_notify_escalation(trek_id, trek_doc, *, payload, action,
+                                 meta_key, now, errors):
+    """Reserve the refire cooldown, then post a notify-user-only escalation.
+
+    Shared by the idle + leader-review-stall escalation passes so the "post a
+    trek escalation" contract (scope resolution → cooldown stamp → envelope →
+    notify bus event) lives in one place instead of being copied per escalation
+    type (maintainability review 2026-07-29).
+
+    Ordering (AX review 2026-07-29): the cooldown is stamped + saved **before**
+    the event is emitted. If the save fails we abort without emitting, so a save
+    failure can never leave us posting the same notice every tick with no
+    cooldown record (the old emit-then-stamp order flooded on save failure). A
+    persistent condition simply re-fires on the next cooldown window. All
+    failures (no scope / save / notify) are recorded in ``errors`` — never
+    silently swallowed. Returns ``{project_id, event_id}`` or None.
+    """
+    scope_project_ids = _resolve_trek_scope_project_ids(trek_doc)
+    if not scope_project_ids:
+        errors.append({"trek_id": trek_id, "error": "no_scope_project",
+                       "escalation": action})
+        return None
+    target_project_id = scope_project_ids[0]
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    # Reserve the cooldown first (stamp + save), so a save failure aborts before
+    # any notification goes out.
+    trek_doc.setdefault("meta", {})[meta_key] = now_iso
+    trek_doc["updated_at"] = trek_mod.utcnow_iso()
+    try:
+        db.save_trek(trek_id, trek_doc)
+    except Exception:
+        errors.append({"trek_id": trek_id, "error": "escalation_save_failed",
+                       "escalation": action})
+        return None
+    try:
+        envelope_obj = envelope_mod.issue_t1_system_envelope(
+            project_id=target_project_id,
+            trek_id=trek_id,
+            actions_authorized=[action],
+            data_class="free",
+            ttl_seconds=3600,
+        )
+    except ValueError:
+        envelope_obj = None
+    bus_data = {
+        "channel": "notify",
+        "sender_session_id": "",
+        "payload": payload,
+        "envelope": envelope_obj,
+        "delivery": "notify-user-only",
+        "created_at": now_iso,
+    }
+    try:
+        event_id = db.append_bus_event(target_project_id, bus_data)
+    except Exception:
+        errors.append({"trek_id": trek_id, "error": "escalation_notify_failed",
+                       "escalation": action})
+        return None
+    return {"project_id": target_project_id, "event_id": event_id}
+
+
 @app.post("/api/system/trek-scheduler/tick")
 def trek_scheduler_tick_endpoint(
     body: TrekSchedulerTickRequest,
@@ -9810,73 +9871,38 @@ def trek_scheduler_tick_endpoint(
         fresh = db.get_trek(trek_id)
         if fresh is not None:
             trek_doc = fresh
-        scope = trek_doc.get("scope") or []
-        if not scope:
+        if not (trek_doc.get("scope") or []):
             # Same fallback path as the progress-check loop; without a
             # target project we have nowhere to post.
             continue
-        # ms-95 / e-2639 — use the scope-wide resolver and pick the
-        # first canonical project as the idle escalation's notify
-        # surface. Idle escalation goes to the ``notify`` channel
-        # (= user-facing, notify-user-only), not the per-member dm
-        # rail used by progress-check / leader-digest. Posting to
-        # scope[0] keeps the legacy single-bus contract; the dm
-        # transport migration covers the AI-wake rails only.
-        scope_project_ids = _resolve_trek_scope_project_ids(trek_doc)
-        if not scope_project_ids:
-            continue
-        target_project_id = scope_project_ids[0]
+        # Idle escalation goes to the ``notify`` channel (= user-facing,
+        # notify-user-only). The shared helper reserves the cooldown (stamp+save)
+        # before emitting and records any failure in ``errors``.
         payload = trek_scheduler_mod.build_idle_escalation_payload(
             trek_doc, now=now,
         )
-        # Notify channel is the user-facing audit surface. Delivery is
-        # notify-user-only (= surface in inbox, do not auto-execute).
-        try:
-            envelope_obj = envelope_mod.issue_t1_system_envelope(
-                project_id=target_project_id,
-                trek_id=trek_id,
-                actions_authorized=["trek.idle_escalation"],
-                data_class="free",
-                ttl_seconds=3600,
-            )
-        except ValueError:
-            envelope_obj = None
-        bus_data = {
-            "channel": "notify",
-            "sender_session_id": "",
-            "payload": payload,
-            "envelope": envelope_obj,
-            "delivery": "notify-user-only",
-            "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-        }
-        try:
-            event_id = db.append_bus_event(target_project_id, bus_data)
-        except Exception:
-            continue
-        meta = trek_doc.setdefault("meta", {})
-        meta["last_idle_escalation_at"] = now.strftime(
-            "%Y-%m-%dT%H:%M:%S.%fZ"
+        posted = _post_trek_notify_escalation(
+            trek_id, trek_doc, payload=payload,
+            action="trek.idle_escalation",
+            meta_key="last_idle_escalation_at", now=now, errors=errors,
         )
-        trek_doc["updated_at"] = trek_mod.utcnow_iso()
-        try:
-            db.save_trek(trek_id, trek_doc)
-        except Exception:
+        if posted is None:
             continue
         escalations.append({
             "trek_id": trek_id,
-            "project_id": target_project_id,
-            "event_id": event_id,
+            "project_id": posted["project_id"],
+            "event_id": posted["event_id"],
             "idle_minutes": payload.get("idle_minutes"),
         })
 
-    # ms-128 方針8 (e-4368) — leader-halt escalation pass. Independent of the
-    # idle pass above: idle anchors on executor pulses, so a leader asleep while
-    # executors are active is NOT idle and would be missed. This pass detects a
-    # leader not draining the leader_review queue (oldest item stale > 4h) and
-    # escalates to the human user (notify-user-only), with a refire cooldown. The
-    # leader is the root of the watch-tree, so escalation must reach the human
-    # Trek owner, not another AI session.
-    leader_halt_escalations: list[dict] = []
+    # ms-128 方針8 (e-4368) — leader-review-stall escalation pass. Independent of
+    # the idle pass above: idle anchors on executor pulses, so a leader asleep
+    # while executors are active is NOT idle and would be missed. This pass
+    # detects a leader not draining the leader_review queue (oldest item stale
+    # past its current leader's grace window) and escalates to the human user
+    # (notify-user-only), with a refire cooldown. The leader is the root of the
+    # watch-tree, so escalation must reach the human Trek owner, not another AI.
+    leader_review_stall_escalations: list[dict] = []
     for trek_doc in candidate_treks:
         trek_id = trek_doc.get("trek_id", "")
         if trek_mod.is_halted(trek_doc):
@@ -9884,53 +9910,26 @@ def trek_scheduler_tick_endpoint(
         fresh = db.get_trek(trek_id)
         if fresh is not None:
             trek_doc = fresh
-        halt_info = trek_scheduler_mod.should_fire_leader_halt_escalation(
+        stall_info = trek_scheduler_mod.pending_leader_review_stall_escalation(
             trek_doc, now=now,
         )
-        if not halt_info:
+        if not stall_info:
             continue
-        scope_project_ids = _resolve_trek_scope_project_ids(trek_doc)
-        if not scope_project_ids:
-            continue
-        target_project_id = scope_project_ids[0]
-        payload = trek_scheduler_mod.build_leader_halt_payload(
-            trek_doc, halt_info=halt_info, now=now,
+        payload = trek_scheduler_mod.build_leader_review_stall_payload(
+            trek_doc, stall_info=stall_info, now=now,
         )
-        try:
-            envelope_obj = envelope_mod.issue_t1_system_envelope(
-                project_id=target_project_id,
-                trek_id=trek_id,
-                actions_authorized=["trek.leader_halt_escalation"],
-                data_class="free",
-                ttl_seconds=3600,
-            )
-        except ValueError:
-            envelope_obj = None
-        bus_data = {
-            "channel": "notify",
-            "sender_session_id": "",
-            "payload": payload,
-            "envelope": envelope_obj,
-            "delivery": "notify-user-only",
-            "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-        }
-        try:
-            event_id = db.append_bus_event(target_project_id, bus_data)
-        except Exception:
-            continue
-        meta = trek_doc.setdefault("meta", {})
-        meta["last_leader_halt_escalation_at"] = now.strftime(
-            "%Y-%m-%dT%H:%M:%S.%fZ"
+        posted = _post_trek_notify_escalation(
+            trek_id, trek_doc, payload=payload,
+            action="trek.leader_review_stall_escalation",
+            meta_key="last_leader_review_stall_escalation_at",
+            now=now, errors=errors,
         )
-        trek_doc["updated_at"] = trek_mod.utcnow_iso()
-        try:
-            db.save_trek(trek_id, trek_doc)
-        except Exception:
+        if posted is None:
             continue
-        leader_halt_escalations.append({
+        leader_review_stall_escalations.append({
             "trek_id": trek_id,
-            "project_id": target_project_id,
-            "event_id": event_id,
+            "project_id": posted["project_id"],
+            "event_id": posted["event_id"],
             "waited_minutes": payload.get("waited_minutes"),
         })
 
@@ -10125,7 +10124,7 @@ def trek_scheduler_tick_endpoint(
         "due": len(due_treks),
         "fired": fired,
         "escalations": escalations,
-        "leader_halt_escalations": leader_halt_escalations,
+        "leader_review_stall_escalations": leader_review_stall_escalations,
         "auto_stalled": auto_stalled,
         "errors": errors,
         "quiesced": quiesced,
