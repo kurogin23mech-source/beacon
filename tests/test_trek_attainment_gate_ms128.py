@@ -125,6 +125,26 @@ def test_forward_to_user_from_working_is_diverted_not_allowed():
     assert d["forced_state"] == "leader_review"
 
 
+def test_gate_stays_in_sync_with_transition_table():
+    # 保守性レビュー(2026-07-30 medium): gate の「user_review 入口=leader_review のみ」
+    # 規則が VALID_TASK_STATE_TRANSITIONS と drift しないことを機械保証する。
+    # user_review を許容しない全 from_state について、gate は必ず留置 (allowed=False)。
+    for s in trek.VALID_TASK_STATE_TRANSITIONS:
+        allows_user_review = "user_review" in trek.VALID_TASK_STATE_TRANSITIONS[s]
+        d = trek.completion_gate_decision(
+            effective_state="user_review", from_state=s, verdict="approve",
+            caller_sid="judge", prior_stamper_sid="executor",
+            attainment_verdict=[{"criterion": "AC1", "verdict": "met"}],
+        )
+        if allows_user_review:
+            # 唯一 user_review を許す辺 (leader_review) は attainment 全met で通る。
+            assert d["allowed"] is True, s
+        else:
+            # 表が user_review を許さない from_state は gate も必ず留置する。
+            assert d["allowed"] is False, s
+            assert d["forced_state"] == "leader_review", s
+
+
 def test_empty_prior_stamper_is_fail_closed():
     # A4 fix: prior stamper 不明 = judge が実行者の外だと確認できない → 全met verdict
     # でも留置 (自己採点を「識別できないから素通し」にしない)。

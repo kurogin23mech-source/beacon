@@ -4552,9 +4552,11 @@ def completion_gate_decision(*, effective_state: str, from_state: str,
             "code": "user_review_requires_leader_review",
             "message": (
                 "user_review へはリーダー審査 (leader_review→user_review) を経る必要が"
-                "あります。実行セッションは working→leader_review で完成を宣言し、"
-                "リーダーが思想/目的達成レビュー合格で user_review に倒します。"
-                "leader_review に留置します。"
+                "あります。leader_review に留置しました。"
+                "次にすること: 実行セッションは "
+                "`beacon trek task-state <trek-id> <task-id> leader_review "
+                "--note \"完成宣言\"` で完成を宣言し、リーダーが思想/目的達成レビュー"
+                "合格で user_review に倒す。"
             ),
         }
     if verdict == ESCALATE_TO_USER_VERDICT:
