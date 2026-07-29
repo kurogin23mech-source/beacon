@@ -538,6 +538,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_acq_reply.add_argument("--url", default="")
     p_acq_reply.add_argument("--summary", default="")
     p_acq_reply.add_argument("--json", action="store_true")
+    # ms-132 e-4506: リード転換 (返信あり/アポの行を商談へ引き上げ)。
+    p_acq_promote = acq_sub.add_parser("attack-list-promote", add_help=False)
+    p_acq_promote.add_argument("doc_id", nargs="?", default="")
+    p_acq_promote.add_argument("acc_id", nargs="?", default="")
+    p_acq_promote.add_argument("--title", default="")
+    p_acq_promote.add_argument("--json", action="store_true")
 
     # ---- opportunity (ms-106: sales entities, profession=sales) ----
     p_opp = sub.add_parser(
@@ -2282,7 +2288,7 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
         print("Usage: beacon acquisition "
               "[add|list|attack-list|attack-lists|attack-list-fill|"
               "attack-list-send|attack-list-send-record|attack-list-awaiting-reply|"
-              "attack-list-reply-record|status] [options]")
+              "attack-list-reply-record|attack-list-promote|status] [options]")
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
         return rc
@@ -2403,10 +2409,19 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
                "BEACON_COMM_SUMMARY": args.summary or "",
                "BEACON_JSON": "1" if args.json else ""}
         return _run_commands_py(root, "acquisition_attack_list_reply_record", env)
+    if cmd == "attack-list-promote":
+        if not args.doc_id or not args.acc_id:
+            print('Usage: beacon acquisition attack-list-promote '
+                  '<attack-list-doc-id> <acc-id> [--title <商談名>] [--json]')
+            return 1
+        env = {"BEACON_DOC_ID": args.doc_id, "BEACON_SEND_ACC_ID": args.acc_id,
+               "BEACON_OPP_TITLE": args.title or "",
+               "BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "acquisition_attack_list_promote", env)
     print("Usage: beacon acquisition "
           "[add|list|attack-list|attack-lists|attack-list-fill|"
           "attack-list-send|attack-list-send-record|attack-list-awaiting-reply|"
-          "attack-list-reply-record|status] [options]")
+          "attack-list-reply-record|attack-list-promote|status] [options]")
     return 2
 
 
