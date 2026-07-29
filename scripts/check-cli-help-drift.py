@@ -26,11 +26,24 @@ Windows cross-machine DM in 2026-06-07: PR #74 added ``session id`` and
 ``argparse invalid choice: 'session'``. Adding to this lint forces both
 sides to stay in step.
 
-It deliberately ignores positional arg shape and flag spelling — those
-are too noisy to diff and are checked elsewhere (the dispatcher itself
-enforces ``--flag`` parsing). The drift this catches is the most common
-one in practice: a brand-new subcommand that nobody added to the README
-or to ``cmd_help_json``.
+  5. ``REQUIRED_FLAG_PARITY``       — a *curated* bash ↔ Python **flag**
+                                     parity check (ms-126 e-4223). The four
+                                     checks above compare subcommands and
+                                     ignore flags; this one names specific
+                                     (verb, flag) pairs — seeded with the
+                                     mandatory-priority contract (``--priority``
+                                     / ``--untriaged``) — that must exist on
+                                     BOTH the bash ``cmd_<verb>()`` arg-loop and
+                                     the Python subparser, catching a flag added
+                                     to one surface and silently forgotten on
+                                     the other.
+
+Apart from that curated set, the checker deliberately ignores positional
+arg shape and general flag spelling — a blanket flag diff is too noisy, and
+the dispatcher itself enforces ``--flag`` parsing. The drift these catch is
+the common one in practice: a brand-new subcommand that nobody added to the
+README or to ``cmd_help_json``, or a load-bearing flag that lands on only one
+of the two dispatch surfaces.
 
 Allowlists
 ----------
@@ -271,6 +284,34 @@ ALLOW_MISSING_FROM_README: set[str] = {
     "rollback",
     "stop global", "stop scoped", "stop status",
     "stuck check",
+}
+
+
+# ---------------------------------------------------------------------------
+# ms-126 e-4223 (AX#4 + Maint#5): bash ↔ Python *flag* parity
+# ---------------------------------------------------------------------------
+# The four checks above compare which *subcommands* exist on each surface but
+# deliberately ignore flags. That left a silent gap: a flag can be added to one
+# surface (e.g. `--priority` on the Python dispatcher's argparse) and forgotten
+# on the other (the bash `cmd_*` arg-loop is a hand-maintained separate copy),
+# so `beacon <verb> --priority` works on macOS/Linux but `argparse invalid
+# choice`-style breaks — or silently no-ops — on the other path. That is exactly
+# the ms-126 failure mode: the mandatory-priority contract must be reachable
+# identically from both surfaces.
+#
+# This is a *curated* parity check, not a blanket flag diff (blanket diffing is
+# too noisy — see the module docstring). Each entry names a verb and the flags
+# that MUST exist on BOTH the bash function and the Python subparser. Seeded
+# with ms-126's priority contract; extend as other cross-surface flags become
+# load-bearing. Because only these named pairs are enforced, an unrelated
+# bash-only or Python-only flag never trips it — no allowlist needed, the map
+# itself is the scope. Verb keys are canonical "noun sub" (bash function
+# ``cmd_<noun>_<sub>`` / Python nested subparser ``<noun> <sub>``).
+REQUIRED_FLAG_PARITY: dict[str, set[str]] = {
+    "milestone add": {"--priority", "--untriaged"},
+    "milestone update": {"--priority"},
+    "task add": {"--priority", "--untriaged"},
+    "task update": {"--priority"},
 }
 
 
@@ -543,6 +584,120 @@ def collect_dispatch_drift(
     }
 
 
+# ---------------------------------------------------------------------------
+# ms-126 e-4223: bash ↔ Python flag parity extraction
+# ---------------------------------------------------------------------------
+
+def _subparsers_action(parser) -> "argparse._SubParsersAction | None":
+    """Return the argparse sub-parsers action of ``parser`` (or None)."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return action
+    return None
+
+
+def python_verb_flags(
+    python_dispatch_path: Path = PYTHON_DISPATCH,
+) -> dict[str, set[str]]:
+    """Map canonical ``"noun sub"`` → set of ``--long`` flags the Python
+    dispatcher registers on that nested subparser.
+
+    Introspects the real ``build_parser()`` (not a regex over the source), so
+    it sees exactly the flags argparse would accept — including aliases like
+    ``--priority -p`` (only the ``--`` spellings are collected; the parity
+    contract is about long flags). Aliased nouns (``ms`` → ``milestone``) also
+    appear as keys; we key the required map by canonical names so both resolve.
+
+    ``beacon_cli.dispatch`` uses package-relative imports, so it must be loaded
+    as part of its package (the repo root that contains ``beacon_cli/`` on
+    ``sys.path``), not as a bare file — hence ``import_module`` over the package
+    name rather than a spec-from-file-location load.
+    """
+    pkg_root = python_dispatch_path.resolve().parent.parent
+    if str(pkg_root) not in sys.path:
+        sys.path.insert(0, str(pkg_root))
+    module = importlib.import_module("beacon_cli.dispatch")
+    parser = module.build_parser()
+
+    result: dict[str, set[str]] = {}
+    top = _subparsers_action(parser)
+    if top is None:
+        return result
+    for noun, noun_parser in top.choices.items():
+        nested = _subparsers_action(noun_parser)
+        if nested is None:
+            continue
+        for sub, sub_parser in nested.choices.items():
+            flags = {
+                opt
+                for action in sub_parser._actions
+                for opt in action.option_strings
+                if opt.startswith("--")
+            }
+            result[f"{noun} {sub}"] = flags
+    return result
+
+
+_BASH_FUNC_RE = re.compile(r"^cmd_[a-z0-9_]+\(\)", re.MULTILINE)
+# A case label like ``--priority)`` or ``--acceptance-criteria|--ac)`` — capture
+# the whole ``--a|--b`` alias group that precedes the closing paren.
+_BASH_CASE_FLAG_RE = re.compile(r"^\s*(--[a-zA-Z0-9|=?*.\-]+)\)", re.MULTILINE)
+
+
+def bash_verb_flags(verb: str, bin_path: Path = BIN_BEACON) -> set[str]:
+    """Collect the ``--long`` flags parsed inside the bash ``cmd_<verb>()``
+    function body (``verb`` = canonical ``"noun sub"``).
+
+    The bash dispatcher hand-parses flags in a ``case "$1" in … --flag) …``
+    loop inside a ``cmd_<noun>_<sub>()`` function. We slice that function (its
+    ``cmd_…()`` header to the next ``cmd_…()`` header) and read the case labels,
+    splitting ``--a|--b`` alias groups. Returns the set of long flags; empty if
+    the function isn't found (surfaces as a parity miss, which is the point).
+    """
+    text = bin_path.read_text(encoding="utf-8")
+    func_header = "cmd_" + verb.replace(" ", "_") + "()"
+    start = text.find(func_header)
+    if start == -1:
+        return set()
+    nxt = _BASH_FUNC_RE.search(text, start + len(func_header))
+    body = text[start:nxt.start()] if nxt else text[start:]
+    flags: set[str] = set()
+    for group in _BASH_CASE_FLAG_RE.findall(body):
+        for token in group.split("|"):
+            token = token.split("=")[0]  # normalise ``--x=…`` shapes
+            if token.startswith("--") and token != "--":
+                flags.add(token)
+    return flags
+
+
+def collect_flag_parity(
+    bin_path: Path = BIN_BEACON,
+    python_dispatch_path: Path = PYTHON_DISPATCH,
+) -> dict:
+    """Verify every ``REQUIRED_FLAG_PARITY`` (verb, flag) exists on BOTH the
+    bash function and the Python subparser.
+
+    Returns dict with ``ok`` plus two lists of ``"<verb> <flag>"`` strings:
+    ``missing_from_python_flags`` / ``missing_from_bash_flags``.
+    """
+    py_flags = python_verb_flags(python_dispatch_path)
+    missing_python: list[str] = []
+    missing_bash: list[str] = []
+    for verb, required in REQUIRED_FLAG_PARITY.items():
+        have_py = py_flags.get(verb, set())
+        have_bash = bash_verb_flags(verb, bin_path)
+        for flag in sorted(required):
+            if flag not in have_py:
+                missing_python.append(f"{verb} {flag}")
+            if flag not in have_bash:
+                missing_bash.append(f"{verb} {flag}")
+    return {
+        "ok": not (missing_python or missing_bash),
+        "missing_from_python_flags": sorted(missing_python),
+        "missing_from_bash_flags": sorted(missing_bash),
+    }
+
+
 def collect_drift(
     bin_path: Path = BIN_BEACON,
     commands_path: Path = COMMANDS_PY,
@@ -583,12 +738,16 @@ def collect_drift(
     # ms-44 e-1171: bash main case vs Python _HANDLERS parity.
     dispatch_drift = collect_dispatch_drift(bin_path, python_dispatch_path)
 
+    # ms-126 e-4223: bash ↔ Python flag parity (curated priority contract).
+    flag_parity = collect_flag_parity(bin_path, python_dispatch_path)
+
     report = {
         "ok": not (
             bin_missing
             or json_missing
             or readme_missing
             or not dispatch_drift["ok"]
+            or not flag_parity["ok"]
         ),
         "bin_verbs": sorted(bin_verbs),
         "json_verbs": sorted(json_verbs),
@@ -601,6 +760,9 @@ def collect_drift(
         "python_dispatch_verbs": dispatch_drift["python_verbs"],
         "missing_from_python_dispatch": dispatch_drift["missing_from_python_dispatch"],
         "missing_from_bash_dispatch": dispatch_drift["missing_from_bash_dispatch"],
+        # ms-126 e-4223 surface (bash cmd_* flags vs Python subparser flags):
+        "missing_from_python_flags": flag_parity["missing_from_python_flags"],
+        "missing_from_bash_flags": flag_parity["missing_from_bash_flags"],
     }
     return report
 
@@ -609,7 +771,7 @@ def _format_text(report: dict) -> str:
     if report["ok"]:
         return (
             "[cli-drift] OK: bin/beacon, cmd_help_json, README CLI tables, "
-            "and bash↔Python dispatch are aligned.\n"
+            "bash↔Python dispatch, and required flag parity are aligned.\n"
         )
     lines = ["[cli-drift] Drift detected between CLI source-of-truth surfaces:", ""]
     if report["missing_from_bin_help"]:
@@ -642,6 +804,18 @@ def _format_text(report: dict) -> str:
         lines.append("    -> macOS/Linux users won't see these (bash is the default path).")
         lines.append("    -> add the verb to bin/beacon's main case, OR add it to")
         lines.append("       ALLOW_PYTHON_ONLY_DISPATCH if intentionally Python-only.")
+    if report.get("missing_from_python_flags"):
+        lines.append("  - required flag missing from Python dispatch subparser (beacon_cli/dispatch.py):")
+        for v in report["missing_from_python_flags"]:
+            lines.append(f"      beacon {v}")
+        lines.append("    -> add the flag to the matching sub.add_parser(...).add_argument(...) in")
+        lines.append("       beacon_cli/dispatch.py so Windows/pipx users get the same contract.")
+    if report.get("missing_from_bash_flags"):
+        lines.append("  - required flag missing from bash cmd_* arg-loop (bin/beacon):")
+        for v in report["missing_from_bash_flags"]:
+            lines.append(f"      beacon {v}")
+        lines.append("    -> add a `--flag)` case to the matching cmd_<verb>() loop in bin/beacon,")
+        lines.append("       OR revise REQUIRED_FLAG_PARITY if the contract intentionally changed.")
     lines.append("")
     lines.append("Allowlists for intentional asymmetries live in scripts/check-cli-help-drift.py.")
     lines.append("This guard is part of ms-10 e-722 (doc & skill auto-sync) + ms-44 e-1171 (dispatch parity).")

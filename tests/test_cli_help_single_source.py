@@ -78,6 +78,76 @@ def test_usage_has_no_second_help_heredoc():
     )
 
 
+# --- ms-126 e-4223: bash ↔ Python flag parity -------------------------------
+
+
+def test_required_flag_parity_holds():
+    """The curated priority-flag contract is present on BOTH surfaces today."""
+    mod = _load_checker()
+    parity = mod.collect_flag_parity()
+    assert parity["ok"], parity
+
+
+def test_python_extractor_sees_priority_flags():
+    """argparse introspection finds --priority/--untriaged on the real dispatcher."""
+    mod = _load_checker()
+    py = mod.python_verb_flags()
+    assert {"--priority", "--untriaged"} <= py["milestone add"]
+    assert {"--priority", "--untriaged"} <= py["task add"]
+    assert "--priority" in py["milestone update"]
+    assert "--priority" in py["task update"]
+
+
+def test_bash_extractor_sees_priority_flags():
+    """The bash cmd_* slicer finds the same flags in bin/beacon, including the
+    --a|--b alias groups (so `--acceptance-criteria|--ac` doesn't mask siblings)."""
+    mod = _load_checker()
+    assert {"--priority", "--untriaged"} <= mod.bash_verb_flags("milestone add")
+    assert {"--priority", "--untriaged"} <= mod.bash_verb_flags("task add")
+    assert "--priority" in mod.bash_verb_flags("milestone update")
+    assert "--priority" in mod.bash_verb_flags("task update")
+
+
+def test_flag_parity_detects_bash_omission(tmp_path):
+    """A guard that can't fail is useless: prove it fires when a required flag is
+    dropped from the bash surface. A synthetic bin/beacon whose cmd_task_update()
+    lacks --priority must surface as missing_from_bash_flags (Python still has
+    it, so only the bash side is flagged — per-surface attribution works)."""
+    mod = _load_checker()
+    fake_bin = tmp_path / "beacon"
+    fake_bin.write_text(
+        "#!/usr/bin/env bash\n"
+        "cmd_milestone_add() {\n"
+        "  case \"$1\" in\n"
+        "    --priority) priority=\"${2:-}\"; shift 2 ;;\n"
+        "    --untriaged) allow_untriaged=1; shift ;;\n"
+        "  esac\n"
+        "}\n"
+        "cmd_milestone_update() {\n"
+        "  case \"$1\" in\n"
+        "    --priority) priority=\"${2:-}\"; shift 2 ;;\n"
+        "  esac\n"
+        "}\n"
+        "cmd_task_add() {\n"
+        "  case \"$1\" in\n"
+        "    --priority) priority=\"${2:-}\"; shift 2 ;;\n"
+        "    --untriaged) allow_untriaged=1; shift ;;\n"
+        "  esac\n"
+        "}\n"
+        "cmd_task_update() {\n"
+        "  case \"$1\" in\n"
+        "    --status) status=\"${2:-}\"; shift 2 ;;\n"  # --priority intentionally absent
+        "  esac\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    parity = mod.collect_flag_parity(bin_path=fake_bin)
+    assert not parity["ok"]
+    assert "task update --priority" in parity["missing_from_bash_flags"]
+    # Python still registers it → the bash-only omission is not misattributed.
+    assert "task update --priority" not in parity["missing_from_python_flags"]
+
+
 # --- behavioral (need bash) -------------------------------------------------
 
 pytestmark_bash = pytest.mark.skipif(BASH is None, reason="bash not available")
