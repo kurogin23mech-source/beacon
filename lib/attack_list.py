@@ -106,6 +106,16 @@ def phase_values(model_or_columns) -> list:
     return []
 
 
+def is_reacted(phase, phase_values_list) -> bool:
+    """True when ``phase`` is 返信あり or later (funnel position ≥ REPLIED) — a
+    prospect that reacted and is therefore convertible to a lead (ms-132 e-4506).
+    Pure predicate so the promote guard is unit-testable in isolation."""
+    vals = phase_values_list or []
+    if len(vals) <= PHASE_IDX_REPLIED:
+        return False
+    return phase in vals[PHASE_IDX_REPLIED:]
+
+
 def find_row_by_account(rows, acc_id):
     """The first row whose account cell == ``acc_id`` (from an already-filtered
     row list, e.g. ``table_doc.active_rows(model)``), or None. Centralizes the

@@ -27132,13 +27132,13 @@ def cmd_acquisition_attack_list_promote():
         sys.exit(1)
     vals = attack_list.phase_values(model)
     cur = row.get("cells", {}).get(attack_list.COL_PHASE)
-    # Only a *reacted* prospect (返信あり / アポ = funnel position ≥ REPLIED) is a
-    # lead. Contacting or untouched rows are not yet convertible.
-    reacted = (cur in vals[attack_list.PHASE_IDX_REPLIED:]
-               if len(vals) > attack_list.PHASE_IDX_REPLIED else False)
-    if not reacted:
+    # Only a *reacted* prospect (返信あり / アポ) is a lead; untouched/contacted rows
+    # are not yet convertible.
+    if not attack_list.is_reacted(cur, vals):
         print(f"Error: {acc_id} の行は '{cur}' です。返信あり / アポ の行のみ商談へ"
-              f"引き上げできます (先に返信を待つ / 記録する)。", file=sys.stderr)
+              f"引き上げできます。先に返信を記録: "
+              f"`beacon acquisition attack-list-reply-record {doc_id} {acc_id} "
+              f"--message-id <id>`", file=sys.stderr)
         sys.exit(1)
 
     data = load_project()
@@ -27147,46 +27147,39 @@ def cmd_acquisition_attack_list_promote():
         print(f"Error: Account {acc_id} が見つかりません", file=sys.stderr)
         sys.exit(1)
     # No duplicate deal: refuse if the Account already has a live Opportunity.
-    live_opps = [o.get("id") for o in data.get("opportunities", [])
-                 if o.get("account_id") == acc_id
-                 and o.get("status") != sales_entities.CANCELLED_STATUS]
+    # ``live_opportunities`` owns the "not terminal/cancelled" definition, so a
+    # new terminal status added later can't silently slip past this guard.
+    live_opps = [o.get("id") for o in sales_entities.live_opportunities(data)
+                 if o.get("account_id") == acc_id]
     if live_opps:
         print(f"Error: {acc_id} には既に商談があります ({', '.join(live_opps)})。"
-              f"重複した商談は作りません。", file=sys.stderr)
+              f"重複した商談は作りません (確認: `beacon opportunity show {live_opps[0]}`)。",
+              file=sys.stderr)
         sys.exit(1)
 
     acc_name = acc.get("name") or acc_id
-    acc_phases = [p.get("name") for p in sales_entities.account_phases(data)]
-    # Capture the phase BEFORE creating the opp: opportunity_add may itself derive
-    # the Account phase upward, so the "was it at 未接触?" question must be asked now.
-    was_untouched = bool(acc_phases) and acc.get("phase") == acc_phases[0]
+    pre_phase = acc.get("phase")
     try:
+        # opportunity_add itself derives the Account's lifecycle phase upward via
+        # _auto_advance_account_phase (新規商談 → 未接触→リード; sales_entities L1018),
+        # so we don't set it separately — we read and report the actual result.
         opp_id = sales_entities.opportunity_add(
             data, title or f"{acc_name} 商談 (アタックリスト由来)",
             account_id=acc_id, created_at=_now_iso())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-
-    # Drive the Account lifecycle phase 未接触 → リード (funnel 1st → 2nd) only when
-    # it started at the entry phase (never regress a further-along Account). If
-    # opportunity_add already derived it up, this is the net result either way.
-    driven_account_phase = None
-    if was_untouched and len(acc_phases) >= 2:
-        if sales_entities.find_account(data, acc_id).get("phase") == acc_phases[0]:
-            try:
-                sales_entities.phase_set(data, acc_id, acc_phases[1],
-                                         note=f"アタックリスト由来リード化 ({opp_id})",
-                                         at=_now_iso())
-            except ValueError:
-                pass
-        driven_account_phase = acc_phases[1]
     save_project(data)
 
+    final_phase = sales_entities.find_account(data, acc_id).get("phase")
+    driven_account_phase = final_phase if final_phase != pre_phase else None
+
     if json_mode:
-        print(json.dumps({"doc_id": doc_id, "acc_id": acc_id, "opportunity": opp_id,
-                          "account_phase_driven_to": driven_account_phase,
-                          "row_phase": cur}, ensure_ascii=False))
+        print(json.dumps({
+            "doc_id": doc_id, "acc_id": acc_id, "opportunity": opp_id,
+            "account_phase": final_phase,          # the actual resulting phase (truth)
+            "account_phase_driven_to": driven_account_phase,  # None = unchanged
+            "row_phase": cur, "row_kept": True}, ensure_ascii=False))
     else:
         ph = f" / 顧客 phase → {driven_account_phase}" if driven_account_phase else ""
         print(f"引き上げ: {acc_id} → 商談 {opp_id}{ph} "

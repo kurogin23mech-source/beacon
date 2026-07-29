@@ -90,6 +90,31 @@ def test_is_attack_list_empty_or_none():
     assert not attack_list.is_attack_list(None)
 
 
+# --- is_reacted / phase_values / find_row_by_account helpers ---------------
+
+def test_is_reacted():
+    vals = ["未接触", "連絡済", "返信あり", "アポ"]
+    assert not attack_list.is_reacted("未接触", vals)
+    assert not attack_list.is_reacted("連絡済", vals)
+    assert attack_list.is_reacted("返信あり", vals)
+    assert attack_list.is_reacted("アポ", vals)
+    assert not attack_list.is_reacted("連絡済", ["未接触", "連絡済"])  # no REPLIED position
+
+
+def test_phase_values_from_model_and_columns():
+    cols = attack_list.attack_list_columns()
+    assert attack_list.phase_values(cols) == attack_list.DEFAULT_PROSPECT_PHASES
+    assert attack_list.phase_values({"columns": cols}) == attack_list.DEFAULT_PROSPECT_PHASES
+    assert attack_list.phase_values({"columns": []}) == []
+
+
+def test_find_row_by_account():
+    rows = [{"id": "r1", "cells": {"account": "acc-1"}},
+            {"id": "r2", "cells": {"account": "acc-2"}}]
+    assert attack_list.find_row_by_account(rows, "acc-2")["id"] == "r2"
+    assert attack_list.find_row_by_account(rows, "acc-9") is None
+
+
 # --- enforcement through the real table-doc + type layer -------------------
 
 @pytest.fixture

@@ -100,6 +100,8 @@ def test_promote_replied_creates_opp_and_drives_account_phase(promote_cwd, monke
     out = _promote(monkeypatch, capsys, doc_id, "acc-1")
     assert out["opportunity"].startswith("opp-")
     assert out["account_phase_driven_to"] == "リード"
+    assert out["account_phase"] == "リード"   # actual resulting phase (truth field)
+    assert out["row_kept"] is True
     data = _read(cwd)
     opp = next(o for o in data["opportunities"] if o["id"] == out["opportunity"])
     assert opp["account_id"] == "acc-1"

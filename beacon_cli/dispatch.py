@@ -2284,11 +2284,13 @@ def _handle_org(root: Path, args: argparse.Namespace) -> int:
 
 def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
     # ms-115 e-3786/e-3790: 顧客獲得ターゲット (取引先の無い獲得・準備作業の器)。
+    # One usage string so a future sub-verb is added in one place (ms-132 e-4506 保守性レビュー).
+    _ACQ_USAGE = ("Usage: beacon acquisition "
+                  "[add|list|attack-list|attack-lists|attack-list-fill|"
+                  "attack-list-send|attack-list-send-record|attack-list-awaiting-reply|"
+                  "attack-list-reply-record|attack-list-promote|status] [options]")
     if args.show_help or args.acq_cmd is None:
-        print("Usage: beacon acquisition "
-              "[add|list|attack-list|attack-lists|attack-list-fill|"
-              "attack-list-send|attack-list-send-record|attack-list-awaiting-reply|"
-              "attack-list-reply-record|attack-list-promote|status] [options]")
+        print(_ACQ_USAGE)
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
         return rc
@@ -2418,10 +2420,7 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
                "BEACON_OPP_TITLE": args.title or "",
                "BEACON_JSON": "1" if args.json else ""}
         return _run_commands_py(root, "acquisition_attack_list_promote", env)
-    print("Usage: beacon acquisition "
-          "[add|list|attack-list|attack-lists|attack-list-fill|"
-          "attack-list-send|attack-list-send-record|attack-list-awaiting-reply|"
-          "attack-list-reply-record|attack-list-promote|status] [options]")
+    print(_ACQ_USAGE)
     return 2
 
 
