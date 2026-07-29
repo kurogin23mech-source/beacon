@@ -1026,17 +1026,60 @@ def cmd_cloud_join():
 # banned by default and a human bypasses). Here the *human* is the one refused
 # untriaged, because untriaged means "no human has judged this yet" — a
 # self-contradiction when the actor IS the human.
+def _caller_is_human_for_untriaged() -> bool:
+    """Is the --untriaged caller a human (who must be refused the bypass)?
+
+    ms-126 philosophy fix (2026-07-29, independent review): the earlier gate
+    refused the bypass only when a session opted into BEACON_SESSION_KIND=human.
+    But nothing sets that flag by default, so an undeclared human at an
+    interactive terminal — the exact actor the mandatory-priority forcing
+    function targets — was classified as a machine and slipped straight through
+    (default-OPEN hole). The --untriaged bypass is a *machine* capability (a
+    machine legitimately can't judge priority); a human must pick a severity.
+
+    So refuse the bypass by default for anything interactive, and require a
+    machine to be *identifiable*:
+      * explicit BEACON_SESSION_KIND=human        → human (refuse).
+      * explicit non-human kind (ai / machine / …) → machine (allow; covers an
+        AI that happens to run inside a PTY).
+      * unset → infer from the terminal: an interactive stdin (a person typing)
+        is a human (refuse); a non-interactive stdin (AI tool / pipe / CI) is a
+        machine (allow).
+
+    The polarity is deliberately opposite the ms-119 merge / approve bans (there
+    an undeclared session is treated as AI to deny a privileged *human* action);
+    here an undeclared *interactive* session is treated as human to deny a
+    privileged *machine* bypass. That is why this does NOT reuse
+    ``_session_kind_is_human`` (whose "unset = AI" default is correct for those
+    bans but would re-open this hole).
+    """
+    kind = (os.environ.get("BEACON_SESSION_KIND", "") or "").strip().lower()
+    if kind == "human":
+        return True
+    if kind:
+        return False
+    # Unset: a person typing at an interactive terminal has a tty on stdin;
+    # an AI tool / pipe / CI does not. No tty (or an unreadable stdin) = not a
+    # person typing = machine, so the bypass is allowed.
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except Exception:
+        return False
+
+
 def _human_untriaged_bypass_refused() -> bool:
-    """True when a human session is trying to use the untriaged escape hatch.
+    """True when a human is trying to use the untriaged escape hatch.
 
     Returns True iff BOTH: the process asked for untriaged
     (BEACON_ALLOW_UNTRIAGED=1, set by the `--untriaged` flag or a manual export)
-    AND the calling session declares itself human (BEACON_SESSION_KIND=human).
+    AND the caller resolves to a human (see ``_caller_is_human_for_untriaged``:
+    explicit BEACON_SESSION_KIND=human, or an undeclared *interactive* terminal).
     In that case the caller MUST be forced back onto the priority forcing
-    function. Machine / AI sessions (the default) are unaffected.
+    function. Machine / AI sessions (non-interactive, or explicitly declared
+    non-human) are unaffected.
     """
     allow_untriaged = os.environ.get("BEACON_ALLOW_UNTRIAGED", "") == "1"
-    return allow_untriaged and _session_kind_is_human()
+    return allow_untriaged and _caller_is_human_for_untriaged()
 
 
 # The human-facing rejection when a human session tries `--untriaged`. Speaks
@@ -1046,7 +1089,9 @@ _HUMAN_UNTRIAGED_REFUSED_MSG = (
     "Priority is required. '--untriaged' is a machine-only sentinel (issue "
     "import / review-derived / roadmap / dispatch); a human session cannot use "
     "it to defer the judgement. Choose one of: highest, high, medium, low, "
-    "lowest (highest = 大目的への寄与が最大 / lowest = 最小)."
+    "lowest (highest = 大目的への寄与が最大 / lowest = 最小). "
+    "(If this IS an automated / AI caller running at a terminal, declare it "
+    "with BEACON_SESSION_KIND=ai, or run non-interactively.)"
 )
 
 
@@ -16095,6 +16140,15 @@ def _session_kind_is_human() -> bool:
 
     Default (unset ``BEACON_SESSION_KIND``) is treated as AI for safety, the
     same convention as the PR merge ban (see ``_ai_session_merge_ban_active``).
+
+    ⚠ Divergent twin: ``_caller_is_human_for_untriaged`` (near the top of this
+    module) answers the same "is the caller human?" question with the OPPOSITE
+    default for an undeclared session — there an undeclared *interactive*
+    terminal is treated as human (to deny a privileged *machine* bypass), the
+    reverse of this "unset = AI" default (which denies a privileged *human*
+    action). Do NOT reuse this helper for the untriaged forcing-function gate,
+    and if you change this default, re-check that twin — the two polarities are
+    intentional and live far apart (ms-126 philosophy fix).
     """
     return (os.environ.get("BEACON_SESSION_KIND", "") or "").strip().lower() == "human"
 

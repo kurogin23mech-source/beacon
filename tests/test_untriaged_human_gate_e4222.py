@@ -118,6 +118,45 @@ class TestHumanUntriagedBypassRefusedHelper:
         monkeypatch.setenv("BEACON_SESSION_KIND", "Human")
         assert commands._human_untriaged_bypass_refused() is True
 
+    # ms-126 philosophy fix (2026-07-29): undeclared sessions are inferred from
+    # the terminal — an interactive stdin is a human typing (refuse the bypass),
+    # a non-interactive stdin is a machine/pipe/CI (allow).
+    def _set_isatty(self, monkeypatch, value):
+        import types
+        monkeypatch.setattr(commands.sys, "stdin",
+                            types.SimpleNamespace(isatty=lambda: value))
+
+    def test_undeclared_interactive_terminal_is_refused(self, monkeypatch):
+        # The exact hole the fix closes: a real human at a bare terminal who has
+        # NOT exported BEACON_SESSION_KIND=human. Interactive stdin → human → refuse.
+        monkeypatch.delenv("BEACON_SESSION_KIND", raising=False)
+        monkeypatch.setenv("BEACON_ALLOW_UNTRIAGED", "1")
+        self._set_isatty(monkeypatch, True)
+        assert commands._human_untriaged_bypass_refused() is True
+
+    def test_undeclared_non_interactive_is_allowed(self, monkeypatch):
+        # AI tool / pipe / CI: no tty on stdin → machine → allowed (unchanged).
+        monkeypatch.delenv("BEACON_SESSION_KIND", raising=False)
+        monkeypatch.setenv("BEACON_ALLOW_UNTRIAGED", "1")
+        self._set_isatty(monkeypatch, False)
+        assert commands._human_untriaged_bypass_refused() is False
+
+    def test_explicit_ai_overrides_interactive_tty(self, monkeypatch):
+        # An AI that happens to run in a PTY can still declare itself and keep
+        # the untriaged capability — explicit kind wins over the tty inference.
+        monkeypatch.setenv("BEACON_SESSION_KIND", "ai")
+        monkeypatch.setenv("BEACON_ALLOW_UNTRIAGED", "1")
+        self._set_isatty(monkeypatch, True)
+        assert commands._human_untriaged_bypass_refused() is False
+
+    def test_no_bypass_attempt_is_never_refused_even_on_tty(self, monkeypatch):
+        # Without --untriaged there is nothing to refuse; the tty inference must
+        # not fire on a plain interactive command (guards against over-blocking).
+        monkeypatch.delenv("BEACON_SESSION_KIND", raising=False)
+        monkeypatch.delenv("BEACON_ALLOW_UNTRIAGED", raising=False)
+        self._set_isatty(monkeypatch, True)
+        assert commands._human_untriaged_bypass_refused() is False
+
 
 # ---------------------------------------------------------------------------
 # cmd_task_add — human --untriaged rejected, machine --untriaged continues

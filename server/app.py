@@ -1063,7 +1063,11 @@ class MilestoneUpdate(BaseModel):
     target_date: str = ""
     status: str = ""
     description: str = ""
-    priority: str = ""
+    # ms-126 (AX round-2): model "unset" (None = field omitted = no change)
+    # distinctly from an explicit value, and disclose optionality in the schema.
+    # None → leave the priority untouched; a provided value must be one of the 5
+    # severities (untriaged is a machine sentinel, rejected as not-a-severity).
+    priority: Optional[str] = None
     objective: str = ""
     acceptance_criteria: str = ""
 
@@ -1083,14 +1087,16 @@ class EntryUpdate(BaseModel):
     status: str = ""
     detail: str = ""
     date: str = ""
-    # ms-126 (e-4224): the untriaged-recovery path must exist on the web
-    # surface too. A machine-created task lands with the ``untriaged``
-    # sentinel; a non-terminal human triaging it from the Web UI needs to
-    # PATCH a real severity here. Empty = "no change" (core.task_update
-    # treats a falsy priority as untouched), so this never disturbs the
-    # commit/note/status-only edit paths. Without this field the only way to
-    # clear a task's untriaged debt was the CLI — a hole in ux-principle-no-terminal.
-    priority: str = ""
+    # ms-126 (e-4224 + AX round-2): the untriaged-recovery path must exist on
+    # the web surface too — a non-terminal human triaging a machine-created
+    # untriaged task PATCHes a real severity here. Modelled as Optional so the
+    # schema DISCLOSES the value domain and distinguishes "unset" (None = field
+    # omitted = no change) from an explicit value. A provided value must be one
+    # of the 5 severities; ``untriaged`` is a machine sentinel and is rejected
+    # state-independently (you cannot re-assert it from a client — omit the
+    # field to leave an untriaged task unchanged). This removes the earlier
+    # state-dependent "echo untriaged = no-op / else 400" ambiguity.
+    priority: Optional[str] = None
 
 class LogCommit(BaseModel):
     hash: str
@@ -2394,7 +2400,7 @@ def update_milestone(project_id: str, ms_id: str, body: MilestoneUpdate,
                 title=body.title, progress=body.progress,
                 target_date=body.target_date, status=body.status,
                 description=body.description,
-                priority=body.priority,
+                priority=body.priority or "",  # ms-126: None = no change
                 objective=body.objective,
                 acceptance_criteria=body.acceptance_criteria,
             )
@@ -2538,7 +2544,9 @@ def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
                 data, entry_id,
                 description=body.description, status=body.status,
                 detail=body.detail, date=body.date,
-                priority=body.priority,  # ms-126 e-4224: web untriaged-recovery
+                # ms-126: None (field omitted) = leave priority unchanged; a
+                # provided value is validated by the single-source resolver.
+                priority=body.priority or "",
                 author=author,
             )
         except ValueError as e:

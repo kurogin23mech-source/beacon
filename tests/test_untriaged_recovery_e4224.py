@@ -151,23 +151,41 @@ class TestCliTaskRecovery:
             _load(project_dir)["milestones"][0]["entries"][0]["meta"]["priority"] == "high"
         )
 
-    def test_echoing_untriaged_unchanged_is_idempotent_noop(
+    def test_omitting_priority_leaves_untriaged_unchanged(
         self, project_dir, monkeypatch
     ):
-        # AX#1 read-modify-write: an untriaged task's stored value IS
-        # "untriaged"; echoing it back unchanged (e.g. a status-only edit that
-        # re-sends the whole object) must be a no-op, not a rejection. The value
-        # stays untriaged and the debt count is unaffected.
+        # AX round-2: to leave an untriaged task unchanged, you OMIT priority
+        # (no --priority) — a status-only edit must not touch the sentinel. This
+        # is the correct read-modify-write pattern (omit unchanged fields).
         before = commands._count_untriaged_active(_load(project_dir))
         monkeypatch.setenv("BEACON_ENTRY_ID", "e-1")
-        monkeypatch.setenv("BEACON_PRIORITY", core.UNTRIAGED_PRIORITY)  # echo current
-        monkeypatch.setenv("BEACON_STATUS", "in_progress")             # the real edit
-        commands.cmd_task_update()  # must NOT raise
+        monkeypatch.delenv("BEACON_PRIORITY", raising=False)  # omit priority
+        monkeypatch.setenv("BEACON_STATUS", "in_progress")    # the real edit
+        commands.cmd_task_update()
         data = _load(project_dir)
         entry = data["milestones"][0]["entries"][0]
         assert entry["status"] == "in_progress"
-        assert entry["meta"]["priority"] == core.UNTRIAGED_PRIORITY  # still the sentinel
+        assert entry["meta"]["priority"] == core.UNTRIAGED_PRIORITY  # untouched
         assert commands._count_untriaged_active(data) == before
+
+    def test_echoing_untriaged_is_rejected_state_independently(
+        self, project_dir, monkeypatch, capsys
+    ):
+        # AX round-2: explicitly sending "untriaged" is rejected regardless of
+        # the current value (state-independent) — a client cannot re-assert the
+        # machine sentinel. Even on an already-untriaged task, echoing it is a
+        # precise error (not a silent no-op), which is predictable from the
+        # surface. The entry is left unchanged.
+        monkeypatch.setenv("BEACON_ENTRY_ID", "e-1")
+        monkeypatch.setenv("BEACON_PRIORITY", core.UNTRIAGED_PRIORITY)
+        with pytest.raises(SystemExit) as exc:
+            commands.cmd_task_update()
+        assert exc.value.code == 1
+        assert "sentinel, not a severity" in capsys.readouterr().out
+        assert (
+            _load(project_dir)["milestones"][0]["entries"][0]["meta"]["priority"]
+            == core.UNTRIAGED_PRIORITY
+        )
 
 
 class TestCliMilestoneRecovery:
@@ -328,12 +346,32 @@ class TestWebRecovery:
         assert "sentinel, not a severity" in r.text
         assert _store[pid]["milestones"][0]["entries"][0]["meta"]["priority"] == "low"
 
-    def test_patch_task_read_modify_write_echo_of_untriaged_is_accepted(self, web):
-        # AX#1: the canonical AI edit is GET → change one field → PATCH the whole
-        # object back. An untriaged task's GET carries priority=="untriaged"; a
-        # status-only edit that echoes it must succeed (200), not 400 on the
-        # API's own emitted value. The sentinel is preserved (debt unchanged).
-        pid = "p-recover-task-rmw"
+    def test_patch_untriaged_task_omit_priority_is_noop(self, web):
+        # AX round-2: to leave an untriaged task unchanged, OMIT priority. A
+        # status-only PATCH (priority defaults to None = no change) succeeds and
+        # preserves the sentinel — this is the correct read-modify-write pattern
+        # (send only the fields you change), and None is disclosed in the schema.
+        pid = "p-recover-task-omit"
+        _seed(pid, milestones=[_active_ms(entries=[
+            {"id": "e-1", "type": "task", "description": "imported",
+             "status": "todo", "meta": {"priority": core.UNTRIAGED_PRIORITY}},
+        ])])
+        r = web.patch(
+            f"/api/projects/{pid}/entries/e-1",
+            json={"status": "in_progress"},  # priority omitted → None → no change
+        )
+        assert r.status_code == 200, r.text
+        entry = _store[pid]["milestones"][0]["entries"][0]
+        assert entry["status"] == "in_progress"
+        assert entry["meta"]["priority"] == core.UNTRIAGED_PRIORITY
+        assert commands._count_untriaged_active(_store[pid]) == (0, 1)
+
+    def test_patch_untriaged_task_explicit_untriaged_is_rejected(self, web):
+        # AX round-2: explicitly re-sending "untriaged" is rejected 400 even on an
+        # already-untriaged task — state-independent, predictable from the surface
+        # (no "sometimes a silent no-op, sometimes a 400" ambiguity). The client
+        # is told to omit the field instead.
+        pid = "p-recover-task-echo"
         _seed(pid, milestones=[_active_ms(entries=[
             {"id": "e-1", "type": "task", "description": "imported",
              "status": "todo", "meta": {"priority": core.UNTRIAGED_PRIORITY}},
@@ -342,11 +380,12 @@ class TestWebRecovery:
             f"/api/projects/{pid}/entries/e-1",
             json={"status": "in_progress", "priority": core.UNTRIAGED_PRIORITY},
         )
-        assert r.status_code == 200, r.text
+        assert r.status_code == 400, r.text
+        assert "sentinel, not a severity" in r.text
+        # Rejected atomically: neither status nor priority changed.
         entry = _store[pid]["milestones"][0]["entries"][0]
-        assert entry["status"] == "in_progress"
+        assert entry["status"] == "todo"
         assert entry["meta"]["priority"] == core.UNTRIAGED_PRIORITY
-        assert commands._count_untriaged_active(_store[pid]) == (0, 1)
 
     def test_patch_task_status_only_leaves_priority_untouched(self, web):
         # Empty priority in the PATCH body = "no change": a status-only edit
