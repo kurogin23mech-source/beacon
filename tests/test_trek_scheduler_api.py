@@ -3083,3 +3083,140 @@ def test_welcome_tick_skips_pre_A_member_without_session_id():
     assert welcome_events == [], (
         f"welcome tick must be skipped for pre-A members, got {welcome_events}"
     )
+
+
+# ---------------------------------------------------------------------------
+# ms-128 方針8 (e-4368) — leader-halt escalation on the tick
+# ---------------------------------------------------------------------------
+
+def test_leader_halt_escalation_fires_to_notify_channel():
+    _seed_trek(
+        trek_id="tk-lhalt01",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-83"}],
+        last_at="2026-06-18T00:00:00.000000Z",  # long ago → not the driver
+    )
+    # A leader_review task the leader has ignored for years (>> 4h vs real now).
+    _treks["tk-lhalt01"]["task_states"] = {
+        "e-stale": {"state": "leader_review",
+                    "updated_at": "2020-01-01T00:00:00.000000Z"},
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-lhalt01"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["leader_review_stall_escalations"]) == 1
+    assert body["leader_review_stall_escalations"][0]["trek_id"] == "tk-lhalt01"
+
+    events = _bus_events_by_project["beacon-test"]
+    lh = [e for e in events
+          if e.get("payload", {}).get("kind") == "trek-leader-review-stall-escalation"]
+    assert len(lh) == 1
+    ev = lh[0]
+    assert ev["channel"] == "notify"
+    assert ev["delivery"] == "notify-user-only"
+    assert "take-over" in ev["payload"]["body"]  # halted leader → take-over recovery
+    assert ev["payload"]["oldest_task_id"] == "e-stale"
+
+    # meta stamped so the refire cooldown holds next tick.
+    assert _treks["tk-lhalt01"]["meta"]["last_leader_review_stall_escalation_at"]
+
+
+def test_leader_halt_not_fired_when_queue_fresh():
+    _seed_trek(
+        trek_id="tk-lhalt02",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-83"}],
+    )
+    # No leader_review items → nothing to drain → no leader-halt escalation.
+    _treks["tk-lhalt02"]["task_states"] = {
+        "e-1": {"state": "working", "updated_at": "2020-01-01T00:00:00.000000Z"},
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-lhalt02"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["leader_review_stall_escalations"] == []
+
+
+def test_leader_halt_skipped_when_halted():
+    _seed_trek(
+        trek_id="tk-lhalt03",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-83"}],
+    )
+    _treks["tk-lhalt03"]["halt"] = {"reason": "paused", "issued_by_session_id": "sv-leader"}
+    _treks["tk-lhalt03"]["task_states"] = {
+        "e-stale": {"state": "leader_review",
+                    "updated_at": "2020-01-01T00:00:00.000000Z"},
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-lhalt03"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["leader_review_stall_escalations"] == []
+
+
+def test_leader_halt_does_not_halt_the_trek():
+    # Graceful degradation: firing a leader-halt escalation must NOT set the
+    # trek's halt. leader-halt = "review backlog", not "stop the world" — the
+    # trek stays active so executors keep receiving ticks. (Executor task-state
+    # is governed by the separate auto-stall/halt-sweep passes, not this one.)
+    _seed_trek(
+        trek_id="tk-lhalt04",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-83"}],
+    )
+    _treks["tk-lhalt04"]["task_states"] = {
+        "e-stale": {"state": "leader_review",
+                    "updated_at": "2020-01-01T00:00:00.000000Z"},
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-lhalt04"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    assert len(resp.json()["leader_review_stall_escalations"]) == 1
+    saved = _treks["tk-lhalt04"]
+    assert saved.get("halt") in (None, {})          # trek NOT halted
+    assert saved.get("status") == "active"          # still running
+
+
+def test_leader_stall_no_scope_surfaces_error_not_silent():
+    # AX A5: a watchdog that can't post (no resolvable scope) must surface the
+    # failure in `errors`, not silently skip (silent watchdog-disable is worse
+    # than the thing it watches).
+    _seed_trek(
+        trek_id="tk-lhalt05",
+        status="active",
+        cadence=10,
+        scope=[],  # no project → nowhere to post
+    )
+    _treks["tk-lhalt05"]["task_states"] = {
+        "e-stale": {"state": "leader_review",
+                    "leader_review_entered_at": "2020-01-01T00:00:00.000000Z"},
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-lhalt05"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["leader_review_stall_escalations"] == []
+    errs = [e for e in body["errors"]
+            if e.get("escalation") == "trek.leader_review_stall_escalation"]
+    assert len(errs) == 1
+    assert errs[0]["error"] == "no_scope_project"

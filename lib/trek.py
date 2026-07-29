@@ -416,13 +416,25 @@ def set_task_state(trek_doc: dict, *, task_id: str, state: str,
     validate_task_state_transition(current, state)
     states = trek_doc.setdefault("task_states", {})
     now = utcnow_iso()
-    states[task_id] = {
+    entry = {
         "state": state,
         "updated_at": now,
         "updated_by_session_id": updated_by_session_id or "",
         "note": (note or "")[:500],
         "last_activity_at": now,
     }
+    # ms-128 方針8 (e-4368) — stamp when a task *enters* leader_review, so leader
+    # stall detection reads a dedicated field instead of ``updated_at`` (which a
+    # future non-transition re-stamp could reset). Only on the actual transition
+    # into leader_review (not on idempotent re-affirmation) so the entry time is
+    # the *first* time it started waiting.
+    if state == "leader_review":
+        if current == "leader_review":
+            prior = (states.get(task_id) or {}).get("leader_review_entered_at")
+            entry["leader_review_entered_at"] = prior or now
+        else:
+            entry["leader_review_entered_at"] = now
+    states[task_id] = entry
     trek_doc["updated_at"] = now
     return trek_doc
 
@@ -3980,6 +3992,127 @@ HALT_STALL_TIMEOUT_MINUTES = 240   # 進捗停滞: 同一応答 + commit 増分�
 HALT_REASON_LIVENESS = "liveness-timeout"   # 生存断絶 (pulse 途絶)
 HALT_REASON_STALL = "progress-stall"        # 進捗停滞 (同一応答 + commit 不変)
 
+# ms-128 方針8 (e-4368) — リーダー halt の機械検知。リーダーは監視ツリーの根で
+# Trek 内に番犬がいない。既存の idle-escalation は「実行セッションの pulse」を
+# 基準にするため、実行セッションが活発なのにリーダーだけ寝ているケース (=
+# 2026-07-27 の 4.5h stall の実態) を捕まえられない。リーダーの唯一の観測可能な
+# 動作は leader_review キューの消化 (= 思想/目的達成レビュー verdict) なので、
+# 「キューが drain されていない」ことをリーダー halt の signal とする。
+#
+# **oldest-item-age 方式** (full-queue fingerprint でなく): 働いているリーダーは
+# 古い順にキューを消化する (digest は oldest-first で並べる)。よって「最古の
+# leader_review item が threshold を超えて待たされている」= リーダーが前面を
+# 消化していない = halt。この方式は実行セッションが新しい leader_review を後ろに
+# 積んでも最古は動かないので、executor churn に頑健 (full-queue fingerprint だと
+# 追加のたびに stall clock がリセットされ寝たリーダーを見逃す)。閾値は executor
+# halt と同じ 4h。これが方針6 の 2 面のうち「進捗停滞」面をリーダーに写したもの
+# (「生存断絶」面 = trek 全体の沈黙は既存の idle-escalation が担う)。
+# Threshold = the same 4h as executor progress-stall. Bound by reference (not a
+# copied literal) so "tune the halt window" is one edit, and the "same as executor"
+# intent is enforced by code, not a comment (maintainability review 2026-07-29).
+LEADER_REVIEW_STALL_MINUTES = HALT_STALL_TIMEOUT_MINUTES
+# Vocabulary: this is deliberately NOT a HALT_REASON_* value. ``halt`` in Trek is
+# the reserved Andon-cord (trek_doc["halt"], is_halted/set_halt = stop-the-world).
+# leader-review-stall is a *notify-display* reason: the trek stays active, only the
+# leader's review is stalled. It never flows into the halt-sweep machinery. Keeping
+# it out of the HALT_REASON_* namespace prevents a future editor from feeding it to
+# halt-sweep (AX + maintainability review 2026-07-29).
+LEADER_REVIEW_STALL_REASON = "leader-review-stall"
+
+
+def leader_review_entry_time(entry: dict) -> "datetime.datetime | None":
+    """Return when a task_state entry entered leader_review, UTC-aware or None.
+
+    Prefers the dedicated ``leader_review_entered_at`` stamp (written by
+    ``set_task_state`` / ``force_halt_to_leader_review`` on the transition into
+    leader_review) and falls back to ``updated_at`` for legacy entries stamped
+    before the dedicated field existed. The dedicated field decouples stall
+    detection from ``updated_at`` semantics, so a future "harmless" re-stamp of
+    ``updated_at`` (note edit etc.) can't silently reset the stall clock
+    (maintainability review 2026-07-29).
+    """
+    return _parse_iso_to_dt(
+        (entry or {}).get("leader_review_entered_at")
+        or (entry or {}).get("updated_at") or ""
+    )
+
+
+def evaluate_leader_review_stall(
+    trek_doc: dict,
+    *,
+    now: datetime.datetime | None = None,
+    stall_timeout_minutes: int = LEADER_REVIEW_STALL_MINUTES,
+) -> dict | None:
+    """Detect a stalled LEADER by the leader_review queue not draining (方針8).
+
+    Read-only (no mutation): returns stall info or None so the caller (server
+    tick) decides whether to escalate. Pure w.r.t. clock (``now`` injected).
+
+    Signal: how long the *current* leader has failed to drain the front of the
+    queue. A working leader drains oldest-first, so the anchor is the oldest
+    leader_review item's entry time — but clamped so it is never earlier than
+    when the current leader took charge (``meta.leader_assumed_at``). That clamp
+    means a fresh leader who just took over an old backlog gets a full
+    ``stall_timeout_minutes`` grace window instead of being flagged (and
+    re-escalated) the instant they assume a stale queue (AX review 2026-07-29).
+
+    Robust to executor churn: new items piled at the back don't move the oldest,
+    so a busy executor stream can't mask a sleeping leader. This is the
+    leader-side "progress-stall" face of the 方針6 mechanical detection; the
+    "liveness" face (whole-trek silence) stays with idle-escalation.
+
+    Guards: only ``status == 'active'`` treks with a ``leader_session_id`` and no
+    deliberate ``halt`` (via ``is_halted``) are evaluated. Empty leader_review
+    queue → None.
+
+    Returns ``{"reason", "oldest_task_id", "waited_minutes", "queue_size",
+    "leader_session_id"}`` or None. ``queue_size`` counts *all* leader_review
+    items (including any with an unparseable timestamp), so it never under-reports
+    the backlog even when a broken entry is skipped for the age computation.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.timezone.utc)
+    if trek_doc.get("status") != "active":
+        return None
+    if is_halted(trek_doc):
+        return None
+    leader_sid = trek_doc.get("leader_session_id") or ""
+    if not leader_sid:
+        return None
+
+    states = trek_doc.get("task_states") or {}
+    queue_size = 0
+    dated: list[tuple[str, datetime.datetime]] = []
+    for tid, entry in states.items():
+        entry = entry or {}
+        if migrate_legacy_task_state(entry.get("state") or DEFAULT_TASK_STATE) \
+                != "leader_review":
+            continue
+        queue_size += 1  # count every leader_review item, even broken-timestamp
+        entered = leader_review_entry_time(entry)
+        if entered is not None:
+            dated.append((tid, entered))
+    if not dated:
+        return None  # no parseable entry time → can't measure staleness
+
+    oldest_tid, oldest_at = min(dated, key=lambda p: p[1])
+    # Clamp the anchor to when the current leader took charge, so a fresh leader
+    # gets a full grace window on an inherited backlog.
+    assumed = _parse_iso_to_dt((trek_doc.get("meta") or {}).get(
+        "leader_assumed_at") or "")
+    anchor = max(oldest_at, assumed) if assumed is not None else oldest_at
+    waited = now - anchor
+    if waited < datetime.timedelta(minutes=stall_timeout_minutes):
+        return None
+    return {
+        "reason": LEADER_REVIEW_STALL_REASON,
+        "oldest_task_id": oldest_tid,
+        "waited_minutes": int(waited.total_seconds() // 60),
+        "queue_size": queue_size,
+        "leader_session_id": leader_sid,
+    }
+
 
 def compute_response_fingerprint(pulse_entry: dict) -> str:
     """Normalised hash of a session's latest tick response (ms-128 e-4367).
@@ -4155,6 +4288,10 @@ def force_halt_to_leader_review(
     entry["halt_reason"] = halt_reason
     entry["updated_at"] = now_iso
     entry["last_activity_at"] = now_iso
+    # ms-128 方針8 (e-4368) — this is a transition INTO leader_review, so stamp
+    # the dedicated entry-time the leader-stall detector reads (see
+    # leader_review_entry_time).
+    entry["leader_review_entered_at"] = now_iso
     entry["updated_by_session_id"] = "trek-scheduler"
     entry["note"] = (
         f"server-forced to leader_review (halt: {halt_reason}, ms-128 e-4309)"
@@ -4495,7 +4632,14 @@ def transfer_leader(trek_doc: dict, *, target_session_id: str) -> dict:
     if trek_doc.get("leader_session_id") == target_session_id:
         return trek_doc  # already the leader, idempotent
     trek_doc["leader_session_id"] = target_session_id
-    trek_doc["updated_at"] = utcnow_iso()
+    now = utcnow_iso()
+    # ms-128 方針8 (e-4368) — stamp when this leader took charge so leader-stall
+    # detection gives a fresh leader a full grace window on an inherited backlog
+    # (instead of immediately re-flagging them for a 4h-old queue they just
+    # assumed). ``take-over`` routes through here too, so both recovery paths
+    # reset the stall anchor.
+    trek_doc.setdefault("meta", {})["leader_assumed_at"] = now
+    trek_doc["updated_at"] = now
     return trek_doc
 
 

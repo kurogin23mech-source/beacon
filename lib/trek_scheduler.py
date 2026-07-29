@@ -987,6 +987,129 @@ def build_idle_escalation_payload(
     }
 
 
+def _cooldown_elapsed(
+    trek_doc: dict,
+    *,
+    meta_key: str,
+    now: datetime.datetime,
+    refire_cooldown_minutes: int,
+) -> bool:
+    """Return True iff enough time has passed since the last fire at ``meta_key``.
+
+    Shared refire-cooldown check for notify escalations (idle / leader-review-
+    stall / future kinds) so the >= comparison + UTC normalisation live in one
+    place instead of being copied per escalation type (maintainability review
+    2026-07-29). Never-fired (missing key) → True (fire now).
+    """
+    raw = (trek_doc.get("meta") or {}).get(meta_key, "")
+    last = _parse_iso(raw)
+    if last is None:
+        return True
+    return (_ensure_utc(now) - _ensure_utc(last)) >= datetime.timedelta(
+        minutes=refire_cooldown_minutes)
+
+
+# ---------------------------------------------------------------------------
+# ms-128 方針8 (e-4368) — leader-review-stall escalation.
+#
+# 既存 idle-escalation は「実行セッションの pulse」基準で trek 全体の沈黙を捕まえ
+# るが、実行が活発なのにリーダーだけ寝ているケースは捕まえられない。leader-review-
+# stall 検知 (trek.evaluate_leader_review_stall = leader_review キューの最古 item が
+# threshold 超えて未消化) を、idle-escalation と同じ notify-user-only の
+# refire-cooldown 付き escalation に載せる。倒す先は Trek 発注者 (= 人間 user)。
+# 別 AI (= 停滞したリーダー自身や他 executor) に投げても番犬にならないため。
+# 語彙: これは trek_doc["halt"] (= stop-the-world の Andon cord) とは別概念なので
+# "halt" 語を避け "leader-review-stall" で統一する (AX + 保守性レビュー 2026-07-29)。
+# ---------------------------------------------------------------------------
+
+# meta key for the last leader-review-stall escalation fire (refire cooldown).
+_LEADER_STALL_ESCALATION_META_KEY = "last_leader_review_stall_escalation_at"
+
+
+def get_last_leader_review_stall_escalation_at(
+    trek_doc: dict,
+) -> Optional[datetime.datetime]:
+    """Return the trek's last leader-review-stall escalation fire time, or None."""
+    meta = trek_doc.get("meta") or {}
+    return _parse_iso(meta.get(_LEADER_STALL_ESCALATION_META_KEY, ""))
+
+
+def pending_leader_review_stall_escalation(
+    trek_doc: dict,
+    *,
+    now: datetime.datetime,
+    stall_timeout_minutes: Optional[int] = None,
+    refire_cooldown_minutes: int = ESCALATION_REFIRE_COOLDOWN_MINUTES,
+) -> Optional[dict]:
+    """Return the stall_info to escalate this tick, or None (name → returns dict).
+
+    Wraps ``trek.evaluate_leader_review_stall`` (the pure detector) with the same
+    refire-cooldown discipline idle-escalation uses, so the user isn't flooded
+    with the same notice every tick. Missing trek module / detector (old repo)
+    → None (fail-safe, never blocks the tick). ``should_*``-style names imply a
+    bool; this returns the stall_info dict, so it is named ``pending_*`` (AX
+    review 2026-07-29).
+    """
+    trek_mod = _import_trek()
+    if trek_mod is None or not hasattr(trek_mod, "evaluate_leader_review_stall"):
+        return None
+    kwargs = {}
+    if stall_timeout_minutes is not None:
+        kwargs["stall_timeout_minutes"] = stall_timeout_minutes
+    stall_info = trek_mod.evaluate_leader_review_stall(trek_doc, now=now, **kwargs)
+    if not stall_info:
+        return None
+    if not _cooldown_elapsed(
+            trek_doc, meta_key=_LEADER_STALL_ESCALATION_META_KEY, now=now,
+            refire_cooldown_minutes=refire_cooldown_minutes):
+        return None
+    return stall_info
+
+
+def build_leader_review_stall_payload(
+    trek_doc: dict,
+    *,
+    stall_info: dict,
+    now: Optional[datetime.datetime] = None,
+) -> dict:
+    """Render the leader-review-stall escalation payload for the notify channel.
+
+    Pure. The user sees "リーダーがレビューを N 分捌いていない、take-over で復旧を"
+    without querying further. Recovery is take-over only: the stalled leader
+    can't authorize a transfer, so ``take-over`` (user-grain) is the single
+    correct path — the message does not offer transfer-leader (which needs a
+    live leader as the actor and would be a dead-end here, AX review 2026-07-29).
+    """
+    now = _ensure_utc(now or datetime.datetime.now(datetime.timezone.utc))
+    trek_id = trek_doc.get("trek_id", "")
+    leader_session = stall_info.get("leader_session_id") \
+        or trek_doc.get("leader_session_id", "")
+    waited = int(stall_info.get("waited_minutes") or 0)
+    oldest = stall_info.get("oldest_task_id", "")
+    queue_size = int(stall_info.get("queue_size") or 0)
+    body = (
+        f"[Trek リーダーレビュー停滞] trek={trek_id} "
+        f"leader_session={leader_session} が レビュー待ちキューを {waited} 分 "
+        f"消化していません (最古={oldest}、キュー {queue_size} 件)。Trek は稼働継続 "
+        f"していますが (= 全停止ではない)、リーダーがレビューを捌かず成果が "
+        f"leader_review に溜まり続けています。あなた (発注者) の生きたセッションで "
+        f"`beacon trek take-over {trek_id}` を実行してリーダー役を引き取って "
+        f"ください (溜まったレビューキューは新リーダーがそのまま引き継ぎ、この通知は "
+        f"最古 item が捌かれ次第止まります)。"
+    )
+    return {
+        "trek_id": trek_id,
+        "leader_session_id": leader_session,
+        "kind": "trek-leader-review-stall-escalation",
+        "body": body,
+        "reason": stall_info.get("reason", ""),
+        "oldest_task_id": oldest,
+        "waited_minutes": waited,
+        "queue_size": queue_size,
+        "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # DM payload generation (e-1998)
 # ---------------------------------------------------------------------------
