@@ -51,6 +51,7 @@ VERB_LEDGER = {
     "acquisition_status": {"cls": "R", "secondary": [], "note": "[post-memo] 状態遷移の記録(R)"},
     "acquisition_attach_list": {"cls": "R", "secondary": [], "note": "[post-memo/ms-132] 施策にアタックリスト(table-doc)を紐づけ作成=doc_table_create へ委譲(R)"},
     "acquisition_lists": {"cls": "Q", "secondary": [], "note": "[post-memo/ms-132] 施策配下のアタックリスト read-only 一覧(Q)"},
+    "acquisition_attack_list_fill": {"cls": "R", "secondary": [], "note": "[post-memo/ms-132] 条件一致の未接触Accountをアタックリストへ一括行追記(R、dedup+dry-run)"},
 
     # --- activity ---
     "activity_done": {"cls": "R", "secondary": [], "note": ""},

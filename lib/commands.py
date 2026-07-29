@@ -26449,6 +26449,88 @@ def cmd_acquisition_lists():
             print(f"    {brk}")
 
 
+def cmd_acquisition_attack_list_fill():
+    """Bulk-register未接触 Accounts matching a condition query into an attack-list
+    as prospect rows (ms-132 e-4503).
+
+    Query = account phase (default 未接触 = 生リスト) + optional assignee /
+    name-substring. Each matched Account becomes one row (Account ref + the list's
+    own entry phase). Dedup: an Account already present as a row is skipped, so
+    re-running never double-registers (AC3). ``--dry-run`` previews
+    matched/to-add/skipped without writing.
+    Env: BEACON_DOC_ID, BEACON_FILL_PHASE, BEACON_FILL_ASSIGNEE, BEACON_FILL_NAME,
+    BEACON_FILL_LIMIT, BEACON_DRY_RUN, BEACON_JSON.
+    """
+    import attack_list
+    import table_doc
+    import table_type
+    import sales_entities
+    doc_id = os.environ.get("BEACON_DOC_ID", "")
+    _USAGE = ("Usage: beacon acquisition attack-list-fill <doc-id> "
+              "[--phase 未接触] [--assignee <user>] [--name-contains <s>] "
+              "[--limit N] [--dry-run] [--json]")
+    if not doc_id:
+        print("Error: doc-id required\n" + _USAGE, file=sys.stderr)
+        sys.exit(1)
+    if _refuse_if_bus_origin("acquisition_attack_list_fill", {"doc_id": doc_id}):
+        sys.exit(1)
+    phase_filter = os.environ.get("BEACON_FILL_PHASE", "") or "未接触"
+    assignee_filter = os.environ.get("BEACON_FILL_ASSIGNEE", "") or None
+    name_contains = os.environ.get("BEACON_FILL_NAME", "") or None
+    limit_raw = os.environ.get("BEACON_FILL_LIMIT", "")
+    limit = int(_parse_number(limit_raw, "<limit>")) if limit_raw.strip() else None
+    dry_run = os.environ.get("BEACON_DRY_RUN", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    content, title, model = _load_table_model(doc_id)
+    if not attack_list.is_attack_list(model.get("columns", [])):
+        print(f"Error: {doc_id} はアタックリスト (attack-list) ではありません "
+              f"(対象顧客 ref + 打診フェーズ enum の列が要ります)", file=sys.stderr)
+        sys.exit(1)
+    # New prospects start at the list's own entry phase (the funnel may be
+    # customized per company, so read it from the list, not the global default).
+    phase_col = next((c for c in model.get("columns", [])
+                      if c.get("key") == attack_list.COL_PHASE), {})
+    entry_phase = (phase_col.get("values")
+                   or [attack_list.INITIAL_PROSPECT_PHASE])[0]
+
+    data = load_project()
+    matched = sales_entities.filter_accounts(
+        data, phase=phase_filter, assignee=assignee_filter,
+        name_contains=name_contains)
+    if limit is not None:
+        matched = matched[:limit]
+    existing = {r.get("cells", {}).get(attack_list.COL_ACCOUNT)
+                for r in table_doc.active_rows(model)}
+    to_add = [a for a in matched if a.get("id") not in existing]
+    skipped_ids = [a.get("id") for a in matched if a.get("id") in existing]
+    added_ids = [a.get("id") for a in to_add]
+
+    if not dry_run and to_add:
+        table_type.install()
+        at = _now_iso()
+        actor = _actor_str()
+        for a in to_add:
+            table_doc.add_row(model, {attack_list.COL_ACCOUNT: a.get("id"),
+                                      attack_list.COL_PHASE: entry_phase},
+                              actor=actor, at=at)
+        _write_table_model(doc_id, title, content, model)
+
+    if json_mode:
+        print(json.dumps({
+            "doc_id": doc_id, "dry_run": dry_run, "matched": len(matched),
+            "added": [] if dry_run else added_ids,
+            "would_add": added_ids if dry_run else [],
+            "skipped_duplicates": skipped_ids, "entry_phase": entry_phase},
+            ensure_ascii=False))
+        return
+    verb = "追加予定" if dry_run else "追加"
+    print(f"{doc_id}: 条件一致 {len(matched)} 件 / {verb} {len(added_ids)} 件 "
+          f"(phase={entry_phase}) / 重複 skip {len(skipped_ids)} 件")
+    if dry_run:
+        print("  (--dry-run: 書き込みなし。実行は --dry-run を外す)")
+
+
 # --- send-account ledger (ms-107 e-3365) -----------------------------------
 # label → {email, routes{service:{namespace, alias}}}. Internal verbs invoked by
 # the sales Skills to register accounts and resolve the concrete MCP route a
@@ -27877,6 +27959,7 @@ if __name__ == "__main__":
         "acquisition_status": cmd_acquisition_status,
         "acquisition_attach_list": cmd_acquisition_attach_list,
         "acquisition_lists": cmd_acquisition_lists,
+        "acquisition_attack_list_fill": cmd_acquisition_attack_list_fill,
         "account_contact": cmd_account_contact,
         "account_phase": cmd_account_phase,
         "account_rename": cmd_account_rename,

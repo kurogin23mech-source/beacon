@@ -1355,6 +1355,32 @@ cmd_acquisition_lists() {
         python3 "$COMMANDS_PY" acquisition_lists
 }
 
+cmd_acquisition_attack_list_fill() {
+    # ms-132 e-4503 — 条件一致の未接触 Account をアタックリストへ一括行追記 (dedup + dry-run)。
+    ensure_project
+    local doc_id="" phase="" assignee="" name="" limit="" dry="" json=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --phase)         phase="${2:-}"; shift 2 ;;
+            --assignee)      assignee="${2:-}"; shift 2 ;;
+            --name-contains) name="${2:-}"; shift 2 ;;
+            --limit)         limit="${2:-}"; shift 2 ;;
+            --dry-run)       dry="1"; shift ;;
+            --json)          json="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon acquisition attack-list-fill <doc-id> [--phase 未接触] [--assignee <user>] [--name-contains <s>] [--limit N] [--dry-run] [--json]" ;;
+            *)   doc_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$doc_id" ]; then
+        echo "Usage: beacon acquisition attack-list-fill <doc-id> [--phase 未接触] [--assignee <user>] [--name-contains <s>] [--limit N] [--dry-run] [--json]"
+        echo "  条件(既定=未接触)に一致する Account を対象アタックリストへ一括で行追加。重複は自動 skip。--dry-run で事前確認。"
+        exit 1
+    fi
+    BEACON_DOC_ID="$doc_id" BEACON_FILL_PHASE="$phase" BEACON_FILL_ASSIGNEE="$assignee" \
+        BEACON_FILL_NAME="$name" BEACON_FILL_LIMIT="$limit" BEACON_DRY_RUN="$dry" \
+        BEACON_JSON="$json" python3 "$COMMANDS_PY" acquisition_attack_list_fill
+}
+
 cmd_account_rename() {
     ensure_project
     local acc_id="" name=""
@@ -3581,8 +3607,9 @@ case "${1:-}" in
             add)      shift 2; cmd_acquisition_add "$@" ;;
             list|ls)  shift 2; cmd_acquisition_list "$@" ;;
             # ms-132 e-4501: attack-list (table-doc) 紐づけ / 一覧。
-            attack-list)  shift 2; cmd_acquisition_attach_list "$@" ;;
-            attack-lists) shift 2; cmd_acquisition_lists "$@" ;;
+            attack-list)      shift 2; cmd_acquisition_attach_list "$@" ;;
+            attack-lists)     shift 2; cmd_acquisition_lists "$@" ;;
+            attack-list-fill) shift 2; cmd_acquisition_attack_list_fill "$@" ;;
             # ms-120 e-3907: named intent verbs for the lifecycle
             # (todo → in_progress → observing → done). status is read-only.
             start)    BEACON_ACQ_ID="${3:-}" BEACON_ACQ_STATUS="in_progress" python3 "$COMMANDS_PY" acquisition_status ;;
@@ -3594,7 +3621,7 @@ case "${1:-}" in
                 _deprecate_status_write acquisition "beacon acquisition start|observe|done <acq-id>"
                 cmd_acquisition_status "$@"
                 ;;
-            *)        echo "Usage: beacon acquisition [add|list|attack-list|attack-lists|start|observe|done|show]  (顧客獲得ターゲット: 取引先の無い獲得・準備作業。attack-list/attack-lists でアタックリスト管理)" ;;
+            *)        echo "Usage: beacon acquisition [add|list|attack-list|attack-lists|attack-list-fill|start|observe|done|show]  (顧客獲得ターゲット: 取引先の無い獲得・準備作業。attack-list系でアタックリスト管理)" ;;
         esac
         ;;
     opportunity|opp)
