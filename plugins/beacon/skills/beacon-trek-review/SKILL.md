@@ -200,6 +200,14 @@ beacon trek show <trek_id> --json で task_states を集計
 ## 制約
 
 - **必ず 3 択を 1 つ選ぶ** (= 「後で」 を出さない、 leader bottleneck 病理の構造解消)
+- **状態を直接ハックせず review flow を経由する (= ms-128 / e-4283)**: leader は
+  `beacon trek task-state` を素手で任意 state に書き換えるのでなく、本 Skill の 3 択
+  (Step 2 完成 / Step 2H halt 救済) が返す verdict → state 遷移を通す。dogfood
+  (2026-07-27) では leader (AI) が正しい運用を把握できず ad-hoc DM で回し、無効遷移
+  + ハックで user_review を通そうとした。**そもそも状態機械が抜け道を塞ぐ**
+  (`todo`/`working`→`user_review` 直行は不能、`user_review` 入口は
+  `leader_review→user_review` のリーダー承認のみ、素の approve は attainment gate で
+  留置、方針5/6 + e-4373/e-4386)。この Skill はその正しい 1 本道を自明にする層。
 - **verdict 集合は halt_reason タグで分岐する (= e-4374 / AC7)。halt 救済 (halt_reason 非 null) には approve を出さない (= 未完成を完遂扱いにしない)。完成 (halt_reason=null) には reassign/dm-nudge/re-open を出さない。lib `leader_review_verdict_set` と一致させる**
 - `task-state` 書き換えは leader 権限 (= server-side で leader role + leader_session_id 一致を検証)
 - forward-to-user 時、 user の response を待つ間 task は `user_review` のまま、 scheduler は当該 Trek への progress-check 配信停止

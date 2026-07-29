@@ -147,15 +147,19 @@ cd "$PROJECT_DIR" && beacon dm send --channel session-dm \
 
 ## Step 4: 実装 / commit / task done loop
 
+**状態機械を必ず駆動する (ms-128 / e-4282)**: 候補ごとに着手 / 完成 stamp が **必須** (省略すると dogfood で観測した「task_states 空のまま work が進む」病理になる):
+
 各候補ごとに:
 
-1. **scope check** — 触る path / task が scope 配列に match するか self-check、 match しない → Step 6 escalation
-2. **実装** — Read / Edit / Write でコード変更、 Bash で test 実行 green を確認
-3. **中間 commit** — 形式 `<type>(<ms-id>): <概要> (<e-XXX>)`
-4. **task done 判定** — acceptance_criteria を物理照合、 DONE / PARTIAL / SKIP の 3 択、 PARTIAL は follow-up task 起票:
-   ```bash
-   cd "$PROJECT_DIR" && beacon task done <eXXX> --reason "<判断軌跡>"
-   ```
+1. **着手 stamp (必須)**: `beacon trek task-state <trek-id> <task-id> working --note "着手: <概要>"`
+2. **scope check** — 触る path / task が scope に match するか、しない → Step 6 escalation
+3. **実装** — Read / Edit / Write + Bash で test green
+4. **中間 commit** — `<type>(<ms-id>): <概要> (<e-XXX>)`
+5. **完成 stamp (必須)**: `beacon trek task-state <trek-id> <task-id> leader_review --note "完成/PR: <概要>"`
+   executor は `user_review`/`done` へ直接倒さない — 入口は `leader_review→user_review` の
+   リーダー承認のみで、状態機械が `todo`/`working` からの終端直行を弾く (方針5 / e-4373)。
+6. **pool task done 判定** — project pool 側の完了を AC 物理照合 (DONE/PARTIAL/SKIP、
+   PARTIAL は follow-up 起票): `beacon task done <eXXX> --reason "<判断軌跡>"`
 
 1 候補完了したら **user に「次行きますか?」 と聞かない**。 Step 2 に戻って次候補。 scope 空 / budget 枯渇 / Step 6 escalation まで継続。
 

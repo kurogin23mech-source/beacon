@@ -9154,6 +9154,7 @@ def cmd_trek_task_state():
     ).get("updated_by_session_id", "")
     gate = trek.completion_gate_decision(
         effective_state=effective_state,
+        from_state=from_state,
         verdict=verdict,
         caller_sid=caller_sid,
         prior_stamper_sid=prior_stamper_sid,
@@ -9925,8 +9926,8 @@ def cmd_trek_slot_add():
         else:
             target_ref = milestone or operation or task
             print(
-                f"Staged slot-add on trek {trek_id}: "
-                f"slot_id={slot_id}, target={project}:{target_ref} "
+                f"Staged scope-add on trek {trek_id}: "
+                f"target={project}:{target_ref} (id={slot_id}) "
                 f"(pending_id: {pending_id}). "
                 f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
             )
@@ -9960,8 +9961,8 @@ def cmd_trek_slot_add():
     else:
         target_ref = milestone or operation or task
         print(
-            f"Staged slot-add on trek {trek_id}: "
-            f"slot_id={slot_id}, target={project}:{target_ref} "
+            f"Staged scope-add on trek {trek_id}: "
+            f"target={project}:{target_ref} (id={slot_id}) "
             f"(pending_id: {pending_id}). "
             f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
         )
@@ -9987,7 +9988,7 @@ def cmd_trek_slot_amend():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not trek_id or not slot_id:
-        print("Error: trek_id and slot_id are required", file=sys.stderr)
+        print("Error: trek_id and target id are required", file=sys.stderr)
         sys.exit(1)
     add_list = [c.strip() for c in add_raw.split(",") if c.strip()]
     rem_list = [c.strip() for c in rem_raw.split(",") if c.strip()]
@@ -10015,7 +10016,7 @@ def cmd_trek_slot_amend():
             print(json.dumps(pending, ensure_ascii=False))
         else:
             print(
-                f"Staged slot-amend on trek {trek_id}, slot={slot_id} "
+                f"Staged scope-amend on trek {trek_id}, target id={slot_id} "
                 f"(pending_id: {pending_id}). "
                 f"add={add_list} remove={rem_list}. "
                 f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
@@ -10044,7 +10045,7 @@ def cmd_trek_slot_amend():
         print(json.dumps(rec, ensure_ascii=False))
     else:
         print(
-            f"Staged slot-amend on trek {trek_id}, slot={slot_id} "
+            f"Staged scope-amend on trek {trek_id}, target id={slot_id} "
             f"(pending_id: {pending_id}). "
             f"add={add_list} remove={rem_list}. "
             f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
@@ -10071,7 +10072,7 @@ def cmd_trek_slot_claim():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not trek_id or not slot_id:
-        print("Error: trek_id and slot_id are required", file=sys.stderr)
+        print("Error: trek_id and target id are required", file=sys.stderr)
         sys.exit(1)
     if unclaim:
         session_id = ""
@@ -10101,7 +10102,7 @@ def cmd_trek_slot_claim():
         else:
             verb = "unclaim" if not session_id else f"claim by {session_id}"
             print(
-                f"Staged slot-{verb} on trek {trek_id}, slot={slot_id} "
+                f"Staged scope-{verb} on trek {trek_id}, target id={slot_id} "
                 f"(pending_id: {pending_id}). "
                 f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
             )
@@ -10129,7 +10130,7 @@ def cmd_trek_slot_claim():
     else:
         verb = "unclaim" if not session_id else f"claim by {session_id}"
         print(
-            f"Staged slot-{verb} on trek {trek_id}, slot={slot_id} "
+            f"Staged scope-{verb} on trek {trek_id}, target id={slot_id} "
             f"(pending_id: {pending_id}). "
             f"Approve: beacon trek scope-approve {trek_id} {pending_id}"
         )
@@ -10164,7 +10165,7 @@ def cmd_trek_slot_list():
             print(json.dumps(rows, ensure_ascii=False))
             return
         if not rows:
-            print(f"(no slots on trek {trek_id})")
+            print(f"(no targets on trek {trek_id})")
             return
         for r in rows:
             children = r.get("included_task_ids")
@@ -10174,8 +10175,8 @@ def cmd_trek_slot_list():
                 children_repr = f"{len(children)} explicit: {children}"
             claim = r.get("claim_session_id") or "(unclaimed)"
             print(
-                f"- slot_id={r.get('slot_id') or '(legacy-no-id)'} "
-                f"{r.get('target_kind', '')}={r.get('target_id', '')} "
+                f"- {r.get('target_kind', '')}={r.get('target_id', '')} "
+                f"(id={r.get('slot_id') or '(legacy-no-id)'}) "
                 f"project={r.get('project', '')} "
                 f"children={children_repr} claim={claim}"
             )
@@ -10190,7 +10191,7 @@ def cmd_trek_slot_list():
         print(json.dumps(rows, ensure_ascii=False))
     else:
         if not rows:
-            print(f"(no slots on trek {trek_id})")
+            print(f"(no targets on trek {trek_id})")
             return
         for r in rows:
             children = r.get("included_task_ids")
@@ -10200,8 +10201,8 @@ def cmd_trek_slot_list():
                 children_repr = f"{len(children)} explicit: {children}"
             claim = r.get("claim_session_id") or "(unclaimed)"
             print(
-                f"- slot_id={r['slot_id'] or '(legacy-no-id)'} "
-                f"{r['target_kind']}={r['target_id']} "
+                f"- {r['target_kind']}={r['target_id']} "
+                f"(id={r['slot_id'] or '(legacy-no-id)'}) "
                 f"project={r['project']} "
                 f"children={children_repr} claim={claim}"
             )

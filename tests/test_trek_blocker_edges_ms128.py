@@ -129,9 +129,9 @@ def test_satisfied_blocker_is_noop(sat_state):
     doc: dict = {}
     # Drive B to a satisfied state.
     trek.set_task_state(doc, task_id="B", state="working")
-    if sat_state == "leader_review":
-        trek.set_task_state(doc, task_id="B", state="leader_review")
-    else:
+    trek.set_task_state(doc, task_id="B", state="leader_review")
+    if sat_state == "user_review":
+        # e-4373: user_review は leader_review 経由が唯一の入口。
         trek.set_task_state(doc, task_id="B", state="user_review")
     # Blocking A on the already-satisfied B is a no-op: no edge, A stays todo.
     trek.add_blocker(doc, target_id="A", blocker_target_id="B")

@@ -82,9 +82,11 @@ _ALL_MET = [{"criterion": "AC1", "verdict": "met"}]
 
 
 def _decide(**kw):
-    # Default: a completion claim reaching user_review from an external judge.
+    # Default: the only valid completion path — leader_review → user_review by an
+    # external judge (the leader, per SPEC state table v2 / e-4373).
     base = dict(
         effective_state="user_review",
+        from_state="leader_review",
         verdict="",
         caller_sid="judge-sid",
         prior_stamper_sid="executor-sid",
@@ -95,24 +97,52 @@ def _decide(**kw):
 
 
 def test_non_terminal_transition_passes():
-    d = _decide(effective_state="leader_review")
+    d = _decide(effective_state="leader_review", from_state="working")
     assert d["allowed"] is True and d["forced_state"] is None
 
 
-def test_forward_to_user_is_not_gated():
-    # 人間エスカレーションは verdict 無しでも user_review に到達できる。
+def test_forward_to_user_from_leader_review_is_not_gated():
+    # リーダーの人間エスカレーション (leader_review 起点) は verdict 無しでも通す。
     d = _decide(verdict="forward-to-user", attainment_verdict=None)
     assert d["allowed"] is True and d["forced_state"] is None
 
 
-def test_bare_working_to_user_review_is_gated():
-    # P1 fix: verdict 無しの素の working→user_review も完遂合格として gate 対象。
-    # SPEC は user_review 入口をリーダー承認に限定 — 実行者の bare stamp で terminal
-    # 到達させない (自己採点経路を塞ぐ)。attainment 無しなので leader_review 留置。
-    d = _decide(verdict="", attainment_verdict=None)
+def test_working_to_user_review_diverted_to_leader_review():
+    # e-4373: SPEC 状態遷移表は user_review 入口を leader_review→user_review に限定。
+    # working から user_review へ倒す試みは (verdict 問わず) leader_review に留置。
+    for v in ("", "approve", "forward-to-user"):
+        d = _decide(from_state="working", verdict=v,
+                    attainment_verdict=[{"criterion": "AC1", "verdict": "met"}])
+        assert d["allowed"] is False, v
+        assert d["forced_state"] == "leader_review", v
+        assert d["code"] == "user_review_requires_leader_review", v
+
+
+def test_forward_to_user_from_working_is_diverted_not_allowed():
+    # AC9 / e-4574: executor が working から forward-to-user でリーダーを迂回する経路を塞ぐ。
+    d = _decide(from_state="working", verdict="forward-to-user")
     assert d["allowed"] is False
     assert d["forced_state"] == "leader_review"
-    assert d["code"] == "attainment_verdict_required"
+
+
+def test_gate_stays_in_sync_with_transition_table():
+    # 保守性レビュー(2026-07-30 medium): gate の「user_review 入口=leader_review のみ」
+    # 規則が VALID_TASK_STATE_TRANSITIONS と drift しないことを機械保証する。
+    # user_review を許容しない全 from_state について、gate は必ず留置 (allowed=False)。
+    for s in trek.VALID_TASK_STATE_TRANSITIONS:
+        allows_user_review = "user_review" in trek.VALID_TASK_STATE_TRANSITIONS[s]
+        d = trek.completion_gate_decision(
+            effective_state="user_review", from_state=s, verdict="approve",
+            caller_sid="judge", prior_stamper_sid="executor",
+            attainment_verdict=[{"criterion": "AC1", "verdict": "met"}],
+        )
+        if allows_user_review:
+            # 唯一 user_review を許す辺 (leader_review) は attainment 全met で通る。
+            assert d["allowed"] is True, s
+        else:
+            # 表が user_review を許さない from_state は gate も必ず留置する。
+            assert d["allowed"] is False, s
+            assert d["forced_state"] == "leader_review", s
 
 
 def test_empty_prior_stamper_is_fail_closed():

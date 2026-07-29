@@ -552,6 +552,8 @@ def test_set_task_state_records_state_and_metadata():
     )
     trek.set_task_state(t, task_id="e-100", state="working",
                         updated_by_session_id="sv-exec")
+    trek.set_task_state(t, task_id="e-100", state="leader_review",
+                        updated_by_session_id="sv-exec")
     trek.set_task_state(
         t, task_id="e-100", state="done",
         updated_by_session_id="sv-exec", note="phase 2 land",
@@ -573,10 +575,11 @@ def test_set_task_state_validates_transition_from_default():
     # todo → done は禁止
     with pytest.raises(ValueError):
         trek.set_task_state(t, task_id="e-1", state="done")
-    # todo → working なら可、 working → done OK
+    # todo → working なら可、 working → leader_review → done OK (done は user_review へ)
     trek.set_task_state(t, task_id="e-1", state="working")
+    trek.set_task_state(t, task_id="e-1", state="leader_review")
     trek.set_task_state(t, task_id="e-1", state="done")
-    # done → leader_review は禁止 (= done から working 経由のみ)
+    # e-4373: user_review (= done migrate 先) → leader_review は禁止 (working 経由のみ)
     with pytest.raises(ValueError):
         trek.set_task_state(t, task_id="e-1", state="leader_review")
 
@@ -588,8 +591,10 @@ def test_set_task_state_allows_done_back_to_working_then_user_review():
         creator_session_id="sv-1",
     )
     trek.set_task_state(t, task_id="e-1", state="working")
-    trek.set_task_state(t, task_id="e-1", state="done")
-    trek.set_task_state(t, task_id="e-1", state="working")
+    trek.set_task_state(t, task_id="e-1", state="leader_review")
+    trek.set_task_state(t, task_id="e-1", state="done")  # → user_review
+    trek.set_task_state(t, task_id="e-1", state="working")  # user rework
+    trek.set_task_state(t, task_id="e-1", state="leader_review")
     trek.set_task_state(t, task_id="e-1", state="user_review")
     assert t["task_states"]["e-1"]["state"] == "user_review"
 
@@ -653,6 +658,7 @@ def test_aggregate_task_state_all_done():
     # todo → working → done (= claim 経路を通る、done は user_review に migrate)
     for tid in ("e-1", "e-2"):
         trek.set_task_state(t, task_id=tid, state="working")
+        trek.set_task_state(t, task_id=tid, state="leader_review")
         trek.set_task_state(t, task_id=tid, state="done")
     agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
     assert agg["overall"] == "all-user-review"
@@ -668,6 +674,7 @@ def test_aggregate_task_state_all_user_review():
     )
     for tid in ("e-1", "e-2"):
         trek.set_task_state(t, task_id=tid, state="working")
+        trek.set_task_state(t, task_id=tid, state="leader_review")
         trek.set_task_state(t, task_id=tid, state="user_review")
     agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
     assert agg["overall"] == "all-user-review"
@@ -697,8 +704,10 @@ def test_aggregate_task_state_all_terminal_mixed():
         creator_session_id="sv-1",
     )
     trek.set_task_state(t, task_id="e-1", state="working")
+    trek.set_task_state(t, task_id="e-1", state="leader_review")
     trek.set_task_state(t, task_id="e-1", state="done")
     trek.set_task_state(t, task_id="e-2", state="working")
+    trek.set_task_state(t, task_id="e-2", state="leader_review")
     trek.set_task_state(t, task_id="e-2", state="user_review")
     agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
     assert agg["overall"] == "all-user-review"
@@ -714,6 +723,7 @@ def test_aggregate_task_state_active_when_any_working():
         creator_session_id="sv-1",
     )
     trek.set_task_state(t, task_id="e-1", state="working")
+    trek.set_task_state(t, task_id="e-1", state="leader_review")
     trek.set_task_state(t, task_id="e-1", state="done")  # → user_review (方針5 migrate)
     # e-2 stays at default todo
     agg = trek.aggregate_task_state(t, task_ids=["e-1", "e-2"])
@@ -867,8 +877,9 @@ def test_5_state_machine_full_executor_path():
     assert trek.get_task_state(t, "e-x") == "todo"
     trek.set_task_state(t, task_id="e-x", state="working")
     assert trek.get_task_state(t, "e-x") == "working"
-    trek.set_task_state(t, task_id="e-x", state="done")
-    assert trek.get_task_state(t, "e-x") == "user_review"
+    # e-4373: executor は leader_review で hand-off する (done/user_review はリーダーの番)
+    trek.set_task_state(t, task_id="e-x", state="leader_review")
+    assert trek.get_task_state(t, "e-x") == "leader_review"
 
 
 def test_5_state_machine_leader_review_path():
@@ -919,6 +930,7 @@ def test_5_state_machine_user_rework_path():
         creator_session_id="sv-1",
     )
     trek.set_task_state(t, task_id="e-x", state="working")
+    trek.set_task_state(t, task_id="e-x", state="leader_review")
     trek.set_task_state(t, task_id="e-x", state="user_review")
     trek.set_task_state(t, task_id="e-x", state="working")
     assert trek.get_task_state(t, "e-x") == "working"
@@ -1008,6 +1020,8 @@ def test_session_has_active_claim_false_for_done_claim():
     )
     trek.set_task_state(t, task_id="e-1", state="working",
                         updated_by_session_id="sv-exec")
+    trek.set_task_state(t, task_id="e-1", state="leader_review",
+                        updated_by_session_id="sv-exec")
     trek.set_task_state(t, task_id="e-1", state="done",
                         updated_by_session_id="sv-exec")
     assert trek.session_has_active_claim(t, session_id="sv-exec") is False
@@ -1020,6 +1034,8 @@ def test_session_has_active_claim_true_when_one_of_multiple_is_working():
         creator_session_id="sv-1",
     )
     trek.set_task_state(t, task_id="e-1", state="working",
+                        updated_by_session_id="sv-exec")
+    trek.set_task_state(t, task_id="e-1", state="leader_review",
                         updated_by_session_id="sv-exec")
     trek.set_task_state(t, task_id="e-1", state="done",
                         updated_by_session_id="sv-exec")
@@ -1049,6 +1065,8 @@ def test_session_has_any_claim_distinguishes_fresh_vs_finished():
     assert trek.session_has_any_claim(t, session_id="sv-fresh") is False
     # sv-finished: 全部 done
     trek.set_task_state(t, task_id="e-1", state="working",
+                        updated_by_session_id="sv-finished")
+    trek.set_task_state(t, task_id="e-1", state="leader_review",
                         updated_by_session_id="sv-finished")
     trek.set_task_state(t, task_id="e-1", state="done",
                         updated_by_session_id="sv-finished")
