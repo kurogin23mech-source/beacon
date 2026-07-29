@@ -236,6 +236,31 @@ def default_prospect_phase(data: dict) -> str:
     return ps[0]["name"] if ps else attack_list.INITIAL_PROSPECT_PHASE
 
 
+def filter_accounts(data: dict, *, phase=None, assignee=None,
+                    name_contains=None) -> list:
+    """Return the Accounts matching a condition query (ms-132 e-4503).
+
+    Used to assemble an attack list from untouched (= 未接触) Accounts: pass
+    ``phase='未接触'`` (the生リスト entry phase, ms-115) for the raw prospect pool,
+    optionally narrowing by owner (``assignee``) or a name substring. Predicates
+    are AND-combined; a ``None`` predicate is ignored. Cancelled (tombstoned)
+    Accounts never match — a corrected mis-entry is not a prospect. Kept as a
+    reusable query so the bulk-register path (e-4503) and later lead conversion
+    (e-4506) read the same filter instead of re-deriving one each."""
+    out = []
+    for a in data.get("accounts", []):
+        if a.get("status") == CANCELLED_STATUS:
+            continue
+        if phase is not None and a.get("phase") != phase:
+            continue
+        if assignee is not None and a.get("assignee") != assignee:
+            continue
+        if name_contains is not None and name_contains not in (a.get("name") or ""):
+            continue
+        out.append(a)
+    return out
+
+
 def _opportunity_status_for_phase(data: dict, phase: str) -> str:
     """Mirror status from an opportunity's phase. Terminal phases close the
     (有限) Opportunity, projecting to their configured outcome."""

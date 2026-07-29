@@ -489,6 +489,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_acq_status = acq_sub.add_parser("status", add_help=False)
     p_acq_status.add_argument("acq_id", nargs="?", default="")
     p_acq_status.add_argument("status", nargs="?", default="")
+    # ms-132 e-4501/e-4503: attack-list (アタックリスト = table-doc) 系。bin/beacon
+    # (bash) と同じ動詞を Windows/pipx の Python dispatch でも受ける (保守性レビュー
+    # PR #548: bash だけに在ると Windows で feature 全体が不達)。
+    p_acq_al = acq_sub.add_parser("attack-list", add_help=False)
+    p_acq_al.add_argument("acq_id", nargs="?", default="")
+    p_acq_al.add_argument("title", nargs="?", default="")
+    p_acq_al.add_argument("--phases", default="")
+    p_acq_al.add_argument("--json", action="store_true")
+    p_acq_als = acq_sub.add_parser("attack-lists", add_help=False)
+    p_acq_als.add_argument("acq_id", nargs="?", default="")
+    p_acq_als.add_argument("--json", action="store_true")
+    p_acq_alf = acq_sub.add_parser("attack-list-fill", add_help=False)
+    p_acq_alf.add_argument("doc_id", nargs="?", default="")
+    p_acq_alf.add_argument("--account-phase", dest="account_phase", default="")
+    p_acq_alf.add_argument("--assignee", default="")
+    p_acq_alf.add_argument("--name-contains", dest="name_contains", default="")
+    p_acq_alf.add_argument("--limit", default="")
+    p_acq_alf.add_argument("--dry-run", dest="dry_run", action="store_true")
+    p_acq_alf.add_argument("--json", action="store_true")
 
     # ---- opportunity (ms-106: sales entities, profession=sales) ----
     p_opp = sub.add_parser(
@@ -2230,7 +2249,8 @@ def _handle_org(root: Path, args: argparse.Namespace) -> int:
 def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
     # ms-115 e-3786/e-3790: 顧客獲得ターゲット (取引先の無い獲得・準備作業の器)。
     if args.show_help or args.acq_cmd is None:
-        print("Usage: beacon acquisition [add|list|status] [options]")
+        print("Usage: beacon acquisition "
+              "[add|list|attack-list|attack-lists|attack-list-fill|status] [options]")
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
         return rc
@@ -2257,7 +2277,38 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
         env = {"BEACON_ACQ_ID": args.acq_id or "",
                "BEACON_ACQ_STATUS": args.status or ""}
         return _run_commands_py(root, "acquisition_status", env)
-    print("Usage: beacon acquisition [add|list|status] [options]")
+    if cmd == "attack-list":
+        if not args.acq_id or not args.title:
+            print('Usage: beacon acquisition attack-list <acq-id> "<title>" '
+                  '[--phases a,b,c] [--json]')
+            return 1
+        env = {"BEACON_ACQ_ID": args.acq_id, "BEACON_ACQ_LIST_TITLE": args.title,
+               "BEACON_ACQ_LIST_PHASES": args.phases or "",
+               "BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "acquisition_attach_list", env)
+    if cmd == "attack-lists":
+        if not args.acq_id:
+            print("Usage: beacon acquisition attack-lists <acq-id> [--json]")
+            return 1
+        return _run_commands_py(root, "acquisition_lists",
+                                {"BEACON_ACQ_ID": args.acq_id,
+                                 "BEACON_JSON": "1" if args.json else ""})
+    if cmd == "attack-list-fill":
+        if not args.doc_id:
+            print('Usage: beacon acquisition attack-list-fill '
+                  '<attack-list-doc-id> [--account-phase 未接触] [--assignee <u>] '
+                  '[--name-contains <s>] [--limit N] [--dry-run] [--json]')
+            return 1
+        env = {"BEACON_DOC_ID": args.doc_id,
+               "BEACON_FILL_PHASE": args.account_phase or "",
+               "BEACON_FILL_ASSIGNEE": args.assignee or "",
+               "BEACON_FILL_NAME": args.name_contains or "",
+               "BEACON_FILL_LIMIT": args.limit or "",
+               "BEACON_DRY_RUN": "1" if args.dry_run else "",
+               "BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "acquisition_attack_list_fill", env)
+    print("Usage: beacon acquisition "
+          "[add|list|attack-list|attack-lists|attack-list-fill|status] [options]")
     return 2
 
 
