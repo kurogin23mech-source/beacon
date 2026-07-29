@@ -59,7 +59,21 @@ executor の note + 最近 commit + task description を読み、 3 つの判断
 
 `auto_stalled=true` の場合は特に注意: executor が黙って止まった (= pulse 不発火) 可能性があるので、 その task が本当に完了したのか / 途中で止まっただけなのかを commit と note で見極める (= false-positive なら re-work で `working` に戻す)。
 
-## Step 2: 3 択を必ず提示 (= forced 3-choice、 後回し禁止)
+## Step 1.6: halt_reason で verdict 集合を分岐 (= e-4374 / AC7)
+
+leader_review キューには 2 種が混載する。**どちらの verdict 集合を提示するかは、対象 Target の `halt_reason` タグの有無で決まる** (方針6):
+
+```bash
+beacon trek show <trek_id> --json | \
+  jq -r --arg t "<task_id>" '.task_states[$t] | {state, halt_reason, note}'
+```
+
+- **`halt_reason` が非 null (= `progress-stall` / `liveness-timeout`)** → **halt 救済**。server が「停まっただけ (= まだ完成していない)」の Target を強制遷移させたもの。**Step 2H (halt 救済 3 択) へ**。`approve` は未完成に対して意味をなさないので出さない。
+- **`halt_reason` が null** → **正常完成**。executor が完成宣言して自発的に上げたもの。**Step 2 (完成 3 択 = Option A/B/C) へ**。
+
+判定は lib の `leader_review_verdict_set(trek_doc, target_id)` (= `mode` が `completion` / `halt_rescue` / `not_in_review`、`verdicts` に取れる action) と一致させる。`not_in_review` (= state が leader_review でない) なら review 対象でないので何もしない。
+
+## Step 2: 完成 3 択 (= halt_reason が null のとき、 forced 3-choice、 後回し禁止)
 
 ユーザーには **次の 3 つの選択肢を明示し、 review action を 1 つ選んで実行する**。 「後で見る」 は許可しない (= state machine 強制の核心):
 
@@ -107,14 +121,47 @@ beacon trek task-state <trek_id> <task_id> user_review --note "<user escalation 
 
 leader は review DM 受信から **次の action 開始までに 1 つを選ぶ義務**。 後回しは Trek scope 内の他 task に波及して全体停滞の原因になる。 budget gate が引っかかる場合は user に 「budget grant + 即 review 実行」 を提案する (= ただし Trek 内 DM は e-4116 で budget bypass 対象なので、 通常は枯渇しない)。
 
+## Step 2H: halt 救済 3 択 (= halt_reason が非 null のとき、 e-4374 / AC7)
+
+Step 1.6 で `halt_reason` が非 null だった Target は **停まっただけ (= まだ完成していない)**。完成の verdict (approve 等) は意味をなさないので、代わりに **halt 救済の 3 択** を必ず 1 つ選ぶ。いずれも Target を `working` に戻し (= `set_task_state` が entry を置換するので `halt_reason` タグは自動的に解除される)、違いは「誰が / どう再開するか」の副作用:
+
+### Option R1: reassign (= 別セッションへ再配分)
+
+元の担当セッションが死んでいる / 進められない時、別の生存 executor に振り直す。`working` に戻し、新担当へ DM で引き継ぎを送る。
+
+```bash
+beacon trek task-state <trek_id> <task_id> working --note "reassign: <元担当 halt 理由> → <新担当 sid> へ再配分"
+beacon bus send --channel dm --to <新担当 sid> --payload '{"text": "[再配分] task <task_id> を引き継いでください。halt 理由: <progress-stall/liveness-timeout>。状況: <...>"}' --json
+```
+
+### Option R2: dm-nudge (= 実行セッションへ DM 指示)
+
+担当セッションは生きているが停滞している時、DM で具体指示を送って再開を促す。`working` に戻す。
+
+```bash
+beacon trek task-state <trek_id> <task_id> working --note "dm-nudge: 実行セッションへ再開指示"
+beacon bus send --channel dm --to <updated_by_session_id> --payload '{"text": "[再開指示] task <task_id> が halt (<理由>) と判定されました。<具体的な次の一手> を進めてから pulse を打ってください。"}' --json
+```
+
+### Option R3: re-open (= working へ戻すだけ)
+
+false-positive の halt (= 実際は進んでいた) や、leader が単に再開させたい時。DM なしで `working` に戻す。
+
+```bash
+beacon trek task-state <trek_id> <task_id> working --note "re-open: halt false-positive / leader 判断で再開"
+```
+
+いずれも `approve` (= user_review へ) は選べない (= 未完成を完遂扱いにしない構造防御)。halt 救済後に Target が実際に完成したら、その時に通常の完成 3 択 (Step 2) を通って user_review へ上がる。
+
 ## Step 3: 実行 + 結果報告
 
 選んだ option を実行し、 結果を user に 1-2 行で報告:
 
 ```
 Trek <trek_id> task <task_id> review 完了:
+  種別: <完成レビュー / halt 救済 (halt_reason=<...>)>
   state: <new state = user_review / working>
-  action: <approve / re-work / forward-to-user>
+  action: <完成: approve / re-work / forward-to-user | halt 救済: reassign / dm-nudge / re-open>
   根拠: <leader 判断の 1 行要約>
 ```
 
@@ -142,6 +189,7 @@ beacon trek show <trek_id> --json で task_states を集計
 ## 制約
 
 - **必ず 3 択を 1 つ選ぶ** (= 「後で」 を出さない、 leader bottleneck 病理の構造解消)
+- **verdict 集合は halt_reason タグで分岐する (= e-4374 / AC7)。halt 救済 (halt_reason 非 null) には approve を出さない (= 未完成を完遂扱いにしない)。完成 (halt_reason=null) には reassign/dm-nudge/re-open を出さない。lib `leader_review_verdict_set` と一致させる**
 - `task-state` 書き換えは leader 権限 (= server-side で leader role + leader_session_id 一致を検証)
 - forward-to-user 時、 user の response を待つ間 task は `user_review` のまま、 scheduler は当該 Trek への progress-check 配信停止
 - 状態集合は `block / todo / working / leader_review / user_review` の 5 つのみ。 `done` は Trek 外 (= 書けない、 read-time に user_review へ migrate) / 旧 `waiting-review` も使わない (= `set_task_state` が拒否 / migrate する)
