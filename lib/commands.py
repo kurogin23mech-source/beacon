@@ -16140,6 +16140,15 @@ def _session_kind_is_human() -> bool:
 
     Default (unset ``BEACON_SESSION_KIND``) is treated as AI for safety, the
     same convention as the PR merge ban (see ``_ai_session_merge_ban_active``).
+
+    ⚠ Divergent twin: ``_caller_is_human_for_untriaged`` (near the top of this
+    module) answers the same "is the caller human?" question with the OPPOSITE
+    default for an undeclared session — there an undeclared *interactive*
+    terminal is treated as human (to deny a privileged *machine* bypass), the
+    reverse of this "unset = AI" default (which denies a privileged *human*
+    action). Do NOT reuse this helper for the untriaged forcing-function gate,
+    and if you change this default, re-check that twin — the two polarities are
+    intentional and live far apart (ms-126 philosophy fix).
     """
     return (os.environ.get("BEACON_SESSION_KIND", "") or "").strip().lower() == "human"
 
