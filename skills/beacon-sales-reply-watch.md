@@ -54,6 +54,21 @@ BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" 
 `work_item_id` (act-/nrt-) / `target_id` (opp-/acc-) / `channel` / `thread_ref` /
 `last_checked_at` を持つ。これが確認の対象。
 
+## Step 1.5: アタックリスト打診先も対象に含める (ms-132 e-4505)
+
+一括連絡 (`/beacon-sales-outreach`) で打診した先も返信待ちの対象。施策 (Acquisition) 配下の
+各アタックリストについて、**連絡済 (= 送信したがまだ返信が無い) 行**を worklist として取る:
+
+```bash
+# 施策一覧 → 各施策のリスト doc-id → 返信待ち行
+beacon acquisition attack-lists <acq-id> --json
+BEACON_DOC_ID=<doc-id> BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" acquisition_attack_list_awaiting_reply
+```
+
+`awaiting[]` の各要素は `acc_id` / `email` / `message_id` (打診時に送ったメールの id) を
+持つ。これらも Step 2 の「返信確認」対象に加える (email チャネルで、その `message_id` の
+スレッドに新着相手メッセージがあるか)。
+
 ## Step 2: 各スレッドの返信確認 (MCP)
 
 各スレッドについて、`channel` に応じた MCP で `thread_ref` のスレッドに **last_checked_at
@@ -90,6 +105,18 @@ BEACON_COMM_TARGET="<work_item_id>" \
 
 ball が自分に戻ると、そのスレッドは次回 Step 1 の「返信待ち」から外れる (= 二重に拾わ
 ない)。**ここで返信はしない** — 次にどう動くかは人の判断。
+
+**アタックリスト打診先の返信 (Step 1.5 由来、ms-132 e-4505)**: `communication_add` を直に
+叩く代わりに、専用の記録動詞を使う。これは inbound 証跡を Account に残すのと同時に、対応する
+アタックリストの行を **連絡済 → 返信あり** に進め、人間に通知 (trigger) する:
+
+```bash
+beacon acquisition attack-list-reply-record <doc-id> <acc-id> \
+  --message-id "<返信の message-id>" --url "<permalink>" --summary "<返信の1行要約>"
+```
+
+これも **検知のみ** — 返信自体はしない。行が返信ありに進むと次回 Step 1.5 の「連絡済」から
+外れる。リード化 (商談への引き上げ) はこの後、人の判断で `/beacon-...` により行う。
 
 話題が完結した (例: 面談日程が確定した) と読み取れる場合は、watch を落として見張りを
 終える:

@@ -54,6 +54,8 @@ VERB_LEDGER = {
     "acquisition_attack_list_fill": {"cls": "R", "secondary": [], "note": "[post-memo/ms-132] 条件一致の未接触Accountをアタックリストへ一括行追記(R、dedup+dry-run)"},
     "acquisition_attack_list_send": {"cls": "C", "secondary": ["R"], "note": "[post-memo/ms-132] 一括連絡の計画(dry-run,R)/人間の1confirm=承認(C、bus-refused)。承認境界 方針4"},
     "acquisition_attack_list_send_record": {"cls": "R", "secondary": [], "note": "[post-memo/ms-132] 承認済バッチ内の送信記録=証跡+行phase駆動(R、authorized必須)"},
+    "acquisition_attack_list_awaiting_reply": {"cls": "Q", "secondary": [], "note": "[post-memo/ms-132] 返信待ち(連絡済)の宛先 read-only 一覧=reply-watch の worklist(Q)"},
+    "acquisition_attack_list_reply_record": {"cls": "R", "secondary": ["B"], "note": "[post-memo/ms-132] 検知した返信を記録=inbound証跡+行 連絡済→返信あり+通知(R、検知のみ自動返信なし)"},
 
     # --- activity ---
     "activity_done": {"cls": "R", "secondary": [], "note": ""},
