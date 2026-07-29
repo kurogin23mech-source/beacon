@@ -96,11 +96,20 @@ executor の完成宣言を妥当と認め、 task を **`user_review` に stamp
 /beacon-review-run  # 引数: attainment --target <ms-XX>
 ```
 
-両レビューの findings を読み、 思想 drift 無し + 目的達成の証拠十分と leader が判断したら user_review に stamp:
+目的達成レビューの findings から、 target の SPEC 受入条件を **1 項目ずつ `met` / `partial` / `not-met`** に判定して構造化 verdict を組む (= e-4386 完遂ゲート。素の「approve 一発」は server が留置する)。判定は独立 judge の evidence に基づき、 実行者の narrative では倒さない:
 
 ```bash
-beacon trek task-state <trek_id> <task_id> user_review --note "<思想 OK / 目的達成 OK の根拠 1 行>"
+# attainment_verdict = 受入条件ごとの判定。全項目 met のときだけ user_review に倒せる。
+ATT='[{"criterion":"AC1 の1行","verdict":"met"},{"criterion":"AC2 の1行","verdict":"met"}]'
+beacon trek task-state <trek_id> <task_id> user_review \
+  --verdict approve --attainment-verdict "$ATT" \
+  --note "<思想 OK / 全 met の根拠 1 行>"
 ```
+
+**完遂ゲートの構造 (server / lib が強制、 e-4386):**
+- `partial` / `not-met` が 1 つでもあれば server が **working へ差し戻す** (= Option B 相当を自動化)。全 met のときだけ user_review に倒る。
+- **self_judgment 禁止**: task を直前に stamp した session (= executor) 自身が approve すると server が **leader_review に留置** する。判定主体は実行者の外 (= 別 session の leader / judge) でなければならない。executor==leader の単独 Trek では、 このゲートに阻まれるので Option C (forward-to-user) で user に委ねる。
+- verdict / attainment-verdict を省いて素の `user_review` を叩くと **留置** される (= レビュー skip の構造防御)。
 
 思想 drift / 未達成が見つかったら Option B (re-work) に倒す。 レビューを skip して user_review に stamp してはならない (= ターミナル化境界の意味が消える)。
 
@@ -116,10 +125,10 @@ beacon bus send --channel dm --to <updated_by_session_id> --payload '{"text": "[
 
 ### Option C: forward-to-user (= user 介入要請、 leader → user escalation)
 
-leader 判断としても user 嗜好 / 不可逆 / cross-Trek 副作用に該当する場合、 user に判断を投げる。 task を `user_review` に遷移させ、 user 応答待ちで保留 (= `user_review` は terminal 扱いなので scheduler は当該 Trek への progress-check 配信を止める)。
+leader 判断としても user 嗜好 / 不可逆 / cross-Trek 副作用に該当する場合、 user に判断を投げる。 task を `user_review` に遷移させ、 user 応答待ちで保留 (= `user_review` は terminal 扱いなので scheduler は当該 Trek への progress-check 配信を止める)。 forward-to-user は「完遂の主張」ではなく「人間に委ねる」ため、 `--verdict forward-to-user` を明示すると完遂ゲート (e-4386) の attainment 要求を **迂回** する (= 自己採点ではないので gate 対象外):
 
 ```bash
-beacon trek task-state <trek_id> <task_id> user_review --note "<user escalation 理由>"
+beacon trek task-state <trek_id> <task_id> user_review --verdict forward-to-user --note "<user escalation 理由>"
 # user に提示 (= 通常対話 turn で 3 択を再構成して聞く)
 # 「task <task_id> が user_review 状態になりました。 内容: <executor note>。 続行可否を判断してください: re-work / accept / cross-MS 切り替え」
 ```

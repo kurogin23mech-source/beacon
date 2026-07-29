@@ -1299,17 +1299,29 @@ class ApiClient:
         )
 
     def set_trek_task_state(self, trek_id: str, *, task_id: str,
-                             state: str, note: str = "") -> dict:
+                             state: str, note: str = "",
+                             verdict: str = "",
+                             attainment_verdict: list = None) -> dict:
         """ms-75 / e-2048 — Stamp Trek-internal task state.
 
         Member-only (= server-side check). The server validates the
         state transition and emits a one-time trek-task-review DM to
         the leader when the new state is terminal (= done /
         waiting-review). Returns the updated trek doc.
+
+        ms-128 / e-4386 — 完遂ゲート: 倒す先が ``user_review`` の完成合格 (verdict
+        ``approve`` / executor 直 stamp) は、実行者の外が出した全 met の
+        ``attainment_verdict`` (= ``[{"criterion", "verdict"}, ...]``) を伴わないと
+        server が leader_review に留置する。``forward-to-user`` は gate 対象外。
         """
+        payload = {"task_id": task_id, "state": state, "note": note}
+        if verdict:
+            payload["verdict"] = verdict
+        if attainment_verdict is not None:
+            payload["attainment_verdict"] = list(attainment_verdict)
         return self.patch(
             f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/task-state",
-            {"task_id": task_id, "state": state, "note": note},
+            payload,
         )
 
     def add_trek_blocker(self, trek_id: str, *, target_id: str,

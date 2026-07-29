@@ -4188,14 +4188,26 @@ class TrekTaskStateSet(BaseModel):
     """ms-75 / e-2048 — Trek-internal task state declaration.
 
     ``task_id`` is the project entry id (e-XXXX) the executor is stamping.
-    ``state`` is one of ``working``, ``done``, ``waiting-review``. ``note``
-    is a short freeform string (≤500 chars) attached to the state record
-    so the leader review surface can show executor rationale without a
-    separate DM round-trip.
+    ``state`` is one of the canonical 5-state set ``block``, ``todo``,
+    ``working``, ``leader_review``, ``user_review`` (legacy aliases migrate on
+    write: ``done`` → ``user_review``, ``waiting-review`` → ``leader_review``;
+    ``block`` is set only via the blocker endpoint, not here). ``note`` is a
+    short freeform string (≤500 chars) attached to the state record so the
+    leader review surface can show executor rationale without a separate DM
+    round-trip.
     """
     task_id: str
     state: str
     note: Optional[str] = ""
+    # ms-128 / e-4386 — 完遂ゲート (attainment mode)。leader が完成レビューで選んだ
+    # verdict 名 (``approve`` / ``re-work`` / ``forward-to-user``)。executor が直接
+    # stamp する時は空。``user_review`` へ倒す時の合格判定を分岐するのに使う
+    # (approve = attainment gate 対象 / forward-to-user = 人間エスカレーションで gate 外)。
+    verdict: Optional[str] = ""
+    # SPEC 受入条件を criterion 単位で評価した構造化 verdict。
+    # ``[{"criterion": str, "verdict": "met"|"partial"|"not-met"}, ...]``。
+    # ``approve`` で user_review に倒すには全 met が必須 (= 実行者の外の judge が出す)。
+    attainment_verdict: Optional[list] = None
 
 
 class TrekBlockerSet(BaseModel):
@@ -6498,6 +6510,50 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     # 「commit ゼロで Trek slot だけ done」 が成立していた。 ms-97 SPEC
     # AC10 / AC30 補強 + ms-128 方針5 の構造実装、 詳細は lib/trek.py
     # ``check_slot_done_precondition`` の docstring を参照。
+    # ms-128 / e-4386 — 完遂ゲート (attainment mode)。user_review (= Trek 唯一の
+    # terminal) へ倒す「合格判定」を、実行者の外に固定した全 met の attainment
+    # verdict でのみ通す。self_judgment (= 直前に状態を stamp した session が自分で
+    # 倒す) と、素の verdict なし approve を構造的に塞ぐ。失敗時は user_review へ
+    # 倒さず forced_state へ留置し、scheduler が外部 judge へ review を再通知する。
+    # forward-to-user (人間エスカレーション) は gate 対象外。
+    if effective_state in trek_mod.TERMINAL_TASK_STATES:
+        prior_stamper_sid = (
+            (t.get("task_states") or {}).get(body.task_id) or {}
+        ).get("updated_by_session_id", "")
+        gate = trek_mod.completion_gate_decision(
+            effective_state=effective_state,
+            verdict=(body.verdict or ""),
+            caller_sid=caller_sid,
+            prior_stamper_sid=prior_stamper_sid,
+            attainment_verdict=body.attainment_verdict,
+        )
+        if not gate["allowed"]:
+            forced = gate["forced_state"] or "leader_review"
+            # forced_state へ divert できる (= 状態機械が from→forced を許す) なら、
+            # その遷移として書き込み直して review notify を発火させる (= 留置しつつ
+            # leader を再度呼ぶ)。X→X の自己ループは状態機械が許さないので、その時は
+            # 書き込まず 409 で弾く (= 現状態のまま留置)。
+            if forced != from_state and forced in (
+                trek_mod.VALID_TASK_STATE_TRANSITIONS.get(from_state) or ()
+            ):
+                effective_state = forced
+                body.state = forced
+                # note に留置理由を残し、leader の review surface で可視化する。
+                body.note = (
+                    f"[attainment gate: {gate['code']}] {gate['message']}\n"
+                    + (body.note or "")
+                )[:500]
+            else:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": gate["code"],
+                        "message": gate["message"],
+                        "trek_id": trek_id,
+                        "task_id": body.task_id,
+                        "forced_state": forced,
+                    },
+                )
     if effective_state in trek_mod.TERMINAL_TASK_STATES:
         allowed, reason_code, message = trek_mod.check_slot_done_precondition(
             t,
@@ -8824,6 +8880,24 @@ def _post_trek_notify_escalation(trek_id, trek_doc, *, payload, action,
     return {"project_id": target_project_id, "event_id": event_id}
 
 
+# ms-128 / e-4386 補完 (受入条件12) — scheduler tick の注入可能な時計。
+# クロスインスタンス相互ブロックの e2e ハーネス (AC12) が tick 駆動を deterministic
+# に進めるための seam。時刻をここに注入すると、tick の cadence 判定 (is_trek_due) /
+# progress-check stamp (last_progress_check_at) / halt 検知 / block reconcile が
+# 単一の注入時計で動く (下流はすべて ``now`` を受け取るため)。
+# module-global = **in-process からのみ設定可能**で HTTP 表面を持たない
+# (= 本番の wall-clock を wire 越しに詐称できない)。default None = 実 UTC。
+_INJECTED_SCHEDULER_NOW = None
+
+
+def _scheduler_now():
+    """Return the scheduler tick's clock — injected (AC12 harness) or real UTC."""
+    import datetime as _dt
+    if _INJECTED_SCHEDULER_NOW is not None:
+        return _INJECTED_SCHEDULER_NOW
+    return _dt.datetime.now(_dt.timezone.utc)
+
+
 @app.post("/api/system/trek-scheduler/tick")
 def trek_scheduler_tick_endpoint(
     body: TrekSchedulerTickRequest,
@@ -8848,7 +8922,7 @@ def trek_scheduler_tick_endpoint(
 
     import copy
     import datetime
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = _scheduler_now()
     # ms-66 fix: bind now_iso UNCONDITIONALLY here. It is read below by
     # _fire_due_scheduled(now_iso) (operation firing), but its only other binding
     # is inside the trek-quiesce conditional branch — so on every tick where that
@@ -8856,7 +8930,10 @@ def trek_scheduler_tick_endpoint(
     # → UnboundLocalError, swallowed by the try/except below → the server tick's
     # Operation-firing path silently died on every tick since ms-107 (804dfa16).
     # Trek fanout was unaffected (it calls trek_mod.utcnow_iso() directly).
-    now_iso = trek_mod.utcnow_iso()
+    # ms-128 AC12 — derive now_iso from the (possibly injected) clock so the
+    # Operation-firing path and the Trek fanout share one time source under the
+    # harness. In production (no injection) this equals utcnow_iso() (both real).
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     # Fan out across active treks. Without project scoping we list every
     # trek in the backend (admin-style enumeration); the scheduler tick is
     # an internal service, not a user-driven query, so this is acceptable

@@ -1034,10 +1034,11 @@ class TestLeaderSelfLoopSuppress:
         assert len(suppressions) == 1
         assert suppressions[0]["suppression_reason"] == "self_judgment"
         assert suppressions[0]["task_id"] == "e-x"
-        # ms-128 方針5: done は user_review に migrate される (Trek 打ち止め)。
-        assert suppressions[0]["state"] == "user_review"
-        # State transition preserved (done → user_review に migrate 済)
-        assert (t.get("task_states") or {}).get("e-x", {}).get("state") == "user_review"
+        # ms-128 e-4386 (P1 fix): leader が自分で実行した Target を bare done で倒すと
+        # 完遂ゲートの self_judgment 留置で leader_review に diverted される (自己採点で
+        # terminal 到達させない)。そのため suppression / 保存 state は leader_review。
+        assert suppressions[0]["state"] == "leader_review"
+        assert (t.get("task_states") or {}).get("e-x", {}).get("state") == "leader_review"
 
     def test_non_leader_member_stamp_emits_review_event(self):
         """control: non-leader member が stamp → review event 発火 (= 既存挙動)。"""
@@ -1074,6 +1075,113 @@ class TestLeaderSelfLoopSuppress:
         t = _treks[trek_id]
         suppressions = (t.get("meta") or {}).get("review_suppressions") or []
         assert suppressions == []
+
+
+class TestCompletionAttainmentGate:
+    """ms-128 方針6 / e-4386 — leader_review → user_review の完遂ゲート。
+
+    倒す先が terminal (user_review) の「完遂合格」は、実行者の外が出した全 met の
+    attainment verdict でのみ通す。self_judgment (= 直前 stamper が自分で倒す) と
+    verdict 無し approve は leader_review に留置する。
+    """
+
+    def _seed_task_in_leader_review(self, task_id: str, stamper_sid: str) -> str:
+        trek_id = _create_seed_trek()
+        _treks[trek_id]["scope"] = [
+            {"project": "beacon-test", "milestone": "ms-128"}
+        ]
+        _treks[trek_id]["task_states"] = {
+            task_id: {
+                "state": "leader_review",
+                "updated_by_session_id": stamper_sid,
+                "updated_at": "2026-07-29T00:00:00.000000Z",
+                "last_activity_at": "2026-07-29T00:00:00.000000Z",
+                "leader_review_entered_at": "2026-07-29T00:00:00.000000Z",
+                "note": "",
+            }
+        }
+        _seed_pool_task("beacon-test", "ms-128", task_id, status="done")
+        for k in list(_bus_events_by_project.keys()):
+            _bus_events_by_project[k].clear()
+        return trek_id
+
+    def test_leader_approve_without_verdict_detained_at_leader_review(self):
+        # leader が verdict 無しで leader_review → user_review を叩く → 留置 (409)。
+        trek_id = self._seed_task_in_leader_review("e-a", stamper_sid="sv-member")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-a", "state": "user_review",
+                  "verdict": "approve"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["code"] == "attainment_verdict_required"
+        # State unchanged — still leader_review (= 留置).
+        st = (_treks[trek_id]["task_states"] or {})["e-a"]["state"]
+        assert st == "leader_review"
+
+    def test_self_judgment_leader_review_detained_even_with_all_met(self):
+        # 直前 stamper == caller (executor==leader) は全 met verdict でも留置。
+        trek_id = self._seed_task_in_leader_review("e-b", stamper_sid="sv-leader")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-b", "state": "user_review", "verdict": "approve",
+                  "attainment_verdict": [{"criterion": "AC1", "verdict": "met"}]},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["code"] == "attainment_self_judgment_banned"
+        st = (_treks[trek_id]["task_states"] or {})["e-b"]["state"]
+        assert st == "leader_review"
+
+    def test_external_all_met_approve_passes_to_user_review(self):
+        # 実行者 (sv-member) の外の judge (sv-leader) が全 met で approve → 通す。
+        trek_id = self._seed_task_in_leader_review("e-c", stamper_sid="sv-member")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-c", "state": "user_review", "verdict": "approve",
+                  "attainment_verdict": [
+                      {"criterion": "AC1", "verdict": "met"},
+                      {"criterion": "AC2", "verdict": "met"}]},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 200, r.text
+        st = (_treks[trek_id]["task_states"] or {})["e-c"]["state"]
+        assert st == "user_review"
+
+    def test_not_all_met_reworks_to_working(self):
+        # partial が 1 つでもあれば working へ差し戻し。
+        trek_id = self._seed_task_in_leader_review("e-d", stamper_sid="sv-member")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-d", "state": "user_review", "verdict": "approve",
+                  "attainment_verdict": [
+                      {"criterion": "AC1", "verdict": "met"},
+                      {"criterion": "AC2", "verdict": "partial"}]},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        # leader_review → working は valid なので divert 書き込み (200)。
+        assert r.status_code == 200, r.text
+        st = (_treks[trek_id]["task_states"] or {})["e-d"]["state"]
+        assert st == "working"
+
+    def test_forward_to_user_escalation_not_gated(self):
+        # forward-to-user は人間エスカレーション — verdict 無しでも通す。
+        trek_id = self._seed_task_in_leader_review("e-e", stamper_sid="sv-member")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-e", "state": "user_review",
+                  "verdict": "forward-to-user"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 200, r.text
+        st = (_treks[trek_id]["task_states"] or {})["e-e"]["state"]
+        assert st == "user_review"
 
 
 # ---------------------------------------------------------------------------
@@ -1147,11 +1255,9 @@ class TestReviewTriggerStatesEmit:
         # bus event の発火と payload 整合性。
 
     def test_member_stamp_done_still_emits_review_event(self):
-        """control 1: done への遷移は依然 event 発火 (= 既存挙動 regression なし)。"""
+        """control 1: member の bare done は完遂ゲート (e-4386 P1) で leader_review に
+        留置され、その leader_review 遷移で依然 review event が発火する。"""
         trek_id = self._seed_with_member_working("e-done-control")
-        # ms-97 / e-2650 — slot-done precondition 充足のため pool seed。
-        _seed_pool_task("beacon-test", "ms-97", "e-done-control",
-                        status="done")
         _impersonate(MEMBER_UID, MEMBER_EMAIL)
         r = client.patch(
             f"/api/treks/{trek_id}/task-state",
@@ -1164,9 +1270,9 @@ class TestReviewTriggerStatesEmit:
             e for e in bus if e.get("channel") == "trek-task-review"
         ]
         assert len(review_events) == 1
-        # ms-128 方針5: done は user_review に migrate され、event payload も
-        # effective_state (= user_review) を載せる。
-        assert (review_events[0].get("payload") or {}).get("state") == "user_review"
+        # e-4386 P1 fix: member の bare done→ は自己採点なので user_review に倒さず
+        # leader_review に diverted される。review event はその leader_review 遷移で発火。
+        assert (review_events[0].get("payload") or {}).get("state") == "leader_review"
 
     def test_member_stamp_user_review_still_emits_review_event(self):
         """control 2: user_review への遷移も依然 event 発火 (= 既存挙動)。"""
@@ -1182,6 +1288,9 @@ class TestReviewTriggerStatesEmit:
             json={
                 "task_id": "e-user-rev-control",
                 "state": "user_review",
+                # e-4386: user_review へ倒す明示的な人間エスカレーション。
+                # forward-to-user は完遂の主張ではないので attainment ゲート対象外。
+                "verdict": "forward-to-user",
                 "note": "forward to user",
             },
             headers={"X-Beacon-Session": "sv-member"},
@@ -1559,6 +1668,7 @@ class TestSlotDonePrecondition:
             r = client.patch(
                 f"/api/treks/{trek_id}/task-state",
                 json={"task_id": "e-pool-todo", "state": "done",
+                      "verdict": "forward-to-user",
                       "note": "executor が done に flip 試行"},
                 headers={"X-Beacon-Session": "sv-member"},
             )
@@ -1606,6 +1716,7 @@ class TestSlotDonePrecondition:
             r = client.patch(
                 f"/api/treks/{trek_id}/task-state",
                 json={"task_id": "ms-97", "state": "done",
+                      "verdict": "forward-to-user",
                       "note": "MS slot 一括 done flip 試行"},
                 headers={"X-Beacon-Session": "sv-member"},
             )
@@ -1641,6 +1752,7 @@ class TestSlotDonePrecondition:
             r = client.patch(
                 f"/api/treks/{trek_id}/task-state",
                 json={"task_id": "e-pool-done", "state": "done",
+                      "verdict": "forward-to-user",
                       "note": "ok"},
                 headers={"X-Beacon-Session": "sv-member"},
             )
@@ -1675,6 +1787,7 @@ class TestSlotDonePrecondition:
             r = client.patch(
                 f"/api/treks/{trek_id}/task-state",
                 json={"task_id": "ms-97", "state": "done",
+                      "verdict": "forward-to-user",
                       "note": "全 done のため MS slot done"},
                 headers={"X-Beacon-Session": "sv-member"},
             )
@@ -1736,7 +1849,7 @@ class TestSlotDonePrecondition:
         with patch.object(app_module.db, "get_project", _fake_get_project):
             r = client.patch(
                 f"/api/treks/{trek_id}/task-state",
-                json={"task_id": "e-ghost", "state": "done", "note": ""},
+                json={"task_id": "e-ghost", "state": "done", "verdict": "forward-to-user", "note": ""},
                 headers={"X-Beacon-Session": "sv-member"},
             )
         assert r.status_code == 409, r.text

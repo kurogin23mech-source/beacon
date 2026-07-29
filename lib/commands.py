@@ -9041,6 +9041,14 @@ def cmd_trek_task_state():
                               user_review/done; legacy `waiting-review`
                               auto-migrates to leader_review)
       BEACON_TREK_NOTE       (optional)
+      BEACON_TREK_VERDICT    (optional, ms-128/e-4386 — verdict for a user_review
+                              transition: approve (全 met の attainment 必須) or
+                              forward-to-user (人間エスカレーション、gate 対象外)。
+                              re-work は verdict でなく state=working で表す)
+      BEACON_TREK_ATTAINMENT_VERDICT
+                             (optional, JSON list of per-criterion verdicts:
+                              [{"criterion": str, "verdict": "met"|"partial"|
+                              "not-met"}, ...]; required for approve→user_review)
       BEACON_JSON            "1" → json output
     """
     import trek
@@ -9050,7 +9058,19 @@ def cmd_trek_task_state():
     task_id = os.environ.get("BEACON_TREK_TASK_ID", "").strip()
     state = os.environ.get("BEACON_TREK_STATE", "").strip()
     note = os.environ.get("BEACON_TREK_NOTE", "")
+    verdict = os.environ.get("BEACON_TREK_VERDICT", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    # ms-128 / e-4386 — 構造化 attainment verdict を JSON で受ける。壊れた JSON は
+    # 「未評価」= gate が留置する側に倒れるので silent に None 扱いにせず明示 error。
+    attainment_verdict = None
+    _av_raw = os.environ.get("BEACON_TREK_ATTAINMENT_VERDICT", "").strip()
+    if _av_raw:
+        try:
+            attainment_verdict = json.loads(_av_raw)
+        except (ValueError, TypeError) as e:
+            print(f"Error: BEACON_TREK_ATTAINMENT_VERDICT is not valid JSON: {e}",
+                  file=sys.stderr)
+            sys.exit(1)
 
     if not trek_id:
         print("Error: trek_id is required", file=sys.stderr)
@@ -9083,6 +9103,7 @@ def cmd_trek_task_state():
             client, _config = _get_api_client()
             t = client.set_trek_task_state(
                 trek_id, task_id=task_id, state=state, note=note,
+                verdict=verdict, attainment_verdict=attainment_verdict,
             )
         except RuntimeError as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -9090,13 +9111,29 @@ def cmd_trek_task_state():
         if json_mode:
             print(json.dumps(t, ensure_ascii=False))
         else:
-            print(
-                f"Stamped trek {trek_id} task {task_id} state → {state}"
-            )
+            # A1 (AX review 2026-07-29): 要求した state ではなく、server が実際に
+            # 保存した state を表示する。完遂ゲートが divert (user_review 要求 →
+            # leader_review / working に留置) した場合、要求 state をそのまま表示すると
+            # AI が「user_review 達成」と誤認する。実 state を読み、乖離時は WARN を出す。
+            entry = (t.get("task_states") or {}).get(task_id) or {}
+            actual = entry.get("state", state)
+            requested = trek.migrate_legacy_task_state(state)
+            print(f"Stamped trek {trek_id} task {task_id} state → {actual}")
+            if actual != requested:
+                # 原因コード + message は server が note 先頭に埋めた
+                # "[attainment gate: <code>] <message>" 行から surface する
+                # (AX review 2026-07-29: 留置理由 self_judgment / verdict 不足 /
+                # judge 不明 を区別できないと AI が誤った回復ループに入る)。
+                gate_line = (entry.get("note") or "").split("\n", 1)[0]
+                print(
+                    f"  ⚠ 完遂ゲートが遷移を変更: 要求 {requested} → 実際 {actual}"
+                )
+                if gate_line.startswith("[attainment gate:"):
+                    print(f"    {gate_line}")
             # ms-97 / e-2706 — leader notify は REVIEW_TRIGGER_STATES
             # (= done / user_review / leader_review) で発火する。 CLI 表示も
-            # server 側 emit 条件と一致させる。
-            if state in trek.REVIEW_TRIGGER_STATES:
+            # server 側 emit 条件と一致させる (実 state で判定)。
+            if actual in trek.REVIEW_TRIGGER_STATES:
                 print(
                     "  Leader has been notified via trek-task-review DM "
                     "(= /beacon-trek-review surface)."
@@ -9108,6 +9145,38 @@ def cmd_trek_task_state():
         print(f"Error: trek {trek_id} not found", file=sys.stderr)
         sys.exit(1)
     caller_sid = os.environ.get("BEACON_SESSION_ID", "")
+    # ms-128 / e-4386 — 完遂ゲートを local mode でも適用する (server gate と parity)。
+    # user_review へ倒す合格判定は、実行者の外の全 met attainment verdict が要る。
+    effective_state = trek.migrate_legacy_task_state(state)
+    from_state = trek.get_task_state(t, task_id)
+    prior_stamper_sid = (
+        (t.get("task_states") or {}).get(task_id) or {}
+    ).get("updated_by_session_id", "")
+    gate = trek.completion_gate_decision(
+        effective_state=effective_state,
+        verdict=verdict,
+        caller_sid=caller_sid,
+        prior_stamper_sid=prior_stamper_sid,
+        attainment_verdict=attainment_verdict,
+    )
+    requested_state = effective_state
+    gate_divert_code = ""
+    gate_divert_msg = ""
+    if not gate["allowed"]:
+        forced = gate["forced_state"] or "leader_review"
+        if forced != from_state and forced in (
+            trek.VALID_TASK_STATE_TRANSITIONS.get(from_state) or ()
+        ):
+            state = forced
+            gate_divert_code = gate["code"]
+            gate_divert_msg = gate["message"]
+            note = (
+                f"[attainment gate: {gate['code']}] {gate['message']}\n"
+                + (note or "")
+            )[:500]
+        else:
+            print(f"Error: {gate['code']}: {gate['message']}", file=sys.stderr)
+            sys.exit(1)
     try:
         trek.set_task_state(
             t,
@@ -9127,6 +9196,15 @@ def cmd_trek_task_state():
             f"Stamped trek {trek_id} task {task_id} state → {state} "
             "(local mode; review notification skipped — no bus path)"
         )
+        # A1 (AX review 2026-07-29): cloud mode と同じく divert を隠さない。
+        # 原因コード + message を出し、AI が誤った回復ループ (self_judgment 留置なのに
+        # attainment を付け直す等) に入らないようにする。
+        if gate_divert_code:
+            print(
+                f"  ⚠ 完遂ゲートが遷移を変更: 要求 {requested_state} → 実際 {state} "
+                f"[{gate_divert_code}]"
+            )
+            print(f"    {gate_divert_msg}")
 
 
 def cmd_trek_block():

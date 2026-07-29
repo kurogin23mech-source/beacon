@@ -270,10 +270,13 @@ class TestTaskStateWritesOutcomeLog:
             json={"task_id": "e-1", "state": "working"},
         )
         assert r1.status_code == 200, r1.text
-        # Then working → done (= terminal).
+        # Then working → done (= terminal). e-4386 完遂ゲートは全 user_review 到達に
+        # attainment を要求するので、terminal 到達の vehicle として明示 forward-to-user
+        # (人間エスカレーション) を使う (outcome log の記録自体を検証する目的)。
         resp = client.patch(
             "/api/treks/tk-log000001/task-state",
-            json={"task_id": "e-1", "state": "done", "note": "shipped"},
+            json={"task_id": "e-1", "state": "done",
+                  "verdict": "forward-to-user", "note": "shipped"},
         )
         assert resp.status_code == 200, resp.text
         rows = _logs.get("tk-log000001") or []
