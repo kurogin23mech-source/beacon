@@ -9070,16 +9070,21 @@ def cmd_trek_task_state():
             # 保存した state を表示する。完遂ゲートが divert (user_review 要求 →
             # leader_review / working に留置) した場合、要求 state をそのまま表示すると
             # AI が「user_review 達成」と誤認する。実 state を読み、乖離時は WARN を出す。
-            actual = ((t.get("task_states") or {}).get(task_id) or {}).get(
-                "state", state
-            )
+            entry = (t.get("task_states") or {}).get(task_id) or {}
+            actual = entry.get("state", state)
             requested = trek.migrate_legacy_task_state(state)
             print(f"Stamped trek {trek_id} task {task_id} state → {actual}")
             if actual != requested:
+                # 原因コード + message は server が note 先頭に埋めた
+                # "[attainment gate: <code>] <message>" 行から surface する
+                # (AX review 2026-07-29: 留置理由 self_judgment / verdict 不足 /
+                # judge 不明 を区別できないと AI が誤った回復ループに入る)。
+                gate_line = (entry.get("note") or "").split("\n", 1)[0]
                 print(
-                    f"  ⚠ 完遂ゲートが遷移を変更しました: 要求 {requested} → 実際 "
-                    f"{actual} (attainment 不足で留置 / 差し戻し)。"
+                    f"  ⚠ 完遂ゲートが遷移を変更: 要求 {requested} → 実際 {actual}"
                 )
+                if gate_line.startswith("[attainment gate:"):
+                    print(f"    {gate_line}")
             # ms-97 / e-2706 — leader notify は REVIEW_TRIGGER_STATES
             # (= done / user_review / leader_review) で発火する。 CLI 表示も
             # server 側 emit 条件と一致させる (実 state で判定)。
@@ -9109,12 +9114,17 @@ def cmd_trek_task_state():
         prior_stamper_sid=prior_stamper_sid,
         attainment_verdict=attainment_verdict,
     )
+    requested_state = effective_state
+    gate_divert_code = ""
+    gate_divert_msg = ""
     if not gate["allowed"]:
         forced = gate["forced_state"] or "leader_review"
         if forced != from_state and forced in (
             trek.VALID_TASK_STATE_TRANSITIONS.get(from_state) or ()
         ):
             state = forced
+            gate_divert_code = gate["code"]
+            gate_divert_msg = gate["message"]
             note = (
                 f"[attainment gate: {gate['code']}] {gate['message']}\n"
                 + (note or "")
@@ -9141,6 +9151,15 @@ def cmd_trek_task_state():
             f"Stamped trek {trek_id} task {task_id} state → {state} "
             "(local mode; review notification skipped — no bus path)"
         )
+        # A1 (AX review 2026-07-29): cloud mode と同じく divert を隠さない。
+        # 原因コード + message を出し、AI が誤った回復ループ (self_judgment 留置なのに
+        # attainment を付け直す等) に入らないようにする。
+        if gate_divert_code:
+            print(
+                f"  ⚠ 完遂ゲートが遷移を変更: 要求 {requested_state} → 実際 {state} "
+                f"[{gate_divert_code}]"
+            )
+            print(f"    {gate_divert_msg}")
 
 
 def cmd_trek_block():

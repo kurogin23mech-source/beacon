@@ -4459,9 +4459,10 @@ def leader_review_verdict_set(trek_doc: dict, target_id: str) -> dict:
 # 唯一の token。met 以外は「未達」として扱う (未評価 / 未知の値 = 未達)。
 ATTAINMENT_VERDICT_VALUES = ("met", "partial", "not-met")
 ATTAINMENT_MET = ATTAINMENT_VERDICT_VALUES[0]  # 合格 token の単一真実源
-# user_review に倒す 2 つの verdict のうち、gate 対象 (= 完遂合格) と対象外 (= 人間
-# エスカレーション)。COMPLETION_VERDICTS の verdict 名と一致させること。
-COMPLETION_APPROVE_VERDICT = "approve"
+# user_review に倒す verdict の唯一の gate 例外 = 人間エスカレーション。これ以外の
+# verdict (慣習的に "approve"、COMPLETION_VERDICTS 参照) はすべて完遂合格として
+# attainment を要求する。gate は「forward-to-user か否か」だけで分岐するので、合格側の
+# token は enum でなく慣習で足りる (approve のリテラルは SKILL / help / test が持つ)。
 ESCALATE_TO_USER_VERDICT = "forward-to-user"
 
 
