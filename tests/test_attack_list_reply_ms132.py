@@ -124,8 +124,8 @@ def test_reply_record_drives_phase_and_records_inbound(reply_cwd, monkeypatch, c
     assert len(comms) == 1
     assert comms[0]["direction"] == "inbound" and comms[0]["channel"] == "email"
     assert comms[0]["source"]["ref"] == "rmsg-9"
-    # notification trigger fired
-    trig = cwd / ".beacon" / "triggers" / "attack-list-reply-acc-1.json"
+    # notification trigger fired (name carries the reply's message-id)
+    trig = cwd / ".beacon" / "triggers" / "attack-list-reply-acc-1-rmsg-9.json"
     assert trig.exists()
 
 
@@ -136,8 +136,20 @@ def test_reply_on_non_contacted_row_records_but_no_misadvance(
     # must NOT jump to 返信あり (no misadvance from the wrong phase).
     out = _reply(monkeypatch, capsys, doc_id, "acc-1")
     assert out["phase_driven_to"] is None
+    assert out["phase_guard_skipped"] is True  # explicit, not a silent null
     comms = se.find_account(_read(cwd), "acc-1").get("communications", [])
     assert len(comms) == 1 and comms[0]["direction"] == "inbound"
+
+
+def test_notified_reflects_dedup_on_same_reply(reply_cwd, monkeypatch, capsys):
+    # A repeat reply-record for the same acc + message-id must report notified
+    # false (the trigger already exists) rather than a false-positive true.
+    cwd, doc_id = reply_cwd
+    _set_row_phase(doc_id, "acc-1", "連絡済")
+    first = _reply(monkeypatch, capsys, doc_id, "acc-1", mid="dup-1")
+    assert first["notified"] is True
+    second = _reply(monkeypatch, capsys, doc_id, "acc-1", mid="dup-1")
+    assert second["notified"] is False  # deduped, honestly reported
 
 
 def test_reply_record_rejects_unknown_account(reply_cwd, monkeypatch, capsys):

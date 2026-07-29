@@ -26878,25 +26878,21 @@ def cmd_acquisition_attack_list_send_record():
     # fine; a real write failure aborts before any project.json is saved.
     _content, title, model = _load_table_model(doc_id)
     table_type.install()
-    target_row = None
-    row_id = rec.get("row_id", "")
-    for row in table_doc.active_rows(model):
-        if (row_id and row.get("id") == row_id) or (
-                not row_id and row.get("cells", {}).get(
-                    attack_list.COL_ACCOUNT) == acc_id):
-            target_row = row
-            break
+    target_row = attack_list.find_row_by_account(
+        table_doc.active_rows(model), acc_id)
     driven_to = None
     if target_row is not None:
-        vals = next((c.get("values") for c in model.get("columns", [])
-                     if c.get("key") == attack_list.COL_PHASE), []) or []
+        vals = attack_list.phase_values(model)
         cur = target_row.get("cells", {}).get(attack_list.COL_PHASE)
-        if len(vals) >= 2 and cur == vals[0]:  # 未接触 → 連絡済 (first → second)
+        # 未接触 → 連絡済 (funnel entry → contacted)
+        if (len(vals) > attack_list.PHASE_IDX_CONTACTED
+                and cur == vals[attack_list.PHASE_IDX_UNTOUCHED]):
             try:
                 table_doc.set_cell(model, target_row["id"], attack_list.COL_PHASE,
-                                   vals[1], actor=_actor_str(), at=_now_iso())
+                                   vals[attack_list.PHASE_IDX_CONTACTED],
+                                   actor=_actor_str(), at=_now_iso())
                 _write_table_model(doc_id, title, _content, model)
-                driven_to = vals[1]
+                driven_to = vals[attack_list.PHASE_IDX_CONTACTED]
             except table_doc.TableDocError as exc:
                 print(f"Error: 行フェーズの前進に失敗しました ({exc})。"
                       f"証跡は記録していません。", file=sys.stderr)
@@ -26945,19 +26941,12 @@ def cmd_acquisition_attack_list_awaiting_reply():
         print(f"Error: {doc_id} はアタックリスト (attack-list) ではありません",
               file=sys.stderr)
         sys.exit(1)
-    vals = next((c.get("values") for c in model.get("columns", [])
-                 if c.get("key") == attack_list.COL_PHASE), []) or []
-    # 連絡済 = the 2nd funnel phase (the "sent, awaiting reply" state).
-    contacted = vals[1] if len(vals) >= 2 else None
+    vals = attack_list.phase_values(model)
+    # 連絡済 = the "sent, awaiting reply" funnel position.
+    contacted = (vals[attack_list.PHASE_IDX_CONTACTED]
+                 if len(vals) > attack_list.PHASE_IDX_CONTACTED else None)
     data = load_project()
-    # index acc -> most-recent sent message-id from the send batches
-    sent_ref = {}
-    for b in data.get("attack_list_send_batches", []):
-        if b.get("doc_id") != doc_id:
-            continue
-        for r in b.get("recipients", []):
-            if r.get("message_id"):
-                sent_ref[r.get("acc_id")] = r["message_id"]
+    sent_ref = sales_entities.sent_message_ids_for_doc(data, doc_id)
     waiting = []
     for row in table_doc.active_rows(model):
         cells = row.get("cells", {})
@@ -26986,6 +26975,33 @@ def cmd_acquisition_attack_list_awaiting_reply():
         print(f"  - {w['acc_id']} <{w['email']}> msg={w['message_id'] or '(不明)'}")
 
 
+def _fire_attack_list_reply_trigger(acc_id, doc_id, phase, message_id=""):
+    """Notify the human that a prospect replied (ms-132 e-4505). Writes the
+    trigger file directly (mirrors the other _fire_*_trigger helpers) rather than
+    mutating os.environ to call cmd_trigger_fire. The name carries the reply's
+    message-id so a *later, distinct* reply from the same prospect fires its own
+    trigger instead of being deduped away by name."""
+    triggers_dir = _get_triggers_dir()
+    os.makedirs(triggers_dir, exist_ok=True)
+    suffix = f"-{message_id}" if message_id else ""
+    name = f"attack-list-reply-{acc_id}{suffix}"
+    trigger_path = os.path.join(triggers_dir, f"{name}.json")
+    if os.path.exists(trigger_path):
+        return False
+    import datetime
+    with open(trigger_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "name": name, "kind": "attack-list-reply",
+            "acc_id": acc_id, "doc_id": doc_id,
+            "message": (f"{acc_id} からアタックリスト打診への返信が届きました "
+                        f"({doc_id}, 行 → {phase})。返信内容を確認して次の一手 "
+                        f"(日程調整 / 詳細回答) を人が判断してください。"),
+            "created_at": datetime.datetime.now().isoformat(),
+        }, f, ensure_ascii=False)
+        f.write("\n")
+    return True
+
+
 def cmd_acquisition_attack_list_reply_record():
     """Record a detected reply from a prospect (ms-132 e-4505): drive the row
     連絡済→返信あり, write the INBOUND Communication (証跡) on the Account, and fire a
@@ -27010,9 +27026,10 @@ def cmd_acquisition_attack_list_reply_record():
     summary = os.environ.get("BEACON_COMM_SUMMARY", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     if not doc_id or not acc_id:
-        print("Usage: beacon acquisition attack-list-reply-record "
-              "<attack-list-doc-id> <acc-id> [--message-id <id>] [--url <link>] "
-              "[--summary <s>] [--json]", file=sys.stderr)
+        print("Usage: beacon acquisition attack-list-reply-record (INBOUND 検知記録) "
+              "<attack-list-doc-id> <acc-id> "
+              "[--message-id <相手返信のid、検知時に不明なら省略可>] [--url <link>] "
+              "[--summary <相手返信の1行要約>] [--json]", file=sys.stderr)
         sys.exit(1)
 
     _content, title, model = _load_table_model(doc_id)
@@ -27021,30 +27038,23 @@ def cmd_acquisition_attack_list_reply_record():
               file=sys.stderr)
         sys.exit(1)
     table_type.install()
-    target_row = None
-    for row in table_doc.active_rows(model):
-        if row.get("cells", {}).get(attack_list.COL_ACCOUNT) == acc_id:
-            target_row = row
-            break
+    target_row = attack_list.find_row_by_account(
+        table_doc.active_rows(model), acc_id)
     if target_row is None:
-        print(f"Error: {acc_id} は {doc_id} の行に居ません", file=sys.stderr)
+        print(f"Error: {acc_id} は {doc_id} の行に居ません — "
+              f"`beacon acquisition attack-list-awaiting-reply {doc_id}` で返信待ち"
+              f"一覧を確認してください", file=sys.stderr)
         sys.exit(1)
-    vals = next((c.get("values") for c in model.get("columns", [])
-                 if c.get("key") == attack_list.COL_PHASE), []) or []
+    vals = attack_list.phase_values(model)
     cur = target_row.get("cells", {}).get(attack_list.COL_PHASE)
-    driven_to = None
     # Advance only 連絡済 → 返信あり (funnel 2nd → 3rd). A reply on a row at another
-    # phase is still recorded (証跡 + notify) but the phase is left as-is.
-    if len(vals) >= 3 and cur == vals[1]:
-        try:
-            table_doc.set_cell(model, target_row["id"], attack_list.COL_PHASE,
-                               vals[2], actor=_actor_str(), at=_now_iso())
-            _write_table_model(doc_id, title, _content, model)
-            driven_to = vals[2]
-        except table_doc.TableDocError as exc:
-            print(f"Error: 行フェーズの前進に失敗しました ({exc})", file=sys.stderr)
-            sys.exit(1)
+    # phase still records the 証跡 + notifies but does not misadvance the phase.
+    will_advance = (len(vals) > attack_list.PHASE_IDX_REPLIED
+                    and cur == vals[attack_list.PHASE_IDX_CONTACTED])
 
+    # Build the 証跡 in memory FIRST (no save), so if the phase-drive write fails
+    # below nothing is persisted — comm cannot land phase-advanced-without-証跡
+    # nor 証跡-without-attempted-phase (保守性レビュー PR #553: atomicity).
     data = load_project()
     try:
         comm_id = sales_entities.communication_add(
@@ -27055,27 +27065,38 @@ def cmd_acquisition_attack_list_reply_record():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    save_project(data)
 
-    # Notify the human (idiomatic path = a trigger). Per-account name so distinct
-    # replies each surface; re-firing the same acc is deduped until cleared.
-    os.environ["BEACON_TRIGGER_NAME"] = f"attack-list-reply-{acc_id}"
-    os.environ["BEACON_TRIGGER_MESSAGE"] = (
-        f"{acc_id} からアタックリスト打診への返信が届きました "
-        f"({doc_id}, 行 → {driven_to or cur})。返信内容を確認して次の一手 "
-        f"(日程調整 / 詳細回答) を人が判断してください。")
-    try:
-        cmd_trigger_fire()
-    except SystemExit:
-        pass  # notification is best-effort; the 証跡 + phase are already saved
+    driven_to = None
+    if will_advance:
+        try:
+            table_doc.set_cell(model, target_row["id"], attack_list.COL_PHASE,
+                               vals[attack_list.PHASE_IDX_REPLIED],
+                               actor=_actor_str(), at=_now_iso())
+            _write_table_model(doc_id, title, _content, model)
+            driven_to = vals[attack_list.PHASE_IDX_REPLIED]
+        except table_doc.TableDocError as exc:
+            print(f"Error: 行フェーズの前進に失敗しました ({exc})。証跡は記録して"
+                  f"いません。", file=sys.stderr)
+            sys.exit(1)
+    save_project(data)  # persist the 証跡 only after the phase write succeeded
+
+    # Notify the human (idiomatic path = a trigger), writing the file directly.
+    notified = _fire_attack_list_reply_trigger(
+        acc_id, doc_id, driven_to or cur, message_id)
 
     if json_mode:
-        print(json.dumps({"doc_id": doc_id, "acc_id": acc_id, "comm_id": comm_id,
-                          "phase_driven_to": driven_to, "notified": True},
-                         ensure_ascii=False))
+        print(json.dumps({
+            "doc_id": doc_id, "acc_id": acc_id, "comm_id": comm_id,
+            "phase_driven_to": driven_to,
+            # explicit so an AI never reads a null phase as a failure: the phase
+            # was intentionally left as-is because the row was not at 連絡済.
+            "phase_guard_skipped": driven_to is None,
+            "notified": notified}, ensure_ascii=False))
     else:
-        drive_note = f" / 行 → {driven_to}" if driven_to else " (phase 変更なし)"
-        print(f"返信記録: {acc_id} inbound 証跡 {comm_id}{drive_note} / 人間に通知")
+        drive_note = (f" / 行 → {driven_to}" if driven_to
+                      else f" (phase 変更なし: 行は {cur})")
+        note = "" if notified else " (通知は既出のためスキップ)"
+        print(f"返信記録: {acc_id} inbound 証跡 {comm_id}{drive_note}{note}")
 
 
 # --- send-account ledger (ms-107 e-3365) -----------------------------------
