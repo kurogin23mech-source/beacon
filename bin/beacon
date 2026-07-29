@@ -2943,18 +2943,23 @@ cmd_doc() {
                         BEACON_JSON="$t_json" python3 "$COMMANDS_PY" doc_table_add_row
                     ;;
                 set-cell)
-                    # positional: <doc-id> <row-id> <column-key> [value]
+                    # positional: <doc-id> <row-id> <col-key> [value]
                     t_doc_id="${t_doc_id:-${t_pos[0]:-}}"
                     t_row_id="${t_pos[1]:-}"
                     t_col_key="${t_pos[2]:-}"
-                    [[ -z "$t_value_set" && ${#t_pos[@]} -gt 3 ]] && t_value="${t_pos[3]}"
+                    # A 4th positional counts as an explicitly-provided value, so
+                    # a forgotten value is rejected downstream (not written empty).
+                    if [[ -z "$t_value_set" && ${#t_pos[@]} -gt 3 ]]; then
+                        t_value="${t_pos[3]}"; t_value_set="1"
+                    fi
                     if [ -z "$t_doc_id" ] || [ -z "$t_row_id" ] || [ -z "$t_col_key" ]; then
-                        echo "Usage: beacon doc table set-cell <doc-id> <row-id> <column-key> <value> [--json]"
-                        echo "  値に空白や記号を含む場合は --value \"...\" を使う"
+                        echo "Usage: beacon doc table set-cell <doc-id> <row-id> <col-key> <value> [--json]"
+                        echo "  値に空白や記号を含む場合は --value \"...\" を使う（空にするなら --value \"\"）"
                         exit 1
                     fi
                     BEACON_DOC_ID="$t_doc_id" BEACON_ROW_ID="$t_row_id" \
                         BEACON_COL_KEY="$t_col_key" BEACON_VALUE="$t_value" \
+                        BEACON_VALUE_SET="$t_value_set" \
                         BEACON_JSON="$t_json" python3 "$COMMANDS_PY" doc_table_set_cell
                     ;;
                 rm-row)
@@ -2978,11 +2983,14 @@ cmd_doc() {
                     ;;
                 *)
                     echo "Usage: beacon doc table [create|add-row|set-cell|rm-row|show]"
-                    echo "  create   \"title\" --columns '<json>'    型付き列で表を作成"
-                    echo "  add-row  <doc-id> --cells '<json>'      行を追加 (型検査 + 履歴)"
-                    echo "  set-cell <doc-id> <row-id> <col> <val>  セルを更新 (過去値は履歴に残る)"
-                    echo "  rm-row   <doc-id> <row-id>              行を削除 (soft-delete)"
-                    echo "  show     <doc-id>                       表を描画 (--json で構造)"
+                    echo "  create   \"title\" --columns '<json>'        型付き列で表を作成"
+                    echo "  add-row  <doc-id> --cells '<json>'          行を追加 (型検査 + 履歴)"
+                    echo "  set-cell <doc-id> <row-id> <col-key> <val>  セルを更新 (過去値は履歴に残る)"
+                    echo "  rm-row   <doc-id> <row-id>                  行を削除 (soft-delete)"
+                    echo "  show     <doc-id>                           表を描画 (--json で構造)"
+                    # AX review of PR #544: an unknown subcommand (typo) must be a
+                    # non-zero exit so a caller checking $? doesn't read success.
+                    exit 1
                     ;;
             esac
             ;;

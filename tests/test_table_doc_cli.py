@@ -65,7 +65,9 @@ def test_create_table_doc(beacon_project):
     assert out.returncode == 0, out.stderr
     payload = json.loads(out.stdout)
     assert payload["format"] == "table"
-    assert payload["columns"] == ["name", "phase", "amount"]
+    # columns are full objects (same shape as `show --json`) — AX review of #544.
+    assert [c["key"] for c in payload["columns"]] == ["name", "phase", "amount"]
+    assert payload["columns"][1]["values"] == ["lead", "meeting", "won"]
     # The doc file carries format: table in its frontmatter.
     doc_path = beacon_project / ".beacon" / "documents" / f"{payload['doc_id']}.md"
     text = doc_path.read_text()
@@ -140,6 +142,52 @@ def test_rm_row_soft_deletes(beacon_project):
     doc_path = beacon_project / ".beacon" / "documents" / f"{doc_id}.md"
     assert "Beta" in doc_path.read_text()
     assert "rm_row" in doc_path.read_text()
+
+
+def test_set_cell_missing_value_is_rejected(beacon_project):
+    """AX #544: a forgotten <value> must error, not silently write empty."""
+    doc_id = _create_table()
+    _run(["doc", "table", "add-row", doc_id, "--cells", '{"name":"Acme","phase":"lead"}'])
+    r = _run(["doc", "table", "set-cell", doc_id, "r1", "phase"])  # no value
+    assert r.returncode == 1
+    assert "value" in (r.stdout + r.stderr).lower()
+    # The cell keeps its prior value (nothing was written).
+    model = json.loads(_run(["doc", "table", "show", doc_id, "--json"]).stdout)
+    assert model["rows"][0]["cells"]["phase"] == "lead"
+
+
+def test_set_cell_explicit_empty_is_allowed(beacon_project):
+    """--value "" is an explicit clear (distinct from a forgotten value)."""
+    doc_id = _create_table()
+    _run(["doc", "table", "add-row", doc_id, "--cells", '{"name":"Acme","phase":"lead"}'])
+    r = _run(["doc", "table", "set-cell", doc_id, "r1", "phase", "--value", ""])
+    assert r.returncode == 0, r.stderr
+
+
+def test_set_cell_json_returns_old_and_new(beacon_project):
+    """AX #544: set-cell --json reports what was stored + displaced."""
+    doc_id = _create_table()
+    _run(["doc", "table", "add-row", doc_id, "--cells", '{"phase":"lead","amount":"1"}'])
+    out = _run(["doc", "table", "set-cell", doc_id, "r1", "amount", "50", "--json"])
+    payload = json.loads(out.stdout)
+    assert payload["old_value"] == 1 and payload["new_value"] == 50  # coerced
+
+
+def test_show_json_reports_removed_count(beacon_project):
+    """AX #544: tombstoned rows are surfaced as a count, not silently dropped."""
+    doc_id = _create_table()
+    _run(["doc", "table", "add-row", doc_id, "--cells", '{"name":"a"}'])
+    _run(["doc", "table", "add-row", doc_id, "--cells", '{"name":"b"}'])
+    _run(["doc", "table", "rm-row", doc_id, "r2"])
+    model = json.loads(_run(["doc", "table", "show", doc_id, "--json"]).stdout)
+    assert len(model["rows"]) == 1
+    assert model["removed_count"] == 1
+
+
+def test_unknown_table_subcommand_exits_nonzero(beacon_project):
+    """AX #544: a typo'd subcommand must not exit 0."""
+    r = _run(["doc", "table", "creat", "x", "--columns", COLUMNS])  # typo
+    assert r.returncode != 0
 
 
 def test_show_renders_markdown_table(beacon_project):

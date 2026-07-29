@@ -2995,14 +2995,19 @@ def _handle_doc_table(root: Path, args: argparse.Namespace) -> int:
         doc_id = args.table_doc_id or (rest[0] if rest else "")
         row_id = rest[1] if len(rest) > 1 else ""
         col = rest[2] if len(rest) > 2 else ""
+        # A value is "provided" if --value was passed (even empty) or a 4th
+        # positional exists — so a forgotten value is rejected, not written empty.
+        value_set = args.cell_value is not None or len(rest) > 3
         value = (args.cell_value if args.cell_value is not None
                  else (rest[3] if len(rest) > 3 else ""))
         if not (doc_id and row_id and col):
-            print("Usage: beacon doc table set-cell <doc-id> <row-id> <column-key> "
+            print("Usage: beacon doc table set-cell <doc-id> <row-id> <col-key> "
                   "<value> [--json]")
             return 1
         env = {"BEACON_DOC_ID": doc_id, "BEACON_ROW_ID": row_id,
-               "BEACON_COL_KEY": col, "BEACON_VALUE": value, "BEACON_JSON": json_flag}
+               "BEACON_COL_KEY": col, "BEACON_VALUE": value,
+               "BEACON_VALUE_SET": "1" if value_set else "",
+               "BEACON_JSON": json_flag}
         return _run_commands_py(root, "doc_table_set_cell", env)
 
     if sub == "rm-row":

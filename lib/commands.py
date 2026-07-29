@@ -14690,11 +14690,13 @@ def cmd_doc_table_create():
     scope = os.environ.get("BEACON_SCOPE", "") or DEFAULT_SCOPE
     milestone = os.environ.get("BEACON_MS", "")
     operation = os.environ.get("BEACON_OP", "")
-    trek_id = os.environ.get("BEACON_TREK_ID", "")
-    account = os.environ.get("BEACON_ACCOUNT", "")
-    opportunity = os.environ.get("BEACON_OPPORTUNITY", "")
-    target = (os.environ.get("BEACON_TARGET", "") or account or opportunity
-              or milestone or operation or trek_id)
+    # ms-131 e-4497: link via --target (any Target id incl opp-/acc-/acq-) or
+    # --ms / --op. The bash + Windows dispatchers pass exactly these three env
+    # vars, so we read exactly them (no dead --account/--opportunity/--trek
+    # fallback that the dispatchers never populate — maintainability review of
+    # PR #544).
+    trek_id = ""
+    target = (os.environ.get("BEACON_TARGET", "") or milestone or operation)
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not title:
@@ -14787,9 +14789,12 @@ def cmd_doc_table_create():
         # the doc's frontmatter, surfaced via `doc list --target`).
 
     if json_mode:
+        # Emit full column objects (same shape as `show --json`) so an AI
+        # chaining create → show sees one consistent ``columns`` shape (AX
+        # review of PR #544).
         print(json.dumps({"doc_id": doc_id, "title": title, "scope": scope,
                           "format": table_doc.TABLE_FORMAT,
-                          "columns": table_doc.column_keys(model)},
+                          "columns": model.get("columns", [])},
                          ensure_ascii=False))
     else:
         print(f"Created table: {doc_id} [{scope}] ({title}) "
@@ -14838,9 +14843,18 @@ def cmd_doc_table_set_cell():
     row_id = os.environ.get("BEACON_ROW_ID", "")
     col_key = os.environ.get("BEACON_COL_KEY", "")
     value = os.environ.get("BEACON_VALUE", "")
+    # AX review of PR #544: a missing <value> must NOT silently write an empty
+    # string. BEACON_VALUE_SET (set by the dispatchers when a value was actually
+    # provided — positional or --value) distinguishes "forgot the value" from
+    # "explicitly set it to empty", mirroring the BEACON_TARGET_SET pattern.
+    value_set = os.environ.get("BEACON_VALUE_SET", "") == "1"
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     if not (doc_id and row_id and col_key):
-        print("Error: doc-id, row-id, column-key すべて必須です", file=sys.stderr)
+        print("Error: doc-id, row-id, col-key すべて必須です", file=sys.stderr)
+        sys.exit(1)
+    if not value_set:
+        print("Error: <value> が必要です (空にする場合は明示的に --value \"\" を渡す)",
+              file=sys.stderr)
         sys.exit(1)
     if _refuse_if_bus_origin("doc_table_set_cell",
                              {"doc_id": doc_id, "row_id": row_id}):
@@ -14855,8 +14869,13 @@ def cmd_doc_table_set_cell():
         sys.exit(1)
     _write_table_model(doc_id, title, content, model)
 
+    # Return what was actually stored (and displaced) so an AI can read its own
+    # write without a follow-up show (AX review of PR #544). The model recorded
+    # both in the row's latest history entry.
+    last = table_doc.get_row(model, row_id).get("history", [])[-1]
     if json_mode:
-        print(json.dumps({"doc_id": doc_id, "row_id": row_id, "key": col_key},
+        print(json.dumps({"doc_id": doc_id, "row_id": row_id, "key": col_key,
+                          "old_value": last.get("old"), "new_value": last.get("new")},
                          ensure_ascii=False))
     else:
         print(f"Set {row_id}.{col_key} in {doc_id}")
@@ -14900,10 +14919,16 @@ def cmd_doc_table_show():
         sys.exit(1)
     _content, title, model = _load_table_model(doc_id)
     if json_mode:
+        # ``rows`` is the active (non-tombstoned) view. Surface ``removed_count``
+        # so an AI auditing table state can tell "N rows" from "had N+K, K
+        # removed" instead of silently missing the deletions (AX review of #544).
+        active = table_doc.active_rows(model)
+        all_rows = model.get("rows", [])
         print(json.dumps({
             "doc_id": doc_id, "title": title,
             "columns": model.get("columns", []),
-            "rows": table_doc.active_rows(model),
+            "rows": active,
+            "removed_count": len(all_rows) - len(active),
         }, ensure_ascii=False))
     else:
         print(f"# {title}\n")
