@@ -424,6 +424,7 @@ Treks (= 協奏作業領域) are cross-project, cross-session work areas. While 
 | `beacon trek create "title" [--type temporary\|persistent] [--description "..."] [--goal-state "<criterion>"]` | Create a trek; caller becomes leader. `--goal-state` (ms-75 / e-1865) は完了マーカー (acceptance_criteria 相当) |
 | `beacon trek list [--status s] [--include-archived] [--all-actors] [--joined] [--json]` | List treks visible to the caller. `--joined` で自分が join 済の trek だけに絞る (ms-75 / e-1813) |
 | `beacon trek show <trek-id> [--all] [--json]` | Trek 詳細 + scope に紐付く task / commit / 配下 doc の集約ビュー (ms-75 / e-1864)。`--all` で要約 cap を解除 |
+| `beacon trek review-verdicts <trek-id> <task-id> [--json]` | leader_review target の verdict 集合 (completion / halt-rescue を halt_reason で分岐、ms-128 / e-4374)。`/beacon-trek-review` が呼ぶ単一 source |
 | `beacon trek timeline <trek-id> [--limit N] [--json]` | Trek の lifecycle / scope 内 commit / task done / 配下 doc を時系列で参照 (ms-75 / e-1867) |
 | `beacon trek start <trek-id>` | Transition planning → active / planning から active へ |
 | `beacon trek archive <trek-id>` | Archive (= terminal); restart by creating a new trek / 完了化、再開は新 trek 起票 |

@@ -677,6 +677,7 @@ class ApiClient:
                        requested_action: str | None = None,
                        context: str = "", rationale: str = "",
                        client_event_id: str = "",
+                       is_retry: bool = False,
                        max_retries: int = 2) -> dict:
         body = {
             "channel": channel,
@@ -708,11 +709,27 @@ class ApiClient:
         import time as _time
         key = client_event_id or f"ce-{int(_time.time())}-{_secrets.token_hex(4)}"
         body["client_event_id"] = key
+        # ms-128 / e-4289: a caller that re-runs `beacon bus send` after an
+        # *ambiguous* failure (the CLI process died / was killed after the POST
+        # may have landed) can pass the SAME client_event_id + is_retry so the
+        # server dedups (returns the stored event as idempotent_replay) instead
+        # of creating a true duplicate. Within a single process the transport
+        # retry below sets is_retry itself; this seeds it for the cross-
+        # invocation case where the first attempt left no parseable output.
+        if is_retry:
+            body["is_retry"] = True
         path = f"/api/projects/{project_id}/bus"
         attempt = 0
         while True:
             try:
-                return self.post(path, body)
+                resp = self.post(path, body)
+                # ms-128 / e-4289 (AX review PR#545): guarantee the response
+                # carries the client-minted key so a caller can ALWAYS read it
+                # back (from `--json`) to drive a later idempotent --retry. Do
+                # not depend on the server echoing it — stamp it client-side.
+                if isinstance(resp, dict):
+                    resp.setdefault("client_event_id", key)
+                return resp
             except (ConnectionError, TimeoutError):
                 # Ambiguous transport failure: the request may or may not have
                 # landed. ``post`` wraps most url/socket errors as

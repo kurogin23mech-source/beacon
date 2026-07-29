@@ -45,11 +45,13 @@ class _StubApiClient:
     def post_bus_event(self, project_id, channel, *, sender_session_id="",
                        payload=None, delivery="propose-to-ai",
                        envelope=None, requested_action=None,
-                       context="", rationale=""):
+                       context="", rationale="",
+                       client_event_id="", is_retry=False):
         # e-1290: envelope / requested_action are accepted to match the real
         # api_client signature. The pre-envelope CLI tests don't care about
         # these fields; they assert payload/channel/delivery only.
         # ms-90 / e-3246: context / rationale も real signature に合わせて受ける。
+        # ms-128 / e-4289: client_event_id / is_retry も同様に受けて記録する。
         ev = {
             "event_id": f"e-{len(self.events) + 1}",
             "channel": channel,
@@ -60,6 +62,8 @@ class _StubApiClient:
             "requested_action": requested_action,
             "context": context,
             "rationale": rationale,
+            "client_event_id": client_event_id,
+            "is_retry": is_retry,
             "created_at": f"2026-06-07T00:00:0{len(self.events)}.000000Z",
         }
         self.events.append(ev)
@@ -145,7 +149,8 @@ def _clear_bus_env(monkeypatch):
                 "BEACON_BUS_TIMEOUT", "BEACON_BUS_LAST_SEEN_AT", "BEACON_JSON",
                 "BEACON_BUS_RECIPIENT_SESSION", "BEACON_BUS_IN_REPLY_TO",
                 "BEACON_BUS_CONTEXT", "BEACON_BUS_RATIONALE",
-                "BEACON_BUS_EVENT_ID", "BEACON_BUS_ACK_EVENT_ID"):
+                "BEACON_BUS_EVENT_ID", "BEACON_BUS_ACK_EVENT_ID",
+                "BEACON_BUS_CLIENT_EVENT_ID", "BEACON_BUS_IS_RETRY"):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -994,3 +999,77 @@ def test_bus_status_json_emits_raw_event_dict(monkeypatch, capsys, stub):
     assert parsed["delivered_by"] == "bridge-A"
     # opened was never stamped; field should be absent from the dict.
     assert "opened_at" not in parsed
+
+
+# ---------------------------------------------------------------------------
+# ms-128 / e-4289: idempotent cross-invocation resend + stdout purity.
+#
+# The dogfood (2026-07-27) hit two bugs: (1) a human-facing "Note:" line
+# polluted stdout under --json so the leader couldn't parse send success and
+# resent, and (2) each resend minted a fresh client_event_id so the server
+# saw a *new* event → true duplicate DM. The server-side dedup already exists
+# (ms-110/e-4001), but was unreachable from the CLI: no way to reuse the key
+# or set is_retry. These tests pin the CLI exposure that closes the loop.
+# ---------------------------------------------------------------------------
+
+def test_bus_send_forwards_client_event_id_and_retry(monkeypatch, capsys, stub):
+    """--client-event-id X --retry threads client_event_id + is_retry into the
+    post so the server can dedup a cross-invocation resend."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_SENDER", "sv-me")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    monkeypatch.setenv("BEACON_BUS_CLIENT_EVENT_ID", "ce-fixed-key")
+    monkeypatch.setenv("BEACON_BUS_IS_RETRY", "1")
+    commands.cmd_bus_send()
+    assert stub.events[-1]["client_event_id"] == "ce-fixed-key"
+    assert stub.events[-1]["is_retry"] is True
+
+
+def test_bus_send_first_send_is_not_a_retry(monkeypatch, capsys, stub):
+    """A normal first send does NOT set is_retry (only an explicit --retry does),
+    and passes no forced key so the client mints its own."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_SENDER", "sv-me")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    commands.cmd_bus_send()
+    assert stub.events[-1]["is_retry"] is False
+    assert stub.events[-1]["client_event_id"] == ""
+
+
+def test_bus_send_retry_without_client_event_id_exits_2(monkeypatch, capsys, stub):
+    """--retry with no client_event_id is a caller error: fail fast (exit 2)
+    with an actionable message BEFORE any network round-trip, mirroring the
+    server's 422 (is_retry_requires_client_event_id)."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_SENDER", "sv-me")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    monkeypatch.setenv("BEACON_BUS_IS_RETRY", "1")
+    with pytest.raises(SystemExit) as exc:
+        commands.cmd_bus_send()
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "--client-event-id" in err
+    # The guard must fire before the send: no event was posted.
+    assert stub.events == []
+
+
+def test_bus_send_note_nudge_goes_to_stderr_not_stdout(monkeypatch, capsys, stub):
+    """stdout purity (e-4289 part 1): the decision-event "Note:" nudge on a
+    context-less DM must go to stderr, so a --json caller parses pure JSON on
+    stdout (the leak that caused the dogfood false-failure resend)."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_SENDER", "sv-me")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    monkeypatch.setenv("BEACON_JSON", "1")
+    commands.cmd_bus_send()
+    captured = capsys.readouterr()
+    # stdout must be pure JSON (round-trips), no "Note:" leakage.
+    parsed = json.loads(captured.out.strip())
+    assert parsed["channel"] == "dm"
+    assert "Note:" not in captured.out
+    # The nudge is still emitted — on stderr.
+    assert "--context" in captured.err

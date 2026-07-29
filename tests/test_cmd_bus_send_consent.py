@@ -42,7 +42,7 @@ class _StubApiClient:
 
     def post_bus_event(self, project_id, channel, *, sender_session_id="",
                        payload=None, delivery="propose-to-ai", envelope=None,
-                       requested_action=None, context="", rationale=""):
+                       requested_action=None, context="", rationale="", client_event_id="", is_retry=False):
         self.post_calls.append({"project_id": project_id, "channel": channel,
                                 "payload": payload or {}, "envelope": envelope})
         return {"event_id": "ev-1", "channel": channel, "delivery": delivery,

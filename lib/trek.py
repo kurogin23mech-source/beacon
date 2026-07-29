@@ -4362,6 +4362,72 @@ def sweep_working_target_halts(
     return forced
 
 
+# ---------------------------------------------------------------------------
+# ms-128 方針6 (e-4374) — leader_review の verdict 集合を halt_reason タグで分岐。
+#
+# leader_review キューには 2 種が混載する: (a) 正常完成 (executor が完成 PR 化して
+# 自発的に上げた) と (b) halt 救済 (server が halt_reason タグ付きで強制遷移させた、
+# = まだ完成していない・停まっただけ)。両者で leader が取れる action は食い違う —
+# 「approve (= 完遂と認める)」は「ただ停まっただけ」の target に対して意味をなさない。
+# 同じ leader_review 状態でも、halt_reason タグの有無で verdict 集合を分ける。
+# ---------------------------------------------------------------------------
+
+# 完成レビュー: executor の完成宣言に対する leader の判定。
+COMPLETION_VERDICTS = (
+    {"verdict": "approve", "to_state": "user_review",
+     "intent": "思想/目的達成レビュー合格 → ターミナル化 (user の番へ)"},
+    {"verdict": "re-work", "to_state": "working",
+     "intent": "差し戻し (追加作業を要請)"},
+    {"verdict": "forward-to-user", "to_state": "user_review",
+     "intent": "嗜好/不可逆/cross-Trek 判断を user に escalate"},
+)
+
+# halt 救済: 停まっただけの target を働ける状態へ戻す。approve は無い (= 未完成)。
+HALT_RESCUE_VERDICTS = (
+    {"verdict": "reassign", "to_state": "working",
+     "intent": "別セッションへ再配分して再開"},
+    {"verdict": "dm-nudge", "to_state": "working",
+     "intent": "実行セッションへ DM 指示して再開を促す"},
+    {"verdict": "re-open", "to_state": "working",
+     "intent": "working へ戻す (halt タグを解除)"},
+)
+
+
+def leader_review_verdict_set(trek_doc: dict, target_id: str) -> dict:
+    """Return the verdict set a leader may pick from for a leader_review target.
+
+    ms-128 方針6 (e-4374) — branches on the halt_reason tag so the leader is
+    offered the *right* actions: a normally-completed target gets
+    {approve / re-work / forward-user}; a halt-rescued target (still ``working``
+    semantically, merely stalled) gets {reassign / dm-nudge / re-open} — never
+    ``approve``, which is meaningless for something that only stopped.
+
+    Pure (reads task_states, mutates nothing). Returns::
+
+        {"mode": "completion" | "halt_rescue" | "not_in_review",
+         "halt_reason": str | None,
+         "verdicts": [{"verdict", "to_state", "intent"}, ...]}
+
+    ``not_in_review`` (empty verdicts) when the target is not in leader_review,
+    so a caller can guard instead of offering a nonsensical review.
+    """
+    entry = (trek_doc.get("task_states") or {}).get(target_id) or {}
+    if entry.get("state") != "leader_review":
+        return {"mode": "not_in_review", "halt_reason": None, "verdicts": []}
+    halt_reason = entry.get("halt_reason") or None
+    if halt_reason:
+        return {
+            "mode": "halt_rescue",
+            "halt_reason": halt_reason,
+            "verdicts": [dict(v) for v in HALT_RESCUE_VERDICTS],
+        }
+    return {
+        "mode": "completion",
+        "halt_reason": None,
+        "verdicts": [dict(v) for v in COMPLETION_VERDICTS],
+    }
+
+
 def detect_unresponsive_leader(
     trek_doc: dict,
     now: datetime.datetime,

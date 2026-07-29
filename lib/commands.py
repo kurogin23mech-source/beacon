@@ -7452,6 +7452,36 @@ def _goal_state_status(trek_doc: dict, agg: dict) -> str:
     )
 
 
+def cmd_trek_review_verdicts():
+    """Emit the verdict set a leader may pick for a leader_review target.
+
+    ms-128 方針6 / e-4374 (AX/maintainability review PR#545) — the single
+    source of truth for "which verdicts apply" is ``trek.leader_review_verdict_set``
+    (branches on the halt_reason tag: completion vs halt-rescue). The
+    /beacon-trek-review Skill calls THIS verb and renders whatever it returns,
+    instead of hand-copying the verdict lists into prose (which would silently
+    drift from the lib). Reads BEACON_TREK_ID / BEACON_TREK_TASK_ID; always
+    emits JSON (the Skill parses it).
+    """
+    import trek as _trek
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    task_id = os.environ.get("BEACON_TREK_TASK_ID", "").strip()
+    if not trek_id or not task_id:
+        print("Error: trek_id and task_id are required", file=sys.stderr)
+        sys.exit(1)
+    try:
+        t = get_store().get_trek(trek_id)
+    except ValueError:
+        print(f"Error: trek {trek_id} not found", file=sys.stderr)
+        sys.exit(1)
+    except RuntimeError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    result = _trek.leader_review_verdict_set(t, task_id)
+    print(json.dumps(result, ensure_ascii=False))
+
+
 def cmd_trek_show():
     """Show a single trek by id with task / commit / doc aggregation.
 
@@ -20874,6 +20904,7 @@ def _help_registry():
         {"command": "beacon trek create <title>", "flags": ["--type temporary|persistent (default persistent)", "--description <text>", "--goal-state <criterion>", "--json"], "description": "Create a trek (cross-project協奏作業領域). Requires an identified live session (the caller's session/email becomes the trek leader, ms-69) — run it from a real bclaude session, not a bare script. --goal-state は ms-75/e-1865 完了マーカー"},
         {"command": "beacon trek list", "flags": ["--status <s>", "--include-archived", "--all-actors", "--joined", "--json"], "description": "List treks visible to the caller. --joined で自分が join 済の trek だけ"},
         {"command": "beacon trek show <trek-id>", "flags": ["--all", "--json"], "description": "Show trek detail + 集約ビュー (task / commit / doc, ms-75/e-1864). --all で cap 解除"},
+        {"command": "beacon trek review-verdicts <trek-id> <task-id>", "flags": ["--json"], "description": "leader_review target の verdict 集合を返す (completion / halt-rescue を halt_reason で分岐、ms-128/e-4374)。/beacon-trek-review が呼ぶ単一 source"},
         {"command": "beacon trek timeline <trek-id>", "flags": ["--limit N", "--json"], "description": "Trek の lifecycle / commit / task done / doc を時系列で参照 (ms-75/e-1867)"},
         {"command": "beacon trek start <trek-id>", "flags": ["--json"], "description": "Transition trek planning → active"},
         {"command": "beacon trek archive <trek-id>", "flags": ["--json"], "description": "Archive trek (= terminal); restart by creating a new one"},
@@ -22301,6 +22332,24 @@ def cmd_bus_send():
     # DM 発信を「問題駆動の相談」として記録するためのメタデータ。本文とは別に運ぶ。
     dec_context = os.environ.get("BEACON_BUS_CONTEXT", "").strip()
     dec_rationale = os.environ.get("BEACON_BUS_RATIONALE", "").strip()
+    # ms-128 / e-4289: idempotent cross-invocation resend. A caller (leader /
+    # Skill) that re-runs `beacon bus send` after an ambiguous failure passes
+    # --client-event-id <same key> --retry so the server dedups instead of
+    # creating a true duplicate DM (the 2026-07-27 dogfood failure). Empty →
+    # the client mints a fresh key (normal first send).
+    client_event_id = os.environ.get("BEACON_BUS_CLIENT_EVENT_ID", "").strip()
+    is_retry = os.environ.get("BEACON_BUS_IS_RETRY", "") == "1"
+    # Fail fast (mirror the server's 422) before any network round-trip so the
+    # caller gets an actionable message rather than an opaque HTTP error.
+    if is_retry and not client_event_id:
+        print(
+            "Error: --retry requires --client-event-id. Resend with the SAME"
+            " client_event_id the first attempt used so the server can dedup"
+            " (idempotent send, e-4289). The first send's JSON output carries"
+            " it under the \"client_event_id\" key.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     # e-1209: --to <session_id> stamps payload.recipient_session_id so the
     # server-side filter in /bus/unread can route the event to a single
     # recipient. Without this, `dm`-channel events fan out to every session
@@ -22728,6 +22777,8 @@ def cmd_bus_send():
             requested_action=requested_action,
             context=dec_context,
             rationale=dec_rationale,
+            client_event_id=client_event_id,
+            is_retry=is_retry,
         )
     except BaseException:
         # The send failed — refund the pessimistically-decremented slot
@@ -27891,6 +27942,7 @@ if __name__ == "__main__":
         "trek_create": cmd_trek_create,
         "trek_list": cmd_trek_list,
         "trek_show": cmd_trek_show,
+        "trek_review_verdicts": cmd_trek_review_verdicts,
         "trek_start": cmd_trek_start,
         "trek_archive": cmd_trek_archive,
         "trek_invite": cmd_trek_invite,
