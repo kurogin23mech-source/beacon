@@ -35,13 +35,16 @@ def project_dir(tmp_path, monkeypatch):
     # ms-126: priority is mandatory. This test exercises the done-MS re-open
     # prompt, not priority triage, so opt into the untriaged sentinel to keep
     # the add path unblocked.
-    # ms-126 / e-4222: the untriaged sentinel is now a *machine-only* capability
-    # — a human session (conftest defaults BEACON_SESSION_KIND=human) that passes
-    # --untriaged is refused. This fixture seeds data as a machine caller, not a
-    # human deferring a priority judgement, so it declares a non-human session
-    # for the untriaged add to be honoured.
+    # ms-126 / e-4222 + philosophy fix (2026-07-29): the untriaged sentinel is a
+    # *machine-only* capability. The refusal is no longer keyed only on
+    # BEACON_SESSION_KIND=human — an undeclared *interactive* session (the
+    # test_interactive_* cases below monkeypatch stdin.isatty→True) now counts as
+    # a human and is refused. This fixture seeds data as a machine caller, so it
+    # must DECLARE itself non-human explicitly (BEACON_SESSION_KIND=ai) rather
+    # than rely on the unset default — which is exactly the recovery path the
+    # refusal message advertises for automated callers at a terminal.
     monkeypatch.setenv("BEACON_ALLOW_UNTRIAGED", "1")
-    monkeypatch.delenv("BEACON_SESSION_KIND", raising=False)
+    monkeypatch.setenv("BEACON_SESSION_KIND", "ai")
     return tmp_path
 
 
