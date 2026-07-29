@@ -24,6 +24,13 @@ TREK_EXECUTE = SKILLS / "beacon-trek-execute.md"
 TREK_REVIEW = SKILLS / "beacon-trek-review.md"
 TREK_PULSE = SKILLS / "beacon-trek-pulse.md"
 
+# NOTE (parity reliance): these assertions read only the legacy ``skills/*.md``
+# copies. The canonical ``shared/skills/<name>/SKILL.md`` copies are covered
+# transitively by ``test_shared_skills_canonical_parity.py`` (bodies must match
+# byte-for-byte after frontmatter). If that parity test is ever retired (its
+# docstring allows this once the legacy files are removed), repoint the paths
+# below at ``shared/skills/<name>/SKILL.md`` so the动線 invariants stay guarded.
+
 
 # ---------------------------------------------------------------------------
 # AC9 (e-4281) — executor は端末の人間に判断を投げない
@@ -33,13 +40,29 @@ TREK_PULSE = SKILLS / "beacon-trek-pulse.md"
 def test_execute_skill_forbids_askuserquestion():
     """The execute Skill must explicitly forbid AskUserQuestion within Trek
     scope — the terminal-human modal is what killed the session for 4h+ in
-    the 2026-07-27 dogfood (tk-9d4b53ed)."""
+    the 2026-07-27 dogfood (tk-9d4b53ed).
+
+    The assertion pins a *prohibition*, not mere presence: a future edit that
+    flipped the sentence to "AskUserQuestion を使ってよい" (the exact AC9
+    regression) must fail. We require AskUserQuestion to co-occur with a
+    negation verb (使わない / 投げない / 聞かない) so the token can't survive
+    a permissive reword."""
     body = TREK_EXECUTE.read_text(encoding="utf-8")
     assert "AskUserQuestion" in body, (
         "beacon-trek-execute.md must name AskUserQuestion so the prohibition "
         "is unambiguous (e-4281 / AC9)."
     )
     assert "e-4281" in body
+    # Prohibition must be present, not just the token. Find the sentence(s)
+    # naming AskUserQuestion and require a negation verb nearby.
+    prohibition_verbs = ("使わない", "投げない", "聞かない", "禁止")
+    lines_with_token = [ln for ln in body.splitlines() if "AskUserQuestion" in ln]
+    assert any(
+        any(v in ln for v in prohibition_verbs) for ln in lines_with_token
+    ), (
+        "AskUserQuestion appears but no prohibition verb (使わない/投げない/"
+        "聞かない/禁止) is co-located — AC9 forbids it, the Skill must SAY so."
+    )
 
 
 def test_execute_skill_has_judgment_priority_section():
@@ -95,8 +118,11 @@ def test_review_skill_imposes_philosophy_and_attainment_review():
     """leader_review→user_review must impose 思想 + 目的達成 review before the
     stamp (AX/保守性 are the executor's PR-time job; this is the配置手前境界)."""
     body = TREK_REVIEW.read_text(encoding="utf-8")
-    assert "--type philosophy" in body, "思想レビュー動線が欠落 (e-4370)"
-    assert "--type attainment" in body, "目的達成レビュー動線が欠落 (e-4370)"
+    # /beacon-review-run takes type as a POSITIONAL first arg (not --type);
+    # the AX review of PR #542 flagged the --type drift, so pin the positional
+    # form to prevent it from creeping back.
+    assert "philosophy --pr" in body, "思想レビュー動線 (positional) が欠落 (e-4370)"
+    assert "attainment --target" in body, "目的達成レビュー動線 (positional) が欠落 (e-4370)"
     assert "ターミナル化境界" in body
 
 

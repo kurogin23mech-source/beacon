@@ -66,7 +66,7 @@ cd "$PROJECT_DIR" && beacon trek show "$trek_id" --json
 
 - `status == "active"` を確認 (= planning / archived は finalize 対象外)
 - `members` から自分が `role: leader` であることを確認 (= leader role でない場合は warning で「leader transfer 後に再実行してください」 と返して終了)
-- `task_states` 全てが terminal (= `done` / `archived`) か確認。 まだ working / leader_review が残っていれば warning で「未完了 task がある: <id 一覧>」 と表示し続行 / 中止を user に問う
+- `task_states` 全てが terminal (= `user_review`。 done は Trek 外なので read-time に user_review へ migrate 済、 `lib/trek.py: TERMINAL_TASK_STATES=("user_review",)` と一致) か確認。 まだ working / leader_review / todo / block が残っていれば warning で「未完了 task がある: <id 一覧>」 と表示し続行 / 中止を user に問う
 
 leader role でない場合は中止 (= leader stance reminder と整合、 CORE doc `trek-leader-stance`)。
 

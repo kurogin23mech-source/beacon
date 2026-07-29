@@ -69,9 +69,10 @@ executor の完成宣言を妥当と認め、 task を **`user_review` に stamp
 
 ```bash
 # 1. 思想レビュー — 実装が SPEC / vision の思想通りか、 文脈ゼロの独立 judge に問う
-/beacon-review-run  # 引数: --type philosophy --pr <n> --origin-doc <対象 MS の SPEC doc-id>
+#    (type は positional 第 1 引数、 /beacon-review-run 引数仕様に一致させる)
+/beacon-review-run  # 引数: philosophy --pr <n> --origin-doc <対象 MS の SPEC doc-id>
 # 2. 目的達成レビュー — target の受入条件が満たされた証拠を独立生成 (verdict=達成かは leader 判断)
-/beacon-review-run  # 引数: --type attainment --target <ms-XX>
+/beacon-review-run  # 引数: attainment --target <ms-XX>
 ```
 
 両レビューの findings を読み、 思想 drift 無し + 目的達成の証拠十分と leader が判断したら user_review に stamp:
@@ -119,17 +120,17 @@ Trek <trek_id> task <task_id> review 完了:
 
 ## Step 4: 完遂 handoff (= 全 Target が user_review、 leader 単独が撃つ、 e-4370 / AC6)
 
-review 後に trek の全 Target を集計し、 状態に応じて分岐する。**完遂 handoff (= リーダー→ユーザー「手前まで完了、あなたの番」通知) はリーダー単独が撃つ** (= 台帳所有者、 方針9)。実行セッションは完遂を判定しない — これで「あるセッションが完遂を撃った瞬間、別セッションが未 claim Target を claim して完遂が偽になる」race を防ぐ。
+review 後に trek の全 Target を集計し、 状態に応じて分岐する。**完遂 handoff (= リーダー→ユーザー「手前まで完了、あなたの番」通知) はリーダー単独が撃つ** (= 方針9 = 台帳所有者 = leader だけが完遂を宣言する)。実行セッションは完遂を判定しない — これで「あるセッションが完遂を撃った瞬間、別セッションが未 claim Target を claim して完遂が偽になる」race を防ぐ。
 
 ```bash
 beacon trek show <trek_id> --json で task_states を集計
 ```
 
-- **全 Target が `user_review` (= 完遂)** → **完遂 handoff を撃つ**:
-  1. user へ通知 (= 非ブロッキング、 AskUserQuestion で止めない):
+- **全 Target が `user_review`** → **完遂 handoff を撃つ**。ただし user_review には 2 系統が混在する (方針5 で user_review を唯一の terminal に統一したため、状態 token では区別しない): Option A 由来 (= 思想/目的達成レビュー合格、デプロイ待ち) と Option C 由来 (= leader が嗜好/不可逆判断を user に forward、あなたの判断待ち)。**handoff 通知は Target ごとに 2 系統を明示して「完遂」を偽装しない** (= どれが reviewed 済でどれが判断要求かを user が 1 度で読める):
+  1. Target ごとに `note` / 直近 action から系統を判定し、 user へ通知 (= 非ブロッキング、 AskUserQuestion で止めない):
      ```bash
      beacon bus send --channel notify --delivery notify-user-only \
-       --payload '{"text": "Trek <trek_id> 完遂: 全 Target が user_review (= 手前まで完了) に達しました。あなたの番です — 各 Target の最終確認 / デプロイをご判断ください。archive は /beacon-trek-finalize で。"}'
+       --payload '{"text": "Trek <trek_id> 手前まで完了、あなたの番です。\n✓ レビュー合格・デプロイ待ち: <approve 系の Target と 1 行要約>\n⤴ あなたの判断待ち: <forward 系の Target と論点>\n各 Target をご判断ください。archive は /beacon-trek-finalize で。"}'
      ```
   2. 二重発火を防ぐため stamp (= completion_notified と組で leader-digest tick を止める、 ms-97 AC21):
      ```bash

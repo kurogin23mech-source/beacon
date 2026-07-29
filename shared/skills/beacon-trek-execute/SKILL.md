@@ -63,7 +63,9 @@ Trek scope 内では **AskUserQuestion (= 端末の人間への選択要求 / mo
 3. **dm-leader (上向き)**: leader 固有判断 (deploy 順序 / cross-trek / scope 境界 / 不可逆 / 嗜好 / secret)。leader が要れば user へ escalate (方針8)
 4. **continue (自走)**: 答えが出なければ安全な範囲で試行し結果で学ぶ
 
-deploy / リリース境界も同じ — Step 7 の `notify-user-only` DM (= 非ブロッキング) で escalate し **AskUserQuestion で止まらない**。executor は Trek 完遂を判定しない (= 完遂 handoff は leader 単独、 方針9 / e-4370)。
+上の順は /beacon-trek-pulse Step 2 の ladder と同一で、 escalation (= 不可逆/嗜好/secret) は項目3 の dm-leader に畳んである (= pulse 側 5 項目の第5「dm-leader escalate」に対応)。DM は raw `bus send` でなく `/beacon-dm-send` 経由が推奨 (= live-check + budget gate + envelope 自動付与)。
+
+deploy / リリース境界も同じ — Step 7 の `notify-user-only` DM (= 非ブロッキング) で escalate し **AskUserQuestion で止まらない**。executor は Trek 完遂を判定しない (= 完遂 handoff は leader 単独が撃つ、 方針9 = 台帳所有者だけが完遂宣言、 e-4370)。
 
 ## Step 1: Trek 有効性 gating
 
@@ -196,7 +198,7 @@ cd "$PROJECT_DIR" && beacon bus ack --event <event_id> 2>&1 || \
 
 - 択 [1] state 更新: `beacon trek task-state <trek-id> <task-id> leader_review|user_review --note "<根拠>"` (= server-side で leader 通知 DM 自動発信。done は Trek 外 = 書かない、 方針5)
 - 択 [2] 作業再開: 次の slice を **このターン内で即開始** (= announce だけは禁止)
-- 択 [3] リーダー DM: `beacon bus send --channel dm --to <leader_session_id> --payload '{"text": "判断要請: <context>"}' --json` (= 判断境界の問い合わせ専用)
+- 択 [3] リーダー DM: `/beacon-dm-send` 経由で leader へ判断要請 (= 判断境界の問い合わせ専用、 live-check + budget gate 付き。raw `beacon bus send --channel dm --to <leader_session_id>` は fallback)
 
 「とりあえず armed のまま待機」 / 「次の tick を待つ」 は protocol 違反。
 
@@ -226,7 +228,7 @@ opt-in しない場合: event は `delivery=propose-to-ai` 降格、 user が見
 |---|---|
 | `/beacon-operation-execute` | 単一 Operation を autonomous 実行 (= ms-60) |
 | `/beacon-trek-execute` (本 Skill) | Trek scope を autonomous 実行 (= ms-75) |
-| `/beacon-trek-review` | leader forced 3-択 review (= done / waiting-review 受け、 ms-75 / e-2048) |
+| `/beacon-trek-review` | leader forced 3-択 review (= leader_review / user_review 受け、 ms-75 / e-2048) |
 | `/beacon-dm-send` | DM 送信 (= Trek scope 内なら自律 OK) |
 | `/beacon-dm-respond` | DM 受信判断 (= cross-user 必ず y/n、 Trek scope は dm_gate で bypass) |
 | `/beacon-bus-armed` | 自律 listen 状態維持 (= 一般 DM 用、 Trek 用途外、 ms-97 中心原則 6) |
