@@ -871,15 +871,13 @@ def milestone_update(data: dict, ms_id: str, *,
                 # ms-126 (e-4224 / AX#1): accept an idempotent echo of the
                 # current value (incl. the untriaged sentinel) so read-modify-
                 # write round-trips don't 400; reject only a real transition to
-                # a non-severity. Mirrors task_update above.
+                # a non-severity. Maint#1: the transition routes through the
+                # single-source resolver, not a re-inlined copy. Mirrors
+                # task_update above.
                 current = ms.get("priority", "")
                 if priority != current:
-                    if priority == UNTRIAGED_PRIORITY:
-                        raise ValueError(_UNTRIAGED_NOT_SEVERITY_MSG)
-                    if priority not in _ACCEPTED_PRIORITIES:
-                        raise ValueError(
-                            f"Invalid priority: {priority}. Valid: {', '.join(_PRIORITY_SCALE_ORDER)}")
-                    ms["priority"] = normalize_priority(priority)
+                    ms["priority"] = _resolve_priority_for_write(
+                        priority, allow_untriaged=False)
             if objective:
                 ms["objective"] = objective
             if acceptance_criteria:
@@ -1347,19 +1345,16 @@ def task_update(data: dict, entry_id: str, *,
         # unchanged must be an idempotent no-op, NOT a 400 — otherwise the API's
         # own emitted value becomes an invalid input and the AI mis-diagnoses
         # its own request. So: an echo of the currently-stored value (incl. the
-        # sentinel) is accepted as a no-change; only an actual *transition* to a
-        # non-severity is rejected. That keeps the "a human cannot newly choose
-        # untriaged" invariant while not breaking round-trips.
+        # sentinel) is accepted as a no-change; only an actual *transition* is
+        # validated. Maint#1: that transition routes through the single-source
+        # resolver (allow_untriaged=False = human path) rather than re-inlining
+        # the severity/untriaged rules — _resolve_priority_for_write is the one
+        # authority (it rejects the sentinel as not-a-severity, keeping the "a
+        # human cannot newly choose untriaged" invariant).
         current = (entry.get("meta") or {}).get("priority", "")
         if priority != current:
-            if priority == UNTRIAGED_PRIORITY:
-                raise ValueError(_UNTRIAGED_NOT_SEVERITY_MSG)
-            if priority not in _ACCEPTED_PRIORITIES:
-                raise ValueError(
-                    f"Invalid priority: {priority}. Valid: {', '.join(_PRIORITY_SCALE_ORDER)}"
-                )
-            meta = entry.setdefault("meta", {})
-            meta["priority"] = normalize_priority(priority)
+            entry.setdefault("meta", {})["priority"] = _resolve_priority_for_write(
+                priority, allow_untriaged=False)
             changed = True
     if changed:
         author_clean = _clean_author(author)
