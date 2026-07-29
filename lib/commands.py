@@ -1895,6 +1895,23 @@ def _evidence_required_message(eid: str, target_id: str) -> str:
         f"(監査に記録が残ります)。\n")
 
 
+def _backlog_undisposed_message(eid: str, target_id: str, undisposed: list) -> str:
+    """The approve-refusal message when a pending approval still has UNSTARTED
+    highest/high tasks without a disposition (ms-119 / e-4579). Renders the concrete
+    blocking backlog + the recovery command, sharing the block layout with
+    _ta.format_backlog_gap so surface and refusal cannot drift."""
+    body = _ta.format_backlog_gap(undisposed, target_id=target_id)
+    return (
+        f"Error: 承認依頼 {eid} は未着手の重要タスク (highest/high) の disposition が"
+        f"未完です (ms-119 / e-4579)。\n"
+        f"  attainment は AC (アウトカム) 軸で定義しますが、未着手の highest/high は"
+        f"『必要と符号化された既知作業』であり、掃除機がある≠掃除した の穴です。\n"
+        f"  各タスクに done / superseded[理由] / blocks-attainment のいずれかを付ける"
+        f"まで、この承認は構造的に未完成として通りません。\n"
+        f"{body}\n"
+    )
+
+
 def _route_completion_to_review(data: dict, ms_id: str, *, reason: str,
                                 new_state: str = "done") -> None:
     """Route a milestone completion through the 目的達成レビュー gate instead of
@@ -1941,6 +1958,12 @@ def _route_completion_to_review(data: dict, ms_id: str, *, reason: str,
         target_id=ms_id)
     if _gap:
         print(_gap)
+    # ms-119 e-4579: surface the unstarted highest/high backlog up front, so the
+    # approver knows the disposition table must be filled before approve will pass.
+    _bgap = _ta.format_backlog_gap(
+        core.unstarted_priority_tasks(target), target_id=ms_id)
+    if _bgap:
+        print(_bgap)
     _print_evidence_guidance(eid, ms_id)
     print(f"  確定 (= 遷移実行): beacon target approve {eid} [--rationale <text>]")
     print(f"  却下 (= 遷移せず): beacon target reject {eid} [--rationale <text>]")
@@ -2009,6 +2032,12 @@ def cmd_target_review_request():
         target_id=target_id)
     if _gap:
         print(_gap)
+    # ms-119 e-4579: surface the unstarted highest/high backlog up front so the
+    # approver knows the disposition table must be filled before approve will pass.
+    _bgap = _ta.format_backlog_gap(
+        core.unstarted_priority_tasks(target), target_id=target_id)
+    if _bgap:
+        print(_bgap)
     _print_evidence_guidance(eid, target_id)
     print(f"  確定 (= 遷移実行): beacon target approve {eid} [--rationale <text>]")
     print(f"  却下 (= 遷移せず): beacon target reject {eid} [--rationale <text>]")
@@ -2049,10 +2078,22 @@ def cmd_target_approve():
     # only translate --acknowledge-no-evidence → allow_no_evidence and render the
     # recovery path when core refuses.
     _ack_no_ev = os.environ.get("BEACON_ACK_NO_EVIDENCE", "") == "1"
+    # ms-119 / e-4579: resolve the owning target so core can run the backlog
+    # cross-check (unstarted highest/high tasks must each carry a disposition
+    # before an attainment claim is approved). find_entry returns
+    # (container, parent_list, entry, index); the container IS the target.
+    _r0 = core.find_entry(data, entry_id)
+    _approval_target = _r0[0] if _r0 else None
     try:
         entry, new_state = core.target_transition_approval_approve(
             data, entry_id, rationale=rationale, actor=_actor_str(),
-            gate=_approval_gate_record(), allow_no_evidence=_ack_no_ev)
+            gate=_approval_gate_record(), allow_no_evidence=_ack_no_ev,
+            target=_approval_target)
+    except core.BacklogUndisposedError as e:
+        _r = core.find_entry(data, entry_id)
+        _tid = (_r[2]["meta"].get("target_id") if _r else "") or "<target-id>"
+        sys.stderr.write(_backlog_undisposed_message(entry_id, _tid, e.undisposed))
+        sys.exit(2)
     except core.EvidenceRequiredError:
         _r = core.find_entry(data, entry_id)
         _tid = (_r[2]["meta"].get("target_id") if _r else "") or "<target-id>"
@@ -2122,6 +2163,55 @@ def cmd_target_attach_evidence():
     print(f"  承認へ: beacon target approve {entry_id} [--rationale <text>]")
 
 
+def cmd_target_attach_disposition():
+    """Record a disposition for one UNSTARTED highest/high backlog task on a pending
+    transition-approval (ms-119 / e-4579).
+
+    beacon target attach-disposition <entry-id> --task <task-id>
+        --verdict <done|superseded|blocks-attainment> [--reason <text>] [--source <text>]
+
+    Answers "what happened to this important, unstarted task?" so an attainment claim
+    cannot silently skip it. ``superseded`` requires --reason. The disposition is the
+    JUDGE / human's determination against the SPEC 原典 — not the implementer's self-
+    report (SPEC § 方針3); --source records the self-declared provenance verbatim."""
+    entry_id = os.environ.get("BEACON_ENTRY_ID", "").strip()
+    task_id = os.environ.get("BEACON_DISP_TASK", "").strip()
+    verdict = os.environ.get("BEACON_DISP_VERDICT", "").strip()
+    reason = os.environ.get("BEACON_DISP_REASON", "").strip()
+    source = os.environ.get("BEACON_DISP_SOURCE", "").strip()
+    _verdicts = "|".join(_ta.DISPOSITION_VERDICTS)
+    if not entry_id or not task_id or not verdict:
+        print(f"Usage: beacon target attach-disposition <entry-id> --task <task-id> "
+              f"--verdict <{_verdicts}> [--reason <text>] [--source <text>]",
+              file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        entry = core.target_transition_approval_attach_disposition(
+            data, entry_id, task_id=task_id, verdict=verdict, reason=reason,
+            source=source, actor=_actor_str())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_transition_approval_attach_disposition",
+                           "entry_id": entry_id})
+    n = len(_ta.disposition_map(entry))
+    print(f"disposition を記録: {entry_id} ({task_id} → {verdict}, "
+          f"disposition 済 {n} タスク)")
+    # Surface remaining undisposed backlog so the operator knows what's left.
+    _tgt = core.find_entry(data, entry_id)
+    if _tgt:
+        remaining = _ta.undisposed_backlog(
+            entry, core.unstarted_priority_tasks(_tgt[0]))
+        _gap = _ta.format_backlog_gap(
+            remaining, target_id=entry["meta"].get("target_id", ""))
+        if _gap:
+            print(_gap)
+        else:
+            print(f"  全 backlog disposition 済 — 承認へ: "
+                  f"beacon target approve {entry_id} [--rationale <text>]")
+
+
 def cmd_target_reject():
     """Reject a pending target transition — records the verdict; the transition
     does NOT execute (e-3912)."""
@@ -2183,6 +2273,20 @@ def cmd_target_list():
               f"{m.get('old_state')} -> {m.get('new_state')} [{st}]")
         if m.get("intent"):
             print(f"      intent: {m.get('intent')}")
+        # ms-119 e-4579 §方針4: surface the RECORDED claim (independent-review verdict
+        # + disposition table) so the human approver reads the true source, not the
+        # executor's DM summary. Only for pending rows (the decision is live there).
+        if st == "pending":
+            for rev in m.get("review_evidence", []) or []:
+                _src = f" [{rev.get('source')}]" if rev.get("source") else ""
+                print(f"      review: {rev.get('verdict')}{_src} — "
+                      f"{rev.get('summary', '')}")
+            disp = _ta.disposition_map(e)
+            if disp:
+                print(f"      disposition 表 ({len(disp)} タスク):")
+                for tid, rec in disp.items():
+                    _rsn = f" — {rec.get('reason')}" if rec.get("reason") else ""
+                    print(f"        {tid}: {rec.get('verdict')}{_rsn}")
 
 
 # ---------------------------------------------------------------------------
@@ -3004,6 +3108,24 @@ def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = ""
     if _mi:
         gaps.append(_mi)
 
+    # ms-119 / e-4579: hand the judge the UNSTARTED highest/high backlog so its
+    # verdict must reckon with each important-but-untouched task (SPEC § 方針3: the
+    # disposition is the judge's determination against the 原典, not the
+    # implementer's self-report). Each carries id / priority / description so the
+    # judge can propose done / superseded[理由] / blocks-attainment per task.
+    backlog = [
+        {"id": t.get("id"),
+         "priority": ((t.get("meta") or {}).get("priority") or ""),
+         "description": (t.get("description") or "")}
+        for t in core.unstarted_priority_tasks(target)
+    ]
+    if backlog:
+        gaps.append(
+            f"未着手の重要タスク (highest/high) が {len(backlog)} 件あります。各タスクに "
+            f"done / superseded[理由] / blocks-attainment の disposition を判定して"
+            f"ください (attainment は AC 軸だが、未着手の重要作業は目的未達の強い "
+            f"prior — 掃除機がある≠掃除した)。")
+
     bundle = review_spine.assemble_attainment_context(
         target_id=target_id,
         spec_origin_id=spec_origin_id,
@@ -3012,6 +3134,7 @@ def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = ""
         target_ref=target_ref,
         diff_text=diff_text,
         gaps=gaps,
+        backlog=backlog,
         implementer_model=os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip(),
     )
     print(json.dumps(bundle, ensure_ascii=False))
@@ -27129,6 +27252,7 @@ if __name__ == "__main__":
         "target_review_request": cmd_target_review_request,
         "target_approve": cmd_target_approve,
         "target_attach_evidence": cmd_target_attach_evidence,
+        "target_attach_disposition": cmd_target_attach_disposition,  # ms-119 e-4579
         "target_reject": cmd_target_reject,
         "target_list": cmd_target_list,
         "target_create": cmd_target_create,      # ms-122 e-3956

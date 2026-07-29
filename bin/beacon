@@ -550,6 +550,25 @@ cmd_target_attach_evidence() {
         python3 "$COMMANDS_PY" target_attach_evidence
 }
 
+cmd_target_attach_disposition() {
+    ensure_project
+    local entry_id="" task="" verdict="" reason="" source=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --task)     task="${2:-}";    shift 2 ;;
+            --verdict)  verdict="${2:-}"; shift 2 ;;
+            --reason)   reason="${2:-}";  shift 2 ;;
+            --source)   source="${2:-}";  shift 2 ;;
+            -?*)        _guard_positional "$1" "Usage: beacon target attach-disposition <entry-id> --task <task-id> --verdict <done|superseded|blocks-attainment> [--reason <text>] [--source <text>]" ;;
+            *)          entry_id="$1";    shift ;;
+        esac
+    done
+    BEACON_ENTRY_ID="$entry_id" BEACON_DISP_TASK="$task" \
+        BEACON_DISP_VERDICT="$verdict" BEACON_DISP_REASON="$reason" \
+        BEACON_DISP_SOURCE="$source" \
+        python3 "$COMMANDS_PY" target_attach_disposition
+}
+
 cmd_target_reject() {
     ensure_project
     local entry_id="" rationale=""
@@ -3323,6 +3342,7 @@ case "${1:-}" in
             review-request|review) shift 2; cmd_target_review_request "$@" ;;
             approve)  shift 2; cmd_target_approve "$@" ;;
             attach-review-evidence) shift 2; cmd_target_attach_evidence "$@" ;;
+            attach-disposition) shift 2; cmd_target_attach_disposition "$@" ;;
             reject)   shift 2; cmd_target_reject "$@" ;;
             list|ls)  shift 2; cmd_target_list "$@" ;;
             create)   shift 2; cmd_target_create "$@" ;;
@@ -3335,6 +3355,8 @@ case "${1:-}" in
             *)        echo "Usage: beacon target <subcommand>
   目的達成レビュー (target 遷移の人間承認):
     review-request | approve | reject | list
+    attach-review-evidence <entry-id> --verdict <attained|partial|not-attained> --summary <text>
+    attach-disposition <entry-id> --task <task-id> --verdict <done|superseded|blocks-attainment> [--reason <text>]
   記述子駆動 target (data 定義 target-class の操作, ms-122):
     create --class <kind> --label <text> [--field key=value ...]
     advance --class <kind> <target-id> [--to <phase>] [--field key=value ...] [--reason <text>]
