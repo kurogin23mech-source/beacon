@@ -1361,19 +1361,19 @@ cmd_acquisition_attack_list_fill() {
     local doc_id="" phase="" assignee="" name="" limit="" dry="" json=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --phase)         phase="${2:-}"; shift 2 ;;
+            --account-phase) phase="${2:-}"; shift 2 ;;
             --assignee)      assignee="${2:-}"; shift 2 ;;
             --name-contains) name="${2:-}"; shift 2 ;;
             --limit)         limit="${2:-}"; shift 2 ;;
             --dry-run)       dry="1"; shift ;;
             --json)          json="1"; shift ;;
-            -?*) _guard_positional "$1" "Usage: beacon acquisition attack-list-fill <doc-id> [--phase 未接触] [--assignee <user>] [--name-contains <s>] [--limit N] [--dry-run] [--json]" ;;
+            -?*) _guard_positional "$1" "Usage: beacon acquisition attack-list-fill <attack-list-doc-id> [--account-phase <name>] [--assignee <user>] [--name-contains <s>] [--limit N] [--dry-run] [--json]" ;;
             *)   doc_id="$1"; shift ;;
         esac
     done
     if [ -z "$doc_id" ]; then
-        echo "Usage: beacon acquisition attack-list-fill <doc-id> [--phase 未接触] [--assignee <user>] [--name-contains <s>] [--limit N] [--dry-run] [--json]"
-        echo "  条件(既定=未接触)に一致する Account を対象アタックリストへ一括で行追加。重複は自動 skip。--dry-run で事前確認。"
+        echo "Usage: beacon acquisition attack-list-fill <attack-list-doc-id> [--account-phase <name>] [--assignee <user>] [--name-contains <s>] [--limit N (登録順で先頭N件)] [--dry-run] [--json]"
+        echo "  条件(既定=プロジェクトの第1顧客フェーズ=未接触)に一致する Account を対象アタックリストへ一括で行追加。重複は自動 skip。--dry-run で事前確認。"
         exit 1
     fi
     BEACON_DOC_ID="$doc_id" BEACON_FILL_PHASE="$phase" BEACON_FILL_ASSIGNEE="$assignee" \

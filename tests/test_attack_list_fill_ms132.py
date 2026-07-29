@@ -123,7 +123,7 @@ def test_fill_bulk_adds_untouched_accounts(sales_cwd, monkeypatch, capsys):
     _seed_accounts(sales_cwd)
     out = _fill(monkeypatch, capsys, doc_id)
     assert out["matched"] == 2  # only 未接触 (acc-1, acc-2), not リード acc-3
-    assert set(out["added"]) == {"acc-1", "acc-2"}
+    assert set(out["target_ids"]) == {"acc-1", "acc-2"}
     assert out["entry_phase"] == "未接触"
     rows = _list_rows(monkeypatch, capsys)
     assert rows[0]["row_count"] == 2
@@ -135,7 +135,7 @@ def test_fill_is_idempotent_dedup(sales_cwd, monkeypatch, capsys):
     _seed_accounts(sales_cwd)
     _fill(monkeypatch, capsys, doc_id)
     out2 = _fill(monkeypatch, capsys, doc_id)  # re-run
-    assert out2["added"] == []
+    assert out2["target_ids"] == []
     assert set(out2["skipped_duplicates"]) == {"acc-1", "acc-2"}
     assert _list_rows(monkeypatch, capsys)[0]["row_count"] == 2  # no doubles
 
@@ -145,8 +145,7 @@ def test_fill_dry_run_writes_nothing(sales_cwd, monkeypatch, capsys):
     _seed_accounts(sales_cwd)
     out = _fill(monkeypatch, capsys, doc_id, BEACON_DRY_RUN="1")
     assert out["dry_run"] is True
-    assert set(out["would_add"]) == {"acc-1", "acc-2"}
-    assert out["added"] == []
+    assert set(out["target_ids"]) == {"acc-1", "acc-2"}  # would-add under dry_run
     assert _list_rows(monkeypatch, capsys)[0]["row_count"] == 0  # nothing written
 
 
@@ -154,7 +153,7 @@ def test_fill_limit(sales_cwd, monkeypatch, capsys):
     doc_id = _make_list(monkeypatch, capsys)
     _seed_accounts(sales_cwd)
     out = _fill(monkeypatch, capsys, doc_id, BEACON_FILL_LIMIT="1")
-    assert len(out["added"]) == 1
+    assert len(out["target_ids"]) == 1
 
 
 def test_fill_rejects_non_attack_list(sales_cwd, monkeypatch, capsys):
@@ -174,6 +173,26 @@ def test_fill_rejects_non_attack_list(sales_cwd, monkeypatch, capsys):
     assert "アタックリスト" in capsys.readouterr().err
 
 
+def test_fill_default_phase_follows_configured_account_funnel(sales_cwd, monkeypatch, capsys):
+    # AX review PR #548: omitting --account-phase must use the project's configured
+    # first account phase, not a hardcoded '未接触'. Rename the account funnel entry
+    # and confirm the default filter follows it (no silent zero-match).
+    doc_id = _make_list(monkeypatch, capsys)
+    for k in ("BEACON_FUNNEL_KIND", "BEACON_PHASE_OLD", "BEACON_PHASE_NEW"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("BEACON_FUNNEL_KIND", "account")
+    monkeypatch.setenv("BEACON_PHASE_OLD", "未接触")
+    monkeypatch.setenv("BEACON_PHASE_NEW", "見込みリスト")
+    commands.cmd_phase_rename()
+    capsys.readouterr()
+    data = _read(sales_cwd)
+    se.account_add(data, "候補X", phase="見込みリスト")
+    _write(sales_cwd, data)
+    out = _fill(monkeypatch, capsys, doc_id)  # no --account-phase
+    assert out["filter_phase"] == "見込みリスト"
+    assert len(out["target_ids"]) == 1
+
+
 def test_fill_uses_lists_own_entry_phase(sales_cwd, monkeypatch, capsys):
     # Rename the prospect funnel entry, make a fresh list (bakes the renamed
     # funnel), then fill: new rows must start at the list's entry phase.
@@ -190,4 +209,4 @@ def test_fill_uses_lists_own_entry_phase(sales_cwd, monkeypatch, capsys):
     _write(sales_cwd, data)
     out = _fill(monkeypatch, capsys, doc_id, BEACON_FILL_PHASE="新規")
     assert out["entry_phase"] == "新規"
-    assert len(out["added"]) == 1
+    assert len(out["target_ids"]) == 1
