@@ -14487,6 +14487,14 @@ def cmd_doc_update():
     account = os.environ.get("BEACON_ACCOUNT", "")
     opportunity = os.environ.get("BEACON_OPPORTUNITY", "")
     target_in = os.environ.get("BEACON_TARGET", "") or account or opportunity
+    # ms-131 e-4497 — detach intent, decided from *explicit user signals only*
+    # (before any preservation of existing links). "--target ''" with no other
+    # link flag means "fully unlink this doc" — clear the canonical target AND
+    # any legacy milestone/operation mirror a prior --ms/--op create wrote. If
+    # the user also passed a link flag, that is a relink, not a detach.
+    detach_target = (target_explicit and not target_in and not ms_explicit
+                     and not op_explicit and not trek_id
+                     and not account and not opportunity)
     # Use existing values as defaults
     if not title:
         title = existing.get("title", "")
@@ -14502,7 +14510,12 @@ def cmd_doc_update():
     # error; we honor both literally (= same behavior as before this fix) and
     # leave the duplicated frontmatter visible so the mistake is loud, not
     # silent.
-    if ms_explicit and not op_explicit:
+    if detach_target:
+        # Full detach: clear the legacy milestone/operation mirror too, so the
+        # doc ends up linked to nothing (the preservation below is skipped).
+        milestone = ""
+        operation = ""
+    elif ms_explicit and not op_explicit:
         # Mode 1: user wants this doc on a milestone. Drop any prior op.
         operation = ""
     elif op_explicit and not ms_explicit:
@@ -14526,8 +14539,6 @@ def cmd_doc_update():
     # account/opportunity/acquisition/--target wins, then the resolved
     # milestone/operation/trek, then the doc's existing ``target``.
     import work_model
-    detach_target = target_explicit and not (target_in or milestone
-                                             or operation or trek_id)
     if detach_target:
         target = ""
     else:
@@ -14545,8 +14556,8 @@ def cmd_doc_update():
     # e-4497: drop_target removes the ``target`` (and its legacy mirror) on detach.
     content = _add_frontmatter(
         content, scope, milestone, operation, trek_id,
-        drop_milestone=(op_explicit and not ms_explicit),
-        drop_operation=(ms_explicit and not op_explicit),
+        drop_milestone=(op_explicit and not ms_explicit) or detach_target,
+        drop_operation=(ms_explicit and not op_explicit) or detach_target,
         target=target or "",
         drop_target=detach_target,
     )
