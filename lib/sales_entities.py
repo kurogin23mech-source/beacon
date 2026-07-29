@@ -111,11 +111,18 @@ DEFAULT_OPPORTUNITY_PHASES = [
 # 打診フェーズ funnel (ms-132 e-4502): インサイドセールスの attack-list (= 一括打診
 # リスト) の各行が辿る状態 (未接触 → 連絡済 → 返信あり → アポ)。account / opportunity
 # funnel と同じく per-company config として project.json (``prospect_phases``) に保存され
-# ``beacon phase prospect ...`` で編集できる。語彙の source of truth は
-# ``attack_list.DEFAULT_PROSPECT_PHASES`` (依存の無い pure leaf module) に一本化し、ここは
-# それを funnel-def 形式 ({"name": ...}) に包んで seed するだけ (一つの既定語彙を二重定義
-# しない)。attack-list の行 phase は table-doc の enum 列がこの語彙で検査する。
-DEFAULT_PROSPECT_PHASES = [{"name": n} for n in attack_list.DEFAULT_PROSPECT_PHASES]
+# ``beacon phase prospect ...`` で編集できる。既定語彙の source of truth は
+# ``attack_list.DEFAULT_PROSPECT_PHASES`` (依存の無い pure leaf module) だけ — ここに同名の
+# 派生定数は置かず、seed が要る唯一の場所 (``build_sales_project``) で funnel-def 形式
+# ({"name": ...}) に包む。attack-list の行 phase は table-doc の enum 列がこの語彙で検査する。
+
+
+def default_prospect_phase_defs() -> list:
+    """The prospect funnel seed in funnel-def form (``[{"name": ...}]``), wrapping
+    the single source-of-truth vocabulary ``attack_list.DEFAULT_PROSPECT_PHASES``.
+    One place builds this shape so there is no second ``DEFAULT_PROSPECT_PHASES``
+    constant to drift (ms-132 e-4502 保守性レビュー)."""
+    return [{"name": n} for n in attack_list.DEFAULT_PROSPECT_PHASES]
 
 # who_has_the_ball (SPEC §4): whose court the deal is in. Data only in ms-106.
 BALL_SELF = "self"
@@ -3354,7 +3361,7 @@ def build_sales_project(name: str, objective: str, *, retro_day: str = "monday",
         "account_phases": [dict(p) for p in DEFAULT_ACCOUNT_PHASES],
         "opportunity_phases": [dict(p) for p in DEFAULT_OPPORTUNITY_PHASES],
         # ms-132 e-4502: attack-list の打診フェーズ funnel (未接触→連絡済→返信あり→アポ)。
-        "prospect_phases": [dict(p) for p in DEFAULT_PROSPECT_PHASES],
+        "prospect_phases": default_prospect_phase_defs(),
         # e-3582: 前進の macro-frame を config に seed する (企業ごと編集可)。AI が
         # フェーズを読むとき「フェーズ = 次へ抜けさせるもの」と理解する枠組み。
         "opportunity_phase_frame": OPPORTUNITY_PHASE_MACRO_FRAME,

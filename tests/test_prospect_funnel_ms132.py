@@ -152,3 +152,22 @@ def test_attach_list_bakes_configured_funnel(sales_cwd, monkeypatch, capsys):
 
 def _names(phases):
     return [p.get("name") for p in phases]
+
+
+# --- funnel-kind registry consistency (guards the 5-site sync) --------------
+
+def test_funnel_kind_dicts_are_consistent():
+    """Adding a funnel kind must touch every site or the guard fails here.
+
+    A kind present in the CLI aliases but missing from the ownership map or the
+    data-key map would let the CLI accept a funnel it can't own/persist. This
+    asserts the three canonical-kind sets agree, so a future 4th funnel can't
+    silently skip a site (ms-132 e-4502 保守性レビュー finding)."""
+    import commands
+    kinds_from_aliases = set(commands._FUNNEL_KIND_ALIASES.values())
+    assert kinds_from_aliases == set(commands._FUNNEL_OWNING_CLASS)
+    assert kinds_from_aliases == set(se._FUNNEL_KEYS)
+    # every owning class must be a real sales target-class (ownership check input)
+    import occupation
+    sales_owned = set(occupation.OWNED_TARGET_CLASSES["sales"])
+    assert set(commands._FUNNEL_OWNING_CLASS.values()) <= sales_owned

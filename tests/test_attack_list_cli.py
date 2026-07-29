@@ -1,10 +1,10 @@
 """CLI tests for the attack-list verbs (ms-132 e-4501).
 
-`beacon acquisition attach-list` creates an attack-list (table-doc) linked to a
-施策, and `beacon acquisition lists` surfaces the施策's attack-lists with per-phase
-counts. Exercises AC1 (紐づけ), AC2 (canonical row schema) and AC3 (show under the
-施策), plus the guardrails (missing施策 rejected, non-attack-list table-docs
-ignored).
+`beacon acquisition attack-list` creates an attack-list (table-doc) linked to a
+施策, and `beacon acquisition attack-lists` surfaces the施策's attack-lists with
+per-phase counts. Exercises AC1 (紐づけ), AC2 (canonical row schema) and AC3 (show
+under the施策), plus the guardrails (missing施策 rejected, non-attack-list
+table-docs ignored).
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ def proj(tmp_path, monkeypatch):
 
 
 def _attach(acq_id, title, *extra):
-    return _run(["acquisition", "attach-list", acq_id, title, "--json", *extra])
+    return _run(["acquisition", "attack-list", acq_id, title, "--json", *extra])
 
 
 def test_attach_list_creates_linked_table(proj):
@@ -60,7 +60,7 @@ def test_attach_list_creates_linked_table(proj):
 
 
 def test_attach_list_rejects_missing_acquisition(proj):
-    r = _run(["acquisition", "attach-list", "acq-9", "x"])
+    r = _run(["acquisition", "attack-list", "acq-9", "x"])
     assert r.returncode == 1
     assert "acquisition not found" in (r.stdout + r.stderr)
 
@@ -79,7 +79,7 @@ def test_lists_shows_attack_lists_with_phase_counts(proj):
         assert _run(["doc", "table", "add-row", doc_id,
                      "--cells", cells]).returncode == 0
 
-    out = json.loads(_run(["acquisition", "lists", "acq-1", "--json"]).stdout)
+    out = json.loads(_run(["acquisition", "attack-lists", "acq-1", "--json"]).stdout)
     assert out["acquisition"] == "acq-1"
     assert len(out["lists"]) == 1
     lst = out["lists"][0]
@@ -89,7 +89,7 @@ def test_lists_shows_attack_lists_with_phase_counts(proj):
 
 
 def test_lists_empty_when_no_attack_list(proj):
-    out = json.loads(_run(["acquisition", "lists", "acq-1", "--json"]).stdout)
+    out = json.loads(_run(["acquisition", "attack-lists", "acq-1", "--json"]).stdout)
     assert out == {"acquisition": "acq-1", "lists": []}
 
 
@@ -98,12 +98,13 @@ def test_lists_ignores_non_attack_list_table_docs(proj):
     cols = json.dumps([{"key": "note", "type": "text"}])
     _run(["doc", "table", "create", "別表", "--columns", cols,
           "--scope", "memo", "--target", "acq-1"])
-    _attach("acq-1", "攻略リスト")
-    out = json.loads(_run(["acquisition", "lists", "acq-1", "--json"]).stdout)
-    assert [l["doc_id"] for l in out["lists"]] == ["攻略リスト"]
+    attack_doc_id = json.loads(_attach("acq-1", "攻略リスト").stdout)["doc_id"]
+    out = json.loads(_run(["acquisition", "attack-lists", "acq-1", "--json"]).stdout)
+    # Only the attack-list surfaces — assert on the real doc_id, not the title.
+    assert [l["doc_id"] for l in out["lists"]] == [attack_doc_id]
 
 
 def test_lists_rejects_missing_acquisition(proj):
-    r = _run(["acquisition", "lists", "acq-9"])
+    r = _run(["acquisition", "attack-lists", "acq-9"])
     assert r.returncode == 1
     assert "acquisition not found" in (r.stdout + r.stderr)
