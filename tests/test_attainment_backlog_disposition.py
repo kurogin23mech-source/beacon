@@ -54,9 +54,22 @@ def test_normalize_task_status_buckets():
     assert _ta.normalize_task_status("todo") == "unstarted"
     assert _ta.normalize_task_status("") == "unstarted"
     assert _ta.normalize_task_status("done") == "done"
+    assert _ta.normalize_task_status("closed") == "done"
     assert _ta.normalize_task_status("cancelled") == "cancelled"
-    for s in ("in_progress", "in_review", "waiting", "working", "leader_review"):
+    assert _ta.normalize_task_status("canceled") == "cancelled"
+    for s in ("in_progress", "in_review", "waiting", "working", "leader_review",
+              "user_review", "active"):
         assert _ta.normalize_task_status(s) == "in_progress"
+
+
+def test_normalize_task_status_unknown_is_fail_closed():
+    # #551 MUST-3: an unrecognised status must NOT slip past the gate as in_progress
+    # (that was fail-OPEN). A gate guarding a completion claim fails CLOSED, so an
+    # unknown status is treated as unstarted (= gated, demands a disposition).
+    assert _ta.normalize_task_status("frobnicated") == "unstarted"
+    assert _ta.normalize_task_status("weird-new-word") == "unstarted"
+    # and such a task is therefore backlog-gated when highest/high
+    assert _ta.is_backlog_gated(_task("e-x", status="frobnicated", priority="high"))
 
 
 # --- pure layer: disposition records --------------------------------------
@@ -141,13 +154,28 @@ def _data(entry, tasks=None):
 
 
 def test_approve_refused_while_backlog_undisposed():
+    # #551 MUST-1: no `target=` arg — the gate self-derives the target and runs on
+    # every path.
     data = _data(_pending_entry(), tasks=[_task("e-1", priority="highest")])
     with pytest.raises(core.BacklogUndisposedError) as ex:
-        core.target_transition_approval_approve(
-            data, "e-A", target=data["milestones"][0])
+        core.target_transition_approval_approve(data, "e-A")
     assert {t["id"] for t in ex.value.undisposed} == {"e-1"}
     # verdict not recorded
     assert data["milestones"][0]["entries"][0]["status"] == "pending"
+
+
+def test_approve_gate_runs_with_no_caller_opt_in():
+    # #551 MUST-1: the earlier default-open `target=None` bypass is GONE. An approve
+    # with an undisposed gated backlog must refuse even though the caller passes only
+    # (data, entry_id) — there is no way to silently skip the gate by omitting an arg.
+    data = _data(_pending_entry(), tasks=[_task("e-1", priority="highest")])
+    with pytest.raises(core.BacklogUndisposedError):
+        core.target_transition_approval_approve(data, "e-A")
+    # the signature no longer accepts a `target` kwarg
+    import inspect
+    sig = inspect.signature(core.target_transition_approval_approve)
+    assert "target" not in sig.parameters
+    assert "allow_undisposed_backlog" in sig.parameters
 
 
 def test_approve_proceeds_once_backlog_disposed():
@@ -156,29 +184,67 @@ def test_approve_proceeds_once_backlog_disposed():
     core.target_transition_approval_attach_disposition(
         data, "e-A", task_id="e-1", verdict="superseded", reason="不要になった",
         source="judge")
-    entry, new_state = core.target_transition_approval_approve(
-        data, "e-A", target=data["milestones"][0])
+    entry, new_state = core.target_transition_approval_approve(data, "e-A")
     assert new_state == "observing"
     assert entry["status"] == "approved"
 
 
-def test_approve_backward_compatible_no_gated_backlog():
+def test_approve_passes_with_no_gated_backlog():
     # A target with no unstarted highest/high tasks passes unchanged (only
     # lower-tier / done tasks present).
     tasks = [_task("e-1", priority="medium"), _task("e-2", status="done",
                                                     priority="high")]
     data = _data(_pending_entry(), tasks=tasks)
-    entry, new_state = core.target_transition_approval_approve(
-        data, "e-A", target=data["milestones"][0])
-    assert new_state == "observing"
-
-
-def test_approve_backward_compatible_target_none_skips_crosscheck():
-    # Existing callers that pass no target keep working (the cross-check is opt-in
-    # at the point where the CLI resolves the owning target).
-    data = _data(_pending_entry(), tasks=[_task("e-1", priority="highest")])
     entry, new_state = core.target_transition_approval_approve(data, "e-A")
     assert new_state == "observing"
+
+
+def test_approve_skip_flag_stamps_audit_and_proceeds():
+    # #551 MUST-1: an intentional skip is an EXPLICIT, audited flag (not a silent
+    # default). allow_undisposed_backlog proceeds AND stamps backlog_check_skipped.
+    data = _data(_pending_entry(), tasks=[_task("e-1", priority="highest")])
+    entry, new_state = core.target_transition_approval_approve(
+        data, "e-A", allow_undisposed_backlog=True, gate={})
+    assert new_state == "observing"
+    assert entry["meta"]["approval_gate"].get("backlog_check_skipped") is True
+
+
+# --- #551 MUST-2: blocks-attainment refuse + stale-done warn ---------------
+
+def test_approve_refused_when_task_marked_blocks_attainment():
+    # A disposition of blocks-attainment must NOT satisfy the gate — approve refuses.
+    tasks = [_task("e-1", priority="highest")]
+    data = _data(_pending_entry(), tasks=tasks)
+    core.target_transition_approval_attach_disposition(
+        data, "e-A", task_id="e-1", verdict="blocks-attainment", source="judge")
+    with pytest.raises(core.BacklogBlockedError) as ex:
+        core.target_transition_approval_approve(data, "e-A")
+    assert {t["id"] for t in ex.value.blocking} == {"e-1"}
+    assert data["milestones"][0]["entries"][0]["status"] == "pending"
+
+
+def test_blocks_attainment_can_be_skipped_with_ack():
+    tasks = [_task("e-1", priority="highest")]
+    data = _data(_pending_entry(), tasks=tasks)
+    core.target_transition_approval_attach_disposition(
+        data, "e-A", task_id="e-1", verdict="blocks-attainment", source="judge")
+    entry, new_state = core.target_transition_approval_approve(
+        data, "e-A", allow_undisposed_backlog=True, gate={})
+    assert new_state == "observing"
+    assert entry["meta"]["approval_gate"].get("backlog_check_skipped") is True
+
+
+def test_stale_done_disposition_detected():
+    # disposition=done but live status still unstarted → surfaced by helper (warn).
+    e = _pending_entry()
+    backlog = [_task("e-1", status="todo", priority="high")]
+    _ta.append_disposition(e, task_id="e-1", verdict="done", reason="",
+                           source="", actor="a", at="t")
+    stale = _ta.stale_done_dispositions(e, backlog)
+    assert {t["id"] for t in stale} == {"e-1"}
+    # once the live status is done, it is no longer stale
+    backlog2 = [_task("e-1", status="done", priority="high")]
+    assert _ta.stale_done_dispositions(e, backlog2) == []
 
 
 def test_attach_disposition_rejects_non_backlog_task():
@@ -227,6 +293,7 @@ def _wire(monkeypatch, data):
     monkeypatch.setenv("BEACON_TARGET_APPROVE_USER_OVERRIDE", "1")
     monkeypatch.setenv("BEACON_ENTRY_ID", "e-A")
     monkeypatch.delenv("BEACON_ACK_NO_EVIDENCE", raising=False)
+    monkeypatch.delenv("BEACON_ACK_UNDISPOSED_BACKLOG", raising=False)
     monkeypatch.delenv("BEACON_RATIONALE", raising=False)
 
 
@@ -246,3 +313,68 @@ def test_cli_approve_proceeds_after_disposition(monkeypatch):
     _wire(monkeypatch, data)
     commands.cmd_target_approve()  # no SystemExit
     assert data["milestones"][0]["entries"][0]["status"] == "approved"
+
+
+def test_cli_approve_refused_when_blocks_attainment(monkeypatch):
+    # #551 MUST-2 at the CLI: a blocks-attainment disposition refuses (exit 2).
+    data = _data(_pending_entry(), tasks=[_task("e-1", priority="highest")])
+    core.target_transition_approval_attach_disposition(
+        data, "e-A", task_id="e-1", verdict="blocks-attainment", source="judge")
+    _wire(monkeypatch, data)
+    with pytest.raises(SystemExit) as ex:
+        commands.cmd_target_approve()
+    assert ex.value.code == 2
+    assert data["milestones"][0]["entries"][0]["status"] == "pending"
+
+
+def test_cli_approve_skip_flag_proceeds(monkeypatch):
+    # #551 MUST-1 at the CLI: --acknowledge-undisposed-backlog is the explicit,
+    # audited skip (env BEACON_ACK_UNDISPOSED_BACKLOG=1).
+    data = _data(_pending_entry(), tasks=[_task("e-1", priority="highest")])
+    _wire(monkeypatch, data)
+    monkeypatch.setenv("BEACON_ACK_UNDISPOSED_BACKLOG", "1")
+    commands.cmd_target_approve()  # no SystemExit
+    entry = data["milestones"][0]["entries"][0]
+    assert entry["status"] == "approved"
+    assert entry["meta"]["approval_gate"].get("backlog_check_skipped") is True
+
+
+# --- #551 SHOULD-1: --disposition flag + --verdict migration alias ---------
+
+def _wire_disp(monkeypatch, data):
+    monkeypatch.setattr(commands, "load_project", lambda: data)
+    monkeypatch.setattr(commands, "save_project", lambda *a, **k: None)
+    monkeypatch.setenv("BEACON_ENTRY_ID", "e-A")
+    monkeypatch.setenv("BEACON_DISP_TASK", "e-1")
+    for v in ("BEACON_DISP_DISPOSITION", "BEACON_DISP_VERDICT",
+              "BEACON_DISP_REASON", "BEACON_DISP_SOURCE"):
+        monkeypatch.delenv(v, raising=False)
+
+
+def test_cli_attach_disposition_new_flag(monkeypatch):
+    data = _data(_pending_entry(), tasks=[_task("e-1", priority="highest")])
+    _wire_disp(monkeypatch, data)
+    monkeypatch.setenv("BEACON_DISP_DISPOSITION", "done")
+    commands.cmd_target_attach_disposition()
+    disp = _ta.disposition_map(data["milestones"][0]["entries"][0])
+    assert disp["e-1"]["verdict"] == "done"
+
+
+def test_cli_attach_disposition_verdict_alias(monkeypatch):
+    # --verdict still accepted as a migration alias.
+    data = _data(_pending_entry(), tasks=[_task("e-1", priority="highest")])
+    _wire_disp(monkeypatch, data)
+    monkeypatch.setenv("BEACON_DISP_VERDICT", "done")
+    commands.cmd_target_attach_disposition()
+    disp = _ta.disposition_map(data["milestones"][0]["entries"][0])
+    assert disp["e-1"]["verdict"] == "done"
+
+
+def test_cli_attach_disposition_conflicting_flags_refused(monkeypatch):
+    data = _data(_pending_entry(), tasks=[_task("e-1", priority="highest")])
+    _wire_disp(monkeypatch, data)
+    monkeypatch.setenv("BEACON_DISP_DISPOSITION", "done")
+    monkeypatch.setenv("BEACON_DISP_VERDICT", "superseded")
+    with pytest.raises(SystemExit) as ex:
+        commands.cmd_target_attach_disposition()
+    assert ex.value.code == 1

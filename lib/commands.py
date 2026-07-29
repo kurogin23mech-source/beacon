@@ -1908,6 +1908,28 @@ def _backlog_undisposed_message(eid: str, target_id: str, undisposed: list) -> s
         f"『必要と符号化された既知作業』であり、掃除機がある≠掃除した の穴です。\n"
         f"  各タスクに done / superseded[理由] / blocks-attainment のいずれかを付ける"
         f"まで、この承認は構造的に未完成として通りません。\n"
+        f"  (どうしても skip する場合は --acknowledge-undisposed-backlog、監査に記録が"
+        f"残ります。)\n"
+        f"{body}\n"
+    )
+
+
+def _backlog_blocked_message(eid: str, target_id: str, blocking: list) -> str:
+    """The approve-refusal message when ≥1 gated backlog task is disposed
+    ``blocks-attainment`` (ms-119 / e-4579, #551 MUST-2). A task explicitly recorded
+    as still-required-and-not-done means the attainment claim is, on the record,
+    false — so approve refuses rather than passing on the disposition's mere
+    existence. Shares the block layout with _ta.format_blocks_attainment."""
+    body = _ta.format_blocks_attainment(blocking, target_id=target_id)
+    return (
+        f"Error: 承認依頼 {eid} は blocks-attainment と判定されたタスクが残っている"
+        f"ため通りません (ms-119 / e-4579)。\n"
+        f"  blocks-attainment は「まだ必要で未完」の明示記録なので、attainment 主張は"
+        f"その記録上 false です。\n"
+        f"  各タスクを完了して disposition を done に更新するか superseded[理由必須] に"
+        f"切り替えるまで、この承認は構造的に通りません。\n"
+        f"  (どうしても skip する場合は --acknowledge-undisposed-backlog、監査に記録が"
+        f"残ります。)\n"
         f"{body}\n"
     )
 
@@ -2071,24 +2093,27 @@ def cmd_target_approve():
         )
         sys.exit(2)
     data = load_project()
-    # ms-119 / e-4205: the "no SILENT approval without review-evidence" invariant is
+    # ms-119 / e-4205 + e-4579: BOTH the "no SILENT approval without review-evidence"
+    # and the "no SILENT approval while important backlog is undisposed" invariants are
     # enforced in core.target_transition_approval_approve (the choke point every
     # approval path passes), NOT here — a CLI-only guard would be bypassed by a future
-    # API caller, re-opening the very hole this closes (#504 maint review). Here we
-    # only translate --acknowledge-no-evidence → allow_no_evidence and render the
-    # recovery path when core refuses.
+    # API caller, re-opening the very hole this closes (#504 / #551 maint review). The
+    # owning target is self-derived inside core (the container that holds the approval
+    # entry IS the target), so the backlog gate runs on every path with no caller
+    # opt-in to forget. Here we only translate the two explicit acknowledge flags and
+    # render the recovery paths when core refuses.
     _ack_no_ev = os.environ.get("BEACON_ACK_NO_EVIDENCE", "") == "1"
-    # ms-119 / e-4579: resolve the owning target so core can run the backlog
-    # cross-check (unstarted highest/high tasks must each carry a disposition
-    # before an attainment claim is approved). find_entry returns
-    # (container, parent_list, entry, index); the container IS the target.
-    _r0 = core.find_entry(data, entry_id)
-    _approval_target = _r0[0] if _r0 else None
+    _ack_backlog = os.environ.get("BEACON_ACK_UNDISPOSED_BACKLOG", "") == "1"
     try:
         entry, new_state = core.target_transition_approval_approve(
             data, entry_id, rationale=rationale, actor=_actor_str(),
             gate=_approval_gate_record(), allow_no_evidence=_ack_no_ev,
-            target=_approval_target)
+            allow_undisposed_backlog=_ack_backlog)
+    except core.BacklogBlockedError as e:
+        _r = core.find_entry(data, entry_id)
+        _tid = (_r[2]["meta"].get("target_id") if _r else "") or "<target-id>"
+        sys.stderr.write(_backlog_blocked_message(entry_id, _tid, e.blocking))
+        sys.exit(2)
     except core.BacklogUndisposedError as e:
         _r = core.find_entry(data, entry_id)
         _tid = (_r[2]["meta"].get("target_id") if _r else "") or "<target-id>"
@@ -2103,6 +2128,16 @@ def cmd_target_approve():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     target_id = entry["meta"]["target_id"]
+    # ms-119 / e-4579 (#551 MUST-2): warn when a disposition says "done" but the live
+    # task never left todo (台帳 done / 実状態 todo 乖離). Non-blocking — the approval
+    # already passed the gate — but surface the one-line recovery so the divergence is
+    # visible, not hidden. Read the backlog off the resolved container before applying
+    # the transition (statuses read the same either way; the container holds the tasks).
+    _r_stale = core.find_entry(data, entry_id)
+    _stale = []
+    if _r_stale:
+        _stale = _ta.stale_done_dispositions(
+            entry, core.unstarted_priority_tasks(_r_stale[0]))
     try:
         _apply_transition(data, target_id, new_state, reason=rationale)
     except ValueError as e:
@@ -2113,6 +2148,9 @@ def cmd_target_approve():
     print(f"承認: {target_id} を {new_state} に遷移しました ({entry_id})")
     if rationale:
         print(f"  rationale: {rationale}")
+    _stale_txt = _ta.format_stale_done_warning(_stale, target_id=target_id)
+    if _stale_txt:
+        print(_stale_txt)
     # ms-119 e-4006 audit: surface HOW the gate was passed so an override
     # approval is visible at the point of use, not just in the record.
     _gate = entry["meta"].get("approval_gate", {})
@@ -2124,6 +2162,10 @@ def cmd_target_approve():
         if _gate.get("no_evidence_ack"):
             print("  ⚠ 独立レビュー証拠なしで承認されました "
                   "(--acknowledge-no-evidence) — この遷移は監査対象です (ms-119 / e-4205)。")
+        if _gate.get("backlog_check_skipped"):
+            print("  ⚠ 未着手の重要タスク (highest/high) の disposition ゲートを "
+                  "skip して承認されました (--acknowledge-undisposed-backlog) — "
+                  "この遷移は監査対象です (ms-119 / e-4579)。")
 
 
 def cmd_target_attach_evidence():
@@ -2168,21 +2210,40 @@ def cmd_target_attach_disposition():
     transition-approval (ms-119 / e-4579).
 
     beacon target attach-disposition <entry-id> --task <task-id>
-        --verdict <done|superseded|blocks-attainment> [--reason <text>] [--source <text>]
+        --disposition <done|superseded|blocks-attainment> [--reason <text>] [--source <text>]
 
     Answers "what happened to this important, unstarted task?" so an attainment claim
     cannot silently skip it. ``superseded`` requires --reason. The disposition is the
-    JUDGE / human's determination against the SPEC 原典 — not the implementer's self-
-    report (SPEC § 方針3); --source records the self-declared provenance verbatim."""
+    JUDGE / human's determination against the 原典 — not the implementer's self-report
+    (task e-4579; this design lives in the task, not the ms-119 SPEC); --source records
+    the self-declared provenance verbatim.
+
+    #551 SHOULD-1: the flag is ``--disposition`` (value domain
+    done|superseded|blocks-attainment). ``--verdict`` is a migration alias — its value
+    domain differs from attach-review-evidence's ``--verdict``
+    (attained|partial|not-attained), and the two collided. A caller who passes a
+    review-evidence verdict here is steered to the right flag/values by the value-domain
+    error in ``_ta.append_disposition``."""
     entry_id = os.environ.get("BEACON_ENTRY_ID", "").strip()
     task_id = os.environ.get("BEACON_DISP_TASK", "").strip()
-    verdict = os.environ.get("BEACON_DISP_VERDICT", "").strip()
+    disposition = os.environ.get("BEACON_DISP_DISPOSITION", "").strip()
+    verdict_alias = os.environ.get("BEACON_DISP_VERDICT", "").strip()
     reason = os.environ.get("BEACON_DISP_REASON", "").strip()
     source = os.environ.get("BEACON_DISP_SOURCE", "").strip()
     _verdicts = "|".join(_ta.DISPOSITION_VERDICTS)
+    # #551 SHOULD-1: --disposition is canonical, --verdict is the migration alias.
+    # Passing both with conflicting values is ambiguous — refuse rather than silently
+    # pick one.
+    if disposition and verdict_alias and disposition != verdict_alias:
+        print("Error: --disposition と --verdict (旧 alias) が両方指定され値が異なります。"
+              "--disposition のみを使ってください "
+              f"(値域: {_verdicts})。", file=sys.stderr)
+        sys.exit(1)
+    verdict = disposition or verdict_alias
     if not entry_id or not task_id or not verdict:
         print(f"Usage: beacon target attach-disposition <entry-id> --task <task-id> "
-              f"--verdict <{_verdicts}> [--reason <text>] [--source <text>]",
+              f"--disposition <{_verdicts}> [--reason <text> (superseded 時必須)] "
+              f"[--source <text>]",
               file=sys.stderr)
         sys.exit(1)
     data = load_project()
@@ -2238,6 +2299,23 @@ def cmd_target_reject():
         print(f"  rationale: {rationale}")
 
 
+def _task_live_status(container: dict, task_id: str) -> str:
+    """Live status of ``task_id`` anywhere under ``container`` (#551 SHOULD-2 helper).
+
+    Walks the container's entries (nested included) and returns the matching task's
+    status, or "" when not found. Used so the disposition table can print each task's
+    real status next to its ledger disposition."""
+    def _walk(entries):
+        for e in entries or []:
+            if e.get("id") == task_id:
+                return e.get("status") or ""
+            found = _walk(e.get("entries", []))
+            if found is not None:
+                return found
+        return None
+    return _walk(container.get("entries", [])) or ""
+
+
 def cmd_target_list():
     """List target transition-approval requests (e-3912).
 
@@ -2258,14 +2336,16 @@ def cmd_target_list():
                 continue
             if pending_only and m.get("approval_status") != "pending":
                 continue
-            rows.append(e)
+            # #551 SHOULD-2: keep the owning container so the disposition table can
+            # show each task's LIVE status (台帳 disposition vs 実状態 併記).
+            rows.append((e, c))
     if json_mode:
-        print(json.dumps(rows, ensure_ascii=False))
+        print(json.dumps([e for e, _c in rows], ensure_ascii=False))
         return
     if not rows:
         print("(no transition-approval requests)")
         return
-    for e in rows:
+    for e, _container in rows:
         m = e.get("meta", {})
         st = m.get("approval_status", "?")
         icon = {"pending": "◌", "approved": "●", "rejected": "✗"}.get(st, st)
@@ -2283,10 +2363,20 @@ def cmd_target_list():
                       f"{rev.get('summary', '')}")
             disp = _ta.disposition_map(e)
             if disp:
+                # #551 SHOULD-2: live-status map for the container's tasks, so the
+                # table shows disposition (ledger) alongside the task's real status —
+                # e.g. disposition=done but status=todo is a visible divergence.
+                _live = {t.get("id"): (t.get("status") or "")
+                         for t in core.unstarted_priority_tasks(_container)}
+                # unstarted_priority_tasks only returns still-unstarted gated tasks;
+                # a disposed task that has since been started/finished won't appear, so
+                # fall back to walking the container for a status when missing.
                 print(f"      disposition 表 ({len(disp)} タスク):")
                 for tid, rec in disp.items():
                     _rsn = f" — {rec.get('reason')}" if rec.get("reason") else ""
-                    print(f"        {tid}: {rec.get('verdict')}{_rsn}")
+                    _ls = _live.get(tid) or _task_live_status(_container, tid)
+                    _lstxt = f" (live: {_ls})" if _ls else ""
+                    print(f"        {tid}: {rec.get('verdict')}{_lstxt}{_rsn}")
 
 
 # ---------------------------------------------------------------------------
@@ -3109,9 +3199,10 @@ def _emit_attainment_context(target_id: str, *, pr: str = "", diff_ref: str = ""
         gaps.append(_mi)
 
     # ms-119 / e-4579: hand the judge the UNSTARTED highest/high backlog so its
-    # verdict must reckon with each important-but-untouched task (SPEC § 方針3: the
+    # verdict must reckon with each important-but-untouched task (task e-4579: the
     # disposition is the judge's determination against the 原典, not the
-    # implementer's self-report). Each carries id / priority / description so the
+    # implementer's self-report; this design lives in the task, not the ms-119 SPEC).
+    # Each carries id / priority / description so the
     # judge can propose done / superseded[理由] / blocks-attainment per task.
     backlog = [
         {"id": t.get("id"),

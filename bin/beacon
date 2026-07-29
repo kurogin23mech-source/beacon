@@ -519,17 +519,19 @@ cmd_target_review_request() {
 
 cmd_target_approve() {
     ensure_project
-    local entry_id="" rationale="" ack_no_ev=""
+    local entry_id="" rationale="" ack_no_ev="" ack_backlog=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --rationale|--reason) rationale="${2:-}"; shift 2 ;;
             --acknowledge-no-evidence) ack_no_ev=1; shift ;;
-            -?*)         _guard_positional "$1" "Usage: beacon target approve <entry-id> [--rationale <text>] [--acknowledge-no-evidence]" ;;
+            --acknowledge-undisposed-backlog) ack_backlog=1; shift ;;
+            -?*)         _guard_positional "$1" "Usage: beacon target approve <entry-id> [--rationale <text>] [--acknowledge-no-evidence] [--acknowledge-undisposed-backlog]" ;;
             *)           entry_id="$1";      shift ;;
         esac
     done
     BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" \
         BEACON_ACK_NO_EVIDENCE="$ack_no_ev" \
+        BEACON_ACK_UNDISPOSED_BACKLOG="$ack_backlog" \
         python3 "$COMMANDS_PY" target_approve
 }
 
@@ -552,20 +554,26 @@ cmd_target_attach_evidence() {
 
 cmd_target_attach_disposition() {
     ensure_project
-    local entry_id="" task="" verdict="" reason="" source=""
+    # #551 SHOULD-1: the flag is --disposition (its value domain is
+    # done|superseded|blocks-attainment). --verdict is accepted as a migration alias
+    # so old scripts don't break, but its value domain differs from
+    # attach-review-evidence's --verdict (attained|partial|not-attained) — the two
+    # collided. commands.py steers a caller who mixes them up.
+    local entry_id="" task="" disposition="" verdict_alias="" reason="" source=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --task)     task="${2:-}";    shift 2 ;;
-            --verdict)  verdict="${2:-}"; shift 2 ;;
-            --reason)   reason="${2:-}";  shift 2 ;;
-            --source)   source="${2:-}";  shift 2 ;;
-            -?*)        _guard_positional "$1" "Usage: beacon target attach-disposition <entry-id> --task <task-id> --verdict <done|superseded|blocks-attainment> [--reason <text>] [--source <text>]" ;;
-            *)          entry_id="$1";    shift ;;
+            --task)        task="${2:-}";        shift 2 ;;
+            --disposition) disposition="${2:-}"; shift 2 ;;
+            --verdict)     verdict_alias="${2:-}"; shift 2 ;;
+            --reason)      reason="${2:-}";       shift 2 ;;
+            --source)      source="${2:-}";       shift 2 ;;
+            -?*)           _guard_positional "$1" "Usage: beacon target attach-disposition <entry-id> --task <task-id> --disposition <done|superseded|blocks-attainment> [--reason <text> (superseded 時必須)] [--source <text>]" ;;
+            *)             entry_id="$1";         shift ;;
         esac
     done
     BEACON_ENTRY_ID="$entry_id" BEACON_DISP_TASK="$task" \
-        BEACON_DISP_VERDICT="$verdict" BEACON_DISP_REASON="$reason" \
-        BEACON_DISP_SOURCE="$source" \
+        BEACON_DISP_DISPOSITION="$disposition" BEACON_DISP_VERDICT="$verdict_alias" \
+        BEACON_DISP_REASON="$reason" BEACON_DISP_SOURCE="$source" \
         python3 "$COMMANDS_PY" target_attach_disposition
 }
 
@@ -3355,8 +3363,9 @@ case "${1:-}" in
             *)        echo "Usage: beacon target <subcommand>
   目的達成レビュー (target 遷移の人間承認):
     review-request | approve | reject | list
-    attach-review-evidence <entry-id> --verdict <attained|partial|not-attained> --summary <text>
-    attach-disposition <entry-id> --task <task-id> --verdict <done|superseded|blocks-attainment> [--reason <text>]
+    approve <entry-id> [--rationale <text>] [--acknowledge-no-evidence] [--acknowledge-undisposed-backlog]
+    attach-review-evidence <entry-id> --verdict <attained|partial|not-attained> --summary <text> [--source <text>]
+    attach-disposition <entry-id> --task <task-id> --disposition <done|superseded|blocks-attainment> [--reason <text> (superseded 時必須)] [--source <text>]
   記述子駆動 target (data 定義 target-class の操作, ms-122):
     create --class <kind> --label <text> [--field key=value ...]
     advance --class <kind> <target-id> [--to <phase>] [--field key=value ...] [--reason <text>]
