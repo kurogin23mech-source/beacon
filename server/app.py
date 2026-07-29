@@ -4188,6 +4188,15 @@ class TrekTaskStateSet(BaseModel):
     task_id: str
     state: str
     note: Optional[str] = ""
+    # ms-128 / e-4386 — 完遂ゲート (attainment mode)。leader が完成レビューで選んだ
+    # verdict 名 (``approve`` / ``re-work`` / ``forward-to-user``)。executor が直接
+    # stamp する時は空。``user_review`` へ倒す時の合格判定を分岐するのに使う
+    # (approve = attainment gate 対象 / forward-to-user = 人間エスカレーションで gate 外)。
+    verdict: Optional[str] = ""
+    # SPEC 受入条件を criterion 単位で評価した構造化 verdict。
+    # ``[{"criterion": str, "verdict": "met"|"partial"|"not-met"}, ...]``。
+    # ``approve`` で user_review に倒すには全 met が必須 (= 実行者の外の judge が出す)。
+    attainment_verdict: Optional[list] = None
 
 
 class TrekBlockerSet(BaseModel):
@@ -6490,6 +6499,51 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     # 「commit ゼロで Trek slot だけ done」 が成立していた。 ms-97 SPEC
     # AC10 / AC30 補強 + ms-128 方針5 の構造実装、 詳細は lib/trek.py
     # ``check_slot_done_precondition`` の docstring を参照。
+    # ms-128 / e-4386 — 完遂ゲート (attainment mode)。user_review (= Trek 唯一の
+    # terminal) へ倒す「合格判定」を、実行者の外に固定した全 met の attainment
+    # verdict でのみ通す。self_judgment (= 直前に状態を stamp した session が自分で
+    # 倒す) と、素の verdict なし approve を構造的に塞ぐ。失敗時は user_review へ
+    # 倒さず forced_state へ留置し、scheduler が外部 judge へ review を再通知する。
+    # forward-to-user (人間エスカレーション) は gate 対象外。
+    if effective_state in trek_mod.TERMINAL_TASK_STATES:
+        prior_stamper_sid = (
+            (t.get("task_states") or {}).get(body.task_id) or {}
+        ).get("updated_by_session_id", "")
+        gate = trek_mod.completion_gate_decision(
+            effective_state=effective_state,
+            from_state=from_state,
+            verdict=(body.verdict or ""),
+            caller_sid=caller_sid,
+            prior_stamper_sid=prior_stamper_sid,
+            attainment_verdict=body.attainment_verdict,
+        )
+        if not gate["allowed"]:
+            forced = gate["forced_state"] or "leader_review"
+            # forced_state へ divert できる (= 状態機械が from→forced を許す) なら、
+            # その遷移として書き込み直して review notify を発火させる (= 留置しつつ
+            # leader を再度呼ぶ)。X→X の自己ループは状態機械が許さないので、その時は
+            # 書き込まず 409 で弾く (= 現状態のまま留置)。
+            if forced != from_state and forced in (
+                trek_mod.VALID_TASK_STATE_TRANSITIONS.get(from_state) or ()
+            ):
+                effective_state = forced
+                body.state = forced
+                # note に留置理由を残し、leader の review surface で可視化する。
+                body.note = (
+                    f"[attainment gate: {gate['code']}] {gate['message']}\n"
+                    + (body.note or "")
+                )[:500]
+            else:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": gate["code"],
+                        "message": gate["message"],
+                        "trek_id": trek_id,
+                        "task_id": body.task_id,
+                        "forced_state": forced,
+                    },
+                )
     if effective_state in trek_mod.TERMINAL_TASK_STATES:
         allowed, reason_code, message = trek_mod.check_slot_done_precondition(
             t,

@@ -8996,6 +8996,12 @@ def cmd_trek_task_state():
                               user_review/done; legacy `waiting-review`
                               auto-migrates to leader_review)
       BEACON_TREK_NOTE       (optional)
+      BEACON_TREK_VERDICT    (optional, ms-128/e-4386 — completion verdict name:
+                              approve / re-work / forward-to-user)
+      BEACON_TREK_ATTAINMENT_VERDICT
+                             (optional, JSON list of per-criterion verdicts:
+                              [{"criterion": str, "verdict": "met"|"partial"|
+                              "not-met"}, ...]; required for approve→user_review)
       BEACON_JSON            "1" → json output
     """
     import trek
@@ -9005,7 +9011,19 @@ def cmd_trek_task_state():
     task_id = os.environ.get("BEACON_TREK_TASK_ID", "").strip()
     state = os.environ.get("BEACON_TREK_STATE", "").strip()
     note = os.environ.get("BEACON_TREK_NOTE", "")
+    verdict = os.environ.get("BEACON_TREK_VERDICT", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    # ms-128 / e-4386 — 構造化 attainment verdict を JSON で受ける。壊れた JSON は
+    # 「未評価」= gate が留置する側に倒れるので silent に None 扱いにせず明示 error。
+    attainment_verdict = None
+    _av_raw = os.environ.get("BEACON_TREK_ATTAINMENT_VERDICT", "").strip()
+    if _av_raw:
+        try:
+            attainment_verdict = json.loads(_av_raw)
+        except (ValueError, TypeError) as e:
+            print(f"Error: BEACON_TREK_ATTAINMENT_VERDICT is not valid JSON: {e}",
+                  file=sys.stderr)
+            sys.exit(1)
 
     if not trek_id:
         print("Error: trek_id is required", file=sys.stderr)
@@ -9038,6 +9056,7 @@ def cmd_trek_task_state():
             client, _config = _get_api_client()
             t = client.set_trek_task_state(
                 trek_id, task_id=task_id, state=state, note=note,
+                verdict=verdict, attainment_verdict=attainment_verdict,
             )
         except RuntimeError as e:
             print(f"Error: {e}", file=sys.stderr)
@@ -9063,6 +9082,34 @@ def cmd_trek_task_state():
         print(f"Error: trek {trek_id} not found", file=sys.stderr)
         sys.exit(1)
     caller_sid = os.environ.get("BEACON_SESSION_ID", "")
+    # ms-128 / e-4386 — 完遂ゲートを local mode でも適用する (server gate と parity)。
+    # user_review へ倒す合格判定は、実行者の外の全 met attainment verdict が要る。
+    effective_state = trek.migrate_legacy_task_state(state)
+    from_state = trek.get_task_state(t, task_id)
+    prior_stamper_sid = (
+        (t.get("task_states") or {}).get(task_id) or {}
+    ).get("updated_by_session_id", "")
+    gate = trek.completion_gate_decision(
+        effective_state=effective_state,
+        from_state=from_state,
+        verdict=verdict,
+        caller_sid=caller_sid,
+        prior_stamper_sid=prior_stamper_sid,
+        attainment_verdict=attainment_verdict,
+    )
+    if not gate["allowed"]:
+        forced = gate["forced_state"] or "leader_review"
+        if forced != from_state and forced in (
+            trek.VALID_TASK_STATE_TRANSITIONS.get(from_state) or ()
+        ):
+            state = forced
+            note = (
+                f"[attainment gate: {gate['code']}] {gate['message']}\n"
+                + (note or "")
+            )[:500]
+        else:
+            print(f"Error: {gate['code']}: {gate['message']}", file=sys.stderr)
+            sys.exit(1)
     try:
         trek.set_task_state(
             t,

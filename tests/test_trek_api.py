@@ -1076,6 +1076,113 @@ class TestLeaderSelfLoopSuppress:
         assert suppressions == []
 
 
+class TestCompletionAttainmentGate:
+    """ms-128 方針6 / e-4386 — leader_review → user_review の完遂ゲート。
+
+    倒す先が terminal (user_review) の「完遂合格」は、実行者の外が出した全 met の
+    attainment verdict でのみ通す。self_judgment (= 直前 stamper が自分で倒す) と
+    verdict 無し approve は leader_review に留置する。
+    """
+
+    def _seed_task_in_leader_review(self, task_id: str, stamper_sid: str) -> str:
+        trek_id = _create_seed_trek()
+        _treks[trek_id]["scope"] = [
+            {"project": "beacon-test", "milestone": "ms-128"}
+        ]
+        _treks[trek_id]["task_states"] = {
+            task_id: {
+                "state": "leader_review",
+                "updated_by_session_id": stamper_sid,
+                "updated_at": "2026-07-29T00:00:00.000000Z",
+                "last_activity_at": "2026-07-29T00:00:00.000000Z",
+                "leader_review_entered_at": "2026-07-29T00:00:00.000000Z",
+                "note": "",
+            }
+        }
+        _seed_pool_task("beacon-test", "ms-128", task_id, status="done")
+        for k in list(_bus_events_by_project.keys()):
+            _bus_events_by_project[k].clear()
+        return trek_id
+
+    def test_leader_approve_without_verdict_detained_at_leader_review(self):
+        # leader が verdict 無しで leader_review → user_review を叩く → 留置 (409)。
+        trek_id = self._seed_task_in_leader_review("e-a", stamper_sid="sv-member")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-a", "state": "user_review",
+                  "verdict": "approve"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["code"] == "attainment_verdict_required"
+        # State unchanged — still leader_review (= 留置).
+        st = (_treks[trek_id]["task_states"] or {})["e-a"]["state"]
+        assert st == "leader_review"
+
+    def test_self_judgment_leader_review_detained_even_with_all_met(self):
+        # 直前 stamper == caller (executor==leader) は全 met verdict でも留置。
+        trek_id = self._seed_task_in_leader_review("e-b", stamper_sid="sv-leader")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-b", "state": "user_review", "verdict": "approve",
+                  "attainment_verdict": [{"criterion": "AC1", "verdict": "met"}]},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["code"] == "attainment_self_judgment_banned"
+        st = (_treks[trek_id]["task_states"] or {})["e-b"]["state"]
+        assert st == "leader_review"
+
+    def test_external_all_met_approve_passes_to_user_review(self):
+        # 実行者 (sv-member) の外の judge (sv-leader) が全 met で approve → 通す。
+        trek_id = self._seed_task_in_leader_review("e-c", stamper_sid="sv-member")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-c", "state": "user_review", "verdict": "approve",
+                  "attainment_verdict": [
+                      {"criterion": "AC1", "verdict": "met"},
+                      {"criterion": "AC2", "verdict": "met"}]},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 200, r.text
+        st = (_treks[trek_id]["task_states"] or {})["e-c"]["state"]
+        assert st == "user_review"
+
+    def test_not_all_met_reworks_to_working(self):
+        # partial が 1 つでもあれば working へ差し戻し。
+        trek_id = self._seed_task_in_leader_review("e-d", stamper_sid="sv-member")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-d", "state": "user_review", "verdict": "approve",
+                  "attainment_verdict": [
+                      {"criterion": "AC1", "verdict": "met"},
+                      {"criterion": "AC2", "verdict": "partial"}]},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        # leader_review → working は valid なので divert 書き込み (200)。
+        assert r.status_code == 200, r.text
+        st = (_treks[trek_id]["task_states"] or {})["e-d"]["state"]
+        assert st == "working"
+
+    def test_forward_to_user_escalation_not_gated(self):
+        # forward-to-user は人間エスカレーション — verdict 無しでも通す。
+        trek_id = self._seed_task_in_leader_review("e-e", stamper_sid="sv-member")
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "e-e", "state": "user_review",
+                  "verdict": "forward-to-user"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 200, r.text
+        st = (_treks[trek_id]["task_states"] or {})["e-e"]["state"]
+        assert st == "user_review"
+
+
 # ---------------------------------------------------------------------------
 # ms-97 / e-2706 — leader_review 遷移時の trek-task-review event 発火 (AC1)
 # ---------------------------------------------------------------------------

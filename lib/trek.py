@@ -4428,6 +4428,140 @@ def leader_review_verdict_set(trek_doc: dict, target_id: str) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# ms-128 方針6 / e-4386 — 完遂ゲートの attainment mode 化。
+#
+# 「完遂せよ」が完遂を生まないのは、done 判定を実行者の外に固定しておらず自己採点に
+# なるから (2026-07-28 設計インプット)。Trek の唯一の terminal = user_review へ倒す
+# 合格判定を、次の 3 つで構造的に締める:
+#   1. 受入条件を criterion 単位 (met / partial / not-met) で評価した構造化 verdict を
+#      必須にする (= 素の「approve」一発を禁止)。全 met でなければ倒せない。
+#   2. 判定主体を実行者の外に固定する (self_judgment = 直前に状態を stamp した session
+#      が自分で user_review に倒す経路) を完遂ゲートで無効化する。
+#   3. 明示的な人間エスカレーション (forward-to-user) だけは gate 対象外 — これは
+#      「判断を人間に委ねる」ための user_review 到達であり、自己採点ではない。
+#
+# 失敗時は user_review に倒さず leader_review に留置し (forced_state)、scheduler が
+# 外部 judge へ review を再通知する (= 「手前まで運ぶ」の手前で止める / user 合意
+# 2026-07-29「leader_review に留置」)。未達 (verdict はあるが全 met でない) の時だけは
+# SPEC どおり working へ差し戻す。
+# ---------------------------------------------------------------------------
+
+# 受入条件 1 項目あたりの verdict 値。met 以外は「未達」として扱う (未評価 = 未達)。
+ATTAINMENT_VERDICT_VALUES = ("met", "partial", "not-met")
+# user_review に倒す 2 つの verdict のうち、gate 対象 (= 完遂合格) と対象外 (= 人間
+# エスカレーション)。COMPLETION_VERDICTS の verdict 名と一致させること。
+COMPLETION_APPROVE_VERDICT = "approve"
+ESCALATE_TO_USER_VERDICT = "forward-to-user"
+
+
+def evaluate_attainment_verdict(criteria_verdicts) -> dict:
+    """Pure — reduce per-criterion verdicts to a completion decision.
+
+    ``criteria_verdicts``: list of ``{"criterion": str, "verdict": str}`` where
+    verdict is one of ``ATTAINMENT_VERDICT_VALUES``. Any value other than
+    ``met`` (including missing / unknown / an unevaluated criterion) counts as
+    **未達** — an un-judged criterion is conservatively NOT met, so a verdict
+    can never pass by omission.
+
+    Returns ``{"has_verdict": bool, "all_met": bool, "unmet": [criterion, ...]}``.
+    An empty / non-list input yields ``has_verdict=False`` (= no structured
+    judgment supplied at all), distinct from ``has_verdict=True, all_met=False``
+    (= judged, but something is unmet).
+    """
+    items = [c for c in (criteria_verdicts or []) if isinstance(c, dict)]
+    if not items:
+        return {"has_verdict": False, "all_met": False, "unmet": []}
+    unmet = []
+    for c in items:
+        v = str(c.get("verdict", "")).strip().lower()
+        if v != "met":
+            label = str(c.get("criterion") or c.get("text") or "").strip()
+            unmet.append(label[:200])
+    return {"has_verdict": True, "all_met": not unmet, "unmet": unmet}
+
+
+def completion_gate_decision(*, effective_state: str, from_state: str,
+                             verdict: str, caller_sid: str,
+                             prior_stamper_sid: str,
+                             attainment_verdict) -> dict:
+    """Pure — decide whether a **completion approval** into ``user_review`` passes.
+
+    ms-128 / e-4386. Called with the *effective* (post-migrate) target state, the
+    state being transitioned *from*, the leader's chosen ``verdict`` (empty when
+    an executor stamps directly), the calling session, the session that stamped
+    the current state (``prior_stamper_sid`` = the executor for a leader_review
+    origin), and the structured ``attainment_verdict`` payload.
+
+    The gate guards only the **completion-approval** path — the judgment that a
+    target is *done*: ``leader_review → user_review`` (the leader's approval), or
+    any transition carrying an explicit ``approve`` verdict. A bare
+    ``working → user_review`` with no verdict is the executor's *forward-to-user
+    escalation* (= "this needs a human", not "this is complete") and is left
+    open; ``forward-to-user`` is likewise never gated.
+
+    On a guarded path it enforces: (1) the judge is outside the executor
+    (self_judgment = caller == prior stamper is banned), and (2) every SPEC
+    criterion is ``met`` in an ``attainment_verdict``.
+
+    Returns ``{"allowed": bool, "forced_state": str|None, "code": str,
+    "message": str}``. When ``allowed`` is False, ``forced_state`` is where the
+    task is 留置 instead of the terminal:
+      * ``leader_review`` — no valid all-met external verdict; re-summon a judge.
+      * ``working`` — judged but a criterion is 未達; 差し戻し per SPEC.
+    """
+    if effective_state != "user_review":
+        return {"allowed": True, "forced_state": None, "code": "", "message": ""}
+    if verdict == ESCALATE_TO_USER_VERDICT:
+        # 人間へのエスカレーションは自己採点ではない — gate しない。
+        return {"allowed": True, "forced_state": None, "code": "", "message": ""}
+    # gate 対象は「完遂合格判定」だけ: leader_review からの承認、または明示 approve。
+    # verdict 無しの working→user_review は forward-to-user エスカレーション扱いで開けておく
+    # (= 完遂の主張ではないため、attainment を要求しない)。
+    is_completion_approval = (
+        from_state == "leader_review" or verdict == COMPLETION_APPROVE_VERDICT
+    )
+    if not is_completion_approval:
+        return {"allowed": True, "forced_state": None, "code": "", "message": ""}
+    self_judgment = bool(
+        caller_sid and prior_stamper_sid and caller_sid == prior_stamper_sid
+    )
+    if self_judgment:
+        return {
+            "allowed": False,
+            "forced_state": "leader_review",
+            "code": "attainment_self_judgment_banned",
+            "message": (
+                "完遂判定は実行者の外に固定する必要があります "
+                "(self_judgment 自動 pass 禁止)。作業した session 以外の judge が "
+                "attainment verdict を出してください。leader_review に留置します。"
+            ),
+        }
+    ev = evaluate_attainment_verdict(attainment_verdict)
+    if not ev["has_verdict"]:
+        return {
+            "allowed": False,
+            "forced_state": "leader_review",
+            "code": "attainment_verdict_required",
+            "message": (
+                "user_review へ倒すには SPEC 受入条件を criterion 単位で "
+                "met/partial/not-met 評価した attainment verdict が必要です。"
+                "leader_review に留置します。"
+            ),
+        }
+    if not ev["all_met"]:
+        return {
+            "allowed": False,
+            "forced_state": "working",
+            "code": "attainment_not_all_met",
+            "message": (
+                "未達の受入条件があるため working へ差し戻します: "
+                + ", ".join(ev["unmet"][:5])
+            ),
+        }
+    return {"allowed": True, "forced_state": None, "code": "", "message": ""}
+
+
 def detect_unresponsive_leader(
     trek_doc: dict,
     now: datetime.datetime,
