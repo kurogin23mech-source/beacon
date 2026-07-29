@@ -1313,6 +1313,48 @@ cmd_acquisition_status() {
         python3 "$COMMANDS_PY" acquisition_status
 }
 
+cmd_acquisition_attach_list() {
+    # ms-132 e-4501 — 施策(acq-)にアタックリスト(ms-131 table-doc)を紐づけ作成。
+    # 列は正準スキーマ(対象顧客=acc参照 / 打診フェーズ / 最終接触日 / メモ)。
+    ensure_project
+    local acq_id="" title="" phases="" json=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --phases) phases="${2:-}"; shift 2 ;;
+            --json)   json="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon acquisition attack-list <acq-id> \"<title>\" [--phases a,b,c] [--json]" ;;
+            *)   if [ -z "$acq_id" ]; then acq_id="$1"; else title="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$acq_id" ] || [ -z "$title" ]; then
+        echo "Usage: beacon acquisition attack-list <acq-id> \"<title>\" [--phases 未接触,連絡済,返信あり,アポ] [--json]"
+        echo "  施策(acq-)にアタックリスト(table-doc)を紐づけ作成。列=対象顧客(acc参照)/打診フェーズ/最終接触日/メモ。"
+        exit 1
+    fi
+    BEACON_ACQ_ID="$acq_id" BEACON_ACQ_LIST_TITLE="$title" \
+        BEACON_ACQ_LIST_PHASES="$phases" BEACON_JSON="$json" \
+        python3 "$COMMANDS_PY" acquisition_attach_list
+}
+
+cmd_acquisition_lists() {
+    # ms-132 e-4501 — 施策配下のアタックリスト一覧 (read-only)。
+    ensure_project
+    local acq_id="" json=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon acquisition attack-lists <acq-id> [--json]" ;;
+            *)   acq_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$acq_id" ]; then
+        echo "Usage: beacon acquisition attack-lists <acq-id> [--json]"
+        exit 1
+    fi
+    BEACON_ACQ_ID="$acq_id" BEACON_JSON="$json" \
+        python3 "$COMMANDS_PY" acquisition_lists
+}
+
 cmd_account_rename() {
     ensure_project
     local acc_id="" name=""
@@ -2023,12 +2065,12 @@ cmd_phase_add() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --index|--at) index="${2:-}"; shift 2 ;;
-            -?*) _guard_positional "$1" "Usage: beacon phase add <account|opportunity> <name> [--index N]" ;;
+            -?*) _guard_positional "$1" "Usage: beacon phase add <account|opportunity|prospect> <name> [--index N]" ;;
             *)   if [ -z "$funnel" ]; then funnel="$1"; else name="$1"; fi; shift ;;
         esac
     done
     if [ -z "$funnel" ] || [ -z "$name" ]; then
-        echo "Usage: beacon phase add <account|opportunity> <name> [--index N]"
+        echo "Usage: beacon phase add <account|opportunity|prospect> <name> [--index N]"
         exit 1
     fi
     BEACON_FUNNEL_KIND="$funnel" BEACON_PHASE_NAME="$name" BEACON_PHASE_INDEX="$index" \
@@ -2040,13 +2082,13 @@ cmd_phase_rename() {
     local funnel="" old="" new=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -?*) _guard_positional "$1" "Usage: beacon phase rename <account|opportunity> <old> <new>" ;;
+            -?*) _guard_positional "$1" "Usage: beacon phase rename <account|opportunity|prospect> <old> <new>" ;;
             *)   if [ -z "$funnel" ]; then funnel="$1";
                  elif [ -z "$old" ]; then old="$1"; else new="$1"; fi; shift ;;
         esac
     done
     if [ -z "$funnel" ] || [ -z "$old" ] || [ -z "$new" ]; then
-        echo "Usage: beacon phase rename <account|opportunity> <old> <new>"
+        echo "Usage: beacon phase rename <account|opportunity|prospect> <old> <new>"
         exit 1
     fi
     BEACON_FUNNEL_KIND="$funnel" BEACON_PHASE_OLD="$old" BEACON_PHASE_NEW="$new" \
@@ -2058,13 +2100,13 @@ cmd_phase_move() {
     local funnel="" name="" index=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -?*) _guard_positional "$1" "Usage: beacon phase move <account|opportunity> <name> <index>" ;;
+            -?*) _guard_positional "$1" "Usage: beacon phase move <account|opportunity|prospect> <name> <index>" ;;
             *)   if [ -z "$funnel" ]; then funnel="$1";
                  elif [ -z "$name" ]; then name="$1"; else index="$1"; fi; shift ;;
         esac
     done
     if [ -z "$funnel" ] || [ -z "$name" ] || [ -z "$index" ]; then
-        echo "Usage: beacon phase move <account|opportunity> <name> <index>"
+        echo "Usage: beacon phase move <account|opportunity|prospect> <name> <index>"
         exit 1
     fi
     BEACON_FUNNEL_KIND="$funnel" BEACON_PHASE_NAME="$name" BEACON_PHASE_INDEX="$index" \
@@ -2076,12 +2118,12 @@ cmd_phase_remove() {
     local funnel="" name=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            -?*) _guard_positional "$1" "Usage: beacon phase remove <account|opportunity> <name>" ;;
+            -?*) _guard_positional "$1" "Usage: beacon phase remove <account|opportunity|prospect> <name>" ;;
             *)   if [ -z "$funnel" ]; then funnel="$1"; else name="$1"; fi; shift ;;
         esac
     done
     if [ -z "$funnel" ] || [ -z "$name" ]; then
-        echo "Usage: beacon phase remove <account|opportunity> <name>"
+        echo "Usage: beacon phase remove <account|opportunity|prospect> <name>"
         exit 1
     fi
     BEACON_FUNNEL_KIND="$funnel" BEACON_PHASE_NAME="$name" \
@@ -3538,6 +3580,9 @@ case "${1:-}" in
         case "${2:-}" in
             add)      shift 2; cmd_acquisition_add "$@" ;;
             list|ls)  shift 2; cmd_acquisition_list "$@" ;;
+            # ms-132 e-4501: attack-list (table-doc) 紐づけ / 一覧。
+            attack-list)  shift 2; cmd_acquisition_attach_list "$@" ;;
+            attack-lists) shift 2; cmd_acquisition_lists "$@" ;;
             # ms-120 e-3907: named intent verbs for the lifecycle
             # (todo → in_progress → observing → done). status is read-only.
             start)    BEACON_ACQ_ID="${3:-}" BEACON_ACQ_STATUS="in_progress" python3 "$COMMANDS_PY" acquisition_status ;;
@@ -3549,7 +3594,7 @@ case "${1:-}" in
                 _deprecate_status_write acquisition "beacon acquisition start|observe|done <acq-id>"
                 cmd_acquisition_status "$@"
                 ;;
-            *)        echo "Usage: beacon acquisition [add|list|start|observe|done|show]  (顧客獲得ターゲット: 取引先の無い獲得・準備作業。状態遷移は名前付き動詞で)" ;;
+            *)        echo "Usage: beacon acquisition [add|list|attack-list|attack-lists|start|observe|done|show]  (顧客獲得ターゲット: 取引先の無い獲得・準備作業。attack-list/attack-lists でアタックリスト管理)" ;;
         esac
         ;;
     opportunity|opp)

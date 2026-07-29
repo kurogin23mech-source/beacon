@@ -14791,6 +14791,81 @@ def _write_table_model(doc_id: str, title: str, old_content: str, model) -> None
             f.write(new_content)
 
 
+def _persist_table_doc(*, title, columns, scope, milestone="", operation="",
+                       trek_id="", target="", doc_id=""):
+    """Validate columns, build + link + persist a table-doc, record the dev-Target
+    entry, and return ``(doc_id, model)``.
+
+    The single create path shared by ``cmd_doc_table_create`` (env-driven) and
+    ``cmd_acquisition_attach_list`` (param-driven) so neither has to mutate
+    ``os.environ`` to reach the other — the delegation is an ordinary function
+    call with an explicit signature (ms-132 e-4502 AX/保守性レビュー: env mutation
+    as in-process argument passing broke local reasoning). Raises
+    ``table_doc.TableDocError`` on an invalid column definition so callers keep
+    their own error wording."""
+    import table_doc
+    import table_type
+    import work_model
+    table_type.validate_column_types(columns if isinstance(columns, list) else [])
+    model = table_doc.new_table(columns)
+    # ms-131 e-4497 — hard-validate a sales Target (account/opportunity/
+    # acquisition) exists before linking, mirroring cmd_doc_add.
+    if target:
+        _validate_sales_target_exists(target)
+    if scope == "core":
+        milestone = milestone or None
+    body = table_doc.serialize_table_body(title, model)
+    content = _add_frontmatter(body, scope, milestone or "", operation or "",
+                               trek_id or "", target=target or "",
+                               doc_format=table_doc.TABLE_FORMAT)
+    if _is_cloud_mode():
+        client, config = _get_api_client()
+        if doc_id:
+            result = client.update_document(config["project_id"], doc_id, title, content)
+        else:
+            result = client.create_document(config["project_id"], title, content)
+        doc_id = result["doc_id"]
+    else:
+        docs_dir = _get_docs_dir()
+        os.makedirs(docs_dir, exist_ok=True)
+        if not doc_id:
+            doc_id = _doc_slug(title)
+        fpath = os.path.join(docs_dir, f"{doc_id}.md")
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(content)
+    # Entry recording resolves the dev Target this table-doc belongs to. A
+    # table-doc can be linked to any Target (方針6): milestone/operation get the
+    # dev entry log; sales Targets (account/opportunity/acquisition) and generic
+    # links carry none, so we skip rather than record against an empty ms_id.
+    data = load_project()
+    today = _now_iso()
+    _tkind = work_model.target_kind(target or "")
+    op_id = operation or (target if _tkind == "operation" else "")
+    ms_id = milestone or (target if _tkind == "milestone" else "")
+    if scope != "core" and not _is_sales_target(target):
+        if op_id:
+            for op in data.get("operations", []):
+                if op.get("id") == op_id:
+                    eid = core.next_entry_id(data)
+                    op.setdefault("entries", []).append({
+                        "id": eid, "type": "save",
+                        "description": f"table-doc create: {title} ({scope})",
+                        "status": "done", "created_at": today, "done_at": today,
+                        "meta": {"revision_id": doc_id, "source": "auto"},
+                    })
+                    break
+            save_project(data)
+        elif ms_id:
+            core.save_entry(data, ms_id=ms_id,
+                            description=f"table-doc create: {title} ({scope})",
+                            source="auto", date=today, revision_id=doc_id,
+                            url=None, hash=None, progress=None)
+            save_project(data)
+        # else: generic / no dev Target — nothing to record (linkage lives in
+        # the doc's frontmatter, surfaced via `doc list --target`).
+    return doc_id, model
+
+
 def cmd_doc_table_create():
     """Create a table-doc: a document with format:table and typed columns."""
     import table_doc
@@ -14831,73 +14906,12 @@ def cmd_doc_table_create():
         sys.exit(1)
 
     try:
-        table_type.validate_column_types(
-            columns if isinstance(columns, list) else [])
-        model = table_doc.new_table(columns)
+        doc_id, model = _persist_table_doc(
+            title=title, columns=columns, scope=scope, milestone=milestone,
+            operation=operation, trek_id=trek_id, target=target, doc_id=doc_id)
     except table_doc.TableDocError as exc:
         print(f"Error: 列定義が不正です: {exc}", file=sys.stderr)
         sys.exit(1)
-
-    # ms-131 e-4497 — hard-validate a sales Target (account/opportunity/
-    # acquisition) exists before linking, mirroring cmd_doc_add.
-    if target:
-        _validate_sales_target_exists(target)
-
-    if scope == "core":
-        milestone = milestone or None
-
-    body = table_doc.serialize_table_body(title, model)
-    content = _add_frontmatter(body, scope, milestone or "", operation or "",
-                               trek_id or "", target=target or "",
-                               doc_format=table_doc.TABLE_FORMAT)
-
-    if _is_cloud_mode():
-        client, config = _get_api_client()
-        if doc_id:
-            result = client.update_document(config["project_id"], doc_id, title, content)
-        else:
-            result = client.create_document(config["project_id"], title, content)
-        doc_id = result["doc_id"]
-    else:
-        docs_dir = _get_docs_dir()
-        os.makedirs(docs_dir, exist_ok=True)
-        if not doc_id:
-            doc_id = _doc_slug(title)
-        fpath = os.path.join(docs_dir, f"{doc_id}.md")
-        with open(fpath, "w", encoding="utf-8") as f:
-            f.write(content)
-
-    # Entry recording resolves the dev Target this table-doc belongs to. A
-    # table-doc can be linked to any Target (方針6): milestone/operation get the
-    # dev entry log; sales Targets (account/opportunity/acquisition) and generic
-    # links carry none, so we skip rather than record against an empty ms_id.
-    import work_model
-    data = load_project()
-    today = _now_iso()
-    _tkind = work_model.target_kind(target or "")
-    op_id = operation or (target if _tkind == "operation" else "")
-    ms_id = milestone or (target if _tkind == "milestone" else "")
-    if scope != "core" and not _is_sales_target(target):
-        if op_id:
-            for op in data.get("operations", []):
-                if op.get("id") == op_id:
-                    eid = core.next_entry_id(data)
-                    op.setdefault("entries", []).append({
-                        "id": eid, "type": "save",
-                        "description": f"table-doc create: {title} ({scope})",
-                        "status": "done", "created_at": today, "done_at": today,
-                        "meta": {"revision_id": doc_id, "source": "auto"},
-                    })
-                    break
-            save_project(data)
-        elif ms_id:
-            core.save_entry(data, ms_id=ms_id,
-                            description=f"table-doc create: {title} ({scope})",
-                            source="auto", date=today, revision_id=doc_id,
-                            url=None, hash=None, progress=None)
-            save_project(data)
-        # else: generic / no dev Target — nothing to record (linkage lives in
-        # the doc's frontmatter, surfaced via `doc list --target`).
 
     if json_mode:
         # Emit full column objects (same shape as `show --json`) so an AI
@@ -20887,11 +20901,11 @@ def _help_registry():
         {"command": "beacon meeting cancel <mtg-id>", "flags": [], "description": "Cancel a scheduled meeting"},
         {"command": "beacon meeting list [<opp-id>]", "flags": ["--json"], "description": "List meetings; <opp-id> optional — omit to list across all opportunities (e-3909)"},
         {"command": "beacon meeting list-ended", "flags": ["--now <datetime>", "--json"], "description": "List meetings whose scheduled end has passed but are still scheduled (終了検知 Operation C の候補; e-3909 canonical read verb, alias: meeting ended)"},
-        {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity vocabulary)"},
-        {"command": "beacon phase add <account|opportunity> <name>", "flags": ["--index <n>"], "description": "Add or insert a funnel stage"},
-        {"command": "beacon phase rename <account|opportunity> <old> <new>", "flags": [], "description": "Rename a funnel stage (references follow)"},
-        {"command": "beacon phase move <account|opportunity> <name> <index>", "flags": [], "description": "Reorder a funnel stage"},
-        {"command": "beacon phase remove <account|opportunity> <name>", "flags": [], "description": "Delete a funnel stage (blocked if non-empty)"},
+        {"command": "beacon phase list", "flags": ["--json"], "description": "Show the configured phase funnels (account / opportunity / prospect vocabulary)"},
+        {"command": "beacon phase add <account|opportunity|prospect> <name>", "flags": ["--index <n>"], "description": "Add or insert a funnel stage"},
+        {"command": "beacon phase rename <account|opportunity|prospect> <old> <new>", "flags": [], "description": "Rename a funnel stage (references follow)"},
+        {"command": "beacon phase move <account|opportunity|prospect> <name> <index>", "flags": [], "description": "Reorder a funnel stage"},
+        {"command": "beacon phase remove <account|opportunity|prospect> <name>", "flags": [], "description": "Delete a funnel stage (blocked if non-empty)"},
         {"command": "beacon save <desc>", "flags": ["-m <ms-id>", "--hash <hash>", "--source manual", "--json"], "description": "Save a freeform entry to a milestone"},
         {"command": "beacon sync", "flags": [], "description": "Auto-sync recent git commits to active milestone"},
         {"command": "beacon summary <text>", "flags": [], "description": "Update project summary"},
@@ -26302,6 +26316,139 @@ def cmd_acquisition_status():
     print(f"{acq_id} → {status}")
 
 
+def cmd_acquisition_attach_list():
+    """Create an attack-list (ms-131 table-doc) linked to an Acquisition (ms-132
+    e-4501, AC1/AC2).
+
+    The list's columns are the canonical attack-list schema (対象顧客=acc 参照 /
+    打診フェーズ / 最終接触日 / メモ). Creation, sales-Target existence validation
+    and frontmatter linkage all go through the *single* table-doc create path
+    (``cmd_doc_table_create``) — the attach verb only bakes the columns and points
+    ``--target`` at the施策, so this path can never diverge from the primitive it
+    builds on (方針2: the list IS a table-doc).
+    Env: BEACON_ACQ_ID, BEACON_ACQ_LIST_TITLE, BEACON_ACQ_LIST_PHASES (optional,
+    comma-separated funnel override for e-4502), BEACON_JSON.
+    """
+    import attack_list
+    import table_doc
+    _USAGE = ('Usage: beacon acquisition attack-list <acq-id> "<title>" '
+              '[--phases a,b,c] [--json]')
+    acq_id = os.environ.get("BEACON_ACQ_ID", "")
+    title = os.environ.get("BEACON_ACQ_LIST_TITLE", "")
+    phases_raw = os.environ.get("BEACON_ACQ_LIST_PHASES", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not acq_id:
+        print("Error: acq-id required\n" + _USAGE
+              + "\n  (`beacon acquisition list` で acq- ID を確認)", file=sys.stderr)
+        sys.exit(1)
+    if not title:
+        print("Error: リストのタイトルが必要です\n" + _USAGE, file=sys.stderr)
+        sys.exit(1)
+    if _refuse_if_bus_origin("acquisition_attach_list",
+                             {"acq_id": acq_id, "title": title[:80]}):
+        sys.exit(1)
+    # Validate the施策 exists up-front so the error names the acquisition (the
+    # shared create path re-checks, but this keeps the message on the acq-).
+    _validate_sales_target_exists(acq_id)
+    # Phase funnel resolution (ms-132 e-4502): an explicit --phases override wins;
+    # otherwise bake the project's *configured* prospect funnel so a company that
+    # edited `beacon phase prospect ...` gets its own vocabulary; falling back to
+    # the shipped default when unset.
+    phases = [p.strip() for p in phases_raw.split(",") if p.strip()]
+    if not phases:
+        import sales_entities
+        configured = sales_entities.prospect_phases(load_project())
+        phases = [p.get("name") for p in configured if p.get("name")]
+    try:
+        columns = attack_list.attack_list_columns(phases or None)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    # Create through the shared table-doc path (方針2: the list IS a table-doc).
+    # scope=memo mirrors the sales table-doc convention; target=acq- links the list
+    # so `doc list --target` / `acquisition attack-lists` surface it.
+    doc_id, model = _persist_table_doc(
+        title=title, columns=columns, scope="memo", target=acq_id)
+
+    if json_mode:
+        # Acquisition-scoped shape (not the bare table-doc JSON): the caller asked
+        # `acquisition attach-list`, so the output names the acquisition it linked
+        # to — structurally comparable to `acquisition attack-lists` (AX review).
+        print(json.dumps({"acquisition": acq_id, "doc_id": doc_id, "title": title,
+                          "format": table_doc.TABLE_FORMAT,
+                          "columns": model.get("columns", [])}, ensure_ascii=False))
+    else:
+        print(f"Attached attack-list {doc_id} to {acq_id}: {title}")
+
+
+def cmd_acquisition_lists():
+    """List the attack-lists (table-docs) linked to an Acquisition (ms-132
+    e-4501, AC3).
+
+    Surfaces each linked list's title, active row count and per-phase breakdown so
+    a施策's outreach state reads at a glance. Only table-docs whose columns match
+    the attack-list schema are shown (a施策 may carry other linked docs).
+    Env: BEACON_ACQ_ID, BEACON_JSON.
+    """
+    import attack_list
+    import table_doc
+    import work_model
+    acq_id = os.environ.get("BEACON_ACQ_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not acq_id:
+        print("Error: acq-id required\nUsage: beacon acquisition attack-lists "
+              "<acq-id> [--json]\n  (`beacon acquisition list` で acq- ID を確認)",
+              file=sys.stderr)
+        sys.exit(1)
+    _validate_sales_target_exists(acq_id)
+
+    store = get_store()
+    linked = [d for d in store.list_documents()
+              if d.get("status") != "cancelled"
+              and work_model.doc_target(d) == acq_id]
+
+    results = []
+    for meta in linked:
+        doc_id = meta.get("doc_id")
+        # list_documents carries frontmatter metadata but not necessarily the body;
+        # fetch the full doc to parse the table payload.
+        full = store.get_document(doc_id) or {}
+        content = full.get("content", "")
+        if not table_doc.is_table_content(content):
+            continue
+        try:
+            model = table_doc.parse_table(content)
+        except table_doc.TableDocError:
+            continue
+        if not attack_list.is_attack_list(model.get("columns", [])):
+            continue
+        rows = table_doc.active_rows(model)
+        phase_counts = {}
+        for row in rows:
+            phase = row.get("cells", {}).get(attack_list.COL_PHASE) or "(未設定)"
+            phase_counts[phase] = phase_counts.get(phase, 0) + 1
+        results.append({
+            "doc_id": doc_id,
+            "title": full.get("title") or meta.get("title", ""),
+            "row_count": len(rows),
+            "phase_counts": phase_counts,
+        })
+
+    if json_mode:
+        print(json.dumps({"acquisition": acq_id, "lists": results},
+                         ensure_ascii=False))
+        return
+    if not results:
+        print(f"{acq_id} に紐づくアタックリストはまだありません "
+              f'(`beacon acquisition attack-list {acq_id} "<title>"` で作成)')
+        return
+    for r in results:
+        print(f"{r['doc_id']}  {r['title']}  ({r['row_count']} 件)")
+        if r["phase_counts"]:
+            brk = " / ".join(f"{k}:{v}" for k, v in r["phase_counts"].items())
+            print(f"    {brk}")
+
+
 # --- send-account ledger (ms-107 e-3365) -----------------------------------
 # label → {email, routes{service:{namespace, alias}}}. Internal verbs invoked by
 # the sales Skills to register accounts and resolve the concrete MCP route a
@@ -27097,14 +27244,16 @@ def cmd_phase_list():
     data = load_project()
     acc_phases = sales_entities.account_phases(data)
     opp_phases = sales_entities.opportunity_phases(data)
+    prospect_phases = sales_entities.prospect_phases(data)  # ms-132 e-4502
     frame = sales_entities.opportunity_phase_frame(data)  # e-3582: 前進の macro-frame
     if json_mode:
         print(json.dumps({"account_phases": acc_phases,
                           "opportunity_phases": opp_phases,
+                          "prospect_phases": prospect_phases,
                           "opportunity_phase_frame": frame},
                          ensure_ascii=False, indent=2))
         return
-    if not acc_phases and not opp_phases:
+    if not acc_phases and not opp_phases and not prospect_phases:
         print("No phase funnel configured (not a sales project, or no phases set).")
         return
     # e-3582: フェーズを読む前に「フェーズ = 次へ抜けさせるもの」の枠組みを刷り込む。
@@ -27139,6 +27288,11 @@ def cmd_phase_list():
         # 紐づけた work-item の完了が促す (フェーズ固定の分岐ではない)。
         if m["default_lead"] is not None:
             print(f"      遷移日リード: {m['default_lead']}日")
+    # ms-132 e-4502: 打診フェーズ funnel — attack-list の相手ごとの状態語彙。
+    if prospect_phases:
+        print("打診 (attack-list prospect) phases:")
+        for p in prospect_phases:
+            print(f"  - {p.get('name')}")
 
 
 # --- phase funnel editing (ms-116) -----------------------------------------
@@ -27153,26 +27307,37 @@ _FUNNEL_KIND_ALIASES = {
     "account": "account", "accounts": "account", "顧客": "account",
     "opportunity": "opportunity", "opportunities": "opportunity",
     "opp": "opportunity", "商談": "opportunity",
+    # ms-132 e-4502: 打診フェーズ funnel (attack-list の相手ごとの状態)。
+    "prospect": "prospect", "prospects": "prospect", "打診": "prospect",
+}
+
+# The target-class whose ownership gates editing each funnel. account / opportunity
+# are themselves target-classes; the prospect funnel governs attack-lists that hang
+# off Acquisitions, so it is gated by acquisition ownership (ms-132 e-4502).
+_FUNNEL_OWNING_CLASS = {
+    "account": "account", "opportunity": "opportunity", "prospect": "acquisition",
 }
 
 
 def _resolve_funnel_kind(raw: str) -> str:
     kind = _FUNNEL_KIND_ALIASES.get((raw or "").strip().lower(), "")
     if not kind:
-        print(f"Error: unknown funnel '{raw}' (expected: account | opportunity)",
-              file=sys.stderr)
+        print(f"Error: unknown funnel '{raw}' "
+              f"(expected: account | opportunity | prospect)", file=sys.stderr)
         sys.exit(1)
     return kind
 
 
 def _guard_funnel_owned(data: dict, kind: str) -> None:
     """Refuse to edit a funnel the project's profession does not own, reusing
-    the ms-115 containment gate. account / opportunity are sales-owned, so a
+    the ms-115 containment gate. account / opportunity / prospect are all
+    sales-owned (prospect maps to the acquisition target-class it governs), so a
     dev project is blocked with the same guidance-rich message target creation
     uses (ms-116 e-3822 — enforce 職種 > 対象 for funnel edits too)."""
     import occupation
+    owning_class = _FUNNEL_OWNING_CLASS.get(kind, kind)
     try:
-        occupation.assert_target_class_owned(data, kind)
+        occupation.assert_target_class_owned(data, owning_class)
     except occupation.TargetClassProfessionError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -27710,6 +27875,8 @@ if __name__ == "__main__":
         "acquisition_add": cmd_acquisition_add,
         "acquisition_list": cmd_acquisition_list,
         "acquisition_status": cmd_acquisition_status,
+        "acquisition_attach_list": cmd_acquisition_attach_list,
+        "acquisition_lists": cmd_acquisition_lists,
         "account_contact": cmd_account_contact,
         "account_phase": cmd_account_phase,
         "account_rename": cmd_account_rename,
