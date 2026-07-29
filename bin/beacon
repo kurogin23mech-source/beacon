@@ -1381,6 +1381,61 @@ cmd_acquisition_attack_list_fill() {
         BEACON_JSON="$json" python3 "$COMMANDS_PY" acquisition_attack_list_fill
 }
 
+cmd_acquisition_attack_list_send() {
+    # ms-132 e-4504 — 一括連絡の計画(dry-run 既定) / 人間の1confirm=承認(--confirm)。
+    # 承認境界 方針4: confirm 前は 1 通も送信/記録されない。承認は bus-refused で人間限定。
+    ensure_project
+    local doc_id="" subject="" message="" msgfile="" fromphase="" limit="" confirm="" json=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --subject)      subject="${2:-}"; shift 2 ;;
+            --message)      message="${2:-}"; shift 2 ;;
+            --message-file) msgfile="${2:-}"; shift 2 ;;
+            --from-phase)   fromphase="${2:-}"; shift 2 ;;
+            --limit)        limit="${2:-}"; shift 2 ;;
+            --confirm)      confirm="1"; shift ;;
+            --json)         json="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon acquisition attack-list-send <attack-list-doc-id> [--subject <s>] [--message-file <f> | --message <body>] [--from-phase <name>] [--limit N] [--confirm] [--json]" ;;
+            *)   doc_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$doc_id" ]; then
+        echo "Usage: beacon acquisition attack-list-send <attack-list-doc-id> [--subject <s>] [--message-file <f> | --message <body>] [--from-phase <name>] [--limit N] [--confirm] [--json]"
+        echo "  既定=dry-run(計画のみ、送信も記録もしない)。--confirm で人間が1回承認(bus からは不可)。送信自体は Skill が行う。"
+        exit 1
+    fi
+    if [ -n "$msgfile" ] && [ -z "$message" ]; then
+        message="$(cat "$msgfile" 2>/dev/null)"
+    fi
+    BEACON_DOC_ID="$doc_id" BEACON_SEND_SUBJECT="$subject" BEACON_SEND_MESSAGE="$message" \
+        BEACON_SEND_FROM_PHASE="$fromphase" BEACON_SEND_LIMIT="$limit" \
+        BEACON_CONFIRM="$confirm" BEACON_JSON="$json" \
+        python3 "$COMMANDS_PY" acquisition_attack_list_send
+}
+
+cmd_acquisition_attack_list_send_record() {
+    # ms-132 e-4504 — 承認済バッチ内の1送信を記録(証跡+行 未接触→連絡済)。authorized 必須。
+    ensure_project
+    local doc_id="" acc_id="" msgid="" url="" subject="" json=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --message-id) msgid="${2:-}"; shift 2 ;;
+            --url)        url="${2:-}"; shift 2 ;;
+            --subject)    subject="${2:-}"; shift 2 ;;
+            --json)       json="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon acquisition attack-list-send-record <attack-list-doc-id> <acc-id> --message-id <id> [--url <permalink>] [--subject <s>] [--json]" ;;
+            *)   if [ -z "$doc_id" ]; then doc_id="$1"; else acc_id="$1"; fi; shift ;;
+        esac
+    done
+    if [ -z "$doc_id" ] || [ -z "$acc_id" ]; then
+        echo "Usage: beacon acquisition attack-list-send-record <attack-list-doc-id> <acc-id> --message-id <id> [--url <permalink>] [--subject <s>] [--json]"
+        exit 1
+    fi
+    BEACON_DOC_ID="$doc_id" BEACON_SEND_ACC_ID="$acc_id" BEACON_SEND_MESSAGE_ID="$msgid" \
+        BEACON_SEND_URL="$url" BEACON_SEND_SUBJECT="$subject" BEACON_JSON="$json" \
+        python3 "$COMMANDS_PY" acquisition_attack_list_send_record
+}
+
 cmd_account_rename() {
     ensure_project
     local acc_id="" name=""
@@ -3610,6 +3665,8 @@ case "${1:-}" in
             attack-list)      shift 2; cmd_acquisition_attach_list "$@" ;;
             attack-lists)     shift 2; cmd_acquisition_lists "$@" ;;
             attack-list-fill) shift 2; cmd_acquisition_attack_list_fill "$@" ;;
+            attack-list-send) shift 2; cmd_acquisition_attack_list_send "$@" ;;
+            attack-list-send-record) shift 2; cmd_acquisition_attack_list_send_record "$@" ;;
             # ms-120 e-3907: named intent verbs for the lifecycle
             # (todo → in_progress → observing → done). status is read-only.
             start)    BEACON_ACQ_ID="${3:-}" BEACON_ACQ_STATUS="in_progress" python3 "$COMMANDS_PY" acquisition_status ;;
@@ -3621,7 +3678,7 @@ case "${1:-}" in
                 _deprecate_status_write acquisition "beacon acquisition start|observe|done <acq-id>"
                 cmd_acquisition_status "$@"
                 ;;
-            *)        echo "Usage: beacon acquisition [add|list|attack-list|attack-lists|attack-list-fill|start|observe|done|show]  (顧客獲得ターゲット: 取引先の無い獲得・準備作業。attack-list系でアタックリスト管理)" ;;
+            *)        echo "Usage: beacon acquisition [add|list|attack-list|attack-lists|attack-list-fill|attack-list-send|attack-list-send-record|start|observe|done|show]  (顧客獲得ターゲット: 取引先の無い獲得・準備作業。attack-list系でアタックリスト管理)" ;;
         esac
         ;;
     opportunity|opp)
