@@ -868,16 +868,14 @@ def milestone_update(data: dict, ms_id: str, *,
             if target_date:
                 ms["target_date"] = target_date
             if priority:
-                # ms-126 (e-4224 / AX#1): accept an idempotent echo of the
-                # current value (incl. the untriaged sentinel) so read-modify-
-                # write round-trips don't 400; reject only a real transition to
-                # a non-severity. Maint#1: the transition routes through the
-                # single-source resolver, not a re-inlined copy. Mirrors
+                # ms-126 (e-4224 + AX round-2): a provided priority always routes
+                # through the single-source resolver; empty/omitted = no change.
+                # ``untriaged`` is rejected state-independently (a client cannot
+                # re-assert the machine sentinel). To leave an untriaged milestone
+                # unchanged, omit the field rather than echo it. Mirrors
                 # task_update above.
-                current = ms.get("priority", "")
-                if priority != current:
-                    ms["priority"] = _resolve_priority_for_write(
-                        priority, allow_untriaged=False)
+                ms["priority"] = _resolve_priority_for_write(
+                    priority, allow_untriaged=False)
             if objective:
                 ms["objective"] = objective
             if acceptance_criteria:
@@ -1339,23 +1337,19 @@ def task_update(data: dict, entry_id: str, *,
         entry["behavior"] = behavior
         changed = True
     if priority:
-        # ms-126 (e-4224 / AX#1): read-modify-write is the canonical AI edit
-        # pattern (GET an entry, change one field, PATCH the whole object back).
-        # An untriaged task's GET carries priority=="untriaged"; echoing it back
-        # unchanged must be an idempotent no-op, NOT a 400 — otherwise the API's
-        # own emitted value becomes an invalid input and the AI mis-diagnoses
-        # its own request. So: an echo of the currently-stored value (incl. the
-        # sentinel) is accepted as a no-change; only an actual *transition* is
-        # validated. Maint#1: that transition routes through the single-source
-        # resolver (allow_untriaged=False = human path) rather than re-inlining
-        # the severity/untriaged rules — _resolve_priority_for_write is the one
-        # authority (it rejects the sentinel as not-a-severity, keeping the "a
-        # human cannot newly choose untriaged" invariant).
-        current = (entry.get("meta") or {}).get("priority", "")
-        if priority != current:
-            entry.setdefault("meta", {})["priority"] = _resolve_priority_for_write(
-                priority, allow_untriaged=False)
-            changed = True
+        # ms-126 (e-4224 + AX round-2): a provided priority always routes through
+        # the single-source resolver (Maint#1). Empty/omitted = no change (the
+        # ``if priority`` guard above); a provided value must be a real severity.
+        # ``untriaged`` is rejected state-INDEPENDENTLY — a client cannot
+        # re-assert the machine sentinel regardless of the current value. The
+        # earlier idempotent-echo carve-out (accept priority==current, incl. the
+        # sentinel) was dropped because it made the same input state-dependent
+        # (echo untriaged = silent no-op vs a 400 otherwise), which an AI reading
+        # the surface cannot predict. To leave an untriaged entry unchanged, omit
+        # the field (Web: priority=None; CLI: no --priority) rather than echo it.
+        entry.setdefault("meta", {})["priority"] = _resolve_priority_for_write(
+            priority, allow_untriaged=False)
+        changed = True
     if changed:
         author_clean = _clean_author(author)
         if author_clean:
