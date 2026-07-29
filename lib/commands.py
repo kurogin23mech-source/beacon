@@ -26277,6 +26277,119 @@ def cmd_acquisition_status():
     print(f"{acq_id} → {status}")
 
 
+def cmd_acquisition_attach_list():
+    """Create an attack-list (ms-131 table-doc) linked to an Acquisition (ms-132
+    e-4501, AC1/AC2).
+
+    The list's columns are the canonical attack-list schema (対象顧客=acc 参照 /
+    打診フェーズ / 最終接触日 / メモ). Creation, sales-Target existence validation
+    and frontmatter linkage all go through the *single* table-doc create path
+    (``cmd_doc_table_create``) — the attach verb only bakes the columns and points
+    ``--target`` at the施策, so this path can never diverge from the primitive it
+    builds on (方針2: the list IS a table-doc).
+    Env: BEACON_ACQ_ID, BEACON_ACQ_LIST_TITLE, BEACON_ACQ_LIST_PHASES (optional,
+    comma-separated funnel override for e-4502), BEACON_JSON.
+    """
+    import attack_list
+    acq_id = os.environ.get("BEACON_ACQ_ID", "")
+    title = os.environ.get("BEACON_ACQ_LIST_TITLE", "")
+    phases_raw = os.environ.get("BEACON_ACQ_LIST_PHASES", "")
+    if not acq_id:
+        print("Error: acq-id required", file=sys.stderr)
+        sys.exit(1)
+    if not title:
+        print("Error: リストのタイトルが必要です", file=sys.stderr)
+        sys.exit(1)
+    # Validate the施策 exists up-front so the error names the acquisition (the
+    # delegated create path re-checks, but this keeps the message on the acq-).
+    _validate_sales_target_exists(acq_id)
+    phases = [p.strip() for p in phases_raw.split(",") if p.strip()] or None
+    try:
+        columns = attack_list.attack_list_columns(phases)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+    # Delegate to the one validated table-doc create path. scope=memo mirrors the
+    # sales table-doc convention; target=acq- links the list so `doc list --target`
+    # / `acquisition lists` surface it. These env vars are exactly what
+    # cmd_doc_table_create reads; BEACON_JSON (if set by the caller) rides through
+    # untouched, so `--json` yields the table-doc create JSON for chaining.
+    os.environ["BEACON_TITLE"] = title
+    os.environ["BEACON_COLUMNS"] = json.dumps(columns, ensure_ascii=False)
+    os.environ["BEACON_SCOPE"] = "memo"
+    os.environ["BEACON_TARGET"] = acq_id
+    os.environ["BEACON_MS"] = ""
+    os.environ["BEACON_OP"] = ""
+    os.environ["BEACON_DOC_ID"] = ""
+    cmd_doc_table_create()
+
+
+def cmd_acquisition_lists():
+    """List the attack-lists (table-docs) linked to an Acquisition (ms-132
+    e-4501, AC3).
+
+    Surfaces each linked list's title, active row count and per-phase breakdown so
+    a施策's outreach state reads at a glance. Only table-docs whose columns match
+    the attack-list schema are shown (a施策 may carry other linked docs).
+    Env: BEACON_ACQ_ID, BEACON_JSON.
+    """
+    import attack_list
+    import table_doc
+    import work_model
+    acq_id = os.environ.get("BEACON_ACQ_ID", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not acq_id:
+        print("Error: acq-id required", file=sys.stderr)
+        sys.exit(1)
+    _validate_sales_target_exists(acq_id)
+
+    store = get_store()
+    linked = [d for d in store.list_documents()
+              if d.get("status") != "cancelled"
+              and work_model.doc_target(d) == acq_id]
+
+    results = []
+    for meta in linked:
+        doc_id = meta.get("doc_id")
+        # list_documents carries frontmatter metadata but not necessarily the body;
+        # fetch the full doc to parse the table payload.
+        full = store.get_document(doc_id) or {}
+        content = full.get("content", "")
+        if not table_doc.is_table_content(content):
+            continue
+        try:
+            model = table_doc.parse_table(content)
+        except table_doc.TableDocError:
+            continue
+        if not attack_list.is_attack_list(model.get("columns", [])):
+            continue
+        rows = table_doc.active_rows(model)
+        phase_counts = {}
+        for row in rows:
+            phase = row.get("cells", {}).get(attack_list.COL_PHASE) or "(未設定)"
+            phase_counts[phase] = phase_counts.get(phase, 0) + 1
+        results.append({
+            "doc_id": doc_id,
+            "title": full.get("title") or meta.get("title", ""),
+            "row_count": len(rows),
+            "phase_counts": phase_counts,
+        })
+
+    if json_mode:
+        print(json.dumps({"acquisition": acq_id, "lists": results},
+                         ensure_ascii=False))
+        return
+    if not results:
+        print(f"{acq_id} に紐づくアタックリストはまだありません "
+              f'(`beacon acquisition attach-list {acq_id} "<title>"` で作成)')
+        return
+    for r in results:
+        print(f"{r['doc_id']}  {r['title']}  ({r['row_count']} 件)")
+        if r["phase_counts"]:
+            brk = " / ".join(f"{k}:{v}" for k, v in r["phase_counts"].items())
+            print(f"    {brk}")
+
+
 # --- send-account ledger (ms-107 e-3365) -----------------------------------
 # label → {email, routes{service:{namespace, alias}}}. Internal verbs invoked by
 # the sales Skills to register accounts and resolve the concrete MCP route a
@@ -27685,6 +27798,8 @@ if __name__ == "__main__":
         "acquisition_add": cmd_acquisition_add,
         "acquisition_list": cmd_acquisition_list,
         "acquisition_status": cmd_acquisition_status,
+        "acquisition_attach_list": cmd_acquisition_attach_list,
+        "acquisition_lists": cmd_acquisition_lists,
         "account_contact": cmd_account_contact,
         "account_phase": cmd_account_phase,
         "account_rename": cmd_account_rename,

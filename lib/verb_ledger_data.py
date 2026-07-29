@@ -49,6 +49,8 @@ VERB_LEDGER = {
     "acquisition_add": {"cls": "R", "secondary": [], "note": "[post-memo] 獲得ターゲット起票=台帳追記(R)、milestone add と同型"},
     "acquisition_list": {"cls": "Q", "secondary": [], "note": "[post-memo] read-only 一覧"},
     "acquisition_status": {"cls": "R", "secondary": [], "note": "[post-memo] 状態遷移の記録(R)"},
+    "acquisition_attach_list": {"cls": "R", "secondary": [], "note": "[post-memo/ms-132] 施策にアタックリスト(table-doc)を紐づけ作成=doc_table_create へ委譲(R)"},
+    "acquisition_lists": {"cls": "Q", "secondary": [], "note": "[post-memo/ms-132] 施策配下のアタックリスト read-only 一覧(Q)"},
 
     # --- activity ---
     "activity_done": {"cls": "R", "secondary": [], "note": ""},
