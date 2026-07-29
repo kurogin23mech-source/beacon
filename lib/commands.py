@@ -21833,6 +21833,24 @@ def cmd_bus_send():
     # DM 発信を「問題駆動の相談」として記録するためのメタデータ。本文とは別に運ぶ。
     dec_context = os.environ.get("BEACON_BUS_CONTEXT", "").strip()
     dec_rationale = os.environ.get("BEACON_BUS_RATIONALE", "").strip()
+    # ms-128 / e-4289: idempotent cross-invocation resend. A caller (leader /
+    # Skill) that re-runs `beacon bus send` after an ambiguous failure passes
+    # --client-event-id <same key> --retry so the server dedups instead of
+    # creating a true duplicate DM (the 2026-07-27 dogfood failure). Empty →
+    # the client mints a fresh key (normal first send).
+    client_event_id = os.environ.get("BEACON_BUS_CLIENT_EVENT_ID", "").strip()
+    is_retry = os.environ.get("BEACON_BUS_IS_RETRY", "") == "1"
+    # Fail fast (mirror the server's 422) before any network round-trip so the
+    # caller gets an actionable message rather than an opaque HTTP error.
+    if is_retry and not client_event_id:
+        print(
+            "Error: --retry requires --client-event-id. Resend with the SAME"
+            " client_event_id the first attempt used so the server can dedup"
+            " (idempotent send, e-4289). The first send's JSON output carries"
+            " it under the \"client_event_id\" key.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     # e-1209: --to <session_id> stamps payload.recipient_session_id so the
     # server-side filter in /bus/unread can route the event to a single
     # recipient. Without this, `dm`-channel events fan out to every session
@@ -22260,6 +22278,8 @@ def cmd_bus_send():
             requested_action=requested_action,
             context=dec_context,
             rationale=dec_rationale,
+            client_event_id=client_event_id,
+            is_retry=is_retry,
         )
     except BaseException:
         # The send failed — refund the pessimistically-decremented slot

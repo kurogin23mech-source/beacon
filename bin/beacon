@@ -5553,6 +5553,11 @@ EOF
         # send-mode path) sets it so an armed session's autonomous loop cannot
         # forge a bypass. Threaded to cmd_bus_send as BEACON_BUS_MANUAL.
         _bus_manual=""
+        # ms-128 / e-4289: idempotent cross-invocation resend. --client-event-id
+        # lets a caller reuse the key from a first (ambiguous) attempt; --retry
+        # sets is_retry so the server dedups instead of double-posting.
+        _bus_client_event_id=""
+        _bus_is_retry=""
         # ms-94 / e-2291 (2026-07-06): `bus directory` の default 挙動を反転。
         # 今まで cwd project 限定 (= 他 project の live session が見えない) が
         # default だったので、user / AI が --all-projects と付けても phantom flag
@@ -5620,6 +5625,9 @@ EOF
                 --recipient-confirmed) _bus_recipient_confirmed="1"; shift ;;
                 # ms-120 / e-3901: explicit manual override of the armed gate.
                 --manual)         _bus_manual="1"; shift ;;
+                # ms-128 / e-4289: idempotent resend across CLI invocations.
+                --client-event-id) _bus_client_event_id="${2:-}"; shift 2 ;;
+                --retry)          _bus_is_retry="1"; shift ;;
                 # Route help to the usage block via the dispatch `*)` arm so we
                 # don't duplicate the heredoc. `__help__` matches no real sub.
                 -h|--help)        _bus_sub="__help__"; shift ;;
@@ -5685,6 +5693,20 @@ print(m.group(1) if m else "")' || true)
                     echo "Error: --to と --to-user は相互排他です (どちらか片方のみ指定してください)。" >&2
                     exit 2
                 fi
+                # ms-128 / e-4289: --client-event-id keys ONE logical send for
+                # idempotent resend. Reusing it across a multi-recipient fan-out
+                # would make every recipient after the first collide (same key,
+                # different per-recipient payload → server 409). Idempotent
+                # resend is single-recipient by construction, so reject the combo
+                # loudly instead of letting a fan-out half-fail.
+                if [[ -n "$_bus_client_event_id" ]]; then
+                    _cei_recip_count=$(printf '%s' "$_bus_to_list" | grep -c .)
+                    if [[ "$_cei_recip_count" -gt 1 ]]; then
+                        echo "Error: --client-event-id is for single-recipient idempotent resend, but $_cei_recip_count recipients were given." >&2
+                        echo "       Retry one recipient at a time with its own client_event_id." >&2
+                        exit 2
+                    fi
+                fi
                 # Dedupe and fan out one send per recipient. The legacy
                 # behavior (single --to) collapses to a single subprocess.
                 if [[ -z "$_bus_to_list" ]]; then
@@ -5702,6 +5724,8 @@ print(m.group(1) if m else "")' || true)
                         BEACON_BUS_NO_ENVELOPE="$_bus_no_envelope" \
                         BEACON_BUS_RECIPIENT_CONFIRMED="$_bus_recipient_confirmed" \
                         BEACON_BUS_MANUAL="$_bus_manual" \
+                        BEACON_BUS_CLIENT_EVENT_ID="$_bus_client_event_id" \
+                        BEACON_BUS_IS_RETRY="$_bus_is_retry" \
                         BEACON_JSON="$_bus_json" \
                         python3 "$COMMANDS_PY" bus_send
                 else
@@ -5724,6 +5748,8 @@ print(m.group(1) if m else "")' || true)
                             BEACON_BUS_NO_ENVELOPE="$_bus_no_envelope" \
                             BEACON_BUS_RECIPIENT_CONFIRMED="$_bus_recipient_confirmed" \
                             BEACON_BUS_MANUAL="$_bus_manual" \
+                            BEACON_BUS_CLIENT_EVENT_ID="$_bus_client_event_id" \
+                            BEACON_BUS_IS_RETRY="$_bus_is_retry" \
                             BEACON_JSON="$_bus_json" \
                             python3 "$COMMANDS_PY" bus_send || _rc=$?
                     done <<< "$_bus_to_list"
