@@ -12,8 +12,10 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import core  # noqa: E402
 import commands  # noqa: E402
+from beacon_cli import dispatch  # noqa: E402
 
 
 def make_project(**kwargs):
@@ -260,16 +262,10 @@ class TestUntriagedBacklogTriggerFile:
 # helpful に reject する。
 # ---------------------------------------------------------------------------
 
-def _dispatch_parser():
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-    from beacon_cli import dispatch
-    return dispatch, dispatch.build_parser()
-
-
 def test_dispatch_priority_choices_reject_invalid():
     """python surface: 無効な priority は argparse が SystemExit(2) で弾く
     (= silent に不正値を通さない、bash の 5 択プロンプトと契約一致)。"""
-    _, p = _dispatch_parser()
+    p = dispatch.build_parser()
     for argv in (
         ["milestone", "add", "x", "--priority", "bogus"],
         ["task", "add", "x", "--priority", "urgent"],
@@ -282,25 +278,27 @@ def test_dispatch_priority_choices_reject_invalid():
 
 
 def test_dispatch_priority_choices_accept_valid_and_omit():
-    """有効な 5 値は通り、省略は default (変更/未設定なし) で通る。
+    """有効な 5 値は通り、省略は「明示的な priority なし」で通る。
     untriaged sentinel は --untriaged で opt-in する (choices とは独立)。"""
-    _, p = _dispatch_parser()
+    p = dispatch.build_parser()
     for lvl in ("highest", "high", "medium", "low", "lowest"):
         ns = p.parse_args(["milestone", "add", "x", "--priority", lvl])
         assert ns.priority == lvl
-    # 省略 → default
-    ns = p.parse_args(["task", "add", "x"])
-    assert ns.priority is None
-    ns = p.parse_args(["milestone", "add", "x"])
-    assert ns.priority == ""
+    # 省略 → falsy な default (「明示なし」)。task add は None / ms add は "" と
+    # 内部 sentinel が割れているが (pre-existing、この PR の範囲外)、ここでは
+    # 「明示的な priority が入っていない」ことだけを契約として pin し、None vs ""
+    # の差を canonical に固定しない (独立レビュー #539)。
+    assert not p.parse_args(["task", "add", "x"]).priority
+    assert not p.parse_args(["milestone", "add", "x"]).priority
     # untriaged は choices を経由しない別経路
     ns = p.parse_args(["task", "add", "x", "--untriaged"])
     assert ns.allow_untriaged is True
 
 
 def test_dispatch_priority_choices_single_source():
-    """choices/help は 1 定義 (_PRIORITY_CHOICES) から来る = surface 間 drift 防止。"""
-    dispatch, _ = _dispatch_parser()
+    """choices は 1 定義 (_PRIORITY_CHOICES) から来て core.VALID_PRIORITIES と一致
+    (= python surface↔core の値 drift を機械 pin。bash 側は別コピー・手動同期で、
+    汎用 flag-parity guard は e-4223 の残り半分)。"""
     assert dispatch._PRIORITY_CHOICES == (
         "highest", "high", "medium", "low", "lowest")
     assert set(dispatch._PRIORITY_CHOICES) == core.VALID_PRIORITIES
