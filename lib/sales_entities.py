@@ -236,6 +236,144 @@ def default_prospect_phase(data: dict) -> str:
     return ps[0]["name"] if ps else attack_list.INITIAL_PROSPECT_PHASE
 
 
+# ---------------------------------------------------------------------------
+# Attack-list bulk-send batch (ms-132 e-4504) — the structural anchor for the
+# human 1-confirm gate on external outreach.
+#
+# A bulk external send goes: plan (pending) → authorize (confirm) → record per
+# recipient (requires authorized). The invariants this model enforces:
+#   - a recipient's send is *recordable* only inside an AUTHORIZED batch;
+#   - authorization flips pending→authorized only via the CLI verb that refuses a
+#     bus / DM / auto-execute origin AND an *armed* (autonomous) session — so no
+#     no-human-in-loop context authorizes. (This does NOT prove a human typed the
+#     command: in an agentic system the AI operates the CLI on the human's behalf.
+#     A dialog AI acting on its human's instruction is the intended operator; the
+#     Skill's explicit confirm step + the ``authorized_by`` audit cover it.)
+#   - a record's message must digest to the confirmed 文面 (bind confirmed↔sent).
+# So a prospect row's 未接触→連絡済 transition and its outbound 証跡 are reachable
+# ONLY through an authorized batch and only for the confirmed content — confirm 前
+# は 1 通も『記録』されない (SPEC 方針4). The transport itself (MCP Gmail) is
+# Skill-level and uncontrollable from here; a rogue direct send leaves ZERO
+# batch/証跡/phase record — silent in Beacon's ledger, detectable only by
+# reconciling the Gmail sent-box (a follow-up detection Operation, out of scope).
+# ---------------------------------------------------------------------------
+
+SEND_BATCH_PENDING = "pending"
+SEND_BATCH_AUTHORIZED = "authorized"
+SEND_BATCH_SENT = "sent"
+SEND_BATCH_CANCELLED = "cancelled"
+_SEND_BATCHES_KEY = "attack_list_send_batches"
+
+
+def _send_batches(data: dict) -> list:
+    return data.setdefault(_SEND_BATCHES_KEY, [])
+
+
+def next_send_batch_id(data: dict) -> str:
+    return _next_prefixed_id(
+        [b.get("id", "") for b in data.get(_SEND_BATCHES_KEY, [])], "sendb-")
+
+
+def find_send_batch(data: dict, batch_id: str) -> Optional[dict]:
+    for b in data.get(_SEND_BATCHES_KEY, []):
+        if b.get("id") == batch_id:
+            return b
+    return None
+
+
+def pending_send_batch_for_doc(data: dict, doc_id: str) -> Optional[dict]:
+    for b in data.get(_SEND_BATCHES_KEY, []):
+        if b.get("doc_id") == doc_id and b.get("status") == SEND_BATCH_PENDING:
+            return b
+    return None
+
+
+def authorized_send_batch_for_doc(data: dict, doc_id: str) -> Optional[dict]:
+    for b in data.get(_SEND_BATCHES_KEY, []):
+        if b.get("doc_id") == doc_id and b.get("status") in (
+                SEND_BATCH_AUTHORIZED, SEND_BATCH_SENT):
+            return b
+    return None
+
+
+def create_send_batch(data: dict, *, doc_id: str, recipients: list,
+                      message_digest: str, message_preview: str,
+                      created_at: str, created_by: str = "") -> dict:
+    """Create the pending send batch for ``doc_id``, superseding any earlier
+    pending one (re-planning always yields exactly one fresh pending batch).
+    ``recipients`` = list of ``{acc_id, row_id, email}``."""
+    for b in _send_batches(data):
+        if b.get("doc_id") == doc_id and b.get("status") == SEND_BATCH_PENDING:
+            b["status"] = SEND_BATCH_CANCELLED  # superseded by the re-plan
+    batch = {
+        "id": next_send_batch_id(data),
+        "doc_id": doc_id,
+        "status": SEND_BATCH_PENDING,
+        "message_digest": message_digest,
+        "message_preview": message_preview,
+        "recipients": [{"acc_id": r["acc_id"], "row_id": r.get("row_id", ""),
+                        "email": r.get("email", ""), "sent_at": None,
+                        "message_id": "", "comm_id": ""} for r in recipients],
+        "created_at": created_at,
+        "created_by": created_by,
+        "authorized_at": None,
+        "authorized_by": "",
+    }
+    _send_batches(data).append(batch)
+    return batch
+
+
+def authorize_send_batch(data: dict, batch_id: str, *, at: str, by: str = "") -> dict:
+    """Flip a pending batch to authorized (the single human confirm). Idempotent
+    on an already-authorized batch; refuses a sent/cancelled one."""
+    b = find_send_batch(data, batch_id)
+    if b is None:
+        raise ValueError(f"send batch not found: {batch_id}")
+    if b.get("status") == SEND_BATCH_AUTHORIZED:
+        return b
+    if b.get("status") != SEND_BATCH_PENDING:
+        raise ValueError(
+            f"batch {batch_id} is {b.get('status')}; only a pending batch can be "
+            f"authorized")
+    b["status"] = SEND_BATCH_AUTHORIZED
+    b["authorized_at"] = at
+    b["authorized_by"] = by
+    return b
+
+
+def batch_recipient(batch: dict, acc_id: str) -> Optional[dict]:
+    for r in batch.get("recipients", []):
+        if r.get("acc_id") == acc_id:
+            return r
+    return None
+
+
+def record_batch_send(data: dict, doc_id: str, acc_id: str, *, at: str,
+                      message_id: str = "") -> dict:
+    """Mark one recipient sent within the doc's AUTHORIZED batch.
+
+    The structural gate: refuses unless an authorized batch exists for the doc,
+    the recipient is in it, and it was not already sent (idempotency = no
+    double-send). Returns the recipient dict so the caller can attach the
+    Communication id after recording the 証跡. Never fabricates authorization —
+    a send can only be recorded against a human-authorized batch."""
+    b = authorized_send_batch_for_doc(data, doc_id)
+    if b is None:
+        raise ValueError(
+            f"{doc_id} に authorized な送信バッチがありません "
+            f"(先に `attack-list-send <doc> --confirm` で人間が承認する必要があります)")
+    r = batch_recipient(b, acc_id)
+    if r is None:
+        raise ValueError(f"{acc_id} は承認済みバッチ {b['id']} の宛先ではありません")
+    if r.get("sent_at"):
+        raise ValueError(f"{acc_id} は既にバッチ {b['id']} で送信記録済みです")
+    r["sent_at"] = at
+    r["message_id"] = message_id
+    if all(x.get("sent_at") for x in b.get("recipients", [])):
+        b["status"] = SEND_BATCH_SENT
+    return r
+
+
 def filter_accounts(data: dict, *, phase=None, assignee=None,
                     name_contains=None) -> list:
     """Return the Accounts matching a condition query (ms-132 e-4503).

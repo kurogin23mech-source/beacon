@@ -52,6 +52,8 @@ VERB_LEDGER = {
     "acquisition_attach_list": {"cls": "R", "secondary": [], "note": "[post-memo/ms-132] 施策にアタックリスト(table-doc)を紐づけ作成=doc_table_create へ委譲(R)"},
     "acquisition_lists": {"cls": "Q", "secondary": [], "note": "[post-memo/ms-132] 施策配下のアタックリスト read-only 一覧(Q)"},
     "acquisition_attack_list_fill": {"cls": "R", "secondary": [], "note": "[post-memo/ms-132] 条件一致の未接触Accountをアタックリストへ一括行追記(R、dedup+dry-run)"},
+    "acquisition_attack_list_send": {"cls": "C", "secondary": ["R"], "note": "[post-memo/ms-132] 一括連絡の計画(dry-run,R)/人間の1confirm=承認(C、bus-refused)。承認境界 方針4"},
+    "acquisition_attack_list_send_record": {"cls": "R", "secondary": [], "note": "[post-memo/ms-132] 承認済バッチ内の送信記録=証跡+行phase駆動(R、authorized必須)"},
 
     # --- activity ---
     "activity_done": {"cls": "R", "secondary": [], "note": ""},

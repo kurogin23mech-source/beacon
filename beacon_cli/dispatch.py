@@ -508,6 +508,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_acq_alf.add_argument("--limit", default="")
     p_acq_alf.add_argument("--dry-run", dest="dry_run", action="store_true")
     p_acq_alf.add_argument("--json", action="store_true")
+    # ms-132 e-4504: 一括連絡の計画/承認(送信境界) + 送信記録。
+    p_acq_send = acq_sub.add_parser("attack-list-send", add_help=False)
+    p_acq_send.add_argument("doc_id", nargs="?", default="")
+    p_acq_send.add_argument("--subject", default="")
+    p_acq_send.add_argument("--message", default="")
+    p_acq_send.add_argument("--message-file", dest="message_file", default="")
+    p_acq_send.add_argument("--from-phase", dest="from_phase", default="")
+    p_acq_send.add_argument("--limit", default="")
+    p_acq_send.add_argument("--confirm", action="store_true")
+    p_acq_send.add_argument("--json", action="store_true")
+    p_acq_sendrec = acq_sub.add_parser("attack-list-send-record", add_help=False)
+    p_acq_sendrec.add_argument("doc_id", nargs="?", default="")
+    p_acq_sendrec.add_argument("acc_id", nargs="?", default="")
+    p_acq_sendrec.add_argument("--message-id", dest="message_id", default="")
+    p_acq_sendrec.add_argument("--message", default="")
+    p_acq_sendrec.add_argument("--message-file", dest="message_file", default="")
+    p_acq_sendrec.add_argument("--url", default="")
+    p_acq_sendrec.add_argument("--subject", default="")
+    p_acq_sendrec.add_argument("--json", action="store_true")
 
     # ---- opportunity (ms-106: sales entities, profession=sales) ----
     p_opp = sub.add_parser(
@@ -2250,7 +2269,8 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
     # ms-115 e-3786/e-3790: 顧客獲得ターゲット (取引先の無い獲得・準備作業の器)。
     if args.show_help or args.acq_cmd is None:
         print("Usage: beacon acquisition "
-              "[add|list|attack-list|attack-lists|attack-list-fill|status] [options]")
+              "[add|list|attack-list|attack-lists|attack-list-fill|"
+              "attack-list-send|attack-list-send-record|status] [options]")
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
         return rc
@@ -2307,8 +2327,53 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
                "BEACON_DRY_RUN": "1" if args.dry_run else "",
                "BEACON_JSON": "1" if args.json else ""}
         return _run_commands_py(root, "acquisition_attack_list_fill", env)
+    if cmd == "attack-list-send":
+        if not args.doc_id:
+            print('Usage: beacon acquisition attack-list-send '
+                  '<attack-list-doc-id> [--subject <s>] '
+                  '[--message-file <f> | --message <body>] [--from-phase <name>] '
+                  '[--limit N] [--confirm] [--json]')
+            return 1
+        message = args.message or ""
+        if args.message_file and not message:
+            try:
+                with open(args.message_file, encoding="utf-8") as f:
+                    message = f.read()
+            except OSError as e:
+                print(f"Error: --message-file 読み込み失敗: {e}")
+                return 1
+        env = {"BEACON_DOC_ID": args.doc_id,
+               "BEACON_SEND_SUBJECT": args.subject or "",
+               "BEACON_SEND_MESSAGE": message,
+               "BEACON_SEND_FROM_PHASE": args.from_phase or "",
+               "BEACON_SEND_LIMIT": args.limit or "",
+               "BEACON_CONFIRM": "1" if args.confirm else "",
+               "BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "acquisition_attack_list_send", env)
+    if cmd == "attack-list-send-record":
+        if not args.doc_id or not args.acc_id:
+            print('Usage: beacon acquisition attack-list-send-record '
+                  '<attack-list-doc-id> <acc-id> --message-id <id> '
+                  '[--url <permalink>] [--subject <s>] [--json]')
+            return 1
+        rec_message = args.message or ""
+        if args.message_file and not rec_message:
+            try:
+                with open(args.message_file, encoding="utf-8") as f:
+                    rec_message = f.read()
+            except OSError as e:
+                print(f"Error: --message-file 読み込み失敗: {e}")
+                return 1
+        env = {"BEACON_DOC_ID": args.doc_id, "BEACON_SEND_ACC_ID": args.acc_id,
+               "BEACON_SEND_MESSAGE_ID": args.message_id or "",
+               "BEACON_SEND_MESSAGE": rec_message,
+               "BEACON_SEND_URL": args.url or "",
+               "BEACON_SEND_SUBJECT": args.subject or "",
+               "BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "acquisition_attack_list_send_record", env)
     print("Usage: beacon acquisition "
-          "[add|list|attack-list|attack-lists|attack-list-fill|status] [options]")
+          "[add|list|attack-list|attack-lists|attack-list-fill|"
+          "attack-list-send|attack-list-send-record|status] [options]")
     return 2
 
 
