@@ -9869,6 +9869,71 @@ def trek_scheduler_tick_endpoint(
             "idle_minutes": payload.get("idle_minutes"),
         })
 
+    # ms-128 方針8 (e-4368) — leader-halt escalation pass. Independent of the
+    # idle pass above: idle anchors on executor pulses, so a leader asleep while
+    # executors are active is NOT idle and would be missed. This pass detects a
+    # leader not draining the leader_review queue (oldest item stale > 4h) and
+    # escalates to the human user (notify-user-only), with a refire cooldown. The
+    # leader is the root of the watch-tree, so escalation must reach the human
+    # Trek owner, not another AI session.
+    leader_halt_escalations: list[dict] = []
+    for trek_doc in candidate_treks:
+        trek_id = trek_doc.get("trek_id", "")
+        if trek_mod.is_halted(trek_doc):
+            continue
+        fresh = db.get_trek(trek_id)
+        if fresh is not None:
+            trek_doc = fresh
+        halt_info = trek_scheduler_mod.should_fire_leader_halt_escalation(
+            trek_doc, now=now,
+        )
+        if not halt_info:
+            continue
+        scope_project_ids = _resolve_trek_scope_project_ids(trek_doc)
+        if not scope_project_ids:
+            continue
+        target_project_id = scope_project_ids[0]
+        payload = trek_scheduler_mod.build_leader_halt_payload(
+            trek_doc, halt_info=halt_info, now=now,
+        )
+        try:
+            envelope_obj = envelope_mod.issue_t1_system_envelope(
+                project_id=target_project_id,
+                trek_id=trek_id,
+                actions_authorized=["trek.leader_halt_escalation"],
+                data_class="free",
+                ttl_seconds=3600,
+            )
+        except ValueError:
+            envelope_obj = None
+        bus_data = {
+            "channel": "notify",
+            "sender_session_id": "",
+            "payload": payload,
+            "envelope": envelope_obj,
+            "delivery": "notify-user-only",
+            "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        }
+        try:
+            event_id = db.append_bus_event(target_project_id, bus_data)
+        except Exception:
+            continue
+        meta = trek_doc.setdefault("meta", {})
+        meta["last_leader_halt_escalation_at"] = now.strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+        )
+        trek_doc["updated_at"] = trek_mod.utcnow_iso()
+        try:
+            db.save_trek(trek_id, trek_doc)
+        except Exception:
+            continue
+        leader_halt_escalations.append({
+            "trek_id": trek_id,
+            "project_id": target_project_id,
+            "event_id": event_id,
+            "waited_minutes": payload.get("waited_minutes"),
+        })
+
     # ms-75 / e-2067: auto-stall pass. Independent of cadence-fire because
     # the safety net must fire whenever a working task crosses its TTL —
     # regardless of whether the trek's progress-check is due this tick.
@@ -10060,6 +10125,7 @@ def trek_scheduler_tick_endpoint(
         "due": len(due_treks),
         "fired": fired,
         "escalations": escalations,
+        "leader_halt_escalations": leader_halt_escalations,
         "auto_stalled": auto_stalled,
         "errors": errors,
         "quiesced": quiesced,

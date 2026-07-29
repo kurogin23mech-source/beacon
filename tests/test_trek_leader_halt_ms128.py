@@ -118,3 +118,55 @@ def test_legacy_done_migrated_not_counted_as_leader_review():
     assert r is not None
     assert r["oldest_task_id"] == "e-2"   # only the migrated leader_review
     assert r["queue_size"] == 1
+
+
+# --- chunk 2: escalation helpers -------------------------------------------
+
+import trek_scheduler as _sched  # noqa: E402
+
+
+def _active_trek(states, *, meta=None):
+    d = {"trek_id": "tk-x", "status": "active", "leader_session_id": "sv-lead",
+         "task_states": states}
+    if meta:
+        d["meta"] = meta
+    return d
+
+
+def test_should_fire_returns_halt_info_when_stalled():
+    doc = _active_trek({"e-1": {"state": "leader_review", "updated_at": _OLD}})
+    hi = _sched.should_fire_leader_halt_escalation(doc, now=_NOW)
+    assert hi is not None
+    assert hi["reason"] == trek.HALT_REASON_LEADER_REVIEW_STALL
+
+
+def test_should_fire_none_when_not_stalled():
+    doc = _active_trek({"e-1": {"state": "leader_review", "updated_at": _RECENT}})
+    assert _sched.should_fire_leader_halt_escalation(doc, now=_NOW) is None
+
+
+def test_cooldown_suppresses_recent_refire():
+    doc = _active_trek(
+        {"e-1": {"state": "leader_review", "updated_at": _OLD}},
+        meta={"last_leader_halt_escalation_at": "2026-07-29T11:50:00.000000Z"})
+    # 10 min ago < 30 min cooldown → suppressed
+    assert _sched.should_fire_leader_halt_escalation(doc, now=_NOW) is None
+
+
+def test_refire_allowed_after_cooldown():
+    doc = _active_trek(
+        {"e-1": {"state": "leader_review", "updated_at": _OLD}},
+        meta={"last_leader_halt_escalation_at": "2026-07-29T11:00:00.000000Z"})
+    # 60 min ago > 30 min cooldown → allowed
+    assert _sched.should_fire_leader_halt_escalation(doc, now=_NOW) is not None
+
+
+def test_payload_shape_and_transfer_guidance():
+    doc = _active_trek({"e-1": {"state": "leader_review", "updated_at": _OLD}})
+    hi = _sched.should_fire_leader_halt_escalation(doc, now=_NOW)
+    p = _sched.build_leader_halt_payload(doc, halt_info=hi, now=_NOW)
+    assert p["kind"] == "trek-leader-halt-escalation"
+    assert p["waited_minutes"] == 300
+    assert p["oldest_task_id"] == "e-1"
+    assert "transfer-leader" in p["body"]
+    assert p["leader_session_id"] == "sv-lead"

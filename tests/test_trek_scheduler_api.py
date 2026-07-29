@@ -3083,3 +3083,85 @@ def test_welcome_tick_skips_pre_A_member_without_session_id():
     assert welcome_events == [], (
         f"welcome tick must be skipped for pre-A members, got {welcome_events}"
     )
+
+
+# ---------------------------------------------------------------------------
+# ms-128 方針8 (e-4368) — leader-halt escalation on the tick
+# ---------------------------------------------------------------------------
+
+def test_leader_halt_escalation_fires_to_notify_channel():
+    _seed_trek(
+        trek_id="tk-lhalt01",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-83"}],
+        last_at="2026-06-18T00:00:00.000000Z",  # long ago → not the driver
+    )
+    # A leader_review task the leader has ignored for years (>> 4h vs real now).
+    _treks["tk-lhalt01"]["task_states"] = {
+        "e-stale": {"state": "leader_review",
+                    "updated_at": "2020-01-01T00:00:00.000000Z"},
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-lhalt01"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["leader_halt_escalations"]) == 1
+    assert body["leader_halt_escalations"][0]["trek_id"] == "tk-lhalt01"
+
+    events = _bus_events_by_project["beacon-test"]
+    lh = [e for e in events
+          if e.get("payload", {}).get("kind") == "trek-leader-halt-escalation"]
+    assert len(lh) == 1
+    ev = lh[0]
+    assert ev["channel"] == "notify"
+    assert ev["delivery"] == "notify-user-only"
+    assert "transfer-leader" in ev["payload"]["body"]
+    assert ev["payload"]["oldest_task_id"] == "e-stale"
+
+    # meta stamped so the refire cooldown holds next tick.
+    assert _treks["tk-lhalt01"]["meta"]["last_leader_halt_escalation_at"]
+
+
+def test_leader_halt_not_fired_when_queue_fresh():
+    _seed_trek(
+        trek_id="tk-lhalt02",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-83"}],
+    )
+    # No leader_review items → nothing to drain → no leader-halt escalation.
+    _treks["tk-lhalt02"]["task_states"] = {
+        "e-1": {"state": "working", "updated_at": "2020-01-01T00:00:00.000000Z"},
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-lhalt02"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["leader_halt_escalations"] == []
+
+
+def test_leader_halt_skipped_when_halted():
+    _seed_trek(
+        trek_id="tk-lhalt03",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-83"}],
+    )
+    _treks["tk-lhalt03"]["halt"] = {"reason": "paused", "issued_by_session_id": "sv-leader"}
+    _treks["tk-lhalt03"]["task_states"] = {
+        "e-stale": {"state": "leader_review",
+                    "updated_at": "2020-01-01T00:00:00.000000Z"},
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-lhalt03"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["leader_halt_escalations"] == []

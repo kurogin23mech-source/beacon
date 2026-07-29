@@ -988,6 +988,102 @@ def build_idle_escalation_payload(
 
 
 # ---------------------------------------------------------------------------
+# ms-128 方針8 (e-4368) — leader halt escalation.
+#
+# 既存 idle-escalation は「実行セッションの pulse」基準で trek 全体の沈黙を捕まえ
+# るが、実行が活発なのにリーダーだけ寝ているケースは捕まえられない。leader halt
+# 検知 (trek.evaluate_leader_halt = leader_review キューの最古 item が threshold
+# 超えて未消化) を、idle-escalation と同じ notify-user-only の refire-cooldown 付き
+# escalation に載せる。倒す先は Trek 発注者 (= 人間 user)。別 AI (= 気絶したリーダー
+# 自身や他 executor) に投げても番犬にならないため (motivation: 気絶した人に助けを
+# 呼べと言うのと同じ)。
+# ---------------------------------------------------------------------------
+
+
+def get_last_leader_halt_escalation_at(
+    trek_doc: dict,
+) -> Optional[datetime.datetime]:
+    """Return the trek's last leader-halt escalation fire time, or None."""
+    meta = trek_doc.get("meta") or {}
+    return _parse_iso(meta.get("last_leader_halt_escalation_at", ""))
+
+
+def should_fire_leader_halt_escalation(
+    trek_doc: dict,
+    *,
+    now: datetime.datetime,
+    stall_timeout_minutes: Optional[int] = None,
+    refire_cooldown_minutes: int = ESCALATION_REFIRE_COOLDOWN_MINUTES,
+) -> Optional[dict]:
+    """Return leader-halt info to escalate, or None (with refire cooldown).
+
+    Wraps ``trek.evaluate_leader_halt`` (the pure detector) with the same
+    refire-cooldown discipline idle-escalation uses, so the user isn't flooded
+    with the same leader-halt notice every tick. Returns the halt_info dict when
+    an escalation should fire this tick, else None. Missing trek module / detector
+    (old repo) → None (fail-safe, never blocks the tick).
+    """
+    trek_mod = _import_trek()
+    if trek_mod is None or not hasattr(trek_mod, "evaluate_leader_halt"):
+        return None
+    kwargs = {}
+    if stall_timeout_minutes is not None:
+        kwargs["stall_timeout_minutes"] = stall_timeout_minutes
+    halt_info = trek_mod.evaluate_leader_halt(trek_doc, now=now, **kwargs)
+    if not halt_info:
+        return None
+    last_fire = get_last_leader_halt_escalation_at(trek_doc)
+    if last_fire is not None:
+        now_u = _ensure_utc(now)
+        last_u = _ensure_utc(last_fire)
+        if (now_u - last_u) < datetime.timedelta(
+                minutes=refire_cooldown_minutes):
+            return None
+    return halt_info
+
+
+def build_leader_halt_payload(
+    trek_doc: dict,
+    *,
+    halt_info: dict,
+    now: Optional[datetime.datetime] = None,
+) -> dict:
+    """Render the leader-halt escalation payload for the notify channel (方針8).
+
+    Pure. The user sees "リーダーがレビューを N 分捌いていない、transfer-leader で
+    復旧を" without querying further. Includes the transfer-leader remediation so
+    the escalation points at an executable recovery (not a dead-end).
+    """
+    now = _ensure_utc(now or datetime.datetime.now(datetime.timezone.utc))
+    trek_id = trek_doc.get("trek_id", "")
+    leader_session = halt_info.get("leader_session_id") \
+        or trek_doc.get("leader_session_id", "")
+    waited = int(halt_info.get("waited_minutes") or 0)
+    oldest = halt_info.get("oldest_task_id", "")
+    queue_size = int(halt_info.get("queue_size") or 0)
+    body = (
+        f"[Trek リーダー halt] trek={trek_id} leader_session={leader_session} が "
+        f"レビュー待ちキューを {waited} 分消化していません "
+        f"(最古={oldest}、キュー {queue_size} 件)。リーダーが停滞しています。"
+        f"実行セッションは継続しますが成果が leader_review に溜まり続けます "
+        f"(= graceful degradation)。生存する実行セッションへ "
+        f"`beacon trek transfer-leader {trek_id} <live-session>` でリーダー役を "
+        f"移譲して復旧してください (溜まったキューは新リーダーが引き継ぎます)。"
+    )
+    return {
+        "trek_id": trek_id,
+        "leader_session_id": leader_session,
+        "kind": "trek-leader-halt-escalation",
+        "body": body,
+        "reason": halt_info.get("reason", ""),
+        "oldest_task_id": oldest,
+        "waited_minutes": waited,
+        "queue_size": queue_size,
+        "created_at": now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+    }
+
+
+# ---------------------------------------------------------------------------
 # DM payload generation (e-1998)
 # ---------------------------------------------------------------------------
 
