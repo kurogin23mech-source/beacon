@@ -240,17 +240,22 @@ def default_prospect_phase(data: dict) -> str:
 # Attack-list bulk-send batch (ms-132 e-4504) — the structural anchor for the
 # human 1-confirm gate on external outreach.
 #
-# A bulk external send goes: plan (pending) → authorize (human-only) → record
-# per recipient (requires authorized). The invariants this model enforces:
-#   - a recipient's send is *recordable* only inside an AUTHORIZED batch, and
-#   - authorization flips pending→authorized only via the CLI verb that is
-#     ``_refuse_if_bus_origin``-gated (no bus / DM / auto-execute context can
-#     authorize).
+# A bulk external send goes: plan (pending) → authorize (confirm) → record per
+# recipient (requires authorized). The invariants this model enforces:
+#   - a recipient's send is *recordable* only inside an AUTHORIZED batch;
+#   - authorization flips pending→authorized only via the CLI verb that refuses a
+#     bus / DM / auto-execute origin AND an *armed* (autonomous) session — so no
+#     no-human-in-loop context authorizes. (This does NOT prove a human typed the
+#     command: in an agentic system the AI operates the CLI on the human's behalf.
+#     A dialog AI acting on its human's instruction is the intended operator; the
+#     Skill's explicit confirm step + the ``authorized_by`` audit cover it.)
+#   - a record's message must digest to the confirmed 文面 (bind confirmed↔sent).
 # So a prospect row's 未接触→連絡済 transition and its outbound 証跡 are reachable
-# ONLY through a human-authorized batch — confirm 前は 1 通も『記録』されない
-# (SPEC 方針4). The transport itself (MCP Gmail) is Skill-level and uncontrollable
-# from here; a rogue direct send leaves ZERO batch/証跡/phase record, i.e. a
-# detectable anomaly rather than a silent success.
+# ONLY through an authorized batch and only for the confirmed content — confirm 前
+# は 1 通も『記録』されない (SPEC 方針4). The transport itself (MCP Gmail) is
+# Skill-level and uncontrollable from here; a rogue direct send leaves ZERO
+# batch/証跡/phase record — silent in Beacon's ledger, detectable only by
+# reconciling the Gmail sent-box (a follow-up detection Operation, out of scope).
 # ---------------------------------------------------------------------------
 
 SEND_BATCH_PENDING = "pending"

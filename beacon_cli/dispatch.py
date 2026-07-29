@@ -522,6 +522,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_acq_sendrec.add_argument("doc_id", nargs="?", default="")
     p_acq_sendrec.add_argument("acc_id", nargs="?", default="")
     p_acq_sendrec.add_argument("--message-id", dest="message_id", default="")
+    p_acq_sendrec.add_argument("--message", default="")
+    p_acq_sendrec.add_argument("--message-file", dest="message_file", default="")
     p_acq_sendrec.add_argument("--url", default="")
     p_acq_sendrec.add_argument("--subject", default="")
     p_acq_sendrec.add_argument("--json", action="store_true")
@@ -2354,8 +2356,17 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
                   '<attack-list-doc-id> <acc-id> --message-id <id> '
                   '[--url <permalink>] [--subject <s>] [--json]')
             return 1
+        rec_message = args.message or ""
+        if args.message_file and not rec_message:
+            try:
+                with open(args.message_file, encoding="utf-8") as f:
+                    rec_message = f.read()
+            except OSError as e:
+                print(f"Error: --message-file 読み込み失敗: {e}")
+                return 1
         env = {"BEACON_DOC_ID": args.doc_id, "BEACON_SEND_ACC_ID": args.acc_id,
                "BEACON_SEND_MESSAGE_ID": args.message_id or "",
+               "BEACON_SEND_MESSAGE": rec_message,
                "BEACON_SEND_URL": args.url or "",
                "BEACON_SEND_SUBJECT": args.subject or "",
                "BEACON_JSON": "1" if args.json else ""}

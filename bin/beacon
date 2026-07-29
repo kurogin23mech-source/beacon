@@ -1405,7 +1405,10 @@ cmd_acquisition_attack_list_send() {
         exit 1
     fi
     if [ -n "$msgfile" ] && [ -z "$message" ]; then
-        message="$(cat "$msgfile" 2>/dev/null)"
+        if ! message="$(cat "$msgfile")"; then
+            echo "Error: --message-file 読み込み失敗: $msgfile" >&2
+            exit 1
+        fi
     fi
     BEACON_DOC_ID="$doc_id" BEACON_SEND_SUBJECT="$subject" BEACON_SEND_MESSAGE="$message" \
         BEACON_SEND_FROM_PHASE="$fromphase" BEACON_SEND_LIMIT="$limit" \
@@ -1415,25 +1418,34 @@ cmd_acquisition_attack_list_send() {
 
 cmd_acquisition_attack_list_send_record() {
     # ms-132 e-4504 — 承認済バッチ内の1送信を記録(証跡+行 未接触→連絡済)。authorized 必須。
+    # --message/--message-file は送信した文面で、承認時の文面と digest 照合する。
     ensure_project
-    local doc_id="" acc_id="" msgid="" url="" subject="" json=""
+    local doc_id="" acc_id="" msgid="" url="" subject="" message="" msgfile="" json=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --message-id) msgid="${2:-}"; shift 2 ;;
-            --url)        url="${2:-}"; shift 2 ;;
-            --subject)    subject="${2:-}"; shift 2 ;;
-            --json)       json="1"; shift ;;
-            -?*) _guard_positional "$1" "Usage: beacon acquisition attack-list-send-record <attack-list-doc-id> <acc-id> --message-id <id> [--url <permalink>] [--subject <s>] [--json]" ;;
+            --message-id)   msgid="${2:-}"; shift 2 ;;
+            --url)          url="${2:-}"; shift 2 ;;
+            --subject)      subject="${2:-}"; shift 2 ;;
+            --message)      message="${2:-}"; shift 2 ;;
+            --message-file) msgfile="${2:-}"; shift 2 ;;
+            --json)         json="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon acquisition attack-list-send-record <attack-list-doc-id> <acc-id> --message-id <id> [--message-file <f>|--message <body>] [--subject <s>] [--url <permalink>] [--json]" ;;
             *)   if [ -z "$doc_id" ]; then doc_id="$1"; else acc_id="$1"; fi; shift ;;
         esac
     done
     if [ -z "$doc_id" ] || [ -z "$acc_id" ]; then
-        echo "Usage: beacon acquisition attack-list-send-record <attack-list-doc-id> <acc-id> --message-id <id> [--url <permalink>] [--subject <s>] [--json]"
+        echo "Usage: beacon acquisition attack-list-send-record <attack-list-doc-id> <acc-id> --message-id <id> [--message-file <f>|--message <body>] [--subject <s>] [--url <permalink>] [--json]"
         exit 1
     fi
+    if [ -n "$msgfile" ] && [ -z "$message" ]; then
+        if ! message="$(cat "$msgfile")"; then
+            echo "Error: --message-file 読み込み失敗: $msgfile" >&2
+            exit 1
+        fi
+    fi
     BEACON_DOC_ID="$doc_id" BEACON_SEND_ACC_ID="$acc_id" BEACON_SEND_MESSAGE_ID="$msgid" \
-        BEACON_SEND_URL="$url" BEACON_SEND_SUBJECT="$subject" BEACON_JSON="$json" \
-        python3 "$COMMANDS_PY" acquisition_attack_list_send_record
+        BEACON_SEND_URL="$url" BEACON_SEND_SUBJECT="$subject" BEACON_SEND_MESSAGE="$message" \
+        BEACON_JSON="$json" python3 "$COMMANDS_PY" acquisition_attack_list_send_record
 }
 
 cmd_account_rename() {

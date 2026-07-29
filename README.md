@@ -289,7 +289,7 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon acquisition attack-lists <acq-id> [--json]` | List a 顧客獲得ターゲット's アタックリスト with per-phase counts / 施策配下のアタックリスト一覧 (ms-132) |
 | `beacon acquisition attack-list-fill <doc-id> [--account-phase <name>] [--assignee <user>] [--name-contains <s>] [--limit <n>] [--dry-run] [--json]` | Bulk-register 未接触 Accounts matching a query into an アタックリスト (dedup, --dry-run) / 条件一致の未接触顧客を一括登録 (ms-132) |
 | `beacon acquisition attack-list-send <doc-id> [--subject <s>] [--message-file <f>] [--message <body>] [--from-phase <name>] [--limit <n>] [--confirm] [--json]` | Plan a bulk outreach (dry-run); --confirm = the single human authorization (bus-refused). Send is Skill-driven / 一括連絡の計画と人間承認 (ms-132 承認境界) |
-| `beacon acquisition attack-list-send-record <doc-id> <acc-id> --message-id <id> [--url <permalink>] [--subject <s>] [--json]` | Record one sent email inside an authorized batch: 証跡 + row 未接触→連絡済 / 承認済バッチの送信を記録 (ms-132) |
+| `beacon acquisition attack-list-send-record <doc-id> <acc-id> --message-id <id> [--message-file <f>] [--message <body>] [--subject <s>] [--url <permalink>] [--json]` | Record one sent email inside an authorized batch (文面 digest must match the confirmed one): 証跡 + row 未接触→連絡済 / 承認済バッチの送信を記録 (ms-132) |
 | `beacon opportunity phase-prob <phase> <n>` | Set a phase win probability (成約率 0-100) / フェーズの成約率を設定 |
 | `beacon sales target <user> <amount> \| list` | Set/list a member's sales quota (目標売上) + weighted pipeline / メンバーの目標売上を設定・一覧 |
 | `beacon opportunity transition-date <opp-id> <YYYY-MM-DD> [--note <text>] \| --clear` | Set the 遷移日 (judgement date) for the current phase / 現フェーズの遷移日（判定予定日）を設定 |

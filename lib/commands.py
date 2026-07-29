@@ -20963,7 +20963,7 @@ def _help_registry():
         {"command": "beacon acquisition attack-lists <acq-id>", "flags": ["--json"], "description": "List a 顧客獲得ターゲット's アタックリスト with per-phase counts (ms-132)"},
         {"command": "beacon acquisition attack-list-fill <doc-id>", "flags": ["--account-phase <name>", "--assignee <user>", "--name-contains <s>", "--limit <n>", "--dry-run", "--json"], "description": "Bulk-register 未接触 Accounts matching a query into an アタックリスト (dedup, --dry-run preview) (ms-132)"},
         {"command": "beacon acquisition attack-list-send <doc-id>", "flags": ["--subject <s>", "--message-file <f>", "--message <body>", "--from-phase <name>", "--limit <n>", "--confirm", "--json"], "description": "Plan (dry-run) a bulk outreach to prospects; --confirm = the single human authorization (bus-refused). Send itself is Skill-driven (ms-132 承認境界)"},
-        {"command": "beacon acquisition attack-list-send-record <doc-id> <acc-id>", "flags": ["--message-id <id>", "--url <permalink>", "--subject <s>", "--json"], "description": "Record one sent email inside an authorized send batch: 証跡 + row 未接触→連絡済 (refuses without authorization) (ms-132)"},
+        {"command": "beacon acquisition attack-list-send-record <doc-id> <acc-id>", "flags": ["--message-id <id>", "--message-file <f>", "--message <body>", "--url <permalink>", "--subject <s>", "--json"], "description": "Record one sent email inside an authorized batch (message digest must match the confirmed 文面): 証跡 + row 未接触→連絡済 (ms-132)"},
         {"command": "beacon opportunity phase-prob <phase> <n>", "flags": [], "description": "Set a phase's 成約率 (win probability 0-100; per-company funnel tuning)"},
         {"command": "beacon sales target <user> <amount>", "flags": [], "description": "Set a member's 目標売上 (sales quota; empty amount clears)"},
         {"command": "beacon sales target list", "flags": ["--json"], "description": "List members' 目標売上 with their 見込み売上 (weighted pipeline)"},
@@ -26652,17 +26652,34 @@ def cmd_acquisition_attack_list_send():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     _USAGE = ("Usage: beacon acquisition attack-list-send <attack-list-doc-id> "
               "[--subject <s>] [--message-file <f> | --message <body>] "
-              "[--from-phase <name>] [--limit N] [--confirm] [--json]")
+              "[--from-phase <name>] [--limit N] [--confirm] [--json]\n"
+              "  既定=計画のみ(dry-run、送信も記録もしない、直前の pending 計画は上書き)。"
+              "--confirm で人間が1回承認 (bus/armed からは不可)。送信自体は Skill が行う。")
     if not doc_id:
         print("Error: doc-id required\n" + _USAGE, file=sys.stderr)
         sys.exit(1)
 
     if confirm:
         # ---- authorize the pending batch = the single human confirm ----------
-        # bus-refused: an autonomous / DM / auto-execute context can never reach
-        # here, so authorization is structurally human-only (SPEC 方針4).
+        # Two structural refusals so no *autonomous* context authorizes a bulk
+        # external send (SPEC 方針4). This does NOT prove a human typed the
+        # command — in an agentic system the AI operates the CLI — but it closes
+        # the paths where no human is in the loop at all:
+        #   (1) bus / DM / auto-execute origin (BEACON_BUS_ORIGIN);
+        #   (2) an *armed* session (a budget grant = autonomous DM-reply mode).
+        #       Arming grants auto-reply budget, NOT bulk-send authorization, so a
+        #       per-batch human confirm is still required in armed mode.
+        # The remaining case (a dialog AI acting on its human's instruction) is
+        # the intended operator; the Skill's explicit human-confirm step and the
+        # ``authorized_by`` audit trail cover it (philosophy review PR #550).
         if _refuse_if_bus_origin("acquisition_attack_list_send_confirm",
                                  {"doc_id": doc_id}):
+            sys.exit(1)
+        if _read_bus_budget() is not None:
+            print("Error: このセッションは armed (自律 DM 応答モード) です。"
+                  "一括連絡の承認は arming とは別に、対話でその都度 人間が行う必要が"
+                  "あります。`beacon bus budget` を落としてから承認してください。",
+                  file=sys.stderr)
             sys.exit(1)
         data = load_project()
         batch = (sales_entities.pending_send_batch_for_doc(data, doc_id)
@@ -26742,6 +26759,8 @@ def cmd_acquisition_attack_list_send():
         route = None
     from_email = (route or {}).get("email", "")
 
+    superseded = sales_entities.pending_send_batch_for_doc(data, doc_id)
+    superseded_id = superseded["id"] if superseded else None
     batch = sales_entities.create_send_batch(
         data, doc_id=doc_id, recipients=recipients, message_digest=digest,
         message_preview=preview, created_at=_now_iso(), created_by=_actor_str())
@@ -26750,13 +26769,20 @@ def cmd_acquisition_attack_list_send():
     if json_mode:
         print(json.dumps({
             "doc_id": doc_id, "batch_id": batch["id"], "status": "pending",
+            # ``authorized`` is the self-describing not-yet-confirmed flag: a
+            # reader must not mistake status=pending for "queued to send" (AX
+            # review PR #550). Nothing sends/records until authorized == true.
+            "authorized": False,
             "from_phase": from_phase, "recipient_count": len(recipients),
             "recipients": [{"acc_id": r["acc_id"], "email": r["email"]}
                            for r in recipients],
             "skipped_no_email": no_email, "subject": subject,
-            "message_digest": digest, "from_email": from_email}, ensure_ascii=False))
+            "message_digest": digest, "from_email": from_email,
+            "superseded_batch": superseded_id}, ensure_ascii=False))
         return
     print(f"[送信計画 dry-run] batch {batch['id']} / {doc_id}")
+    if superseded_id:
+        print(f"  (直前の pending 計画 {superseded_id} を上書きしました)")
     print(f"  差出人: {from_email or '(未設定 — 送信時に Skill が identity を解決)'}")
     print(f"  対象フェーズ: {from_phase} / 宛先 {len(recipients)} 件"
           + (f" / email 無しで除外 {len(no_email)} 件" if no_email else ""))
@@ -26776,13 +26802,20 @@ def cmd_acquisition_attack_list_send_record():
     e-4504): drive the prospect row 未接触→連絡済, write the outbound Communication
     (証跡) on the Account, and mark the recipient sent.
 
-    Refuses unless the doc has an authorized batch containing this Account
-    (``sales_entities.record_batch_send``) — the recorded effect of a send is
-    structurally unreachable without the human confirm. Idempotent: a recipient
-    already booked is refused (no double-send record).
-    Env: BEACON_DOC_ID, BEACON_SEND_ACC_ID, BEACON_SEND_MESSAGE_ID,
-    BEACON_SEND_URL, BEACON_SEND_SUBJECT, BEACON_JSON.
+    Refuses unless the doc has an authorized batch containing this Account, and
+    (when the batch carries a digest) unless the message actually sent matches the
+    one the human confirmed — the recorded effect of a send is structurally
+    unreachable without the human confirm, and bound to the confirmed 文面.
+    Idempotent: a recipient already booked is refused (no double-send record).
+
+    The 証跡 (project.json) and the row phase-drive (table-doc) are two stores; the
+    phase-drive is done FIRST as a precondition and a failure aborts loudly (exit
+    1) — project.json is saved LAST so a phase-drive failure leaves neither store
+    changed (maintainability/philosophy review PR #550).
+    Env: BEACON_DOC_ID, BEACON_SEND_ACC_ID, BEACON_SEND_MESSAGE_ID (required),
+    BEACON_SEND_URL, BEACON_SEND_SUBJECT, BEACON_SEND_MESSAGE, BEACON_JSON.
     """
+    import hashlib
     import attack_list
     import table_doc
     import table_type
@@ -26792,39 +26825,59 @@ def cmd_acquisition_attack_list_send_record():
     message_id = os.environ.get("BEACON_SEND_MESSAGE_ID", "")
     url = os.environ.get("BEACON_SEND_URL", "")
     subject = os.environ.get("BEACON_SEND_SUBJECT", "")
+    message = os.environ.get("BEACON_SEND_MESSAGE", "")
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    _USAGE = ("Usage: beacon acquisition attack-list-send-record "
+              "<attack-list-doc-id> <acc-id> --message-id <id> "
+              "[--message-file <f>|--message <body>] [--subject <s>] "
+              "[--url <permalink>] [--json]")
     if not doc_id or not acc_id:
-        print("Usage: beacon acquisition attack-list-send-record "
-              "<attack-list-doc-id> <acc-id> --message-id <id> [--url <permalink>] "
-              "[--subject <s>] [--json]", file=sys.stderr)
+        print(_USAGE, file=sys.stderr)
+        sys.exit(1)
+    # --message-id is the RFC822 trace ref; without it the 証跡 loses its origin
+    # pointer, so require it rather than silently record an empty ref (AX review).
+    if not message_id.strip():
+        print("Error: --message-id は必須です "
+              "(MCP send_email の戻り値の message-id を渡してください)", file=sys.stderr)
         sys.exit(1)
 
     data = load_project()
-    # Structural gate: only recordable inside an authorized batch with this acc.
-    try:
-        rec = sales_entities.record_batch_send(
-            data, doc_id, acc_id, at=_now_iso(), message_id=message_id)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
+    batch = sales_entities.authorized_send_batch_for_doc(data, doc_id)
+    if batch is None:
+        print(f"Error: {doc_id} に authorized な送信バッチがありません "
+              f"(先に `beacon acquisition attack-list-send {doc_id} --confirm` で"
+              f"人間が承認する必要があります)", file=sys.stderr)
         sys.exit(1)
-    # 証跡: outbound email Communication on the Account.
-    try:
-        comm_id = sales_entities.communication_add(
-            data, acc_id, subject or f"アタックリスト一括連絡 ({doc_id})",
-            direction="outbound", channel="email",
-            source=({"ref": message_id, "url": url} if (message_id or url) else None),
-            occurred_at=_now_iso(), created_at=_now_iso())
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
+    rec = sales_entities.batch_recipient(batch, acc_id)
+    if rec is None:
+        print(f"Error: {acc_id} は承認済みバッチ {batch['id']} の宛先ではありません",
+              file=sys.stderr)
         sys.exit(1)
-    rec["comm_id"] = comm_id
-    save_project(data)
+    if rec.get("sent_at"):
+        print(f"Error: {acc_id} は既にバッチ {batch['id']} で送信記録済みです",
+              file=sys.stderr)
+        sys.exit(1)
+    # Bind confirmed↔sent: the message actually sent must digest to what the human
+    # confirmed at plan time (philosophy review PR #550 — otherwise the 文面 could
+    # be swapped after confirm and still record as a legitimate send).
+    expected_digest = batch.get("message_digest") or ""
+    if expected_digest:
+        if not message.strip():
+            print("Error: 送信した文面 (--message-file / --message) を渡して"
+                  "承認時の文面と照合してください", file=sys.stderr)
+            sys.exit(1)
+        got = hashlib.sha256((subject + "\n" + message).encode("utf-8")).hexdigest()
+        if got != expected_digest:
+            print("Error: 送信した文面が承認時の文面と一致しません "
+                  "(承認された文面のみ送信・記録できます)", file=sys.stderr)
+            sys.exit(1)
 
-    # Drive the prospect row 未接触→連絡済 (first → second phase of the list funnel).
+    # Phase-drive FIRST (precondition). A no-op (row not at the funnel entry) is
+    # fine; a real write failure aborts before any project.json is saved.
     _content, title, model = _load_table_model(doc_id)
     table_type.install()
-    row_id = rec.get("row_id", "")
     target_row = None
+    row_id = rec.get("row_id", "")
     for row in table_doc.active_rows(model):
         if (row_id and row.get("id") == row_id) or (
                 not row_id and row.get("cells", {}).get(
@@ -26842,8 +26895,25 @@ def cmd_acquisition_attack_list_send_record():
                                    vals[1], actor=_actor_str(), at=_now_iso())
                 _write_table_model(doc_id, title, _content, model)
                 driven_to = vals[1]
-            except table_doc.TableDocError:
-                driven_to = None
+            except table_doc.TableDocError as exc:
+                print(f"Error: 行フェーズの前進に失敗しました ({exc})。"
+                      f"証跡は記録していません。", file=sys.stderr)
+                sys.exit(1)
+
+    # Now book the 証跡 + mark the recipient sent, and save project.json LAST.
+    try:
+        sales_entities.record_batch_send(data, doc_id, acc_id, at=_now_iso(),
+                                         message_id=message_id)
+        comm_id = sales_entities.communication_add(
+            data, acc_id, subject or f"アタックリスト一括連絡 ({doc_id})",
+            direction="outbound", channel="email",
+            source={"ref": message_id, "url": url},
+            occurred_at=_now_iso(), created_at=_now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    sales_entities.batch_recipient(batch, acc_id)["comm_id"] = comm_id
+    save_project(data)
 
     if json_mode:
         print(json.dumps({"doc_id": doc_id, "acc_id": acc_id, "comm_id": comm_id,

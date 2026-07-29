@@ -108,9 +108,11 @@ beacon acquisition attack-list-send "$DOC" --subject "$SUBJECT" --message-file /
 beacon acquisition attack-list-send "$DOC" --confirm
 ```
 
-これが承認バッチを `authorized` にする**唯一の人間ゲート**。bus / 自動実行から起動された
-文脈ではこのコマンドは拒否される (persistence poisoning defense) ため、**この Skill を
-人間が対話で動かしている時にしか承認は成立しない**。
+これが承認バッチを `authorized` にする**人間ゲート**。bus / DM / 自動実行から起動された
+文脈、および **armed (自律 DM 応答モード) のセッション**では拒否される (arming は一括送信の
+承認を含まない)。つまり **人間が居ないループからは承認できない**。対話セッションの AI が
+人間の指示で動かすのが正規経路で、その最終的な人間確認は Step 4 の提示に対するユーザーの
+明示 OK が担う (この Skill の人間確認ステップを飛ばさないこと)。
 
 ## Step 6: 送信 + 記録 (宛先ごとにループ)
 
@@ -121,10 +123,13 @@ Step 4 の `recipients` の各 `{acc_id, email}` について、順に:
    返ってきた RFC822 Message-ID を `$MID` として控える。
 2. **記録** (証跡 + 行フェーズ前進):
    ```bash
-   beacon acquisition attack-list-send-record "$DOC" <acc-id> --message-id "$MID" --subject "$SUBJECT"
+   beacon acquisition attack-list-send-record "$DOC" <acc-id> --message-id "$MID" --subject "$SUBJECT" --message-file /tmp/outreach_body.txt
    ```
-   これは **承認済みバッチにその宛先が居る時だけ**成功し、Account に outbound の証跡を残し、
-   対応する行を **未接触→連絡済** に進める。承認前・非対象・二重送信は拒否される。
+   **承認時と同じ文面ファイルを渡す**こと (`--message-file`)。CLI はその文面を承認済み
+   バッチの digest と照合し、一致した時だけ記録する (承認した文面と違うものを送って記録
+   することはできない)。承認済みバッチにその宛先が居る時だけ成功し、Account に outbound の
+   証跡を残し、対応する行を **未接触→連絡済** に進める。承認前・非対象・二重送信・文面不一致・
+   message-id 欠落はすべて拒否される。
 3. 送信が失敗した宛先は記録もされない (バッチには pending のまま残る)。エラーを控えて次へ。
 
 **送信ループの前に必ず Step 5 の承認が済んでいること。** 承認なしに `send_email` を呼んで

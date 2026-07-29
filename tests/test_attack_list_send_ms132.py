@@ -132,10 +132,15 @@ def _capture(monkeypatch, fn):
     return json.loads(buf.getvalue())
 
 
-def _plan(monkeypatch, capsys, doc_id, **flags):
+_SUBJ = "初回連絡"
+_MSG = "はじめまして、ご提案があります。"
+
+
+def _plan(monkeypatch, capsys, doc_id, subject=_SUBJ, message=_MSG, **flags):
     _clear(monkeypatch)
     monkeypatch.setenv("BEACON_DOC_ID", doc_id)
-    monkeypatch.setenv("BEACON_SEND_MESSAGE", flags.pop("message", "こんにちは"))
+    monkeypatch.setenv("BEACON_SEND_SUBJECT", subject)
+    monkeypatch.setenv("BEACON_SEND_MESSAGE", message)
     monkeypatch.setenv("BEACON_JSON", "1")
     for k, v in flags.items():
         monkeypatch.setenv(k, str(v))
@@ -191,20 +196,39 @@ def _confirm(monkeypatch, doc_id):
     commands.cmd_acquisition_attack_list_send()
 
 
-def _record(monkeypatch, capsys, doc_id, acc_id, mid="m1"):
+def _record(monkeypatch, capsys, doc_id, acc_id, mid="m1",
+            subject=_SUBJ, message=_MSG):
     _clear(monkeypatch)
     monkeypatch.setenv("BEACON_DOC_ID", doc_id)
     monkeypatch.setenv("BEACON_SEND_ACC_ID", acc_id)
     monkeypatch.setenv("BEACON_SEND_MESSAGE_ID", mid)
+    monkeypatch.setenv("BEACON_SEND_SUBJECT", subject)
+    monkeypatch.setenv("BEACON_SEND_MESSAGE", message)
     monkeypatch.setenv("BEACON_JSON", "1")
     commands.cmd_acquisition_attack_list_send_record()
     return json.loads(capsys.readouterr().out)
 
 
+def test_confirm_is_refused_when_armed(outreach_cwd, monkeypatch, capsys):
+    # An armed (autonomous DM-reply) session must not authorize a bulk send:
+    # arming grants auto-reply budget, not blanket send authorization.
+    cwd, doc_id = outreach_cwd
+    _plan(monkeypatch, capsys, doc_id)
+    monkeypatch.setattr(commands, "_read_bus_budget",
+                        lambda: {"total": 5, "used": 0})
+    _clear(monkeypatch)
+    monkeypatch.setenv("BEACON_DOC_ID", doc_id)
+    monkeypatch.setenv("BEACON_CONFIRM", "1")
+    with pytest.raises(SystemExit) as ei:
+        commands.cmd_acquisition_attack_list_send()
+    assert ei.value.code == 1
+    assert se.pending_send_batch_for_doc(_read(cwd), doc_id) is not None  # still pending
+
+
 def test_happy_path_confirm_then_record_drives_phase_and_records_証跡(
         outreach_cwd, monkeypatch, capsys):
     cwd, doc_id = outreach_cwd
-    _plan(monkeypatch, capsys, doc_id, **{"BEACON_SEND_SUBJECT": "初回連絡"})
+    _plan(monkeypatch, capsys, doc_id)
     _confirm(monkeypatch, doc_id)
     capsys.readouterr()
     out = _record(monkeypatch, capsys, doc_id, "acc-1", mid="msg-123")
@@ -216,6 +240,28 @@ def test_happy_path_confirm_then_record_drives_phase_and_records_証跡(
     assert len(comms) == 1
     assert comms[0]["direction"] == "outbound" and comms[0]["channel"] == "email"
     assert comms[0]["source"]["ref"] == "msg-123"
+
+
+def test_record_requires_message_id(outreach_cwd, monkeypatch, capsys):
+    cwd, doc_id = outreach_cwd
+    _plan(monkeypatch, capsys, doc_id)
+    _confirm(monkeypatch, doc_id)
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as ei:
+        _record(monkeypatch, capsys, doc_id, "acc-1", mid="")  # missing message-id
+    assert ei.value.code == 1
+
+
+def test_record_refuses_content_mismatch(outreach_cwd, monkeypatch, capsys):
+    # The recorded send's 文面 must match the confirmed one (digest bind).
+    cwd, doc_id = outreach_cwd
+    _plan(monkeypatch, capsys, doc_id)
+    _confirm(monkeypatch, doc_id)
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as ei:
+        _record(monkeypatch, capsys, doc_id, "acc-1", message="別の文面にすり替え")
+    assert ei.value.code == 1
+    assert not any(a.get("communications") for a in _read(cwd)["accounts"])
 
 
 def test_record_double_send_refused_via_cli(outreach_cwd, monkeypatch, capsys):
@@ -233,7 +279,7 @@ def test_plan_excludes_rows_without_email(outreach_cwd, monkeypatch, capsys):
     cwd, doc_id = outreach_cwd
     # add a 3rd account with NO contact email, and put it on the list
     data = _read(cwd)
-    aid = se.account_add(data, "未C", phase="未接触")  # acc-3, no contacts
+    se.account_add(data, "未C", phase="未接触")  # acc-3, no contacts
     _write(cwd, data)
     _clear(monkeypatch)
     monkeypatch.setenv("BEACON_DOC_ID", doc_id)
