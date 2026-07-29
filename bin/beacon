@@ -4427,6 +4427,73 @@ except ValueError as e:
                 BEACON_TREK_STATE="$state" BEACON_TREK_NOTE="$note" \
                     python3 "$COMMANDS_PY" trek_task_state
                 ;;
+            # ms-128 方針4 / e-4365 — leader が依存 (blocker) を張る。TARGET が
+            # 各 --on <blocker> に依存する = blocker が取り込み済みになるまで
+            # TARGET を block する。循環・自己ブロックは server/lib が拒否。
+            block)
+                shift 2
+                trek_id="" target_id="" note="" onblockers=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --on)
+                            if [[ -z "$onblockers" ]]; then onblockers="${2:-}"
+                            else onblockers="${onblockers}"$'\n'"${2:-}"
+                            fi
+                            shift 2 ;;
+                        --note) note="${2:-}"; shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *)
+                            if [[ -z "$trek_id" ]]; then trek_id="$1"
+                            elif [[ -z "$target_id" ]]; then target_id="$1"
+                            fi
+                            shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_TREK_TARGET_ID="$target_id" \
+                BEACON_TREK_BLOCKER_IDS="$onblockers" BEACON_TREK_NOTE="$note" \
+                    python3 "$COMMANDS_PY" trek_block
+                ;;
+            # ms-128 方針4 / e-4365 — leader が依存 (blocker) を 1 本外す。循環の
+            # 解消や誤登録の訂正に使う。外した後に reconcile が走り block 状態が
+            # 再整定する (最後の未解決 blocker なら自動再開)。
+            unblock)
+                shift 2
+                trek_id="" target_id="" onblockers=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --on)
+                            if [[ -z "$onblockers" ]]; then onblockers="${2:-}"
+                            else onblockers="${onblockers}"$'\n'"${2:-}"
+                            fi
+                            shift 2 ;;
+                        --json) export BEACON_JSON=1; shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *)
+                            if [[ -z "$trek_id" ]]; then trek_id="$1"
+                            elif [[ -z "$target_id" ]]; then target_id="$1"
+                            fi
+                            shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_TREK_TARGET_ID="$target_id" \
+                BEACON_TREK_BLOCKER_IDS="$onblockers" \
+                    python3 "$COMMANDS_PY" trek_unblock
+                ;;
+            # ms-128 方針4 / e-4365 — 依存待ち (block) の target 一覧 + 循環表示。
+            blockers)
+                shift 2
+                trek_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *) [[ -z "$trek_id" ]] && trek_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" \
+                    python3 "$COMMANDS_PY" trek_blockers
+                ;;
             # ms-95 / e-2308 — TTL safety net deadline 延長 (= leader が Agent
             # subagent dispatch する際の reaffirm 代替)。 --minutes 0 で clear。
             extend-ttl)
@@ -4533,7 +4600,10 @@ except ValueError as e:
                 echo "  kickoff <trek-id> [--session-id X] [--kickoff-dm-event-id Y]  (= Kickoff Ritual 完了 stamp、 /beacon-trek-pulse Step 0.4、 ms-88 e-2138)"
                 echo "  pulse-ack <trek-id> [--picked-choice X] [--note '...'] [--state-summary '...'] [--blocker '...'] [--needs-leader-judgment] [--time-on-task N]  (= /beacon-trek-pulse Skill observability ack、 ms-88 e-2106 + ms-92 e-2165 構造化 payload)"
                 echo "  reconcile <trek-id> [--apply]                  (= task pool ↔ Trek stamp の乖離を修復、 default dry-run、 ms-88 e-2167)"
-                echo "  task-state <trek-id> <task-id> <state> [--note '...']  (= ms-75/e-2048、 state: working|done|waiting-review)"
+                echo "  task-state <trek-id> <task-id> <state> [--note '...']  (= ms-75/e-2048、 state: working|leader_review|user_review)"
+                echo "  block <trek-id> <target-id> --on <blocker-id> [--on ...] [--note '...']  (= leader が依存を張る、 ms-128/e-4365。全依存が取り込み済みで自動再開)"
+                echo "  unblock <trek-id> <target-id> --on <blocker-id>  (= 依存を 1 本外す、 循環解消/誤登録訂正、 ms-128/e-4365)"
+                echo "  blockers <trek-id>                              (= 依存待ちの target 一覧 + 循環表示、 ms-128/e-4365)"
                 echo "  task add <trek-id> --target <pid>:<ms-id> \"<desc>\" [--motivation \"...\"] [--acceptance-criteria \"...\"] [--priority L]  (= cross-project task add via Trek scope、 ms-92/e-2141)"
                 echo ""
                 echo "Env (creator identity, required for 'create'):"

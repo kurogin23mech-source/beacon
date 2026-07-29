@@ -1295,6 +1295,38 @@ class ApiClient:
             {"task_id": task_id, "state": state, "note": note},
         )
 
+    def add_trek_blocker(self, trek_id: str, *, target_id: str,
+                         blocker_target_ids: list, note: str = "") -> dict:
+        """ms-128 方針4 (e-4365) — draw blocker edges target → blockers (atomic).
+
+        Leader-only (= server-side check). Records that ``target_id`` depends on
+        each id in ``blocker_target_ids`` and blocks the target. All edges apply
+        atomically (all-or-nothing) in one request. The server rejects self-blocks
+        + dependency cycles and no-ops an already-satisfied blocker. Returns the
+        updated trek doc.
+        """
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/blocker",
+            {
+                "target_id": target_id,
+                "blocker_target_ids": list(blocker_target_ids),
+                "note": note or "",
+            },
+        )
+
+    def remove_trek_blocker(self, trek_id: str, *, target_id: str,
+                            blocker_target_id: str) -> dict:
+        """ms-128 方針4 (e-4365) — remove a blocker edge and reconcile.
+
+        Leader-only. Drops the ``target_id → blocker_target_id`` edge; the server
+        reconciles the target's block state afterwards. Returns the updated trek
+        doc.
+        """
+        return self.post(
+            f"/api/treks/{urllib.parse.quote(trek_id, safe='')}/unblock",
+            {"target_id": target_id, "blocker_target_id": blocker_target_id},
+        )
+
     def extend_trek_task_ttl(self, trek_id: str, *, task_id: str,
                              minutes: int, reason: str = "") -> dict:
         """ms-95 / e-2308 — Postpone TTL safety net deadline on a task.

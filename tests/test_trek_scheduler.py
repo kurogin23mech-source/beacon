@@ -1204,9 +1204,10 @@ def test_task_state_aggregate_empty_returns_zero_counts_and_todo():
     agg = scheduler.build_task_state_aggregate(t)
     assert agg["counts"] == {
         "leader_review": 0, "done": 0, "user_review": 0,
-        "working": 0, "todo": 0,
+        "working": 0, "todo": 0, "block": 0,
     }
     assert agg["leader_review_queue"] == []
+    assert agg["blocked_queue"] == []
     assert agg["overall_state"] == "todo"
 
 
@@ -1225,7 +1226,7 @@ def test_task_state_aggregate_counts_each_state_bucket():
     # migrate される。done×2 + user_review×1 は user_review=3 に畳まれ done=0。
     assert agg["counts"] == {
         "leader_review": 0, "done": 0, "user_review": 3,
-        "working": 1, "todo": 1,
+        "working": 1, "todo": 1, "block": 0,
     }
     # overall_state: 1 working → "working" wins per AC10 precedence
     assert agg["overall_state"] == "working"
