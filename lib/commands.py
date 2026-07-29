@@ -14149,6 +14149,11 @@ def _read_local_doc(fpath):
         result["operation"] = operation
     if trek_id:
         result["trek_id"] = trek_id
+    # ms-131 e-4494: surface the document format (``table`` vs default markdown)
+    # so table-doc readers (CLI show / Web UI) can branch without re-parsing the
+    # frontmatter. Additive — plain markdown docs omit it and read unchanged.
+    if meta.get("format"):
+        result["format"] = meta["format"]
     # Soft-delete fields surface so cmd_doc_list can filter without
     # re-parsing the frontmatter (ms-14 e-973).
     if meta.get("status"):

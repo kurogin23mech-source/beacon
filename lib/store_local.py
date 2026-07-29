@@ -136,8 +136,8 @@ class LocalStore:
                 "scope": scope,
                 "updated_at": updated_at,
             }
-            for k in ("target", "milestone", "operation", "trek_id", "status",
-                      "trashed_at", "trashed_by", "trash_reason"):
+            for k in ("format", "target", "milestone", "operation", "trek_id",
+                      "status", "trashed_at", "trashed_by", "trash_reason"):
                 if meta.get(k):
                     entry[k] = meta[k]
             results.append(entry)
@@ -180,7 +180,7 @@ class LocalStore:
             "content": content,
             "updated_at": updated_at,
         }
-        for k in ("milestone", "operation", "trek_id", "status",
+        for k in ("format", "milestone", "operation", "trek_id", "status",
                   "trashed_at", "trashed_by", "trash_reason"):
             if meta.get(k):
                 result[k] = meta[k]
