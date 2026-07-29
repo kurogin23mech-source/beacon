@@ -116,3 +116,49 @@ def test_blockers_view_human_readable(trek_env, trek_id):
     assert r.returncode == 0, r.stderr
     assert "ms-A" in r.stdout
     assert "ms-B" in r.stdout
+
+
+# --- review hardening (2026-07-29) -----------------------------------------
+
+def test_block_noop_reports_skipped_not_blocked(trek_env, trek_id):
+    # Satisfy ms-B first, then block ms-A on it → should report skipped, not blocked.
+    _run(trek_env, "task-state", trek_id, "ms-B", "working")
+    _run(trek_env, "task-state", trek_id, "ms-B", "leader_review")
+    r = _run(trek_env, "block", trek_id, "ms-A", "--on", "ms-B")
+    assert r.returncode == 0, r.stderr
+    assert "skipped ms-B" in r.stdout
+    assert "何も張られていません" in r.stdout
+
+
+def test_block_mixed_reports_each_edge(trek_env, trek_id):
+    _run(trek_env, "task-state", trek_id, "ms-B", "working")
+    _run(trek_env, "task-state", trek_id, "ms-B", "leader_review")  # satisfied
+    r = _run(trek_env, "block", trek_id, "ms-A", "--on", "ms-B", "--on", "ms-C")
+    assert r.returncode == 0, r.stderr
+    assert "skipped ms-B" in r.stdout
+    assert "blocked on ms-C" in r.stdout
+
+
+def test_task_state_rejects_block(trek_env, trek_id):
+    r = _run(trek_env, "task-state", trek_id, "ms-A", "block")
+    assert r.returncode != 0
+    assert "beacon trek block" in r.stderr
+
+
+def test_unblock_removes_edge_and_reconciles(trek_env, trek_id):
+    _run(trek_env, "block", trek_id, "ms-A", "--on", "ms-B")
+    r = _run(trek_env, "unblock", trek_id, "ms-A", "--on", "ms-B", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    assert "ms-A" not in (doc.get("target_blockers") or {})
+    # edge-less block reconciles back to todo
+    assert doc["task_states"]["ms-A"]["state"] == "todo"
+
+
+def test_unblock_one_edge_of_two_keeps_block(trek_env, trek_id):
+    _run(trek_env, "block", trek_id, "ms-A", "--on", "ms-B", "--on", "ms-C")
+    r = _run(trek_env, "unblock", trek_id, "ms-A", "--on", "ms-B", "--json")
+    assert r.returncode == 0, r.stderr
+    doc = json.loads(r.stdout)
+    assert doc["target_blockers"]["ms-A"] == ["ms-C"]
+    assert doc["task_states"]["ms-A"]["state"] == "block"  # still waiting on ms-C

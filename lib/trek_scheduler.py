@@ -1232,7 +1232,28 @@ def build_task_state_aggregate(trek_doc: dict) -> dict:
     # field が担う。各 entry に blocker と「まだ満たされていない blocker」を添えて
     # leader が「何待ちか」を polling 無しで読めるようにする。
     blocked_queue: list[dict] = []
-    blockers_ledger = trek_doc.get("target_blockers") or {}
+    # ms-128 方針4 (e-4365) — working 中に依存先が退行した (satisfied 未満に戻った)
+    # target を leader へ届ける surface。reconcile_blocks は「working は yank せず
+    # warning」と判定するが、その warning の配達先が無いと leader digest には
+    # working としか出ず「退行した依存の上で作業中」の危険が silent になる
+    # (AX/保守性レビュー 2026-07-29)。ここで同条件を再計算して digest に載せる。
+    working_regressed_blockers: list[dict] = []
+    # 満了判定と台帳キーは trek.py の正典を import して使う (= 生タプル /
+    # 生文字列を再記述しない、単一真実源。M1/M2 レビュー指摘)。
+    _trek = _import_trek()
+    SATISFIED = tuple(getattr(_trek, "SATISFIED_BLOCKER_STATES",
+                              ("leader_review", "user_review"))) \
+        if _trek else ("leader_review", "user_review")
+    blockers_key = getattr(_trek, "TARGET_BLOCKERS_KEY", "target_blockers") \
+        if _trek else "target_blockers"
+    blockers_ledger = trek_doc.get(blockers_key) or {}
+
+    def _unsatisfied_of(tid):
+        return [
+            b for b in (blockers_ledger.get(tid) or [])
+            if _task_state_of(trek_doc, b, states.get(b) or {}) not in SATISFIED
+        ]
+
     # Build the children list for compute_ms_slot_state in one pass.
     children: list[dict] = []
     for tid, entry in states.items():
@@ -1253,24 +1274,27 @@ def build_task_state_aggregate(trek_doc: dict) -> dict:
             })
         if state == "block":
             blockers = list(blockers_ledger.get(tid) or [])
-            unsatisfied = [
-                b for b in blockers
-                if _task_state_of(trek_doc, b, states.get(b) or {})
-                not in ("leader_review", "user_review")
-            ]
             blocked_queue.append({
                 "task_id": tid,
                 "blockers": blockers,
-                "unsatisfied": unsatisfied,
+                "unsatisfied": _unsatisfied_of(tid),
                 "updated_at": entry.get("updated_at") or "",
             })
+        if state == "working":
+            unsat = _unsatisfied_of(tid)
+            if unsat:
+                working_regressed_blockers.append({
+                    "task_id": tid,
+                    "unsatisfied": unsat,
+                    "updated_at": entry.get("updated_at") or "",
+                })
     # Stable ordering: oldest leader_review first so the leader's eye lands
     # on the one that has been waiting longest (= same intent as the
     # sessions[] sort by time_on_task desc).
     leader_review_queue.sort(key=lambda r: r.get("updated_at") or "")
     blocked_queue.sort(key=lambda r: r.get("updated_at") or "")
+    working_regressed_blockers.sort(key=lambda r: r.get("updated_at") or "")
 
-    _trek = _import_trek()
     _compute = getattr(_trek, "compute_ms_slot_state", None) if _trek else None
     if _compute is not None and children:
         overall_state = _compute(children)
@@ -1295,6 +1319,7 @@ def build_task_state_aggregate(trek_doc: dict) -> dict:
         "counts": counts,
         "leader_review_queue": leader_review_queue,
         "blocked_queue": blocked_queue,
+        "working_regressed_blockers": working_regressed_blockers,
         "overall_state": overall_state,
     }
 
@@ -1481,6 +1506,9 @@ def build_leader_digest_payload(
                 # ms-128 方針4 (e-4365) — degenerate path でも shape 一貫のため出す。
                 "blocked_queue_count": len(task_state_aggregate["blocked_queue"]),
                 "blocker_cycle_count": 0,
+                "working_regressed_blocker_count": len(
+                    task_state_aggregate.get("working_regressed_blockers") or []
+                ),
                 "total_acks_across_sessions": 0,
             },
             "sessions": [],
@@ -1586,6 +1614,10 @@ def build_leader_digest_payload(
         # (方針4)、digest に載せることがリーダーへの一次 escalation surface。
         "blocked_queue_count": len(task_state_aggregate["blocked_queue"]),
         "blocker_cycle_count": len(blocker_cycles),
+        # working 中に依存先が退行した target 数 (= reconcile が warning にした条件)。
+        "working_regressed_blocker_count": len(
+            task_state_aggregate.get("working_regressed_blockers") or []
+        ),
         "total_acks_across_sessions": int(
             summary.get("total_acks_across_sessions") or 0
         ),
@@ -1664,11 +1696,20 @@ def build_leader_digest_payload(
         block_line = (
             f"\nblocked (依存待ち): {len(blocked_q)} 件 [{b_ids}{b_more}]"
         )
+    wrb = task_state_aggregate.get("working_regressed_blockers") or []
+    if wrb:
+        w_ids = ", ".join(r["task_id"] for r in wrb[:3])
+        w_more = f" (+{len(wrb) - 3} more)" if len(wrb) > 3 else ""
+        block_line += (
+            f"\n⚠ 依存退行中に作業続行 {len(wrb)} 件 [{w_ids}{w_more}] "
+            f"— 取り込み済みだった依存先が差し戻された上で作業中。続行か中断か判断を"
+        )
     if blocker_cycles:
         cyc_str = "; ".join(" → ".join(c) for c in blocker_cycles[:2])
         block_line += (
             f"\n⚠ 依存の循環 {len(blocker_cycles)} 件 [{cyc_str}] "
-            f"— まずリーダーが自律解消 (target 分割 / 順序強制 / blocker 一本外し) "
+            f"— まずリーダーが自律解消 (target 分割 / 順序強制 / "
+            f"blocker 一本外し = `beacon trek unblock <trek> <target> --on <blocker>`) "
             f"を試み、解けない時のみユーザーへ escalate してください"
         )
 

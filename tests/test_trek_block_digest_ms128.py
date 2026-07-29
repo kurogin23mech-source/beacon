@@ -115,3 +115,39 @@ def test_digest_shape_keys_present():
         assert key in dig["summary"]
     assert "blocker_cycles" in dig
     assert "blocked_queue" in dig["task_state_aggregate"]
+
+
+# --- working-regressed-blocker surface (AX review 2026-07-29) ---------------
+
+def _working_with_regressed_blocker():
+    doc = {"trek_id": "tk-wr", "task_states": {}}
+    trek.add_blocker(doc, target_id="A", blocker_target_id="B")
+    trek.set_task_state(doc, task_id="B", state="working")
+    trek.set_task_state(doc, task_id="B", state="leader_review")  # satisfy
+    trek.reconcile_blocks(doc)                                    # A → todo
+    trek.set_task_state(doc, task_id="A", state="working")        # A in flight
+    trek.set_task_state(doc, task_id="B", state="working")        # B regresses
+    return doc
+
+
+def test_aggregate_surfaces_working_regressed_blockers():
+    doc = _working_with_regressed_blocker()
+    agg = scheduler.build_task_state_aggregate(doc)
+    wr = agg["working_regressed_blockers"]
+    assert len(wr) == 1
+    assert wr[0]["task_id"] == "A"
+    assert wr[0]["unsatisfied"] == ["B"]
+
+
+def test_digest_surfaces_working_regressed_count_and_body():
+    doc = _working_with_regressed_blocker()
+    dig = scheduler.build_leader_digest_payload(doc, now=_NOW)
+    assert dig["summary"]["working_regressed_blocker_count"] == 1
+    assert "依存退行中に作業続行" in dig["body"]
+
+
+def test_digest_cycle_body_names_unblock_command():
+    doc = _blocked_trek()
+    doc[trek.TARGET_BLOCKERS_KEY]["C"] = ["A"]
+    dig = scheduler.build_leader_digest_payload(doc, now=_NOW)
+    assert "beacon trek unblock" in dig["body"]

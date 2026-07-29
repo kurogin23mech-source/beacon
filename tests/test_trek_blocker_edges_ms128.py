@@ -157,3 +157,97 @@ def test_one_satisfied_one_unsatisfied_blocker_still_blocks():
     trek.add_blocker(doc, target_id="A", blocker_target_id="B")  # real
     assert trek.get_blockers(doc, "A") == ["B"]
     assert trek.get_task_state(doc, "A") == "block"
+
+
+# --- review hardening (2026-07-29) -----------------------------------------
+
+def test_add_blocker_returns_status_applied():
+    doc: dict = {}
+    r = trek.add_blocker(doc, target_id="A", blocker_target_id="B")
+    assert r["applied"] is True
+    assert r["reason"] == "applied"
+    assert r["state"] == "block"
+
+
+def test_add_blocker_returns_noop_satisfied():
+    doc: dict = {}
+    trek.set_task_state(doc, task_id="B", state="working")
+    trek.set_task_state(doc, task_id="B", state="leader_review")
+    r = trek.add_blocker(doc, target_id="A", blocker_target_id="B")
+    assert r["applied"] is False
+    assert r["reason"] == "noop-satisfied"
+
+
+def test_add_blocker_returns_noop_existing():
+    doc: dict = {}
+    trek.add_blocker(doc, target_id="A", blocker_target_id="B")
+    r = trek.add_blocker(doc, target_id="A", blocker_target_id="B")
+    assert r["applied"] is False
+    assert r["reason"] == "noop-existing"
+
+
+@pytest.mark.parametrize("setup,kind", [
+    (("A", "A"), "self_block"),
+    (("", "B"), "missing_id"),
+])
+def test_blocker_error_kinds(setup, kind):
+    with pytest.raises(trek.TrekBlockerError) as ei:
+        trek.add_blocker({}, target_id=setup[0], blocker_target_id=setup[1])
+    assert ei.value.kind == kind
+
+
+def test_cycle_error_kind():
+    doc: dict = {}
+    trek.add_blocker(doc, target_id="A", blocker_target_id="B")
+    with pytest.raises(trek.TrekBlockerError) as ei:
+        trek.add_blocker(doc, target_id="B", blocker_target_id="A")
+    assert ei.value.kind == "cycle"
+
+
+def test_not_blockable_error_kind():
+    doc: dict = {}
+    trek.set_task_state(doc, task_id="A", state="working")
+    trek.set_task_state(doc, task_id="A", state="leader_review")
+    with pytest.raises(trek.TrekBlockerError) as ei:
+        trek.add_blocker(doc, target_id="A", blocker_target_id="Z")
+    assert ei.value.kind == "not_blockable"
+
+
+def test_not_blockable_leaves_no_phantom_edge():
+    # Atomicity: a rejected block on a handed-off target records no edge.
+    doc: dict = {}
+    trek.set_task_state(doc, task_id="A", state="working")
+    trek.set_task_state(doc, task_id="A", state="leader_review")
+    with pytest.raises(trek.TrekBlockerError):
+        trek.add_blocker(doc, target_id="A", blocker_target_id="Z")
+    assert trek.get_blockers(doc, "A") == []
+
+
+def test_remove_blocker_drops_edge():
+    doc: dict = {}
+    trek.add_blocker(doc, target_id="A", blocker_target_id="B")
+    trek.add_blocker(doc, target_id="A", blocker_target_id="C")
+    assert trek.remove_blocker(doc, target_id="A", blocker_target_id="B") is True
+    assert trek.get_blockers(doc, "A") == ["C"]
+
+
+def test_remove_blocker_idempotent():
+    doc: dict = {}
+    trek.add_blocker(doc, target_id="A", blocker_target_id="B")
+    assert trek.remove_blocker(doc, target_id="A", blocker_target_id="Z") is False
+
+
+def test_remove_last_blocker_clears_ledger_entry():
+    doc: dict = {}
+    trek.add_blocker(doc, target_id="A", blocker_target_id="B")
+    trek.remove_blocker(doc, target_id="A", blocker_target_id="B")
+    assert "A" not in (doc.get(trek.TARGET_BLOCKERS_KEY) or {})
+
+
+def test_remove_blocker_then_reconcile_unblocks():
+    doc: dict = {}
+    trek.add_blocker(doc, target_id="A", blocker_target_id="B")
+    assert trek.get_task_state(doc, "A") == "block"
+    trek.remove_blocker(doc, target_id="A", blocker_target_id="B")
+    trek.reconcile_blocks(doc)
+    assert trek.get_task_state(doc, "A") == "todo"  # edge-less block recovers

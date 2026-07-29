@@ -439,6 +439,22 @@ def set_task_state(trek_doc: dict, *, task_id: str, state: str,
 # ---------------------------------------------------------------------------
 
 
+class TrekBlockerError(ValueError):
+    """A blocker-edge write was rejected, carrying a machine-readable ``kind``.
+
+    Subclasses ValueError so existing ``except ValueError`` callers keep working,
+    but the ``kind`` (``missing_id`` / ``self_block`` / ``cycle`` /
+    ``not_blockable``) lets the server map the failure to an HTTP status without
+    string-sniffing the message (AX review 2026-07-29). ``not_blockable`` / ``cycle``
+    are state/graph conflicts (409); ``missing_id`` / ``self_block`` are bad input
+    (400).
+    """
+
+    def __init__(self, message: str, *, kind: str):
+        super().__init__(message)
+        self.kind = kind
+
+
 def get_blockers(trek_doc: dict, target_id: str) -> list[str]:
     """Return the list of blocker target-ids that ``target_id`` depends on.
 
@@ -503,55 +519,104 @@ def add_blocker(trek_doc: dict, *, target_id: str, blocker_target_id: str,
     validates {todo, working} → block; a handed-off target in leader_review /
     user_review is not blockable and raises).
 
-    Guards, in order:
-      * empty ids → ValueError.
-      * self-block (target == blocker) → ValueError (a target cannot depend on
-        itself).
+    Guards, in order (all raise ``TrekBlockerError`` with a machine-readable
+    ``kind`` so the server can map to an HTTP status without string-sniffing):
+      * empty ids → kind ``missing_id``.
+      * self-block (target == blocker) → kind ``self_block``.
       * blocker already satisfied (leader_review / user_review) → **no-op**: the
         dependency is already met, so no edge is drawn and the target's state is
-        left untouched (方針4: "到達済みの entity を blocker に指定したら即
-        no-op"). Returns trek_doc unchanged for that edge.
-      * cycle: if ``blocker_target_id`` already (transitively) depends on
-        ``target_id``, drawing this edge would close a cycle (A→…→A) → ValueError
-        (方針4 二段循環検知 第 (i) 段: 書き込みを拒否する = 張れない).
+        left untouched (方針4: "到達済みの entity を blocker に指定したら即 no-op").
+      * cycle: ``blocker_target_id`` already (transitively) depends on
+        ``target_id`` → kind ``cycle`` (二段循環検知 第 (i) 段: 書き込みを拒否).
+      * target not blockable (leader_review / user_review) → kind ``not_blockable``.
 
-    Idempotent for an already-recorded, still-unsatisfied edge (re-affirming
-    keeps the single edge + block state). Returns the mutated trek_doc.
+    Returns a status dict (the caller holds its own ``trek_doc`` reference, which
+    is mutated in place): ``{"target_id", "blocker_target_id", "applied": bool,
+    "reason": "applied"|"noop-satisfied"|"noop-existing", "state": <new state>}``.
+    ``applied`` is True only when a **new** edge was recorded — so a CLI can tell
+    "blocked on X" from "skipped X (already satisfied / already recorded)" instead
+    of claiming success unconditionally (AX review 2026-07-29).
     """
     if not target_id:
-        raise ValueError("target_id is required")
+        raise TrekBlockerError("target_id is required", kind="missing_id")
     if not blocker_target_id:
-        raise ValueError("blocker_target_id is required")
+        raise TrekBlockerError("blocker_target_id is required", kind="missing_id")
     if target_id == blocker_target_id:
-        raise ValueError(
-            f"a target cannot block itself ({target_id!r} → {target_id!r})"
+        raise TrekBlockerError(
+            f"a target cannot block itself ({target_id!r} → {target_id!r})",
+            kind="self_block",
         )
 
     # Already-satisfied blocker → the dependency is a no-op (don't record, don't
     # block). Nothing to wait on.
     if blocker_is_satisfied(trek_doc, blocker_target_id):
-        return trek_doc
+        return {"target_id": target_id, "blocker_target_id": blocker_target_id,
+                "applied": False, "reason": "noop-satisfied",
+                "state": get_task_state(trek_doc, target_id)}
 
     # Cycle guard: would target → blocker close a loop? That happens iff blocker
     # can already reach target through the existing edges.
     adjacency = _blocker_adjacency(trek_doc)
     if _reaches(adjacency, blocker_target_id, target_id):
-        raise ValueError(
+        raise TrekBlockerError(
             f"blocker edge {target_id!r} → {blocker_target_id!r} would create a "
-            f"dependency cycle (blocker already depends on target)"
+            f"dependency cycle (blocker already depends on target)",
+            kind="cycle",
         )
+
+    # Validate the target is blockable BEFORE mutating the edge ledger, so the
+    # docstring's "atomically" holds on the failure path too: a non-blockable
+    # target (already handed off to leader_review / user_review) raises here and
+    # leaves **no** phantom edge behind.
+    current = get_task_state(trek_doc, target_id)
+    try:
+        validate_task_state_transition(current, "block")
+    except ValueError as e:
+        raise TrekBlockerError(str(e), kind="not_blockable")
 
     graph = trek_doc.setdefault(TARGET_BLOCKERS_KEY, {})
     edges = graph.setdefault(target_id, [])
-    if blocker_target_id not in edges:
+    newly = blocker_target_id not in edges
+    if newly:
         edges.append(blocker_target_id)
 
-    # Transition target → block (validates todo/working → block; idempotent if
-    # already blocked). This is where a non-blockable state (leader_review /
-    # user_review) surfaces a ValueError.
+    # Transition target → block (re-validates todo/working → block; idempotent if
+    # already blocked). The pre-check above already guaranteed this succeeds.
     set_task_state(trek_doc, task_id=target_id, state="block",
                    updated_by_session_id=updated_by_session_id, note=note)
-    return trek_doc
+    return {"target_id": target_id, "blocker_target_id": blocker_target_id,
+            "applied": newly, "reason": "applied" if newly else "noop-existing",
+            "state": "block"}
+
+
+def remove_blocker(trek_doc: dict, *, target_id: str,
+                   blocker_target_id: str) -> bool:
+    """Remove one blocker edge ``target_id → blocker_target_id`` (方針4 unblock).
+
+    The leader's手動 escape hatch for breaking a dependency (e.g. resolving a
+    cycle by dropping one edge — the "blocker 一本外し" the digest/CLI cycle
+    guidance names). Removes the single edge; the caller is expected to run
+    ``reconcile_blocks`` afterwards so the target's ``block`` state re-settles
+    (unblocks if this was its last unsatisfied blocker). Returns True iff an edge
+    was actually removed (idempotent no-op → False). Does NOT change task state
+    itself — reconcile owns state transitions.
+    """
+    if not target_id or not blocker_target_id:
+        raise TrekBlockerError("target_id and blocker_target_id are required",
+                               kind="missing_id")
+    graph = trek_doc.get(TARGET_BLOCKERS_KEY) or {}
+    edges = graph.get(target_id) or []
+    if blocker_target_id not in edges:
+        return False
+    edges = [b for b in edges if b != blocker_target_id]
+    if edges:
+        graph[target_id] = edges
+    else:
+        # Drop the empty ledger entry so the graph reflects only live edges.
+        graph.pop(target_id, None)
+    trek_doc[TARGET_BLOCKERS_KEY] = graph
+    trek_doc["updated_at"] = utcnow_iso()
+    return True
 
 
 def blockers_all_satisfied(trek_doc: dict, target_id: str) -> bool:
@@ -583,30 +648,42 @@ def reconcile_blocks(trek_doc: dict, *, updated_by_session_id: str = "server",
         re-blocked (``todo → block``); a dependent already ``working`` is **not**
         yanked mid-flight — it is surfaced as a warning for the leader to judge.
 
-    Only targets that carry edges are considered. Targets past their own
-    hand-off (leader_review / user_review) are left untouched — their own work
-    is merged, so their dependencies no longer gate them.
+    Targets past their own hand-off (leader_review / user_review) are left
+    untouched — their own work is merged, so their dependencies no longer gate
+    them.
+
+    The scan set is the **union** of (a) targets carrying edges and (b) every
+    target currently in ``block`` state — so an *edge-less* ``block`` (e.g. one
+    that reached block through some path other than ``add_blocker``) is not left
+    to stall forever: with no blockers it is vacuously satisfied and auto-unblocks
+    to todo (recorded under ``unblocked``). This closes the silent-stall hole AX
+    review flagged (a block with nothing to wait on that no one ever clears).
 
     Returns ``{"unblocked": [...], "reblocked": [...], "warnings": [...]}`` where
-    each warning is ``{"target": id, "unsatisfied": [blocker_id, ...]}``. Pure
-    w.r.t. clock (``now`` accepted for symmetry with the halt path; unused today
-    but kept so the server tick can pass a single injected clock).
+    each warning is ``{"task_id": id, "unsatisfied": [blocker_id, ...]}`` (key name
+    matches the digest ``blocked_queue`` rows). Pure w.r.t. clock (``now`` accepted
+    for symmetry with the halt path; unused today but kept so the server tick can
+    pass a single injected clock).
     """
     graph = trek_doc.get(TARGET_BLOCKERS_KEY) or {}
+    states = trek_doc.get("task_states") or {}
     unblocked: list[str] = []
     reblocked: list[str] = []
     warnings: list[dict] = []
 
-    # Sort for deterministic order (tests + audit logs don't depend on dict
-    # insertion quirks).
-    for target_id in sorted(graph.keys()):
-        if not (graph.get(target_id) or []):
-            continue  # no live edges
+    # Scan targets with edges PLUS any target sitting in block state (so edge-less
+    # blocks recover instead of stalling). Sort for deterministic order.
+    scan = set(k for k, v in graph.items() if v) | {
+        tid for tid in states if get_task_state(trek_doc, tid) == "block"
+    }
+    for target_id in sorted(scan):
         state = get_task_state(trek_doc, target_id)
         all_ok = blockers_all_satisfied(trek_doc, target_id)
 
         if state == "block":
             if all_ok:
+                # All blockers satisfied — OR no blockers at all (edge-less block,
+                # vacuously satisfied). Either way, nothing left to wait on.
                 set_task_state(trek_doc, task_id=target_id, state="todo",
                                updated_by_session_id=updated_by_session_id,
                                note="auto-unblock: all blockers satisfied")
@@ -622,12 +699,16 @@ def reconcile_blocks(trek_doc: dict, *, updated_by_session_id: str = "server",
                 reblocked.append(target_id)
         elif state == "working":
             if not all_ok:
-                # In flight — don't yank. Surface for the leader (方針4).
+                # In flight — don't yank. Surface for the leader (方針4). The
+                # leader-facing delivery of this is the digest's
+                # working_regressed_blockers surface (build_task_state_aggregate),
+                # which recomputes the same condition; this return value is the
+                # tick's structured result.
                 unsatisfied = [
                     b for b in get_blockers(trek_doc, target_id)
                     if not blocker_is_satisfied(trek_doc, b)
                 ]
-                warnings.append({"target": target_id, "unsatisfied": unsatisfied})
+                warnings.append({"task_id": target_id, "unsatisfied": unsatisfied})
         # leader_review / user_review: hand-off done, deps no longer gate → skip.
 
     return {"unblocked": unblocked, "reblocked": reblocked, "warnings": warnings}

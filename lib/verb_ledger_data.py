@@ -419,6 +419,7 @@ VERB_LEDGER = {
     "trek_task_state": {"cls": "R", "secondary": [], "note": ""},
     "trek_timeline": {"cls": "Q", "secondary": [], "note": ""},
     "trek_transfer_leader": {"cls": "C", "secondary": ["R"], "note": ""},
+    "trek_unblock": {"cls": "R", "secondary": ["B"], "note": "依存を外す記録(R)/reconcileはserver機構(B)"},
 
     # --- trigger ---
     "trigger_check": {"cls": "Q", "secondary": [], "note": ""},

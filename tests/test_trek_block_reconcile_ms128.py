@@ -119,7 +119,8 @@ def test_rollback_warns_but_does_not_yank_working_dependent():
     trek.set_task_state(doc, task_id="B", state="working")   # B regresses
     result = trek.reconcile_blocks(doc)
     assert trek.get_task_state(doc, "A") == "working"        # NOT yanked
-    assert result["warnings"] == [{"target": "A", "unsatisfied": ["B"]}]
+    # warnings key is "task_id" to match the digest blocked_queue rows.
+    assert result["warnings"] == [{"task_id": "A", "unsatisfied": ["B"]}]
 
 
 def test_handed_off_dependent_is_left_alone():
@@ -171,3 +172,23 @@ def test_cycle_scan_finds_two_node_cycle():
 def test_reconcile_empty_graph_is_noop():
     result = trek.reconcile_blocks({})
     assert result == {"unblocked": [], "reblocked": [], "warnings": []}
+
+
+# --- edge-less block recovery (AX review 2026-07-29) ------------------------
+
+def test_edgeless_block_auto_recovers():
+    # A block with no blocker edges (vacuously satisfied) must not stall forever.
+    doc: dict = {"task_states": {
+        "A": {"state": "block", "updated_at": "2026-07-29T00:00:00Z"},
+    }}
+    result = trek.reconcile_blocks(doc)
+    assert trek.get_task_state(doc, "A") == "todo"
+    assert result["unblocked"] == ["A"]
+
+
+def test_block_with_edges_not_treated_as_edgeless():
+    doc: dict = {}
+    trek.add_blocker(doc, target_id="A", blocker_target_id="B")  # B unsatisfied
+    result = trek.reconcile_blocks(doc)
+    assert trek.get_task_state(doc, "A") == "block"  # still waiting
+    assert result["unblocked"] == []

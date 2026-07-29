@@ -2036,3 +2036,88 @@ class TestAddBlockerEndpoint:
             headers={"X-Beacon-Session": "sv-leader"},
         )
         assert r.status_code == 400, r.text
+
+
+class TestBlockerEndpointHardening:
+    """ms-128 方針4 (e-4365) — review-hardening: list-atomic, error kinds,
+    unblock, task-state block rejection (2026-07-29)."""
+
+    def test_list_blockers_atomic_all_applied(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/blocker",
+            json={"target_id": "ms-A", "blocker_target_ids": ["ms-B", "ms-C"]},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["target_blockers"]["ms-A"] == ["ms-B", "ms-C"]
+
+    def test_list_atomic_rejects_all_on_one_failure(self):
+        # ms-A depends on ms-B ok, then ms-A → ms-A self-block in same list →
+        # whole request fails, nothing persisted.
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/blocker",
+            json={"target_id": "ms-A", "blocker_target_ids": ["ms-B", "ms-A"]},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 400, r.text
+        # Nothing saved: re-read shows no edge.
+        t = _treks[trek_id]
+        assert "ms-A" not in (t.get("target_blockers") or {})
+
+    def test_not_blockable_returns_409_with_kind(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        # Drive ms-A to leader_review (not blockable).
+        client.patch(f"/api/treks/{trek_id}/task-state",
+                     json={"task_id": "ms-A", "state": "working"},
+                     headers={"X-Beacon-Session": "sv-leader"})
+        client.patch(f"/api/treks/{trek_id}/task-state",
+                     json={"task_id": "ms-A", "state": "leader_review"},
+                     headers={"X-Beacon-Session": "sv-leader"})
+        r = client.post(
+            f"/api/treks/{trek_id}/blocker",
+            json={"target_id": "ms-A", "blocker_target_id": "ms-Z"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["kind"] == "not_blockable"
+
+    def test_task_state_rejects_block(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        r = client.patch(
+            f"/api/treks/{trek_id}/task-state",
+            json={"task_id": "ms-A", "state": "block"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 400, r.text
+
+    def test_unblock_endpoint_removes_and_reconciles(self):
+        trek_id = _create_seed_trek()
+        _impersonate(LEADER_UID, LEADER_EMAIL)
+        client.post(f"/api/treks/{trek_id}/blocker",
+                    json={"target_id": "ms-A", "blocker_target_id": "ms-B"},
+                    headers={"X-Beacon-Session": "sv-leader"})
+        r = client.post(
+            f"/api/treks/{trek_id}/unblock",
+            json={"target_id": "ms-A", "blocker_target_id": "ms-B"},
+            headers={"X-Beacon-Session": "sv-leader"},
+        )
+        assert r.status_code == 200, r.text
+        doc = r.json()
+        assert "ms-A" not in (doc.get("target_blockers") or {})
+        assert doc["task_states"]["ms-A"]["state"] == "todo"  # edge-less recover
+
+    def test_unblock_non_leader_forbidden(self):
+        trek_id = _create_seed_trek()
+        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        r = client.post(
+            f"/api/treks/{trek_id}/unblock",
+            json={"target_id": "ms-A", "blocker_target_id": "ms-B"},
+            headers={"X-Beacon-Session": "sv-member"},
+        )
+        assert r.status_code == 403, r.text

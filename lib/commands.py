@@ -8995,6 +8995,13 @@ def cmd_trek_task_state():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-128 方針4 (e-4365) — block は `beacon trek block` (依存を張る) 経由でしか
+    # 設定できない。task-state から直接 block にすると edge 無しの block が生まれ
+    # 待ち先ゼロで滞留する (AX レビュー)。surface で弾く。
+    if trek.migrate_legacy_task_state(state) == "block":
+        print("Error: block state is set via `beacon trek block <trek> "
+              "<target> --on <blocker>`, not via task-state", file=sys.stderr)
+        sys.exit(1)
 
     if _is_cloud_mode():
         try:
@@ -9059,8 +9066,10 @@ def cmd_trek_block():
 
     Records that TARGET depends on each BLOCKER (= cannot proceed until the
     blocker is 取り込み済み) and blocks the target. Leader-only. Self-blocks and
-    dependency cycles are rejected; an already-satisfied blocker is a no-op.
-    Multiple --on blockers are applied in order (each independently guarded).
+    dependency cycles are rejected; an already-satisfied blocker is a no-op. All
+    --on blockers apply atomically (all-or-nothing): a rejected blocker aborts the
+    whole command without persisting. The output distinguishes edges that were
+    actually drawn from ones skipped as no-ops (AX review 2026-07-29).
     """
     import trek
     import trek_store
@@ -9085,29 +9094,37 @@ def cmd_trek_block():
               file=sys.stderr)
         sys.exit(1)
 
+    def _report(doc):
+        # Honest per-edge report: an edge that made it into the ledger was drawn;
+        # one that didn't (and the command didn't error) was a satisfied no-op.
+        recorded = set((doc.get("target_blockers") or {}).get(target_id) or [])
+        drawn = [b for b in blocker_ids if b in recorded]
+        skipped = [b for b in blocker_ids if b not in recorded]
+        if json_mode:
+            print(json.dumps(doc, ensure_ascii=False))
+            return
+        for b in drawn:
+            print(f"  blocked on {b}")
+        for b in skipped:
+            print(f"  skipped {b} (= 既に取り込み済み、依存は自動的に満たされています)")
+        if drawn:
+            print(f"→ trek {trek_id} target {target_id} は依存待ち (block) です。"
+                  " 依存先が leader_review (= 取り込み済み) に達すると自動再開します。")
+        else:
+            print(f"→ 何も張られていません (全 blocker が既に満たされています)。"
+                  f" target {target_id} の状態は変わっていません。")
+
     if _is_cloud_mode():
         try:
             client, _config = _get_api_client()
-            t = None
-            for b in blocker_ids:
-                t = client.add_trek_blocker(
-                    trek_id, target_id=target_id,
-                    blocker_target_id=b, note=note,
-                )
+            t = client.add_trek_blocker(
+                trek_id, target_id=target_id,
+                blocker_target_ids=blocker_ids, note=note,
+            )
         except RuntimeError as e:
             print(f"Error: {e}", file=sys.stderr)
             sys.exit(1)
-        if json_mode:
-            print(json.dumps(t, ensure_ascii=False))
-        else:
-            print(
-                f"Blocked trek {trek_id} target {target_id} on "
-                f"{', '.join(blocker_ids)}"
-            )
-            print(
-                "  依存先が leader_review (= 取り込み済み) に達すると自動で "
-                "再開します (= AND auto-unblock)。"
-            )
+        _report(t)
         return
 
     t = trek_store.load_trek(trek_id)
@@ -9115,23 +9132,80 @@ def cmd_trek_block():
         print(f"Error: trek {trek_id} not found", file=sys.stderr)
         sys.exit(1)
     caller_sid = os.environ.get("BEACON_SESSION_ID", "")
+    # Apply all to the in-memory doc; save once. A rejection aborts before save
+    # → atomic, matching the cloud endpoint (AX/maintainability review).
     for b in blocker_ids:
         try:
             trek.add_blocker(
                 t, target_id=target_id, blocker_target_id=b,
                 updated_by_session_id=caller_sid, note=note,
             )
-        except ValueError as e:
-            print(f"Error: {e}", file=sys.stderr)
+        except trek.TrekBlockerError as e:
+            print(f"Error ({e.kind}): {e}", file=sys.stderr)
             sys.exit(1)
     trek_store.save_trek(t)
+    _report(t)
+
+
+def cmd_trek_unblock():
+    """Remove a blocker edge and reconcile (ms-128 方針4 / e-4365).
+
+    Env:
+      BEACON_TREK_ID          (required)
+      BEACON_TREK_TARGET_ID   (required, the dependent target)
+      BEACON_TREK_BLOCKER_IDS (required, the blocker edge to drop)
+      BEACON_JSON             "1" → json output
+
+    The leader's cycle-breaking escape hatch: drops the TARGET → BLOCKER edge and
+    reconciles so the target's block state re-settles (unblocks if that was its
+    last unsatisfied blocker). Leader-only in cloud mode.
+    """
+    import trek
+    import trek_store
+
+    trek_id = os.environ.get("BEACON_TREK_ID", "").strip()
+    target_id = os.environ.get("BEACON_TREK_TARGET_ID", "").strip()
+    blockers_raw = os.environ.get("BEACON_TREK_BLOCKER_IDS", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    blocker_ids = [b.strip() for b in blockers_raw.split("\n") if b.strip()]
+
+    if not trek_id or not target_id or not blocker_ids:
+        print("Error: trek_id, target_id and --on <blocker-id> are required",
+              file=sys.stderr)
+        sys.exit(1)
+    blocker_id = blocker_ids[0]
+
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+            t = client.remove_trek_blocker(
+                trek_id, target_id=target_id, blocker_target_id=blocker_id,
+            )
+        except RuntimeError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        t = trek_store.load_trek(trek_id)
+        if t is None:
+            print(f"Error: trek {trek_id} not found", file=sys.stderr)
+            sys.exit(1)
+        removed = trek.remove_blocker(
+            t, target_id=target_id, blocker_target_id=blocker_id,
+        )
+        if removed:
+            trek.reconcile_blocks(t, updated_by_session_id="server")
+            trek_store.save_trek(t)
+
     if json_mode:
         print(json.dumps(t, ensure_ascii=False))
     else:
-        print(
-            f"Blocked trek {trek_id} target {target_id} on "
-            f"{', '.join(blocker_ids)} (local mode)"
-        )
+        state = "?"
+        try:
+            state = trek.get_task_state(t, target_id)
+        except Exception:
+            pass
+        print(f"Removed blocker {target_id} → {blocker_id}. "
+              f"target {target_id} state: {state}")
 
 
 def cmd_trek_blockers():
@@ -9142,8 +9216,12 @@ def cmd_trek_blockers():
       BEACON_JSON      "1" → json output (the blocked_queue list)
 
     Reads the trek's dependency ledger + task states and prints, per blocked
-    target, its blockers and the ones still unsatisfied. Read-only.
+    target, its blockers and the ones still unsatisfied. In local mode this also
+    runs a reconcile first (local has no server tick driver, so auto-unblock
+    would otherwise never fire — AX review 2026-07-29). Cloud mode reads the
+    server-reconciled state as-is.
     """
+    import trek
     import trek_store
     import trek_scheduler
 
@@ -9162,6 +9240,12 @@ def cmd_trek_blockers():
             sys.exit(1)
     else:
         t = trek_store.load_trek(trek_id)
+        if t is not None:
+            # Local mode has no server tick — reconcile lazily so `blockers`
+            # reflects auto-unblock / rollback before we render it.
+            result = trek.reconcile_blocks(t, updated_by_session_id="server")
+            if result.get("unblocked") or result.get("reblocked"):
+                trek_store.save_trek(t)
     if t is None:
         print(f"Error: trek {trek_id} not found", file=sys.stderr)
         sys.exit(1)
@@ -9196,8 +9280,9 @@ def cmd_trek_blockers():
         for c in cycles:
             print(f"  - {' → '.join(c)} → {c[0]}")
         print(
-            "  まずリーダーが自律解消 (target 分割 / 順序強制 / blocker 一本外し) "
-            "を試み、解けない時のみユーザーへ escalate してください。"
+            "  まずリーダーが自律解消を試みてください: `beacon trek unblock "
+            "<trek> <target> --on <blocker>` で循環上の依存を 1 本外す "
+            "(= target 分割 / 順序強制 も可)。解けない時のみユーザーへ escalate。"
         )
 
 
@@ -27351,6 +27436,7 @@ if __name__ == "__main__":
         "trek_blanket_revoke": cmd_trek_blanket_revoke,
         "trek_task_state": cmd_trek_task_state,
         "trek_block": cmd_trek_block,
+        "trek_unblock": cmd_trek_unblock,
         "trek_blockers": cmd_trek_blockers,
         "trek_extend_ttl": cmd_trek_extend_ttl,
         # ms-97 / Phase 7-A / AC21 — leader が user summary DM 送信後

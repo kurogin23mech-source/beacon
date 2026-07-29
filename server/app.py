@@ -12,7 +12,7 @@ import os
 import sys
 import time
 import uuid
-from typing import Optional
+from typing import List, Optional
 
 # Add lib/ to path so we can import core
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
@@ -4182,16 +4182,29 @@ class TrekTaskStateSet(BaseModel):
 
 
 class TrekBlockerSet(BaseModel):
-    """ms-128 方針4 (e-4365) — draw a blocker edge target_id → blocker_target_id.
+    """ms-128 方針4 (e-4365) — draw blocker edges target_id → blocker_target_ids.
 
-    The leader records that ``target_id`` depends on ``blocker_target_id`` (=
-    cannot proceed until the blocker is 取り込み済み). Recording the edge blocks
-    the target; the server rejects self-blocks and dependency cycles at write
-    time and no-ops when the blocker is already satisfied.
+    The leader records that ``target_id`` depends on each id in
+    ``blocker_target_ids`` (= cannot proceed until the blocker is 取り込み済み).
+    All edges are applied **atomically** in one request (server-side all-or-
+    nothing) so cloud and local CLI have the same partial-failure semantics
+    (AX/maintainability review 2026-07-29). ``blocker_target_id`` (singular) is a
+    back-compat alias folded into the list.
+    """
+    target_id: str
+    blocker_target_ids: List[str] = []
+    blocker_target_id: Optional[str] = None
+    note: Optional[str] = ""
+
+
+class TrekUnblockSet(BaseModel):
+    """ms-128 方針4 (e-4365) — remove a blocker edge target_id → blocker_target_id.
+
+    The leader's manual escape hatch (break a cycle by dropping one edge). After
+    removal the server reconciles the target's block state.
     """
     target_id: str
     blocker_target_id: str
-    note: Optional[str] = ""
 
 
 class TrekHaltSet(BaseModel):
@@ -6421,6 +6434,17 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
         trek_mod.validate_task_state(body.state)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    # ms-128 方針4 (e-4365) — block は edge を張る操作 (add_blocker) 経由でしか
+    # 到達できない。task-state から直接 block にすると edge 無しの block が生まれ、
+    # reconcile がその edge-less block を待ち先ゼロで復帰させる (= 意図しない待機)。
+    # ここで surface で弾き、block は必ず /blocker endpoint 経由に限定する
+    # (AX レビュー 2026-07-29 の state/edge desync 指摘)。
+    if trek_mod.migrate_legacy_task_state(body.state) == "block":
+        raise HTTPException(
+            status_code=400,
+            detail=("block state is set by drawing a blocker "
+                    "(POST /api/treks/{id}/blocker), not via task-state"),
+        )
     # ms-97 P5 (= review finding Trek-H3): leader-review gate. The state
     # machine (CORE doc 5nfTSmCDVUzD4SLzIhI5) assigns transitions ORIGINATING
     # from a review-terminal state to a specific role: ``leader_review → *``
@@ -6625,43 +6649,89 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
     return t
 
 
+# ms-128 方針4 (e-4365) — add_blocker の error kind → HTTP status。cycle /
+# not_blockable は状態・グラフの衝突 (409、状態が変われば張れる)、self_block /
+# missing_id は入力不正 (400)。文字列 sniffing でなく機械可読 kind で分ける
+# (AX レビュー 2026-07-29)。
+_BLOCKER_ERROR_STATUS = {
+    "cycle": 409,
+    "not_blockable": 409,
+    "self_block": 400,
+    "missing_id": 400,
+}
+
+
 @app.post("/api/treks/{trek_id}/blocker")
 def add_trek_blocker_endpoint(trek_id: str, body: TrekBlockerSet,
                               request: Request,
                               user: dict = Depends(require_auth)):
-    """Draw a blocker edge ``target_id → blocker_target_id`` (ms-128 方針4 / e-4365).
+    """Draw blocker edges ``target_id → blocker_target_ids`` (ms-128 方針4 / e-4365).
 
     Leader-only: the leader owns the dependency ledger (方針7), so only the
-    leader session may declare that one target depends on another. Records the
-    edge and transitions the target to ``block``. The server rejects self-blocks
-    and dependency cycles (二段循環検知 第 (i) 段) at write time, no-ops when the
-    blocker is already satisfied (leader_review+), and 409s when the target is
-    not in a blockable state (todo / working). Returns the updated trek doc.
+    leader session may declare that one target depends on another. Records each
+    edge and transitions the target to ``block``. **Atomic**: all edges apply to
+    the in-memory doc first and the doc is saved once — if any edge is rejected
+    (self-block / cycle / non-blockable state) nothing is persisted, so cloud and
+    local CLI share one all-or-nothing semantics. An already-satisfied blocker is
+    a per-edge no-op. Returns the updated trek doc.
     """
     t = _load_trek_for_read(trek_id, user, request)
     _reject_if_trek_archived(t)
     _require_trek_leader_session(t, user, request)
     if not body.target_id:
         raise HTTPException(status_code=400, detail="target_id required")
-    if not body.blocker_target_id:
-        raise HTTPException(status_code=400, detail="blocker_target_id required")
+    ids = list(body.blocker_target_ids or [])
+    if body.blocker_target_id:
+        ids.append(body.blocker_target_id)
+    if not ids:
+        raise HTTPException(status_code=400,
+                            detail="at least one blocker_target_id required")
     caller_sid = request.headers.get("X-Beacon-Session", "") or ""
-    try:
-        trek_mod.add_blocker(
-            t,
-            target_id=body.target_id,
-            blocker_target_id=body.blocker_target_id,
-            updated_by_session_id=caller_sid,
-            note=body.note or "",
-        )
-    except ValueError as e:
-        # self-block / cycle / non-blockable state → client error. 409 for the
-        # cycle case (= conflict with existing edges), 400 otherwise.
-        msg = str(e)
-        code = 409 if "cycle" in msg else 400
-        raise HTTPException(status_code=code, detail=msg)
+    # Apply all to the in-memory doc; save once. Any rejection aborts before save
+    # → atomic (no partial persistence).
+    for bid in ids:
+        try:
+            trek_mod.add_blocker(
+                t,
+                target_id=body.target_id,
+                blocker_target_id=bid,
+                updated_by_session_id=caller_sid,
+                note=body.note or "",
+            )
+        except trek_mod.TrekBlockerError as e:
+            raise HTTPException(
+                status_code=_BLOCKER_ERROR_STATUS.get(e.kind, 400),
+                detail={"kind": e.kind, "message": str(e)},
+            )
     t["updated_at"] = trek_mod.utcnow_iso()
     db.save_trek(trek_id, t)
+    return t
+
+
+@app.post("/api/treks/{trek_id}/unblock")
+def remove_trek_blocker_endpoint(trek_id: str, body: TrekUnblockSet,
+                                 request: Request,
+                                 user: dict = Depends(require_auth)):
+    """Remove a blocker edge and reconcile (ms-128 方針4 / e-4365).
+
+    Leader-only. Drops the ``target_id → blocker_target_id`` edge, then runs the
+    block reconcile so the target's ``block`` state re-settles (unblocks if that
+    was its last unsatisfied blocker). This is the leader's cycle-breaking escape
+    hatch. Returns the updated trek doc.
+    """
+    t = _load_trek_for_read(trek_id, user, request)
+    _reject_if_trek_archived(t)
+    _require_trek_leader_session(t, user, request)
+    if not body.target_id or not body.blocker_target_id:
+        raise HTTPException(status_code=400,
+                            detail="target_id and blocker_target_id required")
+    removed = trek_mod.remove_blocker(
+        t, target_id=body.target_id, blocker_target_id=body.blocker_target_id,
+    )
+    if removed:
+        trek_mod.reconcile_blocks(t, updated_by_session_id="server")
+        t["updated_at"] = trek_mod.utcnow_iso()
+        db.save_trek(trek_id, t)
     return t
 
 
