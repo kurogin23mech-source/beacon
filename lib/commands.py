@@ -14556,6 +14556,23 @@ def cmd_doc_update():
         print(f"Document not found: {doc_id}")
         sys.exit(1)
 
+    # ms-131 e-4544 — close the write-path side door (SPEC 方針4: the type-check +
+    # append-only history must be the *only* way a table-doc's rows change). A
+    # generic `doc update --content ...` would rewrite a table-doc's beacon-table
+    # payload with no type-check and no history, and — if the new content lacks
+    # frontmatter — silently drop ``format: table`` and downgrade the doc to
+    # markdown. Refuse content replacement on a table-doc and route the caller to
+    # the `doc table` verbs. Linkage/title/scope updates (which preserve the body)
+    # stay allowed — detach (e-4497) relies on `doc update --target ""`.
+    import table_doc as _table_doc
+    if content and _table_doc.is_table_content(existing.get("content", "")):
+        print("Error: これは table-doc です。行の変更は `beacon doc table "
+              "add-row/set-cell/rm-row` を使ってください "
+              "(doc update --content は型検査と履歴を迂回するため拒否します)。"
+              "\n  紐づけ/タイトル/スコープの変更は --content なしで可能です。",
+              file=sys.stderr)
+        sys.exit(1)
+
     operation = os.environ.get("BEACON_OP", "")
     # ms-109 e-3754 — canonical target linkage inputs (account / opportunity are
     # new sales Targets; --target is generic). Resolved into ``target`` below.
