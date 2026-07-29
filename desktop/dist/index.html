@@ -8210,6 +8210,75 @@ function renderSearchResults() {
   </div>`;
 }
 
+// ms-131 e-4498 — table-doc rendering (read-only).
+// A table-doc (frontmatter ``format: table``) carries a fenced
+// ```beacon-table``` JSON block ({columns, rows}) in its body instead of prose.
+// The Documents tab renders it as an HTML table (column headers + active rows)
+// rather than markdown, so a human can audit the structured data. It is
+// view-only by design: rows are operated via the CLI (`beacon doc table ...`),
+// never edited from the UI (ux-principle-no-terminal / SPEC 方針5). Malformed
+// payloads fall back to markdown so nothing is silently lost.
+function docFormatIsTable(content) {
+  const m = /^---\n([\s\S]*?)\n---/.exec(content || '');
+  if (!m) return false;
+  return /(^|\n)\s*format:\s*table\s*(\n|$)/.test(m[1]);
+}
+
+function parseTableDocPayload(content) {
+  const m = /```beacon-table\s*\n([\s\S]*?)\n```/.exec(content || '');
+  if (!m) return null;
+  try {
+    const t = JSON.parse(m[1]);
+    return (t && Array.isArray(t.columns)) ? t : null;
+  } catch (e) { return null; }
+}
+
+// Resolve a ref-typed cell (e.g. "opp-3") to the referenced entity's label when
+// it is loaded in the current project state; otherwise show the raw id.
+function resolveRefLabel(id) {
+  const p = state.project || {};
+  const cols = [p.milestones, p.opportunities, p.accounts, p.acquisitions, p.operations];
+  for (const c of cols) {
+    if (!Array.isArray(c)) continue;
+    const hit = c.find(x => x && x.id === id);
+    if (hit) return (hit.label || hit.title || hit.name || id);
+  }
+  return id;
+}
+
+function renderTableDocHtml(content) {
+  const t = parseTableDocPayload(content);
+  if (!t) return marked.parse(content || '');  // malformed → markdown fallback
+  const cols = t.columns;
+  const allRows = Array.isArray(t.rows) ? t.rows : [];
+  const rows = allRows.filter(r => r && !r.removed_at);
+  const head = cols.map(c => `<th>${esc(c.label || c.key)}</th>`).join('');
+  const body = rows.map(r => {
+    const cells = (r && r.cells) || {};
+    const tds = cols.map(c => {
+      let v = cells[c.key];
+      if (v === undefined || v === null) v = '';
+      if (c.type === 'ref' && v !== '') v = resolveRefLabel(String(v));
+      else if (typeof v === 'boolean') v = v ? '✓' : '✗';
+      return `<td>${esc(String(v))}</td>`;
+    }).join('');
+    return `<tr>${tds}</tr>`;
+  }).join('');
+  const removed = allRows.length - rows.length;
+  const parts = [`<table class="table-doc"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`];
+  if (rows.length === 0) parts.push('<div class="table-doc-note">(行なし)</div>');
+  if (removed > 0) parts.push(`<div class="table-doc-note">${removed} 行が削除済み（履歴に保持）</div>`);
+  return parts.join('');
+}
+
+// Shared body renderer used by the Documents detail view and the search-hit
+// overlay: table-docs render as a table, everything else as markdown.
+function renderDocBody(content) {
+  return docFormatIsTable(content)
+    ? renderTableDocHtml(content)
+    : marked.parse(content || '');
+}
+
 function renderDocumentsSection() {
   if (state.documentContent) {
     const scope = state.documentContent.scope || 'memo';
@@ -8218,7 +8287,7 @@ function renderDocumentsSection() {
         <span class="retro-back" data-action="close-document">\u2190 back to list</span>
         <button data-action="copy-doc-link" data-doc-id="${esc(state.documentContent.doc_id)}" style="float:right;font-size:0.72rem;padding:3px 10px;background:var(--bg-raised);border:1px solid var(--border);border-radius:3px;color:var(--text-secondary);cursor:pointer;font-family:inherit;">Copy link</button>
         <h3 style="font-size: 1rem; color: var(--text-primary); margin: 8px 0 16px;">${scopeBadge(scope)}${esc(state.documentContent.title)}</h3>
-        <div class="doc-content">${marked.parse(state.documentContent.content || '')}</div>
+        <div class="doc-content">${renderDocBody(state.documentContent.content)}</div>
       </section>`;
   }
   // ms-46 e-750: pull the retro detail-view early-return up alongside the
@@ -9525,7 +9594,7 @@ function renderDocumentOverlay() {
         <button class="entry-modal-close" data-action="close-document-overlay">✕</button>
       </div>
       <div class="entry-modal-body">
-        <div class="doc-content">${marked.parse(d.content || '')}</div>
+        <div class="doc-content">${renderDocBody(d.content)}</div>
       </div>
     </div>
   `;
