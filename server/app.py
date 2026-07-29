@@ -8870,6 +8870,24 @@ def _post_trek_notify_escalation(trek_id, trek_doc, *, payload, action,
     return {"project_id": target_project_id, "event_id": event_id}
 
 
+# ms-128 / e-4386 補完 (受入条件12) — scheduler tick の注入可能な時計。
+# クロスインスタンス相互ブロックの e2e ハーネス (AC12) が tick 駆動を deterministic
+# に進めるための seam。時刻をここに注入すると、tick の cadence 判定 (is_trek_due) /
+# progress-check stamp (last_progress_check_at) / halt 検知 / block reconcile が
+# 単一の注入時計で動く (下流はすべて ``now`` を受け取るため)。
+# module-global = **in-process からのみ設定可能**で HTTP 表面を持たない
+# (= 本番の wall-clock を wire 越しに詐称できない)。default None = 実 UTC。
+_INJECTED_SCHEDULER_NOW = None
+
+
+def _scheduler_now():
+    """Return the scheduler tick's clock — injected (AC12 harness) or real UTC."""
+    import datetime as _dt
+    if _INJECTED_SCHEDULER_NOW is not None:
+        return _INJECTED_SCHEDULER_NOW
+    return _dt.datetime.now(_dt.timezone.utc)
+
+
 @app.post("/api/system/trek-scheduler/tick")
 def trek_scheduler_tick_endpoint(
     body: TrekSchedulerTickRequest,
@@ -8894,7 +8912,7 @@ def trek_scheduler_tick_endpoint(
 
     import copy
     import datetime
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = _scheduler_now()
     # ms-66 fix: bind now_iso UNCONDITIONALLY here. It is read below by
     # _fire_due_scheduled(now_iso) (operation firing), but its only other binding
     # is inside the trek-quiesce conditional branch — so on every tick where that
@@ -8902,7 +8920,10 @@ def trek_scheduler_tick_endpoint(
     # → UnboundLocalError, swallowed by the try/except below → the server tick's
     # Operation-firing path silently died on every tick since ms-107 (804dfa16).
     # Trek fanout was unaffected (it calls trek_mod.utcnow_iso() directly).
-    now_iso = trek_mod.utcnow_iso()
+    # ms-128 AC12 — derive now_iso from the (possibly injected) clock so the
+    # Operation-firing path and the Trek fanout share one time source under the
+    # harness. In production (no injection) this equals utcnow_iso() (both real).
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     # Fan out across active treks. Without project scoping we list every
     # trek in the backend (admin-style enumeration); the scheduler tick is
     # an internal service, not a user-driven query, so this is acceptable
