@@ -4378,7 +4378,7 @@ COMPLETION_VERDICTS = (
      "intent": "思想/目的達成レビュー合格 → ターミナル化 (user の番へ)"},
     {"verdict": "re-work", "to_state": "working",
      "intent": "差し戻し (追加作業を要請)"},
-    {"verdict": "forward-user", "to_state": "user_review",
+    {"verdict": "forward-to-user", "to_state": "user_review",
      "intent": "嗜好/不可逆/cross-Trek 判断を user に escalate"},
 )
 

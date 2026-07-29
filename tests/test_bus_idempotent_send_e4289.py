@@ -95,3 +95,27 @@ def test_definite_server_error_is_not_retried():
     with pytest.raises(RuntimeError):
         c.post_bus_event("p", "dm", payload={"text": "hi"})
     assert len(posts) == 1, "a definite server response must not be resent"
+
+
+def test_stub_signature_is_subset_of_real_post_bus_event():
+    """Guard stub drift (maintainability review PR#545): the test double's
+    post_bus_event must accept a subset of the real api_client params, so a
+    future kwarg added to the real signature can't leave the stub silently
+    unaware (a half-wired flag passing tests)."""
+    import inspect
+    import importlib.util
+    real = set(inspect.signature(
+        api_client.ApiClient.post_bus_event).parameters.keys())
+    spec = importlib.util.spec_from_file_location(
+        "_tbc", os.path.join(os.path.dirname(__file__), "test_bus_cli.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    stub_params = set(inspect.signature(
+        mod._StubApiClient.post_bus_event).parameters.keys())
+    missing = stub_params - real
+    assert not missing, (
+        f"stub post_bus_event has params the real one lacks: {missing} — "
+        "the stub has drifted from api_client.ApiClient.post_bus_event."
+    )
+    # The idempotency kwargs specifically must be mirrored.
+    assert {"client_event_id", "is_retry"} <= stub_params

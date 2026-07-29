@@ -3946,6 +3946,29 @@ except ValueError as e:
                 BEACON_TREK_ID="$trek_id" BEACON_ALL="$show_all" \
                     python3 "$COMMANDS_PY" trek_show
                 ;;
+            review-verdicts)
+                # ms-128 / e-4374: emit the leader's verdict set for a
+                # leader_review target (completion vs halt-rescue, branched on
+                # the halt_reason tag). /beacon-trek-review calls this so the
+                # verdict lists have a single source of truth (lib), not a
+                # hand-copied prose mirror (AX/maintainability review PR#545).
+                shift 2
+                trek_id="" task_id=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) export BEACON_JSON=1; shift ;;
+                        -?*)    _guard_flag "$1" ;;
+                        *)
+                            if [[ -z "$trek_id" ]]; then trek_id="$1"
+                            elif [[ -z "$task_id" ]]; then task_id="$1"
+                            fi
+                            shift
+                            ;;
+                    esac
+                done
+                BEACON_TREK_ID="$trek_id" BEACON_TREK_TASK_ID="$task_id" \
+                    python3 "$COMMANDS_PY" trek_review_verdicts
+                ;;
             start)
                 shift 2
                 trek_id=""
@@ -5874,7 +5897,7 @@ EOF
                 ;;
             *)
                 cat <<'EOF'
-Usage: beacon bus send         --channel <ch> [--to <session_id>]... [--to-trek <trek-id>] [--payload '<json>'] [--sender <id>] [--delivery <auto-execute|propose-to-ai|notify-user-only; default propose-to-ai>] [--in-reply-to <event_id>] [--manual] [--action <name>]... [--no-envelope] [--project <id>]
+Usage: beacon bus send         --channel <ch> [--to <session_id>]... [--to-trek <trek-id>] [--payload '<json>'] [--sender <id>] [--delivery <auto-execute|propose-to-ai|notify-user-only; default propose-to-ai>] [--in-reply-to <event_id>] [--manual] [--client-event-id <id> --retry] [--action <name>]... [--no-envelope] [--project <id>]
        beacon bus listen       [--recipient <id>] [--channel <ch>] [--interval <sec>] [--auto-ack] [--once] [--project <id>]
        beacon bus receive      [--recipient <id>] [--channel <ch>] [--timeout <sec>] [--auto-ack] [--project <id>]
        beacon bus ack          [--recipient <id>] (--last-seen-at <iso8601> | --event <event_id>) [--project <id>]
@@ -5899,6 +5922,14 @@ delivery: auto-execute | propose-to-ai (default) | notify-user-only
                override). A non-armed session needs no flag — the human typing
                the command is the approval. The same gate applies via the MCP
                reply tool (channel/bus.mjs).
+--client-event-id / --retry:
+               (send, e-4289) idempotent resend after an AMBIGUOUS failure (the
+               CLI died / was killed and you don't know if the send landed).
+               The first send's --json output carries "client_event_id"; to
+               resend, pass that SAME id with --retry so the server dedups
+               instead of creating a duplicate. --retry REQUIRES
+               --client-event-id (errors otherwise). Single-recipient only
+               (one logical send = one key); rejected with multiple --to.
 --project:     override the cwd's project_id (e-1151) for cross-project DM/directory.
                Auth + API URL still come from the current project; only the
                target project_id in the API call changes.
@@ -6060,7 +6091,9 @@ EOF
                 ;;
             *)
                 cat <<'EOF'
-Usage: beacon dm send    --to <sid> --payload '<json>' [--in-reply-to <eid>] [--manual] [--recipient-confirmed] [--action <name>]... [--project <id>] [--json]
+Usage: beacon dm send    --to <sid> --payload '<json>' [--in-reply-to <eid>] [--manual] [--recipient-confirmed] [--client-event-id <id> --retry] [--action <name>]... [--project <id>] [--json]
+       (--client-event-id <id> --retry: idempotent resend after an ambiguous
+        failure — reuse the id from the first send's --json; single-recipient only)
        beacon dm respond approve <event_id> [--project <id>] [--json]
        beacon dm respond deny    <event_id> [--project <id>] [--json]
        beacon dm audit  [<project_id>] [--limit N] [--project <id>] [--json]

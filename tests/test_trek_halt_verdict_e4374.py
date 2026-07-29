@@ -33,11 +33,12 @@ def test_completion_verdicts_when_no_halt_reason():
     assert vs["mode"] == "completion"
     assert vs["halt_reason"] is None
     names = {v["verdict"] for v in vs["verdicts"]}
-    assert names == {"approve", "re-work", "forward-user"}
+    assert names == {"approve", "re-work", "forward-to-user"}
     # approve terminalizes; re-work returns to working.
     to = {v["verdict"]: v["to_state"] for v in vs["verdicts"]}
     assert to["approve"] == "user_review"
     assert to["re-work"] == "working"
+    assert to["forward-to-user"] == "user_review"
 
 
 def test_halt_rescue_verdicts_when_halt_reason_present():
@@ -100,3 +101,43 @@ def test_re_open_clears_halt_reason_so_next_review_is_not_stuck():
     trek.set_task_state(doc, task_id="e-1", state="leader_review", note="done")
     vs = trek.leader_review_verdict_set(doc, "e-1")
     assert vs["mode"] == "completion"
+
+
+# ---------------------------------------------------------------------------
+# AX/maintainability review PR#545 — pin the skill to the lib so the verdict
+# lists have a single source of truth (not a hand-copied prose mirror).
+# ---------------------------------------------------------------------------
+
+import pathlib  # noqa: E402
+
+_SKILL = (pathlib.Path(__file__).resolve().parent.parent
+          / "skills" / "beacon-trek-review.md")
+
+
+def test_skill_calls_the_verdict_verb_not_hand_derivation():
+    """The skill must fetch the verdict set from the single-source CLI verb,
+    not re-derive the branch by hand (the drift risk both reviewers flagged)."""
+    body = _SKILL.read_text(encoding="utf-8")
+    assert "beacon trek review-verdicts" in body, (
+        "beacon-trek-review.md must call `beacon trek review-verdicts` so the "
+        "verdict lists come from lib.leader_review_verdict_set, not prose."
+    )
+
+
+def test_skill_mentions_only_real_lib_verdicts():
+    """Every verdict token named in the skill's option prose must be a real
+    lib verdict — a phantom/renamed verdict in the skill would misfire."""
+    body = _SKILL.read_text(encoding="utf-8")
+    lib_verdicts = {v["verdict"] for v in
+                    trek.COMPLETION_VERDICTS + trek.HALT_RESCUE_VERDICTS}
+    # Guard against near-miss spellings: the skill must not name a verdict the
+    # lib doesn't have.
+    for phantom in ("forward-user", "reopen", "re_open", "dm_nudge"):
+        # these are near-miss spellings of real verdicts; none may appear.
+        assert phantom not in body, (
+            f"skill names '{phantom}' which is not a lib verdict "
+            f"(real set: {sorted(lib_verdicts)})"
+        )
+    # And the canonical names must all be present somewhere in the option prose.
+    for v in lib_verdicts:
+        assert v in body, f"lib verdict '{v}' is not documented in the skill"

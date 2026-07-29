@@ -66,17 +66,19 @@ executor の note + 最近 commit + task description を読み、 3 つの判断
 
 ## Step 1.6: halt_reason で verdict 集合を分岐 (= e-4374 / AC7)
 
-leader_review キューには 2 種が混載する。**どちらの verdict 集合を提示するかは、対象 Target の `halt_reason` タグの有無で決まる** (方針6):
+leader_review キューには 2 種が混載する。**どちらの verdict 集合を提示するかは、verdict の単一 source である CLI に問う** (= hand-copy でなく、lib `leader_review_verdict_set` を露出した verb を呼ぶ。方針6 / e-4374):
 
 ```bash
-beacon trek show <trek_id> --json | \
-  jq -r --arg t "<task_id>" '.task_states[$t] | {state, halt_reason, note}'
+beacon trek review-verdicts <trek_id> <task_id> --json
 ```
 
-- **`halt_reason` が非 null (= `progress-stall` / `liveness-timeout`)** → **halt 救済**。server が「停まっただけ (= まだ完成していない)」の Target を強制遷移させたもの。**Step 2H (halt 救済 3 択) へ**。`approve` は未完成に対して意味をなさないので出さない。
-- **`halt_reason` が null** → **正常完成**。executor が完成宣言して自発的に上げたもの。**Step 2 (完成 3 択 = Option A/B/C) へ**。
+返る JSON の `mode` で分岐し、`verdicts[]` (各 `{verdict, to_state, intent}`) を **そのまま** 提示する (= verdict 名/遷移先を skill 側で再定義しない):
 
-判定は lib の `leader_review_verdict_set(trek_doc, target_id)` (= `mode` が `completion` / `halt_rescue` / `not_in_review`、`verdicts` に取れる action) と一致させる。`not_in_review` (= state が leader_review でない) なら review 対象でないので何もしない。
+- **`mode == "halt_rescue"`** (= `halt_reason` タグ有り = server が「停まっただけ / 未完成」を強制遷移させた) → **Step 2H** へ。`approve` は返らない (= 未完成を完遂扱いにしない構造防御)。
+- **`mode == "completion"`** (= executor が完成宣言して自発的に上げた) → **Step 2 (Option A/B/C)** へ。
+- **`mode == "not_in_review"`** (= state が leader_review でない) → review 対象でないので何もしない。
+
+Step 2 / 2H の本文は各 verdict の **実行手順** (どの CLI を打つか) を示すだけで、どの verdict が選べるかの正典は上の verb 出力。両者が食い違ったら verb 出力が正。
 
 ## Step 2: 完成 3 択 (= halt_reason が null のとき、 forced 3-choice、 後回し禁止)
 

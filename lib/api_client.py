@@ -722,7 +722,14 @@ class ApiClient:
         attempt = 0
         while True:
             try:
-                return self.post(path, body)
+                resp = self.post(path, body)
+                # ms-128 / e-4289 (AX review PR#545): guarantee the response
+                # carries the client-minted key so a caller can ALWAYS read it
+                # back (from `--json`) to drive a later idempotent --retry. Do
+                # not depend on the server echoing it — stamp it client-side.
+                if isinstance(resp, dict):
+                    resp.setdefault("client_event_id", key)
+                return resp
             except (ConnectionError, TimeoutError):
                 # Ambiguous transport failure: the request may or may not have
                 # landed. ``post`` wraps most url/socket errors as
