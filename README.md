@@ -360,8 +360,15 @@ Requires `gh` CLI authenticated. When a task linked to an Issue is marked done, 
 | `beacon doc show <doc-id>` | Show document / 内容表示 |
 | `beacon doc update <doc-id> --content "text"` | Update document / 更新 |
 | `beacon doc image-upload <local-file>` | Upload image, get markdown img tag / 画像アップロードして img タグを返す |
+| `beacon doc table create "title" --columns '<json>'` | Create a typed table-doc / 型付きテーブル型ドキュメントを作成 |
+| `beacon doc table add-row <doc-id> --cells '<json>'` | Append a row (type-checked, history) / 行を追加（型検査・履歴） |
+| `beacon doc table set-cell <doc-id> <row-id> <col> <val>` | Update a cell (old value kept in history) / セル更新（過去値は履歴に残る） |
+| `beacon doc table rm-row <doc-id> <row-id>` | Soft-delete a row / 行を削除（soft-delete） |
+| `beacon doc table show <doc-id> [--json]` | Render the table / 表を描画 |
 
 Scopes: `core` (design principles / 設計原則), `spec` (technical specs / 仕様), `memo` (notes / メモ)
+
+Formats: default `markdown`; `table` = 行×列の構造化ドキュメント (columns are typed: `number`/`date`/`bool`/`ref`/`enum`/`text`). Rows are operated via `beacon doc table ...` only — 行の書き込みは型検査と追記のみ履歴を必ず通す。
 
 Use `--ms <ms-id>` to associate a document with a milestone, or `--op <op-id>` to associate with an Operation (e.g. log fetch instructions for `/beacon-operation-review`).
 

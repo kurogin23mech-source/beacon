@@ -869,6 +869,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_doc_delete.add_argument("doc_id", nargs="?", default="")
     p_doc_delete.add_argument("--json", action="store_true")
 
+    # ms-131 e-4496 — table-doc row operations. Kept in step with the bash
+    # dispatcher (bin/beacon `doc table ...`) so Windows pipx users get the
+    # same verbs instead of an argparse "invalid choice".
+    p_doc_table = doc_sub.add_parser("table", add_help=False)
+    p_doc_table.add_argument("table_cmd", nargs="?", default="")
+    p_doc_table.add_argument("rest", nargs="*")
+    p_doc_table.add_argument("--columns", default="")
+    p_doc_table.add_argument("--cells", default="")
+    p_doc_table.add_argument("--title", default="")
+    p_doc_table.add_argument("--value", dest="cell_value", default=None)
+    p_doc_table.add_argument("--scope", "-s", dest="scope", default="")
+    p_doc_table.add_argument("--ms", dest="doc_ms", default="")
+    p_doc_table.add_argument("--op", dest="doc_op", default="")
+    p_doc_table.add_argument("--target", dest="doc_target", default="")
+    p_doc_table.add_argument("--id", dest="table_doc_id", default="")
+    p_doc_table.add_argument("--json", action="store_true")
+
     # ---- note ----
     p_note = sub.add_parser("note", help="Session note operations", add_help=False)
     p_note.add_argument("text_or_sub", nargs="?", default="")
@@ -2929,8 +2946,77 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
         }
         return _run_commands_py(root, "doc_delete", env)
 
+    if cmd == "table":
+        return _handle_doc_table(root, args)
+
     print(f"Unknown doc subcommand: {cmd}")
     return 1
+
+
+def _handle_doc_table(root: Path, args: argparse.Namespace) -> int:
+    """Route ``beacon doc table <sub>`` to the shared cmd_doc_table_* handlers
+    (ms-131 e-4496). Positional layout mirrors the bash dispatcher."""
+    sub = (args.table_cmd or "").strip()
+    rest = list(args.rest or [])
+    json_flag = "1" if args.json else ""
+
+    if sub == "create":
+        title = args.title or (rest[0] if rest else "")
+        if not title or not args.columns:
+            print("Usage: beacon doc table create \"title\" --columns '<json>' "
+                  "[--scope ...] [--ms|--op|--target id] [--id slug] [--json]")
+            return 1
+        env = {
+            "BEACON_TITLE": title, "BEACON_COLUMNS": args.columns,
+            "BEACON_DOC_ID": args.table_doc_id or "", "BEACON_SCOPE": args.scope or "",
+            "BEACON_MS": args.doc_ms or "", "BEACON_OP": args.doc_op or "",
+            "BEACON_TARGET": args.doc_target or "", "BEACON_JSON": json_flag,
+        }
+        return _run_commands_py(root, "doc_table_create", env)
+
+    if sub == "add-row":
+        doc_id = args.table_doc_id or (rest[0] if rest else "")
+        if not doc_id or not args.cells:
+            print("Usage: beacon doc table add-row <doc-id> --cells '<json>' [--json]")
+            return 1
+        env = {"BEACON_DOC_ID": doc_id, "BEACON_CELLS": args.cells,
+               "BEACON_JSON": json_flag}
+        return _run_commands_py(root, "doc_table_add_row", env)
+
+    if sub == "set-cell":
+        doc_id = args.table_doc_id or (rest[0] if rest else "")
+        row_id = rest[1] if len(rest) > 1 else ""
+        col = rest[2] if len(rest) > 2 else ""
+        value = (args.cell_value if args.cell_value is not None
+                 else (rest[3] if len(rest) > 3 else ""))
+        if not (doc_id and row_id and col):
+            print("Usage: beacon doc table set-cell <doc-id> <row-id> <column-key> "
+                  "<value> [--json]")
+            return 1
+        env = {"BEACON_DOC_ID": doc_id, "BEACON_ROW_ID": row_id,
+               "BEACON_COL_KEY": col, "BEACON_VALUE": value, "BEACON_JSON": json_flag}
+        return _run_commands_py(root, "doc_table_set_cell", env)
+
+    if sub == "rm-row":
+        doc_id = args.table_doc_id or (rest[0] if rest else "")
+        row_id = rest[1] if len(rest) > 1 else ""
+        if not (doc_id and row_id):
+            print("Usage: beacon doc table rm-row <doc-id> <row-id> [--json]")
+            return 1
+        env = {"BEACON_DOC_ID": doc_id, "BEACON_ROW_ID": row_id,
+               "BEACON_JSON": json_flag}
+        return _run_commands_py(root, "doc_table_rm_row", env)
+
+    if sub == "show":
+        doc_id = args.table_doc_id or (rest[0] if rest else "")
+        if not doc_id:
+            print("Usage: beacon doc table show <doc-id> [--json]")
+            return 1
+        env = {"BEACON_DOC_ID": doc_id, "BEACON_JSON": json_flag}
+        return _run_commands_py(root, "doc_table_show", env)
+
+    print("Usage: beacon doc table [create|add-row|set-cell|rm-row|show]")
+    return 2
 
 
 # ---- note handlers ----
