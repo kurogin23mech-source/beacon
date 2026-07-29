@@ -101,6 +101,8 @@ class _StubApiClient:
         requested_action=None,
         context="",
         rationale="",
+        client_event_id="",
+        is_retry=False,
     ):
         self.post_calls.append({
             "project_id": project_id,

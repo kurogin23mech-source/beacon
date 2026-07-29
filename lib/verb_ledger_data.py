@@ -404,6 +404,7 @@ VERB_LEDGER = {
     "trek_pulse_ack": {"cls": "R", "secondary": [], "note": ""},
     "trek_reconcile": {"cls": "B", "secondary": [], "note": ""},
     "trek_resume": {"cls": "C", "secondary": ["B"], "note": ""},
+    "trek_review_verdicts": {"cls": "Q", "secondary": [], "note": "leader_review verdict 集合を read-only で返す (e-4374)"},
     "trek_scope_approve": {"cls": "R", "secondary": ["C"], "note": "scope承認記録(R)/決定(C)"},
     "trek_scope_reject": {"cls": "R", "secondary": ["C"], "note": ""},
     "trek_show": {"cls": "Q", "secondary": [], "note": ""},

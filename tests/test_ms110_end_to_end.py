@@ -98,7 +98,7 @@ class _BridgeClient:
 
     def post_bus_event(self, project_id, channel, *, sender_session_id="",
                        payload=None, delivery="propose-to-ai", envelope=None,
-                       requested_action=None, context="", rationale=""):
+                       requested_action=None, context="", rationale="", client_event_id="", is_retry=False):
         resp = self.tc.post(f"/api/projects/{project_id}/bus", json={
             "channel": channel, "sender_session_id": sender_session_id,
             "payload": payload or {}, "delivery": delivery, "envelope": envelope,
@@ -214,7 +214,7 @@ def test_confirmed_claim_cannot_be_replayed_to_another_user(send, monkeypatch):
 
     def _capture(self, project_id, channel, *, sender_session_id="", payload=None,
                  delivery="propose-to-ai", envelope=None, requested_action=None,
-                 context="", rationale=""):
+                 context="", rationale="", client_event_id="", is_retry=False):
         # Retarget the send to Carol while keeping the Bob-pinned claim.
         payload = {**(payload or {}), "recipient_session_id": "sv-carol"}
         captured["envelope"] = envelope

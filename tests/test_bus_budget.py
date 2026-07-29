@@ -187,7 +187,7 @@ class _StubClient:
     def post_bus_event(self, project_id, channel, *, sender_session_id="",
                        payload=None, delivery="propose-to-ai",
                        envelope=None, requested_action=None,
-                       context="", rationale=""):
+                       context="", rationale="", client_event_id="", is_retry=False):
         # e-1290: tolerate envelope/requested_action kwargs from the
         # envelope-by-default CLI path. The budget tests don't assert on
         # envelope contents — they care about decrement timing — so we just
