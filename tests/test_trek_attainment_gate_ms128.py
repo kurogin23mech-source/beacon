@@ -82,10 +82,9 @@ _ALL_MET = [{"criterion": "AC1", "verdict": "met"}]
 
 
 def _decide(**kw):
-    # Default: the completion-approval path (leader_review → user_review).
+    # Default: a completion claim reaching user_review from an external judge.
     base = dict(
         effective_state="user_review",
-        from_state="leader_review",
         verdict="",
         caller_sid="judge-sid",
         prior_stamper_sid="executor-sid",
@@ -96,7 +95,7 @@ def _decide(**kw):
 
 
 def test_non_terminal_transition_passes():
-    d = _decide(effective_state="leader_review", from_state="working")
+    d = _decide(effective_state="leader_review")
     assert d["allowed"] is True and d["forced_state"] is None
 
 
@@ -106,18 +105,23 @@ def test_forward_to_user_is_not_gated():
     assert d["allowed"] is True and d["forced_state"] is None
 
 
-def test_bare_working_to_user_review_escalation_is_not_gated():
-    # verdict 無しの working→user_review は forward-to-user エスカレーション扱い。
-    # 完遂の主張ではないので gate せず開けておく (既存 executor escalation 経路)。
-    d = _decide(from_state="working", verdict="", attainment_verdict=None)
-    assert d["allowed"] is True and d["forced_state"] is None
-
-
-def test_explicit_approve_from_working_is_gated():
-    # working からでも明示 approve は完遂合格 → gate 対象 (verdict 必須)。
-    d = _decide(from_state="working", verdict="approve", attainment_verdict=None)
+def test_bare_working_to_user_review_is_gated():
+    # P1 fix: verdict 無しの素の working→user_review も完遂合格として gate 対象。
+    # SPEC は user_review 入口をリーダー承認に限定 — 実行者の bare stamp で terminal
+    # 到達させない (自己採点経路を塞ぐ)。attainment 無しなので leader_review 留置。
+    d = _decide(verdict="", attainment_verdict=None)
     assert d["allowed"] is False
+    assert d["forced_state"] == "leader_review"
     assert d["code"] == "attainment_verdict_required"
+
+
+def test_empty_prior_stamper_is_fail_closed():
+    # A4 fix: prior stamper 不明 = judge が実行者の外だと確認できない → 全met verdict
+    # でも留置 (自己採点を「識別できないから素通し」にしない)。
+    d = _decide(prior_stamper_sid="", attainment_verdict=_ALL_MET)
+    assert d["allowed"] is False
+    assert d["forced_state"] == "leader_review"
+    assert d["code"] == "attainment_judge_unverifiable"
 
 
 def test_self_judgment_is_detained_even_with_all_met():

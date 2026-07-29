@@ -8996,8 +8996,10 @@ def cmd_trek_task_state():
                               user_review/done; legacy `waiting-review`
                               auto-migrates to leader_review)
       BEACON_TREK_NOTE       (optional)
-      BEACON_TREK_VERDICT    (optional, ms-128/e-4386 — completion verdict name:
-                              approve / re-work / forward-to-user)
+      BEACON_TREK_VERDICT    (optional, ms-128/e-4386 — verdict for a user_review
+                              transition: approve (全 met の attainment 必須) or
+                              forward-to-user (人間エスカレーション、gate 対象外)。
+                              re-work は verdict でなく state=working で表す)
       BEACON_TREK_ATTAINMENT_VERDICT
                              (optional, JSON list of per-criterion verdicts:
                               [{"criterion": str, "verdict": "met"|"partial"|
@@ -9064,13 +9066,24 @@ def cmd_trek_task_state():
         if json_mode:
             print(json.dumps(t, ensure_ascii=False))
         else:
-            print(
-                f"Stamped trek {trek_id} task {task_id} state → {state}"
+            # A1 (AX review 2026-07-29): 要求した state ではなく、server が実際に
+            # 保存した state を表示する。完遂ゲートが divert (user_review 要求 →
+            # leader_review / working に留置) した場合、要求 state をそのまま表示すると
+            # AI が「user_review 達成」と誤認する。実 state を読み、乖離時は WARN を出す。
+            actual = ((t.get("task_states") or {}).get(task_id) or {}).get(
+                "state", state
             )
+            requested = trek.migrate_legacy_task_state(state)
+            print(f"Stamped trek {trek_id} task {task_id} state → {actual}")
+            if actual != requested:
+                print(
+                    f"  ⚠ 完遂ゲートが遷移を変更しました: 要求 {requested} → 実際 "
+                    f"{actual} (attainment 不足で留置 / 差し戻し)。"
+                )
             # ms-97 / e-2706 — leader notify は REVIEW_TRIGGER_STATES
             # (= done / user_review / leader_review) で発火する。 CLI 表示も
-            # server 側 emit 条件と一致させる。
-            if state in trek.REVIEW_TRIGGER_STATES:
+            # server 側 emit 条件と一致させる (実 state で判定)。
+            if actual in trek.REVIEW_TRIGGER_STATES:
                 print(
                     "  Leader has been notified via trek-task-review DM "
                     "(= /beacon-trek-review surface)."
@@ -9091,7 +9104,6 @@ def cmd_trek_task_state():
     ).get("updated_by_session_id", "")
     gate = trek.completion_gate_decision(
         effective_state=effective_state,
-        from_state=from_state,
         verdict=verdict,
         caller_sid=caller_sid,
         prior_stamper_sid=prior_stamper_sid,

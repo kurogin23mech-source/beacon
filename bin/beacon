@@ -4629,7 +4629,7 @@ except ValueError as e:
                 echo "  kickoff <trek-id> [--session-id X] [--kickoff-dm-event-id Y]  (= Kickoff Ritual 完了 stamp、 /beacon-trek-pulse Step 0.4、 ms-88 e-2138)"
                 echo "  pulse-ack <trek-id> [--picked-choice X] [--note '...'] [--state-summary '...'] [--blocker '...'] [--needs-leader-judgment] [--time-on-task N]  (= /beacon-trek-pulse Skill observability ack、 ms-88 e-2106 + ms-92 e-2165 構造化 payload)"
                 echo "  reconcile <trek-id> [--apply]                  (= task pool ↔ Trek stamp の乖離を修復、 default dry-run、 ms-88 e-2167)"
-                echo "  task-state <trek-id> <task-id> <state> [--note '...'] [--verdict approve|re-work|forward-to-user] [--attainment-verdict '<json>']  (= ms-75/e-2048、 state: working|leader_review|user_review。approve で user_review に倒すには全 met の --attainment-verdict 必須、 ms-128/e-4386)"
+                echo "  task-state <trek-id> <task-id> <state> [--note '...'] [--verdict approve|forward-to-user] [--attainment-verdict '<json>']  (= ms-75/e-2048、 state: working|leader_review|user_review。user_review に倒すには全 met の --attainment-verdict 付き approve、 または人間エスカレーションの forward-to-user が必須。re-work は verdict でなく state=working で表す、 ms-128/e-4386)"
                 echo "  block <trek-id> <target-id> --on <blocker-id> [--on ...] [--note '...']  (= leader が依存を張る、 ms-128/e-4365。全依存が取り込み済みで自動再開)"
                 echo "  unblock <trek-id> <target-id> --on <blocker-id>  (= 依存を 1 本外す、 循環解消/誤登録訂正、 ms-128/e-4365)"
                 echo "  blockers <trek-id>                              (= 依存待ちの target 一覧 + 循環表示、 ms-128/e-4365)"

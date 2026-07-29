@@ -4437,9 +4437,17 @@ def leader_review_verdict_set(trek_doc: dict, target_id: str) -> dict:
 #   1. 受入条件を criterion 単位 (met / partial / not-met) で評価した構造化 verdict を
 #      必須にする (= 素の「approve」一発を禁止)。全 met でなければ倒せない。
 #   2. 判定主体を実行者の外に固定する (self_judgment = 直前に状態を stamp した session
-#      が自分で user_review に倒す経路) を完遂ゲートで無効化する。
+#      が自分で user_review に倒す / prior stamper 不明で外部判定を確認できない) を
+#      完遂ゲートで無効化する。
 #   3. 明示的な人間エスカレーション (forward-to-user) だけは gate 対象外 — これは
 #      「判断を人間に委ねる」ための user_review 到達であり、自己採点ではない。
+#
+# 思想レビュー (2026-07-29, P1 high) の指摘で **user_review への全入口** を gate 対象に
+# する。当初は「leader_review 起点 または 明示 approve」に絞っていたが、SPEC 状態遷移表
+# では user_review 入口はリーダー承認のみ、かつ本 diff の SKILL 文書も「素の user_review
+# は留置される」と宣言しているのに、素の working→user_review が素通りして実行者が単独で
+# terminal に到達できる穴が残っていた (= 自己採点経路が隣に開く)。forward-to-user 明示
+# 以外の user_review 到達はすべて完遂合格として attainment を要求する。
 #
 # 失敗時は user_review に倒さず leader_review に留置し (forced_state)、scheduler が
 # 外部 judge へ review を再通知する (= 「手前まで運ぶ」の手前で止める / user 合意
@@ -4447,8 +4455,10 @@ def leader_review_verdict_set(trek_doc: dict, target_id: str) -> dict:
 # SPEC どおり working へ差し戻す。
 # ---------------------------------------------------------------------------
 
-# 受入条件 1 項目あたりの verdict 値。met 以外は「未達」として扱う (未評価 = 未達)。
+# 受入条件 1 項目あたりの verdict 値 (正規化後の canonical set)。先頭 = 合格を意味する
+# 唯一の token。met 以外は「未達」として扱う (未評価 / 未知の値 = 未達)。
 ATTAINMENT_VERDICT_VALUES = ("met", "partial", "not-met")
+ATTAINMENT_MET = ATTAINMENT_VERDICT_VALUES[0]  # 合格 token の単一真実源
 # user_review に倒す 2 つの verdict のうち、gate 対象 (= 完遂合格) と対象外 (= 人間
 # エスカレーション)。COMPLETION_VERDICTS の verdict 名と一致させること。
 COMPLETION_APPROVE_VERDICT = "approve"
@@ -4460,9 +4470,16 @@ def evaluate_attainment_verdict(criteria_verdicts) -> dict:
 
     ``criteria_verdicts``: list of ``{"criterion": str, "verdict": str}`` where
     verdict is one of ``ATTAINMENT_VERDICT_VALUES``. Any value other than
-    ``met`` (including missing / unknown / an unevaluated criterion) counts as
-    **未達** — an un-judged criterion is conservatively NOT met, so a verdict
-    can never pass by omission.
+    ``ATTAINMENT_MET`` (including missing / unknown / an unevaluated criterion)
+    counts as **未達** — an un-judged criterion is conservatively NOT met, so a
+    verdict can never pass by omission. Matching is case-insensitive after
+    ``strip().lower()``; the ``met`` token is derived from
+    ``ATTAINMENT_MET`` so the constant is the single source (rename the constant →
+    the accepted token changes with it).
+
+    Only the documented ``criterion`` label is read (no silent ``text`` alias —
+    AX review 2026-07-29 A5: an undocumented field that ``evaluate`` accepts
+    would corrupt the leader's review surface silently).
 
     Returns ``{"has_verdict": bool, "all_met": bool, "unmet": [criterion, ...]}``.
     An empty / non-list input yields ``has_verdict=False`` (= no structured
@@ -4475,34 +4492,36 @@ def evaluate_attainment_verdict(criteria_verdicts) -> dict:
     unmet = []
     for c in items:
         v = str(c.get("verdict", "")).strip().lower()
-        if v != "met":
-            label = str(c.get("criterion") or c.get("text") or "").strip()
+        if v != ATTAINMENT_MET:
+            label = str(c.get("criterion") or "").strip()
             unmet.append(label[:200])
     return {"has_verdict": True, "all_met": not unmet, "unmet": unmet}
 
 
-def completion_gate_decision(*, effective_state: str, from_state: str,
+def completion_gate_decision(*, effective_state: str,
                              verdict: str, caller_sid: str,
                              prior_stamper_sid: str,
                              attainment_verdict) -> dict:
-    """Pure — decide whether a **completion approval** into ``user_review`` passes.
+    """Pure — decide whether a transition into ``user_review`` passes the gate.
 
     ms-128 / e-4386. Called with the *effective* (post-migrate) target state, the
-    state being transitioned *from*, the leader's chosen ``verdict`` (empty when
-    an executor stamps directly), the calling session, the session that stamped
-    the current state (``prior_stamper_sid`` = the executor for a leader_review
-    origin), and the structured ``attainment_verdict`` payload.
+    chosen ``verdict`` (empty when a session stamps directly), the calling
+    session, the session that stamped the current state (``prior_stamper_sid`` =
+    the executor for a leader_review origin), and the structured
+    ``attainment_verdict`` payload.
 
-    The gate guards only the **completion-approval** path — the judgment that a
-    target is *done*: ``leader_review → user_review`` (the leader's approval), or
-    any transition carrying an explicit ``approve`` verdict. A bare
-    ``working → user_review`` with no verdict is the executor's *forward-to-user
-    escalation* (= "this needs a human", not "this is complete") and is left
-    open; ``forward-to-user`` is likewise never gated.
+    **Every** path reaching ``user_review`` (the Trek terminal) is a completion
+    claim and must be backed by an external, all-met attainment verdict — the
+    only exception is an explicit ``forward-to-user`` escalation (judgment punted
+    to the human, not a completion claim). This closes the bare
+    ``working → user_review`` self-terminalize hole (思想レビュー P1, 2026-07-29):
+    the SPEC admits ``user_review`` only via the leader's approval, so an executor
+    can never reach the terminal by a bare stamp.
 
-    On a guarded path it enforces: (1) the judge is outside the executor
-    (self_judgment = caller == prior stamper is banned), and (2) every SPEC
-    criterion is ``met`` in an ``attainment_verdict``.
+    It enforces: (1) the judge is outside the executor — ``self_judgment``
+    (caller == prior stamper) is banned, and a **missing** prior stamper is
+    fail-closed (can't confirm the judge differs from the executor — AX review A4);
+    (2) every SPEC criterion is ``met`` in an ``attainment_verdict``.
 
     Returns ``{"allowed": bool, "forced_state": str|None, "code": str,
     "message": str}``. When ``allowed`` is False, ``forced_state`` is where the
@@ -4515,14 +4534,9 @@ def completion_gate_decision(*, effective_state: str, from_state: str,
     if verdict == ESCALATE_TO_USER_VERDICT:
         # 人間へのエスカレーションは自己採点ではない — gate しない。
         return {"allowed": True, "forced_state": None, "code": "", "message": ""}
-    # gate 対象は「完遂合格判定」だけ: leader_review からの承認、または明示 approve。
-    # verdict 無しの working→user_review は forward-to-user エスカレーション扱いで開けておく
-    # (= 完遂の主張ではないため、attainment を要求しない)。
-    is_completion_approval = (
-        from_state == "leader_review" or verdict == COMPLETION_APPROVE_VERDICT
-    )
-    if not is_completion_approval:
-        return {"allowed": True, "forced_state": None, "code": "", "message": ""}
+    # forward-to-user 明示 **以外** の user_review 到達はすべて完遂合格 = attainment 必須
+    # (P1 fix: 素の working→user_review も含む。SPEC は user_review 入口をリーダー承認に
+    # 限定しており、実行者の bare stamp で terminal 到達させない)。
     self_judgment = bool(
         caller_sid and prior_stamper_sid and caller_sid == prior_stamper_sid
     )
@@ -4535,6 +4549,20 @@ def completion_gate_decision(*, effective_state: str, from_state: str,
                 "完遂判定は実行者の外に固定する必要があります "
                 "(self_judgment 自動 pass 禁止)。作業した session 以外の judge が "
                 "attainment verdict を出してください。leader_review に留置します。"
+            ),
+        }
+    if not prior_stamper_sid:
+        # A4 (AX review 2026-07-29): prior stamper が空 = 直前に誰が作業したか不明で、
+        # judge が実行者の外だと確認できない。fail-closed で留置する (自己採点を
+        # 「識別できないから素通し」にしない)。
+        return {
+            "allowed": False,
+            "forced_state": "leader_review",
+            "code": "attainment_judge_unverifiable",
+            "message": (
+                "直前に状態を stamp した session が不明で、完遂判定を出す judge が "
+                "実行者の外だと確認できません。leader_review に留置します "
+                "(session_id を伴う stamp で作業者を記録してから外部 judge が承認)。"
             ),
         }
     ev = evaluate_attainment_verdict(attainment_verdict)

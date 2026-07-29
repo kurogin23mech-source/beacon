@@ -4180,10 +4180,13 @@ class TrekTaskStateSet(BaseModel):
     """ms-75 / e-2048 — Trek-internal task state declaration.
 
     ``task_id`` is the project entry id (e-XXXX) the executor is stamping.
-    ``state`` is one of ``working``, ``done``, ``waiting-review``. ``note``
-    is a short freeform string (≤500 chars) attached to the state record
-    so the leader review surface can show executor rationale without a
-    separate DM round-trip.
+    ``state`` is one of the canonical 5-state set ``block``, ``todo``,
+    ``working``, ``leader_review``, ``user_review`` (legacy aliases migrate on
+    write: ``done`` → ``user_review``, ``waiting-review`` → ``leader_review``;
+    ``block`` is set only via the blocker endpoint, not here). ``note`` is a
+    short freeform string (≤500 chars) attached to the state record so the
+    leader review surface can show executor rationale without a separate DM
+    round-trip.
     """
     task_id: str
     state: str
@@ -6511,7 +6514,6 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
         ).get("updated_by_session_id", "")
         gate = trek_mod.completion_gate_decision(
             effective_state=effective_state,
-            from_state=from_state,
             verdict=(body.verdict or ""),
             caller_sid=caller_sid,
             prior_stamper_sid=prior_stamper_sid,
