@@ -3980,6 +3980,90 @@ HALT_STALL_TIMEOUT_MINUTES = 240   # 進捗停滞: 同一応答 + commit 増分�
 HALT_REASON_LIVENESS = "liveness-timeout"   # 生存断絶 (pulse 途絶)
 HALT_REASON_STALL = "progress-stall"        # 進捗停滞 (同一応答 + commit 不変)
 
+# ms-128 方針8 (e-4368) — リーダー halt の機械検知。リーダーは監視ツリーの根で
+# Trek 内に番犬がいない。既存の idle-escalation は「実行セッションの pulse」を
+# 基準にするため、実行セッションが活発なのにリーダーだけ寝ているケース (=
+# 2026-07-27 の 4.5h stall の実態) を捕まえられない。リーダーの唯一の観測可能な
+# 動作は leader_review キューの消化 (= 思想/目的達成レビュー verdict) なので、
+# 「キューが drain されていない」ことをリーダー halt の signal とする。
+#
+# **oldest-item-age 方式** (full-queue fingerprint でなく): 働いているリーダーは
+# 古い順にキューを消化する (digest は oldest-first で並べる)。よって「最古の
+# leader_review item が threshold を超えて待たされている」= リーダーが前面を
+# 消化していない = halt。この方式は実行セッションが新しい leader_review を後ろに
+# 積んでも最古は動かないので、executor churn に頑健 (full-queue fingerprint だと
+# 追加のたびに stall clock がリセットされ寝たリーダーを見逃す)。閾値は executor
+# halt と同じ 4h。これが方針6 の 2 面のうち「進捗停滞」面をリーダーに写したもの
+# (「生存断絶」面 = trek 全体の沈黙は既存の idle-escalation が担う)。
+LEADER_REVIEW_STALL_MINUTES = 240
+HALT_REASON_LEADER_REVIEW_STALL = "leader-review-stall"
+
+
+def evaluate_leader_halt(
+    trek_doc: dict,
+    *,
+    now: datetime.datetime | None = None,
+    stall_timeout_minutes: int = LEADER_REVIEW_STALL_MINUTES,
+) -> dict | None:
+    """Detect a halted LEADER by the leader_review queue not draining (方針8).
+
+    Read-only (no mutation): returns halt info or None so the caller (server
+    tick) decides whether to escalate. Pure w.r.t. clock (``now`` injected; the
+    e2e harness passes a fake clock).
+
+    Signal: the oldest ``leader_review`` task's age. A working leader drains the
+    queue oldest-first, so if the oldest waiting item has sat >=
+    ``stall_timeout_minutes`` the leader isn't reviewing (regardless of new items
+    executors pile at the back). This is the leader-side "progress-stall" face of
+    the 方針6 mechanical halt detection; the "liveness" face (whole-trek silence)
+    stays with the existing idle-escalation.
+
+    Guards: only ``status == 'active'`` treks with a ``leader_session_id`` and no
+    deliberate ``halt`` are evaluated. An empty leader_review queue → None
+    (nothing to drain, so the leader can't be "not draining").
+
+    Returns ``{"reason", "oldest_task_id", "waited_minutes", "queue_size",
+    "leader_session_id"}`` or None.
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.timezone.utc)
+    if trek_doc.get("status") != "active":
+        return None
+    if trek_doc.get("halt"):
+        return None
+    leader_sid = trek_doc.get("leader_session_id") or ""
+    if not leader_sid:
+        return None
+
+    states = trek_doc.get("task_states") or {}
+    # Collect leader_review items with their entry time (updated_at = when the
+    # task last transitioned, i.e. when it entered leader_review).
+    queue: list[tuple[str, datetime.datetime]] = []
+    for tid, entry in states.items():
+        entry = entry or {}
+        if migrate_legacy_task_state(entry.get("state") or DEFAULT_TASK_STATE) \
+                != "leader_review":
+            continue
+        entered = _parse_iso_to_dt(entry.get("updated_at") or "")
+        if entered is None:
+            continue
+        queue.append((tid, entered))  # _parse_iso_to_dt returns UTC-aware
+    if not queue:
+        return None
+
+    oldest_tid, oldest_at = min(queue, key=lambda p: p[1])
+    waited = now - oldest_at
+    if waited < datetime.timedelta(minutes=stall_timeout_minutes):
+        return None
+    return {
+        "reason": HALT_REASON_LEADER_REVIEW_STALL,
+        "oldest_task_id": oldest_tid,
+        "waited_minutes": int(waited.total_seconds() // 60),
+        "queue_size": len(queue),
+        "leader_session_id": leader_sid,
+    }
+
 
 def compute_response_fingerprint(pulse_entry: dict) -> str:
     """Normalised hash of a session's latest tick response (ms-128 e-4367).
