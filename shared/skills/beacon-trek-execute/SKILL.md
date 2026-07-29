@@ -138,12 +138,32 @@ cd "$PROJECT_DIR" && beacon dm send --channel session-dm \
 
 ## Step 4: 実装 / commit / task done loop
 
+**状態機械を必ず駆動する (= ms-128 / e-4282)**: Trek は `task_states` が「誰が何を着手 /
+完成させたか」を反映して初めて observability が生きる。dogfood (2026-07-27) では
+`task_states` が空のまま work が進み、Trek 自身が進捗を知らない病理が観測された。以下の
+2 つの stamp は **候補ごとに必須** で、省略してはならない (状態が実態と乖離する):
+
 各候補ごとに:
 
-1. **scope check** — 触る path / task が scope 配列に match するか self-check、 match しない → Step 6 escalation
-2. **実装** — Read / Edit / Write でコード変更、 Bash で test 実行 green を確認
-3. **中間 commit** — 形式 `<type>(<ms-id>): <概要> (<e-XXX>)`
-4. **task done 判定** — acceptance_criteria を物理照合、 DONE / PARTIAL / SKIP の 3 択、 PARTIAL は follow-up task 起票:
+1. **着手 stamp (必須)** — 取り掛かる前に `working` を stamp する。これで Trek が
+   「この候補は自分が着手中」を知る:
+   ```bash
+   cd "$PROJECT_DIR" && beacon trek task-state <trek-id> <task-id> working --note "着手: <概要>"
+   ```
+2. **scope check** — 触る path / task が scope 配列に match するか self-check、 match しない → Step 6 escalation
+3. **実装** — Read / Edit / Write でコード変更、 Bash で test 実行 green を確認
+4. **中間 commit** — 形式 `<type>(<ms-id>): <概要> (<e-XXX>)`
+5. **完成 stamp (必須)** — 候補が完成し PR 化したら `leader_review` を stamp する
+   (= 完成宣言。server が leader へ review DM を自動発信する)。**executor は
+   `user_review` / `done` へ直接倒さない** — `user_review` はリーダーの承認 (思想/目的
+   達成レビュー合格) を経る `leader_review → user_review` が唯一の入口で、状態機械が
+   `todo` / `working` から終端への直行を弾く (= review 経由必須、方針5 / e-4373)。
+   done は Trek 外 (= 書かない):
+   ```bash
+   cd "$PROJECT_DIR" && beacon trek task-state <trek-id> <task-id> leader_review --note "完成/PR: <概要>"
+   ```
+6. **pool task done 判定** — 上とは別に、project pool 側の task 完了を acceptance_criteria
+   物理照合で DONE / PARTIAL / SKIP 判定 (PARTIAL は follow-up task 起票):
    ```bash
    cd "$PROJECT_DIR" && beacon task done <eXXX> --reason "<判断軌跡>"
    ```
