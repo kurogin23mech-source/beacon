@@ -129,23 +129,45 @@ class TestCliTaskRecovery:
         # Task debt is gone; only the (still-untriaged) milestone remains.
         assert commands._count_untriaged_active(data) == (1, 0)
 
-    def test_human_cannot_update_task_priority_to_untriaged_literal(
+    def test_human_cannot_transition_triaged_task_to_untriaged(
         self, project_dir, monkeypatch, capsys
     ):
         # Recovery must move *forward* to a real severity — a human cannot
-        # re-park the sentinel via update. ``untriaged`` is not an accepted
-        # severity, so task_update raises "Invalid priority" → exit 1.
+        # re-park the sentinel. First triage e-1 to "high", then an attempt to
+        # transition it back to untriaged is rejected with the precise
+        # sentinel-not-a-severity message (AX#3), leaving the value unchanged.
         monkeypatch.setenv("BEACON_ENTRY_ID", "e-1")
+        monkeypatch.setenv("BEACON_PRIORITY", "high")
+        commands.cmd_task_update()  # triage first
+        assert _load(project_dir)["milestones"][0]["entries"][0]["meta"]["priority"] == "high"
+
         monkeypatch.setenv("BEACON_PRIORITY", core.UNTRIAGED_PRIORITY)
         with pytest.raises(SystemExit) as exc:
             commands.cmd_task_update()
         assert exc.value.code == 1
-        assert "Invalid priority" in capsys.readouterr().out
-        # Unchanged: still the sentinel, still counted as debt.
+        assert "sentinel, not a severity" in capsys.readouterr().out
+        # Unchanged: still the triaged severity, not re-parked.
         assert (
-            _load(project_dir)["milestones"][0]["entries"][0]["meta"]["priority"]
-            == core.UNTRIAGED_PRIORITY
+            _load(project_dir)["milestones"][0]["entries"][0]["meta"]["priority"] == "high"
         )
+
+    def test_echoing_untriaged_unchanged_is_idempotent_noop(
+        self, project_dir, monkeypatch
+    ):
+        # AX#1 read-modify-write: an untriaged task's stored value IS
+        # "untriaged"; echoing it back unchanged (e.g. a status-only edit that
+        # re-sends the whole object) must be a no-op, not a rejection. The value
+        # stays untriaged and the debt count is unaffected.
+        before = commands._count_untriaged_active(_load(project_dir))
+        monkeypatch.setenv("BEACON_ENTRY_ID", "e-1")
+        monkeypatch.setenv("BEACON_PRIORITY", core.UNTRIAGED_PRIORITY)  # echo current
+        monkeypatch.setenv("BEACON_STATUS", "in_progress")             # the real edit
+        commands.cmd_task_update()  # must NOT raise
+        data = _load(project_dir)
+        entry = data["milestones"][0]["entries"][0]
+        assert entry["status"] == "in_progress"
+        assert entry["meta"]["priority"] == core.UNTRIAGED_PRIORITY  # still the sentinel
+        assert commands._count_untriaged_active(data) == before
 
 
 class TestCliMilestoneRecovery:
@@ -290,24 +312,41 @@ class TestWebRecovery:
         assert entry["meta"]["priority"] == "high"
         assert commands._count_untriaged_active(_store[pid]) == (0, 0)
 
-    def test_patch_task_priority_rejects_untriaged_literal(self, web):
+    def test_patch_task_transition_to_untriaged_rejected(self, web):
         # The web recovery path, like the CLI, only moves to a real severity;
-        # re-parking the sentinel is an Invalid priority → 400.
+        # transitioning a triaged task BACK to the sentinel is rejected → 400.
         pid = "p-recover-task-guard"
         _seed(pid, milestones=[_active_ms(entries=[
-            {"id": "e-1", "type": "task", "description": "imported",
-             "status": "todo", "meta": {"priority": core.UNTRIAGED_PRIORITY}},
+            {"id": "e-1", "type": "task", "description": "triaged",
+             "status": "todo", "meta": {"priority": "low"}},
         ])])
         r = web.patch(
             f"/api/projects/{pid}/entries/e-1",
             json={"priority": core.UNTRIAGED_PRIORITY},
         )
         assert r.status_code == 400, r.text
-        assert "Invalid priority" in r.text
-        assert (
-            _store[pid]["milestones"][0]["entries"][0]["meta"]["priority"]
-            == core.UNTRIAGED_PRIORITY
+        assert "sentinel, not a severity" in r.text
+        assert _store[pid]["milestones"][0]["entries"][0]["meta"]["priority"] == "low"
+
+    def test_patch_task_read_modify_write_echo_of_untriaged_is_accepted(self, web):
+        # AX#1: the canonical AI edit is GET → change one field → PATCH the whole
+        # object back. An untriaged task's GET carries priority=="untriaged"; a
+        # status-only edit that echoes it must succeed (200), not 400 on the
+        # API's own emitted value. The sentinel is preserved (debt unchanged).
+        pid = "p-recover-task-rmw"
+        _seed(pid, milestones=[_active_ms(entries=[
+            {"id": "e-1", "type": "task", "description": "imported",
+             "status": "todo", "meta": {"priority": core.UNTRIAGED_PRIORITY}},
+        ])])
+        r = web.patch(
+            f"/api/projects/{pid}/entries/e-1",
+            json={"status": "in_progress", "priority": core.UNTRIAGED_PRIORITY},
         )
+        assert r.status_code == 200, r.text
+        entry = _store[pid]["milestones"][0]["entries"][0]
+        assert entry["status"] == "in_progress"
+        assert entry["meta"]["priority"] == core.UNTRIAGED_PRIORITY
+        assert commands._count_untriaged_active(_store[pid]) == (0, 1)
 
     def test_patch_task_status_only_leaves_priority_untouched(self, web):
         # Empty priority in the PATCH body = "no change": a status-only edit

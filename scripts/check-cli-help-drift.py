@@ -596,28 +596,46 @@ def _subparsers_action(parser) -> "argparse._SubParsersAction | None":
     return None
 
 
-def python_verb_flags(
-    python_dispatch_path: Path = PYTHON_DISPATCH,
-) -> dict[str, set[str]]:
-    """Map canonical ``"noun sub"`` → set of ``--long`` flags the Python
-    dispatcher registers on that nested subparser.
-
-    Introspects the real ``build_parser()`` (not a regex over the source), so
-    it sees exactly the flags argparse would accept — including aliases like
-    ``--priority -p`` (only the ``--`` spellings are collected; the parity
-    contract is about long flags). Aliased nouns (``ms`` → ``milestone``) also
-    appear as keys; we key the required map by canonical names so both resolve.
+def _load_dispatch_parser(python_dispatch_path: Path = PYTHON_DISPATCH):
+    """Import ``beacon_cli.dispatch`` and return its ``build_parser()`` result.
 
     ``beacon_cli.dispatch`` uses package-relative imports, so it must be loaded
     as part of its package (the repo root that contains ``beacon_cli/`` on
     ``sys.path``), not as a bare file — hence ``import_module`` over the package
-    name rather than a spec-from-file-location load.
+    name rather than a spec-from-file-location load. Because ``import_module``
+    caches in ``sys.modules``, this always introspects the *installed* package;
+    callers that need to introspect a different parser (e.g. a synthetic one in
+    a test) inject it via ``python_verb_flags(parser=...)`` instead of pointing
+    this at another file — the path argument here only anchors which repo root
+    goes on ``sys.path``, it cannot swap the cached module.
     """
     pkg_root = python_dispatch_path.resolve().parent.parent
     if str(pkg_root) not in sys.path:
         sys.path.insert(0, str(pkg_root))
     module = importlib.import_module("beacon_cli.dispatch")
-    parser = module.build_parser()
+    return module.build_parser()
+
+
+def python_verb_flags(
+    python_dispatch_path: Path = PYTHON_DISPATCH,
+    parser=None,
+) -> dict[str, set[str]]:
+    """Map canonical ``"noun sub"`` → set of ``--long`` flags the Python
+    dispatcher registers on that nested subparser.
+
+    Introspects a real argparse parser (not a regex over the source), so it sees
+    exactly the flags argparse would accept — including aliases like
+    ``--priority -p`` (only the ``--`` spellings are collected; the parity
+    contract is about long flags). Aliased nouns (``ms`` → ``milestone``) also
+    appear as keys; we key the required map by canonical names so both resolve.
+
+    ``parser`` is the real injection seam: pass a ``build_parser()``-shaped
+    ``ArgumentParser`` to introspect it directly. When ``None`` (production),
+    the installed ``beacon_cli.dispatch`` parser is loaded — see
+    ``_load_dispatch_parser`` for why the module can't be swapped by path.
+    """
+    if parser is None:
+        parser = _load_dispatch_parser(python_dispatch_path)
 
     result: dict[str, set[str]] = {}
     top = _subparsers_action(parser)
@@ -644,23 +662,33 @@ _BASH_FUNC_RE = re.compile(r"^cmd_[a-z0-9_]+\(\)", re.MULTILINE)
 _BASH_CASE_FLAG_RE = re.compile(r"^\s*(--[a-zA-Z0-9|=?*.\-]+)\)", re.MULTILINE)
 
 
-def bash_verb_flags(verb: str, bin_path: Path = BIN_BEACON) -> set[str]:
+def bash_verb_flags(verb: str, bin_path: Path = BIN_BEACON) -> "set[str] | None":
     """Collect the ``--long`` flags parsed inside the bash ``cmd_<verb>()``
     function body (``verb`` = canonical ``"noun sub"``).
 
     The bash dispatcher hand-parses flags in a ``case "$1" in … --flag) …``
     loop inside a ``cmd_<noun>_<sub>()`` function. We slice that function (its
     ``cmd_…()`` header to the next ``cmd_…()`` header) and read the case labels,
-    splitting ``--a|--b`` alias groups. Returns the set of long flags; empty if
-    the function isn't found (surfaces as a parity miss, which is the point).
+    splitting ``--a|--b`` alias groups.
+
+    Returns the set of long flags, or ``None`` when the function definition
+    isn't found. The two are distinct failures with distinct fixes ("the loop
+    is missing a flag" vs "the function was renamed/removed / the verb key is
+    wrong"), so the caller must not collapse a missing function into an empty
+    flag set. The function *header* is matched line-anchored (``^cmd_…()``) —
+    the same anchor used to find the slice *end* — so a bare mention of the
+    name in a comment or usage string can't be mistaken for the definition
+    (an unanchored ``str.find`` could latch onto an earlier occurrence and
+    slice the wrong region, yielding a false pass).
     """
     text = bin_path.read_text(encoding="utf-8")
-    func_header = "cmd_" + verb.replace(" ", "_") + "()"
-    start = text.find(func_header)
-    if start == -1:
-        return set()
-    nxt = _BASH_FUNC_RE.search(text, start + len(func_header))
-    body = text[start:nxt.start()] if nxt else text[start:]
+    name = "cmd_" + verb.replace(" ", "_")
+    header_re = re.compile(r"^" + re.escape(name) + r"\(\)", re.MULTILINE)
+    m = header_re.search(text)
+    if m is None:
+        return None
+    nxt = _BASH_FUNC_RE.search(text, m.end())
+    body = text[m.start():nxt.start()] if nxt else text[m.start():]
     flags: set[str] = set()
     for group in _BASH_CASE_FLAG_RE.findall(body):
         for token in group.split("|"):
@@ -677,24 +705,38 @@ def collect_flag_parity(
     """Verify every ``REQUIRED_FLAG_PARITY`` (verb, flag) exists on BOTH the
     bash function and the Python subparser.
 
-    Returns dict with ``ok`` plus two lists of ``"<verb> <flag>"`` strings:
-    ``missing_from_python_flags`` / ``missing_from_bash_flags``.
+    Returns dict with ``ok`` plus three lists: ``missing_from_python_flags`` /
+    ``missing_from_bash_flags`` (``"<verb> <flag>"`` strings), and
+    ``missing_bash_functions`` (``"<verb>"`` — the whole bash ``cmd_<verb>()``
+    is absent, a different fix than a missing flag: add/rename the function or
+    correct the verb key, not "add a flag to a loop that doesn't exist").
     """
     py_flags = python_verb_flags(python_dispatch_path)
     missing_python: list[str] = []
     missing_bash: list[str] = []
+    missing_bash_functions: list[str] = []
     for verb, required in REQUIRED_FLAG_PARITY.items():
         have_py = py_flags.get(verb, set())
         have_bash = bash_verb_flags(verb, bin_path)
+        if have_bash is None:
+            # The cmd_<verb>() function itself is gone — report once, and don't
+            # also emit per-flag "missing from loop" noise for a loop that
+            # doesn't exist (that would misdirect the fix).
+            missing_bash_functions.append(verb)
+            have_bash = set()
+            bash_function_present = False
+        else:
+            bash_function_present = True
         for flag in sorted(required):
             if flag not in have_py:
                 missing_python.append(f"{verb} {flag}")
-            if flag not in have_bash:
+            if bash_function_present and flag not in have_bash:
                 missing_bash.append(f"{verb} {flag}")
     return {
-        "ok": not (missing_python or missing_bash),
+        "ok": not (missing_python or missing_bash or missing_bash_functions),
         "missing_from_python_flags": sorted(missing_python),
         "missing_from_bash_flags": sorted(missing_bash),
+        "missing_bash_functions": sorted(missing_bash_functions),
     }
 
 
@@ -763,6 +805,7 @@ def collect_drift(
         # ms-126 e-4223 surface (bash cmd_* flags vs Python subparser flags):
         "missing_from_python_flags": flag_parity["missing_from_python_flags"],
         "missing_from_bash_flags": flag_parity["missing_from_bash_flags"],
+        "missing_bash_functions": flag_parity["missing_bash_functions"],
     }
     return report
 
@@ -816,6 +859,13 @@ def _format_text(report: dict) -> str:
             lines.append(f"      beacon {v}")
         lines.append("    -> add a `--flag)` case to the matching cmd_<verb>() loop in bin/beacon,")
         lines.append("       OR revise REQUIRED_FLAG_PARITY if the contract intentionally changed.")
+    if report.get("missing_bash_functions"):
+        lines.append("  - bash cmd_<verb>() function itself not found in bin/beacon:")
+        for v in report["missing_bash_functions"]:
+            lines.append(f"      beacon {v}  (expected function: cmd_{v.replace(' ', '_')}())")
+        lines.append("    -> the whole handler is absent (renamed/removed), not just a flag.")
+        lines.append("       Add/rename the cmd_<verb>() function in bin/beacon, OR fix the verb")
+        lines.append("       key in REQUIRED_FLAG_PARITY if it no longer matches a real function.")
     lines.append("")
     lines.append("Allowlists for intentional asymmetries live in scripts/check-cli-help-drift.py.")
     lines.append("This guard is part of ms-10 e-722 (doc & skill auto-sync) + ms-44 e-1171 (dispatch parity).")

@@ -868,9 +868,18 @@ def milestone_update(data: dict, ms_id: str, *,
             if target_date:
                 ms["target_date"] = target_date
             if priority:
-                if priority not in _ACCEPTED_PRIORITIES:
-                    raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
-                ms["priority"] = normalize_priority(priority)
+                # ms-126 (e-4224 / AX#1): accept an idempotent echo of the
+                # current value (incl. the untriaged sentinel) so read-modify-
+                # write round-trips don't 400; reject only a real transition to
+                # a non-severity. Mirrors task_update above.
+                current = ms.get("priority", "")
+                if priority != current:
+                    if priority == UNTRIAGED_PRIORITY:
+                        raise ValueError(_UNTRIAGED_NOT_SEVERITY_MSG)
+                    if priority not in _ACCEPTED_PRIORITIES:
+                        raise ValueError(
+                            f"Invalid priority: {priority}. Valid: {', '.join(_PRIORITY_SCALE_ORDER)}")
+                    ms["priority"] = normalize_priority(priority)
             if objective:
                 ms["objective"] = objective
             if acceptance_criteria:
@@ -1332,13 +1341,26 @@ def task_update(data: dict, entry_id: str, *,
         entry["behavior"] = behavior
         changed = True
     if priority:
-        if priority not in _ACCEPTED_PRIORITIES:
-            raise ValueError(
-                f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}"
-            )
-        meta = entry.setdefault("meta", {})
-        meta["priority"] = normalize_priority(priority)
-        changed = True
+        # ms-126 (e-4224 / AX#1): read-modify-write is the canonical AI edit
+        # pattern (GET an entry, change one field, PATCH the whole object back).
+        # An untriaged task's GET carries priority=="untriaged"; echoing it back
+        # unchanged must be an idempotent no-op, NOT a 400 — otherwise the API's
+        # own emitted value becomes an invalid input and the AI mis-diagnoses
+        # its own request. So: an echo of the currently-stored value (incl. the
+        # sentinel) is accepted as a no-change; only an actual *transition* to a
+        # non-severity is rejected. That keeps the "a human cannot newly choose
+        # untriaged" invariant while not breaking round-trips.
+        current = (entry.get("meta") or {}).get("priority", "")
+        if priority != current:
+            if priority == UNTRIAGED_PRIORITY:
+                raise ValueError(_UNTRIAGED_NOT_SEVERITY_MSG)
+            if priority not in _ACCEPTED_PRIORITIES:
+                raise ValueError(
+                    f"Invalid priority: {priority}. Valid: {', '.join(_PRIORITY_SCALE_ORDER)}"
+                )
+            meta = entry.setdefault("meta", {})
+            meta["priority"] = normalize_priority(priority)
+            changed = True
     if changed:
         author_clean = _clean_author(author)
         if author_clean:
