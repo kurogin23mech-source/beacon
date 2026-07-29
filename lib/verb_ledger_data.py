@@ -378,6 +378,7 @@ VERB_LEDGER = {
     "target_advance": {"cls": "R", "secondary": [], "note": "[post-memo] target のフェーズ進行を記録(R)、opportunity phase と同型"},
     "target_approve": {"cls": "R", "secondary": ["C", "B"], "note": "[post-memo] 目的達成 verdict 記録(R)/人間決定(C)/遷移実行(B)、target/pr approve と同型"},
     "target_attach_evidence": {"cls": "R", "secondary": [], "note": "[post-memo] 独立レビュー verdict/根拠を pending 承認に添付=台帳追記(R)"},
+    "target_attach_disposition": {"cls": "R", "secondary": [], "note": "[e-4579] 未着手 highest/high タスクの disposition(done/superseded/blocks-attainment)を pending 承認に添付=台帳追記(R)、attach_evidence と同族"},
     "target_ball": {"cls": "R", "secondary": [], "note": "[post-memo] 次手のコート(self/counterpart)を記録(R)"},
     "target_class_add": {"cls": "B", "secondary": [], "note": "[post-memo] 新 target-class を project.json へ宣言=descriptor/schema 追加の機械操作(B)、no-code onboarding 経路"},
     "target_class_list": {"cls": "Q", "secondary": [], "note": "[post-memo] 宣言済 target-class の read-only 一覧(Q)"},

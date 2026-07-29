@@ -276,6 +276,13 @@ ATTAINMENT_JUDGE_CONTRACT = (
     "証拠と判定案を生成するだけで、target の状態遷移を確定させません。実装者セッション"
     "の会話文脈・コミットの意図説明・『本当はこうするつもり』を一切参照しないでください "
     "(文脈ゼロの計器)。"
+    " さらに (ms-119 / e-4579): bundle の backlog に列挙された未着手の重要タスク "
+    "(highest/high) は、target が『必要と符号化した既知作業』です。attainment は AC "
+    "(アウトカム) 軸で判定しますが、未着手の重要タスクは目的未達の強い prior です "
+    "(掃除機がある≠掃除した)。各 backlog タスクについて done / superseded[なぜ不要か"
+    "の理由必須] / blocks-attainment の disposition を提案し、根拠を添えてください。"
+    "『重要だがパスして良い』とするなら superseded + 理由で明示し、silent に飛ばさない"
+    "でください。"
 )
 
 
@@ -309,7 +316,7 @@ def judge_model_independence(implementer_model, judge_model):
 
 def assemble_attainment_context(*, target_id, spec_origin_id, spec_content,
                                 criteria, target_ref, diff_text="", gaps=None,
-                                implementer_model=""):
+                                backlog=None, implementer_model=""):
     """Assemble the 目的達成 evidence-generation bundle for an independent judge
     (ms-119 / e-4005).
 
@@ -332,6 +339,11 @@ def assemble_attainment_context(*, target_id, spec_origin_id, spec_content,
         target_ref: what was reviewed (target id / ref range).
         diff_text: optional mechanically-collected diff for supporting context.
         gaps: optional gentle gaps (e.g. missing SPEC 原典, 方針5).
+        backlog: ms-119 / e-4579 — the target's UNSTARTED highest/high tasks
+            (``[{"id","priority","description"}]``). The judge must reckon with each
+            (掃除機がある≠掃除した): an important, encoded, untouched task is a strong
+            "goal not yet met" prior. The judge proposes a disposition per task
+            (done / superseded[理由] / blocks-attainment); the human confirms.
     """
     return {
         "review_type": REVIEW_ATTAINMENT,
@@ -345,6 +357,8 @@ def assemble_attainment_context(*, target_id, spec_origin_id, spec_content,
         "independence_contract": INDEPENDENCE_CONTRACT,
         "implementer_model": implementer_model or "",
         "gaps": list(gaps or []),
+        # e-4579: the important, unstarted backlog the judge must dispose of.
+        "backlog": list(backlog or []),
     }
 
 

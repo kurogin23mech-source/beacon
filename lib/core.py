@@ -2309,6 +2309,31 @@ def _find_approval_target(data: dict, target_id: str) -> dict:
     )
 
 
+def unstarted_priority_tasks(target: dict) -> list:
+    """Collect a target's UNSTARTED highest/high tasks (ms-119 / e-4579).
+
+    The backlog cross-check for the 目的達成 gate: an unstarted highest/high task is
+    a known, encoded piece of important work: leaving it untouched while claiming
+    attainment is the "掃除機がある≠掃除した" hole. Walks the target's direct task
+    entries (nested sub-tasks included) and returns those that ``transition_approval.
+    is_backlog_gated`` flags. ``target`` is a milestone or operation dict.
+
+    NOTE: this is a *cross-check*, not the *definition* of attainment. Attainment is
+    defined on outcomes (AC); this only forces an EXPLICIT disposition on the
+    important backlog so a skip is never silent (SPEC / task e-4579 §方針1)."""
+    out = []
+
+    def _walk(entries):
+        for e in entries or []:
+            if _ta.is_backlog_gated(e):
+                out.append(e)
+            # sub-tasks can also be gated work items.
+            _walk(e.get("entries", []))
+
+    _walk(target.get("entries", []))
+    return out
+
+
 def target_transition_approval_add(data: dict, target_id: str, *, old_state: str,
                                    new_state: str, intent: str = "",
                                    evidence: list = None, actor: str = "",
@@ -2342,10 +2367,47 @@ class EvidenceRequiredError(ValueError):
     recovery path instead of a generic error."""
 
 
+class BacklogUndisposedError(ValueError):
+    """Raised when a target-transition approval is attempted while UNSTARTED
+    highest/high tasks still lack an explicit disposition (ms-119 / e-4579).
+
+    Carries ``undisposed`` (the list of blocking task dicts) so the CLI can render
+    the disposition-recovery path. A ValueError subclass so existing
+    ``except ValueError`` sites still catch it, but a distinct type so the CLI can
+    show the concrete backlog rather than a generic error. This is the structural
+    close of the "掃除機がある≠掃除した" hole: a completion claim cannot be approved
+    while known important work sits untouched WITHOUT that skip being made explicit
+    (done / superseded[理由] / blocks-attainment) on the record."""
+
+    def __init__(self, entry_id, undisposed):
+        self.entry_id = entry_id
+        self.undisposed = undisposed
+        super().__init__(entry_id)
+
+
+class BacklogBlockedError(ValueError):
+    """Raised when a target-transition approval is attempted while ≥1 gated backlog
+    task's disposition is ``blocks-attainment`` (ms-119 / e-4579, #551 MUST-2).
+
+    ``blocks-attainment`` means the judge/human recorded that the task is still
+    required and NOT done — the attainment claim is, by that record, false. Merely
+    HAVING a disposition must not satisfy the gate: a task named as blocking must
+    actually block. Carries ``blocking`` (the list of {task, disposition-record}
+    pairs) so the CLI can name each one. A ValueError subclass (existing
+    ``except ValueError`` sites still catch it) but a distinct type so the CLI renders
+    the specific "these tasks are marked blocks-attainment" recovery path."""
+
+    def __init__(self, entry_id, blocking):
+        self.entry_id = entry_id
+        self.blocking = blocking
+        super().__init__(entry_id)
+
+
 def target_transition_approval_approve(data: dict, entry_id: str, *,
                                        rationale: str = "", actor: str = "",
                                        gate: dict = None,
-                                       allow_no_evidence: bool = False):
+                                       allow_no_evidence: bool = False,
+                                       allow_undisposed_backlog: bool = False):
     """Approve a pending transition. Returns (entry, new_state_to_apply).
 
     approve は verdict を記録するだけで、実際の状態遷移は呼び出し側が
@@ -2361,11 +2423,30 @@ def target_transition_approval_approve(data: dict, entry_id: str, *,
     closes). Empty evidence + not allowed → EvidenceRequiredError. Empty evidence +
     allowed → proceeds AND stamps ``no_evidence_ack`` on the gate so the conscious
     bypass is audited.
+
+    Backlog disposition cross-check (ms-119 / e-4579, #551 AX/maint/思想 review):
+    the owning target is *self-derived* from ``find_entry`` (the container that holds
+    the approval entry IS the target), NOT passed in by the caller. The earlier
+    ``target=None`` opt-in silently skipped the gate when a caller forgot to pass it —
+    re-introducing the very SILENT skip this PR closes, inside the enforcement layer.
+    Now the cross-check runs on EVERY path, deriving the backlog itself. When any
+    UNSTARTED highest/high task on the target lacks a disposition, this raises:
+
+      - ``BacklogBlockedError`` if any such task's LATEST disposition is
+        ``blocks-attainment`` (the record explicitly says the goal is NOT met — the
+        approval is refused, not merely warned; only an explicit ack proceeds), OR
+      - ``BacklogUndisposedError`` if any such task carries NO disposition at all.
+
+    ``allow_undisposed_backlog`` (same shape as ``allow_no_evidence``): a conscious,
+    audited bypass. When True the cross-check does not raise; instead it stamps
+    ``backlog_check_skipped=True`` on the gate so the skip is grep-able, exactly like
+    the ``no_evidence_ack`` path — the default is "gate enabled", the skip is never
+    silent.
     """
     result = find_entry(data, entry_id)
     if not result:
         raise ValueError(f"Entry not found: {entry_id}")
-    _, _, entry, _ = result
+    container, _, entry, _ = result
     if entry.get("type") != "target-transition-approval":
         raise ValueError(f"Entry {entry_id} is not a transition-approval entry")
     if not _ta.has_review_evidence(entry):
@@ -2373,6 +2454,23 @@ def target_transition_approval_approve(data: dict, entry_id: str, *,
             raise EvidenceRequiredError(entry_id)
         gate = dict(gate or {})
         gate["no_evidence_ack"] = True
+    # ms-119 / e-4579: the backlog cross-check. An UNSTARTED highest/high task is a
+    # known-important piece of work; approving attainment while one sits undisposed
+    # (or explicitly marked blocks-attainment) is the silent "掃除機がある≠掃除した"
+    # miss. The target is the container that holds this approval entry — self-derived,
+    # never caller-supplied (an omitted arg must not open the gate). This is a
+    # *cross-check*, not the definition of attainment (outcomes/AC define that) — so it
+    # only fires on important, unstarted work, never on drained or lower-tier backlog.
+    backlog = unstarted_priority_tasks(container) if container else []
+    blocking = _ta.blocks_attainment_backlog(entry, backlog)
+    undisposed = _ta.undisposed_backlog(entry, backlog)
+    if blocking or undisposed:
+        if not allow_undisposed_backlog:
+            if blocking:
+                raise BacklogBlockedError(entry_id, blocking)
+            raise BacklogUndisposedError(entry_id, undisposed)
+        gate = dict(gate or {})
+        gate["backlog_check_skipped"] = True
     new_state = _ta.append_verdict(entry, status="approved", rationale=rationale,
                                    actor=actor, at=_now_iso(), gate=gate)
     return entry, new_state
@@ -2401,6 +2499,44 @@ def target_transition_approval_attach_evidence(data: dict, entry_id: str, *,
             f"独立レビュー証拠は verdict の前に添付します")
     _ta.append_review_evidence(entry, verdict=verdict, summary=summary,
                                source=source, actor=actor, at=_now_iso())
+    return entry
+
+
+def target_transition_approval_attach_disposition(data: dict, entry_id: str, *,
+                                                  task_id: str, verdict: str,
+                                                  reason: str = "", source: str = "",
+                                                  actor: str = "") -> dict:
+    """Record a disposition for one UNSTARTED highest/high backlog task on a pending
+    transition-approval (ms-119 / e-4579). Returns the entry.
+
+    The disposition answers "what happened to this important, unstarted task?" so an
+    attainment claim cannot silently skip it. Refused if the entry is not pending
+    (same reason as attach-evidence: a terminal approval must not be back-dated), if
+    ``task_id`` is not actually a gated backlog task on the target (so a stray id
+    can't fake-satisfy the gate), or if the verdict is invalid / superseded lacks a
+    reason (enforced in ``_ta.append_disposition``). ``source`` is the self-declared
+    provenance (recorded, not structurally proven independent — the value is the
+    non-silence + grep-able provenance, exactly like review-evidence)."""
+    result = find_entry(data, entry_id)
+    if not result:
+        raise ValueError(f"Entry not found: {entry_id}")
+    target, _, entry, _ = result  # find_entry returns (container, parent_list, entry, index)
+    if entry.get("type") != "target-transition-approval":
+        raise ValueError(f"Entry {entry_id} is not a transition-approval entry")
+    if entry.get("status") != "pending":
+        raise ValueError(
+            f"Entry {entry_id} is not pending (status={entry.get('status')}); "
+            f"disposition は verdict の前に記録します")
+    # Guard: task_id must be a real gated backlog task on THIS target, so a typo or a
+    # stray id cannot fake-satisfy the gate for a different task that is still blocking.
+    backlog_ids = {t.get("id") for t in unstarted_priority_tasks(target)}
+    if task_id not in backlog_ids:
+        raise ValueError(
+            f"{task_id} is not an unstarted highest/high task of "
+            f"{entry['meta'].get('target_id')} — disposition applies only to the "
+            f"gated backlog (done/in-flight/lower-priority tasks are not gated)")
+    _ta.append_disposition(entry, task_id=task_id, verdict=verdict, reason=reason,
+                           source=source, actor=actor, at=_now_iso())
     return entry
 
 

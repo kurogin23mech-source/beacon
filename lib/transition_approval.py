@@ -214,6 +214,273 @@ def has_review_evidence(entry):
     return bool((entry.get("meta") or {}).get("review_evidence"))
 
 
+# ms-119 / e-4579: the priority tiers whose UNSTARTED tasks are a strong "goal not
+# yet met" prior. A task at highest/high is a *known, encoded* piece of work the
+# owner already judged important; leaving it untouched while claiming attainment is
+# the "掃除機がある≠掃除した" hole (a mechanism exists in code ≠ the goal was reached).
+# medium/low/lowest are NOT gated — attainment is defined on OUTCOMES (AC), not on
+# draining every task, and lower-tier backlog is normal residue, not a completion
+# blocker. (See wave8 2026-07-29: attainment read 11/12 while 1 highest + 3 high
+# tasks sat untouched.)
+BACKLOG_GATED_PRIORITIES = ("highest", "high")
+
+# ms-119 / e-4579: the closed value domain for a backlog-task disposition. Each
+# unstarted highest/high task must carry EXACTLY one of these before the target's
+# attainment can be approved — so "important but skippable" is never a SILENT miss:
+#   - "done"             : the work was in fact completed (status flip pending, or
+#                          the task is being closed as part of this attainment).
+#   - "superseded"       : the task is no longer needed for the goal (a hypothesis
+#                          that turned out unnecessary). REASON REQUIRED — the
+#                          judge / human must say WHY it can be dropped.
+#   - "blocks-attainment": the task is still required and NOT done, so it actively
+#                          blocks the attainment claim. #551 MUST-2: this is now
+#                          ENFORCED, not merely recorded — approve refuses while any
+#                          gated task carries this disposition (see
+#                          blocks_attainment_backlog). "attained にできない" is
+#                          structural, not advisory.
+DISPOSITION_VERDICTS = ("done", "superseded", "blocks-attainment")
+
+
+# The status vocabulary, bucketed. Each canonical live status is listed EXACTLY once
+# so the coarse buckets the backlog gate reads are an explicit enumeration, not a
+# fail-open catch-all (#551 MEDIUM maint review). An UNKNOWN status is deliberately
+# NOT mapped to "in_progress": that was fail-OPEN (an unrecognised status silently
+# escaped the gate). A gate that protects a completion claim must fail CLOSED — an
+# unknown status is treated as "unstarted" (gated), so a typo / new vocabulary word
+# surfaces as a disposition demand rather than a silent skip.
+_STARTED_STATUSES = frozenset({
+    "in_progress", "in_review", "waiting", "working", "leader_review",
+    "user_review", "active", "blocked",
+})
+_DONE_STATUSES = frozenset({"done", "closed"})
+_CANCELLED_STATUSES = frozenset({"cancelled", "canceled"})
+_UNSTARTED_STATUSES = frozenset({"", "todo"})
+
+
+def normalize_task_status(status):
+    """Canonicalize a task status to the coarse buckets the backlog gate cares about.
+
+    Returns "unstarted" for a task that never began (todo / "" / **or any unknown
+    status** — fail-closed), "done" for a completed one, "cancelled" for a
+    soft-deleted one, and "in_progress" for anything in flight (in_progress /
+    in_review / waiting / working / leader_review / user_review / active …).
+
+    Only "unstarted" highest/high tasks are gated. The buckets are an EXPLICIT
+    enumeration (``_STARTED_STATUSES`` etc.), NOT a catch-all — the previous
+    ``return "in_progress"`` fallthrough was fail-OPEN: an unrecognised status
+    escaped the gate silently. A gate guarding a completion claim must fail CLOSED, so
+    an unknown status is conservatively treated as ``unstarted`` (= gated, demands a
+    disposition) rather than assumed in-flight."""
+    s = (status or "").strip().lower()
+    if s in _UNSTARTED_STATUSES:
+        return "unstarted"
+    if s in _DONE_STATUSES:
+        return "done"
+    if s in _CANCELLED_STATUSES:
+        return "cancelled"
+    if s in _STARTED_STATUSES:
+        return "in_progress"
+    # Unknown status → fail-closed: gated, so a typo / new vocabulary word cannot
+    # slip an important task past the attainment gate unnoticed.
+    return "unstarted"
+
+
+def is_backlog_gated(task):
+    """True if ``task`` is an UNSTARTED highest/high work item (ms-119 / e-4579).
+
+    ``task`` is a work-item dict (``{"id", "type", "status", "meta": {"priority"}}``).
+    Only ``type == "task"`` items with an unstarted status and a gated priority
+    qualify — commits / notes / done / in-flight tasks do not. Pure."""
+    if (task.get("type") or "task") != "task":
+        return False
+    if normalize_task_status(task.get("status")) != "unstarted":
+        return False
+    priority = ((task.get("meta") or {}).get("priority") or "").strip().lower()
+    return priority in BACKLOG_GATED_PRIORITIES
+
+
+def append_disposition(entry, *, task_id, verdict, reason, source, actor, at):
+    """Record a disposition for one backlog task onto a pending approval (e-4579).
+
+    Each record answers "what happened to this unstarted highest/high task?" with a
+    value from ``DISPOSITION_VERDICTS``. ``superseded`` REQUIRES a non-empty reason
+    (dropping important work must be justified in the record, not asserted). Like
+    ``append_review_evidence``, ``source`` is the self-declared provenance (recorded
+    verbatim, NOT structurally proven independent) — the value is that a disposition
+    cannot be applied SILENTLY and its provenance is grep-able.
+
+    Append-only: the latest record for a task_id wins at read time
+    (``disposition_map``), but every attempt stays on the ledger for audit. Pure —
+    the caller owns persistence."""
+    if verdict not in DISPOSITION_VERDICTS:
+        raise ValueError(
+            "invalid disposition verdict %r (expected one of %s)"
+            % (verdict, ", ".join(DISPOSITION_VERDICTS)))
+    if verdict == "superseded" and not (reason or "").strip():
+        raise ValueError(
+            "disposition 'superseded' requires a --reason (why the task can be "
+            "dropped without blocking attainment)")
+    if not (task_id or "").strip():
+        raise ValueError("disposition requires a task_id")
+    rec = {
+        "task_id": task_id,
+        "verdict": verdict,
+        "reason": reason or "",
+        "source": source or "",
+        "actor": actor,
+        "at": at,
+    }
+    entry.setdefault("meta", {}).setdefault("dispositions", []).append(rec)
+    return entry
+
+
+def disposition_map(entry):
+    """Latest disposition per task_id on ``entry`` (ms-119 / e-4579).
+
+    Returns ``{task_id: record}`` keeping the LAST appended record for each task
+    (append-only ledger; latest wins). Empty dict when none recorded. Pure."""
+    out = {}
+    for rec in (entry.get("meta") or {}).get("dispositions", []) or []:
+        tid = rec.get("task_id")
+        if tid:
+            out[tid] = rec
+    return out
+
+
+def undisposed_backlog(entry, backlog):
+    """The gated tasks that still lack a disposition (ms-119 / e-4579).
+
+    ``backlog`` is the list of unstarted highest/high task dicts for the target
+    (collected mechanically by the caller — see core.unstarted_priority_tasks).
+    A task is considered disposed when EITHER it now has an explicit disposition
+    record on the approval, OR its live status is already done/cancelled (an
+    implicit disposition — the concern the gate protects against, a silent skip,
+    cannot apply to work that is visibly finished or dropped).
+
+    Returns the sub-list of ``backlog`` whose ids are still undisposed — empty
+    means the gate is satisfied. Pure — takes primitive lists so it is trivially
+    testable and cannot drift from the persistence layer."""
+    disposed = set(disposition_map(entry).keys())
+    out = []
+    for task in backlog:
+        tid = task.get("id")
+        if tid in disposed:
+            continue
+        if normalize_task_status(task.get("status")) in ("done", "cancelled"):
+            continue
+        out.append(task)
+    return out
+
+
+def blocks_attainment_backlog(entry, backlog):
+    """Gated tasks whose LATEST disposition is ``blocks-attainment`` (e-4579, #551).
+
+    ``blocks-attainment`` is the record that the task is still required and NOT done —
+    i.e. the attainment claim is, on that record, false. Merely HAVING a disposition
+    must not satisfy the gate (a task literally named "blocks attainment" would
+    otherwise let approve pass): this surfaces those tasks so the approve path can
+    refuse them (or demand an explicit ack), making "blocks-attainment がある間は
+    attained にできない" structural rather than advisory.
+
+    Returns the sub-list of ``backlog`` tasks whose latest disposition verdict is
+    ``blocks-attainment``. Empty means none block. Pure."""
+    disposed = disposition_map(entry)
+    out = []
+    for task in backlog:
+        rec = disposed.get(task.get("id"))
+        if rec and rec.get("verdict") == "blocks-attainment":
+            out.append(task)
+    return out
+
+
+def stale_done_dispositions(entry, backlog):
+    """Gated tasks disposed ``done`` on the ledger but still UNSTARTED live (e-4579).
+
+    A ledger/reality divergence: the disposition says "the work was in fact
+    completed", but the task's live status never left todo. That is exactly the
+    "掃除機がある≠掃除した" gap the gate exists to surface, so the approve path warns
+    (not refuses — the disposition is a good-faith claim; the fix is a one-liner) and
+    prints a ``beacon task done <id>`` recovery hint.
+
+    Returns the sub-list of ``backlog`` tasks with a latest disposition of ``done``
+    whose live status is still ``unstarted``. Pure."""
+    disposed = disposition_map(entry)
+    out = []
+    for task in backlog:
+        rec = disposed.get(task.get("id"))
+        if not rec or rec.get("verdict") != "done":
+            continue
+        if normalize_task_status(task.get("status")) == "unstarted":
+            out.append(task)
+    return out
+
+
+def format_blocks_attainment(blocking, *, target_id):
+    """Render the "these gated tasks are marked blocks-attainment" refusal block.
+
+    Returns "" when ``blocking`` is empty. Names each task + priority so the human sees
+    exactly which recorded blocker keeps the attainment claim from being approvable."""
+    if not blocking:
+        return ""
+    lines = [
+        f"⛔ blocks-attainment のタスクが残っています ({target_id}) — "
+        f"attained にはできません:",
+    ]
+    for task in blocking:
+        pri = ((task.get("meta") or {}).get("priority") or "").strip() or "?"
+        desc = (task.get("description") or "").strip()
+        if len(desc) > 60:
+            desc = desc[:57] + "..."
+        lines.append(f"  - {task.get('id')} [{pri}] {desc}")
+    lines.append(
+        "  各タスクを完了 (beacon task done <id>) して disposition を done に更新するか、"
+        "superseded[理由必須] に切り替えてください。")
+    return "\n".join(lines)
+
+
+def format_stale_done_warning(stale, *, target_id):
+    """Render a NON-blocking warning for tasks disposed ``done`` but still unstarted.
+
+    Returns "" when ``stale`` is empty. Prints the recovery hint so the台帳(done) と
+    実状態(todo) の乖離 is visible and one command away from fixed."""
+    if not stale:
+        return ""
+    lines = [
+        f"⚠ disposition=done だが live status が未着手のタスク ({target_id}) — "
+        f"台帳と実状態が乖離しています:",
+    ]
+    for task in stale:
+        lines.append(f"  - beacon task done {task.get('id')}")
+    return "\n".join(lines)
+
+
+def format_backlog_gap(undisposed, *, target_id):
+    """Render the "unstarted important tasks still need a disposition" block.
+
+    Returns "" when ``undisposed`` is empty (caller omits the section). This is the
+    forcing-function surface: it names each blocking task + its priority so the
+    human/judge sees the concrete backlog the attainment claim is skipping over."""
+    if not undisposed:
+        return ""
+    verdicts = "|".join(DISPOSITION_VERDICTS)
+    lines = [
+        f"⚠ 未着手の重要タスク ({target_id}) — attainment 承認前に明示 disposition が必要:",
+    ]
+    for task in undisposed:
+        pri = ((task.get("meta") or {}).get("priority") or "").strip() or "?"
+        desc = (task.get("description") or "").strip()
+        if len(desc) > 60:
+            desc = desc[:57] + "..."
+        lines.append(f"  - {task.get('id')} [{pri}] {desc}")
+    lines.append(
+        f"  各タスクに: beacon target attach-disposition <entry-id> "
+        f"--task <task-id> --disposition <{verdicts}> [--reason <text> (superseded 時必須)]")
+    lines.append(
+        "  (superseded は理由必須。disposition は独立 judge / 人間承認を経て確定 — "
+        "実装者の自己申告では attained にできません。)")
+    return "\n".join(lines)
+
+
 def assess_completion_criteria(*, has_spec, objective="", acceptance="", intent=""):
     """Surface gaps in a target's completion criteria (ms-119 / e-3911 §5 AC6).
 

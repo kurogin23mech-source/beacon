@@ -257,8 +257,14 @@ beacon review context --type attainment --target <ms-XX|op-X>   # 補助差分�
 
 stdout の JSON は `origin` (= target の SPEC 原典、自動解決)・`criteria` (= target の
 objective / acceptance)・`artifact` (= 任意の差分)・`judge_contract`・`verdict_ownership`
-(= `"human"`)・`gaps` を持つ。`gaps` が非空 (SPEC 未添付 / 空) ならそのまま人間に晒す
-(方針5)。
+(= `"human"`)・`gaps`・`backlog` を持つ。`gaps` が非空 (SPEC 未添付 / 空) ならそのまま
+人間に晒す (方針5)。
+
+`backlog` (ms-119 e-4579) は **未着手の重要タスク (highest/high)** の一覧
+(`[{"id","priority","description"}]`)。attainment は AC (アウトカム) 軸で判定するが、
+未着手の重要タスクは「必要と符号化された既知作業」であり、目的未達の強い prior
+(掃除機がある≠掃除した)。judge はこれを無視してはならず、各タスクに disposition
+(`done` / `superseded[理由必須]` / `blocks-attainment`) を判定する。
 
 ### A-2. 独立 judge に「証拠」を作らせる
 
@@ -271,8 +277,12 @@ objective / acceptance)・`artifact` (= 任意の差分)・`judge_contract`・`v
 3. 出力指示: 次の JSON スキーマだけを返す —
    ```json
    {"criteria": [{"criterion": "...", "verdict": "met|partial|not-met", "evidence": "確認した実コード/テスト/挙動"}],
+    "dispositions": [{"task_id": "e-XXXX", "verdict": "done|superseded|blocks-attainment", "reason": "superseded なら必須: なぜ不要か"}],
     "overall_verdict": "attained|not-attained", "verdict_reason": "..."}
    ```
+   `dispositions` は bundle の `backlog` の各タスクに対応 (未着手 highest/high)。judge は
+   実コードで「実は done か」を確認し、まだ必要なら `blocks-attainment`、要件変更で不要
+   なら `superseded` + 理由、を判定する。**silent に飛ばさない**。
 
 judge には **repo の読み取りを許す** (実コード検証が仕事)。だが**実装者セッションの
 会話文脈・コミットの意図説明は渡さない** (文脈ゼロの計器)。**あなた (実装者) は証拠を
@@ -285,6 +295,14 @@ judge が返した証拠 (各 criterion の met/partial/not-met + 根拠 + overa
 
 - 目的達成レビュー依頼がまだ無ければ `beacon target review-request <target> --new-state
   <state> --intent "<要約>" --evidence <refs>` で作る (依頼は AI が作ってよい)。
+- **証拠を添付**: judge の overall verdict を `beacon target attach-review-evidence
+  <entry-id> --verdict <attained|partial|not-attained> --summary "<要約>" --source
+  "independent-judge:<model>"` で記録する。
+- **disposition を添付 (ms-119 e-4579)**: judge が返した `dispositions` の各タスクを
+  `beacon target attach-disposition <entry-id> --task <task-id> --verdict
+  <done|superseded|blocks-attainment> [--reason <text>] --source "independent-judge:<model>"`
+  で記録する。未着手 highest/high が全て disposition 済になるまで **approve は構造的に
+  refuse される** (掃除機がある≠掃除した の穴を塞ぐ)。`superseded` は理由必須。
 - **確定 (approve) は人間**: `beacon target approve <entry-id>` は e-4006 で AI セッション
   を拒否する。人間が証拠を見て `BEACON_SESSION_KIND=human`（または明示 override）で
   approve するか、却下する。あなたはここで止まり、人間の判断を待つ。
