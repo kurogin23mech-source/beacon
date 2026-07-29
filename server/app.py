@@ -1083,6 +1083,14 @@ class EntryUpdate(BaseModel):
     status: str = ""
     detail: str = ""
     date: str = ""
+    # ms-126 (e-4224): the untriaged-recovery path must exist on the web
+    # surface too. A machine-created task lands with the ``untriaged``
+    # sentinel; a non-terminal human triaging it from the Web UI needs to
+    # PATCH a real severity here. Empty = "no change" (core.task_update
+    # treats a falsy priority as untouched), so this never disturbs the
+    # commit/note/status-only edit paths. Without this field the only way to
+    # clear a task's untriaged debt was the CLI — a hole in ux-principle-no-terminal.
+    priority: str = ""
 
 class LogCommit(BaseModel):
     hash: str
@@ -2530,6 +2538,7 @@ def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
                 data, entry_id,
                 description=body.description, status=body.status,
                 detail=body.detail, date=body.date,
+                priority=body.priority,  # ms-126 e-4224: web untriaged-recovery
                 author=author,
             )
         except ValueError as e:
