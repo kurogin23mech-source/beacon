@@ -50,7 +50,7 @@ fi
 | **trek-trigger** | 起点 DM 由来の autonomous loop 起動 (= ms-75 / e-1870)。 Step 1〜9 を通常通り走らせる。 | AC1, AC15 |
 | **trek-progress-check** | server cadence (= default 10 分) 由来の「次やって」 DM (= ms-83 / e-1999)。 T1-system envelope の Step 0.5 認可を必ず先に通す → Step 1〜9。 | AC15, AC16, AC18 |
 | **trek-leader-digest** | leader 向け digest event (= 他 member の状態変化サマリ)。 受信者 = leader。 **Step 1.5 (= leader_review queue 必須チェック) を必ず通す** → queue 非空なら全件 `/beacon-trek-review` chain、 空なら digest 観察のみで終了。 (= ms-97 / e-2709) | AC (leader-digest) |
-| **trek-task-review** | executor が task-state done / waiting-review を打った時に server が leader へ自動送信する DM (= ms-75 / e-2048)。 受信時は `/beacon-trek-review <trek-id> <task-id>` を呼んで forced 3-択 (approve / re-work / forward-to-user) に入る。 | AC (task-review) |
+| **trek-task-review** | executor が task-state leader_review / user_review を打った時に server が leader へ自動送信する DM (= ms-75 / e-2048)。 受信時は `/beacon-trek-review <trek-id> <task-id>` を呼んで forced 3-択 (approve / re-work / forward-to-user) に入る。 | AC (task-review) |
 | **completion_ready** | trek 全 scope task が terminal state に達した signal。 leader は `/beacon-trek-review` で残 review を片付け、 最後に `beacon trek archive <trek-id>` を判断する。 自律 archive は禁止 (= user 確認境界)。 | AC (completion-ready) |
 
 ## いつ起動するか
@@ -62,6 +62,19 @@ fi
 ## cwd 解決
 
 `(project: ...)` パスを additionalContext から優先抽出、 なければ pwd。 ホーム直下なら abort。 **すべての Bash 呼び出しに `cd "$PROJECT_DIR" && ...` を前置**。
+
+## 判断境界の優先順 (= 端末の人間に聞かない、 e-4281 / AC9)
+
+Trek scope 内では **AskUserQuestion (= 端末の人間への選択要求 / modal prompt) を使わない**。端末の人間待ちは modal-block でセッションを殺す (2026-07-27 dogfood tk-9d4b53ed で 4h+ silent stall)。判断が要る時は待たず下の順で **DM に routing** する (詳細は /beacon-trek-pulse Step 2):
+
+1. **自己判断 (即実行)**: SPEC / CORE doc / 既存 task が答えを構造的に語る → DM 不要で実行
+2. **dm-peer (横向き)**: 同 Trek 内の別 executor に相談 (peer-first、 ms-88 e-2140)
+3. **dm-leader (上向き)**: leader 固有判断 (deploy 順序 / cross-trek / scope 境界 / 不可逆 / 嗜好 / secret)。leader が要れば user へ escalate (方針8)
+4. **continue (自走)**: 答えが出なければ安全な範囲で試行し結果で学ぶ
+
+上の順は /beacon-trek-pulse Step 2 の ladder と同一で、 escalation (= 不可逆/嗜好/secret) は項目3 の dm-leader に畳んである (= pulse 側 5 項目の第5「dm-leader escalate」に対応)。DM は raw `bus send` でなく `/beacon-dm-send` 経由が推奨 (= live-check + budget gate + envelope 自動付与)。
+
+deploy / リリース境界も同じ — Step 7 の `notify-user-only` DM (= 非ブロッキング) で escalate し **AskUserQuestion で止まらない**。executor は Trek 完遂を判定しない (= 完遂 handoff は leader 単独が撃つ、 方針9 = 台帳所有者だけが完遂宣言、 e-4370)。
 
 ## Step 1: Trek 有効性 gating
 
@@ -192,9 +205,9 @@ cd "$PROJECT_DIR" && beacon bus ack --event <event_id> 2>&1 || \
 
 応答終了直前に **実際の CLI action を 1 つ実行**:
 
-- 択 [1] state 更新: `beacon trek task-state <trek-id> <task-id> done|waiting-review --note "<根拠>"` (= server-side で leader 通知 DM 自動発信)
+- 択 [1] state 更新: `beacon trek task-state <trek-id> <task-id> leader_review|user_review --note "<根拠>"` (= server-side で leader 通知 DM 自動発信。done は Trek 外 = 書かない、 方針5)
 - 択 [2] 作業再開: 次の slice を **このターン内で即開始** (= announce だけは禁止)
-- 択 [3] リーダー DM: `beacon bus send --channel dm --to <leader_session_id> --payload '{"text": "判断要請: <context>"}' --json` (= 判断境界の問い合わせ専用)
+- 択 [3] リーダー DM: `/beacon-dm-send` 経由で leader へ判断要請 (= 判断境界の問い合わせ専用、 live-check + budget gate 付き。raw `beacon bus send --channel dm --to <leader_session_id>` は fallback)
 
 「とりあえず armed のまま待機」 / 「次の tick を待つ」 は protocol 違反。
 
@@ -208,6 +221,7 @@ cd "$PROJECT_DIR" && beacon bus ack --event <event_id> 2>&1 || \
 - 同じ task を二重に done にしない (= idempotent)
 - **同 event の重複 invoke は server-side 保証に乗り、 session memory での「前回やった」 判定は使わない (= ms-97 / e-2709)**
 - **leader-digest 受信時は queue 数を必ず 1 次情報で実測し、 ack 応答だけで終わらせない (= ms-97 / e-2709 Step 1.5)**
+- **端末の人間に AskUserQuestion で判断を投げない (= e-4281 / AC9)。判断は dm-peer / dm-leader に routing、 deploy/release は notify-user-only で escalate**
 
 ## opt-in 手順 (user 側)
 
@@ -223,7 +237,7 @@ opt-in しない場合: event は `delivery=propose-to-ai` 降格、 user が見
 |---|---|
 | `/beacon-operation-execute` | 単一 Operation を autonomous 実行 (= ms-60) |
 | `/beacon-trek-execute` (本 Skill) | Trek scope を autonomous 実行 (= ms-75) |
-| `/beacon-trek-review` | leader forced 3-択 review (= done / waiting-review 受け、 ms-75 / e-2048) |
+| `/beacon-trek-review` | leader forced 3-択 review (= leader_review / user_review 受け、 ms-75 / e-2048) |
 | `/beacon-dm-send` | DM 送信 (= Trek scope 内なら自律 OK) |
 | `/beacon-dm-respond` | DM 受信判断 (= cross-user 必ず y/n、 Trek scope は dm_gate で bypass) |
 | `/beacon-bus-armed` | 自律 listen 状態維持 (= 一般 DM 用、 Trek 用途外、 ms-97 中心原則 6) |
