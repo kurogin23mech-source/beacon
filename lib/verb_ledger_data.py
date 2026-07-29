@@ -127,6 +127,14 @@ VERB_LEDGER = {
     "doc_list": {"cls": "Q", "secondary": [], "note": ""},
     "doc_restore": {"cls": "B", "secondary": ["R"], "note": ""},
     "doc_show": {"cls": "Q", "secondary": [], "note": ""},
+    # ms-131 e-4496 — table-doc row operations. All writes route through the
+    # append-only model (set-cell/rm-row never overwrite past state), so they are
+    # record verbs (R); show is a read-only render (Q).
+    "doc_table_add_row": {"cls": "R", "secondary": [], "note": "table-doc に行を追記(R、型検査+履歴)"},
+    "doc_table_create": {"cls": "R", "secondary": [], "note": "format:table の doc を作成(R)"},
+    "doc_table_rm_row": {"cls": "R", "secondary": [], "note": "行を soft-delete=tombstone 追記(R、監査痕跡は残る)"},
+    "doc_table_set_cell": {"cls": "R", "secondary": [], "note": "セル更新=旧値を上書きせず履歴に追記(R)"},
+    "doc_table_show": {"cls": "Q", "secondary": [], "note": "table-doc を表として read-only 描画(Q)"},
     "doc_update": {"cls": "R", "secondary": ["C"], "note": "台帳追記(R)/対話(C)"},
 
     # --- doctor ---

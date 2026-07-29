@@ -2773,6 +2773,9 @@ cmd_doc() {
             # if empty (= clear the field)".
             local doc_ms_set=""
             local doc_op_set=""
+            # ms-131 e-4497: same absent-vs-empty marker for --target so
+            # `--target ""` detaches (clears the linkage).
+            local doc_target_set=""
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
@@ -2784,7 +2787,7 @@ cmd_doc() {
                     --trek)       doc_trek="${2:-}"; shift 2 ;;
                     --account|--acc)      doc_account="${2:-}"; shift 2 ;;
                     --opportunity|--opp)  doc_opportunity="${2:-}"; shift 2 ;;
-                    --target)     doc_target="${2:-}"; shift 2 ;;
+                    --target)     doc_target="${2:-}"; doc_target_set="1"; shift 2 ;;
                     --json)       json_flag="1"; shift ;;
                     --bus-origin) doc_bus_origin="1"; shift ;;
                     --stdin)      shift ;;
@@ -2802,6 +2805,7 @@ cmd_doc() {
                 BEACON_CONTENT="$doc_content" BEACON_SCOPE="$doc_scope" \
                 BEACON_MS="$doc_ms" BEACON_OP="$doc_op" \
                 BEACON_MS_SET="$doc_ms_set" BEACON_OP_SET="$doc_op_set" \
+                BEACON_TARGET_SET="$doc_target_set" \
                 BEACON_TREK_ID="$doc_trek" \
                 BEACON_ACCOUNT="$doc_account" BEACON_OPPORTUNITY="$doc_opportunity" \
                 BEACON_TARGET="$doc_target" \
@@ -2887,8 +2891,111 @@ cmd_doc() {
             BEACON_DOC_IMAGE_PATH="$image_path" BEACON_JSON="$json_flag" \
                 python3 "$COMMANDS_PY" doc_image_upload
             ;;
+        table)
+            # ms-131 e-4496 — table-doc (行×列の構造化ドキュメント) 操作。
+            # 行の書き込みは型検査と履歴追記を必ず通す唯一の経路。
+            shift
+            local table_sub="${1:-}"
+            shift 2>/dev/null || true
+            local t_doc_id="" t_title="" t_columns="" t_cells="" t_row_id=""
+            local t_col_key="" t_value="" t_scope="" t_target="" t_ms="" t_op=""
+            local t_json=""
+            local t_value_set=""
+            local -a t_pos=()
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --columns)  t_columns="${2:-}"; shift 2 ;;
+                    --cells)    t_cells="${2:-}"; shift 2 ;;
+                    --title)    t_title="${2:-}"; shift 2 ;;
+                    --value)    t_value="${2:-}"; t_value_set="1"; shift 2 ;;
+                    --scope|-s) t_scope="${2:-}"; shift 2 ;;
+                    --target)   t_target="${2:-}"; shift 2 ;;
+                    -m|--ms)    t_ms="${2:-}"; shift 2 ;;
+                    --op)       t_op="${2:-}"; shift 2 ;;
+                    --id)       t_doc_id="${2:-}"; shift 2 ;;
+                    --json)     t_json="1"; shift ;;
+                    -?*)        _guard_flag "$1" ;;
+                    *)          t_pos+=("$1"); shift ;;
+                esac
+            done
+            case "$table_sub" in
+                create)
+                    # create: title は位置引数 or --title。
+                    [[ -z "$t_title" && ${#t_pos[@]} -gt 0 ]] && t_title="${t_pos[0]}"
+                    if [ -z "$t_title" ] || [ -z "$t_columns" ]; then
+                        echo "Usage: beacon doc table create \"title\" --columns '<json>' [--scope ...] [--ms|--op|--target id] [--id slug] [--json]"
+                        echo "  columns 例: '[{\"key\":\"name\",\"label\":\"名前\",\"type\":\"text\"},{\"key\":\"phase\",\"type\":\"enum\",\"values\":[\"lead\",\"won\"]}]'"
+                        exit 1
+                    fi
+                    BEACON_TITLE="$t_title" BEACON_COLUMNS="$t_columns" \
+                        BEACON_DOC_ID="$t_doc_id" BEACON_SCOPE="$t_scope" \
+                        BEACON_MS="$t_ms" BEACON_OP="$t_op" BEACON_TARGET="$t_target" \
+                        BEACON_JSON="$t_json" python3 "$COMMANDS_PY" doc_table_create
+                    ;;
+                add-row)
+                    t_doc_id="${t_doc_id:-${t_pos[0]:-}}"
+                    if [ -z "$t_doc_id" ] || [ -z "$t_cells" ]; then
+                        echo "Usage: beacon doc table add-row <doc-id> --cells '<json>' [--json]"
+                        echo "  cells 例: '{\"name\":\"Acme\",\"phase\":\"lead\"}'"
+                        exit 1
+                    fi
+                    BEACON_DOC_ID="$t_doc_id" BEACON_CELLS="$t_cells" \
+                        BEACON_JSON="$t_json" python3 "$COMMANDS_PY" doc_table_add_row
+                    ;;
+                set-cell)
+                    # positional: <doc-id> <row-id> <col-key> [value]
+                    t_doc_id="${t_doc_id:-${t_pos[0]:-}}"
+                    t_row_id="${t_pos[1]:-}"
+                    t_col_key="${t_pos[2]:-}"
+                    # A 4th positional counts as an explicitly-provided value, so
+                    # a forgotten value is rejected downstream (not written empty).
+                    if [[ -z "$t_value_set" && ${#t_pos[@]} -gt 3 ]]; then
+                        t_value="${t_pos[3]}"; t_value_set="1"
+                    fi
+                    if [ -z "$t_doc_id" ] || [ -z "$t_row_id" ] || [ -z "$t_col_key" ]; then
+                        echo "Usage: beacon doc table set-cell <doc-id> <row-id> <col-key> <value> [--json]"
+                        echo "  値に空白や記号を含む場合は --value \"...\" を使う（空にするなら --value \"\"）"
+                        exit 1
+                    fi
+                    BEACON_DOC_ID="$t_doc_id" BEACON_ROW_ID="$t_row_id" \
+                        BEACON_COL_KEY="$t_col_key" BEACON_VALUE="$t_value" \
+                        BEACON_VALUE_SET="$t_value_set" \
+                        BEACON_JSON="$t_json" python3 "$COMMANDS_PY" doc_table_set_cell
+                    ;;
+                rm-row)
+                    t_doc_id="${t_doc_id:-${t_pos[0]:-}}"
+                    t_row_id="${t_pos[1]:-}"
+                    if [ -z "$t_doc_id" ] || [ -z "$t_row_id" ]; then
+                        echo "Usage: beacon doc table rm-row <doc-id> <row-id> [--json]"
+                        exit 1
+                    fi
+                    BEACON_DOC_ID="$t_doc_id" BEACON_ROW_ID="$t_row_id" \
+                        BEACON_JSON="$t_json" python3 "$COMMANDS_PY" doc_table_rm_row
+                    ;;
+                show)
+                    t_doc_id="${t_doc_id:-${t_pos[0]:-}}"
+                    if [ -z "$t_doc_id" ]; then
+                        echo "Usage: beacon doc table show <doc-id> [--json]"
+                        exit 1
+                    fi
+                    BEACON_DOC_ID="$t_doc_id" BEACON_JSON="$t_json" \
+                        python3 "$COMMANDS_PY" doc_table_show
+                    ;;
+                *)
+                    echo "Usage: beacon doc table [create|add-row|set-cell|rm-row|show]"
+                    echo "  create   \"title\" --columns '<json>'        型付き列で表を作成"
+                    echo "  add-row  <doc-id> --cells '<json>'          行を追加 (型検査 + 履歴)"
+                    echo "  set-cell <doc-id> <row-id> <col-key> <val>  セルを更新 (過去値は履歴に残る)"
+                    echo "  rm-row   <doc-id> <row-id>                  行を削除 (soft-delete)"
+                    echo "  show     <doc-id>                           表を描画 (--json で構造)"
+                    # AX review of PR #544: an unknown subcommand (typo) must be a
+                    # non-zero exit so a caller checking $? doesn't read success.
+                    exit 1
+                    ;;
+            esac
+            ;;
         *)
-            echo "Usage: beacon doc [add|list|show|update|delete|restore|history|image-upload]"
+            echo "Usage: beacon doc [add|list|show|update|delete|restore|history|image-upload|table]"
             echo "  add          \"title\" --scope core|spec|memo|retro|report [--ms ms-id]"
             echo "  update       <doc-id> [--title text] [--content text]"
             echo "  list         [--scope core|spec|memo|retro|report] [--ms ms-id] [--include-trashed]"
@@ -2897,6 +3004,7 @@ cmd_doc() {
             echo "  history      <doc-id>"
             echo "  restore      <doc-id> --rev <n>"
             echo "  image-upload <local-file>                           Upload image, get markdown img tag"
+            echo "  table        [create|add-row|set-cell|rm-row|show]  行×列の構造化ドキュメント (ms-131)"
             ;;
     esac
 }
