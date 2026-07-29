@@ -1954,6 +1954,14 @@ def issue_import_authoring_rule(project_data: dict, report: dict) -> dict:
     eid = next_entry_id(project_data)
     now = _now_iso()
     description = f"#{number}: {title}" if title else f"Issue #{number}"
+    # ms-126 (e-4225): importing a GitHub Issue is a machine path — no human has
+    # judged its priority yet, so it must land with the ``untriaged`` sentinel
+    # (surfaces in the untriaged-backlog debt trigger, prompting a human to
+    # triage it). Route that stamp through the single-source helper rather than
+    # hardcoding the literal here, so the sentinel-write mechanism has exactly
+    # one authority: if its value or machine-path rule ever changes, this import
+    # path follows automatically instead of drifting into a stale copy.
+    imported_priority = _resolve_priority_for_write("", allow_untriaged=True)
     entry = {
         "id": eid,
         "type": "task",
@@ -1966,12 +1974,7 @@ def issue_import_authoring_rule(project_data: dict, report: dict) -> dict:
             "issue_number": number,
             "issue_url": url,
             "created_by": created_by,
-            # ms-126: importing a GitHub Issue is a machine path — no human has
-            # judged its priority yet. Stamp the ``untriaged`` sentinel so the
-            # imported task surfaces in the untriaged-backlog debt trigger and a
-            # human is prompted to triage it, rather than silently landing with
-            # no priority.
-            "priority": UNTRIAGED_PRIORITY,
+            "priority": imported_priority,
         },
     }
     if body and body.strip():

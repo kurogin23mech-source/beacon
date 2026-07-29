@@ -165,6 +165,20 @@ class TestIssueImportUntriaged:
         assert entry["id"] == eid
         assert entry["meta"]["priority"] == core.UNTRIAGED_PRIORITY
 
+    def test_import_stamp_routes_through_single_source_helper(self):
+        # e-4225: the imported task's priority must be whatever the single-source
+        # machine-path resolver produces — not a literal copy hardcoded in
+        # issue_import. Pinning them equal means a future change to the sentinel
+        # write mechanism (value or machine-path rule) can't leave issue_import
+        # behind on a stale duplicate.
+        data = make_project(milestones=[make_active_ms()])
+        core.issue_import(
+            data, ms_id="ms-1", number=7, url="http://y", title="T", body="",
+        )
+        stamped = data["milestones"][0]["entries"][0]["meta"]["priority"]
+        assert stamped == core._resolve_priority_for_write(
+            "", allow_untriaged=True)
+
 
 # ---------------------------------------------------------------------------
 # trigger: untriaged-backlog counting + no-backfill
