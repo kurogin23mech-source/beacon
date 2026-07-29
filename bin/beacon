@@ -2799,6 +2799,7 @@ cmd_doc() {
             if [ -z "$doc_id" ]; then
                 echo "Usage: beacon doc update <doc-id> [--title text] [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--account acc-id] [--opportunity opp-id] [--target id] [--content text] [--json]"
                 echo "  Content can also be piped via stdin."
+                echo "  Note: --content は table-doc (format: table) では拒否されます。行の変更は 'beacon doc table' を使ってください (紐づけ/タイトル/スコープ変更は可)。"
                 exit 1
             fi
             BEACON_DOC_ID="$doc_id" BEACON_TITLE="$doc_title" \

@@ -64,10 +64,16 @@ def test_doc_update_content_refused_on_table_doc(proj):
 
 def test_doc_update_stdin_content_refused_on_table_doc(proj):
     doc_id = _make_table()
+    _run(["doc", "table", "add-row", doc_id, "--cells", '{"name":"A"}'])
     r = subprocess.run([str(BEACON_BIN), "doc", "update", doc_id, "--stdin"],
                        input="clobber", text=True, capture_output=True)
     assert r.returncode == 1
     assert "table-doc" in (r.stdout + r.stderr)
+    # The stdin path must leave the doc untouched too (symmetry with --content).
+    text = (proj / ".beacon" / "documents" / f"{doc_id}.md").read_text()
+    assert "format: table" in text and "clobber" not in text
+    model = json.loads(_run(["doc", "table", "show", doc_id, "--json"]).stdout)
+    assert model["rows"][0]["cells"]["name"] == "A"
 
 
 def test_linkage_update_still_allowed_on_table_doc(proj):
