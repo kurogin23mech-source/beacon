@@ -55,6 +55,19 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from ._version import __version__
 
 
+# ms-126 (e-4223): priority の 5 択を **この python surface (dispatcher) 内の** 単一
+# 定義にする。無効値を argparse の choices で早期 reject し、未判断は ``--untriaged``
+# で opt-in する (空文字は sentinel でなく無効値)。
+# 注意 (独立レビュー #539 / Maint#1): 5 値は他に lib/core.py の VALID_PRIORITIES と
+# bash bin/beacon のプロンプト / help 文字列にも別コピーで存在する。ここでは
+# core.VALID_PRIORITIES との一致を test で pin しているが、bash 側は手動同期 (別
+# コピー)。bash↔python の汎用 flag-parity 検査を cli-drift guard に足すのは e-4223
+# の残り半分 (別コミット)。
+# help= は付けない: サブコマンド parser は add_help=False で --help/-h を自前処理
+# するため argparse の help= は表示されず (dead)、付けると誤誘導だけ残る (#539 AX#1)。
+_PRIORITY_CHOICES = ("highest", "high", "medium", "low", "lowest")
+
+
 # ---------------------------------------------------------------------------
 # Subprocess helper — single point of truth for invoking commands.py
 # ---------------------------------------------------------------------------
@@ -655,7 +668,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_task_add.add_argument("-t", "--type", dest="entry_type", default=None)
     p_task_add.add_argument("-d", "--detail", default=None)
     p_task_add.add_argument("--from", dest="requested_by", default=None)
-    p_task_add.add_argument("--priority", default=None)
+    p_task_add.add_argument("--priority", default=None,
+                            choices=_PRIORITY_CHOICES)
     # ms-126: machine opt-in to the untriaged sentinel (empty priority allowed).
     p_task_add.add_argument("--untriaged", action="store_true",
                             dest="allow_untriaged")
@@ -696,7 +710,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--acceptance-criteria", "--ac", dest="acceptance_criteria", default=""
     )
     p_task_update.add_argument("--behavior", default="")
-    p_task_update.add_argument("--priority", "-p", default="")
+    # e-4223: 省略時は default="" で「変更なし」。値を渡すなら 5 択で validate。
+    p_task_update.add_argument("--priority", "-p", default="",
+                               choices=_PRIORITY_CHOICES)
 
     p_task_cancel = task_sub.add_parser("cancel", add_help=False)
     p_task_cancel.add_argument("entry_id", nargs="?", default="")
@@ -717,7 +733,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ms_add.add_argument(
         "--description", "--desc", dest="description", default=""
     )
-    p_ms_add.add_argument("--priority", default="")
+    p_ms_add.add_argument("--priority", default="",
+                          choices=_PRIORITY_CHOICES)
     # ms-126: machine opt-in to the untriaged sentinel (empty priority allowed).
     p_ms_add.add_argument("--untriaged", action="store_true",
                           dest="allow_untriaged")
@@ -764,7 +781,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_ms_update.add_argument(
         "--description", "--desc", dest="description", default=""
     )
-    p_ms_update.add_argument("--priority", default="")
+    p_ms_update.add_argument("--priority", default="",
+                             choices=_PRIORITY_CHOICES)
     p_ms_update.add_argument("--objective", default="")
     p_ms_update.add_argument(
         "--acceptance-criteria", "--ac", dest="acceptance_criteria", default=""
@@ -2559,7 +2577,10 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
             env["BEACON_REQUESTED_BY"] = args.requested_by
         if args.priority is not None:
             env["BEACON_PRIORITY"] = args.priority
-        if getattr(args, "allow_untriaged", False):
+        # e-4226: 直接参照で dest 配線漏れを fail-fast にする。getattr(..., False)
+        # は --untriaged の dest が切れても silent に False を返し、flag が黙って
+        # 無効化される穴になる (周囲の args.priority 等も直接参照で一貫)。
+        if args.allow_untriaged:
             env["BEACON_ALLOW_UNTRIAGED"] = "1"
         if args.motivation is not None:
             env["BEACON_MOTIVATION"] = args.motivation
@@ -2691,7 +2712,10 @@ def _handle_milestone(root: Path, args: argparse.Namespace) -> int:
             "BEACON_OWNER": args.owner or "",
             "BEACON_ASSIGNEE": args.assignee or "",
         }
-        if getattr(args, "allow_untriaged", False):
+        # e-4226: 直接参照で dest 配線漏れを fail-fast にする。getattr(..., False)
+        # は --untriaged の dest が切れても silent に False を返し、flag が黙って
+        # 無効化される穴になる (周囲の args.priority 等も直接参照で一貫)。
+        if args.allow_untriaged:
             env["BEACON_ALLOW_UNTRIAGED"] = "1"
         return _run_commands_py(root, "milestone_add", env)
 
