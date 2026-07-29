@@ -868,9 +868,16 @@ def milestone_update(data: dict, ms_id: str, *,
             if target_date:
                 ms["target_date"] = target_date
             if priority:
-                if priority not in _ACCEPTED_PRIORITIES:
-                    raise ValueError(f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}")
-                ms["priority"] = normalize_priority(priority)
+                # ms-126 (e-4224 / AX#1): accept an idempotent echo of the
+                # current value (incl. the untriaged sentinel) so read-modify-
+                # write round-trips don't 400; reject only a real transition to
+                # a non-severity. Maint#1: the transition routes through the
+                # single-source resolver, not a re-inlined copy. Mirrors
+                # task_update above.
+                current = ms.get("priority", "")
+                if priority != current:
+                    ms["priority"] = _resolve_priority_for_write(
+                        priority, allow_untriaged=False)
             if objective:
                 ms["objective"] = objective
             if acceptance_criteria:
@@ -1332,13 +1339,23 @@ def task_update(data: dict, entry_id: str, *,
         entry["behavior"] = behavior
         changed = True
     if priority:
-        if priority not in _ACCEPTED_PRIORITIES:
-            raise ValueError(
-                f"Invalid priority: {priority}. Valid: {', '.join(sorted(VALID_PRIORITIES))}"
-            )
-        meta = entry.setdefault("meta", {})
-        meta["priority"] = normalize_priority(priority)
-        changed = True
+        # ms-126 (e-4224 / AX#1): read-modify-write is the canonical AI edit
+        # pattern (GET an entry, change one field, PATCH the whole object back).
+        # An untriaged task's GET carries priority=="untriaged"; echoing it back
+        # unchanged must be an idempotent no-op, NOT a 400 — otherwise the API's
+        # own emitted value becomes an invalid input and the AI mis-diagnoses
+        # its own request. So: an echo of the currently-stored value (incl. the
+        # sentinel) is accepted as a no-change; only an actual *transition* is
+        # validated. Maint#1: that transition routes through the single-source
+        # resolver (allow_untriaged=False = human path) rather than re-inlining
+        # the severity/untriaged rules — _resolve_priority_for_write is the one
+        # authority (it rejects the sentinel as not-a-severity, keeping the "a
+        # human cannot newly choose untriaged" invariant).
+        current = (entry.get("meta") or {}).get("priority", "")
+        if priority != current:
+            entry.setdefault("meta", {})["priority"] = _resolve_priority_for_write(
+                priority, allow_untriaged=False)
+            changed = True
     if changed:
         author_clean = _clean_author(author)
         if author_clean:
@@ -1954,6 +1971,14 @@ def issue_import_authoring_rule(project_data: dict, report: dict) -> dict:
     eid = next_entry_id(project_data)
     now = _now_iso()
     description = f"#{number}: {title}" if title else f"Issue #{number}"
+    # ms-126 (e-4225): importing a GitHub Issue is a machine path — no human has
+    # judged its priority yet, so it must land with the ``untriaged`` sentinel
+    # (surfaces in the untriaged-backlog debt trigger, prompting a human to
+    # triage it). Route that stamp through the single-source helper rather than
+    # hardcoding the literal here, so the sentinel-write mechanism has exactly
+    # one authority: if its value or machine-path rule ever changes, this import
+    # path follows automatically instead of drifting into a stale copy.
+    imported_priority = _resolve_priority_for_write("", allow_untriaged=True)
     entry = {
         "id": eid,
         "type": "task",
@@ -1966,12 +1991,7 @@ def issue_import_authoring_rule(project_data: dict, report: dict) -> dict:
             "issue_number": number,
             "issue_url": url,
             "created_by": created_by,
-            # ms-126: importing a GitHub Issue is a machine path — no human has
-            # judged its priority yet. Stamp the ``untriaged`` sentinel so the
-            # imported task surfaces in the untriaged-backlog debt trigger and a
-            # human is prompted to triage it, rather than silently landing with
-            # no priority.
-            "priority": UNTRIAGED_PRIORITY,
+            "priority": imported_priority,
         },
     }
     if body and body.strip():

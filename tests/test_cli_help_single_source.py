@@ -78,6 +78,154 @@ def test_usage_has_no_second_help_heredoc():
     )
 
 
+# --- ms-126 e-4223: bash ↔ Python flag parity -------------------------------
+
+
+def test_required_flag_parity_holds():
+    """The curated priority-flag contract is present on BOTH surfaces today."""
+    mod = _load_checker()
+    parity = mod.collect_flag_parity()
+    assert parity["ok"], parity
+
+
+def test_python_extractor_sees_priority_flags():
+    """argparse introspection finds --priority/--untriaged on the real dispatcher."""
+    mod = _load_checker()
+    py = mod.python_verb_flags()
+    assert {"--priority", "--untriaged"} <= py["milestone add"]
+    assert {"--priority", "--untriaged"} <= py["task add"]
+    assert "--priority" in py["milestone update"]
+    assert "--priority" in py["task update"]
+
+
+def test_bash_extractor_sees_priority_flags():
+    """The bash cmd_* slicer finds the same flags in bin/beacon, including the
+    --a|--b alias groups (so `--acceptance-criteria|--ac` doesn't mask siblings)."""
+    mod = _load_checker()
+    assert {"--priority", "--untriaged"} <= mod.bash_verb_flags("milestone add")
+    assert {"--priority", "--untriaged"} <= mod.bash_verb_flags("task add")
+    assert "--priority" in mod.bash_verb_flags("milestone update")
+    assert "--priority" in mod.bash_verb_flags("task update")
+
+
+def test_flag_parity_detects_bash_omission(tmp_path):
+    """A guard that can't fail is useless: prove it fires when a required flag is
+    dropped from the bash surface. A synthetic bin/beacon whose cmd_task_update()
+    lacks --priority must surface as missing_from_bash_flags (Python still has
+    it, so only the bash side is flagged — per-surface attribution works)."""
+    mod = _load_checker()
+    fake_bin = tmp_path / "beacon"
+    fake_bin.write_text(
+        "#!/usr/bin/env bash\n"
+        "cmd_milestone_add() {\n"
+        "  case \"$1\" in\n"
+        "    --priority) priority=\"${2:-}\"; shift 2 ;;\n"
+        "    --untriaged) allow_untriaged=1; shift ;;\n"
+        "  esac\n"
+        "}\n"
+        "cmd_milestone_update() {\n"
+        "  case \"$1\" in\n"
+        "    --priority) priority=\"${2:-}\"; shift 2 ;;\n"
+        "  esac\n"
+        "}\n"
+        "cmd_task_add() {\n"
+        "  case \"$1\" in\n"
+        "    --priority) priority=\"${2:-}\"; shift 2 ;;\n"
+        "    --untriaged) allow_untriaged=1; shift ;;\n"
+        "  esac\n"
+        "}\n"
+        "cmd_task_update() {\n"
+        "  case \"$1\" in\n"
+        "    --status) status=\"${2:-}\"; shift 2 ;;\n"  # --priority intentionally absent
+        "  esac\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    parity = mod.collect_flag_parity(bin_path=fake_bin)
+    assert not parity["ok"]
+    assert "task update --priority" in parity["missing_from_bash_flags"]
+    # Python still registers it → the bash-only omission is not misattributed.
+    assert "task update --priority" not in parity["missing_from_python_flags"]
+
+
+def test_python_seam_is_injectable():
+    """Maint finding: the Python side must have a *real* injection seam, not an
+    illusory path arg (import_module caches, so a path can't swap the module).
+    Passing a synthetic parser missing --priority on `milestone add` must be
+    detected — proving python_verb_flags(parser=...) actually introspects it."""
+    import argparse
+
+    mod = _load_checker()
+    p = argparse.ArgumentParser(add_help=False)
+    sub = p.add_subparsers()
+    ms = sub.add_parser("milestone", add_help=False)
+    ms_sub = ms.add_subparsers()
+    ms_add = ms_sub.add_parser("add", add_help=False)
+    ms_add.add_argument("--untriaged", action="store_true")  # --priority omitted
+    flags = mod.python_verb_flags(parser=p)
+    assert "--untriaged" in flags["milestone add"]
+    assert "--priority" not in flags["milestone add"]  # the injected parser is seen
+
+
+def test_flag_parity_reports_missing_bash_function_distinctly(tmp_path):
+    """AX finding: a *missing function* is a different fix than a *missing flag*.
+    A synthetic bin/beacon with no cmd_task_update() at all must surface in
+    missing_bash_functions — NOT as 'task update --priority' in the flag list
+    (which would misdirect the fix to 'add a case to a loop' that doesn't exist)."""
+    mod = _load_checker()
+    fake_bin = tmp_path / "beacon"
+    fake_bin.write_text(
+        "#!/usr/bin/env bash\n"
+        "cmd_milestone_add() { case \"$1\" in --priority) :;; --untriaged) :;; esac; }\n"
+        "cmd_milestone_update() { case \"$1\" in --priority) :;; esac; }\n"
+        "cmd_task_add() { case \"$1\" in --priority) :;; --untriaged) :;; esac; }\n"
+        # cmd_task_update() intentionally ABSENT
+        , encoding="utf-8",
+    )
+    parity = mod.collect_flag_parity(bin_path=fake_bin)
+    assert not parity["ok"]
+    assert "task update" in parity["missing_bash_functions"]
+    assert "task update --priority" not in parity["missing_from_bash_flags"]
+
+
+def test_bash_slice_start_is_anchored_not_substring(tmp_path):
+    """Maint finding: the function-header search must be line-anchored so a bare
+    mention of the name (comment / usage string) earlier in the file can't be
+    mistaken for the definition and slice the wrong region (a false pass)."""
+    mod = _load_checker()
+    fake_bin = tmp_path / "beacon"
+    fake_bin.write_text(
+        "#!/usr/bin/env bash\n"
+        "# NOTE: cmd_task_update() parses --status; see below.\n"  # decoy mention
+        "cmd_other() {\n"
+        "  case \"$1\" in\n"
+        "    --priority) shift 2 ;;\n"                              # wrong region
+        "  esac\n"
+        "}\n"
+        "cmd_task_update() {\n"
+        "  case \"$1\" in\n"
+        "    --priority) shift 2 ;;\n"
+        "    --status) shift 2 ;;\n"
+        "  esac\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    flags = mod.bash_verb_flags("task update", bin_path=fake_bin)
+    # Must read the REAL definition (has --priority + --status), not latch onto
+    # the decoy comment mention and slice cmd_other's region instead.
+    assert flags == {"--priority", "--status"}
+
+
+def test_bash_verb_flags_returns_none_when_function_absent(tmp_path):
+    """The extractor signals function-not-found as None (distinct from an empty
+    flag set), so callers can tell 'no such function' from 'function has no
+    matching flags'."""
+    mod = _load_checker()
+    fake_bin = tmp_path / "beacon"
+    fake_bin.write_text("#!/usr/bin/env bash\ncmd_other() { :; }\n", encoding="utf-8")
+    assert mod.bash_verb_flags("task update", bin_path=fake_bin) is None
+
+
 # --- behavioral (need bash) -------------------------------------------------
 
 pytestmark_bash = pytest.mark.skipif(BASH is None, reason="bash not available")
