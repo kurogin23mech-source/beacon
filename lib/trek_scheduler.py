@@ -1066,9 +1066,11 @@ def build_leader_halt_payload(
         f"レビュー待ちキューを {waited} 分消化していません "
         f"(最古={oldest}、キュー {queue_size} 件)。リーダーが停滞しています。"
         f"実行セッションは継続しますが成果が leader_review に溜まり続けます "
-        f"(= graceful degradation)。生存する実行セッションへ "
-        f"`beacon trek transfer-leader {trek_id} <live-session>` でリーダー役を "
-        f"移譲して復旧してください (溜まったキューは新リーダーが引き継ぎます)。"
+        f"(= graceful degradation)。**停滞したリーダー自身は移譲できない**ため、"
+        f"あなた (発注者) の生きたセッションで `beacon trek take-over {trek_id}` を "
+        f"実行してリーダー役を引き取ってください (溜まったレビューキューは新リーダーが "
+        f"そのまま引き継ぎます)。別の生きたリーダーセッションから明示移譲する場合は "
+        f"`beacon trek transfer-leader {trek_id} ...` も可。"
     )
     return {
         "trek_id": trek_id,

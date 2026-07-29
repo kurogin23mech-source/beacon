@@ -3119,7 +3119,7 @@ def test_leader_halt_escalation_fires_to_notify_channel():
     ev = lh[0]
     assert ev["channel"] == "notify"
     assert ev["delivery"] == "notify-user-only"
-    assert "transfer-leader" in ev["payload"]["body"]
+    assert "take-over" in ev["payload"]["body"]  # halted leader → take-over recovery
     assert ev["payload"]["oldest_task_id"] == "e-stale"
 
     # meta stamped so the refire cooldown holds next tick.
@@ -3165,3 +3165,30 @@ def test_leader_halt_skipped_when_halted():
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["leader_halt_escalations"] == []
+
+
+def test_leader_halt_does_not_halt_the_trek():
+    # Graceful degradation: firing a leader-halt escalation must NOT set the
+    # trek's halt. leader-halt = "review backlog", not "stop the world" — the
+    # trek stays active so executors keep receiving ticks. (Executor task-state
+    # is governed by the separate auto-stall/halt-sweep passes, not this one.)
+    _seed_trek(
+        trek_id="tk-lhalt04",
+        status="active",
+        cadence=10,
+        scope=[{"project": "beacon-test", "milestone": "ms-83"}],
+    )
+    _treks["tk-lhalt04"]["task_states"] = {
+        "e-stale": {"state": "leader_review",
+                    "updated_at": "2020-01-01T00:00:00.000000Z"},
+    }
+    resp = client.post(
+        "/api/system/trek-scheduler/tick",
+        json={"trek_ids": ["tk-lhalt04"]},
+        headers=HEADERS_OK,
+    )
+    assert resp.status_code == 200, resp.text
+    assert len(resp.json()["leader_halt_escalations"]) == 1
+    saved = _treks["tk-lhalt04"]
+    assert saved.get("halt") in (None, {})          # trek NOT halted
+    assert saved.get("status") == "active"          # still running

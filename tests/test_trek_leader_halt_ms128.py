@@ -168,5 +168,38 @@ def test_payload_shape_and_transfer_guidance():
     assert p["kind"] == "trek-leader-halt-escalation"
     assert p["waited_minutes"] == 300
     assert p["oldest_task_id"] == "e-1"
-    assert "transfer-leader" in p["body"]
+    assert "take-over" in p["body"]  # correct recovery for a halted leader
     assert p["leader_session_id"] == "sv-lead"
+
+
+# --- chunk 3: recovery drains the queue; graceful degradation ---------------
+
+def test_take_over_preserves_leader_review_queue_for_new_leader():
+    # "leader-transfer で溜まったキューが drain": the queue is derived from
+    # task_states, so after transfer_leader the accumulated leader_review items
+    # are fully visible to whoever is now leader (nothing to migrate, no loss).
+    doc = _active_trek({
+        "e-1": {"state": "leader_review", "updated_at": _OLD},
+        "e-2": {"state": "leader_review", "updated_at": _RECENT},
+    })
+    before = _sched.build_task_state_aggregate(doc)["leader_review_queue"]
+    trek.transfer_leader(doc, target_session_id="sv-new-leader")
+    after = _sched.build_task_state_aggregate(doc)["leader_review_queue"]
+    assert doc["leader_session_id"] == "sv-new-leader"
+    assert [r["task_id"] for r in after] == [r["task_id"] for r in before]
+    assert len(after) == 2  # the whole backlog carries to the new leader
+
+
+def test_leader_halt_detection_does_not_touch_executor_state():
+    # Graceful degradation: detecting a leader halt is read-only and must not
+    # change any executor task state or halt the trek.
+    doc = _active_trek({
+        "e-review": {"state": "leader_review", "updated_at": _OLD},
+        "e-work": {"state": "working", "updated_at": _RECENT},
+    })
+    import copy
+    before = copy.deepcopy(doc)
+    r = trek.evaluate_leader_halt(doc, now=_NOW)
+    assert r is not None            # leader halt detected
+    assert doc == before            # executor state untouched, trek not halted
+    assert doc.get("halt") is None
