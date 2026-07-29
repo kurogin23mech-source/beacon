@@ -9109,6 +9109,7 @@ def cmd_trek_task_state():
     ).get("updated_by_session_id", "")
     gate = trek.completion_gate_decision(
         effective_state=effective_state,
+        from_state=from_state,
         verdict=verdict,
         caller_sid=caller_sid,
         prior_stamper_sid=prior_stamper_sid,

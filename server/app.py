@@ -6514,6 +6514,7 @@ def set_trek_task_state_endpoint(trek_id: str, body: TrekTaskStateSet,
         ).get("updated_by_session_id", "")
         gate = trek_mod.completion_gate_decision(
             effective_state=effective_state,
+            from_state=from_state,
             verdict=(body.verdict or ""),
             caller_sid=caller_sid,
             prior_stamper_sid=prior_stamper_sid,

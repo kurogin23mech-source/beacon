@@ -1288,8 +1288,9 @@ class TestReviewTriggerStatesEmit:
             json={
                 "task_id": "e-user-rev-control",
                 "state": "user_review",
-                # e-4386: user_review へ倒す明示的な人間エスカレーション。
-                # forward-to-user は完遂の主張ではないので attainment ゲート対象外。
+                # e-4373: member の working→user_review は (forward-to-user でも) リーダー
+                # 審査を経ていないので leader_review に留置される。SPEC 状態遷移表では
+                # user_review 入口は leader_review→user_review (leader) のみ。
                 "verdict": "forward-to-user",
                 "note": "forward to user",
             },
@@ -1301,8 +1302,9 @@ class TestReviewTriggerStatesEmit:
             e for e in bus if e.get("channel") == "trek-task-review"
         ]
         assert len(review_events) == 1
+        # working からの試みは leader_review に diverted され、その遷移で review event 発火。
         assert (
-            (review_events[0].get("payload") or {}).get("state") == "user_review"
+            (review_events[0].get("payload") or {}).get("state") == "leader_review"
         )
 
     def test_leader_self_stamp_leader_review_still_suppresses(self):
@@ -1627,12 +1629,17 @@ class TestSlotDonePrecondition:
         _treks[trek_id]["task_states"] = {}
         return trek_id
 
-    def _seed_member_working(self, trek_id: str, task_id: str) -> None:
+    def _seed_member_working(self, trek_id: str, task_id: str,
+                             state: str = "working") -> None:
+        # e-4373: user_review へは leader_review→user_review (leader) が唯一の入口。
+        # slot-done precondition (terminal) を試すテストは、executor(sv-member) が
+        # leader_review に stamp 済の状態を seed し、leader が terminal に倒す形にする。
         _treks[trek_id]["task_states"][task_id] = {
-            "state": "working",
+            "state": state,
             "updated_by_session_id": "sv-member",
             "updated_at": "2026-06-28T00:00:00.000000Z",
             "last_activity_at": "2026-06-28T00:00:00.000000Z",
+            "leader_review_entered_at": "2026-06-28T00:00:00.000000Z",
             "note": "",
         }
         for k in list(_bus_events_by_project.keys()):
@@ -1647,7 +1654,7 @@ class TestSlotDonePrecondition:
         では set_task_state が無条件で通り、 phantom done を生んでいた。
         """
         trek_id = self._seed_active_trek_with_scope()
-        self._seed_member_working(trek_id, "e-pool-todo")
+        self._seed_member_working(trek_id, state="leader_review", task_id="e-pool-todo")
         from unittest.mock import patch
 
         def _fake_get_project(pid: str):
@@ -1663,14 +1670,14 @@ class TestSlotDonePrecondition:
                 }
             return None
 
-        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        _impersonate(LEADER_UID, LEADER_EMAIL)
         with patch.object(app_module.db, "get_project", _fake_get_project):
             r = client.patch(
                 f"/api/treks/{trek_id}/task-state",
                 json={"task_id": "e-pool-todo", "state": "done",
                       "verdict": "forward-to-user",
                       "note": "executor が done に flip 試行"},
-                headers={"X-Beacon-Session": "sv-member"},
+                headers={"X-Beacon-Session": "sv-leader"},
             )
         assert r.status_code == 409, r.text
         body = r.json()
@@ -1678,10 +1685,10 @@ class TestSlotDonePrecondition:
         detail = body.get("detail") or {}
         assert detail.get("code") == "task_pool_not_done", detail
         assert "task pool" in (detail.get("message") or "")
-        # state transition は適用されていないこと (= 真値源 ordering)
+        # state transition は適用されていないこと (= 真値源 ordering、seed の leader_review のまま)
         assert (
             _treks[trek_id]["task_states"]["e-pool-todo"]["state"]
-            == "working"
+            == "leader_review"
         )
 
     # ----- 2. MS ref slot で配下 task 一部 todo のまま slot done → 4xx -----
@@ -1693,7 +1700,7 @@ class TestSlotDonePrecondition:
         flow に頼らず、 ordering を server で構造強制する。
         """
         trek_id = self._seed_active_trek_with_scope(ms_id="ms-97")
-        self._seed_member_working(trek_id, "ms-97")
+        self._seed_member_working(trek_id, state="leader_review", task_id="ms-97")
         from unittest.mock import patch
 
         def _fake_get_project(pid: str):
@@ -1711,14 +1718,14 @@ class TestSlotDonePrecondition:
                 }
             return None
 
-        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        _impersonate(LEADER_UID, LEADER_EMAIL)
         with patch.object(app_module.db, "get_project", _fake_get_project):
             r = client.patch(
                 f"/api/treks/{trek_id}/task-state",
                 json={"task_id": "ms-97", "state": "done",
                       "verdict": "forward-to-user",
                       "note": "MS slot 一括 done flip 試行"},
-                headers={"X-Beacon-Session": "sv-member"},
+                headers={"X-Beacon-Session": "sv-leader"},
             )
         assert r.status_code == 409, r.text
         detail = r.json().get("detail") or {}
@@ -1731,7 +1738,7 @@ class TestSlotDonePrecondition:
     def test_task_ref_slot_done_allowed_when_pool_done(self):
         """task ref slot: project pool が done なら slot done も通る。"""
         trek_id = self._seed_active_trek_with_scope()
-        self._seed_member_working(trek_id, "e-pool-done")
+        self._seed_member_working(trek_id, state="leader_review", task_id="e-pool-done")
         from unittest.mock import patch
 
         def _fake_get_project(pid: str):
@@ -1747,14 +1754,14 @@ class TestSlotDonePrecondition:
                 }
             return None
 
-        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        _impersonate(LEADER_UID, LEADER_EMAIL)
         with patch.object(app_module.db, "get_project", _fake_get_project):
             r = client.patch(
                 f"/api/treks/{trek_id}/task-state",
                 json={"task_id": "e-pool-done", "state": "done",
                       "verdict": "forward-to-user",
                       "note": "ok"},
-                headers={"X-Beacon-Session": "sv-member"},
+                headers={"X-Beacon-Session": "sv-leader"},
             )
         assert r.status_code == 200, r.text
         # ms-128 方針5: pool-done gate は通るが、保存状態は done → user_review に
@@ -1766,7 +1773,7 @@ class TestSlotDonePrecondition:
     def test_ms_ref_slot_done_allowed_when_all_children_done(self):
         """MS slot: 配下 task が全 done なら slot done も通る (= happy path)。"""
         trek_id = self._seed_active_trek_with_scope(ms_id="ms-97")
-        self._seed_member_working(trek_id, "ms-97")
+        self._seed_member_working(trek_id, state="leader_review", task_id="ms-97")
         from unittest.mock import patch
 
         def _fake_get_project(pid: str):
@@ -1782,14 +1789,14 @@ class TestSlotDonePrecondition:
                 }
             return None
 
-        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        _impersonate(LEADER_UID, LEADER_EMAIL)
         with patch.object(app_module.db, "get_project", _fake_get_project):
             r = client.patch(
                 f"/api/treks/{trek_id}/task-state",
                 json={"task_id": "ms-97", "state": "done",
                       "verdict": "forward-to-user",
                       "note": "全 done のため MS slot done"},
-                headers={"X-Beacon-Session": "sv-member"},
+                headers={"X-Beacon-Session": "sv-leader"},
             )
         assert r.status_code == 200, r.text
 
@@ -1832,7 +1839,7 @@ class TestSlotDonePrecondition:
         """scope project の task pool に存在しない id を done にしようとして
         も reject (= 「task 自体が無いのに slot だけ done」 phantom 経路の防御)。"""
         trek_id = self._seed_active_trek_with_scope()
-        self._seed_member_working(trek_id, "e-ghost")
+        self._seed_member_working(trek_id, state="leader_review", task_id="e-ghost")
         from unittest.mock import patch
 
         def _fake_get_project(pid: str):
@@ -1845,12 +1852,12 @@ class TestSlotDonePrecondition:
                 }
             return None
 
-        _impersonate(MEMBER_UID, MEMBER_EMAIL)
+        _impersonate(LEADER_UID, LEADER_EMAIL)
         with patch.object(app_module.db, "get_project", _fake_get_project):
             r = client.patch(
                 f"/api/treks/{trek_id}/task-state",
                 json={"task_id": "e-ghost", "state": "done", "verdict": "forward-to-user", "note": ""},
-                headers={"X-Beacon-Session": "sv-member"},
+                headers={"X-Beacon-Session": "sv-leader"},
             )
         assert r.status_code == 409, r.text
         detail = r.json().get("detail") or {}

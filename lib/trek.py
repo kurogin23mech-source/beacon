@@ -204,10 +204,16 @@ DEFAULT_WORKING_TTL_MINUTES = 1440
 # done は Trek 外 (= 配置境界)。既存 done stamp は read-time に user_review へ
 # migrate される (LEGACY_TASK_STATE_MIGRATIONS) ので from-state に done は現れない。
 # CORE doc `5nfTSmCDVUzD4SLzIhI5` § "1 枚 transition diagram" 参照。
+# SPEC 状態遷移表 v2 (doc Vt0fzDUbmK0yI89GZeZj §状態遷移表) の忠実実装 (e-4373)。
+# **user_review への入口は leader_review→user_review の 1 辺のみ (主体=リーダー)**。
+# working→user_review 辺は SPEC 表に存在しない — 旧実装がこれを許容していたのは
+# drift で、実行者が単独で terminal に到達できる自己採点経路を開けていた
+# (思想レビュー 2026-07-30 P1 + e-4574)。除去して「判定主体=リーダー」を状態機械で
+# 構造保証する。done は状態集合外 (read-time migrate で user_review へ吸収、方針5)。
 VALID_TASK_STATE_TRANSITIONS = {
     "block": ("todo",),
     "todo": ("working", "block"),
-    "working": ("leader_review", "user_review", "block"),
+    "working": ("leader_review", "block"),
     "leader_review": ("user_review", "working"),
     "user_review": ("working",),
 }
@@ -4499,7 +4505,7 @@ def evaluate_attainment_verdict(criteria_verdicts) -> dict:
     return {"has_verdict": True, "all_met": not unmet, "unmet": unmet}
 
 
-def completion_gate_decision(*, effective_state: str,
+def completion_gate_decision(*, effective_state: str, from_state: str,
                              verdict: str, caller_sid: str,
                              prior_stamper_sid: str,
                              attainment_verdict) -> dict:
@@ -4532,12 +4538,30 @@ def completion_gate_decision(*, effective_state: str,
     """
     if effective_state != "user_review":
         return {"allowed": True, "forced_state": None, "code": "", "message": ""}
+    # SPEC 状態遷移表 v2: user_review への入口は leader_review→user_review のみ
+    # (主体=リーダー、e-4373)。それ以外の origin (working / todo 等) から user_review
+    # へ倒す試みは、リーダー審査 (leader_review) を経ていないので leader_review に留置し
+    # 外部 judge を召喚する。これで「別 member が working から直接 terminal に到達」
+    # (思想 P1) と「executor が forward-to-user でリーダーを迂回」(AC9 / e-4574) の
+    # 両バイパスを状態機械側で構造的に塞ぐ。from_state=leader_review は handler の
+    # _require_trek_leader_session で既に「caller=リーダー」が保証されている。
+    if from_state != "leader_review":
+        return {
+            "allowed": False,
+            "forced_state": "leader_review",
+            "code": "user_review_requires_leader_review",
+            "message": (
+                "user_review へはリーダー審査 (leader_review→user_review) を経る必要が"
+                "あります。実行セッションは working→leader_review で完成を宣言し、"
+                "リーダーが思想/目的達成レビュー合格で user_review に倒します。"
+                "leader_review に留置します。"
+            ),
+        }
     if verdict == ESCALATE_TO_USER_VERDICT:
-        # 人間へのエスカレーションは自己採点ではない — gate しない。
+        # リーダーの人間エスカレーション (leader_review 起点) は自己採点ではない — 通す。
         return {"allowed": True, "forced_state": None, "code": "", "message": ""}
-    # forward-to-user 明示 **以外** の user_review 到達はすべて完遂合格 = attainment 必須
-    # (P1 fix: 素の working→user_review も含む。SPEC は user_review 入口をリーダー承認に
-    # 限定しており、実行者の bare stamp で terminal 到達させない)。
+    # leader_review 起点の完遂合格 (approve): 判定主体=リーダー (handler 保証) かつ
+    # 実行者の外 (下の self_judgment チェック) で、全 met attainment を要求する。
     self_judgment = bool(
         caller_sid and prior_stamper_sid and caller_sid == prior_stamper_sid
     )
