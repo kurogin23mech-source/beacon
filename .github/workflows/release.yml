@@ -104,83 +104,23 @@ jobs:
           echo "Running: scripts/release.py ${args[*]}"
           python scripts/release.py "${args[@]}"
 
-      - name: Fan out to downstream workflows (deploy-cloud-run)
-        # GitHub deliberately suppresses workflow runs for pushes made with
-        # GITHUB_TOKEN (loop guard). release.yml just pushed the version bump
-        # + tag with GITHUB_TOKEN, so deploy-cloud-run.yml does NOT fire on
-        # its own — production API would still serve the previous version
-        # (e-953). Dispatch it explicitly and wait for completion so this run
-        # surfaces deploy failures instead of silently succeeding.
+      - name: 本番デプロイ案内 (手動 VPS pull-deploy / ms-105 e-4694)
+        # 本番は pull 型 VPS (scripts/vps-pull-deploy.sh; VPS が main を systemd
+        # timer で polling して self-update) に移行済み。その auto-deploy timer は
+        # 2026-07-28 に意図的に無効化され、デプロイは MANUAL 運用 (main merge は
+        # 本番影響ゼロ)。よって release は本番へ自動反映しない。旧 Cloud Run fan-out
+        # (deploy-cloud-run.yml) は撤去した — beacon-ai.dev は VPS を指しており Cloud
+        # Run には誰も向いていないため、そこへ deploy しても「出荷済みに見えて本番は
+        # stale」を生むだけだった (2026-07-31 に v0.61.0 で実際に踏んだ)。pull 型は
+        # public repo に secret を置かない設計なので Actions から SSH-push はしない。
+        # maintainer が下記 1 コマンドで本番反映する:
         if: ${{ inputs.dry_run == false }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -e
-          # Read the version from the tag scripts/release.py just created.
-          # NOTE: an earlier version of this step did
-          #   python -c 'from lib.commands import __version__; print(__version__)'
-          # which fails in CI because lib/commands.py imports a peer module
-          # (`from store import get_store`) that bin/beacon normally puts on
-          # sys.path. The bare `python -c` invocation does not, so the import
-          # raises ModuleNotFoundError and the entire fan-out aborts after
-          # the metadata release already published the tag — exactly the
-          # 5-channel mismatch CORE doc rMlHx9n0LYFJ2kWIQELi P1 warns about
-          # (caught by the v0.9.0 dogfood, ms-52 e-960).
-          # `git describe` is dependency-free and reads the very tag that
-          # release.py just pushed.
-          set -o pipefail
-          NEW_VERSION="$(git describe --tags --abbrev=0 --match='v[0-9]*' | sed 's/^v//')"
-          if [ -z "$NEW_VERSION" ]; then
-            echo "::error::Could not read released version from git describe — fan-out cannot proceed."
-            exit 1
-          fi
-          echo "Released CLI version: ${NEW_VERSION}"
-
-          # Capture the existing latest deploy run id (so we can wait on the NEW one).
-          PREV_DEPLOY_ID="$(gh run list --workflow=deploy-cloud-run.yml --limit 1 --json databaseId -q '.[0].databaseId // 0')"
-
-          # e-1274: pass the released tag (e.g. v0.22.0) to deploy-cloud-run.yml
-          # so the resulting beacon deploy record entry can be cross-referenced
-          # with this release. Without it, the deploy entry has no version
-          # number and reviewers have to guess via timestamp + git log.
-          echo "::group::Dispatch deploy-cloud-run.yml on main (version=v${NEW_VERSION})"
-          gh workflow run deploy-cloud-run.yml --ref main -f version="v${NEW_VERSION}"
-          echo "::endgroup::"
-
-          # Poll for the newly dispatched run to appear (gh workflow run is async).
-          NEW_DEPLOY_ID=""
-          for i in $(seq 1 20); do
-            sleep 3
-            CANDIDATE="$(gh run list --workflow=deploy-cloud-run.yml --limit 1 --json databaseId -q '.[0].databaseId // 0')"
-            if [ "$CANDIDATE" != "$PREV_DEPLOY_ID" ] && [ "$CANDIDATE" != "0" ]; then
-              NEW_DEPLOY_ID="$CANDIDATE"
-              break
-            fi
-          done
-          if [ -z "$NEW_DEPLOY_ID" ]; then
-            echo "::warning::deploy-cloud-run.yml dispatch did not surface a new run within 60s. Maintainer should re-trigger manually."
-            exit 0
-          fi
-          echo "Watching deploy-cloud-run.yml run #${NEW_DEPLOY_ID}"
-          gh run watch "$NEW_DEPLOY_ID" --exit-status || {
-            echo "::error::deploy-cloud-run.yml run #${NEW_DEPLOY_ID} failed. Cloud Run deploy did not reach the new version."
-            exit 1
-          }
-
-          # NOTE: an earlier version of this step polled
-          #   curl https://beacon-ai.dev/health | jq .version
-          # and asserted equality with $NEW_VERSION, on the assumption that
-          # /health would expose the released CLI version. That assertion
-          # was retired (ms-52 e-960 follow-up) because the version field
-          # would have required adding beacon_cli/ to the production image
-          # (Dockerfile change rejected by the maintainer for unrelated
-          # reasons). The deploy-cloud-run.yml `gh run watch --exit-status`
-          # above already surfaces a real deploy failure; treating /health
-          # version as a release gate produced false negatives that blocked
-          # otherwise-fine releases. If a stronger end-to-end signal is
-          # needed later, see the pre-release-smoke design discussion
-          # (would build the image locally + curl /health BEFORE tagging).
-          echo "deploy-cloud-run.yml succeeded; /health version assertion intentionally skipped (ms-52 e-960 retro)."
+          NEW_VERSION="$(git describe --tags --abbrev=0 --match='v[0-9]*' 2>/dev/null || echo '?')"
+          echo "::notice title=本番反映は手動です::${NEW_VERSION} をタグ + GitHub Release + Homebrew tap まで発行しました。本番 VPS への反映は手動で行ってください:"
+          echo "  ssh ubuntu@beacon-ai.dev sudo systemctl start beacon-deploy.service"
+          echo "  (vps-pull-deploy.sh が main=${NEW_VERSION} を pull → 再起動 → health check、health 失敗時は auto-rollback)"
+          echo "  自動デプロイ (beacon-deploy.timer) は意図的に無効のまま — 復活させない手動運用。反映後 beacon-ai.dev を確認。"
 
       - name: Fan out to downstream workflows (release-build, Tauri + wheel)
         # Same GITHUB_TOKEN loop-guard story as the deploy fan-out: the v* tag
