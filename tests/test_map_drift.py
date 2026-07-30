@@ -179,53 +179,83 @@ def test_seed_box_writes_once_and_is_idempotent(tmp_path, monkeypatch):
 
 
 class _FakeStore:
-    def __init__(self, doc):
+    """A store whose application-map doc is ``doc`` and whose project payload
+    carries ``releases`` (defaults to none). map-drift is re-keyed to release
+    count in e-3342, so both surfaces are read from the same store."""
+
+    def __init__(self, doc, releases=None):
         self._doc = doc
+        self._releases = releases or []
 
     def get_document(self, doc_id):
         return self._doc if doc_id == "application-map" else None
 
-
-class _FakeProc:
-    def __init__(self, stdout, returncode=0):
-        self.stdout = stdout
-        self.returncode = returncode
+    def load_project(self):
+        return {"releases": list(self._releases)}
 
 
-def _fake_git(nlines):
-    """Deterministic `git log --since=... --pretty=%H` output of nlines hashes.
-
-    Pins commit_count independent of the real repo depth (CI uses a shallow
-    fetch-depth=1 checkout, so `git log --since=2020` there returns ~0 commits).
-    """
-    def _run(*args, **kwargs):
-        return _FakeProc("\n".join(f"{i:040x}" for i in range(nlines)))
-    return _run
+def _releases(*dates):
+    """Build release records with the given ISO ``date`` values."""
+    return [{"id": f"rel-{i}", "date": d} for i, d in enumerate(dates)]
 
 
-def test_map_drift_fires_when_stale(tmp_path, monkeypatch):
+# ------------------------------------------------------------ (B) release count
+
+def test_count_releases_since_counts_only_newer():
+    data = {"releases": _releases(
+        "2019-06-01T00:00:00",  # before baseline → not counted
+        "2020-06-01T00:00:00",  # after  baseline → counted
+        "2021-01-01T00:00:00",  # after  baseline → counted
+    )}
+    assert commands._count_releases_since(data, "2020-01-01T00:00:00") == 2
+
+
+def test_count_releases_since_ignores_missing_date():
+    data = {"releases": [{"id": "r1"}, {"id": "r2", "date": "2021-01-01T00:00:00"}]}
+    assert commands._count_releases_since(data, "2020-01-01T00:00:00") == 1
+
+
+def test_map_drift_fires_when_release_shipped_since_map(tmp_path, monkeypatch):
     monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
     monkeypatch.setattr(commands, "get_store",
-                        lambda: _FakeStore({"updated_at": "2020-01-01T00:00:00"}))
-    monkeypatch.setattr(commands.subprocess, "run",
-                        _fake_git(commands._MAP_DRIFT_COMMIT_THRESHOLD + 5))
+                        lambda: _FakeStore(
+                            {"updated_at": "2020-01-01T00:00:00"},
+                            releases=_releases("2020-06-01T00:00:00",
+                                                "2021-02-01T00:00:00")))
     commands._auto_fire_map_drift_trigger()
     p = tmp_path / "map-drift.json"
     assert p.exists()
     data = json.loads(p.read_text(encoding="utf-8"))
     assert data["kind"] == "map-drift"
-    assert data["commit_count"] >= commands._MAP_DRIFT_COMMIT_THRESHOLD
+    assert data["release_count"] == 2
+    # No commit_count field anymore (re-keyed to releases in e-3342).
+    assert "commit_count" not in data
 
 
-def test_map_drift_does_not_fire_when_below_threshold(tmp_path, monkeypatch):
+def test_map_drift_does_not_fire_without_release_since_map(tmp_path, monkeypatch):
+    # WIP commits accrue but nothing has shipped since the map was reconciled →
+    # the map is not stale, so no nag (the whole point of e-3342).
     monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
     monkeypatch.setattr(commands, "get_store",
-                        lambda: _FakeStore({"updated_at": "2020-01-01T00:00:00"}))
-    # Fewer commits than the threshold → no fire (independent of real git depth).
-    monkeypatch.setattr(commands.subprocess, "run",
-                        _fake_git(commands._MAP_DRIFT_COMMIT_THRESHOLD - 1))
+                        lambda: _FakeStore(
+                            {"updated_at": "2021-01-01T00:00:00"},
+                            releases=_releases("2020-06-01T00:00:00")))
     commands._auto_fire_map_drift_trigger()
     assert not (tmp_path / "map-drift.json").exists()
+
+
+def test_map_drift_self_clears_after_reconcile(tmp_path, monkeypatch):
+    # A stale trigger from an earlier ship must clear once /beacon-map moves the
+    # map's updated_at past every shipped release.
+    monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
+    stale = tmp_path / "map-drift.json"
+    stale.write_text('{"kind": "map-drift"}', encoding="utf-8")
+    monkeypatch.setattr(commands, "get_store",
+                        lambda: _FakeStore(
+                            {"updated_at": "2022-01-01T00:00:00"},
+                            releases=_releases("2021-06-01T00:00:00")))
+    commands._auto_fire_map_drift_trigger()
+    assert not stale.exists()
 
 
 def test_map_drift_does_not_fire_when_map_missing(tmp_path, monkeypatch):
@@ -258,12 +288,13 @@ def test_map_reconcile_skips_when_map_missing(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 class _FakeStoreWithProfession(_FakeStore):
-    def __init__(self, doc, profession):
-        super().__init__(doc)
+    def __init__(self, doc, profession, releases=None):
+        super().__init__(doc, releases=releases)
         self._profession = profession
 
     def load_project(self):
-        return {"profession": self._profession, "milestones": []}
+        return {"profession": self._profession, "milestones": [],
+                "releases": list(self._releases)}
 
 
 def test_application_map_applies_only_to_dev(monkeypatch):
@@ -279,9 +310,8 @@ def test_map_drift_does_not_fire_for_sales(tmp_path, monkeypatch):
     monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
     monkeypatch.setattr(commands, "get_store",
                         lambda: _FakeStoreWithProfession(
-                            {"updated_at": "2020-01-01T00:00:00"}, "sales"))
-    monkeypatch.setattr(commands.subprocess, "run",
-                        _fake_git(commands._MAP_DRIFT_COMMIT_THRESHOLD + 5))
+                            {"updated_at": "2020-01-01T00:00:00"}, "sales",
+                            releases=_releases("2021-01-01T00:00:00")))
     commands._auto_fire_map_drift_trigger()
     assert not (tmp_path / "map-drift.json").exists()
 

@@ -258,6 +258,47 @@ Push: [push-id] [branch] ([N] commits)
   [生成した説明文]
 ```
 
+## Step 4.5: 全貌マップの reconcile を促す (release 出荷境界 — ms-104 e-3342)
+
+**この Step は Step 2.5 で release を切った場合のみ実行する** (= 通常の push だけで release
+を切っていないなら skip)。
+
+pull 型デプロイ (= サーバや配布物が client 側 deploy hook 無しで main merge / release で
+更新される形態) では、**出荷境界 = release record** になる。release を切った瞬間が surface
+(= 機能の入口: CLI / API / Skill) が世に出た節目なので、ここが全貌マップ (application-map =
+今このプロダクトに何ができるかを写した現在地の索引、CORE doc `application-map`) を
+**足す＆消す (reconcile)** する自然な契機。Step 2 で「何が変わったか」を既に言語化している
+ので、その同じ理解を累積地図に反映する。session-start の map-drift trigger (commit 数の
+proxy で無視されがちだった) に代わる **主 forcing function** を出荷境界に置く設計 (e-3342)。
+
+### profession gate + 地図の有無
+
+`beacon status --json` の `profession` が `dev` 以外なら全貌マップは対象外なのでスキップ。
+`dev` (または未設定) のとき、地図の有無を確認:
+
+```bash
+beacon doc show application-map >/dev/null 2>&1 && echo "MAP_EXISTS" || echo "MAP_MISSING"
+```
+
+- `MAP_MISSING` → スキップ (地図が無いので reconcile できない。生成は `/beacon-map` の生成モード)。
+- `MAP_EXISTS` → 以下でユーザーに reconcile を促す。
+
+### ユーザーに reconcile を提案する
+
+今回の release で surface が増減したかを Step 1〜2 の内容から AI が判断し、1 行で提案する:
+
+```
+release vX.Y.Z で surface (機能の入口) が変わっているようです。全貌マップ (application-map)
+を `/beacon-map` で reconcile (= 足す＆消す) して、今回の変化を現在地の地図に反映しますか?
+  [reconcile する / 後で (次の session-start で map-drift backstop が再度促します) / skip]
+```
+
+- **reconcile する** → `/beacon-map` Skill を起動する (reconcile モード、drift ゼロまで直す)。
+- **後で / skip** → 何もしない。次の session-start で map-drift backstop (release 数基準) が
+  再度促す。
+
+surface が明らかに変わっていない release と AI が判断できるなら提案を省いてよい (ノイズ抑制)。
+
 ## Step 5: トリガーチェック
 
 Bash ツールで実行:
