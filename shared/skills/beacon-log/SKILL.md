@@ -96,6 +96,27 @@ stdout に JSON が返る。2つのパターンがある:
 }
 ```
 
+### パターンC: 非 dev プロジェクト（milestone_binding=none / ms-133 e-4650）
+
+営業 (sales) やバックオフィス (backoffice) 等の職種プロジェクトは milestone を持たない
+(仕事は商談 (Opportunity) 等の target で回す) ため、prepare は次を返す:
+
+```json
+{
+  "commit": {"hash": "...", "message": "...", "date": "...", "summary": "..."},
+  "profession": "sales",
+  "milestone_binding": "none",
+  "note": "..."
+}
+```
+
+`milestone_binding == "none"` の場合、**Step 1.5〜4.5 のマイルストーン選定・進捗評価・
+タスク完了判定・MS 完了提案をすべてスキップ** する (紐づける milestone が無い)。
+finalize も `-m` 無しで呼んでよい (CLI 側が非 dev + milestone 無しを benign に扱い、
+milestone 紐づけ無しで受理する)。ユーザーには「コミット [hash] を記録しました
+(この [profession] プロジェクトは milestone を持たないため、特定の target には紐づけて
+いません)」と 1 行報告し、Step 5 (ドキュメント評価) 以降のみ通常通り進める。
+
 ## Step 1.5: マイルストーン選定（candidatesがある場合のみ）
 
 パターンBの場合、以下の基準で **メインMSを1つ選定** する:
