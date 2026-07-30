@@ -20,6 +20,20 @@ they break at the archive/cache boundary when the plugin is copied.
 The two plugin-only Codex skills are hand-maintained and preserved (they are
 not in ``shared/skills/``, so this script never touches them).
 
+Profession gate policy (ms-133 e-4667)
+======================================
+The Codex plugin BUNDLES ALL canonical skills, including profession-specific
+ones (the 14 ``beacon-sales-*`` skills migrated in e-4667). There is NO
+per-project profession gate on the Codex side — unlike ``beacon skill install``
+for Claude Code, which reads the legacy ``skills/*.md`` frontmatter
+``profession:`` and installs only the current project's occupation. That gate
+can't apply here: a Codex plugin is a static bundle copied at ``codex plugin
+add`` time, with no project context. Bundling everything and letting each skill
+activate only on its own triggers is the accepted model (a dev Codex user simply
+never fires the sales triggers). ``profession`` therefore stays only in the
+legacy ``skills/*.md`` (Claude's gate); the canonical ``SKILL.md`` frontmatter
+has no ``profession`` field (COMMON_FIELDS = name/description/version).
+
 Run this after any change under ``shared/skills/``. The CI test
 ``tests/test_codex_plugin_install.py`` pins that the materialized output is in
 sync (byte-identical SKILL.md) and that the shipped set is exactly

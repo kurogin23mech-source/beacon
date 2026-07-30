@@ -1,0 +1,5 @@
+triggers:
+  - "/beacon-sales-reply-watch"
+  - "返信チェック"
+  - "返信ウォッチ"
+  - "返信来てないか確認"
