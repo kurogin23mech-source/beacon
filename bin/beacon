@@ -252,15 +252,41 @@ cmd_setup() {
             if [ -f "$BEACON_PROJECT_FILE" ]; then
                 echo "  .beacon/project.json already exists — skipping init."
             else
+                # ms-133 e-4648: ask the occupation FIRST. Step 2 above installed
+                # only the core Skills (project.json didn't exist yet, so the
+                # profession gate saw {core}); after init writes the profession
+                # we re-install so the occupation's Skills (e.g. beacon-sales-*)
+                # actually land. Blank = dev.
+                echo "  職種 (profession):"
+                echo "    1) 開発 (dev) [既定]   2) 営業 (sales)   3) バックオフィス (backoffice)"
+                echo "    （その他の職種名を直接入力してもOK）"
+                read -rp "  > [1]: " prof_choice
+                local proj_profession=""
+                case "${prof_choice:-1}" in
+                    1|"") proj_profession="dev" ;;
+                    2) proj_profession="sales" ;;
+                    3) proj_profession="backoffice" ;;
+                    *) proj_profession="$prof_choice" ;;
+                esac
+                echo ""
                 echo "  Project name:"
                 echo "    リポジトリ名や略称で構いません。ダッシュボードの表示名になります。"
                 read -rp "  > " proj_name
                 echo ""
-                echo "  Project objective:"
-                echo "    このプロジェクトで最終的に何を実現したいですか？"
-                echo "    あなたとAIが共有するゴール宣言です。セッションをまたいで判断の基準になります。"
-                echo "    「何を作るか」ではなく「誰がどんな状態になるか」で書いてください。"
-                echo "    例）「AI駆動で開発するユーザーが、目的と今やっていることを常にクリアに保ちながら開発に集中できるようにする」"
+                # ms-133 e-4648: frame the objective prompt by the occupation's
+                # onboarding plan (WHAT to ask + vision role) instead of the
+                # hardcoded dev "何を作るか". Falls back to the dev wording if the
+                # plan can't be read (older engine).
+                local plan_vision_role
+                plan_vision_role=$(BEACON_PROFESSION="$proj_profession" \
+                    python3 "$COMMANDS_PY" onboarding_plan 2>/dev/null \
+                    | python3 -c "import json,sys
+try: print(json.load(sys.stdin).get('vision_role',''))
+except Exception: pass" 2>/dev/null)
+                echo "  Objective (${plan_vision_role:-このプロジェクトで実現したいこと}):"
+                if [ "$proj_profession" = "dev" ] || [ -z "$plan_vision_role" ]; then
+                    echo "    「何を作るか」ではなく「誰がどんな状態になるか」で書いてください。"
+                fi
                 read -rp "  > " proj_objective
                 echo ""
                 echo "  Weekly retro day:"
@@ -284,7 +310,15 @@ cmd_setup() {
                 # interactive setup yet; users get the safe default).
                 BEACON_NAME="$proj_name" BEACON_OBJECTIVE="$proj_objective" \
                     BEACON_RETRO_DAY="$retro_day" \
+                    BEACON_PROFESSION="$proj_profession" \
                     BEACON_SENSITIVITY="high" python3 "$COMMANDS_PY" init
+                # ms-133 e-4648: re-install Skills now that project.json carries
+                # the profession, so the occupation's Skills install (Step 2 ran
+                # before init and could only see {core}). No-op for dev.
+                if [ -f "$BEACON_PROJECT_FILE" ] && [ "$proj_profession" != "dev" ]; then
+                    echo "  職種 '$proj_profession' の Skill を導入中..."
+                    python3 "$COMMANDS_PY" skill_install 2>&1 | sed 's/^/  /'
+                fi
             fi
             ;;
         2)
