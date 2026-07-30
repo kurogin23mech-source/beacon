@@ -20966,6 +20966,7 @@ def _help_registry():
         {"command": "beacon acquisition attack-list-send-record <doc-id> <acc-id>", "flags": ["--message-id <id>", "--message-file <f>", "--message <body>", "--url <permalink>", "--subject <s>", "--json"], "description": "Record one sent email inside an authorized batch (message digest must match the confirmed 文面): 証跡 + row 未接触→連絡済 (ms-132)"},
         {"command": "beacon acquisition attack-list-awaiting-reply <doc-id>", "flags": ["--json"], "description": "List prospects awaiting a reply (rows at 連絡済 with their sent message-id) — the reply-watch worklist (ms-132)"},
         {"command": "beacon acquisition attack-list-reply-record <doc-id> <acc-id>", "flags": ["--message-id <id>", "--url <link>", "--summary <s>", "--json"], "description": "Record a detected prospect reply: inbound 証跡 + row 連絡済→返信あり + notify (detection-only) (ms-132)"},
+        {"command": "beacon acquisition attack-list-promote <doc-id> <acc-id>", "flags": ["--title <商談名>", "--json"], "description": "Promote a reacted (返信あり/アポ) prospect to an Opportunity + drive Account phase 未接触→リード (lead conversion) (ms-132)"},
         {"command": "beacon opportunity phase-prob <phase> <n>", "flags": [], "description": "Set a phase's 成約率 (win probability 0-100; per-company funnel tuning)"},
         {"command": "beacon sales target <user> <amount>", "flags": [], "description": "Set a member's 目標売上 (sales quota; empty amount clears)"},
         {"command": "beacon sales target list", "flags": ["--json"], "description": "List members' 目標売上 with their 見込み売上 (weighted pipeline)"},
@@ -27099,6 +27100,92 @@ def cmd_acquisition_attack_list_reply_record():
         print(f"返信記録: {acc_id} inbound 証跡 {comm_id}{drive_note}{note}")
 
 
+def cmd_acquisition_attack_list_promote():
+    """Promote a reacted prospect to an Opportunity — lead conversion (ms-132
+    e-4506). Requires the row to be at 返信あり or アポ. Creates an Opportunity for
+    the Account, drives the Account's lifecycle phase 未接触→リード, and leaves the
+    attack-list row in place (its history is preserved). Idempotent-ish: refuses
+    if the Account already has a live Opportunity (no duplicate deal).
+    Env: BEACON_DOC_ID, BEACON_SEND_ACC_ID, BEACON_OPP_TITLE, BEACON_JSON.
+    """
+    import attack_list
+    import table_doc
+    import sales_entities
+    doc_id = os.environ.get("BEACON_DOC_ID", "")
+    acc_id = os.environ.get("BEACON_SEND_ACC_ID", "")
+    title = os.environ.get("BEACON_OPP_TITLE", "")
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    if not doc_id or not acc_id:
+        print("Usage: beacon acquisition attack-list-promote "
+              "<attack-list-doc-id> <acc-id> [--title <商談名>] [--json]",
+              file=sys.stderr)
+        sys.exit(1)
+
+    _content, _title, model = _load_table_model(doc_id)
+    if not attack_list.is_attack_list(model.get("columns", [])):
+        print(f"Error: {doc_id} はアタックリスト (attack-list) ではありません",
+              file=sys.stderr)
+        sys.exit(1)
+    row = attack_list.find_row_by_account(table_doc.active_rows(model), acc_id)
+    if row is None:
+        print(f"Error: {acc_id} は {doc_id} の行に居ません", file=sys.stderr)
+        sys.exit(1)
+    vals = attack_list.phase_values(model)
+    cur = row.get("cells", {}).get(attack_list.COL_PHASE)
+    # Only a *reacted* prospect (返信あり / アポ) is a lead; untouched/contacted rows
+    # are not yet convertible.
+    if not attack_list.is_reacted(cur, vals):
+        print(f"Error: {acc_id} の行は '{cur}' です。返信あり / アポ の行のみ商談へ"
+              f"引き上げできます。先に返信を記録: "
+              f"`beacon acquisition attack-list-reply-record {doc_id} {acc_id} "
+              f"--message-id <id>`", file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+    acc = sales_entities.find_account(data, acc_id)
+    if acc is None:
+        print(f"Error: Account {acc_id} が見つかりません", file=sys.stderr)
+        sys.exit(1)
+    # No duplicate deal: refuse if the Account already has a live Opportunity.
+    # ``live_opportunities`` owns the "not terminal/cancelled" definition, so a
+    # new terminal status added later can't silently slip past this guard.
+    live_opps = [o.get("id") for o in sales_entities.live_opportunities(data)
+                 if o.get("account_id") == acc_id]
+    if live_opps:
+        print(f"Error: {acc_id} には既に商談があります ({', '.join(live_opps)})。"
+              f"重複した商談は作りません (確認: `beacon opportunity show {live_opps[0]}`)。",
+              file=sys.stderr)
+        sys.exit(1)
+
+    acc_name = acc.get("name") or acc_id
+    pre_phase = acc.get("phase")
+    try:
+        # opportunity_add itself derives the Account's lifecycle phase upward via
+        # _auto_advance_account_phase (新規商談 → 未接触→リード; sales_entities L1018),
+        # so we don't set it separately — we read and report the actual result.
+        opp_id = sales_entities.opportunity_add(
+            data, title or f"{acc_name} 商談 (アタックリスト由来)",
+            account_id=acc_id, created_at=_now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+
+    final_phase = sales_entities.find_account(data, acc_id).get("phase")
+    driven_account_phase = final_phase if final_phase != pre_phase else None
+
+    if json_mode:
+        print(json.dumps({
+            "doc_id": doc_id, "acc_id": acc_id, "opportunity": opp_id,
+            "account_phase": final_phase,          # the actual resulting phase (truth)
+            "account_phase_driven_to": driven_account_phase,  # None = unchanged
+            "row_phase": cur, "row_kept": True}, ensure_ascii=False))
+    else:
+        ph = f" / 顧客 phase → {driven_account_phase}" if driven_account_phase else ""
+        print(f"引き上げ: {acc_id} → 商談 {opp_id}{ph} "
+              f"(リスト行 '{cur}' は保持)")
+
+
 # --- send-account ledger (ms-107 e-3365) -----------------------------------
 # label → {email, routes{service:{namespace, alias}}}. Internal verbs invoked by
 # the sales Skills to register accounts and resolve the concrete MCP route a
@@ -28532,6 +28619,7 @@ if __name__ == "__main__":
         "acquisition_attack_list_send_record": cmd_acquisition_attack_list_send_record,
         "acquisition_attack_list_awaiting_reply": cmd_acquisition_attack_list_awaiting_reply,
         "acquisition_attack_list_reply_record": cmd_acquisition_attack_list_reply_record,
+        "acquisition_attack_list_promote": cmd_acquisition_attack_list_promote,
         "account_contact": cmd_account_contact,
         "account_phase": cmd_account_phase,
         "account_rename": cmd_account_rename,
