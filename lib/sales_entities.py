@@ -175,6 +175,54 @@ def prospect_phases(data: dict) -> list:
     return data.get("prospect_phases", [])
 
 
+# Source labels for effective_phases (a funnel came from saved config, from the
+# shipped built-in seed, or the project has no funnel concept at all).
+PHASE_SOURCE_CONFIGURED = "configured"
+PHASE_SOURCE_DEFAULT = "builtin_default"
+PHASE_SOURCE_NONE = "none"
+
+
+def effective_phases(data: dict) -> dict:
+    """The funnels a *sales* project actually runs on, resolved once.
+
+    Each funnel is the saved per-company vocabulary if configured, else the
+    shipped ``DEFAULT_*`` seed — the SAME "configured or default" rule entity
+    creation already applies (``account_phases(data) or DEFAULT_ACCOUNT_PHASES``
+    at :216/:228/:1103). Centralising it here gives one authoritative place for
+    that rule and returns a **per-funnel source** so a caller can tell configured
+    from default *per funnel* (a project may have custom account phases but be on
+    the default opportunity funnel). Non-sales projects have no funnel → empty
+    lists, source ``none``. (ms-129 e-4405 + AX/保守性 review 2026-07-30.)
+
+    Returns ``{"account": [...], "opportunity": [...], "prospect": [...],
+    "source": {"account": <label>, "opportunity": ..., "prospect": ...},
+    "using_builtin_default": bool}``.
+    """
+    profession = (data.get("profession") or "").strip().lower()
+    if profession != "sales":
+        none = {"account": PHASE_SOURCE_NONE, "opportunity": PHASE_SOURCE_NONE,
+                "prospect": PHASE_SOURCE_NONE}
+        return {"account": [], "opportunity": [], "prospect": [],
+                "source": none, "using_builtin_default": False}
+
+    def _resolve(configured, default_list):
+        if configured:
+            return list(configured), PHASE_SOURCE_CONFIGURED
+        return [dict(p) for p in default_list], PHASE_SOURCE_DEFAULT
+
+    acc, acc_src = _resolve(account_phases(data), DEFAULT_ACCOUNT_PHASES)
+    opp, opp_src = _resolve(opportunity_phases(data), DEFAULT_OPPORTUNITY_PHASES)
+    pros_cfg = prospect_phases(data)
+    if pros_cfg:
+        pros, pros_src = list(pros_cfg), PHASE_SOURCE_CONFIGURED
+    else:
+        pros, pros_src = default_prospect_phase_defs(), PHASE_SOURCE_DEFAULT
+    source = {"account": acc_src, "opportunity": opp_src, "prospect": pros_src}
+    return {"account": acc, "opportunity": opp, "prospect": pros,
+            "source": source,
+            "using_builtin_default": PHASE_SOURCE_DEFAULT in source.values()}
+
+
 # Macro-frame (前進の枠組み) — e-3582, SPEC 方針5(A) / AC6. A funnel-level
 # natural-language framing that teaches the AI how to *read* the phases: a phase
 # is not a bucket to sit in but a stage to be pushed *out of*. "仕事を進める" =

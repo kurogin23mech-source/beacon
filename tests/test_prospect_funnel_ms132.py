@@ -82,6 +82,73 @@ def test_phase_list_json_includes_prospect(sales_cwd, monkeypatch, capsys):
     assert _names(out["prospect_phases"]) == ["未接触", "連絡済", "返信あり", "アポ"]
 
 
+# --- e-4405 (ms-129): sales project w/ no configured funnel shows the built-in
+# default (which entity creation actually uses), NOT "not a sales project" -----
+
+def _unseeded_sales(tmp_path, monkeypatch):
+    """A sales project whose funnels were never seeded (e.g. init-created), so
+    the accessors read empty but the built-in DEFAULT_* are what's in effect."""
+    data = se.build_sales_project("S", "o")
+    for k in ("account_phases", "opportunity_phases", "prospect_phases"):
+        data.pop(k, None)
+    return _project(tmp_path, monkeypatch, data)
+
+
+def test_phase_list_sales_no_config_shows_builtin_default_json(tmp_path, monkeypatch, capsys):
+    _unseeded_sales(tmp_path, monkeypatch)
+    monkeypatch.setenv("BEACON_JSON", "1")
+    commands.cmd_phase_list()
+    out = json.loads(capsys.readouterr().out)
+    assert out["using_builtin_default"] is True
+    assert _names(out["account_phases"]) == ["未接触", "リード", "未成約顧客", "成約顧客"]
+    assert _names(out["prospect_phases"]) == ["未接触", "連絡済", "返信あり", "アポ"]
+    assert out["opportunity_phases"][0]["name"] == "商談準備"
+    # per-funnel source (AX review): every funnel is the built-in default here.
+    assert out["phases_source"] == {"account": "builtin_default",
+                                    "opportunity": "builtin_default",
+                                    "prospect": "builtin_default"}
+
+
+def test_effective_phases_reports_source_per_funnel(tmp_path, monkeypatch):
+    # AX review: a mixed project (custom account funnel, default商談/打診) must
+    # report source per funnel, not a blanket boolean — so a read→add workflow
+    # knows which funnel is already customised.
+    data = se.build_sales_project("S", "o")
+    for k in ("opportunity_phases", "prospect_phases"):
+        data.pop(k, None)                       # only account_phases stays configured
+    eff = se.effective_phases(data)
+    assert eff["source"]["account"] == "configured"
+    assert eff["source"]["opportunity"] == "builtin_default"
+    assert eff["source"]["prospect"] == "builtin_default"
+    assert eff["using_builtin_default"] is True
+
+
+def test_effective_phases_non_sales_is_empty(tmp_path, monkeypatch):
+    eff = se.effective_phases({"profession": "dev"})
+    assert eff["account"] == [] and eff["opportunity"] == [] and eff["prospect"] == []
+    assert eff["using_builtin_default"] is False
+    assert set(eff["source"].values()) == {"none"}
+
+
+def test_phase_list_sales_no_config_text_omits_not_a_sales_project(tmp_path, monkeypatch, capsys):
+    _unseeded_sales(tmp_path, monkeypatch)
+    monkeypatch.delenv("BEACON_JSON", raising=False)
+    commands.cmd_phase_list()
+    out = capsys.readouterr().out
+    assert "not a sales project" not in out       # the misleading line is gone
+    assert "デフォルト" in out                      # "(組み込みデフォルト使用中)" note shown
+    assert "未接触" in out and "商談準備" in out    # effective funnel is displayed
+
+
+def test_phase_list_non_sales_still_says_not_a_sales_project(tmp_path, monkeypatch, capsys):
+    data = {"profession": "dev", "name": "D", "milestones": [], "members": [],
+            "documents": [], "deployments": [], "releases": []}
+    _project(tmp_path, monkeypatch, data)
+    monkeypatch.delenv("BEACON_JSON", raising=False)
+    commands.cmd_phase_list()
+    assert "not a sales project" in capsys.readouterr().out
+
+
 # --- editing the prospect funnel ------------------------------------------
 
 def test_add_appends_prospect_stage(sales_cwd, monkeypatch):
