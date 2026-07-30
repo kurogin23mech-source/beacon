@@ -53,7 +53,7 @@ def test_stale_mismatch_behind_is_lagging():
     # marker set 30 min ago and prod is *behind* it → the deploy never landed.
     r = dh.evaluate_deploy_health(
         True, "old1234", "new5678", 1800, grace_seconds=900,
-        prod_is_behind_target=True)
+        prod_ancestry=dh.ANCESTRY_BEHIND)
     assert r["status"] == dh.LAGGING
     assert r["status"] in dh.ALERT_STATUSES
 
@@ -62,18 +62,20 @@ def test_stale_mismatch_ahead_is_not_alert():
     # prod is *newer* than the marker (deploy not recorded) → drift, not stuck.
     r = dh.evaluate_deploy_health(
         True, "new5678", "old1234", 1800, grace_seconds=900,
-        prod_is_behind_target=False)
+        prod_ancestry=dh.ANCESTRY_AHEAD)
     assert r["status"] == dh.AHEAD
     assert r["status"] not in dh.ALERT_STATUSES
 
 
 def test_unknown_direction_defaults_to_lagging():
     # direction undetermined + past grace → conservative alert (don't miss a
-    # real stuck deploy).
+    # real stuck deploy). Also the default when the arg is omitted.
     r = dh.evaluate_deploy_health(
         True, "old1234", "new5678", 1800, grace_seconds=900,
-        prod_is_behind_target=None)
+        prod_ancestry=dh.ANCESTRY_UNKNOWN)
     assert r["status"] == dh.LAGGING
+    assert dh.evaluate_deploy_health(
+        True, "old1234", "new5678", 1800, grace_seconds=900)["status"] == dh.LAGGING
 
 
 def test_unknown_age_treated_as_past_grace():

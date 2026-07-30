@@ -18363,37 +18363,60 @@ def _next_release_id(data: dict, date_str: str) -> str:
     return f"{prefix}-{n}"
 
 
+def _is_default_prod_backend(environment, backend):
+    """True when a deploy record targets the real prod (the box behind
+    beacon-ai.dev), i.e. the ``deployed-prod`` marker should move.
+
+    ``backend == ""`` means "no profile resolved" and ``"default"`` is the
+    default profile name — both denote the same primary prod gateway, distinct
+    from ``aws-ga`` / ``trailnode`` / other backends which must NOT move the
+    prod marker. Extracted as a named predicate (ms-105, maintainability review
+    2026-07-30) so this backend-equivalence rule lives in one greppable place.
+    """
+    return environment == "prod" and (backend or "") in ("", "default")
+
+
 def _update_deployed_prod_marker(rev, json_mode=False):
     """Force-move the ``deployed-prod`` git tag to ``rev`` and push it (ms-105).
 
     Single source of truth for "what rev prod should be serving", read
     token-free by the deploy-health monitor (.github/workflows/
     deploy-health-monitor.yml → scripts/deploy-health-monitor.py). Best-effort:
-    a failed tag / push prints a warning but never raises, so recording a deploy
-    can't fail on a marker hiccup — the monitor's ``ahead`` nudge surfaces a
-    marker that drifted behind prod.
+    a failed tag / push never raises, so recording a deploy can't fail on a
+    marker hiccup.
+
+    Returns a result dict ``{"rev", "updated": bool, "error": str|None}`` so the
+    caller can surface a failure even in ``--json`` mode — a silently-swallowed
+    push failure would recreate the exact marker-drift the monitor exists to
+    catch (AX review 2026-07-30). In non-JSON mode it also prints a human line.
     """
     import subprocess as _sp
-    rev = (rev or "").strip()
+    result = {"rev": (rev or "").strip(), "updated": False, "error": None}
+    rev = result["rev"]
     if not rev:
-        return
+        result["error"] = "no rev to mark"
+        return result
     try:
         _sp.run(["git", "tag", "-f", "deployed-prod", rev],
                 check=True, capture_output=True, text=True, timeout=10)
     except Exception as e:  # noqa: BLE001 — best-effort, never fail the record
+        result["error"] = f"tag failed: {e}"
         if not json_mode:
             print(f"  ⚠ deployed-prod タグの更新に失敗しました ({e}). "
                   f"監視は次回の記録で追随します。")
-        return
+        return result
     try:
         _sp.run(["git", "push", "-f", "origin", "deployed-prod"],
                 check=True, capture_output=True, text=True, timeout=30)
+        result["updated"] = True
         if not json_mode:
             print(f"  deployed-prod → {rev} (deploy-health 監視の基準を更新)")
     except Exception as e:  # noqa: BLE001
+        result["error"] = f"push failed: {e}"
         if not json_mode:
             print(f"  ⚠ deployed-prod タグの push に失敗しました ({e}). "
                   f"`git push -f origin deployed-prod` を手動で実行してください。")
+    return result
 
 
 def cmd_deploy_record():
@@ -18637,8 +18660,9 @@ def cmd_deploy_record():
     # aws-ga / trailnode / non-prod deploys must not. Best-effort — a failed
     # tag/push must never fail the record (the monitor's soft "unrecorded deploy"
     # nudge covers a missed marker).
-    if environment == "prod" and backend in ("", "default"):
-        _update_deployed_prod_marker(head_hash, json_mode)
+    marker_result = None
+    if _is_default_prod_backend(environment, backend):
+        marker_result = _update_deployed_prod_marker(head_hash, json_mode)
 
     # ms-104 e-3154: deploy = surface が世に出る節目。全貌マップの reconcile を促す。
     _fire_map_reconcile_trigger()
@@ -18647,6 +18671,10 @@ def cmd_deploy_record():
         out = {"deploy": deploy_entry}
         if release_entry:
             out["release"] = release_entry
+        # Surface the marker outcome so a --json caller can detect a failed push
+        # (AX review 2026-07-30 — it was silently swallowed in JSON mode before).
+        if marker_result is not None:
+            out["deployed_prod_marker"] = marker_result
         print(json.dumps(out, ensure_ascii=False))
     else:
         icon = "◉" if deploy_type == "major" else "○"

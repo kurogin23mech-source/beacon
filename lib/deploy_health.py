@@ -55,6 +55,12 @@ NO_TARGET = "no_target"
 # statuses that warrant an alert
 ALERT_STATUSES = frozenset({LAGGING, UNREACHABLE})
 
+# git-ancestry of prod vs the marker (a 3-value string, NOT Optional[bool], so
+# "unknown" can't be misread as a falsy "not behind" — AX review 2026-07-30).
+ANCESTRY_BEHIND = "behind"      # prod is an ancestor of the marker  → stuck
+ANCESTRY_AHEAD = "ahead"        # prod is a descendant of the marker → unrecorded
+ANCESTRY_UNKNOWN = "unknown"    # direction undetermined → treated as behind
+
 
 def evaluate_deploy_health(
     reachable: bool,
@@ -62,7 +68,7 @@ def evaluate_deploy_health(
     target_rev: str,
     target_age_seconds: Optional[float],
     grace_seconds: float = 900.0,
-    prod_is_behind_target: Optional[bool] = None,
+    prod_ancestry: str = ANCESTRY_UNKNOWN,
 ) -> dict:
     """Decide whether production is healthy relative to the deploy marker.
 
@@ -76,11 +82,13 @@ def evaluate_deploy_health(
       grace_seconds: how long a mismatch is tolerated as "a deploy in flight"
         before it's called a stuck deploy. Default 15 min (> the pull/restart +
         health settle).
-      prod_is_behind_target: git ancestry — ``True`` if ``prod_rev`` is an
-        ancestor of ``target_rev`` (prod behind the marker = stuck), ``False`` if
-        prod is a descendant (prod ahead = unrecorded deploy), ``None`` if the
-        direction couldn't be determined (treated conservatively as behind, so a
-        real stuck deploy is never missed).
+      prod_ancestry: git ancestry of prod vs the marker, one of
+        ``ANCESTRY_BEHIND`` (prod is an ancestor of the marker = stuck),
+        ``ANCESTRY_AHEAD`` (prod is a descendant = unrecorded deploy), or
+        ``ANCESTRY_UNKNOWN`` (direction couldn't be determined — treated
+        conservatively as behind so a real stuck deploy is never missed). A
+        3-value string (not ``Optional[bool]``) so "unknown" can't be misread as
+        a falsy "not behind".
 
     Returns a dict ``{"status": ..., "prod_rev", "target_rev", ...}``. Only
     ``LAGGING`` / ``UNREACHABLE`` should trigger an alert (see ``ALERT_STATUSES``).
@@ -107,13 +115,13 @@ def evaluate_deploy_health(
     )
     if within_grace:
         status = DEPLOYING
-    elif prod_is_behind_target is False:
+    elif prod_ancestry == ANCESTRY_AHEAD:
         # prod is newer than the marker → a deploy happened without recording it.
         # Not stuck; surface as a soft nudge so the marker gets caught up.
         status = AHEAD
     else:
-        # prod is behind the marker (or direction unknown) past the grace window
-        # → the deploy we recorded never actually landed = stuck.
+        # prod is behind the marker (ANCESTRY_BEHIND) or the direction is unknown,
+        # past the grace window → the deploy we recorded never landed = stuck.
         status = LAGGING
     return {
         "status": status,
@@ -121,7 +129,7 @@ def evaluate_deploy_health(
         "target_rev": target_rev,
         "target_age_seconds": target_age_seconds,
         "grace_seconds": grace_seconds,
-        "prod_is_behind_target": prod_is_behind_target,
+        "prod_ancestry": prod_ancestry,
     }
 
 

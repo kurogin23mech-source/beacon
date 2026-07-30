@@ -106,45 +106,48 @@ def read_deploy_marker(ref: str = "deployed-prod") -> tuple:
         return ("", None)
 
 
-def git_prod_behind_target(prod_rev: str, target_rev: str):
-    """Return the ancestry direction of prod vs the marker, or ``None``.
+def git_prod_ancestry(prod_rev: str, target_rev: str) -> str:
+    """Return the ancestry of prod vs the marker as a 3-value string.
 
-    ``True``  → ``prod_rev`` is an ancestor of ``target_rev`` (prod is *behind*
-                the marker = the recorded deploy never landed = stuck).
-    ``False`` → prod is a descendant of the marker (prod is *ahead* = a deploy
-                happened that wasn't recorded — drift, not an incident).
-    ``None``  → couldn't determine (either rev missing from the checkout); the
-                evaluator then treats it conservatively as behind (LAGGING) so a
-                real stuck deploy is never silently dropped.
+    ``dh.ANCESTRY_BEHIND``  → ``prod_rev`` is an ancestor of ``target_rev`` (prod
+                is *behind* the marker = the recorded deploy never landed = stuck).
+    ``dh.ANCESTRY_AHEAD``   → prod is a descendant of the marker (prod is *ahead*
+                = a deploy happened that wasn't recorded — drift, not an incident).
+    ``dh.ANCESTRY_UNKNOWN`` → couldn't determine (either rev missing from the
+                checkout, or diverged branches); the evaluator then treats it
+                conservatively as behind (LAGGING) so a real stuck deploy is
+                never silently dropped.
 
-    Requires both commits in the local history — the workflow checks out with
-    ``fetch-depth: 0`` so prod's (possibly older) rev is present.
+    A string (not a tri-state bool) so callers can't misread "unknown" as a
+    falsy "not behind" (AX review 2026-07-30). Requires both commits in the
+    local history — the workflow checks out with ``fetch-depth: 0`` so prod's
+    (possibly older) rev is present.
     """
     prod_rev = (prod_rev or "").strip()
     target_rev = (target_rev or "").strip()
     if not prod_rev or not target_rev:
-        return None
+        return dh.ANCESTRY_UNKNOWN
     try:
         # Both revs must resolve locally, else ancestry is meaningless.
         for r in (prod_rev, target_rev):
             if subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{r}^{{commit}}"],
                               capture_output=True, text=True, timeout=10).returncode != 0:
-                return None
+                return dh.ANCESTRY_UNKNOWN
         behind = subprocess.run(
             ["git", "merge-base", "--is-ancestor", prod_rev, target_rev],
             capture_output=True, text=True, timeout=10,
         ).returncode == 0
         if behind:
-            return True
+            return dh.ANCESTRY_BEHIND
         ahead = subprocess.run(
             ["git", "merge-base", "--is-ancestor", target_rev, prod_rev],
             capture_output=True, text=True, timeout=10,
         ).returncode == 0
-        # ahead → prod is descendant of marker → not behind. If neither (diverged
-        # branches), return None (conservative → LAGGING).
-        return False if ahead else None
+        # ahead → prod is descendant of marker. Neither (diverged) → unknown
+        # (conservative → LAGGING).
+        return dh.ANCESTRY_AHEAD if ahead else dh.ANCESTRY_UNKNOWN
     except Exception:
-        return None
+        return dh.ANCESTRY_UNKNOWN
 
 
 def fetch_live_sessions() -> list:
@@ -204,13 +207,13 @@ def decide_and_alert(
     reachable: bool,
     prod_rev: str,
     target_rev: str,
-    target_age: float,
+    target_age_seconds: float,
     owner_user_id: str,
     live_sessions: list,
     last_alerted_rev: str,
     send,
     grace_seconds: float = 900.0,
-    prod_is_behind_target=None,
+    prod_ancestry: str = dh.ANCESTRY_UNKNOWN,
 ) -> dict:
     """Evaluate health and (dedup-gated) alert. Returns a verdict dict.
 
@@ -219,14 +222,13 @@ def decide_and_alert(
     not every tick. ``unreachable`` dedups on the literal ``"unreachable"`` key
     so a flapping box doesn't spam but a *new* stuck rev still alerts.
 
-    ``prod_is_behind_target`` is the git-ancestry direction (see
-    ``git_prod_behind_target``) — it separates a genuine stuck deploy (prod
-    behind the marker → alert) from an unrecorded deploy (prod ahead → soft
-    ``ahead`` nudge, no alert).
+    ``prod_ancestry`` is the git-ancestry direction (see ``git_prod_ancestry``)
+    — it separates a genuine stuck deploy (prod behind the marker → alert) from
+    an unrecorded deploy (prod ahead → soft ``ahead`` nudge, no alert).
     """
     verdict = dh.evaluate_deploy_health(
-        reachable, prod_rev, target_rev, target_age,
-        grace_seconds=grace_seconds, prod_is_behind_target=prod_is_behind_target,
+        reachable, prod_rev, target_rev, target_age_seconds,
+        grace_seconds=grace_seconds, prod_ancestry=prod_ancestry,
     )
     status = verdict["status"]
     verdict["alerted"] = False
@@ -276,27 +278,33 @@ def main(argv=None) -> int:
 
     reachable, prod_rev = fetch_prod_version(args.prod_url)
     target_rev, target_age = read_deploy_marker(args.marker_ref)
-    behind = git_prod_behind_target(prod_rev, target_rev)
+    ancestry = git_prod_ancestry(prod_rev, target_rev)
     live = fetch_live_sessions()
     last = _read_state(args.state_file)
 
     verdict = decide_and_alert(
         reachable=reachable, prod_rev=prod_rev, target_rev=target_rev,
-        target_age=target_age if target_age is not None else 10_000.0,
+        target_age_seconds=target_age if target_age is not None else 10_000.0,
         owner_user_id=args.owner_user_id, live_sessions=live,
         last_alerted_rev=last, send=send_alert_dm,
-        grace_seconds=args.grace_seconds, prod_is_behind_target=behind,
+        grace_seconds=args.grace_seconds, prod_ancestry=ancestry,
     )
     if verdict.get("alerted"):
         _write_state(args.state_file, verdict.get("dedup_key", target_rev))
 
     print(json.dumps(verdict, ensure_ascii=False))
-    # An unrecorded deploy (prod ahead of the marker) isn't an incident, but the
-    # marker is stale — nudge (still exit 0 / green) so it gets caught up.
+    # Non-alert states that still need a human/AI action print a recovery nudge
+    # to stderr (still exit 0 / green). Kept symmetric so neither is a silent
+    # dead-end (AX review 2026-07-30 flagged no_target had no nudge).
     if verdict["status"] == dh.AHEAD:
         print(f"ℹ deploy-health: 本番 ({prod_rev[:7]}) は deployed-prod マーカー "
               f"({(target_rev or '')[:7]}) より新しい = デプロイ記録漏れ。"
               f"`beacon deploy record` を打ってマーカーを追随させてください。",
+              file=sys.stderr)
+    elif verdict["status"] == dh.NO_TARGET:
+        print(f"ℹ deploy-health: deployed-prod マーカーが未作成のため遅延判定を "
+              f"スキップしました (本番 {prod_rev[:7]} の死活のみ監視)。"
+              f"`beacon deploy record` を一度打つとマーカーが作られ遅延監視が有効化されます。",
               file=sys.stderr)
     if verdict["status"] in dh.ALERT_STATUSES and verdict.get(
             "sent") is False and not verdict.get("dedup"):

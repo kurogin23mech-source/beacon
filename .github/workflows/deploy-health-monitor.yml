@@ -77,11 +77,14 @@ jobs:
           BEACON_PROD_URL: ${{ vars.BEACON_PROD_URL }}
           BEACON_OWNER_USER_ID: ${{ vars.BEACON_OWNER_USER_ID }}
           BEACON_CLOUD_ID_TOKEN: ${{ secrets.BEACON_DEPLOY_MONITOR_TOKEN }}
+          # Single source of truth for the marker ref name — the script reads it
+          # via argparse's env default, so the literal lives here only (was also
+          # hardcoded in a --marker-ref flag; maintainability review 2026-07-30).
+          BEACON_DEPLOY_MARKER_REF: deployed-prod
         run: |
           python3 scripts/deploy-health-monitor.py \
             --prod-url "${BEACON_PROD_URL:-https://beacon-ai.dev}" \
             --owner-user-id "${BEACON_OWNER_USER_ID:-}" \
-            --marker-ref deployed-prod \
             --state-file .beacon/.deploy-health-alerted
 
       # e-1391 (ms-66) — twin watchdog for the periodic TICK (Trek/Operation
