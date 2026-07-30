@@ -490,10 +490,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_acq_status.add_argument("acq_id", nargs="?", default="")
     p_acq_status.add_argument("status", nargs="?", default="")
     # ms-132 e-4507: 打ち切り (soft-cancel)。status でなく削除で中止を表す。
+    # account/opportunity delete と同じ監査ゲート: --reason か --acknowledge を要求。
     for _dv in ("delete", "cancel", "rm"):
         _p = acq_sub.add_parser(_dv, add_help=False)
         _p.add_argument("acq_id", nargs="?", default="")
         _p.add_argument("--reason", default="")
+        _p.add_argument("--acknowledge", action="store_true")
     # ms-132 e-4501/e-4503: attack-list (アタックリスト = table-doc) 系。bin/beacon
     # (bash) と同じ動詞を Windows/pipx の Python dispatch でも受ける (保守性レビュー
     # PR #548: bash だけに在ると Windows で feature 全体が不達)。
@@ -2324,11 +2326,21 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "acquisition_status", env)
     if cmd in ("delete", "cancel", "rm"):
         if not args.acq_id:
-            print("Usage: beacon acquisition delete <acq-id> [--reason <text>]")
+            print("Usage: beacon acquisition delete <acq-id> "
+                  "(--reason <text> | --acknowledge)")
+            return 1
+        reason = getattr(args, "reason", "") or ""
+        acknowledge = getattr(args, "acknowledge", False)
+        # 監査ゲート: account/opportunity delete と同じく reason か acknowledge が要る。
+        if not reason and not acknowledge:
+            print("Error: `acquisition delete` is destructive and requires an "
+                  "audit entry. Pass --reason \"...\" or --acknowledge.",
+                  file=sys.stderr)
             return 1
         return _run_commands_py(root, "acquisition_delete",
                                 {"BEACON_ACQ_ID": args.acq_id,
-                                 "BEACON_CANCEL_REASON": getattr(args, "reason", "") or ""})
+                                 "BEACON_CANCEL_REASON":
+                                     reason or "(acknowledged: no detailed reason given)"})
     if cmd == "attack-list":
         if not args.acq_id or not args.title:
             print('Usage: beacon acquisition attack-list <acq-id> "<title>" '

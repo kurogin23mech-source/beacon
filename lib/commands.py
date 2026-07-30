@@ -21173,7 +21173,7 @@ def _help_registry():
         {"command": "beacon acquisition list", "flags": ["--json"], "description": "List 顧客獲得ターゲット with their lifecycle status"},
         {"command": "beacon acquisition start <acq-id>", "flags": [], "description": "Move a 顧客獲得ターゲット to in_progress (着手). Named lifecycle verb (ms-120 e-3907); status stays read-only."},
         {"command": "beacon acquisition done <acq-id>", "flags": [], "description": "Mark a 顧客獲得ターゲット done (完了)."},
-        {"command": "beacon acquisition delete <acq-id>", "flags": ["--reason <text>"], "description": "打ち切り: soft-cancel a 顧客獲得ターゲット (tombstone, audit kept). Discontinuation = deletion, not a status (ms-132 e-4507)."},
+        {"command": "beacon acquisition delete <acq-id>", "flags": ["--reason <text>", "--acknowledge"], "description": "打ち切り: soft-cancel a 顧客獲得ターゲット (tombstone, audit kept). Discontinuation = deletion, not a status (ms-132 e-4507). Aliases: cancel, rm. Requires --reason or --acknowledge (account/opportunity delete と同じ監査ゲート)."},
         {"command": "beacon acquisition attack-list <acq-id> <title>", "flags": ["--phases <a,b,c>", "--json"], "description": "Attach a typed アタックリスト (table-doc: 対象顧客/打診フェーズ/最終接触日/メモ) to a 顧客獲得ターゲット (ms-132)"},
         {"command": "beacon acquisition attack-lists <acq-id>", "flags": ["--json"], "description": "List a 顧客獲得ターゲット's アタックリスト with per-phase counts (ms-132)"},
         {"command": "beacon acquisition attack-list-fill <doc-id>", "flags": ["--account-phase <name>", "--assignee <user>", "--name-contains <s>", "--limit <n>", "--dry-run", "--json"], "description": "Bulk-register 未接触 Accounts matching a query into an アタックリスト (dedup, --dry-run preview) (ms-132)"},
@@ -26627,7 +26627,8 @@ def cmd_acquisition_delete():
     acq_id = os.environ.get("BEACON_ACQ_ID", "")
     reason = os.environ.get("BEACON_CANCEL_REASON", "")
     if not acq_id:
-        print("Usage: beacon acquisition delete <acq-id> [--reason <text>]",
+        print("Usage: beacon acquisition delete <acq-id> "
+              "(--reason <text> | --acknowledge)",
               file=sys.stderr)
         sys.exit(1)
     data = load_project()

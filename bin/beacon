@@ -1519,19 +1519,24 @@ cmd_acquisition_attack_list_reply_record() {
 
 cmd_acquisition_delete() {
     # ms-132 e-4507 — 打ち切り (soft-cancel)。status でなく削除で中止を表す。
+    # account/opportunity delete と同じ監査ゲート: --reason か --acknowledge を要求
+    # (destructive verb はどれも同じ形で reason を強制する — AX 原則1 の一貫性)。
     ensure_project
-    local acq_id="" reason=""
+    local acq_id="" reason="" acknowledge=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --reason) reason="${2:-}"; shift 2 ;;
-            -?*) _guard_positional "$1" "Usage: beacon acquisition delete <acq-id> [--reason <text>]" ;;
+            --acknowledge) acknowledge="1"; shift ;;
+            -?*) _guard_positional "$1" "Usage: beacon acquisition delete <acq-id> (--reason <text> | --acknowledge)" ;;
             *)   acq_id="$1"; shift ;;
         esac
     done
     if [ -z "$acq_id" ]; then
-        echo "Usage: beacon acquisition delete <acq-id> [--reason <text>]"
+        echo "Usage: beacon acquisition delete <acq-id> (--reason <text> | --acknowledge)"
         exit 1
     fi
+    _require_audit_reason "acquisition delete" "$reason" "$acknowledge"
+    [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
     BEACON_ACQ_ID="$acq_id" BEACON_CANCEL_REASON="$reason" \
         python3 "$COMMANDS_PY" acquisition_delete
 }

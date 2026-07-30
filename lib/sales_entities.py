@@ -3614,8 +3614,15 @@ def acquisition_set_status(data: dict, acquisition_id: str, status: str, *,
     if acq is None:
         raise ValueError(f"Acquisition not found: {acquisition_id}")
     if status not in ACQUISITION_STATUSES:
+        # ms-132 e-4507 (AX misleading の是正): observing は廃止されたので、旧
+        # 「様子見」相当を打とうとした利用者に正しい回復経路を名指しする。打ち切りは
+        # status でなく削除 (soft-cancel) で表す — start/done では代替できない。
+        hint = ""
+        if status == "observing":
+            hint = (" — observing は廃止されました。打ち切り (discontinuation) は "
+                    "`beacon acquisition delete <acq-id>` を使ってください")
         raise ValueError(
-            f"status must be one of {list(ACQUISITION_STATUSES)}, got {status!r}")
+            f"status must be one of {list(ACQUISITION_STATUSES)}, got {status!r}{hint}")
     # ms-120 e-3908: guard the from→to transition via the shared lifecycle
     # mechanism (illegal jumps like done→todo raise). Lazy import avoids a
     # module-load cycle. All named verbs (start/done) flow through here.

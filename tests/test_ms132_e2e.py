@@ -8,10 +8,7 @@
 
 from __future__ import annotations
 
-import hashlib
-import io
 import json
-import contextlib
 import sys
 from pathlib import Path
 
@@ -21,7 +18,6 @@ LIB = Path(__file__).parent.parent / "lib"
 sys.path.insert(0, str(LIB))
 
 import commands  # noqa: E402
-import core  # noqa: E402
 import sales_entities as se  # noqa: E402
 
 
@@ -138,14 +134,9 @@ def test_acquisition_lifecycle_no_observing(proj, monkeypatch, capsys):
 
 def test_acquisition_discontinue_is_delete(proj, monkeypatch, capsys):
     # 打ち切り = soft-cancel (delete), not a lifecycle status. Tombstoned, audit kept.
+    # `proj` is the project cwd (fixture return); read the tombstoned record back.
     _run(monkeypatch, commands.cmd_acquisition_delete, capsys,
          BEACON_ACQ_ID="acq-1", BEACON_CANCEL_REASON="方針変更で中止")
-    acq = se.find_acquisition(_read(cwd_of(monkeypatch)), "acq-1")
-    assert acq["status"] == core.CANCELLED_STATUS if hasattr(core, "CANCELLED_STATUS") \
-        else acq["status"] == "cancelled"
+    acq = se.find_acquisition(_read(proj), "acq-1")
+    assert acq["status"] == "cancelled"
     assert acq["meta"]["cancel_reason"] == "方針変更で中止"
-
-
-def cwd_of(monkeypatch):
-    import os
-    return Path(os.getcwd())

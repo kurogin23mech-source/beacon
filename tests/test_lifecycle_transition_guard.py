@@ -20,6 +20,20 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "lib"))
 
 import core  # noqa: E402
+import sales_entities as se  # noqa: E402
+
+
+# --- single source of truth: the two enumerations must not drift (e-4507) ----
+
+def test_acquisition_statuses_match_transition_table():
+    """`sales_entities.ACQUISITION_STATUSES` (validation) and the keys of
+    `core.LIFECYCLE_TRANSITIONS["acquisition"]` (transition guard) both enumerate
+    the valid acquisition states. They are defined in two files; a future change
+    that adds/removes a state in one but not the other would split validation from
+    the guard (accepted-but-untransitionable, or vice versa). Pin them together so
+    that drift fails here loudly rather than at runtime (maintainability review
+    e-4507, §単一真実源)."""
+    assert set(se.ACQUISITION_STATUSES) == set(core.LIFECYCLE_TRANSITIONS["acquisition"])
 
 
 # --- unit: the shared guard -------------------------------------------------
