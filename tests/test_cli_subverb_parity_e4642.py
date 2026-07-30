@@ -58,8 +58,9 @@ def test_python_reader_sees_subparser_choices_only():
     `sessions list` would be reported as bogus Windows breakage."""
     mod = _load_checker()
     py = mod.python_sub_verbs()
-    # phase registers only `list` as a real choice on the Python side today.
-    assert py.get("phase") == {"list"}
+    # phase is subparser-backed and exposes `list` (+ the e-4643 backfilled
+    # add/rename/move/remove — we assert `list` presence, forward-compatible).
+    assert "list" in py.get("phase", set())
     # milestone is subparser-backed and exposes many choices.
     assert {"add", "start", "done"} <= py.get("milestone", set())
     # `note` and `sessions` use a positional (text_or_sub / list_arg) => absent.
@@ -95,7 +96,10 @@ def test_removing_a_snapshot_entry_turns_it_red():
     checker must flag it. This is what makes e-4643's backfill a real,
     regression-guarded shrink rather than a silent no-op."""
     mod = _load_checker()
-    victim = "phase add"
+    # Use a still-deferred entry as the victim ("phase add" left the snapshot
+    # once e-4643 backfilled it — its guard is now proven by parity, not the
+    # snapshot). Any remaining bash-only sub-verb demonstrates the mechanism.
+    victim = "trek block"
     assert victim in mod.ALLOW_SUBVERB_MISSING_FROM_PYTHON
     original = set(mod.ALLOW_SUBVERB_MISSING_FROM_PYTHON)
     try:

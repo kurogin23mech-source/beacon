@@ -319,11 +319,11 @@ ALLOW_MISSING_FROM_README: set[str] = {
 # Sub-verbs present in bin/beacon's main-case routing but NOT registered as a
 # Python subparser choice (=> `argparse invalid choice` on Windows/pipx).
 ALLOW_SUBVERB_MISSING_FROM_PYTHON: set[str] = {
-    # -- profession-critical (Windows sales users): e-4643 backfills these --
-    "acquisition start", "acquisition done",
-    "opportunity describe", "opportunity desc",
-    "phase add", "phase rename", "phase move",
-    "phase remove", "phase delete", "phase rm",
+    # -- profession-critical rows backfilled by e-4643 have been REMOVED from
+    #    this snapshot (acquisition start/done, opportunity describe/desc,
+    #    phase add/rename/move/remove/delete/rm). They now have Python subparser
+    #    parity, so the checker actively GUARDS them: if a future change drops
+    #    the dispatch subparser, the drift re-appears here as a failure.
     # -- install / cloud parity: e-4649 --
     "cloud upload-initial", "cloud migrate-from-local",
     # -- dev/ops verbs, bash-only for now (方針3, not on the hot Windows path) --
