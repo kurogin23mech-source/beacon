@@ -79,23 +79,53 @@ cat Cargo.toml 2>/dev/null | grep -m1 '^description'
 
 **この段階ではホーム判定や Mode 分岐をしない**。環境情報は Step 2 の draft 組み立てと Step 3 の場所決めに使うだけ。
 
-## Step 2: name + 大目的を明示的に聞く
+## Step 1.7: 職種を決めて onboarding plan を取得する (ms-133 e-4648)
 
-ユーザーに対して **1 メッセージで以下のフォーム** を提示する。
-**name と objective のどちらにも draft をできる限り埋めて出す** (Step 1 で取れた環境情報を最大限活用):
+Beacon は開発 (dev) 専用ではなく、営業 (sales) やバックオフィス (backoffice) 等の
+「職種インスタンス」を載せられる。**何を聞くか・大目的が何を意味するかは職種で変わる**
+ので、質問文をこの Skill に直書きせず、CLI が emit する onboarding plan を描画する
+(= 出し分け判定は lib/occupation.py に集約、Skill は描画のみ)。
+
+1. **職種を 1 問で確認する** (confirm-minimal)。ユーザーの初期発話や環境スキャンから
+   明らかなら draft を添えて、そうでなければ既定 dev を提示する:
+   ```
+   この Beacon は何の職種で使いますか？
+     1) 開発 (dev) — プロダクト/コードを作る  [既定]
+     2) 営業 (sales) — 商談・顧客開拓を回す
+     3) バックオフィス (backoffice) — 契約・評価・月次決算 等
+     （その他の職種名を直接書いてもOK）
+   ```
+   ユーザーが選んだ値を `$PROFESSION` とする (空入力 = dev)。**職種ごとの質問内容を
+   ここで分岐して書かない** — 次で plan から取得する。
+
+2. **plan を取得する** (read-only、プロジェクトは作られない)。Bash ツールで:
+   ```bash
+   beacon init --profession "$PROFESSION" --plan
+   ```
+   stdout に JSON が返る: `{"profession", "vision_role", "ask":[{key,label,help,required}], "next_hint"}`。
+   これが Step 2 のフォームと Step 5d の誘導の素材になる。plan が取れなければ (古い beacon 等)
+   従来の dev フォーム (name + 大目的 + 任意ターゲット/補足) に fall back してよい。
+
+## Step 2: name + plan の質問項目を明示的に聞く
+
+ユーザーに対して **1 メッセージでフォーム** を提示する。**name は職種非依存で常に聞く**。
+その下に **Step 1.7 の plan の `ask[]` を順に描画する** (`label` を見出し、`help` を補足に、
+`required=false` は「(任意、空でもOK)」と添える)。name/先頭項目には Step 1 で取れた draft を
+できる限り埋める:
 
 ```
-Beacon プロジェクトとして始めますね。以下を教えてください:
+Beacon プロジェクト (職種: [plan.profession]) として始めますね。以下を教えてください:
 
   📛 プロジェクト名:   [name-draft を必ず挿入。デフォルトは現在のディレクトリ名 "$CWD_BASENAME"]
                        このまま使う場合は Enter (空入力)、別の名前にする場合はその名前を入力してください。
-  🎯 大目的:           [objective-draft があれば挿入し、出どころ ("README から" / "package.json から" 等) を 1 行添える。
-                       何も取れなければ「1〜2 行で (このプロジェクトが完成したら何ができるようになるか)」]
-
-  以下は任意 (空でも OK、後で /beacon-vision で深掘りできます):
-  👥 ターゲット:        誰のためのプロジェクトか
-  📝 その他補足:        制約・成功基準・やらないこと等
+  [plan.ask の各項目を順に描画:]
+  🎯 [ask.label]:      [ask.help。先頭の objective には draft があれば挿入し出どころを1行添える]
+  …(required=false の項目は「(任意、空でもOK)」を添える)
 ```
+
+**職種による質問の出し分けはこのフォーム生成では判断しない** — plan.ask が営業なら営業の項目、
+dev なら大目的/ターゲット/やらないこと を既に含んでいる。Skill は plan を描画するだけ (AC2 /
+SPEC 独立レビュー high#1)。
 
 ### draft の組み立て
 
@@ -184,9 +214,14 @@ Bash(command="mkdir -p $PROJECT_DIR", cwd="$CWD")
 
 ### Step 5b: beacon init
 
+`--profession` に Step 1.7 で確定した `$PROFESSION` を渡す (dev のときは省略しても
+同じ = 既定 dev。営業/バックオフィス等では必須 — これを渡さないと dev スキーマで
+作られてしまう)。営業/バックオフィスで得た項目 (focus / scope 等) は objective に
+織り込むか、init 後の次アクション (plan.next_hint) で扱う。
+
 ```
 Bash(
-  command="beacon init --name '[name]' --objective '[objective]' --retro-day [retro_day] --storage [storage]",
+  command="beacon init --name '[name]' --objective '[objective]' --retro-day [retro_day] --storage [storage] --profession [$PROFESSION]",
   cwd="$PROJECT_DIR"
 )
 ```
