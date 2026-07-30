@@ -18363,6 +18363,39 @@ def _next_release_id(data: dict, date_str: str) -> str:
     return f"{prefix}-{n}"
 
 
+def _update_deployed_prod_marker(rev, json_mode=False):
+    """Force-move the ``deployed-prod`` git tag to ``rev`` and push it (ms-105).
+
+    Single source of truth for "what rev prod should be serving", read
+    token-free by the deploy-health monitor (.github/workflows/
+    deploy-health-monitor.yml → scripts/deploy-health-monitor.py). Best-effort:
+    a failed tag / push prints a warning but never raises, so recording a deploy
+    can't fail on a marker hiccup — the monitor's ``ahead`` nudge surfaces a
+    marker that drifted behind prod.
+    """
+    import subprocess as _sp
+    rev = (rev or "").strip()
+    if not rev:
+        return
+    try:
+        _sp.run(["git", "tag", "-f", "deployed-prod", rev],
+                check=True, capture_output=True, text=True, timeout=10)
+    except Exception as e:  # noqa: BLE001 — best-effort, never fail the record
+        if not json_mode:
+            print(f"  ⚠ deployed-prod タグの更新に失敗しました ({e}). "
+                  f"監視は次回の記録で追随します。")
+        return
+    try:
+        _sp.run(["git", "push", "-f", "origin", "deployed-prod"],
+                check=True, capture_output=True, text=True, timeout=30)
+        if not json_mode:
+            print(f"  deployed-prod → {rev} (deploy-health 監視の基準を更新)")
+    except Exception as e:  # noqa: BLE001
+        if not json_mode:
+            print(f"  ⚠ deployed-prod タグの push に失敗しました ({e}). "
+                  f"`git push -f origin deployed-prod` を手動で実行してください。")
+
+
 def cmd_deploy_record():
     """Record a deployment entry (major or minor) based on recent commits."""
     import subprocess as _sp
@@ -18595,6 +18628,17 @@ def cmd_deploy_record():
     else:
         dep_list.append(deploy_entry)
     save_project(data)
+
+    # ms-105 e-4600: move the `deployed-prod` git marker so the deploy-health
+    # monitor (GitHub Actions, token-free) can compare prod's live /api/version
+    # rev against the rev we intended to deploy. main HEAD stopped being that
+    # truth when the VPS pull-timer was disabled (2026-07-28) and prod began
+    # tracking manual deploys only. Only the real prod backend moves the marker;
+    # aws-ga / trailnode / non-prod deploys must not. Best-effort — a failed
+    # tag/push must never fail the record (the monitor's soft "unrecorded deploy"
+    # nudge covers a missed marker).
+    if environment == "prod" and backend in ("", "default"):
+        _update_deployed_prod_marker(head_hash, json_mode)
 
     # ms-104 e-3154: deploy = surface が世に出る節目。全貌マップの reconcile を促す。
     _fire_map_reconcile_trigger()

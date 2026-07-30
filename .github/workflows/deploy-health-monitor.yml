@@ -6,10 +6,17 @@ name: Deploy health monitor (ms-105 e-3230)
 # is still caught (a monitor on the box can't report its own outage).
 #
 # Every ~10 min it fetches production's live git revision from /api/version,
-# compares it to origin/main HEAD (with a grace window so an in-flight deploy
-# isn't misread as stuck), and on a stuck / unreachable prod sends a beacon-bus
-# DM to the deploying session (or the owner's live session). See
-# scripts/deploy-health-monitor.py + lib/deploy_health.py.
+# compares it to the `deployed-prod` git tag — the deploy marker moved by
+# `beacon deploy record` to the rev we intended to deploy (with a grace window
+# so an in-flight deploy isn't misread as stuck) — and on a stuck / unreachable
+# prod sends a beacon-bus DM to the deploying session (or the owner's live
+# session). See scripts/deploy-health-monitor.py + lib/deploy_health.py.
+#
+# Why the marker, not origin/main HEAD (the original basis): the VPS pull-timer
+# that made prod auto-track main was disabled 2026-07-28, so "prod behind main"
+# became the normal state and reddened this job every tick. The marker is a
+# git-native truth source for "what prod should serve" independent of whether
+# auto-deploy is on, readable here token-free.
 #
 # Required repo configuration (Settings → Secrets and variables → Actions):
 #   * secret  BEACON_DEPLOY_MONITOR_TOKEN — a beacon cloud id-token the CLI uses
@@ -40,8 +47,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          # Need the main HEAD commit + its author time for the grace check.
-          fetch-depth: 2
+          # Full history + tags: the monitor resolves the `deployed-prod` tag and
+          # does an ancestry check (prod behind the marker = stuck vs ahead =
+          # unrecorded deploy), which needs prod's — possibly older — rev present.
+          fetch-depth: 0
+          fetch-tags: true
 
       - uses: actions/setup-python@v6
         with:
@@ -71,7 +81,7 @@ jobs:
           python3 scripts/deploy-health-monitor.py \
             --prod-url "${BEACON_PROD_URL:-https://beacon-ai.dev}" \
             --owner-user-id "${BEACON_OWNER_USER_ID:-}" \
-            --main-ref HEAD \
+            --marker-ref deployed-prod \
             --state-file .beacon/.deploy-health-alerted
 
       # e-1391 (ms-66) — twin watchdog for the periodic TICK (Trek/Operation
