@@ -1779,14 +1779,12 @@ def build_parser() -> argparse.ArgumentParser:
     auth_sub.add_parser("logout", add_help=False)
     auth_sub.add_parser("status", add_help=False)
 
-    # ---- cloud list / status / open / join / off / push / pull (#20) ----
-    # Authenticated users (Windows pipx) need a full path to migrate local
-    # projects to cloud and sync the other way. The architectural concern
-    # behind cloud push (= two-master divergence) is already handled in
-    # commands.py: cloud_push auto-switches to cloud mode after the
-    # initial upload (ms-36 cloud-first cache design), and a SECOND push
-    # while already in cloud mode is refused unless --force is given and
-    # logged to the changelog (ms-24). We can wire push/pull safely.
+    # ---- cloud list / status / open / join / off (#20) ----
+    # e-4629: user 向け `cloud push` / `cloud pull` は撤去 (bin/beacon bash と統一)。
+    # push/pull は ms-36 cloud-first で日常運用に不要になり、bash 側は既に e-2038 で
+    # 削除済み。dispatch.py だけ user 向けパーサ / help が残る bash↔Python drift だった。
+    # 初回アップロードの内部エンジン cmd_cloud_push (commands.py) は upload-initial /
+    # init 時 cloud 化の裏方として現役なので残す (= ここで user 向けに露出しないだけ)。
     p_cloud = sub.add_parser("cloud", help="Cloud project navigation", add_help=False)
     p_cloud.add_argument("--help", "-h", action="store_true", dest="show_help")
     cloud_sub = p_cloud.add_subparsers(dest="cloud_cmd", metavar="<subcmd>")
@@ -1803,10 +1801,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_cloud_open.add_argument("project_id", nargs="?", default="")
     p_cloud_open.add_argument("--no-browser", action="store_true",
                               help="Don't auto-launch the browser/desktop UI")
-    p_cloud_push = cloud_sub.add_parser("push", add_help=False)
-    p_cloud_push.add_argument("-f", "--force", action="store_true",
-                              help="Override the cloud-mode safety block")
-    cloud_sub.add_parser("pull", add_help=False)
 
     # ---- pr show / add / close / approve / reject / create / request-review / request-changes / review / merge ----
     p_pr = sub.add_parser("pr", help="Pull-request operations", add_help=False)
@@ -4061,13 +4055,11 @@ def _handle_cloud(root: Path, args: argparse.Namespace) -> int:
     """
     if args.show_help or args.cloud_cmd is None:
         print(
-            "Usage: beacon cloud [list|status|open <id>|join <id>|push|pull]\n"
+            "Usage: beacon cloud [list|status|open <id>|join <id>]\n"
             "  list                 List cloud projects\n"
             "  status               Show current cloud mode + project_id\n"
             "  open <project-id>    Bind cwd to a cloud project + open Web UI\n"
             "  join <project-id>    Bind cwd to a cloud project (no UI launch)\n"
-            "  push [-f|--force]    Upload local project to cloud\n"
-            "  pull                 Sync cloud state into the local read-only cache\n"
             "\n"
             "Sandbox / verification only (e-1861, ms-61):\n"
             "  off --confirm <id>   Disable cloud sync (archives cloud.json into .beacon/.trash/)"
@@ -4136,20 +4128,10 @@ def _handle_cloud(root: Path, args: argparse.Namespace) -> int:
             print("Usage: beacon cloud open <project-id>")
             return 1
         return _do_cloud_open(root, args.project_id, args.no_browser)
-    if cmd == "push":
-        # cmd_cloud_push reads BEACON_FORCE from env. It already enforces the
-        # ms-24 cloud-mode block (refuses without --force). The historical
-        # ms-36 "config.json mode -> cloud after initial migration" auto-
-        # switch was retired in e-1861 (ms-61) — cloud.json existence is
-        # now the sole source of truth, so no mode-write happens here.
-        # Dispatch handler is intentionally thin.
-        return _run_commands_py(
-            root, "cloud_push",
-            {"BEACON_FORCE": "1" if args.force else ""},
-        )
-    if cmd == "pull":
-        return _run_commands_py(root, "cloud_pull", {})
-
+    # e-4629: user 向け `push` / `pull` は撤去 (bash と統一)。初回アップロードの
+    # 内部エンジン cmd_cloud_push は upload-initial / init 時 cloud 化の裏方として
+    # 残るが、ここで user 向けには露出しない。cloud_pull は commands.py 側 dispatch も
+    # e-2038 で削除済。
     print(f"Unknown cloud subcommand: {cmd}")
     return 1
 
