@@ -152,6 +152,36 @@ def test_notified_reflects_dedup_on_same_reply(reply_cwd, monkeypatch, capsys):
     assert second["notified"] is False  # deduped, honestly reported
 
 
+def _row_cells(doc_id, acc_id):
+    _c, _t, model = commands._load_table_model(doc_id)
+    for r in table_doc.active_rows(model):
+        if r["cells"].get("account") == acc_id:
+            return r["cells"]
+    raise AssertionError(f"row for {acc_id} not found")
+
+
+def test_reply_record_stamps_last_contact(reply_cwd, monkeypatch, capsys):
+    # e-4623: reply-record fills 最終接触日 (= 返信日) on the SAME write as the phase
+    # drive — 打診フェーズ and 最終接触日 commit together (no partial write).
+    cwd, doc_id = reply_cwd
+    _set_row_phase(doc_id, "acc-1", "連絡済")
+    _reply(monkeypatch, capsys, doc_id, "acc-1", mid="r1")
+    cells = _row_cells(doc_id, "acc-1")
+    assert cells["last_contact"] == commands._now_iso()[:10]
+    assert cells["phase"] == "返信あり"
+
+
+def test_reply_stamps_last_contact_even_when_phase_guard_skipped(
+        reply_cwd, monkeypatch, capsys):
+    # AC2: 最終接触日 updates on EVERY reply-record — including a reply on a row not
+    # at 連絡済, where the phase is intentionally left as-is. The date still records
+    # that a contact happened (the audit signal must not depend on phase advance).
+    cwd, doc_id = reply_cwd  # acc-1 stays 未接触 (never contacted)
+    out = _reply(monkeypatch, capsys, doc_id, "acc-1", mid="r2")
+    assert out["phase_driven_to"] is None          # phase guard-skipped
+    assert _row_cells(doc_id, "acc-1")["last_contact"] == commands._now_iso()[:10]
+
+
 def test_reply_record_rejects_unknown_account(reply_cwd, monkeypatch, capsys):
     cwd, doc_id = reply_cwd
     with pytest.raises(SystemExit) as ei:

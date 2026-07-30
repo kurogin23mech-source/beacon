@@ -27208,19 +27208,28 @@ def cmd_acquisition_attack_list_send_record():
     if target_row is not None:
         vals = attack_list.phase_values(model)
         cur = target_row.get("cells", {}).get(attack_list.COL_PHASE)
-        # 未接触 → 連絡済 (funnel entry → contacted)
-        if (len(vals) > attack_list.PHASE_IDX_CONTACTED
-                and cur == vals[attack_list.PHASE_IDX_UNTOUCHED]):
-            try:
+        try:
+            # e-4623: stamp 最終接触日 (= 送信日) on every send-record. The schema's
+            # date column was dead — no contact flow wrote it, so the row phase
+            # advanced while its sibling date stayed empty (監査シグナルが自動フロー
+            # から切れていた)。Ride the SAME set_cell + single write as the phase
+            # drive so 打診フェーズ と 最終接触日 が同時に確定する (片方だけの部分
+            # 書込を作らない)。列型は date なので日付部分のみ (_now_iso()[:10])。
+            table_doc.set_cell(model, target_row["id"],
+                               attack_list.COL_LAST_CONTACT, _now_iso()[:10],
+                               actor=_actor_str(), at=_now_iso())
+            # 未接触 → 連絡済 (funnel entry → contacted)
+            if (len(vals) > attack_list.PHASE_IDX_CONTACTED
+                    and cur == vals[attack_list.PHASE_IDX_UNTOUCHED]):
                 table_doc.set_cell(model, target_row["id"], attack_list.COL_PHASE,
                                    vals[attack_list.PHASE_IDX_CONTACTED],
                                    actor=_actor_str(), at=_now_iso())
-                _write_table_model(doc_id, title, _content, model)
                 driven_to = vals[attack_list.PHASE_IDX_CONTACTED]
-            except table_doc.TableDocError as exc:
-                print(f"Error: 行フェーズの前進に失敗しました ({exc})。"
-                      f"証跡は記録していません。", file=sys.stderr)
-                sys.exit(1)
+            _write_table_model(doc_id, title, _content, model)
+        except table_doc.TableDocError as exc:
+            print(f"Error: 行の更新に失敗しました ({exc})。"
+                  f"証跡は記録していません。", file=sys.stderr)
+            sys.exit(1)
 
     # Now book the 証跡 + mark the recipient sent, and save project.json LAST.
     try:
@@ -27391,18 +27400,25 @@ def cmd_acquisition_attack_list_reply_record():
         sys.exit(1)
 
     driven_to = None
-    if will_advance:
-        try:
+    try:
+        # e-4623: stamp 最終接触日 (= 返信日) on every reply-record — ride the same
+        # set_cell + single write as the phase drive so 打診フェーズ と 最終接触日 が
+        # 同時に確定する (片方だけの部分書込を作らない)。証跡は行の書込が成功した
+        # 後にだけ save する (PR #553 の atomicity を維持)。列型は date。
+        table_doc.set_cell(model, target_row["id"],
+                           attack_list.COL_LAST_CONTACT, _now_iso()[:10],
+                           actor=_actor_str(), at=_now_iso())
+        if will_advance:
             table_doc.set_cell(model, target_row["id"], attack_list.COL_PHASE,
                                vals[attack_list.PHASE_IDX_REPLIED],
                                actor=_actor_str(), at=_now_iso())
-            _write_table_model(doc_id, title, _content, model)
             driven_to = vals[attack_list.PHASE_IDX_REPLIED]
-        except table_doc.TableDocError as exc:
-            print(f"Error: 行フェーズの前進に失敗しました ({exc})。証跡は記録して"
-                  f"いません。", file=sys.stderr)
-            sys.exit(1)
-    save_project(data)  # persist the 証跡 only after the phase write succeeded
+        _write_table_model(doc_id, title, _content, model)
+    except table_doc.TableDocError as exc:
+        print(f"Error: 行の更新に失敗しました ({exc})。証跡は記録して"
+              f"いません。", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)  # persist the 証跡 only after the row write succeeded
 
     # Notify the human (idiomatic path = a trigger), writing the file directly.
     notified = _fire_attack_list_reply_trigger(
