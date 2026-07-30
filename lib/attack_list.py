@@ -83,6 +83,39 @@ def attack_list_columns(phases=None) -> list:
     ]
 
 
+# Funnel-position indices (ms-132 e-4505 review): the send/reply verbs advance a
+# row by *position* in the (configurable) prospect funnel, so name the positions
+# once instead of scattering literal vals[0]/[1]/[2] across call sites. Position,
+# not name, because a company may rename the phases via ``beacon phase prospect``.
+PHASE_IDX_UNTOUCHED = 0   # 未接触 (entry)
+PHASE_IDX_CONTACTED = 1   # 連絡済 (sent, awaiting reply)
+PHASE_IDX_REPLIED = 2     # 返信あり (replied)
+
+
+def phase_values(model_or_columns) -> list:
+    """The prospect funnel's allowed values in order, or [] if absent.
+
+    Accepts a table model (``{"columns": [...]}``) or a raw columns list. One
+    reader for the phase enum so the send / reply / worklist verbs don't each
+    re-derive it (ms-132 e-4505 保守性レビュー)."""
+    cols = (model_or_columns.get("columns", [])
+            if isinstance(model_or_columns, dict) else (model_or_columns or []))
+    for c in cols:
+        if isinstance(c, dict) and c.get("key") == COL_PHASE:
+            return list(c.get("values") or [])
+    return []
+
+
+def find_row_by_account(rows, acc_id):
+    """The first row whose account cell == ``acc_id`` (from an already-filtered
+    row list, e.g. ``table_doc.active_rows(model)``), or None. Centralizes the
+    row-lookup the send / reply verbs both need (ms-132 e-4505 保守性レビュー)."""
+    for row in rows or []:
+        if row.get("cells", {}).get(COL_ACCOUNT) == acc_id:
+            return row
+    return None
+
+
 def is_attack_list(columns) -> bool:
     """True when a table-doc's columns match the attack-list schema shape.
 

@@ -527,6 +527,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_acq_sendrec.add_argument("--url", default="")
     p_acq_sendrec.add_argument("--subject", default="")
     p_acq_sendrec.add_argument("--json", action="store_true")
+    # ms-132 e-4505: 返信監視の配線 (返信待ち一覧 + 検知した返信の記録)。
+    p_acq_await = acq_sub.add_parser("attack-list-awaiting-reply", add_help=False)
+    p_acq_await.add_argument("doc_id", nargs="?", default="")
+    p_acq_await.add_argument("--json", action="store_true")
+    p_acq_reply = acq_sub.add_parser("attack-list-reply-record", add_help=False)
+    p_acq_reply.add_argument("doc_id", nargs="?", default="")
+    p_acq_reply.add_argument("acc_id", nargs="?", default="")
+    p_acq_reply.add_argument("--message-id", dest="message_id", default="")
+    p_acq_reply.add_argument("--url", default="")
+    p_acq_reply.add_argument("--summary", default="")
+    p_acq_reply.add_argument("--json", action="store_true")
 
     # ---- opportunity (ms-106: sales entities, profession=sales) ----
     p_opp = sub.add_parser(
@@ -2270,7 +2281,8 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
     if args.show_help or args.acq_cmd is None:
         print("Usage: beacon acquisition "
               "[add|list|attack-list|attack-lists|attack-list-fill|"
-              "attack-list-send|attack-list-send-record|status] [options]")
+              "attack-list-send|attack-list-send-record|attack-list-awaiting-reply|"
+              "attack-list-reply-record|status] [options]")
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
         return rc
@@ -2371,9 +2383,30 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
                "BEACON_SEND_SUBJECT": args.subject or "",
                "BEACON_JSON": "1" if args.json else ""}
         return _run_commands_py(root, "acquisition_attack_list_send_record", env)
+    if cmd == "attack-list-awaiting-reply":
+        if not args.doc_id:
+            print("Usage: beacon acquisition attack-list-awaiting-reply "
+                  "<attack-list-doc-id> [--json]")
+            return 1
+        return _run_commands_py(root, "acquisition_attack_list_awaiting_reply",
+                                {"BEACON_DOC_ID": args.doc_id,
+                                 "BEACON_JSON": "1" if args.json else ""})
+    if cmd == "attack-list-reply-record":
+        if not args.doc_id or not args.acc_id:
+            print('Usage: beacon acquisition attack-list-reply-record '
+                  '<attack-list-doc-id> <acc-id> [--message-id <id>] '
+                  '[--url <link>] [--summary <s>] [--json]')
+            return 1
+        env = {"BEACON_DOC_ID": args.doc_id, "BEACON_SEND_ACC_ID": args.acc_id,
+               "BEACON_SEND_MESSAGE_ID": args.message_id or "",
+               "BEACON_SEND_URL": args.url or "",
+               "BEACON_COMM_SUMMARY": args.summary or "",
+               "BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "acquisition_attack_list_reply_record", env)
     print("Usage: beacon acquisition "
           "[add|list|attack-list|attack-lists|attack-list-fill|"
-          "attack-list-send|attack-list-send-record|status] [options]")
+          "attack-list-send|attack-list-send-record|attack-list-awaiting-reply|"
+          "attack-list-reply-record|status] [options]")
     return 2
 
 

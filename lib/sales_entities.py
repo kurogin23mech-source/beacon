@@ -374,6 +374,21 @@ def record_batch_send(data: dict, doc_id: str, acc_id: str, *, at: str,
     return r
 
 
+def sent_message_ids_for_doc(data: dict, doc_id: str) -> dict:
+    """Map acc_id -> the message-id we sent that Account for this attack-list,
+    read from the send batches (ms-132 e-4505). Keeps the send-batch schema
+    knowledge here (the model owns it) instead of letting a read command reach
+    into ``attack_list_send_batches`` internals directly (保守性レビュー)."""
+    out = {}
+    for b in data.get(_SEND_BATCHES_KEY, []):
+        if b.get("doc_id") != doc_id:
+            continue
+        for r in b.get("recipients", []):
+            if r.get("message_id"):
+                out[r.get("acc_id")] = r["message_id"]
+    return out
+
+
 def filter_accounts(data: dict, *, phase=None, assignee=None,
                     name_contains=None) -> list:
     """Return the Accounts matching a condition query (ms-132 e-4503).
