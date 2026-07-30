@@ -2,6 +2,247 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.61.0] - 2026-07-30
+
+- Merge pull request #572 from kurogin23mech-source/ms-104-mapmaint-e3342
+- Merge pull request #564 from kurogin23mech-source/ms-133-profession-front-door-e4648
+- fix(ms-133): onboarding_plan を verb ledger に分類登録 (e-4648)
+- Merge pull request #567 from kurogin23mech-source/ms-133-cloud-verb-parity-e4649
+- Merge pull request #571 from kurogin23mech-source/ms-133-windows-subverb-backfill-e4643
+- Merge pull request #570 from kurogin23mech-source/ms-133-release-drift-gate
+- Merge pull request #569 from kurogin23mech-source/ms-133-setup-reframe-e4671
+- Merge pull request #568 from kurogin23mech-source/ms-133-sales-skill-canonical-e4667
+- Merge pull request #566 from kurogin23mech-source/ms-133-frontend-dist-drift-e4409
+- Merge pull request #565 from kurogin23mech-source/ms-133-beacon-log-profession-e4650
+- feat(ms-104): 全貌マップ reconcile の forcing function を出荷境界へ再配置 (e-3342)
+- Merge pull request #562 from kurogin23mech-source/ms-133-cli-subverb-parity-e4642
+- fix(ms-133): init --profession が inherited BEACON_PROFESSION env を clobber する回帰を修正 (e-4648)
+- ci(ms-133): release に strict drift ゲートを追加 — Windows drift を出荷させない (e-4682)
+- docs(ms-133): beacon setup を「手動フォールバック」に役割縮小 (e-4671)
+- feat(ms-133): 営業 Skill 14本を canonical 化して Codex plugin に同梱 (e-4667)
+- feat(ms-133): cloud upload-initial / migrate-from-local を Windows dispatch に移植 (e-4649 Part A)
+- test(ms-133): desktop/dist が build 出力と一致することを保証する drift 検知 (e-4409)
+- fix(ms-133): beacon-log を職種対応 — milestone 無しの営業 project で失敗しない (e-4650)
+- feat(ms-133): setup wizard に profession 対話 + init 後の Skill 再install (e-4648 face2)
+- feat(ms-133): beacon-init/vision Skill を plan 描画駆動にする (e-4648/e-4408 render 側)
+- feat(ms-133): profession front door — init --profession + descriptor-driven onboarding plan (e-4648/e-4408)
+- feat(ms-133): Windows/pipx に職種クリティカル sub-verb を backfill (e-4643)
+- feat(ms-133): CLI drift checker に bash↔Python sub-verb parity 検査を追加 (e-4642)
+- Merge pull request #561 from kurogin23mech-source/ms-129-sales-phase-list-e4405
+- refactor(ms-129): 独立レビュー反映 — effective_phases 抽出 + per-funnel source (e-4405)
+- fix(ms-129): 営業 phase list が「not a sales project」誤表示 → 組み込みデフォルトを明示表示 (e-4405)
+- Merge pull request #560 from kurogin23mech-source/ms-95/cloud-push-pull-dispatch-drift-e4629
+- fix(ms-95): dispatch.py の user 向け cloud push/pull を撤去し bash と統一 (e-4629)
+- Merge pull request #559 from kurogin23mech-source/ms-132-fork-5149d2
+- fix(ms-132): #e-4623 独立2体レビュー(AX+保守性/sonnet)反映 — PR #559
+- fix(ms-132): #e-4623 アタックリストの最終接触日を接触フローで自動記録
+- Merge pull request #558 from kurogin23mech-source/ms-132-fork-5149d2
+- fix(ms-132): #e-4562/#e-4507 独立2体レビュー(AX+保守性/sonnet)反映 — PR #558
+- feat(ms-132): #e-4562 営業Web UIに顧客獲得(施策)の閲覧タブを追加 — アタックリスト打診フェーズ進捗を可視化
+- fix(ms-132): #e-4507 PR #556 merge後レビュー所見の hardening (#1 DRY / #3 list filter)
+- Merge pull request #556 from kurogin23mech-source/ms-132-fork-5149d2
+- Merge pull request #557 from kurogin23mech-source/ms-105-deploy-marker-e-4607
+- fix(ms-105): 独立レビュー(AX+保守性)の findings 反映 — deploy-health 監視 (e-4607)
+- fix(ms-132): #e-4507 独立2体レビュー(AX+保守性/sonnet)反映 — delete 監査ゲート統一ほか
+- fix(ms-105): deploy-health 監視の基準を main HEAD→deployed-prod マーカーへ (e-4607)
+- feat(ms-132): #e-4507 Acquisitionライフサイクル整備 — observing除去 + 打ち切りは削除 + 一連e2e
+- Merge pull request #555 from kurogin23mech-source/ms-132-fork-5149d2
+- Merge pull request #554 from kurogin23mech-source/ms-132-e4506
+- Merge pull request #553 from kurogin23mech-source/ms-132-fork-5149d2
+- fix(ms-132): 独立2体レビュー(AX+保守性)反映 — リード転換の堅牢化 (PR #554)
+- feat(ms-132): リード転換 — 返信あり/アポの行を商談へ引き上げ (e-4506)
+- fix(ms-132): 独立2体レビュー(AX+保守性)反映 — 返信配線の堅牢化 (PR #553)
+- Merge pull request #551 from kurogin23mech-source/ms-119-capability-ax-ai-target-pr-ax-instance
+- feat(ms-132): 返信監視をアタックリスト行に配線 — 連絡済→返信あり+通知 (e-4505)
+- Merge pull request #552 from kurogin23mech-source/ms-128-wave8-4a4ccc
+- fix(ms-119): #551 独立3体レビュー(AX/保守性/思想)由来 — backlog disposition ゲートの hardening (e-4579)
+- fix(ms-128): PR#552 独立レビュー反映 — gate↔表 drift ガード + 回復コマンド明示 + skill trim
+- feat(ms-128): executor/leader に状態機械の正しい駆動を Skill で強制 (e-4282/e-4283)
+- Merge pull request #550 from kurogin23mech-source/ms-132-fork-5149d2
+- feat(ms-119): 目的達成レビューに backlog disposition ゲートを追加 (e-4579)
+- feat(ms-128): 状態遷移表を SPEC v2 に忠実化 — working→user_review 辺を除去 (e-4373 + e-4574)
+- fix(ms-132): 独立3体レビュー(AX+保守性+思想)反映 — 承認境界を強化 (PR #550)
+- feat(ms-128): Trek scope CLI 出力の語彙を slot→target に統一 (e-4363 / AC4)
+- feat(ms-132): 一括連絡の承認境界 — dry-run→人間1confirm→送信記録 (e-4504)
+- Merge pull request #548 from kurogin23mech-source/ms-132-fork-5149d2
+- Merge pull request #549 from kurogin23mech-source/ms-128-wave8-4a4ccc
+- fix(ms-128): PR#549 独立再レビュー(AX/保守性)反映 — divert 表示の対称化 + dead 定数除去
+- fix(ms-132): 独立2体レビュー(AX+保守性/sonnet)由来の反映 (PR #548)
+- fix(ms-128): 独立3体レビュー反映 — 完遂ゲートの穴を塞ぐ (P1/A4 + AX/保守性指摘)
+- feat(ms-132): 条件クエリで未接触Accountを抽出しアタックリストへ一括登録 (e-4503)
+- Merge pull request #547 from kurogin23mech-source/ms-132-fork-5149d2
+- feat(ms-128): AC12 クロスインスタンス相互ブロックの e2e + 注入可能な時計 (受入条件12)
+- fix(ms-132): 独立2体レビュー(AX+保守性/sonnet)由来の反映 (PR #547)
+- feat(ms-128): 完遂ゲートを attainment mode 化 — leader_review→user_review を全met+実行者外に固定 (e-4386)
+- Merge pull request #546 from kurogin23mech-source/ms-131-writepath-hardening
+- feat(ms-132): 打診フェーズ funnel を設定可能な3本目の funnel に (e-4502)
+- fix(ms-131): 独立レビュー(AX+保守性/sonnet)反映 — 側門ガードの hardening (PR #546)
+- fix(ms-131): table-doc の書き込み側門を封鎖 — doc update --content を default-deny (e-4544)
+- feat(ms-132): アタックリスト正準スキーマ + 施策紐づけ CLI (e-4501)
+- Merge pull request #545 from kurogin23mech-source/ms-128-wave8-4a4ccc
+- fix(ms-128): CI 緑化 — verb ledger 登録 + post_bus_event stub を新 kwargs に追従
+- Merge pull request #544 from kurogin23mech-source/ms-131-fork-5ab06b
+- fix(ms-128): Wave8 独立2体レビュー(AX+保守性)指摘を反映 (e-4289/e-4374)
+- test(ms-131): table-doc 統合回帰 e2e + 発見した detach バグ修正 (e-4499)
+- feat(ms-131): Web UI で table-doc を表描画（閲覧専用）(e-4498)
+- fix(ms-131): doc table の5 verb を Q/R/B/C verb ledger に分類 — CI blocker (PR #544)
+- feat(ms-128): leader_review verdict 集合を halt_reason で分岐 (AC7完成/e-4374)
+- Merge pull request #543 from kurogin23mech-source/ms-126-review-fixes
+- fix(ms-131): 独立レビュー(AX+保守性/sonnet)由来の反映 — table-doc CLI hardening (PR #544)
+- test(ms-126): Fix#1 波及 — 対話 reopen-prompt fixture を機械セッション明示宣言に直す
+- docs(ms-126): 保守性レビュー反映 — session-kind 双子ヘルパーの相互参照を追加
+- feat(ms-128): bus send にべき等再送を露出 — --client-event-id/--retry + stdout純化テスト (AC10/e-4289)
+- fix(ms-126): AXレビュー反映 — update priority を Optional化+untriaged を状態非依存で拒否
+- feat(ms-131): table-doc を任意 target に紐づけ + 付け外し (e-4497)
+- fix(ms-126): 思想レビュー反映 — CLI人間ゲートの既定オープン穴を TTY 推論で閉じる
+- Merge pull request #542 from kurogin23mech-source/ms-128-wave7-4a4ccc
+- feat(ms-131): 行操作 CLI — doc table create/add-row/set-cell/rm-row/show (e-4496)
+- chore(ms-128): Wave7 skill 変更を codex plugin コピーに反映 (build-codex-plugin-skills)
+- fix(ms-128): Wave7 独立2体レビュー(AX+保守性)指摘を全反映 (e-4281/e-4370)
+- feat(ms-131): 列の型検査 — number/date/bool 流用 + ref/enum/text 追加 (e-4495)
+- Merge pull request #541 from kurogin23mech-source/ms-126-fork-8a0f81
+- feat(ms-128): Wave7 — executor は端末の人間に聞かない + 完遂 handoff/思想レビュー境界 (e-4281/e-4370)
+- feat(ms-131): table-doc core データモデル — format:table + 列/行/行ごと追記履歴 (e-4494)
+- refactor(ms-126): Maint#1 反映 — update 経路の priority 検証を単一source helper に戻す
+- fix(ms-126): 独立2体レビュー(AX+保守性/fable)指摘を反映 — 回復路のread-modify-write穴 + guard硬化
+- Merge pull request #540 from kurogin23mech-source/ms-128-fork-4a4ccc
+- fix(ms-128): 独立2体レビュー(AX+保守性/fable)由来の hardening (Wave6/e-4368)
+- feat(ms-126): #e-4223 残半分 — cli-drift ガードに bash↔python flag parity 検査
+- refactor(ms-126): #e-4225 issue_import の untriaged stamp を単一 source helper に一本化
+- feat(ms-126): #e-4224 untriaged 回復経路を全 surface で完全化 + 契約テスト
+- fix(ms-128): 復旧経路を take-over に正す + drain/graceful-degradation 固め (Wave6/e-4368 chunk3)
+- feat(ms-128): リーダー halt を server tick で user へ escalate (Wave6/e-4368 chunk2)
+- feat(ms-128): リーダー halt 検知 (queue 非drain) (Wave6/e-4368 chunk1)
+- Merge pull request #539 from kurogin23mech-source/ms-126-untriaged-recovery
+- Merge pull request #538 from kurogin23mech-source/ms-128-fork-4a4ccc
+- refactor(ms-126): #539 独立レビュー由来 — dead help= 除去 + comment 実態化 + test 整理
+- fix(ms-128): 独立2体レビュー(AX+保守性/fable)由来の構造 hardening (Wave5/e-4365)
+- feat(ms-126): --untriaged の env 配線を getattr→直接参照で fail-fast (e-4226)
+- feat(ms-126): dispatch.py の --priority に choices/help + core parity 検査 (e-4223 一部)
+- fix(ms-128): trek_block/trek_blockers を Q/R/B/C verb 台帳に分類 (Wave5/e-4365)
+- feat(ms-128): beacon trek block/blockers CLI + endpoint (Wave5/e-4365 chunk5)
+- feat(ms-128): block reconcile を server tick に配線 + leader digest に surface (Wave5/e-4365 chunk4)
+- feat(ms-128): AND 自動解除 + rollback + 動的循環再検査 (Wave5/e-4365 chunk3)
+- feat(ms-128): blocker edge 台帳 + 書き込み時循環拒否 (Wave5/e-4365 chunk2)
+- feat(ms-128): block を Trek 状態機械に追加 (Wave5/e-4365 chunk1)
+- feat(ms-119): beacon-review-uc のギャップ発見チェックリストを 10→12 に同期 (e-4406)
+- Merge pull request #537 from kurogin23mech-source/ms-128-wave4c-executor-waiting
+- refactor(ms-128): #537 独立レビュー由来 — recency の stall マスク穴を塞ぐ
+- feat(ms-128): executor-waiting + commit recency を leader digest に surface (Wave4c/e-4307)
+- feat(ms-128): build_working_targets_recency helper (Wave4c/e-4307 wip1)
+- Merge pull request #536 from kurogin23mech-source/ms-128-wave4b-leader-observability
+- refactor(ms-128): #536 独立レビュー由来 — leader 発火判断を純関数化
+- feat(ms-128): leader-digest heartbeat で silent stall を可視化 (Wave4b / e-4284)
+- Merge pull request #533 from kurogin23mech-source/ms-128-wave4-two-layer-tick
+- refactor(ms-128): #533 独立レビュー由来 — 二層 tick の状態分割を正典に集約
+- Merge pull request #535 from kurogin23mech-source/ms-111-fork-51ea33
+- Merge pull request #534 from kurogin23mech-source/ms-114-fork-077bbc
+- feat(ms-111, e-3621): master linking を server ingest に配線 (AC1/AC2, flag-gated)
+- Merge origin/main into ms-114-fork-077bbc (post #532)
+- feat(ms-114): backend authoring を principal の work-unit scope に接続 (e-3745)
+- feat(ms-128): 二層 tick — 実行 tick を leader_review で止める (Wave4 / e-4287)
+- test(ms-114): report seam の出力契約+local fallback 回帰を整備 (e-3744, AC6)
+- fix(ms-114): master_sync_drain を verb 台帳に分類 (AC1) — main CI 復旧
+- Merge pull request #531 from kurogin23mech-source/ms-128-wave3-done-removal
+- Merge pull request #532 from kurogin23mech-source/ms-114-fork-077bbc
+- feat(ms-114): issue_import を report→server-author の継ぎ目に移管 (e-3743 intake 第一歩)
+- fix: master_sync_drain verb を Q/R/B/C 台帳に分類 (main CI 復旧)
+- Merge remote-tracking branch 'origin/main' into ms-128-wave3-done-removal
+- refactor(ms-128): 独立レビュー(AX+保守性)由来の drift 修正 — 単一真実源化
+- Merge pull request #530 from kurogin23mech-source/ms-114-fork-077bbc
+- feat(ms-128): done を Trek 状態機械から除去し user_review で打ち止め (Wave3 / 方針5)
+- feat(ms-114): commit authoring を report→server-author の継ぎ目に再ホーム (e-3742 第一スライス)
+- Merge pull request #529 from kurogin23mech-source/ms-111-go-live-prep
+- refactor(ms-111): レビュー由来 — 未配線 helper script 除去 + マーカー命名を自己記述化
+- Merge pull request #525 from kurogin23mech-source/ms-128-trek-ai-stamp-2026-07-27-dogfood
+- revert(ms-111, e-4399): drain の periodic 配線を session-start から外す
+- feat(ms-111, e-4399): master-sync outbox を操作非依存の定期経路 (session-start) で drain
+- docs(ms-111, e-4360): master_binding を experimental / 意図的未配線と明示
+- Merge remote-tracking branch 'origin/main' into ms-128-trek-ai-stamp-2026-07-27-dogfood
+- Merge pull request #527 from kurogin23mech-source/ms-111-identity-l1-semantic-layer
+- Merge pull request #526 from kurogin23mech-source/ms-126-ms-triage-default
+- Merge main (transcript drift test fix) into ms-111-identity-l1-semantic-layer
+- Merge main (transcript drift test fix) into ms-126-ms-triage-default
+- Merge pull request #528 from kurogin23mech-source/fix-transcript-source-drift-test
+- fix(ms-107): transcript source drift test を散文化した skill doc に追従 (main CI 復旧)
+- feat(ms-128): halt sweep を server tick に配線 — Wave 2 完了 (方針6/e-4309)
+- feat(ms-128): halt sweep + working→leader_review 強制遷移 (方針6/e-4309 lib orchestration)
+- fix(ms-128): #525 独立レビュー由来の実 drift 修正 (単一真実源 + help drift + 命名) e-4389
+- feat(ms-126, e-4222): untriaged を機械経路限定にし人間の優先度必須バイパスを構造的に塞ぐ
+- feat(ms-111, e-4355): master-sync emit 失敗の lost-edit を outbox+pending マーカーで塞ぐ
+- Merge branch 'main' of https://github.com/kurogin23mech-source/beacon
+- feat(ms-128): per-target halt 機械検知 core (方針6 e-4367 lib) + skill parity 同期
+- feat(ms-128): tick 文面を前進フレーム+telos に、待機フォールバック廃止 (方針2 e-4364)
+- feat(ms-128): trek-pulse skill を前進フレーム4択に — no-op(待機)除去+telos注入 (方針1/2 agent面)
+- feat(ms-128): tick 応答を型付き分類する — 待機(no-op/空)を no-response に降格 (方針1 e-4372 lib 層)
+- Merge pull request #524 from kurogin23mech-source/ms-106/opp-modal-wide-meeting-readability
+- fix(ms-106): 営業カンバンの商談モーダルを広げ面談まとめの縦長を解消 (e-4381)
+- feat(ms-128): Trek の Target を target-entity 限定に — task slot を親 MS へ read-time migrate (方針3 v2.1)
+- Merge ms-107-sales-vocab-cleanup: 営業skill5本の内部語彙を営業パーソン向けに統一 (レビュー由来 e-4375〜e-4379)
+- docs(ms-107): 営業skill5本の内部語彙を営業パーソン向けに統一 (レビュー由来 e-4375〜e-4379)
+- Merge pull request #523 from kurogin23mech-source/ms-111-e3623-cross-instance
+- test(ms-111): cross-instance 検証 — 同 org の 2 インスタンスが同一 Account を共有 (e-3623)
+- Merge pull request #522 from kurogin23mech-source/ms-111-e3622-chunk2b
+- feat(ms-111): inbound fan-out を consumer に配線 (master 変更→org projections、e-3622 chunk2b part2)
+- feat(ms-111): inbound sync の lib core — master name→投影 cache write-back (e-3622 chunk2b part1)
+- Merge pull request #521 from kurogin23mech-source/ms-111-e3622-chunk2a
+- test(ms-111): master-sync consumer の server 統合 test (e-3622 chunk2a)
+- feat(ms-111): master-sync outbound write-through を配線 (CLI emit + server authz consumer, e-3622 chunk2a part2)
+- feat(ms-111): master-sync の producer payload + server consumer core (e-3622 chunk2a part2 lib)
+- feat(ms-111): 投影 rename の master write-through lib core (e-3622 chunk2a part1)
+- Merge pull request #520 from kurogin23mech-source/ms-111-e3622-chunk1
+- feat(ms-111): マスター identity の org 境界を read/write 両側で fail-closed に (e-3622 chunk1)
+- Merge pull request #519 from kurogin23mech-source/ms-111-fork-77200b
+- refactor(ms-111): chunk2b の独立 review 指摘を反映 (AX + maintainability, e-3621)
+- Merge pull request #518 from kurogin23mech-source/ms-111-fork-77200b
+- Merge pull request #517 from kurogin23mech-source/ms-118-fork-34f176
+- feat(ms-111): 投影 Account/Contact の read を master resolver 経由に一本化 + 作成 seam (e-3621 part2 後半 chunk2b)
+- feat(ms-118): 組織の俯瞰 UI (read-only) — 誰がどの project に参加しているか一望 (e-4236 slice2)
+- Merge remote-tracking branch 'origin/main' into ms-118-fork-34f176
+- test(ms-118): end-to-end 受入検証 — org 作成→招待→参加割当→開示ゲート (e-4237)
+- Merge pull request #516 from kurogin23mech-source/ms-111-fork-84558f
+- feat(ms-111): server 側マスター adapter の橋渡し (e-3621 part2 後半 chunk2a)
+- Merge pull request #515 from kurogin23mech-source/ms-111-fork-84558f
+- Merge pull request #514 from kurogin23mech-source/ms-118-e4236-overview
+- feat(ms-111): 投影の読み出しをマスター経由に (e-3621 part2 後半 chunk1)
+- feat(ms-118): org 俯瞰の集約 API — read-only UI のデータ層 (e-4236 slice 1)
+- Merge pull request #512 from kurogin23mech-source/ms-114-report-request
+- Merge pull request #513 from kurogin23mech-source/ms-111-fork-84558f
+- refactor(ms-114): 独立 AX+保守性レビュー #512 の指摘を反映 (e-3740/e-3741)
+- fix(ms-111): resolve_by_external_ref を org-scoped に (leader review #513)
+- Merge remote-tracking branch 'origin/main' into ms-111-fork-84558f
+- Merge pull request #511 from kurogin23mech-source/ms-118-e4242-windows-parity
+- Merge pull request #510 from kurogin23mech-source/ms-118-e4235-external-guest
+- feat(ms-111): 投影→マスター参照層 (e-3621 part2 前半)
+- feat(ms-114): CLI verb Q/R/B/C live 台帳 + 融着 seam (e-3740)
+- feat(ms-118): beacon org を Windows/pipx 経路にも配線 — bin/beacon と parity (e-4242)
+- feat(ms-114): report/request プリミティブ + 報告スキーマ (e-3741)
+- feat(ms-111): project ごとのマスター束縛宣言 (e-3621 part1)
+- feat(ms-118): 外部ゲストの可視化 — member list で org 非所属の参加者を明示 (e-4235)
+- Merge remote-tracking branch 'origin/main' into ms-111-fork-84558f
+- Merge pull request #509 from kurogin23mech-source/ms-118-fork-fa5731
+- feat(ms-111): マスター store の backend 登録 + 汎用プリミティブ (e-3620)
+- feat(ms-111): マスター identity の adapter 契約 + Beacon-default 実装 (e-3620)
+- feat(ms-118): org 削除/member削除の owner-only ガード実配線 + beacon org delete (e-4234)
+- feat(ms-118): project re-home — org 所属リンク張替え + 開示の即時再評価 (e-4233)
+- feat(ms-111): 薄いマスター identity schema を確定 (e-3619)
+- Merge pull request #508 from kurogin23mech-source/ms-118-e4232-org-invite
+- fix(ms-118): 独立AX/保守性レビュー #508 の指摘を反映 (add-only + role値域 + 命名対称)
+- feat(ms-118): org invite / remove-member — 所属のみ・アクセス非付与 (e-4232)
+- Merge pull request #507 from kurogin23mech-source/ms-118-beacon-org-cli-project-ui
+- fix(ms-118): 独立AX/保守性レビュー #507 の指摘6件を反映 (silent-failure を構造で塞ぐ)
+- feat(ms-118): beacon org CLI 骨格 (create/list/show) + org store 到達路 (e-4231)
+- Merge pull request #506 from kurogin23mech-source/ms-113-organization
+- fix(ms-113): 独立AX/保守性レビュー #506 の指摘を反映 (seam の契約を構造で閉じる)
+- Merge pull request #505 from kurogin23mech-source/ms-126-ms-triage-default
+- fix(ms-126): AX/保守性レビュー #505 の指摘5件を反映 (forcing function の整合性)
+- feat(ms-126): 優先度必須化の Skill 波及を塞ぐ (init/archaeology/log/dispatch/review-run)
+- feat(ms-126): wire untriaged through dispatch/API + tests + skill docs
+- feat(ms-126): mandatory priority + untriaged sentinel + backlog trigger
+- feat(ms-113): backend サービス identity 層 + ms-114 接続 seam を定義 (e-3736)
+- docs(release): update README/CHANGELOG for v0.60.4
+- chore(release): bump formula to 0.60.4
+
 ## [v0.60.4] - 2026-07-26
 
 ## [v0.60.3] - 2026-07-23
