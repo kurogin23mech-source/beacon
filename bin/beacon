@@ -216,8 +216,18 @@ cmd_init() {
 }
 
 cmd_setup() {
-    echo "Beacon Setup"
-    echo "============"
+    echo "Beacon Setup (手動フォールバック)"
+    echo "================================"
+    echo ""
+    # ms-133 e-4671: the canonical onboarding path is the AI-driven setup prompt
+    # the Web UI hands out (empty-state "Setup prompt" → paste into Claude Code /
+    # Codex, and the agent runs install/auth/skill/init for you). This
+    # interactive wizard is the MANUAL fallback for people who prefer to answer
+    # in the terminal — it deliberately overlaps that path. See report doc
+    # "オンボーディング経路の責務境界と判断" (e-4671).
+    echo "推奨: Web UI 空状態の「Setup prompt」を Claude Code / Codex に貼ると、"
+    echo "      AI が install / auth / skill / init を代行します (ターミナル対話不要)。"
+    echo "      本ウィザードは、ターミナルで自分で進めたい人向けの手動フォールバックです。"
     echo ""
 
     # Step 1: Auth
