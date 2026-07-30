@@ -4423,6 +4423,24 @@ def cmd_log():
                 ms_id = fork_target
 
     data = load_project()
+
+    # ms-133 e-4650: same non-dev guard as the prepare/finalize entry points —
+    # a milestone-less sales/backoffice project must not crash the direct
+    # `beacon log "msg"` path (or the bare hook path) with "No active milestone".
+    _profession = occupation.resolve_profession(data)
+    _active_ms = [m for m in data.get("milestones", [])
+                  if m.get("status") in ("todo", "in_progress", "observing")]
+    if _profession != "dev" and not ms_id and not _active_ms:
+        msg = (f"{_profession} project has no milestones — commit "
+               f"{commit_hash[:7] or '(unknown)'} not milestone-bound.")
+        if json_mode:
+            print(json.dumps({"status": "skipped", "milestone_binding": "none",
+                              "profession": _profession, "note": msg},
+                             ensure_ascii=False))
+        else:
+            print(msg)
+        return
+
     result = core.log_commit(
         data, ms_id=ms_id, commit_hash=commit_hash,
         message=message, date=date, summary=summary, progress=progress,
@@ -4450,6 +4468,28 @@ def cmd_log_prepare():
     summary_text = os.environ.get("BEACON_SUMMARY", "")
 
     data = load_project()
+
+    # ms-133 e-4650: a non-dev project (sales / backoffice) drives work through
+    # its own targets (opportunities / …), not milestones — milestones[] is
+    # empty by construction. The post-commit hook fires /beacon-log on EVERY
+    # commit, so erroring "No active milestone" here would fail the hook on any
+    # commit in a sales repo. Emit a benign prepare payload the Skill reads to
+    # record/skip without milestone binding, instead of exiting non-zero.
+    _profession = occupation.resolve_profession(data)
+    _active_ms = [m for m in data.get("milestones", [])
+                  if m.get("status") in ("todo", "in_progress", "observing")]
+    if _profession != "dev" and not _active_ms:
+        print(json.dumps({
+            "commit": {"hash": commit_hash, "message": message,
+                       "date": date, "summary": summary_text},
+            "current_summary": data.get("summary", ""),
+            "profession": _profession,
+            "milestone_binding": "none",
+            "note": (f"{_profession} project has no milestones; this commit is "
+                     "not milestone-bound. Report it without selecting a "
+                     "milestone and skip progress evaluation."),
+        }, ensure_ascii=False))
+        return
 
     # ms-79 / e-1816 (UC3-F2): fork.json の target_ms_id を最優先する。
     # ms-67 で fork した子 worktree は明示意図 (= 親が「この MS をやれ」と
@@ -4577,6 +4617,24 @@ def cmd_log_finalize():
     source = _resolve_commit_source()
 
     data = load_project()
+
+    # ms-133 e-4650: mirror cmd_log_prepare — a non-dev project with no
+    # milestones must not fail the commit hook. Nothing to bind the commit to,
+    # so acknowledge and return 0 rather than raising "No active milestone".
+    _profession = occupation.resolve_profession(data)
+    _active_ms = [m for m in data.get("milestones", [])
+                  if m.get("status") in ("todo", "in_progress", "observing")]
+    if _profession != "dev" and not ms_id and not _active_ms:
+        msg = (f"{_profession} project has no milestones — commit "
+               f"{commit_hash[:7] or '(unknown)'} recorded no milestone binding.")
+        if json_mode:
+            print(json.dumps({"ok": True, "milestone_binding": "none",
+                              "profession": _profession, "note": msg},
+                             ensure_ascii=False))
+        else:
+            print(msg)
+        return
+
     # ms-81 e-1916: status gate. Resolve the target MS the same way log_commit
     # would internally, then surface the warning before mutating state.
     try:
