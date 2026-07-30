@@ -53,8 +53,7 @@ def _acq_status(proj):
 
 @pytest.mark.parametrize("verb,expected", [
     ("start", "in_progress"),
-    ("observe", "observing"),
-    ("done", "done"),
+    ("done", "done"),  # ms-132 e-4507: observe 除去 (打ち切りは delete で表す)
 ])
 def test_acquisition_intent_verbs_move_state(proj, verb, expected):
     r = _run(proj, "acquisition", verb, "acq-1")
@@ -63,11 +62,11 @@ def test_acquisition_intent_verbs_move_state(proj, verb, expected):
 
 
 def test_acquisition_status_write_is_deprecated_but_works(proj):
-    r = _run(proj, "acquisition", "status", "acq-1", "observing")
+    r = _run(proj, "acquisition", "status", "acq-1", "in_progress")
     assert r.returncode == 0
     assert "deprecated" in r.stderr.lower()
-    assert "start|observe|done" in r.stderr
-    assert _acq_status(proj) == "observing"  # still performs the write (compat)
+    assert "start|done" in r.stderr
+    assert _acq_status(proj) == "in_progress"  # still performs the write (compat)
 
 
 def test_operation_status_write_is_deprecated_but_works(proj):
@@ -88,7 +87,7 @@ def test_bare_status_is_still_read_only(proj):
 def test_acquisition_help_advertises_verbs_not_status_write(proj):
     r = _run(proj, "acquisition", "--help")
     assert r.returncode == 0
-    for verb in ("acquisition start", "acquisition observe", "acquisition done"):
+    for verb in ("acquisition start", "acquisition done"):  # ms-132 e-4507: observe 除去
         assert verb in r.stdout
     # the write-status form is no longer advertised
     assert "acquisition status <acq-id> <status>" not in r.stdout

@@ -3558,14 +3558,15 @@ def build_sales_project(name: str, objective: str, *, retro_day: str = "monday",
 # 構造は同型 (finite・取引先なし・成約/失注なし) だが sales 所有なので dev の
 # Milestone は借りない (職種 ⊃ 対象 の封じ込め)。
 #
-# 方針 (ms-115 SPEC 方針2): opportunity のようなフェーズ funnel と 成約/失注 は持たず、
-# 全 target 共通の標準ライフサイクル (todo → in_progress → observing → done) だけ持つ。
-# 目標 (例「20 社アタック → 5 社アポ」) は description の散文で表す — 構造化フィールドは
-# 作らない (過剰設計回避、必要になれば後で field 昇格)。
+# 方針 (ms-115 SPEC 方針2 / ms-132 e-4507): opportunity のようなフェーズ funnel と
+# 成約/失注 は持たず、素直な標準ライフサイクル (todo → in_progress → done) だけ持つ。
+# 打ち切り (中止) は status でなく削除 (soft-cancel = acquisition_cancel) で表す
+# ので、observing のような中間の「見守り」状態は置かない (ms-132 e-4507)。目標
+# (例「20 社アタック → 5 社アポ」) は description の散文で表す。
 # ---------------------------------------------------------------------------
 
 # 標準ライフサイクル (開発 Milestone と同じ語彙)。フェーズ funnel ではない。
-ACQUISITION_STATUSES = ("todo", "in_progress", "observing", "done")
+ACQUISITION_STATUSES = ("todo", "in_progress", "done")
 
 
 def next_acquisition_id(data: dict) -> str:
@@ -3607,23 +3608,47 @@ def acquisition_add(data: dict, title: str, *, description: str = "",
 def acquisition_set_status(data: dict, acquisition_id: str, status: str, *,
                            at: str = "") -> dict:
     """Move an Acquisition along its standard lifecycle (todo → in_progress →
-    observing → done) and return it. This is the occupation-agnostic target
-    lifecycle — there is no phase funnel and no won/lost (ms-115 方針2)."""
+    done) and return it. Occupation-agnostic target lifecycle — no phase funnel,
+    no won/lost (ms-115 方針2), and no observing (ms-132 e-4507: 打ち切りは削除で表す)."""
     acq = find_acquisition(data, acquisition_id)
     if acq is None:
         raise ValueError(f"Acquisition not found: {acquisition_id}")
     if status not in ACQUISITION_STATUSES:
+        # ms-132 e-4507 (AX misleading の是正): observing は廃止されたので、旧
+        # 「様子見」相当を打とうとした利用者に正しい回復経路を名指しする。打ち切りは
+        # status でなく削除 (soft-cancel) で表す — start/done では代替できない。
+        hint = ""
+        if status == "observing":
+            hint = (" — observing は廃止されました。打ち切り (discontinuation) は "
+                    "`beacon acquisition delete <acq-id>` を使ってください")
         raise ValueError(
-            f"status must be one of {list(ACQUISITION_STATUSES)}, got {status!r}")
+            f"status must be one of {list(ACQUISITION_STATUSES)}, got {status!r}{hint}")
     # ms-120 e-3908: guard the from→to transition via the shared lifecycle
     # mechanism (illegal jumps like done→todo raise). Lazy import avoids a
-    # module-load cycle. All named verbs (start/observe/done) flow through here.
+    # module-load cycle. All named verbs (start/done) flow through here.
     import core
     core.validate_lifecycle_transition("acquisition", acq.get("status", ""), status)
     if status == work_model.DONE_STATUS:
         work_model.mark_done(acq, at=at, actor=work_base.current_actor())
     else:
         acq["status"] = status
+    return acq
+
+
+def acquisition_cancel(data: dict, acquisition_id: str, *, reason: str = "",
+                       actor: str = "", at: str = "") -> dict:
+    """Soft-cancel (打ち切り) an Acquisition and return it (ms-132 e-4507).
+
+    Discontinuing a施策 is expressed as *deletion*, not a lifecycle status: the
+    record is tombstoned via ``work_base.stamp_cancel`` (status → cancelled, with
+    reason/actor/at) so the audit trail survives (data-immutability原則) and it
+    drops out of the active list. An Acquisition is a standalone target (no live
+    references to orphan, unlike an Account), so no force flag is needed."""
+    acq = find_acquisition(data, acquisition_id)
+    if acq is None:
+        raise ValueError(f"Acquisition not found: {acquisition_id}")
+    work_base.stamp_cancel(acq, reason=reason, actor=actor or work_base.current_actor(),
+                           at=at)
     return acq
 
 

@@ -3191,10 +3191,11 @@ LIFECYCLE_TRANSITIONS: dict[str, dict[str, frozenset[str]]] = {
         "open": frozenset({"closed"}),
         "closed": frozenset(),  # terminal
     },
+    # ms-132 e-4507: observing を除去。施策は todo → in_progress → done の素直な
+    # ライフサイクルだけを持ち、打ち切りは status でなく削除 (soft-cancel) で表す。
     "acquisition": {
-        "todo": frozenset({"in_progress", "observing", "done"}),
-        "in_progress": frozenset({"observing", "done"}),
-        "observing": frozenset({"done"}),
+        "todo": frozenset({"in_progress", "done"}),
+        "in_progress": frozenset({"done"}),
         "done": frozenset(),  # terminal
     },
 }
