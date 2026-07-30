@@ -146,6 +146,9 @@ cmd_init() {
     local storage="${BEACON_INIT_STORAGE:-local}"
     # ms-63 / e-1441: default-high sensitivity unless caller opts in to low.
     local sensitivity="${BEACON_INIT_SENSITIVITY:-high}"
+    # ms-133 e-4648: chosen occupation (blank → cmd_init defaults to dev, so an
+    # omitted --profession keeps the development schema byte-for-byte).
+    local profession="${BEACON_INIT_PROFESSION:-}"
     local storage_choice="1"
     [[ "$storage" == "cloud" ]] && storage_choice="2"
 
@@ -203,6 +206,7 @@ cmd_init() {
     BEACON_NAME="$name" BEACON_OBJECTIVE="$objective" \
         BEACON_RETRO_DAY="${retro_day:-friday}" \
         BEACON_SENSITIVITY="$sensitivity" \
+        BEACON_PROFESSION="$profession" \
         python3 "$COMMANDS_PY" init
 
     # Cloud setup if selected
@@ -3636,6 +3640,14 @@ case "${1:-}" in
         # safe default). Opt-in low via --sensitivity low for OSS-style
         # open projects.
         _init_sensitivity="high"
+        # ms-133 e-4648: the profession front door. `--profession` chooses the
+        # occupation (dev / sales / backoffice / any data-defined name); before
+        # this only the undocumented BEACON_PROFESSION env selected it, so the
+        # README-advertised `beacon init --profession sales` errored. `--plan`
+        # is read-only: emit the occupation's onboarding plan (WHAT to ask +
+        # vision role) as JSON and exit, so /beacon-init renders the right
+        # questions without hardcoding them.
+        _init_profession="" _init_plan=""
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --name)        _init_name="${2:-}"; shift 2 ;;
@@ -3643,13 +3655,21 @@ case "${1:-}" in
                 --retro-day)   _init_retro_day="${2:-}"; shift 2 ;;
                 --storage)     _init_storage="${2:-}"; shift 2 ;;
                 --sensitivity) _init_sensitivity="${2:-}"; shift 2 ;;
+                --profession)  _init_profession="${2:-}"; shift 2 ;;
+                --plan)        _init_plan="1"; shift ;;
                 -?*) _guard_flag "$1" ;;
                 *) shift ;;
             esac
         done
+        if [ -n "$_init_plan" ]; then
+            BEACON_PROFESSION="${_init_profession:-dev}" \
+                python3 "$COMMANDS_PY" onboarding_plan
+            exit 0
+        fi
         BEACON_INIT_NAME="$_init_name" BEACON_INIT_OBJECTIVE="$_init_objective" \
             BEACON_INIT_RETRO_DAY="$_init_retro_day" BEACON_INIT_STORAGE="$_init_storage" \
             BEACON_INIT_SENSITIVITY="$_init_sensitivity" \
+            BEACON_INIT_PROFESSION="$_init_profession" \
             cmd_init
         ;;
     status)

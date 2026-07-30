@@ -117,6 +117,143 @@ def project_targets(data: dict) -> list:
 
 
 # ---------------------------------------------------------------------------
+# Onboarding plan — WHAT init asks + the ROLE of the project's objective/vision,
+# per occupation (ms-133 e-4648 / e-4408).
+#
+# The front-door problem: `beacon init --profession sales` used to run the
+# DEVELOPMENT onboarding (大目的 / ターゲット / やらないこと) because the
+# /beacon-init + /beacon-vision Skills hardcoded the dev questions. Every
+# occupation HAS a "why / where are we headed" (it is ③ shared-frame), but WHAT
+# you ask and what the answer is FOR differs. Encoding that difference as
+# `if profession == "sales"` inside the Skill markdown is exactly what the SPEC
+# review flagged (high#1): a reviewer cannot structurally trust the Skill, and
+# the next occupation re-implements the branch. So the plan is emitted HERE from
+# the occupation and the Skill RENDERS it verbatim (CLI/lib decides, Skill draws).
+#
+# A plan is a dict:
+#   vision_role : one line — what the project's objective/vision MEANS for this
+#                 occupation. /beacon-vision uses it to frame its deep-dive so a
+#                 sales project isn't asked to write a product vision.
+#   ask         : ordered onboarding fields the Skill collects at init, each
+#                 {"key", "label", "help", "required"}. `objective` is shared
+#                 (every occupation needs a north star) but its label/help is
+#                 occupation-specific; occupation-only fields ride after it.
+#   next_hint   : the first real action after init (mirrors cmd_init's "Next:").
+#
+# dev's plan reproduces the existing dev onboarding verbatim (AC2: dev init
+# 不変). Adding an occupation = adding one entry here (or, for a data-defined
+# occupation, the GENERIC fallback below already yields a sane render-only plan
+# with no code change — same descriptor-fallback contract as project_targets).
+
+_ONBOARDING_PLANS: dict = {
+    "dev": {
+        "vision_role": "何を作り、誰をどんな状態にするか — プロダクトの北極星"
+                       "（セッションをまたいで判断の基準になるゴール宣言）",
+        "ask": [
+            {
+                "key": "objective",
+                "label": "プロジェクトの大目的",
+                "help": "このプロジェクトで最終的に何を実現したいですか？"
+                        "「何を作るか」ではなく「誰がどんな状態になるか」で。",
+                "required": True,
+            },
+            {
+                "key": "target",
+                "label": "ターゲット（任意）",
+                "help": "誰のためのプロダクトか。空でも OK、後で /beacon-vision で深掘りできます。",
+                "required": False,
+            },
+            {
+                "key": "non_goals",
+                "label": "やらないこと（任意）",
+                "help": "スコープ外を先に決めておくと迷子になりにくい。空でも OK。",
+                "required": False,
+            },
+        ],
+        "next_hint": "beacon milestone add",
+    },
+    "sales": {
+        "vision_role": "営業の狙い — 対象顧客・注力領域・達成したい成果"
+                       "（商談を前に進める判断の基準）",
+        "ask": [
+            {
+                "key": "objective",
+                "label": "この営業活動のゴール",
+                "help": "何を達成したいですか？（例: 対象市場での売上・獲得件数・"
+                        "開拓したい顧客層）。プロダクトの作り込みではなく営業成果で。",
+                "required": True,
+            },
+            {
+                "key": "focus",
+                "label": "注力領域（任意）",
+                "help": "どの顧客層・商材・地域に注力するか。空でも OK。",
+                "required": False,
+            },
+        ],
+        "next_hint": "beacon account add / beacon opportunity add",
+    },
+    "backoffice": {
+        "vision_role": "担当業務の範囲と目的 — 何を回し、何を守るか",
+        "ask": [
+            {
+                "key": "objective",
+                "label": "この業務の目的",
+                "help": "担当する業務で何を成立させたいか（例: 契約・評価・月次決算を"
+                        "滞りなく回す）。プロダクト開発ではなく業務運営の言葉で。",
+                "required": True,
+            },
+            {
+                "key": "scope",
+                "label": "対象業務（任意）",
+                "help": "扱う業務領域（契約 / 評価 / 月次決算 / 勤怠 等）。空でも OK。",
+                "required": False,
+            },
+        ],
+        "next_hint": "beacon target create --class <種類> --label <名前>",
+    },
+}
+
+# The plan a data-defined occupation (legal / hr / …) gets when it has no
+# built-in entry: a single occupation-neutral objective + a generic vision role.
+# This keeps the front door working for occupations added purely by descriptor
+# (no Beacon code change), matching project_targets' fail-open contract.
+_GENERIC_ONBOARDING_PLAN: dict = {
+    "vision_role": "この職種の目的 — 何を前に進めるための場か",
+    "ask": [
+        {
+            "key": "objective",
+            "label": "この職種のゴール",
+            "help": "この職種で何を達成したいか（あなたの言葉で 1 行）。",
+            "required": True,
+        },
+    ],
+    "next_hint": "beacon target-class add",
+}
+
+
+def onboarding_plan(profession: str) -> dict:
+    """Return the onboarding plan for ``profession`` (WHAT init asks + the role
+    of the project's objective/vision).
+
+    Built-in occupations (dev / sales / backoffice) return their curated plan;
+    any other (data-defined) occupation returns the GENERIC plan carrying its
+    own name, so the front door works for descriptor-only occupations with no
+    code change here. ``objective`` is always present and required — every
+    occupation needs a north star — so callers can rely on it existing."""
+    prof = (profession or DEFAULT_PROFESSION).strip().lower() or DEFAULT_PROFESSION
+    plan = _ONBOARDING_PLANS.get(prof)
+    if plan is None:
+        plan = dict(_GENERIC_ONBOARDING_PLAN)
+    out = {
+        "profession": prof,
+        "vision_role": plan["vision_role"],
+        "ask": [dict(f) for f in plan["ask"]],
+        "next_hint": plan["next_hint"],
+    }
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Profession ⊃ Target-class containment (ms-115 e-3785).
 #
 # The data model is "profession OWNS its set of target-classes": development
