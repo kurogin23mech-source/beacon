@@ -27123,6 +27123,38 @@ def cmd_acquisition_attack_list_send():
           f"`beacon acquisition attack-list-send {doc_id} --confirm`")
 
 
+def _today_iso() -> str:
+    """Today's date as ``YYYY-MM-DD`` (date-only). ms-132 e-4623: the single
+    source for the date stamped into ``date``-typed table columns — those columns
+    reject ``_now_iso()``'s time component, so a future policy change (timezone,
+    format) has one place to edit rather than a slice expression copied per site
+    (PR #559 保守性レビュー M1)."""
+    return _now_iso()[:10]
+
+
+def _stamp_attack_list_contact(model, doc_id, title, content, row_id, date_str,
+                               new_phase):
+    """Stamp an attack-list row's 最終接触日 (and optionally advance its 打診フェーズ)
+    in ONE ``set_cell`` pair + a single write, so the date and the phase always
+    commit together — never a partial write. ms-132 e-4623 shared skeleton for
+    send-record / reply-record (PR #559 保守性レビュー M2: the two flows had a
+    parallel-but-divergent write path; this makes the row-mutation step identical
+    for both, with the per-flow difference expressed only as ``new_phase``).
+
+    ``new_phase`` is the target 打診フェーズ, or ``None`` to leave the phase as-is
+    (date-only). Raises ``table_doc.TableDocError`` on a write failure; the caller
+    surfaces it and owns the 証跡 save ordering (PR #553 atomicity stays caller-side).
+    """
+    import table_doc
+    import attack_list
+    table_doc.set_cell(model, row_id, attack_list.COL_LAST_CONTACT, date_str,
+                       actor=_actor_str(), at=_now_iso())
+    if new_phase is not None:
+        table_doc.set_cell(model, row_id, attack_list.COL_PHASE, new_phase,
+                           actor=_actor_str(), at=_now_iso())
+    _write_table_model(doc_id, title, content, model)
+
+
 def cmd_acquisition_attack_list_send_record():
     """Book one sent email inside an attack-list's AUTHORIZED send batch (ms-132
     e-4504): drive the prospect row 未接触→連絡済, write the outbound Communication
@@ -27205,27 +27237,24 @@ def cmd_acquisition_attack_list_send_record():
     target_row = attack_list.find_row_by_account(
         table_doc.active_rows(model), acc_id)
     driven_to = None
+    last_contact = None
     if target_row is not None:
         vals = attack_list.phase_values(model)
         cur = target_row.get("cells", {}).get(attack_list.COL_PHASE)
+        # 未接触 → 連絡済 (funnel entry → contacted); None = leave phase as-is.
+        new_phase = (vals[attack_list.PHASE_IDX_CONTACTED]
+                     if (len(vals) > attack_list.PHASE_IDX_CONTACTED
+                         and cur == vals[attack_list.PHASE_IDX_UNTOUCHED])
+                     else None)
+        last_contact = _today_iso()
         try:
-            # e-4623: stamp 最終接触日 (= 送信日) on every send-record. The schema's
-            # date column was dead — no contact flow wrote it, so the row phase
-            # advanced while its sibling date stayed empty (監査シグナルが自動フロー
-            # から切れていた)。Ride the SAME set_cell + single write as the phase
-            # drive so 打診フェーズ と 最終接触日 が同時に確定する (片方だけの部分
-            # 書込を作らない)。列型は date なので日付部分のみ (_now_iso()[:10])。
-            table_doc.set_cell(model, target_row["id"],
-                               attack_list.COL_LAST_CONTACT, _now_iso()[:10],
-                               actor=_actor_str(), at=_now_iso())
-            # 未接触 → 連絡済 (funnel entry → contacted)
-            if (len(vals) > attack_list.PHASE_IDX_CONTACTED
-                    and cur == vals[attack_list.PHASE_IDX_UNTOUCHED]):
-                table_doc.set_cell(model, target_row["id"], attack_list.COL_PHASE,
-                                   vals[attack_list.PHASE_IDX_CONTACTED],
-                                   actor=_actor_str(), at=_now_iso())
-                driven_to = vals[attack_list.PHASE_IDX_CONTACTED]
-            _write_table_model(doc_id, title, _content, model)
+            # e-4623: stamp 最終接触日 (= 送信日) on every send-record + advance the
+            # phase together in one write. The schema's date column was dead (no
+            # flow wrote it), so the row phase advanced while its sibling date
+            # stayed empty. Shared skeleton keeps date+phase atomic (no partial write).
+            _stamp_attack_list_contact(model, doc_id, title, _content,
+                                       target_row["id"], last_contact, new_phase)
+            driven_to = new_phase
         except table_doc.TableDocError as exc:
             print(f"Error: 行の更新に失敗しました ({exc})。"
                   f"証跡は記録していません。", file=sys.stderr)
@@ -27247,11 +27276,16 @@ def cmd_acquisition_attack_list_send_record():
     save_project(data)
 
     if json_mode:
+        # e-4623 (PR #559 AX F1): disclose the stamped 最終接触日 so an AI can observe
+        # the date write from the result (not a silent state change), independent of
+        # whether the phase advanced.
         print(json.dumps({"doc_id": doc_id, "acc_id": acc_id, "comm_id": comm_id,
-                          "phase_driven_to": driven_to}, ensure_ascii=False))
+                          "phase_driven_to": driven_to,
+                          "last_contact": last_contact}, ensure_ascii=False))
     else:
         drive_note = f" / 行 → {driven_to}" if driven_to else ""
-        print(f"記録: {acc_id} outbound email 証跡 {comm_id}{drive_note}")
+        date_note = f" / 接触日 {last_contact}" if last_contact else ""
+        print(f"記録: {acc_id} outbound email 証跡 {comm_id}{drive_note}{date_note}")
 
 
 def cmd_acquisition_attack_list_awaiting_reply():
@@ -27400,20 +27434,16 @@ def cmd_acquisition_attack_list_reply_record():
         sys.exit(1)
 
     driven_to = None
+    last_contact = _today_iso()
+    new_phase = vals[attack_list.PHASE_IDX_REPLIED] if will_advance else None
     try:
-        # e-4623: stamp 最終接触日 (= 返信日) on every reply-record — ride the same
-        # set_cell + single write as the phase drive so 打診フェーズ と 最終接触日 が
-        # 同時に確定する (片方だけの部分書込を作らない)。証跡は行の書込が成功した
-        # 後にだけ save する (PR #553 の atomicity を維持)。列型は date。
-        table_doc.set_cell(model, target_row["id"],
-                           attack_list.COL_LAST_CONTACT, _now_iso()[:10],
-                           actor=_actor_str(), at=_now_iso())
-        if will_advance:
-            table_doc.set_cell(model, target_row["id"], attack_list.COL_PHASE,
-                               vals[attack_list.PHASE_IDX_REPLIED],
-                               actor=_actor_str(), at=_now_iso())
-            driven_to = vals[attack_list.PHASE_IDX_REPLIED]
-        _write_table_model(doc_id, title, _content, model)
+        # e-4623: stamp 最終接触日 (= 返信日) on every reply-record + advance the phase
+        # (when at 連絡済) together in one write via the shared skeleton — 打診フェーズ
+        # と 最終接触日 が同時に確定する (片方だけの部分書込を作らない)。証跡は行の
+        # 書込が成功した後にだけ save する (PR #553 の atomicity を維持)。
+        _stamp_attack_list_contact(model, doc_id, title, _content,
+                                   target_row["id"], last_contact, new_phase)
+        driven_to = new_phase
     except table_doc.TableDocError as exc:
         print(f"Error: 行の更新に失敗しました ({exc})。証跡は記録して"
               f"いません。", file=sys.stderr)
@@ -27431,12 +27461,16 @@ def cmd_acquisition_attack_list_reply_record():
             # explicit so an AI never reads a null phase as a failure: the phase
             # was intentionally left as-is because the row was not at 連絡済.
             "phase_guard_skipped": driven_to is None,
+            # e-4623 (PR #559 AX F1): disclose the stamped 最終接触日 (= 返信日) — the
+            # date write happens on every reply-record, independent of phase advance.
+            "last_contact": last_contact,
             "notified": notified}, ensure_ascii=False))
     else:
         drive_note = (f" / 行 → {driven_to}" if driven_to
                       else f" (phase 変更なし: 行は {cur})")
         note = "" if notified else " (通知は既出のためスキップ)"
-        print(f"返信記録: {acc_id} inbound 証跡 {comm_id}{drive_note}{note}")
+        print(f"返信記録: {acc_id} inbound 証跡 {comm_id}{drive_note} / 接触日 "
+              f"{last_contact}{note}")
 
 
 def cmd_acquisition_attack_list_promote():
