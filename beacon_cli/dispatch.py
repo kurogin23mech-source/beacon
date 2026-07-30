@@ -324,6 +324,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_init.add_argument("--objective")
     p_init.add_argument("--retro-day", dest="retro_day")
     p_init.add_argument("--storage", default="local")
+    # ms-133 e-4648: the profession "front door" — choose the occupation at init
+    # time (dev / sales / backoffice / any data-defined name). Previously only
+    # the undocumented BEACON_PROFESSION env selected it, so `beacon init
+    # --profession sales` (as the README advertised) errored. --plan prints the
+    # occupation's onboarding plan (WHAT to ask + vision role) as JSON and
+    # writes nothing, so the /beacon-init Skill can render the right questions.
+    p_init.add_argument("--profession", default="")
+    p_init.add_argument("--plan", action="store_true", dest="plan_only")
     # ms-63 / e-1441: project disclosure posture at init time. Default is
     # ``high`` per SPEC § 設計方針 2 — opt-in low only when the project is
     # explicitly open (= OSS, public docs).
@@ -1963,6 +1971,13 @@ def _handle_init(root: Path, args: argparse.Namespace) -> int:
         _print_init_help()
         return 0
 
+    # ms-133 e-4648: `--plan` is read-only — emit the onboarding plan for the
+    # chosen profession and exit without creating a project. The Skill uses this
+    # to know WHAT to ask before running the real init.
+    if getattr(args, "plan_only", False):
+        prof = getattr(args, "profession", "") or "dev"
+        return _run_commands_py(root, "onboarding_plan", {"BEACON_PROFESSION": prof})
+
     project_file = os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
     if Path(project_file).exists():
         print(".beacon/project.json already exists.")
@@ -2024,6 +2039,12 @@ def _handle_init(root: Path, args: argparse.Namespace) -> int:
         # (= forgot-to-configure → safe default).
         "BEACON_SENSITIVITY": getattr(args, "sensitivity", "high") or "high",
     }
+    # ms-133 e-4648: forward the chosen occupation. cmd_init reads
+    # BEACON_PROFESSION and defaults to "dev" when blank, so an omitted
+    # --profession keeps the development schema byte-for-byte (AC2: dev 不変).
+    profession = getattr(args, "profession", "") or ""
+    if profession:
+        env["BEACON_PROFESSION"] = profession
     rc = _run_commands_py(root, "init", env)
     if rc != 0:
         return rc

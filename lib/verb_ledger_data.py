@@ -267,6 +267,9 @@ VERB_LEDGER = {
     "org_delete": {"cls": "B", "secondary": ["C"], "note": "[post-memo] org 破壊的削除=store 保守/認可の機械(B)/owner-only 窓口(C)、milestone delete と同型"},
     "org_rehome": {"cls": "B", "secondary": [], "note": "[post-memo] project の org 所属リンク張替=認可/投影の機械操作(B)、disclose と同族"},
 
+    # --- profession onboarding (post-memo, ms-133 e-4648) ---
+    "onboarding_plan": {"cls": "Q", "secondary": [], "note": "[post-memo] 職種の onboarding 計画 (聞く項目 + vision 役割) を JSON で emit する read-only。`init --plan` 経由の内部 verb、書き込みなし"},
+
     # --- phase funnel config (post-memo, ms-116) ---
     "phase_add": {"cls": "B", "secondary": [], "note": "[post-memo] funnel(config)段追加=project.json 保守/store 編集(B)、entity 遷移でなく methodology"},
     "phase_list": {"cls": "Q", "secondary": [], "note": ""},

@@ -788,6 +788,22 @@ def _seed_application_map_box(objective: str) -> None:
         return
 
 
+def cmd_onboarding_plan():
+    """Emit the onboarding plan (WHAT to ask + the role of the objective/vision)
+    for BEACON_PROFESSION as JSON, then exit — writes nothing.
+
+    ms-133 e-4648 / e-4408: this is the descriptor-driven seam that lets the
+    /beacon-init and /beacon-vision Skills render the RIGHT questions per
+    occupation WITHOUT encoding `if profession == "sales"` in the Skill markdown
+    (the SPEC review's high#1). The Skill calls `beacon init --profession <p>
+    --plan`, reads this JSON, renders `ask[]`, and frames the vision deep-dive
+    with `vision_role`. Reached only via `init --plan`, so it needs no standalone
+    verb / README / help_json entry."""
+    profession = os.environ.get("BEACON_PROFESSION", "dev") or "dev"
+    plan = occupation.onboarding_plan(profession)
+    print(json.dumps(plan, ensure_ascii=False, indent=2))
+
+
 def cmd_init():
     name = os.environ.get("BEACON_NAME", "")
     objective = os.environ.get("BEACON_OBJECTIVE", "")
@@ -29122,6 +29138,9 @@ if __name__ == "__main__":
         "watch_clear": cmd_watch_clear,
         "watch_list": cmd_watch_list,
         "phase_list": cmd_phase_list,
+        # ms-133 e-4648 — onboarding plan emitter (reached via `init --plan`,
+        # internal: no standalone verb / README / help_json entry)
+        "onboarding_plan": cmd_onboarding_plan,
         # ms-116 — edit a running project's saved phase funnel
         "phase_add": cmd_phase_add,
         "phase_rename": cmd_phase_rename,
