@@ -28356,16 +28356,45 @@ def cmd_phase_list():
     opp_phases = sales_entities.opportunity_phases(data)
     prospect_phases = sales_entities.prospect_phases(data)  # ms-132 e-4502
     frame = sales_entities.opportunity_phase_frame(data)  # e-3582: 前進の macro-frame
+    # e-4405 (ms-129): a sales project with no custom funnel configured still runs
+    # on the built-in DEFAULT_* seeds — entity creation uses `account_phases(data)
+    # or DEFAULT_ACCOUNT_PHASES` (sales_entities:216/228/1103), so 商談準備 / リード
+    # etc. ARE in effect. Read data-only, this command showed nothing and printed
+    # "not a sales project", making a営業 user think profession detection broke and
+    # the effective defaults look "未設定". Show the SAME effective funnel entities
+    # use, flag it as the built-in default, and reserve the "not a sales project"
+    # line for genuinely non-sales projects.
+    profession = (data.get("profession") or "").strip().lower()
+    using_default = False
+    if profession == "sales":
+        if not acc_phases:
+            acc_phases = [dict(p) for p in sales_entities.DEFAULT_ACCOUNT_PHASES]
+            using_default = True
+        if not opp_phases:
+            opp_phases = [dict(p) for p in sales_entities.DEFAULT_OPPORTUNITY_PHASES]
+            using_default = True
+        if not prospect_phases:
+            prospect_phases = sales_entities.default_prospect_phase_defs()
+            using_default = True
     if json_mode:
         print(json.dumps({"account_phases": acc_phases,
                           "opportunity_phases": opp_phases,
                           "prospect_phases": prospect_phases,
-                          "opportunity_phase_frame": frame},
+                          "opportunity_phase_frame": frame,
+                          "using_builtin_default": using_default},
                          ensure_ascii=False, indent=2))
         return
     if not acc_phases and not opp_phases and not prospect_phases:
-        print("No phase funnel configured (not a sales project, or no phases set).")
+        # profession=sales fills the defaults above, so this is only reached by a
+        # non-sales project (or a sales project explicitly stripped of all phases).
+        if profession == "sales":
+            print("フェーズ funnel が未設定です（beacon phase add で追加できます）。")
+        else:
+            print("No phase funnel configured (not a sales project, or no phases set).")
         return
+    if using_default:
+        print("（組み込みデフォルトのフェーズを使用中 — beacon phase add / rename 等で"
+              "会社ごとに編集できます）\n")
     # e-3582: フェーズを読む前に「フェーズ = 次へ抜けさせるもの」の枠組みを刷り込む。
     if opp_phases:
         print(f"■ 前進の枠組み: {frame}\n")
