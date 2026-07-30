@@ -202,8 +202,11 @@ ALLOW_BASH_ONLY_DISPATCH: set[str] = {
     "reset",       # destructive admin op, bash-only
     "run",         # operation run record (member-aware, not in Python yet)
     "incident",    # incident open/close (operation-coupled, not in Python yet)
-    "sales",       # ms-106 fb4: sales quota/target verb, bash-only for now
-                   # (Windows/dispatch.py parity for the sales CLI = follow-up)
+    # ms-133 e-4642: `sales` and `org` were removed from this allowlist — both
+    # now have top-level Python parity (`"sales": _handle_sales` /
+    # `"org": _handle_org` in _HANDLERS, `sales)` / `org)` in bin/beacon's main
+    # case). Their entries here had gone stale; keeping them would have masked a
+    # real future regression if either lost parity. (SPEC AC5.)
     "migrate",     # ms-109 e-3695: `migrate target-labels` one-shot backfill,
                    # bash-only for now (dispatch.py parity = follow-up, same as
                    # sales — a rare migration verb, not on the hot Windows path)
@@ -220,10 +223,8 @@ ALLOW_BASH_ONLY_DISPATCH: set[str] = {
                    # bundle for an independent judge. bash-only for now;
                    # dispatch.py Windows parity = follow-up, same precedent as
                    # target — a dev/ops review verb, not on the hot Windows path.
-    "org",         # ms-118 e-4231: `org create/list/show` — team org (tenancy)
-                   # foundation. bash-only for now; dispatch.py Windows parity =
-                   # follow-up (e-4242), same precedent as target/review — a
-                   # back-office tenancy verb, not on the hot Windows path.
+    # (`org` removed here — see the ms-133 e-4642 note above; it gained Python
+    # top-level parity via `"org": _handle_org`.)
     # ms-73 e-1762/e-1763/e-1764 cleared the ms-55 coordination-signal
     # exempts (stop / resume / rollback / claim / stuck / morning) once
     # commit 3b5b64a (e-1735) landed their Python parity. Their entries
@@ -284,6 +285,74 @@ ALLOW_MISSING_FROM_README: set[str] = {
     "rollback",
     "stop global", "stop scoped", "stop status",
     "stuck check",
+}
+
+
+# ---------------------------------------------------------------------------
+# ms-133 e-4642: bash ↔ Python SUB-verb parity (noun + subcommand)
+# ---------------------------------------------------------------------------
+# The dispatch parity check (collect_dispatch_drift) compares only TOP-LEVEL
+# verbs. That left a whole class of drift invisible (2026-07-30 audit, report
+# doc JToylm5EStT4c6gK3DZR): a noun exists on both surfaces but a *sub-verb*
+# (e.g. `phase add`, `opportunity describe`) is a registered argparse subparser
+# choice only in bash, so Windows/pipx users hit `argparse invalid choice` on
+# the sub-verb even though `beacon phase --help` lists it on macOS.
+#
+# Scope by construction: only nouns whose Python handler uses argparse
+# ``add_subparsers`` can drift this way — argparse rejects an unknown choice.
+# A noun that takes a permissive positional (``note <text_or_sub>``,
+# ``sessions <list_arg>``) dispatches the sub-verb manually and accepts
+# anything, so it can't ``invalid choice``; python_sub_verbs() emits no choice
+# set for it and the comparison skips it. This keeps the check honest (no false
+# positives from manually-dispatched nouns).
+#
+# The two sets below SNAPSHOT the sub-verb drift as of e-4642's first deploy so
+# the checker reports only NEW drift. Shrinking them is the follow-up work:
+#   * profession-critical rows tagged (e-4643) are backfilled by that task;
+#   * cloud upload-initial / migrate-from-local -> e-4649 (install/cloud parity);
+#   * operation/trek/bus/channel/deploy/member/project/milestone/trigger rows are
+#     dev/ops verbs deliberately bash-only for now (方針3 — not on the hot
+#     Windows path), each removable when/if it grows Python parity.
+# Removing an entry after adding the matching Python subparser is the whole
+# point: the check then guards that verb's parity forever.
+
+# Sub-verbs present in bin/beacon's main-case routing but NOT registered as a
+# Python subparser choice (=> `argparse invalid choice` on Windows/pipx).
+ALLOW_SUBVERB_MISSING_FROM_PYTHON: set[str] = {
+    # -- profession-critical (Windows sales users): e-4643 backfills these --
+    "acquisition start", "acquisition done",
+    "opportunity describe", "opportunity desc",
+    "phase add", "phase rename", "phase move",
+    "phase remove", "phase delete", "phase rm",
+    # -- install / cloud parity: e-4649 --
+    "cloud upload-initial", "cloud migrate-from-local",
+    # -- dev/ops verbs, bash-only for now (方針3, not on the hot Windows path) --
+    "bus auto-execute",
+    "channel opt-in", "channel opt-out", "channel opt_in", "channel opt_out",
+    "channel status", "channel uninstall",
+    "claim view",
+    "deploy delete", "deploy rollback", "deploy void",
+    "member invitation", "member invite", "member join", "member whoami",
+    "milestone cancel", "milestone delete", "milestone depends",
+    "milestone occupations", "milestone release", "milestone rename",
+    "milestone wait",
+    "operation activate", "operation approve", "operation close",
+    "operation create", "operation list", "operation open", "operation revoke",
+    "operation show", "operation start", "operation status", "operation task",
+    "operation update",
+    "project cleanup", "project export", "project import", "project orphans",
+    "project rename",
+    "trek blanket-approve", "trek blanket-revoke", "trek block", "trek blockers",
+    "trek review-verdicts", "trek summary-sent", "trek task", "trek unblock",
+    "trigger tick",
+}
+
+# Sub-verbs registered as a Python subparser choice but absent from bin/beacon's
+# main-case routing. macOS/Linux users won't reach these via bash.
+ALLOW_SUBVERB_MISSING_FROM_BASH: set[str] = {
+    # `claim ls` is a Python-side alias of `claim list`; bash exposes
+    # `claim list`. Benign alias asymmetry, not a real gap.
+    "claim ls",
 }
 
 
@@ -740,6 +809,164 @@ def collect_flag_parity(
     }
 
 
+# ---------------------------------------------------------------------------
+# ms-133 e-4642: bash ↔ Python sub-verb parity extraction
+# ---------------------------------------------------------------------------
+
+def _noun_alias_map(parser) -> "dict[str, str]":
+    """Map every top-level noun spelling → its canonical noun.
+
+    ``build_parser`` registers alias nouns (``ms`` for ``milestone``, ``opp``
+    for ``opportunity``) as extra keys in the top ``_SubParsersAction.choices``
+    that point to the *same* parser object. We group by object identity and pick
+    the longest spelling as canonical (milestone>ms, opportunity>opp,
+    account>acc, …), so the bash and Python sides collapse to one key before we
+    diff sub-verbs — otherwise every aliased noun would double-count."""
+    top = _subparsers_action(parser)
+    if top is None:
+        return {}
+    groups: "dict[int, list[str]]" = {}
+    for name, p in top.choices.items():
+        groups.setdefault(id(p), []).append(name)
+    amap: "dict[str, str]" = {}
+    for names in groups.values():
+        canon = max(names, key=len)
+        for n in names:
+            amap[n] = canon
+    return amap
+
+
+def python_sub_verbs(
+    python_dispatch_path: Path = PYTHON_DISPATCH,
+    parser=None,
+) -> "dict[str, set[str]]":
+    """Map canonical noun → set of sub-verb argparse *choices* the Python
+    dispatcher enforces on that noun's nested subparser.
+
+    Only nouns whose handler uses ``add_subparsers`` appear. A noun that takes a
+    permissive positional (``note <text_or_sub>``, ``sessions <list_arg>``)
+    dispatches its sub-verb by hand and accepts any token, so it can't
+    ``argparse invalid choice`` — it contributes nothing here and the parity
+    comparison skips it. ``parser`` is the injection seam for tests; when None
+    the installed ``beacon_cli.dispatch`` parser is loaded."""
+    if parser is None:
+        parser = _load_dispatch_parser(python_dispatch_path)
+    amap = _noun_alias_map(parser)
+    top = _subparsers_action(parser)
+    out: "dict[str, set[str]]" = {}
+    if top is None:
+        return out
+    for noun, np in top.choices.items():
+        nested = _subparsers_action(np)
+        if nested is None:
+            continue
+        out.setdefault(amap.get(noun, noun), set()).update(nested.choices)
+    return out
+
+
+_BIN_NOUN_CASE_RE = re.compile(r"^    ([a-z][a-z0-9_|-]*)\)\s*$")
+_BIN_INNER_CASE_OPEN_RE = re.compile(r"case .*? in\s*$")
+_BIN_INNER_LABEL_RE = re.compile(r"^\s+([a-z][a-z0-9_|-]*)\)(?:\s|$)")
+_BIN_BRANCH_END_RE = re.compile(r"^        ;;\s*$")
+_BIN_ESAC_RE = re.compile(r"^\s+esac\s*$")
+
+
+def parse_bin_sub_verbs(
+    bin_path: Path = BIN_BEACON,
+    alias_map: "dict[str, str] | None" = None,
+) -> "dict[str, set[str]]":
+    """Map canonical noun → set of sub-verb case labels bin/beacon's MAIN switch
+    routes for that noun.
+
+    Each top-level noun branch may open an inner ``case "${2:-}" in`` that lists
+    the sub-verbs. We walk the branch tracking ``case``/``esac`` depth so a
+    deeper nested case (e.g. acquisition's ``attack-list`` flows) doesn't leak
+    its labels, and collect only the FIRST inner level. Union labels
+    (``remove|delete|rm``) split into separate sub-verbs; the terminal ``*``
+    wildcard is skipped. ``alias_map`` (from ``_noun_alias_map``) canonicalises
+    aliased noun branches (``milestone|ms``) so both sides key alike."""
+    if alias_map is None:
+        alias_map = {}
+    lines = bin_path.read_text(encoding="utf-8").splitlines()
+    out: "dict[str, set[str]]" = {}
+    in_main = False
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        if line == 'case "${1:-}" in':
+            in_main = True
+            i += 1
+            continue
+        if in_main and line == "esac":
+            in_main = False
+            i += 1
+            continue
+        if in_main:
+            m = _BIN_NOUN_CASE_RE.match(line)
+            if m:
+                nouns = [x for x in m.group(1).split("|") if not x.startswith("-")]
+                j = i + 1
+                depth = 0
+                while j < n:
+                    lj = lines[j]
+                    if depth == 0 and _BIN_BRANCH_END_RE.match(lj):
+                        break
+                    if _BIN_INNER_CASE_OPEN_RE.search(lj):
+                        depth += 1
+                        j += 1
+                        continue
+                    if _BIN_ESAC_RE.match(lj):
+                        depth -= 1
+                        j += 1
+                        continue
+                    if depth == 1:
+                        lm = _BIN_INNER_LABEL_RE.match(lj)
+                        if lm:
+                            for sub in lm.group(1).split("|"):
+                                if sub == "*":
+                                    continue
+                                for nn in nouns:
+                                    canon = alias_map.get(nn, nn)
+                                    out.setdefault(canon, set()).add(sub)
+                    j += 1
+                i = j
+                continue
+        i += 1
+    return out
+
+
+def collect_subverb_drift(
+    bin_path: Path = BIN_BEACON,
+    python_dispatch_path: Path = PYTHON_DISPATCH,
+) -> dict:
+    """Compare bash inner-case sub-verbs vs Python nested-subparser choices.
+
+    Only nouns that are subparser-backed on the Python side (i.e. can
+    ``invalid choice``) AND present in the bash main switch are compared.
+    Returns the missing sets minus the ALLOW_SUBVERB_* snapshots."""
+    parser = _load_dispatch_parser(python_dispatch_path)
+    amap = _noun_alias_map(parser)
+    py = python_sub_verbs(python_dispatch_path, parser=parser)
+    bash = parse_bin_sub_verbs(bin_path, alias_map=amap)
+
+    missing_from_python: set[str] = set()
+    missing_from_bash: set[str] = set()
+    for noun in set(py) & set(bash):
+        for sub in bash[noun] - py[noun]:
+            missing_from_python.add(f"{noun} {sub}")
+        for sub in py[noun] - bash[noun]:
+            missing_from_bash.add(f"{noun} {sub}")
+
+    missing_from_python -= ALLOW_SUBVERB_MISSING_FROM_PYTHON
+    missing_from_bash -= ALLOW_SUBVERB_MISSING_FROM_BASH
+    return {
+        "ok": not (missing_from_python or missing_from_bash),
+        "missing_from_python_subverbs": sorted(missing_from_python),
+        "missing_from_bash_subverbs": sorted(missing_from_bash),
+    }
+
+
 def collect_drift(
     bin_path: Path = BIN_BEACON,
     commands_path: Path = COMMANDS_PY,
@@ -783,6 +1010,9 @@ def collect_drift(
     # ms-126 e-4223: bash ↔ Python flag parity (curated priority contract).
     flag_parity = collect_flag_parity(bin_path, python_dispatch_path)
 
+    # ms-133 e-4642: bash ↔ Python sub-verb parity (noun + subcommand).
+    subverb_drift = collect_subverb_drift(bin_path, python_dispatch_path)
+
     report = {
         "ok": not (
             bin_missing
@@ -790,6 +1020,7 @@ def collect_drift(
             or readme_missing
             or not dispatch_drift["ok"]
             or not flag_parity["ok"]
+            or not subverb_drift["ok"]
         ),
         "bin_verbs": sorted(bin_verbs),
         "json_verbs": sorted(json_verbs),
@@ -806,6 +1037,10 @@ def collect_drift(
         "missing_from_python_flags": flag_parity["missing_from_python_flags"],
         "missing_from_bash_flags": flag_parity["missing_from_bash_flags"],
         "missing_bash_functions": flag_parity["missing_bash_functions"],
+        # ms-133 e-4642 surface (bash inner-case sub-verbs vs Python subparser
+        # choices — the noun+subcommand parity that top-level checks miss):
+        "missing_from_python_subverbs": subverb_drift["missing_from_python_subverbs"],
+        "missing_from_bash_subverbs": subverb_drift["missing_from_bash_subverbs"],
     }
     return report
 
@@ -866,6 +1101,21 @@ def _format_text(report: dict) -> str:
         lines.append("    -> the whole handler is absent (renamed/removed), not just a flag.")
         lines.append("       Add/rename the cmd_<verb>() function in bin/beacon, OR fix the verb")
         lines.append("       key in REQUIRED_FLAG_PARITY if it no longer matches a real function.")
+    if report.get("missing_from_python_subverbs"):
+        lines.append("  - sub-verb in bin/beacon routing but NOT a Python subparser choice:")
+        for v in report["missing_from_python_subverbs"]:
+            lines.append(f"      beacon {v}")
+        lines.append("    -> Windows/pipx users hit `argparse invalid choice` on the sub-verb.")
+        lines.append("    -> register it via `<noun>_sub.add_parser('<sub>', ...)` in")
+        lines.append("       beacon_cli/dispatch.py, OR add it to ALLOW_SUBVERB_MISSING_FROM_PYTHON")
+        lines.append("       if the sub-verb is intentionally bash-only for now.")
+    if report.get("missing_from_bash_subverbs"):
+        lines.append("  - sub-verb registered as a Python subparser choice but missing from bin/beacon:")
+        for v in report["missing_from_bash_subverbs"]:
+            lines.append(f"      beacon {v}")
+        lines.append("    -> macOS/Linux (bash) users can't reach it.")
+        lines.append("    -> add the inner-case label in bin/beacon's main switch, OR add it to")
+        lines.append("       ALLOW_SUBVERB_MISSING_FROM_BASH if it's an intentional Python-only alias.")
     lines.append("")
     lines.append("Allowlists for intentional asymmetries live in scripts/check-cli-help-drift.py.")
     lines.append("This guard is part of ms-10 e-722 (doc & skill auto-sync) + ms-44 e-1171 (dispatch parity).")
