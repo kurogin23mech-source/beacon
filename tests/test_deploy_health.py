@@ -30,23 +30,52 @@ def test_matching_rev_is_ok():
 
 
 def test_short_and_full_rev_match():
-    # prod reports short, main is full-length — same commit, must be OK.
+    # prod reports short, the marker is full-length — same commit, must be OK.
     assert dh._rev_matches("abc1234", "abc1234def5678901234")
     assert dh._rev_matches("abc1234def5678901234", "abc1234")
 
 
+def test_no_marker_is_no_target_not_alert():
+    # No deploy marker yet → can't judge lag on rev; must not alert.
+    r = dh.evaluate_deploy_health(True, "abc1234", "", 10_000)
+    assert r["status"] == dh.NO_TARGET
+    assert r["status"] not in dh.ALERT_STATUSES
+
+
 def test_fresh_mismatch_is_deploying_not_lagging():
-    # main advanced 1 min ago; the pull timer hasn't caught up yet → grace.
+    # marker moved 1 min ago; prod hasn't caught up yet → grace window.
     r = dh.evaluate_deploy_health(True, "old1234", "new5678", 60, grace_seconds=900)
     assert r["status"] == dh.DEPLOYING
     assert r["status"] not in dh.ALERT_STATUSES
 
 
-def test_stale_mismatch_is_lagging():
-    # main advanced 30 min ago and prod still hasn't caught up → stuck deploy.
-    r = dh.evaluate_deploy_health(True, "old1234", "new5678", 1800, grace_seconds=900)
+def test_stale_mismatch_behind_is_lagging():
+    # marker set 30 min ago and prod is *behind* it → the deploy never landed.
+    r = dh.evaluate_deploy_health(
+        True, "old1234", "new5678", 1800, grace_seconds=900,
+        prod_ancestry=dh.ANCESTRY_BEHIND)
     assert r["status"] == dh.LAGGING
     assert r["status"] in dh.ALERT_STATUSES
+
+
+def test_stale_mismatch_ahead_is_not_alert():
+    # prod is *newer* than the marker (deploy not recorded) → drift, not stuck.
+    r = dh.evaluate_deploy_health(
+        True, "new5678", "old1234", 1800, grace_seconds=900,
+        prod_ancestry=dh.ANCESTRY_AHEAD)
+    assert r["status"] == dh.AHEAD
+    assert r["status"] not in dh.ALERT_STATUSES
+
+
+def test_unknown_direction_defaults_to_lagging():
+    # direction undetermined + past grace → conservative alert (don't miss a
+    # real stuck deploy). Also the default when the arg is omitted.
+    r = dh.evaluate_deploy_health(
+        True, "old1234", "new5678", 1800, grace_seconds=900,
+        prod_ancestry=dh.ANCESTRY_UNKNOWN)
+    assert r["status"] == dh.LAGGING
+    assert dh.evaluate_deploy_health(
+        True, "old1234", "new5678", 1800, grace_seconds=900)["status"] == dh.LAGGING
 
 
 def test_unknown_age_treated_as_past_grace():

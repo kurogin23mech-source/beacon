@@ -3,14 +3,25 @@
 Pure logic for "本番が壊れても気付ける" (= notice when production is broken):
 
 - ``evaluate_deploy_health`` compares production's live git revision (from
-  ``/api/version``) against ``origin/main`` HEAD and decides whether prod is
-  ``ok`` / ``deploying`` (a fresh mismatch still inside the grace window) /
-  ``lagging`` (main advanced long ago but prod never caught up = a stuck deploy,
-  the 2026-07-10 incident) / ``unreachable``.
+  ``/api/version``) against the **deploy marker** — the ``deployed-prod`` git
+  tag, moved by ``beacon deploy record`` to the rev we intended to deploy — and
+  decides whether prod is ``ok`` / ``deploying`` (a fresh mismatch still inside
+  the grace window) / ``lagging`` (the recorded deploy never landed = a stuck
+  deploy, the 2026-07-10 incident class) / ``ahead`` (prod is *newer* than the
+  marker = a deploy happened but wasn't recorded — drift, not an incident) /
+  ``no_target`` (no marker yet) / ``unreachable``.
 - ``resolve_alert_recipient`` picks WHO the beacon-bus DM alert goes to: the
   session that deployed the offending revision when it can be identified,
   otherwise a user-scoped DM to the project owner (which surfaces at the
   owner's next session-start catch-up even after days away — ms-54 e-2974).
+
+Why the marker and not ``origin/main`` (the original basis)? The VPS pull-timer
+that made prod auto-track main was disabled on 2026-07-28; prod now advances
+only on a manual deploy. So "prod behind main HEAD" became the *normal* state
+(main marches ahead of a deliberately-frozen prod) and made the monitor red on
+every tick. The marker restores a truth source that means "what prod should be
+serving" independent of whether auto-deploy is on — and it lives in git, so the
+GitHub Actions monitor reads it token-free.
 
 These are kept side-effect free so both the server alert endpoint and the CLI
 can share them and they can be unit-tested without a live prod / bus. The
@@ -32,54 +43,93 @@ OK = "ok"
 DEPLOYING = "deploying"
 LAGGING = "lagging"
 UNREACHABLE = "unreachable"
+# prod is a *descendant* of the marker: a deploy landed but `beacon deploy
+# record` wasn't run, so the marker is stale-behind. NOT an incident — a soft
+# "please record it" nudge (green). Distinguishing this from LAGGING is the
+# whole reason we take a direction (ancestor/descendant), not just equality.
+AHEAD = "ahead"
+# No deploy marker exists yet (fresh repo / never recorded a prod deploy). Can't
+# tell stuck from healthy on rev, so stay quiet on lag — only unreachable fires.
+NO_TARGET = "no_target"
 
 # statuses that warrant an alert
 ALERT_STATUSES = frozenset({LAGGING, UNREACHABLE})
+
+# git-ancestry of prod vs the marker (a 3-value string, NOT Optional[bool], so
+# "unknown" can't be misread as a falsy "not behind" — AX review 2026-07-30).
+ANCESTRY_BEHIND = "behind"      # prod is an ancestor of the marker  → stuck
+ANCESTRY_AHEAD = "ahead"        # prod is a descendant of the marker → unrecorded
+ANCESTRY_UNKNOWN = "unknown"    # direction undetermined → treated as behind
 
 
 def evaluate_deploy_health(
     reachable: bool,
     prod_rev: str,
-    main_rev: str,
-    main_head_age_seconds: Optional[float],
+    target_rev: str,
+    target_age_seconds: Optional[float],
     grace_seconds: float = 900.0,
+    prod_ancestry: str = ANCESTRY_UNKNOWN,
 ) -> dict:
-    """Decide whether production is healthy relative to ``origin/main``.
+    """Decide whether production is healthy relative to the deploy marker.
 
     Args:
       reachable: did ``/api/version`` respond at all.
       prod_rev: git revision production reports serving (``/api/version`` git_rev).
-      main_rev: current ``origin/main`` HEAD revision.
-      main_head_age_seconds: how long ago the main HEAD commit was authored;
-        ``None`` when unknown (treated as past the grace window).
+      target_rev: the rev prod *should* be serving — the ``deployed-prod`` marker
+        (empty string when no marker exists yet).
+      target_age_seconds: how long ago the marker was set (its tag date); ``None``
+        when unknown (treated as past the grace window).
       grace_seconds: how long a mismatch is tolerated as "a deploy in flight"
-        before it's called a stuck deploy. Default 15 min (> the 2 min pull
-        timer + build/health settle).
+        before it's called a stuck deploy. Default 15 min (> the pull/restart +
+        health settle).
+      prod_ancestry: git ancestry of prod vs the marker, one of
+        ``ANCESTRY_BEHIND`` (prod is an ancestor of the marker = stuck),
+        ``ANCESTRY_AHEAD`` (prod is a descendant = unrecorded deploy), or
+        ``ANCESTRY_UNKNOWN`` (direction couldn't be determined — treated
+        conservatively as behind so a real stuck deploy is never missed). A
+        3-value string (not ``Optional[bool]``) so "unknown" can't be misread as
+        a falsy "not behind".
 
-    Returns a dict ``{"status": ..., "prod_rev", "main_rev", ...}``. Only
+    Returns a dict ``{"status": ..., "prod_rev", "target_rev", ...}``. Only
     ``LAGGING`` / ``UNREACHABLE`` should trigger an alert (see ``ALERT_STATUSES``).
     """
     if not reachable:
-        return {"status": UNREACHABLE, "prod_rev": prod_rev, "main_rev": main_rev}
+        return {"status": UNREACHABLE, "prod_rev": prod_rev, "target_rev": target_rev}
 
-    # Compare on short-rev prefixes so a 40-char main HEAD matches prod's
+    if not (target_rev or "").strip():
+        # No marker to compare against — a stuck deploy is indistinguishable from
+        # a healthy one on rev alone, so don't cry wolf. (unreachable still fires
+        # above; that needs no marker.)
+        return {"status": NO_TARGET, "prod_rev": prod_rev, "target_rev": target_rev}
+
+    # Compare on short-rev prefixes so a 40-char marker matches prod's
     # `git rev-parse --short` output (or vice versa).
-    if _rev_matches(prod_rev, main_rev):
-        return {"status": OK, "prod_rev": prod_rev, "main_rev": main_rev}
+    if _rev_matches(prod_rev, target_rev):
+        return {"status": OK, "prod_rev": prod_rev, "target_rev": target_rev}
 
     # A mismatch inside the grace window is a normal in-flight deploy, not a
-    # stuck one — don't cry wolf while the pull timer is still catching up.
+    # stuck one — don't cry wolf while the restart/health check is still settling.
     within_grace = (
-        main_head_age_seconds is not None
-        and main_head_age_seconds < grace_seconds
+        target_age_seconds is not None
+        and target_age_seconds < grace_seconds
     )
-    status = DEPLOYING if within_grace else LAGGING
+    if within_grace:
+        status = DEPLOYING
+    elif prod_ancestry == ANCESTRY_AHEAD:
+        # prod is newer than the marker → a deploy happened without recording it.
+        # Not stuck; surface as a soft nudge so the marker gets caught up.
+        status = AHEAD
+    else:
+        # prod is behind the marker (ANCESTRY_BEHIND) or the direction is unknown,
+        # past the grace window → the deploy we recorded never landed = stuck.
+        status = LAGGING
     return {
         "status": status,
         "prod_rev": prod_rev,
-        "main_rev": main_rev,
-        "main_head_age_seconds": main_head_age_seconds,
+        "target_rev": target_rev,
+        "target_age_seconds": target_age_seconds,
         "grace_seconds": grace_seconds,
+        "prod_ancestry": prod_ancestry,
     }
 
 
