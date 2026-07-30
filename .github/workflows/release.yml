@@ -61,6 +61,15 @@ jobs:
         with:
           python-version: '3.11'
 
+      # ms-133: block the release if main carries any strict drift. lint-docs.yml
+      # runs these on PR + push, but a push-run can't un-push and a PR-run only
+      # blocks when it's a required check — so drift can reach main. This is the
+      # SHIP gate: a release with bash↔Python CLI drift (Windows `invalid choice`)
+      # never leaves the building. Same script lint-docs.yml uses, so the two
+      # gates can't diverge.
+      - name: Strict drift guards (release gate)
+        run: bash scripts/ci-strict-drift-guards.sh
+
       - name: Configure git identity
         run: |
           git config user.name  "beacon-release-bot"

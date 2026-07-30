@@ -39,17 +39,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: CLI help drift
-        run: python3 scripts/check-cli-help-drift.py --strict
-
-      - name: server/ ↔ lib/ name collision (ms-64 e-1618)
-        # 2026-06-13 本番障害の再発防止: app.py の sys.path.insert で lib/ が
-        # import path 先頭に入るため、server/*.py に lib/ と同名のファイルを
-        # 作ると shadow されて壊れる。pre-commit と CI で機械的に block。
-        run: python3 scripts/check-server-lib-collision.py --strict
-
-      - name: INSTALL.md static validation
-        run: python3 scripts/check-install-md.py --strict
+      # ms-133: the strict, release-blocking drift guards live in one shared
+      # script so this PR gate and the release.yml SHIP gate can't diverge (a
+      # meta-drift). It runs: CLI help/dispatch parity (Windows invalid-choice),
+      # server/↔lib/ name collision (2026-06-13 本番障害の再発防止 — app.py の
+      # sys.path.insert で lib/ が import 先頭に入り server/*.py の同名 shadow が
+      # 壊す), and INSTALL.md static validation. Each exits non-zero on drift.
+      - name: Strict drift guards
+        run: bash scripts/ci-strict-drift-guards.sh
 
       - name: Skill drift (sanity — no installed skills on CI)
         # CI has no ~/.claude/skills/, so we expect "not installed" findings.
