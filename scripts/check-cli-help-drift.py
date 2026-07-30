@@ -324,8 +324,9 @@ ALLOW_SUBVERB_MISSING_FROM_PYTHON: set[str] = {
     #    phase add/rename/move/remove/delete/rm). They now have Python subparser
     #    parity, so the checker actively GUARDS them: if a future change drops
     #    the dispatch subparser, the drift re-appears here as a failure.
-    # -- install / cloud parity: e-4649 --
-    "cloud upload-initial", "cloud migrate-from-local",
+    # (cloud upload-initial / migrate-from-local were REMOVED here — e-4649
+    #  backfilled them into the Python dispatcher, so the checker now guards
+    #  their parity.)
     # -- dev/ops verbs, bash-only for now (方針3, not on the hot Windows path) --
     "bus auto-execute",
     "channel opt-in", "channel opt-out", "channel opt_in", "channel opt_out",

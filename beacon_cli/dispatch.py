@@ -1838,6 +1838,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_cloud_open.add_argument("project_id", nargs="?", default="")
     p_cloud_open.add_argument("--no-browser", action="store_true",
                               help="Don't auto-launch the browser/desktop UI")
+    # ms-133 e-4649: install/cloud parity — these were bash-only, so a
+    # Windows/pipx user could not do the one-shot local→cloud migration
+    # (upload-initial) or retire an orphan local project.json after the cloud
+    # cut-over (migrate-from-local). Both route to the SAME engine the bash
+    # dispatcher uses (cloud_push / cloud_migrate_from_local).
+    p_cloud_ui = cloud_sub.add_parser("upload-initial", add_help=False)
+    p_cloud_ui.add_argument("--force", "-f", action="store_true",
+                            help="re-upload even if a cloud copy already exists")
+    p_cloud_mfl = cloud_sub.add_parser("migrate-from-local", add_help=False)
+    p_cloud_mfl.add_argument("--confirm", default="",
+                             help="cloud project_id (exact match required)")
+    # bash accepts --force-after-review as an alias of --force here.
+    p_cloud_mfl.add_argument("--force-after-review", "--force",
+                             dest="force", action="store_true",
+                             help="proceed after reviewing the pre-flight report")
 
     # ---- pr show / add / close / approve / reject / create / request-review / request-changes / review / merge ----
     p_pr = sub.add_parser("pr", help="Pull-request operations", add_help=False)
@@ -4179,6 +4194,28 @@ def _handle_cloud(root: Path, args: argparse.Namespace) -> int:
             return 1
         return _run_commands_py(
             root, "cloud_join", {"BEACON_CLOUD_PROJECT_ID": args.project_id}
+        )
+    if cmd == "upload-initial":
+        # ms-133 e-4649: one-shot local→cloud migration, bash parity. Mirrors
+        # bin/beacon's `upload-initial` (BEACON_FORCE → cloud_push).
+        return _run_commands_py(
+            root, "cloud_push",
+            {"BEACON_FORCE": "1" if getattr(args, "force", False) else ""},
+        )
+    if cmd == "migrate-from-local":
+        # ms-133 e-4649: retire an orphan local project.json after the cloud
+        # cut-over, bash parity. Two-factor: --confirm <project_id> is required
+        # (mirrors bin/beacon + the `cloud off` silent-invocation guard).
+        if not args.confirm:
+            _eprint(
+                "Usage: beacon cloud migrate-from-local --confirm <project_id> "
+                "[--force-after-review]"
+            )
+            return 1
+        return _run_commands_py(
+            root, "cloud_migrate_from_local",
+            {"BEACON_CONFIRM": args.confirm,
+             "BEACON_FORCE": "1" if getattr(args, "force", False) else ""},
         )
     if cmd == "off":
         # e-1861 (ms-61): "cloud off" is sandbox / verification-only. Beacon
