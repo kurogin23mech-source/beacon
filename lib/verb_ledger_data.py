@@ -56,6 +56,7 @@ VERB_LEDGER = {
     "acquisition_attack_list_send_record": {"cls": "R", "secondary": [], "note": "[post-memo/ms-132] 承認済バッチ内の送信記録=証跡+行phase駆動(R、authorized必須)"},
     "acquisition_attack_list_awaiting_reply": {"cls": "Q", "secondary": [], "note": "[post-memo/ms-132] 返信待ち(連絡済)の宛先 read-only 一覧=reply-watch の worklist(Q)"},
     "acquisition_attack_list_reply_record": {"cls": "R", "secondary": ["B"], "note": "[post-memo/ms-132] 検知した返信を記録=inbound証跡+行 連絡済→返信あり+通知(R、検知のみ自動返信なし)"},
+    "acquisition_attack_list_promote": {"cls": "R", "secondary": [], "note": "[post-memo/ms-132] 返信あり/アポの行を商談(Opportunity)へ引き上げ+Account phase 未接触→リード連動(R)"},
 
     # --- activity ---
     "activity_done": {"cls": "R", "secondary": [], "note": ""},
