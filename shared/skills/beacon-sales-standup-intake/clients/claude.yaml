@@ -1,0 +1,5 @@
+triggers:
+  - "/beacon-sales-standup-intake"
+  - "日次取込"
+  - "今日のやり取りを取り込み"
+  - "standup 取込"

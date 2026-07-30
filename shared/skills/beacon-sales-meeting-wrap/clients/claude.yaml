@@ -1,0 +1,5 @@
+triggers:
+  - "/beacon-sales-meeting-wrap"
+  - "面談の振り返り"
+  - "面談終了ワークフロー"
+  - "議事録を取り込み"

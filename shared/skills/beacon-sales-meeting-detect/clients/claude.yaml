@@ -1,0 +1,5 @@
+triggers:
+  - "/beacon-sales-meeting-detect"
+  - "面談の終了チェック"
+  - "終了した面談"
+  - "ミーティング終了検知"
