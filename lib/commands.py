@@ -26655,10 +26655,13 @@ def cmd_acquisition_add():
 
 def cmd_acquisition_list():
     import json as _json
-    import sales_entities
     data = load_project()
-    # e-4507 follow-up (#3): 打ち切った (cancelled) 施策は active view から外す。
-    acqs = sales_entities.active_acquisitions(data)
+    # e-4507 follow-up (独立 AX レビュー #558): a `list` command is an inventory of
+    # record — show ALL acquisitions including 打ち切った (cancelled) ones (with their
+    # cancelled status visible), matching the sibling `beacon account list`. Hiding
+    # tombstoned rows here would be a silent omission (an AI can't see/discover a
+    # 打ち切った施策). The curated Web board is the place that hides terminal items.
+    acqs = data.get("acquisitions", [])
     if os.environ.get("BEACON_JSON") == "1":
         print(_json.dumps(acqs, ensure_ascii=False))
         return

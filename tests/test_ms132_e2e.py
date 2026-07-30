@@ -166,13 +166,15 @@ def test_ack_sentinel_is_single_source_across_bash_and_python():
     assert m.group(1) == commands._ACKNOWLEDGED_REASON
 
 
-def test_acquisition_list_excludes_cancelled(proj, monkeypatch, capsys):
-    # #3: a tombstoned (打ち切った) 施策 drops out of the active list; it stays
-    # findable by id for audit.
+def test_acquisition_list_is_an_inventory_shows_cancelled(proj, monkeypatch, capsys):
+    # 独立 AX レビュー #558: a `list` command is an inventory of record — it shows
+    # ALL acquisitions including 打ち切った (cancelled) ones (status visible),
+    # matching the sibling `beacon account list`. Hiding tombstoned rows here would
+    # be a silent omission (an AI couldn't see/discover the 打ち切った施策).
     _run(monkeypatch, commands.cmd_acquisition_add, capsys, BEACON_ACQ_TITLE="獲得B")
     _run(monkeypatch, commands.cmd_acquisition_delete, capsys,
          BEACON_ACQ_ID="acq-1", BEACON_ACKNOWLEDGE="1")
     listed = _run(monkeypatch, commands.cmd_acquisition_list, capsys)
-    ids = {a["id"] for a in listed}
-    assert "acq-1" not in ids and "acq-2" in ids       # cancelled dropped, active kept
-    assert se.find_acquisition(_read(proj), "acq-1")["status"] == "cancelled"  # audit
+    by_id = {a["id"]: a for a in listed}
+    assert "acq-1" in by_id and "acq-2" in by_id        # cancelled AND active both listed
+    assert by_id["acq-1"]["status"] == "cancelled"      # cancelled status is visible

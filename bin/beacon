@@ -1536,9 +1536,12 @@ cmd_acquisition_delete() {
         exit 1
     fi
     _require_audit_reason "acquisition delete" "$reason" "$acknowledge"
-    # e-4507 follow-up (#1 DRY): don't pre-substitute the sentinel here — pass the
-    # acknowledge flag and let commands.py stamp its single _ACKNOWLEDGED_REASON.
-    BEACON_ACQ_ID="$acq_id" BEACON_CANCEL_REASON="$reason" BEACON_ACKNOWLEDGE="$acknowledge" \
+    # Pre-substitute the acknowledged sentinel here, exactly like the sibling
+    # destructive verbs (account/opportunity delete, communication cancel) — one
+    # audit-gate pattern across all of bin/beacon (保守性レビュー #558 M4). The
+    # sentinel value is pinned equal to commands._ACKNOWLEDGED_REASON by a test.
+    [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
+    BEACON_ACQ_ID="$acq_id" BEACON_CANCEL_REASON="$reason" \
         python3 "$COMMANDS_PY" acquisition_delete
 }
 

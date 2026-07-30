@@ -3315,6 +3315,9 @@ let state = {
   openOppId: null,         // ms-106 fb1: 商談モーダルで開いている opp-id (カンバン click)
   hiddenPhases: new Set(), // ms-106 fb2: 商談フィルタで隠している phase (dev の hiddenStatuses と同型)
   hiddenAccountPhases: new Set(), // ms-115 e-3789: Account タブで隠している顧客フェーズ (未接触/リード/…)
+  hiddenAcqStatuses: new Set(),   // ms-132 e-4562: Acquisition タブで隠している施策ステータス (todo/in_progress/done)
+  openAttackLists: new Set(),     // ms-132 e-4562: 表を展開しているアタックリストの doc-id
+  attackListContent: {},          // ms-132 e-4562: attack-list 本文キャッシュ (doc-id → content 文字列)
   oppFilterInit: false,    // ms-106 fb2: 初回 render で terminal phase を default 非表示に seed したか
   oppAssignee: '',         // ms-106 fb3: 担当ユーザーでの絞り込み ('' = 全員)
   salesMembers: null,      // ms-106 fb7: /members payload (project payload に無いので別取得)
@@ -4607,13 +4610,14 @@ function renderOpportunitiesSection() {
 function renderAcquisitionsSection() {
   const p = state.project;
   const all = p.acquisitions || [];
-  // 打ち切った (cancelled) 施策は既定の active view から外す (CLI の
-  // active_acquisitions と同じ「取消済は active work でない」規約)。
+  // 打ち切った (cancelled) 施策は curated なボードから外す — 進行中の作業ではないため。
+  // (opportunity board の _oppVisible が terminal を隠すのと同じ規約。CLI の
+  // `acquisition list` は inventory なので全件見せる、という surface 差は意図的。)
+  // NOTE: 'cancelled' は work_base.CANCELLED_STATUS のリテラル鏡像 (_oppVisible と同値)。
   const acqs = all.filter(a => a.status !== 'cancelled');
   if (!acqs.length) {
     return `<section class="sales-board fade-in"><div class="sales-empty">顧客獲得ターゲット (施策) がありません。<code>beacon acquisition add "&lt;施策名&gt;"</code> で追加できます。</div></section>`;
   }
-  state.hiddenAcqStatuses = state.hiddenAcqStatuses || new Set();
   const statuses = ['todo', 'in_progress', 'done'];
   const labelOf = { todo: '未着手', in_progress: '進行中', done: '完了' };
   const allOn = state.hiddenAcqStatuses.size === 0;
@@ -4656,7 +4660,7 @@ function _renderAcqCard(a) {
 // judged from the loaded content — not the list metadata's `format` field — so it
 // is robust across storage backends.
 function _acqAttackLists(acqId) {
-  const cache = state.attackListContent || {};
+  const cache = state.attackListContent;
   const out = [];
   for (const d of (state.documents || [])) {
     if (d.target !== acqId) continue;
@@ -4665,6 +4669,8 @@ function _acqAttackLists(acqId) {
     if (!docFormatIsTable(content)) continue;
     const model = parseTableDocPayload(content);
     if (!model || !Array.isArray(model.columns)) continue;
+    // 'phase' は attack-list スキーマの列キー (Python: attack_list.COL_PHASE) の鏡像。
+    // 変える際は両サイドを合わせること。ここが attack-list とその他 table-doc の識別点。
     if (!model.columns.some(c => c.key === 'phase')) continue;  // attack-list marker
     out.push({ doc_id: d.doc_id, title: d.title || d.doc_id, content, model });
   }
@@ -4691,7 +4697,7 @@ function _renderAttackList(l) {
     const pct = Math.round(c / total * 100);
     return `<span class="acq-phase-seg p${i % 6}" style="width:${pct}%" title="${esc(ph)}: ${c}"></span>`;
   }).join('')}</div>` : '';
-  const expanded = (state.openAttackLists || new Set()).has(l.doc_id);
+  const expanded = state.openAttackLists.has(l.doc_id);
   const table = expanded ? `<div class="acq-list-table">${renderTableDocHtml(l.content)}</div>` : '';
   return `<div class="acq-list">
       <div class="acq-list-head" data-action="toggle-acq-list" data-doc-id="${esc(l.doc_id)}">
@@ -5458,10 +5464,11 @@ const dataSource = {
     }
   },
   loadDocumentContent: async (docId) => { state.documentContent = await api(`/api/projects/${state.projectId}/documents/${docId}`); },
-  // ms-132 e-4562: fetch a document's body by id and RETURN it (does not touch
-  // the single-slot state.documentContent). Used by the read-only Acquisition
-  // view to pre-warm attack-list (table-doc) contents for phase-progress display.
-  loadDocContentById: async (docId) => {
+  // ms-132 e-4562: GET a document's body by id and RETURN it — the `get` prefix
+  // (vs the `load*` methods that mutate state) signals this is a pure fetch that
+  // does NOT touch the single-slot state.documentContent. Used by the read-only
+  // Acquisition view to pre-warm attack-list (table-doc) contents for progress.
+  getDocContentById: async (docId) => {
     const d = await api(`/api/projects/${state.projectId}/documents/${docId}`);
     return (d && d.content) || '';
   },
@@ -6040,12 +6047,11 @@ async function switchTab(tab) {
     // pre-warm the body of every table-doc linked to a 施策 into a cache keyed by
     // doc_id (skipping ones already cached). No writes — display only.
     if (state.documents.length === 0) await dataSource.loadDocuments().catch(() => {});
-    state.attackListContent = state.attackListContent || {};
     const acqIds = new Set(((state.project && state.project.acquisitions) || []).map(a => a.id));
     const pending = (state.documents || []).filter(
       d => d.target && acqIds.has(d.target) && !(d.doc_id in state.attackListContent));
     await Promise.all(pending.map(async d => {
-      try { state.attackListContent[d.doc_id] = await dataSource.loadDocContentById(d.doc_id); }
+      try { state.attackListContent[d.doc_id] = await dataSource.getDocContentById(d.doc_id); }
       catch (_e) { state.attackListContent[d.doc_id] = ''; }
     }));
   }
@@ -9348,7 +9354,6 @@ function handleCommonAction(action, el) {
       state.hiddenPhases.clear(); render(); return true;
     case 'acq-filter-status': {  // ms-132 e-4562: 施策ステータス絞り込み (read-only)
       const s = el.dataset.status || '';
-      state.hiddenAcqStatuses = state.hiddenAcqStatuses || new Set();
       state.hiddenAcqStatuses.has(s) ? state.hiddenAcqStatuses.delete(s) : state.hiddenAcqStatuses.add(s);
       render(); return true;
     }
@@ -9356,7 +9361,6 @@ function handleCommonAction(action, el) {
       state.hiddenAcqStatuses = new Set(); render(); return true;
     case 'toggle-acq-list': {  // ms-132 e-4562: アタックリストの表を開閉
       const id = el.dataset.docId || '';
-      state.openAttackLists = state.openAttackLists || new Set();
       state.openAttackLists.has(id) ? state.openAttackLists.delete(id) : state.openAttackLists.add(id);
       render(); return true;
     }
