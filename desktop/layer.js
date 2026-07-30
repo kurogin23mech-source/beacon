@@ -209,6 +209,16 @@ const dataSource = {
     if (m) title = m[1];
     state.documentContent = { doc_id: docId, title, scope, content: body };
   },
+  // ms-132 e-4562 — Tauri mirror of the Web loadDocContentById: fetch a doc body
+  // by id and RETURN it (does not touch state.documentContent). Feeds the
+  // read-only Acquisition view's attack-list phase-progress display.
+  loadDocContentById: async (docId) => {
+    if (cloudMode) {
+      const d = JSON.parse(await invoke('cloud_get_document', { docId }));
+      return (d && d.content) || '';
+    }
+    return await invoke('get_document_content', { docId });
+  },
   // ms-70 e-1718 — DM approval history (Settings > Audit).
   // Tauri Rust binding (cloud_list_dm_approval_history) is not implemented
   // yet; mirror the "Web-only" pattern used by Member admin (= now wired
