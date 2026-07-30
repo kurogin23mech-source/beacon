@@ -489,6 +489,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_acq_status = acq_sub.add_parser("status", add_help=False)
     p_acq_status.add_argument("acq_id", nargs="?", default="")
     p_acq_status.add_argument("status", nargs="?", default="")
+    # ms-133 e-4643: named-intent lifecycle verbs (todo → in_progress → done),
+    # bash parity. Each sets a fixed status via the acquisition_status engine —
+    # mirrors bin/beacon's `start)`/`done)` inner-case (BEACON_ACQ_STATUS
+    # in_progress/done). Without these Windows/pipx users hit `invalid choice`
+    # on `beacon acquisition start`.
+    for _iv in ("start", "done"):
+        _p = acq_sub.add_parser(_iv, add_help=False)
+        _p.add_argument("acq_id", nargs="?", default="")
     # ms-132 e-4507: 打ち切り (soft-cancel)。status でなく削除で中止を表す。
     # account/opportunity delete と同じ監査ゲート: --reason か --acknowledge を要求。
     for _dv in ("delete", "cancel", "rm"):
@@ -572,6 +580,13 @@ def build_parser() -> argparse.ArgumentParser:
     opp_sub.add_parser("list", aliases=["ls"], add_help=False).add_argument(
         "--json", action="store_true"
     )
+
+    # ms-133 e-4643: `describe`/`desc` — set/clear an opportunity's背景/経緯/メモ,
+    # bash parity (BEACON_OPP_ID / BEACON_OPP_DESCRIPTION → opportunity_describe).
+    # Empty text clears. Without this Windows/pipx users hit `invalid choice`.
+    p_opp_desc = opp_sub.add_parser("describe", aliases=["desc"], add_help=False)
+    p_opp_desc.add_argument("opp_id", nargs="?", default="")
+    p_opp_desc.add_argument("description", nargs="?", default="")
 
     p_opp_phase = opp_sub.add_parser("phase", add_help=False)
     p_opp_phase.add_argument("opp_id", nargs="?", default="")
@@ -708,6 +723,28 @@ def build_parser() -> argparse.ArgumentParser:
     phase_sub.add_parser("list", add_help=False).add_argument(
         "--json", action="store_true"
     )
+    # ms-133 e-4643: edit a running project's saved phase funnel, bash parity
+    # (ms-116). <funnel> = account | opportunity | prospect. Stage names may
+    # contain spaces, so they're single positionals. Without these Windows/pipx
+    # users hit `argparse invalid choice` on `beacon phase add` (the "dispatch
+    # 定義ゼロ" gap the 2026-07-30 audit flagged as worst).
+    p_phase_add = phase_sub.add_parser("add", add_help=False)
+    p_phase_add.add_argument("funnel", nargs="?", default="")
+    p_phase_add.add_argument("name", nargs="?", default="")
+    p_phase_add.add_argument("--index", "--at", dest="index", default="")
+    p_phase_rename = phase_sub.add_parser("rename", add_help=False)
+    p_phase_rename.add_argument("funnel", nargs="?", default="")
+    p_phase_rename.add_argument("old", nargs="?", default="")
+    p_phase_rename.add_argument("new", nargs="?", default="")
+    p_phase_move = phase_sub.add_parser("move", add_help=False)
+    p_phase_move.add_argument("funnel", nargs="?", default="")
+    p_phase_move.add_argument("name", nargs="?", default="")
+    p_phase_move.add_argument("index", nargs="?", default="")
+    p_phase_remove = phase_sub.add_parser(
+        "remove", aliases=["delete", "rm"], add_help=False
+    )
+    p_phase_remove.add_argument("funnel", nargs="?", default="")
+    p_phase_remove.add_argument("name", nargs="?", default="")
 
     # ---- sync ----
     p_sync = sub.add_parser("sync", help="Auto-sync recent git commits", add_help=False)
@@ -2318,6 +2355,17 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
         env = {"BEACON_ACQ_ID": args.acq_id or "",
                "BEACON_ACQ_STATUS": args.status or ""}
         return _run_commands_py(root, "acquisition_status", env)
+    if cmd in ("start", "done"):
+        # ms-133 e-4643: named-intent lifecycle verbs, bash parity. `start` and
+        # `done` set a fixed status through the same acquisition_status engine
+        # (bin/beacon maps start→in_progress, done→done).
+        if not args.acq_id:
+            print(f"Usage: beacon acquisition {cmd} <acq-id>")
+            return 1
+        fixed_status = "in_progress" if cmd == "start" else "done"
+        env = {"BEACON_ACQ_ID": args.acq_id or "",
+               "BEACON_ACQ_STATUS": fixed_status}
+        return _run_commands_py(root, "acquisition_status", env)
     if cmd in ("delete", "cancel", "rm"):
         if not args.acq_id:
             print("Usage: beacon acquisition delete <acq-id> "
@@ -2472,6 +2520,16 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
     if cmd in ("list", "ls"):
         env = {"BEACON_JSON": "1" if args.json else ""}
         return _run_commands_py(root, "opportunity_list", env)
+    if cmd in ("describe", "desc"):
+        # ms-133 e-4643: set/clear an opportunity's背景/経緯/メモ, bash parity.
+        # Empty text clears (so we don't require a non-empty description).
+        if not args.opp_id:
+            print("Usage: beacon opportunity describe <opp-id> <text>   "
+                  "(背景/経緯/メモ; 空文字でクリア)")
+            return 1
+        env = {"BEACON_OPP_ID": args.opp_id or "",
+               "BEACON_OPP_DESCRIPTION": args.description or ""}
+        return _run_commands_py(root, "opportunity_describe", env)
     if cmd == "phase":
         if not args.opp_id or not args.phase:
             print("Usage: beacon opportunity phase <opp-id> <phase> [--note <text>]")
@@ -2722,9 +2780,15 @@ def _handle_meeting(root: Path, args: argparse.Namespace) -> int:
     return 2
 
 
+_PHASE_USAGE = ("Usage: beacon phase "
+                "[list [--json] | add <funnel> <name> [--index N] | "
+                "rename <funnel> <old> <new> | move <funnel> <name> <index> | "
+                "remove <funnel> <name>]   (<funnel> = account|opportunity|prospect)")
+
+
 def _handle_phase(root: Path, args: argparse.Namespace) -> int:
     if args.show_help or args.phase_cmd is None:
-        print("Usage: beacon phase list [--json]")
+        print(_PHASE_USAGE)
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
         return rc
@@ -2733,7 +2797,45 @@ def _handle_phase(root: Path, args: argparse.Namespace) -> int:
     if cmd == "list":
         env = {"BEACON_JSON": "1" if args.json else ""}
         return _run_commands_py(root, "phase_list", env)
-    print("Usage: beacon phase list [--json]")
+    # ms-133 e-4643: funnel-editing verbs, bash parity (ms-116). Each mirrors
+    # the matching cmd_phase_<verb>() in bin/beacon (BEACON_FUNNEL_KIND +
+    # BEACON_PHASE_* env → phase_<verb> in commands.py).
+    if cmd == "add":
+        if not args.funnel or not args.name:
+            print("Usage: beacon phase add <account|opportunity|prospect> "
+                  "<name> [--index N]")
+            return 1
+        env = {"BEACON_FUNNEL_KIND": args.funnel or "",
+               "BEACON_PHASE_NAME": args.name or "",
+               "BEACON_PHASE_INDEX": args.index or ""}
+        return _run_commands_py(root, "phase_add", env)
+    if cmd == "rename":
+        if not args.funnel or not args.old or not args.new:
+            print("Usage: beacon phase rename <account|opportunity|prospect> "
+                  "<old> <new>")
+            return 1
+        env = {"BEACON_FUNNEL_KIND": args.funnel or "",
+               "BEACON_PHASE_OLD": args.old or "",
+               "BEACON_PHASE_NEW": args.new or ""}
+        return _run_commands_py(root, "phase_rename", env)
+    if cmd == "move":
+        if not args.funnel or not args.name or not args.index:
+            print("Usage: beacon phase move <account|opportunity|prospect> "
+                  "<name> <index>")
+            return 1
+        env = {"BEACON_FUNNEL_KIND": args.funnel or "",
+               "BEACON_PHASE_NAME": args.name or "",
+               "BEACON_PHASE_INDEX": args.index or ""}
+        return _run_commands_py(root, "phase_move", env)
+    if cmd in ("remove", "delete", "rm"):
+        if not args.funnel or not args.name:
+            print("Usage: beacon phase remove <account|opportunity|prospect> "
+                  "<name>")
+            return 1
+        env = {"BEACON_FUNNEL_KIND": args.funnel or "",
+               "BEACON_PHASE_NAME": args.name or ""}
+        return _run_commands_py(root, "phase_remove", env)
+    print(_PHASE_USAGE)
     return 2
 
 
