@@ -2337,10 +2337,13 @@ def _handle_acquisition(root: Path, args: argparse.Namespace) -> int:
                   "audit entry. Pass --reason \"...\" or --acknowledge.",
                   file=sys.stderr)
             return 1
+        # e-4507 follow-up (#1 DRY): don't hardcode the acknowledged sentinel —
+        # signal the waiver via BEACON_ACKNOWLEDGE and let commands.py stamp its
+        # single _ACKNOWLEDGED_REASON definition.
         return _run_commands_py(root, "acquisition_delete",
                                 {"BEACON_ACQ_ID": args.acq_id,
-                                 "BEACON_CANCEL_REASON":
-                                     reason or "(acknowledged: no detailed reason given)"})
+                                 "BEACON_CANCEL_REASON": reason,
+                                 "BEACON_ACKNOWLEDGE": "1" if acknowledge else ""})
     if cmd == "attack-list":
         if not args.acq_id or not args.title:
             print('Usage: beacon acquisition attack-list <acq-id> "<title>" '

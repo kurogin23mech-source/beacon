@@ -26656,6 +26656,11 @@ def cmd_acquisition_add():
 def cmd_acquisition_list():
     import json as _json
     data = load_project()
+    # e-4507 follow-up (独立 AX レビュー #558): a `list` command is an inventory of
+    # record — show ALL acquisitions including 打ち切った (cancelled) ones (with their
+    # cancelled status visible), matching the sibling `beacon account list`. Hiding
+    # tombstoned rows here would be a silent omission (an AI can't see/discover a
+    # 打ち切った施策). The curated Web board is the place that hides terminal items.
     acqs = data.get("acquisitions", [])
     if os.environ.get("BEACON_JSON") == "1":
         print(_json.dumps(acqs, ensure_ascii=False))
@@ -26698,6 +26703,12 @@ def cmd_acquisition_delete():
     import sales_entities
     acq_id = os.environ.get("BEACON_ACQ_ID", "")
     reason = os.environ.get("BEACON_CANCEL_REASON", "")
+    # e-4507 follow-up (#1 DRY): the acknowledged-no-reason sentinel has ONE
+    # definition (_ACKNOWLEDGED_REASON). Callers signal a deliberate no-reason
+    # waiver with BEACON_ACKNOWLEDGE=1 and let this path stamp the sentinel,
+    # rather than each entrypoint hardcoding the literal string.
+    if not reason and os.environ.get("BEACON_ACKNOWLEDGE") == "1":
+        reason = _ACKNOWLEDGED_REASON
     if not acq_id:
         print("Usage: beacon acquisition delete <acq-id> "
               "(--reason <text> | --acknowledge)",

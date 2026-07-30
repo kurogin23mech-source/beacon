@@ -3134,6 +3134,33 @@ details[open] > .setup-prompt-summary::after { transform: rotate(90deg); }
 .sm-close:hover { color:var(--text-primary); }
 .sales-empty { color:var(--text-dim); padding:20px; text-align:center; }
 .sales-empty code { color:var(--text-secondary); background:var(--bg-raised); padding:1px 5px; border-radius:3px; }
+/* --- ms-132 e-4562: read-only Acquisition (施策) view --- */
+.acq-card { border:1px solid var(--border); border-radius:6px; padding:12px 14px; margin:8px 0; background:var(--bg-raised); }
+.acq-head { display:flex; align-items:center; gap:8px; }
+.acq-id { color:var(--text-dim); font-size:11px; font-family:monospace; }
+.acq-status { font-size:10px; padding:1px 7px; border-radius:10px; border:1px solid currentColor; color:var(--text-dim); }
+.acq-status.s-todo { color:var(--todo); }
+.acq-status.s-in_progress { color:var(--in-progress); }
+.acq-status.s-done { color:var(--done); }
+.acq-label { color:var(--text-primary); font-weight:600; }
+.acq-desc { color:var(--text-secondary); font-size:12px; margin:6px 0 2px; }
+.acq-nolist { color:var(--text-dim); font-size:12px; margin-top:8px; }
+.acq-nolist code { color:var(--text-secondary); background:var(--bg-base); padding:1px 5px; border-radius:3px; }
+.acq-list { margin-top:10px; border-top:1px solid var(--border); padding-top:8px; }
+.acq-list-head { display:flex; align-items:center; gap:8px; cursor:pointer; }
+.acq-list-caret { color:var(--text-dim); width:12px; }
+.acq-list-title { color:var(--text-primary); font-size:13px; }
+.acq-list-count { color:var(--text-dim); font-size:11px; margin-left:auto; }
+.acq-phase-summary { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:6px 0 2px; }
+.acq-phase-bar { display:flex; width:160px; height:8px; border-radius:4px; overflow:hidden; background:var(--bg-base); border:1px solid var(--border); }
+.acq-phase-seg { height:100%; }
+.acq-phase-chip { font-size:11px; color:var(--text-secondary); }
+.acq-phase-chip b { color:var(--text-primary); }
+.acq-phase-seg.p0,.acq-phase-chip.p0 b { color:var(--todo); } .acq-phase-seg.p0 { background:var(--todo); }
+.acq-phase-seg.p1,.acq-phase-chip.p1 b { color:var(--in-progress); } .acq-phase-seg.p1 { background:var(--in-progress); }
+.acq-phase-seg.p2,.acq-phase-chip.p2 b { color:var(--done); } .acq-phase-seg.p2 { background:var(--done); }
+.acq-phase-seg.p3 { background:var(--text-secondary); } .acq-phase-seg.p4 { background:var(--text-dim); } .acq-phase-seg.p5 { background:var(--border); }
+.acq-list-table { margin-top:8px; }
 /* --- ms-106 fb1: phase color-coding (target-class generic: 準備/active/決着) --- */
 .pp { border:1px solid currentColor; border-radius:4px; padding:2px 7px; font-size:11px; white-space:nowrap; }
 .pp-prep     { color:var(--todo); }         /* 準備 (funnel entry) = todo */
@@ -3467,6 +3494,17 @@ const dataSource = {
     const m = body.match(/^# (.+)/m);
     if (m) title = m[1];
     state.documentContent = { doc_id: docId, title, scope, content: body };
+  },
+  // ms-132 e-4562 — Tauri mirror of the Web getDocContentById: GET a doc body by
+  // id and RETURN it (the `get` prefix marks it as a pure fetch that does not
+  // touch state.documentContent). Feeds the read-only Acquisition view's
+  // attack-list phase-progress display.
+  getDocContentById: async (docId) => {
+    if (cloudMode) {
+      const d = JSON.parse(await invoke('cloud_get_document', { docId }));
+      return (d && d.content) || '';
+    }
+    return await invoke('get_document_content', { docId });
   },
   // ms-70 e-1718 — DM approval history (Settings > Audit).
   // Tauri Rust binding (cloud_list_dm_approval_history) is not implemented
@@ -4852,6 +4890,7 @@ function renderMainContent() {
   const salesTabBar = `
       <button class="tab-btn ${effectiveTab === 'opportunities' ? 'active' : ''}" data-action="switch-tab" data-tab="opportunities">Opportunity</button>
       <button class="tab-btn ${effectiveTab === 'account' ? 'active' : ''}" data-action="switch-tab" data-tab="account">Account</button>
+      <button class="tab-btn ${effectiveTab === 'acquisition' ? 'active' : ''}" data-action="switch-tab" data-tab="acquisition">Acquisition</button>
       <button class="tab-btn ${effectiveTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${effectiveTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Session</button>`;
   const devTabBar = `
@@ -4868,6 +4907,7 @@ function renderMainContent() {
     <div class="tab-bar fade-in stagger-1">${isSales ? salesTabBar : devTabBar}</div>
     ${effectiveTab === 'opportunities' ? renderOpportunitiesSection() : ''}
     ${effectiveTab === 'account' ? renderAccountsSection() : ''}
+    ${effectiveTab === 'acquisition' ? renderAcquisitionsSection() : ''}
     ${isSales && state.openAccountId ? renderAccountModal(state.openAccountId) : ''}
     ${isSales && state.openOppId ? renderOpportunityModal(state.openOppId) : ''}
     ${effectiveTab === 'dashboard' ? `
@@ -5067,6 +5107,114 @@ function renderOpportunitiesSection() {
     </div>`;
   const body = view === 'list' ? _renderOppList(p) : _renderOppKanban(p);
   return `<section class="sales-board fade-in">${toggle}${_renderOppFilterBar(phases)}${_renderAssigneeBar(opps)}${body}</section>`;
+}
+
+// ms-132 e-4562: read-only 顧客獲得 (Acquisition / 施策) view. Lists 施策 as
+// first-class cards and, under each, its linked アタックリスト (attack-list =
+// table-doc) with 打診フェーズ (outreach-phase) progress. All data comes from the
+// already-loaded project + a document-content cache (switchTab pre-warms it); this
+// view never writes — advancing phases stays a CLI/Skill action.
+function renderAcquisitionsSection() {
+  const p = state.project;
+  const all = p.acquisitions || [];
+  // 打ち切った (cancelled) 施策は curated なボードから外す — 進行中の作業ではないため。
+  // (opportunity board の _oppVisible が terminal を隠すのと同じ規約。CLI の
+  // `acquisition list` は inventory なので全件見せる、という surface 差は意図的。)
+  // NOTE: 'cancelled' は work_base.CANCELLED_STATUS のリテラル鏡像 (_oppVisible と同値)。
+  const acqs = all.filter(a => a.status !== 'cancelled');
+  if (!acqs.length) {
+    return `<section class="sales-board fade-in"><div class="sales-empty">顧客獲得ターゲット (施策) がありません。<code>beacon acquisition add "&lt;施策名&gt;"</code> で追加できます。</div></section>`;
+  }
+  const statuses = ['todo', 'in_progress', 'done'];
+  const labelOf = { todo: '未着手', in_progress: '進行中', done: '完了' };
+  const allOn = state.hiddenAcqStatuses.size === 0;
+  const filterBar = `<div class="filter-bar">
+      <button class="filter-btn f-all ${allOn ? 'on' : 'off'}" data-action="acq-filter-all">all</button>
+      ${statuses.map(s => {
+        const on = !state.hiddenAcqStatuses.has(s);
+        const cls = { todo: 'f-todo', in_progress: 'f-active', done: 'f-done' }[s] || '';
+        return `<button class="filter-btn ${on ? 'on' : 'off'} ${cls}" data-action="acq-filter-status" data-status="${s}">${labelOf[s] || s}</button>`;
+      }).join('')}
+    </div>`;
+  const visible = acqs.filter(a => !state.hiddenAcqStatuses.has(a.status));
+  const cards = visible.length
+    ? visible.map(a => _renderAcqCard(a)).join('')
+    : `<div class="sales-empty">表示できる施策がありません (フィルタで絞り込み中)。</div>`;
+  return `<section class="sales-board fade-in">${filterBar}${cards}</section>`;
+}
+
+function _renderAcqCard(a) {
+  const label = esc(a.label || a.title || a.id);
+  const st = esc(a.status || '');
+  const desc = a.description ? `<div class="acq-desc">${esc(a.description)}</div>` : '';
+  const lists = _acqAttackLists(a.id);
+  const listsHtml = lists.length
+    ? lists.map(l => _renderAttackList(l)).join('')
+    : `<div class="acq-nolist">アタックリスト未作成 (<code>beacon acquisition attack-list ${esc(a.id)} "&lt;title&gt;"</code>)</div>`;
+  return `<div class="acq-card">
+      <div class="acq-head">
+        <span class="acq-id">${esc(a.id)}</span>
+        <span class="acq-status s-${st}">${esc(st)}</span>
+        <span class="acq-label">${label}</span>
+      </div>
+      ${desc}
+      ${listsHtml}
+    </div>`;
+}
+
+// Attack-lists linked to a 施策: table-docs (target === acqId) whose content is
+// cached and parses as an attack-list (has the 'phase' column). Table-ness is
+// judged from the loaded content — not the list metadata's `format` field — so it
+// is robust across storage backends.
+function _acqAttackLists(acqId) {
+  const cache = state.attackListContent;
+  const out = [];
+  for (const d of (state.documents || [])) {
+    if (d.target !== acqId) continue;
+    const content = cache[d.doc_id];
+    if (content === undefined) continue;             // not pre-warmed yet
+    if (!docFormatIsTable(content)) continue;
+    const model = parseTableDocPayload(content);
+    if (!model || !Array.isArray(model.columns)) continue;
+    // 'phase' は attack-list スキーマの列キー (Python: attack_list.COL_PHASE) の鏡像。
+    // 変える際は両サイドを合わせること。ここが attack-list とその他 table-doc の識別点。
+    if (!model.columns.some(c => c.key === 'phase')) continue;  // attack-list marker
+    out.push({ doc_id: d.doc_id, title: d.title || d.doc_id, content, model });
+  }
+  return out;
+}
+
+function _renderAttackList(l) {
+  const phaseCol = l.model.columns.find(c => c.key === 'phase');
+  const order = (phaseCol && Array.isArray(phaseCol.values)) ? phaseCol.values : [];
+  const rows = (l.model.rows || []).filter(r => r && !r.removed_at);
+  const total = rows.length;
+  const counts = {};
+  for (const r of rows) {
+    const ph = (r.cells && r.cells.phase) || '(未設定)';
+    counts[ph] = (counts[ph] || 0) + 1;
+  }
+  const seq = order.length ? order.slice() : Object.keys(counts);
+  for (const k of Object.keys(counts)) if (!seq.includes(k)) seq.push(k);
+  const chips = seq.map((ph, i) =>
+    `<span class="acq-phase-chip p${i % 6}">${esc(ph)} <b>${counts[ph] || 0}</b></span>`).join('');
+  const bar = total ? `<div class="acq-phase-bar">${seq.map((ph, i) => {
+    const c = counts[ph] || 0;
+    if (!c) return '';
+    const pct = Math.round(c / total * 100);
+    return `<span class="acq-phase-seg p${i % 6}" style="width:${pct}%" title="${esc(ph)}: ${c}"></span>`;
+  }).join('')}</div>` : '';
+  const expanded = state.openAttackLists.has(l.doc_id);
+  const table = expanded ? `<div class="acq-list-table">${renderTableDocHtml(l.content)}</div>` : '';
+  return `<div class="acq-list">
+      <div class="acq-list-head" data-action="toggle-acq-list" data-doc-id="${esc(l.doc_id)}">
+        <span class="acq-list-caret">${expanded ? '▾' : '▸'}</span>
+        <span class="acq-list-title">${esc(l.title)}</span>
+        <span class="acq-list-count">${total} 件</span>
+      </div>
+      <div class="acq-phase-summary">${bar}${chips}</div>
+      ${table}
+    </div>`;
 }
 // ms-106 fb2: 開発 Beacon の Milestones フィルタ (filter-bar) と同じ挙動・レイアウト。
 // phase 別の hide toggle + all クリアで全表示。phase → 色は status filter の
@@ -5941,6 +6089,20 @@ async function switchTab(tab) {
     if (state.documents.length === 0) loads.push(dataSource.loadDocuments().catch(() => {}));
     if (state.retros.length === 0) loads.push(dataSource.loadRetros().catch(() => {}));
     await Promise.all(loads);
+  }
+  if (tab === 'acquisition') {
+    // ms-132 e-4562: the read-only Acquisition view needs each attack-list's
+    // rows to show 打診フェーズ progress. Ensure the document list is loaded, then
+    // pre-warm the body of every table-doc linked to a 施策 into a cache keyed by
+    // doc_id (skipping ones already cached). No writes — display only.
+    if (state.documents.length === 0) await dataSource.loadDocuments().catch(() => {});
+    const acqIds = new Set(((state.project && state.project.acquisitions) || []).map(a => a.id));
+    const pending = (state.documents || []).filter(
+      d => d.target && acqIds.has(d.target) && !(d.doc_id in state.attackListContent));
+    await Promise.all(pending.map(async d => {
+      try { state.attackListContent[d.doc_id] = await dataSource.getDocContentById(d.doc_id); }
+      catch (_e) { state.attackListContent[d.doc_id] = ''; }
+    }));
   }
   if (tab === 'operations') {
     // ms-69 / e-1664: pre-warm related-treks for every operation on the
@@ -9239,6 +9401,18 @@ function handleCommonAction(action, el) {
     }
     case 'opp-filter-all':
       state.hiddenPhases.clear(); render(); return true;
+    case 'acq-filter-status': {  // ms-132 e-4562: 施策ステータス絞り込み (read-only)
+      const s = el.dataset.status || '';
+      state.hiddenAcqStatuses.has(s) ? state.hiddenAcqStatuses.delete(s) : state.hiddenAcqStatuses.add(s);
+      render(); return true;
+    }
+    case 'acq-filter-all':
+      state.hiddenAcqStatuses = new Set(); render(); return true;
+    case 'toggle-acq-list': {  // ms-132 e-4562: アタックリストの表を開閉
+      const id = el.dataset.docId || '';
+      state.openAttackLists.has(id) ? state.openAttackLists.delete(id) : state.openAttackLists.add(id);
+      render(); return true;
+    }
     case 'acc-filter-phase': {  // ms-115 e-3789: 顧客フェーズ絞り込み
       const ph = el.dataset.phase || '';
       state.hiddenAccountPhases.has(ph) ? state.hiddenAccountPhases.delete(ph) : state.hiddenAccountPhases.add(ph);
