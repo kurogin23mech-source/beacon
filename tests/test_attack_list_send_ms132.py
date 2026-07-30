@@ -275,6 +275,30 @@ def test_record_double_send_refused_via_cli(outreach_cwd, monkeypatch, capsys):
     assert ei.value.code == 1
 
 
+def _row_cells(doc_id, acc_id):
+    import table_doc
+    _c, _t, model = commands._load_table_model(doc_id)
+    for r in table_doc.active_rows(model):
+        if r["cells"].get("account") == acc_id:
+            return r["cells"]
+    raise AssertionError(f"row for {acc_id} not found")
+
+
+def test_send_record_stamps_last_contact(outreach_cwd, monkeypatch, capsys):
+    # e-4623: the 最終接触日 (last_contact) column was schema-defined but no contact
+    # flow wrote it. send-record must fill it (= 送信日) on the SAME write as the
+    # phase drive — phase and date commit together (no partial write).
+    cwd, doc_id = outreach_cwd
+    _plan(monkeypatch, capsys, doc_id)
+    _confirm(monkeypatch, doc_id)
+    capsys.readouterr()
+    assert not _row_cells(doc_id, "acc-1").get("last_contact")  # empty before
+    _record(monkeypatch, capsys, doc_id, "acc-1", mid="msg-1")
+    cells = _row_cells(doc_id, "acc-1")
+    assert cells["last_contact"] == commands._now_iso()[:10]     # stamped = today
+    assert cells["phase"] == "連絡済"                            # committed together
+
+
 def test_plan_excludes_rows_without_email(outreach_cwd, monkeypatch, capsys):
     cwd, doc_id = outreach_cwd
     # add a 3rd account with NO contact email, and put it on the list
