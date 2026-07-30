@@ -283,8 +283,8 @@ For sales projects (`beacon init --profession sales`), track accounts (= 顧客 
 | `beacon acquisition add "<title>" [--description <text>] [--assignee <user>]` | Add a 顧客獲得ターゲット (取引先の無い獲得・準備作業の器) / 顧客獲得ターゲットを追加 |
 | `beacon acquisition list [--json]` | List 顧客獲得ターゲット / 顧客獲得ターゲットを一覧 |
 | `beacon acquisition start <acq-id>` | Move a 顧客獲得ターゲット to in_progress / 顧客獲得ターゲットに着手 |
-| `beacon acquisition observe <acq-id>` | Move a 顧客獲得ターゲット to observing / 顧客獲得ターゲットを見守りに |
 | `beacon acquisition done <acq-id>` | Mark a 顧客獲得ターゲット done / 顧客獲得ターゲットを完了 |
+| `beacon acquisition delete <acq-id> [--reason <text>]` | 打ち切り: soft-cancel a 顧客獲得ターゲット (tombstone) / 施策を打ち切り (削除で表す, ms-132) |
 | `beacon acquisition attack-list <acq-id> "<title>" [--phases <a,b,c>] [--json]` | Attach a typed アタックリスト (table-doc) to a 顧客獲得ターゲット / 施策にアタックリストを紐づけ (ms-132) |
 | `beacon acquisition attack-lists <acq-id> [--json]` | List a 顧客獲得ターゲット's アタックリスト with per-phase counts / 施策配下のアタックリスト一覧 (ms-132) |
 | `beacon acquisition attack-list-fill <doc-id> [--account-phase <name>] [--assignee <user>] [--name-contains <s>] [--limit <n>] [--dry-run] [--json]` | Bulk-register 未接触 Accounts matching a query into an アタックリスト (dedup, --dry-run) / 条件一致の未接触顧客を一括登録 (ms-132) |

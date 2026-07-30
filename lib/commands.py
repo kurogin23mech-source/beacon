@@ -21172,8 +21172,8 @@ def _help_registry():
         {"command": "beacon acquisition add <title>", "flags": ["--description <text>", "--assignee <user>"], "description": "Add a 顧客獲得ターゲット (取引先の無い有限の獲得・準備作業の器; 営業専用)"},
         {"command": "beacon acquisition list", "flags": ["--json"], "description": "List 顧客獲得ターゲット with their lifecycle status"},
         {"command": "beacon acquisition start <acq-id>", "flags": [], "description": "Move a 顧客獲得ターゲット to in_progress (着手). Named lifecycle verb (ms-120 e-3907); status stays read-only."},
-        {"command": "beacon acquisition observe <acq-id>", "flags": [], "description": "Move a 顧客獲得ターゲット to observing (見守り)."},
         {"command": "beacon acquisition done <acq-id>", "flags": [], "description": "Mark a 顧客獲得ターゲット done (完了)."},
+        {"command": "beacon acquisition delete <acq-id>", "flags": ["--reason <text>"], "description": "打ち切り: soft-cancel a 顧客獲得ターゲット (tombstone, audit kept). Discontinuation = deletion, not a status (ms-132 e-4507)."},
         {"command": "beacon acquisition attack-list <acq-id> <title>", "flags": ["--phases <a,b,c>", "--json"], "description": "Attach a typed アタックリスト (table-doc: 対象顧客/打診フェーズ/最終接触日/メモ) to a 顧客獲得ターゲット (ms-132)"},
         {"command": "beacon acquisition attack-lists <acq-id>", "flags": ["--json"], "description": "List a 顧客獲得ターゲット's アタックリスト with per-phase counts (ms-132)"},
         {"command": "beacon acquisition attack-list-fill <doc-id>", "flags": ["--account-phase <name>", "--assignee <user>", "--name-contains <s>", "--limit <n>", "--dry-run", "--json"], "description": "Bulk-register 未接触 Accounts matching a query into an アタックリスト (dedup, --dry-run preview) (ms-132)"},
@@ -26617,6 +26617,30 @@ def cmd_acquisition_status():
     print(f"{acq_id} → {status}")
 
 
+def cmd_acquisition_delete():
+    """Soft-cancel (打ち切り) a 顧客獲得ターゲット — ms-132 e-4507. Discontinuing a
+    施策 is expressed as deletion, not a lifecycle status. The record is
+    tombstoned (status → cancelled, audit trail kept), never physically removed.
+    Env: BEACON_ACQ_ID, BEACON_CANCEL_REASON.
+    """
+    import sales_entities
+    acq_id = os.environ.get("BEACON_ACQ_ID", "")
+    reason = os.environ.get("BEACON_CANCEL_REASON", "")
+    if not acq_id:
+        print("Usage: beacon acquisition delete <acq-id> [--reason <text>]",
+              file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        sales_entities.acquisition_cancel(data, acq_id, reason=reason,
+                                          at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"Cancelled acquisition {acq_id}" + (f": {reason}" if reason else ""))
+
+
 def cmd_acquisition_attach_list():
     """Create an attack-list (ms-131 table-doc) linked to an Acquisition (ms-132
     e-4501, AC1/AC2).
@@ -28828,6 +28852,7 @@ if __name__ == "__main__":
         "acquisition_add": cmd_acquisition_add,
         "acquisition_list": cmd_acquisition_list,
         "acquisition_status": cmd_acquisition_status,
+        "acquisition_delete": cmd_acquisition_delete,
         "acquisition_attach_list": cmd_acquisition_attach_list,
         "acquisition_lists": cmd_acquisition_lists,
         "acquisition_attack_list_fill": cmd_acquisition_attack_list_fill,

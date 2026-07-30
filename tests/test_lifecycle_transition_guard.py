@@ -31,8 +31,7 @@ import core  # noqa: E402
     ("operation", "open", "closed"),
     ("acquisition", "todo", "in_progress"),
     ("acquisition", "todo", "done"),      # forward skip allowed
-    ("acquisition", "in_progress", "observing"),
-    ("acquisition", "observing", "done"),
+    ("acquisition", "in_progress", "done"),  # ms-132 e-4507: observing 除去後
 ])
 def test_legal_forward_transitions_pass(kind, frm, to):
     core.validate_lifecycle_transition(kind, frm, to)  # must not raise
@@ -42,7 +41,7 @@ def test_legal_forward_transitions_pass(kind, frm, to):
     ("operation", "closed", "open"),        # reopen terminal
     ("operation", "open", "todo"),          # backward
     ("acquisition", "done", "todo"),        # backward from terminal
-    ("acquisition", "observing", "todo"),   # backward
+    ("acquisition", "in_progress", "todo"), # backward (ms-132 e-4507)
 ])
 def test_illegal_transitions_raise_with_recovery_hint(kind, frm, to):
     with pytest.raises(ValueError) as ei:
