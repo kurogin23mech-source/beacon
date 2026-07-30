@@ -3582,6 +3582,17 @@ def find_acquisition(data: dict, acquisition_id: str) -> Optional[dict]:
     return None
 
 
+def active_acquisitions(data: dict) -> list:
+    """Acquisitions minus tombstoned (cancelled) ones — the active-work view.
+
+    e-4507 follow-up (#3): 打ち切った (soft-cancelled) 施策は「取消済」であって
+    進行中の作業ではないので、既定の一覧からは外す。監査のため record は残る
+    (find_acquisition では引ける)。取消済を active view から落とすのは
+    ``filter_accounts`` と同じ規約 (a corrected mis-entry is not active work)。"""
+    return [a for a in data.get("acquisitions", [])
+            if a.get("status") != CANCELLED_STATUS]
+
+
 def acquisition_add(data: dict, title: str, *, description: str = "",
                     assignee: str = "", created_at: str = "",
                     created_by: str = "") -> str:

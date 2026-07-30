@@ -1536,8 +1536,9 @@ cmd_acquisition_delete() {
         exit 1
     fi
     _require_audit_reason "acquisition delete" "$reason" "$acknowledge"
-    [ -z "$reason" ] && reason="$BEACON_ACK_SENTINEL"
-    BEACON_ACQ_ID="$acq_id" BEACON_CANCEL_REASON="$reason" \
+    # e-4507 follow-up (#1 DRY): don't pre-substitute the sentinel here — pass the
+    # acknowledge flag and let commands.py stamp its single _ACKNOWLEDGED_REASON.
+    BEACON_ACQ_ID="$acq_id" BEACON_CANCEL_REASON="$reason" BEACON_ACKNOWLEDGE="$acknowledge" \
         python3 "$COMMANDS_PY" acquisition_delete
 }
 

@@ -26655,8 +26655,10 @@ def cmd_acquisition_add():
 
 def cmd_acquisition_list():
     import json as _json
+    import sales_entities
     data = load_project()
-    acqs = data.get("acquisitions", [])
+    # e-4507 follow-up (#3): 打ち切った (cancelled) 施策は active view から外す。
+    acqs = sales_entities.active_acquisitions(data)
     if os.environ.get("BEACON_JSON") == "1":
         print(_json.dumps(acqs, ensure_ascii=False))
         return
@@ -26698,6 +26700,12 @@ def cmd_acquisition_delete():
     import sales_entities
     acq_id = os.environ.get("BEACON_ACQ_ID", "")
     reason = os.environ.get("BEACON_CANCEL_REASON", "")
+    # e-4507 follow-up (#1 DRY): the acknowledged-no-reason sentinel has ONE
+    # definition (_ACKNOWLEDGED_REASON). Callers signal a deliberate no-reason
+    # waiver with BEACON_ACKNOWLEDGE=1 and let this path stamp the sentinel,
+    # rather than each entrypoint hardcoding the literal string.
+    if not reason and os.environ.get("BEACON_ACKNOWLEDGE") == "1":
+        reason = _ACKNOWLEDGED_REASON
     if not acq_id:
         print("Usage: beacon acquisition delete <acq-id> "
               "(--reason <text> | --acknowledge)",
