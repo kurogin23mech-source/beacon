@@ -12465,14 +12465,31 @@ def _auto_fire_release_due_trigger() -> None:
         f.write("\n")
 
 
-# map-drift trigger (ms-104 e-3155). Commit-count backstop that surfaces when
-# the application-map CORE doc (= 全貌マップ / 現在地の surface 索引) has gone
-# stale relative to accumulated commits. General mechanism: fires for ANY
-# project that has an application-map doc; the actual add/remove reconcile is
-# /beacon-map's job (which uses a per-project surface adapter such as
-# scripts/check-map-drift.py when present). Mirrors release-due: the count
-# prompts a human/AI action, it does not act on its own.
-_MAP_DRIFT_COMMIT_THRESHOLD = 20
+# map-drift trigger (ms-104 e-3155, re-keyed to release count in e-3342).
+#
+# Backstop that surfaces when the application-map CORE doc (= 全貌マップ /
+# 現在地の surface 索引) has gone stale RELATIVE TO SHIPPING. The PRIMARY forcing
+# function to reconcile the map lives at the ship boundary itself — the
+# /beacon-deploy and /beacon-push (release 判定) Skills prompt a reconcile in the
+# same flow that generates the release note (e-3342). This trigger is only the
+# low-priority safety net for when a project ships without reconciling.
+#
+# Why release count, not commit count (e-3342): the old baseline was "N commits
+# since the map was last updated", which is decoupled from shipping. It fired at
+# session-start on ordinary dev activity (unrelated to surfaces going to the
+# world) and was easily ignored — it once drifted 36→54 commits before anyone
+# acted. The application-map is a cumulative *shipped-capability* index; a
+# release is the diff. So staleness is correctly measured as "surfaces shipped
+# (= releases recorded) since the map was last reconciled", which is exactly the
+# unit the map tracks. A project that hasn't shipped since the last reconcile has
+# a fresh map no matter how many WIP commits accrued, so this no longer nags
+# mid-development.
+#
+# General mechanism: fires for ANY project that has an application-map doc; the
+# actual add/remove reconcile is /beacon-map's job (which uses a per-project
+# surface adapter such as scripts/check-map-drift.py when present). Mirrors
+# release-due: the count prompts a human/AI action, it does not act on its own.
+_MAP_DRIFT_RELEASE_THRESHOLD = 1
 
 
 def _project_profession_safe() -> str:
@@ -12513,15 +12530,43 @@ def _clear_map_drift_trigger_if_exists() -> None:
             pass
 
 
+def _count_releases_since(data: dict, since_iso: str) -> int:
+    """Count release records (data["releases"]) recorded strictly after
+    ``since_iso`` (an ISO8601 timestamp, typically the application-map doc's
+    updated_at). Release records carry a ``date`` field written by
+    cmd_deploy_record when a --semver is passed (see _next_release_id path).
+
+    A release is the ship diff; counting releases since the map was last
+    reconciled measures exactly the staleness the map cares about (e-3342).
+    String comparison is safe here because both sides are ISO8601 (lexical
+    order == chronological order); a malformed/absent date sorts before any
+    real ``since_iso`` and is simply not counted.
+    """
+    n = 0
+    for rel in data.get("releases", []):
+        rel_date = str(rel.get("date") or "")
+        if rel_date and rel_date > since_iso:
+            n += 1
+    return n
+
+
 def _auto_fire_map_drift_trigger() -> None:
-    """Fire a 'map-drift' trigger when >= _MAP_DRIFT_COMMIT_THRESHOLD commits
-    have accrued since the application-map doc was last updated.
+    """Fire a 'map-drift' trigger when >= _MAP_DRIFT_RELEASE_THRESHOLD releases
+    have been recorded since the application-map doc was last updated.
+
+    Re-keyed from commit count to RELEASE count in e-3342: staleness that
+    matters is "surfaces shipped since the map was last reconciled", not raw dev
+    activity. See the module comment above _MAP_DRIFT_RELEASE_THRESHOLD for the
+    full rationale. This is the low-priority backstop; the primary reconcile
+    forcing function is in the /beacon-deploy and /beacon-push (release 判定)
+    Skills, which prompt a reconcile in the same flow that ships.
 
     Fires only when the map EXISTS; a missing map is the session-start
     proposal's job (ms-104 e-3153), not this backstop's. Baseline = the map
     doc's updated_at (refreshed whenever /beacon-map rewrites it), so no
-    separate marker file is needed. Degrades silently with no store / no map /
-    outside a git repo.
+    separate marker file is needed — reconciling the map moves updated_at past
+    the shipped releases and the trigger self-clears. Degrades silently with no
+    store / no map.
 
     Development-only: a non-dev project (e.g. sales) owns no application-map, so
     the backstop never fires and clears any stale trigger (ms-109 e-3404).
@@ -12530,7 +12575,8 @@ def _auto_fire_map_drift_trigger() -> None:
         _clear_map_drift_trigger_if_exists()
         return
     try:
-        doc = get_store().get_document("application-map")
+        store = get_store()
+        doc = store.get_document("application-map")
     except Exception:
         return
     if not doc:
@@ -12540,20 +12586,13 @@ def _auto_fire_map_drift_trigger() -> None:
     if not updated_at:
         return
 
-    project_dir = os.path.dirname(get_project_file())
-    repo_root = os.path.dirname(project_dir) or "."
     try:
-        result = subprocess.run(
-            ["git", "log", f"--since={updated_at}", "--pretty=format:%H"],
-            capture_output=True, text=True, cwd=repo_root, check=False,
-        )
-    except (FileNotFoundError, OSError):
+        data = store.load_project()
+    except Exception:
         return
-    if result.returncode != 0:
-        return
-    n = len([ln for ln in result.stdout.splitlines() if ln.strip()])
+    n = _count_releases_since(data, updated_at)
 
-    if n < _MAP_DRIFT_COMMIT_THRESHOLD:
+    if n < _MAP_DRIFT_RELEASE_THRESHOLD:
         _clear_map_drift_trigger_if_exists()
         return
 
@@ -12579,15 +12618,16 @@ def _auto_fire_map_drift_trigger() -> None:
         created_at = now_iso
 
     message = (
-        f"全貌マップ (application-map) の最終更新から {n} commits 積み上がっています。"
-        f"surface (= 機能の入口) が増減して地図が古い可能性があります。"
-        f"`/beacon-map` で reconcile (= 足す＆消す) してください。"
+        f"全貌マップ (application-map) の最終更新以降に {n} 件のリリースが出荷されています。"
+        f"出荷時に surface (= 機能の入口) が増減して地図が古い可能性があります。"
+        f"本来は出荷フロー (/beacon-deploy・/beacon-push) で reconcile を促しますが、"
+        f"取りこぼした場合の安全網です。`/beacon-map` で reconcile (= 足す＆消す) してください。"
     )
     trigger_data = {
         "name": "map-drift",
         "kind": "map-drift",
         "map_updated_at": updated_at,
-        "commit_count": n,
+        "release_count": n,
         "message": message,
         "created_at": created_at,
         "refreshed_at": now_iso,

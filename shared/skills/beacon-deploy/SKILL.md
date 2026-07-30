@@ -200,6 +200,49 @@ Deploy: [deploy-id] [major/minor] (env)
   [生成した説明文]
 ```
 
+## Step 4.5: 全貌マップの reconcile を促す (forcing function — ms-104 e-3342)
+
+デプロイ = surface (= 機能の入口: CLI / API / Skill) が世に出る節目。ここが全貌マップ
+(application-map = 今このプロダクトに何ができるかを写した現在地の索引、CORE doc `application-map`)
+を **足す＆消す (reconcile)** する自然な契機。Step 2 で「何ができるようになったか」を既に言語化
+しているので、その同じ理解を累積地図に反映する。これは session-start の map-drift trigger
+(commit 数の proxy で発火し無視されがちだった) に代わる **主 forcing function** で、
+「出荷した瞬間に地図を直す」ことで地図の腐敗を出荷境界で塞ぐ (e-3342 で再配置)。
+
+### profession gate + 地図の有無
+
+まず対象プロジェクトかを確認する。`beacon status --json` の `profession` が `dev` 以外
+(例 `sales`) なら全貌マップは対象外 (開発インスタンス専用の surface 索引) なので、この Step は
+**丸ごとスキップ**。`dev` (または未設定) のときのみ以下に進む。
+
+地図がまだ無い (= 未生成) プロジェクトも reconcile 対象外 (生成は別契機 = session-start 提案 /
+`/beacon-map` 生成モード)。Bash ツールで確認:
+
+```bash
+beacon doc show application-map >/dev/null 2>&1 && echo "MAP_EXISTS" || echo "MAP_MISSING"
+```
+
+- `MAP_MISSING` → この Step をスキップ (地図が無いので reconcile できない)。
+- `MAP_EXISTS` → 以下でユーザーに reconcile を促す。
+
+### ユーザーに reconcile を提案する
+
+今回のデプロイで surface が増減した (= 新しい CLI / API / Skill が入口として増えた、または
+廃止された) かを Step 1〜2 の内容から AI が判断し、ユーザーに 1 行で提案する:
+
+```
+このデプロイで surface (機能の入口) が変わっているようです。全貌マップ (application-map) を
+`/beacon-map` で reconcile (= 足す＆消す) して、今回の変化を現在地の地図に反映しますか?
+  [reconcile する / 後で (次の session-start で map-drift backstop が再度促します) / skip]
+```
+
+- **reconcile する** → `/beacon-map` Skill を起動する (reconcile モードで走り、drift ゼロまで直す)。
+- **後で / skip** → 何もしない。CLI 側が `map-reconcile` trigger を残しているので、次の
+  session-start で backstop として再度目に入る。
+
+surface が明らかに変わっていない (= 文言修正 / infra 調整のみのデプロイ) と AI が判断できる場合は、
+提案自体を省いてよい (ノイズ抑制)。判断に迷うなら提案を出す (地図の腐敗より 1 行の確認の方が安い)。
+
 ## Step 5: トリガーチェック
 
 Bash ツールで実行:
@@ -207,9 +250,11 @@ Bash ツールで実行:
 beacon trigger tick && beacon trigger check
 ```
 
-deploy 直後は Operation の run_record 記録などで trigger 判定が変わっている可能性があるので、 `tick` で refresh してから `check` (ms-98 / e-2764)。
+deploy 直後は Operation の run_record 記録や map-reconcile 判定が変わっている可能性があるので、 `tick` で refresh してから `check` (ms-98 / e-2764)。
 
-空でなければ各トリガーの `message` を提示する。
+空でなければ各トリガーの `message` を提示する。`map-reconcile` トリガー (= deploy record が
+残した「地図を直せ」の印) が出ていて、Step 4.5 でまだ reconcile していなければ、そこで改めて
+`/beacon-map` を促す。
 
 ## 制約
 

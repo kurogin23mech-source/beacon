@@ -198,6 +198,6 @@ python3 "$(beacon _install-root)/scripts/check-map-drift.py" --doc-id applicatio
 - 機械照合スクリプト: `scripts/check-map-drift.py` (= surface 列挙 + 両方向 diff、e-3151)
 - CORE doc `application-map` (= 生成物、e-3152)
 - ms-104 SPEC (= 全貌マップの設計方針): doc_id `amSbihUWTZ8Pd3WyxfdU`
-- 自動メンテ経路: deploy/release hook (e-3154 で reconcile を相乗り) / map-drift trigger (e-3155 backstop)
+- 自動メンテ経路 (ms-104 e-3342 で再配置): **主 forcing function は出荷フロー** = `/beacon-deploy` の Step 4.5 と `/beacon-push` の release 判定後 (Step 4.5) が「出荷した瞬間に地図を直す」を促す。map-drift trigger は **release 数基準の低優先 backstop** (= 出荷フローで取りこぼした時の安全網、旧 commit 数 proxy から e-3342 で降格)。deploy record が残す `map-reconcile` trigger も session-start で再掲される安全網。
 - session-start が「地図が無ければ本 Skill を提案」する (= 既存プロジェクトの backfill 契機)
 - 関連 MS: ms-85 (surface area を畳む側 / 本 MS は見える化する側で対)
