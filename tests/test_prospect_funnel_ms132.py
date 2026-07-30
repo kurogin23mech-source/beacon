@@ -103,6 +103,31 @@ def test_phase_list_sales_no_config_shows_builtin_default_json(tmp_path, monkeyp
     assert _names(out["account_phases"]) == ["未接触", "リード", "未成約顧客", "成約顧客"]
     assert _names(out["prospect_phases"]) == ["未接触", "連絡済", "返信あり", "アポ"]
     assert out["opportunity_phases"][0]["name"] == "商談準備"
+    # per-funnel source (AX review): every funnel is the built-in default here.
+    assert out["phases_source"] == {"account": "builtin_default",
+                                    "opportunity": "builtin_default",
+                                    "prospect": "builtin_default"}
+
+
+def test_effective_phases_reports_source_per_funnel(tmp_path, monkeypatch):
+    # AX review: a mixed project (custom account funnel, default商談/打診) must
+    # report source per funnel, not a blanket boolean — so a read→add workflow
+    # knows which funnel is already customised.
+    data = se.build_sales_project("S", "o")
+    for k in ("opportunity_phases", "prospect_phases"):
+        data.pop(k, None)                       # only account_phases stays configured
+    eff = se.effective_phases(data)
+    assert eff["source"]["account"] == "configured"
+    assert eff["source"]["opportunity"] == "builtin_default"
+    assert eff["source"]["prospect"] == "builtin_default"
+    assert eff["using_builtin_default"] is True
+
+
+def test_effective_phases_non_sales_is_empty(tmp_path, monkeypatch):
+    eff = se.effective_phases({"profession": "dev"})
+    assert eff["account"] == [] and eff["opportunity"] == [] and eff["prospect"] == []
+    assert eff["using_builtin_default"] is False
+    assert set(eff["source"].values()) == {"none"}
 
 
 def test_phase_list_sales_no_config_text_omits_not_a_sales_project(tmp_path, monkeypatch, capsys):
