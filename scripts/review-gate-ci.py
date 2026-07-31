@@ -9,24 +9,21 @@ bypass it, and running the judge depends on an AI voluntarily calling
 merge path can complete until the PR's required reviews are recorded — regardless
 of merge route or whether an AI is present.
 
-This script sets/reads the gate status. The independent judge that flips the gate
-now runs IN CI (ms-119 / e-4143, scripts/review-judge-ci.py) so a review happens
-even with no AI session present. The lifecycle:
+This scaffold does NOT run an LLM in CI. Running an independent judge on GitHub's
+runners is the deferred chunk (it needs an ANTHROPIC_API_KEY secret, per-PR API
+cost, and a blocking-policy decision). Instead the split is:
 
-  * PR open/sync → set `beacon-review-gate` = pending, so the required check
-    blocks the merge button immediately (fast, no LLM).
-  * the CI judge runs each required pr-open review type, posts advisory findings,
-    then flips the gate to success once every required review has run. The block
-    policy is "did the review run?", never the verdict (SPEC 方針4).
-  * the LOCAL review flow (`beacon review done`, called by /beacon-review-run)
-    can also flip it to success via `gh` when a review is run interactively.
+  * PR open/sync → the workflow sets `beacon-review-gate` = pending, so the
+    required check blocks the merge button immediately.
+  * the LOCAL review flow (`beacon review done`, called by /beacon-review-run
+    once a judge produces a verdict) flips it to success via `gh`.
 
-CI makes the "was it run?" question impossible to bypass by merge route.
+The judge still runs through the existing AI path; CI only makes the "was it
+run?" question impossible to bypass by merge route.
 
 Activation (repo-admin — see docs/review-gate-ci.md):
   1. set repo variable  BEACON_REVIEW_GATE_CI=1   (workflow no-ops until then)
   2. branch protection: require the status check `beacon-review-gate`
-  3. add secret ANTHROPIC_API_KEY so the CI judge (e-4143) can run
 
 Usage:
   review-gate-ci.py plan  [--pr N]                 # print the pending-status payload (pure)
