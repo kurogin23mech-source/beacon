@@ -19,29 +19,50 @@ recorded — gh, UI, and beacon alike.
 
 ## What this scaffold does (and does not)
 
-- **Does**: `.github/workflows/review-gate.yml` sets `beacon-review-gate` =
-  `pending` on PR open/sync (so the required check blocks the merge button), and
-  `beacon review done` (called by `/beacon-review-run` once a judge produces a
-  verdict) flips it to `success` via `gh`. The judge still runs through the
-  existing AI review path.
-- **Does NOT**: run an LLM in CI. Running an independent judge on GitHub's
-  runners is the **deferred chunk** — it needs an `ANTHROPIC_API_KEY` secret,
-  per-PR API cost, and a decision on which findings *block* vs merely report
-  (AX / 思想 are advisory; 目的達成 is human-gated). Until that is designed, CI
-  only enforces *that a review was run*, not the judge's verdict.
+- **`set-pending` job**: sets `beacon-review-gate` = `pending` on PR open/sync
+  (fast, no LLM), so the required check blocks the merge button immediately.
+- **`run-judge` job** (ms-119 / e-4143): runs the independent judge **in CI** —
+  for each required pr-open review type (AX + maintainability) it builds the
+  review-kernel context (`beacon review context`), runs an LLM judge
+  (`scripts/review-judge-ci.py`), posts the findings as an **advisory** PR
+  comment, and — once every required review has run — flips the gate to
+  `success`. If the judge cannot run (missing key, API error) the gate stays
+  `pending` and the merge is blocked.
+- The local flow (`beacon review done`, called by `/beacon-review-run`) can also
+  flip the gate to `success` when a review is run interactively.
 
-## Activation (repo-admin — two steps)
+### Block policy (decided 2026-07-31, SPEC 方針4)
 
-1. **Enable the workflow.** Set the repository *variable* (Settings → Secrets and
-   variables → Actions → Variables):
+The gate blocks on **whether the review ran and was recorded**, *not* on whether
+the judge found drift. Findings are **advisory** — posted as a comment, never
+failing the check. This keeps AX / 思想 reviews advisory (方針4: gating findings
+turns them into ignored drift warnings) while making the *running* of the review
+a non-bypassable required check. (目的達成 stays human-gated — it is not a CI
+judge run.)
+
+## Activation (repo-admin — three steps)
+
+1. **Add the judge's API key.** Set the repository *secret* (Settings → Secrets
+   and variables → Actions → Secrets):
+
+   ```
+   ANTHROPIC_API_KEY = sk-ant-...
+   ```
+
+   The `run-judge` job fails without it (by design — a review that cannot run
+   must not silently pass). Optional cost lever: set the repo *variable*
+   `BEACON_REVIEW_JUDGE_MODEL` (alias `sonnet`/`opus`/`haiku`, or a full model
+   id) to override each review type's `default_judge_model` (sonnet).
+
+2. **Enable the workflow.** Set the repository *variable*:
 
    ```
    BEACON_REVIEW_GATE_CI = 1
    ```
 
-   Until this is `1` the workflow job is skipped (no runs, no cost).
+   Until this is `1` both jobs are skipped (no runs, no cost).
 
-2. **Require the check.** In branch protection for `main` (Settings → Branches →
+3. **Require the check.** In branch protection for `main` (Settings → Branches →
    Branch protection rules), enable **"Require status checks to pass before
    merging"** and add the check context:
 
@@ -49,20 +70,24 @@ recorded — gh, UI, and beacon alike.
    beacon-review-gate
    ```
 
-   A PR with no recorded review then shows the check as pending/expected and the
-   merge button is blocked on every route.
+   A PR whose review hasn't run then shows the check as pending/expected and the
+   merge button is blocked on every route (gh, UI, and `beacon` alike).
 
 Optional, for the local flow to flip the check green automatically: export
 `BEACON_REVIEW_GATE_CI=1` in the session where `/beacon-review-run` finishes
 (otherwise flip it manually with `scripts/review-gate-ci.py set --state success
 --sha <PR head sha>`).
 
-## Deferred: LLM judge in CI (the "別の塊")
+### First-activation validation
 
-Running the judge itself in CI (so a review happens even with no AI session
-present) is a separate task. Open questions to settle first: model + budget per
-PR, blocking policy (which review types fail the check vs comment-only), and the
-secret (`ANTHROPIC_API_KEY`). The scaffold above is forward-compatible: the CI
-runner (`scripts/review-gate-ci.py`) already knows the required review types via
-`review_spine.batch_review_types_for_node("pr-open")`, so the judge step slots in
-where the `pending` status is set today.
+Because the judge depends on `beacon review context` succeeding on the CI runner,
+validate on one throwaway PR after activating: open a PR, confirm `run-judge`
+posts an advisory comment for each type and the `beacon-review-gate` check goes
+green, then confirm a PR with the judge disabled (or failing) leaves the check
+pending and blocks merge.
+
+## Cost
+
+The judge runs once per required review type per PR sync. AX + maintainability =
+2 LLM calls per push, on the sonnet-tier model by default. There is no cost until
+`BEACON_REVIEW_GATE_CI=1` **and** `ANTHROPIC_API_KEY` are both set.

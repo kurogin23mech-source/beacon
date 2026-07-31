@@ -26,6 +26,7 @@ on:
 permissions:
   statuses: write        # to POST the commit status
   contents: read
+  pull-requests: write   # to post the advisory judge comment (ms-119 e-4143)
 
 jobs:
   set-pending:
@@ -41,5 +42,62 @@ jobs:
         run: |
           python3 scripts/review-gate-ci.py set \
             --state pending \
+            --sha "${{ github.event.pull_request.head.sha }}" \
+            --pr "${{ github.event.pull_request.number }}"
+
+  run-judge:
+    # ms-119 e-4143: run the independent judge IN CI so a review happens even with
+    # no AI session present. Depends on set-pending so the gate is already `pending`
+    # (merge blocked) before the judge runs; flips it to `success` only after EVERY
+    # required pr-open review type (AX + maintainability) has run. Findings are
+    # advisory (posted as a comment) — the gate blocks on "did the review run?",
+    # never on the verdict (SPEC 方針4). Default OFF with set-pending.
+    needs: set-pending
+    if: vars.BEACON_REVIEW_GATE_CI == '1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install the Anthropic SDK (CI-only judge dependency)
+        run: pip install --quiet anthropic
+      - name: Run the independent judge for each required review type
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # optional per-run cost lever; defaults to each type's default_judge_model (sonnet)
+          BEACON_REVIEW_JUDGE_MODEL: ${{ vars.BEACON_REVIEW_JUDGE_MODEL }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+            echo "::error::BEACON_REVIEW_GATE_CI=1 but ANTHROPIC_API_KEY secret is unset — the judge cannot run, so the gate stays pending (merge blocked). Add the secret (see docs/review-gate-ci.md)." >&2
+            exit 1
+          fi
+          # The required pr-open review types (AX + maintainability) come from the
+          # same registry the gate uses, so a newly-registered pr-open type joins
+          # here with no edit.
+          TYPES=$(python3 scripts/review-gate-ci.py plan --pr "$PR" \
+                  | python3 -c "import json,sys; print(' '.join(json.load(sys.stdin)['required_reviews']))")
+          echo "Required review types: $TYPES"
+          for t in $TYPES; do
+            echo "::group::judge: $t"
+            ./bin/beacon review context --type "$t" --pr "$PR" --mode diff > "ctx-$t.json"
+            python3 scripts/review-judge-ci.py judge \
+              --context-file "ctx-$t.json" \
+              --comment-out "comment-$t.md" \
+              --result-out "result-$t.json"
+            gh pr comment "$PR" --body-file "comment-$t.md"
+            echo "::endgroup::"
+          done
+      - name: Flip beacon-review-gate = success (every required review ran)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          python3 scripts/review-gate-ci.py set \
+            --state success \
             --sha "${{ github.event.pull_request.head.sha }}" \
             --pr "${{ github.event.pull_request.number }}"
