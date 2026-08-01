@@ -1961,7 +1961,8 @@ def _backlog_undisposed_message(eid: str, target_id: str, undisposed: list) -> s
     highest/high tasks without a disposition (ms-119 / e-4579). Renders the concrete
     blocking backlog + the recovery command, sharing the block layout with
     _ta.format_backlog_gap so surface and refusal cannot drift."""
-    body = _ta.format_backlog_gap(undisposed, target_id=target_id)
+    body = _ta.format_backlog_gap(undisposed, target_id=target_id,
+                                  spec_updated_at=_spec_updated_at_for_target(target_id))
     return (
         f"Error: 承認依頼 {eid} は未着手の重要タスク (highest/high) の disposition が"
         f"未完です (ms-119 / e-4579)。\n"
@@ -2044,7 +2045,8 @@ def _route_completion_to_review(data: dict, ms_id: str, *, reason: str,
     # ms-119 e-4579: surface the unstarted highest/high backlog up front, so the
     # approver knows the disposition table must be filled before approve will pass.
     _bgap = _ta.format_backlog_gap(
-        core.unstarted_priority_tasks(target), target_id=ms_id)
+        core.unstarted_priority_tasks(target), target_id=ms_id,
+        spec_updated_at=_spec_updated_at_for_target(ms_id))
     if _bgap:
         print(_bgap)
     _print_evidence_guidance(eid, ms_id)
@@ -2118,7 +2120,8 @@ def cmd_target_review_request():
     # ms-119 e-4579: surface the unstarted highest/high backlog up front so the
     # approver knows the disposition table must be filled before approve will pass.
     _bgap = _ta.format_backlog_gap(
-        core.unstarted_priority_tasks(target), target_id=target_id)
+        core.unstarted_priority_tasks(target), target_id=target_id,
+        spec_updated_at=_spec_updated_at_for_target(target_id))
     if _bgap:
         print(_bgap)
     _print_evidence_guidance(eid, target_id)
@@ -2325,8 +2328,10 @@ def cmd_target_attach_disposition():
     if _tgt:
         remaining = _ta.undisposed_backlog(
             entry, core.unstarted_priority_tasks(_tgt[0]))
+        _rtid = entry["meta"].get("target_id", "")
         _gap = _ta.format_backlog_gap(
-            remaining, target_id=entry["meta"].get("target_id", ""))
+            remaining, target_id=_rtid,
+            spec_updated_at=_spec_updated_at_for_target(_rtid))
         if _gap:
             print(_gap)
         else:
@@ -12931,6 +12936,22 @@ def _spec_doc_for_target(target_id: str, kind: str) -> Optional[dict]:
         if doc.get("scope") == "spec" and doc.get(field) == target_id:
             return doc
     return None
+
+
+def _spec_updated_at_for_target(target_id: str) -> Optional[str]:
+    """The SPEC doc's ``updated_at`` for a target, or None (ms-119 / e-4597).
+
+    Evidence for the task↔SPEC last-written-intent tie-breaker in the attainment
+    disposition gate: reuses the single-source _spec_doc_for_target scan, inferring the
+    kind from the id prefix (op- → operation, else milestone). Best-effort — no spec /
+    transport failure → None (the tie-breaker is simply omitted, never wrong)."""
+    if not target_id:
+        return None
+    kind = "operation" if str(target_id).startswith("op-") else "milestone"
+    doc = _spec_doc_for_target(target_id, kind)
+    if not doc:
+        return None
+    return doc.get("updated_at") or None
 
 
 def _spec_exists_for_ms(ms_id: str) -> bool:
