@@ -101,3 +101,34 @@ def test_bad_explicit_milestone_id_raises():
     with pytest.raises(ValueError):
         occupation.record_target_entry(data, "ms-999", description="x",
                                        source="auto", date="2026-08-02")
+
+
+# --- is_valid_link_target: profession-agnostic link validation (philosophy #1) --
+
+def test_is_valid_link_target_hard_validates_sales_and_is_lenient_for_dev():
+    data = {"profession": "sales",
+            "accounts": [{"id": "acc-1"}],
+            "opportunities": [{"id": "opp-1"}],
+            "acquisitions": [{"id": "acq-1"}]}
+    # hard-validated sales classes: existence checked
+    assert occupation.is_valid_link_target(data, "acc-1") is True
+    assert occupation.is_valid_link_target(data, "acc-9") is False
+    assert occupation.is_valid_link_target(data, "opp-1") is True
+    assert occupation.is_valid_link_target(data, "acq-9") is False
+    # dev / trek / unknown / empty → lenient (True), it is a "safe to link" check
+    assert occupation.is_valid_link_target(data, "ms-5") is True
+    assert occupation.is_valid_link_target(data, "tk-abc") is True
+    assert occupation.is_valid_link_target(data, "ct-9") is True
+    assert occupation.is_valid_link_target(data, "") is True
+
+
+def test_hard_validated_collection_keys_are_known_target_kinds():
+    """Parity guard (maintainability review 2026-08-02 #1): every kind in
+    occupation._HARD_VALIDATED_COLLECTION must be a recognised target kind in
+    work_model's prefix map — so a typo / stale entry (or a kind removed from
+    work_model) is caught by CI rather than silently giving a target lenient
+    treatment it should not get."""
+    import work_model
+    known_kinds = set(work_model._TARGET_PREFIX_KIND.values())
+    for kind in occupation._HARD_VALIDATED_COLLECTION:
+        assert kind in known_kinds, f"{kind} not a known target kind"

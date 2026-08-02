@@ -238,6 +238,41 @@ def record_target_entry(data: dict, target_id: str = "", *, description: str,
     return {"recorded": False, "reason": f"{kind or 'unknown'}-no-changelog"}
 
 
+# Target classes whose existence is hard-validated before a shared capability
+# (doc) links to them: a sales account / opportunity / acquisition id must refer
+# to a real record. Dev targets (milestone / operation), trek, and unknown /
+# descriptor-defined prefixes keep the lenient round-trip. Located HERE (the
+# occupation dispatch layer, which is allowed to know sales collections) so a
+# profession-SHARED capability validates a link target WITHOUT branching on sales
+# collections itself (ms-134, philosophy review 2026-08-02 #1).
+_HARD_VALIDATED_COLLECTION = {
+    "account": "accounts",
+    "opportunity": "opportunities",
+    "acquisition": "acquisitions",
+}
+
+
+def is_valid_link_target(data: dict, target_id: str) -> bool:
+    """True when ``target_id`` is SAFE to link a doc to — profession-agnostic
+    (ms-134; named for its contract, not "does it exist", per AX review
+    2026-08-02 #1).
+
+    Returns ``True`` when the target exists OR when its kind is not hard-validated
+    (a dev milestone / operation, a trek, or an unknown / descriptor-defined
+    prefix → lenient pass, matching the pre-ms-134 round-trip). Returns ``False``
+    ONLY for a hard-validated sales class (account / opportunity / acquisition)
+    whose id has no record. NOTE the lenient side: a non-existent ``ms-999`` returns
+    ``True`` (dev is not hard-validated here) — this is a "safe to link" check, not
+    a general existence check. This is the seam that lets a profession-SHARED (L2)
+    capability such as ``doc`` validate a link target without reaching into sales
+    collections directly."""
+    kind = _wm.target_kind(target_id or "")
+    coll = _HARD_VALIDATED_COLLECTION.get(kind)
+    if not coll:
+        return True
+    return (target_id or "") in {x.get("id") for x in data.get(coll, [])}
+
+
 # ---------------------------------------------------------------------------
 # Onboarding plan — WHAT init asks + the ROLE of the project's objective/vision,
 # per occupation (ms-133 e-4648 / e-4408).
