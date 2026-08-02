@@ -208,4 +208,23 @@ if [ -f scripts/check-branch-focus-divergence.py ]; then
   python3 scripts/check-branch-focus-divergence.py 2>&1 | sed 's/^/[pre-commit] /' || true
 fi
 
+# ==============================================================================
+# Check 9: Capability scope invariant (added 2026-08-02, ms-134 e-4721)
+# ==============================================================================
+# When the CLI surface (commands.py) or the scope ledger / occupation / core
+# recording layer changes, verify every verb is classified L0..L4 and no
+# profession-shared (L1/L2) capability reaches a profession concrete
+# (core.save_entry / find_target_milestone — it must record through
+# occupation.record_target_entry). strict mode (= exit 1) blocks the commit so
+# the boundary e-4720 closed for `doc` cannot silently re-open.
+if echo "$STAGED" | grep -qE "^(lib/commands\.py|lib/capability_ledger\.py|lib/occupation\.py|lib/core\.py|scripts/check-capability-scope\.py)$"; then
+  if [ -f scripts/check-capability-scope.py ]; then
+    python3 scripts/check-capability-scope.py 2>&1 | sed 's/^/[pre-commit] /'
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+      echo "[pre-commit] ERROR: capability scope 違反を解消してから commit してください (ms-134 e-4721)。" >&2
+      exit 1
+    fi
+  fi
+fi
+
 exit 0

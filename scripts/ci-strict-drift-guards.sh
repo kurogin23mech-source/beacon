@@ -29,4 +29,12 @@ python3 "$ROOT/scripts/check-server-lib-collision.py" --strict
 echo "[ci-strict-drift-guards] INSTALL.md static validation…"
 python3 "$ROOT/scripts/check-install-md.py" --strict
 
+echo "[ci-strict-drift-guards] capability scope invariant (ms-134 e-4721)…"
+# Every CLI verb must classify L0..L4, and no profession-shared (L1/L2)
+# capability may reach a profession concrete (core.save_entry /
+# find_target_milestone) — it must record through occupation.record_target_entry.
+# This is the boundary e-4720 closed for `doc`; blocking it here keeps a
+# regression from shipping.
+python3 "$ROOT/scripts/check-capability-scope.py"
+
 echo "[ci-strict-drift-guards] all strict drift guards passed."
