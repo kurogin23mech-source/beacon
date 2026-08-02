@@ -101,3 +101,22 @@ def test_bad_explicit_milestone_id_raises():
     with pytest.raises(ValueError):
         occupation.record_target_entry(data, "ms-999", description="x",
                                        source="auto", date="2026-08-02")
+
+
+# --- target_exists: profession-agnostic link validation (philosophy #1) -----
+
+def test_target_exists_hard_validates_sales_and_is_lenient_for_dev():
+    data = {"profession": "sales",
+            "accounts": [{"id": "acc-1"}],
+            "opportunities": [{"id": "opp-1"}],
+            "acquisitions": [{"id": "acq-1"}]}
+    # hard-validated sales classes: existence checked
+    assert occupation.target_exists(data, "acc-1") is True
+    assert occupation.target_exists(data, "acc-9") is False
+    assert occupation.target_exists(data, "opp-1") is True
+    assert occupation.target_exists(data, "acq-9") is False
+    # dev / trek / unknown / empty → lenient (True)
+    assert occupation.target_exists(data, "ms-5") is True
+    assert occupation.target_exists(data, "tk-abc") is True
+    assert occupation.target_exists(data, "ct-9") is True
+    assert occupation.target_exists(data, "") is True

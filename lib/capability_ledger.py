@@ -78,11 +78,14 @@ SCOPE_LEVELS = {
 
 ORIGINS = {"beacon-default", "client-custom", "individual-via-trailnode"}
 
-# Sharing breadth for the dependency partial order (bigger = shared more widely).
-# L0 is intentionally absent: it is the product-operation layer, a separate axis.
-# Its rule is expressed directly in ``may_depend`` / the checker, not as a breadth
-# rank — an L0 capability may depend on L1/L2 but must not be depended ON by a
-# public (L1..L4) capability, and must not ship in the public distribution.
+# Sharing breadth for the dependency partial order (bigger = shared more widely),
+# on the SINGLE sharing-scope axis. L0 is not given a breadth rank here because
+# its rule is asymmetric rather than a different axis: an L0 (product-operation)
+# capability may depend on any public level, but no public (L1..L4) capability
+# may depend on L0, and L0 must not ship in the public distribution. ``may_depend``
+# encodes that L0 rule explicitly (it is still the same sharing-scope axis, just a
+# rank whose dependency edge only points inward). Reworded per philosophy review
+# 2026-08-02 #5 so "L0 special-case" is not misread as "L0 is a second axis".
 _SCOPE_BREADTH = {"L1": 4, "L2": 3, "L3": 2, "L4": 1}
 
 # Profession-shared scopes: capabilities here must not reach a profession concrete.
@@ -90,12 +93,26 @@ PROFESSION_SHARED_SCOPES = ("L1", "L2")
 
 # The profession-specific concrete symbols an L1/L2 capability must NOT call.
 # Each maps to the abstraction it should use instead (surfaced in the violation
-# message so a fix is one step away, per ms-115 方針5).
+# message so a fix is one step away, per ms-115 方針5). Both profession sides are
+# listed so the invariant is SYMMETRIC (philosophy review 2026-08-02 #1): a shared
+# capability reaching a dev concrete (milestone recorder) OR a sales concrete
+# (activity / communication / nurturing recorder) is flagged. Existence /
+# validation and recording both route through the occupation layer
+# (``occupation.target_exists`` / ``occupation.record_target_entry``) instead.
 PROFESSION_CONCRETE_SYMBOLS = {
+    # dev (milestone) concretes
     "core.save_entry":
         "dev milestone changelog recorder — use occupation.record_target_entry",
     "core.find_target_milestone":
         "dev milestone resolver — record via occupation.record_target_entry",
+    # sales concretes (symmetric side)
+    "sales_entities.activity_add":
+        "sales activity recorder — a shared capability must record via "
+        "occupation.record_target_entry, not a profession concrete",
+    "sales_entities.communication_add":
+        "sales communication recorder — record via occupation.record_target_entry",
+    "sales_entities.nurturing_add":
+        "sales nurturing recorder — record via occupation.record_target_entry",
 }
 
 

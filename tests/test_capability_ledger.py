@@ -185,3 +185,28 @@ def test_checker_allows_profession_specific_concrete_use(tmp_path):
     path = _write(tmp_path, "commands.py", _SYNTH_ALLOWED)
     viol = chk.find_invariant_violations(path)
     assert viol == []
+
+
+_SYNTH_SALES_CONCRETE = '''
+import sales_entities
+def cmd_doc_synthetic3():
+    # a shared (doc→L2) handler must not reach a SALES concrete either (symmetry).
+    data = {}
+    sales_entities.activity_add(data, "opp-1", "x")
+'''
+
+
+def test_checker_flags_shared_handler_reaching_sales_concrete(tmp_path):
+    """Symmetry (philosophy #1): an L1/L2 capability reaching a SALES concrete
+    (sales_entities.activity_add) is flagged, not just the dev side."""
+    path = _write(tmp_path, "commands.py", _SYNTH_SALES_CONCRETE)
+    viol = chk.find_invariant_violations(path)
+    assert len(viol) == 1, viol
+    assert viol[0]["verb"] == "doc_synthetic3"
+    assert viol[0]["symbol"] == "sales_entities.activity_add"
+
+
+def test_sales_concretes_are_in_denylist():
+    # both profession sides present so the invariant is symmetric.
+    assert "core.save_entry" in cl.PROFESSION_CONCRETE_SYMBOLS
+    assert "sales_entities.activity_add" in cl.PROFESSION_CONCRETE_SYMBOLS

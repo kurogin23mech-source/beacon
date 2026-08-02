@@ -238,6 +238,37 @@ def record_target_entry(data: dict, target_id: str = "", *, description: str,
     return {"recorded": False, "reason": f"{kind or 'unknown'}-no-changelog"}
 
 
+# Target classes whose existence is hard-validated before a shared capability
+# (doc) links to them: a sales account / opportunity / acquisition id must refer
+# to a real record. Dev targets (milestone / operation), trek, and unknown /
+# descriptor-defined prefixes keep the lenient round-trip. Located HERE (the
+# occupation dispatch layer, which is allowed to know sales collections) so a
+# profession-SHARED capability validates a link target WITHOUT branching on sales
+# collections itself (ms-134, philosophy review 2026-08-02 #1).
+_HARD_VALIDATED_COLLECTION = {
+    "account": "accounts",
+    "opportunity": "opportunities",
+    "acquisition": "acquisitions",
+}
+
+
+def target_exists(data: dict, target_id: str) -> bool:
+    """Profession-agnostic existence check for a doc's link target (ms-134).
+
+    Returns ``True`` when the target exists OR when its kind is not hard-validated
+    (a dev milestone / operation, a trek, or an unknown / descriptor-defined
+    prefix → lenient, matching the pre-ms-134 round-trip). Returns ``False`` only
+    for a hard-validated sales class (account / opportunity / acquisition) whose
+    id has no record. This is the seam that lets a profession-SHARED (L2)
+    capability such as ``doc`` validate a link target without reaching into sales
+    collections directly."""
+    kind = _wm.target_kind(target_id or "")
+    coll = _HARD_VALIDATED_COLLECTION.get(kind)
+    if not coll:
+        return True
+    return (target_id or "") in {x.get("id") for x in data.get(coll, [])}
+
+
 # ---------------------------------------------------------------------------
 # Onboarding plan — WHAT init asks + the ROLE of the project's objective/vision,
 # per occupation (ms-133 e-4648 / e-4408).

@@ -52,15 +52,16 @@ def _commands_path() -> str:
 # --- AST helpers -----------------------------------------------------------
 
 def _forbidden_attr(node: ast.AST) -> str:
-    """Return ``core.<attr>`` when ``node`` is a call to one of the forbidden
-    dev-concrete symbols (``core.save_entry`` / ``core.find_target_milestone``),
-    else ``""``. Matches ``core.attr(...)`` — the way commands.py invokes them."""
+    """Return ``<module>.<attr>`` when ``node`` is a call to one of the forbidden
+    profession-concrete symbols (dev: ``core.save_entry`` /
+    ``core.find_target_milestone``; sales: ``sales_entities.activity_add`` etc.),
+    else ``""``. Matches ``module.attr(...)`` — the way commands.py invokes them.
+    Both profession sides are checked so the invariant is symmetric (ms-134)."""
     if not isinstance(node, ast.Call):
         return ""
     fn = node.func
-    if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name) \
-            and fn.value.id == "core":
-        dotted = f"core.{fn.attr}"
+    if isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name):
+        dotted = f"{fn.value.id}.{fn.attr}"
         if dotted in cl.PROFESSION_CONCRETE_SYMBOLS:
             return dotted
     return ""

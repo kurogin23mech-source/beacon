@@ -14777,31 +14777,18 @@ def cmd_doc_show():
 # step (ms-131 added ``acquisition`` — the acq- Target that table-doc links to).
 # ---------------------------------------------------------------------------
 
-_SALES_TARGET_COLLECTION = {
-    "account": "accounts",
-    "opportunity": "opportunities",
-    "acquisition": "acquisitions",
-}
+def _validate_link_target_exists(target: str) -> None:
+    """Exit with a clear error if a doc's link ``target`` is a hard-validated
+    class (sales account / opportunity / acquisition) whose id has no record.
 
-
-def _is_sales_target(target: str) -> bool:
-    """True when ``target`` is a non-dev sales Target (account/opportunity/
-    acquisition) — the classes with no milestone/operation entry log."""
-    import work_model
-    return work_model.target_kind(target or "") in _SALES_TARGET_COLLECTION
-
-
-def _validate_sales_target_exists(target: str) -> None:
-    """Hard-validate that a sales Target id refers to an existing entity; exit
-    with a clear error if not. No-op for dev Targets / unknown prefixes (they
-    keep the pre-existing lenient round-trip behavior)."""
-    import work_model
-    kind = work_model.target_kind(target or "")
-    coll = _SALES_TARGET_COLLECTION.get(kind)
-    if not coll:
-        return
-    data = load_project()
-    if target not in {x.get("id") for x in data.get(coll, [])}:
+    ms-134 (philosophy review 2026-08-02 #1): the existence knowledge — which
+    kinds are hard-validated and which collections hold them — lives in the
+    occupation dispatch layer (``occupation.target_exists``), NOT here. So this
+    profession-SHARED (doc) path no longer branches on sales collections; it asks
+    the occupation layer and only owns the CLI error/exit. No-op for dev /
+    unknown targets (lenient round-trip preserved)."""
+    if target and not occupation.target_exists(load_project(), target):
+        kind = work_model.target_kind(target or "")
         print(f"Error: {kind} not found: {target}", file=sys.stderr)
         sys.exit(1)
 
@@ -14857,7 +14844,7 @@ def cmd_doc_add():
     # stay lenient (their pre-existing behavior); an unknown prefix is left to
     # round-trip untouched.
     if target:
-        _validate_sales_target_exists(target)
+        _validate_link_target_exists(target)
 
     content = _resolve_content_input(content)
 
@@ -15060,7 +15047,7 @@ def cmd_doc_update():
     # Hard-validate the sales Target classes when explicitly passed (a preserved
     # existing link was already validated at creation).
     if target_in:
-        _validate_sales_target_exists(target_in)
+        _validate_link_target_exists(target_in)
 
     # Rebuild with frontmatter. e-1859: _add_frontmatter is called with an
     # explicit "scope wipe" pass so the field we are dropping (= operation
@@ -15211,7 +15198,7 @@ def _persist_table_doc(*, title, columns, scope, milestone="", operation="",
     # ms-131 e-4497 — hard-validate a sales Target (account/opportunity/
     # acquisition) exists before linking, mirroring cmd_doc_add.
     if target:
-        _validate_sales_target_exists(target)
+        _validate_link_target_exists(target)
     if scope == "core":
         milestone = milestone or None
     body = table_doc.serialize_table_body(title, model)
@@ -26851,7 +26838,7 @@ def cmd_acquisition_attach_list():
         sys.exit(1)
     # Validate the施策 exists up-front so the error names the acquisition (the
     # shared create path re-checks, but this keeps the message on the acq-).
-    _validate_sales_target_exists(acq_id)
+    _validate_link_target_exists(acq_id)
     # Phase funnel resolution (ms-132 e-4502): an explicit --phases override wins;
     # otherwise bake the project's *configured* prospect funnel so a company that
     # edited `beacon phase prospect ...` gets its own vocabulary; falling back to
@@ -26902,7 +26889,7 @@ def cmd_acquisition_lists():
               "<acq-id> [--json]\n  (`beacon acquisition list` で acq- ID を確認)",
               file=sys.stderr)
         sys.exit(1)
-    _validate_sales_target_exists(acq_id)
+    _validate_link_target_exists(acq_id)
 
     store = get_store()
     linked = [d for d in store.list_documents()
