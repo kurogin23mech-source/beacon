@@ -15097,11 +15097,17 @@ def cmd_doc_update():
     # ``core.save_entry`` that errored with "No active milestone" in a milestone-
     # less project (bug e-4710). core docs are project-wide, and a detach
     # (``--target ""``) intentionally unlinks the doc — neither records.
+    # ms-134: same conditional-save pattern as cmd_doc_add / _persist_table_doc —
+    # persist only when the side-effect actually recorded (a no-op record means
+    # data is unchanged, so no write). Keeps the three doc write paths uniform
+    # (maintainability review 2026-08-02, finding B).
+    rec = {"recorded": False}
     if scope != "core" and not detach_target:
-        occupation.record_target_entry(
+        rec = occupation.record_target_entry(
             data, target or "", description=f"doc update: {title} ({scope})",
             source="auto", date=today, revision_id=doc_id or "")
-    save_project(data)
+    if rec.get("recorded"):
+        save_project(data)
 
     if json_mode:
         print(json.dumps({"doc_id": doc_id, "title": title, "scope": scope}, ensure_ascii=False))

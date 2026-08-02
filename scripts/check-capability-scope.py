@@ -20,7 +20,10 @@ The invariant scan uses the AST (not text/grep) so a mention of the forbidden
 symbol inside a comment or docstring is NOT a false hit — only a real call is.
 A call inside a private helper (``_foo``) is attributed to the scope of the
 cmd_<verb> handlers that call that helper (transitive), so a shared handler
-cannot dodge the check by moving the concrete call into a helper.
+cannot dodge the check by moving the concrete call into a helper. NOTE: this is
+ONE level (cmd → helper); a helper → helper → concrete chain is not followed.
+commands.py has no such 2-level chain today; if one is introduced, deepen
+``_cmd_handlers_calling`` to walk helper-to-helper edges.
 
 usage:
   python3 scripts/check-capability-scope.py            # human report
@@ -213,6 +216,10 @@ def main() -> int:
     if result["ok"]:
         print("  OK: every capability is classified and no profession-shared "
               "capability reaches a profession concrete.")
+    else:
+        print("  → Fix the items above (classify the verb/skill, or route the "
+              "shared capability through occupation.record_target_entry), then "
+              "re-run: python3 scripts/check-capability-scope.py")
     return 0 if result["ok"] else 1
 
 
