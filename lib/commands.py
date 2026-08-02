@@ -14783,13 +14783,17 @@ def _validate_link_target_exists(target: str) -> None:
 
     ms-134 (philosophy review 2026-08-02 #1): the existence knowledge — which
     kinds are hard-validated and which collections hold them — lives in the
-    occupation dispatch layer (``occupation.target_exists``), NOT here. So this
-    profession-SHARED (doc) path no longer branches on sales collections; it asks
-    the occupation layer and only owns the CLI error/exit. No-op for dev /
+    occupation dispatch layer (``occupation.is_valid_link_target``), NOT here. So
+    this profession-SHARED (doc) path no longer branches on sales collections; it
+    asks the occupation layer and only owns the CLI error/exit. No-op for dev /
     unknown targets (lenient round-trip preserved)."""
-    if target and not occupation.target_exists(load_project(), target):
+    if target and not occupation.is_valid_link_target(load_project(), target):
         kind = work_model.target_kind(target or "")
-        print(f"Error: {kind} not found: {target}", file=sys.stderr)
+        # AX review 2026-08-02 #2: name the recovery path so a caller can find a
+        # valid id instead of guessing. account / opportunity / acquisition each
+        # have a `list` verb.
+        print(f"Error: {kind} '{target}' not found. "
+              f"Run 'beacon {kind} list' to see valid IDs.", file=sys.stderr)
         sys.exit(1)
 
 

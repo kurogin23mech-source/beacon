@@ -252,14 +252,18 @@ _HARD_VALIDATED_COLLECTION = {
 }
 
 
-def target_exists(data: dict, target_id: str) -> bool:
-    """Profession-agnostic existence check for a doc's link target (ms-134).
+def is_valid_link_target(data: dict, target_id: str) -> bool:
+    """True when ``target_id`` is SAFE to link a doc to — profession-agnostic
+    (ms-134; named for its contract, not "does it exist", per AX review
+    2026-08-02 #1).
 
     Returns ``True`` when the target exists OR when its kind is not hard-validated
     (a dev milestone / operation, a trek, or an unknown / descriptor-defined
-    prefix → lenient, matching the pre-ms-134 round-trip). Returns ``False`` only
-    for a hard-validated sales class (account / opportunity / acquisition) whose
-    id has no record. This is the seam that lets a profession-SHARED (L2)
+    prefix → lenient pass, matching the pre-ms-134 round-trip). Returns ``False``
+    ONLY for a hard-validated sales class (account / opportunity / acquisition)
+    whose id has no record. NOTE the lenient side: a non-existent ``ms-999`` returns
+    ``True`` (dev is not hard-validated here) — this is a "safe to link" check, not
+    a general existence check. This is the seam that lets a profession-SHARED (L2)
     capability such as ``doc`` validate a link target without reaching into sales
     collections directly."""
     kind = _wm.target_kind(target_id or "")

@@ -98,7 +98,7 @@ PROFESSION_SHARED_SCOPES = ("L1", "L2")
 # capability reaching a dev concrete (milestone recorder) OR a sales concrete
 # (activity / communication / nurturing recorder) is flagged. Existence /
 # validation and recording both route through the occupation layer
-# (``occupation.target_exists`` / ``occupation.record_target_entry``) instead.
+# (``occupation.is_valid_link_target`` / ``occupation.record_target_entry``) instead.
 PROFESSION_CONCRETE_SYMBOLS = {
     # dev (milestone) concretes
     "core.save_entry":
