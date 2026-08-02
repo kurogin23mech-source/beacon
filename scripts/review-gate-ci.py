@@ -22,7 +22,7 @@ The judge still runs through the existing AI path; CI only makes the "was it
 run?" question impossible to bypass by merge route.
 
 Activation (repo-admin — see docs/review-gate-ci.md):
-  1. set repo variable  BEACON_REVIEW_CI_ENABLED=1   (workflow no-ops until then)
+  1. set repo variable  BEACON_REVIEW_GATE_CI=1   (workflow no-ops until then)
   2. branch protection: require the status check `beacon-review-gate`
 
 Usage:

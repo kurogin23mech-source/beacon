@@ -454,30 +454,117 @@ def format_stale_done_warning(stale, *, target_id):
     return "\n".join(lines)
 
 
-def format_backlog_gap(undisposed, *, target_id):
+def authored_timestamp_tiebreaker(task_created_at, spec_updated_at):
+    """Last-written-intent tie-breaker for a task↔SPEC contradiction (ms-119 / e-4597).
+
+    When the attainment review identifies that a gated task CONTRADICTS the target's
+    SPEC (a *semantic* judgement made by the judge/human — NOT by this function), the
+    disposition needs a principled tie-breaker: the LAST WRITTEN intent wins. This
+    compares the task's ``created_at`` against the SPEC doc's ``updated_at`` and reports
+    which is newer + which way the disposition leans, as EVIDENCE for that decision:
+
+      - SPEC newer  → the SPEC re-scoped after the task was filed → the task is a
+        ``superseded`` candidate (lean = "superseded").
+      - task newer  → the task post-dates the SPEC → the task's intent stands and still
+        needs a real disposition (lean = "task-valid").
+
+    Motivating incident (ms-128 AC4): a vocab-unify task (filed 2026-07-27) was
+    de-scoped by SPEC v2 (2026-07-28), but a judge partial-judged on the stale task
+    criterion and nearly blocked attainment on an obsolete requirement. Symmetric so it
+    also protects the other direction (a task newer than the SPEC is not silently
+    superseded).
+
+    Returns {spec_newer, lean, task_created_at, spec_updated_at} or None when either
+    timestamp is missing/unparseable (surface no hint rather than a wrong one).
+
+    CRITICAL — a TIE-BREAKER, never a blind auto-supersede:
+      * the *detection* of a contradiction is semantic (judge/human); this fires only
+        as evidence once a human/judge is deciding the disposition;
+      * doc-level ``updated_at`` is COARSE — there is no per-section provenance, so an
+        edit to an unrelated SPEC section makes the whole doc look "newer". A newer SPEC
+        timestamp is therefore evidence to weigh, not proof the task is stale.
+    Pure (parses the two given strings; no clock read)."""
+    from datetime import datetime
+
+    def _parse(ts):
+        if not ts or not isinstance(ts, str):
+            return None
+        s = ts.strip().replace("Z", "+00:00")
+        for candidate in (s, s[:19]):  # full ISO, then second-precision fallback
+            try:
+                # compare naive: a tz-present/absent mix across our own timestamps is
+                # noise at the day-grain this coarse tie-breaker operates on.
+                return datetime.fromisoformat(candidate).replace(tzinfo=None)
+            except ValueError:
+                continue
+        return None
+
+    t = _parse(task_created_at)
+    s = _parse(spec_updated_at)
+    if t is None or s is None:
+        return None
+    spec_newer = s > t
+    return {
+        "spec_newer": spec_newer,
+        "lean": "superseded" if spec_newer else "task-valid",
+        "task_created_at": task_created_at,
+        "spec_updated_at": spec_updated_at,
+    }
+
+
+def format_backlog_gap(undisposed, *, target_id, spec_updated_at=None):
     """Render the "unstarted important tasks still need a disposition" block.
 
     Returns "" when ``undisposed`` is empty (caller omits the section). This is the
     forcing-function surface: it names each blocking task + its priority so the
-    human/judge sees the concrete backlog the attainment claim is skipping over."""
+    human/judge sees the concrete backlog the attainment claim is skipping over.
+
+    ``spec_updated_at`` (ms-119 / e-4597): the target's SPEC doc ``updated_at``. When
+    given, each task also gets a last-written-intent tie-breaker line (task.created_at
+    vs the SPEC timestamp) so a judge/human deciding whether the task is superseded by a
+    re-scoped SPEC has the evidence inline. Advisory — the disposition is still explicit
+    and required; None (no SPEC / unresolvable) simply omits the tie-breaker."""
     if not undisposed:
         return ""
     verdicts = "|".join(DISPOSITION_VERDICTS)
     lines = [
         f"⚠ 未着手の重要タスク ({target_id}) — attainment 承認前に明示 disposition が必要:",
     ]
+    showed_tiebreaker = False
     for task in undisposed:
         pri = ((task.get("meta") or {}).get("priority") or "").strip() or "?"
         desc = (task.get("description") or "").strip()
         if len(desc) > 60:
             desc = desc[:57] + "..."
         lines.append(f"  - {task.get('id')} [{pri}] {desc}")
+        # ms-119 / e-4597: last-written-intent tie-breaker, surfaced as EVIDENCE for the
+        # disposition when a SPEC timestamp is available. Framed "矛盾時の" — it only
+        # applies IF the judge/human finds a contradiction; it is never auto-applied.
+        if spec_updated_at:
+            tb = authored_timestamp_tiebreaker(task.get("created_at"), spec_updated_at)
+            if tb:
+                showed_tiebreaker = True
+                tdate = (task.get("created_at") or "")[:10]
+                sdate = (spec_updated_at or "")[:10]
+                if tb["spec_newer"]:
+                    lines.append(
+                        f"      ↳ 矛盾時の tie-breaker: SPEC({sdate}) が task({tdate}) より"
+                        f"新しい → last-written-intent は SPEC 側 = superseded 候補")
+                else:
+                    lines.append(
+                        f"      ↳ 矛盾時の tie-breaker: task({tdate}) が SPEC({sdate}) より"
+                        f"新しい → タスク側の意図が有効 = done/blocks-attainment で disposition")
     lines.append(
         f"  各タスクに: beacon target attach-disposition <entry-id> "
         f"--task <task-id> --disposition <{verdicts}> [--reason <text> (superseded 時必須)]")
     lines.append(
         "  (superseded は理由必須。disposition は独立 judge / 人間承認を経て確定 — "
         "実装者の自己申告では attained にできません。)")
+    if showed_tiebreaker:
+        lines.append(
+            "  ※ tie-breaker は『矛盾が検出された時』の後勝ち裁定のみ (矛盾の検出と最終判断は "
+            "judge/人間)。doc 単位 updated_at は粗く、無関係 section の変更でも SPEC が新しく"
+            "見えうるため、blind auto-supersede せず必ず確認すること。")
     return "\n".join(lines)
 
 
