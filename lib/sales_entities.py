@@ -186,13 +186,16 @@ def effective_phases(data: dict) -> dict:
     """The funnels a *sales* project actually runs on, resolved once.
 
     Each funnel is the saved per-company vocabulary if configured, else the
-    shipped ``DEFAULT_*`` seed — the SAME "configured or default" rule entity
-    creation already applies (``account_phases(data) or DEFAULT_ACCOUNT_PHASES``
-    at :216/:228/:1103). Centralising it here gives one authoritative place for
-    that rule and returns a **per-funnel source** so a caller can tell configured
-    from default *per funnel* (a project may have custom account phases but be on
-    the default opportunity funnel). Non-sales projects have no funnel → empty
-    lists, source ``none``. (ms-129 e-4405 + AX/保守性 review 2026-07-30.)
+    shipped ``DEFAULT_*`` seed — the "configured or default" rule. This is the
+    ONE authoritative place for that rule (ms-134 e-4638): the account-phase
+    derivation helpers (``_account_phase_idx`` / ``derive_account_phase``) now
+    read ``effective_phases(data)["account"]`` instead of each re-applying
+    ``account_phases(data) or DEFAULT_ACCOUNT_PHASES``, so the fallback — and its
+    profession gate (non-sales → empty, no default leak) — lives here alone. It
+    returns a **per-funnel source** so a caller can tell configured from default
+    *per funnel* (a project may have custom account phases but be on the default
+    opportunity funnel). Non-sales projects have no funnel → empty lists, source
+    ``none``. (ms-129 e-4405 + AX/保守性 review 2026-07-30; ms-134 e-4638.)
 
     Returns ``{"account": [...], "opportunity": [...], "prospect": [...],
     "source": {"account": <label>, "opportunity": ..., "prospect": ...},
@@ -1148,7 +1151,7 @@ def _opp_progress_signals(data: dict, opp: dict) -> tuple:
 
 
 def _account_phase_idx(data: dict, phase_name: str) -> int:
-    aps = account_phases(data) or DEFAULT_ACCOUNT_PHASES
+    aps = effective_phases(data)["account"]  # e-4638: fallback を effective_phases に一本化
     for i, p in enumerate(aps):
         if p.get("name") == phase_name:
             return i
@@ -1172,7 +1175,7 @@ def derive_account_phase(data: dict, account_id: str) -> Optional[str]:
     リード に上げるのは Opportunity 信号の外なので、ここでは扱わない (人手の
     phase-set / 将来の拡張)。Returns the phase NAME, or ``None`` when unconfigured.
     """
-    aps = account_phases(data) or DEFAULT_ACCOUNT_PHASES
+    aps = effective_phases(data)["account"]  # e-4638: fallback を effective_phases に一本化
     if not aps:
         return None
     n = len(aps)

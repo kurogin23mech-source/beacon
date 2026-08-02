@@ -22,12 +22,21 @@ auth / doc / session) needs no adapter, and pure L2/L3 surfaces (development
 task/milestone, sales opportunity/activity) call their own occupation's code
 directly. See SPEC ``XOaDpSaFITVkZKKgPvPT`` 設計方針 4 / 6 and the reuse map
 ``E42bCsD7eQSrtGWX0JOF``.
+
+⚠ TERMINOLOGY: the "L1 / L2 / L3" labels in THIS docstring are the OLDER
+occupation-coupling scheme (L1 = occupation-invariant, L2/L3 = occupation-
+specific). They are a DIFFERENT scheme from ms-134's L0..L4 *sharing-scope*
+ledger in ``capability_ledger.py`` — do not conflate. Notably ``doc`` is "L1
+occupation-invariant" here but "L2 class-abstraction" under the ms-134 scheme
+(that finer distinction is what caught the milestone leak e-4720). See CORE doc
+``37Svg6nD2FccJM27yBjq`` and ``capability_ledger.py``'s terminology note.
 """
 
 from __future__ import annotations
 
 import core
 import sales_entities
+import work_base
 import work_model as _wm
 import target_descriptor as _td   # ms-122 e-3957: data 定義 target-class 記述子
 import target_engine as _te       # ms-122 e-3957: 記述子駆動 target の投影
@@ -114,6 +123,119 @@ def project_targets(data: dict) -> list:
     if not rows and adapter is None:
         rows = core.project_targets(data)
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Target entry recording — the class-abstraction (L2) side-effect seam
+# (ms-134 e-4720).
+#
+# A profession-SHARED capability (a document create/update) needs to record
+# "something happened to this Target" without knowing whether the Target is a
+# development milestone or a sales opportunity. Before this, the doc write paths
+# called ``core.save_entry(ms_id=…)`` directly — the DEV concrete — which auto-
+# picks the active milestone and RAISES "No active milestone" in a project that
+# has none (any sales project). So a customer-document write succeeded but the
+# command exited non-zero (bug e-4710), and the same raised error shadowed
+# ``--account`` linkage (e-4711). The doc capability was designed shared but its
+# recording subsystem was hardcoded dev-specific — an abstraction-boundary leak.
+#
+# ``record_target_entry`` is that missing seam: it dispatches by the Target's
+# KIND (derived from its id prefix via ``work_model.target_kind``) and, crucially,
+# NO-OPS when there is nothing to record onto — a Target class with no dev-era
+# changelog (opportunity / account / acquisition / trek) or a project with no
+# milestone at all. It never forces a milestone into existence. Development
+# behaviour is unchanged (1 active milestone → recorded exactly as before; a
+# bad explicit id or an ambiguous multi-active project still errors through
+# ``core.resolve_recordable_milestone`` → ``find_target_milestone``).
+#
+# This is the ONE place allowed to reach the dev concrete (``core.save_entry``)
+# on behalf of a shared capability; the shared callers depend on THIS abstraction
+# instead. ``scripts/check-capability-scope.py`` enforces that no L1/L2 capability
+# calls the dev concrete directly.
+# ---------------------------------------------------------------------------
+
+def _record_operation_entry(data: dict, op_id: str, *, description: str,
+                            source: str, date: str, revision_id: str) -> dict:
+    """Append a ``save`` entry to operation ``op_id``'s entries, matching the
+    shape ``core.save_entry`` produces for a milestone. Returns a result dict;
+    ``{"recorded": False, "reason": "operation-not-found"}`` when the id is
+    unknown (the doc still wrote; only the side-effect log is skipped)."""
+    now = date or work_base.now_iso()
+    for op in data.get("operations", []):
+        if op.get("id") == op_id:
+            meta = {"source": source}
+            if revision_id:
+                meta["revision_id"] = revision_id
+            op.setdefault("entries", []).append({
+                "id": core.next_entry_id(data),
+                "type": "save",
+                "description": description,
+                "status": "done",
+                "created_at": now,
+                "done_at": now,
+                "meta": meta,
+            })
+            return {"recorded": True, "target": op_id}
+    return {"recorded": False, "reason": "operation-not-found"}
+
+
+def record_target_entry(data: dict, target_id: str = "", *, description: str,
+                        source: str = "auto", date: str = "",
+                        revision_id: str = "", url: str = "", hash: str = "",
+                        progress: str = "") -> dict:
+    """Record a side-effect changelog entry against a Target, dispatched by the
+    Target's kind, profession-agnostically (ms-134 e-4720).
+
+    Behaviour by target kind (derived from ``target_id``'s prefix):
+      - empty ``target_id`` → record onto the project's single active milestone
+        if one exists (development's historical auto-pick), else NO-OP (a project
+        with no milestone — e.g. sales — records nothing rather than erroring).
+      - ``operation`` → append a ``save`` entry to that operation's entries.
+      - ``milestone`` → record onto that milestone via ``core.save_entry``.
+      - ANY OTHER kind — a sales Target (opportunity / account / acquisition), a
+        trek, or an unrecognised / descriptor-defined prefix — → NO-OP. It never
+        falls through to the active milestone, so a doc explicitly linked to a
+        non-dev target never silently records onto a different one.
+
+    Returns ``{"recorded": bool, ...}``. NEVER raises for the "no milestone to
+    record onto" case; a bad explicit id / multi-active ambiguity still raises
+    through ``core.resolve_recordable_milestone`` (those are real user errors).
+    The caller decides whether to persist based on ``recorded``.
+    """
+    # No explicit target → development's historical auto-pick onto the single
+    # active milestone. Records only if one exists; a milestone-less project
+    # (sales / back-office) no-ops (the structural fix for e-4710).
+    if not target_id:
+        if core.resolve_recordable_milestone(data, "") is None:
+            return {"recorded": False, "reason": "no-milestone"}
+        result = core.save_entry(data, ms_id="", description=description,
+                                 source=source, date=date, url=url,
+                                 revision_id=revision_id, hash=hash,
+                                 progress=progress)
+        return {"recorded": True, "target": result.get("milestone", ""),
+                "result": result}
+    kind = _wm.target_kind(target_id)
+    if kind == "operation":
+        return _record_operation_entry(data, target_id, description=description,
+                                       source=source, date=date,
+                                       revision_id=revision_id)
+    if kind == "milestone":
+        if core.resolve_recordable_milestone(data, target_id) is None:
+            return {"recorded": False, "reason": "no-milestone"}
+        result = core.save_entry(data, ms_id=target_id, description=description,
+                                 source=source, date=date, url=url,
+                                 revision_id=revision_id, hash=hash,
+                                 progress=progress)
+        return {"recorded": True, "target": result.get("milestone", target_id),
+                "result": result}
+    # Any OTHER kind — a sales Target (opportunity / account / acquisition), a
+    # trek, OR an unrecognised / descriptor-defined prefix (ms-122 data-defined
+    # target-class) — has no dev-era changelog to record onto. Crucially this
+    # NEVER falls through to the active milestone: a doc EXPLICITLY linked to some
+    # target must not silently record onto a *different* one. So a new descriptor
+    # Target class is safe-by-default (no-op) without having to be enumerated
+    # anywhere (maintainability review 2026-08-02, Maint#2).
+    return {"recorded": False, "reason": f"{kind or 'unknown'}-no-changelog"}
 
 
 # ---------------------------------------------------------------------------

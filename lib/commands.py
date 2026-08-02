@@ -14902,36 +14902,21 @@ def cmd_doc_add():
             f.write(content)
 
     import datetime
-    import work_model
     data = load_project()
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # ms-109 e-3754 / ms-131 e-4497 — account / opportunity / acquisition docs
-    # have no milestone/operation legacy entry to record (they link via
-    # ``target`` only); skip the dev-era entry recording for them so we never
-    # call save_entry with an empty ms_id.
-    _is_sales_link = _is_sales_target(target)
-    # core docs: skip MS/Op entry recording (they're project-wide)
-    if scope != "core" and not _is_sales_link:
-        if operation:
-            # Record in operation entries
-            for op in data.get("operations", []):
-                if op.get("id") == operation:
-                    eid = core.next_entry_id(data)
-                    op.setdefault("entries", []).append({
-                        "id": eid,
-                        "type": "save",
-                        "description": f"doc add: {title} ({scope})",
-                        "status": "done",
-                        "created_at": today,
-                        "done_at": today,
-                        "meta": {"revision_id": doc_id, "source": "auto"},
-                    })
-                    break
-        else:
-            core.save_entry(data, ms_id=milestone, description=f"doc add: {title} ({scope})",
-                            source="auto", date=today, revision_id=doc_id,
-                            url=None, hash=None, progress=None)
-        save_project(data)
+    # ms-134 e-4720: record the doc-add side effect through the occupation layer,
+    # which dispatches by the Target's kind and no-ops when there is no dev-era
+    # changelog to record onto — a sales Target (opportunity/account/acquisition),
+    # a trek, or a project with no milestone. This replaces a direct
+    # ``core.save_entry(ms_id=…)`` that required an active milestone in EVERY
+    # project and so errored (write succeeded, exit non-zero) in a sales project
+    # (bug e-4710/e-4711). core docs are project-wide and record nothing.
+    if scope != "core":
+        rec = occupation.record_target_entry(
+            data, target or "", description=f"doc add: {title} ({scope})",
+            source="auto", date=today, revision_id=doc_id or "")
+        if rec.get("recorded"):
+            save_project(data)
 
     if json_mode:
         print(json.dumps({"doc_id": doc_id, "title": title, "scope": scope}, ensure_ascii=False))
@@ -15105,37 +15090,24 @@ def cmd_doc_update():
     import datetime
     data = load_project()
     today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    # e-1859: mirror cmd_doc_add's scope-aware entry recording so an
-    # op-scoped doc update lands in op.entries (not the milestone log).
-    # core scope is project-wide and skips entry recording entirely.
-    # ms-109 e-3754 / ms-131 e-4497: account / opportunity / acquisition docs
-    # link via ``target`` only and have no milestone/operation legacy entry.
-    # ms-131 e-4497: a detach (--target "") leaves the doc with no dev Target, so
-    # there is nothing to record — skip rather than fall through to save_entry,
-    # which would error with "No active milestone".
-    _is_sales_link = _is_sales_target(target)
-    if scope == "core" or _is_sales_link or detach_target:
-        pass
-    elif operation:
-        for op in data.get("operations", []):
-            if op.get("id") == operation:
-                eid = core.next_entry_id(data)
-                op.setdefault("entries", []).append({
-                    "id": eid,
-                    "type": "save",
-                    "description": f"doc update: {title} ({scope})",
-                    "status": "done",
-                    "created_at": today,
-                    "done_at": today,
-                    "meta": {"revision_id": doc_id, "source": "auto"},
-                })
-                break
-    else:
-        core.save_entry(data, ms_id=milestone,
-                        description=f"doc update: {title} ({scope})",
-                        source="auto", date=today, revision_id=doc_id,
-                        url=None, hash=None, progress=None)
-    save_project(data)
+    # ms-134 e-4720: record the doc-update side effect through the occupation
+    # layer, which dispatches by the Target's kind and no-ops when there is no
+    # dev-era changelog to record onto — a sales Target (opportunity/account/
+    # acquisition), a trek, or a project with no milestone. Replaces a direct
+    # ``core.save_entry`` that errored with "No active milestone" in a milestone-
+    # less project (bug e-4710). core docs are project-wide, and a detach
+    # (``--target ""``) intentionally unlinks the doc — neither records.
+    # ms-134: same conditional-save pattern as cmd_doc_add / _persist_table_doc —
+    # persist only when the side-effect actually recorded (a no-op record means
+    # data is unchanged, so no write). Keeps the three doc write paths uniform
+    # (maintainability review 2026-08-02, finding B).
+    rec = {"recorded": False}
+    if scope != "core" and not detach_target:
+        rec = occupation.record_target_entry(
+            data, target or "", description=f"doc update: {title} ({scope})",
+            source="auto", date=today, revision_id=doc_id or "")
+    if rec.get("recorded"):
+        save_project(data)
 
     if json_mode:
         print(json.dumps({"doc_id": doc_id, "title": title, "scope": scope}, ensure_ascii=False))
@@ -15261,36 +15233,22 @@ def _persist_table_doc(*, title, columns, scope, milestone="", operation="",
         fpath = os.path.join(docs_dir, f"{doc_id}.md")
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
-    # Entry recording resolves the dev Target this table-doc belongs to. A
-    # table-doc can be linked to any Target (方針6): milestone/operation get the
-    # dev entry log; sales Targets (account/opportunity/acquisition) and generic
-    # links carry none, so we skip rather than record against an empty ms_id.
+    # ms-134 e-4720: record the table-doc create side effect through the
+    # occupation layer, which dispatches by the Target's kind and no-ops when
+    # there is no dev-era changelog to record onto (sales Target / trek). Replaces
+    # a direct core.save_entry that required a milestone (bug e-4710). core docs
+    # are project-wide; a table-doc with no explicit link records nothing (its
+    # linkage lives in the frontmatter, surfaced via `doc list --target`).
     data = load_project()
     today = _now_iso()
-    _tkind = work_model.target_kind(target or "")
-    op_id = operation or (target if _tkind == "operation" else "")
-    ms_id = milestone or (target if _tkind == "milestone" else "")
-    if scope != "core" and not _is_sales_target(target):
-        if op_id:
-            for op in data.get("operations", []):
-                if op.get("id") == op_id:
-                    eid = core.next_entry_id(data)
-                    op.setdefault("entries", []).append({
-                        "id": eid, "type": "save",
-                        "description": f"table-doc create: {title} ({scope})",
-                        "status": "done", "created_at": today, "done_at": today,
-                        "meta": {"revision_id": doc_id, "source": "auto"},
-                    })
-                    break
-            save_project(data)
-        elif ms_id:
-            core.save_entry(data, ms_id=ms_id,
-                            description=f"table-doc create: {title} ({scope})",
-                            source="auto", date=today, revision_id=doc_id,
-                            url=None, hash=None, progress=None)
-            save_project(data)
-        # else: generic / no dev Target — nothing to record (linkage lives in
-        # the doc's frontmatter, surfaced via `doc list --target`).
+    if scope != "core":
+        link = target or operation or milestone or ""
+        if link:
+            rec = occupation.record_target_entry(
+                data, link, description=f"table-doc create: {title} ({scope})",
+                source="auto", date=today, revision_id=doc_id or "")
+            if rec.get("recorded"):
+                save_project(data)
     return doc_id, model
 
 

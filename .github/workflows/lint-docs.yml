@@ -20,11 +20,15 @@ on:
     paths:
       - 'bin/beacon'
       - 'lib/commands.py'
+      - 'lib/capability_ledger.py'
+      - 'lib/occupation.py'
+      - 'lib/core.py'
       - 'beacon_cli/dispatch.py'
       - 'README.md'
       - 'INSTALL.md'
       - 'skills/**'
       - 'scripts/check-*.py'
+      - 'scripts/ci-strict-drift-guards.sh'
       - '.github/workflows/lint-docs.yml'
   push:
     branches: [main]
