@@ -56,9 +56,12 @@ surface (a test pins full coverage).
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 import cli_surface
+
+_REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ---------------------------------------------------------------------------
@@ -223,3 +226,76 @@ def summary() -> dict:
         "by_scope": rec["by_scope"],
         "unclassified": len(rec["unclassified"]),
     }
+
+
+# ---------------------------------------------------------------------------
+# Skill classification (the second capability surface, e-4709 AC "CLI + Skill").
+#
+# Skills are markdown, not code, so the DEPENDENCY invariant checker (which scans
+# code for a reach into a profession concrete) does not apply to them — a skill's
+# scope is classified for the ledger / distribution story, and the code-level
+# invariant is enforced on the CLI verbs a skill calls. Rules mirror the verb
+# noun rules: sales skills are L3, the coordination-substrate skills L1, the
+# planning/knowledge skills that operate on the shared Target/project abstraction
+# L2, dev delivery-workflow skills L3, and repo-maintenance skills L0.
+# ---------------------------------------------------------------------------
+
+# Prefix rules, longest-prefix-wins, applied after exact overrides.
+_SKILL_PREFIX_SCOPE = (
+    ("beacon-sales-", "L3"),      # sales profession skills
+    ("beacon-operation-", "L1"),  # operations = cross-profession scheduling
+    ("beacon-trek-", "L1"),       # trek coordination substrate
+    ("beacon-session-", "L1"),    # session management
+    ("beacon-dm-", "L1"),         # cross-user DM
+    ("beacon-review", "L2"),      # review* operate on shared targets (ms-119 職種中立)
+    ("_beacon-", "L1"),           # methodology companions (shared authoring aids)
+)
+
+# Exact skill → scope (where the prefix rule does not fit).
+_SKILL_SCOPE = {
+    "beacon-archaeology": "L2", "beacon-bus-armed": "L1", "beacon-cloud": "L1",
+    "beacon-deploy": "L3", "beacon-dispatch": "L1", "beacon-drift-check": "L0",
+    "beacon-incident-report": "L1", "beacon-init": "L1", "beacon-log": "L3",
+    "beacon-map": "L2", "beacon-member": "L1", "beacon-note": "L1",
+    "beacon-onboard": "L1", "beacon-pr-create": "L3", "beacon-push": "L3",
+    "beacon-retro": "L2", "beacon-retrospect": "L2", "beacon-roadmap": "L2",
+    "beacon-spec": "L2", "beacon-task": "L3", "beacon-vision": "L2",
+}
+
+
+def skill_scope_of(skill_name: str) -> str:
+    """Return the L0..L4 scope of a Skill (by its name, e.g. ``beacon-task``),
+    or ``""`` when unknown. Exact override wins, then the longest matching prefix
+    rule."""
+    name = (skill_name or "").strip()
+    if name in _SKILL_SCOPE:
+        return _SKILL_SCOPE[name]
+    best, best_len = "", -1
+    for prefix, scope in _SKILL_PREFIX_SCOPE:
+        if name.startswith(prefix) and len(prefix) > best_len:
+            best, best_len = scope, len(prefix)
+    return best
+
+
+def enumerate_skills(skills_dir: str = "") -> list:
+    """Return the sorted skill names (``*.md`` basenames) shipped in the repo
+    ``skills/`` directory — the live skill surface this ledger reconciles
+    against."""
+    d = skills_dir or os.path.join(_REPO, "skills")
+    if not os.path.isdir(d):
+        return []
+    return sorted(f[:-3] for f in os.listdir(d) if f.endswith(".md"))
+
+
+def reconcile_skills(skills_dir: str = "") -> dict:
+    """Reconcile skill classification against the live skill surface. Returns
+    ``{"unclassified": [...], "by_scope": {...}}`` — a skill with no scope rule
+    is surfaced so it gets classified (mirrors ``reconcile`` for verbs)."""
+    skills = enumerate_skills(skills_dir)
+    unclassified = sorted(s for s in skills if not skill_scope_of(s))
+    by_scope: dict = {k: 0 for k in SCOPE_LEVELS}
+    for s in skills:
+        sc = skill_scope_of(s)
+        if sc:
+            by_scope[sc] = by_scope.get(sc, 0) + 1
+    return {"unclassified": unclassified, "by_scope": by_scope}

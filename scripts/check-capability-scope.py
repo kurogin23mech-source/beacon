@@ -164,11 +164,14 @@ def find_invariant_violations(commands_path: str = "") -> list:
 
 
 def run(commands_path: str = "") -> dict:
-    """Run both checks and return a structured result with an ``ok`` verdict."""
+    """Run all checks and return a structured result with an ``ok`` verdict."""
     cov = check_coverage()
+    skill_cov = cl.reconcile_skills()
     viol = find_invariant_violations(commands_path)
-    ok = not cov["unclassified"] and not viol
-    return {"ok": ok, "coverage": cov, "violations": viol}
+    ok = (not cov["unclassified"] and not skill_cov["unclassified"]
+          and not viol)
+    return {"ok": ok, "coverage": cov, "skill_coverage": skill_cov,
+            "violations": viol}
 
 
 def main() -> int:
@@ -184,14 +187,22 @@ def main() -> int:
         return 0 if result["ok"] else 1
 
     cov = result["coverage"]
+    scov = result["skill_coverage"]
     print("capability scope checker (ms-134)")
     print(f"  coverage: {sum(cov['by_scope'].values())} verbs classified "
           f"{cov['by_scope']}")
+    print(f"  skills:   {sum(scov['by_scope'].values())} skills classified "
+          f"{scov['by_scope']}")
     if cov["unclassified"]:
-        print(f"  UNCLASSIFIED ({len(cov['unclassified'])}): "
+        print(f"  UNCLASSIFIED VERBS ({len(cov['unclassified'])}): "
               f"{', '.join(cov['unclassified'])}")
         print("    → give the new noun a scope in lib/capability_ledger.py "
               "(_NOUN_SCOPE) or a per-verb override.")
+    if scov["unclassified"]:
+        print(f"  UNCLASSIFIED SKILLS ({len(scov['unclassified'])}): "
+              f"{', '.join(scov['unclassified'])}")
+        print("    → give the skill a scope in lib/capability_ledger.py "
+              "(_SKILL_SCOPE / _SKILL_PREFIX_SCOPE).")
     if result["violations"]:
         print(f"  INVARIANT VIOLATIONS ({len(result['violations'])}):")
         for v in result["violations"]:

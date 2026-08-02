@@ -40,6 +40,21 @@ def test_every_live_verb_is_classified():
         + ", ".join(rec["unclassified"]))
 
 
+def test_every_skill_is_classified():
+    rec = cl.reconcile_skills()
+    assert rec["unclassified"] == [], (
+        "unclassified skills (give a scope in _SKILL_SCOPE / _SKILL_PREFIX_SCOPE): "
+        + ", ".join(rec["unclassified"]))
+
+
+def test_key_skills_have_expected_scope():
+    assert cl.skill_scope_of("beacon-sales-email") == "L3"
+    assert cl.skill_scope_of("beacon-task") == "L3"
+    assert cl.skill_scope_of("beacon-trek-execute") == "L1"
+    assert cl.skill_scope_of("beacon-map") == "L2"
+    assert cl.skill_scope_of("_beacon-spec-methodology") == "L1"
+
+
 def test_ledger_uses_shared_surface_source():
     """The ledger reconciles against the SAME live surface the verb ledger and
     map-drift lint use, so the three can never drift apart."""
