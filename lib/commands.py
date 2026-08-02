@@ -14790,9 +14790,11 @@ def _validate_link_target_exists(target: str) -> None:
     if target and not occupation.is_valid_link_target(load_project(), target):
         kind = work_model.target_kind(target or "")
         # AX review 2026-08-02 #2: name the recovery path so a caller can find a
-        # valid id instead of guessing. account / opportunity / acquisition each
-        # have a `list` verb.
-        print(f"Error: {kind} '{target}' not found. "
+        # valid id instead of guessing. Keep the historical "{kind} not found:
+        # {target}" phrasing (multiple tests assert that contiguous substring)
+        # and APPEND the recovery hint. account/opportunity/acquisition each have
+        # a `list` verb.
+        print(f"Error: {kind} not found: {target}. "
               f"Run 'beacon {kind} list' to see valid IDs.", file=sys.stderr)
         sys.exit(1)
 
