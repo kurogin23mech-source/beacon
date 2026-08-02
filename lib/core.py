@@ -457,6 +457,36 @@ def find_target_milestone(data: dict, ms_id: str = "", *, index: int | None = No
     return active_list[0]
 
 
+def resolve_recordable_milestone(data: dict, ms_id: str = "") -> dict | None:
+    """Tolerant resolver for entry-recording *side effects* (ms-134 e-4720).
+
+    Returns the milestone dict a side-effect entry (e.g. "doc add: …") should be
+    recorded onto, or ``None`` when there is NO milestone to record onto — a
+    project with zero milestones (a sales / back-office project) must not be
+    forced to have one just so a shared capability can log a side effect.
+
+    This is deliberately narrower than ``find_target_milestone``: it swallows ONLY
+    the "no milestone exists at all" case (auto-pick over an empty list). An
+    explicit ``ms_id`` that does not exist, and the "multiple active milestones,
+    which one?" ambiguity, still RAISE through ``find_target_milestone`` — those
+    are real user errors to surface, not the profession-shape difference the
+    shared doc path must tolerate. So a dev project keeps recording exactly as
+    before (1 active → record; bad id / ambiguous → error), while a sales project
+    (0 milestones) yields ``None`` and the caller no-ops.
+
+    Callers must go through the occupation layer (``occupation.record_target_entry``),
+    not call ``save_entry`` / ``find_target_milestone`` directly, so that a
+    profession-shared (L1/L2) capability never depends on this dev concrete —
+    ``scripts/check-capability-scope.py`` enforces that boundary.
+    """
+    if not ms_id:
+        active = [ms for ms in data.get("milestones", [])
+                  if ms.get("status") == "in_progress"]
+        if not active:
+            return None
+    return find_target_milestone(data, ms_id)
+
+
 def next_entry_id(data: dict) -> str:
     """Generate next entry id across all milestones and operations (including nested).
 
