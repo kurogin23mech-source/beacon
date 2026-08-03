@@ -268,12 +268,11 @@ _NOUN_SCOPE = {
     "onboarding": "L1", "operation": "L1", "org": "L1", "resume": "L1",
     "run": "L1", "search": "L1", "session": "L1", "sessions": "L1",
     "stop": "L1", "trek": "L1", "trigger": "L1",
-    # L1 — reclassified 2026-08-03 (e-4737 台帳 review): these were mis-scoped by
-    # their noun name, not their behaviour. master = customer-identity master-sync
-    # drain (ms-111, was L0); morning = bus autonomous-activity summary (ms-55,
-    # was L3-sales); profile = Beacon auth/backend profile listing (ms-64, was
-    # L3-sales). All three are profession-generic coordination/infra, not sales.
-    "master": "L1", "morning": "L1", "profile": "L1",
+    # reclassified 2026-08-03 (e-4737 台帳 review) — mis-scoped by noun NAME, not
+    # behaviour; still this same L1 section (one header), rationale inline:
+    "master": "L1",   # was L0: customer-identity master-sync drain (ms-111)
+    "morning": "L1",  # was L3-sales: bus autonomous-activity summary (ms-55)
+    "profile": "L1",  # was L3-sales: Beacon auth/backend profile listing (ms-64)
     # L2 — class-abstraction: operate on a Target via the abstraction.
     "claim": "L2", "doc": "L2", "review": "L2", "status": "L2",
     "summary": "L2", "target": "L2",
@@ -282,8 +281,8 @@ _NOUN_SCOPE = {
     "push": "L3", "deploy": "L3", "pr": "L3", "issue": "L3", "retro": "L3",
     "rollback": "L3", "entry": "L3", "stuck": "L3",
     # L3 — profession default (sales). "watch" = the sales reply-watch
-    # (sales_entities.set_watch — watch a thread for a reply at a cadence); it was
-    # mis-scoped L1 by its generic noun (reclassified 2026-08-03, e-4737).
+    # (sales_entities.set_watch — watch a thread for a reply at a cadence, ms-107);
+    # it was mis-scoped L1 by its generic noun (reclassified 2026-08-03, e-4737).
     "account": "L3", "acquisition": "L3", "activity": "L3",
     "communication": "L3", "meeting": "L3", "nurturing": "L3",
     "opportunity": "L3", "phase": "L3", "sales": "L3", "contact": "L3",
@@ -367,7 +366,11 @@ _L3_NOUN_PROFESSION = {
     "sync": "dev", "push": "dev", "deploy": "dev", "pr": "dev",
     "issue": "dev", "retro": "dev", "rollback": "dev", "entry": "dev",
     "stuck": "dev",
-    # sales profession defaults.
+    # sales profession defaults. NOTE: "morning" / "profile" were here until
+    # 2026-08-03; they were reclassified L3-sales → L1 in _NOUN_SCOPE (e-4737,
+    # they are bus/auth infra not sales) so they are INTENTIONALLY absent — the
+    # sync test enforces this, do not re-add them. "watch" was added here (moved
+    # L1 → L3-sales, the sales reply-watch).
     "account": "sales", "acquisition": "sales", "activity": "sales",
     "communication": "sales", "meeting": "sales", "nurturing": "sales",
     "opportunity": "sales", "phase": "sales", "sales": "sales",
