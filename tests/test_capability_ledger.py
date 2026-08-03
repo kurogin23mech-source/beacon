@@ -103,6 +103,80 @@ def test_origin_is_orthogonal_axis():
     assert "L5" not in cl.SCOPE_LEVELS
 
 
+# --- ownership axis (ms-134 e-4738) ----------------------------------------
+
+def test_owner_required_only_for_l3_l4():
+    assert cl.owner_required("L3") is True
+    assert cl.owner_required("L4") is True
+    for shared in ("L0", "L1", "L2", ""):
+        assert cl.owner_required(shared) is False, shared
+
+
+def test_owner_of_dispatches_by_scope():
+    # L3 dev / sales resolve to their profession; shared scopes have no owner.
+    assert cl.owner_of("milestone_add") == "dev"
+    assert cl.owner_of("task_done") == "dev"
+    assert cl.owner_of("opportunity_add") == "sales"
+    assert cl.owner_of("account_add") == "sales"
+    # shared (L1/L2/L0) capabilities have NO single owner — a correct empty.
+    assert cl.owner_of("doc_add") == ""      # L2
+    assert cl.owner_of("bus_ack") == ""      # L1
+    assert cl.owner_of("doctor") == ""       # L0
+
+
+def test_owner_values_are_valid_professions():
+    for v in cl.enumerate_live_verbs():
+        o = cl.owner_of(v)
+        if o:
+            assert o in cl.PROFESSIONS, (v, o)
+
+
+def test_every_l3_l4_verb_has_owner():
+    # The ownership coverage gate: every L3 verb resolves to a profession (and
+    # every L4 to a project). A new L3 noun without an owner fails here.
+    rec = cl.reconcile_ownership()
+    assert rec["unowned"] == [], (
+        "L3/L4 verbs with no owner (add the noun to _L3_NOUN_PROFESSION): "
+        + ", ".join(rec["unowned"]))
+
+
+def test_every_l3_skill_has_owner():
+    rec = cl.reconcile_skill_ownership()
+    assert rec["unowned"] == [], (
+        "L3 skills with no owner (add to _SKILL_OWNER / _SKILL_OWNER_PREFIX): "
+        + ", ".join(rec["unowned"]))
+
+
+def test_l3_profession_map_is_in_sync_with_scope():
+    # Every L3 noun in _NOUN_SCOPE must have a profession, and no entry in
+    # _L3_NOUN_PROFESSION may be stale (point at a non-L3 noun). This keeps the
+    # ownership axis honest as the scope map evolves.
+    l3_nouns = {n for n, s in cl._NOUN_SCOPE.items() if s == "L3"}
+    owned_nouns = set(cl._L3_NOUN_PROFESSION)
+    assert l3_nouns - owned_nouns == set(), (
+        "L3 nouns missing a profession owner: " + ", ".join(sorted(l3_nouns - owned_nouns)))
+    assert owned_nouns - l3_nouns == set(), (
+        "stale _L3_NOUN_PROFESSION entries (not L3 in _NOUN_SCOPE): "
+        + ", ".join(sorted(owned_nouns - l3_nouns)))
+
+
+def test_skill_owner_of_representative():
+    assert cl.skill_owner_of("beacon-sales-email") == "sales"
+    assert cl.skill_owner_of("beacon-task") == "dev"
+    assert cl.skill_owner_of("beacon-deploy") == "dev"
+    # shared skills have no owner.
+    assert cl.skill_owner_of("beacon-trek-execute") == ""   # L1
+    assert cl.skill_owner_of("beacon-map") == ""            # L2
+
+
+def test_ownership_is_orthogonal_to_scope_and_origin():
+    # ownership (who) is a third axis, distinct from scope (how widely shared)
+    # and origin (who authored). A capability can be L3+dev+beacon-default.
+    assert cl.scope_of("milestone_add") == "L3"
+    assert cl.owner_of("milestone_add") == "dev"
+    assert cl.origin_of("milestone_add") == "beacon-default"
+
+
 # --- invariant gate (e-4720/e-4721): real tree must be clean ---------------
 
 def test_no_profession_shared_capability_reaches_a_concrete():
