@@ -135,19 +135,25 @@ PROFESSION_CONCRETE_SYMBOLS = {
 # is legitimate.
 # ---------------------------------------------------------------------------
 
+# Each advice names the CONCRETE callable to use instead (like
+# PROFESSION_CONCRETE_SYMBOLS names ``occupation.record_target_entry``), so a
+# remediator has a one-step fix path, not a concept to go hunt for:
+# ``occupation.iter_target_records(data)`` returns every Target record across
+# professions, and ``occupation.target_collections(data)`` returns the collection
+# keys — both walk dev + sales + descriptor-defined targets without branching.
 PROFESSION_CONCRETE_COLLECTIONS = {
     "milestones":
-        "dev milestone collection — enumerate targets via the occupation/"
-        "work_model abstraction, not data['milestones'] directly",
+        "dev milestone collection — enumerate targets via "
+        "occupation.iter_target_records(data), not data['milestones'] directly",
     "opportunities":
-        "sales opportunity collection — enumerate via the occupation/work_model "
-        "abstraction, not data['opportunities'] directly",
+        "sales opportunity collection — enumerate via "
+        "occupation.iter_target_records(data), not data['opportunities'] directly",
     "accounts":
-        "sales account collection — enumerate via the occupation/work_model "
-        "abstraction, not data['accounts'] directly",
+        "sales account collection — enumerate via "
+        "occupation.iter_target_records(data), not data['accounts'] directly",
     "acquisitions":
-        "sales acquisition collection — enumerate via the occupation/work_model "
-        "abstraction, not data['acquisitions'] directly",
+        "sales acquisition collection — enumerate via "
+        "occupation.iter_target_records(data), not data['acquisitions'] directly",
 }
 
 # Ratchet allowlist: (verb, collection) couplings that ALREADY exist and are

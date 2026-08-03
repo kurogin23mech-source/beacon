@@ -221,18 +221,20 @@ def test_no_new_collection_coupling_on_real_tree():
     result = chk.run()
     new = result["new_collection_coupling"]
     assert new == [], (
-        "NEW profession-collection coupling (route via the abstraction, or if "
-        "truly pending add to KNOWN_COLLECTION_COUPLING with a reason): "
+        "NEW profession-collection coupling — route it through the abstraction "
+        "occupation.iter_target_records(data) (see the KNOWN_COLLECTION_COUPLING "
+        "comment: never add a new entry to silence a fresh violation): "
         + "; ".join(f"{c['verb']}[{c['scope']}]→data['{c['collection']}']"
                     f"{' via '+c['via'] if c['via'] else ''}" for c in new))
 
 
-def test_every_detected_coupling_is_known():
-    # On the real tree, every detected coupling must be allowlisted (else it is
-    # a NEW one — covered by the test above, but asserted here for a clear msg).
+def test_every_detected_coupling_is_pending_debt():
+    # On the real tree, every detected coupling must be allowlisted (status
+    # pending_debt); a new_violation is caught by the test above, asserted here
+    # for a clear message.
     coupling = chk.find_collection_coupling()
     for c in coupling:
-        assert c["known"], f"un-allowlisted coupling: {c}"
+        assert c["status"] == "pending_debt", f"un-allowlisted coupling: {c}"
 
 
 def test_no_stale_collection_allowlist_entries():
@@ -300,7 +302,8 @@ def test_checker_flags_new_collection_read_direct(tmp_path):
     cols = sorted((h["verb"], h["collection"]) for h in hits)
     assert cols == [("doc_synthetic_coll", "milestones"),
                     ("doc_synthetic_coll", "opportunities")], hits
-    assert all(not h["known"] for h in hits)  # synthetic verbs aren't allowlisted
+    # synthetic verbs aren't allowlisted → all fresh violations.
+    assert all(h["status"] == "new_violation" for h in hits)
 
 
 def test_checker_flags_collection_read_via_helper(tmp_path):
@@ -320,4 +323,23 @@ def test_checker_ignores_l3_collection_read(tmp_path):
 
 def test_checker_ignores_operations_collection(tmp_path):
     path = _write(tmp_path, "commands.py", _SYNTH_COLLECTION_OPERATIONS_OK)
+    assert chk.find_collection_coupling(path) == []
+
+
+_SYNTH_COLLECTION_WRITE_CTX = '''
+def cmd_doc_synthetic_write():
+    # A shared (doc→L2) handler that WRITES a same-named local dict key is NOT a
+    # reach into project data — must not be a false positive (maintainability
+    # review 2026-08-03: only ast.Load subscripts count).
+    result = {}
+    result["milestones"] = []
+    result["opportunities"] = compute()
+    del result["accounts"]
+'''
+
+
+def test_checker_ignores_collection_write_context(tmp_path):
+    # a WRITE (Store/Del) to a same-named local dict key is not a read of
+    # project data — the ctx guard keeps it from being a false positive.
+    path = _write(tmp_path, "commands.py", _SYNTH_COLLECTION_WRITE_CTX)
     assert chk.find_collection_coupling(path) == []

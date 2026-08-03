@@ -3,18 +3,24 @@
 e-4709 / e-4721).
 
 Turns the L0..L4 sharing-scope ledger (``lib/capability_ledger.py``) from a
-description into an ENFORCED norm. Two checks:
+description into an ENFORCED norm. Three checks:
 
   1. Coverage (e-4709 AC "every capability classified, none unclassified"):
      every live CLI verb must resolve to a scope. A verb under a new noun the
      rules do not know is reported as unclassified.
 
-  2. Dependency invariant (e-4709/e-4720 core): a profession-SHARED capability
-     (scope L1/L2) must NOT reach into a profession-specific concrete —
-     ``core.save_entry`` / ``core.find_target_milestone`` (the dev milestone
-     recorder/resolver). Shared capabilities record through the abstraction
-     ``occupation.record_target_entry`` instead. This is the boundary e-4720
-     closed for ``doc``; the checker stops it from re-opening.
+  2. Dependency invariant — symbol reach (e-4709/e-4720 core): a profession-
+     SHARED capability (scope L1/L2) must NOT reach into a profession-specific
+     concrete — ``core.save_entry`` / ``core.find_target_milestone`` (the dev
+     milestone recorder/resolver). Shared capabilities record through the
+     abstraction ``occupation.record_target_entry`` instead. This is the boundary
+     e-4720 closed for ``doc``; the checker stops it from re-opening.
+
+  3. Dependency invariant — collection coupling (e-4740): a profession-SHARED
+     capability must NOT read a profession-specific project-data collection
+     directly (``data["milestones"]`` etc.) — the same leak as (2) but expressed
+     as a raw dict read the symbol check cannot see. Existing couplings are an
+     allowlisted ratchet (reported as pending debt); a NEW one fails the checker.
 
 The invariant scan uses the AST (not text/grep) so a mention of the forbidden
 symbol inside a comment or docstring is NOT a false hit — only a real call is.
@@ -136,12 +142,18 @@ def _governing_shared_verbs(tree: ast.AST, funcs: list, lineno: int) -> list:
 
 
 def _collection_key(node: ast.AST) -> str:
-    """Return the profession-concrete collection key when ``node`` reads one
-    directly — ``data["milestones"]`` (Subscript) or ``obj.get("milestones")``
+    """Return the profession-concrete collection key when ``node`` READS one
+    directly — ``data["milestones"]`` (Subscript load) or ``obj.get("milestones")``
     (a ``.get`` Call) for a key in ``PROFESSION_CONCRETE_COLLECTIONS`` — else
     ``""``. Matched via the AST so a string literal in a comment/docstring is not
-    a false hit, mirroring ``_forbidden_attr``."""
-    if isinstance(node, ast.Subscript):
+    a false hit, mirroring ``_forbidden_attr``.
+
+    Only a Subscript in LOAD context counts (maintainability review 2026-08-03):
+    a WRITE to a same-named local dict (``result["milestones"] = [...]`` /
+    ``del d["milestones"]``) is not a reach into project data and must not be a
+    false positive. ``.get`` is inherently a read, so no ctx guard is needed
+    there."""
+    if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
         sl = node.slice
         if isinstance(sl, ast.Constant) and isinstance(sl.value, str) \
                 and sl.value in cl.PROFESSION_CONCRETE_COLLECTIONS:
@@ -204,9 +216,11 @@ def find_collection_coupling(commands_path: str = "") -> list:
     the non-enumerated coupling the symbol denylist cannot see (ms-134 e-4740).
 
     Each item is a dict: ``{verb, scope, collection, advice, via, lineno,
-    known}``. ``known`` is True when (verb, collection) is in the ratchet
-    allowlist (accepted pending debt); a False item is a NEW violation that fails
-    the checker."""
+    status}``. ``status`` is ``"pending_debt"`` when (verb, collection) is in the
+    ratchet allowlist (an accepted existing coupling), or ``"new_violation"``
+    when it is not (a fresh coupling that fails the checker). The field is
+    self-describing — a caller filters ``status == "new_violation"`` for the
+    actionable set without consulting docs (AX review 2026-08-03)."""
     path = commands_path or _commands_path()
     src = open(path, encoding="utf-8").read()
     tree = ast.parse(src)
@@ -218,6 +232,7 @@ def find_collection_coupling(commands_path: str = "") -> list:
         if not collection:
             continue
         for verb, scope, via in _governing_shared_verbs(tree, funcs, node.lineno):
+            known = cl.is_known_collection_coupling(verb, collection)
             hits.append({
                 "verb": verb,
                 "scope": scope,
@@ -225,7 +240,7 @@ def find_collection_coupling(commands_path: str = "") -> list:
                 "advice": cl.PROFESSION_CONCRETE_COLLECTIONS[collection],
                 "via": via,
                 "lineno": node.lineno,
-                "known": cl.is_known_collection_coupling(verb, collection),
+                "status": "pending_debt" if known else "new_violation",
             })
     seen, unique = set(), []
     for h in hits:
@@ -237,13 +252,21 @@ def find_collection_coupling(commands_path: str = "") -> list:
 
 
 def run(commands_path: str = "") -> dict:
-    """Run all checks and return a structured result with an ``ok`` verdict."""
+    """Run all checks and return a structured result with an ``ok`` verdict.
+
+    ``ok`` is the authoritative pass/fail (also the process exit code). It is
+    False if ANY of: unclassified verbs/skills, symbol-reach ``violations``, or
+    ``new_collection_coupling``. A consumer that wants the full failing set must
+    read BOTH ``violations`` (symbol reach, check 2) AND
+    ``new_collection_coupling`` (collection read, check 3) — they are distinct
+    violation families with distinct item schemas, so gate on ``ok`` rather than
+    iterating one list (AX review 2026-08-03)."""
     cov = check_coverage()
     skill_cov = cl.reconcile_skills()
     viol = find_invariant_violations(commands_path)
     coupling = find_collection_coupling(commands_path)
-    new_coupling = [c for c in coupling if not c["known"]]
-    pending_coupling = [c for c in coupling if c["known"]]
+    new_coupling = [c for c in coupling if c["status"] == "new_violation"]
+    pending_coupling = [c for c in coupling if c["status"] == "pending_debt"]
     ok = (not cov["unclassified"] and not skill_cov["unclassified"]
           and not viol and not new_coupling)
     return {"ok": ok, "coverage": cov, "skill_coverage": skill_cov,
