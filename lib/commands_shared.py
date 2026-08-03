@@ -16,6 +16,7 @@ Dependency direction (ms-127 SPEC 方針4 = 循環 import を構造で防ぐ):
 so the dependency graph stays one-directional and no cycle can form.
 """
 
+import json
 import os
 import sys
 
@@ -277,3 +278,269 @@ def save_project_unsafe(data, op=None):
     store.save_project(data)
     if op:
         _append_changelog(op)
+
+
+# ---------------------------------------------------------------------------
+
+# ms-127 e-4317-foundation: cross-family shared helpers promoted from commands.py
+
+#
+
+# These are the leaf helpers every cmd_<family> module needs (cloud config /
+
+# API client / token / cloud-mode detection / bus project-id resolution /
+
+# persistence-poisoning defense / session-notes path).
+
+# Moved verbatim so family modules can `from commands_shared import ...`
+
+# instead of importing commands.py (which would form a cycle — SPEC 方針4).
+
+# ---------------------------------------------------------------------------
+
+# --- cloud mode / config / api url / token / api client ---
+
+def _is_cloud_mode():
+    """Check if we're in cloud mode (single source of truth: cloud.json existence).
+
+    e-1861 (ms-61): The legacy ``config.json["mode"] == "cloud"`` dual-source
+    check was removed because it created a silent drift window: a sub-agent
+    could overwrite ``.beacon/config.json`` to ``{"mode": "local"}`` and the
+    CLI would suddenly read the stale local ``project.json`` instead of cloud,
+    causing apparent user data loss (2026-06-15 incident).
+
+    Beacon is always invoked from Claude Code, which requires internet, so
+    "local mode" has no production use case. ``.beacon/cloud.json`` existence
+    is now the single, structurally protected source of truth. ``BEACON_CLOUD=1``
+    still forces cloud for test harnesses that mock ``cloud.json`` indirectly.
+
+    Any ``mode`` field still sitting in legacy ``config.json`` is ignored
+    (graceful — we never error, we just stop reading it). ``beacon doctor``
+    surfaces the legacy field as a non-fatal migration warning.
+    """
+    if os.environ.get("BEACON_CLOUD") == "1":
+        return True
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    cloud_path = os.path.join(beacon_dir, "cloud.json")
+    return os.path.exists(cloud_path)
+
+def _resolve_active_api_url() -> str:
+    """Return the api_url of the active profile (ms-64 / e-1458).
+
+    Replaces the previous ``os.environ.get("BEACON_API_URL", DEFAULT_API_URL)``
+    + ``config.get("api_url", DEFAULT_API_URL)`` chain that was duplicated at
+    11+ sites in this module. The profile resolver already implements the full
+    precedence chain (env > cwd cloud.json > profile.json > default), so all
+    sites now go through it and a single point of truth handles the precedence
+    rules.
+
+    The active profile is determined by (in order): ``--profile`` CLI arg
+    (exported as ``BEACON_PROFILE`` by ``bin/beacon`` top-level), then
+    ``BEACON_PROFILE`` env, then cwd ``.beacon/cloud.json`` ``profile`` field,
+    then the ``default`` profile.
+    """
+    try:
+        import profile as _profile  # type: ignore[import-not-found]
+        return _profile.resolve_active_profile().api_url
+    except Exception:
+        # Best-effort fallback: legacy chain. Keeps CLI usable if profile.py
+        # itself is unimportable for any reason (e.g. partial install).
+        api_url = _resolve_active_api_url()
+        config_path = _get_cloud_config_path()
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    api_url = json.load(f).get("api_url", api_url)
+            except Exception:
+                pass
+        return api_url
+
+def _get_cloud_config_path():
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    return os.path.join(beacon_dir, "cloud.json")
+
+def _extract_token(creds) -> str:
+    """Extract bearer token from credentials (handles both object and dict forms)."""
+    if isinstance(creds, dict):
+        return creds.get("token", "") or creds.get("id_token", "")
+    return (creds.id_token or creds.token) if creds else ""
+
+def _get_api_client():
+    """Create an ApiClient from cloud.json config and auth credentials.
+
+    The ApiClient receives a TokenProvider callable instead of a static token,
+    so tokens are refreshed on every API call. This prevents long-lived CLI
+    sessions from failing after the initial token expires.
+    """
+    from auth import load_credentials
+    creds = load_credentials()
+    if creds is None:
+        print("Not logged in. Run: beacon auth login")
+        sys.exit(1)
+
+    config_path = _get_cloud_config_path()
+    if not os.path.exists(config_path):
+        print("No cloud.json found. Run 'beacon cloud upload-initial' first.")
+        sys.exit(1)
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        config = json.load(f)
+
+    api_url = _resolve_active_api_url()
+
+    # Use a TokenProvider callable so each request picks up a fresh token.
+    # load_credentials() refreshes OAuth tokens automatically; web_auth tokens
+    # will be refreshed once _refresh_web_auth_token() support is wired in.
+    def _token_provider() -> str:
+        from auth import load_credentials as _load
+        _creds = _load()
+        return _extract_token(_creds) if _creds else ""
+
+    from api_client import ApiClient
+    return ApiClient(api_url, _token_provider), config
+
+# --- bus project-id resolution ---
+
+def _resolve_bus_project_id(config: dict) -> str:
+    """Return the project_id the bus call should target.
+
+    Resolution order (ms-54 e-1151):
+      1. ``BEACON_BUS_PROJECT_ID`` env var — set by the dispatcher when
+         the user passed ``--project <id>``. This lets a Beacon session
+         post into / read from another project's bus (e.g. Mac Beacon
+         session DMs a TrailNode session) without flipping cwd.
+      2. ``config["project_id"]`` — the default, derived from
+         ``.beacon/cloud.json`` of the current project.
+
+    ms-97 / e-2694 dogfood fix: when an override is supplied via
+    ``--project`` (= env var), pass it through
+    :func:`lib.project_ref.resolve_project_ref` against the cloud
+    project list so short names (= ``life-plan-simulator``) expand to
+    full suffix'd ids (= ``life-plan-simulator-68c5df``). The session
+    registry, DM fanout, and recipient lookups all key off the full
+    id — short-name input silently misses every record. Best-effort:
+    if the api client / list call is unavailable (= local-mode tests,
+    offline), passthrough preserves the legacy behaviour.
+    """
+    override = os.environ.get("BEACON_BUS_PROJECT_ID", "").strip()
+    if override:
+        return _canonicalize_project_ref(override) or override
+    return config.get("project_id", "")
+
+
+def _canonicalize_project_ref(ref: str) -> str:
+    """Best-effort short-name → full project_id expansion.
+
+    Wraps :func:`lib.project_ref.resolve_project_ref` with a cloud-only
+    lister (= ``api_client.list_projects``) and swallows transport
+    errors so a network blip in the resolver never blocks the underlying
+    send / fanout. Returns the resolved id, or the input unchanged when
+    resolution can't run.
+    """
+    if not ref:
+        return ref
+    try:
+        from project_ref import resolve_project_ref as _resolve
+    except ImportError:
+        from lib.project_ref import resolve_project_ref as _resolve
+    lister = None
+    if _is_cloud_mode():
+        try:
+            client, _config = _get_api_client()
+
+            def _list() -> list:
+                try:
+                    return client.list_projects() or []
+                except Exception:  # noqa: BLE001 — degrade to passthrough
+                    return []
+
+            lister = _list
+        except Exception:  # noqa: BLE001
+            lister = None
+    try:
+        return _resolve(ref, db_or_lister=lister)
+    except ValueError:
+        # Ambiguous — surface the input unchanged. The downstream call
+        # (= /bus send, /trek scope add) will hit a clearer error path
+        # (= "project not found" or rejection at the server) instead of
+        # the resolver hijacking error reporting.
+        return ref
+
+# --- persistence-poisoning (bus-origin) write defense (ms-54 e-1293) ---
+
+PERSISTENCE_POISONING_AUDIT_FILE = "persistence_poisoning_audit.jsonl"
+
+_BUS_ORIGIN_REFUSAL_MESSAGE = (
+    "Error: writes from bus-origin payloads are not allowed "
+    "(persistence poisoning defense)"
+)
+
+
+def _is_bus_origin_input() -> bool:
+    """Return True iff the current invocation is marked as bus-derived.
+
+    Read from ``BEACON_BUS_ORIGIN``. Truthy values are ``"1"`` and ``"true"``
+    (case-insensitive). Everything else is treated as not-set so a
+    misconfigured caller fails closed (i.e. allows the write) only when the
+    flag is absent — never on a typo'd truthy value.
+    """
+    raw = os.environ.get("BEACON_BUS_ORIGIN", "").strip().lower()
+    return raw in ("1", "true", "yes")
+
+
+def _persistence_poisoning_audit_path() -> str:
+    """Local jsonl path for refused bus-origin persistence attempts."""
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    return os.path.join(beacon_dir, PERSISTENCE_POISONING_AUDIT_FILE)
+
+
+def _record_persistence_poisoning_refusal(handler: str, details: dict) -> None:
+    """Append a refusal audit record to the local jsonl audit log.
+
+    Best-effort: any IO error is swallowed (we still refuse the write — the
+    audit log is forensic context, not the gate). The record schema is
+    intentionally small and human-readable so an operator can grep for
+    ``handler=note_add`` to see the trail.
+    """
+    import datetime
+    try:
+        record = {
+            "ts": datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.%fZ"
+            ),
+            "handler": handler,
+            "verdict": "refused",
+            "reason": "bus_origin_persistence_blocked",
+            "session_id": _resolve_session_id(),
+            "details": details,
+        }
+        path = _persistence_poisoning_audit_path()
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError:
+        # Audit logging is best-effort; never let it mask the refusal itself.
+        pass
+
+
+def _refuse_if_bus_origin(handler: str, details: dict) -> bool:
+    """Refuse the current persistence call if marked bus-origin.
+
+    Returns True iff the call was refused (caller should ``sys.exit(1)``
+    immediately). When True, an audit record is written and the refusal
+    message is printed to stderr.
+
+    Handlers (``cmd_note_add``, ``cmd_doc_add``, ``cmd_doc_update``,
+    ``cmd_session_end``) MUST call this BEFORE any persistence side effect.
+    """
+    if not _is_bus_origin_input():
+        return False
+    _record_persistence_poisoning_refusal(handler, details)
+    print(_BUS_ORIGIN_REFUSAL_MESSAGE, file=sys.stderr)
+    return True
+
+# --- session-notes path (shared by note family + session rescue) ---
+
+def _get_notes_path():
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    return os.path.join(beacon_dir, "session_notes.jsonl")
