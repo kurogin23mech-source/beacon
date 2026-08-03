@@ -255,21 +255,26 @@ def run(commands_path: str = "") -> dict:
     """Run all checks and return a structured result with an ``ok`` verdict.
 
     ``ok`` is the authoritative pass/fail (also the process exit code). It is
-    False if ANY of: unclassified verbs/skills, symbol-reach ``violations``, or
-    ``new_collection_coupling``. A consumer that wants the full failing set must
-    read BOTH ``violations`` (symbol reach, check 2) AND
-    ``new_collection_coupling`` (collection read, check 3) — they are distinct
-    violation families with distinct item schemas, so gate on ``ok`` rather than
-    iterating one list (AX review 2026-08-03)."""
+    False if ANY of: unclassified verbs/skills, symbol-reach ``violations``,
+    ``new_collection_coupling``, or unowned L3/L4 verbs/skills (ownership axis,
+    e-4738). A consumer that wants the full failing set must read BOTH
+    ``violations`` (symbol reach, check 2) AND ``new_collection_coupling``
+    (collection read, check 3) — they are distinct violation families with
+    distinct item schemas, so gate on ``ok`` rather than iterating one list
+    (AX review 2026-08-03)."""
     cov = check_coverage()
     skill_cov = cl.reconcile_skills()
+    ownership = cl.reconcile_ownership()
+    skill_ownership = cl.reconcile_skills_ownership()
     viol = find_invariant_violations(commands_path)
     coupling = find_collection_coupling(commands_path)
     new_coupling = [c for c in coupling if c["status"] == "new_violation"]
     pending_coupling = [c for c in coupling if c["status"] == "pending_debt"]
     ok = (not cov["unclassified"] and not skill_cov["unclassified"]
+          and not ownership["unowned"] and not skill_ownership["unowned"]
           and not viol and not new_coupling)
     return {"ok": ok, "coverage": cov, "skill_coverage": skill_cov,
+            "ownership": ownership, "skill_ownership": skill_ownership,
             "violations": viol,
             "collection_coupling": coupling,
             "new_collection_coupling": new_coupling,
@@ -295,6 +300,9 @@ def main() -> int:
           f"{cov['by_scope']}")
     print(f"  skills:   {sum(scov['by_scope'].values())} skills classified "
           f"{scov['by_scope']}")
+    own = result["ownership"]
+    sown = result["skill_ownership"]
+    print(f"  ownership: verbs {own['by_owner']} / skills {sown['by_owner']}")
     if cov["unclassified"]:
         print(f"  UNCLASSIFIED VERBS ({len(cov['unclassified'])}): "
               f"{', '.join(cov['unclassified'])}")
@@ -305,6 +313,18 @@ def main() -> int:
               f"{', '.join(scov['unclassified'])}")
         print("    → give the skill a scope in lib/capability_ledger.py "
               "(_SKILL_SCOPE / _SKILL_PREFIX_SCOPE).")
+    if own["unowned"]:
+        print(f"  UNOWNED L3/L4 VERBS ({len(own['unowned'])}): "
+              f"{', '.join(own['unowned'])}")
+        print("    → give the L3 noun a profession in _L3_NOUN_PROFESSION "
+              "(or the L4 verb a project in _L4_VERB_PROJECT).")
+    if sown["unowned"]:
+        print(f"  UNOWNED L3/L4 SKILLS ({len(sown['unowned'])}): "
+              f"{', '.join(sown['unowned'])}")
+        print("    → if the skill matches an existing prefix (e.g. beacon-sales-*): "
+              "add its exact name to _SKILL_OWNER. If it introduces a NEW "
+              "profession prefix (e.g. beacon-backoffice-*): add a tuple to "
+              "_SKILL_OWNER_PREFIX so all future skills under it resolve too.")
     if result["violations"]:
         print(f"  INVARIANT VIOLATIONS ({len(result['violations'])}):")
         for v in result["violations"]:

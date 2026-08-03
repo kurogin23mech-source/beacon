@@ -230,6 +230,14 @@ _VERB_SCOPE_OVERRIDE: dict = {
 }
 
 
+def _noun_from_key(cap_key: str) -> str:
+    """The noun of a capability key — the substring before the first ``_``
+    (``task_done`` → ``task``). The ONE place that knows the key→noun split, so
+    ``scope_of`` and ``owner_of`` cannot fork on the format (maintainability
+    review 2026-08-03)."""
+    return (cap_key or "").strip().split("_", 1)[0]
+
+
 def scope_of(cap_key: str) -> str:
     """Return the L0..L4 scope of a capability (CLI verb dispatch key), or ``""``
     when its noun is unknown to the rules (surfaced by ``reconcile`` as
@@ -237,8 +245,7 @@ def scope_of(cap_key: str) -> str:
     key = (cap_key or "").strip()
     if key in _VERB_SCOPE_OVERRIDE:
         return _VERB_SCOPE_OVERRIDE[key]
-    noun = key.split("_", 1)[0]
-    return _NOUN_SCOPE.get(noun, "")
+    return _NOUN_SCOPE.get(_noun_from_key(key), "")
 
 
 def origin_of(cap_key: str) -> str:
@@ -248,6 +255,91 @@ def origin_of(cap_key: str) -> str:
     orthogonal authorship axis, ms-134 設計方針2). Kept as a function so the
     origin source can move to per-capability data without changing callers."""
     return "beacon-default"
+
+
+# ---------------------------------------------------------------------------
+# Ownership axis (ms-134 e-4738) — WHO a profession-specific capability belongs
+# to. Scope says HOW WIDELY a capability may be shared (L0..L4); it does not say
+# to WHICH profession an L3 default belongs, nor to WHICH project an L4
+# capability belongs. That "belongs-to" is the prerequisite data for the
+# distribution story (TrailNode org/profession packaging, ms-53/58): to ship
+# "the sales defaults" or "project X's L4 capabilities" you must first know
+# which capability is whose. Until e-4738 the L3 dev/sales split lived only in
+# _NOUN_SCOPE comments ("documentation, not enforcement"); this turns it into
+# enforced data.
+#
+# Ownership is ORTHOGONAL to both scope and origin:
+#   - L0/L1/L2 are profession-SHARED — they have NO single owner (owner_of == "";
+#     that is the correct state, not a missing classification).
+#   - L3 is owned by exactly one PROFESSION (dev / sales / backoffice …).
+#   - L4 is owned by exactly one PROJECT (none ship by default → registry empty).
+# The checker enforces: every live L3 capability resolves to a profession, every
+# live L4 to a project. A new L3 noun added to _NOUN_SCOPE without an owner here
+# is surfaced (the same drift-catch as scope coverage).
+# ---------------------------------------------------------------------------
+
+# Recognised profession owners for L3 defaults — the validation allowlist that
+# owner values are checked against. Kept as data (not a bool split) so its
+# CONDITIONAL logic needs no change for a new profession. NOTE: ``backoffice`` is
+# already listed but has no live capability yet. Registering an actual backoffice
+# L3 capability still requires (all in THIS file):
+#   1. verbs — a noun entry in ``_L3_NOUN_PROFESSION`` (noun → "backoffice"),
+#   2. skills — a scope rule in ``_SKILL_SCOPE`` / ``_SKILL_PREFIX_SCOPE`` AND an
+#      owner rule in ``_SKILL_OWNER`` / ``_SKILL_OWNER_PREFIX``.
+# The checker catches a miss at CI time; this list is the authoring-time signpost
+# (AX/maintainability review 2026-08-03).
+PROFESSIONS = {"dev", "sales", "backoffice"}
+
+# L3 noun -> owning profession. MUST stay in sync with the L3 entries of
+# _NOUN_SCOPE: a test asserts every L3 noun has exactly one profession here and
+# no entry here is stale (points at a non-L3 noun). Mirrors the dev/sales split
+# the _NOUN_SCOPE comments already document, now machine-enforced.
+_L3_NOUN_PROFESSION = {
+    # dev profession defaults.
+    "milestone": "dev", "task": "dev", "log": "dev", "save": "dev",
+    "sync": "dev", "push": "dev", "deploy": "dev", "pr": "dev",
+    "issue": "dev", "retro": "dev", "rollback": "dev", "entry": "dev",
+    "stuck": "dev",
+    # sales profession defaults.
+    "account": "sales", "acquisition": "sales", "activity": "sales",
+    "communication": "sales", "meeting": "sales", "nurturing": "sales",
+    "opportunity": "sales", "phase": "sales", "sales": "sales",
+    "contact": "sales", "dossier": "sales", "morning": "sales",
+    "profile": "sales",
+}
+
+# L4 verb -> owning project. Empty: no L4 (project-only) capability ships in the
+# product (by_scope L4 == 0). A project-local capability entering via a client
+# project / TrailNode stamps its project id here (orthogonal to origin_of).
+_L4_VERB_PROJECT: dict = {}
+
+
+def owner_of(cap_key: str) -> str:
+    """Return the ownership handle of a capability, dispatched by its scope
+    (ms-134 e-4738):
+
+      - L3 → the owning PROFESSION (``dev`` / ``sales`` / …), or ``""`` when the
+        noun has no profession registered (surfaced by ``reconcile_ownership``).
+      - L4 → the owning PROJECT id, or ``""`` when unregistered.
+      - L0 (product-operation) / L1 / L2 (profession-shared) → ``""`` — none of
+        these has a single owner. This is a CORRECT empty, distinguished from a
+        missing one by scope: call ``owner_required(scope_of(cap))`` to tell
+        "no owner is expected" from "an owner is missing". (Only L1/L2 are
+        ``is_profession_shared``; L0 is product-operation — all three are simply
+        not owner-bearing.)
+    """
+    scope = scope_of(cap_key)
+    if scope == "L3":
+        return _L3_NOUN_PROFESSION.get(_noun_from_key(cap_key), "")
+    if scope == "L4":
+        return _L4_VERB_PROJECT.get((cap_key or "").strip(), "")
+    return ""
+
+
+def owner_required(scope: str) -> bool:
+    """True when a capability at ``scope`` must resolve to an owner (L3 → a
+    profession, L4 → a project). L0/L1/L2 are shared and require none."""
+    return scope in ("L3", "L4")
 
 
 def is_profession_shared(scope: str) -> bool:
@@ -303,6 +395,34 @@ def reconcile(live: Optional[set] = None) -> dict:
         if s:
             by_scope[s] = by_scope.get(s, 0) + 1
     return {"unclassified": unclassified, "by_scope": by_scope}
+
+
+def reconcile_ownership(live: Optional[set] = None) -> dict:
+    """Reconcile the OWNERSHIP axis (ms-134 e-4738) against the live CLI surface.
+    Returns ``{"unowned": [...], "by_owner": {...}}``:
+
+    - ``unowned``: live verbs whose scope REQUIRES an owner (L3 → profession,
+      L4 → project) but resolves to none — an L3 capability under a new noun that
+      was given a scope but no profession, or an L4 with no project. This is the
+      OWNERSHIP-axis parallel of ``reconcile``'s ``unclassified`` (the scope-axis
+      gap list); the keys differ because each names its own axis' gap.
+    - ``by_owner``: count of live verbs per resolved owner, pre-seeded with every
+      profession (so ``backoffice`` shows ``0`` before its first live verb rather
+      than being absent) plus ``"(shared)"`` (L0/L1/L2) and ``"(unowned)"``.
+    """
+    live = enumerate_live_verbs() if live is None else live
+    unowned = sorted(v for v in live
+                     if owner_required(scope_of(v)) and not owner_of(v))
+    by_owner: dict = {p: 0 for p in PROFESSIONS}
+    by_owner["(shared)"] = 0
+    by_owner["(unowned)"] = 0
+    for v in live:
+        if owner_required(scope_of(v)):
+            key = owner_of(v) or "(unowned)"
+        else:
+            key = "(shared)"
+        by_owner[key] = by_owner.get(key, 0) + 1
+    return {"unowned": unowned, "by_owner": by_owner}
 
 
 def summary() -> dict:
@@ -365,6 +485,31 @@ def skill_scope_of(skill_name: str) -> str:
     return best
 
 
+# L3 skill -> owning profession (ms-134 e-4738). sales skills via the
+# ``beacon-sales-`` prefix; the dev delivery-workflow skills (all L3 in
+# _SKILL_SCOPE) by exact name. A test asserts every L3 skill resolves here.
+_SKILL_OWNER_PREFIX = (("beacon-sales-", "sales"),)
+_SKILL_OWNER = {
+    "beacon-deploy": "dev", "beacon-log": "dev", "beacon-pr-create": "dev",
+    "beacon-push": "dev", "beacon-task": "dev",
+}
+
+
+def skill_owner_of(skill_name: str) -> str:
+    """Return the owning profession of an L3 Skill (``dev`` / ``sales`` / …), or
+    ``""`` for a shared (L0/L1/L2) skill or an unregistered L3 one. Mirrors
+    ``owner_of`` for verbs (ms-134 e-4738)."""
+    name = (skill_name or "").strip()
+    if skill_scope_of(name) != "L3":
+        return ""
+    if name in _SKILL_OWNER:
+        return _SKILL_OWNER[name]
+    for prefix, owner in _SKILL_OWNER_PREFIX:
+        if name.startswith(prefix):
+            return owner
+    return ""
+
+
 def enumerate_skills(skills_dir: str = "") -> list:
     """Return the sorted skill names (``*.md`` basenames) shipped in the repo
     ``skills/`` directory — the live skill surface this ledger reconciles
@@ -387,3 +532,26 @@ def reconcile_skills(skills_dir: str = "") -> dict:
         if sc:
             by_scope[sc] = by_scope.get(sc, 0) + 1
     return {"unclassified": unclassified, "by_scope": by_scope}
+
+
+def reconcile_skills_ownership(skills_dir: str = "") -> dict:
+    """Reconcile the OWNERSHIP axis for skills against the live skill surface
+    (ms-134 e-4738). Returns ``{"unowned": [...], "by_owner": {...}}`` — an L3
+    skill with no profession owner is surfaced (mirrors ``reconcile_ownership``
+    for verbs). Named ``reconcile_skills_ownership`` to parallel the scope-axis
+    ``reconcile`` → ``reconcile_skills`` step (AX review 2026-08-03). ``by_owner``
+    is pre-seeded with every profession, ``"(shared)"`` and ``"(unowned)"`` like
+    the verb reconciler."""
+    skills = enumerate_skills(skills_dir)
+    unowned = sorted(s for s in skills
+                     if owner_required(skill_scope_of(s)) and not skill_owner_of(s))
+    by_owner: dict = {p: 0 for p in PROFESSIONS}
+    by_owner["(shared)"] = 0
+    by_owner["(unowned)"] = 0
+    for s in skills:
+        if owner_required(skill_scope_of(s)):
+            key = skill_owner_of(s) or "(unowned)"
+        else:
+            key = "(shared)"
+        by_owner[key] = by_owner.get(key, 0) + 1
+    return {"unowned": unowned, "by_owner": by_owner}
