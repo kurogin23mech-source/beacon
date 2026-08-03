@@ -42,7 +42,9 @@ exit 0 = clean / 1 = coverage gap or invariant violation (CI / pre-commit gate)
 just failing with "UNCLASSIFIED", it emits, per gap, the exact ledger edit site +
 the L0..L4 menu + a best-effort guess, for the /beacon-scope-classify Skill to turn
 into an AI-proposes → human-confirms classification. It is READ-ONLY and ADVISORY:
-always exits 0 (it does not gate — the default mode above is the gate).
+always exits 0 (it does not gate — the default mode above is the gate). Because it
+exits 0 whether or not gaps exist, an automation must branch on the JSON ``ok``
+field (false = gaps exist), NOT on the exit code (AX review 581).
 """
 
 from __future__ import annotations
@@ -311,9 +313,14 @@ def run(commands_path: str = "") -> dict:
 def render_proposal(prop: dict) -> None:
     """Human-readable render of the classification proposal (ms-134 e-4739)."""
     print("capability scope classification proposal (ms-134 e-4739)")
+    scanned = prop.get("scanned", {})
     if prop["ok"]:
         print("  OK: no open gaps — every capability is classified and owned. "
               "Nothing to propose.")
+        print(f"      (scanned {scanned.get('verbs', '?')} verbs + "
+              f"{scanned.get('skills', '?')} skills. If you expected a gap, "
+              f"verify the new capability is on the live surface — a new verb in "
+              f"commands.py / a new skills/<name>.md file.)")
         return
     print(f"  {prop['gap_count']} open gap(s). For each, confirm a layer/owner and "
           f"apply the edit (do this via /beacon-scope-classify — AI proposes, you "
@@ -340,7 +347,8 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--propose", action="store_true",
                     help="emit a classification proposal for open gaps (ms-134 "
-                         "e-4739); read-only, always exits 0")
+                         "e-4739); read-only, ALWAYS exits 0 — automation must "
+                         "branch on the JSON `ok` field (false=gaps), not $?")
     ap.add_argument("--commands-path", default="", help="override commands.py path")
     args = ap.parse_args()
 

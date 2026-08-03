@@ -572,3 +572,66 @@ def test_l4_skill_is_owned_not_flagged_unowned():
     rec = cl.reconcile_skills_ownership()
     assert "beacon-scope-classify" not in rec["unowned"]
     assert rec["by_owner"].get("beacon") == 1
+
+
+# --- propose owner-gap paths (maintainability review 581: these 2 loops of
+#     propose() were untested — scope gaps were, owner gaps were not) ----------
+
+def test_propose_verb_owner_gap(monkeypatch):
+    # A verb whose noun IS classified L3 but has no profession owner → an OWNER
+    # gap (not a scope gap), pointing at _L3_NOUN_PROFESSION. Synthesize the state
+    # (all real L3 nouns are owned) by adding an L3 noun without an owner entry.
+    monkeypatch.setitem(cl._NOUN_SCOPE, "synthledger", "L3")
+    p = cl.propose(live={"synthledger_add"}, skills_dir="/nonexistent")
+    gap = next(g for g in p["proposals"] if g["capability"] == "synthledger_add")
+    assert gap["gap"] == "owner" and gap["kind"] == "verb"
+    assert gap["known_scope"] == "L3" and gap["proposed_scope"] == "L3"
+    assert gap["edits"][0]["dict"] == "_L3_NOUN_PROFESSION"
+    assert gap["edits"][0]["key"] == "synthledger"
+
+
+def test_propose_skill_owner_gap(monkeypatch, tmp_path):
+    # An L3 skill present on the live surface but with no owner → an OWNER gap
+    # pointing at _SKILL_OWNER. Its name has no profession token, so low confidence.
+    d = tmp_path / "skills"
+    d.mkdir()
+    (d / "beacon-synthledger.md").write_text("x", encoding="utf-8")
+    monkeypatch.setitem(cl._SKILL_SCOPE, "beacon-synthledger", "L3")
+    p = cl.propose(live=set(), skills_dir=str(d))
+    gap = next(g for g in p["proposals"] if g["capability"] == "beacon-synthledger")
+    assert gap["gap"] == "owner" and gap["kind"] == "skill"
+    assert gap["known_scope"] == "L3"
+    assert gap["confidence"] == "low"
+    assert gap["edits"][0]["dict"] == "_SKILL_OWNER"
+
+
+def test_propose_reports_scanned_counts():
+    # scanned surfaces how many capabilities were inspected, so an empty result is
+    # distinguishable from "scanner looked in the wrong place" (AX review 581).
+    p = cl.propose(live={"payroll_run"}, skills_dir="/nonexistent")
+    assert p["scanned"]["verbs"] == 1
+    assert p["scanned"]["skills"] == 0
+
+
+# --- render_proposal: the lib↔script schema contract (maintainability 581) ---
+
+def test_render_proposal_renders_gap(capsys):
+    # render_proposal() reads many propose() keys; a schema change must not break
+    # it silently. Assert the human report surfaces the gap + edit site.
+    prop = cl.propose(live={"payroll_run"}, skills_dir="/nonexistent")
+    chk.render_proposal(prop)
+    out = capsys.readouterr().out
+    assert "payroll_run" in out
+    assert "scope gap" in out
+    assert "_NOUN_SCOPE" in out
+
+
+def test_render_proposal_ok_shows_scanned(capsys):
+    # The OK branch surfaces scanned counts as the "did the scanner look here?"
+    # diagnostic (AX review 581).
+    chk.render_proposal({"ok": True, "gap_count": 0, "proposals": [],
+                         "scope_menu": {}, "owner_menu": [],
+                         "scanned": {"verbs": 305, "skills": 57}})
+    out = capsys.readouterr().out
+    assert "no open gaps" in out
+    assert "305 verbs" in out and "57 skills" in out

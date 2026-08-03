@@ -700,7 +700,8 @@ def _scope_edit_sites(kind: str, capability: str, noun: str, scope: str) -> list
             "note": ("or add a longest-wins rule to _SKILL_PREFIX_SCOPE if this "
                      "introduces a family (e.g. ('beacon-<prof>-', 'L3')). "
                      "If L3, ALSO set the owner: _SKILL_OWNER[name] or a "
-                     "_SKILL_OWNER_PREFIX tuple."),
+                     "_SKILL_OWNER_PREFIX tuple; if L4, ALSO set "
+                     "_SKILL_PROJECT[name]=<project-id>."),
         }]
     return [{
         "file": "lib/capability_ledger.py",
@@ -741,16 +742,29 @@ def propose(live: Optional[set] = None, skills_dir: str = "") -> dict:
     e-4739). Read-only: it never writes the ledger — the write is the
     /beacon-scope-classify Skill's human-confirmed step.
 
-    Returns ``{"ok", "gap_count", "proposals": [...], "scope_menu", "owner_menu"}``:
-    - ``ok``: no gaps (nothing to classify).
+    Returns ``{"ok", "gap_count", "proposals", "scope_menu", "owner_menu",
+    "scanned"}``:
+    - ``ok``: no gaps (nothing to classify). This is the field an exit-code-driven
+      caller must branch on — ``--propose`` ALWAYS exits 0 (it is advisory, not a
+      gate), so read ``ok`` (``false`` = gaps exist), never ``$?`` (AX review 581).
+    - ``gap_count``: number of ``proposals``.
     - ``proposals``: one dict per gap, each with ``kind`` (verb/skill), ``gap``
       (scope/owner), the capability, a best-effort ``proposed_scope`` /
       ``proposed_owner`` (``""`` when there is no signal), a ``confidence``
       (``high`` only on a profession-token signal, else ``low``), a ``rationale``,
       and ``edits`` — the exact ledger site(s) to change. Ordered verb-scope,
-      verb-owner, skill-scope, skill-owner for a stable read.
-    - ``scope_menu`` / ``owner_menu``: the L0..L4 levels and the profession owners
-      the human chooses among (so the caller need not re-import the constants).
+      verb-owner, skill-scope, skill-owner for a stable read. Each edit's
+      ``value_hint`` is the value to WRITE when confident (e.g. ``"L3"``), or an
+      angle-bracket PLACEHOLDER (``"<L0|L1|L2|L3|L4>"`` / ``"<project-id>"``) that
+      the human substitutes — never write a ``<...>`` string verbatim (AX review 581).
+    - ``scope_menu``: the L0..L4 levels the human chooses a scope from.
+    - ``owner_menu``: the PROFESSION list, for an L3 owner ONLY. An L4 owner is a
+      PROJECT id (a free string, no fixed list) — take it from the gap's edit
+      ``note`` / ``value_hint`` (``_SKILL_PROJECT`` / ``_L4_VERB_PROJECT``), not
+      from this menu (AX review 581: the menu is L3-only).
+    - ``scanned``: ``{"verbs": N, "skills": M}`` — how many live capabilities were
+      inspected, so an ``ok``/empty result is distinguishable from "the scanner
+      looked in the wrong place and found nothing" (AX review 581).
     """
     live = enumerate_live_verbs() if live is None else live
     verb_scope_gaps = reconcile(live)["unclassified"]
@@ -838,4 +852,6 @@ def propose(live: Optional[set] = None, skills_dir: str = "") -> dict:
         "proposals": proposals,
         "scope_menu": dict(SCOPE_LEVELS),
         "owner_menu": sorted(PROFESSIONS),
+        "scanned": {"verbs": len(live),
+                    "skills": len(enumerate_skills(skills_dir))},
     }
