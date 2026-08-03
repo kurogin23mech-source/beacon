@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import glob
 import json
 import os
 import sys
@@ -61,8 +62,47 @@ sys.path.insert(0, os.path.join(REPO, "lib"))
 import capability_ledger as cl  # noqa: E402
 
 
-def _commands_path() -> str:
-    return os.path.join(REPO, "lib", "commands.py")
+def _scanned_paths(commands_path: str = "") -> list:
+    """Files the invariant scan walks.
+
+    Default (production / CI / pre-commit): ``commands.py`` + ``commands_shared.py``
+    + every extracted family module ``lib/cmd_<family>.py``. The god-module split
+    (ms-127) relocates ``cmd_<verb>`` handlers and their helpers out of
+    ``commands.py``; a single-file scan would lose sight of a profession-collection
+    read the moment its handler or helper moved to a family module — a silent gap
+    in the ms-134 invariant. Scanning the whole family set keeps the handler→helper
+    attribution (``_governing_shared_verbs``) working across module boundaries.
+
+    When ``commands_path`` is given (test fixtures / ``--commands-path`` override)
+    the scan is restricted to THAT single file, preserving the fixture isolation
+    the synthetic-source tests rely on (a fixture must not pick up reads from the
+    real family modules)."""
+    if commands_path:
+        return [commands_path]
+    lib = os.path.join(REPO, "lib")
+    candidates = [os.path.join(lib, "commands.py"),
+                  os.path.join(lib, "commands_shared.py")]
+    candidates += sorted(glob.glob(os.path.join(lib, "cmd_*.py")))
+    seen, out = set(), []
+    for p in candidates:
+        ap = os.path.abspath(p)
+        if ap not in seen and os.path.exists(p):
+            seen.add(ap)
+            out.append(p)
+    return out
+
+
+def _load_trees(paths: list) -> list:
+    """Return ``[(rel_path, tree, funcs)]`` for each scanned file — rel_path is
+    relative to the repo root, used for human-readable violation locations
+    (``@ lib/cmd_session.py:120``) now that reads can live outside commands.py."""
+    out = []
+    for p in paths:
+        src = open(p, encoding="utf-8").read()
+        tree = ast.parse(src)
+        rel = os.path.relpath(p, REPO)
+        out.append((rel, tree, _build_function_index(tree)))
+    return out
 
 
 # --- AST helpers -----------------------------------------------------------
@@ -123,25 +163,43 @@ def _cmd_handlers_calling(tree: ast.AST, helper: str) -> list:
     return callers
 
 
+def _cmd_handlers_calling_any(trees: list, helper: str) -> list:
+    """``cmd_<verb>`` handlers across ALL scanned trees that call ``helper`` by
+    bare name. Cross-module because the god-module split can place the handler
+    (e.g. ``cmd_session_end`` in ``cmd_session.py``) and the helper it calls
+    (e.g. ``_release_all_occupations_for_session`` in ``commands.py`` /
+    ``commands_shared.py``) in different files — a single-tree search would miss
+    the edge and drop the read from attribution."""
+    callers = []
+    for _rel, tree, _funcs in trees:
+        callers.extend(_cmd_handlers_calling(tree, helper))
+    return callers
+
+
 def _verb_of_handler(handler: str) -> str:
     """``cmd_task_done`` -> ``task_done`` (the dispatch key). ``""`` for a
     non-handler name."""
     return handler[4:] if handler.startswith("cmd_") else ""
 
 
-def _governing_shared_verbs(tree: ast.AST, funcs: list, lineno: int) -> list:
+def _governing_shared_verbs(trees: list, file_funcs: list, lineno: int) -> list:
     """Return ``[(verb, scope, via)]`` for the profession-SHARED (L1/L2) cmd
     handlers whose scope governs the node at ``lineno`` — either the handler
     directly, or (one level) every ``cmd_`` handler that calls the helper the
     node lives in. Shared attribution used by BOTH invariant checks (the symbol
     reach and the collection read), so they attribute a call/read to a capability
-    identically."""
-    encloser = _enclosing_function(funcs, lineno)
+    identically.
+
+    ``file_funcs`` is the function index of the file the node lives in, so the
+    enclosing function is resolved within the node's own module; the cmd→helper
+    edge is then searched across ALL ``trees`` (the handler may live in a
+    different family module than the helper — ms-127 module-aware scan)."""
+    encloser = _enclosing_function(file_funcs, lineno)
     candidates = []  # (verb, via)
     if encloser.startswith("cmd_"):
         candidates.append((_verb_of_handler(encloser), ""))
     elif encloser:
-        for h in _cmd_handlers_calling(tree, encloser):
+        for h in _cmd_handlers_calling_any(trees, encloser):
             candidates.append((_verb_of_handler(h), encloser))
     out = []
     for verb, via in candidates:
@@ -188,36 +246,38 @@ def find_invariant_violations(commands_path: str = "") -> list:
     """Return the list of invariant violations: profession-shared (L1/L2)
     capabilities that call a profession-specific concrete symbol.
 
-    Each violation is a dict: ``{verb, scope, symbol, advice, via, lineno}``.
-    ``via`` names the helper when the call is transitive (else "")."""
-    path = commands_path or _commands_path()
-    src = open(path, encoding="utf-8").read()
-    tree = ast.parse(src)
-    funcs = _build_function_index(tree)
+    Each violation is a dict: ``{verb, scope, symbol, advice, via, file,
+    lineno}``. ``via`` names the helper when the call is transitive (else "");
+    ``file`` is the module the call lives in (repo-relative) since the scan now
+    spans commands.py + commands_shared.py + the family modules."""
+    trees = _load_trees(_scanned_paths(commands_path))
 
     violations = []
-    for node in ast.walk(tree):
-        dotted = _forbidden_attr(node)
-        if not dotted:
-            continue
-        # Attribute the call to the profession-shared handler(s) that govern it.
-        for verb, scope, via in _governing_shared_verbs(tree, funcs, node.lineno):
-            violations.append({
-                "verb": verb,
-                "scope": scope,
-                "symbol": dotted,
-                "advice": cl.PROFESSION_CONCRETE_SYMBOLS[dotted],
-                "via": via,
-                "lineno": node.lineno,
-            })
+    for rel, tree, funcs in trees:
+        for node in ast.walk(tree):
+            dotted = _forbidden_attr(node)
+            if not dotted:
+                continue
+            # Attribute the call to the profession-shared handler(s) governing it
+            # (searched across all trees so a cross-module handler is not missed).
+            for verb, scope, via in _governing_shared_verbs(trees, funcs, node.lineno):
+                violations.append({
+                    "verb": verb,
+                    "scope": scope,
+                    "symbol": dotted,
+                    "advice": cl.PROFESSION_CONCRETE_SYMBOLS[dotted],
+                    "via": via,
+                    "file": rel,
+                    "lineno": node.lineno,
+                })
     # de-duplicate (a helper called by several shared handlers can repeat).
     seen, unique = set(), []
     for v in violations:
-        key = (v["verb"], v["symbol"], v["via"], v["lineno"])
+        key = (v["verb"], v["symbol"], v["via"], v["file"], v["lineno"])
         if key not in seen:
             seen.add(key)
             unique.append(v)
-    return sorted(unique, key=lambda v: (v["verb"], v["lineno"]))
+    return sorted(unique, key=lambda v: (v["verb"], v["file"], v["lineno"]))
 
 
 def find_collection_coupling(commands_path: str = "") -> list:
@@ -234,46 +294,49 @@ def find_collection_coupling(commands_path: str = "") -> list:
       - ``"pending_debt"`` — a genuine coupling accepted pending remediation
         (ratchet allowlist).
       - ``"new_violation"`` — neither of the above; a fresh coupling that fails
-        the checker."""
-    path = commands_path or _commands_path()
-    src = open(path, encoding="utf-8").read()
-    tree = ast.parse(src)
-    funcs = _build_function_index(tree)
+        the checker.
+
+    ``file`` (repo-relative) names the module the read lives in — the scan spans
+    commands.py + commands_shared.py + the family modules (ms-127)."""
+    trees = _load_trees(_scanned_paths(commands_path))
 
     hits = []
-    for node in ast.walk(tree):
-        collection = _collection_key(node)
-        if not collection:
-            continue
-        for verb, scope, via in _governing_shared_verbs(tree, funcs, node.lineno):
-            if cl.is_reviewed_legitimate_read(verb, collection):
-                status = "reviewed_correct"
-                # A reviewed-correct read must NOT be remediated, so its advice is
-                # the review EVIDENCE (why the read is exact), not the routing hint
-                # — which would be wrong here (maintainability review 2026-08-03).
-                advice = cl.REVIEWED_LEGITIMATE_COLLECTION_READS[(verb, collection)]
-            elif cl.is_known_collection_coupling(verb, collection):
-                status = "pending_debt"
-                advice = cl.PROFESSION_CONCRETE_COLLECTIONS[collection]
-            else:
-                status = "new_violation"
-                advice = cl.PROFESSION_CONCRETE_COLLECTIONS[collection]
-            hits.append({
-                "verb": verb,
-                "scope": scope,
-                "collection": collection,
-                "advice": advice,
-                "via": via,
-                "lineno": node.lineno,
-                "status": status,
-            })
+    for rel, tree, funcs in trees:
+        for node in ast.walk(tree):
+            collection = _collection_key(node)
+            if not collection:
+                continue
+            for verb, scope, via in _governing_shared_verbs(trees, funcs, node.lineno):
+                if cl.is_reviewed_legitimate_read(verb, collection):
+                    status = "reviewed_correct"
+                    # A reviewed-correct read must NOT be remediated, so its advice
+                    # is the review EVIDENCE (why the read is exact), not the routing
+                    # hint — which would be wrong here (maintainability review
+                    # 2026-08-03).
+                    advice = cl.REVIEWED_LEGITIMATE_COLLECTION_READS[(verb, collection)]
+                elif cl.is_known_collection_coupling(verb, collection):
+                    status = "pending_debt"
+                    advice = cl.PROFESSION_CONCRETE_COLLECTIONS[collection]
+                else:
+                    status = "new_violation"
+                    advice = cl.PROFESSION_CONCRETE_COLLECTIONS[collection]
+                hits.append({
+                    "verb": verb,
+                    "scope": scope,
+                    "collection": collection,
+                    "advice": advice,
+                    "via": via,
+                    "file": rel,
+                    "lineno": node.lineno,
+                    "status": status,
+                })
     seen, unique = set(), []
     for h in hits:
-        key = (h["verb"], h["collection"], h["via"], h["lineno"])
+        key = (h["verb"], h["collection"], h["via"], h["file"], h["lineno"])
         if key not in seen:
             seen.add(key)
             unique.append(h)
-    return sorted(unique, key=lambda h: (h["verb"], h["lineno"]))
+    return sorted(unique, key=lambda h: (h["verb"], h["file"], h["lineno"]))
 
 
 def run(commands_path: str = "") -> dict:
@@ -403,7 +466,7 @@ def main() -> int:
         for v in result["violations"]:
             via = f" (via {v['via']})" if v["via"] else ""
             print(f"    - {v['verb']} [{v['scope']}] calls {v['symbol']}"
-                  f"{via} @ commands.py:{v['lineno']}")
+                  f"{via} @ {v['file']}:{v['lineno']}")
             print(f"      → {v['advice']}")
     new_coupling = result["new_collection_coupling"]
     pending_coupling = result["pending_collection_coupling"]
@@ -413,7 +476,7 @@ def main() -> int:
         for c in new_coupling:
             via = f" (via {c['via']})" if c["via"] else ""
             print(f"    - {c['verb']} [{c['scope']}] reads data['{c['collection']}']"
-                  f"{via} @ commands.py:{c['lineno']}")
+                  f"{via} @ {c['file']}:{c['lineno']}")
             print(f"      → {c['advice']}")
     if pending_coupling:
         # Accepted debt: enumerated + visible, but not a failure (ratchet).

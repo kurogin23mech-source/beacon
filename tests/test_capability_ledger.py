@@ -14,6 +14,7 @@ Load-bearing tests:
     "clean", not "checker asleep".
 """
 
+import ast
 import os
 import sys
 
@@ -486,6 +487,47 @@ def test_checker_ignores_collection_write_context(tmp_path):
     # project data — the ctx guard keeps it from being a false positive.
     path = _write(tmp_path, "commands.py", _SYNTH_COLLECTION_WRITE_CTX)
     assert chk.find_collection_coupling(path) == []
+
+
+def test_governing_verbs_attribution_crosses_module_boundary():
+    """ms-127 module-aware scan: a helper's profession-collection read in ONE file
+    is attributed to a profession-shared cmd_<verb> handler that lives in ANOTHER
+    file. The god-module split moves cmd_<verb> handlers into cmd_<family>.py while
+    the helper they call may stay in commands.py / commands_shared.py; a single-tree
+    scan would miss that cmd→helper edge and silently drop the read from the ms-134
+    invariant. This asserts the cross-module edge (and the single-tree negative
+    control that motivates it)."""
+    # file A: a helper (no cmd_ handler) that reads a profession collection.
+    tree_a = ast.parse("def _synth_xwalk(d):\n    return d.get('milestones')\n")
+    funcs_a = chk._build_function_index(tree_a)
+    # file B: a SHARED (doc→L2) handler that calls the helper — different module.
+    tree_b = ast.parse("def cmd_doc_synthxmod():\n    _synth_xwalk({})\n")
+    funcs_b = chk._build_function_index(tree_b)
+    trees = [("a.py", tree_a, funcs_a), ("b.py", tree_b, funcs_b)]
+
+    # The `.get('milestones')` read is on line 2 of file A. With BOTH trees, the
+    # read is attributed to doc_synthxmod (via the helper) even though the handler
+    # is in the other file.
+    gov = chk._governing_shared_verbs(trees, funcs_a, 2)
+    assert {v for v, _s, _via in gov} == {"doc_synthxmod"}, gov
+    assert all(via == "_synth_xwalk" for _v, _s, via in gov), gov
+
+    # Negative control: scanning file A ALONE loses the handler → no attribution.
+    # This is exactly the silent gap the module-aware scan closes.
+    gov_single = chk._governing_shared_verbs([("a.py", tree_a, funcs_a)], funcs_a, 2)
+    assert gov_single == [], gov_single
+
+
+def test_scanned_paths_default_includes_family_modules_and_shared():
+    """Default scan set = commands.py + commands_shared.py + every lib/cmd_*.py.
+    A single-file override (test fixture / --commands-path) restricts to that one
+    file so synthetic-source fixtures stay isolated from the real family modules."""
+    default = chk._scanned_paths()
+    bases = {os.path.basename(p) for p in default}
+    assert "commands.py" in bases
+    assert "commands_shared.py" in bases  # e-4316/e-4317 shared foundation is scanned
+    # override → exactly the one file, nothing auto-discovered.
+    assert chk._scanned_paths("/tmp/fixture_commands.py") == ["/tmp/fixture_commands.py"]
 
 
 # --- classification proposal (ms-134 e-4739) -------------------------------
