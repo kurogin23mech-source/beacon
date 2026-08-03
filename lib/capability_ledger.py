@@ -166,18 +166,70 @@ PROFESSION_CONCRETE_COLLECTIONS = {
 # is no longer detected, so a remediation is forced to delete its allowlist row
 # (the allowlist cannot rot into a lie about what still couples).
 #
-# Every entry below is a real coupling found in the 2026-08-02 sweep (the
-# session-log ``target_list`` finding + the wider scan it seeded): a shared
-# capability that walks only dev ``milestones`` and would miss a sales project's
-# targets. Remediation is tracked under ms-134.
+# Each remaining entry is a GENUINE gap confirmed by the 2026-08-03 per-site
+# review (e-4737): a shared capability that walks only dev ``milestones`` and
+# would miss a sales project's targets. Where the gap is a whole deferred effort
+# it is tracked by its own milestone; the inline note says which.
 KNOWN_COLLECTION_COUPLING = {
-    ("target_list", "milestones"),
-    ("session_end", "milestones"),
-    ("session_fork", "milestones"),
-    ("session_rescue", "milestones"),
-    ("cloud_migrate_from_local", "milestones"),
+    # trek aggregation is dev-bound (commits/tasks) but Trek is a profession-
+    # generic feature — it should aggregate work-item/evidence across all target
+    # arms. Deferred until cross-profession demand is clear: ms-137 (waiting).
     ("trek_show", "milestones"),
     ("trek_timeline", "milestones"),
+    # session rescue finds other sessions by session_id in target entries; sales
+    # stores those under activities/communications arms, not ``entries``. Needs
+    # arm-aware walking. Deferred: ms-138 (waiting).
+    ("session_rescue", "milestones"),
+    # cloud migration pre-flight diffs only milestones; a sales-project migration
+    # would not diff opportunities. A real gap, but the pre-flight ABORTS on any
+    # local-only entry, so extending it is behaviour-sensitive (migration
+    # internals + integration test needed) — left as tracked debt under ms-134.
+    ("cloud_migrate_from_local", "milestones"),
+}
+
+# Reviewed-legitimate reads (ms-134 e-4737): (verb, collection) reads a
+# human-confirmed per-site review found CORRECT — the sought data lives ONLY in
+# that collection by the data model's design, so the read is not profession
+# coupling. DISTINCT from KNOWN_COLLECTION_COUPLING (pending debt): these are NOT
+# debt and must NOT be "remediated" (routing them through the target abstraction
+# would be WRONG — e.g. it would walk sales targets that never hold this data, or
+# drop operations). Each entry carries the evidence.
+#
+# CONFIRMATION GATE (AX review 2026-08-03): "reviewed" means a HUMAN confirmed it
+# via the PR independent-review + human-merge checkpoint (CLAUDE.md merge gate) —
+# not the AI self-declaring. An entry added here appears in the PR diff and is
+# independently reviewed before merge; the AI proposes with evidence, the human
+# confirms on merge (the ms-134 layer-assignment ownership pattern). A deeper
+# code-level gate (checker validates the evidence cites a real artifact) is
+# possible future hardening, deferred — shared with the debt ratchet's same
+# prose-gate limitation.
+#
+# WHICH LIST does a new (verb, collection) go in? Two binary questions:
+#   1. Is that collection the ONLY place this data can live, by the data model?
+#      → yes → REVIEWED_LEGITIMATE (the read is exact, not coupling).
+#   2. Would routing through occupation.iter_target_records be CORRECT if done?
+#      → yes → KNOWN_COLLECTION_COUPLING (genuine debt to remediate).
+#      → no (wrong abstraction — would drop operations / walk irrelevant targets)
+#        → REVIEWED_LEGITIMATE.
+REVIEWED_LEGITIMATE_COLLECTION_READS = {
+    ("target_list", "milestones"):
+        "target-transition-approval entries live only in milestones (dev) and "
+        "operations (cross-profession): requires_spine_approval() is False for "
+        "sales opportunities (existing judge path), so no sales target holds "
+        "them. NOTE occupation.iter_target_records does NOT cover operations "
+        "(TARGET_COLLECTIONS = milestones+opportunities), so target_list must "
+        "keep reading milestones+operations directly — routing through the "
+        "abstraction would silently drop operation-hosted approvals.",
+    ("session_end", "milestones"):
+        "occupation (claim) is stored only on ms['occupation']; "
+        "milestone_release_occupation is milestone-specific and sales entities "
+        "carry no occupation field. Reading milestones is exact, not coupling.",
+    ("session_fork", "milestones"):
+        "fork is a git-worktree operation (creates .worktrees/<ms-id>-fork-…, a "
+        "branch, fork.json target_ms_id) — only a dev milestone is forkable; a "
+        "sales Opportunity has no git worktree. Reading milestones is exact, not "
+        "coupling. Independent AX review 2026-08-03 corrected an initial "
+        "over-eager remediation of this site.",
 }
 
 
@@ -185,6 +237,13 @@ def is_known_collection_coupling(verb: str, collection: str) -> bool:
     """True when (verb, collection) is an accepted-pending coupling in the
     ratchet allowlist (reported as debt, not a CI failure)."""
     return (verb, collection) in KNOWN_COLLECTION_COUPLING
+
+
+def is_reviewed_legitimate_read(verb: str, collection: str) -> bool:
+    """True when (verb, collection) is a human-reviewed LEGITIMATE read — the
+    sought data lives only in that collection by design, so it is not profession
+    coupling and must not be remediated (ms-134 e-4737)."""
+    return (verb, collection) in REVIEWED_LEGITIMATE_COLLECTION_READS
 
 
 # ---------------------------------------------------------------------------

@@ -319,26 +319,63 @@ def test_no_new_collection_coupling_on_real_tree():
                     f"{' via '+c['via'] if c['via'] else ''}" for c in new))
 
 
-def test_every_detected_coupling_is_pending_debt():
-    # On the real tree, every detected coupling must be allowlisted (status
-    # pending_debt); a new_violation is caught by the test above, asserted here
-    # for a clear message.
+def test_every_detected_coupling_is_classified():
+    # On the real tree, every detected coupling must be either accepted debt
+    # (pending_debt) or a human-reviewed correct read (legitimate); a
+    # new_violation is caught by the test above, asserted here for a clear msg.
     coupling = chk.find_collection_coupling()
     for c in coupling:
-        assert c["status"] == "pending_debt", f"un-allowlisted coupling: {c}"
+        assert c["status"] in ("pending_debt", "reviewed_correct"), (
+            f"un-classified coupling: {c}")
 
 
 def test_no_stale_collection_allowlist_entries():
     """Ratchet hygiene: every (verb, collection) in KNOWN_COLLECTION_COUPLING
-    must still be detected in the real tree. When a handler is remediated the
-    coupling disappears, so its allowlist row MUST be deleted — this test fails
-    until it is, preventing the allowlist from rotting into a stale lie about
-    what still couples."""
+    AND in REVIEWED_LEGITIMATE_COLLECTION_READS must still be detected in the
+    real tree. When a handler is remediated (debt) or refactored away the read
+    disappears, so its row MUST be deleted — this test fails until it is,
+    preventing either list from rotting into a stale lie about what still reads a
+    profession collection."""
     detected = {(c["verb"], c["collection"]) for c in chk.find_collection_coupling()}
-    stale = sorted(cl.KNOWN_COLLECTION_COUPLING - detected)
-    assert not stale, (
-        "allowlist entries no longer detected (delete them — the handler was "
-        "remediated): " + ", ".join(f"{v}→{coll}" for v, coll in stale))
+    stale_debt = sorted(cl.KNOWN_COLLECTION_COUPLING - detected)
+    assert not stale_debt, (
+        "pending-debt entries no longer detected (delete them — remediated): "
+        + ", ".join(f"{v}→{coll}" for v, coll in stale_debt))
+    stale_legit = sorted(set(cl.REVIEWED_LEGITIMATE_COLLECTION_READS) - detected)
+    assert not stale_legit, (
+        "reviewed-legitimate entries no longer detected (delete them — the read "
+        "was refactored away): " + ", ".join(f"{v}→{coll}" for v, coll in stale_legit))
+
+
+def test_debt_and_legitimate_are_disjoint():
+    # A (verb, collection) cannot be BOTH pending debt and reviewed-legitimate —
+    # it is one or the other. Keeps the two lists from silently contradicting.
+    overlap = set(cl.KNOWN_COLLECTION_COUPLING) & set(cl.REVIEWED_LEGITIMATE_COLLECTION_READS)
+    assert overlap == set(), f"a read is both debt and legitimate: {overlap}"
+
+
+def test_reviewed_correct_reads_are_classified_correctly():
+    # The human-reviewed correct reads (e-4737) report as "reviewed_correct",
+    # not debt — so they are not nagged for remediation.
+    by_key = {(c["verb"], c["collection"]): c["status"]
+              for c in chk.find_collection_coupling()}
+    assert by_key.get(("target_list", "milestones")) == "reviewed_correct"
+    assert by_key.get(("session_end", "milestones")) == "reviewed_correct"
+    # session_fork is milestone-scoped by design (a git-worktree op) — an initial
+    # over-eager remediation was reverted after independent AX review 2026-08-03,
+    # and it is now classified reviewed-correct, not remediated.
+    assert by_key.get(("session_fork", "milestones")) == "reviewed_correct"
+
+
+def test_reviewed_correct_advice_is_evidence_not_routing_hint():
+    # A reviewed-correct read must NOT carry the "route via iter_target_records"
+    # advice (which would be wrong for it); its advice is the review evidence
+    # (maintainability review 2026-08-03).
+    for c in chk.find_collection_coupling():
+        if c["status"] == "reviewed_correct":
+            assert "iter_target_records" not in c["advice"] or "NOT" in c["advice"]
+            assert c["advice"] == cl.REVIEWED_LEGITIMATE_COLLECTION_READS[
+                (c["verb"], c["collection"])]
 
 
 def test_operations_is_not_a_profession_collection():

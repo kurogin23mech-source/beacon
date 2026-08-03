@@ -5928,9 +5928,12 @@ def cmd_session_fork():
         print("Usage: beacon session fork <ms-id> [--json]", file=sys.stderr)
         sys.exit(2)
 
-    # Resolve ms_title from the local project.json cache (load_project gives
-    # the full project including milestones[]). Surfaces a clean error if
-    # the ms doesn't exist rather than writing fork.json with a blank title.
+    # Resolve ms_title from the local project.json cache. fork is a git-worktree
+    # operation (creates .worktrees/<ms-id>-fork-…, a branch, fork.json with
+    # target_ms_id) — it is milestone-scoped BY DESIGN: only a dev milestone is
+    # forkable (a sales Opportunity has no git worktree). So reading milestones
+    # here is a legitimate exact read, NOT profession coupling — recorded as such
+    # in capability_ledger.REVIEWED_LEGITIMATE_COLLECTION_READS (ms-134 e-4737).
     data = load_project()
     ms_title = ""
     for ms in data.get("milestones", []):
