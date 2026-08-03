@@ -259,7 +259,7 @@ def is_reviewed_legitimate_read(verb: str, collection: str) -> bool:
 # so the dev/sales split inside L3 is documentation, not enforcement.
 _NOUN_SCOPE = {
     # L0 — Beacon product operation / admin / dev tooling.
-    "doctor": "L0", "skill": "L0", "migrate": "L0", "master": "L0",
+    "doctor": "L0", "skill": "L0", "migrate": "L0",
     "reset": "L0", "update": "L0", "project": "L0",
     # L1 — all-profession coordination substrate (target-agnostic).
     "auth": "L1", "bus": "L1", "channel": "L1", "cloud": "L1", "cycle": "L1",
@@ -267,7 +267,13 @@ _NOUN_SCOPE = {
     "incident": "L1", "init": "L1", "member": "L1", "note": "L1",
     "onboarding": "L1", "operation": "L1", "org": "L1", "resume": "L1",
     "run": "L1", "search": "L1", "session": "L1", "sessions": "L1",
-    "stop": "L1", "trek": "L1", "trigger": "L1", "watch": "L1",
+    "stop": "L1", "trek": "L1", "trigger": "L1",
+    # L1 — reclassified 2026-08-03 (e-4737 台帳 review): these were mis-scoped by
+    # their noun name, not their behaviour. master = customer-identity master-sync
+    # drain (ms-111, was L0); morning = bus autonomous-activity summary (ms-55,
+    # was L3-sales); profile = Beacon auth/backend profile listing (ms-64, was
+    # L3-sales). All three are profession-generic coordination/infra, not sales.
+    "master": "L1", "morning": "L1", "profile": "L1",
     # L2 — class-abstraction: operate on a Target via the abstraction.
     "claim": "L2", "doc": "L2", "review": "L2", "status": "L2",
     "summary": "L2", "target": "L2",
@@ -275,11 +281,13 @@ _NOUN_SCOPE = {
     "milestone": "L3", "task": "L3", "log": "L3", "save": "L3", "sync": "L3",
     "push": "L3", "deploy": "L3", "pr": "L3", "issue": "L3", "retro": "L3",
     "rollback": "L3", "entry": "L3", "stuck": "L3",
-    # L3 — profession default (sales).
+    # L3 — profession default (sales). "watch" = the sales reply-watch
+    # (sales_entities.set_watch — watch a thread for a reply at a cadence); it was
+    # mis-scoped L1 by its generic noun (reclassified 2026-08-03, e-4737).
     "account": "L3", "acquisition": "L3", "activity": "L3",
     "communication": "L3", "meeting": "L3", "nurturing": "L3",
     "opportunity": "L3", "phase": "L3", "sales": "L3", "contact": "L3",
-    "dossier": "L3", "morning": "L3", "profile": "L3",
+    "dossier": "L3", "watch": "L3",
 }
 
 # Per-verb overrides where a single verb does not follow its noun's scope.
@@ -363,8 +371,7 @@ _L3_NOUN_PROFESSION = {
     "account": "sales", "acquisition": "sales", "activity": "sales",
     "communication": "sales", "meeting": "sales", "nurturing": "sales",
     "opportunity": "sales", "phase": "sales", "sales": "sales",
-    "contact": "sales", "dossier": "sales", "morning": "sales",
-    "profile": "sales",
+    "contact": "sales", "dossier": "sales", "watch": "sales",
 }
 
 # L4 verb -> owning project. Empty: no L4 (project-only) capability ships in the
