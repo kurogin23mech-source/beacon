@@ -218,8 +218,9 @@ def find_collection_coupling(commands_path: str = "") -> list:
     Each item is a dict: ``{verb, scope, collection, advice, via, lineno,
     status}``. ``status`` is one of (self-describing — a caller filters on it
     without consulting docs, AX review 2026-08-03):
-      - ``"legitimate"`` — a human-reviewed correct read (the data lives only in
-        that collection by design); not coupling, not debt (e-4737).
+      - ``"reviewed_correct"`` — a HUMAN-reviewed correct read (the data lives
+        only in that collection by design); not coupling, not debt (e-4737). The
+        process-naming (not a bare "legitimate") signals the human-review gate.
       - ``"pending_debt"`` — a genuine coupling accepted pending remediation
         (ratchet allowlist).
       - ``"new_violation"`` — neither of the above; a fresh coupling that fails
@@ -236,16 +237,22 @@ def find_collection_coupling(commands_path: str = "") -> list:
             continue
         for verb, scope, via in _governing_shared_verbs(tree, funcs, node.lineno):
             if cl.is_reviewed_legitimate_read(verb, collection):
-                status = "legitimate"
+                status = "reviewed_correct"
+                # A reviewed-correct read must NOT be remediated, so its advice is
+                # the review EVIDENCE (why the read is exact), not the routing hint
+                # — which would be wrong here (maintainability review 2026-08-03).
+                advice = cl.REVIEWED_LEGITIMATE_COLLECTION_READS[(verb, collection)]
             elif cl.is_known_collection_coupling(verb, collection):
                 status = "pending_debt"
+                advice = cl.PROFESSION_CONCRETE_COLLECTIONS[collection]
             else:
                 status = "new_violation"
+                advice = cl.PROFESSION_CONCRETE_COLLECTIONS[collection]
             hits.append({
                 "verb": verb,
                 "scope": scope,
                 "collection": collection,
-                "advice": cl.PROFESSION_CONCRETE_COLLECTIONS[collection],
+                "advice": advice,
                 "via": via,
                 "lineno": node.lineno,
                 "status": status,
@@ -275,20 +282,22 @@ def run(commands_path: str = "") -> dict:
     ownership = cl.reconcile_ownership()
     skill_ownership = cl.reconcile_skills_ownership()
     viol = find_invariant_violations(commands_path)
-    coupling = find_collection_coupling(commands_path)
-    new_coupling = [c for c in coupling if c["status"] == "new_violation"]
-    pending_coupling = [c for c in coupling if c["status"] == "pending_debt"]
-    legitimate_coupling = [c for c in coupling if c["status"] == "legitimate"]
+    # all_collection_reads is the FULL inventory (all three statuses), named so a
+    # caller does not mistake it for a problems-only list (AX review 2026-08-03).
+    all_reads = find_collection_coupling(commands_path)
+    new_coupling = [c for c in all_reads if c["status"] == "new_violation"]
+    pending_coupling = [c for c in all_reads if c["status"] == "pending_debt"]
+    reviewed_reads = [c for c in all_reads if c["status"] == "reviewed_correct"]
     ok = (not cov["unclassified"] and not skill_cov["unclassified"]
           and not ownership["unowned"] and not skill_ownership["unowned"]
           and not viol and not new_coupling)
     return {"ok": ok, "coverage": cov, "skill_coverage": skill_cov,
             "ownership": ownership, "skill_ownership": skill_ownership,
             "violations": viol,
-            "collection_coupling": coupling,
+            "all_collection_reads": all_reads,
             "new_collection_coupling": new_coupling,
             "pending_collection_coupling": pending_coupling,
-            "legitimate_collection_reads": legitimate_coupling}
+            "reviewed_correct_reads": reviewed_reads}
 
 
 def main() -> int:
@@ -359,13 +368,13 @@ def main() -> int:
               f"allowlisted — remediate then drop from KNOWN_COLLECTION_COUPLING):")
         for verb, coll in pend_pairs:
             print(f"    · {verb} reads data['{coll}']")
-    legit = result["legitimate_collection_reads"]
-    if legit:
+    reviewed = result["reviewed_correct_reads"]
+    if reviewed:
         # Human-reviewed correct reads (data lives only there by design).
-        legit_pairs = sorted({(c["verb"], c["collection"]) for c in legit})
-        print(f"  reviewed-legitimate reads ({len(legit_pairs)}, confirmed "
+        rev_pairs = sorted({(c["verb"], c["collection"]) for c in reviewed})
+        print(f"  reviewed-correct reads ({len(rev_pairs)}, human-confirmed "
               f"correct — data lives only there by design, do NOT remediate):")
-        for verb, coll in legit_pairs:
+        for verb, coll in rev_pairs:
             print(f"    ✓ {verb} reads data['{coll}']")
     if result["ok"]:
         print("  OK: every capability is classified and no profession-shared "

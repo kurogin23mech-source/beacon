@@ -193,19 +193,43 @@ KNOWN_COLLECTION_COUPLING = {
 # coupling. DISTINCT from KNOWN_COLLECTION_COUPLING (pending debt): these are NOT
 # debt and must NOT be "remediated" (routing them through the target abstraction
 # would be WRONG — e.g. it would walk sales targets that never hold this data, or
-# drop operations). Each entry carries the evidence. The checker reports these
-# separately (neither a failure nor debt). AI proposes with evidence; a human
-# confirms (the ms-134 layer-assignment ownership pattern).
+# drop operations). Each entry carries the evidence.
+#
+# CONFIRMATION GATE (AX review 2026-08-03): "reviewed" means a HUMAN confirmed it
+# via the PR independent-review + human-merge checkpoint (CLAUDE.md merge gate) —
+# not the AI self-declaring. An entry added here appears in the PR diff and is
+# independently reviewed before merge; the AI proposes with evidence, the human
+# confirms on merge (the ms-134 layer-assignment ownership pattern). A deeper
+# code-level gate (checker validates the evidence cites a real artifact) is
+# possible future hardening, deferred — shared with the debt ratchet's same
+# prose-gate limitation.
+#
+# WHICH LIST does a new (verb, collection) go in? Two binary questions:
+#   1. Is that collection the ONLY place this data can live, by the data model?
+#      → yes → REVIEWED_LEGITIMATE (the read is exact, not coupling).
+#   2. Would routing through occupation.iter_target_records be CORRECT if done?
+#      → yes → KNOWN_COLLECTION_COUPLING (genuine debt to remediate).
+#      → no (wrong abstraction — would drop operations / walk irrelevant targets)
+#        → REVIEWED_LEGITIMATE.
 REVIEWED_LEGITIMATE_COLLECTION_READS = {
     ("target_list", "milestones"):
-        "target-transition-approval entries only ever exist in milestones/"
-        "operations: requires_spine_approval() returns False for sales "
-        "opportunities (they use the existing judge path), so no sales target "
-        "holds these. Reading milestones+operations is exact, not coupling.",
+        "target-transition-approval entries live only in milestones (dev) and "
+        "operations (cross-profession): requires_spine_approval() is False for "
+        "sales opportunities (existing judge path), so no sales target holds "
+        "them. NOTE occupation.iter_target_records does NOT cover operations "
+        "(TARGET_COLLECTIONS = milestones+opportunities), so target_list must "
+        "keep reading milestones+operations directly — routing through the "
+        "abstraction would silently drop operation-hosted approvals.",
     ("session_end", "milestones"):
         "occupation (claim) is stored only on ms['occupation']; "
         "milestone_release_occupation is milestone-specific and sales entities "
         "carry no occupation field. Reading milestones is exact, not coupling.",
+    ("session_fork", "milestones"):
+        "fork is a git-worktree operation (creates .worktrees/<ms-id>-fork-…, a "
+        "branch, fork.json target_ms_id) — only a dev milestone is forkable; a "
+        "sales Opportunity has no git worktree. Reading milestones is exact, not "
+        "coupling. Independent AX review 2026-08-03 corrected an initial "
+        "over-eager remediation of this site.",
 }
 
 

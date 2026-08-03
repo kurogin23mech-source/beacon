@@ -325,7 +325,7 @@ def test_every_detected_coupling_is_classified():
     # new_violation is caught by the test above, asserted here for a clear msg.
     coupling = chk.find_collection_coupling()
     for c in coupling:
-        assert c["status"] in ("pending_debt", "legitimate"), (
+        assert c["status"] in ("pending_debt", "reviewed_correct"), (
             f"un-classified coupling: {c}")
 
 
@@ -354,21 +354,28 @@ def test_debt_and_legitimate_are_disjoint():
     assert overlap == set(), f"a read is both debt and legitimate: {overlap}"
 
 
-def test_reviewed_legitimate_reads_are_classified_correctly():
-    # The two human-reviewed legitimate reads (e-4737) report as "legitimate",
+def test_reviewed_correct_reads_are_classified_correctly():
+    # The human-reviewed correct reads (e-4737) report as "reviewed_correct",
     # not debt — so they are not nagged for remediation.
     by_key = {(c["verb"], c["collection"]): c["status"]
               for c in chk.find_collection_coupling()}
-    assert by_key.get(("target_list", "milestones")) == "legitimate"
-    assert by_key.get(("session_end", "milestones")) == "legitimate"
+    assert by_key.get(("target_list", "milestones")) == "reviewed_correct"
+    assert by_key.get(("session_end", "milestones")) == "reviewed_correct"
+    # session_fork is milestone-scoped by design (a git-worktree op) — an initial
+    # over-eager remediation was reverted after independent AX review 2026-08-03,
+    # and it is now classified reviewed-correct, not remediated.
+    assert by_key.get(("session_fork", "milestones")) == "reviewed_correct"
 
 
-def test_session_fork_read_is_remediated():
-    # session_fork was remediated (routes through occupation.iter_target_records),
-    # so it must no longer be detected reading data['milestones'] at all.
-    detected = {(c["verb"], c["collection"]) for c in chk.find_collection_coupling()}
-    assert ("session_fork", "milestones") not in detected
-    assert ("session_fork", "milestones") not in cl.KNOWN_COLLECTION_COUPLING
+def test_reviewed_correct_advice_is_evidence_not_routing_hint():
+    # A reviewed-correct read must NOT carry the "route via iter_target_records"
+    # advice (which would be wrong for it); its advice is the review evidence
+    # (maintainability review 2026-08-03).
+    for c in chk.find_collection_coupling():
+        if c["status"] == "reviewed_correct":
+            assert "iter_target_records" not in c["advice"] or "NOT" in c["advice"]
+            assert c["advice"] == cl.REVIEWED_LEGITIMATE_COLLECTION_READS[
+                (c["verb"], c["collection"])]
 
 
 def test_operations_is_not_a_profession_collection():
