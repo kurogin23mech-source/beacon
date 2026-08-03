@@ -486,3 +486,152 @@ def test_checker_ignores_collection_write_context(tmp_path):
     # project data — the ctx guard keeps it from being a false positive.
     path = _write(tmp_path, "commands.py", _SYNTH_COLLECTION_WRITE_CTX)
     assert chk.find_collection_coupling(path) == []
+
+
+# --- classification proposal (ms-134 e-4739) -------------------------------
+
+def test_propose_clean_ledger_has_no_gaps():
+    # The live ledger is fully classified/owned (the coverage tests assert this),
+    # so propose() reports nothing to classify and stays advisory-clean.
+    p = cl.propose()
+    assert p["ok"] is True
+    assert p["gap_count"] == 0
+    assert p["proposals"] == []
+    # the menus travel with the result so a caller need not re-import constants
+    assert set(p["scope_menu"]) == set(cl.SCOPE_LEVELS)
+    assert set(p["owner_menu"]) == cl.PROFESSIONS
+
+
+def test_propose_unknown_noun_verb_is_a_low_confidence_scope_gap():
+    # A brand-new noun with no signal → a scope gap with an empty guess (no
+    # fabricated layer) but the exact _NOUN_SCOPE edit site named.
+    p = cl.propose(live={"payroll_run"}, skills_dir="/nonexistent")
+    assert p["ok"] is False and p["gap_count"] == 1
+    gap = p["proposals"][0]
+    assert gap["kind"] == "verb" and gap["gap"] == "scope"
+    assert gap["noun"] == "payroll"
+    assert gap["proposed_scope"] == "" and gap["confidence"] == "low"
+    edit = gap["edits"][0]
+    assert edit["dict"] == "_NOUN_SCOPE" and edit["key"] == "payroll"
+
+
+def test_propose_profession_token_verb_is_high_confidence_l3():
+    # A noun that names a profession is the one confident signal a pure guess
+    # trusts → L3/<profession> with the owner follow-up flagged in the note.
+    p = cl.propose(live={"backoffice_report"}, skills_dir="/nonexistent")
+    gap = p["proposals"][0]
+    assert gap["proposed_scope"] == "L3"
+    assert gap["proposed_owner"] == "backoffice"
+    assert gap["confidence"] == "high"
+    assert "_L3_NOUN_PROFESSION" in gap["edits"][0]["note"]
+
+
+def test_propose_skill_profession_token_is_l3_owned(tmp_path):
+    # An unclassified skill whose name carries a profession token → L3/<prof> with
+    # the _SKILL_SCOPE edit site + owner follow-up.
+    d = tmp_path / "skills"
+    d.mkdir()
+    (d / "beacon-backoffice-payroll.md").write_text("x", encoding="utf-8")
+    p = cl.propose(live=set(), skills_dir=str(d))
+    gap = next(g for g in p["proposals"] if g["kind"] == "skill")
+    assert gap["gap"] == "scope"
+    assert gap["proposed_scope"] == "L3" and gap["proposed_owner"] == "backoffice"
+    assert gap["edits"][0]["dict"] == "_SKILL_SCOPE"
+
+
+def test_propose_is_read_only():
+    # propose() must not mutate the ledger tables (it is the read-only scaffold;
+    # the write happens in the Skill's human-confirmed step).
+    before = dict(cl._NOUN_SCOPE)
+    cl.propose(live={"payroll_run", "backoffice_report"}, skills_dir="/nonexistent")
+    assert cl._NOUN_SCOPE == before
+
+
+# --- L4 skill ownership (ms-134 e-4739; the mechanism dogfoods itself) ------
+
+def test_scope_classify_skill_is_l4_owned_by_beacon():
+    # e-4739's own Skill is the first live L4 capability: project-local to the
+    # Beacon repo (it edits this very ledger). Its scope/owner must resolve so it
+    # is neither unclassified nor unowned.
+    assert cl.skill_scope_of("beacon-scope-classify") == "L4"
+    assert cl.skill_owner_of("beacon-scope-classify") == "beacon"
+
+
+def test_skill_owner_of_dispatches_l3_profession_and_l4_project():
+    # L3 → profession, L4 → project, shared → "". The dispatch mirrors owner_of
+    # for verbs so the two axes read the same on both surfaces.
+    assert cl.skill_owner_of("beacon-task") == "dev"          # L3 dev
+    assert cl.skill_owner_of("beacon-sales-email") == "sales"  # L3 sales (prefix)
+    assert cl.skill_owner_of("beacon-scope-classify") == "beacon"  # L4 project
+    assert cl.skill_owner_of("beacon-map") == ""              # L2 shared, no owner
+
+
+def test_l4_skill_is_owned_not_flagged_unowned():
+    # The ownership reconciler must count the L4 skill under its project, not in
+    # (unowned) — the coverage gate stays green with a live L4 capability present.
+    rec = cl.reconcile_skills_ownership()
+    assert "beacon-scope-classify" not in rec["unowned"]
+    assert rec["by_owner"].get("beacon") == 1
+
+
+# --- propose owner-gap paths (maintainability review 581: these 2 loops of
+#     propose() were untested — scope gaps were, owner gaps were not) ----------
+
+def test_propose_verb_owner_gap(monkeypatch):
+    # A verb whose noun IS classified L3 but has no profession owner → an OWNER
+    # gap (not a scope gap), pointing at _L3_NOUN_PROFESSION. Synthesize the state
+    # (all real L3 nouns are owned) by adding an L3 noun without an owner entry.
+    monkeypatch.setitem(cl._NOUN_SCOPE, "synthledger", "L3")
+    p = cl.propose(live={"synthledger_add"}, skills_dir="/nonexistent")
+    gap = next(g for g in p["proposals"] if g["capability"] == "synthledger_add")
+    assert gap["gap"] == "owner" and gap["kind"] == "verb"
+    assert gap["known_scope"] == "L3" and gap["proposed_scope"] == "L3"
+    assert gap["edits"][0]["dict"] == "_L3_NOUN_PROFESSION"
+    assert gap["edits"][0]["key"] == "synthledger"
+
+
+def test_propose_skill_owner_gap(monkeypatch, tmp_path):
+    # An L3 skill present on the live surface but with no owner → an OWNER gap
+    # pointing at _SKILL_OWNER. Its name has no profession token, so low confidence.
+    d = tmp_path / "skills"
+    d.mkdir()
+    (d / "beacon-synthledger.md").write_text("x", encoding="utf-8")
+    monkeypatch.setitem(cl._SKILL_SCOPE, "beacon-synthledger", "L3")
+    p = cl.propose(live=set(), skills_dir=str(d))
+    gap = next(g for g in p["proposals"] if g["capability"] == "beacon-synthledger")
+    assert gap["gap"] == "owner" and gap["kind"] == "skill"
+    assert gap["known_scope"] == "L3"
+    assert gap["confidence"] == "low"
+    assert gap["edits"][0]["dict"] == "_SKILL_OWNER"
+
+
+def test_propose_reports_scanned_counts():
+    # scanned surfaces how many capabilities were inspected, so an empty result is
+    # distinguishable from "scanner looked in the wrong place" (AX review 581).
+    p = cl.propose(live={"payroll_run"}, skills_dir="/nonexistent")
+    assert p["scanned"]["verbs"] == 1
+    assert p["scanned"]["skills"] == 0
+
+
+# --- render_proposal: the lib↔script schema contract (maintainability 581) ---
+
+def test_render_proposal_renders_gap(capsys):
+    # render_proposal() reads many propose() keys; a schema change must not break
+    # it silently. Assert the human report surfaces the gap + edit site.
+    prop = cl.propose(live={"payroll_run"}, skills_dir="/nonexistent")
+    chk.render_proposal(prop)
+    out = capsys.readouterr().out
+    assert "payroll_run" in out
+    assert "scope gap" in out
+    assert "_NOUN_SCOPE" in out
+
+
+def test_render_proposal_ok_shows_scanned(capsys):
+    # The OK branch surfaces scanned counts as the "did the scanner look here?"
+    # diagnostic (AX review 581).
+    chk.render_proposal({"ok": True, "gap_count": 0, "proposals": [],
+                         "scope_menu": {}, "owner_menu": [],
+                         "scanned": {"verbs": 305, "skills": 57}})
+    out = capsys.readouterr().out
+    assert "no open gaps" in out
+    assert "305 verbs" in out and "57 skills" in out
