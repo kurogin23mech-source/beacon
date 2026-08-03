@@ -5928,17 +5928,19 @@ def cmd_session_fork():
         print("Usage: beacon session fork <ms-id> [--json]", file=sys.stderr)
         sys.exit(2)
 
-    # Resolve ms_title from the local project.json cache (load_project gives
-    # the full project including milestones[]). Surfaces a clean error if
-    # the ms doesn't exist rather than writing fork.json with a blank title.
+    # Resolve the target title from the local project.json cache. Walk targets
+    # through the profession-agnostic seam (occupation.iter_target_records) rather
+    # than data["milestones"] directly, so a fork onto any Target class — not just
+    # a dev milestone — resolves its label (ms-134 e-4737). Surfaces a clean error
+    # if the target doesn't exist rather than writing fork.json with a blank title.
     data = load_project()
     ms_title = ""
-    for ms in data.get("milestones", []):
-        if ms.get("id") == ms_id:
-            ms_title = work_model.target_label(ms)
+    for target in occupation.iter_target_records(data):
+        if target.get("id") == ms_id:
+            ms_title = work_model.target_label(target)
             break
     if not ms_title:
-        print(f"Error: milestone not found: {ms_id}", file=sys.stderr)
+        print(f"Error: target not found: {ms_id}", file=sys.stderr)
         sys.exit(1)
 
     # Parent session info — used by the child's session-start to surface
