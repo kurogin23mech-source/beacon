@@ -230,6 +230,14 @@ _VERB_SCOPE_OVERRIDE: dict = {
 }
 
 
+def _noun_from_key(cap_key: str) -> str:
+    """The noun of a capability key — the substring before the first ``_``
+    (``task_done`` → ``task``). The ONE place that knows the key→noun split, so
+    ``scope_of`` and ``owner_of`` cannot fork on the format (maintainability
+    review 2026-08-03)."""
+    return (cap_key or "").strip().split("_", 1)[0]
+
+
 def scope_of(cap_key: str) -> str:
     """Return the L0..L4 scope of a capability (CLI verb dispatch key), or ``""``
     when its noun is unknown to the rules (surfaced by ``reconcile`` as
@@ -237,8 +245,7 @@ def scope_of(cap_key: str) -> str:
     key = (cap_key or "").strip()
     if key in _VERB_SCOPE_OVERRIDE:
         return _VERB_SCOPE_OVERRIDE[key]
-    noun = key.split("_", 1)[0]
-    return _NOUN_SCOPE.get(noun, "")
+    return _NOUN_SCOPE.get(_noun_from_key(key), "")
 
 
 def origin_of(cap_key: str) -> str:
@@ -271,8 +278,16 @@ def origin_of(cap_key: str) -> str:
 # is surfaced (the same drift-catch as scope coverage).
 # ---------------------------------------------------------------------------
 
-# Recognised profession owners for L3 defaults. Kept as data (not a bool split)
-# so a 3rd profession (backoffice, ms-121) slots in without a code change.
+# Recognised profession owners for L3 defaults — the validation allowlist that
+# owner values are checked against. Kept as data (not a bool split) so its
+# CONDITIONAL logic needs no change for a new profession. NOTE: ``backoffice`` is
+# already listed but has no live capability yet. Registering an actual backoffice
+# L3 capability still requires (all in THIS file):
+#   1. verbs — a noun entry in ``_L3_NOUN_PROFESSION`` (noun → "backoffice"),
+#   2. skills — a scope rule in ``_SKILL_SCOPE`` / ``_SKILL_PREFIX_SCOPE`` AND an
+#      owner rule in ``_SKILL_OWNER`` / ``_SKILL_OWNER_PREFIX``.
+# The checker catches a miss at CI time; this list is the authoring-time signpost
+# (AX/maintainability review 2026-08-03).
 PROFESSIONS = {"dev", "sales", "backoffice"}
 
 # L3 noun -> owning profession. MUST stay in sync with the L3 entries of
@@ -306,14 +321,16 @@ def owner_of(cap_key: str) -> str:
       - L3 → the owning PROFESSION (``dev`` / ``sales`` / …), or ``""`` when the
         noun has no profession registered (surfaced by ``reconcile_ownership``).
       - L4 → the owning PROJECT id, or ``""`` when unregistered.
-      - L0 / L1 / L2 → ``""`` — these are profession-SHARED and have NO single
-        owner (a correct empty, distinguished from a missing one by scope; use
-        ``owner_required`` to tell them apart).
+      - L0 (product-operation) / L1 / L2 (profession-shared) → ``""`` — none of
+        these has a single owner. This is a CORRECT empty, distinguished from a
+        missing one by scope: call ``owner_required(scope_of(cap))`` to tell
+        "no owner is expected" from "an owner is missing". (Only L1/L2 are
+        ``is_profession_shared``; L0 is product-operation — all three are simply
+        not owner-bearing.)
     """
     scope = scope_of(cap_key)
     if scope == "L3":
-        noun = (cap_key or "").strip().split("_", 1)[0]
-        return _L3_NOUN_PROFESSION.get(noun, "")
+        return _L3_NOUN_PROFESSION.get(_noun_from_key(cap_key), "")
     if scope == "L4":
         return _L4_VERB_PROJECT.get((cap_key or "").strip(), "")
     return ""
@@ -386,15 +403,19 @@ def reconcile_ownership(live: Optional[set] = None) -> dict:
 
     - ``unowned``: live verbs whose scope REQUIRES an owner (L3 → profession,
       L4 → project) but resolves to none — an L3 capability under a new noun that
-      was given a scope but no profession, or an L4 with no project. The same
-      drift-catch as scope coverage, one axis over.
-    - ``by_owner``: count of live verbs per resolved owner (shared L0/L1/L2 are
-      counted under the ``"(shared)"`` key), for a coverage summary.
+      was given a scope but no profession, or an L4 with no project. This is the
+      OWNERSHIP-axis parallel of ``reconcile``'s ``unclassified`` (the scope-axis
+      gap list); the keys differ because each names its own axis' gap.
+    - ``by_owner``: count of live verbs per resolved owner, pre-seeded with every
+      profession (so ``backoffice`` shows ``0`` before its first live verb rather
+      than being absent) plus ``"(shared)"`` (L0/L1/L2) and ``"(unowned)"``.
     """
     live = enumerate_live_verbs() if live is None else live
     unowned = sorted(v for v in live
                      if owner_required(scope_of(v)) and not owner_of(v))
-    by_owner: dict = {}
+    by_owner: dict = {p: 0 for p in PROFESSIONS}
+    by_owner["(shared)"] = 0
+    by_owner["(unowned)"] = 0
     for v in live:
         if owner_required(scope_of(v)):
             key = owner_of(v) or "(unowned)"
@@ -513,15 +534,20 @@ def reconcile_skills(skills_dir: str = "") -> dict:
     return {"unclassified": unclassified, "by_scope": by_scope}
 
 
-def reconcile_skill_ownership(skills_dir: str = "") -> dict:
+def reconcile_skills_ownership(skills_dir: str = "") -> dict:
     """Reconcile the OWNERSHIP axis for skills against the live skill surface
     (ms-134 e-4738). Returns ``{"unowned": [...], "by_owner": {...}}`` — an L3
     skill with no profession owner is surfaced (mirrors ``reconcile_ownership``
-    for verbs)."""
+    for verbs). Named ``reconcile_skills_ownership`` to parallel the scope-axis
+    ``reconcile`` → ``reconcile_skills`` step (AX review 2026-08-03). ``by_owner``
+    is pre-seeded with every profession, ``"(shared)"`` and ``"(unowned)"`` like
+    the verb reconciler."""
     skills = enumerate_skills(skills_dir)
     unowned = sorted(s for s in skills
                      if owner_required(skill_scope_of(s)) and not skill_owner_of(s))
-    by_owner: dict = {}
+    by_owner: dict = {p: 0 for p in PROFESSIONS}
+    by_owner["(shared)"] = 0
+    by_owner["(unowned)"] = 0
     for s in skills:
         if owner_required(skill_scope_of(s)):
             key = skill_owner_of(s) or "(unowned)"

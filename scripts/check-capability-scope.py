@@ -265,7 +265,7 @@ def run(commands_path: str = "") -> dict:
     cov = check_coverage()
     skill_cov = cl.reconcile_skills()
     ownership = cl.reconcile_ownership()
-    skill_ownership = cl.reconcile_skill_ownership()
+    skill_ownership = cl.reconcile_skills_ownership()
     viol = find_invariant_violations(commands_path)
     coupling = find_collection_coupling(commands_path)
     new_coupling = [c for c in coupling if c["status"] == "new_violation"]
@@ -321,8 +321,10 @@ def main() -> int:
     if sown["unowned"]:
         print(f"  UNOWNED L3/L4 SKILLS ({len(sown['unowned'])}): "
               f"{', '.join(sown['unowned'])}")
-        print("    → give the L3 skill a profession in _SKILL_OWNER "
-              "(/ _SKILL_OWNER_PREFIX).")
+        print("    → if the skill matches an existing prefix (e.g. beacon-sales-*): "
+              "add its exact name to _SKILL_OWNER. If it introduces a NEW "
+              "profession prefix (e.g. beacon-backoffice-*): add a tuple to "
+              "_SKILL_OWNER_PREFIX so all future skills under it resolve too.")
     if result["violations"]:
         print(f"  INVARIANT VIOLATIONS ({len(result['violations'])}):")
         for v in result["violations"]:

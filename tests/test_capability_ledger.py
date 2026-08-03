@@ -141,10 +141,27 @@ def test_every_l3_l4_verb_has_owner():
 
 
 def test_every_l3_skill_has_owner():
-    rec = cl.reconcile_skill_ownership()
+    rec = cl.reconcile_skills_ownership()
     assert rec["unowned"] == [], (
         "L3 skills with no owner (add to _SKILL_OWNER / _SKILL_OWNER_PREFIX): "
         + ", ".join(rec["unowned"]))
+
+
+def test_skill_owner_map_has_no_stale_entries():
+    # Symmetry with the verb-side stale check (maintainability review 2026-08-03):
+    # every exact-name key in _SKILL_OWNER must still classify as L3 in
+    # _SKILL_SCOPE. A skill demoted L3→L2 with a leftover _SKILL_OWNER entry is a
+    # stale lie about ownership; this catches it (the reconcile coverage test only
+    # catches the missing-owner direction).
+    stale = sorted(name for name in cl._SKILL_OWNER
+                   if cl.skill_scope_of(name) != "L3")
+    assert stale == [], (
+        "stale _SKILL_OWNER entries (no longer L3 in _SKILL_SCOPE): "
+        + ", ".join(stale))
+    # every owner-prefix must correspond to a scope-prefix that yields L3.
+    for prefix, _owner in cl._SKILL_OWNER_PREFIX:
+        assert cl.skill_scope_of(prefix + "x") == "L3", (
+            f"owner prefix {prefix!r} does not resolve to an L3 skill scope")
 
 
 def test_l3_profession_map_is_in_sync_with_scope():
