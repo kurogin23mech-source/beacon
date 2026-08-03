@@ -186,6 +186,21 @@ def test_skill_owner_of_representative():
     assert cl.skill_owner_of("beacon-map") == ""            # L2
 
 
+def test_reclassification_2026_08_03_is_pinned():
+    # Pin the e-4737 台帳-review reclassifications so a local edit that reverts one
+    # fails immediately (the sync test only checks L3 completeness, so an L0↔L1
+    # mis-revert would otherwise pass silently — maintainability review 2026-08-03).
+    assert cl.scope_of("master_sync_drain") == "L1"   # was L0
+    assert cl.scope_of("morning") == "L1"             # was L3/sales
+    assert cl.scope_of("profile_list") == "L1"        # was L3/sales
+    assert cl.scope_of("watch_set") == "L3"           # was L1
+    assert cl.owner_of("watch_set") == "sales"        # now a sales default
+    # the three that moved to L1 must have NO owner (shared).
+    assert cl.owner_of("morning") == ""
+    assert cl.owner_of("profile_list") == ""
+    assert cl.owner_of("master_sync_drain") == ""
+
+
 def test_ownership_is_orthogonal_to_scope_and_origin():
     # ownership (who) is a third axis, distinct from scope (how widely shared)
     # and origin (who authored). A capability can be L3+dev+beacon-default.
