@@ -117,6 +117,77 @@ PROFESSION_CONCRETE_SYMBOLS = {
 
 
 # ---------------------------------------------------------------------------
+# Non-enumerated profession coupling (ms-134 e-4740 / philosophy review #1).
+#
+# The symbol denylist above catches a shared capability CALLING a profession
+# recorder. But the same leak also happens as a raw dict READ: indexing a
+# profession-specific project-data collection directly (``data["milestones"]`` /
+# ``data.get("opportunities")``) couples an L1/L2 capability to one profession's
+# concrete storage, which the enumerated-symbol check cannot see. A shared
+# capability that walks only ``milestones`` silently misses a sales project's
+# targets (opportunities / accounts) — exactly the class of leak that hid the
+# original doc→milestone bug. A profession-shared capability must enumerate
+# targets through the occupation / work_model abstraction (the ``TARGET_ARMS``
+# registry) instead of indexing a profession collection.
+#
+# NOTE: ``operations`` is deliberately NOT here — it is the L1 cross-profession
+# scheduling collection, not a profession concrete, so an L1 handler reading it
+# is legitimate.
+# ---------------------------------------------------------------------------
+
+# Each advice names the CONCRETE callable to use instead (like
+# PROFESSION_CONCRETE_SYMBOLS names ``occupation.record_target_entry``), so a
+# remediator has a one-step fix path, not a concept to go hunt for:
+# ``occupation.iter_target_records(data)`` returns every Target record across
+# professions, and ``occupation.target_collections(data)`` returns the collection
+# keys — both walk dev + sales + descriptor-defined targets without branching.
+PROFESSION_CONCRETE_COLLECTIONS = {
+    "milestones":
+        "dev milestone collection — enumerate targets via "
+        "occupation.iter_target_records(data), not data['milestones'] directly",
+    "opportunities":
+        "sales opportunity collection — enumerate via "
+        "occupation.iter_target_records(data), not data['opportunities'] directly",
+    "accounts":
+        "sales account collection — enumerate via "
+        "occupation.iter_target_records(data), not data['accounts'] directly",
+    "acquisitions":
+        "sales acquisition collection — enumerate via "
+        "occupation.iter_target_records(data), not data['acquisitions'] directly",
+}
+
+# Ratchet allowlist: (verb, collection) couplings that ALREADY exist and are
+# accepted PENDING remediation (ms-134 e-4740). The checker reports these as
+# visible "pending debt" but does NOT fail on them; any coupling NOT in this set
+# is a NEW violation and fails CI. This is a ONE-WAY ratchet:
+#   - remove an entry when its handler is migrated to the abstraction;
+#   - NEVER add a new entry to silence a fresh violation — fix the handler.
+# A test (``test_no_stale_collection_allowlist_entries``) fails if an entry here
+# is no longer detected, so a remediation is forced to delete its allowlist row
+# (the allowlist cannot rot into a lie about what still couples).
+#
+# Every entry below is a real coupling found in the 2026-08-02 sweep (the
+# session-log ``target_list`` finding + the wider scan it seeded): a shared
+# capability that walks only dev ``milestones`` and would miss a sales project's
+# targets. Remediation is tracked under ms-134.
+KNOWN_COLLECTION_COUPLING = {
+    ("target_list", "milestones"),
+    ("session_end", "milestones"),
+    ("session_fork", "milestones"),
+    ("session_rescue", "milestones"),
+    ("cloud_migrate_from_local", "milestones"),
+    ("trek_show", "milestones"),
+    ("trek_timeline", "milestones"),
+}
+
+
+def is_known_collection_coupling(verb: str, collection: str) -> bool:
+    """True when (verb, collection) is an accepted-pending coupling in the
+    ratchet allowlist (reported as debt, not a CI failure)."""
+    return (verb, collection) in KNOWN_COLLECTION_COUPLING
+
+
+# ---------------------------------------------------------------------------
 # Classification by verb noun (the substring before the first "_"). The rule map
 # gives every current noun a scope; a per-verb OVERRIDE handles the exceptions
 # where a noun's verbs split across scopes. A noun the rules do not know resolves
