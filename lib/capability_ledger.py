@@ -537,6 +537,14 @@ _SKILL_SCOPE = {
     "beacon-onboard": "L1", "beacon-pr-create": "L3", "beacon-push": "L3",
     "beacon-retro": "L2", "beacon-retrospect": "L2", "beacon-roadmap": "L2",
     "beacon-spec": "L2", "beacon-task": "L3", "beacon-vision": "L2",
+    # L4 — project-local to the Beacon source repo itself. beacon-scope-classify
+    # (ms-134 e-4739) edits THIS ledger (lib/capability_ledger.py); a pip-installed
+    # Beacon user has no ledger to maintain, so it is useful only in the Beacon
+    # repo = project-individual (L4). Its own layer was set through e-4739's own
+    # propose→confirm ritual (AI proposed L4, user confirmed 2026-08-03) — the
+    # mechanism dogfoods itself. This is the ledger's "a project-local skill would
+    # be L4" example made concrete (the first live L4 capability).
+    "beacon-scope-classify": "L4",
 }
 
 
@@ -563,13 +571,28 @@ _SKILL_OWNER = {
     "beacon-push": "dev", "beacon-task": "dev",
 }
 
+# L4 skill -> owning PROJECT id (ms-134 e-4739), the skill-side parallel of
+# ``_L4_VERB_PROJECT``. L4's owner is a project (not a profession): a project-local
+# skill belongs to exactly one project. ``beacon`` = the Beacon source repo itself.
+_SKILL_PROJECT = {
+    "beacon-scope-classify": "beacon",
+}
+
 
 def skill_owner_of(skill_name: str) -> str:
-    """Return the owning profession of an L3 Skill (``dev`` / ``sales`` / …), or
-    ``""`` for a shared (L0/L1/L2) skill or an unregistered L3 one. Mirrors
-    ``owner_of`` for verbs (ms-134 e-4738)."""
+    """Return the ownership handle of a Skill, dispatched by its scope (mirrors
+    ``owner_of`` for verbs, ms-134 e-4738/e-4739):
+
+      - L3 → the owning PROFESSION (``dev`` / ``sales`` / …), or ``""`` when
+        unregistered.
+      - L4 → the owning PROJECT id, or ``""`` when unregistered.
+      - L0/L1/L2 (shared) → ``""`` — no single owner (a correct empty).
+    """
     name = (skill_name or "").strip()
-    if skill_scope_of(name) != "L3":
+    scope = skill_scope_of(name)
+    if scope == "L4":
+        return _SKILL_PROJECT.get(name, "")
+    if scope != "L3":
         return ""
     if name in _SKILL_OWNER:
         return _SKILL_OWNER[name]
@@ -696,7 +719,7 @@ def _owner_edit_sites(kind: str, capability: str, noun: str, scope: str) -> list
     already known, only the owner is missing)."""
     if scope == "L4":
         if kind == "skill":
-            return [{"file": "lib/capability_ledger.py", "dict": "_SKILL_OWNER",
+            return [{"file": "lib/capability_ledger.py", "dict": "_SKILL_PROJECT",
                      "key": capability, "value_hint": "<project-id>",
                      "note": "L4 skill belongs to exactly one project."}]
         return [{"file": "lib/capability_ledger.py", "dict": "_L4_VERB_PROJECT",

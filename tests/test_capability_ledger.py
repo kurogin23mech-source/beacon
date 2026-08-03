@@ -545,3 +545,30 @@ def test_propose_is_read_only():
     before = dict(cl._NOUN_SCOPE)
     cl.propose(live={"payroll_run", "backoffice_report"}, skills_dir="/nonexistent")
     assert cl._NOUN_SCOPE == before
+
+
+# --- L4 skill ownership (ms-134 e-4739; the mechanism dogfoods itself) ------
+
+def test_scope_classify_skill_is_l4_owned_by_beacon():
+    # e-4739's own Skill is the first live L4 capability: project-local to the
+    # Beacon repo (it edits this very ledger). Its scope/owner must resolve so it
+    # is neither unclassified nor unowned.
+    assert cl.skill_scope_of("beacon-scope-classify") == "L4"
+    assert cl.skill_owner_of("beacon-scope-classify") == "beacon"
+
+
+def test_skill_owner_of_dispatches_l3_profession_and_l4_project():
+    # L3 → profession, L4 → project, shared → "". The dispatch mirrors owner_of
+    # for verbs so the two axes read the same on both surfaces.
+    assert cl.skill_owner_of("beacon-task") == "dev"          # L3 dev
+    assert cl.skill_owner_of("beacon-sales-email") == "sales"  # L3 sales (prefix)
+    assert cl.skill_owner_of("beacon-scope-classify") == "beacon"  # L4 project
+    assert cl.skill_owner_of("beacon-map") == ""              # L2 shared, no owner
+
+
+def test_l4_skill_is_owned_not_flagged_unowned():
+    # The ownership reconciler must count the L4 skill under its project, not in
+    # (unowned) — the coverage gate stays green with a live L4 capability present.
+    rec = cl.reconcile_skills_ownership()
+    assert "beacon-scope-classify" not in rec["unowned"]
+    assert rec["by_owner"].get("beacon") == 1
