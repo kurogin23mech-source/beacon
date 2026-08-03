@@ -624,3 +624,195 @@ def reconcile_skills_ownership(skills_dir: str = "") -> dict:
             key = "(shared)"
         by_owner[key] = by_owner.get(key, 0) + 1
     return {"unowned": unowned, "by_owner": by_owner}
+
+
+# ---------------------------------------------------------------------------
+# Classification PROPOSAL (ms-134 e-4739) — the authoring-time forcing function.
+#
+# reconcile* above DETECT a gap (a new noun/skill with no scope, an L3/L4 with no
+# owner); the CI checker fails on it. But detection only says "UNCLASSIFIED" — it
+# leaves the human to derive the layer AND lets an AI self-classify silently. This
+# turns detection into a structured PROPOSAL: for every gap, emit the exact ledger
+# edit site, the L0..L4 menu, and a best-effort guess with a confidence — so the
+# classification of a new capability is proposed structurally (not by a prompt's
+# please-remember), and the actual write goes through a human-confirm gate in the
+# /beacon-scope-classify Skill (AI proposes → human confirms → ledger written),
+# never a silent AI edit. Mirrors the attainment verdict's propose→confirm split.
+#
+# This function is PURE (enumerate + transform, no I/O beyond the surface reads
+# reconcile* already do, no AST): the guess is deliberately conservative — a
+# confident scope/owner only when a real token signal exists (a profession name in
+# the capability's own name). For a bare new verb noun there is NO signal, so the
+# guess is empty and the human decides against the menu. The proposal's value is
+# the STRUCTURE (the gap, its exact edit site, the menu), not a fabricated layer;
+# the deeper reasoning (reading the handler to tell an L3 default from an L1/L2
+# leak) is the Skill's AI job on top of this scaffold.
+# ---------------------------------------------------------------------------
+
+def _profession_token(name: str) -> str:
+    """Return the profession named as a token in ``name`` (``beacon-sales-email``
+    → ``sales``; ``payroll_run`` → ``""``), or ``""`` when none. The one real
+    signal a pure guess can trust: a capability that names its profession in its
+    own identifier almost certainly belongs to that profession (L3)."""
+    tokens = set((name or "").replace("_", "-").split("-"))
+    for p in sorted(PROFESSIONS):
+        if p in tokens:
+            return p
+    return ""
+
+
+def _scope_edit_sites(kind: str, capability: str, noun: str, scope: str) -> list:
+    """The exact ledger edit(s) that give ``capability`` a SCOPE. ``scope`` is the
+    guessed level ("" when unguessed — the edit still names the site with a
+    ``<scope>`` placeholder so the human fills it). Conditional owner follow-ups
+    (L3 → profession, L4 → project) travel as ``note`` so one proposal carries the
+    whole "what to edit" story."""
+    value = scope or "<L0|L1|L2|L3|L4>"
+    if kind == "skill":
+        return [{
+            "file": "lib/capability_ledger.py",
+            "dict": "_SKILL_SCOPE",
+            "key": capability,
+            "value_hint": value,
+            "note": ("or add a longest-wins rule to _SKILL_PREFIX_SCOPE if this "
+                     "introduces a family (e.g. ('beacon-<prof>-', 'L3')). "
+                     "If L3, ALSO set the owner: _SKILL_OWNER[name] or a "
+                     "_SKILL_OWNER_PREFIX tuple."),
+        }]
+    return [{
+        "file": "lib/capability_ledger.py",
+        "dict": "_NOUN_SCOPE",
+        "key": noun,
+        "value_hint": value,
+        "note": ("classifies EVERY verb under this noun. A per-verb exception "
+                 "goes in _VERB_SCOPE_OVERRIDE instead. If L3, ALSO add "
+                 "_L3_NOUN_PROFESSION[noun]=<profession>; if L4, "
+                 "_L4_VERB_PROJECT[verb]=<project>."),
+    }]
+
+
+def _owner_edit_sites(kind: str, capability: str, noun: str, scope: str) -> list:
+    """The exact ledger edit(s) that give an L3/L4 ``capability`` an OWNER (scope
+    already known, only the owner is missing)."""
+    if scope == "L4":
+        if kind == "skill":
+            return [{"file": "lib/capability_ledger.py", "dict": "_SKILL_OWNER",
+                     "key": capability, "value_hint": "<project-id>",
+                     "note": "L4 skill belongs to exactly one project."}]
+        return [{"file": "lib/capability_ledger.py", "dict": "_L4_VERB_PROJECT",
+                 "key": capability, "value_hint": "<project-id>",
+                 "note": "L4 verb belongs to exactly one project."}]
+    # L3
+    if kind == "skill":
+        return [{"file": "lib/capability_ledger.py", "dict": "_SKILL_OWNER",
+                 "key": capability, "value_hint": "<profession>",
+                 "note": ("or a _SKILL_OWNER_PREFIX tuple if this is a new "
+                          "profession family (e.g. ('beacon-<prof>-', '<prof>')).")}]
+    return [{"file": "lib/capability_ledger.py", "dict": "_L3_NOUN_PROFESSION",
+             "key": noun, "value_hint": "<profession>",
+             "note": "add the profession to PROFESSIONS first if it is new."}]
+
+
+def propose(live: Optional[set] = None, skills_dir: str = "") -> dict:
+    """Return a structured classification PROPOSAL for every open gap (ms-134
+    e-4739). Read-only: it never writes the ledger — the write is the
+    /beacon-scope-classify Skill's human-confirmed step.
+
+    Returns ``{"ok", "gap_count", "proposals": [...], "scope_menu", "owner_menu"}``:
+    - ``ok``: no gaps (nothing to classify).
+    - ``proposals``: one dict per gap, each with ``kind`` (verb/skill), ``gap``
+      (scope/owner), the capability, a best-effort ``proposed_scope`` /
+      ``proposed_owner`` (``""`` when there is no signal), a ``confidence``
+      (``high`` only on a profession-token signal, else ``low``), a ``rationale``,
+      and ``edits`` — the exact ledger site(s) to change. Ordered verb-scope,
+      verb-owner, skill-scope, skill-owner for a stable read.
+    - ``scope_menu`` / ``owner_menu``: the L0..L4 levels and the profession owners
+      the human chooses among (so the caller need not re-import the constants).
+    """
+    live = enumerate_live_verbs() if live is None else live
+    verb_scope_gaps = reconcile(live)["unclassified"]
+    verb_owner_gaps = reconcile_ownership(live)["unowned"]
+    skill_scope_gaps = reconcile_skills(skills_dir)["unclassified"]
+    skill_owner_gaps = reconcile_skills_ownership(skills_dir)["unowned"]
+
+    proposals = []
+
+    for verb in verb_scope_gaps:
+        noun = _noun_from_key(verb)
+        prof = _profession_token(verb)
+        proposals.append({
+            "capability": verb, "kind": "verb", "gap": "scope", "noun": noun,
+            "known_scope": "",
+            "proposed_scope": "L3" if prof else "",
+            "proposed_owner": prof,
+            "confidence": "high" if prof else "low",
+            "rationale": (
+                f"noun '{noun}' names profession '{prof}' → L3/{prof} default."
+                if prof else
+                f"new noun '{noun}' — no scope signal from the name. Decide "
+                f"against the menu: is it product-ops (L0), shared substrate (L1), "
+                f"a target-abstraction rule (L2), a profession default (L3), or "
+                f"one project's (L4)? Reading the handler settles it."),
+            "edits": _scope_edit_sites("verb", verb, noun, "L3" if prof else ""),
+        })
+
+    for verb in verb_owner_gaps:
+        noun = _noun_from_key(verb)
+        scope = scope_of(verb)
+        prof = _profession_token(verb)
+        proposals.append({
+            "capability": verb, "kind": "verb", "gap": "owner", "noun": noun,
+            "known_scope": scope,
+            "proposed_scope": scope,
+            "proposed_owner": prof,
+            "confidence": "high" if prof else "low",
+            "rationale": (
+                f"{scope} verb needs an owner; name names '{prof}'."
+                if prof else
+                f"{scope} capability requires an owner "
+                f"({'profession' if scope == 'L3' else 'project'}) — pick from the "
+                f"menu; the noun gives no signal."),
+            "edits": _owner_edit_sites("verb", verb, noun, scope),
+        })
+
+    for skill in skill_scope_gaps:
+        prof = _profession_token(skill)
+        proposals.append({
+            "capability": skill, "kind": "skill", "gap": "scope", "noun": "",
+            "known_scope": "",
+            "proposed_scope": "L3" if prof else "",
+            "proposed_owner": prof,
+            "confidence": "high" if prof else "low",
+            "rationale": (
+                f"skill name contains profession token '{prof}' → L3/{prof}."
+                if prof else
+                "no profession token — likely L1 (coordination substrate) or L2 "
+                "(operates on the shared Target abstraction); decide by what CLI "
+                "verbs it drives."),
+            "edits": _scope_edit_sites("skill", skill, "", "L3" if prof else ""),
+        })
+
+    for skill in skill_owner_gaps:
+        scope = skill_scope_of(skill)
+        prof = _profession_token(skill)
+        proposals.append({
+            "capability": skill, "kind": "skill", "gap": "owner", "noun": "",
+            "known_scope": scope,
+            "proposed_scope": scope,
+            "proposed_owner": prof,
+            "confidence": "high" if prof else "low",
+            "rationale": (
+                f"{scope} skill needs an owner; name names '{prof}'."
+                if prof else
+                f"{scope} skill requires an owner "
+                f"({'profession' if scope == 'L3' else 'project'}); no name signal."),
+            "edits": _owner_edit_sites("skill", skill, "", scope),
+        })
+
+    return {
+        "ok": not proposals,
+        "gap_count": len(proposals),
+        "proposals": proposals,
+        "scope_menu": dict(SCOPE_LEVELS),
+        "owner_menu": sorted(PROFESSIONS),
+    }

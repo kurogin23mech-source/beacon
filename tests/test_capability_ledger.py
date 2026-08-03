@@ -486,3 +486,62 @@ def test_checker_ignores_collection_write_context(tmp_path):
     # project data — the ctx guard keeps it from being a false positive.
     path = _write(tmp_path, "commands.py", _SYNTH_COLLECTION_WRITE_CTX)
     assert chk.find_collection_coupling(path) == []
+
+
+# --- classification proposal (ms-134 e-4739) -------------------------------
+
+def test_propose_clean_ledger_has_no_gaps():
+    # The live ledger is fully classified/owned (the coverage tests assert this),
+    # so propose() reports nothing to classify and stays advisory-clean.
+    p = cl.propose()
+    assert p["ok"] is True
+    assert p["gap_count"] == 0
+    assert p["proposals"] == []
+    # the menus travel with the result so a caller need not re-import constants
+    assert set(p["scope_menu"]) == set(cl.SCOPE_LEVELS)
+    assert set(p["owner_menu"]) == cl.PROFESSIONS
+
+
+def test_propose_unknown_noun_verb_is_a_low_confidence_scope_gap():
+    # A brand-new noun with no signal → a scope gap with an empty guess (no
+    # fabricated layer) but the exact _NOUN_SCOPE edit site named.
+    p = cl.propose(live={"payroll_run"}, skills_dir="/nonexistent")
+    assert p["ok"] is False and p["gap_count"] == 1
+    gap = p["proposals"][0]
+    assert gap["kind"] == "verb" and gap["gap"] == "scope"
+    assert gap["noun"] == "payroll"
+    assert gap["proposed_scope"] == "" and gap["confidence"] == "low"
+    edit = gap["edits"][0]
+    assert edit["dict"] == "_NOUN_SCOPE" and edit["key"] == "payroll"
+
+
+def test_propose_profession_token_verb_is_high_confidence_l3():
+    # A noun that names a profession is the one confident signal a pure guess
+    # trusts → L3/<profession> with the owner follow-up flagged in the note.
+    p = cl.propose(live={"backoffice_report"}, skills_dir="/nonexistent")
+    gap = p["proposals"][0]
+    assert gap["proposed_scope"] == "L3"
+    assert gap["proposed_owner"] == "backoffice"
+    assert gap["confidence"] == "high"
+    assert "_L3_NOUN_PROFESSION" in gap["edits"][0]["note"]
+
+
+def test_propose_skill_profession_token_is_l3_owned(tmp_path):
+    # An unclassified skill whose name carries a profession token → L3/<prof> with
+    # the _SKILL_SCOPE edit site + owner follow-up.
+    d = tmp_path / "skills"
+    d.mkdir()
+    (d / "beacon-backoffice-payroll.md").write_text("x", encoding="utf-8")
+    p = cl.propose(live=set(), skills_dir=str(d))
+    gap = next(g for g in p["proposals"] if g["kind"] == "skill")
+    assert gap["gap"] == "scope"
+    assert gap["proposed_scope"] == "L3" and gap["proposed_owner"] == "backoffice"
+    assert gap["edits"][0]["dict"] == "_SKILL_SCOPE"
+
+
+def test_propose_is_read_only():
+    # propose() must not mutate the ledger tables (it is the read-only scaffold;
+    # the write happens in the Skill's human-confirmed step).
+    before = dict(cl._NOUN_SCOPE)
+    cl.propose(live={"payroll_run", "backoffice_report"}, skills_dir="/nonexistent")
+    assert cl._NOUN_SCOPE == before

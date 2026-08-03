@@ -34,7 +34,15 @@ commands.py has no such 2-level chain today; if one is introduced, deepen
 usage:
   python3 scripts/check-capability-scope.py            # human report
   python3 scripts/check-capability-scope.py --json     # machine-readable
+  python3 scripts/check-capability-scope.py --propose  # classification proposal
+  python3 scripts/check-capability-scope.py --propose --json  # (for the Skill)
 exit 0 = clean / 1 = coverage gap or invariant violation (CI / pre-commit gate)
+
+--propose (ms-134 e-4739) is the AUTHORING-TIME face of the same gaps: instead of
+just failing with "UNCLASSIFIED", it emits, per gap, the exact ledger edit site +
+the L0..L4 menu + a best-effort guess, for the /beacon-scope-classify Skill to turn
+into an AI-proposes → human-confirms classification. It is READ-ONLY and ADVISORY:
+always exits 0 (it does not gate — the default mode above is the gate).
 """
 
 from __future__ import annotations
@@ -300,11 +308,49 @@ def run(commands_path: str = "") -> dict:
             "reviewed_correct_reads": reviewed_reads}
 
 
+def render_proposal(prop: dict) -> None:
+    """Human-readable render of the classification proposal (ms-134 e-4739)."""
+    print("capability scope classification proposal (ms-134 e-4739)")
+    if prop["ok"]:
+        print("  OK: no open gaps — every capability is classified and owned. "
+              "Nothing to propose.")
+        return
+    print(f"  {prop['gap_count']} open gap(s). For each, confirm a layer/owner and "
+          f"apply the edit (do this via /beacon-scope-classify — AI proposes, you "
+          f"confirm, it writes the ledger).")
+    print("  scope menu:")
+    for lvl, desc in prop["scope_menu"].items():
+        print(f"    {lvl} — {desc}")
+    print(f"  owner menu (for L3 → a profession): {', '.join(prop['owner_menu'])}")
+    for p in prop["proposals"]:
+        guess = p["proposed_scope"] or "?"
+        if p["proposed_owner"]:
+            guess += f"/{p['proposed_owner']}"
+        print(f"\n  - [{p['kind']} · {p['gap']} gap] {p['capability']}"
+              f"  → guess {guess} ({p['confidence']} confidence)")
+        print(f"      why: {p['rationale']}")
+        for e in p["edits"]:
+            print(f"      edit: {e['file']} :: {e['dict']}[{e['key']!r}] = "
+                  f"{e['value_hint']}")
+            print(f"            {e['note']}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Beacon capability scope checker")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
+    ap.add_argument("--propose", action="store_true",
+                    help="emit a classification proposal for open gaps (ms-134 "
+                         "e-4739); read-only, always exits 0")
     ap.add_argument("--commands-path", default="", help="override commands.py path")
     args = ap.parse_args()
+
+    if args.propose:
+        prop = cl.propose()
+        if args.json:
+            print(json.dumps(prop, ensure_ascii=False))
+        else:
+            render_proposal(prop)
+        return 0  # advisory: never gates (the default mode is the gate)
 
     result = run(args.commands_path)
 
