@@ -113,7 +113,49 @@ def _verb_of_handler(handler: str) -> str:
     return handler[4:] if handler.startswith("cmd_") else ""
 
 
-# --- the two checks --------------------------------------------------------
+def _governing_shared_verbs(tree: ast.AST, funcs: list, lineno: int) -> list:
+    """Return ``[(verb, scope, via)]`` for the profession-SHARED (L1/L2) cmd
+    handlers whose scope governs the node at ``lineno`` — either the handler
+    directly, or (one level) every ``cmd_`` handler that calls the helper the
+    node lives in. Shared attribution used by BOTH invariant checks (the symbol
+    reach and the collection read), so they attribute a call/read to a capability
+    identically."""
+    encloser = _enclosing_function(funcs, lineno)
+    candidates = []  # (verb, via)
+    if encloser.startswith("cmd_"):
+        candidates.append((_verb_of_handler(encloser), ""))
+    elif encloser:
+        for h in _cmd_handlers_calling(tree, encloser):
+            candidates.append((_verb_of_handler(h), encloser))
+    out = []
+    for verb, via in candidates:
+        scope = cl.scope_of(verb)
+        if cl.is_profession_shared(scope):
+            out.append((verb, scope, via))
+    return out
+
+
+def _collection_key(node: ast.AST) -> str:
+    """Return the profession-concrete collection key when ``node`` reads one
+    directly — ``data["milestones"]`` (Subscript) or ``obj.get("milestones")``
+    (a ``.get`` Call) for a key in ``PROFESSION_CONCRETE_COLLECTIONS`` — else
+    ``""``. Matched via the AST so a string literal in a comment/docstring is not
+    a false hit, mirroring ``_forbidden_attr``."""
+    if isinstance(node, ast.Subscript):
+        sl = node.slice
+        if isinstance(sl, ast.Constant) and isinstance(sl.value, str) \
+                and sl.value in cl.PROFESSION_CONCRETE_COLLECTIONS:
+            return sl.value
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+            and node.func.attr == "get" and node.args:
+        a0 = node.args[0]
+        if isinstance(a0, ast.Constant) and isinstance(a0.value, str) \
+                and a0.value in cl.PROFESSION_CONCRETE_COLLECTIONS:
+            return a0.value
+    return ""
+
+
+# --- the checks ------------------------------------------------------------
 
 def check_coverage() -> dict:
     """Coverage check: return the reconcile result (unclassified + per-scope)."""
@@ -136,27 +178,16 @@ def find_invariant_violations(commands_path: str = "") -> list:
         dotted = _forbidden_attr(node)
         if not dotted:
             continue
-        encloser = _enclosing_function(funcs, node.lineno)
-        # Resolve the encloser to the capability handler(s) whose scope governs
-        # this call, then flag any that are profession-shared (L1/L2).
-        offenders = []  # (verb, via)
-        if encloser.startswith("cmd_"):
-            offenders.append((_verb_of_handler(encloser), ""))
-        elif encloser:
-            # a helper — attribute to every cmd_ handler that calls it.
-            for h in _cmd_handlers_calling(tree, encloser):
-                offenders.append((_verb_of_handler(h), encloser))
-        for verb, via in offenders:
-            scope = cl.scope_of(verb)
-            if cl.is_profession_shared(scope):
-                violations.append({
-                    "verb": verb,
-                    "scope": scope,
-                    "symbol": dotted,
-                    "advice": cl.PROFESSION_CONCRETE_SYMBOLS[dotted],
-                    "via": via,
-                    "lineno": node.lineno,
-                })
+        # Attribute the call to the profession-shared handler(s) that govern it.
+        for verb, scope, via in _governing_shared_verbs(tree, funcs, node.lineno):
+            violations.append({
+                "verb": verb,
+                "scope": scope,
+                "symbol": dotted,
+                "advice": cl.PROFESSION_CONCRETE_SYMBOLS[dotted],
+                "via": via,
+                "lineno": node.lineno,
+            })
     # de-duplicate (a helper called by several shared handlers can repeat).
     seen, unique = set(), []
     for v in violations:
@@ -167,15 +198,59 @@ def find_invariant_violations(commands_path: str = "") -> list:
     return sorted(unique, key=lambda v: (v["verb"], v["lineno"]))
 
 
+def find_collection_coupling(commands_path: str = "") -> list:
+    """Return profession-shared (L1/L2) capabilities that read a profession-
+    specific project-data collection directly (``data["milestones"]`` etc.) —
+    the non-enumerated coupling the symbol denylist cannot see (ms-134 e-4740).
+
+    Each item is a dict: ``{verb, scope, collection, advice, via, lineno,
+    known}``. ``known`` is True when (verb, collection) is in the ratchet
+    allowlist (accepted pending debt); a False item is a NEW violation that fails
+    the checker."""
+    path = commands_path or _commands_path()
+    src = open(path, encoding="utf-8").read()
+    tree = ast.parse(src)
+    funcs = _build_function_index(tree)
+
+    hits = []
+    for node in ast.walk(tree):
+        collection = _collection_key(node)
+        if not collection:
+            continue
+        for verb, scope, via in _governing_shared_verbs(tree, funcs, node.lineno):
+            hits.append({
+                "verb": verb,
+                "scope": scope,
+                "collection": collection,
+                "advice": cl.PROFESSION_CONCRETE_COLLECTIONS[collection],
+                "via": via,
+                "lineno": node.lineno,
+                "known": cl.is_known_collection_coupling(verb, collection),
+            })
+    seen, unique = set(), []
+    for h in hits:
+        key = (h["verb"], h["collection"], h["via"], h["lineno"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(h)
+    return sorted(unique, key=lambda h: (h["verb"], h["lineno"]))
+
+
 def run(commands_path: str = "") -> dict:
     """Run all checks and return a structured result with an ``ok`` verdict."""
     cov = check_coverage()
     skill_cov = cl.reconcile_skills()
     viol = find_invariant_violations(commands_path)
+    coupling = find_collection_coupling(commands_path)
+    new_coupling = [c for c in coupling if not c["known"]]
+    pending_coupling = [c for c in coupling if c["known"]]
     ok = (not cov["unclassified"] and not skill_cov["unclassified"]
-          and not viol)
+          and not viol and not new_coupling)
     return {"ok": ok, "coverage": cov, "skill_coverage": skill_cov,
-            "violations": viol}
+            "violations": viol,
+            "collection_coupling": coupling,
+            "new_collection_coupling": new_coupling,
+            "pending_collection_coupling": pending_coupling}
 
 
 def main() -> int:
@@ -214,13 +289,33 @@ def main() -> int:
             print(f"    - {v['verb']} [{v['scope']}] calls {v['symbol']}"
                   f"{via} @ commands.py:{v['lineno']}")
             print(f"      → {v['advice']}")
+    new_coupling = result["new_collection_coupling"]
+    pending_coupling = result["pending_collection_coupling"]
+    if new_coupling:
+        print(f"  NEW COLLECTION COUPLING ({len(new_coupling)}) — a shared "
+              f"capability reads a profession collection directly:")
+        for c in new_coupling:
+            via = f" (via {c['via']})" if c["via"] else ""
+            print(f"    - {c['verb']} [{c['scope']}] reads data['{c['collection']}']"
+                  f"{via} @ commands.py:{c['lineno']}")
+            print(f"      → {c['advice']}")
+    if pending_coupling:
+        # Accepted debt: enumerated + visible, but not a failure (ratchet).
+        pend_pairs = sorted({(c["verb"], c["collection"]) for c in pending_coupling})
+        print(f"  pending collection-coupling debt ({len(pend_pairs)}, "
+              f"allowlisted — remediate then drop from KNOWN_COLLECTION_COUPLING):")
+        for verb, coll in pend_pairs:
+            print(f"    · {verb} reads data['{coll}']")
     if result["ok"]:
         print("  OK: every capability is classified and no profession-shared "
-              "capability reaches a profession concrete.")
+              "capability reaches a profession concrete (no NEW symbol reach or "
+              "collection coupling).")
     else:
         print("  → Fix the items above (classify the verb/skill, or route the "
-              "shared capability through occupation.record_target_entry), then "
-              "re-run: python3 scripts/check-capability-scope.py")
+              "shared capability through the occupation abstraction — "
+              "occupation.record_target_entry for recording, the work_model "
+              "target registry for enumeration), then re-run: "
+              "python3 scripts/check-capability-scope.py")
     return 0 if result["ok"] else 1
 
 

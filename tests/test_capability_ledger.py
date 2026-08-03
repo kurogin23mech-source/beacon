@@ -210,3 +210,114 @@ def test_sales_concretes_are_in_denylist():
     # both profession sides present so the invariant is symmetric.
     assert "core.save_entry" in cl.PROFESSION_CONCRETE_SYMBOLS
     assert "sales_entities.activity_add" in cl.PROFESSION_CONCRETE_SYMBOLS
+
+
+# --- non-enumerated collection coupling (ms-134 e-4740) --------------------
+
+def test_no_new_collection_coupling_on_real_tree():
+    """The ratchet gate: a NEW (non-allowlisted) shared capability reading a
+    profession collection directly (data['milestones'] etc.) fails CI. Existing
+    couplings are accepted debt; adding a fresh one flips this red."""
+    result = chk.run()
+    new = result["new_collection_coupling"]
+    assert new == [], (
+        "NEW profession-collection coupling (route via the abstraction, or if "
+        "truly pending add to KNOWN_COLLECTION_COUPLING with a reason): "
+        + "; ".join(f"{c['verb']}[{c['scope']}]→data['{c['collection']}']"
+                    f"{' via '+c['via'] if c['via'] else ''}" for c in new))
+
+
+def test_every_detected_coupling_is_known():
+    # On the real tree, every detected coupling must be allowlisted (else it is
+    # a NEW one — covered by the test above, but asserted here for a clear msg).
+    coupling = chk.find_collection_coupling()
+    for c in coupling:
+        assert c["known"], f"un-allowlisted coupling: {c}"
+
+
+def test_no_stale_collection_allowlist_entries():
+    """Ratchet hygiene: every (verb, collection) in KNOWN_COLLECTION_COUPLING
+    must still be detected in the real tree. When a handler is remediated the
+    coupling disappears, so its allowlist row MUST be deleted — this test fails
+    until it is, preventing the allowlist from rotting into a stale lie about
+    what still couples."""
+    detected = {(c["verb"], c["collection"]) for c in chk.find_collection_coupling()}
+    stale = sorted(cl.KNOWN_COLLECTION_COUPLING - detected)
+    assert not stale, (
+        "allowlist entries no longer detected (delete them — the handler was "
+        "remediated): " + ", ".join(f"{v}→{coll}" for v, coll in stale))
+
+
+def test_operations_is_not_a_profession_collection():
+    # operations is the L1 cross-profession scheduling collection — reading it
+    # from a shared handler is legitimate and must NOT be a concrete collection.
+    assert "operations" not in cl.PROFESSION_CONCRETE_COLLECTIONS
+    assert "milestones" in cl.PROFESSION_CONCRETE_COLLECTIONS
+    assert "opportunities" in cl.PROFESSION_CONCRETE_COLLECTIONS
+
+
+_SYNTH_COLLECTION_NEW = '''
+def load_project():
+    return {}
+def cmd_doc_synthetic_coll():
+    # doc_* is L2 (shared); reading a dev collection directly is a NEW coupling.
+    data = load_project()
+    for m in data["milestones"]:
+        pass
+    also = data.get("opportunities", [])
+'''
+
+_SYNTH_COLLECTION_VIA_HELPER = '''
+def _synth_walk(data):
+    return list(data.get("milestones", []))
+def cmd_status_synthetic_coll():
+    # status is L2; the read lives in a helper → attributed transitively.
+    data = {}
+    _synth_walk(data)
+'''
+
+_SYNTH_COLLECTION_L3_OK = '''
+def cmd_milestone_synthetic_coll():
+    # milestone_* is L3 (dev profession default) — reading data['milestones']
+    # is its legitimate job, not a coupling violation.
+    data = {}
+    for m in data["milestones"]:
+        pass
+'''
+
+_SYNTH_COLLECTION_OPERATIONS_OK = '''
+def cmd_doc_synthetic_ops():
+    # operations is L1 cross-profession, not a profession concrete → not flagged.
+    data = {}
+    for o in data.get("operations", []):
+        pass
+'''
+
+
+def test_checker_flags_new_collection_read_direct(tmp_path):
+    path = _write(tmp_path, "commands.py", _SYNTH_COLLECTION_NEW)
+    hits = chk.find_collection_coupling(path)
+    cols = sorted((h["verb"], h["collection"]) for h in hits)
+    assert cols == [("doc_synthetic_coll", "milestones"),
+                    ("doc_synthetic_coll", "opportunities")], hits
+    assert all(not h["known"] for h in hits)  # synthetic verbs aren't allowlisted
+
+
+def test_checker_flags_collection_read_via_helper(tmp_path):
+    path = _write(tmp_path, "commands.py", _SYNTH_COLLECTION_VIA_HELPER)
+    hits = chk.find_collection_coupling(path)
+    assert len(hits) == 1, hits
+    assert hits[0]["verb"] == "status_synthetic_coll"
+    assert hits[0]["collection"] == "milestones"
+    assert hits[0]["via"] == "_synth_walk"
+
+
+def test_checker_ignores_l3_collection_read(tmp_path):
+    # a profession-specific (L3) handler reading its own collection is fine.
+    path = _write(tmp_path, "commands.py", _SYNTH_COLLECTION_L3_OK)
+    assert chk.find_collection_coupling(path) == []
+
+
+def test_checker_ignores_operations_collection(tmp_path):
+    path = _write(tmp_path, "commands.py", _SYNTH_COLLECTION_OPERATIONS_OK)
+    assert chk.find_collection_coupling(path) == []
