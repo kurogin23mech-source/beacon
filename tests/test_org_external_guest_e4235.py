@@ -7,7 +7,7 @@ so admins can tell org members apart from external guests.
 
 Covers:
   - org.external_guest_user_ids : pure classifier (team-org only)
-  - commands._annotate_external_guests : best-effort annotation on member rows
+  - cmd_org._annotate_external_guests : best-effort annotation on member rows
 """
 from __future__ import annotations
 
@@ -57,7 +57,7 @@ def test_none_or_empty_inputs():
 
 
 # ---------------------------------------------------------------------------
-# commands._annotate_external_guests — best-effort row annotation
+# cmd_org._annotate_external_guests — best-effort row annotation
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()

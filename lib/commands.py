@@ -105,6 +105,13 @@ from cmd_session import (  # noqa: F401  (re-exported for dispatch + import-path
 
 # ms-127 e-4318b: the `beacon org *` + `beacon member *` families live in
 # lib/cmd_org.py now. Re-imported for dispatch + external `commands.X` stability.
+# Invariant across the split: re-export ALL moved names (public handlers AND
+# private helpers), uniformly, so `import commands; commands.<name>` and the
+# dispatch dict keep resolving regardless of which names external code happens to
+# reference. The private ones are NOT a curated public API — they are re-export
+# aliases; the canonical definition (and the correct monkeypatch target) is
+# cmd_org. Patch cmd_org.<helper>, not commands.<helper> (a patch on the alias
+# does not intercept calls made from within cmd_org's own namespace).
 from cmd_org import (  # noqa: F401
     cmd_org_create,
     cmd_org_list,

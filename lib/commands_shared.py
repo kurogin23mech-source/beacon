@@ -2,11 +2,19 @@
 """Shared CLI helpers for the beacon command modules (ms-127 e-4316).
 
 This module holds the leaf helpers that every ``cmd_*`` family module depends
-on: project load/save, the session/commit-source resolvers, the changelog
-appender, and the write-gate helpers. It was extracted verbatim from the head
-of ``commands.py`` (the god-module split) so that the per-family ``cmd_<family>``
-modules can ``from commands_shared import ...`` a single, stable dependency
-without pulling in the whole 29K-line ``commands.py``.
+on. It grows as the god-module split proceeds; each promoted group is delimited
+by a ``# --- ... ---`` / ``# ms-127 ...`` section comment. Currently:
+  - project load/save, session/commit-source resolvers, changelog appender,
+    write-gate helpers (e-4316);
+  - cloud mode / config / API client / token / bus project-id resolution /
+    persistence-poisoning (bus-origin) write defense / session-notes path
+    (e-4317-foundation);
+  - cross-family identity / cloud-project helpers — ``_project_id_for_ops`` /
+    ``_read_credentials_for_identity`` / ``_resolve_creator_identity`` /
+    ``_rename_local_project_json_for_cloud_cutover`` (e-4318-foundation).
+Helpers were extracted verbatim from ``commands.py`` so the per-family
+``cmd_<family>`` modules can ``from commands_shared import ...`` a single, stable
+dependency without pulling in the whole ``commands.py``.
 
 Dependency direction (ms-127 SPEC 方針4 = 循環 import を構造で防ぐ):
   commands_shared  →  core / store / work_model   (downward, leaf domain modules)
@@ -580,6 +588,7 @@ def _project_id_for_ops() -> str:
             pass
     return data.get("name", "")
 
+
 def _read_credentials_for_identity() -> tuple[str, str]:
     """Read (user_id, email) from the active-profile credentials.json (ms-61 / e-2132).
 
@@ -670,8 +679,14 @@ def _read_credentials_for_identity() -> tuple[str, str]:
             return user_id, email
     return "", ""
 
+
 def _resolve_creator_identity() -> tuple[str, str, str]:
-    """Return (user_id, email, session_id) for the trek creator.
+    """Return (user_id, email, session_id) for the calling user.
+
+    ms-127 e-4318: promoted to commands_shared because this is a cross-family
+    identity resolver — the caller may be an org command (cmd_org_create /
+    cmd_org_list), a trek command, or a bus command. (The name predates the
+    promotion; it resolves the acting user's identity, not a trek-specific one.)
 
     Resolution order (ms-61 / e-2132):
       1. Env vars (``BEACON_USER_ID`` / ``BEACON_USER_EMAIL`` / ``BEACON_SESSION_ID``)
@@ -706,6 +721,7 @@ def _resolve_creator_identity() -> tuple[str, str, str]:
         except Exception:
             user_id = ""
     return user_id, email, session_id
+
 
 def _rename_local_project_json_for_cloud_cutover(project_file: str) -> Optional[str]:
     """Rename ``.beacon/project.json`` to ``.before-cloud-YYYYMMDD`` (ms-84 Phase 3).
