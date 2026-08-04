@@ -759,12 +759,14 @@ def _release_all_occupations_for_session(session_id: str) -> int:
     to claim. Returns the number of releases performed (0 for sessions
     that weren't holding anything).
 
-    ms-127 note: kept in commands.py (not commands_shared) because it reads
-    ``data["milestones"]`` — the ms-134 capability-scope checker only scans
-    commands.py, so moving this profession-collection read into an unscanned
-    module would silently drop the reviewed-legitimate `session_end→milestones`
-    coupling from detection. It moves to the session family module in e-4317,
-    together with the checker's module-awareness fix.
+    ms-127 note: this reads ``data["milestones"]``, so it lives here in the
+    session family module (with its only caller cmd_session_end) rather than in
+    commands_shared — NOT in commands.py. The ms-134 capability-scope checker was
+    made module-aware in e-4317a (it now scans commands.py + commands_shared.py +
+    lib/cmd_*.py), so the reviewed-legitimate `session_end→milestones` coupling is
+    still attributed to the session_end verb from this file (verified in prod
+    pre-commit). Do NOT move it into commands_shared: a profession-collection read
+    in the shared foundation would be a genuine coupling, not a session-scoped one.
     """
     if not session_id:
         return 0
