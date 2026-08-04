@@ -18,6 +18,7 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
+import cmd_org  # noqa: E402  (ms-127 e-4318b: org/member family moved to cmd_org.py; patch helpers there)
 
 import org as org_mod  # noqa: E402
 import org_store  # noqa: E402
@@ -140,9 +141,9 @@ def test_cmd_org_list_rejects_all_in_cloud(monkeypatch):
     import commands
     monkeypatch.setenv("BEACON_ORG_ALL", "1")
     monkeypatch.delenv("BEACON_JSON", raising=False)
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_org, "_is_cloud_mode", lambda: True)
     # --all は local 専用。cloud では get_store に到達する前に exit する。
-    monkeypatch.setattr(commands, "get_store",
+    monkeypatch.setattr(cmd_org, "get_store",
                         lambda *a, **k: pytest.fail("must exit before get_store"))
     with pytest.raises(SystemExit) as ei:
         commands.cmd_org_list()
@@ -154,8 +155,8 @@ def test_cmd_org_list_rejects_unresolved_identity(monkeypatch):
     monkeypatch.delenv("BEACON_ORG_ALL", raising=False)
     monkeypatch.delenv("BEACON_JSON", raising=False)
     # identity 未解決 (uid 空) のとき、黙って全件 admin view に昇格せず exit する。
-    monkeypatch.setattr(commands, "_resolve_creator_identity", lambda: ("", "", ""))
-    monkeypatch.setattr(commands, "get_store",
+    monkeypatch.setattr(cmd_org, "_resolve_creator_identity", lambda: ("", "", ""))
+    monkeypatch.setattr(cmd_org, "get_store",
                         lambda *a, **k: pytest.fail("must exit before get_store"))
     with pytest.raises(SystemExit) as ei:
         commands.cmd_org_list()
