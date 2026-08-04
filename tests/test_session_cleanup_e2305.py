@@ -51,6 +51,9 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import cmd_session  # noqa: E402  (ms-127 e-4317b: session family moved here; patch
+#                     the helpers where the moved functions look them up, not on
+#                     commands — commands only re-exports them.)
 import session  # noqa: E402
 
 
@@ -110,7 +113,7 @@ def project_dir(monkeypatch):
         monkeypatch.delenv("BEACON_CLOUD", raising=False)
         # Block the actual cloud push so the test stays hermetic; the
         # local cache write is the side effect we observe.
-        monkeypatch.setattr(commands, "_push_session_log_to_cloud", lambda p: False)
+        monkeypatch.setattr(cmd_session, "_push_session_log_to_cloud", lambda p: False)
         try:
             yield Path(tmp)
         finally:
@@ -130,7 +133,7 @@ def _wire_cloud_mode(monkeypatch, stub_client) -> object:
     import store_local
     monkeypatch.setattr(store_local.LocalStore, "is_cloud", lambda self: True)
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_session, "_get_api_client",
         lambda: (stub_client, {"project_id": "proj-1"}),
     )
     # auth.load_credentials is imported inside the helper — stub the
@@ -182,7 +185,7 @@ def test_stamp_helper_is_noop_in_local_mode(project_dir, monkeypatch):
     # there by patching _get_api_client to fail loudly if invoked.
     def _fail(*_a, **_kw):
         raise AssertionError("local mode must not call _get_api_client")
-    monkeypatch.setattr(commands, "_get_api_client", _fail)
+    monkeypatch.setattr(cmd_session, "_get_api_client", _fail)
 
     ok = commands._stamp_cloud_session_shutdown("sv-test-123")
     assert ok is False
@@ -209,7 +212,7 @@ def test_stamp_helper_returns_false_on_empty_session_id(project_dir, monkeypatch
 
     def _fail(*_a, **_kw):
         raise AssertionError("empty sid must short-circuit before client mint")
-    monkeypatch.setattr(commands, "_get_api_client", _fail)
+    monkeypatch.setattr(cmd_session, "_get_api_client", _fail)
 
     assert commands._stamp_cloud_session_shutdown("") is False
 
@@ -300,7 +303,7 @@ def test_session_end_in_local_mode_does_not_attempt_cloud_call(project_dir, monk
     """
     def _fail(*_a, **_kw):
         raise AssertionError("local mode must not call _get_api_client")
-    monkeypatch.setattr(commands, "_get_api_client", _fail)
+    monkeypatch.setattr(cmd_session, "_get_api_client", _fail)
 
     monkeypatch.setenv("BEACON_JSON", "1")
     with redirect_stdout(io.StringIO()):
