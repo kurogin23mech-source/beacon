@@ -7,7 +7,7 @@ the bus backend timed out. Before this fix, the SSL exception bubbled
 out of ``cmd_bus_listen``, the process exited, and the Monitor armed
 loop died with it — silent end of autonomous DM coverage.
 
-The fix lives in ``lib/commands.cmd_bus_listen``: the per-iteration
+The fix lives in ``lib/cmd_bus.cmd_bus_listen``: the per-iteration
 ``list_unread_bus_events`` call is wrapped in a try/except shield that
 catches the four canonical transient-network exception types
 (``urllib.error.URLError``, ``ssl.SSLError``, ``TimeoutError``,
@@ -52,6 +52,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
+import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
 
 
 # ---------------------------------------------------------------------------
@@ -156,15 +157,15 @@ def test_single_url_error_recovers_and_streams_event(
         [event],
     ])
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_bus, "_get_api_client",
         lambda: (stub, {"project_id": "proj-1"}),
     )
     # Avoid invoking sidecar lookup (= would call into the real client and
     # explode in this stub). The pending-DM banner path is tested in
     # test_bus_listen_dm_banner.py — here we just need the network shield.
-    monkeypatch.setattr(commands, "_fetch_pending_dm_lookup", lambda c, p: {})
+    monkeypatch.setattr(cmd_bus, "_fetch_pending_dm_lookup", lambda c, p: {})
 
-    commands.cmd_bus_listen()
+    cmd_bus.cmd_bus_listen()
 
     out_lines = capsys.readouterr().out.strip().splitlines()
     assert len(out_lines) == 1
@@ -207,10 +208,10 @@ def test_persistent_errors_grow_backoff_and_reset_on_success(
         list(errs) + [[event], urllib.error.URLError("late blip"), [event]],
     )
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_bus, "_get_api_client",
         lambda: (stub, {"project_id": "proj-1"}),
     )
-    monkeypatch.setattr(commands, "_fetch_pending_dm_lookup", lambda c, p: {})
+    monkeypatch.setattr(cmd_bus, "_fetch_pending_dm_lookup", lambda c, p: {})
 
     # Disable --once so the loop reaches the second success. We cap via
     # the script: once the script is exhausted the stub raises RuntimeError
@@ -219,7 +220,7 @@ def test_persistent_errors_grow_backoff_and_reset_on_success(
     monkeypatch.setenv("BEACON_BUS_AUTO_ACK", "1")
 
     with pytest.raises(RuntimeError, match="exhausted"):
-        commands.cmd_bus_listen()
+        cmd_bus.cmd_bus_listen()
 
     # The recorded sleeps interleave retry-backoff sleeps with the
     # per-iteration ``interval`` sleep (0.25). Pull just the retry
@@ -240,14 +241,14 @@ def test_backoff_caps_at_thirty_seconds(monkeypatch, capsys, listen_env):
     errs = [urllib.error.URLError(f"err-{i}") for i in range(8)]
     stub = _ScriptedApiClient(list(errs))
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_bus, "_get_api_client",
         lambda: (stub, {"project_id": "proj-1"}),
     )
-    monkeypatch.setattr(commands, "_fetch_pending_dm_lookup", lambda c, p: {})
+    monkeypatch.setattr(cmd_bus, "_fetch_pending_dm_lookup", lambda c, p: {})
     monkeypatch.delenv("BEACON_BUS_ONCE", raising=False)
 
     with pytest.raises(RuntimeError, match="exhausted"):
-        commands.cmd_bus_listen()
+        cmd_bus.cmd_bus_listen()
 
     retry_sleeps = [s for s in listen_env["sleeps"] if s != 0.25]
     assert retry_sleeps == [1, 2, 4, 8, 16, 30, 30, 30]
@@ -263,13 +264,13 @@ def test_value_error_propagates_unchanged(monkeypatch, capsys, listen_env):
     transient-network types are caught and retried."""
     stub = _ScriptedApiClient([ValueError("unexpected payload shape")])
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_bus, "_get_api_client",
         lambda: (stub, {"project_id": "proj-1"}),
     )
-    monkeypatch.setattr(commands, "_fetch_pending_dm_lookup", lambda c, p: {})
+    monkeypatch.setattr(cmd_bus, "_fetch_pending_dm_lookup", lambda c, p: {})
 
     with pytest.raises(ValueError, match="unexpected payload shape"):
-        commands.cmd_bus_listen()
+        cmd_bus.cmd_bus_listen()
 
     # No retry sleep was emitted (= shield did not fire on this type).
     retry_sleeps = [s for s in listen_env["sleeps"] if s != 0.25]
@@ -283,13 +284,13 @@ def test_keyboard_interrupt_still_clean_exit(monkeypatch, capsys, listen_env):
     new network shield does not accidentally swallow it."""
     stub = _ScriptedApiClient([KeyboardInterrupt()])
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_bus, "_get_api_client",
         lambda: (stub, {"project_id": "proj-1"}),
     )
-    monkeypatch.setattr(commands, "_fetch_pending_dm_lookup", lambda c, p: {})
+    monkeypatch.setattr(cmd_bus, "_fetch_pending_dm_lookup", lambda c, p: {})
 
     # Should return None (= clean exit), not raise.
-    result = commands.cmd_bus_listen()
+    result = cmd_bus.cmd_bus_listen()
     assert result is None
 
 
@@ -314,12 +315,12 @@ def test_transient_error_logged_to_stderr(monkeypatch, capsys, listen_env):
         [event],
     ])
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_bus, "_get_api_client",
         lambda: (stub, {"project_id": "proj-1"}),
     )
-    monkeypatch.setattr(commands, "_fetch_pending_dm_lookup", lambda c, p: {})
+    monkeypatch.setattr(cmd_bus, "_fetch_pending_dm_lookup", lambda c, p: {})
 
-    commands.cmd_bus_listen()
+    cmd_bus.cmd_bus_listen()
 
     err = capsys.readouterr().err
     assert "[bus listen] transient network error" in err

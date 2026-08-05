@@ -3,7 +3,7 @@
 The unit tests cover the two halves separately: ``test_cmd_bus_send_consent``
 proves the CLI stamps a ``recipient_confirmed`` claim, and
 ``test_sender_consent_backstop`` proves the server gate reads one. This test
-joins them — it drives the **actual** ``commands.cmd_bus_send`` (which builds
+joins them — it drives the **actual** ``cmd_bus.cmd_bus_send`` (which builds
 the envelope + claim exactly as the shipped CLI does) and routes its POST into
 the **actual** ``app.post_bus_event`` backstop via a bridge client. That
 verifies the claim the CLI produces is the claim the server accepts — the seam
@@ -31,6 +31,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
+import commands_shared  # noqa: E402  (ms-127 e-4803)
+import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
 import firestore_client  # noqa: E402
 
 PROJECT_ID = "proj-e2e"
@@ -152,8 +154,11 @@ def send(monkeypatch):
     monkeypatch.setattr(app_module, "_fanout_bus_event", _noop)
 
     bridge = _BridgeClient(TestClient(app_module.app))
-    monkeypatch.setattr(commands, "_get_api_client",
-                        lambda: (bridge, {"project_id": PROJECT_ID}))
+    _client = lambda: (bridge, {"project_id": PROJECT_ID})
+    monkeypatch.setattr(cmd_bus, "_get_api_client", _client)
+    # live-check lazily does `from commands import _get_api_client` (dm_discover)
+    monkeypatch.setattr(commands, "_get_api_client", _client)
+    monkeypatch.setattr(commands_shared, "_get_api_client", _client)
 
     def _do(*, to, sender="sv-alice", sender_uid="uid-alice", confirmed=False):
         for k in ("BEACON_BUS_CHANNEL", "BEACON_BUS_PAYLOAD", "BEACON_BUS_SENDER",
@@ -170,7 +175,7 @@ def send(monkeypatch):
         monkeypatch.setenv("BEACON_BUS_PAYLOAD", '{"text":"hello"}')
         if confirmed:
             monkeypatch.setenv("BEACON_BUS_RECIPIENT_CONFIRMED", "1")
-        commands.cmd_bus_send()
+        cmd_bus.cmd_bus_send()
 
     return _do
 

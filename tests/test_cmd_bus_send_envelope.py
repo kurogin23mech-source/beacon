@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
+import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
 
 
 # ---------------------------------------------------------------------------
@@ -125,10 +126,10 @@ class _StubApiClient:
 
 @pytest.fixture
 def stub(monkeypatch):
-    """Wire commands._get_api_client to our stub + a fixed project."""
+    """Wire cmd_bus._get_api_client to our stub + a fixed project."""
     stub = _StubApiClient()
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_bus, "_get_api_client",
         lambda: (stub, {"project_id": "proj-1"}),
     )
     return stub
@@ -153,7 +154,7 @@ def test_send_issues_envelope_before_post(monkeypatch, stub):
     """Default send: issue → post, in that order. Tier = T1 (human-CLI)."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ops")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
 
     assert len(stub.issue_calls) == 1
     assert len(stub.post_calls) == 1
@@ -181,7 +182,7 @@ def test_send_with_single_action_propagates_to_envelope_and_request(
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ops")
     monkeypatch.setenv("BEACON_BUS_ACTION", "status_check")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
 
     assert stub.issue_calls[0]["actions_authorized"] == ["status_check"]
     # Single action: also stamped as requested_action so the receiver verify
@@ -199,7 +200,7 @@ def test_send_with_multiple_actions_grants_all_but_no_single_request(
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ops")
     # The bash wrapper joins repeated --action flags with commas.
     monkeypatch.setenv("BEACON_BUS_ACTION", "status_check,refresh_cache")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
 
     assert stub.issue_calls[0]["actions_authorized"] == [
         "status_check", "refresh_cache",
@@ -219,7 +220,7 @@ def test_no_envelope_flag_skips_issuance(monkeypatch, stub):
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ops")
     monkeypatch.setenv("BEACON_BUS_NO_ENVELOPE", "1")
     monkeypatch.setenv("BEACON_BUS_ACTION", "status_check")  # ignored
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
 
     assert stub.issue_calls == []
     assert len(stub.post_calls) == 1
@@ -240,12 +241,12 @@ def test_send_falls_back_on_issue_404(monkeypatch, capsys):
         issue_error=RuntimeError("API error 404: not found"),
     )
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_bus, "_get_api_client",
         lambda: (stub, {"project_id": "proj-1"}),
     )
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ops")
 
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
 
     # Issuance was attempted...
     assert len(stub.issue_calls) == 1
@@ -271,12 +272,12 @@ def test_send_falls_back_on_issue_400(monkeypatch, capsys):
         ),
     )
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_bus, "_get_api_client",
         lambda: (stub, {"project_id": "proj-1"}),
     )
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ops")
 
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
 
     assert len(stub.post_calls) == 1
     assert stub.post_calls[0]["envelope"] is None
@@ -293,12 +294,12 @@ def test_send_falls_back_on_issue_transport_error(monkeypatch, capsys):
         issue_error=ConnectionError("Cannot connect to API"),
     )
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_bus, "_get_api_client",
         lambda: (stub, {"project_id": "proj-1"}),
     )
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ops")
 
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
 
     # Legacy post still went out.
     assert len(stub.post_calls) == 1
@@ -319,6 +320,6 @@ def test_send_payload_does_not_change_tier(monkeypatch, stub):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ops")
     monkeypatch.setenv("BEACON_BUS_PAYLOAD", json.dumps({"ping": "ok"}))
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
 
     assert stub.issue_calls[0]["tier"] == "T1"

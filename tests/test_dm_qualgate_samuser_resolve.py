@@ -43,6 +43,8 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import commands_shared  # noqa: E402  (ms-127 e-4803)
+import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
 import dm_qualgate  # noqa: E402
 
 
@@ -121,13 +123,13 @@ class _FakeClient:
 
 def _stub_api(monkeypatch, sessions):
     monkeypatch.setattr(
-        commands, "_get_api_client", lambda: (_FakeClient(sessions), {})
+        commands_shared, "_get_api_client", lambda: (_FakeClient(sessions), {})
     )
 
 
 def _stub_identity(monkeypatch, email):
     monkeypatch.setattr(
-        commands, "_resolve_creator_identity",
+        commands_shared, "_resolve_creator_identity",
         lambda: ("user-self", email, "sender-sid"),
     )
 
@@ -140,7 +142,7 @@ def test_fallback_found_without_email_returns_caller_email(monkeypatch):
         {"session_id": RECIP_SID, "user_id": "user-self", "actor": {}},
     ])
     _stub_identity(monkeypatch, SENDER_EMAIL)
-    email = commands._resolve_recipient_email_via_self_sessions(RECIP_SID)
+    email = commands_shared._resolve_recipient_email_via_self_sessions(RECIP_SID)
     assert email == SENDER_EMAIL
 
 
@@ -152,7 +154,7 @@ def test_fallback_found_with_email_prefers_row_email(monkeypatch):
          "actor": {"email": SENDER_EMAIL, "machine": "mac-1"}},
     ])
     _stub_identity(monkeypatch, "should-not-be-used@example.com")
-    email = commands._resolve_recipient_email_via_self_sessions(RECIP_SID)
+    email = commands_shared._resolve_recipient_email_via_self_sessions(RECIP_SID)
     assert email == SENDER_EMAIL
 
 
@@ -166,7 +168,7 @@ def test_fallback_comember_without_email_stays_external(monkeypatch):
         {"session_id": RECIP_SID, "user_id": "user-OTHER", "actor": {}},
     ])
     _stub_identity(monkeypatch, SENDER_EMAIL)  # caller uid = "user-self"
-    email = commands._resolve_recipient_email_via_self_sessions(RECIP_SID)
+    email = commands_shared._resolve_recipient_email_via_self_sessions(RECIP_SID)
     assert email == ""
     assert email != SENDER_EMAIL
 
@@ -179,7 +181,7 @@ def test_fallback_comember_with_email_returns_their_email(monkeypatch):
          "actor": {"email": "other@example.com"}},
     ])
     _stub_identity(monkeypatch, SENDER_EMAIL)
-    email = commands._resolve_recipient_email_via_self_sessions(RECIP_SID)
+    email = commands_shared._resolve_recipient_email_via_self_sessions(RECIP_SID)
     assert email == "other@example.com"
     assert email != SENDER_EMAIL
 
@@ -193,7 +195,7 @@ def test_fallback_not_found_returns_blank(monkeypatch):
          "actor": {"email": SENDER_EMAIL}},
     ])
     _stub_identity(monkeypatch, SENDER_EMAIL)
-    email = commands._resolve_recipient_email_via_self_sessions(RECIP_SID)
+    email = commands_shared._resolve_recipient_email_via_self_sessions(RECIP_SID)
     assert email == ""
 
 
@@ -202,8 +204,8 @@ def test_fallback_api_failure_returns_blank(monkeypatch):
     footgun that blocks the send)."""
     def _boom():
         raise RuntimeError("no auth")
-    monkeypatch.setattr(commands, "_get_api_client", _boom)
-    assert commands._resolve_recipient_email_via_self_sessions(RECIP_SID) == ""
+    monkeypatch.setattr(commands_shared, "_get_api_client", _boom)
+    assert commands_shared._resolve_recipient_email_via_self_sessions(RECIP_SID) == ""
 
 
 def test_fallback_empty_recipient_returns_blank(monkeypatch):
@@ -214,8 +216,8 @@ def test_fallback_empty_recipient_returns_blank(monkeypatch):
         called["n"] += 1
         return (_FakeClient([]), {})
 
-    monkeypatch.setattr(commands, "_get_api_client", _client)
-    assert commands._resolve_recipient_email_via_self_sessions("") == ""
+    monkeypatch.setattr(commands_shared, "_get_api_client", _client)
+    assert commands_shared._resolve_recipient_email_via_self_sessions("") == ""
     assert called["n"] == 0
 
 
@@ -249,7 +251,7 @@ def test_live_row_without_email_backfills_via_fallback(monkeypatch, capsys):
         {"session_id": RECIP_SID, "user_id": "user-self", "actor": {}},
     ])
     _stub_identity(monkeypatch, SENDER_EMAIL)
-    new_recipient, notice, email = commands._resolve_recipient_live(RECIP_SID, "dm")
+    new_recipient, notice, email = commands_shared._resolve_recipient_live(RECIP_SID, "dm")
     assert new_recipient == RECIP_SID
     assert notice is None
     assert email == SENDER_EMAIL  # backfilled, not ""
@@ -277,7 +279,7 @@ def test_helper_import_failure_still_resolves_identity(monkeypatch):
         {"session_id": RECIP_SID, "user_id": "user-self", "actor": {}},
     ])
     _stub_identity(monkeypatch, SENDER_EMAIL)  # caller uid = user-self
-    _new, notice, email = commands._resolve_recipient_live(RECIP_SID, "dm")
+    _new, notice, email = commands_shared._resolve_recipient_live(RECIP_SID, "dm")
     # Resolved via fallback despite the helper import failing — NOT "".
     assert email == SENDER_EMAIL
 
@@ -290,7 +292,7 @@ def test_no_live_check_env_still_resolves_identity(monkeypatch):
         {"session_id": RECIP_SID, "user_id": "user-self", "actor": {}},
     ])
     _stub_identity(monkeypatch, SENDER_EMAIL)
-    _new, notice, email = commands._resolve_recipient_live(RECIP_SID, "dm")
+    _new, notice, email = commands_shared._resolve_recipient_live(RECIP_SID, "dm")
     assert email == SENDER_EMAIL
 
 
@@ -305,8 +307,8 @@ def test_live_row_with_email_does_not_call_fallback(monkeypatch, capsys):
     def _should_not_be_called():
         raise AssertionError("fallback must not run when row has an email")
 
-    monkeypatch.setattr(commands, "_get_api_client", _should_not_be_called)
-    new_recipient, notice, email = commands._resolve_recipient_live(RECIP_SID, "dm")
+    monkeypatch.setattr(commands_shared, "_get_api_client", _should_not_be_called)
+    new_recipient, notice, email = commands_shared._resolve_recipient_live(RECIP_SID, "dm")
     assert new_recipient == RECIP_SID
     assert email == SENDER_EMAIL
     capsys.readouterr()

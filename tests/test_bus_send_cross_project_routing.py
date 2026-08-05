@@ -38,6 +38,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
 
 
 RECIPIENT = "cfgw5d79ll-1781009858157-94a72e40"
@@ -70,7 +71,7 @@ class _MockClient:
 def _stub_client(monkeypatch, target=None, user=None):
     """Patch _get_api_client to return a mock client + empty config."""
     mock = _MockClient(target, user)
-    monkeypatch.setattr(commands, "_get_api_client", lambda: (mock, {}))
+    monkeypatch.setattr(cmd_bus, "_get_api_client", lambda: (mock, {}))
     return mock
 
 
@@ -87,19 +88,19 @@ def reset_env(monkeypatch):
 
 def test_non_dm_channel_skips():
     """Broadcast channels have no fixed recipient — never re-route."""
-    assert commands._validate_recipient_project(
+    assert cmd_bus._validate_recipient_project(
         RECIPIENT, TARGET, "session-broadcast"
     ) == TARGET
 
 
 def test_empty_recipient_skips():
-    assert commands._validate_recipient_project("", TARGET, "dm") == TARGET
+    assert cmd_bus._validate_recipient_project("", TARGET, "dm") == TARGET
 
 
 def test_skip_env_bypasses(monkeypatch):
     monkeypatch.setenv("BEACON_BUS_SKIP_TO_CHECK", "1")
     # Even without any API stub the bypass wins (no lookup performed).
-    assert commands._validate_recipient_project(
+    assert cmd_bus._validate_recipient_project(
         RECIPIENT, TARGET, "dm"
     ) == TARGET
 
@@ -114,7 +115,7 @@ def test_recipient_in_target_project_unchanged(monkeypatch):
         target=[{"session_id": RECIPIENT}],
         user=[],
     )
-    assert commands._validate_recipient_project(
+    assert cmd_bus._validate_recipient_project(
         RECIPIENT, TARGET, "dm"
     ) == TARGET
 
@@ -129,7 +130,7 @@ def test_recipient_in_other_project_auto_routes(monkeypatch, capsys):
         target=[],
         user=[{"session_id": RECIPIENT, "project_id": OTHER}],
     )
-    routed = commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
+    routed = cmd_bus._validate_recipient_project(RECIPIENT, TARGET, "dm")
     assert routed == OTHER
     err = capsys.readouterr().err
     assert "Auto-routing" in err
@@ -145,7 +146,7 @@ def test_recipient_in_other_project_strict_mode_errors(monkeypatch, capsys):
         user=[{"session_id": RECIPIENT, "project_id": OTHER}],
     )
     with pytest.raises(SystemExit) as exc:
-        commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
+        cmd_bus._validate_recipient_project(RECIPIENT, TARGET, "dm")
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "polls project" in err
@@ -164,7 +165,7 @@ def test_recipient_not_found_anywhere_hard_errors_by_default(monkeypatch, capsys
     """
     _stub_client(monkeypatch, target=[], user=[])
     with pytest.raises(SystemExit) as exc:
-        commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
+        cmd_bus._validate_recipient_project(RECIPIENT, TARGET, "dm")
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "見つかりません" in err  # 日本語のエラーメッセージ
@@ -176,7 +177,7 @@ def test_recipient_not_found_anywhere_hard_errors_by_default(monkeypatch, capsys
 def test_allow_unknown_env_restores_soft_warn(monkeypatch, capsys):
     monkeypatch.setenv("BEACON_BUS_ALLOW_UNKNOWN", "1")
     _stub_client(monkeypatch, target=[], user=[])
-    routed = commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
+    routed = cmd_bus._validate_recipient_project(RECIPIENT, TARGET, "dm")
     # legacy soft-warn 経路: hard-error にならず、 target project にそのまま送る。
     assert routed == TARGET
     err = capsys.readouterr().err
@@ -198,7 +199,7 @@ def test_target_lookup_api_failure_bypasses(monkeypatch, capsys):
 
     _stub_client(monkeypatch, target=_raise, user=[])
 
-    routed = commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
+    routed = cmd_bus._validate_recipient_project(RECIPIENT, TARGET, "dm")
     assert routed == TARGET
     err = capsys.readouterr().err
     assert "API 経由で失敗" in err
@@ -213,7 +214,7 @@ def test_user_sessions_api_failure_bypasses(monkeypatch, capsys):
 
     _stub_client(monkeypatch, target=[], user=_raise)
 
-    routed = commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
+    routed = cmd_bus._validate_recipient_project(RECIPIENT, TARGET, "dm")
     assert routed == TARGET
     err = capsys.readouterr().err
     assert "API 経由で失敗" in err
@@ -232,7 +233,7 @@ def test_target_match_wins_over_user_sessions_match(monkeypatch, capsys):
         target=[{"session_id": RECIPIENT}],
         user=[{"session_id": RECIPIENT, "project_id": OTHER}],
     )
-    routed = commands._validate_recipient_project(RECIPIENT, TARGET, "dm")
+    routed = cmd_bus._validate_recipient_project(RECIPIENT, TARGET, "dm")
     assert routed == TARGET
     err = capsys.readouterr().err
     assert "Auto-routing" not in err

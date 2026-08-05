@@ -200,7 +200,7 @@ def test_mcp_reply_n_grants_n_sends(project_root):
 # ---------------------------------------------------------------------------
 
 def test_mcp_reply_allows_when_total_is_zero_sentinel(project_root):
-    """Matches lib/commands._bus_budget_consume_one's branch for "file
+    """Matches lib/cmd_bus._bus_budget_consume_one's branch for "file
     present, total<=0" → allow without decrement, armed=False. Without
     this the two code paths diverge on this corner."""
     _write_budget(project_root, total=0, used=0)

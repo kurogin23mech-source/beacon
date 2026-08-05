@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
+import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
 import dm_qualgate  # noqa: E402
 
 
@@ -54,7 +55,7 @@ class _RecordingClient:
 def test_cli_qual_gate_holds_and_refunds(project_dir, monkeypatch, capsys):
     _clear_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "3")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
 
     # Force the gate to HOLD regardless of routing (the classifier/route mocking
@@ -66,13 +67,13 @@ def test_cli_qual_gate_holds_and_refunds(project_dir, monkeypatch, capsys):
                             "reason": "external_needs_human"},
     )
     client = _RecordingClient()
-    monkeypatch.setattr(commands, "_get_api_client",
+    monkeypatch.setattr(cmd_bus, "_get_api_client",
                         lambda: (client, {"project_id": "p"}))
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
     monkeypatch.setenv("BEACON_BUS_IN_REPLY_TO", "e-x")
 
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_send()
+        cmd_bus.cmd_bus_send()
     assert exc.value.code == 1
     assert client.sent is False, "held reply must not be sent"
 
@@ -89,7 +90,7 @@ def test_cli_qual_gate_off_escape_hatch(project_dir, monkeypatch, capsys):
     # BEACON_QUALGATE_OFF=1 skips the gate entirely (parity with the JS side).
     _clear_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "3")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
     monkeypatch.setenv("BEACON_QUALGATE_OFF", "1")
 
@@ -108,11 +109,11 @@ def test_cli_qual_gate_off_escape_hatch(project_dir, monkeypatch, capsys):
 
         def post_bus_event(self, *a, **kw):
             raise RuntimeError("cloud down")
-    monkeypatch.setattr(commands, "_get_api_client",
+    monkeypatch.setattr(cmd_bus, "_get_api_client",
                         lambda: (_Boom(), {"project_id": "p"}))
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
     monkeypatch.setenv("BEACON_BUS_IN_REPLY_TO", "e-x")
 
     with pytest.raises(RuntimeError):
-        commands.cmd_bus_send()
+        cmd_bus.cmd_bus_send()
     assert called["gate"] is False, "BEACON_QUALGATE_OFF=1 must skip the gate"

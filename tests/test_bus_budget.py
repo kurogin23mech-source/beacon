@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
+import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
 
 
 @pytest.fixture
@@ -61,7 +62,7 @@ def test_grant_writes_budget_file_with_expected_schema(project_dir,
                                                          monkeypatch, capsys):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     path = project_dir / ".beacon" / "bus-budget.json"
     assert path.exists()
     data = json.loads(path.read_text())
@@ -75,7 +76,7 @@ def test_grant_rejects_non_integer(project_dir, monkeypatch, capsys):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "five")
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_budget_grant()
+        cmd_bus.cmd_bus_budget_grant()
     assert exc.value.code == 1
 
 
@@ -83,12 +84,12 @@ def test_grant_rejects_zero_or_negative(project_dir, monkeypatch, capsys):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "0")
     with pytest.raises(SystemExit):
-        commands.cmd_bus_budget_grant()
+        cmd_bus.cmd_bus_budget_grant()
 
 
 def test_show_when_not_granted(project_dir, monkeypatch, capsys):
     _clear_bus_env(monkeypatch)
-    commands.cmd_bus_budget_show()
+    cmd_bus.cmd_bus_budget_show()
     out = capsys.readouterr().out
     assert "not granted" in out
     assert "autonomous mode disabled" in out
@@ -97,9 +98,9 @@ def test_show_when_not_granted(project_dir, monkeypatch, capsys):
 def test_show_when_armed(project_dir, monkeypatch, capsys):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "3")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
-    commands.cmd_bus_budget_show()
+    cmd_bus.cmd_bus_budget_show()
     out = capsys.readouterr().out
     assert "0/3 used" in out
     assert "3 remaining" in out
@@ -109,17 +110,17 @@ def test_show_when_armed(project_dir, monkeypatch, capsys):
 def test_clear_removes_budget_file(project_dir, monkeypatch, capsys):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
     path = project_dir / ".beacon" / "bus-budget.json"
     assert path.exists()
-    commands.cmd_bus_budget_clear()
+    cmd_bus.cmd_bus_budget_clear()
     assert not path.exists()
 
 
 def test_clear_when_no_budget_is_idempotent(project_dir, monkeypatch, capsys):
     _clear_bus_env(monkeypatch)
-    commands.cmd_bus_budget_clear()  # must not crash
+    cmd_bus.cmd_bus_budget_clear()  # must not crash
     capsys.readouterr()
 
 
@@ -132,7 +133,7 @@ def test_consume_allows_when_no_budget_file(project_dir, monkeypatch, capsys):
     applies when explicitly armed — otherwise the autonomous-mode safety
     feature becomes a friction tax on normal usage."""
     _clear_bus_env(monkeypatch)
-    allowed, state = commands._bus_budget_consume_one()
+    allowed, state = cmd_bus._bus_budget_consume_one()
     assert allowed is True
     assert state.get("armed") is False
 
@@ -140,13 +141,13 @@ def test_consume_allows_when_no_budget_file(project_dir, monkeypatch, capsys):
 def test_consume_decrements_when_armed(project_dir, monkeypatch, capsys):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "3")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
-    allowed, state = commands._bus_budget_consume_one()
+    allowed, state = cmd_bus._bus_budget_consume_one()
     assert allowed is True
     assert state["used"] == 1
     # Round trip the file: another consume sees the higher used count.
-    allowed, state = commands._bus_budget_consume_one()
+    allowed, state = cmd_bus._bus_budget_consume_one()
     assert state["used"] == 2
 
 
@@ -155,11 +156,11 @@ def test_consume_refuses_when_exhausted(project_dir, monkeypatch, capsys):
     refuse must not mutate `used` further so re-grant math stays clean."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "2")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
-    assert commands._bus_budget_consume_one()[0] is True
-    assert commands._bus_budget_consume_one()[0] is True
-    allowed, state = commands._bus_budget_consume_one()
+    assert cmd_bus._bus_budget_consume_one()[0] is True
+    assert cmd_bus._bus_budget_consume_one()[0] is True
+    allowed, state = cmd_bus._bus_budget_consume_one()
     assert allowed is False
     assert state["used"] == 2  # NOT incremented past total
 
@@ -171,7 +172,7 @@ def test_consume_treats_corrupted_file_as_no_budget(project_dir, monkeypatch,
     _clear_bus_env(monkeypatch)
     path = project_dir / ".beacon" / "bus-budget.json"
     path.write_text("{this is not json")
-    allowed, state = commands._bus_budget_consume_one()
+    allowed, state = cmd_bus._bus_budget_consume_one()
     assert allowed is True
     assert state.get("armed") is False
 
@@ -224,7 +225,7 @@ class _StubClient:
 def stub_client(monkeypatch):
     stub = _StubClient()
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_bus, "_get_api_client",
         lambda: (stub, {"project_id": "proj-1"}),
     )
     return stub
@@ -236,7 +237,7 @@ def test_manual_send_without_in_reply_to_bypasses_gate(project_dir, monkeypatch,
     approval. No --in-reply-to → no gate, even if no budget granted."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ch")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     out = capsys.readouterr().out
     assert "Sent:" in out
     assert "budget" not in out  # no budget surfaced when bypassed
@@ -252,7 +253,7 @@ def test_reply_refused_when_no_budget_granted(project_dir, monkeypatch, capsys,
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ch")
     monkeypatch.setenv("BEACON_BUS_IN_REPLY_TO", "e-original")
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_send()
+        cmd_bus.cmd_bus_send()
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "no auto-reply budget is granted" in err
@@ -267,11 +268,11 @@ def test_reply_succeeds_after_budget_grant(project_dir, monkeypatch, capsys,
     without further per-reply approval."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "3")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ch")
     monkeypatch.setenv("BEACON_BUS_IN_REPLY_TO", "e-original")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     out = capsys.readouterr().out
     assert "Sent:" in out
     assert "budget: 1/3" in out
@@ -288,15 +289,15 @@ def test_reply_refused_when_budget_exhausted(project_dir, monkeypatch, capsys,
     autonomous-loop runaway."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "2")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ch")
     monkeypatch.setenv("BEACON_BUS_IN_REPLY_TO", "e-original")
-    commands.cmd_bus_send()
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     capsys.readouterr()
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_send()
+        cmd_bus.cmd_bus_send()
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "exhausted" in err
@@ -317,25 +318,25 @@ def test_manual_send_still_works_even_with_budget_exhausted(project_dir,
     bypass by dropping a flag."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "1")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
     # Burn the budget via a reply
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ch")
     monkeypatch.setenv("BEACON_BUS_IN_REPLY_TO", "e-x")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     capsys.readouterr()
     # e-3901: a bare send while armed+exhausted (no --in-reply-to, no --manual)
     # is now GATED — the old fail-open bypass is closed.
     monkeypatch.delenv("BEACON_BUS_IN_REPLY_TO", raising=False)
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_send()
+        cmd_bus.cmd_bus_send()
     assert exc.value.code == 1
     assert "budget exhausted" in capsys.readouterr().err
     assert len(stub_client.calls) == 1, "gated bare send must not reach the client"
     # The explicit human escape: --manual sends the one-off despite exhaustion,
     # recorded as an audited override.
     monkeypatch.setenv("BEACON_BUS_MANUAL", "1")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     out = capsys.readouterr().out
     assert "Sent:" in out
     assert len(stub_client.calls) == 2
@@ -350,12 +351,12 @@ def test_armed_bare_send_is_gated_without_in_reply_to(project_dir, monkeypatch,
     send context (armed), not the presence of the flag, triggers the gate."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "3")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ch")
     # No BEACON_BUS_IN_REPLY_TO — the exact shape an autonomous loop would use
     # to escape the pre-e-3901 gate.
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     assert "Sent:" in capsys.readouterr().out
     budget = json.loads(
         (project_dir / ".beacon" / "bus-budget.json").read_text())
@@ -370,11 +371,11 @@ def test_armed_manual_override_bypasses_gate(project_dir, monkeypatch, capsys,
     old fail-open bypass (drop --in-reply-to), this leaves a loud audit record."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "2")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ch")
     monkeypatch.setenv("BEACON_BUS_MANUAL", "1")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     capsys.readouterr()
     budget = json.loads(
         (project_dir / ".beacon" / "bus-budget.json").read_text())
@@ -389,12 +390,12 @@ def test_reply_json_mode_includes_budget_state(project_dir, monkeypatch, capsys,
     whether to keep going. JSON mode appends it under _budget."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ch")
     monkeypatch.setenv("BEACON_BUS_IN_REPLY_TO", "e-original")
     monkeypatch.setenv("BEACON_JSON", "1")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     out = capsys.readouterr().out.strip()
     parsed = json.loads(out)
     assert parsed["channel"] == "ch"
@@ -421,7 +422,7 @@ def test_grant_refused_under_operation_auto_execute(project_dir, monkeypatch,
     monkeypatch.setenv("BEACON_OPERATION_AUTO_EXECUTE", "1")
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_budget_grant()
+        cmd_bus.cmd_bus_budget_grant()
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "T1-only" in err
@@ -441,7 +442,7 @@ def test_grant_refused_when_operation_envelope_id_set(project_dir, monkeypatch,
     monkeypatch.setenv("BEACON_OPERATION_ENVELOPE_ID", "env-test-123")
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_budget_grant()
+        cmd_bus.cmd_bus_budget_grant()
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "T1-only" in err
@@ -455,7 +456,7 @@ def test_grant_allowed_when_no_operation_context(project_dir, monkeypatch,
     monkeypatch.delenv("BEACON_OPERATION_AUTO_EXECUTE", raising=False)
     monkeypatch.delenv("BEACON_OPERATION_ENVELOPE_ID", raising=False)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     path = project_dir / ".beacon" / "bus-budget.json"
     assert path.exists()
     data = json.loads(path.read_text())
@@ -471,7 +472,7 @@ def test_reply_refunds_budget_when_cloud_call_fails(project_dir, monkeypatch,
     kept even on failure; e-2999 flips that to refund-on-failure."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "3")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
 
     class _Boom:
@@ -483,12 +484,12 @@ def test_reply_refunds_budget_when_cloud_call_fails(project_dir, monkeypatch,
             # way; the CLI falls back to no-envelope, then the post fails.
             raise RuntimeError("cloud is down")
 
-    monkeypatch.setattr(commands, "_get_api_client",
+    monkeypatch.setattr(cmd_bus, "_get_api_client",
                         lambda: (_Boom(), {"project_id": "p"}))
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ch")
     monkeypatch.setenv("BEACON_BUS_IN_REPLY_TO", "e-x")
     with pytest.raises(RuntimeError):
-        commands.cmd_bus_send()
+        cmd_bus.cmd_bus_send()
     # Budget went 0 → 1 (pessimistic) then refunded back to 0 on the failure.
     budget = json.loads(
         (project_dir / ".beacon" / "bus-budget.json").read_text())
@@ -506,7 +507,7 @@ def test_record_trek_bypass_creates_counter_when_no_budget(project_dir,
     counter — armed=False and total/used=0 so the gate semantics are
     unchanged for non-Trek sends."""
     _clear_bus_env(monkeypatch)
-    commands._record_bus_budget_trek_bypass("tk-abc")
+    cmd_bus._record_bus_budget_trek_bypass("tk-abc")
     path = project_dir / ".beacon" / "bus-budget.json"
     assert path.exists()
     data = json.loads(path.read_text())
@@ -519,10 +520,10 @@ def test_record_trek_bypass_creates_counter_when_no_budget(project_dir,
 def test_record_trek_bypass_increments_existing_counter(project_dir, monkeypatch):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
-    commands.cmd_bus_budget_grant()
-    commands._record_bus_budget_trek_bypass("tk-abc")
-    commands._record_bus_budget_trek_bypass("tk-abc")
-    commands._record_bus_budget_trek_bypass("tk-xyz")
+    cmd_bus.cmd_bus_budget_grant()
+    cmd_bus._record_bus_budget_trek_bypass("tk-abc")
+    cmd_bus._record_bus_budget_trek_bypass("tk-abc")
+    cmd_bus._record_bus_budget_trek_bypass("tk-xyz")
     data = json.loads(
         (project_dir / ".beacon" / "bus-budget.json").read_text())
     assert data["trek_bypassed"]["tk-abc"] == 2
@@ -534,7 +535,7 @@ def test_record_trek_bypass_increments_existing_counter(project_dir, monkeypatch
 
 def test_record_trek_bypass_no_op_on_empty_trek_id(project_dir, monkeypatch):
     _clear_bus_env(monkeypatch)
-    commands._record_bus_budget_trek_bypass("")
+    cmd_bus._record_bus_budget_trek_bypass("")
     # No write; if there is no budget file, none is created.
     path = project_dir / ".beacon" / "bus-budget.json"
     assert not path.exists()
@@ -544,12 +545,12 @@ def test_budget_show_displays_trek_bypassed_counts(project_dir, monkeypatch,
                                                     capsys):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
-    commands._record_bus_budget_trek_bypass("tk-trek1")
-    commands._record_bus_budget_trek_bypass("tk-trek1")
-    commands._record_bus_budget_trek_bypass("tk-trek2")
-    commands.cmd_bus_budget_show()
+    cmd_bus._record_bus_budget_trek_bypass("tk-trek1")
+    cmd_bus._record_bus_budget_trek_bypass("tk-trek1")
+    cmd_bus._record_bus_budget_trek_bypass("tk-trek2")
+    cmd_bus.cmd_bus_budget_show()
     out = capsys.readouterr().out
     assert "0/5 used" in out  # main budget untouched
     assert "Trek-internal bypassed: 3 send(s)" in out
@@ -562,9 +563,9 @@ def test_budget_show_omits_trek_section_when_no_bypassed(project_dir,
     """Don't add Trek noise to budgets that never saw a Trek-internal send."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_BUDGET_N", "5")
-    commands.cmd_bus_budget_grant()
+    cmd_bus.cmd_bus_budget_grant()
     capsys.readouterr()
-    commands.cmd_bus_budget_show()
+    cmd_bus.cmd_bus_budget_show()
     out = capsys.readouterr().out
     assert "Trek-internal bypassed" not in out
 
@@ -575,8 +576,8 @@ def test_is_trek_internal_send_returns_false_in_local_mode(project_dir,
     Trek scope detection requires the cloud-side session directory."""
     _clear_bus_env(monkeypatch)
     # Stub _is_cloud_mode to False explicitly.
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: False)
-    bypass, trek_id = commands._is_trek_internal_send("sv-recipient")
+    monkeypatch.setattr(cmd_bus, "_is_cloud_mode", lambda: False)
+    bypass, trek_id = cmd_bus._is_trek_internal_send("sv-recipient")
     assert bypass is False
     assert trek_id == ""
 
@@ -584,8 +585,8 @@ def test_is_trek_internal_send_returns_false_in_local_mode(project_dir,
 def test_is_trek_internal_send_returns_false_for_empty_recipient(project_dir,
                                                                   monkeypatch):
     _clear_bus_env(monkeypatch)
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
-    bypass, trek_id = commands._is_trek_internal_send("")
+    monkeypatch.setattr(cmd_bus, "_is_cloud_mode", lambda: True)
+    bypass, trek_id = cmd_bus._is_trek_internal_send("")
     assert bypass is False
     assert trek_id == ""
 
@@ -595,8 +596,8 @@ def test_is_trek_internal_send_returns_true_for_shared_active_trek(project_dir,
     """Both sender and recipient are joined members of an active trek →
     bypass. Mirrors server-side dm_gate.GATE_REASON_SHARED_TREK."""
     _clear_bus_env(monkeypatch)
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
-    monkeypatch.setattr(commands, "_resolve_creator_identity",
+    monkeypatch.setattr(cmd_bus, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_bus, "_resolve_creator_identity",
                          lambda: ("u-sender", "sender@x", "sv-1"))
 
     class _FakeClient:
@@ -614,10 +615,10 @@ def test_is_trek_internal_send_returns_true_for_shared_active_trek(project_dir,
                     {"user_id": "u-recipient", "joined_at": "2026-06-19T00:00:00Z"},
                 ],
             }]
-    monkeypatch.setattr(commands, "_get_api_client",
+    monkeypatch.setattr(cmd_bus, "_get_api_client",
                          lambda: (_FakeClient(), {"project_id": "p"}))
-    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
-    bypass, trek_id = commands._is_trek_internal_send("sv-recipient")
+    monkeypatch.setattr(cmd_bus, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, trek_id = cmd_bus._is_trek_internal_send("sv-recipient")
     assert bypass is True
     assert trek_id == "tk-shared"
 
@@ -634,8 +635,8 @@ def test_is_trek_internal_send_returns_false_when_only_one_side_joined(project_d
     legacy contract; that path is covered by test_dm_gate's pre-A tests and
     test_sender_consent_backstop.)"""
     _clear_bus_env(monkeypatch)
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
-    monkeypatch.setattr(commands, "_resolve_creator_identity",
+    monkeypatch.setattr(cmd_bus, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_bus, "_resolve_creator_identity",
                          lambda: ("u-sender", "sender@x", "sv-1"))
 
     class _FakeClient:
@@ -658,10 +659,10 @@ def test_is_trek_internal_send_returns_false_when_only_one_side_joined(project_d
                     {"user_id": "u-recipient", "joined_at": ""},
                 ],
             }]
-    monkeypatch.setattr(commands, "_get_api_client",
+    monkeypatch.setattr(cmd_bus, "_get_api_client",
                          lambda: (_FakeClient(), {"project_id": "p"}))
-    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
-    bypass, _ = commands._is_trek_internal_send("sv-recipient")
+    monkeypatch.setattr(cmd_bus, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, _ = cmd_bus._is_trek_internal_send("sv-recipient")
     assert bypass is False
 
 
@@ -670,8 +671,8 @@ def test_is_trek_internal_send_returns_false_when_trek_not_active(project_dir,
     """Planning / archived treks do not grant Trek scope. The gate must not
     bypass for treks that aren't actively running work."""
     _clear_bus_env(monkeypatch)
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
-    monkeypatch.setattr(commands, "_resolve_creator_identity",
+    monkeypatch.setattr(cmd_bus, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_bus, "_resolve_creator_identity",
                          lambda: ("u-sender", "sender@x", "sv-1"))
 
     class _FakeClient:
@@ -687,10 +688,10 @@ def test_is_trek_internal_send_returns_false_when_trek_not_active(project_dir,
                     {"user_id": "u-recipient", "joined_at": "x"},
                 ],
             }]
-    monkeypatch.setattr(commands, "_get_api_client",
+    monkeypatch.setattr(cmd_bus, "_get_api_client",
                          lambda: (_FakeClient(), {"project_id": "p"}))
-    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
-    bypass, _ = commands._is_trek_internal_send("sv-r")
+    monkeypatch.setattr(cmd_bus, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, _ = cmd_bus._is_trek_internal_send("sv-r")
     assert bypass is False
 
 
@@ -701,8 +702,8 @@ def test_is_trek_internal_send_returns_false_for_halted_trek(project_dir,
     when both users are joined members. Mirrors the server-side dm_gate skip
     that the CLI mirror was missing."""
     _clear_bus_env(monkeypatch)
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
-    monkeypatch.setattr(commands, "_resolve_creator_identity",
+    monkeypatch.setattr(cmd_bus, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_bus, "_resolve_creator_identity",
                          lambda: ("u-sender", "sender@x", "sv-1"))
 
     class _FakeClient:
@@ -719,10 +720,10 @@ def test_is_trek_internal_send_returns_false_for_halted_trek(project_dir,
                     {"user_id": "u-recipient", "joined_at": "x"},
                 ],
             }]
-    monkeypatch.setattr(commands, "_get_api_client",
+    monkeypatch.setattr(cmd_bus, "_get_api_client",
                          lambda: (_FakeClient(), {"project_id": "p"}))
-    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
-    bypass, _ = commands._is_trek_internal_send("sv-r")
+    monkeypatch.setattr(cmd_bus, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, _ = cmd_bus._is_trek_internal_send("sv-r")
     assert bypass is False
 
 
@@ -739,8 +740,8 @@ def test_is_trek_internal_send_bypasses_for_same_user_trek_members(
     not user distinctness — gates the bypass. This case uses a legacy
     user_id-grain member row (no session_id)."""
     _clear_bus_env(monkeypatch)
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
-    monkeypatch.setattr(commands, "_resolve_creator_identity",
+    monkeypatch.setattr(cmd_bus, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_bus, "_resolve_creator_identity",
                          lambda: ("u-same", "x", "sv-1"))
 
     class _FakeClient:
@@ -749,10 +750,10 @@ def test_is_trek_internal_send_bypasses_for_same_user_trek_members(
         def list_treks(self):
             return [{"trek_id": "tk", "status": "active",
                      "members": [{"user_id": "u-same", "joined_at": "x"}]}]
-    monkeypatch.setattr(commands, "_get_api_client",
+    monkeypatch.setattr(cmd_bus, "_get_api_client",
                          lambda: (_FakeClient(), {"project_id": "p"}))
-    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
-    bypass, trek_id = commands._is_trek_internal_send("sv-r")
+    monkeypatch.setattr(cmd_bus, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, trek_id = cmd_bus._is_trek_internal_send("sv-r")
     assert bypass is True
     assert trek_id == "tk"
 
@@ -768,8 +769,8 @@ def test_is_trek_internal_send_session_grain_requires_both_joined(
     NOT in members[]. Bypass must NOT fire — membership is checked at session
     grain, so being the same user is insufficient on its own."""
     _clear_bus_env(monkeypatch)
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
-    monkeypatch.setattr(commands, "_resolve_creator_identity",
+    monkeypatch.setattr(cmd_bus, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_bus, "_resolve_creator_identity",
                          lambda: ("u-same", "x", "sv-1"))
 
     class _FakeClient:
@@ -781,10 +782,10 @@ def test_is_trek_internal_send_session_grain_requires_both_joined(
                 {"session_id": "sv-1", "user_id": "u-same", "joined_at": "x"},
                 {"session_id": "sv-other", "user_id": "u-same", "joined_at": "x"},
             ]}]
-    monkeypatch.setattr(commands, "_get_api_client",
+    monkeypatch.setattr(cmd_bus, "_get_api_client",
                          lambda: (_FakeClient(), {"project_id": "p"}))
-    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
-    bypass, _ = commands._is_trek_internal_send("sv-r")
+    monkeypatch.setattr(cmd_bus, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, _ = cmd_bus._is_trek_internal_send("sv-r")
     assert bypass is False
 
 
@@ -795,8 +796,8 @@ def test_is_trek_internal_send_session_grain_both_joined(
     bypass. Leader (sv-1) + fork (sv-r) as two distinct member rows of one
     user — the real solo-dev dogfood shape."""
     _clear_bus_env(monkeypatch)
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
-    monkeypatch.setattr(commands, "_resolve_creator_identity",
+    monkeypatch.setattr(cmd_bus, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_bus, "_resolve_creator_identity",
                          lambda: ("u-same", "x", "sv-1"))
 
     class _FakeClient:
@@ -807,10 +808,10 @@ def test_is_trek_internal_send_session_grain_both_joined(
                 {"session_id": "sv-1", "user_id": "u-same", "joined_at": "x"},
                 {"session_id": "sv-r", "user_id": "u-same", "joined_at": "x"},
             ]}]
-    monkeypatch.setattr(commands, "_get_api_client",
+    monkeypatch.setattr(cmd_bus, "_get_api_client",
                          lambda: (_FakeClient(), {"project_id": "p"}))
-    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
-    bypass, trek_id = commands._is_trek_internal_send("sv-r")
+    monkeypatch.setattr(cmd_bus, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, trek_id = cmd_bus._is_trek_internal_send("sv-r")
     assert bypass is True
     assert trek_id == "tk"
 
@@ -820,15 +821,15 @@ def test_is_trek_internal_send_fails_safe_when_api_throws(project_dir, monkeypat
     in force — silently relaxing on misconfigured infra is exactly what
     the SPEC forbids."""
     _clear_bus_env(monkeypatch)
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
-    monkeypatch.setattr(commands, "_resolve_creator_identity",
+    monkeypatch.setattr(cmd_bus, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_bus, "_resolve_creator_identity",
                          lambda: ("u-sender", "sender@x", "sv-1"))
 
     class _BoomClient:
         def list_sessions(self, _p):
             raise RuntimeError("server is on fire")
-    monkeypatch.setattr(commands, "_get_api_client",
+    monkeypatch.setattr(cmd_bus, "_get_api_client",
                          lambda: (_BoomClient(), {"project_id": "p"}))
-    monkeypatch.setattr(commands, "_resolve_bus_project_id", lambda _c: "p")
-    bypass, _ = commands._is_trek_internal_send("sv-r")
+    monkeypatch.setattr(cmd_bus, "_resolve_bus_project_id", lambda _c: "p")
+    bypass, _ = cmd_bus._is_trek_internal_send("sv-r")
     assert bypass is False

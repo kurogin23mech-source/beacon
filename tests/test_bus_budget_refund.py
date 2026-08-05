@@ -24,6 +24,7 @@ sys.path.insert(0, str(REPO_ROOT / "lib"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
+import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
 
 BUS_BUDGET_MJS = REPO_ROOT / "channel" / "bus-budget.mjs"
 
@@ -54,32 +55,32 @@ def _read_used(root: Path) -> int:
 
 def test_cli_refund_gives_back_one_slot(project_dir):
     _write_budget(project_dir, total=3, used=2)
-    assert commands._bus_budget_refund_one() is True
+    assert cmd_bus._bus_budget_refund_one() is True
     assert _read_used(project_dir) == 1
 
 
 def test_cli_consume_then_refund_nets_zero(project_dir):
     _write_budget(project_dir, total=3, used=0)
-    allowed, _ = commands._bus_budget_consume_one()
+    allowed, _ = cmd_bus._bus_budget_consume_one()
     assert allowed is True and _read_used(project_dir) == 1
-    assert commands._bus_budget_refund_one() is True
+    assert cmd_bus._bus_budget_refund_one() is True
     assert _read_used(project_dir) == 0, "a held/failed send must not cost a turn"
 
 
 def test_cli_refund_clamps_at_zero(project_dir):
     _write_budget(project_dir, total=3, used=0)
-    assert commands._bus_budget_refund_one() is False
+    assert cmd_bus._bus_budget_refund_one() is False
     assert _read_used(project_dir) == 0, "refund without a prior consume is a no-op"
 
 
 def test_cli_refund_noop_when_not_armed(project_dir):
     _write_budget(project_dir, total=0, used=0)
-    assert commands._bus_budget_refund_one() is False
+    assert cmd_bus._bus_budget_refund_one() is False
 
 
 def test_cli_refund_noop_when_no_budget_file(project_dir):
     # no budget file at all
-    assert commands._bus_budget_refund_one() is False
+    assert cmd_bus._bus_budget_refund_one() is False
 
 
 # --- MCP (Node) side -------------------------------------------------------
