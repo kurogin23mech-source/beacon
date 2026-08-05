@@ -32,6 +32,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import cmd_log  # noqa: E402  (ms-127 e-4320: _read_fork_target_ms_id lives here; not re-exported on commands)
 
 
 def _make_project(tmp: Path, fork_target: str = "") -> Path:
@@ -89,23 +90,23 @@ def project_with_fork(monkeypatch):
 
 
 def test_read_fork_target_ms_id_returns_value_when_present(project_with_fork):
-    assert commands._read_fork_target_ms_id() == "ms-2"
+    assert cmd_log._read_fork_target_ms_id() == "ms-2"
 
 
 def test_read_fork_target_ms_id_returns_empty_when_absent(project):
-    assert commands._read_fork_target_ms_id() == ""
+    assert cmd_log._read_fork_target_ms_id() == ""
 
 
 def test_read_fork_target_ms_id_handles_malformed_json(project, monkeypatch):
     fork_path = Path(os.path.dirname(commands.get_project_file())) / "fork.json"
     fork_path.write_text("not valid json {{", encoding="utf-8")
-    assert commands._read_fork_target_ms_id() == ""
+    assert cmd_log._read_fork_target_ms_id() == ""
 
 
 def test_read_fork_target_ms_id_handles_missing_target_field(project, monkeypatch):
     fork_path = Path(os.path.dirname(commands.get_project_file())) / "fork.json"
     fork_path.write_text(json.dumps({"child_branch": "x"}), encoding="utf-8")
-    assert commands._read_fork_target_ms_id() == ""
+    assert cmd_log._read_fork_target_ms_id() == ""
 
 
 def test_cmd_log_prepare_uses_fork_target_when_no_ms_arg(project_with_fork,

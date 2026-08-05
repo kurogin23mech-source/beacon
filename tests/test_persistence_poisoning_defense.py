@@ -41,6 +41,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
 import cmd_session  # noqa: E402  (ms-127 e-4317b: session family moved here)
+import cmd_note  # noqa: E402  (ms-127 e-4320: note family moved here)
 
 
 @pytest.fixture
@@ -76,7 +77,7 @@ def project_dir(monkeypatch):
                   "BEACON_SUMMARY", "BEACON_SESSION_ID"):
             monkeypatch.delenv(k, raising=False)
         # Silence cloud-push attempts even if anything leaks through.
-        monkeypatch.setattr(commands, "_push_note_to_cloud", lambda n: None)
+        monkeypatch.setattr(cmd_note, "_push_note_to_cloud", lambda n: None)
         monkeypatch.setattr(cmd_session, "_push_session_log_to_cloud", lambda p: False)
         try:
             yield Path(tmp)

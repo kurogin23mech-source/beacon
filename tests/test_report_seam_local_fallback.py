@@ -30,6 +30,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import cmd_issue  # noqa: E402  (ms-127 e-4320: issue family moved here)
 import core  # noqa: E402
 
 
@@ -129,7 +130,7 @@ def test_cmd_log_stdout_contract(local_project, monkeypatch, capsys):
 def test_cmd_issue_import_stdout_contract(local_project, monkeypatch, capsys):
     """``beacon issue import`` stdout is stable: ``Imported Issue #N → [eid]: title``.
     The GitHub fetch is stubbed so the test stays local + offline."""
-    monkeypatch.setattr(commands, "_gh_issue_fetch", lambda number: {
+    monkeypatch.setattr(cmd_issue, "_gh_issue_fetch", lambda number: {
         "url": "https://github.com/o/r/issues/9", "title": "Stubbed issue",
         "body": "b", "state": "OPEN"})
     monkeypatch.setenv("BEACON_ISSUE_NUMBER", "9")

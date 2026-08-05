@@ -23,6 +23,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import cmd_note  # noqa: E402  (ms-127 e-4320: note family moved here)
 import session  # noqa: E402
 
 
@@ -90,7 +91,7 @@ def test_note_add_with_context_preserves_both_fields(project_dir, monkeypatch):
 def test_note_add_omits_session_id_when_resolver_returns_empty(project_dir, monkeypatch):
     """A misbehaving session module must NOT inject an empty 'session_id'
     field — the field is present-or-absent, never an empty sentinel."""
-    monkeypatch.setattr(commands, "_resolve_session_id", lambda: "")
+    monkeypatch.setattr(cmd_note, "_resolve_session_id", lambda: "")
     monkeypatch.setenv("BEACON_NOTE_TEXT", "no session")
     commands.cmd_note_add()
     note = _read_notes(project_dir)[0]
