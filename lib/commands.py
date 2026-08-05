@@ -21615,14 +21615,8 @@ def cmd_rollback():
         sys.exit(1)
 
 
-# ---------------------------------------------------------------------------
-# Claim CLI (ms-55 e-1648)
-# ---------------------------------------------------------------------------
-#
-# `beacon claim` is the user-facing surface for the claim primitives
-# defined in lib/claims.py. Three issuance verbs share most of the
-# argument shape (`--target`, `--intent`), so the implementation
-# factors the common path through a private helper.
+# Claim CLI (ms-55 e-1648) — moved to lib/cmd_claim.py (ms-127 e-4321);
+# re-imported at top. (`beacon claim` fronts the claim primitives in lib/claims.py.)
 
 
 def _morning_save_briefing_doc(briefing_text: str, briefing) -> dict:

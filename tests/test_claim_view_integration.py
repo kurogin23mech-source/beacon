@@ -194,6 +194,11 @@ class TestCmdClaimViewIOShell:
                        focus_directory=None):
         sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
         import commands
+        # ms-127 e-4321: the claim family lives in cmd_claim now, so impl helpers
+        # are patched THERE (where cmd_claim_view resolves them). We still RETURN
+        # `commands` because callers invoke the public handler via the dispatch
+        # surface (commands.cmd_claim_view, re-exported from cmd_claim).
+        # Patch target = cmd_claim (impl); call target = commands (dispatch alias).
         monkeypatch.setattr(cmd_claim, "load_project", lambda: fixture)
         monkeypatch.setattr(cmd_claim, "_resolve_session_id", lambda: "sv-me")
         monkeypatch.setattr(
