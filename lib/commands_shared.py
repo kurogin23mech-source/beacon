@@ -2,11 +2,19 @@
 """Shared CLI helpers for the beacon command modules (ms-127 e-4316).
 
 This module holds the leaf helpers that every ``cmd_*`` family module depends
-on: project load/save, the session/commit-source resolvers, the changelog
-appender, and the write-gate helpers. It was extracted verbatim from the head
-of ``commands.py`` (the god-module split) so that the per-family ``cmd_<family>``
-modules can ``from commands_shared import ...`` a single, stable dependency
-without pulling in the whole 29K-line ``commands.py``.
+on. It grows as the god-module split proceeds; each promoted group is delimited
+by a ``# --- ... ---`` / ``# ms-127 ...`` section comment. Currently:
+  - project load/save, session/commit-source resolvers, changelog appender,
+    write-gate helpers (e-4316);
+  - cloud mode / config / API client / token / bus project-id resolution /
+    persistence-poisoning (bus-origin) write defense / session-notes path
+    (e-4317-foundation);
+  - cross-family identity / cloud-project helpers — ``_project_id_for_ops`` /
+    ``_read_credentials_for_identity`` / ``_resolve_creator_identity`` /
+    ``_rename_local_project_json_for_cloud_cutover`` (e-4318-foundation).
+Helpers were extracted verbatim from ``commands.py`` so the per-family
+``cmd_<family>`` modules can ``from commands_shared import ...`` a single, stable
+dependency without pulling in the whole ``commands.py``.
 
 Dependency direction (ms-127 SPEC 方針4 = 循環 import を構造で防ぐ):
   commands_shared  →  core / store / work_model   (downward, leaf domain modules)
@@ -19,6 +27,7 @@ so the dependency graph stays one-directional and no cycle can form.
 import json
 import os
 import sys
+from typing import Optional
 
 from store import get_store
 import core
@@ -544,3 +553,224 @@ def _refuse_if_bus_origin(handler: str, details: dict) -> bool:
 def _get_notes_path():
     beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
     return os.path.join(beacon_dir, "session_notes.jsonl")
+
+
+# ---------------------------------------------------------------------------
+
+# ms-127 e-4318-foundation: cross-family identity / cloud-project helpers
+
+# promoted from commands.py so cmd_org (org+member family) and other callers
+
+# (deploy / cloud / trek / bus) depend on commands_shared, not commands.py.
+
+# ---------------------------------------------------------------------------
+
+def _project_id_for_ops() -> str:
+    """Return the project_id used by apply_operation for this CLI invocation.
+
+    Local mode: project_id is irrelevant beyond changelog labeling, so we
+    use the project's `name` field. Cloud mode: requires the cloud.json
+    project_id which the API layer normally supplies — here we read
+    .beacon/cloud.json if present, else fall back to project name.
+    """
+    try:
+        data = load_project()
+    except Exception:
+        return ""
+    project_file = get_project_file()
+    beacon_dir = os.path.dirname(project_file) or ".beacon"
+    cloud_json = os.path.join(beacon_dir, "cloud.json")
+    if os.path.exists(cloud_json):
+        try:
+            with open(cloud_json, "r", encoding="utf-8") as f:
+                return json.load(f).get("project_id", "") or data.get("name", "")
+        except (OSError, json.JSONDecodeError):
+            pass
+    return data.get("name", "")
+
+
+def _read_credentials_for_identity() -> tuple[str, str]:
+    """Read (user_id, email) from the active-profile credentials.json (ms-61 / e-2132).
+
+    Returns ``("", "")`` if no credentials file exists, the file is malformed,
+    or no usable fields are present. Never raises — this is a best-effort
+    fallback for ``_resolve_creator_identity``; the caller still treats
+    missing email as a hard error if env is also empty.
+
+    Implementation:
+      * Resolves the credentials path via ``profile.resolve_active_profile()``
+        so cwd ``cloud.json.profile`` and ``BEACON_PROFILE`` are honored.
+      * Falls back to legacy ``~/.beacon/credentials.json`` if the per-profile
+        path doesn't exist yet (= pre-migration installs).
+      * ``user_id`` is decoded from the JWT ``sub`` claim (= Google sub, e.g.
+        Cognito/Cloud Identity uid). The token is split as ``bcli.<payload>.<sig>``
+        or stdlib JWT ``<header>.<payload>.<sig>``; we read the middle segment.
+      * ``email`` is read from the top-level ``email`` field directly.
+
+    Why this exists:
+      ms-84 dogfood (2026-06-19) で観測された病理: fork session で
+      ``BEACON_USER_EMAIL`` 設定漏れ → ``beacon trek create / join / dm send``
+      が hard error。 credentials.json には email がある (= login 済) のに
+      env を要求するため、 fork 経路で identity 漏れる導線が温存されていた。
+      本 helper で auto-read 経路を足し、 env override は最優先のまま
+      (= test / CI / multi-account 用)。
+    """
+    import base64
+    import json as _json
+    try:
+        import profile as _profile
+        cred_path = _profile.resolve_active_profile().credentials_path
+    except Exception:
+        cred_path = None
+
+    candidates = []
+    if cred_path is not None:
+        candidates.append(cred_path)
+    # Legacy singleton location (= pre-profile installs). Honor BEACON_HOME
+    # so tests / multi-account flows can isolate it the same way the profile
+    # module does (= profile._beacon_home contract).
+    beacon_home = os.environ.get("BEACON_HOME") or os.path.expanduser("~/.beacon")
+    candidates.append(os.path.join(beacon_home, "credentials.json"))
+
+    for path in candidates:
+        try:
+            if not os.path.exists(path):
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                data = _json.load(f)
+        except Exception:
+            continue
+
+        email = (data.get("email") or "").strip()
+        token = (data.get("token") or "").strip()
+
+        # Decode token payload to recover sub (= user_id). Two formats
+        # supported:
+        #   * ``bcli.<payload_b64>.<sig_hex>`` — Beacon CLI long-lived token
+        #     (= 2 segments after the "bcli." prefix, payload is segment[0])
+        #   * ``<header>.<payload>.<sig>`` — standard 3-segment JWT (= Cognito
+        #     id_token, Google id_token; payload is segment[1])
+        user_id = ""
+        if token:
+            tok = token
+            is_bcli = False
+            if tok.startswith("bcli."):
+                tok = tok[5:]
+                is_bcli = True
+            segments = tok.split(".")
+            payload_b64 = ""
+            if is_bcli and len(segments) >= 1:
+                payload_b64 = segments[0]
+            elif len(segments) >= 2:
+                payload_b64 = segments[1]
+            if payload_b64:
+                # Re-pad base64 (JWT strips '='); urlsafe alphabet.
+                padding = "=" * (-len(payload_b64) % 4)
+                try:
+                    payload_bytes = base64.urlsafe_b64decode(
+                        payload_b64 + padding
+                    )
+                    payload = _json.loads(payload_bytes.decode("utf-8"))
+                    user_id = str(payload.get("sub") or "").strip()
+                except Exception:
+                    user_id = ""
+
+        if email or user_id:
+            return user_id, email
+    return "", ""
+
+
+def _resolve_creator_identity() -> tuple[str, str, str]:
+    """Return (user_id, email, session_id) for the calling user.
+
+    ms-127 e-4318: promoted to commands_shared because this is a cross-family
+    identity resolver — the caller may be an org command (cmd_org_create /
+    cmd_org_list), a trek command, or a bus command. (The name predates the
+    promotion; it resolves the acting user's identity, not a trek-specific one.)
+
+    Resolution order (ms-61 / e-2132):
+      1. Env vars (``BEACON_USER_ID`` / ``BEACON_USER_EMAIL`` / ``BEACON_SESSION_ID``)
+         — highest precedence so tests, CI, multi-account flows override freely.
+      2. ``credentials.json`` of the active profile (= login 済セッションは
+         自動継承)。 email と user_id のうち env で埋まらなかったものだけ
+         credentials から補う。 env と credentials の値が共存している場合は
+         **env が勝つ**。
+      3. ``whoami`` for ``user_id`` only — final fallback so dev-mode runs
+         without login still produce a non-empty user_id (= just the OS user).
+
+    Email と session_id は credentials 経路でも埋まらなければ呼び出し側で
+    hard error にする (= ``BEACON_USER_EMAIL`` 要求 など)。 fabricating
+    silently は member/leader 記録を破壊するので構造的に避ける。
+    """
+    user_id = os.environ.get("BEACON_USER_ID", "").strip()
+    email = os.environ.get("BEACON_USER_EMAIL", "").strip()
+    session_id = os.environ.get("BEACON_SESSION_ID", "").strip()
+
+    # ms-61 / e-2132 — credentials.json fallback for env-missing case.
+    if not email or not user_id:
+        cred_user_id, cred_email = _read_credentials_for_identity()
+        if not email:
+            email = cred_email
+        if not user_id:
+            user_id = cred_user_id
+
+    if not user_id:
+        try:
+            import getpass
+            user_id = getpass.getuser()
+        except Exception:
+            user_id = ""
+    return user_id, email, session_id
+
+
+def _rename_local_project_json_for_cloud_cutover(project_file: str) -> Optional[str]:
+    """Rename ``.beacon/project.json`` to ``.before-cloud-YYYYMMDD`` (ms-84 Phase 3).
+
+    Idempotent insurance for the local→cloud migration: after upload-initial
+    succeeds the local file becomes the silent-drift source from the moment
+    of cloud cut-over (any later cloud write will not propagate to disk).
+    Renaming it to a dated suffix:
+
+      - hides it from ``beacon-find-root`` style markers (cloud.json now
+        carries that role; see ``bin/beacon-find-root``);
+      - keeps a one-shot recovery copy on disk (= we never ``rm``);
+      - encodes the cut-over date so multiple runs (re-uploads, sandbox
+        tests) do not collide.
+
+    No-op when the source file is missing (= already cut over or never
+    existed for a from-scratch cloud project). Returns the destination
+    path on rename, ``None`` otherwise. Failures are logged to stderr
+    but do not raise — the cut-over should not be blocked by a stat /
+    rename hiccup, the user can rename manually post-hoc.
+    """
+    if not os.path.exists(project_file):
+        return None
+    import datetime as _dt
+    stamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d")
+    base_dir = os.path.dirname(project_file) or ".beacon"
+    base_name = os.path.basename(project_file)
+    dest = os.path.join(base_dir, f"{base_name}.before-cloud-{stamp}")
+    # If the destination already exists (= re-run on the same day), append
+    # a short suffix to keep the rename idempotent without overwriting the
+    # earlier recovery copy. Never delete an existing backup.
+    if os.path.exists(dest):
+        suffix = 1
+        while os.path.exists(f"{dest}.{suffix}"):
+            suffix += 1
+        dest = f"{dest}.{suffix}"
+    try:
+        os.rename(project_file, dest)
+    except OSError as exc:
+        print(
+            f"Warning: failed to rename {project_file} → {dest}: {exc}\n"
+            f"  The cloud cut-over succeeded but the local cache is still on disk.\n"
+            f"  Rename it manually to prevent drift confusion.",
+            file=sys.stderr,
+        )
+        return None
+    _append_changelog({
+        "op": "cloud_cutover_rename",
+        "from": project_file,
+        "to": dest,
+    })
+    return dest

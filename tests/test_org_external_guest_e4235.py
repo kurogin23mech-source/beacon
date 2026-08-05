@@ -7,7 +7,7 @@ so admins can tell org members apart from external guests.
 
 Covers:
   - org.external_guest_user_ids : pure classifier (team-org only)
-  - commands._annotate_external_guests : best-effort annotation on member rows
+  - cmd_org._annotate_external_guests : best-effort annotation on member rows
 """
 from __future__ import annotations
 
@@ -57,13 +57,16 @@ def test_none_or_empty_inputs():
 
 
 # ---------------------------------------------------------------------------
-# commands._annotate_external_guests — best-effort row annotation
+# cmd_org._annotate_external_guests — best-effort row annotation
 # ---------------------------------------------------------------------------
 
 @pytest.fixture()
 def commands_mod():
+    # ms-127 e-4318b: _annotate_external_guests moved to cmd_org.py. It resolves
+    # get_store in cmd_org's namespace, so _patch_store must patch cmd_org — point
+    # the fixture at the module that actually hosts the function under test.
     import importlib
-    mod = importlib.import_module("commands")
+    mod = importlib.import_module("cmd_org")
     return mod
 
 
