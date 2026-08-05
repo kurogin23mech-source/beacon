@@ -163,21 +163,22 @@ from cmd_task import (  # noqa: F401
     cmd_task_cancel,
 )
 
-# ms-127 e-4320: more group-A families moved to their own modules (clean,
-# no shared-helper promote needed). Re-imported for dispatch + `commands.X`
-# stability; patch cmd_<family>.<name>, not commands.<name> (alias).
-from cmd_note import (  # noqa: F401
-    cmd_note_add, cmd_note_list, cmd_note_clear, _push_note_to_cloud,
-)
+# ms-127 e-4320: more group-A families moved to their own modules (clean, no
+# shared-helper promote needed). Re-export rule (ms-127, tightened per PR #586
+# independent review): re-export ONLY the public cmd_* handlers — the dispatch
+# dict below needs them, and external `import commands; commands.cmd_X()` callers
+# rely on them. Family-PRIVATE helpers (`_foo`) are NOT re-exported: nothing in
+# commands.py calls them post-move, and re-exporting a private would create a
+# silent-no-op monkeypatch trap (patching commands._foo would not intercept the
+# call made inside cmd_<family>, which resolves _foo in its own namespace). Their
+# canonical home + patch target is cmd_<family>._foo; a missing commands._foo now
+# fails loudly (AttributeError) instead of silently.
+from cmd_note import cmd_note_add, cmd_note_list, cmd_note_clear  # noqa: F401
 from cmd_incident import (  # noqa: F401
     cmd_incident_open, cmd_incident_close, cmd_incident_escalate, cmd_incident_list,
 )
-from cmd_issue import (  # noqa: F401
-    cmd_issue_import, cmd_issue_list, cmd_issue_sync, _gh_issue_fetch, _gh_issues_list,
-)
-from cmd_log import (  # noqa: F401
-    cmd_log, cmd_log_prepare, cmd_log_finalize, _read_fork_target_ms_id,
-)
+from cmd_issue import cmd_issue_import, cmd_issue_list, cmd_issue_sync  # noqa: F401
+from cmd_log import cmd_log, cmd_log_prepare, cmd_log_finalize  # noqa: F401
 
 
 # ---------------------------------------------------------------------------
@@ -4077,9 +4078,7 @@ def cmd_operation_purge():
             _print_residual_dups(dup_report)
 
 
-# ---------------------------------------------------------------------------
-# Log commands
-# ---------------------------------------------------------------------------
+# Log commands — moved to lib/cmd_log.py (ms-127 e-4320); re-imported at top.
 
 
 # ---------------------------------------------------------------------------
@@ -4164,9 +4163,8 @@ def cmd_sync():
 # ---------------------------------------------------------------------------
 
 
-# ---------------------------------------------------------------------------
-# Session Notes (ephemeral, cleared at session-end)
-# ---------------------------------------------------------------------------
+# Session Notes (note commands) — moved to lib/cmd_note.py (ms-127 e-4320);
+# re-imported at top.
 
 
 def _resolve_channel_root() -> "Path | None":
@@ -14308,9 +14306,8 @@ def cmd_pr_create():
         print(f"  Commits: {len(commits)} linked")
 
 
-# ---------------------------------------------------------------------------
-# GitHub Issue import (ms-28)
-# ---------------------------------------------------------------------------
+# GitHub Issue import (ms-28) — moved to lib/cmd_issue.py (ms-127 e-4320);
+# re-imported at top.
 
 
 # ---------------------------------------------------------------------------
@@ -18311,7 +18308,7 @@ def cmd_help_render():
 
 
 # ---------------------------------------------------------------------------
-# Operation / Run / Incident commands
+# Operation / Run commands (incident → lib/cmd_incident.py, ms-127 e-4320)
 # ---------------------------------------------------------------------------
 
 def cmd_operation_server_tick():
