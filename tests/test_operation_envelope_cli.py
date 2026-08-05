@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 
 import commands  # noqa: E402
+import cmd_operation  # noqa: E402  (ms-127 e-4798: operation handlers live here)
 
 
 PROJECT_ID = "test-proj"
@@ -76,8 +77,8 @@ def fake_client(monkeypatch):
     def _get_api_client():
         return fc, {"project_id": PROJECT_ID}
 
-    monkeypatch.setattr(commands, "_get_api_client", _get_api_client)
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_operation, "_get_api_client", _get_api_client)
+    monkeypatch.setattr(cmd_operation, "_is_cloud_mode", lambda: True)
     return fc
 
 
@@ -139,7 +140,7 @@ def test_approve_requires_spec_doc(monkeypatch, capsys):
 def test_approve_rejects_local_mode(monkeypatch, capsys):
     monkeypatch.setenv("BEACON_OPERATION_ID", OP_ID)
     monkeypatch.setenv("BEACON_SPEC_DOC_ID", "spec-1")
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: False)
+    monkeypatch.setattr(cmd_operation, "_is_cloud_mode", lambda: False)
     with pytest.raises(SystemExit):
         commands.cmd_operation_approve()
     assert "cloud mode" in capsys.readouterr().err
@@ -195,7 +196,7 @@ def test_revoke_errors_when_no_active(fake_client, monkeypatch, capsys):
 
 def test_revoke_rejects_local_mode(monkeypatch, capsys):
     monkeypatch.setenv("BEACON_OPERATION_ID", OP_ID)
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: False)
+    monkeypatch.setattr(cmd_operation, "_is_cloud_mode", lambda: False)
     with pytest.raises(SystemExit):
         commands.cmd_operation_revoke()
     assert "cloud mode" in capsys.readouterr().err

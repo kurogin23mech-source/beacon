@@ -32,6 +32,7 @@ from typing import Optional
 from store import get_store
 import core
 import work_model  # ms-109 e-3559: 職種非依存の Target 正準ラベルアクセサ
+import occupation  # ms-108 e-3269: 職種 ⊃ target-class 包含ゲート (_gate_target_class)
 
 # ---------------------------------------------------------------------------
 # Store helpers
@@ -933,3 +934,193 @@ def _resolve_current_author(data: Optional[dict] = None) -> dict:
         "email": email,
         "display_name": display_name,
     })
+
+
+# ---------------------------------------------------------------------------
+# ms-127 e-4798: review / spec / gate leaf helpers promoted from commands.py.
+# Shared foundation (triggers dir, review-due nudge firing, target-class gate,
+# session-kind, SPEC lookup) used by many command families. The operation
+# family (cmd_operation.py) is the immediate new consumer; milestone / target
+# handlers in commands.py also call them (via re-export). review_spine /
+# datetime are imported locally inside the functions, matching this file's
+# leaf-only module-import discipline.
+# ---------------------------------------------------------------------------
+
+def _get_triggers_dir():
+    project_dir = os.path.dirname(get_project_file())
+    return os.path.join(project_dir, "triggers")
+
+
+def _spec_doc_for_target(target_id: str, kind: str) -> Optional[dict]:
+    """Return the first spec-scoped document attached to a target, or None.
+
+    Single source of truth for the "spec doc attached to a target" scan (ms-119 —
+    maintainability finding §2): both ``_spec_exists_for_ms`` / ``_spec_exists_for_op``
+    delegate here so the scan rule (scope=="spec" + milestone/operation field
+    match, transport failure swallowed) lives in exactly one place.
+
+    Milestones carry a ``milestone`` field on the doc; operations carry
+    ``operation``. Best-effort: transport failure → None (StoreApi rounds cloud
+    transport failure to []).
+    """
+    if not target_id:
+        return None
+    field = "milestone" if kind == "milestone" else "operation"
+    try:
+        docs = get_store().list_documents()
+    except Exception:
+        return None
+    for doc in docs:
+        if doc.get("scope") == "spec" and doc.get(field) == target_id:
+            return doc
+    return None
+
+
+def _spec_exists_for_op(op_id: str) -> bool:
+    """True if any spec-scoped document is attached to op_id (delegates to the
+    single-source scan _spec_doc_for_target)."""
+    return _spec_doc_for_target(op_id, "operation") is not None
+
+
+def _fire_review_due_trigger(target_id: str, target_kind: str, old_state: str,
+                             new_state: str, *, target_title: str = "",
+                             has_spec: bool = False, gated: bool = False,
+                             is_completion: "Optional[bool]" = None) -> None:
+    """Fire a 'review-due' trigger for a target lifecycle transition
+    (ms-119 / e-3911 — the review firing spine).
+
+    Beacon owns the target lifecycle, so a phase transition / close is a
+    trigger GitHub cannot emit. On a completion-claim transition this surfaces
+    the bound review(s) (see review_spine.review_bindings_for_transition):
+    the 目的達成 nudge (only when the transition bypassed the approval gate) and
+    the 思想 advisory (only when the target has a SPEC 原典). Empty bindings =
+    no file written (routine / reversible transitions fire nothing).
+
+    ``is_completion`` (ms-119 / e-4087):
+      * ``None`` (default) — a BUILT-IN milestone / operation transition: whether
+        it is a completion claim is decided by the transition_approval truth
+        table (review_bindings_for_transition).
+      * ``True`` — a data-defined (descriptor) target reaching done / a terminal
+        phase. Its KIND is a descriptor class name the built-in truth table does
+        not know, but the 節目 is the same completion claim, so bind the reviews
+        directly (review_bindings_for_completion).
+      * ``False`` — a descriptor transition that is NOT a completion (early phase
+        advance): fire nothing.
+
+    Advisory only — never blocks the transition. The blocking mechanism for
+    目的達成 is the approval entry from e-3912, not this trigger.
+    """
+    import review_spine
+    if is_completion is None:
+        bindings = review_spine.review_bindings_for_transition(
+            target_kind, old_state, new_state, has_spec=has_spec, gated=gated)
+    elif is_completion:
+        bindings = review_spine.review_bindings_for_completion(
+            has_spec=has_spec, gated=gated)
+    else:
+        bindings = []
+    if not bindings:
+        return
+    triggers_dir = _get_triggers_dir()
+    os.makedirs(triggers_dir, exist_ok=True)
+    parts = []
+    for b in bindings:
+        if b["review"] == review_spine.REVIEW_ATTAINMENT:
+            # ms-119 e-4005: the 目的達成 review auto-fires at the close 節目 and
+            # points at the INDEPENDENT evidence generation (a context-zero judge
+            # verifies the SPEC against real code); the human owns the verdict.
+            if b.get("gated"):
+                parts.append(
+                    f"目的達成レビュー (target が目的を果たしたか、証拠は独立 judge・"
+                    f"verdict は人間): {target_id} の完了は承認待ちです。"
+                    f"`/beacon-review-run --type attainment --target {target_id}` で"
+                    f"文脈ゼロの独立 judge に SPEC × 実コードを検証させ証拠を作り、"
+                    f"人間が `beacon target approve` で確定してください。")
+            else:
+                parts.append(
+                    f"目的達成レビュー (target が目的を果たしたか、証拠は独立 judge・"
+                    f"verdict は人間): 完了主張がゲートを経ずに適用されました。"
+                    f"`/beacon-review-run --type attainment --target {target_id}` で"
+                    f"独立 judge に振り返り証拠を作らせ、次からは `beacon milestone done "
+                    f"{target_id} --review` でゲート経由に。")
+        elif b["review"] == review_spine.REVIEW_PHILOSOPHY:
+            parts.append(
+                f"思想レビュー (実装が原典 = SPEC / vision の精神通りか、助言・非 "
+                f"blocking): `/beacon-review-run --type philosophy --origin-doc "
+                f"<spec-doc-id>` で文脈ゼロの独立 judge に SPEC を渡し {target_id} の"
+                f"実装 drift を確認してください。")
+    import datetime
+    trigger_data = {
+        "name": f"review-due-{target_id}",
+        "kind": "review-due",
+        "target_id": target_id,
+        "target_kind": target_kind,
+        "old_state": old_state,
+        "new_state": new_state,
+        "bindings": [b["review"] for b in bindings],
+        "gated": gated,
+        "message": f"{target_id} \"{target_title}\" が {old_state} -> {new_state} "
+                   f"(完了主張) に遷移しました。節目のレビュー: " + " / ".join(parts),
+        "created_at": datetime.datetime.now().isoformat(),
+    }
+    trigger_path = os.path.join(triggers_dir, f"review-due-{target_id}.json")
+    with open(trigger_path, "w", encoding="utf-8") as f:
+        json.dump(trigger_data, f, ensure_ascii=False)
+        f.write("\n")
+
+
+def _session_kind_is_human() -> bool:
+    """True when the calling session declares itself human-driven.
+
+    Default (unset ``BEACON_SESSION_KIND``) is treated as AI for safety, the
+    same convention as the PR merge ban (see ``_ai_session_merge_ban_active``).
+
+    ⚠ Divergent twin: ``_caller_is_human_for_untriaged`` (near the top of this
+    module) answers the same "is the caller human?" question with the OPPOSITE
+    default for an undeclared session — there an undeclared *interactive*
+    terminal is treated as human (to deny a privileged *machine* bypass), the
+    reverse of this "unset = AI" default (which denies a privileged *human*
+    action). Do NOT reuse this helper for the untriaged forcing-function gate,
+    and if you change this default, re-check that twin — the two polarities are
+    intentional and live far apart (ms-126 philosophy fix).
+    """
+    return (os.environ.get("BEACON_SESSION_KIND", "") or "").strip().lower() == "human"
+
+
+def _ai_session_direct_completion_ban_active() -> bool:
+    """ms-119 / e-4008 — refuse an AI session's gate-bypassing direct completion.
+
+    The 目的達成 approval gate (e-3912) was *opt-in*: `beacon milestone done`
+    (and `beacon operation close`) applied the completion immediately and only
+    left an advisory nudge, so the blocking review was skippable by just not
+    passing ``--review``. The independent attainment review flagged this
+    (AC2 gap(a)): "構造発火・非迂回" cannot hold while the default completion
+    path bypasses the gate.
+
+    This makes the gate non-bypassable *for AI sessions*: a direct completion
+    (no ``--review``) is refused unless an explicit human signal is present.
+    Humans still own the straight-line path (they own the verdict); the AI must
+    route through the gate (``--review`` → human ``beacon target approve``).
+
+      * ``BEACON_TARGET_COMPLETE_USER_OVERRIDE=1`` — user explicit opt-in for a
+        one-off straight completion.
+      * ``BEACON_SESSION_KIND=human`` — non-AI session (straight terminal use).
+
+    Returns True if the ban fires. The ``--review`` gated path never reaches
+    this check (it is the sanctioned route), so it is unaffected.
+    """
+    if os.environ.get("BEACON_TARGET_COMPLETE_USER_OVERRIDE", "") == "1":
+        return False
+    return not _session_kind_is_human()
+
+
+def _gate_target_class(data: dict, kind: str) -> None:
+    """Enforce profession ⊃ target-class containment before creating a target
+    (ms-115 e-3785). Prints the guidance-rich block message and exits non-zero
+    when the project's profession does not own ``kind`` — so a wrong-profession
+    create fails structurally instead of producing an invisible ghost target."""
+    try:
+        occupation.assert_target_class_owned(data, kind)
+    except occupation.TargetClassProfessionError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
