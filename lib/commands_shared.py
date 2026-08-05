@@ -774,3 +774,162 @@ def _rename_local_project_json_for_cloud_cutover(project_file: str) -> Optional[
         "to": dest,
     })
     return dest
+
+
+# ---------------------------------------------------------------------------
+# ms-127 e-4319-foundation: cross-family untriaged-gate / dup-report / author
+# helpers promoted from commands.py (used by task+entry family AND milestone /
+# operation / sales). cmd_task depends on commands_shared, not commands.py.
+# ---------------------------------------------------------------------------
+
+
+_HUMAN_UNTRIAGED_REFUSED_MSG = (
+    "Priority is required. '--untriaged' is a machine-only sentinel (issue "
+    "import / review-derived / roadmap / dispatch); a human session cannot use "
+    "it to defer the judgement. Choose one of: highest, high, medium, low, "
+    "lowest (highest = 大目的への寄与が最大 / lowest = 最小). "
+    "(If this IS an automated / AI caller running at a terminal, declare it "
+    "with BEACON_SESSION_KIND=ai, or run non-interactively.)"
+)
+
+
+def _caller_is_human_for_untriaged() -> bool:
+    """Is the --untriaged caller a human (who must be refused the bypass)?
+
+    ms-126 philosophy fix (2026-07-29, independent review): the earlier gate
+    refused the bypass only when a session opted into BEACON_SESSION_KIND=human.
+    But nothing sets that flag by default, so an undeclared human at an
+    interactive terminal — the exact actor the mandatory-priority forcing
+    function targets — was classified as a machine and slipped straight through
+    (default-OPEN hole). The --untriaged bypass is a *machine* capability (a
+    machine legitimately can't judge priority); a human must pick a severity.
+
+    So refuse the bypass by default for anything interactive, and require a
+    machine to be *identifiable*:
+      * explicit BEACON_SESSION_KIND=human        → human (refuse).
+      * explicit non-human kind (ai / machine / …) → machine (allow; covers an
+        AI that happens to run inside a PTY).
+      * unset → infer from the terminal: an interactive stdin (a person typing)
+        is a human (refuse); a non-interactive stdin (AI tool / pipe / CI) is a
+        machine (allow).
+
+    The polarity is deliberately opposite the ms-119 merge / approve bans (there
+    an undeclared session is treated as AI to deny a privileged *human* action);
+    here an undeclared *interactive* session is treated as human to deny a
+    privileged *machine* bypass. That is why this does NOT reuse
+    ``_session_kind_is_human`` (whose "unset = AI" default is correct for those
+    bans but would re-open this hole).
+    """
+    kind = (os.environ.get("BEACON_SESSION_KIND", "") or "").strip().lower()
+    if kind == "human":
+        return True
+    if kind:
+        return False
+    # Unset: a person typing at an interactive terminal has a tty on stdin;
+    # an AI tool / pipe / CI does not. No tty (or an unreadable stdin) = not a
+    # person typing = machine, so the bypass is allowed.
+    try:
+        return bool(sys.stdin) and sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+def _human_untriaged_bypass_refused() -> bool:
+    """True when a human is trying to use the untriaged escape hatch.
+
+    Returns True iff BOTH: the process asked for untriaged
+    (BEACON_ALLOW_UNTRIAGED=1, set by the `--untriaged` flag or a manual export)
+    AND the caller resolves to a human (see ``_caller_is_human_for_untriaged``:
+    explicit BEACON_SESSION_KIND=human, or an undeclared *interactive* terminal).
+    In that case the caller MUST be forced back onto the priority forcing
+    function. Machine / AI sessions (non-interactive, or explicitly declared
+    non-human) are unaffected.
+    """
+    allow_untriaged = os.environ.get("BEACON_ALLOW_UNTRIAGED", "") == "1"
+    return allow_untriaged and _caller_is_human_for_untriaged()
+
+
+def _print_residual_dups(dup_report: dict) -> None:
+    """Shared tail for *_purge commands: report duplicates still present."""
+    remaining: list[str] = []
+    for category, dupes in dup_report.items():
+        for did, n in dupes.items():
+            remaining.append(f"{category[:-1]} '{did}' x{n}")
+    print("  Note: residual duplicates remain — " + ", ".join(remaining))
+    print("  Run `beacon doctor` to inspect and purge the next one.")
+
+
+def _resolve_current_author(data: Optional[dict] = None) -> dict:
+    """Return ``{"user_id", "email", "display_name"}`` for the current operator.
+
+    ms-43 / e-2281 — mirror of the server-side ``_resolve_author`` contract
+    (server/app.py L538) on the CLI side so MS / task / Operation creates
+    initiated from the local CLI also stamp ``meta.author`` with the
+    *human* identity rather than leaving the field absent and falling
+    back to the ``"claude"`` literal in ``created_by``.
+
+    Resolution order (= env > credentials.json > project members[]):
+
+      1. ``BEACON_USER_ID`` / ``BEACON_USER_EMAIL`` / ``BEACON_DISPLAY_NAME``
+         env vars take precedence — tests / CI / multi-account flows
+         override freely without touching credentials.json.
+      2. ``credentials.json`` of the active profile (= login 済セッションは
+         自動継承) supplies user_id (= JWT sub claim) and email when env
+         is empty. Reuses ``_read_credentials_for_identity`` so the JWT
+         parsing path stays in one place.
+      3. ``display_name`` is not in credentials.json. As a best-effort
+         fallback, scan ``data["members"][]`` for a member whose id /
+         user_id / email matches the caller and lift the member's
+         ``display_name`` (or ``name``) field. Empty when no match.
+
+    Empty fields are dropped via ``core._clean_author`` so the on-disk
+    shape stays exactly ``{user_id, email, display_name}`` minus the
+    empties. Unauthenticated / no-credentials local mode returns ``{}``
+    — the caller passes ``author=None`` (or this empty dict, same effect)
+    and the create proceeds without a ``meta.author`` field, which the
+    Web UI then renders via the legacy ``created_by`` fallback.
+
+    Best-effort: any exception in member lookup is swallowed so the
+    create path never fails due to display_name resolution.
+    """
+    user_id = (os.environ.get("BEACON_USER_ID") or "").strip()
+    email = (os.environ.get("BEACON_USER_EMAIL") or "").strip()
+    display_name = (os.environ.get("BEACON_DISPLAY_NAME") or "").strip()
+
+    # credentials.json fallback for env-missing case (ms-61 / e-2132 parity).
+    if not email or not user_id:
+        try:
+            cred_user_id, cred_email = _read_credentials_for_identity()
+            if not email:
+                email = cred_email
+            if not user_id:
+                user_id = cred_user_id
+        except Exception:
+            pass
+
+    # display_name fallback via project members[] (ms-78 e-1807 shape).
+    if not display_name and isinstance(data, dict):
+        try:
+            members = data.get("members")
+            if isinstance(members, list):
+                for m in members:
+                    if not isinstance(m, dict):
+                        continue
+                    m_uid = (m.get("user_id") or m.get("id") or "").strip()
+                    m_email = (m.get("email") or "").strip()
+                    if user_id and m_uid == user_id:
+                        display_name = (m.get("display_name") or m.get("name")
+                                        or "").strip()
+                        break
+                    if email and m_email and m_email == email:
+                        display_name = (m.get("display_name") or m.get("name")
+                                        or "").strip()
+                        break
+        except Exception:
+            pass
+
+    return core._clean_author({
+        "user_id": user_id,
+        "email": email,
+        "display_name": display_name,
+    })

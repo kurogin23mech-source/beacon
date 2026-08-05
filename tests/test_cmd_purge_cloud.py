@@ -80,6 +80,7 @@ def _stub_client(monkeypatch, *, project_data: dict,
     to the Store path, the _get_api_client patch can be dropped.
     """
     import commands  # type: ignore
+    import cmd_task  # type: ignore  (ms-127 e-4319b: cmd_entry_purge moved here)
     import store_api  # type: ignore
 
     fake = MagicMock()
@@ -112,6 +113,9 @@ def _stub_client(monkeypatch, *, project_data: dict,
 
     monkeypatch.setattr(commands, "_get_api_client", _fake_get_api_client)
     monkeypatch.setattr(commands, "get_store", _fake_get_store)
+    # cmd_entry_purge resolves get_store in cmd_task's namespace (ms-127 e-4319b),
+    # so patch it there too; cmd_operation_purge stays in commands (patched above).
+    monkeypatch.setattr(cmd_task, "get_store", _fake_get_store)
     return fake
 
 
