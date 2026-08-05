@@ -145,8 +145,11 @@ from cmd_org import (  # noqa: F401
 
 # ms-127 e-4319b: the `beacon task *` + `beacon entry *` families live in
 # lib/cmd_task.py now. Re-imported for dispatch + external `commands.X` stability
-# (uniform re-export of all moved names; canonical definition + monkeypatch
-# target is cmd_task, not this alias).
+# (uniform re-export of all moved names). These are re-export ALIASES: a
+# monkeypatch on `commands.<name>` does NOT intercept calls made from inside
+# cmd_task (which resolved the name in its own namespace at import time). To stub
+# a helper a task/entry handler uses, patch `cmd_task.<name>` (or, for a shared
+# helper, `commands_shared.<name>`) — not `commands.<name>`.
 from cmd_task import (  # noqa: F401
     cmd_entry_purge,
     cmd_entry_move,
@@ -894,43 +897,11 @@ def cmd_cloud_join():
         print(f"  local cache: {pf} → {renamed} (ms-84 Phase 3 cut-over)")
 
 
-# ---------------------------------------------------------------------------
-# ms-126 / e-4222 — untriaged is a MACHINE capability, not a human escape hatch
-# ---------------------------------------------------------------------------
-#
-# The ms-126 forcing function makes priority mandatory on the human entry path
-# (`beacon task add` / `beacon milestone add`): an empty priority is rejected so
-# a person actually picks one of the 5 severities. Machine call sites that
-# genuinely have not judged a priority yet (issue import / review-derived /
-# roadmap bulk / dispatch-derived) opt into the `untriaged` sentinel instead, so
-# the missing judgement becomes *visible debt* (the untriaged-backlog trigger)
-# rather than a silent empty field.
-#
-# The gap this closes: `--untriaged` (→ BEACON_ALLOW_UNTRIAGED=1) was reachable
-# on the HUMAN CLI path too, so a person at a straight terminal could type
-# `beacon task add "…" --untriaged` (or `export BEACON_ALLOW_UNTRIAGED=1`) and
-# skip the "pick a priority" forcing function entirely — a hole straight through
-# the human=mandatory design line.
-#
-# The fix is an actor-based gate, reusing the established BEACON_SESSION_KIND
-# convention (see `_session_kind_is_human` and the ms-119 approval guards):
-#   * A NON-human session (SESSION_KIND unset / "ai") — Claude Code and the
-#     Skill-driven machine paths (dispatch / review-run / roadmap / log
-#     follow-up), plus in-process core call sites — may set untriaged.
-#   * A HUMAN session (SESSION_KIND=human, = a person at a straight terminal)
-#     that passes `--untriaged` / BEACON_ALLOW_UNTRIAGED=1 is REFUSED: the human
-#     owns the priority judgement and must make it. The untriaged sentinel is a
-#     machine deferral, never a human "I'll decide later".
-#
-# Note the polarity is inverted from the ms-119 approval guards (there the AI is
-# banned by default and a human bypasses). Here the *human* is the one refused
-# untriaged, because untriaged means "no human has judged this yet" — a
-# self-contradiction when the actor IS the human.
-
-
-# The human-facing rejection when a human session tries `--untriaged`. Speaks
-# with the same "pick one of the 5, untriaged is machine-only" voice as
-# core._UNTRIAGED_NOT_SEVERITY_MSG so the two forcing-function surfaces agree.
+# ms-126 / e-4222 — the untriaged-is-machine-only actor gate
+# (_caller_is_human_for_untriaged / _human_untriaged_bypass_refused /
+# _HUMAN_UNTRIAGED_REFUSED_MSG) moved to commands_shared.py in ms-127 e-4319b
+# (they gate both cmd_task_add here-adjacent and cmd_milestone_add). The full
+# design rationale now lives with those functions' docstrings in commands_shared.
 
 
 # ---------------------------------------------------------------------------
@@ -4449,9 +4420,8 @@ def cmd_sync():
         print("No new commits to sync.")
 
 
-# ---------------------------------------------------------------------------
-# Task commands
-# ---------------------------------------------------------------------------
+# Task + entry commands — moved to lib/cmd_task.py (ms-127 e-4319b). Add new
+# task/entry handlers there, not here.
 
 
 # ---------------------------------------------------------------------------
