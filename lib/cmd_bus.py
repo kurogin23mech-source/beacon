@@ -6,6 +6,17 @@ commands_shared (upward) + leaf domain modules, never on commands.py — acyclic
 (SPEC 方針4). commands.py re-imports the PUBLIC handlers for dispatch + `commands.X`;
 family-private helpers are NOT re-exported (patch them at cmd_bus.<name>).
 
+Test patch target (monkeypatch trap): a test driving a `cmd_bus_*` handler must
+patch every helper the handler resolves in cmd_bus's OWN namespace — i.e.
+`cmd_bus._X`, NOT `commands._X`. This holds even for helpers that commands.py
+re-exports from commands_shared (e.g. `_read_bus_budget`, `_resolve_recipient_live`):
+the re-export is an independent name binding for commands.py's own callers, so
+`monkeypatch.setattr(commands, "_read_bus_budget", ...)` is a silent no-op on the
+cmd_bus call path. One back-door: the DM live-check lazily does
+`from commands import _get_api_client` inside dm_discover, so a send test that
+reaches the live-check must ALSO stub `commands._get_api_client` (that is why
+those fixtures stub 3 namespaces: cmd_bus + commands_shared + commands).
+
 The budget / recipient / identity leaf helpers this family shares with commands.py
 callers (_read_bus_budget / _write_bus_budget / _get_bus_budget_path /
 _resolve_recipient_live / _bus_auto_execute_channels /
