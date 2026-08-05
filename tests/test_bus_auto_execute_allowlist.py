@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
+import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +73,7 @@ def test_list_when_empty_explains_secure_default(project_dir, monkeypatch,
     """A missing field MUST print the safe-default explanation, not silently
     show nothing. Silence in a security feature is a confusion vector."""
     _clear_ae_env(monkeypatch)
-    commands.cmd_bus_auto_execute_list()
+    cmd_bus.cmd_bus_auto_execute_list()
     out = capsys.readouterr().out
     assert "empty" in out
     assert "downgraded" in out
@@ -82,7 +83,7 @@ def test_add_persists_channel_to_project_json(project_dir, monkeypatch,
                                                 capsys):
     _clear_ae_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_AUTO_EXEC_CHANNEL", "ops")
-    commands.cmd_bus_auto_execute_add()
+    cmd_bus.cmd_bus_auto_execute_add()
     data = json.loads(
         (project_dir / ".beacon" / "project.json").read_text())
     assert data["bus_auto_execute_channels"] == ["ops"]
@@ -94,8 +95,8 @@ def test_add_is_idempotent(project_dir, monkeypatch, capsys):
     deploy script never explodes the list."""
     _clear_ae_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_AUTO_EXEC_CHANNEL", "ops")
-    commands.cmd_bus_auto_execute_add()
-    commands.cmd_bus_auto_execute_add()
+    cmd_bus.cmd_bus_auto_execute_add()
+    cmd_bus.cmd_bus_auto_execute_add()
     data = json.loads(
         (project_dir / ".beacon" / "project.json").read_text())
     assert data["bus_auto_execute_channels"] == ["ops"]
@@ -104,8 +105,8 @@ def test_add_is_idempotent(project_dir, monkeypatch, capsys):
 def test_remove_drops_channel(project_dir, monkeypatch, capsys):
     _clear_ae_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_AUTO_EXEC_CHANNEL", "ops")
-    commands.cmd_bus_auto_execute_add()
-    commands.cmd_bus_auto_execute_remove()
+    cmd_bus.cmd_bus_auto_execute_add()
+    cmd_bus.cmd_bus_auto_execute_remove()
     data = json.loads(
         (project_dir / ".beacon" / "project.json").read_text())
     assert data.get("bus_auto_execute_channels", []) == []
@@ -114,7 +115,7 @@ def test_remove_drops_channel(project_dir, monkeypatch, capsys):
 def test_remove_nonexistent_is_idempotent(project_dir, monkeypatch, capsys):
     _clear_ae_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_AUTO_EXEC_CHANNEL", "ops")
-    commands.cmd_bus_auto_execute_remove()  # must not crash; end state matches
+    cmd_bus.cmd_bus_auto_execute_remove()  # must not crash; end state matches
     data = json.loads(
         (project_dir / ".beacon" / "project.json").read_text())
     assert data.get("bus_auto_execute_channels", []) == []
@@ -123,16 +124,16 @@ def test_remove_nonexistent_is_idempotent(project_dir, monkeypatch, capsys):
 def test_add_rejects_empty_channel(project_dir, monkeypatch, capsys):
     _clear_ae_env(monkeypatch)
     with pytest.raises(SystemExit):
-        commands.cmd_bus_auto_execute_add()
+        cmd_bus.cmd_bus_auto_execute_add()
 
 
 def test_list_json_mode(project_dir, monkeypatch, capsys):
     _clear_ae_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_AUTO_EXEC_CHANNEL", "ops")
-    commands.cmd_bus_auto_execute_add()
+    cmd_bus.cmd_bus_auto_execute_add()
     capsys.readouterr()
     monkeypatch.setenv("BEACON_JSON", "1")
-    commands.cmd_bus_auto_execute_list()
+    cmd_bus.cmd_bus_auto_execute_list()
     out = capsys.readouterr().out.strip()
     parsed = json.loads(out)
     assert parsed == {"channels": ["ops"]}
@@ -147,7 +148,7 @@ def test_corrupt_field_treated_as_empty(project_dir, monkeypatch, capsys):
         (project_dir / ".beacon" / "project.json").read_text())
     data["bus_auto_execute_channels"] = "not-a-list"
     (project_dir / ".beacon" / "project.json").write_text(json.dumps(data))
-    commands.cmd_bus_auto_execute_list()
+    cmd_bus.cmd_bus_auto_execute_list()
     out = capsys.readouterr().out
     assert "empty" in out
 
@@ -168,7 +169,7 @@ def test_add_writes_through_to_local_project_json(project_dir, monkeypatch):
     in cloud mode even though the CLI shows the channel as allowed."""
     _clear_ae_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_AUTO_EXEC_CHANNEL", "operation-trigger")
-    commands.cmd_bus_auto_execute_add()
+    cmd_bus.cmd_bus_auto_execute_add()
     local = json.loads(
         (project_dir / ".beacon" / "project.json").read_text())
     assert local.get("bus_auto_execute_channels") == ["operation-trigger"]
@@ -179,9 +180,9 @@ def test_remove_writes_through_to_local_project_json(project_dir, monkeypatch):
     _clear_ae_env(monkeypatch)
     # Seed via add so the cloud-side state matches.
     monkeypatch.setenv("BEACON_BUS_AUTO_EXEC_CHANNEL", "operation-trigger")
-    commands.cmd_bus_auto_execute_add()
+    cmd_bus.cmd_bus_auto_execute_add()
     # Now remove and verify local was updated.
-    commands.cmd_bus_auto_execute_remove()
+    cmd_bus.cmd_bus_auto_execute_remove()
     local = json.loads(
         (project_dir / ".beacon" / "project.json").read_text())
     assert local.get("bus_auto_execute_channels") == []
@@ -195,7 +196,7 @@ def test_local_mirror_no_ops_when_local_file_absent(monkeypatch, capsys):
     monkeypatch.chdir("/tmp")  # no .beacon dir here
     monkeypatch.delenv("BEACON_PROJECT_FILE", raising=False)
     # Should not raise even though .beacon/project.json doesn't exist.
-    commands._mirror_auto_execute_channels_to_local(["operation-trigger"])
+    cmd_bus._mirror_auto_execute_channels_to_local(["operation-trigger"])
     err = capsys.readouterr().err
     assert "Traceback" not in err
 
@@ -436,7 +437,7 @@ def test_render_context_surfaces_downgraded_count(hook_module):
 # Two readers consult the auto-execute allowlist on every event:
 #
 #   * CLI / lib (= sender side decisions, auto-arm output, doctor checks)
-#     reads via ``commands._bus_auto_execute_channels(project_data)``.
+#     reads via ``cmd_bus._bus_auto_execute_channels(project_data)``.
 #   * Inbox hook (= receiver side downgrade gate) reads via
 #     ``bin/beacon-bus-inbox-hook.py:_read_auto_execute_channels(root)``.
 #
@@ -449,7 +450,7 @@ def test_render_context_surfaces_downgraded_count(hook_module):
 # ---------------------------------------------------------------------------
 
 def test_client_and_server_read_same_project_json_key(hook_module, tmp_path):
-    """`commands._bus_auto_execute_channels(data)` and the hook's
+    """`cmd_bus._bus_auto_execute_channels(data)` and the hook's
     `_read_auto_execute_channels(root)` must return identical results when
     pointed at the same project.json. The shape is asymmetric (dict vs path)
     but the **value** must agree, because the two readers are the two ends
@@ -472,7 +473,7 @@ def test_client_and_server_read_same_project_json_key(hook_module, tmp_path):
     # Client side (= CLI / lib helper) read of the same file.
     data = json.loads(
         (root / ".beacon" / "project.json").read_text())
-    client_view = commands._bus_auto_execute_channels(data)
+    client_view = cmd_bus._bus_auto_execute_channels(data)
 
     assert server_view == client_view, (
         f"client / server allowlist views diverged for the same project.json. "
@@ -495,7 +496,7 @@ def test_client_and_server_agree_on_empty_default(hook_module, tmp_path):
     server_view = hook_module._read_auto_execute_channels(root)
     data = json.loads(
         (root / ".beacon" / "project.json").read_text())
-    client_view = commands._bus_auto_execute_channels(data)
+    client_view = cmd_bus._bus_auto_execute_channels(data)
 
     assert server_view == [] == client_view
 
@@ -515,7 +516,7 @@ def test_client_and_server_agree_on_corrupt_field(hook_module, tmp_path):
     server_view = hook_module._read_auto_execute_channels(root)
     data = json.loads(
         (root / ".beacon" / "project.json").read_text())
-    client_view = commands._bus_auto_execute_channels(data)
+    client_view = cmd_bus._bus_auto_execute_channels(data)
 
     assert server_view == [] == client_view
 
@@ -550,13 +551,13 @@ def test_client_and_server_agree_after_trek_auto_arm_local_write(
     # Simulate the trek auto-arm local mirror write — same code path the
     # `beacon trek join` flow exercises.
     trek_channels = list(commands.TREK_AUTO_ARM_CHANNELS)
-    commands._mirror_auto_execute_channels_to_local(trek_channels)
+    cmd_bus._mirror_auto_execute_channels_to_local(trek_channels)
 
     # Now ask both readers what they see.
     server_view = hook_module._read_auto_execute_channels(root)
     data = json.loads(
         (root / ".beacon" / "project.json").read_text())
-    client_view = commands._bus_auto_execute_channels(data)
+    client_view = cmd_bus._bus_auto_execute_channels(data)
 
     assert server_view == client_view == trek_channels, (
         f"post-trek-arm divergence: client={client_view!r} "
@@ -619,7 +620,7 @@ def test_inbox_hook_does_not_downgrade_trek_channels_after_auto_arm(
         "BEACON_PROJECT_FILE",
         str(fake_project.root / ".beacon" / "project.json"),
     )
-    commands._mirror_auto_execute_channels_to_local(
+    cmd_bus._mirror_auto_execute_channels_to_local(
         list(commands.TREK_AUTO_ARM_CHANNELS))
 
     events = [

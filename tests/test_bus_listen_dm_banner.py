@@ -27,7 +27,7 @@ These tests pin the three AC items from e-1715:
 
 Implementation is split across two pure helpers in ``lib/dm_pending``
 (``format_inline_dm_banner`` + ``build_pending_lookup``) plus a thin
-wrapper ``lib/commands._print_event_with_banner``. Splitting it this
+wrapper ``lib/cmd_bus._print_event_with_banner``. Splitting it this
 way means the CLI logic (= ``cmd_bus_listen`` / ``cmd_bus_receive``)
 stays one tiny diff away from the legacy behaviour: change the print
 call site, leave the loop / cursor / auto-ack handling untouched.
@@ -130,9 +130,10 @@ def _capture_print(ev, lookup) -> str:
         0, os.path.join(os.path.dirname(__file__), "..", "lib")
     )
     import commands  # noqa: E402
+    import cmd_bus  # noqa: E402  (ms-127 e-4803)
     buf = io.StringIO()
     with redirect_stdout(buf):
-        commands._print_event_with_banner(ev, lookup)
+        cmd_bus._print_event_with_banner(ev, lookup)
     return buf.getvalue()
 
 
@@ -241,12 +242,13 @@ def test_fetch_pending_dm_lookup_returns_empty_on_http_error():
         0, os.path.join(os.path.dirname(__file__), "..", "lib")
     )
     import commands  # noqa: E402
+    import cmd_bus  # noqa: E402  (ms-127 e-4803)
 
     class _FailingClient:
         def get(self, _path):
             raise RuntimeError("API error 404: not found")
 
-    out = commands._fetch_pending_dm_lookup(_FailingClient(), "proj-x")
+    out = cmd_bus._fetch_pending_dm_lookup(_FailingClient(), "proj-x")
     assert out == {}
 
 
@@ -257,12 +259,13 @@ def test_fetch_pending_dm_lookup_returns_empty_on_non_list_payload():
         0, os.path.join(os.path.dirname(__file__), "..", "lib")
     )
     import commands  # noqa: E402
+    import cmd_bus  # noqa: E402  (ms-127 e-4803)
 
     class _BadShapeClient:
         def get(self, _path):
             return {"unexpected": "shape"}  # dict, not list
 
-    out = commands._fetch_pending_dm_lookup(_BadShapeClient(), "proj-x")
+    out = cmd_bus._fetch_pending_dm_lookup(_BadShapeClient(), "proj-x")
     assert out == {}
 
 
@@ -272,6 +275,7 @@ def test_fetch_pending_dm_lookup_indexes_pending_rows():
         0, os.path.join(os.path.dirname(__file__), "..", "lib")
     )
     import commands  # noqa: E402
+    import cmd_bus  # noqa: E402  (ms-127 e-4803)
 
     class _OkClient:
         def get(self, path):
@@ -282,5 +286,5 @@ def test_fetch_pending_dm_lookup_indexes_pending_rows():
                 {"event_id": "ev-B", "approval_status": "approved"},
             ]
 
-    out = commands._fetch_pending_dm_lookup(_OkClient(), "proj-x")
+    out = cmd_bus._fetch_pending_dm_lookup(_OkClient(), "proj-x")
     assert set(out.keys()) == {"ev-A"}

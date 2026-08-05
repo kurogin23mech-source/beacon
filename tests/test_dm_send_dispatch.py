@@ -140,24 +140,25 @@ def test_dm_send_and_audit_parse_without_invalid_choice(project_dir):
 
 sys.path.insert(0, str(ROOT / "lib"))
 import commands  # noqa: E402
+import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
 
 
 def test_channel_missing_reason_no_mcp_json(tmp_path):
-    assert ".mcp.json" in (commands._bus_channel_missing_reason(str(tmp_path)) or "")
+    assert ".mcp.json" in (cmd_bus._bus_channel_missing_reason(str(tmp_path)) or "")
 
 
 def test_channel_missing_reason_no_beacon_bus_entry(tmp_path):
     (tmp_path / ".mcp.json").write_text('{"mcpServers": {"other": {}}}')
-    reason = commands._bus_channel_missing_reason(str(tmp_path))
+    reason = cmd_bus._bus_channel_missing_reason(str(tmp_path))
     assert reason and "beacon-bus" in reason
 
 
 def test_channel_missing_reason_malformed(tmp_path):
     (tmp_path / ".mcp.json").write_text("{not json")
-    reason = commands._bus_channel_missing_reason(str(tmp_path))
+    reason = cmd_bus._bus_channel_missing_reason(str(tmp_path))
     assert reason and "読めません" in reason
 
 
 def test_channel_present_returns_none(tmp_path):
     (tmp_path / ".mcp.json").write_text('{"mcpServers": {"beacon-bus": {}}}')
-    assert commands._bus_channel_missing_reason(str(tmp_path)) is None
+    assert cmd_bus._bus_channel_missing_reason(str(tmp_path)) is None

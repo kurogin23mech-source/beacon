@@ -27,7 +27,7 @@ so the dependency graph stays one-directional and no cycle can form.
 import json
 import os
 import sys
-from typing import Optional
+from typing import Optional, Tuple
 
 from store import get_store
 import core
@@ -1124,3 +1124,400 @@ def _gate_target_class(data: dict, kind: str) -> None:
     except occupation.TargetClassProfessionError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# ms-127 e-4803: bus budget / recipient / identity leaf helpers promoted from
+# commands.py. Shared foundation used by both the bus family (cmd_bus.py) and a
+# few commands.py callers (_arm_for_trek / cmd_acquisition_attack_list_send /
+# _check_recipient_live_health). The 6 identity/swap/budget-path helpers below
+# are pulled in transitively by _resolve_recipient_live / _read_bus_budget /
+# _write_bus_budget, so they must live here too (a commands_shared resident
+# cannot reach back into cmd_bus without forming a cycle). importlib is a local
+# import inside _resolve_recipient_live, matching the leaf-only discipline.
+# ---------------------------------------------------------------------------
+
+def _get_bus_budget_path() -> str:
+    """Resolve .beacon/bus-budget.json under the current project root."""
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    return os.path.join(beacon_dir, "bus-budget.json")
+
+
+def _read_bus_budget() -> Optional[dict]:
+    path = _get_bus_budget_path()
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        # Treat a corrupted budget file as "no budget granted" — the gate
+        # is fail-closed: sends refused until a human re-grants.
+        return None
+
+
+def _write_bus_budget(data: dict) -> None:
+    path = _get_bus_budget_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _bus_auto_execute_channels(data: dict) -> list:
+    """Read the allowlist from a project.json dict, with type guard.
+
+    Anything other than a list of strings is treated as an empty list — the
+    safe default. We coerce on read rather than on write so a hand-edited
+    project.json with the wrong shape never silently lets auto-execute slip
+    through; the user sees "no channels are armed" until they re-add via CLI.
+    """
+    raw = data.get("bus_auto_execute_channels")
+    if not isinstance(raw, list):
+        return []
+    return [c for c in raw if isinstance(c, str) and c]
+
+
+def _mirror_auto_execute_channels_to_local(channels: list) -> None:
+    """Write-through mirror of the auto-execute allowlist into local
+    ``.beacon/project.json``.
+
+    Why: in cloud mode, ``save_project`` PUTs to the cloud only — the local
+    file is a stale snapshot from ``beacon init`` time and is never refreshed
+    on writes (StoreApi.save_project doesn't mirror). The inbox hook
+    (``bin/beacon-bus-inbox-hook.py``) reads ``bus_auto_execute_channels``
+    from the local file directly (= cheap, no subprocess), so without this
+    mirror the hook always sees an empty allowlist and degrades every
+    opted-in ``operation-trigger`` event to ``propose-to-ai`` — silently
+    breaking the autonomous loop even when the CLI shows the channel as
+    allowed.
+
+    Scoped to this single config field on purpose: a full local mirror is
+    ms-36 territory (cloud-first cache rethink). This is a targeted patch
+    that closes the autonomous-loop UX gap without changing wider semantics.
+
+    Fail-soft: any error (cwd not a beacon project, file unwritable, etc.)
+    is swallowed — the cloud-side write already succeeded, so the user-
+    facing operation is still correct; only the inbox hook's local read
+    stays stale, which is the pre-existing (broken) baseline.
+    """
+    try:
+        project_file = os.environ.get("BEACON_PROJECT_FILE") or os.path.join(
+            ".beacon", "project.json")
+        if not os.path.exists(project_file):
+            return
+        with open(project_file, "r", encoding="utf-8") as f:
+            local = json.load(f)
+        local["bus_auto_execute_channels"] = list(channels)
+        with open(project_file, "w", encoding="utf-8") as f:
+            json.dump(local, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+    except Exception as exc:
+        sys.stderr.write(
+            f"[beacon] local mirror of bus_auto_execute_channels failed "
+            f"(cloud write succeeded; inbox hook may read stale value): "
+            f"{type(exc).__name__}: {exc}\n"
+        )
+
+
+def _row_owner_identity(row: dict) -> Tuple[str, str]:
+    """Extract (user_id, email) from a directory row, normalised to strings.
+
+    Both fields are best-effort: the server stamps ``user_id`` at the top
+    level of each session document (= ms-70 / e-1713 path); ``actor.email``
+    arrives via ``stamp_session_actor_email`` (ms-54 / e-1349) on bridge
+    boot. Either one alone is enough to recognise "same user" for the
+    auto-swap decision; we accept both so e-2280 swap works across the
+    full deployment surface even if one field is unset on legacy bridges.
+    """
+    uid = str(row.get("user_id") or "").strip()
+    actor = row.get("actor") if isinstance(row.get("actor"), dict) else {}
+    email = str(actor.get("email") or "").strip()
+    return (uid, email)
+
+
+def _identity_matches(a: Tuple[str, str], b: Tuple[str, str]) -> bool:
+    """Same-user check: any non-empty field matches on both sides.
+
+    Conservative: an empty pair on either side is never a match (so we
+    never auto-swap into a row whose owner we cannot identify). Either
+    user_id OR email matching is sufficient — this tolerates legacy
+    bridges that only stamp one of the two.
+    """
+    a_uid, a_email = a
+    b_uid, b_email = b
+    if a_uid and b_uid and a_uid == b_uid:
+        return True
+    if a_email and b_email and a_email == b_email:
+        return True
+    return False
+
+
+def _find_stale_recipient_identity(
+    recipient: str, helpers
+) -> Optional[Tuple[str, str]]:
+    """Look up the (user_id, email) the stale recipient sid belonged to.
+
+    Live+healthy directory excludes the stale sid (by definition — that's
+    why we're here). We query the broader directory (no healthy filter,
+    wider since_min) to recover the dead session's owner identity, so
+    the swap candidate search has something to match against.
+
+    Returns ``None`` if the sid can't be found in the broader directory
+    either — that means we don't know who owned it (= stamp was lost
+    or the sid was synthetic / never registered). In that case we fall
+    through to the existing soft-warn path; auto-swap is unsafe without
+    a confirmed owner identity.
+    """
+    try:
+        rows = helpers.discover_and_aggregate(healthy=False, since_min=1440)
+    except Exception:
+        return None
+    for row in rows:
+        if row.get("session_id") == recipient:
+            ident = _row_owner_identity(row)
+            if ident[0] or ident[1]:
+                return ident
+            return None
+    return None
+
+
+def _find_swap_candidate(
+    stale_recipient: str,
+    healthy_rows: list,
+    helpers,
+) -> Optional[dict]:
+    """Pick a same-user live+healthy session to swap the stale sid to.
+
+    Rules (intentionally narrow to keep auto-swap conservative):
+      * Stale recipient's owner identity must be recoverable (= we need
+        a user_id or email to match on).
+      * Among healthy rows, count rows that match that identity AND are
+        not the stale sid itself.
+      * Exactly 1 match → return it (= unambiguous swap).
+      * 0 or 2+ matches → return None (fall through to soft warn; we
+        will not guess between multiple live sessions of the same user).
+
+    The 2+ case matters: the same user can hold multiple concurrent
+    bclaude sessions on different worktrees / machines. Without further
+    context (cwd, machine, agent) we can't tell which one the sender
+    "meant", so we refuse to guess and let the sender re-pick.
+    """
+    stale_ident = _find_stale_recipient_identity(stale_recipient, helpers)
+    if stale_ident is None:
+        return None
+    matches = []
+    for row in healthy_rows:
+        if row.get("session_id") == stale_recipient:
+            continue
+        if _identity_matches(_row_owner_identity(row), stale_ident):
+            matches.append(row)
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _resolve_recipient_email_via_self_sessions(recipient: str) -> str:
+    """Return an email for ``recipient`` iff it is one of the caller's OWN sessions.
+
+    e-3880: the live-directory path (``_resolve_recipient_live``) only surfaces
+    ``actor.email`` when the recipient's session document happens to carry it —
+    and that field is stamped separately (``stamp_session_actor_email``), so a
+    session minted purely from a heartbeat (``machine=None`` etc.) can be live
+    yet have a blank email. When that happens, a same-user cross-project reply
+    (which the server dm_gate permits) gets misclassified as 外部宛 and held in
+    armed mode — the exact non-determinism this fixes.
+
+    The robust fallback: ``GET /api/me/sessions`` (``list_user_sessions``) returns
+    ONLY the calling user's own sessions across all their projects (the server
+    scopes it via ``db.list_projects(user_id=uid)``). So if the recipient sid is
+    present in that set, the recipient is — by construction — the SAME user as
+    the sender. We then return the sender's own login email as the recipient
+    identity, guaranteeing ``_same_user`` fires even when the session doc's
+    ``actor.email`` was never stamped. (If the found row does carry an
+    ``actor.email`` we prefer that, but the sender email is a safe floor since
+    membership already proves same-user.)
+
+    Returns ``""`` when the sid is NOT one of the caller's own sessions (= a
+    genuinely external recipient, or lookup unavailable) so the caller keeps the
+    conservative 外部 default. Never raises — any failure degrades to ``""``.
+    """
+    if not recipient:
+        return ""
+    try:
+        # BaseException, not Exception: _get_api_client does sys.exit(1) (=
+        # SystemExit) when there's no login / cloud.json. A best-effort
+        # identity resolver must degrade to "" there, never abort the send.
+        client, _config = _get_api_client()
+    except BaseException:
+        return ""
+    try:
+        # since_minutes only matters with live_only; unfiltered we get every
+        # session of the caller (across projects). 1 day keeps a just-stopped
+        # sibling visible without live-filtering it out.
+        my_sessions = client.list_user_sessions(since_minutes=1440)
+    except Exception:
+        return ""
+    # e-3880 review fix (over-relaxation): /api/me/sessions returns EVERY session
+    # in the caller's projects — including a *co-member's* session in a shared
+    # project. Project co-membership is NOT same-user. So we must positively
+    # confirm the matched row's owner ``user_id`` equals the caller's own uid;
+    # only then is it safe to treat the recipient as same-user (and hand the
+    # caller's own email to _same_user). A different user's row must NOT return
+    # the caller's email — that would misclassify a cross-user DM as 内部 and let
+    # it bypass the armed 外部宛 hold that ms-110 exists to enforce.
+    try:
+        caller_uid, caller_email, _ = _resolve_creator_identity()
+    except Exception:
+        caller_uid, caller_email = "", ""
+    caller_uid = str(caller_uid or "").strip()
+    caller_email = str(caller_email or "").strip()
+    for s in my_sessions or []:
+        if s.get("session_id") != recipient:
+            continue
+        row_uid = str(s.get("user_id") or "").strip()
+        row_email = str((s.get("actor") or {}).get("email") or "").strip()
+        if caller_uid and row_uid and row_uid == caller_uid:
+            # Confirmed same user (by owner user_id). Prefer the row's stamped
+            # email (authoritative); fall back to the caller's own email so the
+            # same-user identity holds even when actor.email was never stamped.
+            return row_email or caller_email or ""
+        # Different / unconfirmable user: return their stamped email if present
+        # (→ _same_user False → 外部宛), else "" (external default). Never the
+        # caller's email here.
+        return row_email
+    return ""
+
+
+def _resolve_recipient_live(
+    recipient: str, channel: str
+) -> Tuple[str, Optional[str]]:
+    """Liveness gate + soft auto-swap for stale session_id reuse.
+
+    e-1402 established the soft-warn floor: any ``--to <sid>`` DM send
+    triggers a live+healthy directory check; if the sid isn't present,
+    emit a loud stderr warning naming the Skill as recommended fix and
+    let the send proceed.
+
+    e-2280 extends that with a structural recovery path: when the stale
+    sid resolves to a known user, and that user has *exactly one* live
+    healthy session in the directory, auto-swap to that sid (= the AI's
+    new bclaude restart). The swap is loud (stderr notice) so it stays
+    auditable, and conservative (only single-candidate swaps) so we
+    never silently redirect cross-machine or cross-worktree.
+
+    Returns ``(new_recipient, swap_notice, recipient_email)`` where
+    ``swap_notice`` is ``None`` if no swap happened (= unchanged sid), or a
+    short string describing the swap (= caller can log / display).
+    ``recipient_email`` is the resolved recipient's ``actor.email`` when the
+    live check found them (or the swap target), else ``""`` — e-3566 uses it
+    so the qual gate can tell a same-user cross-project DM from a真の外部宛.
+
+    Distinct from ``_validate_recipient_project`` (e-1362) which routes
+    cross-project. This one is identity-grain (same user, new sid).
+
+    Opt-outs:
+      * ``BEACON_BUS_NO_LIVE_CHECK=1`` — bypass entirely (= retains
+        e-1402 contract; CI / automation that handles its own liveness).
+      * ``BEACON_BUS_NO_AUTO_SWAP=1`` — keep the live-check warning but
+        never swap. Useful for scripts that want to detect stale sends
+        explicitly without surprise redirection.
+      * ``BEACON_BUS_REFUSE_STALE=1`` — hard-refuse (exit 1) when stale
+        AND no swap candidate. Opt-in strictness for CI pipelines that
+        treat dead-sid sends as a bug rather than a soft hint.
+    """
+    if channel != "dm" or not recipient:
+        return (recipient, None, "")
+    if os.environ.get("BEACON_BUS_NO_LIVE_CHECK", "") == "1":
+        # Liveness check opted out, but identity resolution is independent and
+        # still needed for the qual gate's same-user recognition (e-3880).
+        return (recipient, None, _resolve_recipient_email_via_self_sessions(recipient))
+
+    try:
+        import importlib
+        helpers = importlib.import_module(
+            "beacon_cli.skills_helpers.dm_discover"
+        )
+    except Exception:
+        # No discovery module available (e.g. beacon_cli not on the CLI
+        # subprocess's sys.path) — bypass the liveness check, but still resolve
+        # identity via the api client so same-user recognition (the qual gate)
+        # does not depend on the dm_discover helper importing (e-3880).
+        return (recipient, None, _resolve_recipient_email_via_self_sessions(recipient))
+
+    try:
+        rows = helpers.discover_and_aggregate(healthy=True, since_min=10)
+    except Exception:
+        # Discovery raised (network / psutil / auth) — bypass the liveness
+        # check, but still resolve identity: same-user recognition (the qual
+        # gate) must not depend on local bridge discovery succeeding (e-3880).
+        return (recipient, None, _resolve_recipient_email_via_self_sessions(recipient))
+
+    for row in rows:
+        if row.get("session_id") == recipient:
+            # e-3566: surface the recipient's identity (actor.email) so the
+            # qual gate can recognise a same-user cross-project DM and not
+            # over-block it as 外部宛. This reuses the live-check we already ran.
+            row_email = str((row.get("actor") or {}).get("email") or "")
+            if not row_email:
+                # e-3880: the live directory row can lack a stamped
+                # actor.email (heartbeat-only session). Fall back to the
+                # sid→user resolution so a same-user cross-project reply is
+                # still recognised and not held in armed mode.
+                row_email = _resolve_recipient_email_via_self_sessions(recipient)
+            return (recipient, None, row_email)  # live + healthy, all good
+
+    # Not in the live+healthy set. Try auto-swap before falling back to
+    # the soft warning.
+    swap_disabled = os.environ.get("BEACON_BUS_NO_AUTO_SWAP", "") == "1"
+    candidate = None
+    if not swap_disabled:
+        candidate = _find_swap_candidate(recipient, rows, helpers)
+
+    if candidate is not None:
+        new_sid = str(candidate.get("session_id") or "")
+        actor = candidate.get("actor") or {}
+        ident_hint = (
+            actor.get("email")
+            or actor.get("machine")
+            or actor.get("agent")
+            or "(unknown owner)"
+        )
+        notice = (
+            f"recipient {recipient[:24]}… is stale; auto-swapped to "
+            f"{new_sid[:24]}… (owner={ident_hint}, single live match)"
+        )
+        print(f"⇄ {notice}", file=sys.stderr)
+        swap_email = str(actor.get("email") or "")
+        if not swap_email:
+            # e-3880: swap target's row can also lack a stamped email; resolve
+            # via the caller's own sessions so same-user免除 still fires.
+            swap_email = _resolve_recipient_email_via_self_sessions(new_sid)
+        return (new_sid, notice, swap_email)
+
+    # Stale + no swap candidate (= zero or multiple matches, or owner
+    # identity not recoverable). Either soft-warn (default) or hard-
+    # refuse if the strict opt-in is set.
+    if os.environ.get("BEACON_BUS_REFUSE_STALE", "") == "1":
+        print(
+            f"Error: recipient session {recipient[:24]}… is not in the "
+            f"live+healthy directory and BEACON_BUS_REFUSE_STALE=1 is set."
+            f" Refusing to send into a dead or unreachable session. Use "
+            f"`/beacon-dm-send` Skill to re-discover a live recipient, or"
+            f" unset the env to fall back to soft-warn.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(
+        f"⚠ recipient session {recipient[:24]}… is not in the live+healthy "
+        f"directory. The send will proceed, but the target may be dead or "
+        f"unreachable. Consider `/beacon-dm-send` Skill which re-discovers "
+        f"on every send. (Set BEACON_BUS_NO_LIVE_CHECK=1 to suppress, "
+        f"BEACON_BUS_REFUSE_STALE=1 to hard-refuse instead.)",
+        file=sys.stderr,
+    )
+    # e-3880: the recipient may be a same-user session that simply isn't in the
+    # live+healthy set right now (just stopped, poll stale). Still resolve the
+    # identity via the caller's own sessions so a same-user cross-project reply
+    # is not held in armed mode purely because the target wasn't "healthy".
+    return (recipient, None, _resolve_recipient_email_via_self_sessions(recipient))

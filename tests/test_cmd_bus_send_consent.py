@@ -20,6 +20,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
+import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
+import commands_shared  # noqa: E402  (ms-127 e-4803)
 import dm_consent  # noqa: E402
 
 
@@ -62,8 +64,16 @@ _BUS_ENV = (
 @pytest.fixture
 def stub(monkeypatch):
     s = _StubApiClient()
-    monkeypatch.setattr(commands, "_get_api_client",
-                        lambda: (s, {"project_id": "proj-recipient"}))
+    # cmd_bus_send resolves _get_api_client in its own namespace for the send,
+    # and again inside _resolve_recipient_live (which lives in commands_shared)
+    # for the live-check — stub both so neither path hits the real cloud client
+    # (ms-127 e-4803: the helper split spread the resolution across 2 modules).
+    _client = lambda: (s, {"project_id": "proj-recipient"})
+    monkeypatch.setattr(cmd_bus, "_get_api_client", _client)
+    monkeypatch.setattr(commands_shared, "_get_api_client", _client)
+    # dm_discover (live-check path) does a lazy `from commands import
+    # _get_api_client`, so stub that namespace too (ms-127 e-4803).
+    monkeypatch.setattr(commands, "_get_api_client", _client)
     # Deterministic identity so _resolve_creator_identity resolves.
     for k in _BUS_ENV:
         monkeypatch.delenv(k, raising=False)
@@ -76,7 +86,7 @@ def stub(monkeypatch):
 
 def test_confirmed_flag_attaches_claim(monkeypatch, stub):
     monkeypatch.setenv("BEACON_BUS_RECIPIENT_CONFIRMED", "1")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
 
     env = stub.post_calls[0]["envelope"]
     assert env is not None
@@ -92,7 +102,7 @@ def test_confirmed_flag_attaches_claim(monkeypatch, stub):
 
 def test_no_flag_attaches_no_claim(monkeypatch, stub):
     # Without the flag, the envelope carries no consent claim.
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     env = stub.post_calls[0]["envelope"]
     assert env is not None
     assert dm_consent.CONSENT_CLAIM_KEY not in env
@@ -102,7 +112,7 @@ def test_claim_matches_the_actual_recipient(monkeypatch, stub):
     """The stamped claim confirms exactly the session being sent to (so the
     server's replay guard accepts it)."""
     monkeypatch.setenv("BEACON_BUS_RECIPIENT_CONFIRMED", "1")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     claim = stub.post_calls[0]["envelope"][dm_consent.CONSENT_CLAIM_KEY]
     assert dm_consent.claim_matches_recipient(claim, recipient_session_id="sv-bob")
 
@@ -113,7 +123,7 @@ def test_confirmed_with_no_envelope_errors(monkeypatch, stub):
     monkeypatch.setenv("BEACON_BUS_RECIPIENT_CONFIRMED", "1")
     monkeypatch.setenv("BEACON_BUS_NO_ENVELOPE", "1")
     with pytest.raises(SystemExit):
-        commands.cmd_bus_send()
+        cmd_bus.cmd_bus_send()
     assert stub.post_calls == []
 
 
@@ -122,6 +132,6 @@ def test_user_scoped_recipient_claim(monkeypatch, stub):
     monkeypatch.delenv("BEACON_BUS_RECIPIENT_SESSION", raising=False)
     monkeypatch.setenv("BEACON_BUS_RECIPIENT_USER", "uid-bob")
     monkeypatch.setenv("BEACON_BUS_RECIPIENT_CONFIRMED", "1")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     claim = stub.post_calls[0]["envelope"][dm_consent.CONSENT_CLAIM_KEY]
     assert claim["recipient"]["user_id"] == "uid-bob"

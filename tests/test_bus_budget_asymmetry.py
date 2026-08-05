@@ -3,7 +3,7 @@
 The autonomous-reply budget gate has two implementations that read/write the
 same ``.beacon/bus-budget.json``:
 
-  * CLI  — ``lib/commands._bus_budget_consume_one`` (a human typing ``beacon``)
+  * CLI  — ``lib/cmd_bus._bus_budget_consume_one`` (a human typing ``beacon``)
   * MCP  — ``channel/bus-budget.mjs consumeBusBudgetOne`` (the AI's reply tool)
 
 They deliberately DIVERGE on the *missing-file* case and AGREE on every armed
@@ -42,6 +42,7 @@ sys.path.insert(0, str(REPO_ROOT / "lib"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
+import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
 
 BUS_BUDGET_MJS = REPO_ROOT / "channel" / "bus-budget.mjs"
 
@@ -76,7 +77,7 @@ def _cli_consume(project_root: Path, monkeypatch) -> tuple[bool, dict]:
     beacon_dir = project_root / ".beacon"
     monkeypatch.setenv("BEACON_PROJECT_FILE", str(beacon_dir / "project.json"))
     monkeypatch.chdir(project_root)
-    return commands._bus_budget_consume_one()
+    return cmd_bus._bus_budget_consume_one()
 
 
 @pytest.fixture

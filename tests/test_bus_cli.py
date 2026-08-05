@@ -30,6 +30,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
+import commands_shared  # noqa: E402  (ms-127 e-4803)
+import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
 
 
 class _StubApiClient:
@@ -130,12 +132,15 @@ class _StubApiClient:
 
 @pytest.fixture
 def stub(monkeypatch, capsys):
-    """Pre-wire commands._get_api_client to return our stub + a fixed project."""
+    """Pre-wire cmd_bus._get_api_client to return our stub + a fixed project."""
     stub = _StubApiClient()
-    monkeypatch.setattr(
-        commands, "_get_api_client",
-        lambda: (stub, {"project_id": "proj-1"}),
-    )
+    _client = lambda: (stub, {"project_id": "proj-1"})
+    monkeypatch.setattr(cmd_bus, "_get_api_client", _client)
+    # A --to DM send runs the live-check, which lazily does
+    # `from commands import _get_api_client` (dm_discover), so stub that
+    # namespace too (ms-127 e-4803: helper split spread the resolution).
+    monkeypatch.setattr(commands, "_get_api_client", _client)
+    monkeypatch.setattr(commands_shared, "_get_api_client", _client)
     # Speed up the polling loop so tests don't sit on time.sleep(2).
     monkeypatch.setenv("BEACON_BUS_INTERVAL", "0.25")
     # Default recipient to avoid the "no recipient_id" exit path everywhere.
@@ -161,7 +166,7 @@ def _clear_bus_env(monkeypatch):
 def test_bus_send_requires_channel(monkeypatch, capsys, stub):
     _clear_bus_env(monkeypatch)
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_send()
+        cmd_bus.cmd_bus_send()
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "channel" in err
@@ -170,7 +175,7 @@ def test_bus_send_requires_channel(monkeypatch, capsys, stub):
 def test_bus_send_minimum_args(monkeypatch, capsys, stub):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "session-dm")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     assert len(stub.events) == 1
     assert stub.events[0]["channel"] == "session-dm"
     assert stub.events[0]["delivery"] == "propose-to-ai"  # default
@@ -185,7 +190,7 @@ def test_bus_send_payload_json_object_only(monkeypatch, capsys, stub):
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "x")
     monkeypatch.setenv("BEACON_BUS_PAYLOAD", "[1, 2]")
     with pytest.raises(SystemExit):
-        commands.cmd_bus_send()
+        cmd_bus.cmd_bus_send()
 
 
 def test_bus_send_payload_invalid_json_exits(monkeypatch, capsys, stub):
@@ -193,14 +198,14 @@ def test_bus_send_payload_invalid_json_exits(monkeypatch, capsys, stub):
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "x")
     monkeypatch.setenv("BEACON_BUS_PAYLOAD", "{not json")
     with pytest.raises(SystemExit):
-        commands.cmd_bus_send()
+        cmd_bus.cmd_bus_send()
 
 
 def test_bus_send_delivery_forwarded(monkeypatch, capsys, stub):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "ops")
     monkeypatch.setenv("BEACON_BUS_DELIVERY", "notify-user-only")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     assert stub.events[-1]["delivery"] == "notify-user-only"
 
 
@@ -208,7 +213,7 @@ def test_bus_send_json_mode(monkeypatch, capsys, stub):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "x")
     monkeypatch.setenv("BEACON_JSON", "1")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     out = capsys.readouterr().out.strip()
     parsed = json.loads(out)
     assert parsed["channel"] == "x"
@@ -226,7 +231,7 @@ def test_bus_send_context_and_rationale_forwarded(monkeypatch, capsys, stub):
     monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
     monkeypatch.setenv("BEACON_BUS_CONTEXT", "listener が 60s で死ぬ")
     monkeypatch.setenv("BEACON_BUS_RATIONALE", "相談が速い")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     assert stub.events[-1]["context"] == "listener が 60s で死ぬ"
     assert stub.events[-1]["rationale"] == "相談が速い"
 
@@ -235,7 +240,7 @@ def test_bus_send_dm_initiate_without_context_warns(monkeypatch, capsys, stub):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
     monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     err = capsys.readouterr().err
     assert "--context" in err  # promote-context nudge on initiating DM
 
@@ -252,11 +257,11 @@ def test_bus_send_dm_reply_without_context_does_not_warn(monkeypatch, capsys,
     # the cwd-scoped .beacon/bus-budget.json, so without this stub the test
     # only passes when an ambient budget file happens to exist in cwd (= the
     # cwd-scoped budget footgun). Stubbing keeps the test hermetic.
-    monkeypatch.setattr(commands, "_read_bus_budget",
+    monkeypatch.setattr(cmd_bus, "_read_bus_budget",
                         lambda: {"armed": True, "total": 10, "used": 1})
-    monkeypatch.setattr(commands, "_bus_budget_consume_one",
+    monkeypatch.setattr(cmd_bus, "_bus_budget_consume_one",
                         lambda: (True, {"armed": True, "total": 10, "used": 1}))
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     err = capsys.readouterr().err
     # 返信は継続なので背景 nudge は出さない (= ノイズ回避)。
     assert "この相談で" not in err and "--context \"" not in err
@@ -273,7 +278,7 @@ def test_bus_send_to_stamps_recipient_session_id(monkeypatch, capsys, stub):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
     monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target-session")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     assert stub.events[-1]["payload"]["recipient_session_id"] == "target-session"
 
 
@@ -289,7 +294,7 @@ def test_bus_send_to_overrides_payload_recipient(monkeypatch, capsys, stub):
         "BEACON_BUS_PAYLOAD",
         json.dumps({"recipient_session_id": "payload-target", "text": "hi"}),
     )
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     p = stub.events[-1]["payload"]
     assert p["recipient_session_id"] == "flag-target"
     assert p["text"] == "hi"  # other payload fields preserved
@@ -302,7 +307,7 @@ def test_bus_send_dm_without_to_warns(monkeypatch, capsys, stub):
     via the warning rather than disappearing into silent failures."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     err = capsys.readouterr().err
     assert "dm" in err and "--to" in err
     # The event was still posted (the warning is advisory, not a refuse).
@@ -319,7 +324,7 @@ def test_bus_send_dm_with_payload_recipient_does_not_warn(monkeypatch, capsys, s
         "BEACON_BUS_PAYLOAD",
         json.dumps({"recipient_session_id": "pre-stamped", "text": "hi"}),
     )
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     err = capsys.readouterr().err
     assert "--to" not in err
 
@@ -331,7 +336,7 @@ def test_bus_send_stamps_source_project_by_default(monkeypatch, capsys, stub):
     {"project_id": "proj-1"} なので payload に "proj-1" が入るはず。"""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "session-x")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     assert len(stub.events) == 1
     payload = stub.events[0]["payload"]
     assert payload.get("source_project") == "proj-1"
@@ -346,7 +351,7 @@ def test_bus_send_source_project_pre_stamped_wins(monkeypatch, capsys, stub):
         "BEACON_BUS_PAYLOAD",
         json.dumps({"source_project": "custom-proj", "text": "hi"}),
     )
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     payload = stub.events[0]["payload"]
     assert payload.get("source_project") == "custom-proj"
 
@@ -355,7 +360,7 @@ def test_bus_send_non_dm_without_to_does_not_warn(monkeypatch, capsys, stub):
     """Non-DM channels keep broadcast semantics; missing --to is normal."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "notify")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     err = capsys.readouterr().err
     assert "--to" not in err
     # The send did happen and did NOT stamp recipient (broadcast intent).
@@ -381,7 +386,7 @@ def test_bus_listen_once_streams_events_as_jsonl(monkeypatch, capsys, stub):
         "created_at": "2026-06-07T00:00:02.000000Z",
     })
     monkeypatch.setenv("BEACON_BUS_ONCE", "1")
-    commands.cmd_bus_listen()
+    cmd_bus.cmd_bus_listen()
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 2
     parsed = [json.loads(line) for line in out]
@@ -399,7 +404,7 @@ def test_bus_listen_once_auto_ack_advances_cursor(monkeypatch, capsys, stub):
     })
     monkeypatch.setenv("BEACON_BUS_ONCE", "1")
     monkeypatch.setenv("BEACON_BUS_AUTO_ACK", "1")
-    commands.cmd_bus_listen()
+    cmd_bus.cmd_bus_listen()
     assert stub.cursors.get("R1") == "2026-06-07T00:00:01.000000Z"
 
 
@@ -416,7 +421,7 @@ def test_bus_listen_once_no_events_keeps_polling_until_some_arrive(monkeypatch,
         "created_at": "2026-06-07T00:00:01.000000Z",
     })
     monkeypatch.setenv("BEACON_BUS_ONCE", "1")
-    commands.cmd_bus_listen()
+    cmd_bus.cmd_bus_listen()
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 1
     assert json.loads(out[0])["event_id"] == "e-A"
@@ -433,7 +438,7 @@ def test_bus_receive_returns_when_events_available(monkeypatch, capsys, stub):
         "payload": {}, "delivery": "propose-to-ai",
         "created_at": "2026-06-07T00:00:01.000000Z",
     })
-    commands.cmd_bus_receive()  # exits 0 implicitly
+    cmd_bus.cmd_bus_receive()  # exits 0 implicitly
     out = capsys.readouterr().out.strip().splitlines()
     assert json.loads(out[0])["event_id"] == "e-A"
 
@@ -444,7 +449,7 @@ def test_bus_receive_timeout_exits_2(monkeypatch, capsys, stub):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_TIMEOUT", "0.3")
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_receive()
+        cmd_bus.cmd_bus_receive()
     assert exc.value.code == 2
 
 
@@ -456,7 +461,7 @@ def test_bus_receive_auto_ack_advances_cursor(monkeypatch, capsys, stub):
         "created_at": "2026-06-07T00:00:01.000000Z",
     })
     monkeypatch.setenv("BEACON_BUS_AUTO_ACK", "1")
-    commands.cmd_bus_receive()
+    cmd_bus.cmd_bus_receive()
     assert stub.cursors["R1"] == "2026-06-07T00:00:01.000000Z"
 
 
@@ -467,7 +472,7 @@ def test_bus_receive_auto_ack_advances_cursor(monkeypatch, capsys, stub):
 def test_bus_ack_requires_last_seen_at(monkeypatch, capsys, stub):
     _clear_bus_env(monkeypatch)
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_ack()
+        cmd_bus.cmd_bus_ack()
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "--last-seen-at" in err and "--event" in err
@@ -476,7 +481,7 @@ def test_bus_ack_requires_last_seen_at(monkeypatch, capsys, stub):
 def test_bus_ack_advances_cursor(monkeypatch, capsys, stub):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_LAST_SEEN_AT", "2026-06-07T00:00:01.000000Z")
-    commands.cmd_bus_ack()
+    cmd_bus.cmd_bus_ack()
     assert stub.cursors["R1"] == "2026-06-07T00:00:01.000000Z"
     out = capsys.readouterr().out
     assert "2026-06-07T00:00:01.000000Z" in out
@@ -505,7 +510,7 @@ def test_bus_ack_via_event_id_resolves_created_at(monkeypatch, capsys, stub):
         "payload": {"op_id": "op-2"},
     })
     monkeypatch.setenv("BEACON_BUS_ACK_EVENT_ID", "ev-trigger-1")
-    commands.cmd_bus_ack()
+    cmd_bus.cmd_bus_ack()
     assert stub.cursors["R1"] == "2026-06-10T11:00:00.000000Z"
     out = capsys.readouterr().out
     assert "2026-06-10T11:00:00.000000Z" in out
@@ -517,7 +522,7 @@ def test_bus_ack_via_unknown_event_id_errors(monkeypatch, capsys, stub):
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_ACK_EVENT_ID", "ev-does-not-exist")
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_ack()
+        cmd_bus.cmd_bus_ack()
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "ev-does-not-exist" in err and "not found" in err
@@ -532,7 +537,7 @@ def test_bus_ack_rejects_both_event_and_last_seen_at(monkeypatch, capsys, stub):
     monkeypatch.setenv("BEACON_BUS_LAST_SEEN_AT", "2026-06-07T00:00:01.000000Z")
     monkeypatch.setenv("BEACON_BUS_ACK_EVENT_ID", "ev-trigger-1")
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_ack()
+        cmd_bus.cmd_bus_ack()
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "not both" in err or "both" in err
@@ -613,7 +618,7 @@ class _StubDirectoryClient(_StubApiClient):
 def dir_stub(monkeypatch):
     stub = _StubDirectoryClient()
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_bus, "_get_api_client",
         lambda: (stub, {"project_id": "proj-1"}),
     )
     return stub
@@ -644,7 +649,7 @@ def test_bus_directory_no_filter_prints_all_sessions(monkeypatch, capsys, dir_st
          "actor": {"email": "b@x", "machine": "win", "agent": "claude"},
          "last_active": "2026-06-07T00:00:02.000000Z"},
     ]
-    commands.cmd_bus_directory()
+    cmd_bus.cmd_bus_directory()
     out = capsys.readouterr().out
     assert "s-1" in out
     assert "s-2" in out
@@ -661,7 +666,7 @@ def test_bus_directory_forwards_filters_to_api(monkeypatch, capsys, dir_stub):
     monkeypatch.setenv("BEACON_DIR_AGENT", "claude")
     monkeypatch.setenv("BEACON_DIR_LIVE", "1")
     monkeypatch.setenv("BEACON_DIR_SINCE_MIN", "10")
-    commands.cmd_bus_directory()
+    cmd_bus.cmd_bus_directory()
     assert dir_stub.last_query == {
         "user_id": "alice@x", "machine": "mac", "agent": "claude",
         "live_only": True, "since_minutes": 10,
@@ -677,13 +682,13 @@ def test_bus_directory_forwards_healthy_filter_to_api(monkeypatch, capsys, dir_s
     forwards it — the picker would silently still include stale rows."""
     _clear_dir_env(monkeypatch)
     monkeypatch.setenv("BEACON_DIR_HEALTHY", "1")
-    commands.cmd_bus_directory()
+    cmd_bus.cmd_bus_directory()
     assert dir_stub.last_query["healthy_only"] is True
 
 
 def test_bus_directory_empty_result_message(monkeypatch, capsys, dir_stub):
     _clear_dir_env(monkeypatch)
-    commands.cmd_bus_directory()
+    cmd_bus.cmd_bus_directory()
     out = capsys.readouterr().out
     assert "no matching sessions" in out.lower()
 
@@ -697,7 +702,7 @@ def test_bus_directory_json_mode(monkeypatch, capsys, dir_stub):
         "last_active": "2026-06-07T00:00:01.000000Z",
     }]
     monkeypatch.setenv("BEACON_JSON", "1")
-    commands.cmd_bus_directory()
+    cmd_bus.cmd_bus_directory()
     out = capsys.readouterr().out.strip()
     parsed = json.loads(out)
     assert len(parsed) == 1
@@ -729,7 +734,7 @@ def test_bus_directory_healthy_filter_drops_stale_and_shutdown(
     ]
     monkeypatch.setenv("BEACON_DIR_HEALTHY", "1")
     monkeypatch.setenv("BEACON_JSON", "1")
-    commands.cmd_bus_directory()
+    cmd_bus.cmd_bus_directory()
     out = capsys.readouterr().out.strip()
     parsed = json.loads(out)
     sids = [s["session_id"] for s in parsed]
@@ -751,7 +756,7 @@ def test_bus_directory_json_includes_poll_health_for_every_row(
                          "poll_interval_ms": 2000}},
     ]
     monkeypatch.setenv("BEACON_JSON", "1")
-    commands.cmd_bus_directory()
+    cmd_bus.cmd_bus_directory()
     parsed = json.loads(capsys.readouterr().out.strip())
     assert parsed[0]["poll_health"]["healthy"] is True
     assert parsed[0]["poll_health"]["age_seconds"] == 2
@@ -781,7 +786,7 @@ def test_bus_directory_human_output_shows_health_tag(
         {"session_id": "s-old", "actor": {"email": "d@x"},
          "last_active": "2026-06-07T00:00:01.000000Z"},  # legacy, no poll_health
     ]
-    commands.cmd_bus_directory()
+    cmd_bus.cmd_bus_directory()
     out = capsys.readouterr().out
     # Healthy line gets ok tag.
     assert "s-ok" in out and "health=ok" in out
@@ -819,7 +824,7 @@ def test_bus_directory_default_uses_list_user_sessions(monkeypatch, capsys, dir_
          "last_active": "2026-07-06T00:00:02.000000Z",
          "project_id": "proj-y", "project_name": "ProjectY"},
     ]
-    commands.cmd_bus_directory()
+    cmd_bus.cmd_bus_directory()
     out = capsys.readouterr().out
     # list_user_sessions 経路 - list_sessions は空 (cwd 経路呼ばれず)。
     assert dir_stub.last_query == {}
@@ -842,7 +847,7 @@ def test_bus_directory_cwd_only_uses_list_sessions(monkeypatch, capsys, dir_stub
         {"session_id": "should-not-appear",
          "project_id": "proj-x", "project_name": "ProjectX"},
     ]
-    commands.cmd_bus_directory()
+    cmd_bus.cmd_bus_directory()
     out = capsys.readouterr().out
     # cwd-only path: list_sessions が呼ばれる、 list_user_sessions は呼ばれない。
     assert dir_stub.last_query != {}
@@ -866,7 +871,7 @@ def test_bus_directory_explicit_project_uses_list_sessions(monkeypatch, capsys, 
         {"session_id": "explicit-1", "actor": {"email": "u@x"},
          "last_active": "2026-07-06T00:00:01.000000Z"},
     ]
-    commands.cmd_bus_directory()
+    cmd_bus.cmd_bus_directory()
     assert dir_stub.last_query != {}
     assert dir_stub.last_user_query == {}
     out = capsys.readouterr().out
@@ -890,7 +895,7 @@ def test_bus_directory_explicit_project_uses_list_sessions(monkeypatch, capsys, 
 def test_bus_status_requires_event_id(monkeypatch, capsys, stub):
     _clear_bus_env(monkeypatch)
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_status()
+        cmd_bus.cmd_bus_status()
     assert exc.value.code == 2
     err = capsys.readouterr().err
     assert "Usage:" in err and "bus status" in err
@@ -901,7 +906,7 @@ def test_bus_status_unknown_event_exits_with_error_line(
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_EVENT_ID", "ghost-evt")
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_status()
+        cmd_bus.cmd_bus_status()
     assert exc.value.code == 1
     captured = capsys.readouterr()
     err = captured.err
@@ -925,7 +930,7 @@ def test_bus_status_renders_3_stages_with_missing_marked_not_yet(
     )
     eid = stub.events[-1]["event_id"]
     monkeypatch.setenv("BEACON_BUS_EVENT_ID", eid)
-    commands.cmd_bus_status()
+    cmd_bus.cmd_bus_status()
     out = capsys.readouterr().out
     assert f"event: {eid}" in out
     assert "channel: dm" in out
@@ -957,7 +962,7 @@ def test_bus_status_renders_full_3_stages_when_all_stamped(
         ts="2026-06-09T05:00:01.234567Z",
     )
     monkeypatch.setenv("BEACON_BUS_EVENT_ID", eid)
-    commands.cmd_bus_status()
+    cmd_bus.cmd_bus_status()
     out = capsys.readouterr().out
     assert "✓ sent" in out
     assert "✓ delivered" in out and "by bridge-A" in out
@@ -990,7 +995,7 @@ def test_bus_status_json_emits_raw_event_dict(monkeypatch, capsys, stub):
     )
     monkeypatch.setenv("BEACON_BUS_EVENT_ID", eid)
     monkeypatch.setenv("BEACON_JSON", "1")
-    commands.cmd_bus_status()
+    cmd_bus.cmd_bus_status()
     out = capsys.readouterr().out
     parsed = json.loads(out)
     assert parsed["event_id"] == eid
@@ -1021,7 +1026,7 @@ def test_bus_send_forwards_client_event_id_and_retry(monkeypatch, capsys, stub):
     monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
     monkeypatch.setenv("BEACON_BUS_CLIENT_EVENT_ID", "ce-fixed-key")
     monkeypatch.setenv("BEACON_BUS_IS_RETRY", "1")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     assert stub.events[-1]["client_event_id"] == "ce-fixed-key"
     assert stub.events[-1]["is_retry"] is True
 
@@ -1033,7 +1038,7 @@ def test_bus_send_first_send_is_not_a_retry(monkeypatch, capsys, stub):
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
     monkeypatch.setenv("BEACON_BUS_SENDER", "sv-me")
     monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     assert stub.events[-1]["is_retry"] is False
     assert stub.events[-1]["client_event_id"] == ""
 
@@ -1048,7 +1053,7 @@ def test_bus_send_retry_without_client_event_id_exits_2(monkeypatch, capsys, stu
     monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
     monkeypatch.setenv("BEACON_BUS_IS_RETRY", "1")
     with pytest.raises(SystemExit) as exc:
-        commands.cmd_bus_send()
+        cmd_bus.cmd_bus_send()
     assert exc.value.code == 2
     err = capsys.readouterr().err
     assert "--client-event-id" in err
@@ -1065,7 +1070,7 @@ def test_bus_send_note_nudge_goes_to_stderr_not_stdout(monkeypatch, capsys, stub
     monkeypatch.setenv("BEACON_BUS_SENDER", "sv-me")
     monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
     monkeypatch.setenv("BEACON_JSON", "1")
-    commands.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
     captured = capsys.readouterr()
     # stdout must be pure JSON (round-trips), no "Note:" leakage.
     parsed = json.loads(captured.out.strip())
