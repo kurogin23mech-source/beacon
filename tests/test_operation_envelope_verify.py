@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 
 import commands  # noqa: E402
+import cmd_operation  # noqa: E402  (ms-127 e-4798: operation handlers live here)
 
 
 PROJECT_ID = "test-proj"
@@ -38,8 +39,8 @@ def fake_client(monkeypatch):
     def _get_api_client():
         return fc, {"project_id": PROJECT_ID}
 
-    monkeypatch.setattr(commands, "_get_api_client", _get_api_client)
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_operation, "_get_api_client", _get_api_client)
+    monkeypatch.setattr(cmd_operation, "_is_cloud_mode", lambda: True)
     return fc
 
 
@@ -164,7 +165,7 @@ def test_verify_missing_action(monkeypatch, capsys):
 
 def test_verify_rejects_local_mode(monkeypatch, capsys):
     _set_envvars(monkeypatch, action="x:y:z")
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: False)
+    monkeypatch.setattr(cmd_operation, "_is_cloud_mode", lambda: False)
     with pytest.raises(SystemExit) as exc:
         commands.cmd_operation_envelope_verify()
     assert exc.value.code == 2

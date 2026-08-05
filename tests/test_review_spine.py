@@ -15,6 +15,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import review_spine  # noqa: E402
 import commands  # noqa: E402
+import cmd_operation  # noqa: E402  (ms-127 e-4798: operation handlers live here)
 
 
 # --- pure binding table ---------------------------------------------------
@@ -90,7 +91,11 @@ def proj(tmp_path, monkeypatch):
     monkeypatch.setattr(commands, "_resolve_session_id", lambda: "sv-t")
     # No SPEC docs in the tmp project by default → has_spec=False.
     monkeypatch.setattr(commands, "_spec_exists_for_ms", lambda _id: False)
-    monkeypatch.setattr(commands, "_spec_exists_for_op", lambda _id: False)
+    # ms-127 e-4798: cmd_operation_close resolves _spec_exists_for_op in the
+    # cmd_operation namespace (it imports it from commands_shared), so patch it
+    # there — patching commands._spec_exists_for_op would be a silent no-op for
+    # the operation-close path.
+    monkeypatch.setattr(cmd_operation, "_spec_exists_for_op", lambda _id: False)
     return tmp_path
 
 
