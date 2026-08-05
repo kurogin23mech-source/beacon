@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
+import cmd_claim  # noqa: E402  (ms-127 e-4321: claim family moved here)
 import claims as _claims  # noqa: E402
 
 
@@ -44,11 +45,11 @@ class _StubBus:
 def stub(monkeypatch, tmp_path):
     s = _StubBus()
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_claim, "_get_api_client",
         lambda: (s, {"project_id": "proj-1"}),
     )
     monkeypatch.setattr(
-        commands, "_resolve_session_id",
+        cmd_claim, "_resolve_session_id",
         lambda: "sv-test",
     )
     monkeypatch.setenv("BEACON_DIR", str(tmp_path))
