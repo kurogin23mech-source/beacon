@@ -1636,3 +1636,38 @@ def _load_local_documents() -> list[dict]:
             "updated_at": meta.get("updated_at", ""),
         })
     return docs
+
+
+# ---------------------------------------------------------------------------
+# ms-127 e-4815: application-map applicability helpers promoted from commands.py.
+# _application_map_applies decides whether the全貌マップ (application-map) drift /
+# reconcile machinery applies to this project; _auto_fire_map_drift_trigger
+# (commands.py) and the deploy family (cmd_deploy.py) both call it. It pulls in
+# _project_profession_safe (profession lookup that never raises), so that helper
+# is promoted alongside it (a commands_shared resident cannot reach back into
+# cmd_deploy without a cycle).
+# ---------------------------------------------------------------------------
+
+def _project_profession_safe() -> str:
+    """Best-effort read of the project's profession (e.g. ``dev`` / ``sales``),
+    defaulting to ``dev``. Used to gate development-only surfaces such as the
+    application-map (ms-109 e-3404) without hard-failing when the store is
+    unavailable."""
+    try:
+        data = get_store().load_project()
+    except Exception:
+        return "dev"
+    # ms-108 e-3701 (fable review B-6): one definition of "resolve profession"
+    # lives in occupation.resolve_profession — reuse it rather than re-inlining
+    # the ``(get("profession") or "dev").strip().lower()`` expression.
+    return occupation.resolve_profession(data)
+
+
+def _application_map_applies() -> bool:
+    """True when the application-map (= 全機能の現在地索引) applies to this
+    project. It is a development-instance surface: it maps code / CLI / Skill
+    entry points, which a sales project does not own. So map seeding, the
+    map-drift backstop, and the deploy-time reconcile prompt fire only for the
+    development instance (ms-109 e-3404). Other occupations get neither the
+    box at init nor the recurring nags."""
+    return _project_profession_safe() == "dev"

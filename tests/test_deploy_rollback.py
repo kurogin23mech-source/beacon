@@ -21,6 +21,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import cmd_deploy  # noqa: E402  (ms-127 e-4815: deploy handlers live here)
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +55,7 @@ def _run_rollback(monkeypatch, *, project, execute=False, reason="oops",
     """Run cmd_deploy_rollback with mocked load_project / apply_operation /
     subprocess. Returns (exit_code, stdout, stderr, captured_op_name)."""
 
-    monkeypatch.setattr(commands, "load_project", lambda: project)
+    monkeypatch.setattr(cmd_deploy, "load_project", lambda: project)
     monkeypatch.setenv("BEACON_REASON", reason)
     monkeypatch.setenv("BEACON_EXECUTE", "1" if execute else "")
     monkeypatch.setenv("BEACON_SERVICE", service_override)
@@ -88,7 +89,7 @@ def _run_rollback(monkeypatch, *, project, execute=False, reason="oops",
     code = None
     try:
         with redirect_stdout(buf), redirect_stderr(err):
-            commands.cmd_deploy_rollback()
+            cmd_deploy.cmd_deploy_rollback()
     except SystemExit as e:
         code = e.code
     return code, buf.getvalue(), err.getvalue(), captured, call_log
@@ -99,7 +100,7 @@ def _run_rollback(monkeypatch, *, project, execute=False, reason="oops",
 # ---------------------------------------------------------------------------
 
 def test_reason_required(monkeypatch):
-    monkeypatch.setattr(commands, "load_project",
+    monkeypatch.setattr(cmd_deploy, "load_project",
                         lambda: _project_with_deploys([deploy("d-1")]))
     monkeypatch.setenv("BEACON_REASON", "")
     buf = io.StringIO()
@@ -107,7 +108,7 @@ def test_reason_required(monkeypatch):
     code = None
     try:
         with redirect_stdout(buf), redirect_stderr(err):
-            commands.cmd_deploy_rollback()
+            cmd_deploy.cmd_deploy_rollback()
     except SystemExit as e:
         code = e.code
     assert code == 1
