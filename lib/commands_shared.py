@@ -26,6 +26,7 @@ so the dependency graph stays one-directional and no cycle can form.
 
 import json
 import os
+import re
 import sys
 from typing import Optional, Tuple
 
@@ -1716,6 +1717,7 @@ def _current_project_id() -> str:
 
 
 DEFAULT_SCOPE = "memo"
+VALID_SCOPES = ("core", "spec", "memo", "retro", "report")  # ms-127 e-4831 (doc scope vocab)
 
 
 def _get_docs_dir():
@@ -1836,3 +1838,251 @@ def _read_local_doc(fpath):
         if meta.get(k):
             result[k] = meta[k]
     return result
+
+
+
+# ---------------------------------------------------------------------------
+# ms-127 e-4831-foundation: doc family shared helpers (promoted from commands.py)
+# frontmatter build/slug, link-target validation, table-doc model load/write/
+# persist. Shared by cmd_doc.py (doc handlers) and the acquisition / profile /
+# briefing callers remaining in commands.py.
+# ---------------------------------------------------------------------------
+def _doc_slug(title):
+    """Generate a file-safe slug from a document title."""
+    slug = re.sub(r"[^\w]+", "-", title.lower()).strip("-")
+    slug = re.sub(r"-+", "-", slug)
+    return slug or "untitled"
+
+def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
+                     drop_milestone=False, drop_operation=False, target="",
+                     doc_format="", drop_target=False):
+    """Prepend frontmatter to content, or update existing scope/milestone/operation/trek_id.
+
+    List values are written as inline YAML arrays (``key: ["a", "b"]``) so
+    they survive the line-based parser on the next round-trip — block-list
+    items containing colons (e.g. ``op:op-2:check_run``) cannot be expressed
+    safely in the line-based format and must be normalised.
+
+    ``trek_id`` (ms-69 / e-1663) associates a doc with a cross-project trek;
+    optional, defaults preserved on round-trip.
+
+    ``target`` (ms-109 e-3754) is the canonical, target-class-agnostic doc
+    linkage key (``acc-1`` / ``opp-3`` / ``ms-5`` …). When set it writes
+    ``target: <id>`` and, for Targets that predate it (milestone / operation /
+    trek), dual-writes the legacy key so existing readers keep working. New
+    Target classes (account / opportunity) carry ``target`` only.
+
+    ``drop_milestone`` / ``drop_operation`` (e-1859) explicitly remove the
+    matching key from existing frontmatter. ``cmd_doc_update`` sets these
+    when the user switches a doc from milestone scope to operation scope
+    (or vice versa) so the rejected field doesn't linger and produce
+    two-headed (= both milestone and operation set) frontmatter that
+    silently misleads ``/beacon-operation-review`` discovery filters.
+    """
+    import work_model
+    meta, body = _parse_frontmatter(content)
+    meta["scope"] = scope
+    # ms-131 e-4496: ``format`` distinguishes a table-doc from the default
+    # markdown. Set it only when a non-empty format is passed, and never emit
+    # ``format: markdown`` (the default is the absence of the key, so existing
+    # markdown docs stay byte-identical on round-trip).
+    if doc_format and doc_format != "markdown":
+        meta["format"] = doc_format
+    if drop_milestone:
+        meta.pop("milestone", None)
+    elif milestone:
+        meta["milestone"] = milestone
+    if drop_operation:
+        meta.pop("operation", None)
+    elif operation:
+        meta["operation"] = operation
+    if trek_id:
+        meta["trek_id"] = trek_id
+    if drop_target:
+        # ms-131 e-4497: detach — remove the canonical target and any legacy
+        # mirror so ``doc update <id> --target ""`` fully unlinks the doc.
+        prior = meta.pop("target", "")
+        prior_legacy = work_model.legacy_link_key_for(prior)
+        if prior_legacy:
+            meta.pop(prior_legacy, None)
+    elif target:
+        # ms-109 e-3754: canonical linkage + back-compat dual-write of the
+        # legacy key (milestone / operation / trek_id) when the Target is one
+        # of the classes that had one, so legacy readers/filters keep resolving.
+        meta["target"] = target
+        legacy_key = work_model.legacy_link_key_for(target)
+        if legacy_key:
+            meta[legacy_key] = target
+    lines = ["---"]
+    for k, v in meta.items():
+        if isinstance(v, list):
+            quoted = ", ".join(f'"{item}"' for item in v)
+            lines.append(f"{k}: [{quoted}]")
+        else:
+            lines.append(f"{k}: {v}")
+    lines.append("---")
+    lines.append("")
+    return "\n".join(lines) + body
+
+def _validate_link_target_exists(target: str) -> None:
+    """Exit with a clear error if a doc's link ``target`` is a hard-validated
+    class (sales account / opportunity / acquisition) whose id has no record.
+
+    ms-134 (philosophy review 2026-08-02 #1): the existence knowledge — which
+    kinds are hard-validated and which collections hold them — lives in the
+    occupation dispatch layer (``occupation.is_valid_link_target``), NOT here. So
+    this profession-SHARED (doc) path no longer branches on sales collections; it
+    asks the occupation layer and only owns the CLI error/exit. No-op for dev /
+    unknown targets (lenient round-trip preserved)."""
+    if target and not occupation.is_valid_link_target(load_project(), target):
+        kind = work_model.target_kind(target or "")
+        # AX review 2026-08-02 #2: name the recovery path so a caller can find a
+        # valid id instead of guessing. Keep the historical "{kind} not found:
+        # {target}" phrasing (multiple tests assert that contiguous substring)
+        # and APPEND the recovery hint. account/opportunity/acquisition each have
+        # a `list` verb.
+        print(f"Error: {kind} not found: {target}. "
+              f"Run 'beacon {kind} list' to see valid IDs.", file=sys.stderr)
+        sys.exit(1)
+
+def _now_iso() -> str:
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _split_frontmatter_raw(content: str) -> tuple[str, str]:
+    """Split content into (raw_frontmatter_block, body), preserving the block
+    verbatim. Returns ("", content) when there is no frontmatter. The raw block
+    includes the closing ``---`` and its trailing newline, so
+    ``raw + body == content`` for round-trip fidelity (we swap only the body)."""
+    if not content.startswith("---"):
+        return "", content
+    end = content.find("\n---", 3)
+    if end == -1:
+        return "", content
+    # Advance past the closing '---' line and any following blank line(s), the
+    # same way _parse_frontmatter computes the body start.
+    body_start = end + 4
+    raw = content[:body_start]
+    body = content[body_start:]
+    stripped = body.lstrip("\n")
+    raw += body[: len(body) - len(stripped)]
+    return raw, stripped
+
+def _load_table_model(doc_id: str):
+    """Load a table-doc and return (content, title, model). Exits with a clear
+    error when the doc is missing or is not a table-doc."""
+    import table_doc
+    existing = get_store().get_document(doc_id)
+    if not existing:
+        print(f"Document not found: {doc_id}", file=sys.stderr)
+        sys.exit(3)
+    content = existing.get("content", "")
+    if not table_doc.is_table_content(content):
+        print(f"Error: {doc_id} は table-doc ではありません (format: table のみ対応)",
+              file=sys.stderr)
+        sys.exit(1)
+    try:
+        model = table_doc.parse_table(content)
+    except table_doc.TableDocError as exc:
+        print(f"Error: table 構造が壊れています: {exc}", file=sys.stderr)
+        sys.exit(1)
+    return content, existing.get("title", doc_id), model
+
+def _write_table_model(doc_id: str, title: str, old_content: str, model) -> None:
+    """Re-serialize ``model`` into the doc, keeping the original frontmatter
+    verbatim, and write it back through the cloud/local path."""
+    import table_doc
+    raw_fm, _ = _split_frontmatter_raw(old_content)
+    new_body = table_doc.serialize_table_body(title, model)
+    new_content = raw_fm + new_body if raw_fm else new_body
+    if _is_cloud_mode():
+        client, config = _get_api_client()
+        client.update_document(config["project_id"], doc_id, title, new_content)
+    else:
+        docs_dir = _get_docs_dir()
+        fpath = os.path.join(docs_dir, f"{doc_id}.md")
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+def _persist_table_doc(*, title, columns, scope, milestone="", operation="",
+                       trek_id="", target="", doc_id=""):
+    """Validate columns, build + link + persist a table-doc, record the dev-Target
+    entry, and return ``(doc_id, model)``.
+
+    The single create path shared by ``cmd_doc_table_create`` (env-driven) and
+    ``cmd_acquisition_attach_list`` (param-driven) so neither has to mutate
+    ``os.environ`` to reach the other — the delegation is an ordinary function
+    call with an explicit signature (ms-132 e-4502 AX/保守性レビュー: env mutation
+    as in-process argument passing broke local reasoning). Raises
+    ``table_doc.TableDocError`` on an invalid column definition so callers keep
+    their own error wording."""
+    import table_doc
+    import table_type
+    import work_model
+    table_type.validate_column_types(columns if isinstance(columns, list) else [])
+    model = table_doc.new_table(columns)
+    # ms-131 e-4497 — hard-validate a sales Target (account/opportunity/
+    # acquisition) exists before linking, mirroring cmd_doc_add.
+    if target:
+        _validate_link_target_exists(target)
+    if scope == "core":
+        milestone = milestone or None
+    body = table_doc.serialize_table_body(title, model)
+    content = _add_frontmatter(body, scope, milestone or "", operation or "",
+                               trek_id or "", target=target or "",
+                               doc_format=table_doc.TABLE_FORMAT)
+    if _is_cloud_mode():
+        client, config = _get_api_client()
+        if doc_id:
+            result = client.update_document(config["project_id"], doc_id, title, content)
+        else:
+            result = client.create_document(config["project_id"], title, content)
+        doc_id = result["doc_id"]
+    else:
+        docs_dir = _get_docs_dir()
+        os.makedirs(docs_dir, exist_ok=True)
+        if not doc_id:
+            doc_id = _doc_slug(title)
+        fpath = os.path.join(docs_dir, f"{doc_id}.md")
+        with open(fpath, "w", encoding="utf-8") as f:
+            f.write(content)
+    # ms-134 e-4720: record the table-doc create side effect through the
+    # occupation layer, which dispatches by the Target's kind and no-ops when
+    # there is no dev-era changelog to record onto (sales Target / trek). Replaces
+    # a direct core.save_entry that required a milestone (bug e-4710). core docs
+    # are project-wide; a table-doc with no explicit link records nothing (its
+    # linkage lives in the frontmatter, surfaced via `doc list --target`).
+    data = load_project()
+    today = _now_iso()
+    if scope != "core":
+        link = target or operation or milestone or ""
+        if link:
+            rec = occupation.record_target_entry(
+                data, link, description=f"table-doc create: {title} ({scope})",
+                source="auto", date=today, revision_id=doc_id or "")
+            if rec.get("recorded"):
+                save_project(data)
+    return doc_id, model
+
+
+def _actor_str() -> str:
+    """Best-effort machine/agent identity string for the audit trail."""
+    try:
+        import agent as _agent_for_actor
+        act = _agent_for_actor.get_actor()
+        m, a = act.get("machine", ""), act.get("agent", "")
+        return f"{m}/{a}" if (m or a) else ""
+    except Exception:
+        return ""
+
+def _sales_skill_nudge(what: str, skill: str, detail: str) -> None:
+    """営業エンティティの user-facing verb を直叩きしたとき、対応する対話スキルへ soft に
+    誘導する (e-3760)。**hard block はしない** (master=人間) ので nudge を stderr に出して
+    実行はそのまま続ける。スキル自身の正規呼び出しは ``BEACON_SALES_SKILL_CALL=1`` を
+    立てるので nudge は出さない (= dev の `beacon pr review`→`/review` 誘導と対称、ただし
+    こちらは同じ verb を skill も使うため bypass token で自身の呼び出しを素通しにする)。
+    stderr に出すので ``--json`` の stdout は汚さない。"""
+    if os.environ.get("BEACON_SALES_SKILL_CALL") == "1":
+        return
+    print(f"💡 {what}は {skill} で対話的に進めると{detail}。"
+          f"このまま直接続行します (master=人間)。", file=sys.stderr)
