@@ -1717,6 +1717,7 @@ def _current_project_id() -> str:
 
 
 DEFAULT_SCOPE = "memo"
+VALID_SCOPES = ("core", "spec", "memo", "retro", "report")  # ms-127 e-4831 (doc scope vocab)
 
 
 def _get_docs_dir():
@@ -2062,3 +2063,26 @@ def _persist_table_doc(*, title, columns, scope, milestone="", operation="",
             if rec.get("recorded"):
                 save_project(data)
     return doc_id, model
+
+
+def _actor_str() -> str:
+    """Best-effort machine/agent identity string for the audit trail."""
+    try:
+        import agent as _agent_for_actor
+        act = _agent_for_actor.get_actor()
+        m, a = act.get("machine", ""), act.get("agent", "")
+        return f"{m}/{a}" if (m or a) else ""
+    except Exception:
+        return ""
+
+def _sales_skill_nudge(what: str, skill: str, detail: str) -> None:
+    """営業エンティティの user-facing verb を直叩きしたとき、対応する対話スキルへ soft に
+    誘導する (e-3760)。**hard block はしない** (master=人間) ので nudge を stderr に出して
+    実行はそのまま続ける。スキル自身の正規呼び出しは ``BEACON_SALES_SKILL_CALL=1`` を
+    立てるので nudge は出さない (= dev の `beacon pr review`→`/review` 誘導と対称、ただし
+    こちらは同じ verb を skill も使うため bypass token で自身の呼び出しを素通しにする)。
+    stderr に出すので ``--json`` の stdout は汚さない。"""
+    if os.environ.get("BEACON_SALES_SKILL_CALL") == "1":
+        return
+    print(f"💡 {what}は {skill} で対話的に進めると{detail}。"
+          f"このまま直接続行します (master=人間)。", file=sys.stderr)
