@@ -28,6 +28,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import cmd_trek  # noqa: E402  (ms-127 e-4820: trek handlers live here)
 
 
 # ---------------------------------------------------------------------------
@@ -125,15 +126,15 @@ def fake_client(monkeypatch):
     """
     from store_api import StoreApi
     fake = FakeApiClient()
-    monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_trek, "_is_cloud_mode", lambda: True)
     monkeypatch.setattr(
-        commands, "_get_api_client",
+        cmd_trek, "_get_api_client",
         lambda: (fake, {"project_id": "fake-project"})
     )
     store_api = StoreApi.__new__(StoreApi)
     store_api._client = fake
     store_api._project_id = "fake-project"
-    monkeypatch.setattr(commands, "get_store", lambda: store_api)
+    monkeypatch.setattr(cmd_trek, "get_store", lambda: store_api)
     return fake
 
 
@@ -166,7 +167,7 @@ class TestCreateCloudDispatch:
         monkeypatch.setenv("BEACON_TREK_TYPE", "temporary")
         monkeypatch.setenv("BEACON_TREK_DESCRIPTION", "test desc")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_create()
+        cmd_trek.cmd_trek_create()
         assert len(fake_client.calls) == 1
         name, kwargs = fake_client.calls[0]
         assert name == "create_trek"
@@ -180,7 +181,7 @@ class TestListCloudDispatch:
     def test_list_routes_to_api_client(self, fake_client, monkeypatch):
         monkeypatch.setenv("BEACON_JSON", "1")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_list()
+        cmd_trek.cmd_trek_list()
         assert fake_client.calls[0][0] == "list_treks"
         assert fake_client.calls[0][1]["status"] == ""
         assert fake_client.calls[0][1]["include_archived"] is False
@@ -190,21 +191,21 @@ class TestListCloudDispatch:
         monkeypatch.setenv("BEACON_TREK_STATUS", "active")
         monkeypatch.setenv("BEACON_JSON", "1")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_list()
+        cmd_trek.cmd_trek_list()
         assert fake_client.calls[0][1]["status"] == "active"
 
     def test_list_passes_include_archived(self, fake_client, monkeypatch):
         monkeypatch.setenv("BEACON_TREK_INCLUDE_ARCHIVED", "1")
         monkeypatch.setenv("BEACON_JSON", "1")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_list()
+        cmd_trek.cmd_trek_list()
         assert fake_client.calls[0][1]["include_archived"] is True
 
     def test_list_passes_all_actors(self, fake_client, monkeypatch):
         monkeypatch.setenv("BEACON_TREK_ALL_ACTORS", "1")
         monkeypatch.setenv("BEACON_JSON", "1")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_list()
+        cmd_trek.cmd_trek_list()
         assert fake_client.calls[0][1]["all_actors"] is True
 
 
@@ -213,7 +214,7 @@ class TestShowCloudDispatch:
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
         monkeypatch.setenv("BEACON_JSON", "1")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_show()
+        cmd_trek.cmd_trek_show()
         assert fake_client.calls[0] == ("get_trek", {"trek_id": "tk-fake01"})
 
 
@@ -221,13 +222,13 @@ class TestStartArchiveCloudDispatch:
     def test_start_routes_to_start_trek(self, fake_client, monkeypatch):
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_start()
+        cmd_trek.cmd_trek_start()
         assert fake_client.calls[0] == ("start_trek", {"trek_id": "tk-fake01"})
 
     def test_archive_routes_to_archive_trek(self, fake_client, monkeypatch):
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_archive()
+        cmd_trek.cmd_trek_archive()
         assert fake_client.calls[0] == ("archive_trek", {"trek_id": "tk-fake01"})
 
 
@@ -236,7 +237,7 @@ class TestInviteJoinLeaveCloudDispatch:
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
         monkeypatch.setenv("BEACON_TREK_ACTOR", "b@x")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_invite()
+        cmd_trek.cmd_trek_invite()
         assert fake_client.calls[0] == (
             "invite_trek_member",
             {"trek_id": "tk-fake01", "email": "b@x"},
@@ -248,13 +249,13 @@ class TestInviteJoinLeaveCloudDispatch:
         # is about cloud routing, not the consent gate).
         monkeypatch.setenv("BEACON_TREK_CONSENT_ACK", "1")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_join()
+        cmd_trek.cmd_trek_join()
         assert fake_client.calls[0] == ("join_trek", {"trek_id": "tk-fake01"})
 
     def test_leave_routes_to_leave_trek(self, fake_client, monkeypatch):
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_leave()
+        cmd_trek.cmd_trek_leave()
         assert fake_client.calls[0] == ("leave_trek", {"trek_id": "tk-fake01"})
 
 
@@ -263,7 +264,7 @@ class TestScopeCloudDispatch:
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
         monkeypatch.setenv("BEACON_TREK_SCOPE_ADD", "beacon:ms-69")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_plan()
+        cmd_trek.cmd_trek_plan()
         name, kwargs = fake_client.calls[0]
         assert name == "add_trek_scope"
         assert kwargs == {
@@ -285,7 +286,7 @@ class TestScopeCloudDispatch:
         stderr_buf = StringIO()
         monkeypatch.setattr(sys, "stderr", stderr_buf)
         with pytest.raises(SystemExit) as exc_info:
-            commands.cmd_trek_plan()
+            cmd_trek.cmd_trek_plan()
         assert exc_info.value.code == 1
         assert "narrowing key" in stderr_buf.getvalue()
         # Cloud client must NOT have been called.
@@ -295,7 +296,7 @@ class TestScopeCloudDispatch:
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
         monkeypatch.setenv("BEACON_TREK_SCOPE_ADD", "beacon:e-1656")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_plan()
+        cmd_trek.cmd_trek_plan()
         kwargs = fake_client.calls[0][1]
         assert kwargs["task"] == "e-1656"
 
@@ -304,7 +305,7 @@ class TestScopeCloudDispatch:
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
         monkeypatch.setenv("BEACON_TREK_SCOPE_REMOVE", "beacon:op-2")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_plan()
+        cmd_trek.cmd_trek_plan()
         name, kwargs = fake_client.calls[0]
         assert name == "remove_trek_scope"
         assert kwargs["operation"] == "op-2"
@@ -315,7 +316,7 @@ class TestHaltCloudDispatch:
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
         monkeypatch.setenv("BEACON_TREK_REASON", "found bug")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_stop()
+        cmd_trek.cmd_trek_stop()
         name, kwargs = fake_client.calls[0]
         assert name == "set_trek_halt"
         assert kwargs == {
@@ -327,7 +328,7 @@ class TestHaltCloudDispatch:
     def test_resume_routes_to_clear_trek_halt(self, fake_client, monkeypatch):
         monkeypatch.setenv("BEACON_TREK_ID", "tk-fake01")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_resume()
+        cmd_trek.cmd_trek_resume()
         assert fake_client.calls[0] == (
             "clear_trek_halt", {"trek_id": "tk-fake01"},
         )
@@ -339,7 +340,7 @@ class TestTransferLeaderCloudDispatch:
         monkeypatch.setenv("BEACON_TREK_TO", "sv-target")
         monkeypatch.setenv("BEACON_SESSION_ID", "sv-caller")
         _capture_stdout(monkeypatch)
-        commands.cmd_trek_transfer_leader()
+        cmd_trek.cmd_trek_transfer_leader()
         name, kwargs = fake_client.calls[0]
         assert name == "transfer_trek_leader"
         assert kwargs == {
@@ -355,7 +356,7 @@ class TestTransferLeaderCloudDispatch:
         monkeypatch.setenv("BEACON_TREK_TO", "sv-target")
         _capture_stdout(monkeypatch)
         with pytest.raises(SystemExit):
-            commands.cmd_trek_transfer_leader()
+            cmd_trek.cmd_trek_transfer_leader()
         # Should NOT have called ApiClient — failed before dispatch.
         assert fake_client.calls == []
 

@@ -1,4 +1,4 @@
-"""Tests for ``commands._current_project_id`` cloud-mode fallback (ms-95 / e-2007).
+"""Tests for ``commands_shared._current_project_id`` cloud-mode fallback (ms-95 / e-2007).
 
 Background
 ----------
@@ -44,6 +44,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import commands_shared  # noqa: E402  (ms-127 e-4820)
 
 
 @pytest.fixture
@@ -69,12 +70,12 @@ def beacon_dir(monkeypatch):
 
 
 def _stub_load_project(monkeypatch, data: dict) -> None:
-    """Make ``commands.load_project()`` return ``data`` deterministically.
+    """Make ``commands_shared.load_project()`` return ``data`` deterministically.
 
     Bypasses the real ``store.load_project()`` path so the test does not
     spin up a StoreApi (cloud-mode) or hit any file we did not stage.
     """
-    monkeypatch.setattr(commands, "load_project", lambda: data)
+    monkeypatch.setattr(commands_shared, "load_project", lambda: data)
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +93,7 @@ def test_current_project_id_local_mode_reads_id_from_project_json(
     # cloud.json is intentionally absent — we are validating the local
     # branch does NOT depend on the fallback.
     assert not (beacon_dir / "cloud.json").exists()
-    assert commands._current_project_id() == "proj-local-abc"
+    assert commands_shared._current_project_id() == "proj-local-abc"
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +120,7 @@ def test_current_project_id_cloud_mode_reads_cloud_json_fallback(
         }),
         encoding="utf-8",
     )
-    assert commands._current_project_id() == "proj-cloud-xyz"
+    assert commands_shared._current_project_id() == "proj-cloud-xyz"
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +142,7 @@ def test_current_project_id_returns_empty_when_no_source_resolves(
     )
     # cloud.json absent on purpose.
     assert not (beacon_dir / "cloud.json").exists()
-    assert commands._current_project_id() == ""
+    assert commands_shared._current_project_id() == ""
 
 
 # ---------------------------------------------------------------------------
@@ -156,9 +157,9 @@ def test_current_project_id_swallows_load_project_exception(
     """If ``load_project`` raises, fall through to cloud.json cleanly."""
     def _raise():
         raise RuntimeError("simulated load_project failure")
-    monkeypatch.setattr(commands, "load_project", _raise)
+    monkeypatch.setattr(commands_shared, "load_project", _raise)
     (beacon_dir / "cloud.json").write_text(
         json.dumps({"project_id": "proj-fallback-after-raise"}),
         encoding="utf-8",
     )
-    assert commands._current_project_id() == "proj-fallback-after-raise"
+    assert commands_shared._current_project_id() == "proj-fallback-after-raise"
