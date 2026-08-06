@@ -22,7 +22,6 @@ the cmd_retro call path (the e-4320 monkeypatch-trap rule).
 
 import json
 import os
-import re
 import sys
 from typing import Optional
 
