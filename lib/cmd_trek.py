@@ -17,10 +17,18 @@ commands_shared in this same change (e-4820-foundation) so the many doc / accoun
 / operation callers in commands.py can keep using them without importing cmd_trek
 (which would form a cycle).
 
-Test patch target (monkeypatch trap): a test driving a cmd_trek_* handler patches
-helpers the handler resolves in cmd_trek's own namespace (cmd_trek._X), including
-re-exported ones — `commands._X` is an independent binding and a silent no-op on
-the cmd_trek call path (the e-4320 rule).
+Test patch target (monkeypatch trap): a test driving a cmd_trek_* handler must
+patch EVERY name the handler resolves at import time in cmd_trek's own namespace
+— not just the private `_helpers`, but also the plain functions imported from
+commands_shared / store (e.g. `load_project`, `get_store`, `_is_cloud_mode`,
+`_get_api_client`). Each `from ... import name` binds an independent copy, so
+`monkeypatch.setattr(commands, "get_store", ...)` is a silent no-op on the
+cmd_trek call path — patch `cmd_trek.get_store` instead.
+    Wrong: monkeypatch.setattr(commands, "_is_cloud_mode", lambda: True)
+    Right: monkeypatch.setattr(cmd_trek, "_is_cloud_mode", lambda: True)
+(This is the same namespace-binding rule the other cmd_<family> modules cite as
+"the e-4320 rule".) Helpers tested directly, not via a trek handler, are patched
+at their canonical home commands_shared.<name>.
 """
 
 import json

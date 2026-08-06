@@ -4973,31 +4973,9 @@ def cmd_channel_status():
 # does not need atomicity.
 
 
-# ---------------------------------------------------------------------------
-# Trek (ms-69) — top-level cross-project collaboration area.
-# Local mode only for now (storage = lib/trek_store, files under
-# ~/.beacon/treks/). Cloud HTTP path lands in e-1656.
-# ---------------------------------------------------------------------------
-
-
-# ms-75 / e-2047 — Trek auto-arm constants. The 3 channels covered here
-# match CHANNEL_TO_SKILL in channel/bus-autonomous-content.mjs (= e-2069)
-# so the bus.mjs side has a Skill mapping for every channel we mark as
-# auto-execute. Default budget = 20 outbound turns gives the executor
-# roughly two cadence cycles' worth of room before requiring a re-grant,
-# which is the SPEC-pinned starting envelope per AC 1.
-
-
-    # consent OK; fall through
-
-
-# ---------------------------------------------------------------------------
-# ms-99 / e-2829 — slot verbs (Trek schema v2 CLI, SPEC 方針 6)
-# ---------------------------------------------------------------------------
-# All four (add / amend / claim / list) run through the pending_scope_ops
-# queue so AC 15 ("all slot CLI ops via staging") holds. Cloud-mode
-# parity lands in e-2830 (Phase 1 API endpoints); until then the cloud
-# branch surfaces a graceful warning and exits.
+# Trek CLI (ms-69) moved to lib/cmd_trek.py (ms-127 e-4820) — handlers are
+# re-imported for dispatch at the top of this file; family-private helpers and
+# trek-only constants (TREK_AUTO_ARM_CHANNELS etc.) live canonically there.
 
 
 # ---------------------------------------------------------------------------
