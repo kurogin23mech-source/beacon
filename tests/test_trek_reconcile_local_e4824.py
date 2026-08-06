@@ -81,6 +81,30 @@ def _run_reconcile(monkeypatch, *, trek_doc, project, apply_=False):
     return json.loads(buf.getvalue()), saved
 
 
+def test_unreadable_project_degrades_but_is_not_silent(monkeypatch):
+    """Independent-review consensus (AX+maintainability): the except guard used to
+    swallow failures silently — the exact class of bug e-4824 was. The degrade
+    (data=None → empty diff) is preserved, but a warning must reach stderr so the
+    caller knows reconcile ran in reduced mode instead of seeing a clean 'no diff'."""
+    monkeypatch.setattr(cmd_trek, "_is_cloud_mode", lambda: False)
+    monkeypatch.setattr(trek_store, "load_trek",
+                        lambda tid: _trek_doc("e-1", "working"))
+
+    def _boom():
+        raise RuntimeError("project.json unreadable")
+    monkeypatch.setattr(cmd_trek, "load_project", _boom)
+    monkeypatch.setenv("BEACON_TREK_ID", "tk-local")
+    monkeypatch.setenv("BEACON_JSON", "1")
+    out, err = StringIO(), StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    monkeypatch.setattr(sys, "stderr", err)
+    cmd_trek.cmd_trek_reconcile()
+    result = json.loads(out.getvalue())
+    assert result["diff"] == []                 # degrade preserved
+    assert "Warning" in err.getvalue()          # but no longer silent
+    assert "project.json unreadable" in err.getvalue()
+
+
 def test_pool_done_but_trek_working_surfaces_in_diff(monkeypatch):
     """The core regression: pool=done + trek stamp=working → diff has the entry.
 

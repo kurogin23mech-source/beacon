@@ -1882,7 +1882,15 @@ def cmd_trek_reconcile():
         # して残す (読める時は実際に task pool を反映するようになる)。
         try:
             data = load_project()
-        except Exception:
+        except Exception as exc:
+            # 独立レビュー consensus (e-4824): silent な swallow はこのバグそのもの
+            # の温床。degrade (data=None → pool mirror を諦める) は残すが、無音に
+            # せず warning を stderr に出して「reconcile が縮退実行された」を可視化。
+            print(
+                f"Warning: project が読めず pool mirror を省略します ({exc}). "
+                "task pool との乖離検出は行いません。",
+                file=sys.stderr,
+            )
             data = None
         pool_status: dict[str, str] = {}
         if data:
