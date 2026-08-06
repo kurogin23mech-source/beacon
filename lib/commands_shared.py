@@ -1521,3 +1521,118 @@ def _resolve_recipient_live(
     # identity via the caller's own sessions so a same-user cross-project reply
     # is not held in armed mode purely because the target wasn't "healthy".
     return (recipient, None, _resolve_recipient_email_via_self_sessions(recipient))
+
+
+# ---------------------------------------------------------------------------
+# ms-127 e-4809: retro-day / week / document / content-input leaf helpers
+# promoted from commands.py. Shared foundation used by the retro family
+# (cmd_retro.py) and by commands.py callers (_auto_fire_retro_trigger /
+# cmd_search / cmd_doc_add / cmd_doc_update). DAY_NAMES is the constant
+# _get_retro_day maps day abbreviations through.
+# ---------------------------------------------------------------------------
+
+DAY_NAMES = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+             "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+             "friday": 4, "saturday": 5, "sunday": 6}
+
+
+def _get_retro_day():
+    try:
+        data = load_project()
+        day_str = data.get("retro_day", "friday").lower()
+        return DAY_NAMES.get(day_str, 4)
+    except Exception:
+        return 4
+
+
+def _last_reviewed_week() -> Optional[str]:
+    """Return the most recent ISO-week string a retro was reviewed for, or None.
+
+    Reads the `.beacon/retro/.reviewed` marker that `beacon retro done` writes.
+    Used by the persistent retro trigger to distinguish "already retro'd this
+    week" from "retro is overdue for one or more past weeks".
+    """
+    project_dir = os.path.dirname(get_project_file())
+    reviewed_path = os.path.join(project_dir, "retro", ".reviewed")
+    try:
+        with open(reviewed_path, "r", encoding="utf-8") as f:
+            return f.read().strip() or None
+    except (FileNotFoundError, IOError):
+        return None
+
+
+def _most_recent_retro_day_on_or_before(today, retro_day_idx: int):
+    """Return the latest date <= today whose weekday() == retro_day_idx.
+
+    If today *is* the retro day, returns today. Used to anchor the
+    "current retro week" — every Friday (or configured day) starts a new
+    retro slot that must be settled before it becomes "stale".
+    """
+    import datetime as _dt
+    delta = (today.weekday() - retro_day_idx) % 7
+    return today - _dt.timedelta(days=delta)
+
+
+def _resolve_content_input(content: str) -> str:
+    """Resolve a ``--content`` argument, treating ``"-"`` as stdin.
+
+    PE dogfood 2026-06-10: ``beacon doc update --content -`` was interpreted
+    literally and replaced a 130-line SPEC with the single character ``-``.
+    kubectl / curl convention treats ``-`` as stdin; we follow the same rule
+    and hard-reject the dangerous case where stdin is a tty.
+    """
+    if content == "-":
+        if sys.stdin.isatty():
+            print("Error: --content - は stdin からの読み込みを意味します", file=sys.stderr)
+            print("       pipe で渡してください: cat file.md | beacon doc update <id>", file=sys.stderr)
+            print("       または --content フラグを省略して stdin から渡してください", file=sys.stderr)
+            sys.exit(1)
+        return sys.stdin.read()
+    if not content and not sys.stdin.isatty():
+        return sys.stdin.read()
+    return content
+
+
+def _load_local_documents() -> list[dict]:
+    """Read all .beacon/documents/*.md files and return them as dicts with
+    frontmatter fields (title, scope, milestone, operation, content, etc.)
+    promoted to top level. Used by cmd_search for local-mode document search."""
+    docs: list[dict] = []
+    project_file = get_project_file()
+    docs_dir = os.path.join(os.path.dirname(project_file), "documents")
+    if not os.path.isdir(docs_dir):
+        return docs
+    for fname in os.listdir(docs_dir):
+        if not fname.endswith(".md"):
+            continue
+        path = os.path.join(docs_dir, fname)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = f.read()
+        except OSError:
+            continue
+        # Parse YAML-ish frontmatter (--- delimited)
+        meta: dict[str, str] = {}
+        content = raw
+        if raw.startswith("---\n"):
+            try:
+                _, fm, body = raw.split("---\n", 2)
+                for line in fm.splitlines():
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        meta[k.strip()] = v.strip().strip('"').strip("'")
+                content = body
+            except ValueError:
+                pass
+        doc_id = meta.get("doc_id") or fname[:-3]
+        docs.append({
+            "doc_id": doc_id,
+            "title": meta.get("title", fname[:-3]),
+            "scope": meta.get("scope", "memo"),
+            "milestone": meta.get("milestone", ""),
+            "operation": meta.get("operation", ""),
+            "content": content,
+            "created_at": meta.get("created_at", ""),
+            "updated_at": meta.get("updated_at", ""),
+        })
+    return docs
