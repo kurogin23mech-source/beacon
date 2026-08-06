@@ -234,6 +234,23 @@ from cmd_bus import (  # noqa: F401
     cmd_bus_status, cmd_bus_directory,
 )
 
+# ms-127 e-4809: retro family moved to cmd_retro.py, plus its retro-day / week /
+# document / content-input leaf helpers promoted to commands_shared. Re-export the
+# 5 promoted helpers so commands.py callers (_auto_fire_retro_trigger / cmd_search
+# / cmd_doc_add / cmd_doc_update) keep resolving them by bare name. DAY_NAMES is
+# only used by the promoted _get_retro_day, so it is NOT re-exported. Retro-handler
+# callers resolve these inside cmd_retro, so tests driving cmd_retro_* patch at
+# cmd_retro._X (the e-4320 monkeypatch-trap rule).
+from commands_shared import (  # noqa: F401
+    _get_retro_day, _last_reviewed_week, _most_recent_retro_day_on_or_before,
+    _load_local_documents, _resolve_content_input,
+)
+# Public retro handlers only (family-private _retro_catch_up_block stays canonical
+# in cmd_retro, patched there — see the e-4320 rule above).
+from cmd_retro import (  # noqa: F401
+    cmd_retro_prepare, cmd_retro_default_since, cmd_retro_save, cmd_retro_done,
+)
+
 
 # ---------------------------------------------------------------------------
 # Init (CLI-specific: file creation, hook installation)
@@ -8885,325 +8902,16 @@ def cmd_milestone_graph():
 # Retro
 # ---------------------------------------------------------------------------
 
-def cmd_retro_prepare():
-    """Prepare the JSON payload that /beacon-retro Skill renders into a
-    weekly markdown.
-
-    The historical core path (= ``core.collect_retro_entries``) is kept
-    as the "per-MS narrative grouping" layer — it walks each milestone's
-    entry tree recursively in date order, which is exactly what the Skill
-    wants for the "今週の取り組み" section.
-
-    ms-79 / e-1836 additions:
-
-      - ``source_breakdown`` (source 別件数): a top-level facet showing
-        how many of the week's entries came from human dialog vs auto-op
-        (= envelope auto-execute) vs DM. Generated via the unified
-        ``retro_query`` base so the same human/auto-op/dm tagging used
-        by /beacon-retrospect is reused here without duplication.
-      - ``catch_up`` block: when multiple retro slots are unreviewed
-        (= the retro trigger reports ``overdue_slots`` length > 1), this
-        block surfaces the overdue weeks list so the Skill can offer a
-        catch-up batch path (e-1837 / UC5-F2). The flag
-        ``BEACON_RETRO_CATCH_UP=1`` enables the listing; without it the
-        block is omitted so existing Skill output is unchanged.
-    """
-    since = os.environ.get("BEACON_SINCE", "")
-    until = os.environ.get("BEACON_UNTIL", "")
-    catch_up_mode = os.environ.get("BEACON_RETRO_CATCH_UP", "") == "1"
-    data = load_project()
-
-    weekly_milestones = []
-    for ms in data.get("milestones", []):
-        ms_entries = core.collect_retro_entries(ms.get("entries", []), since, until)
-        if ms_entries:
-            weekly_milestones.append({
-                "id": ms["id"],
-                "title": ms.get("title", ""),
-                "status": ms.get("status", ""),
-                "progress": ms.get("progress", 0),
-                "entries": ms_entries,
-            })
-
-    # Include deploy records that fall within the period
-    weekly_deploys = []
-    for dep in data.get("deployments", []):
-        dep_date = (dep.get("date") or "")[:10]
-        if (not since or dep_date >= since) and (not until or dep_date <= until):
-            weekly_deploys.append({
-                "id": dep["id"],
-                "type": dep.get("type", ""),
-                "date": dep.get("date", "")[:10],
-                "milestones": dep.get("milestones", []),
-                "newly_completed_ms": dep.get("newly_completed_ms", []),
-                "description": dep.get("description", ""),
-            })
-
-    # ms-79 / e-1836: source breakdown via the unified retro_query base.
-    # Counts how many of the week's history events were human vs auto-op
-    # vs DM. Silent-fail-tolerant so the retro prepare path never breaks
-    # on a malformed entry — we just omit the breakdown in that case.
-    source_breakdown: dict[str, int] = {}
-    try:
-        import retro_query as _rq  # noqa: PLC0415
-        documents = _load_local_documents()
-        rq_result = _rq.retro_query(
-            data,
-            documents,
-            from_date=since,
-            to_date=until,
-            limit=10_000,
-        )
-        source_breakdown = (rq_result.get("facets") or {}).get("source") or {}
-    except Exception:
-        pass
-
-    output: dict = {
-        "project": data.get("name", ""),
-        "period": {"since": since, "until": until},
-        "summary": data.get("summary", ""),
-        "milestones": weekly_milestones,
-        "deploys": weekly_deploys,
-        "source_breakdown": source_breakdown,
-    }
-
-    # ms-79 / e-1837 (UC5-F2): catch-up batch info.
-    # Read the retro trigger payload (= written by _auto_fire_retro_trigger)
-    # to discover whether more than one slot is overdue. The trigger file
-    # is the canonical record so we don't recompute the slot list here.
-    if catch_up_mode:
-        catch_up_block = _retro_catch_up_block()
-        if catch_up_block:
-            output["catch_up"] = catch_up_block
-
-    print(json.dumps(output, ensure_ascii=False))
-
-
-def _retro_catch_up_block() -> Optional[dict]:
-    """Return the catch-up payload built from the persistent retro trigger.
-
-    Shape::
-
-        {
-          "overdue_slots": ["2026-W23", "2026-W24", "2026-W25"],
-          "count": 3,
-          "since_first_overdue": "2026-06-01",
-        }
-
-    Returns ``None`` if there is no retro trigger (= nothing to catch up
-    on) or only a single overdue slot (= the regular retro flow already
-    covers it).
-    """
-    project_dir = os.path.dirname(get_project_file())
-    trigger_path = os.path.join(project_dir, "triggers", "retro.json")
-    if not os.path.exists(trigger_path):
-        return None
-    try:
-        with open(trigger_path, "r", encoding="utf-8") as f:
-            trig = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return None
-    overdue = trig.get("overdue_slots") or []
-    if not isinstance(overdue, list) or len(overdue) < 2:
-        return None
-    # Compute the Monday of the earliest overdue slot for since-display.
-    import datetime as _dt
-    since_first = ""
-    try:
-        first_slot = overdue[0]  # YYYY-WNN
-        year_str, wk_str = first_slot.split("-W")
-        year = int(year_str); wk = int(wk_str)
-        jan4 = _dt.date(year, 1, 4)
-        week1_mon = jan4 - _dt.timedelta(days=jan4.weekday())
-        first_mon = week1_mon + _dt.timedelta(weeks=wk - 1)
-        since_first = first_mon.strftime("%Y-%m-%d")
-    except (ValueError, IndexError):
-        pass
-    return {
-        "overdue_slots": overdue,
-        "count": len(overdue),
-        "since_first_overdue": since_first,
-    }
-
-
-def cmd_retro_default_since():
-    """Print the recommended default `--since` date for `beacon retro`.
-
-    ms-43 e-570: when the user delays a retro past the configured retro_day,
-    the previous default ("this Monday") covers too short a window and misses
-    the actual unreviewed period. Logic:
-
-      1. Read `.reviewed` for the most recent reviewed ISO week (if any).
-      2. If found, return the Monday of the **next** ISO week after that.
-      3. Otherwise fall back to the most recent retro_day on or before today,
-         minus 6 days (= the start of the slot being reviewed).
-      4. Final fallback: this Monday.
-
-    Output is a YYYY-MM-DD line; empty on error (the shell wrapper has its
-    own date-arithmetic fallback so older installs still function).
-    """
-    import datetime
-    try:
-        today = datetime.date.today()
-        # 1. Try the .reviewed marker first.
-        reviewed = _last_reviewed_week()
-        if reviewed:
-            # ISO week format: YYYY-WNN. The Monday of the NEXT week begins
-            # the period we still owe a retro for.
-            try:
-                year_str, wk_str = reviewed.split("-W")
-                year = int(year_str); wk = int(wk_str)
-                # ISO week's Monday: use isocalendar inverse.
-                # week N's Monday = first ISO date with isocalendar() == (year, wk, 1)
-                jan4 = datetime.date(year, 1, 4)  # Always in ISO week 1
-                week1_mon = jan4 - datetime.timedelta(days=jan4.weekday())
-                last_reviewed_mon = week1_mon + datetime.timedelta(weeks=wk - 1)
-                next_mon = last_reviewed_mon + datetime.timedelta(days=7)
-                # Don't let it go past today.
-                if next_mon <= today:
-                    print(next_mon.strftime("%Y-%m-%d"))
-                    return
-            except (ValueError, IndexError):
-                pass  # malformed marker, fall through
-
-        # 2. No marker: anchor on the most recent retro_day.
-        retro_day = _get_retro_day()
-        anchor = _most_recent_retro_day_on_or_before(today, retro_day)
-        # Cover the week ending on the anchor day.
-        since = anchor - datetime.timedelta(days=6)
-        # But not past today (defensive).
-        if since > today:
-            since = today
-        print(since.strftime("%Y-%m-%d"))
-    except Exception:
-        # Empty output → shell wrapper falls back to its own date math.
-        pass
-
-
-def cmd_retro_save():
-    """Persist a retro markdown document for a given ISO week.
-
-    Cloud mode: pushes to the cloud retros subcollection (the source of truth
-    for the Web UI Reviews tab). Local mode: writes `.beacon/retro/{week}.md`.
-
-    /beacon-retro Skill MUST call this instead of writing the file directly.
-    The legacy Write-tool path orphaned retros in cloud mode because the only
-    push path was the initial `beacon cloud push` migration.
-    """
-    week = os.environ.get("BEACON_RETRO_WEEK", "")
-    content = os.environ.get("BEACON_CONTENT", "")
-    json_mode = os.environ.get("BEACON_JSON", "") == "1"
-
-    if not week:
-        print("Error: --week required (e.g. 2026-W23)")
-        sys.exit(1)
-
-    import re
-    if not re.match(r"^\d{4}-W\d{2}$", week):
-        print(f"Error: week must be in YYYY-WNN format (got {week!r})")
-        sys.exit(1)
-
-    content = _resolve_content_input(content)
-
-    if not content:
-        print("Error: content required (pass via BEACON_CONTENT or stdin)")
-        sys.exit(1)
-
-    if _is_cloud_mode():
-        client, config = _get_api_client()
-        try:
-            client.save_retro(config["project_id"], week, content)
-        except RuntimeError as e:
-            print(f"Error: {e}")
-            sys.exit(1)
-        location = f"cloud:projects/{config['project_id']}/retros/{week}"
-    else:
-        project_dir = os.path.dirname(get_project_file())
-        retro_dir = os.path.join(project_dir, "retro")
-        os.makedirs(retro_dir, exist_ok=True)
-        fpath = os.path.join(retro_dir, f"{week}.md")
-        with open(fpath, "w", encoding="utf-8") as f:
-            f.write(content)
-        location = fpath
-
-    if json_mode:
-        print(json.dumps({"week": week, "location": location}, ensure_ascii=False))
-    else:
-        print(f"Saved retro: {week} -> {location}")
-
-
-def cmd_retro_done():
-    import datetime
-    today = datetime.date.today()
-    year, week, _ = today.isocalendar()
-    current_week = f"{year}-W{week:02d}"
-
-    project_dir = os.path.dirname(get_project_file())
-    retro_dir = os.path.join(project_dir, "retro")
-    os.makedirs(retro_dir, exist_ok=True)
-    reviewed_path = os.path.join(retro_dir, ".reviewed")
-    with open(reviewed_path, "w", encoding="utf-8") as f:
-        f.write(current_week + "\n")
-
-    triggers_dir = os.path.join(project_dir, "triggers")
-    retro_trigger = os.path.join(triggers_dir, "retro.json")
-    if os.path.exists(retro_trigger):
-        os.remove(retro_trigger)
-
-    print(f"Retro reviewed: {current_week}")
-
 
 # ---------------------------------------------------------------------------
 # Triggers
 # ---------------------------------------------------------------------------
 
 
-DAY_NAMES = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
-             "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
-             "friday": 4, "saturday": 5, "sunday": 6}
-
-
-def _get_retro_day():
-    try:
-        data = load_project()
-        day_str = data.get("retro_day", "friday").lower()
-        return DAY_NAMES.get(day_str, 4)
-    except Exception:
-        return 4
-
-
-def _last_reviewed_week() -> Optional[str]:
-    """Return the most recent ISO-week string a retro was reviewed for, or None.
-
-    Reads the `.beacon/retro/.reviewed` marker that `beacon retro done` writes.
-    Used by the persistent retro trigger to distinguish "already retro'd this
-    week" from "retro is overdue for one or more past weeks".
-    """
-    project_dir = os.path.dirname(get_project_file())
-    reviewed_path = os.path.join(project_dir, "retro", ".reviewed")
-    try:
-        with open(reviewed_path, "r", encoding="utf-8") as f:
-            return f.read().strip() or None
-    except (FileNotFoundError, IOError):
-        return None
-
-
 def _iso_week_string(date) -> str:
     """`YYYY-WNN` formatted ISO week for a `datetime.date`."""
     year, week, _ = date.isocalendar()
     return f"{year}-W{week:02d}"
-
-
-def _most_recent_retro_day_on_or_before(today, retro_day_idx: int):
-    """Return the latest date <= today whose weekday() == retro_day_idx.
-
-    If today *is* the retro day, returns today. Used to anchor the
-    "current retro week" — every Friday (or configured day) starts a new
-    retro slot that must be settled before it becomes "stale".
-    """
-    import datetime as _dt
-    delta = (today.weekday() - retro_day_idx) % 7
-    return today - _dt.timedelta(days=delta)
 
 
 def _auto_fire_retro_trigger():
@@ -11353,26 +11061,6 @@ def _doc_slug(title):
     slug = re.sub(r"[^\w]+", "-", title.lower()).strip("-")
     slug = re.sub(r"-+", "-", slug)
     return slug or "untitled"
-
-
-def _resolve_content_input(content: str) -> str:
-    """Resolve a ``--content`` argument, treating ``"-"`` as stdin.
-
-    PE dogfood 2026-06-10: ``beacon doc update --content -`` was interpreted
-    literally and replaced a 130-line SPEC with the single character ``-``.
-    kubectl / curl convention treats ``-`` as stdin; we follow the same rule
-    and hard-reject the dangerous case where stdin is a tty.
-    """
-    if content == "-":
-        if sys.stdin.isatty():
-            print("Error: --content - は stdin からの読み込みを意味します", file=sys.stderr)
-            print("       pipe で渡してください: cat file.md | beacon doc update <id>", file=sys.stderr)
-            print("       または --content フラグを省略して stdin から渡してください", file=sys.stderr)
-            sys.exit(1)
-        return sys.stdin.read()
-    if not content and not sys.stdin.isatty():
-        return sys.stdin.read()
-    return content
 
 
 def _parse_frontmatter(text):
@@ -16468,51 +16156,6 @@ def cmd_search():
         if r.get("snippet") and r["snippet"] != title:
             snip = r["snippet"][:120]
             print(f"       └─ {snip}")
-
-
-def _load_local_documents() -> list[dict]:
-    """Read all .beacon/documents/*.md files and return them as dicts with
-    frontmatter fields (title, scope, milestone, operation, content, etc.)
-    promoted to top level. Used by cmd_search for local-mode document search."""
-    docs: list[dict] = []
-    project_file = get_project_file()
-    docs_dir = os.path.join(os.path.dirname(project_file), "documents")
-    if not os.path.isdir(docs_dir):
-        return docs
-    for fname in os.listdir(docs_dir):
-        if not fname.endswith(".md"):
-            continue
-        path = os.path.join(docs_dir, fname)
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                raw = f.read()
-        except OSError:
-            continue
-        # Parse YAML-ish frontmatter (--- delimited)
-        meta: dict[str, str] = {}
-        content = raw
-        if raw.startswith("---\n"):
-            try:
-                _, fm, body = raw.split("---\n", 2)
-                for line in fm.splitlines():
-                    if ":" in line:
-                        k, v = line.split(":", 1)
-                        meta[k.strip()] = v.strip().strip('"').strip("'")
-                content = body
-            except ValueError:
-                pass
-        doc_id = meta.get("doc_id") or fname[:-3]
-        docs.append({
-            "doc_id": doc_id,
-            "title": meta.get("title", fname[:-3]),
-            "scope": meta.get("scope", "memo"),
-            "milestone": meta.get("milestone", ""),
-            "operation": meta.get("operation", ""),
-            "content": content,
-            "created_at": meta.get("created_at", ""),
-            "updated_at": meta.get("updated_at", ""),
-        })
-    return docs
 
 
 def _load_session_logs() -> list[dict]:
