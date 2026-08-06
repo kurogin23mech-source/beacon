@@ -60,10 +60,6 @@ from commands_shared import (  # noqa: F401
     _persist_table_doc,
 )
 
-# doc-private: cmd_doc_show returns a dedicated exit code so skills distinguish
-# "doc not created yet (normal) = 3" from "other failure". Only used here.
-EXIT_DOC_NOT_FOUND = 3
-
 
 def cmd_doc_list():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
@@ -839,13 +835,6 @@ def cmd_doc_delete():
         print(f"Trashed: {doc_id}")
         if reason:
             print(f"  Reason: {reason}")
-
-
-# ---------------------------------------------------------------------------
-# Cloud commands
-# ---------------------------------------------------------------------------
-
-DEFAULT_API_URL = "https://beacon-ai.dev"
 
 
 def cmd_doc_image_upload():
