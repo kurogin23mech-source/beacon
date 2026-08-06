@@ -1874,8 +1874,14 @@ def cmd_trek_reconcile():
         ]
         # Local mode: scope project は cwd の project.json と一致する想定。
         # cross-project scope の局所 reconcile は cloud mode のみで完全対応。
+        # ms-127 e-4824: 旧 read_project() は commands.py 時代から未定義で、
+        # NameError が下の except に握り潰され data=None → pool_status 空 →
+        # local reconcile が常に差分ゼロで無音失敗していた。正しくは既に
+        # import 済みの load_project() (L378/772/1018 と同じ)。except は
+        # 「project が読めない時は pool mirror を諦めて crash させない」防御と
+        # して残す (読める時は実際に task pool を反映するようになる)。
         try:
-            data = read_project()
+            data = load_project()
         except Exception:
             data = None
         pool_status: dict[str, str] = {}
