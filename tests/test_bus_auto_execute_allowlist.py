@@ -36,6 +36,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
+import cmd_trek  # noqa: E402  (ms-127 e-4820: trek handlers live here)
 import cmd_bus  # noqa: E402  (ms-127 e-4803: bus handlers live here)
 
 
@@ -550,7 +551,7 @@ def test_client_and_server_agree_after_trek_auto_arm_local_write(
 
     # Simulate the trek auto-arm local mirror write — same code path the
     # `beacon trek join` flow exercises.
-    trek_channels = list(commands.TREK_AUTO_ARM_CHANNELS)
+    trek_channels = list(cmd_trek.TREK_AUTO_ARM_CHANNELS)
     cmd_bus._mirror_auto_execute_channels_to_local(trek_channels)
 
     # Now ask both readers what they see.
@@ -580,9 +581,9 @@ def test_arm_for_trek_writes_local_mirror_visible_to_hook(
     # _arm_for_trek calls load_project + save_project + mirror. In this
     # local-store fixture (no cloud.json) save_project writes to the same
     # file the hook reads, so the contract is end-to-end visible.
-    result = commands._arm_for_trek("trek-test-arm")
+    result = cmd_trek._arm_for_trek("trek-test-arm")
 
-    expected = set(commands.TREK_AUTO_ARM_CHANNELS)
+    expected = set(cmd_trek.TREK_AUTO_ARM_CHANNELS)
     assert set(result["channels_added"]) == expected
     assert expected.issubset(set(result["channels"]))
 
@@ -621,7 +622,7 @@ def test_inbox_hook_does_not_downgrade_trek_channels_after_auto_arm(
         str(fake_project.root / ".beacon" / "project.json"),
     )
     cmd_bus._mirror_auto_execute_channels_to_local(
-        list(commands.TREK_AUTO_ARM_CHANNELS))
+        list(cmd_trek.TREK_AUTO_ARM_CHANNELS))
 
     events = [
         _make_event("ev-progress", channel="trek-progress-check",

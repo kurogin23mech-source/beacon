@@ -1671,3 +1671,168 @@ def _application_map_applies() -> bool:
     development instance (ms-109 e-3404). Other occupations get neither the
     box at init nor the recurring nags."""
     return _project_profession_safe() == "dev"
+
+
+# ---------------------------------------------------------------------------
+# ms-127 e-4820: docs / frontmatter / project-id leaf helpers promoted from
+# commands.py alongside the trek family split. _get_docs_dir / _parse_frontmatter
+# / _read_local_doc / _current_project_id and the DEFAULT_SCOPE constant are
+# shared foundation used by the trek family (cmd_trek.py) and by many commands.py
+# callers (cmd_doc_* / _auto_fire_operation_triggers / account / table-doc). A
+# commands_shared resident cannot reach back into cmd_trek without a cycle, so
+# these live here. datetime is imported locally inside _read_local_doc.
+# ---------------------------------------------------------------------------
+
+def _current_project_id() -> str:
+    """Return the current project's id (= what ``load_project()`` operates on).
+
+    Used by trek-show / trek-timeline aggregation to decide which scope
+    entries it can resolve locally (= same-project) and which are
+    cross-project hints the caller must visit separately.
+
+    Resolution order (ms-83 / e-2007 dogfood finding):
+      1. ``data.id`` / ``data.project_id`` on the local project.json
+         (= local mode and cloud-cached layouts that store the id inline)
+      2. ``.beacon/cloud.json`` ``project_id`` (= cloud mode default —
+         project.json is the cached document and does not embed the id)
+      3. Empty string if neither path resolves
+    """
+    try:
+        data = load_project()
+    except Exception:
+        data = {}
+    pid = (data.get("id") or data.get("project_id") or "").strip()
+    if pid:
+        return pid
+    try:
+        cloud_path = _get_cloud_config_path()
+        if os.path.exists(cloud_path):
+            with open(cloud_path, "r", encoding="utf-8") as f:
+                cloud_cfg = json.load(f)
+            return (cloud_cfg.get("project_id") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+DEFAULT_SCOPE = "memo"
+
+
+def _get_docs_dir():
+    project_dir = os.path.dirname(get_project_file()) or ".beacon"
+    return os.path.join(project_dir, "documents")
+
+
+def _parse_frontmatter(text):
+    """Parse YAML-like frontmatter from markdown text.
+
+    Returns ``(metadata_dict, body_text)``. Block-list values (lines starting
+    with ``- `` immediately after a key with empty value) are returned as
+    ``list[str]``; everything else is ``str``. PE dogfood 2026-06-10:
+    block-list ``approved_actions`` of the form ``- "op:op-2:check_run"`` were
+    silently destroyed by the previous line-based parser which split each
+    ``- "op:...`` row on its first colon.
+    """
+    if not text.startswith("---"):
+        return {}, text
+    end = text.find("\n---", 3)
+    if end == -1:
+        return {}, text
+    header = text[4:end]
+    body = text[end + 4:].lstrip("\n")
+    meta = {}
+    lines = header.split("\n")
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        i += 1
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.startswith("- "):
+            # Orphan list item without a preceding key — ignore.
+            continue
+        if ":" not in stripped:
+            continue
+        key, val = stripped.split(":", 1)
+        key = key.strip()
+        val = val.strip()
+        if val:
+            # Inline list form: ``key: [a, b]`` is parsed to ``list[str]`` so
+            # that block- and inline-list values round-trip identically.
+            if val.startswith("[") and val.endswith("]"):
+                inner = val[1:-1].strip()
+                if not inner:
+                    meta[key] = []
+                else:
+                    meta[key] = [
+                        s.strip().strip('"').strip("'")
+                        for s in inner.split(",")
+                        if s.strip()
+                    ]
+            else:
+                meta[key] = val
+            continue
+        # Empty inline value → look ahead for a block-list.
+        items: list[str] = []
+        while i < len(lines):
+            next_stripped = lines[i].strip()
+            if not next_stripped:
+                i += 1
+                continue
+            if next_stripped.startswith("- "):
+                items.append(next_stripped[2:].strip().strip('"').strip("'"))
+                i += 1
+                continue
+            break
+        meta[key] = items if items else ""
+    return meta, body
+
+
+def _read_local_doc(fpath):
+    """Read a local document file and return parsed metadata."""
+    import datetime
+    fname = os.path.basename(fpath)
+    with open(fpath, "r", encoding="utf-8") as f:
+        content = f.read()
+    meta, body = _parse_frontmatter(content)
+    scope = meta.get("scope", DEFAULT_SCOPE)
+    milestone = meta.get("milestone", "")
+    # Find title from first heading in body
+    first_line = ""
+    for line in body.split("\n"):
+        line = line.strip()
+        if line:
+            first_line = line
+            break
+    title = first_line.lstrip("# ") if first_line.startswith("#") else fname[:-3]
+    stat = os.stat(fpath)
+    updated = datetime.datetime.fromtimestamp(stat.st_mtime).isoformat()
+    operation = meta.get("operation", "")
+    trek_id = meta.get("trek_id", "")  # ms-69 / e-1663
+    result = {
+        "doc_id": fname[:-3],
+        "title": title,
+        "scope": scope,
+        "content": content,
+        "updated_at": updated,
+    }
+    if milestone:
+        result["milestone"] = milestone
+    if operation:
+        result["operation"] = operation
+    if trek_id:
+        result["trek_id"] = trek_id
+    # ms-131 e-4494: surface the document format (``table`` vs default markdown)
+    # so table-doc readers (CLI show / Web UI) can branch without re-parsing the
+    # frontmatter. Additive — plain markdown docs omit it and read unchanged.
+    if meta.get("format"):
+        result["format"] = meta["format"]
+    # Soft-delete fields surface so cmd_doc_list can filter without
+    # re-parsing the frontmatter (ms-14 e-973).
+    if meta.get("status"):
+        result["status"] = meta["status"]
+    for k in ("trashed_at", "trashed_by", "trash_reason"):
+        if meta.get(k):
+            result[k] = meta[k]
+    return result
