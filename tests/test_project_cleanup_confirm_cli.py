@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "lib"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
+import cmd_project  # noqa: E402  (ms-127 e-4860: project family moved here)
 
 
 class _StubClient:
@@ -54,11 +55,11 @@ def _wire(monkeypatch, projects):
     import auth
     import api_client
     monkeypatch.setattr(auth, "load_credentials", lambda: {"token": "t"})
-    monkeypatch.setattr(commands, "_resolve_active_api_url", lambda: "http://x")
-    monkeypatch.setattr(commands, "_extract_token", lambda creds: "t")
+    monkeypatch.setattr(cmd_project, "_resolve_active_api_url", lambda: "http://x")
+    monkeypatch.setattr(cmd_project, "_extract_token", lambda creds: "t")
     monkeypatch.setattr(api_client, "ApiClient", lambda url, tok: stub)
     monkeypatch.setattr(
-        commands, "_resolve_current_project_id_from_cloud_json", lambda: "")
+        cmd_project, "_resolve_current_project_id_from_cloud_json", lambda: "")
     return stub
 
 
