@@ -2169,3 +2169,110 @@ def _spec_exists_for_ms(ms_id: str) -> bool:
     """True if any spec-scoped document is attached to ms_id (delegates to the
     single-source scan _spec_doc_for_target)."""
     return _spec_doc_for_target(ms_id, "milestone") is not None
+
+# ---------------------------------------------------------------------------
+# ms-127 e-4856: promoted from commands.py during the pr-family split.
+# The review-due trigger helpers (+ _REVIEW_DUE_SUFFIX) are shared by BOTH the
+# pr handlers (cmd_pr.py) and the `beacon review` handlers still in commands.py;
+# they live here so both import them by bare name without a cmd_pr<->commands
+# cycle.
+# ---------------------------------------------------------------------------
+def _fire_review_due_for_pr(review_type: str, label: str, pr_number: str,
+                            pr_title: str, pr_url: str) -> None:
+    """Write a '<type>-review-due' trigger for a PR-bound review (ms-119).
+
+    One trigger file per review type so each re-surfaces (via ``beacon trigger
+    check`` / session-start) and clears independently. Advisory only — never
+    blocks. Best-effort: a bad PR number / IO error is swallowed so recording a
+    PR never fails over a trigger write.
+    """
+    if not pr_number:
+        return
+    try:
+        triggers_dir = _get_triggers_dir()
+        os.makedirs(triggers_dir, exist_ok=True)
+        import datetime
+        trigger_data = {
+            "name": f"{review_type}-review-due-{pr_number}",
+            "kind": f"{review_type}-review-due",
+            "pr_number": pr_number,
+            "pr_url": pr_url,
+            "review": review_type,
+            "message": (
+                f"PR #{pr_number} \"{pr_title or pr_url}\" が作成されました "
+                f"({label} の節目)。文脈ゼロの独立 judge に原典と差分を渡して "
+                f"drift を確認してください: "
+                f"`/beacon-review-run --type {review_type} --pr {pr_number}` "
+                f"(または `beacon review context --type {review_type} --pr {pr_number}`)。"
+            ),
+            "created_at": datetime.datetime.now().isoformat(),
+        }
+        trigger_path = os.path.join(triggers_dir, f"{review_type}-review-due-{pr_number}.json")
+        with open(trigger_path, "w", encoding="utf-8") as f:
+            json.dump(trigger_data, f, ensure_ascii=False)
+            f.write("\n")
+    except OSError:
+        return
+
+def _clear_review_due_for_pr(review_type: str, pr_number: str) -> None:
+    """Remove a '<type>-review-due' trigger once the PR closes / merges — the
+    interface / code-change 節目 is resolved (ms-119). Best-effort."""
+    if not pr_number:
+        return
+    try:
+        path = os.path.join(_get_triggers_dir(), f"{review_type}-review-due-{pr_number}.json")
+        if os.path.isfile(path):
+            os.remove(path)
+    except OSError:
+        return
+
+def _fire_pr_open_review_triggers(pr_number: str, pr_title: str, pr_url: str) -> None:
+    """Fire a review-due trigger for EVERY judge-run review type that binds to the
+    PR-open 節目 (ms-119 / e-4003 + maintainability).
+
+    Data-driven: the set of PR-bound reviews is read from the review-type registry
+    (descriptor ``fires_on == "pr-open"``), so adding a new PR-bound review type
+    (drop a review-type.json with fires_on=pr-open) makes it auto-fire here with
+    **no code change** — e-4009's data-driven registry, extended from *assembly*
+    to *firing*. Today AX and maintainability both bind here; philosophy /
+    attainment bind to target transitions instead (see _fire_review_due_trigger).
+    """
+    if not pr_number:
+        return
+    import review_spine
+    for tid, desc in review_spine.judge_run_review_types().items():
+        if desc.get("fires_on") != "pr-open":
+            continue
+        _fire_review_due_for_pr(tid, desc.get("label", tid), pr_number, pr_title, pr_url)
+
+_REVIEW_DUE_SUFFIX = "-review-due-"
+
+def _pending_review_types_for_pr(pr_number: str) -> list:
+    """Return the review types whose review-due trigger is still present for this
+    PR — i.e. independent reviews (AX / maintainability) that fired at PR-open
+    and have NOT been run/cleared yet. Empty when none outstanding. This is the
+    single gate signal beacon pr approve/merge read (ms-119 e-4060)."""
+    pr_number = str(pr_number or "").strip()
+    if not pr_number:
+        return []
+    tail = f"{_REVIEW_DUE_SUFFIX}{pr_number}.json"
+    out: list = []
+    try:
+        for fn in sorted(os.listdir(_get_triggers_dir())):
+            if not fn.endswith(tail):
+                continue
+            rtype = fn[:-len(tail)]
+            try:
+                with open(os.path.join(_get_triggers_dir(), fn),
+                          encoding="utf-8") as f:
+                    rtype = json.load(f).get("review") or rtype
+            except (OSError, ValueError):
+                pass
+            if rtype:
+                out.append(rtype)
+    except OSError:
+        return []
+    return out
+
+def _pr_open_reviewed_marker_path(pr_number: str) -> str:
+    return os.path.join(_get_triggers_dir(), f".reviewed-pr-{pr_number}")

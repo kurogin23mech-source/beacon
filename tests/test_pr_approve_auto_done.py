@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import cmd_pr  # noqa: E402  (ms-127 e-4856: pr family moved here)
 import core  # noqa: E402
 
 
@@ -119,10 +120,10 @@ def _run_pr_approve(data, *, entry_id="e-400", rationale="LGTM",
     # memory. This mirrors the pattern other commands.py tests use to
     # avoid a real .beacon directory.
     captured = {"saved": None}
-    orig_load = commands.load_project
-    orig_save = commands.save_project
-    commands.load_project = lambda: data
-    commands.save_project = lambda d: captured.__setitem__("saved", d)
+    orig_load = cmd_pr.load_project
+    orig_save = cmd_pr.save_project
+    cmd_pr.load_project = lambda: data
+    cmd_pr.save_project = lambda d: captured.__setitem__("saved", d)
 
     env_backup = {
         k: os.environ.get(k)
@@ -144,8 +145,8 @@ def _run_pr_approve(data, *, entry_id="e-400", rationale="LGTM",
             except SystemExit as e:
                 rc = e.code if isinstance(e.code, int) else 1
     finally:
-        commands.load_project = orig_load
-        commands.save_project = orig_save
+        cmd_pr.load_project = orig_load
+        cmd_pr.save_project = orig_save
         for k, v in env_backup.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -176,7 +177,7 @@ def test_collect_bound_ids_hash_join():
     """meta.resolves on beacon-logged commit is hash-joined to PR child."""
     data = _make_project(with_resolves=True, with_id_mention=False)
     pr_entry = data["milestones"][0]["entries"][2]
-    ids = commands._collect_pr_bound_task_ids(pr_entry, data)
+    ids = cmd_pr._collect_pr_bound_task_ids(pr_entry, data)
     assert ids == ["e-300"]
 
 
@@ -184,7 +185,7 @@ def test_collect_bound_ids_regex_fallback():
     """No resolves on logged commit — regex on commit message still binds."""
     data = _make_project(with_resolves=False, with_id_mention=True)
     pr_entry = data["milestones"][0]["entries"][2]
-    ids = commands._collect_pr_bound_task_ids(pr_entry, data)
+    ids = cmd_pr._collect_pr_bound_task_ids(pr_entry, data)
     assert "e-300" in ids
 
 
@@ -192,7 +193,7 @@ def test_collect_bound_ids_dedupe():
     """Both signals firing → still one entry per task id."""
     data = _make_project(with_resolves=True, with_id_mention=True)
     pr_entry = data["milestones"][0]["entries"][2]
-    ids = commands._collect_pr_bound_task_ids(pr_entry, data)
+    ids = cmd_pr._collect_pr_bound_task_ids(pr_entry, data)
     assert ids == ["e-300"]
 
 
@@ -203,7 +204,7 @@ def test_collect_bound_ids_dedupe():
 def test_judge_high_when_explicit_id_and_keyword_overlap():
     data = _make_project(with_resolves=True, with_id_mention=True)
     pr_entry = data["milestones"][0]["entries"][2]
-    j = commands._judge_pr_approve_auto_done(pr_entry, data)
+    j = cmd_pr._judge_pr_approve_auto_done(pr_entry, data)
     assert len(j) == 1
     assert j[0]["task_id"] == "e-300"
     assert j[0]["confidence"] == "HIGH"
@@ -219,7 +220,7 @@ def test_judge_mid_when_keyword_overlap_only():
         commit_msg="feat: add email validator helper",
     )
     pr_entry = data["milestones"][0]["entries"][2]
-    j = commands._judge_pr_approve_auto_done(pr_entry, data)
+    j = cmd_pr._judge_pr_approve_auto_done(pr_entry, data)
     assert len(j) == 1
     assert j[0]["confidence"] == "MID"
 
@@ -227,7 +228,7 @@ def test_judge_mid_when_keyword_overlap_only():
 def test_judge_skips_done_tasks():
     data = _make_project(task_status="done")
     pr_entry = data["milestones"][0]["entries"][2]
-    j = commands._judge_pr_approve_auto_done(pr_entry, data)
+    j = cmd_pr._judge_pr_approve_auto_done(pr_entry, data)
     assert j == []
 
 
@@ -238,7 +239,7 @@ def test_judge_skips_unknown_task_id():
         e for e in data["milestones"][0]["entries"] if e.get("id") != "e-300"
     ]
     pr_entry = data["milestones"][0]["entries"][1]  # PR shifted to index 1
-    j = commands._judge_pr_approve_auto_done(pr_entry, data)
+    j = cmd_pr._judge_pr_approve_auto_done(pr_entry, data)
     assert j == []
 
 
