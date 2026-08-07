@@ -26,7 +26,14 @@ LIB = Path(__file__).parent.parent / "lib"
 sys.path.insert(0, str(LIB))
 
 import commands  # noqa: E402
+import cmd_acquisition  # noqa: E402  (ms-127 e-4839: acquisition handlers live here)
 import sales_entities as se  # noqa: E402
+
+# e-4320 rule: cmd_acquisition_* handlers resolve helpers (get_store /
+# load_project / _read_bus_budget / _refuse_if_bus_origin …) from
+# cmd_acquisition's own namespace (each `from commands_shared import X` binds an
+# independent copy). To stub any of them, patch `cmd_acquisition.X`, NOT
+# `commands.X` — the latter is a silent no-op on this call path.
 
 
 def _write(cwd: Path, data: dict) -> None:
@@ -214,7 +221,10 @@ def test_confirm_is_refused_when_armed(outreach_cwd, monkeypatch, capsys):
     # arming grants auto-reply budget, not blanket send authorization.
     cwd, doc_id = outreach_cwd
     _plan(monkeypatch, capsys, doc_id)
-    monkeypatch.setattr(commands, "_read_bus_budget",
+    # ms-127 e-4839: cmd_acquisition_attack_list_send resolves _read_bus_budget
+    # from cmd_acquisition's namespace (imported from commands_shared), so patch
+    # there — patching commands.* would be a silent no-op (the e-4320 rule).
+    monkeypatch.setattr(cmd_acquisition, "_read_bus_budget",
                         lambda: {"total": 5, "used": 0})
     _clear(monkeypatch)
     monkeypatch.setenv("BEACON_DOC_ID", doc_id)

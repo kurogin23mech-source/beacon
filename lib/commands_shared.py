@@ -2086,3 +2086,24 @@ def _sales_skill_nudge(what: str, skill: str, detail: str) -> None:
         return
     print(f"💡 {what}は {skill} で対話的に進めると{detail}。"
           f"このまま直接続行します (master=人間)。", file=sys.stderr)
+
+
+def _today_iso() -> str:
+    """Today's date as ``YYYY-MM-DD`` (date-only). ms-132 e-4623: the single
+    source for the date stamped into ``date``-typed table columns — those columns
+    reject ``_now_iso()``'s time component, so a future policy change (timezone,
+    format) has one place to edit rather than a slice expression copied per site
+    (PR #559 保守性レビュー M1)."""
+    return _now_iso()[:10]
+
+
+def _parse_number(raw: str, flag: str):
+    """Parse an optional numeric flag; empty → None, int-if-whole else float."""
+    if not raw or not raw.strip():
+        return None
+    try:
+        val = float(raw)
+        return int(val) if val.is_integer() else val
+    except ValueError:
+        print(f"Error: {flag} must be a number, got {raw!r}", file=sys.stderr)
+        sys.exit(1)
