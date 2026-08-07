@@ -253,9 +253,8 @@ def cmd_doc_add():
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
 
-    import datetime
     data = load_project()
-    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    today = _now_iso()  # ms-127 e-4838: unified through the commands_shared binding
     # ms-134 e-4720: record the doc-add side effect through the occupation layer,
     # which dispatches by the Target's kind and no-ops when there is no dev-era
     # changelog to record onto — a sales Target (opportunity/account/acquisition),
@@ -439,9 +438,8 @@ def cmd_doc_update():
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
 
-    import datetime
     data = load_project()
-    today = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    today = _now_iso()  # ms-127 e-4838: unified through the commands_shared binding
     # ms-134 e-4720: record the doc-update side effect through the occupation
     # layer, which dispatches by the Target's kind and no-ops when there is no
     # dev-era changelog to record onto — a sales Target (opportunity/account/
@@ -811,9 +809,12 @@ def cmd_doc_delete():
         print(f"Document {doc_id} is already in trash.")
         sys.exit(1)
 
-    import core as _core
-    now_iso = _core._now_iso()
-    actor = _core._get_actor()
+    # ms-127 e-4838: use the module-level _now_iso binding (e-4320 patch契約に整合)
+    # and the top-level `import core` for the operator identity (core._get_actor
+    # returns 'claude'/email — distinct from _actor_str's machine/agent pair, so
+    # it stays a core leaf call). The redundant `import core as _core` alias is gone.
+    now_iso = _now_iso()
+    actor = core._get_actor()
     updates = {"status": "cancelled", "trashed_at": now_iso, "trashed_by": actor}
     if reason:
         updates["trash_reason"] = reason

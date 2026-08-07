@@ -60,7 +60,7 @@ def cmd_acquisition_add():
     try:
         acq_id = sales_entities.acquisition_add(
             data, title, description=description, assignee=assignee,
-            created_at=core._now_iso())
+            created_at=_now_iso())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -105,7 +105,7 @@ def cmd_acquisition_status():
     data = load_project()
     try:
         sales_entities.acquisition_set_status(data, acq_id, status,
-                                              at=core._now_iso())
+                                              at=_now_iso())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -136,7 +136,7 @@ def cmd_acquisition_delete():
     data = load_project()
     try:
         sales_entities.acquisition_cancel(data, acq_id, reason=reason,
-                                          at=core._now_iso())
+                                          at=_now_iso())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -313,7 +313,7 @@ def cmd_acquisition_attack_list_fill():
     assignee_filter = os.environ.get("BEACON_FILL_ASSIGNEE", "") or None
     name_contains = os.environ.get("BEACON_FILL_NAME", "") or None
     limit_raw = os.environ.get("BEACON_FILL_LIMIT", "")
-    limit = int(_parse_number(limit_raw, "<limit>")) if limit_raw.strip() else None
+    limit = int(_parse_number(limit_raw, "--limit")) if limit_raw.strip() else None
     dry_run = os.environ.get("BEACON_DRY_RUN", "") == "1"
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
@@ -398,6 +398,7 @@ def cmd_acquisition_attack_list_send():
     _USAGE = ("Usage: beacon acquisition attack-list-send <attack-list-doc-id> "
               "[--subject <s>] [--message-file <f> | --message <body>] "
               "[--from-phase <name>] [--limit N] [--confirm] [--json]\n"
+              "  --from-phase 省略時=リストの先頭フェーズ(未接触)を対象にする。\n"
               "  既定=計画のみ(dry-run、送信も記録もしない、直前の pending 計画は上書き)。"
               "--confirm で人間が1回承認 (bus/armed からは不可)。送信自体は Skill が行う。")
     if not doc_id:
@@ -457,7 +458,7 @@ def cmd_acquisition_attack_list_send():
     subject = os.environ.get("BEACON_SEND_SUBJECT", "")
     message = os.environ.get("BEACON_SEND_MESSAGE", "")
     limit_raw = os.environ.get("BEACON_SEND_LIMIT", "")
-    limit = int(_parse_number(limit_raw, "<limit>")) if limit_raw.strip() else None
+    limit = int(_parse_number(limit_raw, "--limit")) if limit_raw.strip() else None
     if not message.strip():
         print("Error: メッセージ本文が必要です (--message-file / --message)\n"
               + _USAGE, file=sys.stderr)
