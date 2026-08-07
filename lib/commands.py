@@ -294,6 +294,14 @@ from cmd_doc import (  # noqa: F401
     cmd_doc_delete,
     cmd_doc_image_upload,
 )
+
+# ms-127 e-4839-foundation: acquisition family split — generic date/number
+# helpers shared by the acquisition handlers (moving to cmd_acquisition.py) and
+# other commands.py callers (sales/opportunity). Re-exported for path stability.
+from commands_shared import (  # noqa: F401
+    _today_iso,
+    _parse_number,
+)
 # Public deploy handlers only (family-private helpers stay canonical in cmd_deploy,
 # patched there — see the e-4320 rule above).
 from cmd_deploy import (  # noqa: F401
@@ -13742,12 +13750,10 @@ def _install_wall_clock_timeout(cmd_name: str) -> None:
 # substrate but not the milestone/task functions. All args arrive via env vars
 # set by bin/beacon / beacon_cli.dispatch, matching the rest of this module.
 
-def _today_iso() -> str:
-    """Today's date as YYYY-MM-DD (the transition_date engine works in dates,
-    not datetimes — core._now_iso() carries a time component we don't want)."""
-    import datetime
-    return datetime.date.today().isoformat()
-
+# ms-127 e-4839: a duplicate `_today_iso` def lived here. It was shadowed by a
+# second, later def (now promoted to commands_shared), so the effective behavior
+# was already `_now_iso()[:10]` (UTC date). All callers now resolve the single
+# re-exported commands_shared._today_iso — no behavior change.
 
 # _require_sales_project (warn-only) was removed in ms-115 e-3785 — the sales
 # target-creating commands now go through the hard containment gate
@@ -14627,13 +14633,6 @@ def cmd_acquisition_attack_list_send():
           f"`beacon acquisition attack-list-send {doc_id} --confirm`")
 
 
-def _today_iso() -> str:
-    """Today's date as ``YYYY-MM-DD`` (date-only). ms-132 e-4623: the single
-    source for the date stamped into ``date``-typed table columns — those columns
-    reject ``_now_iso()``'s time component, so a future policy change (timezone,
-    format) has one place to edit rather than a slice expression copied per site
-    (PR #559 保守性レビュー M1)."""
-    return _now_iso()[:10]
 
 
 def _stamp_attack_list_contact(model, doc_id, title, content, row_id, date_str,
@@ -15512,16 +15511,6 @@ def cmd_sales_target_list():
         print(f"  {member}: 目標 {amt} / 見込み {pipe:.0f}")
 
 
-def _parse_number(raw: str, flag: str):
-    """Parse an optional numeric flag; empty → None, int-if-whole else float."""
-    if not raw or not raw.strip():
-        return None
-    try:
-        val = float(raw)
-        return int(val) if val.is_integer() else val
-    except ValueError:
-        print(f"Error: {flag} must be a number, got {raw!r}", file=sys.stderr)
-        sys.exit(1)
 
 
 def cmd_opportunity_list():
