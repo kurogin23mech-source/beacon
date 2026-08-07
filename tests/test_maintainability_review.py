@@ -14,6 +14,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import review_spine  # noqa: E402
 import commands  # noqa: E402
+import commands_shared  # noqa: E402  (ms-127 e-4856: trigger helpers promoted here)
+import cmd_pr  # noqa: E402  (ms-127 e-4856: pr family moved here)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -78,6 +80,7 @@ def test_principles_cover_the_seven_lenses():
 # --- PR-open firing is data-driven over fires_on=="pr-open" ---
 
 def test_pr_open_fires_both_ax_and_maintainability(tmp_path, monkeypatch):
+    monkeypatch.setattr(commands_shared, "_get_triggers_dir", lambda: str(tmp_path))
     monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
     commands._fire_pr_open_review_triggers("321", "feat: x",
                                            "https://github.com/o/r/pull/321")
@@ -90,16 +93,18 @@ def test_pr_open_fires_both_ax_and_maintainability(tmp_path, monkeypatch):
 
 
 def test_pr_open_clear_removes_both(tmp_path, monkeypatch):
+    monkeypatch.setattr(commands_shared, "_get_triggers_dir", lambda: str(tmp_path))
     monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
     commands._fire_pr_open_review_triggers("55", "t", "https://github.com/o/r/pull/55")
     assert len(list(tmp_path.glob("*-review-due-55.json"))) == 2
-    commands._clear_pr_open_review_triggers("55")
+    cmd_pr._clear_pr_open_review_triggers("55")
     assert list(tmp_path.glob("*-review-due-55.json")) == []
 
 
 def test_ax_shim_still_works(tmp_path, monkeypatch):
     """The AX-specific shim (pinned by the e-4003 tests) delegates to the generic
     writer and still produces an ax-review-due trigger."""
+    monkeypatch.setattr(commands_shared, "_get_triggers_dir", lambda: str(tmp_path))
     monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
     commands._fire_ax_review_due_trigger("7", "t", "https://github.com/o/r/pull/7")
     t = json.loads((tmp_path / "ax-review-due-7.json").read_text())

@@ -15,17 +15,20 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import commands  # noqa: E402
+import commands_shared  # noqa: E402  (ms-127 e-4856: trigger helpers promoted here)
+import cmd_pr  # noqa: E402  (ms-127 e-4856: pr family moved here)
 
 
 def test_pr_number_from_url_parses_github_pr():
-    assert commands._pr_number_from_url("https://github.com/o/r/pull/477") == "477"
-    assert commands._pr_number_from_url("https://github.com/o/r/pull/1?x=1") == "1"
-    assert commands._pr_number_from_url("") == ""
-    assert commands._pr_number_from_url("https://github.com/o/r/issues/5") == ""
+    assert cmd_pr._pr_number_from_url("https://github.com/o/r/pull/477") == "477"
+    assert cmd_pr._pr_number_from_url("https://github.com/o/r/pull/1?x=1") == "1"
+    assert cmd_pr._pr_number_from_url("") == ""
+    assert cmd_pr._pr_number_from_url("https://github.com/o/r/issues/5") == ""
 
 
 def test_fire_writes_ax_review_due_trigger(tmp_path, monkeypatch):
     tdir = tmp_path / "triggers"
+    monkeypatch.setattr(commands_shared, "_get_triggers_dir", lambda: str(tdir))
     monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tdir))
     commands._fire_ax_review_due_trigger("477", "fix: something", "https://github.com/o/r/pull/477")
     path = tdir / "ax-review-due-477.json"
@@ -40,6 +43,7 @@ def test_fire_writes_ax_review_due_trigger(tmp_path, monkeypatch):
 
 def test_fire_is_noop_without_pr_number(tmp_path, monkeypatch):
     tdir = tmp_path / "triggers"
+    monkeypatch.setattr(commands_shared, "_get_triggers_dir", lambda: str(tdir))
     monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tdir))
     commands._fire_ax_review_due_trigger("", "t", "not-a-pr-url")
     # no trigger dir / file created for an unparseable PR
@@ -48,6 +52,7 @@ def test_fire_is_noop_without_pr_number(tmp_path, monkeypatch):
 
 def test_clear_removes_ax_review_due_trigger(tmp_path, monkeypatch):
     tdir = tmp_path / "triggers"
+    monkeypatch.setattr(commands_shared, "_get_triggers_dir", lambda: str(tdir))
     monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tdir))
     commands._fire_ax_review_due_trigger("500", "t", "https://github.com/o/r/pull/500")
     assert (tdir / "ax-review-due-500.json").exists()
@@ -63,6 +68,7 @@ def test_trigger_check_surfaces_ax_review_due(tmp_path, monkeypatch, capsys):
     it with no special-casing — the structural re-surfacing that keeps AX from
     flowing away unread."""
     tdir = tmp_path / "triggers"
+    monkeypatch.setattr(commands_shared, "_get_triggers_dir", lambda: str(tdir))
     monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tdir))
     # avoid the cloud-touching opportunistic tick during the check
     monkeypatch.setattr(commands, "_maybe_auto_tick", lambda: None)

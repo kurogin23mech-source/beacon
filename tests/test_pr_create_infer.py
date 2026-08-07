@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import cmd_pr  # noqa: E402  (ms-127 e-4856: pr family moved here)
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +69,7 @@ def test_branch_name_wins_over_active_ms(monkeypatch):
     """Branch `ms-42/work` must beat the sole active MS (ms-99)."""
     data = project([ms("ms-42"), ms("ms-99", status="in_progress")])
     patch_git(monkeypatch, branch="ms-42/work", log_lines=[])
-    inferred, reason = commands._infer_pr_ms_id(data)
+    inferred, reason = cmd_pr._infer_pr_ms_id(data)
     assert inferred == "ms-42"
     assert "ms-42" in reason and "branch" in reason
 
@@ -77,7 +78,7 @@ def test_branch_ms_not_in_project_is_ignored(monkeypatch):
     """Branch `ms-77/work` where ms-77 doesn't exist must fall through."""
     data = project([ms("ms-99", status="in_progress")])
     patch_git(monkeypatch, branch="ms-77/work", log_lines=[])
-    inferred, reason = commands._infer_pr_ms_id(data)
+    inferred, reason = cmd_pr._infer_pr_ms_id(data)
     # Should fall through to "sole active MS"
     assert inferred == "ms-99"
 
@@ -90,7 +91,7 @@ def test_commit_ms_pattern_used_when_branch_missing(monkeypatch):
     data = project([ms("ms-15")])
     patch_git(monkeypatch, branch="feature/foo",
               log_lines=["feat(thing): refactor xyz for ms-15"])
-    inferred, reason = commands._infer_pr_ms_id(data)
+    inferred, reason = cmd_pr._infer_pr_ms_id(data)
     assert inferred == "ms-15"
     assert "commit" in reason
 
@@ -108,7 +109,7 @@ def test_e_id_in_commit_reverse_lookups_owning_ms(monkeypatch):
     ])
     patch_git(monkeypatch, branch="feature/foo",
               log_lines=["feat(skill): new pr-create skill (e-606)"])
-    inferred, reason = commands._infer_pr_ms_id(data)
+    inferred, reason = cmd_pr._infer_pr_ms_id(data)
     assert inferred == "ms-42"
     assert "e-606" in reason
 
@@ -124,7 +125,7 @@ def test_sole_active_ms_used_when_no_other_signal(monkeypatch):
         ms("ms-3", status="todo"),
     ])
     patch_git(monkeypatch, branch="hotfix/x", log_lines=["fix typo"])
-    inferred, reason = commands._infer_pr_ms_id(data)
+    inferred, reason = cmd_pr._infer_pr_ms_id(data)
     assert inferred == "ms-2"
     assert "active" in reason
 
@@ -136,7 +137,7 @@ def test_multiple_active_ms_returns_empty(monkeypatch):
         ms("ms-3", status="in_progress"),
     ])
     patch_git(monkeypatch, branch="hotfix/x", log_lines=["fix typo"])
-    inferred, reason = commands._infer_pr_ms_id(data)
+    inferred, reason = cmd_pr._infer_pr_ms_id(data)
     assert inferred == ""
     assert reason == ""
 
@@ -148,7 +149,7 @@ def test_multiple_active_ms_returns_empty(monkeypatch):
 def test_no_signal_returns_empty(monkeypatch):
     data = project([ms("ms-1", status="done")])
     patch_git(monkeypatch, branch="main", log_lines=[])
-    inferred, reason = commands._infer_pr_ms_id(data)
+    inferred, reason = cmd_pr._infer_pr_ms_id(data)
     assert inferred == ""
 
 
@@ -159,7 +160,7 @@ def test_git_missing_does_not_crash(monkeypatch):
     monkeypatch.setattr(commands.subprocess, "run", boom)
     data = project([ms("ms-2", status="in_progress")])
     # Falls through to "sole active MS" — which doesn't need git.
-    inferred, reason = commands._infer_pr_ms_id(data)
+    inferred, reason = cmd_pr._infer_pr_ms_id(data)
     assert inferred == "ms-2"
 
 
@@ -175,10 +176,10 @@ def test_git_missing_does_not_crash(monkeypatch):
 
 def _stub_pr_create_env(monkeypatch, title):
     """Common stubs so cmd_pr_create runs without touching git/gh/disk."""
-    monkeypatch.setattr(commands, "load_project", lambda: project([ms("ms-25")]))
-    monkeypatch.setattr(commands, "save_project", lambda _data: None)
+    monkeypatch.setattr(cmd_pr, "load_project", lambda: project([ms("ms-25")]))
+    monkeypatch.setattr(cmd_pr, "save_project", lambda _data: None)
     monkeypatch.setattr(
-        commands, "_fetch_gh_pr_info",
+        cmd_pr, "_fetch_gh_pr_info",
         lambda _url: {"title": title, "commits": []},
     )
     monkeypatch.setattr(commands.core, "pr_add", lambda *a, **kw: "e-999")
@@ -253,7 +254,7 @@ def test_pr_create_rejects_malformed_json(monkeypatch, capsys):
     monkeypatch.setenv("BEACON_MS_ID", "ms-25")
     monkeypatch.setenv("BEACON_GH_ARGS_JSON", "{not a list")
     monkeypatch.delenv("BEACON_GH_ARGS", raising=False)
-    monkeypatch.setattr(commands, "load_project", lambda: project([ms("ms-25")]))
+    monkeypatch.setattr(cmd_pr, "load_project", lambda: project([ms("ms-25")]))
 
     with pytest.raises(SystemExit) as exc:
         commands.cmd_pr_create()

@@ -34,6 +34,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "lib"))
 
 import commands  # noqa: E402
+import cmd_pr  # noqa: E402  (ms-127 e-4856: pr family moved here)
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +78,7 @@ def test_merge_ban_default_active_for_ai_session():
         "BEACON_PR_MERGE_USER_OVERRIDE": None,
         "BEACON_SESSION_KIND": None,
     }):
-        assert commands._ai_session_merge_ban_active() is True
+        assert cmd_pr._ai_session_merge_ban_active() is True
 
 
 def test_merge_ban_bypassed_by_trek_finalize_consent():
@@ -87,7 +88,7 @@ def test_merge_ban_bypassed_by_trek_finalize_consent():
         "BEACON_PR_MERGE_USER_OVERRIDE": None,
         "BEACON_SESSION_KIND": None,
     }):
-        assert commands._ai_session_merge_ban_active() is False
+        assert cmd_pr._ai_session_merge_ban_active() is False
 
 
 def test_merge_ban_bypassed_by_user_override():
@@ -97,7 +98,7 @@ def test_merge_ban_bypassed_by_user_override():
         "BEACON_PR_MERGE_USER_OVERRIDE": "1",
         "BEACON_SESSION_KIND": None,
     }):
-        assert commands._ai_session_merge_ban_active() is False
+        assert cmd_pr._ai_session_merge_ban_active() is False
 
 
 def test_merge_ban_bypassed_by_human_session_kind():
@@ -107,7 +108,7 @@ def test_merge_ban_bypassed_by_human_session_kind():
         "BEACON_PR_MERGE_USER_OVERRIDE": None,
         "BEACON_SESSION_KIND": "human",
     }):
-        assert commands._ai_session_merge_ban_active() is False
+        assert cmd_pr._ai_session_merge_ban_active() is False
 
 
 def test_merge_ban_session_kind_case_insensitive():
@@ -116,13 +117,13 @@ def test_merge_ban_session_kind_case_insensitive():
         "BEACON_PR_MERGE_USER_OVERRIDE": None,
         "BEACON_SESSION_KIND": "Human",  # any casing
     }):
-        assert commands._ai_session_merge_ban_active() is False
+        assert cmd_pr._ai_session_merge_ban_active() is False
     with _with_env({
         "BEACON_TREK_FINALIZE_CONSENT": None,
         "BEACON_PR_MERGE_USER_OVERRIDE": None,
         "BEACON_SESSION_KIND": "  HUMAN  ",  # padded
     }):
-        assert commands._ai_session_merge_ban_active() is False
+        assert cmd_pr._ai_session_merge_ban_active() is False
 
 
 def test_merge_ban_unknown_session_kind_still_blocks():
@@ -133,17 +134,17 @@ def test_merge_ban_unknown_session_kind_still_blocks():
             "BEACON_PR_MERGE_USER_OVERRIDE": None,
             "BEACON_SESSION_KIND": kind,
         }):
-            assert commands._ai_session_merge_ban_active() is True, kind
+            assert cmd_pr._ai_session_merge_ban_active() is True, kind
 
 
 def test_trek_finalize_consent_active_helper_pinned():
     """The Skill exports this env before delegating; test the read side."""
     with _with_env({"BEACON_TREK_FINALIZE_CONSENT": "1"}):
-        assert commands._trek_finalize_consent_active() is True
+        assert cmd_pr._trek_finalize_consent_active() is True
     with _with_env({"BEACON_TREK_FINALIZE_CONSENT": "0"}):
-        assert commands._trek_finalize_consent_active() is False
+        assert cmd_pr._trek_finalize_consent_active() is False
     with _with_env({"BEACON_TREK_FINALIZE_CONSENT": None}):
-        assert commands._trek_finalize_consent_active() is False
+        assert cmd_pr._trek_finalize_consent_active() is False
 
 
 # ---------------------------------------------------------------------------

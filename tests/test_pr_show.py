@@ -23,6 +23,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import cmd_pr  # noqa: E402  (ms-127 e-4856: pr family moved here)
 
 
 # ---------------------------------------------------------------------------
@@ -72,7 +73,7 @@ def _project_with_one_pr():
 
 def _run_pr_show(monkeypatch, ident: str, json_mode: bool = True):
     """Invoke cmd_pr_show with the given identifier; return parsed payload."""
-    monkeypatch.setattr(commands, "load_project", _project_with_one_pr)
+    monkeypatch.setattr(cmd_pr, "load_project", _project_with_one_pr)
     monkeypatch.setenv("BEACON_PR_IDENT", ident)
     monkeypatch.setenv("BEACON_JSON", "1" if json_mode else "")
 
@@ -145,7 +146,7 @@ def test_payload_handles_pr_without_intent(monkeypatch):
     so /review can detect and warn."""
     proj = _project_with_one_pr()
     proj["milestones"][1]["entries"][0]["meta"]["intent"] = ""
-    monkeypatch.setattr(commands, "load_project", lambda: proj)
+    monkeypatch.setattr(cmd_pr, "load_project", lambda: proj)
     monkeypatch.setenv("BEACON_PR_IDENT", "e-700")
     monkeypatch.setenv("BEACON_JSON", "1")
 
@@ -160,7 +161,7 @@ def test_payload_handles_pr_without_intent(monkeypatch):
 def test_text_mode_warns_when_intent_missing(monkeypatch):
     proj = _project_with_one_pr()
     proj["milestones"][1]["entries"][0]["meta"]["intent"] = ""
-    monkeypatch.setattr(commands, "load_project", lambda: proj)
+    monkeypatch.setattr(cmd_pr, "load_project", lambda: proj)
     monkeypatch.setenv("BEACON_PR_IDENT", "e-700")
     monkeypatch.setenv("BEACON_JSON", "")
 
