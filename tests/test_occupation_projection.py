@@ -137,10 +137,14 @@ def test_generic_core_identical_across_occupations():
 # --------------------------------------------------------------------------
 
 import commands  # noqa: E402
+import cmd_milestone  # noqa: E402  (ms-127 e-4849: cmd_milestone_list moved here)
 
 
 def _run_status_text(monkeypatch, data, capsys):
     monkeypatch.setattr(commands, "load_project", lambda: data)
+    # ms-127 e-4849: cmd_milestone_list moved to cmd_milestone; it resolves
+    # load_project in its own namespace, so patch there too.
+    monkeypatch.setattr(cmd_milestone, "load_project", lambda: data)
     monkeypatch.delenv("BEACON_JSON", raising=False)
     monkeypatch.delenv("BEACON_ALL", raising=False)
     monkeypatch.delenv("BEACON_MS_FILTER", raising=False)

@@ -82,6 +82,7 @@ def _stub_client(monkeypatch, *, project_data: dict,
     import commands  # type: ignore
     import cmd_task  # type: ignore  (ms-127 e-4319b: cmd_entry_purge moved here)
     import cmd_operation  # type: ignore  (ms-127 e-4798: cmd_operation_purge moved here)
+    import cmd_milestone  # type: ignore  (ms-127 e-4849: cmd_milestone_purge moved here)
     import store_api  # type: ignore
 
     fake = MagicMock()
@@ -114,14 +115,15 @@ def _stub_client(monkeypatch, *, project_data: dict,
 
     # This helper backs milestone / entry / operation purge tests, whose
     # handlers now live in different modules and each resolve these helpers in
-    # their OWN namespace (ms-127): cmd_milestone_purge in commands,
-    # cmd_entry_purge in cmd_task (e-4319b), cmd_operation_purge in
+    # their OWN namespace (ms-127): cmd_milestone_purge in cmd_milestone
+    # (e-4849), cmd_entry_purge in cmd_task (e-4319b), cmd_operation_purge in
     # cmd_operation (e-4798). Patch every namespace that a covered handler uses.
     monkeypatch.setattr(commands, "_get_api_client", _fake_get_api_client)
     monkeypatch.setattr(commands, "get_store", _fake_get_store)
     monkeypatch.setattr(cmd_operation, "_get_api_client", _fake_get_api_client)
     monkeypatch.setattr(cmd_operation, "get_store", _fake_get_store)
     monkeypatch.setattr(cmd_task, "get_store", _fake_get_store)
+    monkeypatch.setattr(cmd_milestone, "get_store", _fake_get_store)
     return fake
 
 

@@ -22,6 +22,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import commands
+import cmd_milestone  # ms-127 e-4849: milestone family moved here
 import core
 
 
@@ -44,7 +45,7 @@ class TestProjectTypeDetection:
         # helper short-circuits on the cheap filesystem check.
         (tmp_path / ".git").mkdir()
         monkeypatch.chdir(tmp_path)
-        assert commands._is_git_project() is True
+        assert cmd_milestone._is_git_project() is True
 
     def test_is_git_project_false_in_plain_dir(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -58,7 +59,7 @@ class TestProjectTypeDetection:
             raise FileNotFoundError()
 
         monkeypatch.setattr(_sp, "run", _fake_run)
-        assert commands._is_git_project() is False
+        assert cmd_milestone._is_git_project() is False
 
 
 class TestMilestoneStartAtomic:
@@ -107,7 +108,7 @@ class TestNonGitProjectDegrade:
 
         # Patch git detection to force the non-git branch even if the test
         # runner is itself inside a git checkout.
-        monkeypatch.setattr(commands, "_is_git_project", lambda: False)
+        monkeypatch.setattr(cmd_milestone, "_is_git_project", lambda: False)
 
         # The call must complete cleanly; the non-git-skip message goes to
         # stdout.

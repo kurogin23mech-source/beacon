@@ -21,6 +21,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import cmd_milestone  # noqa: E402  (ms-127 e-4849: milestone family moved here)
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +366,7 @@ def test_is_in_main_project_root_helper_detects_worktree(monkeypatch):
         return _R(returncode=1)
     monkeypatch.setattr(commands.subprocess, "run", fake_run)
 
-    assert commands._is_in_main_project_root() is False
+    assert cmd_milestone._is_in_main_project_root() is False
 
 
 def test_is_in_main_project_root_helper_detects_main(monkeypatch):
@@ -378,7 +379,7 @@ def test_is_in_main_project_root_helper_detects_main(monkeypatch):
         return _R(returncode=1)
     monkeypatch.setattr(commands.subprocess, "run", fake_run)
 
-    assert commands._is_in_main_project_root() is True
+    assert cmd_milestone._is_in_main_project_root() is True
 
 
 def test_is_in_main_project_root_helper_conservative_on_git_missing(monkeypatch):
@@ -387,4 +388,4 @@ def test_is_in_main_project_root_helper_conservative_on_git_missing(monkeypatch)
         raise FileNotFoundError("no git")
     monkeypatch.setattr(commands.subprocess, "run", fake_run)
 
-    assert commands._is_in_main_project_root() is True
+    assert cmd_milestone._is_in_main_project_root() is True
