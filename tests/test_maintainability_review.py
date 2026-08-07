@@ -81,6 +81,7 @@ def test_principles_cover_the_seven_lenses():
 
 def test_pr_open_fires_both_ax_and_maintainability(tmp_path, monkeypatch):
     monkeypatch.setattr(commands_shared, "_get_triggers_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
     commands._fire_pr_open_review_triggers("321", "feat: x",
                                            "https://github.com/o/r/pull/321")
     files = set(os.listdir(tmp_path))
@@ -93,6 +94,7 @@ def test_pr_open_fires_both_ax_and_maintainability(tmp_path, monkeypatch):
 
 def test_pr_open_clear_removes_both(tmp_path, monkeypatch):
     monkeypatch.setattr(commands_shared, "_get_triggers_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
     commands._fire_pr_open_review_triggers("55", "t", "https://github.com/o/r/pull/55")
     assert len(list(tmp_path.glob("*-review-due-55.json"))) == 2
     cmd_pr._clear_pr_open_review_triggers("55")
@@ -103,6 +105,7 @@ def test_ax_shim_still_works(tmp_path, monkeypatch):
     """The AX-specific shim (pinned by the e-4003 tests) delegates to the generic
     writer and still produces an ax-review-due trigger."""
     monkeypatch.setattr(commands_shared, "_get_triggers_dir", lambda: str(tmp_path))
+    monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tmp_path))
     commands._fire_ax_review_due_trigger("7", "t", "https://github.com/o/r/pull/7")
     t = json.loads((tmp_path / "ax-review-due-7.json").read_text())
     assert t["kind"] == "ax-review-due"
