@@ -24,8 +24,13 @@ Test patch target (the e-4320 rule): a test driving a cmd_milestone_* handler
 must patch EVERY name the handler resolves in cmd_milestone's own namespace —
 each `from commands_shared import name` binds an independent copy, so
 `monkeypatch.setattr(commands, "get_store", ...)` is a silent no-op on this call
-path. Patch `cmd_milestone.get_store` (or commands_shared.<name> when testing a
-helper directly) instead.
+path. Patch `cmd_milestone.<name>` for the handler path. Note the 4 promoted
+helpers (_release_occupation_for_transition / _print_evidence_guidance /
+_spec_exists_for_ms / _spec_updated_at_for_target) exist as INDEPENDENT bindings
+at both `cmd_milestone` and `commands` (both import from commands_shared); patch
+`cmd_milestone.<name>` to affect only this family. Do NOT patch
+`commands_shared.<name>` to reach a handler — that mutates the shared source and
+silently couples every family that imported it (cross-test blast radius).
 """
 
 import os
@@ -58,7 +63,6 @@ from commands_shared import (  # noqa: F401
     _spec_updated_at_for_target,
     get_store,
     load_project,
-    occupation,
     save_project,
 )
 

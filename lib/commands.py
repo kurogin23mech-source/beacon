@@ -350,8 +350,12 @@ from cmd_milestone import (  # noqa: F401
     cmd_milestone_graph,
 )
 # ms-127 e-4849: 4 helpers promoted to commands_shared during the milestone
-# split (shared with the target/transition/backlog handlers here). Re-import so
-# `commands._X` callers + tests patching commands._X keep resolving.
+# split (shared with the target/transition/backlog handlers still HERE in
+# commands.py). Re-import so commands.py-internal callers keep resolving them by
+# bare name. NOTE for test authors: patching `commands._X` only affects the
+# commands.py call path — a test driving a cmd_milestone_* handler must patch
+# `cmd_milestone._X` instead (each side binds an independent copy from
+# commands_shared; see the e-4320 rule in cmd_milestone.py's docstring).
 from commands_shared import (  # noqa: F401
     _release_occupation_for_transition,
     _print_evidence_guidance,

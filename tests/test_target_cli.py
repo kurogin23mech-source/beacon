@@ -17,6 +17,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import commands  # noqa: E402
+import cmd_milestone  # noqa: E402  (ms-127 e-4849: cmd_milestone_done moved here)
 import transition_approval as _ta  # noqa: E402
 
 
@@ -40,8 +41,13 @@ def proj(tmp_path, monkeypatch):
     )
     monkeypatch.chdir(tmp_path)
     # Keep the CLI hermetic: no reason gate prompts, deterministic actor.
+    # ms-127 e-4849: cmd_milestone_done moved to cmd_milestone; it resolves these
+    # helpers in its own namespace (imported from commands_shared), so patch there
+    # too or the deterministic-actor claim silently breaks (the e-4320 rule).
     monkeypatch.setattr(commands, "_actor_str", lambda: "m/a")
     monkeypatch.setattr(commands, "_resolve_session_id", lambda: "sv-t")
+    monkeypatch.setattr(cmd_milestone, "_actor_str", lambda: "m/a")
+    monkeypatch.setattr(cmd_milestone, "_resolve_session_id", lambda: "sv-t")
     return tmp_path
 
 
