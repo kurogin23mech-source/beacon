@@ -6386,36 +6386,9 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
 
 
 
-# ---------------------------------------------------------------------------
-# Project export / import (ms-14 e-828): full-snapshot backup
-# ---------------------------------------------------------------------------
-#
-# Local-mode export reads the .beacon/ tree directly. Cloud-mode export
-# fetches via the API so the snapshot reflects authoritative state, not the
-# read-only local cache (CORE doc: cloud project.json is a cache). Both
-# write the same ZIP layout so a round-trip is possible.
-#
-# ZIP layout (schema_version=1):
-#   manifest.json   — required, describes source / version / entry counts
-#   project.json    — authoritative project state
-#   documents/<doc_id>.md (zero or more)
-#   changelog.jsonl (optional)
-#   retro/<file>.md (zero or more)
-#   config.json     (optional, project-level)
-#
-# Import is local-mode-only in this iteration: extract → write to a fresh
-# .beacon/ directory. Cloud import (push to API) is a follow-up.
-
-
-
-
-
-
-
-
-
-
-
+# ms-127 e-4860: the project export / import family (ms-14 e-828, full-snapshot
+# backup) moved to lib/cmd_project.py — see that module's docstring for the ZIP
+# layout and the local/cloud-mode notes. Public handlers are re-imported above.
 
 
 def cmd_cycle_status():

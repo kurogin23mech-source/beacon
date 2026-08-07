@@ -6,12 +6,22 @@ whole-project lifecycle surface: archive / unarchive (retire a project without
 deleting it), export / import (back up + restore the project as a portable
 bundle), cleanup / orphans (find + drop dangling references), rename.
 
-Depends only on commands_shared (upward) + stdlib, never on commands.py at import
-time — acyclic (SPEC 方針4). The one runtime tie to commands.py is _beacon_version()
-below: the CLI version literal (__version__) lives in commands.py because
-version_skew.py pins its file-regex to that file, so it cannot be promoted to
-commands_shared without breaking version detection across the wheel layout. A
-function-local import keeps the import-time DAG acyclic.
+At IMPORT time this module depends only on commands_shared (upward) + stdlib —
+the import-time DAG is acyclic (SPEC 方針4). Handlers additionally do function-local
+imports of leaf domain modules as needed (auth / api_client in the cloud paths,
+project_cleanup in cleanup/orphans) — deferred so they never widen the import-time
+surface. The one runtime tie to commands.py is _beacon_version() below: the CLI
+version literal (__version__) lives in commands.py because version_skew.py pins its
+file-regex to that file, so it cannot be promoted to commands_shared without breaking
+version detection across the wheel layout. A function-local import keeps the
+import-time DAG acyclic.
+
+export / import (ms-14 e-828) write/read a full-snapshot backup ZIP —
+  manifest.json (required: source / version / entry counts) + project.json +
+  documents/<doc_id>.md + changelog.jsonl + retro/<file>.md + config.json.
+  Local-mode export reads .beacon/ directly; cloud-mode fetches via the API for
+  authoritative state. Import is local-mode-only in this iteration (extract →
+  fresh .beacon/).
 
 commands.py re-imports the PUBLIC handlers for dispatch + `commands.cmd_project_*`;
 the family-private helpers (_collect_export_* / _reconstruct_doc_markdown /
@@ -22,6 +32,8 @@ Test patch target (the e-4320 rule): a test driving a cmd_project_* handler must
 patch the name in cmd_project's own namespace — each `from commands_shared import
 name` binds an independent copy, so `monkeypatch.setattr(commands, "get_store",
 ...)` is a silent no-op on this call path. Patch `cmd_project.get_store` instead.
+To pin the manifest's beacon_version field in an export test, patch
+`cmd_project._beacon_version` (not commands.__version__).
 """
 
 import os
