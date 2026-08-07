@@ -34,6 +34,7 @@ from store import get_store
 import core
 import work_model  # ms-109 e-3559: 職種非依存の Target 正準ラベルアクセサ
 import occupation  # ms-108 e-3269: 職種 ⊃ target-class 包含ゲート (_gate_target_class)
+import transition_approval as _ta  # ms-127 e-4849 (milestone split)
 
 # ---------------------------------------------------------------------------
 # Store helpers
@@ -2107,3 +2108,64 @@ def _parse_number(raw: str, flag: str):
     except ValueError:
         print(f"Error: {flag} must be a number, got {raw!r}", file=sys.stderr)
         sys.exit(1)
+
+# ---------------------------------------------------------------------------
+# ms-127 e-4849: promoted from commands.py during the milestone-family split.
+# Used by BOTH the milestone handlers (cmd_milestone.py) and the target /
+# transition / backlog handlers still in commands.py; lives here so both
+# import it by bare name without a cmd_milestone<->commands cycle.
+# ---------------------------------------------------------------------------
+def _release_occupation_for_transition(data, ms_id, *, reason):
+    """ms-81 e-1918: phase transitions auto-release any active occupation
+    on the target MS. Per the SPEC the release happens whether or not the
+    session that claimed it is the same one calling the transition (= a
+    done verb on someone else's claim is implicitly a takeover).
+    """
+    sid = _resolve_session_id() or ""
+    try:
+        import agent as _agent_for_release
+        actor = _agent_for_release.get_actor()
+    except Exception:
+        actor = {}
+    _ms, released = core.milestone_release_occupation(data, ms_id, reason=reason)
+    if released:
+        core.milestone_record_occupation_event(
+            data, ms_id=ms_id, event_type="release",
+            session_id=sid,
+            machine=actor.get("machine", ""),
+            agent=actor.get("agent", ""),
+            reason=reason,
+        )
+
+def _print_evidence_guidance(eid: str, target_id: str) -> None:
+    """Print the 'attach independent review evidence' guidance for a pending approval
+    (ms-119 / e-4205, #504 maint review — this text was copied across the completion
+    route, review-request, and the approve error; rendered once here). Interpolates
+    the concrete target-id and enumerates the verdict vocabulary from its single
+    source (#504 AX review — no bare <id> / <v> placeholders)."""
+    verdicts = "|".join(_ta.REVIEW_EVIDENCE_VERDICTS)
+    print(f"  独立証拠 (= 承認の前提, ms-119/e-4205): "
+          f"`beacon review context --type attainment --target {target_id}` で判定を"
+          f"生成し、")
+    print(f"    `beacon target attach-review-evidence {eid} --verdict <{verdicts}> "
+          f"--summary <text>` で記録 (無ければ approve は --acknowledge-no-evidence を要求)")
+
+def _spec_updated_at_for_target(target_id: str) -> Optional[str]:
+    """The SPEC doc's ``updated_at`` for a target, or None (ms-119 / e-4597).
+
+    Evidence for the task↔SPEC last-written-intent tie-breaker in the attainment
+    disposition gate: reuses the single-source _spec_doc_for_target scan, inferring the
+    kind from the id prefix (op- → operation, else milestone). Best-effort — no spec /
+    transport failure → None (the tie-breaker is simply omitted, never wrong)."""
+    if not target_id:
+        return None
+    kind = "operation" if str(target_id).startswith("op-") else "milestone"
+    doc = _spec_doc_for_target(target_id, kind)
+    if not doc:
+        return None
+    return doc.get("updated_at") or None
+
+def _spec_exists_for_ms(ms_id: str) -> bool:
+    """True if any spec-scoped document is attached to ms_id (delegates to the
+    single-source scan _spec_doc_for_target)."""
+    return _spec_doc_for_target(ms_id, "milestone") is not None

@@ -17,6 +17,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import commands
+import cmd_milestone  # ms-127 e-4849: _prompt_close_leftover_worktree moved here
 import core
 
 
@@ -113,7 +114,7 @@ class TestLeftoverWorktreePrompt:
     def test_no_worktree_no_warning(self, project_dir, monkeypatch, capsys):
         # Sanity: with no `.worktrees/<branch>/` directory, the helper is
         # a silent no-op.
-        commands._prompt_close_leftover_worktree("ms-1", "done")
+        cmd_milestone._prompt_close_leftover_worktree("ms-1", "done")
         assert capsys.readouterr().err == ""
 
     def test_leftover_worktree_emits_warning(
@@ -127,7 +128,7 @@ class TestLeftoverWorktreePrompt:
         worktree_dir = project_dir / ".worktrees" / branch_name
         worktree_dir.mkdir(parents=True)
         monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
-        commands._prompt_close_leftover_worktree("ms-1", "done")
+        cmd_milestone._prompt_close_leftover_worktree("ms-1", "done")
         err = capsys.readouterr().err
         assert "[ms-81 transition prompt]" in err
         assert str(worktree_dir) in err or branch_name in err
@@ -136,5 +137,5 @@ class TestLeftoverWorktreePrompt:
     def test_unknown_ms_silent(self, project_dir, capsys):
         # Defensive: bad ms_id mustn't raise — the prompt is a UX surface,
         # never load-bearing.
-        commands._prompt_close_leftover_worktree("ms-99", "done")
+        cmd_milestone._prompt_close_leftover_worktree("ms-99", "done")
         assert capsys.readouterr().err == ""
