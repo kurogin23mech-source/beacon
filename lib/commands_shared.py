@@ -2096,6 +2096,7 @@ def _today_iso() -> str:
     (PR #559 保守性レビュー M1)."""
     return _now_iso()[:10]
 
+
 def _parse_number(raw: str, flag: str):
     """Parse an optional numeric flag; empty → None, int-if-whole else float."""
     if not raw or not raw.strip():

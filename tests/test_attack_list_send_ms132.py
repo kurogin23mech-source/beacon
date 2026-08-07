@@ -29,6 +29,12 @@ import commands  # noqa: E402
 import cmd_acquisition  # noqa: E402  (ms-127 e-4839: acquisition handlers live here)
 import sales_entities as se  # noqa: E402
 
+# e-4320 rule: cmd_acquisition_* handlers resolve helpers (get_store /
+# load_project / _read_bus_budget / _refuse_if_bus_origin …) from
+# cmd_acquisition's own namespace (each `from commands_shared import X` binds an
+# independent copy). To stub any of them, patch `cmd_acquisition.X`, NOT
+# `commands.X` — the latter is a silent no-op on this call path.
+
 
 def _write(cwd: Path, data: dict) -> None:
     (cwd / ".beacon" / "project.json").write_text(
