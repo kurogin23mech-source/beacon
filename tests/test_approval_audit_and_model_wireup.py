@@ -11,6 +11,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import commands  # noqa: E402
+import cmd_target  # noqa: E402  (ms-127 e-4852: target family moved here)
 import review_spine  # noqa: E402
 import transition_approval as ta  # noqa: E402
 
@@ -71,7 +72,7 @@ def test_gate_record_flags_ai_session_override():
     with _Env({"BEACON_TARGET_APPROVE_USER_OVERRIDE": "1",
                "BEACON_SESSION_KIND": None,
                "BEACON_EVIDENCE_SOURCE": None}):
-        g = commands._approval_gate_record()
+        g = cmd_target._approval_gate_record()
     assert g["signal"] == "user-override"
     assert g["session_kind"] == "unset"  # the smoking gun: override from a non-human session
 
@@ -80,7 +81,7 @@ def test_gate_record_human_session():
     with _Env({"BEACON_TARGET_APPROVE_USER_OVERRIDE": None,
                "BEACON_SESSION_KIND": "human",
                "BEACON_EVIDENCE_SOURCE": "independent-judge:fable"}):
-        g = commands._approval_gate_record()
+        g = cmd_target._approval_gate_record()
     assert g["signal"] == "human-session"
     assert g["evidence_source"] == "independent-judge:fable"
 

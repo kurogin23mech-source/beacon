@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import cmd_target  # noqa: E402  (ms-127 e-4852: target family moved here)
 import core  # noqa: E402
 import transition_approval as _ta  # noqa: E402
 
@@ -103,10 +104,10 @@ def test_core_approve_enforces_evidence_at_the_choke_point():
 # --- CLI approve guard -----------------------------------------------------
 
 def _wire(monkeypatch, data):
-    monkeypatch.setattr(commands, "load_project", lambda: data)
-    monkeypatch.setattr(commands, "save_project", lambda *a, **k: None)
+    monkeypatch.setattr(cmd_target, "load_project", lambda: data)
+    monkeypatch.setattr(cmd_target, "save_project", lambda *a, **k: None)
     # isolate the guard from transition-application machinery
-    monkeypatch.setattr(commands, "_apply_transition", lambda *a, **k: None)
+    monkeypatch.setattr(cmd_target, "_apply_transition", lambda *a, **k: None)
     # pass the e-4006 AI-approve ban so the e-4205 evidence guard is what we test
     monkeypatch.setenv("BEACON_TARGET_APPROVE_USER_OVERRIDE", "1")
     monkeypatch.setenv("BEACON_ENTRY_ID", "e-1")

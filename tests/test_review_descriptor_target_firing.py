@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import commands  # noqa: E402
+import cmd_target  # noqa: E402  (ms-127 e-4852: target family moved here)
 import review_spine  # noqa: E402
 
 
@@ -40,9 +41,9 @@ def proj(tmp_path, monkeypatch):
     }, ensure_ascii=False))
     monkeypatch.setenv("BEACON_PROJECT_FILE",
                        str(tmp_path / ".beacon" / "project.json"))
-    monkeypatch.setattr(commands, "_actor_str", lambda: "m/a")
+    monkeypatch.setattr(cmd_target, "_actor_str", lambda: "m/a")
     # descriptor targets have no doc store spec by default → philosophy off.
-    monkeypatch.setattr(commands, "_spec_exists_for_descriptor_target",
+    monkeypatch.setattr(cmd_target, "_spec_exists_for_descriptor_target",
                         lambda tid: False)
     return tmp_path
 
@@ -116,7 +117,7 @@ def test_advance_to_terminal_phase_fires_review_due(proj, monkeypatch, capsys):
 
 
 def test_philosophy_binds_when_descriptor_target_has_spec(proj, monkeypatch, capsys):
-    monkeypatch.setattr(commands, "_spec_exists_for_descriptor_target",
+    monkeypatch.setattr(cmd_target, "_spec_exists_for_descriptor_target",
                         lambda tid: True)
     tid = _create(proj, monkeypatch, capsys)
     _clear(monkeypatch)

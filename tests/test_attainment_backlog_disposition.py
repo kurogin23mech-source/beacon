@@ -23,6 +23,7 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands  # noqa: E402
+import cmd_target  # noqa: E402  (ms-127 e-4852: target family moved here)
 import core  # noqa: E402
 import review_spine  # noqa: E402
 import transition_approval as _ta  # noqa: E402
@@ -287,9 +288,9 @@ def test_attainment_bundle_backlog_defaults_empty():
 # --- CLI approve guard end-to-end -----------------------------------------
 
 def _wire(monkeypatch, data):
-    monkeypatch.setattr(commands, "load_project", lambda: data)
-    monkeypatch.setattr(commands, "save_project", lambda *a, **k: None)
-    monkeypatch.setattr(commands, "_apply_transition", lambda *a, **k: None)
+    monkeypatch.setattr(cmd_target, "load_project", lambda: data)
+    monkeypatch.setattr(cmd_target, "save_project", lambda *a, **k: None)
+    monkeypatch.setattr(cmd_target, "_apply_transition", lambda *a, **k: None)
     monkeypatch.setenv("BEACON_TARGET_APPROVE_USER_OVERRIDE", "1")
     monkeypatch.setenv("BEACON_ENTRY_ID", "e-A")
     monkeypatch.delenv("BEACON_ACK_NO_EVIDENCE", raising=False)
@@ -342,8 +343,8 @@ def test_cli_approve_skip_flag_proceeds(monkeypatch):
 # --- #551 SHOULD-1: --disposition flag + --verdict migration alias ---------
 
 def _wire_disp(monkeypatch, data):
-    monkeypatch.setattr(commands, "load_project", lambda: data)
-    monkeypatch.setattr(commands, "save_project", lambda *a, **k: None)
+    monkeypatch.setattr(cmd_target, "load_project", lambda: data)
+    monkeypatch.setattr(cmd_target, "save_project", lambda *a, **k: None)
     monkeypatch.setenv("BEACON_ENTRY_ID", "e-A")
     monkeypatch.setenv("BEACON_DISP_TASK", "e-1")
     for v in ("BEACON_DISP_DISPOSITION", "BEACON_DISP_VERDICT",
