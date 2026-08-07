@@ -3,9 +3,12 @@
 
 Extracted verbatim from commands.py (god-module split). The target family is the
 profession-neutral target-class engine surface: review-request / approve /
-attach-evidence / attach-disposition / reject (the attainment-review gate,
-ms-119), plus create / advance / close / instances / work-item / evidence / ball
-/ class-add / class-list (the descriptor-driven data targets, ms-122/124).
+attach-review-evidence / attach-disposition / reject (the attainment-review
+gate, ms-119), plus create / advance / close / instances / work-item / evidence
+/ ball (the descriptor-driven data targets, ms-122/124). The class-add /
+class-list handlers dispatch under the SEPARATE top-level group `beacon
+target-class add` / `beacon target-class list` (NOT `beacon target class-add`);
+their handler names keep the `cmd_target_class_*` prefix for family cohesion.
 
 Depends only on commands_shared (upward) + leaf domain modules (core /
 work_model / transition_approval / target_descriptor / target_engine), never on
@@ -80,6 +83,8 @@ def _apply_transition(data: dict, target_id: str, new_state: str, *,
         raise ValueError(
             f"transition apply not supported for target {target_id!r} "
             f"(kind={kind or 'unknown'})")
+
+
 def _evidence_required_message(eid: str, target_id: str) -> str:
     """The approve-refusal message when a pending approval has no review-evidence
     (ms-119 / e-4205). Shares the vocabulary + command spelling with
@@ -96,6 +101,8 @@ def _evidence_required_message(eid: str, target_id: str) -> str:
         f"--summary <text>` で記録する。\n"
         f"    2. 独立証拠なしで承認すると明示する — `--acknowledge-no-evidence` "
         f"(監査に記録が残ります)。\n")
+
+
 def _backlog_undisposed_message(eid: str, target_id: str, undisposed: list) -> str:
     """The approve-refusal message when a pending approval still has UNSTARTED
     highest/high tasks without a disposition (ms-119 / e-4579). Renders the concrete
@@ -114,6 +121,8 @@ def _backlog_undisposed_message(eid: str, target_id: str, undisposed: list) -> s
         f"残ります。)\n"
         f"{body}\n"
     )
+
+
 def _backlog_blocked_message(eid: str, target_id: str, blocking: list) -> str:
     """The approve-refusal message when ≥1 gated backlog task is disposed
     ``blocks-attainment`` (ms-119 / e-4579, #551 MUST-2). A task explicitly recorded
@@ -132,11 +141,15 @@ def _backlog_blocked_message(eid: str, target_id: str, blocking: list) -> str:
         f"残ります。)\n"
         f"{body}\n"
     )
+
+
 def _parse_evidence() -> list:
     raw = os.environ.get("BEACON_EVIDENCE", "").strip()
     if not raw:
         return []
     return [x.strip() for x in raw.split(",") if x.strip()]
+
+
 def cmd_target_review_request():
     """Create a pending 目的達成レビュー on a target transition (e-3912).
 
@@ -203,6 +216,8 @@ def cmd_target_review_request():
     _print_evidence_guidance(eid, target_id)
     print(f"  確定 (= 遷移実行): beacon target approve {eid} [--rationale <text>]")
     print(f"  却下 (= 遷移せず): beacon target reject {eid} [--rationale <text>]")
+
+
 def cmd_target_approve():
     """Approve a pending target transition — records the verdict AND executes
     the transition on the target (e-3912)."""
@@ -304,6 +319,8 @@ def cmd_target_approve():
             print("  ⚠ 未着手の重要タスク (highest/high) の disposition ゲートを "
                   "skip して承認されました (--acknowledge-undisposed-backlog) — "
                   "この遷移は監査対象です (ms-119 / e-4579)。")
+
+
 def cmd_target_attach_evidence():
     """Attach a 目的達成 review's evidence to a pending transition-approval
     (ms-119 / e-4205).
@@ -339,6 +356,8 @@ def cmd_target_attach_evidence():
     n = len(entry["meta"].get("review_evidence", []))
     print(f"独立レビュー証拠を添付: {entry_id} (verdict={verdict}, 計 {n} 件)")
     print(f"  承認へ: beacon target approve {entry_id} [--rationale <text>]")
+
+
 def cmd_target_attach_disposition():
     """Record a disposition for one UNSTARTED highest/high backlog task on a pending
     transition-approval (ms-119 / e-4579).
@@ -407,6 +426,8 @@ def cmd_target_attach_disposition():
         else:
             print(f"  全 backlog disposition 済 — 承認へ: "
                   f"beacon target approve {entry_id} [--rationale <text>]")
+
+
 def cmd_target_reject():
     """Reject a pending target transition — records the verdict; the transition
     does NOT execute (e-3912)."""
@@ -431,6 +452,8 @@ def cmd_target_reject():
           f"{meta['new_state']} 遷移は実行されません ({entry_id})")
     if rationale:
         print(f"  rationale: {rationale}")
+
+
 def _task_live_status(container: dict, task_id: str) -> str:
     """Live status of ``task_id`` anywhere under ``container`` (#551 SHOULD-2 helper).
 
@@ -446,6 +469,8 @@ def _task_live_status(container: dict, task_id: str) -> str:
                 return found
         return None
     return _walk(container.get("entries", [])) or ""
+
+
 def cmd_target_list():
     """List target transition-approval requests (e-3912).
 
@@ -507,6 +532,8 @@ def cmd_target_list():
                     _ls = _live.get(tid) or _task_live_status(_container, tid)
                     _lstxt = f" (live: {_ls})" if _ls else ""
                     print(f"        {tid}: {rec.get('verdict')}{_lstxt}{_rsn}")
+
+
 def _resolve_descriptor(data: dict, kind: str) -> dict:
     """Return the descriptor for ``kind`` or print a guidance error + exit. When
     the project declares no descriptors at all, the message says so; otherwise
@@ -541,6 +568,8 @@ def _resolve_descriptor(data: dict, kind: str) -> dict:
               file=sys.stderr)
         sys.exit(1)
     return desc
+
+
 def _parse_field_pairs() -> dict:
     """Parse BEACON_FIELDS (newline-joined ``key=value`` rows, set by bin/beacon
     from repeated ``--field key=value``) into a dict. Splits on the FIRST ``=``
@@ -558,6 +587,8 @@ def _parse_field_pairs() -> dict:
         key, val = line.split("=", 1)
         out[key.strip()] = val.strip()
     return out
+
+
 def cmd_target_create():
     """Create a data-defined target of a given class (ms-122 e-3956).
 
@@ -584,6 +615,8 @@ def cmd_target_create():
     print(f"作成: [{rec['id']}] {label} (class={kind})")
     if phase:
         print(f"  phase: {phase}")
+
+
 def cmd_target_advance():
     """Advance a data-defined target to its next (or a named) phase (e-3956).
 
@@ -626,6 +659,8 @@ def cmd_target_advance():
             target_id, kind, old, new, target_title=label,
             has_spec=_spec_exists_for_descriptor_target(target_id),
             is_completion=True)
+
+
 def cmd_target_close():
     """Close (mark done) a data-defined target (e-3956).
 
@@ -662,6 +697,8 @@ def cmd_target_close():
         target_id, kind, prev_phase or "open", "done", target_title=label,
         has_spec=_spec_exists_for_descriptor_target(target_id),
         is_completion=True)
+
+
 def cmd_target_instances():
     """List the instances of a data-defined target-class (e-3956).
 
@@ -693,6 +730,8 @@ def cmd_target_instances():
               f"{r['status']}")
         if detail.get("next_move"):
             print(f"      次の一手: {detail['next_move']}")
+
+
 def cmd_target_work_item():
     """Add / complete / list a WorkItem on a data-defined target (e-4089).
 
@@ -756,6 +795,8 @@ def cmd_target_work_item():
     except _te.TargetEngineError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+
 def cmd_target_evidence():
     """Attach / list Evidence records on a data-defined target (e-4089).
 
@@ -812,6 +853,8 @@ def cmd_target_evidence():
     except _te.TargetEngineError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+
 def cmd_target_ball():
     """Set whose court a data-defined target's next move is in (e-4089).
 
@@ -838,11 +881,15 @@ def cmd_target_ball():
                            "target_id": target_id})
     now = rec.get(_te.BALL_KEY) or "none"
     print(f"ball 更新: [{target_id}] → {now}")
+
+
 def _parse_spec_lines(env_key: str) -> list:
     """Split a newline-joined env value (set by bin/beacon from repeated flags)
     into stripped non-empty lines."""
     return [ln.strip() for ln in os.environ.get(env_key, "").split("\n")
             if ln.strip()]
+
+
 def _field_from_spec(raw: str, *, required: bool) -> dict:
     """Parse a ``key:label[:type]`` field spec into a descriptor field dict.
     Type defaults to ``string``. Raises SystemExit with guidance on a malformed
@@ -869,6 +916,8 @@ def _field_from_spec(raw: str, *, required: bool) -> dict:
     if required:
         field["required"] = True
     return field
+
+
 def _phase_from_spec(raw: str, *, terminal: bool) -> dict:
     """Parse a ``key:label`` phase spec into a descriptor phase dict."""
     parts = raw.split(":")
@@ -881,6 +930,8 @@ def _phase_from_spec(raw: str, *, terminal: bool) -> dict:
     if terminal:
         phase["terminal"] = True
     return phase
+
+
 def cmd_target_class_add():
     """Declare a new data-defined target-class into project.json (e-4091).
 
@@ -960,6 +1011,8 @@ def cmd_target_class_add():
           f"(profession={desc.get('profession')}, type={desc.get('type')})")
     print(f"  次: beacon target create --class {desc.get('kind')} "
           f"--label <名前>")
+
+
 def cmd_target_class_list():
     """List the data-defined target-classes declared in this project (e-4091).
 
@@ -993,6 +1046,8 @@ def cmd_target_class_list():
         # ms-124 AX review: show the actual problems, not just the ⚠ marker.
         for p in (problems or []):
             print(f"      - {p}")
+
+
 def _spec_exists_for_descriptor_target(target_id: str) -> bool:
     """True if a spec-scoped document is attached to a data-defined (descriptor)
     target (ms-119 / e-4087).
@@ -1011,6 +1066,8 @@ def _spec_exists_for_descriptor_target(target_id: str) -> bool:
         if doc.get("scope") == "spec" and doc.get("target") == target_id:
             return True
     return False
+
+
 def _ai_session_attainment_approve_ban_active() -> bool:
     """ms-119 / e-4006 — refuse AI-session self-approval of a 目的達成 verdict.
 
@@ -1035,6 +1092,8 @@ def _ai_session_attainment_approve_ban_active() -> bool:
     if os.environ.get("BEACON_TARGET_APPROVE_USER_OVERRIDE", "") == "1":
         return False
     return not _session_kind_is_human()
+
+
 def _approval_gate_record() -> dict:
     """ms-119 / e-4006 audit (思想レビュー finding ①b) — capture HOW an approval
     passed the human-only guard.
