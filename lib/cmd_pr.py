@@ -20,11 +20,21 @@ commands.py re-imports the PUBLIC handlers for dispatch + `commands.cmd_pr_*`;
 the family-private helpers (_pr_number_from_url / _review_gate_check /
 _fetch_gh_pr_info / ...) are NOT re-exported (patch them at cmd_pr.<name>).
 
-Test patch target (the e-4320 rule): a test driving a cmd_pr_* handler must patch
-the name in cmd_pr's own namespace — each `from commands_shared import name` binds
-an independent copy, so `monkeypatch.setattr(commands, "load_project", ...)` is a
-silent no-op on this call path. Patch `cmd_pr.load_project` (or `cmd_pr.subprocess`
-for gh shell-outs) instead; do NOT patch commands_shared.<name> to reach a handler.
+Test patch target (the e-4320 rule) — TWO cases, because this family straddles
+two modules:
+  (a) HANDLER-ENTRY stubs (load_project / save_project / subprocess / core):
+      cmd_pr_* handlers resolve these in cmd_pr's OWN namespace (each
+      `from commands_shared import name` binds an independent copy), so
+      `monkeypatch.setattr(commands, "load_project", ...)` is a silent no-op on
+      this call path. Patch `cmd_pr.load_project` (or `cmd_pr.subprocess` for gh
+      shell-outs) instead.
+  (b) TRIGGER-DIR stubs (_get_triggers_dir): the review-due trigger helpers
+      (_fire_review_due_for_pr / _fire_pr_open_review_triggers /
+      _clear_pr_open_review_triggers / ...) are DEFINED in commands_shared and
+      resolve _get_triggers_dir in commands_shared's namespace. To redirect
+      trigger-file I/O for a cmd_pr handler test, patch
+      `commands_shared._get_triggers_dir` (patching cmd_pr._get_triggers_dir
+      would be a silent no-op — cmd_pr does not even import that name).
 """
 
 import os
@@ -36,14 +46,10 @@ import subprocess
 import core  # noqa: F401
 
 from commands_shared import (  # noqa: F401
-    _REVIEW_DUE_SUFFIX,
     _check_ms_status_for_write,
-    _clear_review_due_for_pr,
+    _clear_pr_open_review_triggers,
     _fire_pr_open_review_triggers,
-    _fire_review_due_for_pr,
-    _get_triggers_dir,
     _pending_review_types_for_pr,
-    _pr_open_reviewed_marker_path,
     _resolve_session_id,
     load_project,
     save_project,
@@ -57,25 +63,6 @@ def _pr_number_from_url(url: str) -> str:
     the two never drift; returns a string for use in the trigger filename."""
     n = core._extract_pr_number_from_url(url)
     return str(n) if n is not None else ""
-
-def _clear_pr_open_review_triggers(pr_number: str) -> None:
-    """Clear all PR-open review-due triggers for a PR (ms-119). Mirrors
-    _fire_pr_open_review_triggers over the same registry set."""
-    if not pr_number:
-        return
-    import review_spine
-    for tid, desc in review_spine.judge_run_review_types().items():
-        if desc.get("fires_on") != "pr-open":
-            continue
-        _clear_review_due_for_pr(tid, pr_number)
-    # ms-119 e-4060: PR resolved (merged/closed) → drop the reviewed done-marker
-    # too, so the trigger dir does not accumulate stale markers.
-    try:
-        marker = _pr_open_reviewed_marker_path(pr_number)
-        if os.path.exists(marker):
-            os.remove(marker)
-    except OSError:
-        pass
 
 def _review_gate_check(pr_number: str, *, action: str) -> None:
     """Refuse ``action`` (approve / merge) while independent reviews are still

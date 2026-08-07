@@ -392,6 +392,7 @@ from cmd_pr import (  # noqa: F401
 from commands_shared import (  # noqa: F401
     _clear_review_due_for_pr,
     _fire_pr_open_review_triggers,
+    _clear_pr_open_review_triggers,
     _pending_review_types_for_pr,
     _pr_open_reviewed_marker_path,
     _fire_review_due_for_pr,

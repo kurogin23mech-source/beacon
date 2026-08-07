@@ -2245,6 +2245,30 @@ def _fire_pr_open_review_triggers(pr_number: str, pr_title: str, pr_url: str) ->
             continue
         _fire_review_due_for_pr(tid, desc.get("label", tid), pr_number, pr_title, pr_url)
 
+
+def _clear_pr_open_review_triggers(pr_number: str) -> None:
+    """Clear all PR-open review-due triggers for a PR (ms-119). Mirror of
+    _fire_pr_open_review_triggers over the same registry set. ms-127 e-4859:
+    promoted here alongside its fire counterpart so the fire/clear pair shares a
+    single canonical home (the pr close/merge handlers in cmd_pr.py and any
+    review-family caller import it from here)."""
+    if not pr_number:
+        return
+    import review_spine
+    for tid, desc in review_spine.judge_run_review_types().items():
+        if desc.get("fires_on") != "pr-open":
+            continue
+        _clear_review_due_for_pr(tid, pr_number)
+    # ms-119 e-4060: PR resolved (merged/closed) → drop the reviewed done-marker
+    # too, so the trigger dir does not accumulate stale markers.
+    try:
+        marker = _pr_open_reviewed_marker_path(pr_number)
+        if os.path.exists(marker):
+            os.remove(marker)
+    except OSError:
+        pass
+
+
 _REVIEW_DUE_SUFFIX = "-review-due-"
 
 def _pending_review_types_for_pr(pr_number: str) -> list:
