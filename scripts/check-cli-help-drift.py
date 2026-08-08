@@ -998,6 +998,68 @@ def collect_subverb_drift(
     }
 
 
+_REQUIRES_FN_RE = re.compile(r"^#\s*requires-fn:\s*(.+)$", re.MULTILINE)
+_REQUIRES_VAR_RE = re.compile(r"^#\s*requires-var:\s*(.+)$", re.MULTILINE)
+
+
+def collect_requires_drift(bin_path: Path = BIN_BEACON) -> dict:
+    """ms-127 e-4867: verify each family file's `# requires-fn:` / `# requires-var:`
+    declaration against reality.
+
+    The god-module split moves cmd_<verb>() bodies into sourced bin/lib/cmd_*.sh
+    files that implicitly depend on helpers defined in bin/beacon (the dispatcher).
+    Each family file declares those cross-file deps in a machine-readable seam:
+
+        # requires-fn: ensure_project _guard_flag
+        # requires-var: COMMANDS_PY BEACON_INVOCATION_CWD
+
+    Without a guard that seam is just a comment that can silently rot when a
+    helper is renamed. This check makes it a *verified contract*: every declared
+    `requires-fn` must be a real `name()` function in bin/beacon, and every
+    `requires-var` must be assigned/exported there. A context-zero reader (and
+    the next family split) can then trust the declaration.
+
+    Returns {ok, missing_fn: ["<file>: <sym>"...], missing_var: [...]}.
+    """
+    bin_text = bin_path.read_text(encoding="utf-8")
+    defined_fns = {
+        m.group(1)
+        for m in re.finditer(r"^([A-Za-z_][A-Za-z0-9_]*)\(\)", bin_text, re.MULTILINE)
+    }
+    assigned_vars = {
+        m.group(1)
+        for m in re.finditer(
+            r"^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=", bin_text, re.MULTILINE
+        )
+    }
+    # exported inline (e.g. `export FOO="..." cmd_bar`) — catch `export NAME=` and
+    # bare `export NAME` forms too.
+    assigned_vars |= {
+        m.group(1)
+        for m in re.finditer(r"\bexport\s+([A-Za-z_][A-Za-z0-9_]*)", bin_text)
+    }
+
+    lib_dir = bin_path.parent / "lib"
+    missing_fn: list[str] = []
+    missing_var: list[str] = []
+    if lib_dir.is_dir():
+        for family in sorted(lib_dir.glob("cmd_*.sh")):
+            ftext = family.read_text(encoding="utf-8")
+            for m in _REQUIRES_FN_RE.finditer(ftext):
+                for sym in m.group(1).split():
+                    if sym not in defined_fns:
+                        missing_fn.append(f"{family.name}: {sym}")
+            for m in _REQUIRES_VAR_RE.finditer(ftext):
+                for sym in m.group(1).split():
+                    if sym not in assigned_vars:
+                        missing_var.append(f"{family.name}: {sym}")
+    return {
+        "ok": not (missing_fn or missing_var),
+        "missing_requires_fn": sorted(missing_fn),
+        "missing_requires_var": sorted(missing_var),
+    }
+
+
 def collect_drift(
     bin_path: Path = BIN_BEACON,
     commands_path: Path = COMMANDS_PY,
@@ -1044,6 +1106,9 @@ def collect_drift(
     # ms-133 e-4642: bash ↔ Python sub-verb parity (noun + subcommand).
     subverb_drift = collect_subverb_drift(bin_path, python_dispatch_path)
 
+    # ms-127 e-4867: family file `# requires-fn/var:` seam vs bin/beacon reality.
+    requires_drift = collect_requires_drift(bin_path)
+
     report = {
         "ok": not (
             bin_missing
@@ -1052,7 +1117,10 @@ def collect_drift(
             or not dispatch_drift["ok"]
             or not flag_parity["ok"]
             or not subverb_drift["ok"]
+            or not requires_drift["ok"]
         ),
+        "missing_requires_fn": requires_drift["missing_requires_fn"],
+        "missing_requires_var": requires_drift["missing_requires_var"],
         "bin_verbs": sorted(bin_verbs),
         "json_verbs": sorted(json_verbs),
         "readme_verbs": sorted(readme_verbs),
@@ -1147,6 +1215,18 @@ def _format_text(report: dict) -> str:
         lines.append("    -> macOS/Linux (bash) users can't reach it.")
         lines.append("    -> add the inner-case label in bin/beacon's main switch, OR add it to")
         lines.append("       ALLOW_SUBVERB_MISSING_FROM_BASH if it's an intentional Python-only alias.")
+    if report.get("missing_requires_fn"):
+        lines.append("  - bin/lib/cmd_*.sh `# requires-fn:` names a function absent from bin/beacon:")
+        for v in report["missing_requires_fn"]:
+            lines.append(f"      {v}")
+        lines.append("    -> the family file declares a helper dep that no longer exists (renamed/removed).")
+        lines.append("       Fix the `# requires-fn:` line, or restore the function in bin/beacon.")
+    if report.get("missing_requires_var"):
+        lines.append("  - bin/lib/cmd_*.sh `# requires-var:` names a variable absent from bin/beacon:")
+        for v in report["missing_requires_var"]:
+            lines.append(f"      {v}")
+        lines.append("    -> the family file declares a variable dep that isn't assigned/exported in bin/beacon.")
+        lines.append("       Fix the `# requires-var:` line, or set the variable in bin/beacon.")
     lines.append("")
     lines.append("Allowlists for intentional asymmetries live in scripts/check-cli-help-drift.py.")
     lines.append("This guard is part of ms-10 e-722 (doc & skill auto-sync) + ms-44 e-1171 (dispatch parity).")

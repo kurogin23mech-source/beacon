@@ -8,7 +8,8 @@
 #
 # Pure function definitions only — no top-level execution.
 #
-# requires: ensure_project _guard_flag _guard_positional COMMANDS_PY
+# requires-fn: ensure_project _guard_flag _guard_positional
+# requires-var: COMMANDS_PY
 #   These symbols are defined in bin/beacon (the dispatcher) BEFORE this file
 #   is sourced. bash resolves them at call time (late binding), so definition
 #   order across the source boundary is irrelevant. The `requires:` line above

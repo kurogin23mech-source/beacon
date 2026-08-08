@@ -6,7 +6,8 @@
 # No shebang on purpose: this is an include, not a standalone program.
 # Pure function definitions only — no top-level execution.
 #
-# requires: ensure_project _guard_flag COMMANDS_PY
+# requires-fn: ensure_project _guard_flag
+# requires-var: COMMANDS_PY
 #   Defined in bin/beacon (the dispatcher) before this file is sourced;
 #   bash resolves them at call time (late binding). This machine-readable
 #   seam names cross-file deps so a context-zero reader need not read all
