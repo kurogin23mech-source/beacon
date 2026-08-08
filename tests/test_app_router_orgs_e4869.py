@@ -96,6 +96,46 @@ def test_no_stale_org_routes_left_in_app_py():
     )
 
 
+def test_load_org_for_member_is_wired_and_called():
+    """The injected ``load_org_for_member`` is the security boundary for the
+    member-guarded org endpoints (404-for-non-member). Prove it is actually
+    called through the full router stack: build a router whose injected helper
+    raises 404, mount it on a throwaway app, and confirm a guarded endpoint
+    (GET /api/orgs/{id}/overview) surfaces that 404. A mis-wire that dropped the
+    guard (e.g. a no-op helper) would let the request through — this test fails
+    then, guarding the move's most security-sensitive invariant (maintainability
+    review, PR #608)."""
+    from fastapi import FastAPI, HTTPException
+
+    def _deny(org_id, user):
+        raise HTTPException(status_code=404, detail="org not found")
+
+    probe = FastAPI()
+    probe.include_router(
+        routers_orgs.make_router(
+            require_auth=lambda: {"sub": "u1"},
+            is_auth_enabled=lambda: True,
+            load_org_for_member=_deny,
+        )
+    )
+    r = TestClient(probe).get("/api/orgs/any-id/overview")
+    assert r.status_code == 404, (r.status_code, r.text)
+
+
+def test_make_router_rejects_non_callable_dep():
+    """Passing a bool where a callable is expected (the classic
+    ``is_auth_enabled=_auth_enabled`` instead of ``lambda: _auth_enabled``
+    mis-wire) fails at construction with a TypeError, not at request time."""
+    import pytest
+
+    with pytest.raises(TypeError):
+        routers_orgs.make_router(
+            require_auth=lambda: {"sub": "x"},
+            is_auth_enabled=True,  # bug: a bool, not a callable
+            load_org_for_member=lambda org_id, user: {"org_id": org_id},
+        )
+
+
 def test_org_router_factory_is_standalone_with_injected_deps():
     """routers_orgs.make_router(require_auth, *, is_auth_enabled, load_org_for_member)
     builds a mountable APIRouter carrying exactly the five /api/orgs/* paths, taking

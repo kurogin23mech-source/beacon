@@ -75,6 +75,24 @@ def make_router(
     routers_me.make_router): a mis-wire fails at construction rather than at
     request time, and the signature self-describes.
     """
+    # Construction-time type guard. ``is_auth_enabled`` in particular reads as a
+    # bool flag (its name mirrors app.py's ``_auth_enabled``), so a caller may
+    # pass the bool itself instead of ``lambda: _auth_enabled``. Keyword-only
+    # arguments stop positional transposition but NOT a wrong-type value, so we
+    # check callability here — turning that mis-wire into a mount-time TypeError
+    # rather than a ``'bool' object is not callable`` crash on the first request.
+    for _name, _dep in (
+        ("require_auth", require_auth),
+        ("is_auth_enabled", is_auth_enabled),
+        ("load_org_for_member", load_org_for_member),
+    ):
+        if not callable(_dep):
+            raise TypeError(
+                f"routers_orgs.make_router: {_name} must be callable, "
+                f"got {type(_dep).__name__} — pass a function "
+                f"(e.g. is_auth_enabled=lambda: _auth_enabled), not a value."
+            )
+
     router = APIRouter()
 
     @router.post("/api/orgs")
