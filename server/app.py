@@ -1445,36 +1445,10 @@ class MemberInvite(BaseModel):
 # Project
 # ---------------------------------------------------------------------------
 
-@app.get("/api/version")
-def get_server_version():
-    """Server-side beacon CLI version + git revision.
-
-    Returned to the Web UI so the header banner can show
-        "Beacon 0.4.0 (rev abc1234)"
-    and so the client can detect a stale tab when the server is upgraded.
-
-    See e-587 for the UI hookup (server/static/index.html).
-    """
-    import subprocess
-    try:
-        # lib/commands.py is the source of truth for the version string.
-        from commands import __version__ as cli_version  # type: ignore
-    except Exception:
-        cli_version = "unknown"
-
-    git_rev = ""
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=2,
-            cwd=os.path.dirname(os.path.dirname(__file__)),
-        )
-        if result.returncode == 0:
-            git_rev = result.stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass
-
-    return {"cli": cli_version, "git_rev": git_rev}
+# ms-127 e-4868 (B フェーズ scaffold): GET /api/version は
+# server/routers_version.py の make_router() へ切り出し、下部の
+# app.include_router(_make_version_router()) で mount する。app.py god-module
+# 分割の型づくり (factory + include_router)。挙動不変 (純移動)。
 
 
 @app.get("/api/projects/{project_id}/version")
@@ -12946,6 +12920,17 @@ def cli_auth_poll_get(code: str = ""):
     del _cli_pending[code]
     return result
 
+
+# ---------------------------------------------------------------------------
+# ms-127 e-4868 (B フェーズ scaffold): resource routers split out of this
+# god-module and mounted via include_router. First extraction = /api/version
+# (self-contained, no auth). Follow-ups add auth-requiring routers using the
+# require_auth injection pattern (see trailnode.make_router below).
+# ---------------------------------------------------------------------------
+
+from routers_version import make_router as _make_version_router
+
+app.include_router(_make_version_router())
 
 # ---------------------------------------------------------------------------
 # TrailNode capability registry (sister product, see server/trailnode.py)
