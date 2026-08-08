@@ -16,6 +16,12 @@ import os
 
 from fastapi import APIRouter
 
+# Runtime dependency (implicit, mirrors app.py): the version handler does
+# `from commands import __version__`, so lib/ must be on sys.path (app.py puts it
+# there at startup). If lib/ is absent the handler falls back to cli="unknown"
+# rather than erroring — a zero-context reader splitting this file into a new
+# environment should know that silent fallback is expected, not a bug.
+
 
 def make_router() -> APIRouter:
     """Build the version router. Called once from app.py and mounted via
