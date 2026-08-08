@@ -9,7 +9,7 @@
 # requires-fn: ensure_project _guard_flag _guard_positional
 # requires-var: COMMANDS_PY
 #   Defined in bin/beacon (the dispatcher) before this file is sourced;
-#   bash resolves them at call time. Verified by
+#   bash resolves them at call time (late binding). Verified by
 #   scripts/check-cli-help-drift.py (collect_requires_drift).
 
 cmd_phase_list() {

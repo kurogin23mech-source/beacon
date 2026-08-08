@@ -9,7 +9,7 @@
 # requires-fn: ensure_project _guard_flag _guard_positional _require_audit_reason
 # requires-var: COMMANDS_PY BEACON_ACK_SENTINEL
 #   Defined in bin/beacon (the dispatcher) before this file is sourced;
-#   bash resolves them at call time. Verified by
+#   bash resolves them at call time (late binding). Verified by
 #   scripts/check-cli-help-drift.py (collect_requires_drift).
 
 # ms-106: Sales entities (profession=sales). Account / Opportunity CRUD.
