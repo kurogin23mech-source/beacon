@@ -8,6 +8,7 @@
 #
 # requires-fn: 
 # requires-var: COMMANDS_PY
+# requires-cmd: cmd_launch
 #   Defined in bin/beacon (the dispatcher) before this file is sourced;
 #   bash resolves them at call time (late binding). Verified by
 #   scripts/check-cli-help-drift.py (collect_requires_drift).

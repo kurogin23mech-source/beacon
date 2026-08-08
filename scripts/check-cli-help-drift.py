@@ -1005,6 +1005,9 @@ def collect_subverb_drift(
 # keeps the match on one line; (.*) allows an empty (dep-free) declaration.
 _REQUIRES_FN_RE = re.compile(r"^#[ \t]*requires-fn:[ \t]*(.*)$", re.MULTILINE)
 _REQUIRES_VAR_RE = re.compile(r"^#[ \t]*requires-var:[ \t]*(.*)$", re.MULTILINE)
+# requires-cmd: cross-file cmd_* deps (a family fn that calls a cmd_* defined in
+# another family file), ms-127 e-4867.
+_REQUIRES_CMD_RE = re.compile(r"^#[ \t]*requires-cmd:[ \t]*(.*)$", re.MULTILINE)
 
 
 def collect_requires_drift(bin_path: Path = BIN_BEACON) -> dict:
@@ -1047,9 +1050,30 @@ def collect_requires_drift(bin_path: Path = BIN_BEACON) -> dict:
     lib_dir = bin_path.parent / "lib"
     missing_fn: list[str] = []
     missing_var: list[str] = []
+    # ms-127 e-4867: also validate lib→lib `cmd_*` calls. A family function may
+    # call a cmd_* defined in ANOTHER family file (e.g. cmd_launch calls
+    # cmd_status). That cross-file dep is declared in `# requires-cmd:` and
+    # checked two ways: (1) each declared symbol is defined somewhere; (2)
+    # COMPLETENESS — every cross-file cmd_* actually invoked is declared (the
+    # reverse direction both review lenses asked for, so an undeclared cross-lib
+    # call can't silently pass).
+    undeclared_cmd: list[str] = []
+    missing_cmd: list[str] = []
+    fam_files = sorted(lib_dir.glob("cmd_*.sh")) if lib_dir.is_dir() else []
+    # map every cmd_* definition to the file that defines it (lib + dispatcher)
+    cmd_def_file: dict[str, str] = {}
+    for fam in fam_files:
+        for m in re.finditer(r"^(cmd_[a-z0-9_]+)\(\)", fam.read_text(encoding="utf-8"), re.MULTILINE):
+            cmd_def_file[m.group(1)] = fam.name
+    for m in re.finditer(r"^(cmd_[a-z0-9_]+)\(\)", bin_text, re.MULTILINE):
+        cmd_def_file.setdefault(m.group(1), bin_path.name)
+    # command-position cmd_* token: at statement start or after ; && || then do else
+    call_re = re.compile(r"(?:^|;|&&|\|\||\bthen\b|\bdo\b|\belse\b)\s*(cmd_[a-z0-9_]+)\b")
     if lib_dir.is_dir():
-        for family in sorted(lib_dir.glob("cmd_*.sh")):
+        for family in fam_files:
             ftext = family.read_text(encoding="utf-8")
+            local_defs = {m.group(1) for m in re.finditer(r"^(cmd_[a-z0-9_]+)\(\)", ftext, re.MULTILINE)}
+            declared_cmd: set[str] = set()
             for m in _REQUIRES_FN_RE.finditer(ftext):
                 for sym in m.group(1).split():
                     if sym not in defined_fns:
@@ -1058,10 +1082,30 @@ def collect_requires_drift(bin_path: Path = BIN_BEACON) -> dict:
                 for sym in m.group(1).split():
                     if sym not in assigned_vars:
                         missing_var.append(f"{family.name}: {sym}")
+            for m in _REQUIRES_CMD_RE.finditer(ftext):
+                for sym in m.group(1).split():
+                    declared_cmd.add(sym)
+                    if sym not in cmd_def_file:
+                        missing_cmd.append(f"{family.name}: {sym} (declared, defined nowhere)")
+            # completeness: scan code lines (full-line comments stripped) for
+            # command-position cmd_* invocations resolving to ANOTHER file.
+            for raw in ftext.splitlines():
+                if raw.lstrip().startswith("#"):
+                    continue
+                for m in call_re.finditer(raw):
+                    tok = m.group(1)
+                    if tok in local_defs:
+                        continue  # local call, fine
+                    if tok in cmd_def_file and cmd_def_file[tok] != family.name:
+                        if tok not in declared_cmd:
+                            undeclared_cmd.append(f"{family.name}: {tok} (calls it, not in requires-cmd)")
+    undeclared_cmd = sorted(set(undeclared_cmd))
     return {
-        "ok": not (missing_fn or missing_var),
+        "ok": not (missing_fn or missing_var or missing_cmd or undeclared_cmd),
         "missing_requires_fn": sorted(missing_fn),
         "missing_requires_var": sorted(missing_var),
+        "missing_requires_cmd": sorted(missing_cmd),
+        "undeclared_cross_lib_cmd": undeclared_cmd,
     }
 
 
@@ -1111,7 +1155,7 @@ def collect_drift(
     # ms-133 e-4642: bash ↔ Python sub-verb parity (noun + subcommand).
     subverb_drift = collect_subverb_drift(bin_path, python_dispatch_path)
 
-    # ms-127 e-4867: family file `# requires-fn/var:` seam vs bin/beacon reality.
+    # ms-127 e-4867: family file `# requires-fn/var/cmd:` seam vs reality.
     requires_drift = collect_requires_drift(bin_path)
 
     report = {
@@ -1126,6 +1170,8 @@ def collect_drift(
         ),
         "missing_requires_fn": requires_drift["missing_requires_fn"],
         "missing_requires_var": requires_drift["missing_requires_var"],
+        "missing_requires_cmd": requires_drift["missing_requires_cmd"],
+        "undeclared_cross_lib_cmd": requires_drift["undeclared_cross_lib_cmd"],
         "bin_verbs": sorted(bin_verbs),
         "json_verbs": sorted(json_verbs),
         "readme_verbs": sorted(readme_verbs),
@@ -1232,6 +1278,18 @@ def _format_text(report: dict) -> str:
             lines.append(f"      {v}")
         lines.append("    -> the family file declares a variable dep that isn't assigned/exported in bin/beacon.")
         lines.append("       Fix the `# requires-var:` line, or set the variable in bin/beacon.")
+    if report.get("missing_requires_cmd"):
+        lines.append("  - bin/lib/cmd_*.sh `# requires-cmd:` names a cmd_* defined nowhere:")
+        for v in report["missing_requires_cmd"]:
+            lines.append(f"      {v}")
+        lines.append("    -> fix the `# requires-cmd:` line, or restore the cmd_* function.")
+    if report.get("undeclared_cross_lib_cmd"):
+        lines.append("  - bin/lib/cmd_*.sh calls a cmd_* from another family file but doesn't declare it:")
+        for v in report["undeclared_cross_lib_cmd"]:
+            lines.append(f"      {v}")
+        lines.append("    -> add the called function to that file's `# requires-cmd:` line so the")
+        lines.append("       lib→lib dependency is a machine-verified contract (a zero-context reader")
+        lines.append("       must see the dep without grepping all of bin/lib/).")
     lines.append("")
     lines.append("Allowlists for intentional asymmetries live in scripts/check-cli-help-drift.py.")
     lines.append("This guard is part of ms-10 e-722 (doc & skill auto-sync) + ms-44 e-1171 (dispatch parity).")
