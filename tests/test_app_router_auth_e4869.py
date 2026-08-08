@@ -144,6 +144,42 @@ def test_cli_pairing_round_trip_through_router():
     assert approved["status"] == "approved" and approved["id_token"] == "bcli.paired", approved
 
 
+def test_cli_approve_requires_auth(monkeypatch):
+    """POST /api/auth/cli-approve mutates pairing state on behalf of the signed-in
+    user, so it MUST be auth-gated. With auth enabled and no token it returns 401
+    on the real app — guards against a future move accidentally dropping the
+    Depends(require_auth) (maintainability review, PR #610)."""
+    monkeypatch.setattr(app_module, "_auth_enabled", True)
+    app_module.app.dependency_overrides.pop(app_module.require_auth, None)
+    r = client.post("/api/auth/cli-approve", json={"code": "ABCD1234"})
+    assert r.status_code == 401, (r.status_code, r.text)
+
+
+def test_cli_poll_is_one_time_after_consume():
+    """cli-poll consumes the pairing code on success (issues token + deletes it),
+    so a replay (second poll of the same code) must NOT re-issue — it returns 404.
+    Guards the one-time property of the flow (AX/maintainability review, PR #610)."""
+    from fastapi import FastAPI
+
+    probe = FastAPI()
+    probe.include_router(
+        routers_auth.make_router(
+            require_auth=lambda: {"sub": "u1", "email": "u1@example.com"},
+            make_cli_token=lambda sub, email: ("bcli.once", 4102444800),
+            get_local_dev_enabled=lambda: True,
+            get_auth_provider=lambda: "firebase",
+        )
+    )
+    c = TestClient(probe)
+    code = c.post("/api/auth/cli-start").json()["code"]
+    c.post("/api/auth/cli-approve", json={"code": code})
+    first = c.get("/api/auth/cli-poll", params={"code": code})
+    assert first.json()["id_token"] == "bcli.once", first.json()
+    # replay: the code was consumed/deleted on the first successful poll.
+    replay = c.get("/api/auth/cli-poll", params={"code": code})
+    assert replay.status_code == 404, (replay.status_code, replay.text)
+
+
 def test_no_stale_auth_routes_left_in_app_py():
     """server/app.py no longer declares any ``@app.<method>("/api/auth...")`` — the
     routes live solely in routers_auth. Source-level check."""

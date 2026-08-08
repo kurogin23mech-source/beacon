@@ -9,9 +9,11 @@ Pure move: every route body is verbatim from app.py's auth handlers — same
 paths, same shapes, no behavior change.
 
 The CLI-pairing pending-code table ``_cli_pending`` is **auth-local in-memory
-state** (only cli-start / cli-approve / cli-poll touch it), so it moves here as a
-module global. cli-start writes it, cli-approve marks approved, cli-poll reads +
-issues the token — all against this one process-local dict.
+state** (only cli-start / cli-approve / cli-poll touch it). It is a
+**factory-local** dict created inside ``make_router`` (not a module global), so
+each router instance owns its own table and a second mount cannot leak pairing
+codes across instances. cli-start writes it, cli-approve marks approved, cli-poll
+reads + issues the token — all against this one closure-captured dict.
 
 Injected dependencies (owned by app.py, passed in to avoid an import cycle):
 
@@ -45,11 +47,6 @@ from pydantic import BaseModel
 
 import store_router as db  # e-1544: same backend-routing binding app.py uses
 
-# In-memory pending CLI-pairing codes: code -> {sub, email, id_token, expires}.
-# Auth-local process state (moved verbatim from app.py); shared across the three
-# cli-auth routes built by make_router below.
-_cli_pending: dict[str, dict] = {}
-
 
 class DevLoginRequest(BaseModel):
     email: str
@@ -63,7 +60,7 @@ class CliApproveRequest(BaseModel):
 def make_router(
     require_auth: Callable,
     *,
-    make_cli_token: Callable[[str, str], tuple],
+    make_cli_token: Callable[[str, str], tuple[str, int]],
     get_local_dev_enabled: Callable[[], bool],
     get_auth_provider: Callable[[], str],
 ) -> APIRouter:
@@ -93,6 +90,15 @@ def make_router(
                 f"routers_auth.make_router: {_name} must be callable, "
                 f"got {type(_dep).__name__} — pass a function, not a value."
             )
+
+    # In-memory pending CLI-pairing codes: code -> {sub, email, id_token, expires}.
+    # Auth-local process state, scoped to THIS router instance (factory-local, not
+    # module-global): each make_router() call gets its own dict, so a second mount
+    # (e.g. a test probe) cannot leak pairing codes into the real app's table. In
+    # production make_router runs once, so behaviour is identical to the single
+    # module-global app.py had. Shared across the three cli-auth routes below via
+    # the closure.
+    _cli_pending: dict[str, dict] = {}
 
     router = APIRouter()
 
