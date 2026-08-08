@@ -9,7 +9,9 @@ assert (a) the endpoint still works and (b) the route is served exactly once
 from __future__ import annotations
 
 import os
+import re
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
@@ -35,14 +37,24 @@ def test_version_endpoint_served_by_included_router():
     assert isinstance(body["git_rev"], str)
 
 
-def test_version_route_registered_exactly_once():
-    """The split must not leave a stale @app route behind: /api/version is
-    served by exactly one route (the included router's)."""
-    matches = [
-        route for route in app_module.app.routes
-        if getattr(route, "path", None) == "/api/version"
-    ]
-    assert len(matches) == 1, f"expected 1 /api/version route, got {len(matches)}"
+def test_no_stale_version_route_left_in_app_py():
+    """The split must not leave a stale handler behind: server/app.py no longer
+    declares `@app.(get)("/api/version")` — the route now lives solely in
+    routers_version. Checked at the SOURCE level (deterministic, isolation-proof)
+    rather than by iterating app.routes at runtime, which the full test suite can
+    perturb via other tests that reload/reassign the app module.
+
+    Combined with test_version_endpoint_served_by_included_router (the route DOES
+    respond via the mounted router), this proves the move is complete: served by
+    the router, and not duplicated in the god-module."""
+    app_src = (
+        Path(__file__).resolve().parent.parent / "server" / "app.py"
+    ).read_text(encoding="utf-8")
+    # any @app.<method>("/api/version") decorator would be a stale duplicate.
+    assert not re.search(r'@app\.\w+\(\s*["\']/api/version["\']', app_src), (
+        "server/app.py still declares an /api/version route — the split left a "
+        "stale duplicate; remove it (the route belongs in routers_version.py)."
+    )
 
 
 def test_version_router_factory_is_standalone():
