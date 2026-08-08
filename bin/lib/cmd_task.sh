@@ -1,9 +1,20 @@
-#!/usr/bin/env bash
+# shellcheck shell=bash
 # beacon CLI — task family (cmd_task_*)
 # ms-127 e-4867: sourced by bin/beacon (noun-family god-module split).
-# Pure function definitions only — no top-level execution. Relies on
-# helpers (ensure_project / _guard_* / COMMANDS_PY) defined in bin/beacon
-# before this file is sourced; bash resolves them at call time.
+#
+# SOURCE-ONLY — do NOT execute directly (`bash bin/lib/cmd_task.sh` does
+# nothing useful; it only defines functions). bin/beacon `source`s this file.
+# No shebang on purpose: this is an include, not a standalone program.
+#
+# Pure function definitions only — no top-level execution.
+#
+# requires: ensure_project _guard_flag _guard_positional COMMANDS_PY
+#   These symbols are defined in bin/beacon (the dispatcher) BEFORE this file
+#   is sourced. bash resolves them at call time (late binding), so definition
+#   order across the source boundary is irrelevant. The `requires:` line above
+#   is the machine-readable seam: it names this file's cross-file dependencies
+#   so a context-zero reader knows what must be in scope without reading all of
+#   bin/beacon.
 
 cmd_task_add() {
     ensure_project
