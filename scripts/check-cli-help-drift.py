@@ -83,9 +83,35 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BIN_BEACON = ROOT / "bin" / "beacon"
+# ms-127 e-4867: bin/beacon's noun-family cmd_<verb>() bodies are being split
+# out into bin/lib/cmd_*.sh and `source`d back at runtime (bash god-module
+# split B phase). The dispatch `case` stays in bin/beacon, but the *function
+# bodies* move here — so any scan that slices a cmd_<verb>() definition (flag
+# parity) must read bin/beacon AND these sourced files as one logical surface.
+BIN_LIB_DIR = ROOT / "bin" / "lib"
 COMMANDS_PY = ROOT / "lib" / "commands.py"
 README = ROOT / "README.md"
 PYTHON_DISPATCH = ROOT / "beacon_cli" / "dispatch.py"
+
+
+def _bash_function_source(bin_path: Path = BIN_BEACON) -> str:
+    """Combined bash source where ``cmd_<verb>()`` bodies may live.
+
+    Returns ``bin/beacon`` concatenated with every ``bin/lib/cmd_*.sh`` family
+    file (sorted for determinism). A family function's slice end is still the
+    next ``^cmd_…()`` header, which concatenation preserves across file joins,
+    so flag scanning is unaffected by *where* a function physically lives. The
+    dispatch ``case`` block (scanned elsewhere) stays in bin/beacon and is not
+    duplicated by this join.
+    """
+    parts = [bin_path.read_text(encoding="utf-8")]
+    lib_dir = bin_path.parent / "lib"
+    if lib_dir.is_dir():
+        for family in sorted(lib_dir.glob("cmd_*.sh")):
+            parts.append(family.read_text(encoding="utf-8"))
+    # Join with a newline so the last line of one file can't fuse with the
+    # first line of the next (line-anchored regexes depend on real boundaries).
+    return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -751,7 +777,11 @@ def bash_verb_flags(verb: str, bin_path: Path = BIN_BEACON) -> "set[str] | None"
     (an unanchored ``str.find`` could latch onto an earlier occurrence and
     slice the wrong region, yielding a false pass).
     """
-    text = bin_path.read_text(encoding="utf-8")
+    # ms-127 e-4867: cmd_<verb>() bodies may live in bin/beacon OR a sourced
+    # bin/lib/cmd_*.sh family file. Scan the combined surface so a function
+    # that was split out is still found (else the split reads as "handler
+    # absent" and fails CI on a pure move).
+    text = _bash_function_source(bin_path)
     name = "cmd_" + verb.replace(" ", "_")
     header_re = re.compile(r"^" + re.escape(name) + r"\(\)", re.MULTILINE)
     m = header_re.search(text)
