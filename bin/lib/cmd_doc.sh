@@ -9,9 +9,8 @@
 # requires-fn: ensure_project _guard_flag
 # requires-var: COMMANDS_PY
 #   Defined in bin/beacon (the dispatcher) before this file is sourced;
-#   bash resolves them at call time (late binding). This machine-readable
-#   seam names cross-file deps so a context-zero reader need not read all
-#   of bin/beacon.
+#   bash resolves them at call time (late binding). Verified by
+#   scripts/check-cli-help-drift.py (collect_requires_drift).
 
 cmd_doc() {
     ensure_project

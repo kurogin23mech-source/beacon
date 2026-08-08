@@ -10,12 +10,9 @@
 #
 # requires-fn: ensure_project _guard_flag _guard_positional
 # requires-var: COMMANDS_PY
-#   These symbols are defined in bin/beacon (the dispatcher) BEFORE this file
-#   is sourced. bash resolves them at call time (late binding), so definition
-#   order across the source boundary is irrelevant. The `requires:` line above
-#   is the machine-readable seam: it names this file's cross-file dependencies
-#   so a context-zero reader knows what must be in scope without reading all of
-#   bin/beacon.
+#   Defined in bin/beacon (the dispatcher) before this file is sourced;
+#   bash resolves them at call time (late binding). Verified by
+#   scripts/check-cli-help-drift.py (collect_requires_drift).
 
 cmd_task_add() {
     ensure_project
