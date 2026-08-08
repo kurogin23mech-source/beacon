@@ -79,12 +79,24 @@ def test_admin_me_happy_path_through_router(monkeypatch):
     assert r.json() == {"is_admin": True}, r.json()
 
 
-def test_require_admin_is_wired_and_called():
+import pytest
+
+
+@pytest.mark.parametrize("method,path", [
+    ("get", "/api/admin/users"),
+    ("delete", "/api/admin/users/u2"),
+    ("get", "/api/admin/projects"),
+    ("delete", "/api/admin/projects/p1"),
+    ("post", "/api/admin/trash/sweep"),          # the most destructive route
+    ("patch", "/api/admin/projects/p1/owner"),
+])
+def test_require_admin_is_wired_and_called(method, path):
     """The injected ``require_admin`` gate is the security boundary for the
-    mutating admin routes. Prove it is actually called through the full router
-    stack: build a router whose gate raises 403, mount it, and confirm a guarded
-    endpoint (GET /api/admin/users) surfaces that 403. A mis-wire that dropped the
-    gate would let the request through."""
+    mutating admin routes — INCLUDING the destructive ones (delete user/project,
+    trash sweep, owner transfer). Prove the gate is actually called through the
+    full router stack for each: build a router whose gate raises 403, mount it,
+    and confirm the endpoint surfaces that 403. A mis-wire that dropped the gate
+    on any route would let the request through (maintainability review, PR #609)."""
     from fastapi import FastAPI, HTTPException
 
     def _deny(user):
@@ -98,8 +110,67 @@ def test_require_admin_is_wired_and_called():
             apply_op_and_broadcast=lambda *a, **k: {},
         )
     )
-    r = TestClient(probe).get("/api/admin/users")
-    assert r.status_code == 403, (r.status_code, r.text)
+    # Use .request() so a json body can go with any verb (httpx get()/delete()
+    # don't take json=). PATCH/owner needs a valid body to pass validation and
+    # reach the handler's require_admin; other verbs ignore the body.
+    r = TestClient(probe).request(method.upper(), path, json={"new_owner_id": "x"})
+    assert r.status_code == 403, (method, path, r.status_code, r.text)
+
+
+def test_trash_sweep_apply_path_invokes_apply_op_and_broadcast():
+    """The dry_run=False (destructive apply) branch of admin_trash_sweep must run
+    the writes through the injected ``apply_op_and_broadcast`` — the same
+    transactional + broadcast path app.py uses everywhere. Prove that injection is
+    on the hot path: with the gate passing and one project to sweep, a bare
+    (dry_run defaulting False) POST calls the injected helper (maintainability
+    review, PR #609). dry_run=True must NOT call it."""
+    calls = []
+
+    class _FakeDB:
+        def list_all_projects(self):
+            return [{"project_id": "p1"}]
+
+        def sweep_trashed_documents(self, pid, days, dry_run):
+            return []
+
+    class _FakeOps:
+        def load_project_consistent(self, pid):
+            return {}
+
+    class _FakeCore:
+        def sweep_trashed_in_project(self, data, days, apply):
+            return {"ms_purged_ids": [], "task_purged_ids": []}
+
+    def _fake_apply(pid, op, **kw):
+        calls.append((pid, kw.get("op_name")))
+        return {"ms_purged_ids": [], "task_purged_ids": []}
+
+    from fastapi import FastAPI
+
+    probe = FastAPI()
+    probe.include_router(
+        routers_admin.make_router(
+            require_auth=lambda: {"sub": "admin"},
+            require_admin=lambda user: None,   # admin passes
+            apply_op_and_broadcast=_fake_apply,
+        )
+    )
+    # The route bodies resolve module-global db / operations / core at call time;
+    # swap all three so the sweep never touches a real store backend.
+    import routers_admin as _ra
+    saved = (_ra.db, _ra.operations, _ra.core)
+    _ra.db, _ra.operations, _ra.core = _FakeDB(), _FakeOps(), _FakeCore()
+    try:
+        c = TestClient(probe)
+        r_apply = c.post("/api/admin/trash/sweep")            # dry_run defaults False
+        r_dry = c.post("/api/admin/trash/sweep?dry_run=true")
+    finally:
+        _ra.db, _ra.operations, _ra.core = saved
+
+    assert r_apply.status_code == 200, (r_apply.status_code, r_apply.text)
+    assert calls == [("p1", "trash.sweep")], calls  # apply path called the helper once
+    assert r_dry.status_code == 200, (r_dry.status_code, r_dry.text)
+    assert calls == [("p1", "trash.sweep")], "dry_run must not invoke the write helper"
 
 
 def test_make_router_rejects_non_callable_dep():

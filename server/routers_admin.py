@@ -31,7 +31,7 @@ routing). ``core`` / ``operations`` are the same modules app.py imports.
 """
 from __future__ import annotations
 
-from typing import Callable
+from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -53,7 +53,7 @@ def make_router(
     require_auth: Callable,
     *,
     require_admin: Callable[[dict], None],
-    apply_op_and_broadcast: Callable,
+    apply_op_and_broadcast: Callable[..., Any],
 ) -> APIRouter:
     """Build the /api/admin/* router with the host app's auth + admin helpers.
 
