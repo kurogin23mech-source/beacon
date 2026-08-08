@@ -20,6 +20,44 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import app as app_module  # noqa: E402
+# ms-127 e-4871 (PR1): get_disclosed_accounts moved into the /api/projects/*
+# router (nested in make_router), so it is no longer importable as
+# app.get_disclosed_accounts. We build the router with a delegating
+# _load_meta_only and invoke the extracted endpoint directly. db is the same
+# shared store_router module in both, so monkeypatching app_module.db still
+# reaches the handler.
+import routers_projects as rp  # noqa: E402
+
+# Per-test hook the injected _load_meta_only delegates to (set in _setup).
+_STATE: dict = {}
+
+
+def _stub(*_a, **_k):
+    return None
+
+
+def _disclosed_accounts_endpoint():
+    router = rp.make_router(
+        _stub,
+        _load=_stub,
+        _load_meta_only=lambda pid, user: _STATE["load_meta"](pid, user),
+        _require_project_role=_stub,
+        _require_write=_stub,
+        _require_owner=_stub,
+        _apply_op_and_broadcast=_stub,
+        _resolve_author=_stub,
+        _save=_stub,
+        _broadcast_project_after_write=_stub,
+        _broadcast_document_change=_stub,
+        require_envelope_for_action=lambda *_a, **_k: _stub,
+        is_auth_enabled=lambda: True,
+    )
+    for r in router.routes:
+        if (getattr(r, "path", None)
+                == "/api/projects/{project_id}/disclosed-accounts"
+                and "GET" in getattr(r, "methods", set())):
+            return r.endpoint
+    raise LookupError("disclosed-accounts route not found")
 
 
 def _acc(acc_id, links):
@@ -28,8 +66,7 @@ def _acc(acc_id, links):
 
 def _setup(monkeypatch, sales_accounts, *, other_org_accounts=None):
     # lens P = proj-dev, org = org-p-u1 (personal org of u1).
-    monkeypatch.setattr(app_module, "_load_meta_only",
-                        lambda pid, user: {"owner": "u1", "org_id": "org-p-u1"})
+    _STATE["load_meta"] = lambda pid, user: {"owner": "u1", "org_id": "org-p-u1"}
     projects = {
         "proj-sales": {"owner": "u1", "org_id": "org-p-u1", "name": "営業",
                        "accounts": sales_accounts},
@@ -45,7 +82,7 @@ def _setup(monkeypatch, sales_accounts, *, other_org_accounts=None):
 
 
 def _call():
-    return app_module.get_disclosed_accounts("proj-dev", {"sub": "u1"})
+    return _disclosed_accounts_endpoint()("proj-dev", {"sub": "u1"})
 
 
 def test_linked_account_is_returned_with_home_annotation(monkeypatch):

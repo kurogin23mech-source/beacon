@@ -44,6 +44,9 @@ os.environ["BEACON_OPERATIONS_BACKEND"] = "mock"
 import firestore_client  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 import app as app_module  # noqa: E402
+# ms-127 e-4871 (PR1): _mirror_task_done_to_treks moved to routers_projects.py
+# (module-level helper); db/trek_mod are the same shared modules in both.
+import routers_projects as rp  # noqa: E402
 
 # Module-load defense (mirrors tests/test_purge_api.py / tests/test_api.py
 # interaction): store_router captures function references at `from
@@ -1948,7 +1951,7 @@ class TestLeaderReviewSelfApproveGate:
         """The pool-done mirror must skip a leader_review stamp — otherwise a
         pool task going done would auto-approve past the leader review."""
         trek_id = self._seed_trek_with_task_state("e-mir", "leader_review")
-        touched = app_module._mirror_task_done_to_treks("e-mir")
+        touched = rp._mirror_task_done_to_treks("e-mir")
         assert trek_id not in touched
         assert _treks[trek_id]["task_states"]["e-mir"]["state"] == "leader_review"
 
@@ -1956,7 +1959,7 @@ class TestLeaderReviewSelfApproveGate:
         """Sanity: the mirror still does its job for a genuinely-stuck
         working stamp (= regression guard that the P5 skip is narrow)."""
         trek_id = self._seed_trek_with_task_state("e-mir2", "working")
-        touched = app_module._mirror_task_done_to_treks("e-mir2")
+        touched = rp._mirror_task_done_to_treks("e-mir2")
         assert trek_id in touched
         assert _treks[trek_id]["task_states"]["e-mir2"]["state"] == "done"
 

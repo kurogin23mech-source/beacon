@@ -34,6 +34,9 @@ ROUTERS_ME_PY = ROOT / "server" / "routers_me.py"
 # ms-127 e-4869: the admin endpoints (incl. the ownerless audit) moved into the
 # /api/admin/* router; the _require_admin gate is injected as `require_admin`.
 ROUTERS_ADMIN_PY = ROOT / "server" / "routers_admin.py"
+# ms-127 e-4871 (PR1): create_project moved into the /api/projects/* router
+# (nested in make_router; guards injected). The sub-required guard now lives there.
+ROUTERS_PROJECTS_PY = ROOT / "server" / "routers_projects.py"
 
 
 def _read(p: Path) -> str:
@@ -70,7 +73,8 @@ class TestListProjectsDenyByDefault:
 
 class TestCreateProjectRequiresSub:
     def setup_method(self, _method):
-        self.src = _read(APP_PY)
+        # create_project now lives in routers_projects.py (ms-127 e-4871 PR1 split).
+        self.src = _read(ROUTERS_PROJECTS_PY)
 
     def test_create_project_rejects_missing_sub(self):
         m = re.search(
