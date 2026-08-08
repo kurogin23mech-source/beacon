@@ -998,8 +998,13 @@ def collect_subverb_drift(
     }
 
 
-_REQUIRES_FN_RE = re.compile(r"^#\s*requires-fn:\s*(.+)$", re.MULTILINE)
-_REQUIRES_VAR_RE = re.compile(r"^#\s*requires-var:\s*(.+)$", re.MULTILINE)
+# Use [ \t]* (not \s*) after the colon and (.*) (not (.+)): a family with NO
+# function deps writes an empty `# requires-fn:` line. With \s* + (.+) the
+# regex would let \s* swallow the newline and (.+) grab the NEXT line's text
+# (e.g. the requires-var line), producing bogus "missing symbol" reports. [ \t]*
+# keeps the match on one line; (.*) allows an empty (dep-free) declaration.
+_REQUIRES_FN_RE = re.compile(r"^#[ \t]*requires-fn:[ \t]*(.*)$", re.MULTILINE)
+_REQUIRES_VAR_RE = re.compile(r"^#[ \t]*requires-var:[ \t]*(.*)$", re.MULTILINE)
 
 
 def collect_requires_drift(bin_path: Path = BIN_BEACON) -> dict:

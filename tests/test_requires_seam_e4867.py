@@ -59,6 +59,29 @@ def test_broken_requires_fn_is_caught(tmp_path):
     assert "cmd_fake.sh: MISSING_VAR" in r["missing_requires_var"]
 
 
+def test_empty_requires_fn_does_not_bleed_into_next_line(tmp_path):
+    """A family with NO function deps writes an empty `# requires-fn:` line.
+    The parser must not let that empty declaration swallow the following
+    `# requires-var:` line (a \\s*+(.+) regex would — regression guard)."""
+    mod = _load_checker()
+    bin_dir = tmp_path / "bin"
+    (bin_dir / "lib").mkdir(parents=True)
+    (bin_dir / "beacon").write_text(
+        "#!/usr/bin/env bash\nCOMMANDS_PY=x\n", encoding="utf-8"
+    )
+    # cmd_init-style: no fn deps, only a var dep.
+    (bin_dir / "lib" / "cmd_init.sh").write_text(
+        "# requires-fn:\n"
+        "# requires-var: COMMANDS_PY\n"
+        "#   explanatory line\n"
+        "cmd_init() { echo hi; }\n",
+        encoding="utf-8",
+    )
+    r = mod.collect_requires_drift(bin_dir / "beacon")
+    assert r["ok"], r  # COMMANDS_PY exists; empty fn list must not report bogus symbols
+    assert r["missing_requires_fn"] == []
+
+
 def test_satisfied_requires_passes_on_fixture(tmp_path):
     """A family file whose declarations all resolve passes the guard."""
     mod = _load_checker()
