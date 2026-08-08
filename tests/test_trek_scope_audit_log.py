@@ -32,6 +32,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_PY = ROOT / "server" / "app.py"
+# ms-127 e-4870 — the trek scope endpoints + _log_trek_scope_audit helper moved
+# from app.py into routers_treks.py (nested inside make_router). The audit-shape
+# assertions below read that file; the endpoints are now indented one level and
+# decorated with @router. instead of @app.
+ROUTERS_TREKS_PY = ROOT / "server" / "routers_treks.py"
 COMMANDS_PY = ROOT / "lib" / "commands.py"
 
 
@@ -45,7 +50,7 @@ def _read(path: Path) -> str:
 
 class TestAuditLogShape:
     def setup_method(self, _method):
-        self.src = _read(APP_PY)
+        self.src = _read(ROUTERS_TREKS_PY)
 
     def test_audit_helper_exists(self):
         assert "def _log_trek_scope_audit(" in self.src, (
@@ -58,7 +63,7 @@ class TestAuditLogShape:
         # Extract the function body by matching from def to the next
         # top-level @app. decorator (which marks the next route).
         m = re.search(
-            r"def _log_trek_scope_audit\([^)]*\)[^:]*:(.*?)(?=^@app\.)",
+            r"def _log_trek_scope_audit\([^)]*\)[^:]*:(.*?)(?=^    (?:@router\.|def ))",
             self.src,
             re.DOTALL | re.MULTILINE,
         )
@@ -79,7 +84,7 @@ class TestAuditLogShape:
         # Find the function body of add_trek_scope_endpoint and check it
         # ends with an audit call.
         m = re.search(
-            r"def add_trek_scope_endpoint\([^)]*\)[^:]*:(.*?)(?=^@app\.)",
+            r"def add_trek_scope_endpoint\([^)]*\)[^:]*:(.*?)(?=^    (?:@router\.|def ))",
             self.src,
             re.DOTALL | re.MULTILINE,
         )
@@ -99,7 +104,7 @@ class TestAuditLogShape:
 
     def test_remove_endpoint_calls_audit_helper(self):
         m = re.search(
-            r"def remove_trek_scope_endpoint\([^)]*\)[^:]*:(.*?)(?=^@app\.)",
+            r"def remove_trek_scope_endpoint\([^)]*\)[^:]*:(.*?)(?=^    (?:@router\.|def ))",
             self.src,
             re.DOTALL | re.MULTILINE,
         )
@@ -178,10 +183,14 @@ class TestNoUndocumentedScopeMutators:
         # runs strict normalisation, so AC7 / AC23 invariants hold.
         # If a NEW direct caller appears outside these two files, AC23
         # has regressed.
-        assert caller_files == ["lib/trek.py", "server/app.py"], (
-            f"e-2320 contract (post ms-97 / e-2626 + e-2603 AC24): "
-            f"trek.add_scope_entry callers must be exactly "
-            f"['lib/trek.py', 'server/app.py'] (lib = "
+        # ms-127 e-4870 — add_trek_scope_endpoint (the blanket auto-commit
+        # caller) moved from server/app.py to server/routers_treks.py. The
+        # documented-caller set is unchanged in intent; only the server file
+        # changed.
+        assert caller_files == ["lib/trek.py", "server/routers_treks.py"], (
+            f"e-2320 contract (post ms-97 / e-2626 + e-2603 AC24; "
+            f"ms-127 e-4870 move): trek.add_scope_entry callers must be "
+            f"exactly ['lib/trek.py', 'server/routers_treks.py'] (lib = "
             f"approve_pending_scope_op; server = blanket auto-commit "
             f"in add_trek_scope_endpoint). Found: {caller_files!r}. "
             f"Route any new caller through the pending approval flow "
