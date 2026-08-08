@@ -190,15 +190,43 @@ def reset_store():
         _restore_db(prior_db, prior_module)
 
 
+def _iter_api_routes(routes):
+    """Yield every APIRoute reachable from ``routes``, descending into routers
+    mounted via ``include_router``.
+
+    ms-127 e-4871 (PR1): the envelope-gated endpoints (purge / archive /
+    migrate) moved from top-level ``@app.post`` into the ``/api/projects/*``
+    router, which app.py mounts with ``include_router``. Newer FastAPI
+    (>=0.140-ish, as CI installs) no longer *flattens* included routes into
+    ``app.routes`` — it keeps them nested inside an ``_IncludedRouter`` wrapper
+    (exposed via ``.include_context.included_router.routes``). The old flat
+    walk therefore missed the moved deps entirely on CI (Python 3.11 +
+    newer FastAPI), so the gate was never overridden and every purge returned
+    403 ``envelope_required``. This recursive walk finds the deps in both the
+    flattened (older FastAPI) and nested (newer FastAPI) representations, and
+    also descends into any ``Mount``/sub-router with a ``.routes`` list.
+    """
+    for route in routes:
+        if hasattr(route, "dependant"):
+            yield route
+        ctx = getattr(route, "include_context", None)
+        included = getattr(ctx, "included_router", None) if ctx else None
+        if included is not None and getattr(included, "routes", None):
+            yield from _iter_api_routes(included.routes)
+        elif getattr(route, "routes", None):
+            yield from _iter_api_routes(route.routes)
+
+
 def _disable_envelope_gate() -> None:
     """Install a dependency override that lets every action through.
 
     The factory ``require_envelope_for_action`` returns a fresh closure per
     endpoint, so FastAPI registers each as a distinct dependency. Walking the
-    routes and overriding each closure keeps this file decoupled from the
-    list of high-risk endpoints (= no need to mirror that list here).
+    routes (recursively, via :func:`_iter_api_routes`, so include_router'd
+    routes are covered) and overriding each closure keeps this file decoupled
+    from the list of high-risk endpoints (= no need to mirror that list here).
     """
-    for route in app_module.app.routes:
+    for route in _iter_api_routes(app_module.app.routes):
         for dep in getattr(getattr(route, "dependant", None), "dependencies",
                            []) or []:
             call = dep.call

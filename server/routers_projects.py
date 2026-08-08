@@ -1,0 +1,1623 @@
+"""Projects ("/api/projects/*") router — PR1: core CRUD + milestones + entries +
+operations + documents + claims + changelog + log/summary.
+
+ms-127 e-4871 (B フェーズ・最終, sub-resource split PR1 of 3): the first slice of
+the projects god-resource extracted from server/app.py, following the
+make_router(require_auth, *, ...injected helpers) pattern established by
+routers_me / routers_orgs / routers_admin / routers_auth / routers_treks.
+
+Pure move: every route body + helper is verbatim from app.py. Two mechanical
+deltas only: ``@app.<m>`` -> ``@router.<m>``, and the single read of app.py's
+module-global ``_auth_enabled`` bool (in put_project) -> the injected
+``is_auth_enabled()`` getter (so tests that flip the shared flag at runtime are
+reflected — same reasoning as routers_auth's get_local_dev_enabled).
+
+Split boundary (this PR): PR2 (members / invitations / rehome / notes / sessions
+/ session_logs / retros / search) and PR3 (bus / dm) stay in app.py for now. The
+project auth-guard family (``_load`` / ``_require_project_role`` /
+``_require_write`` / ``_require_owner`` / ``_load_meta_only``) is NOT moved — it
+is shared across all three slices and reads ``_auth_enabled``, so it stays owned
+by app.py and is INJECTED into every make_router. This keeps the slices
+independent (no circular imports), the same resolution used for the trek guards.
+
+Module-level helpers below are self-contained (depend only on db / core /
+operations / trek_mod / envelope_mod / master_adapter / work_model) — no auth
+flag, no injected app.py callables — so they live at module scope. All route
+handlers are nested inside make_router so they can close over the injected deps.
+
+Injected dependencies (owned by app.py, passed in to avoid an import cycle):
+
+- ``require_auth``                  — identity dependency.
+- ``_load`` / ``_load_meta_only``   — project load (+ role check) / meta-only load.
+- ``_require_project_role`` / ``_require_write`` / ``_require_owner`` — RBAC guards.
+- ``_apply_op_and_broadcast``       — the write + WS-broadcast path (~15 routes).
+- ``_resolve_author``               — authorship resolution.
+- ``_save``                         — project persist.
+- ``_broadcast_project_after_write`` / ``_broadcast_document_change`` — WS pushes
+                                       (own app.py's _ws_connections / _event_loop).
+- ``require_envelope_for_action``   — envelope-gate dependency factory (owns
+                                       app.py's nonce / parent-lookup stores).
+- ``is_auth_enabled``               — zero-arg getter for the ``_auth_enabled`` bool.
+
+``db`` mirrors app.py's binding — ``store_router as db`` (e-1544 backend routing).
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import time
+from typing import Any, Callable, Dict, List, Optional
+
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+import store_router as db  # e-1544: same backend-routing binding app.py uses
+import core
+import operations
+import trek as trek_mod
+import envelope as envelope_mod
+import work_model
+import master_adapter
+import approved_actions as approved_actions_mod
+import disclosure as disclosure_mod
+import master_binding
+import master_projection
+import org as org_mod
+import phantom_done_evidence as phantom_done_mod
+
+# Structured-audit logger (name-based singleton — same object app.py binds).
+# _check_phantom_done_evidence emits its phantom-done warning here.
+_audit_logger = logging.getLogger("beacon.audit")
+
+
+# ---------------------------------------------------------------------------
+# Pydantic request models (project-only; verbatim from app.py)
+# ---------------------------------------------------------------------------
+
+class ProjectCreate(BaseModel):
+    name: str
+    objective: str = ""
+
+class MilestoneCreate(BaseModel):
+    title: str
+    target_date: str = ""
+    description: str = ""
+    priority: str = ""
+    objective: str = ""
+    acceptance_criteria: str = ""
+
+class MilestoneUpdate(BaseModel):
+    title: str = ""
+    progress: str = ""
+    target_date: str = ""
+    status: str = ""
+    description: str = ""
+    # ms-126 (AX round-2): model "unset" (None = field omitted = no change)
+    # distinctly from an explicit value, and disclose optionality in the schema.
+    # None → leave the priority untouched; a provided value must be one of the 5
+    # severities (untriaged is a machine sentinel, rejected as not-a-severity).
+    priority: Optional[str] = None
+    objective: str = ""
+    acceptance_criteria: str = ""
+
+class EntryCreate(BaseModel):
+    description: str
+    type: str = "task"
+    date: str = ""
+    detail: str = ""
+    # ms-126: priority is required for task entries (the human web form must
+    # supply one of the 5 severities). Empty + type=="task" is rejected by
+    # core.task_add and surfaced as a 400 below. Non-task entries (commit /
+    # note) ignore it.
+    priority: str = ""
+
+class EntryUpdate(BaseModel):
+    description: str = ""
+    status: str = ""
+    detail: str = ""
+    date: str = ""
+    # ms-126 (e-4224 + AX round-2): the untriaged-recovery path must exist on
+    # the web surface too — a non-terminal human triaging a machine-created
+    # untriaged task PATCHes a real severity here. Modelled as Optional so the
+    # schema DISCLOSES the value domain and distinguishes "unset" (None = field
+    # omitted = no change) from an explicit value. A provided value must be one
+    # of the 5 severities; ``untriaged`` is a machine sentinel and is rejected
+    # state-independently (you cannot re-assert it from a client — omit the
+    # field to leave an untriaged task unchanged). This removes the earlier
+    # state-dependent "echo untriaged = no-op / else 400" ambiguity.
+    priority: Optional[str] = None
+
+class LogCommit(BaseModel):
+    hash: str
+    message: str
+    date: str
+    summary: str = ""
+    ms_id: str = ""
+    progress: str = ""
+
+class SummaryUpdate(BaseModel):
+    text: str
+
+class OperationApproveRequest(BaseModel):
+    """Body for POST /api/projects/{id}/operations/{op_id}/envelopes (ms-60 / e-1339).
+
+    Mints a T2 envelope from a SPEC doc whose frontmatter declares
+    ``approved_actions``. The SPEC doc must already exist and be linked to
+    ``op_id`` (frontmatter ``operation: op-X``). ``ttl_seconds`` defaults to
+    "effectively forever" (30 years) per ms-60 SPEC § 設計方針 2 —
+    "SPEC 更新まで無期限" with explicit ``beacon operation revoke`` as the
+    escape valve.
+    """
+    spec_doc_id: str
+    ttl_seconds: int = 30 * 365 * 86400  # ~30 years; revoke is the kill-switch
+
+class OperationRevokeRequest(BaseModel):
+    """Body for POST /api/projects/{id}/operations/{op_id}/envelopes/{env_id}/revoke."""
+    reason: str = "manual revoke"
+
+class OperationFireClaimRequest(BaseModel):
+    """Body for POST /api/projects/{id}/operation-fires/{op_id}/claim (ms-95).
+
+    Atomic per-day claim used by the CLI scheduler to dedup operation
+    triggers across parallel bclaude sessions in the same project. See
+    ``claim_operation_fire_if_new`` in firestore_client for the gate
+    semantics. ``session_id`` is informational (= which session won the
+    race today) and may be empty when the caller has no bridge mint.
+    """
+    session_id: str = ""
+
+class DocumentSave(BaseModel):
+    title: str
+    content: str
+    scope: Optional[str] = None  # core | spec | memo
+
+class DeleteRequest(BaseModel):
+    reason: str = ""
+
+class ActiveClaimSave(BaseModel):
+    """Body for ``POST /api/projects/{pid}/active_claims/{claim_id}`` (ms-55 e-1730).
+
+    The whole `payload` dict is the wire shape lib/claims.py:build_claim_payload
+    produces — claim_kind, target {kind,id}, from_session_id, intent,
+    optional to_session_id / expires_at / metadata, issued_at, claim_id.
+    We do not validate the schema server-side; the client builds + validates
+    locally and this layer is a pure persistence mirror.
+    """
+    payload: dict
+
+class PurgeRequest(BaseModel):
+    """Body for destructive hard-delete endpoints (milestone/entry/operation purge).
+
+    `reason` is required (audit trail per CORE doc data-immutability-principle).
+    `index` (1-based) disambiguates when duplicate IDs exist — set to None when
+    only a single record matches.
+    """
+    reason: str
+    index: Optional[int] = None
+
+
+# ---------------------------------------------------------------------------
+# Module-level project helpers (self-contained: db / core / operations /
+# trek_mod / envelope_mod / master_adapter). Verbatim from app.py.
+# ---------------------------------------------------------------------------
+
+def _master_linking_enabled() -> bool:
+    """master linking (ms-111 linking go-live) が本番活性化されているか (default OFF)。
+
+    本番投下は user のゲート (SPEC ms-111 安全策)。この env flag を deploy 時に明示 ON に
+    するまで、server ingest は投影を master に link せず従来どおり (= projection が唯一の
+    source、regression なし)。ON にすると put_project ingest が全 Account を Beacon-default
+    master に link し、read 側 resolver (既配線) が master 真値を返すようになる。
+    """
+    return os.environ.get("BEACON_MASTER_LINKING_ENABLED", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+def _link_body_accounts_to_master(body: dict) -> None:
+    """whole-project write ingest の choke point で全 Account/Contact を master に link する
+    (ms-111 e-3621 chunk2b / AC1・AC2, flag-gated)。
+
+    linking の go-live は user ゲート (``_master_linking_enabled``)。ON の時だけ:
+      1. project の master_binding (AC2 / SPEC §5・§8) を resolve し束縛軸 org_id と system
+         を得る。Beacon-default master 以外 (外部 CRM = 未実装) と org 未定 ("") は対象外で skip。
+      2. backend 配線済み adapter (server 側のみ持てる) で全 Account/Contact を link する
+         (AC1 = project DB を external_ref 参照化)。
+
+    CLI は backend adapter を持てない (store_router は server 専用) ので linking は必ずこの
+    server ingest に集約する = 「一部 site だけ master 経由」の部分 swap を構造的に防ぐ。
+    失敗は write を壊してはならない (投影は既に valid)。observe 用に log するだけ。
+    """
+    if not _master_linking_enabled():
+        return
+    try:
+        binding = master_binding.resolve_master_binding(body)
+        system = binding.get("system", "")
+        org_id = binding.get("org_id", "")
+        # 本 MS の scope は Beacon-default master のみ (外部 CRM adapter は未実装)。
+        # org 未定 ("") は束縛軸が無く link 不可 → どちらも従来どおり投影のまま。
+        if system != master_binding.BEACON_DEFAULT_SYSTEM or not org_id:
+            return
+        adapter = master_adapter.get_master_adapter()
+        result = master_projection.link_project_accounts(
+            body, adapter, org_id=org_id, now=core._now_iso(), system=system)
+        if result.get("skipped"):
+            logging.getLogger(__name__).info(
+                "master linking skipped entries=%s", result["skipped"])
+    except Exception as exc:  # linking must never break the project write
+        logging.getLogger(__name__).warning("master linking failed: %s", exc)
+
+def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
+    """ms-88 / e-2167 — task pool ↔ Trek stamp 同期 (= mirror sync).
+
+    task pool 側で task が ``done`` に成った瞬間に、 active な Trek の
+    ``task_states[<entry_id>]`` が ``working`` / ``todo`` で stamp 済 なら
+    自動で ``done`` に mirror する。 「task pool で done だが Trek stamp は
+    working で残ってる」 stuck 状態 (= 2026-06-19 dogfood の e-2045 14h
+    放置事例) を構造的に排除する。
+
+    ms-97 P5 (= review Trek-H3): ``leader_review`` は除外する。 これは
+    executor が忘れた stuck stamp ではなく leader の forced review を待つ
+    意図的な状態なので、 pool done で ``done`` に上書きすると leader review
+    を bypass してしまう (= endpoint 側の P5 gate と同じ穴)。
+
+    state transition validation は bypass する (= 直接書き換え)。 これは
+    server-forced reconciliation であり、 「executor / leader / user が
+    意図的に state を進める」 normal transition とは性質が違う。
+
+    Returns trek_ids that were touched.
+    """
+    touched: list[str] = []
+    try:
+        all_treks = db.list_treks(actor_id=None)
+    except Exception:
+        return touched
+    for t in all_treks:
+        if t.get("status") != "active":
+            continue
+        states = t.get("task_states") or {}
+        existing = states.get(entry_id)
+        if not existing:
+            continue
+        try:
+            current_state = trek_mod.get_task_state(t, entry_id)
+        except Exception:
+            current_state = (existing or {}).get("state") or ""
+        if current_state in trek_mod.TERMINAL_TASK_STATES:
+            continue
+        # ms-97 P5 (= review finding Trek-H3): never auto-mirror a task that
+        # is awaiting the leader's forced review. ``leader_review`` is a
+        # deliberate "human judgment pending" state, not a stuck stamp the
+        # executor forgot to advance — overwriting it to ``done`` on pool sync
+        # bypasses the leader review the same way an executor self-approve
+        # would. The mirror only exists to unstick ``working`` / ``todo``
+        # stamps left behind when the pool moved on; leave the review gate to
+        # the leader (via /beacon-trek-review + the endpoint's P5 gate above).
+        if current_state == "leader_review":
+            continue
+        # Direct mirror write (= bypass transition validation).
+        now_iso = trek_mod.utcnow_iso()
+        states[entry_id] = {
+            **existing,
+            "state": "done",
+            "updated_at": now_iso,
+            "last_activity_at": now_iso,
+            "updated_by_session_id": "task-pool-mirror",
+            "note": (
+                "task pool で done 化、 mirror 同期 (= ms-88 / e-2167)"
+            ),
+        }
+        t["task_states"] = states
+        t["updated_at"] = now_iso
+        try:
+            db.save_trek(t.get("trek_id", ""), t)
+            touched.append(t.get("trek_id", ""))
+        except Exception:
+            continue
+    return touched
+
+def _check_phantom_done_evidence(
+    project_id: str,
+    entry_id: str,
+    user: dict,
+    request: Optional[Request] = None,
+) -> Optional[dict]:
+    """Evaluate a freshly-done task for commit evidence; emit warning if missing.
+
+    Returns the assessment dict (or ``None`` on lookup failure / disabled).
+    Failure is silently swallowed — the warning emission is purely
+    observational and must not block the task done response. The returned
+    assessment is folded into the endpoint response so the CLI can surface
+    the warning to the user in the same turn.
+
+    Disabled via env ``BEACON_PHANTOM_DONE_GATE=0`` (escape hatch for
+    Cloud Run rollback without a redeploy). Default = enabled.
+    """
+    if os.environ.get("BEACON_PHANTOM_DONE_GATE", "1") == "0":
+        return None
+    try:
+        data = operations.load_project_consistent(project_id)
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    found = core.find_entry(data, entry_id)
+    if not found:
+        return None
+    _, _, entry, _ = found
+    recent_commits = phantom_done_mod.collect_recent_commits(data)
+    assessment = phantom_done_mod.evaluate_done_evidence(entry, recent_commits)
+    if assessment.get("has_evidence"):
+        # All good — task has a matching commit OR has no keywords to
+        # judge against. Do not pollute Cloud Logging with negatives.
+        return assessment
+    # Phantom done detected — emit structured warning.
+    sid = ""
+    if request is not None:
+        try:
+            sid = request.headers.get("X-Beacon-Session", "") or ""
+        except Exception:
+            sid = ""
+    uid = ""
+    if isinstance(user, dict):
+        uid = user.get("sub") or user.get("email") or ""
+    log_record = {
+        "evt": "task.done.phantom_done_warning",
+        "severity": "WARNING",
+        "phantom_done_warning": True,  # flag for Cloud Logging filter
+        "task_id": entry_id,
+        "project_id": project_id,
+        "user_id": uid,
+        "session_id": sid,
+        "task_description": (entry.get("description") or "")[:200],
+        "task_keywords_sample": assessment.get("task_keywords", [])[:20],
+        "commit_window": assessment.get("window", 0),
+        "threshold": assessment.get("threshold"),
+        "match_type": assessment.get("match_type", "none"),
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    try:
+        # severity=WARNING so Cloud Logging splits this from the bulk
+        # INFO-level audit traffic. The json payload is what aggregation
+        # queries key off.
+        _audit_logger.warning(json.dumps(log_record, ensure_ascii=False))
+    except Exception:
+        pass
+    return assessment
+
+def _spec_doc_for_op(project_id: str, op_id: str, spec_doc_id: str) -> dict:
+    """Load a SPEC doc and verify it's bound to ``op_id``.
+
+    Raises HTTPException with a clear reason on any failure path so the CLI
+    can surface a useful message rather than a generic 500.
+    """
+    doc = db.get_document(project_id, spec_doc_id)
+    if not doc:
+        raise HTTPException(
+            status_code=404, detail=f"SPEC doc not found: {spec_doc_id}"
+        )
+    content = doc.get("content", "") or ""
+    declared_scope = db._extract_frontmatter_field(content, "scope")
+    if declared_scope != "spec":
+        raise HTTPException(
+            status_code=400,
+            detail=(f"doc {spec_doc_id} has scope={declared_scope!r}, "
+                    f"expected 'spec'"),
+        )
+    declared_op = db._extract_frontmatter_field(content, "operation")
+    if declared_op != op_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"SPEC doc {spec_doc_id} is bound to operation "
+                    f"{declared_op!r}, not {op_id!r}"),
+        )
+    return doc
+
+def _enrich_project(data: dict) -> dict:
+    """Add computed fields (total_tasks, done_tasks, entries_to_json) to project."""
+    enriched = {**data}
+    milestones = []
+    for ms in data.get("milestones", []):
+        entries = ms.get("entries", [])
+        total, done = core.count_task_status(entries)
+        milestones.append({
+            **ms,
+            "entries": core.entries_to_json(entries),
+            "total_tasks": total,
+            "done_tasks": done,
+        })
+    enriched["milestones"] = milestones
+    return enriched
+
+def _enrich_project_slim(data: dict) -> dict:
+    """Slim variant for WS broadcast — drops tab-scoped heavy arrays.
+
+    ms-84 / e-2326 (= initial fix) + follow-up: dropping entries[] alone left
+    the Beacon project at 413 KB which is still above whatever WS frame size
+    Cloud Run / GFE tolerates in practice (= 5 retries of wss:// confirmed
+    1006 close at 173 KB and 413 KB, while 32 KB went through). Profiling the
+    slim payload pointed at top-level arrays that the dashboard doesn't need:
+    pushes 311 KiB / deployments 80 KiB / worktree_sessions 5 KiB. These are
+    Releases / Worktree tab content. We drop them from the WS broadcast and
+    the Web UI / Tauri fetch them via tab-specific REST endpoints on demand:
+
+      GET /api/projects/{id}/pushes
+      GET /api/projects/{id}/deployments
+      GET /api/projects/{id}/worktree-sessions
+
+    Milestones keep total_tasks / done_tasks so card summaries stay accurate;
+    entries[] is still fetched per-MS on expand via
+    GET /api/projects/{id}/milestones/{ms_id}/entries. Operations stays in
+    slim because the dashboard renders operation cards inline.
+
+    REST GET /api/projects/{id} (= default, full) is unchanged so CLI / Tauri
+    IPC consumers continue to see the complete payload.
+    """
+    enriched = {**data}
+    for tab_scoped in ("pushes", "deployments", "worktree_sessions"):
+        enriched.pop(tab_scoped, None)
+    milestones = []
+    for ms in data.get("milestones", []):
+        entries = ms.get("entries", [])
+        total, done = core.count_task_status(entries)
+        slim_ms = {k: v for k, v in ms.items() if k != "entries"}
+        slim_ms["total_tasks"] = total
+        slim_ms["done_tasks"] = done
+        milestones.append(slim_ms)
+    enriched["milestones"] = milestones
+    return enriched
+
+def _build_document_change_payload(project_id: str, doc_id: str, op: str,
+                                   fallback_title: str = "",
+                                   fallback_scope: str | None = None) -> dict:
+    """Construct the WS payload for a document add/update event.
+
+    We re-read the saved doc via ``db.get_document`` so the broadcast carries
+    the *post-write* values (especially ``updated_at`` which the server stamps
+    and ``scope`` which may be normalized from frontmatter). If the read
+    fails for any reason — racing delete, transient Firestore error — we
+    degrade to the request body values so clients still get something to
+    insert/update on, rather than silently dropping the event.
+    """
+    saved = db.get_document(project_id, doc_id) or {}
+    scope = saved.get("scope") or fallback_scope or "memo"
+    payload = {
+        "op": op,
+        "doc_id": doc_id,
+        "title": saved.get("title", fallback_title),
+        "scope": scope,
+        "updated_at": saved.get("updated_at", ""),
+    }
+    milestone = saved.get("milestone")
+    if milestone:
+        payload["milestone"] = milestone
+    return payload
+
+
+def make_router(
+    require_auth: Callable,
+    *,
+    _load: Callable,
+    _load_meta_only: Callable,
+    _require_project_role: Callable,
+    _require_write: Callable,
+    _require_owner: Callable,
+    _apply_op_and_broadcast: Callable,
+    _resolve_author: Callable,
+    _save: Callable,
+    _broadcast_project_after_write: Callable,
+    _broadcast_document_change: Callable,
+    require_envelope_for_action: Callable,
+    is_auth_enabled: Callable[[], bool],
+) -> APIRouter:
+    """Build the /api/projects/* (PR1 slice) router with the host app's
+    guards + write helpers injected. Keyword-only + Callable-typed with a
+    construction-time callability check (a mis-wire fails at mount, not at
+    request time)."""
+    for _name, _dep in (
+        ("require_auth", require_auth), ("_load", _load),
+        ("_load_meta_only", _load_meta_only),
+        ("_require_project_role", _require_project_role),
+        ("_require_write", _require_write), ("_require_owner", _require_owner),
+        ("_apply_op_and_broadcast", _apply_op_and_broadcast),
+        ("_resolve_author", _resolve_author), ("_save", _save),
+        ("_broadcast_project_after_write", _broadcast_project_after_write),
+        ("_broadcast_document_change", _broadcast_document_change),
+        ("require_envelope_for_action", require_envelope_for_action),
+        ("is_auth_enabled", is_auth_enabled),
+    ):
+        if not callable(_dep):
+            raise TypeError(
+                f"routers_projects.make_router: {_name} must be callable, "
+                f"got {type(_dep).__name__} — pass a function, not a value."
+            )
+
+    router = APIRouter()
+
+    # ---- route handlers (verbatim bodies; @app -> @router) ----
+
+    @router.get("/api/projects/{project_id}/version")
+    def get_project_version(project_id: str, user: dict = Depends(require_auth)):
+        """Per-project version info derived from push records (e-587).
+
+        Returns:
+          {
+            "latest_pushed_semver":   "v0.4.0"  | "",   # most recent push that
+                                                       # carried an explicit semver
+            "latest_pushed_at":       "2026-05-28T..." | "",
+            "commits_since_release":  N,         # length of pushes after that one
+            "total_pushes":           N,
+            "tag":                    "v0.4.0" | "",   # convenience alias
+          }
+
+        The Web UI displays this as "v0.4.0  +N commits since release". A
+        blank `tag` means the project hasn't started using version-rules yet —
+        show nothing rather than a misleading "v?".
+        """
+        # Permission check — viewers are fine for read, admins bypass membership.
+        # e-1257: route through _require_project_role so this endpoint can't drift
+        # away from the WS/REST authorization gate. Admin bypass is preserved by
+        # short-circuiting the membership check when user.is_admin is set.
+        if user.get("is_admin"):
+            try:
+                data = operations.load_project_consistent(project_id)
+            except LookupError:
+                raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+        else:
+            data, _role = _require_project_role(project_id, user)
+
+        pushes = data.get("pushes") or []
+        # `pushes` ordering varies — sort by pushed_at to be safe.
+        sortable = []
+        for p in pushes:
+            if not isinstance(p, dict):
+                continue
+            sortable.append((p.get("pushed_at", "") or "", p))
+        sortable.sort(key=lambda x: x[0], reverse=True)
+
+        latest_semver = ""
+        latest_at = ""
+        commits_since = 0
+        for _, p in sortable:
+            meta = p.get("meta") or {}
+            sem = p.get("semver") or meta.get("semver") or ""
+            if sem and not latest_semver:
+                latest_semver = sem
+                latest_at = p.get("pushed_at", "")
+                break
+            commits_since += p.get("commit_count", 0) or 0
+
+        return {
+            "latest_pushed_semver": latest_semver,
+            "latest_pushed_at": latest_at,
+            "commits_since_release": commits_since,
+            "total_pushes": len(pushes),
+            "tag": latest_semver,
+        }
+
+    @router.get("/api/projects")
+    def list_projects(include_archived: bool = False, user: dict = Depends(require_auth)):
+        """List projects owned by or shared with the current user."""
+        return db.list_projects(user_id=user.get("sub"), include_archived=include_archived)
+
+    @router.post("/api/projects/{project_id}/archive")
+    def archive_project(
+        project_id: str,
+        user: dict = Depends(require_auth),
+        _envelope: dict = Depends(require_envelope_for_action("project.archive")),
+    ):
+        """Archive a project (soft delete — hidden from default listing)."""
+        # e-1257: owner-only gate via the centralized helper (404 if missing,
+        # 403 if not owner). Pre-check before the transaction mirrors the pattern
+        # used by envelope issuance (L2131) and other owner-gated mutations.
+        _require_project_role(project_id, user, allowed=("owner",))
+        def op(data: dict):
+            data["archived"] = True
+            return data, {"status": "archived", "project_id": project_id}
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="project.archive", actor=user.get("sub", ""),
+        )
+
+    @router.post("/api/projects/{project_id}/unarchive")
+    def unarchive_project(project_id: str, user: dict = Depends(require_auth)):
+        """Restore an archived project."""
+        # e-1257: owner-only gate via the centralized helper. See archive_project.
+        _require_project_role(project_id, user, allowed=("owner",))
+        def op(data: dict):
+            data["archived"] = False
+            return data, {"status": "unarchived", "project_id": project_id}
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="project.unarchive", actor=user.get("sub", ""),
+        )
+
+    @router.post("/api/projects/{project_id}/migrate-to-v2")
+    def migrate_project_to_v2(
+        project_id: str,
+        user: dict = Depends(require_auth),
+        _envelope: dict = Depends(
+            require_envelope_for_action("project.migrate.v2")
+        ),
+    ):
+        """One-time migration from v1 (whole-doc) to v2 (subcollection) layout.
+
+        Why this exists: an unbounded `milestones[]` array on a single Firestore
+        document hits the 1 MiB document size cap. Once over the cap, every
+        growth-direction write (task add / log / new milestone) returns 500
+        because the resulting doc would exceed 1 MiB. The escape hatch is the
+        migration write itself, which moves milestones out to a subcollection
+        and shrinks the project doc to ~100 KiB — well under the cap.
+
+        Restricted to project owner (it is destructive in the sense that it
+        rewrites the storage layout; owner == only person who should approve).
+
+        Idempotent: a project already at schema_version=2 returns
+        {"status": "already_v2"} without doing anything.
+
+        After migration:
+          - Reads via `operations.load_project_consistent` hydrate the project
+            from meta + subcollection (transparent to callers).
+          - Writes via `apply_operation` go through `_apply_cloud_v2` which
+            only touches the affected MS subdoc.
+          - Writes via `replace_project` (legacy whole-doc PUT) detect v2 and
+            dispatch to `_replace_cloud_v2` which decomposes into subdocs.
+        """
+        # Owner check before kicking off the transaction.
+        # e-1257: route through the centralized helper. _require_project_role
+        # loads via load_project_consistent which hydrates milestones on v2, but
+        # this endpoint is invoked once per project (or returns "already_v2"
+        # immediately on v2), so the extra subcollection read is acceptable. The
+        # alternative — keeping db.get_project here — would re-fork the auth path
+        # and re-create the L687/L730 family of drift that ms-39 exists to close.
+        _require_project_role(project_id, user, allowed=("owner",))
+
+        try:
+            result = operations.migrate_v1_to_v2(project_id)
+        except LookupError:
+            # Race: project was deleted between the owner check and the migration.
+            raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+        except RuntimeError as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+        return result
+
+    @router.post("/api/projects/{project_id}")
+    def create_project(project_id: str, body: ProjectCreate,
+                       user: dict = Depends(require_auth)):
+        """Create a new project (like beacon init).
+
+        New projects are created with schema_version=2 (β subcollection layout)
+        by default — see SPEC doc gP9pCssCoa3QduuSMGR0 §"新規プロジェクトは
+        β スキーマで作る (並列性確保)". This lets concurrent writes to different
+        milestones proceed without contending on a single document.
+
+        Existing projects (created before this change) remain on schema_version=1
+        (legacy whole-document) and are not auto-migrated; apply_operation
+        transparently routes them through the legacy transaction path.
+        """
+        existing = db.get_project(project_id)
+        if existing is not None:
+            raise HTTPException(status_code=409, detail=f"Project '{project_id}' already exists")
+        # ms-95 / e-2794 (2026-07-03): owner を必須化。以前は sub 欠落時に空文字
+        # フォールバックで owner="" の project が silent に生まれ、list_projects の
+        # migration-period fallthrough と組み合わさって全ユーザー可視の穴を作って
+        # いた。deny by default 側の fix と両輪で塞ぐ。
+        owner_sub = user.get("sub")
+        if not owner_sub:
+            raise HTTPException(status_code=401, detail="Authenticated user has no sub claim")
+        data = {
+            "name": body.name,
+            "objective": body.objective,
+            "milestones": [],
+            "owner": owner_sub,
+            "members": [],
+            # schema_version: v2 (β subcollection layout) は Firestore 専用
+            # (1 MiB / doc cap を避ける設計)。dynamodb / mysql は 1 MiB 制約が無く、
+            # v2 経路が Firestore を直呼び (operations.py / _hydrate_v2_milestones)
+            # するため非 Firestore backend では動かない。よって非 Firestore では
+            # v1 unified で作る (ms-96 e-2379)。
+            "schema_version": (
+                operations.SCHEMA_V2_BETA
+                if os.environ.get("BEACON_STORE_BACKEND", "firestore").lower() == "firestore"
+                else 1
+            ),
+        }
+        _save(project_id, data)
+        return {"status": "created", "project_id": project_id}
+
+    @router.get("/api/projects/{project_id}")
+    def get_project(project_id: str, slim: bool = False,
+                    user: dict = Depends(require_auth)):
+        # ms-46 e-756: REST もWS pushと同じ enriched shape を返す
+        # (total_tasks / done_tasks / entries_to_json)。client がどの経路で
+        # データを取っても counts が落ちないように対称化する。
+        # ms-84 / e-2326: ?slim=true で entries[] を落とした軽量応答を返す
+        # (= Web UI 初期 fetch 用、 entries は MS expand 時に lazy fetch)。
+        # default は従来通り full 応答 (= CLI / Tauri IPC 等の既存 consumer 互換)。
+        raw = _load(project_id, user)
+        return _enrich_project_slim(raw) if slim else _enrich_project(raw)
+
+    @router.get("/api/projects/{project_id}/disclosed-accounts")
+    def get_disclosed_accounts(project_id: str, user: dict = Depends(require_auth)):
+        """現在のプロジェクト P に開示された、同じ組織の他プロジェクトの顧客(Account)を
+        横断して返す (ms-111 / e-3872 = cross-project read, 1 デプロイ内)。
+
+        ms-113 の開示モデルの read 側配線。P に link された Account を「P のメンバー」に
+        見せる。判定は各 Account の現在の ``project_links`` を ms-113 の開示プリミティブ
+        (``disclosure.can_disclose``) で評価する = 剥奪即時 / fail-closed。
+
+        スコープ (dogfood): 呼び出し user が member である同一 org の他プロジェクトから
+        集める (= 自分の営業/開発プロジェクト横断)。user が member でないプロジェクトに
+        住む Account を、link 先プロジェクト経由で読む「外部ゲスト cross-read」は本
+        endpoint の範囲外 (= 別 authz、follow-up)。ms-111 の cross-instance master store
+        は使わない (= 別デプロイ間同期は別途)。
+        """
+        # 1. lens プロジェクト P へのアクセス権を確認 (P の member でなければ 403/404)。
+        #    meta-only で足りる (milestones hydration 不要 = 高頻度経路の負荷を作らない)。
+        p_data = _load_meta_only(project_id, user)
+        lens_org = org_mod.project_org_id(p_data)
+        uid = user.get("sub", "")
+        # ms-111 e-3621 chunk2b: identity (会社名 / 担当者) の read を master 経由の
+        # resolver に一本化する。server 側は backend 配線済み adapter を持てるので、
+        # link 済 Account は master が真値、未 link は投影 fallback (= 従来値・shape 不変)。
+        # cross-deploy の master 同期 (別デプロイ間) は本 endpoint の範囲外のまま (e-3622)。
+        adapter = master_adapter.get_master_adapter()
+        disclosed: list[dict] = []
+        # 2. user が member の他プロジェクトを走査し、同一 org のものだけ対象にする。
+        for summ in (db.list_projects(uid) or []):
+            qid = summ.get("project_id") or summ.get("id")
+            if not qid or qid == project_id:
+                continue
+            q = db.get_project(qid)
+            if not q or org_mod.project_org_id(q) != lens_org:
+                continue
+            # 3. Q の Account のうち P に開示 (project_links に P を含む) されたものだけ。
+            for acc in q.get("accounts", []) or []:
+                if disclosure_mod.can_disclose(acc, {project_id}):
+                    # shape 不変・identity のみ master 経由に (未 link は投影 fallback)。
+                    disclosed.append(master_projection.account_read_view(acc, adapter, {
+                        "home_project_id": qid,
+                        "home_project_name": q.get("name", ""),
+                    }))
+        return {"project_id": project_id, "disclosed_accounts": disclosed}
+
+    @router.get("/api/projects/{project_id}/milestones/{milestone_id}/entries")
+    def get_milestone_entries(project_id: str, milestone_id: str,
+                              user: dict = Depends(require_auth)):
+        """Return entries[] for a single milestone (ms-84 / e-2326).
+
+        Pair endpoint for the slim WS broadcast: Web UI requests this per-MS
+        when the user expands a card. The recursive entry tree is serialized
+        via core.entries_to_json so the shape matches the legacy full payload.
+        Returns 404 if the milestone is not present in the project.
+        """
+        raw = _load(project_id, user)
+        for ms in raw.get("milestones", []):
+            if ms.get("id") == milestone_id:
+                entries = ms.get("entries", [])
+                return {
+                    "milestone_id": milestone_id,
+                    "entries": core.entries_to_json(entries),
+                }
+        raise HTTPException(status_code=404, detail="milestone not found")
+
+    @router.get("/api/projects/{project_id}/pushes")
+    def get_project_pushes(project_id: str, user: dict = Depends(require_auth)):
+        raw = _load(project_id, user)
+        return {"pushes": raw.get("pushes", [])}
+
+    @router.get("/api/projects/{project_id}/deployments")
+    def get_project_deployments(project_id: str, user: dict = Depends(require_auth)):
+        raw = _load(project_id, user)
+        return {"deployments": raw.get("deployments", [])}
+
+    @router.get("/api/projects/{project_id}/worktree-sessions")
+    def get_project_worktree_sessions(project_id: str,
+                                      user: dict = Depends(require_auth)):
+        raw = _load(project_id, user)
+        return {"worktree_sessions": raw.get("worktree_sessions", [])}
+
+    @router.put("/api/projects/{project_id}")
+    def put_project(project_id: str, body: dict,
+                    user: dict = Depends(require_auth)):
+        # validate_project is also called inside replace_project, but we pre-call
+        # here so the 400 path doesn't open a transaction unnecessarily.
+        try:
+            core.validate_project(body)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        # Auto-set owner if missing (e.g. cloud push from local)
+        if not body.get("owner") and is_auth_enabled():
+            body["owner"] = user.get("sub", "")
+        # ms-111 e-3621 chunk2b: whole-project write は全 Account が通る唯一の choke point。
+        # ここで (flag ON 時のみ) master に link し external_ref を張る。owner 補完後に呼ぶ
+        # (org_id 導出が owner に依存するため)。default OFF なので従来挙動は不変。
+        _link_body_accounts_to_master(body)
+        operations.replace_project(
+            project_id, body,
+            actor=user.get("sub", ""),
+            reason="PUT /api/projects (whole-document replace)",
+        )
+        # ms-43 / e-2128 — explicit WS broadcast after every write. ms-84 / e-2325:
+        # the Firestore on_snapshot listener was disabled (see _start_watcher
+        # docstring) because it produced duplicate broadcasts for every write
+        # (over-broadcast bug). Single-instance Cloud Run posture makes the
+        # explicit broadcast self-sufficient.
+        _broadcast_project_after_write(project_id)
+        return {"status": "ok", "project_id": project_id}
+
+    @router.post("/api/projects/{project_id}/milestones")
+    def create_milestone(project_id: str, body: MilestoneCreate,
+                         user: dict = Depends(require_auth)):
+        # ms-43 / e-2246 — resolve the human author identity (= user_id / email /
+        # display_name) once, then thread it into core.milestone_add so meta.author
+        # is stamped at creation time. Mirrors the create_entry contract from
+        # ms-78 / e-1909 so MS lists / detail can surface a creator label.
+        author = _resolve_author(user)
+
+        def op(data: dict):
+            _require_write(data, user)
+            try:
+                ms_id = core.milestone_add(
+                    data, body.title, body.target_date,
+                    description=body.description,
+                    priority=body.priority,
+                    objective=body.objective,
+                    acceptance_criteria=body.acceptance_criteria,
+                    author=author,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, {"ms_id": ms_id, "title": body.title}
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="milestone.create", actor=user.get("sub", ""),
+        )
+
+    @router.get("/api/projects/{project_id}/milestones/{ms_id}")
+    def get_milestone(project_id: str, ms_id: str,
+                      user: dict = Depends(require_auth)):
+        data = _load(project_id, user)
+        for ms in data["milestones"]:
+            if ms["id"] == ms_id:
+                entries = ms.get("entries", [])
+                total, done = core.count_task_status(entries)
+                return {
+                    **ms,
+                    "total_tasks": total,
+                    "done_tasks": done,
+                    "entries": core.entries_to_json(entries),
+                }
+        raise HTTPException(status_code=404, detail=f"Milestone '{ms_id}' not found")
+
+    @router.patch("/api/projects/{project_id}/milestones/{ms_id}")
+    def update_milestone(project_id: str, ms_id: str, body: MilestoneUpdate,
+                         user: dict = Depends(require_auth)):
+        def op(data: dict):
+            _require_write(data, user)
+            try:
+                ms = core.milestone_update(
+                    data, ms_id,
+                    title=body.title, progress=body.progress,
+                    target_date=body.target_date, status=body.status,
+                    description=body.description,
+                    priority=body.priority or "",  # ms-126: None = no change
+                    objective=body.objective,
+                    acceptance_criteria=body.acceptance_criteria,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, {
+                "id": ms["id"], "title": work_model.target_label(ms), "status": ms["status"],
+                "progress": ms.get("progress", 0),
+            }
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="milestone.update", actor=user.get("sub", ""),
+        )
+
+    @router.post("/api/projects/{project_id}/milestones/{ms_id}/start")
+    def start_milestone(project_id: str, ms_id: str,
+                        user: dict = Depends(require_auth)):
+        def op(data: dict):
+            _require_write(data, user)
+            try:
+                ms = core.milestone_start(data, ms_id)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            # ms-109 e-3697 (fable A-3): read the label through the tolerant reader,
+            # not ms["title"] directly — the other 5 sites in this file already do.
+            # A raw ["title"] would KeyError once the contract step (e-3626) drops
+            # the legacy key on canonical-only milestones.
+            return data, {"id": ms["id"], "title": work_model.target_label(ms), "status": "in_progress"}
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="milestone.start", actor=user.get("sub", ""),
+        )
+
+    @router.post("/api/projects/{project_id}/milestones/{ms_id}/done")
+    def done_milestone(project_id: str, ms_id: str,
+                       user: dict = Depends(require_auth)):
+        def op(data: dict):
+            _require_write(data, user)
+            try:
+                ms = core.milestone_done(data, ms_id)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, {"id": ms["id"], "title": work_model.target_label(ms), "status": "done"}
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="milestone.done", actor=user.get("sub", ""),
+        )
+
+    @router.delete("/api/projects/{project_id}/milestones/{ms_id}")
+    def delete_milestone(project_id: str, ms_id: str,
+                         body: Optional[DeleteRequest] = None,
+                         user: dict = Depends(require_auth)):
+        reason = (body.reason if body else "") or ""
+        def op(data: dict):
+            _require_write(data, user)
+            try:
+                ms = core.milestone_delete(data, ms_id, reason=reason)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, {"id": ms["id"], "status": "cancelled"}
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="milestone.delete", actor=user.get("sub", ""),
+        )
+
+    @router.post("/api/projects/{project_id}/milestones/{ms_id}/purge")
+    def purge_milestone(
+        project_id: str,
+        ms_id: str,
+        body: PurgeRequest,
+        user: dict = Depends(require_auth),
+        _envelope: dict = Depends(require_envelope_for_action("milestone.purge")),
+    ):
+        """Hard-delete a milestone record — owner-only (e-1030).
+
+        Unlike soft delete (`DELETE /milestones/{id}`), this physically removes
+        the record from the array (Issue #14 duplicate-ID recovery path). Restricted
+        to project owner to protect against accidental destruction by editors.
+        """
+        if not body.reason:
+            raise HTTPException(
+                status_code=400,
+                detail="reason is required for purge (audit trail per "
+                       "data-immutability-principle)",
+            )
+        def op(data: dict):
+            _require_owner(data, user)
+            try:
+                ms = core.milestone_purge(
+                    data, ms_id, reason=body.reason, index=body.index,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, {
+                "id": ms["id"], "title": work_model.target_label(ms), "purged": True,
+            }
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="milestone.purge", actor=user.get("sub", ""),
+            reason=body.reason,
+        )
+
+    @router.post("/api/projects/{project_id}/milestones/{ms_id}/entries")
+    def create_entry(project_id: str, ms_id: str, body: EntryCreate,
+                     user: dict = Depends(require_auth)):
+        # ms-78 / e-1909 — resolve the human author identity once, then thread it
+        # into core.task_add so meta.author is stamped at creation time.
+        author = _resolve_author(user)
+
+        def op(data: dict):
+            _require_write(data, user)
+            try:
+                eid = core.task_add(
+                    data, ms_id, body.description,
+                    entry_type=body.type, date=body.date, detail=body.detail,
+                    priority=body.priority,
+                    author=author,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, {"entry_id": eid, "description": body.description}
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="entry.create", actor=user.get("sub", ""),
+        )
+
+    @router.patch("/api/projects/{project_id}/entries/{entry_id}")
+    def update_entry(project_id: str, entry_id: str, body: EntryUpdate,
+                     user: dict = Depends(require_auth)):
+        # ms-78 / e-1909
+        author = _resolve_author(user)
+
+        def op(data: dict):
+            _require_write(data, user)
+            try:
+                ms, entry = core.task_update(
+                    data, entry_id,
+                    description=body.description, status=body.status,
+                    detail=body.detail, date=body.date,
+                    # ms-126: None (field omitted) = leave priority unchanged; a
+                    # provided value is validated by the single-source resolver.
+                    priority=body.priority or "",
+                    author=author,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, core.entries_to_json([entry])[0]
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="entry.update", actor=user.get("sub", ""),
+        )
+
+    @router.post("/api/projects/{project_id}/entries/{entry_id}/done")
+    def done_entry(project_id: str, entry_id: str, request: Request,
+                   user: dict = Depends(require_auth)):
+        import datetime
+        today = datetime.date.today().isoformat()
+        # ms-78 / e-1909
+        author = _resolve_author(user)
+
+        def op(data: dict):
+            _require_write(data, user)
+            try:
+                ms, entry = core.task_done(data, entry_id, date=today, author=author)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, {"entry_id": entry_id, "status": "done"}
+        result = _apply_op_and_broadcast(
+            project_id, op, op_name="entry.done", actor=user.get("sub", ""),
+        )
+        # ms-88 / e-2167 — mirror task pool done into Trek task_states.
+        # Best-effort: failure does not block the task done response.
+        try:
+            _mirror_task_done_to_treks(entry_id)
+        except Exception:
+            pass
+        # ms-95 / e-2726 — phantom-done evidence gate. Flag only, no reject.
+        # Failure is silently swallowed inside the helper; we surface the
+        # assessment in the response so the CLI can echo the warning to the
+        # operator in the same turn.
+        try:
+            assessment = _check_phantom_done_evidence(
+                project_id, entry_id, user, request=request,
+            )
+            if (
+                isinstance(result, dict)
+                and isinstance(assessment, dict)
+                and not assessment.get("has_evidence", True)
+            ):
+                result = {
+                    **result,
+                    "phantom_done_warning": {
+                        "task_id": entry_id,
+                        "match_type": assessment.get("match_type", "none"),
+                        "commit_window": assessment.get("window", 0),
+                        "threshold": assessment.get("threshold"),
+                        "message": (
+                            "No commit in the recent window references this "
+                            "task. Done allowed (= flag, not filter), but the "
+                            "lack of physical evidence is logged for audit "
+                            "(ms-95 / e-2726)."
+                        ),
+                    },
+                }
+        except Exception:
+            pass
+        return result
+
+    @router.delete("/api/projects/{project_id}/entries/{entry_id}")
+    def delete_entry(project_id: str, entry_id: str,
+                     body: Optional[DeleteRequest] = None,
+                     user: dict = Depends(require_auth)):
+        reason = (body.reason if body else "") or ""
+        def op(data: dict):
+            _require_write(data, user)
+            try:
+                entry = core.task_delete(data, entry_id, reason=reason)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, {"entry_id": entry_id, "status": "cancelled"}
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="entry.delete", actor=user.get("sub", ""),
+        )
+
+    @router.post("/api/projects/{project_id}/entries/{entry_id}/purge")
+    def purge_entry(
+        project_id: str,
+        entry_id: str,
+        body: PurgeRequest,
+        user: dict = Depends(require_auth),
+        _envelope: dict = Depends(require_envelope_for_action("entry.purge")),
+    ):
+        """Hard-delete an entry record — owner-only (e-1030).
+
+        Entry-level analogue of milestone purge — Issue #14 / e-863 recovery for
+        duplicate entry IDs. Editors cannot purge; only the project owner can.
+        """
+        if not body.reason:
+            raise HTTPException(
+                status_code=400,
+                detail="reason is required for purge (audit trail per "
+                       "data-immutability-principle)",
+            )
+        def op(data: dict):
+            _require_owner(data, user)
+            try:
+                entry = core.entry_purge(
+                    data, entry_id, reason=body.reason, index=body.index,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, {
+                "entry_id": entry.get("id", entry_id),
+                "description": entry.get("description", ""),
+                "purged": True,
+            }
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="entry.purge", actor=user.get("sub", ""),
+            reason=body.reason,
+        )
+
+    @router.post("/api/projects/{project_id}/operations/{op_id}/purge")
+    def purge_operation(
+        project_id: str,
+        op_id: str,
+        body: PurgeRequest,
+        user: dict = Depends(require_auth),
+        _envelope: dict = Depends(require_envelope_for_action("operation.purge")),
+    ):
+        """Hard-delete an operation record — owner-only (e-1030).
+
+        Operation-level analogue of milestone purge — Issue #14 / e-863 recovery
+        for duplicate operation IDs. Editors cannot purge; only the project owner
+        can.
+        """
+        if not body.reason:
+            raise HTTPException(
+                status_code=400,
+                detail="reason is required for purge (audit trail per "
+                       "data-immutability-principle)",
+            )
+        def op(data: dict):
+            _require_owner(data, user)
+            try:
+                purged = core.operation_purge(
+                    data, op_id, reason=body.reason, index=body.index,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, {
+                "id": purged.get("id", op_id),
+                "title": work_model.target_label(purged),
+                "purged": True,
+            }
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="operation.purge", actor=user.get("sub", ""),
+            reason=body.reason,
+        )
+
+    @router.post("/api/projects/{project_id}/operations/{op_id}/envelopes")
+    def operation_approve(
+        project_id: str,
+        op_id: str,
+        body: OperationApproveRequest,
+        user: dict = Depends(require_auth),
+    ):
+        """Mint a T2 envelope from a SPEC doc's ``approved_actions``.
+
+        Steps:
+          1. Membership check (writer required — minting an authorization is a
+             privileged action).
+          2. Verify ``op_id`` exists on the project.
+          3. Load the SPEC doc, verify it's scope=spec and bound to ``op_id``.
+          4. Parse + validate ``approved_actions`` (last-segment wildcards OK
+             for T2 per ms-60 SPEC § 設計方針 4).
+          5. Issue server-signed envelope via envelope module.
+          6. Store record (auto-revoking any prior active envelope for the op).
+
+        Returns the stored envelope record.
+        """
+        data, _role = _require_project_role(
+            project_id, user, allowed=("owner", "editor")
+        )
+        if not core.find_operations(data, op_id):
+            raise HTTPException(
+                status_code=404, detail=f"operation not found: {op_id}"
+            )
+        spec_doc = _spec_doc_for_op(project_id, op_id, body.spec_doc_id)
+        content = spec_doc.get("content", "")
+        try:
+            raw_actions = approved_actions_mod.parse_spec_frontmatter(content)
+        except approved_actions_mod.ApprovedActionsError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        if raw_actions is None:
+            raise HTTPException(
+                status_code=400,
+                detail=("SPEC doc has no `approved_actions` field in YAML "
+                        "frontmatter; nothing to authorize"),
+            )
+        if not raw_actions:
+            raise HTTPException(
+                status_code=400,
+                detail=("`approved_actions` is empty — an envelope with no "
+                        "authorized actions is meaningless"),
+            )
+        try:
+            approved_actions_mod.validate_actions(
+                raw_actions, allow_last_segment_wildcard=True
+            )
+        except approved_actions_mod.ApprovedActionsError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid approved_actions: {exc}"
+            )
+
+        issuer = user.get("email") or user.get("sub") or "dev"
+        try:
+            envelope_dict = envelope_mod.issue_envelope(
+                tier=envelope_mod.TIER_T2,
+                issuer=issuer,
+                project_id=project_id,
+                scope=op_id,
+                actions_authorized=raw_actions,
+                ttl_seconds=body.ttl_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        record = db.issue_operation_envelope(
+            project_id=project_id,
+            op_id=op_id,
+            spec_doc_id=body.spec_doc_id,
+            spec_revision_id=spec_doc.get("revision_id", ""),
+            envelope_dict=envelope_dict,
+            approved_actions=raw_actions,
+            created_by=issuer,
+        )
+        return record
+
+    @router.post(
+        "/api/projects/{project_id}/operations/{op_id}/envelopes/{envelope_id}/revoke"
+    )
+    def operation_revoke(
+        project_id: str,
+        op_id: str,
+        envelope_id: str,
+        body: OperationRevokeRequest,
+        user: dict = Depends(require_auth),
+    ):
+        """Mark an envelope as revoked. Idempotent.
+
+        ``op_id`` in the URL is verified against the stored record so a typo'd
+        URL can't revoke an envelope belonging to a different operation.
+        """
+        _require_project_role(project_id, user, allowed=("owner", "editor"))
+        existing = db.get_operation_envelope(project_id, envelope_id)
+        if not existing:
+            raise HTTPException(
+                status_code=404, detail=f"envelope not found: {envelope_id}"
+            )
+        if existing.get("op_id") != op_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"envelope {envelope_id} belongs to operation "
+                        f"{existing.get('op_id')!r}, not {op_id!r}"),
+            )
+        revoked_by = user.get("email") or user.get("sub") or "dev"
+        record = db.revoke_operation_envelope(
+            project_id, envelope_id, revoked_by, body.reason or "manual revoke"
+        )
+        return record
+
+    @router.get("/api/projects/{project_id}/operations/{op_id}/envelopes")
+    def operation_envelopes_list(
+        project_id: str,
+        op_id: str,
+        status: Optional[str] = Query(None, description="active | revoked"),
+        user: dict = Depends(require_auth),
+    ):
+        """List envelopes for an operation, newest first.
+
+        ``status`` filter is optional. Read-only members can list (audit visibility).
+        """
+        _load(project_id, user)  # membership check (any role)
+        if status and status not in ("active", "revoked"):
+            raise HTTPException(
+                status_code=400, detail="status must be 'active' or 'revoked'"
+            )
+        return db.list_operation_envelopes(project_id, op_id=op_id, status=status)
+
+    @router.post("/api/projects/{project_id}/operation-fires/{op_id}/claim")
+    def operation_fire_claim(
+        project_id: str,
+        op_id: str,
+        body: OperationFireClaimRequest,
+        user: dict = Depends(require_auth),
+    ):
+        """Atomically claim "I'm firing op-<id> today" for this project (ms-95).
+
+        First-write-wins per ``(project, op, today)``. Subsequent callers see the
+        prior claim and skip their bus push. The CLI scheduler
+        (``_auto_fire_operation_triggers`` in lib/commands.py) hits this endpoint
+        before posting the operation-trigger bus event so cross-cwd /
+        cross-machine parallel bclaude sessions in the same project no longer
+        each fire independently (= e-1668 N-multiplied fires / e-2350 4-6 min
+        retrigger storms when ``run_record`` lands locally but cloud sync lag
+        makes the next scheduler tick still see "no run_record yet").
+
+        Response: ``{claimed: bool, claimed_by: str, claimed_at: str}``. Date is
+        server clock (UTC) so all sessions agree on the calendar day boundary
+        even across timezone-mixed machines.
+
+        Any project member (= owner / editor / viewer) may claim. The claim
+        itself is not a privileged action; the gate exists to dedup honest
+        parallel writers, not to enforce access.
+        """
+        _load(project_id, user)  # membership check (any role)
+        import datetime
+        today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+        return db.claim_operation_fire_if_new(
+            project_id, op_id, today, body.session_id or ""
+        )
+
+    @router.post("/api/projects/{project_id}/log")
+    def log_commit(project_id: str, body: LogCommit,
+                   user: dict = Depends(require_auth)):
+        # ms-78 / e-1909 — stamp meta.author with the human identity of the
+        # signed-in committer (= what the Web UI renders in commit lists).
+        author = _resolve_author(user)
+
+        def op(data: dict):
+            _require_write(data, user)
+            try:
+                result = core.log_commit(
+                    data, ms_id=body.ms_id, commit_hash=body.hash,
+                    message=body.message, date=body.date,
+                    summary=body.summary, progress=body.progress,
+                    author=author,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, result
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="project.log", actor=user.get("sub", ""),
+        )
+
+    @router.patch("/api/projects/{project_id}/summary")
+    def update_summary(project_id: str, body: SummaryUpdate,
+                       user: dict = Depends(require_auth)):
+        """**Deprecated** (e-1040 completed). Writes are no-op.
+
+        Cross-session hand-off → `beacon session log` (session_logs subcollection).
+        Human narrative → `project-vision` CORE doc.
+
+        The endpoint still returns 200 with the currently-stored summary so
+        unknown legacy callers (older CLI / external scripts) don't crash —
+        they just observe their input was ignored. The `Deprecation` /
+        `Sunset` headers signal the contract change machine-readably.
+        """
+        # Permission check is still useful (do not leak read access to
+        # outsiders), but we don't apply the mutation.
+        data = _load(project_id, user)
+        _require_write(data, user)
+        existing = data.get("summary", "")
+        response = JSONResponse(
+            content={
+                "summary": existing,
+                "write_ignored": True,
+                "deprecated_since": "e-1040",
+            }
+        )
+        # Standard HTTP deprecation signals.
+        response.headers["Deprecation"] = "true"
+        response.headers["Sunset"] = "see e-1040; endpoint will be removed"
+        response.headers["Link"] = (
+            '<https://github.com/kurogin23mech-source/beacon/blob/main/CLAUDE.md>; '
+            'rel="deprecation"; type="text/html"'
+        )
+        return response
+
+    @router.get("/api/projects/{project_id}/documents")
+    def list_documents(project_id: str,
+                       user: dict = Depends(require_auth)):
+        """List all documents for a project."""
+        _load(project_id, user)  # access check
+        return db.list_documents(project_id)
+
+    @router.get("/api/projects/{project_id}/documents/{doc_id}")
+    def get_document(project_id: str, doc_id: str,
+                     user: dict = Depends(require_auth)):
+        """Get a specific document."""
+        _load(project_id, user)  # access check
+        doc = db.get_document(project_id, doc_id)
+        if doc is None:
+            raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+        return doc
+
+    @router.post("/api/projects/{project_id}/documents")
+    async def create_document(project_id: str, body: DocumentSave,
+                              user: dict = Depends(require_auth)):
+        """Create a new document.
+
+        ms-43 e-809: emits a ``document_change`` WS frame after the write so the
+        Documents tab on every live client refreshes without waiting for the user
+        to re-open the tab. Async only because of that broadcast — the DB write
+        itself is sync.
+        """
+        data = _load(project_id, user)
+        _require_write(data, user)
+        doc_id = db.save_document(project_id, "", body.title, body.content, body.scope)
+        await _broadcast_document_change(
+            project_id,
+            _build_document_change_payload(project_id, doc_id, op="add",
+                                           fallback_title=body.title,
+                                           fallback_scope=body.scope),
+        )
+        return {"doc_id": doc_id, "title": body.title}
+
+    @router.put("/api/projects/{project_id}/documents/{doc_id}")
+    async def update_document(project_id: str, doc_id: str, body: DocumentSave,
+                              user: dict = Depends(require_auth)):
+        """Update an existing document.
+
+        ms-43 e-809: emits a ``document_change`` WS frame post-write so the open
+        Documents tab on every client picks up the new title / scope / updated_at
+        in-place (instead of staying stale until next tab switch).
+        """
+        data = _load(project_id, user)
+        _require_write(data, user)
+        db.save_document(project_id, doc_id, body.title, body.content, body.scope,
+                         updated_by=user.get("email", "unknown"))
+        await _broadcast_document_change(
+            project_id,
+            _build_document_change_payload(project_id, doc_id, op="update",
+                                           fallback_title=body.title,
+                                           fallback_scope=body.scope),
+        )
+        return {"doc_id": doc_id, "title": body.title}
+
+    @router.get("/api/projects/{project_id}/documents/{doc_id}/revisions")
+    def list_document_revisions(project_id: str, doc_id: str, user: dict = Depends(require_auth)):
+        """List revision history of a document."""
+        _load(project_id, user)
+        return db.list_document_revisions(project_id, doc_id)
+
+    @router.get("/api/projects/{project_id}/documents/{doc_id}/revisions/{rev}")
+    def get_document_revision(project_id: str, doc_id: str, rev: int, user: dict = Depends(require_auth)):
+        """Get a specific revision of a document."""
+        _load(project_id, user)
+        result = db.get_document_revision(project_id, doc_id, rev)
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"Revision {rev} not found for '{doc_id}'")
+        return result
+
+    @router.delete("/api/projects/{project_id}/documents/{doc_id}")
+    async def delete_document_endpoint(project_id: str, doc_id: str,
+                                       body: Optional[DeleteRequest] = None,
+                                       user: dict = Depends(require_auth)):
+        """Soft-delete a document. Optional ``reason`` records why (ms-14 e-991).
+
+        ms-43 e-809: emits a ``document_change`` (op=delete) WS frame so live
+        clients drop the entry from their cached ``state.documents`` without
+        needing a tab switch to re-fetch. We capture title/scope BEFORE the
+        soft-delete because ``list_documents`` filters deleted docs and the
+        client may want to render a brief "X was deleted" toast keyed on scope.
+        """
+        data = _load(project_id, user)
+        _require_write(data, user)
+        # Snapshot scope/title before delete so the broadcast payload still
+        # carries them — once delete_document flips the soft-delete flag,
+        # list_documents-style fetches filter the row out, leaving the client
+        # without enough context to update its filtered views correctly.
+        prior = db.get_document(project_id, doc_id) or {}
+        reason = (body.reason if body else "") or ""
+        if not db.delete_document(project_id, doc_id,
+                                  deleted_by=user.get("email", "unknown"),
+                                  reason=reason):
+            raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found")
+        payload = {
+            "op": "delete",
+            "doc_id": doc_id,
+            "title": prior.get("title", ""),
+            "scope": prior.get("scope", "memo"),
+            "updated_at": "",
+        }
+        milestone = prior.get("milestone")
+        if milestone:
+            payload["milestone"] = milestone
+        await _broadcast_document_change(project_id, payload)
+        return {"doc_id": doc_id, "status": "cancelled"}
+
+    @router.post("/api/projects/{project_id}/documents/images")
+    async def upload_document_image(project_id: str,
+                                    file: UploadFile = File(...),
+                                    user: dict = Depends(require_auth)):
+        """ms-43: SPEC / memo / retro 本文に貼る画像を 1 枚アップロードする。
+
+        multipart/form-data の ``file`` フィールドにバイナリを乗せて POST する。
+        認可は project の write 権限と等価 (= 本文を書ける人なら画像も貼れる)。
+        レスポンスは ``{url, markdown}``: ``markdown`` をそのまま doc 本文に
+        貼り付けると ``![filename](url)`` として render される。
+
+        保存先と仕様の詳細は ``server/doc_images.py`` 参照 (= GCS bucket、UUID
+        key、public read、画像 MIME のみ、10 MiB 上限)。
+        """
+        data = _load(project_id, user)
+        _require_write(data, user)
+
+        contents = await file.read()
+        try:
+            import doc_images
+            result = doc_images.upload_image(
+                project_id=project_id,
+                filename=file.filename or "image",
+                data=contents,
+                declared_content_type=file.content_type,
+            )
+        except ValueError as e:
+            # 不正な MIME / サイズ超過 / 空 data 等、client 側に責任がある類。
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            # GCS 接続不能 / bucket 不在 等の server 側障害。
+            logger.error("doc image upload failed: %s", e)
+            raise HTTPException(status_code=500, detail="image upload failed")
+
+        return {
+            "url": result.url,
+            "markdown": result.markdown,
+            "size": result.size,
+            "content_type": result.content_type,
+        }
+
+    @router.get("/api/projects/{project_id}/active_claims")
+    def list_active_claims_endpoint(project_id: str,
+                                    user: dict = Depends(require_auth)):
+        """List all active claims on a project, sorted by issued_at."""
+        _load(project_id, user)  # access check
+        return db.list_active_claims(project_id)
+
+    @router.get("/api/projects/{project_id}/active_claims/{claim_id}")
+    def get_active_claim_endpoint(project_id: str, claim_id: str,
+                                  user: dict = Depends(require_auth)):
+        _load(project_id, user)
+        claim = db.get_active_claim(project_id, claim_id)
+        if claim is None:
+            raise HTTPException(
+                status_code=404, detail=f"Claim '{claim_id}' not found",
+            )
+        return claim
+
+    @router.post("/api/projects/{project_id}/active_claims/{claim_id}")
+    def save_active_claim_endpoint(project_id: str, claim_id: str,
+                                   body: ActiveClaimSave,
+                                   user: dict = Depends(require_auth)):
+        """Upsert a claim. Idempotent — same claim_id overwrites."""
+        data = _load(project_id, user)
+        _require_write(data, user)
+        db.save_active_claim(project_id, claim_id, body.payload)
+        return {"claim_id": claim_id, "status": "saved"}
+
+    @router.delete("/api/projects/{project_id}/active_claims/{claim_id}")
+    def delete_active_claim_endpoint(project_id: str, claim_id: str,
+                                     user: dict = Depends(require_auth)):
+        """Release a claim from the project-wide store. Idempotent."""
+        data = _load(project_id, user)
+        _require_write(data, user)
+        deleted = db.delete_active_claim(project_id, claim_id)
+        return {"claim_id": claim_id, "deleted": deleted}
+
+    @router.get("/api/projects/{project_id}/changelog")
+    def list_changelog_endpoint(project_id: str,
+                                since: Optional[str] = None,
+                                limit: int = 100,
+                                user: dict = Depends(require_auth)):
+        """Project audit trail — append-only changelog (ms-14 e-825).
+
+        Returns entries newest-first. ``since`` is an ISO8601 timestamp; only
+        entries with ``ts > since`` are returned, which makes incremental
+        polling cheap. ``limit`` is capped at 500 server-side.
+        """
+        _load(project_id, user)  # access check
+        entries = db.list_changelog(project_id, since=since, limit=limit)
+        # ``next_since`` is the oldest ts in this page — pass it back as the
+        # cursor for the NEXT older page when the UI scrolls. Empty result
+        # means there is nothing further back.
+        next_since = entries[-1]["ts"] if entries else None
+        return {"entries": entries, "next_since": next_since, "limit": limit}
+
+    return router

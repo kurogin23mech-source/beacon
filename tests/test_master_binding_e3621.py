@@ -126,9 +126,12 @@ def test_master_binding_is_wired_into_production():
     ここで落ちたら「配線契約」が破れた (= 誰かが ingest 経路から master_binding 参照を
     外した) 合図であり、docstring / WIRED_TO_PRODUCTION マーカーの見直しが要る。
     """
-    server_src = (REPO / "server" / "app.py").read_text(encoding="utf-8")
+    # ms-127 e-4871 (PR1): the ingest wiring (_link_body_accounts_to_master)
+    # moved from app.py into the /api/projects/* router, so the master_binding
+    # reference now lives in routers_projects.py.
+    server_src = (REPO / "server" / "routers_projects.py").read_text(encoding="utf-8")
     assert "master_binding" in server_src, (
-        "server/app.py の ingest から master_binding 参照が消えた。"
+        "server/routers_projects.py の ingest から master_binding 参照が消えた。"
         "未配線に戻すなら本テストと WIRED_TO_PRODUCTION マーカーを併せて更新すること。"
     )
     assert "resolve_master_binding" in server_src  # 束縛軸 (org_id/system) を実際に読む配線
