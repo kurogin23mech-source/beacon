@@ -31,6 +31,9 @@ APP_PY = ROOT / "server" / "app.py"
 # ms-127 e-4869: me_list_projects moved out of the app.py god-module into the
 # /api/me/* router. The no-member-fallback guard below now lives there.
 ROUTERS_ME_PY = ROOT / "server" / "routers_me.py"
+# ms-127 e-4869: the admin endpoints (incl. the ownerless audit) moved into the
+# /api/admin/* router; the _require_admin gate is injected as `require_admin`.
+ROUTERS_ADMIN_PY = ROOT / "server" / "routers_admin.py"
 
 
 def _read(p: Path) -> str:
@@ -118,23 +121,26 @@ class TestMeListProjectsNoMemberFallback:
 
 class TestAdminOwnerlessEndpoint:
     def setup_method(self, _method):
-        self.src = _read(APP_PY)
+        # admin endpoints now live in routers_admin.py (ms-127 e-4869 split);
+        # decorators are @router.* and the admin gate is the injected
+        # `require_admin` (app.py owns `_require_admin` and passes it in).
+        self.src = _read(ROUTERS_ADMIN_PY)
 
     def test_endpoint_registered(self):
-        assert '@app.get("/api/admin/projects/ownerless")' in self.src, (
+        assert '@router.get("/api/admin/projects/ownerless")' in self.src, (
             "audit endpoint must be registered so admins can inventory the residue"
         )
 
     def test_endpoint_requires_admin(self):
         m = re.search(
-            r'@app\.get\("/api/admin/projects/ownerless"\)\s*\n'
-            r"def\s+admin_list_ownerless_projects\([^)]*\)[^:]*:(.*?)return\s+\{",
+            r'@router\.get\("/api/admin/projects/ownerless"\)\s*\n'
+            r"\s*def\s+admin_list_ownerless_projects\([^)]*\)[^:]*:(.*?)return\s+\{",
             self.src,
             re.DOTALL,
         )
         assert m, "could not locate admin_list_ownerless_projects body"
         body = m.group(1)
-        assert "_require_admin(user)" in body, (
+        assert "require_admin(user)" in body, (
             "endpoint must gate on _require_admin so stolen user tokens "
             "cannot enumerate ownerless projects"
         )
