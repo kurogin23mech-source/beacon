@@ -12624,7 +12624,11 @@ app.include_router(_make_version_router())
 from routers_me import make_router as _make_me_router
 
 app.include_router(
-    _make_me_router(require_auth, _stamp_session_liveness, _session_is_live)
+    _make_me_router(
+        require_auth,
+        stamp_session_liveness=_stamp_session_liveness,
+        session_is_live=_session_is_live,
+    )
 )
 
 # ---------------------------------------------------------------------------

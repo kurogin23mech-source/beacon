@@ -66,6 +66,10 @@ def test_me_profile_happy_path_through_router(monkeypatch):
 
     # The route body resolves ``db`` from routers_me's module globals on each
     # call, so swapping the module attribute redirects the mounted router too.
+    # NOTE: this relies on lazy module-global resolution — if routers_me is ever
+    # refactored to cache ``db`` inside the closures (e.g. ``_db = db`` at module
+    # load), this patch silently stops taking effect and the test goes false-green.
+    # Keep ``db`` resolved from the module namespace at call time.
     monkeypatch.setattr(routers_me, "db", _FakeDB())
     app_module.app.dependency_overrides[app_module.require_auth] = lambda: {
         "sub": "u1",

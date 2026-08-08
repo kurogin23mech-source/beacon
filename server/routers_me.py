@@ -35,7 +35,7 @@ module here would silently swap the storage backend, so this must mirror app.py.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -88,12 +88,31 @@ class MeProfileUpdate(BaseModel):
     display_name: str = ""
 
 
-def make_router(require_auth, stamp_session_liveness, session_is_live) -> APIRouter:
+def make_router(
+    require_auth: Callable,
+    *,
+    stamp_session_liveness: Callable[..., None],
+    session_is_live: Callable[..., bool],
+) -> APIRouter:
     """Build the /api/me/* router with the host app's auth + liveness helpers.
 
-    Called once from app.py and mounted via
-    ``app.include_router(make_router(require_auth, _stamp_session_liveness,
-    _session_is_live))``.
+    Called once from app.py and mounted via::
+
+        app.include_router(make_router(
+            require_auth,
+            stamp_session_liveness=_stamp_session_liveness,
+            session_is_live=_session_is_live,
+        ))
+
+    The two liveness helpers are keyword-only (``*``) and ``Callable``-typed on
+    purpose: this is the first multi-dependency router factory (``trailnode``
+    takes only ``require_auth``), so the signature it sets is the型 the
+    remaining resource routers (auth / orgs / admin, treks, projects) copy.
+    Both helpers have the shape ``Callable[[dict, ...], ...]`` and would
+    silently transpose if passed positionally; keyword-only makes a mis-wire a
+    construction-time ``TypeError`` instead of a request-time crash, and the
+    annotations stop a caller reading only the signature from mistaking
+    ``session_is_live`` (a predicate callable) for a bool flag.
     """
     router = APIRouter()
 
