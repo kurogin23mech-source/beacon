@@ -28,6 +28,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FIRESTORE_PY = ROOT / "server" / "firestore_client.py"
 APP_PY = ROOT / "server" / "app.py"
+# ms-127 e-4869: me_list_projects moved out of the app.py god-module into the
+# /api/me/* router. The no-member-fallback guard below now lives there.
+ROUTERS_ME_PY = ROOT / "server" / "routers_me.py"
 
 
 def _read(p: Path) -> str:
@@ -91,7 +94,8 @@ class TestCreateProjectRequiresSub:
 
 class TestMeListProjectsNoMemberFallback:
     def setup_method(self, _method):
-        self.src = _read(APP_PY)
+        # me_list_projects now lives in routers_me.py (ms-127 e-4869 split).
+        self.src = _read(ROUTERS_ME_PY)
 
     def test_migration_member_fallback_removed(self):
         m = re.search(

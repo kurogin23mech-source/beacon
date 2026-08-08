@@ -45,12 +45,29 @@ ME_PATHS = [
 ]
 
 
-def test_me_routes_mounted_and_auth_gated():
-    """Every /api/me/* route is served by the mounted router and gated by the
-    injected ``require_auth``: an unauthenticated request returns 401, NOT 404.
+def test_me_routes_are_mounted():
+    """Every /api/me/* route is served by the mounted router. Checked against
+    app.routes directly (no HTTP request), so the assertion is deterministic
+    regardless of the ambient auth/store state the full suite leaves behind
+    (other test modules flip app._auth_enabled and stub the store globally)."""
+    paths = {r.path for r in app_module.app.routes}
+    for p in ME_PATHS:
+        assert p in paths, (p, paths)
 
-    A 404 here would mean the split dropped the route entirely; a 200 would mean
-    auth wasn't wired. 401 proves both: mounted + auth-required."""
+
+def test_me_profile_auth_gated_when_auth_enabled(monkeypatch):
+    """With auth enabled and no token, GET /api/me/profile is rejected at the
+    injected ``require_auth`` (401) BEFORE any handler/store code runs — proving
+    the route is auth-gated.
+
+    We force ``_auth_enabled = True`` locally because another test module in the
+    same process sets the shared ``app._auth_enabled = False`` at import; without
+    this the request would fall through require_auth to the store layer (and, in
+    CI with no Firestore credentials, crash instead of returning 401). monkeypatch
+    auto-restores the flag so we don't pollute later tests."""
+    monkeypatch.setattr(app_module, "_auth_enabled", True)
+    # Ensure no leftover dependency override short-circuits require_auth.
+    app_module.app.dependency_overrides.pop(app_module.require_auth, None)
     r = client.get("/api/me/profile")
     assert r.status_code == 401, (r.status_code, r.text)
 
