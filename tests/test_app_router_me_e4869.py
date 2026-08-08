@@ -46,13 +46,18 @@ ME_PATHS = [
 
 
 def test_me_routes_are_mounted():
-    """Every /api/me/* route is served by the mounted router. Checked against
-    app.routes directly (no HTTP request), so the assertion is deterministic
-    regardless of the ambient auth/store state the full suite leaves behind
-    (other test modules flip app._auth_enabled and stub the store globally)."""
-    paths = {r.path for r in app_module.app.routes}
+    """Every /api/me/* route is served by the mounted router. Checked against the
+    OpenAPI schema's path set (no HTTP request), so the assertion is deterministic
+    regardless of the ambient auth/store state the full suite leaves behind (other
+    test modules flip app._auth_enabled and stub the store globally).
+
+    We read app.openapi()["paths"] rather than iterating app.routes: across
+    FastAPI versions an included router surfaces in app.routes as objects without
+    a uniform ``.path`` attribute (e.g. a Mount / _IncludedRouter wrapper), so
+    direct attribute access is version-fragile. The OpenAPI path map is stable."""
+    paths = set(app_module.app.openapi().get("paths", {}).keys())
     for p in ME_PATHS:
-        assert p in paths, (p, paths)
+        assert p in paths, (p, sorted(x for x in paths if "/api/me" in x))
 
 
 def test_me_profile_auth_gated_when_auth_enabled(monkeypatch):
