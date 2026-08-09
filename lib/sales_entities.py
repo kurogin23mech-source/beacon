@@ -1829,6 +1829,34 @@ def opportunities_awaiting_judgement(data: dict, today: str) -> list:
     } for o, st in pairs]
 
 
+def overdue_activities(data: dict, today: str) -> list:
+    """締切精査 for activities (準備活動: 会食・打診など): 商談横断で deadline が
+    due/overdue な活動を古い順に返す — ms-139 e-4951 (SPEC P3)。
+
+    これまで締切精査は商談の遷移日 (transition_date) しか見ておらず、活動の期日
+    (activity.deadline) は WebUI しか surface していなかった。ここは L2 締切エンジン
+    (``deadline.overdue_work_items``) に活動を流すだけ — done / cancelled は
+    ``is_settled`` で terminal 扱いになり自動で外れる (催促は完了・取消で止まる)。
+
+    取消商談 (``live_opportunities`` で除外) の活動は出さない。各 row に商談文脈
+    (opp_id / opp_title) と who_has_the_ball (次に動く責任) を載せる。"""
+    out = []
+    for opp in live_opportunities(data):
+        acts = opp.get("activities", []) or []
+        for act, st in deadline.overdue_work_items(acts, today):
+            out.append({
+                "opp_id": opp.get("id", ""),
+                "opp_title": work_model.target_label(opp),
+                "act_id": act.get("id", ""),
+                "description": act.get("description", ""),
+                "deadline": act.get("deadline", ""),
+                "activity_status": st,  # deadline.TRANSITION_DUE / _OVERDUE
+                "who_has_the_ball": act.get("who_has_the_ball", ""),
+            })
+    out.sort(key=lambda r: r["deadline"] or "")
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Advance gate (前進ゲート) — ms-106 SPEC XG1yBugcb3GRnamRljhx, task e-3579
 # ---------------------------------------------------------------------------

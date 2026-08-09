@@ -110,3 +110,51 @@ def test_update_deadline_moves_out_of_overdue():
     assert [it["id"] for it, _ in deadline.overdue_work_items(acts, "2026-08-09")] == [aid]
     se.activity_update(data, aid, deadline="2026-08-20")
     assert deadline.overdue_work_items(acts, "2026-08-09") == []
+
+
+# --- overdue_activities: CLI (beacon opportunity due) の catch surface (e-4951) --
+
+def _sales_data():
+    return {
+        "profession": "sales",
+        "opportunities": [
+            {"id": "opp-1", "phase": "初回", "status": "open", "title": "A社商談",
+             "activities": []},
+        ],
+    }
+
+
+def test_overdue_activities_across_opps_oldest_first():
+    data = _sales_data()
+    se.activity_add(data, "opp-1", "8/7会食", deadline="2026-08-07",
+                    who_has_the_ball="self", created_at="2026-08-01T00:00:00Z")
+    se.activity_add(data, "opp-1", "相手待ち打診", deadline="2026-08-06",
+                    who_has_the_ball="counterpart", created_at="2026-08-01T00:00:00Z")
+    se.activity_add(data, "opp-1", "来週の資料", deadline="2026-08-25",
+                    who_has_the_ball="self", created_at="2026-08-01T00:00:00Z")
+    rows = se.overdue_activities(data, "2026-08-09")
+    # oldest 期日 first, 未来 (08-25) は除外。
+    assert [r["description"] for r in rows] == ["相手待ち打診", "8/7会食"]
+    assert rows[0]["opp_id"] == "opp-1"
+    assert rows[0]["opp_title"] == "A社商談"
+    assert rows[0]["who_has_the_ball"] == "counterpart"
+
+
+def test_overdue_activities_excludes_done_and_cancelled():
+    data = _sales_data()
+    a1 = se.activity_add(data, "opp-1", "済んだ会食", deadline="2026-08-01",
+                         created_at="2026-08-01T00:00:00Z")
+    a2 = se.activity_add(data, "opp-1", "やめた打診", deadline="2026-08-01",
+                         created_at="2026-08-01T00:00:00Z")
+    se.activity_set_status(data, a1, "done", at="2026-08-09T00:00:00Z")
+    se.activity_cancel(data, a2, reason="不要")
+    assert se.overdue_activities(data, "2026-08-20") == []
+
+
+def test_overdue_activities_skips_cancelled_opportunity():
+    # 取消商談 (live_opportunities で除外) の活動は catch surface に出さない。
+    data = _sales_data()
+    se.activity_add(data, "opp-1", "会食", deadline="2026-08-01",
+                    created_at="2026-08-01T00:00:00Z")
+    data["opportunities"][0]["status"] = se.work_base.CANCELLED_STATUS
+    assert se.overdue_activities(data, "2026-08-20") == []
