@@ -458,7 +458,7 @@ case "${1:-}" in
     deadline)
         case "${2:-}" in
             due)      shift 2; cmd_deadline_due "$@" ;;
-            *)        echo "Usage: beacon deadline [due]  (職種横断で期日 到達/超過 の work item を surface)" ;;
+            *)        echo "Usage: beacon deadline due [--json]  (職種横断で期日 到達/超過 の work item を surface)" >&2; exit 2 ;;
         esac
         ;;
     opportunity|opp)

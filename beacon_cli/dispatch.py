@@ -2721,7 +2721,7 @@ def _handle_deadline(root: Path, args: argparse.Namespace) -> int:
     argparse 経路も bash と同じ ``deadline_due`` にルートする。"""
     cmd = getattr(args, "deadline_cmd", None)
     if args.show_help or cmd is None:
-        print("Usage: beacon deadline [due] [--json]")
+        print("Usage: beacon deadline due [--json]")
         return 0 if args.show_help else 2
     if cmd == "due":
         env = {"BEACON_JSON": "1" if args.json else ""}

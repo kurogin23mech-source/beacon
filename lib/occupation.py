@@ -660,10 +660,9 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # downstream forcing function loads cleanly onto it.
 # ---------------------------------------------------------------------------
 
-# Per-collection arm classification. Keyed by collection name (parallel to
-# TARGET_DECOMPOSITION) so the two read together. ``work_item_arm`` names the arm
-# holding planned work + how a work item is identified inside it: ``arm`` is the
-# nested list, ``item_type`` is ``None`` when every item in the arm is a work item
+# Per-collection arm classification. ``work_item_arm`` names the arm holding
+# planned work + how a work item is identified inside it: ``arm`` is the nested
+# list, ``item_type`` is ``None`` when every item in the arm is a work item
 # (sales activities) or an entry ``type`` string when the arm is shared (dev
 # ``entries`` hold tasks AND commits → work items are ``type == "task"``), and
 # ``kind`` is the occupation-agnostic label for a work item of that arm
@@ -671,6 +670,16 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # re-deriving it from a collection name (ms-142 e-5010: the deadline reminder's
 # ``work_kind``). ``evidence_arms`` names where proof/changelog records live (dev
 # commits ride the SAME entries arm; sales evidence is its own communications arm).
+#
+# REACHABILITY (ms-142 e-5011 review, Maint#5): the ONLY consumer of these three
+# ``_ARM_ROLES`` / ``_ARM_PHASE_BALL`` / ``_COLLECTION_KIND`` dicts is
+# ``profession_manifest``, which walks ``target_collections(data)`` — the seed of
+# which is milestones + opportunities ONLY (accounts / acquisitions ride a
+# different persistence path and are NOT Target collections here, see
+# ``TARGET_COLLECTIONS``). So an entry keyed by any collection NOT returned by
+# ``target_collections`` would be dead data — a silent no-op if edited. Keep these
+# keyed to exactly milestones + opportunities; a descriptor occupation's roles come
+# from its descriptor (``target_descriptor.arm_roles``), not from here.
 _ARM_ROLES = {
     "milestones": {
         "work_item_arm": {"arm": "entries", "item_type": "task", "kind": "task"},
@@ -681,39 +690,26 @@ _ARM_ROLES = {
                           "kind": "activity"},
         "evidence_arms": [{"arm": "communications", "item_type": None}],
     },
-    "accounts": {
-        "work_item_arm": {"arm": "nurturings", "item_type": None,
-                          "kind": "nurturing"},
-        "evidence_arms": [{"arm": "communications", "item_type": None}],
-    },
-    # acquisitions carry no fat arms (inline work items, no child changelog) so
-    # they declare no work-item / evidence arm — an honest empty classification.
-    "acquisitions": {
-        "work_item_arm": None,
-        "evidence_arms": [],
-    },
 }
 
 # The exclusive phase + who-has-the-ball model per collection (SPEC 方針 1 lists
 # "phase・ball" among the slots). Sales Targets advance through a phase funnel and
 # carry the ball; development milestones do not (their progress is task ratios /
 # evidence), so dev's phase_ball is ``None`` — a declared absence, not a gap.
+# Same reachability rule as ``_ARM_ROLES`` (milestones + opportunities only).
 _ARM_PHASE_BALL = {
     "milestones": None,
     "opportunities": {"phase_field": "phase", "ball_field": "who_has_the_ball"},
-    "accounts": {"phase_field": "phase", "ball_field": None},
-    "acquisitions": None,
 }
 
 # collection -> target-class kind for the built-in occupations. Bridges the
-# collection-keyed registries (TARGET_DECOMPOSITION / _ARM_ROLES) to the kind-
-# keyed ones (NARROWING_ID_PREFIXES). Descriptor collections resolve their kind
-# from the descriptor itself, so this only needs the built-ins.
+# collection-keyed registries to the kind-keyed ones (NARROWING_ID_PREFIXES).
+# Descriptor collections resolve their kind from the descriptor itself, so this
+# only needs the built-ins reachable via ``target_collections`` (milestones +
+# opportunities); see the reachability note above.
 _COLLECTION_KIND = {
     "milestones": "milestone",
     "opportunities": "opportunity",
-    "accounts": "account",
-    "acquisitions": "acquisition",
 }
 
 
@@ -731,16 +727,17 @@ def _collection_kind(data: dict | None, collection: str) -> str:
     return ""
 
 
-def _arm_roles_for(data: dict | None, collection: str, arms: tuple) -> dict:
+def _arm_roles_for(data: dict | None, collection: str) -> dict:
     """Return ``{work_item_arm, evidence_arms}`` for a collection. Built-in
     collections use the ``_ARM_ROLES`` seed. A descriptor-defined collection asks
     its descriptor (``target_descriptor.arm_roles``) which arm holds work items vs
     evidence — an EXPLICIT declaration if the descriptor carries one (so a new
     occupation may name its arms anything and still light up arm-walking
     capabilities — the true "declare, don't wire" contract, ms-142 e-5011), else
-    the thick-frame name convention (``work_items`` / ``evidence``). This is what
-    lets a NEW occupation light up arm-walking capabilities by DECLARING its
-    manifest, with no edit here (ms-142 の芯)."""
+    the thick-frame name convention (that fallback lives ONCE in
+    ``target_descriptor.arm_roles`` — single source of truth, e-5011 review
+    Maint#7). This is what lets a NEW occupation light up arm-walking capabilities
+    by DECLARING its manifest, with no edit here (ms-142 の芯)."""
     seed = _ARM_ROLES.get(collection)
     if seed is not None:
         return {
@@ -753,13 +750,12 @@ def _arm_roles_for(data: dict | None, collection: str, arms: tuple) -> dict:
             if isinstance(desc, dict) \
                     and (desc.get("collection") or "").strip() == collection:
                 return _td.arm_roles(desc)
-    # A collection with no seed and no descriptor (unusual): fall back to the
-    # name convention over its physical arms.
-    work_item_arm = {"arm": "work_items", "item_type": None, "kind": "work_item"} \
-        if "work_items" in arms else None
-    evidence_arms = [{"arm": "evidence", "item_type": None}] \
-        if "evidence" in arms else []
-    return {"work_item_arm": work_item_arm, "evidence_arms": evidence_arms}
+    # A collection with no seed and no descriptor is not reachable from
+    # ``profession_manifest`` (it only walks ``target_collections``, whose members
+    # each have a seed or a descriptor). Return an empty classification defensively
+    # rather than re-implementing the name convention (that lives in
+    # ``target_descriptor.arm_roles``).
+    return {"work_item_arm": None, "evidence_arms": []}
 
 
 def profession_manifest(data: dict, profession: str | None = None) -> dict:
@@ -805,7 +801,7 @@ def profession_manifest(data: dict, profession: str | None = None) -> dict:
         spec = decomposition.get(collection, {"id_field": "id", "arms": ()})
         arms = tuple(spec.get("arms") or ())
         kind = _collection_kind(data, collection)
-        roles = _arm_roles_for(data, collection, arms)
+        roles = _arm_roles_for(data, collection)
         target_classes.append({
             "kind": kind,
             "collection": collection,

@@ -14,7 +14,10 @@ cmd_deadline_due() {
         case "$1" in
             --json) json_flag="1"; shift ;;
             -?*) _guard_flag "$1" ;;
-            *)      shift ;;
+            # `deadline due` takes no positional args; a stray one (e.g. a typo'd
+            # id) must error, not be silently dropped — symmetric with the flag
+            # guard above and with dispatch.py's argparse (which rejects it).
+            *)      echo "beacon deadline due は引数を取りません (不明: '$1')" >&2; return 2 ;;
         esac
     done
     BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" deadline_due
