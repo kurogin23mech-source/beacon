@@ -46,6 +46,7 @@ import trek as trek_mod  # ms-69 / e-1656: trek schema + pure mutators
 import trek_scheduler as trek_scheduler_mod  # ms-83 / e-1997: progress-check cadence logic
 import tick_scheduler  # ms-107 e-3434/e-3461: target-agnostic periodic-tick cadence
 import deadline  # ms-139 e-4953: L2 締切エンジン (overdue 規則 + reminder dedup)
+import occupation  # ms-142 e-5010: 職種非依存の Target/WorkItem 抽象イテレータ
 import tick_health as tick_health_mod  # e-1391 / ms-66: tick-liveness evaluation
 
 # e-1391 (ms-66) — last successful periodic tick, recorded by the
@@ -3991,26 +3992,23 @@ def _fire_operation(pid: str, project: dict, op: dict, now_iso: str) -> dict:
 
 def _deadline_reminder_candidates(project: dict):
     """Yield ``(item, kind, label, recipient_session)`` for every work item that
-    can carry a deadline — milestones (``target_date``), their tasks
-    (``deadline``), and sales activities (``deadline``) — ms-139 e-4953.
+    can carry a deadline — Targets (a milestone's ``target_date``) and their work
+    items (dev task / sales activity ``deadline``) — ms-139 e-4953.
 
-    ``recipient`` is the session that *claims* the item's target (its
-    ``occupation.session_id``): the milestone for a task, the opportunity for an
-    activity. '' when unclaimed (no live owner to DM). Reading the project's
-    concrete collections lives here in the server (app layer), not in the L2
-    ``deadline`` module, which stays collection-agnostic (per capability 台帳 L2)."""
-    for ms in (project.get("milestones", []) or []):
-        recipient = (ms.get("occupation") or {}).get("session_id", "") or ""
-        label = ms.get("title") or ms.get("label") or ms.get("id", "")
-        # milestone 自身 (deadline_of は target_date を読む)
-        yield ms, "milestone", label, recipient
-        for e in (ms.get("entries", []) or []):
-            if e.get("type") == "task":
-                yield e, "task", e.get("description") or e.get("id", ""), recipient
-    for opp in (project.get("opportunities", []) or []):
-        recipient = (opp.get("occupation") or {}).get("session_id", "") or ""
-        for a in (opp.get("activities", []) or []):
-            yield a, "activity", a.get("description") or a.get("id", ""), recipient
+    A thin adapter over the SHARED occupation-agnostic enumeration
+    ``occupation.iter_deadline_candidates`` (ms-142 e-5010): both this server
+    reminder and the session-start display (``beacon deadline due``) walk that one
+    enumeration, so neither names ``project['milestones']`` / ``entries`` /
+    ``opportunities`` / ``activities`` and a new occupation's deadlines light up
+    at both sites with no edit. An opportunity carries no Target-level deadline
+    field today, so ``deadline.deadline_of`` returns '' and ``_fire_due_deadlines``
+    skips it (behavior parity with the milestone-only Target yield this replaced).
+
+    ``recipient`` is the session that *claims* the item's Target; '' when
+    unclaimed (no live owner to DM). ``kind`` is the occupation-agnostic label
+    (milestone / task / activity) the reminder message stamps."""
+    for cand in occupation.iter_deadline_candidates(project):
+        yield cand["item"], cand["kind"], cand["label"], cand["recipient"]
 
 
 def _fire_due_deadlines(pid: str, project: dict, now_iso: str, report: list) -> bool:

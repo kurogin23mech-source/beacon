@@ -115,6 +115,9 @@ VERB_LEDGER = {
     # --- cycle ---
     "cycle_status": {"cls": "Q", "secondary": [], "note": ""},
 
+    # --- deadline (ms-142 e-5010) ---
+    "deadline_due": {"cls": "Q", "secondary": [], "note": "職種横断で期日到達/超過の work item を一覧する read-only (opportunity_due の cross-profession 版)"},
+
     # --- deploy ---
     "deploy_delete": {"cls": "B", "secondary": [], "note": ""},
     "deploy_list": {"cls": "Q", "secondary": [], "note": ""},

@@ -6269,6 +6269,7 @@ def _help_registry():
         {"command": "beacon opportunity transition-date <opp-id> <YYYY-MM-DD>", "flags": ["--note <text>", "--clear"], "description": "Set the 遷移日 (judgement date) for the current phase (append-only transition_date_history)"},
         {"command": "beacon opportunity judge <opp-id> advance|retry|terminal", "flags": ["--note <text>"], "description": "Judge a reached 遷移日 (3-way: 次へ/やり直し/決着; human-confirmed, master=人間)"},
         {"command": "beacon opportunity due", "flags": ["--json"], "description": "List due/overdue 商談の遷移日 and 準備活動の期日 (transition_date + activity.deadline)"},
+        {"command": "beacon deadline due", "flags": ["--json"], "description": "職種横断で期日 到達/超過 の work item を surface (milestone target_date / task・activity deadline を occupation イテレータ経由で 1 経路化)"},
         {"command": "beacon opportunity activity <opp-id> <desc>", "flags": ["--deadline <date>", "--ball self|counterpart"], "description": "Add an activity (業務・事前計画型) under an opportunity"},
         {"command": "beacon opportunity delete <opp-id>", "flags": [], "description": "Delete an opportunity and its activities"},
         {"command": "beacon communication add <target-id>", "flags": ["--direction inbound|outbound", "--channel <free-text: email/slack/messenger/line/in-person/…>", "--source-ref <id>", "--source-url <link>", "--occurred <datetime>"], "description": "Record a communication (証跡・事後記録型 = 営業の Commit); target is opp-/acc- or act-/nrt- (act-/nrt- links the activity/nurturing it fulfilled); channel is free-text for off-pipeline media"},
@@ -9114,6 +9115,57 @@ def cmd_opportunity_due():
               "やめたなら cancel / 期日を延ばすなら update --deadline")
 
 
+def cmd_deadline_due():
+    """締切精査 (ms-142 e-5010): 職種横断で期日 到達/超過 の work item を surface する
+    単一経路。サーバの overdue リマインダ (server/app.py) と同じ
+    ``occupation.iter_deadline_candidates`` を consume し、L2 締切規則
+    (``deadline.work_item_temporal_status``) を適用する。だから開発 (milestone の
+    target_date / task の deadline) も営業 (activity の deadline) も、職種で分岐せず 1
+    経路で拾える。session-start の締切表示 (scripts/session-start-deadlines.py) が
+    ``beacon deadline due --json`` としてこれを呼ぶ。BEACON_JSON=1 で machine 出力
+    (``{"items": [{kind, label, deadline, temporal, context}]}``、古い期日順)。"""
+    import occupation
+    import deadline
+    import work_model
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    data = load_project()
+    today = _today_iso()
+    _terminal = {work_model.DONE_STATUS, work_model.CANCELLED_STATUS}
+    items = []
+    for cand in occupation.iter_deadline_candidates(data):
+        # A work item under a terminal (done/cancelled) Target is noise — skip it,
+        # matching the session-start display's historical behavior (ms-139
+        # finding#4). A terminal Target itself is excluded by the temporal rule
+        # below (its own status is terminal), so this is uniform across levels.
+        if cand.get("target_status") in _terminal:
+            continue
+        st = deadline.work_item_temporal_status(cand["item"], today)
+        if st not in (deadline.TRANSITION_DUE, deadline.TRANSITION_OVERDUE):
+            continue
+        items.append({
+            "kind": cand["kind"],
+            "label": cand["label"],
+            "deadline": deadline.deadline_of(cand["item"]),
+            "temporal": st,
+            "context": cand["context"],
+        })
+    items.sort(key=lambda r: r.get("deadline") or "")
+    if json_mode:
+        print(json.dumps({"items": items}, ensure_ascii=False))
+        return
+    if not items:
+        print("締切精査: 期日 到達/超過の work item はありません")
+        return
+    label_jp = {"milestone": "MS", "task": "タスク", "activity": "活動"}
+    print("⏰ 締切超過/本日 の work item:")
+    for r in items:
+        mark = "⚠ 超過" if r["temporal"] == deadline.TRANSITION_OVERDUE else "⏰ 本日"
+        ctx = f" — {r['context']}" if r.get("context") else ""
+        print(f"  [{label_jp.get(r['kind'], r['kind'])}] {r['label']} / "
+              f"期日 {r['deadline']} {mark}{ctx}")
+    print("  → 済んだら完了/期日を延ばす/やめたら取消 で盤面から外してください。")
+
+
 def cmd_opportunity_delete():
     # e-3586: 物理削除でなく soft-cancel (取消)。中の証跡 (活動/証跡) を消さない。
     import sales_entities
@@ -9866,6 +9918,7 @@ if __name__ == "__main__":
         "opportunity_transition_date": cmd_opportunity_transition_date,
         "opportunity_judge": cmd_opportunity_judge,
         "opportunity_due": cmd_opportunity_due,
+        "deadline_due": cmd_deadline_due,             # ms-142 e-5010
         "opportunity_activity": cmd_opportunity_activity,
         "activity_done": cmd_activity_done,
         "activity_cancel": cmd_activity_cancel,      # ms-139 e-4950

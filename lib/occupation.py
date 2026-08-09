@@ -620,6 +620,302 @@ def target_child_tables(data: dict | None = None) -> tuple:
     return tuple(seen)
 
 
+# ---------------------------------------------------------------------------
+# Instantiation manifest — the single read-path for "what slots a profession
+# fills" (ms-142 e-5008 / SPEC BcQ0OUTjOrwTnUltRqmb 設計方針 1).
+#
+# The six registries above already gather a profession's slots (projection /
+# owned classes / collections / decomposition / narrowing), but ONE thing was
+# nowhere declared: for each Target collection, WHICH nested arm holds planned
+# *work items* vs *evidence*, and HOW a work item is identified inside a shared
+# arm. ``TARGET_DECOMPOSITION`` lists a collection's arms but treats them all
+# alike — it cannot tell that a development ``entries`` arm mixes tasks (work
+# items) and commits (evidence) discriminated by ``type``, while a sales
+# ``activities`` arm is ALL work items and ``communications`` is a separate
+# evidence arm. That missing classification is exactly what an occupation-
+# agnostic work-item walk (deadline enumeration, the e-5009 iterator) needs.
+#
+# ``profession_manifest`` is that single read-path. It is COMPOSED from the
+# existing registries (which stay the source of truth — nothing here overrides
+# them) PLUS the ``_ARM_ROLES`` seed below, and it carries ms-122 descriptor
+# collections for free. It is a non-breaking VIEW, not a physical merge: adding
+# it changes no existing caller (AC1 = "引ける／集約" — a read-path, not a
+# rewrite of the six well-tested registries).
+#
+# CRITICAL (ms-142 の芯 / leader 承認条件 1): the arm classification is
+# DECLARATIVE DATA (``_ARM_ROLES`` / ``_ARM_PHASE_BALL`` keyed by collection),
+# never an ``if profession == …`` branch. ms-142's whole promise is "declare a
+# new occupation's manifest and every arm-walking L2 capability lights up with
+# ZERO wiring" (e-5014). A classification that leaked into code branches would
+# break "declare ⇒ light up" — the same class of hole ms-133's independent
+# review caught (high#: 記述子駆動でなく Skill md に if 分岐が漏れる). A data-
+# defined occupation's arms come from its descriptor (``_DEFAULT_ARMS`` =
+# work_items / evidence), so it, too, lights up without editing this file.
+#
+# CONTRACT (leader 承認条件 2): ``profession_manifest`` is the canonical CONSUME
+# contract. When e-5013 migrates the ``KNOWN_COLLECTION_COUPLING`` debt into the
+# coverage matrix, "consult profession_manifest instead of reading
+# data['milestones']" is the fix it points each capability to. Enforcement lands
+# later (e-5012 matrix / e-5013 migration); the shape is fixed HERE so the
+# downstream forcing function loads cleanly onto it.
+# ---------------------------------------------------------------------------
+
+# Per-collection arm classification. ``work_item_arm`` names the arm holding
+# planned work + how a work item is identified inside it: ``arm`` is the nested
+# list, ``item_type`` is ``None`` when every item in the arm is a work item
+# (sales activities) or an entry ``type`` string when the arm is shared (dev
+# ``entries`` hold tasks AND commits → work items are ``type == "task"``), and
+# ``kind`` is the occupation-agnostic label for a work item of that arm
+# (dev ``task`` / sales ``activity``) — what a shared capability stamps instead of
+# re-deriving it from a collection name (ms-142 e-5010: the deadline reminder's
+# ``work_kind``). ``evidence_arms`` names where proof/changelog records live (dev
+# commits ride the SAME entries arm; sales evidence is its own communications arm).
+#
+# REACHABILITY (ms-142 e-5011 review, Maint#5): the ONLY consumer of these three
+# ``_ARM_ROLES`` / ``_ARM_PHASE_BALL`` / ``_COLLECTION_KIND`` dicts is
+# ``profession_manifest``, which walks ``target_collections(data)`` — the seed of
+# which is milestones + opportunities ONLY (accounts / acquisitions ride a
+# different persistence path and are NOT Target collections here, see
+# ``TARGET_COLLECTIONS``). So an entry keyed by any collection NOT returned by
+# ``target_collections`` would be dead data — a silent no-op if edited. Keep these
+# keyed to exactly milestones + opportunities; a descriptor occupation's roles come
+# from its descriptor (``target_descriptor.arm_roles``), not from here.
+_ARM_ROLES = {
+    "milestones": {
+        "work_item_arm": {"arm": "entries", "item_type": "task", "kind": "task"},
+        "evidence_arms": [{"arm": "entries", "item_type": "commit"}],
+    },
+    "opportunities": {
+        "work_item_arm": {"arm": "activities", "item_type": None,
+                          "kind": "activity"},
+        "evidence_arms": [{"arm": "communications", "item_type": None}],
+    },
+}
+
+# The exclusive phase + who-has-the-ball model per collection (SPEC 方針 1 lists
+# "phase・ball" among the slots). Sales Targets advance through a phase funnel and
+# carry the ball; development milestones do not (their progress is task ratios /
+# evidence), so dev's phase_ball is ``None`` — a declared absence, not a gap.
+# Same reachability rule as ``_ARM_ROLES`` (milestones + opportunities only).
+_ARM_PHASE_BALL = {
+    "milestones": None,
+    "opportunities": {"phase_field": "phase", "ball_field": "who_has_the_ball"},
+}
+
+# collection -> target-class kind for the built-in occupations. Bridges the
+# collection-keyed registries to the kind-keyed ones (NARROWING_ID_PREFIXES).
+# Descriptor collections resolve their kind from the descriptor itself, so this
+# only needs the built-ins reachable via ``target_collections`` (milestones +
+# opportunities); see the reachability note above.
+_COLLECTION_KIND = {
+    "milestones": "milestone",
+    "opportunities": "opportunity",
+}
+
+
+def _collection_kind(data: dict | None, collection: str) -> str:
+    """Return the target-class ``kind`` for a collection: the built-in map, else
+    a descriptor whose ``collection`` matches (ms-122), else ``""``."""
+    kind = _COLLECTION_KIND.get(collection, "")
+    if kind:
+        return kind
+    if data:
+        for desc in _td.load_descriptors(data):
+            if isinstance(desc, dict) \
+                    and (desc.get("collection") or "").strip() == collection:
+                return (desc.get("kind") or "").strip()
+    return ""
+
+
+def _arm_roles_for(data: dict | None, collection: str) -> dict:
+    """Return ``{work_item_arm, evidence_arms}`` for a collection. Built-in
+    collections use the ``_ARM_ROLES`` seed. A descriptor-defined collection asks
+    its descriptor (``target_descriptor.arm_roles``) which arm holds work items vs
+    evidence — an EXPLICIT declaration if the descriptor carries one (so a new
+    occupation may name its arms anything and still light up arm-walking
+    capabilities — the true "declare, don't wire" contract, ms-142 e-5011), else
+    the thick-frame name convention (that fallback lives ONCE in
+    ``target_descriptor.arm_roles`` — single source of truth, e-5011 review
+    Maint#7). This is what lets a NEW occupation light up arm-walking capabilities
+    by DECLARING its manifest, with no edit here (ms-142 の芯)."""
+    seed = _ARM_ROLES.get(collection)
+    if seed is not None:
+        return {
+            "work_item_arm": dict(seed["work_item_arm"])
+            if seed["work_item_arm"] else None,
+            "evidence_arms": [dict(a) for a in seed["evidence_arms"]],
+        }
+    if data:
+        for desc in _td.load_descriptors(data):
+            if isinstance(desc, dict) \
+                    and (desc.get("collection") or "").strip() == collection:
+                return _td.arm_roles(desc)
+    # A collection with no seed and no descriptor is not reachable from
+    # ``profession_manifest`` (it only walks ``target_collections``, whose members
+    # each have a seed or a descriptor). Return an empty classification defensively
+    # rather than re-implementing the name convention (that lives in
+    # ``target_descriptor.arm_roles``).
+    return {"work_item_arm": None, "evidence_arms": []}
+
+
+def profession_manifest(data: dict, profession: str | None = None) -> dict:
+    """Return the project's instantiation manifest — the SINGLE read-path for a
+    profession's Target-class slots as declarative data (ms-142 e-5008).
+
+    Shape::
+
+        {
+          "profession": "dev",
+          "target_classes": [
+            {
+              "kind": "milestone",
+              "collection": "milestones",
+              "id_field": "id",
+              "id_prefix": "ms-",
+              "narrowing": True,          # sliceable in a Trek scope
+              "arms": ("entries",),       # all fat arms (from decomposition)
+              "work_item_arm": {"arm": "entries", "item_type": "task"},
+              "evidence_arms": [{"arm": "entries", "item_type": "commit"}],
+              "phase_ball": None,
+            },
+            ...
+          ],
+        }
+
+    Composed from the existing registries (``target_collections`` /
+    ``target_decomposition`` / ``narrowing_id_prefixes`` / ``all_narrowing_kinds``
+    — all untouched source of truth) plus the ``_ARM_ROLES`` / ``_ARM_PHASE_BALL``
+    classification seed, and it carries ms-122 descriptor collections for free.
+    Both a dev project and a sales project resolve to the SAME shape (a list of
+    identically-keyed dicts) — the occupation-agnostic contract that arm-walking
+    L2 capabilities (deadline enumeration, the e-5009 work-item iterator) consume
+    instead of reading concrete collections directly. ``profession`` defaults to
+    the project's own; pass it only to override for tests."""
+    prof = (profession or resolve_profession(data)) if data is not None \
+        else DEFAULT_PROFESSION
+    decomposition = target_decomposition(data)
+    narrowing = set(all_narrowing_kinds(data))
+    prefixes = narrowing_id_prefixes(data)
+    target_classes = []
+    for collection in target_collections(data):
+        spec = decomposition.get(collection, {"id_field": "id", "arms": ()})
+        arms = tuple(spec.get("arms") or ())
+        kind = _collection_kind(data, collection)
+        roles = _arm_roles_for(data, collection)
+        target_classes.append({
+            "kind": kind,
+            "collection": collection,
+            "id_field": spec.get("id_field", "id"),
+            "id_prefix": prefixes.get(kind, ""),
+            "narrowing": kind in narrowing,
+            "arms": arms,
+            "work_item_arm": roles["work_item_arm"],
+            "evidence_arms": roles["evidence_arms"],
+            "phase_ball": _ARM_PHASE_BALL.get(collection),
+        })
+    return {"profession": prof, "target_classes": target_classes}
+
+
+def iter_work_items(data: dict):
+    """Yield ``(work_item, target, arm)`` for every planned work item across
+    occupations, profession-agnostically (ms-142 e-5009).
+
+    Consumes ``profession_manifest``'s ``work_item_arm`` so a caller walks
+    development tasks (a milestone's ``entries`` filtered to ``type == "task"``)
+    AND sales activities (an opportunity's whole ``activities`` arm) through ONE
+    read path, with no ``if profession`` branch. This is the occupation-agnostic
+    work-item spine the deadline enumeration (e-5010) and the completeness harness
+    build on, so an L2 capability never has to name ``data['milestones']`` /
+    ``entries`` / ``activities`` itself.
+
+    Per yielded tuple:
+      - ``work_item`` — the raw work-item record (a dev task entry / a sales
+        activity), verbatim (with its own nested fields).
+      - ``target`` — the parent Target record it lives under (the milestone /
+        opportunity). Yielded so a caller can resolve target-scoped context (the
+        claiming session for a deadline reminder = ``target['occupation']
+        ['session_id']``) without a second lookup.
+      - ``arm`` — the arm name the item came from (``"entries"`` / ``"activities"``),
+        for labelling.
+
+    The manifest's ``item_type`` discriminates a SHARED arm: dev ``entries`` hold
+    tasks AND commits, so only ``type == "task"`` items are work items (commits
+    are evidence, never yielded here); a ``None`` item_type means every item in
+    the arm is a work item (sales activities). Target classes with no
+    ``work_item_arm`` (acquisitions) contribute nothing. Scope follows
+    ``profession_manifest`` (milestones + opportunities), matching the deadline
+    enumeration it will replace."""
+    for tc in profession_manifest(data)["target_classes"]:
+        wia = tc["work_item_arm"]
+        if not wia:
+            continue
+        arm, item_type = wia["arm"], wia["item_type"]
+        for target in data.get(tc["collection"], []) or []:
+            for item in target.get(arm, []) or []:
+                if not isinstance(item, dict):
+                    continue
+                if item_type is not None and item.get("type") != item_type:
+                    continue
+                yield item, target, arm
+
+
+def iter_deadline_candidates(data: dict):
+    """Yield every deadline-bearing candidate across occupations, each a dict
+    (ms-142 e-5010 — the SINGLE occupation-agnostic enumeration both deadline
+    call sites share)::
+
+        {"item": <record>, "kind": "milestone"|"task"|"activity"|…,
+         "label": <str>, "target_id": <parent target id>,
+         "target_status": <parent target status>,
+         "recipient": <claiming session_id or "">, "context": <breadcrumb>}
+
+    Enumerates Target level (a milestone's ``target_date``) via
+    ``iter_target_records`` PLUS work items (dev task / sales activity
+    ``deadline``) via ``iter_work_items``. The server reminder
+    (``server/app.py:_deadline_reminder_candidates``) and the session-start
+    display (``beacon deadline due`` → ``scripts/session-start-deadlines.py``)
+    both consume THIS, so neither names ``data['milestones']`` / ``entries`` /
+    ``activities`` — a new occupation's deadlines light up with zero edit at
+    either site. This only ENUMERATES; the L2 temporal rule
+    (``deadline.work_item_temporal_status``) is applied by callers, keeping the
+    ``deadline`` module collection-agnostic (capability 台帳 L2).
+
+    ``recipient`` is the session claiming the item's Target (its
+    ``occupation.session_id``): the milestone for a task, the opportunity for an
+    activity; '' when unclaimed. ``kind`` is the occupation-agnostic label the
+    reminder message stamps. ``target_status`` is the PARENT Target's status (a
+    display can drop work items under a terminal Target without the enumerator
+    imposing that policy). ``context`` is a human breadcrumb — the target id, or
+    ``"<target_id> / <item_id>"`` for a work item."""
+    for target in iter_target_records(data):
+        recipient = (target.get("occupation") or {}).get("session_id", "") or ""
+        tid = target.get("id", "")
+        yield {
+            "item": target,
+            "kind": _wm.target_kind(tid) or "target",
+            "label": target.get("title") or target.get("label") or tid,
+            "target_id": tid,
+            "target_status": target.get("status", ""),
+            "recipient": recipient,
+            "context": tid,
+        }
+    arm_kind = {tc["work_item_arm"]["arm"]: tc["work_item_arm"]["kind"]
+                for tc in profession_manifest(data)["target_classes"]
+                if tc["work_item_arm"]}
+    for item, target, arm in iter_work_items(data):
+        recipient = (target.get("occupation") or {}).get("session_id", "") or ""
+        tid, iid = target.get("id", ""), item.get("id", "")
+        yield {
+            "item": item,
+            "kind": arm_kind.get(arm, arm),
+            "label": item.get("description") or iid,
+            "target_id": tid,
+            "target_status": target.get("status", ""),
+            "recipient": recipient,
+            "context": f"{tid} / {iid}" if iid else tid,
+        }
+
+
 # Trek scope narrowing vocabulary (ms-109 e-3699 / fable review B-2).
 #
 # A Trek scope entry narrows to a single target inside a project. Which target

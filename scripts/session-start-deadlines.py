@@ -5,16 +5,20 @@ session-start が起動のたびに「期日を過ぎた作業」を surface す
 リマインダ (e-4953) が本命だが、その駆動が落ちても最低限の可視化を保証する二重化
 (真値源はサーバ、ここは毎回再計算する冪等な表示)。
 
-職種横断で 3 種類の work item を 1 つの L2 締切規則 (lib/deadline.py:
-今日 > 締切 かつ status が terminal(done/cancelled) でない) にかける:
+ms-142 e-5010 で列挙を ``beacon deadline due --json`` (= occupation.iter_deadline_
+candidates を consume する単一経路) に一本化した。これによりサーバの overdue
+リマインダとこの表示が同じ列挙を歩き、milestone の target_date / task・activity の
+deadline を職種で分岐せず拾う (新職種は manifest 宣言だけで乗り、この script は
+無改修)。CLI が L2 締切規則 (今日 > 締切 かつ status が terminal でない) と
+terminal な Target 配下の work item 除外まで済ませて返すので、ここは整形だけ行う。
 
   * milestone   — target_date (開発の target)
   * task        — deadline    (開発の work item、ms-139 e-4949 で新設)
-  * activity    — deadline    (営業の準備活動、`beacon opportunity due` 経由)
+  * activity    — deadline    (営業の準備活動)
 
-データ取得は best-effort な `beacon ... --json` subprocess。1 つでも失敗したら
-その源だけ空に落として続行する。出力が空なら何も print しない (session-start は
-空セクションを省く契約)。常に exit 0。
+データ取得は best-effort な `beacon deadline due --json` subprocess。失敗したら
+空に落として続行する。出力が空なら何も print しない (session-start は空セクションを
+省く契約)。常に exit 0。
 
 Output contract:
   * 期日超過/本日 が 0 件 -> 何も print しない。
@@ -52,68 +56,6 @@ def _beacon_json(args):
         return None
 
 
-def _today():
-    # ISO date; deadline comparison is plain string compare (YYYY-MM-DD).
-    import datetime
-    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-
-
-def _collect_rows(status, today):
-    """Build a flat list of overdue/due display rows across milestone /
-    task / activity, oldest 期日 first. Reads only best-effort JSON already
-    fetched or fetched here; the L2 rule lives in ``deadline``."""
-    rows = []
-    profession = (status or {}).get("profession", "dev") if status else "dev"
-
-    # (1) milestone target_date — 開発 target。status --json の targets[] を使う。
-    for t in (status or {}).get("targets", []) or []:
-        if t.get("kind") != "milestone":
-            continue
-        detail = t.get("detail") or {}
-        item = {"deadline": detail.get("target_date", ""), "status": t.get("status", "")}
-        st = deadline.work_item_temporal_status(item, today)
-        if st in (deadline.TRANSITION_DUE, deadline.TRANSITION_OVERDUE):
-            rows.append({
-                "kind": "milestone", "label": t.get("label", t.get("id", "")),
-                "deadline": item["deadline"], "temporal": st,
-                "context": t.get("id", ""),
-            })
-
-    # (2) task deadline — 開発 work item。terminal でない milestone すべての task を引く
-    # (ms-139 思想レビュー finding#4: in_progress だけに絞ると observing/todo/waiting な MS
-    # 配下の締切付き task が session-start からも(未 claim なら server DM からも)漏れる穴に
-    # なる。done/cancelled のみ除外し、二重化の網を SPEC AC4 の無条件文言どおり広く張る)。
-    _MS_TERMINAL = {"done", "cancelled"}
-    for t in (status or {}).get("targets", []) or []:
-        if t.get("kind") != "milestone" or t.get("status") in _MS_TERMINAL:
-            continue
-        tl = _beacon_json(["task", "list", "-m", t.get("id", "")])
-        entries = (tl or {}).get("entries", []) if isinstance(tl, dict) else []
-        for e in entries:
-            if e.get("type") != "task":
-                continue
-            st = deadline.work_item_temporal_status(e, today)
-            if st in (deadline.TRANSITION_DUE, deadline.TRANSITION_OVERDUE):
-                rows.append({
-                    "kind": "task", "label": e.get("description", e.get("id", "")),
-                    "deadline": deadline.deadline_of(e), "temporal": st,
-                    "context": f"{t.get('id', '')} / {e.get('id', '')}",
-                })
-
-    # (3) activity deadline — 営業の準備活動。sales project のみ。
-    if profession != "dev":
-        due = _beacon_json(["opportunity", "due"])
-        for a in (due or {}).get("activities", []) if isinstance(due, dict) else []:
-            rows.append({
-                "kind": "activity", "label": a.get("description", a.get("act_id", "")),
-                "deadline": a.get("deadline", ""), "temporal": a.get("activity_status", ""),
-                "context": f"{a.get('opp_title', '')} ({a.get('opp_id', '')})",
-            })
-
-    rows.sort(key=lambda r: r.get("deadline") or "")
-    return rows
-
-
 def _format(rows):
     if not rows:
         return ""
@@ -130,9 +72,10 @@ def _format(rows):
 
 
 def main():
-    today = _today()
-    status = _beacon_json(["status"])
-    rows = _collect_rows(status, today)
+    # 職種横断の締切列挙は CLI に一本化 (ms-142 e-5010)。CLI が temporal 判定・
+    # terminal Target 配下の除外・古い期日順ソートまで済ませて {"items": [...]} を返す。
+    due = _beacon_json(["deadline", "due"])
+    rows = (due or {}).get("items", []) if isinstance(due, dict) else []
     text = _format(rows)
     if text:
         print(text)
