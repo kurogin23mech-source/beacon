@@ -5,6 +5,14 @@ Extracted verbatim from commands.py (god-module split). Depends only on
 commands_shared (upward) + leaf domain modules (store, core, subprocess,
 shutil, version_rules), never on commands.py — acyclic (SPEC 方針4).
 commands.py re-imports these names for dispatch + `commands.X`.
+
+MONKEYPATCH TARGET (= 独立レビュー AX/保守性 medium 由来, e-4971): これらの関数が
+内部で解決するヘルパー (get_store / _get_triggers_dir / _extract_token /
+_maybe_auto_tick / _push_operation_trigger_to_bus 等) を test で stub する場合、
+`monkeypatch.setattr(commands, "_X", ...)` は **届かない** — 関数は _X を自分の
+namespace (= この cmd_trigger module) で解決するため。`monkeypatch.setattr(
+cmd_trigger, "_X", ...)` を当てること (commands 経由の caller 用に両方 mirror して
+よい)。commands 側だけに patch すると stub が効かず test が偽 green になる。
 """
 
 import json

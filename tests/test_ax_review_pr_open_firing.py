@@ -15,6 +15,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import commands  # noqa: E402
+import cmd_trigger  # noqa: E402  (ms-127 e-4971)
 import commands_shared  # noqa: E402  (ms-127 e-4856: trigger helpers promoted here)
 import cmd_pr  # noqa: E402  (ms-127 e-4856: pr family moved here)
 
@@ -70,8 +71,12 @@ def test_trigger_check_surfaces_ax_review_due(tmp_path, monkeypatch, capsys):
     tdir = tmp_path / "triggers"
     monkeypatch.setattr(commands_shared, "_get_triggers_dir", lambda: str(tdir))
     monkeypatch.setattr(commands, "_get_triggers_dir", lambda: str(tdir))
+    # ms-127 e-4971: cmd_trigger_check + _maybe_auto_tick moved to cmd_trigger and
+    # resolve _get_triggers_dir / _maybe_auto_tick in ITS namespace — mirror.
+    monkeypatch.setattr(cmd_trigger, "_get_triggers_dir", lambda: str(tdir))
     # avoid the cloud-touching opportunistic tick during the check
     monkeypatch.setattr(commands, "_maybe_auto_tick", lambda: None)
+    monkeypatch.setattr(cmd_trigger, "_maybe_auto_tick", lambda: None)
     commands._fire_ax_review_due_trigger("42", "feat: x", "https://github.com/o/r/pull/42")
     commands.cmd_trigger_check()
     out = capsys.readouterr().out

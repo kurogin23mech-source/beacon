@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 
 import commands  # noqa: E402
+import cmd_trigger  # noqa: E402  (ms-127 e-4971: _push_operation_trigger_to_bus の canonical home)
 import cmd_operation  # noqa: E402  (ms-127 e-4798: operation handlers live here)
 
 
@@ -277,6 +278,12 @@ def cloud_mode(tmp_path, monkeypatch):
     fake_auth.load_credentials = lambda: {"token": "fake"}
     monkeypatch.setitem(sys.modules, "auth", fake_auth)
     monkeypatch.setattr(commands, "_extract_token", lambda c: "fake-token")
+    # ms-127 e-4971: _push_operation_trigger_to_bus moved to cmd_trigger and
+    # resolves _get_cloud_config_path / _extract_token in ITS namespace, so
+    # mirror the patches (patching commands alone no longer intercepts).
+    monkeypatch.setattr(cmd_trigger, "_get_cloud_config_path",
+                        commands._get_cloud_config_path)
+    monkeypatch.setattr(cmd_trigger, "_extract_token", commands._extract_token)
     return beacon_dir
 
 
