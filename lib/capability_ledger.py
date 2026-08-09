@@ -143,7 +143,25 @@ PROFESSION_CONCRETE_SYMBOLS = {
 # communication_add/opportunity_activity/acquisition_attack_list_*) is registered
 # here with owner=ms-143, avoiding the churn of allowlisting-then-removing the 4
 # already-abstracted verbs (leader interlock ruling 2026-08-09).
-KNOWN_SYMBOL_REACH: set = set()
+KNOWN_SYMBOL_REACH: set = {
+    # ms-134 e-5061 step 2 (L3→L2 promotion) — class-derived RECORDING verbs
+    # promoted to L2 that STILL call a profession recorder/resolver directly.
+    # owner = ms-143 (its PR #2 routes each through occupation.record_target_entry /
+    # create_target / set_entry_state, then deletes its row here; the stale-entry
+    # test forces the deletion). ms-143 PR #1 (#625) already abstracted task_done /
+    # opportunity_add / activity_set_status, so those are absent below.
+    # dev: resolve the active milestone / write a milestone changelog entry.
+    ("task_add", "core.find_target_milestone"),
+    ("task_list", "core.find_target_milestone"),
+    ("sync", "core.find_target_milestone"),
+    ("log_finalize", "core.find_target_milestone"),
+    ("save", "core.save_entry"),
+    # sales: record an activity / communication onto the sales target.
+    ("opportunity_activity", "sales_entities.activity_add"),
+    ("communication_add", "sales_entities.communication_add"),
+    ("acquisition_attack_list_send_record", "sales_entities.communication_add"),
+    ("acquisition_attack_list_reply_record", "sales_entities.communication_add"),
+}
 
 
 def is_known_symbol_reach(verb: str, symbol: str) -> bool:
@@ -234,6 +252,38 @@ KNOWN_COLLECTION_COUPLING = {
     # deferred as tracked debt. owner = ms-134 (human-confirmed disposition,
     # e-5061). NOTE the worktree/branch part must stay milestone-specific.
     ("doctor", "milestones"),
+    # ms-134 e-5061 step 2 (L3→L2 promotion) — class-derived CRUD verbs promoted to
+    # L2 that STILL read a profession concrete collection directly. owner = ms-143
+    # (its PR #2 routes each through occupation.iter_target_records / the target
+    # abstraction, then deletes its row here; the stale-entry test forces the
+    # deletion). ms-143 PR #1 (#625) already abstracted create/done
+    # (milestone_add's RECORD path, task_done, opportunity_add, activity_set_status)
+    # so those record paths are absent — only residual READS remain below.
+    # dev milestone readers (list / show / graph / join / observe / wait /
+    # workspace_cleanup / done enumerate milestones; log_* resolve the active MS;
+    # retro_prepare aggregates milestone history):
+    ("milestone_list", "milestones"),
+    ("milestone_show", "milestones"),
+    ("milestone_graph", "milestones"),
+    ("milestone_join", "milestones"),
+    ("milestone_observe", "milestones"),
+    ("milestone_wait", "milestones"),
+    ("milestone_workspace_cleanup", "milestones"),
+    ("milestone_done", "milestones"),
+    ("log", "milestones"),
+    ("log_prepare", "milestones"),
+    ("log_finalize", "milestones"),
+    ("retro_prepare", "milestones"),
+    # milestone_add: its RECORD path is abstracted (create_target, ms-143 #625), but
+    # a residual READ remains in _is_bulk_milestone_add (counts milestones added in
+    # the last 60s to suppress an inline hint) — walks only dev 'milestones', so it
+    # misses a sales bulk-add. Distinct from the record path; ms-143 PR #2 routes it
+    # through iter_target_records too (flagged to leader 2026-08-09).
+    ("milestone_add", "milestones"),
+    # sales target readers (opportunity_list / acquisition_list enumerate their
+    # profession collection directly):
+    ("opportunity_list", "opportunities"),
+    ("acquisition_list", "acquisitions"),
 }
 
 # Reviewed-legitimate reads (ms-134 e-4737): (verb, collection) reads a
@@ -341,22 +391,41 @@ _NOUN_SCOPE = {
     # Target/WorkItem abstraction (occupation.iter_deadline_candidates); the rule
     # is profession-shared (ms-142 e-5010).
     "deadline": "L2",
-    # L3 — profession default (dev).
-    "milestone": "L3", "task": "L3", "log": "L3", "save": "L3", "sync": "L3",
-    "push": "L3", "deploy": "L3", "pr": "L3", "issue": "L3", "retro": "L3",
-    "rollback": "L3", "entry": "L3", "stuck": "L3",
+    # ms-134 e-5061: class-derived CRUD promoted L3→L2. These operate on the
+    # Target / WorkItem / Evidence CLASS (a milestone IS a Target, a task IS a
+    # WorkItem, a commit/log IS Evidence) — the operation rule is profession-common
+    # even though the concrete is instantiated per profession (dev Milestone /
+    # sales Opportunity). CORE doc 37Svg6nD2FccJM27yBjq 判定軸: 対象がクラス由来なら
+    # L2。The abstraction they route through is occupation.record_target_entry /
+    # create_target / set_entry_state / iter_target_records; ms-143 PR #1 (#625)
+    # already abstracted create/done (milestone_add/task_done/opportunity_add/
+    # activity_set_status → concrete-free on main), so those verbs are clean. The
+    # CRUD still reading a concrete directly is tracked as expected-red debt owned
+    # by ms-143 (KNOWN_COLLECTION_COUPLING + KNOWN_SYMBOL_REACH) until PR #2
+    # abstracts the remainder. dev-class nouns:
+    "milestone": "L2", "task": "L2", "log": "L2", "save": "L2", "sync": "L2",
+    "retro": "L2", "entry": "L2", "stuck": "L2",
+    # sales-class nouns (Opportunity IS a Target, activity/communication ARE
+    # WorkItem/Evidence, acquisition IS a Target, phase IS a Target lifecycle op):
+    "opportunity": "L2", "activity": "L2", "communication": "L2",
+    "acquisition": "L2", "phase": "L2",
+    # L3 — profession default (dev). These operate on dev-SPECIFIC objects (a PR /
+    # deploy / git push / issue / rollback / scenario are development artifacts,
+    # not Target-class instances), so they stay profession-owned.
+    "push": "L3", "deploy": "L3", "pr": "L3", "issue": "L3",
+    "rollback": "L3",
     # scenario (ms-136 自動デバッグ基盤): 公開配布される dev 一般機能 — dev
-    # ユーザーが自プロジェクトの SPEC を検証する(pr/deploy/retro と同じ dev の
-    # L3)。非配布の運用専用(L0)ではない。concrete 到達可否は L1/L2 を除外する
+    # ユーザーが自プロジェクトの SPEC を検証する(pr/deploy と同じ dev の L3)。
+    # 非配布の運用専用(L0)ではない。concrete 到達可否は L1/L2 を除外する
     # だけで L0/L3 を分けない;分ける軸は『公開配布か』。
     "scenario": "L3",
-    # L3 — profession default (sales). "watch" = the sales reply-watch
-    # (sales_entities.set_watch — watch a thread for a reply at a cadence, ms-107);
-    # it was mis-scoped L1 by its generic noun (reclassified 2026-08-03, e-4737).
-    "account": "L3", "acquisition": "L3", "activity": "L3",
-    "communication": "L3", "meeting": "L3", "nurturing": "L3",
-    "opportunity": "L3", "phase": "L3", "sales": "L3", "contact": "L3",
-    "dossier": "L3", "watch": "L3",
+    # L3 — profession default (sales). These operate on sales-SPECIFIC objects
+    # (account = a customer, meeting / nurturing / sales email, dossier = a
+    # customer file, contact = a person), NOT Target-class instances. "watch" =
+    # the sales reply-watch (sales_entities.set_watch — watch a thread for a reply
+    # at a cadence, ms-107); mis-scoped L1 by its generic noun until e-4737.
+    "account": "L3", "meeting": "L3", "nurturing": "L3",
+    "sales": "L3", "contact": "L3", "dossier": "L3", "watch": "L3",
 }
 
 # Per-verb overrides where a single verb does not follow its noun's scope.
@@ -431,20 +500,23 @@ PROFESSIONS = {"dev", "sales", "backoffice"}
 # no entry here is stale (points at a non-L3 noun). Mirrors the dev/sales split
 # the _NOUN_SCOPE comments already document, now machine-enforced.
 _L3_NOUN_PROFESSION = {
-    # dev profession defaults.
-    "milestone": "dev", "task": "dev", "log": "dev", "save": "dev",
-    "sync": "dev", "push": "dev", "deploy": "dev", "pr": "dev",
-    "issue": "dev", "retro": "dev", "rollback": "dev", "entry": "dev",
-    "stuck": "dev", "scenario": "dev",  # ms-136 自動デバッグ基盤 (dev L3)
+    # dev profession defaults. NOTE: milestone / task / log / save / sync / retro /
+    # entry / stuck were here until ms-134 e-5061; they were promoted L3→L2 in
+    # _NOUN_SCOPE (class-derived CRUD — a milestone IS a Target, operation rule is
+    # profession-common) so they are INTENTIONALLY absent — the sync test enforces
+    # every L3 noun appears here and every entry here points at an L3 noun, so a
+    # promoted noun left here would fail. Do not re-add them.
+    "push": "dev", "deploy": "dev", "pr": "dev",
+    "issue": "dev", "rollback": "dev",
+    "scenario": "dev",  # ms-136 自動デバッグ基盤 (dev L3)
     # sales profession defaults. NOTE: "morning" / "profile" were here until
-    # 2026-08-03; they were reclassified L3-sales → L1 in _NOUN_SCOPE (e-4737,
-    # they are bus/auth infra not sales) so they are INTENTIONALLY absent — the
-    # sync test enforces this, do not re-add them. "watch" was added here (moved
-    # L1 → L3-sales, the sales reply-watch).
-    "account": "sales", "acquisition": "sales", "activity": "sales",
-    "communication": "sales", "meeting": "sales", "nurturing": "sales",
-    "opportunity": "sales", "phase": "sales", "sales": "sales",
-    "contact": "sales", "dossier": "sales", "watch": "sales",
+    # 2026-08-03 (reclassified L3-sales → L1, bus/auth infra, e-4737); and
+    # opportunity / activity / communication / acquisition / phase were here until
+    # ms-134 e-5061 (promoted L3→L2, class-derived). All are INTENTIONALLY absent —
+    # the sync test enforces this, do not re-add them. "watch" is the sales
+    # reply-watch (moved L1 → L3-sales, e-4737).
+    "account": "sales", "meeting": "sales", "nurturing": "sales",
+    "sales": "sales", "contact": "sales", "dossier": "sales", "watch": "sales",
 }
 
 # L4 verb -> owning project. Empty: no L4 (project-only) capability ships in the

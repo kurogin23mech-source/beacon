@@ -89,10 +89,18 @@ def test_key_capabilities_have_expected_scope():
     assert cl.scope_of("doc_update") == "L2"
     assert cl.scope_of("claim_view") == "L2"
     assert cl.scope_of("status") == "L2"
-    # profession-specific defaults must be L3 (NOT shared) so their legitimate
-    # use of the dev concrete is not flagged.
+    # ms-134 e-5061 step 2: class-derived CRUD promoted L3→L2 (a milestone IS a
+    # Target, a task IS a WorkItem, a commit/log IS Evidence — the operation rule
+    # is profession-common). Their still-concrete reads/records are tracked as
+    # expected-red debt (KNOWN_COLLECTION_COUPLING / KNOWN_SYMBOL_REACH, owner=ms-143)
+    # until ms-143 PR #2 abstracts them.
     for v in ("milestone_add", "task_add", "log_finalize", "save", "sync",
-              "pr_add", "account_add", "opportunity_add"):
+              "opportunity_add", "opportunity_activity", "communication_add",
+              "acquisition_list", "retro_prepare"):
+        assert cl.scope_of(v) == "L2", v
+    # genuinely dev/sales-specific defaults stay L3 (a PR / a customer account are
+    # not Target-class instances), so their use of the profession concrete is legit.
+    for v in ("pr_add", "account_add", "deploy", "push", "contact_add"):
         assert cl.scope_of(v) == "L3", v
     assert cl.scope_of("bus_ack") == "L1"
     # ms-134 e-5061: doctor/update/project/skill/migrate/reset promoted L0→L1
@@ -140,11 +148,15 @@ def test_owner_required_only_for_l3_l4():
 
 def test_owner_of_dispatches_by_scope():
     # L3 dev / sales resolve to their profession; shared scopes have no owner.
-    assert cl.owner_of("milestone_add") == "dev"
-    assert cl.owner_of("task_done") == "dev"
-    assert cl.owner_of("opportunity_add") == "sales"
+    assert cl.owner_of("pr_add") == "dev"
+    assert cl.owner_of("deploy") == "dev"
     assert cl.owner_of("account_add") == "sales"
-    # shared (L1/L2) capabilities have NO single owner — a correct empty.
+    assert cl.owner_of("contact_add") == "sales"
+    # shared (L1/L2) capabilities have NO single owner — a correct empty. The
+    # class-derived CRUD promoted L3→L2 in e-5061 step 2 are now unowned (correct):
+    assert cl.owner_of("milestone_add") == ""  # L2 (was dev L3, e-5061)
+    assert cl.owner_of("task_done") == ""       # L2 (was dev L3)
+    assert cl.owner_of("opportunity_add") == ""  # L2 (was sales L3)
     assert cl.owner_of("doc_add") == ""      # L2
     assert cl.owner_of("bus_ack") == ""      # L1
     assert cl.owner_of("doctor") == ""       # L1 (was L0, e-5061; still unowned)
@@ -230,9 +242,10 @@ def test_reclassification_2026_08_03_is_pinned():
 def test_ownership_is_orthogonal_to_scope_and_origin():
     # ownership (who) is a third axis, distinct from scope (how widely shared)
     # and origin (who authored). A capability can be L3+dev+beacon-default.
-    assert cl.scope_of("milestone_add") == "L3"
-    assert cl.owner_of("milestone_add") == "dev"
-    assert cl.origin_of("milestone_add") == "beacon-default"
+    # (pr_add stays L3-dev; milestone_add moved to L2 in e-5061 step 2.)
+    assert cl.scope_of("pr_add") == "L3"
+    assert cl.owner_of("pr_add") == "dev"
+    assert cl.origin_of("pr_add") == "beacon-default"
 
 
 # --- invariant gate (e-4720/e-4721): real tree must be clean ---------------
@@ -277,8 +290,9 @@ def cmd_doc_synthetic2():
 
 _SYNTH_ALLOWED = '''
 import core
-def cmd_task_synthetic():
-    # task_* is L3 (profession-specific dev) — using the dev concrete is legit.
+def cmd_pr_synthetic():
+    # pr_* is L3 (profession-specific dev) — using the dev concrete is legit.
+    # (task_* moved to L2 in e-5061 step 2, so it is no longer a valid L3 example.)
     data = {}
     core.save_entry(data, ms_id="", description="x", source="auto", date="")
 '''
@@ -505,9 +519,10 @@ def cmd_status_synthetic_coll():
 '''
 
 _SYNTH_COLLECTION_L3_OK = '''
-def cmd_milestone_synthetic_coll():
-    # milestone_* is L3 (dev profession default) — reading data['milestones']
-    # is its legitimate job, not a coupling violation.
+def cmd_pr_synthetic_coll():
+    # pr_* is L3 (dev profession default) — reading data['milestones'] from a
+    # dev-specific handler is legit, not a coupling violation. (milestone_* moved
+    # to L2 in e-5061 step 2, so it is no longer a valid L3 example.)
     data = {}
     for m in data["milestones"]:
         pass
