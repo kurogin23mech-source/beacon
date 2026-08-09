@@ -662,23 +662,28 @@ def target_child_tables(data: dict | None = None) -> tuple:
 
 # Per-collection arm classification. Keyed by collection name (parallel to
 # TARGET_DECOMPOSITION) so the two read together. ``work_item_arm`` names the arm
-# holding planned work + how a work item is identified inside it; ``item_type``
-# is ``None`` when every item in the arm is a work item (sales activities), or an
-# entry ``type`` string when the arm is shared (dev ``entries`` hold tasks AND
-# commits → work items are ``type == "task"``). ``evidence_arms`` names where
-# proof/changelog records live (dev commits ride the SAME entries arm; sales
-# evidence is its own communications arm).
+# holding planned work + how a work item is identified inside it: ``arm`` is the
+# nested list, ``item_type`` is ``None`` when every item in the arm is a work item
+# (sales activities) or an entry ``type`` string when the arm is shared (dev
+# ``entries`` hold tasks AND commits → work items are ``type == "task"``), and
+# ``kind`` is the occupation-agnostic label for a work item of that arm
+# (dev ``task`` / sales ``activity``) — what a shared capability stamps instead of
+# re-deriving it from a collection name (ms-142 e-5010: the deadline reminder's
+# ``work_kind``). ``evidence_arms`` names where proof/changelog records live (dev
+# commits ride the SAME entries arm; sales evidence is its own communications arm).
 _ARM_ROLES = {
     "milestones": {
-        "work_item_arm": {"arm": "entries", "item_type": "task"},
+        "work_item_arm": {"arm": "entries", "item_type": "task", "kind": "task"},
         "evidence_arms": [{"arm": "entries", "item_type": "commit"}],
     },
     "opportunities": {
-        "work_item_arm": {"arm": "activities", "item_type": None},
+        "work_item_arm": {"arm": "activities", "item_type": None,
+                          "kind": "activity"},
         "evidence_arms": [{"arm": "communications", "item_type": None}],
     },
     "accounts": {
-        "work_item_arm": {"arm": "nurturings", "item_type": None},
+        "work_item_arm": {"arm": "nurturings", "item_type": None,
+                          "kind": "nurturing"},
         "evidence_arms": [{"arm": "communications", "item_type": None}],
     },
     # acquisitions carry no fat arms (inline work items, no child changelog) so
@@ -742,7 +747,7 @@ def _arm_roles_for(data: dict | None, collection: str, arms: tuple) -> dict:
             if seed["work_item_arm"] else None,
             "evidence_arms": [dict(a) for a in seed["evidence_arms"]],
         }
-    work_item_arm = {"arm": "work_items", "item_type": None} \
+    work_item_arm = {"arm": "work_items", "item_type": None, "kind": "work_item"} \
         if "work_items" in arms else None
     evidence_arms = [{"arm": "evidence", "item_type": None}] \
         if "evidence" in arms else []

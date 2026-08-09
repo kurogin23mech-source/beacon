@@ -46,6 +46,7 @@ import trek as trek_mod  # ms-69 / e-1656: trek schema + pure mutators
 import trek_scheduler as trek_scheduler_mod  # ms-83 / e-1997: progress-check cadence logic
 import tick_scheduler  # ms-107 e-3434/e-3461: target-agnostic periodic-tick cadence
 import deadline  # ms-139 e-4953: L2 締切エンジン (overdue 規則 + reminder dedup)
+import occupation  # ms-142 e-5010: 職種非依存の Target/WorkItem 抽象イテレータ
 import tick_health as tick_health_mod  # e-1391 / ms-66: tick-liveness evaluation
 
 # e-1391 (ms-66) — last successful periodic tick, recorded by the
@@ -3991,26 +3992,39 @@ def _fire_operation(pid: str, project: dict, op: dict, now_iso: str) -> dict:
 
 def _deadline_reminder_candidates(project: dict):
     """Yield ``(item, kind, label, recipient_session)`` for every work item that
-    can carry a deadline — milestones (``target_date``), their tasks
-    (``deadline``), and sales activities (``deadline``) — ms-139 e-4953.
+    can carry a deadline — Targets (a milestone's ``target_date``) and their work
+    items (dev task / sales activity ``deadline``) — ms-139 e-4953, routed through
+    the occupation-agnostic manifest (ms-142 e-5010).
 
-    ``recipient`` is the session that *claims* the item's target (its
+    Walks ``occupation.iter_target_records`` (Target level) and
+    ``occupation.iter_work_items`` (work items via the manifest's
+    ``work_item_arm``) instead of naming ``project['milestones']`` / ``entries`` /
+    ``opportunities`` / ``activities`` — so a new occupation's deadlines light up
+    with no edit here. An opportunity has no Target-level deadline field today, so
+    ``deadline.deadline_of`` returns '' and ``_fire_due_deadlines`` skips it
+    (behavior parity with the milestone-only Target yield this replaces); it would
+    light up automatically if a future Target class carries a ``target_date``.
+
+    ``recipient`` is the session that *claims* the item's Target (its
     ``occupation.session_id``): the milestone for a task, the opportunity for an
-    activity. '' when unclaimed (no live owner to DM). Reading the project's
-    concrete collections lives here in the server (app layer), not in the L2
-    ``deadline`` module, which stays collection-agnostic (per capability 台帳 L2)."""
-    for ms in (project.get("milestones", []) or []):
-        recipient = (ms.get("occupation") or {}).get("session_id", "") or ""
-        label = ms.get("title") or ms.get("label") or ms.get("id", "")
-        # milestone 自身 (deadline_of は target_date を読む)
-        yield ms, "milestone", label, recipient
-        for e in (ms.get("entries", []) or []):
-            if e.get("type") == "task":
-                yield e, "task", e.get("description") or e.get("id", ""), recipient
-    for opp in (project.get("opportunities", []) or []):
-        recipient = (opp.get("occupation") or {}).get("session_id", "") or ""
-        for a in (opp.get("activities", []) or []):
-            yield a, "activity", a.get("description") or a.get("id", ""), recipient
+    activity. '' when unclaimed (no live owner to DM). ``kind`` is the occupation-
+    agnostic label (milestone / task / activity) the reminder message stamps."""
+    # Target level — a milestone's ``target_date``. (deadline_of reads
+    # target_date; a Target class without one is skipped downstream.)
+    for target in occupation.iter_target_records(project):
+        recipient = (target.get("occupation") or {}).get("session_id", "") or ""
+        kind = work_model.target_kind(target.get("id", "")) or "target"
+        label = target.get("title") or target.get("label") or target.get("id", "")
+        yield target, kind, label, recipient
+    # Work items — dev tasks (entries type==task) and sales activities — via the
+    # manifest's work_item_arm, with the arm's occupation-agnostic kind label.
+    manifest = occupation.profession_manifest(project)
+    arm_kind = {tc["work_item_arm"]["arm"]: tc["work_item_arm"]["kind"]
+                for tc in manifest["target_classes"] if tc["work_item_arm"]}
+    for item, target, arm in occupation.iter_work_items(project):
+        recipient = (target.get("occupation") or {}).get("session_id", "") or ""
+        label = item.get("description") or item.get("id", "")
+        yield item, arm_kind.get(arm, arm), label, recipient
 
 
 def _fire_due_deadlines(pid: str, project: dict, now_iso: str, report: list) -> bool:

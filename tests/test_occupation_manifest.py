@@ -83,7 +83,7 @@ def test_dev_milestone_arm_roles():
     assert ms["kind"] == "milestone"
     assert ms["id_prefix"] == "ms-"
     assert ms["narrowing"] is True
-    assert ms["work_item_arm"] == {"arm": "entries", "item_type": "task"}
+    assert ms["work_item_arm"] == {"arm": "entries", "item_type": "task", "kind": "task"}
     assert ms["evidence_arms"] == [{"arm": "entries", "item_type": "commit"}]
     assert ms["phase_ball"] is None
 
@@ -97,7 +97,7 @@ def test_sales_opportunity_arm_roles():
     opp = _class(occ.profession_manifest(_sales()), "opportunities")
     assert opp["kind"] == "opportunity"
     assert opp["id_prefix"] == "opp-"
-    assert opp["work_item_arm"] == {"arm": "activities", "item_type": None}
+    assert opp["work_item_arm"] == {"arm": "activities", "item_type": None, "kind": "activity"}
     assert opp["evidence_arms"] == [{"arm": "communications", "item_type": None}]
     assert opp["phase_ball"] == {"phase_field": "phase",
                                  "ball_field": "who_has_the_ball"}
@@ -144,7 +144,7 @@ def test_descriptor_occupation_lights_up_arms():
     assert mat["id_prefix"] == "mat-"
     # Thick-frame default arms (work_items / evidence) classify without any edit
     # to occupation.py — declare the manifest and the arms light up.
-    assert mat["work_item_arm"] == {"arm": "work_items", "item_type": None}
+    assert mat["work_item_arm"] == {"arm": "work_items", "item_type": None, "kind": "work_item"}
     assert mat["evidence_arms"] == [{"arm": "evidence", "item_type": None}]
     assert set(mat) == CLASS_KEYS
 
