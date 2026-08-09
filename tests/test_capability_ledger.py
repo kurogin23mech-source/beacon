@@ -56,6 +56,26 @@ def test_key_skills_have_expected_scope():
     assert cl.skill_scope_of("_beacon-spec-methodology") == "L1"
 
 
+def test_review_split_dev_instruments_vs_neutral_plumbing():
+    # ms-134 e-5061 review 分割: the review VERB + the beacon-review* workflow/
+    # attainment skills are profession-neutral (L2); the code-review instrument
+    # skills (ax/philosophy/maintainability) review CODE = a dev artifact (L3-dev).
+    assert cl.scope_of("review_context") == "L2"       # the verb stays plumbing
+    assert cl.skill_scope_of("beacon-review") == "L2"  # entry + attainment plumbing
+    assert cl.skill_scope_of("beacon-review-run") == "L2"
+    for instrument in ("ax-review", "philosophy-review", "maintainability-review"):
+        assert cl.skill_scope_of(instrument) == "L3", instrument
+        assert cl.skill_owner_of(instrument) == "dev", instrument
+
+
+def test_dir_form_skills_are_enumerated():
+    # The review instruments are dir-form skills (skills/<name>/SKILL.md), not
+    # top-level *.md; enumerate_skills must still see them so they are classified.
+    skills = cl.enumerate_skills()
+    for instrument in ("ax-review", "philosophy-review", "maintainability-review"):
+        assert instrument in skills, instrument
+
+
 def test_ledger_uses_shared_surface_source():
     """The ledger reconciles against the SAME live surface the verb ledger and
     map-drift lint use, so the three can never drift apart."""
@@ -69,13 +89,26 @@ def test_key_capabilities_have_expected_scope():
     assert cl.scope_of("doc_update") == "L2"
     assert cl.scope_of("claim_view") == "L2"
     assert cl.scope_of("status") == "L2"
-    # profession-specific defaults must be L3 (NOT shared) so their legitimate
-    # use of the dev concrete is not flagged.
+    # ms-134 e-5061 step 2: class-derived CRUD promoted L3→L2 (a milestone IS a
+    # Target, a task IS a WorkItem, a commit/log IS Evidence — the operation rule
+    # is profession-common). Their still-concrete reads/records are tracked as
+    # expected-red debt (KNOWN_COLLECTION_COUPLING / KNOWN_SYMBOL_REACH, owner=ms-143)
+    # until ms-143 PR #2 abstracts them.
     for v in ("milestone_add", "task_add", "log_finalize", "save", "sync",
-              "pr_add", "account_add", "opportunity_add"):
+              "opportunity_add", "opportunity_activity", "communication_add",
+              "acquisition_list", "retro_prepare"):
+        assert cl.scope_of(v) == "L2", v
+    # genuinely dev/sales-specific defaults stay L3 (a PR / a customer account are
+    # not Target-class instances), so their use of the profession concrete is legit.
+    for v in ("pr_add", "account_add", "deploy", "push", "contact_add"):
         assert cl.scope_of(v) == "L3", v
     assert cl.scope_of("bus_ack") == "L1"
-    assert cl.scope_of("doctor") == "L0"
+    # ms-134 e-5061: doctor/update/project/skill/migrate/reset promoted L0→L1
+    # (instance-universal tooling, not Beacon-repo-only operation). No verb is L0
+    # anymore; the L0 scope is carried by skills (beacon-drift-check) instead.
+    assert cl.scope_of("doctor") == "L1"
+    assert cl.scope_of("update") == "L1"
+    assert cl.scope_of("project_export") == "L1"
 
 
 def test_scope_values_are_valid():
@@ -115,14 +148,18 @@ def test_owner_required_only_for_l3_l4():
 
 def test_owner_of_dispatches_by_scope():
     # L3 dev / sales resolve to their profession; shared scopes have no owner.
-    assert cl.owner_of("milestone_add") == "dev"
-    assert cl.owner_of("task_done") == "dev"
-    assert cl.owner_of("opportunity_add") == "sales"
+    assert cl.owner_of("pr_add") == "dev"
+    assert cl.owner_of("deploy") == "dev"
     assert cl.owner_of("account_add") == "sales"
-    # shared (L1/L2/L0) capabilities have NO single owner — a correct empty.
+    assert cl.owner_of("contact_add") == "sales"
+    # shared (L1/L2) capabilities have NO single owner — a correct empty. The
+    # class-derived CRUD promoted L3→L2 in e-5061 step 2 are now unowned (correct):
+    assert cl.owner_of("milestone_add") == ""  # L2 (was dev L3, e-5061)
+    assert cl.owner_of("task_done") == ""       # L2 (was dev L3)
+    assert cl.owner_of("opportunity_add") == ""  # L2 (was sales L3)
     assert cl.owner_of("doc_add") == ""      # L2
     assert cl.owner_of("bus_ack") == ""      # L1
-    assert cl.owner_of("doctor") == ""       # L0
+    assert cl.owner_of("doctor") == ""       # L1 (was L0, e-5061; still unowned)
 
 
 def test_owner_values_are_valid_professions():
@@ -205,15 +242,20 @@ def test_reclassification_2026_08_03_is_pinned():
 def test_ownership_is_orthogonal_to_scope_and_origin():
     # ownership (who) is a third axis, distinct from scope (how widely shared)
     # and origin (who authored). A capability can be L3+dev+beacon-default.
-    assert cl.scope_of("milestone_add") == "L3"
-    assert cl.owner_of("milestone_add") == "dev"
-    assert cl.origin_of("milestone_add") == "beacon-default"
+    # (pr_add stays L3-dev; milestone_add moved to L2 in e-5061 step 2.)
+    assert cl.scope_of("pr_add") == "L3"
+    assert cl.owner_of("pr_add") == "dev"
+    assert cl.origin_of("pr_add") == "beacon-default"
 
 
 # --- invariant gate (e-4720/e-4721): real tree must be clean ---------------
 
 def test_no_profession_shared_capability_reaches_a_concrete():
-    viol = chk.find_invariant_violations()
+    # Only a NEW (non-allowlisted) symbol reach fails: an accepted-pending reach
+    # (KNOWN_SYMBOL_REACH, ms-143-owned class-derived recorder) is debt, not a
+    # failure — symmetric to the collection ratchet (ms-134 e-5061).
+    viol = [v for v in chk.find_invariant_violations()
+            if v["status"] == "new_violation"]
     assert viol == [], (
         "profession-shared (L1/L2) capabilities reaching a profession concrete: "
         + "; ".join(f"{v['verb']}[{v['scope']}]→{v['symbol']}"
@@ -248,8 +290,9 @@ def cmd_doc_synthetic2():
 
 _SYNTH_ALLOWED = '''
 import core
-def cmd_task_synthetic():
-    # task_* is L3 (profession-specific dev) — using the dev concrete is legit.
+def cmd_pr_synthetic():
+    # pr_* is L3 (profession-specific dev) — using the dev concrete is legit.
+    # (task_* moved to L2 in e-5061 step 2, so it is no longer a valid L3 example.)
     data = {}
     core.save_entry(data, ms_id="", description="x", source="auto", date="")
 '''
@@ -370,6 +413,61 @@ def test_debt_and_legitimate_are_disjoint():
     assert overlap == set(), f"a read is both debt and legitimate: {overlap}"
 
 
+# --- symbol-reach ratchet (ms-134 e-5061), symmetric to the collection ratchet -
+
+def test_no_l0_verb_in_shipped_distribution(monkeypatch):
+    # Distribution exclusion (ms-134 e-5062): no L0 verb may be dispatchable in the
+    # shipped CLI surface. Empty by construction after e-5061 (no verb is L0).
+    assert cl.shipped_l0_verbs() == [], cl.shipped_l0_verbs()
+    assert chk.run()["l0_distribution_leak"] == []
+    # Mechanism: if a live verb were (mis)classified L0, the guard flags it. doctor
+    # is a real live verb — pin it L0 and it must surface, then the gate goes red.
+    monkeypatch.setitem(cl._NOUN_SCOPE, "doctor", "L0")
+    assert "doctor" in cl.shipped_l0_verbs()
+    assert chk.run()["ok"] is False
+
+
+def test_no_new_symbol_reach_on_real_tree():
+    """The symbol ratchet gate: a NEW (non-allowlisted) shared capability calling
+    a profession recorder/resolver symbol fails CI. An allowlisted (KNOWN_SYMBOL_
+    REACH, ms-143-owned) reach is accepted debt. Mirrors the collection gate."""
+    result = chk.run()
+    new = result["new_symbol_reach"]
+    assert new == [], (
+        "NEW profession symbol reach — route it through "
+        "occupation.record_target_entry (never add a KNOWN_SYMBOL_REACH entry to "
+        "silence a fresh violation): "
+        + "; ".join(f"{v['verb']}[{v['scope']}]→{v['symbol']}"
+                    f"{' via '+v['via'] if v['via'] else ''}" for v in new))
+
+
+def test_symbol_reach_allowlist_makes_a_reach_pending(tmp_path, monkeypatch):
+    # The mechanism: a (verb, symbol) in KNOWN_SYMBOL_REACH is classified
+    # pending_debt (not new_violation) so it no longer fails the gate. Proven on a
+    # synthetic tree with a monkeypatched allowlist so the assertion is deterministic
+    # regardless of the real allowlist's ms-143 remainder.
+    path = _write(tmp_path, "commands.py", _SYNTH_DIRECT)
+    before = chk.find_invariant_violations(path)
+    assert before[0]["status"] == "new_violation"  # doc_synthetic not allowlisted
+    monkeypatch.setattr(cl, "KNOWN_SYMBOL_REACH",
+                        {("doc_synthetic", "core.save_entry")})
+    after = chk.find_invariant_violations(path)
+    assert len(after) == 1 and after[0]["status"] == "pending_debt", after
+
+
+def test_no_stale_symbol_reach_allowlist_entries():
+    """Ratchet hygiene (symmetric to test_no_stale_collection_allowlist_entries):
+    every (verb, symbol) in KNOWN_SYMBOL_REACH must still be detected on the real
+    tree, so a row cannot rot into a lie after its handler is abstracted. Now that
+    step 2 has registered the ms-143 remainder, this enforces that each entry
+    still reaches a concrete until ms-143 PR #2 abstracts it and deletes the row."""
+    detected = {(v["verb"], v["symbol"]) for v in chk.find_invariant_violations()}
+    stale = sorted(cl.KNOWN_SYMBOL_REACH - detected)
+    assert not stale, (
+        "pending symbol-reach entries no longer detected (delete them — the "
+        "handler was abstracted): " + ", ".join(f"{v}→{s}" for v, s in stale))
+
+
 def test_reviewed_correct_reads_are_classified_correctly():
     # The human-reviewed correct reads (e-4737) report as "reviewed_correct",
     # not debt — so they are not nagged for remediation.
@@ -423,9 +521,10 @@ def cmd_status_synthetic_coll():
 '''
 
 _SYNTH_COLLECTION_L3_OK = '''
-def cmd_milestone_synthetic_coll():
-    # milestone_* is L3 (dev profession default) — reading data['milestones']
-    # is its legitimate job, not a coupling violation.
+def cmd_pr_synthetic_coll():
+    # pr_* is L3 (dev profession default) — reading data['milestones'] from a
+    # dev-specific handler is legit, not a coupling violation. (milestone_* moved
+    # to L2 in e-5061 step 2, so it is no longer a valid L3 example.)
     data = {}
     for m in data["milestones"]:
         pass

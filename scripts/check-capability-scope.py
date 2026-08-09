@@ -14,13 +14,24 @@ description into an ENFORCED norm. Three checks:
      concrete — ``core.save_entry`` / ``core.find_target_milestone`` (the dev
      milestone recorder/resolver). Shared capabilities record through the
      abstraction ``occupation.record_target_entry`` instead. This is the boundary
-     e-4720 closed for ``doc``; the checker stops it from re-opening.
+     e-4720 closed for ``doc``; the checker stops it from re-opening. Like (3),
+     an accepted-pending reach (a class-derived verb promoted L2 whose recorder
+     is not yet abstracted) is an allowlisted ratchet (KNOWN_SYMBOL_REACH,
+     reported as pending debt, owner MS named inline); a NEW one fails (ms-134
+     e-5061).
 
   3. Dependency invariant — collection coupling (e-4740): a profession-SHARED
      capability must NOT read a profession-specific project-data collection
      directly (``data["milestones"]`` etc.) — the same leak as (2) but expressed
      as a raw dict read the symbol check cannot see. Existing couplings are an
      allowlisted ratchet (reported as pending debt); a NEW one fails the checker.
+
+  4. Distribution exclusion (e-5062): no L0 (Beacon-product-operation, 非配布) verb
+     may appear in the shipped dispatch surface (``enumerate_live_verbs`` = the
+     wheel-packaged commands.py/dispatch.py dispatch). Since source dispatch ==
+     shipped dispatch, this is verb-granular and needs no built wheel. Empty today
+     (no verb is L0 after e-5061); a guard against a future L0 verb being wired into
+     public dispatch. (Skill-side distribution exclusion is a deferred follow-up.)
 
 The invariant scan uses the AST (not text/grep) so a mention of the forbidden
 symbol inside a comment or docstring is NOT a false hit — only a real call is.
@@ -261,6 +272,14 @@ def find_invariant_violations(commands_path: str = "") -> list:
             # Attribute the call to the profession-shared handler(s) governing it
             # (searched across all trees so a cross-module handler is not missed).
             for verb, scope, via in _governing_shared_verbs(trees, funcs, node.lineno):
+                # status mirrors find_collection_coupling: an accepted-pending
+                # symbol reach (ms-143-owned class-derived recorder not yet routed
+                # through the abstraction) is "pending_debt" (allowlisted ratchet),
+                # anything else is a fresh "new_violation" that fails CI. There is
+                # no reviewed_correct for symbols (see KNOWN_SYMBOL_REACH docstring).
+                status = ("pending_debt"
+                          if cl.is_known_symbol_reach(verb, dotted)
+                          else "new_violation")
                 violations.append({
                     "verb": verb,
                     "scope": scope,
@@ -269,6 +288,7 @@ def find_invariant_violations(commands_path: str = "") -> list:
                     "via": via,
                     "file": rel,
                     "lineno": node.lineno,
+                    "status": status,
                 })
     # de-duplicate (a helper called by several shared handlers can repeat).
     seen, unique = set(), []
@@ -354,23 +374,34 @@ def run(commands_path: str = "") -> dict:
     skill_cov = cl.reconcile_skills()
     ownership = cl.reconcile_ownership()
     skill_ownership = cl.reconcile_skills_ownership()
+    # viol is the FULL inventory (both statuses); split like the collection reads
+    # so a NEW symbol reach fails CI while an allowlisted (ms-143-owned) one is
+    # reported as pending debt (ms-134 e-5061 symbol ratchet).
     viol = find_invariant_violations(commands_path)
+    new_viol = [v for v in viol if v["status"] == "new_violation"]
+    pending_viol = [v for v in viol if v["status"] == "pending_debt"]
     # all_collection_reads is the FULL inventory (all three statuses), named so a
     # caller does not mistake it for a problems-only list (AX review 2026-08-03).
     all_reads = find_collection_coupling(commands_path)
     new_coupling = [c for c in all_reads if c["status"] == "new_violation"]
     pending_coupling = [c for c in all_reads if c["status"] == "pending_debt"]
     reviewed_reads = [c for c in all_reads if c["status"] == "reviewed_correct"]
+    # Distribution exclusion (ms-134 e-5062): no L0 (product-operation) verb may
+    # appear in the shipped dispatch surface. Empty today (no verb is L0); a guard.
+    l0_leak = cl.shipped_l0_verbs()
     ok = (not cov["unclassified"] and not skill_cov["unclassified"]
           and not ownership["unowned"] and not skill_ownership["unowned"]
-          and not viol and not new_coupling)
+          and not new_viol and not new_coupling and not l0_leak)
     return {"ok": ok, "coverage": cov, "skill_coverage": skill_cov,
             "ownership": ownership, "skill_ownership": skill_ownership,
             "violations": viol,
+            "new_symbol_reach": new_viol,
+            "pending_symbol_reach": pending_viol,
             "all_collection_reads": all_reads,
             "new_collection_coupling": new_coupling,
             "pending_collection_coupling": pending_coupling,
-            "reviewed_correct_reads": reviewed_reads}
+            "reviewed_correct_reads": reviewed_reads,
+            "l0_distribution_leak": l0_leak}
 
 
 def render_proposal(prop: dict) -> None:
@@ -439,6 +470,14 @@ def main() -> int:
     own = result["ownership"]
     sown = result["skill_ownership"]
     print(f"  ownership: verbs {own['by_owner']} / skills {sown['by_owner']}")
+    if result["l0_distribution_leak"]:
+        print(f"  DISTRIBUTION EXCLUSION VIOLATION ({len(result['l0_distribution_leak'])}) "
+              f"— L0 (non-distributed, product-operation) verbs are in the shipped "
+              f"dispatch surface (ms-134 e-5062):")
+        for v in result["l0_distribution_leak"]:
+            print(f"    - {v} [L0] is dispatchable in the public CLI")
+        print("    → an L0 capability must not ship: reclassify it (universal "
+              "tooling → L1) or move it out of the wheel-packaged dispatch.")
     if cov["unclassified"]:
         print(f"  UNCLASSIFIED VERBS ({len(cov['unclassified'])}): "
               f"{', '.join(cov['unclassified'])}")
@@ -461,13 +500,22 @@ def main() -> int:
               "add its exact name to _SKILL_OWNER. If it introduces a NEW "
               "profession prefix (e.g. beacon-backoffice-*): add a tuple to "
               "_SKILL_OWNER_PREFIX so all future skills under it resolve too.")
-    if result["violations"]:
-        print(f"  INVARIANT VIOLATIONS ({len(result['violations'])}):")
-        for v in result["violations"]:
+    new_viol = result["new_symbol_reach"]
+    pending_viol = result["pending_symbol_reach"]
+    if new_viol:
+        print(f"  INVARIANT VIOLATIONS ({len(new_viol)}):")
+        for v in new_viol:
             via = f" (via {v['via']})" if v["via"] else ""
             print(f"    - {v['verb']} [{v['scope']}] calls {v['symbol']}"
                   f"{via} @ {v['file']}:{v['lineno']}")
             print(f"      → {v['advice']}")
+    if pending_viol:
+        # Accepted debt: enumerated + visible, but not a failure (symbol ratchet).
+        pend_sym = sorted({(v["verb"], v["symbol"]) for v in pending_viol})
+        print(f"  pending symbol-reach debt ({len(pend_sym)}, allowlisted — "
+              f"remediate then drop from KNOWN_SYMBOL_REACH):")
+        for verb, sym in pend_sym:
+            print(f"    · {verb} calls {sym}")
     new_coupling = result["new_collection_coupling"]
     pending_coupling = result["pending_collection_coupling"]
     if new_coupling:
