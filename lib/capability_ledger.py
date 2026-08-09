@@ -539,6 +539,7 @@ _SKILL_PREFIX_SCOPE = (
 _SKILL_SCOPE = {
     "beacon-archaeology": "L2", "beacon-bus-armed": "L1", "beacon-cloud": "L1",
     "beacon-deploy": "L3", "beacon-dispatch": "L1", "beacon-drift-check": "L0",
+    "beacon-scenario-gen": "L0",  # ms-136: 自動デバッグ基盤の生成器 (dev/QA tooling)
     "beacon-incident-report": "L1", "beacon-init": "L1", "beacon-log": "L3",
     "beacon-map": "L2", "beacon-member": "L1", "beacon-note": "L1",
     "beacon-onboard": "L1", "beacon-pr-create": "L3", "beacon-push": "L3",
