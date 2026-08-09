@@ -876,8 +876,9 @@ def cmd_bus_send():
         _, _sender_email_resolved, _ = _resolve_creator_identity()
     except Exception:
         _sender_email_resolved = ""
-    import dm_consent as _dm_consent
-    _xuser_note = _dm_consent.cross_user_send_advisory(
+    import dm_consent  # inline import matches the existing dm_consent /
+    # dm_qualgate lazy-import pattern in this module (circular-import safe).
+    _xuser_note = dm_consent.cross_user_send_advisory(
         sender_email=_sender_email_resolved,
         recipient_email=_recipient_email,
         channel=channel,

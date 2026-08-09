@@ -95,6 +95,12 @@ CONSENT_REQUIRED_CROSS_USER = "cross_user_new_send"
 # Discrimination: does this send need a human recipient-confirmation?
 # ---------------------------------------------------------------------------
 
+# NOTE (ms-141 / e-4968): ``cross_user_send_advisory`` (below) is a caller that
+# pins ``operation_envelope=False`` and ``shared_trek=False`` because the client
+# pre-flight cannot cheaply resolve those. If a new carve-out parameter is added
+# here, review that caller so its advisory does not silently diverge from this
+# rule (it is non-blocking, so drift only mis-shows a hint — but keep them in
+# sync).
 def classify_send_consent(
     *,
     sender_user_id: str,
@@ -244,10 +250,13 @@ def cross_user_send_advisory(
     )
     if not required:
         return None
+    # AX (PR #621): conditional tone + state that the send still proceeds, so a
+    # reader does not mistake this non-blocking advisory for a block/abort.
     return (
-        "Note: 宛先が別ユーザーの新規 DM に見えます。/beacon-dm-send を使うと"
-        " 宛先を人間が確認し recipient_confirmed claim を発行します"
-        " (このまま直叩きするとサーバが 403 sender_consent_required で拒否します)。"
+        "Note: 宛先が別ユーザーの新規 DM に見えます。正しい宛先なら問題ありません。"
+        " /beacon-dm-send を使うと宛先を人間が確認し recipient_confirmed claim を"
+        " 発行します (この経路を通らない cross-user 新規 DM は server 側の 403"
+        " backstop に当たることがあります)。この送信は続行します。"
     )
 
 
