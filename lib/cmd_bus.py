@@ -861,6 +861,33 @@ def cmd_bus_send():
             )
             return
 
+    # ms-141 / e-4968: client-side cross-user pre-flight (NON-blocking advisory).
+    #
+    # When a raw `beacon bus send` looks like a new DM to a different user with
+    # no recipient confirmation, the server backstop (e-3443) will 403. Surface
+    # that locally BEFORE the round-trip so the caller routes through
+    # /beacon-dm-send (which confirms the recipient), WITHOUT adding a gate — the
+    # send still proceeds and the server stays the authority. Uses identity we
+    # already resolve (sender email from creds, recipient email from the live
+    # check) — no extra lookup. `_sender_email_resolved` is reused by the
+    # qual-gate block below to avoid resolving twice.
+    _sender_email_resolved = ""
+    try:
+        _, _sender_email_resolved, _ = _resolve_creator_identity()
+    except Exception:
+        _sender_email_resolved = ""
+    import dm_consent as _dm_consent
+    _xuser_note = _dm_consent.cross_user_send_advisory(
+        sender_email=_sender_email_resolved,
+        recipient_email=_recipient_email,
+        channel=channel,
+        is_reply=bool(in_reply_to),
+        recipient_confirmed=(
+            os.environ.get("BEACON_BUS_RECIPIENT_CONFIRMED", "") == "1"),
+    )
+    if _xuser_note:
+        _advise(_xuser_note)
+
     # e-1290: envelope-by-default for CLI sends.
     #
     # Tier selection rule: `beacon bus send` is invoked by a human typing a
@@ -1048,10 +1075,9 @@ def cmd_bus_send():
         # cross-project DM is not over-blocked as 外部宛. Sender email comes from
         # the login credentials; recipient email from the live check above (both
         # reuse identity we already resolve — no extra network call).
-        try:
-            _, _sender_email, _ = _resolve_creator_identity()
-        except Exception:
-            _sender_email = ""
+        # ms-141: reuse the sender email resolved for the cross-user pre-flight
+        # above (avoid a second identity resolution).
+        _sender_email = _sender_email_resolved
         _cat = dm_qualgate.classify_outbound_reply(
             channel=channel,
             sender_project_id=_sender_proj,

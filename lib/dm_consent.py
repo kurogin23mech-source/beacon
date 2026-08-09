@@ -207,6 +207,50 @@ def classify_send_consent(
     return (True, CONSENT_REQUIRED_CROSS_USER)
 
 
+def cross_user_send_advisory(
+    *,
+    sender_email: str,
+    recipient_email: str,
+    channel: str = "dm",
+    is_reply: bool = False,
+    recipient_confirmed: bool = False,
+) -> Optional[str]:
+    """ms-141 / e-4968: client-side, NON-blocking pre-flight advisory.
+
+    Return a heads-up string when a send LOOKS like a new cross-user DM with no
+    recipient confirmation — the case the server backstop (e-3443) will reject
+    with 403 ``sender_consent_required``. The point is to steer a raw
+    ``beacon bus send`` toward ``/beacon-dm-send`` (which confirms the recipient
+    and mints the claim) BEFORE the round-trip, without adding any gate: the
+    server stays the authority and the send still proceeds.
+
+    Uses the already-resolved sender / recipient **emails** as the identity
+    proxy (no extra lookup) and reuses :func:`classify_send_consent` so this
+    advisory can never diverge from the actual server rule. ``None`` = no
+    advisory (proceed silently). Conservative on the carve-outs it cannot cheaply
+    prove client-side (operation / shared-Trek → treated as not-applicable),
+    which at worst shows one extra non-blocking hint — never suppresses a real
+    one and never blocks a send.
+    """
+    if recipient_confirmed:
+        return None
+    required, _reason = classify_send_consent(
+        sender_user_id=sender_email or "",
+        recipient_user_id=recipient_email or "",
+        channel=channel,
+        is_reply=is_reply,
+        operation_envelope=False,
+        shared_trek=False,
+    )
+    if not required:
+        return None
+    return (
+        "Note: 宛先が別ユーザーの新規 DM に見えます。/beacon-dm-send を使うと"
+        " 宛先を人間が確認し recipient_confirmed claim を発行します"
+        " (このまま直叩きするとサーバが 403 sender_consent_required で拒否します)。"
+    )
+
+
 # ---------------------------------------------------------------------------
 # The recipient_confirmed consent claim (independent of actions_authorized)
 # ---------------------------------------------------------------------------
