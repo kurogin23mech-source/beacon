@@ -25,6 +25,7 @@ cmd_task_add() {
     local motivation=""
     local acceptance_criteria=""
     local allow_untriaged=""
+    local deadline=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -36,7 +37,8 @@ cmd_task_add() {
             --untriaged)                allow_untriaged="1";           shift   ;;
             --motivation|--why)         motivation="${2:-}";           shift 2 ;;
             --acceptance-criteria|--ac) acceptance_criteria="${2:-}";  shift 2 ;;
-            -?*)                        _guard_positional "$1" "Usage: beacon task add \"<description>\" [-m <ms-id>] [-t <type>] [-d <detail>] --priority P [--untriaged] [--motivation W] [--ac A]" ;;
+            --deadline|--due)           deadline="${2:-}";             shift 2 ;;
+            -?*)                        _guard_positional "$1" "Usage: beacon task add \"<description>\" [-m <ms-id>] [-t <type>] [-d <detail>] --priority P [--untriaged] [--motivation W] [--ac A] [--deadline YYYY-MM-DD]" ;;
             *)                          description="$1";              shift   ;;
         esac
     done
@@ -50,6 +52,7 @@ cmd_task_add() {
         BEACON_PRIORITY="$priority" BEACON_MOTIVATION="$motivation" \
         BEACON_ALLOW_UNTRIAGED="$allow_untriaged" \
         BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
+        BEACON_DEADLINE="$deadline" \
         python3 "$COMMANDS_PY" task_add
 }
 
@@ -85,6 +88,7 @@ cmd_task_update() {
     local acceptance_criteria=""
     local behavior=""
     local priority=""
+    local deadline=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -97,6 +101,7 @@ cmd_task_update() {
             --acceptance-criteria|--ac) acceptance_criteria="${2:-}"; shift 2 ;;
             --behavior)                 behavior="${2:-}"; shift 2 ;;
             --priority|-p)              priority="${2:-}"; shift 2 ;;
+            --deadline|--due)           deadline="${2:-}"; shift 2 ;;
             -?*)           _guard_flag "$1" ;;
             *)                          entry_id="$1"; shift ;;
         esac
@@ -106,7 +111,7 @@ cmd_task_update() {
         echo "Usage: beacon task update <entry-id> [--description D] [--status S] [--detail D] [--ms MS-ID]"
         echo "                                     [--motivation TEXT] [--acceptance-criteria TEXT]"
         echo "                                     [--behavior TEXT] [--priority highest|high|medium|low|lowest]"
-        echo "                                     [--json]"
+        echo "                                     [--deadline YYYY-MM-DD] [--json]"
         exit 1
     fi
     BEACON_ENTRY_ID="$entry_id" BEACON_JSON="$json_flag" \
@@ -116,6 +121,7 @@ cmd_task_update() {
         BEACON_ACCEPTANCE_CRITERIA="$acceptance_criteria" \
         BEACON_BEHAVIOR="$behavior" \
         BEACON_PRIORITY="$priority" \
+        BEACON_DEADLINE="$deadline" \
         python3 "$COMMANDS_PY" task_update
 }
 

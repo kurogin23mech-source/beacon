@@ -1232,7 +1232,7 @@ def task_add(data: dict, ms_id: str, description: str, *,
              entry_type: str = "task", date: str = "",
              detail: str = "", requested_by: str = "",
              priority: str = "", motivation: str = "",
-             acceptance_criteria: str = "",
+             acceptance_criteria: str = "", deadline: str = "",
              author: dict | None = None,
              allow_untriaged: bool = False) -> str:
     """Add an entry to a milestone. Returns the new entry id.
@@ -1287,6 +1287,12 @@ def task_add(data: dict, ms_id: str, description: str, *,
         entry["motivation"] = motivation
     if acceptance_criteria:
         entry["acceptance_criteria"] = acceptance_criteria
+    # ms-139 e-4949: 締切 (deadline, YYYY-MM-DD) は top-level フィールド。milestone の
+    # target_date と同様、L2 締切エンジン (lib/deadline.py の deadline_of) が canonical
+    # ``deadline`` として読む。フィールド名は職種ごとに残す (task/activity=deadline、
+    # milestone=target_date)。任意なので値がある時だけ持たせる。
+    if deadline:
+        entry["deadline"] = deadline
     entries.append(entry)
     return eid
 
@@ -1323,7 +1329,7 @@ def task_update(data: dict, entry_id: str, *,
                 description: str = "", status: str = "",
                 detail: str = "", date: str = "",
                 motivation: str = "", acceptance_criteria: str = "",
-                behavior: str = "", priority: str = "",
+                behavior: str = "", priority: str = "", deadline: str = "",
                 author: dict | None = None) -> tuple[dict, dict]:
     """Update entry fields. Returns (milestone, entry).
 
@@ -1365,6 +1371,11 @@ def task_update(data: dict, entry_id: str, *,
         changed = True
     if behavior:
         entry["behavior"] = behavior
+        changed = True
+    if deadline:
+        # ms-139 e-4949: 締切の後追い設定/変更。空文字は「変更なし」(他フィールドと
+        # 同じ規約)。L2 締切エンジンが canonical ``deadline`` として読む。
+        entry["deadline"] = deadline
         changed = True
     if priority:
         # ms-126 (e-4224 + AX round-2): a provided priority always routes through
@@ -2947,7 +2958,9 @@ def entries_to_json(entries: list) -> list:
             item["meta"] = e.get("meta", {})
         if e.get("detail"):
             item["detail"] = e["detail"]
-        for field in ("motivation", "acceptance_criteria", "behavior"):
+        # ms-139 e-4949: deadline を JSON に出す (task list --json / session-start /
+        # cockpit の締切超過 surface が読む top-level フィールド)。
+        for field in ("motivation", "acceptance_criteria", "behavior", "deadline"):
             if e.get(field):
                 item[field] = e[field]
         children = e.get("entries", [])

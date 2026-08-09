@@ -784,6 +784,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_task_add.add_argument(
         "--acceptance-criteria", "--ac", dest="acceptance_criteria", default=None
     )
+    # ms-139 e-4949: task の締切 (YYYY-MM-DD)。--due は別名。
+    p_task_add.add_argument("--deadline", "--due", dest="deadline", default=None)
 
     p_task_done = task_sub.add_parser("done", add_help=False)
     p_task_done.add_argument("entry_id", nargs="?", default="")
@@ -820,6 +822,8 @@ def build_parser() -> argparse.ArgumentParser:
     # e-4223: 省略時は default="" で「変更なし」。値を渡すなら 5 択で validate。
     p_task_update.add_argument("--priority", "-p", default="",
                                choices=_PRIORITY_CHOICES)
+    # ms-139 e-4949: 締切の後追い設定/変更 (YYYY-MM-DD)。空 = 変更なし。
+    p_task_update.add_argument("--deadline", "--due", dest="deadline", default="")
 
     p_task_cancel = task_sub.add_parser("cancel", add_help=False)
     p_task_cancel.add_argument("entry_id", nargs="?", default="")
@@ -2928,6 +2932,8 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
             env["BEACON_MOTIVATION"] = args.motivation
         if args.acceptance_criteria is not None:
             env["BEACON_ACCEPTANCE_CRITERIA"] = args.acceptance_criteria
+        if args.deadline is not None:  # ms-139 e-4949
+            env["BEACON_DEADLINE"] = args.deadline
         return _run_commands_py(root, "task_add", env)
 
     if cmd == "done":
@@ -2994,6 +3000,7 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
             "BEACON_ACCEPTANCE_CRITERIA": args.acceptance_criteria or "",
             "BEACON_BEHAVIOR": args.behavior or "",
             "BEACON_PRIORITY": args.priority or "",
+            "BEACON_DEADLINE": args.deadline or "",  # ms-139 e-4949
         }
         return _run_commands_py(root, "task_update", env)
 
