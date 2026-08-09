@@ -9792,6 +9792,7 @@ def cmd_watch_list():
 def cmd_scenario_run():
     import scenario_store
     import scenario_runner
+    import scenario_bisect
     path = os.environ.get("BEACON_SCENARIO_PATH", "")
     as_json = os.environ.get("BEACON_JSON", "") == "1"
     if not path:
@@ -9804,8 +9805,15 @@ def cmd_scenario_run():
     except (scenario_store.ScenarioError, FileNotFoundError, OSError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(2)
+    # On failure, auto-append the dataflow-layer bisect (e-4700): turn the
+    # failure into a one-shot layer localization instead of a手探り.
+    diag = (scenario_bisect.diagnose_failure(scenario, report)
+            if not report["passed"] else None)
     if as_json:
-        print(json.dumps(report, ensure_ascii=False))
+        out = dict(report)
+        if diag:
+            out["diagnosis"] = diag
+        print(json.dumps(out, ensure_ascii=False))
     else:
         mark = "PASS" if report["passed"] else "FAIL"
         print(f"[{mark}] {report['name']} ({report['spec_ref']}) — "
@@ -9817,6 +9825,10 @@ def cmd_scenario_run():
                 print(f"    spec_source: {f['spec_source']}")
             if f.get("observation_basis"):
                 print(f"    observation_basis: {f['observation_basis']}")
+        if diag and diag.get("diagnosable"):
+            print(f"  → 障害層 bisect (e-4700): {diag['summary']}")
+            if diag.get("why"):
+                print(f"    根拠: {diag['why']}")
     # exit nonzero on a failed journey so CI (e-4702) can gate on it.
     sys.exit(0 if report["passed"] else 1)
 
