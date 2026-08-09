@@ -75,7 +75,12 @@ def test_key_capabilities_have_expected_scope():
               "pr_add", "account_add", "opportunity_add"):
         assert cl.scope_of(v) == "L3", v
     assert cl.scope_of("bus_ack") == "L1"
-    assert cl.scope_of("doctor") == "L0"
+    # ms-134 e-5061: doctor/update/project/skill/migrate/reset promoted L0→L1
+    # (instance-universal tooling, not Beacon-repo-only operation). No verb is L0
+    # anymore; the L0 scope is carried by skills (beacon-drift-check) instead.
+    assert cl.scope_of("doctor") == "L1"
+    assert cl.scope_of("update") == "L1"
+    assert cl.scope_of("project_export") == "L1"
 
 
 def test_scope_values_are_valid():
@@ -119,10 +124,10 @@ def test_owner_of_dispatches_by_scope():
     assert cl.owner_of("task_done") == "dev"
     assert cl.owner_of("opportunity_add") == "sales"
     assert cl.owner_of("account_add") == "sales"
-    # shared (L1/L2/L0) capabilities have NO single owner — a correct empty.
+    # shared (L1/L2) capabilities have NO single owner — a correct empty.
     assert cl.owner_of("doc_add") == ""      # L2
     assert cl.owner_of("bus_ack") == ""      # L1
-    assert cl.owner_of("doctor") == ""       # L0
+    assert cl.owner_of("doctor") == ""       # L1 (was L0, e-5061; still unowned)
 
 
 def test_owner_values_are_valid_professions():

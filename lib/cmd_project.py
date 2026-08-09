@@ -421,7 +421,15 @@ def cmd_project_export():
     # Build manifest (entry_counts gives a quick integrity hash without
     # parsing the whole project).
     project_data = snapshot["project"]
-    ms_list = project_data.get("milestones", []) or []
+    # Count Targets through the occupation abstraction, not data['milestones']
+    # directly (ms-134 e-5061): project export is L1 (instance-universal), so its
+    # integrity count must cover a sales project's Opportunities too, not only dev
+    # Milestones. iter_target_records returns every Target record across
+    # occupations verbatim (with nested entries). The "milestones" entry_counts
+    # key name is kept for backup-schema back-compat (schema_version unchanged);
+    # it now counts all Targets regardless of occupation.
+    import occupation
+    target_records = occupation.iter_target_records(project_data)
     op_list = project_data.get("operations", []) or []
 
     def _count_entries(ms):
@@ -433,9 +441,9 @@ def cmd_project_export():
         return total
 
     entry_counts = {
-        "milestones": len(ms_list),
+        "milestones": len(target_records),
         "operations": len(op_list),
-        "top_level_entries": sum(_count_entries(ms) for ms in ms_list),
+        "top_level_entries": sum(_count_entries(t) for t in target_records),
         "documents": len(snapshot["documents"]),
         "changelog_lines": snapshot["changelog_lines"],
         "retro_files": len(snapshot["retros"]),
@@ -508,7 +516,10 @@ def cmd_project_export():
     else:
         print(f"Exported [{manifest['project_name']}] -> {output}")
         print(f"  size: {size_bytes} bytes ({len(written_paths)} files)")
-        print(f"  milestones: {entry_counts['milestones']}, "
+        # Reference the Target count via the local (not entry_counts['milestones'])
+        # so the capability-scope checker does not read this local-dict subscript
+        # as a data['milestones'] reach — project export is L1 now (ms-134 e-5061).
+        print(f"  milestones: {len(target_records)}, "
               f"docs: {entry_counts['documents']}, "
               f"changelog: {entry_counts['changelog_lines']} lines")
 

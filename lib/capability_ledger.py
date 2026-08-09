@@ -185,6 +185,18 @@ KNOWN_COLLECTION_COUPLING = {
     # local-only entry, so extending it is behaviour-sensitive (migration
     # internals + integration test needed) — left as tracked debt under ms-134.
     ("cloud_migrate_from_local", "milestones"),
+    # doctor's ms81 state-machine check walks data['milestones'] for three things:
+    # (A) active/observing target without an assignee, (B) done milestone with a
+    # leftover git worktree, (C/D) in_progress branch checks. B/C/D are milestone-
+    # git-specific (an opportunity has no worktree/branch — same shape as the
+    # session_fork/session_end reviewed-correct reads). But (A) assignee-missing
+    # applies to ANY target, so a sales project silently gets no warning. doctor
+    # became L1 (instance-universal) in e-5061; routing the assignee check through
+    # occupation.iter_target_records WOULD be correct, but starting to warn sales
+    # projects is behaviour-sensitive (new output on live sales instances) so it is
+    # deferred as tracked debt. owner = ms-134 (human-confirmed disposition,
+    # e-5061). NOTE the worktree/branch part must stay milestone-specific.
+    ("doctor", "milestones"),
 }
 
 # Reviewed-legitimate reads (ms-134 e-4737): (verb, collection) reads a
@@ -258,9 +270,14 @@ def is_reviewed_legitimate_read(verb: str, collection: str) -> bool:
 # only distinguishes profession-shared (L1/L2) from profession-specific (L0/L3/L4),
 # so the dev/sales split inside L3 is documentation, not enforcement.
 _NOUN_SCOPE = {
-    # L0 — Beacon product operation / admin / dev tooling.
-    "doctor": "L0", "skill": "L0", "migrate": "L0",
-    "reset": "L0", "update": "L0", "project": "L0",
+    # L0 — Beacon product operation (= Beacon にとっての L4、非配布・運用専用).
+    # NO verb is L0 as of ms-134 e-5061: the former L0 verbs
+    # (doctor/update/project/skill/migrate/reset) were universal instance tooling,
+    # not Beacon-repo-only operation, so they moved to L1 below (CORE doc
+    # 37Svg6nD2FccJM27yBjq 2026-08-09 改訂: 普遍機能は L1、L0 は配布から構造除外).
+    # The L0 scope itself stays valid — it is carried by SKILLS (e.g.
+    # beacon-drift-check in _SKILL_SCOPE), not verbs. e-5062 enforces the
+    # distribution exclusion so any future L0 verb cannot ship in the wheel/plugin.
     # L1 — all-profession coordination substrate (target-agnostic).
     "auth": "L1", "bus": "L1", "channel": "L1", "cloud": "L1", "cycle": "L1",
     "disclose": "L1", "undisclose": "L1", "dm": "L1", "help": "L1",
@@ -268,6 +285,13 @@ _NOUN_SCOPE = {
     "onboarding": "L1", "operation": "L1", "org": "L1", "resume": "L1",
     "run": "L1", "search": "L1", "session": "L1", "sessions": "L1",
     "stop": "L1", "trek": "L1", "trigger": "L1",
+    # ms-134 e-5061: former L0 verbs promoted to L1. These are instance-universal
+    # tooling (health check / self-update / project scaffold / skill install /
+    # data migration / local reset) — identical for every profession & project,
+    # not Beacon-repo-only operation. They must NOT read a profession concrete
+    # (checker polices them as L1 now); if one does it is a genuine leak to fix.
+    "doctor": "L1", "update": "L1", "project": "L1",
+    "skill": "L1", "migrate": "L1", "reset": "L1",
     # reclassified 2026-08-03 (e-4737 台帳 review) — mis-scoped by noun NAME, not
     # behaviour; still this same L1 section (one header), rationale inline:
     "master": "L1",   # was L0: customer-identity master-sync drain (ms-111)
@@ -286,8 +310,8 @@ _NOUN_SCOPE = {
     "rollback": "L3", "entry": "L3", "stuck": "L3",
     # scenario (ms-136 自動デバッグ基盤): 公開配布される dev 一般機能 — dev
     # ユーザーが自プロジェクトの SPEC を検証する(pr/deploy/retro と同じ dev の
-    # L3)。Beacon 運用側だけの非公開ツール(doctor/migrate=L0)ではない。concrete
-    # 到達可否は L1/L2 を除外するだけで L0/L3 を分けない;分ける軸は『公開配布か』。
+    # L3)。非配布の運用専用(L0)ではない。concrete 到達可否は L1/L2 を除外する
+    # だけで L0/L3 を分けない;分ける軸は『公開配布か』。
     "scenario": "L3",
     # L3 — profession default (sales). "watch" = the sales reply-watch
     # (sales_entities.set_watch — watch a thread for a reply at a cadence, ms-107);
