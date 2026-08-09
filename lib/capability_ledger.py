@@ -275,12 +275,10 @@ KNOWN_COLLECTION_COUPLING = {
     ("log_prepare", "milestones"),
     ("log_finalize", "milestones"),
     ("retro_prepare", "milestones"),
-    # milestone_add: its RECORD path is abstracted (create_target, ms-143 #625), but
-    # a residual READ remains in _is_bulk_milestone_add (counts milestones added in
-    # the last 60s to suppress an inline hint) — walks only dev 'milestones', so it
-    # misses a sales bulk-add. Distinct from the record path; ms-143 PR #2 routes it
-    # through iter_target_records too (flagged to leader 2026-08-09).
-    ("milestone_add", "milestones"),
+    # (ms-143 PR#2) milestone_add remediated: _is_bulk_milestone_add now reads via
+    # occupation.iter_target_records (commit 587c4084), so milestone_add no longer
+    # couples to data['milestones']. Entry removed — the stale-entry test enforces
+    # that a greened verb is dropped from the allowlist.
     # sales target readers (opportunity_list / acquisition_list enumerate their
     # profession collection directly):
     ("opportunity_list", "opportunities"),
