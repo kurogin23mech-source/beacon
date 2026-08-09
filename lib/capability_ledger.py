@@ -261,6 +261,13 @@ _NOUN_SCOPE = {
     # L0 — Beacon product operation / admin / dev tooling.
     "doctor": "L0", "skill": "L0", "migrate": "L0",
     "reset": "L0", "update": "L0", "project": "L0",
+    # scenario (ms-136): auto-debug基盤 — dev/QA tooling that runs SPEC-derived
+    # journeys against Beacon itself. L0 because it is meta-tooling for
+    # developing/verifying Beacon (not a profession user's workflow), and L0's
+    # "may depend on any level" rule correctly permits its reach into a
+    # profession's concretes (via inward_inject → sales communication ingest)
+    # to exercise that profession's real journey.
+    "scenario": "L0",
     # L1 — all-profession coordination substrate (target-agnostic).
     "auth": "L1", "bus": "L1", "channel": "L1", "cloud": "L1", "cycle": "L1",
     "disclose": "L1", "undisclose": "L1", "dm": "L1", "help": "L1",

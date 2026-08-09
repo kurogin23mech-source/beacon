@@ -482,6 +482,14 @@ case "${1:-}" in
             *)        echo "Usage: beacon communication [add|list|cancel|retarget]" ;;
         esac
         ;;
+    scenario)
+        case "${2:-}" in
+            run)      shift 2; cmd_scenario_run "$@" ;;
+            save)     shift 2; cmd_scenario_save "$@" ;;
+            list|ls)  shift 2; cmd_scenario_list "$@" ;;
+            *)        echo "Usage: beacon scenario [run|save|list]" ;;
+        esac
+        ;;
     meeting|mtg)
         case "${2:-}" in
             schedule)   shift 2; cmd_meeting_schedule "$@" ;;

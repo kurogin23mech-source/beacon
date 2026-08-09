@@ -9782,6 +9782,84 @@ def cmd_watch_list():
 
 
 # ---------------------------------------------------------------------------
+# ms-136 e-4699 — scenario asset operations (自動デバッグ基盤の実行可能シナリオ)
+# The generation half is the /beacon-scenario-gen Skill (Claude reads a SPEC);
+# these deterministic verbs run / save / list the resulting diffable assets.
+# `scenario_run` is headless-invokable so CI (e-4702) can drive it without the
+# interactive Skill.
+# ---------------------------------------------------------------------------
+
+def cmd_scenario_run():
+    import scenario_store
+    import scenario_runner
+    path = os.environ.get("BEACON_SCENARIO_PATH", "")
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+    if not path:
+        print("Error: scenario file path required (beacon scenario run <file>)",
+              file=sys.stderr)
+        sys.exit(2)
+    try:
+        scenario = scenario_store.load_scenario(path)
+        report = scenario_runner.run_scenario(scenario)
+    except (scenario_store.ScenarioError, FileNotFoundError, OSError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+    if as_json:
+        print(json.dumps(report, ensure_ascii=False))
+    else:
+        mark = "PASS" if report["passed"] else "FAIL"
+        print(f"[{mark}] {report['name']} ({report['spec_ref']}) — "
+              f"{len(report['steps'])} steps")
+        if not report["passed"] and report["failure"]:
+            f = report["failure"]
+            print(f"  x step {f['index']} ({f['kind']}): {f['reason']}")
+            if f.get("spec_source"):
+                print(f"    spec_source: {f['spec_source']}")
+            if f.get("observation_basis"):
+                print(f"    observation_basis: {f['observation_basis']}")
+    # exit nonzero on a failed journey so CI (e-4702) can gate on it.
+    sys.exit(0 if report["passed"] else 1)
+
+
+def cmd_scenario_save():
+    import scenario_store
+    src = os.environ.get("BEACON_SCENARIO_PATH", "")
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+    if not src:
+        print("Error: input scenario JSON path required "
+              "(beacon scenario save <file.json>)", file=sys.stderr)
+        sys.exit(2)
+    try:
+        with open(src, "r", encoding="utf-8") as f:
+            scenario = json.load(f)
+        dest = scenario_store.save_scenario(scenario)
+    except (scenario_store.ScenarioError, FileNotFoundError,
+            json.JSONDecodeError, OSError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+    if as_json:
+        print(json.dumps({"saved": str(dest)}, ensure_ascii=False))
+    else:
+        print(f"Saved scenario -> {dest}")
+
+
+def cmd_scenario_list():
+    import scenario_store
+    ms = os.environ.get("BEACON_SCENARIO_MS", "") or None
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+    rows = scenario_store.list_scenarios(milestone=ms)
+    if as_json:
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+    if not rows:
+        print("No saved scenarios." if not ms else f"No scenarios for {ms}.")
+        return
+    for r in rows:
+        print(f"  [{r['milestone']}] {r['name']} - {r['step_count']} steps, "
+              f"{r['quality_signal_count']} quality-signal(s)  ({r['spec_ref']})")
+
+
+# ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
 
@@ -9790,6 +9868,9 @@ if __name__ == "__main__":
     _install_wall_clock_timeout(cmd)
     commands = {
         "init": cmd_init,
+        "scenario_run": cmd_scenario_run,
+        "scenario_save": cmd_scenario_save,
+        "scenario_list": cmd_scenario_list,
         "milestone_add": cmd_milestone_add,
         "milestone_list": cmd_milestone_list,
         "milestone_start": cmd_milestone_start,
