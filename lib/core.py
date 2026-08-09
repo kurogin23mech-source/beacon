@@ -1303,7 +1303,10 @@ def task_add(data: dict, ms_id: str, description: str, *,
 
 def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
               author: dict | None = None) -> tuple[dict, dict]:
-    """Mark an entry as done. Returns (milestone, entry).
+    """Mark an entry as done. Returns the 2-tuple ``(milestone, entry)`` — the
+    containing milestone first, the entry second (review finding #5: stated
+    explicitly since the close now delegates to ``occupation.set_entry_state``,
+    which returns the same 2-tuple shape; NOT a 4-tuple).
 
     ``author`` (ms-78 / e-1909): optional ``{"user_id", "email",
     "display_name"}`` dict attached to ``meta.done_by_user`` — the

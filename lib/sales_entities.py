@@ -2592,14 +2592,15 @@ def activity_set_status(data: dict, activity_id: str, status: str, *,
         raise ValueError(
             f"status must be one of {sorted(_SETTABLE_ACTIVITY_STATUS)}{hint}, got {status!r}")
     import occupation
-    try:
-        _opp, act = occupation.set_entry_state(
-            data, activity_id, status, at=at, actor=work_base.current_actor())
-    except ValueError:
-        # preserve the sales-specific not-found message (set_entry_state raises a
-        # generic "Entry not found"); status was already validated above so the
-        # only ValueError here is not-found.
+    # review finding #2: detect not-found EXPLICITLY (to keep the sales-specific
+    # message) instead of catching set_entry_state's ValueError. A bare
+    # ``except ValueError`` would rewrite ANY ValueError — e.g. a manifest
+    # misconfiguration — into a misleading "Activity not found". With the entry
+    # pre-confirmed present, set_entry_state's own ValueErrors propagate un-masked.
+    if occupation.find_target_entry(data, activity_id) is None:
         raise ValueError(f"Activity not found: {activity_id}")
+    _opp, act = occupation.set_entry_state(
+        data, activity_id, status, at=at, actor=work_base.current_actor())
     return act
 
 

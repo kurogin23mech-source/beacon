@@ -94,3 +94,25 @@ def test_unknown_kind_raises():
         occupation.next_target_id(_dev(), "nonesuch")
     with pytest.raises(ValueError):
         occupation.create_target(_dev(), "nonesuch", label="x")
+
+
+def test_unknown_kind_error_names_valid_kinds():
+    """review finding #3: the error lists what IS available."""
+    try:
+        occupation.create_target(_dev(), "nonesuch", label="x")
+        assert False, "should have raised"
+    except ValueError as e:
+        assert "milestone" in str(e)  # a valid dev kind is named
+
+
+def test_create_target_rejects_id_collision(monkeypatch):
+    """review finding #1: create_target is the single writer, so a corrupted id
+    space (allocator returns an already-present id) must raise, not silently
+    append a duplicate. Force the collision by stubbing the allocator to return
+    an id that already exists."""
+    data = {"id": "p", "profession": "dev", "milestones": [{"id": "ms-1"}]}
+    monkeypatch.setattr(occupation, "next_target_id", lambda d, k: "ms-1")
+    with pytest.raises(ValueError, match="collision"):
+        occupation.create_target(data, "milestone", label="dup")
+    # nothing appended — the pre-append guard fired.
+    assert [m["id"] for m in data["milestones"]] == ["ms-1"]

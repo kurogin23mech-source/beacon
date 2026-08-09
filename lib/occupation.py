@@ -821,10 +821,16 @@ def target_class(data: dict, kind: str) -> dict:
     (ms-143). Raises ``ValueError`` if this project's profession has no such
     class, so a caller minting / locating a Target of an unknown kind fails
     loudly instead of silently writing to the wrong collection."""
-    for tc in profession_manifest(data)["target_classes"]:
+    classes = profession_manifest(data)["target_classes"]
+    for tc in classes:
         if tc["kind"] == kind:
             return tc
-    raise ValueError(f"No target-class {kind!r} in this project's profession")
+    # review finding #3: name the valid kinds so a caller with a typo / wrong
+    # profession sees what IS available, not just what isn't.
+    valid = [tc["kind"] for tc in classes]
+    raise ValueError(
+        f"No target-class {kind!r} in this project's profession "
+        f"(valid kinds: {valid})")
 
 
 def next_target_id(data: dict, kind: str) -> str:
@@ -872,13 +878,26 @@ def create_target(data: dict, kind: str, *, label: str,
     Whether Opportunities SHOULD carry ``created_by`` is a separate product
     decision tracked outside this refactor."""
     tc = target_class(data, kind)
+    collection = tc["collection"]
     target_id = next_target_id(data, kind)
+    # Collision guard (review finding #1): create_target is now the SINGLE writer
+    # for all target creation, so the ID-uniqueness invariant that
+    # ``core.milestone_add`` used to enforce belongs here. ``next_target_id`` is
+    # max-suffix+1 so this is normally unreachable, but a corrupted id space
+    # (e.g. a hand-edited project.json with duplicate ids) would otherwise
+    # silently append a duplicate — raise instead of corrupting further.
+    id_field = tc.get("id_field", "id")
+    if any(rec.get(id_field) == target_id
+           for rec in data.get(collection, []) or []):
+        raise ValueError(
+            f"Target ID collision: {target_id} already exists in "
+            f"{collection!r}. Corrupted ids — run `beacon doctor`.")
     rec = _wm.new_target(
         target_id, label, status=status or _wm.TODO_STATUS,
         created_at=created_at, created_by=created_by, assignee=assignee, **extra)
     if not stamp_created_by:
         rec.pop("created_by", None)
-    data.setdefault(tc["collection"], []).append(rec)
+    data.setdefault(collection, []).append(rec)
     return rec
 
 
@@ -920,7 +939,8 @@ def find_target_entry(data: dict, entry_id: str):
 
 
 def set_entry_state(data: dict, entry_id: str, status: str, *,
-                    at: str = "", actor: str = "", reason: str = "") -> tuple:
+                    at: str = "", actor: str = "",
+                    reason: str = "") -> tuple[dict, dict]:
     """Transition a work-item's lifecycle state, profession-generically (ms-143,
     設計判断 b 系統3 = 状態変更). ``done`` routes through ``work_model.mark_done``
     (canonical ``status`` / ``done_at`` + ``done_by`` / ``done_reason`` completion
@@ -935,8 +955,10 @@ def set_entry_state(data: dict, entry_id: str, status: str, *,
     the completion attribution ``mark_done`` writes must not leak onto plain field
     edits (設計判断 i = 分離).
 
-    Returns ``(target, entry)``. Raises ``ValueError`` if the entry is not found
-    or ``status`` is not settable here."""
+    Returns ``(parent_target, work_item_entry)`` — the containing Target first,
+    the work item second (review finding #4: the positional order is documented so
+    callers don't swap them). Raises ``ValueError`` if the entry is not found or
+    ``status`` is not settable here."""
     hit = find_target_entry(data, entry_id)
     if not hit:
         raise ValueError(f"Entry not found: {entry_id}")
