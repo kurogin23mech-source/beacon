@@ -67,7 +67,6 @@ import master_projection
 import org as org_mod
 import phantom_done_evidence as phantom_done_mod
 import invitations as invitations_mod  # ms-127 e-4871 PR2: token-based invites
-import redis_client  # ms-127 e-4871 PR2: session-upsert rate limit (fail-open)
 
 # Structured-audit logger (name-based singleton — same object app.py binds).
 # _check_phantom_done_evidence emits its phantom-done warning here.

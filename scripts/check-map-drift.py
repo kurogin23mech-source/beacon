@@ -83,29 +83,27 @@ def enumerate_api() -> set[str]:
     """@app.<method>('path') と router (prefix 付き) を列挙 → 'METHOD path'。
 
     ms-127 の god-module 分割 (e-4869〜4871) で /api/* の実装が app.py から
-    server/routers_*.py (auth / admin / orgs / me / treks / projects / version)
+    server/routers_*.py (auth / admin / orgs / me / treks / projects / version …)
     へ順次 include_router で切り出された。これらの router は完全な /api/... path を
-    自身の @router デコレータに書く (prefix なし) ので、空 prefix で走査する。
-    trailnode 系だけは相対 path を書くので mount 時の prefix を補う。ここに
-    切り出し先を足し忘れると、移設済み route が「幽霊 (map にあるが実体なし)」と
-    誤検知され map-drift が偽陽性になる。
+    自身の @router デコレータに書く (prefix なし) ので、`server/routers_*.py` を
+    **glob で自動発見** して空 prefix で走査する。将来さらに router を割っても、
+    ファイル名が routers_*.py なら列挙にこの関数の変更は要らない (= 切り出し先の
+    足し忘れで移設済み route が「幽霊 (map にあるが実体なし)」と誤検知される
+    偽陽性の穴を構造的に塞ぐ)。trailnode 系だけは相対 path を書くので glob に
+    載せず、mount 時の prefix を明示補完する。
     """
     routes: set[str] = set()
     app = open(os.path.join(REPO, "server", "app.py"), encoding="utf-8").read()
     for meth, path in re.findall(r'@app\.(get|post|put|patch|delete|websocket)\(\s*["\']([^"\']+)["\']', app):
         routes.add(f"{meth.upper()} {_norm_path(path)}")
-    for fname, prefix in (
-        ("trailnode.py", "/api/trailnode"),
-        ("trailnode_orgs.py", "/api/trailnode/orgs"),
-        ("routers_version.py", ""),
-        ("routers_auth.py", ""),
-        ("routers_admin.py", ""),
-        ("routers_orgs.py", ""),
-        ("routers_me.py", ""),
-        ("routers_treks.py", ""),
-        ("routers_projects.py", ""),
-    ):
-        fp = os.path.join(REPO, "server", fname)
+    # (file, prefix): trailnode は相対 path なので mount prefix を明示。
+    scan: list[tuple[str, str]] = [
+        (os.path.join(REPO, "server", "trailnode.py"), "/api/trailnode"),
+        (os.path.join(REPO, "server", "trailnode_orgs.py"), "/api/trailnode/orgs"),
+    ]
+    # routers_*.py は完全 path を書くので空 prefix で glob 自動発見。
+    scan += [(fp, "") for fp in sorted(globmod.glob(os.path.join(REPO, "server", "routers_*.py")))]
+    for fp, prefix in scan:
         if not os.path.exists(fp):
             continue
         txt = open(fp, encoding="utf-8").read()
