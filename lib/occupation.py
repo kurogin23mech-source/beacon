@@ -979,6 +979,20 @@ def set_entry_state(data: dict, entry_id: str, status: str, *,
     return target, entry
 
 
+def target_records(data: dict, kind: str) -> list:
+    """Return the list of Target records for ``kind`` (manifest-resolved
+    collection), profession-generically (ms-143). The concrete-literal-free way
+    for a shared / to-be-shared verb to get 'all milestones' or 'all
+    opportunities' without naming ``data['milestones']`` / ``data['opportunities']``
+    itself. Returns the live list (callers may read it; mutation should go through
+    the create/add primitives). ``[]`` if ``kind`` isn't in this profession."""
+    try:
+        tc = target_class(data, kind)
+    except ValueError:
+        return []
+    return data.get(tc["collection"], []) or []
+
+
 def find_target(data: dict, target_id: str) -> dict | None:
     """Locate a Target record by id across all Target collections,
     profession-generically (ms-143). Returns the record dict or ``None`` — the
@@ -1027,8 +1041,12 @@ def _all_work_item_ids(data: dict) -> list:
     return ids
 
 
+_ARM_DEFAULT_ITEM_TYPE = object()  # sentinel: "use the arm's declared item_type"
+
+
 def add_work_item(data: dict, target_id: str, *, description: str,
-                  status: str = "", **extra) -> dict:
+                  status: str = "", item_type=_ARM_DEFAULT_ITEM_TYPE,
+                  **extra) -> dict:
     """Append a work item (dev task / sales activity) under a Target,
     profession-generically (ms-143 設計判断 b 系統1 = work-item 追加). Resolves the
     target's ``work_item_arm`` ``{arm, item_type, id_prefix}`` from
@@ -1059,9 +1077,15 @@ def add_work_item(data: dict, target_id: str, *, description: str,
         raise ValueError(f"Target not found: {target_id}")
     item_id = work_base.next_suffixed_id(
         _all_work_item_ids(data), wia.get("id_prefix", ""))
+    # ``type`` is the arm's declared item_type by default; a caller may override
+    # it for the arm's polymorphic entries (dev's ``entries`` arm holds
+    # task / commit / note — task_add passes its entry_type). A falsy resolved
+    # type stamps no ``type`` field (sales activities declare None).
+    resolved_type = (wia.get("item_type")
+                     if item_type is _ARM_DEFAULT_ITEM_TYPE else item_type)
     item: dict = {"id": item_id, "description": description}
-    if wia.get("item_type"):
-        item["type"] = wia["item_type"]
+    if resolved_type:
+        item["type"] = resolved_type
     item["status"] = status or _wm.TODO_STATUS
     item.update(extra)
     target.setdefault(arm, []).append(item)
