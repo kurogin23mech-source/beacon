@@ -1564,14 +1564,20 @@ def cmd_dm_sent():
     (recipient, text) that recurs in the shown set. Read-only.
     """
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    _limit_raw = os.environ.get("BEACON_DM_SENT_LIMIT", "").strip()
     try:
-        limit = int(os.environ.get("BEACON_DM_SENT_LIMIT", "") or "20")
+        limit = int(_limit_raw or "20")
     except ValueError:
+        # AX (PR #622): don't silently swallow a bad --limit — surface it.
+        print(f"Warning: --limit {_limit_raw!r} is not an integer; using 20.",
+              file=sys.stderr)
         limit = 20
     my_sid = _resolve_session_id()
     if not my_sid:
-        print("Error: could not resolve this session's id (channel not "
-              "installed in this cwd?).", file=sys.stderr)
+        # AX (PR #622): concrete recovery command, no speculative "?".
+        print("Error: could not resolve this session's id. Run "
+              "`beacon channel install` in this directory to bind a channel, "
+              "then retry.", file=sys.stderr)
         sys.exit(1)
     client, config = _get_api_client()
     project_id = _resolve_bus_project_id(config)
@@ -1588,8 +1594,11 @@ def cmd_dm_sent():
         print(f"No DMs sent from this session ({my_sid[:16]}…) found "
               f"in the last {scan} dm events.")
         return
+    # AX (PR #622): the row shows the send time (created_at) then the two
+    # receipt flags actually rendered (delivered / opened); "sent" is every row
+    # by definition, so the header names only what varies per row.
     print(f"DMs sent from this session ({my_sid[:16]}…), newest first "
-          f"[sent ✓ / delivered / opened]:")
+          f"(time = sent; deliv/open = receipt):")
     for r in rows:
         recv = str(r["recipient"])[:20]
         preview = " ".join(str(r["text"]).split())[:48]
@@ -1600,8 +1609,9 @@ def cmd_dm_sent():
               f"deliv:{d} open:{o}{dup}")
         print(f"      \"{preview}\"")
     if any(r["duplicate"] for r in rows):
-        print("  ⚠dup = 同一宛先・同一本文が直近の送信に複数あります "
-              "(意図的でなければ二重送信の可能性)。")
+        # AX (PR #622): state the dup scope is THIS view, not global history.
+        print("  ⚠dup = 同一宛先・同一本文がこの表示範囲内に複数あります "
+              "(意図的でなければ二重送信の可能性、--limit で範囲を広げられます)。")
 
 
 def _validate_recipient_project(

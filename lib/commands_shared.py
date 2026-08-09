@@ -1306,11 +1306,16 @@ def dm_sent_rows(events: list, my_sid: str, limit: int = 20) -> list:
     rows = []
     for e in mine:
         p = (e or {}).get("payload") or {}
+        _rsid = p.get("recipient_session_id") or ""
+        _ruid = p.get("recipient_user_id") or ""
         rows.append({
             "event_id": (e or {}).get("event_id", ""),
-            "recipient": (
-                p.get("recipient_session_id")
-                or p.get("recipient_user_id") or ""),
+            # AX (PR #622): keep the id type unambiguous for a follow-up
+            # `dm send --to` (session-scoped) vs `--to-user` (user-scoped) —
+            # a caller must not have to guess which kind `recipient` is.
+            "recipient_session_id": _rsid,
+            "recipient_user_id": _ruid,
+            "recipient": _rsid or _ruid or "",  # display convenience
             "text": p.get("text") or "",
             "created_at": (e or {}).get("created_at", ""),
             "delivered_at": (e or {}).get("delivered_at", ""),

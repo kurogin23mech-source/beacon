@@ -3152,7 +3152,9 @@ receive-side cross-user approval decisions).
 --json:         emit {session_id, sent:[...]} as JSON instead of a table.
 EOF
                             shift; _dm_sent_help="1" ;;
-                        *) shift ;;
+                        # AX (PR #622): no positional args expected here, so an
+                        # unknown option is a typo — fail loudly, don't drop it.
+                        *) echo "beacon dm sent: unknown option: $1" >&2; exit 2 ;;
                     esac
                 done
                 if [[ -z "${_dm_sent_help:-}" ]]; then
