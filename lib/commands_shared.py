@@ -24,10 +24,12 @@ Dependency direction (ms-127 SPEC 方針4 = 循環 import を構造で防ぐ):
 so the dependency graph stays one-directional and no cycle can form.
 """
 
+import hashlib
 import json
 import os
 import re
 import sys
+import time
 from typing import Callable, Optional, Tuple
 
 from store import get_store
@@ -1235,7 +1237,6 @@ def _bus_send_fingerprint(
 ) -> str:
     """Stable fingerprint of a logical send (user-intent parts only, not the
     metadata the CLI stamps onto the payload afterwards)."""
-    import hashlib
     basis = "|".join([
         project_id or "", channel or "", recipient or "",
         recipient_user or "", payload_raw or "",
@@ -1261,6 +1262,27 @@ def _bus_find_recent_send(
             return None
         return e if (now - ts) <= window_sec else None
     return None
+
+
+def _bus_recent_send_record(fingerprint: str, event: dict) -> None:
+    """Append a successful send to the recent-send log so a later identical
+    re-send is recognised by ``_bus_find_recent_send``. Paired with the guard
+    check in cmd_bus_send — keep the stored shape (fingerprint / ts / event /
+    event_id) in sync with what the lookup reads. Best-effort: a log-write
+    failure must never break a send that already landed on the server."""
+    if not fingerprint:
+        return
+    try:
+        log = _read_bus_sent_log()
+        log.append({
+            "fingerprint": fingerprint,
+            "ts": time.time(),
+            "event": event,
+            "event_id": (event or {}).get("event_id", ""),
+        })
+        _write_bus_sent_log(log)
+    except Exception:
+        pass
 
 
 def _bus_auto_execute_channels(data: dict) -> list:
