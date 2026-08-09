@@ -59,6 +59,34 @@ def test_collect_rows_dev_milestone_and_task(monkeypatch):
     assert rows[0]["temporal"] == deadline.TRANSITION_OVERDUE
 
 
+def test_collect_rows_scans_non_inprogress_milestones(monkeypatch):
+    # 思想レビュー finding#4: observing/todo/waiting な MS 配下の締切付き task も
+    # session-start が拾う(done/cancelled の MS だけ除外)。
+    status = {
+        "profession": "dev",
+        "targets": [
+            {"id": "ms-obs", "kind": "milestone", "status": "observing",
+             "label": "観察中MS", "detail": {"target_date": ""}},
+            {"id": "ms-done", "kind": "milestone", "status": "done",
+             "label": "完了MS", "detail": {"target_date": ""}},
+        ],
+    }
+    calls = []
+
+    def fake_json(args):
+        calls.append(args)
+        if args[:2] == ["task", "list"] and args[-1] == "ms-obs":
+            return {"entries": [{"type": "task", "id": "e-1", "description": "観察中の期限切れ",
+                                 "deadline": "2026-08-06", "status": "todo"}]}
+        return {"entries": []}
+
+    monkeypatch.setattr(mod, "_beacon_json", fake_json)
+    rows = mod._collect_rows(status, TODAY)
+    assert [(r["kind"], r["label"]) for r in rows] == [("task", "観察中の期限切れ")]
+    # done な MS の task list は引かない(terminal 除外)。
+    assert ["task", "list", "-m", "ms-done"] not in calls
+
+
 def test_collect_rows_sales_activity(monkeypatch):
     status = {"profession": "sales", "targets": []}
 

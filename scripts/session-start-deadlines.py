@@ -79,9 +79,13 @@ def _collect_rows(status, today):
                 "context": t.get("id", ""),
             })
 
-    # (2) task deadline — 開発 work item。in_progress な milestone の task を引く。
+    # (2) task deadline — 開発 work item。terminal でない milestone すべての task を引く
+    # (ms-139 思想レビュー finding#4: in_progress だけに絞ると observing/todo/waiting な MS
+    # 配下の締切付き task が session-start からも(未 claim なら server DM からも)漏れる穴に
+    # なる。done/cancelled のみ除外し、二重化の網を SPEC AC4 の無条件文言どおり広く張る)。
+    _MS_TERMINAL = {"done", "cancelled"}
     for t in (status or {}).get("targets", []) or []:
-        if t.get("kind") != "milestone" or t.get("status") != "in_progress":
+        if t.get("kind") != "milestone" or t.get("status") in _MS_TERMINAL:
             continue
         tl = _beacon_json(["task", "list", "-m", t.get("id", "")])
         entries = (tl or {}).get("entries", []) if isinstance(tl, dict) else []

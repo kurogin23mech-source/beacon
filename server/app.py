@@ -4040,6 +4040,11 @@ def _fire_due_deadlines(pid: str, project: dict, now_iso: str, report: list) -> 
                            "deadline": dl, "fired": False,
                            "skipped": "no claimer session"})
             continue
+        # ms-139 思想レビュー finding#3: DUE(本日締切・未超過)でも発火するが、文面は
+        # temporal に応じて分ける。overdue を DUE 当日に断言すると受信 AI の判断入力が汚れる。
+        overdue = st == deadline.TRANSITION_OVERDUE
+        head = "⏰ 締切超過" if overdue else "⏰ 本日締切"
+        state = "を過ぎています" if overdue else "は本日が締切です"
         payload = {
             "kind": "deadline-reminder",
             "work_kind": kind,
@@ -4047,7 +4052,7 @@ def _fire_due_deadlines(pid: str, project: dict, now_iso: str, report: list) -> 
             "deadline": dl,
             "temporal": st,
             "recipient_session_id": recipient,
-            "message": (f"⏰ 締切超過: {label} の締切 {dl} を過ぎています ({kind})。"
+            "message": (f"{head}: {label} の締切 {dl} {state} ({kind})。"
                         f"済んだら完了、延ばすなら期日変更、やめたら取消で盤面から"
                         f"外してください。"),
             "created_at": now_iso,

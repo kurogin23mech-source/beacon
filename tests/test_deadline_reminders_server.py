@@ -126,6 +126,18 @@ def test_done_and_future_not_reminded(monkeypatch):
     assert events == []
 
 
+def test_due_today_message_does_not_claim_overdue(monkeypatch):
+    # 思想レビュー finding#3: 本日締切(DUE, 未超過)でも発火するが、文面は「過ぎて
+    # います」と断言しない(受信 AI の判断入力を汚さない)。
+    events = _sink(monkeypatch)
+    project = _project_with_claimed_ms(deadline="2026-08-09")  # == NOW の日付
+    assert app._fire_due_deadlines("p1", project, NOW, []) is True
+    msg = events[0]["payload"]["message"]
+    assert "本日" in msg
+    assert "過ぎています" not in msg
+    assert events[0]["payload"]["temporal"] == deadline.TRANSITION_DUE
+
+
 def test_refire_after_deadline_extended_then_lapsed(monkeypatch):
     events = _sink(monkeypatch)
     project = _project_with_claimed_ms(deadline="2026-08-06")
