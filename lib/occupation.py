@@ -733,12 +733,13 @@ def _collection_kind(data: dict | None, collection: str) -> str:
 
 def _arm_roles_for(data: dict | None, collection: str, arms: tuple) -> dict:
     """Return ``{work_item_arm, evidence_arms}`` for a collection. Built-in
-    collections use the ``_ARM_ROLES`` seed. A descriptor-defined collection has
-    no seed entry, so its roles are derived from its declared arms following the
-    thick-frame convention (``_DEFAULT_ARMS`` = work_items / evidence): the
-    ``work_items`` arm is the work-item arm and ``evidence`` is an evidence arm,
-    each with ``item_type=None`` (every item in the arm plays that role). This is
-    what lets a NEW occupation light up arm-walking capabilities by DECLARING its
+    collections use the ``_ARM_ROLES`` seed. A descriptor-defined collection asks
+    its descriptor (``target_descriptor.arm_roles``) which arm holds work items vs
+    evidence — an EXPLICIT declaration if the descriptor carries one (so a new
+    occupation may name its arms anything and still light up arm-walking
+    capabilities — the true "declare, don't wire" contract, ms-142 e-5011), else
+    the thick-frame name convention (``work_items`` / ``evidence``). This is what
+    lets a NEW occupation light up arm-walking capabilities by DECLARING its
     manifest, with no edit here (ms-142 の芯)."""
     seed = _ARM_ROLES.get(collection)
     if seed is not None:
@@ -747,6 +748,13 @@ def _arm_roles_for(data: dict | None, collection: str, arms: tuple) -> dict:
             if seed["work_item_arm"] else None,
             "evidence_arms": [dict(a) for a in seed["evidence_arms"]],
         }
+    if data:
+        for desc in _td.load_descriptors(data):
+            if isinstance(desc, dict) \
+                    and (desc.get("collection") or "").strip() == collection:
+                return _td.arm_roles(desc)
+    # A collection with no seed and no descriptor (unusual): fall back to the
+    # name convention over its physical arms.
     work_item_arm = {"arm": "work_items", "item_type": None, "kind": "work_item"} \
         if "work_items" in arms else None
     evidence_arms = [{"arm": "evidence", "item_type": None}] \

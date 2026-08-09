@@ -258,6 +258,51 @@ def _validate_fields(fields: list, label: str, where: str) -> list:
 _DEFAULT_ARMS = ["work_items", "evidence"]
 
 
+def arm_roles(desc: dict) -> dict:
+    """Return a descriptor's arm ROLES — ``{"work_item_arm": {arm, item_type,
+    kind} | None, "evidence_arms": [{arm, item_type}, ...]}`` (ms-142 e-5011).
+
+    A descriptor declares its child ARMS (``decomposition.arms``, physical child
+    lists) but, until ms-142, not which arm holds planned WORK ITEMS vs EVIDENCE —
+    the occupation-agnostic capabilities (deadline enumeration, the coverage
+    harness) need that role, not just the name. This reads an EXPLICIT declaration
+    when present so a new occupation can name its arms ANYTHING (``duties`` /
+    ``attestations``) and still light up every arm-walking capability — the true
+    "declare, don't wire" contract (the alternative, matching hard-coded arm
+    names ``work_items`` / ``evidence``, only lit up professions that used those
+    magic names). Falls back to that name convention when no explicit roles are
+    declared, so descriptors authored before this (``build_descriptor`` /
+    ``backoffice_seed``, whose arms ARE ``work_items`` / ``evidence``) are
+    unchanged. Tolerant: a malformed field degrades to the empty classification,
+    never raises."""
+    if not isinstance(desc, dict):
+        return {"work_item_arm": None, "evidence_arms": []}
+    wia_raw = desc.get("work_item_arm")
+    ev_raw = desc.get("evidence_arms")
+    if wia_raw is not None or ev_raw is not None:
+        work_item_arm = None
+        if isinstance(wia_raw, dict) and (wia_raw.get("arm") or "").strip():
+            work_item_arm = {
+                "arm": wia_raw["arm"],
+                "item_type": wia_raw.get("item_type"),
+                "kind": (wia_raw.get("kind") or "").strip() or "work_item",
+            }
+        evidence_arms = []
+        for e in (ev_raw or []):
+            if isinstance(e, dict) and (e.get("arm") or "").strip():
+                evidence_arms.append(
+                    {"arm": e["arm"], "item_type": e.get("item_type")})
+        return {"work_item_arm": work_item_arm, "evidence_arms": evidence_arms}
+    # No explicit roles → thick-frame name convention (back-compat).
+    arms = [a for a in ((desc.get("decomposition") or {}).get("arms") or [])
+            if isinstance(a, str)]
+    work_item_arm = {"arm": "work_items", "item_type": None, "kind": "work_item"} \
+        if "work_items" in arms else None
+    evidence_arms = [{"arm": "evidence", "item_type": None}] \
+        if "evidence" in arms else []
+    return {"work_item_arm": work_item_arm, "evidence_arms": evidence_arms}
+
+
 def build_descriptor(*, kind: str, label: str, profession: str, dtype: str,
                      id_prefix: str, collection: str,
                      fields: Optional[list] = None,
