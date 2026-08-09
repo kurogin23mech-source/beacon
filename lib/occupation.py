@@ -682,12 +682,17 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # from its descriptor (``target_descriptor.arm_roles``), not from here.
 _ARM_ROLES = {
     "milestones": {
-        "work_item_arm": {"arm": "entries", "item_type": "task", "kind": "task"},
+        # ms-143: ``id_prefix`` is the declarative work-item id prefix — a dev
+        # task is ``e-`` (shared with operation entries, see next_entry_id). It
+        # lets add_work_item allocate the next work-item id from the manifest
+        # alone, so a new occupation lights up by DECLARING its prefix.
+        "work_item_arm": {"arm": "entries", "item_type": "task", "kind": "task",
+                          "id_prefix": "e-"},
         "evidence_arms": [{"arm": "entries", "item_type": "commit"}],
     },
     "opportunities": {
         "work_item_arm": {"arm": "activities", "item_type": None,
-                          "kind": "activity"},
+                          "kind": "activity", "id_prefix": "act-"},
         "evidence_arms": [{"arm": "communications", "item_type": None}],
     },
 }
@@ -972,6 +977,76 @@ def set_entry_state(data: dict, entry_id: str, status: str, *,
             f"status must be 'todo' or 'done' (cancel has its own audit-stamped "
             f"path), got {status!r}")
     return target, entry
+
+
+def _collect_item_ids(entries: list, out: list) -> None:
+    """Append every id in ``entries``, recursing into nested ``entries`` children
+    (dev subtasks)."""
+    for it in entries:
+        out.append(it.get("id", ""))
+        _collect_item_ids(it.get("entries", []) or [], out)
+
+
+def _all_work_item_ids(data: dict) -> list:
+    """Every work-item id across all Target work-item arms (nested) PLUS operation
+    entries — the GLOBAL id space ``add_work_item`` allocates within (ms-143 設計
+    判断 a). Work-item prefixes are globally unique (dev ``e-`` lives only in
+    milestone / operation entries, sales ``act-`` only in activities), so
+    ``next_suffixed_id`` filtered by a prefix over this superset is collision-safe
+    and preserves ``core.next_entry_id``'s cross-operations scope. Operations are
+    dev infra (not a profession Target) but share the ``e-`` space, so they are
+    scanned explicitly."""
+    ids: list = []
+    for tc in profession_manifest(data)["target_classes"]:
+        arm = (tc.get("work_item_arm") or {}).get("arm")
+        if not arm:
+            continue
+        for rec in data.get(tc["collection"], []) or []:
+            _collect_item_ids(rec.get(arm, []) or [], ids)
+    for op in data.get("operations", []) or []:
+        _collect_item_ids(op.get("entries", []) or [], ids)
+    return ids
+
+
+def add_work_item(data: dict, target_id: str, *, description: str,
+                  status: str = "", **extra) -> dict:
+    """Append a work item (dev task / sales activity) under a Target,
+    profession-generically (ms-143 設計判断 b 系統1 = work-item 追加). Resolves the
+    target's ``work_item_arm`` ``{arm, item_type, id_prefix}`` from
+    ``profession_manifest`` and appends ``{id, [type], status, description,
+    **extra}`` to that arm. The id is allocated GLOBALLY by prefix (設計判断 a) via
+    ``_all_work_item_ids`` so it never collides with an existing id of the same
+    prefix anywhere (incl. operation entries for ``e-``).
+
+    Profession-specific fields — a task's ``priority`` / ``motivation``, an
+    activity's ``deadline`` / ``who_has_the_ball`` — ride via ``**extra``; the
+    frontend (``core.task_add`` / ``sales_entities.activity_add``) owns them, this
+    primitive stays the generic skeleton (mirrors ``create_target``'s layering).
+    ``type`` is stamped only when the arm declares an ``item_type`` (dev tasks
+    carry ``type="task"``; sales activities declare ``None`` and carry no type).
+
+    Returns the new work-item dict. Raises ``ValueError`` if the target kind has
+    no work-item arm or the target id is not found."""
+    kind = _wm.target_kind(target_id)
+    tc = target_class(data, kind)
+    wia = tc.get("work_item_arm") or {}
+    arm = wia.get("arm")
+    if not arm:
+        raise ValueError(f"target-class {kind!r} has no work-item arm")
+    id_field = tc.get("id_field", "id")
+    target = next((r for r in data.get(tc["collection"], []) or []
+                   if r.get(id_field) == target_id), None)
+    if target is None:
+        raise ValueError(f"Target not found: {target_id}")
+    item_id = work_base.next_suffixed_id(
+        _all_work_item_ids(data), wia.get("id_prefix", ""))
+    item: dict = {"id": item_id, "description": description}
+    if wia.get("item_type"):
+        item["type"] = wia["item_type"]
+    item["status"] = status or _wm.TODO_STATUS
+    item.update(extra)
+    target.setdefault(arm, []).append(item)
+    return item
 
 
 def iter_work_items(data: dict):
