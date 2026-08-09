@@ -47,6 +47,11 @@ from commands_shared import (
     _mirror_auto_execute_channels_to_local,
     _resolve_recipient_live,
     _make_notice,
+    _read_bus_sent_log,
+    _write_bus_sent_log,
+    _bus_dedup_window_seconds,
+    _bus_send_fingerprint,
+    _bus_find_recent_send,
 )
 
 
@@ -784,6 +789,58 @@ def cmd_bus_send():
         project_id = _validate_recipient_project(
             recipient, project_id, channel, advise=_advise)
 
+    # ms-141 / e-4965: client-side recent-send guard (idempotent-by-default).
+    #
+    # The server only dedups a matching client_event_id when is_retry=true, so a
+    # bare re-run of `beacon bus send` (fresh key, is_retry=false) would create a
+    # true duplicate — the exact 2026-08-09 double-send class, now that ms-140
+    # closed the JSON-parse-confusion cause. This guard makes an *accidental
+    # identical dm re-send* idempotent by DEFAULT: if the same (project +
+    # channel + recipient + payload) was sent within the dedup window, return the
+    # first send's result verbatim instead of posting again. Scoped to dm
+    # (non-dm channels legitimately repeat identical payloads). Skipped when the
+    # caller drives idempotency explicitly (--client-event-id / --retry) or opts
+    # out with --allow-duplicate. Placed before envelope mint so a replay avoids
+    # the whole server round-trip.
+    allow_duplicate = os.environ.get("BEACON_BUS_ALLOW_DUPLICATE", "") == "1"
+    _local_guard_active = (
+        channel == "dm"
+        and not allow_duplicate
+        and not client_event_id
+        and not is_retry
+    )
+    _send_fingerprint = ""
+    if _local_guard_active:
+        import time as _time
+        _send_fingerprint = _bus_send_fingerprint(
+            project_id=project_id, channel=channel, recipient=recipient,
+            recipient_user=recipient_user, payload_raw=payload_raw,
+        )
+        _window = _bus_dedup_window_seconds()
+        _prior = _bus_find_recent_send(
+            _read_bus_sent_log(), _send_fingerprint, _window, _time.time())
+        if _prior is not None:
+            prior_event = _prior.get("event") or {}
+            prior_id = prior_event.get("event_id", _prior.get("event_id", "?"))
+            note = (
+                f"同一宛先・同一本文の DM を直近 {_window}s 以内に送信済みのため、"
+                f"初回送信 (event {prior_id}) を冪等に返しました (重複送信は"
+                f"行っていません)。意図的に再送する場合は --allow-duplicate を"
+                f"付けてください。"
+            )
+            if json_mode:
+                out = dict(prior_event)
+                out["local_idempotent_replay"] = True
+                out["notes"] = _advisories + [note]
+                print(json.dumps(out, ensure_ascii=False))
+                return
+            _advise(note)
+            print(
+                f"Sent (idempotent replay, local guard): [{prior_id}] {channel} "
+                f"→ recipient unchanged; no duplicate posted."
+            )
+            return
+
     # e-1290: envelope-by-default for CLI sends.
     #
     # Tier selection rule: `beacon bus send` is invoked by a human typing a
@@ -1012,6 +1069,23 @@ def cmd_bus_send():
         if _budget_slot_consumed:
             _bus_budget_refund_one()
         raise
+    # ms-141 / e-4965: record this dm send so an accidental identical re-run
+    # within the window is served as an idempotent replay (see the guard above).
+    # Best-effort: a log write failure must never break a send that already
+    # landed on the server.
+    if _local_guard_active and _send_fingerprint:
+        try:
+            import time as _time
+            _log = _read_bus_sent_log()
+            _log.append({
+                "fingerprint": _send_fingerprint,
+                "ts": _time.time(),
+                "event": event,
+                "event_id": event.get("event_id", ""),
+            })
+            _write_bus_sent_log(_log)
+        except Exception:
+            pass
     if os.environ.get("BEACON_JSON", "") == "1":
         # Augment the event JSON with the post-decrement budget so scripted
         # callers can decide whether to keep the autonomous loop running.

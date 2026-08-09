@@ -155,7 +155,8 @@ def _clear_bus_env(monkeypatch):
                 "BEACON_BUS_RECIPIENT_SESSION", "BEACON_BUS_IN_REPLY_TO",
                 "BEACON_BUS_CONTEXT", "BEACON_BUS_RATIONALE",
                 "BEACON_BUS_EVENT_ID", "BEACON_BUS_ACK_EVENT_ID",
-                "BEACON_BUS_CLIENT_EVENT_ID", "BEACON_BUS_IS_RETRY"):
+                "BEACON_BUS_CLIENT_EVENT_ID", "BEACON_BUS_IS_RETRY",
+                "BEACON_BUS_ALLOW_DUPLICATE", "BEACON_BUS_DEDUP_WINDOW_SEC"):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -294,6 +295,103 @@ def test_bus_send_json_stdout_pure_despite_advisory(monkeypatch, capsys, stub):
     # the advisory is preserved *inside* the JSON, not leaked to stderr.
     assert any("--context" in n for n in parsed.get("notes", []))
     assert "--context" not in captured.err
+
+
+# ---------------------------------------------------------------------------
+# ms-141 / e-4965: client-side recent-send guard — an accidental identical dm
+# re-send within the window is served as an idempotent replay by default (no
+# duplicate posted), with --allow-duplicate as the intentional-resend escape.
+# The guard is scoped to channel="dm"; non-dm channels legitimately repeat.
+# ---------------------------------------------------------------------------
+
+def test_bus_send_dm_duplicate_within_window_is_idempotent_replay(
+        monkeypatch, capsys, stub):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    monkeypatch.setenv("BEACON_BUS_PAYLOAD", '{"text":"hello"}')
+    monkeypatch.setenv("BEACON_JSON", "1")
+    cmd_bus.cmd_bus_send()
+    first = json.loads(capsys.readouterr().out.strip())
+    assert len(stub.events) == 1
+    # identical re-send within window → replay, NO new event posted
+    cmd_bus.cmd_bus_send()
+    second = json.loads(capsys.readouterr().out.strip())
+    assert len(stub.events) == 1  # the double-send is structurally prevented
+    assert second.get("local_idempotent_replay") is True
+    assert second["event_id"] == first["event_id"]
+    assert any("--allow-duplicate" in n for n in second.get("notes", []))
+
+
+def test_bus_send_dm_allow_duplicate_bypasses_guard(monkeypatch, capsys, stub):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    monkeypatch.setenv("BEACON_BUS_PAYLOAD", '{"text":"hello"}')
+    cmd_bus.cmd_bus_send()
+    capsys.readouterr()
+    monkeypatch.setenv("BEACON_BUS_ALLOW_DUPLICATE", "1")
+    cmd_bus.cmd_bus_send()
+    assert len(stub.events) == 2  # intentional resend goes through
+
+
+def test_bus_send_dm_different_payload_not_deduped(monkeypatch, capsys, stub):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    monkeypatch.setenv("BEACON_BUS_PAYLOAD", '{"text":"one"}')
+    cmd_bus.cmd_bus_send()
+    monkeypatch.setenv("BEACON_BUS_PAYLOAD", '{"text":"two"}')
+    cmd_bus.cmd_bus_send()
+    assert len(stub.events) == 2  # distinct content → both sent
+
+
+def test_bus_send_dm_window_zero_disables_guard(monkeypatch, capsys, stub):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    monkeypatch.setenv("BEACON_BUS_PAYLOAD", '{"text":"hi"}')
+    monkeypatch.setenv("BEACON_BUS_DEDUP_WINDOW_SEC", "0")
+    cmd_bus.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
+    assert len(stub.events) == 2  # window<=0 disables the guard
+
+
+def test_bus_send_non_dm_channel_not_guarded(monkeypatch, capsys, stub):
+    # operation-trigger / trek / heartbeat legitimately repeat identical
+    # payloads (observed: op-1 "test" fired repeatedly), so the guard must not
+    # touch non-dm channels.
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "operation-trigger")
+    monkeypatch.setenv("BEACON_BUS_PAYLOAD", '{"text":"test"}')
+    cmd_bus.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
+    assert len(stub.events) == 2
+
+
+def test_bus_send_explicit_client_event_id_skips_local_guard(
+        monkeypatch, capsys, stub):
+    # An explicit client_event_id means the caller drives idempotency itself
+    # (server-side dedup path), so the local guard steps aside.
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    monkeypatch.setenv("BEACON_BUS_PAYLOAD", '{"text":"hi"}')
+    monkeypatch.setenv("BEACON_BUS_CLIENT_EVENT_ID", "ce-fixed")
+    cmd_bus.cmd_bus_send()
+    cmd_bus.cmd_bus_send()
+    assert len(stub.events) == 2  # local guard inactive; server dedup separate
+
+
+def test_bus_find_recent_send_staleness_boundary():
+    # Pure unit test of the staleness boundary (now/window injected).
+    import commands_shared as cs
+    entries = [{"fingerprint": "abc", "ts": 1000.0, "event": {"event_id": "e-1"}}]
+    assert cs._bus_find_recent_send(entries, "abc", 90, 1050.0)["event"][
+        "event_id"] == "e-1"                                  # within window
+    assert cs._bus_find_recent_send(entries, "abc", 90, 1200.0) is None  # stale
+    assert cs._bus_find_recent_send(entries, "abc", 0, 1000.0) is None   # off
+    assert cs._bus_find_recent_send(entries, "zzz", 90, 1000.0) is None  # no hit
 
 
 def test_bus_send_non_json_keeps_stderr_advisory(monkeypatch, capsys, stub):
