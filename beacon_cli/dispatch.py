@@ -1018,9 +1018,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_scenario = sub.add_parser("scenario",
                                 help="Scenario asset operations (run/save/list)",
                                 add_help=False)
-    p_scenario.add_argument("scenario_cmd", nargs="?", default="")  # run|save|list
+    p_scenario.add_argument("scenario_cmd", nargs="?", default="")  # run|save|list|replay
     p_scenario.add_argument("path", nargs="?", default="")
     p_scenario.add_argument("--ms", dest="ms", default="")
+    p_scenario.add_argument("--attainment", action="store_true")
     p_scenario.add_argument("--json", action="store_true")
     p_scenario.add_argument("--help", "-h", action="store_true", dest="show_help")
 
@@ -3446,7 +3447,8 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
 _SCENARIO_USAGE = (
     "Usage: beacon scenario run <file> [--json]\n"
     "       beacon scenario save <file.json> [--json]\n"
-    "       beacon scenario list [--ms <ms-id>] [--json]"
+    "       beacon scenario list [--ms <ms-id>] [--json]\n"
+    "       beacon scenario replay [--ms <ms-id>] [--attainment] [--json]"
 )
 
 
@@ -3475,6 +3477,12 @@ def _handle_scenario(root: Path, args: argparse.Namespace) -> int:
     if subc == "list":
         return _run_commands_py(root, "scenario_list",
                                 {"BEACON_SCENARIO_MS": args.ms or "",
+                                 "BEACON_JSON": json_flag})
+    if subc == "replay":
+        return _run_commands_py(root, "scenario_replay",
+                                {"BEACON_SCENARIO_MS": args.ms or "",
+                                 "BEACON_SCENARIO_ATTAINMENT":
+                                     "1" if getattr(args, "attainment", False) else "",
                                  "BEACON_JSON": json_flag})
     print(_SCENARIO_USAGE)
     return 1

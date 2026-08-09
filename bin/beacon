@@ -487,7 +487,8 @@ case "${1:-}" in
             run)      shift 2; cmd_scenario_run "$@" ;;
             save)     shift 2; cmd_scenario_save "$@" ;;
             list|ls)  shift 2; cmd_scenario_list "$@" ;;
-            *)        echo "Usage: beacon scenario [run|save|list]" ;;
+            replay)   shift 2; cmd_scenario_replay "$@" ;;
+            *)        echo "Usage: beacon scenario [run|save|list|replay]" ;;
         esac
         ;;
     meeting|mtg)

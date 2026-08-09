@@ -9871,6 +9871,51 @@ def cmd_scenario_list():
               f"{r['quality_signal_count']} quality-signal(s)  ({r['spec_ref']})")
 
 
+def cmd_scenario_replay():
+    # ms-136 e-4702 — dual use: CI regression (default) + attainment evidence
+    # (--attainment). Default blocks on any failure (exit 1) and labels each as
+    # infra (harness/net broke) vs product (real regression). --attainment emits
+    # journey-pass EVIDENCE (not a verdict, no gating) for the MS's review.
+    import scenario_regression
+    ms = os.environ.get("BEACON_SCENARIO_MS", "") or None
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+    attainment = os.environ.get("BEACON_SCENARIO_ATTAINMENT", "") == "1"
+
+    if attainment:
+        if not ms:
+            print("Error: --attainment requires --ms <ms-id>", file=sys.stderr)
+            sys.exit(2)
+        ev = scenario_regression.attainment_evidence(ms)
+        if as_json:
+            print(json.dumps(ev, ensure_ascii=False))
+        else:
+            print(f"journey-pass evidence for {ms} "
+                  f"({'all green' if ev['all_journeys_green'] else 'some red'}, "
+                  f"{ev['journey_count']} journeys):")
+            for j in ev["journeys"]:
+                mark = "✓" if j["passed"] else "✗"
+                extra = "" if j["passed"] else f" [{j['origin']}/{j.get('responsible_layer') or '?'}]"
+                print(f"  {mark} {j['name']} ({j['spec_ref']}){extra}")
+            print(f"  ⚠ {ev['label']}")
+        return  # evidence, not a gate — never exit-1 blocks the reviewer
+
+    run = scenario_regression.run_saved_scenarios(milestone=ms)
+    if as_json:
+        print(json.dumps(run, ensure_ascii=False))
+    else:
+        total = len(run["results"])
+        print(f"scenario regression: {total} scenario(s), "
+              f"{'ALL GREEN' if run['all_passed'] else 'FAILURES'}")
+        for r in run["product_regressions"]:
+            print(f"  ✗ [product regression] {r['name']} — "
+                  f"層 {r.get('responsible_layer') or '?'}: {r['reason']}")
+        for r in run["infra_failures"]:
+            print(f"  ⚠ [infra failure — net flaky/broken, not a product regression] "
+                  f"{r['name']} — {r['reason']}")
+    # CI block on ANY failure; the labels above tell infra vs product apart.
+    sys.exit(0 if run["all_passed"] else 1)
+
+
 # ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
@@ -9883,6 +9928,7 @@ if __name__ == "__main__":
         "scenario_run": cmd_scenario_run,
         "scenario_save": cmd_scenario_save,
         "scenario_list": cmd_scenario_list,
+        "scenario_replay": cmd_scenario_replay,
         "milestone_add": cmd_milestone_add,
         "milestone_list": cmd_milestone_list,
         "milestone_start": cmd_milestone_start,

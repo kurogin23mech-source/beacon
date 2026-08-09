@@ -59,3 +59,20 @@ cmd_scenario_list() {
     BEACON_SCENARIO_MS="$ms" BEACON_JSON="$json_flag" \
         python3 "$COMMANDS_PY" scenario_list
 }
+
+cmd_scenario_replay() {
+    ensure_project
+    local ms="" json_flag="" attainment=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --ms)         ms="${2:-}"; shift 2 ;;
+            --attainment) attainment="1"; shift ;;
+            --json)       json_flag="1"; shift ;;
+            -?*)          _guard_positional "$1" "Usage: beacon scenario replay [--ms <ms-id>] [--attainment] [--json]" ;;
+            *)            shift ;;
+        esac
+    done
+    BEACON_SCENARIO_MS="$ms" BEACON_SCENARIO_ATTAINMENT="$attainment" \
+        BEACON_JSON="$json_flag" \
+        python3 "$COMMANDS_PY" scenario_replay
+}
