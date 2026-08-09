@@ -993,6 +993,55 @@ def target_records(data: dict, kind: str) -> list:
     return data.get(tc["collection"], []) or []
 
 
+def resolve_target(data: dict, target_id: str = "", *,
+                   index: int | None = None) -> dict:
+    """Resolve a Target by id, or auto-select the single active one,
+    profession-generically (ms-143). The profession-AGNOSTIC generalization of
+    ``core.find_target_milestone`` (which is a dev-concrete symbol): a shared /
+    to-be-shared verb resolves its Target through this rather than calling the
+    dev-specific resolver. Behaviour mirrors find_target_milestone but over the
+    manifest-driven record set (all Target collections), so it never names
+    ``data['milestones']`` itself:
+
+      - ``target_id`` given → that Target. Duplicate ids (corruption) require an
+        explicit ``index`` (1-based); out-of-range / count reported.
+      - empty ``target_id`` → the single ``status == "in_progress"`` Target
+        (0 → "no active", >1 → "specify -m").
+
+    ``core.find_target_milestone`` stays for L1 dev callers (milestone commands /
+    cmd_pr / task_update); this is the L2 path. Raises ``ValueError`` on
+    not-found / ambiguous / none-active / multiple-active. This is a target-level
+    resolver — the sibling of the entry-level ``find_target_entry``."""
+    records = iter_target_records(data)
+    if target_id:
+        matches = [r for r in records if r.get("id") == target_id]
+        if not matches:
+            raise ValueError(f"Target not found: {target_id}")
+        if len(matches) == 1:
+            if index is not None and index != 1:
+                raise ValueError(
+                    f"Target '{target_id}' has only 1 record but "
+                    f"--index {index} was given.")
+            return matches[0]
+        if index is None:
+            raise ValueError(
+                f"Ambiguous target '{target_id}': {len(matches)} records exist "
+                f"(data corruption). Specify which with `--index <n>` where n is "
+                f"1..{len(matches)}.")
+        if index < 1 or index > len(matches):
+            raise ValueError(
+                f"--index {index} is out of range for '{target_id}' "
+                f"(valid: 1..{len(matches)}).")
+        return matches[index - 1]
+    active = [r for r in records if r.get("status") == "in_progress"]
+    if len(active) == 0:
+        raise ValueError("No active target. Run: beacon milestone start <ms-id>")
+    if len(active) > 1:
+        ids = ", ".join(r.get("id", "") for r in active)
+        raise ValueError(f"Multiple active targets. Specify with -m <id>: {ids}")
+    return active[0]
+
+
 def find_target(data: dict, target_id: str) -> dict | None:
     """Locate a Target record by id across all Target collections,
     profession-generically (ms-143). Returns the record dict or ``None`` — the

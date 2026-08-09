@@ -76,3 +76,46 @@ def test_duplicate_id_index_out_of_range_raises():
                   {"id": "ms-1", "status": "todo"}])
     with pytest.raises(ValueError, match="out of range"):
         core.find_target_milestone(data, "ms-1", index=5)
+
+
+# --- resolve_target (L2 generic) resolves the SAME record as find_target_milestone
+# (dev L1) — the parity leader pinned when task_add/task_list/sync/log_finalize were
+# rerouted off the dev-concrete resolver. Messages are generic; the RESOLVED RECORD
+# and the raise/allow decisions match. ---
+
+import occupation  # noqa: E402
+
+
+def test_resolve_target_by_id_matches_ftm():
+    data = _proj([{"id": "ms-1", "status": "todo"},
+                  {"id": "ms-2", "status": "in_progress"}])
+    assert (occupation.resolve_target(data, "ms-2")
+            is core.find_target_milestone(data, "ms-2"))
+
+
+def test_resolve_target_autoselect_matches_ftm():
+    data = _proj([{"id": "ms-1", "status": "done"},
+                  {"id": "ms-2", "status": "in_progress"}])
+    assert (occupation.resolve_target(data, "")
+            is core.find_target_milestone(data, ""))
+
+
+def test_resolve_target_duplicate_index_matches_ftm():
+    data = _proj([{"id": "ms-1", "status": "todo", "title": "a"},
+                  {"id": "ms-1", "status": "todo", "title": "b"}])
+    assert (occupation.resolve_target(data, "ms-1", index=2)
+            is core.find_target_milestone(data, "ms-1", index=2))
+
+
+def test_resolve_target_raises_parity():
+    # not found / none active / multiple active / ambiguous — same raise decisions
+    with pytest.raises(ValueError):
+        occupation.resolve_target(_proj([{"id": "ms-1", "status": "todo"}]), "ms-9")
+    with pytest.raises(ValueError):
+        occupation.resolve_target(_proj([{"id": "ms-1", "status": "done"}]), "")
+    with pytest.raises(ValueError):
+        occupation.resolve_target(_proj([{"id": "ms-1", "status": "in_progress"},
+                                         {"id": "ms-2", "status": "in_progress"}]), "")
+    with pytest.raises(ValueError):
+        occupation.resolve_target(_proj([{"id": "ms-1", "status": "todo"},
+                                         {"id": "ms-1", "status": "todo"}]), "ms-1")

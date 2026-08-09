@@ -277,7 +277,8 @@ def cmd_log_finalize():
     # ms-81 e-1916: status gate. Resolve the target MS the same way log_commit
     # would internally, then surface the warning before mutating state.
     try:
-        target_ms = core.find_target_milestone(data, ms_id)
+        # ms-143: profession-generic target resolution (not the dev-concrete symbol).
+        target_ms = occupation.resolve_target(data, ms_id)
     except ValueError:
         target_ms = None
     if target_ms is not None:

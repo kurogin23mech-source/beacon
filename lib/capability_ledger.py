@@ -152,10 +152,10 @@ KNOWN_SYMBOL_REACH: set = {
     # test forces the deletion). ms-143 PR #1 (#625) already abstracted task_done /
     # opportunity_add / activity_set_status, so those are absent below.
     # dev: resolve the active milestone / write a milestone changelog entry.
-    ("task_add", "core.find_target_milestone"),
-    ("task_list", "core.find_target_milestone"),
-    ("sync", "core.find_target_milestone"),
-    ("log_finalize", "core.find_target_milestone"),
+    # (ms-143 PR#2) task_add / task_list / sync / log_finalize remediated: each now
+    # resolves its target via the profession-generic occupation.resolve_target
+    # instead of the dev-concrete find_target_milestone, so their symbol-reach rows
+    # are removed (the stale-entry test enforces removal once greened).
     ("save", "core.save_entry"),
     # sales: record an activity / communication onto the sales target.
     ("opportunity_activity", "sales_entities.activity_add"),

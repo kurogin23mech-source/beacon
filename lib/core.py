@@ -1260,7 +1260,14 @@ def task_add(data: dict, ms_id: str, description: str, *,
     ``meta.created_by`` (= local-agent string for CLI / debug). Empty
     fields are dropped.
     """
-    target = find_target_milestone(data, ms_id)
+    # ms-143: resolve the target through the profession-generic
+    # occupation.resolve_target (NOT the dev-concrete find_target_milestone), so
+    # the task_add verb no longer symbol-reaches a PROFESSION_CONCRETE_SYMBOL.
+    # resolve_target mirrors find_target_milestone's id / auto-select-active /
+    # duplicate resolution over the manifest record set. Lazy import (occupation
+    # imports core).
+    import occupation
+    target = occupation.resolve_target(data, ms_id)
     meta = {}
     if requested_by:
         meta["requested_by"] = requested_by

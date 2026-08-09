@@ -2116,7 +2116,8 @@ def _cloud_purge_dispatch(action_label: str, fn, *,
 def cmd_sync():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     data = load_project()
-    target = core.find_target_milestone(data, ms_id)
+    # ms-143: profession-generic target resolution (not the dev-concrete symbol).
+    target = occupation.resolve_target(data, ms_id)
 
     entries = target.setdefault("entries", [])
     existing_hashes = set()
