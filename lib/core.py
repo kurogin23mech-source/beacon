@@ -595,26 +595,31 @@ def milestone_add(data: dict, title: str, target_date: str = "",
     label in MS lists / detail. Empty fields are dropped via
     ``_clean_author``.
     """
-    ms_id = next_milestone_id(data)
-    # Collision guard — should be unreachable when next_milestone_id is
-    # correct, but kept as a structural invariant so future allocator
-    # changes can't silently re-introduce the bug.
-    if any(ms.get("id") == ms_id for ms in data.get("milestones", [])):
-        raise ValueError(
-            f"Milestone ID collision: {ms_id} already exists. "
-            "This indicates corrupted milestone IDs — run `beacon doctor`."
-        )
-    # ms-109 e-3698 (fable A-4): build the generic Target skeleton (id / label /
-    # status / created_at / created_by / assignee) through the occupation-
-    # agnostic base so the dev add-path and the base share one definition and
-    # the base defaults (created_at / created_by via work_base) apply. The
-    # dev-specific fields — the legacy ``title`` dual-write, ``target_date``,
-    # and the ``commits`` list — ride along via ``extra``.
-    ms = work_model.new_target(
-        ms_id, title, status="todo",
+    # ms-143 (leader 握り 設計判断 b/B): the profession-neutral skeleton + the
+    # collection append are now the ONE generic writer ``occupation.create_target``
+    # (dispatched by ``profession_manifest``), so this verb no longer names
+    # ``data['milestones']`` itself. ``milestone_add`` stays as the dev-FRONTEND
+    # helper: it owns the dev enrichment below (ms-81 empty-assignee no-pollution /
+    # priority / description / objective / AC / owner / author) and delegates only
+    # the skeleton. Imported lazily because ``occupation`` imports ``core`` — a
+    # top-level import here would cycle (``create_target`` itself stays core-free
+    # so a future ``core → occupation`` delegation stays clean). The legacy
+    # ``title`` dual-write, ``target_date`` and ``commits`` ride via ``extra``.
+    # ms-126 forcing function: resolve/validate the priority BEFORE any write so a
+    # rejected value (human empty / untriaged+explicit conflict) raises before
+    # create_target appends. ms-143 preserved this pre-write invariant when the
+    # append moved into create_target (previously the raise happened before the
+    # tail append; now it must happen before create_target's append).
+    resolved_priority = _resolve_priority_for_write(
+        priority, allow_untriaged=allow_untriaged
+    )
+    import occupation
+    ms = occupation.create_target(
+        data, "milestone", label=title,
         created_at=_now_iso(), created_by=_get_actor(), assignee=assignee,
         title=title, target_date=target_date, commits=[],
     )
+    ms_id = ms["id"]
     # Preserve the milestone no-pollution rule (ms-81): an empty assignee is
     # dropped rather than persisted as ``""``. The base constructor always
     # emits the generic slot; milestones opt out of the empty case so a doc
@@ -627,9 +632,7 @@ def milestone_add(data: dict, title: str, target_date: str = "",
     # allow_untriaged=False and an empty value is rejected here; machine paths
     # pass allow_untriaged=True and an empty value becomes the ``untriaged``
     # sentinel (visible debt), never a silent blank.
-    ms["priority"] = _resolve_priority_for_write(
-        priority, allow_untriaged=allow_untriaged
-    )
+    ms["priority"] = resolved_priority
     if objective:
         ms["objective"] = objective
     if acceptance_criteria:
@@ -648,7 +651,8 @@ def milestone_add(data: dict, title: str, target_date: str = "",
     author_clean = _clean_author(author)
     if author_clean:
         ms.setdefault("meta", {})["author"] = author_clean
-    data["milestones"].append(ms)
+    # NB: ``occupation.create_target`` already appended ``ms`` to the collection;
+    # the enrichment above mutates that same record in place (ms-143).
     return ms_id
 
 
