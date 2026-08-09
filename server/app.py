@@ -836,8 +836,10 @@ def _resolve_author(user: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-_BUS_DELIVERY_MODES = {"auto-execute", "propose-to-ai", "notify-user-only"}
-_BUS_DELIVERY_DEFAULT = "propose-to-ai"
+# _BUS_DELIVERY_MODES / _BUS_DELIVERY_DEFAULT moved to routers_projects.py with
+# post_bus_event (ms-127 e-4871 PR3c). Single source of truth there; removed the
+# now-orphaned app.py copies so the two can never silently diverge on a future
+# delivery-mode addition (independent AX + maintainability review consensus).
 
 
 # ---------------------------------------------------------------------------
