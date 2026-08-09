@@ -75,11 +75,61 @@ STEP_INBOUND_STIMULUS = "inbound_stimulus"
 STEP_ASSERT = "assert"
 VALID_STEP_KINDS = {STEP_PERSONA_CLI, STEP_INBOUND_STIMULUS, STEP_ASSERT}
 
+# quality_signals reason types (ms-136 e-4699 / leader 論点3): an AC that could
+# not be turned into an executable, observable assert is reported — but WHY it
+# could not must be categorized, so a correctly out-of-scope AC is never
+# mis-reported as a SPEC defect.
+QS_NEEDS_REWRITE = "needs-observable-rewrite"   # SPEC 品質欠陥: 観測可能に書けてない
+QS_OUT_OF_SCOPE = "out-of-scope-boundary"       # 方針4 で正しく除外 (欠陥ではない)
+VALID_QS_REASONS = {QS_NEEDS_REWRITE, QS_OUT_OF_SCOPE}
+
 
 class ScenarioError(Exception):
     """A scenario is malformed (bad step kind, missing required field, assert
-    without a SPEC citation). Raised before/while running — distinct from a
-    journey *failing* its assertions, which is reported, not raised."""
+    without provenance, mis-categorized quality signal). Raised before/while
+    running — distinct from a journey *failing* its assertions, which is
+    reported, not raised."""
+
+
+def validate_scenario(scenario: dict) -> None:
+    """Structural + discipline validation of a scenario, independent of running
+    it. Enforces the握った contract so a malformed scenario is rejected before
+    it is run OR saved as a diffable asset (single source of validation, reused
+    by scenario_store.save_scenario). Raises ScenarioError on any violation.
+    """
+    if not isinstance(scenario, dict) or not isinstance(scenario.get("steps"), list):
+        raise ScenarioError("scenario must be a dict with a 'steps' list")
+    for i, step in enumerate(scenario["steps"]):
+        if not isinstance(step, dict):
+            raise ScenarioError(f"step {i}: must be an object")
+        kind = step.get("kind")
+        if kind not in VALID_STEP_KINDS:
+            raise ScenarioError(
+                f"step {i}: unknown kind {kind!r} (valid: {sorted(VALID_STEP_KINDS)})")
+        if kind == STEP_PERSONA_CLI:
+            if not isinstance(step.get("argv"), list) or not step["argv"]:
+                raise ScenarioError(f"step {i}: persona_cli needs a non-empty argv list")
+        elif kind == STEP_INBOUND_STIMULUS:
+            if not step.get("target") or not step.get("summary"):
+                raise ScenarioError(
+                    f"step {i}: inbound_stimulus needs 'target' and 'summary'")
+        else:  # STEP_ASSERT — both provenance axes required (方針3 + 論点2)
+            if not (step.get("spec_source") or "").strip():
+                raise ScenarioError(
+                    f"step {i}: assert needs 'spec_source' (期待値の SPEC 出典一文)")
+            if not (step.get("observation_basis") or "").strip():
+                raise ScenarioError(
+                    f"step {i}: assert needs 'observation_basis' (観測 field + "
+                    "なぜ SPEC 概念に対応するか)")
+    # quality_signals: optional, but each must be categorized (論点3)
+    for j, qs in enumerate(scenario.get("quality_signals", []) or []):
+        if not isinstance(qs, dict):
+            raise ScenarioError(f"quality_signals[{j}]: must be an object")
+        if qs.get("reason_type") not in VALID_QS_REASONS:
+            raise ScenarioError(
+                f"quality_signals[{j}]: reason_type must be one of "
+                f"{sorted(VALID_QS_REASONS)} (欠陥=needs-observable-rewrite か "
+                f"正しくスコープ外=out-of-scope-boundary か を区別する)")
 
 
 # ---------------------------------------------------------------------------
@@ -221,14 +271,33 @@ def _walk_json_path(obj, path: str):
 
 def _run_assert(step: dict, last_cli: Optional[dict]) -> dict:
     """Evaluate one observation assertion against the preceding persona_cli's
-    output. Every assert must cite the SPEC line it verifies (方針3) — the
-    runner refuses one that doesn't, so a scenario cannot smuggle in an oracle
-    with no provenance."""
+    output.
+
+    Every assert must carry BOTH provenance axes (ms-136 e-4699 / leader 論点2),
+    or the runner refuses it — so no oracle can be smuggled in without a
+    reviewable trail on either axis:
+
+    - ``spec_source`` — the SPEC 一文 that makes the *expected value* true (方針3:
+      オラクルは SPEC 由来). This is "what is true".
+    - ``observation_basis`` — which CLI command / field the value is *observed*
+      through, and why that field corresponds to the SPEC's user-visible concept.
+      This is "how it is observed". It closes the residual leak where an
+      implementer-named field (e.g. ``.owner`` standing in for the SPEC's
+      "ball") could green-light buggy code: the基盤 (何が真か / どう観測するか)
+      both stay diff-reviewable, so a human/leader can challenge
+      "asserted ``.owner`` as ball — is that really the SPEC's ball concept?".
+    """
     spec_source = (step.get("spec_source") or "").strip()
     if not spec_source:
         raise ScenarioError(
             "assert step must carry 'spec_source' (方針3: オラクルは SPEC 由来 "
-            "+ 出典一文) — assertion without provenance is refused")
+            "+ 出典一文) — assertion without expected-value provenance is refused")
+    observation_basis = (step.get("observation_basis") or "").strip()
+    if not observation_basis:
+        raise ScenarioError(
+            "assert step must carry 'observation_basis' (leader 論点2: どの CLI "
+            "field で観測するか + なぜ SPEC 概念に対応するか) — assertion without "
+            "observation provenance is refused")
     kind = step.get("assert")
     if last_cli is None and kind in ("exit_code", "stdout_contains",
                                      "stdout_not_contains", "json_path"):
@@ -236,7 +305,8 @@ def _run_assert(step: dict, last_cli: Optional[dict]) -> dict:
             f"assert '{kind}' has no preceding persona_cli output to check")
 
     def result(ok, reason=None):
-        out = {"ok": ok, "assert": kind, "spec_source": spec_source}
+        out = {"ok": ok, "assert": kind, "spec_source": spec_source,
+               "observation_basis": observation_basis}
         if reason:
             out["reason"] = reason
         return out
@@ -292,15 +362,8 @@ def run_scenario(scenario: dict, *, workdir: Optional[str] = None,
     the report shows the whole journey (the e-4700 bisect reads all layers), but
     ``failure`` pins the *first* divergence — the honest "where it broke".
     """
-    if not isinstance(scenario, dict) or "steps" not in scenario:
-        raise ScenarioError("scenario must be a dict with a 'steps' list")
-
-    # Validate step kinds up front (fail fast on a malformed scenario).
-    for i, step in enumerate(scenario["steps"]):
-        k = step.get("kind")
-        if k not in VALID_STEP_KINDS:
-            raise ScenarioError(
-                f"step {i}: unknown kind {k!r} (valid: {sorted(VALID_STEP_KINDS)})")
+    # Fail fast on a malformed scenario (single source of validation).
+    validate_scenario(scenario)
 
     beacon_bin = beacon_bin or DEFAULT_BEACON_BIN
     base_env = dict(env if env is not None else os.environ)
@@ -334,6 +397,8 @@ def run_scenario(scenario: dict, *, workdir: Optional[str] = None,
                        "reason": r.get("reason", "step failed")}
             if r.get("spec_source"):
                 failure["spec_source"] = r["spec_source"]
+            if r.get("observation_basis"):
+                failure["observation_basis"] = r["observation_basis"]
 
     return {
         "name": scenario.get("name", ""),

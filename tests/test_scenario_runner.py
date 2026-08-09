@@ -21,6 +21,9 @@ import scenario_runner as sr  # noqa: E402
 
 BALL_SELF_SRC = "SPEC §6: 最新 inbound → ボールは自分 (BALL_SELF)"
 BALL_CP_SRC = "SPEC §6: 最新 outbound → ボールは相手 (BALL_COUNTERPART)"
+# observation_basis: どの CLI field で観測するか + なぜ SPEC 概念に対応するか (論点2)
+BALL_OBS = ("communication list --json の 'ball' フィールド。SPEC のユーザー可視概念"
+            "『ボール(手番)』を直接表す派生値なので対応する。")
 
 
 def _sales_reply_journey():
@@ -41,7 +44,8 @@ def _sales_reply_journey():
              "argv": ["communication", "list", "opp-1", "--json"],
              "label": "送信後の ball を観測"},
             {"kind": "assert", "assert": "json_path", "path": "ball",
-             "value": "counterpart", "spec_source": BALL_CP_SRC},
+             "value": "counterpart", "spec_source": BALL_CP_SRC,
+             "observation_basis": BALL_OBS},
             {"kind": "inbound_stimulus", "target": "opp-1",
              "summary": "検討します、と返信あり", "channel": "email",
              "expect_ingested": True, "label": "顧客が返信 (環境刺激)"},
@@ -49,7 +53,8 @@ def _sales_reply_journey():
              "argv": ["communication", "list", "opp-1", "--json"],
              "label": "取り込み後の ball を観測"},
             {"kind": "assert", "assert": "json_path", "path": "ball",
-             "value": "self", "spec_source": BALL_SELF_SRC},
+             "value": "self", "spec_source": BALL_SELF_SRC,
+             "observation_basis": BALL_OBS},
         ],
     }
 
@@ -88,8 +93,10 @@ def test_assertion_mismatch_is_reported_not_raised(tmp_path):
     assert report["passed"] is False
     assert report["failure"]["index"] == 6
     assert report["failure"]["kind"] == "assert"
-    # the failing assert keeps its SPEC provenance in the failure record
+    # the failing assert keeps BOTH provenance axes in the failure record
+    # (leader 論点2: 何が真か / どう観測するか の両軸を review 可能に残す)
     assert report["failure"]["spec_source"] == BALL_SELF_SRC
+    assert report["failure"]["observation_basis"] == BALL_OBS
 
 
 def test_persona_cli_unexpected_error_is_failure(tmp_path):
@@ -125,6 +132,24 @@ def test_assert_without_spec_source_raises(tmp_path):
         sr.run_scenario(scenario, workdir=str(tmp_path))
 
 
+def test_assert_without_observation_basis_raises(tmp_path):
+    # leader 論点2: an assert must also declare HOW it observes (which field +
+    # why that field = the SPEC concept), not just what SPEC sentence is true.
+    scenario = {
+        "seed": {"profession": "sales", "name": "S", "objective": "o"},
+        "steps": [
+            {"kind": "persona_cli", "argv": ["opportunity", "add", "D"]},
+            {"kind": "persona_cli",
+             "argv": ["communication", "list", "opp-1", "--json"]},
+            {"kind": "assert", "assert": "json_path", "path": "target",
+             "value": "opp-1", "spec_source": "SPEC: 対象商談に紐づく"},
+            # ↑ has spec_source but no observation_basis → refused
+        ],
+    }
+    with pytest.raises(sr.ScenarioError):
+        sr.run_scenario(scenario, workdir=str(tmp_path))
+
+
 def test_unknown_step_kind_raises(tmp_path):
     scenario = {"steps": [{"kind": "teleport", "argv": []}]}
     with pytest.raises(sr.ScenarioError):
@@ -144,7 +169,8 @@ def test_dev_seed_journey_runs(tmp_path):
              "label": "状態を JSON で観測"},
             {"kind": "assert", "assert": "json_path", "path": "profession",
              "value": "dev",
-             "spec_source": "SPEC スコープ: profession-agnostic に journey を回す"},
+             "spec_source": "SPEC スコープ: profession-agnostic に journey を回す",
+             "observation_basis": "status --json の 'profession' フィールド"},
         ],
     }
     report = sr.run_scenario(scenario, workdir=str(tmp_path))
