@@ -3474,7 +3474,7 @@ def _handle_scenario(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "scenario_save",
                                 {"BEACON_SCENARIO_PATH": args.path,
                                  "BEACON_JSON": json_flag})
-    if subc == "list":
+    if subc in ("list", "ls"):  # 'ls' alias matches bin/beacon (cross-frontend parity)
         return _run_commands_py(root, "scenario_list",
                                 {"BEACON_SCENARIO_MS": args.ms or "",
                                  "BEACON_JSON": json_flag})
