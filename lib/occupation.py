@@ -816,6 +816,164 @@ def profession_manifest(data: dict, profession: str | None = None) -> dict:
     return {"profession": prof, "target_classes": target_classes}
 
 
+def target_class(data: dict, kind: str) -> dict:
+    """Return the ``profession_manifest`` target-class descriptor for ``kind``
+    (ms-143). Raises ``ValueError`` if this project's profession has no such
+    class, so a caller minting / locating a Target of an unknown kind fails
+    loudly instead of silently writing to the wrong collection."""
+    classes = profession_manifest(data)["target_classes"]
+    for tc in classes:
+        if tc["kind"] == kind:
+            return tc
+    # review finding #3: name the valid kinds so a caller with a typo / wrong
+    # profession sees what IS available, not just what isn't.
+    valid = [tc["kind"] for tc in classes]
+    raise ValueError(
+        f"No target-class {kind!r} in this project's profession "
+        f"(valid kinds: {valid})")
+
+
+def next_target_id(data: dict, kind: str) -> str:
+    """Allocate the next id for a Target of ``kind``, profession-generically
+    (ms-143, 設計判断 ii). The collection and ``id_prefix`` come from
+    ``profession_manifest`` so each target-class keeps an INDEPENDENT id space
+    (milestones count ``ms-``, opportunities count ``opp-``), collision-safe and
+    deterministic via ``work_base.next_suffixed_id`` (max integer suffix + 1).
+
+    This is the single generic allocator the hand-rolled per-collection ones
+    (``core.next_milestone_id`` / ``sales_entities.next_opportunity_id``) collapse
+    into; those stay as thin back-compat shims delegating here."""
+    tc = target_class(data, kind)
+    id_field = tc.get("id_field", "id")
+    ids = [rec.get(id_field, "") for rec in data.get(tc["collection"], []) or []]
+    return work_base.next_suffixed_id(ids, tc["id_prefix"])
+
+
+def create_target(data: dict, kind: str, *, label: str,
+                  status: str = "", created_at: str = "", created_by: str = "",
+                  assignee: str = "", stamp_created_by: bool = True,
+                  **extra) -> dict:
+    """Create a new Target of ``kind`` and append it to its collection,
+    profession-generically (ms-143, 設計判断 b 系統2 = target 作成). Resolves the
+    collection + ``id_prefix`` from ``profession_manifest``, allocates the id via
+    ``next_target_id``, builds the occupation-agnostic skeleton through
+    ``work_model.new_target`` (id / label / status / created_at / created_by /
+    assignee), and appends. Profession-specific fields (a milestone's
+    ``target_date`` / ``commits``, an opportunity's ``phase`` / ``account_id``)
+    ride via ``**extra``. Returns the new record.
+
+    Both a dev milestone and a sales opportunity mint through THIS one path — the
+    ``kind``-keyed manifest lookup is the only place profession enters, so the
+    verb itself never names ``data['milestones']`` / ``data['opportunities']``.
+    Workflow around creation (seeding a phase's anchor activities, the ms-81
+    empty-assignee no-pollution rule) stays at the caller / CLI frontend, not in
+    this primitive (leader 握り: primitive は create に専念、workflow は CLI).
+
+    ``stamp_created_by`` (ms-143 parity-first): the base always mints a
+    ``created_by``, but a sales Opportunity historically carries none
+    (DEV_ONLY_SKELETON_KEYS). A frontend that must preserve that existing
+    profession skeleton difference passes ``stamp_created_by=False`` so the
+    refactor stays a pure abstraction (no behavior change), NOT an enrichment that
+    silently unifies the difference (leader 握り: 差は surface して温存、混ぜない).
+    Whether Opportunities SHOULD carry ``created_by`` is a separate product
+    decision tracked outside this refactor."""
+    tc = target_class(data, kind)
+    collection = tc["collection"]
+    target_id = next_target_id(data, kind)
+    # Collision guard (review finding #1): create_target is now the SINGLE writer
+    # for all target creation, so the ID-uniqueness invariant that
+    # ``core.milestone_add`` used to enforce belongs here. ``next_target_id`` is
+    # max-suffix+1 so this is normally unreachable, but a corrupted id space
+    # (e.g. a hand-edited project.json with duplicate ids) would otherwise
+    # silently append a duplicate — raise instead of corrupting further.
+    id_field = tc.get("id_field", "id")
+    if any(rec.get(id_field) == target_id
+           for rec in data.get(collection, []) or []):
+        raise ValueError(
+            f"Target ID collision: {target_id} already exists in "
+            f"{collection!r}. Corrupted ids — run `beacon doctor`.")
+    rec = _wm.new_target(
+        target_id, label, status=status or _wm.TODO_STATUS,
+        created_at=created_at, created_by=created_by, assignee=assignee, **extra)
+    if not stamp_created_by:
+        rec.pop("created_by", None)
+    data.setdefault(collection, []).append(rec)
+    return rec
+
+
+def _find_in_entry_list(entries: list, entry_id: str, target: dict):
+    """Locate ``entry_id`` in ``entries``, recursing into each entry's nested
+    ``entries`` children — the same recursion ``core.find_entry`` (_find_entry_in)
+    does for dev subtasks. Returns (target, arm_list, entry, index) or None."""
+    for i, entry in enumerate(entries):
+        if entry.get("id") == entry_id:
+            return (target, entries, entry, i)
+        hit = _find_in_entry_list(entry.get("entries", []) or [], entry_id, target)
+        if hit:
+            return hit
+    return None
+
+
+def find_target_entry(data: dict, entry_id: str):
+    """Locate a work-item entry by id across ALL Target collections' work-item
+    arms, profession-generically (ms-143, 設計判断 b 系統3). Returns
+    ``(target, arm_list, entry, index)`` or ``None`` — the same shape
+    ``core.find_entry`` returns for the dev case, so ``set_entry_state`` can close
+    a dev task (a milestone's ``entries``, incl. nested subtasks) and a sales
+    activity (an opportunity's ``activities``) through ONE path. The work-item arm
+    per target-class comes from ``profession_manifest`` so the locator never names
+    ``data['milestones']`` / ``data['opportunities']`` itself.
+
+    SCOPE: walks Target work-item arms only. Operation entries (operations are NOT
+    Targets) stay ``core.find_entry``'s responsibility — out of the ms-143 'target
+    CRUD' scope."""
+    for tc in profession_manifest(data)["target_classes"]:
+        arm = (tc.get("work_item_arm") or {}).get("arm")
+        if not arm:
+            continue
+        for target in data.get(tc["collection"], []) or []:
+            hit = _find_in_entry_list(target.get(arm, []) or [], entry_id, target)
+            if hit:
+                return hit
+    return None
+
+
+def set_entry_state(data: dict, entry_id: str, status: str, *,
+                    at: str = "", actor: str = "",
+                    reason: str = "") -> tuple[dict, dict]:
+    """Transition a work-item's lifecycle state, profession-generically (ms-143,
+    設計判断 b 系統3 = 状態変更). ``done`` routes through ``work_model.mark_done``
+    (canonical ``status`` / ``done_at`` + ``done_by`` / ``done_reason`` completion
+    attribution); ``todo`` is a plain status set. This unifies ``core.task_done``
+    (done) and ``sales_entities.activity_set_status`` (todo/done) behind one path.
+
+    ``cancelled`` is a legitimate terminal state but carries its own audit stamp
+    (``work_base.stamp_cancel`` via each occupation's cancel verb), so it is
+    rejected here rather than set bare — mirroring ``activity_set_status``'s
+    ``_SETTABLE`` guard. Attribute patches (rename / amount / deadline) are a
+    SEPARATE responsibility (a future ``update_entry``), NOT folded here, because
+    the completion attribution ``mark_done`` writes must not leak onto plain field
+    edits (設計判断 i = 分離).
+
+    Returns ``(parent_target, work_item_entry)`` — the containing Target first,
+    the work item second (review finding #4: the positional order is documented so
+    callers don't swap them). Raises ``ValueError`` if the entry is not found or
+    ``status`` is not settable here."""
+    hit = find_target_entry(data, entry_id)
+    if not hit:
+        raise ValueError(f"Entry not found: {entry_id}")
+    target, _arm_list, entry, _idx = hit
+    if status == _wm.DONE_STATUS:
+        _wm.mark_done(entry, at=at, actor=actor, reason=reason)
+    elif status == _wm.TODO_STATUS:
+        entry["status"] = status
+    else:
+        raise ValueError(
+            f"status must be 'todo' or 'done' (cancel has its own audit-stamped "
+            f"path), got {status!r}")
+    return target, entry
+
+
 def iter_work_items(data: dict):
     """Yield ``(work_item, target, arm)`` for every planned work item across
     occupations, profession-agnostically (ms-142 e-5009).

@@ -227,7 +227,14 @@ def cmd_task_done():
     # ms-81 e-1916: status gate. Look up the entry's parent MS first so we
     # can warn if the MS isn't write-authorised. The PR-merge sub-branch
     # below also goes through the same gate.
-    result = core.find_entry(data, entry_id)
+    # ms-143: locate through the manifest-driven occupation.find_target_entry
+    # (same (target, arm_list, entry, index) shape) so the ``task done`` verb no
+    # longer names data['milestones'] itself. Operation entries are out of Target
+    # scope here (dead for this verb — operation tasks use `operation task done`);
+    # a miss simply skips the gate and falls through to core.task_done, which
+    # raises the same "Entry not found" as before.
+    import occupation
+    result = occupation.find_target_entry(data, entry_id)
     if result:
         parent_ms, _, entry, _ = result
         if not _check_ms_status_for_write(
