@@ -85,6 +85,26 @@ def test_bus_audit_not_shadowed_by_event_id_wildcard():
     )
 
 
+def test_bus_unread_not_shadowed_by_event_id_wildcard():
+    # ms-127 e-4871 PR3b: /bus/unread and /bus/{event_id} now live in the SAME
+    # router (make_bus_delivery_router). /bus/{event_id} must be registered
+    # LAST or it shadows the literal /bus/unread (event_id="unread"). A
+    # 200+sentinel proves the request reached list_unread_bus_events.
+    # list_unread_bus_events has a REQUIRED `recipient_id` query param, so
+    # omitting it yields a 422 validation error — which uniquely proves the
+    # request reached list_unread_bus_events. If /bus/unread were shadowed by
+    # the /bus/{event_id} wildcard, it would instead hit get_bus_event (which
+    # has no required query param) and return 404, never 422.
+    resp = _client.get("/api/projects/p1/bus/unread")
+    assert resp.status_code == 422 and "recipient_id" in resp.text, (
+        "GET /bus/unread did not reach list_unread_bus_events (got %s %r) — the "
+        "/bus/{event_id} wildcard is likely registered BEFORE /bus/unread in "
+        "make_bus_delivery_router. Keep get_bus_event (/bus/{event_id}) as the "
+        "LAST route defined in that factory."
+        % (resp.status_code, resp.text[:120])
+    )
+
+
 def test_bus_event_id_still_resolves_for_real_event_ids():
     # A non-'audit' segment must still reach the delivery handler (which 404s
     # here because find_bus_event is stubbed to None) — the ordering fix must
