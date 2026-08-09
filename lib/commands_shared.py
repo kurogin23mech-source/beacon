@@ -28,7 +28,7 @@ import json
 import os
 import re
 import sys
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from store import get_store
 import core
@@ -1390,8 +1390,23 @@ def _resolve_recipient_email_via_self_sessions(recipient: str) -> str:
     return ""
 
 
+def _make_notice(
+    advise: Optional[Callable[[str], None]],
+) -> Callable[[str], None]:
+    """ms-140: return the sink for a non-fatal advisory. When ``advise`` is
+    given (the --json path), advisories are collected by the caller (folded into
+    the result's "notes"); when it is None, they print to stderr as before. Both
+    ``bus send`` helpers route their proceed-anyway warnings through this so the
+    "keep --json stdout pure" fallback lives in exactly one place (single source
+    of truth). Hard-error paths do NOT use this — they sys.exit and print to
+    stderr directly, since they never coexist with a success JSON."""
+    return advise if advise is not None else (
+        lambda m: print(m, file=sys.stderr))
+
+
 def _resolve_recipient_live(
-    recipient: str, channel: str, advise=None,
+    recipient: str, channel: str,
+    advise: Optional[Callable[[str], None]] = None,
 ) -> Tuple[str, Optional[str]]:
     """Liveness gate + soft auto-swap for stale session_id reuse.
 
@@ -1434,8 +1449,7 @@ def _resolve_recipient_live(
     # streams), corrupts the caller's parse, and drives a duplicate resend. The
     # hard-refuse path (BEACON_BUS_REFUSE_STALE) keeps printing to stderr since
     # it sys.exit's and never yields a success JSON.
-    _notice = advise if advise is not None else (
-        lambda m: print(m, file=sys.stderr))
+    _notice = _make_notice(advise)
     if channel != "dm" or not recipient:
         return (recipient, None, "")
     if os.environ.get("BEACON_BUS_NO_LIVE_CHECK", "") == "1":

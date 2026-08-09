@@ -138,6 +138,26 @@ def test_recipient_in_other_project_auto_routes(monkeypatch, capsys):
     assert TARGET in err
 
 
+def test_auto_route_notice_goes_to_advise_sink_keeps_stderr_clean(
+        monkeypatch, capsys):
+    """ms-140 (independent maintainability review, PR #617): when the caller
+    passes an ``advise`` sink (the --json path), the proceed-anyway auto-route
+    notice must go INTO the sink and NOT to stderr. Otherwise it merges ahead of
+    the JSON result on a combined stdout+stderr stream and the caller re-sends →
+    duplicate DM. Mirror of the _resolve_recipient_live isolation test."""
+    _stub_client(
+        monkeypatch,
+        target=[],
+        user=[{"session_id": RECIPIENT, "project_id": OTHER}],
+    )
+    collected: list[str] = []
+    routed = cmd_bus._validate_recipient_project(
+        RECIPIENT, TARGET, "dm", advise=collected.append)
+    assert routed == OTHER
+    assert capsys.readouterr().err == ""  # merge-safe: nothing on stderr
+    assert any("Auto-routing" in m for m in collected)
+
+
 def test_recipient_in_other_project_strict_mode_errors(monkeypatch, capsys):
     monkeypatch.setenv("BEACON_BUS_NO_AUTO_ROUTE", "1")
     _stub_client(

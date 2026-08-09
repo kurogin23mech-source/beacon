@@ -30,7 +30,7 @@ import json
 import os
 import sys
 import urllib.parse
-from typing import Optional
+from typing import Callable, Optional
 
 from commands_shared import (
     load_project,
@@ -46,6 +46,7 @@ from commands_shared import (
     _bus_auto_execute_channels,
     _mirror_auto_execute_channels_to_local,
     _resolve_recipient_live,
+    _make_notice,
 )
 
 
@@ -1025,8 +1026,11 @@ def cmd_bus_send():
         # ms-140: fold the non-fatal advisory notes into the result so the
         # human-facing info isn't lost while stdout stays a single pure JSON
         # object (no stderr interleaving that could make a caller re-send).
-        if _advisories:
-            out["notes"] = list(_advisories)
+        # Always emit the key (empty list when no advisories) so the schema is
+        # stable and self-describing: a caller can rely on out["notes"] instead
+        # of guessing whether an absent key means "none" or "unsupported build"
+        # (independent AX review, PR #617).
+        out["notes"] = list(_advisories)
         print(json.dumps(out, ensure_ascii=False))
         return
     line = (
@@ -1440,7 +1444,7 @@ def cmd_bus_status():
 
 def _validate_recipient_project(
     recipient: str, target_project_id: str, channel: str,
-    advise=None,
+    advise: Optional[Callable[[str], None]] = None,
 ):
     """Cross-project pre-flight for ``beacon bus send --to <recipient>``.
 
@@ -1483,8 +1487,7 @@ def _validate_recipient_project(
     # never land on stderr where a merged stdout+stderr stream would corrupt the
     # JSON result and trigger a duplicate resend. Hard-error paths below keep
     # printing to stderr directly (they sys.exit and never emit a success JSON).
-    _notice = advise if advise is not None else (
-        lambda m: print(m, file=sys.stderr))
+    _notice = _make_notice(advise)
     if channel != "dm" or not recipient:
         return target_project_id
     if os.environ.get("BEACON_BUS_SKIP_TO_CHECK", "") == "1":

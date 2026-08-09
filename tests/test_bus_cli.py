@@ -217,6 +217,9 @@ def test_bus_send_json_mode(monkeypatch, capsys, stub):
     out = capsys.readouterr().out.strip()
     parsed = json.loads(out)
     assert parsed["channel"] == "x"
+    # ms-140: "notes" is always present (empty when no advisory fired) so the
+    # schema is stable and self-describing (independent AX review, PR #617).
+    assert parsed["notes"] == []
 
 
 # ---------------------------------------------------------------------------
