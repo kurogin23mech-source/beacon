@@ -14,6 +14,8 @@ this per-test via explicit env swaps, so the global default never masks them.
 
 import os
 
+import pytest
+
 # Declare the test harness human-driven. os.environ mutation here also
 # propagates to subprocess children (tests that invoke the `beacon` CLI), so
 # both in-process command calls and subprocess runs inherit it.
@@ -25,3 +27,14 @@ os.environ.setdefault("BEACON_SESSION_KIND", "human")
 # residue projects behind. setdefault (not a hard set) so a test that
 # deliberately clears it can. Propagates to `beacon` CLI subprocess children.
 os.environ.setdefault("BEACON_TEST_MODE", "1")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_bus_sent_log(tmp_path, monkeypatch):
+    """ms-141 / e-4965: point the bus recent-send guard's log at a per-test tmp
+    file so `beacon bus send` (dm) in any test never writes the real repo
+    .beacon/ and never cross-contaminates other tests via a shared fingerprint
+    log. Tests that specifically exercise the guard set their own contents."""
+    monkeypatch.setenv(
+        "BEACON_BUS_SENT_LOG_PATH", str(tmp_path / "bus-sent-log.json"))
+

@@ -24,10 +24,12 @@ Dependency direction (ms-127 SPEC 方針4 = 循環 import を構造で防ぐ):
 so the dependency graph stays one-directional and no cycle can form.
 """
 
+import hashlib
 import json
 import os
 import re
 import sys
+import time
 from typing import Callable, Optional, Tuple
 
 from store import get_store
@@ -1163,6 +1165,124 @@ def _write_bus_budget(data: dict) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# ms-141 / e-4965: client-side recent-send guard for idempotent DM sends.
+#
+# The server only dedups on client_event_id when is_retry=true (app.py), so a
+# naive re-run of `beacon bus send` (fresh key, is_retry=false) always creates a
+# true duplicate. This guard makes an *accidental identical re-send* idempotent
+# by DEFAULT without any server change: `beacon bus send` records a fingerprint
+# (project + channel + recipient + payload) of each dm send in a small cwd-local
+# log; a second send with the same fingerprint within a short window returns the
+# first send's result verbatim instead of posting again. Scoped to channel="dm"
+# because non-dm channels (operation-trigger / trek / heartbeat) legitimately
+# repeat identical payloads. `--allow-duplicate` bypasses the guard for an
+# intentional resend (AX: auto-correct the common accidental case, keep an
+# explicit escape for the rare intentional one).
+# ---------------------------------------------------------------------------
+_BUS_DEDUP_WINDOW_DEFAULT = 90   # seconds; accidental re-runs are seconds apart
+_BUS_SENT_LOG_MAX = 30           # keep only the most-recent N sends
+
+
+def _get_bus_sent_log_path() -> str:
+    """Resolve .beacon/bus-sent-log.json under the current project root.
+
+    ``BEACON_BUS_SENT_LOG_PATH`` overrides the location (tests point it at a
+    per-test tmp file so the guard never writes the real repo .beacon/ or
+    cross-contaminates other tests)."""
+    override = os.environ.get("BEACON_BUS_SENT_LOG_PATH", "").strip()
+    if override:
+        return override
+    beacon_dir = os.path.dirname(get_project_file()) or ".beacon"
+    return os.path.join(beacon_dir, "bus-sent-log.json")
+
+
+def _read_bus_sent_log() -> list:
+    path = _get_bus_sent_log_path()
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except (OSError, json.JSONDecodeError):
+        # A corrupted log just means "no recent-send memory" — fail open so the
+        # guard never blocks a legitimate send on a bad file.
+        return []
+
+
+def _write_bus_sent_log(entries: list) -> None:
+    path = _get_bus_sent_log_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(entries[-_BUS_SENT_LOG_MAX:], f, ensure_ascii=False, indent=2)
+
+
+def _bus_dedup_window_seconds() -> int:
+    """Recent-send window in seconds. 0 or negative disables the guard."""
+    raw = os.environ.get("BEACON_BUS_DEDUP_WINDOW_SEC", "").strip()
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            return _BUS_DEDUP_WINDOW_DEFAULT
+    return _BUS_DEDUP_WINDOW_DEFAULT
+
+
+def _bus_send_fingerprint(
+    *, project_id: str, channel: str, recipient: str,
+    recipient_user: str, payload_raw: str,
+) -> str:
+    """Stable fingerprint of a logical send (user-intent parts only, not the
+    metadata the CLI stamps onto the payload afterwards)."""
+    basis = "|".join([
+        project_id or "", channel or "", recipient or "",
+        recipient_user or "", payload_raw or "",
+    ])
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16]
+
+
+def _bus_find_recent_send(
+    entries: list, fingerprint: str, window_sec: int, now: float,
+) -> Optional[dict]:
+    """Return the most-recent log entry matching ``fingerprint`` if it is within
+    ``window_sec`` of ``now``, else None. Pure (now/window injected) so the
+    staleness boundary is unit-testable. window_sec <= 0 disables the guard."""
+    if window_sec <= 0 or not fingerprint:
+        return None
+    for e in reversed(entries):
+        if e.get("fingerprint") != fingerprint:
+            continue
+        # The most-recent match decides: if it is stale, older ones are too.
+        try:
+            ts = float(e.get("ts") or 0)
+        except (TypeError, ValueError):
+            return None
+        return e if (now - ts) <= window_sec else None
+    return None
+
+
+def _bus_recent_send_record(fingerprint: str, event: dict) -> None:
+    """Append a successful send to the recent-send log so a later identical
+    re-send is recognised by ``_bus_find_recent_send``. Paired with the guard
+    check in cmd_bus_send — keep the stored shape (fingerprint / ts / event /
+    event_id) in sync with what the lookup reads. Best-effort: a log-write
+    failure must never break a send that already landed on the server."""
+    if not fingerprint:
+        return
+    try:
+        log = _read_bus_sent_log()
+        log.append({
+            "fingerprint": fingerprint,
+            "ts": time.time(),
+            "event": event,
+            "event_id": (event or {}).get("event_id", ""),
+        })
+        _write_bus_sent_log(log)
+    except Exception:
+        pass
 
 
 def _bus_auto_execute_channels(data: dict) -> list:

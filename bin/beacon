@@ -2594,6 +2594,12 @@ EOF
         # send-mode path) sets it so an armed session's autonomous loop cannot
         # forge a bypass. Threaded to cmd_bus_send as BEACON_BUS_MANUAL.
         _bus_manual=""
+        # ms-141 / e-4965: --allow-duplicate opts out of the client-side
+        # recent-send guard (which otherwise serves an accidental identical dm
+        # re-send within the window as an idempotent replay). Set it for an
+        # intentional resend of the same message. Threaded as
+        # BEACON_BUS_ALLOW_DUPLICATE.
+        _bus_allow_duplicate=""
         # ms-128 / e-4289: idempotent cross-invocation resend. --client-event-id
         # lets a caller reuse the key from a first (ambiguous) attempt; --retry
         # sets is_retry so the server dedups instead of double-posting.
@@ -2666,6 +2672,7 @@ EOF
                 --recipient-confirmed) _bus_recipient_confirmed="1"; shift ;;
                 # ms-120 / e-3901: explicit manual override of the armed gate.
                 --manual)         _bus_manual="1"; shift ;;
+                --allow-duplicate) _bus_allow_duplicate="1"; shift ;;
                 # ms-128 / e-4289: idempotent resend across CLI invocations.
                 --client-event-id) _bus_client_event_id="${2:-}"; shift 2 ;;
                 --retry)          _bus_is_retry="1"; shift ;;
@@ -2765,6 +2772,7 @@ print(m.group(1) if m else "")' || true)
                         BEACON_BUS_NO_ENVELOPE="$_bus_no_envelope" \
                         BEACON_BUS_RECIPIENT_CONFIRMED="$_bus_recipient_confirmed" \
                         BEACON_BUS_MANUAL="$_bus_manual" \
+                        BEACON_BUS_ALLOW_DUPLICATE="$_bus_allow_duplicate" \
                         BEACON_BUS_CLIENT_EVENT_ID="$_bus_client_event_id" \
                         BEACON_BUS_IS_RETRY="$_bus_is_retry" \
                         BEACON_JSON="$_bus_json" \
@@ -2789,6 +2797,7 @@ print(m.group(1) if m else "")' || true)
                             BEACON_BUS_NO_ENVELOPE="$_bus_no_envelope" \
                             BEACON_BUS_RECIPIENT_CONFIRMED="$_bus_recipient_confirmed" \
                             BEACON_BUS_MANUAL="$_bus_manual" \
+                            BEACON_BUS_ALLOW_DUPLICATE="$_bus_allow_duplicate" \
                             BEACON_BUS_CLIENT_EVENT_ID="$_bus_client_event_id" \
                             BEACON_BUS_IS_RETRY="$_bus_is_retry" \
                             BEACON_JSON="$_bus_json" \
@@ -2948,6 +2957,15 @@ delivery: auto-execute | propose-to-ai (default) | notify-user-only
                instead of creating a duplicate. --retry REQUIRES
                --client-event-id (errors otherwise). Single-recipient only
                (one logical send = one key); rejected with multiple --to.
+--allow-duplicate:
+               (send, e-4965) opt out of the client-side recent-send guard.
+               By default an identical dm (same recipient + payload) re-sent
+               within a short window (~90s; BEACON_BUS_DEDUP_WINDOW_SEC) is
+               returned as an idempotent replay instead of posting again, so an
+               accidental double-send is prevented. Pass this to intentionally
+               send the same message twice. dm channel only. Related
+               idempotency controls: --client-event-id / --retry (dedup a resend
+               after an AMBIGUOUS failure via the server).
 --project:     override the cwd's project_id (e-1151) for cross-project DM/directory.
                Auth + API URL still come from the current project; only the
                target project_id in the API call changes.

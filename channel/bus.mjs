@@ -878,6 +878,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const payload = { recipient_session_id, text, source_project: PROJECT_ID }
   if (in_reply_to) payload.in_reply_to = in_reply_to
 
+  // ms-141 / e-4965 boundary (intentional, not an oversight): the client-side
+  // recent-send guard that makes an accidental identical dm re-send idempotent
+  // lives ONLY in the CLI path (lib/cmd_bus.py cmd_bus_send + .beacon/
+  // bus-sent-log.json). This MCP reply tool posts directly via apiPost below and
+  // is NOT covered by that guard. If MCP-path dedup is ever needed, factor the
+  // guard into a shared layer both paths call — do not silently assume coverage.
+
   // e-3901: the budget gate fires on the AUTONOMOUS CONTEXT of the send, not
   // on the presence of in_reply_to. The MCP reply tool is always AI-authored
   // (no human types through it), so a send is autonomous when in_reply_to is
