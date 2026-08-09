@@ -929,7 +929,8 @@ class BusEventCreate(BaseModel):
     is_retry: bool = False
 
 
-# EnvelopeIssueRequest moved to routers_projects.make_bus_gate_router (ms-127 e-4871 PR3a).
+# EnvelopeIssueRequest now lives at MODULE scope in server/routers_projects.py
+# (canonical home, used by make_bus_gate_router). Moved in ms-127 e-4871 PR3a.
 
 class BusCursorAdvance(BaseModel):
     """Body for POST /api/projects/{project_id}/bus/cursors/{recipient_id}.

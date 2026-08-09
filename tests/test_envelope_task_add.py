@@ -136,6 +136,11 @@ def test_trek_scope_includes_ms_target_required():
 import firestore_client  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 import app as app_module  # noqa: E402
+# ms-127 e-4871 PR3a: check-task-add (and its _envelope_nonce_store_singleton)
+# moved from app.py into routers_projects.make_bus_gate_router. The nonce
+# singleton now lives on the routers_projects module, so the per-test reset
+# below must target its new home (resetting app_module would silently no-op).
+import routers_projects as routers_projects_module  # noqa: E402
 
 sys.modules["firestore_client"] = app_module.db
 
@@ -166,8 +171,11 @@ def _rebind():
     _treks.clear()
     _projects.clear()
     # Reset the module-level nonce singleton so each test starts clean.
-    if hasattr(app_module, "_envelope_nonce_store_singleton"):
-        delattr(app_module, "_envelope_nonce_store_singleton")
+    # The singleton lives on routers_projects (its post-extraction home);
+    # reset both modules defensively in case a future move relocates it again.
+    for _mod in (routers_projects_module, app_module):
+        if hasattr(_mod, "_envelope_nonce_store_singleton"):
+            delattr(_mod, "_envelope_nonce_store_singleton")
     yield
     for name, val in prior.items():
         if val is None and hasattr(db_module, name):

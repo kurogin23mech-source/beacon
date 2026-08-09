@@ -498,7 +498,7 @@ def _build_document_change_payload(project_id: str, doc_id: str, op: str,
 
 
 # ---------------------------------------------------------------------------
-# Bus/dm gate — Pydantic models (verbatim from app.py; moved for make_bus_gate_router)
+# Bus/dm gate — Pydantic models (canonical home; used by make_bus_gate_router)
 # ---------------------------------------------------------------------------
 
 class EnvelopeIssueRequest(BaseModel):
@@ -580,11 +580,16 @@ class DMRespondBody(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _get_envelope_nonce_store():
-    """Lazy-resolve the envelope nonce store binding.
+    """Lazy-resolve the in-memory nonce store for the check-task-add gate.
 
-    For the test path we need to reach the same store the bus-event
-    flow uses. The store has process scope so we keep one module-level
-    singleton here.
+    This is a **gate-local** process-scoped singleton used only by
+    ``check_task_add_envelope`` (the pure verify endpoint). It is NOT the
+    store the delivery bus-receive flow uses — that path uses app.py's
+    ``_FirestoreNonceStore`` via ``_envelope_nonce_store()`` (note the near-
+    identical name). Keeping this InMemory singleton module-local means the
+    check-task-add verify has a stable replay-protection scope within a
+    process; tests reset it by ``delattr``-ing
+    ``routers_projects._envelope_nonce_store_singleton``.
     """
     global _envelope_nonce_store_singleton
     try:
