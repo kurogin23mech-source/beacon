@@ -399,3 +399,52 @@ def test_evaluate_consent_ignores_actions_authorized():
     )
     # No claim → denied, whatever the (absent) action grant would be.
     assert out["allow"] is False
+
+
+# ---------------------------------------------------------------------------
+# ms-141 / e-4968: client-side cross-user pre-flight advisory (non-blocking).
+# Reuses classify_send_consent so it can never diverge from the server rule.
+# ---------------------------------------------------------------------------
+
+def test_cross_user_advisory_fires_for_new_cross_user_dm():
+    note = dm_consent.cross_user_send_advisory(
+        sender_email="me@example.com",
+        recipient_email="other@example.com",
+        channel="dm",
+        is_reply=False,
+        recipient_confirmed=False,
+    )
+    assert note is not None
+    assert "/beacon-dm-send" in note
+
+
+def test_cross_user_advisory_silent_when_same_user():
+    assert dm_consent.cross_user_send_advisory(
+        sender_email="me@example.com", recipient_email="me@example.com",
+        channel="dm", is_reply=False, recipient_confirmed=False) is None
+
+
+def test_cross_user_advisory_silent_on_reply():
+    assert dm_consent.cross_user_send_advisory(
+        sender_email="me@example.com", recipient_email="other@example.com",
+        channel="dm", is_reply=True, recipient_confirmed=False) is None
+
+
+def test_cross_user_advisory_silent_when_confirmed():
+    assert dm_consent.cross_user_send_advisory(
+        sender_email="me@example.com", recipient_email="other@example.com",
+        channel="dm", is_reply=False, recipient_confirmed=True) is None
+
+
+def test_cross_user_advisory_silent_when_recipient_unresolved():
+    # Cannot prove cross-user → no advisory (mirrors CONSENT_SKIP_UNRESOLVED).
+    assert dm_consent.cross_user_send_advisory(
+        sender_email="me@example.com", recipient_email="",
+        channel="dm", is_reply=False, recipient_confirmed=False) is None
+
+
+def test_cross_user_advisory_silent_on_non_dm_channel():
+    assert dm_consent.cross_user_send_advisory(
+        sender_email="me@example.com", recipient_email="other@example.com",
+        channel="operation-trigger", is_reply=False,
+        recipient_confirmed=False) is None

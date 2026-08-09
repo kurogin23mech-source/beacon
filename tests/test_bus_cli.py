@@ -383,6 +383,41 @@ def test_bus_send_explicit_client_event_id_skips_local_guard(
     assert len(stub.events) == 2  # local guard inactive; server dedup separate
 
 
+def test_bus_send_cross_user_preflight_advisory_non_blocking(
+        monkeypatch, capsys, stub):
+    # ms-141 / e-4968: a new dm to a different user (by email) surfaces a
+    # non-blocking advisory steering to /beacon-dm-send, and the send STILL
+    # proceeds (the server backstop remains the authority, not the client).
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    monkeypatch.setenv("BEACON_BUS_PAYLOAD", '{"text":"hi"}')
+    monkeypatch.setenv("BEACON_JSON", "1")
+    monkeypatch.setattr(cmd_bus, "_resolve_recipient_live",
+                        lambda *a, **k: ("target", None, "other@example.com"))
+    monkeypatch.setattr(cmd_bus, "_resolve_creator_identity",
+                        lambda: ("u1", "me@example.com", ""))
+    cmd_bus.cmd_bus_send()
+    out = json.loads(capsys.readouterr().out.strip())
+    assert len(stub.events) == 1  # non-blocking: the send went through
+    assert any("/beacon-dm-send" in n for n in out.get("notes", []))
+
+
+def test_bus_send_same_user_no_cross_user_advisory(monkeypatch, capsys, stub):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    monkeypatch.setenv("BEACON_BUS_PAYLOAD", '{"text":"hi"}')
+    monkeypatch.setenv("BEACON_JSON", "1")
+    monkeypatch.setattr(cmd_bus, "_resolve_recipient_live",
+                        lambda *a, **k: ("target", None, "me@example.com"))
+    monkeypatch.setattr(cmd_bus, "_resolve_creator_identity",
+                        lambda: ("u1", "me@example.com", ""))
+    cmd_bus.cmd_bus_send()
+    out = json.loads(capsys.readouterr().out.strip())
+    assert not any("/beacon-dm-send" in n for n in out.get("notes", []))
+
+
 def test_bus_find_recent_send_staleness_boundary():
     # Pure unit test of the staleness boundary (now/window injected).
     import commands_shared as cs

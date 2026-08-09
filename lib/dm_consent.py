@@ -95,6 +95,12 @@ CONSENT_REQUIRED_CROSS_USER = "cross_user_new_send"
 # Discrimination: does this send need a human recipient-confirmation?
 # ---------------------------------------------------------------------------
 
+# NOTE (ms-141 / e-4968): ``cross_user_send_advisory`` (below) is a caller that
+# pins ``operation_envelope=False`` and ``shared_trek=False`` because the client
+# pre-flight cannot cheaply resolve those. If a new carve-out parameter is added
+# here, review that caller so its advisory does not silently diverge from this
+# rule (it is non-blocking, so drift only mis-shows a hint — but keep them in
+# sync).
 def classify_send_consent(
     *,
     sender_user_id: str,
@@ -205,6 +211,53 @@ def classify_send_consent(
     # Default: a proven cross-user new-send (both ids resolved and different)
     # with no carve-out → a human must confirm the target.
     return (True, CONSENT_REQUIRED_CROSS_USER)
+
+
+def cross_user_send_advisory(
+    *,
+    sender_email: str,
+    recipient_email: str,
+    channel: str = "dm",
+    is_reply: bool = False,
+    recipient_confirmed: bool = False,
+) -> Optional[str]:
+    """ms-141 / e-4968: client-side, NON-blocking pre-flight advisory.
+
+    Return a heads-up string when a send LOOKS like a new cross-user DM with no
+    recipient confirmation — the case the server backstop (e-3443) will reject
+    with 403 ``sender_consent_required``. The point is to steer a raw
+    ``beacon bus send`` toward ``/beacon-dm-send`` (which confirms the recipient
+    and mints the claim) BEFORE the round-trip, without adding any gate: the
+    server stays the authority and the send still proceeds.
+
+    Uses the already-resolved sender / recipient **emails** as the identity
+    proxy (no extra lookup) and reuses :func:`classify_send_consent` so this
+    advisory can never diverge from the actual server rule. ``None`` = no
+    advisory (proceed silently). Conservative on the carve-outs it cannot cheaply
+    prove client-side (operation / shared-Trek → treated as not-applicable),
+    which at worst shows one extra non-blocking hint — never suppresses a real
+    one and never blocks a send.
+    """
+    if recipient_confirmed:
+        return None
+    required, _reason = classify_send_consent(
+        sender_user_id=sender_email or "",
+        recipient_user_id=recipient_email or "",
+        channel=channel,
+        is_reply=is_reply,
+        operation_envelope=False,
+        shared_trek=False,
+    )
+    if not required:
+        return None
+    # AX (PR #621): conditional tone + state that the send still proceeds, so a
+    # reader does not mistake this non-blocking advisory for a block/abort.
+    return (
+        "Note: 宛先が別ユーザーの新規 DM に見えます。正しい宛先なら問題ありません。"
+        " /beacon-dm-send を使うと宛先を人間が確認し recipient_confirmed claim を"
+        " 発行します (この経路を通らない cross-user 新規 DM は server 側の 403"
+        " backstop に当たることがあります)。この送信は続行します。"
+    )
 
 
 # ---------------------------------------------------------------------------
