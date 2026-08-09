@@ -870,6 +870,76 @@ def create_target(data: dict, kind: str, *, label: str,
     return rec
 
 
+def _find_in_entry_list(entries: list, entry_id: str, target: dict):
+    """Locate ``entry_id`` in ``entries``, recursing into each entry's nested
+    ``entries`` children — the same recursion ``core.find_entry`` (_find_entry_in)
+    does for dev subtasks. Returns (target, arm_list, entry, index) or None."""
+    for i, entry in enumerate(entries):
+        if entry.get("id") == entry_id:
+            return (target, entries, entry, i)
+        hit = _find_in_entry_list(entry.get("entries", []) or [], entry_id, target)
+        if hit:
+            return hit
+    return None
+
+
+def find_target_entry(data: dict, entry_id: str):
+    """Locate a work-item entry by id across ALL Target collections' work-item
+    arms, profession-generically (ms-143, 設計判断 b 系統3). Returns
+    ``(target, arm_list, entry, index)`` or ``None`` — the same shape
+    ``core.find_entry`` returns for the dev case, so ``set_entry_state`` can close
+    a dev task (a milestone's ``entries``, incl. nested subtasks) and a sales
+    activity (an opportunity's ``activities``) through ONE path. The work-item arm
+    per target-class comes from ``profession_manifest`` so the locator never names
+    ``data['milestones']`` / ``data['opportunities']`` itself.
+
+    SCOPE: walks Target work-item arms only. Operation entries (operations are NOT
+    Targets) stay ``core.find_entry``'s responsibility — out of the ms-143 'target
+    CRUD' scope."""
+    for tc in profession_manifest(data)["target_classes"]:
+        arm = (tc.get("work_item_arm") or {}).get("arm")
+        if not arm:
+            continue
+        for target in data.get(tc["collection"], []) or []:
+            hit = _find_in_entry_list(target.get(arm, []) or [], entry_id, target)
+            if hit:
+                return hit
+    return None
+
+
+def set_entry_state(data: dict, entry_id: str, status: str, *,
+                    at: str = "", actor: str = "", reason: str = "") -> tuple:
+    """Transition a work-item's lifecycle state, profession-generically (ms-143,
+    設計判断 b 系統3 = 状態変更). ``done`` routes through ``work_model.mark_done``
+    (canonical ``status`` / ``done_at`` + ``done_by`` / ``done_reason`` completion
+    attribution); ``todo`` is a plain status set. This unifies ``core.task_done``
+    (done) and ``sales_entities.activity_set_status`` (todo/done) behind one path.
+
+    ``cancelled`` is a legitimate terminal state but carries its own audit stamp
+    (``work_base.stamp_cancel`` via each occupation's cancel verb), so it is
+    rejected here rather than set bare — mirroring ``activity_set_status``'s
+    ``_SETTABLE`` guard. Attribute patches (rename / amount / deadline) are a
+    SEPARATE responsibility (a future ``update_entry``), NOT folded here, because
+    the completion attribution ``mark_done`` writes must not leak onto plain field
+    edits (設計判断 i = 分離).
+
+    Returns ``(target, entry)``. Raises ``ValueError`` if the entry is not found
+    or ``status`` is not settable here."""
+    hit = find_target_entry(data, entry_id)
+    if not hit:
+        raise ValueError(f"Entry not found: {entry_id}")
+    target, _arm_list, entry, _idx = hit
+    if status == _wm.DONE_STATUS:
+        _wm.mark_done(entry, at=at, actor=actor, reason=reason)
+    elif status == _wm.TODO_STATUS:
+        entry["status"] = status
+    else:
+        raise ValueError(
+            f"status must be 'todo' or 'done' (cancel has its own audit-stamped "
+            f"path), got {status!r}")
+    return target, entry
+
+
 def iter_work_items(data: dict):
     """Yield ``(work_item, target, arm)`` for every planned work item across
     occupations, profession-agnostically (ms-142 e-5009).
