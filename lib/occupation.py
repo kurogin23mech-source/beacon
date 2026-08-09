@@ -807,6 +807,49 @@ def profession_manifest(data: dict, profession: str | None = None) -> dict:
     return {"profession": prof, "target_classes": target_classes}
 
 
+def iter_work_items(data: dict):
+    """Yield ``(work_item, target, arm)`` for every planned work item across
+    occupations, profession-agnostically (ms-142 e-5009).
+
+    Consumes ``profession_manifest``'s ``work_item_arm`` so a caller walks
+    development tasks (a milestone's ``entries`` filtered to ``type == "task"``)
+    AND sales activities (an opportunity's whole ``activities`` arm) through ONE
+    read path, with no ``if profession`` branch. This is the occupation-agnostic
+    work-item spine the deadline enumeration (e-5010) and the completeness harness
+    build on, so an L2 capability never has to name ``data['milestones']`` /
+    ``entries`` / ``activities`` itself.
+
+    Per yielded tuple:
+      - ``work_item`` — the raw work-item record (a dev task entry / a sales
+        activity), verbatim (with its own nested fields).
+      - ``target`` — the parent Target record it lives under (the milestone /
+        opportunity). Yielded so a caller can resolve target-scoped context (the
+        claiming session for a deadline reminder = ``target['occupation']
+        ['session_id']``) without a second lookup.
+      - ``arm`` — the arm name the item came from (``"entries"`` / ``"activities"``),
+        for labelling.
+
+    The manifest's ``item_type`` discriminates a SHARED arm: dev ``entries`` hold
+    tasks AND commits, so only ``type == "task"`` items are work items (commits
+    are evidence, never yielded here); a ``None`` item_type means every item in
+    the arm is a work item (sales activities). Target classes with no
+    ``work_item_arm`` (acquisitions) contribute nothing. Scope follows
+    ``profession_manifest`` (milestones + opportunities), matching the deadline
+    enumeration it will replace."""
+    for tc in profession_manifest(data)["target_classes"]:
+        wia = tc["work_item_arm"]
+        if not wia:
+            continue
+        arm, item_type = wia["arm"], wia["item_type"]
+        for target in data.get(tc["collection"], []) or []:
+            for item in target.get(arm, []) or []:
+                if not isinstance(item, dict):
+                    continue
+                if item_type is not None and item.get("type") != item_type:
+                    continue
+                yield item, target, arm
+
+
 # Trek scope narrowing vocabulary (ms-109 e-3699 / fable review B-2).
 #
 # A Trek scope entry narrows to a single target inside a project. Which target
