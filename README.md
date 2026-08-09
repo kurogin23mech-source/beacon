@@ -256,6 +256,7 @@ target が目的を達成したかの遷移（マイルストーン完了・オ�
 | `beacon task delete <id>` | Logical delete / 論理削除 |
 | `beacon entry move <id> -t <task-id>` | Move entry under a task / タスク配下に移動 |
 | `beacon entry purge <e-id> --reason "..." [--index <n>]` | Hard delete an entry record — recovery for duplicate-ID corruption (e-863) / ハード削除（重複ID復旧用） |
+| `beacon deadline due [--json]` | List due/overdue work items across occupations (milestone target_date / task・activity deadline) / 職種横断で期日 到達・超過 の作業を一覧 |
 
 ### Sales (営業 / profession=sales)
 

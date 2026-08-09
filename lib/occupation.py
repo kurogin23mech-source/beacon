@@ -855,6 +855,63 @@ def iter_work_items(data: dict):
                 yield item, target, arm
 
 
+def iter_deadline_candidates(data: dict):
+    """Yield every deadline-bearing candidate across occupations, each a dict
+    (ms-142 e-5010 — the SINGLE occupation-agnostic enumeration both deadline
+    call sites share)::
+
+        {"item": <record>, "kind": "milestone"|"task"|"activity"|…,
+         "label": <str>, "target_id": <parent target id>,
+         "target_status": <parent target status>,
+         "recipient": <claiming session_id or "">, "context": <breadcrumb>}
+
+    Enumerates Target level (a milestone's ``target_date``) via
+    ``iter_target_records`` PLUS work items (dev task / sales activity
+    ``deadline``) via ``iter_work_items``. The server reminder
+    (``server/app.py:_deadline_reminder_candidates``) and the session-start
+    display (``beacon deadline due`` → ``scripts/session-start-deadlines.py``)
+    both consume THIS, so neither names ``data['milestones']`` / ``entries`` /
+    ``activities`` — a new occupation's deadlines light up with zero edit at
+    either site. This only ENUMERATES; the L2 temporal rule
+    (``deadline.work_item_temporal_status``) is applied by callers, keeping the
+    ``deadline`` module collection-agnostic (capability 台帳 L2).
+
+    ``recipient`` is the session claiming the item's Target (its
+    ``occupation.session_id``): the milestone for a task, the opportunity for an
+    activity; '' when unclaimed. ``kind`` is the occupation-agnostic label the
+    reminder message stamps. ``target_status`` is the PARENT Target's status (a
+    display can drop work items under a terminal Target without the enumerator
+    imposing that policy). ``context`` is a human breadcrumb — the target id, or
+    ``"<target_id> / <item_id>"`` for a work item."""
+    for target in iter_target_records(data):
+        recipient = (target.get("occupation") or {}).get("session_id", "") or ""
+        tid = target.get("id", "")
+        yield {
+            "item": target,
+            "kind": _wm.target_kind(tid) or "target",
+            "label": target.get("title") or target.get("label") or tid,
+            "target_id": tid,
+            "target_status": target.get("status", ""),
+            "recipient": recipient,
+            "context": tid,
+        }
+    arm_kind = {tc["work_item_arm"]["arm"]: tc["work_item_arm"]["kind"]
+                for tc in profession_manifest(data)["target_classes"]
+                if tc["work_item_arm"]}
+    for item, target, arm in iter_work_items(data):
+        recipient = (target.get("occupation") or {}).get("session_id", "") or ""
+        tid, iid = target.get("id", ""), item.get("id", "")
+        yield {
+            "item": item,
+            "kind": arm_kind.get(arm, arm),
+            "label": item.get("description") or iid,
+            "target_id": tid,
+            "target_status": target.get("status", ""),
+            "recipient": recipient,
+            "context": f"{tid} / {iid}" if iid else tid,
+        }
+
+
 # Trek scope narrowing vocabulary (ms-109 e-3699 / fable review B-2).
 #
 # A Trek scope entry narrows to a single target inside a project. Which target

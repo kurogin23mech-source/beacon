@@ -455,6 +455,12 @@ case "${1:-}" in
             *)        echo "Usage: beacon acquisition [add|list|attack-list|attack-lists|attack-list-fill|attack-list-send|attack-list-send-record|attack-list-awaiting-reply|attack-list-reply-record|attack-list-promote|start|done|delete|show]  (顧客獲得ターゲット: attack-list系でアタックリスト管理、打ち切りは delete)" ;;
         esac
         ;;
+    deadline)
+        case "${2:-}" in
+            due)      shift 2; cmd_deadline_due "$@" ;;
+            *)        echo "Usage: beacon deadline [due]  (職種横断で期日 到達/超過 の work item を surface)" ;;
+        esac
+        ;;
     opportunity|opp)
         case "${2:-}" in
             add)      shift 2; cmd_opportunity_add "$@" ;;

@@ -276,6 +276,10 @@ _NOUN_SCOPE = {
     # L2 — class-abstraction: operate on a Target via the abstraction.
     "claim": "L2", "doc": "L2", "review": "L2", "status": "L2",
     "summary": "L2", "target": "L2",
+    # deadline: enumerates deadline-bearing work items across occupations via the
+    # Target/WorkItem abstraction (occupation.iter_deadline_candidates); the rule
+    # is profession-shared (ms-142 e-5010).
+    "deadline": "L2",
     # L3 — profession default (dev).
     "milestone": "L3", "task": "L3", "log": "L3", "save": "L3", "sync": "L3",
     "push": "L3", "deploy": "L3", "pr": "L3", "issue": "L3", "retro": "L3",

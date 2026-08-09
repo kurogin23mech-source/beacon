@@ -120,3 +120,40 @@ def test_empty_and_missing_arms_yield_nothing():
              "milestones": [{"id": "ms-1", "title": "M", "status": "todo"}]}
     assert list(occ.iter_work_items(empty)) == []
     assert list(occ.iter_work_items({"name": "x", "profession": "dev"})) == []
+
+
+# ---------------------------------------------------------------------------
+# iter_deadline_candidates — the shared deadline enumeration (ms-142 e-5010):
+# Target level + work items, each carrying kind / target_id / target_status /
+# recipient / context for the two consumers (server reminder + deadline due CLI).
+# ---------------------------------------------------------------------------
+
+def test_deadline_candidates_dev_target_then_workitems():
+    cands = list(occ.iter_deadline_candidates(_dev()))
+    kinds = [(c["kind"], c["label"]) for c in cands]
+    # milestone (Target level) first, then its two tasks (commit/note excluded).
+    assert kinds == [("milestone", "M"), ("task", "T1"), ("task", "T2")]
+    ms_cand = cands[0]
+    assert ms_cand["target_id"] == "ms-1"
+    assert ms_cand["target_status"] == "in_progress"
+    task_cand = cands[1]
+    assert task_cand["target_status"] == "in_progress"   # parent Target's status
+    assert task_cand["recipient"] == "sv-dev"
+    assert task_cand["context"] == "ms-1 / e-1"
+
+
+def test_deadline_candidates_sales_activity():
+    cands = list(occ.iter_deadline_candidates(_sales()))
+    act = [c for c in cands if c["kind"] == "activity"]
+    assert [c["label"] for c in act] == ["call", "demo"]
+    assert act[0]["target_id"] == "opp-1"
+    assert act[0]["recipient"] == "sv-sales"
+
+
+def test_deadline_candidates_carry_parent_terminal_status():
+    # target_status reflects the PARENT Target so a display can drop work items
+    # under a done/cancelled Target without the enumerator imposing the policy.
+    data = _dev()
+    data["milestones"][0]["status"] = "done"
+    for c in occ.iter_deadline_candidates(data):
+        assert c["target_status"] == "done"

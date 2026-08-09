@@ -568,6 +568,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_acq_promote.add_argument("--title", default="")
     p_acq_promote.add_argument("--json", action="store_true")
 
+    # ---- deadline (ms-142 e-5010: 職種横断の締切列挙、profession-shared L2) ----
+    p_deadline = sub.add_parser(
+        "deadline", help="職種横断で期日 到達/超過 の work item を surface",
+        add_help=False,
+    )
+    p_deadline.add_argument("--help", "-h", action="store_true", dest="show_help")
+    deadline_sub = p_deadline.add_subparsers(dest="deadline_cmd", metavar="<subcmd>")
+    deadline_sub.add_parser("due", add_help=False).add_argument(
+        "--json", action="store_true"
+    )
+
     # ---- opportunity (ms-106: sales entities, profession=sales) ----
     p_opp = sub.add_parser(
         "opportunity", aliases=["opp"], help="Sales opportunity operations",
@@ -2702,6 +2713,20 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
     print("Usage: beacon opportunity "
           "[add|list|phase|activity|delete|assign|amount|phase-prob|"
           "transition-date|judge|due] [options]")
+    return 2
+
+
+def _handle_deadline(root: Path, args: argparse.Namespace) -> int:
+    """``beacon deadline due`` — 職種横断の締切列挙 (ms-142 e-5010)。Windows/pipx の
+    argparse 経路も bash と同じ ``deadline_due`` にルートする。"""
+    cmd = getattr(args, "deadline_cmd", None)
+    if args.show_help or cmd is None:
+        print("Usage: beacon deadline [due] [--json]")
+        return 0 if args.show_help else 2
+    if cmd == "due":
+        env = {"BEACON_JSON": "1" if args.json else ""}
+        return _run_commands_py(root, "deadline_due", env)
+    print("Usage: beacon deadline [due] [--json]")
     return 2
 
 
@@ -5441,6 +5466,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "acquisition": _handle_acquisition,  # ms-115: 顧客獲得ターゲット
     "acq": _handle_acquisition,
     "opportunity": _handle_opportunity,
+    "deadline": _handle_deadline,
     "opp": _handle_opportunity,
     "communication": _handle_communication,
     "comm": _handle_communication,
