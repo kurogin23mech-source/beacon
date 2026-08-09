@@ -1285,6 +1285,49 @@ def _bus_recent_send_record(fingerprint: str, event: dict) -> None:
         pass
 
 
+def dm_sent_rows(events: list, my_sid: str, limit: int = 20) -> list:
+    """ms-141 / e-4966: build the sender-side "DMs I sent" audit rows.
+
+    Pure function (no IO) so the shaping + duplicate detection is unit-testable.
+    ``events`` is the raw list from ``list_bus_events(channel="dm")``; keep only
+    the ones this session sent (``sender_session_id == my_sid``), newest first,
+    cap at ``limit``. Each row carries the receipt fields already on the event
+    (created_at = sent, delivered_at, opened_at) plus a ``duplicate`` flag =
+    the same (recipient, text) appears more than once in the shown set (the
+    "did I send the same DM twice recently?" signal — the shown recent window
+    stands in for "short time").
+    """
+    mine = [
+        e for e in (events or [])
+        if str((e or {}).get("sender_session_id") or "") == (my_sid or "")
+    ]
+    mine.sort(key=lambda e: str((e or {}).get("created_at") or ""), reverse=True)
+    mine = mine[: max(int(limit), 0)] if limit else mine
+    rows = []
+    for e in mine:
+        p = (e or {}).get("payload") or {}
+        rows.append({
+            "event_id": (e or {}).get("event_id", ""),
+            "recipient": (
+                p.get("recipient_session_id")
+                or p.get("recipient_user_id") or ""),
+            "text": p.get("text") or "",
+            "created_at": (e or {}).get("created_at", ""),
+            "delivered_at": (e or {}).get("delivered_at", ""),
+            "opened_at": (e or {}).get("opened_at", ""),
+            "duplicate": False,
+        })
+    # Flag same (recipient, text) appearing more than once in the shown set.
+    seen: dict = {}
+    for r in rows:
+        seen[(r["recipient"], r["text"])] = seen.get(
+            (r["recipient"], r["text"]), 0) + 1
+    for r in rows:
+        if seen.get((r["recipient"], r["text"]), 0) > 1:
+            r["duplicate"] = True
+    return rows
+
+
 def _bus_auto_execute_channels(data: dict) -> list:
     """Read the allowlist from a project.json dict, with type guard.
 

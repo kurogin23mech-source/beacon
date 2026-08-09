@@ -53,6 +53,7 @@ from commands_shared import (
     _bus_send_fingerprint,
     _bus_find_recent_send,
     _bus_recent_send_record,
+    dm_sent_rows,
 )
 
 
@@ -1550,6 +1551,57 @@ def cmd_bus_status():
                _fmt_by(delivered_by, event.get("delivered_by_identity"))))
     print(_row("✓" if opened_at else "✗", "opened", opened_at,
                _fmt_by(opened_by, event.get("opened_by_identity"))))
+
+
+def cmd_dm_sent():
+    """ms-141 / e-4966: sender-side audit — list the DMs THIS session sent.
+
+    The complement of `beacon dm audit` (which shows cross-user *approval*
+    decisions on the receive side). Answers "what did I send / did I send the
+    same thing twice?" so an accidental duplicate is visible after the fact.
+    Reads the authoritative server events (`list_bus_events`), keeps the ones
+    this session sent, newest first, and shows the 3-stage receipt + a ⚠ on any
+    (recipient, text) that recurs in the shown set. Read-only.
+    """
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    try:
+        limit = int(os.environ.get("BEACON_DM_SENT_LIMIT", "") or "20")
+    except ValueError:
+        limit = 20
+    my_sid = _resolve_session_id()
+    if not my_sid:
+        print("Error: could not resolve this session's id (channel not "
+              "installed in this cwd?).", file=sys.stderr)
+        sys.exit(1)
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)
+    # Fetch more than `limit` because we filter to this session's sends; cap the
+    # scan so a busy project doesn't pull an unbounded page.
+    scan = min(max(limit * 5, 100), 500)
+    events = client.list_bus_events(project_id, channel="dm", limit=scan)
+    rows = dm_sent_rows(events, my_sid, limit=limit)
+    if json_mode:
+        print(json.dumps({"session_id": my_sid, "sent": rows},
+                         ensure_ascii=False))
+        return
+    if not rows:
+        print(f"No DMs sent from this session ({my_sid[:16]}…) found "
+              f"in the last {scan} dm events.")
+        return
+    print(f"DMs sent from this session ({my_sid[:16]}…), newest first "
+          f"[sent ✓ / delivered / opened]:")
+    for r in rows:
+        recv = str(r["recipient"])[:20]
+        preview = " ".join(str(r["text"]).split())[:48]
+        d = "✓" if r["delivered_at"] else "✗"
+        o = "✓" if r["opened_at"] else "✗"
+        dup = " ⚠dup" if r["duplicate"] else ""
+        print(f"  [{r['event_id']}] {r['created_at']}  →{recv}…  "
+              f"deliv:{d} open:{o}{dup}")
+        print(f"      \"{preview}\"")
+    if any(r["duplicate"] for r in rows):
+        print("  ⚠dup = 同一宛先・同一本文が直近の送信に複数あります "
+              "(意図的でなければ二重送信の可能性)。")
 
 
 def _validate_recipient_project(

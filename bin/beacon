@@ -3125,6 +3125,43 @@ EOF
                         python3 "$COMMANDS_PY" dm_log
                 fi
                 ;;
+            # ms-141 / e-4966: sender-side "DMs I sent" audit — the complement
+            # of `dm audit` (receive-side approval decisions). READ-only.
+            # Usage: `beacon dm sent [--limit N] [--project <id>] [--json]`
+            sent)
+                _dm_sent_limit=""
+                _dm_sent_json=""
+                _dm_sent_project=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json)    _dm_sent_json="1"; shift ;;
+                        --limit)   _dm_sent_limit="${2:-}"; shift 2 ;;
+                        --project) _dm_sent_project="${2:-}"; shift 2 ;;
+                        -h|--help)
+                            cat <<'EOF'
+Usage: beacon dm sent [--limit N] [--project <id>] [--json]
+
+List the DMs THIS session sent, newest first, with the 3-stage receipt
+(sent / delivered / opened) and a ⚠dup marker on any (recipient, text) that
+recurs in the shown set (= "did I send the same DM twice?"). Read-only.
+This is the sender-side complement of `beacon dm audit` (which shows the
+receive-side cross-user approval decisions).
+
+--limit N:      max rows shown (default 20).
+--project <id>: cross-project override for a one-off lookup.
+--json:         emit {session_id, sent:[...]} as JSON instead of a table.
+EOF
+                            shift; _dm_sent_help="1" ;;
+                        *) shift ;;
+                    esac
+                done
+                if [[ -z "${_dm_sent_help:-}" ]]; then
+                    BEACON_DM_SENT_LIMIT="$_dm_sent_limit" \
+                        BEACON_BUS_PROJECT_ID="$_dm_sent_project" \
+                        BEACON_JSON="$_dm_sent_json" \
+                        python3 "$COMMANDS_PY" dm_sent
+                fi
+                ;;
             *)
                 cat <<'EOF'
 Usage: beacon dm send    --to <sid> --payload '<json>' [--in-reply-to <eid>] [--manual] [--recipient-confirmed] [--client-event-id <id> --retry] [--action <name>]... [--project <id>] [--json]
@@ -3133,6 +3170,7 @@ Usage: beacon dm send    --to <sid> --payload '<json>' [--in-reply-to <eid>] [--
        beacon dm respond approve <event_id> [--project <id>] [--json]
        beacon dm respond deny    <event_id> [--project <id>] [--json]
        beacon dm audit  [<project_id>] [--limit N] [--project <id>] [--json]
+       beacon dm sent   [--limit N] [--project <id>] [--json]
 
 `dm send` is the canonical DM verb (e-3899): it delegates to
 `bus send --channel dm`, so the dm domain owns the verb while bus stays

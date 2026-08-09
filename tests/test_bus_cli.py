@@ -418,6 +418,61 @@ def test_bus_send_same_user_no_cross_user_advisory(monkeypatch, capsys, stub):
     assert not any("/beacon-dm-send" in n for n in out.get("notes", []))
 
 
+# ---------------------------------------------------------------------------
+# ms-141 / e-4966: sender-side "DMs I sent" audit (beacon dm sent).
+# ---------------------------------------------------------------------------
+
+def test_dm_sent_rows_filters_sorts_and_flags_duplicates():
+    import commands_shared as cs
+    events = [
+        {"event_id": "e1", "sender_session_id": "me",
+         "created_at": "2026-01-01T00:00:01Z",
+         "payload": {"recipient_session_id": "r1", "text": "hi"}},
+        {"event_id": "e2", "sender_session_id": "other",
+         "created_at": "2026-01-01T00:00:02Z",
+         "payload": {"recipient_session_id": "r1", "text": "hi"}},
+        {"event_id": "e3", "sender_session_id": "me",
+         "created_at": "2026-01-01T00:00:03Z",
+         "payload": {"recipient_session_id": "r1", "text": "hi"},
+         "delivered_at": "2026-01-01T00:00:04Z"},
+    ]
+    rows = cs.dm_sent_rows(events, "me", limit=20)
+    assert [r["event_id"] for r in rows] == ["e3", "e1"]  # mine only, newest 1st
+    assert all(r["duplicate"] for r in rows)  # same (r1,"hi") twice → flagged
+    assert rows[0]["delivered_at"] == "2026-01-01T00:00:04Z"
+
+
+def test_dm_sent_rows_distinct_content_not_flagged():
+    import commands_shared as cs
+    events = [
+        {"event_id": "e1", "sender_session_id": "me", "created_at": "t1",
+         "payload": {"recipient_session_id": "r1", "text": "a"}},
+        {"event_id": "e2", "sender_session_id": "me", "created_at": "t2",
+         "payload": {"recipient_session_id": "r1", "text": "b"}},
+    ]
+    rows = cs.dm_sent_rows(events, "me", limit=20)
+    assert not any(r["duplicate"] for r in rows)
+
+
+def test_cmd_dm_sent_lists_only_my_sends(monkeypatch, capsys, stub):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_JSON", "1")
+    monkeypatch.setattr(cmd_bus, "_resolve_session_id", lambda: "my-sid")
+    events = [
+        {"event_id": "a", "sender_session_id": "my-sid",
+         "created_at": "2026-01-01T00:00:02Z",
+         "payload": {"recipient_session_id": "r", "text": "one"}},
+        {"event_id": "b", "sender_session_id": "someone-else",
+         "created_at": "2026-01-01T00:00:03Z",
+         "payload": {"recipient_session_id": "r", "text": "x"}},
+    ]
+    stub.list_bus_events = lambda *a, **k: events
+    cmd_bus.cmd_dm_sent()
+    out = json.loads(capsys.readouterr().out.strip())
+    assert out["session_id"] == "my-sid"
+    assert [r["event_id"] for r in out["sent"]] == ["a"]  # only my send
+
+
 def test_bus_find_recent_send_staleness_boundary():
     # Pure unit test of the staleness boundary (now/window injected).
     import commands_shared as cs

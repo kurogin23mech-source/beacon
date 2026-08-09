@@ -231,7 +231,7 @@ from cmd_bus import (  # noqa: F401
     cmd_bus_budget_grant, cmd_bus_budget_show, cmd_bus_budget_clear,
     cmd_bus_auto_execute_list, cmd_bus_auto_execute_add, cmd_bus_auto_execute_remove,
     cmd_bus_send, cmd_bus_listen, cmd_bus_receive, cmd_bus_ack,
-    cmd_bus_status, cmd_bus_directory,
+    cmd_bus_status, cmd_bus_directory, cmd_dm_sent,
 )
 
 # ms-127 e-4809: retro family moved to cmd_retro.py, plus its retro-day / week /
@@ -11540,6 +11540,9 @@ if __name__ == "__main__":
         # Mirror of the Web UI Settings > Audit table; reaches the same
         # server endpoint and renders 6 columns of decided sidecar rows.
         "dm_log": cmd_dm_log,
+        # ms-141 / e-4966: sender-side "DMs I sent" audit (complement of the
+        # receive-side dm_log/dm_audit). Reached by `beacon dm sent`.
+        "dm_sent": cmd_dm_sent,
         # ms-55 e-1646: stop / resume signal CLI. Anyone can broadcast
         # (Andon cord principle, SPEC §2). The events ride on the
         # existing bus on channel `stop-signal`.
