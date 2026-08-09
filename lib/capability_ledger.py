@@ -536,6 +536,20 @@ def reconcile(live: Optional[set] = None) -> dict:
     return {"unclassified": unclassified, "by_scope": by_scope}
 
 
+def shipped_l0_verbs(live: Optional[set] = None) -> list:
+    """Return live (shipped) CLI verbs classified L0 — the distribution-exclusion
+    violation (ms-134 e-5062). L0 = Beacon-product-operation (非配布・運用専用); an
+    L0 verb appearing in the live dispatch surface (``enumerate_live_verbs`` = the
+    same wheel-packaged commands.py/dispatch.py dispatch the verb ledger + map-drift
+    lint reconcile against) means an operation-only capability leaked into the public
+    distribution. This reuses the live surface rather than inspecting a built wheel:
+    source dispatch == shipped dispatch, so it is verb-granular + precise + needs no
+    build. Empty by construction after e-5061 (no verb is L0); it is a GUARD that
+    fails the checker if a future L0 verb is ever wired into public dispatch."""
+    live = enumerate_live_verbs() if live is None else live
+    return sorted(v for v in live if scope_of(v) == "L0")
+
+
 def reconcile_ownership(live: Optional[set] = None) -> dict:
     """Reconcile the OWNERSHIP axis (ms-134 e-4738) against the live CLI surface.
     Returns ``{"unowned": [...], "by_owner": {...}}``:

@@ -26,6 +26,13 @@ description into an ENFORCED norm. Three checks:
      as a raw dict read the symbol check cannot see. Existing couplings are an
      allowlisted ratchet (reported as pending debt); a NEW one fails the checker.
 
+  4. Distribution exclusion (e-5062): no L0 (Beacon-product-operation, 非配布) verb
+     may appear in the shipped dispatch surface (``enumerate_live_verbs`` = the
+     wheel-packaged commands.py/dispatch.py dispatch). Since source dispatch ==
+     shipped dispatch, this is verb-granular and needs no built wheel. Empty today
+     (no verb is L0 after e-5061); a guard against a future L0 verb being wired into
+     public dispatch. (Skill-side distribution exclusion is a deferred follow-up.)
+
 The invariant scan uses the AST (not text/grep) so a mention of the forbidden
 symbol inside a comment or docstring is NOT a false hit — only a real call is.
 A call inside a private helper (``_foo``) is attributed to the scope of the
@@ -379,9 +386,12 @@ def run(commands_path: str = "") -> dict:
     new_coupling = [c for c in all_reads if c["status"] == "new_violation"]
     pending_coupling = [c for c in all_reads if c["status"] == "pending_debt"]
     reviewed_reads = [c for c in all_reads if c["status"] == "reviewed_correct"]
+    # Distribution exclusion (ms-134 e-5062): no L0 (product-operation) verb may
+    # appear in the shipped dispatch surface. Empty today (no verb is L0); a guard.
+    l0_leak = cl.shipped_l0_verbs()
     ok = (not cov["unclassified"] and not skill_cov["unclassified"]
           and not ownership["unowned"] and not skill_ownership["unowned"]
-          and not new_viol and not new_coupling)
+          and not new_viol and not new_coupling and not l0_leak)
     return {"ok": ok, "coverage": cov, "skill_coverage": skill_cov,
             "ownership": ownership, "skill_ownership": skill_ownership,
             "violations": viol,
@@ -390,7 +400,8 @@ def run(commands_path: str = "") -> dict:
             "all_collection_reads": all_reads,
             "new_collection_coupling": new_coupling,
             "pending_collection_coupling": pending_coupling,
-            "reviewed_correct_reads": reviewed_reads}
+            "reviewed_correct_reads": reviewed_reads,
+            "l0_distribution_leak": l0_leak}
 
 
 def render_proposal(prop: dict) -> None:
@@ -459,6 +470,14 @@ def main() -> int:
     own = result["ownership"]
     sown = result["skill_ownership"]
     print(f"  ownership: verbs {own['by_owner']} / skills {sown['by_owner']}")
+    if result["l0_distribution_leak"]:
+        print(f"  DISTRIBUTION EXCLUSION VIOLATION ({len(result['l0_distribution_leak'])}) "
+              f"— L0 (non-distributed, product-operation) verbs are in the shipped "
+              f"dispatch surface (ms-134 e-5062):")
+        for v in result["l0_distribution_leak"]:
+            print(f"    - {v} [L0] is dispatchable in the public CLI")
+        print("    → an L0 capability must not ship: reclassify it (universal "
+              "tooling → L1) or move it out of the wheel-packaged dispatch.")
     if cov["unclassified"]:
         print(f"  UNCLASSIFIED VERBS ({len(cov['unclassified'])}): "
               f"{', '.join(cov['unclassified'])}")

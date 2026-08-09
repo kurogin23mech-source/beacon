@@ -401,6 +401,18 @@ def test_debt_and_legitimate_are_disjoint():
 
 # --- symbol-reach ratchet (ms-134 e-5061), symmetric to the collection ratchet -
 
+def test_no_l0_verb_in_shipped_distribution(monkeypatch):
+    # Distribution exclusion (ms-134 e-5062): no L0 verb may be dispatchable in the
+    # shipped CLI surface. Empty by construction after e-5061 (no verb is L0).
+    assert cl.shipped_l0_verbs() == [], cl.shipped_l0_verbs()
+    assert chk.run()["l0_distribution_leak"] == []
+    # Mechanism: if a live verb were (mis)classified L0, the guard flags it. doctor
+    # is a real live verb — pin it L0 and it must surface, then the gate goes red.
+    monkeypatch.setitem(cl._NOUN_SCOPE, "doctor", "L0")
+    assert "doctor" in cl.shipped_l0_verbs()
+    assert chk.run()["ok"] is False
+
+
 def test_no_new_symbol_reach_on_real_tree():
     """The symbol ratchet gate: a NEW (non-allowlisted) shared capability calling
     a profession recorder/resolver symbol fails CI. An allowlisted (KNOWN_SYMBOL_
