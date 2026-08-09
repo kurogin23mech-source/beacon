@@ -30,7 +30,7 @@ import json
 import os
 import sys
 import urllib.parse
-from typing import Optional
+from typing import Callable, Optional
 
 from commands_shared import (
     load_project,
@@ -46,6 +46,7 @@ from commands_shared import (
     _bus_auto_execute_channels,
     _mirror_auto_execute_channels_to_local,
     _resolve_recipient_live,
+    _make_notice,
 )
 
 
@@ -510,6 +511,32 @@ def cmd_bus_auto_execute_remove():
 
 
 def cmd_bus_send():
+    # ms-140: --json output purity to stop caller-side double sends. In --json
+    # mode the ONLY thing on stdout must be the single result object, but this
+    # function also emits several non-fatal *advisory* notes (背景なし nudge,
+    # --manual override note, envelope fallback) to stderr on the success path.
+    # A caller that reads the send result via a merged stdout+stderr stream (the
+    # Bash tool does exactly this) then sees `Note: ...\n{json}`, fails to parse
+    # it, concludes "did it send?", and re-runs `beacon bus send` WITHOUT
+    # --client-event-id/--retry → the server registers a true duplicate DM (the
+    # 2026-08-09 誤送信 incident 1786254891861-3OOjSB). Structural close: in
+    # --json mode advisories are collected and folded into the result JSON under
+    # "notes" instead of being printed to stderr, so stdout is exactly one clean
+    # object and no stream merge can pollute what the caller parses. Human
+    # (non-json) mode keeps the inline stderr notes unchanged.
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    _advisories: list[str] = []
+
+    def _advise(msg: str) -> None:
+        """Emit a non-fatal advisory: to the result JSON in --json mode (keeps
+        stdout pure), else inline to stderr as before. Fatal errors that
+        sys.exit continue to print to stderr directly — they never coexist with
+        a success JSON, so they cannot pollute a parseable result."""
+        if json_mode:
+            _advisories.append(msg)
+        else:
+            print(msg, file=sys.stderr)
+
     channel = os.environ.get("BEACON_BUS_CHANNEL", "").strip()
     if not channel:
         print("Error: --channel <name> required", file=sys.stderr)
@@ -601,12 +628,11 @@ def cmd_bus_send():
         payload = {**payload, "recipient_user_id": recipient_user}
     elif channel == "dm" and not payload.get("recipient_session_id") \
             and not payload.get("recipient_user_id"):
-        print(
+        _advise(
             "Warning: sending to channel 'dm' without --to <session_id> or "
             "--to-user <user_id>. After e-1209 the server drops unaddressed "
             "DM events rather than broadcasting them — pass --to or --to-user "
-            "or use a different channel for broadcasts.",
-            file=sys.stderr,
+            "or use a different channel for broadcasts."
         )
 
     # e-1000 / e-3901: autonomous-send gate.
@@ -704,10 +730,9 @@ def cmd_bus_send():
         # payload so the decision-event trail shows a human deliberately
         # bypassed the autonomous gate (audit), and surface a one-line note.
         payload = {**payload, "manual_override": True}
-        print(
+        _advise(
             "Note: --manual override — this send bypasses the armed auto-reply "
-            "gate (recorded as a human-approved override).",
-            file=sys.stderr,
+            "gate (recorded as a human-approved override)."
         )
 
     if in_reply_to:
@@ -739,22 +764,25 @@ def cmd_bus_send():
     # cross-project misroute incident): if --to points at a session that
     # polls a different project than `project_id`, auto-route to that
     # project. Loud stderr notice keeps the override auditable.
-    project_id = _validate_recipient_project(recipient, project_id, channel)
+    project_id = _validate_recipient_project(
+        recipient, project_id, channel, advise=_advise)
     # e-1402 + e-2280: liveness gate on the sid itself, with conservative
     # auto-swap when the stale sid maps to a single live healthy sibling
     # owned by the same user. ms-95 / e-2280 lifts AI's per-send duty to
     # manually re-resolve via `bus directory --live` after observed
     # 2026-06-22 kyozai dolphin Trek dogfood (= 2 stale sends in 30 min).
     swapped_recipient, swap_notice, _recipient_email = _resolve_recipient_live(
-        recipient, channel)
+        recipient, channel, advise=_advise)
     if swap_notice is not None and swapped_recipient != recipient:
         # Update payload + re-validate project routing for the new sid.
         # The new session may live in a different project (= different
         # bclaude worktree); _validate_recipient_project handles the
-        # cross-project hop with its own stderr notice.
+        # cross-project hop with its own advisory notice (routed to --json
+        # notes in json mode, else stderr).
         recipient = swapped_recipient
         payload = {**payload, "recipient_session_id": recipient}
-        project_id = _validate_recipient_project(recipient, project_id, channel)
+        project_id = _validate_recipient_project(
+            recipient, project_id, channel, advise=_advise)
 
     # e-1290: envelope-by-default for CLI sends.
     #
@@ -869,24 +897,21 @@ def cmd_bus_send():
             # still lands.
             msg = str(e)
             if "API error 404" in msg or "API error 400" in msg:
-                print(
+                _advise(
                     f"Note: envelope issuance unavailable ({msg.split(':', 1)[0]});"
-                    " falling back to legacy bus path.",
-                    file=sys.stderr,
+                    " falling back to legacy bus path."
                 )
             else:
-                print(
+                _advise(
                     f"Note: envelope issuance error, falling back to legacy"
-                    f" bus path: {msg}",
-                    file=sys.stderr,
+                    f" bus path: {msg}"
                 )
             envelope_obj = None
             requested_action = None
         except (ConnectionError, OSError) as e:
-            print(
+            _advise(
                 f"Note: envelope issuance network error, falling back to"
-                f" legacy bus path: {e}",
-                file=sys.stderr,
+                f" legacy bus path: {e}"
             )
             envelope_obj = None
             requested_action = None
@@ -916,11 +941,10 @@ def cmd_bus_send():
     # 空なら、書くよう促す (= SPEC §設計方針3: promote、hard block しない)。
     # 返信 (in_reply_to あり) は継続なので促さない (= ノイズ回避、主役は開始の瞬間)。
     if channel == "dm" and not in_reply_to and not dec_context:
-        print(
+        _advise(
             "Note: 背景なしで DM を発信します。この相談で『どんな問題に直面したか』を"
             " --context \"...\" で添えると、意思決定の記録 (decision-event) が"
-            " 問題駆動の相談として残ります (任意、送信は止めません)。",
-            file=sys.stderr,
+            " 問題駆動の相談として残ります (任意、送信は止めません)。"
         )
 
     # Qualitative gate (ms-93 e-3340 — mirrors channel/bus-qualgate.mjs).
@@ -999,6 +1023,14 @@ def cmd_bus_send():
                 "remaining": max(int(budget.get("total", 0))
                                   - int(budget.get("used", 0)), 0),
             }
+        # ms-140: fold the non-fatal advisory notes into the result so the
+        # human-facing info isn't lost while stdout stays a single pure JSON
+        # object (no stderr interleaving that could make a caller re-send).
+        # Always emit the key (empty list when no advisories) so the schema is
+        # stable and self-describing: a caller can rely on out["notes"] instead
+        # of guessing whether an absent key means "none" or "unsupported build"
+        # (independent AX review, PR #617).
+        out["notes"] = list(_advisories)
         print(json.dumps(out, ensure_ascii=False))
         return
     line = (
@@ -1412,6 +1444,7 @@ def cmd_bus_status():
 
 def _validate_recipient_project(
     recipient: str, target_project_id: str, channel: str,
+    advise: Optional[Callable[[str], None]] = None,
 ):
     """Cross-project pre-flight for ``beacon bus send --to <recipient>``.
 
@@ -1449,6 +1482,12 @@ def _validate_recipient_project(
         legacy soft-warn 経路に戻す (= 破壊的変更を吸収したい既存 script 用)。
         default では unknown recipient は refuse。
     """
+    # ms-140: non-fatal "proceeding anyway" warnings must be routable into the
+    # caller's --json advisory sink (folded into the result "notes") so they
+    # never land on stderr where a merged stdout+stderr stream would corrupt the
+    # JSON result and trigger a duplicate resend. Hard-error paths below keep
+    # printing to stderr directly (they sys.exit and never emit a success JSON).
+    _notice = _make_notice(advise)
     if channel != "dm" or not recipient:
         return target_project_id
     if os.environ.get("BEACON_BUS_SKIP_TO_CHECK", "") == "1":
@@ -1500,14 +1539,13 @@ def _validate_recipient_project(
                 file=sys.stderr,
             )
             sys.exit(1)
-        print(
+        _notice(
             f"⚠ recipient session {recipient[:24]}… polls project "
             f"{other_pid!r}, not the target {target_project_id!r}. "
             f"Auto-routing this DM via --project {other_pid}. "
             f"(Set BEACON_BUS_SKIP_TO_CHECK=1 to bypass this check, "
             f"or BEACON_BUS_NO_AUTO_ROUTE=1 to make the mismatch a "
-            f"hard error.)",
-            file=sys.stderr,
+            f"hard error.)"
         )
         return other_pid
 
@@ -1516,24 +1554,22 @@ def _validate_recipient_project(
     # かつ recipient 見つからなかった場合は e-2291 の new behavior として hard
     # error に昇格 (opt-out あり)。
     if lookup_failed:
-        print(
+        _notice(
             f"⚠ recipient session {recipient[:24]}… の project lookup が "
             f"API 経由で失敗しました。 Send proceeding against project "
             f"{target_project_id!r} as-is; verify the receipt afterwards "
-            f"with `beacon bus status <event_id>`.",
-            file=sys.stderr,
+            f"with `beacon bus status <event_id>`."
         )
         return target_project_id
 
     if os.environ.get("BEACON_BUS_ALLOW_UNKNOWN", "") == "1":
         # Legacy soft-warn: 既存 script との後方互換 opt-out。
-        print(
+        _notice(
             f"⚠ recipient session {recipient[:24]}… is not visible in any "
             f"of your projects. Send proceeding against project "
             f"{target_project_id!r} as-is; verify the receipt afterwards "
             f"with `beacon bus status <event_id>`. (Set via "
-            f"BEACON_BUS_ALLOW_UNKNOWN=1.)",
-            file=sys.stderr,
+            f"BEACON_BUS_ALLOW_UNKNOWN=1.)"
         )
         return target_project_id
 

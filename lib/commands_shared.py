@@ -28,7 +28,7 @@ import json
 import os
 import re
 import sys
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from store import get_store
 import core
@@ -1390,8 +1390,23 @@ def _resolve_recipient_email_via_self_sessions(recipient: str) -> str:
     return ""
 
 
+def _make_notice(
+    advise: Optional[Callable[[str], None]],
+) -> Callable[[str], None]:
+    """ms-140: return the sink for a non-fatal advisory. When ``advise`` is
+    given (the --json path), advisories are collected by the caller (folded into
+    the result's "notes"); when it is None, they print to stderr as before. Both
+    ``bus send`` helpers route their proceed-anyway warnings through this so the
+    "keep --json stdout pure" fallback lives in exactly one place (single source
+    of truth). Hard-error paths do NOT use this — they sys.exit and print to
+    stderr directly, since they never coexist with a success JSON."""
+    return advise if advise is not None else (
+        lambda m: print(m, file=sys.stderr))
+
+
 def _resolve_recipient_live(
-    recipient: str, channel: str
+    recipient: str, channel: str,
+    advise: Optional[Callable[[str], None]] = None,
 ) -> Tuple[str, Optional[str]]:
     """Liveness gate + soft auto-swap for stale session_id reuse.
 
@@ -1427,6 +1442,14 @@ def _resolve_recipient_live(
         AND no swap candidate. Opt-in strictness for CI pipelines that
         treat dead-sid sends as a bug rather than a soft hint.
     """
+    # ms-140: the stale-swap / not-live warnings below are non-fatal (the send
+    # proceeds), so in --json mode they must be routable into the caller's
+    # advisory sink (folded into the result "notes") instead of stderr — a note
+    # on stderr merges ahead of the JSON on stdout (the Bash tool combines the
+    # streams), corrupts the caller's parse, and drives a duplicate resend. The
+    # hard-refuse path (BEACON_BUS_REFUSE_STALE) keeps printing to stderr since
+    # it sys.exit's and never yields a success JSON.
+    _notice = _make_notice(advise)
     if channel != "dm" or not recipient:
         return (recipient, None, "")
     if os.environ.get("BEACON_BUS_NO_LIVE_CHECK", "") == "1":
@@ -1488,7 +1511,7 @@ def _resolve_recipient_live(
             f"recipient {recipient[:24]}… is stale; auto-swapped to "
             f"{new_sid[:24]}… (owner={ident_hint}, single live match)"
         )
-        print(f"⇄ {notice}", file=sys.stderr)
+        _notice(f"⇄ {notice}")
         swap_email = str(actor.get("email") or "")
         if not swap_email:
             # e-3880: swap target's row can also lack a stamped email; resolve
@@ -1510,13 +1533,12 @@ def _resolve_recipient_live(
         )
         sys.exit(1)
 
-    print(
+    _notice(
         f"⚠ recipient session {recipient[:24]}… is not in the live+healthy "
         f"directory. The send will proceed, but the target may be dead or "
         f"unreachable. Consider `/beacon-dm-send` Skill which re-discovers "
         f"on every send. (Set BEACON_BUS_NO_LIVE_CHECK=1 to suppress, "
-        f"BEACON_BUS_REFUSE_STALE=1 to hard-refuse instead.)",
-        file=sys.stderr,
+        f"BEACON_BUS_REFUSE_STALE=1 to hard-refuse instead.)"
     )
     # e-3880: the recipient may be a same-user session that simply isn't in the
     # live+healthy set right now (just stopped, poll stale). Still resolve the
