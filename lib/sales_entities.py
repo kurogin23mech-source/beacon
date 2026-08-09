@@ -38,6 +38,7 @@ from typing import Optional
 
 import work_base
 import work_model  # ms-109 e-3559: 職種非依存の Target/WorkItem 正準アクセサ
+import deadline  # ms-139 e-4948: L2 締切エンジン (temporal core をここへ抽出)
 import disclosure  # ms-113 e-3734: project 参加ベースの開示プリミティブ
 import org  # ms-113 e-3734: personal/team org id 導出
 import master_projection  # ms-111 e-3621: Account/Contact 生成時の master link seam
@@ -1530,54 +1531,21 @@ def needs_transition_date(data: dict, target_id: str) -> bool:
 # stale になるが、派生なら常に正しい。``status`` (open/won/lost…) とは直交する
 # 別次元 (overdue な商談も status は open のまま)。
 
-TRANSITION_UNSET = "unset"          # 非terminal・遷移日なし (= needs_transition_date)
-TRANSITION_SCHEDULED = "scheduled"  # 遷移日が未来
-TRANSITION_DUE = "due"              # 遷移日が今日 (= 判定日)
-TRANSITION_OVERDUE = "overdue"      # 遷移日を過ぎ、まだ非terminal (= 判定待ち, 抜け漏れ候補)
-TRANSITION_SETTLED = "settled"      # terminal フェーズ (= 決着済み)
-
-
-# --- target-class temporal core (ms-107 e-3271) ----------------------------
+# --- target-class temporal core → L2 engine (ms-139 e-4948) ----------------
 # 「対象が期日を持つ → 時間的ステータスが派生する」は sales 固有でなく target-class
-# 共通の関心事 (milestone.target_date / opportunity.transition_date / operation の
-# 次回発火 は同型)。開発 Beacon が締切を surface していないのは設計でなく gap。
-# ここは *pure* な汎用コア (data も target 型も知らない、期日と『今日』と settled
-# 述語だけ) として書き、営業は下の transition_status がこれを wrap する第一
-# consumer。ms-109 (統合リファクタ) で L2 engine module へそのまま抽出し、
-# milestone.target_date を second consumer として差す。
-
-def temporal_status(due_date: str, today: str, *, settled: bool = False) -> str:
-    """Pure temporal classification of a due date relative to ``today``
-    (both ``YYYY-MM-DD``). Target-class generic — no entity knowledge.
-
-    ``settled=True`` (= 決着済み / 完了) → SETTLED regardless of date. No due
-    date → UNSET. Otherwise past → OVERDUE, today → DUE, future → SCHEDULED.
-    ISO dates compare correctly as plain strings, so no parsing is needed.
-    """
-    if settled:
-        return TRANSITION_SETTLED
-    d = (due_date or "").strip()
-    if not d:
-        return TRANSITION_UNSET
-    if d < today:
-        return TRANSITION_OVERDUE
-    if d == today:
-        return TRANSITION_DUE
-    return TRANSITION_SCHEDULED
-
-
-def scan_overdue(items, due_date_of, settled_of, today: str) -> list:
-    """Generic 締切精査 (deadline review): return ``(item, status)`` pairs whose
-    temporal_status is DUE or OVERDUE, oldest due date first. ``due_date_of`` /
-    ``settled_of`` are callables reading a due date / settled flag off each item,
-    so any target class plugs in (opportunities today; milestones at ms-109)."""
-    out = []
-    for it in items:
-        st = temporal_status(due_date_of(it), today, settled=bool(settled_of(it)))
-        if st in (TRANSITION_DUE, TRANSITION_OVERDUE):
-            out.append((it, st))
-    out.sort(key=lambda pair: (due_date_of(pair[0]) or ""))
-    return out
+# 共通の関心事 (milestone.target_date / opportunity.transition_date / activity.deadline
+# / task.deadline は同型)。ms-107 e-3271 の予告どおり、pure な汎用コアと temporal
+# status 語彙は L2 engine (lib/deadline.py) へ抽出済み。ここは後方互換の re-export で、
+# 既存の sales_entities.TRANSITION_* / temporal_status / scan_overdue 参照
+# (commands.py 等) を保つ。営業固有の wrapper transition_status は下に残る (第一
+# consumer)。
+TRANSITION_UNSET = deadline.TRANSITION_UNSET
+TRANSITION_SCHEDULED = deadline.TRANSITION_SCHEDULED
+TRANSITION_DUE = deadline.TRANSITION_DUE
+TRANSITION_OVERDUE = deadline.TRANSITION_OVERDUE
+TRANSITION_SETTLED = deadline.TRANSITION_SETTLED
+temporal_status = deadline.temporal_status
+scan_overdue = deadline.scan_overdue
 
 
 def transition_status(data: dict, target_id: str, today: str) -> str:
