@@ -56,6 +56,26 @@ def test_key_skills_have_expected_scope():
     assert cl.skill_scope_of("_beacon-spec-methodology") == "L1"
 
 
+def test_review_split_dev_instruments_vs_neutral_plumbing():
+    # ms-134 e-5061 review 分割: the review VERB + the beacon-review* workflow/
+    # attainment skills are profession-neutral (L2); the code-review instrument
+    # skills (ax/philosophy/maintainability) review CODE = a dev artifact (L3-dev).
+    assert cl.scope_of("review_context") == "L2"       # the verb stays plumbing
+    assert cl.skill_scope_of("beacon-review") == "L2"  # entry + attainment plumbing
+    assert cl.skill_scope_of("beacon-review-run") == "L2"
+    for instrument in ("ax-review", "philosophy-review", "maintainability-review"):
+        assert cl.skill_scope_of(instrument) == "L3", instrument
+        assert cl.skill_owner_of(instrument) == "dev", instrument
+
+
+def test_dir_form_skills_are_enumerated():
+    # The review instruments are dir-form skills (skills/<name>/SKILL.md), not
+    # top-level *.md; enumerate_skills must still see them so they are classified.
+    skills = cl.enumerate_skills()
+    for instrument in ("ax-review", "philosophy-review", "maintainability-review"):
+        assert instrument in skills, instrument
+
+
 def test_ledger_uses_shared_surface_source():
     """The ledger reconciles against the SAME live surface the verb ledger and
     map-drift lint use, so the three can never drift apart."""

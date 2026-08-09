@@ -594,7 +594,12 @@ _SKILL_PREFIX_SCOPE = (
     ("beacon-trek-", "L1"),       # trek coordination substrate
     ("beacon-session-", "L1"),    # session management
     ("beacon-dm-", "L1"),         # cross-user DM
-    ("beacon-review", "L2"),      # review* operate on shared targets (ms-119 職種中立)
+    ("beacon-review", "L2"),      # review* verbs/skills = the review PLUMBING +
+                                  # attainment (目的達成 = 職種中立): a target met its
+                                  # goal is profession-neutral. The dev-specific
+                                  # review TYPES live as separate instrument skills
+                                  # below (ax/philosophy/maintainability = L3-dev),
+                                  # not under this prefix (ms-134 e-5061 review 分割).
     ("_beacon-", "L1"),           # methodology companions (shared authoring aids)
 )
 
@@ -608,6 +613,13 @@ _SKILL_SCOPE = {
     "beacon-onboard": "L1", "beacon-pr-create": "L3", "beacon-push": "L3",
     "beacon-retro": "L2", "beacon-retrospect": "L2", "beacon-roadmap": "L2",
     "beacon-spec": "L2", "beacon-task": "L3", "beacon-vision": "L2",
+    # ms-134 e-5061 review 分割: the code-review instrument skills (dir-form,
+    # each skills/<name>/SKILL.md + review-type.json) review CODE — a dev-specific
+    # artifact — so they are L3-dev, distinct from the profession-neutral review
+    # plumbing + attainment (beacon-review*, L2). This is where the user's intent
+    # "AX/思想/保守性 = 開発固有" is expressed (leader ruling: it belongs at the
+    # skill layer, not the review verb which is type-agnostic plumbing).
+    "ax-review": "L3", "philosophy-review": "L3", "maintainability-review": "L3",
     # L4 — project-local to the Beacon source repo itself. beacon-scope-classify
     # (ms-134 e-4739) edits THIS ledger (lib/capability_ledger.py); a pip-installed
     # Beacon user has no ledger to maintain, so it is useful only in the Beacon
@@ -640,6 +652,8 @@ _SKILL_OWNER_PREFIX = (("beacon-sales-", "sales"),)
 _SKILL_OWNER = {
     "beacon-deploy": "dev", "beacon-log": "dev", "beacon-pr-create": "dev",
     "beacon-push": "dev", "beacon-task": "dev", "beacon-scenario-gen": "dev",
+    # code-review instruments (ms-134 e-5061): review CODE = a dev artifact.
+    "ax-review": "dev", "philosophy-review": "dev", "maintainability-review": "dev",
 }
 
 # L4 skill -> owning PROJECT id (ms-134 e-4739), the skill-side parallel of
@@ -674,13 +688,23 @@ def skill_owner_of(skill_name: str) -> str:
 
 
 def enumerate_skills(skills_dir: str = "") -> list:
-    """Return the sorted skill names (``*.md`` basenames) shipped in the repo
-    ``skills/`` directory — the live skill surface this ledger reconciles
-    against."""
+    """Return the sorted skill names shipped in the repo ``skills/`` directory —
+    the live skill surface this ledger reconciles against. A skill is either a
+    top-level ``<name>.md`` file OR a ``<name>/`` directory containing a
+    ``SKILL.md`` (the dir-form skills, e.g. the ax / philosophy / maintainability
+    review instruments — each carries SKILL.md + review-type.json; ms-134 e-5061).
+    Both forms are real skill surfaces, so both must be classified + owned."""
     d = skills_dir or os.path.join(_REPO, "skills")
     if not os.path.isdir(d):
         return []
-    return sorted(f[:-3] for f in os.listdir(d) if f.endswith(".md"))
+    names = set()
+    for f in os.listdir(d):
+        full = os.path.join(d, f)
+        if f.endswith(".md") and os.path.isfile(full):
+            names.add(f[:-3])
+        elif os.path.isdir(full) and os.path.isfile(os.path.join(full, "SKILL.md")):
+            names.add(f)
+    return sorted(names)
 
 
 def reconcile_skills(skills_dir: str = "") -> dict:
