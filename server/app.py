@@ -45,6 +45,7 @@ import redis_client  # ms-96 / e-2381: rate limit 用の揮発カウンタ (fail
 import trek as trek_mod  # ms-69 / e-1656: trek schema + pure mutators
 import trek_scheduler as trek_scheduler_mod  # ms-83 / e-1997: progress-check cadence logic
 import tick_scheduler  # ms-107 e-3434/e-3461: target-agnostic periodic-tick cadence
+import deadline  # ms-139 e-4953: L2 締切エンジン (overdue 規則 + reminder dedup)
 import tick_health as tick_health_mod  # e-1391 / ms-66: tick-liveness evaluation
 
 # e-1391 (ms-66) — last successful periodic tick, recorded by the
@@ -3988,6 +3989,96 @@ def _fire_operation(pid: str, project: dict, op: dict, now_iso: str) -> dict:
             "recipient": recipient or "(broadcast)"}
 
 
+def _deadline_reminder_candidates(project: dict):
+    """Yield ``(item, kind, label, recipient_session)`` for every work item that
+    can carry a deadline — milestones (``target_date``), their tasks
+    (``deadline``), and sales activities (``deadline``) — ms-139 e-4953.
+
+    ``recipient`` is the session that *claims* the item's target (its
+    ``occupation.session_id``): the milestone for a task, the opportunity for an
+    activity. '' when unclaimed (no live owner to DM). Reading the project's
+    concrete collections lives here in the server (app layer), not in the L2
+    ``deadline`` module, which stays collection-agnostic (per capability 台帳 L2)."""
+    for ms in (project.get("milestones", []) or []):
+        recipient = (ms.get("occupation") or {}).get("session_id", "") or ""
+        label = ms.get("title") or ms.get("label") or ms.get("id", "")
+        # milestone 自身 (deadline_of は target_date を読む)
+        yield ms, "milestone", label, recipient
+        for e in (ms.get("entries", []) or []):
+            if e.get("type") == "task":
+                yield e, "task", e.get("description") or e.get("id", ""), recipient
+    for opp in (project.get("opportunities", []) or []):
+        recipient = (opp.get("occupation") or {}).get("session_id", "") or ""
+        for a in (opp.get("activities", []) or []):
+            yield a, "activity", a.get("description") or a.get("id", ""), recipient
+
+
+def _fire_due_deadlines(pid: str, project: dict, now_iso: str, report: list) -> bool:
+    """締切超過の work item を検知し、claim 者のセッションへ 1 回だけ DM で知らせる
+    — ms-139 e-4953。tick に相乗りする 2 つ目の source。
+
+    判定規則は L2 締切エンジン (``deadline``): 今日 > 締切 かつ status が terminal
+    (done/cancelled) でない → overdue。二重配信は ``deadline.pending_reminders`` /
+    ``mark_reminded`` の dedup (最後にリマインドした締切値) で防ぐ — 締切を延ばして
+    再び過ぎたら値が変わるので再通知される。reminder は「action を認可する DM」では
+    なく **通知** なので envelope 不要 (delivery=propose-to-ai で受信 AI の文脈に載せ、
+    idle-wake で起こす)。claim 者セッションが無い項目は DM 先が無いので skip。
+
+    ``report`` に per-fire を積み、dedup 印を刻んだら True を返す (呼び出し側が
+    ``save_project`` する)。"""
+    today = now_iso[:10]
+    changed = False
+    for item, kind, label, recipient in _deadline_reminder_candidates(project):
+        st = deadline.work_item_temporal_status(item, today)
+        if st not in (deadline.TRANSITION_DUE, deadline.TRANSITION_OVERDUE):
+            continue
+        if item.get(deadline.REMINDED_FOR_KEY) == deadline.deadline_of(item):
+            continue  # この締切値では既にリマインド済み
+        dl = deadline.deadline_of(item)
+        if not recipient:
+            report.append({"project_id": pid, "kind": kind, "label": label,
+                           "deadline": dl, "fired": False,
+                           "skipped": "no claimer session"})
+            continue
+        # ms-139 思想レビュー finding#3: DUE(本日締切・未超過)でも発火するが、文面は
+        # temporal に応じて分ける。overdue を DUE 当日に断言すると受信 AI の判断入力が汚れる。
+        overdue = st == deadline.TRANSITION_OVERDUE
+        head = "⏰ 締切超過" if overdue else "⏰ 本日締切"
+        state = "を過ぎています" if overdue else "は本日が締切です"
+        payload = {
+            "kind": "deadline-reminder",
+            "work_kind": kind,
+            "label": label,
+            "deadline": dl,
+            "temporal": st,
+            "recipient_session_id": recipient,
+            "message": (f"{head}: {label} の締切 {dl} {state} ({kind})。"
+                        f"済んだら完了、延ばすなら期日変更、やめたら取消で盤面から"
+                        f"外してください。"),
+            "created_at": now_iso,
+        }
+        bus_data = {
+            "channel": "dm",
+            "sender_session_id": "",
+            "payload": payload,
+            "delivery": "propose-to-ai",
+            "created_at": now_iso,
+        }
+        try:
+            db.append_bus_event(pid, bus_data)
+        except Exception as exc:  # pragma: no cover
+            report.append({"project_id": pid, "kind": kind, "label": label,
+                           "fired": False,
+                           "error": f"append_bus_event: {type(exc).__name__}"})
+            continue
+        deadline.mark_reminded(item)  # 二重配信防止の dedup 印
+        item["deadline_reminded_at"] = now_iso
+        changed = True
+        report.append({"project_id": pid, "kind": kind, "label": label,
+                       "deadline": dl, "fired": True, "recipient": recipient})
+    return changed
+
+
 def _fire_due_scheduled(now_iso: str) -> list:
     """ms-107 e-3434 chunk 3b — fire due *scheduled* things on the shared Trek
     scheduler tick ("相乗り"), using the target-agnostic ``lib/tick_scheduler``
@@ -4032,6 +4123,10 @@ def _fire_due_scheduled(now_iso: str) -> list:
             if result.get("fired"):
                 op.setdefault("meta", {})["last_fired_at"] = now_iso
                 changed = True
+        # --- source: deadline reminders (ms-139 e-4953) — 締切超過の work item を
+        #     claim 者セッションへ 1 回 DM。Operations と同じ tick に相乗りする。 ---
+        if _fire_due_deadlines(pid, project, now_iso, report):
+            changed = True
         # --- future sources (Account 定期連絡 / short-lived watch tasks) plug
         #     in here with their own descriptor adapter + fire callback ---
         if changed:

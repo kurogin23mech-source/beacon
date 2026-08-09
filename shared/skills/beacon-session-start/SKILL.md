@@ -420,6 +420,28 @@ python3 "$(beacon _install-root)/scripts/session-start-trek-status.py" 2>/dev/nu
 
 local mode (= `.beacon/cloud.json` 不在) でも `~/.beacon/treks/` から拾うので動作する。この Step は **読み取り専用**。
 
+## Step 1p: 締切超過 (overdue) work items の surface (ms-139 e-4952)
+
+期日を過ぎた作業 (開発の milestone `target_date` / task `deadline`、営業の activity
+`deadline`) を、起動のたびに冪等に表示する。サーバ発の締切リマインダ (e-4953 = サーバ
+tick が claim 者セッションへ DM) が本命だが、その駆動が落ちても最低限の可視化を保証する
+二重化 (真値源はサーバ、ここは毎回再計算する冪等表示)。判定規則は L2 締切エンジン
+`lib/deadline.py` (今日 > 締切 かつ status が terminal(done/cancelled) でない) に一本化
+されている。
+
+Bash ツールで実行 (fail-safe、常に exit 0):
+
+```bash
+python3 "$(beacon _install-root)/scripts/session-start-deadlines.py" 2>/dev/null
+```
+
+出力が空なら期日超過なし、何も表示しない。**「⏰ 締切超過 (overdue) work items:」で
+始まる block が出たら、Step 3 出力ヘッダ部にそのまま転記する** (未解決 Incident の直後、
+DM catch-up と並ぶ位置)。各行は `[種別] label / 期日 YYYY-MM-DD (⚠超過/⏰本日) — 文脈`、
+古い期日順。データ取得 (milestone/task/activity の 3 源を best-effort JSON で集約) と整形は
+script (`scripts/session-start-deadlines.py`、単体テスト済み) が所管。この Step は
+**読み取り専用** (超過を消すには done / update --deadline / cancel を user/AI が別途行う)。
+
 ## Step 1j: 前セッションの session log 読み込み（ms-43 e-1360）
 
 前セッション末で `/beacon-session-end` Skill が `beacon session end` で集約した session log には、**「次セッション最優先 / top of queue / 次にやること」セクションが summary 内に明文化されている**ことが多い。これは trigger より優先順位が高い (人間/AI が curate した継続意図そのもの)。

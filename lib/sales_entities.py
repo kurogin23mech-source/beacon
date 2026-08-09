@@ -38,6 +38,7 @@ from typing import Optional
 
 import work_base
 import work_model  # ms-109 e-3559: 職種非依存の Target/WorkItem 正準アクセサ
+import deadline  # ms-139 e-4948: L2 締切エンジン (temporal core をここへ抽出)
 import disclosure  # ms-113 e-3734: project 参加ベースの開示プリミティブ
 import org  # ms-113 e-3734: personal/team org id 導出
 import master_projection  # ms-111 e-3621: Account/Contact 生成時の master link seam
@@ -1530,54 +1531,21 @@ def needs_transition_date(data: dict, target_id: str) -> bool:
 # stale になるが、派生なら常に正しい。``status`` (open/won/lost…) とは直交する
 # 別次元 (overdue な商談も status は open のまま)。
 
-TRANSITION_UNSET = "unset"          # 非terminal・遷移日なし (= needs_transition_date)
-TRANSITION_SCHEDULED = "scheduled"  # 遷移日が未来
-TRANSITION_DUE = "due"              # 遷移日が今日 (= 判定日)
-TRANSITION_OVERDUE = "overdue"      # 遷移日を過ぎ、まだ非terminal (= 判定待ち, 抜け漏れ候補)
-TRANSITION_SETTLED = "settled"      # terminal フェーズ (= 決着済み)
-
-
-# --- target-class temporal core (ms-107 e-3271) ----------------------------
+# --- target-class temporal core → L2 engine (ms-139 e-4948) ----------------
 # 「対象が期日を持つ → 時間的ステータスが派生する」は sales 固有でなく target-class
-# 共通の関心事 (milestone.target_date / opportunity.transition_date / operation の
-# 次回発火 は同型)。開発 Beacon が締切を surface していないのは設計でなく gap。
-# ここは *pure* な汎用コア (data も target 型も知らない、期日と『今日』と settled
-# 述語だけ) として書き、営業は下の transition_status がこれを wrap する第一
-# consumer。ms-109 (統合リファクタ) で L2 engine module へそのまま抽出し、
-# milestone.target_date を second consumer として差す。
-
-def temporal_status(due_date: str, today: str, *, settled: bool = False) -> str:
-    """Pure temporal classification of a due date relative to ``today``
-    (both ``YYYY-MM-DD``). Target-class generic — no entity knowledge.
-
-    ``settled=True`` (= 決着済み / 完了) → SETTLED regardless of date. No due
-    date → UNSET. Otherwise past → OVERDUE, today → DUE, future → SCHEDULED.
-    ISO dates compare correctly as plain strings, so no parsing is needed.
-    """
-    if settled:
-        return TRANSITION_SETTLED
-    d = (due_date or "").strip()
-    if not d:
-        return TRANSITION_UNSET
-    if d < today:
-        return TRANSITION_OVERDUE
-    if d == today:
-        return TRANSITION_DUE
-    return TRANSITION_SCHEDULED
-
-
-def scan_overdue(items, due_date_of, settled_of, today: str) -> list:
-    """Generic 締切精査 (deadline review): return ``(item, status)`` pairs whose
-    temporal_status is DUE or OVERDUE, oldest due date first. ``due_date_of`` /
-    ``settled_of`` are callables reading a due date / settled flag off each item,
-    so any target class plugs in (opportunities today; milestones at ms-109)."""
-    out = []
-    for it in items:
-        st = temporal_status(due_date_of(it), today, settled=bool(settled_of(it)))
-        if st in (TRANSITION_DUE, TRANSITION_OVERDUE):
-            out.append((it, st))
-    out.sort(key=lambda pair: (due_date_of(pair[0]) or ""))
-    return out
+# 共通の関心事 (milestone.target_date / opportunity.transition_date / activity.deadline
+# / task.deadline は同型)。ms-107 e-3271 の予告どおり、pure な汎用コアと temporal
+# status 語彙は L2 engine (lib/deadline.py) へ抽出済み。ここは後方互換の re-export で、
+# 既存の sales_entities.TRANSITION_* / temporal_status / scan_overdue 参照
+# (commands.py 等) を保つ。営業固有の wrapper transition_status は下に残る (第一
+# consumer)。
+TRANSITION_UNSET = deadline.TRANSITION_UNSET
+TRANSITION_SCHEDULED = deadline.TRANSITION_SCHEDULED
+TRANSITION_DUE = deadline.TRANSITION_DUE
+TRANSITION_OVERDUE = deadline.TRANSITION_OVERDUE
+TRANSITION_SETTLED = deadline.TRANSITION_SETTLED
+temporal_status = deadline.temporal_status
+scan_overdue = deadline.scan_overdue
 
 
 def transition_status(data: dict, target_id: str, today: str) -> str:
@@ -1859,6 +1827,34 @@ def opportunities_awaiting_judgement(data: dict, today: str) -> list:
         # not a lie; fall back to the static field only when there is no comm.
         "who_has_the_ball": derive_ball(o) or o.get("who_has_the_ball", ""),
     } for o, st in pairs]
+
+
+def overdue_activities(data: dict, today: str) -> list:
+    """締切精査 for activities (準備活動: 会食・打診など): 商談横断で deadline が
+    due/overdue な活動を古い順に返す — ms-139 e-4951 (SPEC P3)。
+
+    これまで締切精査は商談の遷移日 (transition_date) しか見ておらず、活動の期日
+    (activity.deadline) は WebUI しか surface していなかった。ここは L2 締切エンジン
+    (``deadline.overdue_work_items``) に活動を流すだけ — done / cancelled は
+    ``is_settled`` で terminal 扱いになり自動で外れる (催促は完了・取消で止まる)。
+
+    取消商談 (``live_opportunities`` で除外) の活動は出さない。各 row に商談文脈
+    (opp_id / opp_title) と who_has_the_ball (次に動く責任) を載せる。"""
+    out = []
+    for opp in live_opportunities(data):
+        acts = opp.get("activities", []) or []
+        for act, st in deadline.overdue_work_items(acts, today):
+            out.append({
+                "opp_id": opp.get("id", ""),
+                "opp_title": work_model.target_label(opp),
+                "act_id": act.get("id", ""),
+                "description": act.get("description", ""),
+                "deadline": act.get("deadline", ""),
+                "activity_status": st,  # deadline.TRANSITION_DUE / _OVERDUE
+                "who_has_the_ball": act.get("who_has_the_ball", ""),
+            })
+    out.sort(key=lambda r: r["deadline"] or "")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -2559,7 +2555,15 @@ def find_activity(data: dict, activity_id: str):
     return None, None
 
 
-VALID_ACTIVITY_STATUS = {work_model.TODO_STATUS, work_model.DONE_STATUS}
+# ms-139 e-4950: cancelled は Activity の正当な terminal 状態 (activity_cancel が
+# 作る)。以前 valid 集合が {todo, done} だけで cancelled を欠いていたため、cockpit の
+# 「status == cancelled は未消化に出さない」除外前提と齟齬していた (SPEC P6)。
+# vocabulary としては cancelled を含める。ただし cancelled は監査印
+# (cancelled_at/by/reason) を伴うので、直接 set できる状態は下の _SETTABLE のみに
+# 絞り、cancel は activity_cancel を経由させる (= work_base.stamp_cancel)。
+VALID_ACTIVITY_STATUS = {
+    work_model.TODO_STATUS, work_model.DONE_STATUS, work_model.CANCELLED_STATUS}
+_SETTABLE_ACTIVITY_STATUS = {work_model.TODO_STATUS, work_model.DONE_STATUS}
 
 
 def activity_set_status(data: dict, activity_id: str, status: str, *,
@@ -2568,13 +2572,17 @@ def activity_set_status(data: dict, activity_id: str, status: str, *,
     other Communication *fulfills* a planned Activity (ms-106 e-3505): the plan
     is marked done rather than leaving a lingering todo sitting beside the
     Communication fact — the send is recorded once (as the Communication), and
-    the plan it satisfied is closed, not duplicated as a second '[sent]' todo."""
+    the plan it satisfied is closed, not duplicated as a second '[sent]' todo.
+
+    Only todo/done are settable here; cancel goes through ``activity_cancel``
+    (it stamps the cancel audit trail) — ms-139 e-4950."""
     opp, act = find_activity(data, activity_id)
     if act is None:
         raise ValueError(f"Activity not found: {activity_id}")
-    if status not in VALID_ACTIVITY_STATUS:
+    if status not in _SETTABLE_ACTIVITY_STATUS:
+        hint = " (cancel via activity_cancel)" if status == work_model.CANCELLED_STATUS else ""
         raise ValueError(
-            f"status must be one of {sorted(VALID_ACTIVITY_STATUS)}, got {status!r}")
+            f"status must be one of {sorted(_SETTABLE_ACTIVITY_STATUS)}{hint}, got {status!r}")
     if status == work_model.DONE_STATUS:
         # ms-109 e-3696 (fable A-2): close the Activity through the same
         # occupation-agnostic base a development task done uses, so both stamp
@@ -2606,6 +2614,29 @@ def activity_cancel(data: dict, activity_id: str, *, reason: str = "") -> dict:
     if act is None:
         raise ValueError(f"Activity not found: {activity_id}")
     return work_base.stamp_cancel(act, reason=reason)
+
+
+def activity_update(data: dict, activity_id: str, *, description: str = "",
+                    deadline: str = "", who_has_the_ball: str = "") -> dict:
+    """Update an Activity's mutable plan fields (説明 / 締切 / ボール) after
+    creation and return it — ms-139 e-4950 (SPEC 方針5: deadline / ball の後追い
+    更新)。空文字は「変更なし」(task_update と同じ規約) なので、触りたいフィールド
+    だけ渡す。``who_has_the_ball`` は self / counterpart を検証する。締切の変更は L2
+    締切エンジンが次の overdue 判定に即反映する (状態は派生なので stale しない)."""
+    _, act = find_activity(data, activity_id)
+    if act is None:
+        raise ValueError(f"Activity not found: {activity_id}")
+    if description.strip():
+        act["description"] = description.strip()
+    if deadline.strip():
+        act["deadline"] = deadline.strip()
+    if who_has_the_ball.strip():
+        ball = who_has_the_ball.strip()
+        if ball not in (BALL_SELF, BALL_COUNTERPART):
+            raise ValueError(
+                f"ball must be {BALL_SELF!r} or {BALL_COUNTERPART!r}, got {ball!r}")
+        act["who_has_the_ball"] = ball
+    return act
 
 
 def find_nurturing(data: dict, nurturing_id: str):

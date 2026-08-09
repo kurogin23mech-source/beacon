@@ -6267,7 +6267,7 @@ def _help_registry():
         {"command": "beacon opportunity phase <opp-id> <phase>", "flags": ["--note <text>"], "description": "Declare a phase transition (append-only phase_history; master=人間)"},
         {"command": "beacon opportunity transition-date <opp-id> <YYYY-MM-DD>", "flags": ["--note <text>", "--clear"], "description": "Set the 遷移日 (judgement date) for the current phase (append-only transition_date_history)"},
         {"command": "beacon opportunity judge <opp-id> advance|retry|terminal", "flags": ["--note <text>"], "description": "Judge a reached 遷移日 (3-way: 次へ/やり直し/決着; human-confirmed, master=人間)"},
-        {"command": "beacon opportunity due", "flags": ["--json"], "description": "List opportunities awaiting a transition judgement (遷移日 due/overdue)"},
+        {"command": "beacon opportunity due", "flags": ["--json"], "description": "List due/overdue 商談の遷移日 and 準備活動の期日 (transition_date + activity.deadline)"},
         {"command": "beacon opportunity activity <opp-id> <desc>", "flags": ["--deadline <date>", "--ball self|counterpart"], "description": "Add an activity (業務・事前計画型) under an opportunity"},
         {"command": "beacon opportunity delete <opp-id>", "flags": [], "description": "Delete an opportunity and its activities"},
         {"command": "beacon communication add <target-id>", "flags": ["--direction inbound|outbound", "--channel <free-text: email/slack/messenger/line/in-person/…>", "--source-ref <id>", "--source-url <link>", "--occurred <datetime>"], "description": "Record a communication (証跡・事後記録型 = 営業の Commit); target is opp-/acc- or act-/nrt- (act-/nrt- links the activity/nurturing it fulfilled); channel is free-text for off-pipeline media"},
@@ -9060,19 +9060,24 @@ def cmd_opportunity_judge():
 
 
 def cmd_opportunity_due():
-    """締切精査 (deadline review, ms-107 e-3271): opportunities whose 遷移日 is
-    due/overdue as of today, split by who-has-the-ball into the two actions the
-    overdue set implies — 自分ボール(判定/対応) と 相手ボール(催促). BEACON_JSON=1
-    for machine output. This is the AI's catch surface for the overdue state."""
+    """締切精査 (deadline review, ms-107 e-3271 + ms-139 e-4951): due/overdue な
+    2 種類を surface する — (1) 商談の遷移日 (transition_date)、(2) 準備活動の期日
+    (activity.deadline)。以前は (1) だけで、活動の期日超過は WebUI しか出さず AI が
+    『8/7の会食どうでした?』と気づけなかった。どちらも who-has-the-ball で行動が
+    割れる。BEACON_JSON=1 で machine 出力 (``{"opportunities": [...],
+    "activities": [...]}``)。AI の overdue catch surface。"""
     import sales_entities
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
-    rows = sales_entities.opportunities_awaiting_judgement(data, _today_iso())
+    today = _today_iso()
+    rows = sales_entities.opportunities_awaiting_judgement(data, today)
+    acts = sales_entities.overdue_activities(data, today)  # ms-139 e-4951
     if json_mode:
-        print(json.dumps(rows, ensure_ascii=False))
+        print(json.dumps({"opportunities": rows, "activities": acts},
+                         ensure_ascii=False))
         return
-    if not rows:
-        print("締切精査: 期日 到達/超過の商談はありません")
+    if not rows and not acts:
+        print("締切精査: 期日 到達/超過の商談・活動はありません")
         return
 
     def _fmt(r):
@@ -9083,15 +9088,29 @@ def cmd_opportunity_due():
     mine = [r for r in rows if r.get("who_has_the_ball") == sales_entities.BALL_SELF]
     theirs = [r for r in rows if r.get("who_has_the_ball") == sales_entities.BALL_COUNTERPART]
     if mine:
-        print("自分のボール — 判定/対応が必要:")
+        print("商談の遷移日 — 自分のボール (判定/対応が必要):")
         for r in mine:
             print(_fmt(r))
         print("  → beacon opportunity judge <opp-id> advance|retry|terminal で判定")
     if theirs:
-        print("相手のボール — 相手待ちが期限超過、催促が必要:")
+        print("商談の遷移日 — 相手のボール (相手待ちが期限超過、催促が必要):")
         for r in theirs:
             print(_fmt(r))
         print("  → 相手に催促 (メール/日程調整) or beacon opportunity judge で決着判断")
+
+    # ms-139 e-4951: 活動 (準備行動) の期日超過。実施済みなら done、やめたなら cancel
+    # で盤面から外す。
+    if acts:
+        def _fmt_act(a):
+            mark = "⚠ 超過" if a["activity_status"] == sales_entities.TRANSITION_OVERDUE else "⏰ 本日"
+            ball = "自分" if a["who_has_the_ball"] == sales_entities.BALL_SELF else "相手"
+            return (f"  [{a['act_id']}] {a['description']} — {a['opp_title']} "
+                    f"({a['opp_id']}) / 期日 {a['deadline']} {mark} / ボール:{ball}")
+        print("準備活動の期日 — 到達/超過:")
+        for a in acts:
+            print(_fmt_act(a))
+        print("  → 実施済みなら beacon opportunity activity done <act-id> / "
+              "やめたなら cancel / 期日を延ばすなら update --deadline")
 
 
 def cmd_opportunity_delete():
@@ -9385,6 +9404,45 @@ def cmd_activity_done():
         sys.exit(1)
     save_project(data)
     print(f"activity {act_id} → {act['status']}")
+
+
+def cmd_activity_cancel():
+    """取消 (cancel) a planned Activity — ms-139 e-4950. 誤起票やらないと決めた
+    活動を、削除せず監査印つきで cancelled にする。Env: BEACON_ACT_ID,
+    BEACON_REASON."""
+    import sales_entities
+    act_id = os.environ.get("BEACON_ACT_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
+    data = load_project()
+    try:
+        act = sales_entities.activity_cancel(data, act_id, reason=reason)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"activity {act_id} → {act['status']}")
+
+
+def cmd_activity_update():
+    """Activity の説明 / 締切 / ボールを後追い更新する — ms-139 e-4950。空の項目は
+    変更なし。Env: BEACON_ACT_ID, BEACON_ACTIVITY_DESC, BEACON_ACTIVITY_DEADLINE,
+    BEACON_ACTIVITY_BALL."""
+    import sales_entities
+    act_id = os.environ.get("BEACON_ACT_ID", "")
+    desc = os.environ.get("BEACON_ACTIVITY_DESC", "")
+    deadline = os.environ.get("BEACON_ACTIVITY_DEADLINE", "")
+    ball = os.environ.get("BEACON_ACTIVITY_BALL", "")
+    data = load_project()
+    try:
+        act = sales_entities.activity_update(
+            data, act_id, description=desc, deadline=deadline,
+            who_has_the_ball=ball)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"activity {act_id} updated "
+          f"(deadline={act.get('deadline', '')}, ball={act.get('who_has_the_ball', '')})")
 
 
 def cmd_communication_add():
@@ -9809,6 +9867,8 @@ if __name__ == "__main__":
         "opportunity_due": cmd_opportunity_due,
         "opportunity_activity": cmd_opportunity_activity,
         "activity_done": cmd_activity_done,
+        "activity_cancel": cmd_activity_cancel,      # ms-139 e-4950
+        "activity_update": cmd_activity_update,       # ms-139 e-4950
         "sales_reply_watch_op_ensure": cmd_sales_reply_watch_op_ensure,
         "opportunity_delete": cmd_opportunity_delete,
         # ms-107 e-3432 — Communication (証跡・事後記録型 = 営業の Commit)

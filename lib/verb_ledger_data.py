@@ -61,6 +61,8 @@ VERB_LEDGER = {
 
     # --- activity ---
     "activity_done": {"cls": "R", "secondary": [], "note": ""},
+    "activity_cancel": {"cls": "R", "secondary": [], "note": ""},   # ms-139 e-4950
+    "activity_update": {"cls": "R", "secondary": [], "note": ""},   # ms-139 e-4950
 
     # --- auth ---
     "auth_login": {"cls": "C", "secondary": [], "note": ""},

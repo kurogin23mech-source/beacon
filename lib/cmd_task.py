@@ -132,6 +132,7 @@ def cmd_task_add():
     priority = os.environ.get("BEACON_PRIORITY", "")
     motivation = os.environ.get("BEACON_MOTIVATION", "")
     acceptance_criteria = os.environ.get("BEACON_ACCEPTANCE_CRITERIA", "")
+    deadline = os.environ.get("BEACON_DEADLINE", "")  # ms-139 e-4949
     # ms-126: priority mandatory on the human path; machine callers opt into the
     # ``untriaged`` sentinel via ``--untriaged`` (BEACON_ALLOW_UNTRIAGED=1).
     allow_untriaged = os.environ.get("BEACON_ALLOW_UNTRIAGED", "") == "1"
@@ -203,7 +204,7 @@ def cmd_task_add():
                             date=date, detail=detail, requested_by=requested_by,
                             priority=priority, motivation=motivation,
                             acceptance_criteria=acceptance_criteria,
-                            author=author or None,
+                            deadline=deadline, author=author or None,
                             allow_untriaged=allow_untriaged)
     except ValueError as e:
         # ms-126: clean CLI error for the "priority is required" forcing
@@ -383,6 +384,7 @@ def cmd_task_update():
             acceptance_criteria=os.environ.get("BEACON_ACCEPTANCE_CRITERIA", ""),
             behavior=os.environ.get("BEACON_BEHAVIOR", ""),
             priority=os.environ.get("BEACON_PRIORITY", ""),
+            deadline=os.environ.get("BEACON_DEADLINE", ""),  # ms-139 e-4949
         )
     except ValueError as e:
         print(str(e))

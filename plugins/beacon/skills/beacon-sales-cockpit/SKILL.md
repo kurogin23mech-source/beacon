@@ -35,14 +35,14 @@ ROOT=$(beacon-find-root) && \
 
 ```bash
 beacon opportunity list --json                 # 全商談・フェーズ・遷移日・活動
-beacon opportunity due --json                  # 遷移日が due/overdue の商談
+beacon opportunity due --json                  # 遷移日 + 準備活動の期日が due/overdue → {opportunities, activities}
 beacon phase list --json                       # フェーズごとのゴール・活動テンプレ
 BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" watch_list  # 返信待ち
 ```
 
 引数で商談 ID が渡っていれば、その 1 件に絞って深掘りする。無ければ全商談を横断する。
 
-> **取消済 (cancelled) は「やること」に載せない (e-3587)**: `beacon opportunity list --json`
+> **取消済 (cancelled) は「やること」に載せない (e-3587 / ms-139 e-4954: 活動 done/cancel の CLI 経路と L2 の terminal 自動除外が揃った)**: `beacon opportunity list --json`
 > は取消済商談を既定で除外するが、*生きている商談の中の個々の活動・証跡* には
 > `status == "cancelled"` のものが混じりうる。それらは「未消化」ではないので、Step 2 の
 > 準備活動・期日超過の判定 (項目 4/5) から必ず除外する (= done と同じ扱い)。取消済を
@@ -65,7 +65,10 @@ BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" 
    なければ `/beacon-sales-email` でフォロー。
 4. **現フェーズの準備活動（activity_template）が未消化** → 「その活動をやれ」。送信なら
    `/beacon-sales-email`、日程なら `/beacon-sales-schedule`。
-5. **期日超過の活動 / ナーチャリング** → 拾って促す。
+5. **期日超過の活動 / ナーチャリング** → `beacon opportunity due --json` の `activities`
+   (準備活動の期日超過。done / cancelled は L2 締切エンジンが terminal 扱いで自動除外済み、
+   ms-139 e-4954) を拾って促す。実施済みなら `beacon opportunity activity done <act-id>`、
+   やめたなら `cancel`、期日を延ばすなら `update --deadline` で盤面から外す (催促を止める栓)。
 6. 上記どれも無ければ「待ち（相手ボール・予定通り）」。
 
 各商談の現フェーズのゴール（methodology）を添えて、「なぜ今それか」を 1 行で示す。
