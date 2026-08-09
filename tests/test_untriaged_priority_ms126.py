@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import core  # noqa: E402
 import commands  # noqa: E402
+import cmd_trigger  # noqa: E402  (ms-127 e-4971: _auto_fire_untriaged_backlog_trigger の canonical home)
 from beacon_cli import dispatch  # noqa: E402
 
 
@@ -232,6 +233,10 @@ class TestUntriagedBacklogTriggerFile:
         triggers_dir.mkdir()
         monkeypatch.setattr(commands, "_get_triggers_dir",
                             lambda: str(triggers_dir))
+        # ms-127 e-4971: the fire/clear helper moved to cmd_trigger and resolves
+        # _get_triggers_dir / get_store in ITS namespace, so mirror the patches.
+        monkeypatch.setattr(cmd_trigger, "_get_triggers_dir",
+                            commands._get_triggers_dir)
 
         # Fake store returning a project with one untriaged active task.
         class _Store:
@@ -248,6 +253,7 @@ class TestUntriagedBacklogTriggerFile:
             ]},
         ])
         monkeypatch.setattr(commands, "get_store", lambda: _Store(data_with))
+        monkeypatch.setattr(cmd_trigger, "get_store", commands.get_store)
         commands._auto_fire_untriaged_backlog_trigger()
         trigger_file = triggers_dir / "untriaged-backlog.json"
         assert trigger_file.exists()
@@ -266,6 +272,7 @@ class TestUntriagedBacklogTriggerFile:
             ]},
         ])
         monkeypatch.setattr(commands, "get_store", lambda: _Store(data_clear))
+        monkeypatch.setattr(cmd_trigger, "get_store", commands.get_store)
         commands._auto_fire_untriaged_backlog_trigger()
         assert not trigger_file.exists()
 

@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
 
 import commands  # noqa: E402
+import cmd_trigger  # noqa: E402  (ms-127 e-4971: _auto_fire_operation_triggers の canonical home)
 
 
 @pytest.fixture
@@ -207,6 +208,10 @@ def test_auto_fire_skips_bus_push_when_claim_lost(project_with_open_op,
     monkeypatch.setattr(commands, "_push_operation_trigger_to_bus",
                         lambda *args, **kw: push_calls.append((args, kw)))
 
+    # ms-127 e-4971: _auto_fire_operation_triggers moved to cmd_trigger and
+    # resolves these helpers in ITS namespace — mirror the commands patches.
+    monkeypatch.setattr(cmd_trigger, "_claim_operation_fire_for_bus_push", commands._claim_operation_fire_for_bus_push)
+    monkeypatch.setattr(cmd_trigger, "_push_operation_trigger_to_bus", commands._push_operation_trigger_to_bus)
     commands._auto_fire_operation_triggers()
 
     assert push_calls == [], (
@@ -231,6 +236,10 @@ def test_auto_fire_pushes_bus_when_claim_won(project_with_open_op,
     monkeypatch.setattr(commands, "_push_operation_trigger_to_bus",
                         lambda *args, **kw: push_calls.append((args, kw)))
 
+    # ms-127 e-4971: _auto_fire_operation_triggers moved to cmd_trigger and
+    # resolves these helpers in ITS namespace — mirror the commands patches.
+    monkeypatch.setattr(cmd_trigger, "_claim_operation_fire_for_bus_push", commands._claim_operation_fire_for_bus_push)
+    monkeypatch.setattr(cmd_trigger, "_push_operation_trigger_to_bus", commands._push_operation_trigger_to_bus)
     commands._auto_fire_operation_triggers()
 
     assert len(push_calls) == 1, (
