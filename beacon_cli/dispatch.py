@@ -1020,7 +1020,7 @@ def build_parser() -> argparse.ArgumentParser:
                                 add_help=False)
     p_scenario.add_argument("scenario_cmd", nargs="?", default="")  # run|save|list|replay
     p_scenario.add_argument("path", nargs="?", default="")
-    p_scenario.add_argument("--ms", dest="ms", default="")
+    p_scenario.add_argument("-m", "--ms", dest="ms", default="")  # -m: repo-wide milestone convention (AX #3)
     p_scenario.add_argument("--attainment", action="store_true")
     p_scenario.add_argument("--json", action="store_true")
     p_scenario.add_argument("--help", "-h", action="store_true", dest="show_help")
@@ -3445,10 +3445,11 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
 # ---- scenario handlers (ms-136 e-4699) ----
 
 _SCENARIO_USAGE = (
-    "Usage: beacon scenario run <file> [--json]\n"
-    "       beacon scenario save <file.json> [--json]\n"
+    "Usage: beacon scenario run <scenario.json> [--json]\n"
+    "       beacon scenario save <scenario.json> [--json]   # input must be JSON\n"
     "       beacon scenario list [--ms <ms-id>] [--json]\n"
-    "       beacon scenario replay [--ms <ms-id>] [--attainment] [--json]"
+    "       beacon scenario replay [--ms <ms-id>] [--attainment] [--json]\n"
+    "         (default: CI regression, exit 1 on failure; --attainment: evidence only, exit 0)"
 )
 
 
@@ -3484,6 +3485,11 @@ def _handle_scenario(root: Path, args: argparse.Namespace) -> int:
                                  "BEACON_SCENARIO_ATTAINMENT":
                                      "1" if getattr(args, "attainment", False) else "",
                                  "BEACON_JSON": json_flag})
+    # Name the bad verb so a mistyped subcommand is distinguishable from a
+    # missing one (AX review finding #1).
+    if subc:
+        print(f"Error: unknown scenario subcommand: '{subc}' "
+              "(expected run|save|list|replay)")
     print(_SCENARIO_USAGE)
     return 1
 

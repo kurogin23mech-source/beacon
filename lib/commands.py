@@ -9829,6 +9829,10 @@ def cmd_scenario_run():
             print(f"  → 障害層 bisect (e-4700): {diag['summary']}")
             if diag.get("why"):
                 print(f"    根拠: {diag['why']}")
+            # recovery hint (AX review finding #4): tell the agent what to do next.
+            print(f"    → 次の一手: 上記の層を修正し `beacon scenario run {path}` "
+                  "で再実行 (層が L_cli なら persona 操作の CLI 面、L_engine なら "
+                  "commands.py、L_store なら永続を確認)")
     # exit nonzero on a failed journey so CI (e-4702) can gate on it.
     sys.exit(0 if report["passed"] else 1)
 

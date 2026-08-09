@@ -488,7 +488,9 @@ case "${1:-}" in
             save)     shift 2; cmd_scenario_save "$@" ;;
             list|ls)  shift 2; cmd_scenario_list "$@" ;;
             replay)   shift 2; cmd_scenario_replay "$@" ;;
-            *)        echo "Usage: beacon scenario [run|save|list|replay]" ;;
+            "")       echo "Usage: beacon scenario [run|save|list|replay]" ;;
+            *)        echo "Error: unknown scenario subcommand: '${2}' (expected run|save|list|replay)"; \
+                      echo "Usage: beacon scenario [run|save|list|replay]" ;;
         esac
         ;;
     meeting|mtg)
