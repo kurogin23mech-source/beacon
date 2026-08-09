@@ -116,6 +116,43 @@ PROFESSION_CONCRETE_SYMBOLS = {
 }
 
 
+# Ratchet allowlist for SYMBOL reaches (ms-134 e-5061) — the symmetric twin of
+# KNOWN_COLLECTION_COUPLING for the symbol-denylist check. A profession-shared
+# (L1/L2) capability that CALLS a profession recorder/resolver symbol above is an
+# invariant violation. When such a capability is a class-derived verb promoted to
+# L2 whose recording path is not YET routed through the occupation abstraction,
+# its (verb, symbol) reach is accepted here as expected-red debt — reported as
+# pending debt, not a CI failure. Same 1-way ratchet discipline as the collection
+# allowlist:
+#   - add an entry ONLY for a genuine deferred abstraction (name the owning MS
+#     inline, e.g. owner=ms-143);
+#   - NEVER add one to silence a fresh violation — route the handler through
+#     occupation.record_target_entry instead;
+#   - the stale-entry test (test_no_stale_symbol_reach_allowlist_entries) forces a
+#     row's deletion once its handler is abstracted, so the list cannot rot into a
+#     lie about what still reaches a profession recorder.
+# There is deliberately NO reviewed-legitimate counterpart (unlike collections): a
+# shared capability calling a profession recorder is never "exact by design" — the
+# recording must always go through occupation.record_target_entry — so the only
+# non-failing status a symbol reach can have is deferred debt.
+#
+# EMPTY until ms-134 e-5061 step 2 (L3→L2 promotion) lands. The mechanism ships
+# first (this fork) so that when ms-143 PR #1 abstracts create/done (milestone_add
+# /task_done/opportunity_add/activity_set_status) and this fork rebases, only the
+# un-abstracted remainder (task_add/task_list/sync/log_finalize/save/
+# communication_add/opportunity_activity/acquisition_attack_list_*) is registered
+# here with owner=ms-143, avoiding the churn of allowlisting-then-removing the 4
+# already-abstracted verbs (leader interlock ruling 2026-08-09).
+KNOWN_SYMBOL_REACH: set = set()
+
+
+def is_known_symbol_reach(verb: str, symbol: str) -> bool:
+    """True when (verb, symbol) is an accepted-pending symbol reach in the ratchet
+    allowlist (reported as debt, not a CI failure). Symmetric to
+    ``is_known_collection_coupling``."""
+    return (verb, symbol) in KNOWN_SYMBOL_REACH
+
+
 # ---------------------------------------------------------------------------
 # Non-enumerated profession coupling (ms-134 e-4740 / philosophy review #1).
 #

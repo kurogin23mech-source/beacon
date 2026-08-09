@@ -218,7 +218,11 @@ def test_ownership_is_orthogonal_to_scope_and_origin():
 # --- invariant gate (e-4720/e-4721): real tree must be clean ---------------
 
 def test_no_profession_shared_capability_reaches_a_concrete():
-    viol = chk.find_invariant_violations()
+    # Only a NEW (non-allowlisted) symbol reach fails: an accepted-pending reach
+    # (KNOWN_SYMBOL_REACH, ms-143-owned class-derived recorder) is debt, not a
+    # failure — symmetric to the collection ratchet (ms-134 e-5061).
+    viol = [v for v in chk.find_invariant_violations()
+            if v["status"] == "new_violation"]
     assert viol == [], (
         "profession-shared (L1/L2) capabilities reaching a profession concrete: "
         + "; ".join(f"{v['verb']}[{v['scope']}]→{v['symbol']}"
@@ -373,6 +377,47 @@ def test_debt_and_legitimate_are_disjoint():
     # it is one or the other. Keeps the two lists from silently contradicting.
     overlap = set(cl.KNOWN_COLLECTION_COUPLING) & set(cl.REVIEWED_LEGITIMATE_COLLECTION_READS)
     assert overlap == set(), f"a read is both debt and legitimate: {overlap}"
+
+
+# --- symbol-reach ratchet (ms-134 e-5061), symmetric to the collection ratchet -
+
+def test_no_new_symbol_reach_on_real_tree():
+    """The symbol ratchet gate: a NEW (non-allowlisted) shared capability calling
+    a profession recorder/resolver symbol fails CI. An allowlisted (KNOWN_SYMBOL_
+    REACH, ms-143-owned) reach is accepted debt. Mirrors the collection gate."""
+    result = chk.run()
+    new = result["new_symbol_reach"]
+    assert new == [], (
+        "NEW profession symbol reach — route it through "
+        "occupation.record_target_entry (never add a KNOWN_SYMBOL_REACH entry to "
+        "silence a fresh violation): "
+        + "; ".join(f"{v['verb']}[{v['scope']}]→{v['symbol']}"
+                    f"{' via '+v['via'] if v['via'] else ''}" for v in new))
+
+
+def test_symbol_reach_allowlist_makes_a_reach_pending(tmp_path, monkeypatch):
+    # The mechanism: a (verb, symbol) in KNOWN_SYMBOL_REACH is classified
+    # pending_debt (not new_violation) so it no longer fails the gate. Proven on a
+    # synthetic tree because the real-tree allowlist is empty until step 2 lands.
+    path = _write(tmp_path, "commands.py", _SYNTH_DIRECT)
+    before = chk.find_invariant_violations(path)
+    assert before[0]["status"] == "new_violation"  # empty allowlist → fresh
+    monkeypatch.setattr(cl, "KNOWN_SYMBOL_REACH",
+                        {("doc_synthetic", "core.save_entry")})
+    after = chk.find_invariant_violations(path)
+    assert len(after) == 1 and after[0]["status"] == "pending_debt", after
+
+
+def test_no_stale_symbol_reach_allowlist_entries():
+    """Ratchet hygiene (symmetric to test_no_stale_collection_allowlist_entries):
+    every (verb, symbol) in KNOWN_SYMBOL_REACH must still be detected on the real
+    tree, so a row cannot rot into a lie after its handler is abstracted. Vacuous
+    while the allowlist is empty; meaningful once step 2 registers the remainder."""
+    detected = {(v["verb"], v["symbol"]) for v in chk.find_invariant_violations()}
+    stale = sorted(cl.KNOWN_SYMBOL_REACH - detected)
+    assert not stale, (
+        "pending symbol-reach entries no longer detected (delete them — the "
+        "handler was abstracted): " + ", ".join(f"{v}→{s}" for v, s in stale))
 
 
 def test_reviewed_correct_reads_are_classified_correctly():
