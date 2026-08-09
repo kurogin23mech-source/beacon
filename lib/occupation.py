@@ -816,6 +816,60 @@ def profession_manifest(data: dict, profession: str | None = None) -> dict:
     return {"profession": prof, "target_classes": target_classes}
 
 
+def target_class(data: dict, kind: str) -> dict:
+    """Return the ``profession_manifest`` target-class descriptor for ``kind``
+    (ms-143). Raises ``ValueError`` if this project's profession has no such
+    class, so a caller minting / locating a Target of an unknown kind fails
+    loudly instead of silently writing to the wrong collection."""
+    for tc in profession_manifest(data)["target_classes"]:
+        if tc["kind"] == kind:
+            return tc
+    raise ValueError(f"No target-class {kind!r} in this project's profession")
+
+
+def next_target_id(data: dict, kind: str) -> str:
+    """Allocate the next id for a Target of ``kind``, profession-generically
+    (ms-143, 設計判断 ii). The collection and ``id_prefix`` come from
+    ``profession_manifest`` so each target-class keeps an INDEPENDENT id space
+    (milestones count ``ms-``, opportunities count ``opp-``), collision-safe and
+    deterministic via ``work_base.next_suffixed_id`` (max integer suffix + 1).
+
+    This is the single generic allocator the hand-rolled per-collection ones
+    (``core.next_milestone_id`` / ``sales_entities.next_opportunity_id``) collapse
+    into; those stay as thin back-compat shims delegating here."""
+    tc = target_class(data, kind)
+    id_field = tc.get("id_field", "id")
+    ids = [rec.get(id_field, "") for rec in data.get(tc["collection"], []) or []]
+    return work_base.next_suffixed_id(ids, tc["id_prefix"])
+
+
+def create_target(data: dict, kind: str, *, label: str,
+                  status: str = "", created_at: str = "", created_by: str = "",
+                  assignee: str = "", **extra) -> dict:
+    """Create a new Target of ``kind`` and append it to its collection,
+    profession-generically (ms-143, 設計判断 b 系統2 = target 作成). Resolves the
+    collection + ``id_prefix`` from ``profession_manifest``, allocates the id via
+    ``next_target_id``, builds the occupation-agnostic skeleton through
+    ``work_model.new_target`` (id / label / status / created_at / created_by /
+    assignee), and appends. Profession-specific fields (a milestone's
+    ``target_date`` / ``commits``, an opportunity's ``phase`` / ``account_id``)
+    ride via ``**extra``. Returns the new record.
+
+    Both a dev milestone and a sales opportunity mint through THIS one path — the
+    ``kind``-keyed manifest lookup is the only place profession enters, so the
+    verb itself never names ``data['milestones']`` / ``data['opportunities']``.
+    Workflow around creation (seeding a phase's anchor activities, the ms-81
+    empty-assignee no-pollution rule) stays at the caller / CLI frontend, not in
+    this primitive (leader 握り: primitive は create に専念、workflow は CLI)."""
+    tc = target_class(data, kind)
+    target_id = next_target_id(data, kind)
+    rec = _wm.new_target(
+        target_id, label, status=status or _wm.TODO_STATUS,
+        created_at=created_at, created_by=created_by, assignee=assignee, **extra)
+    data.setdefault(tc["collection"], []).append(rec)
+    return rec
+
+
 def iter_work_items(data: dict):
     """Yield ``(work_item, target, arm)`` for every planned work item across
     occupations, profession-agnostically (ms-142 e-5009).
