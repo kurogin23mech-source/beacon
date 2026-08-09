@@ -277,7 +277,7 @@ from cmd_bus import (  # noqa: F401
     cmd_bus_budget_grant, cmd_bus_budget_show, cmd_bus_budget_clear,
     cmd_bus_auto_execute_list, cmd_bus_auto_execute_add, cmd_bus_auto_execute_remove,
     cmd_bus_send, cmd_bus_listen, cmd_bus_receive, cmd_bus_ack,
-    cmd_bus_status, cmd_bus_directory,
+    cmd_bus_status, cmd_bus_directory, cmd_dm_sent,
 )
 
 # ms-127 e-4809: retro family moved to cmd_retro.py, plus its retro-day / week /
@@ -6231,6 +6231,7 @@ def _help_registry():
         {"command": "beacon dm send", "flags": ["--to <sid>", "--to-user <uid>", "--payload <json>", "--in-reply-to <eid>", "--manual", "--recipient-confirmed", "--action <name>", "--project <id>", "--json"], "description": "Send a DM (canonical DM verb; delegates to bus send --channel dm; e-3899)"},
         {"command": "beacon dm respond <approve|deny> <event_id>", "flags": ["--project <id>", "--json"], "description": "Decide a pending cross-user DM action envelope (receiver-side; ms-70)"},
         {"command": "beacon dm audit", "flags": ["--limit <n>", "--project <id>", "--json"], "description": "Read the DM-approval audit log (e-3899 canonical; alias: dm log)"},
+        {"command": "beacon dm sent", "flags": ["--limit <n>", "--project <id>", "--json"], "description": "List DMs THIS session sent with receipt (sent/delivered/opened) + ⚠dup marker (sender-side; ms-141 e-4966)"},
         # ms-106 ② — sales job-template entities (profession=sales projects)
         {"command": "beacon account add <name>", "flags": ["--health <text>", "--assignee <user>"], "description": "Add a sales account (顧客; 対象・継続)"},
         {"command": "beacon account list", "flags": ["--json", "--as-project <id>", "--linked"], "description": "List sales accounts (+contacts); --as-project shows only accounts disclosed to that project (fail-closed); --linked pulls accounts disclosed to THIS project from other org projects (cloud mode)"},
@@ -10030,6 +10031,9 @@ if __name__ == "__main__":
         # Mirror of the Web UI Settings > Audit table; reaches the same
         # server endpoint and renders 6 columns of decided sidecar rows.
         "dm_log": cmd_dm_log,
+        # ms-141 / e-4966: sender-side "DMs I sent" audit (complement of the
+        # receive-side dm_log/dm_audit). Reached by `beacon dm sent`.
+        "dm_sent": cmd_dm_sent,
         # ms-55 e-1646: stop / resume signal CLI. Anyone can broadcast
         # (Andon cord principle, SPEC §2). The events ride on the
         # existing bus on channel `stop-signal`.

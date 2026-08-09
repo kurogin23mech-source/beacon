@@ -500,6 +500,7 @@ walkthrough.
 | `beacon dm send --to <sid> --payload '<json>' [--manual] [--in-reply-to <eid>]` | Send a DM (canonical verb; delegates to `bus send --channel dm`) / DM 送信 (e-3899) |
 | `beacon dm respond <approve\|deny> <event_id>` | Decide a pending cross-user DM action envelope / 受信側の承認判断 |
 | `beacon dm audit [--limit N] [--json]` | Read the DM-approval audit log (alias: `dm log`) / DM 監査ログ |
+| `beacon dm sent [--limit N] [--json]` | List DMs THIS session sent with receipt + ⚠dup marker (sender-side) / 送信した DM の履歴 (e-4966) |
 | `beacon channel install` | Install beacon-bus MCP entry into `.mcp.json` / DM 機能を有効化 |
 | `beacon channel uninstall [--purge-files\|--keep-files]` | Remove MCP entry; `--purge-files` also moves `channel/node_modules` to `.trash/` |
 | `beacon channel opt-out [--project\|--global]` | Block install / auto-install (persistent flag) |

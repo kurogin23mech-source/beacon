@@ -1814,6 +1814,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_dm_log.add_argument("--project", dest="dm_project_id", default="")
     p_dm_log.add_argument("--json", action="store_true")
 
+    # ms-141 / e-4966: sender-side "DMs I sent" audit (complement of dm audit).
+    p_dm_sent = dm_sub.add_parser("sent", add_help=False)
+    p_dm_sent.add_argument("--limit", default="")
+    p_dm_sent.add_argument("--project", dest="dm_project_id", default="")
+    p_dm_sent.add_argument("--json", action="store_true")
+
     # ---- auth login / logout / status (cloud OAuth) ----
     # `beacon auth login` opens a browser and signs in with Google so the
     # cloud project APIs (firestore / WS) become reachable. commands.py
@@ -5404,6 +5410,15 @@ def _handle_dm(root: Path, args: argparse.Namespace) -> int:
             "BEACON_JSON": "1" if getattr(args, "json", False) else "",
         }
         return _run_commands_py(root, "dm_log", env)
+
+    if cmd == "sent":
+        # ms-141 / e-4966: sender-side audit of the DMs this session sent.
+        env = {
+            "BEACON_DM_SENT_LIMIT": getattr(args, "limit", "") or "",
+            "BEACON_BUS_PROJECT_ID": getattr(args, "dm_project_id", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        }
+        return _run_commands_py(root, "dm_sent", env)
 
     print(f"Unknown dm subcommand: {cmd}")
     return 2

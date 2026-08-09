@@ -53,6 +53,7 @@ from commands_shared import (
     _bus_send_fingerprint,
     _bus_find_recent_send,
     _bus_recent_send_record,
+    dm_sent_rows,
 )
 
 
@@ -1550,6 +1551,67 @@ def cmd_bus_status():
                _fmt_by(delivered_by, event.get("delivered_by_identity"))))
     print(_row("✓" if opened_at else "✗", "opened", opened_at,
                _fmt_by(opened_by, event.get("opened_by_identity"))))
+
+
+def cmd_dm_sent():
+    """ms-141 / e-4966: sender-side audit — list the DMs THIS session sent.
+
+    The complement of `beacon dm audit` (which shows cross-user *approval*
+    decisions on the receive side). Answers "what did I send / did I send the
+    same thing twice?" so an accidental duplicate is visible after the fact.
+    Reads the authoritative server events (`list_bus_events`), keeps the ones
+    this session sent, newest first, and shows the 3-stage receipt + a ⚠ on any
+    (recipient, text) that recurs in the shown set. Read-only.
+    """
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    _limit_raw = os.environ.get("BEACON_DM_SENT_LIMIT", "").strip()
+    try:
+        limit = int(_limit_raw or "20")
+    except ValueError:
+        # AX (PR #622): don't silently swallow a bad --limit — surface it.
+        print(f"Warning: --limit {_limit_raw!r} is not an integer; using 20.",
+              file=sys.stderr)
+        limit = 20
+    my_sid = _resolve_session_id()
+    if not my_sid:
+        # AX (PR #622): concrete recovery command, no speculative "?".
+        print("Error: could not resolve this session's id. Run "
+              "`beacon channel install` in this directory to bind a channel, "
+              "then retry.", file=sys.stderr)
+        sys.exit(1)
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)
+    # Fetch more than `limit` because we filter to this session's sends; cap the
+    # scan so a busy project doesn't pull an unbounded page.
+    scan = min(max(limit * 5, 100), 500)
+    events = client.list_bus_events(project_id, channel="dm", limit=scan)
+    rows = dm_sent_rows(events, my_sid, limit=limit)
+    if json_mode:
+        print(json.dumps({"session_id": my_sid, "sent": rows},
+                         ensure_ascii=False))
+        return
+    if not rows:
+        print(f"No DMs sent from this session ({my_sid[:16]}…) found "
+              f"in the last {scan} dm events.")
+        return
+    # AX (PR #622): the row shows the send time (created_at) then the two
+    # receipt flags actually rendered (delivered / opened); "sent" is every row
+    # by definition, so the header names only what varies per row.
+    print(f"DMs sent from this session ({my_sid[:16]}…), newest first "
+          f"(time = sent; deliv/open = receipt):")
+    for r in rows:
+        recv = str(r["recipient"])[:20]
+        preview = " ".join(str(r["text"]).split())[:48]
+        d = "✓" if r["delivered_at"] else "✗"
+        o = "✓" if r["opened_at"] else "✗"
+        dup = " ⚠dup" if r["duplicate"] else ""
+        print(f"  [{r['event_id']}] {r['created_at']}  →{recv}…  "
+              f"deliv:{d} open:{o}{dup}")
+        print(f"      \"{preview}\"")
+    if any(r["duplicate"] for r in rows):
+        # AX (PR #622): state the dup scope is THIS view, not global history.
+        print("  ⚠dup = 同一宛先・同一本文がこの表示範囲内に複数あります "
+              "(意図的でなければ二重送信の可能性、--limit で範囲を広げられます)。")
 
 
 def _validate_recipient_project(
