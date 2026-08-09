@@ -2,6 +2,176 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.62.0] - 2026-08-09
+
+- Merge pull request #622 from kurogin23mech-source/ms-141-e4966-dm-sent-audit
+- fix(ms-141): dm_sent を verb ledger に分類登録して CI を通す (e-4966)
+- refactor(ms-141): PR #622 独立レビュー findings を反映 (e-4966)
+- feat(ms-141): 送信者側の監査 `beacon dm sent` を追加 (e-4966)
+- Merge PR #618: feat(ms-139) 締切を L2 プリミティブ化し超過をサーバから能動通知
+- Merge pull request #621 from kurogin23mech-source/ms-141-e4968-cross-user-preflight
+- fix(ms-139): activity_cancel/update を verb ledger に登録 (e-4950 CI 修復)
+- Merge pull request #619 from kurogin23mech-source/ms-127-e4971-cmd-trigger-split
+- refactor(ms-141): PR #621 独立レビュー findings を反映 (e-4968)
+- feat(ms-141): cross-user 誤送信に摩擦ゼロの client 事前警告を足す (e-4968)
+- fix(ms-127): trigger split の monkeypatch mirror を追加テスト2本に + docstring 注記 (e-4971 CI 修復)
+- fix(ms-139): 思想レビュー由来の締切 surface 2 件を修正 (e-4952/e-4953)
+- Merge pull request #620 from kurogin23mech-source/ms-141-e4965-idempotent-default
+- refactor(ms-141): PR #620 独立レビュー findings を反映 (e-4965)
+- feat(ms-141): DM の事故的二重送信を client 側 recent-send ガードで冪等化 (e-4965)
+- refactor(ms-127): commands.py の trigger auto-fire 一式を lib/cmd_trigger.py へ切り出す (e-4971)
+- feat(ms-139): サーバ tick で締切超過を検知し claim 者セッションへ DM リマインド (e-4953)
+- feat(ms-139): cockpit の期日超過活動表示と cancelled 除外を整合 (e-4954)
+- feat(ms-139): session-start が締切超過 work item を毎回 surface (e-4952)
+- Merge pull request #617 from kurogin23mech-source/ms-140-fork-c52a44
+- feat(ms-139): beacon opportunity due で活動(activity)の期日超過も surface (e-4951)
+- feat(ms-139): 活動(activity)を完了/取消/更新できる CLI を露出し status 語彙を整合 (e-4950)
+- feat(ms-139): 開発 task に締切(deadline)フィールドを追加し CLI で設定可能に (e-4949)
+- refactor(ms-140): 独立レビュー findings を反映 — notes 常時出力 + _notice 一本化
+- feat(ms-139): 締切(deadline)の L2 engine を抽出し work item を同一規則で overdue 判定 (e-4948)
+- fix(ms-140): bus send --json 出力を merge-safe にして DM 二重送信を構造で止める
+- Merge pull request #615 from kurogin23mech-source/ms-127-e4871-app-router-projects-busdelivery
+- refactor(ms-127): app.py の bus 配信 6 route を routers_projects へ切り出す (e-4871 PR3b)
+- Merge pull request #614 from kurogin23mech-source/ms-127-e4871-app-router-projects-busgate
+- fix(ms-127): route 順序回帰テストを version 非依存の TestClient 方式に (e-4871 PR3a CI 修復)
+- refactor(ms-127): PR3a 独立レビュー由来の修正 + route 順序回帰テスト (e-4871 PR3a)
+- refactor(ms-127): app.py の bus/dm gate 7 route を routers_projects へ切り出す (e-4871 PR3a)
+- Merge pull request #613 from kurogin23mech-source/ms-127-e4871-app-router-projects-collab
+- refactor(ms-127): 独立レビュー由来の 2 件を反映 (e-4871 PR2)
+- fix(ms-127): map-drift の API 列挙に routers_*.py を追加 (e-4871 PR2 CI 修復)
+- refactor(ms-127): app.py の /api/projects/* collab を routers_projects へ切り出す (e-4871 PR2/3)
+- Merge pull request #612 from kurogin23mech-source/ms-127-e4871-app-router-projects-core
+- fix(ms-127): test_purge_api の envelope-gate bypass を include_router 対応に (e-4871 PR1 CI 修復)
+- refactor(ms-127): app.py の /api/projects/* core を routers_projects へ切り出す (e-4871 PR1/3)
+- Merge pull request #611 from kurogin23mech-source/ms-127-e4870-app-router-treks
+- refactor(ms-127): app.py の /api/treks/* を routers_treks へ切り出す (e-4870)
+- Merge pull request #610 from kurogin23mech-source/ms-127-e4869-app-router-auth
+- refactor(ms-127): auth router の _cli_pending を factory-local 化 + 境界テスト (e-4869 独立レビュー由来)
+- refactor(ms-127): app.py の /api/auth/* を routers_auth へ切り出す (e-4869 完了)
+- Merge pull request #609 from kurogin23mech-source/ms-127-e4869-app-router-admin
+- refactor(ms-127): admin router に型付き注入 + 破壊的経路のテスト (e-4869 独立レビュー由来)
+- refactor(ms-127): app.py の /api/admin/* を routers_admin へ切り出す (e-4869 B フェーズ)
+- Merge pull request #608 from kurogin23mech-source/ms-127-e4869-app-router-orgs
+- refactor(ms-127): orgs router に construction 型ガード + 注入経路テスト (e-4869 独立レビュー由来)
+- refactor(ms-127): app.py の /api/orgs/* を routers_orgs へ切り出す (e-4869 B フェーズ)
+- Merge pull request #607 from kurogin23mech-source/ms-127-e4869-app-router-me
+- fix(ms-127): mount 検査を OpenAPI schema ベースに — FastAPI 版差の吸収 (e-4869 CI)
+- fix(ms-127): me router 分割の CI 追従 — 環境依存テスト修正 + source 検査の移動先追従 (e-4869)
+- refactor(ms-127): me router factory を型安全に (e-4869 独立レビュー由来)
+- refactor(ms-127): app.py の /api/me/* を routers_me へ切り出す (e-4869 B フェーズ)
+- Merge pull request #606 from kurogin23mech-source/ms-127-e4868-app-router-scaffold
+- fix(ms-127): scaffold の stale-route 検査を source ベースに (e-4868 CI)
+- docs(ms-127): routers_version の暗黙 lib/ 依存を明示 (e-4868 PR #606 レビュー由来)
+- refactor(ms-127): app.py router 化の足場 — /api/version を切り出し型を確立 (e-4868 B フェーズ)
+- Merge pull request #605 from kurogin23mech-source/ms-127-e4867-batch5-groupC-misc
+- refactor(ms-127): lib→lib 依存を requires-cmd + 完全性 guard で契約化 (e-4867 PR #605)
+- refactor(ms-127): bin/beacon の残り全 family を source 分割し dispatcher 化完遂 (e-4867)
+- Merge pull request #604 from kurogin23mech-source/ms-127-e4867-batch4-sales-groupB
+- refactor(ms-127): レビュー由来 polish — sales 再分割 + header 統一 (e-4867 PR #604)
+- refactor(ms-127): bin/beacon の営業(group B) family を source 分割 (e-4867)
+- Merge pull request #603 from kurogin23mech-source/ms-127-e4867-batch3-milestone-target
+- refactor(ms-127): bin/beacon の milestone/target family を source 分割 (e-4867 群A phase3)
+- Merge pull request #602 from kurogin23mech-source/ms-127-e4867-batch2-doc-log-retro-entry
+- refactor(ms-127): requires seam を検証済み契約に + レビュー由来 polish (e-4867 PR #602)
+- refactor(ms-127): bin/beacon の entry/log/retro/doc family を source 分割 (e-4867 群A phase2)
+- Merge pull request #601 from kurogin23mech-source/ms-127-e4867-bin-beacon-split
+- refactor(ms-127): 独立レビュー由来の family file テンプレ改善 (e-4867 PR #601)
+- fix(ms-127): cli-drift checker を bin/lib/cmd_*.sh 追従に (e-4867 CI)
+- refactor(ms-127): bin/beacon の task family を bin/lib/cmd_task.sh へ source 分割 (e-4867 B フェーズ pilot)
+- Merge pull request #600 from kurogin23mech-source/ms-127-e4860-cmd-project-split
+- refactor(ms-127): cmd_project split の独立レビュー polish 3件 (PR #600)
+- refactor(ms-127): project family を lib/cmd_project.py へ切り出す (e-4860)
+- Merge pull request #599 from kurogin23mech-source/ms-127-e4856-cmd-pr-split
+- fix(ms-127): trigger テストを両 namespace patch で hermetic 化 (PR #599 CI)
+- refactor(ms-127): cmd_pr split の独立レビュー polish 3件 (PR #599)
+- refactor(ms-127): pr family を lib/cmd_pr.py へ切り出す (e-4856)
+- Merge pull request #598 from kurogin23mech-source/ms-127-e4852-cmd-target-split
+- refactor(ms-127): cmd_target split の独立レビュー polish 4件 (PR #598)
+- refactor(ms-127): target family を lib/cmd_target.py へ切り出す (e-4852)
+- Merge pull request #597 from kurogin23mech-source/ms-127-e4849-cmd-milestone-split
+- refactor(ms-127): cmd_milestone split の独立レビュー polish 3件 (PR #597)
+- refactor(ms-127): milestone family を lib/cmd_milestone.py へ切り出す (e-4849)
+- Merge pull request #596 from kurogin23mech-source/ms-127-e4846-polish-timestamp-actor
+- refactor(ms-127): cmd_doc / cmd_acquisition の timestamp・actor 一貫化 + 文言修正 (e-4838, e-4845)
+- Merge pull request #595 from kurogin23mech-source/ms-127-e4839-cmd-acquisition-split
+- refactor(ms-127): acquisition split の独立レビュー polish 2件 (PR #595 consensus)
+- refactor(ms-127): acquisition family を lib/cmd_acquisition.py へ切り出す (e-4839)
+- refactor(ms-127): acquisition split の foundation — 汎用 date/number ヘルパー昇格 + _today_iso 重複除去 (e-4839)
+- Merge pull request #594 from kurogin23mech-source/ms-127-e4831-cmd-doc-split
+- refactor(ms-127): doc split の抽出 artifact 2件を除去 (PR #594 独立レビュー consensus)
+- refactor(ms-127): doc family を lib/cmd_doc.py へ切り出す (e-4831)
+- refactor(ms-127): doc family split の foundation — 共有ヘルパーを commands_shared へ昇格 (e-4831)
+- Merge pull request #593 from kurogin23mech-source/ms-127-e4824-trek-read-project
+- fix(ms-127): trek reconcile の縮退経路を非サイレント化 (e-4824 独立レビュー consensus)
+- fix(ms-127): trek local-mode reconcile の未定義 read_project() を load_project() に是正 (e-4824)
+- Merge pull request #592 from kurogin23mech-source/ms-127-ai-commands-py-bin-beacon-server-app
+- refactor(ms-127): PR #592 独立レビュー findings 反映 (e-4820)
+- refactor(ms-127): trek family を lib/cmd_trek.py へ切り出す (e-4820)
+- Merge pull request #591 from kurogin23mech-source/ms-127-ai-commands-py-bin-beacon-server-app
+- refactor(ms-127): deploy family を lib/cmd_deploy.py へ切り出す (e-4815)
+- Merge pull request #590 from kurogin23mech-source/ms-127-ai-commands-py-bin-beacon-server-app
+- refactor(ms-127): PR #590 独立レビュー findings 反映 (e-4809)
+- refactor(ms-127): retro family を lib/cmd_retro.py へ切り出す (e-4809)
+- Merge pull request #589 from kurogin23mech-source/ms-127-ai-commands-py-bin-beacon-server-app
+- refactor(ms-127): PR #589 独立レビュー findings 反映 (e-4803)
+- refactor(ms-127): bus family を lib/cmd_bus.py へ切り出す (e-4803)
+- Merge pull request #588 from kurogin23mech-source/ms-127-ai-commands-py-bin-beacon-server-app
+- refactor(ms-127): operation family を lib/cmd_operation.py へ切り出す (e-4798)
+- Merge pull request #587 from kurogin23mech-source/ms-127-ai-commands-py-bin-beacon-server-app
+- docs(ms-127): PR #587 独立レビュー findings 反映 (orphan comment + fixture 注記, docs のみ)
+- refactor(ms-127): sessions/push/claim family を各 cmd_<family>.py へ切り出す (e-4321)
+- Merge pull request #586 from kurogin23mech-source/ms-127-ai-commands-py-bin-beacon-server-app
+- refactor(ms-127): PR #586 独立レビュー findings 反映 — private helper 再エクスポート廃止 + orphan header 掃除
+- refactor(ms-127): note/incident/issue/log family を各 cmd_<family>.py へ切り出す (e-4320)
+- Merge pull request #585 from kurogin23mech-source/ms-127-ai-commands-py-bin-beacon-server-app
+- docs(ms-127): PR #585 独立レビュー findings 反映 (dead-comment 掃除 + patch 注記, docs のみ)
+- refactor(ms-127): task+entry family を lib/cmd_task.py へ切り出す (e-4319)
+- Merge pull request #584 from kurogin23mech-source/ms-127-ai-commands-py-bin-beacon-server-app
+- docs(ms-127): PR #584 独立レビュー findings 反映 (docstring/comment/style のみ)
+- refactor(ms-127): org+member family を lib/cmd_org.py へ切り出す (e-4318)
+- Merge pull request #583 from kurogin23mech-source/ms-127-ai-commands-py-bin-beacon-server-app
+- docs(ms-127): 独立レビュー findings 反映 — _release_all の docstring を移動後の実態に修正 (PR #583)
+- refactor(ms-127): session family を lib/cmd_session.py へ切り出す (e-4317b)
+- refactor(ms-127): capability-scope checker を module 横断走査に拡張 (e-4317a)
+- refactor(ms-127): commands_shared に cross-family 共有 helper を拡充 (e-4317 前提)
+- refactor(ms-127): 共有 CLI helper を lib/commands_shared.py に抽出 (e-4316)
+- Merge pull request #582 from kurogin23mech-source/ms-134-p2-l0-skill-fix
+- docs(ms-134): scope-classify skill の L0 説明を台帳の不変条件に整合 (思想レビュー P2)
+- Merge pull request #581 from kurogin23mech-source/ms-134-e4739-scope-propose
+- fix(ms-134): PR #581 の AX/保守性 独立レビュー findings を反映 (e-4739)
+- feat(ms-134): /beacon-scope-classify Skill — 層分類の人間確定ゲート (e-4739 part B)
+- feat(ms-134): capability 分類提案の scaffold — checker --propose モード (e-4739 part A)
+- Merge pull request #580 from kurogin23mech-source/ms-134-e4737-ledger-review-reclassify
+- fix(ms-134): PR #580 の AX/保守性 独立レビュー findings を反映 (e-4737 part B)
+- fix(ms-134): 台帳全数レビューで4件の誤分類を是正 (e-4737 part B)
+- Merge pull request #579 from kurogin23mech-source/ms-134-e4737-collection-remediation
+- fix(ms-134): PR #579 の AX/保守性 独立レビュー findings を反映 — session_fork 誤修正を撤回 (e-4737)
+- feat(ms-134): 職種結合7件を人手レビューで判定 — 正当2件を台帳分離 + session_fork 修正 (e-4737)
+- Merge pull request #578 from kurogin23mech-source/ms-134-e4738-ownership-axis
+- fix(ms-134): PR #578 の AX/保守性 独立レビュー findings を反映 (e-4738)
+- feat(ms-134): capability 台帳に所有軸を追加 — L3=職種 / L4=プロジェクト を CI 強制 (e-4738)
+- Merge pull request #577 from kurogin23mech-source/ms-134-e4740-collection-coupling-check
+- fix(ms-134): PR #577 の AX/保守性 独立レビュー findings を反映 (e-4740)
+- feat(ms-134): checker が非列挙の職種結合 (data['milestones'] 直読み) を検知 (e-4740)
+- Merge pull request #576 from kurogin23mech-source/ms-134-capability-l0-l1-beacon-l2-l3-public
+- fix(ms-134): link-target エラー文言を既存契約に戻し回復手順を末尾追加 (CI 修正)
+- fix(ms-134): PR #576 の AX/保守性レビュー findings を反映
+- fix(ms-134): 思想レビュー #1 を反映 — 不変条件の対称化 + doc の sales 依存除去 (PR #575 follow-up)
+- Merge pull request #575 from kurogin23mech-source/ms-134-capability-l0-l1-beacon-l2-l3-public
+- fix(ms-134): AX+保守性 独立レビュー findings を反映 (PR #575)
+- refactor(ms-134): account phase 導出の fallback を effective_phases に一本化 (e-4638)
+- feat(ms-134): Skill 56本を L0〜L4 分類 + sales doc の end-to-end 回帰テスト (e-4709/e-4710/e-4711/e-4712)
+- feat(ms-134): capability 共有スコープ台帳 L0〜L4 + 依存不変条件の機械強制 (e-4719/e-4709/e-4721)
+- feat(ms-134): doc 記録を occupation 層の抽象に寄せ dev 具象依存を構造的に断つ (e-4720)
+- Merge pull request #574 from kurogin23mech-source/ms-119-review-gate-polish-e4597
+- feat(ms-119): task↔SPEC 矛盾の裁定基準を attainment gate に追加 (e-4597)
+- revert(ms-119): drop CI-side judge (approach A), keep session-driven gate (e-4143)
+- feat(ms-119): run the independent review judge in CI (e-4143)
+- Merge pull request #573 from kurogin23mech-source/ms-105-release-vps-followthrough-e4694
+- fix(ms-105): release.yml を VPS 移行に追従 — 死んだ Cloud Run fanout を撤去し手動VPSデプロイ案内へ (e-4694)
+- docs(release): update README/CHANGELOG for v0.61.0
+- chore(release): bump formula to 0.61.0
+
 ## [v0.61.0] - 2026-07-30
 
 - Merge pull request #572 from kurogin23mech-source/ms-104-mapmaint-e3342
