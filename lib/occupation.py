@@ -845,7 +845,8 @@ def next_target_id(data: dict, kind: str) -> str:
 
 def create_target(data: dict, kind: str, *, label: str,
                   status: str = "", created_at: str = "", created_by: str = "",
-                  assignee: str = "", **extra) -> dict:
+                  assignee: str = "", stamp_created_by: bool = True,
+                  **extra) -> dict:
     """Create a new Target of ``kind`` and append it to its collection,
     profession-generically (ms-143, 設計判断 b 系統2 = target 作成). Resolves the
     collection + ``id_prefix`` from ``profession_manifest``, allocates the id via
@@ -860,12 +861,23 @@ def create_target(data: dict, kind: str, *, label: str,
     verb itself never names ``data['milestones']`` / ``data['opportunities']``.
     Workflow around creation (seeding a phase's anchor activities, the ms-81
     empty-assignee no-pollution rule) stays at the caller / CLI frontend, not in
-    this primitive (leader 握り: primitive は create に専念、workflow は CLI)."""
+    this primitive (leader 握り: primitive は create に専念、workflow は CLI).
+
+    ``stamp_created_by`` (ms-143 parity-first): the base always mints a
+    ``created_by``, but a sales Opportunity historically carries none
+    (DEV_ONLY_SKELETON_KEYS). A frontend that must preserve that existing
+    profession skeleton difference passes ``stamp_created_by=False`` so the
+    refactor stays a pure abstraction (no behavior change), NOT an enrichment that
+    silently unifies the difference (leader 握り: 差は surface して温存、混ぜない).
+    Whether Opportunities SHOULD carry ``created_by`` is a separate product
+    decision tracked outside this refactor."""
     tc = target_class(data, kind)
     target_id = next_target_id(data, kind)
     rec = _wm.new_target(
         target_id, label, status=status or _wm.TODO_STATUS,
         created_at=created_at, created_by=created_by, assignee=assignee, **extra)
+    if not stamp_created_by:
+        rec.pop("created_by", None)
     data.setdefault(tc["collection"], []).append(rec)
     return rec
 

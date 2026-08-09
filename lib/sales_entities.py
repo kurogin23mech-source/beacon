@@ -1032,33 +1032,36 @@ def opportunity_add(data: dict, title: str, *, account_id: str = "",
     if who_has_the_ball not in VALID_BALL:
         raise ValueError(
             f"who_has_the_ball must be one of {sorted(VALID_BALL)}, got {who_has_the_ball!r}")
-    data.setdefault("opportunities", [])
-    opp_id = next_opportunity_id(data)
     initial_phase = phase or default_opportunity_phase(data)
-    # ms-109 e-3698 (fable A-4): base default for ``created_at`` (blank → now),
-    # so it is also the timestamp on the seeded advance gate below. Opportunity
-    # keeps its hand-built skeleton for now — its ``status`` is phase-derived
-    # (not the base default "todo") and the sales model is still moving (方針3).
     created_at = created_at or work_base.now_iso()
-    data["opportunities"].append({
-        "id": opp_id,
-        "title": title.strip(),
-        "label": title.strip(),  # ms-109 e-3625: canonical Target label (dual-write during skew)
-        "account_id": account_id or None,
-        "phase": initial_phase,
-        "goal_amount": goal_amount,
-        "probability": probability,
-        "deadline": deadline,
-        "who_has_the_ball": who_has_the_ball,
-        "assignee": assignee,
-        # ms-106 e-3526: free-text 背景 / 経緯 / メモ。構造化フィールド (金額・確度
-        # 等) では拾えない「この商談はどういう経緯で・何がポイントか」を残す場所。
-        "description": (description or "").strip(),
-        "status": _opportunity_status_for_phase(data, initial_phase),
-        "created_at": created_at,
-        "activities": [],
-        "gates": [],
-    })
+    # ms-143 sales-mirror (系統2 = target 作成): the id allocation + collection
+    # append are now the ONE generic writer occupation.create_target — the SAME
+    # path a dev milestone mints through — with sales enrichment (account_id /
+    # phase / goal / ball / gates …) riding via **extra. This is the ms-143 core
+    # proof that one abstraction serves both professions' create. Two parity-first
+    # points (leader 握り): ``status`` stays phase-derived (NOT the base "todo"),
+    # and ``stamp_created_by=False`` preserves the Opportunity's existing lack of
+    # ``created_by`` (DEV_ONLY_SKELETON_KEYS) — a pure abstraction, no enrichment.
+    # Lazy import avoids the occupation→sales_entities cycle.
+    import occupation
+    opp = occupation.create_target(
+        data, "opportunity", label=title.strip(),
+        status=_opportunity_status_for_phase(data, initial_phase),
+        created_at=created_at, assignee=assignee, stamp_created_by=False,
+        # ms-109 e-3625: canonical Target label dual-write during skew.
+        title=title.strip(),
+        account_id=account_id or None,
+        phase=initial_phase,
+        goal_amount=goal_amount,
+        probability=probability,
+        deadline=deadline,
+        who_has_the_ball=who_has_the_ball,
+        # ms-106 e-3526: free-text 背景 / 経緯 / メモ。
+        description=(description or "").strip(),
+        activities=[],
+        gates=[],
+    )
+    opp_id = opp["id"]
     # 入場で空の前進ゲートを1つ置く (SPEC 実装順ヒント1) — non-terminal のみ。
     # 遷移日はゲートが持つ (fold): 与えられていれば初期ゲートに載せる。
     if not opportunity_phase_is_terminal(data, initial_phase):
@@ -2576,22 +2579,27 @@ def activity_set_status(data: dict, activity_id: str, status: str, *,
 
     Only todo/done are settable here; cancel goes through ``activity_cancel``
     (it stamps the cancel audit trail) — ms-139 e-4950."""
-    opp, act = find_activity(data, activity_id)
-    if act is None:
-        raise ValueError(f"Activity not found: {activity_id}")
+    # ms-143 sales-mirror (系統3): the cancelled guard stays here (sales-specific
+    # audit message pointing at activity_cancel), but the find + lifecycle
+    # transition delegate to occupation.set_entry_state — the SAME shared path a
+    # dev task closes through (find_target_entry locates the activity in the
+    # opportunity's ``activities`` arm; ``done`` routes through the same
+    # work_model.mark_done base). This is the ms-143 core proof: ONE abstraction
+    # serves both professions' done. Lazy import avoids the
+    # occupation→sales_entities cycle.
     if status not in _SETTABLE_ACTIVITY_STATUS:
         hint = " (cancel via activity_cancel)" if status == work_model.CANCELLED_STATUS else ""
         raise ValueError(
             f"status must be one of {sorted(_SETTABLE_ACTIVITY_STATUS)}{hint}, got {status!r}")
-    if status == work_model.DONE_STATUS:
-        # ms-109 e-3696 (fable A-2): close the Activity through the same
-        # occupation-agnostic base a development task done uses, so both stamp
-        # status / done_at / meta.done_by identically instead of each
-        # re-implementing it. Gives sales activities the done_by trail they
-        # previously lacked (task AC: 証跡が基底経由で刻まれる).
-        work_model.mark_done(act, at=at, actor=work_base.current_actor())
-    else:
-        act["status"] = status
+    import occupation
+    try:
+        _opp, act = occupation.set_entry_state(
+            data, activity_id, status, at=at, actor=work_base.current_actor())
+    except ValueError:
+        # preserve the sales-specific not-found message (set_entry_state raises a
+        # generic "Entry not found"); status was already validated above so the
+        # only ValueError here is not-found.
+        raise ValueError(f"Activity not found: {activity_id}")
     return act
 
 
