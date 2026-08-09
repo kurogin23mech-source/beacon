@@ -133,8 +133,12 @@ _APP_ATTRS = (
     "_start_watcher", "_stop_watcher", "_require_project_role",
     "_resolve_bus_event_user_ids",
 )
+# ms-127 e-4871 PR3c: post_bus_event moved to routers_projects, which has its
+# own module-level _auth_enabled. Mirror the same do-not-restore rule as above.
+_ROUTERS_ATTRS: tuple = ()
 _fc_originals: dict = {}
 _app_originals: dict = {}
+_routers_originals: dict = {}
 
 
 def setup_module(_module):
@@ -142,9 +146,10 @@ def setup_module(_module):
     overrides only when THIS module's tests are about to run. Adjacent files'
     tests have already executed by then (or run after teardown_module restores
     everything)."""
-    global _fc_originals, _app_originals
+    global _fc_originals, _app_originals, _routers_originals
     _fc_originals = {name: getattr(firestore_client, name, None) for name in _FC_ATTRS}
     _app_originals = {name: getattr(app_module, name, None) for name in _APP_ATTRS}
+    _routers_originals = {name: getattr(routers_projects_module, name, None) for name in _ROUTERS_ATTRS}
 
     firestore_client.append_bus_event = _mock_append_bus_event
     firestore_client.list_bus_events = _mock_list_bus_events
@@ -160,6 +165,10 @@ def setup_module(_module):
 
     # Auth off (dev mode) so we can call endpoints without minting tokens.
     app_module._auth_enabled = False
+    # ms-127 e-4871 PR3c: post_bus_event moved to routers_projects but reads the
+    # auth flag via the injected is_auth_enabled() getter (which closes over
+    # app._auth_enabled), so flipping app_module._auth_enabled above is enough —
+    # no separate routers_projects flip needed.
     app_module._start_watcher = lambda project_id: None
     app_module._stop_watcher = lambda project_id: None
     # The _require_project_role helper depends on
@@ -191,6 +200,9 @@ def teardown_module(_module):
     for name, value in _app_originals.items():
         if value is not None:
             setattr(app_module, name, value)
+    for name, value in _routers_originals.items():
+        if value is not None:
+            setattr(routers_projects_module, name, value)
 
 
 @pytest.fixture(autouse=True)
