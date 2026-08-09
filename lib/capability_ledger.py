@@ -136,13 +136,14 @@ PROFESSION_CONCRETE_SYMBOLS = {
 # recording must always go through occupation.record_target_entry — so the only
 # non-failing status a symbol reach can have is deferred debt.
 #
-# EMPTY until ms-134 e-5061 step 2 (L3→L2 promotion) lands. The mechanism ships
-# first (this fork) so that when ms-143 PR #1 abstracts create/done (milestone_add
-# /task_done/opportunity_add/activity_set_status) and this fork rebases, only the
-# un-abstracted remainder (task_add/task_list/sync/log_finalize/save/
-# communication_add/opportunity_activity/acquisition_attack_list_*) is registered
-# here with owner=ms-143, avoiding the churn of allowlisting-then-removing the 4
-# already-abstracted verbs (leader interlock ruling 2026-08-09).
+# Populated by ms-134 e-5061 step 2 (L3→L2 promotion) with the 9 entries below,
+# all owner=ms-143. The mechanism landed first (empty) and step 2 registered only
+# the un-abstracted remainder: ms-143 PR #1 (#625) had already abstracted create/
+# done (milestone_add's record path / task_done / opportunity_add /
+# activity_set_status), so those verbs are clean and deliberately absent here —
+# avoiding the churn of allowlisting-then-removing them (leader interlock ruling
+# 2026-08-09). ms-143 PR #2 abstracts each remaining verb and deletes its row; the
+# stale-entry test forces the deletion, so this set shrinks to empty over time.
 KNOWN_SYMBOL_REACH: set = {
     # ms-134 e-5061 step 2 (L3→L2 promotion) — class-derived RECORDING verbs
     # promoted to L2 that STILL call a profession recorder/resolver directly.

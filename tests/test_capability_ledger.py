@@ -444,10 +444,11 @@ def test_no_new_symbol_reach_on_real_tree():
 def test_symbol_reach_allowlist_makes_a_reach_pending(tmp_path, monkeypatch):
     # The mechanism: a (verb, symbol) in KNOWN_SYMBOL_REACH is classified
     # pending_debt (not new_violation) so it no longer fails the gate. Proven on a
-    # synthetic tree because the real-tree allowlist is empty until step 2 lands.
+    # synthetic tree with a monkeypatched allowlist so the assertion is deterministic
+    # regardless of the real allowlist's ms-143 remainder.
     path = _write(tmp_path, "commands.py", _SYNTH_DIRECT)
     before = chk.find_invariant_violations(path)
-    assert before[0]["status"] == "new_violation"  # empty allowlist → fresh
+    assert before[0]["status"] == "new_violation"  # doc_synthetic not allowlisted
     monkeypatch.setattr(cl, "KNOWN_SYMBOL_REACH",
                         {("doc_synthetic", "core.save_entry")})
     after = chk.find_invariant_violations(path)
@@ -457,8 +458,9 @@ def test_symbol_reach_allowlist_makes_a_reach_pending(tmp_path, monkeypatch):
 def test_no_stale_symbol_reach_allowlist_entries():
     """Ratchet hygiene (symmetric to test_no_stale_collection_allowlist_entries):
     every (verb, symbol) in KNOWN_SYMBOL_REACH must still be detected on the real
-    tree, so a row cannot rot into a lie after its handler is abstracted. Vacuous
-    while the allowlist is empty; meaningful once step 2 registers the remainder."""
+    tree, so a row cannot rot into a lie after its handler is abstracted. Now that
+    step 2 has registered the ms-143 remainder, this enforces that each entry
+    still reaches a concrete until ms-143 PR #2 abstracts it and deletes the row."""
     detected = {(v["verb"], v["symbol"]) for v in chk.find_invariant_violations()}
     stale = sorted(cl.KNOWN_SYMBOL_REACH - detected)
     assert not stale, (
