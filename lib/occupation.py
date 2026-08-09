@@ -979,6 +979,25 @@ def set_entry_state(data: dict, entry_id: str, status: str, *,
     return target, entry
 
 
+def find_target(data: dict, target_id: str) -> dict | None:
+    """Locate a Target record by id across all Target collections,
+    profession-generically (ms-143). Returns the record dict or ``None`` — the
+    manifest-driven replacement for ``core.find_target_milestone`` /
+    ``sales_entities.find_opportunity`` when a profession-shared / to-be-shared
+    verb needs the containing Target without naming ``data['milestones']`` /
+    ``data['opportunities']`` itself."""
+    kind = _wm.target_kind(target_id)
+    try:
+        tc = target_class(data, kind)
+    except ValueError:
+        return None
+    id_field = tc.get("id_field", "id")
+    for rec in data.get(tc["collection"], []) or []:
+        if rec.get(id_field) == target_id:
+            return rec
+    return None
+
+
 def _collect_item_ids(entries: list, out: list) -> None:
     """Append every id in ``entries``, recursing into nested ``entries`` children
     (dev subtasks)."""

@@ -2320,7 +2320,14 @@ def activity_add(data: dict, opportunity_id: str, description: str, *,
     phase-fold step (e-3553) tell which phase's work an activity belongs to. It
     is a SALES-instance field only — the occupation-agnostic base stays phase
     -free (doc 5srt3fcamG59ljyRlNKn の層分界)."""
-    opp = find_opportunity(data, opportunity_id)
+    # ms-143 sales-mirror (系統1 = work-item 追加): validations stay here
+    # (sales-frontend concern), but the target lookup + id allocation + append
+    # delegate to the shared occupation primitives — the SAME path a dev task is
+    # added through. find_target / add_work_item are manifest-driven so this verb
+    # no longer names data['opportunities'] / next_activity_id itself. Lazy import
+    # avoids the occupation→sales_entities cycle.
+    import occupation
+    opp = occupation.find_target(data, opportunity_id)
     if opp is None:
         raise ValueError(f"Opportunity not found: {opportunity_id}")
     if not description or not description.strip():
@@ -2328,18 +2335,14 @@ def activity_add(data: dict, opportunity_id: str, description: str, *,
     if who_has_the_ball not in VALID_BALL:
         raise ValueError(
             f"who_has_the_ball must be one of {sorted(VALID_BALL)}, got {who_has_the_ball!r}")
-    act_id = next_activity_id(data)
-    opp.setdefault("activities", []).append({
-        "id": act_id,
-        "description": description.strip(),
-        "deadline": deadline,
-        "status": "todo",
-        "who_has_the_ball": who_has_the_ball,
-        "source": source,
-        "created_at": created_at,
-        "created_in_phase": created_in_phase or opp.get("phase", ""),
-    })
-    return act_id
+    # created_in_phase defaults to the opportunity's current phase (sales-specific
+    # enrichment, ms-106 e-3555) — computed here and passed as an extra field.
+    act = occupation.add_work_item(
+        data, opportunity_id, description=description.strip(),
+        deadline=deadline, who_has_the_ball=who_has_the_ball, source=source,
+        created_at=created_at,
+        created_in_phase=created_in_phase or opp.get("phase", ""))
+    return act["id"]
 
 
 def next_nurturing_id(data: dict) -> str:
