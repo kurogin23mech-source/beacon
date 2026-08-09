@@ -101,3 +101,31 @@ def test_sales_entities_reexports_are_identity():
     assert se.scan_overdue is deadline.scan_overdue
     assert se.TRANSITION_OVERDUE == deadline.TRANSITION_OVERDUE
     assert se.TRANSITION_SETTLED == deadline.TRANSITION_SETTLED
+
+
+# --- reminder dedup (サーバ発リマインダの二重配信防止, e-4953) ----------------
+
+def test_pending_reminders_excludes_already_reminded():
+    items = [{"id": "t1", "deadline": "2026-08-07", "status": "todo"}]
+    assert [i["id"] for i, _ in deadline.pending_reminders(items, TODAY)] == ["t1"]
+    deadline.mark_reminded(items[0])
+    assert items[0][deadline.REMINDED_FOR_KEY] == "2026-08-07"
+    # 同じ締切値では再送しない。
+    assert deadline.pending_reminders(items, TODAY) == []
+
+
+def test_pending_reminders_refires_when_deadline_changes():
+    # 締切を延ばして再び過ぎたら値が変わるので再通知される。
+    items = [{"id": "t1", "deadline": "2026-08-07", "status": "todo"}]
+    deadline.mark_reminded(items[0])
+    assert deadline.pending_reminders(items, TODAY) == []
+    items[0]["deadline"] = "2026-08-08"  # 延長したが今日より前 → 再び overdue
+    assert [i["id"] for i, _ in deadline.pending_reminders(items, TODAY)] == ["t1"]
+
+
+def test_pending_reminders_excludes_terminal_and_future():
+    items = [
+        {"id": "done", "deadline": "2026-08-01", "status": "done"},
+        {"id": "future", "deadline": "2026-08-20", "status": "todo"},
+    ]
+    assert deadline.pending_reminders(items, TODAY) == []

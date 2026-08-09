@@ -123,3 +123,36 @@ def overdue_work_items(items, today: str) -> list:
     target_date) と status(terminal) を読むので、呼び出し側はクラスを問わず
     items を渡すだけでよい (task / milestone / activity 共通)."""
     return scan_overdue(items, deadline_of, is_settled, today)
+
+
+# ---------------------------------------------------------------------------
+# Reminder dedup — サーバ発の締切超過リマインダ (ms-139 e-4953) が「同じ締切に
+# ついて二重配信しない」ための純粋な判定。真値源はサーバの tick だが、判定規則は
+# ここに置き、状態 (最後にリマインドした締切値) は work item 自身に刻む。
+# ---------------------------------------------------------------------------
+
+# 最後にリマインドした締切値を控える key。現在の締切と一致する間は再送しない。
+# 締切を延ばして再び過ぎたら値が変わるので再通知される (状態は派生で stale しない)。
+REMINDED_FOR_KEY = "deadline_reminded_for"
+
+
+def pending_reminders(items, today: str) -> list:
+    """DUE / OVERDUE な work item のうち、**現在の締切値についてまだリマインドして
+    いない** ものを古い順で返す ``(item, status)`` の list — ms-139 e-4953。
+
+    二重配信の dedup は ``item[REMINDED_FOR_KEY]`` (前回リマインドした締切値) と
+    現在の ``deadline_of(item)`` の一致で判定する。値が違えば (= 新しい締切が過ぎた)
+    再通知する。純粋関数 — 渡された list を読むだけで I/O も collection 直読みも
+    しない。"""
+    out = []
+    for item, st in overdue_work_items(items, today):
+        if item.get(REMINDED_FOR_KEY) == deadline_of(item):
+            continue
+        out.append((item, st))
+    return out
+
+
+def mark_reminded(item: dict) -> None:
+    """work item に「現在の締切値でリマインド済み」を刻む (二重配信防止)。呼び出し側は
+    通知の配信に成功した後に呼ぶ。締切が変われば次の tick で再び pending になる。"""
+    item[REMINDED_FOR_KEY] = deadline_of(item)
