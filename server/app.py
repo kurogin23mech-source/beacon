@@ -836,99 +836,6 @@ def _resolve_author(user: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-class RetroCreate(BaseModel):
-    content: str
-
-class NoteCreate(BaseModel):
-    text: str
-    context: str = ""
-    ts: str = ""
-    # ms-57 / e-1036: per-session attribution for the session-log
-    # aggregation query. Empty string = "no session" (older clients,
-    # pre-ms-57 CLI) and is dropped server-side so Firestore docs stay
-    # either "tagged with a real id" or "no field at all".
-    session_id: str = ""
-
-class SessionUpsert(BaseModel):
-    """Body for PUT /api/projects/{project_id}/sessions/{session_id}.
-
-    Fields mirror lib/session.py's local payload. All optional because heartbeat
-    updates only need to bump last_active; first-mint upserts populate the rest.
-    server/firestore_client.upsert_session uses merge=True so partial bodies
-    are safe.
-
-    ms-54 / e-1318 (Option C true-heartbeat) adds three new fields the bridge
-    (channel/bus.mjs) stamps on every poll iteration:
-
-      * ``last_poll_at``     — ISO8601 UTC of the most recent poll iteration.
-                               Updated *inside* the bridge's poll loop, so a
-                               stale value structurally implies "this bridge
-                               cannot receive events" (not "the heartbeat
-                               code path ran on a process whose poll loop
-                               died long ago").
-      * ``poll_interval_ms`` — bridge's poll cadence. Lets the server compute
-                               a precise "healthy if last_poll_at within
-                               max(30s, 2 × poll_interval_ms)" threshold
-                               rather than guessing.
-      * ``shutdown``         — True iff the bridge wrote this update as part
-                               of a graceful SIGINT/SIGTERM teardown. Used
-                               by the directory ``--healthy`` filter to
-                               immediately classify deliberately-stopped
-                               sessions as not-healthy, instead of waiting
-                               for ``last_poll_at`` to go stale.
-    """
-    actor: Optional[dict] = None
-    created_at: Optional[str] = None
-    last_active: Optional[str] = None
-    harness: Optional[str] = None
-    last_poll_at: Optional[str] = None
-    poll_interval_ms: Optional[int] = None
-    shutdown: Optional[bool] = None
-
-    # ms-54 / e-1369: session transparency in 4 layers (5th is INTENT, written
-    # via a separate endpoint so the bridge never mints narrative text).
-    #
-    #   Layer 0 — Identity     : agent.{kind, version}, harness.{kind, version}
-    #   Layer 1 — Where        : cwd, git.{branch, head_short, head_subject}
-    #   Layer 2 — What         : focus.{milestone, recent_task}
-    #   Layer 3 — Reach        : channels, budget
-    #
-    # All optional. A bridge that only stamps Identity at mint and Where on
-    # heartbeat still serialises correctly via merge=True. The dicts are
-    # shaped (rather than flat fields) so adding a sub-key later doesn't bump
-    # the SessionUpsert surface area, and the JSON wire format reads like a
-    # natural namespace ("agent.version" rather than "agent_version").
-    agent: Optional[dict] = None      # {kind, version}
-    # NOTE: the legacy top-level `harness: str` above is kept for back-compat;
-    # the new structured form lands under runtime.harness instead of replacing
-    # the flat field. A bridge can populate both — readers should prefer the
-    # nested dict when present.
-    runtime: Optional[dict] = None    # {harness: {kind, version}}
-    cwd: Optional[str] = None
-    git: Optional[dict] = None        # {branch, head_short, head_subject}
-    focus: Optional[dict] = None      # {milestone: {id, title}, recent_task: {id, description}}
-    channels: Optional[list[str]] = None
-    budget: Optional[dict] = None     # {remaining, total}
-
-
-class SessionIntentUpsert(BaseModel):
-    """Body for POST /api/projects/{project_id}/sessions/{session_id}/intent
-    (ms-54 / e-1369 Layer 4).
-
-    Intent is the *AI's self-report* of what it is currently doing — the only
-    Layer that depends on natural language rather than machine observation.
-    The bridge does NOT write intent (it has no insight into the AI's goal);
-    the AI stamps it via `beacon session focus "<text>"` or the picker shows
-    "(idle)" when absent.
-
-    `attention_required` is a boolean flag the AI raises when it is waiting
-    on a human decision. Readers (directory picker, Web UI) show it
-    prominently so a teammate sees "who needs me" at a glance.
-    """
-    text: Optional[str] = None
-    attention_required: Optional[bool] = None
-
-
 _BUS_DELIVERY_MODES = {"auto-execute", "propose-to-ai", "notify-user-only"}
 _BUS_DELIVERY_DEFAULT = "propose-to-ai"
 
@@ -1081,31 +988,6 @@ class BusEventReceiptAck(BaseModel):
     """
     stage: str
     recipient_session_id: str
-
-
-class SessionLogUpsert(BaseModel):
-    """Body for PUT /api/projects/{project_id}/session_logs/{session_id}.
-
-    ms-57 / e-1037 schema. `summary` is the durable decision-trail content
-    (survives entry GC); `*_ids` are best-effort back-references. `recovered`
-    is set True only on the first upsert from the rescue path (session-start
-    seeing an orphan session) so forensics can tell rescue-born entries from
-    session-end ones. All fields optional because rescue and session-end
-    write different subsets; firestore_client.upsert_session_log uses
-    merge=True so partials are safe.
-    """
-    summary: Optional[str] = None
-    note_ids: Optional[list[str]] = None
-    commit_ids: Optional[list[str]] = None
-    pr_ids: Optional[list[str]] = None
-    created_at: Optional[str] = None
-    last_aggregated_at: Optional[str] = None
-    recovered: Optional[bool] = None
-
-
-class MemberInvite(BaseModel):
-    email: str
-    role: str = "viewer"  # viewer | editor
 
 
 # ---------------------------------------------------------------------------
@@ -1384,138 +1266,6 @@ def require_envelope_for_action(action_name: str):
 # Members (invite / remove)
 # ---------------------------------------------------------------------------
 
-@app.post("/api/projects/{project_id}/members")
-def invite_member(project_id: str, body: MemberInvite,
-                  user: dict = Depends(require_auth)):
-    """Invite a member by email. Only project owner can invite."""
-    if body.role not in ("viewer", "editor"):
-        raise HTTPException(status_code=400, detail="Role must be 'viewer' or 'editor'")
-    # Look up the invitee outside the transaction — read-only on the users
-    # collection, not the project doc. Safe and avoids extending the txn window.
-    found = db.find_user_by_email(body.email)
-    if found is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"User '{body.email}' not found. They must sign in to Beacon first.",
-        )
-    invited_id, _ = found
-
-    def op(data: dict):
-        if _auth_enabled and data.get("owner") != user.get("sub"):
-            raise HTTPException(
-                status_code=403, detail="Only project owner can invite members"
-            )
-        members = data.get("members", [])
-        if any(m.get("user_id") == invited_id for m in members):
-            raise HTTPException(
-                status_code=409, detail=f"'{body.email}' is already a member"
-            )
-        if data.get("owner") == invited_id:
-            raise HTTPException(
-                status_code=409, detail=f"'{body.email}' is the project owner"
-            )
-        members.append({"user_id": invited_id, "email": body.email, "role": body.role})
-        data["members"] = members
-        return data, {"status": "invited", "email": body.email, "role": body.role}
-
-    return _apply_op_and_broadcast(
-        project_id, op, op_name="member.invite", actor=user.get("sub", ""),
-    )
-
-
-@app.delete("/api/projects/{project_id}/members/{member_email}")
-def remove_member(project_id: str, member_email: str,
-                  user: dict = Depends(require_auth)):
-    """Remove a member. Only project owner can remove."""
-    def op(data: dict):
-        if _auth_enabled and data.get("owner") != user.get("sub"):
-            raise HTTPException(
-                status_code=403, detail="Only project owner can remove members"
-            )
-        members = data.get("members", [])
-        new_members = [m for m in members if m.get("email") != member_email]
-        if len(new_members) == len(members):
-            raise HTTPException(
-                status_code=404, detail=f"Member '{member_email}' not found"
-            )
-        data["members"] = new_members
-        return data, {"status": "removed", "email": member_email}
-
-    return _apply_op_and_broadcast(
-        project_id, op, op_name="member.remove", actor=user.get("sub", ""),
-    )
-
-
-@app.get("/api/projects/{project_id}/members")
-def list_members(project_id: str, user: dict = Depends(require_auth)):
-    """List project members.
-
-    ms-78 e-1807: enriches each row with the user's `display_name` so the
-    UI / CLI can prefer a human-friendly label over the raw email. The field
-    is empty when the user hasn't set one yet — the UI should fall back to
-    email in that case.
-    """
-    data = _load(project_id, user)
-    owner_id = data.get("owner", "")
-    owner_email = ""
-    owner_display_name = ""
-    if owner_id:
-        owner_data = db.get_user(owner_id)
-        if owner_data:
-            owner_email = owner_data.get("email", "")
-            owner_display_name = owner_data.get("display_name", "")
-    members = data.get("members", []) or []
-    enriched = []
-    for m in members:
-        if not isinstance(m, dict):
-            continue
-        m2 = dict(m)
-        uid = m.get("user_id", "")
-        if uid:
-            udata = db.get_user(uid)
-            if udata:
-                m2["display_name"] = udata.get("display_name", "") or m2.get(
-                    "display_name", ""
-                )
-        enriched.append(m2)
-    return {
-        "owner": owner_id,
-        "owner_email": owner_email,
-        "owner_display_name": owner_display_name,
-        "members": enriched,
-    }
-
-
-class MemberRoleUpdate(BaseModel):
-    role: str  # viewer | editor
-
-
-@app.patch("/api/projects/{project_id}/members/{member_email}")
-def update_member_role(project_id: str, member_email: str, body: MemberRoleUpdate,
-                       user: dict = Depends(require_auth)):
-    """Update a member's role. Only project owner can change roles."""
-    if body.role not in ("viewer", "editor"):
-        raise HTTPException(status_code=400, detail="Role must be 'viewer' or 'editor'")
-
-    def op(data: dict):
-        if _auth_enabled and data.get("owner") != user.get("sub"):
-            raise HTTPException(
-                status_code=403, detail="Only project owner can change roles"
-            )
-        members = data.get("members", [])
-        for m in members:
-            if m.get("email") == member_email:
-                m["role"] = body.role
-                data["members"] = members
-                return data, {"email": member_email, "role": body.role}
-        raise HTTPException(
-            status_code=404, detail=f"Member '{member_email}' not found"
-        )
-
-    return _apply_op_and_broadcast(
-        project_id, op, op_name="member.update_role", actor=user.get("sub", ""),
-    )
-
 
 # ---------------------------------------------------------------------------
 # Member invitations (ms-78 e-1803/e-1804)
@@ -1536,273 +1286,6 @@ def update_member_role(project_id: str, member_email: str, body: MemberRoleUpdat
 #
 # All writes go through `apply_operation` so the Firestore vs DynamoDB
 # split is invisible to this layer.
-
-class InvitationCreate(BaseModel):
-    email: str
-    role: str = "viewer"  # viewer | editor
-    expiry_days: int = invitations_mod.DEFAULT_EXPIRY_DAYS
-
-
-class InvitationAccept(BaseModel):
-    display_name: str = ""  # ms-78 e-1807: required-but-allow-server-default
-
-
-def _invite_url(token: str) -> str:
-    """Build the public landing URL for a token. Honours BEACON_PUBLIC_BASE_URL
-    so local dev / staging / prod all produce a clickable link."""
-    base = os.environ.get(
-        "BEACON_PUBLIC_BASE_URL", "https://beacon-ai.dev"
-    ).rstrip("/")
-    return f"{base}/join/{token}"
-
-
-@app.post("/api/projects/{project_id}/invitations")
-def create_invitation(project_id: str, body: InvitationCreate,
-                      user: dict = Depends(require_auth)):
-    """Owner issues a fresh invite token. Returns the plaintext token + URL ONCE.
-
-    The plaintext is *never* returned again — if the inviter loses it they
-    must cancel + re-issue. The DB only ever sees the SHA256 hash.
-    """
-    issued: dict = {}
-
-    def op(data: dict):
-        if _auth_enabled and data.get("owner") != user.get("sub"):
-            raise HTTPException(
-                status_code=403,
-                detail="Only project owner can issue invitations",
-            )
-        try:
-            invitation, token = invitations_mod.invitation_create(
-                data,
-                email=body.email,
-                role=body.role,
-                invited_by_user_id=user.get("sub", ""),
-                invited_by_email=user.get("email", ""),
-                expiry_days=body.expiry_days,
-                project_id=project_id,
-            )
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
-        # Stash for outside the txn — the closure may be retried, only the
-        # last successful run's values matter.
-        issued["invitation"] = invitation
-        issued["token"] = token
-        return data, None
-
-    _apply_op_and_broadcast(
-        project_id, op,
-        op_name="invitation.create", actor=user.get("sub", ""),
-    )
-    invitation = issued.get("invitation") or {}
-    token = issued.get("token") or ""
-    return {
-        "invitation": invitations_mod.invitation_public_view(invitation),
-        "token": token,                        # plaintext, returned ONCE
-        "url": _invite_url(token),
-        "expires_at": invitation.get("expires_at", ""),
-        "note": (
-            "Beacon project member への招待です。GitHub repo collaborator は別途 "
-            "GitHub 側で `gh repo edit --add-collaborator <user>` 等で設定してください。"
-        ),
-    }
-
-
-@app.get("/api/projects/{project_id}/invitations")
-def list_invitations(project_id: str, user: dict = Depends(require_auth)):
-    """List active (= unexpired) invitations for a project. Owner-only."""
-    data = _load(project_id, user)
-    if _auth_enabled and data.get("owner") != user.get("sub"):
-        raise HTTPException(
-            status_code=403,
-            detail="Only project owner can view invitations",
-        )
-    return {
-        "invitations": [
-            invitations_mod.invitation_public_view(inv)
-            for inv in invitations_mod.invitations_list(data)
-            if not invitations_mod._is_expired(inv.get("expires_at", ""))
-        ],
-    }
-
-
-@app.delete("/api/projects/{project_id}/invitations/{invitation_id}")
-def cancel_invitation(project_id: str, invitation_id: str,
-                      user: dict = Depends(require_auth)):
-    """Cancel an outstanding invitation. Owner-only.
-
-    After cancel, the token becomes invalid — even if the invitee still has
-    the URL, /accept will return 404.
-    """
-    def op(data: dict):
-        if _auth_enabled and data.get("owner") != user.get("sub"):
-            raise HTTPException(
-                status_code=403,
-                detail="Only project owner can cancel invitations",
-            )
-        try:
-            removed = invitations_mod.invitation_cancel(data, invitation_id)
-        except ValueError as e:
-            raise HTTPException(status_code=404, detail=str(e))
-        return data, {
-            "status": "cancelled",
-            "invitation": invitations_mod.invitation_public_view(removed),
-        }
-
-    return _apply_op_and_broadcast(
-        project_id, op,
-        op_name="invitation.cancel", actor=user.get("sub", ""),
-    )
-
-
-def _resolve_invitation_project(token: str) -> tuple[str, dict, dict]:
-    """Resolve (project_id, project_data, invitation_dict) from a plaintext token.
-
-    Tokens carry the project_id as a prefix (= ``<pid>.<random>``) so we can
-    look up directly without scanning all projects. Raises 404 on miss.
-    """
-    pid = invitations_mod.parse_token_project_id(token)
-    if not pid:
-        raise HTTPException(
-            status_code=404,
-            detail="Invitation token has no project context. Ask the inviter for a fresh link.",
-        )
-    data = db.get_project(pid)
-    if not data:
-        raise HTTPException(
-            status_code=404,
-            detail="Invitation not found or expired. Ask the inviter for a fresh link.",
-        )
-    inv = invitations_mod.invitation_find_by_token(data, token)
-    if not inv:
-        raise HTTPException(
-            status_code=404,
-            detail="Invitation not found or expired. Ask the inviter for a fresh link.",
-        )
-    return pid, data, inv
-
-
-@app.get("/api/invitations/{token}")
-def preview_invitation(token: str):
-    """Preview an invitation by plaintext token. Public endpoint — no auth.
-
-    Returns project name / role / inviter so the landing page can render
-    "X invited you to Project Y as Z" before the invitee logs in. Does NOT
-    return any secrets and does NOT consume the invitation.
-
-    404 if the token does not match any live invitation (= unknown / expired /
-    cancelled / already accepted).
-    """
-    pid, data, inv = _resolve_invitation_project(token)
-    owner_id = data.get("owner") or ""
-    owner_email = ""
-    if owner_id:
-        owner_data = db.get_user(owner_id)
-        if owner_data:
-            owner_email = owner_data.get("email", "")
-    return {
-        "project_id": pid,
-        "project_name": data.get("name", ""),
-        "role": inv.get("role", ""),
-        "invited_email": inv.get("email", ""),
-        "inviter_email": inv.get("invited_by_email", "") or owner_email,
-        "expires_at": inv.get("expires_at", ""),
-        "owner_email": owner_email,
-    }
-
-
-@app.post("/api/invitations/{token}/accept")
-def accept_invitation(token: str, body: InvitationAccept,
-                      user: dict = Depends(require_auth)):
-    """Consume an invite token and add the caller to the project's members.
-
-    Authenticated — the caller must already be signed in (= Google login on
-    the landing page). The invitee email must match the email the invitation
-    was issued to (= prevents passing the URL to a third party).
-
-    `display_name` is recorded on the user record (= ms-78 e-1807, the
-    UC11-F5 "no more raw emails in author columns" goal).
-
-    Idempotent on success in the trivial sense: invitation is consumed and
-    the member row is added. A second call returns 404 because the token
-    no longer exists.
-    """
-    target_pid = invitations_mod.parse_token_project_id(token)
-    if not target_pid:
-        raise HTTPException(
-            status_code=404,
-            detail="Invitation token has no project context. Ask the inviter for a fresh link.",
-        )
-    caller_id = user.get("sub", "")
-    caller_email = (user.get("email") or "").lower()
-    display_name = (body.display_name or "").strip()
-
-    accepted: dict = {}
-
-    def op(data: dict):
-        try:
-            inv = invitations_mod.invitation_consume(data, token)
-        except ValueError as e:
-            # Race against another consume / cancel attempt
-            raise HTTPException(status_code=404, detail=str(e))
-        # Email match check — server enforces, role cannot be re-targeted
-        invitee_email = (inv.get("email") or "").lower()
-        if caller_email and invitee_email and caller_email != invitee_email:
-            # Re-insert the invitation so the legitimate invitee can still use it
-            data.setdefault("invitations", []).append(inv)
-            raise HTTPException(
-                status_code=403,
-                detail=(
-                    f"This invitation was issued to {invitee_email}, but you "
-                    f"are signed in as {caller_email}. Sign in with the "
-                    "invited account and try again."
-                ),
-            )
-        # Add to project members (= server-side schema, user_id key)
-        members = data.setdefault("members", [])
-        if not isinstance(members, list):
-            members = []
-            data["members"] = members
-        if data.get("owner") == caller_id:
-            # Owner accepting their own invite (= edge case, no-op for membership)
-            pass
-        elif not any(m.get("user_id") == caller_id for m in members
-                     if isinstance(m, dict)):
-            members.append({
-                "user_id": caller_id,
-                "email": caller_email,
-                "role": inv.get("role", "viewer"),
-                "joined_at": invitations_mod._now_iso(),
-                "invited_by": inv.get("invited_by", ""),
-            })
-        accepted["invitation"] = inv
-        return data, None
-
-    _apply_op_and_broadcast(
-        target_pid, op,
-        op_name="invitation.accept", actor=caller_id,
-    )
-
-    # Persist display_name on the user record (= UC11-F5 / e-1807).
-    # Best-effort — failure here should not block project membership.
-    if display_name:
-        try:
-            db.update_user(caller_id, {"display_name": display_name})
-        except Exception:
-            pass
-
-    inv = accepted.get("invitation") or {}
-    return {
-        "status": "accepted",
-        "project_id": target_pid,
-        "role": inv.get("role", ""),
-        "display_name": display_name,
-        "next_step_url": f"/?project={target_pid}",
-        "note": (
-            "Beacon project に追加されました。GitHub repo の collaborator は "
-            "別途 GitHub 側で設定が必要です (招待主に依頼してください)。"
-        ),
-    }
 
 
 # ms-127 e-4869: /api/admin/* は server/routers_admin.py へ切り出し済み
@@ -1906,46 +1389,6 @@ def _load_org_for_member(org_id: str, user: dict) -> dict:
     if _auth_enabled and not org_mod.is_org_member(doc, user.get("sub", "")):
         raise HTTPException(status_code=404, detail="org not found")
     return doc
-
-
-class ProjectRehome(BaseModel):
-    org_id: str
-
-
-@app.post("/api/projects/{project_id}/rehome")
-def rehome_project_endpoint(project_id: str, body: ProjectRehome,
-                            user: dict = Depends(require_auth)):
-    """Re-home a project into a different org — org 所属リンクだけ張り替える (ms-118 / e-4233).
-
-    project の identity (project_id) と履歴は不変で、``org_id`` リンクのみ差し替える
-    (SPEC 方針3)。開示は移動後の org 基準で即座に再評価される: ms-113 の開示は
-    ``project_org_id`` を request 時に live 参照する (get_disclosed_accounts) ので、
-    org_id を書き換えた瞬間から新 org 基準になる (= キャッシュ無し / 剥奪即時、受入条件4)。
-
-    認可 (2 条件の AND):
-      - 呼び出し user が project の **owner** であること (= 自分の project しか動かせない。
-        editor では不可。破壊的操作の owner-only 統一厳格化は e-4234)。
-      - target org が実在し、呼び出し user がその org の **member** であること
-        (= 所属していない org に project を吸わせない。非 member / 不在 org は 404 で秘匿)。
-    """
-    target_org_id = (body.org_id or "").strip()
-    if not target_org_id:
-        raise HTTPException(status_code=400, detail="org_id is required")
-    # target org 実在 + caller が member であることを保証 (非 member / 不在は 404)。
-    _load_org_for_member(target_org_id, user)
-    # project owner 限定で full doc をロードする (org_id は top-level なので meta-only で足りる)。
-    data, _role = _require_project_role(
-        project_id, user, allowed=("owner",), hydrate_milestones=False)
-    try:
-        previous = org_mod.rehome_project(data, target_org_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    _save(project_id, data)
-    return {
-        "project_id": project_id,
-        "org_id": target_org_id,
-        "previous_org_id": previous,
-    }
 
 
 # ms-95 / e-2320 — structured audit log for Trek scope mutations.
@@ -2057,106 +1500,10 @@ def rehome_project_endpoint(project_id: str, body: ProjectRehome,
 # Retro
 # ---------------------------------------------------------------------------
 
-@app.get("/api/projects/{project_id}/notes")
-def list_notes(project_id: str, user: dict = Depends(require_auth)):
-    """List session notes from Firestore."""
-    _load(project_id, user)
-    return db.list_notes(project_id)
-
-
-@app.post("/api/projects/{project_id}/notes")
-def add_note(project_id: str, body: NoteCreate, user: dict = Depends(require_auth)):
-    """Add a session note."""
-    import datetime
-    _load(project_id, user)
-    note = {
-        "ts": body.ts or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "text": body.text,
-    }
-    if body.context:
-        note["context"] = body.context
-    if body.session_id:
-        note["session_id"] = body.session_id
-    note_id = db.add_note(project_id, note)
-    return {"note_id": note_id, **note}
-
-
-@app.delete("/api/projects/{project_id}/notes")
-def clear_notes(project_id: str, user: dict = Depends(require_auth)):
-    """Clear all session notes."""
-    data = _load(project_id, user)
-    _require_write(data, user)
-    db.clear_notes(project_id)
-    return {"status": "cleared"}
-
 
 # ---------------------------------------------------------------------------
 # Session registry (ms-57 / e-1063)
 # ---------------------------------------------------------------------------
-
-@app.put("/api/projects/{project_id}/sessions/{session_id}")
-def upsert_session(
-    project_id: str,
-    session_id: str,
-    body: SessionUpsert,
-    user: dict = Depends(require_auth),
-):
-    """Upsert a session registry entry.
-
-    Heartbeat path: CLI sends only `last_active` to refresh liveness without
-    overwriting the original mint metadata. Initial mint path: CLI sends the
-    full payload. Firestore merge=True (in db.upsert_session) handles both.
-
-    ms-54 / e-1349: the authenticated user's email is stamped onto the
-    session's ``actor.email`` field regardless of whether the body included
-    actor. Email lives only on the server (bearer token is its property),
-    so the bridge cannot fabricate or spoof another user's identity. The
-    directory query then surfaces ``actor.email`` so the DM-send Skill
-    picker can show a member-level identity ("alice@…") rather than just
-    ``machine/agent``. See firestore_client.stamp_session_actor_email for
-    the field-path merge that preserves actor.machine/agent in the
-    heartbeat (no-actor) path.
-
-    ms-98 (e-3836): this is the heartbeat path (CLI PUTs every few seconds).
-    Authorization only needs the project meta doc (owner/members live at the
-    top level), and the handler body never reads ``data["milestones"]`` — it
-    only writes via ``db.*``. Using ``_load_meta_only`` avoids re-hydrating the
-    entire milestones subcollection on every heartbeat, which was a dominant
-    source of memory churn in the 2026-07-21 hang incident.
-    """
-    _load_meta_only(project_id, user)
-    payload = {k: v for k, v in body.model_dump().items() if v is not None}
-    email = user.get("email", "")
-    uid = user.get("sub", "")
-
-    # ms-95: stamp the authenticated user_id (= JWT ``sub``) on the session
-    # row so ``_apply_dm_payload_visibility`` can resolve sid→uid without a
-    # separate roundtrip. Bridge clients do not (and must not) supply their
-    # own user_id — the auth token is the only authority. Without this
-    # stamp, ``sid_to_uid[recipient_sid] = ""`` and the visibility gate
-    # redacts DM payloads even for the intended recipient (observed 2026-07-06
-    # with Iruka / Windows bridge v0.54.0, DM event Y9kG6O6C2Qz5bp2gQ7cN).
-    if uid:
-        payload["user_id"] = uid
-
-    # Mint path: body carried actor. Stamp email in-line so the single
-    # db.upsert_session write below lands the complete view atomically.
-    if email and isinstance(payload.get("actor"), dict):
-        payload["actor"] = {**payload["actor"], "email": email}
-
-    if not payload and not email:
-        # Nothing to write — surface as a no-op rather than a 422, so callers
-        # debouncing client-side don't need to special-case empty bodies.
-        return {"status": "noop"}
-    if payload:
-        db.upsert_session(project_id, session_id, payload)
-    # Heartbeat path: body had no actor. Stamp the authenticated email via
-    # the field-path merge helper so existing actor.machine/agent (from a
-    # prior mint) are not stomped. Idempotent — repeat heartbeats just
-    # re-write the same email leaf.
-    if email and not isinstance(payload.get("actor"), dict):
-        db.stamp_session_actor_email(project_id, session_id, email)
-    return {"status": "ok", "session_id": session_id}
 
 
 _POLL_HEALTH_MIN_WINDOW_S = 30
@@ -2274,186 +1621,9 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     session["live"] = (ws_live is True) or poll_healthy
 
 
-@app.get("/api/projects/{project_id}/sessions")
-def list_sessions(
-    project_id: str,
-    user_id: str = "",
-    machine: str = "",
-    agent: str = "",
-    cwd: str = "",
-    agent_kind: str = "",
-    live_only: bool = False,
-    since_minutes: int = 5,
-    healthy_only: bool = False,
-    user: dict = Depends(require_auth),
-):
-    """List sessions for a project, with optional directory-query filters.
-
-    ms-54 / e-1134: the rendezvous CLI (e-999) needs to look up "which session
-    of this user/machine/agent is currently live" so a sender can pick a DM
-    target without knowing the exact session_id out-of-band.
-
-    Filters (all opt-in; the no-arg call still returns everything, ordered by
-    last_active desc, to preserve the ms-57 rescue and Web UI 'who is active'
-    behavior):
-
-      * ``user_id``       — match ``actor.email`` (user identity surfaces as the
-                            email field per session.py's mint convention).
-      * ``machine``       — match ``actor.machine`` exactly.
-      * ``agent``         — match ``actor.agent`` exactly.
-      * ``cwd``           — match the session's ``cwd`` exactly (e-2520 stable
-                            recipient identity: part of the coarse key that
-                            survives sid re-mint).
-      * ``agent_kind``    — match ``agent.kind`` exactly (claude-code / codex).
-                            This is the structural agent type, distinct from
-                            ``actor.agent`` (a machine label). Together with
-                            ``cwd`` + ``machine`` this forms the sid-independent
-                            identity a sender can resolve to the current live
-                            session.
-      * ``live_only``     — drop sessions whose ``last_active`` is older than
-                            ``since_minutes`` ago. Heartbeat-based liveness, so
-                            a session that crashed without session-end is
-                            correctly classified as not-live once its heartbeat
-                            goes stale (≥ ms-57 heartbeat cadence + slack).
-                            NOTE: ``last_active`` proves only "some heartbeat
-                            code path ran"; for "this bridge can actually
-                            receive DMs right now" use ``healthy_only``.
-      * ``since_minutes`` — threshold for live_only. Default 5 matches the
-                            session heartbeat cadence; raise it for "active in
-                            last hour" style queries.
-      * ``healthy_only``  — e-1318 Option C true-heartbeat. Drop sessions
-                            whose bridge poll loop is stale or shutdown. The
-                            stale window is ``max(30s, 2× poll_interval_ms)``,
-                            so the filter scales with the bridge's own
-                            cadence. Sessions without ``last_poll_at`` (never
-                            polled — likely an older bridge or no bridge at
-                            all) are also dropped under ``healthy_only`` —
-                            unknown-liveness is *not* a healthy receiver.
-
-    Every returned row carries a ``poll_health`` block (e-1318) regardless
-    of filter choice, so the CLI / Skill consumer can display age & shutdown
-    flag in the picker without an extra round-trip.
-
-    Filtering is in-memory after load. The sessions/ subcollection is bounded
-    (single-digit to a few dozen docs per project in practice), so we avoid
-    Firestore composite-index requirements for what is fundamentally an
-    interactive picker query.
-    """
-    _load(project_id, user)
-    sessions = db.list_sessions(project_id)
-
-    import datetime
-    now_dt = datetime.datetime.now(datetime.timezone.utc)
-
-    # Always attach poll_health — backward-compat callers that ignore it lose
-    # nothing, but /beacon-dm-send (and any other directory consumer) gets
-    # the structured signal in one round-trip.
-    #
-    # Also stamp ``bridge: True/False`` (ms-54 e-1319): True iff a bridge
-    # poll loop has ever written ``last_poll_at`` on this session. This is
-    # the structural marker for "has a receive channel at all", distinct
-    # from poll_health.healthy which factors in age + shutdown. Callers
-    # that only want "would a DM have anywhere to land" (e.g. directory
-    # default view) can filter on this without re-implementing the
-    # last_poll_at presence check.
-    for s in sessions:
-        _stamp_session_liveness(s, project_id, now_dt)
-
-    if not (user_id or machine or agent or cwd or agent_kind or live_only or healthy_only):
-        return sessions
-
-    def _matches(s: dict) -> bool:
-        actor = s.get("actor") or {}
-        if user_id and actor.get("email", "") != user_id:
-            return False
-        if machine and actor.get("machine", "") != machine:
-            return False
-        if agent and actor.get("agent", "") != agent:
-            return False
-        # e-2520: stable-recipient-identity resolve. cwd + agent_kind are the
-        # coarse identity key that survives sid re-mint (bridge restart /
-        # daemon churn), so a sender can target "the codex in /path on this
-        # machine" instead of a raw ephemeral sid. agent_kind matches the
-        # structural agent.kind (claude-code / codex), NOT actor.agent (which
-        # is just the machine label). Combined with healthy_only + client-side
-        # sort by last_poll_at, this yields the current live sid for a tuple.
-        if cwd and (s.get("cwd") or "") != cwd:
-            return False
-        if agent_kind and ((s.get("agent") or {}).get("kind") or "") != agent_kind:
-            return False
-        return True
-
-    filtered = [s for s in sessions if _matches(s)]
-
-    if live_only:
-        cutoff = now_dt - datetime.timedelta(minutes=since_minutes)
-        cutoff_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-        # e-3214/e-3220: shared with /api/me/sessions so both directory paths
-        # drop shut-down daemons identically (see _session_is_live).
-        filtered = [s for s in filtered if _session_is_live(s, cutoff_iso)]
-
-    if healthy_only:
-        # ms-101 / e-3010 — 接続ベースの liveness を優先する union 判定に切替。
-        # 従来は poll_health.healthy (= last_poll_at 由来) のみを見ていたため、
-        # WS では接続中なのに last_poll_at が遅れて healthy=False になる session
-        # を取りこぼした (= 「live 0 なのに届く」ズレ)。``live`` は ws_live=True
-        # (接続台帳に接続あり) か poll_healthy のどちらかで True になるので、
-        # 接続直後の session を即 healthy 受信者として拾える。Redis 不通時は
-        # ws_live=None で live == poll_healthy に一致し、従来挙動を保つ。
-        filtered = [s for s in filtered if s.get("live") is True]
-
-    return filtered
-
-
 # ---------------------------------------------------------------------------
 # Session log (ms-57 / e-1037)
 # ---------------------------------------------------------------------------
-
-@app.put("/api/projects/{project_id}/session_logs/{session_id}")
-def upsert_session_log(
-    project_id: str,
-    session_id: str,
-    body: SessionLogUpsert,
-    user: dict = Depends(require_auth),
-):
-    """Upsert a session log entry keyed by session_id (merge=True).
-
-    Both session-end (e-1038) and rescue (e-1039) call this with their own
-    subset of fields; merge semantics make the calls commutative — last
-    writer wins per field, but no field gets nulled by a partial body.
-    """
-    _load(project_id, user)
-    payload = {k: v for k, v in body.model_dump().items() if v is not None}
-    if not payload:
-        return {"status": "noop"}
-    db.upsert_session_log(project_id, session_id, payload)
-    return {"status": "ok", "session_id": session_id}
-
-
-@app.get("/api/projects/{project_id}/session_logs/{session_id}")
-def get_session_log(
-    project_id: str,
-    session_id: str,
-    user: dict = Depends(require_auth),
-):
-    """Fetch a single session log entry. Returns 404 if absent."""
-    _load(project_id, user)
-    doc = db.get_session_log(project_id, session_id)
-    if doc is None:
-        raise HTTPException(404, detail=f"session_log not found: {session_id}")
-    return doc
-
-
-@app.get("/api/projects/{project_id}/session_logs")
-def list_session_logs(
-    project_id: str,
-    limit: int = 0,
-    user: dict = Depends(require_auth),
-):
-    """List session logs by last_aggregated_at desc. ``limit=0`` means all."""
-    _load(project_id, user)
-    return db.list_session_logs(project_id, limit=limit or None)
 
 
 # ---------------------------------------------------------------------------
@@ -6039,42 +5209,6 @@ def get_bus_cursor(
 # ---------------------------------------------------------------------------
 
 
-@app.post("/api/projects/{project_id}/sessions/{session_id}/intent")
-def upsert_session_intent(
-    project_id: str,
-    session_id: str,
-    body: SessionIntentUpsert,
-    user: dict = Depends(require_auth),
-):
-    """Stamp the AI's free-form intent on its own session document.
-
-    Two fields, both optional:
-
-      * ``text``               — 1-line description of what this AI is doing
-                                 right now (e.g. "DM read receipt 実装中").
-                                 Empty string clears it.
-      * ``attention_required`` — True when the session is waiting on a human
-                                 decision. The directory picker / Web UI uses
-                                 this to surface "who needs me" at a glance.
-
-    The endpoint does NOT enforce that the calling session_id matches the
-    authenticated user — multi-agent dispatch may stamp on behalf of a
-    sub-session. We do require project membership via _load_meta_only. The
-    ``actor.email`` already on the session document is the audit trail for
-    who actually owns it.
-    """
-    # Cost-reduction: intent stamping writes to the session doc only.
-    # Membership check needs the meta doc; milestones are never read.
-    _load_meta_only(project_id, user)
-    payload = body.model_dump(exclude_none=True)
-    if not payload:
-        return {"status": "noop"}
-    # Land under a stable nested key so directory readers know exactly where
-    # to look. Avoids the SessionUpsert merge surface entirely.
-    db.upsert_session(project_id, session_id, {"intent": payload})
-    return {"status": "ok", "session_id": session_id, "intent": payload}
-
-
 # ---------------------------------------------------------------------------
 # Per-event read receipts (ms-54 / e-1348)
 #
@@ -6164,91 +5298,6 @@ def get_bus_event(
         )
     redacted = _apply_dm_payload_visibility(project_id, [event], _caller_uid(user))
     return redacted[0]
-
-
-@app.get("/api/projects/{project_id}/retros")
-def list_retros(project_id: str, user: dict = Depends(require_auth)):
-    """List all retrospective documents for a project."""
-    return db.list_retros(project_id)
-
-
-@app.get("/api/projects/{project_id}/retros/{week}")
-def get_retro(project_id: str, week: str, user: dict = Depends(require_auth)):
-    """Get a specific retrospective document."""
-    retro = db.get_retro(project_id, week)
-    if retro is None:
-        raise HTTPException(status_code=404, detail=f"Retro '{week}' not found")
-    return retro
-
-
-@app.post("/api/projects/{project_id}/retros/{week}")
-def save_retro(project_id: str, week: str, body: RetroCreate,
-               user: dict = Depends(require_auth)):
-    """Save a retrospective document."""
-    data = _load(project_id, user)
-    _require_write(data, user)
-    db.save_retro(project_id, week, body.content)
-    return {"week": week, "status": "saved"}
-
-
-@app.get("/api/projects/{project_id}/search")
-def search_project(
-    project_id: str,
-    q: str = "",
-    type: Optional[str] = None,        # CSV (task,commit,...) — required by CORE doc
-    status: Optional[str] = None,      # CSV
-    priority: Optional[str] = None,    # CSV
-    scope: str = "",
-    ms: str = "",
-    op: str = "",
-    id: str = "",
-    assignee: str = "",
-    owner: str = "",
-    from_: Optional[str] = Query(default=None, alias="from"),
-    to: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0,
-    user: dict = Depends(require_auth),
-):
-    """Unified search across all Beacon entities.
-
-    See CORE doc 'Beacon 検索基盤の原則' and SPEC '3ne57ccZegYQXDQA03op' for
-    the design contract. This endpoint delegates to lib/search.search_project
-    so the CLI, server, and Skills all share the same logic.
-    """
-    import sys as _sys, os as _os
-    _LIB = _os.path.join(_os.path.dirname(__file__), "..", "lib")
-    if _LIB not in _sys.path:
-        _sys.path.insert(0, _LIB)
-    import search as _search  # noqa: PLC0415
-
-    data = _load(project_id, user)
-    # Hydrate documents from Firestore subcollection.
-    documents = db.list_documents(project_id)
-
-    def _split(s: Optional[str]) -> Optional[list[str]]:
-        if not s:
-            return None
-        return [x.strip() for x in s.split(",") if x.strip()]
-
-    return _search.search_project(
-        data,
-        documents,
-        q=q,
-        type=_split(type),
-        status=_split(status),
-        priority=_split(priority),
-        scope=scope,
-        ms=ms,
-        op=op,
-        id=id,
-        assignee=assignee,
-        owner=owner,
-        from_date=from_ or "",
-        to_date=to or "",
-        limit=limit,
-        offset=offset,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -7256,6 +6305,38 @@ app.include_router(
         _broadcast_project_after_write=_broadcast_project_after_write,
         _broadcast_document_change=_broadcast_document_change,
         require_envelope_for_action=require_envelope_for_action,
+        is_auth_enabled=lambda: _auth_enabled,
+    )
+)
+
+# ms-127 e-4871 (PR2/3): /api/projects/* membership + collaboration/session slice
+# + /api/invitations/{token} moved to routers_projects.make_collab_router. Guards
+# + session-liveness helpers stay in app.py and are injected (_compute_poll_health
+# stays too, used by the staying _stamp_session_liveness). PR3 (bus/dm) still here.
+from routers_projects import make_collab_router as _make_collab_router
+
+# The helper callables are injected as late-binding thunks (lambda *a, **k:
+# _load(*a, **k)) rather than direct references, so a moved handler resolves
+# app.py's *current* helper at call time. This preserves the pre-move
+# module-global semantics exactly: before extraction these routes called the
+# module-global _load / _stamp_session_liveness / etc., so tests that
+# monkeypatch app._load (e.g. test_invitation_api's _mock_load, or
+# test_session_heartbeat) still take effect. Same rationale as the
+# is_auth_enabled getter. In production nothing rebinds these, so behaviour is
+# identical. require_auth stays a direct reference (FastAPI introspects it as a
+# Depends() and must see the real dependency callable).
+app.include_router(
+    _make_collab_router(
+        require_auth,
+        _load=lambda *a, **k: _load(*a, **k),
+        _load_meta_only=lambda *a, **k: _load_meta_only(*a, **k),
+        _require_project_role=lambda *a, **k: _require_project_role(*a, **k),
+        _require_write=lambda *a, **k: _require_write(*a, **k),
+        _save=lambda *a, **k: _save(*a, **k),
+        _apply_op_and_broadcast=lambda *a, **k: _apply_op_and_broadcast(*a, **k),
+        _load_org_for_member=lambda *a, **k: _load_org_for_member(*a, **k),
+        _session_is_live=lambda *a, **k: _session_is_live(*a, **k),
+        _stamp_session_liveness=lambda *a, **k: _stamp_session_liveness(*a, **k),
         is_auth_enabled=lambda: _auth_enabled,
     )
 )
