@@ -1310,17 +1310,21 @@ def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
     *human* identity that completed the task on the server side
     (distinct from ``meta.done_by`` which is the local-agent string).
     """
-    result = find_entry(data, entry_id)
-    if not result:
-        raise ValueError(f"Entry not found: {entry_id}")
-    ms, _, entry, _ = result
-    # ms-109 e-3696 (fable A-2): the generic done-stamp — status / done_at /
-    # meta.done_by / meta.done_reason — goes through the occupation-agnostic
-    # base so a development task and a sales activity close the same way. The
-    # dev-specific bits (the ``date`` mirror and the *human* ``done_by_user``
-    # identity) stay here.
-    work_model.mark_done(entry, at=date or _now_iso(), actor=_get_actor(),
-                         reason=reason)
+    # ms-143: locate + close through occupation.set_entry_state (manifest-driven),
+    # so the verb no longer walks data['milestones'] directly. set_entry_state
+    # routes ``done`` through the same work_model.mark_done base (status / done_at /
+    # meta.done_by / meta.done_reason) a sales activity closes with — a dev task
+    # and a sales activity now close through ONE path. The old find_entry ALSO
+    # scanned operations; that branch is DEAD for task completion (operation tasks
+    # close via core.operation_task_done, NOT this verb — grep-confirmed no live
+    # caller / test passes an operation entry here), so the abstraction drops it.
+    # dev-specific tail (the ``date`` mirror + the human ``done_by_user`` stamp)
+    # stays here as the dev-frontend concern. Lazy import avoids the
+    # occupation→core module cycle.
+    import occupation
+    ms, entry = occupation.set_entry_state(
+        data, entry_id, "done", at=date or _now_iso(),
+        actor=_get_actor(), reason=reason)
     if not entry.get("date"):
         entry["date"] = entry["done_at"]
     author_clean = _clean_author(author)
