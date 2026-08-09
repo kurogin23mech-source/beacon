@@ -10957,6 +10957,45 @@ def cmd_activity_done():
     print(f"activity {act_id} → {act['status']}")
 
 
+def cmd_activity_cancel():
+    """取消 (cancel) a planned Activity — ms-139 e-4950. 誤起票やらないと決めた
+    活動を、削除せず監査印つきで cancelled にする。Env: BEACON_ACT_ID,
+    BEACON_REASON."""
+    import sales_entities
+    act_id = os.environ.get("BEACON_ACT_ID", "")
+    reason = os.environ.get("BEACON_REASON", "")
+    data = load_project()
+    try:
+        act = sales_entities.activity_cancel(data, act_id, reason=reason)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"activity {act_id} → {act['status']}")
+
+
+def cmd_activity_update():
+    """Activity の説明 / 締切 / ボールを後追い更新する — ms-139 e-4950。空の項目は
+    変更なし。Env: BEACON_ACT_ID, BEACON_ACTIVITY_DESC, BEACON_ACTIVITY_DEADLINE,
+    BEACON_ACTIVITY_BALL."""
+    import sales_entities
+    act_id = os.environ.get("BEACON_ACT_ID", "")
+    desc = os.environ.get("BEACON_ACTIVITY_DESC", "")
+    deadline = os.environ.get("BEACON_ACTIVITY_DEADLINE", "")
+    ball = os.environ.get("BEACON_ACTIVITY_BALL", "")
+    data = load_project()
+    try:
+        act = sales_entities.activity_update(
+            data, act_id, description=desc, deadline=deadline,
+            who_has_the_ball=ball)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data)
+    print(f"activity {act_id} updated "
+          f"(deadline={act.get('deadline', '')}, ball={act.get('who_has_the_ball', '')})")
+
+
 def cmd_communication_add():
     # ms-107 e-3432 — 営業の Commit: source を辿れる事後記録型の証跡を target
     # (opp-… 優先 / acc-…) の子として append-only で残す。
@@ -11379,6 +11418,8 @@ if __name__ == "__main__":
         "opportunity_due": cmd_opportunity_due,
         "opportunity_activity": cmd_opportunity_activity,
         "activity_done": cmd_activity_done,
+        "activity_cancel": cmd_activity_cancel,      # ms-139 e-4950
+        "activity_update": cmd_activity_update,       # ms-139 e-4950
         "sales_reply_watch_op_ensure": cmd_sales_reply_watch_op_ensure,
         "opportunity_delete": cmd_opportunity_delete,
         # ms-107 e-3432 — Communication (証跡・事後記録型 = 営業の Commit)

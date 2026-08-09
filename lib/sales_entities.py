@@ -2527,7 +2527,15 @@ def find_activity(data: dict, activity_id: str):
     return None, None
 
 
-VALID_ACTIVITY_STATUS = {work_model.TODO_STATUS, work_model.DONE_STATUS}
+# ms-139 e-4950: cancelled は Activity の正当な terminal 状態 (activity_cancel が
+# 作る)。以前 valid 集合が {todo, done} だけで cancelled を欠いていたため、cockpit の
+# 「status == cancelled は未消化に出さない」除外前提と齟齬していた (SPEC P6)。
+# vocabulary としては cancelled を含める。ただし cancelled は監査印
+# (cancelled_at/by/reason) を伴うので、直接 set できる状態は下の _SETTABLE のみに
+# 絞り、cancel は activity_cancel を経由させる (= work_base.stamp_cancel)。
+VALID_ACTIVITY_STATUS = {
+    work_model.TODO_STATUS, work_model.DONE_STATUS, work_model.CANCELLED_STATUS}
+_SETTABLE_ACTIVITY_STATUS = {work_model.TODO_STATUS, work_model.DONE_STATUS}
 
 
 def activity_set_status(data: dict, activity_id: str, status: str, *,
@@ -2536,13 +2544,17 @@ def activity_set_status(data: dict, activity_id: str, status: str, *,
     other Communication *fulfills* a planned Activity (ms-106 e-3505): the plan
     is marked done rather than leaving a lingering todo sitting beside the
     Communication fact — the send is recorded once (as the Communication), and
-    the plan it satisfied is closed, not duplicated as a second '[sent]' todo."""
+    the plan it satisfied is closed, not duplicated as a second '[sent]' todo.
+
+    Only todo/done are settable here; cancel goes through ``activity_cancel``
+    (it stamps the cancel audit trail) — ms-139 e-4950."""
     opp, act = find_activity(data, activity_id)
     if act is None:
         raise ValueError(f"Activity not found: {activity_id}")
-    if status not in VALID_ACTIVITY_STATUS:
+    if status not in _SETTABLE_ACTIVITY_STATUS:
+        hint = " (cancel via activity_cancel)" if status == work_model.CANCELLED_STATUS else ""
         raise ValueError(
-            f"status must be one of {sorted(VALID_ACTIVITY_STATUS)}, got {status!r}")
+            f"status must be one of {sorted(_SETTABLE_ACTIVITY_STATUS)}{hint}, got {status!r}")
     if status == work_model.DONE_STATUS:
         # ms-109 e-3696 (fable A-2): close the Activity through the same
         # occupation-agnostic base a development task done uses, so both stamp
@@ -2574,6 +2586,29 @@ def activity_cancel(data: dict, activity_id: str, *, reason: str = "") -> dict:
     if act is None:
         raise ValueError(f"Activity not found: {activity_id}")
     return work_base.stamp_cancel(act, reason=reason)
+
+
+def activity_update(data: dict, activity_id: str, *, description: str = "",
+                    deadline: str = "", who_has_the_ball: str = "") -> dict:
+    """Update an Activity's mutable plan fields (説明 / 締切 / ボール) after
+    creation and return it — ms-139 e-4950 (SPEC 方針5: deadline / ball の後追い
+    更新)。空文字は「変更なし」(task_update と同じ規約) なので、触りたいフィールド
+    だけ渡す。``who_has_the_ball`` は self / counterpart を検証する。締切の変更は L2
+    締切エンジンが次の overdue 判定に即反映する (状態は派生なので stale しない)."""
+    _, act = find_activity(data, activity_id)
+    if act is None:
+        raise ValueError(f"Activity not found: {activity_id}")
+    if description.strip():
+        act["description"] = description.strip()
+    if deadline.strip():
+        act["deadline"] = deadline.strip()
+    if who_has_the_ball.strip():
+        ball = who_has_the_ball.strip()
+        if ball not in (BALL_SELF, BALL_COUNTERPART):
+            raise ValueError(
+                f"ball must be {BALL_SELF!r} or {BALL_COUNTERPART!r}, got {ball!r}")
+        act["who_has_the_ball"] = ball
+    return act
 
 
 def find_nurturing(data: dict, nurturing_id: str):

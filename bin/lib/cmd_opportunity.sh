@@ -235,12 +235,20 @@ cmd_opportunity_due() {
 
 cmd_opportunity_activity() {
     ensure_project
+    # ms-139 e-4950: 活動のライフサイクル動詞。先頭が done/cancel/update なら sub-verb、
+    # そうでなければ従来の add 形 (<opp-id> <desc>)。act-id は全 opp 横断で一意なので
+    # done/cancel/update は <act-id> だけで引ける。
+    case "${1:-}" in
+        done)    shift; cmd_opportunity_activity_done "$@"; return ;;
+        cancel)  shift; cmd_opportunity_activity_cancel "$@"; return ;;
+        update)  shift; cmd_opportunity_activity_update "$@"; return ;;
+    esac
     local opp_id="" desc="" deadline="" ball=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --deadline) deadline="${2:-}"; shift 2 ;;
             --ball)     ball="${2:-}"; shift 2 ;;
-            -?*)        _guard_positional "$1" "Usage: beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self|counterpart]" ;;
+            -?*)        _guard_positional "$1" "Usage: beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self|counterpart]  (also: done|cancel|update <act-id>)" ;;
             *)
                 if [ -z "$opp_id" ]; then opp_id="$1"; else desc="$1"; fi
                 shift ;;
@@ -248,11 +256,61 @@ cmd_opportunity_activity() {
     done
     if [ -z "$opp_id" ] || [ -z "$desc" ]; then
         echo "Usage: beacon opportunity activity <opp-id> <desc> [--deadline <date>] [--ball self|counterpart]"
+        echo "       beacon opportunity activity done   <act-id>"
+        echo "       beacon opportunity activity cancel <act-id> [--reason <text>]"
+        echo "       beacon opportunity activity update <act-id> [--deadline <date>] [--ball self|counterpart] [--description <text>]"
         exit 1
     fi
     BEACON_OPP_ID="$opp_id" BEACON_ACTIVITY_DESC="$desc" \
         BEACON_ACTIVITY_DEADLINE="$deadline" BEACON_ACTIVITY_BALL="$ball" \
         python3 "$COMMANDS_PY" opportunity_activity
+}
+
+cmd_opportunity_activity_done() {
+    local act_id="${1:-}"
+    if [ -z "$act_id" ]; then
+        echo "Usage: beacon opportunity activity done <act-id>"
+        exit 1
+    fi
+    BEACON_ACT_ID="$act_id" BEACON_ACT_STATUS="done" \
+        python3 "$COMMANDS_PY" activity_done
+}
+
+cmd_opportunity_activity_cancel() {
+    local act_id="" reason=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --reason) reason="${2:-}"; shift 2 ;;
+            -?*)      _guard_positional "$1" "Usage: beacon opportunity activity cancel <act-id> [--reason <text>]" ;;
+            *)        act_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$act_id" ]; then
+        echo "Usage: beacon opportunity activity cancel <act-id> [--reason <text>]"
+        exit 1
+    fi
+    BEACON_ACT_ID="$act_id" BEACON_REASON="$reason" \
+        python3 "$COMMANDS_PY" activity_cancel
+}
+
+cmd_opportunity_activity_update() {
+    local act_id="" deadline="" ball="" desc=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --deadline)           deadline="${2:-}"; shift 2 ;;
+            --ball)               ball="${2:-}"; shift 2 ;;
+            --description|--desc) desc="${2:-}"; shift 2 ;;
+            -?*)                  _guard_positional "$1" "Usage: beacon opportunity activity update <act-id> [--deadline <date>] [--ball self|counterpart] [--description <text>]" ;;
+            *)                    act_id="$1"; shift ;;
+        esac
+    done
+    if [ -z "$act_id" ]; then
+        echo "Usage: beacon opportunity activity update <act-id> [--deadline <date>] [--ball self|counterpart] [--description <text>]"
+        exit 1
+    fi
+    BEACON_ACT_ID="$act_id" BEACON_ACTIVITY_DEADLINE="$deadline" \
+        BEACON_ACTIVITY_BALL="$ball" BEACON_ACTIVITY_DESC="$desc" \
+        python3 "$COMMANDS_PY" activity_update
 }
 
 cmd_opportunity_delete() {

@@ -602,10 +602,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_opp_phase.add_argument("--note", default="")
 
     p_opp_activity = opp_sub.add_parser("activity", add_help=False)
+    # ms-139 e-4950: 先頭 positional は add 形の <opp-id> か、done/cancel/update の
+    # sub-verb。sub-verb のとき 2 番目 positional は <act-id>。
     p_opp_activity.add_argument("opp_id", nargs="?", default="")
     p_opp_activity.add_argument("desc", nargs="?", default="")
     p_opp_activity.add_argument("--deadline", default="")
     p_opp_activity.add_argument("--ball", default="")
+    p_opp_activity.add_argument("--reason", default="")
+    p_opp_activity.add_argument("--description", "--desc", dest="description", default="")
 
     p_opp_delete = opp_sub.add_parser("delete", add_help=False)
     p_opp_delete.add_argument("opp_id", nargs="?", default="")
@@ -2581,9 +2585,32 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
         }
         return _run_commands_py(root, "opportunity_phase", env)
     if cmd == "activity":
+        # ms-139 e-4950: done/cancel/update <act-id> は活動のライフサイクル動詞。
+        verb = args.opp_id
+        if verb in ("done", "cancel", "update"):
+            act_id = args.desc  # 2 番目 positional = act-id
+            if not act_id:
+                print(f"Usage: beacon opportunity activity {verb} <act-id>"
+                      + (" [--reason <text>]" if verb == "cancel" else "")
+                      + (" [--deadline <date>] [--ball self|counterpart] [--description <text>]"
+                         if verb == "update" else ""))
+                return 1
+            if verb == "done":
+                return _run_commands_py(root, "activity_done", {
+                    "BEACON_ACT_ID": act_id, "BEACON_ACT_STATUS": "done"})
+            if verb == "cancel":
+                return _run_commands_py(root, "activity_cancel", {
+                    "BEACON_ACT_ID": act_id, "BEACON_REASON": args.reason or ""})
+            return _run_commands_py(root, "activity_update", {
+                "BEACON_ACT_ID": act_id,
+                "BEACON_ACTIVITY_DEADLINE": args.deadline or "",
+                "BEACON_ACTIVITY_BALL": args.ball or "",
+                "BEACON_ACTIVITY_DESC": args.description or "",
+            })
         if not args.opp_id or not args.desc:
             print("Usage: beacon opportunity activity <opp-id> <desc> "
-                  "[--deadline <date>] [--ball self|counterpart]")
+                  "[--deadline <date>] [--ball self|counterpart]  "
+                  "(also: done|cancel|update <act-id>)")
             return 1
         env = {
             "BEACON_OPP_ID": args.opp_id or "",
