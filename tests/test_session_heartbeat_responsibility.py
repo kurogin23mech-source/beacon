@@ -229,22 +229,48 @@ def test_list_sessions_attaches_bridge_field():
         ],
     )
 
-    # Import as a module attribute so we can patch before list_sessions runs.
+    # ms-127 e-4871 PR2: list_sessions moved out of app.py into the
+    # /api/projects/* collab router (nested inside make_collab_router), so it is
+    # no longer importable as app.list_sessions. Build that router with a stub
+    # _load and the *real* session-liveness helpers (the bridge/poll_health
+    # composition under test), extract the GET /sessions endpoint, and call it
+    # directly. The handler reads its own module-level `db` (= store_router), so
+    # we patch store_router.list_sessions (not app.db) to feed the fake rows.
     import server.app as app_module  # type: ignore
-    real_db = getattr(app_module, "db", None)
-    app_module.db = fake_db
+    import routers_projects as rp  # type: ignore
+    import store_router  # type: ignore
 
-    # Bypass _load (auth + project existence) and the require_auth dependency
-    # by calling the underlying function directly with a stub user.
     class _StubUser(dict):
         pass
 
-    # _load wants project_id + user but only raises on missing project; stub it.
-    real_load = app_module._load
-    app_module._load = lambda pid, user: None
+    real_store_list = store_router.list_sessions
+    store_router.list_sessions = fake_db.list_sessions
+
+    def _find_endpoint(router, path, method):
+        for r in router.routes:
+            if getattr(r, "path", None) == path and method in getattr(
+                    r, "methods", set()):
+                return r.endpoint
+        raise LookupError(path)
 
     try:
-        rows = app_module.list_sessions(
+        router = rp.make_collab_router(
+            app_module.require_auth,
+            _load=lambda pid, user=None: None,
+            _load_meta_only=lambda *a, **k: None,
+            _require_project_role=lambda *a, **k: None,
+            _require_write=lambda *a, **k: None,
+            _save=lambda *a, **k: None,
+            _apply_op_and_broadcast=lambda *a, **k: None,
+            _load_org_for_member=lambda *a, **k: None,
+            # Real helpers — the bridge / poll_health composition is what we test.
+            _session_is_live=app_module._session_is_live,
+            _stamp_session_liveness=app_module._stamp_session_liveness,
+            is_auth_enabled=lambda: False,
+        )
+        list_sessions = _find_endpoint(
+            router, "/api/projects/{project_id}/sessions", "GET")
+        rows = list_sessions(
             project_id="proj-x",
             user_id="",
             machine="",
@@ -255,9 +281,7 @@ def test_list_sessions_attaches_bridge_field():
             user=_StubUser(),
         )
     finally:
-        app_module._load = real_load
-        if real_db is not None:
-            app_module.db = real_db
+        store_router.list_sessions = real_store_list
 
     by_id = {r["session_id"]: r for r in rows}
 
