@@ -75,6 +75,13 @@ STEP_INBOUND_STIMULUS = "inbound_stimulus"
 STEP_ASSERT = "assert"
 VALID_STEP_KINDS = {STEP_PERSONA_CLI, STEP_INBOUND_STIMULUS, STEP_ASSERT}
 
+# Two-tier disposable environments (SPEC 方針6): local (cheap, broad — a
+# throwaway local-mode project) is the default; cloud-ephemeral (expensive, only
+# for cloud-固有 paths) routes to scenario_cloud.
+TIER_LOCAL = "local"
+TIER_CLOUD_EPHEMERAL = "cloud-ephemeral"
+VALID_TIERS = {TIER_LOCAL, TIER_CLOUD_EPHEMERAL}
+
 # quality_signals reason types (ms-136 e-4699 / leader 論点3): an AC that could
 # not be turned into an executable, observable assert is reported — but WHY it
 # could not must be categorized, so a correctly out-of-scope AC is never
@@ -120,6 +127,11 @@ def validate_scenario(scenario: dict) -> None:
     """
     if not isinstance(scenario, dict) or not isinstance(scenario.get("steps"), list):
         raise ScenarioError("scenario must be a dict with a 'steps' list")
+    tier = scenario.get("tier", TIER_LOCAL)
+    if tier not in VALID_TIERS:
+        raise ScenarioError(
+            f"unknown tier {tier!r} (valid: {sorted(VALID_TIERS)}) — 方針6: local "
+            "を広く / cloud-ephemeral は cloud 固有パスのみ")
     for i, step in enumerate(scenario["steps"]):
         if not isinstance(step, dict):
             raise ScenarioError(f"step {i}: must be an object")
@@ -399,6 +411,13 @@ def run_scenario(scenario: dict, *, workdir: Optional[str] = None,
     """
     # Fail fast on a malformed scenario (single source of validation).
     validate_scenario(scenario)
+
+    # Route cloud-ephemeral scenarios to the cloud runner (SPEC 方針6). Local
+    # import avoids a module cycle (scenario_cloud imports this module).
+    if scenario.get("tier") == TIER_CLOUD_EPHEMERAL:
+        import scenario_cloud
+        return scenario_cloud.run_cloud_scenario(
+            scenario, beacon_bin=beacon_bin, env=env)
 
     beacon_bin = beacon_bin or DEFAULT_BEACON_BIN
     base_env = dict(env if env is not None else os.environ)

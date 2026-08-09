@@ -42,7 +42,10 @@ from typing import Optional
 LAYER_CLI = "L_cli"
 LAYER_ENGINE = "L_engine"
 LAYER_STORE = "L_store"
-# L_api — deferred to e-4701 (cloud-ephemeral); no API layer exists in local mode.
+# L_api (ms-136 e-4701): in cloud mode the store IS the server API/DB, an
+# independent layer. In local mode store = the one project.json the engine
+# writes, so no API layer exists (we do not fabricate one — e-4700 黒箱誠実さ).
+LAYER_API = "L_api"
 
 # stderr signatures that mean the persona's operation is not valid against the
 # CLI surface (arg / dispatch / interface gap) — the 顧客獲得タブ / milestone
@@ -244,6 +247,12 @@ def diagnose_failure(scenario: dict, report: dict, *,
         core = {"responsible_layer": None, "boundary": "unknown",
                 "observed": failure.get("reason", ""), "expected": "",
                 "expected_provenance": "", "why": "unrecognized failure kind"}
+
+    # In cloud mode the store layer is the server API/DB (e-4701): remap so the
+    # localization names L_api, not the local-file store layer.
+    if report.get("mode") == "cloud" and core.get("responsible_layer") == LAYER_STORE:
+        core["responsible_layer"] = LAYER_API
+        core["boundary"] = core.get("boundary", "") + " (cloud: server API/DB)"
 
     layer = core.get("responsible_layer") or "?"
     summary = (f"層 {layer} が原因: {core['boundary']} で "
