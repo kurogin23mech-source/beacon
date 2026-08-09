@@ -576,6 +576,48 @@ class DMRespondBody(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Bus delivery — Pydantic models (canonical home; used by make_bus_delivery_router)
+# Moved from app.py in ms-127 e-4871 PR3b.
+# ---------------------------------------------------------------------------
+
+class BusCursorAdvance(BaseModel):
+    """Body for POST /api/projects/{project_id}/bus/cursors/{recipient_id}.
+
+    ms-54 / e-998. Consumers commit ``last_seen_at`` after successfully
+    processing a batch. The server enforces forward-only semantics, so a
+    stale client that sends an older value gets a silent no-op rather than
+    rewinding the cursor for everyone else.
+    """
+    last_seen_at: str
+
+
+class BusEventReceiptAck(BaseModel):
+    """Body for POST /api/projects/{project_id}/bus/{event_id}/ack (ms-54 / e-1348).
+
+    Records a per-event read-receipt stage. The cursor (BusCursorAdvance)
+    only tracks the recipient's aggregate frontier; this gives the sender
+    a way to ask "did *this* event surface to anyone?".
+
+    ``stage`` is one of:
+      * ``delivered`` — receiver bridge fetched the event (poll/WS landed)
+      * ``opened``    — receiver dispatched it to the AI/MCP client; the
+                        recipient session has structurally seen the content
+
+    ``recipient_session_id`` is stamped on the event as ``<stage>_by`` so an
+    auditor can answer "who opened it". First-write-wins per stage — repeat
+    acks are idempotent no-ops (returned with ``already_set=True``).
+    """
+    stage: str
+    recipient_session_id: str
+
+
+# Moved from app.py (ms-127 e-4871 PR3b). Used by ack_bus_event_receipt in
+# make_bus_delivery_router. Kept here (not injected) because it is a pure
+# constant with no app.py dependency.
+_RECEIPT_STAGES = ("delivered", "opened")
+
+
+# ---------------------------------------------------------------------------
 # Bus/dm gate — module-level helpers (verbatim from app.py)
 # ---------------------------------------------------------------------------
 
@@ -3286,5 +3328,261 @@ def make_bus_gate_router(
                 )
 
         return row
+
+    return router
+
+
+# ---------------------------------------------------------------------------
+# Bus delivery router (ms-127 e-4871 PR3b)
+#
+# Handles the 6 synchronous "receive" side of the bus:
+#   GET  /api/projects/{project_id}/bus
+#   GET  /api/projects/{project_id}/bus/unread
+#   POST /api/projects/{project_id}/bus/cursors/{recipient_id}
+#   GET  /api/projects/{project_id}/bus/cursors/{recipient_id}
+#   POST /api/projects/{project_id}/bus/{event_id}/ack
+#   GET  /api/projects/{project_id}/bus/{event_id}   ← LAST (wildcard; must come after /unread & /cursors)
+#
+# The POST /bus send handler (async) stays in app.py.
+#
+# Route-ordering constraint: GET /bus/{event_id} is registered LAST inside
+# this router so Starlette's registration-order matching does not let the
+# wildcard shadow the literal /bus/unread or /bus/cursors/* paths.
+# GET /bus/audit lives in the EARLIER-mounted make_bus_gate_router and
+# therefore always wins over /bus/{event_id} from this router.
+# ---------------------------------------------------------------------------
+
+
+def make_bus_delivery_router(
+    require_auth: Callable,
+    *,
+    _load: Callable,
+    _load_meta_only: Callable,
+    _apply_dm_payload_visibility: Callable,
+    _caller_uid: Callable,
+    _bus_event_addressed_to: Callable,
+) -> APIRouter:
+    """Build the /api/projects/* PR3b bus delivery slice.
+
+    Same injection contract as make_bus_gate_router: app.py owns the helper
+    family and passes them in as keyword-only callables. Keyword-only +
+    construction-time callability check.
+    """
+    for _name, _dep in (
+        ("require_auth", require_auth),
+        ("_load", _load),
+        ("_load_meta_only", _load_meta_only),
+        ("_apply_dm_payload_visibility", _apply_dm_payload_visibility),
+        ("_caller_uid", _caller_uid),
+        ("_bus_event_addressed_to", _bus_event_addressed_to),
+    ):
+        if not callable(_dep):
+            raise TypeError(
+                f"routers_projects.make_bus_delivery_router: {_name} must be callable, "
+                f"got {type(_dep).__name__} — pass a function, not a value."
+            )
+
+    router = APIRouter()
+
+    # ---- route handlers (verbatim bodies; @app -> @router) ----
+
+    @router.get("/api/projects/{project_id}/bus")
+    def list_bus_events(
+        project_id: str,
+        since: str = "",
+        channel: str = "",
+        limit: int = 100,
+        user: dict = Depends(require_auth),
+    ):
+        """List bus events ordered by created_at. Use ``since=<last_seen_iso>``
+        for polling-style catch-up; ``channel`` for server-side routing filter.
+
+        ms-93 / e-2275: DM-channel events have their ``payload`` redacted before
+        return when the caller is neither sender nor recipient. Sidecar metadata
+        (event_id, channel, sender_session_id, created_at, receipt timestamps,
+        envelope view) stays visible so audit/diagnostics tooling keeps working.
+
+        ms-98 (e-3836): polling catch-up path (callers hit it with ``since=`` on a
+        loop). The handler only needs the meta doc for the membership check — it
+        never reads ``data["milestones"]`` — so meta-only load avoids re-hydrating
+        the whole milestones/entries tree on every poll.
+        """
+        _load_meta_only(project_id, user)
+        events = db.list_bus_events(
+            project_id, since=since, channel=channel, limit=limit,
+        )
+        return _apply_dm_payload_visibility(project_id, events, _caller_uid(user))
+
+    @router.get("/api/projects/{project_id}/bus/unread")
+    def list_unread_bus_events(
+        project_id: str,
+        recipient_id: str,
+        channel: str = "",
+        limit: int = 100,
+        since: str = "",
+        user: dict = Depends(require_auth),
+    ):
+        """List events the recipient has not yet acknowledged via their cursor.
+
+        Like ``GET /bus`` except ``since`` is resolved server-side from
+        ``bus_cursors/{recipient_id}`` AND results are filtered through
+        :func:`_bus_event_addressed_to` so DM channels do not fan out to
+        every subscriber (e-1209). The endpoint **does not advance** the
+        cursor — callers POST to ``/bus/cursors/{recipient_id}`` after processing.
+        Splitting read and acknowledge lets crashing consumers get at-least-once
+        delivery (events stay readable until acknowledged) while structurally
+        preventing duplicate delivery once they acknowledge.
+
+        We over-fetch from the store (``limit * 4`` capped at 400) before applying
+        the recipient filter so a high-volume channel doesn't starve the
+        requested recipient when most of the window is addressed to others.
+        The cursor still advances by ``created_at`` across the full set, so
+        skipped events are not redelivered on the next round.
+
+        ``since`` override (ms-60 follow-up): callers can pass an explicit
+        ``since`` to fetch events newer than a client-side high-water mark
+        instead of the server-side recipient cursor. This lets the bridge
+        (channel/bus.mjs) advance its own in-memory watermark per poll without
+        burning the server cursor that the inbox-hook depends on for emitting
+        AUTONOMOUS ACTION blocks. Empty string ⇒ fall back to the server cursor
+        (= legacy behavior, used by /beacon-bus-inbox-hook).
+        """
+        # Cost-reduction: this is one of the highest-volume polling endpoints
+        # (bus.mjs hits it every 2-3 seconds per session). The handler body
+        # never reads data["milestones"] — it only needs the meta doc for the
+        # role check. Meta-only load turns 97 Firestore reads into 1.
+        _load_meta_only(project_id, user)
+        if not since:
+            cursor = db.get_bus_cursor(project_id, recipient_id)
+            since = cursor.get("last_seen_at", "")
+        # Over-fetch so the recipient filter does not blank out a noisy window.
+        raw_limit = min(max(limit * 4, limit), 400) if limit else 400
+        raw = db.list_bus_events(
+            project_id, since=since, channel=channel, limit=raw_limit,
+        )
+        # ms-54 / e-2934: caller の user_id を _bus_event_addressed_to に渡して
+        # user-scoped 宛先 (= payload.recipient_user_id) の DM も配信対象にする。
+        # 認証済 user の user_id は require_auth で解決済 (= _caller_uid)。 caller
+        # が自 session 以外の recipient_id を polling している異常経路 (= admin
+        # tooling 等) では、 その caller の user_id を使って判定するのが安全な既定
+        # (= 自分宛の user-scoped DM は自 poll で必ず届く、 他人宛の user-scoped
+        # DM は他人の polling で拾わせる)。
+        caller_uid = _caller_uid(user)
+        filtered = [e for e in raw
+                    if _bus_event_addressed_to(e, recipient_id, caller_uid)]
+        if limit:
+            filtered = filtered[:limit]
+        # ms-93 / e-2275: redact DM payloads the caller isn't a party to. The
+        # recipient_id query param is the session asking for its inbox, but the
+        # *caller* is the authenticated user behind that request. In dogfood,
+        # callers typically pass their own recipient_id (= bridge polling for
+        # itself), so this is a no-op for the common path; the guard catches
+        # the cross-user case where a member queries another session's unread.
+        return _apply_dm_payload_visibility(project_id, filtered, _caller_uid(user))
+
+    @router.post("/api/projects/{project_id}/bus/cursors/{recipient_id}")
+    def advance_bus_cursor(
+        project_id: str,
+        recipient_id: str,
+        body: BusCursorAdvance,
+        user: dict = Depends(require_auth),
+    ):
+        """Forward-only acknowledge of bus events for ``recipient_id``.
+
+        The server discards advance requests that would rewind the cursor (see
+        firestore_client.advance_bus_cursor for the structural reasoning). The
+        response is the cursor state *after* the call, so the client can verify
+        its commit landed.
+        """
+        # Cost-reduction: cursor advance follows every bus/unread poll (paired
+        # write after read). Handler only needs the meta doc for auth — the
+        # cursor state itself lives in bus_cursors, not data["milestones"].
+        _load_meta_only(project_id, user)
+        return db.advance_bus_cursor(project_id, recipient_id, body.last_seen_at)
+
+    @router.get("/api/projects/{project_id}/bus/cursors/{recipient_id}")
+    def get_bus_cursor(
+        project_id: str,
+        recipient_id: str,
+        user: dict = Depends(require_auth),
+    ):
+        """Return the current cursor for ``recipient_id`` ({} if unset)."""
+        # Cost-reduction: read-only cursor fetch, no milestones touched.
+        _load_meta_only(project_id, user)
+        return db.get_bus_cursor(project_id, recipient_id)
+
+    @router.post("/api/projects/{project_id}/bus/{event_id}/ack")
+    def ack_bus_event_receipt(
+        project_id: str,
+        event_id: str,
+        body: BusEventReceiptAck,
+        user: dict = Depends(require_auth),
+    ):
+        """Idempotent first-write-wins receipt stamping for a single bus event.
+
+        The semantics differ from the cursor advance in
+        :func:`advance_bus_cursor`:
+
+          * Cursor = recipient-side frontier (covers many events at once).
+          * Receipt = sender-visible per-event ack ("did this specific message
+            surface to anyone?"). bus.mjs calls this twice for each DM —
+            ``delivered`` when poll first sees it, ``opened`` after the
+            ``notifications/claude/channel`` push lands.
+
+        Repeat calls for the same stage are no-ops and return the original
+        timestamp with ``already_set=True``. Unknown stages are rejected at the
+        boundary so a typo on the receiver does not accidentally smuggle a new
+        field onto the event document.
+        """
+        # Cost-reduction: receipt ack writes to the bus event doc only.
+        # Handler only needs auth via the meta doc; no milestones access.
+        _load_meta_only(project_id, user)
+        stage = body.stage
+        if stage not in _RECEIPT_STAGES:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"invalid stage {stage!r}; expected one of "
+                    f"{_RECEIPT_STAGES}"
+                ),
+            )
+        result = db.set_bus_event_receipt(
+            project_id, event_id, stage, body.recipient_session_id,
+        )
+        if result is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"bus event {event_id!r} not found",
+            )
+        return result
+
+    # GET /bus/{event_id} is registered LAST so the wildcard does not shadow
+    # the literal /bus/unread and /bus/cursors/* registered above.
+    @router.get("/api/projects/{project_id}/bus/{event_id}")
+    def get_bus_event(
+        project_id: str,
+        event_id: str,
+        user: dict = Depends(require_auth),
+    ):
+        """Return one event with its receipt state for ``beacon bus status``.
+
+        Powers the 3-stage display (sent / delivered / opened). The event dict
+        already carries the per-stage timestamp fields when set, so the client
+        only needs to render what's present.
+
+        ms-93 / e-2275: when the event is on a DM channel and the caller is
+        neither sender nor recipient, the ``payload`` field is replaced with a
+        redaction marker — sidecar fields (delivery, *_at, channel, etc.) stay
+        visible so the 3-stage display still renders.
+        """
+        _load(project_id, user)
+        event = db.find_bus_event(project_id, event_id)
+        if event is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"bus event {event_id!r} not found",
+            )
+        redacted = _apply_dm_payload_visibility(project_id, [event], _caller_uid(user))
+        return redacted[0]
 
     return router
