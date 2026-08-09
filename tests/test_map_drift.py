@@ -152,6 +152,7 @@ def test_reconcile_file_wedge_existence(small_surface, tmp_path):
 import commands  # noqa: E402
 import commands_shared  # noqa: E402  (ms-127 e-4815)
 import cmd_deploy  # noqa: E402  (ms-127 e-4815: deploy handlers live here)
+import cmd_trigger  # noqa: E402  (ms-127 e-4971: map-drift trigger canonical home)
 
 
 def test_box_content_has_header_and_objective():
@@ -227,6 +228,8 @@ def test_map_drift_fires_when_release_shipped_since_map(tmp_path, monkeypatch):
                                                 "2021-02-01T00:00:00")))
     monkeypatch.setattr(commands_shared, "get_store", commands.get_store)  # ms-127 e-4815: profession gate resolves get_store in commands_shared
     monkeypatch.setattr(cmd_deploy, "get_store", commands.get_store)  # ms-127 e-4815: _fire_map_reconcile_trigger calls get_store() directly
+    monkeypatch.setattr(cmd_trigger, "_get_triggers_dir", commands._get_triggers_dir)  # ms-127 e-4971: trigger family resolves _get_triggers_dir in cmd_trigger
+    monkeypatch.setattr(cmd_trigger, "get_store", commands.get_store)  # ms-127 e-4971: trigger family resolves get_store in cmd_trigger
     commands._auto_fire_map_drift_trigger()
     p = tmp_path / "map-drift.json"
     assert p.exists()
@@ -248,6 +251,8 @@ def test_map_drift_does_not_fire_without_release_since_map(tmp_path, monkeypatch
                             releases=_releases("2020-06-01T00:00:00")))
     monkeypatch.setattr(commands_shared, "get_store", commands.get_store)  # ms-127 e-4815: profession gate resolves get_store in commands_shared
     monkeypatch.setattr(cmd_deploy, "get_store", commands.get_store)  # ms-127 e-4815: _fire_map_reconcile_trigger calls get_store() directly
+    monkeypatch.setattr(cmd_trigger, "_get_triggers_dir", commands._get_triggers_dir)  # ms-127 e-4971
+    monkeypatch.setattr(cmd_trigger, "get_store", commands.get_store)  # ms-127 e-4971
     commands._auto_fire_map_drift_trigger()
     assert not (tmp_path / "map-drift.json").exists()
 
@@ -265,6 +270,8 @@ def test_map_drift_self_clears_after_reconcile(tmp_path, monkeypatch):
                             releases=_releases("2021-06-01T00:00:00")))
     monkeypatch.setattr(commands_shared, "get_store", commands.get_store)  # ms-127 e-4815: profession gate resolves get_store in commands_shared
     monkeypatch.setattr(cmd_deploy, "get_store", commands.get_store)  # ms-127 e-4815: _fire_map_reconcile_trigger calls get_store() directly
+    monkeypatch.setattr(cmd_trigger, "_get_triggers_dir", commands._get_triggers_dir)  # ms-127 e-4971
+    monkeypatch.setattr(cmd_trigger, "get_store", commands.get_store)  # ms-127 e-4971
     commands._auto_fire_map_drift_trigger()
     assert not stale.exists()
 
@@ -275,6 +282,8 @@ def test_map_drift_does_not_fire_when_map_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(commands, "get_store", lambda: _FakeStore(None))
     monkeypatch.setattr(commands_shared, "get_store", commands.get_store)  # ms-127 e-4815: profession gate resolves get_store in commands_shared
     monkeypatch.setattr(cmd_deploy, "get_store", commands.get_store)  # ms-127 e-4815: _fire_map_reconcile_trigger calls get_store() directly
+    monkeypatch.setattr(cmd_trigger, "_get_triggers_dir", commands._get_triggers_dir)  # ms-127 e-4971
+    monkeypatch.setattr(cmd_trigger, "get_store", commands.get_store)  # ms-127 e-4971
     commands._auto_fire_map_drift_trigger()
     assert not (tmp_path / "map-drift.json").exists()
 
@@ -339,6 +348,8 @@ def test_map_drift_does_not_fire_for_sales(tmp_path, monkeypatch):
                             releases=_releases("2021-01-01T00:00:00")))
     monkeypatch.setattr(commands_shared, "get_store", commands.get_store)  # ms-127 e-4815: profession gate resolves get_store in commands_shared
     monkeypatch.setattr(cmd_deploy, "get_store", commands.get_store)  # ms-127 e-4815: _fire_map_reconcile_trigger calls get_store() directly
+    monkeypatch.setattr(cmd_trigger, "_get_triggers_dir", commands._get_triggers_dir)  # ms-127 e-4971
+    monkeypatch.setattr(cmd_trigger, "get_store", commands.get_store)  # ms-127 e-4971
     commands._auto_fire_map_drift_trigger()
     assert not (tmp_path / "map-drift.json").exists()
 
@@ -354,6 +365,8 @@ def test_map_drift_sales_gate_clears_stale_trigger(tmp_path, monkeypatch):
                             {"updated_at": "2020-01-01T00:00:00"}, "sales"))
     monkeypatch.setattr(commands_shared, "get_store", commands.get_store)  # ms-127 e-4815: profession gate resolves get_store in commands_shared
     monkeypatch.setattr(cmd_deploy, "get_store", commands.get_store)  # ms-127 e-4815: _fire_map_reconcile_trigger calls get_store() directly
+    monkeypatch.setattr(cmd_trigger, "_get_triggers_dir", commands._get_triggers_dir)  # ms-127 e-4971
+    monkeypatch.setattr(cmd_trigger, "get_store", commands.get_store)  # ms-127 e-4971
     commands._auto_fire_map_drift_trigger()
     assert not stale.exists()
 

@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "lib"))
 
 import commands  # noqa: E402
+import cmd_trigger  # noqa: E402  (monkeypatch target after ms-127 e-4971 split)
 
 
 @pytest.fixture
@@ -68,11 +69,16 @@ def _count_auto_fire_calls(monkeypatch):
             counts[key] += 1
         return _fn
 
-    monkeypatch.setattr(commands, "_auto_fire_retro_trigger", _wrap("retro"))
-    monkeypatch.setattr(commands, "_auto_fire_operation_triggers", _wrap("op"))
-    monkeypatch.setattr(commands, "_auto_fire_release_due_trigger", _wrap("due"))
-    monkeypatch.setattr(commands, "_auto_fire_release_marker_trigger", _wrap("marker"))
-    monkeypatch.setattr(commands, "_cleanup_stale_triggers", _wrap("cleanup"))
+    # ms-127 e-4971: after the trigger family moved to cmd_trigger.py, the
+    # canonical definitions (and monkeypatch targets) are cmd_trigger.*  —
+    # patching commands.* only replaces re-export aliases and does NOT
+    # intercept calls made from within cmd_trigger's own namespace (the
+    # e-4320 monkeypatch-trap rule).
+    monkeypatch.setattr(cmd_trigger, "_auto_fire_retro_trigger", _wrap("retro"))
+    monkeypatch.setattr(cmd_trigger, "_auto_fire_operation_triggers", _wrap("op"))
+    monkeypatch.setattr(cmd_trigger, "_auto_fire_release_due_trigger", _wrap("due"))
+    monkeypatch.setattr(cmd_trigger, "_auto_fire_release_marker_trigger", _wrap("marker"))
+    monkeypatch.setattr(cmd_trigger, "_cleanup_stale_triggers", _wrap("cleanup"))
     return counts
 
 
