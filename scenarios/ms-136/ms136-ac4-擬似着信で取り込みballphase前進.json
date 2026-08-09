@@ -1,0 +1,120 @@
+{
+  "name": "ms136-ac4 擬似着信で取り込み→ball→phase前進",
+  "milestone": "ms-136",
+  "spec_ref": "y2gy76tVfnzKVfFy4elM",
+  "generated": {
+    "by": "scenario-gen (dogfood, claude)",
+    "spec_ac": "AC4"
+  },
+  "seed": {
+    "profession": "sales",
+    "name": "AC4 Dogfood",
+    "objective": "擬似着信の取り込み経路を検証する"
+  },
+  "steps": [
+    {
+      "kind": "persona_cli",
+      "argv": [
+        "opportunity",
+        "add",
+        "Acme Deal"
+      ],
+      "label": "商談を立てる (ペルソナ操作)"
+    },
+    {
+      "kind": "persona_cli",
+      "argv": [
+        "communication",
+        "add",
+        "opp-1",
+        "提案を送付",
+        "--direction",
+        "outbound",
+        "--channel",
+        "email"
+      ],
+      "label": "提案を送る=最後は自分が送信 (ペルソナ操作)"
+    },
+    {
+      "kind": "persona_cli",
+      "argv": [
+        "communication",
+        "list",
+        "opp-1",
+        "--json"
+      ],
+      "label": "送信直後のボールを観測"
+    },
+    {
+      "kind": "assert",
+      "assert": "json_path",
+      "path": "ball",
+      "value": "counterpart",
+      "spec_source": "ms-136 SPEC 設計方針5: 土台は『擬似着信を注入して取り込み→ball が自分に戻る→前進を検証する仕組み』 の含意: 取り込み『前』(=自分が最後に送信した直後)は ball が自分に戻る前=相手側。ms-136 SPEC 受入条件4: 擬似着信を注入すると、取り込み→ball 更新→phase 前進が検証でき、本物の外部送信は一切起きない の取り込み前提状態",
+      "observation_basis": "`communication list <opp> --json` の 'ball' フィールドで観測する。SPEC のユーザー可視概念『ボール(手番)』は derive_ball(最新 communication の向き)で実現される派生値であり、この JSON の 'ball' がそれを露出する。opportunity list の 'who_has_the_ball'(静的初期値, 返信後も更新されない)は同名だが SPEC 概念を実現しないので使わない。"
+    },
+    {
+      "kind": "inbound_stimulus",
+      "target": "opp-1",
+      "summary": "検討を前に進めたい、と先方から返信",
+      "channel": "email",
+      "expect_ingested": true,
+      "label": "擬似着信=顧客が返信 (環境刺激, inward inject)"
+    },
+    {
+      "kind": "persona_cli",
+      "argv": [
+        "communication",
+        "list",
+        "opp-1",
+        "--json"
+      ],
+      "label": "取り込み後のボールを観測"
+    },
+    {
+      "kind": "assert",
+      "assert": "json_path",
+      "path": "ball",
+      "value": "self",
+      "spec_source": "ms-136 SPEC 設計方針5: 土台は『擬似着信を注入して取り込み→ball が自分に戻る→前進を検証する仕組み』(=方向 self を述べる文) + ms-136 SPEC 受入条件4: 擬似着信を注入すると、取り込み→ball 更新→phase 前進が検証でき、本物の外部送信は一切起きない(=『更新+前進』が受入基準)",
+      "observation_basis": "`communication list <opp> --json` の 'ball' フィールドで観測する。SPEC のユーザー可視概念『ボール(手番)』は derive_ball(最新 communication の向き)で実現される派生値であり、この JSON の 'ball' がそれを露出する。opportunity list の 'who_has_the_ball'(静的初期値, 返信後も更新されない)は同名だが SPEC 概念を実現しないので使わない。"
+    },
+    {
+      "kind": "persona_cli",
+      "argv": [
+        "opportunity",
+        "judge",
+        "opp-1",
+        "advance",
+        "2026-09-01"
+      ],
+      "label": "ボールが戻ったのでフェーズを前進 (ペルソナ操作)"
+    },
+    {
+      "kind": "persona_cli",
+      "argv": [
+        "opportunity",
+        "list",
+        "--json"
+      ],
+      "label": "前進後のフェーズを観測"
+    },
+    {
+      "kind": "assert",
+      "assert": "json_path",
+      "path": "0.phase",
+      "value": "提案準備",
+      "spec_source": "ms-136 SPEC 受入条件4: 擬似着信を注入すると、取り込み→ball 更新→phase 前進が検証でき、本物の外部送信は一切起きない の『phase 前進』 + ms-136 SPEC 設計方針5: 土台は『擬似着信を注入して取り込み→ball が自分に戻る→前進を検証する仕組み』 の『→前進』",
+      "observation_basis": "`opportunity list --json` の [0].'phase' で観測する。SPEC の『フェーズ前進』は商談の現フェーズ名の変化として現れ、この field がそれを露出する。"
+    },
+    {
+      "kind": "assert",
+      "assert": "structural_invariant",
+      "invariant": "no_cloud_json",
+      "spec_source": "ms-136 SPEC 受入条件4: 擬似着信を注入すると、取り込み→ball 更新→phase 前進が検証でき、本物の外部送信は一切起きない の『本物の外部送信は一切起きない』 + ms-136 SPEC 設計方針4『外部送信(transmission)は縁の外』",
+      "observation_basis": "structural-invariant(不変条件で検証、CLI field 観測ではない): run 後に workdir/.beacon/cloud.json が存在しない=プロジェクトが local-mode を維持し、cloud/外部への書き込み経路が構造的に存在しなかったことを示す。inward_inject の no-outward-dependency import test と対で『送信ゼロ』を構造保証する(方針4 の out-of-scope 例は『メールが実際に届くか』であって『送信が起きないこと』ではない=後者は検証可能な安全性)。",
+      "label": "外部送信ゼロ=検証可能な安全性 (満たされた assert / 構造不変条件)"
+    }
+  ],
+  "quality_signals": []
+}

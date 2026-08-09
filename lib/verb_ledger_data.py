@@ -353,6 +353,11 @@ VERB_LEDGER = {
     # --- save ---
     "save": {"cls": "R", "secondary": [], "note": ""},
 
+    # --- scenario (ms-136 e-4699: 実ユースケース自動デバッグ基盤の資産操作) ---
+    "scenario_run": {"cls": "Q", "secondary": ["B"], "note": "実ユースケース journey を使い捨て local-mode 環境で実行し CLI 出力を観測(実プロジェクト不変=Q)/実CLIを黒箱で回す検証機構(B)。headless=CI 回帰に使える"},
+    "scenario_save": {"cls": "R", "secondary": [], "note": "生成シナリオを scenarios/<ms>/ に diffable 資産として台帳追記(R)"},
+    "scenario_list": {"cls": "Q", "secondary": [], "note": "保存シナリオの read-only 一覧(Q)"},
+    "scenario_replay": {"cls": "Q", "secondary": ["B"], "note": "保存シナリオを CI 回帰として replay + MS close の attainment evidence 供給(実プロジェクト不変=Q / 実CLI黒箱実行=B)。attainment は verdict でなく evidence"},
     # --- search ---
     "search": {"cls": "Q", "secondary": [], "note": ""},
 

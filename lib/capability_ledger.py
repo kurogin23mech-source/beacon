@@ -284,6 +284,11 @@ _NOUN_SCOPE = {
     "milestone": "L3", "task": "L3", "log": "L3", "save": "L3", "sync": "L3",
     "push": "L3", "deploy": "L3", "pr": "L3", "issue": "L3", "retro": "L3",
     "rollback": "L3", "entry": "L3", "stuck": "L3",
+    # scenario (ms-136 自動デバッグ基盤): 公開配布される dev 一般機能 — dev
+    # ユーザーが自プロジェクトの SPEC を検証する(pr/deploy/retro と同じ dev の
+    # L3)。Beacon 運用側だけの非公開ツール(doctor/migrate=L0)ではない。concrete
+    # 到達可否は L1/L2 を除外するだけで L0/L3 を分けない;分ける軸は『公開配布か』。
+    "scenario": "L3",
     # L3 — profession default (sales). "watch" = the sales reply-watch
     # (sales_entities.set_watch — watch a thread for a reply at a cadence, ms-107);
     # it was mis-scoped L1 by its generic noun (reclassified 2026-08-03, e-4737).
@@ -369,7 +374,7 @@ _L3_NOUN_PROFESSION = {
     "milestone": "dev", "task": "dev", "log": "dev", "save": "dev",
     "sync": "dev", "push": "dev", "deploy": "dev", "pr": "dev",
     "issue": "dev", "retro": "dev", "rollback": "dev", "entry": "dev",
-    "stuck": "dev",
+    "stuck": "dev", "scenario": "dev",  # ms-136 自動デバッグ基盤 (dev L3)
     # sales profession defaults. NOTE: "morning" / "profile" were here until
     # 2026-08-03; they were reclassified L3-sales → L1 in _NOUN_SCOPE (e-4737,
     # they are bus/auth infra not sales) so they are INTENTIONALLY absent — the
@@ -536,6 +541,7 @@ _SKILL_PREFIX_SCOPE = (
 _SKILL_SCOPE = {
     "beacon-archaeology": "L2", "beacon-bus-armed": "L1", "beacon-cloud": "L1",
     "beacon-deploy": "L3", "beacon-dispatch": "L1", "beacon-drift-check": "L0",
+    "beacon-scenario-gen": "L3",  # ms-136: 自動デバッグ基盤の生成器 (dev L3, 公開配布)
     "beacon-incident-report": "L1", "beacon-init": "L1", "beacon-log": "L3",
     "beacon-map": "L2", "beacon-member": "L1", "beacon-note": "L1",
     "beacon-onboard": "L1", "beacon-pr-create": "L3", "beacon-push": "L3",
@@ -572,7 +578,7 @@ def skill_scope_of(skill_name: str) -> str:
 _SKILL_OWNER_PREFIX = (("beacon-sales-", "sales"),)
 _SKILL_OWNER = {
     "beacon-deploy": "dev", "beacon-log": "dev", "beacon-pr-create": "dev",
-    "beacon-push": "dev", "beacon-task": "dev",
+    "beacon-push": "dev", "beacon-task": "dev", "beacon-scenario-gen": "dev",
 }
 
 # L4 skill -> owning PROJECT id (ms-134 e-4739), the skill-side parallel of

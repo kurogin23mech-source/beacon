@@ -9834,6 +9834,145 @@ def cmd_watch_list():
 
 
 # ---------------------------------------------------------------------------
+# ms-136 e-4699 — scenario asset operations (自動デバッグ基盤の実行可能シナリオ)
+# The generation half is the /beacon-scenario-gen Skill (Claude reads a SPEC);
+# these deterministic verbs run / save / list the resulting diffable assets.
+# `scenario_run` is headless-invokable so CI (e-4702) can drive it without the
+# interactive Skill.
+# ---------------------------------------------------------------------------
+
+def cmd_scenario_run():
+    import scenario_store
+    import scenario_runner
+    import scenario_bisect
+    path = os.environ.get("BEACON_SCENARIO_PATH", "")
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+    if not path:
+        print("Error: scenario file path required (beacon scenario run <file>)",
+              file=sys.stderr)
+        sys.exit(2)
+    try:
+        scenario = scenario_store.load_scenario(path)
+        report = scenario_runner.run_scenario(scenario)
+    except (scenario_store.ScenarioError, FileNotFoundError, OSError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+    # On failure, auto-append the dataflow-layer bisect (e-4700): turn the
+    # failure into a one-shot layer localization instead of a手探り.
+    diag = (scenario_bisect.diagnose_failure(scenario, report)
+            if not report["passed"] else None)
+    if as_json:
+        out = dict(report)
+        if diag:
+            out["diagnosis"] = diag
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        mark = "PASS" if report["passed"] else "FAIL"
+        print(f"[{mark}] {report['name']} ({report['spec_ref']}) — "
+              f"{len(report['steps'])} steps")
+        if not report["passed"] and report["failure"]:
+            f = report["failure"]
+            print(f"  x step {f['index']} ({f['kind']}): {f['reason']}")
+            if f.get("spec_source"):
+                print(f"    spec_source: {f['spec_source']}")
+            if f.get("observation_basis"):
+                print(f"    observation_basis: {f['observation_basis']}")
+        if diag and diag.get("diagnosable"):
+            print(f"  → 障害層 bisect (e-4700): {diag['summary']}")
+            if diag.get("why"):
+                print(f"    根拠: {diag['why']}")
+            # recovery hint (AX review finding #4): tell the agent what to do next.
+            print(f"    → 次の一手: 上記の層を修正し `beacon scenario run {path}` "
+                  "で再実行 (層が L_cli なら persona 操作の CLI 面、L_engine なら "
+                  "commands.py、L_store なら永続を確認)")
+    # exit nonzero on a failed journey so CI (e-4702) can gate on it.
+    sys.exit(0 if report["passed"] else 1)
+
+
+def cmd_scenario_save():
+    import scenario_store
+    src = os.environ.get("BEACON_SCENARIO_PATH", "")
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+    if not src:
+        print("Error: input scenario JSON path required "
+              "(beacon scenario save <file.json>)", file=sys.stderr)
+        sys.exit(2)
+    try:
+        with open(src, "r", encoding="utf-8") as f:
+            scenario = json.load(f)
+        dest = scenario_store.save_scenario(scenario)
+    except (scenario_store.ScenarioError, FileNotFoundError,
+            json.JSONDecodeError, OSError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(2)
+    if as_json:
+        print(json.dumps({"saved": str(dest)}, ensure_ascii=False))
+    else:
+        print(f"Saved scenario -> {dest}")
+
+
+def cmd_scenario_list():
+    import scenario_store
+    ms = os.environ.get("BEACON_SCENARIO_MS", "") or None
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+    rows = scenario_store.list_scenarios(milestone=ms)
+    if as_json:
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+    if not rows:
+        print("No saved scenarios." if not ms else f"No scenarios for {ms}.")
+        return
+    for r in rows:
+        print(f"  [{r['milestone']}] {r['name']} - {r['step_count']} steps, "
+              f"{r['quality_signal_count']} quality-signal(s)  ({r['spec_ref']})")
+
+
+def cmd_scenario_replay():
+    # ms-136 e-4702 — dual use: CI regression (default) + attainment evidence
+    # (--attainment). Default blocks on any failure (exit 1) and labels each as
+    # infra (harness/net broke) vs product (real regression). --attainment emits
+    # journey-pass EVIDENCE (not a verdict, no gating) for the MS's review.
+    import scenario_regression
+    ms = os.environ.get("BEACON_SCENARIO_MS", "") or None
+    as_json = os.environ.get("BEACON_JSON", "") == "1"
+    attainment = os.environ.get("BEACON_SCENARIO_ATTAINMENT", "") == "1"
+
+    if attainment:
+        if not ms:
+            print("Error: --attainment requires --ms <ms-id>", file=sys.stderr)
+            sys.exit(2)
+        ev = scenario_regression.attainment_evidence(ms)
+        if as_json:
+            print(json.dumps(ev, ensure_ascii=False))
+        else:
+            print(f"journey-pass evidence for {ms} "
+                  f"({'all green' if ev['all_journeys_green'] else 'some red'}, "
+                  f"{ev['journey_count']} journeys):")
+            for j in ev["journeys"]:
+                mark = "✓" if j["passed"] else "✗"
+                extra = "" if j["passed"] else f" [{j['origin']}/{j.get('responsible_layer') or '?'}]"
+                print(f"  {mark} {j['name']} ({j['spec_ref']}){extra}")
+            print(f"  ⚠ {ev['label']}")
+        return  # evidence, not a gate — never exit-1 blocks the reviewer
+
+    run = scenario_regression.run_saved_scenarios(milestone=ms)
+    if as_json:
+        print(json.dumps(run, ensure_ascii=False))
+    else:
+        total = len(run["results"])
+        print(f"scenario regression: {total} scenario(s), "
+              f"{'ALL GREEN' if run['all_passed'] else 'FAILURES'}")
+        for r in run["product_regressions"]:
+            print(f"  ✗ [product regression] {r['name']} — "
+                  f"層 {r.get('responsible_layer') or '?'}: {r['reason']}")
+        for r in run["infra_failures"]:
+            print(f"  ⚠ [infra failure — net flaky/broken, not a product regression] "
+                  f"{r['name']} — {r['reason']}")
+    # CI block on ANY failure; the labels above tell infra vs product apart.
+    sys.exit(0 if run["all_passed"] else 1)
+
+
+# ---------------------------------------------------------------------------
 # Main dispatch
 # ---------------------------------------------------------------------------
 
@@ -9842,6 +9981,10 @@ if __name__ == "__main__":
     _install_wall_clock_timeout(cmd)
     commands = {
         "init": cmd_init,
+        "scenario_run": cmd_scenario_run,
+        "scenario_save": cmd_scenario_save,
+        "scenario_list": cmd_scenario_list,
+        "scenario_replay": cmd_scenario_replay,
         "milestone_add": cmd_milestone_add,
         "milestone_list": cmd_milestone_list,
         "milestone_start": cmd_milestone_start,

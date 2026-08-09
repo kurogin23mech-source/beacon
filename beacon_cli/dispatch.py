@@ -1025,6 +1025,17 @@ def build_parser() -> argparse.ArgumentParser:
                         action="store_true")
     p_note.add_argument("--help", "-h", action="store_true", dest="show_help")
 
+    # ---- scenario (ms-136 e-4699: 実ユースケース自動デバッグ基盤の資産操作) ----
+    p_scenario = sub.add_parser("scenario",
+                                help="Scenario asset operations (run/save/list)",
+                                add_help=False)
+    p_scenario.add_argument("scenario_cmd", nargs="?", default="")  # run|save|list|replay
+    p_scenario.add_argument("path", nargs="?", default="")
+    p_scenario.add_argument("-m", "--ms", dest="ms", default="")  # -m: repo-wide milestone convention (AX #3)
+    p_scenario.add_argument("--attainment", action="store_true")
+    p_scenario.add_argument("--json", action="store_true")
+    p_scenario.add_argument("--help", "-h", action="store_true", dest="show_help")
+
     # ---- trigger ----
     p_trigger = sub.add_parser("trigger", help="Trigger queue operations", add_help=False)
     p_trigger.add_argument("--help", "-h", action="store_true", dest="show_help")
@@ -3456,6 +3467,58 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "note_add", env)
 
 
+# ---- scenario handlers (ms-136 e-4699) ----
+
+_SCENARIO_USAGE = (
+    "Usage: beacon scenario run <scenario.json> [--json]\n"
+    "       beacon scenario save <scenario.json> [--json]   # input must be JSON\n"
+    "       beacon scenario list [--ms <ms-id>] [--json]\n"
+    "       beacon scenario replay [--ms <ms-id>] [--attainment] [--json]\n"
+    "         (default: CI regression, exit 1 on failure; --attainment: evidence only, exit 0)"
+)
+
+
+def _handle_scenario(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help:
+        print(_SCENARIO_USAGE)
+        return 0
+    if (rc := _ensure_project()) is not None:
+        return rc
+    subc = args.scenario_cmd
+    json_flag = "1" if args.json else ""
+    if subc == "run":
+        if not args.path:
+            print(_SCENARIO_USAGE)
+            return 2
+        return _run_commands_py(root, "scenario_run",
+                                {"BEACON_SCENARIO_PATH": args.path,
+                                 "BEACON_JSON": json_flag})
+    if subc == "save":
+        if not args.path:
+            print(_SCENARIO_USAGE)
+            return 2
+        return _run_commands_py(root, "scenario_save",
+                                {"BEACON_SCENARIO_PATH": args.path,
+                                 "BEACON_JSON": json_flag})
+    if subc in ("list", "ls"):  # 'ls' alias matches bin/beacon (cross-frontend parity)
+        return _run_commands_py(root, "scenario_list",
+                                {"BEACON_SCENARIO_MS": args.ms or "",
+                                 "BEACON_JSON": json_flag})
+    if subc == "replay":
+        return _run_commands_py(root, "scenario_replay",
+                                {"BEACON_SCENARIO_MS": args.ms or "",
+                                 "BEACON_SCENARIO_ATTAINMENT":
+                                     "1" if getattr(args, "attainment", False) else "",
+                                 "BEACON_JSON": json_flag})
+    # Name the bad verb so a mistyped subcommand is distinguishable from a
+    # missing one (AX review finding #1).
+    if subc:
+        print(f"Error: unknown scenario subcommand: '{subc}' "
+              "(expected run|save|list|replay)")
+    print(_SCENARIO_USAGE)
+    return 1
+
+
 # ---- trigger handlers ----
 
 
@@ -5470,6 +5533,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "opp": _handle_opportunity,
     "communication": _handle_communication,
     "comm": _handle_communication,
+    "scenario": _handle_scenario,  # ms-136 e-4699: 自動デバッグ基盤の資産操作
     "meeting": _handle_meeting,
     "mtg": _handle_meeting,
     "sales": _handle_sales,
