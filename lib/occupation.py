@@ -620,6 +620,193 @@ def target_child_tables(data: dict | None = None) -> tuple:
     return tuple(seen)
 
 
+# ---------------------------------------------------------------------------
+# Instantiation manifest — the single read-path for "what slots a profession
+# fills" (ms-142 e-5008 / SPEC BcQ0OUTjOrwTnUltRqmb 設計方針 1).
+#
+# The six registries above already gather a profession's slots (projection /
+# owned classes / collections / decomposition / narrowing), but ONE thing was
+# nowhere declared: for each Target collection, WHICH nested arm holds planned
+# *work items* vs *evidence*, and HOW a work item is identified inside a shared
+# arm. ``TARGET_DECOMPOSITION`` lists a collection's arms but treats them all
+# alike — it cannot tell that a development ``entries`` arm mixes tasks (work
+# items) and commits (evidence) discriminated by ``type``, while a sales
+# ``activities`` arm is ALL work items and ``communications`` is a separate
+# evidence arm. That missing classification is exactly what an occupation-
+# agnostic work-item walk (deadline enumeration, the e-5009 iterator) needs.
+#
+# ``profession_manifest`` is that single read-path. It is COMPOSED from the
+# existing registries (which stay the source of truth — nothing here overrides
+# them) PLUS the ``_ARM_ROLES`` seed below, and it carries ms-122 descriptor
+# collections for free. It is a non-breaking VIEW, not a physical merge: adding
+# it changes no existing caller (AC1 = "引ける／集約" — a read-path, not a
+# rewrite of the six well-tested registries).
+#
+# CRITICAL (ms-142 の芯 / leader 承認条件 1): the arm classification is
+# DECLARATIVE DATA (``_ARM_ROLES`` / ``_ARM_PHASE_BALL`` keyed by collection),
+# never an ``if profession == …`` branch. ms-142's whole promise is "declare a
+# new occupation's manifest and every arm-walking L2 capability lights up with
+# ZERO wiring" (e-5014). A classification that leaked into code branches would
+# break "declare ⇒ light up" — the same class of hole ms-133's independent
+# review caught (high#: 記述子駆動でなく Skill md に if 分岐が漏れる). A data-
+# defined occupation's arms come from its descriptor (``_DEFAULT_ARMS`` =
+# work_items / evidence), so it, too, lights up without editing this file.
+#
+# CONTRACT (leader 承認条件 2): ``profession_manifest`` is the canonical CONSUME
+# contract. When e-5013 migrates the ``KNOWN_COLLECTION_COUPLING`` debt into the
+# coverage matrix, "consult profession_manifest instead of reading
+# data['milestones']" is the fix it points each capability to. Enforcement lands
+# later (e-5012 matrix / e-5013 migration); the shape is fixed HERE so the
+# downstream forcing function loads cleanly onto it.
+# ---------------------------------------------------------------------------
+
+# Per-collection arm classification. Keyed by collection name (parallel to
+# TARGET_DECOMPOSITION) so the two read together. ``work_item_arm`` names the arm
+# holding planned work + how a work item is identified inside it; ``item_type``
+# is ``None`` when every item in the arm is a work item (sales activities), or an
+# entry ``type`` string when the arm is shared (dev ``entries`` hold tasks AND
+# commits → work items are ``type == "task"``). ``evidence_arms`` names where
+# proof/changelog records live (dev commits ride the SAME entries arm; sales
+# evidence is its own communications arm).
+_ARM_ROLES = {
+    "milestones": {
+        "work_item_arm": {"arm": "entries", "item_type": "task"},
+        "evidence_arms": [{"arm": "entries", "item_type": "commit"}],
+    },
+    "opportunities": {
+        "work_item_arm": {"arm": "activities", "item_type": None},
+        "evidence_arms": [{"arm": "communications", "item_type": None}],
+    },
+    "accounts": {
+        "work_item_arm": {"arm": "nurturings", "item_type": None},
+        "evidence_arms": [{"arm": "communications", "item_type": None}],
+    },
+    # acquisitions carry no fat arms (inline work items, no child changelog) so
+    # they declare no work-item / evidence arm — an honest empty classification.
+    "acquisitions": {
+        "work_item_arm": None,
+        "evidence_arms": [],
+    },
+}
+
+# The exclusive phase + who-has-the-ball model per collection (SPEC 方針 1 lists
+# "phase・ball" among the slots). Sales Targets advance through a phase funnel and
+# carry the ball; development milestones do not (their progress is task ratios /
+# evidence), so dev's phase_ball is ``None`` — a declared absence, not a gap.
+_ARM_PHASE_BALL = {
+    "milestones": None,
+    "opportunities": {"phase_field": "phase", "ball_field": "who_has_the_ball"},
+    "accounts": {"phase_field": "phase", "ball_field": None},
+    "acquisitions": None,
+}
+
+# collection -> target-class kind for the built-in occupations. Bridges the
+# collection-keyed registries (TARGET_DECOMPOSITION / _ARM_ROLES) to the kind-
+# keyed ones (NARROWING_ID_PREFIXES). Descriptor collections resolve their kind
+# from the descriptor itself, so this only needs the built-ins.
+_COLLECTION_KIND = {
+    "milestones": "milestone",
+    "opportunities": "opportunity",
+    "accounts": "account",
+    "acquisitions": "acquisition",
+}
+
+
+def _collection_kind(data: dict | None, collection: str) -> str:
+    """Return the target-class ``kind`` for a collection: the built-in map, else
+    a descriptor whose ``collection`` matches (ms-122), else ``""``."""
+    kind = _COLLECTION_KIND.get(collection, "")
+    if kind:
+        return kind
+    if data:
+        for desc in _td.load_descriptors(data):
+            if isinstance(desc, dict) \
+                    and (desc.get("collection") or "").strip() == collection:
+                return (desc.get("kind") or "").strip()
+    return ""
+
+
+def _arm_roles_for(data: dict | None, collection: str, arms: tuple) -> dict:
+    """Return ``{work_item_arm, evidence_arms}`` for a collection. Built-in
+    collections use the ``_ARM_ROLES`` seed. A descriptor-defined collection has
+    no seed entry, so its roles are derived from its declared arms following the
+    thick-frame convention (``_DEFAULT_ARMS`` = work_items / evidence): the
+    ``work_items`` arm is the work-item arm and ``evidence`` is an evidence arm,
+    each with ``item_type=None`` (every item in the arm plays that role). This is
+    what lets a NEW occupation light up arm-walking capabilities by DECLARING its
+    manifest, with no edit here (ms-142 の芯)."""
+    seed = _ARM_ROLES.get(collection)
+    if seed is not None:
+        return {
+            "work_item_arm": dict(seed["work_item_arm"])
+            if seed["work_item_arm"] else None,
+            "evidence_arms": [dict(a) for a in seed["evidence_arms"]],
+        }
+    work_item_arm = {"arm": "work_items", "item_type": None} \
+        if "work_items" in arms else None
+    evidence_arms = [{"arm": "evidence", "item_type": None}] \
+        if "evidence" in arms else []
+    return {"work_item_arm": work_item_arm, "evidence_arms": evidence_arms}
+
+
+def profession_manifest(data: dict, profession: str | None = None) -> dict:
+    """Return the project's instantiation manifest — the SINGLE read-path for a
+    profession's Target-class slots as declarative data (ms-142 e-5008).
+
+    Shape::
+
+        {
+          "profession": "dev",
+          "target_classes": [
+            {
+              "kind": "milestone",
+              "collection": "milestones",
+              "id_field": "id",
+              "id_prefix": "ms-",
+              "narrowing": True,          # sliceable in a Trek scope
+              "arms": ("entries",),       # all fat arms (from decomposition)
+              "work_item_arm": {"arm": "entries", "item_type": "task"},
+              "evidence_arms": [{"arm": "entries", "item_type": "commit"}],
+              "phase_ball": None,
+            },
+            ...
+          ],
+        }
+
+    Composed from the existing registries (``target_collections`` /
+    ``target_decomposition`` / ``narrowing_id_prefixes`` / ``all_narrowing_kinds``
+    — all untouched source of truth) plus the ``_ARM_ROLES`` / ``_ARM_PHASE_BALL``
+    classification seed, and it carries ms-122 descriptor collections for free.
+    Both a dev project and a sales project resolve to the SAME shape (a list of
+    identically-keyed dicts) — the occupation-agnostic contract that arm-walking
+    L2 capabilities (deadline enumeration, the e-5009 work-item iterator) consume
+    instead of reading concrete collections directly. ``profession`` defaults to
+    the project's own; pass it only to override for tests."""
+    prof = (profession or resolve_profession(data)) if data is not None \
+        else DEFAULT_PROFESSION
+    decomposition = target_decomposition(data)
+    narrowing = set(all_narrowing_kinds(data))
+    prefixes = narrowing_id_prefixes(data)
+    target_classes = []
+    for collection in target_collections(data):
+        spec = decomposition.get(collection, {"id_field": "id", "arms": ()})
+        arms = tuple(spec.get("arms") or ())
+        kind = _collection_kind(data, collection)
+        roles = _arm_roles_for(data, collection, arms)
+        target_classes.append({
+            "kind": kind,
+            "collection": collection,
+            "id_field": spec.get("id_field", "id"),
+            "id_prefix": prefixes.get(kind, ""),
+            "narrowing": kind in narrowing,
+            "arms": arms,
+            "work_item_arm": roles["work_item_arm"],
+            "evidence_arms": roles["evidence_arms"],
+            "phase_ball": _ARM_PHASE_BALL.get(collection),
+        })
+    return {"profession": prof, "target_classes": target_classes}
+
+
 # Trek scope narrowing vocabulary (ms-109 e-3699 / fable review B-2).
 #
 # A Trek scope entry narrows to a single target inside a project. Which target
