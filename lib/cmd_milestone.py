@@ -151,11 +151,18 @@ def _is_bulk_milestone_add(data: dict, current_ms_id: str) -> bool:
     import datetime as _dt
     try:
         now = _dt.datetime.now(_dt.timezone.utc)
-        milestones = data.get("milestones", [])
-        # Compare against the second-most-recent MS (the most recent is the
+        # ms-143: read Target records through the manifest-driven iterator rather
+        # than naming data['milestones'] directly, so this helper (part of the
+        # milestone_add verb's reach) is concrete-free. iter_target_records
+        # preserves per-collection append order; in a development project (this
+        # helper's only caller) the milestones collection is the whole set, so the
+        # "most recent prior record" semantics are unchanged.
+        import occupation
+        records = occupation.iter_target_records(data)
+        # Compare against the second-most-recent record (the most recent is the
         # one we just added).
         prior = None
-        for ms in reversed(milestones):
+        for ms in reversed(records):
             if ms.get("id") == current_ms_id:
                 continue
             prior = ms
