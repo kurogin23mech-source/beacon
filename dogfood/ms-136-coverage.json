@@ -1,0 +1,63 @@
+{
+  "milestone": "ms-136",
+  "spec_ref": "y2gy76tVfnzKVfFy4elM",
+  "note": "ms-136 e-4703 dogfood 一巡: 自動デバッグ基盤を自身の SPEC に当て、各受入条件が『どう検証されているか』を3分類(scenario / verified-by-test / quality-signal)で正直に写す。verified-by-test は基盤メタ能力=専用 test で検証済(quality_signal ではない, leader 裁定)。",
+  "acs": [
+    {
+      "ac": "AC1",
+      "text": "SPEC の AC/目的から (a)ペルソナ×ゴールの journey (b)実 CLI 操作列 (c)SPEC の一文に紐づく観測アサーション を生成し、保存された成果物として出力できる",
+      "disposition": "verified-by-test",
+      "evidence": "tests/test_scenario_store.py (生成物の検証+保存) + 生成器 /beacon-scenario-gen + 本 dogfood 成果物 scenarios/ms-136/ が生成→保存の実物",
+      "why": "生成器は基盤メタ能力。生成物の契約(両軸 provenance / 保存)は store test が検証、実際の生成物は AC4 scenario が存在証拠。"
+    },
+    {
+      "ac": "AC2",
+      "text": "生成シナリオが使い捨て local-mode 環境で実 CLI を回し、CLI/API 観測で pass/fail を判定できる(外向き効果を一切発火しない)",
+      "disposition": "scenario",
+      "evidence": "scenarios/ms-136/ms136-ac4-*.json (local-mode 実CLI journey、外向きゼロを structural_invariant で担保)",
+      "why": "AC4 の journey がまさに local-mode 実CLI run + CLI 観測 assert + 送信ゼロ。regression で green 維持。"
+    },
+    {
+      "ac": "AC3",
+      "text": "cloud 固有と判定された journey が cloud-ephemeral 環境(立て→実行→teardown)で回る",
+      "disposition": "verified-by-test",
+      "evidence": "tests/test_scenario_cloud.py (disposable_project による create→teardown、prod refuse、on-exception teardown を mock で pin)。実 cloud live 実行は user 検証(leader 裁定の検証境界)",
+      "why": "cloud-ephemeral は基盤能力。dev では live cloud を叩かない境界のため mock test で検証、live は user。"
+    },
+    {
+      "ac": "AC4",
+      "text": "擬似着信を注入すると、取り込み→ball 更新→phase 前進が検証でき、本物の外部送信は一切起きない",
+      "disposition": "scenario",
+      "evidence": "scenarios/ms-136/ms136-ac4-*.json (擬似着信 inject→communication list --json の ball が self→opportunity judge advance→phase 前進、送信ゼロは structural_invariant no_cloud_json)",
+      "why": "SPEC 由来 journey として完全に scenario 化、実CLIで green replay。"
+    },
+    {
+      "ac": "AC5",
+      "text": "シナリオが落ちたとき、CLI→engine→store→API のどの層で期待と分岐したかが機械出力される(6段手探りが1回の層特定になる)",
+      "disposition": "verified-by-test",
+      "evidence": "tests/test_scenario_bisect.py (意図バグ=必須 priority 欠落→ L_cli を1発特定する e2e、who_has_the_ball 級 ingest→L_engine 局所化)",
+      "why": "層 bisect は基盤能力。方針8 達成基準(6段→1発)を deliberate-bug e2e で pin。"
+    },
+    {
+      "ac": "AC6",
+      "text": "保存シナリオが CI で回帰テストとして走り、かつ MS close 時に attainment 判定として再利用できる",
+      "disposition": "verified-by-test",
+      "evidence": "tests/test_scenario_regression.py (全 scenarios/ の green replay を CI gate 化、infra vs product 分類、attainment は非verdict evidence)",
+      "why": "CI両用は基盤能力。回帰 gate と attainment evidence の契約を test で検証。"
+    },
+    {
+      "ac": "AC7",
+      "text": "オラクルが SPEC 由来であること(各アサーションに出典 SPEC 一文)がシナリオ成果物に残り、レビュー可能",
+      "disposition": "scenario",
+      "evidence": "scenarios/ms-136/ms136-ac4-*.json の各 assert に spec_source(期待値の SPEC 一文)+ observation_basis(観測 field と SPEC 概念対応)。diff でレビュー可能",
+      "why": "provenance 両軸が保存成果物に diff 可能な形で残る=AC7 そのもの。store/runner が両軸欠落を拒否(test 済)。"
+    },
+    {
+      "ac": "AC8",
+      "text": "dogfood: 本 SPEC(ms-136)自身が、この仕組みの最初の検証対象になる(SPEC→シナリオの入れ子)",
+      "disposition": "verified-by-test",
+      "evidence": "dogfood/ms-136-coverage.json (本成果物) + tests/test_dogfood_coverage.py (3分類の完全性・evidence 実在を pin)",
+      "why": "この coverage 一巡自体が AC8。全 AC を3分類で写し、evidence の実在を test が強制=正直な dogfood。"
+    }
+  ]
+}
