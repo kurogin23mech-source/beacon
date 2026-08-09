@@ -116,6 +116,20 @@ def test_dead_recipient_soft_warns(capsys):
     assert "BEACON_BUS_NO_LIVE_CHECK" in err
 
 
+def test_dead_recipient_advise_sink_keeps_stderr_clean(capsys):
+    """ms-140: when the caller passes an ``advise`` sink (the --json path), the
+    soft-warn must go INTO the sink and NOT to stderr. Otherwise the warning
+    merges ahead of the JSON result on a combined stdout+stderr stream and the
+    caller re-sends → duplicate DM."""
+    sys.modules["beacon_cli.skills_helpers.dm_discover"] = _stub_discover([
+        {"session_id": LIVE_SID, "project_id": "beacon-b95643"},
+    ])
+    collected: list[str] = []
+    commands._resolve_recipient_live(DEAD_SID, "dm", advise=collected.append)
+    assert capsys.readouterr().err == ""  # merge-safe: nothing on stderr
+    assert any("not in the live+healthy directory" in m for m in collected)
+
+
 def test_dead_recipient_does_not_exit(capsys):
     """Even on the dead-sid path the function must return normally so the
     send can still proceed (soft-warn vs hard-refuse design decision)."""

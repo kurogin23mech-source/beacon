@@ -1391,7 +1391,7 @@ def _resolve_recipient_email_via_self_sessions(recipient: str) -> str:
 
 
 def _resolve_recipient_live(
-    recipient: str, channel: str
+    recipient: str, channel: str, advise=None,
 ) -> Tuple[str, Optional[str]]:
     """Liveness gate + soft auto-swap for stale session_id reuse.
 
@@ -1427,6 +1427,15 @@ def _resolve_recipient_live(
         AND no swap candidate. Opt-in strictness for CI pipelines that
         treat dead-sid sends as a bug rather than a soft hint.
     """
+    # ms-140: the stale-swap / not-live warnings below are non-fatal (the send
+    # proceeds), so in --json mode they must be routable into the caller's
+    # advisory sink (folded into the result "notes") instead of stderr — a note
+    # on stderr merges ahead of the JSON on stdout (the Bash tool combines the
+    # streams), corrupts the caller's parse, and drives a duplicate resend. The
+    # hard-refuse path (BEACON_BUS_REFUSE_STALE) keeps printing to stderr since
+    # it sys.exit's and never yields a success JSON.
+    _notice = advise if advise is not None else (
+        lambda m: print(m, file=sys.stderr))
     if channel != "dm" or not recipient:
         return (recipient, None, "")
     if os.environ.get("BEACON_BUS_NO_LIVE_CHECK", "") == "1":
@@ -1488,7 +1497,7 @@ def _resolve_recipient_live(
             f"recipient {recipient[:24]}… is stale; auto-swapped to "
             f"{new_sid[:24]}… (owner={ident_hint}, single live match)"
         )
-        print(f"⇄ {notice}", file=sys.stderr)
+        _notice(f"⇄ {notice}")
         swap_email = str(actor.get("email") or "")
         if not swap_email:
             # e-3880: swap target's row can also lack a stamped email; resolve
@@ -1510,13 +1519,12 @@ def _resolve_recipient_live(
         )
         sys.exit(1)
 
-    print(
+    _notice(
         f"⚠ recipient session {recipient[:24]}… is not in the live+healthy "
         f"directory. The send will proceed, but the target may be dead or "
         f"unreachable. Consider `/beacon-dm-send` Skill which re-discovers "
         f"on every send. (Set BEACON_BUS_NO_LIVE_CHECK=1 to suppress, "
-        f"BEACON_BUS_REFUSE_STALE=1 to hard-refuse instead.)",
-        file=sys.stderr,
+        f"BEACON_BUS_REFUSE_STALE=1 to hard-refuse instead.)"
     )
     # e-3880: the recipient may be a same-user session that simply isn't in the
     # live+healthy set right now (just stopped, poll stale). Still resolve the

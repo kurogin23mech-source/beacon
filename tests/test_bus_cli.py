@@ -268,6 +268,44 @@ def test_bus_send_dm_reply_without_context_does_not_warn(monkeypatch, capsys,
 
 
 # ---------------------------------------------------------------------------
+# ms-140: --json output purity. A new DM send without --context fires the
+# 背景なし advisory. In --json mode that advisory must NOT leak to stderr —
+# otherwise a caller reading a merged stdout+stderr stream (the Bash tool) sees
+# `Note: ...\n{json}`, fails to parse the send result, and re-runs the command
+# without --client-event-id/--retry → the server registers a duplicate DM (the
+# 2026-08-09 誤送信 incident). stdout must be exactly one parseable object; the
+# note rides inside it under "notes".
+# ---------------------------------------------------------------------------
+
+def test_bus_send_json_stdout_pure_despite_advisory(monkeypatch, capsys, stub):
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    monkeypatch.setenv("BEACON_JSON", "1")
+    cmd_bus.cmd_bus_send()
+    captured = capsys.readouterr()
+    # stdout is a single JSON object with no advisory prefix that would break
+    # a caller's json.loads (the double-send trigger).
+    parsed = json.loads(captured.out.strip())
+    assert parsed["channel"] == "dm"
+    # the advisory is preserved *inside* the JSON, not leaked to stderr.
+    assert any("--context" in n for n in parsed.get("notes", []))
+    assert "--context" not in captured.err
+
+
+def test_bus_send_non_json_keeps_stderr_advisory(monkeypatch, capsys, stub):
+    """Human (non-json) mode is unchanged: the nudge still prints to stderr and
+    no JSON `notes` object is emitted on stdout."""
+    _clear_bus_env(monkeypatch)
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
+    monkeypatch.setenv("BEACON_BUS_RECIPIENT_SESSION", "target")
+    cmd_bus.cmd_bus_send()
+    captured = capsys.readouterr()
+    assert "--context" in captured.err
+    assert "notes" not in captured.out
+
+
+# ---------------------------------------------------------------------------
 # --to (e-1209): the sender CLI must stamp payload.recipient_session_id so
 # the server-side filter can route the event to a single recipient. Before
 # this, dm events fanned out to every dm-subscribed session because nothing
@@ -1062,9 +1100,16 @@ def test_bus_send_retry_without_client_event_id_exits_2(monkeypatch, capsys, stu
 
 
 def test_bus_send_note_nudge_goes_to_stderr_not_stdout(monkeypatch, capsys, stub):
-    """stdout purity (e-4289 part 1): the decision-event "Note:" nudge on a
-    context-less DM must go to stderr, so a --json caller parses pure JSON on
-    stdout (the leak that caused the dogfood false-failure resend)."""
+    """stdout purity — ms-140 supersedes e-4289 "part 1".
+
+    e-4289 routed the context-less-DM "Note:" nudge to STDERR and asserted it
+    stayed there. That was insufficient: the Bash tool (the actual --json
+    consumer) MERGES stdout+stderr, so a note on stderr still lands *before* the
+    JSON in the caller's view, breaks the parse, and drives a duplicate resend
+    (the 2026-08-09 誤送信 incident). ms-140 makes --json mode merge-safe: the
+    advisory is folded INTO the result JSON under "notes" and nothing is written
+    to stderr on the success path. So stdout round-trips as a single object AND a
+    merged stream is still exactly that object."""
     _clear_bus_env(monkeypatch)
     monkeypatch.setenv("BEACON_BUS_CHANNEL", "dm")
     monkeypatch.setenv("BEACON_BUS_SENDER", "sv-me")
@@ -1072,9 +1117,11 @@ def test_bus_send_note_nudge_goes_to_stderr_not_stdout(monkeypatch, capsys, stub
     monkeypatch.setenv("BEACON_JSON", "1")
     cmd_bus.cmd_bus_send()
     captured = capsys.readouterr()
-    # stdout must be pure JSON (round-trips), no "Note:" leakage.
+    # stdout round-trips as a single pure JSON object.
     parsed = json.loads(captured.out.strip())
     assert parsed["channel"] == "dm"
-    assert "Note:" not in captured.out
-    # The nudge is still emitted — on stderr.
-    assert "--context" in captured.err
+    # merge-safe: nothing on stderr on the success path, so stdout+stderr merged
+    # is still exactly the parseable object (the real double-send guarantee).
+    assert captured.err.strip() == ""
+    # the nudge is preserved for humans — inside the JSON, not on a side stream.
+    assert any("--context" in n for n in parsed.get("notes", []))
