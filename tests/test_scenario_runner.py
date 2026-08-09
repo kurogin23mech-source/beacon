@@ -156,6 +156,39 @@ def test_unknown_step_kind_raises(tmp_path):
         sr.run_scenario(scenario, workdir=str(tmp_path))
 
 
+def test_structural_invariant_no_cloud_json_passes(tmp_path):
+    # leader tightening 2: "no outbound" is a satisfied assert whose observation
+    # is a structural invariant (project stayed local), not a CLI field.
+    scenario = {
+        "seed": {"profession": "sales", "name": "S", "objective": "o"},
+        "steps": [
+            {"kind": "persona_cli", "argv": ["opportunity", "add", "D"]},
+            {"kind": "assert", "assert": "structural_invariant",
+             "invariant": "no_cloud_json",
+             "spec_source": "AC4: 本物の外部送信は一切起きない",
+             "observation_basis": "structural-invariant: cloud.json 不在=local維持"},
+        ],
+    }
+    report = sr.run_scenario(scenario, workdir=str(tmp_path))
+    assert report["passed"] is True, report["failure"]
+    inv_step = report["steps"][-1]
+    assert inv_step["assert"] == "structural_invariant"
+    assert inv_step["ok"] is True
+
+
+def test_unknown_structural_invariant_raises(tmp_path):
+    scenario = {
+        "seed": {"profession": "sales", "name": "S", "objective": "o"},
+        "steps": [
+            {"kind": "assert", "assert": "structural_invariant",
+             "invariant": "no_such_invariant",
+             "spec_source": "x", "observation_basis": "y"},
+        ],
+    }
+    with pytest.raises(sr.ScenarioError):
+        sr.run_scenario(scenario, workdir=str(tmp_path))
+
+
 def test_dev_seed_journey_runs(tmp_path):
     # profession-agnostic: a dev project seeds and a persona op runs black-box.
     scenario = {

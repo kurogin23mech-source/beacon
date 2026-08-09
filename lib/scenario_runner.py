@@ -83,6 +83,27 @@ QS_NEEDS_REWRITE = "needs-observable-rewrite"   # SPEC 品質欠陥: 観測可�
 QS_OUT_OF_SCOPE = "out-of-scope-boundary"       # 方針4 で正しく除外 (欠陥ではない)
 VALID_QS_REASONS = {QS_NEEDS_REWRITE, QS_OUT_OF_SCOPE}
 
+# Structural invariants (ms-136 e-4699 / leader 検分 tightening 2): a claim like
+# "no outbound send happens" is a *verifiable safety assertion* we verify by
+# structure (the project stays local — no cloud.json — so no outward path
+# exists), NOT a CLI-field observation and NOT a quality_signal (方針4's
+# out-of-scope example is "does the mail actually arrive", not "no send fires" —
+# the latter is the safety we structurally guarantee). Each invariant is a
+# checker over the run's workdir, so "no outbound" is recorded as a satisfied
+# assert whose observation mechanism is "structural-invariant".
+
+
+def _inv_no_cloud_json(workdir: Path) -> bool:
+    """The throwaway project never gained a cloud.json → it stayed local-mode
+    the whole journey, so the CLI reached no cloud store and no outward
+    transmission path ever existed."""
+    return not (workdir / ".beacon" / "cloud.json").exists()
+
+
+STRUCTURAL_INVARIANTS = {
+    "no_cloud_json": _inv_no_cloud_json,
+}
+
 
 class ScenarioError(Exception):
     """A scenario is malformed (bad step kind, missing required field, assert
@@ -121,6 +142,12 @@ def validate_scenario(scenario: dict) -> None:
                 raise ScenarioError(
                     f"step {i}: assert needs 'observation_basis' (観測 field + "
                     "なぜ SPEC 概念に対応するか)")
+            if step.get("assert") == "structural_invariant":
+                inv = step.get("invariant")
+                if inv not in STRUCTURAL_INVARIANTS:
+                    raise ScenarioError(
+                        f"step {i}: unknown structural invariant {inv!r} "
+                        f"(known: {sorted(STRUCTURAL_INVARIANTS)})")
     # quality_signals: optional, but each must be categorized (論点3)
     for j, qs in enumerate(scenario.get("quality_signals", []) or []):
         if not isinstance(qs, dict):
@@ -269,7 +296,7 @@ def _walk_json_path(obj, path: str):
     return cur, True
 
 
-def _run_assert(step: dict, last_cli: Optional[dict]) -> dict:
+def _run_assert(step: dict, last_cli: Optional[dict], workdir: Path) -> dict:
     """Evaluate one observation assertion against the preceding persona_cli's
     output.
 
@@ -310,6 +337,14 @@ def _run_assert(step: dict, last_cli: Optional[dict]) -> dict:
         if reason:
             out["reason"] = reason
         return out
+
+    if kind == "structural_invariant":
+        # Observed by structure over the run's workdir, not a CLI field (leader
+        # 検分 tightening 2). e.g. "no outbound" = the project stayed local.
+        inv = step["invariant"]
+        holds = STRUCTURAL_INVARIANTS[inv](workdir)
+        return result(holds, None if holds
+                      else f"structural invariant {inv!r} does not hold")
 
     if kind == "exit_code":
         want = step.get("value", 0)
@@ -388,7 +423,7 @@ def run_scenario(scenario: dict, *, workdir: Optional[str] = None,
         elif kind == STEP_INBOUND_STIMULUS:
             r = _run_inbound_stimulus(step, project_file)
         else:  # STEP_ASSERT
-            r = _run_assert(step, last_cli)
+            r = _run_assert(step, last_cli, workdir)
 
         entry = {"index": i, "kind": kind, "label": label, **r}
         step_reports.append(entry)
