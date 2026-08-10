@@ -260,34 +260,27 @@ KNOWN_COLLECTION_COUPLING = {
     # e-5061). NOTE the worktree/branch part must stay milestone-specific.
     ("doctor", "milestones"),
     # ms-134 e-5061 step 2 (L3→L2 promotion) — class-derived CRUD verbs promoted to
-    # L2 that STILL read a profession concrete collection directly. owner = ms-143
-    # (its PR #2 routes each through occupation.iter_target_records / the target
-    # abstraction, then deletes its row here; the stale-entry test forces the
-    # deletion). ms-143 PR #1 (#625) already abstracted create/done
-    # (milestone_add's RECORD path, task_done, opportunity_add, activity_set_status)
-    # so those record paths are absent — only residual READS remain below.
-    # dev milestone readers (list / show / graph / join / observe / wait /
-    # workspace_cleanup / done enumerate milestones; log_* resolve the active MS;
-    # retro_prepare aggregates milestone history):
-    ("milestone_list", "milestones"),
-    ("milestone_show", "milestones"),
-    ("milestone_graph", "milestones"),
-    ("milestone_join", "milestones"),
-    ("milestone_observe", "milestones"),
-    ("milestone_wait", "milestones"),
-    ("milestone_workspace_cleanup", "milestones"),
-    ("milestone_done", "milestones"),
-    ("log", "milestones"),
-    ("log_prepare", "milestones"),
-    ("log_finalize", "milestones"),
-    ("retro_prepare", "milestones"),
-    # (ms-143 PR#2) milestone_add remediated: _is_bulk_milestone_add now reads via
-    # occupation.iter_target_records (commit 587c4084), so milestone_add no longer
-    # couples to data['milestones']. Entry removed — the stale-entry test enforces
-    # that a greened verb is dropped from the allowlist.
-    # sales target readers (opportunity_list / acquisition_list enumerate their
-    # profession collection directly):
-    ("opportunity_list", "opportunities"),
+    # L2 that read a profession concrete collection directly. owner = ms-143.
+    #
+    # (ms-143 PR#2) The dev milestone readers (milestone_list / show / join /
+    # observe / wait / workspace_cleanup / done) + the log family (log / log_prepare
+    # / log_finalize) + opportunity_list now enumerate / locate via
+    # occupation.target_records(data, <kind>) (a milestone-specific read expressed
+    # without the concrete collection literal), and milestone_list's result-dict
+    # build was restructured to a local list (no read-back of output['milestones']).
+    # Their rows are removed — the stale-entry test enforces the deletion once the
+    # literal is gone. milestone_add was greened earlier (commit 587c4084,
+    # _is_bulk_milestone_add via occupation.iter_target_records). milestone_graph and
+    # retro_prepare had NO real project read left after that — their only remaining
+    # matches are a dependency-graph wave's own ``milestones`` field and a deployment
+    # record's own ``milestones`` field respectively, so they moved to
+    # REVIEWED_LEGITIMATE_COLLECTION_READS (a false-positive of the string-based
+    # check, not project coupling).
+    #
+    # acquisition_list stays: ``acquisitions`` is NOT a Target collection
+    # (TARGET_COLLECTIONS = milestones + opportunities), so occupation.target_records
+    # cannot enumerate it — routing it through the target abstraction would be the
+    # WRONG abstraction. Left as tracked debt pending its own disposition.
     ("acquisition_list", "acquisitions"),
 }
 
@@ -334,6 +327,23 @@ REVIEWED_LEGITIMATE_COLLECTION_READS = {
         "sales Opportunity has no git worktree. Reading milestones is exact, not "
         "coupling. Independent AX review 2026-08-03 corrected an initial "
         "over-eager remediation of this site.",
+    # ms-143 PR#2: false positives of the string-based check — the match is NOT a
+    # read of project['milestones'] but of a same-named key on a LOCAL structure,
+    # so routing through occupation.iter_target_records would be wrong (there is no
+    # project collection to route to). The real project reads these verbs had were
+    # remediated to occupation.target_records; only these local-structure reads
+    # remain.
+    ("milestone_graph", "milestones"):
+        "reads wave_info['milestones'] — the list of milestone ids in a dependency "
+        "graph WAVE (produced by core's graph builder), not project['milestones']. "
+        "A local graph-structure field that happens to share the key name; the "
+        "checker's string match cannot tell them apart. Not profession coupling.",
+    ("retro_prepare", "milestones"):
+        "reads dep.get('milestones') — a DEPLOYMENT record's own field listing "
+        "which milestones that deploy shipped, not project['milestones']. The real "
+        "milestone aggregation (for ms in …) was remediated to "
+        "occupation.target_records; this deployment-field read is exact, not "
+        "coupling.",
 }
 
 

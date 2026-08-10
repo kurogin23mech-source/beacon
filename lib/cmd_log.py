@@ -58,7 +58,7 @@ def cmd_log():
             # fork target_ms_id が project.json にあるか軽くチェック。無ければ
             # 普通の auto-pick (find_target_milestone) に倒れる。
             data_check = load_project()
-            if any(m.get("id") == fork_target for m in data_check.get("milestones", [])):
+            if any(m.get("id") == fork_target for m in occupation.target_records(data_check, "milestone")):
                 ms_id = fork_target
 
     data = load_project()
@@ -67,7 +67,7 @@ def cmd_log():
     # a milestone-less sales/backoffice project must not crash the direct
     # `beacon log "msg"` path (or the bare hook path) with "No active milestone".
     _profession = occupation.resolve_profession(data)
-    _active_ms = [m for m in data.get("milestones", [])
+    _active_ms = [m for m in occupation.target_records(data, "milestone")
                   if m.get("status") in ("todo", "in_progress", "observing")]
     if _profession != "dev" and not ms_id and not _active_ms:
         msg = (f"{_profession} project has no milestones — commit "
@@ -115,7 +115,7 @@ def cmd_log_prepare():
     # commit in a sales repo. Emit a benign prepare payload the Skill reads to
     # record/skip without milestone binding, instead of exiting non-zero.
     _profession = occupation.resolve_profession(data)
-    _active_ms = [m for m in data.get("milestones", [])
+    _active_ms = [m for m in occupation.target_records(data, "milestone")
                   if m.get("status") in ("todo", "in_progress", "observing")]
     if _profession != "dev" and not _active_ms:
         print(json.dumps({
@@ -142,7 +142,7 @@ def cmd_log_prepare():
     effective_ms_id = ms_id or fork_target_ms_id
 
     if effective_ms_id:
-        for ms in data["milestones"]:
+        for ms in occupation.target_records(data, "milestone"):
             if ms["id"] == effective_ms_id:
                 targets = [ms]
                 break
@@ -152,7 +152,7 @@ def cmd_log_prepare():
             # fallback。explicit --ms ms_id が無効なときと違って
             # silent fallback でよい (= fork.json は hint であって命令ではない)。
             if fork_target_ms_id and not ms_id:
-                targets = [ms for ms in data["milestones"]
+                targets = [ms for ms in occupation.target_records(data, "milestone")
                            if ms["status"] in ("todo", "in_progress", "observing")]
                 if not targets:
                     print("No active milestone. Run: beacon milestone start <ms-id>")
@@ -161,7 +161,7 @@ def cmd_log_prepare():
                 print(f"Milestone not found: {effective_ms_id}")
                 sys.exit(1)
     else:
-        targets = [ms for ms in data["milestones"] if ms["status"] in ("todo", "in_progress", "observing")]
+        targets = [ms for ms in occupation.target_records(data, "milestone") if ms["status"] in ("todo", "in_progress", "observing")]
         if not targets:
             print("No active milestone. Run: beacon milestone start <ms-id>")
             sys.exit(1)
@@ -261,7 +261,7 @@ def cmd_log_finalize():
     # milestones must not fail the commit hook. Nothing to bind the commit to,
     # so acknowledge and return 0 rather than raising "No active milestone".
     _profession = occupation.resolve_profession(data)
-    _active_ms = [m for m in data.get("milestones", [])
+    _active_ms = [m for m in occupation.target_records(data, "milestone")
                   if m.get("status") in ("todo", "in_progress", "observing")]
     if _profession != "dev" and not ms_id and not _active_ms:
         msg = (f"{_profession} project has no milestones — commit "

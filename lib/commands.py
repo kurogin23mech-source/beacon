@@ -8803,7 +8803,7 @@ def cmd_opportunity_list():
     show_all = os.environ.get("BEACON_ALL", "") == "1"  # e-3586: --all で取消済も出す
     data = load_project()
     # e-3586: 既定は取消済 (cancelled) を除外。--all で全件。
-    opps = (data.get("opportunities", []) if show_all
+    opps = (occupation.target_records(data, "opportunity") if show_all
             else sales_entities.live_opportunities(data))
     if json_mode:
         print(json.dumps(opps, ensure_ascii=False, indent=2))
