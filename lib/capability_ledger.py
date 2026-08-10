@@ -160,7 +160,9 @@ KNOWN_SYMBOL_REACH: set = {
     # instead of core.save_entry; the no-active-milestone raise is preserved in the
     # cmd_save frontend (parity harness test_cmd_save_parity_ms143). Row removed.
     # sales: record an activity / communication onto the sales target.
-    ("opportunity_activity", "sales_entities.activity_add"),
+    # (ms-143 PR#2) opportunity_activity remediated: adds the activity via
+    # occupation.add_work_item (an opportunity's activities are its work-item arm)
+    # instead of the sales-concrete sales_entities.activity_add. Row removed.
     ("communication_add", "sales_entities.communication_add"),
     ("acquisition_attack_list_send_record", "sales_entities.communication_add"),
     ("acquisition_attack_list_reply_record", "sales_entities.communication_add"),

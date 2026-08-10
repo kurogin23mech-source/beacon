@@ -9400,9 +9400,27 @@ def cmd_opportunity_activity():
     ball = os.environ.get("BEACON_ACTIVITY_BALL", "") or sales_entities.BALL_SELF
     data = load_project()
     try:
-        act_id = sales_entities.activity_add(data, opp_id, desc, deadline=deadline,
-                                             who_has_the_ball=ball,
-                                             created_at=core._now_iso())
+        # ms-143: add the activity through the profession-generic
+        # occupation.add_work_item (an opportunity's activities ARE its work-item
+        # arm), NOT the dev... sales-concrete sales_entities.activity_add symbol, so
+        # this L2 verb stops symbol-reaching a PROFESSION_CONCRETE_SYMBOL. The sales
+        # validations (opportunity exists / ball vocabulary / description required)
+        # and the created_in_phase default stay here as the sales frontend concern —
+        # same shape sales_entities.activity_add produces (parity).
+        opp = occupation.find_target(data, opp_id)
+        if opp is None:
+            raise ValueError(f"Opportunity not found: {opp_id}")
+        if not desc or not desc.strip():
+            raise ValueError("Activity description is required")
+        if ball not in sales_entities.VALID_BALL:
+            raise ValueError(
+                f"who_has_the_ball must be one of "
+                f"{sorted(sales_entities.VALID_BALL)}, got {ball!r}")
+        act = occupation.add_work_item(
+            data, opp_id, description=desc.strip(), deadline=deadline,
+            who_has_the_ball=ball, source="", created_at=core._now_iso(),
+            created_in_phase=opp.get("phase", ""))
+        act_id = act["id"]
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
