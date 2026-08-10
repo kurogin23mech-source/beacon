@@ -2919,10 +2919,12 @@ def communication_add(data: dict, target_id: str, summary: str, *,
     import — occupation imports sales_entities at module load, so the reverse edge
     must not be import-time."""
     import occupation
+    # add_evidence returns the record dict (AX review PR #628 finding #1, symmetric
+    # with add_work_item); this frontend keeps its historical id-string return.
     return occupation.add_evidence(
         data, target_id, summary=summary, direction=direction, channel=channel,
         body=body, source=source, occurred_at=occurred_at,
-        created_at=created_at, created_in_phase=created_in_phase)
+        created_at=created_at, created_in_phase=created_in_phase)["id"]
 
 
 def communications_of(target: dict, *, linked_id: Optional[str] = None,

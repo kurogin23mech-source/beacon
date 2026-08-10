@@ -151,14 +151,17 @@ def _is_bulk_milestone_add(data: dict, current_ms_id: str) -> bool:
     import datetime as _dt
     try:
         now = _dt.datetime.now(_dt.timezone.utc)
-        # ms-143: read Target records through the manifest-driven iterator rather
+        # ms-143: read Target records through the manifest-driven accessor rather
         # than naming data['milestones'] directly, so this helper (part of the
-        # milestone_add verb's reach) is concrete-free. iter_target_records
-        # preserves per-collection append order; in a development project (this
-        # helper's only caller) the milestones collection is the whole set, so the
-        # "most recent prior record" semantics are unchanged.
+        # milestone_add verb's reach) is concrete-free. This helper is milestone-
+        # specific (bulk-add of milestones), so it asks for the milestone kind
+        # explicitly via target_records(data, "milestone") — NOT the all-collections
+        # iter_target_records, which would fold a sibling occupation's Targets
+        # (opportunities) into the "most recent prior record" scan in a mixed
+        # project (maintainability review PR #628 finding §1). Append order within
+        # the milestones collection is preserved, so the semantics are unchanged.
         import occupation
-        records = occupation.iter_target_records(data)
+        records = occupation.target_records(data, "milestone")
         # Compare against the second-most-recent record (the most recent is the
         # one we just added).
         prior = None

@@ -9558,7 +9558,7 @@ def cmd_communication_add():
         comm_id = occupation.add_evidence(
             data, target_id, summary=summary, direction=direction, channel=channel,
             body=body, source=source or None, occurred_at=occurred_at,
-            created_at=core._now_iso())
+            created_at=core._now_iso())["id"]
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

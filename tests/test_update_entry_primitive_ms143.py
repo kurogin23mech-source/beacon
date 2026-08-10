@@ -86,7 +86,7 @@ def test_locates_a_dev_milestone_and_task_too():
 
 
 def test_unknown_id_raises():
-    with pytest.raises(ValueError, match="Entry not found"):
+    with pytest.raises(ValueError, match="Record not found"):
         occupation.update_entry(_sales(), "opp-404", title="x")
 
 

@@ -683,7 +683,7 @@ def cmd_acquisition_attack_list_send_record():
             data, acc_id, summary=subject or f"アタックリスト一括連絡 ({doc_id})",
             direction="outbound", channel="email",
             source={"ref": message_id, "url": url},
-            occurred_at=_now_iso(), created_at=_now_iso())
+            occurred_at=_now_iso(), created_at=_now_iso())["id"]
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -847,7 +847,7 @@ def cmd_acquisition_attack_list_reply_record():
             data, acc_id, summary=summary or f"アタックリスト打診先からの返信 ({doc_id})",
             direction="inbound", channel="email",
             source={"ref": message_id, "url": url},
-            occurred_at=_now_iso(), created_at=_now_iso())
+            occurred_at=_now_iso(), created_at=_now_iso())["id"]
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

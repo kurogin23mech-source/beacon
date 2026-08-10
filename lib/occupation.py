@@ -979,20 +979,23 @@ def set_entry_state(data: dict, entry_id: str, status: str, *,
     return target, entry
 
 
-def update_entry(data: dict, entry_id: str, **fields) -> dict:
+def update_entry(data: dict, record_id: str, **fields) -> dict:
     """Patch attributes on a Target OR a work item, profession-generically (ms-143,
     設計判断 i = 更新). The attribute-patch sibling of ``set_entry_state`` (which
     owns the LIFECYCLE transition todo/done + its completion attribution) — kept
     SEPARATE so the ``mark_done`` completion stamps never leak onto a plain field
     edit (設計判断 i = 分離).
 
-    Locates ``entry_id`` first across all Target collections (``find_target``) and,
-    failing that, their work-item arms (``find_target_entry``) — so it never names
-    ``data['milestones']`` / ``data['opportunities']`` / ``find_opportunity`` itself.
-    Applies each keyword in ``fields`` verbatim (``record[key] = value``); a value of
-    ``None`` is WRITTEN, not skipped, so a field can be CLEARED (a sales
-    ``goal_amount=None`` clears the 商談金額). The caller passes only the keys it
-    means to change.
+    ``record_id`` is a Target id (milestone / opportunity) OR a work-item id (task /
+    activity) — the parameter and the not-found error say "record", not "entry",
+    because this resolves BOTH planes (AX review PR #628: an "entry" conventionally
+    means a sub-record, so naming it ``entry_id`` mis-signals that a Target id is
+    not accepted). Locates via ``find_target`` first, then ``find_target_entry`` —
+    so it never names ``data['milestones']`` / ``data['opportunities']`` /
+    ``find_opportunity`` itself. Applies each keyword in ``fields`` verbatim
+    (``record[key] = value``); a value of ``None`` is WRITTEN, not skipped, so a
+    field can be CLEARED (a sales ``goal_amount=None`` clears the 商談金額). The
+    caller passes only the keys it means to change.
 
     Per-field validation / normalization stays in the FRONTEND — this primitive is
     the generic locate + apply skeleton, mirroring how ``add_work_item`` leaves the
@@ -1000,14 +1003,14 @@ def update_entry(data: dict, entry_id: str, **fields) -> dict:
     ``milestone update``'s progress clamp / priority resolver / status-meta stamp /
     label dual-write; sales ``opportunity phase``'s funnel transition) are NOT folded
     here — they keep their own frontend path (leader 握り: primitive は plain patch
-    に閉じる). Returns the located record. Raises ``ValueError`` when ``entry_id``
+    に閉じる). Returns the located record. Raises ``ValueError`` when ``record_id``
     matches no Target or work item."""
-    record = find_target(data, entry_id)
+    record = find_target(data, record_id)
     if record is None:
-        hit = find_target_entry(data, entry_id)
+        hit = find_target_entry(data, record_id)
         record = hit[2] if hit else None
     if record is None:
-        raise ValueError(f"Entry not found: {entry_id}")
+        raise ValueError(f"Record not found: {record_id}")
     for key, value in fields.items():
         record[key] = value
     return record
@@ -1113,7 +1116,14 @@ def resolve_target(data: dict, target_id: str = "", *,
         return matches[index - 1]
     active = [r for r in records if r.get("status") == "in_progress"]
     if len(active) == 0:
-        raise ValueError("No active target. Run: beacon milestone start <ms-id>")
+        # AX review PR #628 (misleading): resolve_target is profession-GENERIC, so
+        # the recovery hint must not hard-code the dev-only `beacon milestone start`
+        # (which does nothing for a sales project whose targets are Opportunities).
+        # Emit the activation command the project's own occupation uses.
+        prof = resolve_profession(data)
+        hint = ("beacon milestone start <ms-id>" if prof == "dev"
+                else "activate an in-progress target for this project")
+        raise ValueError(f"No active target. Run: {hint}")
     if len(active) > 1:
         ids = ", ".join(r.get("id", "") for r in active)
         raise ValueError(f"Multiple active targets. Specify with -m <id>: {ids}")
@@ -1260,11 +1270,15 @@ def _resolve_evidence_parent(data: dict, parent_id: str):
 def add_evidence(data: dict, parent_id: str, *, summary: str, direction: str,
                  channel: str = "other", body: str = "",
                  source: dict | None = None, occurred_at: str = "",
-                 created_at: str = "", created_in_phase: str = "") -> str:
+                 created_at: str = "", created_in_phase: str = "") -> dict:
     """Append a piece of evidence (a sales Communication / 事後記録型の証跡) under a
-    Target or the work item it fulfilled, occupation-generically, and return its id
-    (ms-143 設計判断 b 系統4 = 証跡追加). The evidence-grain sibling of
-    ``add_work_item`` (which adds a *planned* work item to a Target's work-item arm)
+    Target or the work item it fulfilled, occupation-generically, and return the new
+    record (ms-143 設計判断 b 系統4 = 証跡追加). Returns the record dict — symmetric
+    with its siblings ``add_work_item`` and ``target_engine.add_evidence``, which
+    both return the new record; a caller reads ``.get("id")`` for the id (AX review
+    PR #628 finding #1: sibling primitives must not split their return type). The
+    evidence-grain sibling of ``add_work_item`` (which adds a *planned* work item to
+    a Target's work-item arm)
     and of ``record_target_entry`` (which carries the dev milestone changelog and
     NO-OPs on a sales Target, so it cannot record a Communication — the gap this
     fills).
@@ -1319,7 +1333,7 @@ def add_evidence(data: dict, parent_id: str, *, summary: str, direction: str,
     if body_txt:
         record["body"] = body_txt
     node.setdefault(arm, []).append(record)
-    return ev_id
+    return record
 
 
 def iter_work_items(data: dict):

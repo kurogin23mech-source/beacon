@@ -55,7 +55,10 @@ def _add(data, parent_id, **kw):
     kw.setdefault("direction", "outbound")
     kw.setdefault("channel", "email")
     kw.setdefault("created_at", FIXED)
-    return occupation.add_evidence(data, parent_id, **kw)
+    # add_evidence returns the record dict (symmetric with add_work_item /
+    # target_engine.add_evidence, AX review PR #628 finding #1); these tests assert
+    # on the id, so extract it here.
+    return occupation.add_evidence(data, parent_id, **kw)["id"]
 
 
 # --- grain + nesting -------------------------------------------------------
