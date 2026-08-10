@@ -3046,10 +3046,20 @@ def cmd_save():
         sys.exit(1)
 
     data = load_project()
-    result = core.save_entry(data, ms_id=ms_id, description=description,
-                             source=source, date=date, url=url,
-                             revision_id=revision_id, hash=hash_val,
-                             progress=progress)
+    # ms-143: record the side-effect changelog through the profession-generic
+    # occupation.record_target_entry (NOT the dev-concrete core.save_entry), so
+    # the save verb no longer symbol-reaches a PROFESSION_CONCRETE_SYMBOL. Bad-id /
+    # multi-active still RAISE identically (record_target_entry propagates
+    # find_target_milestone's errors). Only the empty-ms_id-no-active case differs:
+    # record_target_entry no-ops (recorded=False) where save_entry raised — so the
+    # frontend re-raises to PRESERVE the observable "No active milestone" error
+    # (parity-first, leader 握り; abstraction=occupation, no-milestone UX=frontend).
+    outcome = occupation.record_target_entry(
+        data, ms_id, description=description, source=source, date=date, url=url,
+        revision_id=revision_id, hash=hash_val, progress=progress)
+    if not outcome.get("recorded"):
+        raise ValueError("No active milestone. Run: beacon milestone start <ms-id>")
+    result = outcome["result"]
     save_project(data)
 
     if json_mode:

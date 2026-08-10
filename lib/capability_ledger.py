@@ -156,7 +156,9 @@ KNOWN_SYMBOL_REACH: set = {
     # resolves its target via the profession-generic occupation.resolve_target
     # instead of the dev-concrete find_target_milestone, so their symbol-reach rows
     # are removed (the stale-entry test enforces removal once greened).
-    ("save", "core.save_entry"),
+    # (ms-143 PR#2) save remediated: records via occupation.record_target_entry
+    # instead of core.save_entry; the no-active-milestone raise is preserved in the
+    # cmd_save frontend (parity harness test_cmd_save_parity_ms143). Row removed.
     # sales: record an activity / communication onto the sales target.
     ("opportunity_activity", "sales_entities.activity_add"),
     ("communication_add", "sales_entities.communication_add"),
