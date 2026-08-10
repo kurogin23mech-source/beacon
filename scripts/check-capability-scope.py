@@ -484,7 +484,7 @@ def main() -> int:
             print(f"    - {v} [L0] is dispatchable in the public CLI")
         print("    → an L0 capability must not ship: reclassify it (universal "
               "tooling → L1) or move it out of the wheel-packaged dispatch.")
-    if result.get("l0_skill_distribution_leak"):
+    if result["l0_skill_distribution_leak"]:
         print(f"  DISTRIBUTION EXCLUSION VIOLATION ({len(result['l0_skill_distribution_leak'])}) "
               f"— L0 (non-distributed, product-operation) Skills are in the shipped "
               f"skills/ tree (ms-134 e-5086):")

@@ -627,17 +627,23 @@ def shipped_l0_verbs(live: Optional[set] = None) -> list:
     return sorted(v for v in live if scope_of(v) == "L0")
 
 
-def shipped_l0_skills(skills_dir: str = "") -> list:
+def shipped_l0_skills(skills: Optional[list] = None,
+                      skills_dir: str = "") -> list:
     """Return shipped Skills classified L0 — the skill-side distribution-exclusion
     violation (ms-134 e-5086, the symmetric twin of ``shipped_l0_verbs``). Every
     file under repo ``skills/`` is bundled into the wheel/plugin verbatim (pyproject
     ``package-data`` ships ``skills/**/*.md``), so a Skill enumerated here IS a
     shipped Skill; an L0 (Beacon-product-operation, 非配布・運用専用) Skill among them
-    means an operation-only capability leaked into the public distribution. Empty by
-    construction after e-5086 (no Skill is L0 — beacon-drift-check was reclassified
-    L1 as a universal source↔installed drift check); it is a GUARD that fails the
-    checker if a future L0 Skill is ever placed in the shipped ``skills/`` tree."""
-    return sorted(s for s in enumerate_skills(skills_dir) if skill_scope_of(s) == "L0")
+    means an operation-only capability leaked into the public distribution.
+
+    Like ``shipped_l0_verbs``'s ``live``, callers may inject the already-enumerated
+    skill surface via ``skills``; ``None`` re-enumerates from ``skills_dir`` (the
+    repo ``skills/`` tree). The current tree is L0-free (beacon-drift-check was
+    reclassified L1 — a universal source↔installed drift check; see the L0 comment
+    block above ``_NOUN_SCOPE``). This is a GUARD that fails the checker if a future
+    L0 Skill is ever placed in the shipped ``skills/`` tree."""
+    names = enumerate_skills(skills_dir) if skills is None else skills
+    return sorted(s for s in names if skill_scope_of(s) == "L0")
 
 
 def reconcile_ownership(live: Optional[set] = None) -> dict:
