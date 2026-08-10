@@ -386,12 +386,17 @@ def run(commands_path: str = "") -> dict:
     new_coupling = [c for c in all_reads if c["status"] == "new_violation"]
     pending_coupling = [c for c in all_reads if c["status"] == "pending_debt"]
     reviewed_reads = [c for c in all_reads if c["status"] == "reviewed_correct"]
-    # Distribution exclusion (ms-134 e-5062): no L0 (product-operation) verb may
-    # appear in the shipped dispatch surface. Empty today (no verb is L0); a guard.
+    # Distribution exclusion (ms-134 e-5062 verbs / e-5086 skills): no L0
+    # (product-operation, 非配布) capability may appear in the shipped distribution.
+    # Verbs: the shipped dispatch surface. Skills: the bundled skills/ tree (every
+    # *.md ships via pyproject package-data). Both empty today (nothing is L0); twin
+    # guards that fail if a future L0 verb/Skill leaks into the public distribution.
     l0_leak = cl.shipped_l0_verbs()
+    l0_skill_leak = cl.shipped_l0_skills()
     ok = (not cov["unclassified"] and not skill_cov["unclassified"]
           and not ownership["unowned"] and not skill_ownership["unowned"]
-          and not new_viol and not new_coupling and not l0_leak)
+          and not new_viol and not new_coupling and not l0_leak
+          and not l0_skill_leak)
     return {"ok": ok, "coverage": cov, "skill_coverage": skill_cov,
             "ownership": ownership, "skill_ownership": skill_ownership,
             "violations": viol,
@@ -401,7 +406,8 @@ def run(commands_path: str = "") -> dict:
             "new_collection_coupling": new_coupling,
             "pending_collection_coupling": pending_coupling,
             "reviewed_correct_reads": reviewed_reads,
-            "l0_distribution_leak": l0_leak}
+            "l0_distribution_leak": l0_leak,
+            "l0_skill_distribution_leak": l0_skill_leak}
 
 
 def render_proposal(prop: dict) -> None:
@@ -478,6 +484,17 @@ def main() -> int:
             print(f"    - {v} [L0] is dispatchable in the public CLI")
         print("    → an L0 capability must not ship: reclassify it (universal "
               "tooling → L1) or move it out of the wheel-packaged dispatch.")
+    if result.get("l0_skill_distribution_leak"):
+        print(f"  DISTRIBUTION EXCLUSION VIOLATION ({len(result['l0_skill_distribution_leak'])}) "
+              f"— L0 (non-distributed, product-operation) Skills are in the shipped "
+              f"skills/ tree (ms-134 e-5086):")
+        for s in result["l0_skill_distribution_leak"]:
+            print(f"    - {s} [L0] ships in the bundled skills/ (pyproject package-data)")
+        print("    → an L0 Skill must not ship. Decide by what the Skill actually does:")
+        print("      · if it is instance-universal (any beacon user, incl. a pipx "
+              "install, would run it): reclassify → L1 in _SKILL_SCOPE.")
+        print("      · if it is genuinely Beacon-repo-only operation: move it out of "
+              "the shipped skills/ tree (a non-packaged dev-tools location).")
     if cov["unclassified"]:
         print(f"  UNCLASSIFIED VERBS ({len(cov['unclassified'])}): "
               f"{', '.join(cov['unclassified'])}")

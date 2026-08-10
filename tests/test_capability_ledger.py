@@ -427,6 +427,31 @@ def test_no_l0_verb_in_shipped_distribution(monkeypatch):
     assert chk.run()["ok"] is False
 
 
+def test_no_l0_skill_in_shipped_distribution(monkeypatch):
+    # Distribution exclusion (ms-134 e-5086, the skill-side twin of e-5062): no L0
+    # Skill may ship in the bundled skills/ tree (every *.md ships via pyproject
+    # package-data). Empty by construction after e-5086 — beacon-drift-check, the
+    # only former L0 Skill, was reclassified L1 (universal source↔installed drift
+    # check that a distributed pipx user can hit too).
+    assert cl.shipped_l0_skills() == [], cl.shipped_l0_skills()
+    assert chk.run()["l0_skill_distribution_leak"] == []
+    # Mechanism: if a shipped Skill were (mis)classified L0, the guard flags it.
+    # beacon-drift-check is a real shipped Skill — pin it L0 and it must surface,
+    # then the gate goes red. This proves the guard is on the axis a leak appears on
+    # (skills), not just the empty verb axis.
+    monkeypatch.setitem(cl._SKILL_SCOPE, "beacon-drift-check", "L0")
+    assert "beacon-drift-check" in cl.shipped_l0_skills()
+    assert chk.run()["ok"] is False
+
+
+def test_beacon_drift_check_is_l1_universal_install_drift(monkeypatch):
+    # ms-134 e-5086: beacon-drift-check detects source↔installed skill drift, which
+    # any beacon user (a pipx install that `beacon update`d without re-running
+    # `beacon skill install`, not only a repo developer) can have — so it is L1
+    # (instance-universal), not L0 (Beacon-repo-only operation).
+    assert cl.skill_scope_of("beacon-drift-check") == "L1"
+
+
 def test_no_new_symbol_reach_on_real_tree():
     """The symbol ratchet gate: a NEW (non-allowlisted) shared capability calling
     a profession recorder/resolver symbol fails CI. An allowlisted (KNOWN_SYMBOL_
