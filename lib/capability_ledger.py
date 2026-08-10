@@ -436,10 +436,13 @@ KNOWN_ARM_REACH = {
     # helper still walks each record's dev ``entries`` arm, so the backup manifest's
     # ``top_level_entries`` integrity count under-counts a sales project's work
     # (Opportunity activities/communications). Route _count_entries through
-    # profession_manifest work_item_arm/evidence_arms. Discovered by the arm scan
-    # itself (ms-142 e-5012); not previously catalogued because the collection
-    # ratchet — which only sees data['<collection>'] reads — is blind to an arm
-    # read. owner = ms-142 (surfaced here; remediation is a small follow-up).
+    # profession_manifest arms. Discovered by the arm scan itself (ms-142 e-5012);
+    # not previously catalogued because the collection ratchet — which only sees
+    # data['<collection>'] reads — is blind to an arm read. owner = ms-142:
+    # greening cmd_project's enumeration is squarely within its mandate ("列挙を
+    # Target/WorkItem 抽象イテレータへ寄せる"), tracked by task e-5115. Per leader
+    # ruling 2026-08-10, the owner tag names the MS that will actually green the
+    # surface, so the stale-entry test fires on the right MS (rot prevention).
     ("cmd_project", "entries"),
 }
 
