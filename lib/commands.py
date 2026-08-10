@@ -9155,6 +9155,11 @@ def cmd_deadline_due():
             continue
         items.append({
             "kind": cand["kind"],
+            # ms-143 e-5047: resolve the display label here (where project data +
+            # descriptors are loaded) and carry it in the payload, so the JSON
+            # consumer (scripts/session-start-deadlines.py) need not re-hardcode a
+            # kind→label map. A new occupation's label rides from its descriptor.
+            "kind_label": occupation.kind_display_label(data, cand["kind"]),
             "label": cand["label"],
             "deadline": deadline.deadline_of(cand["item"]),
             "temporal": st,
@@ -9167,12 +9172,11 @@ def cmd_deadline_due():
     if not items:
         print("締切精査: 期日 到達/超過の work item はありません")
         return
-    label_jp = {"milestone": "MS", "task": "タスク", "activity": "活動"}
     print("⏰ 締切超過/本日 の work item:")
     for r in items:
         mark = "⚠ 超過" if r["temporal"] == deadline.TRANSITION_OVERDUE else "⏰ 本日"
         ctx = f" — {r['context']}" if r.get("context") else ""
-        print(f"  [{label_jp.get(r['kind'], r['kind'])}] {r['label']} / "
+        print(f"  [{r['kind_label']}] {r['label']} / "
               f"期日 {r['deadline']} {mark}{ctx}")
     print("  → 済んだら完了/期日を延ばす/やめたら取消 で盤面から外してください。")
 

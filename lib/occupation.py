@@ -1027,6 +1027,50 @@ def target_records(data: dict, kind: str) -> list:
     return data.get(tc["collection"], []) or []
 
 
+# Display labels (Japanese) per occupation-agnostic kind — the SINGLE declaration
+# the deadline surfaces read, replacing the ``label_jp`` dict that was duplicated
+# in commands.py (``beacon deadline due``) AND scripts/session-start-deadlines.py
+# (ms-143 e-5047 / PR #623 maintainability review finding #6). A descriptor-defined
+# occupation declares its own label (``display_label`` / ``label_jp`` on the target
+# descriptor), so a NEW occupation's kinds get a display label with ZERO wiring at
+# the call sites. Built-ins are the exact set the old ``label_jp`` carried
+# (milestone / task / activity), so an unlisted kind (opportunity / account / a
+# descriptor kind with no declared label) falls back to the kind string —
+# byte-identical to the pre-refactor ``label_jp.get(kind, kind)``.
+_KIND_DISPLAY_LABEL = {
+    "milestone": "MS",
+    "task": "タスク",
+    "activity": "活動",
+}
+
+
+def kind_display_label(data: dict | None, kind: str) -> str:
+    """Return the display label for an occupation-agnostic ``kind`` (a target kind
+    like ``milestone`` / ``opportunity`` or a work-item kind like ``task`` /
+    ``activity``), sourced from declarations rather than a hardcoded map at the call
+    site (ms-143 e-5047).
+
+    Resolution order: the built-in ``_KIND_DISPLAY_LABEL`` (dev / sales built-ins),
+    then — when ``data`` is given — a descriptor-defined kind's own
+    ``display_label`` / ``label_jp`` (ms-122 data-defined occupations), else the
+    ``kind`` string itself. ``data`` may be ``None`` (a display consumer without the
+    project loaded, e.g. scripts/session-start-deadlines.py); descriptor labels then
+    resolve only where the caller passes the CLI-provided label, and built-in kinds
+    still map. This is the seam that makes a new occupation's deadline labels light
+    up from its manifest/descriptor with no edit at either surface."""
+    label = _KIND_DISPLAY_LABEL.get(kind)
+    if label:
+        return label
+    if data:
+        for desc in _td.load_descriptors(data):
+            if isinstance(desc, dict) and (desc.get("kind") or "").strip() == kind:
+                lbl = (desc.get("display_label")
+                       or desc.get("label_jp") or "").strip()
+                if lbl:
+                    return lbl
+    return kind
+
+
 def resolve_target(data: dict, target_id: str = "", *,
                    index: int | None = None) -> dict:
     """Resolve a Target by id, or auto-select the single active one,
