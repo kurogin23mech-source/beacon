@@ -15,8 +15,9 @@ surfaces that profession's Target and work item.
 Single source of truth for RED (leader 裁定 (A), ms-142 e-5012): this module holds
 NO red registry of its own. Every "this capability misses a new profession" debt
 lives in the ledger ratchets (``KNOWN_COLLECTION_COUPLING`` / ``KNOWN_SYMBOL_REACH``
-/ the arm-name coupling class e-5013 adds). e-5013 is the RECONCILE test that pins
-matrix ↔ ratchet consistency; this module is GREEN-only (behavioral positive proof).
+/ ``KNOWN_ARM_REACH`` — the arm-name coupling class e-5012 adds). e-5013 is the
+RECONCILE test that pins matrix ↔ ratchet consistency; this module is GREEN-only
+(behavioral positive proof).
 
 If the synthetic profession flows GREEN through every abstraction consumer, the
 abstraction is genuinely declaration-driven; a capability that does NOT is either

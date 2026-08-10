@@ -493,6 +493,124 @@ def test_no_stale_symbol_reach_allowlist_entries():
         "handler was abstracted): " + ", ".join(f"{v}→{s}" for v, s in stale))
 
 
+# --- arm-name coupling ratchet (ms-142 e-5012), the third reach class ---------
+
+_SYNTH_ARM_READ = '''
+import occupation
+def collect_synthetic(data):
+    """A shared-frame aggregator that walks Targets through the abstraction but
+    then reads the dev `entries` arm directly. The docstring mentions entries but
+    only the real read must be flagged (AST, not grep)."""
+    out = []
+    for tgt in occupation.iter_target_records(data):
+        for e in tgt.get("entries", []):   # <- arm-name coupling
+            out.append(e)
+    return out
+'''
+
+_SYNTH_ARM_WRITE = '''
+def build(data):
+    # a WRITE to a same-named local key is not a reach into a Target record and
+    # must not be a false positive (LOAD-only Subscript guard).
+    result = {}
+    result["entries"] = []
+    return result
+'''
+
+
+def test_no_new_arm_coupling_on_real_tree():
+    """The arm ratchet gate: a NEW (non-allowlisted) shared-frame aggregator
+    reading a profession arm name off a Target record fails CI. The existing
+    session_log read is accepted debt; adding a fresh one flips this red. Mirrors
+    the collection/symbol gates."""
+    result = chk.run()
+    new = result["new_arm_coupling"]
+    assert new == [], (
+        "NEW profession arm coupling — route it through "
+        "occupation.profession_manifest evidence_arms / work_item_arm (never add a "
+        "KNOWN_ARM_REACH entry to silence a fresh read): "
+        + "; ".join(f"{a['site']}→tgt['{a['arm']}'] @ {a['file']}:{a['lineno']}"
+                    for a in new))
+
+
+def test_every_detected_arm_read_is_classified():
+    # On the real tree every detected arm read must be accepted debt (there is no
+    # reviewed_correct for arms — a shared aggregator arm read is never exact by
+    # design); a new_violation is caught above, asserted here for a clear message.
+    for a in chk.find_arm_coupling():
+        assert a["status"] == "pending_debt", f"un-classified arm read: {a}"
+
+
+def test_no_stale_arm_reach_allowlist_entries():
+    """Ratchet hygiene (symmetric to the collection/symbol stale checks): every
+    (site, arm) in KNOWN_ARM_REACH must still be detected on the real tree, so a
+    row cannot rot into a lie after the module is routed through the manifest."""
+    detected = {(a["site"], a["arm"]) for a in chk.find_arm_coupling()}
+    stale = sorted(cl.KNOWN_ARM_REACH - detected)
+    assert not stale, (
+        "pending arm-reach entries no longer detected (delete them — the module "
+        "was routed through profession_manifest): "
+        + ", ".join(f"{s}→{arm}" for s, arm in stale))
+
+
+def test_registered_arm_reads_are_the_detected_debt():
+    # The concrete anchors: both shared-frame aggregators that abstracted target
+    # enumeration but kept a dev-arm read (session_log aggregation + cmd_project
+    # export) are detected and are exactly the allowlisted debt (not fresh
+    # violations). cmd_project was surfaced by the arm scan itself — the collection
+    # ratchet is blind to an arm read (ms-142 e-5012).
+    by_key = {(a["site"], a["arm"]): a["status"] for a in chk.find_arm_coupling()}
+    assert by_key.get(("session_log", "entries")) == "pending_debt"
+    assert by_key.get(("cmd_project", "entries")) == "pending_debt"
+    assert ("session_log", "entries") in cl.KNOWN_ARM_REACH
+    assert ("cmd_project", "entries") in cl.KNOWN_ARM_REACH
+
+
+def test_checker_flags_a_shared_frame_arm_read(tmp_path):
+    # A synthetic aggregator reading tgt['entries'] is flagged as a NEW arm read
+    # (its site is not in KNOWN_ARM_REACH), proving the checker detects it.
+    path = _write(tmp_path, "aggregator.py", _SYNTH_ARM_READ)
+    hits = chk.find_arm_coupling(path)
+    assert len(hits) == 1, hits
+    assert hits[0]["site"] == "aggregator"
+    assert hits[0]["arm"] == "entries"
+    assert hits[0]["status"] == "new_violation"
+
+
+def test_arm_scan_ignores_a_write_to_a_same_named_local(tmp_path):
+    # result["entries"] = [] is a WRITE, not a reach into a Target record — the
+    # LOAD-only Subscript guard must keep it from being a false positive.
+    path = _write(tmp_path, "builder.py", _SYNTH_ARM_WRITE)
+    assert chk.find_arm_coupling(path) == []
+
+
+def test_arm_reach_allowlist_makes_a_read_pending(tmp_path, monkeypatch):
+    # The mechanism: a (site, arm) in KNOWN_ARM_REACH is classified pending_debt
+    # (not new_violation) so it no longer fails the gate. Proven on a synthetic
+    # tree with a monkeypatched allowlist so the assertion is deterministic.
+    path = _write(tmp_path, "aggregator.py", _SYNTH_ARM_READ)
+    before = chk.find_arm_coupling(path)
+    assert before[0]["status"] == "new_violation"  # aggregator not allowlisted
+    monkeypatch.setattr(cl, "KNOWN_ARM_REACH", {("aggregator", "entries")})
+    after = chk.find_arm_coupling(path)
+    assert len(after) == 1 and after[0]["status"] == "pending_debt", after
+
+
+def test_profession_arms_cover_decomposition():
+    """PROFESSION_CONCRETE_ARMS must stay a SUPERSET of every fat arm any built-in
+    profession Target declares in occupation.TARGET_DECOMPOSITION — so a new arm
+    added to a profession cannot slip in without the arm checker learning to
+    police it (the forcing function that keeps the denylist honest)."""
+    import occupation
+    declared = {arm
+                for spec in occupation.TARGET_DECOMPOSITION.values()
+                for arm in spec["arms"]}
+    missing = sorted(declared - set(cl.PROFESSION_CONCRETE_ARMS))
+    assert not missing, (
+        "profession Target arms not in PROFESSION_CONCRETE_ARMS (add them so a "
+        "shared aggregator reading them is policed): " + ", ".join(missing))
+
+
 def test_reviewed_correct_reads_are_classified_correctly():
     # The human-reviewed correct reads (e-4737) report as "reviewed_correct",
     # not debt — so they are not nagged for remediation.

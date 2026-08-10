@@ -91,6 +91,14 @@ def collect_project_entries(data: dict, session_id: str) -> dict:
     pr_texts: list[str] = []
 
     import occupation
+    # ARM-NAME COUPLING (ms-142 e-5012, tracked debt): target ENUMERATION is
+    # abstracted (iter_target_records), but the dev ``entries`` arm is still read
+    # by name here, so a sales Opportunity's Communication evidence (arm
+    # ``communications``) is missed. The fix is to route through
+    # occupation.profession_manifest evidence_arms; deferred with e-3702 (sales
+    # records do not stamp meta.session_id yet). Registered as pending debt in
+    # capability_ledger.KNOWN_ARM_REACH ("session_log", "entries") — the checker's
+    # stale-entry test forces this comment + read to be remediated together.
     for tgt in occupation.iter_target_records(data):
         for e in _iter_entries(tgt.get("entries", [])):
             meta = e.get("meta") or {}
