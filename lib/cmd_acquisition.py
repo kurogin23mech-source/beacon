@@ -673,10 +673,14 @@ def cmd_acquisition_attack_list_send_record():
 
     # Now book the 証跡 + mark the recipient sent, and save project.json LAST.
     try:
+        import occupation
         sales_entities.record_batch_send(data, doc_id, acc_id, at=_now_iso(),
                                          message_id=message_id)
-        comm_id = sales_entities.communication_add(
-            data, acc_id, subject or f"アタックリスト一括連絡 ({doc_id})",
+        # ms-143: record the 証跡 via profession-generic occupation.add_evidence
+        # (byte-identical to the sales-concrete recorder), so this verb stops
+        # symbol-reaching a PROFESSION_CONCRETE_SYMBOL.
+        comm_id = occupation.add_evidence(
+            data, acc_id, summary=subject or f"アタックリスト一括連絡 ({doc_id})",
             direction="outbound", channel="email",
             source={"ref": message_id, "url": url},
             occurred_at=_now_iso(), created_at=_now_iso())
@@ -835,8 +839,12 @@ def cmd_acquisition_attack_list_reply_record():
     # nor 証跡-without-attempted-phase (保守性レビュー PR #553: atomicity).
     data = load_project()
     try:
-        comm_id = sales_entities.communication_add(
-            data, acc_id, summary or f"アタックリスト打診先からの返信 ({doc_id})",
+        import occupation
+        # ms-143: record the 証跡 via profession-generic occupation.add_evidence
+        # (byte-identical to the sales-concrete recorder), so this verb stops
+        # symbol-reaching a PROFESSION_CONCRETE_SYMBOL.
+        comm_id = occupation.add_evidence(
+            data, acc_id, summary=summary or f"アタックリスト打診先からの返信 ({doc_id})",
             direction="inbound", channel="email",
             source={"ref": message_id, "url": url},
             occurred_at=_now_iso(), created_at=_now_iso())

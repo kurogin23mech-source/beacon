@@ -105,14 +105,20 @@ PROFESSION_CONCRETE_SYMBOLS = {
         "dev milestone changelog recorder — use occupation.record_target_entry",
     "core.find_target_milestone":
         "dev milestone resolver — record via occupation.record_target_entry",
-    # sales concretes (symmetric side)
+    # sales concretes (symmetric side). ms-143 routes each to the RIGHT generic
+    # grain (not the one-size "record_target_entry", which no-ops on a sales Target
+    # and so mis-advised the evidence/work-item grains): a planned work item →
+    # occupation.add_work_item, a 証跡 → occupation.add_evidence, a dev changelog →
+    # occupation.record_target_entry.
     "sales_entities.activity_add":
-        "sales activity recorder — a shared capability must record via "
-        "occupation.record_target_entry, not a profession concrete",
+        "sales activity recorder — add the planned work item via "
+        "occupation.add_work_item (an opportunity's activities are its work-item arm)",
     "sales_entities.communication_add":
-        "sales communication recorder — record via occupation.record_target_entry",
+        "sales communication recorder — record the 証跡 via occupation.add_evidence "
+        "(the evidence-grain sibling of add_work_item)",
     "sales_entities.nurturing_add":
-        "sales nurturing recorder — record via occupation.record_target_entry",
+        "sales nurturing recorder — add the planned work item via "
+        "occupation.add_work_item (symmetric with an opportunity's activity)",
 }
 
 
@@ -144,29 +150,25 @@ PROFESSION_CONCRETE_SYMBOLS = {
 # avoiding the churn of allowlisting-then-removing them (leader interlock ruling
 # 2026-08-09). ms-143 PR #2 abstracts each remaining verb and deletes its row; the
 # stale-entry test forces the deletion, so this set shrinks to empty over time.
-KNOWN_SYMBOL_REACH: set = {
-    # ms-134 e-5061 step 2 (L3→L2 promotion) — class-derived RECORDING verbs
-    # promoted to L2 that STILL call a profession recorder/resolver directly.
-    # owner = ms-143 (its PR #2 routes each through occupation.record_target_entry /
-    # create_target / set_entry_state, then deletes its row here; the stale-entry
-    # test forces the deletion). ms-143 PR #1 (#625) already abstracted task_done /
-    # opportunity_add / activity_set_status, so those are absent below.
-    # dev: resolve the active milestone / write a milestone changelog entry.
-    # (ms-143 PR#2) task_add / task_list / sync / log_finalize remediated: each now
-    # resolves its target via the profession-generic occupation.resolve_target
-    # instead of the dev-concrete find_target_milestone, so their symbol-reach rows
-    # are removed (the stale-entry test enforces removal once greened).
-    # (ms-143 PR#2) save remediated: records via occupation.record_target_entry
-    # instead of core.save_entry; the no-active-milestone raise is preserved in the
-    # cmd_save frontend (parity harness test_cmd_save_parity_ms143). Row removed.
-    # sales: record an activity / communication onto the sales target.
-    # (ms-143 PR#2) opportunity_activity remediated: adds the activity via
-    # occupation.add_work_item (an opportunity's activities are its work-item arm)
-    # instead of the sales-concrete sales_entities.activity_add. Row removed.
-    ("communication_add", "sales_entities.communication_add"),
-    ("acquisition_attack_list_send_record", "sales_entities.communication_add"),
-    ("acquisition_attack_list_reply_record", "sales_entities.communication_add"),
-}
+#
+# ms-143 PR #2 has now GREENED every entry ms-134 e-5061 step 2 registered, so the
+# set is empty. The removal history (each verb → the occupation abstraction it now
+# routes through) for the record:
+#   - task_add / task_list / sync / log_finalize → occupation.resolve_target
+#     (was the dev-concrete core.find_target_milestone).
+#   - save → occupation.record_target_entry (was core.save_entry); the
+#     no-active-milestone raise is preserved in cmd_save (test_cmd_save_parity_ms143).
+#   - opportunity_activity → occupation.add_work_item (was sales_entities.activity_add;
+#     an opportunity's activities are its work-item arm).
+#   - communication_add / acquisition_attack_list_send_record / _reply_record →
+#     occupation.add_evidence (was sales_entities.communication_add); the evidence-
+#     grain sibling of add_work_item, nesting-aware for act-/nrt-
+#     (test_add_evidence_primitive_ms143). ms-143 PR #1 (#625) had already abstracted
+#     task_done / opportunity_add / activity_set_status (deliberately never listed).
+# The stale-entry test enforces this set stays honest: a row may return ONLY for a
+# genuine new deferred abstraction (name its owning MS inline), never to silence a
+# fresh violation — route the handler through the occupation layer instead.
+KNOWN_SYMBOL_REACH: set = set()
 
 
 def is_known_symbol_reach(verb: str, symbol: str) -> bool:

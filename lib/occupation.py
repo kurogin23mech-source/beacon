@@ -1141,6 +1141,109 @@ def add_work_item(data: dict, target_id: str, *, description: str,
     return item
 
 
+def _resolve_evidence_parent(data: dict, parent_id: str):
+    """Resolve where a piece of evidence (a sales Communication / 事後記録型の証跡)
+    is stored and which planned work item it fulfilled, occupation-generically
+    (ms-143 設計判断 b 系統4). Returns ``(node, arm, linked_id, container)`` — or
+    ``(None, None, None, None)`` when unresolvable:
+
+      - ``node``      the dict whose evidence arm physically holds the record: the
+                      Target itself (opp-/acc- grain), or the fulfilled work item
+                      (act-/nrt- grain, nested — mirrors a dev commit nested under
+                      its task).
+      - ``arm``       the evidence arm name on ``node`` (``"communications"``).
+      - ``linked_id`` the work item the evidence fulfilled (``""`` at target grain),
+                      recorded so both grains stay traceable.
+      - ``container`` the owning Target (opp/acc) — the source of the
+                      ``created_in_phase`` set-once default even when ``node`` is a
+                      nested work item.
+
+    Accounts / nurturings are deliberately NOT ``profession_manifest`` Target-classes
+    (that invariant stays milestones + opportunities, see ``TARGET_COLLECTIONS``), so
+    this resolver reaches the sales resolvers directly rather than forcing accounts
+    into the manifest and changing every Target projection (ms-143 option A, human-
+    confirmed 2026-08-10). occupation.py is the layer allowed to know sales
+    collections — the same seam as ``record_target_entry`` /
+    ``_HARD_VALIDATED_COLLECTION`` — so the account-grain evidence path lives HERE,
+    not in the profession-agnostic base."""
+    container, linked_id = sales_entities.resolve_communication_target(
+        data, parent_id)
+    if container is None:
+        return None, None, None, None
+    if linked_id.startswith("act-"):
+        _, node = sales_entities.find_activity(data, linked_id)
+    elif linked_id.startswith("nrt-"):
+        _, node = sales_entities.find_nurturing(data, linked_id)
+    else:
+        node = container
+    return node, "communications", linked_id, container
+
+
+def add_evidence(data: dict, parent_id: str, *, summary: str, direction: str,
+                 channel: str = "other", body: str = "",
+                 source: dict | None = None, occurred_at: str = "",
+                 created_at: str = "", created_in_phase: str = "") -> str:
+    """Append a piece of evidence (a sales Communication / 事後記録型の証跡) under a
+    Target or the work item it fulfilled, occupation-generically, and return its id
+    (ms-143 設計判断 b 系統4 = 証跡追加). The evidence-grain sibling of
+    ``add_work_item`` (which adds a *planned* work item to a Target's work-item arm)
+    and of ``record_target_entry`` (which carries the dev milestone changelog and
+    NO-OPs on a sales Target, so it cannot record a Communication — the gap this
+    fills).
+
+    NESTING (mirrors the dev commit↔task model, ms-106 e-3503): a record that
+    fulfills a work item (act-/nrt-) nests UNDER that work item's own evidence arm;
+    one addressed to the Target (opp-/acc-) directly sits at Target level.
+    ``linked_id`` records which work item it fulfilled so both grains stay
+    traceable, and the container's current phase is stamped set-once as
+    ``created_in_phase``.
+
+    Profession-specific fields (``direction`` / ``channel`` / ``body`` / ``source`` /
+    ``occurred_at``) are the sales evidence vocabulary — occupation.py carries them
+    exactly as ``record_target_entry`` carries the dev changelog vocabulary
+    (``revision_id`` / ``hash`` / …). The id is allocated GLOBALLY by prefix via the
+    canonical ``sales_entities.next_communication_id`` (comm- space over every
+    Opportunity + Account, incl. nested), so numbering is unchanged (parity).
+
+    Raises ``ValueError`` on an unresolvable parent, an empty summary, or an invalid
+    direction — same precedence and messages as the pre-refactor
+    ``sales_entities.communication_add`` (pinned by
+    ``tests/test_add_evidence_primitive_ms143.py``)."""
+    node, arm, linked_id, container = _resolve_evidence_parent(data, parent_id)
+    if node is None:
+        raise ValueError(
+            "Communication target not found (opp-…/acc-… target or "
+            f"act-…/nrt-… work item): {parent_id}")
+    if not summary or not summary.strip():
+        raise ValueError("Communication summary is required")
+    if direction not in sales_entities.VALID_COMM_DIRECTION:
+        raise ValueError(
+            f"direction must be one of "
+            f"{sorted(sales_entities.VALID_COMM_DIRECTION)}, got {direction!r}")
+    # channel is free-text (e-3454): normalize only; empty → "other".
+    ch = (channel or "").strip().lower() or "other"
+    ev_id = sales_entities.next_communication_id(data)
+    record = {
+        "id": ev_id,
+        "direction": direction,
+        "channel": ch,
+        "summary": summary.strip(),
+        "source": dict(source) if source else {},
+        "linked_id": linked_id,
+        "occurred_at": occurred_at,
+        "created_at": created_at,
+        # e-3555: 証跡が生まれた時点の商談/顧客のフェーズを set-once で刻む (container の
+        # 現フェーズを既定に、retarget しても不変)。
+        "created_in_phase": created_in_phase or container.get("phase", ""),
+    }
+    # e-3544: 本文欄は非空のときだけ書く (空なら key ごと省いて前方互換を保つ)。
+    body_txt = (body or "").strip()
+    if body_txt:
+        record["body"] = body_txt
+    node.setdefault(arm, []).append(record)
+    return ev_id
+
+
 def iter_work_items(data: dict):
     """Yield ``(work_item, target, arm)`` for every planned work item across
     occupations, profession-agnostically (ms-142 e-5009).

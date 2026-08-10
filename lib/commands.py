@@ -9546,8 +9546,13 @@ def cmd_communication_add():
         source["url"] = source_url
     data = load_project()
     try:
-        comm_id = sales_entities.communication_add(
-            data, target_id, summary, direction=direction, channel=channel,
+        # ms-143: record the 証跡 through the profession-generic
+        # occupation.add_evidence (the evidence-grain sibling of add_work_item),
+        # NOT the sales-concrete sales_entities.communication_add symbol, so this
+        # L2 verb stops symbol-reaching a PROFESSION_CONCRETE_SYMBOL. add_evidence
+        # produces byte-identical records (parity harness), incl. act-/nrt- nesting.
+        comm_id = occupation.add_evidence(
+            data, target_id, summary=summary, direction=direction, channel=channel,
             body=body, source=source or None, occurred_at=occurred_at,
             created_at=core._now_iso())
     except ValueError as e:

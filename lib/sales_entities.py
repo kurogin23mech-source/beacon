@@ -2904,49 +2904,19 @@ def communication_add(data: dict, target_id: str, summary: str, *,
     ``body`` (e-3544, 任意) is a fuller free-text 内容要約 — the骨子 of a mail /
     the 要点 of a議事録 — kept separate from ``summary`` (the 1-行 log line). It is
     stored only when non-empty so old records stay byte-identical (前方互換), and
-    is shown in the UI's per-証跡 detail toggle (最上部) when present."""
-    container, linked_id = resolve_communication_target(data, target_id)
-    if container is None:
-        raise ValueError(
-            "Communication target not found (opp-…/acc-… target or "
-            f"act-…/nrt-… work item): {target_id}")
-    if not summary or not summary.strip():
-        raise ValueError("Communication summary is required")
-    if direction not in VALID_COMM_DIRECTION:
-        raise ValueError(
-            f"direction must be one of {sorted(VALID_COMM_DIRECTION)}, "
-            f"got {direction!r}")
-    # channel is free-text (e-3454): real-world channels are open-ended
-    # (messenger / line / 対面 …). Normalize only; empty → "other".
-    ch = (channel or "").strip().lower() or "other"
-    comm_id = next_communication_id(data)
-    # e-3503 — nest under the fulfilled work item (act-/nrt-), else store at the
-    # target (opp/acc) level, mirroring commit-under-task vs commit-at-milestone.
-    if linked_id.startswith("act-"):
-        _, node = find_activity(data, linked_id)
-    elif linked_id.startswith("nrt-"):
-        _, node = find_nurturing(data, linked_id)
-    else:
-        node = container
-    record = {
-        "id": comm_id,
-        "direction": direction,
-        "channel": ch,
-        "summary": summary.strip(),
-        "source": dict(source) if source else {},
-        "linked_id": linked_id,
-        "occurred_at": occurred_at,
-        "created_at": created_at,
-        # e-3555: 証跡が生まれた時点の商談/顧客のフェーズを set-once で刻む。空なら
-        # container (opp/acc) の現フェーズを既定にする。retarget しても不変。
-        "created_in_phase": created_in_phase or container.get("phase", ""),
-    }
-    # e-3544: 本文欄は非空のときだけ書く (空なら key ごと省いて前方互換を保つ)。
-    body_txt = (body or "").strip()
-    if body_txt:
-        record["body"] = body_txt
-    node.setdefault("communications", []).append(record)
-    return comm_id
+    is shown in the UI's per-証跡 detail toggle (最上部) when present.
+
+    ms-143: the record build + nesting + id allocation now live in the profession-
+    generic ``occupation.add_evidence`` (the evidence-grain sibling of
+    ``add_work_item``); this stays as the sales frontend signature so existing
+    callers are byte-identical (pinned by test_add_evidence_primitive_ms143). Lazy
+    import — occupation imports sales_entities at module load, so the reverse edge
+    must not be import-time."""
+    import occupation
+    return occupation.add_evidence(
+        data, target_id, summary=summary, direction=direction, channel=channel,
+        body=body, source=source, occurred_at=occurred_at,
+        created_at=created_at, created_in_phase=created_in_phase)
 
 
 def communications_of(target: dict, *, linked_id: Optional[str] = None,
