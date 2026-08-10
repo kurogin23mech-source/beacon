@@ -901,49 +901,58 @@ def milestone_update(data: dict, ms_id: str, *,
     "-" (matches the convention used by other CLI clear-this-field tools);
     any other non-empty value sets the field.
     """
-    for ms in data["milestones"]:
-        if ms["id"] == ms_id:
-            if title:
-                work_model.set_target_label(ms, title, dual_write=True)  # ms-109 e-3625
-            if description is not None and description != "":
-                ms["description"] = description
-            if progress:
-                try:
-                    ms["progress"] = max(0, min(100, int(progress)))
-                except ValueError:
-                    pass
-            if target_date:
-                ms["target_date"] = target_date
-            if priority:
-                # ms-126 (e-4224 + AX round-2): a provided priority always routes
-                # through the single-source resolver; empty/omitted = no change.
-                # ``untriaged`` is rejected state-independently (a client cannot
-                # re-assert the machine sentinel). To leave an untriaged milestone
-                # unchanged, omit the field rather than echo it. Mirrors
-                # task_update above.
-                ms["priority"] = _resolve_priority_for_write(
-                    priority, allow_untriaged=False)
-            if objective:
-                ms["objective"] = objective
-            if acceptance_criteria:
-                ms["acceptance_criteria"] = acceptance_criteria
-            if owner:
-                ms["owner"] = "" if owner == "-" else owner
-            if assignee:
-                ms["assignee"] = "" if assignee == "-" else assignee
-            if status:
-                if status not in VALID_STATUSES:
-                    raise ValueError(
-                        f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_STATUSES))}"
-                    )
-                ms["status"] = status
-                meta = ms.setdefault("meta", {})
-                meta[f"{status}_at"] = _now_iso()
-                meta[f"{status}_by"] = _get_actor()
-                if reason:
-                    meta[f"{status}_reason"] = reason
-            return ms
-    raise ValueError(f"Milestone not found: {ms_id}")
+    # ms-143 e-5141: locate the milestone through the profession-generic
+    # occupation.find_target rather than naming data['milestones'] directly, so the
+    # dev-milestone UPDATE path (like create / done / list before it) stops reaching
+    # into the concrete collection. The rich per-field logic below (progress clamp /
+    # priority resolver / status-meta stamp / label dual-write) stays HERE as the dev
+    # frontend concern — it does NOT fit the generic plain-patch occupation.update_
+    # entry, which deliberately carries only flat field sets (leader 握り: primitive
+    # は plain patch に閉じる). Lazy import — occupation imports core at module load.
+    import occupation
+    ms = occupation.find_target(data, ms_id)
+    if ms is None:
+        raise ValueError(f"Milestone not found: {ms_id}")
+    if title:
+        work_model.set_target_label(ms, title, dual_write=True)  # ms-109 e-3625
+    if description is not None and description != "":
+        ms["description"] = description
+    if progress:
+        try:
+            ms["progress"] = max(0, min(100, int(progress)))
+        except ValueError:
+            pass
+    if target_date:
+        ms["target_date"] = target_date
+    if priority:
+        # ms-126 (e-4224 + AX round-2): a provided priority always routes
+        # through the single-source resolver; empty/omitted = no change.
+        # ``untriaged`` is rejected state-independently (a client cannot
+        # re-assert the machine sentinel). To leave an untriaged milestone
+        # unchanged, omit the field rather than echo it. Mirrors
+        # task_update above.
+        ms["priority"] = _resolve_priority_for_write(
+            priority, allow_untriaged=False)
+    if objective:
+        ms["objective"] = objective
+    if acceptance_criteria:
+        ms["acceptance_criteria"] = acceptance_criteria
+    if owner:
+        ms["owner"] = "" if owner == "-" else owner
+    if assignee:
+        ms["assignee"] = "" if assignee == "-" else assignee
+    if status:
+        if status not in VALID_STATUSES:
+            raise ValueError(
+                f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_STATUSES))}"
+            )
+        ms["status"] = status
+        meta = ms.setdefault("meta", {})
+        meta[f"{status}_at"] = _now_iso()
+        meta[f"{status}_by"] = _get_actor()
+        if reason:
+            meta[f"{status}_reason"] = reason
+    return ms
 
 
 def milestone_purge(data: dict, ms_id: str, *, reason: str,
