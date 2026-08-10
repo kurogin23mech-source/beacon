@@ -126,9 +126,14 @@ def test_unresolved_ms_reference_is_clean_error_not_traceback(proj):
     # milestone) used to bubble a raw Python traceback out of the commands.py
     # dispatcher. It must surface as a clean 1-line error + exit 1, never a
     # stacktrace.
+    # ms-143: task_add / task_list now resolve their target through the profession-
+    # generic occupation.resolve_target (not the dev-concrete find_target_milestone),
+    # so an unresolved id reads "Target not found: <id>" — a clean, correct 1-line
+    # error (the guard this test enforces), generalized from the old dev-only
+    # "Milestone not found".
     for args in (("task", "list", "-m", "ms-999"),
                  ("task", "add", "x", "-m", "ms-999")):
         r = _run(proj, *args)
         assert r.returncode == 1, args
-        assert "Milestone not found" in r.stderr, args
+        assert "Target not found" in r.stderr, args
         assert "Traceback" not in (r.stdout + r.stderr), args

@@ -151,11 +151,21 @@ def _is_bulk_milestone_add(data: dict, current_ms_id: str) -> bool:
     import datetime as _dt
     try:
         now = _dt.datetime.now(_dt.timezone.utc)
-        milestones = data.get("milestones", [])
-        # Compare against the second-most-recent MS (the most recent is the
+        # ms-143: read Target records through the manifest-driven accessor rather
+        # than naming data['milestones'] directly, so this helper (part of the
+        # milestone_add verb's reach) is concrete-free. This helper is milestone-
+        # specific (bulk-add of milestones), so it asks for the milestone kind
+        # explicitly via target_records(data, "milestone") — NOT the all-collections
+        # iter_target_records, which would fold a sibling occupation's Targets
+        # (opportunities) into the "most recent prior record" scan in a mixed
+        # project (maintainability review PR #628 finding §1). Append order within
+        # the milestones collection is preserved, so the semantics are unchanged.
+        import occupation
+        records = occupation.target_records(data, "milestone")
+        # Compare against the second-most-recent record (the most recent is the
         # one we just added).
         prior = None
-        for ms in reversed(milestones):
+        for ms in reversed(records):
             if ms.get("id") == current_ms_id:
                 continue
             prior = ms
@@ -177,13 +187,13 @@ def cmd_milestone_list():
     ms_filter_str = os.environ.get("BEACON_MS_FILTER", "")
     data = load_project()
 
-    milestones = data["milestones"]
+    milestones = occupation.target_records(data, "milestone")
     if not show_all:
         milestones = [ms for ms in milestones if ms.get("status") != "cancelled"]
 
     if ms_filter_str:
         ms_ids = [m.strip() for m in ms_filter_str.split(",") if m.strip()]
-        all_ids = {ms["id"] for ms in data["milestones"]}
+        all_ids = {ms["id"] for ms in occupation.target_records(data, "milestone")}
         for ms_id in ms_ids:
             if ms_id not in all_ids:
                 print(f"Error: milestone not found: {ms_id}", file=sys.stderr)
@@ -222,6 +232,10 @@ def cmd_milestone_list():
             # existing readers / Skills keep working unchanged.
             "pending_operations": [],
         }
+        # ms-143: collect into a local list, then assign — avoids reading back
+        # ``output["milestones"]`` (a LOAD subscript on the local result dict the
+        # collection-coupling checker cannot tell apart from project data).
+        _ms_out = []
         for ms in milestones:
             entries = ms.get("entries", [])
             total_tasks, done_tasks = core.count_task_status(entries)
@@ -237,7 +251,8 @@ def cmd_milestone_list():
             for f in ("priority", "objective", "acceptance_criteria", "description"):
                 if ms.get(f):
                     ms_item[f] = ms[f]
-            output["milestones"].append(ms_item)
+            _ms_out.append(ms_item)
+        output["milestones"] = _ms_out
         import datetime as _dt
         today_str = _dt.date.today().isoformat()
         for op in data.get("operations", []):
@@ -621,7 +636,7 @@ def _prompt_close_leftover_worktree(ms_id: str, transition: str) -> None:
         data = load_project()
     except Exception:
         return
-    ms = next((m for m in data.get("milestones", []) if m.get("id") == ms_id), None)
+    ms = next((m for m in occupation.target_records(data, "milestone") if m.get("id") == ms_id), None)
     if ms is None:
         return
     try:
@@ -695,7 +710,7 @@ _OBSERVE_BAN_ERROR = (
 )
 def _milestone_status(data: dict, ms_id: str) -> str:
     """Current status string of a milestone, or "" if not found."""
-    for _m in data.get("milestones", []):
+    for _m in occupation.target_records(data, "milestone"):
         if _m.get("id") == ms_id:
             return _m.get("status", "")
     return ""
@@ -981,7 +996,7 @@ def cmd_milestone_join():
     # Find the MS up front so we can read its title (needed for slug + the
     # human-facing "joined X" message) and so we can fail fast with a
     # clearer error than "Milestone not found" from the deep helper.
-    ms = next((m for m in data.get("milestones", []) if m.get("id") == ms_id), None)
+    ms = next((m for m in occupation.target_records(data, "milestone") if m.get("id") == ms_id), None)
     if ms is None:
         print(f"Error: Milestone not found: {ms_id}", file=sys.stderr)
         sys.exit(1)
@@ -1060,7 +1075,7 @@ def cmd_milestone_show():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
 
-    for ms in data["milestones"]:
+    for ms in occupation.target_records(data, "milestone"):
         if ms["id"] == ms_id:
             entries = ms.get("entries", [])
             total_tasks, done_tasks = core.count_task_status(entries)
@@ -1459,7 +1474,7 @@ def cmd_milestone_workspace_cleanup():
         sys.exit(1)
 
     data = load_project()
-    ms = next((m for m in data["milestones"] if m["id"] == ms_id), None)
+    ms = next((m for m in occupation.target_records(data, "milestone") if m["id"] == ms_id), None)
     if ms is None:
         print(f"Error: milestone not found: {ms_id}", file=sys.stderr)
         sys.exit(1)

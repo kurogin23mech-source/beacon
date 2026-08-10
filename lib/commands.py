@@ -2116,7 +2116,8 @@ def _cloud_purge_dispatch(action_label: str, fn, *,
 def cmd_sync():
     ms_id = os.environ.get("BEACON_MS_ID", "")
     data = load_project()
-    target = core.find_target_milestone(data, ms_id)
+    # ms-143: profession-generic target resolution (not the dev-concrete symbol).
+    target = occupation.resolve_target(data, ms_id)
 
     entries = target.setdefault("entries", [])
     existing_hashes = set()
@@ -3045,10 +3046,20 @@ def cmd_save():
         sys.exit(1)
 
     data = load_project()
-    result = core.save_entry(data, ms_id=ms_id, description=description,
-                             source=source, date=date, url=url,
-                             revision_id=revision_id, hash=hash_val,
-                             progress=progress)
+    # ms-143: record the side-effect changelog through the profession-generic
+    # occupation.record_target_entry (NOT the dev-concrete core.save_entry), so
+    # the save verb no longer symbol-reaches a PROFESSION_CONCRETE_SYMBOL. Bad-id /
+    # multi-active still RAISE identically (record_target_entry propagates
+    # find_target_milestone's errors). Only the empty-ms_id-no-active case differs:
+    # record_target_entry no-ops (recorded=False) where save_entry raised — so the
+    # frontend re-raises to PRESERVE the observable "No active milestone" error
+    # (parity-first, leader 握り; abstraction=occupation, no-milestone UX=frontend).
+    outcome = occupation.record_target_entry(
+        data, ms_id, description=description, source=source, date=date, url=url,
+        revision_id=revision_id, hash=hash_val, progress=progress)
+    if not outcome.get("recorded"):
+        raise ValueError("No active milestone. Run: beacon milestone start <ms-id>")
+    result = outcome["result"]
     save_project(data)
 
     if json_mode:
@@ -8792,7 +8803,7 @@ def cmd_opportunity_list():
     show_all = os.environ.get("BEACON_ALL", "") == "1"  # e-3586: --all で取消済も出す
     data = load_project()
     # e-3586: 既定は取消済 (cancelled) を除外。--all で全件。
-    opps = (data.get("opportunities", []) if show_all
+    opps = (occupation.target_records(data, "opportunity") if show_all
             else sales_entities.live_opportunities(data))
     if json_mode:
         print(json.dumps(opps, ensure_ascii=False, indent=2))
@@ -9144,6 +9155,11 @@ def cmd_deadline_due():
             continue
         items.append({
             "kind": cand["kind"],
+            # ms-143 e-5047: resolve the display label here (where project data +
+            # descriptors are loaded) and carry it in the payload, so the JSON
+            # consumer (scripts/session-start-deadlines.py) need not re-hardcode a
+            # kind→label map. A new occupation's label rides from its descriptor.
+            "kind_label": occupation.kind_display_label(data, cand["kind"]),
             "label": cand["label"],
             "deadline": deadline.deadline_of(cand["item"]),
             "temporal": st,
@@ -9156,12 +9172,11 @@ def cmd_deadline_due():
     if not items:
         print("締切精査: 期日 到達/超過の work item はありません")
         return
-    label_jp = {"milestone": "MS", "task": "タスク", "activity": "活動"}
     print("⏰ 締切超過/本日 の work item:")
     for r in items:
         mark = "⚠ 超過" if r["temporal"] == deadline.TRANSITION_OVERDUE else "⏰ 本日"
         ctx = f" — {r['context']}" if r.get("context") else ""
-        print(f"  [{label_jp.get(r['kind'], r['kind'])}] {r['label']} / "
+        print(f"  [{r['kind_label']}] {r['label']} / "
               f"期日 {r['deadline']} {mark}{ctx}")
     print("  → 済んだら完了/期日を延ばす/やめたら取消 で盤面から外してください。")
 
@@ -9389,9 +9404,27 @@ def cmd_opportunity_activity():
     ball = os.environ.get("BEACON_ACTIVITY_BALL", "") or sales_entities.BALL_SELF
     data = load_project()
     try:
-        act_id = sales_entities.activity_add(data, opp_id, desc, deadline=deadline,
-                                             who_has_the_ball=ball,
-                                             created_at=core._now_iso())
+        # ms-143: add the activity through the profession-generic
+        # occupation.add_work_item (an opportunity's activities ARE its work-item
+        # arm), NOT the dev... sales-concrete sales_entities.activity_add symbol, so
+        # this L2 verb stops symbol-reaching a PROFESSION_CONCRETE_SYMBOL. The sales
+        # validations (opportunity exists / ball vocabulary / description required)
+        # and the created_in_phase default stay here as the sales frontend concern —
+        # same shape sales_entities.activity_add produces (parity).
+        opp = occupation.find_target(data, opp_id)
+        if opp is None:
+            raise ValueError(f"Opportunity not found: {opp_id}")
+        if not desc or not desc.strip():
+            raise ValueError("Activity description is required")
+        if ball not in sales_entities.VALID_BALL:
+            raise ValueError(
+                f"who_has_the_ball must be one of "
+                f"{sorted(sales_entities.VALID_BALL)}, got {ball!r}")
+        act = occupation.add_work_item(
+            data, opp_id, description=desc.strip(), deadline=deadline,
+            who_has_the_ball=ball, source="", created_at=core._now_iso(),
+            created_in_phase=opp.get("phase", ""))
+        act_id = act["id"]
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -9517,10 +9550,15 @@ def cmd_communication_add():
         source["url"] = source_url
     data = load_project()
     try:
-        comm_id = sales_entities.communication_add(
-            data, target_id, summary, direction=direction, channel=channel,
+        # ms-143: record the 証跡 through the profession-generic
+        # occupation.add_evidence (the evidence-grain sibling of add_work_item),
+        # NOT the sales-concrete sales_entities.communication_add symbol, so this
+        # L2 verb stops symbol-reaching a PROFESSION_CONCRETE_SYMBOL. add_evidence
+        # produces byte-identical records (parity harness), incl. act-/nrt- nesting.
+        comm_id = occupation.add_evidence(
+            data, target_id, summary=summary, direction=direction, channel=channel,
             body=body, source=source or None, occurred_at=occurred_at,
-            created_at=core._now_iso())
+            created_at=core._now_iso())["id"]
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

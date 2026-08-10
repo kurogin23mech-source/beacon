@@ -26,6 +26,7 @@ import sys
 from typing import Optional
 
 import core
+import occupation
 from commands_shared import (
     load_project,
     get_project_file,
@@ -68,7 +69,7 @@ def cmd_retro_prepare():
     data = load_project()
 
     weekly_milestones = []
-    for ms in data.get("milestones", []):
+    for ms in occupation.target_records(data, "milestone"):
         ms_entries = core.collect_retro_entries(ms.get("entries", []), since, until)
         if ms_entries:
             weekly_milestones.append({

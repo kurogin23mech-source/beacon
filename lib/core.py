@@ -408,7 +408,15 @@ def find_milestones(data: dict, ms_id: str) -> list[dict]:
     has duplicate IDs (Issue #14 — should now be prevented by
     validate_project, but the helper still works on raw/unvalidated data).
     """
-    return [ms for ms in data.get("milestones", []) if ms.get("id") == ms_id]
+    # ms-143: read the milestone record set through the manifest-driven
+    # occupation.target_records (concrete-literal-free) rather than naming
+    # data['milestones'] here — greens every verb that resolves via
+    # find_milestones / find_target_milestone (task_add / task_list / log). The
+    # milestone-specific matching stays here (dev frontend). Lazy import avoids
+    # the occupation→core module cycle.
+    import occupation
+    return [ms for ms in occupation.target_records(data, "milestone")
+            if ms.get("id") == ms_id]
 
 
 def find_target_milestone(data: dict, ms_id: str = "", *, index: int | None = None) -> dict:
@@ -448,7 +456,12 @@ def find_target_milestone(data: dict, ms_id: str = "", *, index: int | None = No
             )
         return matches[index - 1]
 
-    active_list = [ms for ms in data["milestones"] if ms["status"] == "in_progress"]
+    # ms-143: auto-select the single active milestone from the manifest-driven
+    # record set (concrete-literal-free). The dev-specific resolution (single
+    # active → pick it, zero → prompt to start, >1 → require -m) is UNCHANGED.
+    import occupation
+    active_list = [ms for ms in occupation.target_records(data, "milestone")
+                   if ms["status"] == "in_progress"]
     if len(active_list) == 0:
         raise ValueError("No active milestone. Run: beacon milestone start <ms-id>")
     if len(active_list) > 1:
@@ -1247,9 +1260,14 @@ def task_add(data: dict, ms_id: str, description: str, *,
     ``meta.created_by`` (= local-agent string for CLI / debug). Empty
     fields are dropped.
     """
-    target = find_target_milestone(data, ms_id)
-    entries = target.setdefault("entries", [])
-    eid = next_entry_id(data)
+    # ms-143: resolve the target through the profession-generic
+    # occupation.resolve_target (NOT the dev-concrete find_target_milestone), so
+    # the task_add verb no longer symbol-reaches a PROFESSION_CONCRETE_SYMBOL.
+    # resolve_target mirrors find_target_milestone's id / auto-select-active /
+    # duplicate resolution over the manifest record set. Lazy import (occupation
+    # imports core).
+    import occupation
+    target = occupation.resolve_target(data, ms_id)
     meta = {}
     if requested_by:
         meta["requested_by"] = requested_by
@@ -1275,30 +1293,31 @@ def task_add(data: dict, ms_id: str, description: str, *,
     author_clean = _clean_author(author)
     if author_clean:
         meta["author"] = author_clean
-    entry = {
-        "id": eid,
-        "type": entry_type,
-        "description": description,
-        "date": date or now,
-        "created_at": now,
-        "done_at": None,
-        "status": "todo",
-        "meta": meta,
-    }
+    # ms-143: id allocation + arm append delegate to occupation.add_work_item
+    # (manifest-driven; global-by-prefix id == next_entry_id). find_target_milestone
+    # above keeps the dev-specific resolution (auto-select active / duplicate index)
+    # and is now itself concrete-free, so this verb no longer names data['milestones']
+    # / next_entry_id. entry_type (task/commit/note) rides as the item_type override;
+    # the dev-shaped fields (date / created_at / done_at / meta + optional detail /
+    # motivation / acceptance_criteria / deadline) ride via **extra so the entry
+    # shape is byte-for-byte unchanged. Lazy import avoids the occupation→core cycle.
+    #
+    # ms-139 e-4949: 締切 (deadline) は top-level フィールド (L2 締切エンジンが
+    # canonical ``deadline`` として読む)。任意なので値がある時だけ持たせる。
+    import occupation
+    optional: dict = {}
     if detail:
-        entry["detail"] = detail
+        optional["detail"] = detail
     if motivation:
-        entry["motivation"] = motivation
+        optional["motivation"] = motivation
     if acceptance_criteria:
-        entry["acceptance_criteria"] = acceptance_criteria
-    # ms-139 e-4949: 締切 (deadline, YYYY-MM-DD) は top-level フィールド。milestone の
-    # target_date と同様、L2 締切エンジン (lib/deadline.py の deadline_of) が canonical
-    # ``deadline`` として読む。フィールド名は職種ごとに残す (task/activity=deadline、
-    # milestone=target_date)。任意なので値がある時だけ持たせる。
+        optional["acceptance_criteria"] = acceptance_criteria
     if deadline:
-        entry["deadline"] = deadline
-    entries.append(entry)
-    return eid
+        optional["deadline"] = deadline
+    entry = occupation.add_work_item(
+        data, target["id"], description=description, item_type=entry_type,
+        date=date or now, created_at=now, done_at=None, meta=meta, **optional)
+    return entry["id"]
 
 
 def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",
