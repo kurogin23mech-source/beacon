@@ -979,6 +979,40 @@ def set_entry_state(data: dict, entry_id: str, status: str, *,
     return target, entry
 
 
+def update_entry(data: dict, entry_id: str, **fields) -> dict:
+    """Patch attributes on a Target OR a work item, profession-generically (ms-143,
+    設計判断 i = 更新). The attribute-patch sibling of ``set_entry_state`` (which
+    owns the LIFECYCLE transition todo/done + its completion attribution) — kept
+    SEPARATE so the ``mark_done`` completion stamps never leak onto a plain field
+    edit (設計判断 i = 分離).
+
+    Locates ``entry_id`` first across all Target collections (``find_target``) and,
+    failing that, their work-item arms (``find_target_entry``) — so it never names
+    ``data['milestones']`` / ``data['opportunities']`` / ``find_opportunity`` itself.
+    Applies each keyword in ``fields`` verbatim (``record[key] = value``); a value of
+    ``None`` is WRITTEN, not skipped, so a field can be CLEARED (a sales
+    ``goal_amount=None`` clears the 商談金額). The caller passes only the keys it
+    means to change.
+
+    Per-field validation / normalization stays in the FRONTEND — this primitive is
+    the generic locate + apply skeleton, mirroring how ``add_work_item`` leaves the
+    sales validation to its caller. So the rich, profession-specific edits (dev
+    ``milestone update``'s progress clamp / priority resolver / status-meta stamp /
+    label dual-write; sales ``opportunity phase``'s funnel transition) are NOT folded
+    here — they keep their own frontend path (leader 握り: primitive は plain patch
+    に閉じる). Returns the located record. Raises ``ValueError`` when ``entry_id``
+    matches no Target or work item."""
+    record = find_target(data, entry_id)
+    if record is None:
+        hit = find_target_entry(data, entry_id)
+        record = hit[2] if hit else None
+    if record is None:
+        raise ValueError(f"Entry not found: {entry_id}")
+    for key, value in fields.items():
+        record[key] = value
+    return record
+
+
 def target_records(data: dict, kind: str) -> list:
     """Return the list of Target records for ``kind`` (manifest-resolved
     collection), profession-generically (ms-143). The concrete-literal-free way

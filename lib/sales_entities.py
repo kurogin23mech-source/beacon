@@ -553,12 +553,15 @@ def opportunity_set_description(data: dict, opportunity_id: str,
                                description: str) -> dict:
     """Set an Opportunity's free-text 背景 / 経緯 / メモ (ms-106 e-3526). Empty
     string clears it. Returns the updated opportunity dict. Raises ValueError
-    when the opportunity is unknown."""
-    opp = find_opportunity(data, opportunity_id)
-    if opp is None:
-        raise ValueError(f"Opportunity not found: {opportunity_id}")
-    opp["description"] = (description or "").strip()
-    return opp
+    when the opportunity is unknown.
+
+    ms-143: patches through the profession-generic occupation.update_entry
+    (locate + plain field patch), so the sales 更新 path no longer names
+    data['opportunities'] / find_opportunity itself. Lazy import — occupation
+    imports sales_entities at module load."""
+    import occupation
+    return occupation.update_entry(
+        data, opportunity_id, description=(description or "").strip())
 
 
 def opportunity_set_title(data: dict, opportunity_id: str, title: str) -> dict:
@@ -567,15 +570,16 @@ def opportunity_set_title(data: dict, opportunity_id: str, title: str) -> dict:
     name (parallel to `milestone rename`). Returns the updated opportunity dict.
     Raises ValueError when the opportunity is unknown or the title is empty
     (unlike description, a title cannot be cleared — every opportunity needs a
-    name)."""
-    opp = find_opportunity(data, opportunity_id)
-    if opp is None:
-        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    name).
+
+    ms-143: the title validation (non-empty) stays here as the sales frontend
+    concern; the locate + patch routes through occupation.update_entry so the 更新
+    path no longer names data['opportunities'] itself. Lazy import."""
+    import occupation
     new_title = (title or "").strip()
     if not new_title:
         raise ValueError("title must not be empty (an opportunity always needs a name)")
-    opp["title"] = new_title
-    return opp
+    return occupation.update_entry(data, opportunity_id, title=new_title)
 
 
 def account_phase_warnings(data: dict, new_phase: str) -> list:
@@ -1239,12 +1243,14 @@ def _auto_advance_account_phase(data: dict, account_id: str, *, at: str = "") ->
 
 def set_opportunity_amount(data: dict, opp_id: str, amount) -> dict:
     """Set an opportunity's goal_amount (商談金額). ``amount`` is a number (円)
-    or None to clear. Returns the mutated opportunity."""
-    opp = find_opportunity(data, opp_id)
-    if opp is None:
-        raise ValueError(f"Opportunity not found: {opp_id}")
-    opp["goal_amount"] = amount
-    return opp
+    or None to clear. Returns the mutated opportunity.
+
+    ms-143: patches through the profession-generic occupation.update_entry
+    (locate + plain field patch; ``goal_amount=None`` clears — update_entry writes
+    None rather than skipping it), so the 更新 path no longer names
+    data['opportunities'] itself. Lazy import."""
+    import occupation
+    return occupation.update_entry(data, opp_id, goal_amount=amount)
 
 
 def set_phase_probability(data: dict, phase_name: str, probability) -> dict:
