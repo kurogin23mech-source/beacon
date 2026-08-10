@@ -363,9 +363,13 @@ _NOUN_SCOPE = {
     # (doctor/update/project/skill/migrate/reset) were universal instance tooling,
     # not Beacon-repo-only operation, so they moved to L1 below (CORE doc
     # 37Svg6nD2FccJM27yBjq 2026-08-09 改訂: 普遍機能は L1、L0 は配布から構造除外).
-    # The L0 scope itself stays valid — it is carried by SKILLS (e.g.
-    # beacon-drift-check in _SKILL_SCOPE), not verbs. e-5062 enforces the
-    # distribution exclusion so any future L0 verb cannot ship in the wheel/plugin.
+    # As of ms-134 e-5086, NO Skill is L0 either — beacon-drift-check (the only
+    # former L0 Skill) was reclassified L1 (universal source↔installed drift check).
+    # So L0 is currently empty on BOTH axes. The L0 scope stays valid as a category;
+    # e-5062 (shipped_l0_verbs) + e-5086 (shipped_l0_skills) are the twin GUARDS that
+    # fail the checker if a future L0 verb or Skill is ever placed in the public
+    # distribution — the distribution-exclusion is enforced on the axis a leak could
+    # appear on, not just documented.
     # L1 — all-profession coordination substrate (target-agnostic).
     "auth": "L1", "bus": "L1", "channel": "L1", "cloud": "L1", "cycle": "L1",
     "disclose": "L1", "undisclose": "L1", "dm": "L1", "help": "L1",
@@ -623,6 +627,25 @@ def shipped_l0_verbs(live: Optional[set] = None) -> list:
     return sorted(v for v in live if scope_of(v) == "L0")
 
 
+def shipped_l0_skills(skills: Optional[list] = None,
+                      skills_dir: str = "") -> list:
+    """Return shipped Skills classified L0 — the skill-side distribution-exclusion
+    violation (ms-134 e-5086, the symmetric twin of ``shipped_l0_verbs``). Every
+    file under repo ``skills/`` is bundled into the wheel/plugin verbatim (pyproject
+    ``package-data`` ships ``skills/**/*.md``), so a Skill enumerated here IS a
+    shipped Skill; an L0 (Beacon-product-operation, 非配布・運用専用) Skill among them
+    means an operation-only capability leaked into the public distribution.
+
+    Like ``shipped_l0_verbs``'s ``live``, callers may inject the already-enumerated
+    skill surface via ``skills``; ``None`` re-enumerates from ``skills_dir`` (the
+    repo ``skills/`` tree). The current tree is L0-free (beacon-drift-check was
+    reclassified L1 — a universal source↔installed drift check; see the L0 comment
+    block above ``_NOUN_SCOPE``). This is a GUARD that fails the checker if a future
+    L0 Skill is ever placed in the shipped ``skills/`` tree."""
+    names = enumerate_skills(skills_dir) if skills is None else skills
+    return sorted(s for s in names if skill_scope_of(s) == "L0")
+
+
 def reconcile_ownership(live: Optional[set] = None) -> dict:
     """Reconcile the OWNERSHIP axis (ms-134 e-4738) against the live CLI surface.
     Returns ``{"unowned": [...], "by_owner": {...}}``:
@@ -693,7 +716,15 @@ _SKILL_PREFIX_SCOPE = (
 # Exact skill → scope (where the prefix rule does not fit).
 _SKILL_SCOPE = {
     "beacon-archaeology": "L2", "beacon-bus-armed": "L1", "beacon-cloud": "L1",
-    "beacon-deploy": "L3", "beacon-dispatch": "L1", "beacon-drift-check": "L0",
+    "beacon-deploy": "L3", "beacon-dispatch": "L1",
+    # beacon-drift-check: L0→L1 (ms-134 e-5086). It formats `beacon doctor`'s
+    # skills-drift warning = source skills (repo skills/ OR wheel _bundled_skills/)
+    # vs installed ~/.claude/skills/. That source↔installed drift is universal: a
+    # distributed pipx user who `beacon update`d without re-running `beacon skill
+    # install` has it too. So it is instance-universal (L1), not Beacon-repo-only
+    # operation (L0). Its earlier L0 classification was read off the "for developers"
+    # framing, not the drift it actually detects.
+    "beacon-drift-check": "L1",
     "beacon-scenario-gen": "L3",  # ms-136: 自動デバッグ基盤の生成器 (dev L3, 公開配布)
     "beacon-incident-report": "L1", "beacon-init": "L1", "beacon-log": "L3",
     "beacon-map": "L2", "beacon-member": "L1", "beacon-note": "L1",
