@@ -41,7 +41,7 @@ ROOT=$(beacon-find-root) && \
 全商談と、判定待ち・返信待ちの状態を取る:
 
 ```bash
-beacon opportunity list --json                 # 全商談・フェーズ・遷移日・活動
+beacon opportunity list --json                 # 全商談・フェーズ・遷移日・活動 + gate_needs_anchor（発火源 未紐づけの事実フラグ, ms-144 e-5178）
 beacon opportunity due --json                  # 遷移日 + 準備活動の期日が due/overdue → {opportunities, activities}
 beacon phase list --json                       # フェーズごとのゴール・活動テンプレ
 BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" watch_list  # 返信待ち
@@ -61,10 +61,14 @@ BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" 
 関門)** が 1 つ開いている。商談ごとに、以下の優先順位で「次の一手」を 1 つ決める（上から評価し
 最初にヒットしたもの）:
 
-1. **前進ゲートが空（発火源 未紐づけ／遷移日 未設定）** → 最優先で「発火源を確保せよ」。
+1. **前進ゲートが空（`gate_needs_anchor == true` ／遷移日 未設定）** → 最優先で「発火源を確保せよ」。
+   「発火源が未紐づけか」は生の `gates[]` を自分で解釈せず、`opportunity list --json` の各商談の
+   `gate_needs_anchor` フラグ（open な前進ゲートかつ発火源が空 = true、ms-144 e-5178）を事実として読む。
    ゲートに判定のきっかけ（面談 or 日程付きの活動）が紐づいていないと、準備も追い込みも
-   駆動できない（SPEC §2、空ゲート = 確保が目的）。→ `/beacon-sales-schedule` で面談を確定
-   すると、その面談がゲートの発火源になり遷移日も同時に入る。
+   駆動できない（SPEC §2、空ゲート = 確保が目的）。確保の手段は 2 つ:
+   面談で確保するなら `/beacon-sales-schedule` で面談を確定すると、その面談がゲートの発火源になり
+   遷移日も同時に入る。既にある活動（面談以外）を発火源に結ぶなら `beacon opportunity anchor <opp> <act-id>`
+   で直接結ぶ（ms-144 e-5177）。
 2. **前進ゲートが判定どき（紐づけた面談/活動が完了、または遷移日 超過）** → 「判定せよ」。
    紐づけた面談が終わっていれば `/beacon-sales-meeting-wrap`（議事録→判定案）、無ければ
    `beacon opportunity judge` の 3 択（前進 / やり直し / 決着）に繋ぐ。
@@ -170,8 +174,8 @@ beacon doc list --account <acc-id> --scope spec --json   # dossier-<acc-id> の�
 ## 制約
 
 - **提示までが自律**。送信・予約・フェーズ確定は既存 Skill の人間承認を経る（勝手にやらない）。
-- **空の前進ゲート（発火源 未紐づけ）を最優先で促す**（engine 駆動の起点、SPEC §2 =
-  空ゲート = 発火源を確保せよ）。
+- **空の前進ゲート（`gate_needs_anchor`）を最優先で促す**（engine 駆動の起点、SPEC §2 =
+  空ゲート = 発火源を確保せよ）。判定は生 `gates[]` の解釈でなく `gate_needs_anchor` フラグで行う。
 - 読み取り専用で導出する（盤面を読むだけ、`project.json` を直接書き換えない）。
 - 実行は既存 Skill に繋ぐ。この Skill 内で送信 API を直接叩かない。
 
