@@ -39,6 +39,7 @@ import work_model  # noqa: F401
 import transition_approval as _ta  # noqa: F401
 import target_descriptor as _td  # noqa: F401
 import target_engine as _te  # noqa: F401
+import occupation  # noqa: F401  (no cycle: occupation does not import cmd_target)
 
 from commands_shared import (  # noqa: F401
     _actor_str,
@@ -544,16 +545,33 @@ def _resolve_descriptor(data: dict, kind: str) -> dict:
     if not kind:
         print("Error: --class <kind> は必須です", file=sys.stderr)
         sys.exit(1)
-    desc = _td.get_descriptor(data, kind)
+    # effective (not raw) descriptors so a profession-default target-class — dev's
+    # ``release``, ms-142 e-5161 — resolves via `beacon target <verb> --class
+    # release` even though no user declared it in target_classes.
+    desc = occupation.effective_get_descriptor(data, kind)
     if desc is None:
-        kinds = _td.descriptor_kinds(data)
-        if kinds:
-            print(f"Error: target-class '{kind}' の記述子がありません "
-                  f"(宣言済: {', '.join(kinds)})", file=sys.stderr)
-        else:
-            print(f"Error: target-class '{kind}' の記述子がありません "
-                  f"(このプロジェクトは target_classes を1つも宣言していません)",
-                  file=sys.stderr)
+        # AX review e-5220: the "not found" hint MUST NOT list a profession-default
+        # (built-in) class like ``release`` under 宣言済 — a user who never wrote it
+        # would search project.json in vain and misdiagnose. Split the two sources so
+        # the injection model is self-describing: what the user declared vs what the
+        # occupation supplies built-in.
+        declared = [(d.get("kind") or "").strip()
+                    for d in _td.load_descriptors(data)
+                    if isinstance(d, dict) and (d.get("kind") or "").strip()]
+        builtin = [k for k in (
+                       (d.get("kind") or "").strip()
+                       for d in occupation.effective_descriptors(data)
+                       if isinstance(d, dict) and (d.get("kind") or "").strip())
+                   if k not in declared]
+        parts = []
+        if declared:
+            parts.append(f"宣言済: {', '.join(declared)}")
+        if builtin:
+            parts.append(f"ビルトイン (職種既定): {', '.join(builtin)}")
+        detail = " / ".join(parts) if parts \
+            else "このプロジェクトは target-class を1つも持ちません"
+        print(f"Error: target-class '{kind}' の記述子がありません ({detail})",
+              file=sys.stderr)
         sys.exit(1)
     # ms-122 AX finding: validate the descriptor at the point of use so a
     # malformed record (unknown field type / duplicate keys / required on a

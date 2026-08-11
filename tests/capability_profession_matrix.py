@@ -150,6 +150,27 @@ import target_state    # noqa: E402
 import claim_view      # noqa: E402
 
 
+def _release_project():
+    # Release as dev's L3 first-class Target (ms-142 §9 / e-5161): it is a
+    # profession-default descriptor (kind=release), so it enters the manifest via
+    # occupation.effective_descriptors with work_item_arm=None and evidence_arms=[]
+    # — its deadline and 証跡 cells are DECLARED N/A (identical shape to operation),
+    # while phase-advance (draft→published→deployed via the descriptor engine),
+    # completion-gate (self-close-ban) and claim must be GREEN. The record is shaped
+    # exactly as target_engine.create_target stamps a descriptor target (kind /
+    # phase / who_has_the_ball / phase_history / work_items / evidence).
+    return {
+        "name": "rel", "profession": "dev", "milestones": [],
+        "release_targets": [
+            {"id": "rel-1", "label": "v1.0", "kind": "release",
+             "status": "in_progress", "phase": "draft", "version": "1.0.0",
+             "who_has_the_ball": "self",
+             "occupation": {"session_id": "sv-rel"},
+             "phase_history": [], "work_items": [], "evidence": []},
+        ],
+    }
+
+
 def _operation_project():
     # Operation as a first-class Target (ms-142 §8): it is in the manifest
     # (target_collections seed) with work_item_arm=None and evidence_arms=[] — so
@@ -185,6 +206,11 @@ TARGET_CLASSES = {
                     "work_item_id": "act-1"},
     "operation": {"project": _operation_project, "target_id": "op-1",
                   "work_item_id": None},   # None → no work-item arm → deadline N/A
+    # ms-142 e-5161: release is a profession-default (built-in-as-data) dev Target-
+    # class. work_item_id=None → its deadline cell is a declared N/A (work_item_arm
+    # =None), evidence_arms=[] → 証跡 N/A; phase-advance / completion-gate / claim GREEN.
+    "release": {"project": _release_project, "target_id": "rel-1",
+                "work_item_id": None},
     "obligation": {"project": _synthetic_project, "target_id": "obl-1",
                    "work_item_id": "duty-1"},
 }

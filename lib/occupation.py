@@ -71,10 +71,13 @@ DEFAULT_PROFESSION = "dev"
 
 def _descriptors_owned_by(data: dict, profession: str) -> list:
     """Return the well-formed descriptors whose ``profession`` matches (lower-
-    cased). Empty for a dev / sales project (they declare no descriptors)."""
+    cased), sourced from ``effective_descriptors`` (profession defaults + the
+    user-declared raw list). A dev project therefore returns its profession-default
+    ``release`` descriptor even with no user descriptors (ms-142 e-5161); a sales
+    project stays empty (sales has no profession default and declares none)."""
     want = (profession or "").strip().lower()
     out = []
-    for desc in _td.load_descriptors(data):
+    for desc in effective_descriptors(data):
         if isinstance(desc, dict) \
                 and (desc.get("profession") or "").strip().lower() == want:
             out.append(desc)
@@ -88,6 +91,43 @@ def resolve_profession(data: dict) -> str:
     development projection."""
     return (data.get("profession") or DEFAULT_PROFESSION).strip().lower() \
         or DEFAULT_PROFESSION
+
+
+def effective_descriptors(data: dict | None) -> list:
+    """Return the target-class descriptors the registry read-paths should see:
+    the project's PROFESSION-DEFAULT descriptors (built-ins modelled as data —
+    dev's ``release``, ms-142 e-5161) FOLLOWED BY the user-declared raw list
+    (``target_descriptor.load_descriptors``).
+
+    ``load_descriptors`` stays the raw user list (authoring / validation / the
+    ``target-class list`` view operate on exactly what the user wrote); this is
+    the union the SIX descriptor-aware registries below consult so a built-in-as-
+    data class (release) lights up every "declare, don't wire" capability without
+    polluting the user's declared set. ``data`` may be ``None`` / ``{}`` (a no-data
+    registry call, e.g. an import-time consult): the profession resolves to the
+    default (dev) so the dev defaults still inject — the coverage-matrix floor
+    (``profession_manifest({})``) depends on release surfacing there. Defaults
+    come FIRST so a (malformed) user duplicate cannot shadow a built-in in a
+    first-match lookup; cross-collision with a user descriptor of the same kind
+    is a project-config error the authoring path already refuses."""
+    prof = resolve_profession(data or {})
+    return _td.profession_default_descriptors(prof) + _td.load_descriptors(data or {})
+
+
+def effective_get_descriptor(data: dict | None, kind: str) -> dict | None:
+    """Return the descriptor for ``kind`` from ``effective_descriptors`` (profession
+    defaults + user-declared), or ``None`` (ms-142 e-5161). The effective-aware
+    sibling of ``target_descriptor.get_descriptor`` (which sees only the raw user
+    list): a class resolver that must find a built-in-as-data class (release)
+    consults this, so ``beacon target advance --class release`` and the generic
+    state model resolve it even though no user declared it."""
+    want = (kind or "").strip()
+    if not want:
+        return None
+    for desc in effective_descriptors(data):
+        if isinstance(desc, dict) and (desc.get("kind") or "").strip() == want:
+            return desc
+    return None
 
 
 # The registry: profession -> the adapter's Target projection. Adding a new
@@ -473,7 +513,7 @@ def target_class_owner(kind: str, data: dict | None = None) -> str:
         if kind in kinds:
             return prof
     if data is not None:
-        for desc in _td.load_descriptors(data):
+        for desc in effective_descriptors(data):
             if isinstance(desc, dict) and (desc.get("kind") or "").strip() == kind:
                 return (desc.get("profession") or "").strip().lower()
     return ""
@@ -546,13 +586,15 @@ TARGET_COLLECTIONS = ("milestones", "opportunities", "operations")
 def target_collections(data: dict | None = None) -> tuple:
     """Return the project.json keys that hold Target records. Without ``data``,
     the built-in seed (milestones / opportunities). With ``data``, the seed PLUS
-    each descriptor's ``collection`` (ms-122 e-3957), so a data-defined
-    occupation's records are walked by the same aggregators without editing this
-    registry."""
-    if not data:
-        return TARGET_COLLECTIONS
+    each descriptor's ``collection`` (ms-122 e-3957) AND the profession-default
+    collections (dev's ``releases``, ms-142 e-5161), so a data-defined occupation's
+    records — and release — are walked by the same aggregators without editing this
+    registry. A no-data / no-descriptor caller still gets the seed PLUS the dev
+    default (``effective_descriptors`` resolves the profession to dev when data is
+    absent), so the coverage-matrix floor ``profession_manifest({})`` surfaces
+    release."""
     out = list(TARGET_COLLECTIONS)
-    for desc in _td.load_descriptors(data):
+    for desc in effective_descriptors(data):
         coll = (desc.get("collection") or "").strip() \
             if isinstance(desc, dict) else ""
         if coll and coll not in out:
@@ -647,11 +689,12 @@ def target_decomposition(data: dict | None = None) -> dict:
     descriptor's ``decomposition`` (``{id_field, arms}``) keyed by its
     ``collection`` (ms-122 e-3957). A descriptor with no ``decomposition``
     defaults to ``{id_field: "id", arms: ()}`` (its records ride inline, no new
-    child table). Built-in collections are never overridden by a descriptor."""
-    if not data:
-        return dict(TARGET_DECOMPOSITION)
+    child table). Built-in collections are never overridden by a descriptor. The
+    profession-default descriptors (dev's ``releases``, ms-142 e-5161) merge in
+    too — release declares empty arms, so it adds no child table but IS a known
+    decomposed collection."""
     merged = dict(TARGET_DECOMPOSITION)
-    for desc in _td.load_descriptors(data):
+    for desc in effective_descriptors(data):
         if not isinstance(desc, dict):
             continue
         coll = (desc.get("collection") or "").strip()
@@ -824,11 +867,10 @@ def _collection_kind(data: dict | None, collection: str) -> str:
     kind = _COLLECTION_KIND.get(collection, "")
     if kind:
         return kind
-    if data:
-        for desc in _td.load_descriptors(data):
-            if isinstance(desc, dict) \
-                    and (desc.get("collection") or "").strip() == collection:
-                return (desc.get("kind") or "").strip()
+    for desc in effective_descriptors(data):
+        if isinstance(desc, dict) \
+                and (desc.get("collection") or "").strip() == collection:
+            return (desc.get("kind") or "").strip()
     return ""
 
 
@@ -850,11 +892,10 @@ def _arm_roles_for(data: dict | None, collection: str) -> dict:
             if seed["work_item_arm"] else None,
             "evidence_arms": [dict(a) for a in seed["evidence_arms"]],
         }
-    if data:
-        for desc in _td.load_descriptors(data):
-            if isinstance(desc, dict) \
-                    and (desc.get("collection") or "").strip() == collection:
-                return _td.arm_roles(desc)
+    for desc in effective_descriptors(data):
+        if isinstance(desc, dict) \
+                and (desc.get("collection") or "").strip() == collection:
+            return _td.arm_roles(desc)
     # A collection with no seed and no descriptor is not reachable from
     # ``profession_manifest`` (it only walks ``target_collections``, whose members
     # each have a seed or a descriptor). Return an empty classification defensively
@@ -1177,13 +1218,12 @@ def kind_display_label(data: dict | None, kind: str) -> str:
     label = _KIND_DISPLAY_LABEL.get(kind)
     if label:
         return label
-    if data:
-        for desc in _td.load_descriptors(data):
-            if isinstance(desc, dict) and (desc.get("kind") or "").strip() == kind:
-                lbl = (desc.get("display_label")
-                       or desc.get("label_jp") or "").strip()
-                if lbl:
-                    return lbl
+    for desc in effective_descriptors(data):
+        if isinstance(desc, dict) and (desc.get("kind") or "").strip() == kind:
+            lbl = (desc.get("display_label")
+                   or desc.get("label_jp") or "").strip()
+            if lbl:
+                return lbl
     return kind
 
 
@@ -1249,17 +1289,81 @@ def find_target(data: dict, target_id: str) -> dict | None:
     manifest-driven replacement for ``core.find_target_milestone`` /
     ``sales_entities.find_opportunity`` when a profession-shared / to-be-shared
     verb needs the containing Target without naming ``data['milestones']`` /
-    ``data['opportunities']`` itself."""
+    ``data['opportunities']`` itself.
+
+    Resolution is by id-prefix kind (the fast path for the built-in prefixes ms- /
+    op- / opp- / …); an id whose prefix ``work_model.target_kind`` does not map — a
+    descriptor-defined class or a profession-default class like release (rel-, which
+    is deliberately NOT hardcoded in the prefix table, ms-142 e-5161) — falls back to
+    scanning every Target collection so it is still located, honouring the docstring
+    promise "across all Target collections"."""
     kind = _wm.target_kind(target_id)
-    try:
-        tc = target_class(data, kind)
-    except ValueError:
+    tc = None
+    if kind:
+        try:
+            tc = target_class(data, kind)
+        except ValueError:
+            tc = None
+    if tc is not None:
+        id_field = tc.get("id_field", "id")
+        for rec in data.get(tc["collection"], []) or []:
+            if rec.get(id_field) == target_id:
+                return rec
         return None
-    id_field = tc.get("id_field", "id")
-    for rec in data.get(tc["collection"], []) or []:
-        if rec.get(id_field) == target_id:
-            return rec
+    # Unknown / unmapped prefix → scan all Target collections (descriptor / release).
+    # Honour each collection's own id_field (maint review e-5220): the fast path
+    # above reads ``tc['id_field']``, so the fallback must too, else a descriptor
+    # class with a custom id_field AND an unmapped prefix would resolve on the fast
+    # path but be silently missed here.
+    decomposition = target_decomposition(data)
+    for coll in target_collections(data):
+        coll_id_field = decomposition.get(coll, {}).get("id_field", "id")
+        for rec in data.get(coll, []) or []:
+            if isinstance(rec, dict) and rec.get(coll_id_field) == target_id:
+                return rec
     return None
+
+
+# The record field holding a Target's cross-target bundle references — the ids of
+# OTHER Targets this one gathers WITHOUT owning them (ms-142 e-5161 / §3 confirmed:
+# "他ターゲット配下の記録を所有せず参照して束ねる関係は L2 の generic 能力"). The
+# field name says both facts a reader needs (AX review e-5220): it holds target IDs
+# (references, not inlined records) — NOT ownership, NOT nested objects.
+BUNDLE_FIELD = "bundled_target_ids"
+
+
+def bundled_targets(data: dict, target) -> list:
+    """Resolve a Target's cross-target bundle references to the referenced Target
+    records, profession-generically (ms-142 §3 / e-5161 — the L2 base capability
+    a release's L3 uses to gather the milestones it ships WITHOUT owning them).
+
+    ``target`` is a Target record dict or an id. Reads its ``bundled_target_ids``
+    field — a list of Target ids (or ``{"id": ...}`` dicts) — and returns each referenced
+    Target record found via ``find_target`` across every collection, in declaration
+    order. A reference is RESOLVED, not owned: the bundled milestone stays a
+    milestone in ``data['milestones']`` with its own lifecycle; this only returns a
+    view. A dangling reference (id no longer present) is skipped rather than raising
+    — a bundle is a soft pointer set, so a deleted milestone silently drops out. Any
+    Target-class may carry ``bundles`` (release is the first user), so this is a
+    generic base ability, not a release special-case (no ``if kind == 'release'``).
+
+    NOTE: this is the READER. Populating ``bundles`` (a future ``beacon release
+    bundle`` verb) is a follow-up; the L2 resolution seam lands here so a class that
+    declares bundle references lights up gathering with zero wiring."""
+    rec = find_target(data, target) if isinstance(target, str) else target
+    if not isinstance(rec, dict):
+        return []
+    out: list = []
+    for ref in (rec.get(BUNDLE_FIELD) or []):
+        ref_id = ref if isinstance(ref, str) \
+            else (ref.get("id") if isinstance(ref, dict) else "")
+        ref_id = (ref_id or "").strip()
+        if not ref_id:
+            continue
+        found = find_target(data, ref_id)
+        if found is not None:
+            out.append(found)
+    return out
 
 
 def _collect_item_ids(entries: list, out: list) -> None:
@@ -1677,11 +1781,10 @@ def all_narrowing_kinds(data: dict | None = None) -> tuple:
         for k in kinds:
             if k not in out:
                 out.append(k)
-    if data:
-        for desc in _td.load_descriptors(data):
-            k = (desc.get("kind") or "").strip() if isinstance(desc, dict) else ""
-            if k and k not in out:
-                out.append(k)
+    for desc in effective_descriptors(data):
+        k = (desc.get("kind") or "").strip() if isinstance(desc, dict) else ""
+        if k and k not in out:
+            out.append(k)
     return tuple(out)
 
 
@@ -1702,11 +1805,10 @@ NARROWING_ID_PREFIXES = {
 def narrowing_id_prefixes(data: dict | None = None) -> dict:
     """Return the ``kind -> id prefix`` map. Without ``data``, the built-in
     seed; with ``data``, plus each descriptor's ``kind -> id_prefix`` (ms-122
-    e-3957). Built-in kinds are never overridden."""
-    if not data:
-        return dict(NARROWING_ID_PREFIXES)
+    e-3957) plus the profession-default kinds (dev's ``release`` → ``rel-``, ms-142
+    e-5161). Built-in kinds are never overridden."""
     merged = dict(NARROWING_ID_PREFIXES)
-    for desc in _td.load_descriptors(data):
+    for desc in effective_descriptors(data):
         if not isinstance(desc, dict):
             continue
         kind = (desc.get("kind") or "").strip()

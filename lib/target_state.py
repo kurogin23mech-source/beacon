@@ -301,8 +301,11 @@ def state_model_for(data: Optional[dict], kind: str) -> Optional[dict]:
     if builtin is not None:
         return builtin
     if data is not None:
-        import target_descriptor as _td
-        desc = _td.get_descriptor(data, want)
+        # effective (not raw) descriptors so a profession-default target-class —
+        # dev's ``release``, ms-142 e-5161 — resolves its state model here even
+        # though no user declared it. Lazy import avoids the occupation↔this cycle.
+        import occupation as _occ
+        desc = _occ.effective_get_descriptor(data, want)
         if desc is not None:
             return _descriptor_state_model(desc)
     return None
@@ -491,9 +494,10 @@ def _advance_descriptor(data: dict, kind: str, target_id: str, to_phase: str, *,
     ``target_engine.advance_target``. Refuses a terminal phase here (route via
     ``beacon target close``) so the descriptor path honours the same
     non-terminal-only contract the built-ins do."""
-    import target_descriptor as _td
     import target_engine as _te
-    desc = _td.get_descriptor(data, kind)
+    import occupation as _occ
+    # effective descriptors so a profession-default class (release) advances too.
+    desc = _occ.effective_get_descriptor(data, kind)
     if desc is None:
         raise TargetStateError(f"no descriptor for target-class {kind!r}")
     if _te.is_terminal_phase(desc, to_phase):

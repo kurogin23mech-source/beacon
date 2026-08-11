@@ -130,3 +130,30 @@ def test_operation_is_a_row_with_declared_absences():
     assert MUST_HAVE_CAPABILITIES["deadline"]["na"](tc) is True
     assert MUST_HAVE_CAPABILITIES["evidence"]["na"](tc) is True
     assert MUST_HAVE_CAPABILITIES["completion_gate"]["na"](tc) is False
+
+
+def test_release_is_a_row_with_declared_absences():
+    # ms-142 §9 / e-5161: release is dev's L3 first-class Target-class, injected as
+    # a profession-default descriptor (occupation.effective_descriptors), so it MUST
+    # appear in the dev manifest AND as a coverage-matrix row. Its deadline / 証跡
+    # cells are DECLARED N/A (work_item_arm=None / evidence_arms=[]); phase-advance
+    # (descriptor phases), completion-gate (self-close-ban) and claim must be GREEN.
+    assert "release" in TARGET_CLASSES
+    project = TARGET_CLASSES["release"]["project"]()
+    tc = _manifest_tc(project, "release")
+    assert tc is not None, "release is not in the profession_manifest — the " \
+        "effective_descriptors injection regressed."
+    assert tc["collection"] == "release_targets"
+    assert MUST_HAVE_CAPABILITIES["deadline"]["na"](tc) is True
+    assert MUST_HAVE_CAPABILITIES["evidence"]["na"](tc) is True
+    assert MUST_HAVE_CAPABILITIES["completion_gate"]["na"](tc) is False
+
+
+def test_release_surfaces_in_the_bare_dev_manifest_floor():
+    # The 番人's engine-scoped floor: release must appear in profession_manifest({})
+    # (dev is the default profession), NOT only when a fixture declares a release
+    # record — that is what makes the guardian catch a NEW built-in Target-class.
+    import occupation  # noqa: E402
+    kinds = {tc["kind"]
+             for tc in occupation.profession_manifest({})["target_classes"]}
+    assert "release" in kinds
