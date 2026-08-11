@@ -59,11 +59,20 @@ ALLOWED_FIELD_TYPES = ("string", "text", "number", "date", "bool", "money")
 # ---------------------------------------------------------------------------
 
 def load_descriptors(data: dict) -> list:
-    """Return the project's target-class descriptors (the raw list under
+    """Return the RAW user-declared target-class descriptors (the list under
     ``target_classes``), or ``[]`` when the key is absent / not a list. A
     project.json written before this feature reads as no descriptors, so
     occupation code that consults this gets exactly the built-in (code) classes
-    and no error — the additive/tolerant compat contract in action."""
+    and no error — the additive/tolerant compat contract in action.
+
+    ⚠ RAW = authoring-only (ms-142 e-5161). This returns ONLY what the user wrote;
+    it does NOT include profession-DEFAULT descriptors (dev's built-in ``release``).
+    Use it for authoring / validation (``target-class list``, ``append_descriptor``,
+    ``validate_target_classes``) where the user's declared set is the subject. For
+    REGISTRY / RESOLUTION reads (projection, claim, state model, phase advance) call
+    ``occupation.effective_descriptors`` / ``occupation.effective_get_descriptor``
+    instead — those union in the profession defaults, so a built-in class like
+    release resolves. Calling THIS for a registry read silently misses release."""
     descriptors = data.get(TARGET_CLASSES_KEY)
     return descriptors if isinstance(descriptors, list) else []
 
@@ -83,9 +92,16 @@ def descriptor_kinds(data: dict) -> list:
 
 
 def get_descriptor(data: dict, kind: str) -> Optional[dict]:
-    """Return the descriptor whose ``kind`` matches, or ``None`` when no
-    descriptor declares it. First match wins (a duplicate kind is a validation
-    error surfaced elsewhere; readers stay deterministic)."""
+    """Return the RAW user-declared descriptor whose ``kind`` matches, or ``None``.
+    First match wins (a duplicate kind is a validation error surfaced elsewhere;
+    readers stay deterministic).
+
+    ⚠ RAW = user list only (ms-142 e-5161): this returns ``None`` for a profession-
+    DEFAULT class (dev's built-in ``release``) because the user never declared it.
+    A registry / resolution caller that must find a built-in-as-data class MUST use
+    ``occupation.effective_get_descriptor`` instead (it unions the profession
+    defaults). Reserve this raw accessor for authoring paths that operate on exactly
+    what the user wrote."""
     want = (kind or "").strip()
     if not want:
         return None

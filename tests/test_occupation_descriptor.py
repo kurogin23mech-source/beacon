@@ -151,7 +151,7 @@ def test_bundled_targets_resolves_references_without_owning():
         {"id": "ms-2", "title": "M2", "status": "done", "entries": []})
     data["release_targets"] = [
         {"id": "rel-1", "label": "v1", "kind": "release", "status": "in_progress",
-         "phase": "draft", "bundles": ["ms-1", "ms-2", "ms-404"],
+         "phase": "draft", "bundled_target_ids": ["ms-1", "ms-2", "ms-404"],
          "who_has_the_ball": "self", "phase_history": [],
          "work_items": [], "evidence": []}]
     bundled = occ.bundled_targets(data, "rel-1")
@@ -161,16 +161,17 @@ def test_bundled_targets_resolves_references_without_owning():
     assert bundled[0] is data["milestones"][0]
     # Accepts a record directly, and {"id": ...} ref shape.
     rec = data["release_targets"][0]
-    rec["bundles"] = [{"id": "ms-2"}]
+    rec["bundled_target_ids"] = [{"id": "ms-2"}]
     assert [t["id"] for t in occ.bundled_targets(data, rec)] == ["ms-2"]
     # No bundles → empty.
     assert occ.bundled_targets(data, "ms-1") == []
 
 
-def test_builtin_narrowing_unchanged_without_data():
-    # trek.py calls these with no data at import time. The seed PLUS the dev
-    # profession-default (release, ms-142 e-5161) — release is a first-class dev
-    # Target-class (§7 全種類を同格に), so it is Trek-narrowable too.
+def test_builtin_narrowing_no_data_includes_dev_profession_defaults():
+    # trek.py calls these with no data at import time. The result is the built-in
+    # seed PLUS the dev profession-default (release, ms-142 e-5161): the no-data set
+    # is intentionally NOT the immutable seed — a profession default expands it, and
+    # release is a first-class dev Target-class (§7 全種類を同格に), Trek-narrowable too.
     assert occ.all_narrowing_kinds() == ("milestone", "operation", "task",
                                          "opportunity", "account", "release")
     assert occ.narrowing_kind_for_ref("ms-1") == "milestone"

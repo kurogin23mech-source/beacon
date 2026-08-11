@@ -71,7 +71,10 @@ DEFAULT_PROFESSION = "dev"
 
 def _descriptors_owned_by(data: dict, profession: str) -> list:
     """Return the well-formed descriptors whose ``profession`` matches (lower-
-    cased). Empty for a dev / sales project (they declare no descriptors)."""
+    cased), sourced from ``effective_descriptors`` (profession defaults + the
+    user-declared raw list). A dev project therefore returns its profession-default
+    ``release`` descriptor even with no user descriptors (ms-142 e-5161); a sales
+    project stays empty (sales has no profession default and declares none)."""
     want = (profession or "").strip().lower()
     out = []
     for desc in effective_descriptors(data):
@@ -1308,17 +1311,25 @@ def find_target(data: dict, target_id: str) -> dict | None:
                 return rec
         return None
     # Unknown / unmapped prefix → scan all Target collections (descriptor / release).
+    # Honour each collection's own id_field (maint review e-5220): the fast path
+    # above reads ``tc['id_field']``, so the fallback must too, else a descriptor
+    # class with a custom id_field AND an unmapped prefix would resolve on the fast
+    # path but be silently missed here.
+    decomposition = target_decomposition(data)
     for coll in target_collections(data):
+        coll_id_field = decomposition.get(coll, {}).get("id_field", "id")
         for rec in data.get(coll, []) or []:
-            if isinstance(rec, dict) and rec.get("id") == target_id:
+            if isinstance(rec, dict) and rec.get(coll_id_field) == target_id:
                 return rec
     return None
 
 
 # The record field holding a Target's cross-target bundle references — the ids of
 # OTHER Targets this one gathers WITHOUT owning them (ms-142 e-5161 / §3 confirmed:
-# "他ターゲット配下の記録を所有せず参照して束ねる関係は L2 の generic 能力").
-BUNDLE_FIELD = "bundles"
+# "他ターゲット配下の記録を所有せず参照して束ねる関係は L2 の generic 能力"). The
+# field name says both facts a reader needs (AX review e-5220): it holds target IDs
+# (references, not inlined records) — NOT ownership, NOT nested objects.
+BUNDLE_FIELD = "bundled_target_ids"
 
 
 def bundled_targets(data: dict, target) -> list:
@@ -1326,8 +1337,8 @@ def bundled_targets(data: dict, target) -> list:
     records, profession-generically (ms-142 §3 / e-5161 — the L2 base capability
     a release's L3 uses to gather the milestones it ships WITHOUT owning them).
 
-    ``target`` is a Target record dict or an id. Reads its ``bundles`` field — a
-    list of Target ids (or ``{"id": ...}`` dicts) — and returns each referenced
+    ``target`` is a Target record dict or an id. Reads its ``bundled_target_ids``
+    field — a list of Target ids (or ``{"id": ...}`` dicts) — and returns each referenced
     Target record found via ``find_target`` across every collection, in declaration
     order. A reference is RESOLVED, not owned: the bundled milestone stays a
     milestone in ``data['milestones']`` with its own lifecycle; this only returns a
