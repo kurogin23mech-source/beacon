@@ -731,17 +731,18 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # ``work_kind``). ``evidence_arms`` names where proof/changelog records live (dev
 # commits ride the SAME entries arm; sales evidence is its own communications arm).
 #
-# ⚠ DECLARED-ONLY / UNCONSUMED (ms-143 PR#4, 思想レビュー finding e-5151): unlike
-# ``work_item_arm`` (which ``add_work_item`` reads from the manifest so a new
-# occupation lights up by DECLARING it), ``evidence_arms`` currently has NO
-# consumer — ``occupation.add_evidence`` resolves the sales evidence grain directly
-# (option A, human-approved interim) and does not read this declaration. So
-# ``evidence_arms`` is a declared-but-unwired slot: a new occupation declaring it
-# will NOT light up an evidence path yet. In the INTERIM, record sales evidence by
-# calling ``occupation.add_evidence`` directly (option A) — do not rely on this
-# ``evidence_arms`` declaration to route anything. This is recorded honestly here
-# (not silently left as false "wired" advertising) until e-5151 makes add_evidence
-# manifest-driven and recovers the declared→wired contract.
+# CONSUMED (ms-142 T4 e-5159 — the declared→wired contract closed): ``add_evidence``
+# now reads this declaration via ``evidence_arm_for`` to ROUTE the write, symmetric
+# with ``add_work_item`` consuming ``work_item_arm``. A Target-class that DECLARES
+# its evidence arm lights up the evidence write path by declaration alone — the
+# declared-but-unwired asymmetry (ms-143 PR#4 思想レビュー finding e-5151) is gone.
+# ``iter_evidence`` is the READ sibling: it consumes ``evidence_arms`` to walk every
+# evidence record (dev commits + sales communications, incl. the closure grain
+# nested under work items) profession-agnostically. The sales GRAIN resolution
+# (which node holds the record — Target vs the fulfilled work item) stays on the
+# occupation seam ``_resolve_evidence_parent``; only the ARM name is now manifest-
+# driven (accounts / nurturings, deliberately NOT Target-classes, fall back to the
+# resolver's arm, keeping records byte-identical).
 #
 # REACHABILITY (ms-142 e-5011 review, Maint#5; extended e-5156): the ONLY consumer
 # of these two ``_ARM_ROLES`` / ``_COLLECTION_KIND`` dicts (``_ARM_PHASE_BALL`` was
@@ -1379,6 +1380,25 @@ def _resolve_evidence_parent(data: dict, parent_id: str):
     return node, "communications", linked_id, container
 
 
+def evidence_arm_for(data: dict, kind: str) -> str:
+    """Return the first declared evidence-arm name for a Target ``kind`` from the
+    manifest, or ``""`` when the kind is not a Target-class or declares no evidence
+    arm (ms-142 T4 e-5159).
+
+    This is the CONSUME side of ``evidence_arms``: ``add_evidence`` reads it so the
+    declaration ROUTES the write, resolving the "declared-but-unwired" slot flagged
+    honestly in ``_ARM_ROLES`` — the asymmetry where ``add_work_item`` consumed
+    ``work_item_arm`` but nothing consumed ``evidence_arms``. A Target-class that
+    declares its evidence arm (opportunity → ``"communications"``, or a descriptor
+    occupation naming it anything) now lights up the evidence write path by
+    declaration alone."""
+    for tc in profession_manifest(data)["target_classes"]:
+        if tc["kind"] == kind:
+            arms = tc.get("evidence_arms") or []
+            return arms[0]["arm"] if arms else ""
+    return ""
+
+
 def add_evidence(data: dict, parent_id: str, *, summary: str, direction: str,
                  channel: str = "other", body: str = "",
                  source: dict | None = None, occurred_at: str = "",
@@ -1418,6 +1438,16 @@ def add_evidence(data: dict, parent_id: str, *, summary: str, direction: str,
         raise ValueError(
             "Communication target not found (opp-…/acc-… target or "
             f"act-…/nrt-… work item): {parent_id}")
+    # ms-142 T4 (e-5159): CONSUME the manifest's declared evidence arm instead of
+    # trusting the resolver's hardcoded name, so ``evidence_arms`` is no longer a
+    # dead slot — a Target-class that DECLARES its evidence arm lights up this
+    # write path by declaration alone, symmetric with ``add_work_item`` consuming
+    # ``work_item_arm``. Non-manifest sales grains (accounts / nurturings are
+    # deliberately NOT Target-classes, ms-143 option A) keep the resolver's arm —
+    # the occupation seam this MS leaves intact — so the record stays byte-
+    # identical (both resolve to "communications").
+    declared_arm = evidence_arm_for(data, _wm.target_kind(container.get("id", "")))
+    arm = declared_arm or arm
     if not summary or not summary.strip():
         raise ValueError("Communication summary is required")
     if direction not in sales_entities.VALID_COMM_DIRECTION:
@@ -1489,6 +1519,76 @@ def iter_work_items(data: dict):
                 if item_type is not None and item.get("type") != item_type:
                     continue
                 yield item, target, arm
+
+
+def iter_evidence(data: dict):
+    """Yield ``(evidence, target, arm)`` for every evidence record across
+    occupations, profession-agnostically (ms-142 e-5159 — the証跡-grain sibling of
+    ``iter_work_items``).
+
+    Consumes ``profession_manifest``'s ``evidence_arms`` so a caller walks dev
+    commits (a milestone's ``entries`` filtered to ``type == "commit"``) AND sales
+    Communications (an opportunity's ``communications`` arm) through ONE read path
+    with no ``if profession`` branch — the same "declare, don't wire" contract the
+    work-item spine gives, now extended to evidence so no L2 capability has to name
+    ``data['milestones']`` / ``entries`` / ``communications`` itself.
+
+    CLOSURE (the "証跡が業務を閉じる因果" this task pins): evidence that fulfilled a
+    planned work item nests UNDER that work item (a sales Communication under the
+    ``act-``/``nrt-`` it closed), so this walks BOTH grains — an evidence arm at
+    Target level AND the same arm nested under each work item. A record that closed
+    a work item carries a ``linked_id`` naming it; a caller reads
+    ``evidence.get('linked_id')`` to trace that closure. This is class-declared, not
+    uniform: sales communications carry ``linked_id`` (``""`` at Target grain), dev
+    commits are Target-grain evidence with NO per-work-item link (they ride the
+    milestone changelog, not a task), so ``linked_id`` is absent on them. The nested
+    descent is skipped when the evidence arm IS the work-item arm (dev's shared
+    ``entries``): there evidence and work items are siblings discriminated by
+    ``type``, not a separate nested grain, so descending would re-walk the list.
+
+    Per yielded tuple:
+      - ``evidence`` — the raw evidence record (a dev commit entry / a sales
+        Communication), verbatim.
+      - ``target`` — the owning Target record (milestone / opportunity), whether
+        the evidence sits at Target level or nested under a work item, so a caller
+        resolves target-scoped context without a second lookup.
+      - ``arm`` — the evidence arm name (``"entries"`` / ``"communications"``).
+
+    The ``item_type`` discriminates a SHARED arm exactly as in ``iter_work_items``:
+    dev ``entries`` hold tasks AND commits, so only ``type == "commit"`` items are
+    evidence; a ``None`` item_type means every item in the arm is evidence (sales
+    communications). Target classes with no ``evidence_arms`` (operations)
+    contribute nothing. Scope follows ``profession_manifest`` (milestones +
+    opportunities + descriptor collections)."""
+    def _match(item, item_type):
+        return (isinstance(item, dict)
+                and (item_type is None or item.get("type") == item_type))
+
+    for tc in profession_manifest(data)["target_classes"]:
+        ev_arms = tc["evidence_arms"]
+        if not ev_arms:
+            continue
+        wia = tc["work_item_arm"] or {}
+        wi_arm = wia.get("arm")
+        for target in data.get(tc["collection"], []) or []:
+            for ea in ev_arms:
+                arm, item_type = ea["arm"], ea.get("item_type")
+                # Target-grain evidence (dev commits, target-addressed comms).
+                for item in target.get(arm, []) or []:
+                    if _match(item, item_type):
+                        yield item, target, arm
+                # Closure grain: evidence nested under the work item it closed.
+                # When evidence shares the work-item arm (dev's ``entries``) the two
+                # grains are ONE type-discriminated list, not a nested grain, so
+                # descending would re-walk it — skip that case.
+                shares_work_item_arm = bool(wi_arm) and wi_arm == arm
+                if wi_arm and not shares_work_item_arm:
+                    for wi in target.get(wi_arm, []) or []:
+                        if not isinstance(wi, dict):
+                            continue
+                        for item in wi.get(arm, []) or []:
+                            if _match(item, item_type):
+                                yield item, target, arm
 
 
 def iter_deadline_candidates(data: dict):
