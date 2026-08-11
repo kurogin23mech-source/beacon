@@ -358,6 +358,85 @@ def append_descriptor(data: dict, desc: dict) -> list:
     return []
 
 
+# ---------------------------------------------------------------------------
+# Profession-default descriptors — a target-class a profession ALWAYS has, even
+# though no user declared it in ``target_classes`` (ms-142 e-5161 / T6).
+#
+# ``load_descriptors`` returns ONLY the user-declared raw list (uncontaminated —
+# authoring / validation / ``target-class list`` operate on exactly what the user
+# wrote). But some target-classes are a BUILT-IN part of an occupation that we
+# choose to model AS a descriptor rather than hardcode a fourth registry branch
+# for. Release is the first: it is dev's L3 "bundle several milestones' output,
+# carry a version, publish→deploy" target-class (class-engine ideal §9). Modelling
+# it as a descriptor means every L2 capability (projection / claim / phase advance /
+# the coverage matrix) lights it up by the SAME "declare, don't wire" path a
+# data-defined occupation rides — no ``if kind == "release"`` anywhere.
+#
+# These defaults are injected by ``occupation.effective_descriptors`` (defaults +
+# the raw user list), which the registry read-paths consult; ``load_descriptors``
+# stays raw so the user's declared set is never polluted with a built-in. sales
+# declares no default here — "職種固有 target-class を宣言で足す" means release is
+# dev's, not everyone's (§9).
+# ---------------------------------------------------------------------------
+
+# Release: dev's L3 target-class. It bundles milestones (a cross-target reference
+# resolved by the generic ``occupation.bundled_targets``, not owned) and advances
+# draft → published → deployed (terminal). It carries a ``version`` field and NO
+# work-item / evidence arms — a release's "work" is the milestones it bundles and
+# its "evidence" is the git tag / deploy record the existing release.yml path owns,
+# so on the coverage matrix its deadline + 証跡 cells are DECLARED N/A (identical
+# to operation's shape). ``work_item_arm`` / ``evidence_arms`` are declared
+# EXPLICITLY (not left to the name convention) so the absence is data a reader can
+# see, mirroring how ``occupation._ARM_ROLES`` writes operation's None as data.
+#
+# ⚠ collection is ``release_targets``, NOT ``releases`` (ms-142 e-5161 裁定 A):
+# ``data["releases"]`` ALREADY holds the deploy-flow release-NOTE ledger
+# (``release-YYYYMMDD-N`` records with semver / deploy_ids, written by
+# ``cmd_deploy`` / read by ``cmd_trigger``'s release-due count — the release.yml
+# path the design deliberately does NOT touch). Reusing ``releases`` would make
+# ``project_targets`` / the claim view enumerate those release-notes as bogus
+# release TARGETS. The L3 target-class is a DISTINCT thing (a release you push
+# draft→published→deployed, bundling milestones) from a published release-note, so
+# it gets its own collection; the two coexist without collision.
+RELEASE_DESCRIPTOR: dict = {
+    "kind": "release",
+    "label": "リリース",
+    "profession": "dev",
+    "type": TYPE_SINGLE_SHOT,
+    "id_prefix": "rel-",
+    "collection": "release_targets",
+    "decomposition": {"id_field": "id", "arms": []},
+    "work_item_arm": None,
+    "evidence_arms": [],
+    "fields": [
+        {"key": "version", "type": "string", "label": "バージョン"},
+    ],
+    "phases": [
+        {"key": "draft"},
+        {"key": "published"},
+        {"key": "deployed", "terminal": True},
+    ],
+}
+
+
+# profession -> the descriptors it ALWAYS has (built-in, modelled as data). Only
+# dev has one today (release). A profession absent from this map contributes no
+# defaults, so sales / a data-defined occupation are unchanged.
+PROFESSION_DEFAULT_DESCRIPTORS: dict = {
+    "dev": [RELEASE_DESCRIPTOR],
+}
+
+
+def profession_default_descriptors(profession: str) -> list:
+    """Return the built-in-as-data descriptors a profession ALWAYS carries (e.g.
+    dev's ``release``), or ``[]`` for a profession with none (ms-142 e-5161). These
+    are NOT in ``load_descriptors`` (the raw user list): the registry read-paths
+    union them in via ``occupation.effective_descriptors`` so authoring / the raw
+    ``target_classes`` list stay uncontaminated by a built-in the user never wrote."""
+    return list(PROFESSION_DEFAULT_DESCRIPTORS.get(
+        (profession or "").strip().lower(), []))
+
+
 def validate_target_classes(data: dict) -> dict:
     """Validate every descriptor in the project. Returns a dict mapping a
     problem-label → its list of problem strings. Two cross-descriptor checks are

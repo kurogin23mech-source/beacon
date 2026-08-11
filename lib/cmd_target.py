@@ -544,9 +544,15 @@ def _resolve_descriptor(data: dict, kind: str) -> dict:
     if not kind:
         print("Error: --class <kind> は必須です", file=sys.stderr)
         sys.exit(1)
-    desc = _td.get_descriptor(data, kind)
+    # effective (not raw) descriptors so a profession-default target-class — dev's
+    # ``release``, ms-142 e-5161 — resolves via `beacon target <verb> --class
+    # release` even though no user declared it in target_classes.
+    import occupation as _occ
+    desc = _occ.effective_get_descriptor(data, kind)
     if desc is None:
-        kinds = _td.descriptor_kinds(data)
+        kinds = [(d.get("kind") or "").strip()
+                 for d in _occ.effective_descriptors(data)
+                 if isinstance(d, dict) and (d.get("kind") or "").strip()]
         if kinds:
             print(f"Error: target-class '{kind}' の記述子がありません "
                   f"(宣言済: {', '.join(kinds)})", file=sys.stderr)

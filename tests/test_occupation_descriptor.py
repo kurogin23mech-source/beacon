@@ -104,19 +104,76 @@ def test_target_class_owner_resolves_descriptor_with_data():
 
 def test_dev_project_unchanged():
     data = _dev()
+    # ms-142 e-5161 (T6): release is dev's L3 built-in-as-data Target-class,
+    # injected by occupation.effective_descriptors — so a dev project WITH a release
+    # record projects it (below) and owned/collections now include release. A dev
+    # project with NO release record is otherwise unchanged (only ms-1 projects).
     rows = occ.project_targets(data)
     assert [r["id"] for r in rows] == ["ms-1"]
-    assert occ.owned_target_classes(data, "dev") == ("milestone", "operation")
-    # ms-142 e-5156 (T1): operations joined the Target-collection seed so a dev
-    # Operation is enumerated as a first-class Target. project_targets / owned
-    # classes are unchanged (this test's "unchanged" subject); the seed grows.
-    assert occ.target_collections(data) == ("milestones", "opportunities", "operations")
-    assert occ.target_collections() == ("milestones", "opportunities", "operations")
+    assert occ.owned_target_classes(data, "dev") == (
+        "milestone", "operation", "release")
+    # ms-142 e-5156 (T1): operations joined the Target-collection seed. e-5161 (T6):
+    # release_targets joins via the dev profession-default descriptor (present with or
+    # without ``data`` — the coverage-matrix floor depends on it surfacing no-data).
+    assert occ.target_collections(data) == (
+        "milestones", "opportunities", "operations", "release_targets")
+    assert occ.target_collections() == (
+        "milestones", "opportunities", "operations", "release_targets")
+
+
+# ---------------------------------------------------------------------------
+# Release (dev's L3 built-in-as-data class) + the generic bundle capability
+# (ms-142 e-5161 / T6).
+# ---------------------------------------------------------------------------
+
+def test_release_is_a_dev_default_descriptor_but_not_in_raw_list():
+    import target_descriptor as td
+    data = _dev()
+    # effective (registry-facing) sees release; raw (authoring) does not.
+    assert occ.effective_get_descriptor(data, "release")["collection"] == "release_targets"
+    assert td.get_descriptor(data, "release") is None
+    assert "release" not in [d.get("kind") for d in td.load_descriptors(data)]
+    # A dev project with a release record projects it as a first-class Target.
+    data["release_targets"] = [
+        {"id": "rel-1", "label": "v1", "kind": "release", "status": "in_progress",
+         "phase": "draft", "who_has_the_ball": "self",
+         "phase_history": [], "work_items": [], "evidence": []}]
+    ids = [r["id"] for r in occ.project_targets(data)]
+    assert "rel-1" in ids and "ms-1" in ids
+
+
+def test_bundled_targets_resolves_references_without_owning():
+    # A release bundles milestones by reference: bundled_targets returns the
+    # referenced milestone RECORDS (still owned by data['milestones']); a dangling
+    # id is skipped, not raised. Generic — any Target with a ``bundles`` field.
+    data = _dev()
+    data["milestones"].append(
+        {"id": "ms-2", "title": "M2", "status": "done", "entries": []})
+    data["release_targets"] = [
+        {"id": "rel-1", "label": "v1", "kind": "release", "status": "in_progress",
+         "phase": "draft", "bundles": ["ms-1", "ms-2", "ms-404"],
+         "who_has_the_ball": "self", "phase_history": [],
+         "work_items": [], "evidence": []}]
+    bundled = occ.bundled_targets(data, "rel-1")
+    assert [t["id"] for t in bundled] == ["ms-1", "ms-2"]   # ms-404 dropped
+    # Resolution, not ownership: the bundled milestone is unchanged in its own
+    # collection (same object identity).
+    assert bundled[0] is data["milestones"][0]
+    # Accepts a record directly, and {"id": ...} ref shape.
+    rec = data["release_targets"][0]
+    rec["bundles"] = [{"id": "ms-2"}]
+    assert [t["id"] for t in occ.bundled_targets(data, rec)] == ["ms-2"]
+    # No bundles → empty.
+    assert occ.bundled_targets(data, "ms-1") == []
 
 
 def test_builtin_narrowing_unchanged_without_data():
-    # trek.py calls these with no data at import time — must be the seed only.
+    # trek.py calls these with no data at import time. The seed PLUS the dev
+    # profession-default (release, ms-142 e-5161) — release is a first-class dev
+    # Target-class (§7 全種類を同格に), so it is Trek-narrowable too.
     assert occ.all_narrowing_kinds() == ("milestone", "operation", "task",
-                                         "opportunity", "account")
+                                         "opportunity", "account", "release")
     assert occ.narrowing_kind_for_ref("ms-1") == "milestone"
+    assert occ.narrowing_kind_for_ref("rel-1") == "release"
     assert "contract" not in occ.narrowing_id_prefixes()
+    assert occ.narrowing_id_prefixes().get("release") == "rel-"
