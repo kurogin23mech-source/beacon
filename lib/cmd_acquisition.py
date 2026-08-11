@@ -41,6 +41,7 @@ from commands_shared import (  # noqa: F401
     _ACKNOWLEDGED_REASON,
     _gate_target_class,
     _ai_session_direct_completion_ban_active,
+    _self_close_ban_refuse,
     _get_triggers_dir,
     _refuse_if_bus_origin,
     _read_bus_budget,
@@ -101,24 +102,24 @@ def cmd_acquisition_list():
 
 def cmd_acquisition_status():
     import sales_entities
+    import target_state as _tstate
     acq_id = os.environ.get("BEACON_ACQ_ID", "")
     status = os.environ.get("BEACON_ACQ_STATUS", "")
-    # ms-142 T3 / e-5158 — reaching `done` is a completion claim; give this
-    # previously-ungated class the same anti-self-close gate every target-class
-    # must have (Scope B: the lightweight structural ban). An AI session cannot
-    # mark an acquisition done directly without a human/override signal; its
-    # state model declares completion_gate=self-close-ban so the coverage matrix
-    # (T5) sees the gate exists.
-    if status == "done" and _ai_session_direct_completion_ban_active():
-        print(
-            f"Error: marking {acq_id} done directly from an AI session is refused "
-            "(ms-142 T3 / e-5158 anti-self-close gate).\n"
-            "  Paths forward (= one of these):\n"
-            "    1. BEACON_TARGET_COMPLETE_USER_OVERRIDE=1 — explicit user opt-in.\n"
-            "    2. BEACON_SESSION_KIND=human — declare the session human-driven.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+    # ms-142 T3 / e-5158 — reaching a completion terminal is a completion claim;
+    # give this previously-ungated class the same anti-self-close gate every
+    # target-class must have (Scope B: the lightweight structural ban). The
+    # completion terminal is DERIVED from the declared state model's routed_states
+    # (not a hardcoded "done") so a new terminal added to the model is auto-gated —
+    # single source of truth (T3 AX+maint review consensus). The cancel status is
+    # EXCLUDED: soft-cancel (`beacon acquisition delete`) is an abandon path, not a
+    # completion claim, so it is deliberately ungated (T3 maint review §1).
+    _completion_terminals = frozenset(
+        _tstate.state_model_for(None, "acquisition")["routed_states"]
+    ) - {work_model.CANCELLED_STATUS}
+    if status in _completion_terminals and _ai_session_direct_completion_ban_active():
+        _self_close_ban_refuse(
+            acq_id, f"marking {acq_id} {status}",
+            f"beacon acquisition status {acq_id} {status}")
     data = load_project()
     try:
         sales_entities.acquisition_set_status(data, acq_id, status,

@@ -1118,6 +1118,31 @@ def _ai_session_direct_completion_ban_active() -> bool:
     return not _session_kind_is_human()
 
 
+def _self_close_ban_refuse(target_id: str, action: str, retry_cmd: str) -> None:
+    """Print the Scope-B anti-self-close refusal for a target-class that carries
+    the lightweight structural gate (acquisition / descriptor, ms-142 T3 / e-5158)
+    and exit non-zero. Single source for the two verbs so the "Paths forward" text
+    cannot drift between them (T3 maintainability review §6). Names the concrete
+    RETRY invocation so a context-zero agent can act directly from the error, not
+    just learn which env var exists (T3 AX review, principle 3).
+
+    ``action`` is the human phrase for what is refused ("marking X done" /
+    "closing X"); ``retry_cmd`` is the original command to re-run under a signal.
+    Callers guard with ``_ai_session_direct_completion_ban_active()`` before
+    calling this (it always exits)."""
+    print(
+        f"Error: {action} directly from an AI session is refused "
+        "(ms-142 T3 anti-self-close gate — completion needs a human signal).\n"
+        "  Paths forward (= one of these):\n"
+        f"    1. BEACON_TARGET_COMPLETE_USER_OVERRIDE=1 {retry_cmd}\n"
+        "       (explicit one-off user opt-in for this completion)\n"
+        "    2. BEACON_SESSION_KIND=human — declare the session human-driven, "
+        "then re-run.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
 def _gate_target_class(data: dict, kind: str) -> None:
     """Enforce profession ⊃ target-class containment before creating a target
     (ms-115 e-3785). Prints the guidance-rich block message and exits non-zero

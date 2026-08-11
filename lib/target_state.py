@@ -114,6 +114,17 @@ GATE_SELF_CLOSE_BAN = "self-close-ban"  # lightweight structural gate: the termi
                                     # (BEACON_TARGET_COMPLETE_USER_OVERRIDE / human
                                     # session bypass) — the gate EXISTS, its criteria
                                     # stay L3 (acquisition / descriptor classes).
+#
+# ⚠ DECLARATION ≠ ENFORCEMENT (ms-142 T3 maintainability review): declaring
+# ``completion_gate`` on a state model is a LABEL — it does NOT auto-wire the ban.
+# Enforcement lives in each class's terminal VERB (``cmd_acquisition status`` /
+# ``beacon target close`` apply the self-close ban; milestone/operation route the
+# spine; opportunity_judge is the sales gate). The descriptor path is generic
+# (``cmd_target close`` covers every descriptor kind), but a NEW BUILT-IN class
+# added here with ``completion_gate`` set must ALSO have its verb wired to the gate.
+# The T5 coverage matrix is the drift-checker that fails when a class declares a
+# gate its terminal path does not actually apply — until it lands, keep the two in
+# sync by hand.
 
 
 # ---------------------------------------------------------------------------
