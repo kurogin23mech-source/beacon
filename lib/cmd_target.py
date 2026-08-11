@@ -42,6 +42,8 @@ import target_engine as _te  # noqa: F401
 
 from commands_shared import (  # noqa: F401
     _actor_str,
+    _ai_session_direct_completion_ban_active,
+    _self_close_ban_refuse,
     _fire_review_due_trigger,
     _print_evidence_guidance,
     _release_occupation_for_transition,
@@ -673,6 +675,17 @@ def cmd_target_close():
         print("Usage: beacon target close --class <kind> <target-id> "
               "[--reason <text>]", file=sys.stderr)
         sys.exit(1)
+    # ms-142 T3 / e-5158 — closing a data-defined target is a completion claim.
+    # Every target-class must carry an anti-self-close gate; a descriptor class
+    # previously had only an advisory review-due nudge (it could self-complete).
+    # Scope B gives it the same lightweight structural ban as acquisition: an AI
+    # session cannot close directly without a human/override signal. The class's
+    # state model declares completion_gate=self-close-ban so the coverage matrix
+    # (T5) sees the gate exists.
+    if _ai_session_direct_completion_ban_active():
+        _self_close_ban_refuse(
+            target_id, f"closing {target_id}",
+            f"beacon target close --class {kind} {target_id}")
     data = load_project()
     desc = _resolve_descriptor(data, kind)
     try:

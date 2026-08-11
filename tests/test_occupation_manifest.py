@@ -96,6 +96,8 @@ def test_dev_milestone_arm_roles():
     assert ms["state_model"]["state_field"] == "status"
     assert ms["state_model"]["ball_field"] is None
     assert {"done", "observing"} <= set(ms["state_model"]["gated_states"])
+    # ms-142 T3: milestone's terminal is guarded by the dev spine (ms-119).
+    assert ms["state_model"]["completion_gate"] == "spine"
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +120,8 @@ def test_sales_opportunity_arm_roles():
     assert opp["state_model"]["shape"] == "funnel"
     assert opp["state_model"]["state_field"] == "phase"
     assert opp["state_model"]["ball_field"] == "who_has_the_ball"
+    # ms-142 T3: opportunity's terminal is guarded by the existing sales judge flow.
+    assert opp["state_model"]["completion_gate"] == "sales-judge"
 
 
 def test_manifest_scoped_to_target_collections():
@@ -152,6 +156,7 @@ def test_operation_is_a_manifest_target_class_without_work_item_arm():
     assert op["state_model"]["state_field"] == "status"
     assert op["state_model"]["ball_field"] is None
     assert op["state_model"]["gated_states"] == ["closed"]
+    assert op["state_model"]["completion_gate"] == "spine"
     assert set(op) == CLASS_KEYS
 
 
@@ -197,6 +202,8 @@ def test_descriptor_occupation_lights_up_arms():
                                  "ball_field": "who_has_the_ball"}
     # the descriptor's terminal phase (``closed``) is the routed/close-via state.
     assert "closed" in mat["state_model"]["gated_states"]
+    # ms-142 T3: a descriptor class gets the lightweight self-close-ban gate.
+    assert mat["state_model"]["completion_gate"] == "self-close-ban"
 
 
 def test_descriptor_custom_arms_have_no_workitem_arm():

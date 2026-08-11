@@ -50,6 +50,39 @@ def test_shapes_match_leader_option_a():
     assert ts.state_model_for(None, "opportunity")["shape"] == ts.SHAPE_FUNNEL
 
 
+# ---------------------------------------------------------------------------
+# Completion gate (ms-142 T3 / e-5158): EVERY target-class declares which gate
+# guards its terminal — the anti-self-close capability's existence, checkable
+# from one field (what the T5 coverage matrix will enforce). Scope B: the two
+# previously-ungated classes (acquisition / descriptor) get the lightweight
+# structural ban, not the full spine.
+# ---------------------------------------------------------------------------
+
+def test_every_class_declares_a_completion_gate():
+    expected = {
+        "milestone": ts.GATE_SPINE,
+        "operation": ts.GATE_SPINE,
+        "opportunity": ts.GATE_SALES_JUDGE,
+        "acquisition": ts.GATE_SELF_CLOSE_BAN,
+    }
+    for kind, gate in expected.items():
+        model = ts.state_model_for(None, kind)
+        assert ts.completion_gate_for(model) == gate, kind
+        # non-null is the invariant the coverage matrix depends on.
+        assert ts.completion_gate_for(model) is not None, kind
+
+
+def test_descriptor_class_declares_self_close_ban():
+    data = {"name": "L", "profession": "legal", "milestones": [],
+            "target_classes": [_MATTER]}
+    model = ts.state_model_for(data, "matter")
+    assert ts.completion_gate_for(model) == ts.GATE_SELF_CLOSE_BAN
+
+
+def test_completion_gate_for_none_model():
+    assert ts.completion_gate_for(None) is None
+
+
 _MATTER = {
     "kind": "matter", "label": "案件", "profession": "legal",
     "type": "single-shot", "id_prefix": "mat-", "collection": "matters",
