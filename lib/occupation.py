@@ -504,14 +504,42 @@ def assert_target_class_owned(data: dict, kind: str) -> None:
         f"  使うコマンド: {owned_hints or '(なし)'}")
 
 
-# The project.json keys under which each occupation stores its Target records.
-# This registry is the ONE place that knows "which collections are Targets"
-# across occupations; occupation-agnostic base code (work_model / work_base)
-# must NOT carry these names. Shared-frame code that needs the RAW Target
-# records (not the projected shape) — e.g. session_log aggregation — asks here
-# instead of hardcoding the collection names itself (ms-108 e-3701 / fable
-# review B-1: keep occupation knowledge in the registry layer).
-TARGET_COLLECTIONS = ("milestones", "opportunities")
+# The project.json keys under which each occupation stores its AGGREGATABLE Target
+# records — the set the shared-frame aggregators (session_log, deadline, the
+# manifest) walk. Occupation-agnostic base code (work_model / work_base) must NOT
+# carry these names; shared-frame code asks here instead of hardcoding the
+# collection names (ms-108 e-3701 / fable review B-1: keep occupation knowledge in
+# the registry layer).
+#
+# ⚠ NOT the only "which collections are Targets" registry (ms-142 T1 e-5156 review,
+# fable AX/Maint): there are THREE, each a different lens on "Target", and they must
+# stay in subset-sync:
+#   - ``TARGET_COLLECTIONS`` (here) = AGGREGATABLE Targets (session_log / manifest);
+#   - ``TARGET_DECOMPOSITION``      = physically DECOMPOSED Targets (row backend +
+#     ``target_disclosure`` scan) — adds accounts / acquisitions;
+#   - ``claim_target_collections`` = CLAIMABLE Targets (claim view) = the manifest
+#     set ∪ {accounts, acquisitions}.
+# The honest invariant (pinned by ``test_operation_target_class_e5156`` /
+# ``claim_target_collections ⊇ TARGET_DECOMPOSITION ∪ target_collections``) keeps
+# them from silently diverging while T1 has them split; unifying the three into one
+# master registry is the deferred deep fix (follow-up, touched by T2–T7).
+#
+# ms-142 e-5156 (T1): ``operations`` joins the seed so a development Operation is
+# enumerated as a first-class Target beside a Milestone — the same abstraction a
+# Milestone rides for projection / claim / deadline enumeration, closing the gap
+# where Operation was known only to the record path (occupation.record_target_entry)
+# while列挙・クレーム経路 stayed a separate system. Operation is a PERSISTENT
+# (recurring) dev Target with a status lifecycle (todo→in_progress→open→closed),
+# NOT a funnel — so it declares no phase/ball (``_ARM_PHASE_BALL`` below) and,
+# per the T1 裁定, no ``work_item_arm`` yet (its OperationTasks keep their own
+# ``operation task done`` L3 path; folding them into the shared work-item CRUD
+# spine is deferred to avoid a silent ``beacon task done`` regression). Consumers
+# that walk this seed were each confirmed non-breaking before landing: session_log
+# aggregation filters to commit/pr entries (operations carry none), deadline
+# enumeration reads a ``deadline``/``target_date`` operations lack (→ UNSET,
+# filtered), and the backup integrity count already documents "all Targets"
+# semantics (the operations sub-count overlap is tracked debt, e-5115).
+TARGET_COLLECTIONS = ("milestones", "opportunities", "operations")
 
 
 def target_collections(data: dict | None = None) -> tuple:
@@ -543,6 +571,36 @@ def iter_target_records(data: dict) -> list:
     for coll in target_collections(data):
         records.extend(data.get(coll, []) or [])
     return records
+
+
+# Sales secondary Target collections that are CLAIMABLE but are not manifest
+# Target collections (they ride a different persistence path and are not walked
+# by ``target_collections`` / the session-log aggregator). A 顧客 = account and a
+# 顧客獲得ターゲット = acquisition can be claimed / worked, so the claim view must
+# cover them (SPEC AC1 names account explicitly) even though they are not in the
+# manifest.
+_CLAIM_SECONDARY_COLLECTIONS = ("accounts", "acquisitions")
+
+
+def claim_target_collections(data: dict | None = None) -> tuple:
+    """Return every project.json collection whose records are CLAIMABLE Targets
+    across occupations (ms-142 e-5156 / T1).
+
+    Sourced from ``profession_manifest`` (the DDL-decoupled Target set —
+    milestones, opportunities, the ms-142 operations addition, and any descriptor
+    collections) PLUS the sales secondary Target collections (accounts /
+    acquisitions) that are claimable but ride a separate persistence path. This is
+    the single source ``claim_view.build_claim_views`` consumes so its enumeration
+    is NOT coupled to the physical decomposition / DDL registry
+    (``TARGET_DECOMPOSITION``) — the T1 裁定 goal — while still covering 顧客 =
+    account. Adding operations to the manifest therefore lights up the 2-layer
+    claim filter for Operations with no edit in ``claim_view`` (T7 も同時前進)."""
+    cols = [tc["collection"]
+            for tc in profession_manifest(data or {})["target_classes"]]
+    for extra in _CLAIM_SECONDARY_COLLECTIONS:
+        if extra not in cols:
+            cols.append(extra)
+    return tuple(cols)
 
 
 # ---------------------------------------------------------------------------
@@ -683,15 +741,26 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # (not silently left as false "wired" advertising) until e-5151 makes add_evidence
 # manifest-driven and recovers the declared→wired contract.
 #
-# REACHABILITY (ms-142 e-5011 review, Maint#5): the ONLY consumer of these three
-# ``_ARM_ROLES`` / ``_ARM_PHASE_BALL`` / ``_COLLECTION_KIND`` dicts is
-# ``profession_manifest``, which walks ``target_collections(data)`` — the seed of
-# which is milestones + opportunities ONLY (accounts / acquisitions ride a
+# REACHABILITY (ms-142 e-5011 review, Maint#5; extended e-5156): the ONLY consumer
+# of these three ``_ARM_ROLES`` / ``_ARM_PHASE_BALL`` / ``_COLLECTION_KIND`` dicts
+# is ``profession_manifest``, which walks ``target_collections(data)`` — whose seed
+# is milestones + opportunities + operations (accounts / acquisitions ride a
 # different persistence path and are NOT Target collections here, see
 # ``TARGET_COLLECTIONS``). So an entry keyed by any collection NOT returned by
 # ``target_collections`` would be dead data — a silent no-op if edited. Keep these
-# keyed to exactly milestones + opportunities; a descriptor occupation's roles come
+# keyed to exactly those seed collections; a descriptor occupation's roles come
 # from its descriptor (``target_descriptor.arm_roles``), not from here.
+#
+# operations declares a work_item_arm of ``None`` EXPLICITLY (below), not by
+# omission: per the ms-142 T1 裁定 an Operation carries no shared work-item arm
+# yet, but its absence is written as DATA so the three sibling dicts (_ARM_ROLES /
+# _ARM_PHASE_BALL / _COLLECTION_KIND) share ONE key set (milestones + opportunities
+# + operations) — "均一に宣言" per the class-engine ideal, not a prose-only claim
+# a reader must trust. ``_arm_roles_for`` maps a ``None`` work_item_arm to the
+# empty classification, so behaviour is identical to omitting it (the pin tests
+# hold). Folding OperationTasks into the shared work-item spine (find_target_entry
+# / set_entry_state / iter_work_items) is the deferred part — that would silently
+# change ``beacon task done`` — not the declaration.
 _ARM_ROLES = {
     "milestones": {
         # ms-143: ``id_prefix`` is the declarative work-item id prefix — a dev
@@ -707,26 +776,35 @@ _ARM_ROLES = {
                           "kind": "activity", "id_prefix": "act-"},
         "evidence_arms": [{"arm": "communications", "item_type": None}],
     },
+    # operations: work_item_arm is a DECLARED None (see the note above) so the
+    # three sibling dicts share one key set. OperationTasks keep their own
+    # ``operation task done`` L3 path in PR#1 (folding them into the shared
+    # work-item spine is deferred, ms-142 T1 裁定).
+    "operations": {"work_item_arm": None, "evidence_arms": []},
 }
 
 # The exclusive phase + who-has-the-ball model per collection (SPEC 方針 1 lists
 # "phase・ball" among the slots). Sales Targets advance through a phase funnel and
 # carry the ball; development milestones do not (their progress is task ratios /
 # evidence), so dev's phase_ball is ``None`` — a declared absence, not a gap.
-# Same reachability rule as ``_ARM_ROLES`` (milestones + opportunities only).
+# operations likewise has no funnel: it moves through a STATUS lifecycle
+# (todo→in_progress→open→closed), not a phase/ball, so its phase_ball is a
+# declared ``None`` too (ms-142 e-5156). Same reachability rule as ``_ARM_ROLES``.
 _ARM_PHASE_BALL = {
     "milestones": None,
     "opportunities": {"phase_field": "phase", "ball_field": "who_has_the_ball"},
+    "operations": None,
 }
 
 # collection -> target-class kind for the built-in occupations. Bridges the
 # collection-keyed registries to the kind-keyed ones (NARROWING_ID_PREFIXES).
 # Descriptor collections resolve their kind from the descriptor itself, so this
 # only needs the built-ins reachable via ``target_collections`` (milestones +
-# opportunities); see the reachability note above.
+# opportunities + operations); see the reachability note above.
 _COLLECTION_KIND = {
     "milestones": "milestone",
     "opportunities": "opportunity",
+    "operations": "operation",
 }
 
 

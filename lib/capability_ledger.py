@@ -343,10 +343,12 @@ REVIEWED_LEGITIMATE_COLLECTION_READS = {
         "target-transition-approval entries live only in milestones (dev) and "
         "operations (cross-profession): requires_spine_approval() is False for "
         "sales opportunities (existing judge path), so no sales target holds "
-        "them. NOTE occupation.iter_target_records does NOT cover operations "
-        "(TARGET_COLLECTIONS = milestones+opportunities), so target_list must "
-        "keep reading milestones+operations directly — routing through the "
-        "abstraction would silently drop operation-hosted approvals.",
+        "them. As of ms-142 e-5156 iter_target_records DOES cover operations "
+        "(TARGET_COLLECTIONS gained 'operations'), but it also walks sales "
+        "opportunities which never hold these approvals, so target_list's direct "
+        "milestones+operations read stays exact — NOT profession coupling. "
+        "Remediating it to the abstraction is possible now but out of the T1 "
+        "scope (which did not fold operation into the shared work-item CRUD).",
     ("session_end", "milestones"):
         "occupation (claim) is stored only on ms['occupation']; "
         "milestone_release_occupation is milestone-specific and sales entities "
