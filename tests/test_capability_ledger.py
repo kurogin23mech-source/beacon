@@ -493,6 +493,198 @@ def test_no_stale_symbol_reach_allowlist_entries():
         "handler was abstracted): " + ", ".join(f"{v}→{s}" for v, s in stale))
 
 
+# --- arm-name coupling ratchet (ms-142 e-5012), the third reach class ---------
+
+_SYNTH_ARM_READ = '''
+import occupation
+def collect_synthetic(data):
+    """A shared-frame aggregator that walks Targets through the abstraction but
+    then reads the dev `entries` arm directly. The docstring mentions entries but
+    only the real read must be flagged (AST, not grep)."""
+    out = []
+    for tgt in occupation.iter_target_records(data):
+        for e in tgt.get("entries", []):   # <- arm-name coupling
+            out.append(e)
+    return out
+'''
+
+_SYNTH_ARM_WRITE = '''
+def build(data):
+    # a WRITE to a same-named local key is not a reach into a Target record and
+    # must not be a false positive (LOAD-only Subscript guard).
+    result = {}
+    result["entries"] = []
+    return result
+'''
+
+
+def test_no_new_arm_coupling_on_real_tree():
+    """The arm ratchet gate: a NEW (non-allowlisted) shared-frame aggregator
+    reading a profession arm name off a Target record fails CI. The existing
+    session_log read is accepted debt; adding a fresh one flips this red. Mirrors
+    the collection/symbol gates."""
+    result = chk.run()
+    new = result["new_arm_coupling"]
+    assert new == [], (
+        "NEW profession arm coupling — route it through "
+        "occupation.profession_manifest evidence_arms / work_item_arm (never add a "
+        "KNOWN_ARM_REACH entry to silence a fresh read): "
+        + "; ".join(f"{a['site']}→tgt['{a['arm']}'] @ {a['file']}:{a['lineno']}"
+                    for a in new))
+
+
+def test_every_detected_arm_read_is_classified():
+    # On the real tree every detected arm read must be CLASSIFIED — accepted debt
+    # (pending_debt) OR a human-reviewed legitimate read (reviewed_correct, the C2
+    # recovery path for a generic arm name off a non-Target record); a new_violation
+    # is caught above, asserted here for a clear message. (The assert must accept
+    # reviewed_correct: hard-coding pending_debt would false-fail the moment the
+    # REVIEWED_LEGITIMATE_ARM_READS mechanism is first used — PR #629 re-review low#1.)
+    for a in chk.find_arm_coupling():
+        assert a["status"] in ("pending_debt", "reviewed_correct"), (
+            f"un-classified arm read: {a}")
+
+
+def test_no_stale_arm_reach_allowlist_entries():
+    """Ratchet hygiene (symmetric to the collection/symbol stale checks): every
+    (site, arm) in KNOWN_ARM_REACH AND in REVIEWED_LEGITIMATE_ARM_READS must still
+    be detected on the real tree, so a row cannot rot into a lie after the module is
+    routed through the manifest (debt) or the read is refactored away (reviewed)."""
+    detected = {(a["site"], a["arm"]) for a in chk.find_arm_coupling()}
+    stale_debt = sorted(cl.KNOWN_ARM_REACH - detected)
+    assert not stale_debt, (
+        "pending arm-reach entries no longer detected (delete them — the module "
+        "was routed through profession_manifest): "
+        + ", ".join(f"{s}→{arm}" for s, arm in stale_debt))
+    stale_reviewed = sorted(set(cl.REVIEWED_LEGITIMATE_ARM_READS) - detected)
+    assert not stale_reviewed, (
+        "reviewed-legitimate arm entries no longer detected (delete them — the read "
+        "was refactored away): " + ", ".join(f"{s}→{arm}" for s, arm in stale_reviewed))
+
+
+def test_registered_arm_reads_are_the_detected_debt():
+    # The concrete anchors: both shared-frame aggregators that abstracted target
+    # enumeration but kept a dev-arm read (session_log aggregation + cmd_project
+    # export) are detected and are exactly the allowlisted debt (not fresh
+    # violations). cmd_project was surfaced by the arm scan itself — the collection
+    # ratchet is blind to an arm read (ms-142 e-5012).
+    by_key = {(a["site"], a["arm"]): a["status"] for a in chk.find_arm_coupling()}
+    assert by_key.get(("session_log", "entries")) == "pending_debt"
+    assert by_key.get(("cmd_project", "entries")) == "pending_debt"
+    assert ("session_log", "entries") in cl.KNOWN_ARM_REACH
+    assert ("cmd_project", "entries") in cl.KNOWN_ARM_REACH
+
+
+def test_checker_flags_a_shared_frame_arm_read(tmp_path):
+    # A synthetic aggregator reading tgt['entries'] is flagged as a NEW arm read
+    # (its site is not in KNOWN_ARM_REACH), proving the checker detects it.
+    path = _write(tmp_path, "aggregator.py", _SYNTH_ARM_READ)
+    hits = chk.find_arm_coupling(path)
+    assert len(hits) == 1, hits
+    assert hits[0]["site"] == "aggregator"
+    assert hits[0]["arm"] == "entries"
+    assert hits[0]["status"] == "new_violation"
+
+
+def test_arm_scan_ignores_a_write_to_a_same_named_local(tmp_path):
+    # result["entries"] = [] is a WRITE, not a reach into a Target record — the
+    # LOAD-only Subscript guard must keep it from being a false positive.
+    path = _write(tmp_path, "builder.py", _SYNTH_ARM_WRITE)
+    assert chk.find_arm_coupling(path) == []
+
+
+def test_arm_reach_allowlist_makes_a_read_pending(tmp_path, monkeypatch):
+    # The mechanism: a (site, arm) in KNOWN_ARM_REACH is classified pending_debt
+    # (not new_violation) so it no longer fails the gate. Proven on a synthetic
+    # tree with a monkeypatched allowlist so the assertion is deterministic.
+    path = _write(tmp_path, "aggregator.py", _SYNTH_ARM_READ)
+    before = chk.find_arm_coupling(path)
+    assert before[0]["status"] == "new_violation"  # aggregator not allowlisted
+    monkeypatch.setattr(cl, "KNOWN_ARM_REACH", {("aggregator", "entries")})
+    after = chk.find_arm_coupling(path)
+    assert len(after) == 1 and after[0]["status"] == "pending_debt", after
+
+
+def test_profession_arms_cover_decomposition():
+    """PROFESSION_CONCRETE_ARMS must stay a SUPERSET of every fat arm any built-in
+    profession Target declares in occupation.TARGET_DECOMPOSITION — so a new arm
+    added to a profession cannot slip in without the arm checker learning to
+    police it (the forcing function that keeps the denylist honest)."""
+    import occupation
+    declared = {arm
+                for spec in occupation.TARGET_DECOMPOSITION.values()
+                for arm in spec["arms"]}
+    missing = sorted(declared - set(cl.PROFESSION_CONCRETE_ARMS))
+    assert not missing, (
+        "profession Target arms not in PROFESSION_CONCRETE_ARMS (add them so a "
+        "shared aggregator reading them is policed): " + ", ".join(missing))
+
+
+# --- arm-scan population is machine-derived (PR #629 review C1) ----------------
+
+def test_arm_scan_population_is_machine_derived():
+    """C1: the arm-scan population is DERIVED (every lib/*.py that calls
+    iter_target_records), not a hand tuple — so a NEW aggregator is scanned without
+    editing a list. It must cover the known aggregators and EXCLUDE the abstraction
+    definer (occupation, which owns the arm registry)."""
+    pop = set(chk.arm_scanned_modules())
+    assert {"session_log", "cmd_project"} <= pop, pop
+    assert "occupation" not in pop, (
+        "occupation.py (the arm-registry definer) must be excluded from the scan")
+
+
+def test_no_iter_target_records_caller_escapes_the_arm_scan():
+    """DERIVATION regression guard (PR #629 re-review low#2): assert the scan
+    population STAYS machine-derived from the ``_calls_iter_target_records``
+    predicate. Because both sides here use that same predicate, an all-clear is
+    trivially true WHILE the derivation is in place — the value is catching a REVERT:
+    if ``_arm_scanned_paths`` is ever changed back to a hand-list that omits a real
+    caller, ``scanned`` drops it while ``callers`` (recomputed from the predicate)
+    keeps it, so ``escaped`` becomes non-empty and this fails. It is NOT the
+    behavioral escape gate — that is ``test_no_new_arm_coupling_on_real_tree`` (a new
+    caller with a real arm read fails CI there, mutation-confirmed in review)."""
+    import ast
+    import glob
+    lib = os.path.join(os.path.dirname(__file__), "..", "lib")
+    callers = set()
+    for p in glob.glob(os.path.join(lib, "*.py")):
+        tree = ast.parse(open(p, encoding="utf-8").read())
+        if chk._calls_iter_target_records(tree):
+            callers.add(os.path.splitext(os.path.basename(p))[0])
+    scanned = set(chk.arm_scanned_modules())
+    excluded = {os.path.splitext(m)[0] for m in chk._ARM_SCAN_EXCLUDE}
+    escaped = sorted(callers - scanned - excluded)
+    assert not escaped, (
+        "iter_target_records callers escaping the arm scan (they will not be checked "
+        "for a hardcoded arm read — add to the population or _ARM_SCAN_EXCLUDE with a "
+        "rationale): " + ", ".join(escaped))
+
+
+# --- reviewed-legitimate arm recovery path (PR #629 review C2) -----------------
+
+def test_reviewed_arm_read_makes_a_read_legitimate(tmp_path, monkeypatch):
+    """C2: the arm matcher is receiver-blind (fires on any x['entries']), so a legit
+    read of a generic arm name off a NON-Target record (an L1 operation's entries)
+    needs a recovery path or it forces a wrong remediation. A (site, arm) in
+    REVIEWED_LEGITIMATE_ARM_READS classifies reviewed_correct, not new_violation.
+    Proven on a synthetic tree with a monkeypatched allowlist (deterministic)."""
+    path = _write(tmp_path, "aggregator.py", _SYNTH_ARM_READ)
+    before = chk.find_arm_coupling(path)
+    assert before[0]["status"] == "new_violation"
+    monkeypatch.setattr(cl, "REVIEWED_LEGITIMATE_ARM_READS",
+                        {("aggregator", "entries"): "L1 operation entries, not a Target arm"})
+    after = chk.find_arm_coupling(path)
+    assert len(after) == 1 and after[0]["status"] == "reviewed_correct", after
+    assert after[0]["advice"] == "L1 operation entries, not a Target arm"
+
+
+def test_arm_debt_and_reviewed_are_disjoint():
+    # A (site, arm) cannot be BOTH pending debt and reviewed-legitimate — one or the
+    # other, so the two lists cannot silently contradict (symmetry with collections).
+    overlap = set(cl.KNOWN_ARM_REACH) & set(cl.REVIEWED_LEGITIMATE_ARM_READS)
+    assert overlap == set(), f"an arm read is both debt and reviewed: {overlap}"
+
+
 def test_reviewed_correct_reads_are_classified_correctly():
     # The human-reviewed correct reads (e-4737) report as "reviewed_correct",
     # not debt — so they are not nagged for remediation.

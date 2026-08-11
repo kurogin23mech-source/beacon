@@ -361,6 +361,139 @@ def is_reviewed_legitimate_read(verb: str, collection: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Arm-name coupling (ms-142 e-5012 / leader 裁定 A) — the THIRD reach class.
+#
+# The collection check catches ``data["milestones"]`` (indexing a profession's
+# top-level Target collection). But a shared-frame aggregator can ALREADY route
+# target enumeration through the abstraction (``occupation.iter_target_records``)
+# and STILL couple to one profession — by reading a hardcoded profession-specific
+# ARM NAME off each abstracted Target record: ``tgt.get("entries")``. A
+# development milestone stores its work items + changelog under the ``entries``
+# arm; a sales opportunity stores them under ``activities`` / ``communications``.
+# So a shared aggregator that walks ``tgt["entries"]`` silently drops every sales
+# Target's work — the same doc→milestone class of leak, one level DEEPER than the
+# collection read (the enumeration is abstracted; the arm is not).
+#
+# The fix a remediator routes to: ask ``occupation.profession_manifest(data)``
+# for each target-class's ``work_item_arm`` / ``evidence_arms`` (declarative per
+# occupation) instead of hardcoding an arm name — the same declaration-driven
+# contract ms-142 is built on (a new occupation names its arms anything and still
+# lights up, e-5011/e-5014).
+#
+# WHY a SEPARATE ratchet from collection coupling: these reads live in the
+# shared-frame aggregator MODULES (``lib/session_log.py`` …), NOT in the CLI-verb
+# dispatch surface the collection/symbol scan walks (commands.py + cmd_*.py), and
+# they key by (module, arm), not (verb, collection). Same 1-way ratchet
+# discipline: a NEW arm read fails CI, an allowlisted one is visible pending debt
+# with an owning MS named inline, and the stale-entry test
+# (``test_no_stale_arm_reach_allowlist_entries``) forces a row's deletion once the
+# module routes through the manifest — the list cannot rot into a lie about what
+# still hardcodes a profession arm.
+#
+# NOTE: ``operations`` also nests an ``entries`` arm, but ``operations`` is the L1
+# cross-profession scheduling collection (see the PROFESSION_CONCRETE_COLLECTIONS
+# note) — an L1 module reading an operation's entries is legitimate. The arm scan
+# is deliberately scoped to the declared shared-frame TARGET aggregators below, so
+# an operations-arm read is out of its reach by construction.
+# ---------------------------------------------------------------------------
+
+# Profession-specific arm names -> the advice a remediator follows. These are the
+# fat-arm names ``occupation.TARGET_DECOMPOSITION`` assigns to a single
+# profession's Target (dev milestone ``entries``; sales opportunity
+# ``activities`` / ``communications``; account ``nurturings``). A shared-frame
+# aggregator reading one of these as a string literal off a Target record is
+# coupling to that profession's shape. A test
+# (``test_profession_arms_cover_decomposition``) asserts this set stays a superset
+# of the fat arms any profession Target declares, so a new arm cannot be added to
+# a profession without the checker learning to police it.
+PROFESSION_CONCRETE_ARMS = {
+    "entries":
+        "dev milestone work-item/changelog arm — enumerate a Target's work items "
+        "and evidence via occupation.profession_manifest(data) work_item_arm / "
+        "evidence_arms, not tgt['entries'] directly",
+    "activities":
+        "sales opportunity work-item arm — enumerate via profession_manifest "
+        "work_item_arm, not tgt['activities'] directly",
+    "communications":
+        "sales evidence arm — enumerate via profession_manifest evidence_arms, "
+        "not tgt['communications'] directly",
+    "nurturings":
+        "sales account work-item arm — enumerate via profession_manifest "
+        "work_item_arm, not tgt['nurturings'] directly",
+}
+
+# Ratchet allowlist: (site, arm) couplings that ALREADY exist and are accepted
+# PENDING remediation (ms-142 e-5012). ``site`` is the shared-frame module STEM
+# the read lives in (arm reads are not CLI-verb-attributed — see the class comment
+# above). ONE-WAY ratchet, identical discipline to the two above:
+#   - add a row ONLY for a genuine deferred abstraction (name the owning MS
+#     inline);
+#   - NEVER add one to silence a fresh read — route it through
+#     occupation.profession_manifest instead;
+#   - the stale-entry test forces a row's deletion once the module is remediated.
+KNOWN_ARM_REACH = {
+    # session_log aggregation (beacon session end / session rescue) routes target
+    # enumeration through occupation.iter_target_records, but then reads each
+    # record's dev ``entries`` arm directly — collect_project_entries walks
+    # tgt.get("entries", []) and its nested _iter_entries recurses e.get("entries")
+    # — so a sales project's Communication evidence is never collected into its
+    # session log. Routing through profession_manifest evidence_arms is the fix;
+    # it is DEFERRED because sales work records do not stamp meta.session_id yet
+    # (the collect filter would find nothing to gather even once the arm is
+    # correct), so the arm fix rides with that follow-up. owner = ms-108
+    # (session_log occupation-neutrality; the open follow-up is e-3702, named in
+    # collect_project_entries' docstring).
+    ("session_log", "entries"),
+    # cmd_project export/backup (beacon project export) — an L1 (instance-
+    # universal) capability that counts Targets through iter_target_records (its
+    # collection read was abstracted, ms-134 e-5061) but whose _count_entries
+    # helper still walks each record's dev ``entries`` arm, so the backup manifest's
+    # ``top_level_entries`` integrity count under-counts a sales project's work
+    # (Opportunity activities/communications). Route _count_entries through
+    # profession_manifest arms. Discovered by the arm scan itself (ms-142 e-5012);
+    # not previously catalogued because the collection ratchet — which only sees
+    # data['<collection>'] reads — is blind to an arm read. owner = ms-142:
+    # greening cmd_project's enumeration is squarely within its mandate ("列挙を
+    # Target/WorkItem 抽象イテレータへ寄せる"), tracked by task e-5115. Per leader
+    # ruling 2026-08-10, the owner tag names the MS that will actually green the
+    # surface, so the stale-entry test fires on the right MS (rot prevention).
+    ("cmd_project", "entries"),
+}
+
+
+def is_known_arm_reach(site: str, arm: str) -> bool:
+    """True when (site, arm) is an accepted-pending arm reach in the ratchet
+    allowlist (reported as debt, not a CI failure). Symmetric to
+    ``is_known_collection_coupling`` / ``is_known_symbol_reach``."""
+    return (site, arm) in KNOWN_ARM_REACH
+
+
+# Reviewed-legitimate arm reads (PR #629 review C2) — (site, arm) reads a
+# human-confirmed CORRECT arm that is NOT a profession-Target coupling, so it must
+# NOT be remediated. The arm-name match is receiver-BLIND (it fires on any
+# ``x["entries"]`` for a key in PROFESSION_CONCRETE_ARMS, regardless of what ``x``
+# is), so a shared-frame aggregator that legitimately reads a generic arm name off
+# a NON-Target record — most concretely an L1 ``operation``'s ``entries`` arm
+# (operations is the cross-profession scheduling collection, not a profession
+# concrete — see the PROFESSION_CONCRETE_COLLECTIONS note) — would otherwise be a
+# false positive with no escape but a wrong remediation. This is that escape,
+# mirroring ``REVIEWED_LEGITIMATE_COLLECTION_READS``: each entry carries the
+# evidence, the stale-entry test forces its deletion once the read is refactored
+# away, and it is disjoint from KNOWN_ARM_REACH (a read is debt OR reviewed, never
+# both). Empty today (no scanned aggregator reads a non-Target arm); the mechanism
+# is the recovery path the receiver-blind matcher needs.
+REVIEWED_LEGITIMATE_ARM_READS: dict = {}
+
+
+def is_reviewed_legitimate_arm_read(site: str, arm: str) -> bool:
+    """True when (site, arm) is a human-reviewed LEGITIMATE arm read — the arm
+    belongs to a non-Target record (e.g. an L1 operation's ``entries``), so it is
+    not profession coupling and must not be remediated (PR #629 review C2).
+    Symmetric to ``is_reviewed_legitimate_read`` for collections."""
+    return (site, arm) in REVIEWED_LEGITIMATE_ARM_READS
+
+
+# ---------------------------------------------------------------------------
 # Classification by verb noun (the substring before the first "_"). The rule map
 # gives every current noun a scope; a per-verb OVERRIDE handles the exceptions
 # where a noun's verbs split across scopes. A noun the rules do not know resolves
