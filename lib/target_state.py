@@ -95,7 +95,14 @@ SHAPE_PHASES = "phases"                     # descriptor: ordered phases + termi
 
 
 # ---------------------------------------------------------------------------
-# Built-in state models — declarative data, keyed by occupation-agnostic kind.
+# Built-in state models — declarative data, keyed by occupation-agnostic KIND
+# (``milestone`` / ``operation`` / ...). NOTE the key is the kind, NOT the
+# collection: the sibling registries in ``occupation.py`` (``_ARM_ROLES`` /
+# ``_COLLECTION_KIND``) are collection-keyed (``milestones``), so a new built-in
+# added here must be keyed by its kind and ``profession_manifest`` bridges the two
+# via ``_collection_kind`` (ms-142 T2 maintainability review: flag the two keying
+# schemes so a future edit does not key a state model by collection and read back
+# ``None``).
 #
 # Each model carries:
 #   shape             — one of the SHAPE_* constants.
@@ -214,18 +221,12 @@ def _descriptor_state_model(desc: dict) -> dict:
             p: "beacon target close --class %s <id>" % (desc.get("kind") or "")
             for p in sorted(terminal)
         },
-        "ball_field": work_model_ball_field(),
+        # descriptors carry a ball (target_engine seeds who_has_the_ball on create);
+        # the field key comes from the single source of truth in work_model.
+        "ball_field": _wm.BALL_FIELD,
         "monotonic": False,
         "phases_ref": None,
     }
-
-
-def work_model_ball_field() -> str:
-    """The canonical field a target's who-has-the-ball lives under. Named once
-    here so the descriptor model and the manifest projection agree with
-    ``target_engine.BALL_KEY`` without importing it (avoids a heavier import for
-    a one-word constant)."""
-    return "who_has_the_ball"
 
 
 def state_model_for(data: Optional[dict], kind: str) -> Optional[dict]:
@@ -262,7 +263,8 @@ def derive_phase_ball(model: Optional[dict]) -> Optional[dict]:
     ``occupation.profession_manifest`` now emits for ``phase_ball`` instead of
     reading a standalone hardcoded map (ms-142 T2). Value invariance for the
     built-ins: milestone/operation → None (state_field ``status``), opportunity →
-    ``{"phase": "who_has_the_ball"}``."""
+    ``{"phase_field": "phase", "ball_field": "who_has_the_ball"}`` (the exact keys
+    of the returned dict — do not read it as ``{"phase": ...}``)."""
     if not model:
         return None
     if model.get("state_field") != "status" and model.get("ball_field"):
@@ -274,17 +276,24 @@ def derive_phase_ball(model: Optional[dict]) -> Optional[dict]:
 def public_state_model(model: Optional[dict]) -> Optional[dict]:
     """Return the manifest-facing projection of a state model — the compact,
     uniform view every target-class entry carries (shape / state_field /
-    terminal_states / ball_field). The internal ``routed_states`` verb hints and
+    gated_states / ball_field). The internal ``routed_states`` verb hints and
     ``advanceable_states`` stay private to this module; the manifest exposes only
-    what a reader needs to reason about the class. ``terminal_states`` is the
-    sorted set of routed (close-via) states — empty for a funnel whose terminals
-    are config-derived (shape ``funnel`` already signals that)."""
+    what a reader needs to reason about the class.
+
+    ``gated_states`` (ms-142 T2 AX review) is the sorted set of states that
+    ``set_target_state`` will NOT write — a class verb is required to reach them.
+    It deliberately is NOT called ``terminal_states``: for a milestone the set
+    includes gate-managed transitional states (``in_review`` / ``approved``) that
+    are not lifecycle end-states, so "terminal" would mislead a reader into
+    modelling ``in_review`` as a dead end. The name says what is true of ALL of
+    them: they are gated behind a verb. Empty for a funnel whose gated phases are
+    config-derived (shape ``funnel`` already signals that)."""
     if not model:
         return None
     return {
         "shape": model["shape"],
         "state_field": model["state_field"],
-        "terminal_states": sorted(model.get("routed_states") or {}),
+        "gated_states": sorted(model.get("routed_states") or {}),
         "ball_field": model.get("ball_field"),
     }
 
@@ -294,19 +303,29 @@ def public_state_model(model: Optional[dict]) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def _resolve(data: dict, target_id: str) -> tuple:
-    """Return ``(record, kind)`` for ``target_id`` across every target
+    """Return ``(record, kind)`` for ``target_id`` across every CLAIMABLE target
     collection, profession-generically. Uses ``occupation`` (the manifest-driven
-    resolver) so this never indexes ``data['milestones']`` itself; falls back to
-    a scan over ``iter_target_records`` for descriptor ids whose prefix the
-    built-in ``target_kind`` map does not know. Lazy import avoids an import
-    cycle (occupation eager-imports this module)."""
+    resolver) so this never indexes ``data['milestones']`` itself; falls back to a
+    scan over ``occupation.claim_target_collections`` for ids the manifest resolver
+    does not reach — descriptor ids AND the sales secondary collections
+    (accounts / acquisitions) that ride a separate persistence path and so are NOT
+    in ``iter_target_records``. Without that widening an acquisition (whose state
+    model IS declared) could not be resolved here (ms-142 T2 maintainability
+    review). Lazy import avoids an import cycle (occupation eager-imports this
+    module)."""
     import occupation as _occ
     rec = _occ.find_target(data, target_id)
     if rec is None:
-        rec = next((r for r in _occ.iter_target_records(data)
-                    if isinstance(r, dict) and r.get("id") == target_id), None)
+        for coll in _occ.claim_target_collections(data):
+            rec = next((r for r in (data.get(coll) or [])
+                        if isinstance(r, dict) and r.get("id") == target_id), None)
+            if rec is not None:
+                break
     if rec is None:
-        raise TargetStateError(f"target not found: {target_id}")
+        raise TargetStateError(
+            f"target not found: {target_id}. Ids are prefixed by class "
+            f"(ms- milestone / op- operation / opp- opportunity / acq- acquisition, "
+            f"plus any descriptor prefix). List targets with `beacon status`.")
     kind = _wm.target_kind(target_id) or (rec.get("kind") or "")
     return rec, kind
 
@@ -377,10 +396,13 @@ def set_target_state(data: dict, target_id: str, to_state: str, *,
 
     advanceable = model.get("advanceable_states") or ()
     if want not in advanceable:
+        # AX review: name the concrete gated states + their verbs inline, rather
+        # than pointing at the internal ``routed_states`` field a caller can't see.
+        gated = "; ".join(f"{s} → {v}" for s, v in sorted(routed.items())) or "(none)"
         raise TargetStateError(
-            f"unknown non-terminal {kind} state {want!r} "
-            f"(advanceable: {sorted(advanceable)}; terminal/gated states go "
-            f"through a class verb — see routed_states)")
+            f"unknown non-terminal {kind} state {want!r}. "
+            f"Advanceable via set_target_state: {sorted(advanceable)}. "
+            f"Gated states (use the named verb): {gated}")
 
     if model.get("monotonic"):
         import core

@@ -48,7 +48,9 @@ class TargetEngineError(ValueError):
 # them the same way it splits milestone.entries / opportunity.activities.
 WORK_ITEMS_KEY = "work_items"
 EVIDENCE_KEY = "evidence"
-BALL_KEY = "who_has_the_ball"
+# Sourced from the occupation-agnostic single source of truth (ms-142 T2) so this
+# and ``target_state`` cannot drift on the ball field key.
+BALL_KEY = work_model.BALL_FIELD
 
 
 # ---------------------------------------------------------------------------

@@ -95,7 +95,7 @@ def test_dev_milestone_arm_roles():
     assert ms["state_model"]["shape"] == "status_enum"
     assert ms["state_model"]["state_field"] == "status"
     assert ms["state_model"]["ball_field"] is None
-    assert {"done", "observing"} <= set(ms["state_model"]["terminal_states"])
+    assert {"done", "observing"} <= set(ms["state_model"]["gated_states"])
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +151,7 @@ def test_operation_is_a_manifest_target_class_without_work_item_arm():
     assert op["state_model"]["shape"] == "transition_table"
     assert op["state_model"]["state_field"] == "status"
     assert op["state_model"]["ball_field"] is None
-    assert op["state_model"]["terminal_states"] == ["closed"]
+    assert op["state_model"]["gated_states"] == ["closed"]
     assert set(op) == CLASS_KEYS
 
 
@@ -196,7 +196,7 @@ def test_descriptor_occupation_lights_up_arms():
     assert mat["phase_ball"] == {"phase_field": "phase",
                                  "ball_field": "who_has_the_ball"}
     # the descriptor's terminal phase (``closed``) is the routed/close-via state.
-    assert "closed" in mat["state_model"]["terminal_states"]
+    assert "closed" in mat["state_model"]["gated_states"]
 
 
 def test_descriptor_custom_arms_have_no_workitem_arm():

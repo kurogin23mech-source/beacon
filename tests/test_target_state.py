@@ -157,6 +157,39 @@ def test_set_target_state_rejects_illegal_operation_jump():
 
 
 # ---------------------------------------------------------------------------
+# Acquisition: also monotonic, but rides a SECONDARY (non-manifest) collection —
+# so this pins that _resolve reaches it (the operation test alone would not).
+# ---------------------------------------------------------------------------
+
+def _sales_with_acq(status="todo"):
+    return {"name": "s", "profession": "sales", "milestones": [],
+            "acquisitions": [{"id": "acq-1", "label": "A", "status": status}]}
+
+
+def test_set_target_state_advances_acquisition_monotonic():
+    data = _sales_with_acq("todo")
+    _, old, new = ts.set_target_state(data, "acq-1", "in_progress")
+    assert (old, new) == ("todo", "in_progress")
+    assert data["acquisitions"][0]["status"] == "in_progress"
+
+
+def test_set_target_state_refuses_acquisition_terminal():
+    data = _sales_with_acq("in_progress")
+    with pytest.raises(ts.TargetStateError) as exc:
+        ts.set_target_state(data, "acq-1", "done")
+    assert "acquisition status" in str(exc.value)
+    assert data["acquisitions"][0]["status"] == "in_progress"
+
+
+def test_set_target_state_rejects_illegal_acquisition_jump():
+    # in_progress → todo is a backward jump the monotonic table forbids.
+    data = _sales_with_acq("in_progress")
+    with pytest.raises(ts.TargetStateError):
+        ts.set_target_state(data, "acq-1", "todo")
+    assert data["acquisitions"][0]["status"] == "in_progress"
+
+
+# ---------------------------------------------------------------------------
 # Descriptor: delegates to target_engine for non-terminal phases; the terminal
 # phase is refused (route through close).
 # ---------------------------------------------------------------------------

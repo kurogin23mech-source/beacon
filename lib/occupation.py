@@ -882,9 +882,10 @@ def profession_manifest(data: dict, profession: str | None = None) -> dict:
               "evidence_arms": [{"arm": "entries", "item_type": "commit"}],
               "phase_ball": None,        # derived from state_model (ms-142 T2)
               "state_model": {"shape": "status_enum", "state_field": "status",
-                              "terminal_states": ["approved", "cancelled",
-                                                  "done", "in_review",
-                                                  "observing"],
+                              # states set_target_state won't write (verb-gated):
+                              "gated_states": ["approved", "cancelled",
+                                               "done", "in_review",
+                                               "observing"],
                               "ball_field": None},
             },
             ...
