@@ -67,7 +67,7 @@ BEACON_WATCH_AWAITING=1 BEACON_JSON=1 python3 "$(beacon _lib-path)/commands.py" 
    ゲートに判定のきっかけ（面談 or 日程付きの活動）が紐づいていないと、準備も追い込みも
    駆動できない（SPEC §2、空ゲート = 確保が目的）。確保の手段は 2 つ:
    面談で確保するなら `/beacon-sales-schedule` で面談を確定すると、その面談がゲートの発火源になり
-   遷移日も同時に入る。既にある活動（面談以外）を発火源に結ぶなら `beacon opportunity anchor <opp> <act-id>`
+   遷移日も同時に入る。既にある活動（面談以外）を発火源に結ぶなら `beacon opportunity anchor <opp-id> <work-item-id>`
    で直接結ぶ（ms-144 e-5177）。
 2. **前進ゲートが判定どき（紐づけた面談/活動が完了、または遷移日 超過）** → 「判定せよ」。
    紐づけた面談が終わっていれば `/beacon-sales-meeting-wrap`（議事録→判定案）、無ければ
@@ -175,7 +175,7 @@ beacon doc list --account <acc-id> --scope spec --json   # dossier-<acc-id> の�
 
 - **提示までが自律**。送信・予約・フェーズ確定は既存 Skill の人間承認を経る（勝手にやらない）。
 - **空の前進ゲート（`gate_needs_anchor`）を最優先で促す**（engine 駆動の起点、SPEC §2 =
-  空ゲート = 発火源を確保せよ）。判定は生 `gates[]` の解釈でなく `gate_needs_anchor` フラグで行う。
+  空ゲート = 発火源を確保せよ）。「発火源が未紐づけか」の判定だけは生 `gates[]` でなく `gate_needs_anchor` フラグで行う（優先順位1 の判定規則に従う。遷移日 未設定 の判定は フラグ未提供のため gate の `transition_date` を読む）。
 - 読み取り専用で導出する（盤面を読むだけ、`project.json` を直接書き換えない）。
 - 実行は既存 Skill に繋ぐ。この Skill 内で送信 API を直接叩かない。
 
