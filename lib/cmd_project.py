@@ -433,6 +433,13 @@ def cmd_project_export():
     op_list = project_data.get("operations", []) or []
 
     def _count_entries(ms):
+        # ARM-NAME COUPLING (ms-142 e-5012, tracked debt): target enumeration above
+        # is abstracted (iter_target_records), but this counts only the dev
+        # ``entries`` arm, so a sales Opportunity's activities/communications are
+        # not counted into ``top_level_entries``. Fix = route through
+        # occupation.profession_manifest work_item_arm/evidence_arms. Registered as
+        # pending debt in capability_ledger.KNOWN_ARM_REACH ("cmd_project",
+        # "entries"); the checker's stale-entry test forces this to be remediated.
         total = 0
         for e in ms.get("entries", []) or []:
             total += 1

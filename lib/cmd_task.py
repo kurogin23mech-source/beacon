@@ -15,6 +15,7 @@ from typing import Optional
 
 from store import get_store
 import core
+import occupation  # ms-143: profession-generic target/entry primitives
 import work_model
 
 from commands_shared import (
@@ -146,7 +147,7 @@ def cmd_task_add():
         sys.exit(1)
 
     data = load_project()
-    target = core.find_target_milestone(data, ms_id)
+    target = occupation.resolve_target(data, ms_id)
 
     # ms-81 e-1919: re-open prompt for done MS. Adding a task to a done
     # milestone creates a zombie (= the e-1916 write gate then blocks any
@@ -275,7 +276,7 @@ def cmd_task_list():
     show_all = os.environ.get("BEACON_ALL", "") == "1"
     type_filter = os.environ.get("BEACON_TYPE_FILTER", "")
     data = load_project()
-    target = core.find_target_milestone(data, ms_id)
+    target = occupation.resolve_target(data, ms_id)
 
     entries = core.filter_cancelled(target.get("entries", []), show_all)
 

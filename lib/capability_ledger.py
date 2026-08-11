@@ -105,14 +105,30 @@ PROFESSION_CONCRETE_SYMBOLS = {
         "dev milestone changelog recorder — use occupation.record_target_entry",
     "core.find_target_milestone":
         "dev milestone resolver — record via occupation.record_target_entry",
-    # sales concretes (symmetric side)
+    # ms-143 PR#4 (思想レビュー finding / leader steer 2026-08-11): find_opportunity
+    # is the SALES twin of find_target_milestone (a profession-concrete Target
+    # RESOLVER), but was missing from this denylist — an asymmetric enumeration gap
+    # that let a shared verb reach the sales concrete undetected (false green). Its
+    # dev twin is listed above, so the sales side must be too. Shared verbs resolve
+    # a Target via occupation.find_target / resolve_target instead.
+    "sales_entities.find_opportunity":
+        "sales opportunity resolver — resolve the Target via occupation.find_target "
+        "(by id; use occupation.resolve_target only for the empty-id 'single active "
+        "target' auto-select case). The sales twin of find_target_milestone.",
+    # sales concretes (symmetric side). ms-143 routes each to the RIGHT generic
+    # grain (not the one-size "record_target_entry", which no-ops on a sales Target
+    # and so mis-advised the evidence/work-item grains): a planned work item →
+    # occupation.add_work_item, a 証跡 → occupation.add_evidence, a dev changelog →
+    # occupation.record_target_entry.
     "sales_entities.activity_add":
-        "sales activity recorder — a shared capability must record via "
-        "occupation.record_target_entry, not a profession concrete",
+        "sales activity recorder — add the planned work item via "
+        "occupation.add_work_item (an opportunity's activities are its work-item arm)",
     "sales_entities.communication_add":
-        "sales communication recorder — record via occupation.record_target_entry",
+        "sales communication recorder — record the 証跡 via occupation.add_evidence "
+        "(the evidence-grain sibling of add_work_item)",
     "sales_entities.nurturing_add":
-        "sales nurturing recorder — record via occupation.record_target_entry",
+        "sales nurturing recorder — add the planned work item via "
+        "occupation.add_work_item (symmetric with an opportunity's activity)",
 }
 
 
@@ -144,24 +160,44 @@ PROFESSION_CONCRETE_SYMBOLS = {
 # avoiding the churn of allowlisting-then-removing them (leader interlock ruling
 # 2026-08-09). ms-143 PR #2 abstracts each remaining verb and deletes its row; the
 # stale-entry test forces the deletion, so this set shrinks to empty over time.
+#
+# ms-143 PR #2 has now GREENED every entry ms-134 e-5061 step 2 registered, so the
+# set is empty. The removal history (each verb → the occupation abstraction it now
+# routes through) for the record:
+#   - task_add / task_list / sync / log_finalize → occupation.resolve_target
+#     (was the dev-concrete core.find_target_milestone).
+#   - save → occupation.record_target_entry (was core.save_entry); the
+#     no-active-milestone raise is preserved in cmd_save (test_cmd_save_parity_ms143).
+#   - opportunity_activity → occupation.add_work_item (was sales_entities.activity_add;
+#     an opportunity's activities are its work-item arm).
+#   - communication_add / acquisition_attack_list_send_record / _reply_record →
+#     occupation.add_evidence (was sales_entities.communication_add); the evidence-
+#     grain sibling of add_work_item, nesting-aware for act-/nrt-
+#     (test_add_evidence_primitive_ms143). ms-143 PR #1 (#625) had already abstracted
+#     task_done / opportunity_add / activity_set_status (deliberately never listed).
+# The stale-entry test enforces this set stays honest: a row may return ONLY for a
+# genuine new deferred abstraction (name its owning MS inline), never to silence a
+# fresh violation — route the handler through the occupation layer instead.
+#
+# ms-143 PR#4 (思想レビュー finding / leader steer 2026-08-11): adding
+# sales_entities.find_opportunity to PROFESSION_CONCRETE_SYMBOLS (closing the
+# dev/sales resolver-symmetry gap) SURFACES three L2 opportunity verbs that resolve
+# the deal via the sales-concrete find_opportunity. They are registered here as
+# visible expected-red debt (= the checker REPORTS the reach as pending debt, but it
+# is an acknowledged/tracked interim — NOT a CI-blocking failure and NOT a signal to
+# remediate immediately before its prerequisite exists; owner=ms-143) rather than
+# left as a false green — this
+# visibility is a CLOSE CONDITION for ms-143 (the milestone does NOT close claiming
+# "台帳=全部緑"). The real remediation is the set_target_state primitive follow-up:
+# once Target state transitions are abstracted, opportunity_phase greens without
+# reaching find_opportunity, and opportunity_add/judge resolve via
+# occupation.find_target. Each row is deleted when its verb is migrated (stale-entry
+# test enforces the deletion). meeting_list (L3, sales-specific) also reaches
+# find_opportunity but is NOT flagged (the checker only governs L1/L2 shared verbs).
 KNOWN_SYMBOL_REACH: set = {
-    # ms-134 e-5061 step 2 (L3→L2 promotion) — class-derived RECORDING verbs
-    # promoted to L2 that STILL call a profession recorder/resolver directly.
-    # owner = ms-143 (its PR #2 routes each through occupation.record_target_entry /
-    # create_target / set_entry_state, then deletes its row here; the stale-entry
-    # test forces the deletion). ms-143 PR #1 (#625) already abstracted task_done /
-    # opportunity_add / activity_set_status, so those are absent below.
-    # dev: resolve the active milestone / write a milestone changelog entry.
-    ("task_add", "core.find_target_milestone"),
-    ("task_list", "core.find_target_milestone"),
-    ("sync", "core.find_target_milestone"),
-    ("log_finalize", "core.find_target_milestone"),
-    ("save", "core.save_entry"),
-    # sales: record an activity / communication onto the sales target.
-    ("opportunity_activity", "sales_entities.activity_add"),
-    ("communication_add", "sales_entities.communication_add"),
-    ("acquisition_attack_list_send_record", "sales_entities.communication_add"),
-    ("acquisition_attack_list_reply_record", "sales_entities.communication_add"),
+    ("opportunity_add", "sales_entities.find_opportunity"),
+    ("opportunity_phase", "sales_entities.find_opportunity"),
+    ("opportunity_judge", "sales_entities.find_opportunity"),
 }
 
 
@@ -254,36 +290,27 @@ KNOWN_COLLECTION_COUPLING = {
     # e-5061). NOTE the worktree/branch part must stay milestone-specific.
     ("doctor", "milestones"),
     # ms-134 e-5061 step 2 (L3→L2 promotion) — class-derived CRUD verbs promoted to
-    # L2 that STILL read a profession concrete collection directly. owner = ms-143
-    # (its PR #2 routes each through occupation.iter_target_records / the target
-    # abstraction, then deletes its row here; the stale-entry test forces the
-    # deletion). ms-143 PR #1 (#625) already abstracted create/done
-    # (milestone_add's RECORD path, task_done, opportunity_add, activity_set_status)
-    # so those record paths are absent — only residual READS remain below.
-    # dev milestone readers (list / show / graph / join / observe / wait /
-    # workspace_cleanup / done enumerate milestones; log_* resolve the active MS;
-    # retro_prepare aggregates milestone history):
-    ("milestone_list", "milestones"),
-    ("milestone_show", "milestones"),
-    ("milestone_graph", "milestones"),
-    ("milestone_join", "milestones"),
-    ("milestone_observe", "milestones"),
-    ("milestone_wait", "milestones"),
-    ("milestone_workspace_cleanup", "milestones"),
-    ("milestone_done", "milestones"),
-    ("log", "milestones"),
-    ("log_prepare", "milestones"),
-    ("log_finalize", "milestones"),
-    ("retro_prepare", "milestones"),
-    # milestone_add: its RECORD path is abstracted (create_target, ms-143 #625), but
-    # a residual READ remains in _is_bulk_milestone_add (counts milestones added in
-    # the last 60s to suppress an inline hint) — walks only dev 'milestones', so it
-    # misses a sales bulk-add. Distinct from the record path; ms-143 PR #2 routes it
-    # through iter_target_records too (flagged to leader 2026-08-09).
-    ("milestone_add", "milestones"),
-    # sales target readers (opportunity_list / acquisition_list enumerate their
-    # profession collection directly):
-    ("opportunity_list", "opportunities"),
+    # L2 that read a profession concrete collection directly. owner = ms-143.
+    #
+    # (ms-143 PR#2) The dev milestone readers (milestone_list / show / join /
+    # observe / wait / workspace_cleanup / done) + the log family (log / log_prepare
+    # / log_finalize) + opportunity_list now enumerate / locate via
+    # occupation.target_records(data, <kind>) (a milestone-specific read expressed
+    # without the concrete collection literal), and milestone_list's result-dict
+    # build was restructured to a local list (no read-back of output['milestones']).
+    # Their rows are removed — the stale-entry test enforces the deletion once the
+    # literal is gone. milestone_add was greened earlier (commit 587c4084,
+    # _is_bulk_milestone_add via occupation.iter_target_records). milestone_graph and
+    # retro_prepare had NO real project read left after that — their only remaining
+    # matches are a dependency-graph wave's own ``milestones`` field and a deployment
+    # record's own ``milestones`` field respectively, so they moved to
+    # REVIEWED_LEGITIMATE_COLLECTION_READS (a false-positive of the string-based
+    # check, not project coupling).
+    #
+    # acquisition_list stays: ``acquisitions`` is NOT a Target collection
+    # (TARGET_COLLECTIONS = milestones + opportunities), so occupation.target_records
+    # cannot enumerate it — routing it through the target abstraction would be the
+    # WRONG abstraction. Left as tracked debt pending its own disposition.
     ("acquisition_list", "acquisitions"),
 }
 
@@ -332,6 +359,23 @@ REVIEWED_LEGITIMATE_COLLECTION_READS = {
         "sales Opportunity has no git worktree. Reading milestones is exact, not "
         "coupling. Independent AX review 2026-08-03 corrected an initial "
         "over-eager remediation of this site.",
+    # ms-143 PR#2: false positives of the string-based check — the match is NOT a
+    # read of project['milestones'] but of a same-named key on a LOCAL structure,
+    # so routing through occupation.iter_target_records would be wrong (there is no
+    # project collection to route to). The real project reads these verbs had were
+    # remediated to occupation.target_records; only these local-structure reads
+    # remain.
+    ("milestone_graph", "milestones"):
+        "reads wave_info['milestones'] — the list of milestone ids in a dependency "
+        "graph WAVE (produced by core's graph builder), not project['milestones']. "
+        "A local graph-structure field that happens to share the key name; the "
+        "checker's string match cannot tell them apart. Not profession coupling.",
+    ("retro_prepare", "milestones"):
+        "reads dep.get('milestones') — a DEPLOYMENT record's own field listing "
+        "which milestones that deploy shipped, not project['milestones']. The real "
+        "milestone aggregation (for ms in …) was remediated to "
+        "occupation.target_records; this deployment-field read is exact, not "
+        "coupling.",
 }
 
 
@@ -346,6 +390,139 @@ def is_reviewed_legitimate_read(verb: str, collection: str) -> bool:
     sought data lives only in that collection by design, so it is not profession
     coupling and must not be remediated (ms-134 e-4737)."""
     return (verb, collection) in REVIEWED_LEGITIMATE_COLLECTION_READS
+
+
+# ---------------------------------------------------------------------------
+# Arm-name coupling (ms-142 e-5012 / leader 裁定 A) — the THIRD reach class.
+#
+# The collection check catches ``data["milestones"]`` (indexing a profession's
+# top-level Target collection). But a shared-frame aggregator can ALREADY route
+# target enumeration through the abstraction (``occupation.iter_target_records``)
+# and STILL couple to one profession — by reading a hardcoded profession-specific
+# ARM NAME off each abstracted Target record: ``tgt.get("entries")``. A
+# development milestone stores its work items + changelog under the ``entries``
+# arm; a sales opportunity stores them under ``activities`` / ``communications``.
+# So a shared aggregator that walks ``tgt["entries"]`` silently drops every sales
+# Target's work — the same doc→milestone class of leak, one level DEEPER than the
+# collection read (the enumeration is abstracted; the arm is not).
+#
+# The fix a remediator routes to: ask ``occupation.profession_manifest(data)``
+# for each target-class's ``work_item_arm`` / ``evidence_arms`` (declarative per
+# occupation) instead of hardcoding an arm name — the same declaration-driven
+# contract ms-142 is built on (a new occupation names its arms anything and still
+# lights up, e-5011/e-5014).
+#
+# WHY a SEPARATE ratchet from collection coupling: these reads live in the
+# shared-frame aggregator MODULES (``lib/session_log.py`` …), NOT in the CLI-verb
+# dispatch surface the collection/symbol scan walks (commands.py + cmd_*.py), and
+# they key by (module, arm), not (verb, collection). Same 1-way ratchet
+# discipline: a NEW arm read fails CI, an allowlisted one is visible pending debt
+# with an owning MS named inline, and the stale-entry test
+# (``test_no_stale_arm_reach_allowlist_entries``) forces a row's deletion once the
+# module routes through the manifest — the list cannot rot into a lie about what
+# still hardcodes a profession arm.
+#
+# NOTE: ``operations`` also nests an ``entries`` arm, but ``operations`` is the L1
+# cross-profession scheduling collection (see the PROFESSION_CONCRETE_COLLECTIONS
+# note) — an L1 module reading an operation's entries is legitimate. The arm scan
+# is deliberately scoped to the declared shared-frame TARGET aggregators below, so
+# an operations-arm read is out of its reach by construction.
+# ---------------------------------------------------------------------------
+
+# Profession-specific arm names -> the advice a remediator follows. These are the
+# fat-arm names ``occupation.TARGET_DECOMPOSITION`` assigns to a single
+# profession's Target (dev milestone ``entries``; sales opportunity
+# ``activities`` / ``communications``; account ``nurturings``). A shared-frame
+# aggregator reading one of these as a string literal off a Target record is
+# coupling to that profession's shape. A test
+# (``test_profession_arms_cover_decomposition``) asserts this set stays a superset
+# of the fat arms any profession Target declares, so a new arm cannot be added to
+# a profession without the checker learning to police it.
+PROFESSION_CONCRETE_ARMS = {
+    "entries":
+        "dev milestone work-item/changelog arm — enumerate a Target's work items "
+        "and evidence via occupation.profession_manifest(data) work_item_arm / "
+        "evidence_arms, not tgt['entries'] directly",
+    "activities":
+        "sales opportunity work-item arm — enumerate via profession_manifest "
+        "work_item_arm, not tgt['activities'] directly",
+    "communications":
+        "sales evidence arm — enumerate via profession_manifest evidence_arms, "
+        "not tgt['communications'] directly",
+    "nurturings":
+        "sales account work-item arm — enumerate via profession_manifest "
+        "work_item_arm, not tgt['nurturings'] directly",
+}
+
+# Ratchet allowlist: (site, arm) couplings that ALREADY exist and are accepted
+# PENDING remediation (ms-142 e-5012). ``site`` is the shared-frame module STEM
+# the read lives in (arm reads are not CLI-verb-attributed — see the class comment
+# above). ONE-WAY ratchet, identical discipline to the two above:
+#   - add a row ONLY for a genuine deferred abstraction (name the owning MS
+#     inline);
+#   - NEVER add one to silence a fresh read — route it through
+#     occupation.profession_manifest instead;
+#   - the stale-entry test forces a row's deletion once the module is remediated.
+KNOWN_ARM_REACH = {
+    # session_log aggregation (beacon session end / session rescue) routes target
+    # enumeration through occupation.iter_target_records, but then reads each
+    # record's dev ``entries`` arm directly — collect_project_entries walks
+    # tgt.get("entries", []) and its nested _iter_entries recurses e.get("entries")
+    # — so a sales project's Communication evidence is never collected into its
+    # session log. Routing through profession_manifest evidence_arms is the fix;
+    # it is DEFERRED because sales work records do not stamp meta.session_id yet
+    # (the collect filter would find nothing to gather even once the arm is
+    # correct), so the arm fix rides with that follow-up. owner = ms-108
+    # (session_log occupation-neutrality; the open follow-up is e-3702, named in
+    # collect_project_entries' docstring).
+    ("session_log", "entries"),
+    # cmd_project export/backup (beacon project export) — an L1 (instance-
+    # universal) capability that counts Targets through iter_target_records (its
+    # collection read was abstracted, ms-134 e-5061) but whose _count_entries
+    # helper still walks each record's dev ``entries`` arm, so the backup manifest's
+    # ``top_level_entries`` integrity count under-counts a sales project's work
+    # (Opportunity activities/communications). Route _count_entries through
+    # profession_manifest arms. Discovered by the arm scan itself (ms-142 e-5012);
+    # not previously catalogued because the collection ratchet — which only sees
+    # data['<collection>'] reads — is blind to an arm read. owner = ms-142:
+    # greening cmd_project's enumeration is squarely within its mandate ("列挙を
+    # Target/WorkItem 抽象イテレータへ寄せる"), tracked by task e-5115. Per leader
+    # ruling 2026-08-10, the owner tag names the MS that will actually green the
+    # surface, so the stale-entry test fires on the right MS (rot prevention).
+    ("cmd_project", "entries"),
+}
+
+
+def is_known_arm_reach(site: str, arm: str) -> bool:
+    """True when (site, arm) is an accepted-pending arm reach in the ratchet
+    allowlist (reported as debt, not a CI failure). Symmetric to
+    ``is_known_collection_coupling`` / ``is_known_symbol_reach``."""
+    return (site, arm) in KNOWN_ARM_REACH
+
+
+# Reviewed-legitimate arm reads (PR #629 review C2) — (site, arm) reads a
+# human-confirmed CORRECT arm that is NOT a profession-Target coupling, so it must
+# NOT be remediated. The arm-name match is receiver-BLIND (it fires on any
+# ``x["entries"]`` for a key in PROFESSION_CONCRETE_ARMS, regardless of what ``x``
+# is), so a shared-frame aggregator that legitimately reads a generic arm name off
+# a NON-Target record — most concretely an L1 ``operation``'s ``entries`` arm
+# (operations is the cross-profession scheduling collection, not a profession
+# concrete — see the PROFESSION_CONCRETE_COLLECTIONS note) — would otherwise be a
+# false positive with no escape but a wrong remediation. This is that escape,
+# mirroring ``REVIEWED_LEGITIMATE_COLLECTION_READS``: each entry carries the
+# evidence, the stale-entry test forces its deletion once the read is refactored
+# away, and it is disjoint from KNOWN_ARM_REACH (a read is debt OR reviewed, never
+# both). Empty today (no scanned aggregator reads a non-Target arm); the mechanism
+# is the recovery path the receiver-blind matcher needs.
+REVIEWED_LEGITIMATE_ARM_READS: dict = {}
+
+
+def is_reviewed_legitimate_arm_read(site: str, arm: str) -> bool:
+    """True when (site, arm) is a human-reviewed LEGITIMATE arm read — the arm
+    belongs to a non-Target record (e.g. an L1 operation's ``entries``), so it is
+    not profession coupling and must not be remediated (PR #629 review C2).
+    Symmetric to ``is_reviewed_legitimate_read`` for collections."""
+    return (site, arm) in REVIEWED_LEGITIMATE_ARM_READS
 
 
 # ---------------------------------------------------------------------------

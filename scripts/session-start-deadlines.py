@@ -39,6 +39,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "lib"))
 
 import deadline  # noqa: E402
+import occupation  # noqa: E402  (ms-143 e-5047: kind→label fallback)
 
 
 def _beacon_json(args):
@@ -60,12 +61,15 @@ def _format(rows):
     if not rows:
         return ""
     lines = ["⏰ 締切超過 (overdue) work items:"]
-    label_jp = {"milestone": "MS", "task": "タスク", "activity": "活動"}
     for r in rows:
         mark = "⚠ 超過" if r["temporal"] == deadline.TRANSITION_OVERDUE else "⏰ 本日"
         ctx = f" — {r['context']}" if r.get("context") else ""
+        # ms-143 e-5047: prefer the label the CLI resolved (descriptor-aware, since
+        # it had project data); fall back to the occupation resolver for built-in
+        # kinds when an older CLI omitted it. No more hardcoded kind→label map here.
+        label = r.get("kind_label") or occupation.kind_display_label(None, r["kind"])
         lines.append(
-            f"  [{label_jp.get(r['kind'], r['kind'])}] {r['label']} / "
+            f"  [{label}] {r['label']} / "
             f"期日 {r['deadline']} {mark}{ctx}")
     lines.append("  → 済んだら完了/期日を延ばす/やめたら取消 で盤面から外してください。")
     return "\n".join(lines)

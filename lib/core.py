@@ -408,7 +408,15 @@ def find_milestones(data: dict, ms_id: str) -> list[dict]:
     has duplicate IDs (Issue #14 — should now be prevented by
     validate_project, but the helper still works on raw/unvalidated data).
     """
-    return [ms for ms in data.get("milestones", []) if ms.get("id") == ms_id]
+    # ms-143: read the milestone record set through the manifest-driven
+    # occupation.target_records (concrete-literal-free) rather than naming
+    # data['milestones'] here — greens every verb that resolves via
+    # find_milestones / find_target_milestone (task_add / task_list / log). The
+    # milestone-specific matching stays here (dev frontend). Lazy import avoids
+    # the occupation→core module cycle.
+    import occupation
+    return [ms for ms in occupation.target_records(data, "milestone")
+            if ms.get("id") == ms_id]
 
 
 def find_target_milestone(data: dict, ms_id: str = "", *, index: int | None = None) -> dict:
@@ -448,7 +456,12 @@ def find_target_milestone(data: dict, ms_id: str = "", *, index: int | None = No
             )
         return matches[index - 1]
 
-    active_list = [ms for ms in data["milestones"] if ms["status"] == "in_progress"]
+    # ms-143: auto-select the single active milestone from the manifest-driven
+    # record set (concrete-literal-free). The dev-specific resolution (single
+    # active → pick it, zero → prompt to start, >1 → require -m) is UNCHANGED.
+    import occupation
+    active_list = [ms for ms in occupation.target_records(data, "milestone")
+                   if ms["status"] == "in_progress"]
     if len(active_list) == 0:
         raise ValueError("No active milestone. Run: beacon milestone start <ms-id>")
     if len(active_list) > 1:
@@ -888,49 +901,74 @@ def milestone_update(data: dict, ms_id: str, *,
     "-" (matches the convention used by other CLI clear-this-field tools);
     any other non-empty value sets the field.
     """
-    for ms in data["milestones"]:
-        if ms["id"] == ms_id:
-            if title:
-                work_model.set_target_label(ms, title, dual_write=True)  # ms-109 e-3625
-            if description is not None and description != "":
-                ms["description"] = description
-            if progress:
-                try:
-                    ms["progress"] = max(0, min(100, int(progress)))
-                except ValueError:
-                    pass
-            if target_date:
-                ms["target_date"] = target_date
-            if priority:
-                # ms-126 (e-4224 + AX round-2): a provided priority always routes
-                # through the single-source resolver; empty/omitted = no change.
-                # ``untriaged`` is rejected state-independently (a client cannot
-                # re-assert the machine sentinel). To leave an untriaged milestone
-                # unchanged, omit the field rather than echo it. Mirrors
-                # task_update above.
-                ms["priority"] = _resolve_priority_for_write(
-                    priority, allow_untriaged=False)
-            if objective:
-                ms["objective"] = objective
-            if acceptance_criteria:
-                ms["acceptance_criteria"] = acceptance_criteria
-            if owner:
-                ms["owner"] = "" if owner == "-" else owner
-            if assignee:
-                ms["assignee"] = "" if assignee == "-" else assignee
-            if status:
-                if status not in VALID_STATUSES:
-                    raise ValueError(
-                        f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_STATUSES))}"
-                    )
-                ms["status"] = status
-                meta = ms.setdefault("meta", {})
-                meta[f"{status}_at"] = _now_iso()
-                meta[f"{status}_by"] = _get_actor()
-                if reason:
-                    meta[f"{status}_reason"] = reason
-            return ms
-    raise ValueError(f"Milestone not found: {ms_id}")
+    # ms-143 e-5141: locate the milestone through the profession-generic
+    # occupation.find_target rather than the bare `for ms in data['milestones']`
+    # walk, so the class-derived UPDATE verb (cmd_milestone_update is L2 — "update a
+    # Target" is a profession-common operation) resolves its Target the same way as
+    # the create / done / list verbs greened in PR#2.
+    #
+    # SCOPE (maintainability review PR #630): this greens the UPDATE locate only. The
+    # other milestone accessors in this file (milestone_done / _wait / _purge and the
+    # dev-lifecycle helpers) still walk data['milestones'] directly, and that is
+    # LEGITIMATE, not a half-migration: core.py IS the development occupation adapter,
+    # so reading its own occupation's collection is native (the same way
+    # sales_entities reads data['opportunities']). What e-5141 removes here is the
+    # concrete read from the shared-CRUD UPDATE path specifically; a blanket rewrite
+    # of core's dev-internal accessors is neither required nor in scope.
+    #
+    # The rich per-field logic below (progress clamp / priority resolver / status-meta
+    # stamp / label dual-write) stays HERE as the dev frontend concern — it does NOT
+    # fit the generic plain-patch occupation.update_entry, which deliberately carries
+    # only flat field sets (leader 握り: primitive は plain patch に閉じる).
+    #
+    # IMPORT POLICY: occupation must be imported inside the function body, never at
+    # module level — occupation imports core at module load, so a top-level
+    # `import occupation` here would be a cycle (every occupation call site in this
+    # file follows this lazy-import rule).
+    import occupation
+    ms = occupation.find_target(data, ms_id)
+    if ms is None:
+        raise ValueError(f"Milestone not found: {ms_id}")
+    if title:
+        work_model.set_target_label(ms, title, dual_write=True)  # ms-109 e-3625
+    if description is not None and description != "":
+        ms["description"] = description
+    if progress:
+        try:
+            ms["progress"] = max(0, min(100, int(progress)))
+        except ValueError:
+            pass
+    if target_date:
+        ms["target_date"] = target_date
+    if priority:
+        # ms-126 (e-4224 + AX round-2): a provided priority always routes
+        # through the single-source resolver; empty/omitted = no change.
+        # ``untriaged`` is rejected state-independently (a client cannot
+        # re-assert the machine sentinel). To leave an untriaged milestone
+        # unchanged, omit the field rather than echo it. Mirrors
+        # task_update above.
+        ms["priority"] = _resolve_priority_for_write(
+            priority, allow_untriaged=False)
+    if objective:
+        ms["objective"] = objective
+    if acceptance_criteria:
+        ms["acceptance_criteria"] = acceptance_criteria
+    if owner:
+        ms["owner"] = "" if owner == "-" else owner
+    if assignee:
+        ms["assignee"] = "" if assignee == "-" else assignee
+    if status:
+        if status not in VALID_STATUSES:
+            raise ValueError(
+                f"Invalid status: {status}. Valid: {', '.join(sorted(VALID_STATUSES))}"
+            )
+        ms["status"] = status
+        meta = ms.setdefault("meta", {})
+        meta[f"{status}_at"] = _now_iso()
+        meta[f"{status}_by"] = _get_actor()
+        if reason:
+            meta[f"{status}_reason"] = reason
+    return ms
 
 
 def milestone_purge(data: dict, ms_id: str, *, reason: str,
@@ -1247,9 +1285,14 @@ def task_add(data: dict, ms_id: str, description: str, *,
     ``meta.created_by`` (= local-agent string for CLI / debug). Empty
     fields are dropped.
     """
-    target = find_target_milestone(data, ms_id)
-    entries = target.setdefault("entries", [])
-    eid = next_entry_id(data)
+    # ms-143: resolve the target through the profession-generic
+    # occupation.resolve_target (NOT the dev-concrete find_target_milestone), so
+    # the task_add verb no longer symbol-reaches a PROFESSION_CONCRETE_SYMBOL.
+    # resolve_target mirrors find_target_milestone's id / auto-select-active /
+    # duplicate resolution over the manifest record set. Lazy import (occupation
+    # imports core).
+    import occupation
+    target = occupation.resolve_target(data, ms_id)
     meta = {}
     if requested_by:
         meta["requested_by"] = requested_by
@@ -1275,30 +1318,31 @@ def task_add(data: dict, ms_id: str, description: str, *,
     author_clean = _clean_author(author)
     if author_clean:
         meta["author"] = author_clean
-    entry = {
-        "id": eid,
-        "type": entry_type,
-        "description": description,
-        "date": date or now,
-        "created_at": now,
-        "done_at": None,
-        "status": "todo",
-        "meta": meta,
-    }
+    # ms-143: id allocation + arm append delegate to occupation.add_work_item
+    # (manifest-driven; global-by-prefix id == next_entry_id). find_target_milestone
+    # above keeps the dev-specific resolution (auto-select active / duplicate index)
+    # and is now itself concrete-free, so this verb no longer names data['milestones']
+    # / next_entry_id. entry_type (task/commit/note) rides as the item_type override;
+    # the dev-shaped fields (date / created_at / done_at / meta + optional detail /
+    # motivation / acceptance_criteria / deadline) ride via **extra so the entry
+    # shape is byte-for-byte unchanged. Lazy import avoids the occupation→core cycle.
+    #
+    # ms-139 e-4949: 締切 (deadline) は top-level フィールド (L2 締切エンジンが
+    # canonical ``deadline`` として読む)。任意なので値がある時だけ持たせる。
+    import occupation
+    optional: dict = {}
     if detail:
-        entry["detail"] = detail
+        optional["detail"] = detail
     if motivation:
-        entry["motivation"] = motivation
+        optional["motivation"] = motivation
     if acceptance_criteria:
-        entry["acceptance_criteria"] = acceptance_criteria
-    # ms-139 e-4949: 締切 (deadline, YYYY-MM-DD) は top-level フィールド。milestone の
-    # target_date と同様、L2 締切エンジン (lib/deadline.py の deadline_of) が canonical
-    # ``deadline`` として読む。フィールド名は職種ごとに残す (task/activity=deadline、
-    # milestone=target_date)。任意なので値がある時だけ持たせる。
+        optional["acceptance_criteria"] = acceptance_criteria
     if deadline:
-        entry["deadline"] = deadline
-    entries.append(entry)
-    return eid
+        optional["deadline"] = deadline
+    entry = occupation.add_work_item(
+        data, target["id"], description=description, item_type=entry_type,
+        date=date or now, created_at=now, done_at=None, meta=meta, **optional)
+    return entry["id"]
 
 
 def task_done(data: dict, entry_id: str, *, date: str = "", reason: str = "",

@@ -553,12 +553,15 @@ def opportunity_set_description(data: dict, opportunity_id: str,
                                description: str) -> dict:
     """Set an Opportunity's free-text 背景 / 経緯 / メモ (ms-106 e-3526). Empty
     string clears it. Returns the updated opportunity dict. Raises ValueError
-    when the opportunity is unknown."""
-    opp = find_opportunity(data, opportunity_id)
-    if opp is None:
-        raise ValueError(f"Opportunity not found: {opportunity_id}")
-    opp["description"] = (description or "").strip()
-    return opp
+    when the opportunity is unknown.
+
+    ms-143: patches through the profession-generic occupation.update_entry
+    (locate + plain field patch), so the sales 更新 path no longer names
+    data['opportunities'] / find_opportunity itself. Lazy import — occupation
+    imports sales_entities at module load."""
+    import occupation
+    return occupation.update_entry(
+        data, opportunity_id, description=(description or "").strip())
 
 
 def opportunity_set_title(data: dict, opportunity_id: str, title: str) -> dict:
@@ -567,15 +570,16 @@ def opportunity_set_title(data: dict, opportunity_id: str, title: str) -> dict:
     name (parallel to `milestone rename`). Returns the updated opportunity dict.
     Raises ValueError when the opportunity is unknown or the title is empty
     (unlike description, a title cannot be cleared — every opportunity needs a
-    name)."""
-    opp = find_opportunity(data, opportunity_id)
-    if opp is None:
-        raise ValueError(f"Opportunity not found: {opportunity_id}")
+    name).
+
+    ms-143: the title validation (non-empty) stays here as the sales frontend
+    concern; the locate + patch routes through occupation.update_entry so the 更新
+    path no longer names data['opportunities'] itself. Lazy import."""
+    import occupation
     new_title = (title or "").strip()
     if not new_title:
         raise ValueError("title must not be empty (an opportunity always needs a name)")
-    opp["title"] = new_title
-    return opp
+    return occupation.update_entry(data, opportunity_id, title=new_title)
 
 
 def account_phase_warnings(data: dict, new_phase: str) -> list:
@@ -1239,12 +1243,14 @@ def _auto_advance_account_phase(data: dict, account_id: str, *, at: str = "") ->
 
 def set_opportunity_amount(data: dict, opp_id: str, amount) -> dict:
     """Set an opportunity's goal_amount (商談金額). ``amount`` is a number (円)
-    or None to clear. Returns the mutated opportunity."""
-    opp = find_opportunity(data, opp_id)
-    if opp is None:
-        raise ValueError(f"Opportunity not found: {opp_id}")
-    opp["goal_amount"] = amount
-    return opp
+    or None to clear. Returns the mutated opportunity.
+
+    ms-143: patches through the profession-generic occupation.update_entry
+    (locate + plain field patch; ``goal_amount=None`` clears — update_entry writes
+    None rather than skipping it), so the 更新 path no longer names
+    data['opportunities'] itself. Lazy import."""
+    import occupation
+    return occupation.update_entry(data, opp_id, goal_amount=amount)
 
 
 def set_phase_probability(data: dict, phase_name: str, probability) -> dict:
@@ -2320,7 +2326,14 @@ def activity_add(data: dict, opportunity_id: str, description: str, *,
     phase-fold step (e-3553) tell which phase's work an activity belongs to. It
     is a SALES-instance field only — the occupation-agnostic base stays phase
     -free (doc 5srt3fcamG59ljyRlNKn の層分界)."""
-    opp = find_opportunity(data, opportunity_id)
+    # ms-143 sales-mirror (系統1 = work-item 追加): validations stay here
+    # (sales-frontend concern), but the target lookup + id allocation + append
+    # delegate to the shared occupation primitives — the SAME path a dev task is
+    # added through. find_target / add_work_item are manifest-driven so this verb
+    # no longer names data['opportunities'] / next_activity_id itself. Lazy import
+    # avoids the occupation→sales_entities cycle.
+    import occupation
+    opp = occupation.find_target(data, opportunity_id)
     if opp is None:
         raise ValueError(f"Opportunity not found: {opportunity_id}")
     if not description or not description.strip():
@@ -2328,18 +2341,14 @@ def activity_add(data: dict, opportunity_id: str, description: str, *,
     if who_has_the_ball not in VALID_BALL:
         raise ValueError(
             f"who_has_the_ball must be one of {sorted(VALID_BALL)}, got {who_has_the_ball!r}")
-    act_id = next_activity_id(data)
-    opp.setdefault("activities", []).append({
-        "id": act_id,
-        "description": description.strip(),
-        "deadline": deadline,
-        "status": "todo",
-        "who_has_the_ball": who_has_the_ball,
-        "source": source,
-        "created_at": created_at,
-        "created_in_phase": created_in_phase or opp.get("phase", ""),
-    })
-    return act_id
+    # created_in_phase defaults to the opportunity's current phase (sales-specific
+    # enrichment, ms-106 e-3555) — computed here and passed as an extra field.
+    act = occupation.add_work_item(
+        data, opportunity_id, description=description.strip(),
+        deadline=deadline, who_has_the_ball=who_has_the_ball, source=source,
+        created_at=created_at,
+        created_in_phase=created_in_phase or opp.get("phase", ""))
+    return act["id"]
 
 
 def next_nurturing_id(data: dict) -> str:
@@ -2901,49 +2910,21 @@ def communication_add(data: dict, target_id: str, summary: str, *,
     ``body`` (e-3544, 任意) is a fuller free-text 内容要約 — the骨子 of a mail /
     the 要点 of a議事録 — kept separate from ``summary`` (the 1-行 log line). It is
     stored only when non-empty so old records stay byte-identical (前方互換), and
-    is shown in the UI's per-証跡 detail toggle (最上部) when present."""
-    container, linked_id = resolve_communication_target(data, target_id)
-    if container is None:
-        raise ValueError(
-            "Communication target not found (opp-…/acc-… target or "
-            f"act-…/nrt-… work item): {target_id}")
-    if not summary or not summary.strip():
-        raise ValueError("Communication summary is required")
-    if direction not in VALID_COMM_DIRECTION:
-        raise ValueError(
-            f"direction must be one of {sorted(VALID_COMM_DIRECTION)}, "
-            f"got {direction!r}")
-    # channel is free-text (e-3454): real-world channels are open-ended
-    # (messenger / line / 対面 …). Normalize only; empty → "other".
-    ch = (channel or "").strip().lower() or "other"
-    comm_id = next_communication_id(data)
-    # e-3503 — nest under the fulfilled work item (act-/nrt-), else store at the
-    # target (opp/acc) level, mirroring commit-under-task vs commit-at-milestone.
-    if linked_id.startswith("act-"):
-        _, node = find_activity(data, linked_id)
-    elif linked_id.startswith("nrt-"):
-        _, node = find_nurturing(data, linked_id)
-    else:
-        node = container
-    record = {
-        "id": comm_id,
-        "direction": direction,
-        "channel": ch,
-        "summary": summary.strip(),
-        "source": dict(source) if source else {},
-        "linked_id": linked_id,
-        "occurred_at": occurred_at,
-        "created_at": created_at,
-        # e-3555: 証跡が生まれた時点の商談/顧客のフェーズを set-once で刻む。空なら
-        # container (opp/acc) の現フェーズを既定にする。retarget しても不変。
-        "created_in_phase": created_in_phase or container.get("phase", ""),
-    }
-    # e-3544: 本文欄は非空のときだけ書く (空なら key ごと省いて前方互換を保つ)。
-    body_txt = (body or "").strip()
-    if body_txt:
-        record["body"] = body_txt
-    node.setdefault("communications", []).append(record)
-    return comm_id
+    is shown in the UI's per-証跡 detail toggle (最上部) when present.
+
+    ms-143: the record build + nesting + id allocation now live in the profession-
+    generic ``occupation.add_evidence`` (the evidence-grain sibling of
+    ``add_work_item``); this stays as the sales frontend signature so existing
+    callers are byte-identical (pinned by test_add_evidence_primitive_ms143). Lazy
+    import — occupation imports sales_entities at module load, so the reverse edge
+    must not be import-time."""
+    import occupation
+    # add_evidence returns the record dict (AX review PR #628 finding #1, symmetric
+    # with add_work_item); this frontend keeps its historical id-string return.
+    return occupation.add_evidence(
+        data, target_id, summary=summary, direction=direction, channel=channel,
+        body=body, source=source, occurred_at=occurred_at,
+        created_at=created_at, created_in_phase=created_in_phase)["id"]
 
 
 def communications_of(target: dict, *, linked_id: Optional[str] = None,

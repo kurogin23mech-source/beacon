@@ -83,7 +83,8 @@ def test_dev_milestone_arm_roles():
     assert ms["kind"] == "milestone"
     assert ms["id_prefix"] == "ms-"
     assert ms["narrowing"] is True
-    assert ms["work_item_arm"] == {"arm": "entries", "item_type": "task", "kind": "task"}
+    assert ms["work_item_arm"] == {"arm": "entries", "item_type": "task",
+                                   "kind": "task", "id_prefix": "e-"}
     assert ms["evidence_arms"] == [{"arm": "entries", "item_type": "commit"}]
     assert ms["phase_ball"] is None
 
@@ -97,7 +98,8 @@ def test_sales_opportunity_arm_roles():
     opp = _class(occ.profession_manifest(_sales()), "opportunities")
     assert opp["kind"] == "opportunity"
     assert opp["id_prefix"] == "opp-"
-    assert opp["work_item_arm"] == {"arm": "activities", "item_type": None, "kind": "activity"}
+    assert opp["work_item_arm"] == {"arm": "activities", "item_type": None,
+                                    "kind": "activity", "id_prefix": "act-"}
     assert opp["evidence_arms"] == [{"arm": "communications", "item_type": None}]
     assert opp["phase_ball"] == {"phase_field": "phase",
                                  "ball_field": "who_has_the_ball"}

@@ -717,6 +717,18 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # ``work_kind``). ``evidence_arms`` names where proof/changelog records live (dev
 # commits ride the SAME entries arm; sales evidence is its own communications arm).
 #
+# ⚠ DECLARED-ONLY / UNCONSUMED (ms-143 PR#4, 思想レビュー finding e-5151): unlike
+# ``work_item_arm`` (which ``add_work_item`` reads from the manifest so a new
+# occupation lights up by DECLARING it), ``evidence_arms`` currently has NO
+# consumer — ``occupation.add_evidence`` resolves the sales evidence grain directly
+# (option A, human-approved interim) and does not read this declaration. So
+# ``evidence_arms`` is a declared-but-unwired slot: a new occupation declaring it
+# will NOT light up an evidence path yet. In the INTERIM, record sales evidence by
+# calling ``occupation.add_evidence`` directly (option A) — do not rely on this
+# ``evidence_arms`` declaration to route anything. This is recorded honestly here
+# (not silently left as false "wired" advertising) until e-5151 makes add_evidence
+# manifest-driven and recovers the declared→wired contract.
+#
 # REACHABILITY (ms-142 e-5011 review, Maint#5; extended e-5156): the ONLY consumer
 # of these three ``_ARM_ROLES`` / ``_ARM_PHASE_BALL`` / ``_COLLECTION_KIND`` dicts
 # is ``profession_manifest``, which walks ``target_collections(data)`` — whose seed
@@ -736,12 +748,17 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # facts.
 _ARM_ROLES = {
     "milestones": {
-        "work_item_arm": {"arm": "entries", "item_type": "task", "kind": "task"},
+        # ms-143: ``id_prefix`` is the declarative work-item id prefix — a dev
+        # task is ``e-`` (shared with operation entries, see next_entry_id). It
+        # lets add_work_item allocate the next work-item id from the manifest
+        # alone, so a new occupation lights up by DECLARING its prefix.
+        "work_item_arm": {"arm": "entries", "item_type": "task", "kind": "task",
+                          "id_prefix": "e-"},
         "evidence_arms": [{"arm": "entries", "item_type": "commit"}],
     },
     "opportunities": {
         "work_item_arm": {"arm": "activities", "item_type": None,
-                          "kind": "activity"},
+                          "kind": "activity", "id_prefix": "act-"},
         "evidence_arms": [{"arm": "communications", "item_type": None}],
     },
     # operations: no work_item_arm entry ON PURPOSE (see the note above). Its
@@ -1034,6 +1051,363 @@ def set_entry_state(data: dict, entry_id: str, status: str, *,
             f"status must be 'todo' or 'done' (cancel has its own audit-stamped "
             f"path), got {status!r}")
     return target, entry
+
+
+def update_entry(data: dict, record_id: str, **fields) -> dict:
+    """Patch attributes on a Target OR a work item, profession-generically (ms-143,
+    設計判断 i = 更新). The attribute-patch sibling of ``set_entry_state`` (which
+    owns the LIFECYCLE transition todo/done + its completion attribution) — kept
+    SEPARATE so the ``mark_done`` completion stamps never leak onto a plain field
+    edit (設計判断 i = 分離).
+
+    ``record_id`` is a Target id (milestone / opportunity) OR a work-item id (task /
+    activity) — the parameter and the not-found error say "record", not "entry",
+    because this resolves BOTH planes (AX review PR #628: an "entry" conventionally
+    means a sub-record, so naming it ``entry_id`` mis-signals that a Target id is
+    not accepted). Locates via ``find_target`` first, then ``find_target_entry`` —
+    so it never names ``data['milestones']`` / ``data['opportunities']`` /
+    ``find_opportunity`` itself. Applies each keyword in ``fields`` verbatim
+    (``record[key] = value``); a value of ``None`` is WRITTEN, not skipped, so a
+    field can be CLEARED (a sales ``goal_amount=None`` clears the 商談金額). The
+    caller passes only the keys it means to change.
+
+    Per-field validation / normalization stays in the FRONTEND — this primitive is
+    the generic locate + apply skeleton, mirroring how ``add_work_item`` leaves the
+    sales validation to its caller. So the rich, profession-specific edits (dev
+    ``milestone update``'s progress clamp / priority resolver / status-meta stamp /
+    label dual-write; sales ``opportunity phase``'s funnel transition) are NOT folded
+    here — they keep their own frontend path (leader 握り: primitive は plain patch
+    に閉じる). Returns the located record. Raises ``ValueError`` when ``record_id``
+    matches no Target or work item."""
+    record = find_target(data, record_id)
+    if record is None:
+        hit = find_target_entry(data, record_id)
+        record = hit[2] if hit else None
+    if record is None:
+        raise ValueError(f"Record not found: {record_id}")
+    for key, value in fields.items():
+        record[key] = value
+    return record
+
+
+def target_records(data: dict, kind: str) -> list:
+    """Return the list of Target records for ``kind`` (manifest-resolved
+    collection), profession-generically (ms-143). The concrete-literal-free way
+    for a shared / to-be-shared verb to get 'all milestones' or 'all
+    opportunities' without naming ``data['milestones']`` / ``data['opportunities']``
+    itself. Returns the live list (callers may read it; mutation should go through
+    the create/add primitives). ``[]`` if ``kind`` isn't in this profession."""
+    try:
+        tc = target_class(data, kind)
+    except ValueError:
+        return []
+    return data.get(tc["collection"], []) or []
+
+
+# Display labels (Japanese) per occupation-agnostic kind — the SINGLE declaration
+# the deadline surfaces read, replacing the ``label_jp`` dict that was duplicated
+# in commands.py (``beacon deadline due``) AND scripts/session-start-deadlines.py
+# (ms-143 e-5047 / PR #623 maintainability review finding #6). A descriptor-defined
+# occupation declares its own label (``display_label`` / ``label_jp`` on the target
+# descriptor), so a NEW occupation's kinds get a display label with ZERO wiring at
+# the call sites. Built-ins are the exact set the old ``label_jp`` carried
+# (milestone / task / activity), so an unlisted kind (opportunity / account / a
+# descriptor kind with no declared label) falls back to the kind string —
+# byte-identical to the pre-refactor ``label_jp.get(kind, kind)``.
+_KIND_DISPLAY_LABEL = {
+    "milestone": "MS",
+    "task": "タスク",
+    "activity": "活動",
+}
+
+
+def kind_display_label(data: dict | None, kind: str) -> str:
+    """Return the display label for an occupation-agnostic ``kind`` (a target kind
+    like ``milestone`` / ``opportunity`` or a work-item kind like ``task`` /
+    ``activity``), sourced from declarations rather than a hardcoded map at the call
+    site (ms-143 e-5047).
+
+    Resolution order: the built-in ``_KIND_DISPLAY_LABEL`` (dev / sales built-ins),
+    then — when ``data`` is given — a descriptor-defined kind's own
+    ``display_label`` / ``label_jp`` (ms-122 data-defined occupations), else the
+    ``kind`` string itself. ``data`` may be ``None`` (a display consumer without the
+    project loaded, e.g. scripts/session-start-deadlines.py); descriptor labels then
+    resolve only where the caller passes the CLI-provided label, and built-in kinds
+    still map. This is the seam that makes a new occupation's deadline labels light
+    up from its manifest/descriptor with no edit at either surface."""
+    label = _KIND_DISPLAY_LABEL.get(kind)
+    if label:
+        return label
+    if data:
+        for desc in _td.load_descriptors(data):
+            if isinstance(desc, dict) and (desc.get("kind") or "").strip() == kind:
+                lbl = (desc.get("display_label")
+                       or desc.get("label_jp") or "").strip()
+                if lbl:
+                    return lbl
+    return kind
+
+
+def resolve_target(data: dict, target_id: str = "", *,
+                   index: int | None = None) -> dict:
+    """Resolve a Target by id, or auto-select the single active one,
+    profession-generically (ms-143). The profession-AGNOSTIC generalization of
+    ``core.find_target_milestone`` (which is a dev-concrete symbol): a shared /
+    to-be-shared verb resolves its Target through this rather than calling the
+    dev-specific resolver. Behaviour mirrors find_target_milestone but over the
+    manifest-driven record set (all Target collections), so it never names
+    ``data['milestones']`` itself:
+
+      - ``target_id`` given → that Target. Duplicate ids (corruption) require an
+        explicit ``index`` (1-based); out-of-range / count reported.
+      - empty ``target_id`` → the single ``status == "in_progress"`` Target
+        (0 → "no active", >1 → "specify -m").
+
+    ``core.find_target_milestone`` stays for L1 dev callers (milestone commands /
+    cmd_pr / task_update); this is the L2 path. Raises ``ValueError`` on
+    not-found / ambiguous / none-active / multiple-active. This is a target-level
+    resolver — the sibling of the entry-level ``find_target_entry``."""
+    records = iter_target_records(data)
+    if target_id:
+        matches = [r for r in records if r.get("id") == target_id]
+        if not matches:
+            raise ValueError(f"Target not found: {target_id}")
+        if len(matches) == 1:
+            if index is not None and index != 1:
+                raise ValueError(
+                    f"Target '{target_id}' has only 1 record but "
+                    f"--index {index} was given.")
+            return matches[0]
+        if index is None:
+            raise ValueError(
+                f"Ambiguous target '{target_id}': {len(matches)} records exist "
+                f"(data corruption). Specify which with `--index <n>` where n is "
+                f"1..{len(matches)}.")
+        if index < 1 or index > len(matches):
+            raise ValueError(
+                f"--index {index} is out of range for '{target_id}' "
+                f"(valid: 1..{len(matches)}).")
+        return matches[index - 1]
+    active = [r for r in records if r.get("status") == "in_progress"]
+    if len(active) == 0:
+        # AX review PR #628 (misleading): resolve_target is profession-GENERIC, so
+        # the recovery hint must not hard-code the dev-only `beacon milestone start`
+        # (which does nothing for a sales project whose targets are Opportunities).
+        # Emit the activation command the project's own occupation uses.
+        prof = resolve_profession(data)
+        hint = ("beacon milestone start <ms-id>" if prof == "dev"
+                else "activate an in-progress target for this project")
+        raise ValueError(f"No active target. Run: {hint}")
+    if len(active) > 1:
+        ids = ", ".join(r.get("id", "") for r in active)
+        raise ValueError(f"Multiple active targets. Specify with -m <id>: {ids}")
+    return active[0]
+
+
+def find_target(data: dict, target_id: str) -> dict | None:
+    """Locate a Target record by id across all Target collections,
+    profession-generically (ms-143). Returns the record dict or ``None`` — the
+    manifest-driven replacement for ``core.find_target_milestone`` /
+    ``sales_entities.find_opportunity`` when a profession-shared / to-be-shared
+    verb needs the containing Target without naming ``data['milestones']`` /
+    ``data['opportunities']`` itself."""
+    kind = _wm.target_kind(target_id)
+    try:
+        tc = target_class(data, kind)
+    except ValueError:
+        return None
+    id_field = tc.get("id_field", "id")
+    for rec in data.get(tc["collection"], []) or []:
+        if rec.get(id_field) == target_id:
+            return rec
+    return None
+
+
+def _collect_item_ids(entries: list, out: list) -> None:
+    """Append every id in ``entries``, recursing into nested ``entries`` children
+    (dev subtasks)."""
+    for it in entries:
+        out.append(it.get("id", ""))
+        _collect_item_ids(it.get("entries", []) or [], out)
+
+
+def _all_work_item_ids(data: dict) -> list:
+    """Every work-item id across all Target work-item arms (nested) PLUS operation
+    entries — the GLOBAL id space ``add_work_item`` allocates within (ms-143 設計
+    判断 a). Work-item prefixes are globally unique (dev ``e-`` lives only in
+    milestone / operation entries, sales ``act-`` only in activities), so
+    ``next_suffixed_id`` filtered by a prefix over this superset is collision-safe
+    and preserves ``core.next_entry_id``'s cross-operations scope. Operations are
+    dev infra (not a profession Target) but share the ``e-`` space, so they are
+    scanned explicitly."""
+    ids: list = []
+    for tc in profession_manifest(data)["target_classes"]:
+        arm = (tc.get("work_item_arm") or {}).get("arm")
+        if not arm:
+            continue
+        for rec in data.get(tc["collection"], []) or []:
+            _collect_item_ids(rec.get(arm, []) or [], ids)
+    for op in data.get("operations", []) or []:
+        _collect_item_ids(op.get("entries", []) or [], ids)
+    return ids
+
+
+_ARM_DEFAULT_ITEM_TYPE = object()  # sentinel: "use the arm's declared item_type"
+
+
+def add_work_item(data: dict, target_id: str, *, description: str,
+                  status: str = "", item_type=_ARM_DEFAULT_ITEM_TYPE,
+                  **extra) -> dict:
+    """Append a work item (dev task / sales activity) under a Target,
+    profession-generically (ms-143 設計判断 b 系統1 = work-item 追加). Resolves the
+    target's ``work_item_arm`` ``{arm, item_type, id_prefix}`` from
+    ``profession_manifest`` and appends ``{id, [type], status, description,
+    **extra}`` to that arm. The id is allocated GLOBALLY by prefix (設計判断 a) via
+    ``_all_work_item_ids`` so it never collides with an existing id of the same
+    prefix anywhere (incl. operation entries for ``e-``).
+
+    Profession-specific fields — a task's ``priority`` / ``motivation``, an
+    activity's ``deadline`` / ``who_has_the_ball`` — ride via ``**extra``; the
+    frontend (``core.task_add`` / ``sales_entities.activity_add``) owns them, this
+    primitive stays the generic skeleton (mirrors ``create_target``'s layering).
+    ``type`` is stamped only when the arm declares an ``item_type`` (dev tasks
+    carry ``type="task"``; sales activities declare ``None`` and carry no type).
+
+    Returns the new work-item dict. Raises ``ValueError`` if the target kind has
+    no work-item arm or the target id is not found."""
+    kind = _wm.target_kind(target_id)
+    tc = target_class(data, kind)
+    wia = tc.get("work_item_arm") or {}
+    arm = wia.get("arm")
+    if not arm:
+        raise ValueError(f"target-class {kind!r} has no work-item arm")
+    id_field = tc.get("id_field", "id")
+    target = next((r for r in data.get(tc["collection"], []) or []
+                   if r.get(id_field) == target_id), None)
+    if target is None:
+        raise ValueError(f"Target not found: {target_id}")
+    item_id = work_base.next_suffixed_id(
+        _all_work_item_ids(data), wia.get("id_prefix", ""))
+    # ``type`` is the arm's declared item_type by default; a caller may override
+    # it for the arm's polymorphic entries (dev's ``entries`` arm holds
+    # task / commit / note — task_add passes its entry_type). A falsy resolved
+    # type stamps no ``type`` field (sales activities declare None).
+    resolved_type = (wia.get("item_type")
+                     if item_type is _ARM_DEFAULT_ITEM_TYPE else item_type)
+    item: dict = {"id": item_id, "description": description}
+    if resolved_type:
+        item["type"] = resolved_type
+    item["status"] = status or _wm.TODO_STATUS
+    item.update(extra)
+    target.setdefault(arm, []).append(item)
+    return item
+
+
+def _resolve_evidence_parent(data: dict, parent_id: str):
+    """Resolve where a piece of evidence (a sales Communication / 事後記録型の証跡)
+    is stored and which planned work item it fulfilled, occupation-generically
+    (ms-143 設計判断 b 系統4). Returns ``(node, arm, linked_id, container)`` — or
+    ``(None, None, None, None)`` when unresolvable:
+
+      - ``node``      the dict whose evidence arm physically holds the record: the
+                      Target itself (opp-/acc- grain), or the fulfilled work item
+                      (act-/nrt- grain, nested — mirrors a dev commit nested under
+                      its task).
+      - ``arm``       the evidence arm name on ``node`` (``"communications"``).
+      - ``linked_id`` the work item the evidence fulfilled (``""`` at target grain),
+                      recorded so both grains stay traceable.
+      - ``container`` the owning Target (opp/acc) — the source of the
+                      ``created_in_phase`` set-once default even when ``node`` is a
+                      nested work item.
+
+    Accounts / nurturings are deliberately NOT ``profession_manifest`` Target-classes
+    (that invariant stays milestones + opportunities, see ``TARGET_COLLECTIONS``), so
+    this resolver reaches the sales resolvers directly rather than forcing accounts
+    into the manifest and changing every Target projection (ms-143 option A, human-
+    confirmed 2026-08-10). occupation.py is the layer allowed to know sales
+    collections — the same seam as ``record_target_entry`` /
+    ``_HARD_VALIDATED_COLLECTION`` — so the account-grain evidence path lives HERE,
+    not in the profession-agnostic base."""
+    container, linked_id = sales_entities.resolve_communication_target(
+        data, parent_id)
+    if container is None:
+        return None, None, None, None
+    if linked_id.startswith("act-"):
+        _, node = sales_entities.find_activity(data, linked_id)
+    elif linked_id.startswith("nrt-"):
+        _, node = sales_entities.find_nurturing(data, linked_id)
+    else:
+        node = container
+    return node, "communications", linked_id, container
+
+
+def add_evidence(data: dict, parent_id: str, *, summary: str, direction: str,
+                 channel: str = "other", body: str = "",
+                 source: dict | None = None, occurred_at: str = "",
+                 created_at: str = "", created_in_phase: str = "") -> dict:
+    """Append a piece of evidence (a sales Communication / 事後記録型の証跡) under a
+    Target or the work item it fulfilled, occupation-generically, and return the new
+    record (ms-143 設計判断 b 系統4 = 証跡追加). Returns the record dict — symmetric
+    with its siblings ``add_work_item`` and ``target_engine.add_evidence``, which
+    both return the new record; a caller reads ``.get("id")`` for the id (AX review
+    PR #628 finding #1: sibling primitives must not split their return type). The
+    evidence-grain sibling of ``add_work_item`` (which adds a *planned* work item to
+    a Target's work-item arm)
+    and of ``record_target_entry`` (which carries the dev milestone changelog and
+    NO-OPs on a sales Target, so it cannot record a Communication — the gap this
+    fills).
+
+    NESTING (mirrors the dev commit↔task model, ms-106 e-3503): a record that
+    fulfills a work item (act-/nrt-) nests UNDER that work item's own evidence arm;
+    one addressed to the Target (opp-/acc-) directly sits at Target level.
+    ``linked_id`` records which work item it fulfilled so both grains stay
+    traceable, and the container's current phase is stamped set-once as
+    ``created_in_phase``.
+
+    Profession-specific fields (``direction`` / ``channel`` / ``body`` / ``source`` /
+    ``occurred_at``) are the sales evidence vocabulary — occupation.py carries them
+    exactly as ``record_target_entry`` carries the dev changelog vocabulary
+    (``revision_id`` / ``hash`` / …). The id is allocated GLOBALLY by prefix via the
+    canonical ``sales_entities.next_communication_id`` (comm- space over every
+    Opportunity + Account, incl. nested), so numbering is unchanged (parity).
+
+    Raises ``ValueError`` on an unresolvable parent, an empty summary, or an invalid
+    direction — same precedence and messages as the pre-refactor
+    ``sales_entities.communication_add`` (pinned by
+    ``tests/test_add_evidence_primitive_ms143.py``)."""
+    node, arm, linked_id, container = _resolve_evidence_parent(data, parent_id)
+    if node is None:
+        raise ValueError(
+            "Communication target not found (opp-…/acc-… target or "
+            f"act-…/nrt-… work item): {parent_id}")
+    if not summary or not summary.strip():
+        raise ValueError("Communication summary is required")
+    if direction not in sales_entities.VALID_COMM_DIRECTION:
+        raise ValueError(
+            f"direction must be one of "
+            f"{sorted(sales_entities.VALID_COMM_DIRECTION)}, got {direction!r}")
+    # channel is free-text (e-3454): normalize only; empty → "other".
+    ch = (channel or "").strip().lower() or "other"
+    ev_id = sales_entities.next_communication_id(data)
+    record = {
+        "id": ev_id,
+        "direction": direction,
+        "channel": ch,
+        "summary": summary.strip(),
+        "source": dict(source) if source else {},
+        "linked_id": linked_id,
+        "occurred_at": occurred_at,
+        "created_at": created_at,
+        # e-3555: 証跡が生まれた時点の商談/顧客のフェーズを set-once で刻む (container の
+        # 現フェーズを既定に、retarget しても不変)。
+        "created_in_phase": created_in_phase or container.get("phase", ""),
+    }
+    # e-3544: 本文欄は非空のときだけ書く (空なら key ごと省いて前方互換を保つ)。
+    body_txt = (body or "").strip()
+    if body_txt:
+        record["body"] = body_txt
+    node.setdefault(arm, []).append(record)
+    return record
 
 
 def iter_work_items(data: dict):
