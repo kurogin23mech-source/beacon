@@ -679,6 +679,14 @@ class ApiClient:
                        client_event_id: str = "",
                        is_retry: bool = False,
                        max_retries: int = 2) -> dict:
+        # ms-108 e-5194 follow-up: structural leak guard. A test context posting
+        # a bus event to the production cloud is what let a non-hermetic
+        # operation-trigger unit test spray op-1 "test" events onto the live bus
+        # every suite run. guard_prod_project_write only covered project
+        # creation, so bus posts slipped through — block them at the same choke
+        # point. No-op outside test context / non-prod targets.
+        import cloud_write_guard
+        cloud_write_guard.guard_prod_bus_write(self._base_url)
         body = {
             "channel": channel,
             "sender_session_id": sender_session_id,

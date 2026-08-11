@@ -93,6 +93,38 @@ def guard_prod_project_write(base_url: str) -> None:
     )
 
 
+def guard_prod_bus_write(base_url: str) -> None:
+    """Raise if a test context is about to post a bus event to production.
+
+    ``guard_prod_project_write`` only covers project-*creating* writes, so a
+    test that constructs a real ``ApiClient`` and posts to the bus of an
+    already-existing production project slipped through (the exact leak that
+    let a non-hermetic operation-trigger unit test spray ``op-1`` "test"
+    events onto the live bus every time the suite ran — a wrong monkeypatch
+    target meant the helper's local-mode early-return never fired). Guard the
+    bus post at the same choke point so no test can leak to the live bus even
+    when its own mock is wired up incorrectly.
+
+    No-op outside a test context (normal CLI / autonomous use is unaffected)
+    and no-op for non-prod targets (local mode, staging, a sandbox cloud). The
+    escape hatch ``BEACON_ALLOW_PROD_TEST_WRITE=1`` lets a test that genuinely
+    must exercise the live bus opt in.
+    """
+    if not is_test_context():
+        return
+    if not is_prod_api_url(base_url):
+        return
+    if os.environ.get("BEACON_ALLOW_PROD_TEST_WRITE") == "1":
+        return
+    raise RuntimeError(
+        "cloud_write_guard: refusing to post a bus event to the production "
+        f"cloud ({base_url}) from a test context. A unit test must stub the "
+        "cloud config / ApiClient so it never reaches the live bus (patch the "
+        "helper's *own* module namespace, not a re-export). If this test "
+        "genuinely must hit the prod bus, set BEACON_ALLOW_PROD_TEST_WRITE=1."
+    )
+
+
 def _default_cleanup(client, project_id: str) -> None:
     """Best-effort archive of a disposable project via the envelope path.
 

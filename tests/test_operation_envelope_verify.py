@@ -215,8 +215,14 @@ def test_push_operation_trigger_local_mode_safe(monkeypatch):
     """When no cloud.json exists, the helper should silently return without
     raising. Local-mode users must not see errors from this autonomous-path
     plumbing (ms-60 / e-1340)."""
+    # ms-108 e-5194 follow-up: patch the name in cmd_trigger — the module where
+    # _push_operation_trigger_to_bus is defined and resolves _get_cloud_config_path
+    # from its own globals. Patching commands._get_cloud_config_path (a re-export)
+    # had no effect on the helper's lookup, so the local-mode early-return never
+    # fired and the helper reached the real cwd cloud.json → posted op-1 "test"
+    # events to the live bus every suite run.
     monkeypatch.setattr(
-        commands, "_get_cloud_config_path",
+        cmd_trigger, "_get_cloud_config_path",
         lambda: "/nonexistent/cloud.json",
     )
     # Must not raise.
