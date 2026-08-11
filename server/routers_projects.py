@@ -59,6 +59,7 @@ import operations
 import trek as trek_mod
 import envelope as envelope_mod
 import work_model
+import sales_entities  # ms-108 e-5194: mirror the CLI's funnel resolution into the payload
 import master_adapter
 import approved_actions as approved_actions_mod
 import disclosure as disclosure_mod
@@ -416,6 +417,22 @@ def _spec_doc_for_op(project_id: str, op_id: str, spec_doc_id: str) -> dict:
         )
     return doc
 
+def _resolve_sales_funnels(data: dict, enriched: dict) -> dict:
+    """ms-108 e-5194: merge the resolved sales funnels into the Web UI payload.
+
+    A funnel-less sales project (not created via ``new_sales_project``, or older
+    than the seed) has no ``opportunity_phases`` key, so the board renders zero
+    columns = blank. The CLI never hits this because it resolves ``configured or
+    DEFAULT`` funnels; we mirror that resolution into the payload so CLI and Web
+    UI agree. Delegates to ``sales_entities.payload_funnels`` — the single owner
+    of both the sales gate (via ``effective_phases``) and the kind→key mapping
+    (``_FUNNEL_KEYS``) — so this layer holds no second (weaker) profession check
+    and no hardcoded funnel set. Non-sales resolves to an empty dict here, so dev
+    payloads are untouched."""
+    enriched.update(sales_entities.payload_funnels(data))
+    return enriched
+
+
 def _enrich_project(data: dict) -> dict:
     """Add computed fields (total_tasks, done_tasks, entries_to_json) to project."""
     enriched = {**data}
@@ -430,7 +447,7 @@ def _enrich_project(data: dict) -> dict:
             "done_tasks": done,
         })
     enriched["milestones"] = milestones
-    return enriched
+    return _resolve_sales_funnels(data, enriched)
 
 def _enrich_project_slim(data: dict) -> dict:
     """Slim variant for WS broadcast — drops tab-scoped heavy arrays.
@@ -468,7 +485,7 @@ def _enrich_project_slim(data: dict) -> dict:
         slim_ms["done_tasks"] = done
         milestones.append(slim_ms)
     enriched["milestones"] = milestones
-    return enriched
+    return _resolve_sales_funnels(data, enriched)
 
 def _build_document_change_payload(project_id: str, doc_id: str, op: str,
                                    fallback_title: str = "",
