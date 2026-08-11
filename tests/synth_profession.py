@@ -61,9 +61,17 @@ def build_synthetic_project(*, duty_overdue: bool = True) -> dict:
         "obligations": [
             {
                 "id": "obl-1",
+                # ``kind`` / ``phase_history`` / ``who_has_the_ball`` mirror what
+                # ``target_engine.create_target`` stamps on a real descriptor
+                # Target: ``kind`` lets the generic ``set_target_state`` resolver
+                # derive the class from the id, and the ball + history are what the
+                # descriptor advance engine reads/appends (ms-142 T5 fidelity).
+                "kind": "obligation",
                 "label": "個人情報の年次点検",
                 "status": "raised",
                 "phase": "raised",
+                "phase_history": [],
+                "who_has_the_ball": "self",
                 "occupation": {"session_id": "sv-comp"},
                 "duties": [
                     {"id": "duty-1", "description": "点検レポート提出",
