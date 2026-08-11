@@ -278,38 +278,67 @@ def _arm_key(node: ast.AST) -> str:
     return ""
 
 
-# Shared-frame aggregator modules subject to the arm-name scan (ms-142 e-5012).
-# These are lib modules that walk raw Target records (via
-# occupation.iter_target_records) as a profession-SHARED capability and therefore
-# must not hardcode a profession arm name. UNLIKE the collection/symbol scan
-# (which walks the CLI-verb dispatch surface and attributes a read to a verb), an
-# arm read here is attributed to its MODULE stem — the ratchet key in
-# KNOWN_ARM_REACH.
+# The arm-name scan population is DERIVED, not hand-listed (PR #629 review C1).
+# The scanned set = every lib/*.py module that CALLS occupation.iter_target_records.
+# That call is the exact membership signal: a module walking Target records through
+# the enumeration abstraction has ALREADY dropped its collection coupling, so a
+# hardcoded arm name is its SOLE residual profession coupling — precisely the leak
+# the collection scan is blind to. Deriving the population by AST makes the
+# forcing-function claim REAL: a NEW shared-frame aggregator is scanned the moment
+# it lands, not contingent on someone remembering to append it to a tuple (the
+# original hand-tuple could silently pass a new arm read — C1). A CLI L2 verb that
+# still reads data['milestones'] directly is NOT a caller, so it is correctly
+# EXCLUDED — its arm read rides with its collection-coupling remediation
+# (KNOWN_COLLECTION_COUPLING, ms-143), never double-tracked here.
 #
-# Membership rule (keeps the set principled, not ad hoc): a module belongs here
-# when it has ALREADY abstracted its target ENUMERATION (uses
-# iter_target_records) so a hardcoded arm name is its SOLE residual profession
-# coupling. That is exactly the coupling the collection scan is blind to. A CLI
-# L2 verb that still reads data['milestones'] directly is NOT added here — its arm
-# read rides with its collection-coupling remediation (KNOWN_COLLECTION_COUPLING,
-# ms-143), so listing it here too would double-track the same handler.
-#   - session_log.py: session end / rescue aggregation.
-#   - cmd_project.py: the project export/backup handler's entry-count (its only
-#     arm read; the module's other verbs read no Target arm — verified by the scan).
-_ARM_SCANNED_MODULES = ("session_log.py", "cmd_project.py")
+# occupation.py is the one caller EXCLUDED: it is the abstraction DEFINER (it owns
+# the arm registry _ARM_ROLES / TARGET_DECOMPOSITION and walks arms by design), so
+# its arm handling is the source of truth, not a coupling to police.
+_ARM_SCAN_EXCLUDE = {"occupation.py"}
 
 
-def _arm_scanned_paths(arm_paths: str = "") -> list:
-    """Files the arm-name scan walks. Default: the declared shared-frame Target
-    aggregators under ``lib/``. ``arm_paths`` (a single path) overrides for test
-    fixtures, mirroring ``_scanned_paths``' ``commands_path`` isolation."""
-    if arm_paths:
-        return [arm_paths]
-    lib = os.path.join(REPO, "lib")
+def _calls_iter_target_records(tree: ast.AST) -> bool:
+    """True when ``tree`` contains a CALL to ``iter_target_records`` (bare or
+    ``occupation.iter_target_records``). AST-based, so a comment/docstring mention
+    (e.g. capability_ledger's prose) is NOT a false positive — only a real call
+    makes a module a Target aggregator subject to the arm scan."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if (isinstance(f, ast.Attribute) and f.attr == "iter_target_records") \
+                    or (isinstance(f, ast.Name) and f.id == "iter_target_records"):
+                return True
+    return False
+
+
+def arm_scanned_modules() -> list:
+    """Return the derived arm-scan population as module stems (PR #629 C1) — every
+    lib/*.py that calls ``iter_target_records`` minus ``_ARM_SCAN_EXCLUDE``. Exposed
+    so a reconcile test can pin that the population is machine-derived and covers
+    the known aggregators (session_log / cmd_project) without a hand-maintained
+    list that can rot."""
+    return sorted(os.path.splitext(os.path.basename(p))[0]
+                  for p in _arm_scanned_paths())
+
+
+def _arm_scanned_paths(arm_path: str = "") -> list:
+    """Files the arm-name scan walks — DERIVED (PR #629 C1): every ``lib/*.py`` that
+    CALLS ``iter_target_records`` (a shared-frame Target aggregator), minus
+    ``_ARM_SCAN_EXCLUDE`` (occupation.py, the abstraction definer). So a new
+    aggregator is scanned automatically — the population cannot rot behind a hand
+    tuple. ``arm_path`` (a single path) overrides for test fixtures, mirroring
+    ``_scanned_paths``' ``commands_path`` isolation."""
+    if arm_path:
+        return [arm_path]
     out = []
-    for name in _ARM_SCANNED_MODULES:
-        p = os.path.join(lib, name)
-        if os.path.exists(p):
+    for p in sorted(glob.glob(os.path.join(REPO, "lib", "*.py"))):
+        if os.path.basename(p) in _ARM_SCAN_EXCLUDE:
+            continue
+        try:
+            tree = ast.parse(open(p, encoding="utf-8").read())
+        except SyntaxError:
+            continue
+        if _calls_iter_target_records(tree):
             out.append(p)
     return out
 
@@ -427,7 +456,7 @@ def find_collection_coupling(commands_path: str = "") -> list:
     return sorted(unique, key=lambda h: (h["verb"], h["file"], h["lineno"]))
 
 
-def find_arm_coupling(arm_paths: str = "") -> list:
+def find_arm_coupling(arm_path: str = "") -> list:
     """Return shared-frame aggregators that read a profession-specific ARM name
     off a Target record directly (``tgt.get("entries")`` etc.) — the coupling one
     level deeper than the collection read: the enumeration is abstracted through
@@ -435,17 +464,20 @@ def find_arm_coupling(arm_paths: str = "") -> list:
 
     Each item is a dict: ``{site, arm, advice, file, lineno, status}``. ``site``
     is the module stem (the ratchet key — arm reads are attributed to the
-    shared-frame MODULE they live in, not a CLI verb; see ``_ARM_SCANNED_MODULES``).
-    ``status`` is one of (self-describing, so a caller filters without docs):
-      - ``"pending_debt"`` — an accepted coupling in the ``KNOWN_ARM_REACH``
-        ratchet allowlist (owning MS named inline);
-      - ``"new_violation"`` — a fresh arm read that fails the checker.
-    There is deliberately no ``reviewed_correct`` status: a shared-frame Target
-    aggregator reading a profession arm is never exact-by-design — it must route
-    through ``occupation.profession_manifest`` — so the only non-failing status is
-    deferred debt (same asymmetry as the symbol ratchet)."""
+    shared-frame MODULE they live in, not a CLI verb; the population is derived by
+    ``_arm_scanned_paths``). ``status`` is one of (self-describing, so a caller
+    filters without docs):
+      - ``"reviewed_correct"`` — a HUMAN-reviewed legitimate arm read (the arm is
+        an L1 collection's, e.g. an operation's ``entries``, not a profession
+        Target's); not coupling, not debt. Added in PR #629 review (C2): the
+        name-based match is receiver-blind, so a legit read of a generic arm name
+        needs a recovery path or it would force a wrong remediation. Mirrors the
+        collection ratchet's ``reviewed_correct``.
+      - ``"pending_debt"`` — an accepted coupling in ``KNOWN_ARM_REACH`` (owning MS
+        named inline);
+      - ``"new_violation"`` — a fresh arm read that fails the checker."""
     hits = []
-    for p in _arm_scanned_paths(arm_paths):
+    for p in _arm_scanned_paths(arm_path):
         src = open(p, encoding="utf-8").read()
         tree = ast.parse(src)
         rel = os.path.relpath(p, REPO)
@@ -454,13 +486,19 @@ def find_arm_coupling(arm_paths: str = "") -> list:
             arm = _arm_key(node)
             if not arm:
                 continue
-            status = ("pending_debt"
-                      if cl.is_known_arm_reach(site, arm)
-                      else "new_violation")
+            if cl.is_reviewed_legitimate_arm_read(site, arm):
+                status = "reviewed_correct"
+                advice = cl.REVIEWED_LEGITIMATE_ARM_READS[(site, arm)]
+            elif cl.is_known_arm_reach(site, arm):
+                status = "pending_debt"
+                advice = cl.PROFESSION_CONCRETE_ARMS[arm]
+            else:
+                status = "new_violation"
+                advice = cl.PROFESSION_CONCRETE_ARMS[arm]
             hits.append({
                 "site": site,
                 "arm": arm,
-                "advice": cl.PROFESSION_CONCRETE_ARMS[arm],
+                "advice": advice,
                 "file": rel,
                 "lineno": node.lineno,
                 "status": status,
@@ -474,7 +512,7 @@ def find_arm_coupling(arm_paths: str = "") -> list:
     return sorted(unique, key=lambda h: (h["site"], h["file"], h["lineno"]))
 
 
-def run(commands_path: str = "") -> dict:
+def run(commands_path: str = "", arm_path: str = "") -> dict:
     """Run all checks and return a structured result with an ``ok`` verdict.
 
     ``ok`` is the authoritative pass/fail (also the process exit code). It is
@@ -506,9 +544,10 @@ def run(commands_path: str = "") -> dict:
     # shared-frame aggregator modules (session_log …) rather than the CLI-verb
     # surface. Split like the collection reads so a NEW arm read fails CI while an
     # allowlisted (KNOWN_ARM_REACH) one is reported as pending debt.
-    all_arm_reads = find_arm_coupling()
+    all_arm_reads = find_arm_coupling(arm_path)
     new_arm_coupling = [a for a in all_arm_reads if a["status"] == "new_violation"]
     pending_arm_coupling = [a for a in all_arm_reads if a["status"] == "pending_debt"]
+    reviewed_arm_reads = [a for a in all_arm_reads if a["status"] == "reviewed_correct"]
     # Distribution exclusion (ms-134 e-5062 verbs / e-5086 skills): no L0
     # (product-operation, 非配布) capability may appear in the shipped distribution.
     # Verbs: the shipped dispatch surface. Skills: the bundled skills/ tree (every
@@ -532,6 +571,7 @@ def run(commands_path: str = "") -> dict:
             "all_arm_reads": all_arm_reads,
             "new_arm_coupling": new_arm_coupling,
             "pending_arm_coupling": pending_arm_coupling,
+            "reviewed_correct_arm_reads": reviewed_arm_reads,
             "l0_distribution_leak": l0_leak,
             "l0_skill_distribution_leak": l0_skill_leak}
 
@@ -700,6 +740,14 @@ def main() -> int:
               f"remediate then drop from KNOWN_ARM_REACH):")
         for site, arm in pend_arms:
             print(f"    · {site} reads tgt['{arm}']")
+    reviewed_arm = result["reviewed_correct_arm_reads"]
+    if reviewed_arm:
+        # Human-reviewed legitimate arm reads (an L1 record's arm, not a Target's).
+        rev_arms = sorted({(a["site"], a["arm"]) for a in reviewed_arm})
+        print(f"  reviewed-correct arm reads ({len(rev_arms)}, human-confirmed — an "
+              f"L1 record's arm, not a profession Target's, do NOT remediate):")
+        for site, arm in rev_arms:
+            print(f"    ✓ {site} reads ['{arm}']")
     if result["ok"]:
         print("  OK: every capability is classified and no profession-shared "
               "capability reaches a profession concrete (no NEW symbol reach or "

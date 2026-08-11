@@ -84,21 +84,65 @@ def _matrix_lit_capabilities() -> dict:
     return out
 
 
-# --- (A) green ⇒ ratchet-absent ------------------------------------------------
+# --- (A) green ⟺ ratchet-absent, per capability (PR #629 review C3) -------------
+#
+# The FIRST cut of this test compared ``set(GREEN_PROBES) & universe`` — but the
+# probe keys are abstraction-iterator names and the universe is CLI-verb names +
+# module stems, two DISJOINT namespaces, so the intersection was永久に空 and the
+# test could never fail (C3: vacuous green). The fix reasons PER CAPABILITY: each
+# subject carries its OWN key, and the tie is ``green ⟺ key-absent`` (equivalently
+# ``green != in_ratchet``). That fires across namespaces — an iterator wrongly
+# added to a ratchet, or ``session_log`` greened without deleting its row, both
+# break it — and a canary proves it CAN fail.
 
-def test_green_capabilities_are_ratchet_absent():
-    """A capability the matrix runs GREEN across every profession must not appear in
-    any ratchet — it is declaration-driven, so it carries no debt. This is the
-    forward half of the reconcile: proving a lit capability is never also tracked as
-    broken."""
-    universe = _ratchet_capability_universe()
-    lit = _matrix_lit_capabilities()
-    green = sorted(cap for cap, ok in lit.items() if ok)
-    offenders = sorted(set(green) & universe)
-    assert offenders == [], (
-        "capabilities are GREEN in the behavioral matrix yet ALSO listed as ratchet "
-        "debt (green and broken cannot both be true — delete the ratchet row or fix "
-        "the probe): " + ", ".join(offenders))
+def _reconcile_subjects():
+    """Every capability the reconcile reasons about, as ``(key, is_green)``:
+      - the matrix abstraction consumers — GREEN across all professions, keys are
+        the iterator names (correctly absent from every ratchet);
+      - ``session_log`` — behaviorally RED (its aggregation misses a sales project's
+        session-stamped evidence, the arm coupling), key present in KNOWN_ARM_REACH.
+        This is the NAMESPACE-CROSSING subject that makes the reconcile non-vacuous:
+        a real red capability whose ratchet presence must agree with its behavior."""
+    subjects = [(cap, ok) for cap, ok in _matrix_lit_capabilities().items()]
+    sales = _sales_project_with_session_stamped_evidence()
+    collected = session_log.collect_project_entries(sales, "sess-X")
+    subjects.append(("session_log", "comm-9" in collected["commit_ids"]))
+    return subjects
+
+
+def _reconcile_offenders(subjects, universe):
+    """Subjects whose behavior and ratchet presence DISAGREE. Consistent means
+    ``green ⟺ absent`` and ``red ⟺ present`` — i.e. ``is_green != (key in
+    universe)``. A subject where they are EQUAL (green+present, or red+absent) is an
+    offender."""
+    return [(k, g, k in universe) for k, g in subjects if g == (k in universe)]
+
+
+def test_reconcile_green_iff_ratchet_absent():
+    """The forward half, per capability: a GREEN capability must be ratchet-absent
+    and a RED one ratchet-present. Fires across the iterator / verb / module-stem
+    namespaces because each subject is checked against its own key — not a
+    whole-namespace set intersection (the C3 vacuity)."""
+    bad = _reconcile_offenders(_reconcile_subjects(), _ratchet_capability_universe())
+    assert bad == [], (
+        "matrix ↔ ratchet inconsistency (green must be ratchet-ABSENT, red must be "
+        "ratchet-PRESENT): " + "; ".join(
+            f"{k}: green={g}, in_ratchet={p}" for k, g, p in bad))
+
+
+def test_reconcile_is_not_vacuous():
+    """Prove the reconcile CAN fail (the C3 finding was that it structurally could
+    not). A PLANTED inconsistency — a green capability whose key IS in the universe
+    — must be flagged; and the real subject set must contain a genuine
+    namespace-crossing RED, ratcheted subject (session_log), so the tie is exercised
+    on live data, not an empty set."""
+    planted = _reconcile_offenders([("planted", True)], {"planted"})
+    assert planted, (
+        "reconcile predicate is vacuous — a green+ratcheted subject was not caught")
+    subs = dict(_reconcile_subjects())
+    assert subs.get("session_log") is False, "session_log expected behaviorally RED"
+    assert "session_log" in _ratchet_capability_universe(), (
+        "session_log expected in a ratchet — the reconcile tie would be inert")
 
 
 def test_all_matrix_probes_are_green_so_none_needs_a_ratchet():

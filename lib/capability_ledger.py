@@ -454,6 +454,31 @@ def is_known_arm_reach(site: str, arm: str) -> bool:
     return (site, arm) in KNOWN_ARM_REACH
 
 
+# Reviewed-legitimate arm reads (PR #629 review C2) — (site, arm) reads a
+# human-confirmed CORRECT arm that is NOT a profession-Target coupling, so it must
+# NOT be remediated. The arm-name match is receiver-BLIND (it fires on any
+# ``x["entries"]`` for a key in PROFESSION_CONCRETE_ARMS, regardless of what ``x``
+# is), so a shared-frame aggregator that legitimately reads a generic arm name off
+# a NON-Target record — most concretely an L1 ``operation``'s ``entries`` arm
+# (operations is the cross-profession scheduling collection, not a profession
+# concrete — see the PROFESSION_CONCRETE_COLLECTIONS note) — would otherwise be a
+# false positive with no escape but a wrong remediation. This is that escape,
+# mirroring ``REVIEWED_LEGITIMATE_COLLECTION_READS``: each entry carries the
+# evidence, the stale-entry test forces its deletion once the read is refactored
+# away, and it is disjoint from KNOWN_ARM_REACH (a read is debt OR reviewed, never
+# both). Empty today (no scanned aggregator reads a non-Target arm); the mechanism
+# is the recovery path the receiver-blind matcher needs.
+REVIEWED_LEGITIMATE_ARM_READS: dict = {}
+
+
+def is_reviewed_legitimate_arm_read(site: str, arm: str) -> bool:
+    """True when (site, arm) is a human-reviewed LEGITIMATE arm read — the arm
+    belongs to a non-Target record (e.g. an L1 operation's ``entries``), so it is
+    not profession coupling and must not be remediated (PR #629 review C2).
+    Symmetric to ``is_reviewed_legitimate_read`` for collections."""
+    return (site, arm) in REVIEWED_LEGITIMATE_ARM_READS
+
+
 # ---------------------------------------------------------------------------
 # Classification by verb noun (the substring before the first "_"). The rule map
 # gives every current noun a scope; a per-verb OVERRIDE handles the exceptions
