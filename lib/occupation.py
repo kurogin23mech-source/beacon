@@ -671,6 +671,18 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # ``work_kind``). ``evidence_arms`` names where proof/changelog records live (dev
 # commits ride the SAME entries arm; sales evidence is its own communications arm).
 #
+# ⚠ DECLARED-ONLY / UNCONSUMED (ms-143 PR#4, 思想レビュー finding e-5151): unlike
+# ``work_item_arm`` (which ``add_work_item`` reads from the manifest so a new
+# occupation lights up by DECLARING it), ``evidence_arms`` currently has NO
+# consumer — ``occupation.add_evidence`` resolves the sales evidence grain directly
+# (option A, human-approved interim) and does not read this declaration. So
+# ``evidence_arms`` is a declared-but-unwired slot: a new occupation declaring it
+# will NOT light up an evidence path yet. In the INTERIM, record sales evidence by
+# calling ``occupation.add_evidence`` directly (option A) — do not rely on this
+# ``evidence_arms`` declaration to route anything. This is recorded honestly here
+# (not silently left as false "wired" advertising) until e-5151 makes add_evidence
+# manifest-driven and recovers the declared→wired contract.
+#
 # REACHABILITY (ms-142 e-5011 review, Maint#5): the ONLY consumer of these three
 # ``_ARM_ROLES`` / ``_ARM_PHASE_BALL`` / ``_COLLECTION_KIND`` dicts is
 # ``profession_manifest``, which walks ``target_collections(data)`` — the seed of
