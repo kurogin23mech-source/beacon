@@ -2330,26 +2330,72 @@ def _parse_number(raw: str, flag: str):
 # transition / backlog handlers still in commands.py; lives here so both
 # import it by bare name without a cmd_milestone<->commands cycle.
 # ---------------------------------------------------------------------------
-def _release_occupation_for_transition(data, ms_id, *, reason):
-    """ms-81 e-1918: phase transitions auto-release any active occupation
-    on the target MS. Per the SPEC the release happens whether or not the
-    session that claimed it is the same one calling the transition (= a
-    done verb on someone else's claim is implicitly a takeover).
-    """
+def _release_occupation_for_transition(data, target_id, *, reason):
+    """ms-81 e-1918: phase transitions auto-release any active occupation on the
+    target. Per the SPEC the release happens whether or not the session that claimed
+    it is the same one calling the transition (= a done verb on someone else's claim
+    is implicitly a takeover).
+
+    ms-142 T7 (e-5162): generic over target-class — releases the live claim on ANY
+    target (milestone / operation / release / descriptor) via ``core.release_occupation``,
+    so a non-milestone transition frees its claim too. The append-only audit event
+    (``worktree_sessions``) stays milestone-scoped (milestone-specific history, not
+    the live-claim layer). Best-effort: a not-found target is a silent no-op."""
     sid = _resolve_session_id() or ""
     try:
         import agent as _agent_for_release
         actor = _agent_for_release.get_actor()
     except Exception:
         actor = {}
-    _ms, released = core.milestone_release_occupation(data, ms_id, reason=reason)
-    if released:
+    try:
+        _rec, released = core.release_occupation(data, target_id, reason=reason)
+    except ValueError:
+        return  # target not found (already gone) — release is best-effort
+    if released and work_model.target_kind(target_id) == "milestone":
         core.milestone_record_occupation_event(
-            data, ms_id=ms_id, event_type="release",
+            data, ms_id=target_id, event_type="release",
             session_id=sid,
             machine=actor.get("machine", ""),
             agent=actor.get("agent", ""),
             reason=reason,
+        )
+
+
+def _claim_occupation_for_work(data, target_id):
+    """Stamp a live occupation claim on ANY target when a session starts working it
+    (ms-142 T7 e-5162) — the generic sibling of ``milestone start``'s claim, so the
+    "someone is sitting here now" layer covers operation / release / descriptor
+    targets, not just milestones (closing the silent double-work hole, 理想像 §5).
+
+    Warns (never blocks — soft claim, SPEC §3-3) on a collision with ANOTHER
+    session's existing claim. Only stamps when a real session id resolves: a
+    session-less context (test sandbox / scripted scaffold) is a no-op, so it never
+    perturbs a record's shape where there is no live session to claim on its behalf.
+    A not-found target is a silent no-op."""
+    sid = _resolve_session_id() or ""
+    if not sid:
+        return
+    try:
+        import agent as _agent_for_claim
+        actor = _agent_for_claim.get_actor()
+    except Exception:
+        actor = {}
+    try:
+        _rec, previous = core.claim_occupation(
+            data, target_id, session_id=sid,
+            machine=actor.get("machine", ""), agent=actor.get("agent", ""))
+    except ValueError:
+        return  # target not found — best-effort
+    if previous and previous.get("session_id") and \
+            previous.get("session_id") != sid:
+        prev_sid = previous.get("session_id", "?")
+        prev_machine = previous.get("machine", "?")
+        print(
+            f"  [occupation] {target_id} は別セッション {prev_sid[:12]}... "
+            f"({prev_machine}, claimed_at: {previous.get('claimed_at', '?')}) が "
+            f"作業中でした。takeover で続行します — 相手がまだ動いているなら "
+            f"beacon dm で調整してください (二重作業防止)。",
+            file=sys.stderr,
         )
 
 def _print_evidence_guidance(eid: str, target_id: str) -> None:

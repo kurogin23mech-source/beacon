@@ -35,6 +35,8 @@ from commands_shared import (
     _fire_review_due_trigger,
     _gate_target_class,
     _spec_exists_for_op,
+    _claim_occupation_for_work,
+    _release_occupation_for_transition,
 )
 
 
@@ -181,6 +183,10 @@ def cmd_operation_open():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-142 T7 (e-5162): opening an Operation = this session starts working it →
+    # stamp the live occupation claim so a second session touching the same op is
+    # warned (the same 'someone is sitting here' layer a milestone gets on start).
+    _claim_occupation_for_work(data, op["id"])
     save_project(data, op={"type": "operation_open", "op_id": op["id"], "title": title})
     if os.environ.get("BEACON_JSON"):
         print(json.dumps(op, ensure_ascii=False))
@@ -318,6 +324,9 @@ def cmd_operation_close():
             old_state = _o.get("status", "")
             break
     op = core.operation_close(data, op_id)
+    # ms-142 T7 (e-5162): retiring an Operation frees its live occupation claim,
+    # symmetric with milestone done/observe releasing theirs.
+    _release_occupation_for_transition(data, op_id, reason="close")
     save_project(data, op={"type": "operation_close", "op_id": op_id})
     # ms-119 e-3911: operation retirement is a completion claim — fire the
     # review-due nudge (目的達成 + 思想 if the operation has a SPEC).
