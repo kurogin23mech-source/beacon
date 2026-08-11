@@ -2,6 +2,18 @@
 (e-5012, rebuilt on the ms-134 reclassification). Importable definitions; the
 assertions live in ``test_capability_profession_matrix.py``.
 
+This module holds TWO sibling coverage matrices (asserted by two different test
+files — check which one you are extending):
+  1. e-5012 (this docstring below) — profession rows × abstraction-ITERATOR
+     columns (``PROFESSIONS`` / ``GREEN_PROBES``); proves the iterators are
+     declaration-driven. Asserted by ``test_capability_profession_matrix.py``.
+  2. T5 e-5160 (the block after ``GREEN_PROBES``) — Target-CLASS rows × §5
+     must-have-CAPABILITY columns (``TARGET_CLASSES`` /
+     ``MUST_HAVE_CAPABILITIES``), 3-valued cells. Asserted by
+     ``test_coverage_matrix_must_have_e5160.py``. Its probes take an extra
+     ``kind`` arg and live in a ``{probe, na}`` registry — a DIFFERENT convention
+     from block 1, so copy the block you are actually extending.
+
 The MS thesis: "declare a profession's manifest and every SHARED capability that
 walks the Target/WorkItem abstraction lights up — with zero wiring." ms-134's
 ``capability_ledger`` is the NEGATIVE, STATIC guard (a profession-shared verb may
@@ -161,13 +173,18 @@ def _operation_project():
 # acquisitions ride a separate persistence path and are deliberately NOT manifest
 # Target-classes (see occupation.TARGET_COLLECTIONS), so they are out of this
 # manifest-scoped matrix, matching every other ms-142 capability.
+# The row key is the target-class KIND. ``work_item_id`` is None when the class
+# declares no work-item arm (operation) — that None is what makes the deadline
+# cell a declared N/A, matched by _na_deadline reading work_item_arm. The
+# ``obligation`` row's factory is _synthetic_project (not _obligation_project):
+# it is THE synthetic descriptor profession, kind=obligation (see synth_profession).
 TARGET_CLASSES = {
     "milestone": {"project": _dev_project, "target_id": "ms-1",
                   "work_item_id": "e-1"},
     "opportunity": {"project": _sales_project, "target_id": "opp-1",
                     "work_item_id": "act-1"},
     "operation": {"project": _operation_project, "target_id": "op-1",
-                  "work_item_id": None},
+                  "work_item_id": None},   # None → no work-item arm → deadline N/A
     "obligation": {"project": _synthetic_project, "target_id": "obl-1",
                    "work_item_id": "duty-1"},
 }
@@ -193,7 +210,11 @@ def _find_target_record(project, kind, target_id):
 # --- capability probes: (project, kind, target_id, work_item_id) -> bool GREEN ---
 
 def _cap_phase_advance(project, kind, target_id, work_item_id):
-    """The class can be advanced through its declared state model (T2)."""
+    """The class can be advanced through its declared state model (T2).
+
+    NOTE: MUTATES ``project`` (calls set_target_state in-place). The test hands it
+    a FRESH ``row["project"]()`` per cell so the mutation never leaks; a caller
+    reusing this probe outside the test must do the same."""
     model = target_state.state_model_for(project, kind)
     if not model or not model.get("state_field"):
         return False
@@ -205,7 +226,12 @@ def _cap_phase_advance(project, kind, target_id, work_item_id):
         cur = rec.get(model["state_field"], "")
         to = next((s for s in adv if s != cur), None)
         if to is None:
-            return True   # a single advanceable non-terminal state; model routes it
+            # Degenerate model: a single advanceable state and the target already
+            # sits on it — the advance PATH exists (set_target_state routes this
+            # class) but there is no distinct state to move to in this fixture. No
+            # built-in class hits this (all declare ≥2 advanceable states / a
+            # funnel); it is a defensive guard, not a live green cell.
+            return True
         try:
             _r, _old, new = target_state.set_target_state(project, target_id, to)
             return new == to
@@ -219,8 +245,10 @@ def _cap_phase_advance(project, kind, target_id, work_item_id):
 
 
 def _cap_deadline(project, kind, target_id, work_item_id):
-    return any(c["item"].get("id") == work_item_id
-               for c in occupation.iter_deadline_candidates(project))
+    # Same "is this work item a deadline candidate" check as the e-5012 block's
+    # _probe_iter_deadline_candidates — delegate rather than re-inline the
+    # iter_deadline_candidates walk (single source of truth, maint review §2).
+    return _probe_iter_deadline_candidates(project, target_id, work_item_id)
 
 
 def _cap_evidence(project, kind, target_id, work_item_id):
@@ -253,8 +281,13 @@ def _na_evidence(tc):
     return not tc.get("evidence_arms")
 
 
-# capability name -> {probe, na}. The names are the §5 "絶対漏らすな" set; the
-# order matches §5's table.
+# capability name -> {probe, na}. Slot contract (distinct from the e-5012 block's
+# bare-function GREEN_PROBES, so read the signatures here, not there):
+#   probe: (project, kind, target_id, work_item_id) -> bool  — True iff the
+#          capability behaviourally lights up (GREEN).
+#   na:    (manifest_tc) -> bool  — True iff the manifest DECLARES the class lacks
+#          the arm this capability rides (a declared absence, not a gap).
+# The names are the §5 "絶対漏らすな" set; the order matches §5's table.
 MUST_HAVE_CAPABILITIES = {
     "phase_advance": {"probe": _cap_phase_advance, "na": _na_never},
     "deadline": {"probe": _cap_deadline, "na": _na_deadline},

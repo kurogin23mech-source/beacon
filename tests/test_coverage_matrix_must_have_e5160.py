@@ -67,8 +67,11 @@ def test_matrix_cell_is_green_or_declared_absent(kind, row, cap, spec):
         # A declared absence must AGREE with behaviour: nothing lights up. If the
         # capability DID light up, the manifest declaration is stale (drift).
         assert not lit, (
-            f"cell [{cap} × {kind}] is DECLARED N/A (manifest arm absent) but the "
-            f"capability lit up anyway — the manifest declaration is stale.")
+            f"cell [{cap} × {kind}] is DECLARED N/A (the manifest arm this "
+            f"capability rides — work_item_arm for deadline / evidence_arms for "
+            f"evidence — is empty on {kind!r}) but the capability lit up anyway. "
+            f"The manifest declaration is stale: give {kind!r} the arm, or drop "
+            f"the N/A predicate.")
     else:
         # Not a declared absence ⇒ the capability MUST light up. An empty cell is
         # a silent gap: the class lacks a 絶対漏らすな capability.
@@ -102,6 +105,12 @@ def test_rows_cover_every_manifest_target_class():
     for row in TARGET_CLASSES.values():
         for tc in occupation.profession_manifest(row["project"]())["target_classes"]:
             seen_kinds.add(tc["kind"])
+    # Engine-scoped floor (not just fixture-scoped): a bare manifest surfaces the
+    # data-INDEPENDENT built-in seed collections (milestones + opportunities +
+    # operations). Union it in so a NEW built-in Target-class added to the engine
+    # is caught even if no fixture happens to declare it (AX review e-5160).
+    for tc in occupation.profession_manifest({})["target_classes"]:
+        seen_kinds.add(tc["kind"])
     missing = seen_kinds - set(TARGET_CLASSES)
     assert not missing, (
         f"manifest Target-class(es) {sorted(missing)} have no coverage-matrix "
