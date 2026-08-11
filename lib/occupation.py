@@ -1535,15 +1535,16 @@ def iter_evidence(data: dict):
 
     CLOSURE (the "証跡が業務を閉じる因果" this task pins): evidence that fulfilled a
     planned work item nests UNDER that work item (a sales Communication under the
-    ``act-``/``nrt-`` it closed, mirroring the dev commit↔milestone model), so this
-    walks BOTH grains — an evidence arm at Target level AND the same arm nested
-    under each work item — and each yielded record carries its own ``linked_id``
-    (the work item it closed; ``""`` at Target grain). A caller reads
-    ``evidence['linked_id']`` to trace which work item an証跡 closed, uniformly
-    across classes. The nested descent is skipped when the evidence arm IS the
-    work-item arm (dev's shared ``entries``): there evidence and work items are
-    siblings discriminated by ``type``, not a separate nested grain, so descending
-    would re-walk the same list.
+    ``act-``/``nrt-`` it closed), so this walks BOTH grains — an evidence arm at
+    Target level AND the same arm nested under each work item. A record that closed
+    a work item carries a ``linked_id`` naming it; a caller reads
+    ``evidence.get('linked_id')`` to trace that closure. This is class-declared, not
+    uniform: sales communications carry ``linked_id`` (``""`` at Target grain), dev
+    commits are Target-grain evidence with NO per-work-item link (they ride the
+    milestone changelog, not a task), so ``linked_id`` is absent on them. The nested
+    descent is skipped when the evidence arm IS the work-item arm (dev's shared
+    ``entries``): there evidence and work items are siblings discriminated by
+    ``type``, not a separate nested grain, so descending would re-walk the list.
 
     Per yielded tuple:
       - ``evidence`` — the raw evidence record (a dev commit entry / a sales
@@ -1577,9 +1578,11 @@ def iter_evidence(data: dict):
                     if _match(item, item_type):
                         yield item, target, arm
                 # Closure grain: evidence nested under the work item it closed.
-                # Skipped when evidence shares the work-item arm (dev entries),
-                # where the two grains are one type-discriminated list.
-                if wi_arm and wi_arm != arm:
+                # When evidence shares the work-item arm (dev's ``entries``) the two
+                # grains are ONE type-discriminated list, not a nested grain, so
+                # descending would re-walk it — skip that case.
+                shares_work_item_arm = bool(wi_arm) and wi_arm == arm
+                if wi_arm and not shares_work_item_arm:
                     for wi in target.get(wi_arm, []) or []:
                         if not isinstance(wi, dict):
                             continue
