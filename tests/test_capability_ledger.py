@@ -534,11 +534,15 @@ def test_no_new_arm_coupling_on_real_tree():
 
 
 def test_every_detected_arm_read_is_classified():
-    # On the real tree every detected arm read must be accepted debt (there is no
-    # reviewed_correct for arms — a shared aggregator arm read is never exact by
-    # design); a new_violation is caught above, asserted here for a clear message.
+    # On the real tree every detected arm read must be CLASSIFIED — accepted debt
+    # (pending_debt) OR a human-reviewed legitimate read (reviewed_correct, the C2
+    # recovery path for a generic arm name off a non-Target record); a new_violation
+    # is caught above, asserted here for a clear message. (The assert must accept
+    # reviewed_correct: hard-coding pending_debt would false-fail the moment the
+    # REVIEWED_LEGITIMATE_ARM_READS mechanism is first used — PR #629 re-review low#1.)
     for a in chk.find_arm_coupling():
-        assert a["status"] == "pending_debt", f"un-classified arm read: {a}"
+        assert a["status"] in ("pending_debt", "reviewed_correct"), (
+            f"un-classified arm read: {a}")
 
 
 def test_no_stale_arm_reach_allowlist_entries():
@@ -630,10 +634,15 @@ def test_arm_scan_population_is_machine_derived():
 
 
 def test_no_iter_target_records_caller_escapes_the_arm_scan():
-    """C1 forcing function, pinned: EVERY lib module that calls iter_target_records
-    is either scanned or explicitly excluded — a new caller cannot silently escape
-    the arm check (the exact gap the hand tuple left). This is the machine check the
-    docstring's 'a new arm read is caught by CI' claim depends on."""
+    """DERIVATION regression guard (PR #629 re-review low#2): assert the scan
+    population STAYS machine-derived from the ``_calls_iter_target_records``
+    predicate. Because both sides here use that same predicate, an all-clear is
+    trivially true WHILE the derivation is in place — the value is catching a REVERT:
+    if ``_arm_scanned_paths`` is ever changed back to a hand-list that omits a real
+    caller, ``scanned`` drops it while ``callers`` (recomputed from the predicate)
+    keeps it, so ``escaped`` becomes non-empty and this fails. It is NOT the
+    behavioral escape gate — that is ``test_no_new_arm_coupling_on_real_tree`` (a new
+    caller with a real arm read fails CI there, mutation-confirmed in review)."""
     import ast
     import glob
     lib = os.path.join(os.path.dirname(__file__), "..", "lib")
