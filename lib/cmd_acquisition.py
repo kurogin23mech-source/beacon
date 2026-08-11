@@ -40,6 +40,7 @@ from commands_shared import (  # noqa: F401
     _parse_number,
     _ACKNOWLEDGED_REASON,
     _gate_target_class,
+    _ai_session_direct_completion_ban_active,
     _get_triggers_dir,
     _refuse_if_bus_origin,
     _read_bus_budget,
@@ -102,6 +103,22 @@ def cmd_acquisition_status():
     import sales_entities
     acq_id = os.environ.get("BEACON_ACQ_ID", "")
     status = os.environ.get("BEACON_ACQ_STATUS", "")
+    # ms-142 T3 / e-5158 — reaching `done` is a completion claim; give this
+    # previously-ungated class the same anti-self-close gate every target-class
+    # must have (Scope B: the lightweight structural ban). An AI session cannot
+    # mark an acquisition done directly without a human/override signal; its
+    # state model declares completion_gate=self-close-ban so the coverage matrix
+    # (T5) sees the gate exists.
+    if status == "done" and _ai_session_direct_completion_ban_active():
+        print(
+            f"Error: marking {acq_id} done directly from an AI session is refused "
+            "(ms-142 T3 / e-5158 anti-self-close gate).\n"
+            "  Paths forward (= one of these):\n"
+            "    1. BEACON_TARGET_COMPLETE_USER_OVERRIDE=1 — explicit user opt-in.\n"
+            "    2. BEACON_SESSION_KIND=human — declare the session human-driven.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     data = load_project()
     try:
         sales_entities.acquisition_set_status(data, acq_id, status,

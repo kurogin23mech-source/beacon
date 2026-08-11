@@ -95,6 +95,28 @@ SHAPE_PHASES = "phases"                     # descriptor: ordered phases + termi
 
 
 # ---------------------------------------------------------------------------
+# Completion-gate projections (ms-142 T3 / e-5158). Every target-class's terminal
+# transition MUST pass through a completion gate — the anti-self-close capability
+# whose EXISTENCE must never leak when a new occupation is declared (class-engine
+# ideal §5: "ゲートの存在は漏らすな（中身ロジックは L3 可）"). A class declares
+# WHICH gate projection guards its terminal; the internal logic stays L3 (each
+# projection differs), but the DECLARATION is uniform so the coverage matrix (T5)
+# can check "every class with a terminal declares a gate" from one field.
+#
+# The three projections that exist today (leader Q2 ruling: Scope B — the two
+# ungated classes get the lightweight structural ban, not the full spine):
+GATE_SPINE = "spine"                # dev spine: transition_approval + beacon target
+                                    # review-request/approve (milestone / operation).
+GATE_SALES_JUDGE = "sales-judge"    # sales judge flow: opportunity_judge (the human
+                                    # verdict against meeting evidence).
+GATE_SELF_CLOSE_BAN = "self-close-ban"  # lightweight structural gate: the terminal
+                                    # verb refuses an AI session's direct completion
+                                    # (BEACON_TARGET_COMPLETE_USER_OVERRIDE / human
+                                    # session bypass) — the gate EXISTS, its criteria
+                                    # stay L3 (acquisition / descriptor classes).
+
+
+# ---------------------------------------------------------------------------
 # Built-in state models — declarative data, keyed by occupation-agnostic KIND
 # (``milestone`` / ``operation`` / ...). NOTE the key is the kind, NOT the
 # collection: the sibling registries in ``occupation.py`` (``_ARM_ROLES`` /
@@ -119,6 +141,9 @@ SHAPE_PHASES = "phases"                     # descriptor: ordered phases + termi
 #                       ``core.LIFECYCLE_TRANSITIONS`` (the SSOT table); False →
 #                       permissive (the human is master).
 #   phases_ref        — for a funnel, the config accessor its phases come from.
+#   completion_gate   — which gate projection guards the terminal transition
+#                       (GATE_SPINE / GATE_SALES_JUDGE / GATE_SELF_CLOSE_BAN);
+#                       the anti-self-close capability's declared existence (T3).
 #
 # The advanceable/routed split is the SINGLE source for "which states does a
 # class own and which need a class verb". ``core.VALID_STATUSES`` /
@@ -152,6 +177,7 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         "ball_field": None,
         "monotonic": False,
         "phases_ref": None,
+        "completion_gate": GATE_SPINE,   # ms-119 目的達成 review + AI-direct ban
     },
     "operation": {
         "kind": "operation",
@@ -162,6 +188,7 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         "ball_field": None,
         "monotonic": True,   # validated via core.LIFECYCLE_TRANSITIONS['operation']
         "phases_ref": None,
+        "completion_gate": GATE_SPINE,   # same dev spine as milestone (close)
     },
     "acquisition": {
         "kind": "acquisition",
@@ -176,6 +203,9 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         "ball_field": None,
         "monotonic": True,   # validated via core.LIFECYCLE_TRANSITIONS['acquisition']
         "phases_ref": None,
+        # ms-142 T3: no gate existed; Scope B gives it the lightweight structural
+        # ban (AI cannot self-close `done` without a human/override signal).
+        "completion_gate": GATE_SELF_CLOSE_BAN,
     },
     "opportunity": {
         "kind": "opportunity",
@@ -191,6 +221,9 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         "ball_field": "who_has_the_ball",
         "monotonic": False,
         "phases_ref": "opportunity_phases",
+        # the existing sales judge flow (opportunity_judge) IS the gate; the spine
+        # deliberately does not stack a second one (transition_approval docstring).
+        "completion_gate": GATE_SALES_JUDGE,
     },
 }
 
@@ -226,7 +259,23 @@ def _descriptor_state_model(desc: dict) -> dict:
         "ball_field": _wm.BALL_FIELD,
         "monotonic": False,
         "phases_ref": None,
+        # ms-142 T3: a data-defined class had no gate; Scope B gives it the same
+        # lightweight structural ban as acquisition (beacon target close refuses an
+        # AI session's direct completion without a human/override signal).
+        "completion_gate": GATE_SELF_CLOSE_BAN,
     }
+
+
+def completion_gate_for(model: Optional[dict]) -> Optional[str]:
+    """Return the completion-gate projection guarding a class's terminal
+    transition (``spine`` / ``sales-judge`` / ``self-close-ban``), or ``None``
+    when the model has none declared (ms-142 T3). The coverage matrix (T5) reads
+    this to enforce that every target-class with a terminal state declares a gate
+    — the anti-self-close capability's existence, checked from one field rather
+    than re-deriving it per class."""
+    if not model:
+        return None
+    return model.get("completion_gate")
 
 
 def state_model_for(data: Optional[dict], kind: str) -> Optional[dict]:
@@ -295,6 +344,9 @@ def public_state_model(model: Optional[dict]) -> Optional[dict]:
         "state_field": model["state_field"],
         "gated_states": sorted(model.get("routed_states") or {}),
         "ball_field": model.get("ball_field"),
+        # ms-142 T3: which completion gate guards this class's terminal (the
+        # coverage matrix checks it is non-null for every class with a terminal).
+        "completion_gate": model.get("completion_gate"),
     }
 
 
