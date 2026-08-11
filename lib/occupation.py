@@ -677,8 +677,10 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # consumer — ``occupation.add_evidence`` resolves the sales evidence grain directly
 # (option A, human-approved interim) and does not read this declaration. So
 # ``evidence_arms`` is a declared-but-unwired slot: a new occupation declaring it
-# will NOT light up an evidence path yet. This is recorded honestly here (not
-# silently left as false "wired" advertising) until e-5151 makes add_evidence
+# will NOT light up an evidence path yet. In the INTERIM, record sales evidence by
+# calling ``occupation.add_evidence`` directly (option A) — do not rely on this
+# ``evidence_arms`` declaration to route anything. This is recorded honestly here
+# (not silently left as false "wired" advertising) until e-5151 makes add_evidence
 # manifest-driven and recovers the declared→wired contract.
 #
 # REACHABILITY (ms-142 e-5011 review, Maint#5): the ONLY consumer of these three

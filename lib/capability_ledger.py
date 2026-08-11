@@ -113,7 +113,8 @@ PROFESSION_CONCRETE_SYMBOLS = {
     # a Target via occupation.find_target / resolve_target instead.
     "sales_entities.find_opportunity":
         "sales opportunity resolver — resolve the Target via occupation.find_target "
-        "/ resolve_target (the sales twin of find_target_milestone)",
+        "(by id; use occupation.resolve_target only for the empty-id 'single active "
+        "target' auto-select case). The sales twin of find_target_milestone.",
     # sales concretes (symmetric side). ms-143 routes each to the RIGHT generic
     # grain (not the one-size "record_target_entry", which no-ops on a sales Target
     # and so mis-advised the evidence/work-item grains): a planned work item →
@@ -182,7 +183,10 @@ PROFESSION_CONCRETE_SYMBOLS = {
 # sales_entities.find_opportunity to PROFESSION_CONCRETE_SYMBOLS (closing the
 # dev/sales resolver-symmetry gap) SURFACES three L2 opportunity verbs that resolve
 # the deal via the sales-concrete find_opportunity. They are registered here as
-# visible expected-red debt (owner=ms-143) rather than left as a false green — this
+# visible expected-red debt (= the checker REPORTS the reach as pending debt, but it
+# is an acknowledged/tracked interim — NOT a CI-blocking failure and NOT a signal to
+# remediate immediately before its prerequisite exists; owner=ms-143) rather than
+# left as a false green — this
 # visibility is a CLOSE CONDITION for ms-143 (the milestone does NOT close claiming
 # "台帳=全部緑"). The real remediation is the set_target_state primitive follow-up:
 # once Target state transitions are abstracted, opportunity_phase greens without
