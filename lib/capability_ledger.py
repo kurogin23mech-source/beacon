@@ -105,6 +105,15 @@ PROFESSION_CONCRETE_SYMBOLS = {
         "dev milestone changelog recorder — use occupation.record_target_entry",
     "core.find_target_milestone":
         "dev milestone resolver — record via occupation.record_target_entry",
+    # ms-143 PR#4 (思想レビュー finding / leader steer 2026-08-11): find_opportunity
+    # is the SALES twin of find_target_milestone (a profession-concrete Target
+    # RESOLVER), but was missing from this denylist — an asymmetric enumeration gap
+    # that let a shared verb reach the sales concrete undetected (false green). Its
+    # dev twin is listed above, so the sales side must be too. Shared verbs resolve
+    # a Target via occupation.find_target / resolve_target instead.
+    "sales_entities.find_opportunity":
+        "sales opportunity resolver — resolve the Target via occupation.find_target "
+        "/ resolve_target (the sales twin of find_target_milestone)",
     # sales concretes (symmetric side). ms-143 routes each to the RIGHT generic
     # grain (not the one-size "record_target_entry", which no-ops on a sales Target
     # and so mis-advised the evidence/work-item grains): a planned work item →
@@ -168,7 +177,24 @@ PROFESSION_CONCRETE_SYMBOLS = {
 # The stale-entry test enforces this set stays honest: a row may return ONLY for a
 # genuine new deferred abstraction (name its owning MS inline), never to silence a
 # fresh violation — route the handler through the occupation layer instead.
-KNOWN_SYMBOL_REACH: set = set()
+#
+# ms-143 PR#4 (思想レビュー finding / leader steer 2026-08-11): adding
+# sales_entities.find_opportunity to PROFESSION_CONCRETE_SYMBOLS (closing the
+# dev/sales resolver-symmetry gap) SURFACES three L2 opportunity verbs that resolve
+# the deal via the sales-concrete find_opportunity. They are registered here as
+# visible expected-red debt (owner=ms-143) rather than left as a false green — this
+# visibility is a CLOSE CONDITION for ms-143 (the milestone does NOT close claiming
+# "台帳=全部緑"). The real remediation is the set_target_state primitive follow-up:
+# once Target state transitions are abstracted, opportunity_phase greens without
+# reaching find_opportunity, and opportunity_add/judge resolve via
+# occupation.find_target. Each row is deleted when its verb is migrated (stale-entry
+# test enforces the deletion). meeting_list (L3, sales-specific) also reaches
+# find_opportunity but is NOT flagged (the checker only governs L1/L2 shared verbs).
+KNOWN_SYMBOL_REACH: set = {
+    ("opportunity_add", "sales_entities.find_opportunity"),
+    ("opportunity_phase", "sales_entities.find_opportunity"),
+    ("opportunity_judge", "sales_entities.find_opportunity"),
+}
 
 
 def is_known_symbol_reach(verb: str, symbol: str) -> bool:
