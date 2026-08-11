@@ -116,8 +116,9 @@ def build_claim_view(
     """Bundle a single Target's LIVE + persistent claim state into one view.
 
     ``exists`` (ms-112 AX finding): whether this id names a real, claim-walked
-    Target. A miss (unknown id, or a kind this view does not walk — task /
-    operation / trek) MUST NOT read as ``unclaimed=true`` ("free to grab"),
+    Target. A miss (unknown id, or a kind this view does not walk — task / trek;
+    NOTE operation IS walked as of ms-142 e-5156) MUST NOT read as
+    ``unclaimed=true`` ("free to grab"),
     because this view is the double-work-prevention source of truth and a typo
     would otherwise become a dangerous false negative. When ``exists`` is False
     the view carries ``exists: false`` and ``unclaimed`` is forced False.

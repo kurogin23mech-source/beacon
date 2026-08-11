@@ -6,10 +6,14 @@
 これを id で任意の Target を引いて開示する汎用動詞 (`beacon disclose` /
 `beacon undisclose`) に持ち上げる。Account はその最初の consumer にすぎない。
 
-resolver は `occupation.TARGET_DECOMPOSITION` (= 全 Target collection の登録簿:
-milestones / opportunities / accounts / acquisitions …) を走査するので、prefix に
-依存せず、将来 Target 種が増えても自動で開示対象になる。実際の link/unlink は
-ms-113 で本番着地した `disclosure` プリミティブ (fail-closed / 剥奪即時) が担う。
+resolver は `occupation.TARGET_DECOMPOSITION` (= 物理分解される Target collection の
+登録簿: milestones / opportunities / accounts / acquisitions) を走査する。これは
+「開示しうる Target」の集合であって「全 Target」ではない点に注意 (ms-142 T1 e-5156):
+development の Operation は Target だが cross-project 開示の主体ではない (定期実行の
+運用対象であって、他プロジェクトへ公開する資産ではない) ため、意図的に
+TARGET_DECOMPOSITION に含めず = disclose 非対象としている。ここに載る種は prefix に
+依存せず自動で開示対象になる。実際の link/unlink は ms-113 で本番着地した
+`disclosure` プリミティブ (fail-closed / 剥奪即時) が担う。
 """
 from __future__ import annotations
 

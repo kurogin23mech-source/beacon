@@ -504,13 +504,25 @@ def assert_target_class_owned(data: dict, kind: str) -> None:
         f"  使うコマンド: {owned_hints or '(なし)'}")
 
 
-# The project.json keys under which each occupation stores its Target records.
-# This registry is the ONE place that knows "which collections are Targets"
-# across occupations; occupation-agnostic base code (work_model / work_base)
-# must NOT carry these names. Shared-frame code that needs the RAW Target
-# records (not the projected shape) — e.g. session_log aggregation — asks here
-# instead of hardcoding the collection names itself (ms-108 e-3701 / fable
-# review B-1: keep occupation knowledge in the registry layer).
+# The project.json keys under which each occupation stores its AGGREGATABLE Target
+# records — the set the shared-frame aggregators (session_log, deadline, the
+# manifest) walk. Occupation-agnostic base code (work_model / work_base) must NOT
+# carry these names; shared-frame code asks here instead of hardcoding the
+# collection names (ms-108 e-3701 / fable review B-1: keep occupation knowledge in
+# the registry layer).
+#
+# ⚠ NOT the only "which collections are Targets" registry (ms-142 T1 e-5156 review,
+# fable AX/Maint): there are THREE, each a different lens on "Target", and they must
+# stay in subset-sync:
+#   - ``TARGET_COLLECTIONS`` (here) = AGGREGATABLE Targets (session_log / manifest);
+#   - ``TARGET_DECOMPOSITION``      = physically DECOMPOSED Targets (row backend +
+#     ``target_disclosure`` scan) — adds accounts / acquisitions;
+#   - ``claim_target_collections`` = CLAIMABLE Targets (claim view) = the manifest
+#     set ∪ {accounts, acquisitions}.
+# The honest invariant (pinned by ``test_operation_target_class_e5156`` /
+# ``claim_target_collections ⊇ TARGET_DECOMPOSITION ∪ target_collections``) keeps
+# them from silently diverging while T1 has them split; unifying the three into one
+# master registry is the deferred deep fix (follow-up, touched by T2–T7).
 #
 # ms-142 e-5156 (T1): ``operations`` joins the seed so a development Operation is
 # enumerated as a first-class Target beside a Milestone — the same abstraction a
@@ -739,13 +751,16 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # keyed to exactly those seed collections; a descriptor occupation's roles come
 # from its descriptor (``target_descriptor.arm_roles``), not from here.
 #
-# operations is INTENTIONALLY absent from ``_ARM_ROLES`` (below): per the ms-142
-# T1 裁定 an Operation declares NO ``work_item_arm`` yet, so ``_arm_roles_for``
-# returns the empty classification (work_item_arm=None) for it — do NOT "fix" this
-# by seeding an operations arm. It IS present in ``_ARM_PHASE_BALL`` and
-# ``_COLLECTION_KIND`` (a declared member of the seed), so the asymmetry is
-# deliberate: work_item_arm=None is a declared deferral, kind/phase are declared
-# facts.
+# operations declares a work_item_arm of ``None`` EXPLICITLY (below), not by
+# omission: per the ms-142 T1 裁定 an Operation carries no shared work-item arm
+# yet, but its absence is written as DATA so the three sibling dicts (_ARM_ROLES /
+# _ARM_PHASE_BALL / _COLLECTION_KIND) share ONE key set (milestones + opportunities
+# + operations) — "均一に宣言" per the class-engine ideal, not a prose-only claim
+# a reader must trust. ``_arm_roles_for`` maps a ``None`` work_item_arm to the
+# empty classification, so behaviour is identical to omitting it (the pin tests
+# hold). Folding OperationTasks into the shared work-item spine (find_target_entry
+# / set_entry_state / iter_work_items) is the deferred part — that would silently
+# change ``beacon task done`` — not the declaration.
 _ARM_ROLES = {
     "milestones": {
         # ms-143: ``id_prefix`` is the declarative work-item id prefix — a dev
@@ -761,10 +776,11 @@ _ARM_ROLES = {
                           "kind": "activity", "id_prefix": "act-"},
         "evidence_arms": [{"arm": "communications", "item_type": None}],
     },
-    # operations: no work_item_arm entry ON PURPOSE (see the note above). Its
-    # OperationTasks stay on the ``operation task done`` L3 path in PR#1; folding
-    # them into the shared work-item spine (find_target_entry / set_entry_state /
-    # iter_work_items) would silently change ``beacon task done`` — deferred.
+    # operations: work_item_arm is a DECLARED None (see the note above) so the
+    # three sibling dicts share one key set. OperationTasks keep their own
+    # ``operation task done`` L3 path in PR#1 (folding them into the shared
+    # work-item spine is deferred, ms-142 T1 裁定).
+    "operations": {"work_item_arm": None, "evidence_arms": []},
 }
 
 # The exclusive phase + who-has-the-ball model per collection (SPEC 方針 1 lists

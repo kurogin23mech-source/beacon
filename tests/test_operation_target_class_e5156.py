@@ -101,6 +101,59 @@ def test_claim_view_still_covers_accounts():
     assert views["acc-1"]["target_kind"] == "account"
 
 
+def test_claim_view_covers_acquisitions():
+    # acquisition is a claimable secondary Target too — the manifest-sourced
+    # enumeration must reach it (leader review #2: acquisitions claim reachability).
+    data = {"name": "s", "profession": "sales", "milestones": [],
+            "acquisitions": [{"id": "acq-1", "label": "獲得ターゲットA"}]}
+    views = claim_view.build_claim_views(data, live_session_ids=set())
+    assert "acq-1" in views
+    assert views["acq-1"]["target_kind"] == "acquisition"
+
+
+# ---------------------------------------------------------------------------
+# Drift guard (leader review #2): T1 split "what is a Target" across three
+# registries — TARGET_COLLECTIONS (aggregatable) / TARGET_DECOMPOSITION
+# (decomposed+disclosable) / claim_target_collections (claimable). Until they are
+# unified (deferred deep fix), pin the subset invariant so they cannot silently
+# diverge: the claim registry must cover BOTH the physical registry and the
+# aggregatable one, or a Target would drop out of the double-work-prevention view.
+# ---------------------------------------------------------------------------
+
+def test_claim_target_collections_is_superset_of_the_other_two_registries():
+    for data in (
+        {"name": "d", "profession": "dev", "milestones": [], "operations": []},
+        {"name": "s", "profession": "sales", "milestones": [], "opportunities": [],
+         "accounts": [], "acquisitions": []},
+    ):
+        claimable = set(occ.claim_target_collections(data))
+        decomposed = set(occ.TARGET_DECOMPOSITION)
+        aggregatable = set(occ.target_collections(data))
+        assert decomposed <= claimable, (
+            f"TARGET_DECOMPOSITION {decomposed - claimable} not covered by claim "
+            f"registry — a decomposed Target would drop out of the claim view")
+        assert aggregatable <= claimable, (
+            f"target_collections {aggregatable - claimable} not covered by claim "
+            f"registry")
+
+
+def test_drift_guard_covers_descriptor_collections():
+    # A descriptor-defined occupation's collection enters target_collections (and
+    # thus the manifest → claim registry); the invariant must still hold so a new
+    # occupation's Target is claimable, not silently dropped.
+    contract = {
+        "kind": "contract", "label": "契約", "profession": "legal",
+        "type": "single-shot", "id_prefix": "ctr-", "collection": "contracts",
+        "decomposition": {"id_field": "id", "arms": []},
+        "fields": [], "phases": [{"key": "drafting", "label": "起草"}],
+    }
+    data = {"name": "L", "profession": "legal", "milestones": [],
+            "target_classes": [contract], "contracts": []}
+    claimable = set(occ.claim_target_collections(data))
+    assert "contracts" in claimable
+    assert set(occ.target_collections(data)) <= claimable
+
+
 # ---------------------------------------------------------------------------
 # Ripple non-breaking (leader caution a): the Operation is enumerated for
 # deadlines but carries no date, so consumers filter it out.
