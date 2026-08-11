@@ -8859,10 +8859,13 @@ def cmd_opportunity_list():
             gate_str = ("決着済み"
                         if sales_entities.opportunity_phase_is_terminal(data, o.get("phase", ""))
                         else "無し")
-        elif (gate.get("anchor") or "").strip():
-            gate_str = f"確定 (発火源 {gate['anchor']})"
+        elif sales_entities.gate_needs_anchor(data, o["id"]):
+            # e-5178 maint-a: the「anchor 空」判定 comes from the one predicate
+            # (gate_needs_anchor), not a second inline copy — commands only builds
+            # the display string around it.
+            gate_str = f"空 ({sales_entities.GATE_UNANCHORED_LABEL})"
         else:
-            gate_str = "空 (発火源 未紐づけ)"
+            gate_str = f"確定 (発火源 {gate['anchor']})"
         print(f"    前進ゲート: {gate_str} / 通過フェーズ履歴: {done_n}")
 
 
@@ -8947,9 +8950,10 @@ def cmd_opportunity_transition_date():
         # cairn症状 (opp-3/opp-4) — the date is set but nothing will fire the
         # judgement. Warn to stderr but never block (permissive 原則, master=人間).
         if sales_entities.gate_needs_anchor(data, opp_id):
-            print(f"  ⚠ 発火源 未結合: この前進ゲートには判定のきっかけ (面談/活動) が"
-                  f"結ばれていません。`beacon opportunity anchor {opp_id} <work-item>` で"
-                  f"結ぶと、その完了で自動的にフェーズ判定が走ります。", file=sys.stderr)
+            print(f"  ⚠ {sales_entities.GATE_UNANCHORED_LABEL}: この前進ゲートには判定の"
+                  f"きっかけ (面談/活動) が結ばれていません。"
+                  f"`beacon opportunity anchor {opp_id} <work-item-id>` で結ぶと、"
+                  f"その完了で自動的にフェーズ判定が走ります。", file=sys.stderr)
     else:
         print(f"{opp_id} transition_date cleared (recorded in transition_date_history)")
 

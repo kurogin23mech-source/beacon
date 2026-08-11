@@ -1505,6 +1505,23 @@ def set_transition_date(data: dict, target_id: str, transition_date: str, *,
         f"transition_date targets an opportunity (opp-…), got {target_id!r}")
 
 
+def _open_advance_gate(data: dict, target_id: str) -> Optional[dict]:
+    """The opportunity's open前進ゲート, or None — the shared guard chain behind the
+    derived「open gate かつ …が空」twins (``needs_transition_date`` /
+    ``gate_needs_anchor``). Non-opportunity id, unknown opportunity, terminal phase
+    (defensive vs a stale gate), or no open gate all collapse to None so a caller
+    can write its predicate in one line (ms-144 e-5178 maint-b — single guard, two
+    derived facts)."""
+    if not target_id.startswith("opp-"):
+        return None
+    opp = find_opportunity(data, target_id)
+    if opp is None:
+        return None
+    if opportunity_phase_is_terminal(data, opp.get("phase", "")):
+        return None  # 決着済み — no live gate (defensive vs stale gate)
+    return current_gate(data, target_id)
+
+
 def needs_transition_date(data: dict, target_id: str) -> bool:
     """True when the opportunity has an open advance gate with no 遷移日 placed
     (SPEC §2: placing the 遷移日 is the top-priority step on phase entry — without
@@ -1512,17 +1529,8 @@ def needs_transition_date(data: dict, target_id: str) -> bool:
 
     Terminal / gate-less opportunities never need one (no open gate), so False.
     """
-    if not target_id.startswith("opp-"):
-        return False
-    opp = find_opportunity(data, target_id)
-    if opp is None:
-        return False
-    if opportunity_phase_is_terminal(data, opp.get("phase", "")):
-        return False  # 決着済み — no judgement date needed (defensive vs stale gate)
-    gate = current_gate(data, target_id)
-    if gate is None:
-        return False
-    return not (gate.get("transition_date") or "").strip()
+    gate = _open_advance_gate(data, target_id)
+    return gate is not None and not (gate.get("transition_date") or "").strip()
 
 
 def gate_needs_anchor(data: dict, target_id: str) -> bool:
@@ -1533,19 +1541,10 @@ def gate_needs_anchor(data: dict, target_id: str) -> bool:
     left cairn opp-3/opp-4 stuck). Anchor it with ``beacon opportunity anchor``.
 
     Terminal / gate-less opportunities never need one (no open gate), so False —
-    the same twin-shape guard as ``needs_transition_date``.
-    """
-    if not target_id.startswith("opp-"):
-        return False
-    opp = find_opportunity(data, target_id)
-    if opp is None:
-        return False
-    if opportunity_phase_is_terminal(data, opp.get("phase", "")):
-        return False  # 決着済み — no gate to anchor (defensive vs stale gate)
-    gate = current_gate(data, target_id)
-    if gate is None:
-        return False
-    return not (gate.get("anchor") or "").strip()
+    the same twin-shape guard as ``needs_transition_date`` (shared
+    ``_open_advance_gate``)."""
+    gate = _open_advance_gate(data, target_id)
+    return gate is not None and not (gate.get("anchor") or "").strip()
 
 
 # ---------------------------------------------------------------------------
@@ -1921,6 +1920,11 @@ def overdue_activities(data: dict, today: str) -> list:
 GATE_OPEN = "open"          # 進行中 — その商談で唯一 (≤1 の制約対象)
 GATE_DONE = "done"          # 判定済み — outcome + 判断証跡を刻んで積む (履歴)
 GATE_CANCELLED = work_base.CANCELLED_STATUS  # 取消 (商談中止 等で発火せず畳む)
+
+# Single spelling for「発火源が結ばれていない前進ゲート」across the list display,
+# the transition-date warning, and the cockpit (ms-144 e-5178 maint-c — one label,
+# no drift). Used to build 「空 (発火源 未紐づけ)」 and the anchor nudge.
+GATE_UNANCHORED_LABEL = "発火源 未紐づけ"
 
 # outcome vocabulary — mirrors the three judgement branches (advance_transition /
 # retry_transition / terminal_transition). Stamped on a gate when it settles.

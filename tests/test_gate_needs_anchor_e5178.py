@@ -95,7 +95,7 @@ def test_transition_date_warns_when_gate_unanchored(tmp_path, monkeypatch, capsy
     captured = capsys.readouterr()
     # date is still set (permissive — not blocked) but a warning points to anchor.
     assert "2026-09-01" in captured.out
-    assert "発火源 未結合" in captured.err
+    assert "発火源 未紐づけ" in captured.err
     assert "beacon opportunity anchor" in captured.err
 
 
@@ -111,7 +111,24 @@ def test_transition_date_no_warning_once_anchored(tmp_path, monkeypatch, capsys)
 
     commands.cmd_opportunity_transition_date()
     captured = capsys.readouterr()
-    assert "発火源 未結合" not in captured.err
+    assert "発火源 未紐づけ" not in captured.err
+
+
+def test_list_text_gate_display_single_source(tmp_path, monkeypatch, capsys):
+    """The human-readable list builds「空 (発火源 未紐づけ)」/「確定」off the one
+    gate_needs_anchor predicate + the shared label constant (e-5178 maint-a/c),
+    not a second inline anchor check."""
+    data = se.build_sales_project("S", "obj")
+    se.opportunity_add(data, "Unanchored", created_at="T0")
+    anchored = se.opportunity_add(data, "Anchored", created_at="T0")
+    act = se.activity_add(data, anchored, "call", deadline="2026-09-01")
+    se.anchor_opportunity_gate(data, anchored, act, at="T1")
+    _project(tmp_path, monkeypatch, data)
+
+    commands.cmd_opportunity_list()
+    out = capsys.readouterr().out
+    assert f"空 ({se.GATE_UNANCHORED_LABEL})" in out
+    assert f"確定 (発火源 {act})" in out
 
 
 def test_transition_date_clear_does_not_warn(tmp_path, monkeypatch, capsys):
@@ -126,4 +143,4 @@ def test_transition_date_clear_does_not_warn(tmp_path, monkeypatch, capsys):
 
     commands.cmd_opportunity_transition_date()
     captured = capsys.readouterr()
-    assert "発火源 未結合" not in captured.err
+    assert "発火源 未紐づけ" not in captured.err
