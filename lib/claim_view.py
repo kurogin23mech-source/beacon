@@ -286,15 +286,19 @@ def build_claim_views(
     """Build the claim view for EVERY Target across occupations, keyed by
     target id.
 
-    Walks every Target collection the decomposition registry knows about
-    (``occupation.TARGET_DECOMPOSITION``: milestones + opportunities + accounts
-    + …) so the map covers milestone / 商談 / 顧客 alike — SPEC AC1 asks for the
-    顧客 = account class explicitly. This is deliberately WIDER than
-    ``occupation.iter_target_records`` (milestones + opportunities only — its
-    contract is session-log aggregation, where accounts are not "targets"). A
-    new occupation's Target collection is picked up automatically once it
-    registers in the decomposition registry, with no change here. Targets
-    without an ``id`` are skipped.
+    Walks every CLAIMABLE Target collection via
+    ``occupation.claim_target_collections(data)`` — the manifest Target set
+    (milestones + opportunities + operations + descriptor collections) plus the
+    sales secondary Target collections (accounts / acquisitions) — so the map
+    covers milestone / operation / 商談 / 顧客 alike (SPEC AC1 asks for the 顧客 =
+    account class explicitly). ms-142 e-5156 (T1): sourcing this from the manifest
+    instead of the physical decomposition registry (``TARGET_DECOMPOSITION``, which
+    is coupled to the server MySQL child-table DDL) decouples claim enumeration
+    from that DDL AND makes an Operation appear in the claim view — so the 2-layer
+    claim filter (session-start) now covers Operations, which
+    ``iter_target_records`` alone did not surface here before. A new occupation's
+    Target collection is picked up automatically once it enters the manifest, with
+    no change here. Targets without an ``id`` are skipped.
 
     ``focus_directory`` (ms-125 e-4094): an optional map ``target_id -> [session
     dict, …]`` of the live sessions focused on each target (from the bus
@@ -303,7 +307,7 @@ def build_claim_views(
     (local mode / directory unreachable)."""
     focus_directory = focus_directory or {}
     views: dict[str, dict] = {}
-    for coll in occupation.TARGET_DECOMPOSITION:
+    for coll in occupation.claim_target_collections(data):
         for target in data.get(coll, []) or []:
             tid_raw = (target or {}).get("id") if isinstance(target, dict) else ""
             view = build_claim_view(

@@ -107,8 +107,11 @@ def test_dev_project_unchanged():
     rows = occ.project_targets(data)
     assert [r["id"] for r in rows] == ["ms-1"]
     assert occ.owned_target_classes(data, "dev") == ("milestone", "operation")
-    assert occ.target_collections(data) == ("milestones", "opportunities")
-    assert occ.target_collections() == ("milestones", "opportunities")
+    # ms-142 e-5156 (T1): operations joined the Target-collection seed so a dev
+    # Operation is enumerated as a first-class Target. project_targets / owned
+    # classes are unchanged (this test's "unchanged" subject); the seed grows.
+    assert occ.target_collections(data) == ("milestones", "opportunities", "operations")
+    assert occ.target_collections() == ("milestones", "opportunities", "operations")
 
 
 def test_builtin_narrowing_unchanged_without_data():

@@ -105,14 +105,30 @@ def test_sales_opportunity_arm_roles():
 
 def test_manifest_scoped_to_target_collections():
     # The manifest surfaces exactly the aggregatable Target collections
-    # (``target_collections`` = milestones + opportunities), matching
-    # ``iter_target_records`` and the deadline enumeration scope. Sales accounts /
-    # acquisitions are Targets but ride a different persistence path and are not
-    # walked here — so the manifest does NOT surface them (behavior parity, not a
-    # gap). The armless work_item_arm=None case is pinned by the descriptor test.
+    # (``target_collections`` = milestones + opportunities + operations, ms-142
+    # e-5156), matching ``iter_target_records`` and the deadline enumeration scope.
+    # Sales accounts / acquisitions are Targets but ride a different persistence
+    # path and are not walked here — so the manifest does NOT surface them
+    # (behavior parity, not a gap). The armless work_item_arm=None case is pinned
+    # by the descriptor test and by the operation test below.
     cols = {tc["collection"]
             for tc in occ.profession_manifest(_sales())["target_classes"]}
-    assert cols == {"milestones", "opportunities"}
+    assert cols == {"milestones", "opportunities", "operations"}
+
+
+def test_operation_is_a_manifest_target_class_without_work_item_arm():
+    # ms-142 e-5156 (T1): an Operation is a first-class manifest Target beside a
+    # Milestone — so projection / claim / deadline enumeration reach it through the
+    # same abstraction. Per the T1 裁定 it declares NO work_item_arm yet (its
+    # OperationTasks keep their own ``operation task done`` L3 path), and it has no
+    # funnel phase/ball (it moves through a status lifecycle). id_prefix is op-.
+    op = _class(occ.profession_manifest(_dev()), "operations")
+    assert op["kind"] == "operation"
+    assert op["id_prefix"] == "op-"
+    assert op["work_item_arm"] is None
+    assert op["evidence_arms"] == []
+    assert op["phase_ball"] is None
+    assert set(op) == CLASS_KEYS
 
 
 # ---------------------------------------------------------------------------
