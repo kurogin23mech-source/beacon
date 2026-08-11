@@ -2708,7 +2708,7 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
         # ms-144 e-5177: bind a work item as the発火源 of the open前進ゲート.
         if not args.opp_id or not args.work_item_id:
             print("Usage: beacon opportunity anchor <opp-id> <work-item-id>  "
-                  "(work-item = mtg-/act-/nrt-)")
+                  "(work-item = mtg-/act-)")
             return 1
         env = {
             "BEACON_OPP_ID": args.opp_id or "",

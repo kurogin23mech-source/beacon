@@ -2137,24 +2137,31 @@ def _anchor_open_gate_to_meeting(data: dict, opportunity_id: str,
 
 
 def anchor_opportunity_gate(data: dict, opportunity_id: str,
-                            work_item_id: str, *, at: str = "") -> dict:
-    """Bind ``work_item_id`` (a meeting/activity/nurturing) as the発火源 of the
-    opportunity's open前進ゲート, and return the gate — the public verb backing
-    ``beacon opportunity anchor`` (ms-144 e-5177). This is the missing入口: gates
-    open with ``anchor=''`` and, outside the two meeting side-effects, no verb
-    let the AI attach a non-meeting work item, so 先方検討中 / 合意済み gates
-    (no ``kind:meeting`` template) stayed empty (SPEC §問題).
+                            work_item_id: str, *, at: str = ""):
+    """Bind ``work_item_id`` (a meeting or activity) as the発火源 of the
+    opportunity's open前進ゲート — the public verb backing ``beacon opportunity
+    anchor`` (ms-144 e-5177). This is the missing入口: gates open with
+    ``anchor=''`` and, outside the two meeting side-effects, no verb let the AI
+    attach a non-meeting work item, so 先方検討中 / 合意済み gates (no
+    ``kind:meeting`` template) stayed empty (SPEC §問題).
 
-    Thin wrapper over ``anchor_gate`` (which records the link, validates the
-    mtg-/act-/nrt- prefix + existence, and syncs the gate's 遷移日 to the work
-    item's date). Adds three guards ``anchor_gate`` alone cannot express here:
+    Returns ``(gate, changed, synced_date)`` so the caller can report only what
+    actually happened (the verb's whole point is not to claim state it did not
+    set): ``changed`` is False on an idempotent re-anchor, ``synced_date`` is the
+    遷移日 only when *this* call moved it (leader review A3).
+
+    Wraps ``anchor_gate`` (which records the link + syncs 遷移日 to the work
+    item's date) and adds guards ``anchor_gate`` alone cannot express here:
 
     * **no open gate → ValueError** (not a silent no-op like the meeting path):
       the verb has no work to do — the phase is terminal or none is open — so
       the caller must hear it rather than believe it anchored (leader 裁定 3).
-    * **idempotent**: re-anchoring to the *same* work item returns the gate
-      unchanged, adding no history row; a *different* work item re-links (an
-      auditable mis-link correction, permissive — leader 裁定 2).
+    * **meeting / activity only**: nurturing (``nrt-``) lives under an Account,
+      never an Opportunity, so it can never own an opportunity gate — reject it
+      with a recovery hint instead of a confusing ownership error (review A2).
+    * **idempotent**: re-anchoring to the *same* work item leaves the gate
+      unchanged (``changed=False``, no history row); a *different* work item
+      re-links (an auditable mis-link correction, permissive — leader 裁定 2).
     * **ownership**: the work item must belong to *this* opportunity. A foreign
       (another opp's) or unknown id is rejected, so a "確定 (発火源 X)" display
       can never point at a work item this deal does not own (leader caution 4).
@@ -2165,16 +2172,21 @@ def anchor_opportunity_gate(data: dict, opportunity_id: str,
             f"{opportunity_id} has no open advance gate to anchor "
             f"(the phase is terminal, or no gate is open)")
     wi = (work_item_id or "").strip()
-    # Ownership: the work item must live on this opportunity. find_meeting /
-    # find_work_item search globally, so an existing-but-foreign id would slip
-    # past anchor_gate's existence check — validate the owner here first.
+    # A meeting or activity only. Ownership: the work item must live on this
+    # opportunity — find_meeting / find_activity search globally, so an
+    # existing-but-foreign id would slip past anchor_gate's existence check.
     if wi.startswith("mtg-"):
         owner, found = find_meeting(data, wi)
-    elif wi.startswith("act-") or wi.startswith("nrt-"):
-        owner, found = find_work_item(data, wi)
+    elif wi.startswith("act-"):
+        owner, found = find_activity(data, wi)
+    elif wi.startswith("nrt-"):
+        raise ValueError(
+            f"{work_item_id} is a nurturing (nrt-), which lives under an Account, "
+            f"not an Opportunity — it cannot anchor a商談's前進ゲート. "
+            f"Anchor a meeting (mtg-) or activity (act-) on {opportunity_id} instead")
     else:
         raise ValueError(
-            f"anchor must be a work item (mtg-/act-/nrt-), got {work_item_id!r}")
+            f"anchor must be a meeting or activity (mtg-/act-), got {work_item_id!r}")
     if found is None:
         raise ValueError(f"anchor work item not found: {work_item_id}")
     if owner is None or owner.get("id") != opportunity_id:
@@ -2183,8 +2195,12 @@ def anchor_opportunity_gate(data: dict, opportunity_id: str,
             f"{owner.get('id') if owner else 'another target'}, "
             f"not {opportunity_id} — a gate can only anchor its own商談's work item")
     if (gate.get("anchor") or "") == wi:
-        return gate  # idempotent: already this発火源, no duplicate history row
-    return anchor_gate(data, gate["id"], wi, at=at)
+        return gate, False, ""  # idempotent: already this発火源, nothing changed
+    prev_date = (gate.get("transition_date") or "").strip()
+    anchor_gate(data, gate["id"], wi, at=at)
+    new_date = (gate.get("transition_date") or "").strip()
+    synced_date = new_date if new_date != prev_date else ""
+    return gate, True, synced_date
 
 
 def settle_gate(data: dict, gate_id: str, *, outcome: str, reason: str = "",

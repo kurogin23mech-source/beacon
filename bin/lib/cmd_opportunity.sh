@@ -200,12 +200,20 @@ cmd_opportunity_anchor() {
     # を結ぶ入口。既定フェーズ (先方検討中/合意済み) は面談 template を持たず
     # auto-anchor が発火しないため、AI が非面談 work-item を明示的に結べる verb。
     local opp_id="" work_item=""
-    local _usage="Usage: beacon opportunity anchor <opp-id> <work-item-id>  (work-item = mtg-/act-/nrt-)"
+    local _usage="Usage: beacon opportunity anchor <opp-id> <work-item-id>  (work-item = mtg-/act-)"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -?*)    _guard_positional "$1" "$_usage" ;;
             *)
-                if [ -z "$opp_id" ]; then opp_id="$1"; else work_item="$1"; fi
+                # Reject a 3rd+ positional explicitly (last-wins would silently
+                # drop it) so bash matches the Python argparse front (review A1).
+                if [ -z "$opp_id" ]; then opp_id="$1"
+                elif [ -z "$work_item" ]; then work_item="$1"
+                else
+                    echo "Error: 余分な引数 '$1' — anchor は <opp-id> <work-item-id> の 2 つだけを取ります。" >&2
+                    echo "       $_usage" >&2
+                    exit 1
+                fi
                 shift ;;
         esac
     done

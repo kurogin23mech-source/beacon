@@ -6278,7 +6278,7 @@ def _help_registry():
         {"command": "beacon opportunity list", "flags": ["--json"], "description": "List sales opportunities with phase / status / account"},
         {"command": "beacon opportunity phase <opp-id> <phase>", "flags": ["--note <text>"], "description": "Declare a phase transition (append-only phase_history; master=人間)"},
         {"command": "beacon opportunity transition-date <opp-id> <YYYY-MM-DD>", "flags": ["--note <text>", "--clear"], "description": "Set the 遷移日 (judgement date) for the current phase (append-only transition_date_history)"},
-        {"command": "beacon opportunity anchor <opp-id> <work-item-id>", "flags": [], "description": "Bind a work item (mtg-/act-/nrt-) as the 発火源 of the open 前進ゲート; its completion fires the phase judgement (idempotent, ownership-checked)"},
+        {"command": "beacon opportunity anchor <opp-id> <work-item-id>", "flags": [], "description": "Bind a meeting or activity (mtg-/act-) as the 発火源 of the open 前進ゲート; its completion fires the phase judgement (idempotent, ownership-checked)"},
         {"command": "beacon opportunity judge <opp-id> advance|retry|terminal", "flags": ["--note <text>"], "description": "Judge a reached 遷移日 (3-way: 次へ/やり直し/決着; human-confirmed, master=人間)"},
         {"command": "beacon opportunity due", "flags": ["--json"], "description": "List due/overdue 商談の遷移日 and 準備活動の期日 (transition_date + activity.deadline)"},
         {"command": "beacon deadline due", "flags": ["--json"], "description": "職種横断で期日 到達/超過 の work item を surface (milestone target_date / task・activity deadline を occupation イテレータ経由で 1 経路化)"},
@@ -8954,16 +8954,22 @@ def cmd_opportunity_anchor():
     work_item_id = os.environ.get("BEACON_WORK_ITEM_ID", "")
     data = load_project()
     try:
-        gate = sales_entities.anchor_opportunity_gate(
+        gate, changed, synced_date = sales_entities.anchor_opportunity_gate(
             data, opp_id, work_item_id, at=core._now_iso())
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # Report only what actually happened — the verb's point is not to claim
+    # state it did not set (review A3). An idempotent re-anchor changed nothing,
+    # so nothing is written and the message says so.
+    if not changed:
+        print(f"{opp_id} 前進ゲート {gate['id']} は既に発火源 {gate['anchor']} に"
+              f"結合済み (変更なし)")
+        return
     save_project(data)
-    td = (gate.get("transition_date") or "").strip()
-    td_str = f" (遷移日 {td} に同期)" if td else ""
+    synced_str = f" (遷移日 {synced_date} に同期)" if synced_date else ""
     print(f"{opp_id} 前進ゲート {gate['id']} → 発火源 {gate['anchor']} に結合"
-          f"{td_str} (前進ゲート履歴に記録)")
+          f"{synced_str} (前進ゲート履歴に記録)")
 
 
 def _human_actor() -> str:
