@@ -194,6 +194,29 @@ cmd_opportunity_transition_date() {
         python3 "$COMMANDS_PY" opportunity_transition_date
 }
 
+cmd_opportunity_anchor() {
+    ensure_project
+    # e-5177: 前進ゲートの発火源 (anchor) に work-item (面談/活動/ナーチャリング)
+    # を結ぶ入口。既定フェーズ (先方検討中/合意済み) は面談 template を持たず
+    # auto-anchor が発火しないため、AI が非面談 work-item を明示的に結べる verb。
+    local opp_id="" work_item=""
+    local _usage="Usage: beacon opportunity anchor <opp-id> <work-item-id>  (work-item = mtg-/act-/nrt-)"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -?*)    _guard_positional "$1" "$_usage" ;;
+            *)
+                if [ -z "$opp_id" ]; then opp_id="$1"; else work_item="$1"; fi
+                shift ;;
+        esac
+    done
+    if [ -z "$opp_id" ] || [ -z "$work_item" ]; then
+        echo "$_usage"
+        exit 1
+    fi
+    BEACON_OPP_ID="$opp_id" BEACON_WORK_ITEM_ID="$work_item" \
+        python3 "$COMMANDS_PY" opportunity_anchor
+}
+
 cmd_opportunity_judge() {
     ensure_project
     local opp_id="" decision="" arg="" note=""

@@ -2136,6 +2136,57 @@ def _anchor_open_gate_to_meeting(data: dict, opportunity_id: str,
     anchor_gate(data, gate["id"], meeting_id, at=at)
 
 
+def anchor_opportunity_gate(data: dict, opportunity_id: str,
+                            work_item_id: str, *, at: str = "") -> dict:
+    """Bind ``work_item_id`` (a meeting/activity/nurturing) as the発火源 of the
+    opportunity's open前進ゲート, and return the gate — the public verb backing
+    ``beacon opportunity anchor`` (ms-144 e-5177). This is the missing入口: gates
+    open with ``anchor=''`` and, outside the two meeting side-effects, no verb
+    let the AI attach a non-meeting work item, so 先方検討中 / 合意済み gates
+    (no ``kind:meeting`` template) stayed empty (SPEC §問題).
+
+    Thin wrapper over ``anchor_gate`` (which records the link, validates the
+    mtg-/act-/nrt- prefix + existence, and syncs the gate's 遷移日 to the work
+    item's date). Adds three guards ``anchor_gate`` alone cannot express here:
+
+    * **no open gate → ValueError** (not a silent no-op like the meeting path):
+      the verb has no work to do — the phase is terminal or none is open — so
+      the caller must hear it rather than believe it anchored (leader 裁定 3).
+    * **idempotent**: re-anchoring to the *same* work item returns the gate
+      unchanged, adding no history row; a *different* work item re-links (an
+      auditable mis-link correction, permissive — leader 裁定 2).
+    * **ownership**: the work item must belong to *this* opportunity. A foreign
+      (another opp's) or unknown id is rejected, so a "確定 (発火源 X)" display
+      can never point at a work item this deal does not own (leader caution 4).
+    """
+    gate = current_gate(data, opportunity_id)
+    if gate is None:
+        raise ValueError(
+            f"{opportunity_id} has no open advance gate to anchor "
+            f"(the phase is terminal, or no gate is open)")
+    wi = (work_item_id or "").strip()
+    # Ownership: the work item must live on this opportunity. find_meeting /
+    # find_work_item search globally, so an existing-but-foreign id would slip
+    # past anchor_gate's existence check — validate the owner here first.
+    if wi.startswith("mtg-"):
+        owner, found = find_meeting(data, wi)
+    elif wi.startswith("act-") or wi.startswith("nrt-"):
+        owner, found = find_work_item(data, wi)
+    else:
+        raise ValueError(
+            f"anchor must be a work item (mtg-/act-/nrt-), got {work_item_id!r}")
+    if found is None:
+        raise ValueError(f"anchor work item not found: {work_item_id}")
+    if owner is None or owner.get("id") != opportunity_id:
+        raise ValueError(
+            f"{work_item_id} belongs to "
+            f"{owner.get('id') if owner else 'another target'}, "
+            f"not {opportunity_id} — a gate can only anchor its own商談's work item")
+    if (gate.get("anchor") or "") == wi:
+        return gate  # idempotent: already this発火源, no duplicate history row
+    return anchor_gate(data, gate["id"], wi, at=at)
+
+
 def settle_gate(data: dict, gate_id: str, *, outcome: str, reason: str = "",
                 actor: str = "", at: str = "") -> dict:
     """Settle an open advance gate with its判定 outcome and evidence; return it.

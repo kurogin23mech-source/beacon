@@ -472,11 +472,12 @@ case "${1:-}" in
             rename)   shift 2; cmd_opportunity_rename "$@" ;;
             phase-prob) shift 2; cmd_opportunity_phase_prob "$@" ;;
             transition-date|td) shift 2; cmd_opportunity_transition_date "$@" ;;
+            anchor)   shift 2; cmd_opportunity_anchor "$@" ;;
             judge)    shift 2; cmd_opportunity_judge "$@" ;;
             due)      shift 2; cmd_opportunity_due "$@" ;;
             activity) shift 2; cmd_opportunity_activity "$@" ;;
             delete)   shift 2; cmd_opportunity_delete "$@" ;;
-            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|describe|rename|phase-prob|transition-date|judge|due|activity|delete]" ;;
+            *)        echo "Usage: beacon opportunity [add|list|phase|assign|amount|describe|rename|phase-prob|transition-date|anchor|judge|due|activity|delete]" ;;
         esac
         ;;
     communication|comm)
