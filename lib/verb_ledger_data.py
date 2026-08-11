@@ -253,6 +253,7 @@ VERB_LEDGER = {
     "opportunity_activity": {"cls": "R", "secondary": [], "note": ""},
     "opportunity_add": {"cls": "R", "secondary": [], "note": ""},
     "opportunity_amount": {"cls": "R", "secondary": [], "note": ""},
+    "opportunity_anchor": {"cls": "R", "secondary": [], "note": "[ms-144] 発火源(work-item)を前進ゲートに結ぶ記録(R)、opportunity_transition_date と同型"},
     "opportunity_assign": {"cls": "R", "secondary": [], "note": ""},
     "opportunity_delete": {"cls": "B", "secondary": ["C"], "note": ""},
     "opportunity_describe": {"cls": "R", "secondary": [], "note": "[post-memo] 背景/経緯メモの追記(R)、opportunity add と同族"},

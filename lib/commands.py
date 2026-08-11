@@ -6278,6 +6278,7 @@ def _help_registry():
         {"command": "beacon opportunity list", "flags": ["--json"], "description": "List sales opportunities with phase / status / account"},
         {"command": "beacon opportunity phase <opp-id> <phase>", "flags": ["--note <text>"], "description": "Declare a phase transition (append-only phase_history; master=人間)"},
         {"command": "beacon opportunity transition-date <opp-id> <YYYY-MM-DD>", "flags": ["--note <text>", "--clear"], "description": "Set the 遷移日 (judgement date) for the current phase (append-only transition_date_history)"},
+        {"command": "beacon opportunity anchor <opp-id> <work-item-id>", "flags": [], "description": "Bind a meeting or activity (mtg-/act-) as the 発火源 of the open 前進ゲート; its completion fires the phase judgement (idempotent, ownership-checked)"},
         {"command": "beacon opportunity judge <opp-id> advance|retry|terminal", "flags": ["--note <text>"], "description": "Judge a reached 遷移日 (3-way: 次へ/やり直し/決着; human-confirmed, master=人間)"},
         {"command": "beacon opportunity due", "flags": ["--json"], "description": "List due/overdue 商談の遷移日 and 準備活動の期日 (transition_date + activity.deadline)"},
         {"command": "beacon deadline due", "flags": ["--json"], "description": "職種横断で期日 到達/超過 の work item を surface (milestone target_date / task・activity deadline を occupation イテレータ経由で 1 経路化)"},
@@ -8940,6 +8941,37 @@ def cmd_opportunity_transition_date():
         print(f"{opp_id} transition_date cleared (recorded in transition_date_history)")
 
 
+def cmd_opportunity_anchor():
+    """Bind a work item (面談/活動/ナーチャリング) as the発火源 of an
+    opportunity's open前進ゲート (ms-144 e-5177).
+
+    Env: BEACON_OPP_ID, BEACON_WORK_ITEM_ID. Wraps
+    sales_entities.anchor_opportunity_gate — idempotent, ownership-checked, and
+    an explicit error (exit 1) when no gate is open / the work item is unknown
+    or belongs to another商談 (so 「確定 (発火源 X)」 is never a lie)."""
+    import sales_entities
+    opp_id = os.environ.get("BEACON_OPP_ID", "")
+    work_item_id = os.environ.get("BEACON_WORK_ITEM_ID", "")
+    data = load_project()
+    try:
+        gate, changed, synced_date = sales_entities.anchor_opportunity_gate(
+            data, opp_id, work_item_id, at=core._now_iso())
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    # Report only what actually happened — the verb's point is not to claim
+    # state it did not set (review A3). An idempotent re-anchor changed nothing,
+    # so nothing is written and the message says so.
+    if not changed:
+        print(f"{opp_id} 前進ゲート {gate['id']} は既に発火源 {gate['anchor']} に"
+              f"結合済み (変更なし)")
+        return
+    save_project(data)
+    synced_str = f" (遷移日 {synced_date} に同期)" if synced_date else ""
+    print(f"{opp_id} 前進ゲート {gate['id']} → 発火源 {gate['anchor']} に結合"
+          f"{synced_str} (前進ゲート履歴に記録)")
+
+
 def _human_actor() -> str:
     """The human master's identity for a human-confirmed state transition
     (phase judge / manual phase jump). ms-106 e-3691 (fable review C-2).
@@ -10097,6 +10129,7 @@ if __name__ == "__main__":
         "sales_target": cmd_sales_target,
         "sales_target_list": cmd_sales_target_list,
         "opportunity_transition_date": cmd_opportunity_transition_date,
+        "opportunity_anchor": cmd_opportunity_anchor,
         "opportunity_judge": cmd_opportunity_judge,
         "opportunity_due": cmd_opportunity_due,
         "deadline_due": cmd_deadline_due,             # ms-142 e-5010

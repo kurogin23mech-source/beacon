@@ -645,6 +645,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_opp_td.add_argument("--note", default="")
     p_opp_td.add_argument("--clear", action="store_true")
 
+    # ms-144 e-5177: 前進ゲートの発火源 (anchor) に work-item を結ぶ入口。
+    p_opp_anchor = opp_sub.add_parser("anchor", add_help=False)
+    p_opp_anchor.add_argument("opp_id", nargs="?", default="")
+    p_opp_anchor.add_argument("work_item_id", nargs="?", default="")
+
     p_opp_judge = opp_sub.add_parser("judge", add_help=False)
     p_opp_judge.add_argument("opp_id", nargs="?", default="")
     p_opp_judge.add_argument("decision", nargs="?", default="")
@@ -2699,6 +2704,17 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
             "BEACON_PHASE_NOTE": args.note or "",
         }
         return _run_commands_py(root, "opportunity_transition_date", env)
+    if cmd == "anchor":
+        # ms-144 e-5177: bind a work item as the発火源 of the open前進ゲート.
+        if not args.opp_id or not args.work_item_id:
+            print("Usage: beacon opportunity anchor <opp-id> <work-item-id>  "
+                  "(work-item = mtg-/act-)")
+            return 1
+        env = {
+            "BEACON_OPP_ID": args.opp_id or "",
+            "BEACON_WORK_ITEM_ID": args.work_item_id or "",
+        }
+        return _run_commands_py(root, "opportunity_anchor", env)
     if cmd == "rename":
         # e-3909: post-creation title edit (Windows parity).
         if not args.opp_id or not args.title:
@@ -2723,7 +2739,7 @@ def _handle_opportunity(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "opportunity_due", env)
     print("Usage: beacon opportunity "
           "[add|list|phase|activity|delete|assign|amount|phase-prob|"
-          "transition-date|judge|due] [options]")
+          "transition-date|anchor|judge|due] [options]")
     return 2
 
 
