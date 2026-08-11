@@ -686,7 +686,11 @@ class ApiClient:
         # creation, so bus posts slipped through — block them at the same choke
         # point. No-op outside test context / non-prod targets.
         import cloud_write_guard
-        cloud_write_guard.guard_prod_bus_write(self._base_url)
+        # getattr default: some tests build a client via ApiClient.__new__(...)
+        # (bypassing __init__, so _base_url is unset) and stub `.post` — they
+        # never reach the network, and a client with no base_url isn't targeting
+        # prod, so the guard must no-op rather than AttributeError.
+        cloud_write_guard.guard_prod_bus_write(getattr(self, "_base_url", ""))
         body = {
             "channel": channel,
             "sender_session_id": sender_session_id,
