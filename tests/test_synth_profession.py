@@ -77,10 +77,11 @@ def test_manifest_lights_up_synthetic_profession():
     assert obl["work_item_arm"] == {"arm": "duties", "item_type": None,
                                     "kind": "duty"}
     assert obl["evidence_arms"] == [{"arm": "attestations", "item_type": None}]
-    # same key set as any built-in class (occupation-agnostic contract).
+    # same key set as any built-in class (occupation-agnostic contract). ms-142
+    # T2 (e-5157) adds ``state_model`` (phase_ball is derived from it).
     assert set(obl) == {"kind", "collection", "id_field", "id_prefix",
                         "narrowing", "arms", "work_item_arm", "evidence_arms",
-                        "phase_ball"}
+                        "phase_ball", "state_model"}
 
 
 # ---------------------------------------------------------------------------

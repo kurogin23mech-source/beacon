@@ -373,6 +373,15 @@ BALL_COUNTERPART = "counterpart"  # the other party's turn — we are waiting on
 BALL_NONE = ""                # no ball in play (target done / not yet started)
 VALID_BALL = (BALL_SELF, BALL_COUNTERPART, BALL_NONE)
 
+# The canonical RECORD FIELD KEY the ball lives under. The ball VALUES (self /
+# counterpart / none) are the vocabulary above; this is the field name they are
+# stored under on a target record. Named here — the occupation-agnostic layer
+# that already owns the ball vocabulary — as the single source of truth so
+# ``target_engine.BALL_KEY`` and ``target_state`` reference it instead of
+# re-declaring the literal (ms-142 T2 maintainability review: two copies of
+# "who_has_the_ball" could drift).
+BALL_FIELD = "who_has_the_ball"
+
 
 def normalize_ball(value: str) -> str:
     """Return ``value`` if it is a recognised ball state, else ``BALL_NONE``.

@@ -25,9 +25,11 @@ import target_engine as te  # noqa: E402
 
 
 # Every target-class entry in the manifest carries exactly these keys, whatever
-# the occupation — this identity is the occupation-agnostic contract.
+# the occupation — this identity is the occupation-agnostic contract. ms-142 T2
+# (e-5157) adds ``state_model`` (from which ``phase_ball`` is now derived).
 CLASS_KEYS = {"kind", "collection", "id_field", "id_prefix", "narrowing",
-              "arms", "work_item_arm", "evidence_arms", "phase_ball"}
+              "arms", "work_item_arm", "evidence_arms", "phase_ball",
+              "state_model"}
 
 
 def _dev():
@@ -87,6 +89,13 @@ def test_dev_milestone_arm_roles():
                                    "kind": "task", "id_prefix": "e-"}
     assert ms["evidence_arms"] == [{"arm": "entries", "item_type": "commit"}]
     assert ms["phase_ball"] is None
+    # ms-142 T2: a milestone's state model is a permissive status enum with no
+    # ball; its terminal/gated states (the review-gate + delete targets) are
+    # listed so phase_ball derives None from state_field == "status".
+    assert ms["state_model"]["shape"] == "status_enum"
+    assert ms["state_model"]["state_field"] == "status"
+    assert ms["state_model"]["ball_field"] is None
+    assert {"done", "observing"} <= set(ms["state_model"]["gated_states"])
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +112,12 @@ def test_sales_opportunity_arm_roles():
     assert opp["evidence_arms"] == [{"arm": "communications", "item_type": None}]
     assert opp["phase_ball"] == {"phase_field": "phase",
                                  "ball_field": "who_has_the_ball"}
+    # ms-142 T2: the opportunity state model is a config-derived funnel carrying a
+    # ball — exactly the pair phase_ball is derived from (state_field != "status"
+    # AND a ball_field).
+    assert opp["state_model"]["shape"] == "funnel"
+    assert opp["state_model"]["state_field"] == "phase"
+    assert opp["state_model"]["ball_field"] == "who_has_the_ball"
 
 
 def test_manifest_scoped_to_target_collections():
@@ -130,6 +145,13 @@ def test_operation_is_a_manifest_target_class_without_work_item_arm():
     assert op["work_item_arm"] is None
     assert op["evidence_arms"] == []
     assert op["phase_ball"] is None
+    # ms-142 T2: an operation's state model is a monotonic status transition
+    # table whose only terminal is ``closed`` (routed through operation close);
+    # no ball, so phase_ball derives None.
+    assert op["state_model"]["shape"] == "transition_table"
+    assert op["state_model"]["state_field"] == "status"
+    assert op["state_model"]["ball_field"] is None
+    assert op["state_model"]["gated_states"] == ["closed"]
     assert set(op) == CLASS_KEYS
 
 
@@ -165,6 +187,16 @@ def test_descriptor_occupation_lights_up_arms():
     assert mat["work_item_arm"] == {"arm": "work_items", "item_type": None, "kind": "work_item"}
     assert mat["evidence_arms"] == [{"arm": "evidence", "item_type": None}]
     assert set(mat) == CLASS_KEYS
+    # ms-142 T2: a descriptor's state model is derived from its declared phases
+    # (shape ``phases``); because target_engine seeds every descriptor target
+    # with a ball, its phase_ball is now DERIVED as present — an intended
+    # correction of the old hardcoded None (which never modelled descriptors).
+    assert mat["state_model"]["shape"] == "phases"
+    assert mat["state_model"]["state_field"] == "phase"
+    assert mat["phase_ball"] == {"phase_field": "phase",
+                                 "ball_field": "who_has_the_ball"}
+    # the descriptor's terminal phase (``closed``) is the routed/close-via state.
+    assert "closed" in mat["state_model"]["gated_states"]
 
 
 def test_descriptor_custom_arms_have_no_workitem_arm():

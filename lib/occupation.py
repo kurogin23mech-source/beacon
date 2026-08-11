@@ -40,6 +40,7 @@ import work_base
 import work_model as _wm
 import target_descriptor as _td   # ms-122 e-3957: data 定義 target-class 記述子
 import target_engine as _te       # ms-122 e-3957: 記述子駆動 target の投影
+import target_state as _tstate    # ms-142 e-5157: 宣言的 state model + phase_ball 導出
 
 
 DEFAULT_PROFESSION = "dev"
@@ -530,7 +531,7 @@ def assert_target_class_owned(data: dict, kind: str) -> None:
 # where Operation was known only to the record path (occupation.record_target_entry)
 # while列挙・クレーム経路 stayed a separate system. Operation is a PERSISTENT
 # (recurring) dev Target with a status lifecycle (todo→in_progress→open→closed),
-# NOT a funnel — so it declares no phase/ball (``_ARM_PHASE_BALL`` below) and,
+# NOT a funnel — so its state model derives no phase/ball (ms-142 T2) and,
 # per the T1 裁定, no ``work_item_arm`` yet (its OperationTasks keep their own
 # ``operation task done`` L3 path; folding them into the shared work-item CRUD
 # spine is deferred to avoid a silent ``beacon task done`` regression). Consumers
@@ -701,7 +702,8 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # rewrite of the six well-tested registries).
 #
 # CRITICAL (ms-142 の芯 / leader 承認条件 1): the arm classification is
-# DECLARATIVE DATA (``_ARM_ROLES`` / ``_ARM_PHASE_BALL`` keyed by collection),
+# DECLARATIVE DATA (``_ARM_ROLES`` keyed by collection; the phase/ball slot is
+# derived from each class's declared state model in ``target_state``, ms-142 T2),
 # never an ``if profession == …`` branch. ms-142's whole promise is "declare a
 # new occupation's manifest and every arm-walking L2 capability lights up with
 # ZERO wiring" (e-5014). A classification that leaked into code branches would
@@ -742,7 +744,8 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # manifest-driven and recovers the declared→wired contract.
 #
 # REACHABILITY (ms-142 e-5011 review, Maint#5; extended e-5156): the ONLY consumer
-# of these three ``_ARM_ROLES`` / ``_ARM_PHASE_BALL`` / ``_COLLECTION_KIND`` dicts
+# of these two ``_ARM_ROLES`` / ``_COLLECTION_KIND`` dicts (``_ARM_PHASE_BALL`` was
+# dissolved into the state model in T2, e-5157)
 # is ``profession_manifest``, which walks ``target_collections(data)`` — whose seed
 # is milestones + opportunities + operations (accounts / acquisitions ride a
 # different persistence path and are NOT Target collections here, see
@@ -753,10 +756,12 @@ def target_child_tables(data: dict | None = None) -> tuple:
 #
 # operations declares a work_item_arm of ``None`` EXPLICITLY (below), not by
 # omission: per the ms-142 T1 裁定 an Operation carries no shared work-item arm
-# yet, but its absence is written as DATA so the three sibling dicts (_ARM_ROLES /
-# _ARM_PHASE_BALL / _COLLECTION_KIND) share ONE key set (milestones + opportunities
-# + operations) — "均一に宣言" per the class-engine ideal, not a prose-only claim
-# a reader must trust. ``_arm_roles_for`` maps a ``None`` work_item_arm to the
+# yet, but its absence is written as DATA so the two sibling dicts (_ARM_ROLES /
+# _COLLECTION_KIND) share ONE key set (milestones + opportunities + operations) —
+# "均一に宣言" per the class-engine ideal, not a prose-only claim a reader must
+# trust. Its phase/ball slot is likewise a DECLARED absence, now sourced from the
+# operation state model (``target_state``, T2) which derives ``None``.
+# ``_arm_roles_for`` maps a ``None`` work_item_arm to the
 # empty classification, so behaviour is identical to omitting it (the pin tests
 # hold). Folding OperationTasks into the shared work-item spine (find_target_entry
 # / set_entry_state / iter_work_items) is the deferred part — that would silently
@@ -788,13 +793,17 @@ _ARM_ROLES = {
 # carry the ball; development milestones do not (their progress is task ratios /
 # evidence), so dev's phase_ball is ``None`` — a declared absence, not a gap.
 # operations likewise has no funnel: it moves through a STATUS lifecycle
-# (todo→in_progress→open→closed), not a phase/ball, so its phase_ball is a
-# declared ``None`` too (ms-142 e-5156). Same reachability rule as ``_ARM_ROLES``.
-_ARM_PHASE_BALL = {
-    "milestones": None,
-    "opportunities": {"phase_field": "phase", "ball_field": "who_has_the_ball"},
-    "operations": None,
-}
+# (todo→in_progress→open→closed), not a phase/ball, so its phase_ball is ``None`` too.
+#
+# ms-142 T2 (e-5157): the standalone ``_ARM_PHASE_BALL`` hardwire is DISSOLVED.
+# phase_ball is no longer a hand-maintained dict keyed by collection; it is
+# DERIVED from each class's declared state model (``target_state``) via
+# ``target_state.derive_phase_ball``. A class has a phase/ball pair exactly when
+# it advances through a non-``status`` field (a funnel/descriptor phase) AND
+# carries a ball, so milestone/operation derive ``None`` and opportunity derives
+# ``{"phase": "who_has_the_ball"}`` — byte-identical to the old literals (pinned
+# by test_occupation_manifest), but now sourced from the state model rather than
+# a second place that could drift from it.
 
 # collection -> target-class kind for the built-in occupations. Bridges the
 # collection-keyed registries to the kind-keyed ones (NARROWING_ID_PREFIXES).
@@ -871,7 +880,13 @@ def profession_manifest(data: dict, profession: str | None = None) -> dict:
               "arms": ("entries",),       # all fat arms (from decomposition)
               "work_item_arm": {"arm": "entries", "item_type": "task"},
               "evidence_arms": [{"arm": "entries", "item_type": "commit"}],
-              "phase_ball": None,
+              "phase_ball": None,        # derived from state_model (ms-142 T2)
+              "state_model": {"shape": "status_enum", "state_field": "status",
+                              # states set_target_state won't write (verb-gated):
+                              "gated_states": ["approved", "cancelled",
+                                               "done", "in_review",
+                                               "observing"],
+                              "ball_field": None},
             },
             ...
           ],
@@ -879,8 +894,10 @@ def profession_manifest(data: dict, profession: str | None = None) -> dict:
 
     Composed from the existing registries (``target_collections`` /
     ``target_decomposition`` / ``narrowing_id_prefixes`` / ``all_narrowing_kinds``
-    — all untouched source of truth) plus the ``_ARM_ROLES`` / ``_ARM_PHASE_BALL``
-    classification seed, and it carries ms-122 descriptor collections for free.
+    — all untouched source of truth) plus the ``_ARM_ROLES`` classification seed
+    and each class's declared state model (``target_state``, from which
+    ``phase_ball`` is derived — ms-142 T2), and it carries ms-122 descriptor
+    collections for free.
     Both a dev project and a sales project resolve to the SAME shape (a list of
     identically-keyed dicts) — the occupation-agnostic contract that arm-walking
     L2 capabilities (deadline enumeration, the e-5009 work-item iterator) consume
@@ -897,6 +914,7 @@ def profession_manifest(data: dict, profession: str | None = None) -> dict:
         arms = tuple(spec.get("arms") or ())
         kind = _collection_kind(data, collection)
         roles = _arm_roles_for(data, collection)
+        model = _tstate.state_model_for(data, kind)
         target_classes.append({
             "kind": kind,
             "collection": collection,
@@ -906,7 +924,11 @@ def profession_manifest(data: dict, profession: str | None = None) -> dict:
             "arms": arms,
             "work_item_arm": roles["work_item_arm"],
             "evidence_arms": roles["evidence_arms"],
-            "phase_ball": _ARM_PHASE_BALL.get(collection),
+            # ms-142 T2: derived from the declared state model, not a hardcoded map.
+            "phase_ball": _tstate.derive_phase_ball(model),
+            # ms-142 T2: the class's state model (shape / state_field / terminal /
+            # ball) as a first-class manifest slot — "状態モデルを引ける読み取り経路".
+            "state_model": _tstate.public_state_model(model),
         })
     return {"profession": prof, "target_classes": target_classes}
 
