@@ -59,6 +59,7 @@ import operations
 import trek as trek_mod
 import envelope as envelope_mod
 import work_model
+import sales_entities  # ms-108 e-5194: mirror the CLI's funnel resolution into the payload
 import master_adapter
 import approved_actions as approved_actions_mod
 import disclosure as disclosure_mod
@@ -416,6 +417,29 @@ def _spec_doc_for_op(project_id: str, op_id: str, spec_doc_id: str) -> dict:
         )
     return doc
 
+def _resolve_sales_funnels(data: dict, enriched: dict) -> dict:
+    """ms-108 e-5194: mirror the CLI's funnel resolution into the Web UI payload.
+
+    The Web UI reads ``p.opportunity_phases`` verbatim, but a sales project's
+    saved data only carries the funnel keys when it was created via
+    ``new_sales_project`` (which seeds them). A project that got ``profession:
+    sales`` after the fact (or predates the seed) has no ``opportunity_phases``
+    key, so the board renders zero columns = blank. The CLI never hits this
+    because it resolves ``configured or DEFAULT`` through
+    ``sales_entities.effective_phases`` — the ONE authoritative funnel resolver.
+    We apply the SAME resolver here so CLI and Web UI see the same funnels and a
+    funnel-less sales project still renders. ``effective_phases`` is
+    profession-gated (non-sales → empty), so this is a no-op for dev projects.
+    ``configured`` funnels pass through unchanged (effective_phases returns them
+    when present)."""
+    if data.get("profession") != "sales":
+        return enriched
+    eff = sales_entities.effective_phases(data)
+    for funnel in ("opportunity", "account", "prospect"):
+        enriched[f"{funnel}_phases"] = eff[funnel]
+    return enriched
+
+
 def _enrich_project(data: dict) -> dict:
     """Add computed fields (total_tasks, done_tasks, entries_to_json) to project."""
     enriched = {**data}
@@ -430,7 +454,7 @@ def _enrich_project(data: dict) -> dict:
             "done_tasks": done,
         })
     enriched["milestones"] = milestones
-    return enriched
+    return _resolve_sales_funnels(data, enriched)
 
 def _enrich_project_slim(data: dict) -> dict:
     """Slim variant for WS broadcast — drops tab-scoped heavy arrays.
@@ -468,7 +492,7 @@ def _enrich_project_slim(data: dict) -> dict:
         slim_ms["done_tasks"] = done
         milestones.append(slim_ms)
     enriched["milestones"] = milestones
-    return enriched
+    return _resolve_sales_funnels(data, enriched)
 
 def _build_document_change_payload(project_id: str, doc_id: str, op: str,
                                    fallback_title: str = "",
