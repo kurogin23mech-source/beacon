@@ -33,6 +33,7 @@ import master_projection  # ms-111 / e-3621: 投影 Account/Contact identity を
 import master_adapter  # ms-111 / e-3621: backend 配線済み Beacon-default master adapter
 import master_binding  # ms-111 / e-3621 chunk2b: project の master 束縛宣言 (org_id 軸) を ingest で読む
 import work_model  # ms-109 e-3643: 職種非依存の Target 正準ラベル tolerant reader
+import sales_entities  # ms-108 e-5194: enrich siblings resolve the sales funnel identically
 import dm_gate as dm_gate_mod  # ms-70 / e-1713: cross-user DM action authorization judge
 import dm_consent as dm_consent_mod  # ms-110 / e-3443: sender-side cross-user consent backstop
 import decision_event as decision_event_mod  # ms-90 / e-3246: decision-event 記録
@@ -4763,6 +4764,9 @@ def _enrich_project_active_only(
             "done_tasks": done,
         })
     enriched["milestones"] = milestones
+    # ms-108 e-5194: keep the enrich siblings symmetric — a sales project's board
+    # needs the resolved funnel here too (no-op for non-sales / dev).
+    enriched.update(sales_entities.payload_funnels(data))
     return enriched
 
 

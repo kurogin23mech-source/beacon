@@ -1294,6 +1294,26 @@ def _funnel_key(kind: str) -> str:
             f"(expected 'account', 'opportunity' or 'prospect')")
 
 
+def payload_funnels(data: dict) -> dict:
+    """The resolved sales funnels to merge into a Web UI project payload
+    (ms-108 e-5194).
+
+    Returns ``{"opportunity_phases": [...], "account_phases": [...],
+    "prospect_phases": [...]}`` for a sales project — configured funnels as-is,
+    else the shipped defaults — and an EMPTY dict for a non-sales project (no
+    funnel keys injected). Resolution + the sales gate both come from
+    :func:`effective_phases` (the ONE authoritative resolver), and the key
+    mapping from ``_FUNNEL_KEYS`` — so no caller re-defines "is this sales" or
+    "kind → payload key". This is the single place that owns "which funnels a
+    payload carries" so the CLI and the Web UI enrich layer resolve identically
+    (a funnel-less sales project — not created via ``new_sales_project`` — still
+    renders its board instead of a blank one). Non-sales resolves to all-empty
+    funnels here, so the dict comprehension drops them and dev payloads are
+    untouched."""
+    eff = effective_phases(data)
+    return {key: eff[kind] for kind, key in _FUNNEL_KEYS.items() if eff[kind]}
+
+
 def _funnel_targets(data: dict, kind: str) -> list:
     """The target rows whose ``phase`` field points into this funnel.
 

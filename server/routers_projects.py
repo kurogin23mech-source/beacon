@@ -418,25 +418,18 @@ def _spec_doc_for_op(project_id: str, op_id: str, spec_doc_id: str) -> dict:
     return doc
 
 def _resolve_sales_funnels(data: dict, enriched: dict) -> dict:
-    """ms-108 e-5194: mirror the CLI's funnel resolution into the Web UI payload.
+    """ms-108 e-5194: merge the resolved sales funnels into the Web UI payload.
 
-    The Web UI reads ``p.opportunity_phases`` verbatim, but a sales project's
-    saved data only carries the funnel keys when it was created via
-    ``new_sales_project`` (which seeds them). A project that got ``profession:
-    sales`` after the fact (or predates the seed) has no ``opportunity_phases``
-    key, so the board renders zero columns = blank. The CLI never hits this
-    because it resolves ``configured or DEFAULT`` through
-    ``sales_entities.effective_phases`` — the ONE authoritative funnel resolver.
-    We apply the SAME resolver here so CLI and Web UI see the same funnels and a
-    funnel-less sales project still renders. ``effective_phases`` is
-    profession-gated (non-sales → empty), so this is a no-op for dev projects.
-    ``configured`` funnels pass through unchanged (effective_phases returns them
-    when present)."""
-    if data.get("profession") != "sales":
-        return enriched
-    eff = sales_entities.effective_phases(data)
-    for funnel in ("opportunity", "account", "prospect"):
-        enriched[f"{funnel}_phases"] = eff[funnel]
+    A funnel-less sales project (not created via ``new_sales_project``, or older
+    than the seed) has no ``opportunity_phases`` key, so the board renders zero
+    columns = blank. The CLI never hits this because it resolves ``configured or
+    DEFAULT`` funnels; we mirror that resolution into the payload so CLI and Web
+    UI agree. Delegates to ``sales_entities.payload_funnels`` — the single owner
+    of both the sales gate (via ``effective_phases``) and the kind→key mapping
+    (``_FUNNEL_KEYS``) — so this layer holds no second (weaker) profession check
+    and no hardcoded funnel set. Non-sales resolves to an empty dict here, so dev
+    payloads are untouched."""
+    enriched.update(sales_entities.payload_funnels(data))
     return enriched
 
 
