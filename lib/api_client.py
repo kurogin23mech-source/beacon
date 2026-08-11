@@ -193,6 +193,15 @@ class ApiClient:
             return self._token()
         return self._token
 
+    def _guard_base_url(self) -> str:
+        """The base_url the prod-test-write guards read, tolerant of a client
+        built via ``ApiClient.__new__(...)`` (some tests bypass ``__init__`` and
+        stub ``.post``, so ``_base_url`` is unset — they never reach the network
+        and aren't targeting prod, so the guard must no-op, not AttributeError).
+        Single accessor so every guard call site uses one idiom (ms-108 e-5194
+        maint finding)."""
+        return getattr(self, "_base_url", "")
+
     def _request(self, method: str, path: str, body: dict | None = None,
                  *, extra_headers: dict | None = None) -> dict:
         # ms-98 / e-2777: fail fast when a recent 429 storm has opened
@@ -365,7 +374,7 @@ class ApiClient:
         # materialize a new project just like create_project — guard the same
         # leak vector (e.g. `beacon cloud upload-initial` → cmd_cloud_push).
         import cloud_write_guard
-        cloud_write_guard.guard_prod_project_write(self._base_url)
+        cloud_write_guard.guard_prod_project_write(self._guard_base_url())
         return self.put(f"/api/projects/{project_id}", data)
 
     def create_project(self, project_id: str, name: str, objective: str = "") -> dict:
@@ -373,7 +382,7 @@ class ApiClient:
         # project on the production cloud is the exact path that left 48
         # phase4-test residue projects behind — block it at the choke point.
         import cloud_write_guard
-        cloud_write_guard.guard_prod_project_write(self._base_url)
+        cloud_write_guard.guard_prod_project_write(self._guard_base_url())
         return self.post(f"/api/projects/{project_id}",
                          {"name": name, "objective": objective})
 
@@ -679,6 +688,14 @@ class ApiClient:
                        client_event_id: str = "",
                        is_retry: bool = False,
                        max_retries: int = 2) -> dict:
+        # ms-108 e-5194 follow-up: structural leak guard. A test context posting
+        # a bus event to the production cloud is what let a non-hermetic
+        # operation-trigger unit test spray op-1 "test" events onto the live bus
+        # every suite run. guard_prod_project_write only covered project
+        # creation, so bus posts slipped through — block them at the same choke
+        # point. No-op outside test context / non-prod targets.
+        import cloud_write_guard
+        cloud_write_guard.guard_prod_bus_write(self._guard_base_url())
         body = {
             "channel": channel,
             "sender_session_id": sender_session_id,

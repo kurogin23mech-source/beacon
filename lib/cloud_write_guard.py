@@ -65,6 +65,32 @@ def is_prod_api_url(url: str) -> bool:
     return any(host.endswith(sfx) for sfx in _PROD_HOST_SUFFIXES)
 
 
+# The single escape hatch shared by every prod-test-write guard below. It is
+# deliberately process-wide and shared (not per-guard): a test that legitimately
+# needs to touch prod is rare, and one loud, greppable opt-in is easier to audit
+# than a family of near-identical ones. Because it is shared, each guard's error
+# message states that scope explicitly (下記 AX finding, ms-108 e-5194) so an
+# author enabling it for one write path knows it unlocks all of them.
+_PROD_TEST_WRITE_HATCH = "BEACON_ALLOW_PROD_TEST_WRITE"
+
+
+def _prod_test_write_blocked(base_url: str) -> bool:
+    """True when a prod write from a test context must be refused — the single
+    decision chain (is_test_context → is_prod_api_url → hatch) behind every
+    ``guard_prod_*_write`` below. Extracted so the rule has one source of truth:
+    a 3rd write guard (DM / envelope …) is a thin shell over this, and changing
+    the hatch name or adding staging can't drift half the guards (ms-108 e-5194
+    maint finding). False (= allowed) outside a test context, for non-prod
+    targets, or when the shared hatch is set."""
+    if not is_test_context():
+        return False
+    if not is_prod_api_url(base_url):
+        return False
+    if os.environ.get(_PROD_TEST_WRITE_HATCH) == "1":
+        return False
+    return True
+
+
 def guard_prod_project_write(base_url: str) -> None:
     """Raise if a test context is about to write a project to production.
 
@@ -78,18 +104,53 @@ def guard_prod_project_write(base_url: str) -> None:
     ``BEACON_ALLOW_PROD_TEST_WRITE=1`` lets a test opt in, but such a test must
     wrap creation in :func:`disposable_project` so teardown always archives it.
     """
-    if not is_test_context():
-        return
-    if not is_prod_api_url(base_url):
-        return
-    if os.environ.get("BEACON_ALLOW_PROD_TEST_WRITE") == "1":
+    if not _prod_test_write_blocked(base_url):
         return
     raise RuntimeError(
         "cloud_write_guard: refusing to write a project to the production "
         f"cloud ({base_url}) from a test context. Tests must use local mode "
         "or a sandbox/staging cloud. If this test genuinely must hit prod, "
-        "set BEACON_ALLOW_PROD_TEST_WRITE=1 AND wrap creation in "
-        "cloud_write_guard.disposable_project(...) so a crash can't leak it."
+        "set BEACON_ALLOW_PROD_TEST_WRITE=1 (this shared hatch unlocks ALL "
+        "prod test writes — project AND bus — for the process) AND wrap "
+        "creation in cloud_write_guard.disposable_project(...) so a crash "
+        "can't leak it."
+    )
+
+
+def guard_prod_bus_write(base_url: str) -> None:
+    """Raise if a test context is about to post a bus event to production.
+
+    ``guard_prod_project_write`` only covers project-*creating* writes, so a
+    test that constructs a real ``ApiClient`` and posts to the bus of an
+    already-existing production project slipped through (the exact leak that
+    let a non-hermetic operation-trigger unit test spray ``op-1`` "test"
+    events onto the live bus every time the suite ran — a wrong monkeypatch
+    target meant the helper's local-mode early-return never fired). Guard the
+    bus **post** at the same choke point so no test can leak a bus *post* to
+    the live bus even when its own mock is wired up incorrectly.
+
+    Scope note (ms-108 e-5194 AX finding): this guards ``post_bus_event`` only.
+    Sibling bus-mutating verbs (``advance_bus_cursor`` / ``ack_bus_event_receipt``
+    / ``issue_bus_envelope`` / ``respond_dm_approval``) are NOT yet routed through
+    a guard — extending coverage to them is tracked as a follow-up. Do not read
+    this as "no test can touch the live bus"; it means "no test can leak a bus
+    post".
+
+    No-op outside a test context (normal CLI / autonomous use is unaffected)
+    and no-op for non-prod targets (local mode, staging, a sandbox cloud). The
+    escape hatch ``BEACON_ALLOW_PROD_TEST_WRITE=1`` lets a test that genuinely
+    must exercise the live bus opt in.
+    """
+    if not _prod_test_write_blocked(base_url):
+        return
+    raise RuntimeError(
+        "cloud_write_guard: refusing to post a bus event to the production "
+        f"cloud ({base_url}) from a test context. A unit test must stub the "
+        "cloud config / ApiClient so it never reaches the live bus (patch the "
+        "helper's *own* module namespace, not a re-export). If this test "
+        "genuinely must hit the prod bus, set BEACON_ALLOW_PROD_TEST_WRITE=1 "
+        "(this shared hatch unlocks ALL prod test writes — project AND bus — "
+        "for the process)."
     )
 
 

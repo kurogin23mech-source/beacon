@@ -78,6 +78,74 @@ class TestGuardProjectCreate(unittest.TestCase):
             os.environ["BEACON_TEST_MODE"] = "1"
 
 
+class TestGuardBusWrite(unittest.TestCase):
+    """ms-108 e-5194 follow-up: the bus-post choke point.
+
+    guard_prod_project_write only covered project *creation*, so a test that
+    posted to the bus of an already-existing prod project slipped through —
+    the exact leak that let a non-hermetic operation-trigger unit test spray
+    op-1 "test" events onto the live bus every suite run. Pin the same
+    test-context / prod-target / escape-hatch semantics for bus posts.
+    """
+
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in (
+            "BEACON_TEST_MODE", "PYTEST_CURRENT_TEST",
+            "BEACON_ALLOW_PROD_TEST_WRITE",
+        )}
+        os.environ["BEACON_TEST_MODE"] = "1"
+        os.environ.pop("BEACON_ALLOW_PROD_TEST_WRITE", None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_blocks_prod_in_test_context(self):
+        with self.assertRaises(RuntimeError):
+            cwg.guard_prod_bus_write("https://beacon-ai.dev")
+
+    def test_allows_local_in_test_context(self):
+        cwg.guard_prod_bus_write("http://localhost:8000")  # no raise
+
+    def test_escape_hatch_allows_prod(self):
+        os.environ["BEACON_ALLOW_PROD_TEST_WRITE"] = "1"
+        cwg.guard_prod_bus_write("https://beacon-ai.dev")  # no raise
+
+    def test_noop_outside_test_context(self):
+        os.environ.pop("BEACON_TEST_MODE", None)
+        os.environ.pop("PYTEST_CURRENT_TEST", None)
+        try:
+            cwg.guard_prod_bus_write("https://beacon-ai.dev")  # no raise
+        finally:
+            os.environ["BEACON_TEST_MODE"] = "1"
+
+
+class TestApiClientBusPostGuarded(unittest.TestCase):
+    """The guard is wired into ApiClient.post_bus_event itself, so even a test
+    whose own mock is misconfigured (the failure mode that caused this leak)
+    cannot reach the live bus."""
+
+    def test_post_bus_event_blocks_prod_in_test_context(self):
+        import api_client
+        saved = os.environ.get("BEACON_TEST_MODE")
+        os.environ["BEACON_TEST_MODE"] = "1"
+        try:
+            client = api_client.ApiClient("https://beacon-ai.dev", token="x")
+            with self.assertRaises(RuntimeError):
+                client.post_bus_event(
+                    "beacon-b95643", "operation-trigger",
+                    payload={"op_id": "op-1", "message": "test"},
+                )
+        finally:
+            if saved is None:
+                os.environ.pop("BEACON_TEST_MODE", None)
+            else:
+                os.environ["BEACON_TEST_MODE"] = saved
+
+
 class _FakeClient:
     """Records create/archive calls; create honors the guard via base_url."""
 
