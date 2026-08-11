@@ -902,13 +902,29 @@ def milestone_update(data: dict, ms_id: str, *,
     any other non-empty value sets the field.
     """
     # ms-143 e-5141: locate the milestone through the profession-generic
-    # occupation.find_target rather than naming data['milestones'] directly, so the
-    # dev-milestone UPDATE path (like create / done / list before it) stops reaching
-    # into the concrete collection. The rich per-field logic below (progress clamp /
-    # priority resolver / status-meta stamp / label dual-write) stays HERE as the dev
-    # frontend concern — it does NOT fit the generic plain-patch occupation.update_
-    # entry, which deliberately carries only flat field sets (leader 握り: primitive
-    # は plain patch に閉じる). Lazy import — occupation imports core at module load.
+    # occupation.find_target rather than the bare `for ms in data['milestones']`
+    # walk, so the class-derived UPDATE verb (cmd_milestone_update is L2 — "update a
+    # Target" is a profession-common operation) resolves its Target the same way as
+    # the create / done / list verbs greened in PR#2.
+    #
+    # SCOPE (maintainability review PR #630): this greens the UPDATE locate only. The
+    # other milestone accessors in this file (milestone_done / _wait / _purge and the
+    # dev-lifecycle helpers) still walk data['milestones'] directly, and that is
+    # LEGITIMATE, not a half-migration: core.py IS the development occupation adapter,
+    # so reading its own occupation's collection is native (the same way
+    # sales_entities reads data['opportunities']). What e-5141 removes here is the
+    # concrete read from the shared-CRUD UPDATE path specifically; a blanket rewrite
+    # of core's dev-internal accessors is neither required nor in scope.
+    #
+    # The rich per-field logic below (progress clamp / priority resolver / status-meta
+    # stamp / label dual-write) stays HERE as the dev frontend concern — it does NOT
+    # fit the generic plain-patch occupation.update_entry, which deliberately carries
+    # only flat field sets (leader 握り: primitive は plain patch に閉じる).
+    #
+    # IMPORT POLICY: occupation must be imported inside the function body, never at
+    # module level — occupation imports core at module load, so a top-level
+    # `import occupation` here would be a cycle (every occupation call site in this
+    # file follows this lazy-import rule).
     import occupation
     ms = occupation.find_target(data, ms_id)
     if ms is None:
