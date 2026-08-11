@@ -1525,6 +1525,29 @@ def needs_transition_date(data: dict, target_id: str) -> bool:
     return not (gate.get("transition_date") or "").strip()
 
 
+def gate_needs_anchor(data: dict, target_id: str) -> bool:
+    """True when the opportunity has an open前進ゲート with no発火源 (anchor) bound
+    yet (ms-144 e-5178). This is the derived fact behind the「空 (発火源 未紐づけ)」
+    display — surfaced as a flag so the AI can *see* an unanchored gate instead of
+    re-deriving it from the raw ``gates[]`` (SPEC §問題: the判定日-only path that
+    left cairn opp-3/opp-4 stuck). Anchor it with ``beacon opportunity anchor``.
+
+    Terminal / gate-less opportunities never need one (no open gate), so False —
+    the same twin-shape guard as ``needs_transition_date``.
+    """
+    if not target_id.startswith("opp-"):
+        return False
+    opp = find_opportunity(data, target_id)
+    if opp is None:
+        return False
+    if opportunity_phase_is_terminal(data, opp.get("phase", "")):
+        return False  # 決着済み — no gate to anchor (defensive vs stale gate)
+    gate = current_gate(data, target_id)
+    if gate is None:
+        return False
+    return not (gate.get("anchor") or "").strip()
+
+
 # ---------------------------------------------------------------------------
 # Transition judgement engine — ms-107 e-3372, SPEC §3. Target-class generic.
 # ---------------------------------------------------------------------------

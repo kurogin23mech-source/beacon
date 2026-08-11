@@ -8807,7 +8807,13 @@ def cmd_opportunity_list():
     opps = (occupation.target_records(data, "opportunity") if show_all
             else sales_entities.live_opportunities(data))
     if json_mode:
-        print(json.dumps(opps, ensure_ascii=False, indent=2))
+        # ms-144 e-5178: surface「open gate but no発火源」as a derived flag so the
+        # AI (and the cockpit) can see an unanchored gate without re-deriving it
+        # from raw gates[]. Projection only — not persisted onto the record.
+        enriched = [{**o,
+                     "gate_needs_anchor": sales_entities.gate_needs_anchor(data, o["id"])}
+                    for o in opps]
+        print(json.dumps(enriched, ensure_ascii=False, indent=2))
         return
     if not opps:
         print("No opportunities yet. Add one with: beacon opportunity add \"<title>\"")
@@ -8937,6 +8943,13 @@ def cmd_opportunity_transition_date():
     if rec["transition_date"]:
         print(f"{opp_id} transition_date → {rec['transition_date']} "
               f"(recorded in transition_date_history)")
+        # ms-144 e-5178: placing a判定日 on a gate with no発火源 is the exact
+        # cairn症状 (opp-3/opp-4) — the date is set but nothing will fire the
+        # judgement. Warn to stderr but never block (permissive 原則, master=人間).
+        if sales_entities.gate_needs_anchor(data, opp_id):
+            print(f"  ⚠ 発火源 未結合: この前進ゲートには判定のきっかけ (面談/活動) が"
+                  f"結ばれていません。`beacon opportunity anchor {opp_id} <work-item>` で"
+                  f"結ぶと、その完了で自動的にフェーズ判定が走ります。", file=sys.stderr)
     else:
         print(f"{opp_id} transition_date cleared (recorded in transition_date_history)")
 
