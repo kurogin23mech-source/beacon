@@ -310,11 +310,14 @@ KNOWN_COLLECTION_COUPLING = {
     # REVIEWED_LEGITIMATE_COLLECTION_READS (a false-positive of the string-based
     # check, not project coupling).
     #
-    # acquisition_list stays: ``acquisitions`` is NOT a Target collection
-    # (TARGET_COLLECTIONS = milestones + opportunities), so occupation.target_records
-    # cannot enumerate it — routing it through the target abstraction would be the
-    # WRONG abstraction. Left as tracked debt pending its own disposition.
-    ("acquisition_list", "acquisitions"),
+    # ms-142 e-5250 (思想レビュー finding P2c): ``acquisition_list`` moved OUT of this
+    # debt set to REVIEWED_LEGITIMATE_COLLECTION_READS. ``acquisitions`` is the sole
+    # home of acquisition records; iter_target_records (the target abstraction) walks
+    # milestones/opportunities/operations and would NOT return acquisitions, so the
+    # direct read is EXACT — the target abstraction is the WRONG one, the same shape
+    # as target_list / session_fork. Its old "tracked debt pending disposition" state
+    # violated SPEC AC6's "owning MS 付き" (it had none) precisely because it was not
+    # debt at all; disposed here as reviewed-correct.
 }
 
 # Reviewed-legitimate reads (ms-134 e-4737): (verb, collection) reads a
@@ -379,6 +382,15 @@ REVIEWED_LEGITIMATE_COLLECTION_READS = {
         "milestone aggregation (for ms in …) was remediated to "
         "occupation.target_records; this deployment-field read is exact, not "
         "coupling.",
+    ("acquisition_list", "acquisitions"):
+        "ms-142 e-5250 (思想レビュー P2c): acquisitions is the SOLE home of "
+        "acquisition (顧客獲得ターゲット) records and rides a separate persistence "
+        "path — it is NOT in TARGET_COLLECTIONS, so occupation.iter_target_records "
+        "(which walks milestones/opportunities/operations) would NOT return them. "
+        "Reading data['acquisitions'] to LIST acquisitions is therefore exact, not "
+        "profession coupling — the target abstraction is the wrong one, the same "
+        "shape as target_list / session_fork above. Human-confirmed reviewed-correct "
+        "(was mis-filed as ownerless debt).",
 }
 
 
