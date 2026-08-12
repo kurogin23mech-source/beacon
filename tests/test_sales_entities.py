@@ -2594,3 +2594,38 @@ def test_migrate_opp_gates_preserves_legacy_evidence():
     assert "transition_date_history" in leg
     # the active top-level copies are cleared (gate列 = single live source)
     assert "phase_history" not in opp and "transition_date" not in opp
+
+
+# --- ms-142 e-5169: phase_set routes non-terminal advance via set_target_state -
+
+def test_phase_set_non_terminal_routes_through_set_target_state():
+    """A non-terminal opportunity phase move goes through the generic primitive
+    (target_state.set_target_state → advance_funnel_phase), and the mirrored
+    status + linked-account rollup land exactly as the legacy direct write did."""
+    data = _fresh()
+    acc = se.account_add(data, "Globex", created_at="T0")
+    oid = se.opportunity_add(data, "Deal", account_id=acc, created_at="T0")
+    nxt = se.next_opportunity_phase(data, se.find_opportunity(data, oid)["phase"])
+    assert nxt is not None
+    se.phase_set(data, oid, nxt, at="T1")
+    opp = se.find_opportunity(data, oid)
+    assert opp["phase"] == nxt
+    # non-terminal → status mirrors to "open" (invariant with the raw write)
+    assert opp["status"] == "open"
+    # the linked account rolled up with THIS caller's ``at`` (kept out of the seam)
+    acc_rec = se.find_account(data, acc)
+    hist = acc_rec.get("phase_history", [])
+    assert hist and hist[-1].get("at") == "T1"
+
+
+def test_phase_set_terminal_stays_on_direct_writer_and_mirrors_outcome():
+    """A terminal (決着) phase cannot ride set_target_state (it refuses terminals);
+    phase_set writes it directly and the status mirrors to the configured outcome."""
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal", created_at="T0")
+    terminal = next(p["name"] for p in se.opportunity_phases(data)
+                    if p.get("terminal") and p.get("outcome") == "won")
+    se.phase_set(data, oid, terminal, at="T1")
+    opp = se.find_opportunity(data, oid)
+    assert opp["phase"] == terminal
+    assert opp["status"] == "won"

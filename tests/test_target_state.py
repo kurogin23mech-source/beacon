@@ -252,19 +252,55 @@ def test_set_target_state_refuses_descriptor_terminal_phase():
 
 
 # ---------------------------------------------------------------------------
-# Opportunity funnel: declared for phase_ball, transition deferred (follow-up).
+# Opportunity funnel: non-terminal advance routes through the sales seam;
+# terminal (決着) is refused as the sales judge gate's completion claim (e-5169).
 # ---------------------------------------------------------------------------
 
-def test_set_target_state_defers_opportunity_funnel():
-    data = {"name": "s", "profession": "sales", "milestones": [],
+def _sales_with_opp(phase="商談準備"):
+    # Use the shipped funnel vocabulary so opportunity_phase_is_terminal /
+    # _opportunity_status_for_phase resolve against real phase defs.
+    import sales_entities as se
+    return {"name": "s", "profession": "sales", "milestones": [],
+            "opportunity_phases": [dict(p) for p in se.DEFAULT_OPPORTUNITY_PHASES],
             "opportunities": [{"id": "opp-1", "label": "O", "status": "open",
-                               "phase": "lead", "who_has_the_ball": "self",
+                               "phase": phase, "who_has_the_ball": "self",
                                "activities": [], "communications": []}]}
+
+
+def test_set_target_state_advances_opportunity_funnel_non_terminal():
+    data = _sales_with_opp("商談準備")
+    import sales_entities as se
+    nxt = se.next_opportunity_phase(data, "商談準備")
+    rec, old, new = ts.set_target_state(data, "opp-1", nxt)
+    assert (old, new) == ("商談準備", nxt)
+    assert data["opportunities"][0]["phase"] == nxt
+    # status mirror stays "open" for a non-terminal phase (invariant with phase_set).
+    assert data["opportunities"][0]["status"] == "open"
+
+
+def test_set_target_state_refuses_opportunity_terminal_phase():
+    data = _sales_with_opp("提案")
+    import sales_entities as se
+    terminal = next(p["name"] for p in se.opportunity_phases(data)
+                    if p.get("terminal"))
     with pytest.raises(ts.TargetStateError) as exc:
-        ts.set_target_state(data, "opp-1", "qualified")
-    assert "not yet routed" in str(exc.value)
-    # phase untouched — no desync of the mirrored status.
-    assert data["opportunities"][0]["phase"] == "lead"
+        ts.set_target_state(data, "opp-1", terminal)
+    assert "terminal" in str(exc.value)
+    # phase untouched — the settlement must go through the sales judge gate.
+    assert data["opportunities"][0]["phase"] == "提案"
+
+
+def test_set_target_state_funnel_matches_phase_set_status_mirror():
+    """The status projection is byte-identical whether a non-terminal phase is
+    reached via set_target_state or the legacy phase_set write (status 同期不変)."""
+    import sales_entities as se
+    a = _sales_with_opp("商談準備")
+    b = _sales_with_opp("商談準備")
+    nxt = se.next_opportunity_phase(a, "商談準備")
+    ts.set_target_state(a, "opp-1", nxt)
+    se.advance_funnel_phase(b, b["opportunities"][0], nxt)
+    assert a["opportunities"][0]["status"] == b["opportunities"][0]["status"]
+    assert a["opportunities"][0]["phase"] == b["opportunities"][0]["phase"]
 
 
 def test_set_target_state_unknown_target():

@@ -8879,7 +8879,13 @@ def cmd_opportunity_phase():
     # block: master = human (SPEC §5). Warnings compare against the current phase.
     warnings = []
     if opp_id.startswith("opp-"):
-        opp = sales_entities.find_opportunity(data, opp_id)
+        # ms-142 e-5169: resolve the Target through the profession-generic
+        # occupation.find_target (the sales twin of the milestone resolver greened
+        # in ms-143), not the sales-concrete find_opportunity — so the shared
+        # ``opportunity_phase`` verb no longer reaches a profession recorder. The
+        # transition itself already rides set_target_state via jump_transition.
+        import occupation
+        opp = occupation.find_target(data, opp_id)
         cur = opp.get("phase", "") if opp else ""
         # e-3527: pass the deal's 想定金額 (goal or amount) so require_amount
         # phases can warn when neither is set.
