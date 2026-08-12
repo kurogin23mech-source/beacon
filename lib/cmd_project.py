@@ -447,7 +447,14 @@ def cmd_project_export():
         """Count a Target record's fat-arm items + their nested children across
         every arm the class declares. Recurses over the SAME arm names, so a dev
         commit nested under a task (both in ``entries``) and a sales evidence row
-        nested under a work item are both counted, with no arm name hardcoded."""
+        nested under a work item are both counted, with no arm name hardcoded.
+
+        ASSUMPTION (ms-142 e-5115 AX/maint review): a child item lives under one of
+        the class's OWN declared fat-arm names (dev nests commits under ``entries``,
+        sales nests a communication under the ``communications`` arm). This holds for
+        every built-in class today. A future class that nested children under an arm
+        NOT in its ``arms`` set would under-count them here — at which point the count
+        should thread a per-level arm map rather than reusing ``arm_names``."""
         total = 0
         for arm in arm_names:
             for item in record.get(arm, []) or []:
