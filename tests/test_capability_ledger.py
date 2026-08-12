@@ -999,3 +999,25 @@ def test_render_proposal_ok_shows_scanned(capsys):
     out = capsys.readouterr().out
     assert "no open gaps" in out
     assert "305 verbs" in out and "57 skills" in out
+
+
+def test_ratchet_family_tables_agree():
+    """ms-142 e-5143 (maint review §1): the ratchet registry is split across the
+    lib (cl.RATCHET_FAMILIES = the data half) and the scanner (chk._RATCHET_SCAN =
+    the key_extractor/population half), bound by family name. Adding a row to one
+    without the other would KeyError only at runtime for that family. This pins the
+    two key-sets equal so the split-table sync is a CI failure, not a latent bug."""
+    assert set(chk._RATCHET_SCAN) == set(cl.RATCHET_FAMILIES), (
+        "ratchet family tables drifted — cl.RATCHET_FAMILIES and chk._RATCHET_SCAN "
+        "must declare the same families: "
+        f"lib-only={set(cl.RATCHET_FAMILIES) - set(chk._RATCHET_SCAN)}, "
+        f"scanner-only={set(chk._RATCHET_SCAN) - set(cl.RATCHET_FAMILIES)}")
+
+
+def test_classify_reach_rejects_unknown_family():
+    """ms-142 e-5143 (AX review): an unknown family name is a clear ValueError
+    naming the valid families, not a bare KeyError (self-describing recovery)."""
+    import pytest as _pytest
+    with _pytest.raises(ValueError) as exc:
+        cl.classify_reach("nonesuch", ("v", "t"))
+    assert "nonesuch" in str(exc.value) and "collection" in str(exc.value)
