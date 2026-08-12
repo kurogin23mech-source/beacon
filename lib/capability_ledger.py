@@ -479,20 +479,12 @@ KNOWN_ARM_REACH = {
     # (session_log occupation-neutrality; the open follow-up is e-3702, named in
     # collect_project_entries' docstring).
     ("session_log", "entries"),
-    # cmd_project export/backup (beacon project export) — an L1 (instance-
-    # universal) capability that counts Targets through iter_target_records (its
-    # collection read was abstracted, ms-134 e-5061) but whose _count_entries
-    # helper still walks each record's dev ``entries`` arm, so the backup manifest's
-    # ``top_level_entries`` integrity count under-counts a sales project's work
-    # (Opportunity activities/communications). Route _count_entries through
-    # profession_manifest arms. Discovered by the arm scan itself (ms-142 e-5012);
-    # not previously catalogued because the collection ratchet — which only sees
-    # data['<collection>'] reads — is blind to an arm read. owner = ms-142:
-    # greening cmd_project's enumeration is squarely within its mandate ("列挙を
-    # Target/WorkItem 抽象イテレータへ寄せる"), tracked by task e-5115. Per leader
-    # ruling 2026-08-10, the owner tag names the MS that will actually green the
-    # surface, so the stale-entry test fires on the right MS (rot prevention).
-    ("cmd_project", "entries"),
+    # ms-142 e-5115 GREENED cmd_project: the backup manifest's ``top_level_entries``
+    # integrity count now walks each Target's fat arms via
+    # occupation.profession_manifest (arm names read from the manifest, no literal
+    # ``entries``), so it covers a sales project's activities/communications and no
+    # longer reaches the dev arm. Row deleted (stale-entry test forces the deletion
+    # once the arm read is abstracted).
 }
 
 

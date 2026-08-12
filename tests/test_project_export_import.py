@@ -240,3 +240,42 @@ def test_import_rejects_unsafe_paths(local_project, monkeypatch, tmp_path):
     with pytest.raises(SystemExit):
         commands.cmd_project_import()
     assert not (tmp_path / "escape.txt").exists()
+
+
+# --- ms-142 e-5115: backup integrity count covers a sales project's work -------
+
+def test_export_counts_sales_work_items(tmp_path, monkeypatch, capsys):
+    """A sales project's backup manifest counts Opportunity activities /
+    communications in ``top_level_entries`` — the old dev-``entries``-only walk
+    scored a sales project's work as 0 (ms-142 e-5115). Dev-invariance is pinned
+    by test_export_writes_manifest_and_payload (top_level_entries == 2)."""
+    import sales_entities as se
+
+    beacon_dir = tmp_path / ".beacon"
+    beacon_dir.mkdir()
+    (beacon_dir / "documents").mkdir()
+    (beacon_dir / "retro").mkdir()
+
+    data = se.build_sales_project("sales-demo", "close deals")
+    oid = se.opportunity_add(data, "big deal")
+    se.activity_add(data, oid, "call customer")
+    se.activity_add(data, oid, "send proposal")
+    (beacon_dir / "project.json").write_text(
+        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    (beacon_dir / "changelog.jsonl").write_text("", encoding="utf-8")
+    (beacon_dir / "config.json").write_text('{"retro_day":"friday"}\n',
+                                            encoding="utf-8")
+
+    monkeypatch.setenv("BEACON_PROJECT_FILE", str(beacon_dir / "project.json"))
+    monkeypatch.delenv("BEACON_CLOUD", raising=False)
+    monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "local")
+    monkeypatch.delitem(sys.modules, "firestore_client", raising=False)
+
+    output = tmp_path / "backup.zip"
+    _run_export(monkeypatch, output)
+
+    with zipfile.ZipFile(output) as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+    # 1 Opportunity Target, 2 activities counted (not 0 as under the old walk).
+    assert manifest["entry_counts"]["milestones"] == 1
+    assert manifest["entry_counts"]["top_level_entries"] == 2

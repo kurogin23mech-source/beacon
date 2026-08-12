@@ -432,25 +432,48 @@ def cmd_project_export():
     target_records = occupation.iter_target_records(project_data)
     op_list = project_data.get("operations", []) or []
 
-    def _count_entries(ms):
-        # ARM-NAME COUPLING (ms-142 e-5012, tracked debt): target enumeration above
-        # is abstracted (iter_target_records), but this counts only the dev
-        # ``entries`` arm, so a sales Opportunity's activities/communications are
-        # not counted into ``top_level_entries``. Fix = route through
-        # occupation.profession_manifest work_item_arm/evidence_arms. Registered as
-        # pending debt in capability_ledger.KNOWN_ARM_REACH ("cmd_project",
-        # "entries"); the checker's stale-entry test forces this to be remediated.
+    # ms-142 e-5115: count every Target's fat-arm items through the occupation
+    # manifest instead of the hardcoded dev ``entries`` arm. Each target-class
+    # declares its fat arms (dev milestone → ("entries",); sales opportunity →
+    # ("activities", "communications")), so the integrity count covers a sales
+    # project's work too rather than under-counting it. Dev stays byte-identical:
+    # arms == ("entries",) reproduces the old "top-level entries + nested entries"
+    # walk (a task's nested commits ride the same ``entries`` arm). This greens the
+    # (cmd_project, "entries") arm-reach debt — the arm name is now read from the
+    # manifest, never as a literal.
+    manifest = occupation.profession_manifest(project_data)
+
+    def _count_arm_items(record, arm_names):
+        """Count a Target record's fat-arm items + their nested children across
+        every arm the class declares. Recurses over the SAME arm names, so a dev
+        commit nested under a task (both in ``entries``) and a sales evidence row
+        nested under a work item are both counted, with no arm name hardcoded.
+
+        ASSUMPTION (ms-142 e-5115 AX/maint review): a child item lives under one of
+        the class's OWN declared fat-arm names (dev nests commits under ``entries``,
+        sales nests a communication under the ``communications`` arm). This holds for
+        every built-in class today. A future class that nested children under an arm
+        NOT in its ``arms`` set would under-count them here — at which point the count
+        should thread a per-level arm map rather than reusing ``arm_names``."""
         total = 0
-        for e in ms.get("entries", []) or []:
-            total += 1
-            for nested in e.get("entries", []) or []:
+        for arm in arm_names:
+            for item in record.get(arm, []) or []:
                 total += 1
+                total += _count_arm_items(item, arm_names)
         return total
+
+    top_level_entries = 0
+    for tc in manifest["target_classes"]:
+        arms = tc["arms"]
+        if not arms:
+            continue
+        for record in project_data.get(tc["collection"], []) or []:
+            top_level_entries += _count_arm_items(record, arms)
 
     entry_counts = {
         "milestones": len(target_records),
         "operations": len(op_list),
-        "top_level_entries": sum(_count_entries(t) for t in target_records),
+        "top_level_entries": top_level_entries,
         "documents": len(snapshot["documents"]),
         "changelog_lines": snapshot["changelog_lines"],
         "retro_files": len(snapshot["retros"]),
