@@ -901,12 +901,19 @@ def milestone_wait(data: dict, ms_id: str, *, reason: str = "") -> dict:
     cancelled cannot move to waiting — todo means "never started" (no
     history to preserve), done means "completed" (re-open via observe or
     active), cancelled is terminal.
+
+    ms-142 e-5169: writes ``waiting`` through ``target_state.set_target_state``
+    (the same primitive as ``milestone_start``); only the SOURCE guard is
+    milestone-specific and stays here. Returns the record the primitive wrote, so
+    the return path is symmetric with ``milestone_start``.
     """
-    # ms-142 e-5169: the SOURCE guard (only active/observing may wait) is the
-    # milestone's own state-machine rule and stays HERE; only the WRITE is routed
-    # through the generic primitive so ``waiting`` is stamped on the one path
-    # (identical meta[waiting_at/by/reason] convention). ``waiting`` is a
-    # non-terminal advanceable state, so the completion gate is untouched.
+    # The SOURCE guard (only active/observing may wait) is the milestone's own
+    # state-machine rule — set_target_state is permissive on the milestone status
+    # enum (monotonic=False), so it would accept ``waiting`` from any state; this
+    # stricter source rule has no home in the generic model and stays HERE. Only
+    # the WRITE routes through the primitive (identical meta[waiting_at/by/reason]
+    # convention). ``waiting`` is a non-terminal advanceable state, so the
+    # completion gate is untouched.
     import target_state
     ms = None
     for m in data["milestones"]:
@@ -924,10 +931,11 @@ def milestone_wait(data: dict, ms_id: str, *, reason: str = "") -> dict:
             f"(todo → use start; done → use start to re-open)"
         )
     try:
-        target_state.set_target_state(data, ms_id, "waiting", reason=reason)
+        rec, _old, _new = target_state.set_target_state(
+            data, ms_id, "waiting", reason=reason)
     except target_state.TargetStateError as exc:
         raise ValueError(str(exc)) from exc
-    return ms
+    return rec
 
 
 def milestone_update(data: dict, ms_id: str, *,

@@ -443,25 +443,14 @@ def set_target_state(data: dict, target_id: str, to_state: str, *,
         return _advance_descriptor(data, kind, target_id, want,
                                    actor=actor, reason=reason)
 
-    # Opportunity funnel: delegate the non-terminal write to the sales seam
-    # (ms-142 e-5169; the twin of the SHAPE_PHASES → target_engine delegation).
-    # A terminal (決着) phase is a completion claim guarded by the sales judge
-    # gate (GATE_SALES_JUDGE) — refused here so set_target_state stays
-    # non-terminal-only for the funnel too (the completion-gate non-bypass). Which
-    # phases are terminal is CONFIG-derived, so the check lives in the sales
-    # adapter. The seam writes phase + mirrored status; the account rollup + ``at``
-    # stay with the caller (phase_set), so status 同期 is invariant.
+    # Opportunity funnel: delegate to the sales seam via a dedicated helper — the
+    # SHAPE_FUNNEL twin of the SHAPE_PHASES → _advance_descriptor delegation, so
+    # the two config-derived classes route their non-terminal write through the
+    # same thin shape (ms-142 e-5169). Keeping the sales-specific terminal check
+    # inside _advance_funnel is what stops the gate logic from spreading across
+    # set_target_state.
     if shape == SHAPE_FUNNEL:
-        import sales_entities as _se
-        old = rec.get(model["state_field"], "")
-        if _se.opportunity_phase_is_terminal(data, want):
-            raise TargetStateError(
-                f"{target_id}: {want!r} is a terminal (決着) phase — "
-                f"set_target_state writes only non-terminal transitions. Route the "
-                f"settlement through the sales judge gate (`beacon opportunity judge` "
-                f"/ terminal declaration), which is the funnel's completion gate.")
-        _se.advance_funnel_phase(data, rec, want)
-        return rec, old, want
+        return _advance_funnel(data, target_id, rec, model["state_field"], want)
 
     state_field = model["state_field"]
     old = rec.get(state_field, "")
@@ -520,3 +509,26 @@ def _advance_descriptor(data: dict, kind: str, target_id: str, to_phase: str, *,
             f"route through `beacon target close --class {kind} {target_id}`")
     return _te.advance_target(data, desc, target_id, to_phase=to_phase,
                               actor=actor, reason=reason)
+
+
+def _advance_funnel(data: dict, target_id: str, rec: dict, state_field: str,
+                    to_phase: str) -> tuple:
+    """Delegate an opportunity funnel's non-terminal advance to the sales seam
+    ``sales_entities.advance_funnel_phase`` (the SHAPE_FUNNEL twin of
+    ``_advance_descriptor``). Refuses a terminal (決着) phase here — a settlement
+    is a completion claim owned by the sales judge gate (GATE_SALES_JUDGE), which
+    set_target_state must not bypass. Which phases are terminal is CONFIG-derived
+    (per project), so the check lives in the sales adapter and stays inside this
+    one helper rather than spreading across set_target_state. The seam writes phase
+    + mirrored status; the account rollup + ``at`` stay with the caller
+    (``phase_set``), so status 同期 is invariant. Returns ``(rec, old, new)``."""
+    import sales_entities as _se
+    old = rec.get(state_field, "")
+    if _se.opportunity_phase_is_terminal(data, to_phase):
+        raise TargetStateError(
+            f"{target_id}: {to_phase!r} is a terminal (決着) phase — "
+            f"set_target_state writes only non-terminal transitions. Settle the "
+            f"deal via `beacon opportunity phase {target_id} {to_phase}` (the "
+            f"funnel's completion gate), not the generic advance path.")
+    _se.advance_funnel_phase(data, rec, to_phase)
+    return rec, old, to_phase

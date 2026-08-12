@@ -483,11 +483,13 @@ def advance_funnel_phase(data: dict, opp: dict, new_phase: str) -> str:
     This is the sales L3 seam ``target_state.set_target_state`` delegates to for a
     SHAPE_FUNNEL class (the twin of ``target_engine.advance_target`` for descriptor
     phases). It owns ONLY the phase↔status mirror — NOT the account rollup or the
-    ``at`` audit stamp, which the caller (``phase_set``) threads with its own ``at``
-    so routing a transition through ``set_target_state`` cannot shift the rollup's
-    timestamp. The mirror uses the same ``_opportunity_status_for_phase`` the raw
-    write always did, so the status projection is byte-identical (status 同期不変;
-    pinned by test_sales_entities + test_target_state)."""
+    ``at`` audit stamp. Neither this function nor ``set_target_state`` stamps
+    ``at``; whichever caller drives the transition (``phase_set`` today, a generic
+    advance verb tomorrow) is responsible for threading its own ``at`` into the
+    rollup, so routing a transition through ``set_target_state`` cannot shift the
+    rollup's timestamp. The mirror uses the same ``_opportunity_status_for_phase``
+    the raw write always did, so the status projection is byte-identical (status
+    同期不変; pinned by test_sales_entities + test_target_state)."""
     old = opp.get("phase", "")
     opp["phase"] = new_phase
     opp["status"] = _opportunity_status_for_phase(data, new_phase)
@@ -1124,8 +1126,11 @@ def phase_set(data: dict, target_id: str, new_phase: str, *,
         # its phase through the same primitive every other target-class does. A
         # terminal (決着) phase is the sales judge gate's completion claim, which
         # set_target_state refuses by contract, so it stays on the direct writer
-        # here (permissive: master=人間, SPEC §5/§6). Both routes land on the same
-        # ``advance_funnel_phase`` mirror, so the status projection is invariant.
+        # here (permissive: master=人間, SPEC §5/§6). Both branches converge on the
+        # SAME single writer ``advance_funnel_phase`` (terminal directly, non-
+        # terminal via set_target_state), so the phase↔status projection has one
+        # source — a future editor adding a write-side effect adds it THERE, not in
+        # either branch, and it applies to both routes uniformly.
         if opportunity_phase_is_terminal(data, new_phase):
             advance_funnel_phase(data, opp, new_phase)
         else:
