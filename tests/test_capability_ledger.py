@@ -563,16 +563,18 @@ def test_no_stale_arm_reach_allowlist_entries():
 
 
 def test_registered_arm_reads_are_the_detected_debt():
-    # The concrete anchors: both shared-frame aggregators that abstracted target
-    # enumeration but kept a dev-arm read (session_log aggregation + cmd_project
-    # export) are detected and are exactly the allowlisted debt (not fresh
-    # violations). cmd_project was surfaced by the arm scan itself — the collection
-    # ratchet is blind to an arm read (ms-142 e-5012).
+    # The concrete anchor: session_log aggregation abstracted target enumeration
+    # but kept a dev-arm read (deferred — sales work does not stamp meta.session_id
+    # yet), so it is detected and is exactly the allowlisted debt (not a fresh
+    # violation). cmd_project export was the sibling arm-read debt; ms-142 e-5115
+    # GREENED it (its backup count now walks each Target's fat arms via
+    # profession_manifest), so it is no longer detected and no longer allowlisted.
     by_key = {(a["site"], a["arm"]): a["status"] for a in chk.find_arm_coupling()}
     assert by_key.get(("session_log", "entries")) == "pending_debt"
-    assert by_key.get(("cmd_project", "entries")) == "pending_debt"
     assert ("session_log", "entries") in cl.KNOWN_ARM_REACH
-    assert ("cmd_project", "entries") in cl.KNOWN_ARM_REACH
+    # e-5115: cmd_project greened — neither detected nor allowlisted anymore.
+    assert by_key.get(("cmd_project", "entries")) is None
+    assert ("cmd_project", "entries") not in cl.KNOWN_ARM_REACH
 
 
 def test_checker_flags_a_shared_frame_arm_read(tmp_path):
