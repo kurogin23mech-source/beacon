@@ -556,27 +556,29 @@ REMEDIATION_TO_MANIFEST = (
     "deletion once abstracted, so the ratchet cannot rot into a lie."
 )
 
-# The three data fields are stored as ATTRIBUTE NAMES (not the dict objects), so
-# ``classify_reach`` resolves the CURRENT module binding at call time. This keeps
-# the registry honest under monkeypatch: a test that rebinds ``cl.KNOWN_ARM_REACH``
-# (or the reviewed/denylist dicts) is seen by the classifier, rather than a stale
-# object captured at import. ``allowlist_reviewed`` is ``None`` for a family with no
-# reviewed class (symbols — see KNOWN_SYMBOL_REACH doc).
+# The three data fields are stored as ZERO-ARG THUNKS (``lambda: KNOWN_ARM_REACH``)
+# that return the CURRENT module binding when called. A thunk keeps the registry
+# honest under monkeypatch — a test that rebinds ``cl.KNOWN_ARM_REACH`` (or the
+# reviewed/denylist dicts) is seen by the classifier because the lambda reads the
+# module global at call time, not at import — WITHOUT the downsides of a string
+# attribute name (which breaks grep / rename / jump-to-def and only fails at runtime
+# on a typo; ms-142 e-5143 maint review). ``allowlist_reviewed`` is ``None`` for a
+# family with no reviewed class (symbols — see KNOWN_SYMBOL_REACH doc).
 RATCHET_FAMILIES: dict = {
     "collection": {
-        "denylist": "PROFESSION_CONCRETE_COLLECTIONS",
-        "allowlist_debt": "KNOWN_COLLECTION_COUPLING",
-        "allowlist_reviewed": "REVIEWED_LEGITIMATE_COLLECTION_READS",
+        "denylist": lambda: PROFESSION_CONCRETE_COLLECTIONS,
+        "allowlist_debt": lambda: KNOWN_COLLECTION_COUPLING,
+        "allowlist_reviewed": lambda: REVIEWED_LEGITIMATE_COLLECTION_READS,
     },
     "symbol": {
-        "denylist": "PROFESSION_CONCRETE_SYMBOLS",
-        "allowlist_debt": "KNOWN_SYMBOL_REACH",
+        "denylist": lambda: PROFESSION_CONCRETE_SYMBOLS,
+        "allowlist_debt": lambda: KNOWN_SYMBOL_REACH,
         "allowlist_reviewed": None,
     },
     "arm": {
-        "denylist": "PROFESSION_CONCRETE_ARMS",
-        "allowlist_debt": "KNOWN_ARM_REACH",
-        "allowlist_reviewed": "REVIEWED_LEGITIMATE_ARM_READS",
+        "denylist": lambda: PROFESSION_CONCRETE_ARMS,
+        "allowlist_debt": lambda: KNOWN_ARM_REACH,
+        "allowlist_reviewed": lambda: REVIEWED_LEGITIMATE_ARM_READS,
     },
 }
 
@@ -590,25 +592,28 @@ def classify_reach(family: str, key: tuple) -> tuple:
 
       * ``reviewed_correct`` — human-confirmed correct read (advice = the review
         evidence, NOT a routing hint — it must not be remediated). Only families
-        with a ``allowlist_reviewed`` dict can reach this.
+        with a ``allowlist_reviewed`` thunk can reach this.
       * ``pending_debt`` — an accepted coupling in the family's ``allowlist_debt``
         (advice = the concrete's routing hint).
       * ``new_violation`` — neither; a fresh coupling that fails the checker.
 
-    The allowlists / denylist are resolved BY NAME from this module's globals at
-    call time (see the RATCHET_FAMILIES note) so monkeypatched tests are honoured.
+    The allowlists / denylist are read through the family's thunks (see the
+    RATCHET_FAMILIES note) so a monkeypatched allowlist is honoured. ``token`` is
+    always a denylist member — the scanner's key extractor only emits a token that
+    is in ``PROFESSION_CONCRETE_*`` — so the ``denylist()[token]`` advice lookup
+    cannot miss.
     """
+    if family not in RATCHET_FAMILIES:
+        raise ValueError(
+            f"unknown ratchet family {family!r}; valid: {sorted(RATCHET_FAMILIES)}")
     fam = RATCHET_FAMILIES[family]
     token = key[-1]
-    g = globals()
-    reviewed_name = fam["allowlist_reviewed"]
-    if reviewed_name is not None:
-        reviewed = g[reviewed_name]
-        if key in reviewed:
-            return "reviewed_correct", reviewed[key]
-    if key in g[fam["allowlist_debt"]]:
-        return "pending_debt", g[fam["denylist"]][token]
-    return "new_violation", g[fam["denylist"]][token]
+    reviewed = fam["allowlist_reviewed"]
+    if reviewed is not None and key in reviewed():
+        return "reviewed_correct", reviewed()[key]
+    if key in fam["allowlist_debt"]():
+        return "pending_debt", fam["denylist"]()[token]
+    return "new_violation", fam["denylist"]()[token]
 
 
 # ---------------------------------------------------------------------------

@@ -364,12 +364,17 @@ def check_coverage() -> dict:
 # The classify (reviewed→debt→new + advice) is the ledger's single ``classify_reach``.
 # A new reach family is one row HERE + one row in ``cl.RATCHET_FAMILIES`` — no new
 # per-family scan function (that 3-way duplication is what this removed).
+# ``output_key`` = the dict key the token is emitted under in the returned hits
+# (matches the family's legacy field name so consumers/tests are unchanged); it is
+# NOT the family name or an AST attribute. The family names here MUST equal
+# ``cl.RATCHET_FAMILIES``' keys — ``test_ratchet_family_tables_agree`` pins the two
+# in sync so adding one table's row without the other fails CI, not at runtime.
 _RATCHET_SCAN = {
-    "symbol": {"token_field": "symbol", "attribution": "verbs",
+    "symbol": {"output_key": "symbol", "attribution": "verbs",
                "key_extractor": _forbidden_attr, "population": _scanned_paths},
-    "collection": {"token_field": "collection", "attribution": "verbs",
+    "collection": {"output_key": "collection", "attribution": "verbs",
                    "key_extractor": _collection_key, "population": _scanned_paths},
-    "arm": {"token_field": "arm", "attribution": "site",
+    "arm": {"output_key": "arm", "attribution": "site",
             "key_extractor": _arm_key, "population": _arm_scanned_paths},
 }
 
@@ -384,7 +389,7 @@ def _find_family_reaches(family: str, path: str = "") -> list:
     carry ``{site, <token>, advice, file, lineno, status}`` — so every existing
     consumer/test is unchanged. Dedup + sort match the old functions exactly."""
     spec = _RATCHET_SCAN[family]
-    tf, extract = spec["token_field"], spec["key_extractor"]
+    ok, extract = spec["output_key"], spec["key_extractor"]
     hits = []
     if spec["attribution"] == "verbs":
         trees = _load_trees(spec["population"](path))
@@ -396,13 +401,12 @@ def _find_family_reaches(family: str, path: str = "") -> list:
                 for verb, scope, via in _governing_shared_verbs(
                         trees, funcs, node.lineno):
                     status, advice = cl.classify_reach(family, (verb, token))
-                    hits.append({"verb": verb, "scope": scope, tf: token,
+                    hits.append({"verb": verb, "scope": scope, ok: token,
                                  "advice": advice, "via": via, "file": rel,
                                  "lineno": node.lineno, "status": status})
-        dedup = lambda h: (h["verb"], h[tf], h["via"], h["file"], h["lineno"])
+        dedup = lambda h: (h["verb"], h[ok], h["via"], h["file"], h["lineno"])
         order = lambda h: (h["verb"], h["file"], h["lineno"])
     else:  # "site" attribution
-        hits_out = hits
         for p in spec["population"](path):
             tree = ast.parse(open(p, encoding="utf-8").read())
             rel = os.path.relpath(p, REPO)
@@ -412,10 +416,10 @@ def _find_family_reaches(family: str, path: str = "") -> list:
                 if not token:
                     continue
                 status, advice = cl.classify_reach(family, (site, token))
-                hits_out.append({"site": site, tf: token, "advice": advice,
-                                 "file": rel, "lineno": node.lineno,
-                                 "status": status})
-        dedup = lambda h: (h["site"], h[tf], h["file"], h["lineno"])
+                hits.append({"site": site, ok: token, "advice": advice,
+                             "file": rel, "lineno": node.lineno,
+                             "status": status})
+        dedup = lambda h: (h["site"], h[ok], h["file"], h["lineno"])
         order = lambda h: (h["site"], h["file"], h["lineno"])
     seen, unique = set(), []
     for h in hits:
