@@ -22,13 +22,7 @@ this matrix is green/na-only, the behavioural positive twin.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-LIB = Path(__file__).parent.parent / "lib"
-sys.path.insert(0, str(LIB))
-sys.path.insert(0, str(Path(__file__).parent))
-
+# sys.path (lib / tests) is centralized in tests/conftest.py (ms-142 e-5144).
 import pytest  # noqa: E402
 
 import occupation  # noqa: E402

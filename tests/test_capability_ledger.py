@@ -16,11 +16,8 @@ Load-bearing tests:
 
 import ast
 import os
-import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
-
+# sys.path (lib / scripts / tests) is centralized in tests/conftest.py (ms-142 e-5144).
 import capability_ledger as cl  # noqa: E402
 import importlib.util  # noqa: E402
 

@@ -80,12 +80,24 @@ def _synthetic_project():
     return build_synthetic_project()
 
 
-# name -> {project, target_id, work_item_id}. The synthetic profession is the one
-# that stresses the abstraction (arms named nothing like dev/sales).
+# name -> {project, target_id, work_item_id}. The third row stresses the abstraction
+# (arms named nothing like dev/sales).
+#
+# TERMINOLOGY (ms-142 e-5144): two words name the same third row on DIFFERENT axes,
+# and both are kept on purpose:
+#   * ``compliance`` — the profession VALUE (the string a project.json's ``profession``
+#     field carries; its target-class kind is ``obligation``). This is the registry KEY.
+#   * ``synthetic`` — the ROLE that profession plays HERE: a fictional profession that
+#     exists only in the test tree (``synth_profession.build_synthetic_project``) to
+#     prove "declare a manifest ⇒ every shared capability lights up" without shipping a
+#     real third occupation. It is why the factory is ``_synthetic_project``.
+# So ``compliance`` (what it is) and ``synthetic`` (why it exists in tests) are not a
+# naming drift — they label the value vs the role.
 PROFESSIONS = {
     "dev": {"project": _dev_project, "target_id": "ms-1", "work_item_id": "e-1"},
     "sales": {"project": _sales_project, "target_id": "opp-1",
               "work_item_id": "act-1"},
+    # profession VALUE (registry key); its ROLE here is the synthetic test fixture.
     "compliance": {"project": _synthetic_project, "target_id": "obl-1",
                    "work_item_id": "duty-1"},
 }
