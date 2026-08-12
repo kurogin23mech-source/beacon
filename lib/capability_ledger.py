@@ -521,6 +521,97 @@ def is_reviewed_legitimate_arm_read(site: str, arm: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# RATCHET_FAMILIES — the ONE registry that unifies the three profession-coupling
+# reach classes (ms-142 e-5143 / PR #629 独立レビュー maint finding). Before this,
+# each class (collection read / symbol call / arm-name read) carried the SAME
+# shape — a concrete denylist, a pending-debt allowlist, an optional reviewed-
+# legitimate allowlist — as three parallel dicts, and the scanner (check-capability-
+# scope.py) repeated one classify block per class. A 4th reach class was a 5-file /
+# 8-site shotgun edit. This registry names each family's pieces in one row so the
+# scanner drives them through ONE generic classify (``classify_reach``) and a new
+# family is a single row + its scanner scan-row (key_extractor / population live in
+# the scanner, which owns the AST — the conceptual 5-field row of the SPEC is split
+# across the lib/script boundary by family name, not duplicated).
+#
+# GRANULARITY (ms-142 e-5143, user 裁定 2026-08-12): the ratchet KEY stays coarse —
+# collection/symbol = (verb, token), arm = (site, token). A NEW reach added inside a
+# module/verb that ALREADY has an allowlisted row is therefore ABSORBED by that row
+# (same key) and does NOT fire as a new_violation. This receiver-blind absorption is
+# a KNOWN limitation kept deliberately (behaviour-invariant consolidation; making
+# the key receiver/line-granular was scoped out as a separate follow-up). The
+# stale-entry tests still force a row's deletion once its handler is abstracted, so
+# the allowlists cannot rot; only the "new reach hides behind an existing debt row"
+# edge is uncovered.
+#
+# Each row: ``denylist`` (concrete token → routing advice, the fix target is always
+# "consult occupation.profession_manifest instead of the concrete", see
+# ``REMEDIATION_TO_MANIFEST``); ``allowlist_debt`` (accepted-pending set, 1-way
+# ratchet); ``allowlist_reviewed`` (human-confirmed-correct dict, or ``None`` when
+# the family has no reviewed class — symbols never do, a shared verb calling a
+# profession recorder is never "exact by design").
+REMEDIATION_TO_MANIFEST = (
+    "route the enumeration/record through the occupation abstraction "
+    "(occupation.profession_manifest / find_target / record_target_entry) instead "
+    "of the profession concrete; the stale-entry test forces the allowlist row's "
+    "deletion once abstracted, so the ratchet cannot rot into a lie."
+)
+
+# The three data fields are stored as ATTRIBUTE NAMES (not the dict objects), so
+# ``classify_reach`` resolves the CURRENT module binding at call time. This keeps
+# the registry honest under monkeypatch: a test that rebinds ``cl.KNOWN_ARM_REACH``
+# (or the reviewed/denylist dicts) is seen by the classifier, rather than a stale
+# object captured at import. ``allowlist_reviewed`` is ``None`` for a family with no
+# reviewed class (symbols — see KNOWN_SYMBOL_REACH doc).
+RATCHET_FAMILIES: dict = {
+    "collection": {
+        "denylist": "PROFESSION_CONCRETE_COLLECTIONS",
+        "allowlist_debt": "KNOWN_COLLECTION_COUPLING",
+        "allowlist_reviewed": "REVIEWED_LEGITIMATE_COLLECTION_READS",
+    },
+    "symbol": {
+        "denylist": "PROFESSION_CONCRETE_SYMBOLS",
+        "allowlist_debt": "KNOWN_SYMBOL_REACH",
+        "allowlist_reviewed": None,
+    },
+    "arm": {
+        "denylist": "PROFESSION_CONCRETE_ARMS",
+        "allowlist_debt": "KNOWN_ARM_REACH",
+        "allowlist_reviewed": "REVIEWED_LEGITIMATE_ARM_READS",
+    },
+}
+
+
+def classify_reach(family: str, key: tuple) -> tuple:
+    """Classify one detected reach into ``(status, advice)`` for any ratchet family
+    (ms-142 e-5143). ``key`` is ``(verb, token)`` for collection/symbol or
+    ``(site, token)`` for arm, where ``token`` is the concrete collection / symbol /
+    arm name. This is the single generic replacement for the three identical
+    reviewed→debt→new blocks the scanner used to carry per family:
+
+      * ``reviewed_correct`` — human-confirmed correct read (advice = the review
+        evidence, NOT a routing hint — it must not be remediated). Only families
+        with a ``allowlist_reviewed`` dict can reach this.
+      * ``pending_debt`` — an accepted coupling in the family's ``allowlist_debt``
+        (advice = the concrete's routing hint).
+      * ``new_violation`` — neither; a fresh coupling that fails the checker.
+
+    The allowlists / denylist are resolved BY NAME from this module's globals at
+    call time (see the RATCHET_FAMILIES note) so monkeypatched tests are honoured.
+    """
+    fam = RATCHET_FAMILIES[family]
+    token = key[-1]
+    g = globals()
+    reviewed_name = fam["allowlist_reviewed"]
+    if reviewed_name is not None:
+        reviewed = g[reviewed_name]
+        if key in reviewed:
+            return "reviewed_correct", reviewed[key]
+    if key in g[fam["allowlist_debt"]]:
+        return "pending_debt", g[fam["denylist"]][token]
+    return "new_violation", g[fam["denylist"]][token]
+
+
+# ---------------------------------------------------------------------------
 # Classification by verb noun (the substring before the first "_"). The rule map
 # gives every current noun a scope; a per-verb OVERRIDE handles the exceptions
 # where a noun's verbs split across scopes. A noun the rules do not know resolves

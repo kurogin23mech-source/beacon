@@ -350,6 +350,82 @@ def check_coverage() -> dict:
     return cl.reconcile()
 
 
+# --- ratchet scan table (ms-142 e-5143) ------------------------------------
+# The scanner half of ``capability_ledger.RATCHET_FAMILIES``: each family binds
+# its AST ``key_extractor`` (node → concrete token, "" for a miss) and its
+# ``attribution`` (how the ratchet key's first element is derived from the call
+# site). Two attribution modes cover all three reach classes:
+#   * ``"verbs"`` — the read is attributed to the profession-SHARED cmd handler(s)
+#     governing the line (collection reads / symbol calls live on the CLI-verb
+#     surface). Key = (verb, token); the population is the commands.py family trees.
+#   * ``"site"`` — the read is attributed to the shared-frame MODULE it lives in
+#     (arm reads live in aggregator modules, not a CLI verb). Key = (site, token);
+#     the population is the ``iter_target_records``-calling lib modules.
+# The classify (reviewed→debt→new + advice) is the ledger's single ``classify_reach``.
+# A new reach family is one row HERE + one row in ``cl.RATCHET_FAMILIES`` — no new
+# per-family scan function (that 3-way duplication is what this removed).
+_RATCHET_SCAN = {
+    "symbol": {"token_field": "symbol", "attribution": "verbs",
+               "key_extractor": _forbidden_attr, "population": _scanned_paths},
+    "collection": {"token_field": "collection", "attribution": "verbs",
+                   "key_extractor": _collection_key, "population": _scanned_paths},
+    "arm": {"token_field": "arm", "attribution": "site",
+            "key_extractor": _arm_key, "population": _arm_scanned_paths},
+}
+
+
+def _find_family_reaches(family: str, path: str = "") -> list:
+    """Generic driver for every ratchet family (ms-142 e-5143): walk the family's
+    population, extract its concrete token per node, attribute it (to the governing
+    shared verbs, or to the module site), and classify via the ledger's single
+    ``classify_reach``. Returns the family's item dicts with byte-identical shape to
+    the old per-family functions — ``verbs`` families carry
+    ``{verb, scope, <token>, advice, via, file, lineno, status}``; ``site`` families
+    carry ``{site, <token>, advice, file, lineno, status}`` — so every existing
+    consumer/test is unchanged. Dedup + sort match the old functions exactly."""
+    spec = _RATCHET_SCAN[family]
+    tf, extract = spec["token_field"], spec["key_extractor"]
+    hits = []
+    if spec["attribution"] == "verbs":
+        trees = _load_trees(spec["population"](path))
+        for rel, tree, funcs in trees:
+            for node in ast.walk(tree):
+                token = extract(node)
+                if not token:
+                    continue
+                for verb, scope, via in _governing_shared_verbs(
+                        trees, funcs, node.lineno):
+                    status, advice = cl.classify_reach(family, (verb, token))
+                    hits.append({"verb": verb, "scope": scope, tf: token,
+                                 "advice": advice, "via": via, "file": rel,
+                                 "lineno": node.lineno, "status": status})
+        dedup = lambda h: (h["verb"], h[tf], h["via"], h["file"], h["lineno"])
+        order = lambda h: (h["verb"], h["file"], h["lineno"])
+    else:  # "site" attribution
+        hits_out = hits
+        for p in spec["population"](path):
+            tree = ast.parse(open(p, encoding="utf-8").read())
+            rel = os.path.relpath(p, REPO)
+            site = os.path.splitext(os.path.basename(p))[0]
+            for node in ast.walk(tree):
+                token = extract(node)
+                if not token:
+                    continue
+                status, advice = cl.classify_reach(family, (site, token))
+                hits_out.append({"site": site, tf: token, "advice": advice,
+                                 "file": rel, "lineno": node.lineno,
+                                 "status": status})
+        dedup = lambda h: (h["site"], h[tf], h["file"], h["lineno"])
+        order = lambda h: (h["site"], h["file"], h["lineno"])
+    seen, unique = set(), []
+    for h in hits:
+        k = dedup(h)
+        if k not in seen:
+            seen.add(k)
+            unique.append(h)
+    return sorted(unique, key=order)
+
+
 def find_invariant_violations(commands_path: str = "") -> list:
     """Return the list of invariant violations: profession-shared (L1/L2)
     capabilities that call a profession-specific concrete symbol.
@@ -357,44 +433,10 @@ def find_invariant_violations(commands_path: str = "") -> list:
     Each violation is a dict: ``{verb, scope, symbol, advice, via, file,
     lineno}``. ``via`` names the helper when the call is transitive (else "");
     ``file`` is the module the call lives in (repo-relative) since the scan now
-    spans commands.py + commands_shared.py + the family modules."""
-    trees = _load_trees(_scanned_paths(commands_path))
-
-    violations = []
-    for rel, tree, funcs in trees:
-        for node in ast.walk(tree):
-            dotted = _forbidden_attr(node)
-            if not dotted:
-                continue
-            # Attribute the call to the profession-shared handler(s) governing it
-            # (searched across all trees so a cross-module handler is not missed).
-            for verb, scope, via in _governing_shared_verbs(trees, funcs, node.lineno):
-                # status mirrors find_collection_coupling: an accepted-pending
-                # symbol reach (ms-143-owned class-derived recorder not yet routed
-                # through the abstraction) is "pending_debt" (allowlisted ratchet),
-                # anything else is a fresh "new_violation" that fails CI. There is
-                # no reviewed_correct for symbols (see KNOWN_SYMBOL_REACH docstring).
-                status = ("pending_debt"
-                          if cl.is_known_symbol_reach(verb, dotted)
-                          else "new_violation")
-                violations.append({
-                    "verb": verb,
-                    "scope": scope,
-                    "symbol": dotted,
-                    "advice": cl.PROFESSION_CONCRETE_SYMBOLS[dotted],
-                    "via": via,
-                    "file": rel,
-                    "lineno": node.lineno,
-                    "status": status,
-                })
-    # de-duplicate (a helper called by several shared handlers can repeat).
-    seen, unique = set(), []
-    for v in violations:
-        key = (v["verb"], v["symbol"], v["via"], v["file"], v["lineno"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(v)
-    return sorted(unique, key=lambda v: (v["verb"], v["file"], v["lineno"]))
+    spans commands.py + commands_shared.py + the family modules. ms-142 e-5143: this
+    is the ``symbol`` row of the generic ratchet driver (there is no reviewed class
+    for symbols — a shared verb calling a profession recorder is never exact)."""
+    return _find_family_reaches("symbol", commands_path)
 
 
 def find_collection_coupling(commands_path: str = "") -> list:
@@ -414,46 +456,9 @@ def find_collection_coupling(commands_path: str = "") -> list:
         the checker.
 
     ``file`` (repo-relative) names the module the read lives in — the scan spans
-    commands.py + commands_shared.py + the family modules (ms-127)."""
-    trees = _load_trees(_scanned_paths(commands_path))
-
-    hits = []
-    for rel, tree, funcs in trees:
-        for node in ast.walk(tree):
-            collection = _collection_key(node)
-            if not collection:
-                continue
-            for verb, scope, via in _governing_shared_verbs(trees, funcs, node.lineno):
-                if cl.is_reviewed_legitimate_read(verb, collection):
-                    status = "reviewed_correct"
-                    # A reviewed-correct read must NOT be remediated, so its advice
-                    # is the review EVIDENCE (why the read is exact), not the routing
-                    # hint — which would be wrong here (maintainability review
-                    # 2026-08-03).
-                    advice = cl.REVIEWED_LEGITIMATE_COLLECTION_READS[(verb, collection)]
-                elif cl.is_known_collection_coupling(verb, collection):
-                    status = "pending_debt"
-                    advice = cl.PROFESSION_CONCRETE_COLLECTIONS[collection]
-                else:
-                    status = "new_violation"
-                    advice = cl.PROFESSION_CONCRETE_COLLECTIONS[collection]
-                hits.append({
-                    "verb": verb,
-                    "scope": scope,
-                    "collection": collection,
-                    "advice": advice,
-                    "via": via,
-                    "file": rel,
-                    "lineno": node.lineno,
-                    "status": status,
-                })
-    seen, unique = set(), []
-    for h in hits:
-        key = (h["verb"], h["collection"], h["via"], h["file"], h["lineno"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(h)
-    return sorted(unique, key=lambda h: (h["verb"], h["file"], h["lineno"]))
+    commands.py + commands_shared.py + the family modules (ms-127). ms-142 e-5143:
+    this is the ``collection`` row of the generic ratchet driver."""
+    return _find_family_reaches("collection", commands_path)
 
 
 def find_arm_coupling(arm_path: str = "") -> list:
@@ -475,41 +480,12 @@ def find_arm_coupling(arm_path: str = "") -> list:
         collection ratchet's ``reviewed_correct``.
       - ``"pending_debt"`` — an accepted coupling in ``KNOWN_ARM_REACH`` (owning MS
         named inline);
-      - ``"new_violation"`` — a fresh arm read that fails the checker."""
-    hits = []
-    for p in _arm_scanned_paths(arm_path):
-        src = open(p, encoding="utf-8").read()
-        tree = ast.parse(src)
-        rel = os.path.relpath(p, REPO)
-        site = os.path.splitext(os.path.basename(p))[0]
-        for node in ast.walk(tree):
-            arm = _arm_key(node)
-            if not arm:
-                continue
-            if cl.is_reviewed_legitimate_arm_read(site, arm):
-                status = "reviewed_correct"
-                advice = cl.REVIEWED_LEGITIMATE_ARM_READS[(site, arm)]
-            elif cl.is_known_arm_reach(site, arm):
-                status = "pending_debt"
-                advice = cl.PROFESSION_CONCRETE_ARMS[arm]
-            else:
-                status = "new_violation"
-                advice = cl.PROFESSION_CONCRETE_ARMS[arm]
-            hits.append({
-                "site": site,
-                "arm": arm,
-                "advice": advice,
-                "file": rel,
-                "lineno": node.lineno,
-                "status": status,
-            })
-    seen, unique = set(), []
-    for h in hits:
-        key = (h["site"], h["arm"], h["file"], h["lineno"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(h)
-    return sorted(unique, key=lambda h: (h["site"], h["file"], h["lineno"]))
+      - ``"new_violation"`` — a fresh arm read that fails the checker.
+
+    ms-142 e-5143: this is the ``arm`` row of the generic ratchet driver — the only
+    ``site``-attributed family (arm reads are attributed to their module, not a CLI
+    verb)."""
+    return _find_family_reaches("arm", arm_path)
 
 
 def run(commands_path: str = "", arm_path: str = "") -> dict:
