@@ -37,16 +37,17 @@ advance verb through ``set_target_state``.
 SCOPE of T2 (leader Q2 段階化)
 -----------------------------
 This module DECLARES all four built-in state models + derives descriptor ones,
-and ``set_target_state`` is the new single non-terminal advance path for the
-three status/table classes (milestone / operation / acquisition) and for
-descriptor phases (delegated to the proven ``target_engine``). It deliberately
-does NOT yet rewire the HOT-PATH verbs (``sales_entities.phase_set`` funnel
-status-mirroring; the milestone review-gate verbs) — that broad rewiring is the
-named follow-up. So the opportunity FUNNEL transition raises a "not yet routed"
-error here rather than writing a phase that would desync the mirrored status.
-This is honest partial coverage (task-done-judgment-principle 原則6): the
-primitive + declarations + the structural completion-gate guard land now; wiring
-the existing verbs onto them is next.
+and ``set_target_state`` is the single non-terminal advance path for all classes:
+the three status/table classes (milestone / operation / acquisition), descriptor
+phases (delegated to the proven ``target_engine``), and — since ms-142 e-5169 —
+the opportunity FUNNEL (delegated to the sales seam ``sales_entities.
+advance_funnel_phase``, which owns the phase↔status mirror). The former HOT-PATH
+verbs now ride this one path: ``sales_entities.phase_set`` routes a non-terminal
+opportunity phase through ``set_target_state`` (the status mirror is invariant),
+and the milestone advance verbs ``core.milestone_start`` / ``milestone_wait``
+write ``in_progress`` / ``waiting`` through it. The terminal/gated writes stay on
+their class verbs (the review gate for a milestone, the sales judge gate for an
+opportunity settlement) — set_target_state refuses those by contract.
 
 COMPLETION-GATE NON-BYPASS (leader caution 1, the most important invariant)
 --------------------------------------------------------------------------
@@ -223,10 +224,10 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         "shape": SHAPE_FUNNEL,
         "state_field": "phase",
         # Funnel phases are CONFIG-derived (per project), so the advanceable set
-        # is resolved at runtime, not declared here. set_target_state does NOT
-        # yet route the funnel transition (leader Q2: hot-path funnel rewiring is
-        # follow-up) because writing ``phase`` without phase_set's status-mirror
-        # would desync the derived status.
+        # is resolved at runtime (in the sales seam), not declared here. ms-142
+        # e-5169: set_target_state now routes a NON-terminal funnel transition by
+        # delegating to sales_entities.advance_funnel_phase (which owns the
+        # phase↔status mirror); a terminal phase is refused (sales judge gate).
         "advanceable_states": None,
         "routed_states": {},
         "ball_field": "who_has_the_ball",
@@ -414,9 +415,10 @@ def set_target_state(data: dict, target_id: str, to_state: str, *,
       * A permissive class (milestone status enum) writes any advanceable state.
       * A descriptor class delegates to the proven ``target_engine.advance_target``
         (its phases, required-field checks, and phase_history are reused).
-      * The opportunity FUNNEL transition is not yet routed here (leader Q2: the
-        funnel status-mirror rewiring is the named follow-up) and raises with
-        that pointer, rather than writing a ``phase`` that would desync status.
+      * The opportunity FUNNEL delegates the non-terminal write to the sales seam
+        ``sales_entities.advance_funnel_phase`` (phase + mirrored status, ms-142
+        e-5169); a terminal (決着) phase is refused as the sales judge gate's
+        completion claim.
 
     The write is generic (the state field + a ``meta['{state}_at/by/reason']``
     stamp matching each status class's own audit convention); it is additive —
@@ -441,13 +443,25 @@ def set_target_state(data: dict, target_id: str, to_state: str, *,
         return _advance_descriptor(data, kind, target_id, want,
                                    actor=actor, reason=reason)
 
-    # Opportunity funnel: declared for phase_ball derivation, transition deferred.
+    # Opportunity funnel: delegate the non-terminal write to the sales seam
+    # (ms-142 e-5169; the twin of the SHAPE_PHASES → target_engine delegation).
+    # A terminal (決着) phase is a completion claim guarded by the sales judge
+    # gate (GATE_SALES_JUDGE) — refused here so set_target_state stays
+    # non-terminal-only for the funnel too (the completion-gate non-bypass). Which
+    # phases are terminal is CONFIG-derived, so the check lives in the sales
+    # adapter. The seam writes phase + mirrored status; the account rollup + ``at``
+    # stay with the caller (phase_set), so status 同期 is invariant.
     if shape == SHAPE_FUNNEL:
-        raise TargetStateError(
-            f"opportunity funnel advancement is not yet routed through "
-            f"set_target_state (ms-142 follow-up; the funnel's status-mirror "
-            f"rewiring is deferred). Use `beacon opportunity phase {target_id} "
-            f"{want}` for now.")
+        import sales_entities as _se
+        old = rec.get(model["state_field"], "")
+        if _se.opportunity_phase_is_terminal(data, want):
+            raise TargetStateError(
+                f"{target_id}: {want!r} is a terminal (決着) phase — "
+                f"set_target_state writes only non-terminal transitions. Route the "
+                f"settlement through the sales judge gate (`beacon opportunity judge` "
+                f"/ terminal declaration), which is the funnel's completion gate.")
+        _se.advance_funnel_phase(data, rec, want)
+        return rec, old, want
 
     state_field = model["state_field"]
     old = rec.get(state_field, "")

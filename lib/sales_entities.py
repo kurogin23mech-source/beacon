@@ -475,6 +475,25 @@ def _opportunity_status_for_phase(data: dict, phase: str) -> str:
     return "open"
 
 
+def advance_funnel_phase(data: dict, opp: dict, new_phase: str) -> str:
+    """The opportunity funnel's SINGLE low-level phase writer (ms-142 e-5169):
+    set the exclusive ``phase`` and its mirrored ``status`` on ``opp``. Returns
+    the phase left behind.
+
+    This is the sales L3 seam ``target_state.set_target_state`` delegates to for a
+    SHAPE_FUNNEL class (the twin of ``target_engine.advance_target`` for descriptor
+    phases). It owns ONLY the phase↔status mirror — NOT the account rollup or the
+    ``at`` audit stamp, which the caller (``phase_set``) threads with its own ``at``
+    so routing a transition through ``set_target_state`` cannot shift the rollup's
+    timestamp. The mirror uses the same ``_opportunity_status_for_phase`` the raw
+    write always did, so the status projection is byte-identical (status 同期不変;
+    pinned by test_sales_entities + test_target_state)."""
+    old = opp.get("phase", "")
+    opp["phase"] = new_phase
+    opp["status"] = _opportunity_status_for_phase(data, new_phase)
+    return old
+
+
 def opportunity_phase_warnings(data: dict, current_phase: str, new_phase: str,
                                *, goal_amount=None, amount=None) -> list:
     """Non-blocking checks for an opportunity phase transition (SPEC §5:
@@ -1100,11 +1119,22 @@ def phase_set(data: dict, target_id: str, new_phase: str, *,
         if opp is None:
             raise ValueError(f"Opportunity not found: {target_id}")
         record = {"phase": new_phase, "at": at, "note": note}
-        opp["phase"] = new_phase
-        opp["status"] = _opportunity_status_for_phase(data, new_phase)
+        # ms-142 e-5169 — the funnel's non-terminal advance now rides the ONE
+        # generic path (``target_state.set_target_state``), so an opportunity moves
+        # its phase through the same primitive every other target-class does. A
+        # terminal (決着) phase is the sales judge gate's completion claim, which
+        # set_target_state refuses by contract, so it stays on the direct writer
+        # here (permissive: master=人間, SPEC §5/§6). Both routes land on the same
+        # ``advance_funnel_phase`` mirror, so the status projection is invariant.
+        if opportunity_phase_is_terminal(data, new_phase):
+            advance_funnel_phase(data, opp, new_phase)
+        else:
+            import target_state
+            target_state.set_target_state(data, target_id, new_phase, reason=note)
         # ms-106 fb3 / e-3350 — project the linked Account's lifecycle phase from
         # its opportunities' furthest progress. Advance UP only (a customer who
         # once closed stays 成約顧客); humans can still override via acc- phase_set.
+        # Kept HERE (not in the seam) so the rollup keeps this caller's ``at``.
         if opp.get("account_id"):
             _auto_advance_account_phase(data, opp["account_id"], at=at)
         return record

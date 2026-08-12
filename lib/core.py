@@ -670,15 +670,22 @@ def milestone_add(data: dict, title: str, target_date: str = "",
 
 
 def milestone_start(data: dict, ms_id: str) -> dict:
-    """Activate a milestone (multiple can be active simultaneously). Returns the activated ms."""
-    found = None
-    for ms in data["milestones"]:
-        if ms["id"] == ms_id:
-            ms["status"] = "in_progress"
-            found = ms
-    if not found:
-        raise ValueError(f"Milestone not found: {ms_id}")
-    return found
+    """Activate a milestone (multiple can be active simultaneously). Returns the activated ms.
+
+    ms-142 e-5169: the ``in_progress`` advance now rides the ONE generic path
+    (``target_state.set_target_state``) so a milestone moves its state through the
+    same primitive every target-class does. ``in_progress`` is a non-terminal
+    advanceable state, so the completion gate is untouched (done/observing still
+    route through the ms-119 review verbs, which set_target_state refuses). The
+    primitive also stamps ``meta['in_progress_at/by']`` — an audit stamp start did
+    not previously leave, additive. Lazy import avoids the core↔target_state cycle
+    (target_state lazily imports core for the monotonic guard)."""
+    import target_state
+    try:
+        rec, _old, _new = target_state.set_target_state(data, ms_id, "in_progress")
+    except target_state.TargetStateError as exc:
+        raise ValueError(str(exc)) from exc
+    return rec
 
 
 # ms-81 e-1918: session occupation model. Active MS may also be "occupied"
@@ -895,24 +902,32 @@ def milestone_wait(data: dict, ms_id: str, *, reason: str = "") -> dict:
     history to preserve), done means "completed" (re-open via observe or
     active), cancelled is terminal.
     """
-    for ms in data["milestones"]:
-        if ms["id"] == ms_id:
-            current = ms.get("status", "todo")
-            if current not in _WAITING_SOURCES:
-                raise ValueError(
-                    f"Cannot wait milestone in status '{current}'. "
-                    f"Only active (in_progress) or observing milestones can "
-                    f"transition to waiting. "
-                    f"(todo → use start; done → use start to re-open)"
-                )
-            ms["status"] = "waiting"
-            meta = ms.setdefault("meta", {})
-            meta["waiting_at"] = _now_iso()
-            meta["waiting_by"] = _get_actor()
-            if reason:
-                meta["waiting_reason"] = reason
-            return ms
-    raise ValueError(f"Milestone not found: {ms_id}")
+    # ms-142 e-5169: the SOURCE guard (only active/observing may wait) is the
+    # milestone's own state-machine rule and stays HERE; only the WRITE is routed
+    # through the generic primitive so ``waiting`` is stamped on the one path
+    # (identical meta[waiting_at/by/reason] convention). ``waiting`` is a
+    # non-terminal advanceable state, so the completion gate is untouched.
+    import target_state
+    ms = None
+    for m in data["milestones"]:
+        if m["id"] == ms_id:
+            ms = m
+            break
+    if ms is None:
+        raise ValueError(f"Milestone not found: {ms_id}")
+    current = ms.get("status", "todo")
+    if current not in _WAITING_SOURCES:
+        raise ValueError(
+            f"Cannot wait milestone in status '{current}'. "
+            f"Only active (in_progress) or observing milestones can "
+            f"transition to waiting. "
+            f"(todo → use start; done → use start to re-open)"
+        )
+    try:
+        target_state.set_target_state(data, ms_id, "waiting", reason=reason)
+    except target_state.TargetStateError as exc:
+        raise ValueError(str(exc)) from exc
+    return ms
 
 
 def milestone_update(data: dict, ms_id: str, *,

@@ -196,7 +196,10 @@ PROFESSION_CONCRETE_SYMBOLS = {
 # find_opportunity but is NOT flagged (the checker only governs L1/L2 shared verbs).
 KNOWN_SYMBOL_REACH: set = {
     ("opportunity_add", "sales_entities.find_opportunity"),
-    ("opportunity_phase", "sales_entities.find_opportunity"),
+    # ms-142 e-5169 GREENED opportunity_phase: cmd_opportunity_phase now resolves
+    # the deal via occupation.find_target and its transition rides set_target_state,
+    # so it no longer reaches the sales concrete. Row deleted (stale-entry test
+    # forces the deletion once the handler is abstracted).
     ("opportunity_judge", "sales_entities.find_opportunity"),
 }
 
