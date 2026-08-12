@@ -18,15 +18,19 @@ import sys
 import pytest
 
 # ms-142 e-5144: centralize the ``sys.path`` boilerplate every test module used to
-# repeat (``sys.path.insert(0, .../lib)`` + scripts/ + tests/). conftest.py is
-# imported by pytest before any test module in this tree, so putting the project's
-# own source roots on the path here lets a test do ``import capability_ledger`` (lib),
+# repeat (``sys.path.insert(0, .../lib)`` + scripts/ + tests/). pytest AUTO-IMPORTS
+# this conftest before any test module under tests/, so putting the project's own
+# source roots on the path here lets a test do ``import capability_ledger`` (lib),
 # import a hyphen-free scripts module, or import a sibling test helper
-# (``capability_profession_matrix``) without its own insert. Additive and idempotent
-# — modules that still carry their own insert are unaffected; new tests need none.
-_TESTS_DIR = os.path.dirname(__file__)
+# (``capability_profession_matrix``) without its own insert. THIS is the one place
+# test sys.path setup lives — a test file under tests/ must NOT add its own insert
+# (a file under a future sub-package outside this conftest's scope would need its own).
+# Paths are absolutized so the ``not in sys.path`` guard is truly idempotent even
+# against an absolute-path entry a not-yet-migrated module inserted (additive; a
+# module that still carries its own insert is unaffected).
+_TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 for _sub in ("lib", "scripts"):
-    _p = os.path.join(_TESTS_DIR, "..", _sub)
+    _p = os.path.abspath(os.path.join(_TESTS_DIR, "..", _sub))
     if _p not in sys.path:
         sys.path.insert(0, _p)
 if _TESTS_DIR not in sys.path:

@@ -97,6 +97,7 @@ PROFESSIONS = {
     "dev": {"project": _dev_project, "target_id": "ms-1", "work_item_id": "e-1"},
     "sales": {"project": _sales_project, "target_id": "opp-1",
               "work_item_id": "act-1"},
+    # profession VALUE (registry key); its ROLE here is the synthetic test fixture.
     "compliance": {"project": _synthetic_project, "target_id": "obl-1",
                    "work_item_id": "duty-1"},
 }

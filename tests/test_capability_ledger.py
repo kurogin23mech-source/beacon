@@ -16,7 +16,6 @@ Load-bearing tests:
 
 import ast
 import os
-import sys  # noqa: F401  (used by test bodies below; path setup is in conftest.py)
 
 # sys.path (lib / scripts / tests) is centralized in tests/conftest.py (ms-142 e-5144).
 import capability_ledger as cl  # noqa: E402
