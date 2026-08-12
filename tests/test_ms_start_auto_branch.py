@@ -244,8 +244,16 @@ def test_start_no_branch_flag_skips_git(project, monkeypatch, capsys):
 
     commands.cmd_milestone_start()
 
-    # No git call should have fired at all.
-    assert not calls
+    # --no-branch skips the branch automation entirely, so NO branch/checkout git
+    # call should fire. ms-142 e-5169: milestone_start now records an audit stamp
+    # via set_target_state like every other state transition, and resolving the
+    # operator identity for that stamp may probe `git config user.email`
+    # (work_base.current_actor, when not inside Claude Code). That identity probe
+    # is not a branch side effect, so the only git call permitted here is exactly
+    # that read — anything else (checkout / switch / branch) means the branch
+    # automation leaked past the flag.
+    non_identity = [c for c in calls if c[:3] != ["git", "config", "user.email"]]
+    assert not non_identity, non_identity
 
 
 def test_start_no_assignee_flag_skips_assignee(project, monkeypatch, capsys):
