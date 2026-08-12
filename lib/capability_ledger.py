@@ -349,13 +349,10 @@ REVIEWED_LEGITIMATE_COLLECTION_READS = {
         "milestones+operations read stays exact — NOT profession coupling. "
         "Remediating it to the abstraction is possible now but out of the T1 "
         "scope (which did not fold operation into the shared work-item CRUD).",
-    # ms-142 T7 (e-5162): the (session_end, milestones) entry was REMOVED here.
-    # session_end's occupation release is now target-class-generic — it walks
-    # occupation.claim_target_collections and releases via core.release_occupation
-    # (find_target over every collection), so it no longer reads data['milestones']
-    # literally. The live-claim layer is no longer milestone-only, so this is no
-    # longer a milestone-scoped read to allowlist (the stale-entry test enforces
-    # the deletion now that the literal is gone).
+    # ms-142 T7 (e-5162): the (session_end, milestones) entry was REMOVED — session_end
+    # now releases occupation through the target-class abstraction (no literal
+    # data['milestones'] read). Pinned by test_capability_ledger's
+    # `("session_end","milestones") not in by_key` assertion (single authoritative check).
     ("session_fork", "milestones"):
         "fork is a git-worktree operation (creates .worktrees/<ms-id>-fork-…, a "
         "branch, fork.json target_ms_id) — only a dev milestone is forkable; a "

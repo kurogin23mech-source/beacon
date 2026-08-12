@@ -32,6 +32,7 @@ from commands_shared import (
     _get_notes_path,
     _refuse_if_bus_origin,
     _resolve_bus_project_id,
+    _maybe_record_milestone_occupation_event,
 )
 
 
@@ -753,25 +754,21 @@ def cmd_session_fork_list():
 # --- occupation release on session end (ms-81 e-1918) ---
 
 def _release_all_occupations_for_session(session_id: str) -> int:
-    """ms-81 e-1918 (SPEC AC #15): release every TARGET this session is occupying.
+    """ms-81 e-1918 (SPEC AC #15): release every TARGET this session is occupying,
+    across ALL target-classes (ms-142 T7 e-5162). Called from session-end so a clean
+    exit leaves the next session free to claim. Returns the number of releases (0 if
+    the session held nothing).
 
-    Called from session-end so a clean exit leaves the next session free to claim.
-    Returns the number of releases performed (0 for sessions that weren't holding
-    anything).
-
-    ms-142 T7 (e-5162): walks EVERY claimable target collection via the occupation
-    abstraction (``claim_target_collections``), not just ``data["milestones"]`` — so
-    a session that occupied an operation / opportunity / release target releases it
-    too. This de-couples session_end from the milestones concrete (the old ms-127
-    ``session_end→milestones`` ledger coupling is retired: the read now goes through
-    the abstraction, not a literal ``data['milestones']``). The append-only audit
-    event log (``worktree_sessions``, keyed by ms_id) stays milestone-scoped — it is
-    a milestone-specific history, not the live-claim layer the warning reads.
-    """
+    Walks every claimable collection via the occupation abstraction
+    (``claim_target_collections``), so a session that occupied an operation / release
+    target releases it too — not just milestones. The milestone-only audit event
+    (``worktree_sessions``) is delegated to the shared
+    ``_maybe_record_milestone_occupation_event`` gate. (Historical note: this retired
+    the ms-127 ``session_end→milestones`` ledger coupling — see the capability_ledger
+    comment that removed it.)"""
     if not session_id:
         return 0
     import occupation as _occ
-    import work_model as _wm
     data = load_project()
     try:
         import agent as _agent_for_se
@@ -786,16 +783,10 @@ def _release_all_occupations_for_session(session_id: str) -> int:
                 continue
             tid = rec.get("id", "")
             core.release_occupation(data, tid, reason="session-end")
-            # Milestone-only audit history (worktree_sessions); non-milestone
-            # targets carry the live-claim stamp but not this milestone event log.
-            if _wm.target_kind(tid) == "milestone":
-                core.milestone_record_occupation_event(
-                    data, ms_id=tid, event_type="release",
-                    session_id=session_id,
-                    machine=actor.get("machine", ""),
-                    agent=actor.get("agent", ""),
-                    reason="session-end",
-                )
+            _maybe_record_milestone_occupation_event(
+                data, tid, event_type="release", session_id=session_id,
+                machine=actor.get("machine", ""), agent=actor.get("agent", ""),
+                reason="session-end")
             released += 1
     if released:
         save_project(data, op={"op": "session_end_release", "count": released})

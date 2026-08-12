@@ -88,3 +88,42 @@ def test_milestone_wrappers_delegate_to_generic():
     assert data["milestones"][0]["occupation"]["session_id"] == "sv-A"
     _ms2, released = core.milestone_release_occupation(data, "ms-1")
     assert released["session_id"] == "sv-A"
+
+
+# --- the shared _claim_occupation_for_work helper (maint review e-5225) ---------
+
+def test_claim_for_work_is_noop_without_a_session(monkeypatch):
+    # The conditional contract: no live session id → no stamp, returns False, and
+    # the record shape is untouched (why the wired verbs are safe in test sandboxes).
+    import commands_shared as cs
+    monkeypatch.setattr(cs, "_resolve_session_id", lambda: "")
+    data = _project()
+    stamped = cs._claim_occupation_for_work(data, "op-1")
+    assert stamped is False
+    assert "occupation" not in data["operations"][0]
+
+
+def test_claim_for_work_stamps_when_session_resolves(monkeypatch):
+    import commands_shared as cs
+    import agent
+    monkeypatch.setattr(cs, "_resolve_session_id", lambda: "sv-me")
+    monkeypatch.setattr(agent, "get_actor", lambda: {"machine": "m", "agent": "a"})
+    data = _project()
+    stamped = cs._claim_occupation_for_work(data, "rel-1")
+    assert stamped is True
+    assert data["release_targets"][0]["occupation"]["session_id"] == "sv-me"
+
+
+def test_claim_for_work_warns_on_cross_session_collision(monkeypatch, capsys):
+    import commands_shared as cs
+    import agent
+    monkeypatch.setattr(cs, "_resolve_session_id", lambda: "sv-me")
+    monkeypatch.setattr(agent, "get_actor", lambda: {})
+    data = _project()
+    # Another session already sits at op-1.
+    core.claim_occupation(data, "op-1", session_id="sv-other", machine="box")
+    stamped = cs._claim_occupation_for_work(data, "op-1")
+    assert stamped is True  # soft claim: overwrites (last-writer-wins), never blocks
+    assert data["operations"][0]["occupation"]["session_id"] == "sv-me"
+    err = capsys.readouterr().err
+    assert "occupation" in err and "sv-other"[:8] in err  # collision warned to stderr
