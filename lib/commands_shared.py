@@ -2330,27 +2330,95 @@ def _parse_number(raw: str, flag: str):
 # transition / backlog handlers still in commands.py; lives here so both
 # import it by bare name without a cmd_milestone<->commands cycle.
 # ---------------------------------------------------------------------------
-def _release_occupation_for_transition(data, ms_id, *, reason):
-    """ms-81 e-1918: phase transitions auto-release any active occupation
-    on the target MS. Per the SPEC the release happens whether or not the
-    session that claimed it is the same one calling the transition (= a
-    done verb on someone else's claim is implicitly a takeover).
-    """
+def _maybe_record_milestone_occupation_event(
+        data, target_id, *, event_type, session_id, machine, agent, reason=""):
+    """Append a milestone occupation audit event IFF ``target_id`` is a milestone
+    (ms-142 T7 e-5162 — maint review e-5225). The ``worktree_sessions`` audit log is
+    milestone-specific history (not the live-claim layer); this ONE guard-and-call
+    is shared by the two release paths (``_release_occupation_for_transition`` and
+    session-end's ``_release_all_occupations_for_session``) so the milestone-only
+    gate lives in a single place — a future change to the event shape touches here,
+    not two inline copies."""
+    if work_model.target_kind(target_id) != "milestone":
+        return
+    core.milestone_record_occupation_event(
+        data, ms_id=target_id, event_type=event_type, session_id=session_id,
+        machine=machine, agent=agent, reason=reason)
+
+
+def _release_occupation_for_transition(data, target_id, *, reason):
+    """ms-81 e-1918: phase transitions auto-release any active occupation on the
+    target. Per the SPEC the release happens whether or not the session that claimed
+    it is the same one calling the transition (= a done verb on someone else's claim
+    is implicitly a takeover).
+
+    ms-142 T7 (e-5162): generic over target-class — releases the live claim on ANY
+    target (milestone / operation / release / descriptor) via ``core.release_occupation``.
+    Best-effort: a not-found target is a silent no-op (a transition on an already-gone
+    target should not fail on claim cleanup). The claim COUNTERPART is
+    ``_claim_occupation_for_work`` (stamp on work-start); this is the release-on-exit
+    half of the pair."""
     sid = _resolve_session_id() or ""
     try:
         import agent as _agent_for_release
         actor = _agent_for_release.get_actor()
     except Exception:
         actor = {}
-    _ms, released = core.milestone_release_occupation(data, ms_id, reason=reason)
+    try:
+        _rec, released = core.release_occupation(data, target_id, reason=reason)
+    except ValueError:
+        return  # target not found (already gone) — release is best-effort
     if released:
-        core.milestone_record_occupation_event(
-            data, ms_id=ms_id, event_type="release",
-            session_id=sid,
-            machine=actor.get("machine", ""),
-            agent=actor.get("agent", ""),
-            reason=reason,
+        _maybe_record_milestone_occupation_event(
+            data, target_id, event_type="release", session_id=sid,
+            machine=actor.get("machine", ""), agent=actor.get("agent", ""),
+            reason=reason)
+
+
+def _claim_occupation_for_work(data, target_id) -> bool:
+    """Stamp a live occupation claim on ANY target when a session starts working it
+    (ms-142 T7 e-5162) — the generic sibling of ``milestone start``'s claim, so the
+    "someone is sitting here now" layer covers operation / release / descriptor
+    targets, not just milestones (closing the silent double-work hole, 理想像 §5).
+    The release COUNTERPART is ``_release_occupation_for_transition``.
+
+    Returns ``True`` iff a claim was actually stamped (maint review e-5225: the
+    return makes the CONDITIONAL nature visible at the call site and testable). Only
+    stamps when a real session id resolves — a session-less context (test sandbox /
+    scripted scaffold) returns ``False`` without touching the record, so it never
+    perturbs a record's shape where there is no live session to claim on its behalf.
+    A not-found target also returns ``False`` (best-effort). Warns (never blocks —
+    soft claim, SPEC §3-3) on a collision with ANOTHER session's existing claim."""
+    sid = _resolve_session_id() or ""
+    if not sid:
+        return False
+    try:
+        import agent as _agent_for_claim
+        actor = _agent_for_claim.get_actor()
+    except Exception:
+        actor = {}
+    try:
+        _rec, previous = core.claim_occupation(
+            data, target_id, session_id=sid,
+            machine=actor.get("machine", ""), agent=actor.get("agent", ""))
+    except ValueError:
+        return False  # target not found — best-effort
+    if previous and previous.get("session_id") and \
+            previous.get("session_id") != sid:
+        prev_sid = previous.get("session_id", "?")
+        prev_machine = previous.get("machine", "?")
+        # AX review e-5225: name the takeover semantics directionally — this session
+        # OVERWROTE the prior claim (soft claim = last-writer-wins, not a lock), and
+        # the displaced session still believes its claim is live (it is not notified).
+        print(
+            f"  [occupation] {target_id} は別セッション {prev_sid[:12]}... "
+            f"({prev_machine}, claimed_at: {previous.get('claimed_at', '?')}) が "
+            f"作業中でした。この claim を上書きしました (soft claim = last-writer-wins)。"
+            f"旧セッションは自分の claim が有効と思っている可能性があります — "
+            f"まだ動いているなら beacon dm で調整してください (二重作業防止)。",
+            file=sys.stderr,
         )
+    return True
 
 def _print_evidence_guidance(eid: str, target_id: str) -> None:
     """Print the 'attach independent review evidence' guidance for a pending approval

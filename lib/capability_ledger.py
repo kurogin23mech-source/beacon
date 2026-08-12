@@ -349,10 +349,10 @@ REVIEWED_LEGITIMATE_COLLECTION_READS = {
         "milestones+operations read stays exact — NOT profession coupling. "
         "Remediating it to the abstraction is possible now but out of the T1 "
         "scope (which did not fold operation into the shared work-item CRUD).",
-    ("session_end", "milestones"):
-        "occupation (claim) is stored only on ms['occupation']; "
-        "milestone_release_occupation is milestone-specific and sales entities "
-        "carry no occupation field. Reading milestones is exact, not coupling.",
+    # ms-142 T7 (e-5162): the (session_end, milestones) entry was REMOVED — session_end
+    # now releases occupation through the target-class abstraction (no literal
+    # data['milestones'] read). Pinned by test_capability_ledger's
+    # `("session_end","milestones") not in by_key` assertion (single authoritative check).
     ("session_fork", "milestones"):
         "fork is a git-worktree operation (creates .worktrees/<ms-id>-fork-…, a "
         "branch, fork.json target_ms_id) — only a dev milestone is forkable; a "

@@ -691,6 +691,60 @@ def milestone_start(data: dict, ms_id: str) -> dict:
 # and decide rather than ever rejecting.
 
 
+def claim_occupation(
+    data: dict,
+    target_id: str,
+    *,
+    session_id: str,
+    machine: str = "",
+    agent: str = "",
+) -> tuple[dict, dict | None]:
+    """Record an occupation (soft LIVE claim) on ANY target-class record — the
+    generic "someone is sitting at this target right now" stamp (ms-142 T7 e-5162).
+
+    Locates the target across EVERY collection via ``occupation.find_target`` (a
+    milestone, an operation, a sales opportunity, a release / descriptor target),
+    so the live-claim layer is no longer milestone-only — the exact hole T7 closes
+    (two agents touching a non-milestone target silently double-worked). The stamp
+    shape is identical to the milestone one, so the READER (``claim_view`` reads
+    ``target['occupation']`` generically) already surfaces it for all classes with
+    no change.
+
+    Returns ``(record, previous_claim)``; ``previous_claim`` is the occupation in
+    place before this call (``None`` if unoccupied) so the CLI can warn on a live
+    collision. The claim rides on the record itself, so the standard cloud-sync
+    path propagates it without new subcollections. Lazy ``occupation`` import
+    avoids the core↔occupation cycle (occupation imports core)."""
+    import occupation as _occ  # lazy: occupation eager-imports core
+    rec = _occ.find_target(data, target_id)
+    if rec is None:
+        raise ValueError(f"Target not found: {target_id}")
+    previous = rec.get("occupation")
+    rec["occupation"] = {
+        "session_id": session_id,
+        "machine": machine,
+        "agent": agent,
+        "claimed_at": _now_iso(),
+    }
+    return rec, previous
+
+
+def release_occupation(
+    data: dict, target_id: str, *, reason: str = "manual"
+) -> tuple[dict, dict | None]:
+    """Release the occupation claim on ANY target-class record (ms-142 T7 e-5162),
+    the generic sibling of ``claim_occupation``. Returns ``(record, released_claim)``
+    (``released_claim`` is ``None`` if unoccupied — release is idempotent). The
+    target's ``status`` / ``phase`` is NOT touched — releasing a claim leaves the
+    target in whatever state it was in ("active のまま専有解除できる", CORE doc §3)."""
+    import occupation as _occ  # lazy: occupation eager-imports core
+    rec = _occ.find_target(data, target_id)
+    if rec is None:
+        raise ValueError(f"Target not found: {target_id}")
+    released = rec.pop("occupation", None)
+    return rec, released
+
+
 def milestone_claim_occupation(
     data: dict,
     ms_id: str,
@@ -699,49 +753,22 @@ def milestone_claim_occupation(
     machine: str = "",
     agent: str = "",
 ) -> tuple[dict, dict | None]:
-    """Record an occupation claim on ``ms_id``.
-
-    Returns ``(milestone, previous_claim)``. ``previous_claim`` is the
-    occupation record that was in place *before* this call, or ``None`` if
-    the MS was unoccupied. Callers (= CLI) decide whether to surface a
-    warning based on whether ``previous_claim`` exists and whether its
-    session is still live.
-
-    The claim is stored directly on the milestone (``ms["occupation"]``)
-    so the standard cloud-sync path propagates it without new
-    subcollections; the event-log (= ``worktree_sessions``) lives at the
-    project level (see ``milestone_record_occupation_event``).
-    """
-    for ms in data["milestones"]:
-        if ms["id"] == ms_id:
-            previous = ms.get("occupation")
-            claim = {
-                "session_id": session_id,
-                "machine": machine,
-                "agent": agent,
-                "claimed_at": _now_iso(),
-            }
-            ms["occupation"] = claim
-            return ms, previous
-    raise ValueError(f"Milestone not found: {ms_id}")
+    """Record an occupation claim on milestone ``ms_id`` — the milestone-named
+    entry point, now a thin delegate over the generic ``claim_occupation`` (ms-142
+    T7 e-5162: the live-claim layer is target-class-generic, not milestone-only).
+    Kept as a named symbol so existing milestone callers (``milestone start``,
+    session-end release) read intently. Returns ``(milestone, previous_claim)``."""
+    return claim_occupation(
+        data, ms_id, session_id=session_id, machine=machine, agent=agent)
 
 
 def milestone_release_occupation(
     data: dict, ms_id: str, *, reason: str = "manual"
 ) -> tuple[dict, dict | None]:
-    """Release the occupation claim on ``ms_id``.
-
-    Returns ``(milestone, released_claim)``. ``released_claim`` is the
-    occupation that was just cleared, or ``None`` if the MS wasn't
-    occupied. The MS ``status`` is NOT touched — release leaves the MS
-    in whatever phase it was in, per the SPEC's "active のまま専有解除
-    できる" principle (CORE doc §3).
-    """
-    for ms in data["milestones"]:
-        if ms["id"] == ms_id:
-            released = ms.pop("occupation", None)
-            return ms, released
-    raise ValueError(f"Milestone not found: {ms_id}")
+    """Release the occupation claim on milestone ``ms_id`` — the milestone-named
+    delegate over the generic ``release_occupation`` (ms-142 T7 e-5162). Returns
+    ``(milestone, released_claim)``."""
+    return release_occupation(data, ms_id, reason=reason)
 
 
 def milestone_record_occupation_event(

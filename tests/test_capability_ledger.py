@@ -691,7 +691,11 @@ def test_reviewed_correct_reads_are_classified_correctly():
     by_key = {(c["verb"], c["collection"]): c["status"]
               for c in chk.find_collection_coupling()}
     assert by_key.get(("target_list", "milestones")) == "reviewed_correct"
-    assert by_key.get(("session_end", "milestones")) == "reviewed_correct"
+    # ms-142 T7 (e-5162): (session_end, milestones) was REMOVED — session_end's
+    # occupation release is now target-class-generic (walks claim_target_collections
+    # via core.release_occupation), so it no longer reads data['milestones'] and is
+    # no longer a milestone-scoped read to classify. It must NOT reappear here.
+    assert ("session_end", "milestones") not in by_key
     # session_fork is milestone-scoped by design (a git-worktree op) — an initial
     # over-eager remediation was reverted after independent AX review 2026-08-03,
     # and it is now classified reviewed-correct, not remediated.

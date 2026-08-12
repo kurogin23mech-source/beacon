@@ -48,6 +48,7 @@ from commands_shared import (  # noqa: F401
     _fire_review_due_trigger,
     _print_evidence_guidance,
     _release_occupation_for_transition,
+    _claim_occupation_for_work,
     _resolve_session_id,
     _session_kind_is_human,
     _spec_exists_for_ms,
@@ -661,6 +662,10 @@ def cmd_target_advance():
     except _te.TargetEngineError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-142 T7 (e-5162): advancing a data-defined / release target = this session
+    # is working it → stamp the live occupation claim (warns on a cross-session
+    # collision), the same layer a milestone gets on start.
+    _claim_occupation_for_work(data, target_id)
     save_project(data, op={"op": "target_advance", "kind": kind,
                            "target_id": target_id})
     print(f"フェーズ進行: [{target_id}] {old} -> {new}")
@@ -712,6 +717,9 @@ def cmd_target_close():
     except _te.TargetEngineError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-142 T7 (e-5162): closing a data-defined / release target frees its live
+    # occupation claim, symmetric with milestone done/observe.
+    _release_occupation_for_transition(data, target_id, reason="close")
     save_project(data, op={"op": "target_close", "kind": kind,
                            "target_id": target_id})
     print(f"完了: [{target_id}] を done にしました")
