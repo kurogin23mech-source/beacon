@@ -13,8 +13,24 @@ this per-test via explicit env swaps, so the global default never masks them.
 """
 
 import os
+import sys
 
 import pytest
+
+# ms-142 e-5144: centralize the ``sys.path`` boilerplate every test module used to
+# repeat (``sys.path.insert(0, .../lib)`` + scripts/ + tests/). conftest.py is
+# imported by pytest before any test module in this tree, so putting the project's
+# own source roots on the path here lets a test do ``import capability_ledger`` (lib),
+# import a hyphen-free scripts module, or import a sibling test helper
+# (``capability_profession_matrix``) without its own insert. Additive and idempotent
+# — modules that still carry their own insert are unaffected; new tests need none.
+_TESTS_DIR = os.path.dirname(__file__)
+for _sub in ("lib", "scripts"):
+    _p = os.path.join(_TESTS_DIR, "..", _sub)
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
 
 # Declare the test harness human-driven. os.environ mutation here also
 # propagates to subprocess children (tests that invoke the `beacon` CLI), so
