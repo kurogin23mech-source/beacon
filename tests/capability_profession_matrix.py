@@ -340,11 +340,13 @@ def _a_gated_state(project, kind, model):
         return next(iter(routed))
     if model.get("shape") == target_state.SHAPE_FUNNEL:
         # a funnel's terminal (決着) phase is config-derived, not in routed_states.
+        # Read the project's ONE funnel config (opportunity_phases) — the fixture
+        # (_sales_project) carries it, so there is no DEFAULT fallback here (a 2nd
+        # source of the terminal set would risk drifting from the config; maint
+        # review e-5254). None if the project declares no terminal phase.
         import sales_entities as _se
         return next((p["name"] for p in _se.opportunity_phases(project)
-                     if p.get("terminal")),
-                    next((p["name"] for p in _se.DEFAULT_OPPORTUNITY_PHASES
-                          if p.get("terminal")), None))
+                     if p.get("terminal")), None)
     return None
 
 

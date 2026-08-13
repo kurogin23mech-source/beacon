@@ -562,11 +562,21 @@ def find_iterator_narrowing(path: str = "") -> list:
     """Shared-frame aggregators (modules calling ``occupation.iter_target_records``,
     the same derived population as the arm scan) that NARROW the abstracted records
     by a dev-specific signal — an id-prefix filter or a dev-milestone state-vocab
-    branch (ms-142 e-5253). Each item: ``{module, signal, token, advice, file,
-    lineno, status}``; ``status`` is ``"pending_debt"`` (in ``KNOWN_ITERATOR_
-    NARROWING``) or ``"new_violation"`` (fails CI). ``module`` is the file stem (the
-    ratchet key, like the arm family — narrowing is attributed to the aggregator
-    MODULE, not a CLI verb)."""
+    branch (ms-142 e-5253). Each item: ``{module, signal_kind, token, advice, file,
+    lineno, status}``. ``signal_kind`` is the enum literal ``"id-prefix"`` |
+    ``"dev-state"`` (the two keys of ``_NARROWING_ADVICE``); ``token`` is the concrete
+    signal (the prefix ``"ms-"`` or the state literal ``"observing"``). ``status`` is
+    ``"pending_debt"`` (in ``KNOWN_ITERATOR_NARROWING``) or ``"new_violation"`` (fails
+    CI). ``module`` is the file stem (the ratchet key, like the arm family —
+    narrowing is attributed to the aggregator MODULE, not a CLI verb).
+
+    COARSE-by-design (like the arm scan's ``_arm_key``): ``_narrowing_hits`` flags an
+    id-prefix / dev-state literal ANYWHERE in an ``iter_target_records``-consuming
+    module, not only when provably applied to the iterated result — a full dataflow
+    trace is not worth it here because these modules ARE Target aggregators, so such a
+    literal is almost certainly narrowing Target records. The FALSE-positive escape is
+    the ``KNOWN_ITERATOR_NARROWING`` allowlist (reviewed + one-way ratchet), mirroring
+    the arm family's ``REVIEWED_LEGITIMATE_ARM_READS``."""
     paths = [path] if path else _arm_scanned_paths()
     out = []
     for p in paths:
@@ -574,11 +584,11 @@ def find_iterator_narrowing(path: str = "") -> list:
             tree = ast.parse(fh.read())
         rel = os.path.relpath(p, REPO)
         stem = os.path.splitext(os.path.basename(p))[0]
-        for signal, token, lineno in _narrowing_hits(tree):
+        for signal_kind, token, lineno in _narrowing_hits(tree):
             status = "pending_debt" \
                 if cl.is_known_iterator_narrowing(stem, token) else "new_violation"
-            out.append({"module": stem, "signal": signal, "token": token,
-                        "advice": _NARROWING_ADVICE[signal], "file": rel,
+            out.append({"module": stem, "signal_kind": signal_kind, "token": token,
+                        "advice": _NARROWING_ADVICE[signal_kind], "file": rel,
                         "lineno": lineno, "status": status})
     return out
 
@@ -588,13 +598,14 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
 
     ``ok`` is the authoritative pass/fail (also the process exit code). It is
     False if ANY of: unclassified verbs/skills, symbol-reach ``violations``,
-    ``new_collection_coupling``, ``new_arm_coupling`` (ms-142 e-5012), or unowned
-    L3/L4 verbs/skills (ownership axis, e-4738). A consumer that wants the full
-    failing set must read the three reach families — ``violations`` (symbol
-    reach), ``new_collection_coupling`` (collection read), and ``new_arm_coupling``
-    (arm-name read) — they are distinct violation families with distinct item
-    schemas, so gate on ``ok`` rather than iterating one list (AX review
-    2026-08-03)."""
+    ``new_collection_coupling``, ``new_arm_coupling`` (ms-142 e-5012),
+    ``new_iterator_narrowing`` (ms-142 e-5253), or unowned L3/L4 verbs/skills
+    (ownership axis, e-4738). A consumer that wants the full failing set must read
+    the FOUR reach/narrowing families — ``violations`` (symbol reach),
+    ``new_collection_coupling`` (collection read), ``new_arm_coupling`` (arm-name
+    read), and ``new_iterator_narrowing`` (iterator narrowing, e-5253) — they are
+    distinct families with distinct item schemas, so gate on ``ok`` rather than
+    iterating one list (AX review 2026-08-03; e-5253 kept this list current)."""
     cov = check_coverage()
     skill_cov = cl.reconcile_skills()
     ownership = cl.reconcile_ownership()
@@ -836,16 +847,16 @@ def main() -> int:
         print(f"  NEW ITERATOR NARROWING ({len(new_narrow)}) — a shared-frame "
               f"aggregator consumes iter_target_records then narrows by a dev signal:")
         for n in new_narrow:
-            print(f"    - {n['module']} narrows by {n['signal']} '{n['token']}' @ "
-                  f"{n['file']}:{n['lineno']}")
+            print(f"    - {n['module']} narrows by {n['signal_kind']} '{n['token']}' "
+                  f"@ {n['file']}:{n['lineno']}")
             print(f"      → {n['advice']}")
     if pending_narrow:
-        pend_narr = sorted({(n["module"], n["signal"], n["token"])
+        pend_narr = sorted({(n["module"], n["signal_kind"], n["token"])
                             for n in pending_narrow})
         print(f"  pending iterator-narrowing debt ({len(pend_narr)}, allowlisted — "
               f"remediate then drop from KNOWN_ITERATOR_NARROWING):")
-        for mod, signal, token in pend_narr:
-            print(f"    · {mod} narrows by {signal} '{token}'")
+        for mod, signal_kind, token in pend_narr:
+            print(f"    · {mod} narrows by {signal_kind} '{token}'")
     if result["ok"]:
         print("  OK: every capability is classified and no profession-shared "
               "capability reaches a profession concrete (no NEW symbol reach or "

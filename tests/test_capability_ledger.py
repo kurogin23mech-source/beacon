@@ -395,7 +395,7 @@ def test_narrowing_detector_flags_id_prefix_filter(tmp_path):
     path = _write(tmp_path, "cmd_synthetic.py", _NARROW_BY_ID_PREFIX)
     hits = chk.find_iterator_narrowing(path)
     assert len(hits) == 1, hits
-    assert hits[0]["signal"] == "id-prefix"
+    assert hits[0]["signal_kind"] == "id-prefix"
     assert hits[0]["token"] == "ms-"
     assert hits[0]["status"] == "new_violation"
 
@@ -404,7 +404,7 @@ def test_narrowing_detector_flags_dev_state_branch(tmp_path):
     path = _write(tmp_path, "cmd_synthetic.py", _NARROW_BY_DEV_STATE)
     hits = chk.find_iterator_narrowing(path)
     assert len(hits) == 1, hits
-    assert hits[0]["signal"] == "dev-state"
+    assert hits[0]["signal_kind"] == "dev-state"
     assert hits[0]["token"] == "observing"
     assert hits[0]["status"] == "new_violation"
 
@@ -446,7 +446,7 @@ def test_new_narrowing_fails_the_ok_verdict(tmp_path, monkeypatch):
     monkeypatch.setattr(chk, "_arm_scanned_paths", lambda arm_path="": [path])
     result = chk.run()
     assert result["ok"] is False
-    assert any(n["signal"] == "id-prefix"
+    assert any(n["signal_kind"] == "id-prefix"
                for n in result["new_iterator_narrowing"])
 
 

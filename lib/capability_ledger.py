@@ -619,6 +619,17 @@ REMEDIATION_TO_MANIFEST = (
 # attribute name (which breaks grep / rename / jump-to-def and only fails at runtime
 # on a typo; ms-142 e-5143 maint review). ``allowlist_reviewed`` is ``None`` for a
 # family with no reviewed class (symbols — see KNOWN_SYMBOL_REACH doc).
+# NOTE (ms-142 e-5253): a FOURTH reach class — ITERATOR NARROWING — exists but is
+# DELIBERATELY NOT registered here. The three families below share ONE shape: match a
+# concrete NAME against a denylist (collection key / symbol / arm name), which
+# ``_find_family_reaches`` classifies generically. Narrowing is a DIFFERENT shape: it
+# extracts by a SIGNAL-SET (id-prefixes derived from work_model + DEV_NARROWING_STATE_
+# VOCAB), not a name-denylist, so forcing it through the denylist-classify driver would
+# bloat that driver with a special case. It lives standalone in the scanner
+# (``check-capability-scope.py`` → ``find_iterator_narrowing``) with its own allowlist
+# (``KNOWN_ITERATOR_NARROWING`` / ``is_known_iterator_narrowing`` above). Routing rule
+# for the NEXT family: a concrete-NAME denylist family → add a row HERE; a SIGNAL-SET
+# family → add it alongside ``find_iterator_narrowing``.
 RATCHET_FAMILIES: dict = {
     "collection": {
         "denylist": lambda: PROFESSION_CONCRETE_COLLECTIONS,
