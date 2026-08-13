@@ -181,27 +181,29 @@ PROFESSION_CONCRETE_SYMBOLS = {
 #
 # ms-143 PR#4 (思想レビュー finding / leader steer 2026-08-11): adding
 # sales_entities.find_opportunity to PROFESSION_CONCRETE_SYMBOLS (closing the
-# dev/sales resolver-symmetry gap) SURFACES three L2 opportunity verbs that resolve
-# the deal via the sales-concrete find_opportunity. They are registered here as
-# visible expected-red debt (= the checker REPORTS the reach as pending debt, but it
-# is an acknowledged/tracked interim — NOT a CI-blocking failure and NOT a signal to
-# remediate immediately before its prerequisite exists; owner=ms-143) rather than
-# left as a false green — this
-# visibility is a CLOSE CONDITION for ms-143 (the milestone does NOT close claiming
-# "台帳=全部緑"). The real remediation is the set_target_state primitive follow-up:
-# once Target state transitions are abstracted, opportunity_phase greens without
-# reaching find_opportunity, and opportunity_add/judge resolve via
-# occupation.find_target. Each row is deleted when its verb is migrated (stale-entry
-# test enforces the deletion). meeting_list (L3, sales-specific) also reaches
-# find_opportunity but is NOT flagged (the checker only governs L1/L2 shared verbs).
-KNOWN_SYMBOL_REACH: set = {
-    ("opportunity_add", "sales_entities.find_opportunity"),
-    # ms-142 e-5169 GREENED opportunity_phase: cmd_opportunity_phase now resolves
-    # the deal via occupation.find_target and its transition rides set_target_state,
-    # so it no longer reaches the sales concrete. Row deleted (stale-entry test
-    # forces the deletion once the handler is abstracted).
-    ("opportunity_judge", "sales_entities.find_opportunity"),
-}
+# dev/sales resolver-symmetry gap) SURFACED three L2 opportunity verbs
+# (opportunity_add / opportunity_phase / opportunity_judge) that resolved the deal
+# via the sales-concrete find_opportunity. Each was registered here as visible
+# expected-red debt (owner=ms-143) rather than left as a false green — this
+# visibility was a CLOSE CONDITION for ms-143 (the milestone does NOT close claiming
+# "台帳=全部緑"). All three are now REMEDIATED and their rows deleted, so the set is
+# empty:
+#   - opportunity_phase: ms-142 e-5169 (transition rides set_target_state; the deal
+#     resolves via occupation.find_target).
+#   - opportunity_add / opportunity_judge: ms-143 e-5150 (the read-backs now resolve
+#     via occupation.find_target; the judge transitions still ride the sales
+#     judge-gate verbs advance/retry/terminal_transition, which are sales-concrete
+#     and unscanned by design).
+# meeting_list (L3, sales-specific) also reaches find_opportunity but is NOT flagged
+# (the checker only governs L1/L2 shared verbs).
+# The stale-entry test (test_no_stale_symbol_reach_allowlist_entries) keeps the set
+# honest: a row may return ONLY for a genuine new deferred abstraction (name its
+# owning MS inline), never to silence a fresh violation — route the handler through
+# the occupation layer instead.
+# The element shape is (verb, symbol), e.g. ("opportunity_add",
+# "sales_entities.find_opportunity") — the type annotation carries the format now
+# that the set is empty and has no live example (e-5150 保守性レビュー finding).
+KNOWN_SYMBOL_REACH: set[tuple[str, str]] = set()
 
 
 def is_known_symbol_reach(verb: str, symbol: str) -> bool:
