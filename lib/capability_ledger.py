@@ -200,7 +200,10 @@ PROFESSION_CONCRETE_SYMBOLS = {
 # honest: a row may return ONLY for a genuine new deferred abstraction (name its
 # owning MS inline), never to silence a fresh violation — route the handler through
 # the occupation layer instead.
-KNOWN_SYMBOL_REACH: set = set()
+# The element shape is (verb, symbol), e.g. ("opportunity_add",
+# "sales_entities.find_opportunity") — the type annotation carries the format now
+# that the set is empty and has no live example (e-5150 保守性レビュー finding).
+KNOWN_SYMBOL_REACH: set[tuple[str, str]] = set()
 
 
 def is_known_symbol_reach(verb: str, symbol: str) -> bool:

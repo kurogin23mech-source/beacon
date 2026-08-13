@@ -8675,10 +8675,10 @@ def cmd_opportunity_add():
         data, opp_id, at=core._now_iso())
     save_project(data)
     # ms-143 e-5150: read the created deal back through the profession-generic
-    # occupation.find_target (the sales twin of the milestone resolver), not the
-    # sales-concrete find_opportunity — so the shared ``opportunity_add`` verb no
-    # longer reaches a profession recorder (KNOWN_SYMBOL_REACH row dropped).
-    import occupation
+    # occupation.find_target (the sales twin of the milestone resolver, imported at
+    # module top), not the sales-concrete find_opportunity — so the shared
+    # ``opportunity_add`` verb no longer reaches a profession recorder
+    # (KNOWN_SYMBOL_REACH row dropped).
     opp = occupation.find_target(data, opp_id)
     print(f"Added opportunity {opp_id}: {title}")
     if account_id:
@@ -9056,11 +9056,11 @@ def cmd_opportunity_judge():
     (AI never auto-changes state — master=人間)."""
     import sales_entities
     # ms-143 e-5150: resolve the deal for read-back through the profession-generic
-    # occupation.find_target, not the sales-concrete find_opportunity — so the
-    # shared ``opportunity_judge`` verb no longer reaches a profession recorder
-    # (KNOWN_SYMBOL_REACH row dropped). The transitions themselves ride the sales
-    # judge-gate verbs (advance/retry/terminal_transition), unchanged.
-    import occupation
+    # occupation.find_target (imported at module top), not the sales-concrete
+    # find_opportunity — so the shared ``opportunity_judge`` verb no longer reaches a
+    # profession recorder (KNOWN_SYMBOL_REACH row dropped). The transitions
+    # themselves ride the sales judge-gate verbs (advance/retry/terminal_transition),
+    # unchanged.
     opp_id = os.environ.get("BEACON_OPP_ID", "")
     decision = os.environ.get("BEACON_JUDGE_DECISION", "")
     arg = os.environ.get("BEACON_JUDGE_ARG", "")
@@ -9091,9 +9091,12 @@ def cmd_opportunity_judge():
             save_project(data)
             print(f"{opp_id} advance → phase {res['phase']}")
             # e-3270: フェーズ固有の固定アンカー活動を自動起票 (あれば)。
+            # 商談レコードは一度だけ解決し (ループ内で毎回引き直さない)、None は
+            # {} に畳んで terminal 分岐と同じ None ガード流儀に揃える (e-5150 保守性
+            # レビュー finding)。
+            adv_activities = (occupation.find_target(data, opp_id) or {}).get("activities", [])
             for aid in res.get("activities", []):
-                act = next((a for a in (occupation.find_target(data, opp_id) or {}).get("activities", [])
-                            if a["id"] == aid), None)
+                act = next((a for a in adv_activities if a["id"] == aid), None)
                 if act:
                     print(f"  + 活動 {aid}: {act['description']} (テンプレ)")
             if arg:
