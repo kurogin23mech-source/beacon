@@ -180,6 +180,15 @@ def target_kind(target_id: str) -> str:
     return _TARGET_PREFIX_KIND.get(prefix, "")
 
 
+def known_target_prefixes() -> tuple:
+    """The canonical Target id-prefixes WITH the trailing ``-`` (``("acc-", "acq-",
+    "ms-", …)``, sorted). Public accessor over the prefix→kind table so consumers
+    (e.g. the capability-scope narrowing detector, e-5253) derive the prefix set
+    without reaching the private ``_TARGET_PREFIX_KIND`` — a new class's prefix is
+    covered the moment it lands in the table."""
+    return tuple(sorted(p + "-" for p in _TARGET_PREFIX_KIND))
+
+
 def doc_target(meta: dict) -> str:
     """Tolerant read of a document's linked Target id (ms-109 e-3754): canonical
     ``target`` first, then legacy ``milestone`` / ``operation`` / ``trek_id``

@@ -64,11 +64,13 @@ def _sales_project():
     # judge gate refuse it. Without a funnel config the terminal is unrecognised and
     # the ban has nothing to fire on.
     import sales_entities as _se
+    phases = [dict(p) for p in _se.DEFAULT_OPPORTUNITY_PHASES]
+    entry_phase = _se.default_opportunity_phase({"opportunity_phases": phases})
     return {
         "name": "sales", "profession": "sales", "milestones": [],
-        "opportunity_phases": [dict(p) for p in _se.DEFAULT_OPPORTUNITY_PHASES],
+        "opportunity_phases": phases,
         "opportunities": [
-            {"id": "opp-1", "label": "O", "status": "open", "phase": "商談準備",
+            {"id": "opp-1", "label": "O", "status": "open", "phase": entry_phase,
              "occupation": {"session_id": "sv-sales"},
              "activities": [
                  {"id": "act-1", "description": "call", "deadline": "2026-08-06",

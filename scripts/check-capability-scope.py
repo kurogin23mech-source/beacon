@@ -507,10 +507,10 @@ def find_arm_coupling(arm_path: str = "") -> list:
 # ---------------------------------------------------------------------------
 
 def _target_id_prefixes() -> tuple:
-    """The canonical Target id-prefixes (``ms-`` / ``opp-`` / ``acc-`` …), derived
-    from ``work_model``'s prefix→kind table so a NEW Target class is covered without
-    a hardcoded list here."""
-    return tuple(sorted(p + "-" for p in _wm._TARGET_PREFIX_KIND))
+    """The canonical Target id-prefixes (``ms-`` / ``opp-`` / ``acc-`` …), from
+    ``work_model``'s PUBLIC accessor so a NEW Target class is covered without a
+    hardcoded list here (e-5253 review: read the accessor, not the private table)."""
+    return _wm.known_target_prefixes()
 
 
 def _narrowing_hits(tree: ast.AST) -> list:
@@ -535,12 +535,24 @@ def _narrowing_hits(tree: ast.AST) -> list:
             for v in consts:
                 if v in prefixes:
                     hits.append(("id-prefix", v, node.lineno))
-        # (b) dev-state-vocab branch: == / != / in against a dev-milestone literal.
+        # (b) dev-state-vocab branch: == / != / in / not in against a dev-milestone
+        # literal — INCLUDING the membership idiom ``status in ("observing", ...)``
+        # whose comparator is a Tuple/Set/List. The elts are expanded exactly like the
+        # startswith tuple above: the two sister branches MUST stay symmetric or the
+        # most common narrowing form slips the blind-spot detector (e-5253 leader
+        # review HIGH — a blind spot in the blind-spot detector).
         if isinstance(node, ast.Compare):
+            consts = []
             for c in [node.left, *node.comparators]:
-                if isinstance(c, ast.Constant) and isinstance(c.value, str) \
-                        and c.value in cl.DEV_NARROWING_STATE_VOCAB:
-                    hits.append(("dev-state", c.value, node.lineno))
+                if isinstance(c, ast.Constant) and isinstance(c.value, str):
+                    consts.append(c.value)
+                elif isinstance(c, (ast.Tuple, ast.Set, ast.List)):
+                    consts += [e.value for e in c.elts
+                               if isinstance(e, ast.Constant)
+                               and isinstance(e.value, str)]
+            for v in consts:
+                if v in cl.DEV_NARROWING_STATE_VOCAB:
+                    hits.append(("dev-state", v, node.lineno))
     return hits
 
 
@@ -574,9 +586,16 @@ def find_iterator_narrowing(path: str = "") -> list:
     id-prefix / dev-state literal ANYWHERE in an ``iter_target_records``-consuming
     module, not only when provably applied to the iterated result — a full dataflow
     trace is not worth it here because these modules ARE Target aggregators, so such a
-    literal is almost certainly narrowing Target records. The FALSE-positive escape is
-    the ``KNOWN_ITERATOR_NARROWING`` allowlist (reviewed + one-way ratchet), mirroring
-    the arm family's ``REVIEWED_LEGITIMATE_ARM_READS``."""
+    literal is almost certainly narrowing Target records.
+
+    ROUTING (single rule, e-5253 leader review — the 3 messages were inconsistent):
+    ``KNOWN_ITERATOR_NARROWING`` is the pending-DEBT ratchet — a real narrowing that is
+    accepted PENDING remediation (owning MS inline), one-way (remediate the handler,
+    then drop the row); NEVER add a row to silence a fresh narrowing. A genuine
+    FALSE-POSITIVE (a literal that is not actually narrowing Target records) has NO
+    terminal state yet — the reviewed-legitimate twin of ``REVIEWED_LEGITIMATE_ARM_
+    READS`` is DEFERRED to e-5274 (family-crossing alignment); today every consumer is
+    clean so the allowlist is empty and the gap is latent."""
     paths = [path] if path else _arm_scanned_paths()
     out = []
     for p in paths:

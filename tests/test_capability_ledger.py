@@ -409,6 +409,49 @@ def test_narrowing_detector_flags_dev_state_branch(tmp_path):
     assert hits[0]["status"] == "new_violation"
 
 
+# e-5253 leader review HIGH: the MOST COMMON narrowing idiom is `status in (...)`,
+# whose comparator is an ast.Tuple/Set/List — it MUST be caught, symmetric with the
+# startswith tuple expansion, else the blind-spot detector has its own blind spot.
+_NARROW_BY_MEMBERSHIP_TUPLE = '''
+import occupation
+def collect(data):
+    return [r for r in occupation.iter_target_records(data)
+            if r.get("status") in ("observing", "approved")]
+'''
+
+_NARROW_BY_MEMBERSHIP_SET = '''
+import occupation
+def collect(data):
+    return [r for r in occupation.iter_target_records(data)
+            if r.get("status") in {"in_review"}]
+'''
+
+
+def test_narrowing_detector_flags_membership_in_tuple(tmp_path):
+    path = _write(tmp_path, "cmd_synthetic.py", _NARROW_BY_MEMBERSHIP_TUPLE)
+    signals = {(h["signal_kind"], h["token"])
+               for h in chk.find_iterator_narrowing(path)}
+    assert ("dev-state", "observing") in signals
+    assert ("dev-state", "approved") in signals
+
+
+def test_narrowing_detector_flags_membership_in_set(tmp_path):
+    path = _write(tmp_path, "cmd_synthetic.py", _NARROW_BY_MEMBERSHIP_SET)
+    signals = {(h["signal_kind"], h["token"])
+               for h in chk.find_iterator_narrowing(path)}
+    assert ("dev-state", "in_review") in signals
+
+
+def test_dev_narrowing_vocab_is_derived_from_valid_statuses():
+    # e-5253 leader review: the dev-state vocab must DERIVE from core.VALID_STATUSES
+    # (symmetric with the id-prefixes deriving from work_model), so adding a dev
+    # status does not silently blind the detector. Pin the derivation identity.
+    import core
+    assert cl.DEV_NARROWING_STATE_VOCAB == (
+        frozenset(core.VALID_STATUSES) - cl.SHARED_CROSS_CLASS_STATES)
+    assert cl.SHARED_CROSS_CLASS_STATES <= frozenset(core.VALID_STATUSES)
+
+
 def test_narrowing_detector_passes_clean_consumer(tmp_path):
     path = _write(tmp_path, "cmd_synthetic.py", _NARROW_CLEAN)
     assert chk.find_iterator_narrowing(path) == []

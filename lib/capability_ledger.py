@@ -60,6 +60,7 @@ import os
 from typing import Optional
 
 import cli_surface
+import core  # for VALID_STATUSES — DEV_NARROWING_STATE_VOCAB derives from it (e-5253)
 
 _REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -552,13 +553,21 @@ def is_reviewed_legitimate_arm_read(site: str, arm: str) -> bool:
 # (check-capability-scope.py) derives the id-prefixes from work_model and flags these
 # in the iter_target_records-consuming modules.
 
-# Dev-milestone-EXCLUSIVE status literals. A shared iterator-consumer branching on
-# one of these has assumed the dev milestone review lifecycle — an opportunity
-# advances through config phases, an operation through open/closed, an acquisition
-# through todo/in_progress/done; NONE reach in_review/approved/observing. The shared
-# states (todo / in_progress / done / cancelled) are deliberately EXCLUDED so a
-# legitimate cross-class status check is not a false positive.
-DEV_NARROWING_STATE_VOCAB = frozenset({"in_review", "approved", "observing", "waiting"})
+# States SHARED across ≥2 built-in classes (a milestone AND an operation/acquisition
+# all reach todo / in_progress / done; cancelled is a universal soft-delete), so a
+# shared capability branching on one of these is NOT a dev-only assumption. Declared in
+# ONE place so ``DEV_NARROWING_STATE_VOCAB`` DERIVES from it (e-5253 leader review:
+# symmetric with the id-prefixes deriving from work_model — add a dev status to
+# core.VALID_STATUSES and the detector covers it with zero edit here, closing the exact
+# "add a state → detector goes silently blind" drift this PR fights).
+SHARED_CROSS_CLASS_STATES = frozenset({"todo", "in_progress", "done", "cancelled"})
+
+# Dev-milestone-EXCLUSIVE status literals = the full status vocabulary MINUS the
+# cross-class shared states. Derived (not hand-listed): today this resolves to
+# {in_review, approved, observing, waiting} — the milestone review/observe lifecycle a
+# sales opportunity (config phases) / operation (open/closed) never has. A shared
+# iterator-consumer branching on one of these has assumed the dev lifecycle.
+DEV_NARROWING_STATE_VOCAB = frozenset(core.VALID_STATUSES) - SHARED_CROSS_CLASS_STATES
 
 # Ratchet allowlist for accepted-pending narrowing (empty today — both current
 # iter_target_records consumers, cmd_project / session_log, are clean). ONE-WAY
