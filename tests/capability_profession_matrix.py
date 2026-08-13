@@ -73,6 +73,27 @@ def _sales_project():
     }
 
 
+def _account_project():
+    # ms-142 e-5256: Account as the 4th Target-class. It is ball-less (no
+    # who_has_the_ball) and never-terminal (account_phases has no terminal phase),
+    # both DECLARED in its state model — so its completion_gate cell is a DECLARED
+    # N/A (never_terminal), while phase-advance (the phase ladder), deadline (a
+    # nurturing nrt-), evidence (communications) and claim must be GREEN. No status
+    # field (a 継続 relationship, tracked by phase).
+    return {
+        "name": "acct", "profession": "sales", "milestones": [],
+        "accounts": [
+            {"id": "acc-1", "name": "A", "label": "A", "phase": "リード",
+             "phase_history": [], "occupation": {"session_id": "sv-acct"},
+             "nurturings": [
+                 {"id": "nrt-1", "description": "follow up",
+                  "deadline": "2026-08-06", "status": "todo"},
+             ],
+             "communications": [{"id": "comm-a1", "description": "intro call"}]},
+        ],
+    }
+
+
 def _synthetic_project():
     # imported lazily so this module has no hard dependency ordering with the
     # fixture module (both live under tests/).
@@ -202,10 +223,11 @@ def _operation_project():
 
 
 # name -> {project, target_id, work_item_id}. Rows are the manifest Target-classes
-# (milestones + opportunities + operations + the synthetic descriptor). Accounts /
-# acquisitions ride a separate persistence path and are deliberately NOT manifest
-# Target-classes (see occupation.TARGET_COLLECTIONS), so they are out of this
-# manifest-scoped matrix, matching every other ms-142 capability.
+# (milestones + opportunities + operations + accounts + the synthetic descriptor).
+# ms-142 e-5256: ACCOUNTS joined the manifest (occupation.TARGET_COLLECTIONS) — an
+# account has the full phase/work-item/evidence shape, so excluding it was a
+# narrowing (option A, now withdrawn). Acquisitions still ride a separate
+# persistence path and remain out of this manifest-scoped matrix.
 # The row key is the target-class KIND. ``work_item_id`` is None when the class
 # declares no work-item arm (operation) — that None is what makes the deadline
 # cell a declared N/A, matched by _na_deadline reading work_item_arm. The
@@ -218,6 +240,11 @@ TARGET_CLASSES = {
                     "work_item_id": "act-1"},
     "operation": {"project": _operation_project, "target_id": "op-1",
                   "work_item_id": None},   # None → no work-item arm → deadline N/A
+    # ms-142 e-5256: account is ball-less + never-terminal → completion_gate is a
+    # declared N/A; phase-advance / deadline (nrt-) / evidence (communications) /
+    # claim are GREEN. work_item_id=nrt-1 (nurturings are its work-item arm).
+    "account": {"project": _account_project, "target_id": "acc-1",
+                "work_item_id": "nrt-1"},
     # ms-142 e-5161: release is a profession-default (built-in-as-data) dev Target-
     # class. work_item_id=None → its deadline cell is a declared N/A (work_item_arm
     # =None), evidence_arms=[] → 証跡 N/A; phase-advance / completion-gate / claim GREEN.
@@ -275,11 +302,14 @@ def _cap_phase_advance(project, kind, target_id, work_item_id):
             return new == to
         except Exception:
             return False
-    # Opportunity funnel: set_target_state defers the transition (e-5169 follow-up);
-    # the advance capability itself exists via the sales judge / phase verb. It is
-    # present iff the model declares a funnel carrying the ball (phase_ball, T2).
-    return (model.get("shape") == target_state.SHAPE_FUNNEL
-            and bool(model.get("ball_field")))
+    # Funnel: the class advances through its declared phase ladder. The advance
+    # capability exists via the class's phase verb (opportunity_phase / acc-
+    # phase_set) — set_target_state defers the actual write (e-5169) but the
+    # capability is present. ms-142 e-5256: the ball is ORTHOGONAL to phase
+    # advancement — an opportunity carries one, an account does not, yet BOTH
+    # advance their phases. So the check is the declared funnel shape, NOT the ball
+    # (coupling them denied a ball-less funnel its phase-advance cell; leader 裁定).
+    return model.get("shape") == target_state.SHAPE_FUNNEL
 
 
 def _cap_deadline(project, kind, target_id, work_item_id):
@@ -319,6 +349,17 @@ def _na_evidence(tc):
     return not tc.get("evidence_arms")
 
 
+def _na_completion_gate(tc):
+    # ms-142 e-5256: a class that DECLARES it never settles (``never_terminal`` — no
+    # 決着 grain, e.g. an account's 継続 relationship) has no completion gate. That is
+    # a DECLARED absence, not a forgotten gate. GENERAL (not account-hardcoded): any
+    # never-terminal class shares it, while a terminal class (milestone / operation /
+    # opportunity / acquisition — never_terminal=False) must have a GREEN gate. Read
+    # as a POSITIVE declaration (not "completion_gate is None") so a class that merely
+    # forgot its gate is still an EMPTY (failing) cell, not a silent N/A.
+    return bool((tc.get("state_model") or {}).get("never_terminal"))
+
+
 # capability name -> {probe, na}. Slot contract (distinct from the e-5012 block's
 # bare-function GREEN_PROBES, so read the signatures here, not there):
 #   probe: (project, kind, target_id, work_item_id) -> bool  — True iff the
@@ -330,6 +371,6 @@ MUST_HAVE_CAPABILITIES = {
     "phase_advance": {"probe": _cap_phase_advance, "na": _na_never},
     "deadline": {"probe": _cap_deadline, "na": _na_deadline},
     "evidence": {"probe": _cap_evidence, "na": _na_evidence},
-    "completion_gate": {"probe": _cap_completion_gate, "na": _na_never},
+    "completion_gate": {"probe": _cap_completion_gate, "na": _na_completion_gate},
     "claim": {"probe": _cap_claim, "na": _na_never},
 }

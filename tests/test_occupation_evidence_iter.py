@@ -128,7 +128,9 @@ def test_evidence_arm_for_resolves_declared_arm():
     assert occ.evidence_arm_for(sales, "opportunity") == "communications"
     # operations declare no evidence arm; an unknown kind is not a Target-class.
     assert occ.evidence_arm_for(dev, "operation") == ""
-    assert occ.evidence_arm_for(sales, "account") == ""
+    # ms-142 e-5256: account now declares communications as its evidence arm (it is
+    # the 4th Target-class), so add_evidence / iter_evidence light up for accounts.
+    assert occ.evidence_arm_for(sales, "account") == "communications"
 
 
 def test_add_evidence_routes_through_manifest_arm():

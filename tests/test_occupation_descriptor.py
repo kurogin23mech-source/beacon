@@ -112,13 +112,17 @@ def test_dev_project_unchanged():
     assert [r["id"] for r in rows] == ["ms-1"]
     assert occ.owned_target_classes(data, "dev") == (
         "milestone", "operation", "release")
-    # ms-142 e-5156 (T1): operations joined the Target-collection seed. e-5161 (T6):
-    # release_targets joins via the dev profession-default descriptor (present with or
-    # without ``data`` — the coverage-matrix floor depends on it surfacing no-data).
+    # ms-142 e-5156 (T1): operations joined the Target-collection seed. e-5256:
+    # accounts joined too (4th built-in Target-class; profession-agnostic seed — a
+    # dev project has no ``accounts`` key so it projects no account records). e-5161
+    # (T6): release_targets joins via the dev profession-default descriptor (present
+    # with or without ``data`` — the coverage-matrix floor depends on it no-data).
     assert occ.target_collections(data) == (
-        "milestones", "opportunities", "operations", "release_targets")
+        "milestones", "opportunities", "operations", "accounts",
+        "release_targets")
     assert occ.target_collections() == (
-        "milestones", "opportunities", "operations", "release_targets")
+        "milestones", "opportunities", "operations", "accounts",
+        "release_targets")
 
 
 # ---------------------------------------------------------------------------

@@ -580,7 +580,18 @@ def assert_target_class_owned(data: dict, kind: str) -> None:
 # enumeration reads a ``deadline``/``target_date`` operations lack (→ UNSET,
 # filtered), and the backup integrity count already documents "all Targets"
 # semantics (the operations sub-count overlap is tracked debt, e-5115).
-TARGET_COLLECTIONS = ("milestones", "opportunities", "operations")
+# ms-142 e-5256: ``accounts`` joins the seed as the 4th built-in Target-class. An
+# Account has a complete phase model (account_phases + phase_set + phase_history +
+# effective_phases["account"]), a work-item arm (nurturings / nrt-) and an evidence
+# arm (communications) — the same shape a Milestone/Opportunity rides — so leaving
+# it out of the manifest was a NARROWING (ms-143 option A) that denied it the L2
+# common capabilities (phase-advance / deadline / evidence / claim). It is ball-less
+# and never-terminal (a 継続 customer relationship): those are DECLARED in its state
+# model (``target_state``: ball_field=None, never_terminal=True), not forced into the
+# opportunity mold. Consumers that walk this seed were confirmed non-breaking:
+# session_log filters to commit/pr entries (accounts carry none), and deadline
+# enumeration reads the nurturing ``deadline`` field it now surfaces.
+TARGET_COLLECTIONS = ("milestones", "opportunities", "operations", "accounts")
 
 
 def target_collections(data: dict | None = None) -> tuple:
@@ -618,11 +629,16 @@ def iter_target_records(data: dict) -> list:
 
 # Sales secondary Target collections that are CLAIMABLE but are not manifest
 # Target collections (they ride a different persistence path and are not walked
-# by ``target_collections`` / the session-log aggregator). A 顧客 = account and a
-# 顧客獲得ターゲット = acquisition can be claimed / worked, so the claim view must
-# cover them (SPEC AC1 names account explicitly) even though they are not in the
-# manifest.
-_CLAIM_SECONDARY_COLLECTIONS = ("accounts", "acquisitions")
+# by ``target_collections`` / the session-log aggregator). A 顧客獲得ターゲット =
+# acquisition can be claimed / worked, so the claim view must cover it even though
+# it is not in the manifest.
+#
+# ms-142 e-5256: ``accounts`` MOVED OUT of this secondary set — it is now a
+# first-class manifest Target-class (``TARGET_COLLECTIONS``), so
+# ``claim_target_collections`` already gets it from the manifest. Keeping it here
+# too would be redundant (the dedup below would drop it); removing it keeps the
+# "secondary = NOT in the manifest" contract honest.
+_CLAIM_SECONDARY_COLLECTIONS = ("acquisitions",)
 
 
 def claim_target_collections(data: dict | None = None) -> tuple:
@@ -791,12 +807,13 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # of these two ``_ARM_ROLES`` / ``_COLLECTION_KIND`` dicts (``_ARM_PHASE_BALL`` was
 # dissolved into the state model in T2, e-5157)
 # is ``profession_manifest``, which walks ``target_collections(data)`` — whose seed
-# is milestones + opportunities + operations (accounts / acquisitions ride a
-# different persistence path and are NOT Target collections here, see
-# ``TARGET_COLLECTIONS``). So an entry keyed by any collection NOT returned by
-# ``target_collections`` would be dead data — a silent no-op if edited. Keep these
-# keyed to exactly those seed collections; a descriptor occupation's roles come
-# from its descriptor (``target_descriptor.arm_roles``), not from here.
+# is milestones + opportunities + operations + accounts (ms-142 e-5256 added
+# accounts; acquisitions still ride a different persistence path and are NOT a
+# Target collection here, see ``TARGET_COLLECTIONS``). So an entry keyed by any
+# collection NOT returned by ``target_collections`` would be dead data — a silent
+# no-op if edited. Keep these keyed to exactly those seed collections; a descriptor
+# occupation's roles come from its descriptor (``target_descriptor.arm_roles``), not
+# from here.
 #
 # operations declares a work_item_arm of ``None`` EXPLICITLY (below), not by
 # omission: per the ms-142 T1 裁定 an Operation carries no shared work-item arm
@@ -823,6 +840,16 @@ _ARM_ROLES = {
     "opportunities": {
         "work_item_arm": {"arm": "activities", "item_type": None,
                           "kind": "activity", "id_prefix": "act-"},
+        "evidence_arms": [{"arm": "communications", "item_type": None}],
+    },
+    # ms-142 e-5256: an Account's planned work is its ``nurturings`` arm (継続関係の
+    # 手入れ — every item is a work item, so ``item_type`` is None; ids are ``nrt-``),
+    # and its proof/changelog is the SAME ``communications`` arm the opportunity uses
+    # for evidence. Declaring these lights up add_work_item / deadline enumeration /
+    # add_evidence / iter_evidence for accounts with zero per-capability wiring.
+    "accounts": {
+        "work_item_arm": {"arm": "nurturings", "item_type": None,
+                          "kind": "nurturing", "id_prefix": "nrt-"},
         "evidence_arms": [{"arm": "communications", "item_type": None}],
     },
     # operations: work_item_arm is a DECLARED None (see the note above) so the
@@ -858,6 +885,7 @@ _COLLECTION_KIND = {
     "milestones": "milestone",
     "opportunities": "opportunity",
     "operations": "operation",
+    "accounts": "account",   # ms-142 e-5256: 4th built-in Target-class
 }
 
 

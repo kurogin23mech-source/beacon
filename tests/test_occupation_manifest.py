@@ -126,15 +126,14 @@ def test_sales_opportunity_arm_roles():
 
 def test_manifest_scoped_to_target_collections():
     # The manifest surfaces exactly the aggregatable Target collections
-    # (``target_collections`` = milestones + opportunities + operations, ms-142
-    # e-5156), matching ``iter_target_records`` and the deadline enumeration scope.
-    # Sales accounts / acquisitions are Targets but ride a different persistence
-    # path and are not walked here — so the manifest does NOT surface them
-    # (behavior parity, not a gap). The armless work_item_arm=None case is pinned
-    # by the descriptor test and by the operation test below.
+    # (``target_collections`` = milestones + opportunities + operations + accounts,
+    # ms-142 e-5156 + e-5256), matching ``iter_target_records`` and the deadline
+    # enumeration scope. ms-142 e-5256: ACCOUNTS joined the manifest (4th built-in
+    # Target-class with a full phase/work-item/evidence shape). Acquisitions still
+    # ride a different persistence path and are NOT walked here.
     cols = {tc["collection"]
             for tc in occ.profession_manifest(_sales())["target_classes"]}
-    assert cols == {"milestones", "opportunities", "operations"}
+    assert cols == {"milestones", "opportunities", "operations", "accounts"}
 
 
 def test_operation_is_a_manifest_target_class_without_work_item_arm():
