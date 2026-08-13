@@ -178,6 +178,31 @@ def test_account_is_a_row_with_a_declared_completion_gate_absence():
         assert lit, f"account {cap} cell did not light up"
 
 
+def test_completion_gate_cell_is_behavioural_not_label_only(monkeypatch):
+    # ms-142 e-5254: the completion-gate cell must verify the terminal ban ACTUALLY
+    # FIRES, not merely that a gate LABEL is declared (DECLARATION≠ENFORCEMENT — the
+    # drift-checker target_state.py promised itself). Canary: UNWIRE a real class's
+    # ban (empty its routed_states so set_target_state no longer refuses a terminal)
+    # while KEEPING its completion_gate label. A pre-e-5254 label-only probe stayed
+    # green; the behaviour probe must flip to False (an EMPTY cell = CI fail).
+    import target_state as ts  # noqa: E402
+    row = TARGET_CLASSES["milestone"]
+    probe = MUST_HAVE_CAPABILITIES["completion_gate"]["probe"]
+    # with the real (ban-wired) model the cell lights up.
+    assert probe(row["project"](), "milestone",
+                 row["target_id"], row["work_item_id"]) is True
+    # unwire the ban: same gate label, but no gated states + 'done' made advanceable
+    # → set_target_state no longer refuses it.
+    broken = dict(ts.BUILTIN_STATE_MODELS["milestone"], routed_states={},
+                  advanceable_states=("todo", "in_progress", "done"))
+    monkeypatch.setitem(ts.BUILTIN_STATE_MODELS, "milestone", broken)
+    # the LABEL is still present (a pre-e-5254 probe would pass it green)…
+    assert ts.completion_gate_for(ts.state_model_for(None, "milestone")) is not None
+    # …but the BEHAVIOUR probe now fails to light up (the ban did not fire).
+    assert probe(row["project"](), "milestone",
+                 row["target_id"], row["work_item_id"]) is False
+
+
 def test_account_completion_gate_na_is_driven_by_never_terminal_declaration():
     # Canary (leader caution 2): the account completion-gate N/A must come from the
     # DECLARATION (state_model.never_terminal), not an account-name hardcode. Force
