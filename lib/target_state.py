@@ -154,8 +154,18 @@ GATE_SELF_CLOSE_BAN = "self-close-ban"  # lightweight structural gate: the termi
 #                       permissive (the human is master).
 #   phases_ref        — for a funnel, the config accessor its phases come from.
 #   completion_gate   — which gate projection guards the terminal transition
-#                       (GATE_SPINE / GATE_SALES_JUDGE / GATE_SELF_CLOSE_BAN);
-#                       the anti-self-close capability's declared existence (T3).
+#                       (GATE_SPINE / GATE_SALES_JUDGE / GATE_SELF_CLOSE_BAN), or
+#                       None for a never_terminal class; the anti-self-close
+#                       capability's declared existence (T3).
+#   never_terminal    — UNIVERSAL slot (every model declares it, ms-142 e-5256):
+#                       True = the class never settles (no 決着 grain, e.g. an
+#                       account's 継続 relationship → completion_gate is a declared
+#                       None); False = it settles. The coverage matrix's
+#                       completion-gate N/A predicate reads this.
+#   funnel_seam       — SHAPE_FUNNEL-ONLY slot (non-funnel classes omit it): names
+#                       the generic set_target_state advance seam, or None when the
+#                       funnel's phase is written by a class verb (account →
+#                       ``acc- phase_set``). Only presence gates dispatch.
 #
 # The advanceable/routed split is the SINGLE source for "which states does a
 # class own and which need a class verb". ``core.VALID_STATUSES`` /
@@ -190,6 +200,7 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         "monotonic": False,
         "phases_ref": None,
         "completion_gate": GATE_SPINE,   # ms-119 目的達成 review + AI-direct ban
+        "never_terminal": False,         # milestones settle (done/observing)
     },
     "operation": {
         "kind": "operation",
@@ -201,6 +212,7 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         "monotonic": True,   # validated via core.LIFECYCLE_TRANSITIONS['operation']
         "phases_ref": None,
         "completion_gate": GATE_SPINE,   # same dev spine as milestone (close)
+        "never_terminal": False,         # operations settle (closed)
     },
     "acquisition": {
         "kind": "acquisition",
@@ -218,6 +230,7 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         # ms-142 T3: no gate existed; Scope B gives it the lightweight structural
         # ban (AI cannot self-close `done` without a human/override signal).
         "completion_gate": GATE_SELF_CLOSE_BAN,
+        "never_terminal": False,         # acquisitions settle (done/cancelled)
     },
     "opportunity": {
         "kind": "opportunity",
@@ -236,10 +249,16 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         # the existing sales judge flow (opportunity_judge) IS the gate; the spine
         # deliberately does not stack a second one (transition_approval docstring).
         "completion_gate": GATE_SALES_JUDGE,
+        "never_terminal": False,         # opportunities settle (sales judge 決着)
         # ms-142 e-5256: this funnel HAS a generic set_target_state seam — a
         # non-terminal advance delegates to ``_advance_funnel`` (the sales seam that
-        # writes phase + mirrored status). ``funnel_seam`` names it so a SIBLING
-        # funnel WITHOUT one (account) is a declared distinction, not a kind-branch.
+        # writes phase + mirrored status). ``funnel_seam`` is a SHAPE_FUNNEL-only slot
+        # (irrelevant to non-funnel classes, so they omit it): ONLY its presence gates
+        # dispatch — set_target_state's funnel branch runs ``_advance_funnel`` when it
+        # is non-None and routes to the class verb when None. The string value is a
+        # human-readable seam id (any truthy id names the seam for a reader); a SIBLING
+        # funnel WITHOUT a generic seam (account) declares ``None``, a distinction read
+        # from the model, not a kind-branch.
         "funnel_seam": "sales-opportunity",
     },
     "account": {
@@ -438,8 +457,9 @@ def _resolve(data: dict, target_id: str) -> tuple:
     if rec is None:
         raise TargetStateError(
             f"target not found: {target_id}. Ids are prefixed by class "
-            f"(ms- milestone / op- operation / opp- opportunity / acq- acquisition, "
-            f"plus any descriptor prefix). List targets with `beacon status`.")
+            f"(ms- milestone / op- operation / opp- opportunity / acc- account / "
+            f"acq- acquisition, plus any descriptor prefix). "
+            f"List targets with `beacon status`.")
     kind = _wm.target_kind(target_id) or (rec.get("kind") or "")
     return rec, kind
 

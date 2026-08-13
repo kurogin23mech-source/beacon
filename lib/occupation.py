@@ -818,8 +818,9 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # operations declares a work_item_arm of ``None`` EXPLICITLY (below), not by
 # omission: per the ms-142 T1 裁定 an Operation carries no shared work-item arm
 # yet, but its absence is written as DATA so the two sibling dicts (_ARM_ROLES /
-# _COLLECTION_KIND) share ONE key set (milestones + opportunities + operations) —
-# "均一に宣言" per the class-engine ideal, not a prose-only claim a reader must
+# _COLLECTION_KIND) share ONE key set (milestones + opportunities + operations +
+# accounts, ms-142 e-5256) — "均一に宣言" per the class-engine ideal, not a prose-only
+# claim a reader must
 # trust. Its phase/ball slot is likewise a DECLARED absence, now sourced from the
 # operation state model (``target_state``, T2) which derives ``None``.
 # ``_arm_roles_for`` maps a ``None`` work_item_arm to the
@@ -880,7 +881,8 @@ _ARM_ROLES = {
 # collection-keyed registries to the kind-keyed ones (NARROWING_ID_PREFIXES).
 # Descriptor collections resolve their kind from the descriptor itself, so this
 # only needs the built-ins reachable via ``target_collections`` (milestones +
-# opportunities + operations); see the reachability note above.
+# opportunities + operations + accounts, ms-142 e-5256); see the reachability note
+# above.
 _COLLECTION_KIND = {
     "milestones": "milestone",
     "opportunities": "opportunity",
