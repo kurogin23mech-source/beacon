@@ -32,15 +32,39 @@ import target_engine as te  # noqa: E402
 # Declarations: all four built-ins + descriptor derive a uniform model.
 # ---------------------------------------------------------------------------
 
-def test_all_four_builtin_classes_declare_a_state_model():
-    for kind in ("milestone", "operation", "opportunity", "acquisition"):
+def test_all_builtin_classes_declare_a_state_model():
+    # ms-142 e-5256: iterate BUILTIN_STATE_MODELS.keys() (not a hand-listed tuple) so
+    # a NEW built-in class (account was the 4th → now 5 builtins) cannot slip past
+    # this uniformity check by being forgotten in the loop (maint review 縮退 fix).
+    for kind in ts.BUILTIN_STATE_MODELS:
         model = ts.state_model_for(None, kind)
         assert model is not None, kind
-        # uniform declared keys, whatever the shape.
+        # uniform declared keys, whatever the shape. never_terminal is UNIVERSAL
+        # (every model declares it, ms-142 e-5256).
         assert {"kind", "shape", "state_field", "advanceable_states",
-                "routed_states", "ball_field", "monotonic"} <= set(model)
+                "routed_states", "ball_field", "monotonic",
+                "never_terminal"} <= set(model), kind
         assert model["shape"] in (ts.SHAPE_STATUS_ENUM, ts.SHAPE_TRANSITION_TABLE,
                                   ts.SHAPE_FUNNEL, ts.SHAPE_PHASES)
+
+
+def test_every_funnel_declares_funnel_seam():
+    # ms-142 e-5256 anti-blind-spot (maint/ax review): funnel_seam is read with
+    # ``model.get("funnel_seam") is None``, which would conflate an OMITTED key
+    # (a forgotten declaration) with a None-DECLARATION (account's deliberate "no
+    # generic seam"). Enforce that EVERY SHAPE_FUNNEL builtin declares the key, so an
+    # omit is fail-visible here (explicit None stays legal). A seam-less funnel
+    # (funnel_seam=None) MUST also declare ``phase_verb`` for the generic error.
+    for kind, model in ts.BUILTIN_STATE_MODELS.items():
+        if model["shape"] != ts.SHAPE_FUNNEL:
+            continue
+        assert "funnel_seam" in model, (
+            f"{kind}: SHAPE_FUNNEL model must DECLARE funnel_seam (an omit is "
+            f"indistinguishable from a None-declaration).")
+        if model["funnel_seam"] is None:
+            assert model.get("phase_verb"), (
+                f"{kind}: a seam-less funnel (funnel_seam=None) must declare "
+                f"phase_verb so the generic set_target_state error names its verb.")
 
 
 def test_shapes_match_leader_option_a():
@@ -59,17 +83,25 @@ def test_shapes_match_leader_option_a():
 # ---------------------------------------------------------------------------
 
 def test_every_class_declares_a_completion_gate():
+    # ms-142 e-5256: the invariant is now "completion_gate non-null XOR never_terminal"
+    # — a class EITHER settles behind a gate OR is never-terminal (account: no 決着
+    # grain → gate=None). account is included so a regression that drops its
+    # never_terminal (leaving gate=None with never_terminal=False) fails here.
     expected = {
         "milestone": ts.GATE_SPINE,
         "operation": ts.GATE_SPINE,
         "opportunity": ts.GATE_SALES_JUDGE,
         "acquisition": ts.GATE_SELF_CLOSE_BAN,
+        "account": None,   # never-terminal → declared gate absence
     }
+    # every built-in must be covered (derive-checked so a new class is not forgotten).
+    assert set(expected) == set(ts.BUILTIN_STATE_MODELS)
     for kind, gate in expected.items():
         model = ts.state_model_for(None, kind)
         assert ts.completion_gate_for(model) == gate, kind
-        # non-null is the invariant the coverage matrix depends on.
-        assert ts.completion_gate_for(model) is not None, kind
+        # non-null XOR never_terminal (the coverage matrix depends on this).
+        has_gate = ts.completion_gate_for(model) is not None
+        assert has_gate != bool(model.get("never_terminal")), kind
 
 
 def test_descriptor_class_declares_self_close_ban():
@@ -301,6 +333,44 @@ def test_set_target_state_funnel_matches_phase_set_status_mirror():
     se.advance_funnel_phase(b, b["opportunities"][0], nxt)
     assert a["opportunities"][0]["status"] == b["opportunities"][0]["status"]
     assert a["opportunities"][0]["phase"] == b["opportunities"][0]["phase"]
+
+
+# ---------------------------------------------------------------------------
+# Account funnel: a SEAM-LESS funnel (funnel_seam=None). set_target_state must NOT
+# run the opportunity status-mirror writer on it (that would silently write a bogus
+# ``status`` field onto a record that has none) — it routes to the class verb via the
+# model-declared phase_verb (ms-142 e-5256, leader request-changes fix 2).
+# ---------------------------------------------------------------------------
+
+def _sales_with_account(phase="リード"):
+    return {"name": "s", "profession": "sales", "milestones": [],
+            "accounts": [{"id": "acc-1", "name": "A", "label": "A", "phase": phase,
+                          "phase_history": [], "nurturings": [], "communications": []}]}
+
+
+def test_set_target_state_on_seamless_funnel_routes_to_class_verb():
+    data = _sales_with_account("リード")
+    with pytest.raises(ts.TargetStateError) as exc:
+        ts.set_target_state(data, "acc-1", "未成約顧客")
+    # the error names the class's own phase verb (from the model's phase_verb hint,
+    # with the real target id interpolated) — no opportunity/account text hardcoded
+    # in set_target_state.
+    msg = str(exc.value)
+    assert "acc-1" in msg and "account phase" in msg
+    # crucially: the wrong (opportunity) seam did NOT run — phase unchanged and NO
+    # bogus status field was written onto the account.
+    assert data["accounts"][0]["phase"] == "リード"
+    assert "status" not in data["accounts"][0]
+
+
+def test_seamless_funnel_phase_still_advances_via_class_verb():
+    # The real path (acc- phase_set) still works and writes no status mirror — proves
+    # routing away from set_target_state did not break account phase advancement.
+    import sales_entities as se
+    data = _sales_with_account("リード")
+    se.phase_set(data, "acc-1", "未成約顧客", at="2026-08-13")
+    assert data["accounts"][0]["phase"] == "未成約顧客"
+    assert "status" not in data["accounts"][0]
 
 
 def test_set_target_state_unknown_target():

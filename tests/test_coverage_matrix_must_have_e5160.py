@@ -151,3 +151,49 @@ def test_release_surfaces_in_the_bare_dev_manifest_floor():
     kinds = {tc["kind"]
              for tc in occupation.profession_manifest({})["target_classes"]}
     assert "release" in kinds
+
+
+def test_account_is_a_row_with_a_declared_completion_gate_absence():
+    # ms-142 e-5256: account is the 4th built-in Target-class. It is ball-less and
+    # never-terminal, so its EXPECTED cells are pinned here (leader caution 2): the
+    # completion-gate cell is a DECLARED N/A (never_terminal), while phase-advance
+    # (the phase ladder), deadline (nurturing nrt-), evidence (communications) and
+    # claim must be GREEN. A regression that dropped the account manifest entry, its
+    # nurturing/communications arms, or the never_terminal declaration fails here.
+    assert "account" in TARGET_CLASSES
+    row = TARGET_CLASSES["account"]
+    project = row["project"]()
+    tc = _manifest_tc(project, "account")
+    assert tc is not None, "account is not in the profession_manifest — the " \
+        "TARGET_COLLECTIONS / _COLLECTION_KIND registration regressed."
+    assert tc["collection"] == "accounts"
+    # completion_gate is the only N/A cell; the other four must NOT be N/A (→ GREEN).
+    assert MUST_HAVE_CAPABILITIES["completion_gate"]["na"](tc) is True
+    for cap in ("phase_advance", "deadline", "evidence", "claim"):
+        assert MUST_HAVE_CAPABILITIES[cap]["na"](tc) is False, cap
+    # And behaviour must AGREE: the four GREEN cells actually light up.
+    for cap in ("phase_advance", "deadline", "evidence", "claim"):
+        lit = MUST_HAVE_CAPABILITIES[cap]["probe"](
+            row["project"](), "account", row["target_id"], row["work_item_id"])
+        assert lit, f"account {cap} cell did not light up"
+
+
+def test_account_completion_gate_na_is_driven_by_never_terminal_declaration():
+    # Canary (leader caution 2): the account completion-gate N/A must come from the
+    # DECLARATION (state_model.never_terminal), not an account-name hardcode. Force
+    # never_terminal off on a copy of the manifest tc and the N/A predicate must flip
+    # to False — which (since the completion_gate probe does NOT light up for account)
+    # would make the cell an EMPTY silent gap = CI fail. This proves the declaration
+    # is what holds the cell N/A, and that forcing account non-N/A breaks the matrix.
+    project = TARGET_CLASSES["account"]["project"]()
+    tc = _manifest_tc(project, "account")
+    assert MUST_HAVE_CAPABILITIES["completion_gate"]["na"](tc) is True
+    forced = dict(tc)
+    forced["state_model"] = dict(tc["state_model"], never_terminal=False)
+    assert MUST_HAVE_CAPABILITIES["completion_gate"]["na"](forced) is False, (
+        "forcing account to never_terminal=False must drop its completion-gate N/A "
+        "(the cell would then be a silent gap) — the N/A is declaration-driven.")
+    # The predicate is GENERAL, not account-specific: a terminal class (operation)
+    # is never_terminal=False, so its completion-gate cell is (correctly) non-N/A.
+    op_tc = _manifest_tc(TARGET_CLASSES["operation"]["project"](), "operation")
+    assert MUST_HAVE_CAPABILITIES["completion_gate"]["na"](op_tc) is False

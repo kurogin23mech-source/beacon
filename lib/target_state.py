@@ -154,8 +154,28 @@ GATE_SELF_CLOSE_BAN = "self-close-ban"  # lightweight structural gate: the termi
 #                       permissive (the human is master).
 #   phases_ref        — for a funnel, the config accessor its phases come from.
 #   completion_gate   — which gate projection guards the terminal transition
-#                       (GATE_SPINE / GATE_SALES_JUDGE / GATE_SELF_CLOSE_BAN);
-#                       the anti-self-close capability's declared existence (T3).
+#                       (GATE_SPINE / GATE_SALES_JUDGE / GATE_SELF_CLOSE_BAN), or
+#                       None for a never_terminal class; the anti-self-close
+#                       capability's declared existence (T3).
+#   never_terminal    — UNIVERSAL slot (every model declares it, ms-142 e-5256):
+#                       True = the class never settles (no 決着 grain, e.g. an
+#                       account's 継続 relationship → completion_gate is a declared
+#                       None); False = it settles. Invariant: completion_gate is
+#                       non-null XOR never_terminal. The coverage matrix's
+#                       completion-gate N/A predicate reads never_terminal.
+#   funnel_seam       — SHAPE_FUNNEL slot (EVERY funnel model MUST declare it —
+#                       ``test_every_funnel_declares_funnel_seam`` pins that, so an
+#                       OMIT is never mistaken for a None-DECLARATION; the anti-blind-
+#                       spot rule this PR is about). Names the generic set_target_state
+#                       advance seam (any non-None id), or None when the funnel's phase
+#                       is written by a class verb (account → ``acc- phase_set``). A
+#                       NON-None value routes dispatch to ``_advance_funnel``; None
+#                       routes to the class's ``phase_verb`` error. Non-funnel classes
+#                       omit it (they never reach the SHAPE_FUNNEL branch).
+#   phase_verb        — a SHAPE_FUNNEL-with-``funnel_seam=None`` model MUST declare it:
+#                       the class-specific phase-change verb hint (a ``{target_id}``
+#                       template) the generic set_target_state error interpolates, so a
+#                       seam-less funnel is not mis-directed by a hardcoded string.
 #
 # The advanceable/routed split is the SINGLE source for "which states does a
 # class own and which need a class verb". ``core.VALID_STATUSES`` /
@@ -190,6 +210,7 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         "monotonic": False,
         "phases_ref": None,
         "completion_gate": GATE_SPINE,   # ms-119 目的達成 review + AI-direct ban
+        "never_terminal": False,         # milestones settle (done/observing)
     },
     "operation": {
         "kind": "operation",
@@ -201,6 +222,7 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         "monotonic": True,   # validated via core.LIFECYCLE_TRANSITIONS['operation']
         "phases_ref": None,
         "completion_gate": GATE_SPINE,   # same dev spine as milestone (close)
+        "never_terminal": False,         # operations settle (closed)
     },
     "acquisition": {
         "kind": "acquisition",
@@ -218,6 +240,7 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         # ms-142 T3: no gate existed; Scope B gives it the lightweight structural
         # ban (AI cannot self-close `done` without a human/override signal).
         "completion_gate": GATE_SELF_CLOSE_BAN,
+        "never_terminal": False,         # acquisitions settle (done/cancelled)
     },
     "opportunity": {
         "kind": "opportunity",
@@ -236,6 +259,59 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         # the existing sales judge flow (opportunity_judge) IS the gate; the spine
         # deliberately does not stack a second one (transition_approval docstring).
         "completion_gate": GATE_SALES_JUDGE,
+        "never_terminal": False,         # opportunities settle (sales judge 決着)
+        # ms-142 e-5256: this funnel HAS a generic set_target_state seam — a
+        # non-terminal advance delegates to ``_advance_funnel`` (the sales seam that
+        # writes phase + mirrored status). ``funnel_seam`` is a SHAPE_FUNNEL-only slot
+        # (irrelevant to non-funnel classes, so they omit it): ONLY its presence gates
+        # dispatch — set_target_state's funnel branch runs ``_advance_funnel`` when it
+        # is non-None and routes to the class verb when None. The string value is a
+        # human-readable seam id (any truthy id names the seam for a reader); a SIBLING
+        # funnel WITHOUT a generic seam (account) declares ``None``, a distinction read
+        # from the model, not a kind-branch.
+        "funnel_seam": "sales-opportunity",
+    },
+    "account": {
+        "kind": "account",
+        "shape": SHAPE_FUNNEL,
+        "state_field": "phase",
+        # Account phases are CONFIG-derived (``account_phases``), like the
+        # opportunity funnel — the advanceable set is resolved at runtime, not here.
+        "advanceable_states": None,
+        "routed_states": {},
+        # ms-142 e-5256: an Account carries NO ball. It is a 継続 customer
+        # relationship tracked by a phase ladder (未接触→リード→未成約顧客→成約顧客),
+        # not a deal sitting in someone's court, so the record has no
+        # ``who_has_the_ball`` field. A DECLARED absence, not a gap — so
+        # ``derive_phase_ball`` yields None (no phase/ball pair), matching the data.
+        "ball_field": None,
+        "monotonic": False,
+        "phases_ref": "account_phases",
+        # ms-142 e-5256: an Account NEVER settles — ``DEFAULT_ACCOUNT_PHASES`` has no
+        # terminal phase; the relationship is 継続. ``never_terminal`` is the
+        # DECLARATIVE marker the coverage matrix's completion-gate N/A predicate
+        # reads. It is GENERAL (not account-specific): any future never-terminal
+        # class shares it, while a terminal class (milestone/operation/opportunity/
+        # acquisition) is ``never_terminal=False`` → its completion gate must exist.
+        "never_terminal": True,
+        # No 決着 grain ⇒ no completion gate. A declared absence consistent with
+        # ``never_terminal`` (the matrix asserts the behaviour agrees: nothing lights
+        # up on the completion-gate cell).
+        "completion_gate": None,
+        # ms-142 e-5256: an Account's phase is written by the sales L3 verb
+        # ``acc- phase_set`` (a direct phase write, no status mirror) and advanced UP
+        # by derivation from its opportunities' outcomes
+        # (``_auto_advance_account_phase``). It has NO generic set_target_state seam:
+        # ``_advance_funnel`` is the opportunity status-mirror writer and must not run
+        # on an Account (leader 裁定 e-5256). ``funnel_seam=None`` routes
+        # set_target_state to the class's ``phase_verb`` error rather than the wrong
+        # (opportunity) writer — declaratively (reads the model), not a kind-branch.
+        "funnel_seam": None,
+        # The verb hint the generic set_target_state error interpolates (a
+        # ``{target_id}`` template). Declared per class so the error carries no
+        # account-hardcoded string — a future seam-less funnel supplies its own.
+        "phase_verb": "`beacon account phase {target_id} <phase>` で進めてください "
+                      "(顧客フェーズは商談の成約からも自動 derive されます)。",
     },
 }
 
@@ -362,6 +438,11 @@ def public_state_model(model: Optional[dict]) -> Optional[dict]:
         # ms-142 T3: which completion gate guards this class's terminal (the
         # coverage matrix checks it is non-null for every class with a terminal).
         "completion_gate": model.get("completion_gate"),
+        # ms-142 e-5256: whether the class DECLARES it never settles (no 決着 grain,
+        # e.g. an account's 継続 relationship). The coverage matrix's completion-gate
+        # N/A predicate reads this — GENERAL, so a never-terminal class's missing gate
+        # is a declared absence, not a forgotten one.
+        "never_terminal": bool(model.get("never_terminal")),
     }
 
 
@@ -374,12 +455,12 @@ def _resolve(data: dict, target_id: str) -> tuple:
     collection, profession-generically. Uses ``occupation`` (the manifest-driven
     resolver) so this never indexes ``data['milestones']`` itself; falls back to a
     scan over ``occupation.claim_target_collections`` for ids the manifest resolver
-    does not reach — descriptor ids AND the sales secondary collections
-    (accounts / acquisitions) that ride a separate persistence path and so are NOT
-    in ``iter_target_records``. Without that widening an acquisition (whose state
-    model IS declared) could not be resolved here (ms-142 T2 maintainability
-    review). Lazy import avoids an import cycle (occupation eager-imports this
-    module)."""
+    does not reach — descriptor ids AND the manifest-external claimable collection
+    ``acquisitions`` (ms-142 e-5256: accounts MOVED INTO the manifest, so it IS in
+    ``iter_target_records`` now; only acquisitions still rides a separate persistence
+    path). Without that widening an acquisition (whose state model IS declared) could
+    not be resolved here (ms-142 T2 maintainability review). Lazy import avoids an
+    import cycle (occupation eager-imports this module)."""
     import occupation as _occ
     rec = _occ.find_target(data, target_id)
     if rec is None:
@@ -391,8 +472,9 @@ def _resolve(data: dict, target_id: str) -> tuple:
     if rec is None:
         raise TargetStateError(
             f"target not found: {target_id}. Ids are prefixed by class "
-            f"(ms- milestone / op- operation / opp- opportunity / acq- acquisition, "
-            f"plus any descriptor prefix). List targets with `beacon status`.")
+            f"(ms- milestone / op- operation / opp- opportunity / acc- account / "
+            f"acq- acquisition, plus any descriptor prefix). "
+            f"List targets with `beacon status`.")
     kind = _wm.target_kind(target_id) or (rec.get("kind") or "")
     return rec, kind
 
@@ -450,6 +532,18 @@ def set_target_state(data: dict, target_id: str, to_state: str, *,
     # inside _advance_funnel is what stops the gate logic from spreading across
     # set_target_state.
     if shape == SHAPE_FUNNEL:
+        if model.get("funnel_seam") is None:
+            # ms-142 e-5256: a funnel with NO generic seam (Account) has its phase
+            # written by a class verb (``acc- phase_set``, a direct write) + derivation,
+            # not the opportunity status-mirror writer ``_advance_funnel``. Route to the
+            # class's own ``phase_verb`` hint rather than run the wrong seam on it.
+            # Declarative (reads the model), not a kind-branch, and the verb string is
+            # model-declared so no profession-specific text is hardcoded here.
+            verb_hint = (model.get("phase_verb") or "").format(target_id=target_id)
+            raise TargetStateError(
+                f"{target_id}: {kind} phase は set_target_state の generic funnel "
+                f"seam を持ちません。"
+                + (verb_hint or "クラス固有の phase 変更 verb で進めてください。"))
         return _advance_funnel(data, target_id, rec, model["state_field"], want)
 
     state_field = model["state_field"]
