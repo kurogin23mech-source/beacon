@@ -584,6 +584,34 @@ def is_known_iterator_narrowing(site: str, token: str) -> bool:
     return (site, token) in KNOWN_ITERATOR_NARROWING
 
 
+# Reviewed-legitimate iterator narrowing (ms-142 e-5274 — the narrowing twin of
+# REVIEWED_LEGITIMATE_ARM_READS; the terminal state e-5253 left deferred). The
+# narrowing detector is COARSE-by-design: ``find_iterator_narrowing`` flags an
+# id-prefix / dev-state literal ANYWHERE in an ``iter_target_records``-consuming
+# module, without a dataflow trace proving the literal is applied to the iterated
+# Target records. So a literal that is genuinely NOT narrowing Targets — a
+# ``startswith("ms-")`` on an unrelated string, a dev-state compare on a non-Target
+# field — is a false positive with NO escape but a WRONG remediation (there is
+# nothing to route through the manifest). This is that escape, symmetric to the arm /
+# collection reviewed lists: each entry carries the review evidence, the stale-entry
+# test forces its deletion once the read is refactored away, and it is DISJOINT from
+# ``KNOWN_ITERATOR_NARROWING`` (a narrowing is debt OR reviewed, never both). Empty
+# today (both consumers, cmd_project / session_log, are clean); the mechanism is the
+# terminal state the receiver-blind detector needs — before this, narrowing had only
+# 2 states (debt / new) while the arm family had 3, the exact family asymmetry e-5253
+# leader review flagged and e-5274 closes. ``key`` = (module_stem, signal_token);
+# ``value`` = the evidence string (do-not-remediate rationale).
+REVIEWED_LEGITIMATE_ITERATOR_NARROWING: dict = {}
+
+
+def is_reviewed_legitimate_iterator_narrowing(site: str, token: str) -> bool:
+    """True when (site, token) is a human-reviewed LEGITIMATE narrowing — the
+    id-prefix / dev-state literal is not actually narrowing Target records, so it is a
+    detector false positive that must NOT be remediated (ms-142 e-5274). Symmetric to
+    ``is_reviewed_legitimate_arm_read`` / ``is_reviewed_legitimate_read``."""
+    return (site, token) in REVIEWED_LEGITIMATE_ITERATOR_NARROWING
+
+
 # ---------------------------------------------------------------------------
 # RATCHET_FAMILIES — the ONE registry that unifies the three profession-coupling
 # reach classes (ms-142 e-5143 / PR #629 独立レビュー maint finding). Before this,

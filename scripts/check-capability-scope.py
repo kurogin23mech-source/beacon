@@ -589,13 +589,19 @@ def find_iterator_narrowing(path: str = "") -> list:
     literal is almost certainly narrowing Target records.
 
     ROUTING (single rule, e-5253 leader review — the 3 messages were inconsistent):
-    ``KNOWN_ITERATOR_NARROWING`` is the pending-DEBT ratchet — a real narrowing that is
-    accepted PENDING remediation (owning MS inline), one-way (remediate the handler,
-    then drop the row); NEVER add a row to silence a fresh narrowing. A genuine
-    FALSE-POSITIVE (a literal that is not actually narrowing Target records) has NO
-    terminal state yet — the reviewed-legitimate twin of ``REVIEWED_LEGITIMATE_ARM_
-    READS`` is DEFERRED to e-5274 (family-crossing alignment); today every consumer is
-    clean so the allowlist is empty and the gap is latent."""
+    ``status`` is one of three, now symmetric with the arm family (ms-142 e-5274):
+      - ``"reviewed_correct"`` — a HUMAN-reviewed legitimate narrowing in
+        ``REVIEWED_LEGITIMATE_ITERATOR_NARROWING`` (the literal is not actually
+        narrowing Target records — a detector false positive); advice = the review
+        evidence, NOT a routing hint (do NOT remediate). This is the terminal state
+        e-5253 left deferred, the false-positive escape the receiver-blind (coarse)
+        matcher needs.
+      - ``"pending_debt"`` — a real narrowing accepted PENDING remediation in
+        ``KNOWN_ITERATOR_NARROWING`` (owning MS inline), one-way (remediate the
+        handler, then drop the row); NEVER add a row to silence a fresh narrowing.
+      - ``"new_violation"`` — neither; a fresh narrowing that fails the checker.
+    Both allowlists are empty today (both consumers clean); the mechanism is the
+    3-state terminal set the family needs, matching arm's reviewed→debt→new."""
     paths = [path] if path else _arm_scanned_paths()
     out = []
     for p in paths:
@@ -604,10 +610,20 @@ def find_iterator_narrowing(path: str = "") -> list:
         rel = os.path.relpath(p, REPO)
         stem = os.path.splitext(os.path.basename(p))[0]
         for signal_kind, token, lineno in _narrowing_hits(tree):
-            status = "pending_debt" \
-                if cl.is_known_iterator_narrowing(stem, token) else "new_violation"
+            # reviewed → debt → new, identical order to cl.classify_reach so a
+            # reviewed-legitimate narrowing wins over the (disjoint) debt allowlist
+            # and carries the evidence as its advice, not the routing hint.
+            if cl.is_reviewed_legitimate_iterator_narrowing(stem, token):
+                status = "reviewed_correct"
+                advice = cl.REVIEWED_LEGITIMATE_ITERATOR_NARROWING[(stem, token)]
+            elif cl.is_known_iterator_narrowing(stem, token):
+                status = "pending_debt"
+                advice = _NARROWING_ADVICE[signal_kind]
+            else:
+                status = "new_violation"
+                advice = _NARROWING_ADVICE[signal_kind]
             out.append({"module": stem, "signal_kind": signal_kind, "token": token,
-                        "advice": _NARROWING_ADVICE[signal_kind], "file": rel,
+                        "advice": advice, "file": rel,
                         "lineno": lineno, "status": status})
     return out
 
@@ -615,16 +631,27 @@ def find_iterator_narrowing(path: str = "") -> list:
 def run(commands_path: str = "", arm_path: str = "") -> dict:
     """Run all checks and return a structured result with an ``ok`` verdict.
 
+    FAMILY KEY SCHEME (ms-142 e-5274 — unified): the four reach/narrowing families
+    each expose the SAME four ``<status>_<family>`` keys, so a consumer can build any
+    family's key mechanically instead of memorising per-family suffixes (the old split
+    ``violations`` / ``new_symbol_reach`` / ``new_collection_coupling`` /
+    ``new_arm_coupling`` / ``new_iterator_narrowing`` + inconsistent ``all_*`` invited
+    KeyErrors — e-5253 AX finding). The families are ``symbol`` / ``collection`` /
+    ``arm`` / ``iterator_narrowing``; the statuses are ``all_`` (full inventory),
+    ``new_`` (new_violation subset — the CI-gating one), ``pending_`` (pending_debt
+    subset), ``reviewed_`` (reviewed_correct subset). ``reviewed_symbol`` is always
+    ``[]`` — the symbol family structurally has no reviewed class (a shared verb
+    calling a profession recorder is never "correct by design"), kept present for
+    shape symmetry so the mechanical build never misses.
+
     ``ok`` is the authoritative pass/fail (also the process exit code). It is
-    False if ANY of: unclassified verbs/skills, symbol-reach ``violations``,
-    ``new_collection_coupling``, ``new_arm_coupling`` (ms-142 e-5012),
-    ``new_iterator_narrowing`` (ms-142 e-5253), or unowned L3/L4 verbs/skills
-    (ownership axis, e-4738). A consumer that wants the full failing set must read
-    the FOUR reach/narrowing families — ``violations`` (symbol reach),
-    ``new_collection_coupling`` (collection read), ``new_arm_coupling`` (arm-name
-    read), and ``new_iterator_narrowing`` (iterator narrowing, e-5253) — they are
-    distinct families with distinct item schemas, so gate on ``ok`` rather than
-    iterating one list (AX review 2026-08-03; e-5253 kept this list current)."""
+    False if ANY of: unclassified verbs/skills, unowned L3/L4 verbs/skills (ownership
+    axis, e-4738), an L0 distribution leak (verbs or skills), or a NEW reach/narrowing
+    in ANY of the four families — ``new_symbol`` (symbol reach), ``new_collection``
+    (collection read), ``new_arm`` (arm-name read, ms-142 e-5012), or
+    ``new_iterator_narrowing`` (iterator narrowing, ms-142 e-5253). They are distinct
+    families with distinct item schemas, so gate on ``ok`` rather than iterating one
+    list (AX review 2026-08-03; e-5274 unified the names and kept this list current)."""
     cov = check_coverage()
     skill_cov = cl.reconcile_skills()
     ownership = cl.reconcile_ownership()
@@ -656,6 +683,7 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
     all_narrowing = find_iterator_narrowing(arm_path)
     new_narrowing = [n for n in all_narrowing if n["status"] == "new_violation"]
     pending_narrowing = [n for n in all_narrowing if n["status"] == "pending_debt"]
+    reviewed_narrowing = [n for n in all_narrowing if n["status"] == "reviewed_correct"]
     # Distribution exclusion (ms-134 e-5062 verbs / e-5086 skills): no L0
     # (product-operation, 非配布) capability may appear in the shipped distribution.
     # Verbs: the shipped dispatch surface. Skills: the bundled skills/ tree (every
@@ -670,20 +698,28 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
           and not l0_leak and not l0_skill_leak)
     return {"ok": ok, "coverage": cov, "skill_coverage": skill_cov,
             "ownership": ownership, "skill_ownership": skill_ownership,
-            "violations": viol,
-            "new_symbol_reach": new_viol,
-            "pending_symbol_reach": pending_viol,
-            "all_collection_reads": all_reads,
-            "new_collection_coupling": new_coupling,
-            "pending_collection_coupling": pending_coupling,
-            "reviewed_correct_reads": reviewed_reads,
-            "all_arm_reads": all_arm_reads,
-            "new_arm_coupling": new_arm_coupling,
-            "pending_arm_coupling": pending_arm_coupling,
-            "reviewed_correct_arm_reads": reviewed_arm_reads,
+            # symbol family (no reviewed class → reviewed_symbol always []; present
+            # for shape symmetry so a mechanical <status>_<family> build never misses)
+            "all_symbol": viol,
+            "new_symbol": new_viol,
+            "pending_symbol": pending_viol,
+            "reviewed_symbol": [],
+            # collection family
+            "all_collection": all_reads,
+            "new_collection": new_coupling,
+            "pending_collection": pending_coupling,
+            "reviewed_collection": reviewed_reads,
+            # arm family
+            "all_arm": all_arm_reads,
+            "new_arm": new_arm_coupling,
+            "pending_arm": pending_arm_coupling,
+            "reviewed_arm": reviewed_arm_reads,
+            # iterator_narrowing family (reviewed_ terminal state added e-5274)
             "all_iterator_narrowing": all_narrowing,
             "new_iterator_narrowing": new_narrowing,
             "pending_iterator_narrowing": pending_narrowing,
+            "reviewed_iterator_narrowing": reviewed_narrowing,
+            # distribution exclusion — NOT a reach/narrowing family (own axis)
             "l0_distribution_leak": l0_leak,
             "l0_skill_distribution_leak": l0_skill_leak}
 
@@ -795,8 +831,8 @@ def main() -> int:
               "add its exact name to _SKILL_OWNER. If it introduces a NEW "
               "profession prefix (e.g. beacon-backoffice-*): add a tuple to "
               "_SKILL_OWNER_PREFIX so all future skills under it resolve too.")
-    new_viol = result["new_symbol_reach"]
-    pending_viol = result["pending_symbol_reach"]
+    new_viol = result["new_symbol"]
+    pending_viol = result["pending_symbol"]
     if new_viol:
         print(f"  INVARIANT VIOLATIONS ({len(new_viol)}):")
         for v in new_viol:
@@ -811,8 +847,8 @@ def main() -> int:
               f"remediate then drop from KNOWN_SYMBOL_REACH):")
         for verb, sym in pend_sym:
             print(f"    · {verb} calls {sym}")
-    new_coupling = result["new_collection_coupling"]
-    pending_coupling = result["pending_collection_coupling"]
+    new_coupling = result["new_collection"]
+    pending_coupling = result["pending_collection"]
     if new_coupling:
         print(f"  NEW COLLECTION COUPLING ({len(new_coupling)}) — a shared "
               f"capability reads a profession collection directly:")
@@ -828,7 +864,7 @@ def main() -> int:
               f"allowlisted — remediate then drop from KNOWN_COLLECTION_COUPLING):")
         for verb, coll in pend_pairs:
             print(f"    · {verb} reads data['{coll}']")
-    reviewed = result["reviewed_correct_reads"]
+    reviewed = result["reviewed_collection"]
     if reviewed:
         # Human-reviewed correct reads (data lives only there by design).
         rev_pairs = sorted({(c["verb"], c["collection"]) for c in reviewed})
@@ -836,8 +872,8 @@ def main() -> int:
               f"correct — data lives only there by design, do NOT remediate):")
         for verb, coll in rev_pairs:
             print(f"    ✓ {verb} reads data['{coll}']")
-    new_arm = result["new_arm_coupling"]
-    pending_arm = result["pending_arm_coupling"]
+    new_arm = result["new_arm"]
+    pending_arm = result["pending_arm"]
     if new_arm:
         print(f"  NEW ARM COUPLING ({len(new_arm)}) — a shared-frame aggregator "
               f"reads a profession arm name off a Target record directly:")
@@ -852,7 +888,7 @@ def main() -> int:
               f"remediate then drop from KNOWN_ARM_REACH):")
         for site, arm in pend_arms:
             print(f"    · {site} reads tgt['{arm}']")
-    reviewed_arm = result["reviewed_correct_arm_reads"]
+    reviewed_arm = result["reviewed_arm"]
     if reviewed_arm:
         # Human-reviewed legitimate arm reads (an L1 record's arm, not a Target's).
         rev_arms = sorted({(a["site"], a["arm"]) for a in reviewed_arm})
@@ -876,6 +912,16 @@ def main() -> int:
               f"remediate then drop from KNOWN_ITERATOR_NARROWING):")
         for mod, signal_kind, token in pend_narr:
             print(f"    · {mod} narrows by {signal_kind} '{token}'")
+    reviewed_narrow = result["reviewed_iterator_narrowing"]
+    if reviewed_narrow:
+        # Human-reviewed legitimate narrowing (the literal is not actually narrowing
+        # Target records — a detector false positive), symmetric to reviewed arm reads.
+        rev_narr = sorted({(n["module"], n["signal_kind"], n["token"])
+                           for n in reviewed_narrow})
+        print(f"  reviewed-correct narrowing ({len(rev_narr)}, human-confirmed — the "
+              f"literal does not narrow Target records, do NOT remediate):")
+        for mod, signal_kind, token in rev_narr:
+            print(f"    ✓ {mod} '{token}' ({signal_kind}) is not a Target narrowing")
     if result["ok"]:
         print("  OK: every capability is classified and no profession-shared "
               "capability reaches a profession concrete (no NEW symbol reach or "
