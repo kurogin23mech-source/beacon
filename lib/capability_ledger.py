@@ -535,6 +535,47 @@ def is_reviewed_legitimate_arm_read(site: str, arm: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Iterator NARROWING — the detector-blind-spot class (ms-142 e-5253 / 思想レビュー
+# finding P1). The three reach classes above catch a shared capability that reads a
+# profession CONCRETE (a collection / symbol / arm name). But a capability can go
+# THROUGH the abstraction (``occupation.iter_target_records``) — passing all three
+# ratchets AND, if it is not one of the 4 iterators the positive coverage matrix
+# probes, the matrix too — and STILL silently drop a profession by NARROWING the
+# abstracted records with a dev-specific signal:
+#   - an id-PREFIX filter (``r["id"].startswith("ms-")``) keeps only dev milestones,
+#     dropping a sales project's opp-/acc- Targets;
+#   - a dev-milestone STATE-vocab branch (``r["status"] == "observing"``) assumes the
+#     dev lifecycle a sales opportunity (phases) / operation (open/closed) never has.
+# Neither shows up in the positive matrix (4 iterators only) nor the negative
+# ratchets (no concrete NAME is touched) — exactly "壊れているか実運用で踏むまで
+# 分からない". This registry names the dev-specific signals; the scanner
+# (check-capability-scope.py) derives the id-prefixes from work_model and flags these
+# in the iter_target_records-consuming modules.
+
+# Dev-milestone-EXCLUSIVE status literals. A shared iterator-consumer branching on
+# one of these has assumed the dev milestone review lifecycle — an opportunity
+# advances through config phases, an operation through open/closed, an acquisition
+# through todo/in_progress/done; NONE reach in_review/approved/observing. The shared
+# states (todo / in_progress / done / cancelled) are deliberately EXCLUDED so a
+# legitimate cross-class status check is not a false positive.
+DEV_NARROWING_STATE_VOCAB = frozenset({"in_review", "approved", "observing", "waiting"})
+
+# Ratchet allowlist for accepted-pending narrowing (empty today — both current
+# iter_target_records consumers, cmd_project / session_log, are clean). ONE-WAY
+# ratchet, same discipline as the three above: add a row ONLY for a genuine deferred
+# abstraction (owning MS inline), NEVER to silence a fresh narrowing — route the
+# capability through the manifest/abstraction instead. ``key`` = (module_stem,
+# signal_token) where signal_token is the id-prefix (``"ms-"``) or state literal.
+KNOWN_ITERATOR_NARROWING: frozenset = frozenset()
+
+
+def is_known_iterator_narrowing(site: str, token: str) -> bool:
+    """True when (site, token) is an accepted-pending iterator narrowing (reported as
+    debt, not a CI failure). Symmetric to the three reach allowlists."""
+    return (site, token) in KNOWN_ITERATOR_NARROWING
+
+
+# ---------------------------------------------------------------------------
 # RATCHET_FAMILIES — the ONE registry that unifies the three profession-coupling
 # reach classes (ms-142 e-5143 / PR #629 独立レビュー maint finding). Before this,
 # each class (collection read / symbol call / arm-name read) carried the SAME

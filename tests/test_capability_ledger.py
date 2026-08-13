@@ -359,6 +359,97 @@ def test_sales_concretes_are_in_denylist():
     assert "sales_entities.activity_add" in cl.PROFESSION_CONCRETE_SYMBOLS
 
 
+# --- iterator narrowing blind-spot detector (ms-142 e-5253, finding P1) ------
+
+# A capability that goes THROUGH the abstraction (iter_target_records) — so it
+# touches no concrete collection/symbol/arm NAME — but then NARROWS the records by a
+# dev-specific signal. This is invisible to the positive matrix (only 4 iterators
+# probed) AND the three negative ratchets, exactly the P1 blind spot.
+_NARROW_BY_ID_PREFIX = '''
+import occupation
+def collect(data):
+    out = []
+    for r in occupation.iter_target_records(data):
+        if r["id"].startswith("ms-"):   # keeps only milestones — drops opp-/acc-
+            out.append(r)
+    return out
+'''
+
+_NARROW_BY_DEV_STATE = '''
+import occupation
+def collect(data):
+    # branches on a dev-milestone review state a sales opportunity never has.
+    return [r for r in occupation.iter_target_records(data)
+            if r.get("status") == "observing"]
+'''
+
+_NARROW_CLEAN = '''
+import occupation
+def collect(data):
+    # consumes the abstraction and narrows by NOTHING dev-specific — must NOT flag.
+    return [r for r in occupation.iter_target_records(data)]
+'''
+
+
+def test_narrowing_detector_flags_id_prefix_filter(tmp_path):
+    path = _write(tmp_path, "cmd_synthetic.py", _NARROW_BY_ID_PREFIX)
+    hits = chk.find_iterator_narrowing(path)
+    assert len(hits) == 1, hits
+    assert hits[0]["signal"] == "id-prefix"
+    assert hits[0]["token"] == "ms-"
+    assert hits[0]["status"] == "new_violation"
+
+
+def test_narrowing_detector_flags_dev_state_branch(tmp_path):
+    path = _write(tmp_path, "cmd_synthetic.py", _NARROW_BY_DEV_STATE)
+    hits = chk.find_iterator_narrowing(path)
+    assert len(hits) == 1, hits
+    assert hits[0]["signal"] == "dev-state"
+    assert hits[0]["token"] == "observing"
+    assert hits[0]["status"] == "new_violation"
+
+
+def test_narrowing_detector_passes_clean_consumer(tmp_path):
+    path = _write(tmp_path, "cmd_synthetic.py", _NARROW_CLEAN)
+    assert chk.find_iterator_narrowing(path) == []
+
+
+def test_narrowing_detector_ignores_comment_and_docstring(tmp_path):
+    # AST-based: a prefix/state literal in a comment or string is NOT a hit.
+    src = ('import occupation\n'
+           'def collect(data):\n'
+           '    """mentions ms- and observing but does not narrow."""\n'
+           '    # r["id"].startswith("ms-") in a comment must be ignored\n'
+           '    return list(occupation.iter_target_records(data))\n')
+    path = _write(tmp_path, "cmd_synthetic.py", src)
+    assert chk.find_iterator_narrowing(path) == []
+
+
+def test_narrowing_prefixes_are_derived_from_work_model():
+    # declaration-driven: every canonical Target prefix (incl. account's acc-, added
+    # ms-142 e-5256) is a narrowing signal without a hardcoded list in the scanner.
+    prefixes = set(chk._target_id_prefixes())
+    assert {"ms-", "op-", "opp-", "acc-", "acq-"} <= prefixes
+
+
+def test_real_tree_has_no_iterator_narrowing():
+    # both current iter_target_records consumers (cmd_project / session_log) are
+    # clean; run() must report no NEW narrowing (and it feeds the ok verdict).
+    result = chk.run()
+    assert result["new_iterator_narrowing"] == [], result["new_iterator_narrowing"]
+
+
+def test_new_narrowing_fails_the_ok_verdict(tmp_path, monkeypatch):
+    # a NEW narrowing must flip run()'s ok False (it is wired into the gate, not just
+    # reported). Point the arm/narrowing scan population at a synthetic offender.
+    path = _write(tmp_path, "cmd_synthetic.py", _NARROW_BY_ID_PREFIX)
+    monkeypatch.setattr(chk, "_arm_scanned_paths", lambda arm_path="": [path])
+    result = chk.run()
+    assert result["ok"] is False
+    assert any(n["signal"] == "id-prefix"
+               for n in result["new_iterator_narrowing"])
+
+
 # --- non-enumerated collection coupling (ms-134 e-4740) --------------------
 
 def test_no_new_collection_coupling_on_real_tree():

@@ -81,6 +81,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "lib"))
 
 import capability_ledger as cl  # noqa: E402
+import work_model as _wm  # noqa: E402  (canonical Target id-prefix table, e-5253)
 
 
 def _scanned_paths(commands_path: str = "") -> list:
@@ -492,6 +493,96 @@ def find_arm_coupling(arm_path: str = "") -> list:
     return _find_family_reaches("arm", arm_path)
 
 
+# ---------------------------------------------------------------------------
+# Iterator NARROWING detector (ms-142 e-5253 / 思想レビュー finding P1). The three
+# reach families above catch a shared capability reading a profession CONCRETE. This
+# catches the class BLIND to all of them AND to the positive matrix's 4 probed
+# iterators: a capability that consumes ``iter_target_records`` (so it touches no
+# concrete NAME) but then NARROWS the abstracted records by a dev-specific signal —
+# an id-PREFIX filter or a dev-milestone STATE-vocab branch — silently dropping other
+# professions' Targets. The semantic signal set lives in the ledger
+# (``DEV_NARROWING_STATE_VOCAB`` / ``KNOWN_ITERATOR_NARROWING``); the id-prefixes are
+# DERIVED here from the canonical ``work_model`` table (declaration-driven, so a new
+# Target class's prefix is covered without editing this scanner).
+# ---------------------------------------------------------------------------
+
+def _target_id_prefixes() -> tuple:
+    """The canonical Target id-prefixes (``ms-`` / ``opp-`` / ``acc-`` …), derived
+    from ``work_model``'s prefix→kind table so a NEW Target class is covered without
+    a hardcoded list here."""
+    return tuple(sorted(p + "-" for p in _wm._TARGET_PREFIX_KIND))
+
+
+def _narrowing_hits(tree: ast.AST) -> list:
+    """Return ``[(signal_kind, token, lineno)]`` for every dev-specific NARROWING of
+    abstracted records in ``tree``: an id-prefix ``.startswith("ms-")`` (bare or a
+    tuple of prefixes) or a comparison against a ``DEV_NARROWING_STATE_VOCAB``
+    literal. AST-based, so a prefix/literal in a comment or docstring is not a hit."""
+    prefixes = set(_target_id_prefixes())
+    hits = []
+    for node in ast.walk(tree):
+        # (a) id-prefix filter: <x>.startswith("ms-") or .startswith(("ms-","op-"))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == "startswith":
+            consts = []
+            for a in node.args:
+                if isinstance(a, ast.Constant) and isinstance(a.value, str):
+                    consts.append(a.value)
+                elif isinstance(a, ast.Tuple):
+                    consts += [e.value for e in a.elts
+                               if isinstance(e, ast.Constant)
+                               and isinstance(e.value, str)]
+            for v in consts:
+                if v in prefixes:
+                    hits.append(("id-prefix", v, node.lineno))
+        # (b) dev-state-vocab branch: == / != / in against a dev-milestone literal.
+        if isinstance(node, ast.Compare):
+            for c in [node.left, *node.comparators]:
+                if isinstance(c, ast.Constant) and isinstance(c.value, str) \
+                        and c.value in cl.DEV_NARROWING_STATE_VOCAB:
+                    hits.append(("dev-state", c.value, node.lineno))
+    return hits
+
+
+_NARROWING_ADVICE = {
+    "id-prefix":
+        "filtering iter_target_records by an id-prefix keeps only ONE class and "
+        "drops the others (a sales project's opp-/acc- Targets). Branch on the "
+        "manifest's target-class kind (occupation.profession_manifest) or handle "
+        "every enumerated record, not one prefix.",
+    "dev-state":
+        "branching on a dev-milestone state literal assumes the dev lifecycle a "
+        "sales opportunity (phases) / operation (open/closed) never has. Read the "
+        "class's state model (target_state.state_model_for) instead of a hardcoded "
+        "dev status.",
+}
+
+
+def find_iterator_narrowing(path: str = "") -> list:
+    """Shared-frame aggregators (modules calling ``occupation.iter_target_records``,
+    the same derived population as the arm scan) that NARROW the abstracted records
+    by a dev-specific signal — an id-prefix filter or a dev-milestone state-vocab
+    branch (ms-142 e-5253). Each item: ``{module, signal, token, advice, file,
+    lineno, status}``; ``status`` is ``"pending_debt"`` (in ``KNOWN_ITERATOR_
+    NARROWING``) or ``"new_violation"`` (fails CI). ``module`` is the file stem (the
+    ratchet key, like the arm family — narrowing is attributed to the aggregator
+    MODULE, not a CLI verb)."""
+    paths = [path] if path else _arm_scanned_paths()
+    out = []
+    for p in paths:
+        with open(p, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        rel = os.path.relpath(p, REPO)
+        stem = os.path.splitext(os.path.basename(p))[0]
+        for signal, token, lineno in _narrowing_hits(tree):
+            status = "pending_debt" \
+                if cl.is_known_iterator_narrowing(stem, token) else "new_violation"
+            out.append({"module": stem, "signal": signal, "token": token,
+                        "advice": _NARROWING_ADVICE[signal], "file": rel,
+                        "lineno": lineno, "status": status})
+    return out
+
+
 def run(commands_path: str = "", arm_path: str = "") -> dict:
     """Run all checks and return a structured result with an ``ok`` verdict.
 
@@ -528,6 +619,13 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
     new_arm_coupling = [a for a in all_arm_reads if a["status"] == "new_violation"]
     pending_arm_coupling = [a for a in all_arm_reads if a["status"] == "pending_debt"]
     reviewed_arm_reads = [a for a in all_arm_reads if a["status"] == "reviewed_correct"]
+    # Iterator NARROWING (ms-142 e-5253) — the 4th, differently-shaped reach class:
+    # a capability consuming iter_target_records that narrows by a dev id-prefix /
+    # state-vocab. Same derived population as the arm scan; split like the reaches so
+    # a NEW narrowing fails CI while an allowlisted one is pending debt.
+    all_narrowing = find_iterator_narrowing(arm_path)
+    new_narrowing = [n for n in all_narrowing if n["status"] == "new_violation"]
+    pending_narrowing = [n for n in all_narrowing if n["status"] == "pending_debt"]
     # Distribution exclusion (ms-134 e-5062 verbs / e-5086 skills): no L0
     # (product-operation, 非配布) capability may appear in the shipped distribution.
     # Verbs: the shipped dispatch surface. Skills: the bundled skills/ tree (every
@@ -538,6 +636,7 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
     ok = (not cov["unclassified"] and not skill_cov["unclassified"]
           and not ownership["unowned"] and not skill_ownership["unowned"]
           and not new_viol and not new_coupling and not new_arm_coupling
+          and not new_narrowing
           and not l0_leak and not l0_skill_leak)
     return {"ok": ok, "coverage": cov, "skill_coverage": skill_cov,
             "ownership": ownership, "skill_ownership": skill_ownership,
@@ -552,6 +651,9 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
             "new_arm_coupling": new_arm_coupling,
             "pending_arm_coupling": pending_arm_coupling,
             "reviewed_correct_arm_reads": reviewed_arm_reads,
+            "all_iterator_narrowing": all_narrowing,
+            "new_iterator_narrowing": new_narrowing,
+            "pending_iterator_narrowing": pending_narrowing,
             "l0_distribution_leak": l0_leak,
             "l0_skill_distribution_leak": l0_skill_leak}
 
@@ -728,6 +830,22 @@ def main() -> int:
               f"L1 record's arm, not a profession Target's, do NOT remediate):")
         for site, arm in rev_arms:
             print(f"    ✓ {site} reads ['{arm}']")
+    new_narrow = result["new_iterator_narrowing"]
+    pending_narrow = result["pending_iterator_narrowing"]
+    if new_narrow:
+        print(f"  NEW ITERATOR NARROWING ({len(new_narrow)}) — a shared-frame "
+              f"aggregator consumes iter_target_records then narrows by a dev signal:")
+        for n in new_narrow:
+            print(f"    - {n['module']} narrows by {n['signal']} '{n['token']}' @ "
+                  f"{n['file']}:{n['lineno']}")
+            print(f"      → {n['advice']}")
+    if pending_narrow:
+        pend_narr = sorted({(n["module"], n["signal"], n["token"])
+                            for n in pending_narrow})
+        print(f"  pending iterator-narrowing debt ({len(pend_narr)}, allowlisted — "
+              f"remediate then drop from KNOWN_ITERATOR_NARROWING):")
+        for mod, signal, token in pend_narr:
+            print(f"    · {mod} narrows by {signal} '{token}'")
     if result["ok"]:
         print("  OK: every capability is classified and no profession-shared "
               "capability reaches a profession concrete (no NEW symbol reach or "
