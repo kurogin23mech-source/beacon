@@ -557,13 +557,20 @@ def assert_target_class_owned(data: dict, kind: str) -> None:
 # stay in subset-sync:
 #   - ``TARGET_COLLECTIONS`` (here) = AGGREGATABLE Targets (session_log / manifest);
 #   - ``TARGET_DECOMPOSITION``      = physically DECOMPOSED Targets (row backend +
-#     ``target_disclosure`` scan) — adds accounts / acquisitions;
+#     ``target_disclosure`` scan) = the manifest set MINUS ``operations`` (not row-
+#     decomposed) PLUS ``acquisitions``;
 #   - ``claim_target_collections`` = CLAIMABLE Targets (claim view) = the manifest
-#     set ∪ {accounts, acquisitions}.
+#     set ∪ {acquisitions}.
+# ms-142 e-5256: ``accounts`` MOVED INTO the manifest (``TARGET_COLLECTIONS``), so it
+# is no longer an "extra" beyond the manifest in the decomposition / claim sets —
+# the manifest base now covers it. ``acquisitions`` is the ONLY remaining manifest-
+# external claimable/decomposed Target. THIS comment is the single authoritative map
+# of the three registries; the ``claim_target_collections`` / ``_resolve`` docstrings
+# reference it rather than re-listing the members (so they cannot rot into a lie).
 # The honest invariant (pinned by ``test_operation_target_class_e5156`` /
 # ``claim_target_collections ⊇ TARGET_DECOMPOSITION ∪ target_collections``) keeps
 # them from silently diverging while T1 has them split; unifying the three into one
-# master registry is the deferred deep fix (follow-up, touched by T2–T7).
+# master registry is the deferred deep fix (follow-up e-5265, touched by T2–T7).
 #
 # ms-142 e-5156 (T1): ``operations`` joins the seed so a development Operation is
 # enumerated as a first-class Target beside a Milestone — the same abstraction a
@@ -596,7 +603,7 @@ TARGET_COLLECTIONS = ("milestones", "opportunities", "operations", "accounts")
 
 def target_collections(data: dict | None = None) -> tuple:
     """Return the project.json keys that hold Target records. Without ``data``,
-    the built-in seed (milestones / opportunities). With ``data``, the seed PLUS
+    the built-in seed (``TARGET_COLLECTIONS``). With ``data``, the seed PLUS
     each descriptor's ``collection`` (ms-122 e-3957) AND the profession-default
     collections (dev's ``releases``, ms-142 e-5161), so a data-defined occupation's
     records — and release — are walked by the same aggregators without editing this
@@ -614,9 +621,10 @@ def target_collections(data: dict | None = None) -> tuple:
 
 
 def iter_target_records(data: dict) -> list:
-    """Return every raw Target record across occupations (development
-    Milestones + sales Opportunities + any data-defined target-class records,
-    ms-122 e-3957). A project only ever populates the collections of its own
+    """Return every raw Target record across occupations — every collection in
+    ``target_collections(data)`` (the seed ``TARGET_COLLECTIONS`` + any data-defined
+    target-class collections, ms-122 e-3957). A project only ever populates the
+    collections of its own
     occupation, so callers get exactly that occupation's Targets without
     branching on profession. Used by shared-frame aggregators that walk Target
     entries (session log). Unlike ``project_targets`` this returns the records
@@ -645,15 +653,15 @@ def claim_target_collections(data: dict | None = None) -> tuple:
     """Return every project.json collection whose records are CLAIMABLE Targets
     across occupations (ms-142 e-5156 / T1).
 
-    Sourced from ``profession_manifest`` (the DDL-decoupled Target set —
-    milestones, opportunities, the ms-142 operations addition, and any descriptor
-    collections) PLUS the sales secondary Target collections (accounts /
-    acquisitions) that are claimable but ride a separate persistence path. This is
-    the single source ``claim_view.build_claim_views`` consumes so its enumeration
-    is NOT coupled to the physical decomposition / DDL registry
-    (``TARGET_DECOMPOSITION``) — the T1 裁定 goal — while still covering 顧客 =
-    account. Adding operations to the manifest therefore lights up the 2-layer
-    claim filter for Operations with no edit in ``claim_view`` (T7 も同時前進)."""
+    Sourced from ``profession_manifest`` (the DDL-decoupled Target set) PLUS the
+    manifest-external claimable collections in ``_CLAIM_SECONDARY_COLLECTIONS`` — see
+    the authoritative 3-registry map above ``TARGET_COLLECTIONS`` for what each set
+    contains (ms-142 e-5256: 顧客 = account is now IN the manifest, so only
+    acquisitions is secondary). This is the single source ``claim_view.build_claim_
+    views`` consumes so its enumeration is NOT coupled to the physical decomposition /
+    DDL registry (``TARGET_DECOMPOSITION``) — the T1 裁定 goal. Adding a class to the
+    manifest therefore lights up the 2-layer claim filter for it with no edit in
+    ``claim_view`` (T7 も同時前進)."""
     cols = [tc["collection"]
             for tc in profession_manifest(data or {})["target_classes"]]
     for extra in _CLAIM_SECONDARY_COLLECTIONS:
