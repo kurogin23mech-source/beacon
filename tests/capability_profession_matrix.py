@@ -59,10 +59,16 @@ def _dev_project():
 
 
 def _sales_project():
+    # ms-142 e-5254: carry the shipped funnel vocabulary so the completion-gate
+    # BEHAVIOUR probe can attempt a real terminal (決着) phase and observe the sales
+    # judge gate refuse it. Without a funnel config the terminal is unrecognised and
+    # the ban has nothing to fire on.
+    import sales_entities as _se
     return {
         "name": "sales", "profession": "sales", "milestones": [],
+        "opportunity_phases": [dict(p) for p in _se.DEFAULT_OPPORTUNITY_PHASES],
         "opportunities": [
-            {"id": "opp-1", "label": "O", "status": "open", "phase": "lead",
+            {"id": "opp-1", "label": "O", "status": "open", "phase": "商談準備",
              "occupation": {"session_id": "sv-sales"},
              "activities": [
                  {"id": "act-1", "description": "call", "deadline": "2026-08-06",
@@ -324,9 +330,53 @@ def _cap_evidence(project, kind, target_id, work_item_id):
                for _ev, t, _a in occupation.iter_evidence(project))
 
 
+def _a_gated_state(project, kind, model):
+    """Return ONE state whose transition the completion gate must REFUSE (a
+    routed/gated state, or — for a funnel — a config-terminal phase), else None.
+    Used by the completion-gate BEHAVIOUR probe to actually attempt the banned
+    transition instead of trusting a declared label (ms-142 e-5254)."""
+    routed = model.get("routed_states") or {}
+    if routed:
+        return next(iter(routed))
+    if model.get("shape") == target_state.SHAPE_FUNNEL:
+        # a funnel's terminal (決着) phase is config-derived, not in routed_states.
+        import sales_entities as _se
+        return next((p["name"] for p in _se.opportunity_phases(project)
+                     if p.get("terminal")),
+                    next((p["name"] for p in _se.DEFAULT_OPPORTUNITY_PHASES
+                          if p.get("terminal")), None))
+    return None
+
+
 def _cap_completion_gate(project, kind, target_id, work_item_id):
-    return target_state.completion_gate_for(
-        target_state.state_model_for(project, kind)) is not None
+    """GREEN iff the completion gate BEHAVIOURALLY fires — attempting a
+    terminal/gated transition via the generic ``set_target_state`` path is actually
+    REFUSED (the anti-self-close ban applies), NOT merely that a gate LABEL is
+    declared (ms-142 e-5254: DECLARATION≠ENFORCEMENT — the drift-checker
+    target_state.py promised itself). A class that declares a gate but leaves the
+    terminal reachable (ban not wired) returns False → an EMPTY cell → CI fail.
+
+    A never_terminal class has no terminal to ban (its N/A is handled by
+    _na_completion_gate); this probe is only asked to light up for terminal classes.
+    MUTATES ``project`` (attempts a transition) — the matrix hands a fresh project
+    per cell, as with _cap_phase_advance."""
+    model = target_state.state_model_for(project, kind)
+    if not model:
+        return False
+    if model.get("never_terminal"):
+        # no terminal to ban (account's 継続 relationship) — its cell is a declared
+        # N/A (_na_completion_gate), so the gate must NOT light up here.
+        return False
+    banned = _a_gated_state(project, kind, model)
+    if banned is None:
+        # a terminal class with no reachable gated state → the ban cannot be proven
+        # to fire (a label without an enforceable target is exactly the drift).
+        return False
+    try:
+        target_state.set_target_state(project, target_id, banned)
+        return False   # the ban did NOT fire — the gate is a label-only lie.
+    except target_state.TargetStateError:
+        return True    # the ban fired: the gate ENFORCES, not just declares.
 
 
 def _cap_claim(project, kind, target_id, work_item_id):
