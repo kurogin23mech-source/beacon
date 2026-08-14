@@ -124,26 +124,79 @@ class TestGuardBusWrite(unittest.TestCase):
 
 
 class TestApiClientBusPostGuarded(unittest.TestCase):
-    """The guard is wired into ApiClient.post_bus_event itself, so even a test
-    whose own mock is misconfigured (the failure mode that caused this leak)
-    cannot reach the live bus."""
+    """The guard is wired into EVERY bus-mutating ApiClient verb (ms-108 e-5216),
+    so even a test whose own mock is misconfigured (the failure mode that caused
+    this leak) cannot reach the live bus through ANY bus-write door."""
+
+    def setUp(self):
+        self._saved = os.environ.get("BEACON_TEST_MODE")
+        os.environ["BEACON_TEST_MODE"] = "1"
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("BEACON_TEST_MODE", None)
+        else:
+            os.environ["BEACON_TEST_MODE"] = self._saved
+
+    def _prod_client(self):
+        import api_client
+        return api_client.ApiClient("https://beacon-ai.dev", token="x")
 
     def test_post_bus_event_blocks_prod_in_test_context(self):
+        with self.assertRaises(RuntimeError):
+            self._prod_client().post_bus_event(
+                "beacon-b95643", "operation-trigger",
+                payload={"op_id": "op-1", "message": "test"},
+            )
+
+    def test_advance_bus_cursor_blocks_prod_in_test_context(self):
+        # e-5216: advancing a live recipient's cursor from a test = silent event skip.
+        with self.assertRaises(RuntimeError):
+            self._prod_client().advance_bus_cursor(
+                "beacon-b95643", "recipient-1", "2026-08-14T00:00:00Z")
+
+    def test_ack_bus_event_receipt_blocks_prod_in_test_context(self):
+        with self.assertRaises(RuntimeError):
+            self._prod_client().ack_bus_event_receipt(
+                "beacon-b95643", "evt-1", stage="opened",
+                recipient_session_id="sv-x")
+
+    def test_issue_bus_envelope_blocks_prod_in_test_context(self):
+        with self.assertRaises(RuntimeError):
+            self._prod_client().issue_bus_envelope("beacon-b95643", tier="T1")
+
+    def test_guard_raises_distinguishable_subclass(self):
+        # e-5300: the guard raises ProdWriteBlocked (a RuntimeError subclass) so a
+        # caller with a broad `except RuntimeError` fallback can tell it apart and
+        # re-raise instead of swallowing it into a degraded path.
+        import cloud_write_guard
+        with self.assertRaises(cloud_write_guard.ProdWriteBlocked):
+            self._prod_client().post_bus_event(
+                "beacon-b95643", "dm", payload={"text": "x"})
+
+    def test_respond_dm_approval_blocks_prod_in_test_context(self):
+        with self.assertRaises(RuntimeError):
+            self._prod_client().respond_dm_approval(
+                "beacon-b95643", "evt-1", decision="approve")
+
+    def test_sister_verbs_allow_local_in_test_context(self):
+        # local target → guard is inert; the verbs proceed to POST (which then fails
+        # on the fake transport, NOT on the guard). We only assert the guard did not
+        # raise RuntimeError with the guard's prod-refusal message.
         import api_client
-        saved = os.environ.get("BEACON_TEST_MODE")
-        os.environ["BEACON_TEST_MODE"] = "1"
-        try:
-            client = api_client.ApiClient("https://beacon-ai.dev", token="x")
-            with self.assertRaises(RuntimeError):
-                client.post_bus_event(
-                    "beacon-b95643", "operation-trigger",
-                    payload={"op_id": "op-1", "message": "test"},
-                )
-        finally:
-            if saved is None:
-                os.environ.pop("BEACON_TEST_MODE", None)
-            else:
-                os.environ["BEACON_TEST_MODE"] = saved
+        client = api_client.ApiClient("http://localhost:8000", token="x")
+        for call in (
+            lambda: client.advance_bus_cursor("p", "r", "2026-08-14T00:00:00Z"),
+            lambda: client.ack_bus_event_receipt("p", "e", stage="opened",
+                                                 recipient_session_id="s"),
+            lambda: client.issue_bus_envelope("p", tier="T1"),
+            lambda: client.respond_dm_approval("p", "e", decision="approve"),
+        ):
+            try:
+                call()
+            except Exception as exc:  # transport error is fine; guard-refusal is not
+                self.assertNotIn("refusing to post a bus event", str(exc))
+                self.assertNotIn("refusing to write", str(exc))
 
 
 class _FakeClient:

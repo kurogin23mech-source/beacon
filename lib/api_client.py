@@ -202,6 +202,17 @@ class ApiClient:
         maint finding)."""
         return getattr(self, "_base_url", "")
 
+    def _guard_bus_write(self) -> None:
+        """Refuse a bus WRITE from a test context targeting prod. The ONE
+        embodiment of "guard before a bus write" (ms-108 e-5216 / e-5300 maint
+        review): every bus-mutating verb — post_bus_event / issue_bus_envelope /
+        advance_bus_cursor / ack_bus_event_receipt / respond_dm_approval — calls
+        THIS, so the decision and its deferred import live in one place instead of
+        a 2-line preamble copied into five method bodies (which imposed a hidden
+        sync obligation on the next author). No-op off test context / non-prod."""
+        import cloud_write_guard
+        cloud_write_guard.guard_prod_bus_write(self._guard_base_url())
+
     def _request(self, method: str, path: str, body: dict | None = None,
                  *, extra_headers: dict | None = None) -> dict:
         # ms-98 / e-2777: fail fast when a recent 429 storm has opened
@@ -691,11 +702,9 @@ class ApiClient:
         # ms-108 e-5194 follow-up: structural leak guard. A test context posting
         # a bus event to the production cloud is what let a non-hermetic
         # operation-trigger unit test spray op-1 "test" events onto the live bus
-        # every suite run. guard_prod_project_write only covered project
-        # creation, so bus posts slipped through — block them at the same choke
-        # point. No-op outside test context / non-prod targets.
-        import cloud_write_guard
-        cloud_write_guard.guard_prod_bus_write(self._guard_base_url())
+        # every suite run. Routed through the shared _guard_bus_write helper
+        # (e-5300) so all bus-write verbs share one guard call. No-op off test/prod.
+        self._guard_bus_write()
         body = {
             "channel": channel,
             "sender_session_id": sender_session_id,
@@ -783,6 +792,10 @@ class ApiClient:
         receive-time verify pipeline. It must NOT be grafted onto the returned
         envelope afterward — that invalidates the signature (the original bug).
         """
+        # ms-108 e-5216: a bus WRITE choke point, same as post_bus_event — minting an
+        # envelope against prod from a test context is a prod write. Shared helper
+        # (e-5300) so guarding does not leave sibling bus-write verbs as bypass doors.
+        self._guard_bus_write()
         body = {
             "tier": tier,
             "actions_authorized": actions_authorized or [],
@@ -876,6 +889,10 @@ class ApiClient:
 
     def advance_bus_cursor(self, project_id: str, recipient_id: str,
                            last_seen_at: str) -> dict:
+        # ms-108 e-5216: advancing a cursor is a prod bus WRITE — a mis-mocked test
+        # could move a real recipient's cursor and make a live session silently skip
+        # events. Shared guard helper (e-5300); no-op off test/prod.
+        self._guard_bus_write()
         return self.post(
             f"/api/projects/{project_id}/bus/cursors/{recipient_id}",
             {"last_seen_at": last_seen_at},
@@ -898,6 +915,9 @@ class ApiClient:
     def ack_bus_event_receipt(self, project_id: str, event_id: str, *,
                               stage: str, recipient_session_id: str) -> dict:
         """Stamp a receipt stage (delivered|opened). First-write-wins per stage."""
+        # ms-108 e-5216: stamping a receipt is a prod bus WRITE — shared guard helper
+        # (e-5300); no-op off test context / non-prod targets.
+        self._guard_bus_write()
         return self.post(
             f"/api/projects/{project_id}/bus/{urllib.parse.quote(event_id)}/ack",
             {"stage": stage, "recipient_session_id": recipient_session_id},
@@ -940,6 +960,9 @@ class ApiClient:
           * 409 — already decided by someone else, or attempt to flip decision
         Idempotent for "same caller resubmits same decision" (= no-op return).
         """
+        # ms-108 e-5216: recording an approve/deny decision is a prod bus WRITE —
+        # shared guard helper (e-5300); no-op off test/prod.
+        self._guard_bus_write()
         return self.post(
             f"/api/projects/{project_id}/dm/approval/"
             f"{urllib.parse.quote(event_id)}",

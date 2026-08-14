@@ -9000,8 +9000,13 @@ def cmd_opportunity_transition_date():
 
 
 def cmd_opportunity_anchor():
-    """Bind a work item (面談/活動/ナーチャリング) as the発火源 of an
-    opportunity's open前進ゲート (ms-144 e-5177).
+    """Bind a work item (面談 mtg- / 活動 act-) as the発火源 of an opportunity's open
+    前進ゲート (ms-144 e-5177).
+
+    A nurturing (nrt-) is NOT accepted here — it lives under an Account, not an
+    Opportunity, so ``anchor_opportunity_gate`` rejects it with a recovery hint
+    (ms-144 e-5223: the docstring lists only what the verb actually binds, so the
+    surface never reads as if nrt- were allowed).
 
     Env: BEACON_OPP_ID, BEACON_WORK_ITEM_ID. Wraps
     sales_entities.anchor_opportunity_gate — idempotent, ownership-checked, and

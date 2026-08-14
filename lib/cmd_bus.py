@@ -980,6 +980,7 @@ def cmd_bus_send():
         # for). For T1 these line up; for the wider model they need not.
         if len(actions_authorized) == 1:
             requested_action = actions_authorized[0]
+        import cloud_write_guard  # e-5300: for the ProdWriteBlocked re-raise below
         try:
             # Pass consent_claim only when present so the ordinary send path
             # calls issue_bus_envelope with the exact prior kwargs (keeps the
@@ -995,6 +996,14 @@ def cmd_bus_send():
                 data_class="free",
                 **_issue_kwargs,
             )
+        except cloud_write_guard.ProdWriteBlocked:
+            # ms-108 e-5300 (AX review): a test-context prod-bus-write refusal is NOT
+            # an "envelope unavailable" signal — re-raise it so it is a hard stop,
+            # not swallowed into the legacy POST fallback below (which would mute the
+            # guard's diagnostic and defeat the issue_bus_envelope guard). It is a
+            # ProdWriteBlocked, a RuntimeError subclass, so this clause must precede
+            # the broad ``except RuntimeError`` handler.
+            raise
         except RuntimeError as e:
             # api_client wraps HTTPError as `RuntimeError("API error CODE: ...")`.
             # 404 = legacy server, 400 = rejected payload — both fall back to

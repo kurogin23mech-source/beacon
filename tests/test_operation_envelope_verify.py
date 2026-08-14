@@ -271,25 +271,23 @@ class _EnvelopeCaptureClient:
 
 
 @pytest.fixture
-def cloud_mode(tmp_path, monkeypatch):
+def cloud_mode(fake_cloud_config, monkeypatch):
     """Bare cloud-mode project so `_push_operation_trigger_to_bus` reaches
-    the post path. Caller wires the ApiClient stub via `cloud_client`."""
-    beacon_dir = tmp_path / ".beacon"
-    beacon_dir.mkdir(parents=True)
-    (beacon_dir / "cloud.json").write_text(
-        json.dumps({"api_url": "https://api.test", "project_id": "proj-1"}))
-    monkeypatch.setattr(commands, "_get_cloud_config_path",
-                        lambda: str(beacon_dir / "cloud.json"))
+    the post path. Caller wires the ApiClient stub via `cloud_client`.
+
+    ms-108 e-5217: the cloud config path now comes from the canonical
+    ``fake_cloud_config`` fixture (BEACON_PROJECT_FILE → get_project_file() →
+    _get_cloud_config_path) rather than monkeypatching ``_get_cloud_config_path``
+    in each module's namespace. That removes the namespace-knowledge trap this
+    fixture used to embody (it had to mirror the patch onto ``cmd_trigger`` after
+    e-4971 moved the caller) — the env-var path resolves in every module at once.
+    Only ``_extract_token`` (an auth concern, not the config path) is still stubbed."""
+    beacon_dir = fake_cloud_config
     fake_auth = type(sys)("auth")
     fake_auth.load_credentials = lambda: {"token": "fake"}
     monkeypatch.setitem(sys.modules, "auth", fake_auth)
     monkeypatch.setattr(commands, "_extract_token", lambda c: "fake-token")
-    # ms-127 e-4971: _push_operation_trigger_to_bus moved to cmd_trigger and
-    # resolves _get_cloud_config_path / _extract_token in ITS namespace, so
-    # mirror the patches (patching commands alone no longer intercepts).
-    monkeypatch.setattr(cmd_trigger, "_get_cloud_config_path",
-                        commands._get_cloud_config_path)
-    monkeypatch.setattr(cmd_trigger, "_extract_token", commands._extract_token)
+    monkeypatch.setattr(cmd_trigger, "_extract_token", lambda c: "fake-token")
     return beacon_dir
 
 
