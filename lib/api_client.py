@@ -783,6 +783,13 @@ class ApiClient:
         receive-time verify pipeline. It must NOT be grafted onto the returned
         envelope afterward — that invalidates the signature (the original bug).
         """
+        # ms-108 e-5216: a bus WRITE choke point, same as post_bus_event. Minting an
+        # envelope against the production cloud from a test context is a prod write —
+        # guard it too, so guarding only post_bus_event does not leave sibling
+        # bus-write verbs as bypass doors (guard_prod_project_write の「一方だけ守ると
+        # 他方が抜ける」原則)。No-op outside test context / non-prod targets.
+        import cloud_write_guard
+        cloud_write_guard.guard_prod_bus_write(self._guard_base_url())
         body = {
             "tier": tier,
             "actions_authorized": actions_authorized or [],
@@ -876,6 +883,11 @@ class ApiClient:
 
     def advance_bus_cursor(self, project_id: str, recipient_id: str,
                            last_seen_at: str) -> dict:
+        # ms-108 e-5216: advancing a cursor is a prod bus WRITE — a mis-mocked test
+        # could move a real recipient's cursor and make a live session silently skip
+        # events. Guard at the same choke point as post_bus_event (no-op off test/prod).
+        import cloud_write_guard
+        cloud_write_guard.guard_prod_bus_write(self._guard_base_url())
         return self.post(
             f"/api/projects/{project_id}/bus/cursors/{recipient_id}",
             {"last_seen_at": last_seen_at},
@@ -898,6 +910,10 @@ class ApiClient:
     def ack_bus_event_receipt(self, project_id: str, event_id: str, *,
                               stage: str, recipient_session_id: str) -> dict:
         """Stamp a receipt stage (delivered|opened). First-write-wins per stage."""
+        # ms-108 e-5216: stamping a receipt is a prod bus WRITE — guard it at the same
+        # choke point as post_bus_event (no-op off test context / non-prod targets).
+        import cloud_write_guard
+        cloud_write_guard.guard_prod_bus_write(self._guard_base_url())
         return self.post(
             f"/api/projects/{project_id}/bus/{urllib.parse.quote(event_id)}/ack",
             {"stage": stage, "recipient_session_id": recipient_session_id},
@@ -940,6 +956,10 @@ class ApiClient:
           * 409 — already decided by someone else, or attempt to flip decision
         Idempotent for "same caller resubmits same decision" (= no-op return).
         """
+        # ms-108 e-5216: recording an approve/deny decision is a prod bus WRITE —
+        # guard it at the same choke point as post_bus_event (no-op off test/prod).
+        import cloud_write_guard
+        cloud_write_guard.guard_prod_bus_write(self._guard_base_url())
         return self.post(
             f"/api/projects/{project_id}/dm/approval/"
             f"{urllib.parse.quote(event_id)}",

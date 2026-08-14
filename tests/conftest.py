@@ -12,6 +12,7 @@ Tests that specifically exercise the ban (test_attainment_gate_ban.py) override
 this per-test via explicit env swaps, so the global default never masks them.
 """
 
+import json
 import os
 import sys
 
@@ -57,4 +58,29 @@ def _isolate_bus_sent_log(tmp_path, monkeypatch):
     log. Tests that specifically exercise the guard set their own contents."""
     monkeypatch.setenv(
         "BEACON_BUS_SENT_LOG_PATH", str(tmp_path / "bus-sent-log.json"))
+
+
+@pytest.fixture
+def fake_cloud_config(tmp_path, monkeypatch):
+    """Canonical, namespace-free way to fake cloud mode in a unit test (ms-108 e-5217).
+
+    Writes a ``cloud.json`` next to a tmp project file and points
+    ``BEACON_PROJECT_FILE`` at that project file. Because ``_get_cloud_config_path``
+    derives the cloud path from ``get_project_file()`` (which reads
+    ``BEACON_PROJECT_FILE``), EVERY module that calls ``_get_cloud_config_path``
+    resolves to THIS ``cloud.json`` with **no monkeypatch** — so a test no longer
+    needs to know which module's globals hold the from-imported symbol and patch
+    each one (the op-1 leak's真因: patching ``commands._get_cloud_config_path`` alone
+    silently missed ``cmd_trigger``'s copy).
+
+    Returns the ``.beacon`` dir (a ``pathlib.Path``); overwrite ``cloud.json`` there
+    to customise ``api_url`` / ``project_id`` before the code under test reads it."""
+    beacon_dir = tmp_path / ".beacon"
+    beacon_dir.mkdir(parents=True, exist_ok=True)
+    (beacon_dir / "cloud.json").write_text(
+        json.dumps({"api_url": "https://api.test", "project_id": "proj-1"}))
+    (beacon_dir / "project.json").write_text(
+        json.dumps({"name": "t", "milestones": []}))
+    monkeypatch.setenv("BEACON_PROJECT_FILE", str(beacon_dir / "project.json"))
+    return beacon_dir
 

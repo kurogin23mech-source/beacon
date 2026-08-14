@@ -129,12 +129,12 @@ def guard_prod_bus_write(base_url: str) -> None:
     bus **post** at the same choke point so no test can leak a bus *post* to
     the live bus even when its own mock is wired up incorrectly.
 
-    Scope note (ms-108 e-5194 AX finding): this guards ``post_bus_event`` only.
-    Sibling bus-mutating verbs (``advance_bus_cursor`` / ``ack_bus_event_receipt``
-    / ``issue_bus_envelope`` / ``respond_dm_approval``) are NOT yet routed through
-    a guard — extending coverage to them is tracked as a follow-up. Do not read
-    this as "no test can touch the live bus"; it means "no test can leak a bus
-    post".
+    Scope (ms-108 e-5216): this same choke point now guards EVERY bus-mutating
+    verb, not just ``post_bus_event``. The sibling writes — ``advance_bus_cursor``
+    / ``ack_bus_event_receipt`` / ``issue_bus_envelope`` / ``respond_dm_approval``
+    — each call ``guard_prod_bus_write`` before their POST (e-5194 AX finding: a
+    guard that covers one write door leaves the others as bypass doors). So a test
+    can no longer leak ANY bus write to the live bus even with a mis-wired mock.
 
     No-op outside a test context (normal CLI / autonomous use is unaffected)
     and no-op for non-prod targets (local mode, staging, a sandbox cloud). The
