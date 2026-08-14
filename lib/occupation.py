@@ -211,7 +211,17 @@ def _changelog_via_milestone(data: dict, target_id: str, *, arm: str,
     milestone resolution + dedup + progress bump). No-ops (``no-milestone``) when the
     id resolves to no recordable milestone; a bad EXPLICIT id raises through the
     resolver (a real user error, not swallowed). ``arm`` is informational — save_entry
-    owns the ``entries`` write."""
+    owns the ``entries`` write, so the declared arm is NOT honoured here (e-5255 AX
+    review low).
+
+    ``collection`` MUST be ``"milestones"``: this strategy calls save_entry which
+    resolves a real milestone, so routing a non-milestone Target here would raise at
+    write time. ``target_descriptor`` forbids a descriptor from declaring the
+    ``"milestone"`` recorder, so in practice only the built-in milestones seed reaches
+    this; the guard below converts any future misroute into a safe no-op instead of a
+    crash (e-5255 AX review high#2, defensive)."""
+    if collection != "milestones":
+        return {"recorded": False, "reason": f"{kind or 'unknown'}-changelog-misrouted"}
     if core.resolve_recordable_milestone(data, target_id) is None:
         return {"recorded": False, "reason": "no-milestone"}
     result = core.save_entry(data, ms_id=target_id, description=description,
@@ -315,6 +325,14 @@ def record_target_entry(data: dict, target_id: str = "", *, description: str,
     # its real kind and can light up its changelog — the static ``work_model`` table
     # only knows built-in prefixes. Fall back to the static table for a non-manifest
     # ref (a trek ``tk-`` → ``trek``) so the no-op reason stays ``trek-no-changelog``.
+    #
+    # KNOWN ASYMMETRY (e-5255 maint review): the sibling evidence line
+    # (``add_evidence`` → ``evidence_arm_for``) still resolves kind with the STATIC
+    # ``_wm.target_kind`` only, so it does not yet light up a pure-descriptor class's
+    # evidence arm. That is unchanged here (byte-preserving for built-ins, since
+    # ``narrowing_kind_for_ref`` and ``_wm.target_kind`` agree on built-in prefixes);
+    # unifying the evidence line onto the data-aware resolver is a separate follow-up
+    # (it changes add_evidence behaviour for descriptors and needs its own test).
     kind = narrowing_kind_for_ref(target_id, data) or _wm.target_kind(target_id)
     decl = changelog_recorder_for(data, kind)
     if decl is None:
@@ -890,11 +908,19 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # change ``beacon task done`` — not the declaration.
 # ``changelog`` (ms-142 e-5255) DECLARES the side-effect log slot that
 # ``record_target_entry`` appends onto when a shared capability (a doc link) touches
-# the Target: ``{"arm": <nested list>, "recorder": <strategy in _CHANGELOG_RECORDERS>}``
-# or ``None`` (the class has no changelog → record_target_entry NO-OPs, unchanged). The
-# recorder STRATEGY is declared, not branched on ``kind``: milestones use ``"milestone"``
-# (core.save_entry — dev dedup + progress), operations use ``"plain"`` (a bare append),
-# and a descriptor occupation declaring ``changelog`` lights up its changelog write with
+# the Target: ``{"arm": <str — the collection's child-list name>, "recorder": <strategy
+# name in _CHANGELOG_RECORDERS>}`` or ``None`` (the class has no changelog →
+# record_target_entry NO-OPs, unchanged). NOTE the ``arm`` is a SCALAR string (unlike
+# the list-of-dicts ``evidence_arms`` above — do not copy that shape here; e-5255 AX
+# review high#1). The recorder STRATEGY is declared, not branched on ``kind``: milestones
+# use ``"milestone"`` (core.save_entry — dev dedup + progress; that recorder writes
+# save_entry's OWN ``entries`` and does NOT honour the declared ``arm`` — the arm here is
+# ``"entries"`` for consistency only, e-5255 AX review low), operations use ``"plain"``
+# (a bare append that DOES write the declared arm). ``"milestone"`` is a BUILT-IN-only
+# strategy (it needs a real milestone) — a DESCRIPTOR may only declare ``"plain"``
+# (``target_descriptor.DESCRIPTOR_SAFE_CHANGELOG_RECORDERS``), so a descriptor cannot
+# route to the milestone recorder and crash at write time (e-5255 AX review high#2).
+# A descriptor occupation declaring ``changelog`` lights up its changelog write with
 # ZERO edit to record_target_entry — the "declare ⇒ light up" contract the evidence line
 # (evidence_arms → add_evidence) already has, now extended to the changelog side-log so a
 # new class is no longer stuck at the historical no-op (T1 裁定 / e-5255). Sales
@@ -1631,9 +1657,19 @@ def changelog_recorder_for(data: dict, kind: str) -> dict | None:
     own) lights up the write by declaration alone; a class with no declaration returns
     ``None`` and record_target_entry no-ops (the historical sales / trek / unknown
     behaviour, unchanged). An UNKNOWN recorder (a descriptor typo) also returns
-    ``None`` — a safe no-op — rather than crashing every doc write. ``collection`` is
-    carried so the plain recorder can find the record without a second kind→collection
-    lookup."""
+    ``None`` — a safe no-op — rather than crashing every doc write; the typo is ALSO
+    surfaced at project-load by ``target_descriptor.validate_descriptor`` so it is not
+    only a silent miss (e-5255 AX review medium). ``collection`` is carried so the
+    plain recorder can find the record without a second kind→collection lookup.
+
+    RETURN SHAPE (e-5255 AX/maint review): unlike its scalar sibling
+    ``evidence_arm_for`` (which returns a bare arm ``str`` / ``""``), this returns a
+    3-key ``dict`` (``arm`` / ``recorder`` / ``collection``) or ``None`` — a changelog
+    needs the recorder STRATEGY and the collection, not just an arm, so it cannot be a
+    bare string. Do NOT pattern-transfer the ``if arm:`` scalar check here. The dict has
+    THREE keys while the manifest ``changelog`` slot declares TWO (``arm`` /
+    ``recorder``): ``collection`` is added here from the manifest's structural
+    knowledge, not something a class declares."""
     for tc in profession_manifest(data)["target_classes"]:
         if tc["kind"] == kind:
             decl = tc.get("changelog")

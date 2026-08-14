@@ -230,6 +230,30 @@ def validate_descriptor(desc: dict) -> list:
                 [f for f in (phase.get("fields") or []) if isinstance(f, dict)],
                 label, where=f"phase '{pkey}'"))
 
+    # changelog slot (ms-142 e-5255 AX review medium): if declared, it must be
+    # {arm: str, recorder: str} with a DESCRIPTOR-SAFE recorder. Surfacing a bad
+    # recorder HERE (load time) — rather than letting it degrade to a silent write-time
+    # no-op indistinguishable from "no changelog declared" — gives the author a
+    # diagnostic instead of a dropped write.
+    cl = desc.get("changelog")
+    if cl is not None:
+        if not isinstance(cl, dict):
+            problems.append(
+                f"[{label}] 'changelog' は辞書である必要があります (現在: {cl!r})")
+        else:
+            arm = (cl.get("arm") or "").strip()
+            recorder = (cl.get("recorder") or "").strip()
+            if not arm:
+                problems.append(f"[{label}] 'changelog.arm' が未設定です")
+            if not recorder:
+                problems.append(f"[{label}] 'changelog.recorder' が未設定です")
+            elif recorder not in DESCRIPTOR_SAFE_CHANGELOG_RECORDERS:
+                problems.append(
+                    f"[{label}] 'changelog.recorder' は "
+                    f"{' / '.join(sorted(DESCRIPTOR_SAFE_CHANGELOG_RECORDERS))} "
+                    f"のいずれか必要です (現在: {recorder!r})。'milestone' は"
+                    f"マイルストーン専用の組み込み戦略で、記述子からは使えません")
+
     return problems
 
 
@@ -274,6 +298,16 @@ def _validate_fields(fields: list, label: str, where: str) -> list:
 _DEFAULT_ARMS = ["work_items", "evidence"]
 
 
+# Recorder strategies a DESCRIPTOR class may declare for its changelog slot (ms-142
+# e-5255 AX review high#2). Only ``"plain"`` (the generic append) is descriptor-safe:
+# the built-in ``"milestone"`` strategy calls ``core.save_entry`` which resolves a real
+# milestone, so a descriptor routing to it would CRASH at write time. Keeping this a
+# named allowlist (not "anything in _CHANGELOG_RECORDERS") means a descriptor can only
+# pick a strategy that works for a non-milestone Target. Kept HERE (not imported from
+# occupation) to avoid a lib layering cycle; it is a small, stable set.
+DESCRIPTOR_SAFE_CHANGELOG_RECORDERS = frozenset({"plain"})
+
+
 def _changelog_role(desc: dict) -> dict | None:
     """Return a descriptor's declared CHANGELOG slot — ``{"arm": str, "recorder":
     str} | None`` (ms-142 e-5255). The changelog is the side-effect log
@@ -281,16 +315,20 @@ def _changelog_role(desc: dict) -> dict | None:
     (a doc link) touches it. Built-in milestones/operations declare theirs in
     ``occupation._ARM_ROLES``; a descriptor occupation declares its own here so it,
     too, lights up the changelog write path by DECLARATION alone instead of falling
-    to the historical no-op. ``recorder`` names the write strategy
-    (``occupation._CHANGELOG_RECORDERS`` — a descriptor class uses ``"plain"``, the
-    generic append; ``"milestone"`` is the dev save_entry strategy reserved for the
-    milestones collection). Absent / malformed → ``None`` (no changelog → the
-    class keeps no-oping, unchanged). occupation validates ``recorder`` against its
-    registry, so a typo degrades to a safe no-op there, not a crash."""
+    to the historical no-op. ``recorder`` names the write strategy and MUST be one of
+    ``DESCRIPTOR_SAFE_CHANGELOG_RECORDERS`` (``"plain"`` today) — the built-in-only
+    ``"milestone"`` strategy is REJECTED here so a descriptor cannot route to
+    save_entry and crash at write time (e-5255 AX review high#2). Absent / malformed /
+    unsafe-recorder → ``None`` (no changelog → the class keeps no-oping, unchanged);
+    ``validate_descriptor`` ALSO flags a bad recorder at load time so it is not only a
+    silent miss."""
     raw = desc.get("changelog")
-    if isinstance(raw, dict) and (raw.get("arm") or "").strip() \
-            and (raw.get("recorder") or "").strip():
-        return {"arm": raw["arm"].strip(), "recorder": raw["recorder"].strip()}
+    if not isinstance(raw, dict):
+        return None
+    arm = (raw.get("arm") or "").strip()
+    recorder = (raw.get("recorder") or "").strip()
+    if arm and recorder in DESCRIPTOR_SAFE_CHANGELOG_RECORDERS:
+        return {"arm": arm, "recorder": recorder}
     return None
 
 

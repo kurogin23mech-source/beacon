@@ -134,6 +134,43 @@ def test_descriptor_without_changelog_declaration_still_noops():
     assert rec["reason"] == "obligation-no-changelog"
 
 
+def test_descriptor_cannot_route_to_the_milestone_recorder():
+    """e-5255 AX review high#2: the built-in-only ``milestone`` recorder (it calls
+    save_entry, which resolves a real milestone) must NOT be reachable from a descriptor
+    — routing a non-milestone id there would crash at write time. A descriptor declaring
+    it degrades to a safe no-op (rejected as not descriptor-safe), no ValueError."""
+    data = build_synthetic_project()
+    data["target_classes"][0] = dict(data["target_classes"][0])
+    data["target_classes"][0]["changelog"] = {"arm": "audit_log",
+                                               "recorder": "milestone"}
+    # the manifest does not surface an unsafe recorder as a live changelog
+    assert _obligation_class(occ.profession_manifest(data))["changelog"] is None
+    assert occ.changelog_recorder_for(data, "obligation") is None
+    # record_target_entry no-ops safely (crucially, NO ValueError from save_entry)
+    rec = occ.record_target_entry(data, "obl-1", description="x", source="auto",
+                                  date="2026-08-14")
+    assert rec["recorded"] is False and rec["reason"] == "obligation-no-changelog"
+
+
+def test_validate_descriptor_flags_unsafe_or_malformed_changelog():
+    """e-5255 AX review medium: a bad ``changelog.recorder`` (the built-in-only
+    ``milestone`` or a typo) or a malformed slot is surfaced at LOAD time by
+    validate_descriptor, so it is a diagnostic — not a silent write-time no-op
+    indistinguishable from 'no changelog declared'."""
+    ok = dict(SYNTHETIC_DESCRIPTOR,
+              changelog={"arm": "audit_log", "recorder": "plain"})
+    assert td.validate_descriptor(ok) == []
+    for bad_recorder in ("milestone", "Plain", "append"):
+        bad = dict(SYNTHETIC_DESCRIPTOR,
+                   changelog={"arm": "audit_log", "recorder": bad_recorder})
+        probs = td.validate_descriptor(bad)
+        assert any("changelog.recorder" in p for p in probs), (bad_recorder, probs)
+    malformed = dict(SYNTHETIC_DESCRIPTOR, changelog="entries")
+    assert any("changelog" in p for p in td.validate_descriptor(malformed))
+    no_arm = dict(SYNTHETIC_DESCRIPTOR, changelog={"recorder": "plain"})
+    assert any("changelog.arm" in p for p in td.validate_descriptor(no_arm))
+
+
 # ---------------------------------------------------------------------------
 # Work-item iterator: yields the duty, not the attestation, no profession branch.
 # ---------------------------------------------------------------------------
