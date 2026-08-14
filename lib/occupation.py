@@ -195,19 +195,62 @@ def project_targets(data: dict) -> list:
 # calls the dev concrete directly.
 # ---------------------------------------------------------------------------
 
-def _record_operation_entry(data: dict, op_id: str, *, description: str,
-                            source: str, date: str, revision_id: str) -> dict:
-    """Append a ``save`` entry to operation ``op_id``'s entries, matching the
-    shape ``core.save_entry`` produces for a milestone. Returns a result dict;
-    ``{"recorded": False, "reason": "operation-not-found"}`` when the id is
-    unknown (the doc still wrote; only the side-effect log is skipped)."""
+# --- changelog recorder strategies (ms-142 e-5255) -------------------------
+# The two WRITE strategies ``record_target_entry`` dispatches to by DECLARATION
+# (the manifest's ``changelog.recorder``), replacing the bare ``if kind ==
+# "operation" / "milestone"`` branches. Each has the uniform signature the registry
+# dispatch calls with, so a class selects its recorder as DATA and a descriptor
+# class can pick ``"plain"`` to light up. Both preserve the pre-e-5255 behaviour of
+# their branch byte-for-byte (pinned by tests/test_record_target_entry.py).
+
+def _changelog_via_milestone(data: dict, target_id: str, *, arm: str,
+                             collection: str, kind: str, description: str,
+                             source: str, date: str, revision_id: str,
+                             url: str, hash: str, progress: str) -> dict:
+    """Dev milestone changelog: record through ``core.save_entry`` (which owns the
+    milestone resolution + dedup + progress bump). No-ops (``no-milestone``) when the
+    id resolves to no recordable milestone; a bad EXPLICIT id raises through the
+    resolver (a real user error, not swallowed). ``arm`` is informational — save_entry
+    owns the ``entries`` write, so the declared arm is NOT honoured here (e-5255 AX
+    review low).
+
+    ``collection`` MUST be ``"milestones"``: this strategy calls save_entry which
+    resolves a real milestone, so routing a non-milestone Target here would raise at
+    write time. ``target_descriptor`` forbids a descriptor from declaring the
+    ``"milestone"`` recorder, so in practice only the built-in milestones seed reaches
+    this; the guard below converts any future misroute into a safe no-op instead of a
+    crash (e-5255 AX review high#2, defensive)."""
+    if collection != "milestones":
+        return {"recorded": False, "reason": f"{kind or 'unknown'}-changelog-misrouted"}
+    if core.resolve_recordable_milestone(data, target_id) is None:
+        return {"recorded": False, "reason": "no-milestone"}
+    result = core.save_entry(data, ms_id=target_id, description=description,
+                             source=source, date=date, url=url,
+                             revision_id=revision_id, hash=hash, progress=progress)
+    return {"recorded": True, "target": result.get("milestone", target_id),
+            "result": result}
+
+
+def _changelog_via_plain(data: dict, target_id: str, *, arm: str, collection: str,
+                         kind: str, description: str, source: str, date: str,
+                         revision_id: str, url: str, hash: str,
+                         progress: str) -> dict:
+    """Plain changelog append (was ``_record_operation_entry``, generalised to any
+    collection + arm): find the Target record by id in its ``collection`` and append a
+    ``save`` entry to the declared ``arm``, matching the shape ``core.save_entry``
+    produces (minus the milestone-only dedup / progress / date field). ``url`` / ``hash``
+    / ``progress`` do not apply to a plain changelog (operations never carried them) —
+    accepted and IGNORED so the registry dispatch signature stays uniform. Returns
+    ``{"recorded": False, "reason": "<kind>-not-found"}`` when the id is unknown (the
+    doc still wrote; only the side-log is skipped) — for operations that is the
+    unchanged ``operation-not-found``."""
     now = date or work_base.now_iso()
-    for op in data.get("operations", []):
-        if op.get("id") == op_id:
+    for record in data.get(collection, []) or []:
+        if record.get("id") == target_id:
             meta = {"source": source}
             if revision_id:
                 meta["revision_id"] = revision_id
-            op.setdefault("entries", []).append({
+            record.setdefault(arm, []).append({
                 "id": core.next_entry_id(data),
                 "type": "save",
                 "description": description,
@@ -216,8 +259,18 @@ def _record_operation_entry(data: dict, op_id: str, *, description: str,
                 "done_at": now,
                 "meta": meta,
             })
-            return {"recorded": True, "target": op_id}
-    return {"recorded": False, "reason": "operation-not-found"}
+            return {"recorded": True, "target": target_id}
+    return {"recorded": False, "reason": f"{kind or 'unknown'}-not-found"}
+
+
+# Strategy name → recorder. A ``changelog.recorder`` declaration names one of these;
+# a new strategy is one row here + its function (the same registry-not-branch shape
+# the ratchet families use). ``changelog_recorder_for`` validates a declaration's
+# recorder against these keys, so an unknown name degrades to a safe no-op.
+_CHANGELOG_RECORDERS = {
+    "milestone": _changelog_via_milestone,
+    "plain": _changelog_via_plain,
+}
 
 
 def record_target_entry(data: dict, target_id: str = "", *, description: str,
@@ -231,21 +284,29 @@ def record_target_entry(data: dict, target_id: str = "", *, description: str,
       - empty ``target_id`` → record onto the project's single active milestone
         if one exists (development's historical auto-pick), else NO-OP (a project
         with no milestone — e.g. sales — records nothing rather than erroring).
-      - ``operation`` → append a ``save`` entry to that operation's entries.
-      - ``milestone`` → record onto that milestone via ``core.save_entry``.
-      - ANY OTHER kind — a sales Target (opportunity / account / acquisition), a
-        trek, or an unrecognised / descriptor-defined prefix — → NO-OP. It never
-        falls through to the active milestone, so a doc explicitly linked to a
-        non-dev target never silently records onto a different one.
+      - a class with a DECLARED changelog (milestone → ``core.save_entry``;
+        operation → a plain append; a descriptor naming its own — ms-142 e-5255) →
+        record via that declaration's recorder strategy.
+      - ANY class with NO declared changelog — a sales Target (opportunity /
+        account), a trek, or an unrecognised / descriptor prefix that declared none —
+        → NO-OP. It never falls through to the active milestone, so a doc explicitly
+        linked to a non-dev target never silently records onto a different one.
+
+    The per-kind dispatch is DECLARATIVE (ms-142 e-5255): the recorder comes from the
+    manifest's ``changelog`` slot via ``changelog_recorder_for``, not a hardcoded
+    ``if kind == "operation" / "milestone"`` — so a descriptor Target class lights up
+    its changelog by DECLARING one, the same "declare ⇒ light up" contract the
+    evidence line (``evidence_arms`` → ``add_evidence``) already has.
 
     Returns ``{"recorded": bool, ...}``. NEVER raises for the "no milestone to
     record onto" case; a bad explicit id / multi-active ambiguity still raises
     through ``core.resolve_recordable_milestone`` (those are real user errors).
     The caller decides whether to persist based on ``recorded``.
     """
-    # No explicit target → development's historical auto-pick onto the single
-    # active milestone. Records only if one exists; a milestone-less project
-    # (sales / back-office) no-ops (the structural fix for e-4710).
+    # No explicit target → development's historical auto-pick onto the single active
+    # milestone. Records only if one exists; a milestone-less project (sales /
+    # back-office) no-ops (the structural fix for e-4710). This is the empty-id
+    # default, not a per-kind branch, so it stays a direct call.
     if not target_id:
         if core.resolve_recordable_milestone(data, "") is None:
             return {"recorded": False, "reason": "no-milestone"}
@@ -255,28 +316,37 @@ def record_target_entry(data: dict, target_id: str = "", *, description: str,
                                  progress=progress)
         return {"recorded": True, "target": result.get("milestone", ""),
                 "result": result}
-    kind = _wm.target_kind(target_id)
-    if kind == "operation":
-        return _record_operation_entry(data, target_id, description=description,
-                                       source=source, date=date,
-                                       revision_id=revision_id)
-    if kind == "milestone":
-        if core.resolve_recordable_milestone(data, target_id) is None:
-            return {"recorded": False, "reason": "no-milestone"}
-        result = core.save_entry(data, ms_id=target_id, description=description,
-                                 source=source, date=date, url=url,
-                                 revision_id=revision_id, hash=hash,
-                                 progress=progress)
-        return {"recorded": True, "target": result.get("milestone", target_id),
-                "result": result}
-    # Any OTHER kind — a sales Target (opportunity / account / acquisition), a
-    # trek, OR an unrecognised / descriptor-defined prefix (ms-122 data-defined
-    # target-class) — has no dev-era changelog to record onto. Crucially this
-    # NEVER falls through to the active milestone: a doc EXPLICITLY linked to some
-    # target must not silently record onto a *different* one. So a new descriptor
-    # Target class is safe-by-default (no-op) without having to be enumerated
-    # anywhere (maintainability review 2026-08-02, Maint#2).
-    return {"recorded": False, "reason": f"{kind or 'unknown'}-no-changelog"}
+    # Explicit target → the class's DECLARED changelog recorder. No ``if kind ==``:
+    # the recorder (save_entry for milestones, a plain append for operations, or a
+    # descriptor's own) is data, read from the manifest's ``changelog`` slot.
+    #
+    # Kind is resolved DATA-AWARE (``narrowing_kind_for_ref``, descriptor id prefixes
+    # included) so a descriptor Target-class (``obl-1`` → ``obligation``) resolves to
+    # its real kind and can light up its changelog — the static ``work_model`` table
+    # only knows built-in prefixes. Fall back to the static table for a non-manifest
+    # ref (a trek ``tk-`` → ``trek``) so the no-op reason stays ``trek-no-changelog``.
+    #
+    # KNOWN ASYMMETRY (e-5255 maint review): the sibling evidence line
+    # (``add_evidence`` → ``evidence_arm_for``) still resolves kind with the STATIC
+    # ``_wm.target_kind`` only, so it does not yet light up a pure-descriptor class's
+    # evidence arm. That is unchanged here (byte-preserving for built-ins, since
+    # ``narrowing_kind_for_ref`` and ``_wm.target_kind`` agree on built-in prefixes);
+    # unifying the evidence line onto the data-aware resolver is a separate follow-up
+    # (it changes add_evidence behaviour for descriptors and needs its own test).
+    kind = narrowing_kind_for_ref(target_id, data) or _wm.target_kind(target_id)
+    decl = changelog_recorder_for(data, kind)
+    if decl is None:
+        # No declared changelog — a sales Target (opportunity / account), a trek, or an
+        # unrecognised / descriptor prefix that declared none. NEVER falls through to
+        # the active milestone: a doc EXPLICITLY linked to some target must not
+        # silently record onto a *different* one (maintainability review 2026-08-02,
+        # Maint#2). A new descriptor Target class is safe-by-default (no-op) until it
+        # DECLARES a changelog.
+        return {"recorded": False, "reason": f"{kind or 'unknown'}-no-changelog"}
+    return _CHANGELOG_RECORDERS[decl["recorder"]](
+        data, target_id, arm=decl["arm"], collection=decl["collection"], kind=kind,
+        description=description, source=source, date=date,
+        revision_id=revision_id, url=url, hash=hash, progress=progress)
 
 
 # Target classes whose existence is hard-validated before a shared capability
@@ -836,6 +906,27 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # hold). Folding OperationTasks into the shared work-item spine (find_target_entry
 # / set_entry_state / iter_work_items) is the deferred part — that would silently
 # change ``beacon task done`` — not the declaration.
+# ``changelog`` (ms-142 e-5255) DECLARES the side-effect log slot that
+# ``record_target_entry`` appends onto when a shared capability (a doc link) touches
+# the Target: ``{"arm": <str — the collection's child-list name>, "recorder": <strategy
+# name in _CHANGELOG_RECORDERS>}`` or ``None`` (the class has no changelog →
+# record_target_entry NO-OPs, unchanged). NOTE the ``arm`` is a SCALAR string (unlike
+# the list-of-dicts ``evidence_arms`` above — do not copy that shape here; e-5255 AX
+# review high#1). The recorder STRATEGY is declared, not branched on ``kind``: milestones
+# use ``"milestone"`` (core.save_entry — dev dedup + progress; that recorder writes
+# save_entry's OWN ``entries`` and does NOT honour the declared ``arm`` — the arm here is
+# ``"entries"`` for consistency only, e-5255 AX review low), operations use ``"plain"``
+# (a bare append that DOES write the declared arm). ``"milestone"`` is a BUILT-IN-only
+# strategy (it needs a real milestone) — a DESCRIPTOR may only declare ``"plain"``
+# (``target_descriptor.DESCRIPTOR_SAFE_CHANGELOG_RECORDERS``), so a descriptor cannot
+# route to the milestone recorder and crash at write time (e-5255 AX review high#2).
+# A descriptor occupation declaring ``changelog`` lights up its changelog write with
+# ZERO edit to record_target_entry — the "declare ⇒ light up" contract the evidence line
+# (evidence_arms → add_evidence) already has, now extended to the changelog side-log so a
+# new class is no longer stuck at the historical no-op (T1 裁定 / e-5255). Sales
+# Targets (opportunities / accounts) declare ``None`` — they keep no-oping (their proof
+# rides the evidence arm via add_evidence, not this dev-era changelog), preserving
+# behaviour byte-for-byte.
 _ARM_ROLES = {
     "milestones": {
         # ms-143: ``id_prefix`` is the declarative work-item id prefix — a dev
@@ -845,11 +936,13 @@ _ARM_ROLES = {
         "work_item_arm": {"arm": "entries", "item_type": "task", "kind": "task",
                           "id_prefix": "e-"},
         "evidence_arms": [{"arm": "entries", "item_type": "commit"}],
+        "changelog": {"arm": "entries", "recorder": "milestone"},
     },
     "opportunities": {
         "work_item_arm": {"arm": "activities", "item_type": None,
                           "kind": "activity", "id_prefix": "act-"},
         "evidence_arms": [{"arm": "communications", "item_type": None}],
+        "changelog": None,
     },
     # ms-142 e-5256: an Account's planned work is its ``nurturings`` arm (継続関係の
     # 手入れ — every item is a work item, so ``item_type`` is None; ids are ``nrt-``),
@@ -860,12 +953,16 @@ _ARM_ROLES = {
         "work_item_arm": {"arm": "nurturings", "item_type": None,
                           "kind": "nurturing", "id_prefix": "nrt-"},
         "evidence_arms": [{"arm": "communications", "item_type": None}],
+        "changelog": None,
     },
     # operations: work_item_arm is a DECLARED None (see the note above) so the
-    # three sibling dicts share one key set. OperationTasks keep their own
+    # sibling dicts share one key set. OperationTasks keep their own
     # ``operation task done`` L3 path in PR#1 (folding them into the shared
-    # work-item spine is deferred, ms-142 T1 裁定).
-    "operations": {"work_item_arm": None, "evidence_arms": []},
+    # work-item spine is deferred, ms-142 T1 裁定). Its changelog IS declared: the
+    # side-log records onto ``entries`` via the ``plain`` recorder (was the bare
+    # ``if kind == "operation"`` branch, now data — e-5255).
+    "operations": {"work_item_arm": None, "evidence_arms": [],
+                   "changelog": {"arm": "entries", "recorder": "plain"}},
 }
 
 # The exclusive phase + who-has-the-ball model per collection (SPEC 方針 1 lists
@@ -925,10 +1022,12 @@ def _arm_roles_for(data: dict | None, collection: str) -> dict:
     by DECLARING its manifest, with no edit here (ms-142 の芯)."""
     seed = _ARM_ROLES.get(collection)
     if seed is not None:
+        cl = seed.get("changelog")
         return {
             "work_item_arm": dict(seed["work_item_arm"])
             if seed["work_item_arm"] else None,
             "evidence_arms": [dict(a) for a in seed["evidence_arms"]],
+            "changelog": dict(cl) if cl else None,
         }
     for desc in effective_descriptors(data):
         if isinstance(desc, dict) \
@@ -939,7 +1038,7 @@ def _arm_roles_for(data: dict | None, collection: str) -> dict:
     # each have a seed or a descriptor). Return an empty classification defensively
     # rather than re-implementing the name convention (that lives in
     # ``target_descriptor.arm_roles``).
-    return {"work_item_arm": None, "evidence_arms": []}
+    return {"work_item_arm": None, "evidence_arms": [], "changelog": None}
 
 
 def profession_manifest(data: dict, profession: str | None = None) -> dict:
@@ -1004,6 +1103,10 @@ def profession_manifest(data: dict, profession: str | None = None) -> dict:
             "arms": arms,
             "work_item_arm": roles["work_item_arm"],
             "evidence_arms": roles["evidence_arms"],
+            # ms-142 e-5255: the changelog side-log slot (arm + recorder strategy) that
+            # record_target_entry CONSUMES via ``changelog_recorder_for`` — declared,
+            # not branched on kind. ``None`` = the class has no changelog (no-op).
+            "changelog": roles["changelog"],
             # ms-142 T2: derived from the declared state model, not a hardcoded map.
             "phase_ball": _tstate.derive_phase_ball(model),
             # ms-142 T2: the class's state model (shape / state_field / terminal /
@@ -1539,6 +1642,43 @@ def evidence_arm_for(data: dict, kind: str) -> str:
             arms = tc.get("evidence_arms") or []
             return arms[0]["arm"] if arms else ""
     return ""
+
+
+def changelog_recorder_for(data: dict, kind: str) -> dict | None:
+    """Return the CHANGELOG declaration for a Target ``kind`` — ``{"arm", "recorder",
+    "collection"}`` — or ``None`` when the kind is not a Target-class, declares no
+    changelog, or names an unregistered recorder (ms-142 e-5255).
+
+    The CONSUME side of the manifest's ``changelog`` slot, symmetric with
+    ``evidence_arm_for``: ``record_target_entry`` reads it so the declaration ROUTES
+    the side-log write, replacing the bare ``if kind == "operation" / "milestone"``
+    branch. A class that declares its changelog (milestone → ``save_entry`` on
+    ``entries``, operation → a plain append on ``entries``, or a descriptor naming its
+    own) lights up the write by declaration alone; a class with no declaration returns
+    ``None`` and record_target_entry no-ops (the historical sales / trek / unknown
+    behaviour, unchanged). An UNKNOWN recorder (a descriptor typo) also returns
+    ``None`` — a safe no-op — rather than crashing every doc write; the typo is ALSO
+    surfaced at project-load by ``target_descriptor.validate_descriptor`` so it is not
+    only a silent miss (e-5255 AX review medium). ``collection`` is carried so the
+    plain recorder can find the record without a second kind→collection lookup.
+
+    RETURN SHAPE (e-5255 AX/maint review): unlike its scalar sibling
+    ``evidence_arm_for`` (which returns a bare arm ``str`` / ``""``), this returns a
+    3-key ``dict`` (``arm`` / ``recorder`` / ``collection``) or ``None`` — a changelog
+    needs the recorder STRATEGY and the collection, not just an arm, so it cannot be a
+    bare string. Do NOT pattern-transfer the ``if arm:`` scalar check here. The dict has
+    THREE keys while the manifest ``changelog`` slot declares TWO (``arm`` /
+    ``recorder``): ``collection`` is added here from the manifest's structural
+    knowledge, not something a class declares."""
+    for tc in profession_manifest(data)["target_classes"]:
+        if tc["kind"] == kind:
+            decl = tc.get("changelog")
+            if isinstance(decl, dict) \
+                    and decl.get("recorder") in _CHANGELOG_RECORDERS:
+                return {"arm": decl["arm"], "recorder": decl["recorder"],
+                        "collection": tc["collection"]}
+            return None
+    return None
 
 
 def add_evidence(data: dict, parent_id: str, *, summary: str, direction: str,

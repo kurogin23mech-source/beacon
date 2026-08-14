@@ -77,11 +77,98 @@ def test_manifest_lights_up_synthetic_profession():
     assert obl["work_item_arm"] == {"arm": "duties", "item_type": None,
                                     "kind": "duty"}
     assert obl["evidence_arms"] == [{"arm": "attestations", "item_type": None}]
+    # ms-142 e-5255: this synthetic descriptor declares no ``changelog`` slot, so it
+    # resolves to None — the class keeps no-oping on record_target_entry (it could
+    # light up its changelog by declaring one, the "declare ⇒ light up" contract).
+    assert obl["changelog"] is None
     # same key set as any built-in class (occupation-agnostic contract). ms-142
-    # T2 (e-5157) adds ``state_model`` (phase_ball is derived from it).
+    # T2 (e-5157) adds ``state_model``; e-5255 adds ``changelog``.
     assert set(obl) == {"kind", "collection", "id_field", "id_prefix",
                         "narrowing", "arms", "work_item_arm", "evidence_arms",
-                        "phase_ball", "state_model"}
+                        "changelog", "phase_ball", "state_model"}
+
+
+# ---------------------------------------------------------------------------
+# Changelog side-log (ms-142 e-5255): a descriptor class lights up its changelog by
+# DECLARING one — record_target_entry no longer hardcodes ``if kind == …``, so a
+# synthetic profession opts in with zero edit to occupation.record_target_entry.
+# ---------------------------------------------------------------------------
+
+def _synthetic_project_with_changelog():
+    """The synthetic project, with the obligation class opted into a changelog on its
+    OWN arm (``audit_log``) via the generic ``plain`` recorder — a name nothing like
+    dev/sales, proving the dispatch reads the declaration, not a magic arm name."""
+    project = build_synthetic_project()
+    project["target_classes"][0] = dict(project["target_classes"][0])
+    project["target_classes"][0]["changelog"] = {"arm": "audit_log",
+                                                  "recorder": "plain"}
+    return project
+
+
+def test_descriptor_lights_up_changelog_when_declared():
+    data = _synthetic_project_with_changelog()
+    # the manifest surfaces the declared changelog, and the consumer resolves it
+    obl = _obligation_class(occ.profession_manifest(data))
+    assert obl["changelog"] == {"arm": "audit_log", "recorder": "plain"}
+    assert occ.changelog_recorder_for(data, "obligation") == {
+        "arm": "audit_log", "recorder": "plain", "collection": "obligations"}
+    # record_target_entry now RECORDS onto the descriptor Target (was a no-op before
+    # the class could declare a changelog) — kind resolved data-aware from ``obl-``.
+    rec = occ.record_target_entry(data, "obl-1", description="doc add: x",
+                                  source="auto", date="2026-08-14", revision_id="d1")
+    assert rec["recorded"] is True and rec["target"] == "obl-1"
+    log = data["obligations"][0]["audit_log"]
+    assert len(log) == 1
+    assert log[0]["type"] == "save" and log[0]["description"] == "doc add: x"
+    assert log[0]["meta"] == {"source": "auto", "revision_id": "d1"}
+
+
+def test_descriptor_without_changelog_declaration_still_noops():
+    # The default is unchanged: a descriptor that declares NO changelog keeps the
+    # historical no-op (safe-by-default), so opting in is explicit. The reason names
+    # the descriptor kind (resolved data-aware), not a generic "unknown".
+    data = build_synthetic_project()   # SYNTHETIC_DESCRIPTOR declares no changelog
+    rec = occ.record_target_entry(data, "obl-1", description="x", source="auto",
+                                  date="2026-08-14")
+    assert rec["recorded"] is False
+    assert rec["reason"] == "obligation-no-changelog"
+
+
+def test_descriptor_cannot_route_to_the_milestone_recorder():
+    """e-5255 AX review high#2: the built-in-only ``milestone`` recorder (it calls
+    save_entry, which resolves a real milestone) must NOT be reachable from a descriptor
+    — routing a non-milestone id there would crash at write time. A descriptor declaring
+    it degrades to a safe no-op (rejected as not descriptor-safe), no ValueError."""
+    data = build_synthetic_project()
+    data["target_classes"][0] = dict(data["target_classes"][0])
+    data["target_classes"][0]["changelog"] = {"arm": "audit_log",
+                                               "recorder": "milestone"}
+    # the manifest does not surface an unsafe recorder as a live changelog
+    assert _obligation_class(occ.profession_manifest(data))["changelog"] is None
+    assert occ.changelog_recorder_for(data, "obligation") is None
+    # record_target_entry no-ops safely (crucially, NO ValueError from save_entry)
+    rec = occ.record_target_entry(data, "obl-1", description="x", source="auto",
+                                  date="2026-08-14")
+    assert rec["recorded"] is False and rec["reason"] == "obligation-no-changelog"
+
+
+def test_validate_descriptor_flags_unsafe_or_malformed_changelog():
+    """e-5255 AX review medium: a bad ``changelog.recorder`` (the built-in-only
+    ``milestone`` or a typo) or a malformed slot is surfaced at LOAD time by
+    validate_descriptor, so it is a diagnostic — not a silent write-time no-op
+    indistinguishable from 'no changelog declared'."""
+    ok = dict(SYNTHETIC_DESCRIPTOR,
+              changelog={"arm": "audit_log", "recorder": "plain"})
+    assert td.validate_descriptor(ok) == []
+    for bad_recorder in ("milestone", "Plain", "append"):
+        bad = dict(SYNTHETIC_DESCRIPTOR,
+                   changelog={"arm": "audit_log", "recorder": bad_recorder})
+        probs = td.validate_descriptor(bad)
+        assert any("changelog.recorder" in p for p in probs), (bad_recorder, probs)
+    malformed = dict(SYNTHETIC_DESCRIPTOR, changelog="entries")
+    assert any("changelog" in p for p in td.validate_descriptor(malformed))
+    no_arm = dict(SYNTHETIC_DESCRIPTOR, changelog={"recorder": "plain"})
+    assert any("changelog.arm" in p for p in td.validate_descriptor(no_arm))
 
 
 # ---------------------------------------------------------------------------

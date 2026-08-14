@@ -230,6 +230,30 @@ def validate_descriptor(desc: dict) -> list:
                 [f for f in (phase.get("fields") or []) if isinstance(f, dict)],
                 label, where=f"phase '{pkey}'"))
 
+    # changelog slot (ms-142 e-5255 AX review medium): if declared, it must be
+    # {arm: str, recorder: str} with a DESCRIPTOR-SAFE recorder. Surfacing a bad
+    # recorder HERE (load time) — rather than letting it degrade to a silent write-time
+    # no-op indistinguishable from "no changelog declared" — gives the author a
+    # diagnostic instead of a dropped write.
+    cl = desc.get("changelog")
+    if cl is not None:
+        if not isinstance(cl, dict):
+            problems.append(
+                f"[{label}] 'changelog' は辞書である必要があります (現在: {cl!r})")
+        else:
+            arm = (cl.get("arm") or "").strip()
+            recorder = (cl.get("recorder") or "").strip()
+            if not arm:
+                problems.append(f"[{label}] 'changelog.arm' が未設定です")
+            if not recorder:
+                problems.append(f"[{label}] 'changelog.recorder' が未設定です")
+            elif recorder not in DESCRIPTOR_SAFE_CHANGELOG_RECORDERS:
+                problems.append(
+                    f"[{label}] 'changelog.recorder' は "
+                    f"{' / '.join(sorted(DESCRIPTOR_SAFE_CHANGELOG_RECORDERS))} "
+                    f"のいずれか必要です (現在: {recorder!r})。'milestone' は"
+                    f"マイルストーン専用の組み込み戦略で、記述子からは使えません")
+
     return problems
 
 
@@ -274,25 +298,63 @@ def _validate_fields(fields: list, label: str, where: str) -> list:
 _DEFAULT_ARMS = ["work_items", "evidence"]
 
 
+# Recorder strategies a DESCRIPTOR class may declare for its changelog slot (ms-142
+# e-5255 AX review high#2). Only ``"plain"`` (the generic append) is descriptor-safe:
+# the built-in ``"milestone"`` strategy calls ``core.save_entry`` which resolves a real
+# milestone, so a descriptor routing to it would CRASH at write time. Keeping this a
+# named allowlist (not "anything in _CHANGELOG_RECORDERS") means a descriptor can only
+# pick a strategy that works for a non-milestone Target. Kept HERE (not imported from
+# occupation) to avoid a lib layering cycle; it is a small, stable set.
+DESCRIPTOR_SAFE_CHANGELOG_RECORDERS = frozenset({"plain"})
+
+
+def _changelog_role(desc: dict) -> dict | None:
+    """Return a descriptor's declared CHANGELOG slot — ``{"arm": str, "recorder":
+    str} | None`` (ms-142 e-5255). The changelog is the side-effect log
+    ``occupation.record_target_entry`` appends onto a Target when a shared capability
+    (a doc link) touches it. Built-in milestones/operations declare theirs in
+    ``occupation._ARM_ROLES``; a descriptor occupation declares its own here so it,
+    too, lights up the changelog write path by DECLARATION alone instead of falling
+    to the historical no-op. ``recorder`` names the write strategy and MUST be one of
+    ``DESCRIPTOR_SAFE_CHANGELOG_RECORDERS`` (``"plain"`` today) — the built-in-only
+    ``"milestone"`` strategy is REJECTED here so a descriptor cannot route to
+    save_entry and crash at write time (e-5255 AX review high#2). Absent / malformed /
+    unsafe-recorder → ``None`` (no changelog → the class keeps no-oping, unchanged);
+    ``validate_descriptor`` ALSO flags a bad recorder at load time so it is not only a
+    silent miss."""
+    raw = desc.get("changelog")
+    if not isinstance(raw, dict):
+        return None
+    arm = (raw.get("arm") or "").strip()
+    recorder = (raw.get("recorder") or "").strip()
+    if arm and recorder in DESCRIPTOR_SAFE_CHANGELOG_RECORDERS:
+        return {"arm": arm, "recorder": recorder}
+    return None
+
+
 def arm_roles(desc: dict) -> dict:
     """Return a descriptor's arm ROLES — ``{"work_item_arm": {arm, item_type,
-    kind} | None, "evidence_arms": [{arm, item_type}, ...]}`` (ms-142 e-5011).
+    kind} | None, "evidence_arms": [{arm, item_type}, ...], "changelog": {arm,
+    recorder} | None}`` (ms-142 e-5011 + e-5255).
 
     A descriptor declares its child ARMS (``decomposition.arms``, physical child
-    lists) but, until ms-142, not which arm holds planned WORK ITEMS vs EVIDENCE —
-    the occupation-agnostic capabilities (deadline enumeration, the coverage
-    harness) need that role, not just the name. This reads an EXPLICIT declaration
-    when present so a new occupation can name its arms ANYTHING (``duties`` /
-    ``attestations``) and still light up every arm-walking capability — the true
-    "declare, don't wire" contract (the alternative, matching hard-coded arm
-    names ``work_items`` / ``evidence``, only lit up professions that used those
-    magic names). Falls back to that name convention when no explicit roles are
-    declared, so descriptors authored before this (``build_descriptor`` /
-    ``backoffice_seed``, whose arms ARE ``work_items`` / ``evidence``) are
-    unchanged. Tolerant: a malformed field degrades to the empty classification,
+    lists) but, until ms-142, not which arm holds planned WORK ITEMS vs EVIDENCE vs
+    the CHANGELOG side-log — the occupation-agnostic capabilities (deadline
+    enumeration, the coverage harness, record_target_entry) need that role, not just
+    the name. This reads an EXPLICIT declaration when present so a new occupation can
+    name its arms ANYTHING (``duties`` / ``attestations``) and still light up every
+    arm-walking capability — the true "declare, don't wire" contract (the
+    alternative, matching hard-coded arm names ``work_items`` / ``evidence``, only lit
+    up professions that used those magic names). Falls back to that name convention
+    when no explicit roles are declared, so descriptors authored before this
+    (``build_descriptor`` / ``backoffice_seed``, whose arms ARE ``work_items`` /
+    ``evidence``) are unchanged. ``changelog`` is always read from the explicit slot
+    (there is no name convention for it — a descriptor opts into a changelog only by
+    declaring one). Tolerant: a malformed field degrades to the empty classification,
     never raises."""
     if not isinstance(desc, dict):
-        return {"work_item_arm": None, "evidence_arms": []}
+        return {"work_item_arm": None, "evidence_arms": [], "changelog": None}
+    changelog = _changelog_role(desc)
     wia_raw = desc.get("work_item_arm")
     ev_raw = desc.get("evidence_arms")
     if wia_raw is not None or ev_raw is not None:
@@ -308,7 +370,8 @@ def arm_roles(desc: dict) -> dict:
             if isinstance(e, dict) and (e.get("arm") or "").strip():
                 evidence_arms.append(
                     {"arm": e["arm"], "item_type": e.get("item_type")})
-        return {"work_item_arm": work_item_arm, "evidence_arms": evidence_arms}
+        return {"work_item_arm": work_item_arm, "evidence_arms": evidence_arms,
+                "changelog": changelog}
     # No explicit roles → thick-frame name convention (back-compat).
     arms = [a for a in ((desc.get("decomposition") or {}).get("arms") or [])
             if isinstance(a, str)]
@@ -316,7 +379,8 @@ def arm_roles(desc: dict) -> dict:
         if "work_items" in arms else None
     evidence_arms = [{"arm": "evidence", "item_type": None}] \
         if "evidence" in arms else []
-    return {"work_item_arm": work_item_arm, "evidence_arms": evidence_arms}
+    return {"work_item_arm": work_item_arm, "evidence_arms": evidence_arms,
+            "changelog": changelog}
 
 
 def build_descriptor(*, kind: str, label: str, profession: str, dtype: str,

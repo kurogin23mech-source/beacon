@@ -28,7 +28,7 @@ import target_engine as te  # noqa: E402
 # the occupation — this identity is the occupation-agnostic contract. ms-142 T2
 # (e-5157) adds ``state_model`` (from which ``phase_ball`` is now derived).
 CLASS_KEYS = {"kind", "collection", "id_field", "id_prefix", "narrowing",
-              "arms", "work_item_arm", "evidence_arms", "phase_ball",
+              "arms", "work_item_arm", "evidence_arms", "changelog", "phase_ball",
               "state_model"}
 
 
@@ -88,6 +88,9 @@ def test_dev_milestone_arm_roles():
     assert ms["work_item_arm"] == {"arm": "entries", "item_type": "task",
                                    "kind": "task", "id_prefix": "e-"}
     assert ms["evidence_arms"] == [{"arm": "entries", "item_type": "commit"}]
+    # ms-142 e-5255: a milestone's changelog side-log records onto ``entries`` via the
+    # dev ``milestone`` recorder (core.save_entry — dedup + progress).
+    assert ms["changelog"] == {"arm": "entries", "recorder": "milestone"}
     assert ms["phase_ball"] is None
     # ms-142 T2: a milestone's state model is a permissive status enum with no
     # ball; its terminal/gated states (the review-gate + delete targets) are
@@ -112,6 +115,9 @@ def test_sales_opportunity_arm_roles():
     assert opp["work_item_arm"] == {"arm": "activities", "item_type": None,
                                     "kind": "activity", "id_prefix": "act-"}
     assert opp["evidence_arms"] == [{"arm": "communications", "item_type": None}]
+    # ms-142 e-5255: an opportunity declares NO changelog (its proof rides the
+    # evidence arm via add_evidence) — record_target_entry no-ops for it, unchanged.
+    assert opp["changelog"] is None
     assert opp["phase_ball"] == {"phase_field": "phase",
                                  "ball_field": "who_has_the_ball"}
     # ms-142 T2: the opportunity state model is a config-derived funnel carrying a
@@ -147,6 +153,9 @@ def test_operation_is_a_manifest_target_class_without_work_item_arm():
     assert op["id_prefix"] == "op-"
     assert op["work_item_arm"] is None
     assert op["evidence_arms"] == []
+    # ms-142 e-5255: an operation DECLARES a changelog — the side-log appends onto
+    # ``entries`` via the ``plain`` recorder (was the bare ``if kind == "operation"``).
+    assert op["changelog"] == {"arm": "entries", "recorder": "plain"}
     assert op["phase_ball"] is None
     # ms-142 T2: an operation's state model is a monotonic status transition
     # table whose only terminal is ``closed`` (routed through operation close);
