@@ -2164,12 +2164,17 @@ def ensure_open_gate(data: dict, opportunity_id: str, *, phase: str = "",
     return gate
 
 
-# The anchor work-item id prefixes (ms-144 e-5191): a meeting / activity / nurturing.
-# THE single source for "which prefixes name an anchor work item" + how each kind
-# resolves — the prefix-dispatch that was copy-pasted across anchor_gate /
-# anchor_opportunity_gate / _work_item_date / work_item_completed / find_work_item.
-# Change the value domain HERE, not in 4 places (the maint debt e-5191 pays down).
-WORK_ITEM_PREFIXES = ("mtg-", "act-", "nrt-")
+# The anchor work-item kinds (ms-144 e-5191). ``KIND_*`` are the named values
+# ``resolve_work_item`` returns — a closed enum, so a caller compares against the
+# constant instead of re-typing the bare string (e-5203 AX review: the "" case is a
+# non-work-item sentinel). ``WORK_ITEM_KINDS`` maps each id prefix to its kind and is
+# THE single source of "which prefixes name an anchor work item": ``WORK_ITEM_PREFIXES``
+# DERIVES from its keys (add a kind = one entry here, no re-spelled prefix triple).
+KIND_MEETING = "meeting"
+KIND_ACTIVITY = "activity"
+KIND_NURTURING = "nurturing"
+WORK_ITEM_KINDS = {"mtg-": KIND_MEETING, "act-": KIND_ACTIVITY, "nrt-": KIND_NURTURING}
+WORK_ITEM_PREFIXES = tuple(WORK_ITEM_KINDS)
 # The narrower domain that may anchor an OPPORTUNITY gate: a nurturing (nrt-) lives
 # under an Account, so only a meeting / activity can (anchor_opportunity_gate).
 OPPORTUNITY_ANCHOR_PREFIXES = ("mtg-", "act-")
@@ -2184,21 +2189,21 @@ def is_work_item_id(work_item_id: str) -> bool:
 
 def resolve_work_item(data: dict, work_item_id: str):
     """Resolve any anchor work item id to ``(owner, work_item, kind)`` across its
-    kind's store (mtg-→``find_meeting`` / act-→``find_activity`` / nrt-→
-    ``find_nurturing``), or ``(None, None, "")`` for a non-work-item id (ms-144
-    e-5191). ``kind`` is ``"meeting"`` / ``"activity"`` / ``"nurturing"``. THE single
-    prefix-dispatch the anchor / firing / find paths share, so the value domain and
-    its finders live in one place rather than being re-derived per call site."""
+    kind's store, or ``(None, None, "")`` for a non-work-item id (ms-144 e-5191).
+    ``kind`` is one of the ``KIND_*`` constants (``KIND_MEETING`` / ``KIND_ACTIVITY``
+    / ``KIND_NURTURING``); ``""`` signals "not a work item". THE single prefix-dispatch
+    the anchor / firing / find paths share — the prefix→kind domain lives once in
+    ``WORK_ITEM_KINDS``, so this iterates it rather than re-spelling the prefixes."""
     wi = (work_item_id or "").strip()
-    if wi.startswith("mtg-"):
-        owner, found = find_meeting(data, wi)
-        return owner, found, "meeting"
-    if wi.startswith("act-"):
-        owner, found = find_activity(data, wi)
-        return owner, found, "activity"
-    if wi.startswith("nrt-"):
-        owner, found = find_nurturing(data, wi)
-        return owner, found, "nurturing"
+    for prefix, kind in WORK_ITEM_KINDS.items():
+        if wi.startswith(prefix):
+            if kind == KIND_MEETING:
+                owner, found = find_meeting(data, wi)
+            elif kind == KIND_ACTIVITY:
+                owner, found = find_activity(data, wi)
+            else:  # KIND_NURTURING
+                owner, found = find_nurturing(data, wi)
+            return owner, found, kind
     return None, None, ""
 
 
@@ -2399,7 +2404,7 @@ def _work_item_date(data: dict, work_item_id: str) -> str:
     _, found, kind = resolve_work_item(data, work_item_id)
     if found is None:
         return ""
-    if kind == "meeting":
+    if kind == KIND_MEETING:
         return (found.get("scheduled_at", "") or "")[:10]
     return (found.get("deadline", "") or "")  # activity / nurturing
 
@@ -2414,7 +2419,7 @@ def work_item_completed(data: dict, work_item_id: str, now: str = "") -> bool:
     _, found, kind = resolve_work_item(data, work_item_id)
     if found is None:
         return False
-    if kind == "meeting":
+    if kind == KIND_MEETING:
         if found.get("status") == MEETING_ENDED:
             return True
         if found.get("status") == MEETING_SCHEDULED and now:
@@ -2856,7 +2861,7 @@ def find_work_item(data: dict, work_item_id: str):
     stays act-/nrt- only (ms-144 e-5191: shares the one prefix-dispatch, but keeps
     its narrower return so callers that pass a meeting still get ``(None, None)``)."""
     owner, found, kind = resolve_work_item(data, work_item_id)
-    if kind in ("activity", "nurturing"):
+    if kind in (KIND_ACTIVITY, KIND_NURTURING):
         return owner, found
     return None, None
 

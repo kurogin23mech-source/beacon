@@ -46,6 +46,25 @@ def test_work_item_prefixes_constant():
     assert se.OPPORTUNITY_ANCHOR_PREFIXES == ("mtg-", "act-")
 
 
+def test_work_item_prefixes_derive_from_single_source():
+    # e-5203 maint review: WORK_ITEM_PREFIXES is DERIVED from WORK_ITEM_KINDS' keys,
+    # so the prefix domain has one source (not a re-spelled literal in resolve_work_item).
+    assert se.WORK_ITEM_PREFIXES == tuple(se.WORK_ITEM_KINDS)
+    assert se.WORK_ITEM_KINDS == {
+        "mtg-": se.KIND_MEETING, "act-": se.KIND_ACTIVITY, "nrt-": se.KIND_NURTURING}
+
+
+def test_resolve_work_item_returns_kind_constants():
+    # e-5203 AX review: kind is a named constant, not a bare string.
+    data = se.build_sales_project("S", "obj")
+    opp = se.opportunity_add(data, "Deal", created_at="T0")
+    act = se.activity_add(data, opp, "call", deadline="2026-09-01")
+    mtg = se.meeting_schedule(data, opp, "2026-09-02T10:00:00Z", at="T1")
+    assert se.resolve_work_item(data, mtg)[2] == se.KIND_MEETING
+    assert se.resolve_work_item(data, act)[2] == se.KIND_ACTIVITY
+    assert se.resolve_work_item(data, "opp-x")[2] == ""  # non-work-item sentinel
+
+
 def test_is_work_item_id():
     assert se.is_work_item_id("mtg-1") is True
     assert se.is_work_item_id("act-9") is True
@@ -172,11 +191,15 @@ def test_advance_warns_unanchored_gate(tmp_path, monkeypatch, capsys):
         if se.opportunity_phase_is_terminal(data_now, se.find_opportunity(data_now, opp).get("phase", "")):
             break
         commands.cmd_opportunity_judge()
-        err = capsys.readouterr().err
+        captured = capsys.readouterr()
+        err, out = captured.err, captured.out
         reloaded = commands.load_project()
         if se.gate_needs_anchor(reloaded, opp):
             # this advance birthed an empty gate → the prompt must have fired
             assert "発火源 未紐づけ" in err
+            # e-5203 AX review: the twin date advisory also rides stderr (not stdout),
+            # so structured stdout consumers never miss half the pair.
+            assert "遷移日が未設定" not in out
             warned = True
             break
         # else the new phase auto-anchored a seeded meeting; anchor is set, advance on

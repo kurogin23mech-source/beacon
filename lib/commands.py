@@ -8650,7 +8650,8 @@ def _warn_gate_unanchored(data, opp_id):
     未結合のまま先へ進む) is surfaced consistently on the predicate rather than on one
     route only. Silent when the gate is already anchored or none is open (the
     predicate returns False), so it is safe to call unconditionally after any
-    gate-touching verb."""
+    gate-touching verb — including on an acc- id (``gate_needs_anchor`` returns False
+    for non-opp targets), so call sites need no external opp- guard (e-5203 review)."""
     import sales_entities
     if sales_entities.gate_needs_anchor(data, opp_id):
         print(f"  ⚠ {sales_entities.GATE_UNANCHORED_LABEL}: この前進ゲートには判定の"
@@ -8961,9 +8962,10 @@ def cmd_opportunity_phase():
     if seeded:
         print(f"  seeded {len(seeded)} フェーズ活動 (このフェーズの標準ステップ)")
     # ms-144 e-5202: a jump settles the old gate and opens a fresh (empty) one, so
-    # prompt to bind its発火源 — opportunities only (accounts have no advance gate).
-    if opp_id.startswith("opp-"):
-        _warn_gate_unanchored(data, opp_id)
+    # prompt to bind its発火源. Called unconditionally (e-5203 maint review): the
+    # predicate gate_needs_anchor already returns False for acc-/non-opp ids, so no
+    # external opp- guard is needed — the helper is safe on any id.
+    _warn_gate_unanchored(data, opp_id)
 
 
 def cmd_opportunity_transition_date():
@@ -9134,8 +9136,12 @@ def cmd_opportunity_judge():
                 base = _today_iso()
                 sug = sales_entities.suggest_transition_date(data, res["phase"], base)
                 hint = f" (候補: {sug})" if sug else ""
+                # e-5203 AX review: this advisory rides stderr to match its twin
+                # ``_warn_gate_unanchored`` below — both non-blocking prompts on a
+                # fresh gate go to the same stream (stdout stays machine-parseable).
                 print(f"  ⚠ 次フェーズの遷移日が未設定です{hint} — "
-                      f"beacon opportunity transition-date {opp_id} <YYYY-MM-DD>")
+                      f"beacon opportunity transition-date {opp_id} <YYYY-MM-DD>",
+                      file=sys.stderr)
             # ms-144 e-5202: advancing opens a fresh gate for the new phase — prompt
             # to bind its発火源 too (the anchor twin of the 遷移日 warning above; both
             # are empty on a fresh gate). Predicate-based, same helper as add / jump.
