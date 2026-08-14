@@ -1454,7 +1454,15 @@ def find_target(data: dict, target_id: str, kind: str | None = None) -> dict | N
     pass its kind so the resolved range matches the name's promise, closing the gap
     where a mistyped id could grab another kind's record (the resolver no longer
     silently spans every Target for such a caller). Omit ``kind`` for the generic,
-    span-all behaviour (unchanged)."""
+    span-all behaviour (unchanged).
+
+    NOTE (e-5261 ax review): with ``kind`` given, ``None`` means BOTH "no such id"
+    AND "an id of a different kind" — the two collapse to one absent-result. Every
+    current caller wants exactly that ("is there a <kind> with this id? no → not
+    found"), so none re-creates on ``None``. A caller that must distinguish
+    wrong-kind from truly-absent should check the id's kind explicitly (e.g.
+    ``work_model.target_kind``) before calling — this function does not raise on
+    mismatch by design (the task sanctions None-or-error; None is chosen)."""
     if kind:
         # Confined resolution: ONLY this class's collection. A wrong-kind or unknown
         # id finds nothing here (None), never a foreign record.
