@@ -2,6 +2,8 @@
 
 All notable changes to Beacon are documented here. See [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) for format.
 
+## [v0.62.1] - 2026-08-14
+
 ## [v0.62.0] - 2026-08-09
 
 - Merge pull request #622 from kurogin23mech-source/ms-141-e4966-dm-sent-audit
