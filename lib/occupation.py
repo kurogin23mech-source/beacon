@@ -639,8 +639,14 @@ def assert_target_class_owned(data: dict, kind: str) -> None:
 # reference it rather than re-listing the members (so they cannot rot into a lie).
 # The honest invariant (pinned by ``test_operation_target_class_e5156`` /
 # ``claim_target_collections ⊇ TARGET_DECOMPOSITION ∪ target_collections``) keeps
-# them from silently diverging while T1 has them split; unifying the three into one
-# master registry is the deferred deep fix (follow-up e-5265, touched by T2–T7).
+# them from silently diverging. ms-142 e-5265: the deferred deep fix landed — the
+# aggregatable set (``TARGET_COLLECTIONS``), the collection→kind map
+# (``_COLLECTION_KIND``) and the arm classification (``_ARM_ROLES``) are now all
+# DERIVED from ONE declaration, ``target_state.BUILTIN_TARGET_CLASSES`` (together with
+# ``BUILTIN_STATE_MODELS``, which lives there too). Adding a class is ONE entry there,
+# not a 6-site shotgun. ``TARGET_DECOMPOSITION`` / ``claim_target_collections`` (the
+# OTHER two lenses with different membership) stay separate for now — their subset
+# invariant above still guards them.
 #
 # ms-142 e-5156 (T1): ``operations`` joins the seed so a development Operation is
 # enumerated as a first-class Target beside a Milestone — the same abstraction a
@@ -668,7 +674,13 @@ def assert_target_class_owned(data: dict, kind: str) -> None:
 # opportunity mold. Consumers that walk this seed were confirmed non-breaking:
 # session_log filters to commit/pr entries (accounts carry none), and deadline
 # enumeration reads the nurturing ``deadline`` field it now surfaces.
-TARGET_COLLECTIONS = ("milestones", "opportunities", "operations", "accounts")
+# DERIVED (ms-142 e-5265) from the single source ``target_state.BUILTIN_TARGET_CLASSES``:
+# the aggregatable classes' collections, in declaration order (milestones,
+# opportunities, operations, accounts — the tuple order pinned by
+# test_occupation_descriptor). acquisition is aggregatable=False so it is excluded here.
+TARGET_COLLECTIONS = tuple(
+    c["collection"] for c in _tstate.BUILTIN_TARGET_CLASSES.values()
+    if c["aggregatable"])
 
 
 def target_collections(data: dict | None = None) -> tuple:
@@ -927,42 +939,20 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # Targets (opportunities / accounts) declare ``None`` — they keep no-oping (their proof
 # rides the evidence arm via add_evidence, not this dev-era changelog), preserving
 # behaviour byte-for-byte.
+# DERIVED (ms-142 e-5265) from the single source ``target_state.BUILTIN_TARGET_CLASSES``:
+# the per-collection arm classification (work_item_arm / evidence_arms / changelog) for
+# each AGGREGATABLE class that declares arms. The literal that used to live here (with
+# milestones/opportunities/accounts/operations spelled out) moved INTO each class's
+# master entry — this reads it back keyed by collection, so the four registries share
+# ONE declaration. A class with ``arm_roles: None`` (acquisition, not aggregatable) is
+# excluded, exactly as it was absent from the old literal. The arm-role SEMANTICS
+# (work_item_arm names the planned-work arm + how a work item is identified; evidence_arms
+# names proof records; changelog names the side-log recorder) are documented on
+# BUILTIN_TARGET_CLASSES and consumed by add_work_item / iter_evidence / record_target_entry.
 _ARM_ROLES = {
-    "milestones": {
-        # ms-143: ``id_prefix`` is the declarative work-item id prefix — a dev
-        # task is ``e-`` (shared with operation entries, see next_entry_id). It
-        # lets add_work_item allocate the next work-item id from the manifest
-        # alone, so a new occupation lights up by DECLARING its prefix.
-        "work_item_arm": {"arm": "entries", "item_type": "task", "kind": "task",
-                          "id_prefix": "e-"},
-        "evidence_arms": [{"arm": "entries", "item_type": "commit"}],
-        "changelog": {"arm": "entries", "recorder": "milestone"},
-    },
-    "opportunities": {
-        "work_item_arm": {"arm": "activities", "item_type": None,
-                          "kind": "activity", "id_prefix": "act-"},
-        "evidence_arms": [{"arm": "communications", "item_type": None}],
-        "changelog": None,
-    },
-    # ms-142 e-5256: an Account's planned work is its ``nurturings`` arm (継続関係の
-    # 手入れ — every item is a work item, so ``item_type`` is None; ids are ``nrt-``),
-    # and its proof/changelog is the SAME ``communications`` arm the opportunity uses
-    # for evidence. Declaring these lights up add_work_item / deadline enumeration /
-    # add_evidence / iter_evidence for accounts with zero per-capability wiring.
-    "accounts": {
-        "work_item_arm": {"arm": "nurturings", "item_type": None,
-                          "kind": "nurturing", "id_prefix": "nrt-"},
-        "evidence_arms": [{"arm": "communications", "item_type": None}],
-        "changelog": None,
-    },
-    # operations: work_item_arm is a DECLARED None (see the note above) so the
-    # sibling dicts share one key set. OperationTasks keep their own
-    # ``operation task done`` L3 path in PR#1 (folding them into the shared
-    # work-item spine is deferred, ms-142 T1 裁定). Its changelog IS declared: the
-    # side-log records onto ``entries`` via the ``plain`` recorder (was the bare
-    # ``if kind == "operation"`` branch, now data — e-5255).
-    "operations": {"work_item_arm": None, "evidence_arms": [],
-                   "changelog": {"arm": "entries", "recorder": "plain"}},
+    c["collection"]: c["arm_roles"]
+    for c in _tstate.BUILTIN_TARGET_CLASSES.values()
+    if c["aggregatable"] and c["arm_roles"] is not None
 }
 
 # The exclusive phase + who-has-the-ball model per collection (SPEC 方針 1 lists
@@ -988,11 +978,13 @@ _ARM_ROLES = {
 # only needs the built-ins reachable via ``target_collections`` (milestones +
 # opportunities + operations + accounts, ms-142 e-5256); see the reachability note
 # above.
+# DERIVED (ms-142 e-5265) from the single source ``target_state.BUILTIN_TARGET_CLASSES``:
+# collection → kind for the AGGREGATABLE built-ins (milestones→milestone …). Bridges
+# the collection-keyed registries to the kind-keyed ones. acquisition (aggregatable=
+# False) is excluded, matching the old literal (which had only the 4 manifest classes).
 _COLLECTION_KIND = {
-    "milestones": "milestone",
-    "opportunities": "opportunity",
-    "operations": "operation",
-    "accounts": "account",   # ms-142 e-5256: 4th built-in Target-class
+    c["collection"]: c["kind"]
+    for c in _tstate.BUILTIN_TARGET_CLASSES.values() if c["aggregatable"]
 }
 
 
