@@ -941,18 +941,20 @@ def target_child_tables(data: dict | None = None) -> tuple:
 # behaviour byte-for-byte.
 # DERIVED (ms-142 e-5265) from the single source ``target_state.BUILTIN_TARGET_CLASSES``:
 # the per-collection arm classification (work_item_arm / evidence_arms / changelog) for
-# each AGGREGATABLE class that declares arms. The literal that used to live here (with
-# milestones/opportunities/accounts/operations spelled out) moved INTO each class's
-# master entry — this reads it back keyed by collection, so the four registries share
-# ONE declaration. A class with ``arm_roles: None`` (acquisition, not aggregatable) is
-# excluded, exactly as it was absent from the old literal. The arm-role SEMANTICS
-# (work_item_arm names the planned-work arm + how a work item is identified; evidence_arms
-# names proof records; changelog names the side-log recorder) are documented on
-# BUILTIN_TARGET_CLASSES and consumed by add_work_item / iter_evidence / record_target_entry.
+# each AGGREGATABLE class. The literal that used to live here (milestones / opportunities
+# / accounts / operations) moved INTO each class's master entry — this reads it back
+# keyed by collection, so the four registries share ONE declaration. The filter is
+# ``aggregatable`` ALONE: the master validator (``_validate_builtin_target_classes``)
+# guarantees ``aggregatable ⟺ arm_roles is not None``, so an aggregatable class ALWAYS
+# has a full arm_roles dict (a NO-ARMS class declares ``{work_item_arm: None,
+# evidence_arms: [], changelog: None}``, NOT ``arm_roles=None`` — that fails at import,
+# never silently drops out here; e-5265 AX review high#1). The non-aggregatable
+# acquisition (arm_roles=None) is excluded, as it was absent from the old literal. Arm-
+# role SEMANTICS are documented on BUILTIN_TARGET_CLASSES and consumed by add_work_item /
+# iter_evidence / record_target_entry.
 _ARM_ROLES = {
     c["collection"]: c["arm_roles"]
-    for c in _tstate.BUILTIN_TARGET_CLASSES.values()
-    if c["aggregatable"] and c["arm_roles"] is not None
+    for c in _tstate.BUILTIN_TARGET_CLASSES.values() if c["aggregatable"]
 }
 
 # The exclusive phase + who-has-the-ball model per collection (SPEC 方針 1 lists
