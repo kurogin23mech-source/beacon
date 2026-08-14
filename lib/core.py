@@ -976,7 +976,9 @@ def milestone_update(data: dict, ms_id: str, *,
     # `import occupation` here would be a cycle (every occupation call site in this
     # file follows this lazy-import rule).
     import occupation
-    ms = occupation.find_target(data, ms_id)
+    # e-5261: kind-confined — a milestone-named verb resolves a milestone, so a
+    # non-ms id returns None (→ the "not found" error) rather than a foreign record.
+    ms = occupation.find_target(data, ms_id, kind="milestone")
     if ms is None:
         raise ValueError(f"Milestone not found: {ms_id}")
     if title:

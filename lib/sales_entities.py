@@ -2520,7 +2520,9 @@ def activity_add(data: dict, opportunity_id: str, description: str, *,
     # no longer names data['opportunities'] / next_activity_id itself. Lazy import
     # avoids the occupation→sales_entities cycle.
     import occupation
-    opp = occupation.find_target(data, opportunity_id)
+    # e-5261: kind-confined — this opportunity-named verb resolves an opportunity, so
+    # a mistyped non-opp id returns None here rather than grabbing another kind.
+    opp = occupation.find_target(data, opportunity_id, kind="opportunity")
     if opp is None:
         raise ValueError(f"Opportunity not found: {opportunity_id}")
     if not description or not description.strip():

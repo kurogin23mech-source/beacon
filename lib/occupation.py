@@ -1418,7 +1418,7 @@ def resolve_target(data: dict, target_id: str = "", *,
     return active[0]
 
 
-def find_target(data: dict, target_id: str) -> dict | None:
+def find_target(data: dict, target_id: str, kind: str | None = None) -> dict | None:
     """Locate a Target record by id across all Target collections,
     profession-generically (ms-143). Returns the record dict or ``None`` — the
     manifest-driven replacement for ``core.find_target_milestone`` /
@@ -1431,12 +1431,34 @@ def find_target(data: dict, target_id: str) -> dict | None:
     descriptor-defined class or a profession-default class like release (rel-, which
     is deliberately NOT hardcoded in the prefix table, ms-142 e-5161) — falls back to
     scanning every Target collection so it is still located, honouring the docstring
-    promise "across all Target collections"."""
-    kind = _wm.target_kind(target_id)
-    tc = None
+    promise "across all Target collections".
+
+    ms-142 e-5261: pass ``kind`` (e.g. ``"opportunity"``) to CONFINE resolution to
+    that class's collection — an id of a DIFFERENT kind (or an unknown id) then
+    returns ``None`` instead of a foreign record. A verb whose NAME promises a
+    specific class (``opportunity_*`` / ``account_*``) — which moved from a
+    class-specific resolver (``find_opportunity``) to this all-Target one — should
+    pass its kind so the resolved range matches the name's promise, closing the gap
+    where a mistyped id could grab another kind's record (the resolver no longer
+    silently spans every Target for such a caller). Omit ``kind`` for the generic,
+    span-all behaviour (unchanged)."""
     if kind:
+        # Confined resolution: ONLY this class's collection. A wrong-kind or unknown
+        # id finds nothing here (None), never a foreign record.
         try:
             tc = target_class(data, kind)
+        except ValueError:
+            return None
+        id_field = tc.get("id_field", "id")
+        for rec in data.get(tc["collection"], []) or []:
+            if isinstance(rec, dict) and rec.get(id_field) == target_id:
+                return rec
+        return None
+    prefix_kind = _wm.target_kind(target_id)
+    tc = None
+    if prefix_kind:
+        try:
+            tc = target_class(data, prefix_kind)
         except ValueError:
             tc = None
     if tc is not None:
