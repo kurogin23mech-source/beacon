@@ -1418,6 +1418,19 @@ def resolve_target(data: dict, target_id: str = "", *,
     return active[0]
 
 
+def _scan_collection_for_id(records, id_field: str, target_id: str) -> dict | None:
+    """Return the record in ``records`` whose ``id_field`` equals ``target_id``, or
+    ``None`` (ms-142 e-5261 maint review). THE one single-collection id lookup
+    ``find_target``'s three scan branches (confined / prefix-fast / fallback) share,
+    so the id-equality test and the ``isinstance(rec, dict)`` non-dict guard live in
+    one place and cannot drift apart across the branches (they previously did — the
+    prefix-fast branch lacked the guard the other two had)."""
+    for rec in records or []:
+        if isinstance(rec, dict) and rec.get(id_field) == target_id:
+            return rec
+    return None
+
+
 def find_target(data: dict, target_id: str, kind: str | None = None) -> dict | None:
     """Locate a Target record by id across all Target collections,
     profession-generically (ms-143). Returns the record dict or ``None`` — the
@@ -1449,11 +1462,8 @@ def find_target(data: dict, target_id: str, kind: str | None = None) -> dict | N
             tc = target_class(data, kind)
         except ValueError:
             return None
-        id_field = tc.get("id_field", "id")
-        for rec in data.get(tc["collection"], []) or []:
-            if isinstance(rec, dict) and rec.get(id_field) == target_id:
-                return rec
-        return None
+        return _scan_collection_for_id(
+            data.get(tc["collection"], []), tc.get("id_field", "id"), target_id)
     prefix_kind = _wm.target_kind(target_id)
     tc = None
     if prefix_kind:
@@ -1462,11 +1472,8 @@ def find_target(data: dict, target_id: str, kind: str | None = None) -> dict | N
         except ValueError:
             tc = None
     if tc is not None:
-        id_field = tc.get("id_field", "id")
-        for rec in data.get(tc["collection"], []) or []:
-            if rec.get(id_field) == target_id:
-                return rec
-        return None
+        return _scan_collection_for_id(
+            data.get(tc["collection"], []), tc.get("id_field", "id"), target_id)
     # Unknown / unmapped prefix → scan all Target collections (descriptor / release).
     # Honour each collection's own id_field (maint review e-5220): the fast path
     # above reads ``tc['id_field']``, so the fallback must too, else a descriptor
@@ -1474,10 +1481,11 @@ def find_target(data: dict, target_id: str, kind: str | None = None) -> dict | N
     # path but be silently missed here.
     decomposition = target_decomposition(data)
     for coll in target_collections(data):
-        coll_id_field = decomposition.get(coll, {}).get("id_field", "id")
-        for rec in data.get(coll, []) or []:
-            if isinstance(rec, dict) and rec.get(coll_id_field) == target_id:
-                return rec
+        found = _scan_collection_for_id(
+            data.get(coll, []),
+            decomposition.get(coll, {}).get("id_field", "id"), target_id)
+        if found is not None:
+            return found
     return None
 
 
