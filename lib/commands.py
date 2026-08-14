@@ -8640,6 +8640,26 @@ def cmd_account_contact():
     print(f"Added contact '{name}' to {account_id}")
 
 
+def _warn_gate_unanchored(data, opp_id):
+    """Print the「空ゲート (発火源 未紐づけ)」warning to stderr when the opportunity's
+    open前進ゲート has no anchor yet — the derived predicate ``gate_needs_anchor``
+    (ms-144 e-5202). Non-blocking (permissive, master=人間).
+
+    Called at EVERY verb exit where an empty gate can be born (advance / jump / add /
+    transition-date), not just the date path, so the cairn症状 (判定のきっかけが
+    未結合のまま先へ進む) is surfaced consistently on the predicate rather than on one
+    route only. Silent when the gate is already anchored or none is open (the
+    predicate returns False), so it is safe to call unconditionally after any
+    gate-touching verb — including on an acc- id (``gate_needs_anchor`` returns False
+    for non-opp targets), so call sites need no external opp- guard (e-5203 review)."""
+    import sales_entities
+    if sales_entities.gate_needs_anchor(data, opp_id):
+        print(f"  ⚠ {sales_entities.GATE_UNANCHORED_LABEL}: この前進ゲートには判定の"
+              f"きっかけ (面談/活動) が結ばれていません。"
+              f"`beacon opportunity anchor {opp_id} <work-item-id>` で結ぶと、"
+              f"その完了で自動的にフェーズ判定が走ります。", file=sys.stderr)
+
+
 def cmd_opportunity_add():
     import sales_entities
     title = os.environ.get("BEACON_OPP_TITLE", "")
@@ -8686,6 +8706,9 @@ def cmd_opportunity_add():
     print(f"  phase: {opp.get('phase', '') if opp else phase}")
     if seeded:
         print(f"  seeded {len(seeded)} フェーズ活動 (このフェーズの標準ステップ)")
+    # ms-144 e-5202: a new deal opens with an empty前進ゲート — prompt to bind its
+    # 発火源 here too (predicate-based, same as the other gate-touching verbs).
+    _warn_gate_unanchored(data, opp_id)
 
 
 def cmd_opportunity_assign():
@@ -8812,11 +8835,15 @@ def cmd_opportunity_list():
     opps = (occupation.target_records(data, "opportunity") if show_all
             else sales_entities.live_opportunities(data))
     if json_mode:
-        # ms-144 e-5178: surface「open gate but no発火源」as a derived flag so the
-        # AI (and the cockpit) can see an unanchored gate without re-deriving it
-        # from raw gates[]. Projection only — not persisted onto the record.
+        # ms-144 e-5178 / e-5203: surface the open-gate twins「no発火源」and「no
+        # 遷移日」as derived flags so the AI (and the cockpit) can see an unanchored
+        # or dateless gate without re-deriving it from raw gates[]. Both twins are
+        # projected symmetrically (e-5203): the cockpit reads gate_needs_anchor AND
+        # needs_transition_date as facts, not one翼 from a flag and the other from a
+        # raw gates[] walk. Projection only — not persisted onto the record.
         enriched = [{**o,
-                     "gate_needs_anchor": sales_entities.gate_needs_anchor(data, o["id"])}
+                     "gate_needs_anchor": sales_entities.gate_needs_anchor(data, o["id"]),
+                     "needs_transition_date": sales_entities.needs_transition_date(data, o["id"])}
                     for o in opps]
         print(json.dumps(enriched, ensure_ascii=False, indent=2))
         return
@@ -8934,6 +8961,11 @@ def cmd_opportunity_phase():
     print(f"{opp_id} phase → {rec['phase']} ({where})")
     if seeded:
         print(f"  seeded {len(seeded)} フェーズ活動 (このフェーズの標準ステップ)")
+    # ms-144 e-5202: a jump settles the old gate and opens a fresh (empty) one, so
+    # prompt to bind its発火源. Called unconditionally (e-5203 maint review): the
+    # predicate gate_needs_anchor already returns False for acc-/non-opp ids, so no
+    # external opp- guard is needed — the helper is safe on any id.
+    _warn_gate_unanchored(data, opp_id)
 
 
 def cmd_opportunity_transition_date():
@@ -8957,14 +8989,12 @@ def cmd_opportunity_transition_date():
     if rec["transition_date"]:
         print(f"{opp_id} transition_date → {rec['transition_date']} "
               f"(recorded in transition_date_history)")
-        # ms-144 e-5178: placing a判定日 on a gate with no発火源 is the exact
-        # cairn症状 (opp-3/opp-4) — the date is set but nothing will fire the
-        # judgement. Warn to stderr but never block (permissive 原則, master=人間).
-        if sales_entities.gate_needs_anchor(data, opp_id):
-            print(f"  ⚠ {sales_entities.GATE_UNANCHORED_LABEL}: この前進ゲートには判定の"
-                  f"きっかけ (面談/活動) が結ばれていません。"
-                  f"`beacon opportunity anchor {opp_id} <work-item-id>` で結ぶと、"
-                  f"その完了で自動的にフェーズ判定が走ります。", file=sys.stderr)
+        # ms-144 e-5178 / e-5202: placing a判定日 on a gate with no発火源 is the
+        # exact cairn症状 (opp-3/opp-4) — the date is set but nothing will fire the
+        # judgement. The warning now rides the shared ``_warn_gate_unanchored`` helper
+        # (e-5202) so this route and advance / jump / add all prompt off the same
+        # predicate. Warn to stderr but never block (permissive 原則, master=人間).
+        _warn_gate_unanchored(data, opp_id)
     else:
         print(f"{opp_id} transition_date cleared (recorded in transition_date_history)")
 
@@ -9106,8 +9136,16 @@ def cmd_opportunity_judge():
                 base = _today_iso()
                 sug = sales_entities.suggest_transition_date(data, res["phase"], base)
                 hint = f" (候補: {sug})" if sug else ""
+                # e-5203 AX review: this advisory rides stderr to match its twin
+                # ``_warn_gate_unanchored`` below — both non-blocking prompts on a
+                # fresh gate go to the same stream (stdout stays machine-parseable).
                 print(f"  ⚠ 次フェーズの遷移日が未設定です{hint} — "
-                      f"beacon opportunity transition-date {opp_id} <YYYY-MM-DD>")
+                      f"beacon opportunity transition-date {opp_id} <YYYY-MM-DD>",
+                      file=sys.stderr)
+            # ms-144 e-5202: advancing opens a fresh gate for the new phase — prompt
+            # to bind its発火源 too (the anchor twin of the 遷移日 warning above; both
+            # are empty on a fresh gate). Predicate-based, same helper as add / jump.
+            _warn_gate_unanchored(data, opp_id)
             _print_phase_fold(res.get("fold"))
         elif decision == "retry":
             sales_entities.retry_transition(data, opp_id, arg, note=note, at=at, actor=actor)

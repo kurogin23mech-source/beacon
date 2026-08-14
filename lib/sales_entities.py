@@ -2164,6 +2164,49 @@ def ensure_open_gate(data: dict, opportunity_id: str, *, phase: str = "",
     return gate
 
 
+# The anchor work-item kinds (ms-144 e-5191). ``KIND_*`` are the named values
+# ``resolve_work_item`` returns — a closed enum, so a caller compares against the
+# constant instead of re-typing the bare string (e-5203 AX review: the "" case is a
+# non-work-item sentinel). ``WORK_ITEM_KINDS`` maps each id prefix to its kind and is
+# THE single source of "which prefixes name an anchor work item": ``WORK_ITEM_PREFIXES``
+# DERIVES from its keys (add a kind = one entry here, no re-spelled prefix triple).
+KIND_MEETING = "meeting"
+KIND_ACTIVITY = "activity"
+KIND_NURTURING = "nurturing"
+WORK_ITEM_KINDS = {"mtg-": KIND_MEETING, "act-": KIND_ACTIVITY, "nrt-": KIND_NURTURING}
+WORK_ITEM_PREFIXES = tuple(WORK_ITEM_KINDS)
+# The narrower domain that may anchor an OPPORTUNITY gate: a nurturing (nrt-) lives
+# under an Account, so only a meeting / activity can (anchor_opportunity_gate).
+OPPORTUNITY_ANCHOR_PREFIXES = ("mtg-", "act-")
+
+
+def is_work_item_id(work_item_id: str) -> bool:
+    """True when ``work_item_id`` names an anchor work item — ``startswith`` any of
+    ``WORK_ITEM_PREFIXES`` (mtg-/act-/nrt-, ms-144 e-5191). One predicate the anchor
+    paths share instead of re-spelling the three-prefix ``or`` chain."""
+    return (work_item_id or "").strip().startswith(WORK_ITEM_PREFIXES)
+
+
+def resolve_work_item(data: dict, work_item_id: str):
+    """Resolve any anchor work item id to ``(owner, work_item, kind)`` across its
+    kind's store, or ``(None, None, "")`` for a non-work-item id (ms-144 e-5191).
+    ``kind`` is one of the ``KIND_*`` constants (``KIND_MEETING`` / ``KIND_ACTIVITY``
+    / ``KIND_NURTURING``); ``""`` signals "not a work item". THE single prefix-dispatch
+    the anchor / firing / find paths share — the prefix→kind domain lives once in
+    ``WORK_ITEM_KINDS``, so this iterates it rather than re-spelling the prefixes."""
+    wi = (work_item_id or "").strip()
+    for prefix, kind in WORK_ITEM_KINDS.items():
+        if wi.startswith(prefix):
+            if kind == KIND_MEETING:
+                owner, found = find_meeting(data, wi)
+            elif kind == KIND_ACTIVITY:
+                owner, found = find_activity(data, wi)
+            else:  # KIND_NURTURING
+                owner, found = find_nurturing(data, wi)
+            return owner, found, kind
+    return None, None, ""
+
+
 def anchor_gate(data: dict, gate_id: str, work_item_id: str, *,
                 at: str = "") -> dict:
     """Attach (or re-attach) the work item whose completion will prompt this
@@ -2183,13 +2226,10 @@ def anchor_gate(data: dict, gate_id: str, work_item_id: str, *,
         raise ValueError(
             f"{gate_id} is {gate.get('status')!r}, only an open gate can be anchored")
     wi = (work_item_id or "").strip()
-    if not (wi.startswith("mtg-") or wi.startswith("act-") or wi.startswith("nrt-")):
+    if not is_work_item_id(wi):
         raise ValueError(
             f"anchor must be a work item (mtg-/act-/nrt-), got {work_item_id!r}")
-    if wi.startswith("mtg-"):
-        _, found = find_meeting(data, wi)
-    else:
-        _, found = find_work_item(data, wi)
+    _, found, _ = resolve_work_item(data, wi)
     if found is None:
         raise ValueError(f"anchor work item not found: {work_item_id}")
     gate["anchor"] = wi
@@ -2207,15 +2247,20 @@ def anchor_gate(data: dict, gate_id: str, work_item_id: str, *,
 def _anchor_open_gate_to_meeting(data: dict, opportunity_id: str,
                                  meeting_id: str, *, at: str = "") -> None:
     """Anchor the opportunity's open前進ゲート to ``meeting_id`` (its発火源) when a
-    meeting is confirmed with set_transition (e-3583 fix, dogfood #8). Idempotent:
-    skips when the gate already points at this meeting (no duplicate history row),
-    and silently no-ops when no gate is open (terminal / none). This closes the
-    gap where the phase-entry seed path anchored seeded meetings but a directly-
-    scheduled meeting (e.g. on a migrated gate) left the anchor empty."""
-    gate = current_gate(data, opportunity_id)
-    if gate is None or (gate.get("anchor") or "") == meeting_id:
-        return
-    anchor_gate(data, gate["id"], meeting_id, at=at)
+    meeting is confirmed with set_transition (e-3583 fix, dogfood #8).
+
+    ms-144 e-5192: this is the meeting-confirm AUTO path — it now DELEGATES the
+    actual bind to the public verb ``anchor_opportunity_gate`` so that path's
+    ownership invariant (the meeting must belong to *this* opportunity) and its
+    idempotency both apply here too, instead of calling the lower-level
+    ``anchor_gate`` (which skips ownership). The ONE difference kept from the public
+    verb is deliberate: a missing open gate is a **silent no-op** here (this is a
+    passive side-effect of confirming a meeting, not a user request), where
+    ``anchor_opportunity_gate`` raises. Guarding that case before delegating keeps
+    the two anchor entry points converged on a single bind path (e-5192)."""
+    if current_gate(data, opportunity_id) is None:
+        return  # no live gate (terminal / none) — silent for the auto path
+    anchor_opportunity_gate(data, opportunity_id, meeting_id, at=at)
 
 
 def anchor_opportunity_gate(data: dict, opportunity_id: str,
@@ -2254,21 +2299,20 @@ def anchor_opportunity_gate(data: dict, opportunity_id: str,
             f"{opportunity_id} has no open advance gate to anchor "
             f"(the phase is terminal, or no gate is open)")
     wi = (work_item_id or "").strip()
-    # A meeting or activity only. Ownership: the work item must live on this
-    # opportunity — find_meeting / find_activity search globally, so an
-    # existing-but-foreign id would slip past anchor_gate's existence check.
-    if wi.startswith("mtg-"):
-        owner, found = find_meeting(data, wi)
-    elif wi.startswith("act-"):
-        owner, found = find_activity(data, wi)
-    elif wi.startswith("nrt-"):
+    # A meeting or activity only (OPPORTUNITY_ANCHOR_PREFIXES). Ownership: the work
+    # item must live on this opportunity — the finders search globally, so an
+    # existing-but-foreign id would slip past a bare existence check. nurturing
+    # (nrt-) gets a recovery-hint rejection before the domain guard because it IS a
+    # work item but lives under an Account (review A2), not a plain "not a work item".
+    if wi.startswith("nrt-"):
         raise ValueError(
             f"{work_item_id} is a nurturing (nrt-), which lives under an Account, "
             f"not an Opportunity — it cannot anchor a商談's前進ゲート. "
             f"Anchor a meeting (mtg-) or activity (act-) on {opportunity_id} instead")
-    else:
+    if not wi.startswith(OPPORTUNITY_ANCHOR_PREFIXES):
         raise ValueError(
             f"anchor must be a meeting or activity (mtg-/act-), got {work_item_id!r}")
+    owner, found, _ = resolve_work_item(data, wi)
     if found is None:
         raise ValueError(f"anchor work item not found: {work_item_id}")
     if owner is None or owner.get("id") != opportunity_id:
@@ -2357,14 +2401,12 @@ def _work_item_date(data: dict, work_item_id: str) -> str:
     """The date (YYYY-MM-DD) a work item is planned for, or '' — a meeting's
     scheduled_at, an activity/nurturing's deadline. Used to sync a gate's 遷移日
     to its anchor (SPEC AC4)."""
-    wi = (work_item_id or "").strip()
-    if wi.startswith("mtg-"):
-        _, m = find_meeting(data, wi)
-        return (m.get("scheduled_at", "") or "")[:10] if m else ""
-    if wi.startswith("act-") or wi.startswith("nrt-"):
-        _, w = find_work_item(data, wi)
-        return (w.get("deadline", "") or "") if w else ""
-    return ""
+    _, found, kind = resolve_work_item(data, work_item_id)
+    if found is None:
+        return ""
+    if kind == KIND_MEETING:
+        return (found.get("scheduled_at", "") or "")[:10]
+    return (found.get("deadline", "") or "")  # activity / nurturing
 
 
 def work_item_completed(data: dict, work_item_id: str, now: str = "") -> bool:
@@ -2374,22 +2416,18 @@ def work_item_completed(data: dict, work_item_id: str, now: str = "") -> bool:
     A meeting counts as complete when it is ``ended``, or still ``scheduled`` but
     its effective end has passed ``now`` (a full timestamp). An activity or
     nurturing counts when its status is ``done``. Any other id / state → False."""
-    wi = (work_item_id or "").strip()
-    if wi.startswith("mtg-"):
-        _, m = find_meeting(data, wi)
-        if m is None:
-            return False
-        if m.get("status") == MEETING_ENDED:
+    _, found, kind = resolve_work_item(data, work_item_id)
+    if found is None:
+        return False
+    if kind == KIND_MEETING:
+        if found.get("status") == MEETING_ENDED:
             return True
-        if m.get("status") == MEETING_SCHEDULED and now:
-            end = meeting_effective_end(m)
+        if found.get("status") == MEETING_SCHEDULED and now:
+            end = meeting_effective_end(found)
             now_dt = _parse_dt(now)
             return bool(end is not None and now_dt is not None and end <= now_dt)
         return False
-    if wi.startswith("act-") or wi.startswith("nrt-"):
-        _, w = find_work_item(data, wi)
-        return work_model.is_done(w)
-    return False
+    return work_model.is_done(found)  # activity / nurturing
 
 
 def gate_judgement_ready(data: dict, opportunity_id: str, now: str = "") -> bool:
@@ -2818,11 +2856,13 @@ def find_nurturing(data: dict, nurturing_id: str):
 def find_work_item(data: dict, work_item_id: str):
     """Resolve an Activity (act-) or Nurturing (nrt-) work item to
     ``(target, work_item)``, or ``(None, None)``. Used by the reply-watcher
-    (E) which watches a specific 予定 for its counterpart's reply."""
-    if work_item_id.startswith("act-"):
-        return find_activity(data, work_item_id)
-    if work_item_id.startswith("nrt-"):
-        return find_nurturing(data, work_item_id)
+    (E) which watches a specific 予定 for its counterpart's reply. A meeting
+    (mtg-) resolves via ``find_meeting`` / ``resolve_work_item``, NOT here — this
+    stays act-/nrt- only (ms-144 e-5191: shares the one prefix-dispatch, but keeps
+    its narrower return so callers that pass a meeting still get ``(None, None)``)."""
+    owner, found, kind = resolve_work_item(data, work_item_id)
+    if kind in (KIND_ACTIVITY, KIND_NURTURING):
+        return owner, found
     return None, None
 
 
