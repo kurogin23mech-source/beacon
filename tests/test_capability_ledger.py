@@ -569,23 +569,61 @@ def test_run_family_keys_are_symmetric():
     ``<status>_<family>`` keys, so a consumer builds any family's key mechanically
     instead of memorising per-family suffixes (the KeyError risk the old split
     ``violations`` / ``new_symbol_reach`` / ``new_collection_coupling`` / … invited).
-    Pin the scheme so a future family, or a renamed key, cannot silently reintroduce
-    the asymmetry this task removed."""
+    The build reads ``result["families"]`` for the tokens — NOT a hardcoded list here —
+    so this test also proves the shipped tokens (incl. the compound
+    ``iterator_narrowing``) drive the scheme (e-5274 AX review)."""
     result = chk.run()
-    for fam in ("symbol", "collection", "arm", "iterator_narrowing"):
+    families = result["families"]
+    assert families == ["symbol", "collection", "arm", "iterator_narrowing"], families
+    for fam in families:
         for status in ("all", "new", "pending", "reviewed"):
             key = f"{status}_{fam}"
             assert key in result, f"missing unified family key: {key}"
             assert isinstance(result[key], list), f"{key} must be a list, got {type(result[key])}"
-    # symbol has no reviewed class → its reviewed subset is always empty (present only
-    # for shape symmetry, so the mechanical build never KeyErrors on it).
+    # symbol has no reviewed class → its reviewed subset is always empty. It is DERIVED
+    # (not a hardcoded []), so it stays a list and would auto-fill if that ever changed.
     assert result["reviewed_symbol"] == []
     # the full inventory of each family is the union of its three status subsets.
-    for fam in ("symbol", "collection", "arm", "iterator_narrowing"):
+    for fam in families:
         parts = (len(result[f"new_{fam}"]) + len(result[f"pending_{fam}"])
                  + len(result[f"reviewed_{fam}"]))
         assert len(result[f"all_{fam}"]) == parts, (
             f"all_{fam} is not the union of new/pending/reviewed")
+
+
+def test_families_list_is_derived_not_hardcoded():
+    """e-5274 AX review: the family tokens come from _REACH_NARROWING_FAMILIES, derived
+    as the three name-denylist families (RATCHET_FAMILIES / _RATCHET_SCAN keys) plus the
+    standalone signal-set family. Pin the derivation so a new denylist family auto-joins
+    the run() ``families`` list without a hand edit here."""
+    assert chk._REACH_NARROWING_FAMILIES == tuple(chk._RATCHET_SCAN) + ("iterator_narrowing",)
+    # the ledger's registered denylist families and the scanner's scan table agree
+    # (test_ratchet_family_tables_agree pins that), so the derived list covers exactly
+    # the three registered families + narrowing.
+    assert set(chk._RATCHET_SCAN) == set(cl.RATCHET_FAMILIES)
+
+
+def test_classify_narrowing_precedence_and_evidence():
+    """e-5274 maint review: cl.classify_narrowing is the single source of the
+    reviewed→debt→new precedence (the scanner no longer hand-writes it). Reviewed wins
+    over debt and returns the evidence; debt/new return None evidence (advice is the
+    scanner's signal-kind hint)."""
+    site, tok = "cmd_synthetic", "ms-"
+    # new by default (neither allowlist)
+    assert cl.classify_narrowing(site, tok) == ("new_violation", None)
+
+
+def test_classify_narrowing_reads_current_allowlist(monkeypatch):
+    # honours a monkeypatched allowlist (module-global read at call time), and reviewed
+    # wins over a simultaneously-present debt entry (disjoint by contract, precedence
+    # pinned here).
+    site, tok = "cmd_synthetic", "ms-"
+    monkeypatch.setattr(cl, "KNOWN_ITERATOR_NARROWING", frozenset({(site, tok)}))
+    assert cl.classify_narrowing(site, tok) == ("pending_debt", None)
+    monkeypatch.setattr(cl, "REVIEWED_LEGITIMATE_ITERATOR_NARROWING",
+                        {(site, tok): "not a Target narrowing"})
+    status, evidence = cl.classify_narrowing(site, tok)
+    assert status == "reviewed_correct" and evidence == "not a Target narrowing"
 
 
 # --- non-enumerated collection coupling (ms-134 e-4740) --------------------

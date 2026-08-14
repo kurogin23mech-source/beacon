@@ -379,6 +379,17 @@ _RATCHET_SCAN = {
             "key_extractor": _arm_key, "population": _arm_scanned_paths},
 }
 
+# Canonical family-token list for run()'s unified <status>_<family> keys (ms-142
+# e-5274 AX review). DERIVED: the three name-denylist families come from _RATCHET_SCAN
+# (so a new denylist family auto-joins), plus the standalone SIGNAL-SET family
+# iterator_narrowing (kept out of RATCHET_FAMILIES by design — see that dict's note).
+# run() emits this as the "families" key so a consumer iterates the tokens instead of
+# GUESSING the spelling — the fourth token is the compound "iterator_narrowing", NOT a
+# single word, so a consumer inferring a single-word convention from the first three
+# would build "new_narrowing" and hit a silent KeyError. The list is the single source
+# a mechanical <status>_<family> build reads.
+_REACH_NARROWING_FAMILIES = tuple(_RATCHET_SCAN) + ("iterator_narrowing",)
+
 
 def _find_family_reaches(family: str, path: str = "") -> list:
     """Generic driver for every ratchet family (ms-142 e-5143): walk the family's
@@ -610,18 +621,16 @@ def find_iterator_narrowing(path: str = "") -> list:
         rel = os.path.relpath(p, REPO)
         stem = os.path.splitext(os.path.basename(p))[0]
         for signal_kind, token, lineno in _narrowing_hits(tree):
-            # reviewed → debt → new, identical order to cl.classify_reach so a
-            # reviewed-legitimate narrowing wins over the (disjoint) debt allowlist
-            # and carries the evidence as its advice, not the routing hint.
-            if cl.is_reviewed_legitimate_iterator_narrowing(stem, token):
-                status = "reviewed_correct"
-                advice = cl.REVIEWED_LEGITIMATE_ITERATOR_NARROWING[(stem, token)]
-            elif cl.is_known_iterator_narrowing(stem, token):
-                status = "pending_debt"
-                advice = _NARROWING_ADVICE[signal_kind]
-            else:
-                status = "new_violation"
-                advice = _NARROWING_ADVICE[signal_kind]
+            # Precedence (reviewed → debt → new) lives in cl.classify_narrowing — the
+            # narrowing peer of cl.classify_reach — so a change to the allowlist lookup
+            # propagates here without editing this scanner (no parallel if/elif chain,
+            # no direct dict access bypassing the accessor; e-5274 maint review). For a
+            # reviewed narrowing the ledger returns the review EVIDENCE (used as advice);
+            # for debt/new the advice is the signal-kind routing hint, which the scanner
+            # owns because it depends on id-prefix vs dev-state, not a denylist token.
+            status, evidence = cl.classify_narrowing(stem, token)
+            advice = evidence if status == "reviewed_correct" \
+                else _NARROWING_ADVICE[signal_kind]
             out.append({"module": stem, "signal_kind": signal_kind, "token": token,
                         "advice": advice, "file": rel,
                         "lineno": lineno, "status": status})
@@ -632,17 +641,22 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
     """Run all checks and return a structured result with an ``ok`` verdict.
 
     FAMILY KEY SCHEME (ms-142 e-5274 — unified): the four reach/narrowing families
-    each expose the SAME four ``<status>_<family>`` keys, so a consumer can build any
+    each expose the SAME four ``<status>_<family>`` keys, so a consumer builds any
     family's key mechanically instead of memorising per-family suffixes (the old split
     ``violations`` / ``new_symbol_reach`` / ``new_collection_coupling`` /
     ``new_arm_coupling`` / ``new_iterator_narrowing`` + inconsistent ``all_*`` invited
-    KeyErrors — e-5253 AX finding). The families are ``symbol`` / ``collection`` /
-    ``arm`` / ``iterator_narrowing``; the statuses are ``all_`` (full inventory),
-    ``new_`` (new_violation subset — the CI-gating one), ``pending_`` (pending_debt
-    subset), ``reviewed_`` (reviewed_correct subset). ``reviewed_symbol`` is always
-    ``[]`` — the symbol family structurally has no reviewed class (a shared verb
-    calling a profession recorder is never "correct by design"), kept present for
-    shape symmetry so the mechanical build never misses.
+    KeyErrors — e-5253 AX finding). The statuses are ``all_`` (full inventory), ``new_``
+    (new_violation subset — the CI-gating one), ``pending_`` (pending_debt subset),
+    ``reviewed_`` (reviewed_correct subset). The family TOKENS are NOT all single words
+    — the result carries a ``"families"`` list (``symbol`` / ``collection`` / ``arm`` /
+    ``iterator_narrowing``) as the source of truth for the tokens: iterate
+    ``result["families"]`` × the four statuses to build every key, rather than guessing
+    the spelling (the fourth token is the COMPOUND ``iterator_narrowing`` — a consumer
+    inferring a single-word convention from the first three would build ``new_narrowing``
+    and hit a silent KeyError; e-5274 AX review). ``reviewed_symbol`` is always ``[]`` —
+    the symbol family structurally has no reviewed class (a shared verb calling a
+    profession recorder is never "correct by design") — but it is DERIVED like the
+    others (not a hardcoded ``[]``), so it auto-updates if that ever changes.
 
     ``ok`` is the authoritative pass/fail (also the process exit code). It is
     False if ANY of: unclassified verbs/skills, unowned L3/L4 verbs/skills (ownership
@@ -656,34 +670,39 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
     skill_cov = cl.reconcile_skills()
     ownership = cl.reconcile_ownership()
     skill_ownership = cl.reconcile_skills_ownership()
-    # viol is the FULL inventory (both statuses); split like the collection reads
-    # so a NEW symbol reach fails CI while an allowlisted (ms-143-owned) one is
-    # reported as pending debt (ms-134 e-5061 symbol ratchet).
-    viol = find_invariant_violations(commands_path)
-    new_viol = [v for v in viol if v["status"] == "new_violation"]
-    pending_viol = [v for v in viol if v["status"] == "pending_debt"]
-    # all_collection_reads is the FULL inventory (all three statuses), named so a
-    # caller does not mistake it for a problems-only list (AX review 2026-08-03).
-    all_reads = find_collection_coupling(commands_path)
-    new_coupling = [c for c in all_reads if c["status"] == "new_violation"]
-    pending_coupling = [c for c in all_reads if c["status"] == "pending_debt"]
-    reviewed_reads = [c for c in all_reads if c["status"] == "reviewed_correct"]
-    # Arm-name coupling (ms-142 e-5012) — the third reach class, scanned in the
-    # shared-frame aggregator modules (session_log …) rather than the CLI-verb
-    # surface. Split like the collection reads so a NEW arm read fails CI while an
-    # allowlisted (KNOWN_ARM_REACH) one is reported as pending debt.
-    all_arm_reads = find_arm_coupling(arm_path)
-    new_arm_coupling = [a for a in all_arm_reads if a["status"] == "new_violation"]
-    pending_arm_coupling = [a for a in all_arm_reads if a["status"] == "pending_debt"]
-    reviewed_arm_reads = [a for a in all_arm_reads if a["status"] == "reviewed_correct"]
-    # Iterator NARROWING (ms-142 e-5253) — the 4th, differently-shaped reach class:
-    # a capability consuming iter_target_records that narrows by a dev id-prefix /
-    # state-vocab. Same derived population as the arm scan; split like the reaches so
-    # a NEW narrowing fails CI while an allowlisted one is pending debt.
-    all_narrowing = find_iterator_narrowing(arm_path)
-    new_narrowing = [n for n in all_narrowing if n["status"] == "new_violation"]
-    pending_narrowing = [n for n in all_narrowing if n["status"] == "pending_debt"]
-    reviewed_narrowing = [n for n in all_narrowing if n["status"] == "reviewed_correct"]
+    # Each family below binds its locals to the SAME name as its return key
+    # (all_/new_/pending_/reviewed_ + family token), so the ok= expression and the
+    # return dict read the identical name — a source reader tracing ok=False back to a
+    # key never hits a rename gap (ms-142 e-5274 AX/maint review). all_<family> is the
+    # FULL inventory (every status), named so a caller does not mistake it for a
+    # problems-only list (AX review 2026-08-03).
+    #
+    # symbol reach (ms-134 e-5061): a shared verb calling a profession recorder. No
+    # reviewed class (allowlist_reviewed=None), so reviewed_symbol is DERIVED like the
+    # others (always [] today, but auto-updates if the symbol family ever gains a
+    # reviewed class — no hardcoded [] to fall out of sync; e-5274 maint review).
+    all_symbol = find_invariant_violations(commands_path)
+    new_symbol = [v for v in all_symbol if v["status"] == "new_violation"]
+    pending_symbol = [v for v in all_symbol if v["status"] == "pending_debt"]
+    reviewed_symbol = [v for v in all_symbol if v["status"] == "reviewed_correct"]
+    # collection coupling (ms-134 e-4740): a shared verb reading data['milestones'] etc.
+    all_collection = find_collection_coupling(commands_path)
+    new_collection = [c for c in all_collection if c["status"] == "new_violation"]
+    pending_collection = [c for c in all_collection if c["status"] == "pending_debt"]
+    reviewed_collection = [c for c in all_collection if c["status"] == "reviewed_correct"]
+    # arm-name coupling (ms-142 e-5012) — scanned in the shared-frame aggregator
+    # modules (session_log …) rather than the CLI-verb surface.
+    all_arm = find_arm_coupling(arm_path)
+    new_arm = [a for a in all_arm if a["status"] == "new_violation"]
+    pending_arm = [a for a in all_arm if a["status"] == "pending_debt"]
+    reviewed_arm = [a for a in all_arm if a["status"] == "reviewed_correct"]
+    # iterator NARROWING (ms-142 e-5253) — the 4th, differently-shaped (SIGNAL-SET)
+    # family: a capability consuming iter_target_records that narrows by a dev id-prefix
+    # / state-vocab. Same derived population as the arm scan.
+    all_iterator_narrowing = find_iterator_narrowing(arm_path)
+    new_iterator_narrowing = [n for n in all_iterator_narrowing if n["status"] == "new_violation"]
+    pending_iterator_narrowing = [n for n in all_iterator_narrowing if n["status"] == "pending_debt"]
+    reviewed_iterator_narrowing = [n for n in all_iterator_narrowing if n["status"] == "reviewed_correct"]
     # Distribution exclusion (ms-134 e-5062 verbs / e-5086 skills): no L0
     # (product-operation, 非配布) capability may appear in the shipped distribution.
     # Verbs: the shipped dispatch surface. Skills: the bundled skills/ tree (every
@@ -693,32 +712,36 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
     l0_skill_leak = cl.shipped_l0_skills()
     ok = (not cov["unclassified"] and not skill_cov["unclassified"]
           and not ownership["unowned"] and not skill_ownership["unowned"]
-          and not new_viol and not new_coupling and not new_arm_coupling
-          and not new_narrowing
+          and not new_symbol and not new_collection and not new_arm
+          and not new_iterator_narrowing
           and not l0_leak and not l0_skill_leak)
     return {"ok": ok, "coverage": cov, "skill_coverage": skill_cov,
             "ownership": ownership, "skill_ownership": skill_ownership,
-            # symbol family (no reviewed class → reviewed_symbol always []; present
-            # for shape symmetry so a mechanical <status>_<family> build never misses)
-            "all_symbol": viol,
-            "new_symbol": new_viol,
-            "pending_symbol": pending_viol,
-            "reviewed_symbol": [],
+            # the canonical family-token list — iterate this × {all,new,pending,
+            # reviewed} to build any family key mechanically (no guessing the spelling
+            # of the compound "iterator_narrowing" token; e-5274 AX review).
+            "families": list(_REACH_NARROWING_FAMILIES),
+            # symbol family (no reviewed class → reviewed_symbol is DERIVED and always
+            # [] today, present for shape symmetry so a mechanical build never misses)
+            "all_symbol": all_symbol,
+            "new_symbol": new_symbol,
+            "pending_symbol": pending_symbol,
+            "reviewed_symbol": reviewed_symbol,
             # collection family
-            "all_collection": all_reads,
-            "new_collection": new_coupling,
-            "pending_collection": pending_coupling,
-            "reviewed_collection": reviewed_reads,
+            "all_collection": all_collection,
+            "new_collection": new_collection,
+            "pending_collection": pending_collection,
+            "reviewed_collection": reviewed_collection,
             # arm family
-            "all_arm": all_arm_reads,
-            "new_arm": new_arm_coupling,
-            "pending_arm": pending_arm_coupling,
-            "reviewed_arm": reviewed_arm_reads,
+            "all_arm": all_arm,
+            "new_arm": new_arm,
+            "pending_arm": pending_arm,
+            "reviewed_arm": reviewed_arm,
             # iterator_narrowing family (reviewed_ terminal state added e-5274)
-            "all_iterator_narrowing": all_narrowing,
-            "new_iterator_narrowing": new_narrowing,
-            "pending_iterator_narrowing": pending_narrowing,
-            "reviewed_iterator_narrowing": reviewed_narrowing,
+            "all_iterator_narrowing": all_iterator_narrowing,
+            "new_iterator_narrowing": new_iterator_narrowing,
+            "pending_iterator_narrowing": pending_iterator_narrowing,
+            "reviewed_iterator_narrowing": reviewed_iterator_narrowing,
             # distribution exclusion — NOT a reach/narrowing family (own axis)
             "l0_distribution_leak": l0_leak,
             "l0_skill_distribution_leak": l0_skill_leak}

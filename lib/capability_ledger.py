@@ -612,6 +612,34 @@ def is_reviewed_legitimate_iterator_narrowing(site: str, token: str) -> bool:
     return (site, token) in REVIEWED_LEGITIMATE_ITERATOR_NARROWING
 
 
+def classify_narrowing(site: str, token: str) -> tuple:
+    """Classify one detected iterator narrowing into ``(status, evidence)`` — the
+    narrowing peer of ``classify_reach`` (ms-142 e-5274 maint/AX review). Precedence is
+    reviewed → debt → new, IDENTICAL to ``classify_reach`` so the two stay behaviourally
+    aligned: this is the single place that order lives, so the scanner no longer carries
+    a hand-written parallel ``if/elif/else`` that a future change to the allowlist lookup
+    would silently fail to propagate to.
+
+      * ``("reviewed_correct", <evidence str>)`` — a human-reviewed legitimate narrowing
+        in ``REVIEWED_LEGITIMATE_ITERATOR_NARROWING``; ``evidence`` is the do-not-remediate
+        rationale (the caller uses it AS the advice, not a routing hint).
+      * ``("pending_debt", None)`` — an accepted-pending narrowing in
+        ``KNOWN_ITERATOR_NARROWING``.
+      * ``("new_violation", None)`` — neither; a fresh narrowing that fails the checker.
+
+    ``evidence`` is ``None`` for debt/new because the routing advice for those depends on
+    the SIGNAL KIND (id-prefix vs dev-state), which the scanner owns — narrowing is a
+    SIGNAL-SET family with no per-token denylist advice the way collection/symbol/arm
+    have (exactly why it is kept OUT of ``RATCHET_FAMILIES``; see that dict's note). The
+    allowlists are read through the module accessors (honouring a monkeypatched
+    allowlist), matching ``classify_reach``'s thunk discipline."""
+    if is_reviewed_legitimate_iterator_narrowing(site, token):
+        return "reviewed_correct", REVIEWED_LEGITIMATE_ITERATOR_NARROWING[(site, token)]
+    if is_known_iterator_narrowing(site, token):
+        return "pending_debt", None
+    return "new_violation", None
+
+
 # ---------------------------------------------------------------------------
 # RATCHET_FAMILIES — the ONE registry that unifies the three profession-coupling
 # reach classes (ms-142 e-5143 / PR #629 独立レビュー maint finding). Before this,
@@ -656,17 +684,22 @@ REMEDIATION_TO_MANIFEST = (
 # attribute name (which breaks grep / rename / jump-to-def and only fails at runtime
 # on a typo; ms-142 e-5143 maint review). ``allowlist_reviewed`` is ``None`` for a
 # family with no reviewed class (symbols — see KNOWN_SYMBOL_REACH doc).
-# NOTE (ms-142 e-5253): a FOURTH reach class — ITERATOR NARROWING — exists but is
-# DELIBERATELY NOT registered here. The three families below share ONE shape: match a
-# concrete NAME against a denylist (collection key / symbol / arm name), which
-# ``_find_family_reaches`` classifies generically. Narrowing is a DIFFERENT shape: it
-# extracts by a SIGNAL-SET (id-prefixes derived from work_model + DEV_NARROWING_STATE_
-# VOCAB), not a name-denylist, so forcing it through the denylist-classify driver would
-# bloat that driver with a special case. It lives standalone in the scanner
-# (``check-capability-scope.py`` → ``find_iterator_narrowing``) with its own allowlist
-# (``KNOWN_ITERATOR_NARROWING`` / ``is_known_iterator_narrowing`` above). Routing rule
-# for the NEXT family: a concrete-NAME denylist family → add a row HERE; a SIGNAL-SET
-# family → add it alongside ``find_iterator_narrowing``.
+# NOTE (ms-142 e-5253 / e-5274): a FOURTH reach class — ITERATOR NARROWING — exists but
+# is DELIBERATELY NOT registered here, so ``classify_reach('iterator_narrowing', …)``
+# RAISES (unknown family) BY DESIGN. Use its peer classifier ``classify_narrowing`` (just
+# above) instead — the run() output presents iterator_narrowing as a peer family, but the
+# IMPLEMENTATION is forked and this note is where that fork is discoverable. Why forked:
+# the three families below share ONE shape — match a concrete NAME against a denylist
+# (collection key / symbol / arm name), which ``_find_family_reaches`` classifies through
+# ``classify_reach``. Narrowing is a DIFFERENT shape: it extracts by a SIGNAL-SET
+# (id-prefixes derived from work_model + DEV_NARROWING_STATE_VOCAB), not a name-denylist,
+# so forcing it through the denylist-classify driver would bloat that driver with a
+# special case. It lives standalone in the scanner (``check-capability-scope.py`` →
+# ``find_iterator_narrowing``) + its ledger peers ``classify_narrowing`` /
+# ``KNOWN_ITERATOR_NARROWING`` / ``REVIEWED_LEGITIMATE_ITERATOR_NARROWING`` above. Routing
+# rule for the NEXT family: a concrete-NAME denylist family → add a row HERE (rides
+# ``classify_reach``); a SIGNAL-SET family → add it alongside ``find_iterator_narrowing``
+# with its own ``classify_*`` peer.
 RATCHET_FAMILIES: dict = {
     "collection": {
         "denylist": lambda: PROFESSION_CONCRETE_COLLECTIONS,
