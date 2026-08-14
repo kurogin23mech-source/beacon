@@ -102,6 +102,9 @@ def test_dev_milestone_arm_roles():
     assert {"done", "observing"} <= set(ms["state_model"]["gated_states"])
     # ms-142 T3: milestone's terminal is guarded by the dev spine (ms-119).
     assert ms["state_model"]["completion_gate"] == "spine"
+    # ms-142 e-5267: a status-lifecycle class advances generically (no class-verb-
+    # only phase), so the manifest surfaces generic_advance True.
+    assert ms["state_model"]["generic_advance"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +132,27 @@ def test_sales_opportunity_arm_roles():
     assert opp["state_model"]["ball_field"] == "who_has_the_ball"
     # ms-142 T3: opportunity's terminal is guarded by the existing sales judge flow.
     assert opp["state_model"]["completion_gate"] == "sales-judge"
+    # ms-142 e-5267: the opportunity funnel HAS a generic set_target_state seam
+    # (funnel_seam non-None → _advance_funnel), so generic_advance is True — the read
+    # that distinguishes it from a seam-less account funnel below.
+    assert opp["state_model"]["generic_advance"] is True
+
+
+def test_sales_account_state_model_has_no_generic_advance():
+    # ms-142 e-5267: an Account is a SEAM-LESS funnel (funnel_seam=None) — its phase
+    # is written by the class verb ``acc- phase_set`` + derivation, NOT the generic
+    # set_target_state path. The manifest surfaces that as generic_advance False, the
+    # one class where it is False, so a reader distinguishes it from the opportunity
+    # funnel (generic_advance True) WITHOUT knowing the sales internals. The private
+    # funnel_seam id itself never leaks onto the public projection.
+    acc = _class(occ.profession_manifest(_sales()), "accounts")
+    assert acc["kind"] == "account"
+    assert acc["state_model"]["shape"] == "funnel"
+    assert acc["state_model"]["generic_advance"] is False
+    assert "funnel_seam" not in acc["state_model"]
+    # the sibling opportunity funnel differs on exactly this bit.
+    opp = _class(occ.profession_manifest(_sales()), "opportunities")
+    assert opp["state_model"]["generic_advance"] is True
 
 
 def test_manifest_scoped_to_target_collections():
@@ -243,6 +267,8 @@ def test_operation_is_a_manifest_target_class_without_work_item_arm():
     assert op["state_model"]["ball_field"] is None
     assert op["state_model"]["gated_states"] == ["closed"]
     assert op["state_model"]["completion_gate"] == "spine"
+    # ms-142 e-5267: a status-transition class advances generically.
+    assert op["state_model"]["generic_advance"] is True
     assert set(op) == CLASS_KEYS
 
 

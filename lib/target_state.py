@@ -557,6 +557,30 @@ def derive_phase_ball(model: Optional[dict]) -> Optional[dict]:
     return None
 
 
+def has_generic_advance_seam(model: Optional[dict]) -> bool:
+    """Whether ``set_target_state`` has a GENERIC non-terminal advance path for this
+    class, or every phase/state move must go through a class verb (ms-142 e-5267).
+
+    True for every class EXCEPT a SEAM-LESS funnel — a SHAPE_FUNNEL whose
+    ``funnel_seam`` is ``None`` (account): its phase is written only by the class
+    verb ``acc- phase_set`` + derivation, so ``set_target_state`` routes to the
+    ``phase_verb`` error rather than run the wrong (opportunity) seam on it. Every
+    other shape HAS a generic path: a SEAMED funnel (opportunity, ``funnel_seam``
+    non-None) delegates to ``_advance_funnel``; a descriptor phase list delegates to
+    ``_advance_descriptor``; a status-lifecycle class (milestone / operation /
+    acquisition) writes its ``advanceable_states`` directly. This IS the dispatch gate
+    in ``set_target_state``'s SHAPE_FUNNEL branch — that branch calls this helper, and
+    the manifest's ``generic_advance`` field projects it, so the live routing decision
+    and its public surface are ONE predicate defined here (e-5267 maint review: it used
+    to be re-encoded in both places). It reads the model, not a kind-branch — so a
+    future seam-less class shares the answer with no edit here."""
+    if not model:
+        return False
+    if model.get("shape") == SHAPE_FUNNEL:
+        return model.get("funnel_seam") is not None
+    return True
+
+
 def public_state_model(model: Optional[dict]) -> Optional[dict]:
     """Return the manifest-facing projection of a state model — the compact,
     uniform view every target-class entry carries (shape / state_field /
@@ -587,6 +611,13 @@ def public_state_model(model: Optional[dict]) -> Optional[dict]:
         # N/A predicate reads this — GENERAL, so a never-terminal class's missing gate
         # is a declared absence, not a forgotten one.
         "never_terminal": bool(model.get("never_terminal")),
+        # ms-142 e-5267: whether set_target_state can advance this class on the ONE
+        # generic path, or every move needs a class verb. The manifest projection of
+        # the funnel_seam dispatch gate: False ONLY for a seam-less funnel (account,
+        # funnel_seam=None). So a surface reader tells an opportunity (generic advance)
+        # from an account (class-verb-only phase) from the declaration, not by knowing
+        # the sales internals — and the raw funnel_seam id stays private to this module.
+        "generic_advance": has_generic_advance_seam(model),
     }
 
 
@@ -676,11 +707,15 @@ def set_target_state(data: dict, target_id: str, to_state: str, *,
     # inside _advance_funnel is what stops the gate logic from spreading across
     # set_target_state.
     if shape == SHAPE_FUNNEL:
-        if model.get("funnel_seam") is None:
-            # ms-142 e-5256: a funnel with NO generic seam (Account) has its phase
+        if not has_generic_advance_seam(model):
+            # ms-142 e-5256/e-5267: a funnel with NO generic seam (Account) has its phase
             # written by a class verb (``acc- phase_set``, a direct write) + derivation,
             # not the opportunity status-mirror writer ``_advance_funnel``. Route to the
             # class's own ``phase_verb`` hint rather than run the wrong seam on it.
+            # ONE predicate: ``has_generic_advance_seam`` IS this dispatch gate, and the
+            # manifest's ``generic_advance`` projection reads the SAME helper — so the gate
+            # and its public surface cannot drift (e-5267 maint review consensus: the
+            # funnel_seam pivot was encoded here AND in the helper; now defined once).
             # Declarative (reads the model), not a kind-branch, and the verb string is
             # model-declared so no profession-specific text is hardcoded here.
             verb_hint = (model.get("phase_verb") or "").format(target_id=target_id)
