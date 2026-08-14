@@ -151,6 +151,39 @@ def test_phase_ball_derivation_matches_old_hardcode():
 
 
 # ---------------------------------------------------------------------------
+# generic-advance projection (ms-142 e-5267): the manifest-readable boolean that
+# says whether set_target_state advances a class generically, mirroring the
+# funnel_seam dispatch gate. False ONLY for the seam-less funnel (account).
+# ---------------------------------------------------------------------------
+
+def test_has_generic_advance_seam_matches_dispatch():
+    # status-lifecycle classes advance generically (write advanceable_states).
+    assert ts.has_generic_advance_seam(ts.state_model_for(None, "milestone")) is True
+    assert ts.has_generic_advance_seam(ts.state_model_for(None, "operation")) is True
+    assert ts.has_generic_advance_seam(ts.state_model_for(None, "acquisition")) is True
+    # a SEAMED funnel (opportunity, funnel_seam non-None) delegates to _advance_funnel.
+    assert ts.has_generic_advance_seam(ts.state_model_for(None, "opportunity")) is True
+    # a SEAM-LESS funnel (account, funnel_seam=None) has NO generic path — the one
+    # False, matching set_target_state's ``funnel_seam is None`` → class-verb branch.
+    assert ts.has_generic_advance_seam(ts.state_model_for(None, "account")) is False
+    assert ts.has_generic_advance_seam(None) is False
+
+
+def test_public_state_model_projects_generic_advance():
+    # the boolean is surfaced on the manifest-facing projection so a reader gets it
+    # without touching the private funnel_seam id.
+    assert ts.public_state_model(
+        ts.state_model_for(None, "opportunity"))["generic_advance"] is True
+    assert ts.public_state_model(
+        ts.state_model_for(None, "account"))["generic_advance"] is False
+    assert ts.public_state_model(
+        ts.state_model_for(None, "milestone"))["generic_advance"] is True
+    # the raw funnel_seam slot stays PRIVATE — the projection never leaks it.
+    assert "funnel_seam" not in ts.public_state_model(
+        ts.state_model_for(None, "opportunity"))
+
+
+# ---------------------------------------------------------------------------
 # THE critical invariant: completion-gate non-bypass.
 # ---------------------------------------------------------------------------
 
