@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import occupation as occ  # noqa: E402
 import target_engine as te  # noqa: E402
+import target_state as ts  # noqa: E402
 
 
 # Every target-class entry in the manifest carries exactly these keys, whatever
@@ -140,6 +141,83 @@ def test_manifest_scoped_to_target_collections():
     cols = {tc["collection"]
             for tc in occ.profession_manifest(_sales())["target_classes"]}
     assert cols == {"milestones", "opportunities", "operations", "accounts"}
+
+
+def test_registries_derive_from_single_source_e5265():
+    """ms-142 e-5265: the FOUR registries that used to be a 3-file / 6-site shotgun —
+    occupation's ``TARGET_COLLECTIONS`` / ``_COLLECTION_KIND`` / ``_ARM_ROLES`` and
+    target_state's ``BUILTIN_STATE_MODELS`` — are now ALL derived from ONE declaration,
+    ``target_state.BUILTIN_TARGET_CLASSES``. Pin the derivation identity so a future
+    edit cannot silently re-fork them (the drift the honest ⊇ invariant used to police
+    for TARGET_COLLECTIONS is now structurally impossible)."""
+    master = ts.BUILTIN_TARGET_CLASSES
+    agg = [c for c in master.values() if c["aggregatable"]]
+    # the 3 occupation registries are exactly the aggregatable classes' projections.
+    assert occ.TARGET_COLLECTIONS == tuple(c["collection"] for c in agg)
+    assert occ.TARGET_COLLECTIONS == ("milestones", "opportunities", "operations",
+                                      "accounts")   # order-sensitive tuple, pinned
+    assert occ._COLLECTION_KIND == {c["collection"]: c["kind"] for c in agg}
+    assert occ._ARM_ROLES == {c["collection"]: c["arm_roles"] for c in agg
+                              if c["arm_roles"] is not None}
+    # acquisition is the non-aggregatable class: it HAS a state model but is NOT in the
+    # 3 occupation registries (it rides a separate persistence path).
+    assert master["acquisition"]["aggregatable"] is False
+    assert "acquisitions" not in occ.TARGET_COLLECTIONS
+    assert "acquisition" not in occ._COLLECTION_KIND.values()
+    assert "acquisition" in ts.BUILTIN_STATE_MODELS
+    # no registry-only key leaks into any derived state model (public key set).
+    for kind in master:
+        for rk in ts.REGISTRY_ONLY_KEYS:
+            assert rk not in ts.BUILTIN_STATE_MODELS[kind]
+
+
+def test_state_model_key_shape_pinned_e5265():
+    """ms-142 e-5265 (maint review): pin the derived state model's OUTPUT SHAPE (the
+    exact key set per kind) rather than re-running the strip logic the production code
+    uses — a test that mirrors the derivation cannot catch a wrong strip. This catches a
+    base state field accidentally named a REGISTRY_ONLY_KEY (it would go missing here)
+    AND a shape-conditional key drift (funnel_seam / phase_verb)."""
+    base = {"kind", "shape", "state_field", "advanceable_states", "routed_states",
+            "ball_field", "monotonic", "phases_ref", "completion_gate", "never_terminal"}
+    expected = {
+        "milestone": base,
+        "operation": base,
+        "acquisition": base,
+        "opportunity": base | {"funnel_seam"},              # seamed funnel
+        "account": base | {"funnel_seam", "phase_verb"},    # seamless funnel + verb hint
+    }
+    for kind, keys in expected.items():
+        assert set(ts.BUILTIN_STATE_MODELS[kind]) == keys, kind
+
+
+def test_master_validator_catches_violations_e5265(monkeypatch):
+    """ms-142 e-5265 (AX review high#1/#2 + medium): the import-time validator is not
+    asleep — each broken invariant raises. Proven by feeding a mutated copy of the master
+    to the validator (the real one already ran clean at import)."""
+    import pytest
+    good = ts.BUILTIN_TARGET_CLASSES
+
+    def _run(mutated):
+        monkeypatch.setattr(ts, "BUILTIN_TARGET_CLASSES", mutated)
+        monkeypatch.setattr(ts, "BUILTIN_STATE_MODELS", {
+            k: {kk: vv for kk, vv in c.items() if kk not in ts.REGISTRY_ONLY_KEYS}
+            for k, c in mutated.items()})
+        ts._validate_builtin_target_classes()
+
+    # (a) outer key != inner kind
+    m = dict(good); m["milestone"] = dict(good["milestone"], kind="not-milestone")
+    with pytest.raises(AssertionError):
+        _run(m)
+    # (b) aggregatable class with arm_roles=None (the silent-_ARM_ROLES-drop bug)
+    m = dict(good); m["milestone"] = dict(good["milestone"], arm_roles=None)
+    with pytest.raises(AssertionError):
+        _run(m)
+    # (c) a seamless funnel missing its phase_verb (runtime KeyError guard)
+    m = dict(good)
+    acct = {k: v for k, v in good["account"].items() if k != "phase_verb"}
+    m["account"] = acct
+    with pytest.raises(AssertionError):
+        _run(m)
 
 
 def test_operation_is_a_manifest_target_class_without_work_item_arm():

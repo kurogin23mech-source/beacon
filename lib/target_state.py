@@ -185,8 +185,50 @@ GATE_SELF_CLOSE_BAN = "self-close-ban"  # lightweight structural gate: the termi
 # than duplicating the transitions, so the two cannot drift.
 # ---------------------------------------------------------------------------
 
-BUILTIN_STATE_MODELS: dict[str, dict] = {
+# BUILTIN_TARGET_CLASSES — the SINGLE SOURCE for every built-in Target class (ms-142
+# e-5265). Before this, adding a 4th/5th class meant a 3-file / 6-site shotgun edit
+# (``occupation.TARGET_COLLECTIONS`` / ``_ARM_ROLES`` / ``_COLLECTION_KIND`` +
+# ``target_state.BUILTIN_STATE_MODELS``), and missing one silently drifted. Now each
+# class is ONE entry here carrying BOTH its state model AND its cross-registry identity:
+#   - ``collection``  — the project.json key holding the records;
+#   - ``aggregatable`` — True ⇒ in the manifest / ``TARGET_COLLECTIONS`` (walked by
+#     session_log / deadline / claim); acquisition is False (it rides a separate
+#     persistence path — has a state model but is NOT a manifest collection);
+#   - ``arm_roles``   — the work-item / evidence / changelog arm classification
+#     (``None`` for a class with no arms, e.g. acquisition);
+#   - the rest of the entry IS the state model (shape / state_field / routed_states /
+#     …), verbatim as before.
+# The four registries are DERIVED below + in ``occupation`` from this one declaration,
+# so a new class's membership in THOSE FOUR is one append here — the drift they used to
+# risk is now structurally impossible. SCOPE (e-5265 maint review): the other two Target
+# lenses — ``occupation.TARGET_DECOMPOSITION`` (physical row decomposition, excludes
+# operations, includes acquisitions) and ``claim_target_collections`` (adds acquisitions)
+# — have DIFFERENT membership and are NOT derived here; a physically-decomposed class
+# still needs its ``TARGET_DECOMPOSITION`` entry too (a 2-site add, not 1). Their honest
+# ``⊇`` invariant still guards them. Lives in target_state (not occupation) because the state
+# model — the bulky part — anchors on target_state's SHAPE_*/GATE_* constants; the
+# arm_roles are inert DATA occupation reads (target_state itself never consumes them) —
+# a documented pure-data tradeoff for the single-entry goal (a fully clean layering would
+# hoist SHAPE_*/GATE_* + this master into a new lowest module, deferred as disproportionate
+# churn; e-5265 maint review). ORDER MATTERS: the aggregatable entries' order IS
+# ``TARGET_COLLECTIONS``' tuple order (milestones, opportunities, operations, accounts),
+# pinned by ``test_occupation_descriptor.test_dev_project_unchanged`` (tuple) +
+# ``test_occupation_manifest.test_registries_derive_from_single_source_e5265``. INSERT a
+# new AGGREGATABLE class among the first four (before the non-aggregatable ``acquisition``
+# entry) and UPDATE those tuple pins; a non-aggregatable class may go anywhere (it is
+# filtered out of TARGET_COLLECTIONS). The validator below fails loud on a broken invariant.
+BUILTIN_TARGET_CLASSES: dict[str, dict] = {
     "milestone": {
+        "collection": "milestones",
+        "aggregatable": True,
+        "arm_roles": {
+            # ms-143: ``id_prefix`` is the declarative work-item id prefix — a dev
+            # task is ``e-`` (shared with operation entries, see next_entry_id).
+            "work_item_arm": {"arm": "entries", "item_type": "task", "kind": "task",
+                              "id_prefix": "e-"},
+            "evidence_arms": [{"arm": "entries", "item_type": "commit"}],
+            "changelog": {"arm": "entries", "recorder": "milestone"},
+        },
         "kind": "milestone",
         "shape": SHAPE_STATUS_ENUM,
         "state_field": "status",
@@ -212,37 +254,15 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         "completion_gate": GATE_SPINE,   # ms-119 目的達成 review + AI-direct ban
         "never_terminal": False,         # milestones settle (done/observing)
     },
-    "operation": {
-        "kind": "operation",
-        "shape": SHAPE_TRANSITION_TABLE,
-        "state_field": "status",
-        "advanceable_states": ("todo", "in_progress", "open"),
-        "routed_states": {"closed": "beacon operation close <id>"},
-        "ball_field": None,
-        "monotonic": True,   # validated via core.LIFECYCLE_TRANSITIONS['operation']
-        "phases_ref": None,
-        "completion_gate": GATE_SPINE,   # same dev spine as milestone (close)
-        "never_terminal": False,         # operations settle (closed)
-    },
-    "acquisition": {
-        "kind": "acquisition",
-        "shape": SHAPE_TRANSITION_TABLE,
-        "state_field": "status",
-        "advanceable_states": ("todo", "in_progress"),
-        "routed_states": {
-            "done": "beacon acquisition status <id> done "
-                    "(terminal — stamps done_at via work_model.mark_done)",
-            "cancelled": "beacon acquisition cancel <id> (soft-cancel)",
-        },
-        "ball_field": None,
-        "monotonic": True,   # validated via core.LIFECYCLE_TRANSITIONS['acquisition']
-        "phases_ref": None,
-        # ms-142 T3: no gate existed; Scope B gives it the lightweight structural
-        # ban (AI cannot self-close `done` without a human/override signal).
-        "completion_gate": GATE_SELF_CLOSE_BAN,
-        "never_terminal": False,         # acquisitions settle (done/cancelled)
-    },
     "opportunity": {
+        "collection": "opportunities",
+        "aggregatable": True,
+        "arm_roles": {
+            "work_item_arm": {"arm": "activities", "item_type": None,
+                              "kind": "activity", "id_prefix": "act-"},
+            "evidence_arms": [{"arm": "communications", "item_type": None}],
+            "changelog": None,
+        },
         "kind": "opportunity",
         "shape": SHAPE_FUNNEL,
         "state_field": "phase",
@@ -271,7 +291,38 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         # from the model, not a kind-branch.
         "funnel_seam": "sales-opportunity",
     },
+    "operation": {
+        "collection": "operations",
+        "aggregatable": True,
+        # operations: work_item_arm is a DECLARED None (T1 裁定 — OperationTasks keep
+        # their own ``operation task done`` L3 path), evidence_arms empty; its
+        # changelog records onto ``entries`` via the ``plain`` recorder (e-5255).
+        "arm_roles": {"work_item_arm": None, "evidence_arms": [],
+                      "changelog": {"arm": "entries", "recorder": "plain"}},
+        "kind": "operation",
+        "shape": SHAPE_TRANSITION_TABLE,
+        "state_field": "status",
+        "advanceable_states": ("todo", "in_progress", "open"),
+        "routed_states": {"closed": "beacon operation close <id>"},
+        "ball_field": None,
+        "monotonic": True,   # validated via core.LIFECYCLE_TRANSITIONS['operation']
+        "phases_ref": None,
+        "completion_gate": GATE_SPINE,   # same dev spine as milestone (close)
+        "never_terminal": False,         # operations settle (closed)
+    },
     "account": {
+        "collection": "accounts",
+        "aggregatable": True,
+        # ms-142 e-5256: an Account's planned work is its ``nurturings`` arm (継続関係の
+        # 手入れ — every item is a work item, ``item_type`` None; ids ``nrt-``), and its
+        # proof is the SAME ``communications`` arm the opportunity uses; no dev-era
+        # changelog (its records ride the evidence arm via add_evidence, e-5255).
+        "arm_roles": {
+            "work_item_arm": {"arm": "nurturings", "item_type": None,
+                              "kind": "nurturing", "id_prefix": "nrt-"},
+            "evidence_arms": [{"arm": "communications", "item_type": None}],
+            "changelog": None,
+        },
         "kind": "account",
         "shape": SHAPE_FUNNEL,
         "state_field": "phase",
@@ -313,7 +364,100 @@ BUILTIN_STATE_MODELS: dict[str, dict] = {
         "phase_verb": "`beacon account phase {target_id} <phase>` で進めてください "
                       "(顧客フェーズは商談の成約からも自動 derive されます)。",
     },
+    "acquisition": {
+        # acquisition is NOT aggregatable — it has a state model but rides a separate
+        # persistence path (not a manifest / TARGET_COLLECTIONS member, no arm_roles).
+        "collection": "acquisitions",
+        "aggregatable": False,
+        "arm_roles": None,
+        "kind": "acquisition",
+        "shape": SHAPE_TRANSITION_TABLE,
+        "state_field": "status",
+        "advanceable_states": ("todo", "in_progress"),
+        "routed_states": {
+            "done": "beacon acquisition status <id> done "
+                    "(terminal — stamps done_at via work_model.mark_done)",
+            "cancelled": "beacon acquisition cancel <id> (soft-cancel)",
+        },
+        "ball_field": None,
+        "monotonic": True,   # validated via core.LIFECYCLE_TRANSITIONS['acquisition']
+        "phases_ref": None,
+        # ms-142 T3: no gate existed; Scope B gives it the lightweight structural
+        # ban (AI cannot self-close `done` without a human/override signal).
+        "completion_gate": GATE_SELF_CLOSE_BAN,
+        "never_terminal": False,         # acquisitions settle (done/cancelled)
+    },
 }
+
+# The registry-identity keys each master entry carries BEYOND the state model itself
+# (ms-142 e-5265). The state model IS the entry minus these three keys, so there is no
+# second copy that can drift — BUILTIN_STATE_MODELS is DERIVED, not hand-kept. PUBLIC
+# (e-5265 AX review): a consumer that needs to strip registry keys reads THIS, and the
+# validator below guards a collision with a state-model field name. Prefer the public
+# accessor ``state_model_for(data, kind)`` over stripping keys by hand.
+REGISTRY_ONLY_KEYS = ("collection", "aggregatable", "arm_roles")
+_REGISTRY_ONLY_KEYS = REGISTRY_ONLY_KEYS   # back-compat alias for internal callers
+
+BUILTIN_STATE_MODELS: dict[str, dict] = {
+    kind: {k: v for k, v in cls.items() if k not in REGISTRY_ONLY_KEYS}
+    for kind, cls in BUILTIN_TARGET_CLASSES.items()
+}
+
+# The state-model keys EVERY class carries regardless of shape (``funnel_seam`` /
+# ``phase_verb`` are shape-conditional — validated separately below). Used by the
+# import-time validator to catch a state field accidentally named a REGISTRY_ONLY_KEY
+# and thus silently stripped from the derived state model (e-5265 maint review).
+_BASE_STATE_MODEL_KEYS = frozenset({
+    "kind", "shape", "state_field", "advanceable_states", "routed_states",
+    "ball_field", "monotonic", "phases_ref", "completion_gate", "never_terminal"})
+
+
+def _validate_builtin_target_classes() -> None:
+    """Fail LOUD at import if the single-source master (``BUILTIN_TARGET_CLASSES``)
+    breaks an invariant an AI author could otherwise break SILENTLY (ms-142 e-5265
+    AX/maint review — structure over prose reminders). Runs once at module load.
+
+      - outer key == entry['kind']: BUILTIN_STATE_MODELS is keyed by the outer key while
+        kind-dispatch resolves the ``kind`` field — a mismatch is a silent split (AX high#2).
+      - aggregatable ⟺ ``arm_roles is not None``: occupation._ARM_ROLES is derived from the
+        aggregatable entries; an aggregatable class with ``arm_roles=None`` would SILENTLY
+        drop out of _ARM_ROLES → add_work_item / iter_evidence no-op (AX high#1). So an
+        aggregatable class MUST declare a full ``arm_roles`` dict (sub-fields None when an
+        arm is absent, e.g. operation's ``work_item_arm: None``); ``arm_roles=None`` is
+        reserved strictly for the non-aggregatable case (acquisition) — the two ``None``
+        semantics are thus disambiguated by this invariant (AX medium).
+      - every derived state model carries the base keys: catches a state field accidentally
+        NAMED a REGISTRY_ONLY_KEY and silently stripped (maint medium — the derive-by-strip
+        collision).
+      - ``funnel_seam`` present ⟺ SHAPE_FUNNEL: set_target_state's funnel branch reads it,
+        so a funnel class MUST declare it (None or a seam id); a non-funnel class must not.
+      - a SEAMLESS funnel (``funnel_seam is None``, e.g. account) MUST carry a non-empty
+        ``phase_verb``: set_target_state interpolates it in the error path — omitting it is
+        a runtime KeyError (AX medium). A SEAMED funnel (opportunity) need not."""
+    for key, cls in BUILTIN_TARGET_CLASSES.items():
+        assert key == cls.get("kind"), (
+            f"BUILTIN_TARGET_CLASSES: outer key {key!r} != entry kind "
+            f"{cls.get('kind')!r} — the outer key IS the kind, they must match")
+        assert (cls.get("arm_roles") is not None) == bool(cls.get("aggregatable")), (
+            f"{key}: aggregatable={cls.get('aggregatable')} must match arm_roles presence "
+            "— an aggregatable class declares a full arm_roles dict; a non-aggregatable "
+            "class declares arm_roles=None (else it silently drops out of _ARM_ROLES)")
+        model = BUILTIN_STATE_MODELS[key]
+        missing = _BASE_STATE_MODEL_KEYS - set(model)
+        assert not missing, (
+            f"{key}: state model missing base keys {sorted(missing)} — a state field named "
+            f"one of REGISTRY_ONLY_KEYS {REGISTRY_ONLY_KEYS} would be silently stripped")
+        is_funnel = cls.get("shape") == SHAPE_FUNNEL
+        assert ("funnel_seam" in model) == is_funnel, (
+            f"{key}: 'funnel_seam' present ⟺ SHAPE_FUNNEL (funnel classes route through it; "
+            "non-funnel classes must not carry it)")
+        if is_funnel and model.get("funnel_seam") is None:
+            assert (model.get("phase_verb") or "").strip(), (
+                f"{key}: a seamless funnel (funnel_seam=None) MUST declare a non-empty "
+                "phase_verb — set_target_state interpolates it in the error path")
+
+
+_validate_builtin_target_classes()
 
 
 # ---------------------------------------------------------------------------
