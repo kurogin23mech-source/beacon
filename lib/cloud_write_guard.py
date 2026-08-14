@@ -33,6 +33,17 @@ import contextlib
 import os
 import urllib.parse
 
+class ProdWriteBlocked(RuntimeError):
+    """Raised when a test context is refused a write to the production cloud
+    (ms-108 e-5300 AX review). A DISTINCT type — not a bare ``RuntimeError`` —
+    so a caller that has a broad ``except RuntimeError`` fallback (e.g.
+    ``cmd_bus_send``'s legacy-envelope path, which treats a RuntimeError as
+    "server rejected the envelope, fall back to the legacy POST") can tell a
+    guard refusal apart and RE-RAISE it instead of swallowing it into a
+    degraded path. Subclasses ``RuntimeError`` so existing ``except
+    RuntimeError`` / ``assertRaises(RuntimeError)`` sites keep matching."""
+
+
 # The production Beacon cloud. Writing test projects here is the leak.
 _PROD_HOSTS = frozenset({"beacon-ai.dev", "www.beacon-ai.dev"})
 _PROD_HOST_SUFFIXES = (".beacon-ai.dev",)
@@ -106,7 +117,7 @@ def guard_prod_project_write(base_url: str) -> None:
     """
     if not _prod_test_write_blocked(base_url):
         return
-    raise RuntimeError(
+    raise ProdWriteBlocked(
         "cloud_write_guard: refusing to write a project to the production "
         f"cloud ({base_url}) from a test context. Tests must use local mode "
         "or a sandbox/staging cloud. If this test genuinely must hit prod, "
@@ -143,14 +154,17 @@ def guard_prod_bus_write(base_url: str) -> None:
     """
     if not _prod_test_write_blocked(base_url):
         return
-    raise RuntimeError(
+    raise ProdWriteBlocked(
         "cloud_write_guard: refusing to post a bus event to the production "
-        f"cloud ({base_url}) from a test context. A unit test must stub the "
-        "cloud config / ApiClient so it never reaches the live bus (patch the "
-        "helper's *own* module namespace, not a re-export). If this test "
-        "genuinely must hit the prod bus, set BEACON_ALLOW_PROD_TEST_WRITE=1 "
-        "(this shared hatch unlocks ALL prod test writes — project AND bus — "
-        "for the process)."
+        f"cloud ({base_url}) from a test context. Fake cloud mode the canonical "
+        "way: use the ``fake_cloud_config`` fixture (it points BEACON_PROJECT_FILE "
+        "at a tmp cloud.json so _get_cloud_config_path resolves non-prod in EVERY "
+        "module — no per-namespace monkeypatch, see tests/conftest.py), or give the "
+        "ApiClient a local/sandbox base_url. Unlike a prod project write, a bus "
+        "write has no disposable_project teardown counterpart (bus events are "
+        "server-side, not leaked directory residue). If this test genuinely must "
+        "hit the prod bus, set BEACON_ALLOW_PROD_TEST_WRITE=1 (this shared hatch "
+        "unlocks ALL prod test writes — project AND bus — for the process)."
     )
 
 

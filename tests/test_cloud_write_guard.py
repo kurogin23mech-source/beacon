@@ -165,6 +165,15 @@ class TestApiClientBusPostGuarded(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self._prod_client().issue_bus_envelope("beacon-b95643", tier="T1")
 
+    def test_guard_raises_distinguishable_subclass(self):
+        # e-5300: the guard raises ProdWriteBlocked (a RuntimeError subclass) so a
+        # caller with a broad `except RuntimeError` fallback can tell it apart and
+        # re-raise instead of swallowing it into a degraded path.
+        import cloud_write_guard
+        with self.assertRaises(cloud_write_guard.ProdWriteBlocked):
+            self._prod_client().post_bus_event(
+                "beacon-b95643", "dm", payload={"text": "x"})
+
     def test_respond_dm_approval_blocks_prod_in_test_context(self):
         with self.assertRaises(RuntimeError):
             self._prod_client().respond_dm_approval(

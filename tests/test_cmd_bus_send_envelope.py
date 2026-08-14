@@ -262,6 +262,33 @@ def test_send_falls_back_on_issue_404(monkeypatch, capsys):
     assert "legacy" in err
 
 
+def test_send_does_not_swallow_prod_write_guard(monkeypatch):
+    """ms-108 e-5300 (AX review, HIGH): a ProdWriteBlocked raised by
+    issue_bus_envelope is NOT treated as 'envelope unavailable → fall back to the
+    legacy POST'. It re-raises, so a test-context prod bus write is a hard stop —
+    the guard is not silently defeated by the caller's RuntimeError fallback (which
+    would have muted the diagnostic and let a degraded legacy post proceed)."""
+    import cloud_write_guard
+    _clear_bus_env(monkeypatch)
+    stub = _StubApiClient(
+        issue_error=cloud_write_guard.ProdWriteBlocked("refusing prod bus write"))
+    monkeypatch.setattr(
+        cmd_bus, "_get_api_client",
+        lambda: (stub, {"project_id": "proj-1"}),
+    )
+    # Neutralise the armed-budget gate so a budget file leaked by an earlier test in
+    # the suite can't refuse this send before issuance (patch cmd_bus's OWN name — the
+    # re-export from commands_shared means patching commands.* is a silent no-op).
+    monkeypatch.setattr(cmd_bus, "_bus_budget_consume_one",
+                        lambda: (True, {"total": 0, "used": 0, "armed": False}))
+    monkeypatch.setenv("BEACON_BUS_CHANNEL", "ops")
+
+    with pytest.raises(cloud_write_guard.ProdWriteBlocked):
+        cmd_bus.cmd_bus_send()
+    # No legacy post slipped through — the guard short-circuits the whole send.
+    assert len(stub.post_calls) == 0
+
+
 def test_send_falls_back_on_issue_400(monkeypatch, capsys):
     """Server rejection (e.g. payload validation, wildcard action) → 400.
     Same fallback path: legacy post, stderr note, no hard failure."""
