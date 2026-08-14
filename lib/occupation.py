@@ -1418,7 +1418,20 @@ def resolve_target(data: dict, target_id: str = "", *,
     return active[0]
 
 
-def find_target(data: dict, target_id: str) -> dict | None:
+def _scan_collection_for_id(records, id_field: str, target_id: str) -> dict | None:
+    """Return the record in ``records`` whose ``id_field`` equals ``target_id``, or
+    ``None`` (ms-142 e-5261 maint review). THE one single-collection id lookup
+    ``find_target``'s three scan branches (confined / prefix-fast / fallback) share,
+    so the id-equality test and the ``isinstance(rec, dict)`` non-dict guard live in
+    one place and cannot drift apart across the branches (they previously did — the
+    prefix-fast branch lacked the guard the other two had)."""
+    for rec in records or []:
+        if isinstance(rec, dict) and rec.get(id_field) == target_id:
+            return rec
+    return None
+
+
+def find_target(data: dict, target_id: str, kind: str | None = None) -> dict | None:
     """Locate a Target record by id across all Target collections,
     profession-generically (ms-143). Returns the record dict or ``None`` — the
     manifest-driven replacement for ``core.find_target_milestone`` /
@@ -1431,20 +1444,44 @@ def find_target(data: dict, target_id: str) -> dict | None:
     descriptor-defined class or a profession-default class like release (rel-, which
     is deliberately NOT hardcoded in the prefix table, ms-142 e-5161) — falls back to
     scanning every Target collection so it is still located, honouring the docstring
-    promise "across all Target collections"."""
-    kind = _wm.target_kind(target_id)
-    tc = None
+    promise "across all Target collections".
+
+    ms-142 e-5261: pass ``kind`` (e.g. ``"opportunity"``) to CONFINE resolution to
+    that class's collection — an id of a DIFFERENT kind (or an unknown id) then
+    returns ``None`` instead of a foreign record. A verb whose NAME promises a
+    specific class (``opportunity_*`` / ``account_*``) — which moved from a
+    class-specific resolver (``find_opportunity``) to this all-Target one — should
+    pass its kind so the resolved range matches the name's promise, closing the gap
+    where a mistyped id could grab another kind's record (the resolver no longer
+    silently spans every Target for such a caller). Omit ``kind`` for the generic,
+    span-all behaviour (unchanged).
+
+    NOTE (e-5261 ax review): with ``kind`` given, ``None`` means BOTH "no such id"
+    AND "an id of a different kind" — the two collapse to one absent-result. Every
+    current caller wants exactly that ("is there a <kind> with this id? no → not
+    found"), so none re-creates on ``None``. A caller that must distinguish
+    wrong-kind from truly-absent should check the id's kind explicitly (e.g.
+    ``work_model.target_kind``) before calling — this function does not raise on
+    mismatch by design (the task sanctions None-or-error; None is chosen)."""
     if kind:
+        # Confined resolution: ONLY this class's collection. A wrong-kind or unknown
+        # id finds nothing here (None), never a foreign record.
         try:
             tc = target_class(data, kind)
         except ValueError:
+            return None
+        return _scan_collection_for_id(
+            data.get(tc["collection"], []), tc.get("id_field", "id"), target_id)
+    prefix_kind = _wm.target_kind(target_id)
+    tc = None
+    if prefix_kind:
+        try:
+            tc = target_class(data, prefix_kind)
+        except ValueError:
             tc = None
     if tc is not None:
-        id_field = tc.get("id_field", "id")
-        for rec in data.get(tc["collection"], []) or []:
-            if rec.get(id_field) == target_id:
-                return rec
-        return None
+        return _scan_collection_for_id(
+            data.get(tc["collection"], []), tc.get("id_field", "id"), target_id)
     # Unknown / unmapped prefix → scan all Target collections (descriptor / release).
     # Honour each collection's own id_field (maint review e-5220): the fast path
     # above reads ``tc['id_field']``, so the fallback must too, else a descriptor
@@ -1452,10 +1489,11 @@ def find_target(data: dict, target_id: str) -> dict | None:
     # path but be silently missed here.
     decomposition = target_decomposition(data)
     for coll in target_collections(data):
-        coll_id_field = decomposition.get(coll, {}).get("id_field", "id")
-        for rec in data.get(coll, []) or []:
-            if isinstance(rec, dict) and rec.get(coll_id_field) == target_id:
-                return rec
+        found = _scan_collection_for_id(
+            data.get(coll, []),
+            decomposition.get(coll, {}).get("id_field", "id"), target_id)
+        if found is not None:
+            return found
     return None
 
 

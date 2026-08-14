@@ -8699,7 +8699,7 @@ def cmd_opportunity_add():
     # module top), not the sales-concrete find_opportunity — so the shared
     # ``opportunity_add`` verb no longer reaches a profession recorder
     # (KNOWN_SYMBOL_REACH row dropped).
-    opp = occupation.find_target(data, opp_id)
+    opp = occupation.find_target(data, opp_id, kind="opportunity")
     print(f"Added opportunity {opp_id}: {title}")
     if account_id:
         print(f"  account: {account_id}")
@@ -8917,7 +8917,7 @@ def cmd_opportunity_phase():
         # ``opportunity_phase`` verb no longer reaches a profession recorder. The
         # transition itself already rides set_target_state via jump_transition.
         import occupation
-        opp = occupation.find_target(data, opp_id)
+        opp = occupation.find_target(data, opp_id, kind="opportunity")
         cur = opp.get("phase", "") if opp else ""
         # e-3527: pass the deal's 想定金額 (goal or amount) so require_amount
         # phases can warn when neither is set.
@@ -9129,7 +9129,7 @@ def cmd_opportunity_judge():
             # 商談レコードは一度だけ解決し (ループ内で毎回引き直さない)、None は
             # {} に畳んで terminal 分岐と同じ None ガード流儀に揃える (e-5150 保守性
             # レビュー finding)。
-            adv_activities = (occupation.find_target(data, opp_id) or {}).get("activities", [])
+            adv_activities = (occupation.find_target(data, opp_id, kind="opportunity") or {}).get("activities", [])
             for aid in res.get("activities", []):
                 act = next((a for a in adv_activities if a["id"] == aid), None)
                 if act:
@@ -9158,7 +9158,7 @@ def cmd_opportunity_judge():
             print(f"{opp_id} retry → 同フェーズ継続、新しい遷移日: {arg}")
         elif decision == "terminal":
             # 決着候補の外を宣言した時は warning を出す (block しない、master=人間)。
-            opp = occupation.find_target(data, opp_id)
+            opp = occupation.find_target(data, opp_id, kind="opportunity")
             cur = opp.get("phase", "") if opp else ""
             for w in sales_entities.opportunity_phase_warnings(data, cur, arg):
                 print(f"  ⚠ {w}", file=sys.stderr)
@@ -9523,7 +9523,7 @@ def cmd_opportunity_activity():
         # validations (opportunity exists / ball vocabulary / description required)
         # and the created_in_phase default stay here as the sales frontend concern —
         # same shape sales_entities.activity_add produces (parity).
-        opp = occupation.find_target(data, opp_id)
+        opp = occupation.find_target(data, opp_id, kind="opportunity")
         if opp is None:
             raise ValueError(f"Opportunity not found: {opp_id}")
         if not desc or not desc.strip():
