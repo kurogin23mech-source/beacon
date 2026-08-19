@@ -167,3 +167,32 @@ def test_verify_retries_once_on_key_rotation(app_module, monkeypatch):
     assert claims["iss"] == "https://accounts.google.com"
     assert state["n"] == 2  # 1 回だけ再試行
     assert len(_FakeRequest.calls) == 2  # 通常 fetch + force refetch
+
+
+def test_verify_no_refetch_on_non_kid_error(app_module, monkeypatch):
+    """kid 不一致でない ValueError (期限切れ等) は refetch せず即 401。
+
+    無差別 refetch (= 不正トークンで余計な googleapis 往復) を防ぐ回帰テスト。
+    """
+    from fastapi import HTTPException
+    import google.auth.jwt as gjwt
+
+    _FakeRequest.responses = [_FakeResponse()]
+
+    def expired_decode(token, certs=None, audience=None, **kw):
+        raise ValueError("Token expired, as of 2020-01-01")
+
+    monkeypatch.setattr(gjwt, "decode", expired_decode)
+    with pytest.raises(HTTPException) as ei:
+        app_module._verify_google_id_token("tok")
+    assert ei.value.status_code == 401
+    # force-refetch されていない = 証明書取得は 1 回だけ (kid 不一致でないため)
+    assert len(_FakeRequest.calls) == 1
+
+
+def test_is_kid_mismatch_error_predicate(app_module):
+    """retry 条件の純粋判定を外部往復なしで直接テストする。"""
+    assert app_module._is_kid_mismatch_error(ValueError("Certificate for key id X not found"))
+    assert app_module._is_kid_mismatch_error(ValueError("no matching kid"))
+    assert not app_module._is_kid_mismatch_error(ValueError("Token expired"))
+    assert not app_module._is_kid_mismatch_error(ValueError("Invalid signature"))

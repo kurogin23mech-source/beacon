@@ -328,27 +328,35 @@ _REQUEST_TIMEOUT = float(os.environ.get("BEACON_REQUEST_TIMEOUT_S", "30"))
 class RequestTimeoutMiddleware(BaseHTTPMiddleware):
     """Cap every HTTP request at a wall-clock ceiling, returning 504 on overrun.
 
-    ``BEACON_REQUEST_TIMEOUT_S <= 0`` で無効化できる (= opt-out)。
+    タイムアウト値は ``__init__`` の ``timeout`` 引数で注入する (既定はモジュール値
+    ``_REQUEST_TIMEOUT``)。グローバル変数を dispatch から直接読まないことで、テストは
+    ``add_middleware(RequestTimeoutMiddleware, timeout=...)`` でインスタンスごとに値を
+    与えられ、並列テストでのグローバル書き換え競合を避けられる。``timeout <= 0`` で
+    無効化 (= opt-out)。
     """
 
+    def __init__(self, app, timeout: float = _REQUEST_TIMEOUT):
+        super().__init__(app)
+        self._timeout = timeout
+
     async def dispatch(self, request: Request, call_next):
-        if _REQUEST_TIMEOUT <= 0:
+        if self._timeout <= 0:
             return await call_next(request)
         try:
             return await asyncio.wait_for(
-                call_next(request), timeout=_REQUEST_TIMEOUT
+                call_next(request), timeout=self._timeout
             )
         except asyncio.TimeoutError:
             _server_logger.warning(
                 "Request timed out after %.1fs: method=%s path=%s",
-                _REQUEST_TIMEOUT,
+                self._timeout,
                 request.method,
                 request.url.path,
             )
             return JSONResponse(
                 status_code=504,
                 content={
-                    "detail": f"Request timed out after {_REQUEST_TIMEOUT:.1f}s"
+                    "detail": f"Request timed out after {self._timeout:.1f}s"
                 },
             )
 
@@ -603,27 +611,57 @@ def _fetch_google_certs(force: bool = False) -> dict:
         return certs
 
 
-def _verify_google_id_token(token: str) -> dict:
-    """Google ID token をキャッシュ済み証明書で検証する。
+def _is_kid_mismatch_error(err: ValueError) -> bool:
+    """decode 失敗が『鍵 ID (kid) 不一致 = 鍵ローテ直後』を示すか (純粋判定)。
 
-    ``id_token.verify_oauth2_token`` の挙動 (証明書 fetch → jwt.decode → issuer
-    チェック) を再現しつつ、証明書取得だけを ``_fetch_google_certs`` に置き換えて
-    タイムアウト & キャッシュを効かせる。検証失敗は 401、証明書取得失敗は 503。
+    google_jwt.decode の ValueError は kid 不一致以外 (期限切れ / 形式不正 / 署名
+    不正) でも上がる。それらは証明書を取り直しても直らないので、鍵ローテを示す
+    メッセージの時だけ force-refetch する。無差別に refetch すると、不正トークンの
+    たびに余計な googleapis 実往復 (force=True でキャッシュ回避) が走り、軽い悪用の
+    増幅や『refetch した』ログによる原因誤診を招く。
+    """
+    msg = str(err).lower()
+    return "not found" in msg or "kid" in msg
+
+
+def _decode_with_retry(token: str, fetch_fn) -> dict:
+    """証明書で ID token を decode。kid 不一致の時だけ 1 回 force-refetch して再試行。
+
+    ``fetch_fn(force: bool) -> dict`` は証明書取得の注入点。外部 IO をこの関数の外に
+    追い出すことで、retry 条件 (kid 不一致に限る) を外部往復なしで単体テストできる。
+    kid 不一致以外の ValueError は再取得せずそのまま送出する (= 呼び出し側で 401)。
     """
     from google.auth import jwt as google_jwt
 
-    certs = _fetch_google_certs()
+    certs = fetch_fn(False)
     try:
-        claims = google_jwt.decode(token, certs=certs, audience=None)
-    except ValueError:
-        # kid 不一致 = 鍵ローテ直後の可能性。証明書を強制更新して 1 回だけ再試行。
-        certs = _fetch_google_certs(force=True)
-        try:
-            claims = google_jwt.decode(token, certs=certs, audience=None)
-        except ValueError as e:
-            raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
-    if claims.get("iss") not in _GOOGLE_VALID_ISSUERS:
+        return google_jwt.decode(token, certs=certs, audience=None)
+    except ValueError as e:
+        if not _is_kid_mismatch_error(e):
+            raise
+        certs = fetch_fn(True)
+        return google_jwt.decode(token, certs=certs, audience=None)
+
+
+def _check_issuer(claims: dict, valid_issuers) -> None:
+    """iss (発行者) が許可リストに含まれるか (純粋判定、外れれば 401)。"""
+    if claims.get("iss") not in valid_issuers:
         raise HTTPException(status_code=401, detail="Invalid token: wrong issuer")
+
+
+def _verify_google_id_token(token: str) -> dict:
+    """Google ID token をキャッシュ済み証明書で検証する (薄い orchestrator)。
+
+    ``id_token.verify_oauth2_token`` の挙動 (証明書 fetch → jwt.decode → issuer
+    チェック) を再現しつつ、証明書取得だけを ``_fetch_google_certs`` に置き換えて
+    タイムアウト & キャッシュを効かせる。retry 条件は ``_decode_with_retry``、issuer
+    ルールは ``_check_issuer`` に分離済み。検証失敗は 401、証明書取得失敗は 503。
+    """
+    try:
+        claims = _decode_with_retry(token, _fetch_google_certs)
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+    _check_issuer(claims, _GOOGLE_VALID_ISSUERS)
     return claims
 
 

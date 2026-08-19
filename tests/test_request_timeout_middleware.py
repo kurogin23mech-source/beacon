@@ -32,10 +32,9 @@ def _build_client(app_module, timeout):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
 
-    # dispatch reads the module-level _REQUEST_TIMEOUT each request
-    app_module._REQUEST_TIMEOUT = timeout
+    # timeout はコンストラクタ注入 (グローバル _REQUEST_TIMEOUT は書き換えない)
     app = FastAPI()
-    app.add_middleware(app_module.RequestTimeoutMiddleware)
+    app.add_middleware(app_module.RequestTimeoutMiddleware, timeout=timeout)
 
     @app.get("/fast")
     async def fast():
