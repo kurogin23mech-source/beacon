@@ -155,9 +155,10 @@ def test_reconcile_file_wedge_existence(small_surface, tmp_path):
 
 
 def _make_source_signature(root: Path) -> None:
-    """beacon source 署名 (lib/commands.py + server/app.py + skills/) を作る。"""
+    """beacon source 署名 (_SOURCE_SIGNATURE の全要素) を作る。"""
     (root / "lib").mkdir(parents=True, exist_ok=True)
     (root / "lib" / "commands.py").write_text("commands = {}\n", encoding="utf-8")
+    (root / "lib" / "cli_surface.py").write_text("# cli_surface\n", encoding="utf-8")
     (root / "server").mkdir(parents=True, exist_ok=True)
     (root / "server" / "app.py").write_text("# app\n", encoding="utf-8")
     (root / "skills").mkdir(parents=True, exist_ok=True)
@@ -199,25 +200,38 @@ def test_guard_partial_signature_is_not_enough(tmp_path):
     assert CMD.is_beacon_source_project(str(tmp_path)) is False
 
 
+def test_guard_generic_layout_without_beacon_anchor_is_rejected(tmp_path):
+    """汎用 3 パス (lib/commands.py + server/app.py + skills/) が偶然揃っても、
+    beacon 固有 anchor (lib/cli_surface.py) が無ければ通さない (AX e-5320)。"""
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "commands.py").write_text("commands = {}\n", encoding="utf-8")
+    (tmp_path / "server").mkdir()
+    (tmp_path / "server" / "app.py").write_text("# app\n", encoding="utf-8")
+    (tmp_path / "skills").mkdir()
+    assert CMD.is_beacon_source_project(str(tmp_path)) is False
+
+
 def test_main_skips_reconcile_in_foreign_dir(tmp_path, monkeypatch, capsys):
-    """foreign dir から main() を叩くと機械照合せず SKIP して exit 0。"""
+    """foreign dir から main() を叩くと機械照合せず SKIP して exit 3 (= 未照合)。"""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "argv", ["check-map-drift.py", "--doc-id", "application-map"])
     rc = CMD.main()
     out = capsys.readouterr().out
-    assert rc == 0
-    assert "SKIP:" in out
+    assert rc == CMD.SKIP_EXIT == 3        # exit 0 (= 照合して clean) と衝突しない
+    assert out.startswith(CMD.SKIP_PREFIX)
     assert "AI 維持のみ" in out
 
 
 def test_main_skip_json_in_foreign_dir(tmp_path, monkeypatch, capsys):
-    """--json でも skipped マーカーを出して exit 0 (呼び出し側が機械判定できる)。"""
+    """--json でも skipped=true + skip_reason を出して exit 3 (機械判定できる)。"""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "argv", ["check-map-drift.py", "--enumerate", "--json"])
     rc = CMD.main()
     out = capsys.readouterr().out
-    assert rc == 0
-    assert json.loads(out)["skipped"] == "not-beacon-source-project"
+    assert rc == CMD.SKIP_EXIT
+    data = json.loads(out)
+    assert data["skipped"] is True                 # bool 名に bool 値 (string でない)
+    assert data["skip_reason"] == CMD.SKIP_STATUS
 
 
 def test_main_enumerate_runs_in_source_repo(tmp_path, monkeypatch, capsys):
