@@ -347,7 +347,9 @@ class RequestTimeoutMiddleware(BaseHTTPMiddleware):
             )
             return JSONResponse(
                 status_code=504,
-                content={"detail": "Request timed out"},
+                content={
+                    "detail": f"Request timed out after {_REQUEST_TIMEOUT:.1f}s"
+                },
             )
 
 
@@ -529,10 +531,32 @@ def _verify_cognito_token(token: str) -> dict:
 #   2) 取得済み証明書を TTL 付きでプロセス内キャッシュし、hot path から
 #      ネットワーク往復そのものを消す (Google の署名鍵は日次ローテなので 1h TTL は安全)。
 #   3) fetch が失敗しても有効なキャッシュがあれば stale-serve でしのぐ (可用性優先)。
-_GOOGLE_CERTS_TIMEOUT = float(os.environ.get("BEACON_GOOGLE_CERTS_TIMEOUT", "5"))
-_GOOGLE_CERTS_TTL = float(os.environ.get("BEACON_GOOGLE_CERTS_TTL", "3600"))
+#
+# 秒単位の env var は既存の BEACON_RATE_LIMIT_WINDOW_S / BEACON_REQUEST_TIMEOUT_S と
+# 揃えて _S サフィックスで単位を明示する。
+_GOOGLE_CERTS_TIMEOUT_S = float(os.environ.get("BEACON_GOOGLE_CERTS_TIMEOUT_S", "5"))
+_GOOGLE_CERTS_TTL_S = float(os.environ.get("BEACON_GOOGLE_CERTS_TTL_S", "3600"))
+# google-auth の内部定数 (_GOOGLE_OAUTH2_CERTS_URL / _GOOGLE_ISSUERS) はアンダースコア
+# 接頭辞の非公開 API で、バージョン更新で名前や値が変わると証明書取得・issuer 検証が
+# silent に壊れる。ライブラリ内部に継ぎ目を貫通させず、自前の定数として 1 箇所に固定する。
+_GOOGLE_CERTS_URL = "https://www.googleapis.com/oauth2/v1/certs"
+_GOOGLE_VALID_ISSUERS = frozenset(
+    {"accounts.google.com", "https://accounts.google.com"}
+)
 _google_certs_cache: dict = {"certs": None, "fetched_at": 0.0}
 _google_certs_lock = threading.Lock()
+
+
+def _google_certs_cache_valid(force: bool, now: float) -> bool:
+    """キャッシュ済み証明書がそのまま使えるか (TTL 内 かつ force でない)。
+
+    double-checked locking のロック外/ロック内の 2 箇所から呼ぶ単一の真実源。
+    """
+    return (
+        not force
+        and _google_certs_cache["certs"] is not None
+        and (now - _google_certs_cache["fetched_at"]) < _GOOGLE_CERTS_TTL_S
+    )
 
 
 def _fetch_google_certs(force: bool = False) -> dict:
@@ -543,33 +567,22 @@ def _fetch_google_certs(force: bool = False) -> dict:
     stale-serve し、無ければ 503 を上げる (ハングでなく即座に失敗させる)。
     """
     from google.auth.transport import requests as google_requests
-    from google.oauth2 import id_token as _gid
 
     cache = _google_certs_cache
-    now = time.monotonic()
-    if (
-        not force
-        and cache["certs"] is not None
-        and (now - cache["fetched_at"]) < _GOOGLE_CERTS_TTL
-    ):
+    if _google_certs_cache_valid(force, time.monotonic()):
         return cache["certs"]
 
     with _google_certs_lock:
         # ロック取得後に再チェック (別スレッドが fetch 済みなら往復を省く)。
-        now = time.monotonic()
-        if (
-            not force
-            and cache["certs"] is not None
-            and (now - cache["fetched_at"]) < _GOOGLE_CERTS_TTL
-        ):
+        if _google_certs_cache_valid(force, time.monotonic()):
             return cache["certs"]
 
         request = google_requests.Request()
         try:
             response = request(
-                _gid._GOOGLE_OAUTH2_CERTS_URL,
+                _GOOGLE_CERTS_URL,
                 method="GET",
-                timeout=_GOOGLE_CERTS_TIMEOUT,
+                timeout=_GOOGLE_CERTS_TIMEOUT_S,
             )
         except Exception as e:  # noqa: BLE001 - どんな transport 例外もハングにしない
             if cache["certs"] is not None:
@@ -598,7 +611,6 @@ def _verify_google_id_token(token: str) -> dict:
     タイムアウト & キャッシュを効かせる。検証失敗は 401、証明書取得失敗は 503。
     """
     from google.auth import jwt as google_jwt
-    from google.oauth2 import id_token as _gid
 
     certs = _fetch_google_certs()
     try:
@@ -610,7 +622,7 @@ def _verify_google_id_token(token: str) -> dict:
             claims = google_jwt.decode(token, certs=certs, audience=None)
         except ValueError as e:
             raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
-    if claims.get("iss") not in _gid._GOOGLE_ISSUERS:
+    if claims.get("iss") not in _GOOGLE_VALID_ISSUERS:
         raise HTTPException(status_code=401, detail="Invalid token: wrong issuer")
     return claims
 

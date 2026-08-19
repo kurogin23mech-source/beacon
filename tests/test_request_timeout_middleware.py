@@ -53,7 +53,8 @@ def test_slow_request_returns_504(app_module):
     client = _build_client(app_module, timeout=0.2)
     resp = client.get("/slow")
     assert resp.status_code == 504
-    assert resp.json()["detail"] == "Request timed out"
+    # 504 本文は閾値を含める (AI 呼び出し側が「設定が短い」か「実際に遅い」かを判別できる)
+    assert resp.json()["detail"].startswith("Request timed out after")
 
 
 def test_fast_request_passes(app_module):

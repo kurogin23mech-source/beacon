@@ -52,8 +52,8 @@ def app_module(monkeypatch):
     pytest.importorskip("fastapi")
     pytest.importorskip("google.auth")
     monkeypatch.delenv("BEACON_AUTH_PROVIDER", raising=False)
-    monkeypatch.setenv("BEACON_GOOGLE_CERTS_TIMEOUT", "5")
-    monkeypatch.setenv("BEACON_GOOGLE_CERTS_TTL", "3600")
+    monkeypatch.setenv("BEACON_GOOGLE_CERTS_TIMEOUT_S", "5")
+    monkeypatch.setenv("BEACON_GOOGLE_CERTS_TTL_S", "3600")
     if "app" in sys.modules:
         del sys.modules["app"]
     mod = importlib.import_module("app")
