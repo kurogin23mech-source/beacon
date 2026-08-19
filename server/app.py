@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from typing import List, Optional
@@ -304,6 +305,68 @@ app.add_middleware(RateLimitMiddleware)
 
 
 # ---------------------------------------------------------------------------
+# Request-wide timeout (ms-145 / e-5317)
+# ---------------------------------------------------------------------------
+# 本番インシデント (2026-08): 認証時の外部依存ハングで 1 本のリクエストが約 3.6h
+# 滞留し、単一ワーカーの本番プロセスが飢えて 502 で突然死した。個別の外部呼び出しに
+# タイムアウトを入れる (e-5316 の証明書取得など) のが一次防御だが、「どこか 1 箇所で
+# も timeout を入れ忘れたら数時間ハングしうる」状態は残る。ここでは HTTP リクエスト
+# 全体に上限時間を課し、"数時間かかるリクエスト" を機構として物理的に不可能にする
+# (= 多層防御の外殻)。上限超過は 504 Gateway Timeout で即座に閉じる。
+#
+# 限界の明示 (誠実に): asyncio.wait_for はコルーチンをキャンセルするので、await
+# 点を持つ非同期経路は確実に打ち切れる。ただしワーカースレッド上で回る完全同期の
+# ブロッキング呼び出し (timeout 無しの同期 I/O 等) は、504 を返してもスレッド自体は
+# 解放されないことがある。だからこそ個別呼び出し側の timeout (e-5316) が一次防御で、
+# 本 middleware はその取りこぼしを塞ぐ二次防御という位置づけ。
+#
+# WebSocket (= /ws/ の idle-wake 接続) は BaseHTTPMiddleware が http scope 以外を
+# 素通しするため、この timeout の対象外 (長時間接続を壊さない)。
+_REQUEST_TIMEOUT = float(os.environ.get("BEACON_REQUEST_TIMEOUT_S", "30"))
+
+
+class RequestTimeoutMiddleware(BaseHTTPMiddleware):
+    """Cap every HTTP request at a wall-clock ceiling, returning 504 on overrun.
+
+    タイムアウト値は ``__init__`` の ``timeout`` 引数で注入する (既定はモジュール値
+    ``_REQUEST_TIMEOUT``)。グローバル変数を dispatch から直接読まないことで、テストは
+    ``add_middleware(RequestTimeoutMiddleware, timeout=...)`` でインスタンスごとに値を
+    与えられ、並列テストでのグローバル書き換え競合を避けられる。``timeout <= 0`` で
+    無効化 (= opt-out)。
+    """
+
+    def __init__(self, app, timeout: float = _REQUEST_TIMEOUT):
+        super().__init__(app)
+        self._timeout = timeout
+
+    async def dispatch(self, request: Request, call_next):
+        if self._timeout <= 0:
+            return await call_next(request)
+        try:
+            return await asyncio.wait_for(
+                call_next(request), timeout=self._timeout
+            )
+        except asyncio.TimeoutError:
+            _server_logger.warning(
+                "Request timed out after %.1fs: method=%s path=%s",
+                self._timeout,
+                request.method,
+                request.url.path,
+            )
+            return JSONResponse(
+                status_code=504,
+                content={
+                    "detail": f"Request timed out after {self._timeout:.1f}s"
+                },
+            )
+
+
+# Added last so it is the outermost middleware: it wraps rate-limit, audit,
+# CORS, and the handler, guaranteeing the whole request is bounded in time.
+app.add_middleware(RequestTimeoutMiddleware)
+
+
+# ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
 
@@ -462,6 +525,146 @@ def _verify_cognito_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
 
 
+# ms-145 / e-5316: Google 公開鍵 (証明書) 取得のタイムアウト & プロセス内キャッシュ。
+#
+# 本番インシデント (2026-08): id_token.verify_oauth2_token() は認証リクエストの
+# たびに https://www.googleapis.com/oauth2/v1/certs を取りに行く。google-auth の
+# 証明書 fetch に渡るタイムアウトはバージョン依存で、古い版では実質「無限待ち」に
+# なりうる。googleapis 側の TLS 不調でこの fetch がハングすると、1 本のリクエストが
+# 数時間滞留し (実測 elapsed_ms ≒ 3.6h)、単一ワーカーの本番プロセスが飢えて 502 で
+# 突然死した。再起動で復旧するが根治にならない。
+#
+# 構造で閉じる (お願いでなく物理的に不可能にする):
+#   1) 証明書取得に必ず有界タイムアウトを課す (ライブラリ既定に頼らず自前で明示)。
+#   2) 取得済み証明書を TTL 付きでプロセス内キャッシュし、hot path から
+#      ネットワーク往復そのものを消す (Google の署名鍵は日次ローテなので 1h TTL は安全)。
+#   3) fetch が失敗しても有効なキャッシュがあれば stale-serve でしのぐ (可用性優先)。
+#
+# 秒単位の env var は既存の BEACON_RATE_LIMIT_WINDOW_S / BEACON_REQUEST_TIMEOUT_S と
+# 揃えて _S サフィックスで単位を明示する。
+_GOOGLE_CERTS_TIMEOUT_S = float(os.environ.get("BEACON_GOOGLE_CERTS_TIMEOUT_S", "5"))
+_GOOGLE_CERTS_TTL_S = float(os.environ.get("BEACON_GOOGLE_CERTS_TTL_S", "3600"))
+# google-auth の内部定数 (_GOOGLE_OAUTH2_CERTS_URL / _GOOGLE_ISSUERS) はアンダースコア
+# 接頭辞の非公開 API で、バージョン更新で名前や値が変わると証明書取得・issuer 検証が
+# silent に壊れる。ライブラリ内部に継ぎ目を貫通させず、自前の定数として 1 箇所に固定する。
+_GOOGLE_CERTS_URL = "https://www.googleapis.com/oauth2/v1/certs"
+_GOOGLE_VALID_ISSUERS = frozenset(
+    {"accounts.google.com", "https://accounts.google.com"}
+)
+_google_certs_cache: dict = {"certs": None, "fetched_at": 0.0}
+_google_certs_lock = threading.Lock()
+
+
+def _google_certs_cache_valid(force: bool, now: float) -> bool:
+    """キャッシュ済み証明書がそのまま使えるか (TTL 内 かつ force でない)。
+
+    double-checked locking のロック外/ロック内の 2 箇所から呼ぶ単一の真実源。
+    """
+    return (
+        not force
+        and _google_certs_cache["certs"] is not None
+        and (now - _google_certs_cache["fetched_at"]) < _GOOGLE_CERTS_TTL_S
+    )
+
+
+def _fetch_google_certs(force: bool = False) -> dict:
+    """Google の OAuth2 証明書を有界タイムアウト + TTL キャッシュで取得する。
+
+    ``force=True`` は TTL を無視して強制再取得する (鍵ローテ直後に kid 不一致で
+    検証失敗した時の 1 回リトライ用)。fetch 失敗時は有効なキャッシュがあれば
+    stale-serve し、無ければ 503 を上げる (ハングでなく即座に失敗させる)。
+    """
+    from google.auth.transport import requests as google_requests
+
+    cache = _google_certs_cache
+    if _google_certs_cache_valid(force, time.monotonic()):
+        return cache["certs"]
+
+    with _google_certs_lock:
+        # ロック取得後に再チェック (別スレッドが fetch 済みなら往復を省く)。
+        if _google_certs_cache_valid(force, time.monotonic()):
+            return cache["certs"]
+
+        request = google_requests.Request()
+        try:
+            response = request(
+                _GOOGLE_CERTS_URL,
+                method="GET",
+                timeout=_GOOGLE_CERTS_TIMEOUT_S,
+            )
+        except Exception as e:  # noqa: BLE001 - どんな transport 例外もハングにしない
+            if cache["certs"] is not None:
+                return cache["certs"]
+            raise HTTPException(
+                status_code=503, detail=f"Could not fetch Google certs: {e}"
+            )
+        if response.status != 200:
+            if cache["certs"] is not None:
+                return cache["certs"]
+            raise HTTPException(
+                status_code=503,
+                detail=f"Could not fetch Google certs: HTTP {response.status}",
+            )
+        certs = json.loads(response.data.decode("utf-8"))
+        cache["certs"] = certs
+        cache["fetched_at"] = time.monotonic()
+        return certs
+
+
+def _is_kid_mismatch_error(err: ValueError) -> bool:
+    """decode 失敗が『鍵 ID (kid) 不一致 = 鍵ローテ直後』を示すか (純粋判定)。
+
+    google_jwt.decode の ValueError は kid 不一致以外 (期限切れ / 形式不正 / 署名
+    不正) でも上がる。それらは証明書を取り直しても直らないので、鍵ローテを示す
+    メッセージの時だけ force-refetch する。無差別に refetch すると、不正トークンの
+    たびに余計な googleapis 実往復 (force=True でキャッシュ回避) が走り、軽い悪用の
+    増幅や『refetch した』ログによる原因誤診を招く。
+    """
+    msg = str(err).lower()
+    return "not found" in msg or "kid" in msg
+
+
+def _decode_with_retry(token: str, fetch_fn) -> dict:
+    """証明書で ID token を decode。kid 不一致の時だけ 1 回 force-refetch して再試行。
+
+    ``fetch_fn(force: bool) -> dict`` は証明書取得の注入点。外部 IO をこの関数の外に
+    追い出すことで、retry 条件 (kid 不一致に限る) を外部往復なしで単体テストできる。
+    kid 不一致以外の ValueError は再取得せずそのまま送出する (= 呼び出し側で 401)。
+    """
+    from google.auth import jwt as google_jwt
+
+    certs = fetch_fn(False)
+    try:
+        return google_jwt.decode(token, certs=certs, audience=None)
+    except ValueError as e:
+        if not _is_kid_mismatch_error(e):
+            raise
+        certs = fetch_fn(True)
+        return google_jwt.decode(token, certs=certs, audience=None)
+
+
+def _check_issuer(claims: dict, valid_issuers) -> None:
+    """iss (発行者) が許可リストに含まれるか (純粋判定、外れれば 401)。"""
+    if claims.get("iss") not in valid_issuers:
+        raise HTTPException(status_code=401, detail="Invalid token: wrong issuer")
+
+
+def _verify_google_id_token(token: str) -> dict:
+    """Google ID token をキャッシュ済み証明書で検証する (薄い orchestrator)。
+
+    ``id_token.verify_oauth2_token`` の挙動 (証明書 fetch → jwt.decode → issuer
+    チェック) を再現しつつ、証明書取得だけを ``_fetch_google_certs`` に置き換えて
+    タイムアウト & キャッシュを効かせる。retry 条件は ``_decode_with_retry``、issuer
+    ルールは ``_check_issuer`` に分離済み。検証失敗は 401、証明書取得失敗は 503。
+    """
+    try:
+        claims = _decode_with_retry(token, _fetch_google_certs)
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+    _check_issuer(claims, _GOOGLE_VALID_ISSUERS)
+    return claims
+
+
 def _verify_id_token(token: str) -> dict:
     """Verify a bearer token (CLI / Google ID / Cognito JWT) and return claims.
 
@@ -477,17 +680,10 @@ def _verify_id_token(token: str) -> dict:
         return claims
     if _AUTH_PROVIDER == "cognito":
         return _verify_cognito_token(token)
-    # Fall back to Google ID token verification (= Cloud Run 既存経路)
-    from google.oauth2 import id_token
-    from google.auth.transport import requests as google_requests
-
-    try:
-        claims = id_token.verify_oauth2_token(
-            token, google_requests.Request()
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
-    return claims
+    # Fall back to Google ID token verification (= Cloud Run 既存経路)。
+    # ms-145 / e-5316: 証明書取得を有界タイムアウト + キャッシュ経路に置き換え、
+    # googleapis のハングで本番プロセスが飢える経路を構造的に断つ。
+    return _verify_google_id_token(token)
 
 
 # ms-113 / e-3731: personal org (= 個人組織) の lazy ensure。
