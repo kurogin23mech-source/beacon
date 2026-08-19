@@ -26,7 +26,14 @@ source of truth:
   python3 scripts/check-map-drift.py <map.md>        # ファイルを照合
   python3 scripts/check-map-drift.py --enumerate     # source の実在 surface を列挙のみ
   python3 scripts/check-map-drift.py <map.md> --json  # 機械可読
-exit 0 = drift 無し / 1 = drift 有り (CI / map-drift trigger backstop 用)
+exit 0 = drift 無し / 1 = drift 有り (CI / map-drift trigger backstop 用) / 2 = fatal
+
+文脈ガード (e-5320): 機械照合の真値源 (lib/commands.py・server/app.py・skills/) は
+beacon 本体の codebase 構造に固定されている。beacon 以外のプロジェクトで走らせても
+beacon 自身の surface を列挙するだけなので、その場合は照合を refuse し「この map は
+AI 維持のみ・機械の安全網なし」と明示して exit 0 で抜ける (SKIP: 行 / json は
+{"skipped": ...})。判定は cwd から上に辿った source 署名で行い、REPO への cwd 比較は
+使わない (pipx install で REPO != 開発リポになっても開発リポは誤 skip しない)。
 """
 from __future__ import annotations
 
@@ -39,6 +46,55 @@ import subprocess
 import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# --- 文脈ガード (e-5320) -------------------------------------------------
+# enumerate_cli / _api / _skill は REPO 配下の lib/commands.py・server/app.py・
+# skills/ を読む = beacon の codebase 構造に固定されている。したがって機械照合が
+# 意味を持つのは「今 map を突こうとしているプロジェクトが beacon 本体そのもの」の
+# ときだけ。他プロジェクト (例: 営業ダッシュボード) で叩くと beacon 自身の surface を
+# 列挙し、そのプロジェクトの地図に化ける (project-96ec39 からの報告で裏取り)。
+#
+# 判定は「現在のプロジェクト (= cwd から上に辿った root) が beacon の source
+# 署名を持つか」で行い、`cwd == REPO` 比較は使わない: pipx install 時は REPO
+# (= install 先) != 開発リポになり得て、`cwd == REPO` だと正規の beacon 開発リポで
+# ガードが誤発火し、本体の map-drift CI が黙って skip される別の穴を開けるため。
+# 署名探索は REPO に依存しないので、この pipx ケースでも開発リポ (= 署名を持つ) は
+# 正しく素通りする。
+_SOURCE_SIGNATURE = (
+    ("lib", "commands.py"),   # CLI dispatch dict (cli surface の真値源)
+    ("server", "app.py"),     # API route decorator (api surface の真値源)
+    ("skills",),              # skills/*.md (skill surface の真値源)
+)
+
+
+def _has_source_signature(root: str) -> bool:
+    for parts in _SOURCE_SIGNATURE:
+        target = os.path.join(root, *parts)
+        # skills/ はディレクトリ、他はファイル。isdir/isfile を分けて確認する。
+        if len(parts) == 1:
+            if not os.path.isdir(target):
+                return False
+        elif not os.path.isfile(target):
+            return False
+    return True
+
+
+def is_beacon_source_project(start: str | None = None) -> bool:
+    """現在のプロジェクト (= cwd から上に辿った最寄りの beacon source root) が
+    beacon 本体の source repo かを、署名ファイルの実在で判定する。
+
+    True  = beacon 本体 (開発リポ / worktree / CI checkout) → 機械照合は有効。
+    False = 他プロジェクト → 機械照合は beacon の surface を列挙するだけで無効。
+    """
+    cur = os.path.abspath(start if start is not None else os.getcwd())
+    while True:
+        if _has_source_signature(cur):
+            return True
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return False
+        cur = parent
+
 
 # CLI surface enumeration lives in lib/cli_surface.py (the single source of truth
 # shared with lib/verb_ledger.py) so the two readers can never drift (ms-114
@@ -229,6 +285,26 @@ def main() -> int:
     ap.add_argument("--enumerate", action="store_true", help="source の実在 surface を列挙のみ")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
+
+    # 文脈ガード (e-5320): beacon 本体の source repo 以外で走らせても、機械照合は
+    # beacon 自身の CLI/API/Skill を列挙するだけで無意味 (むしろ他プロジェクトの
+    # 地図を beacon の surface で「照合」して汚染する)。beacon 以外では refuse し、
+    # 「この map は AI 維持のみ・機械の安全網なし」を明示する。CI / map-drift
+    # backstop は常に beacon repo 内で走るので、この分岐には入らない。
+    if not is_beacon_source_project():
+        if args.json:
+            print(json.dumps({
+                "skipped": "not-beacon-source-project",
+                "reason": "機械照合は beacon 本体の source (lib/commands.py・server/app.py・skills/) に固定されており、他プロジェクトでは無効",
+            }, ensure_ascii=False, indent=2))
+        else:
+            print("SKIP: このプロジェクトは beacon 本体の source repo ではないため機械照合をスキップします。")
+            print("  application-map の機械照合 (書き漏れ / 幽霊検出) は beacon の CLI/API/Skill 構造に固定されています。")
+            print("  他プロジェクトで走らせると beacon 自身の surface を列挙してこのプロジェクトの地図に化けるため、実行しません。")
+            print("  → この map は AI 維持のみ (機械の安全網なし) です。")
+        # exit 0: 「照合できなかった」は drift 有り (=1) でも fatal (=2) でもない。
+        # 呼び出し側 (skill / 万一の外部 CI) の build を落とさない。
+        return 0
 
     if args.enumerate:
         data = {

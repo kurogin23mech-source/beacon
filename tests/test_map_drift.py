@@ -147,6 +147,94 @@ def test_reconcile_file_wedge_existence(small_surface, tmp_path):
     assert "scripts/check-map-drift.py" not in res["phantom"]["file"]
 
 
+# ------------------------------------------------------ (A) 文脈ガード (e-5320)
+# 機械照合の真値源 (lib/commands.py・server/app.py・skills/) は beacon 本体の
+# codebase 構造に固定されている。beacon 以外のプロジェクトで走らせても beacon 自身の
+# surface を列挙するだけなので refuse する。判定は cwd から上に辿った署名探索で行い、
+# `cwd == REPO` 比較は使わない (pipx で REPO != 開発リポでも誤 skip しない)。
+
+
+def _make_source_signature(root: Path) -> None:
+    """beacon source 署名 (lib/commands.py + server/app.py + skills/) を作る。"""
+    (root / "lib").mkdir(parents=True, exist_ok=True)
+    (root / "lib" / "commands.py").write_text("commands = {}\n", encoding="utf-8")
+    (root / "server").mkdir(parents=True, exist_ok=True)
+    (root / "server" / "app.py").write_text("# app\n", encoding="utf-8")
+    (root / "skills").mkdir(parents=True, exist_ok=True)
+
+
+def test_guard_true_in_actual_beacon_repo():
+    """本 test file 自身が beacon repo 内にある = 署名が見つかり True。"""
+    assert CMD.is_beacon_source_project(str(REPO_ROOT)) is True
+
+
+def test_guard_false_in_foreign_dir(tmp_path):
+    """署名の無いディレクトリ (= 他プロジェクト) では False。"""
+    assert CMD.is_beacon_source_project(str(tmp_path)) is False
+
+
+def test_guard_true_from_subdir_of_source(tmp_path):
+    """署名を持つ root の下の任意の subdir から呼んでも上に辿って True。"""
+    _make_source_signature(tmp_path)
+    deep = tmp_path / "scripts" / "nested"
+    deep.mkdir(parents=True)
+    assert CMD.is_beacon_source_project(str(deep)) is True
+
+
+def test_guard_does_not_use_cwd_equals_repo(tmp_path):
+    """pipx エッジ: 開発リポ (署名あり) が REPO (=別の install 先) と別物でも、
+    署名探索は REPO を参照しないので開発リポは正しく True になる。"""
+    dev_repo = tmp_path / "dev-checkout"
+    dev_repo.mkdir()
+    _make_source_signature(dev_repo)
+    # REPO (= CMD.REPO, install 先) とは別パスだが、署名があるので True。
+    assert Path(dev_repo).resolve() != Path(CMD.REPO).resolve()
+    assert CMD.is_beacon_source_project(str(dev_repo)) is True
+
+
+def test_guard_partial_signature_is_not_enough(tmp_path):
+    """lib/commands.py だけ等の部分一致では beacon 本体と誤認しない。"""
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "lib" / "commands.py").write_text("commands = {}\n", encoding="utf-8")
+    assert CMD.is_beacon_source_project(str(tmp_path)) is False
+
+
+def test_main_skips_reconcile_in_foreign_dir(tmp_path, monkeypatch, capsys):
+    """foreign dir から main() を叩くと機械照合せず SKIP して exit 0。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["check-map-drift.py", "--doc-id", "application-map"])
+    rc = CMD.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "SKIP:" in out
+    assert "AI 維持のみ" in out
+
+
+def test_main_skip_json_in_foreign_dir(tmp_path, monkeypatch, capsys):
+    """--json でも skipped マーカーを出して exit 0 (呼び出し側が機械判定できる)。"""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["check-map-drift.py", "--enumerate", "--json"])
+    rc = CMD.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert json.loads(out)["skipped"] == "not-beacon-source-project"
+
+
+def test_main_enumerate_runs_in_source_repo(tmp_path, monkeypatch, capsys):
+    """署名を持つ dir から叩けば通常どおり列挙する (ガードで塞がない)。"""
+    _make_source_signature(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", ["check-map-drift.py", "--enumerate", "--json"])
+    # enumerate は CMD.REPO (= 実 beacon repo) を読むので中身は本物、
+    # ここで確認したいのは「ガードで skip されず実行に入る」こと。
+    rc = CMD.main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    data = json.loads(out)
+    assert "skipped" not in data
+    assert "cli" in data and "api" in data and "skill" in data
+
+
 # ----------------------------------------------------------- (B) box + triggers
 
 import commands  # noqa: E402
