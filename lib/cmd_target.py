@@ -784,6 +784,10 @@ def cmd_target_instances():
               f"{r['status']}")
         if detail.get("next_move"):
             print(f"      次の一手: {detail['next_move']}")
+        # ms-146 e-5339 — the reason to consider stopping belongs next to the
+        # target it is about, not only in the aggregate status view.
+        for _sig in (detail.get("stop_signals") or []):
+            print(f"      ⚠ {_sig['message']}")
 
 
 def cmd_target_work_item():

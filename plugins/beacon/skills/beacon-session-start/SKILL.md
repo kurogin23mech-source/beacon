@@ -442,6 +442,37 @@ DM catch-up と並ぶ位置)。各行は `[種別] label / 期日 YYYY-MM-DD (�
 script (`scripts/session-start-deadlines.py`、単体テスト済み) が所管。この Step は
 **読み取り専用** (超過を消すには done / update --deadline / cancel を user/AI が別途行う)。
 
+## Step 1q: 切り上げシグナルの surface (ms-146 e-5339)
+
+宣言した時間予算を超えている / 直近の証跡が「効いてない」と続いている Target を、
+起動のたびに提示する。**やり過ぎを止めるための情報は、放っておくと誰も見に行かない**
+——止まれない本人こそ自分から探しに行かないので、毎回必ず開く場所に出す。
+
+Step 1 で取得済みの `beacon status --json` の **`stop_signals`** をそのまま読む
+(追加のコマンド実行は不要)。形は次の通り:
+
+```json
+"stop_signals": [
+  {"id": "ut-1", "label": "セミナー資料を作る", "kind": "undertaking",
+   "signals": [
+     {"kind": "budget_target", "message": "宣言した時間予算 16h に対し 20h 使っています"},
+     {"kind": "stall", "message": "直近の証跡が 2 回連続で「効いてない」です"}
+   ]}
+]
+```
+
+- **空配列なら何も表示しない**。この section は「普段は出ない」ことに意味がある
+  (常に出ている警告は、読み手が見なくなる)。
+- 空でなければ、Step 3 出力ヘッダ部に「⏸ そろそろ切り上げでは？」block として転記する
+  (締切超過 block の直後)。`signals[].message` は CLI 側で完成した文なので **そのまま出す**
+  (AI が言い換えると、機構が実際に見ている根拠と表示がずれる)。
+- `stop_signals` キーが無い場合 (古い CLI) は、この Step ごと省略する。
+
+**この Step は読み取り専用。** シグナルが出ていても Target を勝手に閉じたり、
+フェーズを進めたりしてはならない (ms-146 SPEC 設計方針2: 機構は理由を提示するだけで、
+続けるか切り上げるかは人間が決める)。AI が言い添えてよいのは「切り上げますか、
+それとも続けますか」という**問い**までで、判断そのものは user のもの。
+
 ## Step 1j: 前セッションの session log 読み込み（ms-43 e-1360）
 
 前セッション末で `/beacon-session-end` Skill が `beacon session end` で集約した session log には、**「次セッション最優先 / top of queue / 次にやること」セクションが summary 内に明文化されている**ことが多い。これは trigger より優先順位が高い (人間/AI が curate した継続意図そのもの)。
@@ -582,6 +613,12 @@ Beacon: [name]
 ⚠ beacon-bus channel が未 install です (この cwd で `beacon channel install` を実行してください)   ← Step 1i / MCP_STATUS が OK/UNKNOWN 以外の場合のみ
   detail: [NO_MCP_JSON / NO_BEACON_BUS_ENTRY / MCP_JSON_MALFORMED]
   影響: 他セッションからの DM (channel/bus.mjs 経由) がこの session に届きません
+
+⏸ そろそろ切り上げでは？   ← Step 1q / stop_signals が空でなければ転記、空ならセクションごと省略
+  [ut-1] セミナー資料を作る
+    - 宣言した時間予算 16h に対し 20h 使っています
+    - 直近の証跡が 2 回連続で「効いてない」です
+  → 続けるか切り上げるかは user の判断。AI は問いかけるだけで、勝手に閉じない。
 
 留守中に届いた DM (user-scoped catch-up):   ← Step 1n-2 の出力があれば転記、なければセクションごと省略
   [event_id 短縮] from [sender 短縮] at [created_at] [(既読)]

@@ -736,5 +736,10 @@ def project_target(desc: dict, rec: dict) -> dict:
             "who_has_the_ball": work_model.normalize_ball(rec.get(BALL_KEY, "")),
             "next_move": infer_next_move(desc, rec),
             "evidence_total": len(list_evidence(rec)),
+            # ms-146 e-5339 — why this target might be worth wrapping up now.
+            # Normally an EMPTY list; it rides the projection so every renderer
+            # (status / instances / a future Web UI) reads ONE shape instead of
+            # each one re-deriving the arithmetic.
+            "stop_signals": stop_signals(desc, rec),
         },
     }

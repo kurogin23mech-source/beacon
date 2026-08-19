@@ -166,6 +166,43 @@ def project_targets(data: dict) -> list:
     return rows
 
 
+def stop_signal_rows(data: dict) -> list:
+    """Return the open Targets that the mechanism thinks should probably be
+    wrapped up, as ``[{id, label, kind, signals: [{kind, message}]}]`` (ms-146
+    e-5339). Empty when nothing suggests stopping.
+
+    WHY a SEPARATE read rather than "just render what project_targets carries":
+    the whole point is that this is normally EMPTY. A status screen that grows a
+    permanent "signals" column trains the reader to skim past it; a section that
+    appears only when something is actually over budget or has stopped working
+    keeps its meaning. Callers render it only when non-empty.
+
+    Only descriptor-defined classes can produce rows today, because both signals
+    are declaration-driven (``budget_tracking`` / ``stall_signal``) and no built-in
+    class declares them. A milestone or an opportunity therefore contributes
+    nothing rather than being force-fitted — if dev or sales later wants the same
+    arithmetic it declares, and it lights up here with no edit.
+
+    Done / cancelled Targets are skipped: telling someone to stop work they have
+    already stopped is noise, and this signal must stay rare to stay meaningful."""
+    rows: list = []
+    prof = resolve_profession(data)
+    for desc in _descriptors_owned_by(data, prof):
+        for rec in _te.list_targets(data, desc):
+            if _wm.is_cancelled(rec) or _wm.is_done(rec):
+                continue
+            signals = _te.stop_signals(desc, rec)
+            if not signals:
+                continue
+            rows.append({
+                "id": rec.get("id", ""),
+                "label": _wm.target_label(rec),
+                "kind": rec.get("kind") or desc.get("kind", ""),
+                "signals": signals,
+            })
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Target entry recording — the class-abstraction (L2) side-effect seam
 # (ms-134 e-4720).

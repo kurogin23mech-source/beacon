@@ -400,6 +400,7 @@ VERB_LEDGER = {
     "target_attach_disposition": {"cls": "R", "secondary": [], "note": "[e-4579] 未着手 highest/high タスクの disposition(done/superseded/blocks-attainment)を pending 承認に添付=台帳追記(R)、attach_evidence と同族"},
     "target_ball": {"cls": "R", "secondary": [], "note": "[post-memo] 次手のコート(self/counterpart)を記録(R)"},
     "target_class_add": {"cls": "B", "secondary": [], "note": "[post-memo] 新 target-class を project.json へ宣言=descriptor/schema 追加の機械操作(B)、no-code onboarding 経路"},
+    "target_class_update": {"cls": "B", "secondary": [], "note": "[ms-146 e-5346] 宣言済み target-class に field を追加=descriptor/schema 変更の機械操作(B)。追加のみで削除・改名は拒否するため、既存レコードを壊さない前提の schema 進化操作"},
     "target_class_list": {"cls": "Q", "secondary": [], "note": "[post-memo] 宣言済 target-class の read-only 一覧(Q)"},
     "target_close": {"cls": "R", "secondary": ["B"], "note": "[post-memo] target を done に=完了決定記録(R)/review-due 発火(B)、milestone done と同型"},
     "target_create": {"cls": "R", "secondary": [], "note": "[post-memo] data-defined target 起票=台帳追記(R)、milestone add と同型"},
