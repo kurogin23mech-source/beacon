@@ -343,10 +343,11 @@ case "${1:-}" in
     close --class <kind> <target-id> [--reason <text>]
     instances --class <kind> [--json]
   厚い認知フレーム (WorkItem / Evidence / ball, ms-124):
-    work-item add  --class <kind> <target-id> --desc <text>
+    work-item add  --class <kind> <target-id> --desc <text> [--field key=value ...]
     work-item done --class <kind> <target-id> <item-id> [--reason <text>]
+    work-item cancel --class <kind> <target-id> <item-id> --reason <text>
     work-item list --class <kind> <target-id> [--json]
-    evidence add  --class <kind> <target-id> [--summary <text>] [--for <item-id>]
+    evidence add  --class <kind> <target-id> [--summary <text>] [--for <item-id>] [--field key=value ...]
     evidence list --class <kind> <target-id> [--json]
     ball --class <kind> <target-id> <self|counterpart|none> [--reason <text>]" ;;
         esac
@@ -354,12 +355,23 @@ case "${1:-}" in
     target-class|tclass)
         case "${2:-}" in
             add)      shift 2; cmd_target_class_add "$@" ;;
+            update)   shift 2; cmd_target_class_update "$@" ;;
             list|ls)  shift 2; cmd_target_class_list "$@" ;;
             *)        echo "Usage: beacon target-class <subcommand>  (data 定義 target-class をコード無しで追加, ms-124)
     add --kind <k> --label <l> --type <single-shot|persistent> --id-prefix <pfx-> --collection <coll> [--profession <p>]
         [--field key:label:type ...] [--required-field key:label:type ...]
         [--phase key:label ...] [--terminal-phase key:label ...]
+        [--work-item-field key:label:type ...] [--required-work-item-field ...]
+        [--evidence-field key:label:type ...] [--required-evidence-field ...]
     add --stdin        # 記述子全体を JSON で stdin から渡す
+    update --kind <k>  # 宣言済みクラスに field を足す (追加のみ / 削除・改名は不可)
+        [--field key:label:type ...] [--required-field ...]
+        [--phase-field <phase>:key:label:type ...] [--required-phase-field ...]
+        [--work-item-field ...] [--required-work-item-field ...]
+        [--evidence-field ...] [--required-evidence-field ...]
+        [--budget-tracking <target予算field>:<業務予算field>:<証跡消費field>]
+        [--stall-signal <証跡field>:<値>:<連続回数>]
+      field 指定は key:label:type[:選択肢1|選択肢2|...] 形式
     list [--json]" ;;
         esac
         ;;

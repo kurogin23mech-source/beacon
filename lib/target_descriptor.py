@@ -41,6 +41,16 @@ from typing import Optional
 # The additive top-level project.json key holding the descriptor list.
 TARGET_CLASSES_KEY = "target_classes"
 
+# Child-arm field declarations (ms-146 e-5344). A descriptor may declare the
+# fields its WORK ITEMS / EVIDENCE carry, exactly as ``fields`` declares the
+# target's own. Both are OPTIONAL and read tolerantly: a descriptor written
+# before this feature (backoffice's 契約 / 評価, an authored class) reads as
+# "no child fields" and behaves exactly as before — the additive-only /
+# tolerant-read compat contract (memo pnhATs37xgIxEkpFI8uR) holds by
+# construction, so nothing needs migrating.
+WORK_ITEM_FIELDS_KEY = "work_item_fields"
+EVIDENCE_FIELDS_KEY = "evidence_fields"
+
 # A target-class is either finite (single-shot, completes once — like a
 # development milestone or a sales opportunity) or ongoing (persistent, recurs —
 # like a development operation or a monthly close). SPEC §3.
@@ -153,10 +163,73 @@ def terminal_phase_keys(desc: dict) -> list:
     return out
 
 
+def field_choices(field: dict) -> list:
+    """Return the fixed set of values a field declaration allows, or ``[]`` when
+    it allows any value (ms-146 e-5338).
+
+    WHY a field needs this: "効いたか" is only useful as 効いた / 効いてない /
+    わからない. As free text it is three spellings of the same thing plus typos,
+    and a MECHANISM cannot count "効いてない twice in a row" over prose. A
+    declared choice list is what turns a note into something the engine can
+    reason about — which is the whole difference between a diary and a signal."""
+    got = field.get("choices") if isinstance(field, dict) else None
+    if not isinstance(got, list):
+        return []
+    return [c for c in got if isinstance(c, str) and c.strip()]
+
+
+def check_field_value(field: dict, value) -> str:
+    """Return a human-facing problem string when ``value`` is not allowed for
+    this field declaration, or ``""`` when it is fine.
+
+    Today the only constraint is ``choices``; the function exists so every write
+    path (target create, phase advance, work item, evidence) asks ONE place
+    rather than each re-implementing the check — the seam a future constraint
+    (range, pattern) lands in without a four-site edit."""
+    allowed = field_choices(field)
+    if not allowed:
+        return ""
+    if value in (None, ""):
+        return ""          # presence is the `required` check's job, not this one
+    if str(value) not in allowed:
+        key = (field.get("key") or "").strip()
+        return (f"field '{key}' の値 '{value}' は選べません "
+                f"(選択肢: {' / '.join(allowed)})")
+    return ""
+
+
 def base_fields(desc: dict) -> list:
     """Return the target-level fields a descriptor declares (present regardless
     of phase). Empty when none. Malformed field entries are skipped."""
     return [f for f in (desc.get("fields") or []) if isinstance(f, dict)]
+
+
+def work_item_fields(desc: dict) -> list:
+    """Return the fields a descriptor declares for its WORK ITEMS — the unit of
+    doing (a development task / a sales activity equivalent). Empty when none.
+
+    WHY this exists (ms-146 e-5344): ``occupation.add_work_item`` — the generic
+    entry point a dev task / sales activity rides — accepts ``**extra`` so a
+    profession can carry its own per-item fields (a task's ``priority``, an
+    activity's ``deadline``). The descriptor path (``target_engine.add_work_item``)
+    took a description and nothing else, so a DATA-defined target-class was the one
+    kind whose work items could carry no fields at all. That asymmetry made a
+    per-item declaration (e.g. an executive class's 時間予算) impossible to express
+    as data — the very thing descriptors exist for. Declaring the shape here keeps
+    "機構は基底 / 語彙は記述子" intact: the engine enforces, the descriptor names."""
+    return [f for f in (desc.get(WORK_ITEM_FIELDS_KEY) or [])
+            if isinstance(f, dict)]
+
+
+def evidence_fields(desc: dict) -> list:
+    """Return the fields a descriptor declares for its EVIDENCE records — the
+    append-only proof that something happened (a commit / communication
+    equivalent). Empty when none. Same rationale as ``work_item_fields``; an
+    evidence record that can only carry a free-text summary cannot express a
+    structured observation (e.g. 効いたか = did this move the objective), which is
+    what turns a pile of notes into something a mechanism can reason over."""
+    return [f for f in (desc.get(EVIDENCE_FIELDS_KEY) or [])
+            if isinstance(f, dict)]
 
 
 def fields_at_phase(desc: dict, phase_key: str) -> list:
@@ -212,6 +285,14 @@ def validate_descriptor(desc: dict) -> list:
     # Field key uniqueness within the class (base fields).
     problems.extend(_validate_fields(base_fields(desc), label, where="base"))
 
+    # Child-arm field declarations (ms-146 e-5344) get the same structural check
+    # as base fields — a duplicate / malformed key must surface at declaration
+    # time, not as a confusing write-time rejection much later.
+    problems.extend(
+        _validate_fields(work_item_fields(desc), label, where="work_item"))
+    problems.extend(
+        _validate_fields(evidence_fields(desc), label, where="evidence"))
+
     # Phase key uniqueness + per-phase field checks.
     seen_phases: set = set()
     for phase in (desc.get("phases") or []):
@@ -257,6 +338,26 @@ def validate_descriptor(desc: dict) -> list:
     return problems
 
 
+def _validate_field_choices(field: dict, label: str, where: str) -> list:
+    """Problems for a field's ``choices`` declaration (ms-146 e-5338). Absent is
+    fine (unconstrained); present-but-empty is not — it would allow nothing and
+    silently make the field unwritable."""
+    if "choices" not in field:
+        return []
+    raw = field.get("choices")
+    key = (field.get("key") or "?").strip() or "?"
+    if not isinstance(raw, list) or not raw:
+        return [f"[{label}] {where} の field '{key}' の choices は "
+                f"1 つ以上の値を持つリストである必要があります"]
+    bad = [c for c in raw if not isinstance(c, str) or not c.strip()]
+    if bad:
+        return [f"[{label}] {where} の field '{key}' の choices に "
+                f"空または文字列でない値があります: {bad!r}"]
+    if len(set(raw)) != len(raw):
+        return [f"[{label}] {where} の field '{key}' の choices が重複しています"]
+    return []
+
+
 def _validate_fields(fields: list, label: str, where: str) -> list:
     """Return problems for a field list: each field needs a non-empty ``key``,
     field keys must be unique within their scope, and a declared ``type`` must
@@ -283,6 +384,7 @@ def _validate_fields(fields: list, label: str, where: str) -> list:
             problems.append(
                 f"[{label}] {where} の field '{fkey}' の type '{ftype}' は未知です "
                 f"(許可: {' / '.join(ALLOWED_FIELD_TYPES)})")
+        problems.extend(_validate_field_choices(field, label, where))
     return problems
 
 
@@ -386,15 +488,19 @@ def arm_roles(desc: dict) -> dict:
 def build_descriptor(*, kind: str, label: str, profession: str, dtype: str,
                      id_prefix: str, collection: str,
                      fields: Optional[list] = None,
-                     phases: Optional[list] = None) -> dict:
+                     phases: Optional[list] = None,
+                     work_item_fields: Optional[list] = None,
+                     evidence_fields: Optional[list] = None) -> dict:
     """Build a target-class descriptor dict from its parts (pure, no I/O). The
     shape matches what ``backoffice_seed`` hand-writes: kind / label /
     profession / type / id_prefix / collection / decomposition / fields /
     phases. ``fields`` and ``phases`` are passed through verbatim (the caller
     built them from CLI flags or JSON). ``decomposition.arms`` defaults to the
     thick-frame arms so authored classes get WorkItems / Evidence like the
-    built-in seed. This does NOT validate — the caller runs ``validate_*``."""
-    return {
+    built-in seed. ``work_item_fields`` / ``evidence_fields`` (ms-146 e-5344) are
+    emitted only when non-empty. This does NOT validate — the caller runs
+    ``validate_*``."""
+    desc = {
         "kind": (kind or "").strip(),
         "label": (label or "").strip(),
         "profession": (profession or "").strip(),
@@ -405,6 +511,137 @@ def build_descriptor(*, kind: str, label: str, profession: str, dtype: str,
         "fields": list(fields or []),
         "phases": list(phases or []),
     }
+    # Child-arm declarations are emitted ONLY when the author declared some, so a
+    # descriptor built without them is byte-identical to what this returned before
+    # ms-146 e-5344 (no empty keys appearing in every project.json).
+    if work_item_fields:
+        desc[WORK_ITEM_FIELDS_KEY] = list(work_item_fields)
+    if evidence_fields:
+        desc[EVIDENCE_FIELDS_KEY] = list(evidence_fields)
+    return desc
+
+
+# ---------------------------------------------------------------------------
+# Post-declaration edits (ms-146 e-5346) — ADDITIVE ONLY.
+#
+# WHY additive only: a declaration is not a schema in an empty database, it is a
+# promise about records that ALREADY EXIST. Renaming a field key orphans every
+# value written under the old name; removing one orphans the values themselves.
+# Both are silent data loss dressed as an edit, which the
+# ``data-immutability-principle`` CORE doc forbids. So this module can only ADD,
+# and the CLI refuses remove/rename explicitly (with the reason) rather than
+# leaving the author to guess why the flag does not exist.
+#
+# Retroactivity: adding a field marked ``required`` does NOT invalidate records
+# created before it. Enforcement happens at WRITE time against the declaration
+# current at that moment, so existing records keep their shape and stay readable.
+# The CLI says how many existing records lack the new field, so "my old records
+# are now non-conforming" is a stated fact rather than a discovery.
+# ---------------------------------------------------------------------------
+
+# Where a field declaration can live on a class. ``phase`` needs a phase key too.
+FIELD_ARM_BASE = "base"
+FIELD_ARM_WORK_ITEM = "work_item"
+FIELD_ARM_EVIDENCE = "evidence"
+FIELD_ARM_PHASE = "phase"
+VALID_FIELD_ARMS = (FIELD_ARM_BASE, FIELD_ARM_WORK_ITEM, FIELD_ARM_EVIDENCE,
+                    FIELD_ARM_PHASE)
+
+# arm -> the descriptor key holding that arm's field list (phase is special:
+# its list lives inside the matching phase entry).
+_ARM_FIELD_KEY = {
+    FIELD_ARM_BASE: "fields",
+    FIELD_ARM_WORK_ITEM: WORK_ITEM_FIELDS_KEY,
+    FIELD_ARM_EVIDENCE: EVIDENCE_FIELDS_KEY,
+}
+
+
+def add_field(desc: dict, field: dict, *, arm: str = FIELD_ARM_BASE,
+              phase_key: str = "") -> list:
+    """Append one field declaration to an existing descriptor, in place.
+
+    Returns a list of problem strings; when it is non-empty NOTHING was written
+    (validate-before-mutate, same contract as ``append_descriptor``). ``arm``
+    selects which list the field joins — the target's own ``base`` fields, its
+    ``work_item`` / ``evidence`` child arms, or a single ``phase`` (which also
+    needs ``phase_key``).
+
+    A key already declared on the SAME arm is refused: re-declaring is a redefine
+    in disguise, and the second declaration would silently win for readers while
+    records written under the first keep the old meaning. A phase field may not
+    shadow a base field either, because ``fields_at_phase`` merges the two and the
+    author would have no way to tell which one a value belongs to."""
+    problems: list = []
+    if not isinstance(desc, dict):
+        return ["記述子が辞書ではありません"]
+    if arm not in VALID_FIELD_ARMS:
+        return [f"未知の arm '{arm}' です "
+                f"(有効: {' / '.join(VALID_FIELD_ARMS)})"]
+    label = (desc.get("kind") or "?").strip() or "?"
+
+    if arm == FIELD_ARM_PHASE:
+        pkey = (phase_key or "").strip()
+        if not pkey:
+            return [f"[{label}] phase の field を足すには phase key が必要です"]
+        phase = get_phase(desc, pkey)
+        if phase is None:
+            return [f"[{label}] phase '{pkey}' は宣言されていません "
+                    f"(宣言済: {' / '.join(phase_keys(desc)) or 'なし'})"]
+        existing = [f for f in (phase.get("fields") or [])
+                    if isinstance(f, dict)]
+        # A phase field must not shadow a base field (fields_at_phase merges).
+        base_keys = {(f.get("key") or "").strip() for f in base_fields(desc)}
+        if (field.get("key") or "").strip() in base_keys:
+            problems.append(
+                f"[{label}] '{field.get('key')}' は基本 field と重複します "
+                f"(phase field は基本 field を覆い隠せません)")
+    else:
+        existing = [f for f in (desc.get(_ARM_FIELD_KEY[arm]) or [])
+                    if isinstance(f, dict)]
+        phase = None
+
+    where = arm if arm != FIELD_ARM_PHASE else f"phase '{phase_key}'"
+    problems.extend(_validate_fields(existing + [field], label, where=where))
+    if problems:
+        return problems
+
+    if arm == FIELD_ARM_PHASE:
+        phase.setdefault("fields", []).append(field)
+    else:
+        desc.setdefault(_ARM_FIELD_KEY[arm], []).append(field)
+    return []
+
+
+def records_missing_field(data: dict, desc: dict, field_key: str, *,
+                          arm: str = FIELD_ARM_BASE) -> int:
+    """Count the ALREADY-EXISTING records of this class that carry no value for
+    ``field_key`` — targets for ``base`` / ``phase``, child records for the
+    ``work_item`` / ``evidence`` arms.
+
+    This exists so the CLI can STATE the retroactivity consequence at the moment
+    the author adds a required field, instead of leaving them to find out later
+    that half their records predate the promise."""
+    key = (field_key or "").strip()
+    if not key:
+        return 0
+    coll = data.get((desc.get("collection") or "").strip())
+    if not isinstance(coll, list):
+        return 0
+    missing = 0
+    for rec in coll:
+        if not isinstance(rec, dict):
+            continue
+        if arm in (FIELD_ARM_BASE, FIELD_ARM_PHASE):
+            if not (rec.get(key) or "") and rec.get(key) not in (0, False):
+                missing += 1
+            continue
+        child_key = "work_items" if arm == FIELD_ARM_WORK_ITEM else "evidence"
+        for child in (rec.get(child_key) or []):
+            if not isinstance(child, dict):
+                continue
+            if not (child.get(key) or "") and child.get(key) not in (0, False):
+                missing += 1
+    return missing
 
 
 def append_descriptor(data: dict, desc: dict) -> list:

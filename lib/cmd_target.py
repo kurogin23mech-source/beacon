@@ -610,6 +610,21 @@ def _parse_field_pairs() -> dict:
     return out
 
 
+def _print_child_fields(declared: list, item: dict) -> None:
+    """Echo the declared child-arm fields that the record now carries (ms-146
+    e-5344). The write is otherwise invisible — the caller sees only "WorkItem
+    追加" and cannot tell whether the 時間予算 they passed actually landed — and a
+    write you cannot see is indistinguishable from a silent no-op, the AX病理
+    ms-120 exists to remove. Prints nothing for a class that declares no child
+    fields, so the classic output is unchanged."""
+    for f in declared:
+        if not isinstance(f, dict):
+            continue
+        key = (f.get("key") or "").strip()
+        if key and key in item:
+            print(f"  {key} = {item[key]}")
+
+
 def cmd_target_create():
     """Create a data-defined target of a given class (ms-122 e-3956).
 
@@ -775,7 +790,9 @@ def cmd_target_work_item():
     """Add / complete / list a WorkItem on a data-defined target (e-4089).
 
     beacon target work-item add   --class <kind> <target-id> --desc <text>
+                                  [--field key=value ...]
     beacon target work-item done  --class <kind> <target-id> <item-id> [--reason <text>]
+    beacon target work-item cancel --class <kind> <target-id> <item-id> --reason <text>
     beacon target work-item list  --class <kind> <target-id> [--json]
     """
     action = os.environ.get("BEACON_WI_ACTION", "").strip()
@@ -786,7 +803,7 @@ def cmd_target_work_item():
     reason = os.environ.get("BEACON_REASON", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     if not target_id:
-        print("Usage: beacon target work-item <add|done|list> --class <kind> "
+        print("Usage: beacon target work-item <add|done|cancel|list> --class <kind> "
               "<target-id> ...", file=sys.stderr)
         sys.exit(1)
     data = load_project()
@@ -801,16 +818,33 @@ def cmd_target_work_item():
                       "(positional は target-id のみ)", file=sys.stderr)
                 sys.exit(1)
             item = _te.add_work_item(data, desc, target_id, desc_text,
+                                     fields=_parse_field_pairs(),
                                      actor=_actor_str())
             save_project(data, op={"op": "target_work_item_add", "kind": kind,
                                    "target_id": target_id, "item_id": item["id"]})
             print(f"WorkItem 追加: [{item['id']}] {desc_text}")
+            _print_child_fields(_td.work_item_fields(desc), item)
         elif action == "done":
             item = _te.complete_work_item(data, desc, target_id, item_id,
                                           actor=_actor_str(), reason=reason)
             save_project(data, op={"op": "target_work_item_done", "kind": kind,
                                    "target_id": target_id, "item_id": item_id})
             print(f"WorkItem 完了: [{item_id}]")
+        elif action == "cancel":
+            # ms-146 e-5348: a cancel with no reason is the record that reads
+            # worst later ("why did this disappear?"), so the reason is required
+            # here rather than optional-and-usually-blank.
+            if not reason:
+                print("Error: 取り消しには理由が必要です "
+                      "(--reason \"やらないと決めた理由\")", file=sys.stderr)
+                sys.exit(1)
+            _te.cancel_work_item(data, desc, target_id, item_id,
+                                 actor=_actor_str(), reason=reason)
+            save_project(data, op={"op": "target_work_item_cancel",
+                                   "kind": kind, "target_id": target_id,
+                                   "item_id": item_id})
+            print(f"WorkItem 取り消し: [{item_id}]")
+            print(f"  理由: {reason}")
         elif action == "list":
             rec = _te.find_target(data, desc, target_id)
             if rec is None:
@@ -825,10 +859,24 @@ def cmd_target_work_item():
                 print(f"({target_id} に WorkItem はまだありません)")
                 return
             for it in items:
-                icon = "●" if work_model.is_done(it) else "○"
-                print(f"  {icon} [{it.get('id')}] {it.get('description', '')}")
+                # ms-146 e-5348: a cancelled item must not read as still-open.
+                # Without its own marker the cancel verb is invisible here —
+                # the record changed but the list looks identical, which is the
+                # silent-no-op AX病理 in a different costume.
+                if work_model.is_cancelled(it):
+                    icon = "×"
+                elif work_model.is_done(it):
+                    icon = "●"
+                else:
+                    icon = "○"
+                why = ""
+                if work_model.is_cancelled(it):
+                    reason_txt = (it.get("meta") or {}).get("cancel_reason", "")
+                    why = f"  — 取り消し: {reason_txt}" if reason_txt                         else "  — 取り消し済み"
+                print(f"  {icon} [{it.get('id')}] "
+                      f"{it.get('description', '')}{why}")
         else:
-            print("Usage: beacon target work-item <add|done|list> ...",
+            print("Usage: beacon target work-item <add|done|cancel|list> ...",
                   file=sys.stderr)
             sys.exit(1)
     except _te.TargetEngineError as e:
@@ -840,7 +888,7 @@ def cmd_target_evidence():
     """Attach / list Evidence records on a data-defined target (e-4089).
 
     beacon target evidence add  --class <kind> <target-id> [--summary <text>]
-                                [--for <work-item-id>]
+                                [--for <work-item-id>] [--field key=value ...]
     beacon target evidence list --class <kind> <target-id> [--json]
 
     ms-124 AX review: Evidence mirrors work-item's ``<add|list>`` action shape
@@ -863,12 +911,15 @@ def cmd_target_evidence():
     try:
         if action in ("", "add"):
             ev = _te.add_evidence(data, desc, target_id, summary=summary,
-                                  linked_id=linked_id, actor=_actor_str())
+                                  linked_id=linked_id,
+                                  fields=_parse_field_pairs(),
+                                  actor=_actor_str())
             save_project(data, op={"op": "target_evidence_add", "kind": kind,
                                    "target_id": target_id,
                                    "evidence_id": ev["id"]})
             link = f" → {linked_id}" if linked_id else ""
             print(f"Evidence 追加: [{ev['id']}]{link}")
+            _print_child_fields(_td.evidence_fields(desc), ev)
         elif action == "list":
             rec = _te.find_target(data, desc, target_id)
             if rec is None:
@@ -952,6 +1003,16 @@ def _field_from_spec(raw: str, *, required: bool) -> dict:
     field = {"key": key, "label": (parts[1].strip() if len(parts) > 1 else key)}
     ftype = parts[2].strip() if len(parts) > 2 and parts[2].strip() else "string"
     field["type"] = ftype
+    # ms-146 e-5338: a 4th segment declares the fixed set of values, pipe
+    # separated — ``moved:効いたか:string:効いた|効いてない|わからない``. Pipe rather
+    # than another colon because the segments are already colon-delimited.
+    if len(parts) > 3 and parts[3].strip():
+        choices = [c.strip() for c in parts[3].split("|") if c.strip()]
+        if len(choices) < 2:
+            print(f"Error: choices は '|' 区切りで 2 つ以上必要です: {raw!r} "
+                  f"(key:label:type:選択肢1|選択肢2 形式)", file=sys.stderr)
+            sys.exit(1)
+        field["choices"] = choices
     if required:
         field["required"] = True
     return field
@@ -978,6 +1039,8 @@ def cmd_target_class_add():
         --type <single-shot|persistent> --id-prefix <pfx-> --collection <coll>
         [--field key:label:type ...] [--required-field key:label:type ...]
         [--phase key:label ...] [--terminal-phase key:label ...]
+        [--work-item-field key:label:type ...] [--required-work-item-field ...]
+        [--evidence-field key:label:type ...] [--required-evidence-field ...]
     beacon target-class add --stdin        # full descriptor as JSON on stdin
     """
     data = load_project()
@@ -992,7 +1055,11 @@ def cmd_target_class_add():
             ("--field", "BEACON_TC_FIELDS"),
             ("--required-field", "BEACON_TC_REQUIRED_FIELDS"),
             ("--phase", "BEACON_TC_PHASES"),
-            ("--terminal-phase", "BEACON_TC_TERMINAL_PHASES"))
+            ("--terminal-phase", "BEACON_TC_TERMINAL_PHASES"),
+            ("--work-item-field", "BEACON_TC_WI_FIELDS"),
+            ("--required-work-item-field", "BEACON_TC_REQUIRED_WI_FIELDS"),
+            ("--evidence-field", "BEACON_TC_EV_FIELDS"),
+            ("--required-evidence-field", "BEACON_TC_REQUIRED_EV_FIELDS"))
             if os.environ.get(e, "").strip()]
         if conflicting:
             print(f"Error: --stdin 使用時は他の記述子フラグを指定できません "
@@ -1030,6 +1097,16 @@ def cmd_target_class_add():
                   for s in _parse_spec_lines("BEACON_TC_FIELDS")]
         fields += [_field_from_spec(s, required=True)
                    for s in _parse_spec_lines("BEACON_TC_REQUIRED_FIELDS")]
+        # ms-146 e-5344: the child arms get their own declarations, in the same
+        # key:label:type grammar as the target's own fields.
+        wi_fields = [_field_from_spec(s, required=False)
+                     for s in _parse_spec_lines("BEACON_TC_WI_FIELDS")]
+        wi_fields += [_field_from_spec(s, required=True)
+                      for s in _parse_spec_lines("BEACON_TC_REQUIRED_WI_FIELDS")]
+        ev_fields = [_field_from_spec(s, required=False)
+                     for s in _parse_spec_lines("BEACON_TC_EV_FIELDS")]
+        ev_fields += [_field_from_spec(s, required=True)
+                      for s in _parse_spec_lines("BEACON_TC_REQUIRED_EV_FIELDS")]
         phases = [_phase_from_spec(s, terminal=False)
                   for s in _parse_spec_lines("BEACON_TC_PHASES")]
         phases += [_phase_from_spec(s, terminal=True)
@@ -1037,7 +1114,8 @@ def cmd_target_class_add():
         desc = _td.build_descriptor(
             kind=kind, label=label, profession=profession, dtype=dtype,
             id_prefix=id_prefix, collection=collection, fields=fields,
-            phases=phases)
+            phases=phases, work_item_fields=wi_fields,
+            evidence_fields=ev_fields)
     problems = _td.append_descriptor(data, desc)
     if problems:
         print("Error: 記述子を登録できません:", file=sys.stderr)
@@ -1050,6 +1128,229 @@ def cmd_target_class_add():
           f"(profession={desc.get('profession')}, type={desc.get('type')})")
     print(f"  次: beacon target create --class {desc.get('kind')} "
           f"--label <名前>")
+
+
+def _phase_field_from_spec(raw: str, *, required: bool) -> tuple:
+    """Parse a ``phase:key:label[:type]`` spec into ``(phase_key, field)``.
+
+    The phase comes FIRST because the flag names a place before it names a thing
+    (``--phase-field started:enough_line:十分ライン:text`` reads as "on the 着手
+    phase, add ..."). Raises SystemExit with the grammar on a malformed spec."""
+    parts = (raw or "").split(":")
+    if len(parts) < 2 or not parts[0].strip() or not parts[1].strip():
+        print(f"Error: phase field 指定は phase:key:label:type 形式です "
+              f"(受領: {raw!r})", file=sys.stderr)
+        sys.exit(1)
+    phase_key = parts[0].strip()
+    return phase_key, _field_from_spec(":".join(parts[1:]), required=required)
+
+
+# Which flag feeds which arm. Kept as data so the handler is one loop rather
+# than eight near-identical blocks (the eight-blocks version is where a copy
+# -paste bug silently sends --evidence-field to the work-item arm).
+_UPDATE_ARM_SOURCES = (
+    ("BEACON_TC_FIELDS", _td.FIELD_ARM_BASE, False, "--field"),
+    ("BEACON_TC_REQUIRED_FIELDS", _td.FIELD_ARM_BASE, True, "--required-field"),
+    ("BEACON_TC_WI_FIELDS", _td.FIELD_ARM_WORK_ITEM, False,
+     "--work-item-field"),
+    ("BEACON_TC_REQUIRED_WI_FIELDS", _td.FIELD_ARM_WORK_ITEM, True,
+     "--required-work-item-field"),
+    ("BEACON_TC_EV_FIELDS", _td.FIELD_ARM_EVIDENCE, False, "--evidence-field"),
+    ("BEACON_TC_REQUIRED_EV_FIELDS", _td.FIELD_ARM_EVIDENCE, True,
+     "--required-evidence-field"),
+)
+
+
+def cmd_target_class_update():
+    """Add field declarations to an already-declared target-class (e-5346).
+
+    beacon target-class update --kind <k>
+        [--field key:label:type ...] [--required-field key:label:type ...]
+        [--phase-field <phase>:key:label:type ...]
+        [--required-phase-field <phase>:key:label:type ...]
+        [--work-item-field key:label:type ...] [--required-work-item-field ...]
+        [--evidence-field key:label:type ...] [--required-evidence-field ...]
+
+    ADDITIVE ONLY. Removing or renaming a declared field would orphan the values
+    already written under it — silent data loss dressed as an edit — so those are
+    refused by name with the reason (see ``target_descriptor``'s post-declaration
+    edits section). A newly ``required`` field is NOT retroactive: this reports how
+    many existing records lack it so the consequence is stated, not discovered."""
+    data = load_project()
+    kind = os.environ.get("BEACON_TC_KIND", "").strip()
+    if not kind:
+        print("Usage: beacon target-class update --kind <k> "
+              "[--field key:label:type ...] ...", file=sys.stderr)
+        sys.exit(1)
+
+    # Refuse destructive edits BY NAME. An unknown-flag error would leave the
+    # author guessing whether the capability is missing or forbidden.
+    for flag, env in (("--remove-field", "BEACON_TC_REMOVE_FIELDS"),
+                      ("--rename-field", "BEACON_TC_RENAME_FIELDS")):
+        if os.environ.get(env, "").strip():
+            print(f"Error: {flag} は提供していません。宣言済み field の削除・改名は、"
+                  f"既にその field に書き込まれた値を行き先のない状態にする "
+                  f"(= 編集の姿をしたデータ消失) ためです。\n"
+                  f"  代わりに: 新しい field を足して以後はそちらを使い、"
+                  f"古い field は読み取り専用として残してください。",
+                  file=sys.stderr)
+            sys.exit(1)
+
+    desc = _td.get_descriptor(data, kind)
+    if desc is None:
+        declared = ", ".join(_td.descriptor_kinds(data)) or "なし"
+        print(f"Error: target-class '{kind}' は宣言されていません "
+              f"(宣言済: {declared})\n"
+              f"  新規に作るなら beacon target-class add", file=sys.stderr)
+        sys.exit(1)
+
+    # (arm, phase_key, field) in the order the author wrote them.
+    pending: list = []
+    for env, arm, required, _flag in _UPDATE_ARM_SOURCES:
+        for spec in _parse_spec_lines(env):
+            pending.append((arm, "", _field_from_spec(spec, required=required)))
+    for spec in _parse_spec_lines("BEACON_TC_PHASE_FIELDS"):
+        pkey, field = _phase_field_from_spec(spec, required=False)
+        pending.append((_td.FIELD_ARM_PHASE, pkey, field))
+    for spec in _parse_spec_lines("BEACON_TC_REQUIRED_PHASE_FIELDS"):
+        pkey, field = _phase_field_from_spec(spec, required=True)
+        pending.append((_td.FIELD_ARM_PHASE, pkey, field))
+
+    # ms-146 e-5337: which of this class's OWN fields hold the declared budget
+    # and the recorded spend. Declaring it is what lets the generic engine do the
+    # overrun arithmetic without knowing what an "executive" is.
+    budget_spec = os.environ.get("BEACON_TC_BUDGET_TRACKING", "").strip()
+    budget_cfg = None
+    if budget_spec:
+        segs = [x.strip() for x in budget_spec.split(":")]
+        if len(segs) != 3 or not any(segs):
+            print("Error: --budget-tracking は "
+                  "<target予算field>:<業務予算field>:<証跡消費field> 形式です "
+                  f"(受領: {budget_spec!r})", file=sys.stderr)
+            sys.exit(1)
+        budget_cfg = {"target_budget_field": segs[0],
+                      "work_item_budget_field": segs[1],
+                      "evidence_spend_field": segs[2]}
+
+    # ms-146 e-5338: which evidence value means "this stopped working", and how
+    # many in a row are enough to say so.
+    stall_spec = os.environ.get("BEACON_TC_STALL_SIGNAL", "").strip()
+    stall_cfg = None
+    if stall_spec:
+        segs = [x.strip() for x in stall_spec.split(":")]
+        if len(segs) != 3 or not segs[0] or not segs[1]:
+            print("Error: --stall-signal は <証跡field>:<値>:<連続回数> 形式です "
+                  f"(受領: {stall_spec!r})", file=sys.stderr)
+            sys.exit(1)
+        try:
+            threshold = int(segs[2])
+        except ValueError:
+            print(f"Error: --stall-signal の連続回数が数値ではありません: "
+                  f"{segs[2]!r}", file=sys.stderr)
+            sys.exit(1)
+        if threshold < 1:
+            print("Error: --stall-signal の連続回数は 1 以上です",
+                  file=sys.stderr)
+            sys.exit(1)
+        stall_cfg = {"evidence_field": segs[0], "value": segs[1],
+                     "threshold": threshold}
+
+    if not pending and budget_cfg is None and stall_cfg is None:
+        print(f"Error: 追加する field がひとつも指定されていません "
+              f"(--field / --phase-field / --work-item-field / "
+              f"--evidence-field / --budget-tracking / "
+              f"--stall-signal ...)", file=sys.stderr)
+        sys.exit(1)
+
+    # Apply against a COPY first: either every field lands or none does, so a
+    # typo in the third flag cannot leave the class half-updated.
+    import copy
+    trial = copy.deepcopy(desc)
+    for arm, pkey, field in pending:
+        problems = _td.add_field(trial, field, arm=arm, phase_key=pkey)
+        if problems:
+            print("Error: 記述子を更新できません:", file=sys.stderr)
+            for pb in problems:
+                print(f"  - {pb}", file=sys.stderr)
+            sys.exit(1)
+
+    if budget_cfg is not None:
+        # Every named field must already be declared, else the tracking would
+        # point at nothing and silently report 0 spent forever.
+        known = {(f.get("key") or "").strip() for f in _td.base_fields(trial)}
+        for ph in (trial.get("phases") or []):
+            if isinstance(ph, dict):
+                known |= {(f.get("key") or "").strip()
+                          for f in (ph.get("fields") or [])
+                          if isinstance(f, dict)}
+        wi_known = {(f.get("key") or "").strip()
+                    for f in _td.work_item_fields(trial)}
+        ev_known = {(f.get("key") or "").strip()
+                    for f in _td.evidence_fields(trial)}
+        for label_, value, pool in (
+                ("target予算", budget_cfg["target_budget_field"], known),
+                ("業務予算", budget_cfg["work_item_budget_field"], wi_known),
+                ("証跡消費", budget_cfg["evidence_spend_field"], ev_known)):
+            if value and value not in pool:
+                print(f"Error: --budget-tracking の {label_} field '{value}' は "
+                      f"このクラスに宣言されていません "
+                      f"(宣言済: {', '.join(sorted(x for x in pool if x)) or 'なし'})",
+                      file=sys.stderr)
+                sys.exit(1)
+        trial["budget_tracking"] = budget_cfg
+
+    if stall_cfg is not None:
+        ev_known = {(f.get("key") or "").strip()
+                    for f in _td.evidence_fields(trial)}
+        field = stall_cfg["evidence_field"]
+        if field not in ev_known:
+            print(f"Error: --stall-signal の証跡 field '{field}' は "
+                  f"このクラスに宣言されていません "
+                  f"(宣言済: {', '.join(sorted(x for x in ev_known if x)) or 'なし'})",
+                  file=sys.stderr)
+            sys.exit(1)
+        # The marker must be one the field can actually hold, else the signal can
+        # never fire and the class would look guarded while being blind.
+        declared = next((f for f in _td.evidence_fields(trial)
+                         if (f.get("key") or "").strip() == field), {})
+        allowed = _td.field_choices(declared)
+        if allowed and stall_cfg["value"] not in allowed:
+            print(f"Error: --stall-signal の値 '{stall_cfg['value']}' は "
+                  f"field '{field}' の選択肢にありません "
+                  f"(選択肢: {' / '.join(allowed)})", file=sys.stderr)
+            sys.exit(1)
+        trial["stall_signal"] = stall_cfg
+
+    desc.clear()
+    desc.update(trial)
+    save_project(data, op={"op": "target_class_update", "kind": kind})
+
+    print(f"target-class 更新: [{kind}] {desc.get('label')}")
+    for arm, pkey, field in pending:
+        where = f"phase '{pkey}'" if pkey else {
+            _td.FIELD_ARM_BASE: "基本",
+            _td.FIELD_ARM_WORK_ITEM: "業務 (work-item)",
+            _td.FIELD_ARM_EVIDENCE: "証跡 (evidence)",
+        }.get(arm, arm)
+        mark = " [必須]" if field.get("required") else ""
+        print(f"  + {where}: {field['key']} "
+              f"({field.get('label') or field['key']}){mark}")
+        if not field.get("required"):
+            continue
+        arm_for_count = (_td.FIELD_ARM_BASE if arm == _td.FIELD_ARM_PHASE
+                         else arm)
+        missing = _td.records_missing_field(data, desc, field["key"],
+                                            arm=arm_for_count)
+        if missing:
+            print(f"    ※ 既存 {missing} 件はこの field を持ちません。"
+                  f"遡って無効にはしません (必須は今後の書き込みにのみ適用)")
+    if stall_cfg is not None:
+        print(f"  + 打ち切りシグナル: 証跡 {stall_cfg['evidence_field']} が "
+              f"「{stall_cfg['value']}」{stall_cfg['threshold']} 回連続で発火")
+    if budget_cfg is not None:
+        print(f"  + 時間予算の追跡: target={budget_cfg['target_budget_field'] or '-'} "
+              f"/ 業務={budget_cfg['work_item_budget_field'] or '-'} "
+              f"/ 証跡={budget_cfg['evidence_spend_field'] or '-'}")
 
 
 def cmd_target_class_list():
