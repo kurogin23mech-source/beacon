@@ -327,6 +327,7 @@ case "${1:-}" in
             create)   shift 2; cmd_target_create "$@" ;;
             advance)  shift 2; cmd_target_advance "$@" ;;
             close)    shift 2; cmd_target_close "$@" ;;
+            purge)    shift 2; cmd_target_purge "$@" ;;
             instances) shift 2; cmd_target_instances "$@" ;;
             work-item) shift 2; cmd_target_work_item "$@" ;;
             evidence)  shift 2; cmd_target_evidence "$@" ;;
@@ -341,6 +342,7 @@ case "${1:-}" in
     create --class <kind> --label <text> [--field key=value ...]
     advance --class <kind> <target-id> [--to <phase>] [--field key=value ...] [--reason <text>]
     close --class <kind> <target-id> [--reason <text>]
+    purge --class <kind> <target-id> --reason <text>   # 物理削除 (移設済みデータの掃除用、--reason 必須)
     instances --class <kind> [--json]
   厚い認知フレーム (WorkItem / Evidence / ball, ms-124):
     work-item add  --class <kind> <target-id> --desc <text> [--field key=value ...]

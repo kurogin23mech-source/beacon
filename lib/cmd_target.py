@@ -977,6 +977,68 @@ def cmd_target_ball():
     print(f"ball 更新: [{target_id}] → {now}")
 
 
+def cmd_target_purge():
+    """Physically remove a data-defined target instance (ms-146 e-5351).
+
+    beacon target purge --class <kind> <target-id> --reason <text>
+
+    ``--reason`` is REQUIRED, mirroring ``entry purge`` / ``milestone purge``:
+    a physical delete is the one operation that leaves nothing behind to explain
+    itself, so the explanation has to be captured at the moment it happens
+    (CORE doc ``data-immutability-principle``).
+
+    Unlike the sales-side ``delete`` verbs — which are soft-cancels that keep the
+    record — this really removes it. That is the point: the motivating case is
+    data that was MIGRATED elsewhere, or personal records living in a tool's own
+    repository, where leaving a tombstone defeats the purpose rather than serving
+    it.
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    target_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    reason = os.environ.get("BEACON_REASON", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not target_id:
+        print("Usage: beacon target purge --class <kind> <target-id> "
+              "--reason <text>", file=sys.stderr)
+        sys.exit(1)
+    if not reason:
+        print("Error: purge には --reason が必須です "
+              "(物理削除は後から理由を辿れる記録が残らないため、"
+              "CORE doc data-immutability-principle が理由の明示を求めています)。",
+              file=sys.stderr)
+        print('  例: beacon target purge --class undertaking ut-1 '
+              '--reason "president-28777a へ移設済み"', file=sys.stderr)
+        sys.exit(1)
+
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    try:
+        removed = _te.purge_target(data, desc, target_id)
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # The audit row carries the id, the class and the REASON — deliberately NOT
+    # a snapshot of the record. Copying a purged target's contents into the
+    # changelog would leave behind exactly what the operator asked to remove.
+    save_project(data, op={"op": "target_purge", "kind": desc.get("kind"),
+                           "target_id": target_id, "reason": reason})
+
+    work_items = len(_te.list_work_items(removed))
+    evidence = len(_te.list_evidence(removed))
+    if json_mode:
+        print(json.dumps({"id": target_id, "kind": desc.get("kind"),
+                          "purged": True, "work_items": work_items,
+                          "evidence": evidence, "reason": reason},
+                         ensure_ascii=False))
+        return
+    print(f"物理削除: [{target_id}] {work_model.target_label(removed)} "
+          f"(class={desc.get('kind')})")
+    print(f"  一緒に消えたもの: 業務 {work_items} 件 / 証跡 {evidence} 件")
+    print(f"  理由: {reason}")
+
+
 def _parse_spec_lines(env_key: str) -> list:
     """Split a newline-joined env value (set by bin/beacon from repeated flags)
     into stripped non-empty lines."""

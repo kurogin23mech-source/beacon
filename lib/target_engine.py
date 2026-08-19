@@ -478,6 +478,36 @@ def add_evidence(data: dict, desc: dict, target_id: str, *, summary: str = "",
     return ev
 
 
+def purge_target(data: dict, desc: dict, target_id: str) -> dict:
+    """PHYSICALLY remove a target record from its collection and return the
+    removed record (ms-146 e-5351). Raises when the id is unknown.
+
+    This is deliberately NOT the same thing as ``close_target`` (which marks the
+    work finished) or the shared soft-cancel (which keeps the record and stamps
+    who / when / why). Both of those exist to preserve the trail, and both are
+    the right default — the ``data-immutability-principle`` CORE doc says a state
+    change must stay auditable.
+
+    Purge exists for the case that principle does not cover: the record should
+    never have lived here at all. Data migrated to another project, or personal
+    records sitting in a tool's own repository, are not made safer by leaving a
+    tombstone — for those, "keep the evidence" is the opposite of the goal. So
+    the trail purge leaves is the operator's REASON (the CLI requires one), not
+    the payload.
+
+    The caller persists; in cloud mode that is the ordinary whole-document write,
+    so the lost-update guard still protects a concurrent edit."""
+    coll = _collection(data, desc)
+    want = (target_id or "").strip()
+    id_field = (desc.get("decomposition") or {}).get("id_field", "id")
+    for i, rec in enumerate(coll):
+        if isinstance(rec, dict) and (rec.get(id_field) or "").strip() == want:
+            return coll.pop(i)
+    raise TargetEngineError(
+        f"target が見つかりません: {target_id} "
+        f"(class={desc.get('kind')})")
+
+
 def set_ball(data: dict, desc: dict, target_id: str, ball: str, *,
              actor: str = "", reason: str = "") -> dict:
     """Set whose court the target's next move is in and record the change on the
