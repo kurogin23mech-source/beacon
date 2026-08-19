@@ -294,7 +294,10 @@ def test_project_target_shape():
                                "evidence_total": 0,
                                # ms-146 e-5339 — empty for a class that declares
                                # no budget / stall tracking (contract does not).
-                               "stop_signals": []}}
+                               "stop_signals": [],
+                               # ms-146 e-5340 — empty unless this target was
+                               # split out of another one mid-work.
+                               "split_from": ""}}
 
 
 # ---------------------------------------------------------------------------

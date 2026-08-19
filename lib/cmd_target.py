@@ -653,6 +653,41 @@ def cmd_target_create():
         print(f"  phase: {phase}")
 
 
+def _print_completion_reference(desc, rec, new_phase) -> None:
+    """Print what the owner committed to earlier, plus how the time budget
+    actually went, before a terminal-phase advance is attempted (ms-146 e-5345).
+
+    Printed BEFORE validation on purpose. The common path is that the first
+    attempt FAILS because the 照合 field is missing — and that failure is exactly
+    the moment the owner needs the line in front of them, so they can write an
+    honest comparison on the retry instead of one from memory."""
+    ref = _te.completion_reference(desc, rec, new_phase)
+    budget = _te.budget_status(desc, rec)
+    if not ref and not budget:
+        return
+    print("■ 照合の材料 (着手時に決めたこと)")
+    for row in ref:
+        print(f"  {row['label']}: {row['value']}")
+    if budget and (budget["target_budget"] or budget["spent_total"]):
+        spent = budget["spent_total"]
+        declared = budget["target_budget"]
+        line = f"  実際にかけた時間: {spent:g}h"
+        if declared:
+            diff = spent - declared
+            if diff > 0:
+                line += f" (予算 {declared:g}h を {diff:g}h 超過)"
+            elif diff < 0:
+                line += f" (予算 {declared:g}h に対し {-diff:g}h 残し)"
+            else:
+                line += f" (予算 {declared:g}h ちょうど)"
+        print(line)
+    print("")
+    # Flush: the very next thing printed is often the "必須 field が必要です"
+    # error on stderr. stdout is block-buffered when piped, so without this the
+    # reference block lands AFTER the error it is supposed to explain.
+    sys.stdout.flush()
+
+
 def cmd_target_advance():
     """Advance a data-defined target to its next (or a named) phase (e-3956).
 
@@ -670,6 +705,14 @@ def cmd_target_advance():
     data = load_project()
     desc = _resolve_descriptor(data, kind)
     fields = _parse_field_pairs()
+    # ms-146 e-5345: when the move being attempted lands on a terminal phase,
+    # put the line drawn at the start on screen FIRST — before the advance is
+    # validated, so it is there whether the attempt succeeds or bounces off a
+    # missing 照合 field. There is no path into a terminal phase that skips this.
+    _target_now = _te.find_target(data, desc, target_id)
+    _intended = (to_phase.strip() or _te.next_phase_after(desc, _target_now))
+    if _target_now is not None and _te.is_terminal_phase(desc, _intended):
+        _print_completion_reference(desc, _target_now, _intended)
     try:
         rec, old, new = _te.advance_target(data, desc, target_id,
                                            to_phase=to_phase, fields=fields,
@@ -782,6 +825,8 @@ def cmd_target_instances():
         ball_str = f" ball:{ball}" if ball else ""
         print(f"  {icon} [{r['id']}] {r['label']}{phase}{counts}{ball_str} — "
               f"{r['status']}")
+        if detail.get("split_from"):
+            print(f"      ← {detail['split_from']} から切り出し")
         if detail.get("next_move"):
             print(f"      次の一手: {detail['next_move']}")
         # ms-146 e-5339 — the reason to consider stopping belongs next to the
@@ -975,6 +1020,44 @@ def cmd_target_ball():
                            "target_id": target_id})
     now = rec.get(_te.BALL_KEY) or "none"
     print(f"ball 更新: [{target_id}] → {now}")
+
+
+def cmd_target_split():
+    """Split an idea that came up mid-work into its own target (ms-146 e-5340).
+
+    beacon target split --class <kind> <origin-id> --label <text>
+                        [--field key=value ...]
+
+    The origin is left completely alone — same phase, same 十分ライン, same work
+    items. Keeping the new thought OUT of what you are already doing is the whole
+    purpose, so this command must never be a way to edit the thing you are
+    working on.
+    """
+    kind = os.environ.get("BEACON_TARGET_CLASS", "").strip()
+    origin_id = os.environ.get("BEACON_TARGET_ID", "").strip()
+    label = os.environ.get("BEACON_LABEL", "").strip()
+    if not origin_id or not label:
+        print("Usage: beacon target split --class <kind> <origin-id> "
+              "--label <text> [--field key=value ...]", file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    desc = _resolve_descriptor(data, kind)
+    try:
+        rec = _te.split_target(data, desc, origin_id, label=label,
+                               fields=_parse_field_pairs(),
+                               actor=_actor_str())
+    except _te.TargetEngineError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"op": "target_split", "kind": desc.get("kind"),
+                           "target_id": rec.get("id"), "origin": origin_id})
+    print(f"切り出し: [{rec.get('id')}] {label}")
+    print(f"  {origin_id} から切り出しました "
+          f"({origin_id} のフェーズ・十分ライン・業務は変えていません)")
+    for f in _td.base_fields(desc):
+        key = (f.get("key") or "").strip()
+        if key and key in rec:
+            print(f"  {f.get('label') or key}: {rec[key]}")
 
 
 def cmd_target_purge():

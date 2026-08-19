@@ -311,6 +311,30 @@ def validate_descriptor(desc: dict) -> list:
                 [f for f in (phase.get("fields") or []) if isinstance(f, dict)],
                 label, where=f"phase '{pkey}'"))
 
+    # ms-146 e-5341 — no phase may be declared AFTER a terminal one.
+    #
+    # This is a shape rule, not a style preference. Beacon's行動原則 is "always
+    # advance the target" (CORE doc 0drGJ9f3UaKO7p0RrKQD), and phases are an
+    # ORDERED ladder, so whatever sits at the top is what the engine tells its
+    # owner to climb toward. A class built to stop over-doing (ms-146) originally
+    # proposed ...→十分やった→プラスアルファやった; that ordering would have made the
+    # mechanism itself recommend the exact behaviour the class exists to curb.
+    # The terminal is the top. Anything done beyond it is a RECORD kept on the
+    # finished target (e.g. an overrun note declared as a terminal-phase field),
+    # never a rung above it. See ms-146 SPEC 設計方針3.
+    _phase_order = [p for p in (desc.get("phases") or []) if isinstance(p, dict)]
+    _terminal_at = [i for i, p in enumerate(_phase_order)
+                    if p.get("terminal") is True]
+    if _terminal_at:
+        _last_terminal = max(_terminal_at)
+        for later in _phase_order[_last_terminal + 1:]:
+            lkey = (later.get("key") or "?").strip() or "?"
+            problems.append(
+                f"[{label}] phase '{lkey}' が終端 phase より後に宣言されています。"
+                f"フェイズは順序付きの梯子なので、終端の上に段を置くと機構が"
+                f"『そこまで登れ』と指示することになります。終端を最後にし、"
+                f"やり過ぎた分は終端 phase の field として記録してください")
+
     # changelog slot (ms-142 e-5255 AX review medium): if declared, it must be
     # {arm: str, recorder: str} with a DESCRIPTOR-SAFE recorder. Surfacing a bad
     # recorder HERE (load time) — rather than letting it degrade to a silent write-time

@@ -168,6 +168,25 @@ cmd_target_close() {
         BEACON_REASON="$reason" python3 "$COMMANDS_PY" target_close
 }
 
+cmd_target_split() {
+    ensure_project
+    local kind="" target_id="" label="" fields="" _pos=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --class)  kind="${2:-}";  shift 2 ;;
+            --label)  label="${2:-}"; shift 2 ;;
+            --field)  fields="${fields}${2:-}"$'\n'; shift 2 ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target split --class <kind> <origin-id> --label <text> [--field key=value ...]" ;;
+            *)        if [[ $_pos -eq 0 ]]; then target_id="$1";
+                      else echo "Error: 余分な引数 '$1' (Usage: beacon target split --class <kind> <origin-id> --label <text>)" >&2; exit 1; fi
+                      _pos=$((_pos+1)); shift ;;
+        esac
+    done
+    BEACON_TARGET_CLASS="$kind" BEACON_TARGET_ID="$target_id" \
+        BEACON_LABEL="$label" BEACON_FIELDS="$fields" \
+        python3 "$COMMANDS_PY" target_split
+}
+
 cmd_target_purge() {
     ensure_project
     local kind="" target_id="" reason="" json=0 _pos=0

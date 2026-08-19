@@ -171,6 +171,22 @@ def current_phase(rec: dict) -> str:
     return (rec.get("phase") or "") if isinstance(rec, dict) else ""
 
 
+def next_phase_after(desc: dict, rec) -> str:
+    """Return the phase a bare ``advance`` (no ``--to``) would move this record
+    into, or ``""`` when there is none. Split out so a caller can know WHERE the
+    move lands before attempting it (ms-146 e-5345 needs that to decide whether
+    to show the completion reference)."""
+    phases = td.phase_keys(desc)
+    if not phases or not isinstance(rec, dict):
+        return ""
+    cur = current_phase(rec) or phases[0]
+    try:
+        idx = phases.index(cur)
+    except ValueError:
+        return ""
+    return phases[idx + 1] if idx + 1 < len(phases) else ""
+
+
 def advance_target(data: dict, desc: dict, target_id: str, *,
                   to_phase: str = "", fields: Optional[dict] = None,
                   actor: str = "", reason: str = "") -> tuple:
@@ -269,6 +285,47 @@ def _apply_phase_fields(desc: dict, rec: dict, new_phase: str,
     # All checks passed — now write.
     for key, val in fields.items():
         rec[key] = val
+
+
+def completion_reference(desc: dict, rec: dict, new_phase: str) -> list:
+    """Return what the owner committed to EARLIER, as ``[{key, label, value}]``,
+    for display when they are about to claim they are finished (ms-146 e-5345).
+
+    WHY: the terminal phase can demand a 照合 (a check against the line drawn at
+    the start), but demanding it while the line itself is off-screen means the
+    person checks against their memory and their mood — which is exactly the
+    faculty the line exists to replace. The gate is only real if the thing being
+    checked against is in front of them at that moment.
+
+    "Earlier" means: the class's base fields, plus the fields of every phase
+    BEFORE ``new_phase`` in declaration order. The fields of the phase being
+    entered are excluded — those are what the owner is writing right now, not what
+    they are being held to. Only keys that actually carry a value are returned, so
+    a class that declares nothing up front simply shows nothing."""
+    out: list = []
+    if not isinstance(rec, dict):
+        return out
+    phases = td.phase_keys(desc)
+    try:
+        stop = phases.index((new_phase or "").strip())
+    except ValueError:
+        stop = len(phases)
+    seen: set = set()
+    candidates = list(td.base_fields(desc))
+    for pkey in phases[:stop]:
+        phase = td.get_phase(desc, pkey) or {}
+        candidates.extend(f for f in (phase.get("fields") or [])
+                          if isinstance(f, dict))
+    for f in candidates:
+        key = (f.get("key") or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        val = rec.get(key)
+        if val in (None, "") and val not in (0, False):
+            continue
+        out.append({"key": key, "label": f.get("label") or key, "value": val})
+    return out
 
 
 def is_terminal_phase(desc: dict, phase_key: str) -> bool:
@@ -476,6 +533,47 @@ def add_evidence(data: dict, desc: dict, target_id: str, *, summary: str = "",
                         what="Evidence", kind=desc.get("kind", ""))
     rec.setdefault(EVIDENCE_KEY, []).append(ev)
     return ev
+
+
+SPLIT_FROM_KEY = "split_from"
+
+
+def split_target(data: dict, desc: dict, origin_id: str, *, label: str,
+                 fields=None, actor: str = "", at: str = "") -> dict:
+    """Create a NEW target of the same class from an idea that came up while
+    working on ``origin_id``, and return it (ms-146 e-5340).
+
+    WHY this is its own verb rather than "just create another target": the
+    failure it prevents is scope creep, and scope creep does not happen because
+    people cannot type ``target create`` — it happens because, mid-work, adding
+    the new thought to what you are already doing is the path of least
+    resistance. So the alternative has to be cheaper than the mistake. This copies
+    the origin's base field values (a thought that arrives while serving an
+    objective almost always serves the same one), so the whole move is one
+    command with a label — and the thought gets kept rather than either swallowed
+    or dropped.
+
+    The origin is READ, never written: its phase, its 十分ライン and its work
+    items are untouched. That is the point — the line you drew at the start has to
+    survive the idea that arrived after it.
+
+    ``fields`` overrides any inherited value and may set the new target's own."""
+    origin = find_target(data, desc, origin_id)
+    if origin is None:
+        raise TargetEngineError(f"target が見つかりません: {origin_id}")
+    inherited = {}
+    for f in td.base_fields(desc):
+        key = (f.get("key") or "").strip()
+        if not key:
+            continue
+        val = origin.get(key)
+        if val not in (None, "") or val in (0, False):
+            inherited[key] = val
+    inherited.update(fields or {})
+    rec = create_target(data, desc, label=label, fields=inherited, actor=actor,
+                        at=at)
+    rec[SPLIT_FROM_KEY] = origin.get("id", origin_id)
+    return rec
 
 
 def purge_target(data: dict, desc: dict, target_id: str) -> dict:
@@ -771,5 +869,8 @@ def project_target(desc: dict, rec: dict) -> dict:
             # (status / instances / a future Web UI) reads ONE shape instead of
             # each one re-deriving the arithmetic.
             "stop_signals": stop_signals(desc, rec),
+            # ms-146 e-5340 — where this target came from, when it was split out
+            # of another mid-work. Empty for an ordinary target.
+            "split_from": rec.get(SPLIT_FROM_KEY, ""),
         },
     }

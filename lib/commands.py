@@ -416,6 +416,7 @@ from cmd_target import (  # noqa: F401
     cmd_target_class_add,
     cmd_target_class_update,
     cmd_target_purge,
+    cmd_target_split,
     cmd_target_class_list,
 )
 
@@ -10157,6 +10158,7 @@ if __name__ == "__main__":
         "target_class_add": cmd_target_class_add,  # ms-124 e-4091
         "target_class_update": cmd_target_class_update,  # ms-146 e-5346
         "target_purge": cmd_target_purge,  # ms-146 e-5351
+        "target_split": cmd_target_split,  # ms-146 e-5340
         "target_class_list": cmd_target_class_list,  # ms-124 e-4091
         "review_context": cmd_review_context,
         "review_batch_context": cmd_review_batch_context,  # ms-119 e-4125
