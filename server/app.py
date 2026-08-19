@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 import uuid
 from typing import List, Optional
@@ -462,6 +463,106 @@ def _verify_cognito_token(token: str) -> dict:
         raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
 
 
+# ms-145 / e-5316: Google 公開鍵 (証明書) 取得のタイムアウト & プロセス内キャッシュ。
+#
+# 本番インシデント (2026-08): id_token.verify_oauth2_token() は認証リクエストの
+# たびに https://www.googleapis.com/oauth2/v1/certs を取りに行く。google-auth の
+# 証明書 fetch に渡るタイムアウトはバージョン依存で、古い版では実質「無限待ち」に
+# なりうる。googleapis 側の TLS 不調でこの fetch がハングすると、1 本のリクエストが
+# 数時間滞留し (実測 elapsed_ms ≒ 3.6h)、単一ワーカーの本番プロセスが飢えて 502 で
+# 突然死した。再起動で復旧するが根治にならない。
+#
+# 構造で閉じる (お願いでなく物理的に不可能にする):
+#   1) 証明書取得に必ず有界タイムアウトを課す (ライブラリ既定に頼らず自前で明示)。
+#   2) 取得済み証明書を TTL 付きでプロセス内キャッシュし、hot path から
+#      ネットワーク往復そのものを消す (Google の署名鍵は日次ローテなので 1h TTL は安全)。
+#   3) fetch が失敗しても有効なキャッシュがあれば stale-serve でしのぐ (可用性優先)。
+_GOOGLE_CERTS_TIMEOUT = float(os.environ.get("BEACON_GOOGLE_CERTS_TIMEOUT", "5"))
+_GOOGLE_CERTS_TTL = float(os.environ.get("BEACON_GOOGLE_CERTS_TTL", "3600"))
+_google_certs_cache: dict = {"certs": None, "fetched_at": 0.0}
+_google_certs_lock = threading.Lock()
+
+
+def _fetch_google_certs(force: bool = False) -> dict:
+    """Google の OAuth2 証明書を有界タイムアウト + TTL キャッシュで取得する。
+
+    ``force=True`` は TTL を無視して強制再取得する (鍵ローテ直後に kid 不一致で
+    検証失敗した時の 1 回リトライ用)。fetch 失敗時は有効なキャッシュがあれば
+    stale-serve し、無ければ 503 を上げる (ハングでなく即座に失敗させる)。
+    """
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token as _gid
+
+    cache = _google_certs_cache
+    now = time.monotonic()
+    if (
+        not force
+        and cache["certs"] is not None
+        and (now - cache["fetched_at"]) < _GOOGLE_CERTS_TTL
+    ):
+        return cache["certs"]
+
+    with _google_certs_lock:
+        # ロック取得後に再チェック (別スレッドが fetch 済みなら往復を省く)。
+        now = time.monotonic()
+        if (
+            not force
+            and cache["certs"] is not None
+            and (now - cache["fetched_at"]) < _GOOGLE_CERTS_TTL
+        ):
+            return cache["certs"]
+
+        request = google_requests.Request()
+        try:
+            response = request(
+                _gid._GOOGLE_OAUTH2_CERTS_URL,
+                method="GET",
+                timeout=_GOOGLE_CERTS_TIMEOUT,
+            )
+        except Exception as e:  # noqa: BLE001 - どんな transport 例外もハングにしない
+            if cache["certs"] is not None:
+                return cache["certs"]
+            raise HTTPException(
+                status_code=503, detail=f"Could not fetch Google certs: {e}"
+            )
+        if response.status != 200:
+            if cache["certs"] is not None:
+                return cache["certs"]
+            raise HTTPException(
+                status_code=503,
+                detail=f"Could not fetch Google certs: HTTP {response.status}",
+            )
+        certs = json.loads(response.data.decode("utf-8"))
+        cache["certs"] = certs
+        cache["fetched_at"] = time.monotonic()
+        return certs
+
+
+def _verify_google_id_token(token: str) -> dict:
+    """Google ID token をキャッシュ済み証明書で検証する。
+
+    ``id_token.verify_oauth2_token`` の挙動 (証明書 fetch → jwt.decode → issuer
+    チェック) を再現しつつ、証明書取得だけを ``_fetch_google_certs`` に置き換えて
+    タイムアウト & キャッシュを効かせる。検証失敗は 401、証明書取得失敗は 503。
+    """
+    from google.auth import jwt as google_jwt
+    from google.oauth2 import id_token as _gid
+
+    certs = _fetch_google_certs()
+    try:
+        claims = google_jwt.decode(token, certs=certs, audience=None)
+    except ValueError:
+        # kid 不一致 = 鍵ローテ直後の可能性。証明書を強制更新して 1 回だけ再試行。
+        certs = _fetch_google_certs(force=True)
+        try:
+            claims = google_jwt.decode(token, certs=certs, audience=None)
+        except ValueError as e:
+            raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+    if claims.get("iss") not in _gid._GOOGLE_ISSUERS:
+        raise HTTPException(status_code=401, detail="Invalid token: wrong issuer")
+    return claims
+
+
 def _verify_id_token(token: str) -> dict:
     """Verify a bearer token (CLI / Google ID / Cognito JWT) and return claims.
 
@@ -477,17 +578,10 @@ def _verify_id_token(token: str) -> dict:
         return claims
     if _AUTH_PROVIDER == "cognito":
         return _verify_cognito_token(token)
-    # Fall back to Google ID token verification (= Cloud Run 既存経路)
-    from google.oauth2 import id_token
-    from google.auth.transport import requests as google_requests
-
-    try:
-        claims = id_token.verify_oauth2_token(
-            token, google_requests.Request()
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
-    return claims
+    # Fall back to Google ID token verification (= Cloud Run 既存経路)。
+    # ms-145 / e-5316: 証明書取得を有界タイムアウト + キャッシュ経路に置き換え、
+    # googleapis のハングで本番プロセスが飢える経路を構造的に断つ。
+    return _verify_google_id_token(token)
 
 
 # ms-113 / e-3731: personal org (= 個人組織) の lazy ensure。
