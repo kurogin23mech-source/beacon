@@ -331,7 +331,7 @@ cmd_target_class_update() {
     # Destructive intents are captured so the python layer can refuse them BY
     # NAME with the reason (ms-146 e-5346) — an "unknown flag" error would leave
     # the author unable to tell "missing" from "deliberately forbidden".
-    local rm_fields="" rn_fields="" budget="" stall=""
+    local rm_fields="" rn_fields="" budget="" stall="" profession=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --kind|--class)             kind="${2:-}"; shift 2 ;;
@@ -347,6 +347,7 @@ cmd_target_class_update() {
             --rename-field)             rn_fields="${rn_fields}${2:-}"$'\n'; shift 2 ;;
             --budget-tracking)          budget="${2:-}"; shift 2 ;;
             --stall-signal)             stall="${2:-}"; shift 2 ;;
+            --profession)               profession="${2:-}"; shift 2 ;;
             -?*)                        _guard_positional "$1" "Usage: beacon target-class update --kind <k> [--field key:label:type ...] [--phase-field <phase>:key:label:type ...] [--work-item-field ...] [--evidence-field ...]" ;;
             *)                          echo "Error: 余分な引数 '$1' — target-class update はフラグで指定します (--kind <k> --field ...)" >&2; exit 1 ;;
         esac
@@ -363,6 +364,7 @@ cmd_target_class_update() {
         BEACON_TC_RENAME_FIELDS="$rn_fields" \
         BEACON_TC_BUDGET_TRACKING="$budget" \
         BEACON_TC_STALL_SIGNAL="$stall" \
+        BEACON_TC_PROFESSION="$profession" \
         python3 "$COMMANDS_PY" target_class_update
 }
 

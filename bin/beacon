@@ -365,8 +365,10 @@ case "${1:-}" in
         [--phase key:label ...] [--terminal-phase key:label ...]
         [--work-item-field key:label:type ...] [--required-work-item-field ...]
         [--evidence-field key:label:type ...] [--required-evidence-field ...]
-    add --stdin        # 記述子全体を JSON で stdin から渡す
+    add --stdin [--profession <p>]   # 記述子全体を JSON で stdin から渡す
+                       # --profession はファイルの職種を上書き (共有ファイルの取り込み用)
     update --kind <k>  # 宣言済みクラスに field を足す (追加のみ / 削除・改名は不可)
+        [--profession <p>]   # このクラスを持つ職種を直す (共有ファイルを別職種で使うとき)
         [--field key:label:type ...] [--required-field ...]
         [--phase-field <phase>:key:label:type ...] [--required-phase-field ...]
         [--work-item-field ...] [--required-work-item-field ...]
