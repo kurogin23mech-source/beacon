@@ -305,6 +305,58 @@ app.add_middleware(RateLimitMiddleware)
 
 
 # ---------------------------------------------------------------------------
+# Request-wide timeout (ms-145 / e-5317)
+# ---------------------------------------------------------------------------
+# 本番インシデント (2026-08): 認証時の外部依存ハングで 1 本のリクエストが約 3.6h
+# 滞留し、単一ワーカーの本番プロセスが飢えて 502 で突然死した。個別の外部呼び出しに
+# タイムアウトを入れる (e-5316 の証明書取得など) のが一次防御だが、「どこか 1 箇所で
+# も timeout を入れ忘れたら数時間ハングしうる」状態は残る。ここでは HTTP リクエスト
+# 全体に上限時間を課し、"数時間かかるリクエスト" を機構として物理的に不可能にする
+# (= 多層防御の外殻)。上限超過は 504 Gateway Timeout で即座に閉じる。
+#
+# 限界の明示 (誠実に): asyncio.wait_for はコルーチンをキャンセルするので、await
+# 点を持つ非同期経路は確実に打ち切れる。ただしワーカースレッド上で回る完全同期の
+# ブロッキング呼び出し (timeout 無しの同期 I/O 等) は、504 を返してもスレッド自体は
+# 解放されないことがある。だからこそ個別呼び出し側の timeout (e-5316) が一次防御で、
+# 本 middleware はその取りこぼしを塞ぐ二次防御という位置づけ。
+#
+# WebSocket (= /ws/ の idle-wake 接続) は BaseHTTPMiddleware が http scope 以外を
+# 素通しするため、この timeout の対象外 (長時間接続を壊さない)。
+_REQUEST_TIMEOUT = float(os.environ.get("BEACON_REQUEST_TIMEOUT_S", "30"))
+
+
+class RequestTimeoutMiddleware(BaseHTTPMiddleware):
+    """Cap every HTTP request at a wall-clock ceiling, returning 504 on overrun.
+
+    ``BEACON_REQUEST_TIMEOUT_S <= 0`` で無効化できる (= opt-out)。
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if _REQUEST_TIMEOUT <= 0:
+            return await call_next(request)
+        try:
+            return await asyncio.wait_for(
+                call_next(request), timeout=_REQUEST_TIMEOUT
+            )
+        except asyncio.TimeoutError:
+            _server_logger.warning(
+                "Request timed out after %.1fs: method=%s path=%s",
+                _REQUEST_TIMEOUT,
+                request.method,
+                request.url.path,
+            )
+            return JSONResponse(
+                status_code=504,
+                content={"detail": "Request timed out"},
+            )
+
+
+# Added last so it is the outermost middleware: it wraps rate-limit, audit,
+# CORS, and the handler, guaranteeing the whole request is bounded in time.
+app.add_middleware(RequestTimeoutMiddleware)
+
+
+# ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
 
