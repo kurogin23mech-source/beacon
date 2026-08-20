@@ -432,6 +432,42 @@ def get_project(project_id: str) -> dict | None:
     return _get("projects", project_id)
 
 
+# 2026-08-20 本番停止の修正。心拍 (PUT /api/projects/{pid}/sessions/{sid}) は
+# _load_meta_only → operations.load_project_meta_only → get_project と辿り、
+# owner / members を読むためだけに ~8MB の JSON blob を SELECT + parse していた
+# (認可判定 server/app.py:_get_role が見るのはこの 2 フィールドのみ)。CPython は
+# 断片化した arena を OS に返さないため RSS が cgroup 上限まで上がり続け、ホストが
+# swap を食い潰して 502 に至った。同症状の ms-98 (e-3836) 対策は Firestore の
+# milestones subcollection stream を避けるものだけで、文書を 1 行で持つ MySQL
+# backend (ms-96 e-2378) では無言で無効だった。これがその MySQL 版。
+_PROJECT_HEAVY_PATHS = (
+    "$.milestones", "$.pushes", "$.deployments", "$.releases",
+    "$.operations", "$.undertakings", "$.worktree_sessions", "$.invitations",
+)
+
+
+def get_project_meta(project_id: str) -> dict | None:
+    """重い配列を MySQL 側で落としてから返す project の meta 読み取り。
+
+    whitelist ではなく blacklist (JSON_REMOVE) にしてあるのは、この経路を使う
+    他の高頻度 endpoint (bus/unread、カーソル前進、session intent、per-event
+    ack) が meta の別フィールドを読んでいても壊さないため。``milestones`` は
+    呼び出し側 (load_project_meta_only) が [] に潰す契約なので落として問題ない。
+    """
+    paths = ", ".join(f"'{_p}'" for _p in _PROJECT_HEAVY_PATHS)
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT JSON_REMOVE(data, {paths}) AS data "
+            f"FROM `{_table_name('projects')}` WHERE pk=%s AND sk=%s",
+            (project_id, ""),
+        )
+        row = cur.fetchone()
+    if not row or row.get("data") is None:
+        return None
+    return json.loads(row["data"])
+
+
 def save_project(project_id: str, data: dict) -> None:
     # PK は project_id。data 側に同名キーが含まれていても上書きされるだけで害は無い。
     item = {**data, "project_id": project_id}
