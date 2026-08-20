@@ -49,6 +49,72 @@ def _parse_dt(value) -> Optional[datetime.datetime]:
     return dt.astimezone(datetime.timezone.utc)
 
 
+# --- 失敗時の後退 (2026-08-20 本番停止の再発防止) ------------------------------
+#
+# 発火に失敗した対象は last_fired_at が進まないため「期限到来」のまま残り、
+# 次の tick でまた同じ失敗をする。実際に trek_id を持たない Trek 3 件が 44 日間
+# (= 6 万回以上) 毎分失敗し続け、そのたびにバスへ通知を書いた結果、bus は
+# 98,943 件 / 72MB まで肥大し、それを毎秒読み直す経路と噛み合って本番が停止した。
+#
+# 対処は「失敗も記録して、失敗するほど間隔を広げる」。一時的な障害 (ネットが一瞬
+# 切れた等) は放っておけば復帰し、壊れているものは自然に静かになる。上限を置くの
+# は、いつまでも間隔が伸びて事実上の永久停止になるのを避けるため。
+FAILURE_BACKOFF_CAP_MINUTES = 60
+
+
+def _backoff_minutes(failures: int) -> int:
+    """連続失敗 n 回に対する待ち時間 (分)。1, 2, 4, 8 ... 上限 60。"""
+    if failures <= 0:
+        return 0
+    return min(2 ** (failures - 1), FAILURE_BACKOFF_CAP_MINUTES)
+
+
+def failure_backoff_active(meta: dict, now, *, key: str = "fire") -> bool:
+    """直前の失敗から、まだ待ち時間が明けていないなら True (= 今回は発火しない)。
+
+    ``meta`` は対象の meta dict。``key`` を分けることで、同じ対象でも用途ごとに
+    (進捗チェック / エスカレーション / Operation 実行) 独立した回数を持てる。
+    記録が無い・壊れているときは False (= 従来どおり発火) に倒し、この仕組みが
+    原因で発火が止まることを避ける。
+    """
+    meta = meta or {}
+    failures = 0
+    try:
+        failures = int(meta.get(f"{key}_failures") or 0)
+    except (TypeError, ValueError):
+        return False
+    if failures <= 0:
+        return False
+    last = _parse_dt(meta.get(f"{key}_last_failed_at"))
+    if last is None:
+        return False
+    now_dt = now if isinstance(now, datetime.datetime) else _parse_dt(now)
+    if now_dt is None:
+        return False
+    if now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=datetime.timezone.utc)
+    wait = datetime.timedelta(minutes=_backoff_minutes(failures))
+    return now_dt < last + wait
+
+
+def record_failure(meta: dict, now_iso: str, *, key: str = "fire") -> int:
+    """失敗を 1 回数え、次に待つ起点の時刻を刻む。連続失敗回数を返す。"""
+    try:
+        failures = int(meta.get(f"{key}_failures") or 0)
+    except (TypeError, ValueError):
+        failures = 0
+    failures += 1
+    meta[f"{key}_failures"] = failures
+    meta[f"{key}_last_failed_at"] = now_iso
+    return failures
+
+
+def clear_failure(meta: dict, *, key: str = "fire") -> None:
+    """発火に成功したら失敗の記録を消す (次の失敗は 1 回目から数え直す)。"""
+    meta.pop(f"{key}_failures", None)
+    meta.pop(f"{key}_last_failed_at", None)
+
+
 def cadence_minutes(descriptor: dict,
                     default: int = DEFAULT_CADENCE_MINUTES) -> int:
     """The descriptor's effective cadence in minutes (non-positive / unparseable

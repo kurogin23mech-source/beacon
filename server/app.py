@@ -2660,16 +2660,27 @@ def _post_trek_notify_escalation(trek_id, trek_doc, *, payload, action,
     failures (no scope / save / notify) are recorded in ``errors`` — never
     silently swallowed. Returns ``{project_id, event_id}`` or None.
     """
+    # 2026-08-20 / e-5366 — 失敗が続く対象は待ち時間を空ける。scope 無しは冷却の
+    # stamp より前に return するため、後退が無いと毎 tick 同じ失敗を繰り返す。
+    meta = trek_doc.setdefault("meta", {})
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    if tick_scheduler.failure_backoff_active(meta, now, key=meta_key):
+        return None
     scope_project_ids = _resolve_trek_scope_project_ids(trek_doc)
     if not scope_project_ids:
+        fails = tick_scheduler.record_failure(meta, now_iso, key=meta_key)
+        try:
+            db.save_trek(trek_id, trek_doc)
+        except Exception:
+            pass
         errors.append({"trek_id": trek_id, "error": "no_scope_project",
-                       "escalation": action})
+                       "escalation": action, "consecutive_failures": fails})
         return None
     target_project_id = scope_project_ids[0]
-    now_iso = now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     # Reserve the cooldown first (stamp + save), so a save failure aborts before
     # any notification goes out.
-    trek_doc.setdefault("meta", {})[meta_key] = now_iso
+    tick_scheduler.clear_failure(meta, key=meta_key)
+    meta[meta_key] = now_iso
     trek_doc["updated_at"] = trek_mod.utcnow_iso()
     try:
         db.save_trek(trek_id, trek_doc)
@@ -2698,8 +2709,13 @@ def _post_trek_notify_escalation(trek_id, trek_doc, *, payload, action,
     try:
         event_id = db.append_bus_event(target_project_id, bus_data)
     except Exception:
+        fails = tick_scheduler.record_failure(meta, now_iso, key=meta_key)
+        try:
+            db.save_trek(trek_id, trek_doc)
+        except Exception:
+            pass
         errors.append({"trek_id": trek_id, "error": "escalation_notify_failed",
-                       "escalation": action})
+                       "escalation": action, "consecutive_failures": fails})
         return None
     return {"project_id": target_project_id, "event_id": event_id}
 
@@ -2783,6 +2799,19 @@ def trek_scheduler_tick_endpoint(
                            if t.get("trek_id") in wanted]
     candidate_treks = [t for t in candidate_treks
                        if t.get("status") == "active"]
+    # 2026-08-20 本番停止の再発防止。id を持たない trek を発火対象に通すと、
+    # save_trek("") が pk 空文字の 1 行に全員分を書き込み、冷却の記録が互いを
+    # 上書きして「毎分失敗し続ける」状態になる (44 日間で bus に 98,943 件が
+    # 積もり本番が停止した)。id が無いものは発火させず、握り潰さずに応答へ出す。
+    skipped_no_id = [
+        {"pk_hint": t.get("name") or t.get("title") or "",
+         "status": t.get("status", ""),
+         "reason": "trek_id_missing"}
+        for t in candidate_treks if not (t.get("trek_id") or "").strip()
+    ]
+    if skipped_no_id:
+        candidate_treks = [t for t in candidate_treks
+                           if (t.get("trek_id") or "").strip()]
     # ms-97 / e-2612 (AC32) — explicit halt accounting. ``is_trek_due``
     # already filters halted treks out of the due set (= the cadence
     # decision returns False when halt is set, see lib.trek_scheduler),
@@ -4065,6 +4094,8 @@ def trek_scheduler_tick_endpoint(
         # so observers can tell "leader pulled the cord" apart from
         # "work is genuinely done".
         "halted": halted,
+        # 2026-08-20: id を持たず発火対象から外した trek。空なら健全。
+        "skipped_no_id": skipped_no_id,
         # ms-107 e-3434 chunk 3b — scheduled things fired on this tick.
         "scheduled_fires": scheduled_fires,
     }
@@ -4313,10 +4344,22 @@ def _fire_due_scheduled(now_iso: str) -> list:
         for op in (project.get("operations", []) or []):
             if not tick_scheduler.is_due(_operation_schedule_descriptor(op), now_iso):
                 continue
+            # 2026-08-20 / e-5366 — 直前に失敗しているなら待ち時間が明けるまで
+            # 試さない。失敗が状態を進めないと「期限到来」のまま毎分同じ失敗を
+            # 繰り返す (44 日間 6 万回空回りして本番を落とした形)。
+            _op_meta = op.setdefault("meta", {})
+            if tick_scheduler.failure_backoff_active(_op_meta, now_iso):
+                continue
             result = _fire_operation(pid, project, op, now_iso)
             report.append(result)
             if result.get("fired"):
-                op.setdefault("meta", {})["last_fired_at"] = now_iso
+                _op_meta["last_fired_at"] = now_iso
+                tick_scheduler.clear_failure(_op_meta)
+                changed = True
+            else:
+                # 失敗も必ず刻む (刻まないと次の tick でまた来る)。
+                result["consecutive_failures"] = tick_scheduler.record_failure(
+                    _op_meta, now_iso)
                 changed = True
         # --- source: deadline reminders (ms-139 e-4953) — 締切超過の work item を
         #     claim 者セッションへ 1 回 DM。Operations と同じ tick に相乗りする。 ---

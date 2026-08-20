@@ -1104,7 +1104,8 @@ def get_or_create_user(user_id: str, email: str) -> dict:
 
 def list_users() -> list[dict]:
     # 各 dict は user_id を含む (= put 時に Item へ含めているため)。
-    return _scan("users")
+    # treks と同じ移行由来の id 欠落 (実測 5 件)。同上。
+    return _scan("users", id_field="user_id")
 
 
 def update_user(user_id: str, updates: dict) -> bool:
@@ -1128,7 +1129,8 @@ def delete_user(user_id: str) -> bool:
 
 def find_user_by_email(email: str) -> tuple[str, dict] | None:
     # v1 では専用 index を作らず全 scan + in-memory filter で代用 (= dynamodb 同挙動)。
-    items = [it for it in _scan("users") if it.get("email") == email]
+    items = [it for it in _scan("users", id_field="user_id")
+             if it.get("email") == email]
     if not items:
         return None
     user = items[0]
@@ -2107,7 +2109,12 @@ def list_treks(actor_id: str | None = None, *,
                status: str | None = None,
                include_archived: bool = False) -> list[dict]:
     """List treks. See firestore_client.list_treks for semantics."""
-    items = _scan("treks")
+    # 2026-08-20 本番停止の直接原因。_scan の docstring が「同種の潜在バグは
+    # users / treks / organizations にもある」と予告していたそのもの。Firestore
+    # から移行した trek 行は data に trek_id を持たないため、ここが空文字の
+    # trek を返し、tick の escalation が save_trek("") で pk 空文字の行に書き
+    # 込み続けた (実測 18 件中 15 件が欠落)。PK を真値として stamp する。
+    items = _scan("treks", id_field="trek_id")
     result: list[dict] = []
     for item in items:
         if not include_archived and item.get("status") == "archived":
