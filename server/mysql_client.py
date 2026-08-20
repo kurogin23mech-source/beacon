@@ -526,6 +526,36 @@ def list_projects(user_id: str | None = None,
     return result
 
 
+# 2026-08-20 / e-5367 — 毎分の tick が読むべき project を SQL 側で絞る。
+# 従来 _fire_due_scheduled は list_all_projects → 各 project に get_project を掛け、
+# 全 project の文書を丸ごとメモリへ展開していた (本番実測 75 件。コード内のコメント
+# 自身が "Scale note: iterates all projects each tick — fine at dogfood scale" と
+# 認めていた)。締切も server_tick 付き Operation も持たない project は読む意味が無い。
+#
+# 判定は「入れ子のどこかに締切キーがあるか」「server_tick 付き Operation があるか」。
+# $** は再帰探索なので取りこぼさず、余分に含む方向にだけ誤る (= 発火が黙って止まる
+# 事故を作らない安全側)。本番実測で 75 件 → 20 件。
+_TICK_CANDIDATE_PATHS = (
+    "$**.deadline",                        # 汎用の締切 (task / activity)
+    "$**.target_date",                     # dev milestone の legacy 締切
+    "$.operations[*].meta.server_tick",    # server-tick を opt-in した Operation
+)
+
+
+def list_tick_candidate_project_ids() -> list[str]:
+    """発火対象を持ちうる project の id だけを返す (毎分の tick 用)。"""
+    placeholders = ", ".join(["%s"] * len(_TICK_CANDIDATE_PATHS))
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT pk FROM `{_table_name('projects')}` "
+            f"WHERE sk=%s AND JSON_CONTAINS_PATH(data, 'one', {placeholders})",
+            ("",) + _TICK_CANDIDATE_PATHS,
+        )
+        rows = cur.fetchall()
+    return [r["pk"] for r in rows if r.get("pk")]
+
+
 def list_all_projects() -> list[dict]:
     items = _scan("projects", id_field="project_id")
     return [
