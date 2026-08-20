@@ -1661,15 +1661,35 @@ def list_bus_events(project_id: str, since: str = "", channel: str = "",
       - channel: equality filter
       - limit: 結果件数の上限
     """
-    items = _query("bus_events", project_id)
+    # 2026-08-20 本番停止の主因。以前はここで _query が project の bus_events を
+    # **全件** Python に読み込み、そのあとで since / channel / limit を適用していた。
+    # beacon-b95643 は 98,943 件 / 72MB あり、bus ポーリング (実測 毎秒約1回) の
+    # たびに全件 json.loads するため 1 回で数百 MB を確保していた。CPython は断片化
+    # した arena を OS に返さないので RSS が cgroup 上限に張り付き、OOM ループに
+    # 陥った。since はまさに「新着だけ取る」ためのカーソルなので、絞り込み・整列・
+    # 件数制限を SQL に押し下げる。MySQL は pk で絞った範囲を C で走査し、Python に
+    # 渡るのは limit 件だけになる。返り値の形は _query と等価 (stamp 等はしない)。
+    where = ["pk=%s"]
+    params: list = [project_id]
     if since:
-        items = [it for it in items if it.get("created_at", "") > since]
+        where.append("JSON_UNQUOTE(JSON_EXTRACT(data, '$.created_at')) > %s")
+        params.append(since)
     if channel:
-        items = [it for it in items if it.get("channel") == channel]
-    items.sort(key=lambda it: it.get("created_at", ""))
+        where.append("JSON_UNQUOTE(JSON_EXTRACT(data, '$.channel')) = %s")
+        params.append(channel)
+    sql = (
+        f"SELECT data FROM `{_table_name('bus_events')}` "
+        f"WHERE {' AND '.join(where)} "
+        f"ORDER BY JSON_UNQUOTE(JSON_EXTRACT(data, '$.created_at'))"
+    )
     if limit:
-        items = items[:limit]
-    return items
+        sql += " LIMIT %s"
+        params.append(int(limit))
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute(sql, tuple(params))
+        rows = cur.fetchall()
+    return [json.loads(r["data"]) for r in rows]
 
 
 # ---------------------------------------------------------------------------
