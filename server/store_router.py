@@ -182,6 +182,7 @@ elif _BACKEND == "mysql":
         append_bus_audit,
         list_bus_audit,
         list_bus_events,
+        find_bus_event_by_client_id,
         # Bus event approvals sidecar (ms-70 / e-1712, e-1713 dispatcher gate)
         get_bus_event_approval,
         put_bus_event_approval,

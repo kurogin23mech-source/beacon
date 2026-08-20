@@ -22,6 +22,7 @@ Two halves are pinned here:
 from __future__ import annotations
 
 import copy
+import datetime
 import os
 import sys
 
@@ -65,10 +66,22 @@ def _mock_append_bus_event(project_id: str, data: dict) -> str:
 
 def _mock_list_bus_events(project_id: str, since: str = "", channel: str = "",
                           limit: int = 100) -> list[dict]:
+    """本物と同じ契約: since より後を **古い順** に並べ、先頭 limit 件を返す。
+
+    2026-08-20 / e-5369 — 以前このダブルは rows[-limit:] (= 新しい方から limit 件)
+    を返しており、実装 (古い順に先頭 limit 件) と逆だった。そのため「dedup が最古
+    100 件しか見ていない」という本番の実バグをテストが素通りさせていた。契約を
+    取り違えたダブルは、テストが緑であることの意味を消す。
+    """
     rows = _bus_store.get(project_id, [])
+    if since:
+        rows = [r for r in rows if str(r.get("created_at") or "") > since]
     if channel:
         rows = [r for r in rows if r.get("channel") == channel]
-    return copy.deepcopy(rows[-limit:])
+    rows = sorted(rows, key=lambda r: str(r.get("created_at") or ""))
+    if limit:
+        rows = rows[:limit]
+    return copy.deepcopy(rows)
 
 
 class _FakeVerify:
@@ -186,6 +199,40 @@ def test_non_retry_duplicate_key_is_not_deduped(wired):
     _post(wired, client_event_id="ce-3")
     _post(wired, client_event_id="ce-3")   # is_retry=False
     assert len(_bus_store[PROJECT_ID]) == 2
+
+
+def test_履歴が1万件あっても再送の元メッセージを見つけられる(wired):
+    """e-5369 の回帰テスト。
+
+    実装 list_bus_events の契約は「古い順に先頭 limit 件」。従来 dedup はこれを
+    since 無しで呼んでいたため、見ていたのは最新ではなく **最古** の 100 件だった。
+    本番 beacon-b95643 では最古 100 件に含まれる最新の created_at が 2026-06-09、
+    実際の最新は 2026-08-20 で、2 ヶ月半にわたり重複チェックが当たっていなかった。
+
+    件数が少ないと最古 100 件と最新 100 件が一致するため、既存テスト (イベント 1〜2
+    件) では永久に検出できない。ここでは古い履歴を 1 万件積んでから再送する。
+    """
+    base = datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)
+    _bus_store[PROJECT_ID] = [
+        {"event_id": f"old-{i:06d}", "channel": "dm",
+         "created_at": (base + datetime.timedelta(seconds=i)).strftime(
+             "%Y-%m-%dT%H:%M:%S.%fZ"),
+         "payload": {"text": "old"}}
+        for i in range(10_000)
+    ]
+
+    first = _post(wired, client_event_id="ce-scale", text="only once")
+    assert first.status_code == 200, first.text
+    first_id = first.json()["event_id"]
+    assert len(_bus_store[PROJECT_ID]) == 10_001
+
+    retry = _post(wired, client_event_id="ce-scale", is_retry=True,
+                  text="only once")
+    assert retry.status_code == 200, retry.text
+    body = retry.json()
+    assert body["idempotent_replay"] is True, "1万件の履歴の陰で元メッセージを見失った"
+    assert body["event_id"] == first_id
+    assert len(_bus_store[PROJECT_ID]) == 10_001, "二重送信された"
 
 
 # ---------------------------------------------------------------------------
