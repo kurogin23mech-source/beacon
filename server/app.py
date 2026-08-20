@@ -4325,12 +4325,26 @@ def _fire_due_scheduled(now_iso: str) -> list:
     each tick — fine at dogfood scale; a project-level index of "has a
     server-tick schedulable" is the follow-up when project count grows."""
     report: list = []
-    try:
-        projects = db.list_all_projects()
-    except Exception as exc:  # pragma: no cover
-        return [{"error": f"list_all_projects: {type(exc).__name__}: {exc}"}]
-    for proj_meta in (projects or []):
-        pid = proj_meta.get("project_id") or proj_meta.get("id") or ""
+    # 2026-08-20 / e-5367 — 発火対象を持ちうる project だけを読む。従来は毎分
+    # 全 project の文書を丸ごとメモリへ展開しており (本番実測 75 件)、締切も
+    # server_tick 付き Operation も持たない project まで読んでいた。絞り込みを
+    # 持たない backend / 絞り込みに失敗した場合は従来どおり全件に倒す (発火が
+    # 黙って止まるほうが、余分に読むより危険なため)。
+    pids = None
+    _narrow = getattr(db, "list_tick_candidate_project_ids", None)
+    if _narrow is not None:
+        try:
+            pids = [str(x) for x in (_narrow() or [])]
+        except Exception:
+            pids = None
+    if pids is None:
+        try:
+            projects = db.list_all_projects()
+        except Exception as exc:  # pragma: no cover
+            return [{"error": f"list_all_projects: {type(exc).__name__}: {exc}"}]
+        pids = [(p.get("project_id") or p.get("id") or "")
+                for p in (projects or [])]
+    for pid in pids:
         if not pid:
             continue
         try:

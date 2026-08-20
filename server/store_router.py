@@ -136,6 +136,7 @@ elif _BACKEND == "mysql":
         save_project,
         list_projects,
         list_all_projects,
+        list_tick_candidate_project_ids,
         delete_project,
         # Projects v3 (entry-level split、ms-96 e-2379)。
         # firestore / dynamodb branch では re-export しない (= backend が
