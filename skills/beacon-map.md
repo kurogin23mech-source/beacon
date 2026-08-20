@@ -81,6 +81,7 @@ python3 "$(beacon _install-root)/scripts/check-map-drift.py" --doc-id applicatio
 
 出力の `書き漏れ (missing)` と `幽霊 (phantom)` を読む。
 
+- **`SKIP:` で始まる行が出た (e-5320)** → このプロジェクトは beacon 本体の source repo ではないため、機械照合 (書き漏れ / 幽霊検出) が使えない。機械照合の真値源 (beacon の CLI/API/Skill 構造) は beacon 固定なので、他プロジェクトの map には安全網が無い。ユーザーに「この map は AI 維持のみ (機械の安全網なし) です」と 1 行伝えた上で、機械照合の結果に頼らず R2 を **AI 判断だけ**で進める (= source と付き合わせる代わりに、地図本文と実プロジェクトの実態を AI が突き合わせて curate する)。R3 の再照合 (exit 0 確認) も同様に SKIP になるので、drift ゼロの機械確認は求めない。
 - **両方 0 (exit 0)** → drift 無し。「全貌マップは source と一致しています (書き漏れ0 / 幽霊0)」と 1 行返して終了。
 - **どちらか > 0** → R2 へ。
 
@@ -163,6 +164,8 @@ python3 "$(beacon _install-root)/scripts/check-map-drift.py" /tmp/application-ma
 ```
 `書き漏れ` が残れば足す、`幽霊` が残れば消す/直す。**書き漏れ0 / 幽霊0 (exit 0)** になるまで直す。
 これが「網羅した」ことの機械的保証 (= 目視での取りこぼしを塞ぐ)。
+
+- **`SKIP:` が出た場合 (e-5320)** → beacon 本体以外のプロジェクトでは機械照合が使えない (真値源が beacon の surface 固定)。この検算はスキップし、AI が目視で網羅性を担保して次へ進む。ユーザーに「機械の検算は使えないため AI 判断で網羅した」と 1 行添える。
 
 ### G5. CORE doc として登録
 
