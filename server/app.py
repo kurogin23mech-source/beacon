@@ -1821,6 +1821,13 @@ def _resolve_bus_event_user_ids(
     return (sender_uid, receiver_uid)
 
 
+# 2026-08-20 / e-5369 — 名指し照会を持たない backend 向けの走査窓。再送は元の送信
+# から数秒〜数分で来るので 30 分あれば十分に広い。件数上限は「窓が飽和しても本番を
+# 揺らさない」ことを優先した値 (無制限にしないのは同日の停止の教訓)。
+_DEDUP_LOOKBACK_MINUTES = 30
+_DEDUP_LOOKBACK_LIMIT = 500
+
+
 def _find_bus_event_by_client_id(
     project_id: str, client_event_id: str, channel: str = "",
 ) -> dict | None:
@@ -1837,8 +1844,25 @@ def _find_bus_event_by_client_id(
     """
     if not client_event_id:
         return None
+    # 2026-08-20 / e-5369 — 従来はここで list_bus_events(limit=100) を since 無しで
+    # 呼んでいたが、その契約は「古い順に先頭 limit 件」なので取れていたのは最古 100
+    # 件だった。本番 beacon-b95643 では最古 100 件の最新が 2026-06-09、実際の最新は
+    # 2026-08-20 で、2 ヶ月半のあいだ重複チェックが一度も当たっていなかった。
+    # backend が名指し照会を持つならそれを使い、無ければ「直近の窓」に絞って走査する。
+    _direct = getattr(db, "find_bus_event_by_client_id", None)
+    if _direct is not None:
+        try:
+            return _direct(project_id, client_event_id, channel=channel)
+        except Exception:
+            # Backend hiccup: treat as "not found" (下の走査経路と同じ安全側の倒し方)。
+            return None
+    import datetime as _dt
+    _since = (_dt.datetime.now(_dt.timezone.utc)
+              - _dt.timedelta(minutes=_DEDUP_LOOKBACK_MINUTES)
+              ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     try:
-        recent = db.list_bus_events(project_id, channel=channel, limit=100)
+        recent = db.list_bus_events(project_id, since=_since, channel=channel,
+                                    limit=_DEDUP_LOOKBACK_LIMIT)
     except Exception:
         # Backend hiccup: treat as "not found". The caller then proceeds to
         # create the event — favouring delivery over dedup on a rare scan

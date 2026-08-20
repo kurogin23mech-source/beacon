@@ -1684,6 +1684,44 @@ def list_bus_audit(project_id: str, *, since: str = "",
     return items
 
 
+def find_bus_event_by_client_id(project_id: str, client_event_id: str,
+                                channel: str = "") -> dict | None:
+    """再送の重複チェック用に、client_event_id で 1 件だけ引く (e-5369)。
+
+    2026-08-20 の調査で判明した実バグの修正。従来 server/app.py の
+    _find_bus_event_by_client_id は list_bus_events(limit=100) を since 無しで
+    呼んでいたが、この関数の契約は「古い順に先頭 limit 件」なので、返っていたのは
+    最新 100 件ではなく **最古 100 件** だった。本番 beacon-b95643 では最古 100 件に
+    含まれる最新の created_at が 2026-06-09、実際の最新は 2026-08-20 で、2 ヶ月半に
+    わたり重複チェックが一度も機能していなかった (client_event_id 付きイベントは
+    483 件あり、機能自体は使われている)。ms-140 / ms-141 が誤送信 event
+    1786254891861-3OOjSB を発端に「二重送信を防ぐ」ために立てた MS の中核部分。
+
+    窓を推測して走査するのではなく名指しで引く。sk (= event_id) は ms 精度の
+    タイムスタンプ接頭辞で PRIMARY KEY (pk, sk) の一部なので、ORDER BY sk DESC が
+    そのまま「新しい順」になり索引が効く。
+    """
+    if not client_event_id:
+        return None
+    where = ["pk=%s",
+             "JSON_UNQUOTE(JSON_EXTRACT(data, '$.client_event_id')) = %s"]
+    params: list = [project_id, client_event_id]
+    if channel:
+        where.append("JSON_UNQUOTE(JSON_EXTRACT(data, '$.channel')) = %s")
+        params.append(channel)
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT data FROM `{_table_name('bus_events')}` "
+            f"WHERE {' AND '.join(where)} ORDER BY sk DESC LIMIT 1",
+            tuple(params),
+        )
+        row = cur.fetchone()
+    if not row or row.get("data") is None:
+        return None
+    return json.loads(row["data"])
+
+
 def list_bus_events(project_id: str, since: str = "", channel: str = "",
                     limit: int = 100) -> list[dict]:
     """List bus events ordered by created_at.
