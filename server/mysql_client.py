@@ -1503,16 +1503,34 @@ def list_changelog(project_id: str, *, since: str | None = None,
     ``limit`` は 1..500 にクランプ。各 dict は firestore 版と同じく "id" キー
     (= change_id) を含む。
     """
+    # 2026-08-20 / e-5370 — 以前は _query_rows で project の全 changelog を Python へ
+    # 読み込んでから since / 並べ替え / limit を適用していた。docstring 自身が
+    # incremental polling を謳う経路なのに、毎回の polling が全件 json.loads を
+    # 伴っていた (本番 9,135 行 / 4.5MB)。同日 list_bus_events で本番を落とした
+    # のと同じ形。規模テスト (tests/test_scale_contract_mysql.py) が検出した 3 例目。
     limit = max(1, min(500, int(limit)))
-    rows = []
-    for sk, data in _query_rows("changelog", project_id):
-        entry = dict(data)
-        entry["id"] = sk
-        rows.append(entry)
+    ts_expr = "JSON_UNQUOTE(JSON_EXTRACT(data, '$.ts'))"
+    where = ["pk=%s"]
+    params: list = [project_id]
     if since:
-        rows = [r for r in rows if r.get("ts", "") > since]
-    rows.sort(key=lambda r: r.get("ts", ""), reverse=True)
-    return rows[:limit]
+        where.append(f"{ts_expr} > %s")
+        params.append(since)
+    params.append(int(limit))
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT sk, data FROM `{_table_name('changelog')}` "
+            f"WHERE {' AND '.join(where)} "
+            f"ORDER BY {ts_expr} DESC LIMIT %s",
+            tuple(params),
+        )
+        fetched = cur.fetchall()
+    rows = []
+    for r in fetched:
+        entry = dict(json.loads(r["data"]))
+        entry["id"] = r["sk"]
+        rows.append(entry)
+    return rows
 
 
 # ---------------------------------------------------------------------------
