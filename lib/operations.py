@@ -1023,7 +1023,13 @@ def load_project_meta_only(project_id: str) -> dict:
     # backend switch so DynamoDB deployments benefit from the same "meta only"
     # contract even though they never hit the subcollection stream anyway.
     import store_router as db  # type: ignore[import-not-found]
-    meta = db.get_project(project_id)
+    # 2026-08-20 本番停止: MySQL backend では get_project が ~8MB の行を丸ごと
+    # SELECT + parse するため、「重い payload を読まない」というこの helper の
+    # 目的が果たされていなかった。meta 専用の読み取りを持つ backend ではそちらを
+    # 使い、持たない backend は従来どおり (挙動不変)。
+    _meta_read = getattr(db, "get_project_meta", None)
+    meta = _meta_read(project_id) if _meta_read is not None \
+        else db.get_project(project_id)
     if meta is None:
         raise LookupError(f"Project '{project_id}' not found")
     return {**meta, "milestones": []}

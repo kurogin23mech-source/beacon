@@ -132,6 +132,7 @@ elif _BACKEND == "mysql":
         SCHEMA_V3_ENTRY,
         # Projects (v1 whole-doc)
         get_project,
+        get_project_meta,
         save_project,
         list_projects,
         list_all_projects,
