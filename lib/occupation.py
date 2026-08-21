@@ -70,11 +70,25 @@ DEFAULT_PROFESSION = "dev"
 # ---------------------------------------------------------------------------
 
 def _descriptors_owned_by(data: dict, profession: str) -> list:
-    """Return the well-formed descriptors whose ``profession`` matches (lower-
-    cased), sourced from ``effective_descriptors`` (profession defaults + the
-    user-declared raw list). A dev project therefore returns its profession-default
-    ``release`` descriptor even with no user descriptors (ms-142 e-5161); a sales
-    project stays empty (sales has no profession default and declares none)."""
+    """Return the descriptors this project enumerates for ``profession``, sourced
+    from ``effective_descriptors`` (the built-ins + the user-declared raw list).
+
+    ms-147 e-5374 — enumeration repoint. For a project on the ADOPTED-SET model
+    (``adopted_target_classes`` present), "owned by this project" means every
+    descriptor in its EFFECTIVE set — the classes it COPIED at init plus the ones
+    it declared — NOT a subset re-filtered by each descriptor's ``profession``
+    stamp. That stamp filter is exactly what blocked M:N adoption: a sales project
+    that adopts the (dev-stamped) ``release`` must still enumerate it (SPEC 受入
+    条件3). Adoption already decided membership, so re-checking the stamp here
+    would undo it.
+
+    A LEGACY project (no adopted key) keeps the profession-filtered behaviour
+    byte-for-byte — the ``profession`` arg still selects — so dev / sales /
+    back-office projects written before this feature are unchanged (ms-142 e-5161:
+    a dev project still surfaces its ``release`` default; a sales project with no
+    declarations stays empty)."""
+    if _td.load_adopted_kinds(data) is not None:
+        return [d for d in effective_descriptors(data) if isinstance(d, dict)]
     want = (profession or "").strip().lower()
     out = []
     for desc in effective_descriptors(data):
