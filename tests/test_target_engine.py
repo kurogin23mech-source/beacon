@@ -291,7 +291,13 @@ def test_project_target_shape():
                     "detail": {"phase": "drafting", "type": "single-shot",
                                "who_has_the_ball": "self",
                                "next_move": "次フェーズへ進める: 弁護士レビュー",
-                               "evidence_total": 0}}
+                               "evidence_total": 0,
+                               # ms-146 e-5339 — empty for a class that declares
+                               # no budget / stall tracking (contract does not).
+                               "stop_signals": [],
+                               # ms-146 e-5340 — empty unless this target was
+                               # split out of another one mid-work.
+                               "split_from": ""}}
 
 
 # ---------------------------------------------------------------------------

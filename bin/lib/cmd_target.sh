@@ -168,6 +168,44 @@ cmd_target_close() {
         BEACON_REASON="$reason" python3 "$COMMANDS_PY" target_close
 }
 
+cmd_target_split() {
+    ensure_project
+    local kind="" target_id="" label="" fields="" _pos=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --class)  kind="${2:-}";  shift 2 ;;
+            --label)  label="${2:-}"; shift 2 ;;
+            --field)  fields="${fields}${2:-}"$'\n'; shift 2 ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target split --class <kind> <origin-id> --label <text> [--field key=value ...]" ;;
+            *)        if [[ $_pos -eq 0 ]]; then target_id="$1";
+                      else echo "Error: 余分な引数 '$1' (Usage: beacon target split --class <kind> <origin-id> --label <text>)" >&2; exit 1; fi
+                      _pos=$((_pos+1)); shift ;;
+        esac
+    done
+    BEACON_TARGET_CLASS="$kind" BEACON_TARGET_ID="$target_id" \
+        BEACON_LABEL="$label" BEACON_FIELDS="$fields" \
+        python3 "$COMMANDS_PY" target_split
+}
+
+cmd_target_purge() {
+    ensure_project
+    local kind="" target_id="" reason="" json=0 _pos=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --class)  kind="${2:-}";   shift 2 ;;
+            --reason) reason="${2:-}"; shift 2 ;;
+            --json)   json=1;          shift ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target purge --class <kind> <target-id> --reason <text>" ;;
+            *)        if [[ $_pos -eq 0 ]]; then target_id="$1";
+                      else echo "Error: 余分な引数 '$1' (Usage: beacon target purge --class <kind> <target-id> --reason <text>)" >&2; exit 1; fi
+                      _pos=$((_pos+1)); shift ;;
+        esac
+    done
+    BEACON_TARGET_CLASS="$kind" BEACON_TARGET_ID="$target_id" \
+        BEACON_REASON="$reason" BEACON_JSON="$json" \
+        python3 "$COMMANDS_PY" target_purge
+}
+
 cmd_target_instances() {
     ensure_project
     local kind="" json=0
@@ -186,26 +224,28 @@ cmd_target_instances() {
 cmd_target_work_item() {
     ensure_project
     local action="${1:-}"; [[ $# -gt 0 ]] && shift
-    local kind="" target_id="" item_id="" desc="" reason="" json=0
+    local kind="" target_id="" item_id="" desc="" reason="" json=0 fields=""
     local _pos=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --class)  kind="${2:-}";   shift 2 ;;
             --desc)   desc="${2:-}";   shift 2 ;;
+            --field)  fields="${fields}${2:-}"$'\n'; shift 2 ;;
             --reason) reason="${2:-}"; shift 2 ;;
             --json)   json=1;          shift ;;
-            -?*)      _guard_positional "$1" "Usage: beacon target work-item <add|done|list> --class <kind> <target-id> ..." ;;
+            -?*)      _guard_positional "$1" "Usage: beacon target work-item <add|done|cancel|list> --class <kind> <target-id> [--field key=value ...] ..." ;;
             *)        # ms-124 AX review: reject excess positional instead of
                       # silently overwriting target-id / item-id.
                       if [[ $_pos -eq 0 ]]; then target_id="$1";
                       elif [[ $_pos -eq 1 ]]; then item_id="$1";
-                      else echo "Error: 余分な引数 '$1' (Usage: beacon target work-item <add|done|list> --class <kind> <target-id> [<item-id>])" >&2; exit 1; fi
+                      else echo "Error: 余分な引数 '$1' (Usage: beacon target work-item <add|done|cancel|list> --class <kind> <target-id> [<item-id>])" >&2; exit 1; fi
                       _pos=$((_pos+1)); shift ;;
         esac
     done
     BEACON_WI_ACTION="$action" BEACON_TARGET_CLASS="$kind" \
         BEACON_TARGET_ID="$target_id" BEACON_WI_ITEM_ID="$item_id" \
         BEACON_WI_DESC="$desc" BEACON_REASON="$reason" BEACON_JSON="$json" \
+        BEACON_FIELDS="$fields" \
         python3 "$COMMANDS_PY" target_work_item
 }
 
@@ -215,14 +255,15 @@ cmd_target_evidence() {
     # token is a flag or a target-id (back-compat with the bare-add form).
     local action=""
     case "${1:-}" in add|list) action="$1"; shift ;; esac
-    local kind="" target_id="" summary="" ev_for="" json=0 _pos=0
+    local kind="" target_id="" summary="" ev_for="" json=0 fields="" _pos=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --class)   kind="${2:-}";    shift 2 ;;
             --summary) summary="${2:-}"; shift 2 ;;
             --for)     ev_for="${2:-}";  shift 2 ;;
+            --field)   fields="${fields}${2:-}"$'\n'; shift 2 ;;
             --json)    json=1;           shift ;;
-            -?*)       _guard_positional "$1" "Usage: beacon target evidence <add|list> --class <kind> <target-id> [--summary <text>] [--for <item-id>] [--json]" ;;
+            -?*)       _guard_positional "$1" "Usage: beacon target evidence <add|list> --class <kind> <target-id> [--summary <text>] [--for <item-id>] [--field key=value ...] [--json]" ;;
             *)         # ms-124 AX review: reject excess positional instead of
                        # last-wins silently mis-recording to another target.
                        if [[ $_pos -eq 0 ]]; then target_id="$1";
@@ -233,6 +274,7 @@ cmd_target_evidence() {
     BEACON_EV_ACTION="$action" BEACON_TARGET_CLASS="$kind" \
         BEACON_TARGET_ID="$target_id" BEACON_EV_SUMMARY="$summary" \
         BEACON_EV_FOR="$ev_for" BEACON_JSON="$json" \
+        BEACON_FIELDS="$fields" \
         python3 "$COMMANDS_PY" target_evidence
 }
 
@@ -260,6 +302,9 @@ cmd_target_class_add() {
     ensure_project
     local kind="" label="" profession="" dtype="" id_prefix="" collection=""
     local fields="" req_fields="" phases="" term_phases="" stdin=0
+    # ms-146 e-5344: the child arms (WorkItem / Evidence) carry their own field
+    # declarations, so a data-defined class can name what its 業務 / 証跡 hold.
+    local wi_fields="" req_wi_fields="" ev_fields="" req_ev_fields=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --kind|--class)   kind="${2:-}";       shift 2 ;;  # --class alias (target 側と語彙統一)
@@ -272,6 +317,10 @@ cmd_target_class_add() {
             --required-field) req_fields="${req_fields}${2:-}"$'\n'; shift 2 ;;
             --phase)          phases="${phases}${2:-}"$'\n'; shift 2 ;;
             --terminal-phase) term_phases="${term_phases}${2:-}"$'\n'; shift 2 ;;
+            --work-item-field)          wi_fields="${wi_fields}${2:-}"$'\n'; shift 2 ;;
+            --required-work-item-field) req_wi_fields="${req_wi_fields}${2:-}"$'\n'; shift 2 ;;
+            --evidence-field)           ev_fields="${ev_fields}${2:-}"$'\n'; shift 2 ;;
+            --required-evidence-field)  req_ev_fields="${req_ev_fields}${2:-}"$'\n'; shift 2 ;;
             --stdin)          stdin=1;             shift ;;
             -?*)              _guard_positional "$1" "Usage: beacon target-class add --kind <k> --label <l> --profession <p> --type <single-shot|persistent> --id-prefix <pfx-> --collection <coll> [...]" ;;
             *)                # ms-124 AX review: reject stray positional instead
@@ -285,8 +334,57 @@ cmd_target_class_add() {
         BEACON_TC_ID_PREFIX="$id_prefix" BEACON_TC_COLLECTION="$collection" \
         BEACON_TC_FIELDS="$fields" BEACON_TC_REQUIRED_FIELDS="$req_fields" \
         BEACON_TC_PHASES="$phases" BEACON_TC_TERMINAL_PHASES="$term_phases" \
+        BEACON_TC_WI_FIELDS="$wi_fields" \
+        BEACON_TC_REQUIRED_WI_FIELDS="$req_wi_fields" \
+        BEACON_TC_EV_FIELDS="$ev_fields" \
+        BEACON_TC_REQUIRED_EV_FIELDS="$req_ev_fields" \
         BEACON_TC_STDIN="$stdin" \
         python3 "$COMMANDS_PY" target_class_add
+}
+
+cmd_target_class_update() {
+    ensure_project
+    local kind=""
+    local fields="" req_fields="" wi_fields="" req_wi_fields=""
+    local ev_fields="" req_ev_fields="" ph_fields="" req_ph_fields=""
+    # Destructive intents are captured so the python layer can refuse them BY
+    # NAME with the reason (ms-146 e-5346) — an "unknown flag" error would leave
+    # the author unable to tell "missing" from "deliberately forbidden".
+    local rm_fields="" rn_fields="" budget="" stall="" profession=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --kind|--class)             kind="${2:-}"; shift 2 ;;
+            --field)                    fields="${fields}${2:-}"$'\n'; shift 2 ;;
+            --required-field)           req_fields="${req_fields}${2:-}"$'\n'; shift 2 ;;
+            --work-item-field)          wi_fields="${wi_fields}${2:-}"$'\n'; shift 2 ;;
+            --required-work-item-field) req_wi_fields="${req_wi_fields}${2:-}"$'\n'; shift 2 ;;
+            --evidence-field)           ev_fields="${ev_fields}${2:-}"$'\n'; shift 2 ;;
+            --required-evidence-field)  req_ev_fields="${req_ev_fields}${2:-}"$'\n'; shift 2 ;;
+            --phase-field)              ph_fields="${ph_fields}${2:-}"$'\n'; shift 2 ;;
+            --required-phase-field)     req_ph_fields="${req_ph_fields}${2:-}"$'\n'; shift 2 ;;
+            --remove-field)             rm_fields="${rm_fields}${2:-}"$'\n'; shift 2 ;;
+            --rename-field)             rn_fields="${rn_fields}${2:-}"$'\n'; shift 2 ;;
+            --budget-tracking)          budget="${2:-}"; shift 2 ;;
+            --stall-signal)             stall="${2:-}"; shift 2 ;;
+            --profession)               profession="${2:-}"; shift 2 ;;
+            -?*)                        _guard_positional "$1" "Usage: beacon target-class update --kind <k> [--field key:label:type ...] [--phase-field <phase>:key:label:type ...] [--work-item-field ...] [--evidence-field ...]" ;;
+            *)                          echo "Error: 余分な引数 '$1' — target-class update はフラグで指定します (--kind <k> --field ...)" >&2; exit 1 ;;
+        esac
+    done
+    BEACON_TC_KIND="$kind" \
+        BEACON_TC_FIELDS="$fields" BEACON_TC_REQUIRED_FIELDS="$req_fields" \
+        BEACON_TC_WI_FIELDS="$wi_fields" \
+        BEACON_TC_REQUIRED_WI_FIELDS="$req_wi_fields" \
+        BEACON_TC_EV_FIELDS="$ev_fields" \
+        BEACON_TC_REQUIRED_EV_FIELDS="$req_ev_fields" \
+        BEACON_TC_PHASE_FIELDS="$ph_fields" \
+        BEACON_TC_REQUIRED_PHASE_FIELDS="$req_ph_fields" \
+        BEACON_TC_REMOVE_FIELDS="$rm_fields" \
+        BEACON_TC_RENAME_FIELDS="$rn_fields" \
+        BEACON_TC_BUDGET_TRACKING="$budget" \
+        BEACON_TC_STALL_SIGNAL="$stall" \
+        BEACON_TC_PROFESSION="$profession" \
+        python3 "$COMMANDS_PY" target_class_update
 }
 
 cmd_target_class_list() {

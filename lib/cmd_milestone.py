@@ -223,6 +223,12 @@ def cmd_milestone_list():
             # occupation. Sales projects — whose ``milestones[]`` is empty —
             # finally surface their work here.
             "targets": occupation.project_targets(data),
+            # ms-146 e-5339 — the Targets the mechanism thinks should probably be
+            # wrapped up (over the declared time budget, or recent evidence says
+            # the work stopped moving the objective). Normally an EMPTY list, so
+            # /beacon-session-start can raise it the moment it is not: the owner
+            # who cannot stop is precisely the one who will not go looking.
+            "stop_signals": occupation.stop_signal_rows(data),
             "milestones": [],
             "operations": [],
             # ms-61 / e-1843 — pending Operations (= todo / in_progress)
@@ -338,6 +344,20 @@ def cmd_milestone_list():
             total = t["work_items_total"]
             print(f"  {icon} [{t['id']}] {t['label']} ({t['status']}){phase_note} "
                   f"{done}/{total}")
+
+    # ms-146 e-5339 — 「そろそろ切り上げでは？」. Printed ONLY when a Target actually
+    # trips a declared signal, so its appearance carries information. It reports
+    # and stops there: the ms-146 SPEC 設計方針2 ruling is that the mechanism
+    # surfaces the reason and the human decides whether to keep going.
+    _stops = occupation.stop_signal_rows(data)
+    if _stops:
+        print("\n■ そろそろ切り上げでは？ (機構からの提示 — 続けるかはあなたの判断です)")
+        for _row in _stops:
+            print(f"  [{_row['id']}] {_row['label']}")
+            for _sig in _row["signals"]:
+                print(f"    - {_sig['message']}")
+
+
 def cmd_milestone_start():
     """Activate an MS, auto-create its workspace, and self-add as assignee.
 

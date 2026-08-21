@@ -327,6 +327,8 @@ case "${1:-}" in
             create)   shift 2; cmd_target_create "$@" ;;
             advance)  shift 2; cmd_target_advance "$@" ;;
             close)    shift 2; cmd_target_close "$@" ;;
+            purge)    shift 2; cmd_target_purge "$@" ;;
+            split)    shift 2; cmd_target_split "$@" ;;
             instances) shift 2; cmd_target_instances "$@" ;;
             work-item) shift 2; cmd_target_work_item "$@" ;;
             evidence)  shift 2; cmd_target_evidence "$@" ;;
@@ -341,12 +343,16 @@ case "${1:-}" in
     create --class <kind> --label <text> [--field key=value ...]
     advance --class <kind> <target-id> [--to <phase>] [--field key=value ...] [--reason <text>]
     close --class <kind> <target-id> [--reason <text>]
+    purge --class <kind> <target-id> --reason <text>   # 物理削除 (移設済みデータの掃除用、--reason 必須)
+    split --class <kind> <origin-id> --label <text> [--field key=value ...]
+                       # 作業中に湧いた思いつきを別 target に切り出す (元は一切変えない)
     instances --class <kind> [--json]
   厚い認知フレーム (WorkItem / Evidence / ball, ms-124):
-    work-item add  --class <kind> <target-id> --desc <text>
+    work-item add  --class <kind> <target-id> --desc <text> [--field key=value ...]
     work-item done --class <kind> <target-id> <item-id> [--reason <text>]
+    work-item cancel --class <kind> <target-id> <item-id> --reason <text>
     work-item list --class <kind> <target-id> [--json]
-    evidence add  --class <kind> <target-id> [--summary <text>] [--for <item-id>]
+    evidence add  --class <kind> <target-id> [--summary <text>] [--for <item-id>] [--field key=value ...]
     evidence list --class <kind> <target-id> [--json]
     ball --class <kind> <target-id> <self|counterpart|none> [--reason <text>]" ;;
         esac
@@ -354,12 +360,25 @@ case "${1:-}" in
     target-class|tclass)
         case "${2:-}" in
             add)      shift 2; cmd_target_class_add "$@" ;;
+            update)   shift 2; cmd_target_class_update "$@" ;;
             list|ls)  shift 2; cmd_target_class_list "$@" ;;
             *)        echo "Usage: beacon target-class <subcommand>  (data 定義 target-class をコード無しで追加, ms-124)
     add --kind <k> --label <l> --type <single-shot|persistent> --id-prefix <pfx-> --collection <coll> [--profession <p>]
         [--field key:label:type ...] [--required-field key:label:type ...]
         [--phase key:label ...] [--terminal-phase key:label ...]
-    add --stdin        # 記述子全体を JSON で stdin から渡す
+        [--work-item-field key:label:type ...] [--required-work-item-field ...]
+        [--evidence-field key:label:type ...] [--required-evidence-field ...]
+    add --stdin [--profession <p>]   # 記述子全体を JSON で stdin から渡す
+                       # --profession はファイルの職種を上書き (共有ファイルの取り込み用)
+    update --kind <k>  # 宣言済みクラスに field を足す (追加のみ / 削除・改名は不可)
+        [--profession <p>]   # このクラスを持つ職種を直す (共有ファイルを別職種で使うとき)
+        [--field key:label:type ...] [--required-field ...]
+        [--phase-field <phase>:key:label:type ...] [--required-phase-field ...]
+        [--work-item-field ...] [--required-work-item-field ...]
+        [--evidence-field ...] [--required-evidence-field ...]
+        [--budget-tracking <target予算field>:<業務予算field>:<証跡消費field>]
+        [--stall-signal <証跡field>:<値>:<連続回数>]
+      field 指定は key:label:type[:選択肢1|選択肢2|...] 形式
     list [--json]" ;;
         esac
         ;;
