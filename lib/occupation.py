@@ -109,9 +109,25 @@ def effective_descriptors(data: dict | None) -> list:
     (``profession_manifest({})``) depends on release surfacing there. Defaults
     come FIRST so a (malformed) user duplicate cannot shadow a built-in in a
     first-match lookup; cross-collision with a user descriptor of the same kind
-    is a project-config error the authoring path already refuses."""
-    prof = resolve_profession(data or {})
-    return _td.profession_default_descriptors(prof) + _td.load_descriptors(data or {})
+    is a project-config error the authoring path already refuses.
+
+    ms-147 e-5397 — axis inversion: when the project carries its OWN adopted set
+    (``adopted_target_classes``, copied from the profession manifest at init),
+    the built-in half comes from THAT copy — resolved against the global catalog
+    — not from a live re-derivation off the profession field. So changing a
+    profession's defaults, or a project's profession, no longer retro-alters an
+    already-created project's enumeration (SPEC 方針3 = 複写). A project written
+    before this feature has no adopted key (``load_adopted_kinds`` → None) and
+    falls back to the live profession-default derivation, byte-for-byte as
+    before (tolerant compat). ``data`` None / ``{}`` also has no key, so the
+    import-time coverage-matrix floor keeps surfacing the dev defaults."""
+    data = data or {}
+    if _td.load_adopted_kinds(data) is not None:
+        # PRESENT (possibly empty): the project's copied adopted set is the truth.
+        return _td.resolve_adopted_descriptors(data) + _td.load_descriptors(data)
+    # ABSENT: legacy project — derive built-ins live off the profession.
+    prof = resolve_profession(data)
+    return _td.profession_default_descriptors(prof) + _td.load_descriptors(data)
 
 
 def effective_get_descriptor(data: dict | None, kind: str) -> dict | None:
