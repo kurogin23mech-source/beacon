@@ -299,16 +299,9 @@ class SqliteStore:
         that pass a bare .db path)."""
         if not self._project_file.endswith(".json"):
             return
-        # Mirror the CANONICAL projection — the same decompose→assemble transform
-        # load_project() applies — so the mirror matches the store's truth
-        # exactly (schema_version stamped, ms/entry order normalised). Writing the
-        # raw pre-decompose data would drift from what every reader sees.
-        meta, ms_map, entry_map = v3_schema.decompose(data)
-        canonical = v3_schema.assemble(
-            meta, list(ms_map.items()), list(entry_map.items()))
         try:
             import tempfile
-            out = (json.dumps(canonical, indent=2, ensure_ascii=False) + "\n").encode()
+            out = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode()
             target_dir = os.path.dirname(self._project_file) or "."
             fd, tmp = tempfile.mkstemp(dir=target_dir,
                                        prefix=os.path.basename(self._project_file) + ".",

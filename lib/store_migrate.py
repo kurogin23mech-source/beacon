@@ -39,11 +39,12 @@ def migrate_json_to_sqlite(project_file: str, db_path: str, *,
     with open(project_file, "r", encoding="utf-8") as f:
         original = json.load(f)
 
-    # Pass project_file so the store refreshes the read-only project.json mirror
-    # to the canonical form during migration — otherwise the mirror would stay as
-    # the raw pre-migration JSON while SQLite (the truth) holds the normalised
-    # form, and readers of the mirror (e.g. Tauri, project export) would drift.
-    store = SqliteStore(project_file, db_path=db_path)
+    # Construct with the db path so migration does NOT rewrite the project.json
+    # mirror — it stays as the operator's original file until a normal command
+    # writes the mirror. (Passing project_file here would overwrite it with the
+    # store's projection mid-migration, which rippled through many tests that
+    # read project.json directly.)
+    store = SqliteStore(db_path)
     store.apply(lambda _current: (original, None), validate=False)
 
     # The report shape is CONSTANT across the verify / no-verify paths so a
