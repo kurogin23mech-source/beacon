@@ -42,29 +42,48 @@ def migrate_json_to_sqlite(project_file: str, db_path: str, *,
     store = SqliteStore(db_path)
     store.apply(lambda _current: (original, None), validate=False)
 
+    # The report shape is CONSTANT across the verify / no-verify paths so a
+    # caller never has to branch on which keys exist. ``verified`` is tri-state:
+    # True (ran, matched) / False (ran, mismatch) / None (verify was skipped) —
+    # so ``report.get("verified")`` cannot confuse a skipped check with a failed
+    # one, and a bare ``report["verified"]`` never KeyErrors.
     report: dict[str, Any] = {"migrated": True, "db_path": db_path,
-                              "project_file": project_file}
+                              "project_file": project_file,
+                              "verified": None, "verification": None}
     if verify:
         restored = store.load_project()
-        report["verification"] = verify_migration(original, restored)
-        report["verified"] = report["verification"]["match"]
+        verification = verify_migration(original, restored)
+        report["verification"] = verification
+        report["verified"] = verification["match"]
     return report
 
 
-def _entry_index(entries: list) -> dict:
-    """Index a list of entries by id (recursively flattening inline children),
-    so two entry trees can be compared regardless of ordering."""
+def _entry_index(entries: list) -> tuple[dict, list]:
+    """Index a list of entries by id, recursively flattening inline children.
+
+    Returns ``(index, duplicate_ids)``. The recursion mirrors v3_schema's data
+    model, where a child entry (e.g. a commit under a task) lives INLINE in its
+    parent's ``entries`` list rather than as its own row — so flattening here is
+    how we compare the same tree the store round-trips. If v3_schema ever
+    promotes children to their own rows, this recursion must change with it.
+
+    Duplicate ids are surfaced (not silently overwritten): without this, two
+    entries sharing an id would collapse to one in the dict and a real loss
+    could pass verification unnoticed (the verifier must not rubber-stamp)."""
     out: dict[str, dict] = {}
+    duplicates: list[str] = []
 
     def walk(items: list) -> None:
         for e in items or []:
             eid = e.get("id")
             if eid:
+                if eid in out:
+                    duplicates.append(eid)
                 out[eid] = e
             walk(e.get("entries", []) or [])
 
     walk(entries)
-    return out
+    return out, duplicates
 
 
 def verify_migration(original: dict, restored: dict) -> dict:
@@ -97,11 +116,20 @@ def verify_migration(original: dict, restored: dict) -> dict:
     if extra:
         issues.append(f"unexpected milestones after migration: {sorted(extra)}")
 
+    # entry_count is the total in the ORIGINAL across ALL milestones, not just
+    # the ones that survived — otherwise a lost milestone would shrink the count
+    # and understate the loss exactly when it is worst.
     entry_count = 0
+    for m in original.get("milestones", []) or []:
+        o_idx, _ = _entry_index(m.get("entries", []) or [])
+        entry_count += len(o_idx)
+
     for ms_id in sorted(set(o_ms) & set(r_ms)):
-        o_entries = _entry_index(o_ms[ms_id].get("entries", []) or [])
-        r_entries = _entry_index(r_ms[ms_id].get("entries", []) or [])
-        entry_count += len(o_entries)
+        o_entries, o_dups = _entry_index(o_ms[ms_id].get("entries", []) or [])
+        r_entries, r_dups = _entry_index(r_ms[ms_id].get("entries", []) or [])
+        for dup in sorted(set(o_dups) | set(r_dups)):
+            issues.append(f"{ms_id}: duplicate entry id '{dup}' "
+                          "(cannot verify faithfully)")
         e_missing = set(o_entries) - set(r_entries)
         e_extra = set(r_entries) - set(o_entries)
         if e_missing:

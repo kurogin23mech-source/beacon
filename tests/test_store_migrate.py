@@ -120,3 +120,40 @@ def test_verify_detects_changed_meta():
     result = store_migrate.verify_migration(PROJECT, changed)
     assert result["match"] is False
     assert any("summary" in issue for issue in result["issues"])
+
+
+def test_report_shape_is_stable_when_verify_skipped(tmp_path):
+    """verify=False must still return a constant-shape report: verified=None
+    (skipped, not failed) and verification=None, both keys present."""
+    src = _write_json(tmp_path)
+    db = tmp_path / "project.db"
+    report = store_migrate.migrate_json_to_sqlite(str(src), str(db), verify=False)
+    assert report["migrated"] is True
+    assert report["verified"] is None          # skipped, distinct from False
+    assert report["verification"] is None
+    assert "verified" in report and "verification" in report
+
+
+def test_entry_count_includes_lost_milestone_entries():
+    """entry_count is the ORIGINAL total across all milestones — a dropped
+    milestone must not shrink it (that would understate the loss)."""
+    lossy = json.loads(json.dumps(PROJECT))
+    lossy["milestones"] = [m for m in lossy["milestones"] if m["id"] != "ms-2"]
+    result = store_migrate.verify_migration(PROJECT, lossy)
+    assert result["match"] is False
+    assert result["entry_count"] == 4  # still counts ms-2's e-9
+    assert any("ms-2" in issue for issue in result["issues"])
+
+
+def test_verify_flags_duplicate_entry_id_not_rubber_stamp():
+    """Two entries sharing an id within a milestone must be surfaced, not
+    silently deduped — otherwise a real loss could pass verification."""
+    dup = json.loads(json.dumps(PROJECT))
+    ms1 = next(m for m in dup["milestones"] if m["id"] == "ms-1")
+    ms1["entries"].append({"id": "e-1", "type": "task", "description": "CLASH",
+                           "status": "todo"})
+    # Compare the dup-carrying project against itself: a naive index would
+    # dedup both sides and report match; the verifier must flag the duplicate.
+    result = store_migrate.verify_migration(dup, dup)
+    assert result["match"] is False
+    assert any("duplicate entry id 'e-1'" in issue for issue in result["issues"])
