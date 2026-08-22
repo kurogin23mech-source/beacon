@@ -37,6 +37,39 @@ _PK_MILESTONE = "milestone"
 _PK_ENTRY = "entry"
 _META_SK = ""  # the meta row is a singleton; its sort key is empty.
 
+
+def db_has_data(db_path: str) -> bool:
+    """True if ``db_path`` is a SQLite store that already holds project rows.
+
+    Used by get_store to decide whether a migration is still needed: a missing
+    db, a db with no ``kv`` table, or an empty ``kv`` all count as "no data yet"
+    so a freshly-created empty db can never shadow an existing project.json (the
+    init-ordering race)."""
+    if not os.path.exists(db_path):
+        return False
+    try:
+        conn = sqlite3.connect(db_path)
+        try:
+            return conn.execute("SELECT 1 FROM kv LIMIT 1").fetchone() is not None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return False
+
+
+def sqlite_db_path_for(project_file: str) -> str:
+    """Derive the SQLite db path that sits beside a project.json.
+
+    ``.beacon/project.json`` → ``.beacon/project.db``. A path that already ends
+    in ``.db`` is returned unchanged (lets tests pass a db path directly); any
+    other path gets ``.db`` appended.
+    """
+    if project_file.endswith(".json"):
+        return project_file[:-len(".json")] + ".db"
+    if project_file.endswith(".db"):
+        return project_file
+    return project_file + ".db"
+
 # Matches the file lock's 30s acquisition budget (lib/_file_lock): long enough to
 # absorb heavy contention on a slow disk, short enough that a genuinely stuck
 # writer surfaces as an error instead of hanging the CLI forever.
@@ -53,16 +86,83 @@ class SqliteStore:
     # run on separate store instances within one CLI invocation.
     _save_baseline: dict[str, str] = {}
 
-    def __init__(self, db_path: str):
-        self._db_path = db_path
+    def __init__(self, project_file: str, *, db_path: str | None = None):
+        # ``project_file`` is the .beacon/project.json path. The SQLite db lives
+        # beside it. The JSON file is kept as a best-effort read-only *mirror*
+        # (written after each commit) so the Tauri desktop app — which still
+        # reads project.json directly — keeps working until it is rewired to read
+        # SQLite (the e-5417 follow-up MS). The mirror is a projection, not a
+        # second concurrency-controlled write path.
+        self._project_file = project_file
+        self._db_path = db_path or sqlite_db_path_for(project_file)
+        self._last_hash: str | None = None
+        # Delegate the file-based artifacts (documents / treks / orgs / session
+        # logs / watching) to LocalStore unchanged — those live in their own
+        # files/dirs, not in project.json, so their storage is unaffected.
+        from store_local import LocalStore
+        self._files = LocalStore(project_file)
         self._ensure_schema()
 
     @property
     def db_path(self) -> str:
         return self._db_path
 
+    @property
+    def project_file(self) -> str:
+        return self._project_file
+
     def is_cloud(self) -> bool:
         return False
+
+    # -- file-based artifacts: delegate to LocalStore (storage unchanged) ------
+
+    def list_documents(self):
+        return self._files.list_documents()
+
+    def get_document(self, doc_id: str) -> dict:
+        return self._files.get_document(doc_id)
+
+    def list_treks(self, **kwargs):
+        return self._files.list_treks(**kwargs)
+
+    def get_trek(self, trek_id: str) -> dict:
+        return self._files.get_trek(trek_id)
+
+    def create_org(self, **kwargs) -> dict:
+        return self._files.create_org(**kwargs)
+
+    def list_orgs(self, **kwargs) -> list:
+        return self._files.list_orgs(**kwargs)
+
+    def get_org(self, org_id: str) -> dict:
+        return self._files.get_org(org_id)
+
+    def add_org_member(self, org_id: str, **kwargs) -> dict:
+        return self._files.add_org_member(org_id, **kwargs)
+
+    def remove_org_member(self, org_id: str, **kwargs) -> dict:
+        return self._files.remove_org_member(org_id, **kwargs)
+
+    def delete_org(self, org_id: str) -> dict:
+        return self._files.delete_org(org_id)
+
+    def upsert_session_log(self, session_id: str, body: dict) -> bool:
+        return self._files.upsert_session_log(session_id, body)
+
+    def list_session_ids(self) -> list:
+        return self._files.list_session_ids()
+
+    def get_session_log(self, session_id: str):
+        return self._files.get_session_log(session_id)
+
+    def list_session_logs(self, limit: int = 0) -> list:
+        return self._files.list_session_logs(limit=limit)
+
+    def start_watching(self) -> None:
+        self._files.start_watching()
+
+    def stop_watching(self) -> None:
+        self._files.stop_watching()
 
     # -- connection / schema --------------------------------------------------
 
@@ -183,7 +283,39 @@ class SqliteStore:
             conn.close()
 
         SqliteStore._save_baseline[self._baseline_key()] = _hash_project(new_data)
+        self._write_mirror(new_data)
         return result
+
+    def _write_mirror(self, data: dict) -> None:
+        """Best-effort read-only projection of the committed state into
+        project.json, so the Tauri desktop app (which reads project.json
+        directly) keeps working until it is rewired to read SQLite (e-5417).
+
+        This is NOT a second source of truth or a concurrency path: SQLite is the
+        sole writer, and this only overwrites the mirror with the latest
+        committed state via an atomic replace. Any failure is swallowed — a flaky
+        mirror must never break a command whose real write already succeeded.
+        Skipped when this store isn't backed by a real project.json (e.g. tests
+        that pass a bare .db path)."""
+        if not self._project_file.endswith(".json"):
+            return
+        try:
+            import tempfile
+            out = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode()
+            target_dir = os.path.dirname(self._project_file) or "."
+            fd, tmp = tempfile.mkstemp(dir=target_dir,
+                                       prefix=os.path.basename(self._project_file) + ".",
+                                       suffix=".mirror")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(out)
+                os.replace(tmp, self._project_file)
+                tmp = None
+            finally:
+                if tmp is not None and os.path.exists(tmp):
+                    os.unlink(tmp)
+        except OSError:
+            pass  # mirror is best-effort; the SQLite write is the real one
 
     def _write_diff(self, conn: sqlite3.Connection,
                     old_rows: list[tuple[str, str, str]], data: dict) -> None:
@@ -229,6 +361,94 @@ class SqliteStore:
             return data, None
 
         self.apply(_overwrite, validate=validate)
+
+    # -- project.json-content reads/mutations (SQLite-backed) -----------------
+    # These mirror the LocalStore implementations but route through this store's
+    # load_project / apply, so the CLI gets identical behaviour on SQLite.
+
+    def has_changed(self) -> bool:
+        """True if the store changed since the last call (first call → True).
+
+        Used by the dashboard poll loop. Compares a content hash of the current
+        project so an external write (another process) is noticed."""
+        current = _hash_project(self.load_project())
+        if self._last_hash is None or current != self._last_hash:
+            self._last_hash = current
+            return True
+        return False
+
+    def get_milestone(self, ms_id: str) -> dict:
+        import core
+        data = self.load_project()
+        matches = core.find_milestones(data, ms_id)
+        if not matches:
+            raise ValueError(f"Milestone '{ms_id}' not found")
+        ms = matches[0]
+        entries = ms.get("entries", []) or []
+        total, done = core.count_task_status(entries)
+        return {**ms, "total_tasks": total, "done_tasks": done,
+                "entries": core.entries_to_json(entries)}
+
+    def _purge(self, purge_fn) -> dict:
+        """Shared body for the purge family: run ``purge_fn(data)`` inside one
+        SQLite transaction (validate=False — purge must work on already-invalid
+        data, its whole purpose) and report the removed record + residual dups."""
+        import core
+        captured: dict = {}
+
+        def op(data):
+            captured["purged"] = purge_fn(data)
+            captured["dup_report"] = core.find_duplicate_ids(data)
+            return data, None
+
+        self.apply(op, validate=False)
+        return {
+            "purged": captured["purged"],
+            "still_dirty": any(captured["dup_report"].values()),
+            "dup_report": captured["dup_report"],
+        }
+
+    def purge_entry(self, entry_id: str, *, reason: str,
+                    index: int | None = None) -> dict:
+        import core
+        return self._purge(
+            lambda data: core.entry_purge(data, entry_id, reason=reason, index=index))
+
+    def purge_operation(self, op_id: str, *, reason: str,
+                        index: int | None = None) -> dict:
+        import core
+        return self._purge(
+            lambda data: core.operation_purge(data, op_id, reason=reason, index=index))
+
+    def purge_milestone(self, ms_id: str, *, reason: str,
+                        index: int | None = None) -> dict:
+        import core
+        return self._purge(
+            lambda data: core.milestone_purge(data, ms_id, reason=reason, index=index))
+
+    def rehome_project(self, project_id: str, *, target_org_id: str) -> dict:
+        import org as org_mod
+        import org_store
+        if org_store.load_org(target_org_id) is None:
+            raise ValueError(f"org '{target_org_id}' not found")
+        captured: dict = {}
+
+        def op(data):
+            current_id = data.get("project_id") or data.get("id")
+            if project_id and current_id and project_id != current_id:
+                raise ValueError(
+                    f"project '{project_id}' not found in this workspace "
+                    f"(local mode manages only '{current_id}')")
+            captured["previous"] = org_mod.rehome_project(data, target_org_id)
+            captured["current"] = current_id
+            return data, None
+
+        self.apply(op, validate=True)
+        return {
+            "project_id": captured["current"],
+            "org_id": target_org_id,
+            "previous_org_id": captured["previous"],
+        }
 
 
 def diff_rows(

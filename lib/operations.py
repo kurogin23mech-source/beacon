@@ -253,6 +253,23 @@ def _apply_local(project_file: str, op: Op) -> Any:
     return result
 
 
+def _local_apply(path: str, op: Op, *, validate: bool = True) -> Any:
+    """Route a local read-modify-write through the active local store.
+
+    ms-148 e-5414: the SQLite store serialises the whole read→op→write in one
+    ``BEGIN IMMEDIATE`` transaction — the single write path. The legacy JSON
+    store (``BEACON_LOCAL_BACKEND=json`` rollback lever) still uses
+    ``_apply_local``. Both honour the same op contract, so apply_operation's
+    behaviour is identical either way.
+    """
+    from store import get_store  # lazy: avoids an import cycle at module load
+    from store_sqlite import SqliteStore
+    store = get_store(project_file=path)
+    if isinstance(store, SqliteStore):
+        return store.apply(op, validate=validate)
+    return _apply_local(path, op)
+
+
 # ---------------------------------------------------------------------------
 # Cloud-mode atomic apply (Firestore transaction, v1 legacy)
 # ---------------------------------------------------------------------------
@@ -720,7 +737,7 @@ def apply_operation(
 
     if backend == "local":
         path = project_file or os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
-        result = _apply_local(path, op)
+        result = _local_apply(path, op)
     elif backend == "mock":
         # Test path: uses patched firestore_client.{get,save}_project.
         result = _apply_mock(project_id, op)
@@ -814,12 +831,17 @@ def replace_project(
 
     if backend == "local":
         path = project_file or os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
-        # Identity op — apply_operation already handles the locking, just
-        # discard whatever's there.
-        # NOTE: _apply_local requires the file to exist; for replace where the
-        # file may be absent (first cloud push, etc.), fall back to a direct
-        # write under the lock. Keep semantics tight.
-        if os.path.exists(path):
+        # Identity op — discard whatever's there and write new_data. The store
+        # router handles both backends: SqliteStore.apply serialises the write
+        # (and works even against an empty/absent store); the legacy JSON path
+        # keeps its file-absent fallback. new_data was validated up-front, so we
+        # pass validate=False to avoid re-validating a known-good document.
+        from store import get_store
+        from store_sqlite import SqliteStore
+        store = get_store(project_file=path)
+        if isinstance(store, SqliteStore):
+            store.apply(lambda _existing: (new_data, None), validate=False)
+        elif os.path.exists(path):
             _apply_local(path, lambda _existing: (new_data, None))
         else:
             # First-time write — bypass lock since no existing state to race against.

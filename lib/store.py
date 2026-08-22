@@ -377,5 +377,27 @@ def get_store(project_file: str | None = None) -> Store:
             local_cache_path=project_file,
         )
 
-    from store_local import LocalStore
-    return LocalStore(project_file)
+    # ms-148 e-5414: local project state lives in SQLite (serialised writes,
+    # crash-safe, no lost updates). An existing project.json is migrated into
+    # SQLite on first use, verified before we trust it. project.json is kept as
+    # a read-only mirror for the Tauri desktop app (rewired in a follow-up MS).
+    #
+    # BEACON_LOCAL_BACKEND=json forces the legacy JSON store — a rollback lever
+    # if the SQLite path ever misbehaves in the field.
+    if os.environ.get("BEACON_LOCAL_BACKEND", "sqlite").lower() == "json":
+        from store_local import LocalStore
+        return LocalStore(project_file)
+
+    from store_sqlite import SqliteStore, sqlite_db_path_for, db_has_data
+    db_path = sqlite_db_path_for(project_file)
+    if not db_has_data(db_path) and os.path.exists(project_file):
+        import store_migrate
+        report = store_migrate.migrate_json_to_sqlite(project_file, db_path)
+        if not report.get("verified"):
+            issues = (report.get("verification") or {}).get("issues")
+            raise RuntimeError(
+                f"SQLite migration verification failed for {project_file}: "
+                f"{issues}. The JSON file was left untouched; inspect and "
+                f"re-run (or set BEACON_LOCAL_BACKEND=json to stay on JSON)."
+            )
+    return SqliteStore(project_file, db_path=db_path)

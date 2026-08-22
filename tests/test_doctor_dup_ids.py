@@ -34,6 +34,10 @@ def project_with(monkeypatch):
     monkeypatch.setenv("BEACON_PROJECT_FILE", str(project_file))
     monkeypatch.delenv("BEACON_CLOUD", raising=False)
     monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "local")
+    # ms-148 e-5414: duplicate ids only exist on the JSON backend — SQLite's
+    # (pk, sk) key cannot represent them, so doctor's dup-id detection is a
+    # JSON-store concern. Pin these tests to the legacy backend.
+    monkeypatch.setenv("BEACON_LOCAL_BACKEND", "json")
     # ms-95 e-2438: monkeypatch.delitem auto-restores after the test (see
     # test_cmd_purge_cloud / test_entry_op_purge for the same fix). A raw
     # sys.modules.pop leaks across the boundary, wiping adjacent tests' mocks.

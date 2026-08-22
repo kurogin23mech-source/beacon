@@ -107,6 +107,18 @@ def verify_migration(original: dict, restored: dict) -> dict:
             issues.append(f"meta field '{key}' differs")
 
     # --- milestones (by id) -------------------------------------------------
+    # Duplicate milestone ids collapse in the dict below (and in the SQLite
+    # (pk, sk) key), so a project carrying dup ids would silently lose a
+    # milestone on migration and still verify clean. Detect and refuse it here
+    # so migrate-on-first-use aborts rather than dropping data (the operator
+    # recovers on the JSON backend via `beacon milestone purge`).
+    o_ms_ids = [m.get("id") for m in original.get("milestones", []) or []]
+    o_dup_ms = sorted({mid for mid in o_ms_ids
+                       if mid and o_ms_ids.count(mid) > 1})
+    if o_dup_ms:
+        issues.append(f"duplicate milestone ids {o_dup_ms} "
+                      "(cannot migrate faithfully to SQLite)")
+
     o_ms = {m.get("id"): m for m in original.get("milestones", []) or []}
     r_ms = {m.get("id"): m for m in restored.get("milestones", []) or []}
     missing = set(o_ms) - set(r_ms)

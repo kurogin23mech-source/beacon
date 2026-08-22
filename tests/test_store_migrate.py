@@ -145,6 +145,18 @@ def test_entry_count_includes_lost_milestone_entries():
     assert any("ms-2" in issue for issue in result["issues"])
 
 
+def test_verify_flags_duplicate_milestone_id_not_rubber_stamp():
+    """Two milestones with the same id collapse in SQLite's (pk,sk) key, so
+    migration would silently drop one. The verifier must refuse such a project
+    (both sides key milestones by id, so a naive compare would rubber-stamp)."""
+    dup = json.loads(json.dumps(PROJECT))
+    dup["milestones"].append({"id": "ms-1", "title": "CLASH", "status": "todo",
+                              "entries": []})
+    result = store_migrate.verify_migration(dup, dup)
+    assert result["match"] is False
+    assert any("duplicate milestone ids" in issue for issue in result["issues"])
+
+
 def test_verify_flags_duplicate_entry_id_not_rubber_stamp():
     """Two entries sharing an id within a milestone must be surfaced, not
     silently deduped — otherwise a real loss could pass verification."""
