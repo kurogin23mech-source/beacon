@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 
-from _file_lock import lock_exclusive, lock_shared, unlock
+from _file_lock import lock_shared, unlock
 
 
 def _read_frontmatter(text: str) -> tuple[dict, str]:
@@ -47,6 +47,15 @@ def _read_frontmatter(text: str) -> tuple[dict, str]:
 class LocalStore:
     """Store implementation backed by a local JSON file."""
 
+    # Load-time hash keyed by the project file's *absolute* path. save_project()
+    # compares against this to detect that another writer changed the file
+    # between our load and our save (lost-update detection). It is class-level —
+    # not instance-level — because get_store() hands load_project() and
+    # save_project() *separate* LocalStore instances within a single CLI
+    # invocation, so an instance attribute would not survive the round trip.
+    # This mirrors StoreApi._load_baseline (cloud lost-update guard, e-841).
+    _save_baseline: dict[str, str] = {}
+
     def __init__(self, project_file: str):
         self._project_file = project_file
         self._last_hash: str | None = None
@@ -55,24 +64,60 @@ class LocalStore:
     def project_file(self) -> str:
         return self._project_file
 
+    def _baseline_key(self) -> str:
+        """Absolute-path key so two LocalStore instances that reference the
+        same file (one relative, one absolute) share a baseline entry."""
+        return os.path.abspath(self._project_file)
+
     def load_project(self) -> dict:
         with open(self._project_file, "r", encoding="utf-8") as f:
             lock_shared(f)
             data = json.load(f)
             unlock(f)
-        self._last_hash = self._file_hash()
+        h = self._file_hash()
+        self._last_hash = h
+        # Record the load-time baseline so a later save() — possibly on a
+        # different LocalStore instance — can detect a concurrent overwrite.
+        if h is not None:
+            LocalStore._save_baseline[self._baseline_key()] = h
         return data
 
-    def save_project(self, data: dict) -> None:
-        with open(self._project_file, "r+", encoding="utf-8") as f:
-            lock_exclusive(f)
-            f.seek(0)
-            f.truncate()
-            json.dump(data, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-            f.flush()
-            unlock(f)
-        self._last_hash = self._file_hash()
+    def save_project(self, data: dict, *, validate: bool = False) -> None:
+        """Persist the whole project document through the shared atomic writer.
+
+        ``validate`` mirrors ``SqliteStore.save_project`` so the two local stores
+        share one signature (the e-5414 switchover reads them interchangeably).
+        It defaults to False because the normal path already validated in
+        commands_shared.save_project and the recovery/purge path must be able to
+        persist an intentionally-invalid document.
+
+        This is ms-148 e-5410 (stop-gap; the full fix is the SQLite store,
+        e-5411). Routes through ``local_writer.atomic_apply`` — the single
+        serialised, atomic, crash-safe local write path shared with
+        ``operations._apply_local`` — so it
+
+        (a) can't corrupt the file on a crash mid-write (atomic os.replace), and
+        (b) *detects* a concurrent overwrite (the hash captured at
+            load_project() no longer matches on disk) and raises ConflictError
+            rather than silently clobbering it. commands_shared.save_project
+            catches ConflictError and turns it into a clean "re-run" message.
+
+        This is detection, not rescue: the losing writer's change is dropped,
+        not merged. ``validate=False`` because the normal path already
+        validated in commands_shared.save_project, and the recovery/purge path
+        (save_project_unsafe → here) must be able to persist an
+        intentionally-invalid document.
+        """
+        import local_writer
+        baseline = LocalStore._save_baseline.get(self._baseline_key())
+        _, new_hash = local_writer.atomic_apply(
+            self._project_file,
+            lambda _current: (data, None),
+            baseline=baseline,
+            validate=validate,
+        )
+        self._last_hash = new_hash
+        LocalStore._save_baseline[self._baseline_key()] = new_hash
 
     def has_changed(self) -> bool:
         """Check if the file has changed since last load/save.
