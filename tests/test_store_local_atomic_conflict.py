@@ -178,6 +178,37 @@ def test_baseline_keyed_by_absolute_path_across_instances(tmp_path):
         os.chdir(cwd)
 
 
+# --- the two hash paths must agree (comment-only invariant, now pinned) ------
+
+def test_save_hash_matches_file_hash(tmp_path):
+    """local_writer.state_bytes (what the writer emits) and LocalStore._file_hash
+    (what the next load reads) must hash identically — otherwise every non-
+    conflicting save after a format change would raise a false ConflictError.
+    A comment asks them to stay in sync; this pins it."""
+    import local_writer
+    p = tmp_path / "project.json"
+    _write(p, {"name": "p", "summary": "", "milestones": []})
+    s = _fresh_store(p)
+    data = s.load_project()
+    data["summary"] = "written-by-state_bytes"
+    s.save_project(data)
+    assert local_writer.hash_bytes(local_writer.state_bytes(data)) == s._file_hash()
+
+
+def test_truncated_file_is_detected_as_conflict(tmp_path):
+    """If the file is concurrently truncated to empty after our load, a whole-doc
+    save must NOT silently overwrite — the empty file is a change from the state
+    we loaded, so it trips ConflictError (the guard used to skip empty files)."""
+    p = tmp_path / "project.json"
+    _write(p, {"name": "p", "summary": "v0", "milestones": []})
+    s = _fresh_store(p)
+    data = s.load_project()
+    p.write_text("", encoding="utf-8")  # concurrent truncation
+    data["summary"] = "mine"
+    with pytest.raises(ConflictError):
+        s.save_project(data)
+
+
 # --- both write paths share one lock (the reason for unifying, e-5410) -------
 
 def test_both_write_paths_share_one_lock_no_lost_update(tmp_path, monkeypatch):

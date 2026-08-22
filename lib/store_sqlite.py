@@ -67,9 +67,10 @@ class SqliteStore:
     # -- connection / schema --------------------------------------------------
 
     def _connect(self) -> sqlite3.Connection:
-        # isolation_level=None → autocommit off only when we issue BEGIN
-        # ourselves, giving explicit control over BEGIN IMMEDIATE. WAL + a busy
-        # timeout make concurrent processes wait rather than fail with
+        # isolation_level=None puts Python's sqlite3 in full autocommit: it
+        # injects no implicit BEGIN before writes, so WE own the transaction
+        # boundaries by issuing an explicit BEGIN IMMEDIATE in apply(). WAL + a
+        # busy timeout make concurrent processes wait rather than fail with
         # "database is locked".
         conn = sqlite3.connect(self._db_path, timeout=_BUSY_TIMEOUT_MS / 1000.0,
                                isolation_level=None)
@@ -79,6 +80,10 @@ class SqliteStore:
         return conn
 
     def _ensure_schema(self) -> None:
+        # CREATE TABLE is DDL; SQLite auto-commits it immediately even in the
+        # autocommit connection above, so no explicit BEGIN/COMMIT is needed
+        # here (unlike the DML writes in apply(), which we wrap in BEGIN
+        # IMMEDIATE). busy_timeout is set per connection in _connect().
         conn = self._connect()
         try:
             conn.execute(
@@ -252,7 +257,15 @@ def diff_rows(
 
 
 def _hash_project(data: dict) -> str:
-    """Stable hash of a project dict for lost-update detection."""
+    """Stable hash of a project *dict* for this store's lost-update detection.
+
+    NOTE: this is a store-internal baseline only — it is compared against other
+    hashes produced by THIS same function, never across stores. It intentionally
+    hashes the sorted-key dict, not the on-disk bytes, so it is NOT comparable
+    with the file store's byte-level hash (local_writer.hash_bytes /
+    LocalStore._file_hash). Do not copy one store's baseline into the other's
+    slot (a footgun for the e-5414 get_store switchover).
+    """
     import hashlib
     canonical = json.dumps(data, sort_keys=True, ensure_ascii=False)
     return hashlib.md5(canonical.encode("utf-8")).hexdigest()

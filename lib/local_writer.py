@@ -126,12 +126,13 @@ def atomic_apply(
         with open(project_file, "rb") as rf:
             raw = rf.read()
 
+        # A truncated-to-empty file is a *change* from the non-empty state a
+        # caller loaded, so it must also trip the conflict check — hence
+        # ``current_hash`` is compared even when it is None (None != baseline).
+        # Guarding on ``current_hash is not None`` here would silently skip
+        # detection exactly when the file was concurrently truncated.
         current_hash = hash_bytes(raw) if raw.strip() else None
-        if (
-            baseline is not None
-            and current_hash is not None
-            and current_hash != baseline
-        ):
+        if baseline is not None and current_hash != baseline:
             raise ConflictError(
                 "Local project.json changed since it was read — aborting to "
                 "avoid overwriting another session's changes. Re-run the "

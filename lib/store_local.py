@@ -82,8 +82,14 @@ class LocalStore:
             LocalStore._save_baseline[self._baseline_key()] = h
         return data
 
-    def save_project(self, data: dict) -> None:
+    def save_project(self, data: dict, *, validate: bool = False) -> None:
         """Persist the whole project document through the shared atomic writer.
+
+        ``validate`` mirrors ``SqliteStore.save_project`` so the two local stores
+        share one signature (the e-5414 switchover reads them interchangeably).
+        It defaults to False because the normal path already validated in
+        commands_shared.save_project and the recovery/purge path must be able to
+        persist an intentionally-invalid document.
 
         This is ms-148 e-5410 (stop-gap; the full fix is the SQLite store,
         e-5411). Routes through ``local_writer.atomic_apply`` — the single
@@ -108,7 +114,7 @@ class LocalStore:
             self._project_file,
             lambda _current: (data, None),
             baseline=baseline,
-            validate=False,
+            validate=validate,
         )
         self._last_hash = new_hash
         LocalStore._save_baseline[self._baseline_key()] = new_hash

@@ -81,6 +81,33 @@ def test_decompose_round_trips_locally():
     assert rebuilt["profession"] == "dev"
 
 
+def test_decompose_matches_frozen_server_snapshot():
+    """No-dep parity guard. The @server_only tests below prove equivalence to
+    the live server reference, but they SKIP without pymysql (absent from the
+    standard CLI/CI env), so on their own the 'pinned to the server reference'
+    claim is only checked where the server deps happen to be installed. This
+    snapshot — captured from decompose() and verified equal to the server's
+    _v3_decompose once — makes the structural pin run in every environment, so a
+    drift in v3_schema is caught in plain CI, not only at a future local↔cloud
+    boundary."""
+    meta, ms_map, entry_map = v3_schema.decompose(PROJECT)
+    assert meta == {
+        "name": "Fixture", "summary": "s", "profession": "dev",
+        "schema_version": 3,
+    }
+    assert ms_map == {
+        "ms-1": {"id": "ms-1", "title": "first", "status": "in_progress",
+                 "progress": 50},
+        "ms-2": {"id": "ms-2", "title": "second", "status": "todo",
+                 "progress": 0},
+    }
+    assert sorted(entry_map) == ["ms-1#e-1", "ms-1#e-2", "ms-2#e-9"]
+    assert entry_map["ms-1#e-1"]["entries"] == [
+        {"id": "e-100", "type": "commit", "description": "c",
+         "meta": {"hash": "abc"}},
+    ]
+
+
 @server_only
 def test_decompose_matches_server_reference():
     my_meta, my_ms, my_entry = v3_schema.decompose(PROJECT)
