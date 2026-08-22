@@ -130,6 +130,11 @@ def test_fire_and_forget_auto_record_is_not_dropped(tmp_path):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     steady.wait(timeout=120)
     auto.wait(timeout=120)
+    # A crashed writer would silently drop records (output is discarded); assert
+    # exit codes so an environmental crash surfaces as a clear failure, not a
+    # mysterious count mismatch.
+    assert steady.returncode == 0, "steady writer crashed"
+    assert auto.returncode == 0, "auto-record writer crashed"
 
     entries = _load(pf)["milestones"][0]["entries"]
     autorec = [e for e in entries if e["description"] == "autorec"]

@@ -47,8 +47,11 @@ def migrate_json_to_sqlite(project_file: str, db_path: str, *,
     store = SqliteStore(db_path)
     # populate_if_empty is concurrency-safe: when several processes start on a
     # fresh project at once, exactly one populates and the rest skip (they see
-    # rows). ``migrated`` reflects whether THIS call did the populate.
-    migrated = store.populate_if_empty(original)
+    # rows). ``migrated`` reflects whether THIS call did the populate; ``restored``
+    # is the read-back taken WHILE holding the write lock, so verification below
+    # compares against exactly what was written — not a live re-read that a
+    # concurrent writer's appends could make look like "unexpected entries".
+    migrated, restored = store.populate_if_empty(original)
 
     # The report shape is CONSTANT across the verify / no-verify paths so a
     # caller never has to branch on which keys exist. ``verified`` is tri-state:
@@ -59,7 +62,6 @@ def migrate_json_to_sqlite(project_file: str, db_path: str, *,
                               "project_file": project_file,
                               "verified": None, "verification": None}
     if migrated and verify:
-        restored = store.load_project()
         verification = verify_migration(original, restored)
         report["verification"] = verification
         report["verified"] = verification["match"]

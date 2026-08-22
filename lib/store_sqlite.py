@@ -170,14 +170,17 @@ class SqliteStore:
     def _connect(self) -> sqlite3.Connection:
         # isolation_level=None puts Python's sqlite3 in full autocommit: it
         # injects no implicit BEGIN before writes, so WE own the transaction
-        # boundaries by issuing an explicit BEGIN IMMEDIATE in apply(). WAL + a
-        # busy timeout make concurrent processes wait rather than fail with
-        # "database is locked".
+        # boundaries by issuing an explicit BEGIN IMMEDIATE in apply().
         conn = sqlite3.connect(self._db_path, timeout=_BUSY_TIMEOUT_MS / 1000.0,
                                isolation_level=None)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")  # WAL-safe durability/speed
+        # Set busy_timeout FIRST so every later statement waits for a contended
+        # lock instead of failing immediately. journal_mode is NOT set here — it
+        # is persistent (set once in _ensure_schema); issuing the WAL transition
+        # on every connect is what raced with a concurrent migration's write lock
+        # and crashed with "database is locked" (the WAL-mode change can't be
+        # covered by the busy handler in all cases).
         conn.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA synchronous=NORMAL")  # WAL-safe durability/speed
         return conn
 
     def _ensure_schema(self) -> None:
@@ -195,6 +198,16 @@ class SqliteStore:
                 "  PRIMARY KEY (pk, sk)"
                 ")"
             )
+            # Enable WAL once — it is persistent, so this is a lock-free no-op on
+            # every subsequent open. Changing INTO WAL needs exclusive access, so
+            # under a concurrent migration it can still raise SQLITE_BUSY; tolerate
+            # it (whichever process wins sets WAL, the rest proceed and benefit
+            # once it's set; correctness holds in the interim rollback-journal
+            # mode, only concurrency is briefly reduced).
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+            except sqlite3.OperationalError:
+                pass
         finally:
             conn.close()
 
@@ -246,24 +259,32 @@ class SqliteStore:
         SqliteStore._save_baseline[self._baseline_key()] = _hash_project(data)
         return data
 
-    def populate_if_empty(self, data: dict) -> bool:
+    def populate_if_empty(self, data: dict) -> tuple[bool, Optional[dict]]:
         """Populate the store from ``data`` only if it has no rows yet, atomically.
 
         This is the concurrency-safe core of migrate-on-first-use (e-5415): when
         several processes start on a fresh (json, no db) project at once, they
         all try to migrate. Without serialisation a second migration overwrites
         the first migration's early appends, losing an update. Here the emptiness
-        check and the populate run inside ONE ``BEGIN IMMEDIATE`` transaction, so
-        exactly one process populates and the rest see rows and skip. Returns
-        True iff this call did the populate.
+        check, the populate, AND a read-back all run inside ONE ``BEGIN
+        IMMEDIATE`` transaction, so exactly one process populates and the rest
+        see rows and skip.
+
+        Returns ``(did_populate, restored)``. ``restored`` is the project
+        re-assembled from the rows just written, read back WHILE STILL HOLDING
+        the write lock — so a caller can verify the round trip without racing a
+        concurrent writer's appends (which are blocked until we commit). It is
+        ``None`` when this call did not populate.
         """
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
             if conn.execute("SELECT 1 FROM kv LIMIT 1").fetchone() is not None:
                 conn.execute("COMMIT")
-                return False
+                return False, None
             self._write_diff(conn, [], data)
+            rows = conn.execute("SELECT pk, sk, data FROM kv").fetchall()
+            restored = self._rows_to_project(rows)
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
@@ -271,7 +292,7 @@ class SqliteStore:
         finally:
             conn.close()
         SqliteStore._save_baseline[self._baseline_key()] = _hash_project(data)
-        return True
+        return True, restored
 
     # -- the serialised write primitive --------------------------------------
 
