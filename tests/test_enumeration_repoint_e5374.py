@@ -25,7 +25,7 @@ def _adopting_release(profession):
 
 def test_non_dev_profession_adopting_release_owns_it():
     proj = _adopting_release("legal")
-    kinds = [d["kind"] for d in occupation._descriptors_owned_by(proj, "legal")]
+    kinds = [d["kind"] for d in occupation._descriptors_owned_by(proj)]
     assert "release" in kinds, \
         "adoption decided membership; the dev stamp must not undo it"
 
@@ -65,7 +65,7 @@ def test_legacy_project_enumerates_a_declared_class_regardless_of_stamp():
     # held until profession authority was removed.
     proj = {"name": "p", "profession": "sales", "milestones": [],
             "target_classes": [dict(td.RELEASE_DESCRIPTOR)]}
-    kinds = [d["kind"] for d in occupation._descriptors_owned_by(proj, "sales")]
+    kinds = [d["kind"] for d in occupation._descriptors_owned_by(proj)]
     assert "release" in kinds
 
 
@@ -74,7 +74,7 @@ def test_legacy_sales_with_no_declarations_still_gets_no_dev_builtin():
     # legacy sales project that declares nothing still surfaces no release,
     # because the manifest seed (not the stamp) decides built-ins (ms-142 e-5161).
     proj = {"name": "p", "profession": "sales", "milestones": []}
-    kinds = [d["kind"] for d in occupation._descriptors_owned_by(proj, "sales")]
+    kinds = [d["kind"] for d in occupation._descriptors_owned_by(proj)]
     assert kinds == []
 
 
@@ -82,5 +82,5 @@ def test_legacy_dev_still_surfaces_release_default():
     # Legacy dev project (no adopted key) still gets its built-in release via the
     # live manifest-seed derivation — ms-142 e-5161 behaviour unchanged.
     proj = {"name": "p", "profession": "dev", "milestones": []}
-    kinds = [d["kind"] for d in occupation._descriptors_owned_by(proj, "dev")]
+    kinds = [d["kind"] for d in occupation._descriptors_owned_by(proj)]
     assert kinds == ["release"]

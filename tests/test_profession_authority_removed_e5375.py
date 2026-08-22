@@ -76,7 +76,7 @@ def test_stampless_class_projects_add_work_item_evidence_advance():
 def test_stampless_class_is_owned_and_enumerated():
     data = {"name": "t", "profession": "dev", "milestones": [],
             "target_classes": [dict(NEUTRAL)]}
-    kinds = [d["kind"] for d in occupation._descriptors_owned_by(data, "dev")]
+    kinds = [d["kind"] for d in occupation._descriptors_owned_by(data)]
     assert "undertaking" in kinds
     assert "undertaking" in occupation.owned_target_classes(data, "dev")
 
@@ -91,7 +91,7 @@ def test_disagreeing_stamp_does_not_hide_a_declared_class():
     stamped_dev = dict(NEUTRAL, profession="dev")
     data = {"name": "t", "profession": "sales", "opportunities": [],
             "target_classes": [stamped_dev]}
-    kinds = [d["kind"] for d in occupation._descriptors_owned_by(data, "sales")]
+    kinds = [d["kind"] for d in occupation._descriptors_owned_by(data)]
     assert "undertaking" in kinds
 
 

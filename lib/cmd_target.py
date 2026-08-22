@@ -1181,15 +1181,9 @@ def _phase_from_spec(raw: str, *, terminal: bool) -> dict:
     return phase
 
 
-# ms-147 e-5375: ``_warn_profession_mismatch`` RETIRED. It warned that a
-# target-class whose ``profession`` stamp differed from the project's would be
-# invisible to the profession-scoped reads (``beacon status`` / the shared Target
-# projection / the 切り上げシグナル). That premise is dead: enumeration no longer
-# filters by the descriptor's stamp (``occupation._descriptors_owned_by``), so a
-# declared/adopted class surfaces regardless of its provenance stamp. A mismatch
-# is now harmless (the stamp records origin, nothing more), so there is nothing to
-# warn about. The ``--profession`` override survives as a provenance EDIT; it no
-# longer changes visibility.
+# ms-147 e-5375: the profession-mismatch warning was removed — enumeration no
+# longer filters by a descriptor's profession stamp, so a mismatch is harmless
+# provenance. The ``--profession`` override survives as a provenance edit (below).
 
 
 def cmd_target_class_add():
@@ -1295,7 +1289,7 @@ def cmd_target_class_add():
     save_project(data, op={"op": "target_class_add",
                            "kind": desc.get("kind")})
     print(f"target-class 登録: [{desc.get('kind')}] {desc.get('label')} "
-          f"(profession={desc.get('profession', '(neutral)')}, "
+          f"(出自={desc.get('profession') or '職種スタンプなし (どの職種でも利用可)'}, "
           f"type={desc.get('type')})")
     # ms-147 e-5375: no profession-mismatch warning — a declared class surfaces
     # regardless of its provenance stamp (enumeration no longer filters by it).

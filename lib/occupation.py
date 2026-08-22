@@ -69,28 +69,28 @@ DEFAULT_PROFESSION = "dev"
 # ride additively in the document store meanwhile, per the compat contract).
 # ---------------------------------------------------------------------------
 
-def _descriptors_owned_by(data: dict, profession: str) -> list:
+def _descriptors_owned_by(data: dict) -> list:
     """Return every target-class descriptor this project enumerates — its full
     EFFECTIVE set (the built-in classes it copied/derived plus the ones it
     declared), sourced from ``effective_descriptors``.
 
     ms-147 e-5375 — profession-authority removal (SPEC 方針1). A descriptor's
     ``profession`` field is now PROVENANCE (where the class came from), NEVER a
-    wiring input. A project owns exactly what its effective set contains: the
-    membership decision was already made upstream — an adopted-set project reads
-    its COPIED set (e-5397), a legacy project derives its profession's manifest
-    seed via ``effective_descriptors`` — so re-filtering the result by each
-    descriptor's stamp would re-impose the 1:N ownership this MS exists to remove.
-    That stamp filter is precisely what blocked M:N adoption: a non-dev project
-    that adopts (or declares) the dev-provenance ``release`` must enumerate it
-    (SPEC 受入条件3).
+    wiring input, so this function takes NO profession argument (an accepted-but-
+    ignored parameter would be a silent no-op: the signature would promise
+    filtering the body does not do). A project owns exactly what its effective set
+    contains. The membership decision was already made upstream — an adopted-set
+    project reads its COPIED set (e-5397), a legacy project derives its
+    profession's manifest seed via ``effective_descriptors`` — so re-filtering the
+    result by each descriptor's stamp would re-impose the 1:N ownership this MS
+    exists to remove. That stamp filter is precisely what blocked M:N adoption: a
+    non-dev project that adopts (or declares) the dev-provenance ``release`` must
+    enumerate it (SPEC 受入条件3).
 
     Project-level scoping still lives upstream, not here: a legacy sales project
     with no declarations still gets no ``release`` because the manifest seed
-    (``profession_default_descriptors``), not this filter, decides which built-ins
-    a profession carries (ms-142 e-5161). The ``profession`` arg is retained for
-    call-site stability but no longer consulted."""
-    del profession  # ms-147 e-5375: provenance only, no longer a wiring input
+    (``profession_default_descriptors``), not any filter here, decides which
+    built-ins a profession carries (ms-142 e-5161)."""
     return [d for d in effective_descriptors(data) if isinstance(d, dict)]
 
 
@@ -182,7 +182,7 @@ def project_targets(data: dict) -> list:
     adapter = PROJECTION_ADAPTERS.get(prof)
     if adapter is not None:
         rows.extend(adapter(data))
-    for desc in _descriptors_owned_by(data, prof):
+    for desc in _descriptors_owned_by(data):
         for rec in _te.list_targets(data, desc):
             if _wm.is_cancelled(rec):   # match the default status view
                 continue
@@ -212,8 +212,7 @@ def stop_signal_rows(data: dict) -> list:
     Done / cancelled Targets are skipped: telling someone to stop work they have
     already stopped is noise, and this signal must stay rare to stay meaningful."""
     rows: list = []
-    prof = resolve_profession(data)
-    for desc in _descriptors_owned_by(data, prof):
+    for desc in _descriptors_owned_by(data):
         for rec in _te.list_targets(data, desc):
             if _wm.is_cancelled(rec) or _wm.is_done(rec):
                 continue
@@ -629,7 +628,7 @@ def owned_target_classes(data: dict, profession: str) -> tuple:
     prof = (profession or "").strip().lower()
     builtin = OWNED_TARGET_CLASSES.get(prof, ())
     out = list(builtin)
-    for desc in _descriptors_owned_by(data, prof):
+    for desc in _descriptors_owned_by(data):
         kind = (desc.get("kind") or "").strip()
         if kind and kind not in out:
             out.append(kind)

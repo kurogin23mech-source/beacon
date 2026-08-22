@@ -146,3 +146,22 @@ def test_init_data_defined_copies_empty_adopted_set_present():
     # present-but-empty: the key exists so read-paths treat this project's set as
     # authoritative rather than re-deriving off the profession field.
     assert data.get("adopted_target_classes") == []
+
+
+# e-5375 review (保守性#3/#6): the adopted-set seed must be seeded for EVERY
+# profession, not just dev / data-defined. Before the seeding was centralised, the
+# delegated sales / back-office init branches wrote no key, leaving those projects
+# on the legacy live-derivation fallback (asymmetric protection). These pin that
+# the key is now PRESENT (empty, since neither adopts a built-in) for both.
+
+def test_init_sales_seeds_adopted_set_present_empty():
+    data = _init_project("sales")
+    assert "adopted_target_classes" in data, \
+        "sales init must seed the key (not fall back to legacy live-derivation)"
+    assert data["adopted_target_classes"] == []
+
+
+def test_init_backoffice_seeds_adopted_set_present_empty():
+    data = _init_project("backoffice")
+    assert "adopted_target_classes" in data
+    assert data["adopted_target_classes"] == []

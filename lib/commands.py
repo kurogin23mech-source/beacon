@@ -1069,11 +1069,6 @@ def cmd_init():
             "objective": objective,
             "profession": "dev",
             "milestones": [],
-            # ms-147 e-5397: copy the profession manifest's adopted target-class
-            # kinds (dev → ["release"]) into the project as its OWN set. From here
-            # the project's copy is the truth — changing the manifest later does
-            # not retro-alter this project's enumeration (SPEC 方針3 = 複写).
-            "adopted_target_classes": _td.profession_adopted_kinds("dev"),
             "retro_day": retro_day,
             "disclosure_policy": disclosure_policy,
         }
@@ -1091,15 +1086,18 @@ def cmd_init():
             "profession": profession,
             "milestones": [],
             "target_classes": [],
-            # ms-147 e-5397: a data-defined occupation adopts no built-in class by
-            # default (its targets come from the target_classes it declares), so
-            # the copied adopted set is empty — but PRESENT, so read-paths treat
-            # this project's set as authoritative rather than re-deriving off the
-            # profession field.
-            "adopted_target_classes": _td.profession_adopted_kinds(profession),
             "retro_day": retro_day,
             "disclosure_policy": disclosure_policy,
         }
+    # ms-147 e-5397 + e-5375 review (保守性#3/#6): seed the project's adopted
+    # target-class set in ONE place for EVERY profession, not per-branch. Copying
+    # the manifest's kinds (dev → ["release"]; sales / back-office / data-defined
+    # → []) makes the project's OWN copy the truth from here — changing a manifest
+    # later never retro-alters an existing project's enumeration (SPEC 方針3 = 複写,
+    # 受入条件4). Doing it after the branch closes the earlier asymmetry where dev
+    # got the key but the delegated sales / back-office builders did not, which
+    # left those projects on the legacy live-derivation fallback.
+    data["adopted_target_classes"] = _td.profession_adopted_kinds(profession)
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")

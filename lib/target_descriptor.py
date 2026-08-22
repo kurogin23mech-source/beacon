@@ -766,7 +766,13 @@ def append_descriptor(data: dict, desc: dict) -> list:
 RELEASE_DESCRIPTOR: dict = {
     "kind": "release",
     "label": "リリース",
-    "profession": "dev",
+    # ms-147 e-5375: NO profession stamp. release lives in the global catalog
+    # (BUILTIN_DESCRIPTOR_CATALOG), which SPEC 方針4 layer 1 defines as
+    # profession-NEUTRAL material. Which profession adopts it by default is the
+    # manifest's job (PROFESSION_DEFAULT_DESCRIPTORS maps dev → release), keyed
+    # independently of this object — so the material carries no owner, and a
+    # stamp here would contradict the catalog's neutrality (and be dead data now
+    # that no read-path consults the stamp).
     "type": TYPE_SINGLE_SHOT,
     "id_prefix": "rel-",
     "collection": "release_targets",
