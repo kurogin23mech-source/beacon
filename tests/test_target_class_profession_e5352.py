@@ -187,7 +187,7 @@ def test_update_can_relabel_the_provenance_profession(tmp_path, monkeypatch,
     monkeypatch.setenv("BEACON_TC_PROFESSION", "president")
     cmd_target.cmd_target_class_update()
 
-    assert "president に変更" in capsys.readouterr().out
+    assert "president に更新" in capsys.readouterr().out
     data_after = json.loads((tmp_path / ".beacon" / "project.json")
                             .read_text(encoding="utf-8"))
     assert td.get_descriptor(data_after, "undertaking")["profession"] \

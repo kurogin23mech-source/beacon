@@ -1181,9 +1181,8 @@ def _phase_from_spec(raw: str, *, terminal: bool) -> dict:
     return phase
 
 
-# ms-147 e-5375: the profession-mismatch warning was removed — enumeration no
-# longer filters by a descriptor's profession stamp, so a mismatch is harmless
-# provenance. The ``--profession`` override survives as a provenance edit (below).
+# ms-147 e-5375: profession-mismatch warning removed (the stamp is provenance now,
+# not a visibility filter). ``--profession`` survives below as a provenance edit.
 
 
 def cmd_target_class_add():
@@ -1289,7 +1288,7 @@ def cmd_target_class_add():
     save_project(data, op={"op": "target_class_add",
                            "kind": desc.get("kind")})
     print(f"target-class 登録: [{desc.get('kind')}] {desc.get('label')} "
-          f"(出自={desc.get('profession') or '職種スタンプなし (どの職種でも利用可)'}, "
+          f"(profession={desc.get('profession') or '(なし: 職種中立=どの職種でも利用可)'}, "
           f"type={desc.get('type')})")
     # ms-147 e-5375: no profession-mismatch warning — a declared class surfaces
     # regardless of its provenance stamp (enumeration no longer filters by it).
@@ -1524,8 +1523,8 @@ def cmd_target_class_update():
             print(f"    ※ 既存 {missing} 件はこの field を持ちません。"
                   f"遡って無効にはしません (必須は今後の書き込みにのみ適用)")
     if prof_new:
-        print(f"  + 職種 (出自): {prof_new} に変更 "
-              f"(出自ラベルのみ。列挙は採用集合で決まるため表示への影響はありません)")
+        print(f"  + profession (出自): {prof_new} に更新 "
+              f"(出自の記録を更新。列挙・可視性は採用集合が決めるため不変)")
     if stall_cfg is not None:
         print(f"  + 打ち切りシグナル: 証跡 {stall_cfg['evidence_field']} が "
               f"「{stall_cfg['value']}」{stall_cfg['threshold']} 回連続で発火")

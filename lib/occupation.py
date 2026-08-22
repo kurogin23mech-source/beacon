@@ -624,7 +624,16 @@ def owned_target_classes(data: dict, profession: str) -> tuple:
     """Return every target-class the ``profession`` owns in THIS project: the
     built-in seed for dev / sales PLUS the kinds of any descriptors declared for
     that profession (ms-122 e-3957). A dev / sales project (no descriptors)
-    returns exactly the built-in tuple, so existing behaviour is unchanged."""
+    returns exactly the built-in tuple, so existing behaviour is unchanged.
+
+    ms-147 e-5375 — the ``profession`` arg scopes ONLY the built-in seed half
+    (``OWNED_TARGET_CLASSES``: milestone/operation for dev, opportunity/account/
+    acquisition for sales — a profession's CORE classes, deliberately NOT
+    shareable materials). The descriptor half comes from the project's effective
+    set via ``_descriptors_owned_by(data)`` and is NOT filtered by ``profession``
+    (a descriptor/adopted class like ``release`` belongs to whoever adopted it,
+    regardless of stamp). This two-tier split is intentional (SPEC 方針6): the
+    axis inversion frees descriptor MATERIALS, not the core built-in classes."""
     prof = (profession or "").strip().lower()
     builtin = OWNED_TARGET_CLASSES.get(prof, ())
     out = list(builtin)
