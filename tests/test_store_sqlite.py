@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
-from store_sqlite import SqliteStore
+from store_sqlite import SqliteStore, diff_rows
 from store_api import ConflictError
 
 
@@ -113,6 +113,63 @@ def test_save_project_detects_concurrent_change(tmp_path):
     with pytest.raises(ConflictError):
         s.save_project(data)
     assert s.load_project()["summary"] == "by-other"
+
+
+# --- item-level diff (e-5412): a one-field change touches one row -----------
+
+def test_diff_rows_only_emits_changed_rows():
+    old = [
+        ("meta", "", '{"name":"p"}'),
+        ("milestone", "ms-1", '{"id":"ms-1"}'),
+        ("entry", "ms-1#e-1", '{"id":"e-1","status":"todo"}'),
+        ("entry", "ms-1#e-2", '{"id":"e-2","status":"todo"}'),
+    ]
+    # e-1 changed status; everything else identical.
+    new = [
+        ("meta", "", '{"name":"p"}'),
+        ("milestone", "ms-1", '{"id":"ms-1"}'),
+        ("entry", "ms-1#e-1", '{"id":"e-1","status":"done"}'),
+        ("entry", "ms-1#e-2", '{"id":"e-2","status":"todo"}'),
+    ]
+    upserts, deletes = diff_rows(old, new)
+    assert upserts == [("entry", "ms-1#e-1", '{"id":"e-1","status":"done"}')]
+    assert deletes == []
+
+
+def test_diff_rows_handles_add_and_remove():
+    old = [("entry", "ms-1#e-1", "{}"), ("entry", "ms-1#e-2", "{}")]
+    new = [("entry", "ms-1#e-1", "{}"), ("entry", "ms-1#e-3", "{}")]
+    upserts, deletes = diff_rows(old, new)
+    assert upserts == [("entry", "ms-1#e-3", "{}")]
+    assert deletes == [("entry", "ms-1#e-2")]
+
+
+def test_diff_rows_no_change_emits_nothing():
+    rows = [("meta", "", '{"a":1}'), ("milestone", "ms-1", "{}")]
+    assert diff_rows(rows, list(rows)) == ([], [])
+
+
+def test_item_level_change_roundtrips_on_big_doc(tmp_path):
+    """Editing one entry in a many-milestone doc still reads back correctly —
+    the item-level diff is wired into apply() and equivalent to a full rewrite."""
+    s = _new_store(tmp_path)
+    s.apply(lambda d: ({**d, "milestones": [
+        {"id": f"ms-{i}", "title": f"m{i}", "status": "todo", "entries": [
+            {"id": f"e-{i}0", "type": "task", "description": "t", "status": "todo"},
+        ]} for i in range(1, 6)
+    ]}, None), validate=True)
+
+    def mark_done(d):
+        d["milestones"][2]["entries"][0]["status"] = "done"
+        return d, None
+
+    s.apply(mark_done, validate=True)
+    got = s.load_project()
+    assert got["milestones"][2]["entries"][0]["status"] == "done"
+    # untouched milestones/entries survive intact.
+    assert [m["id"] for m in got["milestones"]] == \
+        ["ms-1", "ms-2", "ms-3", "ms-4", "ms-5"]
+    assert got["milestones"][0]["entries"][0]["status"] == "todo"
 
 
 # --- concurrency: no lost update, no id collision ---------------------------

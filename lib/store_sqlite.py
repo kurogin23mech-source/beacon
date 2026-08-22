@@ -169,7 +169,7 @@ class SqliteStore:
                 import core  # lazy import avoids a circular dependency at load
                 core.validate_project(new_data)
 
-            self._write_all(conn, new_data)
+            self._write_diff(conn, rows, new_data)
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
@@ -180,18 +180,24 @@ class SqliteStore:
         SqliteStore._save_baseline[self._baseline_key()] = _hash_project(new_data)
         return result
 
-    def _write_all(self, conn: sqlite3.Connection, data: dict) -> None:
-        """Replace every row with the decomposition of ``data``.
+    def _write_diff(self, conn: sqlite3.Connection,
+                    old_rows: list[tuple[str, str, str]], data: dict) -> None:
+        """Write only the rows that changed between ``old_rows`` and ``data``.
 
-        e-5411 rewrites the whole row set for simplicity; e-5412 replaces this
-        with an item-level diff so a one-field change touches one row. Both run
-        inside the caller's transaction, so the swap is atomic either way.
+        e-5412: a mutation that touches one milestone or one entry rewrites one
+        row, not the whole document (受入条件5『該当行だけ書き換え』, 受入条件7 の
+        性能根拠). The diff runs inside the caller's transaction, so the update is
+        still atomic. Correctness is identical to a full rewrite because the row
+        set is keyed by ``(pk, sk)``; only unchanged rows are skipped.
         """
-        conn.execute("DELETE FROM kv")
-        conn.executemany(
-            "INSERT INTO kv (pk, sk, data) VALUES (?, ?, ?)",
-            self._project_to_rows(data),
-        )
+        upserts, deletes = diff_rows(old_rows, self._project_to_rows(data))
+        if deletes:
+            conn.executemany("DELETE FROM kv WHERE pk = ? AND sk = ?", deletes)
+        if upserts:
+            conn.executemany(
+                "INSERT OR REPLACE INTO kv (pk, sk, data) VALUES (?, ?, ?)",
+                upserts,
+            )
 
     # -- whole-document save (compatibility with the load→mutate→save split) --
 
@@ -218,6 +224,31 @@ class SqliteStore:
             return data, None
 
         self.apply(_overwrite, validate=validate)
+
+
+def diff_rows(
+    old_rows: list[tuple[str, str, str]],
+    new_rows: list[tuple[str, str, str]],
+) -> tuple[list[tuple[str, str, str]], list[tuple[str, str]]]:
+    """Compute the row-level delta between two ``(pk, sk, data)`` row sets.
+
+    Returns ``(upserts, deletes)``:
+      * ``upserts`` — ``(pk, sk, data)`` for rows that are new or whose data
+        changed. Unchanged rows are omitted (that is the whole point: a one-field
+        edit yields one upsert).
+      * ``deletes`` — ``(pk, sk)`` for rows present before but gone now.
+
+    Pure and side-effect free so it can be unit-tested without a database.
+    """
+    old = {(pk, sk): data for pk, sk, data in old_rows}
+    new = {(pk, sk): data for pk, sk, data in new_rows}
+    upserts = [
+        (pk, sk, data)
+        for (pk, sk), data in new.items()
+        if old.get((pk, sk)) != data
+    ]
+    deletes = [key for key in old if key not in new]
+    return upserts, deletes
 
 
 def _hash_project(data: dict) -> str:
