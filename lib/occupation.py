@@ -70,32 +70,28 @@ DEFAULT_PROFESSION = "dev"
 # ---------------------------------------------------------------------------
 
 def _descriptors_owned_by(data: dict, profession: str) -> list:
-    """Return the descriptors this project enumerates for ``profession``, sourced
-    from ``effective_descriptors`` (the built-ins + the user-declared raw list).
+    """Return every target-class descriptor this project enumerates — its full
+    EFFECTIVE set (the built-in classes it copied/derived plus the ones it
+    declared), sourced from ``effective_descriptors``.
 
-    ms-147 e-5374 — enumeration repoint. For a project on the ADOPTED-SET model
-    (``adopted_target_classes`` present), "owned by this project" means every
-    descriptor in its EFFECTIVE set — the classes it COPIED at init plus the ones
-    it declared — NOT a subset re-filtered by each descriptor's ``profession``
-    stamp. That stamp filter is exactly what blocked M:N adoption: a sales project
-    that adopts the (dev-stamped) ``release`` must still enumerate it (SPEC 受入
-    条件3). Adoption already decided membership, so re-checking the stamp here
-    would undo it.
+    ms-147 e-5375 — profession-authority removal (SPEC 方針1). A descriptor's
+    ``profession`` field is now PROVENANCE (where the class came from), NEVER a
+    wiring input. A project owns exactly what its effective set contains: the
+    membership decision was already made upstream — an adopted-set project reads
+    its COPIED set (e-5397), a legacy project derives its profession's manifest
+    seed via ``effective_descriptors`` — so re-filtering the result by each
+    descriptor's stamp would re-impose the 1:N ownership this MS exists to remove.
+    That stamp filter is precisely what blocked M:N adoption: a non-dev project
+    that adopts (or declares) the dev-provenance ``release`` must enumerate it
+    (SPEC 受入条件3).
 
-    A LEGACY project (no adopted key) keeps the profession-filtered behaviour
-    byte-for-byte — the ``profession`` arg still selects — so dev / sales /
-    back-office projects written before this feature are unchanged (ms-142 e-5161:
-    a dev project still surfaces its ``release`` default; a sales project with no
-    declarations stays empty)."""
-    if _td.load_adopted_kinds(data) is not None:
-        return [d for d in effective_descriptors(data) if isinstance(d, dict)]
-    want = (profession or "").strip().lower()
-    out = []
-    for desc in effective_descriptors(data):
-        if isinstance(desc, dict) \
-                and (desc.get("profession") or "").strip().lower() == want:
-            out.append(desc)
-    return out
+    Project-level scoping still lives upstream, not here: a legacy sales project
+    with no declarations still gets no ``release`` because the manifest seed
+    (``profession_default_descriptors``), not this filter, decides which built-ins
+    a profession carries (ms-142 e-5161). The ``profession`` arg is retained for
+    call-site stability but no longer consulted."""
+    del profession  # ms-147 e-5375: provenance only, no longer a wiring input
+    return [d for d in effective_descriptors(data) if isinstance(d, dict)]
 
 
 def resolve_profession(data: dict) -> str:

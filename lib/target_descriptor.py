@@ -262,7 +262,10 @@ def fields_at_phase(desc: dict, phase_key: str) -> list:
 # Validation — the explicit check (loaders never raise; this surfaces problems).
 # ---------------------------------------------------------------------------
 
-_REQUIRED_STRING_KEYS = ("kind", "label", "profession", "id_prefix", "collection")
+# ms-147 e-5375: ``profession`` left OUT — it is a PROVENANCE tag now, not a
+# required part of a well-formed descriptor. A class authored profession-neutrally
+# (or with the field stripped) is valid; wiring never reads the stamp (SPEC 方針1).
+_REQUIRED_STRING_KEYS = ("kind", "label", "id_prefix", "collection")
 
 
 def validate_descriptor(desc: dict) -> list:
@@ -519,25 +522,30 @@ def arm_roles(desc: dict) -> dict:
             "changelog": changelog}
 
 
-def build_descriptor(*, kind: str, label: str, profession: str, dtype: str,
+def build_descriptor(*, kind: str, label: str, dtype: str,
                      id_prefix: str, collection: str,
+                     profession: str = "",
                      fields: Optional[list] = None,
                      phases: Optional[list] = None,
                      work_item_fields: Optional[list] = None,
                      evidence_fields: Optional[list] = None) -> dict:
     """Build a target-class descriptor dict from its parts (pure, no I/O). The
-    shape matches what ``backoffice_seed`` hand-writes: kind / label /
-    profession / type / id_prefix / collection / decomposition / fields /
-    phases. ``fields`` and ``phases`` are passed through verbatim (the caller
-    built them from CLI flags or JSON). ``decomposition.arms`` defaults to the
-    thick-frame arms so authored classes get WorkItems / Evidence like the
-    built-in seed. ``work_item_fields`` / ``evidence_fields`` (ms-146 e-5344) are
-    emitted only when non-empty. This does NOT validate — the caller runs
-    ``validate_*``."""
+    shape matches what ``backoffice_seed`` hand-writes: kind / label / type /
+    id_prefix / collection / decomposition / fields / phases. ``fields`` and
+    ``phases`` are passed through verbatim (the caller built them from CLI flags
+    or JSON). ``decomposition.arms`` defaults to the thick-frame arms so authored
+    classes get WorkItems / Evidence like the built-in seed. ``work_item_fields``
+    / ``evidence_fields`` (ms-146 e-5344) are emitted only when non-empty. This
+    does NOT validate — the caller runs ``validate_*``.
+
+    ms-147 e-5375: ``profession`` is OPTIONAL — a PROVENANCE tag, never a wiring
+    input (SPEC 方針1). Omitting it builds a profession-neutral material; when
+    given it is recorded verbatim (a shared class file's origin), but the stamp is
+    still emitted only as data a reader can see, not a filter any read-path honours.
+    Emitted only when non-empty so a neutral class carries no empty stamp key."""
     desc = {
         "kind": (kind or "").strip(),
         "label": (label or "").strip(),
-        "profession": (profession or "").strip(),
         "type": (dtype or "").strip(),
         "id_prefix": (id_prefix or "").strip(),
         "collection": (collection or "").strip(),
@@ -545,6 +553,12 @@ def build_descriptor(*, kind: str, label: str, profession: str, dtype: str,
         "fields": list(fields or []),
         "phases": list(phases or []),
     }
+    # ms-147 e-5375: the provenance stamp is emitted ONLY when the author gave one,
+    # so a profession-neutral material carries no empty ``profession`` key (mirrors
+    # the child-arm emission below — no empty keys in every project.json).
+    prof = (profession or "").strip()
+    if prof:
+        desc["profession"] = prof
     # Child-arm declarations are emitted ONLY when the author declared some, so a
     # descriptor built without them is byte-identical to what this returned before
     # ms-146 e-5344 (no empty keys appearing in every project.json).

@@ -51,21 +51,36 @@ def test_dev_adopted_still_owns_builtins_and_release():
         assert kind in owned
 
 
-# --- legacy projects (no adopted key) keep the profession filter -------------
+# --- legacy projects (no adopted key): the stamp is provenance, not a filter ---
+# ms-147 e-5375 completed the inversion e-5374 staged: even a LEGACY project no
+# longer re-filters its effective set by each descriptor's profession stamp. A
+# class DECLARED in the project is the project's, regardless of where it was
+# authored. (Built-in scoping still happens upstream in effective_descriptors, so
+# a legacy sales project with NO declarations still gets no dev built-in.)
 
-def test_legacy_sales_declaring_dev_stamped_release_still_filters_it_out():
-    # A legacy project has no adopted key, so the profession filter still runs:
-    # a stray dev-stamped release declared in a sales project is NOT enumerated
-    # (pre-e5374 behaviour preserved — no silent M:N leak for legacy projects).
+def test_legacy_project_enumerates_a_declared_class_regardless_of_stamp():
+    # e-5375: a dev-stamped release DECLARED in a legacy sales project IS now
+    # enumerated — the stamp is provenance, declaration decided membership. This
+    # is the behaviour e-5374's staged compat test (filters-it-out) deliberately
+    # held until profession authority was removed.
     proj = {"name": "p", "profession": "sales", "milestones": [],
             "target_classes": [dict(td.RELEASE_DESCRIPTOR)]}
     kinds = [d["kind"] for d in occupation._descriptors_owned_by(proj, "sales")]
-    assert "release" not in kinds
+    assert "release" in kinds
+
+
+def test_legacy_sales_with_no_declarations_still_gets_no_dev_builtin():
+    # The removal is of the STAMP filter, not of profession-level seeding: a
+    # legacy sales project that declares nothing still surfaces no release,
+    # because the manifest seed (not the stamp) decides built-ins (ms-142 e-5161).
+    proj = {"name": "p", "profession": "sales", "milestones": []}
+    kinds = [d["kind"] for d in occupation._descriptors_owned_by(proj, "sales")]
+    assert kinds == []
 
 
 def test_legacy_dev_still_surfaces_release_default():
     # Legacy dev project (no adopted key) still gets its built-in release via the
-    # live derivation + profession filter — ms-142 e-5161 behaviour unchanged.
+    # live manifest-seed derivation — ms-142 e-5161 behaviour unchanged.
     proj = {"name": "p", "profession": "dev", "milestones": []}
     kinds = [d["kind"] for d in occupation._descriptors_owned_by(proj, "dev")]
     assert kinds == ["release"]
