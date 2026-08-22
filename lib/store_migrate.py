@@ -45,17 +45,20 @@ def migrate_json_to_sqlite(project_file: str, db_path: str, *,
     # store's projection mid-migration, which rippled through many tests that
     # read project.json directly.)
     store = SqliteStore(db_path)
-    store.apply(lambda _current: (original, None), validate=False)
+    # populate_if_empty is concurrency-safe: when several processes start on a
+    # fresh project at once, exactly one populates and the rest skip (they see
+    # rows). ``migrated`` reflects whether THIS call did the populate.
+    migrated = store.populate_if_empty(original)
 
     # The report shape is CONSTANT across the verify / no-verify paths so a
     # caller never has to branch on which keys exist. ``verified`` is tri-state:
-    # True (ran, matched) / False (ran, mismatch) / None (verify was skipped) —
-    # so ``report.get("verified")`` cannot confuse a skipped check with a failed
-    # one, and a bare ``report["verified"]`` never KeyErrors.
-    report: dict[str, Any] = {"migrated": True, "db_path": db_path,
+    # True (ran, matched) / False (ran, mismatch) / None (verify skipped OR
+    # another process already migrated) — so ``report.get("verified")`` never
+    # confuses those, and a bare ``report["verified"]`` never KeyErrors.
+    report: dict[str, Any] = {"migrated": migrated, "db_path": db_path,
                               "project_file": project_file,
                               "verified": None, "verification": None}
-    if verify:
+    if migrated and verify:
         restored = store.load_project()
         verification = verify_migration(original, restored)
         report["verification"] = verification

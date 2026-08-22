@@ -245,6 +245,33 @@ class SqliteStore:
         SqliteStore._save_baseline[self._baseline_key()] = _hash_project(data)
         return data
 
+    def populate_if_empty(self, data: dict) -> bool:
+        """Populate the store from ``data`` only if it has no rows yet, atomically.
+
+        This is the concurrency-safe core of migrate-on-first-use (e-5415): when
+        several processes start on a fresh (json, no db) project at once, they
+        all try to migrate. Without serialisation a second migration overwrites
+        the first migration's early appends, losing an update. Here the emptiness
+        check and the populate run inside ONE ``BEGIN IMMEDIATE`` transaction, so
+        exactly one process populates and the rest see rows and skip. Returns
+        True iff this call did the populate.
+        """
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM kv LIMIT 1").fetchone() is not None:
+                conn.execute("COMMIT")
+                return False
+            self._write_diff(conn, [], data)
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+        SqliteStore._save_baseline[self._baseline_key()] = _hash_project(data)
+        return True
+
     # -- the serialised write primitive --------------------------------------
 
     def apply(self, op: Callable[[dict], Tuple[dict, Any]], *,

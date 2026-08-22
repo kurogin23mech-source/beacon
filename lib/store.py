@@ -393,7 +393,10 @@ def get_store(project_file: str | None = None) -> Store:
     if not db_has_data(db_path) and os.path.exists(project_file):
         import store_migrate
         report = store_migrate.migrate_json_to_sqlite(project_file, db_path)
-        if not report.get("verified"):
+        # Raise only when THIS process migrated and the verification failed. A
+        # migrated=False means another concurrent process already populated the
+        # db (populate_if_empty) — that is success, not a reason to abort.
+        if report.get("migrated") and not report.get("verified"):
             issues = (report.get("verification") or {}).get("issues")
             raise RuntimeError(
                 f"SQLite migration verification failed for {project_file}: "
