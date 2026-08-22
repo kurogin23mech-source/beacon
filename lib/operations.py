@@ -234,39 +234,22 @@ def _append_changelog(project_id: str, op_name: str, actor: str,
 def _apply_local(project_file: str, op: Op) -> Any:
     """Apply op atomically to a local JSON project file.
 
-    Uses cross-platform exclusive locking (fcntl LOCK_EX on POSIX,
-    msvcrt.locking on Windows) so the read-modify-write window is
-    serialized across processes on the same machine. The Store layer
-    (LocalStore) also locks individual load/save, but here we hold the
-    lock across the whole read→op→write window — that's the key
-    difference.
+    Routes through ``local_writer.atomic_apply`` — the single serialised,
+    atomic, crash-safe local write path shared with ``LocalStore.save_project``
+    (ms-148 e-5410). It holds one exclusive lock across the whole
+    read→op→write window (so nothing is lost between the read and the write)
+    and swaps the new document in with an atomic os.replace (so a crash
+    mid-write can't corrupt the file — the old truncate+dump could).
+
+    ``baseline=None`` because ``op`` runs against state re-read *under* the
+    lock, so there is no load→save gap to guard against here. ``validate=True``
+    keeps the previous behaviour: ``core.validate_project`` runs before the
+    write, so a schema violation raises ValueError and never reaches disk.
     """
-    from _file_lock import lock_exclusive, unlock
-
-    # Open r+ so we can lock and seek-rewrite in place.
-    with open(project_file, "r+", encoding="utf-8") as f:
-        lock_exclusive(f)
-        try:
-            f.seek(0)
-            raw = f.read()
-            data = json.loads(raw) if raw.strip() else {}
-
-            new_data, result = op(data)
-
-            # Validate before persisting — core.validate_project will raise
-            # ValueError on schema violations, and we want that to bubble up
-            # to the caller (HTTPException in API, CLI error in commands.py).
-            import core  # noqa: PLC0415 - lazy import avoids circular at module load
-            core.validate_project(new_data)
-
-            f.seek(0)
-            f.truncate()
-            json.dump(new_data, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-            f.flush()
-        finally:
-            unlock(f)
-
+    import local_writer  # lazy import keeps operations.py import-light
+    result, _ = local_writer.atomic_apply(
+        project_file, op, baseline=None, validate=True,
+    )
     return result
 
 
