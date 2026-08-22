@@ -25,8 +25,14 @@ import table_type  # noqa: E402
 
 
 def _write(cwd, data):
-    (cwd / ".beacon" / "project.json").write_text(
-        json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    # ms-148 e-5414: SQLite is the source of truth; a direct project.json write
+    # only touches the read-only mirror. Seed through the store.
+    from store import get_store
+    store = get_store(project_file=str(cwd / ".beacon" / "project.json"))
+    if hasattr(store, "apply"):
+        store.apply(lambda _cur: (data, None), validate=False)
+    else:
+        store.save_project(data, validate=False)
 
 
 def _read(cwd):
