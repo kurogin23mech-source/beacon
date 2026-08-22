@@ -1092,6 +1092,12 @@ def cmd_init():
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")
+    # ms-148 e-5414: init writes project.json only; the first command migrates it
+    # into SQLite (get_store, migrate-on-first-use). We deliberately do NOT create
+    # the db here — doing so would make a re-run of `beacon init` reset the db but
+    # also make "init then hand-edit project.json before the first command" a
+    # no-op. Re-init on an existing project leaving a stale db is a known edge
+    # (follow-up e-5441); it is rare and `beacon init` is a once-per-project step.
     print(f"Created {pf}")
     if profession == "sales":
         print("  profession = sales (営業スキーマ: opportunities / accounts)")

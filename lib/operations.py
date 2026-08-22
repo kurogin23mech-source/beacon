@@ -231,43 +231,17 @@ def _append_changelog(project_id: str, op_name: str, actor: str,
 # Local-mode atomic apply (file lock)
 # ---------------------------------------------------------------------------
 
-def _apply_local(project_file: str, op: Op) -> Any:
-    """Apply op atomically to a local JSON project file.
-
-    Routes through ``local_writer.atomic_apply`` — the single serialised,
-    atomic, crash-safe local write path shared with ``LocalStore.save_project``
-    (ms-148 e-5410). It holds one exclusive lock across the whole
-    read→op→write window (so nothing is lost between the read and the write)
-    and swaps the new document in with an atomic os.replace (so a crash
-    mid-write can't corrupt the file — the old truncate+dump could).
-
-    ``baseline=None`` because ``op`` runs against state re-read *under* the
-    lock, so there is no load→save gap to guard against here. ``validate=True``
-    keeps the previous behaviour: ``core.validate_project`` runs before the
-    write, so a schema violation raises ValueError and never reaches disk.
-    """
-    import local_writer  # lazy import keeps operations.py import-light
-    result, _ = local_writer.atomic_apply(
-        project_file, op, baseline=None, validate=True,
-    )
-    return result
-
-
 def _local_apply(path: str, op: Op, *, validate: bool = True) -> Any:
-    """Route a local read-modify-write through the active local store.
+    """Route a local read-modify-write through the active local store's apply.
 
-    ms-148 e-5414: the SQLite store serialises the whole read→op→write in one
-    ``BEGIN IMMEDIATE`` transaction — the single write path. The legacy JSON
-    store (``BEACON_LOCAL_BACKEND=json`` rollback lever) still uses
-    ``_apply_local``. Both honour the same op contract, so apply_operation's
-    behaviour is identical either way.
+    ms-148 e-5414: both backends expose ``apply`` with the same
+    lock-across-window contract — SqliteStore via one BEGIN IMMEDIATE
+    transaction (default), LocalStore via ``local_writer.atomic_apply`` (the
+    ``BEACON_LOCAL_BACKEND=json`` rollback lever) — so there is no backend branch
+    here. ``op(data) -> (new_data, result)``; returns ``result``.
     """
     from store import get_store  # lazy: avoids an import cycle at module load
-    from store_sqlite import SqliteStore
-    store = get_store(project_file=path)
-    if isinstance(store, SqliteStore):
-        return store.apply(op, validate=validate)
-    return _apply_local(path, op)
+    return get_store(project_file=path).apply(op, validate=validate)
 
 
 # ---------------------------------------------------------------------------
@@ -831,20 +805,16 @@ def replace_project(
 
     if backend == "local":
         path = project_file or os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
-        # Identity op — discard whatever's there and write new_data. The store
-        # router handles both backends: SqliteStore.apply serialises the write
-        # (and works even against an empty/absent store); the legacy JSON path
-        # keeps its file-absent fallback. new_data was validated up-front, so we
-        # pass validate=False to avoid re-validating a known-good document.
+        # Identity op — discard whatever's there and write new_data through the
+        # active store's apply (uniform across backends). new_data was validated
+        # up-front, so validate=False avoids re-validating a known-good document.
         from store import get_store
-        from store_sqlite import SqliteStore
-        store = get_store(project_file=path)
-        if isinstance(store, SqliteStore):
-            store.apply(lambda _existing: (new_data, None), validate=False)
-        elif os.path.exists(path):
-            _apply_local(path, lambda _existing: (new_data, None))
-        else:
-            # First-time write — bypass lock since no existing state to race against.
+        try:
+            get_store(project_file=path).apply(
+                lambda _existing: (new_data, None), validate=False)
+        except FileNotFoundError:
+            # JSON backend, first-time write with no file yet (e.g. first cloud
+            # push): nothing to race against, so write the file directly.
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(new_data, f, indent=2, ensure_ascii=False)
                 f.write("\n")

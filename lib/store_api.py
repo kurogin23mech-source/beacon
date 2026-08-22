@@ -90,6 +90,18 @@ class StoreApi:
         self._write_local_cache(data)
         return data
 
+    def apply(self, op, *, validate: bool = True):
+        """Not supported on the cloud store (ms-148 e-5414).
+
+        Local stores serialise a read→op→write via ``apply``; cloud writes go
+        through ``operations.apply_operation``'s Firestore transaction instead,
+        so this is never called on a StoreApi. Raise a clear error rather than
+        an AttributeError if some future caller reaches here by mistake.
+        """
+        raise NotImplementedError(
+            "StoreApi.apply is not used — cloud writes go through "
+            "operations.apply_operation (Firestore transaction), not store.apply")
+
     def save_project(self, data: dict) -> None:
         # Lost-update guard (e-841): if the cloud document changed since we
         # loaded it, a blind whole-document PUT would clobber the concurrent

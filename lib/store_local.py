@@ -119,6 +119,23 @@ class LocalStore:
         self._last_hash = new_hash
         LocalStore._save_baseline[self._baseline_key()] = new_hash
 
+    def apply(self, op, *, validate: bool = True):
+        """Serialised read→op→write for the JSON backend.
+
+        Gives the Store protocol a uniform ``apply`` so callers never have to
+        branch on backend (ms-148 e-5414: SqliteStore.apply is the SQLite twin).
+        Routes through ``local_writer.atomic_apply``, which holds one lock across
+        the whole read→op→write window — the same guarantee the former
+        ``operations._apply_local`` gave — so a concurrent writer is serialised,
+        not lost. ``op(data) -> (new_data, result)``; returns ``result``.
+        """
+        import local_writer
+        result, new_hash = local_writer.atomic_apply(
+            self._project_file, op, baseline=None, validate=validate)
+        self._last_hash = new_hash
+        LocalStore._save_baseline[self._baseline_key()] = new_hash
+        return result
+
     def has_changed(self) -> bool:
         """Check if the file has changed since last load/save.
 

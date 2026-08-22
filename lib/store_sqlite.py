@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 from typing import Any, Callable, Optional, Tuple
 
 import v3_schema
@@ -341,8 +342,15 @@ class SqliteStore:
             finally:
                 if tmp is not None and os.path.exists(tmp):
                     os.unlink(tmp)
-        except OSError:
-            pass  # mirror is best-effort; the SQLite write is the real one
+        except OSError as e:
+            # Best-effort: a flaky mirror must not break a command whose SQLite
+            # write already succeeded. But do NOT vanish silently — a persistent
+            # failure (permissions, full disk) means the Tauri desktop app reads
+            # stale data, so leave a trace on stderr rather than a hidden divergence.
+            print(f"[beacon] warning: could not refresh the project.json mirror "
+                  f"({e}); the SQLite store is current but the desktop app may "
+                  f"show stale data until the next successful write.",
+                  file=sys.stderr)
 
     def _write_diff(self, conn: sqlite3.Connection,
                     old_rows: list[tuple[str, str, str]], data: dict) -> None:

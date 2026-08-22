@@ -22,6 +22,18 @@ class Store(Protocol):
         """Save the full project data."""
         ...
 
+    def apply(self, op, *, validate: bool = True):
+        """Serialised read→op→write (ms-148 e-5414).
+
+        ``op(data) -> (new_data, result)`` runs against the current state under a
+        lock held across the whole read→op→write window; returns ``result``. The
+        LOCAL stores (SqliteStore / LocalStore) implement this as the single
+        write primitive. The cloud StoreApi does NOT — cloud writes go through
+        operations.apply_operation's Firestore transaction, so it raises
+        NotImplementedError if called here.
+        """
+        ...
+
     def has_changed(self) -> bool:
         """Check if project data has changed since last load.
 
@@ -317,8 +329,19 @@ class Store(Protocol):
 def get_store(project_file: str | None = None) -> Store:
     """Return the appropriate Store instance.
 
-    If .beacon/cloud.json exists alongside the project file,
-    returns a StoreApi (cloud API). Otherwise returns LocalStore.
+    If .beacon/cloud.json exists alongside the project file, returns a StoreApi
+    (cloud API). Otherwise returns a SQLite-backed store (ms-148 e-5414), or the
+    legacy LocalStore when ``BEACON_LOCAL_BACKEND=json``.
+
+    SIDE EFFECT (local, first use): this is not a pure factory. When a local
+    project.json exists but its SQLite db has no data yet, this migrates the JSON
+    into SQLite on the spot — creating a .db file on disk. Callers in read-only
+    contexts should be aware the first call can write.
+
+    Raises:
+        RuntimeError — if this call performs the migration and its verification
+            fails (the JSON is left untouched; the message names the
+            BEACON_LOCAL_BACKEND=json fallback).
     """
     if project_file is None:
         project_file = os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
