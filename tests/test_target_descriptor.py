@@ -120,9 +120,19 @@ def test_missing_required_fields_flagged():
     problems = td.validate_descriptor({"kind": "x"})
     joined = " ".join(problems)
     assert "'label'" in joined
-    assert "'profession'" in joined
     assert "'id_prefix'" in joined
     assert "'collection'" in joined
+
+
+def test_profession_is_optional_provenance_not_required():
+    # e-5375: ``profession`` is a PROVENANCE tag, not a required part of a
+    # well-formed descriptor. A class with everything BUT profession is valid.
+    problems = td.validate_descriptor({
+        "kind": "x", "label": "X", "id_prefix": "x-", "collection": "xs",
+        "type": "single-shot", "phases": [{"key": "a"}]})
+    joined = " ".join(problems)
+    assert "'profession'" not in joined, "profession must not be required"
+    assert problems == [], problems
 
 
 def test_invalid_type_flagged():

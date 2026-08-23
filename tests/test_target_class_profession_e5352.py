@@ -1,14 +1,18 @@
-"""ms-146 e-5352: a target-class file shared between projects must work in a
-project whose profession differs.
+"""ms-146 e-5352 → ms-147 e-5375: a target-class file shared between projects
+must work in a project whose profession differs.
 
-The failure this prevents is a SILENT half-working state. A class whose declared
-profession does not match the project still registers, and
-`beacon target instances --class <kind>` still finds it — so it looks fine. But
-the profession-scoped reads (`beacon status`, the shared Target projection, the
-切り上げシグナル) filter by owning profession, so the class is invisible in exactly
-the places the owner actually looks. Sharing class files across projects is the
-POINT of declaring classes as data, so an arriving mismatch is the normal case,
-not the exception.
+ORIGINAL premise (e-5352): a class whose declared profession did not match the
+project registered but was INVISIBLE to the profession-scoped reads (`beacon
+status`, the shared Target projection, the 切り上げシグナル), so e-5352 warned on
+the mismatch and offered `--profession` to correct the owner and restore
+visibility.
+
+e-5375 removed profession as a wiring authority: enumeration reads the project's
+adopted/effective set, NOT each descriptor's stamp (`occupation._descriptors_
+owned_by`). So a mismatched stamp is now HARMLESS — the class surfaces regardless
+of it. The stamp is pure provenance (where the class was authored). These tests
+are updated to that reality: no invisibility, no mismatch warning; `--profession`
+survives as a provenance relabel that no longer changes visibility.
 """
 
 import json
@@ -81,19 +85,35 @@ def _feed_stdin(monkeypatch, payload):
 
 
 # ---------------------------------------------------------------------------
-# The mismatch is announced, not silently accepted.
+# e-5375: the mismatch is no longer warned about — it is harmless provenance.
 # ---------------------------------------------------------------------------
 
-def test_add_warns_when_the_file_profession_does_not_match(president,
-                                                           monkeypatch, capsys):
+def test_add_does_not_warn_on_a_provenance_mismatch(president,
+                                                    monkeypatch, capsys):
+    # e-5375: a dev-authored file added to a president project no longer triggers
+    # the "invisible in beacon status" warning, because the stamp does not gate
+    # visibility any more. The class registers and surfaces on its own.
     monkeypatch.setenv("BEACON_TC_STDIN", "1")
     _feed_stdin(monkeypatch, SHARED_FILE)
     cmd_target.cmd_target_class_add()
     err = capsys.readouterr().err
-    assert "'dev'" in err and "'president'" in err
-    assert "beacon status" in err, "must say WHERE it will be missing"
-    assert "target-class update --kind undertaking --profession president" in err, \
-        "must name the one-line fix"
+    assert "⚠" not in err, "a provenance mismatch is harmless — no warning"
+
+
+def test_a_mismatched_class_still_surfaces_in_the_shared_frame(president,
+                                                               monkeypatch):
+    # The positive proof of e-5375: the dev-stamped class added to a president
+    # project is enumerated by the shared Target projection despite the stamp.
+    monkeypatch.setenv("BEACON_TC_STDIN", "1")
+    _feed_stdin(monkeypatch, SHARED_FILE)
+    cmd_target.cmd_target_class_add()
+    data = json.loads((president / ".beacon" / "project.json")
+                      .read_text(encoding="utf-8"))
+    data["undertakings"] = [{"id": "ut-1", "label": "x", "kind": "undertaking",
+                             "phase": "started", "status": "todo",
+                             "work_items": [], "evidence": [],
+                             "phase_history": []}]
+    assert [t["id"] for t in occupation.project_targets(data)] == ["ut-1"]
 
 
 def test_the_class_still_registers_despite_the_mismatch(president, monkeypatch):
@@ -142,10 +162,11 @@ def test_the_override_does_not_disturb_the_rest_of_the_file(president,
 # Repairing a class that is already registered wrong.
 # ---------------------------------------------------------------------------
 
-def test_update_can_correct_the_owning_profession(tmp_path, monkeypatch,
-                                                  capsys):
-    """Changing the OWNER is not a field edit, so the additive-only rule does not
-    apply: it orphans nothing — every record keeps its collection and its shape."""
+def test_update_can_relabel_the_provenance_profession(tmp_path, monkeypatch,
+                                                      capsys):
+    """e-5375: editing the stamp is a pure PROVENANCE relabel. It orphans nothing
+    (every record keeps its collection / id / shape) AND — unlike pre-e5375 — the
+    class is already visible before the edit, because the stamp never gated it."""
     rec = {"id": "ut-1", "label": "テスト", "kind": "undertaking",
            "phase": "started", "status": "todo", "work_items": [],
            "evidence": [], "phase_history": []}
@@ -159,18 +180,19 @@ def test_update_can_correct_the_owning_profession(tmp_path, monkeypatch,
 
     data_before = json.loads((tmp_path / ".beacon" / "project.json")
                              .read_text(encoding="utf-8"))
-    assert occupation.project_targets(data_before) == [], "invisible before"
+    # e-5375: the dev-stamped class is ALREADY visible — the stamp is provenance.
+    assert [t["id"] for t in occupation.project_targets(data_before)] == ["ut-1"]
 
     monkeypatch.setenv("BEACON_TC_KIND", "undertaking")
     monkeypatch.setenv("BEACON_TC_PROFESSION", "president")
     cmd_target.cmd_target_class_update()
 
-    assert "president に変更" in capsys.readouterr().out
+    assert "president に更新" in capsys.readouterr().out
     data_after = json.loads((tmp_path / ".beacon" / "project.json")
                             .read_text(encoding="utf-8"))
     assert td.get_descriptor(data_after, "undertaking")["profession"] \
         == "president"
-    # the instance survives untouched AND is now visible to the shared frame
+    # the instance survives untouched AND stays visible to the shared frame
     assert data_after["undertakings"] == [rec]
     assert [t["id"] for t in occupation.project_targets(data_after)] == ["ut-1"]
 

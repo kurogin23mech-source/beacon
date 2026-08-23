@@ -1089,6 +1089,15 @@ def cmd_init():
             "retro_day": retro_day,
             "disclosure_policy": disclosure_policy,
         }
+    # ms-147 e-5397 + e-5375 review (保守性#3/#6): seed the project's adopted
+    # target-class set in ONE place for EVERY profession, not per-branch. Copying
+    # the manifest's kinds (dev → ["release"]; sales / back-office / data-defined
+    # → []) makes the project's OWN copy the truth from here — changing a manifest
+    # later never retro-alters an existing project's enumeration (SPEC 方針3 = 複写,
+    # 受入条件4). Doing it after the branch closes the earlier asymmetry where dev
+    # got the key but the delegated sales / back-office builders did not, which
+    # left those projects on the legacy live-derivation fallback.
+    data["adopted_target_classes"] = _td.profession_adopted_kinds(profession)
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")

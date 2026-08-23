@@ -69,19 +69,29 @@ DEFAULT_PROFESSION = "dev"
 # ride additively in the document store meanwhile, per the compat contract).
 # ---------------------------------------------------------------------------
 
-def _descriptors_owned_by(data: dict, profession: str) -> list:
-    """Return the well-formed descriptors whose ``profession`` matches (lower-
-    cased), sourced from ``effective_descriptors`` (profession defaults + the
-    user-declared raw list). A dev project therefore returns its profession-default
-    ``release`` descriptor even with no user descriptors (ms-142 e-5161); a sales
-    project stays empty (sales has no profession default and declares none)."""
-    want = (profession or "").strip().lower()
-    out = []
-    for desc in effective_descriptors(data):
-        if isinstance(desc, dict) \
-                and (desc.get("profession") or "").strip().lower() == want:
-            out.append(desc)
-    return out
+def _descriptors_owned_by(data: dict) -> list:
+    """Return every target-class descriptor this project enumerates — its full
+    EFFECTIVE set (the built-in classes it copied/derived plus the ones it
+    declared), sourced from ``effective_descriptors``.
+
+    ms-147 e-5375 — profession-authority removal (SPEC 方針1). A descriptor's
+    ``profession`` field is now PROVENANCE (where the class came from), NEVER a
+    wiring input, so this function takes NO profession argument (an accepted-but-
+    ignored parameter would be a silent no-op: the signature would promise
+    filtering the body does not do). A project owns exactly what its effective set
+    contains. The membership decision was already made upstream — an adopted-set
+    project reads its COPIED set (e-5397), a legacy project derives its
+    profession's manifest seed via ``effective_descriptors`` — so re-filtering the
+    result by each descriptor's stamp would re-impose the 1:N ownership this MS
+    exists to remove. That stamp filter is precisely what blocked M:N adoption: a
+    non-dev project that adopts (or declares) the dev-provenance ``release`` must
+    enumerate it (SPEC 受入条件3).
+
+    Project-level scoping still lives upstream, not here: a legacy sales project
+    with no declarations still gets no ``release`` because the manifest seed
+    (``profession_default_descriptors``), not any filter here, decides which
+    built-ins a profession carries (ms-142 e-5161)."""
+    return [d for d in effective_descriptors(data) if isinstance(d, dict)]
 
 
 def resolve_profession(data: dict) -> str:
@@ -109,9 +119,25 @@ def effective_descriptors(data: dict | None) -> list:
     (``profession_manifest({})``) depends on release surfacing there. Defaults
     come FIRST so a (malformed) user duplicate cannot shadow a built-in in a
     first-match lookup; cross-collision with a user descriptor of the same kind
-    is a project-config error the authoring path already refuses."""
-    prof = resolve_profession(data or {})
-    return _td.profession_default_descriptors(prof) + _td.load_descriptors(data or {})
+    is a project-config error the authoring path already refuses.
+
+    ms-147 e-5397 — axis inversion: when the project carries its OWN adopted set
+    (``adopted_target_classes``, copied from the profession manifest at init),
+    the built-in half comes from THAT copy — resolved against the global catalog
+    — not from a live re-derivation off the profession field. So changing a
+    profession's defaults, or a project's profession, no longer retro-alters an
+    already-created project's enumeration (SPEC 方針3 = 複写). A project written
+    before this feature has no adopted key (``load_adopted_kinds`` → None) and
+    falls back to the live profession-default derivation, byte-for-byte as
+    before (tolerant compat). ``data`` None / ``{}`` also has no key, so the
+    import-time coverage-matrix floor keeps surfacing the dev defaults."""
+    data = data or {}
+    if _td.load_adopted_kinds(data) is not None:
+        # PRESENT (possibly empty): the project's copied adopted set is the truth.
+        return _td.resolve_adopted_descriptors(data) + _td.load_descriptors(data)
+    # ABSENT: legacy project — derive built-ins live off the profession.
+    prof = resolve_profession(data)
+    return _td.profession_default_descriptors(prof) + _td.load_descriptors(data)
 
 
 def effective_get_descriptor(data: dict | None, kind: str) -> dict | None:
@@ -156,7 +182,7 @@ def project_targets(data: dict) -> list:
     adapter = PROJECTION_ADAPTERS.get(prof)
     if adapter is not None:
         rows.extend(adapter(data))
-    for desc in _descriptors_owned_by(data, prof):
+    for desc in _descriptors_owned_by(data):
         for rec in _te.list_targets(data, desc):
             if _wm.is_cancelled(rec):   # match the default status view
                 continue
@@ -186,8 +212,7 @@ def stop_signal_rows(data: dict) -> list:
     Done / cancelled Targets are skipped: telling someone to stop work they have
     already stopped is noise, and this signal must stay rare to stay meaningful."""
     rows: list = []
-    prof = resolve_profession(data)
-    for desc in _descriptors_owned_by(data, prof):
+    for desc in _descriptors_owned_by(data):
         for rec in _te.list_targets(data, desc):
             if _wm.is_cancelled(rec) or _wm.is_done(rec):
                 continue
@@ -599,11 +624,20 @@ def owned_target_classes(data: dict, profession: str) -> tuple:
     """Return every target-class the ``profession`` owns in THIS project: the
     built-in seed for dev / sales PLUS the kinds of any descriptors declared for
     that profession (ms-122 e-3957). A dev / sales project (no descriptors)
-    returns exactly the built-in tuple, so existing behaviour is unchanged."""
+    returns exactly the built-in tuple, so existing behaviour is unchanged.
+
+    ms-147 e-5375 — the ``profession`` arg scopes ONLY the built-in seed half
+    (``OWNED_TARGET_CLASSES``: milestone/operation for dev, opportunity/account/
+    acquisition for sales — a profession's CORE classes, deliberately NOT
+    shareable materials). The descriptor half comes from the project's effective
+    set via ``_descriptors_owned_by(data)`` and is NOT filtered by ``profession``
+    (a descriptor/adopted class like ``release`` belongs to whoever adopted it,
+    regardless of stamp). This two-tier split is intentional (SPEC 方針6): the
+    axis inversion frees descriptor MATERIALS, not the core built-in classes."""
     prof = (profession or "").strip().lower()
     builtin = OWNED_TARGET_CLASSES.get(prof, ())
     out = list(builtin)
-    for desc in _descriptors_owned_by(data, prof):
+    for desc in _descriptors_owned_by(data):
         kind = (desc.get("kind") or "").strip()
         if kind and kind not in out:
             out.append(kind)

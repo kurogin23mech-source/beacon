@@ -41,6 +41,16 @@ from typing import Optional
 # The additive top-level project.json key holding the descriptor list.
 TARGET_CLASSES_KEY = "target_classes"
 
+# The additive top-level project.json key holding the project's ADOPTED
+# target-class kinds (ms-147 e-5397). This is the project's own copy of which
+# built-in-as-data classes it enumerates — seeded from the profession manifest
+# at init and thereafter the truth, so changing a profession's defaults later
+# does NOT retro-alter an already-created project (SPEC 方針3 = 複写, not live
+# inheritance). ABSENT (key not present) means "written before this feature" and
+# read-paths fall back to the live profession-default derivation (tolerant
+# compat); PRESENT-but-empty means "adopts no built-in class" and is honoured.
+ADOPTED_TARGET_CLASSES_KEY = "adopted_target_classes"
+
 # Child-arm field declarations (ms-146 e-5344). A descriptor may declare the
 # fields its WORK ITEMS / EVIDENCE carry, exactly as ``fields`` declares the
 # target's own. Both are OPTIONAL and read tolerantly: a descriptor written
@@ -252,7 +262,10 @@ def fields_at_phase(desc: dict, phase_key: str) -> list:
 # Validation — the explicit check (loaders never raise; this surfaces problems).
 # ---------------------------------------------------------------------------
 
-_REQUIRED_STRING_KEYS = ("kind", "label", "profession", "id_prefix", "collection")
+# ms-147 e-5375: ``profession`` left OUT — it is a PROVENANCE tag now, not a
+# required part of a well-formed descriptor. A class authored profession-neutrally
+# (or with the field stripped) is valid; wiring never reads the stamp (SPEC 方針1).
+_REQUIRED_STRING_KEYS = ("kind", "label", "id_prefix", "collection")
 
 
 def validate_descriptor(desc: dict) -> list:
@@ -509,25 +522,30 @@ def arm_roles(desc: dict) -> dict:
             "changelog": changelog}
 
 
-def build_descriptor(*, kind: str, label: str, profession: str, dtype: str,
+def build_descriptor(*, kind: str, label: str, dtype: str,
                      id_prefix: str, collection: str,
+                     profession: str = "",
                      fields: Optional[list] = None,
                      phases: Optional[list] = None,
                      work_item_fields: Optional[list] = None,
                      evidence_fields: Optional[list] = None) -> dict:
     """Build a target-class descriptor dict from its parts (pure, no I/O). The
-    shape matches what ``backoffice_seed`` hand-writes: kind / label /
-    profession / type / id_prefix / collection / decomposition / fields /
-    phases. ``fields`` and ``phases`` are passed through verbatim (the caller
-    built them from CLI flags or JSON). ``decomposition.arms`` defaults to the
-    thick-frame arms so authored classes get WorkItems / Evidence like the
-    built-in seed. ``work_item_fields`` / ``evidence_fields`` (ms-146 e-5344) are
-    emitted only when non-empty. This does NOT validate — the caller runs
-    ``validate_*``."""
+    shape matches what ``backoffice_seed`` hand-writes: kind / label / type /
+    id_prefix / collection / decomposition / fields / phases. ``fields`` and
+    ``phases`` are passed through verbatim (the caller built them from CLI flags
+    or JSON). ``decomposition.arms`` defaults to the thick-frame arms so authored
+    classes get WorkItems / Evidence like the built-in seed. ``work_item_fields``
+    / ``evidence_fields`` (ms-146 e-5344) are emitted only when non-empty. This
+    does NOT validate — the caller runs ``validate_*``.
+
+    ms-147 e-5375: ``profession`` is OPTIONAL — a PROVENANCE tag, never a wiring
+    input (SPEC 方針1). Omitting it builds a profession-neutral material; when
+    given it is recorded verbatim (a shared class file's origin), but the stamp is
+    still emitted only as data a reader can see, not a filter any read-path honours.
+    Emitted only when non-empty so a neutral class carries no empty stamp key."""
     desc = {
         "kind": (kind or "").strip(),
         "label": (label or "").strip(),
-        "profession": (profession or "").strip(),
         "type": (dtype or "").strip(),
         "id_prefix": (id_prefix or "").strip(),
         "collection": (collection or "").strip(),
@@ -535,6 +553,12 @@ def build_descriptor(*, kind: str, label: str, profession: str, dtype: str,
         "fields": list(fields or []),
         "phases": list(phases or []),
     }
+    # ms-147 e-5375: the provenance stamp is emitted ONLY when the author gave one,
+    # so a profession-neutral material carries no empty ``profession`` key (mirrors
+    # the child-arm emission below — no empty keys in every project.json).
+    prof = (profession or "").strip()
+    if prof:
+        desc["profession"] = prof
     # Child-arm declarations are emitted ONLY when the author declared some, so a
     # descriptor built without them is byte-identical to what this returned before
     # ms-146 e-5344 (no empty keys appearing in every project.json).
@@ -742,7 +766,13 @@ def append_descriptor(data: dict, desc: dict) -> list:
 RELEASE_DESCRIPTOR: dict = {
     "kind": "release",
     "label": "リリース",
-    "profession": "dev",
+    # ms-147 e-5375: NO profession stamp. release lives in the global catalog
+    # (BUILTIN_DESCRIPTOR_CATALOG), which SPEC 方針4 layer 1 defines as
+    # profession-NEUTRAL material. Which profession adopts it by default is the
+    # manifest's job (PROFESSION_DEFAULT_DESCRIPTORS maps dev → release), keyed
+    # independently of this object — so the material carries no owner, and a
+    # stamp here would contradict the catalog's neutrality (and be dead data now
+    # that no read-path consults the stamp).
     "type": TYPE_SINGLE_SHOT,
     "id_prefix": "rel-",
     "collection": "release_targets",
@@ -760,9 +790,21 @@ RELEASE_DESCRIPTOR: dict = {
 }
 
 
-# profession -> the descriptors it ALWAYS has (built-in, modelled as data). Only
-# dev has one today (release). A profession absent from this map contributes no
-# defaults, so sales / a data-defined occupation are unchanged.
+# Layer 1 (ms-147 e-5397 / SPEC 方針4) — the global catalog: every built-in-as-
+# data descriptor, profession-NEUTRAL, indexed by kind. A material lives here,
+# not on a profession, so more than one profession can adopt the same class.
+# This is deliberately SEPARATE from the manifest below: which professions adopt
+# a class by default (layer 2) can change without making an already-copied kind
+# unresolvable (a project's copied set resolves against THIS, layer 1).
+BUILTIN_DESCRIPTOR_CATALOG: dict = {
+    "release": RELEASE_DESCRIPTOR,
+}
+
+# Layer 2 — the profession manifest: which catalog kinds a profession adopts by
+# DEFAULT (built-in, modelled as data). Only dev has one today (release). A
+# profession absent from this map contributes no defaults, so sales / a data-
+# defined occupation are unchanged. This is the seed `beacon init` COPIES into a
+# project's adopted set; after that the project's copy — not this map — is read.
 PROFESSION_DEFAULT_DESCRIPTORS: dict = {
     "dev": [RELEASE_DESCRIPTOR],
 }
@@ -776,6 +818,72 @@ def profession_default_descriptors(profession: str) -> list:
     ``target_classes`` list stay uncontaminated by a built-in the user never wrote."""
     return list(PROFESSION_DEFAULT_DESCRIPTORS.get(
         (profession or "").strip().lower(), []))
+
+
+# ---------------------------------------------------------------------------
+# Target-class as material: the 3-layer model (ms-147 e-5397 / SPEC 方針4).
+#
+#   (1) global catalog  — every built-in-as-data descriptor, profession-neutral
+#   (2) profession manifest — the kinds a profession adopts by DEFAULT (a named
+#       subset of the catalog; PROFESSION_DEFAULT_DESCRIPTORS above IS this)
+#   (3) project adopted set — copied from (2) at init, thereafter the truth
+#
+# The inversion this MS makes: read-paths stop deriving a project's built-in
+# classes LIVE from its profession, and read the project's own COPIED adopted
+# set instead. These helpers expose (1) and (2) as the seam the copy is made
+# from; the copy itself lives in the project (ADOPTED_TARGET_CLASSES_KEY) and is
+# resolved back to descriptors via ``resolve_adopted_descriptors``.
+# ---------------------------------------------------------------------------
+
+def builtin_descriptor_catalog() -> dict:
+    """Return the global catalog of built-in-as-data descriptors as
+    ``{kind: descriptor}`` (ms-147 e-5397, SPEC 方針4 layer 1). Profession-neutral:
+    every built-in class a project could adopt, indexed by kind. Today the only
+    member is ``release`` (dev's built-in), but a class is added here — not on a
+    profession — so a second profession can adopt the same material. Independent
+    of the manifest: a project's copied kind resolves here even if no profession
+    adopts it by default any more (that is exactly the survive-a-manifest-change
+    guarantee, SPEC 受入条件4)."""
+    return dict(BUILTIN_DESCRIPTOR_CATALOG)
+
+
+def profession_adopted_kinds(profession: str) -> list:
+    """Return the target-class KINDS a profession adopts by default (ms-147
+    e-5397, SPEC 方針4 layer 2) — the manifest's named subset of the catalog,
+    e.g. dev → ``["release"]``, a profession with no built-in default → ``[]``.
+    This is what ``beacon init`` COPIES into the project's adopted set."""
+    return [d["kind"] for d in profession_default_descriptors(profession)
+            if isinstance(d, dict) and (d.get("kind") or "").strip()]
+
+
+def load_adopted_kinds(data: dict):
+    """Return the project's COPIED adopted target-class kinds (list of strings),
+    or ``None`` when the key is ABSENT (ms-147 e-5397). The None-vs-empty
+    distinction is load-bearing: ``None`` = "project predates this feature, fall
+    back to live profession-default derivation" (tolerant compat); ``[]`` =
+    "adopts no built-in class, honour that". Malformed entries are skipped."""
+    raw = (data or {}).get(ADOPTED_TARGET_CLASSES_KEY)
+    if not isinstance(raw, list):
+        return None
+    return [k.strip() for k in raw if isinstance(k, str) and k.strip()]
+
+
+def resolve_adopted_descriptors(data: dict) -> list:
+    """Resolve the project's adopted kinds into built-in descriptors from the
+    global catalog (ms-147 e-5397). Returns ``[]`` when the project adopts none.
+    An adopted kind with no catalog entry is skipped (a data-defined class lives
+    in ``target_classes``, not the built-in catalog, and is unioned separately by
+    ``occupation.effective_descriptors``)."""
+    kinds = load_adopted_kinds(data)
+    if not kinds:
+        return []
+    catalog = builtin_descriptor_catalog()
+    out: list = []
+    for kind in kinds:
+        desc = catalog.get(kind)
+        if desc is not None:
+            out.append(desc)
+    return out
 
 
 def validate_target_classes(data: dict) -> dict:

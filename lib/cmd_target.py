@@ -1181,38 +1181,8 @@ def _phase_from_spec(raw: str, *, terminal: bool) -> dict:
     return phase
 
 
-def _warn_profession_mismatch(data: dict, desc: dict, *, fixable: bool) -> None:
-    """Warn when a target-class declares a profession the project does not use
-    (ms-146 e-5352).
-
-    WHY this is worth a warning rather than silence: the class still REGISTERS,
-    and ``beacon target instances --class <kind>`` still finds it, so everything
-    looks fine — but the profession-scoped reads (``beacon status``, the shared
-    Target projection, the 切り上げシグナル) filter by owning profession, so the
-    class is invisible in exactly the places the owner actually looks. A silent
-    half-working state is the worst outcome; say it at the moment it is created.
-
-    This is not an error, because a mismatch is what NORMALLY happens when a class
-    file is shared between projects — which is the point of declaring classes as
-    data. So: register it, say what will be missing, and name the one-line fix."""
-    import occupation  # local: cmd_target does not otherwise need it
-    project_prof = (occupation.resolve_profession(data) or "").strip().lower()
-    desc_prof = (desc.get("profession") or "").strip().lower()
-    if not desc_prof or desc_prof == project_prof:
-        return
-    kind = desc.get("kind") or "?"
-    print(f"⚠ この target-class の職種は '{desc_prof}' ですが、"
-          f"このプロジェクトの職種は '{project_prof}' です。", file=sys.stderr)
-    print(f"  そのままだと beacon status と切り上げシグナルに出てきません "
-          f"(職種が一致する対象だけを集める仕組みのため)。"
-          f"beacon target instances --class {kind} でだけ見えます。",
-          file=sys.stderr)
-    if fixable:
-        print(f"  直すには: beacon target-class update --kind {kind} "
-              f"--profession {project_prof}", file=sys.stderr)
-    else:
-        print(f"  登録時に合わせるには: --profession {project_prof} を付けてください",
-              file=sys.stderr)
+# ms-147 e-5375: profession-mismatch warning removed (the stamp is provenance now,
+# not a visibility filter). ``--profession`` survives below as a provenance edit.
 
 
 def cmd_target_class_add():
@@ -1318,8 +1288,10 @@ def cmd_target_class_add():
     save_project(data, op={"op": "target_class_add",
                            "kind": desc.get("kind")})
     print(f"target-class 登録: [{desc.get('kind')}] {desc.get('label')} "
-          f"(profession={desc.get('profession')}, type={desc.get('type')})")
-    _warn_profession_mismatch(data, desc, fixable=True)
+          f"(profession={desc.get('profession') or '(なし: 職種中立=どの職種でも利用可)'}, "
+          f"type={desc.get('type')})")
+    # ms-147 e-5375: no profession-mismatch warning — a declared class surfaces
+    # regardless of its provenance stamp (enumeration no longer filters by it).
     print(f"  次: beacon target create --class {desc.get('kind')} "
           f"--label <名前>")
 
@@ -1450,11 +1422,12 @@ def cmd_target_class_update():
         stall_cfg = {"evidence_field": segs[0], "value": segs[1],
                      "threshold": threshold}
 
-    # ms-146 e-5352: correcting which profession OWNS the class. This is not a
-    # field edit, so the additive-only rule does not apply: changing the owner
+    # ms-146 e-5352 / ms-147 e-5375: editing the class's PROVENANCE stamp. This is
+    # not a field edit, so the additive-only rule does not apply: changing it
     # orphans nothing — every record keeps its collection, its id and its shape.
-    # What changes is only which profession's reads pick the class up, and that
-    # is precisely the thing a shared class file gets wrong on arrival.
+    # Since e-5375 the stamp no longer gates visibility (enumeration reads the
+    # project's adopted/effective set, not the stamp), so this is a pure origin
+    # relabel; kept because a shared class file may still carry a wrong origin.
     prof_new = os.environ.get("BEACON_TC_PROFESSION", "").strip().lower()
 
     if not pending and budget_cfg is None and stall_cfg is None and not prof_new:
@@ -1550,8 +1523,8 @@ def cmd_target_class_update():
             print(f"    ※ 既存 {missing} 件はこの field を持ちません。"
                   f"遡って無効にはしません (必須は今後の書き込みにのみ適用)")
     if prof_new:
-        print(f"  + 職種: {prof_new} に変更 "
-              f"(これで beacon status と切り上げシグナルに出るようになります)")
+        print(f"  + profession (出自): {prof_new} に更新 "
+              f"(出自の記録を更新。列挙・可視性は採用集合が決めるため不変)")
     if stall_cfg is not None:
         print(f"  + 打ち切りシグナル: 証跡 {stall_cfg['evidence_field']} が "
               f"「{stall_cfg['value']}」{stall_cfg['threshold']} 回連続で発火")
