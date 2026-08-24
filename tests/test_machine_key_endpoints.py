@@ -59,6 +59,9 @@ class _FakeDB:
         r = self.rows.get((project_id, key_id))
         if not r:
             return None
+        # e-5502 AX review A: 実 backend と同じく冪等 (既に失効済みなら保持)。
+        if r.get("revoked_at"):
+            return dict(r)
         r["revoked_at"] = revoked_at
         return dict(r)
 
@@ -131,6 +134,16 @@ def test_revoke_marks_and_unknown_404(owner_env):
     # 存在しない key の失効は 404。
     r2 = client.delete(f"{MK_PATH}/does-not-exist")
     assert r2.status_code == 404, r2.text
+
+
+def test_revoke_is_idempotent(owner_env):
+    # e-5502 AX review A: 再 revoke しても最初の revoked_at を保持 (上書きしない)。
+    raw = client.post(MK_PATH, json={}).json()["key"]
+    _, key_id, _ = mk.parse_token(raw)
+    first = client.delete(f"{MK_PATH}/{key_id}").json()["machine_key"]
+    second = client.delete(f"{MK_PATH}/{key_id}").json()["machine_key"]
+    assert second["revoked_at"] == first["revoked_at"]
+    assert second["revoked"] is True
 
 
 def test_viewer_forbidden(monkeypatch):

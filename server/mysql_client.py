@@ -1935,6 +1935,9 @@ def revoke_machine_key(project_id: str, key_id: str,
     item = _get("machine_keys", project_id, sk=key_id)
     if not item:
         return None
+    # e-5502 AX review A: 冪等。既に失効済みなら最初の revoked_at を保持する。
+    if item.get("revoked_at"):
+        return dict(item)
     item["revoked_at"] = revoked_at
     _put("machine_keys", project_id, item, sk=key_id)
     return dict(item)

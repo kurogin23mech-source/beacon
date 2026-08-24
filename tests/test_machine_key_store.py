@@ -61,15 +61,17 @@ def test_firestore_delete_cascade_includes_machine_keys():
     assert "machine_keys" in src
 
 
-def test_store_router_reexports_machine_key_crud(monkeypatch):
-    # 既定 backend (firestore) の store_router が 4 関数を re-export していること。
+@pytest.mark.parametrize("backend", ["firestore", "mysql", "dynamodb"])
+def test_store_router_reexports_machine_key_crud(backend, monkeypatch):
+    # e-5502 maint review B: 3 backend 全てで 4 関数が re-export されること。
+    # 従来は firestore のみ検証で、mysql/dynamodb の re-export 抜けを検出できなかった。
     import importlib
-    monkeypatch.delenv("BEACON_STORE_BACKEND", raising=False)
+    monkeypatch.setenv("BEACON_STORE_BACKEND", backend)
     import store_router
     importlib.reload(store_router)
     for fn in ("save_machine_key", "get_machine_key",
                "list_machine_keys", "revoke_machine_key"):
-        assert hasattr(store_router, fn), f"store_router missing {fn}"
+        assert hasattr(store_router, fn), f"{backend} store_router missing {fn}"
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +147,16 @@ def test_revoke_marks_and_missing_returns_none(db):
     assert db.get_machine_key(PID, "k1")["revoked_at"] == "2026-08-24T13:00:00Z"
     # 存在しない key の失効は None。
     assert db.revoke_machine_key(PID, "nope", revoked_at=NOW) is None
+
+
+def test_revoke_idempotent_preserves_first_time(db):
+    # e-5502 AX review A: 再 revoke は最初の revoked_at を保持し上書きしない。
+    _, record = mk.issue(PID, now=NOW, key_id="k1", secret="s1")
+    db.save_machine_key(PID, record)
+    first = db.revoke_machine_key(PID, "k1", revoked_at="2026-08-24T13:00:00Z")
+    assert first["revoked_at"] == "2026-08-24T13:00:00Z"
+    second = db.revoke_machine_key(PID, "k1", revoked_at="2026-08-25T20:00:00Z")
+    assert second["revoked_at"] == "2026-08-24T13:00:00Z"  # 最初の時刻を保持
 
 
 def test_end_to_end_issue_store_verify_revoke(db):

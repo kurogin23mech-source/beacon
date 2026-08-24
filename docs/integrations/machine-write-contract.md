@@ -84,7 +84,9 @@ body:
 - `401`: 鍵が無効 / 失効 / 改竄。
 - `403`: 鍵が別 project のもの、または machine 認証でない (人間トークン)。
 - `404`: `op_id` が project に存在しない。
-- `400`: payload 不正 (`status` が ok/warning/error 以外、`priority` が不正値 等)。
+- `422`: payload の enum 不正 (`status` が ok/warning/error 以外、`priority` が
+  許容値以外)。スキーマ層 (Pydantic) が弾くので OpenAPI にも許容値が enum で出る。
+- `400`: その他の payload 不正 (必須欠落など)。
 
 ## 4. PE detector Lambda の差し替え手順
 

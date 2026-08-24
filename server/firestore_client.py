@@ -1410,8 +1410,13 @@ def revoke_machine_key(project_id: str, key_id: str,
     snap = ref.get()
     if not snap.exists:
         return None
+    existing = snap.to_dict() or {}
+    # e-5502 AX review A: 冪等。既に失効済みなら最初の revoked_at を保持し
+    # 上書きしない (再 revoke で監査証跡=最初の失効時刻を消さない)。
+    if existing.get("revoked_at"):
+        return existing
     ref.update({"revoked_at": revoked_at})
-    return {**(snap.to_dict() or {}), "revoked_at": revoked_at}
+    return {**existing, "revoked_at": revoked_at}
 
 
 # ---------------------------------------------------------------------------

@@ -155,10 +155,12 @@ def test_unknown_op_404(machine_env):
     assert r.status_code == 404, (r.status_code, r.text)
 
 
-def test_invalid_status_400(machine_env):
+def test_invalid_status_422(machine_env):
+    # e-5502 AX review C: status は Literal になったので不正値は Pydantic が 422 で弾く
+    # (core の 400 に届く前に schema 層で reject、OpenAPI にも enum が出る)。
     r = client.post(
         f"/api/projects/{PID}/operations/op-1/run-records",
         json={"batch": "b", "status": "bogus"},
         headers=_auth(machine_env["raw"]),
     )
-    assert r.status_code == 400, (r.status_code, r.text)
+    assert r.status_code == 422, (r.status_code, r.text)

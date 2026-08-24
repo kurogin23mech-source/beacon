@@ -47,7 +47,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
@@ -93,16 +93,22 @@ class MachineKeyIssueBody(BaseModel):
 
 class MachineRunRecordBody(BaseModel):
     # ms-151 e-5476: machine が Operation に直接書く run_record (運転記録)。
+    # e-5502 AX review C: 許容値を Literal で型に載せ OpenAPI schema に enum を出す
+    # (core.run_record_add / incident_open の検証と二重防御)。
     batch: str
-    status: str  # ok | warning | error (core.run_record_add が検証)
+    status: Literal["ok", "warning", "error"]
     description: str = ""
     date: str = ""  # 空なら server 時刻
 
 class MachineIncidentBody(BaseModel):
     # ms-151 e-5476: machine が Operation に直接書く incident (異常記録)。
+    # priority は canonical (highest..lowest) + alias "middle" + 空 を許容
+    # (core の _ACCEPTED_PRIORITIES と一致、alias を狭めない)。
     title: str
     description: str = ""
-    priority: str = ""  # 任意 (core.incident_open が検証)
+    priority: Literal[
+        "highest", "high", "medium", "middle", "low", "lowest", ""
+    ] = ""
     opened_at: str = ""  # 空なら server 時刻
 
 class MilestoneCreate(BaseModel):
