@@ -345,6 +345,12 @@ let wsHealthy = false
 // server 側 push (e-3011) が届いているかを bridge ログから確認でき、e-3013 の
 // 「poll 停止後も push だけでズレなく届くか」検証の telemetry になる。
 let wsPushCount = 0
+// ms-140 (AX review C): set when a bus_event WS push arrives, consumed by the
+// next pollOnce. Lets the "0 events" log distinguish an ordinary idle poll from
+// the silent-DM-loss signature (a push announced an event, yet the very next
+// fetch came back empty because `?since` was ahead). Without this flag both
+// cases printed the same line and a monitoring AI could not tell drop from idle.
+let wsPushSincePoll = false
 
 // interruptible sleep: 通常は指定 ms 待つが、wakePoll() で即座に解決できる。
 let _wakeResolve = null
@@ -475,6 +481,7 @@ async function connectBusWs() {
         const frame = JSON.parse(ev && ev.data)
         if (frame && frame.type === 'bus_event') {
           wsPushCount += 1
+          wsPushSincePoll = true
           log(`bus WS push received (bus_event event_id=${frame.event_id || '?'} total=${wsPushCount})`)
         }
       } catch { /* 非 JSON frame は無視して wakePoll だけする */ }
@@ -1060,63 +1067,88 @@ if (!PROJECT_ID || !SESSION_ID) {
   process.on('SIGINT', () => { stopping = true; log('SIGINT received') })
   process.on('SIGTERM', () => { stopping = true; log('SIGTERM received') })
 
-  // ms-60 follow-up: per-bridge in-memory high-water mark. The bridge owns
-  // the MCP-notification delivery channel; the inbox-hook owns the
-  // AUTONOMOUS-ACTION-block delivery channel. They were sharing the server
-  // cursor — bus.mjs advanced it after every push and the hook then saw an
-  // empty unread set, so AUTONOMOUS blocks never reached the AI. Fix:
-  // bus.mjs no longer touches the server cursor. It tracks its own watermark
-  // here and passes it as ``?since=`` so the next poll skips events it
-  // already handled. The server cursor is now the inbox-hook's single
-  // source of truth.
+  // ms-60 + ms-140: per-bridge delivery watermark, OWNED BY THE BRIDGE and
+  // fully decoupled from the server cursor.
   //
-  // On restart the bridge catches up via ensureCursorPrimed (which reads the
-  // server cursor once) so we don't replay history the hook has already
-  // surfaced.
+  // The bridge owns the MCP-notification (idle-wake) delivery channel; the
+  // inbox-hook owns the AUTONOMOUS-ACTION-block channel. They are meant to be
+  // redundant — either can deliver a DM without the other.
+  //
+  // ms-60 stopped the bridge from *advancing* the server cursor (bus.mjs used
+  // to burn it after every push, so the hook saw an empty unread set and its
+  // AUTONOMOUS blocks never reached the AI). But the bridge still *seeded*
+  // bridgeLastSeen from that same server cursor on startup — and the cursor is
+  // advanced by the inbox-hook to whatever IT surfaced on a prompt. So on
+  // (re)start the bridge inherited the hook's surface point and skipped any
+  // live event the hook had passed but the bridge never idle-woke for:
+  // `?since=<hook cursor>` excluded it and the MCP push never fired
+  // (2026-08-24 prod: since=2026-08-24T08:34:58 silently dropped a live DM).
+  // First-run also primed to "now" and discarded in-flight history.
+  //
+  // ms-140 fix: the bridge tracks its own watermark, persisted under
+  // .beacon/bridges/<sid>.delivery.json, and NEVER reads bus_cursors. The
+  // inbox-hook primes/advances the server cursor for itself (its own
+  // _ensure_cursor_primed in bin/beacon-bus-inbox-hook.py), so decoupling
+  // costs the hook nothing.
+  //   - restart   → resume from our own last_delivered_at (no re-delivery, and
+  //                 no skipping events that arrived while we were down).
+  //   - first run → prime to "now" (bridge-owned), so a brand-new session is
+  //                 not flooded with historical DMs as idle-wakes; the hook
+  //                 advancing bus_cursors can never perturb this.
+  // Exactly-once within and across process lifetimes is guaranteed by an
+  // id-dedup set (dispatchedIds) rather than the timestamp compare alone —
+  // this closes the strict-`>` boundary where two events share a created_at.
   let bridgeLastSeen = ''
+  const DELIVERY_STATE_PATH = path.join(BRIDGES_DIR, `${SESSION_ID}.delivery.json`)
+  const DISPATCHED_IDS_MAX = 512
+  let dispatchedIds = new Set()
 
-  // First-run cursor catchup: if this session has never read the bus before
-  // (no cursor or cursor at epoch zero), advance to "now" without dispatching
-  // any events. Prevents flooding the AI with historical DMs that predate this
-  // session.
-  async function ensureCursorPrimed() {
+  function persistDeliveryState() {
     try {
-      const cur = await apiGet(
-        `/api/projects/${PROJECT_ID}/bus/cursors/${encodeURIComponent(SESSION_ID)}`,
-      )
-      const last = cur && typeof cur === 'object' ? cur.last_seen_at || '' : ''
-      const isUnset = !last || last.startsWith('1970-') || last === '0'
-      if (isUnset) {
-        const now = new Date().toISOString()
-        await apiPost(
-          `/api/projects/${PROJECT_ID}/bus/cursors/${encodeURIComponent(SESSION_ID)}`,
-          { last_seen_at: now },
-        )
-        bridgeLastSeen = now
-        log(`first-run: cursor primed to ${now} (no historical dispatch)`)
-      } else {
-        bridgeLastSeen = last
-        log(`cursor already primed (last_seen_at=${last})`)
+      fs.mkdirSync(BRIDGES_DIR, { recursive: true })
+      // Keep only the most-recent ids (Set preserves insertion order) so the
+      // file stays bounded; 512 covers a full over-fetch window (raw_limit≤400).
+      if (dispatchedIds.size > DISPATCHED_IDS_MAX) {
+        dispatchedIds = new Set([...dispatchedIds].slice(-DISPATCHED_IDS_MAX))
+      }
+      const body = {
+        session_id: SESSION_ID,
+        last_delivered_at: bridgeLastSeen,
+        dispatched_ids: [...dispatchedIds],
+        updated_at: new Date().toISOString(),
+      }
+      fs.writeFileSync(DELIVERY_STATE_PATH, JSON.stringify(body))
+    } catch (e) {
+      // Best-effort: a delivery-state write failure must never kill the loop.
+      // Worst case on restart we re-prime to now (same as a fresh session).
+      log(`delivery-state write failed (non-fatal): ${e.message}`)
+    }
+  }
+
+  // Seed the bridge watermark from our OWN persisted delivery state — never
+  // from the server cursor (which belongs to the inbox-hook). This is the
+  // ms-140 fix: the two delivery channels no longer share the seed, so the
+  // hook advancing bus_cursors can never make the bridge skip a live event.
+  async function ensureBridgeWatermark() {
+    try {
+      if (fs.existsSync(DELIVERY_STATE_PATH)) {
+        const st = JSON.parse(fs.readFileSync(DELIVERY_STATE_PATH, 'utf8'))
+        const last = st && typeof st === 'object' ? (st.last_delivered_at || '') : ''
+        if (last) {
+          bridgeLastSeen = last
+          if (Array.isArray(st.dispatched_ids)) dispatchedIds = new Set(st.dispatched_ids)
+          log(`bridge watermark resumed from delivery state (last_delivered_at=${last}, ids=${dispatchedIds.size})`)
+          return
+        }
       }
     } catch (e) {
-      // Cursor endpoint may 404 when no cursor exists yet; treat as first-run.
-      const msg = String(e?.message || e)
-      if (/\b404\b/.test(msg)) {
-        const now = new Date().toISOString()
-        try {
-          await apiPost(
-            `/api/projects/${PROJECT_ID}/bus/cursors/${encodeURIComponent(SESSION_ID)}`,
-            { last_seen_at: now },
-          )
-          bridgeLastSeen = now
-          log(`first-run: cursor created at ${now} (no historical dispatch)`)
-        } catch (e2) {
-          log(`first-run cursor create failed: ${e2.message}`)
-        }
-      } else {
-        log(`cursor prime check failed: ${msg}`)
-      }
+      log(`delivery-state read failed (non-fatal, treating as first-run): path=${DELIVERY_STATE_PATH} err=${e.message}`)
     }
+    // First run for THIS session's bridge: prime to now so we don't replay
+    // history as idle-wakes. Bridge-owned, persisted immediately.
+    bridgeLastSeen = new Date().toISOString()
+    persistDeliveryState()
+    log(`first-run: bridge watermark primed to ${bridgeLastSeen} (no historical dispatch)`)
   }
 
   // Option C (e-1318): poll-gated heartbeat. The previous heartbeat path
@@ -1220,21 +1252,53 @@ if (!PROJECT_ID || !SESSION_ID) {
     // Pass in-memory bridgeLastSeen as ?since so the bridge does not depend on
     // (and does not perturb) the server cursor. Empty string ⇒ server falls
     // back to its cursor, which is the legacy path used by inbox-hook.
+    // ms-140 (AX review C): consume the "a WS push arrived since the last poll"
+    // flag up front. A push that lands mid-fetch re-sets it for the next poll.
+    const wokenByPush = wsPushSincePoll
+    wsPushSincePoll = false
     const url = `/api/projects/${PROJECT_ID}/bus/unread`
       + `?recipient_id=${encodeURIComponent(SESSION_ID)}`
       + `&since=${encodeURIComponent(bridgeLastSeen)}`
     const events = await apiGet(url)
-    if (!Array.isArray(events) || events.length === 0) return
+    if (!Array.isArray(events) || events.length === 0) {
+      // ms-140: never let a poll return silently. Distinguish two 0-event cases
+      // so a monitoring AI can tell drop from idle (AX review C):
+      //   * wokenByPush → a WS push announced an event for us, yet the very next
+      //     fetch came back empty — typically because `?since=bridgeLastSeen` is
+      //     AHEAD of the announced event. This is the silent-DM-loss signature.
+      //   * otherwise  → an ordinary idle backstop poll with nothing waiting.
+      // Pairing the drop line with the "bus WS push received" line at the same
+      // second turns an invisible drop into a diagnosable one: read the since
+      // watermark off the log and see it excluded a live event.
+      if (wokenByPush) {
+        log(`poll: 0 events after WS push — possible silent drop (since=${bridgeLastSeen || '∅'})`)
+      } else {
+        log(`poll: 0 events (idle, since=${bridgeLastSeen || '∅'})`)
+      }
+      return
+    }
     let latestSeen = null
     for (const evt of events) {
+      // ms-140: exactly-once by event id FIRST. This closes the strict-`>`
+      // boundary the timestamp compare alone could not: the server excludes
+      // created_at == since, so a second event sharing a delivered event's
+      // created_at would otherwise be lost. Tracking dispatched ids makes
+      // delivery idempotent regardless of timestamp ties.
+      if (dispatchedIds.has(evt.event_id)) {
+        log(`skip (already dispatched): id=${evt.event_id} created=${evt.created_at || '?'}`)
+        continue
+      }
       // ms-60 follow-up: defense for the deploy gap. If the server is on an
       // older build that ignores the ?since query (which FastAPI does
       // silently for unknown params, so the call still succeeds but resolves
       // since from the server cursor), the bridge can re-receive the same
-      // events on every poll until the inbox-hook advances the cursor.
-      // Skip anything older than the in-memory watermark to keep MCP pushes
-      // exactly-once during this process's lifetime.
-      if (bridgeLastSeen && (evt.created_at || '') <= bridgeLastSeen) {
+      // events on every poll. Skip anything STRICTLY older than the in-memory
+      // watermark (strict `<`, not `<=`, so a boundary-equal event that has
+      // NOT yet been dispatched still gets through — the id set above is what
+      // prevents re-delivery). ms-140: logged (was a bare `continue`) so a
+      // watermark-ahead skip is observable instead of a silent DM drop.
+      if (bridgeLastSeen && (evt.created_at || '') < bridgeLastSeen) {
+        log(`skip (< watermark ${bridgeLastSeen}): id=${evt.event_id} created=${evt.created_at || '?'}`)
         continue
       }
       // e-1348: stamp `delivered` BEFORE the filter chain. The bridge
@@ -1354,6 +1418,12 @@ if (!PROJECT_ID || !SESSION_ID) {
           },
         })
         log(`pushed event_id=${evt.event_id} ch=${ch} from=${sender}`)
+        // ms-140: record the id as dispatched only after a real MCP push, so
+        // the dedup set tracks exactly-once *delivery* (not mere position).
+        // Filtered events (self-sent / mis-addressed / channel drop) are NOT
+        // added — they advance the watermark by created_at instead, so they are
+        // not re-evaluated once the watermark moves past them.
+        dispatchedIds.add(evt.event_id)
         // e-1348: `opened` is stamped only AFTER mcp.notification resolves
         // — i.e. the harness accepted the channel push. A dropped/filtered
         // event will have delivered_at but no opened_at, which is the
@@ -1363,11 +1433,14 @@ if (!PROJECT_ID || !SESSION_ID) {
       latestSeen = evt.created_at || latestSeen
     }
     if (latestSeen) {
-      // ms-60 follow-up: in-memory only. The server cursor is the
-      // inbox-hook's; the bridge advancing it caused AUTONOMOUS ACTION
-      // blocks to never reach the AI. See bridgeLastSeen comment at top.
+      // ms-60 follow-up: we still NEVER touch the server cursor (the
+      // inbox-hook owns it; the bridge advancing it starved AUTONOMOUS ACTION
+      // blocks). ms-140: persist our OWN delivery watermark + dispatched ids so
+      // a restart resumes from here instead of re-seeding from the hook's
+      // cursor. See the bridgeLastSeen comment block at top.
       bridgeLastSeen = latestSeen
-      log(`bridge watermark advanced to ${latestSeen} (in-memory)`)
+      persistDeliveryState()
+      log(`bridge watermark advanced to ${latestSeen} (persisted)`)
     }
   }
 
@@ -1551,7 +1624,7 @@ if (!PROJECT_ID || !SESSION_ID) {
   // Operations yet (server-side Operation scheduler is ms-66) so no Operation
   // notify is lost.
   async function loop() {
-    await ensureCursorPrimed()
+    await ensureBridgeWatermark()
     await stampColdStartMetadata()
     while (!stopping) {
       // e-1667: each step is wrapped in withWatchdog so a hung await never
