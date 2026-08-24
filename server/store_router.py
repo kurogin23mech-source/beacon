@@ -79,6 +79,8 @@ if _BACKEND == "dynamodb":
         get_machine_key,
         list_machine_keys,
         revoke_machine_key,
+        # Operation-fires claim (ms-95 / e-5477 — re-export was missing, gate dark)
+        claim_operation_fire_if_new,
         # Sessions
         upsert_session,
         stamp_session_actor_email,
@@ -198,6 +200,8 @@ elif _BACKEND == "mysql":
         get_machine_key,
         list_machine_keys,
         revoke_machine_key,
+        # Operation-fires claim (ms-95 / e-5477 — re-export was missing, gate dark)
+        claim_operation_fire_if_new,
         # Sessions
         upsert_session,
         stamp_session_actor_email,
@@ -317,6 +321,8 @@ elif _BACKEND == "firestore":
         get_machine_key,
         list_machine_keys,
         revoke_machine_key,
+        # Operation-fires claim (ms-95 / e-5477 — re-export was missing, gate dark)
+        claim_operation_fire_if_new,
         # Sessions
         upsert_session,
         stamp_session_actor_email,

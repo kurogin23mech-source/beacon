@@ -73,6 +73,11 @@ ENTITIES = [
     # テーブル。pk=project_id, sk=key_id。起動時 create_mysql_tables が
     # CREATE TABLE IF NOT EXISTS で作る (schema が DDL を追い越さない = 無停止 retrofit)。
     "machine_keys",
+    # ms-95 / e-5477: operation-fires claim (定期発火の二重駆動を防ぐ first-write-wins)。
+    # firestore_client にしか無く store_router 未 re-export だったため MySQL/DynamoDB
+    # backend では claim 経路が存在せず dedup が silent に無効だった (e-5477 で発見)。
+    # pk=project_id, sk="{op_id}_{period}"。
+    "operation_fires",
     "sessions",
     "session_logs",
     "operation_envelopes",
@@ -131,6 +136,8 @@ _SUBCOLLECTION_SK_NAMES = {
     # ms-151 / e-5474: machine key subcollection (sk=key_id)。delete_project の
     # cascade 対象 (project を消したら鍵も消える = orphan な認証経路を残さない)。
     "machine_keys": "key_id",
+    # ms-95 / e-5477: operation-fires claim (sk="{op_id}_{period}")。
+    "operation_fires": "fire_key",
     "sessions": "session_id",
     "session_lookup": "lookup_key",
     "session_logs": "session_id",
@@ -1931,6 +1938,41 @@ def revoke_machine_key(project_id: str, key_id: str,
     item["revoked_at"] = revoked_at
     _put("machine_keys", project_id, item, sk=key_id)
     return dict(item)
+
+
+# ---------------------------------------------------------------------------
+# Operation-fires claim (PK=project_id, SK="{op_id}_{period}"). ms-95 / e-5477.
+# ---------------------------------------------------------------------------
+# 定期発火の二重駆動 (Beacon tick + 外部 self-drive) を防ぐ first-write-wins な
+# 発火権先取り。firestore の claim_operation_fire_if_new と同契約。period は
+# operation_period.period_key が cadence から算出したバケット文字列。
+
+def claim_operation_fire_if_new(project_id: str, op_id: str, period: str,
+                                session_id: str) -> dict:
+    """"この project で op_id を period に最初に発火する" を原子的に主張する。
+
+    最初の caller は行を作り ``{"claimed": True, ...}`` を返す。以後の caller は
+    既存行を見て ``{"claimed": False, "claimed_by": <first>, ...}`` を返す。
+    原子性は ``_insert_if_absent`` (PK 重複=IntegrityError→False) が担う。
+    """
+    fire_key = f"{op_id}_{period}"
+    record = {
+        "project_id": project_id,
+        "op_id": op_id,
+        "period": period,
+        "session_id": session_id,
+        "claimed_at": _now_iso_utc(),
+    }
+    created = _insert_if_absent("operation_fires", project_id, record, sk=fire_key)
+    if created:
+        return {"claimed": True, "claimed_by": session_id,
+                "claimed_at": record["claimed_at"]}
+    existing = _get("operation_fires", project_id, sk=fire_key) or {}
+    return {
+        "claimed": False,
+        "claimed_by": existing.get("session_id", ""),
+        "claimed_at": existing.get("claimed_at", ""),
+    }
 
 
 # ---------------------------------------------------------------------------

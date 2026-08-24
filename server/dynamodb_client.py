@@ -72,6 +72,8 @@ _SUBCOLLECTION_SK_NAMES = {
     # テーブル。SK = key_id (project 内で key を一意に指す公開識別子)。secret は
     # hash 化して保存し、平文は持たない (machine_key.build_record)。
     "machine_keys": "key_id",
+    # ms-95 / e-5477: operation-fires claim (sk="{op_id}_{period}")。
+    "operation_fires": "fire_key",
     "sessions": "session_id",
     "session_lookup": "lookup_key",
     "session_logs": "session_id",
@@ -112,6 +114,8 @@ TABLES = {
     "bus_event_approvals": f"{TABLE_PREFIX}-bus_event_approvals",
     # ms-151 / e-5474: machine API key テーブル (PK=project_id, SK=key_id)。
     "machine_keys": f"{TABLE_PREFIX}-machine_keys",
+    # ms-95 / e-5477: operation-fires claim (PK=project_id, SK="{op_id}_{period}")。
+    "operation_fires": f"{TABLE_PREFIX}-operation_fires",
     "sessions": f"{TABLE_PREFIX}-sessions",
     "session_logs": f"{TABLE_PREFIX}-session_logs",
     "operation_envelopes": f"{TABLE_PREFIX}-operation_envelopes",
@@ -1248,6 +1252,53 @@ def revoke_machine_key(project_id: str, key_id: str,
     item["revoked_at"] = revoked_at
     table.put_item(Item=item)
     return dict(item)
+
+
+# ---------------------------------------------------------------------------
+# Operation-fires claim (PK=project_id, SK="{op_id}_{period}"). ms-95 / e-5477.
+# ---------------------------------------------------------------------------
+def claim_operation_fire_if_new(project_id: str, op_id: str, period: str,
+                                session_id: str) -> dict:
+    """"この project で op_id を period に最初に発火する" を原子的に主張する。
+
+    ConditionExpression "attribute_not_exists" で put_item し、Firestore
+    transaction と同じ "最初の 1 回だけ claimed=True" を実現する。競合時は
+    ConditionalCheckFailedException が出るので既存行を読んで claimed=False を返す。
+    ``period`` は operation_period.period_key が cadence から算出したバケット。
+    """
+    fire_key = f"{op_id}_{period}"
+    table = _table("operation_fires")
+    now = _now_iso_utc()
+    try:
+        table.put_item(
+            Item={
+                "project_id": project_id,
+                "fire_key": fire_key,
+                "op_id": op_id,
+                "period": period,
+                "session_id": session_id,
+                "claimed_at": now,
+            },
+            ConditionExpression="attribute_not_exists(fire_key)",
+        )
+        return {"claimed": True, "claimed_by": session_id, "claimed_at": now}
+    except Exception as e:  # noqa: BLE001
+        # boto3 / moto のクライアントエラーは名前で識別 (import パス非依存)。
+        is_conflict = e.__class__.__name__ == "ConditionalCheckFailedException"
+        if not is_conflict and hasattr(e, "response") and isinstance(
+                getattr(e, "response", None), dict):
+            is_conflict = e.response.get("Error", {}).get("Code", "") == \
+                "ConditionalCheckFailedException"
+        if not is_conflict:
+            raise
+        existing = table.get_item(
+            Key={"project_id": project_id, "fire_key": fire_key}
+        ).get("Item") or {}
+        return {
+            "claimed": False,
+            "claimed_by": existing.get("session_id", ""),
+            "claimed_at": existing.get("claimed_at", ""),
+        }
 
 
 # ---------------------------------------------------------------------------
