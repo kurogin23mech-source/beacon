@@ -207,7 +207,7 @@ def delete_project(project_id: str) -> bool:
     # Changelog is project-scoped: when the project is deleted, the audit
     # trail goes with it (no orphan access path).
     for subcol_name in ("documents", "retros", "members", "triggers", "notes",
-                        "changelog", "operation_envelopes"):
+                        "changelog", "operation_envelopes", "machine_keys"):
         _delete_subcollection(doc_ref.collection(subcol_name))
     doc_ref.delete()
     return True
@@ -1342,6 +1342,76 @@ def list_decided_approvals(project_id: str, *, limit: int = 50) -> list[dict]:
     if limit:
         out = out[:limit]
     return out
+
+
+# ---------------------------------------------------------------------------
+# Machine API keys (subcollection: projects/{project_id}/machine_keys/{key_id})
+# ms-151 / e-5474: headless machine 認証の鍵。record は machine_key.build_record が
+# 組み立てた secret_hash-only 形 (平文 secret を保存しない)。verify は token 由来の
+# (project_id, key_id) で get_machine_key を直接引く (scan 不要 = 全 backend O(1))。
+# delete_project の cascade 対象 (project を消したら鍵も消える)。
+# ---------------------------------------------------------------------------
+
+MACHINE_KEYS_SUBCOLLECTION = "machine_keys"
+
+
+def save_machine_key(project_id: str, record: dict) -> dict:
+    """発行済み machine key レコードを保存する (key_id で upsert)。"""
+    (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(MACHINE_KEYS_SUBCOLLECTION)
+        .document(record["key_id"])
+        .set(record)
+    )
+    return record
+
+
+def get_machine_key(project_id: str, key_id: str) -> dict | None:
+    """(project_id, key_id) の key レコードを返す。無ければ None。"""
+    doc = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(MACHINE_KEYS_SUBCOLLECTION)
+        .document(key_id)
+        .get()
+    )
+    if not doc.exists:
+        return None
+    return doc.to_dict()
+
+
+def list_machine_keys(project_id: str) -> list[dict]:
+    """project の全 machine key を新しい順 (created_at 降順) で返す。"""
+    docs = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(MACHINE_KEYS_SUBCOLLECTION)
+        .stream()
+    )
+    rows = [doc.to_dict() for doc in docs]
+    rows.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    return rows
+
+
+def revoke_machine_key(project_id: str, key_id: str,
+                       revoked_at: str) -> dict | None:
+    """key を失効させる (revoked_at を刻む)。無ければ None を返す。"""
+    ref = (
+        get_db()
+        .collection(COLLECTION)
+        .document(project_id)
+        .collection(MACHINE_KEYS_SUBCOLLECTION)
+        .document(key_id)
+    )
+    snap = ref.get()
+    if not snap.exists:
+        return None
+    ref.update({"revoked_at": revoked_at})
+    return {**(snap.to_dict() or {}), "revoked_at": revoked_at}
 
 
 # ---------------------------------------------------------------------------

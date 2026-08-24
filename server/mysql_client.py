@@ -69,6 +69,10 @@ ENTITIES = [
     "bus_nonces",
     "bus_audit",
     "bus_event_approvals",
+    # ms-151 / e-5474: machine API key (headless machine 認証の鍵) の project 配下
+    # テーブル。pk=project_id, sk=key_id。起動時 create_mysql_tables が
+    # CREATE TABLE IF NOT EXISTS で作る (schema が DDL を追い越さない = 無停止 retrofit)。
+    "machine_keys",
     "sessions",
     "session_logs",
     "operation_envelopes",
@@ -124,6 +128,9 @@ _SUBCOLLECTION_SK_NAMES = {
     "bus_nonces": "nonce",
     "bus_audit": "audit_id",
     "bus_event_approvals": "event_id",
+    # ms-151 / e-5474: machine key subcollection (sk=key_id)。delete_project の
+    # cascade 対象 (project を消したら鍵も消える = orphan な認証経路を残さない)。
+    "machine_keys": "key_id",
     "sessions": "session_id",
     "session_lookup": "lookup_key",
     "session_logs": "session_id",
@@ -1880,6 +1887,50 @@ def list_decided_approvals(project_id: str, *, limit: int = 50) -> list[dict]:
     if limit:
         rows = rows[:limit]
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Machine API keys (ms-151 / e-5474). PK=project_id, SK=key_id.
+# ---------------------------------------------------------------------------
+# headless machine 認証の鍵を project 配下に持つ。record は machine_key.build_record
+# が組み立てた secret_hash-only 形。verify は token 由来の (project_id, key_id) で
+# get_machine_key を直接引く (scan 不要)。
+
+def save_machine_key(project_id: str, record: dict) -> dict:
+    """発行済み machine key レコードを保存する (key_id で upsert)。"""
+    item = {**record, "project_id": project_id}
+    _put("machine_keys", project_id, item, sk=record["key_id"])
+    return record
+
+
+def get_machine_key(project_id: str, key_id: str) -> dict | None:
+    """(project_id, key_id) の key レコードを返す。無ければ None。
+
+    ``project_id`` を **落とさない** (bus_event_approvals とは異なる)。machine_key
+    .verify_token が別 project すり替え検知にこの field を読むため surface に残す。
+    """
+    item = _get("machine_keys", project_id, sk=key_id)
+    if not item:
+        return None
+    return dict(item)
+
+
+def list_machine_keys(project_id: str) -> list[dict]:
+    """project の全 machine key を新しい順 (created_at 降順) で返す。"""
+    rows = [dict(it) for it in _query("machine_keys", project_id)]
+    rows.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    return rows
+
+
+def revoke_machine_key(project_id: str, key_id: str,
+                       revoked_at: str) -> dict | None:
+    """key を失効させる (revoked_at を刻む)。無ければ None を返す。"""
+    item = _get("machine_keys", project_id, sk=key_id)
+    if not item:
+        return None
+    item["revoked_at"] = revoked_at
+    _put("machine_keys", project_id, item, sk=key_id)
+    return dict(item)
 
 
 # ---------------------------------------------------------------------------

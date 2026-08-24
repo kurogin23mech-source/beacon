@@ -68,6 +68,10 @@ _SUBCOLLECTION_SK_NAMES = {
     # collocates with its source envelope but is updated independently
     # without touching the HMAC-signed payload.
     "bus_event_approvals": "event_id",
+    # ms-151 / e-5474: machine API key (headless machine 認証の鍵) の project 配下
+    # テーブル。SK = key_id (project 内で key を一意に指す公開識別子)。secret は
+    # hash 化して保存し、平文は持たない (machine_key.build_record)。
+    "machine_keys": "key_id",
     "sessions": "session_id",
     "session_lookup": "lookup_key",
     "session_logs": "session_id",
@@ -106,6 +110,8 @@ TABLES = {
     "bus_audit": f"{TABLE_PREFIX}-bus_audit",
     # ms-70 / e-1712: receiver-side approval decision_stamp sidecar.
     "bus_event_approvals": f"{TABLE_PREFIX}-bus_event_approvals",
+    # ms-151 / e-5474: machine API key テーブル (PK=project_id, SK=key_id)。
+    "machine_keys": f"{TABLE_PREFIX}-machine_keys",
     "sessions": f"{TABLE_PREFIX}-sessions",
     "session_logs": f"{TABLE_PREFIX}-session_logs",
     "operation_envelopes": f"{TABLE_PREFIX}-operation_envelopes",
@@ -1181,6 +1187,67 @@ def list_decided_approvals(project_id: str, *, limit: int = 50) -> list[dict]:
     if limit:
         rows = rows[:limit]
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Machine API keys (ms-151 / e-5474). PK=project_id, SK=key_id.
+# ---------------------------------------------------------------------------
+# headless machine (人が介在しない常駐プログラム) 認証の鍵を project 配下に持つ。
+# record は machine_key.build_record が組み立てた secret_hash-only 形 (平文 secret
+# を保存しない)。verify は token 由来の (project_id, key_id) で get_machine_key を
+# 直接引く (scan 不要 = 全 backend O(1))。
+
+def save_machine_key(project_id: str, record: dict) -> dict:
+    """発行済み machine key レコードを保存する (key_id で upsert)。"""
+    item = {**record, "project_id": project_id}
+    _table("machine_keys").put_item(Item=item)
+    return record
+
+
+def get_machine_key(project_id: str, key_id: str) -> dict | None:
+    """(project_id, key_id) の key レコードを返す。無ければ None。
+
+    ここでは ``project_id`` を **落とさない** (bus_event_approvals とは異なる)。
+    ``project_id`` は machine_key.build_record が載せる正規のデータで、
+    machine_key.verify_token が別 project すり替え検知に読むため、surface に残す。
+    """
+    resp = _table("machine_keys").get_item(
+        Key={"project_id": project_id, "key_id": key_id}
+    )
+    item = resp.get("Item")
+    if not item:
+        return None
+    return dict(item)
+
+
+def list_machine_keys(project_id: str) -> list[dict]:
+    """project の全 machine key を新しい順 (created_at 降順) で返す。"""
+    items: list[dict] = []
+    kwargs: dict = {"KeyConditionExpression": Key("project_id").eq(project_id)}
+    while True:
+        resp = _table("machine_keys").query(**kwargs)
+        items.extend(resp.get("Items", []))
+        last = resp.get("LastEvaluatedKey")
+        if not last:
+            break
+        kwargs["ExclusiveStartKey"] = last
+    rows = [dict(it) for it in items]
+    rows.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    return rows
+
+
+def revoke_machine_key(project_id: str, key_id: str,
+                       revoked_at: str) -> dict | None:
+    """key を失効させる (revoked_at を刻む)。無ければ None を返す。"""
+    table = _table("machine_keys")
+    item = table.get_item(
+        Key={"project_id": project_id, "key_id": key_id}
+    ).get("Item")
+    if not item:
+        return None
+    item["revoked_at"] = revoked_at
+    table.put_item(Item=item)
+    return dict(item)
 
 
 # ---------------------------------------------------------------------------
