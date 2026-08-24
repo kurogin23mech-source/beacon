@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
 
 import commands  # noqa: E402
 import core  # noqa: E402
+import occupation  # noqa: E402
 
 
 @pytest.fixture
@@ -136,3 +137,55 @@ def test_backoffice_seeds_descriptors_and_empty_adopted_set(project_cwd,
     core.validate_project(data)
     out = capsys.readouterr().out
     assert "profession = backoffice" in out
+
+
+def test_backoffice_hyphenated_alias(project_cwd, monkeypatch):
+    # The composition branch accepts both "backoffice" and "back-office"; the
+    # hyphenated alias is a live path, so lock it (PR #669 maintainability #4).
+    monkeypatch.setenv("BEACON_PROFESSION", "back-office")
+    commands.cmd_init()
+    data = _read(project_cwd)
+    assert data["profession"] == "backoffice"   # alias resolves to canonical
+    assert len(data["target_classes"]) > 0
+    assert data["adopted_target_classes"] == []
+    core.validate_project(data)
+
+
+# ---------------------------------------------------------------------------
+# ms-150 seam probe — pin the composition seam (occupation.build_new_project)
+# as the UNIT under test, independent of cmd_init's file-write path (PR #669
+# maintainability #3: testing only through cmd_init would let a re-inlining of
+# the cascade pass silently). Also verifies the seam OWNS normalisation so a raw
+# (un-normalised) profession does not fall through to the data-defined branch
+# (PR #669 AX #1 / maintainability #1 consensus).
+# ---------------------------------------------------------------------------
+
+def test_seam_composes_dev_directly():
+    data = occupation.build_new_project("p", "obj", "dev")
+    assert data["profession"] == "dev"
+    assert data["milestones"] == []
+    assert data["adopted_target_classes"] == ["release"]
+    assert "opportunities" not in data
+
+
+def test_seam_composes_sales_directly():
+    data = occupation.build_new_project("p", "obj", "sales")
+    assert data["profession"] == "sales"
+    assert data["opportunities"] == []
+    assert data["accounts"] == []
+    assert data["adopted_target_classes"] == []
+
+
+def test_seam_normalises_raw_profession():
+    # A caller passing an un-normalised value must still hit the right branch —
+    # the seam owns strip/lower, so "Sales" resolves to the sales builder rather
+    # than silently falling through to the data-defined skeleton.
+    data = occupation.build_new_project("p", "obj", "  SALES  ")
+    assert data["profession"] == "sales"
+    assert data["opportunities"] == []
+
+
+def test_seam_empty_profession_is_dev():
+    data = occupation.build_new_project("p", "obj", "")
+    assert data["profession"] == "dev"
+    assert data["adopted_target_classes"] == ["release"]

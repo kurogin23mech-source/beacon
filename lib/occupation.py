@@ -36,6 +36,9 @@ from __future__ import annotations
 
 import core
 import sales_entities
+import backoffice_seed  # ms-150: delegated init builder, module-level for pattern
+                        # parity with sales_entities (no circular dep — backoffice_seed
+                        # imports nothing that reaches occupation)
 import work_base
 import work_model as _wm
 import target_descriptor as _td   # ms-122 e-3957: data 定義 target-class 記述子
@@ -120,7 +123,21 @@ def build_new_project(name: str, objective: str, profession: str, *,
     EFFECTS stay in the caller (file write, application-map seed, profile prompt,
     "Next:" hints); this is a pure transform with no I/O, matching the
     ``build_sales_project`` / ``build_backoffice_project`` builders it delegates
-    to. ``profession`` must already be normalised (lower / stripped)."""
+    to.
+
+    ``profession`` is normalised (strip / lower) INSIDE this seam, so any caller
+    may pass a raw value — a future call site cannot silently fall through to the
+    data-defined branch by forgetting to normalise (PR #669 AX + maintainability
+    review consensus). Empty string means ``dev`` (the default). ``disclosure_policy``
+    is forwarded verbatim to every branch (``None`` is accepted; the dev / data-
+    defined dicts always carry the key)."""
+    # Own normalisation at the seam (idempotent for cmd_init, which already
+    # normalises) so the precondition is not an invisible caller-side obligation.
+    # Empty coalesces to the default "dev" HERE (not only in the branch below) so
+    # the profession field AND the adopted-set lookup agree — otherwise a blank
+    # profession yields a "dev" project whose adopted set is empty (missing
+    # release): the latent inconsistency the seam unit-test surfaced (PR #669 AX #2).
+    profession = (profession or "").strip().lower() or "dev"
     if profession == "sales":
         data = sales_entities.build_sales_project(
             name, objective, retro_day=retro_day,
@@ -128,7 +145,6 @@ def build_new_project(name: str, objective: str, profession: str, *,
     elif profession in ("backoffice", "back-office"):
         # ms-122 e-3958: back-office's target-classes (契約 / 評価 / 月次決算 /
         # 勤怠ウォッチ) come from a descriptor seed, not a code container.
-        import backoffice_seed
         data = backoffice_seed.build_backoffice_project(
             name, objective, retro_day=retro_day,
             disclosure_policy=disclosure_policy)
