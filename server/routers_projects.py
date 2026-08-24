@@ -90,6 +90,20 @@ class MachineKeyIssueBody(BaseModel):
     # どの machine の鍵かを一覧で識別するためのメモで、省略可。
     label: str = ""
 
+class MachineRunRecordBody(BaseModel):
+    # ms-151 e-5476: machine が Operation に直接書く run_record (運転記録)。
+    batch: str
+    status: str  # ok | warning | error (core.run_record_add が検証)
+    description: str = ""
+    date: str = ""  # 空なら server 時刻
+
+class MachineIncidentBody(BaseModel):
+    # ms-151 e-5476: machine が Operation に直接書く incident (異常記録)。
+    title: str
+    description: str = ""
+    priority: str = ""  # 任意 (core.incident_open が検証)
+    opened_at: str = ""  # 空なら server 時刻
+
 class MilestoneCreate(BaseModel):
     title: str
     target_date: str = ""
@@ -1850,6 +1864,80 @@ def make_router(
                 detail=f"machine key '{key_id}' not found in project "
                        f"'{project_id}'")
         return {"machine_key": machine_key_mod.redacted(updated)}
+
+    # -----------------------------------------------------------------------
+    # Machine direct-write endpoints (ms-151 / e-5476) — run_record / incident。
+    # -----------------------------------------------------------------------
+    # headless machine が「起きた事実 (run_record / incident)」を cloud へ直接書く
+    # 口。SPEC 設計方針2: 記録は外向き action ではないので envelope 照合を課さない。
+    # 正当性は「有効な machine key + その key が属する project + 対象 op 実在」の
+    # 3 点で担保する (別 project への書き込みは弾く)。
+
+    def _require_machine_writer(request: Request, project_id: str) -> None:
+        """直書きは machine 認証必須、かつ鍵の project == URL の project を強制する。
+
+        - auth 無効 (dev モード) は許可 (ローカル検証)。
+        - 人間 / CLI トークン (= request.state.machine 不在) は 403 (この口は machine
+          専用。人間は既存の CLI ローカル書き込み経路を使う)。
+        - machine の所属 project ≠ URL の project は 403 (別 project 書き込み拒否)。
+        """
+        if not is_auth_enabled():
+            return
+        machine = getattr(request.state, "machine", None)
+        if not machine:
+            raise HTTPException(
+                status_code=403,
+                detail="machine key required for direct-write endpoints")
+        if machine.get("project_id") != project_id:
+            raise HTTPException(
+                status_code=403,
+                detail="machine key does not belong to this project")
+
+    def _machine_op_write(project_id: str, op_name: str, actor: str, mutate):
+        """op mutate を load→apply→broadcast で永続化し、ValueError を 404/400 に翻訳。
+
+        core.* が投げる ValueError は「Operation not found」(→404) か検証失敗
+        (Invalid status / priority など、→400) のどちらか。message で振り分ける。
+        """
+        def op(data: dict):
+            _operation, entry = mutate(data)
+            return data, entry
+        try:
+            return _apply_op_and_broadcast(
+                project_id, op, op_name=op_name, actor=actor)
+        except ValueError as e:
+            msg = str(e)
+            if "not found" in msg.lower():
+                raise HTTPException(status_code=404, detail=msg)
+            raise HTTPException(status_code=400, detail=msg)
+
+    @router.post("/api/projects/{project_id}/operations/{op_id}/run-records")
+    def machine_add_run_record(project_id: str, op_id: str,
+                               body: MachineRunRecordBody, request: Request,
+                               user: dict = Depends(require_auth)):
+        """machine が Operation に run_record を直接書く (machine 認証、envelope 不要)。"""
+        _require_machine_writer(request, project_id)
+        return _machine_op_write(
+            project_id, op_name="operation.run_record.machine",
+            actor=user.get("sub", ""),
+            mutate=lambda data: core.run_record_add(
+                data, op_id, batch=body.batch, status=body.status,
+                description=body.description, date=body.date or ""),
+        )
+
+    @router.post("/api/projects/{project_id}/operations/{op_id}/incidents")
+    def machine_open_incident(project_id: str, op_id: str,
+                              body: MachineIncidentBody, request: Request,
+                              user: dict = Depends(require_auth)):
+        """machine が Operation に incident を直接書く (machine 認証、envelope 不要)。"""
+        _require_machine_writer(request, project_id)
+        return _machine_op_write(
+            project_id, op_name="operation.incident.machine",
+            actor=user.get("sub", ""),
+            mutate=lambda data: core.incident_open(
+                data, op_id, title=body.title, description=body.description,
+                priority=body.priority or "", opened_at=body.opened_at or ""),
+        )
 
     return router
 
