@@ -782,6 +782,9 @@ _NOUN_SCOPE = {
     "incident": "L1", "init": "L1", "member": "L1", "note": "L1",
     "onboarding": "L1", "operation": "L1", "org": "L1", "resume": "L1",
     "run": "L1", "search": "L1", "session": "L1", "sessions": "L1",
+    # ms-151 e-5474: `machine-key issue/list/revoke` — headless machine 認証の鍵
+    # 管理。全職種共通の認証基盤 (auth / operation / run と同じ L1 infra)。
+    "machine": "L1",
     "stop": "L1", "trek": "L1", "trigger": "L1",
     # ms-134 e-5061: former L0 verbs promoted to L1. These are instance-universal
     # tooling (health check / self-update / project scaffold / skill install /

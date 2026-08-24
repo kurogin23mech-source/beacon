@@ -1734,6 +1734,57 @@ except ValueError as e:
                 ;;
         esac
         ;;
+    machine-key)
+        # ms-151 / e-5474: headless machine 認証の鍵の発行 CLI (owner 限定)。
+        ensure_project
+        _mk_sub="${2:-}"
+        shift 2 || true
+        case "$_mk_sub" in
+            issue)
+                _mk_label=""
+                _mk_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --label) _mk_label="${2:-}"; shift 2 ;;
+                        --json)  _mk_json="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_MACHINE_KEY_LABEL="$_mk_label" BEACON_JSON="$_mk_json" \
+                    python3 "$COMMANDS_PY" machine_key_issue
+                ;;
+            list)
+                _mk_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) _mk_json="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *) shift ;;
+                    esac
+                done
+                BEACON_JSON="$_mk_json" python3 "$COMMANDS_PY" machine_key_list
+                ;;
+            revoke)
+                _mk_id=""
+                _mk_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) _mk_json="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *) if [[ -z "$_mk_id" ]]; then _mk_id="$1"; fi; shift ;;
+                    esac
+                done
+                BEACON_MACHINE_KEY_ID="$_mk_id" BEACON_JSON="$_mk_json" \
+                    python3 "$COMMANDS_PY" machine_key_revoke
+                ;;
+            *)
+                echo "Usage: beacon machine-key issue [--label \"...\"] [--json]"
+                echo "       beacon machine-key list [--json]"
+                echo "       beacon machine-key revoke <key_id> [--json]"
+                ;;
+        esac
+        ;;
     incident)
         ensure_project
         case "${2:-}" in
