@@ -1224,7 +1224,17 @@ if (!PROJECT_ID || !SESSION_ID) {
       + `?recipient_id=${encodeURIComponent(SESSION_ID)}`
       + `&since=${encodeURIComponent(bridgeLastSeen)}`
     const events = await apiGet(url)
-    if (!Array.isArray(events) || events.length === 0) return
+    if (!Array.isArray(events) || events.length === 0) {
+      // ms-140: never let a poll return silently. A WS push announces that a
+      // specific event exists for us; if the very next fetch comes back empty
+      // — typically because `?since=bridgeLastSeen` is AHEAD of the announced
+      // event — that is the silent-DM-loss signature. Logging it (paired with
+      // the "bus WS push received" line at the same second) turns an invisible
+      // drop into a diagnosable one: you can read the since watermark off the
+      // log and see it excluded a live event. Backstop-paced, so not noisy.
+      log(`poll: 0 events (since=${bridgeLastSeen || '∅'})`)
+      return
+    }
     let latestSeen = null
     for (const evt of events) {
       // ms-60 follow-up: defense for the deploy gap. If the server is on an
@@ -1235,6 +1245,11 @@ if (!PROJECT_ID || !SESSION_ID) {
       // Skip anything older than the in-memory watermark to keep MCP pushes
       // exactly-once during this process's lifetime.
       if (bridgeLastSeen && (evt.created_at || '') <= bridgeLastSeen) {
+        // ms-140: this branch silently dropped any event whose created_at was
+        // <= the in-memory watermark, leaving NO trace — the exact reason a
+        // freshly-pushed DM could vanish with no diagnosable signal. Log it so
+        // a watermark-ahead skip is observable (was: bare `continue`).
+        log(`skip (<= watermark ${bridgeLastSeen}): id=${evt.event_id} created=${evt.created_at || '?'}`)
         continue
       }
       // e-1348: stamp `delivered` BEFORE the filter chain. The bridge
