@@ -262,3 +262,125 @@ def test_append_descriptor_rejects_duplicate_kind_and_prefix():
     assert any("id_prefix" in p for p in td.append_descriptor(data, dup_prefix))
     # only the first descriptor was actually written
     assert td.descriptor_kinds(data) == ["ringi"]
+
+
+# ---------------------------------------------------------------------------
+# Phase adjacency graph (ms-152 e-5480) — cycle-permitted descriptor-side
+# declaration of "which phase can follow which". Implicit linear order is the
+# backward-compatible default; an explicit ``next`` graph may cycle for a
+# persistent class but must stay acyclic for a finite one.
+# ---------------------------------------------------------------------------
+
+# A persistent monitoring Operation modelled as a descriptor: its execution loop
+# cycles idle → due → running → idle forever, so it declares an explicit graph
+# with a back edge and carries NO terminal phase.
+MONITOR = {
+    "kind": "monitor",
+    "label": "監視",
+    "type": "persistent",
+    "id_prefix": "mon-",
+    "collection": "monitors",
+    "phases": [
+        {"key": "idle", "next": ["due"]},
+        {"key": "due", "next": ["running"]},
+        {"key": "running", "next": ["idle"]},
+    ],
+}
+
+
+def test_implicit_linear_adjacency_is_the_default():
+    # A descriptor with no `next` reads as the historical linear order.
+    assert not td.has_explicit_adjacency(CONTRACT)
+    assert td.phase_successors(CONTRACT, "drafting") == ["legal_review"]
+    assert td.phase_successors(CONTRACT, "legal_review") == ["signed"]
+    assert td.phase_successors(CONTRACT, "signed") == []      # last / terminal
+    assert td.phase_adjacency(CONTRACT) == {
+        "drafting": ["legal_review"],
+        "legal_review": ["signed"],
+        "signed": [],
+    }
+
+
+def test_implicit_graph_is_acyclic():
+    assert td.phase_graph_has_cycle(CONTRACT) is False
+
+
+def test_unknown_phase_has_no_successors():
+    assert td.phase_successors(CONTRACT, "ghost") == []
+    assert td.phase_successors({"kind": "x"}, "anything") == []
+
+
+def test_explicit_cyclic_adjacency_declared_and_read():
+    assert td.has_explicit_adjacency(MONITOR)
+    assert td.phase_successors(MONITOR, "running") == ["idle"]   # back edge
+    assert td.phase_adjacency(MONITOR) == {
+        "idle": ["due"], "due": ["running"], "running": ["idle"]}
+    assert td.phase_graph_has_cycle(MONITOR) is True
+
+
+def test_explicit_dead_end_phase_has_no_successors():
+    # In explicit mode a phase with no `next` is a dead end (not the linear next).
+    desc = dict(MONITOR, phases=[
+        {"key": "idle", "next": ["running"]},
+        {"key": "running"},           # no `next` → dead end, not → idle
+    ])
+    assert td.phase_successors(desc, "running") == []
+
+
+def test_persistent_cycle_is_valid():
+    assert td.validate_descriptor(MONITOR) == []
+    assert td.validate_target_classes(_project([MONITOR])) == {}
+
+
+def test_finite_cycle_is_rejected():
+    # Same cyclic graph but declared finite (single-shot) → the acyclic invariant
+    # fires: a finite target must march toward a terminal, never loop.
+    desc = dict(MONITOR, type="single-shot")
+    problems = td.validate_descriptor(desc)
+    assert any("循環" in p for p in problems)
+
+
+def test_dangling_next_edge_flagged():
+    desc = dict(MONITOR, phases=[
+        {"key": "idle", "next": ["ghost"]},
+        {"key": "due", "next": ["idle"]},
+    ])
+    problems = td.validate_descriptor(desc)
+    assert any("ghost" in p and "宣言されていない" in p for p in problems)
+
+
+def test_duplicate_next_edge_flagged():
+    desc = dict(MONITOR, phases=[
+        {"key": "idle", "next": ["due", "due"]},
+        {"key": "due", "next": ["idle"]},
+    ])
+    problems = td.validate_descriptor(desc)
+    assert any("重複" in p for p in problems)
+
+
+def test_malformed_next_not_a_list_flagged():
+    desc = dict(MONITOR, phases=[
+        {"key": "idle", "next": "due"},       # string, not a list
+        {"key": "due", "next": ["idle"]},
+    ])
+    problems = td.validate_descriptor(desc)
+    assert any("リスト" in p for p in problems)
+    # tolerant read: the malformed edge reads as no successors, never raises.
+    assert td.phase_successors(desc, "idle") == []
+
+
+def test_terminal_phase_cannot_declare_successors():
+    desc = dict(CONTRACT, phases=[
+        {"key": "drafting", "next": ["signed"]},
+        {"key": "signed", "next": ["drafting"], "terminal": True},
+    ])
+    problems = td.validate_descriptor(desc)
+    assert any("終端" in p for p in problems)
+
+
+def test_release_default_descriptor_unaffected():
+    # The built-in release descriptor (finite, implicit linear) still validates
+    # and reads acyclic — no regression from the adjacency feature.
+    assert td.validate_descriptor(td.RELEASE_DESCRIPTOR) == []
+    assert td.phase_graph_has_cycle(td.RELEASE_DESCRIPTOR) is False
+    assert td.phase_successors(td.RELEASE_DESCRIPTOR, "draft") == ["published"]

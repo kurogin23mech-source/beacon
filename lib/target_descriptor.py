@@ -61,6 +61,19 @@ ADOPTED_TARGET_CLASSES_KEY = "adopted_target_classes"
 WORK_ITEM_FIELDS_KEY = "work_item_fields"
 EVIDENCE_FIELDS_KEY = "evidence_fields"
 
+# Per-phase adjacency declaration (ms-152 e-5480). A phase MAY declare ``next``:
+# the list of phase keys reachable from it in one step — the descriptor-side
+# expression of the phase-graph, which spine §4b permits to CYCLE (SPEC 方針1
+# 「機構は基底・語彙は記述子」). When NO phase declares ``next`` the class reads as
+# the historical IMPLICIT LINEAR order (phase[i] → phase[i+1], last → end): a
+# descriptor written before this feature is unchanged (additive/tolerant compat,
+# memo pnhATs37xgIxEkpFI8uR). When ANY phase declares ``next`` the class is in
+# EXPLICIT-adjacency mode: each phase's successors are exactly its declared list
+# (a phase with no ``next`` is a dead end), so a persistent class can close a
+# cycle (idle → due → running → idle) that the linear order cannot express. A
+# finite (single-shot) class's graph must stay ACYCLIC — validated below.
+PHASE_NEXT_KEY = "next"
+
 # A target-class is either finite (single-shot, completes once — like a
 # development milestone or a sales opportunity) or ongoing (persistent, recurs —
 # like a development operation or a monthly close). SPEC §3.
@@ -173,6 +186,94 @@ def terminal_phase_keys(desc: dict) -> list:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Phase adjacency graph (ms-152 e-5480) — the descriptor-side declaration of
+# "which phase can follow which", cycle-permitted. Everything here is a pure,
+# tolerant read over ``desc``; the transition VALIDATOR that consults this graph
+# to decide a legal move is a separate task (e-5481). Design 方針1: the mechanism
+# is the base, the vocabulary (the graph's shape) is the descriptor's.
+# ---------------------------------------------------------------------------
+
+def _phase_next_list(phase: dict) -> Optional[list]:
+    """Return a phase entry's declared ``next`` successor keys as a cleaned list
+    of non-empty strings, or ``None`` when the phase declares no (well-formed)
+    ``next``. A malformed ``next`` (present but not a list) reads as ``None``
+    here — the tolerant-read contract — while ``validate_descriptor`` surfaces it
+    as a problem so the author is not left with a silently dropped edge."""
+    if not isinstance(phase, dict) or PHASE_NEXT_KEY not in phase:
+        return None
+    raw = phase.get(PHASE_NEXT_KEY)
+    if not isinstance(raw, list):
+        return None
+    return [k.strip() for k in raw if isinstance(k, str) and k.strip()]
+
+
+def has_explicit_adjacency(desc: dict) -> bool:
+    """True when the descriptor declares an EXPLICIT phase-graph — any phase
+    carries a well-formed ``next`` list (ms-152 e-5480). False → the class reads
+    as the implicit linear order (backward compat). This is the mode switch every
+    adjacency read below pivots on, so a reader (and the e-5481 validator) asks
+    ONE place whether the graph is authored or derived."""
+    for phase in (desc.get("phases") or []):
+        if _phase_next_list(phase) is not None:
+            return True
+    return False
+
+
+def phase_successors(desc: dict, phase_key: str) -> list:
+    """Return the phase keys reachable from ``phase_key`` in one step (ms-152
+    e-5480). In EXPLICIT-adjacency mode this is the phase's declared ``next`` list
+    (``[]`` when it declares none — a dead end); otherwise it is the historical
+    IMPLICIT linear successor (the next phase in declaration order, or ``[]`` at
+    the last phase). An unknown / malformed ``phase_key`` returns ``[]``
+    (tolerant). Successors are returned even when they point BACK to an earlier
+    phase — a cycle is legal here; policing direction is the validator's job, not
+    this reader's."""
+    keys = phase_keys(desc)
+    want = (phase_key or "").strip()
+    if want not in keys:
+        return []
+    if has_explicit_adjacency(desc):
+        return _phase_next_list(get_phase(desc, want) or {}) or []
+    idx = keys.index(want)
+    return [keys[idx + 1]] if idx + 1 < len(keys) else []
+
+
+def phase_adjacency(desc: dict) -> dict:
+    """Return the whole phase-graph as ``{phase_key: [successor_keys]}`` over
+    every declared phase, in declaration order (ms-152 e-5480). This is the single
+    shape the transition validator (e-5481) consults so cyclic and non-cyclic
+    classes are checked on ONE path. Empty ``{}`` for a phase-less class."""
+    return {k: phase_successors(desc, k) for k in phase_keys(desc)}
+
+
+def phase_graph_has_cycle(desc: dict) -> bool:
+    """True when the phase-graph contains a cycle — a phase reachable from itself
+    by following ``next`` edges (ms-152 e-5480). A persistent target's execution
+    loop (idle → due → running → idle) IS such a cycle and is legal; a finite
+    (single-shot) target must be acyclic, which ``validate_descriptor`` enforces
+    by consulting this. Implicit linear graphs are acyclic by construction, so
+    this only ever returns True for an explicitly-authored back edge. Edges to
+    undeclared phases are ignored here (that is a separate validation problem)."""
+    adjacency = phase_adjacency(desc)
+    WHITE, GREY, BLACK = 0, 1, 2
+    colour = {k: WHITE for k in adjacency}
+
+    def _visit(node: str) -> bool:
+        colour[node] = GREY
+        for nxt in adjacency.get(node, []):
+            if nxt not in colour:
+                continue                       # dangling edge — not a cycle here
+            if colour[nxt] == GREY:
+                return True                    # back edge → cycle
+            if colour[nxt] == WHITE and _visit(nxt):
+                return True
+        colour[node] = BLACK
+        return False
+
+    return any(colour[k] == WHITE and _visit(k) for k in adjacency)
+
+
 def field_choices(field: dict) -> list:
     """Return the fixed set of values a field declaration allows, or ``[]`` when
     it allows any value (ms-146 e-5338).
@@ -268,6 +369,66 @@ def fields_at_phase(desc: dict, phase_key: str) -> list:
 _REQUIRED_STRING_KEYS = ("kind", "label", "id_prefix", "collection")
 
 
+def _validate_phase_adjacency(desc: dict, label: str) -> list:
+    """Problems for a descriptor's phase-graph ``next`` declarations (ms-152
+    e-5480). Absent ``next`` everywhere = implicit linear order, nothing to check.
+    When declared, each edge must be well-formed, land on a declared phase, not
+    leave a terminal phase, and — for a FINITE (single-shot) class — not form a
+    cycle. A PERSISTENT class may cycle (that is the whole point: idle → due →
+    running → idle), so the cycle check is gated on ``type``."""
+    phases = [p for p in (desc.get("phases") or []) if isinstance(p, dict)]
+    declared = set(phase_keys(desc))
+    terminals = set(terminal_phase_keys(desc))
+    problems: list = []
+    saw_declaration = False
+    for phase in phases:
+        if PHASE_NEXT_KEY not in phase:
+            continue
+        saw_declaration = True
+        pkey = (phase.get("key") or "?").strip() or "?"
+        raw = phase.get(PHASE_NEXT_KEY)
+        if not isinstance(raw, list):
+            problems.append(
+                f"[{label}] phase '{pkey}' の '{PHASE_NEXT_KEY}' は "
+                f"phase key のリストである必要があります (現在: {raw!r})")
+            continue
+        seen: set = set()
+        for entry in raw:
+            if not isinstance(entry, str) or not entry.strip():
+                problems.append(
+                    f"[{label}] phase '{pkey}' の '{PHASE_NEXT_KEY}' に "
+                    f"空または文字列でない値があります: {entry!r}")
+                continue
+            succ = entry.strip()
+            if succ in seen:
+                problems.append(
+                    f"[{label}] phase '{pkey}' の '{PHASE_NEXT_KEY}' に "
+                    f"'{succ}' が重複しています")
+            seen.add(succ)
+            if succ not in declared:
+                problems.append(
+                    f"[{label}] phase '{pkey}' の遷移先 '{succ}' は宣言されていない "
+                    f"phase です (宣言済: {' / '.join(sorted(declared)) or 'なし'})")
+        # A terminal phase is an END — declaring a successor out of it contradicts
+        # 'terminal'. The engine tells its owner to climb toward the terminal, so a
+        # rung ABOVE it (a next edge) would make the mechanism recommend moving past
+        # 'finished' (same rationale as the no-phase-after-terminal rule above).
+        if (phase.get("key") or "").strip() in terminals and seen:
+            problems.append(
+                f"[{label}] 終端 phase '{pkey}' は '{PHASE_NEXT_KEY}' で遷移先を"
+                f"持てません (終端は行き止まりです)。循環させたい場合は "
+                f"'terminal' を外し、type を persistent にしてください")
+    # Finite classes must be acyclic; a persistent class may cycle. Only check when
+    # an explicit graph was authored (implicit linear is acyclic by construction).
+    if saw_declaration and desc.get("type") == TYPE_SINGLE_SHOT \
+            and phase_graph_has_cycle(desc):
+        problems.append(
+            f"[{label}] type が '{TYPE_SINGLE_SHOT}' (有限) なのに phase 遷移が"
+            f"循環しています。有限 target は終端へ向かう非循環グラフである必要が"
+            f"あります。回り続ける運用なら type を '{TYPE_PERSISTENT}' にしてください")
+    return problems
+
+
 def validate_descriptor(desc: dict) -> list:
     """Return a list of human-readable problem strings for one descriptor
     (empty list = valid). This is a STRUCTURE check, not a data-immutability
@@ -347,6 +508,13 @@ def validate_descriptor(desc: dict) -> list:
                 f"フェイズは順序付きの梯子なので、終端の上に段を置くと機構が"
                 f"『そこまで登れ』と指示することになります。終端を最後にし、"
                 f"やり過ぎた分は終端 phase の field として記録してください")
+
+    # Phase adjacency graph (ms-152 e-5480) — validate the descriptor-declared
+    # ``next`` edges: each must be well-formed and reference a declared phase, a
+    # terminal phase must have no successors, and a FINITE class must stay acyclic
+    # (a persistent class may cycle). Kept in its own helper so this check reads as
+    # one unit and the finite/persistent split lives in one place.
+    problems.extend(_validate_phase_adjacency(desc, label))
 
     # changelog slot (ms-142 e-5255 AX review medium): if declared, it must be
     # {arm: str, recorder: str} with a DESCRIPTOR-SAFE recorder. Surfacing a bad
