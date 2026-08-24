@@ -3471,6 +3471,36 @@ def operation_set_execution_phase(data: dict, op_id: str, to_phase: str, *,
     return op
 
 
+# ms-152 e-5483: the monitoring cycle's FIRST LIVE APPLICATION. A recorded run is proof
+# the Operation fired (due), ran (running) and finished — so its execution cycle lands
+# back at ``idle``, traversing the legal edges from wherever it currently sits. This map
+# is the route each starting phase takes to complete one monitoring loop; ``paused`` is
+# deliberately empty — a run recorded against a paused monitor does NOT auto-resume it
+# (paused's run suppression is e-5484's concern, not this driver's).
+_OPERATION_RUN_ROUTE_TO_IDLE: dict[str, tuple[str, ...]] = {
+    "idle": ("due", "running", "idle"),
+    "due": ("running", "idle"),
+    "running": ("idle",),
+    "paused": (),
+}
+
+
+def operation_run_cycle_complete(data: dict, op_id: str, *,
+                                 actor: str = "", reason: str = "run recorded") -> dict:
+    """Advance an Operation's execution cycle to reflect one COMPLETED monitoring run —
+    idle→due→running→idle from wherever it currently sits, landing at ``idle`` — stamping
+    each hop via ``operation_set_execution_phase`` (ms-152 e-5483). Returns the operation.
+
+    This is what makes the idle→due→running→idle loop ACTUALLY transition in the real
+    flow (SPEC 受入条件5), rather than merely being declarable: ``run_record_add`` calls it
+    so recording a run drives the cycle. A ``paused`` Operation is left untouched (its run
+    suppression lands in e-5484); every other starting phase walks its legal route home."""
+    op = _find_operation(data, op_id)
+    for nxt in _OPERATION_RUN_ROUTE_TO_IDLE.get(operation_execution_phase(op), ()):
+        operation_set_execution_phase(data, op_id, nxt, actor=actor, reason=reason)
+    return op
+
+
 def operation_update(data: dict, op_id: str, *,
                      title: str = "", schedule: str = "",
                      activation_hint: str = "", objective: str = "",
@@ -3574,6 +3604,11 @@ def run_record_add(data: dict, op_id: str, *,
         "meta": {"created_by": _get_actor()},
     }
     op.setdefault("entries", []).append(entry)
+    # ms-152 e-5483: recording a run drives the monitoring cycle back to idle (the loop's
+    # first live application). Only for an ``open`` (activated / running) Operation — a
+    # run against a todo/in_progress/closed definition does not move an execution cycle.
+    if op.get("status") == "open":
+        operation_run_cycle_complete(data, op_id, reason="run recorded")
     return op, entry
 
 

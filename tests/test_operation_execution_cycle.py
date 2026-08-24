@@ -22,7 +22,10 @@ import target_descriptor as td  # noqa: E402
 
 
 def _op(status="open", **extra):
-    return {"operations": [dict({"id": "op-1", "title": "監視", "status": status,
+    # ``milestones`` is present (empty) because run_record_add allocates an entry id
+    # via next_entry_id, which walks the milestones collection.
+    return {"milestones": [],
+            "operations": [dict({"id": "op-1", "title": "監視", "status": status,
                                  "meta": {}}, **extra)]}
 
 
@@ -133,3 +136,59 @@ def test_execution_cycle_uses_shared_adjacency_validator():
     assert td.adjacency_allows(adj, "idle", "idle") is True        # no-op
     # the graph is genuinely cyclic (a persistent execution loop).
     assert "idle" in core.OPERATION_EXECUTION_CYCLE["running"]
+
+
+# --- first live application: recording a run drives the cycle (e-5483) --------
+
+def test_run_record_drives_full_cycle_from_idle_to_idle():
+    # An open Operation at idle: recording a run traverses idle→due→running→idle,
+    # landing back at idle ready for the next fire (the loop actually transitions).
+    data = _op(status="open")           # default execution phase = idle
+    core.run_record_add(data, "op-1", batch="disk", status="ok",
+                        description="ディスク使用率 42%")
+    assert core.operation_execution_phase(data["operations"][0]) == "idle"
+    # each hop of the loop was audit-stamped.
+    meta = data["operations"][0]["meta"]
+    assert meta["exec_due_at"] and meta["exec_running_at"] and meta["exec_idle_at"]
+
+
+def test_run_record_completes_cycle_from_running():
+    data = _op(status="open", execution_phase="running")
+    core.run_record_add(data, "op-1", batch="disk", status="ok", description="x")
+    assert core.operation_execution_phase(data["operations"][0]) == "idle"
+
+
+def test_run_record_on_paused_does_not_resume():
+    # A run recorded against a paused monitor must NOT auto-resume it (e-5484 owns
+    # paused). The cycle stays paused; only the run_record entry is appended.
+    data = _op(status="open", execution_phase="paused")
+    _, entry = core.run_record_add(data, "op-1", batch="disk", status="ok",
+                                   description="x")
+    assert core.operation_execution_phase(data["operations"][0]) == "paused"
+    assert entry["type"] == "run_record"
+
+
+def test_run_record_on_non_open_operation_leaves_cycle_untouched():
+    # A run against a todo/in_progress definition does not move an execution cycle.
+    data = _op(status="in_progress")
+    core.run_record_add(data, "op-1", batch="disk", status="ok", description="x")
+    assert "execution_phase" not in data["operations"][0]   # default-on-read idle
+
+
+def test_run_cycle_complete_is_reusable_driver():
+    # The driver walks legal edges home from any starting phase.
+    data = _op(status="open", execution_phase="due")
+    core.operation_run_cycle_complete(data, "op-1")
+    assert core.operation_execution_phase(data["operations"][0]) == "idle"
+
+
+def test_repeated_runs_keep_looping():
+    # Two runs in a row: the op returns to idle each time (the loop is repeatable).
+    data = _op(status="open")
+    core.run_record_add(data, "op-1", batch="b1", status="ok", description="1")
+    assert core.operation_execution_phase(data["operations"][0]) == "idle"
+    core.run_record_add(data, "op-1", batch="b2", status="warning", description="2")
+    assert core.operation_execution_phase(data["operations"][0]) == "idle"
+    runs = [e for e in data["operations"][0]["entries"]
+            if e.get("type") == "run_record"]
+    assert len(runs) == 2
