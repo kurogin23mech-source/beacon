@@ -345,6 +345,12 @@ let wsHealthy = false
 // server 側 push (e-3011) が届いているかを bridge ログから確認でき、e-3013 の
 // 「poll 停止後も push だけでズレなく届くか」検証の telemetry になる。
 let wsPushCount = 0
+// ms-140 (AX review C): set when a bus_event WS push arrives, consumed by the
+// next pollOnce. Lets the "0 events" log distinguish an ordinary idle poll from
+// the silent-DM-loss signature (a push announced an event, yet the very next
+// fetch came back empty because `?since` was ahead). Without this flag both
+// cases printed the same line and a monitoring AI could not tell drop from idle.
+let wsPushSincePoll = false
 
 // interruptible sleep: 通常は指定 ms 待つが、wakePoll() で即座に解決できる。
 let _wakeResolve = null
@@ -475,6 +481,7 @@ async function connectBusWs() {
         const frame = JSON.parse(ev && ev.data)
         if (frame && frame.type === 'bus_event') {
           wsPushCount += 1
+          wsPushSincePoll = true
           log(`bus WS push received (bus_event event_id=${frame.event_id || '?'} total=${wsPushCount})`)
         }
       } catch { /* 非 JSON frame は無視して wakePoll だけする */ }
@@ -1135,7 +1142,7 @@ if (!PROJECT_ID || !SESSION_ID) {
         }
       }
     } catch (e) {
-      log(`delivery-state read failed (non-fatal, treating as first-run): ${e.message}`)
+      log(`delivery-state read failed (non-fatal, treating as first-run): path=${DELIVERY_STATE_PATH} err=${e.message}`)
     }
     // First run for THIS session's bridge: prime to now so we don't replay
     // history as idle-wakes. Bridge-owned, persisted immediately.
@@ -1245,19 +1252,29 @@ if (!PROJECT_ID || !SESSION_ID) {
     // Pass in-memory bridgeLastSeen as ?since so the bridge does not depend on
     // (and does not perturb) the server cursor. Empty string ⇒ server falls
     // back to its cursor, which is the legacy path used by inbox-hook.
+    // ms-140 (AX review C): consume the "a WS push arrived since the last poll"
+    // flag up front. A push that lands mid-fetch re-sets it for the next poll.
+    const wokenByPush = wsPushSincePoll
+    wsPushSincePoll = false
     const url = `/api/projects/${PROJECT_ID}/bus/unread`
       + `?recipient_id=${encodeURIComponent(SESSION_ID)}`
       + `&since=${encodeURIComponent(bridgeLastSeen)}`
     const events = await apiGet(url)
     if (!Array.isArray(events) || events.length === 0) {
-      // ms-140: never let a poll return silently. A WS push announces that a
-      // specific event exists for us; if the very next fetch comes back empty
-      // — typically because `?since=bridgeLastSeen` is AHEAD of the announced
-      // event — that is the silent-DM-loss signature. Logging it (paired with
-      // the "bus WS push received" line at the same second) turns an invisible
-      // drop into a diagnosable one: you can read the since watermark off the
-      // log and see it excluded a live event. Backstop-paced, so not noisy.
-      log(`poll: 0 events (since=${bridgeLastSeen || '∅'})`)
+      // ms-140: never let a poll return silently. Distinguish two 0-event cases
+      // so a monitoring AI can tell drop from idle (AX review C):
+      //   * wokenByPush → a WS push announced an event for us, yet the very next
+      //     fetch came back empty — typically because `?since=bridgeLastSeen` is
+      //     AHEAD of the announced event. This is the silent-DM-loss signature.
+      //   * otherwise  → an ordinary idle backstop poll with nothing waiting.
+      // Pairing the drop line with the "bus WS push received" line at the same
+      // second turns an invisible drop into a diagnosable one: read the since
+      // watermark off the log and see it excluded a live event.
+      if (wokenByPush) {
+        log(`poll: 0 events after WS push — possible silent drop (since=${bridgeLastSeen || '∅'})`)
+      } else {
+        log(`poll: 0 events (idle, since=${bridgeLastSeen || '∅'})`)
+      }
       return
     }
     let latestSeen = null
