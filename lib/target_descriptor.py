@@ -274,15 +274,35 @@ def phase_graph_has_cycle(desc: dict) -> bool:
     return any(colour[k] == WHITE and _visit(k) for k in adjacency)
 
 
+def adjacency_allows(adjacency: dict, from_state: str, to_state: str) -> bool:
+    """Pure graph legality over a RAW ``{state: [successors]}`` adjacency map (ms-152
+    e-5482): a move is legal when ``to_state`` is a declared successor of ``from_state``,
+    and a same-state move is a no-op that is always legal (mirroring
+    ``core.validate_lifecycle_transition``'s same-from/to allowance). The successor
+    collections may be any iterable (``list`` / ``frozenset``); an unknown ``from_state``
+    has no successors and every move out of it is illegal.
+
+    This is the occupation-agnostic CORE that both descriptor phases
+    (``is_legal_phase_transition``, below) and the built-in Operation execution cycle
+    (``core.OPERATION_EXECUTION_CYCLE``, ms-152 e-5482) share, so cyclic and acyclic
+    graphs are checked on ONE path — the SPEC 方針3 single-validator goal made literal
+    rather than re-implemented per caller."""
+    src = (from_state or "").strip()
+    dst = (to_state or "").strip()
+    if src == dst:
+        return True
+    return dst in (adjacency.get(src) or ())
+
+
 def is_legal_phase_transition(desc: dict, from_phase: str, to_phase: str) -> bool:
-    """Whether ``from_phase → to_phase`` is a legal edge in the phase-graph (ms-152
-    e-5481) — the graph-driven generalization of ``core.validate_lifecycle_transition``'s
-    monotonic table. A move is legal when ``to_phase`` is a declared successor of
-    ``from_phase`` (read from ``phase_successors``); a same-phase move is a no-op and
-    always legal (mirroring the monotonic guard's same-from/to allowance). Because it
-    reads the adjacency graph, a CYCLE edge (running → idle) is legal exactly when the
-    descriptor declared it, and a BACKWARD move in an acyclic graph is rejected exactly
-    because no edge was declared — cyclic and non-cyclic classes are checked on ONE path.
+    """Whether ``from_phase → to_phase`` is a legal edge in a descriptor's phase-graph
+    (ms-152 e-5481) — the graph-driven generalization of
+    ``core.validate_lifecycle_transition``'s monotonic table. Delegates to
+    ``adjacency_allows`` over ``phase_adjacency(desc)`` (the shared primitive), so a
+    CYCLE edge (running → idle) is legal exactly when the descriptor declared it, and a
+    BACKWARD move in an acyclic graph is rejected exactly because no edge was declared —
+    cyclic and non-cyclic classes are checked on the SAME path as the Operation
+    execution cycle.
 
     ⚠ This is the pure legality predicate; the ENGINE (``target_engine.advance_target``)
     decides WHEN to consult it: it enforces the graph only for a descriptor that declares
@@ -290,11 +310,7 @@ def is_legal_phase_transition(desc: dict, from_phase: str, to_phase: str) -> boo
     permissive (the human-is-master kickback the engine has always allowed). So calling
     this on an implicit class still answers 'is this a forward step', but the engine does
     not turn that answer into a rejection there."""
-    src = (from_phase or "").strip()
-    dst = (to_phase or "").strip()
-    if src == dst:
-        return True
-    return dst in phase_successors(desc, src)
+    return adjacency_allows(phase_adjacency(desc), from_phase, to_phase)
 
 
 def field_choices(field: dict) -> list:

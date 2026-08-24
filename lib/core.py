@@ -3394,6 +3394,83 @@ def operation_set_status(data: dict, op_id: str, status: str) -> dict:
     return op
 
 
+# ms-152 e-5482: the Operation EXECUTION CYCLE — a SECOND state arm, separate from the
+# definition lifecycle above (LIFECYCLE_TRANSITIONS['operation'], todo→…→closed, monotonic).
+#
+# WHY a second arm (SPEC 方針2 / P3): ``status`` is the life of the Operation DEFINITION
+# (build it → activate it → fold it away), and that is correctly monotonic — you do not
+# un-close a folded Operation. But while an Operation is ``open`` it RUNS, and running is
+# a loop with no end: 待機 (idle) → 実行時刻が来た (due) → 実行中 (running) → 待機 again. That
+# loop cannot live on ``status`` — a cycle on a monotonic field is a contradiction, and
+# mixing the two would let "一時停止 the monitor" mistakenly fold the definition. So the
+# execution cycle is its OWN field, advanced on its OWN graph, leaving ``status`` untouched.
+#
+# It is a CYCLIC adjacency graph, validated by the SAME graph-driven validator the
+# descriptor phases use (target_descriptor.adjacency_allows, ms-152 e-5481) — no second
+# transition table. idle→due→running→idle is the monitoring loop (wired live in e-5483);
+# ``paused`` is the human stop/resume off-ramp (its fire-suppression lands in e-5484).
+OPERATION_EXECUTION_CYCLE: dict[str, frozenset[str]] = {
+    "idle": frozenset({"due", "paused"}),
+    "due": frozenset({"running", "paused"}),
+    "running": frozenset({"idle", "paused"}),
+    "paused": frozenset({"idle"}),
+}
+# The record field holding the execution-cycle state, and the state a never-run
+# Operation reads as. DEFAULT-ON-READ (not written at creation): an Operation created
+# before this feature — or one still being assembled (todo / in_progress) — has no field
+# and reads as ``idle``, so nothing needs migrating (tolerant-read compat).
+EXECUTION_PHASE_FIELD = "execution_phase"
+EXECUTION_PHASE_INITIAL = "idle"
+VALID_EXECUTION_PHASES = frozenset(OPERATION_EXECUTION_CYCLE)
+
+
+def operation_execution_phase(op: dict) -> str:
+    """Return an Operation's current execution-cycle state, defaulting to ``idle`` when
+    the field is absent (ms-152 e-5482). Tolerant: a non-dict / missing field reads as
+    the initial ``idle`` rather than raising, so every reader sees a well-defined state
+    even for an Operation created before the execution cycle existed."""
+    if not isinstance(op, dict):
+        return EXECUTION_PHASE_INITIAL
+    return op.get(EXECUTION_PHASE_FIELD) or EXECUTION_PHASE_INITIAL
+
+
+def operation_set_execution_phase(data: dict, op_id: str, to_phase: str, *,
+                                  actor: str = "", reason: str = "") -> dict:
+    """Advance an Operation's EXECUTION cycle (idle / due / running / paused),
+    independent of its definition-lifecycle ``status`` (ms-152 e-5482). Returns the op.
+
+    The move is validated against ``OPERATION_EXECUTION_CYCLE`` via the shared
+    graph-driven validator (``target_descriptor.adjacency_allows``): a declared edge —
+    including the cyclic ``running → idle`` back-edge — passes, an undeclared one raises
+    with the legal set (原則3 recoverable). A same-phase move is a no-op. The write is
+    the execution field PLUS a ``meta['exec_{phase}_at/_by/_reason']`` audit stamp (who /
+    when / why), mirroring ``operation_set_status``'s convention but under an ``exec_``
+    prefix so the two arms' stamps never collide. ``status`` is NEVER touched here — the
+    definition lifecycle and the execution cycle are separate by construction (AC3/AC4)."""
+    import target_descriptor as _td
+    want = (to_phase or "").strip()
+    if want not in VALID_EXECUTION_PHASES:
+        raise ValueError(
+            f"Invalid execution phase: {want!r}. "
+            f"Valid: {', '.join(sorted(VALID_EXECUTION_PHASES))}")
+    op = _find_operation(data, op_id)
+    cur = operation_execution_phase(op)
+    adjacency = {k: sorted(v) for k, v in OPERATION_EXECUTION_CYCLE.items()}
+    if not _td.adjacency_allows(adjacency, cur, want):
+        allowed = sorted(OPERATION_EXECUTION_CYCLE.get(cur, frozenset()))
+        raise ValueError(
+            f"illegal operation execution transition {cur!r} → {want!r}. "
+            f"Allowed from {cur!r}: {allowed or 'none'}.")
+    op[EXECUTION_PHASE_FIELD] = want
+    meta = op.setdefault("meta", {})
+    stamp = _now_iso()
+    meta[f"exec_{want}_at"] = stamp
+    meta[f"exec_{want}_by"] = actor or _get_actor()
+    if reason:
+        meta[f"exec_{want}_reason"] = reason
+    return op
+
+
 def operation_update(data: dict, op_id: str, *,
                      title: str = "", schedule: str = "",
                      activation_hint: str = "", objective: str = "",
