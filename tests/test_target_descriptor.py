@@ -384,3 +384,14 @@ def test_release_default_descriptor_unaffected():
     assert td.validate_descriptor(td.RELEASE_DESCRIPTOR) == []
     assert td.phase_graph_has_cycle(td.RELEASE_DESCRIPTOR) is False
     assert td.phase_successors(td.RELEASE_DESCRIPTOR, "draft") == ["published"]
+
+
+def test_is_legal_phase_transition_reads_the_graph():
+    # ms-152 e-5481: pure legality predicate over the adjacency graph.
+    assert td.is_legal_phase_transition(MONITOR, "idle", "due") is True
+    assert td.is_legal_phase_transition(MONITOR, "running", "idle") is True   # cycle
+    assert td.is_legal_phase_transition(MONITOR, "idle", "running") is False  # skip
+    assert td.is_legal_phase_transition(MONITOR, "idle", "idle") is True      # no-op
+    # implicit-linear CONTRACT: forward is a declared (implicit) edge, backward is not.
+    assert td.is_legal_phase_transition(CONTRACT, "drafting", "legal_review") is True
+    assert td.is_legal_phase_transition(CONTRACT, "signed", "drafting") is False

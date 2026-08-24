@@ -180,6 +180,13 @@ def next_phase_after(desc: dict, rec) -> str:
     if not phases or not isinstance(rec, dict):
         return ""
     cur = current_phase(rec) or phases[0]
+    # ms-152 e-5481: an EXPLICIT graph has no "next in declaration order" — a bare
+    # advance follows the single declared successor (or is ambiguous / a dead end,
+    # which this reports as "no single next" = ""). Kept in lockstep with the
+    # bare-advance branch of advance_target so the hint and the actual move agree.
+    if td.has_explicit_adjacency(desc):
+        succ = td.phase_successors(desc, cur)
+        return succ[0] if len(succ) == 1 else ""
     try:
         idx = phases.index(cur)
     except ValueError:
@@ -219,12 +226,41 @@ def advance_target(data: dict, desc: dict, target_id: str, *,
             f"記述子 '{desc.get('kind')}' は phase を持たないため phase 進行できません")
 
     old = current_phase(rec) or phases[0]
+    # ms-152 e-5481: when the descriptor declares an EXPLICIT phase-graph, both the
+    # bare advance and the ``--to`` move are validated against its adjacency (cycles
+    # pass, non-declared edges — e.g. a backward step with no back edge — are
+    # rejected). An IMPLICIT-linear class keeps its historical behaviour EXACTLY:
+    # bare advance = next-in-order, ``--to`` = any declared phase (the permissive,
+    # human-is-master kickback), so no existing descriptor's behaviour moves.
+    explicit = td.has_explicit_adjacency(desc)
     if to_phase:
         want = to_phase.strip()
         if want not in phases:
             raise TargetEngineError(
                 f"未知の phase '{want}' です (宣言済: {' / '.join(phases)})")
+        if explicit and not td.is_legal_phase_transition(desc, old, want):
+            succ = td.phase_successors(desc, old)
+            raise TargetEngineError(
+                f"phase '{old}' から '{want}' へは遷移できません "
+                f"(宣言された遷移先: {' / '.join(succ) or 'なし (行き止まり)'})。"
+                f"循環を許すには記述子の '{old}' phase の "
+                f"'{td.PHASE_NEXT_KEY}' に '{want}' を宣言してください")
         new = want
+    elif explicit:
+        # Explicit graph, bare advance: follow the SINGLE declared successor. Zero
+        # successors is a dead end (close instead); more than one is ambiguous and
+        # must be disambiguated with ``--to`` (the graph, not declaration order,
+        # decides — a cyclic phase has no "next in order").
+        succ = td.phase_successors(desc, old)
+        if not succ:
+            raise TargetEngineError(
+                f"{target_id} の phase '{old}' には宣言された遷移先がありません "
+                f"(完了は beacon target close)")
+        if len(succ) > 1:
+            raise TargetEngineError(
+                f"phase '{old}' の遷移先が複数あります ({' / '.join(succ)})。"
+                f"--to <phase> でどれへ進むか指定してください")
+        new = succ[0]
     else:
         try:
             idx = phases.index(old)
@@ -816,7 +852,13 @@ def infer_next_move(desc: dict, rec: dict) -> str:
     if phases and cur in phases:
         if is_terminal_phase(desc, cur):
             return f"完了する (beacon target close --class {desc.get('kind', '')})"
-        nxt = phases[phases.index(cur) + 1]
+        # ms-152 e-5481: derive the next phase through the graph-aware helper rather
+        # than declaration-order indexing — the latter raises IndexError on a cyclic
+        # class whose current phase is last-declared but loops back (idle→due→running
+        # →idle). An ambiguous / dead-end phase yields no single next move.
+        nxt = next_phase_after(desc, rec)
+        if not nxt:
+            return ""
         label = (td.get_phase(desc, nxt) or {}).get("label") or nxt
         return f"次フェーズへ進める: {label}"
     return ""

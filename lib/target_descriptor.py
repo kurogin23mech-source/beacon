@@ -274,6 +274,29 @@ def phase_graph_has_cycle(desc: dict) -> bool:
     return any(colour[k] == WHITE and _visit(k) for k in adjacency)
 
 
+def is_legal_phase_transition(desc: dict, from_phase: str, to_phase: str) -> bool:
+    """Whether ``from_phase → to_phase`` is a legal edge in the phase-graph (ms-152
+    e-5481) — the graph-driven generalization of ``core.validate_lifecycle_transition``'s
+    monotonic table. A move is legal when ``to_phase`` is a declared successor of
+    ``from_phase`` (read from ``phase_successors``); a same-phase move is a no-op and
+    always legal (mirroring the monotonic guard's same-from/to allowance). Because it
+    reads the adjacency graph, a CYCLE edge (running → idle) is legal exactly when the
+    descriptor declared it, and a BACKWARD move in an acyclic graph is rejected exactly
+    because no edge was declared — cyclic and non-cyclic classes are checked on ONE path.
+
+    ⚠ This is the pure legality predicate; the ENGINE (``target_engine.advance_target``)
+    decides WHEN to consult it: it enforces the graph only for a descriptor that declares
+    an EXPLICIT adjacency (``has_explicit_adjacency``), keeping an implicit-linear class
+    permissive (the human-is-master kickback the engine has always allowed). So calling
+    this on an implicit class still answers 'is this a forward step', but the engine does
+    not turn that answer into a rejection there."""
+    src = (from_phase or "").strip()
+    dst = (to_phase or "").strip()
+    if src == dst:
+        return True
+    return dst in phase_successors(desc, src)
+
+
 def field_choices(field: dict) -> list:
     """Return the fixed set of values a field declaration allows, or ``[]`` when
     it allows any value (ms-146 e-5338).

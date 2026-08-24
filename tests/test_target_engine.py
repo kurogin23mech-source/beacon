@@ -477,3 +477,144 @@ def test_phaseless_advance_raises():
         assert False
     except te.TargetEngineError as e:
         assert "phase" in str(e)
+
+
+# ---------------------------------------------------------------------------
+# Graph-driven phase transitions (ms-152 e-5481) — a descriptor with an EXPLICIT
+# adjacency graph advances by its declared edges (cycles pass, non-declared moves
+# rejected). An implicit-linear descriptor (CONTRACT) is UNCHANGED — its permissive
+# kickback (test_advance_to_explicit_phase_allows_moving_back) still holds.
+# ---------------------------------------------------------------------------
+
+# A persistent monitoring Operation modelled as a descriptor whose execution loop
+# cycles idle → due → running → idle. Declared explicitly, so the engine enforces
+# the graph.
+MONITOR = {
+    "kind": "monitor",
+    "label": "監視",
+    "type": "persistent",
+    "id_prefix": "mon-",
+    "collection": "monitors",
+    "phases": [
+        {"key": "idle", "label": "待機", "next": ["due"]},
+        {"key": "due", "label": "実行時刻", "next": ["running"]},
+        {"key": "running", "label": "実行中", "next": ["idle"]},
+    ],
+}
+
+
+def _mon_data():
+    return {"name": "t"}
+
+
+def test_explicit_bare_advance_follows_single_successor():
+    data = _mon_data()
+    rec = te.create_target(data, MONITOR, label="ディスク監視")
+    assert te.current_phase(rec) == "idle"
+    _, old, new = te.advance_target(data, MONITOR, rec["id"])   # idle → due
+    assert (old, new) == ("idle", "due")
+    _, _, new = te.advance_target(data, MONITOR, rec["id"])     # due → running
+    assert new == "running"
+
+
+def test_explicit_cycle_back_edge_is_legal():
+    data = _mon_data()
+    rec = te.create_target(data, MONITOR, label="ディスク監視")
+    te.advance_target(data, MONITOR, rec["id"])                 # → due
+    te.advance_target(data, MONITOR, rec["id"])                 # → running
+    # running → idle is a declared back edge: the cycle closes.
+    _, old, new = te.advance_target(data, MONITOR, rec["id"], to_phase="idle")
+    assert (old, new) == ("running", "idle")
+    # and the loop can go round again.
+    _, _, new = te.advance_target(data, MONITOR, rec["id"])
+    assert new == "due"
+
+
+def test_explicit_non_adjacent_move_is_rejected():
+    data = _mon_data()
+    rec = te.create_target(data, MONITOR, label="ディスク監視")
+    # idle → running skips the declared idle → due edge; not adjacent → rejected.
+    try:
+        te.advance_target(data, MONITOR, rec["id"], to_phase="running")
+        assert False, "expected rejection"
+    except te.TargetEngineError as e:
+        assert "遷移できません" in str(e)
+
+
+def test_explicit_acyclic_backward_move_is_rejected():
+    # An explicitly-declared forward-only chain (no back edge) rejects reverse
+    # moves — "非循環 target では逆行を弾く" (SPEC 受入条件2).
+    chain = dict(MONITOR, type="single-shot", phases=[
+        {"key": "a", "next": ["b"]},
+        {"key": "b", "next": ["c"]},
+        {"key": "c", "terminal": True},
+    ])
+    data = {"name": "t"}
+    rec = te.create_target(data, chain, label="x")
+    te.advance_target(data, chain, rec["id"])                   # a → b
+    try:
+        te.advance_target(data, chain, rec["id"], to_phase="a")  # backward
+        assert False, "expected rejection"
+    except te.TargetEngineError as e:
+        assert "遷移できません" in str(e)
+
+
+def test_explicit_bare_advance_dead_end_raises():
+    chain = dict(MONITOR, type="single-shot", phases=[
+        {"key": "a", "next": ["b"]},
+        {"key": "b", "terminal": True},   # no successors → dead end
+    ])
+    data = {"name": "t"}
+    rec = te.create_target(data, chain, label="x")
+    te.advance_target(data, chain, rec["id"])                   # a → b
+    try:
+        te.advance_target(data, chain, rec["id"])              # bare advance at b
+        assert False, "expected dead-end raise"
+    except te.TargetEngineError as e:
+        assert "遷移先がありません" in str(e)
+
+
+def test_explicit_bare_advance_ambiguous_requires_to():
+    forky = dict(MONITOR, phases=[
+        {"key": "idle", "next": ["due", "paused"]},   # two successors
+        {"key": "due", "next": ["idle"]},
+        {"key": "paused", "next": ["idle"]},
+    ])
+    data = {"name": "t"}
+    rec = te.create_target(data, forky, label="x")
+    try:
+        te.advance_target(data, forky, rec["id"])             # ambiguous
+        assert False, "expected ambiguity raise"
+    except te.TargetEngineError as e:
+        assert "複数" in str(e)
+    # disambiguated with --to it works.
+    _, _, new = te.advance_target(data, forky, rec["id"], to_phase="paused")
+    assert new == "paused"
+
+
+def test_next_phase_after_graph_aware():
+    data = _mon_data()
+    rec = te.create_target(data, MONITOR, label="x")
+    assert te.next_phase_after(MONITOR, rec) == "due"          # idle → due
+    rec["phase"] = "running"
+    assert te.next_phase_after(MONITOR, rec) == "idle"         # back edge, no IndexError
+
+
+def test_infer_next_move_no_indexerror_on_cycle():
+    # running is last-declared but loops back — the old declaration-order index
+    # would IndexError here; the graph-aware path returns the loop hint instead.
+    rec = {"phase": "running", "work_items": [], "evidence": []}
+    hint = te.infer_next_move(MONITOR, rec)
+    assert "待機" in hint or "idle" in hint     # next is idle (label 待機)
+
+
+def test_implicit_linear_advance_unchanged():
+    # Regression guard: CONTRACT (implicit-linear) keeps permissive kickback.
+    data = _data()
+    rec = te.create_target(data, CONTRACT, label="C",
+                           fields={"counterparty": "X"})
+    te.advance_target(data, CONTRACT, rec["id"])               # → legal_review
+    te.advance_target(data, CONTRACT, rec["id"])               # → signed
+    _, old, new = te.advance_target(data, CONTRACT, rec["id"],
+                                    to_phase="drafting")        # backward, allowed
+    assert (old, new) == ("signed", "drafting")
