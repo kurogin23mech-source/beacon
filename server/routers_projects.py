@@ -56,6 +56,7 @@ from pydantic import BaseModel
 import store_router as db  # e-1544: same backend-routing binding app.py uses
 import core
 import machine_key as machine_key_mod  # ms-151 e-5474: headless machine 認証の鍵
+import operation_period  # ms-151 e-5477: operation-fires claim の period バケット
 import operations
 import trek as trek_mod
 import envelope as envelope_mod
@@ -1533,19 +1534,31 @@ def make_router(
         retrigger storms when ``run_record`` lands locally but cloud sync lag
         makes the next scheduler tick still see "no run_record yet").
 
-        Response: ``{claimed: bool, claimed_by: str, claimed_at: str}``. Date is
-        server clock (UTC) so all sessions agree on the calendar day boundary
-        even across timezone-mixed machines.
+        Response: ``{claimed: bool, claimed_by: str, claimed_at: str}``.
+
+        ms-151 / e-5477: the claim key is a **cadence-derived period bucket**
+        (``operation_period.period_key``) instead of the raw calendar day.
+        Day-or-coarser cadences (daily / weekdays / weekly) still bucket by date
+        (= identical to the old key, zero behaviour change), while sub-day
+        cadences (hourly / N-minute) get a finer bucket so multiple same-day
+        fires are not collapsed into "the first fire of the day". The bucket is
+        computed from the server clock (UTC) so all sessions agree on the
+        boundary even across timezone-mixed machines.
 
         Any project member (= owner / editor / viewer) may claim. The claim
         itself is not a privileged action; the gate exists to dedup honest
         parallel writers, not to enforce access.
         """
-        _load(project_id, user)  # membership check (any role)
+        data = _load(project_id, user)  # membership check (any role) + project data
         import datetime
-        today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+        # cadence を op の schedule.frequency から引く (無ければ空 = 日付粒度で backward compat)。
+        op = next((o for o in data.get("operations", [])
+                   if o.get("id") == op_id), None)
+        frequency = ((op or {}).get("schedule") or {}).get("frequency", "")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        period = operation_period.period_key(frequency, now)
         return db.claim_operation_fire_if_new(
-            project_id, op_id, today, body.session_id or ""
+            project_id, op_id, period, body.session_id or ""
         )
 
     @router.post("/api/projects/{project_id}/log")
