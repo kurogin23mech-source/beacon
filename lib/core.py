@@ -3501,6 +3501,42 @@ def operation_run_cycle_complete(data: dict, op_id: str, *,
     return op
 
 
+# ms-152 e-5484: human-triggered PAUSE / RESUME of the execution cycle (SPEC 方針5).
+# An operator can deliberately stop a monitor and start it again; while paused its
+# scheduled fire is suppressed (enforced in cmd_trigger._auto_fire_operation_triggers).
+# This is DISTINCT from the tick's failure-backoff (自動の間引き): backoff is the machine
+# thinning out fires after repeated failures, paused is a person saying "hold this" — the
+# two carry different meaning, so paused is never set automatically by backoff.
+
+def operation_pause(data: dict, op_id: str, *, actor: str = "",
+                    reason: str = "") -> dict:
+    """PAUSE an Operation's execution cycle at the operator's request (ms-152 e-5484):
+    move it to ``paused`` so its scheduled fire is suppressed until it is resumed.
+    Legal from any active state (idle / due / running); already-paused is a no-op. The
+    who / when / why is audit-stamped like any execution transition. Returns the op."""
+    return operation_set_execution_phase(data, op_id, "paused",
+                                         actor=actor, reason=reason)
+
+
+def operation_resume(data: dict, op_id: str, *, actor: str = "",
+                     reason: str = "") -> dict:
+    """RESUME a paused Operation at the operator's request (ms-152 e-5484): move it back
+    to ``idle`` so the next scheduled fire is honoured again. Already-idle is a no-op
+    (nothing to resume). Raises if the Operation is mid-cycle (due / running) rather than
+    paused — "resume" only applies to something a person paused, and due→idle /
+    running→idle here would misrepresent a live run as an operator resume. Returns the op."""
+    op = _find_operation(data, op_id)
+    cur = operation_execution_phase(op)
+    if cur == "idle":
+        return op
+    if cur != "paused":
+        raise ValueError(
+            f"operation {op_id} is not paused (execution phase={cur!r}); "
+            f"resume only applies to a paused Operation")
+    return operation_set_execution_phase(data, op_id, "idle",
+                                         actor=actor, reason=reason)
+
+
 def operation_update(data: dict, op_id: str, *,
                      title: str = "", schedule: str = "",
                      activation_hint: str = "", objective: str = "",

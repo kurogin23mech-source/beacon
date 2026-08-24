@@ -192,3 +192,90 @@ def test_repeated_runs_keep_looping():
     runs = [e for e in data["operations"][0]["entries"]
             if e.get("type") == "run_record"]
     assert len(runs) == 2
+
+
+# --- human-triggered pause / resume (e-5484) ---------------------------------
+
+def test_pause_moves_to_paused_and_stamps():
+    data = _op(status="open")
+    core.operation_pause(data, "op-1", actor="human", reason="メンテ中")
+    op = data["operations"][0]
+    assert core.operation_execution_phase(op) == "paused"
+    assert op["meta"]["exec_paused_by"] == "human"
+    assert op["meta"]["exec_paused_reason"] == "メンテ中"
+
+
+def test_pause_from_running_is_legal():
+    data = _op(status="open", execution_phase="running")
+    core.operation_pause(data, "op-1")
+    assert core.operation_execution_phase(data["operations"][0]) == "paused"
+
+
+def test_resume_returns_paused_op_to_idle():
+    data = _op(status="open", execution_phase="paused")
+    core.operation_resume(data, "op-1", actor="human", reason="再開")
+    assert core.operation_execution_phase(data["operations"][0]) == "idle"
+
+
+def test_resume_on_idle_is_a_noop():
+    data = _op(status="open", execution_phase="idle")
+    core.operation_resume(data, "op-1")   # nothing to resume, no raise
+    assert core.operation_execution_phase(data["operations"][0]) == "idle"
+
+
+def test_resume_on_mid_cycle_raises():
+    # resume only applies to a paused op — a due/running op is not "resumable".
+    data = _op(status="open", execution_phase="running")
+    with pytest.raises(ValueError) as ei:
+        core.operation_resume(data, "op-1")
+    assert "not paused" in str(ei.value)
+
+
+def test_pause_resume_round_trip_then_fires_again():
+    # pause suppresses; resume re-enables; the loop can then complete a run.
+    data = _op(status="open")
+    core.operation_pause(data, "op-1")
+    core.operation_resume(data, "op-1")
+    core.run_record_add(data, "op-1", batch="b", status="ok", description="x")
+    assert core.operation_execution_phase(data["operations"][0]) == "idle"
+
+
+# --- fire suppression: a paused Operation does not fire (AC6) -----------------
+
+def _fire_fixture(tmp_path, monkeypatch, execution_phase=None):
+    import json
+    import cmd_trigger
+    beacon_dir = tmp_path / ".beacon"
+    beacon_dir.mkdir(parents=True)
+    op = {"id": "op-1", "title": "Daily", "status": "open", "log_source": "t",
+          "schedule": {"frequency": "daily",
+                       "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]},
+          "entries": [], "meta": {}}
+    if execution_phase is not None:
+        op["execution_phase"] = execution_phase
+    project = {"name": "t", "milestones": [], "operations": [op]}
+    (beacon_dir / "project.json").write_text(json.dumps(project, ensure_ascii=False))
+    monkeypatch.setenv("BEACON_PROJECT_FILE", str(beacon_dir / "project.json"))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("BEACON_OPERATION_TRIGGER_BROADCAST", raising=False)
+    # Isolate from cloud/bus: the claim wins locally, the bus push is a no-op.
+    monkeypatch.setattr(cmd_trigger, "_claim_operation_fire_for_bus_push",
+                        lambda op_id: True)
+    monkeypatch.setattr(cmd_trigger, "_push_operation_trigger_to_bus",
+                        lambda *a, **k: None)
+    return cmd_trigger, beacon_dir / "triggers" / "operation_check_op-1.json"
+
+
+def test_paused_operation_does_not_fire(tmp_path, monkeypatch):
+    cmd_trigger, trigger_file = _fire_fixture(tmp_path, monkeypatch,
+                                              execution_phase="paused")
+    cmd_trigger._auto_fire_operation_triggers()
+    assert not trigger_file.exists()    # suppressed
+
+
+def test_non_paused_operation_fires(tmp_path, monkeypatch):
+    # Control: the same op, not paused, DOES fire (proves suppression is the cause).
+    cmd_trigger, trigger_file = _fire_fixture(tmp_path, monkeypatch,
+                                              execution_phase="idle")
+    cmd_trigger._auto_fire_operation_triggers()
+    assert trigger_file.exists()
