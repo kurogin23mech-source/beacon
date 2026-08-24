@@ -55,6 +55,7 @@ from pydantic import BaseModel
 
 import store_router as db  # e-1544: same backend-routing binding app.py uses
 import core
+import machine_key as machine_key_mod  # ms-151 e-5474: headless machine 認証の鍵
 import operations
 import trek as trek_mod
 import envelope as envelope_mod
@@ -83,6 +84,11 @@ _audit_logger = logging.getLogger("beacon.audit")
 class ProjectCreate(BaseModel):
     name: str
     objective: str = ""
+
+class MachineKeyIssueBody(BaseModel):
+    # ms-151 e-5474: 発行時に付ける人間可読ラベル (例 "PE detector Lambda")。
+    # どの machine の鍵かを一覧で識別するためのメモで、省略可。
+    label: str = ""
 
 class MilestoneCreate(BaseModel):
     title: str
@@ -1792,6 +1798,58 @@ def make_router(
         # means there is nothing further back.
         next_since = entries[-1]["ts"] if entries else None
         return {"entries": entries, "next_since": next_since, "limit": limit}
+
+    # -----------------------------------------------------------------------
+    # Machine API keys (ms-151 / e-5474) — headless machine 認証の鍵の管理。
+    # -----------------------------------------------------------------------
+    # これらは「鍵を管理する」人間向け経路なので owner 限定 + 人間トークン
+    # (require_auth) で守る。鍵そのものを使う直書き経路 (e-5476) は machine
+    # 認証で別に守られる (= 発行者は人間 owner、利用者は machine)。
+    #
+    # 発行時だけ raw token を返し、以後サーバーは hash しか持たない。一覧・失効は
+    # redacted (secret_hash を落とした) view を返す。
+
+    @router.post("/api/projects/{project_id}/machine-keys")
+    def issue_machine_key(project_id: str, body: "MachineKeyIssueBody",
+                          user: dict = Depends(require_auth)):
+        """新しい machine key を発行する (owner 限定)。
+
+        raw token は **このレスポンスでしか得られない** (record は hash のみ保存)。
+        呼び出し側は表示直後に安全な場所へ保存する責任を持つ。
+        """
+        _require_project_role(project_id, user, allowed=("owner",))
+        created_by = user.get("sub", "") or ""
+        raw, record = machine_key_mod.issue(
+            project_id, label=body.label or "",
+            created_by=created_by, now=core._now_iso(),
+        )
+        db.save_machine_key(project_id, record)
+        return {
+            "key": raw,  # 発行時のみ。以後は再取得不能。
+            "machine_key": machine_key_mod.redacted(record),
+        }
+
+    @router.get("/api/projects/{project_id}/machine-keys")
+    def list_project_machine_keys(project_id: str,
+                                  user: dict = Depends(require_auth)):
+        """project の machine key を新しい順で一覧する (owner 限定, secret は返さない)。"""
+        _require_project_role(project_id, user, allowed=("owner",))
+        rows = db.list_machine_keys(project_id)
+        return {"machine_keys": [machine_key_mod.redacted(r) for r in rows]}
+
+    @router.delete("/api/projects/{project_id}/machine-keys/{key_id}")
+    def revoke_project_machine_key(project_id: str, key_id: str,
+                                   user: dict = Depends(require_auth)):
+        """machine key を失効させる (owner 限定)。以後その鍵での認証は弾かれる。"""
+        _require_project_role(project_id, user, allowed=("owner",))
+        updated = db.revoke_machine_key(
+            project_id, key_id, revoked_at=core._now_iso())
+        if updated is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"machine key '{key_id}' not found in project "
+                       f"'{project_id}'")
+        return {"machine_key": machine_key_mod.redacted(updated)}
 
     return router
 
