@@ -1048,56 +1048,14 @@ def cmd_init():
     # (opportunities/accounts) instead of driving work through milestones.
     # Both carry milestones:[] so the shared validator passes unchanged.
     profession = (os.environ.get("BEACON_PROFESSION", "dev") or "dev").strip().lower()
-    if profession == "sales":
-        import sales_entities
-        data = sales_entities.build_sales_project(
-            name, objective, retro_day=retro_day,
-            disclosure_policy=disclosure_policy)
-    elif profession in ("backoffice", "back-office"):
-        # ms-122 e-3958: back-office is the first DATA-defined occupation — its
-        # target-classes (契約 / 評価 / 月次決算 / 勤怠ウォッチ) come from a
-        # descriptor seed, not a code container. This supersedes the ms-121
-        # milestone-流用 stub. The owner edits target_classes afterwards to
-        # tailor fields / phases without touching Beacon code.
-        import backoffice_seed
-        data = backoffice_seed.build_backoffice_project(
-            name, objective, retro_day=retro_day,
-            disclosure_policy=disclosure_policy)
-    elif profession in ("", "dev"):
-        data = {
-            "name": name,
-            "objective": objective,
-            "profession": "dev",
-            "milestones": [],
-            "retro_day": retro_day,
-            "disclosure_policy": disclosure_policy,
-        }
-    else:
-        # ms-124 e-4091: a profession is no longer a hardcoded enum. Any other
-        # name (legal / hr / …) creates a DATA-defined occupation skeleton: a
-        # bare project carrying that profession and an empty target_classes list,
-        # which the owner fills with `beacon target-class add` — no Beacon code
-        # change to load a new occupation. milestones:[] keeps the shared
-        # validator passing; target_classes:[] declares "targets come from
-        # descriptors" (occupation registry resolves them, e-3957).
-        data = {
-            "name": name,
-            "objective": objective,
-            "profession": profession,
-            "milestones": [],
-            "target_classes": [],
-            "retro_day": retro_day,
-            "disclosure_policy": disclosure_policy,
-        }
-    # ms-147 e-5397 + e-5375 review (保守性#3/#6): seed the project's adopted
-    # target-class set in ONE place for EVERY profession, not per-branch. Copying
-    # the manifest's kinds (dev → ["release"]; sales / back-office / data-defined
-    # → []) makes the project's OWN copy the truth from here — changing a manifest
-    # later never retro-alters an existing project's enumeration (SPEC 方針3 = 複写,
-    # 受入条件4). Doing it after the branch closes the earlier asymmetry where dev
-    # got the key but the delegated sales / back-office builders did not, which
-    # left those projects on the legacy live-derivation fallback.
-    data["adopted_target_classes"] = _td.profession_adopted_kinds(profession)
+    # ms-150 seam probe: the "profession → adopted target-classes → composed
+    # project" cascade moved behind ONE seam (occupation.build_new_project), so
+    # the composition has a single home future per-class catalog migrations plug
+    # into instead of a 4-way branch here. cmd_init keeps only the I/O and the
+    # profession-specific USER FEEDBACK (prints / map seed / Next hints) below.
+    data = occupation.build_new_project(
+        name, objective, profession,
+        retro_day=retro_day, disclosure_policy=disclosure_policy)
     with open(pf, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
         f.write("\n")

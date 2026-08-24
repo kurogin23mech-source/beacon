@@ -103,6 +103,70 @@ def resolve_profession(data: dict) -> str:
         or DEFAULT_PROFESSION
 
 
+def build_new_project(name: str, objective: str, profession: str, *,
+                      retro_day: str = "monday",
+                      disclosure_policy: dict | None = None) -> dict:
+    """Compose a fresh ``project.json`` dict for ``profession`` — the ONE seam
+    where "profession → adopted target-classes → composed project" lives (ms-150
+    seam probe / SPEC §6 composition flow; §1 "profession = target-class 採用プリ
+    セットの糖衣").
+
+    Extracted verbatim from ``commands.cmd_init``'s former if/elif cascade so the
+    composition has a single home that the future per-class catalog migrations
+    (operation / opportunity / … following the ``release`` precedent, SPEC §4b
+    前進の型) plug into, instead of a 4-way branch buried in the CLI command.
+    Behaviour-preserving: returns exactly the dict the cascade built, including
+    the ms-147 e-5397 adopted-set stamp applied once for EVERY profession. SIDE
+    EFFECTS stay in the caller (file write, application-map seed, profile prompt,
+    "Next:" hints); this is a pure transform with no I/O, matching the
+    ``build_sales_project`` / ``build_backoffice_project`` builders it delegates
+    to. ``profession`` must already be normalised (lower / stripped)."""
+    if profession == "sales":
+        data = sales_entities.build_sales_project(
+            name, objective, retro_day=retro_day,
+            disclosure_policy=disclosure_policy)
+    elif profession in ("backoffice", "back-office"):
+        # ms-122 e-3958: back-office's target-classes (契約 / 評価 / 月次決算 /
+        # 勤怠ウォッチ) come from a descriptor seed, not a code container.
+        import backoffice_seed
+        data = backoffice_seed.build_backoffice_project(
+            name, objective, retro_day=retro_day,
+            disclosure_policy=disclosure_policy)
+    elif profession in ("", "dev"):
+        data = {
+            "name": name,
+            "objective": objective,
+            "profession": "dev",
+            "milestones": [],
+            "retro_day": retro_day,
+            "disclosure_policy": disclosure_policy,
+        }
+    else:
+        # ms-124 e-4091: any other name (legal / hr / …) creates a DATA-defined
+        # occupation skeleton — a bare project carrying that profession and an
+        # empty ``target_classes`` list the owner fills with ``beacon
+        # target-class add`` (no Beacon code change to load a new occupation).
+        # ``milestones: []`` keeps the shared validator passing.
+        data = {
+            "name": name,
+            "objective": objective,
+            "profession": profession,
+            "milestones": [],
+            "target_classes": [],
+            "retro_day": retro_day,
+            "disclosure_policy": disclosure_policy,
+        }
+    # ms-147 e-5397 + e-5375 review (保守性#3/#6): seed the project's adopted
+    # target-class set in ONE place for EVERY profession, not per-branch. Copying
+    # the manifest's kinds (dev → ["release"]; sales / back-office / data-defined
+    # → []) makes the project's OWN copy the truth from here — changing a manifest
+    # later never retro-alters an existing project's enumeration (SPEC 方針3 = 複写,
+    # 受入条件4). Applied here (not per-branch) so the delegated sales / back-office
+    # builders get the key too instead of falling back to legacy live-derivation.
+    data["adopted_target_classes"] = _td.profession_adopted_kinds(profession)
+    return data
+
+
 def effective_descriptors(data: dict | None) -> list:
     """Return the target-class descriptors the registry read-paths should see:
     the project's PROFESSION-DEFAULT descriptors (built-ins modelled as data —

@@ -83,3 +83,56 @@ def test_data_defined_profession_creates_descriptor_skeleton(project_cwd,
     out = capsys.readouterr().out
     assert "profession = legal" in out
     assert "beacon target-class add" in out
+
+
+# ---------------------------------------------------------------------------
+# ms-150 seam probe (characterization) — the composition CONTRACT `beacon init`
+# writes, locked BEFORE the profession cascade is extracted behind one seam
+# (occupation.build_new_project). Every assertion here must hold byte-for-byte
+# after the extraction; that is what proves the Transform is behaviour-
+# preserving. The `adopted_target_classes` copy (ms-147 e-5397, stamped once for
+# every profession) is the axis-inversion seam future per-class migrations plug
+# into, so it gets its own coverage per profession.
+# ---------------------------------------------------------------------------
+
+def test_dev_stamps_adopted_release(project_cwd):
+    # dev's only built-in-as-data class today is `release`; the manifest copies
+    # it into the project's adopted set at init.
+    commands.cmd_init()
+    data = _read(project_cwd)
+    assert data["adopted_target_classes"] == ["release"]
+
+
+def test_sales_stamps_empty_adopted_set(project_cwd, monkeypatch):
+    # sales' target-classes (opportunity / account) are still code-wired, not in
+    # the built-in descriptor catalog, so nothing is copied yet.
+    monkeypatch.setenv("BEACON_PROFESSION", "sales")
+    commands.cmd_init()
+    data = _read(project_cwd)
+    assert data["adopted_target_classes"] == []
+
+
+def test_data_defined_stamps_empty_adopted_set(project_cwd, monkeypatch):
+    monkeypatch.setenv("BEACON_PROFESSION", "legal")
+    commands.cmd_init()
+    data = _read(project_cwd)
+    assert data["adopted_target_classes"] == []
+
+
+def test_backoffice_seeds_descriptors_and_empty_adopted_set(project_cwd,
+                                                            monkeypatch,
+                                                            capsys):
+    # backoffice is the half-migrated case: its target-classes ARE data
+    # (descriptors under `target_classes`), but they live in the project's own
+    # declared list, not the profession manifest catalog — so the copied adopted
+    # set is empty while `target_classes` is seeded.
+    monkeypatch.setenv("BEACON_PROFESSION", "backoffice")
+    commands.cmd_init()
+    data = _read(project_cwd)
+    assert data["profession"] == "backoffice"
+    assert data["milestones"] == []            # validator-compat
+    assert len(data["target_classes"]) > 0     # descriptor seed
+    assert data["adopted_target_classes"] == []
+    core.validate_project(data)
+    out = capsys.readouterr().out
+    assert "profession = backoffice" in out
