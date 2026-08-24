@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "lib"))
 
 import commands  # noqa: E402
 import core  # noqa: E402
+import occupation  # noqa: E402
 
 
 @pytest.fixture
@@ -83,3 +84,108 @@ def test_data_defined_profession_creates_descriptor_skeleton(project_cwd,
     out = capsys.readouterr().out
     assert "profession = legal" in out
     assert "beacon target-class add" in out
+
+
+# ---------------------------------------------------------------------------
+# ms-150 seam probe (characterization) — the composition CONTRACT `beacon init`
+# writes, locked BEFORE the profession cascade is extracted behind one seam
+# (occupation.build_new_project). Every assertion here must hold byte-for-byte
+# after the extraction; that is what proves the Transform is behaviour-
+# preserving. The `adopted_target_classes` copy (ms-147 e-5397, stamped once for
+# every profession) is the axis-inversion seam future per-class migrations plug
+# into, so it gets its own coverage per profession.
+# ---------------------------------------------------------------------------
+
+def test_dev_stamps_adopted_release(project_cwd):
+    # dev's only built-in-as-data class today is `release`; the manifest copies
+    # it into the project's adopted set at init.
+    commands.cmd_init()
+    data = _read(project_cwd)
+    assert data["adopted_target_classes"] == ["release"]
+
+
+def test_sales_stamps_empty_adopted_set(project_cwd, monkeypatch):
+    # sales' target-classes (opportunity / account) are still code-wired, not in
+    # the built-in descriptor catalog, so nothing is copied yet.
+    monkeypatch.setenv("BEACON_PROFESSION", "sales")
+    commands.cmd_init()
+    data = _read(project_cwd)
+    assert data["adopted_target_classes"] == []
+
+
+def test_data_defined_stamps_empty_adopted_set(project_cwd, monkeypatch):
+    monkeypatch.setenv("BEACON_PROFESSION", "legal")
+    commands.cmd_init()
+    data = _read(project_cwd)
+    assert data["adopted_target_classes"] == []
+
+
+def test_backoffice_seeds_descriptors_and_empty_adopted_set(project_cwd,
+                                                            monkeypatch,
+                                                            capsys):
+    # backoffice is the half-migrated case: its target-classes ARE data
+    # (descriptors under `target_classes`), but they live in the project's own
+    # declared list, not the profession manifest catalog — so the copied adopted
+    # set is empty while `target_classes` is seeded.
+    monkeypatch.setenv("BEACON_PROFESSION", "backoffice")
+    commands.cmd_init()
+    data = _read(project_cwd)
+    assert data["profession"] == "backoffice"
+    assert data["milestones"] == []            # validator-compat
+    assert len(data["target_classes"]) > 0     # descriptor seed
+    assert data["adopted_target_classes"] == []
+    core.validate_project(data)
+    out = capsys.readouterr().out
+    assert "profession = backoffice" in out
+
+
+def test_backoffice_hyphenated_alias(project_cwd, monkeypatch):
+    # The composition branch accepts both "backoffice" and "back-office"; the
+    # hyphenated alias is a live path, so lock it (PR #669 maintainability #4).
+    monkeypatch.setenv("BEACON_PROFESSION", "back-office")
+    commands.cmd_init()
+    data = _read(project_cwd)
+    assert data["profession"] == "backoffice"   # alias resolves to canonical
+    assert len(data["target_classes"]) > 0
+    assert data["adopted_target_classes"] == []
+    core.validate_project(data)
+
+
+# ---------------------------------------------------------------------------
+# ms-150 seam probe — pin the composition seam (occupation.build_new_project)
+# as the UNIT under test, independent of cmd_init's file-write path (PR #669
+# maintainability #3: testing only through cmd_init would let a re-inlining of
+# the cascade pass silently). Also verifies the seam OWNS normalisation so a raw
+# (un-normalised) profession does not fall through to the data-defined branch
+# (PR #669 AX #1 / maintainability #1 consensus).
+# ---------------------------------------------------------------------------
+
+def test_seam_composes_dev_directly():
+    data = occupation.build_new_project("p", "obj", "dev")
+    assert data["profession"] == "dev"
+    assert data["milestones"] == []
+    assert data["adopted_target_classes"] == ["release"]
+    assert "opportunities" not in data
+
+
+def test_seam_composes_sales_directly():
+    data = occupation.build_new_project("p", "obj", "sales")
+    assert data["profession"] == "sales"
+    assert data["opportunities"] == []
+    assert data["accounts"] == []
+    assert data["adopted_target_classes"] == []
+
+
+def test_seam_normalises_raw_profession():
+    # A caller passing an un-normalised value must still hit the right branch —
+    # the seam owns strip/lower, so "Sales" resolves to the sales builder rather
+    # than silently falling through to the data-defined skeleton.
+    data = occupation.build_new_project("p", "obj", "  SALES  ")
+    assert data["profession"] == "sales"
+    assert data["opportunities"] == []
+
+
+def test_seam_empty_profession_is_dev():
+    data = occupation.build_new_project("p", "obj", "")
+    assert data["profession"] == "dev"
+    assert data["adopted_target_classes"] == ["release"]
