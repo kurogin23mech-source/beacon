@@ -333,6 +333,37 @@ def stop_signal_rows(data: dict) -> list:
     return rows
 
 
+def deliverable_projection_for(data: dict | None, kind: str) -> dict | None:
+    """Return the DELIVERABLE-projection spec for a target-class ``kind`` —
+    ``{"kind", "label", "projector", "ref"} | None`` — as the ONE read over BOTH
+    class provenances (ms-155 e-5598):
+
+    - a BUILT-IN code class (milestone / opportunity / operation / …) declares its
+      deliverable in ``target_state.BUILTIN_TARGET_CLASSES`` (milestone→機能,
+      ``ref="application-map"``);
+    - a data-defined DESCRIPTOR class (incl. the built-in-as-data ``release``)
+      declares it in its descriptor (``target_descriptor.deliverable``).
+
+    Both are normalized through ``target_descriptor.normalize_deliverable``, so the
+    root union (e-5599) asks THIS function per adopted class and寄せ集める the
+    non-None specs without caring whether a class is code or data — the "declare,
+    don't wire" contract extended to the deliverable dimension. A ``kind`` neither
+    built-in nor a declared descriptor, or a class that declares no deliverable,
+    returns ``None``. The milestone→application-map surfacing is thus gated by
+    class ADOPTION, not a ``profession`` branch: only a dev project enumerates the
+    milestone kind, so only there does its deliverable appear (SPEC 受入条件3)."""
+    want = (kind or "").strip()
+    if not want:
+        return None
+    builtin = _tstate.BUILTIN_TARGET_CLASSES.get(want)
+    if builtin is not None:
+        return _td.normalize_deliverable(builtin.get("deliverable"))
+    desc = effective_get_descriptor(data, want)
+    if desc is not None:
+        return _td.deliverable_projection(desc)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Target entry recording — the class-abstraction (L2) side-effect seam
 # (ms-134 e-4720).

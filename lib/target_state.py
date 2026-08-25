@@ -229,6 +229,22 @@ BUILTIN_TARGET_CLASSES: dict[str, dict] = {
             "evidence_arms": [{"arm": "entries", "item_type": "commit"}],
             "changelog": {"arm": "entries", "recorder": "milestone"},
         },
+        # ms-155 e-5598: the milestone class's DELIVERABLE (生み出した価値) is its
+        # 機能投影 — the application-map (今このプロダクトに何ができるかを写した現在地
+        # の索引, CORE doc ``application-map``). spine §2b names milestone→機能
+        # (application-map) as the first per-class deliverable, and this declaration
+        # RE-HOMES the existing map AS milestone's deliverable projection: the
+        # ``"doc"`` projector says "the produced value IS the document named by
+        # ``ref``". A registry-only slot (like ``arm_roles`` — inert data the state
+        # model never consumes; listed in REGISTRY_ONLY_KEYS below). WHY the map's
+        # long-standing ``profession==dev`` gate is the PRINCIPLE's manifestation,
+        # not a special-case: the deliverable rides the milestone CLASS, and only a
+        # dev project adopts the milestone class, so the map surfaces exactly for
+        # dev — the gate emerges from class-adoption, there is no separate
+        # ``if profession == 'dev'`` behind it (SPEC 受入条件3). The root union
+        # (e-5599) collects this only when the project adopts milestone.
+        "deliverable": {"kind": "feature-map", "label": "機能",
+                        "projector": "doc", "ref": "application-map"},
         "kind": "milestone",
         "shape": SHAPE_STATUS_ENUM,
         "state_field": "status",
@@ -395,7 +411,13 @@ BUILTIN_TARGET_CLASSES: dict[str, dict] = {
 # (e-5265 AX review): a consumer that needs to strip registry keys reads THIS, and the
 # validator below guards a collision with a state-model field name. Prefer the public
 # accessor ``state_model_for(data, kind)`` over stripping keys by hand.
-REGISTRY_ONLY_KEYS = ("collection", "aggregatable", "arm_roles")
+# ms-155 e-5598: ``deliverable`` (生み出した価値の投影宣言) is registry-only data —
+# like ``arm_roles``, the state model never consumes it, so it is STRIPPED here to
+# keep BUILTIN_STATE_MODELS a pure state model (else it would leak in and the base-
+# key derive-by-strip invariant would still hold, but the model would carry a
+# non-state field). Only milestone declares one today; a class without it is
+# unaffected.
+REGISTRY_ONLY_KEYS = ("collection", "aggregatable", "arm_roles", "deliverable")
 _REGISTRY_ONLY_KEYS = REGISTRY_ONLY_KEYS   # back-compat alias for internal callers
 
 BUILTIN_STATE_MODELS: dict[str, dict] = {
@@ -455,6 +477,16 @@ def _validate_builtin_target_classes() -> None:
             assert (model.get("phase_verb") or "").strip(), (
                 f"{key}: a seamless funnel (funnel_seam=None) MUST declare a non-empty "
                 "phase_verb — set_target_state interpolates it in the error path")
+        # ms-155 e-5598: a declared ``deliverable`` slot must satisfy the SAME
+        # {kind, projector ∈ allowlist} rule descriptor classes do — enforced via
+        # the shared ``target_descriptor.validate_deliverable`` so a malformed
+        # code-class deliverable fails LOUD at import rather than degrading to a
+        # silent no-contribution in the root union. Lazy import (target_descriptor
+        # is a pure leaf; avoids a load-order edge at module import).
+        import target_descriptor as _td_v
+        dl_problems = _td_v.validate_deliverable(cls.get("deliverable"), key)
+        assert not dl_problems, (
+            f"{key}: invalid deliverable declaration — {dl_problems}")
 
 
 _validate_builtin_target_classes()

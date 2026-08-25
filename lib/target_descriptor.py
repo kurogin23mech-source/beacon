@@ -412,22 +412,23 @@ def evidence_fields(desc: dict) -> list:
 DELIVERABLE_PROJECTORS = frozenset({"doc", "rollup"})
 
 
-def deliverable_projection(desc: dict) -> Optional[dict]:
-    """Return a descriptor's declared DELIVERABLE-projection spec —
+def normalize_deliverable(raw) -> Optional[dict]:
+    """Normalize a RAW deliverable-slot dict into a clean projection spec —
     ``{"kind": str, "label": str, "projector": str, "ref": str} | None`` (ms-155
-    e-5597).
+    e-5597 / e-5598).
 
-    The deliverable is the target-class's produced VALUE as a projectable
-    dimension (spine §2b), distinct from its audit evidence. This reads the
-    ``deliverable`` slot the same tolerant way ``arm_roles`` reads the changelog
-    slot: a well-formed slot needs a non-empty ``kind`` (the deliverable's type
-    token, e.g. ``"feature-map"``) and a ``projector`` in
-    ``DELIVERABLE_PROJECTORS`` (the named build strategy). Absent / malformed /
-    unsafe-projector → ``None`` (the class simply contributes no deliverable to the
-    root union, unchanged from before this feature); ``validate_descriptor`` ALSO
-    flags a bad slot at load time so it is not only a silent miss. ``label`` / ``ref``
-    default to ``""`` (``ref`` is only meaningful for the ``"doc"`` projector)."""
-    raw = desc.get(DELIVERABLE_KEY) if isinstance(desc, dict) else None
+    Pure transform over a raw ``deliverable`` mapping, shared by BOTH the
+    descriptor read (``deliverable_projection``) and the built-in code-class read
+    (``occupation.deliverable_projection_for`` over
+    ``target_state.BUILTIN_TARGET_CLASSES``) so a code class (milestone→機能) and a
+    data-defined class produce the SAME shape — the single normalization the root
+    union (e-5599) consumes regardless of a class being code or data. A well-formed
+    slot needs a non-empty ``kind`` (the deliverable's type token, e.g.
+    ``"feature-map"``) and a ``projector`` in ``DELIVERABLE_PROJECTORS`` (the named
+    build strategy). Absent / malformed / unsafe-projector → ``None`` (the class
+    contributes no deliverable), so the union simply寄せ集める the non-None ones.
+    ``label`` / ``ref`` default to ``""`` (``ref`` is only meaningful for the
+    ``"doc"`` projector)."""
     if not isinstance(raw, dict):
         return None
     kind = (raw.get("kind") or "").strip()
@@ -440,6 +441,45 @@ def deliverable_projection(desc: dict) -> Optional[dict]:
         "projector": projector,
         "ref": (raw.get("ref") or "").strip(),
     }
+
+
+def deliverable_projection(desc: dict) -> Optional[dict]:
+    """Return a descriptor's declared DELIVERABLE-projection spec, or ``None``
+    (ms-155 e-5597). The deliverable is the target-class's produced VALUE as a
+    projectable dimension (spine §2b), distinct from its audit evidence. Reads the
+    descriptor's ``deliverable`` slot through the shared ``normalize_deliverable``,
+    so a descriptor class and a built-in code class are normalized on ONE path;
+    ``validate_descriptor`` flags a malformed slot at load time so a bad
+    declaration is not only a silent ``None``."""
+    raw = desc.get(DELIVERABLE_KEY) if isinstance(desc, dict) else None
+    return normalize_deliverable(raw)
+
+
+def validate_deliverable(raw, label: str) -> list:
+    """Return problems for a deliverable slot (empty list = valid OR absent) —
+    the ONE validation both descriptor classes (``validate_descriptor``) and
+    built-in code classes (``target_state._validate_builtin_target_classes``) share
+    so the ``{kind, projector ∈ DELIVERABLE_PROJECTORS}`` rule lives once (ms-155
+    e-5598). ``None`` is valid (a class declares no deliverable). A present slot
+    must be a dict with a non-empty ``kind`` and a projector in the allowlist."""
+    if raw is None:
+        return []
+    if not isinstance(raw, dict):
+        return [f"[{label}] '{DELIVERABLE_KEY}' は辞書である必要があります "
+                f"(現在: {raw!r})"]
+    problems: list = []
+    dkind = (raw.get("kind") or "").strip()
+    projector = (raw.get("projector") or "").strip()
+    if not dkind:
+        problems.append(f"[{label}] '{DELIVERABLE_KEY}.kind' が未設定です")
+    if not projector:
+        problems.append(f"[{label}] '{DELIVERABLE_KEY}.projector' が未設定です")
+    elif projector not in DELIVERABLE_PROJECTORS:
+        problems.append(
+            f"[{label}] '{DELIVERABLE_KEY}.projector' は "
+            f"{' / '.join(sorted(DELIVERABLE_PROJECTORS))} "
+            f"のいずれか必要です (現在: {projector!r})")
+    return problems
 
 
 def fields_at_phase(desc: dict, phase_key: str) -> list:
@@ -644,26 +684,9 @@ def validate_descriptor(desc: dict) -> list:
     # (load time) — rather than letting ``deliverable_projection`` degrade it to a
     # silent None indistinguishable from "no deliverable declared" — gives the
     # author a diagnostic instead of a class that quietly contributes nothing to
-    # the root union (mirrors the changelog block above).
-    dl = desc.get(DELIVERABLE_KEY)
-    if dl is not None:
-        if not isinstance(dl, dict):
-            problems.append(
-                f"[{label}] '{DELIVERABLE_KEY}' は辞書である必要があります "
-                f"(現在: {dl!r})")
-        else:
-            dkind = (dl.get("kind") or "").strip()
-            projector = (dl.get("projector") or "").strip()
-            if not dkind:
-                problems.append(f"[{label}] '{DELIVERABLE_KEY}.kind' が未設定です")
-            if not projector:
-                problems.append(
-                    f"[{label}] '{DELIVERABLE_KEY}.projector' が未設定です")
-            elif projector not in DELIVERABLE_PROJECTORS:
-                problems.append(
-                    f"[{label}] '{DELIVERABLE_KEY}.projector' は "
-                    f"{' / '.join(sorted(DELIVERABLE_PROJECTORS))} "
-                    f"のいずれか必要です (現在: {projector!r})")
+    # the root union. Delegates to the shared ``validate_deliverable`` so code
+    # classes (``target_state``) enforce the identical rule (ms-155 e-5598).
+    problems.extend(validate_deliverable(desc.get(DELIVERABLE_KEY), label))
 
     return problems
 
