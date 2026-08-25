@@ -84,6 +84,16 @@ def test_subgraph_empty_for_unknown_seam(graph):
     assert sub["members"] == []
 
 
+def test_member_view_includes_surfaces_as():
+    """module 断面に surfaces-as (露出する CLI/API 入口) が含まれる (e-5558)。"""
+    g = cg.CodeGraph()
+    g.add_node(cg.Node(id="lib/cmd_task.py", path="lib/cmd_task.py"))
+    g.add_node(cg.Node(id="cli:beacon task add"))
+    g.add_edge(cg.Edge("lib/cmd_task.py", "cli:beacon task add", "surfaces-as"))
+    view = q.neighborhood_for_module(g, "lib/cmd_task.py")
+    assert view["surfaces_as"] == ["cli:beacon task add"]
+
+
 def test_module_neighborhood(graph):
     view = q.neighborhood_for_module(graph, "lib/store.py")
     assert view["found"] is True

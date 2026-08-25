@@ -74,6 +74,10 @@ def _render_seam(sub: dict) -> str:
             lines.append(f"    依存される元 ({len(m['depended_on_by'])}): "
                          + ", ".join(m["depended_on_by"][:8])
                          + (" …" if len(m["depended_on_by"]) > 8 else ""))
+        if m.get("surfaces_as"):
+            lines.append(f"    露出する入口 ({len(m['surfaces_as'])}): "
+                         + ", ".join(m["surfaces_as"][:6])
+                         + (" …" if len(m["surfaces_as"]) > 6 else ""))
     lines.append(f"\n内側で閉じる依存: {len(sub['internal_dependencies'])}件 / "
                  f"継ぎ目をまたぐ依存 (伝播境界): {len(sub['boundary_dependencies'])}件")
     return "\n".join(lines)
@@ -108,6 +112,10 @@ def _render_module(view: dict) -> str:
                  + (", ".join(view["depends_on"]) or "(なし)"))
     lines.append(f"  依存される元 ({len(view['depended_on_by'])}): "
                  + (", ".join(view["depended_on_by"]) or "(なし)"))
+    if view.get("surfaces_as"):
+        lines.append(f"  露出する入口 ({len(view['surfaces_as'])}): "
+                     + ", ".join(view["surfaces_as"][:10])
+                     + (" …" if len(view["surfaces_as"]) > 10 else ""))
     return "\n".join(lines)
 
 

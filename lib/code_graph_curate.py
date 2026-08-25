@@ -59,6 +59,35 @@ def set_curated(node_table: dict, module_id: str, updates: dict, *,
     return changed
 
 
+def overlay_curated(graph, existing_node_table: dict) -> int:
+    """既存格納ノードの curated セル (role/contract/guard_test) を graph に引き継ぐ。
+
+    再 seed は機械層 (node / seam / depends-on / surfaces-as) を現ソースから作り直すが、
+    人手で書いた curated 層はソースから導出できないので失われる (e-5588)。この関数が
+    「格納済グラフ」の curated セルを「新しく seed したグラフ」の同じ module へ移して
+    から書き戻すことで、refresh しても契約 / 意図が消えないようにする。
+
+    module node のみ対象 (seam / surface node は curated を持たない)。非空セルだけ移す
+    (空で上書きして機械層由来の role を消さない)。実際に値が変わった module 数を返す。
+    """
+    changed = 0
+    for row in table_doc.active_rows(existing_node_table):
+        cells = row.get("cells", {})
+        module_id = cells.get("id") or ""
+        node = graph.get_node(module_id)
+        if node is None:
+            continue
+        touched = False
+        for key in CURATED_KEYS:  # role / contract / guard_test
+            value = cells.get(key) or ""
+            if value and getattr(node, key) != value:
+                setattr(node, key, value)
+                touched = True
+        if touched:
+            changed += 1
+    return changed
+
+
 def curated_view(node_table: dict, module_id: str) -> dict:
     """``module_id`` の現在の curated セル (＋機械層の参照) を読み出す。"""
     row_id = _find_row_id(node_table, module_id)

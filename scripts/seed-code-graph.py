@@ -33,9 +33,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "lib"))
 
 import code_graph  # noqa: E402
+import code_graph_curate  # noqa: E402
 import code_graph_derive  # noqa: E402
 import code_graph_seed  # noqa: E402
 import code_graph_store  # noqa: E402
+import table_doc  # noqa: E402
 
 # 種となる既存 doc の既定 id (SPEC 関連セクション)。
 DEFAULT_INVENTORY_ID = "NC7bEWi08ELyNqgS6Mz0"   # module 監査 (150 module)
@@ -164,6 +166,11 @@ def main() -> int:
     graph = code_graph_seed.build_seed_graph(inv, app)
     if args.derive:
         code_graph_derive.augment_with_machine_layer(graph, REPO)
+    # e-5588: 既存格納グラフの curated 層 (契約/意図) を再 seed 後も保存する。
+    if args.update:
+        existing = table_doc.parse_table(_beacon_doc_show(args.nodes_doc))
+        kept = code_graph_curate.overlay_curated(graph, existing)
+        print(f"curated 引き継ぎ: {kept} module", file=sys.stderr)
     summary = _summary(graph)
 
     if args.emit_nodes:

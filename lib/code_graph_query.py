@@ -31,6 +31,8 @@ def _member_view(graph: CodeGraph, node: Node) -> dict:
         dst for dst, _ in graph.neighbors(node.id, edge_type="depends-on"))
     depended_on_by = sorted(
         src for src, _ in graph.predecessors(node.id, edge_type="depends-on"))
+    surfaces_as = sorted(
+        dst for dst, _ in graph.neighbors(node.id, edge_type="surfaces-as"))
     return {
         "id": node.id,
         "path": node.path,
@@ -41,6 +43,7 @@ def _member_view(graph: CodeGraph, node: Node) -> dict:
         "seams": node.seams(),
         "depends_on": depends_on,             # この module が使う先 (out)
         "depended_on_by": depended_on_by,     # この module に依存する元 (in)
+        "surfaces_as": surfaces_as,           # この module が露出する CLI/API 入口 (e-5558)
     }
 
 

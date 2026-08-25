@@ -72,6 +72,38 @@ def test_set_curated_unknown_module_raises():
                            actor="t", at="t1")
 
 
+def test_overlay_curated_preserves_across_reseed():
+    """再 seed した機械層グラフへ、既存格納の curated セルを引き継ぐ (e-5588)。"""
+    # 既存格納: lib/auth.py に人手 curated がある
+    existing = _node_table_with("lib/auth.py")
+    curate.set_curated(existing, "lib/auth.py",
+                       {"contract": "id_token を発行", "role": "認証の綻び点",
+                        "guard_test": "tests/test_auth.py"}, actor="t", at="t1")
+    # 新しく seed したグラフ: 機械層のみ (curated 空)
+    fresh = cg.CodeGraph()
+    fresh.add_node(cg.Node(id="lib/auth.py", path="lib/auth.py", seam="exec-auth"))
+    fresh.add_node(cg.Node(id="lib/new.py", path="lib/new.py"))  # 既存に無い新 module
+
+    changed = curate.overlay_curated(fresh, existing)
+    assert changed == 1
+    node = fresh.get_node("lib/auth.py")
+    assert node.contract == "id_token を発行"          # curated 引き継がれた
+    assert node.role == "認証の綻び点"
+    assert node.guard_test == "tests/test_auth.py"
+    assert node.seam == "exec-auth"                    # 機械層は温存
+    # 既存に無い新 module は素通り (curated 無し)
+    assert fresh.get_node("lib/new.py").contract == ""
+
+
+def test_overlay_curated_skips_empty_cells():
+    """空の curated セルで機械層由来の値を潰さない。"""
+    existing = _node_table_with("lib/auth.py")  # curated 空
+    fresh = cg.CodeGraph()
+    fresh.add_node(cg.Node(id="lib/auth.py", path="lib/auth.py", role="機械 role"))
+    curate.overlay_curated(fresh, existing)
+    assert fresh.get_node("lib/auth.py").role == "機械 role"  # 空で上書きされない
+
+
 # --- reconcile hook decision ------------------------------------------------
 
 @pytest.fixture
