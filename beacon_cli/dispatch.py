@@ -1030,6 +1030,19 @@ def build_parser() -> argparse.ArgumentParser:
                         action="store_true")
     p_note.add_argument("--help", "-h", action="store_true", dest="show_help")
 
+    # ---- decision (ms-154 e-5594: log-time decision backstop の記録口) ----
+    p_decision = sub.add_parser("decision", help="Record an AI decision to the decision arm",
+                                add_help=False)
+    p_decision.add_argument("decision_cmd", nargs="?", default="")  # record
+    p_decision.add_argument("--what", default="")
+    p_decision.add_argument("--kind", default="")
+    p_decision.add_argument("--rationale", default="")
+    p_decision.add_argument("--decided-by", dest="decided_by", default="")
+    p_decision.add_argument("--evidence", action="append", default=[])
+    p_decision.add_argument("--related-task", dest="related_task", default="")
+    p_decision.add_argument("--json", action="store_true")
+    p_decision.add_argument("--help", "-h", action="store_true", dest="show_help")
+
     # ---- scenario (ms-136 e-4699: 実ユースケース自動デバッグ基盤の資産操作) ----
     p_scenario = sub.add_parser("scenario",
                                 help="Scenario asset operations (run/save/list)",
@@ -3483,6 +3496,35 @@ def _handle_note(root: Path, args: argparse.Namespace) -> int:
     return _run_commands_py(root, "note_add", env)
 
 
+_DECISION_USAGE = (
+    "Usage: beacon decision record --what \"<決定>\" --evidence \"<link>\" [--rationale \"<なぜ>\"]\n"
+    "                              [--kind log-backstop] [--decided-by autonomous-AI]\n"
+    "                              [--related-task e-XXX] [--json]\n"
+    "  --evidence は複数回指定可。decided_by を立てる一級決定は evidence 必須。"
+)
+
+
+def _handle_decision(root: Path, args: argparse.Namespace) -> int:
+    if args.show_help:
+        print(_DECISION_USAGE)
+        return 0
+    if (rc := _ensure_project()) is not None:
+        return rc
+    if args.decision_cmd != "record":
+        print(_DECISION_USAGE)
+        return 1
+    env = {
+        "BEACON_DECISION_WHAT": args.what or "",
+        "BEACON_DECISION_KIND": args.kind or "",
+        "BEACON_DECISION_RATIONALE": args.rationale or "",
+        "BEACON_DECISION_DECIDED_BY": args.decided_by or "",
+        "BEACON_DECISION_EVIDENCE": "\n".join(args.evidence or []),
+        "BEACON_DECISION_RELATED_TASK": args.related_task or "",
+        "BEACON_JSON": "1" if args.json else "",
+    }
+    return _run_commands_py(root, "decision_record", env)
+
+
 # ---- scenario handlers (ms-136 e-4699) ----
 
 _SCENARIO_USAGE = (
@@ -5562,6 +5604,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "doc": _handle_doc,
     "document": _handle_doc,
     "note": _handle_note,
+    "decision": _handle_decision,  # ms-154 e-5594
     "trigger": _handle_trigger,
     "search": _handle_search,
     "cycle": _handle_cycle,

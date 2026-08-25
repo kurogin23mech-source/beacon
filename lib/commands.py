@@ -174,6 +174,7 @@ from cmd_task import (  # noqa: F401
 # canonical home + patch target is cmd_<family>._foo; a missing commands._foo now
 # fails loudly (AttributeError) instead of silently.
 from cmd_note import cmd_note_add, cmd_note_list, cmd_note_clear  # noqa: F401
+from cmd_decision import cmd_decision_record  # noqa: F401  (ms-154 e-5594)
 from cmd_incident import (  # noqa: F401
     cmd_incident_open, cmd_incident_close, cmd_incident_escalate, cmd_incident_list,
 )
@@ -10436,6 +10437,8 @@ if __name__ == "__main__":
         "note_add": cmd_note_add,
         "note_list": cmd_note_list,
         "note_clear": cmd_note_clear,
+        "decision_record": cmd_decision_record,
+
         "bus_send": cmd_bus_send,
         "bus_listen": cmd_bus_listen,
         "bus_receive": cmd_bus_receive,
