@@ -82,6 +82,39 @@ def subgraph_for_seam(graph: CodeGraph, seam: str) -> dict:
     }
 
 
+def seam_coverage(graph: CodeGraph, cluster_names: list[str]) -> dict:
+    """移行台帳の cluster 群が、実際に navigate で引ける部分グラフを持つか照合する。
+
+    受入条件6 (顧客結合の証明): このグラフが投機的な over-engineering でなく移行の
+    役に立つことを、移行台帳 (paradigm-migration-ledger) の各 cluster を変更前に
+    navigate できるかで示す。cluster 名 (= seam の axis) ごとに:
+
+      - ``covered``: seam として存在し member module が 1 つ以上ある (navigate 可能)。
+      - ``member_count`` / ``with_contract`` / ``with_guard_test``: curate の進捗。
+
+    ``covered=False`` の cluster は「移行が navigate に使えない継ぎ目」= グラフが
+    その顧客をまだ載せていない gap。全 cluster が covered なら疎通確認 OK。
+    """
+    rows = []
+    for name in cluster_names:
+        name = _normalize_seam(name)
+        members = [n for n in graph.nodes_in_seam(name) if _is_module(n)]
+        rows.append({
+            "cluster": name,
+            "covered": len(members) > 0,
+            "member_count": len(members),
+            "with_contract": sum(1 for n in members if n.contract),
+            "with_guard_test": sum(1 for n in members if n.guard_test),
+        })
+    covered = sum(1 for r in rows if r["covered"])
+    return {
+        "clusters": rows,
+        "cluster_count": len(rows),
+        "covered_count": covered,
+        "all_covered": covered == len(rows) and len(rows) > 0,
+    }
+
+
 def neighborhood_for_module(graph: CodeGraph, module_id: str) -> dict:
     """1 module を起点に navigate する断面 (変更起点が module のとき)。
 
