@@ -121,20 +121,20 @@ def _render_module(view: dict) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Navigate the code-understanding graph.")
-    ap.add_argument("--seam", help="継ぎ目 (cluster) を指定してその部分グラフを引く")
-    ap.add_argument("--module", help="module を起点に近傍を引く")
-    ap.add_argument("--zoom", metavar="MODULE",
-                    help="巨大 module を function 粒度へ動的 zoom する (非格納・その場計算)")
-    ap.add_argument("--list-seams", action="store_true", help="継ぎ目の一覧を出す")
+    # PR #675 親レビュー #1: 引く対象は排他 (--seam --module 併記で片方が silent 無視される
+    # 穴を argparse で構造的に塞ぐ。consumer が AI なので silent no-op は致命的)。
+    mode = ap.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--seam", help="継ぎ目 (cluster) を指定してその部分グラフを引く")
+    mode.add_argument("--module", help="module を起点に近傍を引く")
+    mode.add_argument("--zoom", metavar="MODULE",
+                      help="巨大 module を function 粒度へ動的 zoom する (非格納・その場計算)")
+    mode.add_argument("--list-seams", action="store_true", help="継ぎ目の一覧を出す")
     ap.add_argument("--nodes-file", metavar="PATH", help="nodes table-doc ファイル")
     ap.add_argument("--edges-file", metavar="PATH", help="edges table-doc ファイル")
     ap.add_argument("--nodes-doc", default=code_graph_store.NODES_DOC_ID)
     ap.add_argument("--edges-doc", default=code_graph_store.EDGES_DOC_ID)
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
-
-    if not (args.seam or args.module or args.list_seams or args.zoom):
-        ap.error("--seam / --module / --zoom / --list-seams のいずれかを指定してください")
 
     # zoom はソース直読み (格納グラフ不要・cloud 不要) なので先に処理する。
     if args.zoom:

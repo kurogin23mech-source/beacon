@@ -43,11 +43,17 @@ def _is_beacon_source_project(repo: str) -> bool:
             and bool(globmod.glob(os.path.join(repo, "server", "*.py"))))
 
 
+# PR #675 親レビュー #4: fatal (cloud/取得失敗) は exit 2 で drift (exit 1) と区別する。
+# 同 exit だと AI が「drift だから再 seed」と誤リトライループに入る。
+FATAL_EXIT = 2
+
+
 def _beacon_doc_show(doc_id: str) -> str:
     out = subprocess.run(["beacon", "doc", "show", doc_id],
                          capture_output=True, text=True, cwd=REPO)
     if out.returncode != 0:
-        raise SystemExit(f"beacon doc show {doc_id} 失敗:\n{out.stderr}")
+        sys.stderr.write(f"fatal: beacon doc show {doc_id} 失敗:\n{out.stderr}\n")
+        raise SystemExit(FATAL_EXIT)
     return out.stdout
 
 
@@ -91,10 +97,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Check the code-graph for drift vs source.")
     ap.add_argument("--nodes-file", metavar="PATH", help="nodes table-doc ファイルを照合")
     ap.add_argument("--edges-file", metavar="PATH", help="edges table-doc ファイルを照合")
-    ap.add_argument("--nodes-doc", default=code_graph_store.NODES_DOC_ID,
-                    help="nodes の doc id (live)")
-    ap.add_argument("--edges-doc", default=code_graph_store.EDGES_DOC_ID,
-                    help="edges の doc id (live)")
+    # 既定 None にして「片方だけ指定 = 別 doc の nodes/edges を混ぜる」穴を検知可能にする。
+    ap.add_argument("--nodes-doc", default=None, help="nodes の doc id (live)")
+    ap.add_argument("--edges-doc", default=None, help="edges の doc id (live)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
@@ -103,18 +108,31 @@ def main() -> int:
         print(json.dumps({"skipped": True}) if args.json else msg)
         return SKIP_EXIT
 
-    # PR #675 AX-2: --nodes-file / --edges-file は必ずペア。片方だけだと黙って live doc に
-    # フォールバックしてローカルファイルが無視される穴を防ぐ。
+    # PR #675 AX-2 + 親レビュー #3: file も doc も必ずペア (片方だけは別ソースの混在 /
+    # silent フォールバックを生むので拒否)。
     if bool(args.nodes_file) != bool(args.edges_file):
         ap.error("--nodes-file と --edges-file はペアで指定してください (片方だけは不可)")
-    if args.nodes_file and args.edges_file:
-        node_content = open(args.nodes_file, encoding="utf-8").read()
-        edge_content = open(args.edges_file, encoding="utf-8").read()
-    else:
-        node_content = _beacon_doc_show(args.nodes_doc)
-        edge_content = _beacon_doc_show(args.edges_doc)
+    if bool(args.nodes_doc) != bool(args.edges_doc):
+        ap.error("--nodes-doc と --edges-doc はペアで指定してください (片方だけは不可)")
 
-    graph = _load_graph(node_content, edge_content)
+    try:
+        if args.nodes_file and args.edges_file:
+            node_content = open(args.nodes_file, encoding="utf-8").read()
+            edge_content = open(args.edges_file, encoding="utf-8").read()
+        else:
+            nodes_doc = args.nodes_doc or code_graph_store.NODES_DOC_ID
+            edges_doc = args.edges_doc or code_graph_store.EDGES_DOC_ID
+            node_content = _beacon_doc_show(nodes_doc)  # 取得失敗は exit 2
+            edge_content = _beacon_doc_show(edges_doc)
+    except OSError as exc:
+        sys.stderr.write(f"fatal: ファイル読み込みに失敗: {exc}\n")
+        return FATAL_EXIT
+
+    try:
+        graph = _load_graph(node_content, edge_content)
+    except table_doc.TableDocError as exc:
+        sys.stderr.write(f"fatal: table-doc の解析に失敗: {exc}\n")
+        return FATAL_EXIT
     diff = derive.diff_against_source(graph, REPO)
 
     if args.json:

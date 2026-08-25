@@ -152,10 +152,13 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="集計を JSON で出す")
     ap.add_argument("--emit-nodes", metavar="PATH", help="nodes table-doc 内容を書き出す")
     ap.add_argument("--emit-edges", metavar="PATH", help="edges table-doc 内容を書き出す")
-    ap.add_argument("--create", action="store_true",
-                    help="生きた Beacon project に table-doc 2枚を新規作成 (cloud write)")
-    ap.add_argument("--update", action="store_true",
-                    help="既存の table-doc 2枚を上書き更新 (cloud write)")
+    # PR #675 親レビュー #2: 新規作成と上書き更新は排他 (両指定で update が silent に勝つ
+    # 穴を argparse で塞ぐ)。
+    persist = ap.add_mutually_exclusive_group()
+    persist.add_argument("--create", action="store_true",
+                         help="生きた Beacon project に table-doc 2枚を新規作成 (cloud write)")
+    persist.add_argument("--update", action="store_true",
+                         help="既存の table-doc 2枚を上書き更新 (cloud write)")
     ap.add_argument("--nodes-doc", default=NODES_DOC_ID,
                     help="--update 時に上書きする nodes doc id")
     ap.add_argument("--edges-doc", default=EDGES_DOC_ID,
