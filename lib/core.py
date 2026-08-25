@@ -3421,6 +3421,10 @@ OPERATION_EXECUTION_CYCLE: dict[str, frozenset[str]] = {
 # and reads as ``idle``, so nothing needs migrating (tolerant-read compat).
 EXECUTION_PHASE_FIELD = "execution_phase"
 EXECUTION_PHASE_INITIAL = "idle"
+# ms-152 e-5514 (保守性レビュー §2): the paused state gets a named constant like
+# EXECUTION_PHASE_INITIAL, so a future rename touches one place and cmd_trigger's
+# fire-suppression check compares against the constant, not a bare "paused" literal.
+EXECUTION_PHASE_PAUSED = "paused"
 VALID_EXECUTION_PHASES = frozenset(OPERATION_EXECUTION_CYCLE)
 
 
@@ -3455,6 +3459,12 @@ def operation_set_execution_phase(data: dict, op_id: str, to_phase: str, *,
             f"Valid: {', '.join(sorted(VALID_EXECUTION_PHASES))}")
     op = _find_operation(data, op_id)
     cur = operation_execution_phase(op)
+    # ms-152 e-5514 (AX + 保守性レビュー consensus): a same-phase move is a TRUE no-op —
+    # return before writing so no spurious ``exec_{phase}_at`` audit stamp is re-stamped.
+    # This makes the docstring's "same-phase is a no-op" honest at the code level, so an AI
+    # calling pause/resume idempotently does not pollute the audit trail with fake events.
+    if cur == want:
+        return op
     adjacency = {k: sorted(v) for k, v in OPERATION_EXECUTION_CYCLE.items()}
     if not _td.adjacency_allows(adjacency, cur, want):
         allowed = sorted(OPERATION_EXECUTION_CYCLE.get(cur, frozenset()))
@@ -3483,6 +3493,29 @@ _OPERATION_RUN_ROUTE_TO_IDLE: dict[str, tuple[str, ...]] = {
     "running": ("idle",),
     "paused": (),
 }
+
+
+def _validate_operation_run_route() -> None:
+    """Load-time drift guard (ms-152 e-5514 保守性レビュー §2): the run route is a SECOND
+    encoding of the monitoring loop separate from ``OPERATION_EXECUTION_CYCLE``, so a future
+    edit that adds / renames a cycle phase could leave the route stale and
+    ``operation_run_cycle_complete`` would silently walk a wrong / empty path. Assert at
+    import that the route covers every execution phase AND that every step is a legal edge of
+    the cycle — a mismatch fails loudly here instead of surfacing as a silent no-advance."""
+    assert set(_OPERATION_RUN_ROUTE_TO_IDLE) == set(OPERATION_EXECUTION_CYCLE), (
+        "_OPERATION_RUN_ROUTE_TO_IDLE must cover exactly the OPERATION_EXECUTION_CYCLE "
+        f"phases; got {sorted(_OPERATION_RUN_ROUTE_TO_IDLE)} vs "
+        f"{sorted(OPERATION_EXECUTION_CYCLE)}")
+    for start, route in _OPERATION_RUN_ROUTE_TO_IDLE.items():
+        prev = start
+        for nxt in route:
+            assert nxt in OPERATION_EXECUTION_CYCLE.get(prev, frozenset()), (
+                f"_OPERATION_RUN_ROUTE_TO_IDLE: {prev!r}→{nxt!r} is not a legal edge of "
+                "OPERATION_EXECUTION_CYCLE (route drifted from the cycle graph)")
+            prev = nxt
+
+
+_validate_operation_run_route()
 
 
 def operation_run_cycle_complete(data: dict, op_id: str, *,
@@ -3514,7 +3547,7 @@ def operation_pause(data: dict, op_id: str, *, actor: str = "",
     move it to ``paused`` so its scheduled fire is suppressed until it is resumed.
     Legal from any active state (idle / due / running); already-paused is a no-op. The
     who / when / why is audit-stamped like any execution transition. Returns the op."""
-    return operation_set_execution_phase(data, op_id, "paused",
+    return operation_set_execution_phase(data, op_id, EXECUTION_PHASE_PAUSED,
                                          actor=actor, reason=reason)
 
 
@@ -3527,13 +3560,18 @@ def operation_resume(data: dict, op_id: str, *, actor: str = "",
     running→idle here would misrepresent a live run as an operator resume. Returns the op."""
     op = _find_operation(data, op_id)
     cur = operation_execution_phase(op)
-    if cur == "idle":
+    if cur == EXECUTION_PHASE_INITIAL:
         return op
-    if cur != "paused":
+    if cur != EXECUTION_PHASE_PAUSED:
+        # ms-152 e-5514 (AX レビュー): name the recovery path, not just the constraint —
+        # a due/running Operation is not "resumable"; it returns to idle when its run
+        # completes (run_record_add drives the cycle), so the caller knows to wait for
+        # the run rather than retry resume.
         raise ValueError(
             f"operation {op_id} is not paused (execution phase={cur!r}); "
-            f"resume only applies to a paused Operation")
-    return operation_set_execution_phase(data, op_id, "idle",
+            f"resume only applies to a paused Operation. A due/running Operation "
+            f"returns to idle when its run completes (via run_record_add), not via resume.")
+    return operation_set_execution_phase(data, op_id, EXECUTION_PHASE_INITIAL,
                                          actor=actor, reason=reason)
 
 

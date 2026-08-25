@@ -72,10 +72,21 @@ def test_unknown_execution_phase_raises():
     assert "Invalid execution phase" in str(ei.value)
 
 
-def test_same_execution_phase_is_a_noop():
+def test_same_execution_phase_is_a_true_noop_no_stamp():
+    # ms-152 e-5514: a same-phase move writes NO audit stamp (true no-op), so idempotent
+    # calls do not pollute the trail with fake transition events.
     data = _op(execution_phase="running")
     core.operation_set_execution_phase(data, "op-1", "running")  # must not raise
-    assert core.operation_execution_phase(data["operations"][0]) == "running"
+    op = data["operations"][0]
+    assert core.operation_execution_phase(op) == "running"
+    assert "exec_running_at" not in op["meta"]      # no spurious re-stamp
+
+
+def test_pause_on_already_paused_is_a_true_noop():
+    # Re-pausing a paused op leaves no fresh stamp (idempotent, honest audit).
+    data = _op(status="open", execution_phase="paused")
+    core.operation_pause(data, "op-1", actor="human", reason="再")
+    assert "exec_paused_at" not in data["operations"][0]["meta"]
 
 
 # --- paused off-ramp (structure declared here; fire-suppression is e-5484) ---
