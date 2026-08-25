@@ -40,6 +40,8 @@ import os
 import sys
 import json
 
+import root_target  # noqa: F401  # ms-153 e-5551: root-target field write seams
+
 from commands_shared import (  # noqa: F401
     Optional,
     _extract_token,
@@ -83,7 +85,9 @@ def cmd_project_rename():
     if new_name == old:
         print(f"プロジェクト名は既に '{new_name}' です (変更なし)。")
         return
-    data["name"] = new_name
+    # ms-153 e-5551: set the root target's label through the root-target seam,
+    # not a bare data["name"] write (SPEC 方針5). Behaviour-preserving.
+    root_target.set_root_label(data, new_name)
     save_project(data, op={"op": "project_rename", "old": old, "new": new_name})
     print(f"プロジェクト名を変更しました: {old or '(無名)'} → {new_name}")
 
@@ -94,7 +98,8 @@ def cmd_project_archive():
     if data.get("archived"):
         print("Project is already archived.")
         return
-    data["archived"] = True
+    # ms-153 e-5551: root-target lifecycle flag through the seam (SPEC 方針5).
+    root_target.set_root_archived(data, True)
     save_project(data)
     print(f"Archived: [{data.get('name', '')}]")
 
@@ -105,7 +110,8 @@ def cmd_project_unarchive():
     if not data.get("archived"):
         print("Project is not archived.")
         return
-    data["archived"] = False
+    # ms-153 e-5551: root-target lifecycle flag through the seam (SPEC 方針5).
+    root_target.set_root_archived(data, False)
     save_project(data)
     print(f"Unarchived: [{data.get('name', '')}]")
 

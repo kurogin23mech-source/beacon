@@ -239,6 +239,32 @@ def test_narrative_home_exists_at_birth():
         assert "adopted_target_classes" in data
 
 
+# --- root-target field write seams (e-5551 / 方針5, 受入条件7) ----------------
+
+def test_set_root_label():
+    data = {"name": "old", "milestones": []}
+    root_target.set_root_label(data, "new")
+    assert data["name"] == "new"
+
+
+def test_set_root_archived_coerces_to_bool():
+    data = {"name": "p", "milestones": []}
+    root_target.set_root_archived(data, True)
+    assert data["archived"] is True
+    root_target.set_root_archived(data, False)
+    assert data["archived"] is False
+    # non-bool truthy input is coerced to a clean flag
+    root_target.set_root_archived(data, 1)
+    assert data["archived"] is True
+
+
+def test_set_root_seams_touch_only_their_field():
+    data = {"name": "p", "archived": False, "milestones": [{"id": "ms-1"}]}
+    root_target.set_root_label(data, "q")
+    assert data["milestones"] == [{"id": "ms-1"}]  # untouched
+    assert data["archived"] is False               # untouched
+
+
 # --- scale contract (CORE doc scale-contract-principle) ----------------------
 
 def test_scale_many_children():

@@ -237,3 +237,64 @@ def project_as_root_target(data: dict) -> dict:
         "projection": projection,
         "narrative": root_narrative(data),
     }
+
+
+# ---------------------------------------------------------------------------
+# Root-target field writes (ms-153 e-5551 / SPEC 方針5).
+#
+# The root target's OWN mutable fields — its display label (``name``) and its
+# archived lifecycle flag (``archived``) — are set through THESE seams, not via
+# bare ``data["name"] = …`` / ``data["archived"] = …`` scattered in cmd_project.
+# This gives root-field mutation ONE home, mirroring how a leaf Target's state
+# goes through ``occupation.set_entry_state`` rather than ad-hoc dict writes: a
+# future root-field concern (validation, a decision-arm hook for archive =
+# 完了承認 in ms-154, an evidence stamp) plugs in HERE with no edit in the CLI.
+#
+# Behaviour-preserving: each seam mutates exactly the field the old inline write
+# did, in memory only. Persistence (``save_project``) stays in the caller, so
+# the cloud / local write path and its ``op`` audit tag are unchanged.
+# ---------------------------------------------------------------------------
+
+def set_root_label(data: dict, new_label: str) -> None:
+    """Set the root target's display label (the project ``name``). In-memory
+    only — the caller owns persistence."""
+    data["name"] = new_label
+
+
+def set_root_archived(data: dict, archived: bool) -> None:
+    """Set the root target's archived lifecycle flag. In-memory only — the
+    caller owns persistence. Coerced to ``bool`` so the stored value is always
+    a clean flag regardless of caller input."""
+    data["archived"] = bool(archived)
+
+
+# ---------------------------------------------------------------------------
+# Trek — the cross-project root variant (ms-153 e-5551 / SPEC 方針5 + 受入条件8;
+# DESIGN PATH ONLY, not implemented in this MS — spine §7 / migration ledger C8).
+#
+# A ``project`` is the root of ONE project's target hierarchy. A ``Trek`` (the
+# 缶詰の徹夜作業部屋 / 事前承認スコープ) is the root over SEVERAL projects and
+# sessions at once — i.e. the SAME root-target abstraction, but its child
+# collection spans projects rather than living inside a single project.json.
+# Today Trek rides its own mechanism (``trek_store`` / ``trek_status``), which is
+# why it "floats" beside the root abstraction (問題 P4).
+#
+# Migration path when Trek is later re-homed onto this root-target abstraction:
+#   1. work-item arm — a Trek's children are its member Targets across projects,
+#      enumerated through a cross-project analogue of
+#      ``occupation.iter_target_records`` (walk each joined project's records)
+#      rather than one project's collections. ``ROOT_TARGET_ARMS.work_item_arm``
+#      already names the enumeration seam (not a literal collection), so the arm
+#      mapping is reusable as-is; only the ``via`` enumerator changes.
+#   2. narrative — a Trek's goal_state / halt reason are its root-owned narrative
+#      (``root_narrative`` analogue), distinct from any member project's.
+#   3. projection — ``synthesized_projection`` rolls up member-project Targets
+#      the same way it rolls up one project's classes; the roll-up is agnostic to
+#      whether the children came from one project or many.
+#   4. phase-less / evidence-less / decision = member completion approval —
+#      identical arm mapping to a single-project root; the only difference is the
+#      breadth of the child set.
+# The two variants (single-project root = project / cross-project root = Trek)
+# therefore share ``ROOT_TARGET_ARMS`` and the projection/narrative split; the
+# implementation is deferred so this MS's scope stays on the single-project root.
+# ---------------------------------------------------------------------------
