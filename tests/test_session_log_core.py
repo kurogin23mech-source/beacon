@@ -92,6 +92,7 @@ def test_collect_project_entries_ignores_entries_without_session_id():
 def test_collect_project_entries_handles_empty_milestones():
     assert session_log.collect_project_entries({"milestones": []}, "S1") == {
         "commit_ids": [], "commit_texts": [], "pr_ids": [], "pr_texts": [],
+        "target_ids": [],
     }
 
 
@@ -125,6 +126,7 @@ def test_collect_project_entries_sales_without_entries_is_empty_not_crash():
     data = {"opportunities": [{"id": "opp-1", "activities": [], "gates": []}]}
     assert session_log.collect_project_entries(data, "S1") == {
         "commit_ids": [], "commit_texts": [], "pr_ids": [], "pr_texts": [],
+        "target_ids": [],
     }
 
 

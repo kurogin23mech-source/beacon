@@ -114,6 +114,17 @@ def build_new_project(name: str, objective: str, profession: str, *,
     seam probe / SPEC §6 composition flow; §1 "profession = target-class 採用プリ
     セットの糖衣").
 
+    ms-153 e-5548 (SPEC 方針4 axis inversion): read this seam as **instantiating
+    the ROOT target and wiring its adopted target-classes** — 新規プロジェクト
+    創出 ＝ root target を instance 化 ＋ 採用 class プリセット配線. The composed
+    dict IS the root-target instance (read back via
+    ``root_target.project_as_root_target``); ``adopted_target_classes`` below is
+    the class wiring, and the root-OWNED narrative (大目的 objective / 経緯
+    summary) is given its home at birth so the write side matches the read-side
+    2-split (方針2 の器の最小核). ``profession`` is demoted to sugar over which
+    class preset is wired — it selects the branch, it is no longer a privileged
+    axis.
+
     Extracted verbatim from ``commands.cmd_init``'s former if/elif cascade so the
     composition has a single home that the future per-class catalog migrations
     (operation / opportunity / … following the ``release`` precedent, SPEC §4b
@@ -180,6 +191,20 @@ def build_new_project(name: str, objective: str, profession: str, *,
     # 受入条件4). Applied here (not per-branch) so the delegated sales / back-office
     # builders get the key too instead of falling back to legacy live-derivation.
     data["adopted_target_classes"] = _td.profession_adopted_kinds(profession)
+    # ms-153 e-5548 (SPEC 方針4): stamp the root-target INSTANCE. The class
+    # wiring is the ``adopted_target_classes`` line above; this gives the
+    # root-OWNED narrative its home at birth so a fresh project already has the
+    # 2-split shape ``root_target`` reads (大目的 objective / 経緯 summary). The
+    # keys ARE the two ``root_target.root_narrative`` fields — kept in sync here
+    # by comment rather than import because ``occupation`` sits BELOW
+    # ``root_target`` (root_target imports occupation, not the reverse), so this
+    # module cannot reference it without a cycle. Additive / back-compat:
+    # ``objective`` is already set by every branch (setdefault is a no-op there),
+    # ``summary`` starts empty so the field EXISTS rather than materialising only
+    # on first write, and a legacy reader ignores an unknown key. The seam-probe
+    # assertions (adopted set / collections / profession) are untouched.
+    data.setdefault("objective", objective)
+    data.setdefault("summary", "")
     return data
 
 

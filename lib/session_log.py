@@ -89,6 +89,12 @@ def collect_project_entries(data: dict, session_id: str) -> dict:
     commit_texts: list[str] = []
     pr_ids: list[str] = []
     pr_texts: list[str] = []
+    # ms-153 e-5550: the distinct Targets this session's entries landed on, in
+    # first-seen order. session-end uses this to scope its summary write to the
+    # ACTUAL worked target (SPEC 方針3: write = 作業した target) instead of a
+    # project-wide log. Sourced from the SAME walk as the commit/pr collection so
+    # attribution never diverges from what was collected.
+    target_ids: list[str] = []
 
     import occupation
     # ARM-NAME COUPLING (ms-142 e-5012, tracked debt): target ENUMERATION is
@@ -100,6 +106,8 @@ def collect_project_entries(data: dict, session_id: str) -> dict:
     # capability_ledger.KNOWN_ARM_REACH ("session_log", "entries") — the checker's
     # stale-entry test forces this comment + read to be remediated together.
     for tgt in occupation.iter_target_records(data):
+        tid = tgt.get("id", "")
+        matched = False
         for e in _iter_entries(tgt.get("entries", [])):
             meta = e.get("meta") or {}
             if meta.get("session_id") != session_id:
@@ -110,16 +118,21 @@ def collect_project_entries(data: dict, session_id: str) -> dict:
                 commit_ids.append(eid)
                 msg = meta.get("message") or e.get("description") or ""
                 commit_texts.append(msg)
+                matched = True
             elif etype == "pr":
                 pr_ids.append(eid)
                 title = e.get("description") or meta.get("url") or ""
                 pr_texts.append(title)
+                matched = True
+        if matched and tid and tid not in target_ids:
+            target_ids.append(tid)
 
     return {
         "commit_ids": commit_ids,
         "commit_texts": commit_texts,
         "pr_ids": pr_ids,
         "pr_texts": pr_texts,
+        "target_ids": target_ids,
     }
 
 
@@ -219,6 +232,43 @@ def mechanical_summary(
 # Aggregation core
 # ---------------------------------------------------------------------------
 
+def resolve_worked_target(beacon_dir: Path, entry_target_ids: list) -> dict:
+    """Decide which Target this session actually worked on, so session-end can
+    scope its summary write to that Target rather than the whole project
+    (ms-153 e-5550 / SPEC 方針3, 問題 P3: write = 作業した target).
+
+    Resolution, highest confidence first:
+
+    1. **fork** — ``.beacon/fork.json``'s ``target_ms_id``. A fork worktree
+       exists to advance exactly that Target, so the write target is
+       STRUCTURALLY determined (SPEC 受入条件6: fork では target_ms_id で定まる),
+       independent of what the session happened to commit.
+    2. **inferred** — no fork, and the session's own entries all landed on ONE
+       Target: that Target.
+    3. **none / ambiguous** — no session entries (``none``) or entries spanning
+       several Targets (``ambiguous``): leave empty. The summary stays
+       project-wide/unattributed rather than guessing a single owner.
+
+    Returns ``{"target_id": str, "target_source": "fork"|"inferred"|"none"|
+    "ambiguous"}``. Read-only (never writes fork.json / project)."""
+    fork_path = beacon_dir / "fork.json"
+    if fork_path.exists():
+        try:
+            fork = json.loads(fork_path.read_text(encoding="utf-8"))
+            tid = (fork.get("target_ms_id") or "").strip()
+            if tid:
+                return {"target_id": tid, "target_source": "fork"}
+        except (OSError, ValueError):
+            # malformed / unreadable fork.json → fall through to inference
+            pass
+    distinct = [t for t in dict.fromkeys(entry_target_ids or []) if t]
+    if len(distinct) == 1:
+        return {"target_id": distinct[0], "target_source": "inferred"}
+    if not distinct:
+        return {"target_id": "", "target_source": "none"}
+    return {"target_id": "", "target_source": "ambiguous"}
+
+
 def aggregate_session(
     *,
     project_data: dict,
@@ -263,6 +313,12 @@ def aggregate_session(
         pr_texts=proj_entries["pr_texts"],
     )
 
+    # ms-153 e-5550 (SPEC 方針3): scope the write to the worked Target. In a fork
+    # this is structurally fixed by fork.json; else inferred from the session's
+    # own entries (empty when none / cross-target). This ATTRIBUTES the session
+    # summary to the Target it advanced instead of an implicit project-wide log.
+    worked = resolve_worked_target(beacon_dir, proj_entries.get("target_ids", []))
+
     now = _now_iso()
     payload = {
         "session_id": session_id,
@@ -270,6 +326,8 @@ def aggregate_session(
         "note_ids": notes["note_ids"],
         "commit_ids": proj_entries["commit_ids"],
         "pr_ids": proj_entries["pr_ids"],
+        "target_id": worked["target_id"],
+        "target_source": worked["target_source"],
         "last_aggregated_at": now,
     }
 
@@ -295,4 +353,5 @@ __all__ = [
     "collect_local_notes",
     "collect_project_entries",
     "mechanical_summary",
+    "resolve_worked_target",
 ]

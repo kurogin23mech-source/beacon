@@ -41,6 +41,7 @@ import subprocess
 import core  # noqa: F401
 import work_model  # noqa: F401
 import occupation  # noqa: F401
+import root_target  # noqa: F401  # ms-153 e-5549: root-target assembler for status
 import transition_approval as _ta  # noqa: F401
 
 from commands_shared import (  # noqa: F401
@@ -205,6 +206,17 @@ def cmd_milestone_list():
             "name": data.get("name", ""),
             "summary": data.get("summary", ""),
             "profession": occupation.resolve_profession(data),
+            # ms-153 e-5549 (SPEC 方針3) — session-start reads the project AS its
+            # ROOT target from HERE. ``root`` is the assembled root view
+            # (root_target.project_as_root_target): it composes the adopted
+            # target-classes' state projection + deliverable projection
+            # (``projection``) with the root-owned narrative — 大目的 / 経緯 —
+            # (``narrative``), keeping the 2-split (方針2) structural. session-start
+            # is thus a root-target ASSEMBLER: read = from root. The scattered
+            # sibling fields (name / summary / profession / targets) stay for
+            # back-compat, but the canonical "read the project's own state" path
+            # is now this single composed root.
+            "root": root_target.project_as_root_target(data),
             # ms-115 e-3788 — 発見性: この職種が作れる target-class を session-start が
             # 読む status に載せる。「この職種で作れるのは X」を最初から見せて、他職種の
             # 対象を誤って作ろうとする前に自然に正しい入口へ導く (封じ込め block は最後の砦)。
