@@ -61,6 +61,19 @@ ADOPTED_TARGET_CLASSES_KEY = "adopted_target_classes"
 WORK_ITEM_FIELDS_KEY = "work_item_fields"
 EVIDENCE_FIELDS_KEY = "evidence_fields"
 
+# Deliverable-projection declaration (ms-155 e-5597). A target-class may declare
+# HOW it summarizes the VALUE it produced — its *deliverable* — as a projectable
+# dimension (spine uq1zgT6apEzAtYE4SfJG §2b: deliverable = target の第3面, process
+# =§4b / audit=§4 と並ぶ). This is NOT the audit evidence (足跡): evidence is proof
+# that work happened, a deliverable is the produced value itself (milestone→機能 /
+# opportunity→成約・pipeline / operation→稼働状態). Declaring "出力の要約方法" per
+# class is what lets the project (root) build its deliverable as the UNION of its
+# adopted classes' projections (ms-155 e-5599) by寄せ集めるだけ — no project-level
+# field to go stale. OPTIONAL and read tolerantly: a descriptor written before this
+# feature carries no deliverable slot and behaves exactly as before (additive-only
+# / tolerant-read compat, memo pnhATs37xgIxEkpFI8uR).
+DELIVERABLE_KEY = "deliverable"
+
 # Per-phase adjacency declaration (ms-152 e-5480). A phase MAY declare ``next``:
 # the list of phase keys reachable from it in one step — the descriptor-side
 # expression of the phase-graph, which spine §4b permits to CYCLE (SPEC 方針1
@@ -382,6 +395,53 @@ def evidence_fields(desc: dict) -> list:
             if isinstance(f, dict)]
 
 
+# Named projector STRATEGIES a descriptor's deliverable slot may pick (ms-155
+# e-5597). Like ``DESCRIPTOR_SAFE_CHANGELOG_RECORDERS``, this is a small allowlist
+# so a declared ``projector`` always resolves to a real builder — the builders
+# themselves (and the code-class milestone/opportunity wiring) land in e-5598 /
+# e-5599; this task declares the vocabulary they dispatch on. Two strategies cover
+# the classes spine §2b names:
+#   - ``"doc"``    — the produced value IS a named document; the slot declares a
+#                    ``ref`` (a doc id or well-known key). milestone→機能 rides this
+#                    (``ref: "application-map"``, e-5598).
+#   - ``"rollup"`` — the produced value is a roll-up summary over the class's
+#                    completed Targets (count + labels). A generic strategy any
+#                    descriptor class can use; opportunity→成約・pipeline rides it
+#                    (道筋明記, e-5601).
+# operation→稼働状態 is deferred (SPEC やらない), so no strategy for it yet.
+DELIVERABLE_PROJECTORS = frozenset({"doc", "rollup"})
+
+
+def deliverable_projection(desc: dict) -> Optional[dict]:
+    """Return a descriptor's declared DELIVERABLE-projection spec —
+    ``{"kind": str, "label": str, "projector": str, "ref": str} | None`` (ms-155
+    e-5597).
+
+    The deliverable is the target-class's produced VALUE as a projectable
+    dimension (spine §2b), distinct from its audit evidence. This reads the
+    ``deliverable`` slot the same tolerant way ``arm_roles`` reads the changelog
+    slot: a well-formed slot needs a non-empty ``kind`` (the deliverable's type
+    token, e.g. ``"feature-map"``) and a ``projector`` in
+    ``DELIVERABLE_PROJECTORS`` (the named build strategy). Absent / malformed /
+    unsafe-projector → ``None`` (the class simply contributes no deliverable to the
+    root union, unchanged from before this feature); ``validate_descriptor`` ALSO
+    flags a bad slot at load time so it is not only a silent miss. ``label`` / ``ref``
+    default to ``""`` (``ref`` is only meaningful for the ``"doc"`` projector)."""
+    raw = desc.get(DELIVERABLE_KEY) if isinstance(desc, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    kind = (raw.get("kind") or "").strip()
+    projector = (raw.get("projector") or "").strip()
+    if not kind or projector not in DELIVERABLE_PROJECTORS:
+        return None
+    return {
+        "kind": kind,
+        "label": (raw.get("label") or "").strip(),
+        "projector": projector,
+        "ref": (raw.get("ref") or "").strip(),
+    }
+
+
 def fields_at_phase(desc: dict, phase_key: str) -> list:
     """Return the fields visible once ``phase_key`` is reached: the class's base
     fields PLUS that phase's own field extension (SPEC §4 — a phase can surface
@@ -579,6 +639,32 @@ def validate_descriptor(desc: dict) -> list:
                     f"のいずれか必要です (現在: {recorder!r})。'milestone' は"
                     f"マイルストーン専用の組み込み戦略で、記述子からは使えません")
 
+    # deliverable slot (ms-155 e-5597): if declared, it must be
+    # {kind: str, projector: <DELIVERABLE_PROJECTORS>}. Surfacing a bad slot HERE
+    # (load time) — rather than letting ``deliverable_projection`` degrade it to a
+    # silent None indistinguishable from "no deliverable declared" — gives the
+    # author a diagnostic instead of a class that quietly contributes nothing to
+    # the root union (mirrors the changelog block above).
+    dl = desc.get(DELIVERABLE_KEY)
+    if dl is not None:
+        if not isinstance(dl, dict):
+            problems.append(
+                f"[{label}] '{DELIVERABLE_KEY}' は辞書である必要があります "
+                f"(現在: {dl!r})")
+        else:
+            dkind = (dl.get("kind") or "").strip()
+            projector = (dl.get("projector") or "").strip()
+            if not dkind:
+                problems.append(f"[{label}] '{DELIVERABLE_KEY}.kind' が未設定です")
+            if not projector:
+                problems.append(
+                    f"[{label}] '{DELIVERABLE_KEY}.projector' が未設定です")
+            elif projector not in DELIVERABLE_PROJECTORS:
+                problems.append(
+                    f"[{label}] '{DELIVERABLE_KEY}.projector' は "
+                    f"{' / '.join(sorted(DELIVERABLE_PROJECTORS))} "
+                    f"のいずれか必要です (現在: {projector!r})")
+
     return problems
 
 
@@ -735,15 +821,17 @@ def build_descriptor(*, kind: str, label: str, dtype: str,
                      fields: Optional[list] = None,
                      phases: Optional[list] = None,
                      work_item_fields: Optional[list] = None,
-                     evidence_fields: Optional[list] = None) -> dict:
+                     evidence_fields: Optional[list] = None,
+                     deliverable: Optional[dict] = None) -> dict:
     """Build a target-class descriptor dict from its parts (pure, no I/O). The
     shape matches what ``backoffice_seed`` hand-writes: kind / label / type /
     id_prefix / collection / decomposition / fields / phases. ``fields`` and
     ``phases`` are passed through verbatim (the caller built them from CLI flags
     or JSON). ``decomposition.arms`` defaults to the thick-frame arms so authored
     classes get WorkItems / Evidence like the built-in seed. ``work_item_fields``
-    / ``evidence_fields`` (ms-146 e-5344) are emitted only when non-empty. This
-    does NOT validate — the caller runs ``validate_*``.
+    / ``evidence_fields`` (ms-146 e-5344) and ``deliverable`` (ms-155 e-5597) are
+    emitted only when non-empty. This does NOT validate — the caller runs
+    ``validate_*``.
 
     ms-147 e-5375: ``profession`` is OPTIONAL — a PROVENANCE tag, never a wiring
     input (SPEC 方針1). Omitting it builds a profession-neutral material; when
@@ -773,6 +861,11 @@ def build_descriptor(*, kind: str, label: str, dtype: str,
         desc[WORK_ITEM_FIELDS_KEY] = list(work_item_fields)
     if evidence_fields:
         desc[EVIDENCE_FIELDS_KEY] = list(evidence_fields)
+    # ms-155 e-5597: the deliverable slot is emitted ONLY when the author declared
+    # one, so a class built without it is byte-identical to what this returned
+    # before (no empty keys appearing in every project.json).
+    if deliverable:
+        desc[DELIVERABLE_KEY] = dict(deliverable)
     return desc
 
 
