@@ -134,8 +134,9 @@ beacon status --json --ms <ms-id> [--ms <ms-id> ...]
 beacon status --json
 ```
 stdout に JSON が返る。以下のフィールドを使う:
-- `name`: プロジェクト名
-- `summary`: 前セッションの経緯・背景
+- `root`: **プロジェクト自身を『ルート target (= 対象の最上位)』として組み立てた投影 (ms-153 e-5549 / SPEC 方針3)。session-start はこの root を読む assembler**。中身は `id` (=`root`) / `label` (プロジェクト名) / `status` (子から導出: 子ゼロ=`todo` / 子あり=`active`) / `kind` (=`root`) / `work_items_total` / `work_items_done` (子 target の数) / `arms` (root の arm マッピング: フェーズ無し・証拠無し・子=作業項目・完了承認・達成物) / `projection` (= **合成投影**: `targets` 子の state 投影 + `counts` 進捗ロールアップ + `deliverables` 達成物 union の seam) / `narrative` (= **root 固有の物語**: `objective` 大目的 + `summary` 経緯、子から導出不可)。**まず root を読んで「このプロジェクトの現在地と物語」を掴む**。以下の個別フィールド (`name` / `summary` / `profession` / `targets[]`) は後方互換のために残るが、これらは root の各部分と重複する (root が正、個別 field は投影の断片)。
+- `name`: プロジェクト名 (= `root.label` と同じ)
+- `summary`: 前セッションの経緯・背景 (= `root.narrative.summary` と同じ)
 - `profession`: この instance の職種 (= `dev` / `sales` 等、無ければ `dev` 扱い)。以下の職種分岐の判定に使う
 - `milestones[]`: 各MSの `id`, `title`, `status`, `progress`, `total_tasks`, `done_tasks` (**開発 instance のみ**、営業では空)
 - `targets[]`: 職種非依存の「対象」投影 (ms-108 e-3269)。各要素は `id` / `label` / `status` / `kind` (`milestone` or `opportunity`) / `work_items_total` / `work_items_done` / `detail` (職種固有の付帯情報)。**開発では Milestone、営業では Opportunity (商談) が同じ形で並ぶ**
