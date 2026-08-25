@@ -279,6 +279,27 @@ BUILTIN_TARGET_CLASSES: dict[str, dict] = {
             "evidence_arms": [{"arm": "communications", "item_type": None}],
             "changelog": None,
         },
+        # ms-155 e-5601 — opportunity→pipeline 同型化の道筋 (SPEC 受入条件6, 実装は
+        # 最小/後続). An opportunity's DELIVERABLE (生み出した価値) is its 成約・
+        # pipeline — the sales analogue of milestone's 機能 map. It would be declared
+        # through the IDENTICAL ``deliverable`` slot milestone uses, with the generic
+        # ``"rollup"`` projector (a summary rolled up over the class's Targets — here
+        # weighted pipeline / 成約 count) rather than ``"doc"``:
+        #
+        #     "deliverable": {"kind": "pipeline", "label": "パイプライン",
+        #                     "projector": "rollup"},
+        #
+        # so ``occupation.deliverable_projection_for(data, "opportunity")`` and the
+        # root union (``project_deliverables``) would surface it for a sales project
+        # with ZERO new wiring — the same "declare, don't wire" path proven for the
+        # descriptor ``"rollup"`` case (test_deliverable_projection_e5598). It is
+        # DELIBERATELY not declared live here yet: the ``"rollup"`` projector has no
+        # resolver that computes the actual weighted-pipeline summary, so shipping the
+        # spec now would surface a hollow deliverable (a declared value with nothing
+        # producing it). Enabling it = add the rollup resolver (the follow-up SPEC
+        # scopes as 最小/後続) and uncomment this slot; the union/accessor already
+        # accept it unchanged, which ``test_opportunity_deliverable_is_isomorphic``
+        # pins executably.
         "kind": "opportunity",
         "shape": SHAPE_FUNNEL,
         "state_field": "phase",

@@ -176,3 +176,35 @@ def test_bearing_classes_includes_descriptor_class():
     data = {"name": "D", "profession": "dev", "milestones": []}
     assert td.append_descriptor(data, deal) == []
     assert occupation.deliverable_bearing_classes(data) == ["milestone", "deal"]
+
+
+# ---------------------------------------------------------------------------
+# opportunity→pipeline 同型化の道筋 (ms-155 e-5601) — proves EXECUTABLY that an
+# opportunity would surface a deliverable through the IDENTICAL slot + accessor +
+# union as milestone, with zero new wiring. The live slot is deliberately not
+# shipped (no rollup resolver yet, see target_state comment); this pins that
+# enabling it later is a one-line uncomment, not a code path that must be built.
+# ---------------------------------------------------------------------------
+
+def test_opportunity_deliverable_is_isomorphic():
+    opp = tstate.BUILTIN_TARGET_CLASSES["opportunity"]
+    assert "deliverable" not in opp   # not shipped live (hollow-spec avoidance)
+    sales = {"name": "S", "profession": "sales", "opportunities": []}
+    assert occupation.project_deliverables(sales) == []   # empty until declared
+
+    # Declare the SAME-shaped slot opportunity would carry, then confirm the very
+    # same accessor + union surface it — no new wiring, isomorphic to milestone.
+    opp["deliverable"] = {"kind": "pipeline", "label": "パイプライン",
+                          "projector": "rollup"}
+    try:
+        assert occupation.deliverable_projection_for(sales, "opportunity") == {
+            "kind": "pipeline", "label": "パイプライン",
+            "projector": "rollup", "ref": ""}
+        assert occupation.project_deliverables(sales) == [
+            {"target_class": "opportunity", "kind": "pipeline",
+             "label": "パイプライン", "projector": "rollup", "ref": ""}]
+        # and it validates under the same shared rule milestone's does
+        assert td.validate_deliverable(opp["deliverable"], "opportunity") == []
+    finally:
+        del opp["deliverable"]   # restore: keep the class hollow-free for other tests
+    assert "deliverable" not in tstate.BUILTIN_TARGET_CLASSES["opportunity"]
