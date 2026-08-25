@@ -969,6 +969,28 @@ class ApiClient:
             {"decision": decision},
         )
 
+    # ms-151 / e-5474: machine API key (headless machine 認証の鍵) の管理。
+    # owner だけが叩ける project-scoped endpoint を薄くラップする。issue の返り
+    # ``key`` は発行時のみ得られる raw token (以後サーバーは hash のみ)。
+
+    def issue_machine_key(self, project_id: str, *, label: str = "") -> dict:
+        """発行 (owner 限定)。返り ``{"key": raw, "machine_key": redacted}``。"""
+        return self.post(
+            f"/api/projects/{project_id}/machine-keys",
+            {"label": label},
+        )
+
+    def list_machine_keys(self, project_id: str) -> dict:
+        """一覧 (owner 限定)。返り ``{"machine_keys": [redacted, ...]}``。"""
+        return self.get(f"/api/projects/{project_id}/machine-keys")
+
+    def revoke_machine_key(self, project_id: str, key_id: str) -> dict:
+        """失効 (owner 限定)。未存在は 404。返り ``{"machine_key": redacted}``。"""
+        return self.delete(
+            f"/api/projects/{project_id}/machine-keys/"
+            f"{urllib.parse.quote(key_id)}"
+        )
+
     # ms-54 / e-1369 Layer 4: AI-authored intent. Set via `beacon session
     # focus "<text>"` / `beacon session attention --set true`. Read by the
     # /beacon-dm-send picker so a sender sees "what is each session doing".

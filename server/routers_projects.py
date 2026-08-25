@@ -47,7 +47,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
@@ -55,6 +55,8 @@ from pydantic import BaseModel
 
 import store_router as db  # e-1544: same backend-routing binding app.py uses
 import core
+import machine_key as machine_key_mod  # ms-151 e-5474: headless machine 認証の鍵
+import operation_period  # ms-151 e-5477: operation-fires claim の period バケット
 import operations
 import trek as trek_mod
 import envelope as envelope_mod
@@ -83,6 +85,31 @@ _audit_logger = logging.getLogger("beacon.audit")
 class ProjectCreate(BaseModel):
     name: str
     objective: str = ""
+
+class MachineKeyIssueBody(BaseModel):
+    # ms-151 e-5474: 発行時に付ける人間可読ラベル (例 "PE detector Lambda")。
+    # どの machine の鍵かを一覧で識別するためのメモで、省略可。
+    label: str = ""
+
+class MachineRunRecordBody(BaseModel):
+    # ms-151 e-5476: machine が Operation に直接書く run_record (運転記録)。
+    # e-5502 AX review C: 許容値を Literal で型に載せ OpenAPI schema に enum を出す
+    # (core.run_record_add / incident_open の検証と二重防御)。
+    batch: str
+    status: Literal["ok", "warning", "error"]
+    description: str = ""
+    date: str = ""  # 空なら server 時刻
+
+class MachineIncidentBody(BaseModel):
+    # ms-151 e-5476: machine が Operation に直接書く incident (異常記録)。
+    # priority は canonical (highest..lowest) + alias "middle" + 空 を許容
+    # (core の _ACCEPTED_PRIORITIES と一致、alias を狭めない)。
+    title: str
+    description: str = ""
+    priority: Literal[
+        "highest", "high", "medium", "middle", "low", "lowest", ""
+    ] = ""
+    opened_at: str = ""  # 空なら server 時刻
 
 class MilestoneCreate(BaseModel):
     title: str
@@ -1513,19 +1540,31 @@ def make_router(
         retrigger storms when ``run_record`` lands locally but cloud sync lag
         makes the next scheduler tick still see "no run_record yet").
 
-        Response: ``{claimed: bool, claimed_by: str, claimed_at: str}``. Date is
-        server clock (UTC) so all sessions agree on the calendar day boundary
-        even across timezone-mixed machines.
+        Response: ``{claimed: bool, claimed_by: str, claimed_at: str}``.
+
+        ms-151 / e-5477: the claim key is a **cadence-derived period bucket**
+        (``operation_period.period_key``) instead of the raw calendar day.
+        Day-or-coarser cadences (daily / weekdays / weekly) still bucket by date
+        (= identical to the old key, zero behaviour change), while sub-day
+        cadences (hourly / N-minute) get a finer bucket so multiple same-day
+        fires are not collapsed into "the first fire of the day". The bucket is
+        computed from the server clock (UTC) so all sessions agree on the
+        boundary even across timezone-mixed machines.
 
         Any project member (= owner / editor / viewer) may claim. The claim
         itself is not a privileged action; the gate exists to dedup honest
         parallel writers, not to enforce access.
         """
-        _load(project_id, user)  # membership check (any role)
+        data = _load(project_id, user)  # membership check (any role) + project data
         import datetime
-        today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+        # cadence を op の schedule.frequency から引く (無ければ空 = 日付粒度で backward compat)。
+        op = next((o for o in data.get("operations", [])
+                   if o.get("id") == op_id), None)
+        frequency = ((op or {}).get("schedule") or {}).get("frequency", "")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        period = operation_period.period_key(frequency, now)
         return db.claim_operation_fire_if_new(
-            project_id, op_id, today, body.session_id or ""
+            project_id, op_id, period, body.session_id or ""
         )
 
     @router.post("/api/projects/{project_id}/log")
@@ -1792,6 +1831,132 @@ def make_router(
         # means there is nothing further back.
         next_since = entries[-1]["ts"] if entries else None
         return {"entries": entries, "next_since": next_since, "limit": limit}
+
+    # -----------------------------------------------------------------------
+    # Machine API keys (ms-151 / e-5474) — headless machine 認証の鍵の管理。
+    # -----------------------------------------------------------------------
+    # これらは「鍵を管理する」人間向け経路なので owner 限定 + 人間トークン
+    # (require_auth) で守る。鍵そのものを使う直書き経路 (e-5476) は machine
+    # 認証で別に守られる (= 発行者は人間 owner、利用者は machine)。
+    #
+    # 発行時だけ raw token を返し、以後サーバーは hash しか持たない。一覧・失効は
+    # redacted (secret_hash を落とした) view を返す。
+
+    @router.post("/api/projects/{project_id}/machine-keys")
+    def issue_machine_key(project_id: str, body: "MachineKeyIssueBody",
+                          user: dict = Depends(require_auth)):
+        """新しい machine key を発行する (owner 限定)。
+
+        raw token は **このレスポンスでしか得られない** (record は hash のみ保存)。
+        呼び出し側は表示直後に安全な場所へ保存する責任を持つ。
+        """
+        _require_project_role(project_id, user, allowed=("owner",))
+        created_by = user.get("sub", "") or ""
+        raw, record = machine_key_mod.issue(
+            project_id, label=body.label or "",
+            created_by=created_by, now=core._now_iso(),
+        )
+        db.save_machine_key(project_id, record)
+        return {
+            "key": raw,  # 発行時のみ。以後は再取得不能。
+            "machine_key": machine_key_mod.redacted(record),
+        }
+
+    @router.get("/api/projects/{project_id}/machine-keys")
+    def list_project_machine_keys(project_id: str,
+                                  user: dict = Depends(require_auth)):
+        """project の machine key を新しい順で一覧する (owner 限定, secret は返さない)。"""
+        _require_project_role(project_id, user, allowed=("owner",))
+        rows = db.list_machine_keys(project_id)
+        return {"machine_keys": [machine_key_mod.redacted(r) for r in rows]}
+
+    @router.delete("/api/projects/{project_id}/machine-keys/{key_id}")
+    def revoke_project_machine_key(project_id: str, key_id: str,
+                                   user: dict = Depends(require_auth)):
+        """machine key を失効させる (owner 限定)。以後その鍵での認証は弾かれる。"""
+        _require_project_role(project_id, user, allowed=("owner",))
+        updated = db.revoke_machine_key(
+            project_id, key_id, revoked_at=core._now_iso())
+        if updated is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"machine key '{key_id}' not found in project "
+                       f"'{project_id}'")
+        return {"machine_key": machine_key_mod.redacted(updated)}
+
+    # -----------------------------------------------------------------------
+    # Machine direct-write endpoints (ms-151 / e-5476) — run_record / incident。
+    # -----------------------------------------------------------------------
+    # headless machine が「起きた事実 (run_record / incident)」を cloud へ直接書く
+    # 口。SPEC 設計方針2: 記録は外向き action ではないので envelope 照合を課さない。
+    # 正当性は「有効な machine key + その key が属する project + 対象 op 実在」の
+    # 3 点で担保する (別 project への書き込みは弾く)。
+
+    def _require_machine_writer(request: Request, project_id: str) -> None:
+        """直書きは machine 認証必須、かつ鍵の project == URL の project を強制する。
+
+        - auth 無効 (dev モード) は許可 (ローカル検証)。
+        - 人間 / CLI トークン (= request.state.machine 不在) は 403 (この口は machine
+          専用。人間は既存の CLI ローカル書き込み経路を使う)。
+        - machine の所属 project ≠ URL の project は 403 (別 project 書き込み拒否)。
+        """
+        if not is_auth_enabled():
+            return
+        machine = getattr(request.state, "machine", None)
+        if not machine:
+            raise HTTPException(
+                status_code=403,
+                detail="machine key required for direct-write endpoints")
+        if machine.get("project_id") != project_id:
+            raise HTTPException(
+                status_code=403,
+                detail="machine key does not belong to this project")
+
+    def _machine_op_write(project_id: str, op_name: str, actor: str, mutate):
+        """op mutate を load→apply→broadcast で永続化し、ValueError を 404/400 に翻訳。
+
+        core.* が投げる ValueError は「Operation not found」(→404) か検証失敗
+        (Invalid status / priority など、→400) のどちらか。message で振り分ける。
+        """
+        def op(data: dict):
+            _operation, entry = mutate(data)
+            return data, entry
+        try:
+            return _apply_op_and_broadcast(
+                project_id, op, op_name=op_name, actor=actor)
+        except ValueError as e:
+            msg = str(e)
+            if "not found" in msg.lower():
+                raise HTTPException(status_code=404, detail=msg)
+            raise HTTPException(status_code=400, detail=msg)
+
+    @router.post("/api/projects/{project_id}/operations/{op_id}/run-records")
+    def machine_add_run_record(project_id: str, op_id: str,
+                               body: MachineRunRecordBody, request: Request,
+                               user: dict = Depends(require_auth)):
+        """machine が Operation に run_record を直接書く (machine 認証、envelope 不要)。"""
+        _require_machine_writer(request, project_id)
+        return _machine_op_write(
+            project_id, op_name="operation.run_record.machine",
+            actor=user.get("sub", ""),
+            mutate=lambda data: core.run_record_add(
+                data, op_id, batch=body.batch, status=body.status,
+                description=body.description, date=body.date or ""),
+        )
+
+    @router.post("/api/projects/{project_id}/operations/{op_id}/incidents")
+    def machine_open_incident(project_id: str, op_id: str,
+                              body: MachineIncidentBody, request: Request,
+                              user: dict = Depends(require_auth)):
+        """machine が Operation に incident を直接書く (machine 認証、envelope 不要)。"""
+        _require_machine_writer(request, project_id)
+        return _machine_op_write(
+            project_id, op_name="operation.incident.machine",
+            actor=user.get("sub", ""),
+            mutate=lambda data: core.incident_open(
+                data, op_id, title=body.title, description=body.description,
+                priority=body.priority or "", opened_at=body.opened_at or ""),
+        )
 
     return router
 

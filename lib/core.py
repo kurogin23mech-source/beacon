@@ -3502,8 +3502,12 @@ def run_record_add(data: dict, op_id: str, *,
 
 def incident_open(data: dict, op_id: str, *,
                   title: str, description: str = "",
-                  priority: str = "") -> tuple[dict, dict]:
-    """Open an Incident in an Operation. Returns (operation, entry)."""
+                  priority: str = "", opened_at: str = "") -> tuple[dict, dict]:
+    """Open an Incident in an Operation. Returns (operation, entry).
+
+    ``opened_at`` (ms-151 / e-5476): 呼び出し側が発生時刻を持つ場合に渡す
+    (headless machine は「いつ異常が起きたか」を報告する)。空なら server 時刻。
+    """
     op = _find_operation(data, op_id)
     eid = next_entry_id(data)
     if priority and priority not in _ACCEPTED_PRIORITIES:
@@ -3514,7 +3518,7 @@ def incident_open(data: dict, op_id: str, *,
         "title": title,
         "status": "open",
         "description": description,
-        "opened_at": _now_iso(),
+        "opened_at": opened_at or _now_iso(),
         "resolved_at": None,
         "resolution": None,
         "linked_ms_task": None,

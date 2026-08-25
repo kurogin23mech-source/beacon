@@ -6497,6 +6497,100 @@ def cmd_run_list():
 
 
 # ---------------------------------------------------------------------------
+# Machine API keys (ms-151 / e-5474) — headless machine 認証の鍵の発行 CLI。
+# ---------------------------------------------------------------------------
+# 鍵の管理 (発行 / 一覧 / 失効) は cloud の owner 限定 endpoint を叩く。発行時だけ
+# raw token が返り、以後サーバーは hash しか持たない。人間 owner が端末から鍵を
+# 発行し、外部 machine (PE detector Lambda 等) に安全な経路で手渡す運用を想定する。
+
+def _machine_key_error(exc: Exception, project_id: str) -> None:
+    """machine key 管理エラーを 1 行で表示して exit する (stacktrace を出さない)。"""
+    msg = str(exc)
+    if "403" in msg:
+        print(
+            f"Error: machine key の管理は project {project_id!r} の owner のみ "
+            f"可能です。\n  ({msg})",
+            file=sys.stderr,
+        )
+    else:
+        print(f"Error: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def cmd_machine_key_issue():
+    label = os.environ.get("BEACON_MACHINE_KEY_LABEL", "")
+    client, config = _get_api_client()
+    project_id = config.get("project_id", "")
+    try:
+        resp = client.issue_machine_key(project_id, label=label)
+    except Exception as exc:  # noqa: BLE001
+        _machine_key_error(exc, project_id)
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(resp, ensure_ascii=False))
+        return
+    info = resp.get("machine_key", {})
+    raw = resp.get("key", "")
+    print(f"machine key を発行しました (project: {project_id})")
+    print(f"  key_id: {info.get('key_id', '')}")
+    if info.get("label"):
+        print(f"  label:  {info.get('label')}")
+    print()
+    print("  ↓ この鍵は今だけ表示されます。安全な場所に保存してください "
+          "(再取得は不可):")
+    print(f"  {raw}")
+
+
+def cmd_machine_key_list():
+    client, config = _get_api_client()
+    project_id = config.get("project_id", "")
+    try:
+        resp = client.list_machine_keys(project_id)
+    except Exception as exc:  # noqa: BLE001
+        _machine_key_error(exc, project_id)
+    rows = resp.get("machine_keys", [])
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(rows, ensure_ascii=False))
+        return
+    if not rows:
+        print(f"machine key はありません (project: {project_id})")
+        return
+    for r in rows:
+        revoked = r.get("revoked")
+        mark = "✗" if revoked else "✓"
+        state = "revoked" if revoked else "active"
+        label = f" — {r.get('label')}" if r.get("label") else ""
+        print(f"{mark} {r.get('key_id', '')} [{state}] "
+              f"{r.get('created_at', '')}{label}")
+
+
+def cmd_machine_key_revoke():
+    key_id = os.environ.get("BEACON_MACHINE_KEY_ID", "")
+    if not key_id:
+        print("Error: <key_id> required.\n"
+              "  Example: beacon machine-key revoke <key_id>",
+              file=sys.stderr)
+        sys.exit(2)
+    client, config = _get_api_client()
+    project_id = config.get("project_id", "")
+    try:
+        resp = client.revoke_machine_key(project_id, key_id)
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        if "404" in msg:
+            print(
+                f"Error: machine key {key_id!r} が project {project_id!r} に "
+                f"見つかりません (既に失効済 / key_id 誤り)。",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _machine_key_error(exc, project_id)
+    if os.environ.get("BEACON_JSON", "") == "1":
+        print(json.dumps(resp.get("machine_key", {}), ensure_ascii=False))
+        return
+    print(f"machine key を失効しました: {key_id} (project: {project_id})")
+
+
+# ---------------------------------------------------------------------------
 # Bus (ms-54 / e-999 rendezvous client + e-1135 delivery field)
 # ---------------------------------------------------------------------------
 # `beacon bus send / listen / receive / ack` give a CLI surface on top of the
@@ -10331,6 +10425,10 @@ if __name__ == "__main__":
         "operation_envelope_verify": cmd_operation_envelope_verify,
         "run_record": cmd_run_record,
         "run_list": cmd_run_list,
+        # ms-151 / e-5474: machine API key 発行 CLI (owner 限定、cloud endpoint)。
+        "machine_key_issue": cmd_machine_key_issue,
+        "machine_key_list": cmd_machine_key_list,
+        "machine_key_revoke": cmd_machine_key_revoke,
         "incident_open": cmd_incident_open,
         "incident_close": cmd_incident_close,
         "incident_escalate": cmd_incident_escalate,

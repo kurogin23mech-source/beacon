@@ -228,6 +228,10 @@ ALLOW_BASH_ONLY_DISPATCH: set[str] = {
     "reset",       # destructive admin op, bash-only
     "run",         # operation run record (member-aware, not in Python yet)
     "incident",    # incident open/close (operation-coupled, not in Python yet)
+    "machine-key",  # ms-151 e-5474: machine 認証の鍵 発行/一覧/失効 (owner 限定,
+                    # cloud endpoint)。bash-only for now; dispatch.py Windows parity
+                    # = follow-up、run/incident と同じ precedent (rare な dev/ops 管理
+                    # verb で、hot な Windows path ではない)。
     # ms-133 e-4642: `sales` and `org` were removed from this allowlist — both
     # now have top-level Python parity (`"sales": _handle_sales` /
     # `"org": _handle_org` in _HANDLERS, `sales)` / `org)` in bin/beacon's main

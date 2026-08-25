@@ -29,6 +29,7 @@ import approved_actions as approved_actions_mod
 import core
 import org as org_mod  # ms-113 / e-3731: Organization (組織) テナンシー primitives
 import principal as principal_mod  # ms-113 / e-3732: 主体モデル + 実効スコープ合成
+import machine_key as machine_key_mod  # ms-151 / e-5474: headless machine 認証の鍵
 import disclosure as disclosure_mod  # ms-111 / e-3872: cross-project Account 開示の read 配線
 import master_projection  # ms-111 / e-3621: 投影 Account/Contact identity を master 経由で解決
 import master_adapter  # ms-111 / e-3621: backend 配線済み Beacon-default master adapter
@@ -686,6 +687,39 @@ def _verify_id_token(token: str) -> dict:
     return _verify_google_id_token(token)
 
 
+def _verify_machine_key(raw: str) -> dict:
+    """machine key (bmk. prefix) を検証し、machine 身元の claims を返す (ms-151 / e-5475)。
+
+    store から token 由来の (project_id, key_id) で key レコードを引き、
+    ``machine_key.verify_token`` で「形式 / 実在 / project 一致 / 未失効 / hash 一致」を
+    確認する。失敗はすべて 401 (= 無効 or 失効した鍵)。
+
+    人間 id_token / CLI トークンとは prefix (``bmk.``) で排他なので、この経路は
+    人間経路 (``_verify_id_token``) を一切通らず、後方互換を壊さない。store lookup は
+    best-effort でラップし、backend 不通でも 500 でなく 401 に倒す (= 認証失敗)。
+    """
+    parsed = machine_key_mod.parse_token(raw)
+    if parsed is None:
+        raise HTTPException(status_code=401, detail="Invalid machine key format")
+    project_id, key_id, _secret = parsed
+    try:
+        record = db.get_machine_key(project_id, key_id)
+    except Exception:
+        record = None
+    verified = machine_key_mod.verify_token(raw, record)
+    if verified is None:
+        raise HTTPException(status_code=401, detail="Invalid or revoked machine key")
+    return {
+        # machine の安定した principal id (= 監査で「どの鍵が書いたか」を辿れる)。
+        "sub": f"machine:{project_id}:{key_id}",
+        "email": "",
+        "machine": True,
+        "machine_key_id": key_id,
+        "project_id": project_id,
+        "label": verified.get("label", ""),
+    }
+
+
 # ms-113 / e-3731: personal org (= 個人組織) の lazy ensure。
 #
 # require_auth は毎リクエスト走る hot path なので、org doc の get を毎回叩くと
@@ -784,6 +818,32 @@ async def require_auth(
         return dev_claims
     if credentials is None:
         raise HTTPException(status_code=401, detail="Authorization header required")
+    # ms-151 / e-5475: machine key (bmk. prefix) は人間トークンと排他の別経路で
+    # 検証する。人間 id_token / CLI トークンは prefix 不一致でこの分岐に入らないので
+    # 後方互換 (= 既存経路は一切変わらない)。machine は user 自動登録 / personal org
+    # ensure を行わず、身元と所属 project だけを request.state に載せる。
+    raw_token = credentials.credentials
+    if machine_key_mod.looks_like_machine_key(raw_token):
+        machine_claims = _verify_machine_key(raw_token)
+        project_id = machine_claims["project_id"]
+        request.state.audit_user_id = machine_claims["sub"]
+        request.state.audit_email = ""
+        # machine は backend agent。実効スコープを自分の 1 project に宣言で絞る
+        # (= 別 project を覗けない)。
+        request.state.principal = principal_mod.make_principal(
+            machine_claims["sub"], "",
+            agent_kind=principal_mod.AGENT_BACKEND,
+            declared_scope=[project_id],
+            focus=project_id,
+        )
+        # 直書き endpoint (e-5476) が「鍵の project == URL の project」を照合するための
+        # machine 文脈。
+        request.state.machine = {
+            "project_id": project_id,
+            "key_id": machine_claims["machine_key_id"],
+            "label": machine_claims["label"],
+        }
+        return machine_claims
     claims = _verify_id_token(credentials.credentials)
     # Auto-register user on first login
     user_id = claims.get("sub", "")

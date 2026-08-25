@@ -69,6 +69,15 @@ ENTITIES = [
     "bus_nonces",
     "bus_audit",
     "bus_event_approvals",
+    # ms-151 / e-5474: machine API key (headless machine 認証の鍵) の project 配下
+    # テーブル。pk=project_id, sk=key_id。起動時 create_mysql_tables が
+    # CREATE TABLE IF NOT EXISTS で作る (schema が DDL を追い越さない = 無停止 retrofit)。
+    "machine_keys",
+    # ms-95 / e-5477: operation-fires claim (定期発火の二重駆動を防ぐ first-write-wins)。
+    # firestore_client にしか無く store_router 未 re-export だったため MySQL/DynamoDB
+    # backend では claim 経路が存在せず dedup が silent に無効だった (e-5477 で発見)。
+    # pk=project_id, sk="{op_id}_{period}"。
+    "operation_fires",
     "sessions",
     "session_logs",
     "operation_envelopes",
@@ -124,6 +133,11 @@ _SUBCOLLECTION_SK_NAMES = {
     "bus_nonces": "nonce",
     "bus_audit": "audit_id",
     "bus_event_approvals": "event_id",
+    # ms-151 / e-5474: machine key subcollection (sk=key_id)。delete_project の
+    # cascade 対象 (project を消したら鍵も消える = orphan な認証経路を残さない)。
+    "machine_keys": "key_id",
+    # ms-95 / e-5477: operation-fires claim (sk="{op_id}_{period}")。
+    "operation_fires": "fire_key",
     "sessions": "session_id",
     "session_lookup": "lookup_key",
     "session_logs": "session_id",
@@ -1880,6 +1894,88 @@ def list_decided_approvals(project_id: str, *, limit: int = 50) -> list[dict]:
     if limit:
         rows = rows[:limit]
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Machine API keys (ms-151 / e-5474). PK=project_id, SK=key_id.
+# ---------------------------------------------------------------------------
+# headless machine 認証の鍵を project 配下に持つ。record は machine_key.build_record
+# が組み立てた secret_hash-only 形。verify は token 由来の (project_id, key_id) で
+# get_machine_key を直接引く (scan 不要)。
+
+def save_machine_key(project_id: str, record: dict) -> dict:
+    """発行済み machine key レコードを保存する (key_id で upsert)。"""
+    item = {**record, "project_id": project_id}
+    _put("machine_keys", project_id, item, sk=record["key_id"])
+    return record
+
+
+def get_machine_key(project_id: str, key_id: str) -> dict | None:
+    """(project_id, key_id) の key レコードを返す。無ければ None。
+
+    ``project_id`` を **落とさない** (bus_event_approvals とは異なる)。machine_key
+    .verify_token が別 project すり替え検知にこの field を読むため surface に残す。
+    """
+    item = _get("machine_keys", project_id, sk=key_id)
+    if not item:
+        return None
+    return dict(item)
+
+
+def list_machine_keys(project_id: str) -> list[dict]:
+    """project の全 machine key を新しい順 (created_at 降順) で返す。"""
+    rows = [dict(it) for it in _query("machine_keys", project_id)]
+    rows.sort(key=lambda r: r.get("created_at", ""), reverse=True)
+    return rows
+
+
+def revoke_machine_key(project_id: str, key_id: str,
+                       revoked_at: str) -> dict | None:
+    """key を失効させる (revoked_at を刻む)。無ければ None を返す。"""
+    item = _get("machine_keys", project_id, sk=key_id)
+    if not item:
+        return None
+    # e-5502 AX review A: 冪等。既に失効済みなら最初の revoked_at を保持する。
+    if item.get("revoked_at"):
+        return dict(item)
+    item["revoked_at"] = revoked_at
+    _put("machine_keys", project_id, item, sk=key_id)
+    return dict(item)
+
+
+# ---------------------------------------------------------------------------
+# Operation-fires claim (PK=project_id, SK="{op_id}_{period}"). ms-95 / e-5477.
+# ---------------------------------------------------------------------------
+# 定期発火の二重駆動 (Beacon tick + 外部 self-drive) を防ぐ first-write-wins な
+# 発火権先取り。firestore の claim_operation_fire_if_new と同契約。period は
+# operation_period.period_key が cadence から算出したバケット文字列。
+
+def claim_operation_fire_if_new(project_id: str, op_id: str, period: str,
+                                session_id: str) -> dict:
+    """"この project で op_id を period に最初に発火する" を原子的に主張する。
+
+    最初の caller は行を作り ``{"claimed": True, ...}`` を返す。以後の caller は
+    既存行を見て ``{"claimed": False, "claimed_by": <first>, ...}`` を返す。
+    原子性は ``_insert_if_absent`` (PK 重複=IntegrityError→False) が担う。
+    """
+    fire_key = f"{op_id}_{period}"
+    record = {
+        "project_id": project_id,
+        "op_id": op_id,
+        "period": period,
+        "session_id": session_id,
+        "claimed_at": _now_iso_utc(),
+    }
+    created = _insert_if_absent("operation_fires", project_id, record, sk=fire_key)
+    if created:
+        return {"claimed": True, "claimed_by": session_id,
+                "claimed_at": record["claimed_at"]}
+    existing = _get("operation_fires", project_id, sk=fire_key) or {}
+    return {
+        "claimed": False,
+        "claimed_by": existing.get("session_id", ""),
+        "claimed_at": existing.get("claimed_at", ""),
+    }
 
 
 # ---------------------------------------------------------------------------

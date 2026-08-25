@@ -74,6 +74,13 @@ if _BACKEND == "dynamodb":
         put_bus_event_approval,
         list_pending_approvals,
         list_decided_approvals,
+        # Machine API keys (ms-151 / e-5474)
+        save_machine_key,
+        get_machine_key,
+        list_machine_keys,
+        revoke_machine_key,
+        # Operation-fires claim (ms-95 / e-5477 — re-export was missing, gate dark)
+        claim_operation_fire_if_new,
         # Sessions
         upsert_session,
         stamp_session_actor_email,
@@ -188,6 +195,13 @@ elif _BACKEND == "mysql":
         put_bus_event_approval,
         list_pending_approvals,
         list_decided_approvals,
+        # Machine API keys (ms-151 / e-5474)
+        save_machine_key,
+        get_machine_key,
+        list_machine_keys,
+        revoke_machine_key,
+        # Operation-fires claim (ms-95 / e-5477 — re-export was missing, gate dark)
+        claim_operation_fire_if_new,
         # Sessions
         upsert_session,
         stamp_session_actor_email,
@@ -302,6 +316,13 @@ elif _BACKEND == "firestore":
         put_bus_event_approval,
         list_pending_approvals,
         list_decided_approvals,
+        # Machine API keys (ms-151 / e-5474)
+        save_machine_key,
+        get_machine_key,
+        list_machine_keys,
+        revoke_machine_key,
+        # Operation-fires claim (ms-95 / e-5477 — re-export was missing, gate dark)
+        claim_operation_fire_if_new,
         # Sessions
         upsert_session,
         stamp_session_actor_email,
