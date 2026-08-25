@@ -33,14 +33,16 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "lib"))
 
 import code_graph  # noqa: E402
+import code_graph_derive  # noqa: E402
 import code_graph_seed  # noqa: E402
 
 # 種となる既存 doc の既定 id (SPEC 関連セクション)。
 DEFAULT_INVENTORY_ID = "NC7bEWi08ELyNqgS6Mz0"   # module 監査 (150 module)
 DEFAULT_APP_MAP_ID = "application-map"           # 全貌マップ (value 文脈)
 
-NODES_DOC_ID = "code-graph-nodes"
-EDGES_DOC_ID = "code-graph-edges"
+# e-5539 の --create で作られた生きた格納先 (session note 参照)。--update の既定。
+NODES_DOC_ID = "CaBxTvnd9RlOBLKwsVzS"
+EDGES_DOC_ID = "ZMs2c7eXdBqHySRpV7qr"
 NODES_TITLE = "コード理解グラフ: nodes (module)"
 EDGES_TITLE = "コード理解グラフ: edges (adjacency)"
 
@@ -108,21 +110,29 @@ def _summary(graph: "code_graph.CodeGraph") -> dict:
     }
 
 
-def _create_live_docs(graph, args) -> None:
-    """生きた Beacon project に nodes / edges の table-doc 2枚を作る (cloud write)."""
+def _persist_live_docs(graph, *, update: bool, nodes_doc: str, edges_doc: str) -> None:
+    """生きた Beacon project に nodes / edges の table-doc 2枚を書き込む (cloud write)。
+
+    ``update`` が False なら新規作成、True なら既存の doc id を上書き更新する
+    (毎回 --derive で再導出したグラフを同じ格納先に反映する運用)。
+    """
     sys.path.insert(0, os.path.join(REPO, "lib"))
     import commands_shared as cs
 
-    node_content = _table_doc_content(NODES_TITLE, graph.to_node_table())
-    edge_content = _table_doc_content(EDGES_TITLE, graph.to_edge_table())
-
     if not cs._is_cloud_mode():
-        raise SystemExit("--create は cloud mode 専用です (.beacon/cloud.json が要ります)")
+        raise SystemExit("--create/--update は cloud mode 専用です (.beacon/cloud.json が要ります)")
     client, config = cs._get_api_client()
     pid = config["project_id"]
-    for title, content in ((NODES_TITLE, node_content), (EDGES_TITLE, edge_content)):
-        res = client.create_document(pid, title, content)
-        print(f"created: {res.get('doc_id')} ({title})")
+    pairs = ((NODES_TITLE, graph.to_node_table(), nodes_doc),
+             (EDGES_TITLE, graph.to_edge_table(), edges_doc))
+    for title, table, doc_id in pairs:
+        content = _table_doc_content(title, table)
+        if update:
+            client.update_document(pid, doc_id, title, content)
+            print(f"updated: {doc_id} ({title})")
+        else:
+            res = client.create_document(pid, title, content)
+            print(f"created: {res.get('doc_id')} ({title})")
 
 
 def main() -> int:
@@ -131,15 +141,25 @@ def main() -> int:
     ap.add_argument("--app-map-id", default=DEFAULT_APP_MAP_ID)
     ap.add_argument("--from-files", nargs="*", metavar="MD",
                     help="INVENTORY.md [APP_MAP.md] をローカルから読む (cloud 不要)")
+    ap.add_argument("--derive", action="store_true",
+                    help="機械層 (ソース由来の module node + import depends-on 辺) を足す (e-5540)")
     ap.add_argument("--json", action="store_true", help="集計を JSON で出す")
     ap.add_argument("--emit-nodes", metavar="PATH", help="nodes table-doc 内容を書き出す")
     ap.add_argument("--emit-edges", metavar="PATH", help="edges table-doc 内容を書き出す")
     ap.add_argument("--create", action="store_true",
-                    help="生きた Beacon project に table-doc 2枚を作る (cloud write)")
+                    help="生きた Beacon project に table-doc 2枚を新規作成 (cloud write)")
+    ap.add_argument("--update", action="store_true",
+                    help="既存の table-doc 2枚を上書き更新 (cloud write)")
+    ap.add_argument("--nodes-doc", default=NODES_DOC_ID,
+                    help="--update 時に上書きする nodes doc id")
+    ap.add_argument("--edges-doc", default=EDGES_DOC_ID,
+                    help="--update 時に上書きする edges doc id")
     args = ap.parse_args()
 
     inv, app = _load_seed_text(args)
     graph = code_graph_seed.build_seed_graph(inv, app)
+    if args.derive:
+        code_graph_derive.augment_with_machine_layer(graph, REPO)
     summary = _summary(graph)
 
     if args.emit_nodes:
@@ -150,10 +170,11 @@ def main() -> int:
         with open(args.emit_edges, "w", encoding="utf-8") as f:
             f.write(_table_doc_content(EDGES_TITLE, graph.to_edge_table()))
         print(f"wrote {args.emit_edges} ({summary['edges']} edges)", file=sys.stderr)
-    if args.create:
-        _create_live_docs(graph, args)
+    if args.create or args.update:
+        _persist_live_docs(graph, update=args.update,
+                           nodes_doc=args.nodes_doc, edges_doc=args.edges_doc)
 
-    if args.json or not (args.emit_nodes or args.emit_edges or args.create):
+    if args.json or not (args.emit_nodes or args.emit_edges or args.create or args.update):
         print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
