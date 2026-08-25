@@ -47,7 +47,7 @@ KNOWN_DECISION_KINDS: frozenset[str] = frozenset(
         # ms-90 Trek 由来の 4(+1) 経路
         "dm-send", "trek-review", "scope-approval", "halt", "resume",
         # ms-154 decision arm の捕獲対象 (e-5592 / e-5593 / e-5594)
-        "task-done", "review-adjudication", "log-backstop",
+        "task-done", "completion-verdict", "review-adjudication", "log-backstop",
     }
 )
 
@@ -67,7 +67,11 @@ DECIDED_BY: frozenset[str] = frozenset(
 )
 
 # related に載りうる参照キー (= 経路ごとに埋まる項目が違うが、shape は共通で固定)。
-_RELATED_KEYS: tuple[str, ...] = ("event_id", "trek_id", "task_id", "in_reply_to")
+# ms-154 e-5592 で ``target_id`` を追加 (= milestone / opportunity 等の完遂判定が
+# 指す対象。task 粒度の ``task_id`` より上位の target 粒度を表す)。
+_RELATED_KEYS: tuple[str, ...] = (
+    "event_id", "trek_id", "task_id", "target_id", "in_reply_to",
+)
 
 # who の shape (= 誰が判断したか)。agent は AI 識別子で、検出できなければ None。
 _WHO_KEYS: tuple[str, ...] = ("session_id", "user_id", "agent")
@@ -264,6 +268,93 @@ def decision_event_from_scope_approval(
         },
         rationale=rationale,
         related={"event_id": event_id},
+    )
+
+
+def decision_event_from_task_done(
+    *,
+    entry_id: str,
+    done_reason: str | None = None,
+    decided_by: str = "autonomous-AI",
+    evidence=None,
+    decider_session_id: str = "",
+    decider_user_id: str = "",
+    agent: str | None = None,
+    context: str = "",
+) -> dict:
+    """task の done 判定 (= 「このタスクは目的を果たした」) の decision-event (ms-154 e-5592)。
+
+    what (= 何を選んだか) は ``"done"``、why (= なぜ) は done 判定の理由
+    (``done_reason``)、根拠 (evidence) はこの done を裏付ける commit / 会話への link。
+    decided_by の default は ``autonomous-AI`` (= CLI 経由の ``beacon task done`` は
+    beacon-log Skill が駆動する AI 判断が主で、最も監査が要るため保守的に AI 側へ倒す。
+    Web UI の人手 done 等は呼び出し側が明示指定して上書きする)。
+
+    ``evidence`` が空でも、対象 task への参照 (``task:<entry_id>``) を baseline として
+    必ず 1 件差し込む (= decided_by を立てた一級 decision は evidence 非空必須という
+    schema 不変条件を、commit 照合が空振り = phantom done でも構造的に満たすため)。
+    """
+    ev = list(_normalize_link_list(evidence))
+    task_ref = f"task:{entry_id}" if entry_id else ""
+    if task_ref and task_ref not in ev:
+        ev.insert(0, task_ref)
+    return build_decision_event(
+        kind="task-done",
+        decision="done",
+        context=context,
+        who={
+            "session_id": decider_session_id,
+            "user_id": decider_user_id,
+            "agent": agent,
+        },
+        rationale=done_reason,
+        decided_by=decided_by,
+        evidence=ev,
+        related={"task_id": entry_id},
+    )
+
+
+def decision_event_from_completion_verdict(
+    *,
+    target_id: str,
+    verdict: str = "done",
+    done_reason: str | None = None,
+    decided_by: str = "AI-proposed-human-chose",
+    evidence=None,
+    decider_session_id: str = "",
+    decider_user_id: str = "",
+    agent: str | None = None,
+    context: str = "",
+) -> dict:
+    """target (= milestone / opportunity 等) の完遂判定 (= 目的達成 verdict) の
+    decision-event (ms-154 e-5592)。
+
+    milestone を done / observing / closed へ倒す遷移は「この target は目的を果たした」
+    という attainment claim を運ぶ (lib/transition_approval の目的達成レビュー)。その
+    verdict を decision arm に記録する。what は verdict (``"done"`` 等)、why は
+    ``done_reason``、根拠 (evidence) は達成を裏付ける link。
+
+    decided_by の default は ``AI-proposed-human-chose`` (= milestone 完遂は ms-119 の
+    目的達成レビューゲートで AI が根拠を組み立て人間が承認する形が原則のため)。純粋な
+    AI 自律完遂なら呼び出し側が ``autonomous-AI`` を明示する。
+    """
+    ev = list(_normalize_link_list(evidence))
+    target_ref = f"target:{target_id}" if target_id else ""
+    if target_ref and target_ref not in ev:
+        ev.insert(0, target_ref)
+    return build_decision_event(
+        kind="completion-verdict",
+        decision=(verdict or "done"),
+        context=context,
+        who={
+            "session_id": decider_session_id,
+            "user_id": decider_user_id,
+            "agent": agent,
+        },
+        rationale=done_reason,
+        decided_by=decided_by,
+        evidence=ev,
+        related={"target_id": target_id},
     )
 
 

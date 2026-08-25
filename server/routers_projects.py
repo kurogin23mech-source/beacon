@@ -347,6 +347,19 @@ def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
             continue
     return touched
 
+def _clamp_decided_by(value: str) -> str:
+    """Coerce a caller-supplied ``decided_by`` into the decision-arm enum (ms-154).
+
+    Falls back to ``autonomous-AI`` (the audit-critical default) for empty or
+    out-of-vocabulary values, so a malformed query param never drops the decision
+    record via the builder's strict validation.
+    """
+    try:
+        return value if value in decision_event_mod.DECIDED_BY else "autonomous-AI"
+    except Exception:
+        return "autonomous-AI"
+
+
 def _check_phantom_done_evidence(
     project_id: str,
     entry_id: str,
@@ -1133,17 +1146,41 @@ def make_router(
 
     @router.post("/api/projects/{project_id}/milestones/{ms_id}/done")
     def done_milestone(project_id: str, ms_id: str,
-                       user: dict = Depends(require_auth)):
+                       user: dict = Depends(require_auth),
+                       decided_by: str = Query("AI-proposed-human-chose")):
+        captured: dict = {}
+
         def op(data: dict):
             _require_write(data, user)
             try:
                 ms = core.milestone_done(data, ms_id)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
+            captured["done_reason"] = (ms.get("meta") or {}).get("done_reason", "")
             return data, {"id": ms["id"], "title": work_model.target_label(ms), "status": "done"}
-        return _apply_op_and_broadcast(
+        result = _apply_op_and_broadcast(
             project_id, op, op_name="milestone.done", actor=user.get("sub", ""),
         )
+        # ms-154 e-5592 — record the target's completion (目的達成) verdict as a
+        # decision-arm event. milestone → done carries the attainment claim
+        # (lib/transition_approval). Best-effort: never break the done response.
+        try:
+            db.append_decision_event(
+                project_id,
+                decision_event_mod.decision_event_from_completion_verdict(
+                    target_id=ms_id,
+                    verdict="done",
+                    done_reason=(captured.get("done_reason") or None),
+                    decided_by=_clamp_decided_by(decided_by),
+                    decider_user_id=user.get("sub", ""),
+                ),
+            )
+        except Exception as _dec_exc:  # pragma: no cover - defensive
+            logging.getLogger(__name__).warning(
+                "append_decision_event (completion-verdict) failed for ms_id=%s: %s",
+                ms_id, _dec_exc,
+            )
+        return result
 
     @router.delete("/api/projects/{project_id}/milestones/{ms_id}")
     def delete_milestone(project_id: str, ms_id: str,
@@ -1247,11 +1284,16 @@ def make_router(
 
     @router.post("/api/projects/{project_id}/entries/{entry_id}/done")
     def done_entry(project_id: str, entry_id: str, request: Request,
-                   user: dict = Depends(require_auth)):
+                   user: dict = Depends(require_auth),
+                   decided_by: str = Query("autonomous-AI")):
         import datetime
         today = datetime.date.today().isoformat()
         # ms-78 / e-1909
         author = _resolve_author(user)
+
+        # ms-154 e-5592 — capture the done judgment's rationale so it can be
+        # recorded as a decision-arm event after the write commits.
+        captured: dict = {}
 
         def op(data: dict):
             _require_write(data, user)
@@ -1259,6 +1301,7 @@ def make_router(
                 ms, entry = core.task_done(data, entry_id, date=today, author=author)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
+            captured["done_reason"] = (entry.get("meta") or {}).get("done_reason", "")
             return data, {"entry_id": entry_id, "status": "done"}
         result = _apply_op_and_broadcast(
             project_id, op, op_name="entry.done", actor=user.get("sub", ""),
@@ -1273,6 +1316,7 @@ def make_router(
         # Failure is silently swallowed inside the helper; we surface the
         # assessment in the response so the CLI can echo the warning to the
         # operator in the same turn.
+        assessment = None
         try:
             assessment = _check_phantom_done_evidence(
                 project_id, entry_id, user, request=request,
@@ -1299,6 +1343,33 @@ def make_router(
                 }
         except Exception:
             pass
+        # ms-154 e-5592 — record the task-done judgment as a decision-arm event
+        # (who / why / evidence). Evidence = commits the phantom assessment matched
+        # (falls back to the task ref inside the builder when none). Best-effort:
+        # a decision-record failure must not break the done response.
+        try:
+            matched = []
+            if isinstance(assessment, dict):
+                matched = [
+                    f"commit:{c.get('hash')}"
+                    for c in (assessment.get("matched_commits") or [])
+                    if isinstance(c, dict) and c.get("hash")
+                ]
+            db.append_decision_event(
+                project_id,
+                decision_event_mod.decision_event_from_task_done(
+                    entry_id=entry_id,
+                    done_reason=(captured.get("done_reason") or None),
+                    decided_by=_clamp_decided_by(decided_by),
+                    evidence=matched,
+                    decider_user_id=user.get("sub", ""),
+                ),
+            )
+        except Exception as _dec_exc:  # pragma: no cover - defensive
+            logging.getLogger(__name__).warning(
+                "append_decision_event (task-done) failed for entry_id=%s: %s",
+                entry_id, _dec_exc,
+            )
         return result
 
     @router.delete("/api/projects/{project_id}/entries/{entry_id}")

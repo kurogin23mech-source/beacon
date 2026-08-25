@@ -484,6 +484,62 @@ def test_done_entry():
     assert r.json()["status"] == "done"
 
 
+def test_done_entry_records_decision_arm_event(monkeypatch):
+    # ms-154 e-5592: done judgment must be CAPTURED as a decision-arm event
+    # (who/why/evidence), not just leave the mechanism in place.
+    captured = []
+    monkeypatch.setattr(_store_router_module, "append_decision_event",
+                        lambda pid, rec: captured.append((pid, rec)))
+    # give the task a done_reason so it flows into rationale (= why).
+    _store[PROJECT_ID]["milestones"][0]["entries"][0]["meta"] = {
+        "done_reason": "AC 全達成と判断"}
+    r = client.post(f"/api/projects/{PROJECT_ID}/entries/e-1/done")
+    assert r.status_code == 200
+    arm = [rec for (_pid, rec) in captured if rec.get("kind") == "task-done"]
+    assert len(arm) == 1
+    rec = arm[0]
+    assert rec["decision"] == "done"                     # what
+    assert rec["rationale"] == "AC 全達成と判断"           # why (done_reason)
+    assert rec["decided_by"] == "autonomous-AI"           # default for CLI done
+    assert rec["evidence"] == ["task:e-1"]                # baseline ref, non-empty
+    assert rec["related"]["task_id"] == "e-1"
+
+
+def test_done_entry_respects_decided_by_override(monkeypatch):
+    captured = []
+    monkeypatch.setattr(_store_router_module, "append_decision_event",
+                        lambda pid, rec: captured.append(rec))
+    r = client.post(
+        f"/api/projects/{PROJECT_ID}/entries/e-1/done?decided_by=human-delegated")
+    assert r.status_code == 200
+    assert captured[0]["decided_by"] == "human-delegated"
+
+
+def test_done_entry_clamps_bad_decided_by(monkeypatch):
+    captured = []
+    monkeypatch.setattr(_store_router_module, "append_decision_event",
+                        lambda pid, rec: captured.append(rec))
+    r = client.post(
+        f"/api/projects/{PROJECT_ID}/entries/e-1/done?decided_by=the-vibes")
+    assert r.status_code == 200
+    # out-of-vocab falls back to the audit-critical default (never drops the record).
+    assert captured[0]["decided_by"] == "autonomous-AI"
+
+
+def test_done_milestone_records_completion_verdict(monkeypatch):
+    captured = []
+    monkeypatch.setattr(_store_router_module, "append_decision_event",
+                        lambda pid, rec: captured.append(rec))
+    r = client.post(f"/api/projects/{PROJECT_ID}/milestones/ms-1/done")
+    assert r.status_code == 200
+    arm = [rec for rec in captured if rec.get("kind") == "completion-verdict"]
+    assert len(arm) == 1
+    assert arm[0]["decision"] == "done"
+    assert arm[0]["decided_by"] == "AI-proposed-human-chose"  # human-approved default
+    assert arm[0]["evidence"] == ["target:ms-1"]
+    assert arm[0]["related"]["target_id"] == "ms-1"
+
+
 def test_delete_entry():
     r = client.delete(f"/api/projects/{PROJECT_ID}/entries/e-1")
     assert r.status_code == 200
