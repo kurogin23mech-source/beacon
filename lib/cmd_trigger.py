@@ -929,6 +929,11 @@ def _auto_fire_operation_triggers():
     for op in data.get("operations", []):
         if op.get("status") != "open":
             continue
+        # ms-152 e-5484: a PAUSED Operation's scheduled fire is suppressed — an operator
+        # deliberately stopped this monitor (distinct from the tick's failure-backoff).
+        # Read-only skip; `operation_resume` returns it to idle and re-enables firing.
+        if core.operation_execution_phase(op) == core.EXECUTION_PHASE_PAUSED:
+            continue
         op_id = op["id"]
         days = op.get("schedule", {}).get("days", [])
         if day_abbr not in days:
