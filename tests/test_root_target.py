@@ -65,16 +65,60 @@ def test_arm_mapping_read_is_a_fresh_copy():
 def test_projection_shape_matches_shared_frame():
     data = _dev_project([_ms("ms-1", "in_progress")])
     root = root_target.project_as_root_target(data)
-    for key in ("id", "label", "status", "kind",
-                "work_items_total", "work_items_done", "arms", "detail"):
+    for key in ("id", "label", "status", "kind", "work_items_total",
+                "work_items_done", "profession", "arms",
+                "projection", "narrative"):
         assert key in root
     assert root["id"] == "root"
     assert root["kind"] == "root"
     assert root["label"] == "Beacon"
-    # root-owned narrative exposed on the view
-    assert root["detail"]["objective"] == "AI 開発の進捗を透明化する"
-    assert root["detail"]["summary"] == "直近: root-target 化に着手"
-    assert root["detail"]["profession"] == "dev"
+    assert root["profession"] == "dev"
+
+
+# --- project-level 2-split (e-5547 / 方針2, 受入条件3) ------------------------
+
+def test_narrative_is_root_owned_not_derived():
+    """大目的 / 経緯 are read off the root, not rolled up from children."""
+    data = _dev_project([_ms("ms-1", "in_progress")])
+    root = root_target.project_as_root_target(data)
+    narrative = root["narrative"]
+    assert narrative["objective"] == "AI 開発の進捗を透明化する"
+    assert narrative["summary"] == "直近: root-target 化に着手"
+    # narrative carries ONLY authored story — no synthesized counts leak in
+    assert "counts" not in narrative
+    assert "targets" not in narrative
+
+
+def test_narrative_survives_when_all_children_removed():
+    """The narrative is the irreducible core: it remains with zero children."""
+    data = _dev_project([])
+    root = root_target.project_as_root_target(data)
+    assert root["narrative"]["objective"] == "AI 開発の進捗を透明化する"
+    assert root["narrative"]["summary"] == "直近: root-target 化に着手"
+    # while the synthesized half correctly collapses to empty
+    assert root["projection"]["counts"] == {"total": 0, "done": 0, "open": 0}
+    assert root["projection"]["targets"] == []
+
+
+def test_projection_is_synthesized_rollup_over_children():
+    data = _dev_project([
+        _ms("ms-1", "done"),
+        _ms("ms-2", "in_progress"),
+        _ms("ms-3", work_model.DONE_STATUS),
+    ])
+    proj = root_target.synthesized_projection(data)
+    assert proj["counts"] == {"total": 3, "done": 2, "open": 1}
+    assert len(proj["targets"]) == 3
+    # deliverable seam present but empty (ms-155 fills it)
+    assert proj["deliverables"] == []
+
+
+def test_top_level_counts_agree_with_projection():
+    """The shared-frame work_items_* must not diverge from projection.counts."""
+    data = _dev_project([_ms("ms-1", "done"), _ms("ms-2", "in_progress")])
+    root = root_target.project_as_root_target(data)
+    assert root["work_items_total"] == root["projection"]["counts"]["total"]
+    assert root["work_items_done"] == root["projection"]["counts"]["done"]
 
 
 def test_children_counted_as_root_work_items():
@@ -149,8 +193,8 @@ def test_sales_project_reads_as_root_via_iter_target_records():
     }
     root = root_target.project_as_root_target(data)
     assert root["kind"] == "root"
-    assert root["detail"]["profession"] == "sales"
-    # children resolve to opportunities through iter_target_records, no branch
+    assert root["profession"] == "sales"
+    # children resolve to opportunities through the per-class projection, no branch
     assert root["work_items_total"] == 2
     assert root["work_items_done"] == 1
     assert root["status"] == "active"

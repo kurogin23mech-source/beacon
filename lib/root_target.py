@@ -31,11 +31,28 @@ evidence-less special form** whose arm mapping is declared once in
     └─────────────┴────────────────────────────────────────────────────────┘
 
 Import layering: this module sits ABOVE ``occupation`` (it consumes
-``iter_target_records`` and ``resolve_profession``). ``occupation`` does not
-import back, so there is no cycle. The project-level information 2-split
-(合成投影 vs root 固有の物語 field) is e-5547; here the view exposes the
-root-owned narrative (objective / summary) minimally so callers have a home for
-it, but the full split lands next.
+``project_targets`` / ``iter_target_records`` / ``resolve_profession``).
+``occupation`` does not import back, so there is no cycle.
+
+Project-level information 2-split (ms-153 e-5547 / SPEC 方針2)
+------------------------------------------------------------
+The information a "project" carries splits into two kinds with opposite
+provenance, and conflating them is what left 器級 information homeless under the
+axis inversion:
+
+- **合成投影 (synthesized projection)** — 現在地 / 進捗 / deliverable. NOT stored
+  at project level: it is rolled up from each adopted target-class's own
+  contribution every read (``synthesized_projection``). Adopting a target-class
+  automatically adds its contribution, so no project-level field can go stale or
+  be "lost" — the projection simply recomputes over whatever classes exist.
+- **root 固有の物語 (root-owned narrative)** — 大目的 vision / 経緯 summary. This
+  CANNOT be derived from any target; it is the irreducible minimal core the root
+  OWNS (``root_narrative``). If every child target vanished, the narrative would
+  remain.
+
+``project_as_root_target`` composes the two into ONE root view, keeping them
+structurally distinct (``projection`` vs ``narrative``) rather than a single
+undifferentiated ``detail`` bag.
 """
 
 from __future__ import annotations
@@ -108,7 +125,7 @@ def root_target_arms(data: dict | None = None) -> dict:
     }
 
 
-def _root_status(open_children: int, total_children: int) -> str:
+def _root_status(total_children: int) -> str:
     """Derive the root's status from its children — the root is phase-less, so it
     has NO stored status of its own; this is a pure derivation.
 
@@ -122,46 +139,101 @@ def _root_status(open_children: int, total_children: int) -> str:
     boundary (SPEC: root の decision＝完了承認 は本 MS では最小に留める)."""
     if total_children == 0:
         return work_model.TODO_STATUS
-    # open_children is informational for callers; both "some open" and "all
-    # children terminal but unapproved" read as active because approval is ms-154.
+    # Both "some children open" and "all children terminal but unapproved" read
+    # as active, because completion approval is ms-154's decision arm.
     return "active"
+
+
+def root_narrative(data: dict) -> dict:
+    """The root-OWNED narrative — the project-level story that CANNOT be derived
+    from any target (SPEC 方針2: 導出できない物語).
+
+    This is the irreducible minimal core the root owns: the 大目的 (grand
+    objective / vision) and the 経緯 (running summary). Both are read straight off
+    the project dict — no roll-up, because no child target carries them. If every
+    child Target vanished, this narrative would remain, which is exactly why it
+    must live ON the root and not be reconstructed from children.
+
+    Read-only: returns a fresh dict, never mutates ``data``. The fuller vision
+    prose lives in the ``project-vision`` CORE doc (a separate store); this module
+    is pure (no I/O), so it surfaces the on-project ``objective`` one-liner and
+    leaves fetching the doc to the session-start assembler (e-5549)."""
+    return {
+        "objective": data.get("objective", ""),   # 大目的 = root goal / vision seed
+        "summary": data.get("summary", ""),        # 経緯 summary (session narrative)
+    }
+
+
+def synthesized_projection(data: dict) -> dict:
+    """The SYNTHESIZED project-level state — 現在地 / 進捗 / deliverable rolled up
+    from each adopted target-class's own contribution (SPEC 方針2: 合成できる投影).
+
+    Nothing here is stored at project level. It recomputes over
+    ``occupation.project_targets`` (the occupation-agnostic per-class projection:
+    dev milestones + sales opportunities + any adopted descriptor class) every
+    read, so adopting a new target-class automatically adds its contribution and
+    NO project-level field can go stale or be "lost" (方針2 の芯 = class を採用した
+    瞬間に投影寄与が付く). Cancelled Targets are already excluded by
+    ``project_targets``.
+
+    Shape::
+
+        {
+          "targets": [...],                    # 現在地: the child Target rows
+          "counts": {"total", "done", "open"}, # 進捗: roll-up over children
+          "deliverables": [...],               # deliverable union (方針: minimal)
+        }
+
+    ``deliverables`` is the seam for the root's deliverable arm (union over
+    children). The deliverable dimension's generalisation is ms-155 (SPEC やらない),
+    and no built-in class emits deliverables yet, so it is an empty list today —
+    present so the shape does not change when ms-155 fills it in."""
+    rows = occupation.project_targets(data)
+    done = sum(1 for r in rows if work_model.is_done(r))
+    open_count = sum(1 for r in rows if work_model.is_open(r))
+    return {
+        "targets": rows,
+        "counts": {
+            "total": len(rows),
+            "done": done,
+            "open": open_count,
+        },
+        # deliverable union over children — ms-155 fills this; empty seam now.
+        "deliverables": [],
+    }
 
 
 def project_as_root_target(data: dict) -> dict:
     """Read ``data`` (a live project dict) AS the root target — a view/projection
     with NO new records and NO mutation of ``data`` (SPEC 受入条件1).
 
-    The returned shape is the same occupation-agnostic projection the shared
-    frame already consumes for leaf Targets (``id`` / ``label`` / ``status`` /
-    ``kind`` / ``work_items_total`` / ``work_items_done`` / ``detail``) PLUS an
-    ``arms`` blob carrying the root's phase-less / evidence-less arm mapping. So a
-    caller can render the root through the exact same path as any child target.
+    The returned shape carries the occupation-agnostic shared-frame core (``id`` /
+    ``label`` / ``status`` / ``kind`` / ``work_items_total`` / ``work_items_done``)
+    plus the root's ``arms`` mapping AND the project-level 2-split (SPEC 方針2):
+
+    - ``projection`` — the SYNTHESIZED half (合成投影, ``synthesized_projection``).
+    - ``narrative``  — the root-OWNED half (root 固有の物語, ``root_narrative``).
+
+    Keeping the two halves as distinct keys (rather than one ``detail`` bag) is
+    the point of the split: a reader knows a ``projection`` field is recomputed
+    from children (safe to ignore staleness) while a ``narrative`` field is
+    authored and must be preserved.
 
     Work-item counts treat each **child Target** as one work item of the root
-    (the fractal §0). Cancelled children are excluded, matching the default
-    status view (``core.project_targets`` / ``occupation.project_targets``)."""
-    children = [
-        rec for rec in occupation.iter_target_records(data)
-        if not work_model.is_cancelled(rec)
-    ]
-    total = len(children)
-    done = sum(1 for rec in children if work_model.is_done(rec))
-    open_count = sum(1 for rec in children if work_model.is_open(rec))
-
+    (the fractal §0), sourced from the same ``project_targets`` roll-up so the
+    top-level counts and ``projection.counts`` never diverge."""
+    projection = synthesized_projection(data)
+    counts = projection["counts"]
     return {
         "id": ROOT_TARGET_KIND,
         "label": data.get("name", ""),
-        "status": _root_status(open_count, total),
+        "status": _root_status(counts["total"]),
         "kind": ROOT_TARGET_KIND,
-        "work_items_total": total,
-        "work_items_done": done,
+        "work_items_total": counts["total"],
+        "work_items_done": counts["done"],
+        "profession": occupation.resolve_profession(data),
         "arms": root_target_arms(data),
-        "detail": {
-            # root-owned narrative (真に project 所有 = root 固有 field). The full
-            # 2-split of project-level info (合成投影 vs 物語) is e-5547; exposed
-            # here so the narrative already has a home on the root view.
-            "objective": data.get("objective", ""),   # 大目的 = root goal
-            "summary": data.get("summary", ""),        # 経緯 summary
-            "profession": occupation.resolve_profession(data),
-        },
+        # SPEC 方針2 の 2分割 — synthesized (derivable) vs owned (authored).
+        "projection": projection,
+        "narrative": root_narrative(data),
     }
