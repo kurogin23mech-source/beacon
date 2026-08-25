@@ -2179,7 +2179,7 @@ EOF
                     case "$1" in
                         --what)         _dec_what="${2:-}"; shift 2 ;;
                         --kind)         _dec_kind="${2:-}"; shift 2 ;;
-                        --rationale)    _dec_rationale="${2:-}"; shift 2 ;;
+                        --rationale|--reason) _dec_rationale="${2:-}"; shift 2 ;;
                         --decided-by)   _dec_decided_by="${2:-}"; shift 2 ;;
                         --evidence)     _dec_evidence="${_dec_evidence:+$_dec_evidence$'\n'}${2:-}"; shift 2 ;;
                         --related-task) _dec_related_task="${2:-}"; shift 2 ;;

@@ -1036,7 +1036,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_decision.add_argument("decision_cmd", nargs="?", default="")  # record | list
     p_decision.add_argument("--what", default="")
     p_decision.add_argument("--kind", default="")
-    p_decision.add_argument("--rationale", default="")
+    p_decision.add_argument("--rationale", "--reason", dest="rationale", default="")
     p_decision.add_argument("--decided-by", dest="decided_by", default="")
     p_decision.add_argument("--evidence", action="append", default=[])
     p_decision.add_argument("--related-task", dest="related_task", default="")
