@@ -86,6 +86,12 @@ def cmd_retro_prepare():
             if ms_entries:
                 weekly_milestones.append({
                     "id": ms["id"],
+                    # ms-155 e-5600 AX review: tag the producing class so a
+                    # consumer of the (milestone-named, for back-compat) list can
+                    # apply class-appropriate field extraction — a non-milestone
+                    # deliverable-bearing class uses ``phase`` not ``status`` /
+                    # ``progress``, and the bare key name no longer signals which.
+                    "target_class": kind,
                     "title": ms.get("title", ""),
                     "status": ms.get("status", ""),
                     "progress": ms.get("progress", 0),

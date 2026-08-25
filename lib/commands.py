@@ -299,9 +299,9 @@ from cmd_retro import (  # noqa: F401
 
 # ms-127 e-4815: deploy family moved to cmd_deploy.py, plus the application-map
 # applicability helper promoted to commands_shared. Re-export _application_map_applies
-# so commands.py's _auto_fire_map_drift_trigger keeps resolving it by bare name;
-# _project_profession_safe (pulled in transitively) is only used inside
-# commands_shared, so it is NOT re-exported. Deploy-handler callers resolve these
+# so commands.py's _auto_fire_map_drift_trigger keeps resolving it by bare name.
+# (ms-155 e-5599: the former _project_profession_safe helper was removed — the gate
+# now derives from the deliverable declaration.) Deploy-handler callers resolve these
 # inside cmd_deploy, so tests driving cmd_deploy_* patch at cmd_deploy._X (e-4320 rule).
 from commands_shared import _application_map_applies  # noqa: F401
 # ms-127 e-4831-foundation: doc family split — frontmatter / table-doc / link-

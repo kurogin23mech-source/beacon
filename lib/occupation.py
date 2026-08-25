@@ -333,7 +333,7 @@ def stop_signal_rows(data: dict) -> list:
     return rows
 
 
-def deliverable_projection_for(data: dict | None, kind: str) -> dict | None:
+def resolve_deliverable(data: dict | None, kind: str) -> dict | None:
     """Return the DELIVERABLE-projection spec for a target-class ``kind`` —
     ``{"kind", "label", "projector", "ref"} | None`` — as the ONE read over BOTH
     class provenances (ms-155 e-5598):
@@ -373,7 +373,7 @@ def project_deliverables(data: dict) -> list:
     This is spine §2b's "project (root) deliverable = 採用 class 群の deliverable
     投影の union" made literal: it walks ``owned_target_classes`` (the project's
     adopted classes — built-in seed for the profession PLUS declared descriptors)
-    and asks ``deliverable_projection_for`` per class, so a dev project surfaces
+    and asks ``resolve_deliverable`` per class, so a dev project surfaces
     milestone→機能 (application-map), a sales project would surface
     opportunity→pipeline once that class declares one (e-5601), and adopting a NEW
     class automatically adds its contribution — the project field cannot go stale
@@ -382,11 +382,17 @@ def project_deliverables(data: dict) -> list:
     PURE (no I/O): each entry carries the deliverable SPEC (incl. ``ref`` for a
     ``"doc"`` projector like application-map). RESOLVING a ref to its actual content
     (fetching the doc) is the session-start assembler's job (the I/O layer), keeping
-    this and its ``root_target.synthesized_projection`` caller side-effect-free."""
+    this and its ``root_target.synthesized_projection`` caller side-effect-free.
+
+    ``data is None`` returns ``[]`` — matching ``resolve_deliverable``'s None
+    tolerance (ms-155 e-5599 AX review): the sibling accepts None for the built-in
+    path, so a caller that learned None is safe there must not hit a crash here."""
+    if data is None:
+        return []
     prof = resolve_profession(data)
     out: list = []
     for kind in owned_target_classes(data, prof):
-        proj = deliverable_projection_for(data, kind)
+        proj = resolve_deliverable(data, kind)
         if proj is not None:
             out.append({"target_class": kind, **proj})
     return out

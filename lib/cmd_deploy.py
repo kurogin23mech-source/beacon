@@ -8,10 +8,11 @@ for dispatch + `commands.X`; family-private helpers (_next_deploy_id /
 _next_release_id / _is_default_prod_backend / _update_deployed_prod_marker /
 _fire_map_reconcile_trigger) are NOT re-exported (patch them at cmd_deploy.<name>).
 
-The application-map applicability helpers (_application_map_applies + the
-_project_profession_safe it pulls in) were promoted to commands_shared in this
-same change (e-4815-foundation) so _auto_fire_map_drift_trigger can keep using
-them without importing cmd_deploy (which would form a cycle).
+The application-map applicability helper (_application_map_applies) was promoted
+to commands_shared in this same change (e-4815-foundation) so
+_auto_fire_map_drift_trigger can keep using it without importing cmd_deploy (which
+would form a cycle). (ms-155 e-5599: it now derives from the deliverable
+declaration rather than a profession helper.)
 
 Test patch target (monkeypatch trap): a test driving a cmd_deploy_* handler
 patches helpers the handler resolves in cmd_deploy's own namespace (cmd_deploy._X),

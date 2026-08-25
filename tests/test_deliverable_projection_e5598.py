@@ -3,7 +3,7 @@
 e-5597 added the per-class ``deliverable`` DECLARATION field to descriptors; this
 task declares the milestone code class's deliverable (機能→application-map) in the
 built-in master (``target_state.BUILTIN_TARGET_CLASSES``) and exposes ONE accessor
-(``occupation.deliverable_projection_for``) that reads a class's deliverable
+(``occupation.resolve_deliverable``) that reads a class's deliverable
 whether the class is CODE (milestone/opportunity/…) or DATA (a descriptor). These
 tests pin:
 
@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "lib"))
@@ -49,7 +50,7 @@ def test_deliverable_is_stripped_from_the_state_model():
 # ---------------------------------------------------------------------------
 
 def test_accessor_reads_milestone_code_class():
-    proj = occupation.deliverable_projection_for({"profession": "dev"}, "milestone")
+    proj = occupation.resolve_deliverable({"profession": "dev"}, "milestone")
     assert proj == {"kind": "feature-map", "label": "機能",
                     "projector": "doc", "ref": "application-map"}
 
@@ -62,24 +63,24 @@ def test_accessor_reads_descriptor_class():
         deliverable={"kind": "pipeline", "projector": "rollup"})
     data = {"name": "t", "profession": "sales"}
     assert td.append_descriptor(data, deal) == []
-    proj = occupation.deliverable_projection_for(data, "deal")
+    proj = occupation.resolve_deliverable(data, "deal")
     assert proj == {"kind": "pipeline", "label": "",
                     "projector": "rollup", "ref": ""}
 
 
 def test_accessor_none_for_class_without_deliverable():
     # opportunity (code class) declares no deliverable today → None (道筋は e-5601).
-    assert occupation.deliverable_projection_for({"profession": "sales"},
+    assert occupation.resolve_deliverable({"profession": "sales"},
                                                  "opportunity") is None
     # release (built-in-as-data descriptor) declares none → None.
-    assert occupation.deliverable_projection_for({"profession": "dev"},
+    assert occupation.resolve_deliverable({"profession": "dev"},
                                                  "release") is None
 
 
 def test_accessor_none_for_unknown_kind_or_empty():
-    assert occupation.deliverable_projection_for({}, "ghost") is None
-    assert occupation.deliverable_projection_for({}, "") is None
-    assert occupation.deliverable_projection_for(None, "milestone") is not None
+    assert occupation.resolve_deliverable({}, "ghost") is None
+    assert occupation.resolve_deliverable({}, "") is None
+    assert occupation.resolve_deliverable(None, "milestone") is not None
 
 
 def test_map_gate_is_class_adoption_not_a_profession_branch():
@@ -87,7 +88,7 @@ def test_map_gate_is_class_adoption_not_a_profession_branch():
     # data's profession field — the gate is that only a dev project ENUMERATES the
     # milestone class (so only there does the map surface), not an if profession==dev.
     for prof in ("dev", "sales", "backoffice", ""):
-        proj = occupation.deliverable_projection_for({"profession": prof},
+        proj = occupation.resolve_deliverable({"profession": prof},
                                                      "milestone")
         assert proj["ref"] == "application-map"
 
@@ -192,19 +193,49 @@ def test_opportunity_deliverable_is_isomorphic():
     sales = {"name": "S", "profession": "sales", "opportunities": []}
     assert occupation.project_deliverables(sales) == []   # empty until declared
 
-    # Declare the SAME-shaped slot opportunity would carry, then confirm the very
-    # same accessor + union surface it — no new wiring, isomorphic to milestone.
-    opp["deliverable"] = {"kind": "pipeline", "label": "パイプライン",
-                          "projector": "rollup"}
-    try:
-        assert occupation.deliverable_projection_for(sales, "opportunity") == {
+    # Declare the SAME-shaped slot opportunity would carry via patch.dict — an
+    # atomic, auto-restoring swap of the whole entry (ms-155 e-5598 maintainability
+    # review: direct in-place mutation + finally-del is a parallel-test footgun; a
+    # context manager cannot leave the module dict dirty for a sibling test).
+    patched = {**opp, "deliverable": {"kind": "pipeline", "label": "パイプライン",
+                                      "projector": "rollup"}}
+    with mock.patch.dict(tstate.BUILTIN_TARGET_CLASSES,
+                         {"opportunity": patched}):
+        # the very same accessor + union surface it — no new wiring, isomorphic.
+        assert occupation.resolve_deliverable(sales, "opportunity") == {
             "kind": "pipeline", "label": "パイプライン",
             "projector": "rollup", "ref": ""}
         assert occupation.project_deliverables(sales) == [
             {"target_class": "opportunity", "kind": "pipeline",
              "label": "パイプライン", "projector": "rollup", "ref": ""}]
         # and it validates under the same shared rule milestone's does
-        assert td.validate_deliverable(opp["deliverable"], "opportunity") == []
-    finally:
-        del opp["deliverable"]   # restore: keep the class hollow-free for other tests
+        assert td.validate_deliverable(patched["deliverable"], "opportunity") == []
     assert "deliverable" not in tstate.BUILTIN_TARGET_CLASSES["opportunity"]
+
+
+# ---------------------------------------------------------------------------
+# Independent-review follow-ups (ms-155 e-5597/e-5599 AX + maintainability).
+# ---------------------------------------------------------------------------
+
+def test_doc_projector_requires_ref():
+    # AX high: a "doc" deliverable IS the document named by ref, so an empty ref
+    # has nothing to resolve. Validate flags it AND normalize drops it to None,
+    # so a hollow doc spec never silently enters the union.
+    bad = {"kind": "feature-map", "projector": "doc"}          # no ref
+    assert any("ref" in p for p in td.validate_deliverable(bad, "x"))
+    assert td.normalize_deliverable(bad) is None
+    bad_empty = {"kind": "feature-map", "projector": "doc", "ref": "  "}
+    assert td.normalize_deliverable(bad_empty) is None
+    # a doc projector WITH a ref is fine
+    ok = {"kind": "feature-map", "projector": "doc", "ref": "application-map"}
+    assert td.validate_deliverable(ok, "x") == []
+    assert td.normalize_deliverable(ok)["ref"] == "application-map"
+    # rollup needs no ref (its value is a roll-up, not a document)
+    assert td.validate_deliverable({"kind": "p", "projector": "rollup"}, "x") == []
+
+
+def test_project_deliverables_tolerates_none_like_sibling():
+    # AX medium: resolve_deliverable(None, ...) is tolerated, so project_deliverables
+    # (and deliverable_bearing_classes) must not crash on None either.
+    assert occupation.project_deliverables(None) == []
+    assert occupation.deliverable_bearing_classes(None) == []

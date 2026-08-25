@@ -409,7 +409,13 @@ def evidence_fields(desc: dict) -> list:
 #                    descriptor class can use; opportunity→成約・pipeline rides it
 #                    (道筋明記, e-5601).
 # operation→稼働状態 is deferred (SPEC やらない), so no strategy for it yet.
-DELIVERABLE_PROJECTORS = frozenset({"doc", "rollup"})
+PROJECTOR_DOC = "doc"        # produced value IS a named document (needs ``ref``)
+PROJECTOR_ROLLUP = "rollup"  # produced value is a roll-up over the class's Targets
+# VALIDATION ALLOWLIST (ms-155 e-5597 AX review): the set of LEGAL projector ids —
+# adding a value HERE is what makes a projector pass ``validate_deliverable``.
+# ``normalize_deliverable`` returns None for any projector NOT in this set, so a
+# typo'd strategy never silently enters the union.
+DELIVERABLE_PROJECTORS = frozenset({PROJECTOR_DOC, PROJECTOR_ROLLUP})
 
 
 def normalize_deliverable(raw) -> Optional[dict]:
@@ -419,7 +425,7 @@ def normalize_deliverable(raw) -> Optional[dict]:
 
     Pure transform over a raw ``deliverable`` mapping, shared by BOTH the
     descriptor read (``deliverable_projection``) and the built-in code-class read
-    (``occupation.deliverable_projection_for`` over
+    (``occupation.resolve_deliverable`` over
     ``target_state.BUILTIN_TARGET_CLASSES``) so a code class (milestone→機能) and a
     data-defined class produce the SAME shape — the single normalization the root
     union (e-5599) consumes regardless of a class being code or data. A well-formed
@@ -435,11 +441,19 @@ def normalize_deliverable(raw) -> Optional[dict]:
     projector = (raw.get("projector") or "").strip()
     if not kind or projector not in DELIVERABLE_PROJECTORS:
         return None
+    ref = (raw.get("ref") or "").strip()
+    # ms-155 e-5597 AX review (high): a ``"doc"`` deliverable IS the document named
+    # by ``ref``, so an empty ref has nothing to resolve. Drop it to None (no
+    # contribution) rather than let a hollow ``ref: ""`` spec enter the union and
+    # fail silently at the assembler's I/O time; ``validate_deliverable`` also flags
+    # it at declaration time so the author sees the miss, not a deferred no-op.
+    if projector == PROJECTOR_DOC and not ref:
+        return None
     return {
         "kind": kind,
         "label": (raw.get("label") or "").strip(),
         "projector": projector,
-        "ref": (raw.get("ref") or "").strip(),
+        "ref": ref,
     }
 
 
@@ -461,7 +475,9 @@ def validate_deliverable(raw, label: str) -> list:
     built-in code classes (``target_state._validate_builtin_target_classes``) share
     so the ``{kind, projector ∈ DELIVERABLE_PROJECTORS}`` rule lives once (ms-155
     e-5598). ``None`` is valid (a class declares no deliverable). A present slot
-    must be a dict with a non-empty ``kind`` and a projector in the allowlist."""
+    must be a dict with a non-empty ``kind`` and a projector in the allowlist; a
+    ``"doc"`` projector additionally requires a non-empty ``ref`` (ms-155 e-5597 AX
+    review high — a doc deliverable with no document to resolve is a silent miss)."""
     if raw is None:
         return []
     if not isinstance(raw, dict):
@@ -479,6 +495,10 @@ def validate_deliverable(raw, label: str) -> list:
             f"[{label}] '{DELIVERABLE_KEY}.projector' は "
             f"{' / '.join(sorted(DELIVERABLE_PROJECTORS))} "
             f"のいずれか必要です (現在: {projector!r})")
+    elif projector == PROJECTOR_DOC and not (raw.get("ref") or "").strip():
+        problems.append(
+            f"[{label}] '{DELIVERABLE_KEY}.ref' は '{PROJECTOR_DOC}' projector で"
+            f"必須です (解決する文書が指定されていません)")
     return problems
 
 

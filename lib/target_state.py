@@ -289,7 +289,7 @@ BUILTIN_TARGET_CLASSES: dict[str, dict] = {
         #     "deliverable": {"kind": "pipeline", "label": "パイプライン",
         #                     "projector": "rollup"},
         #
-        # so ``occupation.deliverable_projection_for(data, "opportunity")`` and the
+        # so ``occupation.resolve_deliverable(data, "opportunity")`` and the
         # root union (``project_deliverables``) would surface it for a sales project
         # with ZERO new wiring — the same "declare, don't wire" path proven for the
         # descriptor ``"rollup"`` case (test_deliverable_projection_e5598). It is
@@ -504,8 +504,8 @@ def _validate_builtin_target_classes() -> None:
         # code-class deliverable fails LOUD at import rather than degrading to a
         # silent no-contribution in the root union. Lazy import (target_descriptor
         # is a pure leaf; avoids a load-order edge at module import).
-        import target_descriptor as _td_v
-        dl_problems = _td_v.validate_deliverable(cls.get("deliverable"), key)
+        import target_descriptor as _td
+        dl_problems = _td.validate_deliverable(cls.get("deliverable"), key)
         assert not dl_problems, (
             f"{key}: invalid deliverable declaration — {dl_problems}")
 
