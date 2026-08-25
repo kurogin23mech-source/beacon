@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.join(REPO, "lib"))
 
 import code_graph  # noqa: E402
 import code_graph_query as query  # noqa: E402
+import code_graph_zoom as zoom  # noqa: E402
 import table_doc  # noqa: E402
 
 DEFAULT_NODES_DOC = "CaBxTvnd9RlOBLKwsVzS"
@@ -76,6 +77,21 @@ def _render_seam(sub: dict) -> str:
     return "\n".join(lines)
 
 
+def _render_zoom(z: dict) -> str:
+    if not z.get("found"):
+        return f"zoom できません (module でない/構文エラー): {z['module']}"
+    lines = [f"zoom: {z['module']} — {z['line_count']}行 / {z['symbol_count']} symbol"]
+    for s in z["symbols"]:
+        head = f"  [{s['kind']}] {s['name']}  (L{s['lineno']}-{s['end_lineno']})"
+        lines.append(head)
+        if s["doc"]:
+            lines.append(f"      {s['doc']}")
+        if s["depends_on"]:
+            lines.append(f"      依存: {', '.join(s['depends_on'][:8])}"
+                         + (" …" if len(s["depends_on"]) > 8 else ""))
+    return "\n".join(lines)
+
+
 def _render_module(view: dict) -> str:
     if not view.get("found"):
         return f"module が見つかりません: {view['module']}"
@@ -97,6 +113,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Navigate the code-understanding graph.")
     ap.add_argument("--seam", help="継ぎ目 (cluster) を指定してその部分グラフを引く")
     ap.add_argument("--module", help="module を起点に近傍を引く")
+    ap.add_argument("--zoom", metavar="MODULE",
+                    help="巨大 module を function 粒度へ動的 zoom する (非格納・その場計算)")
     ap.add_argument("--list-seams", action="store_true", help="継ぎ目の一覧を出す")
     ap.add_argument("--nodes", metavar="PATH", help="nodes table-doc ファイル")
     ap.add_argument("--edges", metavar="PATH", help="edges table-doc ファイル")
@@ -105,8 +123,15 @@ def main() -> int:
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
-    if not (args.seam or args.module or args.list_seams):
-        ap.error("--seam / --module / --list-seams のいずれかを指定してください")
+    if not (args.seam or args.module or args.list_seams or args.zoom):
+        ap.error("--seam / --module / --zoom / --list-seams のいずれかを指定してください")
+
+    # zoom はソース直読み (格納グラフ不要・cloud 不要) なので先に処理する。
+    if args.zoom:
+        z = zoom.zoom_module(REPO, args.zoom)
+        print(json.dumps(z, ensure_ascii=False, indent=2) if args.json
+              else _render_zoom(z))
+        return 0 if z.get("found") else 1
 
     graph = _load_graph(args)
 
