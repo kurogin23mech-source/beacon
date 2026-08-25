@@ -171,6 +171,25 @@ class LogCommit(BaseModel):
 class SummaryUpdate(BaseModel):
     text: str
 
+class DecisionRecordBody(BaseModel):
+    """Body for POST /api/projects/{id}/decisions (ms-154 e-5593).
+
+    The generic write口 for a CLI-side decision to reach the server's unified
+    ``decision_events`` stream. ``who`` (= identity) is NOT accepted from the
+    client — the server stamps it from the authenticated token so a caller cannot
+    attribute a decision to someone else (audit integrity). ``decided_by`` (the
+    *category* of decision-maker) IS a client claim and is validated against the
+    enum by the builder.
+    """
+    kind: str
+    decision: str
+    context: str = ""
+    rationale: Optional[str] = None
+    decided_by: Optional[str] = None
+    evidence: Optional[list] = None
+    options: Optional[list] = None
+    related: Optional[dict] = None
+
 class OperationApproveRequest(BaseModel):
     """Body for POST /api/projects/{id}/operations/{op_id}/envelopes (ms-60 / e-1339).
 
@@ -1371,6 +1390,51 @@ def make_router(
                 entry_id, _dec_exc,
             )
         return result
+
+    @router.post("/api/projects/{project_id}/decisions")
+    def record_decision(project_id: str, body: DecisionRecordBody,
+                        request: Request,
+                        user: dict = Depends(require_auth)):
+        """Append a decision-arm event to the unified stream (ms-154 e-5593).
+
+        The generic write口 for CLI-side decisions (PR review 採否, log-time
+        backstop, …) that don't flow through a dedicated mutating route. The
+        record is validated by the schema builder (decided_by enum / evidence
+        required when decided_by set / non-empty kind+decision), so a malformed
+        decision is a 400, never a silent drop. ``who`` is stamped server-side
+        from the token; only project writers may record.
+        """
+        data = db.get_project(project_id)
+        if not data:
+            raise HTTPException(status_code=404, detail="project not found")
+        _require_write(data, user)
+        sid = ""
+        try:
+            sid = request.headers.get("X-Beacon-Session", "") or ""
+        except Exception:
+            sid = ""
+        try:
+            rec = decision_event_mod.build_decision_event(
+                kind=body.kind,
+                decision=body.decision,
+                context=body.context or "",
+                rationale=body.rationale,
+                decided_by=body.decided_by,
+                evidence=body.evidence,
+                options=body.options,
+                who={"user_id": user.get("sub", ""), "session_id": sid},
+                related=(body.related or {}),
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        try:
+            decision_id = db.append_decision_event(project_id, rec)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"decision stream append failed: {exc}",
+            )
+        return {"decision_id": decision_id, "kind": rec["kind"]}
 
     @router.delete("/api/projects/{project_id}/entries/{entry_id}")
     def delete_entry(project_id: str, entry_id: str,

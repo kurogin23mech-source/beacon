@@ -547,6 +547,64 @@ def test_delete_entry():
 
 
 # ---------------------------------------------------------------------------
+# Decision arm — generic decisions write口 (ms-154 e-5593)
+# ---------------------------------------------------------------------------
+
+def test_record_decision_appends_to_stream(monkeypatch):
+    captured = []
+    monkeypatch.setattr(_store_router_module, "append_decision_event",
+                        lambda pid, rec: (captured.append((pid, rec)) or "dec-x"))
+    r = client.post(
+        f"/api/projects/{PROJECT_ID}/decisions",
+        json={
+            "kind": "review-adjudication", "decision": "approve",
+            "rationale": "指摘 2 件を精査し受容",
+            "decided_by": "autonomous-AI",
+            "evidence": ["pr:e-42", "finding:N+1"],
+            "related": {"task_id": "e-42"},
+        },
+        headers={"X-Beacon-Session": "sv-abc"},
+    )
+    assert r.status_code == 200
+    assert r.json()["kind"] == "review-adjudication"
+    assert len(captured) == 1
+    _pid, rec = captured[0]
+    assert rec["decision"] == "approve"
+    assert rec["decided_by"] == "autonomous-AI"
+    assert rec["evidence"] == ["pr:e-42", "finding:N+1"]
+    # who is server-stamped from the token/session, not client-provided.
+    assert rec["who"]["session_id"] == "sv-abc"
+    assert rec["related"]["task_id"] == "e-42"
+
+
+def test_record_decision_rejects_decided_by_without_evidence(monkeypatch):
+    captured = []
+    monkeypatch.setattr(_store_router_module, "append_decision_event",
+                        lambda pid, rec: captured.append(rec))
+    r = client.post(
+        f"/api/projects/{PROJECT_ID}/decisions",
+        json={"kind": "review-adjudication", "decision": "approve",
+              "decided_by": "autonomous-AI"},  # no evidence → schema 400
+    )
+    assert r.status_code == 400
+    assert captured == []  # nothing appended on a rejected record
+
+
+def test_record_decision_rejects_empty_kind():
+    r = client.post(
+        f"/api/projects/{PROJECT_ID}/decisions",
+        json={"kind": "", "decision": "approve"})
+    assert r.status_code == 400
+
+
+def test_record_decision_unknown_project_404():
+    r = client.post(
+        "/api/projects/no-such-project/decisions",
+        json={"kind": "log-backstop", "decision": "noted"})
+    assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Log
 # ---------------------------------------------------------------------------
 

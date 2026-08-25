@@ -528,6 +528,41 @@ def _judge_pr_approve_auto_done(pr_entry: dict, data: dict) -> list:
 
     return judgements
 
+def _record_review_decision(entry_id: str, verdict: str, rationale: str) -> None:
+    """ms-154 e-5593 — best-effort: record a PR review verdict to the decision arm.
+
+    review 採否 (approve / re-work / reject) は CLI 側の判断で server の書き込み口
+    (= POST /api/projects/{id}/decisions) を通して統一 decision stream に載せる。
+    cloud mode 専用 (= decision stream は server 側)。承認フローを絶対に壊さない:
+    offline / 未ログイン / server error は全て握りつぶす (= flag not gate)。
+
+    ``verdict`` は ``approve`` / ``re-work`` / ``reject``。evidence は対象 PR への
+    参照を baseline に置き、decided_by は ``autonomous-AI`` (= 独立レビューは AI judge
+    verdict が主で最も監査が要る)。who は server が token から stamp する。
+    """
+    try:
+        from commands_shared import _is_cloud_mode, _get_api_client
+        if not _is_cloud_mode():
+            return
+        client, config = _get_api_client()
+        project_id = config.get("project_id", "")
+        if not project_id:
+            return
+        client.record_decision(project_id, {
+            "kind": "review-adjudication",
+            "decision": verdict,
+            "rationale": rationale or None,
+            "decided_by": "autonomous-AI",
+            "evidence": [f"pr:{entry_id}"],
+            "related": {"task_id": entry_id},
+        })
+    except BaseException:
+        # best-effort: _get_api_client may sys.exit (SystemExit) when creds are
+        # missing; swallow everything so decision recording never breaks the
+        # approve / reject / request-changes flow.
+        pass
+
+
 def cmd_pr_approve():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     rationale = os.environ.get("BEACON_RATIONALE", "")
@@ -591,6 +626,7 @@ def cmd_pr_approve():
                 mid_warnings.append(j)
 
     save_project(data)
+    _record_review_decision(entry_id, "approve", rationale)
 
     if json_mode:
         out = {
@@ -649,6 +685,7 @@ def cmd_pr_reject():
         print(str(e), file=sys.stderr)
         sys.exit(1)
     save_project(data)
+    _record_review_decision(entry_id, "reject", rationale)
 
     if json_mode:
         print(json.dumps({"entry_id": entry_id, "review_status": "rejected",
@@ -702,6 +739,7 @@ def cmd_pr_request_changes():
         print(str(e), file=sys.stderr)
         sys.exit(1)
     save_project(data)
+    _record_review_decision(entry_id, "re-work", rationale)
 
     if json_mode:
         print(json.dumps({"entry_id": entry_id, "review_status": "changes_requested"}, ensure_ascii=False))

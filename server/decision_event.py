@@ -358,6 +358,12 @@ def decision_event_from_completion_verdict(
     )
 
 
+# review 採否 (approve / re-work / reject) は CLI 側 (cmd_pr) の判断で、専用の
+# server route を持たない。汎用 decisions 書き込み口 (POST /api/projects/{id}/decisions,
+# kind="review-adjudication") を通り build_decision_event で検証される。ゆえに専用 builder
+# は置かない (= server 側に呼び出し元が無い vestigial 関数を作らない / ms-154 e-5593)。
+
+
 # leader_review からの遷移先 → review 判断の対応 (= 閉じた mapping)。
 def trek_review_decision_from_state(target_state: str) -> str:
     """leader_review 状態からの遷移先を review 判断語に写す。

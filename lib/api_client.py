@@ -592,6 +592,15 @@ class ApiClient:
 
     # Session Note operations
 
+    def record_decision(self, project_id: str, decision: dict) -> dict:
+        """Append a decision-arm event to the unified stream (ms-154 e-5593).
+
+        ``decision`` is the record body (kind / decision / rationale /
+        decided_by / evidence / options / related). The server stamps ``who``
+        from the token + session header, so callers do NOT pass identity here.
+        """
+        return self.post(f"/api/projects/{project_id}/decisions", decision)
+
     def add_note(self, project_id: str, note: dict) -> dict:
         return self.post(f"/api/projects/{project_id}/notes", note)
 
