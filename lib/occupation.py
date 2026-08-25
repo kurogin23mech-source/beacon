@@ -364,6 +364,34 @@ def deliverable_projection_for(data: dict | None, kind: str) -> dict | None:
     return None
 
 
+def project_deliverables(data: dict) -> list:
+    """Return the project's DELIVERABLE union — the deliverable projection of every
+    ADOPTED target-class that declares one, tagged with the producing class (ms-155
+    e-5599). Shape: ``[{"target_class": <kind>, "kind", "label", "projector",
+    "ref"}, ...]`` (empty when no adopted class declares a deliverable).
+
+    This is spine §2b's "project (root) deliverable = 採用 class 群の deliverable
+    投影の union" made literal: it walks ``owned_target_classes`` (the project's
+    adopted classes — built-in seed for the profession PLUS declared descriptors)
+    and asks ``deliverable_projection_for`` per class, so a dev project surfaces
+    milestone→機能 (application-map), a sales project would surface
+    opportunity→pipeline once that class declares one (e-5601), and adopting a NEW
+    class automatically adds its contribution — the project field cannot go stale
+    because it is recomputed from the adopted set every read (方針2 の芯).
+
+    PURE (no I/O): each entry carries the deliverable SPEC (incl. ``ref`` for a
+    ``"doc"`` projector like application-map). RESOLVING a ref to its actual content
+    (fetching the doc) is the session-start assembler's job (the I/O layer), keeping
+    this and its ``root_target.synthesized_projection`` caller side-effect-free."""
+    prof = resolve_profession(data)
+    out: list = []
+    for kind in owned_target_classes(data, prof):
+        proj = deliverable_projection_for(data, kind)
+        if proj is not None:
+            out.append({"target_class": kind, **proj})
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Target entry recording — the class-abstraction (L2) side-effect seam
 # (ms-134 e-4720).

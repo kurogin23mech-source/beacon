@@ -115,8 +115,27 @@ def test_projection_is_synthesized_rollup_over_children():
     proj = root_target.synthesized_projection(data)
     assert proj["counts"] == {"total": 3, "done": 2, "open": 1}
     assert len(proj["targets"]) == 3
-    # deliverable seam present but empty (ms-155 fills it)
-    assert proj["deliverables"] == []
+    # deliverable union filled by ms-155 e-5599: a dev project adopts the milestone
+    # class, whose deliverable IS the 機能 map (application-map).
+    assert proj["deliverables"] == [
+        {"target_class": "milestone", "kind": "feature-map", "label": "機能",
+         "projector": "doc", "ref": "application-map"},
+    ]
+
+
+def test_deliverable_union_is_empty_when_no_adopted_class_declares_one():
+    # A sales project adopts opportunity/account/acquisition — none declares a
+    # deliverable yet (opportunity→pipeline is e-5601), so the union is empty.
+    sales = {"name": "S", "profession": "sales", "opportunities": []}
+    assert root_target.synthesized_projection(sales)["deliverables"] == []
+
+
+def test_deliverable_union_present_even_with_no_children():
+    # The union is over adopted CLASSES, not instances: a dev project with zero
+    # milestones still declares its milestone-class deliverable (the map is the
+    # class's projection, independent of how many milestones exist).
+    proj = root_target.synthesized_projection(_dev_project([]))
+    assert [d["ref"] for d in proj["deliverables"]] == ["application-map"]
 
 
 def test_top_level_counts_agree_with_projection():

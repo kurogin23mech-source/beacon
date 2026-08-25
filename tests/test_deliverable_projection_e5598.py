@@ -107,3 +107,47 @@ def test_shared_validation_rejects_bad_projector():
     problems = td.validate_deliverable({"kind": "x", "projector": "bogus"}, "milestone")
     assert any("projector" in p for p in problems)
     assert td.validate_deliverable(None, "any") == []   # absent is valid
+
+
+# ---------------------------------------------------------------------------
+# The root deliverable UNION (ms-155 e-5599) — occupation.project_deliverables
+# collects the deliverable of every ADOPTED class, tagged with the producing
+# class. Fills the seam root_target.synthesized_projection left empty in ms-153.
+# ---------------------------------------------------------------------------
+
+def test_union_surfaces_milestone_map_for_dev():
+    dev = {"name": "D", "profession": "dev", "milestones": []}
+    assert occupation.project_deliverables(dev) == [
+        {"target_class": "milestone", "kind": "feature-map", "label": "機能",
+         "projector": "doc", "ref": "application-map"},
+    ]
+
+
+def test_union_empty_for_sales_until_a_class_declares_one():
+    sales = {"name": "S", "profession": "sales", "opportunities": []}
+    assert occupation.project_deliverables(sales) == []
+
+
+def test_union_includes_adopted_descriptor_class():
+    # A descriptor class the project declares contributes to the union too — the
+    # "declare, don't wire" contract: adopting a class adds its deliverable.
+    deal = td.build_descriptor(
+        kind="deal", label="商談案件", dtype="single-shot",
+        id_prefix="deal-", collection="deals",
+        deliverable={"kind": "pipeline", "label": "パイプライン",
+                     "projector": "rollup"})
+    data = {"name": "D", "profession": "dev", "milestones": []}
+    assert td.append_descriptor(data, deal) == []
+    union = occupation.project_deliverables(data)
+    classes = {d["target_class"] for d in union}
+    assert classes == {"milestone", "deal"}   # code class + descriptor class
+    deal_row = next(d for d in union if d["target_class"] == "deal")
+    assert deal_row["projector"] == "rollup" and deal_row["label"] == "パイプライン"
+
+
+def test_union_skips_adopted_classes_without_a_deliverable():
+    # operation is adopted by dev but declares no deliverable → not in the union.
+    dev = {"name": "D", "profession": "dev", "milestones": [], "operations": []}
+    classes = {d["target_class"] for d in occupation.project_deliverables(dev)}
+    assert "operation" not in classes
+    assert "milestone" in classes
