@@ -45,6 +45,9 @@ def test_arm_mapping_is_phase_less_and_evidence_less():
     # work-item = children via the enumeration seam, NOT a literal collection
     assert arms["work_item_arm"]["item_type"] == "target"
     assert arms["work_item_arm"]["via"] == "occupation.iter_target_records"
+    # "arm" is present and None (not omitted) so a reader of the leaf shape reads
+    # work_item_arm["arm"] → None, not KeyError (AX review A2)
+    assert arms["work_item_arm"]["arm"] is None
     # decision = children's completion approval (declared, ms-154 adjudicates)
     assert arms["decision"]["kind"] == "completion_approval"
     # deliverable = achievement (declared, ms-155 generalises)
@@ -67,9 +70,11 @@ def test_projection_shape_matches_shared_frame():
     data = _dev_project([_ms("ms-1", "in_progress")])
     root = root_target.project_as_root_target(data)
     for key in ("id", "label", "status", "kind", "work_items_total",
-                "work_items_done", "profession", "arms",
+                "work_items_done", "work_items_open", "profession", "arms",
                 "projection", "narrative"):
         assert key in root
+    # top-level open count agrees with the projection roll-up (AX review A1/A5)
+    assert root["work_items_open"] == root["projection"]["counts"]["open"]
     assert root["id"] == "root"
     assert root["kind"] == "root"
     assert root["label"] == "Beacon"
@@ -237,6 +242,22 @@ def test_narrative_home_exists_at_birth():
         assert data["objective"] == "obj"
         # adopted-class wiring preserved (back-compat with seam probe)
         assert "adopted_target_classes" in data
+
+
+def test_narrative_key_set_is_synced_across_the_import_boundary():
+    """The comment-only sync between root_target.root_narrative (read) and
+    occupation.build_new_project (birth-stamp) is pinned mechanically here, since
+    occupation cannot import root_target (cycle) — maint review M1/M5.
+
+    root_narrative must expose exactly ROOT_NARRATIVE_KEYS, and every one of
+    those keys must have a home stamped by build_new_project. Adding a narrative
+    field without updating build_new_project (or vice versa) fails HERE."""
+    assert set(root_target.root_narrative({}).keys()) \
+        == set(root_target.ROOT_NARRATIVE_KEYS)
+    for prof in ("dev", "sales", "backoffice", "legal"):
+        data = occupation.build_new_project("p", "obj", prof)
+        for key in root_target.ROOT_NARRATIVE_KEYS:
+            assert key in data, f"{prof}: build_new_project must stamp {key!r}"
 
 
 # --- root-target field write seams (e-5551 / 方針5, 受入条件7) ----------------

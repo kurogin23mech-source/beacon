@@ -78,14 +78,37 @@ import work_model
 
 ROOT_TARGET_KIND = "root"
 
+# The root's derived status vocabulary (ms-153 e-5549 AX/maint review A4/M3). The
+# root is phase-less, so this is NOT a stored phase — it is a pure derivation
+# over the children (see ``_root_status``). ``ROOT_STATUS_ACTIVE`` is a
+# DELIBERATELY distinct token from a leaf milestone's ``"in_progress"``: the root
+# is a different Target kind with no phase model, so borrowing the leaf phase
+# vocabulary would falsely imply it has one. Constant-ised (not a bare literal)
+# so a future reader greps one name; the value is documented as distinct-by-
+# design, not an accidental drift.
+ROOT_STATUS_TODO = work_model.TODO_STATUS       # no children yet
+ROOT_STATUS_ACTIVE = "active"                   # has child Targets
+
+# The keys of the root-OWNED narrative (``root_narrative``) — the fields
+# ``occupation.build_new_project`` must stamp a home for at birth. Declared here
+# as the single source of truth; ``occupation`` cannot import this (it sits below
+# root_target), so the two stay in sync via ``tests/test_root_target`` asserting
+# the birth-stamp covers exactly these keys (ms-153 e-5547 maint review M1/M5).
+ROOT_NARRATIVE_KEYS = ("objective", "summary")
+
 ROOT_TARGET_ARMS = {
     "kind": ROOT_TARGET_KIND,
     # phase-less: the root carries no state model / phase_ball of its own.
     "phase_ball": None,
     "state_model": None,
     # work-item arm = the root's child Targets, enumerated through the target
-    # abstraction rather than a literal project-dict array.
+    # abstraction rather than a literal project-dict array. ``arm`` is present
+    # and ``None`` (not omitted) so a reader that learned the leaf shape
+    # (milestone: ``{"arm": "entries", ...}``) reads ``work_item_arm["arm"]`` and
+    # gets ``None`` — "no literal arm; use ``via``" — instead of a KeyError or
+    # mistaking ``via`` for an arm name (ms-153 e-5546 AX review A2).
     "work_item_arm": {
+        "arm": None,
         "item_type": "target",
         "via": "occupation.iter_target_records",
     },
@@ -131,17 +154,24 @@ def _root_status(total_children: int) -> str:
 
     Two honest states only:
 
-    - ``"todo"``   — no children yet (a fresh project, nothing to advance).
-    - ``"active"`` — the project has child Targets (work is under way).
+    - ``ROOT_STATUS_TODO`` (``"todo"``)   — no children yet (nothing to advance).
+    - ``ROOT_STATUS_ACTIVE`` (``"active"``) — the project has child Targets.
+
+    ``"active"`` is a DISTINCT token from a leaf milestone's ``"in_progress"``
+    on purpose (AX/maint review A4/M3): the root is phase-less, so it must not
+    borrow the leaf phase vocabulary. Callers that need to know whether there is
+    OPEN work read the top-level ``work_items_open`` (exposed by
+    ``project_as_root_target``), NOT the status string — ``"active"`` means
+    "has children", it does NOT distinguish "some open" from "all children
+    terminal but unapproved" (AX review A1). That distinction is the open count,
+    surfaced explicitly so the reader is not misled by the status token alone.
 
     A ``"done"`` root is deliberately NOT derived here: root completion is the
     decision arm (完了承認), owned by ms-154. Inventing it now would pre-empt that
     boundary (SPEC: root の decision＝完了承認 は本 MS では最小に留める)."""
     if total_children == 0:
-        return work_model.TODO_STATUS
-    # Both "some children open" and "all children terminal but unapproved" read
-    # as active, because completion approval is ms-154's decision arm.
-    return "active"
+        return ROOT_STATUS_TODO
+    return ROOT_STATUS_ACTIVE
 
 
 def root_narrative(data: dict) -> dict:
@@ -157,11 +187,13 @@ def root_narrative(data: dict) -> dict:
     Read-only: returns a fresh dict, never mutates ``data``. The fuller vision
     prose lives in the ``project-vision`` CORE doc (a separate store); this module
     is pure (no I/O), so it surfaces the on-project ``objective`` one-liner and
-    leaves fetching the doc to the session-start assembler (e-5549)."""
-    return {
-        "objective": data.get("objective", ""),   # 大目的 = root goal / vision seed
-        "summary": data.get("summary", ""),        # 経緯 summary (session narrative)
-    }
+    leaves fetching the doc to the session-start assembler (e-5549).
+
+    Keyed by ``ROOT_NARRATIVE_KEYS`` (the single source of truth for which fields
+    the root owns) so adding a narrative field is a one-line change here that the
+    birth-stamp test pins ``build_new_project`` against (maint review M1/M5)."""
+    return {k: data.get(k, "") for k in ROOT_NARRATIVE_KEYS}
+    # (``objective`` = 大目的 / vision seed; ``summary`` = 経緯 / session narrative)
 
 
 def synthesized_projection(data: dict) -> dict:
@@ -225,12 +257,20 @@ def project_as_root_target(data: dict) -> dict:
     projection = synthesized_projection(data)
     counts = projection["counts"]
     return {
+        # ``id`` is a singleton SENTINEL (== ``kind`` == "root"), NOT a
+        # collection id like "ms-5" / "opp-3": the root is not a member of
+        # ``targets[]`` and is not referenceable by ``--ms``/``-m`` (AX review
+        # A3). It marks "this is the root", not an addressable record.
         "id": ROOT_TARGET_KIND,
         "label": data.get("name", ""),
         "status": _root_status(counts["total"]),
         "kind": ROOT_TARGET_KIND,
         "work_items_total": counts["total"],
         "work_items_done": counts["done"],
+        # top-level open count so a reader sees total/done/open without digging
+        # into ``projection.counts`` — the status token alone does not reveal
+        # whether any work is still open (AX review A1/A5).
+        "work_items_open": counts["open"],
         "profession": occupation.resolve_profession(data),
         "arms": root_target_arms(data),
         # SPEC 方針2 の 2分割 — synthesized (derivable) vs owned (authored).
@@ -242,13 +282,21 @@ def project_as_root_target(data: dict) -> dict:
 # ---------------------------------------------------------------------------
 # Root-target field writes (ms-153 e-5551 / SPEC 方針5).
 #
-# The root target's OWN mutable fields — its display label (``name``) and its
-# archived lifecycle flag (``archived``) — are set through THESE seams, not via
-# bare ``data["name"] = …`` / ``data["archived"] = …`` scattered in cmd_project.
-# This gives root-field mutation ONE home, mirroring how a leaf Target's state
-# goes through ``occupation.set_entry_state`` rather than ad-hoc dict writes: a
-# future root-field concern (validation, a decision-arm hook for archive =
-# 完了承認 in ms-154, an evidence stamp) plugs in HERE with no edit in the CLI.
+# The root target's user-set lifecycle fields — its display label (``name``) and
+# its archived flag (``archived``) — are set through THESE seams, not via bare
+# ``data["name"] = …`` / ``data["archived"] = …`` in cmd_project. This gives the
+# CLI's root-field edits ONE home, mirroring how a leaf Target's state goes
+# through ``occupation.set_entry_state``: a future concern (validation, a
+# decision-arm hook for archive = 完了承認 in ms-154, an evidence stamp) plugs in
+# HERE with no edit in the CLI.
+#
+# SCOPE (maint review M2): this covers the CLI's INTENTIONAL field edits. The
+# ``summary`` field is NOT set here — it is auto-derived from the commit trail by
+# ``core`` (the mechanical session summary) and attributed by ``session_log``, a
+# separate write path, so there is no ``set_root_summary``. The seam's claim is
+# "cmd_project's name/archived edits have one home", not "every write to any root
+# field routes here"; keeping that boundary honest avoids implying a single choke
+# point that does not exist.
 #
 # Behaviour-preserving: each seam mutates exactly the field the old inline write
 # did, in memory only. Persistence (``save_project``) stays in the caller, so
