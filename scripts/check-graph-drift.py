@@ -30,11 +30,8 @@ sys.path.insert(0, os.path.join(REPO, "lib"))
 
 import code_graph  # noqa: E402
 import code_graph_derive as derive  # noqa: E402
+import code_graph_store  # noqa: E402
 import table_doc  # noqa: E402
-
-# e-5539 の --create で作られた格納先 (session note 参照)。
-DEFAULT_NODES_DOC = "CaBxTvnd9RlOBLKwsVzS"
-DEFAULT_EDGES_DOC = "ZMs2c7eXdBqHySRpV7qr"
 
 SKIP_EXIT = 3
 
@@ -85,10 +82,12 @@ def _render(diff: dict) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Check the code-graph for drift vs source.")
-    ap.add_argument("--nodes", metavar="PATH", help="nodes table-doc ファイルを照合")
-    ap.add_argument("--edges", metavar="PATH", help="edges table-doc ファイルを照合")
-    ap.add_argument("--nodes-doc", default=DEFAULT_NODES_DOC, help="nodes の doc id (live)")
-    ap.add_argument("--edges-doc", default=DEFAULT_EDGES_DOC, help="edges の doc id (live)")
+    ap.add_argument("--nodes-file", metavar="PATH", help="nodes table-doc ファイルを照合")
+    ap.add_argument("--edges-file", metavar="PATH", help="edges table-doc ファイルを照合")
+    ap.add_argument("--nodes-doc", default=code_graph_store.NODES_DOC_ID,
+                    help="nodes の doc id (live)")
+    ap.add_argument("--edges-doc", default=code_graph_store.EDGES_DOC_ID,
+                    help="edges の doc id (live)")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
@@ -97,9 +96,13 @@ def main() -> int:
         print(json.dumps({"skipped": True}) if args.json else msg)
         return SKIP_EXIT
 
-    if args.nodes and args.edges:
-        node_content = open(args.nodes, encoding="utf-8").read()
-        edge_content = open(args.edges, encoding="utf-8").read()
+    # PR #675 AX-2: --nodes-file / --edges-file は必ずペア。片方だけだと黙って live doc に
+    # フォールバックしてローカルファイルが無視される穴を防ぐ。
+    if bool(args.nodes_file) != bool(args.edges_file):
+        ap.error("--nodes-file と --edges-file はペアで指定してください (片方だけは不可)")
+    if args.nodes_file and args.edges_file:
+        node_content = open(args.nodes_file, encoding="utf-8").read()
+        edge_content = open(args.edges_file, encoding="utf-8").read()
     else:
         node_content = _beacon_doc_show(args.nodes_doc)
         edge_content = _beacon_doc_show(args.edges_doc)

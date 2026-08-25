@@ -34,16 +34,22 @@ def _rel_module_path(file_path: str, repo: str) -> str | None:
     return os.path.relpath(abspath, absrepo).replace(os.sep, "/")
 
 
-def reminder_for_edit(file_path: str, repo: str) -> str | None:
+def reminder_for_edit(file_path: str, repo: str,
+                      modules: set[str] | None = None) -> str | None:
     """編集された file が code-graph の対象 module なら promptを返す。それ以外は None。
 
     対象 = ソースに実在する module (lib/*.py・server/*.py・channel/*.mjs)。テスト
     ファイルや docs 等は対象外 (None) なので、hook は module 編集時だけ喋る。
+
+    ``modules`` を渡すと source 列挙 (I/O) をスキップして純粋なパス比較になる (テスト
+    で mock 不要、PR #675 AX-5)。省略時は ``enumerate_source_modules`` で自動取得する。
     """
     rel = _rel_module_path(file_path, repo)
     if rel is None:
         return None
-    if rel not in code_graph_derive.enumerate_source_modules(repo):
+    if modules is None:
+        modules = code_graph_derive.enumerate_source_modules(repo)
+    if rel not in modules:
         return None
     return (
         f"BEACON: {rel} を編集しました。コード理解グラフ (code-graph) の "

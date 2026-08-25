@@ -35,16 +35,17 @@ sys.path.insert(0, os.path.join(REPO, "lib"))
 import code_graph  # noqa: E402
 import code_graph_derive  # noqa: E402
 import code_graph_seed  # noqa: E402
+import code_graph_store  # noqa: E402
 
 # 種となる既存 doc の既定 id (SPEC 関連セクション)。
 DEFAULT_INVENTORY_ID = "NC7bEWi08ELyNqgS6Mz0"   # module 監査 (150 module)
 DEFAULT_APP_MAP_ID = "application-map"           # 全貌マップ (value 文脈)
 
-# e-5539 の --create で作られた生きた格納先 (session note 参照)。--update の既定。
-NODES_DOC_ID = "CaBxTvnd9RlOBLKwsVzS"
-EDGES_DOC_ID = "ZMs2c7eXdBqHySRpV7qr"
-NODES_TITLE = "コード理解グラフ: nodes (module)"
-EDGES_TITLE = "コード理解グラフ: edges (adjacency)"
+# 格納先は lib/code_graph_store で単一ソース化 (PR #675 maintainability-1)。
+NODES_DOC_ID = code_graph_store.NODES_DOC_ID
+EDGES_DOC_ID = code_graph_store.EDGES_DOC_ID
+NODES_TITLE = code_graph_store.NODES_TITLE
+EDGES_TITLE = code_graph_store.EDGES_TITLE
 
 
 def _beacon_doc_show(doc_id: str) -> str:

@@ -44,8 +44,12 @@ def main() -> int:
         message = code_graph_reconcile.reminder_for_edit(file_path, REPO)
         if message:
             _emit(message)
-    except Exception:
-        return 0  # 判定失敗は握りつぶす (編集を妨げない)
+    except Exception as exc:
+        # PR #675 AX-1: import / 判定の失敗は握り潰さず stderr に出す (編集は妨げない
+        # よう exit 0 は維持)。「hook が喋えなかった」と「hook が正常に沈黙判定した」を
+        # 分離し、curated 層の劣化を無音にしない。
+        sys.stderr.write(f"code-graph edit hook error: {exc}\n")
+        return 0
     return 0
 
 

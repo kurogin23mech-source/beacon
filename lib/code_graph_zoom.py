@@ -36,7 +36,7 @@ def _import_alias_map(tree: ast.Module, repo: str, modules: set[str],
                   if p.startswith("server/") and p.endswith(".py")}
 
     def resolve(bare: str) -> str | None:
-        return code_graph_derive._resolve_import(bare, src_dir, lib_idx, server_idx)
+        return code_graph_derive.resolve_import(bare, src_dir, lib_idx, server_idx)
 
     alias: dict[str, str] = {}
     for node in ast.walk(tree):

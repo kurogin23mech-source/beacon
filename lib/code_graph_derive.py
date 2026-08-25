@@ -48,7 +48,7 @@ def enumerate_source_modules(repo: str) -> set[str]:
     return mods
 
 
-def _name_index(modules: set[str], directory: str) -> dict[str, str]:
+def name_index(modules: set[str], directory: str) -> dict[str, str]:
     """``{bare_name: path}`` を 1 ディレクトリ分。``lib/core.py`` → ``core``。"""
     out: dict[str, str] = {}
     for path in modules:
@@ -57,7 +57,7 @@ def _name_index(modules: set[str], directory: str) -> dict[str, str]:
     return out
 
 
-def _resolve_import(name: str, src_dir: str,
+def resolve_import(name: str, src_dir: str,
                     lib_idx: dict[str, str], server_idx: dict[str, str]) -> str | None:
     """bare import 名を module パスへ。同ディレクトリ優先で lib/server を探す。
 
@@ -103,8 +103,8 @@ def python_import_edges(repo: str, modules: set[str]) -> list[Edge]:
     ``modules`` 集合の中で解決できた import だけ辺にする (外部依存は張らない)。
     自己 import は落とす。返り値は未 dedup (呼び出し側 / CodeGraph が dedup)。
     """
-    lib_idx = _name_index(modules, "lib")
-    server_idx = _name_index(modules, "server")
+    lib_idx = name_index(modules, "lib")
+    server_idx = name_index(modules, "server")
     edges: list[Edge] = []
     for path in sorted(modules):
         if not path.endswith(".py"):
@@ -115,7 +115,7 @@ def python_import_edges(repo: str, modules: set[str]) -> list[Edge]:
         except OSError:
             continue
         for name in _module_imports(source):
-            dst = _resolve_import(name, src_dir, lib_idx, server_idx)
+            dst = resolve_import(name, src_dir, lib_idx, server_idx)
             if dst and dst != path:
                 edges.append(Edge(src=path, dst=dst, type="depends-on"))
     return edges

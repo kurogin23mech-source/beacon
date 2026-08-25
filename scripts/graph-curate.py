@@ -27,10 +27,11 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, "lib"))
 
 import code_graph_curate  # noqa: E402
+import code_graph_store  # noqa: E402
 import table_doc  # noqa: E402
 
-NODES_DOC_ID = "CaBxTvnd9RlOBLKwsVzS"
-NODES_TITLE = "コード理解グラフ: nodes (module)"
+NODES_DOC_ID = code_graph_store.NODES_DOC_ID
+NODES_TITLE = code_graph_store.NODES_TITLE
 
 
 def _beacon_doc_show(doc_id: str) -> str:

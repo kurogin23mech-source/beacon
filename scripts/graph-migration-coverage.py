@@ -30,11 +30,12 @@ sys.path.insert(0, os.path.join(REPO, "lib"))
 
 import code_graph  # noqa: E402
 import code_graph_query as query  # noqa: E402
+import code_graph_store  # noqa: E402
 import table_doc  # noqa: E402
 
-LEDGER_DOC_ID = "paradigm-migration-ledger"
-NODES_DOC_ID = "CaBxTvnd9RlOBLKwsVzS"
-EDGES_DOC_ID = "ZMs2c7eXdBqHySRpV7qr"
+LEDGER_DOC_ID = code_graph_store.LEDGER_DOC_ID
+NODES_DOC_ID = code_graph_store.NODES_DOC_ID
+EDGES_DOC_ID = code_graph_store.EDGES_DOC_ID
 
 
 def _beacon_doc_show(doc_id: str) -> str:

@@ -28,11 +28,9 @@ sys.path.insert(0, os.path.join(REPO, "lib"))
 
 import code_graph  # noqa: E402
 import code_graph_query as query  # noqa: E402
+import code_graph_store  # noqa: E402
 import code_graph_zoom as zoom  # noqa: E402
 import table_doc  # noqa: E402
-
-DEFAULT_NODES_DOC = "CaBxTvnd9RlOBLKwsVzS"
-DEFAULT_EDGES_DOC = "ZMs2c7eXdBqHySRpV7qr"
 
 
 def _beacon_doc_show(doc_id: str) -> str:
@@ -44,9 +42,13 @@ def _beacon_doc_show(doc_id: str) -> str:
 
 
 def _load_graph(args) -> "code_graph.CodeGraph":
-    if args.nodes and args.edges:
-        nc = open(args.nodes, encoding="utf-8").read()
-        ec = open(args.edges, encoding="utf-8").read()
+    # PR #675 AX-2: --nodes-file / --edges-file は必ずペア (片方だけで live doc への
+    # silent フォールバックを防ぐ)。
+    if bool(args.nodes_file) != bool(args.edges_file):
+        raise SystemExit("--nodes-file と --edges-file はペアで指定してください (片方だけは不可)")
+    if args.nodes_file and args.edges_file:
+        nc = open(args.nodes_file, encoding="utf-8").read()
+        ec = open(args.edges_file, encoding="utf-8").read()
     else:
         nc = _beacon_doc_show(args.nodes_doc)
         ec = _beacon_doc_show(args.edges_doc)
@@ -116,10 +118,10 @@ def main() -> int:
     ap.add_argument("--zoom", metavar="MODULE",
                     help="巨大 module を function 粒度へ動的 zoom する (非格納・その場計算)")
     ap.add_argument("--list-seams", action="store_true", help="継ぎ目の一覧を出す")
-    ap.add_argument("--nodes", metavar="PATH", help="nodes table-doc ファイル")
-    ap.add_argument("--edges", metavar="PATH", help="edges table-doc ファイル")
-    ap.add_argument("--nodes-doc", default=DEFAULT_NODES_DOC)
-    ap.add_argument("--edges-doc", default=DEFAULT_EDGES_DOC)
+    ap.add_argument("--nodes-file", metavar="PATH", help="nodes table-doc ファイル")
+    ap.add_argument("--edges-file", metavar="PATH", help="edges table-doc ファイル")
+    ap.add_argument("--nodes-doc", default=code_graph_store.NODES_DOC_ID)
+    ap.add_argument("--edges-doc", default=code_graph_store.EDGES_DOC_ID)
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args()
 
@@ -143,8 +145,15 @@ def main() -> int:
 
     if args.seam:
         result = query.subgraph_for_seam(graph, args.seam)
-        print(json.dumps(result, ensure_ascii=False, indent=2) if args.json
-              else _render_seam(result))
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif result["member_count"] == 0:
+            # PR #675 AX-3: member ゼロを無出力 exit 1 で返さず、登録済み継ぎ目を示して
+            # 回復経路を出す (誤った継ぎ目名を叩いたときに --list-seams へ誘導)。
+            print(f"継ぎ目 '{result['seam']}' に所属 module がありません。"
+                  f"登録済み継ぎ目: {', '.join(graph.seams()) or '(なし)'}")
+        else:
+            print(_render_seam(result))
         return 0 if result["member_count"] else 1
 
     view = query.neighborhood_for_module(graph, args.module)
