@@ -100,6 +100,16 @@ def attainment_evidence(milestone: str, *, repo_root=None) -> dict:
     Replays the MS's saved scenarios and returns which SPEC-derived journeys are
     green/red, wrapped in an explicit non-verdict label. Feeds the human/leader
     attainment review (ms-119); it never decides attainment or closes the MS.
+
+    ms-155 e-5600 adjudication: the ``milestone`` argument here is an explicit
+    target-ID SCOPING key (which target's saved scenarios to replay), NOT a
+    per-class *deliverable* projection. Attainment evidence (did a journey run) is
+    a different arm from a deliverable (the produced value, e.g. application-map),
+    so this is deliberately OUT of scope for e-5600's "milestone 決め打ち
+    deliverable を記述子経由へ寄せる" — there is no deliverable computation here to
+    reroute. Making saved scenarios attachable to ANY target-class (not just a
+    milestone) is a storage generalization left to a follow-up (SPEC 最小/後続),
+    consistent with the minimal scope chosen for this task.
     """
     run = run_saved_scenarios(repo_root=repo_root, milestone=milestone)
     return {

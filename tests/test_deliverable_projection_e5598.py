@@ -151,3 +151,28 @@ def test_union_skips_adopted_classes_without_a_deliverable():
     classes = {d["target_class"] for d in occupation.project_deliverables(dev)}
     assert "operation" not in classes
     assert "milestone" in classes
+
+
+# ---------------------------------------------------------------------------
+# deliverable_bearing_classes (ms-155 e-5600) — the single source a consumer
+# (cmd_retro) asks instead of hardcoding "milestone".
+# ---------------------------------------------------------------------------
+
+def test_bearing_classes_is_milestone_for_dev():
+    dev = {"name": "D", "profession": "dev", "milestones": []}
+    assert occupation.deliverable_bearing_classes(dev) == ["milestone"]
+
+
+def test_bearing_classes_empty_for_sales_today():
+    sales = {"name": "S", "profession": "sales", "opportunities": []}
+    assert occupation.deliverable_bearing_classes(sales) == []
+
+
+def test_bearing_classes_includes_descriptor_class():
+    deal = td.build_descriptor(
+        kind="deal", label="商談", dtype="single-shot",
+        id_prefix="deal-", collection="deals",
+        deliverable={"kind": "pipeline", "projector": "rollup"})
+    data = {"name": "D", "profession": "dev", "milestones": []}
+    assert td.append_descriptor(data, deal) == []
+    assert occupation.deliverable_bearing_classes(data) == ["milestone", "deal"]

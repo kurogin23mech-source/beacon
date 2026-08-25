@@ -392,6 +392,21 @@ def project_deliverables(data: dict) -> list:
     return out
 
 
+def deliverable_bearing_classes(data: dict) -> list:
+    """Return the KINDS of the project's adopted target-classes that DECLARE a
+    deliverable, in adoption order (ms-155 e-5600). For a dev project this is
+    ``["milestone"]`` (only milestone declares 機能→application-map today); it is
+    derived from the same declarations ``project_deliverables`` unions, so it is
+    the SINGLE source a consumer asks "which class carries this project's produced
+    value" instead of hardcoding the literal ``"milestone"``. A consumer that used
+    to assume milestone (e.g. ``cmd_retro``'s per-class grouping) routes through
+    this so the coupling comes from the declaration, not a bare string — and a
+    non-dev project (or one that later declares another deliverable class) is no
+    longer silently excluded. Dev behaviour is unchanged (the list is exactly
+    ``["milestone"]``)."""
+    return [d["target_class"] for d in project_deliverables(data)]
+
+
 # ---------------------------------------------------------------------------
 # Target entry recording — the class-abstraction (L2) side-effect seam
 # (ms-134 e-4720).
