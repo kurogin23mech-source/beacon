@@ -173,6 +173,8 @@ beacon session end --summary "<Step3のテキスト>"
 
 このコマンドは同時に session 中の notes / commits / PRs も session log に集約する。`beacon session log list` で確認可能。
 
+**作業した target への帰属 (ms-153 e-5550 / SPEC 方針3)**: session log は「project 一本のまとめ」ではなく **実際に作業した target (= 対象)** に帰属して書き込まれる (read=root / write=作業 target の非対称)。帰属先は CLI が自動で決める — **fork worktree では `.beacon/fork.json` の `target_ms_id` で構造的に定まり** (この fork がその target を進めるために立てられたため)、fork でない場合は session 中の commit が全て 1 つの target に載っていればそれを推定、複数 target 横断 / commit 無しなら未帰属 (project 全体) のまま。Skill 側で target を指定する必要はない (payload の `target_id` / `target_source` に自動記録)。
+
 **重要**: Step 3 で生成したサマリーには、引き継ぎを次セッションが拾えるよう **「次セッション最優先」「次にやること」「top of queue」等の見出し** を含めること (session-start Step 1j の抽出ロジックがこのキーワードでセクションを切り出す)。
 
 ## Step 4.5: セッションメモのレビューと統合昇格
