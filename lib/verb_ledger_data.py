@@ -193,6 +193,12 @@ VERB_LEDGER = {
     "meeting_schedule": {"cls": "C", "secondary": ["R"], "note": "カレンダー作成(C外向き)/活動記録(R)"},
 
     # --- member ---
+    # ms-151 e-5474: machine API key 管理 (owner が機械用認証鍵を発行/一覧/失効)。
+    # issue/revoke は human/outward の control(C) で鍵を記録(R)、list は read-only(Q)。
+    # member_add/remove/list と同じ分類 (owner による credential 管理)。
+    "machine_key_issue": {"cls": "C", "secondary": ["R"], "note": "[post-memo] 機械鍵発行(C)/鍵記録(R)"},
+    "machine_key_list": {"cls": "Q", "secondary": [], "note": "[post-memo] 機械鍵一覧"},
+    "machine_key_revoke": {"cls": "C", "secondary": ["R"], "note": "[post-memo] 機械鍵失効(C)/失効記録(R)"},
     "member_add": {"cls": "C", "secondary": ["R"], "note": ""},
     "member_invitation_cancel": {"cls": "C", "secondary": [], "note": ""},
     "member_invitation_list": {"cls": "Q", "secondary": [], "note": ""},

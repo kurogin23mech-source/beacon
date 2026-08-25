@@ -34,6 +34,22 @@ NOW = "2026-08-24T12:00:00Z"
 PID = "beacon-b95643"
 
 
+def _run(coro):
+    """Run a coroutine on a private event loop WITHOUT touching the global one.
+
+    ``asyncio.run()`` sets the current event loop to None on exit, which breaks
+    sibling tests (test_scheduler_key_startup.py) that call
+    ``asyncio.get_event_loop()`` later in the same process. Running on an
+    explicit new loop object (never set as current, closed only here) keeps the
+    process-global default loop untouched.
+    """
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
 def _fake_request():
     req = types.SimpleNamespace()
     req.state = types.SimpleNamespace()
@@ -56,7 +72,7 @@ def test_valid_machine_key_authenticates(monkeypatch, auth_on):
                         lambda pid, kid: record if pid == PID else None)
 
     req = _fake_request()
-    claims = asyncio.run(app_module.require_auth(req, _creds(raw)))
+    claims = _run(app_module.require_auth(req, _creds(raw)))
 
     assert claims["machine"] is True
     assert claims["project_id"] == PID
@@ -74,7 +90,7 @@ def test_revoked_key_rejected_401(monkeypatch, auth_on):
     record["revoked_at"] = "2026-08-24T13:00:00Z"
     monkeypatch.setattr(app_module.db, "get_machine_key", lambda pid, kid: record)
     with pytest.raises(HTTPException) as ei:
-        asyncio.run(app_module.require_auth(_fake_request(), _creds(raw)))
+        _run(app_module.require_auth(_fake_request(), _creds(raw)))
     assert ei.value.status_code == 401
 
 
@@ -82,7 +98,7 @@ def test_unknown_key_rejected_401(monkeypatch, auth_on):
     raw, _ = mk.issue(PID, now=NOW)
     monkeypatch.setattr(app_module.db, "get_machine_key", lambda pid, kid: None)
     with pytest.raises(HTTPException) as ei:
-        asyncio.run(app_module.require_auth(_fake_request(), _creds(raw)))
+        _run(app_module.require_auth(_fake_request(), _creds(raw)))
     assert ei.value.status_code == 401
 
 
@@ -91,7 +107,7 @@ def test_tampered_secret_rejected_401(monkeypatch, auth_on):
     forged = mk.format_token(PID, "kid", "wrong")
     monkeypatch.setattr(app_module.db, "get_machine_key", lambda pid, kid: record)
     with pytest.raises(HTTPException) as ei:
-        asyncio.run(app_module.require_auth(_fake_request(), _creds(forged)))
+        _run(app_module.require_auth(_fake_request(), _creds(forged)))
     assert ei.value.status_code == 401
 
 
@@ -113,7 +129,7 @@ def test_human_token_never_enters_machine_path(monkeypatch, auth_on):
     monkeypatch.setattr(app_module.db, "get_or_create_user", lambda uid, email: {})
     monkeypatch.setattr(app_module, "_ensure_personal_org", lambda uid, email="": None)
 
-    claims = asyncio.run(
+    claims = _run(
         app_module.require_auth(_fake_request(), _creds("bcli.some.human.token")))
 
     assert seen["verify_id"] is True
