@@ -21,42 +21,6 @@ import os
 import code_graph_derive
 
 
-def _import_alias_map(tree: ast.Module, repo: str, modules: set[str],
-                      src_dir: str) -> dict[str, str]:
-    """module の import を「ローカル名 → 依存先 module path」に畳む。
-
-    ``import core`` → core→lib/core.py、``import x as y`` → y→…、
-    ``from commands_shared import a, b as c`` → a/c→lib/commands_shared.py。
-    この codebase は両スタイルを多用するので、function 内で使われた名前から
-    「その function がどの module に依存するか」を後で引けるようにする。
-    """
-    lib_idx = {os.path.basename(p)[:-3]: p for p in modules
-               if p.startswith("lib/") and p.endswith(".py")}
-    server_idx = {os.path.basename(p)[:-3]: p for p in modules
-                  if p.startswith("server/") and p.endswith(".py")}
-
-    def resolve(bare: str) -> str | None:
-        return code_graph_derive.resolve_import(bare, src_dir, lib_idx, server_idx)
-
-    alias: dict[str, str] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for a in node.names:
-                bare = a.name.split(".")[0]
-                dst = resolve(bare)
-                if dst:
-                    alias[a.asname or bare] = dst
-        elif isinstance(node, ast.ImportFrom):
-            if (node.level or 0) != 0 or not node.module:
-                continue
-            dst = resolve(node.module.split(".")[0])
-            if not dst:
-                continue
-            for a in node.names:
-                alias[a.asname or a.name] = dst  # from X import a  → a 経由で X に依存
-    return alias
-
-
 def _names_used(node: ast.AST) -> set[str]:
     """AST 部分木で参照される識別子 (Name / Attribute の起点) を集める。"""
     used: set[str] = set()
@@ -102,7 +66,7 @@ def zoom_module(repo: str, module_path: str) -> dict:
 
     modules = code_graph_derive.enumerate_source_modules(repo)
     src_dir = module_path.split("/", 1)[0]
-    alias = _import_alias_map(tree, repo, modules, src_dir)
+    alias = code_graph_derive.import_alias_map(tree, modules, src_dir)
 
     symbols: list[dict] = []
 

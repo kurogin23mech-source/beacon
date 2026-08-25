@@ -61,7 +61,8 @@ def _render(diff: dict) -> str:
     if diff["clean"]:
         c = diff["counts"]
         return (f"OK: drift 無し (module node {c['graph_module_nodes']} / "
-                f"depends-on 辺 {c['graph_depends_on']})")
+                f"depends-on 辺 {c['graph_depends_on']} / "
+                f"surfaces-as 辺 {c['graph_surfaces_as']})")
     lines = ["DRIFT: code-graph が現在ソースとズレています"]
     if diff["missing_nodes"]:
         lines.append(f"  書き漏れ module (ソースに在るが graph に無い) {len(diff['missing_nodes'])}件:")
@@ -75,6 +76,12 @@ def _render(diff: dict) -> str:
     if diff["phantom_edges"]:
         lines.append(f"  幽霊 depends-on 辺 {len(diff['phantom_edges'])}件 (先頭のみ):")
         lines += [f"    - {s} -> {d}" for s, d in diff["phantom_edges"][:20]]
+    if diff.get("missing_surfaces"):
+        lines.append(f"  書き漏れ surfaces-as {len(diff['missing_surfaces'])}件 (先頭のみ):")
+        lines += [f"    + {s} -> {d}" for s, d in diff["missing_surfaces"][:20]]
+    if diff.get("phantom_surfaces"):
+        lines.append(f"  幽霊 surfaces-as {len(diff['phantom_surfaces'])}件 (先頭のみ):")
+        lines += [f"    - {s} -> {d}" for s, d in diff["phantom_surfaces"][:20]]
     lines.append("  → seeder を再実行 (scripts/seed-code-graph.py --derive --create) して"
                  "現在ソースに揃えてください。")
     return "\n".join(lines)

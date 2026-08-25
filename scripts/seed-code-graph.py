@@ -94,13 +94,16 @@ def _summary(graph: "code_graph.CodeGraph") -> dict:
     by_type: dict[str, int] = {}
     for e in edges:
         by_type[e.type] = by_type.get(e.type, 0) + 1
-    module_nodes = [n for n in nodes if not code_graph_seed.is_seam_node(n)]
+    module_ids = code_graph_derive.module_node_ids(graph)
+    module_nodes = [n for n in nodes if n.id in module_ids]
     seam_nodes = [n for n in nodes if code_graph_seed.is_seam_node(n)]
+    surface_nodes = [n for n in nodes if n.id.startswith(("cli:", "api:", "skill:"))]
     with_role = sum(1 for n in module_nodes if n.role)
     isolated = sum(1 for n in module_nodes if not graph.neighbors(n.id))
     return {
         "module_nodes": len(module_nodes),
         "seam_nodes": len(seam_nodes),
+        "surface_nodes": len(surface_nodes),
         "total_nodes": len(nodes),
         "edges": len(edges),
         "edges_by_type": by_type,

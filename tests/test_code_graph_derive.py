@@ -109,3 +109,100 @@ def test_seam_nodes_are_excluded_from_module_diff(fake_repo):
     # seam node must NOT show up as a phantom module
     assert "seam:exec-auth" not in diff["phantom_nodes"]
     assert diff["clean"] is True
+
+
+# --- e-5558: call / route / cli surfaces-as / .mjs ------------------------
+
+@pytest.fixture
+def machine_repo(tmp_path):
+    """call / route / cli / .mjs の機械層を持つ最小 source tree。"""
+    (tmp_path / "lib").mkdir()
+    (tmp_path / "server").mkdir()
+    (tmp_path / "channel").mkdir()
+    # call graph: caller が helper を import して helper.do() を呼ぶ
+    (tmp_path / "lib" / "helper.py").write_text("def do():\n    return 1\n")
+    (tmp_path / "lib" / "caller.py").write_text(
+        "import helper\n\ndef run():\n    return helper.do()\n")
+    # cli surfaces: commands.py dispatch → cmd_thing の handler
+    (tmp_path / "lib" / "cmd_thing.py").write_text(
+        "def cmd_thing_add():\n    pass\ndef cmd_thing_list():\n    pass\n")
+    (tmp_path / "lib" / "commands.py").write_text(
+        "from cmd_thing import cmd_thing_add, cmd_thing_list\n\n"
+        "def dispatch():\n"
+        "    commands = {\n"
+        '        "thing_add": cmd_thing_add,\n'
+        '        "thing_list": cmd_thing_list,\n'
+        "    }\n"
+        "    return commands\n")
+    # route surfaces: routers_x.py の @router 経路
+    (tmp_path / "server" / "routers_x.py").write_text(
+        "@router.get('/api/x/{id}')\ndef get_x():\n    pass\n"
+        "@router.post('/api/x')\ndef make_x():\n    pass\n")
+    # .mjs import
+    (tmp_path / "channel" / "a.mjs").write_text(
+        "import { z } from './b.mjs'\nimport './c.mjs'\n")
+    (tmp_path / "channel" / "b.mjs").write_text("export const z = 1\n")
+    (tmp_path / "channel" / "c.mjs").write_text("// c\n")
+    return str(tmp_path)
+
+
+def test_call_edges_derive_depends_on(machine_repo):
+    mods = derive.enumerate_source_modules(machine_repo)
+    edges = {(e.src, e.dst) for e in derive.call_edges(machine_repo, mods)}
+    assert ("lib/caller.py", "lib/helper.py") in edges     # helper.do() 呼び出し
+    assert all(e.type == "depends-on" for e in derive.call_edges(machine_repo, mods))
+
+
+def test_mjs_import_edges(machine_repo):
+    mods = derive.enumerate_source_modules(machine_repo)
+    edges = {(e.src, e.dst) for e in derive.mjs_import_edges(machine_repo, mods)}
+    assert ("channel/a.mjs", "channel/b.mjs") in edges     # import { z } from './b.mjs'
+    assert ("channel/a.mjs", "channel/c.mjs") in edges     # import './c.mjs'
+
+
+def test_route_surfaces(machine_repo):
+    mods = derive.enumerate_source_modules(machine_repo)
+    pairs = set(derive.route_surfaces(machine_repo, mods))
+    assert ("server/routers_x.py", "api:GET /api/x/{}") in pairs   # {id} 正規化
+    assert ("server/routers_x.py", "api:POST /api/x") in pairs
+
+
+def test_cli_surfaces(machine_repo):
+    mods = derive.enumerate_source_modules(machine_repo)
+    pairs = set(derive.cli_surfaces(machine_repo, mods))
+    # dispatch verb → handler → module, verb の _ は空白へ (app-map 楔と同じ体系)
+    assert ("lib/cmd_thing.py", "cli:beacon thing add") in pairs
+    assert ("lib/cmd_thing.py", "cli:beacon thing list") in pairs
+
+
+def test_import_alias_map_both_styles(machine_repo):
+    import ast
+    mods = derive.enumerate_source_modules(machine_repo)
+    tree = ast.parse(open(os.path.join(machine_repo, "lib", "commands.py")).read())
+    alias = derive.import_alias_map(tree, mods, "lib")
+    assert alias["cmd_thing_add"] == "lib/cmd_thing.py"
+    assert alias["cmd_thing_list"] == "lib/cmd_thing.py"
+
+
+def test_augment_adds_surfaces_and_diff_is_clean(machine_repo):
+    g = cg.CodeGraph()
+    stats = derive.augment_with_machine_layer(g, machine_repo)
+    assert stats["surfaces_added"] >= 4          # 2 routes + 2 cli verbs
+    # surface nodes are addressable, module → surface edge exists
+    surf = [d for d, _ in g.neighbors("lib/cmd_thing.py", edge_type="surfaces-as")]
+    assert "cli:beacon thing add" in surf
+    # freshly-augmented graph has zero drift across all three edge families
+    diff = derive.diff_against_source(g, machine_repo)
+    assert diff["clean"] is True
+    assert diff["missing_surfaces"] == [] and diff["phantom_surfaces"] == []
+
+
+def test_diff_reports_missing_surface(machine_repo):
+    g = cg.CodeGraph()
+    derive.augment_with_machine_layer(g, machine_repo)
+    # drop a surfaces-as by rebuilding without it → simulate via phantom instead:
+    g.add_node(cg.Node(id="api:GET /api/ghost"))
+    g.add_edge(cg.Edge("server/routers_x.py", "api:GET /api/ghost", "surfaces-as"))
+    diff = derive.diff_against_source(g, machine_repo)
+    assert diff["clean"] is False
+    assert ("server/routers_x.py", "api:GET /api/ghost") in [tuple(x) for x in diff["phantom_surfaces"]]
