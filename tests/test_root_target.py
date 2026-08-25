@@ -15,6 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import root_target  # noqa: E402
 import work_model    # noqa: E402
+import occupation    # noqa: E402
 
 
 def _dev_project(milestones=None):
@@ -198,6 +199,44 @@ def test_sales_project_reads_as_root_via_iter_target_records():
     assert root["work_items_total"] == 2
     assert root["work_items_done"] == 1
     assert root["status"] == "active"
+
+
+# --- creation = root-target instance化 (e-5548 / 方針4, 受入条件4) ------------
+
+def test_build_new_project_reads_back_as_root_dev():
+    """A freshly created dev project round-trips through the root view."""
+    data = occupation.build_new_project("Proj", "大目的テキスト", "dev")
+    root = root_target.project_as_root_target(data)
+    assert root["kind"] == "root"
+    assert root["label"] == "Proj"
+    assert root["profession"] == "dev"
+    # 大目的 wired into the root-owned narrative at birth
+    assert root["narrative"]["objective"] == "大目的テキスト"
+    # fresh project → no children yet
+    assert root["status"] == work_model.TODO_STATUS
+    assert root["projection"]["counts"] == {"total": 0, "done": 0, "open": 0}
+
+
+def test_build_new_project_reads_back_as_root_sales():
+    """Occupation-agnostic: a sales project also instantiates as a root."""
+    data = occupation.build_new_project("Sales Co", "受注 10 社", "sales")
+    root = root_target.project_as_root_target(data)
+    assert root["kind"] == "root"
+    assert root["profession"] == "sales"
+    assert root["narrative"]["objective"] == "受注 10 社"
+    assert root["projection"]["counts"]["total"] == 0
+
+
+def test_narrative_home_exists_at_birth():
+    """The root-owned narrative fields (objective / summary) have a home from
+    creation, so the write side matches the read-side 2-split (方針2)."""
+    for prof in ("dev", "sales", "backoffice", "legal"):
+        data = occupation.build_new_project("p", "obj", prof)
+        assert "objective" in data
+        assert "summary" in data          # home exists even before first write
+        assert data["objective"] == "obj"
+        # adopted-class wiring preserved (back-compat with seam probe)
+        assert "adopted_target_classes" in data
 
 
 # --- scale contract (CORE doc scale-contract-principle) ----------------------
