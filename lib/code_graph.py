@@ -217,6 +217,21 @@ class CodeGraph:
                 out.append((e.src, e))
         return out
 
+    def predecessors(self, node_id: str, *, edge_type: str | None = None) -> list[tuple[str, Edge]]:
+        """``node_id`` を **dst** に持つ辺の ``(src, edge)`` を返す (有向辺の逆引き)。
+
+        ``neighbors`` が「この module が依存する先 (depends-on の out)」なら、
+        ``predecessors`` は「この module に依存している元 (depends-on の in)」。
+        変更の影響範囲 (誰が壊れるか) を navigate するのに使う。
+        """
+        out: list[tuple[str, Edge]] = []
+        for e in self._edges:
+            if edge_type is not None and e.type != edge_type:
+                continue
+            if e.dst == node_id:
+                out.append((e.src, e))
+        return out
+
     def nodes_in_seam(self, seam: str) -> list[Node]:
         """継ぎ目 ``seam`` に所属する module node を返す (SPEC 受入条件4 の礎)。"""
         return [n for n in self._nodes.values() if seam in n.seams()]
