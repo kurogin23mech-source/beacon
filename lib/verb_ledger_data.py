@@ -120,6 +120,7 @@ VERB_LEDGER = {
 
     # --- decision (ms-154 e-5594) ---
     "decision_record": {"cls": "R", "secondary": [], "note": "AI の非自明な決定を decision arm (統一 decision stream) に自己申告記録 (log-time backstop)。生の判断記録=R"},
+    "decision_list": {"cls": "Q", "secondary": [], "note": "decision arm を read-only 一覧 (独立検証: 別 AI が宣言 rationale を実コードに照合する読み口、ms-154 e-5595)"},
 
     # --- deploy ---
     "deploy_delete": {"cls": "B", "secondary": [], "note": ""},

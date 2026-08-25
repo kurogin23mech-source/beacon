@@ -1436,6 +1436,30 @@ def make_router(
             )
         return {"decision_id": decision_id, "kind": rec["kind"]}
 
+    @router.get("/api/projects/{project_id}/decisions")
+    def list_decisions(project_id: str,
+                       kind: str = Query(""),
+                       limit: int = Query(100),
+                       since: str = Query(""),
+                       user: dict = Depends(require_auth)):
+        """Read the unified decision-arm stream (ms-154 e-5595).
+
+        The read side that the independent-verification path uses: a context-zero
+        judge fetches declared decisions (what / why / evidence / decided_by) to
+        check each rationale against the actual code. ``kind`` filters to one
+        decision family (e.g. ``task-done`` / ``review-adjudication`` /
+        ``log-backstop``); ``since`` / ``limit`` page the append-only stream.
+        """
+        _load(project_id, user)  # read-access guard (404 / 403 as appropriate)
+        try:
+            rows = db.list_decision_events(project_id, limit=limit, since=since)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"decision stream read failed: {exc}")
+        if kind:
+            rows = [r for r in rows if r.get("kind") == kind]
+        return {"decisions": rows, "count": len(rows)}
+
     @router.delete("/api/projects/{project_id}/entries/{entry_id}")
     def delete_entry(project_id: str, entry_id: str,
                      body: Optional[DeleteRequest] = None,

@@ -2196,9 +2196,28 @@ EOF
                     BEACON_JSON="$_dec_json" \
                     python3 "$COMMANDS_PY" decision_record
                 ;;
+            list)
+                shift 2
+                _dec_kind=""
+                _dec_limit=""
+                _dec_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --kind)  _dec_kind="${2:-}"; shift 2 ;;
+                        --limit) _dec_limit="${2:-}"; shift 2 ;;
+                        --json)  _dec_json="1"; shift ;;
+                        -?*)     _guard_flag "$1" ;;
+                        *)       shift ;;
+                    esac
+                done
+                BEACON_DECISION_KIND="$_dec_kind" BEACON_DECISION_LIMIT="$_dec_limit" \
+                    BEACON_JSON="$_dec_json" \
+                    python3 "$COMMANDS_PY" decision_list
+                ;;
             *)
                 echo "Usage: beacon decision record --what \"<決定>\" --evidence \"<link>\" [--rationale \"<なぜ>\"]"
                 echo "                              [--kind log-backstop] [--decided-by autonomous-AI] [--related-task e-XXX] [--json]"
+                echo "       beacon decision list [--kind <kind>] [--limit N] [--json]"
                 echo ""
                 echo "  --evidence は複数回指定可 (1 link ごと)。decided_by を立てる一級決定は evidence 必須。"
                 ;;

@@ -174,7 +174,7 @@ from cmd_task import (  # noqa: F401
 # canonical home + patch target is cmd_<family>._foo; a missing commands._foo now
 # fails loudly (AttributeError) instead of silently.
 from cmd_note import cmd_note_add, cmd_note_list, cmd_note_clear  # noqa: F401
-from cmd_decision import cmd_decision_record  # noqa: F401  (ms-154 e-5594)
+from cmd_decision import cmd_decision_record, cmd_decision_list  # noqa: F401  (ms-154 e-5594/e-5595)
 from cmd_incident import (  # noqa: F401
     cmd_incident_open, cmd_incident_close, cmd_incident_escalate, cmd_incident_list,
 )
@@ -1693,6 +1693,15 @@ def cmd_review_context():
         _emit_attainment_context(target_id, pr=pr, diff_ref=diff_ref)
         return
 
+    # ms-154 / e-5595: decision-verification. The artifact is the declared
+    # decision stream (what / why / evidence), not a code diff — a context-zero
+    # judge checks each rationale against the real code the evidence points to.
+    # Self-contained (its 原典 is a fixed repo-file, its artifact is fetched from
+    # the decision read path), so it bypasses the diff/pr/target validation below.
+    if review_type == "decision-verification":
+        _emit_decision_verification_context()
+        return
+
     # --- early input validation (ms-119 e-3947 dogfood: close silent no-ops so
     # the review capability's own CLI doesn't ship the defects it exists to
     # catch). Each guard rejects with a clean `Error:` + exit 1 (never a silent
@@ -1871,6 +1880,68 @@ def cmd_review_context():
         implementer_model=os.environ.get("BEACON_IMPLEMENTER_MODEL", "").strip(),
         artifact=artifact,
         external_references=external_references,
+    )
+    print(json.dumps(bundle, ensure_ascii=False))
+
+
+def _emit_decision_verification_context():
+    """Assemble a decision-verification review kernel (ms-154 e-5595).
+
+    The independent-verification path: fetch the declared decisions (what / why /
+    evidence) from the decision arm and shape them as the review artifact, with
+    the fixed 原典 (skills/decision-verification/principles.md) as origin. A
+    context-zero judge then checks each declared rationale against the real code
+    the evidence points to (catches AI post-hoc rationalization — P4).
+    """
+    import review_spine
+    registry = review_spine.load_review_types()
+    desc = registry.get("decision-verification")
+    if not desc:
+        print("Error: decision-verification review type not registered "
+              "(skills/decision-verification/review-type.json missing).",
+              file=sys.stderr)
+        sys.exit(1)
+    origin_id, origin_content = _repo_file_origin(desc)
+
+    kind = os.environ.get("BEACON_DECISION_KIND", "").strip()
+    limit_raw = os.environ.get("BEACON_DECISION_LIMIT", "").strip()
+    limit = int(limit_raw) if limit_raw.isdigit() else 100
+
+    decisions = []
+    fetch_error = ""
+    try:
+        from commands_shared import _is_cloud_mode, _get_api_client
+        if _is_cloud_mode():
+            client, config = _get_api_client()
+            pid = config.get("project_id", "")
+            if pid:
+                res = client.list_decisions(pid, kind=kind, limit=limit)
+                decisions = res.get("decisions", []) if isinstance(res, dict) else []
+    except BaseException as exc:  # best-effort: never crash the kernel assembly
+        fetch_error = str(exc)
+
+    artifact = {
+        "kind": "decisions",
+        "ref": kind or "all",
+        "content": json.dumps(decisions, ensure_ascii=False, indent=2),
+    }
+    gaps = []
+    if not decisions:
+        gaps.append(
+            "検証対象の decision がありません "
+            f"({'cloud 未接続 / 記録ゼロ' if not fetch_error else 'fetch error: ' + fetch_error})。"
+            "beacon decision record で記録が積まれてから再実行してください。")
+
+    bundle = review_spine.assemble_review_context(
+        "decision-verification",
+        origin_id=origin_id,
+        origin_content=origin_content,
+        diff_text="",
+        mode=review_spine.MODE_DECISION_AUDIT,
+        target_ref=(kind or "decisions"),
+        gaps=gaps,
+        known_judge_types=set(registry.keys()),
+        artifact=artifact,
     )
     print(json.dumps(bundle, ensure_ascii=False))
 
@@ -10438,6 +10509,7 @@ if __name__ == "__main__":
         "note_list": cmd_note_list,
         "note_clear": cmd_note_clear,
         "decision_record": cmd_decision_record,
+        "decision_list": cmd_decision_list,
 
         "bus_send": cmd_bus_send,
         "bus_listen": cmd_bus_listen,

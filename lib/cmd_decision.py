@@ -91,3 +91,54 @@ def cmd_decision_record():
     else:
         did = result.get("decision_id", "?") if isinstance(result, dict) else "?"
         print(f"Decision recorded [{did}]: {kind} — {what[:60]}")
+
+
+def cmd_decision_list():
+    """List decisions from the unified stream (ms-154 e-5595).
+
+    The read side for the independent-verification path (別 AI が宣言 rationale を
+    実コードに照合する) and for auditing. cloud-only.
+    """
+    kind = os.environ.get("BEACON_DECISION_KIND", "").strip()
+    limit = os.environ.get("BEACON_DECISION_LIMIT", "").strip()
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    if not _is_cloud_mode():
+        if json_mode:
+            print(json.dumps({"decisions": [], "count": 0}, ensure_ascii=False))
+        else:
+            print("decision stream は cloud プロジェクトのみ (local mode では記録なし)")
+        return
+
+    try:
+        client, config = _get_api_client()
+        project_id = config.get("project_id", "")
+        if not project_id:
+            print("Error: no project_id in cloud.json", file=sys.stderr)
+            sys.exit(1)
+        result = client.list_decisions(
+            project_id, kind=kind, limit=int(limit) if limit.isdigit() else 100)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"Error: failed to list decisions: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    rows = result.get("decisions", []) if isinstance(result, dict) else []
+    if json_mode:
+        print(json.dumps(result, ensure_ascii=False))
+        return
+    if not rows:
+        print("(決定なし)")
+        return
+    for r in rows:
+        did = r.get("decision_id", "?")
+        k = r.get("kind", "?")
+        what = r.get("decision", "")
+        by = r.get("decided_by") or "?"
+        ev = r.get("evidence") or []
+        print(f"  [{did}] {k} / {by}: {what}")
+        if r.get("rationale"):
+            print(f"      なぜ: {r['rationale']}")
+        if ev:
+            print(f"      根拠: {', '.join(ev)}")

@@ -604,6 +604,42 @@ def test_record_decision_unknown_project_404():
     assert r.status_code == 404
 
 
+def test_list_decisions_reads_stream(monkeypatch):
+    # ms-154 e-5595: the read side the independent-verification path uses.
+    rows = [
+        {"decision_id": "dec-1", "kind": "task-done", "decision": "done",
+         "decided_by": "autonomous-AI", "evidence": ["task:e-1"], "rationale": "AC met"},
+        {"decision_id": "dec-2", "kind": "review-adjudication", "decision": "approve",
+         "decided_by": "autonomous-AI", "evidence": ["pr:e-2"]},
+    ]
+    monkeypatch.setattr(_store_router_module, "list_decision_events",
+                        lambda pid, limit=100, since="": list(rows))
+    r = client.get(f"/api/projects/{PROJECT_ID}/decisions")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 2
+    assert [d["decision_id"] for d in body["decisions"]] == ["dec-1", "dec-2"]
+
+
+def test_list_decisions_filters_by_kind(monkeypatch):
+    rows = [
+        {"decision_id": "dec-1", "kind": "task-done", "decision": "done"},
+        {"decision_id": "dec-2", "kind": "review-adjudication", "decision": "approve"},
+    ]
+    monkeypatch.setattr(_store_router_module, "list_decision_events",
+                        lambda pid, limit=100, since="": list(rows))
+    r = client.get(f"/api/projects/{PROJECT_ID}/decisions?kind=task-done")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 1
+    assert body["decisions"][0]["kind"] == "task-done"
+
+
+def test_list_decisions_unknown_project_404():
+    r = client.get("/api/projects/no-such-project/decisions")
+    assert r.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # Log
 # ---------------------------------------------------------------------------
