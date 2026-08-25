@@ -805,6 +805,10 @@ _NOUN_SCOPE = {
     # Target/WorkItem abstraction (occupation.iter_deadline_candidates); the rule
     # is profession-shared (ms-142 e-5010).
     "deadline": "L2",
+    # decision: records an AI decision (task done / review 採否 / log-backstop) to
+    # the unified decision arm. Profession-shared audit infra over the Target/
+    # WorkItem frame — same shared-frame tier as log / review (ms-154 e-5594).
+    "decision": "L2",
     # ms-134 e-5061: class-derived CRUD promoted L3→L2. These operate on the
     # Target / WorkItem / Evidence CLASS (a milestone IS a Target, a task IS a
     # WorkItem, a commit/log IS Evidence) — the operation rule is profession-common

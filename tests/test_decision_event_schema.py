@@ -31,10 +31,23 @@ import decision_event as de  # noqa: E402
 # Schema builder invariants
 # ---------------------------------------------------------------------------
 
-def test_kind_vocabulary_is_closed():
-    # 経路が増えたらここを直す forcing function。silent 拡張を禁止する。
-    assert de.DECISION_KINDS == frozenset(
+def test_known_kinds_documented_but_vocabulary_open():
+    # ms-154 §設計方針1「語彙開放」: 閉語彙 hard gate を廃止し、KNOWN_* は参照用の
+    # 文書化リストに降格。ms-90 の 5 経路 + ms-154 decision arm の捕獲対象を含む。
+    assert de.KNOWN_DECISION_KINDS >= frozenset(
         {"dm-send", "trek-review", "scope-approval", "halt", "resume"}
+    )
+    assert {"task-done", "completion-verdict", "review-adjudication",
+            "log-backstop"} <= de.KNOWN_DECISION_KINDS
+    # 後方互換 alias が同じ集合を指す (= ms-90 期の import 名を壊さない)。
+    assert de.DECISION_KINDS is de.KNOWN_DECISION_KINDS
+
+
+def test_decided_by_vocabulary():
+    # ms-154 AC1: decided_by は 4 語彙の一級 enum。
+    assert de.DECIDED_BY == frozenset(
+        {"autonomous-AI", "AI-proposed-human-chose",
+         "human-delegated", "programmatic"}
     )
 
 
@@ -47,23 +60,77 @@ def test_build_produces_full_shape_without_outcome():
         rationale="相談した方が速いと判断",
         related={"event_id": "evt-1", "in_reply_to": "evt-0"},
     )
+    # ms-154: decided_by / evidence / options が additive に加わった 11 キー shape。
     assert set(e) == {
-        "decision_id", "kind", "decision", "context",
-        "rationale", "who", "related", "created_at",
+        "decision_id", "kind", "decision", "context", "rationale",
+        "decided_by", "evidence", "options",
+        "who", "related", "created_at",
     }
     assert "outcome" not in e
     assert e["decision_id"].startswith("dec-")
     assert e["who"] == {"session_id": "sv-1", "user_id": "u1", "agent": "claude"}
     assert e["related"] == {
         "event_id": "evt-1", "trek_id": None,
-        "task_id": None, "in_reply_to": "evt-0",
+        "task_id": None, "target_id": None, "in_reply_to": "evt-0",
     }
     assert e["created_at"].endswith("Z")
+    # legacy 経路 (decided_by 未指定) は additive default で通る (= AC6 後方互換)。
+    assert e["decided_by"] is None
+    assert e["evidence"] == []
+    assert e["options"] == []
 
 
-def test_unknown_kind_rejected():
+def test_unknown_kind_accepted_but_empty_rejected():
+    # 語彙開放後: 未知 kind は受け付ける (= 職種横断の汎用アーム)。
+    e = de.build_decision_event(kind="deploy", decision="shipped")
+    assert e["kind"] == "deploy"
+    # ただし空 kind は構造的に弾く (= 種別なしの決定は辿れない)。
     with pytest.raises(ValueError):
-        de.build_decision_event(kind="deploy", decision="shipped")
+        de.build_decision_event(kind="", decision="x")
+    with pytest.raises(ValueError):
+        de.build_decision_event(kind="   ", decision="x")
+
+
+def test_first_class_decision_requires_evidence():
+    # ms-154 §設計方針1: decided_by を立てたら evidence 非空必須 (= 根拠 link を構造強制)。
+    with pytest.raises(ValueError):
+        de.build_decision_event(
+            kind="task-done", decision="e-5591 done",
+            decided_by="autonomous-AI",  # evidence 無し → 拒否
+        )
+    # evidence を伴えば通る。
+    e = de.build_decision_event(
+        kind="task-done", decision="e-5591 done",
+        decided_by="autonomous-AI",
+        rationale="AC1/AC6 を満たすと判断",
+        evidence=["server/decision_event.py:75", "commit:abc1234"],
+        options=["schema 新設", "既存 field 再利用"],
+    )
+    assert e["decided_by"] == "autonomous-AI"
+    assert e["evidence"] == ["server/decision_event.py:75", "commit:abc1234"]
+    assert e["options"] == ["schema 新設", "既存 field 再利用"]
+
+
+def test_unknown_decided_by_rejected():
+    with pytest.raises(ValueError):
+        de.build_decision_event(
+            kind="task-done", decision="x",
+            decided_by="the-vibes", evidence=["ref"],
+        )
+
+
+def test_evidence_normalizes_single_string_and_drops_blanks():
+    e = de.build_decision_event(
+        kind="task-done", decision="x",
+        decided_by="programmatic", evidence="commit:deadbeef",
+    )
+    assert e["evidence"] == ["commit:deadbeef"]  # 単一文字列 → list 化
+    e2 = de.build_decision_event(
+        kind="review-adjudication", decision="approve",
+        decided_by="human-delegated",
+        evidence=["", "  ", "file:1"],  # 空要素は落ちる
+    )
+    assert e2["evidence"] == ["file:1"]
 
 
 def test_decision_required():
@@ -296,6 +363,83 @@ def test_rationale_flows_through_every_path_helper():
     assert sc["rationale"] == "権限外だから"
     assert tr["rationale"] == "AC 未達で差し戻し"
     assert ht["rationale"] == "影響が広い"
+
+
+# ---------------------------------------------------------------------------
+# ms-154 e-5592 — task done 判定 / 目的達成 verdict を decision arm へ昇格
+# ---------------------------------------------------------------------------
+
+def test_task_done_record_shape_and_defaults():
+    e = de.decision_event_from_task_done(
+        entry_id="e-5591",
+        done_reason="AC 全達成、30 テスト green と判断",
+        evidence=["commit:b2a3927"],
+        decider_user_id="u1",
+    )
+    assert e["kind"] == "task-done"
+    assert e["decision"] == "done"            # what = done
+    assert e["rationale"] == "AC 全達成、30 テスト green と判断"  # why = done_reason
+    assert e["decided_by"] == "autonomous-AI"  # CLI done の保守的 default
+    # baseline の task ref が必ず先頭に入り、commit 証拠が続く。
+    assert e["evidence"] == ["task:e-5591", "commit:b2a3927"]
+    assert e["related"]["task_id"] == "e-5591"
+    assert e["who"]["user_id"] == "u1"
+
+
+def test_task_done_evidence_never_empty_even_without_commit():
+    # phantom done (= commit 照合が空振り) でも baseline task ref で evidence 非空を満たす。
+    e = de.decision_event_from_task_done(entry_id="e-999", decided_by="autonomous-AI")
+    assert e["evidence"] == ["task:e-999"]  # decided_by 立てても ValueError にならない
+    assert e["rationale"] is None
+
+
+def test_task_done_decided_by_overridable():
+    e = de.decision_event_from_task_done(
+        entry_id="e-1", decided_by="AI-proposed-human-chose",
+        evidence=["commit:abc"],
+    )
+    assert e["decided_by"] == "AI-proposed-human-chose"
+
+
+def test_completion_verdict_record_shape_and_defaults():
+    e = de.decision_event_from_completion_verdict(
+        target_id="ms-154",
+        verdict="done",
+        done_reason="全 6 タスク done、目的達成レビュー合格",
+        evidence=["commit:deadbee"],
+        decider_user_id="u9",
+    )
+    assert e["kind"] == "completion-verdict"
+    assert e["decision"] == "done"
+    assert e["rationale"] == "全 6 タスク done、目的達成レビュー合格"
+    # milestone 完遂は人間承認が原則なので default は AI-proposed-human-chose。
+    assert e["decided_by"] == "AI-proposed-human-chose"
+    assert e["evidence"] == ["target:ms-154", "commit:deadbee"]
+    assert e["related"]["target_id"] == "ms-154"
+    assert e["related"]["task_id"] is None
+
+
+def test_completion_verdict_defaults_verdict_to_done_and_baseline_evidence():
+    e = de.decision_event_from_completion_verdict(target_id="ms-7")
+    assert e["decision"] == "done"                 # verdict 未指定 → done
+    assert e["evidence"] == ["target:ms-7"]        # baseline target ref で非空
+    assert e["decided_by"] == "AI-proposed-human-chose"
+
+
+def test_task_done_and_completion_verdict_persist_roundtrip():
+    dyn = _fresh_dynamo()
+    pid = "proj-arm"
+    td = de.decision_event_from_task_done(entry_id="e-1", evidence=["commit:aaa"])
+    td["created_at"] = "2026-08-25T01:00:00.000000Z"
+    dyn.append_decision_event(pid, td)
+    cv = de.decision_event_from_completion_verdict(
+        target_id="ms-1", evidence=["commit:bbb"])
+    cv["created_at"] = "2026-08-25T02:00:00.000000Z"
+    dyn.append_decision_event(pid, cv)
+    rows = dyn.list_decision_events(pid)
+    assert [r["kind"] for r in rows] == ["task-done", "completion-verdict"]
+    assert rows[0]["decided_by"] == "autonomous-AI"
+    assert rows[1]["related"]["target_id"] == "ms-1"
 
 
 def test_all_four_kinds_reachable_via_helpers():

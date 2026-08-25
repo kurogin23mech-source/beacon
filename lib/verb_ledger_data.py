@@ -118,6 +118,10 @@ VERB_LEDGER = {
     # --- deadline (ms-142 e-5010) ---
     "deadline_due": {"cls": "Q", "secondary": [], "note": "職種横断で期日到達/超過の work item を一覧する read-only (opportunity_due の cross-profession 版)"},
 
+    # --- decision (ms-154 e-5594) ---
+    "decision_record": {"cls": "R", "secondary": [], "note": "AI の非自明な決定を decision arm (統一 decision stream) に自己申告記録 (log-time backstop)。生の判断記録=R"},
+    "decision_list": {"cls": "Q", "secondary": [], "note": "decision arm を read-only 一覧 (独立検証: 別 AI が宣言 rationale を実コードに照合する読み口、ms-154 e-5595)"},
+
     # --- deploy ---
     "deploy_delete": {"cls": "B", "secondary": [], "note": ""},
     "deploy_list": {"cls": "Q", "secondary": [], "note": ""},

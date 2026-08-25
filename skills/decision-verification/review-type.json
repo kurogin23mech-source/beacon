@@ -1,0 +1,11 @@
+{
+  "id": "decision-verification",
+  "judge_run": true,
+  "label": "決定検証 (declared rationale vs real code)",
+  "origin": {
+    "kind": "repo-file",
+    "ref": "skills/decision-verification/principles.md"
+  },
+  "default_judge_model": "sonnet",
+  "_note": "ms-154 e-5595 — decision arm の独立検証。artifact は code diff ではなく宣言された decision の列 (what/why/evidence)。文脈ゼロの judge が各 rationale を evidence が指す実コードに照合し、後付け合理化 (post-hoc rationalization) を検出する。P4 (AI は自分の why を後から合理化しうる) への構造的対策。beacon review context --type decision-verification --mode decision-audit で kernel を組む。"
+}

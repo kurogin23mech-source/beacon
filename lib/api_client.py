@@ -592,6 +592,32 @@ class ApiClient:
 
     # Session Note operations
 
+    def record_decision(self, project_id: str, decision: dict) -> dict:
+        """Append a decision-arm event to the unified stream (ms-154 e-5593).
+
+        ``decision`` is the record body (kind / decision / rationale /
+        decided_by / evidence / options / related). The server stamps ``who``
+        from the token + session header, so callers do NOT pass identity here.
+        """
+        return self.post(f"/api/projects/{project_id}/decisions", decision)
+
+    def list_decisions(self, project_id: str, *, kind: str = "",
+                       limit: int = 100, since: str = "") -> dict:
+        """Read the unified decision-arm stream (ms-154 e-5595).
+
+        Returns ``{"decisions": [...], "count": N}``. ``kind`` filters to one
+        decision family; ``since`` / ``limit`` page the append-only stream.
+        """
+        q = []
+        if kind:
+            q.append(f"kind={urllib.parse.quote(kind, safe='')}")
+        if limit:
+            q.append(f"limit={int(limit)}")
+        if since:
+            q.append(f"since={urllib.parse.quote(since, safe='')}")
+        qs = ("?" + "&".join(q)) if q else ""
+        return self.get(f"/api/projects/{project_id}/decisions{qs}")
+
     def add_note(self, project_id: str, note: dict) -> dict:
         return self.post(f"/api/projects/{project_id}/notes", note)
 

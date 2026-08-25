@@ -1,23 +1,37 @@
-"""decision-event の統一スキーマ builder / validator (ms-90 / e-3242)。
+"""decision-event の統一スキーマ builder / validator (ms-90 / e-3242 → ms-154 / e-5591)。
 
-ms-90 「Trek リーダーの意思決定を構造化ログとして残す」の中核。DM 発信 /
-trek-review / scope 承認 / halt-resume の 4 経路が散在して記録している「決定」を、
+ms-90 「Trek リーダーの意思決定を構造化ログとして残す」の中核として生まれ、DM 発信 /
+trek-review / scope 承認 / halt-resume の 4 経路が散在して記録していた「決定」を、
 1 本の append-only ストリーム (= backend の ``decision_events`` collection) に
-統一形で束ねる。将来ローカル LLM で PM 専用 AI を訓練する材料にする。
+統一形で束ねてきた。将来ローカル LLM で PM 専用 AI を訓練する材料にする。
 
-論理スキーマの確定は e-3245 の doc ``OqqO02CUvsQzzDMyhhGf`` (spec, ms-90)。
+ms-154 (SPEC ``0iYyU79MEsxN4wGY7ADk``) でこの現物を **decision arm** へ一級化する。
+AI 駆動開発では in-flight (= 実装中) の決定の多数派が AI 判断 (却下 / 先送り /
+done 判定 / findings 採否) であり、これを「誰が (decided_by) / なにを (what) /
+なぜ (why) / 何を根拠に (evidence)」で辿れるようにする。別 AI が rationale (= 根拠の
+主張) を実コードに照合して独立検証できることが目的 (SPEC §設計方針4 / P4)。
+
+論理スキーマの原型は e-3245 の doc ``OqqO02CUvsQzzDMyhhGf`` (spec, ms-90)。
 このモジュールはその論理形を組み立てる純関数を提供する。物理永続化は
 ``mysql_client`` / ``firestore_client`` / ``dynamodb_client`` の
-``append_decision_event`` / ``list_decision_events`` が担う。
+``append_decision_event`` / ``list_decision_events`` が担う (record dict を透過保存)。
 
-設計上の要点 (SPEC ``FrW0XunCgFNPjQcERivm`` §設計方針):
-- ``context`` (= 直面した問題 = 背景) が主役。空でも組み立て自体は通す
-  (= hard block しない、warning は呼び出し側の責務)。
-- ``rationale`` (= 判断理由) は任意。None を許す。
-- ``outcome`` (= 結果) は **持たない**。相談したこと自体を是としたいので、
-  結果の良し悪しで相談行為を評価しない。誤って渡されたら ValueError で弾く。
-- ``kind`` は閉じた語彙。語彙外は ValueError (= 経路が増えたらここを直す
-  forcing function)。
+設計上の要点:
+- ``decision`` が **what** (= 何を選んだか)、``rationale`` が **why** (= なぜ) を
+  兼ねる (= 新設せず既存 field に意味を載せる / SPEC「拡張する・新設しない」)。
+- ``decided_by`` (= 誰が決めたか) は一級 enum (:data:`DECIDED_BY`)。
+  ``autonomous-AI`` (= 人間未確認の AI 単独決定) が最も audit-critical。
+- ``evidence`` (= 根拠への link) は **decided_by を立てたら必須** (= 一級 decision を
+  宣言するなら、それを裏付ける証拠 link を構造的に強制する / SPEC「evidence-link 必須」)。
+  commit hash / ``file:line`` / bus event_id / 会話 url 等の opaque な参照文字列の list。
+- ``options`` (= 検討した他の選択肢) は任意。
+- ``context`` (= 直面した問題 = 背景) は空でも組み立てを通す (= hard block しない)。
+- ``outcome`` (= 結果) は **持たない**。相談 / 判断したこと自体を是としたいので、
+  結果の良し悪しで判断行為を評価しない。誤って渡されたら ValueError で弾く。
+- ``kind`` は **開いた語彙** (ms-154 §設計方針1「語彙開放」)。ms-90 の閉語彙 (Trek 由来
+  5 経路のみ許可) から、decision arm が職種横断の汎用アームになったため開いた。
+  空 kind だけ ValueError。既知の kind は :data:`KNOWN_DECISION_KINDS` に文書化する
+  (= 参照用であって hard gate ではない)。
 """
 from __future__ import annotations
 
@@ -25,13 +39,39 @@ import datetime
 import secrets
 
 
-# 決定経路 (= 閉じた語彙)。増やす時はここと doc OqqO02CUvsQzzDMyhhGf を同時に直す。
-DECISION_KINDS: frozenset[str] = frozenset(
-    {"dm-send", "trek-review", "scope-approval", "halt", "resume"}
+# 既知の決定経路 (= 参照用の語彙リスト。ms-154 §設計方針1 で語彙を開いたので hard gate
+# ではない = 未知の kind も build_decision_event は受け付ける)。新経路を足したらここに
+# 文書化する。ms-90 の 5 経路 + ms-154 decision arm の捕獲対象。
+KNOWN_DECISION_KINDS: frozenset[str] = frozenset(
+    {
+        # ms-90 Trek 由来の 4(+1) 経路
+        "dm-send", "trek-review", "scope-approval", "halt", "resume",
+        # ms-154 decision arm の捕獲対象 (e-5592 / e-5593 / e-5594)
+        "task-done", "completion-verdict", "review-adjudication", "log-backstop",
+    }
+)
+
+# 後方互換の別名 (= ms-90 期の import 名を壊さない)。閉語彙だった頃の意味ではなく、
+# 「既知 kind の集合」を指す点に注意 (語彙自体は開いている)。
+DECISION_KINDS = KNOWN_DECISION_KINDS
+
+# decided_by (= 誰が決めたか) の一級 enum (ms-154 §設計方針1 / AC1)。
+# autonomous-AI が最も audit-critical (= 人間が見ていない判断こそ検分が要る)。
+DECIDED_BY: frozenset[str] = frozenset(
+    {
+        "autonomous-AI",            # 人間未確認の AI 単独決定 (最も audit-critical)
+        "AI-proposed-human-chose",  # AI が選択肢を提示し人間が選んだ
+        "human-delegated",          # 人間が AI に判断を委譲した
+        "programmatic",             # コードが機械的に決めた (= AI 判断ですらない)
+    }
 )
 
 # related に載りうる参照キー (= 経路ごとに埋まる項目が違うが、shape は共通で固定)。
-_RELATED_KEYS: tuple[str, ...] = ("event_id", "trek_id", "task_id", "in_reply_to")
+# ms-154 e-5592 で ``target_id`` を追加 (= milestone / opportunity 等の完遂判定が
+# 指す対象。task 粒度の ``task_id`` より上位の target 粒度を表す)。
+_RELATED_KEYS: tuple[str, ...] = (
+    "event_id", "trek_id", "task_id", "target_id", "in_reply_to",
+)
 
 # who の shape (= 誰が判断したか)。agent は AI 識別子で、検出できなければ None。
 _WHO_KEYS: tuple[str, ...] = ("session_id", "user_id", "agent")
@@ -72,6 +112,41 @@ def _normalize_related(related: dict | None) -> dict:
     return {key: (src.get(key) if src.get(key) else None) for key in _RELATED_KEYS}
 
 
+def _normalize_decided_by(decided_by: str | None) -> str | None:
+    """decided_by を検証して返す (= None 許容 / 語彙外は ValueError)。
+
+    None は「未指定」(= legacy 経路 / decision arm を名乗らない記録)。値を渡す
+    なら :data:`DECIDED_BY` の 4 語彙のいずれかでなければならない (= 一級 enum)。
+    """
+    if decided_by is None or decided_by == "":
+        return None
+    value = str(decided_by)
+    if value not in DECIDED_BY:
+        raise ValueError(
+            f"unknown decided_by: {value!r} (allowed: {sorted(DECIDED_BY)})"
+        )
+    return value
+
+
+def _normalize_link_list(value) -> list[str]:
+    """evidence / options を link 文字列の list に正規化する。
+
+    None → ``[]``、単一文字列 → ``[str]``、iterable → 各要素を str 化して
+    空要素を落とした list。順序は保つ (= 証拠の提示順に意味があるため)。
+    """
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        v = value.strip()
+        return [v] if v else []
+    out: list[str] = []
+    for item in value:
+        s = str(item).strip()
+        if s:
+            out.append(s)
+    return out
+
+
 def build_decision_event(
     *,
     kind: str,
@@ -80,32 +155,55 @@ def build_decision_event(
     who: dict | None = None,
     rationale: str | None = None,
     related: dict | None = None,
+    decided_by: str | None = None,
+    evidence=None,
+    options=None,
     created_at: str | None = None,
     decision_id: str | None = None,
 ) -> dict:
     """統一 decision-event レコードを組み立てて返す (純関数、副作用なし)。
 
-    ``kind`` が語彙外なら ValueError。``outcome`` を含む余計な引数は
-    シグネチャ上受け取れないので構造的に混入しない (= キーワード専用)。
+    意味の対応 (ms-154 §設計方針): ``decision`` = what (= 何を選んだか)、
+    ``rationale`` = why (= なぜ)、``decided_by`` = 誰が決めたか (一級 enum)、
+    ``evidence`` = 何を根拠に (= link の list)、``options`` = 検討した他の選択肢。
 
-    ``created_at`` / ``decision_id`` は未指定なら補完する。永続化層でも
-    防御的に補完するので、ここでの補完は「呼び出し側が id を先に知りたい」
-    ケース (= related.event_id を別レコードに書き戻す等) のためのもの。
+    構造的な不変条件:
+    - ``kind`` は空だと ValueError (= 語彙自体は開いている / ms-154 §設計方針1)。
+    - ``decision`` (= what) は必須。空なら ValueError。
+    - ``decided_by`` は :data:`DECIDED_BY` の語彙か None。語彙外は ValueError。
+    - **``decided_by`` を立てたら ``evidence`` は非空必須** (= 一級 decision を名乗る
+      なら根拠 link を必ず伴う / SPEC「evidence-link 必須」+ P4 独立検証の前提)。
+      逆に legacy 経路 (decided_by=None) は evidence 空でも通る (= 後方互換 / AC6)。
+    - ``outcome`` を含む余計な引数はキーワード専用シグネチャなので構造的に混入しない。
+
+    ``created_at`` / ``decision_id`` は未指定なら補完する。永続化層でも防御的に
+    補完するので、ここでの補完は「呼び出し側が id を先に知りたい」ケース
+    (= related.event_id を別レコードに書き戻す等) のためのもの。
     """
-    if kind not in DECISION_KINDS:
-        raise ValueError(
-            f"unknown decision-event kind: {kind!r} "
-            f"(allowed: {sorted(DECISION_KINDS)})"
-        )
+    if not kind or not str(kind).strip():
+        raise ValueError("decision-event requires a non-empty 'kind'")
     if not decision or not str(decision).strip():
         raise ValueError("decision-event requires a non-empty 'decision'")
 
+    decided_by = _normalize_decided_by(decided_by)
+    evidence = _normalize_link_list(evidence)
+    options = _normalize_link_list(options)
+
+    if decided_by is not None and not evidence:
+        raise ValueError(
+            "decision-event with 'decided_by' requires non-empty 'evidence' "
+            "(SPEC ms-154 §設計方針1 — 一級 decision は根拠 link を必ず伴う)"
+        )
+
     return {
         "decision_id": decision_id or mint_decision_event_id(),
-        "kind": kind,
+        "kind": str(kind),
         "decision": str(decision),
         "context": str(context or ""),
         "rationale": (str(rationale) if rationale else None),
+        "decided_by": decided_by,
+        "evidence": evidence,
+        "options": options,
         "who": _normalize_who(who),
         "related": _normalize_related(related),
         "created_at": created_at or _now_iso(),
@@ -171,6 +269,99 @@ def decision_event_from_scope_approval(
         rationale=rationale,
         related={"event_id": event_id},
     )
+
+
+def decision_event_from_task_done(
+    *,
+    entry_id: str,
+    done_reason: str | None = None,
+    decided_by: str = "autonomous-AI",
+    evidence=None,
+    decider_session_id: str = "",
+    decider_user_id: str = "",
+    agent: str | None = None,
+    context: str = "",
+) -> dict:
+    """task の done 判定 (= 「このタスクは目的を果たした」) の decision-event (ms-154 e-5592)。
+
+    what (= 何を選んだか) は ``"done"``、why (= なぜ) は done 判定の理由
+    (``done_reason``)、根拠 (evidence) はこの done を裏付ける commit / 会話への link。
+    decided_by の default は ``autonomous-AI`` (= CLI 経由の ``beacon task done`` は
+    beacon-log Skill が駆動する AI 判断が主で、最も監査が要るため保守的に AI 側へ倒す。
+    Web UI の人手 done 等は呼び出し側が明示指定して上書きする)。
+
+    ``evidence`` が空でも、対象 task への参照 (``task:<entry_id>``) を baseline として
+    必ず 1 件差し込む (= decided_by を立てた一級 decision は evidence 非空必須という
+    schema 不変条件を、commit 照合が空振り = phantom done でも構造的に満たすため)。
+    """
+    ev = list(_normalize_link_list(evidence))
+    task_ref = f"task:{entry_id}" if entry_id else ""
+    if task_ref and task_ref not in ev:
+        ev.insert(0, task_ref)
+    return build_decision_event(
+        kind="task-done",
+        decision="done",
+        context=context,
+        who={
+            "session_id": decider_session_id,
+            "user_id": decider_user_id,
+            "agent": agent,
+        },
+        rationale=done_reason,
+        decided_by=decided_by,
+        evidence=ev,
+        related={"task_id": entry_id},
+    )
+
+
+def decision_event_from_completion_verdict(
+    *,
+    target_id: str,
+    verdict: str = "done",
+    done_reason: str | None = None,
+    decided_by: str = "AI-proposed-human-chose",
+    evidence=None,
+    decider_session_id: str = "",
+    decider_user_id: str = "",
+    agent: str | None = None,
+    context: str = "",
+) -> dict:
+    """target (= milestone / opportunity 等) の完遂判定 (= 目的達成 verdict) の
+    decision-event (ms-154 e-5592)。
+
+    milestone を done / observing / closed へ倒す遷移は「この target は目的を果たした」
+    という attainment claim を運ぶ (lib/transition_approval の目的達成レビュー)。その
+    verdict を decision arm に記録する。what は verdict (``"done"`` 等)、why は
+    ``done_reason``、根拠 (evidence) は達成を裏付ける link。
+
+    decided_by の default は ``AI-proposed-human-chose`` (= milestone 完遂は ms-119 の
+    目的達成レビューゲートで AI が根拠を組み立て人間が承認する形が原則のため)。純粋な
+    AI 自律完遂なら呼び出し側が ``autonomous-AI`` を明示する。
+    """
+    ev = list(_normalize_link_list(evidence))
+    target_ref = f"target:{target_id}" if target_id else ""
+    if target_ref and target_ref not in ev:
+        ev.insert(0, target_ref)
+    return build_decision_event(
+        kind="completion-verdict",
+        decision=(verdict or "done"),
+        context=context,
+        who={
+            "session_id": decider_session_id,
+            "user_id": decider_user_id,
+            "agent": agent,
+        },
+        rationale=done_reason,
+        decided_by=decided_by,
+        evidence=ev,
+        related={"target_id": target_id},
+    )
+
+
+# review 採否 (approve / re-work / reject) は CLI 側 (cmd_pr) の判断で、専用の
+# server route を持たない。汎用 decisions 書き込み口 (POST /api/projects/{id}/decisions,
+# kind="review-adjudication") を通り build_decision_event で検証される。ゆえに専用 builder
+# は置かない (= server 側に呼び出し元が無い vestigial 関数を作らない / ms-154 e-5593)。
 
 
 # leader_review からの遷移先 → review 判断の対応 (= 閉じた mapping)。

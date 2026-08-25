@@ -46,7 +46,13 @@ REVIEW_AX = "ax"                   # AX: AI-Experience interface drift (advisory
 MODE_DIFF = "diff"
 MODE_FULL_SURFACE = "full-surface"
 MODE_WHOLE_TARGET = "whole-target"
-ARTIFACT_MODES = (MODE_DIFF, MODE_FULL_SURFACE, MODE_WHOLE_TARGET)
+# ms-154 e-5595: "decision-audit" = the artifact is the declared decision-arm
+# stream (what / why / evidence), not a code diff. A context-zero judge checks
+# each declared rationale against the real code the evidence points to (= the
+# independent-verification path that catches AI post-hoc rationalization).
+MODE_DECISION_AUDIT = "decision-audit"
+ARTIFACT_MODES = (MODE_DIFF, MODE_FULL_SURFACE, MODE_WHOLE_TARGET,
+                  MODE_DECISION_AUDIT)
 
 # --- data-driven review-type registry (ms-119 / e-4009) -------------------
 # The judge-run review types are NOT a hardcoded whitelist. Each is described by

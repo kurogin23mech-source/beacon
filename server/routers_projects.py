@@ -171,6 +171,25 @@ class LogCommit(BaseModel):
 class SummaryUpdate(BaseModel):
     text: str
 
+class DecisionRecordBody(BaseModel):
+    """Body for POST /api/projects/{id}/decisions (ms-154 e-5593).
+
+    The generic write口 for a CLI-side decision to reach the server's unified
+    ``decision_events`` stream. ``who`` (= identity) is NOT accepted from the
+    client — the server stamps it from the authenticated token so a caller cannot
+    attribute a decision to someone else (audit integrity). ``decided_by`` (the
+    *category* of decision-maker) IS a client claim and is validated against the
+    enum by the builder.
+    """
+    kind: str
+    decision: str
+    context: str = ""
+    rationale: Optional[str] = None
+    decided_by: Optional[str] = None
+    evidence: Optional[list] = None
+    options: Optional[list] = None
+    related: Optional[dict] = None
+
 class OperationApproveRequest(BaseModel):
     """Body for POST /api/projects/{id}/operations/{op_id}/envelopes (ms-60 / e-1339).
 
@@ -346,6 +365,19 @@ def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
         except Exception:
             continue
     return touched
+
+def _clamp_decided_by(value: str) -> str:
+    """Coerce a caller-supplied ``decided_by`` into the decision-arm enum (ms-154).
+
+    Falls back to ``autonomous-AI`` (the audit-critical default) for empty or
+    out-of-vocabulary values, so a malformed query param never drops the decision
+    record via the builder's strict validation.
+    """
+    try:
+        return value if value in decision_event_mod.DECIDED_BY else "autonomous-AI"
+    except Exception:
+        return "autonomous-AI"
+
 
 def _check_phantom_done_evidence(
     project_id: str,
@@ -1133,17 +1165,41 @@ def make_router(
 
     @router.post("/api/projects/{project_id}/milestones/{ms_id}/done")
     def done_milestone(project_id: str, ms_id: str,
-                       user: dict = Depends(require_auth)):
+                       user: dict = Depends(require_auth),
+                       decided_by: str = Query("AI-proposed-human-chose")):
+        captured: dict = {}
+
         def op(data: dict):
             _require_write(data, user)
             try:
                 ms = core.milestone_done(data, ms_id)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
+            captured["done_reason"] = (ms.get("meta") or {}).get("done_reason", "")
             return data, {"id": ms["id"], "title": work_model.target_label(ms), "status": "done"}
-        return _apply_op_and_broadcast(
+        result = _apply_op_and_broadcast(
             project_id, op, op_name="milestone.done", actor=user.get("sub", ""),
         )
+        # ms-154 e-5592 — record the target's completion (目的達成) verdict as a
+        # decision-arm event. milestone → done carries the attainment claim
+        # (lib/transition_approval). Best-effort: never break the done response.
+        try:
+            db.append_decision_event(
+                project_id,
+                decision_event_mod.decision_event_from_completion_verdict(
+                    target_id=ms_id,
+                    verdict="done",
+                    done_reason=(captured.get("done_reason") or None),
+                    decided_by=_clamp_decided_by(decided_by),
+                    decider_user_id=user.get("sub", ""),
+                ),
+            )
+        except Exception as _dec_exc:  # pragma: no cover - defensive
+            logging.getLogger(__name__).warning(
+                "append_decision_event (completion-verdict) failed for ms_id=%s: %s",
+                ms_id, _dec_exc,
+            )
+        return result
 
     @router.delete("/api/projects/{project_id}/milestones/{ms_id}")
     def delete_milestone(project_id: str, ms_id: str,
@@ -1247,11 +1303,16 @@ def make_router(
 
     @router.post("/api/projects/{project_id}/entries/{entry_id}/done")
     def done_entry(project_id: str, entry_id: str, request: Request,
-                   user: dict = Depends(require_auth)):
+                   user: dict = Depends(require_auth),
+                   decided_by: str = Query("autonomous-AI")):
         import datetime
         today = datetime.date.today().isoformat()
         # ms-78 / e-1909
         author = _resolve_author(user)
+
+        # ms-154 e-5592 — capture the done judgment's rationale so it can be
+        # recorded as a decision-arm event after the write commits.
+        captured: dict = {}
 
         def op(data: dict):
             _require_write(data, user)
@@ -1259,6 +1320,7 @@ def make_router(
                 ms, entry = core.task_done(data, entry_id, date=today, author=author)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
+            captured["done_reason"] = (entry.get("meta") or {}).get("done_reason", "")
             return data, {"entry_id": entry_id, "status": "done"}
         result = _apply_op_and_broadcast(
             project_id, op, op_name="entry.done", actor=user.get("sub", ""),
@@ -1273,6 +1335,7 @@ def make_router(
         # Failure is silently swallowed inside the helper; we surface the
         # assessment in the response so the CLI can echo the warning to the
         # operator in the same turn.
+        assessment = None
         try:
             assessment = _check_phantom_done_evidence(
                 project_id, entry_id, user, request=request,
@@ -1299,7 +1362,103 @@ def make_router(
                 }
         except Exception:
             pass
+        # ms-154 e-5592 — record the task-done judgment as a decision-arm event
+        # (who / why / evidence). Evidence = commits the phantom assessment matched
+        # (falls back to the task ref inside the builder when none). Best-effort:
+        # a decision-record failure must not break the done response.
+        try:
+            matched = []
+            if isinstance(assessment, dict):
+                matched = [
+                    f"commit:{c.get('hash')}"
+                    for c in (assessment.get("matched_commits") or [])
+                    if isinstance(c, dict) and c.get("hash")
+                ]
+            db.append_decision_event(
+                project_id,
+                decision_event_mod.decision_event_from_task_done(
+                    entry_id=entry_id,
+                    done_reason=(captured.get("done_reason") or None),
+                    decided_by=_clamp_decided_by(decided_by),
+                    evidence=matched,
+                    decider_user_id=user.get("sub", ""),
+                ),
+            )
+        except Exception as _dec_exc:  # pragma: no cover - defensive
+            logging.getLogger(__name__).warning(
+                "append_decision_event (task-done) failed for entry_id=%s: %s",
+                entry_id, _dec_exc,
+            )
         return result
+
+    @router.post("/api/projects/{project_id}/decisions")
+    def record_decision(project_id: str, body: DecisionRecordBody,
+                        request: Request,
+                        user: dict = Depends(require_auth)):
+        """Append a decision-arm event to the unified stream (ms-154 e-5593).
+
+        The generic write口 for CLI-side decisions (PR review 採否, log-time
+        backstop, …) that don't flow through a dedicated mutating route. The
+        record is validated by the schema builder (decided_by enum / evidence
+        required when decided_by set / non-empty kind+decision), so a malformed
+        decision is a 400, never a silent drop. ``who`` is stamped server-side
+        from the token; only project writers may record.
+        """
+        data = db.get_project(project_id)
+        if not data:
+            raise HTTPException(status_code=404, detail="project not found")
+        _require_write(data, user)
+        sid = ""
+        try:
+            sid = request.headers.get("X-Beacon-Session", "") or ""
+        except Exception:
+            sid = ""
+        try:
+            rec = decision_event_mod.build_decision_event(
+                kind=body.kind,
+                decision=body.decision,
+                context=body.context or "",
+                rationale=body.rationale,
+                decided_by=body.decided_by,
+                evidence=body.evidence,
+                options=body.options,
+                who={"user_id": user.get("sub", ""), "session_id": sid},
+                related=(body.related or {}),
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        try:
+            decision_id = db.append_decision_event(project_id, rec)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"decision stream append failed: {exc}",
+            )
+        return {"decision_id": decision_id, "kind": rec["kind"]}
+
+    @router.get("/api/projects/{project_id}/decisions")
+    def list_decisions(project_id: str,
+                       kind: str = Query(""),
+                       limit: int = Query(100),
+                       since: str = Query(""),
+                       user: dict = Depends(require_auth)):
+        """Read the unified decision-arm stream (ms-154 e-5595).
+
+        The read side that the independent-verification path uses: a context-zero
+        judge fetches declared decisions (what / why / evidence / decided_by) to
+        check each rationale against the actual code. ``kind`` filters to one
+        decision family (e.g. ``task-done`` / ``review-adjudication`` /
+        ``log-backstop``); ``since`` / ``limit`` page the append-only stream.
+        """
+        _load(project_id, user)  # read-access guard (404 / 403 as appropriate)
+        try:
+            rows = db.list_decision_events(project_id, limit=limit, since=since)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"decision stream read failed: {exc}")
+        if kind:
+            rows = [r for r in rows if r.get("kind") == kind]
+        return {"decisions": rows, "count": len(rows)}
 
     @router.delete("/api/projects/{project_id}/entries/{entry_id}")
     def delete_entry(project_id: str, entry_id: str,

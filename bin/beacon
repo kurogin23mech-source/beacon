@@ -2162,6 +2162,67 @@ EOF
                 ;;
         esac
         ;;
+    decision)
+        # ms-154 e-5594: record an AI decision to the unified decision arm.
+        ensure_project
+        case "${2:-}" in
+            record)
+                shift 2
+                _dec_what=""
+                _dec_kind=""
+                _dec_rationale=""
+                _dec_decided_by=""
+                _dec_evidence=""
+                _dec_related_task=""
+                _dec_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --what)         _dec_what="${2:-}"; shift 2 ;;
+                        --kind)         _dec_kind="${2:-}"; shift 2 ;;
+                        --rationale|--reason) _dec_rationale="${2:-}"; shift 2 ;;
+                        --decided-by)   _dec_decided_by="${2:-}"; shift 2 ;;
+                        --evidence)     _dec_evidence="${_dec_evidence:+$_dec_evidence$'\n'}${2:-}"; shift 2 ;;
+                        --related-task) _dec_related_task="${2:-}"; shift 2 ;;
+                        --json)         _dec_json="1"; shift ;;
+                        -?*)            _guard_flag "$1" ;;
+                        *)              [[ -z "$_dec_what" ]] && _dec_what="$1"; shift ;;
+                    esac
+                done
+                BEACON_DECISION_WHAT="$_dec_what" BEACON_DECISION_KIND="$_dec_kind" \
+                    BEACON_DECISION_RATIONALE="$_dec_rationale" \
+                    BEACON_DECISION_DECIDED_BY="$_dec_decided_by" \
+                    BEACON_DECISION_EVIDENCE="$_dec_evidence" \
+                    BEACON_DECISION_RELATED_TASK="$_dec_related_task" \
+                    BEACON_JSON="$_dec_json" \
+                    python3 "$COMMANDS_PY" decision_record
+                ;;
+            list)
+                shift 2
+                _dec_kind=""
+                _dec_limit=""
+                _dec_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --kind)  _dec_kind="${2:-}"; shift 2 ;;
+                        --limit) _dec_limit="${2:-}"; shift 2 ;;
+                        --json)  _dec_json="1"; shift ;;
+                        -?*)     _guard_flag "$1" ;;
+                        *)       shift ;;
+                    esac
+                done
+                BEACON_DECISION_KIND="$_dec_kind" BEACON_DECISION_LIMIT="$_dec_limit" \
+                    BEACON_JSON="$_dec_json" \
+                    python3 "$COMMANDS_PY" decision_list
+                ;;
+            *)
+                echo "Usage: beacon decision record --what \"<決定>\" --evidence \"<link>\" [--rationale \"<なぜ>\"]"
+                echo "                              [--kind log-backstop] [--decided-by autonomous-AI] [--related-task e-XXX] [--json]"
+                echo "       beacon decision list [--kind <kind>] [--limit N] [--json]"
+                echo ""
+                echo "  --evidence は複数回指定可 (1 link ごと)。decided_by を立てる一級決定は evidence 必須。"
+                ;;
+        esac
+        ;;
     stop)
         # ms-55 e-1646: Andon-cord-style halt protocol.
         # `beacon stop scoped --target <kind>:<id>` halts a specific MS / task
