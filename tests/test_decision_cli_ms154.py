@@ -143,6 +143,43 @@ def test_list_cloud_json(monkeypatch, capsys):
     assert out["count"] == 1 and out["decisions"][0]["decision_id"] == "dec-1"
 
 
+def test_parse_limit_defaults_and_validates():
+    # ms-154 e-5649: unspecified → 100; valid int passes; non-int / non-positive exit 1.
+    assert cmd_decision._parse_limit("") == 100
+    assert cmd_decision._parse_limit("25") == 25
+    for bad in ("abc", "1.5", "-3", "0"):
+        with pytest.raises(SystemExit) as e:
+            cmd_decision._parse_limit(bad)
+        assert e.value.code == 1
+
+
+def test_list_rejects_non_integer_limit(monkeypatch):
+    # A malformed --limit must exit 1, not silently fall back to 100 (silent 破壊).
+    client = _ListClient([])
+    monkeypatch.setenv("BEACON_DECISION_LIMIT", "the-vibes")
+    monkeypatch.delenv("BEACON_DECISION_KIND", raising=False)
+    monkeypatch.setenv("BEACON_JSON", "1")
+    monkeypatch.setattr(cmd_decision, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_decision, "_get_api_client",
+                        lambda: (client, {"project_id": "p1"}))
+    with pytest.raises(SystemExit) as e:
+        cmd_decision.cmd_decision_list()
+    assert e.value.code == 1
+    assert client.calls == []  # rejected before any server call
+
+
+def test_list_passes_valid_limit(monkeypatch):
+    client = _ListClient([])
+    monkeypatch.setenv("BEACON_DECISION_LIMIT", "7")
+    monkeypatch.delenv("BEACON_DECISION_KIND", raising=False)
+    monkeypatch.setenv("BEACON_JSON", "1")
+    monkeypatch.setattr(cmd_decision, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_decision, "_get_api_client",
+                        lambda: (client, {"project_id": "p1"}))
+    cmd_decision.cmd_decision_list()
+    assert client.calls[0][2] == 7  # limit forwarded verbatim
+
+
 def test_list_passes_kind_filter(monkeypatch, capsys):
     rows = [{"decision_id": "dec-1", "kind": "task-done", "decision": "done"},
             {"decision_id": "dec-2", "kind": "review-adjudication", "decision": "approve"}]

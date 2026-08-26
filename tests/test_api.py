@@ -515,15 +515,31 @@ def test_done_entry_respects_decided_by_override(monkeypatch):
     assert captured[0]["decided_by"] == "human-delegated"
 
 
-def test_done_entry_clamps_bad_decided_by(monkeypatch):
+def test_done_entry_rejects_bad_decided_by(monkeypatch):
+    # ms-154 e-5649 (AX HIGH): an out-of-vocab decided_by must 400, not silently
+    # coerce to autonomous-AI (which would corrupt the audit attribution and drop
+    # the write into the wrong decider undetectably). Symmetric with POST /decisions.
     captured = []
     monkeypatch.setattr(_store_router_module, "append_decision_event",
                         lambda pid, rec: captured.append(rec))
     r = client.post(
         f"/api/projects/{PROJECT_ID}/entries/e-1/done?decided_by=the-vibes")
-    assert r.status_code == 200
-    # out-of-vocab falls back to the audit-critical default (never drops the record).
-    assert captured[0]["decided_by"] == "autonomous-AI"
+    assert r.status_code == 400
+    assert "decided_by" in r.json()["detail"]
+    # the task is NOT marked done and no decision is recorded — rejected up front.
+    assert captured == []
+
+
+def test_done_milestone_rejects_bad_decided_by(monkeypatch):
+    # ms-154 e-5649: same guard on the milestone-done route.
+    captured = []
+    monkeypatch.setattr(_store_router_module, "append_decision_event",
+                        lambda pid, rec: captured.append(rec))
+    r = client.post(
+        f"/api/projects/{PROJECT_ID}/milestones/ms-1/done?decided_by=the-vibes")
+    assert r.status_code == 400
+    assert "decided_by" in r.json()["detail"]
+    assert captured == []
 
 
 def test_done_milestone_records_completion_verdict(monkeypatch):
