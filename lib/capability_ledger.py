@@ -801,6 +801,11 @@ _NOUN_SCOPE = {
     # L2 — class-abstraction: operate on a Target via the abstraction.
     "claim": "L2", "doc": "L2", "review": "L2", "status": "L2",
     "summary": "L2", "target": "L2",
+    # deliverable: the produced-value projection of adopted target-classes via the
+    # abstraction (occupation.project_deliverables + deliverable_resolve); rule is
+    # profession-shared — dev surfaces milestone→機能, sales would surface
+    # opportunity→pipeline through the same union (ms-155 e-5602).
+    "deliverable": "L2",
     # deadline: enumerates deadline-bearing work items across occupations via the
     # Target/WorkItem abstraction (occupation.iter_deadline_candidates); the rule
     # is profession-shared (ms-142 e-5010).
