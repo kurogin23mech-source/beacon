@@ -91,14 +91,18 @@ def test_unknown_kind_accepted_but_empty_rejected():
         de.build_decision_event(kind="   ", decision="x")
 
 
-def test_first_class_decision_requires_evidence():
-    # ms-154 §設計方針1: decided_by を立てたら evidence 非空必須 (= 根拠 link を構造強制)。
-    with pytest.raises(ValueError):
-        de.build_decision_event(
-            kind="task-done", decision="e-5591 done",
-            decided_by="autonomous-AI",  # evidence 無し → 拒否
-        )
-    # evidence を伴えば通る。
+def test_decided_by_allows_honest_empty_evidence():
+    # ms-154 e-5650: the old "decided_by → evidence 非空必須" ValueError is GONE.
+    # A decision may carry decided_by with empty evidence — that is the honest
+    # audit signal "no physical backing" (phantom done), not a schema violation.
+    # The self-reference is never fabricated to satisfy a tautological invariant.
+    e0 = de.build_decision_event(
+        kind="task-done", decision="e-5591 done",
+        decided_by="autonomous-AI",  # evidence 無し → もう拒否しない
+    )
+    assert e0["decided_by"] == "autonomous-AI"
+    assert e0["evidence"] == []  # 捏造せず空のまま = 裏付け無しを露出
+    # real evidence を伴えばそのまま積む。
     e = de.build_decision_event(
         kind="task-done", decision="e-5591 done",
         decided_by="autonomous-AI",
@@ -313,6 +317,9 @@ def test_scope_approval_record(decision):
     assert e["decision"] == decision
     assert e["who"]["user_id"] == "u9"
     assert e["related"]["event_id"] == "evt-7"
+    # ms-154 e-5651: DM respond is a human's direct decision (SPEC ms-70 方針3),
+    # so it is captured as a first-class decision with decided_by set.
+    assert e["decided_by"] == "human-delegated"
     assert "outcome" not in e
 
 
@@ -380,16 +387,19 @@ def test_task_done_record_shape_and_defaults():
     assert e["decision"] == "done"            # what = done
     assert e["rationale"] == "AC 全達成、30 テスト green と判断"  # why = done_reason
     assert e["decided_by"] == "autonomous-AI"  # CLI done の保守的 default
-    # baseline の task ref が必ず先頭に入り、commit 証拠が続く。
-    assert e["evidence"] == ["task:e-5591", "commit:b2a3927"]
+    # ms-154 e-5650: evidence は実 link のみ。自己参照 (task:e-5591) は積まない
+    # (related.task_id が運ぶ)。渡した commit だけが残る。
+    assert e["evidence"] == ["commit:b2a3927"]
     assert e["related"]["task_id"] == "e-5591"
     assert e["who"]["user_id"] == "u1"
 
 
-def test_task_done_evidence_never_empty_even_without_commit():
-    # phantom done (= commit 照合が空振り) でも baseline task ref で evidence 非空を満たす。
+def test_task_done_evidence_empty_when_no_commit():
+    # ms-154 e-5650: phantom done (= commit 照合が空振り) は evidence 空のまま通す。
+    # 自己参照 task:<id> を捏造して非空に見せる旧挙動は廃止 (裏付け無しを隠さない)。
     e = de.decision_event_from_task_done(entry_id="e-999", decided_by="autonomous-AI")
-    assert e["evidence"] == ["task:e-999"]  # decided_by 立てても ValueError にならない
+    assert e["evidence"] == []              # 空 = 物理的裏付け無しの監査シグナル
+    assert e["related"]["task_id"] == "e-999"  # 自己参照は related が運ぶ
     assert e["rationale"] is None
 
 
@@ -414,15 +424,17 @@ def test_completion_verdict_record_shape_and_defaults():
     assert e["rationale"] == "全 6 タスク done、目的達成レビュー合格"
     # milestone 完遂は人間承認が原則なので default は AI-proposed-human-chose。
     assert e["decided_by"] == "AI-proposed-human-chose"
-    assert e["evidence"] == ["target:ms-154", "commit:deadbee"]
+    # ms-154 e-5650: 自己参照 (target:ms-154) は積まず、実 link のみ (related が運ぶ)。
+    assert e["evidence"] == ["commit:deadbee"]
     assert e["related"]["target_id"] == "ms-154"
     assert e["related"]["task_id"] is None
 
 
-def test_completion_verdict_defaults_verdict_to_done_and_baseline_evidence():
+def test_completion_verdict_evidence_empty_when_no_link():
     e = de.decision_event_from_completion_verdict(target_id="ms-7")
     assert e["decision"] == "done"                 # verdict 未指定 → done
-    assert e["evidence"] == ["target:ms-7"]        # baseline target ref で非空
+    assert e["evidence"] == []                     # ms-154 e-5650: 自己参照を積まない
+    assert e["related"]["target_id"] == "ms-7"     # 自己参照は related が運ぶ
     assert e["decided_by"] == "AI-proposed-human-chose"
 
 

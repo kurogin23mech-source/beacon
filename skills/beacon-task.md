@@ -148,8 +148,10 @@ beacon task add "<description>" --ms <ms-id> \
 - acceptance_criteria が記録されている場合はそれを参照して満足度を記述する
 
 ```bash
-beacon task done <entry-id> --reason "<生成したreason>"
+beacon task done <entry-id> --reason "<生成したreason>" --decided-by human-delegated
 ```
+- `--decided-by human-delegated`（ms-154 e-5650 — 決定の監査価値を実捕獲する）: この Skill の done は「ユーザーがキューを操作する意図」＝人間が完了を指示する経路なので、決定主体は人間 = `human-delegated`。これで AI が自律照合して下す `/beacon-log` の done（`autonomous-AI`）と監査上で弁別できる。
+- 完了根拠にコミットが絡む場合は実 link を `--evidence "commit:<hash:7>"` で渡す（自己参照は積まない、繰り返し可）。無ければ省略してよい（evidence 空 = 裏付け無しとして正直に残る）。
 - entry-id はユーザーが指定するか、description からの照合で特定する
 - 照合する場合は先に `beacon task list --json --ms <ms-id>` で一覧を取得し、未完了タスクから一致するものを探す
 - **タスク完了後、Step 3（進捗率の自動評価）に進む**

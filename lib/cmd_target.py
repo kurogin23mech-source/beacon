@@ -222,6 +222,77 @@ def cmd_target_review_request():
     print(f"  却下 (= 遷移せず): beacon target reject {eid} [--rationale <text>]")
 
 
+def _decided_by_for_gate() -> str:
+    """decided_by for a human-owned attainment gate action (ms-154 e-5651).
+
+    The 目的達成 verdict is human-owned (SPEC ms-119 方針2). A straight human
+    terminal session pressing the action = ``human-delegated``; an AI-assisted
+    session where the human confirms the AI's assembled case = the review-gate
+    default ``AI-proposed-human-chose``.
+    """
+    return "human-delegated" if _session_kind_is_human() else "AI-proposed-human-chose"
+
+
+def _record_completion_verdict_decision(target_id, verdict, entry, approval_rationale):
+    """ms-154 e-5651 — record a target completion verdict (attainment) on the
+    decision arm, carrying the transition-approval's RICH rationale.
+
+    Why here: the CLI approve path applies the transition via a whole-project PUT,
+    so it never reaches the server route that records the completion-verdict
+    decision (the same primary-path gap e-5650 closed for task done). We record it
+    on the primary path AND — unlike the thin route record (done_reason only) —
+    carry the rich material the transition-approval already holds: the
+    implementer's intent (完了主張), the independent judge's review_evidence
+    (verdict + grounds), and the real evidence refs. This is the AC2 「昇格」 the
+    ms-154 philosophy review found missing, and it captures observing / closed
+    verdicts too (not just done — AC3).
+
+    best-effort, cloud-only: never break the approve flow.
+    """
+    try:
+        from commands_shared import _is_cloud_mode, _get_api_client
+        if not _is_cloud_mode():
+            return
+        meta = entry.get("meta") or {}
+        intent = (meta.get("intent") or "").strip()
+        rev = meta.get("review_evidence") or []
+        # rich rationale = 承認理由 + 実装者の完了主張 + 独立レビューの verdict/grounds。
+        parts = []
+        if approval_rationale:
+            parts.append(f"承認: {approval_rationale}")
+        if intent:
+            parts.append(f"主張(intent): {intent}")
+        for r in rev:
+            v = (r.get("verdict") or "").strip()
+            s = (r.get("summary") or "").strip()
+            if v or s:
+                parts.append(f"独立レビュー[{r.get('source', '?')}] {v}: {s}".strip())
+        rationale = " / ".join(parts) or None
+        # evidence = 実 link のみ: 実装者提出 refs + 独立 judge の provenance。
+        evidence = []
+        for e in (meta.get("evidence") or []):
+            if e and e not in evidence:
+                evidence.append(e)
+        for r in rev:
+            src = (r.get("source") or "").strip()
+            if src and f"review:{src}" not in evidence:
+                evidence.append(f"review:{src}")
+        client, config = _get_api_client()
+        project_id = config.get("project_id", "")
+        if not project_id:
+            return
+        client.record_decision(project_id, {
+            "kind": "completion-verdict",
+            "decision": verdict,
+            "rationale": rationale,
+            "decided_by": _decided_by_for_gate(),
+            "evidence": evidence,
+            "related": {"target_id": target_id},
+        })
+    except BaseException:
+        pass
+
+
 def cmd_target_approve():
     """Approve a pending target transition — records the verdict AND executes
     the transition on the target (e-3912)."""
@@ -302,6 +373,10 @@ def cmd_target_approve():
         sys.exit(1)
     save_project(data, op={"op": "target_transition_approval_approve",
                            "entry_id": entry_id, "target_id": target_id})
+    # ms-154 e-5651: record the completion verdict (done/observing/closed) on the
+    # decision arm with the transition-approval's rich rationale (the CLI path
+    # otherwise never reaches the server route — see helper docstring).
+    _record_completion_verdict_decision(target_id, new_state, entry, rationale)
     print(f"承認: {target_id} を {new_state} に遷移しました ({entry_id})")
     if rationale:
         print(f"  rationale: {rationale}")
@@ -362,6 +437,38 @@ def cmd_target_attach_evidence():
     print(f"  承認へ: beacon target approve {entry_id} [--rationale <text>]")
 
 
+def _record_disposition_decision(target_id, task_id, verdict, reason, source):
+    """ms-154 e-5651 — record a backlog-finding disposition (findings採否) on the
+    decision arm.
+
+    The judge/human determines what happened to an UNSTARTED important task
+    before an attainment claim can pass (done / superseded / blocks-attainment).
+    That adjudication is a decision — who judged, with what verdict and why —
+    but the CLI path applies it via a whole-project PUT and it never reached the
+    decision stream (AC3 'findings採否' が prompt 層格下げ, per the ms-154 review).
+    We record it here on the primary path. best-effort, cloud-only.
+    """
+    try:
+        from commands_shared import _is_cloud_mode, _get_api_client
+        if not _is_cloud_mode():
+            return
+        client, config = _get_api_client()
+        project_id = config.get("project_id", "")
+        if not project_id:
+            return
+        client.record_decision(project_id, {
+            "kind": "disposition",
+            "decision": verdict,
+            "rationale": reason or None,
+            "decided_by": _decided_by_for_gate(),
+            # source = 自己申告 provenance (誰が原典に照らして判定したか) = 実 link 相当。
+            "evidence": [f"source:{source}"] if source else [],
+            "related": {"task_id": task_id, "target_id": target_id},
+        })
+    except BaseException:
+        pass
+
+
 def cmd_target_attach_disposition():
     """Record a disposition for one UNSTARTED highest/high backlog task on a pending
     transition-approval (ms-119 / e-4579).
@@ -413,6 +520,11 @@ def cmd_target_attach_disposition():
         sys.exit(1)
     save_project(data, op={"op": "target_transition_approval_attach_disposition",
                            "entry_id": entry_id})
+    # ms-154 e-5651: record the disposition adjudication (findings採否) on the
+    # decision arm (the CLI path otherwise never reaches a server route).
+    _record_disposition_decision(
+        (entry.get("meta") or {}).get("target_id", ""),
+        task_id, verdict, reason, source)
     n = len(_ta.disposition_map(entry))
     print(f"disposition を記録: {entry_id} ({task_id} → {verdict}, "
           f"disposition 済 {n} タスク)")

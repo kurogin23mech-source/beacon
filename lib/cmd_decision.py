@@ -19,12 +19,10 @@ import sys
 
 from commands_shared import _is_cloud_mode, _get_api_client
 
-
-# decided_by の一級 enum (server/decision_event.py DECIDED_BY と一致させる)。
-# CLI 側でも語彙外を弾いて、server 400 を待たずに早期に気付けるようにする。
-_DECIDED_BY = {
-    "autonomous-AI", "AI-proposed-human-chose", "human-delegated", "programmatic",
-}
+# ms-154 e-5652: decided_by 語彙は decision_vocab.DECIDED_BY が単一ソース。CLI 側でも
+# 語彙外を弾いて server 400 を待たず早期に気付けるようにするが、語彙の定義は server と
+# 共有する (旧: 二重定義していた = 片方だけ増やすと silent に割れる §2 SSoT 違反)。
+from decision_vocab import DECIDED_BY as _DECIDED_BY  # noqa: F401
 
 
 def _split_evidence(raw: str) -> list:
@@ -32,6 +30,28 @@ def _split_evidence(raw: str) -> list:
     if not raw:
         return []
     return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def _parse_limit(raw: str) -> int:
+    """--limit を正の整数に。未指定は 100。不正値は exit 1 (ms-154 e-5649).
+
+    旧実装は ``int(limit) if limit.isdigit() else 100`` で、``--limit abc`` が
+    silently 100 に fallback していた (= 要求とは別の page 数を返しながら成功に
+    見える silent 破壊、audit する側は検知不能)。非整数 / 非正は明示エラーで
+    落とす (= argparse の type=int が返す拒否と対称)。
+    """
+    if not raw:
+        return 100
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"Error: --limit must be an integer (got {raw!r})", file=sys.stderr)
+        sys.exit(1)
+    if value < 1:
+        print(f"Error: --limit must be a positive integer (got {value})",
+              file=sys.stderr)
+        sys.exit(1)
+    return value
 
 
 def cmd_decision_record():
@@ -100,7 +120,7 @@ def cmd_decision_list():
     実コードに照合する) and for auditing. cloud-only.
     """
     kind = os.environ.get("BEACON_DECISION_KIND", "").strip()
-    limit = os.environ.get("BEACON_DECISION_LIMIT", "").strip()
+    limit = _parse_limit(os.environ.get("BEACON_DECISION_LIMIT", "").strip())
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not _is_cloud_mode():
@@ -116,8 +136,7 @@ def cmd_decision_list():
         if not project_id:
             print("Error: no project_id in cloud.json", file=sys.stderr)
             sys.exit(1)
-        result = client.list_decisions(
-            project_id, kind=kind, limit=int(limit) if limit.isdigit() else 100)
+        result = client.list_decisions(project_id, kind=kind, limit=limit)
     except SystemExit:
         raise
     except Exception as exc:

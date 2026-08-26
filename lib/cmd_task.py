@@ -217,6 +217,55 @@ def cmd_task_add():
     print(f"Added {entry_type} [{eid}] to {work_model.target_label(target)}: {description}{from_str}")
 
 
+def _record_task_done_decision(entry_id: str, reason: str) -> None:
+    """ms-154 e-5650 — record a task-done judgment to the decision arm (CLI path).
+
+    The audit gap this closes: ``beacon task done`` mutates the project locally and
+    syncs via a whole-document PUT, so it never touches the server ``done_entry``
+    route where the decision-arm recording lives — the most audit-critical decision
+    (the AI's own done judgment) was recorded for Web-UI dones only, not for the CLI
+    path that /beacon-log and /beacon-task actually drive. We record it here, on the
+    primary path, through the generic decision write口 (POST /api/projects/{id}/decisions).
+
+    Two things are captured *for real* rather than assumed by route (the hollowness
+    the ms-154 philosophy review flagged):
+    - ``decided_by``: read from ``BEACON_DECIDED_BY`` so the caller (Skill) states who
+      actually decided — /beacon-log's autonomous AC-judgment passes ``autonomous-AI``,
+      a human-directed ``beacon task done`` passes ``human-delegated``. Default is the
+      conservative, most audit-critical ``autonomous-AI`` when the caller says nothing.
+    - ``evidence``: read from ``BEACON_DONE_EVIDENCE`` (newline-separated real links —
+      the commit hash /beacon-log knows at log time). Empty is honest: it surfaces a
+      done with no physical backing rather than fabricating a self-reference (e-5650).
+
+    cloud-only (the decision stream is server-side). Best-effort: offline / not-logged-in
+    / server error are all swallowed so decision recording never breaks ``task done``.
+    """
+    try:
+        from commands_shared import _is_cloud_mode, _get_api_client
+        if not _is_cloud_mode():
+            return
+        decided_by = os.environ.get("BEACON_DECIDED_BY", "").strip() or "autonomous-AI"
+        evidence = [ln.strip() for ln in
+                    os.environ.get("BEACON_DONE_EVIDENCE", "").splitlines() if ln.strip()]
+        client, config = _get_api_client()
+        project_id = config.get("project_id", "")
+        if not project_id:
+            return
+        payload = {
+            "kind": "task-done",
+            "decision": "done",
+            "rationale": reason or None,
+            "decided_by": decided_by,
+            "evidence": evidence,
+            "related": {"task_id": entry_id},
+        }
+        client.record_decision(project_id, payload)
+    except BaseException:
+        # best-effort: _get_api_client may sys.exit (SystemExit) on missing creds;
+        # swallow everything so decision recording never breaks the done flow.
+        pass
+
+
 def cmd_task_done():
     entry_id = os.environ.get("BEACON_ENTRY_ID", "")
     progress = os.environ.get("BEACON_PROGRESS", "")
@@ -265,6 +314,9 @@ def cmd_task_done():
     if progress:
         print(f"  Progress: {ms.get('progress', 0)}%")
     save_project(data, op={"op": "task_done", "entry_id": entry_id, "reason": reason})
+    # ms-154 e-5650: record the done judgment on the decision arm (the CLI path
+    # otherwise never reaches the server done route — see helper docstring).
+    _record_task_done_decision(entry_id, reason)
     issue_number = entry.get("meta", {}).get("issue_number")
     if issue_number:
         print(f"  Linked Issue: #{issue_number} — close it with: gh issue close {issue_number}")

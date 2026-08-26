@@ -366,17 +366,25 @@ def _mirror_task_done_to_treks(entry_id: str) -> list[str]:
             continue
     return touched
 
-def _clamp_decided_by(value: str) -> str:
-    """Coerce a caller-supplied ``decided_by`` into the decision-arm enum (ms-154).
+def _require_decided_by(value: str) -> str:
+    """Validate a caller-supplied ``decided_by`` against the decision-arm enum.
 
-    Falls back to ``autonomous-AI`` (the audit-critical default) for empty or
-    out-of-vocabulary values, so a malformed query param never drops the decision
-    record via the builder's strict validation.
+    Returns the value unchanged when it is a first-class enum member; raises
+    HTTP 400 otherwise — symmetric with the generic ``POST /decisions`` route,
+    which 400s on an out-of-vocab ``decided_by`` via the schema builder.
+
+    ms-154 e-5649 (AX HIGH): the old ``_clamp_decided_by`` silently coerced any
+    unknown value to ``autonomous-AI``, so a mis-typed audit attribution was
+    written as a *different* decider with no error — corrupting the very audit
+    field this arm exists to protect, undetectably. Silent coercion is gone.
     """
-    try:
-        return value if value in decision_event_mod.DECIDED_BY else "autonomous-AI"
-    except Exception:
-        return "autonomous-AI"
+    if value in decision_event_mod.DECIDED_BY:
+        return value
+    raise HTTPException(
+        status_code=400,
+        detail=(f"unknown decided_by: {value!r} "
+                f"(allowed: {sorted(decision_event_mod.DECIDED_BY)})"),
+    )
 
 
 def _check_phantom_done_evidence(
@@ -1167,6 +1175,10 @@ def make_router(
     def done_milestone(project_id: str, ms_id: str,
                        user: dict = Depends(require_auth),
                        decided_by: str = Query("AI-proposed-human-chose")):
+        # ms-154 e-5649: reject an out-of-vocab decided_by up front (400) before
+        # any write, rather than silently coercing it inside the best-effort
+        # decision-record block below (where the swallow would hide it).
+        decided_by = _require_decided_by(decided_by)
         captured: dict = {}
 
         def op(data: dict):
@@ -1190,7 +1202,7 @@ def make_router(
                     target_id=ms_id,
                     verdict="done",
                     done_reason=(captured.get("done_reason") or None),
-                    decided_by=_clamp_decided_by(decided_by),
+                    decided_by=decided_by,
                     decider_user_id=user.get("sub", ""),
                 ),
             )
@@ -1305,6 +1317,10 @@ def make_router(
     def done_entry(project_id: str, entry_id: str, request: Request,
                    user: dict = Depends(require_auth),
                    decided_by: str = Query("autonomous-AI")):
+        # ms-154 e-5649: reject an out-of-vocab decided_by up front (400), before
+        # the write — no silent coercion to autonomous-AI (which would corrupt the
+        # audit attribution undetectably).
+        decided_by = _require_decided_by(decided_by)
         import datetime
         today = datetime.date.today().isoformat()
         # ms-78 / e-1909
@@ -1379,7 +1395,7 @@ def make_router(
                 decision_event_mod.decision_event_from_task_done(
                     entry_id=entry_id,
                     done_reason=(captured.get("done_reason") or None),
-                    decided_by=_clamp_decided_by(decided_by),
+                    decided_by=decided_by,
                     evidence=matched,
                     decider_user_id=user.get("sub", ""),
                 ),

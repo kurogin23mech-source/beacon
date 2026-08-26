@@ -812,6 +812,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_task_done.add_argument("-p", "--progress", default="")
     # e-976: default=None — see p_ms_observe.
     p_task_done.add_argument("-r", "--reason", default=None)
+    # ms-154 e-5650: decided_by (who decided) + evidence (real grounds) for the
+    # decision-arm record. --evidence is repeatable (action="append").
+    p_task_done.add_argument("--decided-by", dest="decided_by", default="")
+    p_task_done.add_argument("--evidence", dest="evidence", action="append", default=None)
 
     p_task_list = task_sub.add_parser("list", aliases=["ls"], add_help=False)
     p_task_list.add_argument("-m", "--ms", dest="ms_id", default="")
@@ -1960,11 +1964,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_pr_approve = pr_sub.add_parser("approve", add_help=False)
     p_pr_approve.add_argument("entry_id", nargs="?", default="")
     p_pr_approve.add_argument("--rationale", default="")
+    p_pr_approve.add_argument("--evidence", default="")  # ms-154 e-5669
     p_pr_approve.add_argument("--json", action="store_true")
 
     p_pr_reject = pr_sub.add_parser("reject", add_help=False)
     p_pr_reject.add_argument("entry_id", nargs="?", default="")
     p_pr_reject.add_argument("--rationale", default="")
+    p_pr_reject.add_argument("--evidence", default="")  # ms-154 e-5669
     p_pr_reject.add_argument("--json", action="store_true")
 
     p_pr_create = pr_sub.add_parser("create", add_help=False)
@@ -1979,6 +1985,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pr_rc = pr_sub.add_parser("request-changes", add_help=False)
     p_pr_rc.add_argument("entry_id", nargs="?", default="")
     p_pr_rc.add_argument("--rationale", default="")
+    p_pr_rc.add_argument("--evidence", default="")  # ms-154 e-5669
     p_pr_rc.add_argument("--json", action="store_true")
 
     pr_sub.add_parser("review", add_help=False)  # prints "use /review Skill"
@@ -3065,6 +3072,9 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
         env = {
             "BEACON_ENTRY_ID": args.entry_id,
             "BEACON_PROGRESS": args.progress or "",
+            # ms-154 e-5650: decided_by + evidence for the decision-arm record.
+            "BEACON_DECIDED_BY": args.decided_by or "",
+            "BEACON_DONE_EVIDENCE": "\n".join(args.evidence or []),
         }
         if args.reason is not None:
             env["BEACON_REASON"] = args.reason
@@ -4243,7 +4253,8 @@ def _handle_pr(root: Path, args: argparse.Namespace) -> int:
         )
     if cmd in ("approve", "reject", "request-changes"):
         if not args.entry_id:
-            print(f"Usage: beacon pr {cmd} <entry-id> [--rationale \"text\"]")
+            print(f"Usage: beacon pr {cmd} <entry-id> [--rationale \"text\"] "
+                  "[--evidence \"link\"] [--json]")
             return 1
         subcmd = "pr_" + cmd.replace("-", "_")
         return _run_commands_py(
@@ -4251,6 +4262,7 @@ def _handle_pr(root: Path, args: argparse.Namespace) -> int:
             {
                 "BEACON_ENTRY_ID": args.entry_id,
                 "BEACON_RATIONALE": args.rationale or "",
+                "BEACON_EVIDENCE": getattr(args, "evidence", "") or "",  # ms-154 e-5669
                 "BEACON_JSON": json_env,
             },
         )

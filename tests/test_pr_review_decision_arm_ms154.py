@@ -67,22 +67,30 @@ def _run_verb(verb_name, *, entry_id="e-400", rationale="LGTM"):
 
 def _capture_recorder(monkeypatch):
     calls = []
-    monkeypatch.setattr(cmd_pr, "_record_review_decision",
-                        lambda entry_id, verdict, rationale:
-                        calls.append((entry_id, verdict, rationale)))
+    # ms-154 e-5669: the call sites now pass decided_by + evidence (previously
+    # dead params), so the stub must accept them and the tests assert them.
+    monkeypatch.setattr(
+        cmd_pr, "_record_review_decision",
+        lambda entry_id, verdict, rationale, decided_by="autonomous-AI",
+        evidence=None: calls.append(
+            (entry_id, verdict, rationale, decided_by, evidence)))
     return calls
 
 
 def test_reject_records_reject_verdict(monkeypatch):
     calls = _capture_recorder(monkeypatch)
+    # pin session kind (conftest defaults to human) so decided_by is deterministic
+    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: False)
     _run_verb("cmd_pr_reject", rationale="AC 未達")
-    assert calls == [("e-400", "reject", "AC 未達")]
+    # AI session → autonomous-AI, no evidence supplied → []
+    assert calls == [("e-400", "reject", "AC 未達", "autonomous-AI", [])]
 
 
 def test_request_changes_records_rework_verdict(monkeypatch):
     calls = _capture_recorder(monkeypatch)
+    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: False)
     _run_verb("cmd_pr_request_changes", rationale="ここを直して")
-    assert calls == [("e-400", "re-work", "ここを直して")]
+    assert calls == [("e-400", "re-work", "ここを直して", "autonomous-AI", [])]
 
 
 def test_approve_records_approve_verdict(monkeypatch):
@@ -91,8 +99,43 @@ def test_approve_records_approve_verdict(monkeypatch):
     # test isolates the decision-recording wiring.
     monkeypatch.setattr(cmd_pr, "_review_gate_check", lambda *a, **k: None)
     monkeypatch.setattr(cmd_pr, "_judge_pr_approve_auto_done", lambda *a, **k: [])
+    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: False)
     _run_verb("cmd_pr_approve", rationale="良い")
-    assert calls == [("e-400", "approve", "良い")]
+    assert calls == [("e-400", "approve", "良い", "autonomous-AI", [])]
+
+
+# ---------------------------------------------------------------------------
+# (A') ms-154 e-5669: decided_by is derived from session kind (not hardcoded),
+# and evidence is now CAPTURABLE via BEACON_EVIDENCE (previously a dead param).
+# ---------------------------------------------------------------------------
+
+def test_decided_by_derived_from_session_kind(monkeypatch):
+    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: True)
+    assert cmd_pr._decided_by_for_review() == "human-delegated"
+    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: False)
+    assert cmd_pr._decided_by_for_review() == "autonomous-AI"
+
+
+def test_human_approve_is_not_mislabelled_autonomous(monkeypatch):
+    calls = _capture_recorder(monkeypatch)
+    monkeypatch.setattr(cmd_pr, "_review_gate_check", lambda *a, **k: None)
+    monkeypatch.setattr(cmd_pr, "_judge_pr_approve_auto_done", lambda *a, **k: [])
+    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: True)
+    _run_verb("cmd_pr_approve", rationale="人間が承認")
+    # the human decided directly — NOT autonomous-AI (the bug this fixes)
+    assert calls[0][3] == "human-delegated"
+
+
+def test_evidence_captured_from_env(monkeypatch):
+    calls = _capture_recorder(monkeypatch)
+    monkeypatch.setenv("BEACON_EVIDENCE", "doc:findings-42\nhttps://x/y\n")
+    _run_verb("cmd_pr_reject", rationale="根拠あり")
+    assert calls[0][4] == ["doc:findings-42", "https://x/y"]
+
+
+def test_review_evidence_from_env_drops_empties(monkeypatch):
+    monkeypatch.setenv("BEACON_EVIDENCE", "  \na\n\n b \n")
+    assert cmd_pr._review_evidence_from_env() == ["a", "b"]
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +163,9 @@ def test_recorder_posts_review_adjudication_in_cloud(monkeypatch):
     assert rec["kind"] == "review-adjudication"
     assert rec["decision"] == "approve"
     assert rec["decided_by"] == "autonomous-AI"
-    assert rec["evidence"] == ["pr:e-400"]
+    # ms-154 e-5650: no self-reference (pr:e-400) in evidence — it lives in
+    # related.task_id. With no real link supplied, evidence is honestly empty.
+    assert rec["evidence"] == []
     assert rec["rationale"] == "受容理由"
     assert rec["related"]["task_id"] == "e-400"
 
