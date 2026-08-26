@@ -19,12 +19,10 @@ import sys
 
 from commands_shared import _is_cloud_mode, _get_api_client
 
-
-# decided_by の一級 enum (server/decision_event.py DECIDED_BY と一致させる)。
-# CLI 側でも語彙外を弾いて、server 400 を待たずに早期に気付けるようにする。
-_DECIDED_BY = {
-    "autonomous-AI", "AI-proposed-human-chose", "human-delegated", "programmatic",
-}
+# ms-154 e-5652: decided_by 語彙は decision_vocab.DECIDED_BY が単一ソース。CLI 側でも
+# 語彙外を弾いて server 400 を待たず早期に気付けるようにするが、語彙の定義は server と
+# 共有する (旧: 二重定義していた = 片方だけ増やすと silent に割れる §2 SSoT 違反)。
+from decision_vocab import DECIDED_BY as _DECIDED_BY  # noqa: F401
 
 
 def _split_evidence(raw: str) -> list:

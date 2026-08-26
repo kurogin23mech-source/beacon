@@ -40,6 +40,20 @@ def test_split_evidence_drops_blanks():
     assert cmd_decision._split_evidence("") == []
 
 
+def test_decided_by_vocab_is_single_source(monkeypatch):
+    # ms-154 e-5652: the CLI's _DECIDED_BY and the server's DECIDED_BY are the SAME
+    # object, both imported from decision_vocab. If someone re-introduces a second
+    # literal definition, this identity check fails — no silent vocabulary drift.
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
+    import decision_vocab
+    import decision_event
+    assert cmd_decision._DECIDED_BY is decision_vocab.DECIDED_BY
+    assert decision_event.DECIDED_BY is decision_vocab.DECIDED_BY
+    assert decision_vocab.DECIDED_BY == frozenset(
+        {"autonomous-AI", "AI-proposed-human-chose", "human-delegated", "programmatic"})
+
+
 def test_record_requires_what(monkeypatch):
     _set_env(monkeypatch, BEACON_DECISION_EVIDENCE="commit:abc")
     with pytest.raises(SystemExit) as e:

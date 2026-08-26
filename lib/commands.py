@@ -1654,7 +1654,11 @@ def cmd_review_context():
     their own intent into the judge's input.
 
     Env:
-        BEACON_REVIEW_TYPE: "ax" | "philosophy" | "attainment".
+        BEACON_REVIEW_TYPE: "ax" | "maintainability" | "philosophy" | "attainment"
+                            | "decision-verification" (ms-154 e-5595: an independent
+                            AI checks declared decision rationale against the real
+                            code; its artifact is the decision stream, not a diff —
+                            see _emit_decision_verification_context).
         BEACON_DIFF_REF:    git ref range (e.g. "origin/main...HEAD"); or
         BEACON_PR:          a PR number (uses `gh pr diff`).
         BEACON_ORIGIN_DOC:  doc-id of the 原典 (required for philosophy; the SPEC

@@ -38,6 +38,10 @@ from __future__ import annotations
 import datetime
 import secrets
 
+# ms-154 e-5652: decided_by 語彙は lib/decision_vocab.py が単一ソース (CLI と server の
+# 二重定義を廃止)。server は起動時に lib/ を path に載せる (server/app.py) ので import 可。
+from decision_vocab import DECIDED_BY  # noqa: F401  (re-exported below)
+
 
 # 既知の決定経路 (= 参照用の語彙リスト。ms-154 §設計方針1 で語彙を開いたので hard gate
 # ではない = 未知の kind も build_decision_event は受け付ける)。新経路を足したらここに
@@ -55,16 +59,8 @@ KNOWN_DECISION_KINDS: frozenset[str] = frozenset(
 # 「既知 kind の集合」を指す点に注意 (語彙自体は開いている)。
 DECISION_KINDS = KNOWN_DECISION_KINDS
 
-# decided_by (= 誰が決めたか) の一級 enum (ms-154 §設計方針1 / AC1)。
-# autonomous-AI が最も audit-critical (= 人間が見ていない判断こそ検分が要る)。
-DECIDED_BY: frozenset[str] = frozenset(
-    {
-        "autonomous-AI",            # 人間未確認の AI 単独決定 (最も audit-critical)
-        "AI-proposed-human-chose",  # AI が選択肢を提示し人間が選んだ
-        "human-delegated",          # 人間が AI に判断を委譲した
-        "programmatic",             # コードが機械的に決めた (= AI 判断ですらない)
-    }
-)
+# decided_by (= 誰が決めたか) の一級 enum は decision_vocab.DECIDED_BY が単一ソース
+# (上で import 済、ここから re-export)。旧: この module に重複定義していた (ms-154 e-5652)。
 
 # related に載りうる参照キー (= 経路ごとに埋まる項目が違うが、shape は共通で固定)。
 # ms-154 e-5592 で ``target_id`` を追加 (= milestone / opportunity 等の完遂判定が

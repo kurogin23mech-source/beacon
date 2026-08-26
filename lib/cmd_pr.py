@@ -744,6 +744,14 @@ def cmd_pr_request_changes():
         print(str(e), file=sys.stderr)
         sys.exit(1)
     save_project(data)
+    # ms-154 e-5652 (naming 対照): the same "send it back to be fixed" act wears two
+    # deliberately-distinct names because it lives in two vocabularies:
+    #   - PR review STATE machine → ``changes_requested`` (GitHub-aligned:
+    #     pending → changes_requested → approved; see cmd_pr.py:297).
+    #   - decision-arm VERDICT enum → ``re-work`` (approve / re-work / reject, shared
+    #     with the Trek leader-review verdict; see server/decision_event.py:377).
+    # They are NOT unified: the state machine and the verdict vocabulary are separate
+    # axes. This mapping is the one point they meet, so it is named here explicitly.
     _record_review_decision(entry_id, "re-work", rationale)
 
     if json_mode:
