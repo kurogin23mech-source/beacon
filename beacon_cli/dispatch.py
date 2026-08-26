@@ -4233,7 +4233,8 @@ def _handle_pr(root: Path, args: argparse.Namespace) -> int:
         )
     if cmd in ("approve", "reject", "request-changes"):
         if not args.entry_id:
-            print(f"Usage: beacon pr {cmd} <entry-id> [--rationale \"text\"]")
+            print(f"Usage: beacon pr {cmd} <entry-id> [--rationale \"text\"] "
+                  "[--evidence \"link\"] [--json]")
             return 1
         subcmd = "pr_" + cmd.replace("-", "_")
         return _run_commands_py(
