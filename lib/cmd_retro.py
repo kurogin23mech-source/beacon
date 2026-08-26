@@ -68,17 +68,35 @@ def cmd_retro_prepare():
     catch_up_mode = os.environ.get("BEACON_RETRO_CATCH_UP", "") == "1"
     data = load_project()
 
+    # ms-155 e-5600: the per-class narrative grouping walks the project's
+    # DELIVERABLE-BEARING classes (derived from the deliverable declaration), not a
+    # hardcoded ``"milestone"`` literal — retro is the weekly review of produced
+    # value, so the class it groups by is single-sourced from the same declaration
+    # e-5599 unions. For a dev project this resolves to exactly ``["milestone"]``,
+    # so the output is byte-identical; the coupling to milestone now comes from the
+    # declaration rather than a bare string, and a project that adopts another
+    # deliverable-bearing class is no longer silently excluded. A record that is
+    # not milestone-shaped (no ``entries`` arm) contributes nothing (``.get`` → []),
+    # so the loop stays safe across classes.
     weekly_milestones = []
-    for ms in occupation.target_records(data, "milestone"):
-        ms_entries = core.collect_retro_entries(ms.get("entries", []), since, until)
-        if ms_entries:
-            weekly_milestones.append({
-                "id": ms["id"],
-                "title": ms.get("title", ""),
-                "status": ms.get("status", ""),
-                "progress": ms.get("progress", 0),
-                "entries": ms_entries,
-            })
+    for kind in occupation.deliverable_bearing_classes(data):
+        for ms in occupation.target_records(data, kind):
+            ms_entries = core.collect_retro_entries(
+                ms.get("entries", []), since, until)
+            if ms_entries:
+                weekly_milestones.append({
+                    "id": ms["id"],
+                    # ms-155 e-5600 AX review: tag the producing class so a
+                    # consumer of the (milestone-named, for back-compat) list can
+                    # apply class-appropriate field extraction — a non-milestone
+                    # deliverable-bearing class uses ``phase`` not ``status`` /
+                    # ``progress``, and the bare key name no longer signals which.
+                    "target_class": kind,
+                    "title": ms.get("title", ""),
+                    "status": ms.get("status", ""),
+                    "progress": ms.get("progress", 0),
+                    "entries": ms_entries,
+                })
 
     # Include deploy records that fall within the period
     weekly_deploys = []

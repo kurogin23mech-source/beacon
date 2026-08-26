@@ -395,3 +395,90 @@ def test_is_legal_phase_transition_reads_the_graph():
     # implicit-linear CONTRACT: forward is a declared (implicit) edge, backward is not.
     assert td.is_legal_phase_transition(CONTRACT, "drafting", "legal_review") is True
     assert td.is_legal_phase_transition(CONTRACT, "signed", "drafting") is False
+
+
+# ---------------------------------------------------------------------------
+# Deliverable-projection declaration (ms-155 e-5597) — a target-class declares
+# HOW it summarizes the VALUE it produced (spine §2b). Tolerant read + load-time
+# validation, mirroring the changelog slot; additive so pre-feature descriptors
+# are unchanged.
+# ---------------------------------------------------------------------------
+
+# A milestone-like class whose deliverable IS a named document (機能 map).
+MAP_CLASS = dict(
+    CONTRACT,
+    kind="feature", label="機能単位", id_prefix="feat-", collection="features",
+    deliverable={"kind": "feature-map", "label": "機能",
+                 "projector": "doc", "ref": "application-map"},
+)
+
+# An opportunity-like class whose deliverable is a roll-up over its done targets.
+DEAL_CLASS = dict(
+    CONTRACT,
+    kind="deal", label="商談", id_prefix="deal-", collection="deals",
+    deliverable={"kind": "pipeline", "projector": "rollup"},
+)
+
+
+def test_deliverable_absent_reads_none():
+    # A descriptor written before this feature declares no deliverable.
+    assert td.deliverable_projection(CONTRACT) is None
+    assert td.deliverable_projection({"kind": "x"}) is None
+    assert td.deliverable_projection("not a dict") is None
+
+
+def test_deliverable_doc_projector_read():
+    proj = td.deliverable_projection(MAP_CLASS)
+    assert proj == {"kind": "feature-map", "label": "機能",
+                    "projector": "doc", "ref": "application-map"}
+
+
+def test_deliverable_rollup_defaults_label_and_ref_empty():
+    proj = td.deliverable_projection(DEAL_CLASS)
+    assert proj == {"kind": "pipeline", "label": "",
+                    "projector": "rollup", "ref": ""}
+
+
+def test_deliverable_unsafe_projector_reads_none_and_flags():
+    bad = dict(CONTRACT, deliverable={"kind": "k", "projector": "bogus"})
+    # tolerant read degrades to None (class contributes nothing to the union)...
+    assert td.deliverable_projection(bad) is None
+    # ...but validation surfaces it so the author is not left with a silent miss.
+    problems = td.validate_descriptor(bad)
+    assert any("projector" in p for p in problems)
+
+
+def test_deliverable_missing_kind_flagged():
+    bad = dict(CONTRACT, deliverable={"projector": "doc"})
+    problems = td.validate_descriptor(bad)
+    assert any("deliverable.kind" in p for p in problems)
+
+
+def test_deliverable_missing_projector_flagged():
+    bad = dict(CONTRACT, deliverable={"kind": "k"})
+    problems = td.validate_descriptor(bad)
+    assert any("deliverable.projector" in p for p in problems)
+
+
+def test_deliverable_not_a_dict_flagged():
+    bad = dict(CONTRACT, deliverable="oops")
+    problems = td.validate_descriptor(bad)
+    assert any("deliverable" in p for p in problems)
+
+
+def test_valid_deliverable_classes_have_no_problems():
+    assert td.validate_descriptor(MAP_CLASS) == []
+    assert td.validate_descriptor(DEAL_CLASS) == []
+
+
+def test_build_descriptor_emits_deliverable_only_when_given():
+    without = td.build_descriptor(kind="a", label="A", dtype="single-shot",
+                                  id_prefix="a-", collection="aa")
+    assert td.DELIVERABLE_KEY not in without   # byte-identical to pre-feature
+    with_dl = td.build_descriptor(kind="b", label="B", dtype="single-shot",
+                                  id_prefix="b-", collection="bb",
+                                  deliverable={"kind": "pipeline",
+                                               "projector": "rollup"})
+    assert with_dl[td.DELIVERABLE_KEY] == {"kind": "pipeline",
+                                           "projector": "rollup"}
+    assert td.validate_descriptor(with_dl) == []

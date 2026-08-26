@@ -1856,29 +1856,16 @@ def _load_local_documents() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# ms-127 e-4815: application-map applicability helpers promoted from commands.py.
+# ms-127 e-4815: application-map applicability helper promoted from commands.py.
 # _application_map_applies decides whether the全貌マップ (application-map) drift /
 # reconcile machinery applies to this project; _auto_fire_map_drift_trigger
-# (commands.py) and the deploy family (cmd_deploy.py) both call it. It pulls in
-# _project_profession_safe (profession lookup that never raises), so that helper
-# is promoted alongside it (a commands_shared resident cannot reach back into
-# cmd_deploy without a cycle).
+# (commands.py) and the deploy family (cmd_deploy.py) both call it.
+#
+# ms-155 e-5598/e-5599 (maintainability review): the former ``_project_profession_safe``
+# helper this used was removed — the gate no longer reads the profession directly but
+# DERIVES from the deliverable declaration (see below), so the parallel profession
+# literal (which could drift from the declaration) is gone.
 # ---------------------------------------------------------------------------
-
-def _project_profession_safe() -> str:
-    """Best-effort read of the project's profession (e.g. ``dev`` / ``sales``),
-    defaulting to ``dev``. Used to gate development-only surfaces such as the
-    application-map (ms-109 e-3404) without hard-failing when the store is
-    unavailable."""
-    try:
-        data = get_store().load_project()
-    except Exception:
-        return "dev"
-    # ms-108 e-3701 (fable review B-6): one definition of "resolve profession"
-    # lives in occupation.resolve_profession — reuse it rather than re-inlining
-    # the ``(get("profession") or "dev").strip().lower()`` expression.
-    return occupation.resolve_profession(data)
-
 
 def _application_map_applies() -> bool:
     """True when the application-map (= 全機能の現在地索引) applies to this
@@ -1886,8 +1873,24 @@ def _application_map_applies() -> bool:
     entry points, which a sales project does not own. So map seeding, the
     map-drift backstop, and the deploy-time reconcile prompt fire only for the
     development instance (ms-109 e-3404). Other occupations get neither the
-    box at init nor the recurring nags."""
-    return _project_profession_safe() == "dev"
+    box at init nor the recurring nags.
+
+    ms-155 e-5598/e-5599 (maintainability review): DERIVED from the deliverable
+    declaration rather than a parallel ``profession == "dev"`` literal. The map IS
+    the milestone class's deliverable projection (``ref == "application-map"``), so
+    "does this project produce the map" is answered by whether the deliverable union
+    names it — the SAME single source ``root_target.synthesized_projection``
+    surfaces. Byte-identical today (only a dev project adopts milestone→機能), but
+    the two gates can no longer drift: a project that changes which classes it
+    adopts flips the union and this gate together. Best-effort: an unavailable store
+    defaults to True (the historical dev default — the surface stays visible rather
+    than silently vanishing on a transient read error)."""
+    try:
+        data = get_store().load_project()
+    except Exception:
+        return True
+    return any((d.get("ref") or "") == "application-map"
+               for d in occupation.project_deliverables(data))
 
 
 # ---------------------------------------------------------------------------

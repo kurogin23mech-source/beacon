@@ -122,8 +122,10 @@ ROOT_TARGET_ARMS = {
         "kind": "completion_approval",
         "via": "child_completion",
     },
-    # deliverable arm = the root's achievement. The union-over-children
-    # generalisation is ms-155 (SPEC やらない); here it is only declared.
+    # deliverable arm = the root's achievement. The union-over-children is now
+    # computed by ``synthesized_projection`` (ms-155 e-5599, via
+    # ``occupation.project_deliverables``); this arm mapping declares the binding,
+    # the projection carries the actual union.
     "deliverable": {
         "kind": "achievement",
     },
@@ -216,10 +218,15 @@ def synthesized_projection(data: dict) -> dict:
           "deliverables": [...],               # deliverable union (方針: minimal)
         }
 
-    ``deliverables`` is the seam for the root's deliverable arm (union over
-    children). The deliverable dimension's generalisation is ms-155 (SPEC やらない),
-    and no built-in class emits deliverables yet, so it is an empty list today —
-    present so the shape does not change when ms-155 fills it in."""
+    ``deliverables`` is the root's deliverable arm — the UNION over the project's
+    adopted target-classes' deliverable projections (ms-155 e-5599 filled the seam
+    ms-153 left empty). It is sourced from ``occupation.project_deliverables``: a
+    dev project surfaces milestone→機能 (application-map), and adopting a new class
+    adds its contribution automatically, so the field cannot go stale (方針2 の芯).
+    PURE like the rest of this module — each entry carries the deliverable SPEC
+    (incl. a ``ref`` such as ``"application-map"``); resolving that ref to the
+    document's content is the session-start assembler's (I/O) job, not this
+    roll-up's."""
     rows = occupation.project_targets(data)
     done = sum(1 for r in rows if work_model.is_done(r))
     open_count = sum(1 for r in rows if work_model.is_open(r))
@@ -230,8 +237,8 @@ def synthesized_projection(data: dict) -> dict:
             "done": done,
             "open": open_count,
         },
-        # deliverable union over children — ms-155 fills this; empty seam now.
-        "deliverables": [],
+        # deliverable union over the adopted target-classes (ms-155 e-5599).
+        "deliverables": occupation.project_deliverables(data),
     }
 
 

@@ -333,6 +333,86 @@ def stop_signal_rows(data: dict) -> list:
     return rows
 
 
+def resolve_deliverable(data: dict | None, kind: str) -> dict | None:
+    """Return the DELIVERABLE-projection spec for a target-class ``kind`` —
+    ``{"kind", "label", "projector", "ref"} | None`` — as the ONE read over BOTH
+    class provenances (ms-155 e-5598):
+
+    - a BUILT-IN code class (milestone / opportunity / operation / …) declares its
+      deliverable in ``target_state.BUILTIN_TARGET_CLASSES`` (milestone→機能,
+      ``ref="application-map"``);
+    - a data-defined DESCRIPTOR class (incl. the built-in-as-data ``release``)
+      declares it in its descriptor (``target_descriptor.deliverable``).
+
+    Both are normalized through ``target_descriptor.normalize_deliverable``, so the
+    root union (e-5599) asks THIS function per adopted class and寄せ集める the
+    non-None specs without caring whether a class is code or data — the "declare,
+    don't wire" contract extended to the deliverable dimension. A ``kind`` neither
+    built-in nor a declared descriptor, or a class that declares no deliverable,
+    returns ``None``. The milestone→application-map surfacing is thus gated by
+    class ADOPTION, not a ``profession`` branch: only a dev project enumerates the
+    milestone kind, so only there does its deliverable appear (SPEC 受入条件3)."""
+    want = (kind or "").strip()
+    if not want:
+        return None
+    builtin = _tstate.BUILTIN_TARGET_CLASSES.get(want)
+    if builtin is not None:
+        return _td.normalize_deliverable(builtin.get("deliverable"))
+    desc = effective_get_descriptor(data, want)
+    if desc is not None:
+        return _td.deliverable_projection(desc)
+    return None
+
+
+def project_deliverables(data: dict) -> list:
+    """Return the project's DELIVERABLE union — the deliverable projection of every
+    ADOPTED target-class that declares one, tagged with the producing class (ms-155
+    e-5599). Shape: ``[{"target_class": <kind>, "kind", "label", "projector",
+    "ref"}, ...]`` (empty when no adopted class declares a deliverable).
+
+    This is spine §2b's "project (root) deliverable = 採用 class 群の deliverable
+    投影の union" made literal: it walks ``owned_target_classes`` (the project's
+    adopted classes — built-in seed for the profession PLUS declared descriptors)
+    and asks ``resolve_deliverable`` per class, so a dev project surfaces
+    milestone→機能 (application-map), a sales project would surface
+    opportunity→pipeline once that class declares one (e-5601), and adopting a NEW
+    class automatically adds its contribution — the project field cannot go stale
+    because it is recomputed from the adopted set every read (方針2 の芯).
+
+    PURE (no I/O): each entry carries the deliverable SPEC (incl. ``ref`` for a
+    ``"doc"`` projector like application-map). RESOLVING a ref to its actual content
+    (fetching the doc) is the session-start assembler's job (the I/O layer), keeping
+    this and its ``root_target.synthesized_projection`` caller side-effect-free.
+
+    ``data is None`` returns ``[]`` — matching ``resolve_deliverable``'s None
+    tolerance (ms-155 e-5599 AX review): the sibling accepts None for the built-in
+    path, so a caller that learned None is safe there must not hit a crash here."""
+    if data is None:
+        return []
+    prof = resolve_profession(data)
+    out: list = []
+    for kind in owned_target_classes(data, prof):
+        proj = resolve_deliverable(data, kind)
+        if proj is not None:
+            out.append({"target_class": kind, **proj})
+    return out
+
+
+def deliverable_bearing_classes(data: dict) -> list:
+    """Return the KINDS of the project's adopted target-classes that DECLARE a
+    deliverable, in adoption order (ms-155 e-5600). For a dev project this is
+    ``["milestone"]`` (only milestone declares 機能→application-map today); it is
+    derived from the same declarations ``project_deliverables`` unions, so it is
+    the SINGLE source a consumer asks "which class carries this project's produced
+    value" instead of hardcoding the literal ``"milestone"``. A consumer that used
+    to assume milestone (e.g. ``cmd_retro``'s per-class grouping) routes through
+    this so the coupling comes from the declaration, not a bare string — and a
+    non-dev project (or one that later declares another deliverable class) is no
+    longer silently excluded. Dev behaviour is unchanged (the list is exactly
+    ``["milestone"]``)."""
+    return [d["target_class"] for d in project_deliverables(data)]
+
+
 # ---------------------------------------------------------------------------
 # Target entry recording — the class-abstraction (L2) side-effect seam
 # (ms-134 e-4720).
