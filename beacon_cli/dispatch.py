@@ -1944,11 +1944,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_pr_approve = pr_sub.add_parser("approve", add_help=False)
     p_pr_approve.add_argument("entry_id", nargs="?", default="")
     p_pr_approve.add_argument("--rationale", default="")
+    p_pr_approve.add_argument("--evidence", default="")  # ms-154 e-5669
     p_pr_approve.add_argument("--json", action="store_true")
 
     p_pr_reject = pr_sub.add_parser("reject", add_help=False)
     p_pr_reject.add_argument("entry_id", nargs="?", default="")
     p_pr_reject.add_argument("--rationale", default="")
+    p_pr_reject.add_argument("--evidence", default="")  # ms-154 e-5669
     p_pr_reject.add_argument("--json", action="store_true")
 
     p_pr_create = pr_sub.add_parser("create", add_help=False)
@@ -1963,6 +1965,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pr_rc = pr_sub.add_parser("request-changes", add_help=False)
     p_pr_rc.add_argument("entry_id", nargs="?", default="")
     p_pr_rc.add_argument("--rationale", default="")
+    p_pr_rc.add_argument("--evidence", default="")  # ms-154 e-5669
     p_pr_rc.add_argument("--json", action="store_true")
 
     pr_sub.add_parser("review", add_help=False)  # prints "use /review Skill"
@@ -4238,6 +4241,7 @@ def _handle_pr(root: Path, args: argparse.Namespace) -> int:
             {
                 "BEACON_ENTRY_ID": args.entry_id,
                 "BEACON_RATIONALE": args.rationale or "",
+                "BEACON_EVIDENCE": getattr(args, "evidence", "") or "",  # ms-154 e-5669
                 "BEACON_JSON": json_env,
             },
         )

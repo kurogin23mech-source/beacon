@@ -89,10 +89,12 @@ cmd_pr() {
             local rationale=""
             local json_flag=""
             local no_auto_done_flag=""
+            local evidence=""
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --rationale|--reason)    rationale="${2:-}"; shift 2 ;;
+                    --evidence)     evidence="${2:-}"; shift 2 ;;
                     --json)         json_flag="1"; shift ;;
                     --no-auto-done) no_auto_done_flag="1"; shift ;;
                     -?*)           _guard_flag "$1" ;;
@@ -101,10 +103,10 @@ cmd_pr() {
             done
 
             if [ -z "$entry_id" ]; then
-                echo "Usage: beacon pr approve <entry-id> [--rationale \"text\"] [--no-auto-done] [--json]"
+                echo "Usage: beacon pr approve <entry-id> [--rationale \"text\"] [--evidence \"link\"] [--no-auto-done] [--json]"
                 exit 1
             fi
-            BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" \
+            BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" BEACON_EVIDENCE="$evidence" \
                 BEACON_JSON="$json_flag" BEACON_NO_AUTO_DONE="$no_auto_done_flag" \
                 python3 "$COMMANDS_PY" pr_approve
             ;;
@@ -113,10 +115,12 @@ cmd_pr() {
             local entry_id=""
             local rationale=""
             local json_flag=""
+            local evidence=""
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --rationale|--reason) rationale="${2:-}"; shift 2 ;;
+                    --evidence)  evidence="${2:-}"; shift 2 ;;
                     --json)      json_flag="1"; shift ;;
                     -?*)           _guard_flag "$1" ;;
                     *)           entry_id="$1"; shift ;;
@@ -124,11 +128,11 @@ cmd_pr() {
             done
 
             if [ -z "$entry_id" ]; then
-                echo "Usage: beacon pr reject <entry-id> [--rationale \"text\"] [--json]"
+                echo "Usage: beacon pr reject <entry-id> [--rationale \"text\"] [--evidence \"link\"] [--json]"
                 exit 1
             fi
-            BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" BEACON_JSON="$json_flag" \
-                python3 "$COMMANDS_PY" pr_reject
+            BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" BEACON_EVIDENCE="$evidence" \
+                BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" pr_reject
             ;;
         create)
             shift
@@ -184,10 +188,12 @@ cmd_pr() {
             local entry_id=""
             local rationale=""
             local json_flag=""
+            local evidence=""
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --rationale|--reason) rationale="${2:-}"; shift 2 ;;
+                    --evidence)  evidence="${2:-}"; shift 2 ;;
                     --json)      json_flag="1"; shift ;;
                     -?*)           _guard_flag "$1" ;;
                     *)           entry_id="$1"; shift ;;
@@ -195,11 +201,11 @@ cmd_pr() {
             done
 
             if [ -z "$entry_id" ]; then
-                echo "Usage: beacon pr request-changes <entry-id> [--rationale \"text\"] [--json]"
+                echo "Usage: beacon pr request-changes <entry-id> [--rationale \"text\"] [--evidence \"link\"] [--json]"
                 exit 1
             fi
-            BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" BEACON_JSON="$json_flag" \
-                python3 "$COMMANDS_PY" pr_request_changes
+            BEACON_ENTRY_ID="$entry_id" BEACON_RATIONALE="$rationale" BEACON_EVIDENCE="$evidence" \
+                BEACON_JSON="$json_flag" python3 "$COMMANDS_PY" pr_request_changes
             ;;
         review)
             echo "beacon pr review is now handled by the /review Claude Code Skill."

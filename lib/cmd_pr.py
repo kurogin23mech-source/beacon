@@ -46,6 +46,7 @@ import subprocess
 import core  # noqa: F401
 
 from commands_shared import (  # noqa: F401
+    _session_kind_is_human,
     _check_ms_status_for_write,
     _clear_pr_open_review_triggers,
     _fire_pr_open_review_triggers,
@@ -528,6 +529,35 @@ def _judge_pr_approve_auto_done(pr_entry: dict, data: dict) -> list:
 
     return judgements
 
+
+def _decided_by_for_review() -> str:
+    """The decided_by for a PR review adjudication, derived from the SESSION KIND
+    (ms-154 e-5669) rather than hardcoded ``autonomous-AI``.
+
+    Before this, ``_record_review_decision`` recorded ``autonomous-AI`` for every
+    approve/reject/re-work — even when a HUMAN pressed the button — so the audit
+    field mis-attributed human decisions to the AI. An AI session adjudicating on
+    the independent-judge verdicts is the most-audit-critical ``autonomous-AI``
+    owner (the docstring's original intent); a human terminal session decided it
+    directly. Mirrors ``cmd_target._decided_by_for_gate`` for cross-capability
+    consistency (its ``human-delegated`` gloss-vs-usage tension is a known
+    follow-up, e-5670 — NOT re-litigated here)."""
+    return "human-delegated" if _session_kind_is_human() else "autonomous-AI"
+
+
+def _review_evidence_from_env() -> list:
+    """Real evidence links a caller cites for a review adjudication, from
+    ``BEACON_EVIDENCE`` (newline-separated, empties dropped) — ms-154 e-5669.
+
+    The point is that evidence is now CAPTURABLE at all: the params existed but
+    no call site or CLI flag fed them, so review decisions were structurally
+    evidence-empty even at approve time (when findings docs exist). Empty stays
+    honest-allowed (e-5650) — this only makes non-empty POSSIBLE. Never carries
+    the PR self-reference (``related.task_id`` already does)."""
+    raw = os.environ.get("BEACON_EVIDENCE", "")
+    return [ln.strip() for ln in raw.splitlines() if ln.strip()]
+
+
 def _record_review_decision(entry_id: str, verdict: str, rationale: str,
                             decided_by: str = "autonomous-AI",
                             evidence=None) -> None:
@@ -631,7 +661,9 @@ def cmd_pr_approve():
                 mid_warnings.append(j)
 
     save_project(data)
-    _record_review_decision(entry_id, "approve", rationale)
+    _record_review_decision(entry_id, "approve", rationale,
+                            decided_by=_decided_by_for_review(),
+                            evidence=_review_evidence_from_env())
 
     if json_mode:
         out = {
@@ -690,7 +722,9 @@ def cmd_pr_reject():
         print(str(e), file=sys.stderr)
         sys.exit(1)
     save_project(data)
-    _record_review_decision(entry_id, "reject", rationale)
+    _record_review_decision(entry_id, "reject", rationale,
+                            decided_by=_decided_by_for_review(),
+                            evidence=_review_evidence_from_env())
 
     if json_mode:
         print(json.dumps({"entry_id": entry_id, "review_status": "rejected",
@@ -752,7 +786,9 @@ def cmd_pr_request_changes():
     #     with the Trek leader-review verdict; see server/decision_event.py:377).
     # They are NOT unified: the state machine and the verdict vocabulary are separate
     # axes. This mapping is the one point they meet, so it is named here explicitly.
-    _record_review_decision(entry_id, "re-work", rationale)
+    _record_review_decision(entry_id, "re-work", rationale,
+                            decided_by=_decided_by_for_review(),
+                            evidence=_review_evidence_from_env())
 
     if json_mode:
         print(json.dumps({"entry_id": entry_id, "review_status": "changes_requested"}, ensure_ascii=False))
