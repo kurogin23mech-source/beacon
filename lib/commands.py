@@ -297,6 +297,8 @@ from commands_shared import (  # noqa: F401
 from cmd_retro import (  # noqa: F401
     cmd_retro_prepare, cmd_retro_default_since, cmd_retro_save, cmd_retro_done,
 )
+# ms-155 e-5602: deliverable family (produced-value projection resolver + list).
+from cmd_deliverable import cmd_deliverable_list  # noqa: F401
 
 # ms-127 e-4815: deploy family moved to cmd_deploy.py, plus the application-map
 # applicability helper promoted to commands_shared. Re-export _application_map_applies
@@ -10417,6 +10419,7 @@ if __name__ == "__main__":
         "retro_save": cmd_retro_save,
         "retro_done": cmd_retro_done,
         "retro_default_since": cmd_retro_default_since,
+        "deliverable_list": cmd_deliverable_list,   # ms-155 e-5602
         "trigger_fire": cmd_trigger_fire,
         "trigger_check": cmd_trigger_check,
         "trigger_tick": cmd_trigger_tick,

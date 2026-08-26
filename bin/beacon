@@ -3344,6 +3344,15 @@ EOF
                 ;;
         esac
         ;;
+    deliverable|deliverables)
+        case "${2:-}" in
+            list|ls) shift 2; cmd_deliverable_list "$@" ;;
+            "") echo "Usage: beacon deliverable list [--resolve] [--json]" >&2; exit 1 ;;
+            *)  echo "Unknown deliverable subcommand: ${2}" >&2
+                echo "Usage: beacon deliverable list [--resolve] [--json]" >&2
+                exit 1 ;;
+        esac
+        ;;
     retro)
         shift
         case "${1:-}" in

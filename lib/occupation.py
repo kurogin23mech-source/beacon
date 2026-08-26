@@ -381,8 +381,11 @@ def project_deliverables(data: dict) -> list:
 
     PURE (no I/O): each entry carries the deliverable SPEC (incl. ``ref`` for a
     ``"doc"`` projector like application-map). RESOLVING a ref to its actual content
-    (fetching the doc) is the session-start assembler's job (the I/O layer), keeping
-    this and its ``root_target.synthesized_projection`` caller side-effect-free.
+    (fetching the doc / computing a roll-up) is the job of the I/O counterpart
+    ``deliverable_resolve.resolve_project_deliverables`` (ms-155 e-5602), keeping
+    this and its ``root_target.synthesized_projection`` caller side-effect-free — a
+    caller that only needs the SHAPE (gate derivation, retro grouping) pays no I/O,
+    while a caller that needs the produced VALUE resolves through that module.
 
     ``data is None`` returns ``[]`` — matching ``resolve_deliverable``'s None
     tolerance (ms-155 e-5599 AX review): the sibling accepts None for the built-in

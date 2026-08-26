@@ -140,6 +140,8 @@ VERB_LEDGER = {
 
     # --- doc ---
     "doc_add": {"cls": "R", "secondary": ["C"], "note": "台帳追記(R)/対話(C)"},
+    "deliverable_list": {"cls": "Q", "secondary": [],
+                         "note": "produced-value 投影の read-only(Q) — ms-155 e-5602"},
     "doc_delete": {"cls": "B", "secondary": ["C"], "note": ""},
     "doc_history": {"cls": "Q", "secondary": [], "note": ""},
     "doc_image_upload": {"cls": "R", "secondary": ["C"], "note": ""},

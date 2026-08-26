@@ -1535,6 +1535,26 @@ def build_parser() -> argparse.ArgumentParser:
     channel_sub.add_parser("install", add_help=False)
 
     # `beacon retro [--prepare|--catch-up] [--since X] [--until Y]`
+    # ms-155 e-5602: `beacon deliverable list [--resolve] [--json]` — the
+    # produced-value projection (dev → milestone→機能=application-map). Mirrors
+    # bin/beacon's `deliverable)` case and cmd_deliverable_list().
+    p_deliverable = sub.add_parser(
+        "deliverable", aliases=["deliverables"], add_help=False,
+        help="Project's produced-value (deliverable) projection",
+    )
+    # --help parity with bash (ms-155 e-5666 AX): without this, argparse rejects
+    # `--help` with exit 2 while bash prints usage + exit 1 — different codes for
+    # the same intent. Handle it explicitly and exit 0 (like retro/stop).
+    p_deliverable.add_argument("--help", "-h", action="store_true",
+                               dest="show_help")
+    deliverable_sub = p_deliverable.add_subparsers(
+        dest="deliverable_cmd", metavar="<subcmd>")
+    p_deliverable_list = deliverable_sub.add_parser(
+        "list", aliases=["ls"], add_help=False)
+    p_deliverable_list.add_argument(
+        "--resolve", action="store_true", dest="deliverable_resolve")
+    p_deliverable_list.add_argument("--json", action="store_true")
+
     # `beacon retro save --week YYYY-WNN [--content T] [--stdin] [--json]`
     # `beacon retro done`
     #
@@ -4786,6 +4806,26 @@ def _split_target(target: str) -> tuple[str, str]:
     return k, i
 
 
+def _handle_deliverable(root: Path, args: argparse.Namespace) -> int:
+    """`beacon deliverable list [--resolve] [--json]` (ms-155 e-5602).
+
+    Mirrors bin/beacon's ``deliverable)`` case + ``cmd_deliverable_list``. Without
+    it, Windows beacon.exe (dispatch.py path) would hit `argparse invalid choice:
+    'deliverable'` — the cli-drift guard requires this parity.
+    """
+    if getattr(args, "show_help", False):
+        print("Usage: beacon deliverable list [--resolve] [--json]")
+        return 0
+    sub_cmd = getattr(args, "deliverable_cmd", None)
+    if sub_cmd not in ("list", "ls"):
+        _eprint("Usage: beacon deliverable list [--resolve] [--json]")
+        return 1
+    return _run_commands_py(root, "deliverable_list", {
+        "BEACON_RESOLVE": "1" if getattr(args, "deliverable_resolve", False) else "",
+        "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+    })
+
+
 def _handle_retro(root: Path, args: argparse.Namespace) -> int:
     """`beacon retro [--prepare|--catch-up] [--since X] [--until Y]` (= prepare).
     `beacon retro save --week ... [--content T] [--stdin] [--json]` (= save).
@@ -5634,6 +5674,9 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "sessions": _handle_sessions,
     "profile": _handle_profile,
     "channel": _handle_channel,
+    # ms-155 e-5602: deliverable projection (list [--resolve]).
+    "deliverable": _handle_deliverable,
+    "deliverables": _handle_deliverable,
     # ms-61 / e-2348: Win parity for /beacon-retro Skill (prepare/save/done).
     "retro": _handle_retro,
     "bus": _handle_bus,
