@@ -254,6 +254,12 @@ def decision_event_from_scope_approval(
 
     ``decision`` は ``"approve"`` / ``"deny"``。判断した人 (= 受信者) を who に、
     対象の bus event を related.event_id に置く。
+
+    ``decided_by`` は ``human-delegated`` 固定 (ms-154 e-5651): この承認/却下は
+    SPEC ms-70 方針3「terminal Claude Code 内での user 直接判断のみ」で、必ず人間が
+    直接下す決定 = 人間が決定主体。これで dm_pending respond が「誰が決めたか」を持つ
+    一級 decision として捕獲される (旧: decided_by 未設定で prompt 層格下げ扱いだった)。
+    対象 envelope への参照は ``related.event_id`` が運ぶので evidence は積まない。
     """
     return build_decision_event(
         kind="scope-approval",
@@ -265,6 +271,7 @@ def decision_event_from_scope_approval(
             "agent": agent,
         },
         rationale=rationale,
+        decided_by="human-delegated",
         related={"event_id": event_id},
     )
 

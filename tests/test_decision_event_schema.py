@@ -317,6 +317,9 @@ def test_scope_approval_record(decision):
     assert e["decision"] == decision
     assert e["who"]["user_id"] == "u9"
     assert e["related"]["event_id"] == "evt-7"
+    # ms-154 e-5651: DM respond is a human's direct decision (SPEC ms-70 方針3),
+    # so it is captured as a first-class decision with decided_by set.
+    assert e["decided_by"] == "human-delegated"
     assert "outcome" not in e
 
 
