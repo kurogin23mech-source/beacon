@@ -37,8 +37,11 @@ from store import get_store
 # states (todo / in_progress / waiting) have not produced yet. This is a
 # pragmatic cross-class set — a class cannot yet DECLARE which of its states
 # count as "delivered"; when one needs to diverge, this becomes a per-class
-# descriptor field (follow-up). Kept explicit (not "everything not open") so a
-# new non-terminal state is not silently counted as delivered.
+# descriptor field (follow-up task e-5667). Kept explicit (not "everything not
+# open") so a new non-terminal state is not silently counted as delivered. The
+# tokens are Target STATUS values (milestone done/observing/closed, sales 成約/
+# won, release released) — NOT claim outcomes; ``"completed"`` here is a generic
+# terminal Target status, distinct from ``claims`` outcome vocab.
 _DELIVERED_STATES = frozenset({
     "done", "observing", "closed", "released", "won", "成約", "completed",
 })
@@ -76,10 +79,16 @@ def _resolve_rollup(spec: dict, data: dict) -> dict:
     """Resolve a ``"rollup"`` deliverable: compute a roll-up summary over the
     producing class's DELIVERED Targets (count + labels). The producing class is
     the spec's ``target_class`` (the class that DECLARED the deliverable), not its
-    ``kind`` (the deliverable's own type token, e.g. ``"pipeline"``)."""
-    kind = (spec.get("target_class") or "").strip()
+    ``kind`` (the deliverable's own type token, e.g. ``"pipeline"``).
+
+    Matching relies on ``occupation.project_targets`` tagging every row with
+    ``kind`` = its target-class kind (occupation.py ~L330), so the spec's
+    ``target_class`` and a row's ``kind`` are the SAME namespace — if that
+    guarantee ever breaks, this filter miscounts rather than crashes, hence the
+    equivalence is pinned here explicitly."""
+    target_kind = (spec.get("target_class") or "").strip()
     rows = [r for r in _occ.project_targets(data)
-            if (r.get("kind") or "") == kind]
+            if (r.get("kind") or "") == target_kind]
     delivered = [r for r in rows
                  if (r.get("status") or "") in _DELIVERED_STATES]
     labels = [r.get("label") or r.get("id") or "" for r in delivered]

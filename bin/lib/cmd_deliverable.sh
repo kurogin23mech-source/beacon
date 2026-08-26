@@ -20,8 +20,10 @@ cmd_deliverable_list() {
         case "$1" in
             --resolve) resolve="1"; shift ;;
             --json)    json="1"; shift ;;
-            -?*) _guard_flag "$1" ;;
-            *) shift ;;
+            # Reject unknown flags AND stray positionals (ms-155 e-5666 AX): a
+            # silent `*) shift` would drop a bad token on bash but argparse
+            # errors on it — a cross-frontend parity break. Fail the same way.
+            *) _guard_flag "$1" ;;
         esac
     done
 

@@ -1542,6 +1542,11 @@ def build_parser() -> argparse.ArgumentParser:
         "deliverable", aliases=["deliverables"], add_help=False,
         help="Project's produced-value (deliverable) projection",
     )
+    # --help parity with bash (ms-155 e-5666 AX): without this, argparse rejects
+    # `--help` with exit 2 while bash prints usage + exit 1 — different codes for
+    # the same intent. Handle it explicitly and exit 0 (like retro/stop).
+    p_deliverable.add_argument("--help", "-h", action="store_true",
+                               dest="show_help")
     deliverable_sub = p_deliverable.add_subparsers(
         dest="deliverable_cmd", metavar="<subcmd>")
     p_deliverable_list = deliverable_sub.add_parser(
@@ -4808,6 +4813,9 @@ def _handle_deliverable(root: Path, args: argparse.Namespace) -> int:
     it, Windows beacon.exe (dispatch.py path) would hit `argparse invalid choice:
     'deliverable'` — the cli-drift guard requires this parity.
     """
+    if getattr(args, "show_help", False):
+        print("Usage: beacon deliverable list [--resolve] [--json]")
+        return 0
     sub_cmd = getattr(args, "deliverable_cmd", None)
     if sub_cmd not in ("list", "ls"):
         _eprint("Usage: beacon deliverable list [--resolve] [--json]")
