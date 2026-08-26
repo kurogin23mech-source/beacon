@@ -501,7 +501,9 @@ def test_done_entry_records_decision_arm_event(monkeypatch):
     assert rec["decision"] == "done"                     # what
     assert rec["rationale"] == "AC 全達成と判断"           # why (done_reason)
     assert rec["decided_by"] == "autonomous-AI"           # default for CLI done
-    assert rec["evidence"] == ["task:e-1"]                # baseline ref, non-empty
+    # ms-154 e-5650: no commit references e-1 in this store, so evidence is
+    # honestly empty (the self-reference is NOT fabricated). related carries e-1.
+    assert rec["evidence"] == []
     assert rec["related"]["task_id"] == "e-1"
 
 
@@ -552,7 +554,9 @@ def test_done_milestone_records_completion_verdict(monkeypatch):
     assert len(arm) == 1
     assert arm[0]["decision"] == "done"
     assert arm[0]["decided_by"] == "AI-proposed-human-chose"  # human-approved default
-    assert arm[0]["evidence"] == ["target:ms-1"]
+    # ms-154 e-5650: milestone done gathers no real evidence link → honestly empty
+    # (self-reference target:ms-1 is NOT fabricated; related carries it).
+    assert arm[0]["evidence"] == []
     assert arm[0]["related"]["target_id"] == "ms-1"
 
 
@@ -593,17 +597,22 @@ def test_record_decision_appends_to_stream(monkeypatch):
     assert rec["related"]["task_id"] == "e-42"
 
 
-def test_record_decision_rejects_decided_by_without_evidence(monkeypatch):
+def test_record_decision_accepts_decided_by_with_empty_evidence(monkeypatch):
+    # ms-154 e-5650: the "decided_by → evidence 非空必須" invariant is relaxed.
+    # A decision with decided_by but no evidence is now ACCEPTED and recorded with
+    # empty evidence — the honest "no physical backing" audit signal, not a 400.
     captured = []
     monkeypatch.setattr(_store_router_module, "append_decision_event",
-                        lambda pid, rec: captured.append(rec))
+                        lambda pid, rec: (captured.append(rec) or "dec-y"))
     r = client.post(
         f"/api/projects/{PROJECT_ID}/decisions",
         json={"kind": "review-adjudication", "decision": "approve",
-              "decided_by": "autonomous-AI"},  # no evidence → schema 400
+              "decided_by": "autonomous-AI"},  # no evidence → honest empty, accepted
     )
-    assert r.status_code == 400
-    assert captured == []  # nothing appended on a rejected record
+    assert r.status_code == 200
+    assert len(captured) == 1
+    assert captured[0]["decided_by"] == "autonomous-AI"
+    assert captured[0]["evidence"] == []
 
 
 def test_record_decision_rejects_empty_kind():

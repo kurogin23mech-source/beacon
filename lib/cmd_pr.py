@@ -528,7 +528,9 @@ def _judge_pr_approve_auto_done(pr_entry: dict, data: dict) -> list:
 
     return judgements
 
-def _record_review_decision(entry_id: str, verdict: str, rationale: str) -> None:
+def _record_review_decision(entry_id: str, verdict: str, rationale: str,
+                            decided_by: str = "autonomous-AI",
+                            evidence=None) -> None:
     """ms-154 e-5593 — best-effort: record a PR review verdict to the decision arm.
 
     review 採否 (approve / re-work / reject) は CLI 側の判断で server の書き込み口
@@ -536,9 +538,12 @@ def _record_review_decision(entry_id: str, verdict: str, rationale: str) -> None
     cloud mode 専用 (= decision stream は server 側)。承認フローを絶対に壊さない:
     offline / 未ログイン / server error は全て握りつぶす (= flag not gate)。
 
-    ``verdict`` は ``approve`` / ``re-work`` / ``reject``。evidence は対象 PR への
-    参照を baseline に置き、decided_by は ``autonomous-AI`` (= 独立レビューは AI judge
-    verdict が主で最も監査が要る)。who は server が token から stamp する。
+    ``verdict`` は ``approve`` / ``re-work`` / ``reject``。``decided_by`` は誰が採否を
+    決めたか (default ``autonomous-AI`` = 独立レビューは AI judge verdict が主で最も監査
+    が要る。人間が採否を指示した場合は呼び出し側が上書き)。``evidence`` は採否を裏付ける
+    **実 link (findings doc / 会話 / commit) のみ** で、空でも通す (ms-154 e-5650): 対象
+    PR 自身への参照 (``pr:<id>``) は ``related.task_id`` が運ぶので自己参照は積まない。
+    who は server が token から stamp する。
     """
     try:
         from commands_shared import _is_cloud_mode, _get_api_client
@@ -552,8 +557,8 @@ def _record_review_decision(entry_id: str, verdict: str, rationale: str) -> None
             "kind": "review-adjudication",
             "decision": verdict,
             "rationale": rationale or None,
-            "decided_by": "autonomous-AI",
-            "evidence": [f"pr:{entry_id}"],
+            "decided_by": decided_by,
+            "evidence": [ln for ln in (evidence or []) if ln],
             "related": {"task_id": entry_id},
         })
     except BaseException:

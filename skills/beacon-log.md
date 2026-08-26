@@ -254,8 +254,13 @@ AC が空だが motivation がある場合:
 
 **✓ DONE**: Bash ツールで実行
 ```bash
-cd "$PROJECT_DIR" && beacon task done <entry-id> --reason "<判断軌跡 1〜2 文>"
+cd "$PROJECT_DIR" && beacon task done <entry-id> --reason "<判断軌跡 1〜2 文>" \
+  --decided-by autonomous-AI --evidence "commit:<commit.hash>"
 ```
+
+`--decided-by` / `--evidence`（ms-154 e-5650 — 決定の監査価値を実捕獲する）:
+- `--decided-by autonomous-AI`: /beacon-log の done は AI が AC を自律照合して下す判断（人間は事後監査するのみ、この場で done 可否を聞かない Step 1.9 の原則）。ゆえに「AI 単独決定」= `autonomous-AI` を明示する。これで「人間が指示した done（→ `/beacon-task` が `human-delegated` を渡す）」と監査上で弁別できる（旧: 経路の default 任せで両者が区別不能だった）。
+- `--evidence "commit:<commit.hash>"`: Step 1 prepare の `commit.hash` を実 link として渡す。これが done を裏付ける物理証拠になる（自己参照 `task:<id>` は積まない＝検証材料ゼロを避ける）。複数根拠があれば `--evidence` を繰り返す（例: `--evidence "commit:<hash>" --evidence "server/foo.py:42"`）。commit と無関係な done（稀）では省略してよい（evidence 空 = 裏付け無しとして正直に残る）。
 
 `--reason` の書き方:
 - AC を明示参照する形式: 「AC『○○ができる』をコミット <hash:7> の <file:func> 改修で満たした」

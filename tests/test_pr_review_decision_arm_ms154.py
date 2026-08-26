@@ -120,7 +120,9 @@ def test_recorder_posts_review_adjudication_in_cloud(monkeypatch):
     assert rec["kind"] == "review-adjudication"
     assert rec["decision"] == "approve"
     assert rec["decided_by"] == "autonomous-AI"
-    assert rec["evidence"] == ["pr:e-400"]
+    # ms-154 e-5650: no self-reference (pr:e-400) in evidence — it lives in
+    # related.task_id. With no real link supplied, evidence is honestly empty.
+    assert rec["evidence"] == []
     assert rec["rationale"] == "受容理由"
     assert rec["related"]["task_id"] == "e-400"
 

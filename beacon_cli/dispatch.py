@@ -812,6 +812,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_task_done.add_argument("-p", "--progress", default="")
     # e-976: default=None — see p_ms_observe.
     p_task_done.add_argument("-r", "--reason", default=None)
+    # ms-154 e-5650: decided_by (who decided) + evidence (real grounds) for the
+    # decision-arm record. --evidence is repeatable (action="append").
+    p_task_done.add_argument("--decided-by", dest="decided_by", default="")
+    p_task_done.add_argument("--evidence", dest="evidence", action="append", default=None)
 
     p_task_list = task_sub.add_parser("list", aliases=["ls"], add_help=False)
     p_task_list.add_argument("-m", "--ms", dest="ms_id", default="")
@@ -3045,6 +3049,9 @@ def _handle_task(root: Path, args: argparse.Namespace) -> int:
         env = {
             "BEACON_ENTRY_ID": args.entry_id,
             "BEACON_PROGRESS": args.progress or "",
+            # ms-154 e-5650: decided_by + evidence for the decision-arm record.
+            "BEACON_DECIDED_BY": args.decided_by or "",
+            "BEACON_DONE_EVIDENCE": "\n".join(args.evidence or []),
         }
         if args.reason is not None:
             env["BEACON_REASON"] = args.reason

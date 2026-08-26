@@ -171,9 +171,13 @@ def build_decision_event(
     - ``kind`` は空だと ValueError (= 語彙自体は開いている / ms-154 §設計方針1)。
     - ``decision`` (= what) は必須。空なら ValueError。
     - ``decided_by`` は :data:`DECIDED_BY` の語彙か None。語彙外は ValueError。
-    - **``decided_by`` を立てたら ``evidence`` は非空必須** (= 一級 decision を名乗る
-      なら根拠 link を必ず伴う / SPEC「evidence-link 必須」+ P4 独立検証の前提)。
-      逆に legacy 経路 (decided_by=None) は evidence 空でも通る (= 後方互換 / AC6)。
+    - ``evidence`` は **実 link (commit / code / 会話) のみ** を積む。空でも通す
+      (ms-154 e-5650): 自己参照 (``task:<id>`` / ``target:<id>``) を「evidence 非空」
+      条件充足のために自動挿入する旧挙動 (= トートロジーで invariant を満たし検証
+      材料ゼロを隠す) を廃止した。evidence が空 = 「物理的な裏付けが無い決定」という
+      監査シグナルそのもの (= phantom done を隠さず露出する)。SPEC「evidence-link
+      必須」は「実 link があるなら必須 (捏造で埋めない)」と読み替える。自己参照は
+      ``related.task_id`` / ``related.target_id`` が既に運ぶ (= 冗長を排する)。
     - ``outcome`` を含む余計な引数はキーワード専用シグネチャなので構造的に混入しない。
 
     ``created_at`` / ``decision_id`` は未指定なら補完する。永続化層でも防御的に
@@ -188,12 +192,6 @@ def build_decision_event(
     decided_by = _normalize_decided_by(decided_by)
     evidence = _normalize_link_list(evidence)
     options = _normalize_link_list(options)
-
-    if decided_by is not None and not evidence:
-        raise ValueError(
-            "decision-event with 'decided_by' requires non-empty 'evidence' "
-            "(SPEC ms-154 §設計方針1 — 一級 decision は根拠 link を必ず伴う)"
-        )
 
     return {
         "decision_id": decision_id or mint_decision_event_id(),
@@ -290,14 +288,13 @@ def decision_event_from_task_done(
     beacon-log Skill が駆動する AI 判断が主で、最も監査が要るため保守的に AI 側へ倒す。
     Web UI の人手 done 等は呼び出し側が明示指定して上書きする)。
 
-    ``evidence`` が空でも、対象 task への参照 (``task:<entry_id>``) を baseline として
-    必ず 1 件差し込む (= decided_by を立てた一級 decision は evidence 非空必須という
-    schema 不変条件を、commit 照合が空振り = phantom done でも構造的に満たすため)。
+    ``evidence`` は done を裏付ける **実 link (commit / code / 会話) のみ** (ms-154
+    e-5650)。空でもそのまま通す = commit 照合が空振り (= phantom done) を隠さず
+    「裏付け無し」として露出する。対象 task 自身への参照 (``task:<entry_id>``) は
+    ``related.task_id`` が運ぶので evidence には積まない (= 自己参照でトートロジー的に
+    invariant を満たす旧挙動を廃止)。
     """
     ev = list(_normalize_link_list(evidence))
-    task_ref = f"task:{entry_id}" if entry_id else ""
-    if task_ref and task_ref not in ev:
-        ev.insert(0, task_ref)
     return build_decision_event(
         kind="task-done",
         decision="done",
@@ -337,11 +334,12 @@ def decision_event_from_completion_verdict(
     decided_by の default は ``AI-proposed-human-chose`` (= milestone 完遂は ms-119 の
     目的達成レビューゲートで AI が根拠を組み立て人間が承認する形が原則のため)。純粋な
     AI 自律完遂なら呼び出し側が ``autonomous-AI`` を明示する。
+
+    ``evidence`` は達成を裏付ける **実 link のみ** (ms-154 e-5650)。対象 target 自身への
+    参照 (``target:<target_id>``) は ``related.target_id`` が運ぶので evidence には積まない
+    (= 自己参照の自動挿入を廃止)。空なら「裏付け link 無し」として露出する。
     """
     ev = list(_normalize_link_list(evidence))
-    target_ref = f"target:{target_id}" if target_id else ""
-    if target_ref and target_ref not in ev:
-        ev.insert(0, target_ref)
     return build_decision_event(
         kind="completion-verdict",
         decision=(verdict or "done"),
