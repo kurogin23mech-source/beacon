@@ -526,14 +526,21 @@ def cmd_claim_view():
         label = view.get("label") or view.get("target_id")
         print(f"{view.get('target_id')} {label}")
         if not view.get("exists", True):
-            # ms-109 e-5525 (C9): the claimable-kind list is derived from the
-            # manifest (occupation.claim_target_kinds), not hardcoded — the old
-            # "milestone / opportunity / account" text had already drifted (it
-            # omitted operation, which build_claim_views DOES walk). task / trek /
-            # free are the true out-of-scope kinds (not walked by this view).
+            # ms-109 e-5525 / e-5689 (C9): BOTH the claimable list and the
+            # out-of-scope list are derived, not hardcoded. Claimable = the kinds
+            # build_claim_views walks (occupation.claim_target_kinds) — the old
+            # "milestone / opportunity / account" text had drifted (it omitted
+            # operation). Out-of-scope = the claim-protocol kinds (claims._VALID_
+            # TARGET_KINDS) that this VIEW does NOT surface, i.e. those with no
+            # canonical claimable kind (task / trek / free) — deriving it stops the
+            # same drift recurring on the complement side.
+            import claims as _claims
             _claimable = " / ".join(occupation.claim_target_kinds(data))
+            _out = " / ".join(sorted(
+                k for k in _claims._VALID_TARGET_KINDS
+                if not occupation.canonical_claim_kind(k, data)))
             print(f"  ⚠ この id の target は見つかりません (claim 対象は {_claimable}。"
-                  "task / trek / free はこの view の対象外)。unclaimed とは扱いません。")
+                  f"{_out} はこの view の対象外)。unclaimed とは扱いません。")
         else:
             print(f"  {line}" if line else "  (未 claim — 誰も作業中でなく担当も未設定)")
         if _focus_note:

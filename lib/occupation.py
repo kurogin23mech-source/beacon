@@ -1023,14 +1023,12 @@ def claim_target_kinds(data: dict | None = None) -> tuple:
     claimable though ``build_claim_views`` walks it via ``claim_target_collections``).
     Sourced from the same manifest so adding a class (a descriptor occupation's kind,
     the acquisition secondary) lights its kind up at those call sites with no edit —
-    the "declare, don't wire" contract. Kind resolution covers the NON-aggregatable
-    secondary (acquisitions, absent from the aggregatable-only ``_COLLECTION_KIND``)
-    via the full built-in class table, then descriptors via ``_collection_kind``."""
-    builtin_all = {c["collection"]: c["kind"]
-                   for c in _tstate.BUILTIN_TARGET_CLASSES.values()}
+    the "declare, don't wire" contract. Kind resolution goes through the FULL
+    ``collection_kind`` accessor (ms-109 e-5689) so the NON-aggregatable acquisition
+    secondary — dropped by the aggregatable-only ``_collection_kind`` — is covered."""
     out: list = []
     for coll in claim_target_collections(data):
-        kind = builtin_all.get(coll) or _collection_kind(data, coll)
+        kind = collection_kind(data, coll)
         if kind and kind not in out:
             out.append(kind)
     return tuple(out)
@@ -1311,8 +1309,15 @@ _COLLECTION_KIND = {
 
 
 def _collection_kind(data: dict | None, collection: str) -> str:
-    """Return the target-class ``kind`` for a collection: the built-in map, else
-    a descriptor whose ``collection`` matches (ms-122), else ``""``."""
+    """Return the target-class ``kind`` for a collection: the AGGREGATABLE built-in
+    map, else a descriptor whose ``collection`` matches (ms-122), else ``""``.
+
+    ⚠ Coverage is aggregatable-only: the non-aggregatable ``acquisitions`` resolves
+    to ``""`` here (it is absent from ``_COLLECTION_KIND``). This is correct for the
+    arm / manifest registries keyed to aggregatable collections, but a caller that
+    must cover EVERY claimable class (e.g. the claim surface) needs the full
+    ``collection_kind`` below — ms-109 e-5689 split them so the coverage gap is
+    named, not silent."""
     kind = _COLLECTION_KIND.get(collection, "")
     if kind:
         return kind
@@ -1321,6 +1326,24 @@ def _collection_kind(data: dict | None, collection: str) -> str:
                 and (desc.get("collection") or "").strip() == collection:
             return (desc.get("kind") or "").strip()
     return ""
+
+
+def collection_kind(data: dict | None, collection: str) -> str:
+    """Return the target-class ``kind`` for a collection across the FULL built-in
+    class table — INCLUDING non-aggregatable classes (``acquisitions`` → ``account``
+    獲得, which the aggregatable-only ``_collection_kind`` drops to ``""``) — else a
+    matching descriptor, else ``""`` (ms-109 e-5689).
+
+    The named "全量版" accessor: use this whenever a caller must map every CLAIMABLE
+    collection to its kind (``claim_target_kinds``), so a non-aggregatable class is
+    never silently lost. ``_collection_kind`` stays the aggregatable-scoped sibling
+    for the registries keyed to aggregatable collections; keeping two named
+    functions makes the coverage difference visible at the call site instead of a
+    trap the next reader steps in."""
+    for c in _tstate.BUILTIN_TARGET_CLASSES.values():
+        if c["collection"] == collection:
+            return c["kind"]
+    return _collection_kind(data, collection)   # descriptor fallback (else "")
 
 
 def _arm_roles_for(data: dict | None, collection: str) -> dict:

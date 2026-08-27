@@ -27,10 +27,18 @@ so fabricating an API layer would be dishonest (added in e-4701 for cloud).
     L_store   local persistence            — observed via raw project.json re-read
 
 Non-invasive by design (方針1 黒箱忠実度): observes only at boundaries
-(exit / stderr / stdout / raw-store re-read). It never imports or calls the
-code-under-test's engine (e.g. derive_ball) to compute an expectation —
-instrumenting would couple the debugger to the implementation and re-open the
-leak at the layer-prob level.
+(exit / stderr / stdout / raw-store re-read). It never calls the
+code-under-test's COMPUTATION engine (e.g. derive_ball) to compute an
+expectation — instrumenting would couple the debugger to the implementation and
+re-open the leak at the layer-prob level.
+
+The one shared-library dependency is ``occupation.iter_evidence`` (ms-109 e-5525
+/ e-5688): a STRUCTURAL, occupation-agnostic walk of the raw store's declared
+evidence arms. It reads the SAME bytes the store re-read already observes (no
+derivation, no phase/ball computation), so it stays within the boundary-observer
+contract while letting the injected-着信 probe cover every Target class instead of
+hardcoding sales collections. This is a read helper, NOT the engine whose output
+is under judgement.
 """
 
 from __future__ import annotations
@@ -69,8 +77,8 @@ def _load_raw_store(workdir: str) -> Optional[dict]:
         return None
 
 
-def _all_communications(store: dict) -> list:
-    """Every evidence record in the raw store — target-level AND the closure grain
+def _all_evidence(store: dict) -> list:
+    """Every EVIDENCE record in the raw store — target-level AND the closure grain
     nested under work items — read structurally, no engine call.
 
     ms-109 e-5525 (C9): enumerated through the occupation-agnostic evidence spine
@@ -78,17 +86,22 @@ def _all_communications(store: dict) -> list:
     communications/activities/nurturings walk, so an injected 擬似着信 is found for
     ANY Target class that declares a communications-style evidence arm — a
     data-defined occupation included — not just the two built-in sales collections.
-    The sole consumer (``_has_injected_communication``) keys on ``source.injected``,
-    which only an injected sales Communication carries, so surfacing dev commits
-    here (they never carry it) leaves the injection check invariant."""
+
+    Named ``_all_evidence`` (not ``_all_communications``, e-5688): the return set
+    widened from sales Communications to ALL evidence (a dev commit is evidence
+    too), so the honest name is the general one. The sole consumer
+    (``_has_injected_communication``) keys on ``source.injected``, which only an
+    injected sales Communication carries, so surfacing dev commits here (they never
+    carry it) leaves the injection check invariant."""
     return [ev for ev, _target, _arm in occupation.iter_evidence(store)]
 
 
 def _has_injected_communication(store: dict) -> bool:
-    """Structurally: does the raw store contain a擬似着信 (source.injected=True)?
-    Proof the injection persisted, without asking the engine."""
+    """Structurally: does the raw store contain a 擬似着信 (source.injected=True)?
+    Proof the injection persisted, without asking the engine. Scans all evidence
+    (``_all_evidence``); only an injected Communication carries ``source.injected``."""
     return any((c.get("source") or {}).get("injected")
-               for c in _all_communications(store))
+               for c in _all_evidence(store))
 
 
 def _diagnose_persona_cli(fstep: dict) -> dict:

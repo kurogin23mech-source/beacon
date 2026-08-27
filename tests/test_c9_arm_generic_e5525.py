@@ -4,7 +4,7 @@ kind / arm 参照を記述子駆動へ寄せた不変条件を pin する。
 対象 3 サイト:
   - occupation.claim_target_kinds — claimable kind 列挙を manifest 由来に
   - cmd_claim._canonical_target_kind — --target <kind> 検証を記述子 prefix 駆動に
-  - scenario_bisect._all_communications — 擬似着信検出を iter_evidence 経由に
+  - scenario_bisect._all_evidence — 擬似着信検出を iter_evidence 経由に
 
 いずれも「新 target-class (記述子 occupation) を足したとき取りこぼさない」ことが芯。
 """
@@ -103,10 +103,39 @@ def test_claim_target_kinds_subset_of_validatable():
 
 
 # --------------------------------------------------------------------------
-# scenario_bisect._all_communications
+# occupation.collection_kind — full (incl non-aggregatable) collection→kind
+# (PR#684 review finding 3b / e-5689)
 # --------------------------------------------------------------------------
 
-def test_all_communications_covers_sales_both_grains():
+def test_collection_kind_covers_non_aggregatable_acquisition():
+    """The full accessor resolves the non-aggregatable acquisitions collection that
+    the aggregatable-only _collection_kind drops to "" (the silent-loss trap the
+    two named functions make visible)."""
+    assert occ.collection_kind({}, "acquisitions") == "acquisition"
+    assert occ._collection_kind({}, "acquisitions") == ""   # sibling stays scoped
+
+
+def test_collection_kind_descriptor_and_unknown():
+    data = _ticket_project()
+    assert occ.collection_kind(data, "tickets") == "ticket"
+    assert occ.collection_kind({}, "nonesuch") == ""
+
+
+def test_out_of_scope_kinds_derivation():
+    """finding 3a: the claim view's out-of-scope hint is derived — the claim-protocol
+    kinds (claims._VALID_TARGET_KINDS) that this view does NOT surface are exactly
+    those with no canonical claimable kind (task / trek / free), not a hardcode."""
+    import claims
+    out = sorted(k for k in claims._VALID_TARGET_KINDS
+                 if not occ.canonical_claim_kind(k, {}))
+    assert out == ["free", "task", "trek"]
+
+
+# --------------------------------------------------------------------------
+# scenario_bisect._all_evidence
+# --------------------------------------------------------------------------
+
+def test_all_evidence_covers_sales_both_grains():
     """Preserves the built-in sales walk: target-level + nested under work items."""
     store = {
         "profession": "sales",
@@ -119,7 +148,7 @@ def test_all_communications_covers_sales_both_grains():
                       "nurturings": [{"id": "nrt-1",
                                       "communications": [{"id": "c4"}]}]}],
     }
-    ids = sorted(c.get("id") for c in sb._all_communications(store))
+    ids = sorted(c.get("id") for c in sb._all_evidence(store))
     assert ids == ["c1", "c2", "c3", "c4"]
 
 
