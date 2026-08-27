@@ -11,7 +11,7 @@
 
 使い方:
   python3 scripts/check-graph-drift.py                 # 生きた doc を照合
-  python3 scripts/check-graph-drift.py --nodes n.md --edges e.md   # ファイルを照合
+  python3 scripts/check-graph-drift.py --nodes-file n.md --edges-file e.md   # ファイルを照合
   python3 scripts/check-graph-drift.py --json          # 機械可読
 exit 0 = drift 無し / 1 = drift 有り / 2 = fatal / 3 = skip (beacon 本体でない)
 """

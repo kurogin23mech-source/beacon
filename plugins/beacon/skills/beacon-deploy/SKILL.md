@@ -243,6 +243,42 @@ beacon doc show application-map >/dev/null 2>&1 && echo "MAP_EXISTS" || echo "MA
 surface が明らかに変わっていない (= 文言修正 / infra 調整のみのデプロイ) と AI が判断できる場合は、
 提案自体を省いてよい (ノイズ抑制)。判断に迷うなら提案を出す (地図の腐敗より 1 行の確認の方が安い)。
 
+## Step 4.6: コード理解グラフ (code-graph) の 0-drift を確認し、ズレていれば再 seed を促す (ms-156 e-5628)
+
+デプロイ = ソースが世に出る節目。コード理解グラフ (code-graph = エージェントがコードを全部読まずに
+「どこに何があり・何に依存するか」を引くための module + 依存の投影) の機械層 (module node +
+depends-on / surfaces-as 辺) は **出荷したソースから導出** されるので、出荷で drift しうる。全貌マップと
+違いグラフは機械照合できるので、「変わったかも」で促すのではなく **実際に照合してからだけ** 促す
+(deploy record が `graph-reseed` trigger を残すのと同じ狙いの、ここは即時プロンプト版)。
+
+Bash ツールで実行 (fail-safe、この Step は判定に徹し自動では seed しない)。まず
+`scripts/check-graph-drift.py` の実在を確認する — 無ければこのプロジェクトは beacon 本体でない
+(= グラフを持たない) ので照合を明示スキップする (非 beacon で叩くと python が「ファイルを開けない」
+で EXIT=2 を返し fatal と誤読されるため、存在確認で先に分岐する):
+
+```bash
+if [ ! -f scripts/check-graph-drift.py ]; then echo "SKIP_NOT_BEACON"; else python3 scripts/check-graph-drift.py 2>&1; echo "EXIT=$?"; fi
+```
+
+- **SKIP_NOT_BEACON** (スクリプト不在 = beacon 本体でないプロジェクト) → 何もしない。
+- **EXIT=0** (drift 無し) → 何もしない。
+- **EXIT=1** (drift 有り) → 出力の書き漏れ (ソースに在るが graph に無い) / 幽霊 (graph に在るが
+  ソースに無い) を 1〜2 行に要約し、再 seed を促す:
+  ```
+  コード理解グラフが現在ソースとズレています (書き漏れ N / 幽霊 M)。
+  `python3 scripts/seed-code-graph.py --derive --update` で再 seed して 0-drift に戻しますか?
+    [再 seed する / 後で (deploy record が残した graph-reseed trigger が次の session-start で再掲します)]
+  ```
+  - **再 seed する** → コマンドを実行し、再度 `check-graph-drift.py` で 0-drift (EXIT=0) を確認する。
+  - **後で** → 何もしない。CLI 側が `graph-reseed` trigger を残しているので次の session-start で再度目に入る。
+- **EXIT が 2 以上** (グラフ doc を取得できない = cloud 障害 or グラフ未 seed、または引数エラー等で
+  照合できない) → drift 判定ではないので再 seed は促さず、何もしない。明らかに cloud 障害が疑われる
+  場合のみユーザーに 1 行報告する (未 seed / 非対象は沈黙。EXIT=2 を「fatal」と決めつけて cloud
+  incident を起票しない — 未 seed も同じ EXIT=2 に落ちる)。
+
+> このブロックは `/beacon-push` Step 4.6 と対。差分は「後で」の fallback 文言のみ — 共通部分
+> (照合コマンド・EXIT 解釈・促し文) を直したら push 版も同じく直す (deploy↔push 変種の手動同期点)。
+
 ## Step 5: トリガーチェック
 
 Bash ツールで実行:
