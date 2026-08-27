@@ -4,6 +4,12 @@
 Extracted verbatim from commands.py (god-module split). Depends only on
 commands_shared (upward) + leaf domain modules, never on commands.py — acyclic
 (SPEC 方針4). commands.py re-imports these names for dispatch + `commands.X`.
+
+C10 thin-action audit (ms-142 e-5527, spine §5): this family is the *pure
+record* case — every verb is ``core.incident_*`` (record L2) + local
+validation/filter/output (business L3), with **adapter = ∅** (no subprocess,
+no outward effect). Already in the target shape, so no port extraction is
+needed; recorded here as audited-and-conformant, not skipped.
 """
 
 import json

@@ -27,6 +27,9 @@ import subprocess
 import sys
 
 import core
+import cloud_run_port
+import git_read_port
+import git_write_port
 from store import get_store
 from commands_shared import (
     load_project,
@@ -35,6 +38,12 @@ from commands_shared import (
     _project_id_for_ops,
     _application_map_applies,
 )
+
+# ms-142 e-5527 (spine §5): the outward `git` calls that assemble/ship a deploy
+# record live behind the git ports. Read-only introspection (rev-parse / log)
+# → git_read_port; mutation (tag / force-tag / force-push) → git_write_port.
+# The handlers keep record(L2) + business(L3) incl. the best-effort marker
+# policy. gcloud (cmd_deploy_rollback) is a separate tool → follow-up vine 4b.
 
 
 def _fire_map_reconcile_trigger() -> None:
@@ -196,15 +205,13 @@ def _update_deployed_prod_marker(rev, json_mode=False):
     push failure would recreate the exact marker-drift the monitor exists to
     catch (AX review 2026-07-30). In non-JSON mode it also prints a human line.
     """
-    import subprocess as _sp
     result = {"rev": (rev or "").strip(), "updated": False, "error": None}
     rev = result["rev"]
     if not rev:
         result["error"] = "no rev to mark"
         return result
     try:
-        _sp.run(["git", "tag", "-f", "deployed-prod", rev],
-                check=True, capture_output=True, text=True, timeout=10)
+        git_write_port.tag_force("deployed-prod", rev, timeout=10)
     except Exception as e:  # noqa: BLE001 — best-effort, never fail the record
         result["error"] = f"tag failed: {e}"
         if not json_mode:
@@ -212,8 +219,7 @@ def _update_deployed_prod_marker(rev, json_mode=False):
                   f"監視は次回の記録で追随します。")
         return result
     try:
-        _sp.run(["git", "push", "-f", "origin", "deployed-prod"],
-                check=True, capture_output=True, text=True, timeout=30)
+        git_write_port.push_tag_force("origin", "deployed-prod", timeout=30)
         result["updated"] = True
         if not json_mode:
             print(f"  deployed-prod → {rev} (deploy-health 監視の基準を更新)")
@@ -227,7 +233,6 @@ def _update_deployed_prod_marker(rev, json_mode=False):
 
 def cmd_deploy_record():
     """Record a deployment entry (major or minor) based on recent commits."""
-    import subprocess as _sp
     mode = os.environ.get("BEACON_MODE", "")          # "prepare" or "finalize" or ""
     revision = os.environ.get("BEACON_REVISION", "")
     semver = os.environ.get("BEACON_SEMVER", "")
@@ -261,10 +266,7 @@ def cmd_deploy_record():
     # Resolve the target hash (short form)
     if deploy_hash:
         try:
-            deploy_hash = _sp.check_output(
-                ["git", "rev-parse", "--short", deploy_hash],
-                stderr=_sp.DEVNULL, text=True
-            ).strip()
+            deploy_hash = git_read_port.rev_parse_short(deploy_hash)
         except Exception:
             pass
 
@@ -280,27 +282,12 @@ def cmd_deploy_record():
 
     # Collect commits in the range prev_hash..after_hash
     try:
-        if prev_hash:
-            log_out = _sp.check_output(
-                ["git", "log", f"{prev_hash}..{after_hash}", "--format=%H %s"],
-                stderr=_sp.DEVNULL, text=True
-            ).strip()
-        else:
-            log_out = _sp.check_output(
-                ["git", "log", after_hash, "--format=%H %s", "-50"],
-                stderr=_sp.DEVNULL, text=True
-            ).strip()
+        new_commits = git_read_port.log_commits(prev_hash, after_hash, 50)
     except Exception:
-        log_out = ""
+        new_commits = []
 
-    new_commits = []
-    for line in log_out.splitlines():
-        if line.strip():
-            parts = line.split(" ", 1)
-            new_commits.append({"hash": parts[0][:7], "message": parts[1] if len(parts) > 1 else ""})
-
-    head_hash = deploy_hash or (new_commits[0]["hash"] if new_commits else _sp.check_output(
-        ["git", "rev-parse", "--short", "HEAD"], text=True).strip())
+    head_hash = deploy_hash or (new_commits[0]["hash"] if new_commits
+                                else git_read_port.rev_parse_short("HEAD"))
 
     # Map commit hashes to milestones via beacon entries
     commit_hashes = [c["hash"] for c in new_commits]
@@ -443,10 +430,10 @@ def cmd_deploy_record():
         data.setdefault("releases", []).append(release_entry)
         # Create git tag
         try:
-            _sp.run(["git", "tag", semver], check=True, capture_output=True)
+            git_write_port.tag(semver)
             if not json_mode:
                 print(f"Tagged: {semver}")
-        except _sp.CalledProcessError:
+        except subprocess.CalledProcessError:
             if not json_mode:
                 print(f"Warning: git tag {semver} already exists or failed")
 
@@ -609,11 +596,9 @@ def cmd_deploy_rollback():
         sys.exit(1)
 
     region = current.get("region", "") or os.environ.get("BEACON_REGION", "asia-northeast1")
-    gcloud_cmd = [
-        "gcloud", "run", "services", "update-traffic", service,
-        f"--to-revisions={prev_rev}=100",
-        f"--region={region}",
-    ]
+    # Outward Cloud Run call lives behind cloud_run_port (ms-142 e-5527). The port
+    # builds the exact argv we display below, so "shown == run" (audit-first).
+    gcloud_cmd = cloud_run_port.update_traffic_argv(service, prev_rev, region)
     cmd_str = " ".join(gcloud_cmd)
 
     print(f"Rolling back {service}:")
@@ -624,7 +609,7 @@ def cmd_deploy_rollback():
 
     if execute:
         print("=> executing gcloud command...")
-        r = subprocess.run(gcloud_cmd)
+        r = cloud_run_port.execute(gcloud_cmd)
         if r.returncode != 0:
             print("Error: gcloud command failed; deploy record NOT voided.", file=sys.stderr)
             sys.exit(r.returncode)

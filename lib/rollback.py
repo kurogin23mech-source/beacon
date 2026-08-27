@@ -35,6 +35,20 @@ The actual `beacon rollback` CLI lives in lib/commands.py; this module
 holds the pure logic so it can be unit-tested without standing up a
 real git repo for every assertion (the tests use a tmp_path repo for
 the integration paths and direct function calls for the rest).
+
+C10 thin-action audit (ms-142 e-5527, spine §5): this module is class C
+(pure machinery) — it has **no record(L2) layer** (never touches the
+ledger / save_project) and its git adapter is **already isolated** in the
+single ``_git`` seam, with read (``inspect_repo_state``) and write
+(``execute_rollback``) separated at the function boundary. So it is
+already in the target record/business/adapter shape. It deliberately does
+NOT route through the shared ``git_read_port`` / ``git_write_port``: those
+declare a *raise-on-failure*, cwd-less contract for the record-carrying
+handlers, whereas rollback needs a *returncode-tolerant, cwd-scoped* git
+seam (it inspects ``returncode`` to classify state and drives tmp_path
+repos in tests). ``_git`` is that local adapter. Consolidating the two
+idioms into one port would fracture the port API for no behavioral gain,
+so this seam is audited-and-conformant, not merged.
 """
 
 from __future__ import annotations

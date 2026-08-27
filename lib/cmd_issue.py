@@ -11,32 +11,13 @@ import os
 import sys
 
 import core
+import gh_port
 from commands_shared import load_project, save_project
 
-
-def _gh_issue_fetch(number: int) -> dict:
-    """Fetch a single GitHub issue via gh CLI. Returns dict or raises."""
-    import subprocess as _sp
-    result = _sp.run(
-        ["gh", "issue", "view", str(number), "--json", "number,title,body,url,labels,state"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or f"gh issue view {number} failed")
-    return json.loads(result.stdout)
-
-
-def _gh_issues_list(state: str = "open") -> list:
-    """List GitHub issues via gh CLI. Returns list of dicts."""
-    import subprocess as _sp
-    result = _sp.run(
-        ["gh", "issue", "list", "--state", state, "--limit", "200",
-         "--json", "number,title,body,url,labels,state"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "gh issue list failed")
-    return json.loads(result.stdout)
+# gh forge calls live behind gh_port (ms-142 e-5527, spine §5): the outward
+# `gh` subprocess is the adapter, the handlers below keep only the record(L2) +
+# business(L3) halves. Tests swap the adapter via gh_port.set_adapter / stub
+# gh_port.issue_view.
 
 
 def cmd_issue_import():
@@ -55,7 +36,7 @@ def cmd_issue_import():
         sys.exit(1)
 
     try:
-        issue = _gh_issue_fetch(number)
+        issue = gh_port.issue_view(number)
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -89,7 +70,7 @@ def cmd_issue_list():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     try:
-        issues = _gh_issues_list("open")
+        issues = gh_port.issue_list("open")
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -115,7 +96,7 @@ def cmd_issue_sync():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     try:
-        issues = _gh_issues_list("open")
+        issues = gh_port.issue_list("open")
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
