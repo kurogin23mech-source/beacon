@@ -48,6 +48,34 @@ import target_state as _tstate    # ms-142 e-5157: 宣言的 state model + phase
 
 DEFAULT_PROFESSION = "dev"
 
+# Built-in profession aliases → canonical name. The only one today is
+# back-office ↔ backoffice (ms-122). Kept as data so ``normalize_profession``
+# is the single place that knows the alias set.
+_PROFESSION_ALIASES = {"back-office": "backoffice"}
+
+
+def normalize_profession(profession: str | None) -> str:
+    """Canonical profession name for a RAW value: strip / lower, empty → the
+    default (``dev``), and resolve built-in aliases (``back-office`` →
+    ``backoffice``). The home for normalising a RAW profession value at the
+    front-door accessors and the composition seam — ``init_display`` /
+    ``profession_next_hint`` / ``onboarding_plan`` / ``build_new_project`` /
+    ``resolve_profession`` all call here, so they select the same branch for a
+    raw value; the idiom used to be copied across those 5 spots, half with a
+    ``"dev"`` literal and half with ``DEFAULT_PROFESSION`` (PR #687 保守性/AX
+    consensus, e-5712). Resolving the alias here also fixes a latent gap:
+    ``onboarding_plan("back-office")`` used to fall through to the GENERIC plan
+    because the dict was keyed on the canonical name only.
+
+    NOT yet repo-wide: a few data-path sites read an already-canonical STORED
+    profession and still hand-normalise without alias resolution
+    (``sales_entities`` / ``target_descriptor.profession_default_descriptors``).
+    They never see a raw alias today, so this is a debt sweep (e-5718), not a
+    live bug — the docstring scopes the guarantee honestly rather than claiming a
+    repo-wide single home it does not yet have (PR #688 保守性 finding2)."""
+    prof = (profession or "").strip().lower() or DEFAULT_PROFESSION
+    return _PROFESSION_ALIASES.get(prof, prof)
+
 
 # ---------------------------------------------------------------------------
 # Descriptor-derived registry augmentation (ms-122 e-3957).
@@ -102,8 +130,7 @@ def resolve_profession(data: dict) -> str:
     normalised to lower case. Missing / blank defaults to ``"dev"`` so legacy
     projects (written before the profession field existed) keep the
     development projection."""
-    return (data.get("profession") or DEFAULT_PROFESSION).strip().lower() \
-        or DEFAULT_PROFESSION
+    return normalize_profession(data.get("profession"))
 
 
 def build_new_project(name: str, objective: str, profession: str, *,
@@ -148,18 +175,21 @@ def build_new_project(name: str, objective: str, profession: str, *,
     # the profession field AND the adopted-set lookup agree — otherwise a blank
     # profession yields a "dev" project whose adopted set is empty (missing
     # release): the latent inconsistency the seam unit-test surfaced (PR #669 AX #2).
-    profession = (profession or "").strip().lower() or "dev"
+    profession = normalize_profession(profession)
     if profession == "sales":
         data = sales_entities.build_sales_project(
             name, objective, retro_day=retro_day,
             disclosure_policy=disclosure_policy)
-    elif profession in ("backoffice", "back-office"):
+    elif profession == "backoffice":
         # ms-122 e-3958: back-office's target-classes (契約 / 評価 / 月次決算 /
         # 勤怠ウォッチ) come from a descriptor seed, not a code container.
+        # (``back-office`` alias already resolved by normalize_profession, so the
+        # branch matches the canonical name only — alias knowledge lives once, in
+        # _PROFESSION_ALIASES, not here. PR #688 保守性 finding1 / e-5712.)
         data = backoffice_seed.build_backoffice_project(
             name, objective, retro_day=retro_day,
             disclosure_policy=disclosure_policy)
-    elif profession in ("", "dev"):
+    elif profession == "dev":  # empty already coalesced to "dev" by normalize_profession
         data = {
             "name": name,
             "objective": objective,
@@ -229,19 +259,14 @@ def profession_next_hint(profession: str) -> str:
     composition seam (strip / lower, empty → ``dev``) and the ``back-office``
     alias resolves to the backoffice branch, so all callers select the same
     branch for a raw value."""
-    profession = (profession or "").strip().lower() or "dev"
-    if profession == "sales":
-        return "beacon account add / beacon opportunity add"
-    if profession in ("backoffice", "back-office"):
-        return ("beacon target create --class contract --label <名前> "
-                "--field counterparty=<相手方>")
-    # `profession` is already normalised (empty → "dev") above, so a bare
-    # `== "dev"` is exhaustive here — no dead "" element (PR #686 AX/保守性).
-    if profession == "dev":
-        return "beacon milestone add"
-    # data-defined profession (ms-124 e-4091): no target-classes yet
+    prof = normalize_profession(profession)
+    entry = _PROFESSION_FRONT_DOOR.get(prof)
+    if entry is not None:
+        return entry["next_hint"]
+    # data-defined profession (ms-124 e-4091): no built-in entry — the next
+    # action is to declare its first target-class.
     return ("beacon target-class add --kind <種類> --label <名前> "
-            f"--profession {profession} --type single-shot "
+            f"--profession {prof} --type single-shot "
             "--id-prefix <pfx-> --collection <coll>")
 
 
@@ -263,29 +288,14 @@ def init_display(profession: str) -> dict:
 
     ``profession`` is normalised the same way as the seam (strip / lower, empty
     → ``dev``) so both agree on which branch a raw value selects."""
-    profession = (profession or "").strip().lower() or "dev"
-    next_hint = "Next: " + profession_next_hint(profession)
-    if profession == "sales":
-        return {
-            "schema_label": "profession = sales (営業スキーマ: opportunities / accounts)",
-            "next_hint": next_hint,
-        }
-    if profession in ("backoffice", "back-office"):
-        return {
-            "schema_label": "profession = backoffice (記述子で定義: 契約 / 評価 / "
-                            "月次決算 / 勤怠ウォッチ)",
-            "next_hint": next_hint,
-        }
-    # `profession` is already normalised (empty → "dev") above, so a bare
-    # `== "dev"` is exhaustive here — no dead "" element (PR #686 AX/保守性).
-    if profession == "dev":
-        return {
-            "schema_label": "",  # dev prints no schema-label line
-            "next_hint": next_hint,
-        }
+    prof = normalize_profession(profession)
+    next_hint = "Next: " + profession_next_hint(prof)
+    entry = _PROFESSION_FRONT_DOOR.get(prof)
+    if entry is not None:
+        return {"schema_label": entry["schema_label"], "next_hint": next_hint}
     # data-defined profession (ms-124 e-4091): no target-classes yet
     return {
-        "schema_label": f"profession = {profession} (記述子で定義: target-class 未登録)",
+        "schema_label": f"profession = {prof} (記述子で定義: target-class 未登録)",
         "next_hint": next_hint,
     }
 
@@ -739,19 +749,24 @@ def is_valid_link_target(data: dict, target_id: str) -> bool:
 #                 (every occupation needs a north star) but its label/help is
 #                 occupation-specific; occupation-only fields ride after it.
 #
-# The plan's ``next_hint`` (the first real action after init) is NOT stored here
-# per entry — it is filled in by ``onboarding_plan`` from ``profession_next_hint``
-# so init's "Next:" and the skill's plan share ONE source and can't drift
-# (e-5706; a stored copy here had already diverged from cmd_init, PR #686 保守性
-# finding1). Entries below carry only ``vision_role`` + ``ask``.
+# e-5712 (PR #687 保守性): this is the ONE per-profession front-door table. Each
+# built-in entry carries EVERYTHING the front door surfaces about an occupation
+# — the init ``schema_label`` line (``""`` for dev, which prints none), the
+# ``next_hint`` (bare command for the first action after init), the
+# ``vision_role``, and the ``ask`` fields. ``profession_next_hint`` /
+# ``init_display`` / ``onboarding_plan`` all DERIVE from here, so adding a
+# built-in occupation is ONE entry, not three edits across two if-chains and a
+# separate dict. init's "Next:" (``"Next: " + next_hint``) and the skill's plan
+# share this one ``next_hint`` so they can't drift (e-5706). A data-defined
+# occupation has NO entry — the GENERIC fallbacks below render a sane plan /
+# label / hint from its name (descriptor-only, no code change).
 #
-# dev's plan reproduces the existing dev onboarding verbatim (AC2: dev init
-# 不変). Adding an occupation = adding one entry here (or, for a data-defined
-# occupation, the GENERIC fallback below already yields a sane render-only plan
-# with no code change — same descriptor-fallback contract as project_targets).
+# dev reproduces the existing dev onboarding verbatim (AC2: dev init 不変).
 
-_ONBOARDING_PLANS: dict = {
+_PROFESSION_FRONT_DOOR: dict = {
     "dev": {
+        "schema_label": "",  # dev prints no schema-label line
+        "next_hint": "beacon milestone add",
         "vision_role": "何を作り、誰をどんな状態にするか — プロダクトの北極星"
                        "（セッションをまたいで判断の基準になるゴール宣言）",
         "ask": [
@@ -777,6 +792,8 @@ _ONBOARDING_PLANS: dict = {
         ],
     },
     "sales": {
+        "schema_label": "profession = sales (営業スキーマ: opportunities / accounts)",
+        "next_hint": "beacon account add / beacon opportunity add",
         "vision_role": "営業の狙い — 対象顧客・注力領域・達成したい成果"
                        "（商談を前に進める判断の基準）",
         "ask": [
@@ -796,6 +813,10 @@ _ONBOARDING_PLANS: dict = {
         ],
     },
     "backoffice": {
+        "schema_label": "profession = backoffice (記述子で定義: 契約 / 評価 / "
+                        "月次決算 / 勤怠ウォッチ)",
+        "next_hint": "beacon target create --class contract --label <名前> "
+                     "--field counterparty=<相手方>",
         "vision_role": "担当業務の範囲と目的 — 何を回し、何を守るか",
         "ask": [
             {
@@ -845,17 +866,14 @@ def onboarding_plan(profession: str) -> dict:
     ``next_hint`` is sourced from ``profession_next_hint`` (the single home shared
     with ``init_display``), NOT stored per plan entry, so the skill's rendered
     next action can't drift from init's "Next:" line (e-5706)."""
-    prof = (profession or DEFAULT_PROFESSION).strip().lower() or DEFAULT_PROFESSION
-    plan = _ONBOARDING_PLANS.get(prof)
-    if plan is None:
-        plan = dict(_GENERIC_ONBOARDING_PLAN)
-    out = {
+    prof = normalize_profession(profession)
+    plan = _PROFESSION_FRONT_DOOR.get(prof, _GENERIC_ONBOARDING_PLAN)
+    return {
         "profession": prof,
         "vision_role": plan["vision_role"],
         "ask": [dict(f) for f in plan["ask"]],
         "next_hint": profession_next_hint(prof),
     }
-    return out
 
 
 # ---------------------------------------------------------------------------
