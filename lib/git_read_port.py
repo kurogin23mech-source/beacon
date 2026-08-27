@@ -109,17 +109,30 @@ def get_adapter() -> GitReadAdapter:
 # --- port surface: the thin IF Beacon declares ----------------------------
 
 def current_branch() -> str:
-    """Current branch (rev-parse --abbrev-ref HEAD). Raises on failure."""
+    """Current branch (rev-parse --abbrev-ref HEAD). RAISES on git failure, and
+    returns the literal "HEAD" on a detached HEAD. Prefer this when you want a
+    git failure to surface as an exception; use branch_show_current() when you
+    want the soft-fail contract instead."""
     return _adapter.current_branch()
 
 
 def branch_show_current(timeout: int = 5) -> str:
-    """Current branch via `git branch --show-current` (empty on detached HEAD)."""
+    """Current branch via `git branch --show-current`. Returns "" on a detached
+    HEAD **and on any git failure** (no repo / no git / git error) — this method
+    is returncode-agnostic and NEVER raises for a git-level error, so a caller
+    cannot distinguish "detached HEAD" from "git broken"; wrap in try/except only
+    if you need to observe process-launch errors (FileNotFoundError etc.). This
+    soft-fail contract is deliberate (it preserves the PR-create MS-inference
+    call site's original behavior); current_branch() is the raise-on-failure
+    sibling. (PR #690 independent review: contract promoted to the port surface.)"""
     return _adapter.branch_show_current(timeout)
 
 
 def log_subjects(limit: int, timeout: int = 5) -> list:
-    """Last ``limit`` commit subject lines (git log --pretty=%s)."""
+    """Last ``limit`` commit subject lines (git log --pretty=%s). Returncode-
+    agnostic like branch_show_current(): returns [] on any git failure without
+    raising a git-level error (callers treat empty as "no signal"). Contrast
+    log_commits(), which returns list[dict] and raises on failure."""
     return _adapter.log_subjects(limit, timeout)
 
 

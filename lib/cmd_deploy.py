@@ -609,7 +609,7 @@ def cmd_deploy_rollback():
 
     if execute:
         print("=> executing gcloud command...")
-        r = cloud_run_port.run(gcloud_cmd)
+        r = cloud_run_port.execute(gcloud_cmd)
         if r.returncode != 0:
             print("Error: gcloud command failed; deploy record NOT voided.", file=sys.stderr)
             sys.exit(r.returncode)

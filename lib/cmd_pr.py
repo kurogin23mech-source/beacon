@@ -27,10 +27,13 @@ two modules:
       `from commands_shared import name` binds an independent copy), so
       `monkeypatch.setattr(commands, "load_project", ...)` is a silent no-op on
       this call path. Patch `cmd_pr.load_project` instead. The outward gh/git
-      calls now live behind the ports (ms-142 e-5527): stub `gh_port` (pr_view /
-      pr_list_all / run) and `git_read_port` (branch_show_current / log_subjects),
-      or — since those ports call `subprocess.run` on the shared subprocess
-      module — patch `commands.subprocess.run` and dispatch by argv (both work).
+      calls now live behind the ports (ms-142 e-5527): the CANONICAL stub is at
+      the port surface — `monkeypatch.setattr(gh_port, "pr_view", ...)` /
+      `git_read_port.branch_show_current` etc (stubs the declared contract, stays
+      stable across adapter changes). Patching `commands.subprocess.run` and
+      dispatching by argv also works (the ports call the shared subprocess
+      module) and is what older tests do, but prefer the port surface for new
+      tests. (PR #690 review: one path declared canonical.)
   (b) TRIGGER-DIR stubs (_get_triggers_dir): the review-due trigger helpers
       (_fire_review_due_for_pr / _fire_pr_open_review_triggers /
       _clear_pr_open_review_triggers / ...) are DEFINED in commands_shared and

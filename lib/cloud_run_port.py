@@ -23,7 +23,7 @@ class CloudRunAdapter(Protocol):
 
     def update_traffic_argv(self, service: str, revision: str, region: str) -> list: ...
 
-    def run(self, argv: list) -> subprocess.CompletedProcess: ...
+    def execute(self, argv: list) -> subprocess.CompletedProcess: ...
 
 
 class GcloudCloudRunAdapter:
@@ -37,8 +37,18 @@ class GcloudCloudRunAdapter:
             f"--region={region}",
         ]
 
-    def run(self, argv: list) -> subprocess.CompletedProcess:
-        """Execute a prepared gcloud argv (the one the handler already displayed)."""
+    def execute(self, argv: list) -> subprocess.CompletedProcess:
+        """Execute a prepared gcloud argv (the one the handler already displayed).
+
+        Deliberately does NOT capture output — gcloud streams its progress
+        straight to the user's terminal (the rollback UX shows it live). This is
+        why the entry point is named ``execute`` and not ``run``: unlike
+        ``gh_port.run`` (which captures stdout to parse a PR URL), the returned
+        CompletedProcess here has ``stdout``/``stderr`` == None. Callers read
+        only ``returncode``. (Independent AX/maintainability review of PR #690
+        flagged the identical-signature ``run`` on both ports as a false
+        equivalence; the rename + this note is the fix — adding capture_output
+        would break the live streaming.)"""
         return subprocess.run(argv)
 
 
@@ -62,6 +72,7 @@ def update_traffic_argv(service: str, revision: str, region: str) -> list:
     return _adapter.update_traffic_argv(service, revision, region)
 
 
-def run(argv: list) -> subprocess.CompletedProcess:
-    """Execute a prepared argv. Returns CompletedProcess (caller checks returncode)."""
-    return _adapter.run(argv)
+def execute(argv: list) -> subprocess.CompletedProcess:
+    """Execute a prepared argv, streaming output to the terminal (no capture).
+    Returns CompletedProcess (caller checks returncode; stdout/stderr are None)."""
+    return _adapter.execute(argv)

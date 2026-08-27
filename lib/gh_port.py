@@ -126,5 +126,8 @@ def pr_list_all() -> list:
 
 
 def run(argv: list) -> subprocess.CompletedProcess:
-    """Execute a prepared gh argv. Returns CompletedProcess (caller checks returncode)."""
+    """Execute a prepared gh argv, CAPTURING stdout/stderr as text (so the caller
+    can parse e.g. the created PR URL). Returns CompletedProcess. Note: this
+    captures, whereas cloud_run_port.execute() streams to the terminal — the two
+    are intentionally different, hence the different names (PR #690 review)."""
     return _adapter.run(argv)
