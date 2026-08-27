@@ -254,3 +254,36 @@ def test_backoffice_and_data_defined_next_hints_carry_the_full_form():
     legal = occupation.onboarding_plan("legal")["next_hint"]
     assert "--profession legal" in legal          # profession interpolated
     assert legal.startswith("beacon target-class add --kind")
+
+
+def test_normalize_profession_is_the_one_home():
+    # e-5712: normalize_profession is the single normaliser — strip/lower, empty
+    # → dev, and the back-office alias resolves to canonical backoffice. Pin all
+    # three behaviours so a future default/alias change lives in one place.
+    assert occupation.normalize_profession("  SALES ") == "sales"
+    assert occupation.normalize_profession("") == "dev"
+    assert occupation.normalize_profession(None) == "dev"
+    assert occupation.normalize_profession("back-office") == "backoffice"
+    assert occupation.normalize_profession("Back-Office") == "backoffice"
+    assert occupation.normalize_profession("legal") == "legal"  # data-defined passthrough
+
+
+def test_front_door_table_is_single_source_for_all_three_accessors():
+    # e-5712 (PR #687 保守性): schema_label / next_hint / vision_role+ask all come
+    # from ONE per-profession table. For every built-in, the three accessors must
+    # agree with the table (and with each other), so a new occupation is one entry.
+    for prof, entry in occupation._PROFESSION_FRONT_DOOR.items():
+        assert occupation.init_display(prof)["schema_label"] == entry["schema_label"]
+        assert occupation.profession_next_hint(prof) == entry["next_hint"]
+        assert occupation.onboarding_plan(prof)["vision_role"] == entry["vision_role"]
+        # init's "Next:" is exactly the shared next_hint with the prefix.
+        assert occupation.init_display(prof)["next_hint"] \
+            == "Next: " + occupation.onboarding_plan(prof)["next_hint"]
+
+
+def test_back_office_alias_reaches_backoffice_plan():
+    # e-5712 fixed a latent gap: onboarding_plan keyed on the canonical name only,
+    # so the "back-office" alias used to fall through to the GENERIC plan. Now
+    # normalize_profession resolves it, so all three accessors agree for the alias.
+    assert occupation.onboarding_plan("back-office") == occupation.onboarding_plan("backoffice")
+    assert occupation.init_display("back-office") == occupation.init_display("backoffice")
