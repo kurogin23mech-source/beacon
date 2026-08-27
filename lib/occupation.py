@@ -208,6 +208,55 @@ def build_new_project(name: str, objective: str, profession: str, *,
     return data
 
 
+def init_display(profession: str) -> dict:
+    """Return the user-facing feedback strings for ``beacon init <profession>``:
+    the schema-label line shown after ``Created`` (``""`` for dev, which prints
+    no label) and the ``Next:`` hint. This is the DISPLAY twin of
+    ``build_new_project``'s composition branch: it moves cmd_init's
+    profession→feedback mapping out of the CLI command so ``cmd_init`` prints
+    the returned strings WITHOUT re-branching on profession literals (ms-150
+    e-5465; the alias set was drifting between the composition seam and the
+    CLI's print block, PR #669 保守性#2).
+
+    NOT yet the sole home for ``profession → next action``: ``_ONBOARDING_PLANS``
+    (the /beacon-onboard skill's plan table below) also carries a per-profession
+    ``next_hint`` that its header comment says "mirrors cmd_init's Next:", and the
+    two already differ (backoffice / data-defined). Unifying those two next-hint
+    sources is a follow-up (e-5706); this seam only removes the cmd_init-internal
+    display branch, so the docstring must not over-claim a repo-wide single source
+    (PR #686 保守性 finding1).
+
+    ``profession`` is normalised the same way as the seam (strip / lower, empty
+    → ``dev``) so both agree on which branch a raw value selects."""
+    profession = (profession or "").strip().lower() or "dev"
+    if profession == "sales":
+        return {
+            "schema_label": "profession = sales (営業スキーマ: opportunities / accounts)",
+            "next_hint": "Next: beacon account add / beacon opportunity add",
+        }
+    if profession in ("backoffice", "back-office"):
+        return {
+            "schema_label": "profession = backoffice (記述子で定義: 契約 / 評価 / "
+                            "月次決算 / 勤怠ウォッチ)",
+            "next_hint": "Next: beacon target create --class contract --label <名前> "
+                         "--field counterparty=<相手方>",
+        }
+    # `profession` is already normalised (empty → "dev") above, so a bare
+    # `== "dev"` is exhaustive here — no dead "" element (PR #686 AX/保守性).
+    if profession == "dev":
+        return {
+            "schema_label": "",  # dev prints no schema-label line
+            "next_hint": "Next: beacon milestone add",
+        }
+    # data-defined profession (ms-124 e-4091): no target-classes yet
+    return {
+        "schema_label": f"profession = {profession} (記述子で定義: target-class 未登録)",
+        "next_hint": "Next: beacon target-class add --kind <種類> --label <名前> "
+                     f"--profession {profession} --type single-shot "
+                     "--id-prefix <pfx-> --collection <coll>",
+    }
+
+
 def effective_descriptors(data: dict | None) -> list:
     """Return the target-class descriptors the registry read-paths should see:
     the project's PROFESSION-DEFAULT descriptors (built-ins modelled as data —

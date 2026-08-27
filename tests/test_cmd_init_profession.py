@@ -189,3 +189,38 @@ def test_seam_empty_profession_is_dev():
     data = occupation.build_new_project("p", "obj", "")
     assert data["profession"] == "dev"
     assert data["adopted_target_classes"] == ["release"]
+
+
+def test_init_display_single_source_mapping():
+    # ms-150 e-5465: occupation.init_display is the ONE home for the
+    # profession → user-feedback strings (schema label + "Next:" hint) that
+    # cmd_init used to branch on with profession literals. Pin each branch so a
+    # future edit cannot drift the CLI feedback from the composition seam.
+    dev = occupation.init_display("dev")
+    assert dev["schema_label"] == ""            # dev prints no schema-label line
+    assert dev["next_hint"] == "Next: beacon milestone add"
+
+    sales = occupation.init_display("sales")
+    assert "profession = sales" in sales["schema_label"]
+    assert sales["next_hint"] == "Next: beacon account add / beacon opportunity add"
+
+    back = occupation.init_display("back-office")   # alias resolves to canonical
+    assert "profession = backoffice" in back["schema_label"]
+    assert "beacon target create" in back["next_hint"]
+
+    legal = occupation.init_display("legal")        # data-defined occupation
+    assert "profession = legal" in legal["schema_label"]
+    assert "beacon target-class add" in legal["next_hint"]
+
+
+def test_init_display_agrees_with_the_seam_on_raw_values():
+    # The display and the composition seam must select the SAME profession for a
+    # raw value, else init could show a hint for one profession while the project
+    # is built as another (the drift PR #669 保守性#2 was about). Drive BOTH from
+    # the same raw inputs: init_display(raw) must equal the display for the
+    # canonical profession build_new_project actually resolves raw to. This
+    # exercises build_new_project (the earlier version compared init_display to
+    # itself and never touched the seam — false safety, PR #686 保守性 finding2).
+    for raw in ("  SALES  ", "", "Back-Office", "dev", "legal"):
+        canonical = occupation.build_new_project("p", "o", raw)["profession"]
+        assert occupation.init_display(raw) == occupation.init_display(canonical)
