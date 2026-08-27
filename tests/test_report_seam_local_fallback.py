@@ -130,7 +130,10 @@ def test_cmd_log_stdout_contract(local_project, monkeypatch, capsys):
 def test_cmd_issue_import_stdout_contract(local_project, monkeypatch, capsys):
     """``beacon issue import`` stdout is stable: ``Imported Issue #N → [eid]: title``.
     The GitHub fetch is stubbed so the test stays local + offline."""
-    monkeypatch.setattr(cmd_issue, "_gh_issue_fetch", lambda number: {
+    # The gh fetch now lives behind gh_port (ms-142 e-5527, spine §5); stub the
+    # port so the test stays local + offline.
+    import gh_port
+    monkeypatch.setattr(gh_port, "issue_view", lambda number: {
         "url": "https://github.com/o/r/issues/9", "title": "Stubbed issue",
         "body": "b", "state": "OPEN"})
     monkeypatch.setenv("BEACON_ISSUE_NUMBER", "9")
