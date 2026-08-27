@@ -39,19 +39,29 @@ def migrate_json_to_sqlite(project_file: str, db_path: str, *,
     with open(project_file, "r", encoding="utf-8") as f:
         original = json.load(f)
 
+    # Construct with the db path so migration does NOT rewrite the project.json
+    # mirror — it stays as the operator's original file until a normal command
+    # writes the mirror. (Passing project_file here would overwrite it with the
+    # store's projection mid-migration, which rippled through many tests that
+    # read project.json directly.)
     store = SqliteStore(db_path)
-    store.apply(lambda _current: (original, None), validate=False)
+    # populate_if_empty is concurrency-safe: when several processes start on a
+    # fresh project at once, exactly one populates and the rest skip (they see
+    # rows). ``migrated`` reflects whether THIS call did the populate; ``restored``
+    # is the read-back taken WHILE holding the write lock, so verification below
+    # compares against exactly what was written — not a live re-read that a
+    # concurrent writer's appends could make look like "unexpected entries".
+    migrated, restored = store.populate_if_empty(original)
 
     # The report shape is CONSTANT across the verify / no-verify paths so a
     # caller never has to branch on which keys exist. ``verified`` is tri-state:
-    # True (ran, matched) / False (ran, mismatch) / None (verify was skipped) —
-    # so ``report.get("verified")`` cannot confuse a skipped check with a failed
-    # one, and a bare ``report["verified"]`` never KeyErrors.
-    report: dict[str, Any] = {"migrated": True, "db_path": db_path,
+    # True (ran, matched) / False (ran, mismatch) / None (verify skipped OR
+    # another process already migrated) — so ``report.get("verified")`` never
+    # confuses those, and a bare ``report["verified"]`` never KeyErrors.
+    report: dict[str, Any] = {"migrated": migrated, "db_path": db_path,
                               "project_file": project_file,
                               "verified": None, "verification": None}
-    if verify:
-        restored = store.load_project()
+    if migrated and verify:
         verification = verify_migration(original, restored)
         report["verification"] = verification
         report["verified"] = verification["match"]
@@ -107,6 +117,18 @@ def verify_migration(original: dict, restored: dict) -> dict:
             issues.append(f"meta field '{key}' differs")
 
     # --- milestones (by id) -------------------------------------------------
+    # Duplicate milestone ids collapse in the dict below (and in the SQLite
+    # (pk, sk) key), so a project carrying dup ids would silently lose a
+    # milestone on migration and still verify clean. Detect and refuse it here
+    # so migrate-on-first-use aborts rather than dropping data (the operator
+    # recovers on the JSON backend via `beacon milestone purge`).
+    o_ms_ids = [m.get("id") for m in original.get("milestones", []) or []]
+    o_dup_ms = sorted({mid for mid in o_ms_ids
+                       if mid and o_ms_ids.count(mid) > 1})
+    if o_dup_ms:
+        issues.append(f"duplicate milestone ids {o_dup_ms} "
+                      "(cannot migrate faithfully to SQLite)")
+
     o_ms = {m.get("id"): m for m in original.get("milestones", []) or []}
     r_ms = {m.get("id"): m for m in restored.get("milestones", []) or []}
     missing = set(o_ms) - set(r_ms)

@@ -27,10 +27,19 @@ def _run(args, **kw):
 
 
 def _seed_sales_entity(project_dir: Path, collection: str, entity: dict):
-    p = project_dir / ".beacon" / "project.json"
-    data = json.loads(p.read_text())
-    data.setdefault(collection, []).append(entity)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    # ms-148 e-5414: SQLite is the source of truth; project.json is only a
+    # read-only mirror, so editing it directly no longer reaches the CLI. Seed
+    # the entity THROUGH the store (the CLI subprocess reads the same db).
+    import sys
+    sys.path.insert(0, str(REPO / "lib"))
+    from store_sqlite import SqliteStore
+    store = SqliteStore(str(project_dir / ".beacon" / "project.json"))
+
+    def _op(data):
+        data.setdefault(collection, []).append(entity)
+        return data, None
+
+    store.apply(_op, validate=False)
 
 
 @pytest.fixture

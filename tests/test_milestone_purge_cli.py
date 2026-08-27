@@ -37,6 +37,11 @@ def project_dir(monkeypatch):
         monkeypatch.setenv("BEACON_PROJECT_FILE", str(project_file))
         monkeypatch.delenv("BEACON_CLOUD", raising=False)
         monkeypatch.setenv("BEACON_OPERATIONS_BACKEND", "local")
+        # ms-148 e-5414: duplicate-id recovery is a JSON-store concern — SQLite's
+        # (pk, sk) key structurally cannot hold two records with the same id, and
+        # migration refuses a dup-id project. `beacon milestone purge` is how you
+        # recover on the legacy backend, so pin these tests to it.
+        monkeypatch.setenv("BEACON_LOCAL_BACKEND", "json")
         # ms-95 e-2441: monkeypatch.delitem auto-restores. Raw pop leaks the
         # deletion across the test boundary, wiping adjacent test_api mocks
         # (8 fails on CI).

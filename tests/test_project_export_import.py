@@ -154,10 +154,15 @@ def test_round_trip_preserves_payload(local_project, monkeypatch):
     restored = target / ".beacon"
     assert restored.is_dir()
 
-    # project.json identical (modulo whitespace)
+    # project.json payload identical (modulo whitespace and the store's
+    # schema_version stamp — ms-148 e-5414: export snapshots the SQLite truth,
+    # which carries schema_version=3, while the untouched source mirror does not.
+    # The payload is what must round-trip, not that stamp).
+    def _payload(d):
+        return {k: v for k, v in d.items() if k != "schema_version"}
     original = json.loads((local_project / ".beacon" / "project.json").read_text())
     extracted = json.loads((restored / "project.json").read_text())
-    assert original == extracted
+    assert _payload(original) == _payload(extracted)
 
     # documents preserved
     assert (restored / "documents" / "doc-one.md").read_text() == \

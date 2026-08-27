@@ -231,26 +231,17 @@ def _append_changelog(project_id: str, op_name: str, actor: str,
 # Local-mode atomic apply (file lock)
 # ---------------------------------------------------------------------------
 
-def _apply_local(project_file: str, op: Op) -> Any:
-    """Apply op atomically to a local JSON project file.
+def _local_apply(path: str, op: Op, *, validate: bool = True) -> Any:
+    """Route a local read-modify-write through the active local store's apply.
 
-    Routes through ``local_writer.atomic_apply`` — the single serialised,
-    atomic, crash-safe local write path shared with ``LocalStore.save_project``
-    (ms-148 e-5410). It holds one exclusive lock across the whole
-    read→op→write window (so nothing is lost between the read and the write)
-    and swaps the new document in with an atomic os.replace (so a crash
-    mid-write can't corrupt the file — the old truncate+dump could).
-
-    ``baseline=None`` because ``op`` runs against state re-read *under* the
-    lock, so there is no load→save gap to guard against here. ``validate=True``
-    keeps the previous behaviour: ``core.validate_project`` runs before the
-    write, so a schema violation raises ValueError and never reaches disk.
+    ms-148 e-5414: both backends expose ``apply`` with the same
+    lock-across-window contract — SqliteStore via one BEGIN IMMEDIATE
+    transaction (default), LocalStore via ``local_writer.atomic_apply`` (the
+    ``BEACON_LOCAL_BACKEND=json`` rollback lever) — so there is no backend branch
+    here. ``op(data) -> (new_data, result)``; returns ``result``.
     """
-    import local_writer  # lazy import keeps operations.py import-light
-    result, _ = local_writer.atomic_apply(
-        project_file, op, baseline=None, validate=True,
-    )
-    return result
+    from store import get_store  # lazy: avoids an import cycle at module load
+    return get_store(project_file=path).apply(op, validate=validate)
 
 
 # ---------------------------------------------------------------------------
@@ -720,7 +711,7 @@ def apply_operation(
 
     if backend == "local":
         path = project_file or os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
-        result = _apply_local(path, op)
+        result = _local_apply(path, op)
     elif backend == "mock":
         # Test path: uses patched firestore_client.{get,save}_project.
         result = _apply_mock(project_id, op)
@@ -814,15 +805,16 @@ def replace_project(
 
     if backend == "local":
         path = project_file or os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
-        # Identity op — apply_operation already handles the locking, just
-        # discard whatever's there.
-        # NOTE: _apply_local requires the file to exist; for replace where the
-        # file may be absent (first cloud push, etc.), fall back to a direct
-        # write under the lock. Keep semantics tight.
-        if os.path.exists(path):
-            _apply_local(path, lambda _existing: (new_data, None))
-        else:
-            # First-time write — bypass lock since no existing state to race against.
+        # Identity op — discard whatever's there and write new_data through the
+        # active store's apply (uniform across backends). new_data was validated
+        # up-front, so validate=False avoids re-validating a known-good document.
+        from store import get_store
+        try:
+            get_store(project_file=path).apply(
+                lambda _existing: (new_data, None), validate=False)
+        except FileNotFoundError:
+            # JSON backend, first-time write with no file yet (e.g. first cloud
+            # push): nothing to race against, so write the file directly.
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(new_data, f, indent=2, ensure_ascii=False)
                 f.write("\n")

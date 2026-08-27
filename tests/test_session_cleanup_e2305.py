@@ -131,7 +131,11 @@ def _wire_cloud_mode(monkeypatch, stub_client) -> object:
     cmd_session_end / cmd_session_rescue still get a real Store).
     """
     import store_local
+    import store_sqlite
     monkeypatch.setattr(store_local.LocalStore, "is_cloud", lambda self: True)
+    # ms-148 e-5414: get_store() returns a SqliteStore for local projects now,
+    # so its is_cloud is what the helper reads — patch it too.
+    monkeypatch.setattr(store_sqlite.SqliteStore, "is_cloud", lambda self: True)
     monkeypatch.setattr(
         cmd_session, "_get_api_client",
         lambda: (stub_client, {"project_id": "proj-1"}),
@@ -208,7 +212,9 @@ def test_stamp_helper_returns_false_on_empty_session_id(project_dir, monkeypatch
     write target. Helper returns False without minting anything (the empty-id
     check short-circuits BEFORE the is_cloud branch)."""
     import store_local
+    import store_sqlite
     monkeypatch.setattr(store_local.LocalStore, "is_cloud", lambda self: True)
+    monkeypatch.setattr(store_sqlite.SqliteStore, "is_cloud", lambda self: True)
 
     def _fail(*_a, **_kw):
         raise AssertionError("empty sid must short-circuit before client mint")

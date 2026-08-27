@@ -259,7 +259,12 @@ def _run_inbound_stimulus(step: dict, project_file: Path) -> dict:
     if not target or not summary:
         raise ScenarioError(
             "inbound_stimulus step needs 'target' and 'summary'")
-    store = store_local.LocalStore(str(project_file))
+    # ms-148 e-5414: seed through get_store (the same backend the CLI steps
+    # use) so this in-process inject writes to SQLite, not just the read-only
+    # project.json mirror — otherwise the next CLI step (reading SQLite) would
+    # not see the injected communication.
+    from store import get_store
+    store = get_store(project_file=str(project_file))
     data = store.load_project()
     try:
         res = inward_inject.inject_inbound_communication(

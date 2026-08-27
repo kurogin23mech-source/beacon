@@ -22,6 +22,18 @@ class Store(Protocol):
         """Save the full project data."""
         ...
 
+    def apply(self, op, *, validate: bool = True):
+        """Serialised read→op→write (ms-148 e-5414).
+
+        ``op(data) -> (new_data, result)`` runs against the current state under a
+        lock held across the whole read→op→write window; returns ``result``. The
+        LOCAL stores (SqliteStore / LocalStore) implement this as the single
+        write primitive. The cloud StoreApi does NOT — cloud writes go through
+        operations.apply_operation's Firestore transaction, so it raises
+        NotImplementedError if called here.
+        """
+        ...
+
     def has_changed(self) -> bool:
         """Check if project data has changed since last load.
 
@@ -317,8 +329,19 @@ class Store(Protocol):
 def get_store(project_file: str | None = None) -> Store:
     """Return the appropriate Store instance.
 
-    If .beacon/cloud.json exists alongside the project file,
-    returns a StoreApi (cloud API). Otherwise returns LocalStore.
+    If .beacon/cloud.json exists alongside the project file, returns a StoreApi
+    (cloud API). Otherwise returns a SQLite-backed store (ms-148 e-5414), or the
+    legacy LocalStore when ``BEACON_LOCAL_BACKEND=json``.
+
+    SIDE EFFECT (local, first use): this is not a pure factory. When a local
+    project.json exists but its SQLite db has no data yet, this migrates the JSON
+    into SQLite on the spot — creating a .db file on disk. Callers in read-only
+    contexts should be aware the first call can write.
+
+    Raises:
+        RuntimeError — if this call performs the migration and its verification
+            fails (the JSON is left untouched; the message names the
+            BEACON_LOCAL_BACKEND=json fallback).
     """
     if project_file is None:
         project_file = os.environ.get("BEACON_PROJECT_FILE", ".beacon/project.json")
@@ -377,5 +400,30 @@ def get_store(project_file: str | None = None) -> Store:
             local_cache_path=project_file,
         )
 
-    from store_local import LocalStore
-    return LocalStore(project_file)
+    # ms-148 e-5414: local project state lives in SQLite (serialised writes,
+    # crash-safe, no lost updates). An existing project.json is migrated into
+    # SQLite on first use, verified before we trust it. project.json is kept as
+    # a read-only mirror for the Tauri desktop app (rewired in a follow-up MS).
+    #
+    # BEACON_LOCAL_BACKEND=json forces the legacy JSON store — a rollback lever
+    # if the SQLite path ever misbehaves in the field.
+    if os.environ.get("BEACON_LOCAL_BACKEND", "sqlite").lower() == "json":
+        from store_local import LocalStore
+        return LocalStore(project_file)
+
+    from store_sqlite import SqliteStore, sqlite_db_path_for, db_has_data
+    db_path = sqlite_db_path_for(project_file)
+    if not db_has_data(db_path) and os.path.exists(project_file):
+        import store_migrate
+        report = store_migrate.migrate_json_to_sqlite(project_file, db_path)
+        # Raise only when THIS process migrated and the verification failed. A
+        # migrated=False means another concurrent process already populated the
+        # db (populate_if_empty) — that is success, not a reason to abort.
+        if report.get("migrated") and not report.get("verified"):
+            issues = (report.get("verification") or {}).get("issues")
+            raise RuntimeError(
+                f"SQLite migration verification failed for {project_file}: "
+                f"{issues}. The JSON file was left untouched; inspect and "
+                f"re-run (or set BEACON_LOCAL_BACKEND=json to stay on JSON)."
+            )
+    return SqliteStore(project_file, db_path=db_path)
