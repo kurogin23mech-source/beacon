@@ -27,6 +27,7 @@ import subprocess
 import sys
 
 import core
+import cloud_run_port
 import git_read_port
 import git_write_port
 from store import get_store
@@ -595,11 +596,9 @@ def cmd_deploy_rollback():
         sys.exit(1)
 
     region = current.get("region", "") or os.environ.get("BEACON_REGION", "asia-northeast1")
-    gcloud_cmd = [
-        "gcloud", "run", "services", "update-traffic", service,
-        f"--to-revisions={prev_rev}=100",
-        f"--region={region}",
-    ]
+    # Outward Cloud Run call lives behind cloud_run_port (ms-142 e-5527). The port
+    # builds the exact argv we display below, so "shown == run" (audit-first).
+    gcloud_cmd = cloud_run_port.update_traffic_argv(service, prev_rev, region)
     cmd_str = " ".join(gcloud_cmd)
 
     print(f"Rolling back {service}:")
@@ -610,7 +609,7 @@ def cmd_deploy_rollback():
 
     if execute:
         print("=> executing gcloud command...")
-        r = subprocess.run(gcloud_cmd)
+        r = cloud_run_port.run(gcloud_cmd)
         if r.returncode != 0:
             print("Error: gcloud command failed; deploy record NOT voided.", file=sys.stderr)
             sys.exit(r.returncode)
