@@ -25,9 +25,13 @@ class GitReadAdapter(Protocol):
 
     def current_branch(self) -> str: ...
 
+    def branch_show_current(self, timeout: int = 5) -> str: ...
+
     def rev_parse_short(self, ref: str = "HEAD") -> str: ...
 
     def log_commits(self, from_hash: str, to_hash: str, limit: int) -> list: ...
+
+    def log_subjects(self, limit: int, timeout: int = 5) -> list: ...
 
     def config_user_name(self) -> str: ...
 
@@ -41,6 +45,15 @@ class SubprocessGitReadAdapter:
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             stderr=subprocess.DEVNULL, text=True,
         ).strip()
+
+    def branch_show_current(self, timeout: int = 5) -> str:
+        """Current branch via `git branch --show-current` (empty on detached
+        HEAD — distinct from current_branch(), which returns "HEAD" there).
+        Returncode-agnostic like the caller: returns stdout as-is."""
+        return subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, timeout=timeout,
+        ).stdout.strip()
 
     def rev_parse_short(self, ref: str = "HEAD") -> str:
         return subprocess.check_output(
@@ -63,6 +76,15 @@ class SubprocessGitReadAdapter:
                 commits.append({"hash": parts[0][:7],
                                 "message": parts[1] if len(parts) > 1 else ""})
         return commits
+
+    def log_subjects(self, limit: int, timeout: int = 5) -> list:
+        """The last ``limit`` commit subjects (git log --pretty=%s). Returncode-
+        agnostic: returns whatever lines stdout carried (empty list if none)."""
+        out = subprocess.run(
+            ["git", "log", "--pretty=%s", f"-{limit}"],
+            capture_output=True, text=True, timeout=timeout,
+        ).stdout
+        return [ln for ln in out.splitlines()]
 
     def config_user_name(self) -> str:
         return subprocess.check_output(
@@ -89,6 +111,16 @@ def get_adapter() -> GitReadAdapter:
 def current_branch() -> str:
     """Current branch (rev-parse --abbrev-ref HEAD). Raises on failure."""
     return _adapter.current_branch()
+
+
+def branch_show_current(timeout: int = 5) -> str:
+    """Current branch via `git branch --show-current` (empty on detached HEAD)."""
+    return _adapter.branch_show_current(timeout)
+
+
+def log_subjects(limit: int, timeout: int = 5) -> list:
+    """Last ``limit`` commit subject lines (git log --pretty=%s)."""
+    return _adapter.log_subjects(limit, timeout)
 
 
 def rev_parse_short(ref: str = "HEAD") -> str:

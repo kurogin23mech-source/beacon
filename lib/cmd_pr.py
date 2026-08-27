@@ -22,12 +22,15 @@ _fetch_gh_pr_info / ...) are NOT re-exported (patch them at cmd_pr.<name>).
 
 Test patch target (the e-4320 rule) — TWO cases, because this family straddles
 two modules:
-  (a) HANDLER-ENTRY stubs (load_project / save_project / subprocess / core):
-      cmd_pr_* handlers resolve these in cmd_pr's OWN namespace (each
+  (a) HANDLER-ENTRY stubs (load_project / save_project / core): cmd_pr_*
+      handlers resolve these in cmd_pr's OWN namespace (each
       `from commands_shared import name` binds an independent copy), so
       `monkeypatch.setattr(commands, "load_project", ...)` is a silent no-op on
-      this call path. Patch `cmd_pr.load_project` (or `cmd_pr.subprocess` for gh
-      shell-outs) instead.
+      this call path. Patch `cmd_pr.load_project` instead. The outward gh/git
+      calls now live behind the ports (ms-142 e-5527): stub `gh_port` (pr_view /
+      pr_list_all / run) and `git_read_port` (branch_show_current / log_subjects),
+      or — since those ports call `subprocess.run` on the shared subprocess
+      module — patch `commands.subprocess.run` and dispatch by argv (both work).
   (b) TRIGGER-DIR stubs (_get_triggers_dir): the review-due trigger helpers
       (_fire_review_due_for_pr / _fire_pr_open_review_triggers /
       _clear_pr_open_review_triggers / ...) are DEFINED in commands_shared and
@@ -41,9 +44,17 @@ import os
 import sys
 import json
 import re
-import subprocess
 
 import core  # noqa: F401
+import gh_port
+import git_read_port
+
+# ms-142 e-5527 (spine §5): outward forge/vcs calls live behind the ports —
+# gh (pr view/list/create) → gh_port, read-only git (branch/log for MS
+# inference) → git_read_port. The soft-fail wrappers (_fetch_gh_pr_info /
+# _fetch_gh_pr_list_all) keep their best-effort {}/[] policy (business); the
+# raw `gh` call is the adapter behind the port. record(L2) stays in core /
+# save_project / _record_review_decision.
 
 from commands_shared import (  # noqa: F401
     _session_kind_is_human,
@@ -93,17 +104,14 @@ def _review_gate_check(pr_number: str, *, action: str) -> None:
     sys.exit(2)
 
 def _fetch_gh_pr_info(url: str) -> dict:
-    """Fetch PR title, body, and commits from GitHub via gh CLI. Returns {} on failure."""
+    """Fetch PR title, body, and commits from GitHub. Returns {} on failure.
+
+    Best-effort wrapper (business): the raw `gh pr view` is gh_port.pr_view;
+    this keeps the soft-fail-to-{} policy the callers rely on."""
     try:
-        result = subprocess.run(
-            ["gh", "pr", "view", url, "--json", "title,body,commits"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode == 0:
-            return json.loads(result.stdout)
+        return gh_port.pr_view(url)
     except Exception:
-        pass
-    return {}
+        return {}
 
 def cmd_pr_add():
     import datetime
@@ -901,22 +909,10 @@ def _fetch_gh_pr_list_all() -> list:
     output isn't parsable. Soft-fails so the caller can degrade gracefully.
     """
     try:
-        result = subprocess.run(
-            ["gh", "pr", "list", "--state", "all", "--limit", "100",
-             "--json", "number,state,url,mergedAt,title"],
-            capture_output=True, text=True, timeout=15,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        rows = gh_port.pr_list_all()
+    except Exception:
         return []
-    if result.returncode != 0:
-        return []
-    try:
-        rows = json.loads(result.stdout or "[]")
-    except (ValueError, TypeError):
-        return []
-    if not isinstance(rows, list):
-        return []
-    return rows
+    return rows if isinstance(rows, list) else []
 
 def cmd_pr_sync():
     """ms-61 / e-2005 — sync beacon PR entries with GitHub state.
@@ -1011,11 +1007,8 @@ def _infer_pr_ms_id(data: dict) -> tuple[str, str]:
 
     # 1) Branch name
     try:
-        branch = subprocess.run(
-            ["git", "branch", "--show-current"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.strip()
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        branch = git_read_port.branch_show_current()
+    except Exception:
         branch = ""
     if branch:
         m = re.search(r"ms-(\d+)", branch)
@@ -1026,13 +1019,10 @@ def _infer_pr_ms_id(data: dict) -> tuple[str, str]:
 
     # 2) Recent commit messages for ms-N
     try:
-        log = subprocess.run(
-            ["git", "log", "--pretty=%s", "-5"],
-            capture_output=True, text=True, timeout=5,
-        ).stdout
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        log = ""
-    for line in log.splitlines():
+        subjects = git_read_port.log_subjects(5)
+    except Exception:
+        subjects = []
+    for line in subjects:
         m = re.search(r"ms-(\d+)", line)
         if m:
             cand = f"ms-{m.group(1)}"
@@ -1040,7 +1030,7 @@ def _infer_pr_ms_id(data: dict) -> tuple[str, str]:
                 return cand, f"recent commit `{line[:60]}` → {cand}"
 
     # 3) Recent commits for e-N → reverse-lookup owning MS
-    for line in log.splitlines():
+    for line in subjects:
         m = re.search(r"\be-(\d+)\b", line)
         if m:
             eid = f"e-{m.group(1)}"
@@ -1110,7 +1100,9 @@ def cmd_pr_create():
         import shlex
         cmd += shlex.split(gh_args)
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    # Handler owns argv construction (input validation above); the port owns
+    # the outward execution (ms-142 e-5527, spine §5).
+    result = gh_port.run(cmd)
     if result.stdout:
         sys.stdout.write(result.stdout)
     if result.stderr:

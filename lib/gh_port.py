@@ -33,6 +33,12 @@ class GhAdapter(Protocol):
 
     def issue_list(self, state: str = "open") -> list: ...
 
+    def pr_view(self, url: str) -> dict: ...
+
+    def pr_list_all(self) -> list: ...
+
+    def run(self, argv: list) -> "subprocess.CompletedProcess": ...
+
 
 class SubprocessGhAdapter:
     """Default adapter: shells out to the `gh` CLI. Moved verbatim from
@@ -58,6 +64,31 @@ class SubprocessGhAdapter:
             raise RuntimeError(result.stderr.strip() or "gh issue list failed")
         return json.loads(result.stdout)
 
+    def pr_view(self, url: str) -> dict:
+        result = subprocess.run(
+            ["gh", "pr", "view", url, "--json", "title,body,commits"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or f"gh pr view {url} failed")
+        return json.loads(result.stdout)
+
+    def pr_list_all(self) -> list:
+        result = subprocess.run(
+            ["gh", "pr", "list", "--state", "all", "--limit", "100",
+             "--json", "number,state,url,mergedAt,title"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stderr.strip() or "gh pr list failed")
+        return json.loads(result.stdout or "[]")
+
+    def run(self, argv: list) -> subprocess.CompletedProcess:
+        """Execute a prepared gh argv (e.g. a fully-built `gh pr create …`).
+        The caller owns the argv (incl. user-forwarded flags); the port owns
+        only the outward execution. Captures stdout/stderr as text."""
+        return subprocess.run(argv, capture_output=True, text=True)
+
 
 _adapter: GhAdapter = SubprocessGhAdapter()
 
@@ -82,3 +113,18 @@ def issue_view(number: int) -> dict:
 def issue_list(state: str = "open") -> list:
     """List GitHub issues in ``state``. Returns a list of dicts, raises RuntimeError."""
     return _adapter.issue_list(state)
+
+
+def pr_view(url: str) -> dict:
+    """Fetch a PR's title/body/commits. Returns gh's JSON dict, raises on failure."""
+    return _adapter.pr_view(url)
+
+
+def pr_list_all() -> list:
+    """List all PRs (number/state/url/mergedAt/title). Returns list, raises on failure."""
+    return _adapter.pr_list_all()
+
+
+def run(argv: list) -> subprocess.CompletedProcess:
+    """Execute a prepared gh argv. Returns CompletedProcess (caller checks returncode)."""
+    return _adapter.run(argv)
