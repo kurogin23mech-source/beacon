@@ -213,11 +213,14 @@ def test_init_display_single_source_mapping():
     assert "beacon target-class add" in legal["next_hint"]
 
 
-def test_init_display_normalises_like_the_seam():
-    # Raw / empty values must select the same branch build_new_project does, so
-    # the display and the composition never disagree on which profession a value
-    # means.
-    assert occupation.init_display("  SALES  ")["next_hint"] \
-        == occupation.init_display("sales")["next_hint"]
-    assert occupation.init_display("")["next_hint"] \
-        == occupation.init_display("dev")["next_hint"]
+def test_init_display_agrees_with_the_seam_on_raw_values():
+    # The display and the composition seam must select the SAME profession for a
+    # raw value, else init could show a hint for one profession while the project
+    # is built as another (the drift PR #669 保守性#2 was about). Drive BOTH from
+    # the same raw inputs: init_display(raw) must equal the display for the
+    # canonical profession build_new_project actually resolves raw to. This
+    # exercises build_new_project (the earlier version compared init_display to
+    # itself and never touched the seam — false safety, PR #686 保守性 finding2).
+    for raw in ("  SALES  ", "", "Back-Office", "dev", "legal"):
+        canonical = occupation.build_new_project("p", "o", raw)["profession"]
+        assert occupation.init_display(raw) == occupation.init_display(canonical)
