@@ -11,6 +11,24 @@ R=ledger-append, B=machinery, C=human/outward/local).
 284 entries = 282 live dispatch keys + 2 shell top-level keys (``status`` /
 ``reset``); ``verb_ledger.reconcile()`` pins this against the live surface.
 
+C10 thin-action split worklist (ms-142 e-5527, spine §5). This Q/R/B/C table was
+the *pre-image*: it named, per verb, where record(R)/machinery(B)/outward(C)
+concerns were fused. The split un-braided the outward tool call (adapter) from
+record(L2)+business(L3) for the thin-action families, routing each tool behind a
+declared port (Beacon owns the port, not the adapter). Per-verb outcome:
+
+  issue_import/issue_list/issue_sync   → gh_port           (gh issue view/list)
+  push_record                          → git_read_port     (branch/log/user)
+  deploy_record                        → git_read_port + git_write_port (rev/log; tag/push)
+  deploy_rollback                      → cloud_run_port    (gcloud update-traffic)
+  pr_* (create/sync/add/…)             → gh_port + git_read_port (pr view/list/create; branch/log)
+  incident_open/close/escalate/list    → (adapter=∅: pure record, already conformant)
+  rollback                             → (adapter isolated in rollback._git, class C, already conformant)
+
+Ports: gh_port / git_read_port / git_write_port / cloud_run_port (per-tool ×
+read/write for git). Adding a new outward tool to a thin-action verb means adding
+a port method here-adjacent, not inlining a subprocess in the handler.
+
 Judgment calls flagged for human review (all already ``[post-memo]``-noted; these
 are the ones where the class letter was a genuine toss-up):
 
