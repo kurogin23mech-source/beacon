@@ -12,7 +12,13 @@ import os
 import sys
 
 import core
+import git_read_port
 from commands_shared import load_project, save_project
+
+# Read-only git introspection (branch / HEAD / commit range / git user) lives
+# behind git_read_port (ms-142 e-5527, spine §5): the outward-effect-free `git`
+# calls are the adapter, the handler keeps the record(L2) + business(L3) halves
+# incl. the fallback defaults (main / HEAD) which are a business decision.
 
 
 def _next_push_id(data: dict, date_str: str) -> str:
@@ -31,7 +37,6 @@ def _next_push_id(data: dict, date_str: str) -> str:
 
 def cmd_push_record():
     """Record a push (code release) entry based on commits since last push."""
-    import subprocess as _sp
     mode = os.environ.get("BEACON_MODE", "")          # "prepare" or "finalize" or ""
     from_hash = os.environ.get("BEACON_FROM", "")
     to_hash = os.environ.get("BEACON_TO", "")
@@ -51,16 +56,14 @@ def cmd_push_record():
     # Resolve branch
     if not branch:
         try:
-            branch = _sp.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                                      stderr=_sp.DEVNULL, text=True).strip()
+            branch = git_read_port.current_branch()
         except Exception:
             branch = "main"
 
     # Resolve to_hash
     if not to_hash:
         try:
-            to_hash = _sp.check_output(["git", "rev-parse", "--short", "HEAD"],
-                                       stderr=_sp.DEVNULL, text=True).strip()
+            to_hash = git_read_port.rev_parse_short("HEAD")
         except Exception:
             to_hash = "HEAD"
 
@@ -71,24 +74,9 @@ def cmd_push_record():
 
     # Collect commits in range
     try:
-        if from_hash:
-            log_out = _sp.check_output(
-                ["git", "log", f"{from_hash}..{to_hash}", "--format=%H %s"],
-                stderr=_sp.DEVNULL, text=True
-            ).strip()
-        else:
-            log_out = _sp.check_output(
-                ["git", "log", to_hash, "--format=%H %s", "-50"],
-                stderr=_sp.DEVNULL, text=True
-            ).strip()
+        commits = git_read_port.log_commits(from_hash, to_hash, 50)
     except Exception:
-        log_out = ""
-
-    commits = []
-    for line in log_out.splitlines():
-        if line.strip():
-            parts = line.split(" ", 1)
-            commits.append({"hash": parts[0][:7], "message": parts[1] if len(parts) > 1 else ""})
+        commits = []
 
     # Resolve active ms_id if not given
     if not ms_id:
@@ -99,8 +87,7 @@ def cmd_push_record():
 
     # Pushed by: git user
     try:
-        pushed_by = _sp.check_output(["git", "config", "user.name"],
-                                     stderr=_sp.DEVNULL, text=True).strip()
+        pushed_by = git_read_port.config_user_name()
     except Exception:
         pushed_by = ""
 
