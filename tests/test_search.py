@@ -378,3 +378,121 @@ def test_document_scope_filter_excludes_other_scopes():
     out = search.search_project(project, docs, type=["document"], scope="spec")
     scopes = {r.get("scope") for r in out["results"]}
     assert scopes == {"spec"}, scopes
+
+
+# ---------------------------------------------------------------------------
+# ms-109 e-5524 (C5 per-class strangler): search now covers a sales project's
+# Target classes (opportunities / accounts) via the generic target-class engine,
+# which it silently missed before (dev-only hardcoded milestone/operation loops).
+# ---------------------------------------------------------------------------
+
+def _make_sales_project():
+    return {
+        "profession": "sales",
+        "opportunities": [
+            {"id": "opp-1", "label": "Acme 年間更新", "status": "active",
+             "priority": "high", "description": "大口更新の商談",
+             "created_at": "2026-08-01T00:00:00Z"},
+            {"id": "opp-2", "label": "Globex 新規", "status": "active",
+             "created_at": "2026-08-02T00:00:00Z"},
+        ],
+        "accounts": [
+            {"id": "acc-1", "label": "AcmeCo", "created_at": "2026-07-01T00:00:00Z"},
+        ],
+    }
+
+
+def test_sales_opportunity_and_account_are_searchable_by_label():
+    out = search.search_project(_make_sales_project(), q="Acme")
+    hits = {(r["entity_type"], r["id"]) for r in out["results"]}
+    assert ("opportunity", "opp-1") in hits   # label "Acme 年間更新"
+    assert ("account", "acc-1") in hits        # label "AcmeCo"
+    assert ("opportunity", "opp-2") not in hits  # "Globex" does not match "Acme"
+
+
+def test_sales_target_searchable_by_id():
+    out = search.search_project(_make_sales_project(), q="opp-1")
+    assert [(r["entity_type"], r["id"]) for r in out["results"]] == [("opportunity", "opp-1")]
+
+
+def test_sales_target_render_uses_canonical_label_as_title():
+    out = search.search_project(_make_sales_project(), q="Globex")
+    r = next(x for x in out["results"] if x["id"] == "opp-2")
+    assert r["title"] == "Globex 新規"       # work_model.target_label read
+    assert r["entity_type"] == "opportunity"
+    assert r["url_hash"] == "#opportunity/opp-2"
+
+
+def test_sales_type_filter_selects_target_class():
+    out = search.search_project(_make_sales_project(), type=["account"])
+    kinds = {r["entity_type"] for r in out["results"]}
+    assert kinds == {"account"}
+
+
+def test_sales_facets_count_target_classes():
+    out = search.search_project(_make_sales_project())  # empty q → all
+    tf = out["facets"]["type"]
+    assert tf.get("opportunity", 0) == 2
+    assert tf.get("account", 0) == 1
+
+
+def test_dev_project_has_no_sales_target_leakage():
+    """A development project carries no opportunities/accounts, so the generic
+    loop adds none of those kinds."""
+    project = _make_project()
+    out = search.search_project(project)
+    kinds = {r["entity_type"] for r in out["results"]}
+    assert "opportunity" not in kinds
+    assert "account" not in kinds
+
+
+# --- PR#683 review fixes (independent AX + maintainability judges) ----------
+
+def test_status_filter_round_trips_on_phase_driven_class():
+    """AX/M4: an opportunity's state lives under `phase`; the rendered status and
+    the --status filter must read the SAME (manifest-declared) field, so filtering
+    by the value shown as status returns the record (no silent 0-result)."""
+    sales = {
+        "profession": "sales",
+        "opportunities": [
+            {"id": "opp-1", "label": "Acme", "phase": "negotiation"},
+            {"id": "opp-2", "label": "Globex", "phase": "prospecting"},
+        ],
+    }
+    out = search.search_project(sales)
+    rendered = {r["id"]: r["status"] for r in out["results"]}
+    assert rendered["opp-1"] == "negotiation"          # rendered from `phase`
+    filtered = search.search_project(sales, status=["negotiation"])
+    assert [r["id"] for r in filtered["results"]] == ["opp-1"]   # round-trips
+
+
+def test_ms_and_op_filter_exclude_generic_targets():
+    """AX: --ms / --op are development-scope filters; a sales Target (no ms_id /
+    op_id) must NOT leak into an --ms / --op query."""
+    sales = _make_sales_project()
+    assert search.search_project(sales, ms="ms-1")["results"] == []
+    assert search.search_project(sales, op="op-1")["results"] == []
+
+
+def test_dev_release_target_is_searchable_via_generic_loop():
+    """M3: a dev project's release Targets (release_targets collection) are walked
+    by the generic loop — search covers them now (they were unfindable before)."""
+    dev = {
+        "profession": "dev",
+        "milestones": [{"id": "ms-1", "title": "Auth", "entries": []}],
+        "release_targets": [{"id": "rt-1", "label": "v2.0 GA", "description": "big cut"}],
+    }
+    out = search.search_project(dev, q="v2.0")
+    assert [(r["entity_type"], r["id"]) for r in out["results"]] == [("release", "rt-1")]
+    # and the exact set of Target entity_types a dev project emits is pinned:
+    all_kinds = {r["entity_type"] for r in search.search_project(dev)["results"]}
+    assert all_kinds == {"milestone", "release"}
+
+
+def test_generic_target_findable_by_label_via_fallback():
+    """M2: a Target class with NO bespoke q-field entry is still findable by its
+    canonical `label` through the fallback (no per-kind wiring in search.py)."""
+    sales = {"profession": "sales",
+             "accounts": [{"id": "acc-9", "label": "Zenith Industries"}]}
+    out = search.search_project(sales, q="Zenith")
+    assert [(r["entity_type"], r["id"]) for r in out["results"]] == [("account", "acc-9")]

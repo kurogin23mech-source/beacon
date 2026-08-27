@@ -26,6 +26,13 @@ Searchable entities and their `q` fields:
   run:             description, batch
   incident:        title, description, resolution
 
+  Generic Target classes (ms-109 e-5524) — a sales project's opportunity /
+  account, a dev project's release, or any data-defined occupation's class —
+  are enumerated through the target-class engine and matched on the fallback
+  fields (label, name, title, description). Only development entry types keep a
+  bespoke q-field list above; the fallback (`_Q_FIELDS_FALLBACK`) is the single
+  source for every other class, so declaring a new class needs no edit here.
+
 Every entity's own id (e-XXX / ms-XX / op-X) and a document's doc_id are also
 matched by `q` as a substring, so users can find an entry by number — e.g.
 "e-1005" or a partial "1005" (ms-43 e-1010).
@@ -40,6 +47,9 @@ from __future__ import annotations
 
 import json
 from typing import Any, Optional
+
+import occupation
+import work_model
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +170,56 @@ def search_project(
                         from_date=from_date,
                         to_date=to_date,
                         parent_is_op=True)
+
+    # ------------------ Other Target classes (generic engine) ------------------
+    # ms-109 e-5524 (C5 per-class strangler): the milestone / operation loops above
+    # are the two Target classes with dedicated renderers (_DEDICATED_TARGET_RENDERERS).
+    # Every OTHER manifest Target class — a sales project's opportunities / accounts,
+    # a dev project's release Targets, or any data-defined occupation's classes — is
+    # enumerated here through the generic target-class engine
+    # (occupation.profession_manifest) instead of a hardcoded collection key, and
+    # rendered by the one occupation-agnostic renderer. Before this, only dev
+    # milestones/operations were searchable; a sales project's Targets (and dev
+    # releases) were silently unfindable.
+    #
+    # ms / op are development-scope filters (a Target with no ms_id/op_id would
+    # otherwise leak into an --ms/--op query, since _entity_matches passes records
+    # that carry no such field). These generic classes have no ms/op scope, so the
+    # whole loop is skipped when either filter is set — filtering by a dev scope
+    # asks for that scope's dev entries only (AX review PR#683).
+    #
+    # Scope note: this walks the Target records themselves. Their fat arms
+    # (a sales Target's activities / communications / nurturings) are a follow-up
+    # (e-5524 remainder).
+    if not ms and not op:
+        for _tc in occupation.profession_manifest(project).get("target_classes", []):
+            _kind = _tc.get("kind") or ""
+            _coll = _tc.get("collection") or ""
+            if not _kind or not _coll or _kind in _DEDICATED_TARGET_RENDERERS:
+                continue
+            # The class's declared state field (dev = "status", a funnel class =
+            # "phase") drives BOTH the status filter and the rendered status, so
+            # they agree — the manifest stays the single truth (AX review PR#683).
+            _state_field = ((_tc.get("state_model") or {}).get("state_field")) or "status"
+            for tgt in project.get(_coll, []) or []:
+                if _entity_matches(
+                    _kind, tgt,
+                    q_lower=q_lower,
+                    type_filter=type_filter,
+                    status_filter=status_filter,
+                    priority_filter=priority_filter,
+                    ms_filter=ms,
+                    op_filter=op,
+                    id_filter=id,
+                    assignee=assignee,
+                    owner=owner,
+                    from_date=from_date,
+                    to_date=to_date,
+                    scope_filter=None,
+                    state_field=_state_field,
+                ):
+                    matches.append(_render_target_generic(tgt, _kind, q_lower,
+                                                           state_field=_state_field))
 
     # ------------------ Pushes / Deploys ------------------
     for push in project.get("pushes", []):
@@ -315,13 +375,21 @@ _Q_FIELDS_BY_TYPE = {
     "incident":       ["title", "description", "resolution"],
 }
 
+# Fulltext fields for any entity type not listed above — notably every generic
+# Target class (sales opportunities/accounts, dev releases, any data-defined
+# class). It leads with ``label`` (the canonical display-name key work_model.
+# target_label reads) so a Target is findable by the name shown in its result,
+# with ``name``/``title`` legacy fallbacks (ms-109 e-5524). Keyed per-kind entries
+# stay reserved for the development entry types whose q-fields genuinely differ.
+_Q_FIELDS_FALLBACK = ["label", "name", "title", "description"]
+
 
 def _entity_matches(entity_type: str, e: dict, *, q_lower: str,
                     type_filter, status_filter, priority_filter,
                     ms_filter: str, op_filter: str, id_filter: str,
                     assignee: str, owner: str,
                     from_date: str, to_date: str,
-                    scope_filter) -> bool:
+                    scope_filter, state_field: str = "status") -> bool:
     # type filter
     if type_filter is not None and entity_type not in type_filter:
         return False
@@ -330,9 +398,11 @@ def _entity_matches(entity_type: str, e: dict, *, q_lower: str,
     if id_filter and e.get("id") != id_filter:
         return False
 
-    # status filter
+    # status filter — read the class's declared state field (dev = "status",
+    # a phase-driven sales class = "phase"), so filtering by a value the result
+    # displays as status returns the same set (ms-109 e-5524 AX round-trip).
     if status_filter is not None:
-        if e.get("status", "") not in status_filter:
+        if e.get(state_field, "") not in status_filter:
             return False
 
     # priority filter
@@ -390,7 +460,7 @@ def _entity_matches(entity_type: str, e: dict, *, q_lower: str,
 
 
 def _matches_fulltext(entity_type: str, e: dict, q_lower: str) -> bool:
-    fields = _Q_FIELDS_BY_TYPE.get(entity_type, ["description", "title"])
+    fields = _Q_FIELDS_BY_TYPE.get(entity_type, _Q_FIELDS_FALLBACK)
     for f in fields:
         if isinstance(f, tuple):
             if f[0] == "meta_str":
@@ -530,6 +600,52 @@ def _render_deploy(d: dict, q_lower: str) -> dict:
         "updated_at": d.get("deployed_at", "") or d.get("date", ""),
         "url_hash": f"#deploy-{d.get('id', '')}",
     }
+
+
+def _render_target_generic(tgt: dict, kind: str, q_lower: str, *,
+                           state_field: str = "status") -> dict:
+    """Render a generic Target (opportunity / account / release / data-defined)
+    into the uniform search-result shape (ms-109 e-5524).
+
+    Occupation-agnostic: the display name is read via work_model.target_label
+    (canonical ``label`` → legacy ``title`` / ``name``) so this one renderer
+    serves every Target class without a dedicated renderer, no branching. The
+    rendered ``status`` reads the class's declared ``state_field`` (dev = status,
+    a funnel class = phase) — the SAME field the status filter matches on, so a
+    caller can re-filter by the value it sees. entity_type is the class ``kind``
+    so facets / the UI group by it; url_hash is ``#<kind>/<id>``."""
+    label = work_model.target_label(tgt)
+    src = tgt.get("description") or tgt.get("objective") or label
+    tid = tgt.get("id", "")
+    return {
+        "entity_type": kind,
+        "id": tid,
+        "title": label,
+        "snippet": _snippet(src, q_lower),
+        "ms_id": None,
+        "op_id": None,
+        "status": tgt.get(state_field, ""),
+        "priority": tgt.get("priority", ""),
+        "assignee": tgt.get("assignee", ""),
+        "owner": tgt.get("owner", ""),
+        "scope": None,
+        "created_at": tgt.get("created_at", ""),
+        "updated_at": tgt.get("updated_at", "") or tgt.get("created_at", ""),
+        "url_hash": f"#{kind}/{tid}" if tid else "",
+    }
+
+
+# Target classes that search walks with a DEDICATED renderer + scope semantics
+# (milestone carries ms scope, operation carries op scope) rather than the generic
+# loop. Its keys are the single source for "which kinds the hardcoded loops above
+# handle" — the generic loop skips exactly these, so adding a dedicated loop and
+# forgetting to exclude it here (double-render) or vice-versa (vanish) can't drift
+# from a free-standing literal (ms-109 e-5524, maintainability review PR#683). The
+# strangler's end state folds these into the generic walk too, deleting this map.
+_DEDICATED_TARGET_RENDERERS = {
+    "milestone": _render_milestone,
+    "operation": _render_operation,
+}
 
 
 def _render_document(doc: dict, q_lower: str) -> dict:
