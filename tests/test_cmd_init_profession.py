@@ -224,3 +224,33 @@ def test_init_display_agrees_with_the_seam_on_raw_values():
     for raw in ("  SALES  ", "", "Back-Office", "dev", "legal"):
         canonical = occupation.build_new_project("p", "o", raw)["profession"]
         assert occupation.init_display(raw) == occupation.init_display(canonical)
+
+
+def test_next_hint_single_source_init_and_onboarding_agree():
+    # e-5706: the profession → first-action hint had TWO homes — init_display's
+    # branch and _ONBOARDING_PLANS' per-entry next_hint — whose header comment
+    # claimed they mirrored cmd_init's "Next:" but had drifted (backoffice /
+    # data-defined carried a shorter form). They now BOTH read from
+    # occupation.profession_next_hint. Pin that init's "Next:" line equals the
+    # onboarding plan's next_hint (modulo the "Next: " prefix) for every
+    # profession incl. the data-defined fallback, the back-office alias, and
+    # the empty/None default — so a future edit to either site can't re-drift
+    # (PR #686 保守性 finding1).
+    for prof in ("dev", "sales", "backoffice", "back-office", "legal", "", None):
+        disp = occupation.init_display(prof)["next_hint"]
+        plan = occupation.onboarding_plan(prof)["next_hint"]
+        assert disp.startswith("Next: ")
+        assert disp == "Next: " + plan
+
+
+def test_backoffice_and_data_defined_next_hints_carry_the_full_form():
+    # The drift e-5706 closed: onboarding used to hand back a shorter next_hint
+    # for backoffice / data-defined than cmd_init printed. Both now surface the
+    # concrete, runnable form (the init version was kept canonical so cmd_init's
+    # freshly-reviewed output stays byte-for-byte, PR #686).
+    back = occupation.onboarding_plan("backoffice")["next_hint"]
+    assert back == ("beacon target create --class contract --label <名前> "
+                    "--field counterparty=<相手方>")
+    legal = occupation.onboarding_plan("legal")["next_hint"]
+    assert "--profession legal" in legal          # profession interpolated
+    assert legal.startswith("beacon target-class add --kind")
