@@ -1099,6 +1099,28 @@ def cmd_init():
     # no-op. Re-init on an existing project leaving a stale db is a known edge
     # (follow-up e-5441); it is rare and `beacon init` is a once-per-project step.
     print(f"Created {pf}")
+    # ms-148 review (PR#668 AX finding, HIGH): re-init on a project whose SQLite
+    # store already has data is a silent no-op — get_store only migrates when the
+    # db is empty (migrate-on-first-use), so the project.json we just wrote is
+    # never read and the old store wins. Printing only "Created" makes the user
+    # believe the init took effect. We do NOT change the behaviour (fully
+    # resolving re-init is the filed follow-up e-5441) — we just make the no-op
+    # LOUD so it stops being an invisible trap.
+    try:
+        from store_sqlite import sqlite_db_path_for, db_has_data
+        _existing_db = sqlite_db_path_for(pf)
+        if db_has_data(_existing_db):
+            print(
+                f"⚠ 既存の SQLite store ({_existing_db}) に既にデータがあります。\n"
+                f"  いま書いた {pf} は次回コマンドで読まれません — SQLite store が真値で、\n"
+                f"  空の db のときだけ project.json から移行します (migrate-on-first-use)。\n"
+                f"  この init を反映させたい場合は {_existing_db} を .trash/ へ mv してから再実行してください。\n"
+                f"  (既存 store を保持したまま再 init するのは既知エッジ e-5441 の follow-up 対象)",
+                file=sys.stderr,
+            )
+    except Exception:
+        # Never let this advisory check break init itself.
+        pass
     if profession == "sales":
         print("  profession = sales (営業スキーマ: opportunities / accounts)")
     elif profession in ("backoffice", "back-office"):
