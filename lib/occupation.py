@@ -57,15 +57,22 @@ _PROFESSION_ALIASES = {"back-office": "backoffice"}
 def normalize_profession(profession: str | None) -> str:
     """Canonical profession name for a RAW value: strip / lower, empty → the
     default (``dev``), and resolve built-in aliases (``back-office`` →
-    ``backoffice``). The ONE home for profession normalisation so every
-    per-profession accessor (``init_display`` / ``profession_next_hint`` /
-    ``onboarding_plan`` / ``build_new_project``) selects the same branch for a
-    raw value — the idiom used to be copied in 5 spots, half with a ``"dev"``
-    literal and half with ``DEFAULT_PROFESSION``, so a future default change
-    would have drifted (PR #687 保守性/AX consensus, e-5712). Resolving the alias
-    here also fixes a latent gap: ``onboarding_plan("back-office")`` used to fall
-    through to the GENERIC plan because the dict was keyed on the canonical name
-    only."""
+    ``backoffice``). The home for normalising a RAW profession value at the
+    front-door accessors and the composition seam — ``init_display`` /
+    ``profession_next_hint`` / ``onboarding_plan`` / ``build_new_project`` /
+    ``resolve_profession`` all call here, so they select the same branch for a
+    raw value; the idiom used to be copied across those 5 spots, half with a
+    ``"dev"`` literal and half with ``DEFAULT_PROFESSION`` (PR #687 保守性/AX
+    consensus, e-5712). Resolving the alias here also fixes a latent gap:
+    ``onboarding_plan("back-office")`` used to fall through to the GENERIC plan
+    because the dict was keyed on the canonical name only.
+
+    NOT yet repo-wide: a few data-path sites read an already-canonical STORED
+    profession and still hand-normalise without alias resolution
+    (``sales_entities`` / ``target_descriptor.profession_default_descriptors``).
+    They never see a raw alias today, so this is a debt sweep (e-5718), not a
+    live bug — the docstring scopes the guarantee honestly rather than claiming a
+    repo-wide single home it does not yet have (PR #688 保守性 finding2)."""
     prof = (profession or "").strip().lower() or DEFAULT_PROFESSION
     return _PROFESSION_ALIASES.get(prof, prof)
 
@@ -173,13 +180,16 @@ def build_new_project(name: str, objective: str, profession: str, *,
         data = sales_entities.build_sales_project(
             name, objective, retro_day=retro_day,
             disclosure_policy=disclosure_policy)
-    elif profession in ("backoffice", "back-office"):
+    elif profession == "backoffice":
         # ms-122 e-3958: back-office's target-classes (契約 / 評価 / 月次決算 /
         # 勤怠ウォッチ) come from a descriptor seed, not a code container.
+        # (``back-office`` alias already resolved by normalize_profession, so the
+        # branch matches the canonical name only — alias knowledge lives once, in
+        # _PROFESSION_ALIASES, not here. PR #688 保守性 finding1 / e-5712.)
         data = backoffice_seed.build_backoffice_project(
             name, objective, retro_day=retro_day,
             disclosure_policy=disclosure_policy)
-    elif profession in ("", "dev"):
+    elif profession == "dev":  # empty already coalesced to "dev" by normalize_profession
         data = {
             "name": name,
             "objective": objective,
