@@ -1091,11 +1091,15 @@ def cmd_init():
     except Exception:
         # Never let this advisory check break init itself.
         pass
-    if profession == "sales":
-        print("  profession = sales (営業スキーマ: opportunities / accounts)")
-    elif profession in ("backoffice", "back-office"):
-        print("  profession = backoffice (記述子で定義: 契約 / 評価 / 月次決算 / "
-              "勤怠ウォッチ)")
+    # ms-150 e-5465: the profession → user-feedback strings (schema label +
+    # "Next:" hint) live in ONE place (occupation.init_display), the display
+    # twin of build_new_project's composition branch, so cmd_init no longer
+    # re-branches on profession literals — the alias set was drifting between
+    # the composition seam and this print block (PR #669 保守性#2). cmd_init
+    # keeps only the I/O around the returned strings.
+    _display = occupation.init_display(profession)
+    if _display["schema_label"]:
+        print(f"  {_display['schema_label']}")
     # Visible feedback on the chosen posture (SPEC § acceptance 2 + 3):
     # default-high is silent-but-printed so the user notices, opt-in low
     # gets a single-line confirmation that the OSS-friendly mode is active.
@@ -1118,19 +1122,10 @@ def cmd_init():
         _persist_initial_profile_choice(chosen)
         print(f"Profile pinned for this project: {chosen}")
 
-    if profession == "sales":
-        print("Next: beacon account add / beacon opportunity add")
-    elif profession in ("backoffice", "back-office"):
-        print("Next: beacon target create --class contract --label <名前> "
-              "--field counterparty=<相手方>")
-    elif profession in ("", "dev"):
-        print("Next: beacon milestone add")
-    else:
-        # data-defined profession (ms-124 e-4091): no target-classes yet
-        print(f"  profession = {profession} (記述子で定義: target-class 未登録)")
-        print("Next: beacon target-class add --kind <種類> --label <名前> "
-              f"--profession {profession} --type single-shot "
-              "--id-prefix <pfx-> --collection <coll>")
+    # Single-source "Next:" hint (see init_display note above). The data-defined
+    # profession's schema-label line is now printed once, up with the other
+    # schema labels, instead of a second time here.
+    print(_display["next_hint"])
 
 
 def cmd_common_setup():

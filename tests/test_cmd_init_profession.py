@@ -189,3 +189,35 @@ def test_seam_empty_profession_is_dev():
     data = occupation.build_new_project("p", "obj", "")
     assert data["profession"] == "dev"
     assert data["adopted_target_classes"] == ["release"]
+
+
+def test_init_display_single_source_mapping():
+    # ms-150 e-5465: occupation.init_display is the ONE home for the
+    # profession → user-feedback strings (schema label + "Next:" hint) that
+    # cmd_init used to branch on with profession literals. Pin each branch so a
+    # future edit cannot drift the CLI feedback from the composition seam.
+    dev = occupation.init_display("dev")
+    assert dev["schema_label"] == ""            # dev prints no schema-label line
+    assert dev["next_hint"] == "Next: beacon milestone add"
+
+    sales = occupation.init_display("sales")
+    assert "profession = sales" in sales["schema_label"]
+    assert sales["next_hint"] == "Next: beacon account add / beacon opportunity add"
+
+    back = occupation.init_display("back-office")   # alias resolves to canonical
+    assert "profession = backoffice" in back["schema_label"]
+    assert "beacon target create" in back["next_hint"]
+
+    legal = occupation.init_display("legal")        # data-defined occupation
+    assert "profession = legal" in legal["schema_label"]
+    assert "beacon target-class add" in legal["next_hint"]
+
+
+def test_init_display_normalises_like_the_seam():
+    # Raw / empty values must select the same branch build_new_project does, so
+    # the display and the composition never disagree on which profession a value
+    # means.
+    assert occupation.init_display("  SALES  ")["next_hint"] \
+        == occupation.init_display("sales")["next_hint"]
+    assert occupation.init_display("")["next_hint"] \
+        == occupation.init_display("dev")["next_hint"]
