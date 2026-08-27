@@ -1011,6 +1011,67 @@ def claim_target_collections(data: dict | None = None) -> tuple:
     return tuple(cols)
 
 
+def claim_target_kinds(data: dict | None = None) -> tuple:
+    """Return the CLAIMABLE Target-class KINDS across occupations — the ``kind`` of
+    every collection ``claim_target_collections`` returns, de-duplicated in
+    manifest order (ms-109 e-5525 / C9).
+
+    The kind twin of ``claim_target_collections``: a user-facing claim surface (the
+    ``beacon claim view`` error message / ``--target <kind>:<id>`` validation) must
+    name the kinds it walks WITHOUT hardcoding ``milestone / opportunity / account``
+    — a hardcode that already drifted (the error message said ``operation`` was not
+    claimable though ``build_claim_views`` walks it via ``claim_target_collections``).
+    Sourced from the same manifest so adding a class (a descriptor occupation's kind,
+    the acquisition secondary) lights its kind up at those call sites with no edit —
+    the "declare, don't wire" contract. Kind resolution covers the NON-aggregatable
+    secondary (acquisitions, absent from the aggregatable-only ``_COLLECTION_KIND``)
+    via the full built-in class table, then descriptors via ``_collection_kind``."""
+    builtin_all = {c["collection"]: c["kind"]
+                   for c in _tstate.BUILTIN_TARGET_CLASSES.values()}
+    out: list = []
+    for coll in claim_target_collections(data):
+        kind = builtin_all.get(coll) or _collection_kind(data, coll)
+        if kind and kind not in out:
+            out.append(kind)
+    return tuple(out)
+
+
+def canonical_claim_kind(token: str, data: dict | None = None) -> str:
+    """Canonicalise a claim ``--target <kind>`` token — a canonical claimable kind
+    name (``milestone`` / ``acquisition``) OR an id-prefix shorthand (``ms`` /
+    ``opp`` / ``acq``) — to its canonical kind, RESTRICTED to the claimable set the
+    view actually walks (``claim_target_kinds``) (ms-109 e-5525 / PR#684 review
+    finding 1).
+
+    The single accessor that keeps the claim view's ADVERTISED kinds (the error
+    message, from ``claim_target_kinds``) and its VALIDATED ``--target`` vocabulary
+    on ONE registry. The first cut validated against ``narrowing_id_prefixes``,
+    whose seed omits the non-narrowing ``acquisition`` (``acq-``) — so
+    ``--target acquisition:ms-1`` (a kind/id mismatch) passed validation SILENTLY
+    while ``account:ms-1`` was rejected, reopening the ms-112 "kind is dead input"
+    hole for acquisition (and the new advertised text taught that mis-vocabulary).
+    Deriving BOTH sides from ``claim_target_kinds`` closes the split. Shorthand
+    prefixes come from the built-in id-prefix table (``work_model`` — covers the
+    non-narrowing acquisition / release) unioned with descriptor prefixes
+    (``narrowing_id_prefixes``). Returns ``""`` for a token outside the claimable
+    set → the caller skips validation (best-effort, never a false reject)."""
+    tok = (token or "").strip().lower()
+    if not tok:
+        return ""
+    claimable = set(claim_target_kinds(data))
+    if tok in claimable:                      # already a canonical claimable kind
+        return tok
+    prefixes: dict = {}                        # shorthand (sans trailing '-') -> kind
+    for pfx in _wm.known_target_prefixes():   # built-ins incl acq- / rel-
+        k = _wm.target_kind(pfx + "0")
+        if k:
+            prefixes.setdefault(pfx.rstrip("-"), k)
+    for kind, pfx in narrowing_id_prefixes(data).items():   # descriptor kinds
+        prefixes.setdefault(pfx.rstrip("-"), kind)
+    kind = prefixes.get(tok)
+    return kind if kind in claimable else ""
+
+
 # ---------------------------------------------------------------------------
 # Physical decomposition spec for row-oriented backends (ms-109 e-3591 / SPEC
 # F7mdrDA4djd3byyDbZAv). For a backend that stores each record as its own row

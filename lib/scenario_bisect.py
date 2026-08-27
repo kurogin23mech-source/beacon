@@ -39,6 +39,8 @@ import json
 from pathlib import Path
 from typing import Optional
 
+import occupation
+
 LAYER_CLI = "L_cli"
 LAYER_ENGINE = "L_engine"
 LAYER_STORE = "L_store"
@@ -68,16 +70,18 @@ def _load_raw_store(workdir: str) -> Optional[dict]:
 
 
 def _all_communications(store: dict) -> list:
-    """Every communication in the raw store (target-level + nested under work
-    items), read structurally — no engine call."""
-    out = []
-    for coll in ("opportunities", "accounts"):
-        for tgt in store.get(coll, []) or []:
-            out.extend(tgt.get("communications", []) or [])
-            for child_key in ("activities", "nurturings"):
-                for wi in tgt.get(child_key, []) or []:
-                    out.extend(wi.get("communications", []) or [])
-    return out
+    """Every evidence record in the raw store — target-level AND the closure grain
+    nested under work items — read structurally, no engine call.
+
+    ms-109 e-5525 (C9): enumerated through the occupation-agnostic evidence spine
+    (``occupation.iter_evidence``) instead of the hardcoded opportunities/accounts +
+    communications/activities/nurturings walk, so an injected 擬似着信 is found for
+    ANY Target class that declares a communications-style evidence arm — a
+    data-defined occupation included — not just the two built-in sales collections.
+    The sole consumer (``_has_injected_communication``) keys on ``source.injected``,
+    which only an injected sales Communication carries, so surfacing dev commits
+    here (they never carry it) leaves the injection check invariant."""
+    return [ev for ev, _target, _arm in occupation.iter_evidence(store)]
 
 
 def _has_injected_communication(store: dict) -> bool:
