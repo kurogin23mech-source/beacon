@@ -4,7 +4,7 @@ kind / arm 参照を記述子駆動へ寄せた不変条件を pin する。
 対象 3 サイト:
   - occupation.claim_target_kinds — claimable kind 列挙を manifest 由来に
   - cmd_claim._canonical_target_kind — --target <kind> 検証を記述子 prefix 駆動に
-  - scenario_bisect._all_communications — 擬似着信検出を iter_evidence 経由に
+  - scenario_bisect._all_evidence — 擬似着信検出を iter_evidence 経由に
 
 いずれも「新 target-class (記述子 occupation) を足したとき取りこぼさない」ことが芯。
 """
@@ -103,10 +103,52 @@ def test_claim_target_kinds_subset_of_validatable():
 
 
 # --------------------------------------------------------------------------
-# scenario_bisect._all_communications
+# occupation.collection_kind — coverage named by an explicit flag
+# (PR#684 finding 3b / e-5689, PR#685 finding B / e-5692)
 # --------------------------------------------------------------------------
 
-def test_all_communications_covers_sales_both_grains():
+def test_collection_kind_coverage_flag():
+    """The non-aggregatable acquisitions collection resolves ONLY when the caller
+    opts into full coverage — the default stays aggregatable-only (byte-identical to
+    the old _collection_kind), and the flag NAMES the difference at the call site."""
+    assert occ.collection_kind({}, "acquisitions", include_non_aggregatable=True) \
+        == "acquisition"
+    assert occ.collection_kind({}, "acquisitions") == ""   # default = aggregatable
+
+
+def test_collection_kind_descriptor_and_unknown():
+    data = _ticket_project()
+    assert occ.collection_kind(data, "tickets") == "ticket"          # either coverage
+    assert occ.collection_kind(data, "tickets",
+                               include_non_aggregatable=True) == "ticket"
+    assert occ.collection_kind({}, "nonesuch") == ""
+
+
+# --------------------------------------------------------------------------
+# occupation.non_claimable_protocol_kinds + claims.valid_target_kinds
+# (PR#685 finding A / C — e-5692)
+# --------------------------------------------------------------------------
+
+def test_claims_valid_target_kinds_public_accessor():
+    """finding A: the claim-protocol vocabulary is reachable via a PUBLIC accessor,
+    so shared surfaces do not reach into claims._VALID_TARGET_KINDS."""
+    import claims
+    assert claims.valid_target_kinds() == frozenset(
+        {"ms", "task", "operation", "trek", "free"})
+
+
+def test_non_claimable_protocol_kinds_derivation():
+    """finding C: the claim view's out-of-scope hint is a named complement accessor,
+    not an inline formula — the claim-protocol kinds this view does NOT surface are
+    exactly those with no canonical claimable kind (task / trek / free)."""
+    assert occ.non_claimable_protocol_kinds({}) == ("free", "task", "trek")
+
+
+# --------------------------------------------------------------------------
+# scenario_bisect._all_evidence
+# --------------------------------------------------------------------------
+
+def test_all_evidence_covers_sales_both_grains():
     """Preserves the built-in sales walk: target-level + nested under work items."""
     store = {
         "profession": "sales",
@@ -119,7 +161,7 @@ def test_all_communications_covers_sales_both_grains():
                       "nurturings": [{"id": "nrt-1",
                                       "communications": [{"id": "c4"}]}]}],
     }
-    ids = sorted(c.get("id") for c in sb._all_communications(store))
+    ids = sorted(c.get("id") for c in sb._all_evidence(store))
     assert ids == ["c1", "c2", "c3", "c4"]
 
 

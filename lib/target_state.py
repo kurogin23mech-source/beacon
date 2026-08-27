@@ -134,7 +134,7 @@ GATE_SELF_CLOSE_BAN = "self-close-ban"  # lightweight structural gate: the termi
 # collection: the sibling registries in ``occupation.py`` (``_ARM_ROLES`` /
 # ``_COLLECTION_KIND``) are collection-keyed (``milestones``), so a new built-in
 # added here must be keyed by its kind and ``profession_manifest`` bridges the two
-# via ``_collection_kind`` (ms-142 T2 maintainability review: flag the two keying
+# via ``collection_kind`` (ms-142 T2 maintainability review: flag the two keying
 # schemes so a future edit does not key a state model by collection and read back
 # ``None``).
 #

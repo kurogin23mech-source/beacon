@@ -1023,14 +1023,12 @@ def claim_target_kinds(data: dict | None = None) -> tuple:
     claimable though ``build_claim_views`` walks it via ``claim_target_collections``).
     Sourced from the same manifest so adding a class (a descriptor occupation's kind,
     the acquisition secondary) lights its kind up at those call sites with no edit —
-    the "declare, don't wire" contract. Kind resolution covers the NON-aggregatable
-    secondary (acquisitions, absent from the aggregatable-only ``_COLLECTION_KIND``)
-    via the full built-in class table, then descriptors via ``_collection_kind``."""
-    builtin_all = {c["collection"]: c["kind"]
-                   for c in _tstate.BUILTIN_TARGET_CLASSES.values()}
+    the "declare, don't wire" contract. Kind resolution passes
+    ``include_non_aggregatable=True`` (ms-109 e-5689/e-5692) so the NON-aggregatable
+    acquisition secondary is covered, not silently dropped."""
     out: list = []
     for coll in claim_target_collections(data):
-        kind = builtin_all.get(coll) or _collection_kind(data, coll)
+        kind = collection_kind(data, coll, include_non_aggregatable=True)
         if kind and kind not in out:
             out.append(kind)
     return tuple(out)
@@ -1310,9 +1308,28 @@ _COLLECTION_KIND = {
 }
 
 
-def _collection_kind(data: dict | None, collection: str) -> str:
-    """Return the target-class ``kind`` for a collection: the built-in map, else
-    a descriptor whose ``collection`` matches (ms-122), else ``""``."""
+def collection_kind(data: dict | None, collection: str, *,
+                    include_non_aggregatable: bool = False) -> str:
+    """Return the target-class ``kind`` for a collection, else a matching descriptor,
+    else ``""``. ONE accessor whose COVERAGE is named by an explicit flag, not by an
+    underscore (ms-109 e-5692 / PR#685 review finding B — a Python underscore marks
+    PRIVACY, not narrow coverage, so a sibling pair ``collection_kind`` /
+    ``_collection_kind`` mislead the next reader into silently dropping the
+    non-aggregatable acquisition).
+
+    - ``include_non_aggregatable=False`` (default): the AGGREGATABLE built-in map —
+      correct for the arm / manifest registries keyed to aggregatable collections
+      (the non-aggregatable ``acquisitions`` resolves to ``""`` here, as before).
+    - ``include_non_aggregatable=True``: the FULL built-in class table too, so a
+      caller that must cover every CLAIMABLE class (``claim_target_kinds``) resolves
+      ``acquisitions`` → ``acquisition`` instead of losing it.
+
+    Descriptor collections resolve the same either way (a descriptor is neither in
+    the aggregatable seed nor the built-in table — it is matched last)."""
+    if include_non_aggregatable:
+        for c in _tstate.BUILTIN_TARGET_CLASSES.values():
+            if c["collection"] == collection:
+                return c["kind"]
     kind = _COLLECTION_KIND.get(collection, "")
     if kind:
         return kind
@@ -1321,6 +1338,27 @@ def _collection_kind(data: dict | None, collection: str) -> str:
                 and (desc.get("collection") or "").strip() == collection:
             return (desc.get("kind") or "").strip()
     return ""
+
+
+def non_claimable_protocol_kinds(data: dict | None = None) -> tuple:
+    """Return the claim-PROTOCOL target kinds (``claims.valid_target_kinds`` — ms /
+    task / operation / trek / free) that the claim VIEW does NOT surface, sorted
+    (ms-109 e-5692 / PR#685 review finding C).
+
+    The negative-space twin of ``claim_target_kinds``, kept in the SAME place and
+    style as the positive side so the ``beacon claim view`` missing-target hint can
+    name its out-of-scope kinds via a shared accessor instead of an inline formula
+    that drifts from the positive list.
+
+    Vocabulary bridge (written here once): the claim PROTOCOL kinds are a DIFFERENT
+    namespace from target-CLASS kinds. A protocol kind is out-of-scope for the view
+    exactly when it has no canonical claimable target-class kind
+    (``canonical_claim_kind`` returns ``""``): ``task`` / ``trek`` / ``free`` are not
+    Targets so the view cannot surface them, while ``ms`` / ``operation`` DO bridge
+    to claimable classes and so are NOT out-of-scope."""
+    import claims   # lazy: occupation is a base module, claims a leaf protocol
+    return tuple(sorted(k for k in claims.valid_target_kinds()
+                        if not canonical_claim_kind(k, data)))
 
 
 def _arm_roles_for(data: dict | None, collection: str) -> dict:
@@ -1405,7 +1443,7 @@ def profession_manifest(data: dict, profession: str | None = None) -> dict:
     for collection in target_collections(data):
         spec = decomposition.get(collection, {"id_field": "id", "arms": ()})
         arms = tuple(spec.get("arms") or ())
-        kind = _collection_kind(data, collection)
+        kind = collection_kind(data, collection)
         roles = _arm_roles_for(data, collection)
         model = _tstate.state_model_for(data, kind)
         target_classes.append({

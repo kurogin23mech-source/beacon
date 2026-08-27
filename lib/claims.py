@@ -120,6 +120,19 @@ _VALID_TARGET_KINDS = frozenset({
     TARGET_MS, TARGET_TASK, TARGET_OPERATION, TARGET_TREK, TARGET_FREE,
 })
 
+
+def valid_target_kinds() -> frozenset:
+    """Public accessor for the claim target-kind vocabulary (``ms`` / ``task`` /
+    ``operation`` / ``trek`` / ``free``) — ms-109 e-5692 (PR#685 review finding A).
+
+    Exposed so a shared surface (the ``beacon claim view`` out-of-scope hint) reads
+    this vocabulary WITHOUT reaching into the private ``_VALID_TARGET_KINDS``: an
+    underscore name says "claims-internal", and a cross-module reach into it breaks
+    silently if claims.py later renames / inlines it (the hint lives in a branch
+    that does not fire on the normal path, so the break would hide)."""
+    return _VALID_TARGET_KINDS
+
+
 RESPONSE_ACCEPT = "accept"
 RESPONSE_DECLINE = "decline"
 _VALID_RESPONSES = frozenset({RESPONSE_ACCEPT, RESPONSE_DECLINE})
