@@ -41,6 +41,9 @@ from __future__ import annotations
 import json
 from typing import Any, Optional
 
+import occupation
+import work_model
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -160,6 +163,41 @@ def search_project(
                         from_date=from_date,
                         to_date=to_date,
                         parent_is_op=True)
+
+    # ------------------ Other Target classes (sales / data-defined) ------------------
+    # ms-109 e-5524 (C5 per-class strangler): milestones/operations above are the
+    # development occupation's Target classes, walked by name. Every OTHER Target
+    # class — a sales project's opportunities / accounts, or any data-defined
+    # occupation's classes — is enumerated here through the generic target-class
+    # engine (occupation.profession_manifest / target_decomposition) instead of a
+    # hardcoded collection key. This is purely additive: the milestone / operation
+    # loops above are unchanged (zero dev-search regression), and search now also
+    # finds a sales project's Targets, which it silently missed before. Walking the
+    # sales Targets' fat arms (activities / communications / nurturings) is a
+    # follow-up (e-5524 remainder) — this slice covers the Target records themselves.
+    _dev_handled_kinds = {"milestone", "operation"}
+    for _tc in occupation.profession_manifest(project).get("target_classes", []):
+        _kind = _tc.get("kind") or ""
+        _coll = _tc.get("collection") or ""
+        if not _coll or _kind in _dev_handled_kinds:
+            continue
+        for tgt in project.get(_coll, []) or []:
+            if _entity_matches(
+                _kind, tgt,
+                q_lower=q_lower,
+                type_filter=type_filter,
+                status_filter=status_filter,
+                priority_filter=priority_filter,
+                ms_filter=ms,
+                op_filter=op,
+                id_filter=id,
+                assignee=assignee,
+                owner=owner,
+                from_date=from_date,
+                to_date=to_date,
+                scope_filter=None,
+            ):
+                matches.append(_render_target_generic(tgt, _kind, q_lower))
 
     # ------------------ Pushes / Deploys ------------------
     for push in project.get("pushes", []):
@@ -313,6 +351,12 @@ _Q_FIELDS_BY_TYPE = {
     "operation_task": ["description", "detail"],
     "run":            ["description", "batch"],
     "incident":       ["title", "description", "resolution"],
+    # ms-109 e-5524: sales / data-defined Target classes. Their display name lives
+    # under the canonical ``label`` (with legacy title/name fallbacks handled by
+    # work_model.target_label), so fulltext matches label + the usual prose fields.
+    "opportunity":    ["label", "title", "name", "description", "objective"],
+    "account":        ["label", "name", "title", "description"],
+    "acquisition":    ["label", "title", "description"],
 }
 
 
@@ -529,6 +573,36 @@ def _render_deploy(d: dict, q_lower: str) -> dict:
         "created_at": d.get("deployed_at", "") or d.get("date", ""),
         "updated_at": d.get("deployed_at", "") or d.get("date", ""),
         "url_hash": f"#deploy-{d.get('id', '')}",
+    }
+
+
+def _render_target_generic(tgt: dict, kind: str, q_lower: str) -> dict:
+    """Render a sales / data-defined Target (opportunity / account / …) into the
+    uniform search-result shape (ms-109 e-5524).
+
+    Occupation-agnostic: the display name is read via work_model.target_label
+    (canonical ``label`` → legacy ``title`` / ``name``) so this one renderer
+    serves every non-development Target class without branching. entity_type is
+    the class ``kind`` so facets and the UI can group by it; url_hash points at
+    the class collection so a caller can deep-link to the record."""
+    label = work_model.target_label(tgt)
+    src = tgt.get("description") or tgt.get("objective") or label
+    tid = tgt.get("id", "")
+    return {
+        "entity_type": kind,
+        "id": tid,
+        "title": label,
+        "snippet": _snippet(src, q_lower),
+        "ms_id": None,
+        "op_id": None,
+        "status": tgt.get("status", "") or tgt.get("phase", ""),
+        "priority": tgt.get("priority", ""),
+        "assignee": tgt.get("assignee", ""),
+        "owner": tgt.get("owner", ""),
+        "scope": None,
+        "created_at": tgt.get("created_at", ""),
+        "updated_at": tgt.get("updated_at", "") or tgt.get("created_at", ""),
+        "url_hash": f"#{kind}/{tid}" if tid else "",
     }
 
 

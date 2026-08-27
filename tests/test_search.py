@@ -378,3 +378,69 @@ def test_document_scope_filter_excludes_other_scopes():
     out = search.search_project(project, docs, type=["document"], scope="spec")
     scopes = {r.get("scope") for r in out["results"]}
     assert scopes == {"spec"}, scopes
+
+
+# ---------------------------------------------------------------------------
+# ms-109 e-5524 (C5 per-class strangler): search now covers a sales project's
+# Target classes (opportunities / accounts) via the generic target-class engine,
+# which it silently missed before (dev-only hardcoded milestone/operation loops).
+# ---------------------------------------------------------------------------
+
+def _make_sales_project():
+    return {
+        "profession": "sales",
+        "opportunities": [
+            {"id": "opp-1", "label": "Acme 年間更新", "status": "active",
+             "priority": "high", "description": "大口更新の商談",
+             "created_at": "2026-08-01T00:00:00Z"},
+            {"id": "opp-2", "label": "Globex 新規", "status": "active",
+             "created_at": "2026-08-02T00:00:00Z"},
+        ],
+        "accounts": [
+            {"id": "acc-1", "label": "AcmeCo", "created_at": "2026-07-01T00:00:00Z"},
+        ],
+    }
+
+
+def test_sales_opportunity_and_account_are_searchable_by_label():
+    out = search.search_project(_make_sales_project(), q="Acme")
+    hits = {(r["entity_type"], r["id"]) for r in out["results"]}
+    assert ("opportunity", "opp-1") in hits   # label "Acme 年間更新"
+    assert ("account", "acc-1") in hits        # label "AcmeCo"
+    assert ("opportunity", "opp-2") not in hits  # "Globex" does not match "Acme"
+
+
+def test_sales_target_searchable_by_id():
+    out = search.search_project(_make_sales_project(), q="opp-1")
+    assert [(r["entity_type"], r["id"]) for r in out["results"]] == [("opportunity", "opp-1")]
+
+
+def test_sales_target_render_uses_canonical_label_as_title():
+    out = search.search_project(_make_sales_project(), q="Globex")
+    r = next(x for x in out["results"] if x["id"] == "opp-2")
+    assert r["title"] == "Globex 新規"       # work_model.target_label read
+    assert r["entity_type"] == "opportunity"
+    assert r["url_hash"] == "#opportunity/opp-2"
+
+
+def test_sales_type_filter_selects_target_class():
+    out = search.search_project(_make_sales_project(), type=["account"])
+    kinds = {r["entity_type"] for r in out["results"]}
+    assert kinds == {"account"}
+
+
+def test_sales_facets_count_target_classes():
+    out = search.search_project(_make_sales_project())  # empty q → all
+    tf = out["facets"]["type"]
+    assert tf.get("opportunity", 0) == 2
+    assert tf.get("account", 0) == 1
+
+
+def test_dev_project_has_no_sales_target_leakage():
+    """A development project carries no opportunities/accounts, so the generic
+    loop adds nothing — dev search results are exactly as before."""
+    project = _make_project()
+    out = search.search_project(project)
+    kinds = {r["entity_type"] for r in out["results"]}
+    assert "opportunity" not in kinds
+    assert "account" not in kinds
