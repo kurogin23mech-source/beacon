@@ -6,7 +6,8 @@ commands_shared (upward) + leaf domain modules (core / store), never on
 commands.py — acyclic (SPEC 方針4). commands.py re-imports the PUBLIC handlers
 for dispatch + `commands.X`; family-private helpers (_next_deploy_id /
 _next_release_id / _is_default_prod_backend / _update_deployed_prod_marker /
-_fire_map_reconcile_trigger) are NOT re-exported (patch them at cmd_deploy.<name>).
+_fire_map_reconcile_trigger / _fire_graph_reseed_trigger) are NOT re-exported
+(patch them at cmd_deploy.<name>).
 
 The application-map applicability helper (_application_map_applies) was promoted
 to commands_shared in this same change (e-4815-foundation) so
@@ -86,18 +87,28 @@ def _fire_graph_reseed_trigger() -> None:
     A deploy ships source changes to the world, and the code-understanding graph
     (code-graph) derives its whole machine layer — module nodes + depends-on /
     surfaces-as edges — from that source (lib/*.py・server/*.py・channel/*.mjs).
-    So a deploy is the natural moment to re-seed the graph to current source and
-    re-verify 0-drift, exactly as a deploy prompts an application-map reconcile
-    (_fire_map_reconcile_trigger). Without this, the graph only drifts from source
-    and is re-checked on demand — the "0-drift *verified*" becomes "0-drift
-    *verifiable*" gap the ms-156 target-close review flagged (root_target.py went
-    missing from the graph after merge).
+    So a deploy is the natural moment to re-check the graph against current source
+    and re-seed it if drifted, mirroring how a deploy prompts an application-map
+    reconcile (_fire_map_reconcile_trigger). Without this, the graph only drifts
+    from source and is re-checked on demand — the "0-drift *verified*" becomes
+    "0-drift *verifiable*" gap the ms-156 target-close review flagged
+    (root_target.py went missing from the graph after merge).
 
-    Fires only when the graph docs already exist (get_document(NODES_DOC_ID)); a
-    project that never seeded the graph — e.g. any non-source project, whose doc
-    id resolves to nothing — is a no-op here. The re-seed itself is
-    scripts/seed-code-graph.py's work; this trigger only prompts it. Degrades
-    silently with no store / no graph / IO error.
+    Mirror-but-not-identical to _fire_map_reconcile_trigger: the *shape* (fire a
+    ship-time prompt, best-effort, no-op when the artifact is absent) matches, but
+    the applicability *gate* differs. Map gates on _application_map_applies() (the
+    deliverable-declaration check); this gates on the graph nodes doc actually
+    existing (get_document(NODES_DOC_ID)) — a project that never seeded the graph,
+    e.g. any non-source project whose doc id resolves to nothing, is a no-op here.
+
+    The message is *check-first*: it tells the reader to run check-graph-drift and
+    re-seed ONLY on drift, never to run the cloud-writing `seed --update`
+    unconditionally. That matters because a session-start AI can receive this
+    trigger without ever entering the /beacon-deploy Skill, so the trigger text
+    must itself carry the "verify before write" ordering (AX review PR#682) — an
+    unconditional re-seed instruction would bypass the write-confirmation boundary.
+    The re-seed itself is scripts/seed-code-graph.py's work; this trigger only
+    prompts it. Degrades silently with no store / no graph / IO error.
     """
     try:
         import code_graph_store
@@ -115,10 +126,11 @@ def _fire_graph_reseed_trigger() -> None:
             "name": "graph-reseed",
             "kind": "graph-reseed",
             "message": (
-                "デプロイを記録しました。コード理解グラフ (code-graph) を "
-                "`python3 scripts/seed-code-graph.py --derive --update` で現在ソースに"
-                "再 seed し、`python3 scripts/check-graph-drift.py` で 0-drift を"
-                "確認してください (出荷で module / 依存 / surface が動いた可能性があります)。"
+                "デプロイを記録しました。コード理解グラフ (code-graph) が現在ソースと"
+                "ズレていないか `python3 scripts/check-graph-drift.py` で照合し、"
+                "drift があれば `python3 scripts/seed-code-graph.py --derive --update` で"
+                "再 seed してください (照合が先、再 seed は drift 時のみ = cloud 書き込みを"
+                "無条件に走らせない。出荷で module / 依存 / surface が動いた可能性があります)。"
             ),
             "created_at": now_iso,
             "refreshed_at": now_iso,
