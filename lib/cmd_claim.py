@@ -11,6 +11,7 @@ import json
 import os
 import sys
 
+import occupation
 import work_model
 from commands_shared import (
     load_project,
@@ -412,6 +413,28 @@ def _resolve_focus_directory(live_ids):
     return _invert_focus_directory(sessions)
 
 
+def _canonical_target_kind(token: str, data: dict) -> str:
+    """Canonicalise a ``--target <kind>`` token — a canonical kind name
+    (``milestone``) OR an id-prefix shorthand (``ms`` / ``opp`` / ``acc``) — to the
+    canonical Target kind, descriptor-aware (ms-109 e-5525 / C9).
+
+    Sourced from ``occupation.narrowing_id_prefixes`` (kind → id-prefix, built-ins
+    PLUS each data-defined occupation's kind + prefix) so a descriptor occupation's
+    claimable kind and its shorthand both resolve with no hardcoded alias map.
+    Returns ``""`` for an unknown token — the caller then skips validation rather
+    than rejecting (best-effort fail-fast, never a false rejection)."""
+    tok = (token or "").strip().lower()
+    if not tok:
+        return ""
+    prefixes = occupation.narrowing_id_prefixes(data)  # kind -> "ms-" etc.
+    if tok in prefixes:                     # already a canonical kind name
+        return tok
+    for kind, prefix in prefixes.items():
+        if tok == prefix.rstrip("-"):       # id-prefix shorthand (ms/opp/acc/op)
+            return kind
+    return ""
+
+
 def cmd_claim_view():
     """beacon claim view [--target <k>:<id>] [--json]
 
@@ -431,24 +454,26 @@ def cmd_claim_view():
     ti = os.environ.get("BEACON_CLAIM_TARGET_ID", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
+    data = load_project()
+
     # ms-112 AX+maintainability consensus: the <kind> in --target <kind>:<id>
     # was read then never used by `view` — `--target opp:ms-1` passed silently.
-    # Validate it against the id's derived kind (fail-fast, before any cloud
-    # call) so a mismatch is rejected instead of ignored (kind stops being dead
-    # input).
+    # Validate it against the id's derived kind (fail-fast, before the cloud call
+    # in build_claim_views below) so a mismatch is rejected instead of ignored.
+    # ms-109 e-5525 (C9): both sides are descriptor-driven now — the accepted
+    # <kind> tokens come from occupation.narrowing_id_prefixes and the id→kind
+    # derivation from narrowing_kind_for_ref (built-in fallback work_model.target_
+    # kind keeps acquisition/release covered), so a data-defined occupation's
+    # claimable kind validates too instead of the built-in ms/opp/acc hardcode.
     if ti and tk:
-        _alias = {"ms": "milestone", "milestone": "milestone",
-                  "opp": "opportunity", "opportunity": "opportunity",
-                  "acc": "account", "account": "account"}
-        _declared = _alias.get(tk.lower())
-        _actual = work_model.target_kind(ti)
+        _declared = _canonical_target_kind(tk, data)
+        _actual = occupation.narrowing_kind_for_ref(ti, data) \
+            or work_model.target_kind(ti)
         if _declared and _actual and _declared != _actual:
             print(f"Error: --target の kind '{tk}' が id '{ti}' (= {_actual}) と "
                   f"一致しません。<kind>:<id> は同じ対象を指してください。",
                   file=sys.stderr)
             sys.exit(1)
-
-    data = load_project()
     my_session_id = _resolve_session_id()
     # "me" for the assignee layer: the assignee auto-add on `milestone start`
     # writes ``agent.get_actor()["agent"]`` (e.g. "MACHINE-claude"), so match
@@ -523,9 +548,14 @@ def cmd_claim_view():
         label = view.get("label") or view.get("target_id")
         print(f"{view.get('target_id')} {label}")
         if not view.get("exists", True):
-            print("  ⚠ この id の target は見つかりません (claim 対象は milestone / "
-                  "opportunity / account。task / operation / trek はこの view の"
-                  "対象外)。unclaimed とは扱いません。")
+            # ms-109 e-5525 (C9): the claimable-kind list is derived from the
+            # manifest (occupation.claim_target_kinds), not hardcoded — the old
+            # "milestone / opportunity / account" text had already drifted (it
+            # omitted operation, which build_claim_views DOES walk). task / trek /
+            # free are the true out-of-scope kinds (not walked by this view).
+            _claimable = " / ".join(occupation.claim_target_kinds(data))
+            print(f"  ⚠ この id の target は見つかりません (claim 対象は {_claimable}。"
+                  "task / trek / free はこの view の対象外)。unclaimed とは扱いません。")
         else:
             print(f"  {line}" if line else "  (未 claim — 誰も作業中でなく担当も未設定)")
         if _focus_note:

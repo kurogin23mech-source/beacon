@@ -1011,6 +1011,31 @@ def claim_target_collections(data: dict | None = None) -> tuple:
     return tuple(cols)
 
 
+def claim_target_kinds(data: dict | None = None) -> tuple:
+    """Return the CLAIMABLE Target-class KINDS across occupations — the ``kind`` of
+    every collection ``claim_target_collections`` returns, de-duplicated in
+    manifest order (ms-109 e-5525 / C9).
+
+    The kind twin of ``claim_target_collections``: a user-facing claim surface (the
+    ``beacon claim view`` error message / ``--target <kind>:<id>`` validation) must
+    name the kinds it walks WITHOUT hardcoding ``milestone / opportunity / account``
+    — a hardcode that already drifted (the error message said ``operation`` was not
+    claimable though ``build_claim_views`` walks it via ``claim_target_collections``).
+    Sourced from the same manifest so adding a class (a descriptor occupation's kind,
+    the acquisition secondary) lights its kind up at those call sites with no edit —
+    the "declare, don't wire" contract. Kind resolution covers the NON-aggregatable
+    secondary (acquisitions, absent from the aggregatable-only ``_COLLECTION_KIND``)
+    via the full built-in class table, then descriptors via ``_collection_kind``."""
+    builtin_all = {c["collection"]: c["kind"]
+                   for c in _tstate.BUILTIN_TARGET_CLASSES.values()}
+    out: list = []
+    for coll in claim_target_collections(data):
+        kind = builtin_all.get(coll) or _collection_kind(data, coll)
+        if kind and kind not in out:
+            out.append(kind)
+    return tuple(out)
+
+
 # ---------------------------------------------------------------------------
 # Physical decomposition spec for row-oriented backends (ms-109 e-3591 / SPEC
 # F7mdrDA4djd3byyDbZAv). For a backend that stores each record as its own row
