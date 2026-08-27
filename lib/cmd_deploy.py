@@ -80,6 +80,56 @@ def _fire_map_reconcile_trigger() -> None:
         return
 
 
+def _fire_graph_reseed_trigger() -> None:
+    """Fire a 'graph-reseed' trigger at deploy time (ms-156 e-5628).
+
+    A deploy ships source changes to the world, and the code-understanding graph
+    (code-graph) derives its whole machine layer — module nodes + depends-on /
+    surfaces-as edges — from that source (lib/*.py・server/*.py・channel/*.mjs).
+    So a deploy is the natural moment to re-seed the graph to current source and
+    re-verify 0-drift, exactly as a deploy prompts an application-map reconcile
+    (_fire_map_reconcile_trigger). Without this, the graph only drifts from source
+    and is re-checked on demand — the "0-drift *verified*" becomes "0-drift
+    *verifiable*" gap the ms-156 target-close review flagged (root_target.py went
+    missing from the graph after merge).
+
+    Fires only when the graph docs already exist (get_document(NODES_DOC_ID)); a
+    project that never seeded the graph — e.g. any non-source project, whose doc
+    id resolves to nothing — is a no-op here. The re-seed itself is
+    scripts/seed-code-graph.py's work; this trigger only prompts it. Degrades
+    silently with no store / no graph / IO error.
+    """
+    try:
+        import code_graph_store
+        doc = get_store().get_document(code_graph_store.NODES_DOC_ID)
+    except Exception:
+        return
+    if not doc:
+        return
+    try:
+        triggers_dir = _get_triggers_dir()
+        os.makedirs(triggers_dir, exist_ok=True)
+        import datetime
+        now_iso = datetime.datetime.now().isoformat()
+        trigger_data = {
+            "name": "graph-reseed",
+            "kind": "graph-reseed",
+            "message": (
+                "デプロイを記録しました。コード理解グラフ (code-graph) を "
+                "`python3 scripts/seed-code-graph.py --derive --update` で現在ソースに"
+                "再 seed し、`python3 scripts/check-graph-drift.py` で 0-drift を"
+                "確認してください (出荷で module / 依存 / surface が動いた可能性があります)。"
+            ),
+            "created_at": now_iso,
+            "refreshed_at": now_iso,
+        }
+        with open(os.path.join(triggers_dir, "graph-reseed.json"), "w", encoding="utf-8") as f:
+            json.dump(trigger_data, f, ensure_ascii=False)
+            f.write("\n")
+    except OSError:
+        return
+
+
 def _next_deploy_id(data: dict, date_str: str) -> str:
     """Generate next deploy ID like deploy-20260517-1."""
     prefix = f"deploy-{date_str.replace('-', '')[:8]}"
@@ -410,6 +460,9 @@ def cmd_deploy_record():
 
     # ms-104 e-3154: deploy = surface が世に出る節目。全貌マップの reconcile を促す。
     _fire_map_reconcile_trigger()
+    # ms-156 e-5628: 同じ節目でコード理解グラフ (code-graph) の再 seed を促す
+    # (機械層は出荷したソースから導出されるので、出荷で drift しうる)。
+    _fire_graph_reseed_trigger()
 
     if json_mode:
         out = {"deploy": deploy_entry}
