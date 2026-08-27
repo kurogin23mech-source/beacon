@@ -438,9 +438,61 @@ def test_sales_facets_count_target_classes():
 
 def test_dev_project_has_no_sales_target_leakage():
     """A development project carries no opportunities/accounts, so the generic
-    loop adds nothing — dev search results are exactly as before."""
+    loop adds none of those kinds."""
     project = _make_project()
     out = search.search_project(project)
     kinds = {r["entity_type"] for r in out["results"]}
     assert "opportunity" not in kinds
     assert "account" not in kinds
+
+
+# --- PR#683 review fixes (independent AX + maintainability judges) ----------
+
+def test_status_filter_round_trips_on_phase_driven_class():
+    """AX/M4: an opportunity's state lives under `phase`; the rendered status and
+    the --status filter must read the SAME (manifest-declared) field, so filtering
+    by the value shown as status returns the record (no silent 0-result)."""
+    sales = {
+        "profession": "sales",
+        "opportunities": [
+            {"id": "opp-1", "label": "Acme", "phase": "negotiation"},
+            {"id": "opp-2", "label": "Globex", "phase": "prospecting"},
+        ],
+    }
+    out = search.search_project(sales)
+    rendered = {r["id"]: r["status"] for r in out["results"]}
+    assert rendered["opp-1"] == "negotiation"          # rendered from `phase`
+    filtered = search.search_project(sales, status=["negotiation"])
+    assert [r["id"] for r in filtered["results"]] == ["opp-1"]   # round-trips
+
+
+def test_ms_and_op_filter_exclude_generic_targets():
+    """AX: --ms / --op are development-scope filters; a sales Target (no ms_id /
+    op_id) must NOT leak into an --ms / --op query."""
+    sales = _make_sales_project()
+    assert search.search_project(sales, ms="ms-1")["results"] == []
+    assert search.search_project(sales, op="op-1")["results"] == []
+
+
+def test_dev_release_target_is_searchable_via_generic_loop():
+    """M3: a dev project's release Targets (release_targets collection) are walked
+    by the generic loop — search covers them now (they were unfindable before)."""
+    dev = {
+        "profession": "dev",
+        "milestones": [{"id": "ms-1", "title": "Auth", "entries": []}],
+        "release_targets": [{"id": "rt-1", "label": "v2.0 GA", "description": "big cut"}],
+    }
+    out = search.search_project(dev, q="v2.0")
+    assert [(r["entity_type"], r["id"]) for r in out["results"]] == [("release", "rt-1")]
+    # and the exact set of Target entity_types a dev project emits is pinned:
+    all_kinds = {r["entity_type"] for r in search.search_project(dev)["results"]}
+    assert all_kinds == {"milestone", "release"}
+
+
+def test_generic_target_findable_by_label_via_fallback():
+    """M2: a Target class with NO bespoke q-field entry is still findable by its
+    canonical `label` through the fallback (no per-kind wiring in search.py)."""
+    sales = {"profession": "sales",
+             "accounts": [{"id": "acc-9", "label": "Zenith Industries"}]}
+    out = search.search_project(sales, q="Zenith")
+    assert [(r["entity_type"], r["id"]) for r in out["results"]] == [("account", "acc-9")]
