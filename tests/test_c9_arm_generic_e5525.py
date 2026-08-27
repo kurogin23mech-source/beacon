@@ -103,32 +103,45 @@ def test_claim_target_kinds_subset_of_validatable():
 
 
 # --------------------------------------------------------------------------
-# occupation.collection_kind — full (incl non-aggregatable) collection→kind
-# (PR#684 review finding 3b / e-5689)
+# occupation.collection_kind — coverage named by an explicit flag
+# (PR#684 finding 3b / e-5689, PR#685 finding B / e-5692)
 # --------------------------------------------------------------------------
 
-def test_collection_kind_covers_non_aggregatable_acquisition():
-    """The full accessor resolves the non-aggregatable acquisitions collection that
-    the aggregatable-only _collection_kind drops to "" (the silent-loss trap the
-    two named functions make visible)."""
-    assert occ.collection_kind({}, "acquisitions") == "acquisition"
-    assert occ._collection_kind({}, "acquisitions") == ""   # sibling stays scoped
+def test_collection_kind_coverage_flag():
+    """The non-aggregatable acquisitions collection resolves ONLY when the caller
+    opts into full coverage — the default stays aggregatable-only (byte-identical to
+    the old _collection_kind), and the flag NAMES the difference at the call site."""
+    assert occ.collection_kind({}, "acquisitions", include_non_aggregatable=True) \
+        == "acquisition"
+    assert occ.collection_kind({}, "acquisitions") == ""   # default = aggregatable
 
 
 def test_collection_kind_descriptor_and_unknown():
     data = _ticket_project()
-    assert occ.collection_kind(data, "tickets") == "ticket"
+    assert occ.collection_kind(data, "tickets") == "ticket"          # either coverage
+    assert occ.collection_kind(data, "tickets",
+                               include_non_aggregatable=True) == "ticket"
     assert occ.collection_kind({}, "nonesuch") == ""
 
 
-def test_out_of_scope_kinds_derivation():
-    """finding 3a: the claim view's out-of-scope hint is derived — the claim-protocol
-    kinds (claims._VALID_TARGET_KINDS) that this view does NOT surface are exactly
-    those with no canonical claimable kind (task / trek / free), not a hardcode."""
+# --------------------------------------------------------------------------
+# occupation.non_claimable_protocol_kinds + claims.valid_target_kinds
+# (PR#685 finding A / C — e-5692)
+# --------------------------------------------------------------------------
+
+def test_claims_valid_target_kinds_public_accessor():
+    """finding A: the claim-protocol vocabulary is reachable via a PUBLIC accessor,
+    so shared surfaces do not reach into claims._VALID_TARGET_KINDS."""
     import claims
-    out = sorted(k for k in claims._VALID_TARGET_KINDS
-                 if not occ.canonical_claim_kind(k, {}))
-    assert out == ["free", "task", "trek"]
+    assert claims.valid_target_kinds() == frozenset(
+        {"ms", "task", "operation", "trek", "free"})
+
+
+def test_non_claimable_protocol_kinds_derivation():
+    """finding C: the claim view's out-of-scope hint is a named complement accessor,
+    not an inline formula — the claim-protocol kinds this view does NOT surface are
+    exactly those with no canonical claimable kind (task / trek / free)."""
+    assert occ.non_claimable_protocol_kinds({}) == ("free", "task", "trek")
 
 
 # --------------------------------------------------------------------------

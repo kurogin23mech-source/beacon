@@ -1023,12 +1023,12 @@ def claim_target_kinds(data: dict | None = None) -> tuple:
     claimable though ``build_claim_views`` walks it via ``claim_target_collections``).
     Sourced from the same manifest so adding a class (a descriptor occupation's kind,
     the acquisition secondary) lights its kind up at those call sites with no edit —
-    the "declare, don't wire" contract. Kind resolution goes through the FULL
-    ``collection_kind`` accessor (ms-109 e-5689) so the NON-aggregatable acquisition
-    secondary — dropped by the aggregatable-only ``_collection_kind`` — is covered."""
+    the "declare, don't wire" contract. Kind resolution passes
+    ``include_non_aggregatable=True`` (ms-109 e-5689/e-5692) so the NON-aggregatable
+    acquisition secondary is covered, not silently dropped."""
     out: list = []
     for coll in claim_target_collections(data):
-        kind = collection_kind(data, coll)
+        kind = collection_kind(data, coll, include_non_aggregatable=True)
         if kind and kind not in out:
             out.append(kind)
     return tuple(out)
@@ -1308,16 +1308,28 @@ _COLLECTION_KIND = {
 }
 
 
-def _collection_kind(data: dict | None, collection: str) -> str:
-    """Return the target-class ``kind`` for a collection: the AGGREGATABLE built-in
-    map, else a descriptor whose ``collection`` matches (ms-122), else ``""``.
+def collection_kind(data: dict | None, collection: str, *,
+                    include_non_aggregatable: bool = False) -> str:
+    """Return the target-class ``kind`` for a collection, else a matching descriptor,
+    else ``""``. ONE accessor whose COVERAGE is named by an explicit flag, not by an
+    underscore (ms-109 e-5692 / PR#685 review finding B — a Python underscore marks
+    PRIVACY, not narrow coverage, so a sibling pair ``collection_kind`` /
+    ``_collection_kind`` mislead the next reader into silently dropping the
+    non-aggregatable acquisition).
 
-    ⚠ Coverage is aggregatable-only: the non-aggregatable ``acquisitions`` resolves
-    to ``""`` here (it is absent from ``_COLLECTION_KIND``). This is correct for the
-    arm / manifest registries keyed to aggregatable collections, but a caller that
-    must cover EVERY claimable class (e.g. the claim surface) needs the full
-    ``collection_kind`` below — ms-109 e-5689 split them so the coverage gap is
-    named, not silent."""
+    - ``include_non_aggregatable=False`` (default): the AGGREGATABLE built-in map —
+      correct for the arm / manifest registries keyed to aggregatable collections
+      (the non-aggregatable ``acquisitions`` resolves to ``""`` here, as before).
+    - ``include_non_aggregatable=True``: the FULL built-in class table too, so a
+      caller that must cover every CLAIMABLE class (``claim_target_kinds``) resolves
+      ``acquisitions`` → ``acquisition`` instead of losing it.
+
+    Descriptor collections resolve the same either way (a descriptor is neither in
+    the aggregatable seed nor the built-in table — it is matched last)."""
+    if include_non_aggregatable:
+        for c in _tstate.BUILTIN_TARGET_CLASSES.values():
+            if c["collection"] == collection:
+                return c["kind"]
     kind = _COLLECTION_KIND.get(collection, "")
     if kind:
         return kind
@@ -1328,22 +1340,25 @@ def _collection_kind(data: dict | None, collection: str) -> str:
     return ""
 
 
-def collection_kind(data: dict | None, collection: str) -> str:
-    """Return the target-class ``kind`` for a collection across the FULL built-in
-    class table — INCLUDING non-aggregatable classes (``acquisitions`` → ``account``
-    獲得, which the aggregatable-only ``_collection_kind`` drops to ``""``) — else a
-    matching descriptor, else ``""`` (ms-109 e-5689).
+def non_claimable_protocol_kinds(data: dict | None = None) -> tuple:
+    """Return the claim-PROTOCOL target kinds (``claims.valid_target_kinds`` — ms /
+    task / operation / trek / free) that the claim VIEW does NOT surface, sorted
+    (ms-109 e-5692 / PR#685 review finding C).
 
-    The named "全量版" accessor: use this whenever a caller must map every CLAIMABLE
-    collection to its kind (``claim_target_kinds``), so a non-aggregatable class is
-    never silently lost. ``_collection_kind`` stays the aggregatable-scoped sibling
-    for the registries keyed to aggregatable collections; keeping two named
-    functions makes the coverage difference visible at the call site instead of a
-    trap the next reader steps in."""
-    for c in _tstate.BUILTIN_TARGET_CLASSES.values():
-        if c["collection"] == collection:
-            return c["kind"]
-    return _collection_kind(data, collection)   # descriptor fallback (else "")
+    The negative-space twin of ``claim_target_kinds``, kept in the SAME place and
+    style as the positive side so the ``beacon claim view`` missing-target hint can
+    name its out-of-scope kinds via a shared accessor instead of an inline formula
+    that drifts from the positive list.
+
+    Vocabulary bridge (written here once): the claim PROTOCOL kinds are a DIFFERENT
+    namespace from target-CLASS kinds. A protocol kind is out-of-scope for the view
+    exactly when it has no canonical claimable target-class kind
+    (``canonical_claim_kind`` returns ``""``): ``task`` / ``trek`` / ``free`` are not
+    Targets so the view cannot surface them, while ``ms`` / ``operation`` DO bridge
+    to claimable classes and so are NOT out-of-scope."""
+    import claims   # lazy: occupation is a base module, claims a leaf protocol
+    return tuple(sorted(k for k in claims.valid_target_kinds()
+                        if not canonical_claim_kind(k, data)))
 
 
 def _arm_roles_for(data: dict | None, collection: str) -> dict:
@@ -1428,7 +1443,7 @@ def profession_manifest(data: dict, profession: str | None = None) -> dict:
     for collection in target_collections(data):
         spec = decomposition.get(collection, {"id_field": "id", "arms": ()})
         arms = tuple(spec.get("arms") or ())
-        kind = _collection_kind(data, collection)
+        kind = collection_kind(data, collection)
         roles = _arm_roles_for(data, collection)
         model = _tstate.state_model_for(data, kind)
         target_classes.append({
