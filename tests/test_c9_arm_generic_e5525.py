@@ -15,7 +15,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import occupation as occ  # noqa: E402
-import cmd_claim  # noqa: E402
 import scenario_bisect as sb  # noqa: E402
 
 
@@ -60,28 +59,47 @@ def test_claim_target_kinds_includes_descriptor_kind():
 
 
 # --------------------------------------------------------------------------
-# cmd_claim._canonical_target_kind
+# occupation.canonical_claim_kind (--target <kind>:<id> validation vocabulary)
 # --------------------------------------------------------------------------
 
-def test_canonical_target_kind_builtin_shorthand_and_canonical():
+def test_canonical_claim_kind_builtin_shorthand_and_canonical():
     for tok, want in [("ms", "milestone"), ("milestone", "milestone"),
                       ("opp", "opportunity"), ("acc", "account"),
                       ("op", "operation")]:
-        assert cmd_claim._canonical_target_kind(tok, {}) == want
+        assert occ.canonical_claim_kind(tok, {}) == want
 
 
-def test_canonical_target_kind_descriptor_aware():
+def test_canonical_claim_kind_descriptor_aware():
     """A descriptor kind AND its id-prefix shorthand both canonicalise — the
     ms/opp/acc hardcode could not."""
     data = _ticket_project()
-    assert cmd_claim._canonical_target_kind("ticket", data) == "ticket"
-    assert cmd_claim._canonical_target_kind("tkt", data) == "ticket"
+    assert occ.canonical_claim_kind("ticket", data) == "ticket"
+    assert occ.canonical_claim_kind("tkt", data) == "ticket"
 
 
-def test_canonical_target_kind_unknown_is_empty():
+def test_canonical_claim_kind_unknown_is_empty():
     """Unknown token → "" so the caller SKIPS validation (never a false reject)."""
-    assert cmd_claim._canonical_target_kind("bogus", {}) == ""
-    assert cmd_claim._canonical_target_kind("", {}) == ""
+    assert occ.canonical_claim_kind("bogus", {}) == ""
+    assert occ.canonical_claim_kind("", {}) == ""
+
+
+def test_canonical_claim_kind_covers_acquisition():
+    """PR#684 review finding 1: acquisition is advertised as claimable but was
+    dropped by the narrowing-prefix validation (acq- not in that seed), so an
+    `acquisition:ms-1` mismatch passed silently. The claimable-axis accessor must
+    resolve BOTH the canonical name and the acq- shorthand."""
+    assert occ.canonical_claim_kind("acquisition", {}) == "acquisition"
+    assert occ.canonical_claim_kind("acq", {}) == "acquisition"
+
+
+def test_claim_target_kinds_subset_of_validatable():
+    """The reviewer's structural invariant: every ADVERTISED claimable kind
+    (claim_target_kinds) must be VALIDATABLE (canonicalises to itself). No kind can
+    be advertised yet skip validation — the acquisition split that finding 1 caught
+    cannot recur for any class, built-in or descriptor."""
+    for data in ({}, _ticket_project()):
+        for kind in occ.claim_target_kinds(data):
+            assert occ.canonical_claim_kind(kind, data) == kind, kind
 
 
 # --------------------------------------------------------------------------

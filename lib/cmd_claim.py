@@ -413,28 +413,6 @@ def _resolve_focus_directory(live_ids):
     return _invert_focus_directory(sessions)
 
 
-def _canonical_target_kind(token: str, data: dict) -> str:
-    """Canonicalise a ``--target <kind>`` token — a canonical kind name
-    (``milestone``) OR an id-prefix shorthand (``ms`` / ``opp`` / ``acc``) — to the
-    canonical Target kind, descriptor-aware (ms-109 e-5525 / C9).
-
-    Sourced from ``occupation.narrowing_id_prefixes`` (kind → id-prefix, built-ins
-    PLUS each data-defined occupation's kind + prefix) so a descriptor occupation's
-    claimable kind and its shorthand both resolve with no hardcoded alias map.
-    Returns ``""`` for an unknown token — the caller then skips validation rather
-    than rejecting (best-effort fail-fast, never a false rejection)."""
-    tok = (token or "").strip().lower()
-    if not tok:
-        return ""
-    prefixes = occupation.narrowing_id_prefixes(data)  # kind -> "ms-" etc.
-    if tok in prefixes:                     # already a canonical kind name
-        return tok
-    for kind, prefix in prefixes.items():
-        if tok == prefix.rstrip("-"):       # id-prefix shorthand (ms/opp/acc/op)
-            return kind
-    return ""
-
-
 def cmd_claim_view():
     """beacon claim view [--target <k>:<id>] [--json]
 
@@ -466,7 +444,7 @@ def cmd_claim_view():
     # kind keeps acquisition/release covered), so a data-defined occupation's
     # claimable kind validates too instead of the built-in ms/opp/acc hardcode.
     if ti and tk:
-        _declared = _canonical_target_kind(tk, data)
+        _declared = occupation.canonical_claim_kind(tk, data)
         _actual = occupation.narrowing_kind_for_ref(ti, data) \
             or work_model.target_kind(ti)
         if _declared and _actual and _declared != _actual:
