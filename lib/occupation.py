@@ -208,6 +208,43 @@ def build_new_project(name: str, objective: str, profession: str, *,
     return data
 
 
+def profession_next_hint(profession: str) -> str:
+    """The SINGLE source of truth for ``profession → first action after init``:
+    the bare command (no ``Next: `` prefix) a freshly-created project should run
+    next. Two callers read from here and MUST agree:
+
+    * ``init_display`` prefixes it with ``Next: `` for the ``beacon init`` output.
+    * ``onboarding_plan`` carries it verbatim as the plan's ``next_hint`` for the
+      /beacon-onboard skill to render.
+
+    Before e-5706 this mapping lived in TWO places — ``init_display``'s branch and
+    ``_ONBOARDING_PLANS``' per-entry ``next_hint`` — whose header comment claimed
+    they "mirror cmd_init's Next:" but had already drifted (backoffice /
+    data-defined carried a shorter form). Folding them into this one helper closes
+    that drift structurally; a pin test asserts
+    ``init_display(p)["next_hint"] == "Next: " + onboarding_plan(p)["next_hint"]``
+    for every profession (PR #686 保守性 finding1).
+
+    ``profession`` is normalised the same way as ``init_display`` / the
+    composition seam (strip / lower, empty → ``dev``) and the ``back-office``
+    alias resolves to the backoffice branch, so all callers select the same
+    branch for a raw value."""
+    profession = (profession or "").strip().lower() or "dev"
+    if profession == "sales":
+        return "beacon account add / beacon opportunity add"
+    if profession in ("backoffice", "back-office"):
+        return ("beacon target create --class contract --label <名前> "
+                "--field counterparty=<相手方>")
+    # `profession` is already normalised (empty → "dev") above, so a bare
+    # `== "dev"` is exhaustive here — no dead "" element (PR #686 AX/保守性).
+    if profession == "dev":
+        return "beacon milestone add"
+    # data-defined profession (ms-124 e-4091): no target-classes yet
+    return ("beacon target-class add --kind <種類> --label <名前> "
+            f"--profession {profession} --type single-shot "
+            "--id-prefix <pfx-> --collection <coll>")
+
+
 def init_display(profession: str) -> dict:
     """Return the user-facing feedback strings for ``beacon init <profession>``:
     the schema-label line shown after ``Created`` (``""`` for dev, which prints
@@ -218,42 +255,38 @@ def init_display(profession: str) -> dict:
     e-5465; the alias set was drifting between the composition seam and the
     CLI's print block, PR #669 保守性#2).
 
-    NOT yet the sole home for ``profession → next action``: ``_ONBOARDING_PLANS``
-    (the /beacon-onboard skill's plan table below) also carries a per-profession
-    ``next_hint`` that its header comment says "mirrors cmd_init's Next:", and the
-    two already differ (backoffice / data-defined). Unifying those two next-hint
-    sources is a follow-up (e-5706); this seam only removes the cmd_init-internal
-    display branch, so the docstring must not over-claim a repo-wide single source
-    (PR #686 保守性 finding1).
+    The ``next_hint`` is sourced from ``profession_next_hint`` — the ONE home for
+    ``profession → next action``, shared verbatim with ``onboarding_plan`` (the
+    /beacon-onboard skill's plan) so the CLI and the skill can no longer drift
+    (e-5706, closing the follow-up PR #686 保守性 finding1 flagged). Only the
+    schema-label line is decided here.
 
     ``profession`` is normalised the same way as the seam (strip / lower, empty
     → ``dev``) so both agree on which branch a raw value selects."""
     profession = (profession or "").strip().lower() or "dev"
+    next_hint = "Next: " + profession_next_hint(profession)
     if profession == "sales":
         return {
             "schema_label": "profession = sales (営業スキーマ: opportunities / accounts)",
-            "next_hint": "Next: beacon account add / beacon opportunity add",
+            "next_hint": next_hint,
         }
     if profession in ("backoffice", "back-office"):
         return {
             "schema_label": "profession = backoffice (記述子で定義: 契約 / 評価 / "
                             "月次決算 / 勤怠ウォッチ)",
-            "next_hint": "Next: beacon target create --class contract --label <名前> "
-                         "--field counterparty=<相手方>",
+            "next_hint": next_hint,
         }
     # `profession` is already normalised (empty → "dev") above, so a bare
     # `== "dev"` is exhaustive here — no dead "" element (PR #686 AX/保守性).
     if profession == "dev":
         return {
             "schema_label": "",  # dev prints no schema-label line
-            "next_hint": "Next: beacon milestone add",
+            "next_hint": next_hint,
         }
     # data-defined profession (ms-124 e-4091): no target-classes yet
     return {
         "schema_label": f"profession = {profession} (記述子で定義: target-class 未登録)",
-        "next_hint": "Next: beacon target-class add --kind <種類> --label <名前> "
-                     f"--profession {profession} --type single-shot "
-                     "--id-prefix <pfx-> --collection <coll>",
+        "next_hint": next_hint,
     }
 
 
@@ -705,7 +738,12 @@ def is_valid_link_target(data: dict, target_id: str) -> bool:
 #                 {"key", "label", "help", "required"}. `objective` is shared
 #                 (every occupation needs a north star) but its label/help is
 #                 occupation-specific; occupation-only fields ride after it.
-#   next_hint   : the first real action after init (mirrors cmd_init's "Next:").
+#
+# The plan's ``next_hint`` (the first real action after init) is NOT stored here
+# per entry — it is filled in by ``onboarding_plan`` from ``profession_next_hint``
+# so init's "Next:" and the skill's plan share ONE source and can't drift
+# (e-5706; a stored copy here had already diverged from cmd_init, PR #686 保守性
+# finding1). Entries below carry only ``vision_role`` + ``ask``.
 #
 # dev's plan reproduces the existing dev onboarding verbatim (AC2: dev init
 # 不変). Adding an occupation = adding one entry here (or, for a data-defined
@@ -737,7 +775,6 @@ _ONBOARDING_PLANS: dict = {
                 "required": False,
             },
         ],
-        "next_hint": "beacon milestone add",
     },
     "sales": {
         "vision_role": "営業の狙い — 対象顧客・注力領域・達成したい成果"
@@ -757,7 +794,6 @@ _ONBOARDING_PLANS: dict = {
                 "required": False,
             },
         ],
-        "next_hint": "beacon account add / beacon opportunity add",
     },
     "backoffice": {
         "vision_role": "担当業務の範囲と目的 — 何を回し、何を守るか",
@@ -776,7 +812,6 @@ _ONBOARDING_PLANS: dict = {
                 "required": False,
             },
         ],
-        "next_hint": "beacon target create --class <種類> --label <名前>",
     },
 }
 
@@ -794,7 +829,6 @@ _GENERIC_ONBOARDING_PLAN: dict = {
             "required": True,
         },
     ],
-    "next_hint": "beacon target-class add",
 }
 
 
@@ -806,7 +840,11 @@ def onboarding_plan(profession: str) -> dict:
     any other (data-defined) occupation returns the GENERIC plan carrying its
     own name, so the front door works for descriptor-only occupations with no
     code change here. ``objective`` is always present and required — every
-    occupation needs a north star — so callers can rely on it existing."""
+    occupation needs a north star — so callers can rely on it existing.
+
+    ``next_hint`` is sourced from ``profession_next_hint`` (the single home shared
+    with ``init_display``), NOT stored per plan entry, so the skill's rendered
+    next action can't drift from init's "Next:" line (e-5706)."""
     prof = (profession or DEFAULT_PROFESSION).strip().lower() or DEFAULT_PROFESSION
     plan = _ONBOARDING_PLANS.get(prof)
     if plan is None:
@@ -815,7 +853,7 @@ def onboarding_plan(profession: str) -> dict:
         "profession": prof,
         "vision_role": plan["vision_role"],
         "ask": [dict(f) for f in plan["ask"]],
-        "next_hint": plan["next_hint"],
+        "next_hint": profession_next_hint(prof),
     }
     return out
 
