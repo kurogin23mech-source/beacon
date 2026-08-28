@@ -55,8 +55,17 @@ from pydantic import BaseModel
 
 import store_router as db  # e-1544: same backend-routing binding app.py uses
 import core
+import inspect  # ms-157 e-5749: derive add_work_item's reserved kwargs from source
 import occupation  # ms-157 e-5749: target-class 横断の generic target 投影
 import target_engine as te  # ms-157 e-5749: 記述子 class の generic な生成
+
+# Reserved kwargs occupation.add_work_item binds explicitly (description / status /
+# item_type). Derived from the SOURCE signature, not hand-copied, so adding a
+# keyword-only param there auto-updates this guard instead of silently regaining
+# the **spread-TypeError-as-500 bug (maintainability review of PR #692).
+_WORK_ITEM_RESERVED_KWARGS = frozenset(
+    n for n, p in inspect.signature(occupation.add_work_item).parameters.items()
+    if p.kind is inspect.Parameter.KEYWORD_ONLY)
 import machine_key as machine_key_mod  # ms-151 e-5474: headless machine 認証の鍵
 import operation_period  # ms-151 e-5477: operation-fires claim の period バケット
 import operations
@@ -1160,12 +1169,19 @@ def make_router(
             _require_write(data, user)
             desc = occupation.effective_get_descriptor(data, body.kind)
             if desc is None:
-                # Built-in kinds (milestone / opportunity) have no descriptor and
-                # keep their own creators; be explicit rather than silently no-op.
+                # AX review (PR #692): don't collapse "typo" and "built-in" into
+                # one misleading message. List the descriptor kinds this route
+                # actually accepts (kills guess-retry) and name where built-ins go.
+                declared = sorted({d.get("kind")
+                                   for d in occupation.effective_descriptors(data)
+                                   if isinstance(d, dict) and d.get("kind")})
                 raise HTTPException(
                     status_code=400,
-                    detail=(f"target-class {body.kind!r} is not descriptor-defined; "
-                            f"built-in classes use their own endpoint"))
+                    detail=(f"target-class {body.kind!r} cannot be created here. "
+                            f"This route creates descriptor-defined classes: "
+                            f"{declared or '(none declared)'}. Built-in classes "
+                            f"(milestone / opportunity) use their own endpoints "
+                            f"(e.g. POST /api/projects/{{id}}/milestones)."))
             try:
                 target = te.create_target(data, desc, label=body.label,
                                           fields=body.fields or None, actor=actor)
@@ -1189,7 +1205,7 @@ def make_router(
             # caller putting "status"/"description"/"item_type" in extra would make
             # the **spread raise TypeError (multiple values), escaping as a 500.
             extra = dict(body.extra or {})
-            reserved = {"description", "status", "item_type"} & extra.keys()
+            reserved = _WORK_ITEM_RESERVED_KWARGS & extra.keys()
             if reserved:
                 raise HTTPException(
                     status_code=400,

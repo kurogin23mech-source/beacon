@@ -162,14 +162,19 @@ _SUBCOLLECTION_SK_NAMES = {
 
 def _table_name(entity: str) -> str:
     # Built-ins map through TABLES; a descriptor-defined entity (ms-157 e-5750)
-    # resolves to the same {prefix}_{entity} shape so ensure_target_tables can
-    # create it and the I/O primitives can address it without static registration.
+    # resolves to the same {prefix}_{entity} shape — but ONLY once it has been
+    # ensured (table created + registered in the known-set). An unknown /
+    # un-ensured entity (typically a typo) fails fast HERE rather than silently
+    # addressing a nonexistent table downstream (AX + maintainability review of
+    # PR #692: the earlier permissive fallback removed this fail-fast guard).
     name = TABLES.get(entity)
     if name is not None:
         return name
-    if not entity or not entity.replace("_", "").isalnum():
-        raise KeyError(f"unknown / unsafe entity {entity!r}")
-    return f"{TABLE_PREFIX}_{entity}"
+    if entity in _ENSURED_DESCRIPTOR_ENTITIES:
+        return f"{TABLE_PREFIX}_{entity}"
+    raise KeyError(
+        f"unknown entity {entity!r} (not a built-in, not an ensured descriptor "
+        f"table); check for a typo or call ensure_target_tables first")
 
 
 # ---------------------------------------------------------------------------
@@ -840,15 +845,36 @@ def _scan_materialized_entities() -> set:
     return out
 
 
+def _generic_table_name(entity: str) -> str:
+    """Table name for a descriptor entity WITHOUT the ensured-set gate — used
+    only by _create_generic_table (the creator, which is about to register the
+    entity). All other addressing goes through the gated _table_name so genuine
+    typos fail fast."""
+    if not entity or not entity.replace("_", "").isalnum():
+        raise KeyError(f"unsafe entity {entity!r}")
+    return TABLES.get(entity) or f"{TABLE_PREFIX}_{entity}"
+
+
 def _create_generic_table(entity: str) -> None:
     """CREATE TABLE IF NOT EXISTS for one entity with the uniform (pk, sk, data)
     schema every Beacon table shares. Idempotent — safe to call repeatedly.
     NOTE: DDL implicitly commits in MySQL, so callers MUST invoke this OUTSIDE an
-    open transaction (never inside apply/replace's FOR UPDATE block)."""
+    open transaction (never inside apply/replace's FOR UPDATE block) — enforced
+    below at runtime, not left to the comment."""
     conn = _conn()
+    # Physically enforce the outside-transaction contract (AX + maintainability
+    # review of PR #692): creating a table inside apply/replace's FOR UPDATE block
+    # would let MySQL's implicit DDL commit silently split the transaction and
+    # destroy atomicity. Refuse rather than corrupt. The fake test connection has
+    # no get_autocommit, so this is a no-op under unit tests.
+    if hasattr(conn, "get_autocommit") and not conn.get_autocommit():
+        raise RuntimeError(
+            "_create_generic_table called inside a transaction; DDL implicitly "
+            "commits in MySQL — call ensure_target_tables BEFORE "
+            "conn.autocommit(False), never inside the FOR UPDATE block")
     with conn.cursor() as cur:
         cur.execute(
-            f"CREATE TABLE IF NOT EXISTS `{_table_name(entity)}` ("
+            f"CREATE TABLE IF NOT EXISTS `{_generic_table_name(entity)}` ("
             f"  pk   VARCHAR(191) NOT NULL,"
             f"  sk   VARCHAR(191) NOT NULL DEFAULT '',"
             f"  data JSON NOT NULL,"

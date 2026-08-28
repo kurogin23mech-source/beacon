@@ -105,8 +105,6 @@ def _reset_ensured_tables():
     Snapshot + restore it around every test so one test's auto-created class does
     not leak into another."""
     saved = set(mc._ENSURED_DESCRIPTOR_ENTITIES)
-    mc._ENSURED_DESCRIPTOR_ENTITIES.clear()
-    mc._ENSURED_DESCRIPTOR_ENTITIES.update(saved)
     try:
         yield
     finally:
@@ -426,6 +424,16 @@ def test_descriptor_class_auto_creates_tables_on_write(fake_db):
     # round-trips
     got = mc.get_project_v3("b1")
     assert got["contracts"][0]["clauses"][0]["id"] == "cl-1"
+
+
+def test_table_name_rejects_unknown_entity():
+    # fail-fast restored (AX + maintainability review PR#692): an un-ensured,
+    # non-built-in entity (typically a typo like "milstones") raises rather than
+    # silently resolving to a plausible-but-nonexistent table name.
+    assert "milstones" not in mc.TABLES
+    assert "milstones" not in mc._ENSURED_DESCRIPTOR_ENTITIES
+    with pytest.raises(KeyError):
+        mc._table_name("milstones")
 
 
 def test_descriptor_class_read_rides_inline_when_table_absent(fake_db):
