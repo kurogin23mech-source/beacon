@@ -727,17 +727,21 @@ def _v3_decompose(data: dict) -> tuple[dict, dict, dict]:
 # ---------------------------------------------------------------------------
 # Generic registry-driven decomposition (ms-109 e-3591 / SPEC F7mdrDA4djd3byyDbZAv)
 #
-# The milestone-specific _v3_decompose / _v3_assemble above are the DEVELOPMENT
+# The milestone-specific _v3_decompose / _v3_assemble above were the DEVELOPMENT
 # instance of a general pattern: split a Target collection's fat arms into child
-# rows. These generic forms read ``occupation.TARGET_DECOMPOSITION`` so the SAME
-# code decomposes development milestones AND sales opportunities/accounts,
-# satisfying SPEC AC2 ("dev も同機構の1インスタンス"). They reproduce the
-# milestone split byte-for-byte (pinned by test) and round-trip sales Targets.
+# rows. These generic forms decompose development milestones AND sales
+# opportunities/accounts with the SAME code, satisfying SPEC AC2 ("dev も同機構の
+# 1インスタンス"). They reproduce the milestone split byte-for-byte (pinned by
+# test) and round-trip sales Targets. They ARE the live atomic I/O path now
+# (apply/get/save/replace_project_v3 call them); the milestone-specific pair is
+# dead (no callers) and kept only as the reference the switchover reproduced.
 #
-# NOT yet wired into the live atomic I/O path (apply/get/save_project_v3): that
-# switchover needs the child tables added to ENTITIES + a MySQL integration test
-# (Phase 2d harness) before it can touch the production write path. These pure
-# functions are the proven core that switchover will adopt.
+# ms-157 e-5747 (サーバの target 一級化 / A 段階): the decomposition source is now
+# ``_server_decomposition(data)`` — ``occupation.target_decomposition(data)``
+# (descriptor-aware, ms-122) restricted to collections/arms whose table exists —
+# NOT the built-in ``TARGET_DECOMPOSITION`` seed. So a project's descriptor-
+# defined target-class splits into rows the moment its table exists (e-5750 DDL),
+# with zero data movement; until then it rides inline (read-through fallback).
 # ---------------------------------------------------------------------------
 
 # Collections that assemble emits even when empty. Only "milestones" — it is the
@@ -759,6 +763,45 @@ def _target_sort_key(collection: str, target: dict):
     return (0, target.get("created_at", "") or "￿", tid)
 
 
+def _server_decomposition(data: dict | None) -> dict:
+    """The physical Target decomposition this server can MATERIALIZE for
+    ``data`` right now: ``occupation.target_decomposition(data)`` (descriptor-
+    aware — ms-122 e-3957) restricted to collections AND fat arms whose row
+    table already exists in ``TABLES``.
+
+    ms-157 e-5747 (サーバの target 一級化 / A 段階): the live v3 I/O path used to
+    consult ``occupation.TARGET_DECOMPOSITION`` — the built-in SEED, blind to a
+    project's descriptor-defined target-classes. Threading ``data`` here makes
+    the server split a descriptor class into its own rows the moment its table
+    exists, with ZERO data movement. Until the DDL follows the descriptor
+    (e-5750), a descriptor collection / arm with no table yet is OMITTED, so its
+    records ride inline in the projects meta / target row (assemble's read-through
+    fallback) — exactly today's behaviour. For dev / sales every built-in table
+    exists, so this equals the seed byte-for-byte (pinned by
+    test_mysql_v3_generic_io)."""
+    import occupation  # noqa: PLC0415
+    spec: dict = {}
+    for coll, s in occupation.target_decomposition(data).items():
+        if coll not in TABLES:
+            continue
+        arms = tuple(a for a in s["arms"] if a in TABLES)
+        spec[coll] = {"id_field": s.get("id_field", "id"), "arms": arms}
+    return spec
+
+
+def _server_child_tables(spec: dict) -> tuple:
+    """Distinct child-table names across a ``_server_decomposition`` spec (union
+    of fat-arm names, dedup in declaration order). Mirrors
+    ``occupation.target_child_tables`` but over the materialized spec so it never
+    names a table that does not exist."""
+    seen: list = []
+    for s in spec.values():
+        for arm in s["arms"]:
+            if arm not in seen:
+                seen.append(arm)
+    return tuple(seen)
+
+
 def decompose_project_targets(data: dict) -> tuple[dict, dict, dict]:
     """Split a unified project dict into ``(meta, target_maps, child_maps)``,
     registry-driven across occupations.
@@ -772,8 +815,7 @@ def decompose_project_targets(data: dict) -> tuple[dict, dict, dict]:
       milestones, 3-seg ``{tid}#{arm}#{cid}`` otherwise). Children nested inside
       a fat-arm item stay inline in that item's dict (mirrors a dev commit nested
       in its task's entry row)."""
-    import occupation  # noqa: PLC0415
-    colls = occupation.TARGET_DECOMPOSITION
+    colls = _server_decomposition(data)
     meta = {k: v for k, v in (data or {}).items() if k not in colls}
     meta["schema_version"] = SCHEMA_V3_ENTRY
     target_maps: dict = {}
@@ -806,8 +848,7 @@ def assemble_project_targets(meta: dict, target_maps: dict,
     target id + arm parsed from the sk), reproducing the nested shape CLI/UI
     expect. Arm children are ordered by ``_v3_entry_sort_key``; Target
     collections by ``_target_sort_key``."""
-    import occupation  # noqa: PLC0415
-    colls = occupation.TARGET_DECOMPOSITION
+    colls = _server_decomposition(meta)
     result = {k: v for k, v in (meta or {}).items() if k not in colls}
     for coll, spec in colls.items():
         arms = spec["arms"]
@@ -873,17 +914,17 @@ def _v3_plan_writes(before_by_table: dict, new_data: dict) -> tuple[dict, dict, 
     decomposes ``new_data`` via the registry and diffs every Target collection
     table + child table. The ``projects`` meta is returned separately (always
     upserted as the transaction anchor). Fully unit-testable without a DB."""
-    import occupation  # noqa: PLC0415
+    spec = _server_decomposition(new_data)
     meta, target_maps, child_maps = decompose_project_targets(new_data)
     upserts: dict = {}
     deletes: dict = {}
-    for coll in occupation.TARGET_DECOMPOSITION:
+    for coll in spec:
         up, dl = _diff_map(before_by_table.get(coll, {}), target_maps.get(coll, {}))
         if up:
             upserts[coll] = up
         if dl:
             deletes[coll] = dl
-    for table in occupation.target_child_tables():
+    for table in _server_child_tables(spec):
         up, dl = _diff_map(before_by_table.get(table, {}), child_maps.get(table, {}))
         if up:
             upserts[table] = up
@@ -896,14 +937,14 @@ def _v3_read_target_state(project_id: str) -> tuple | None:
     """Read the projects meta + every Target collection row + child row into
     ``(meta, target_maps, child_maps)`` via the row primitives (each table's
     rows keyed by sk). Returns None when the project meta is absent."""
-    import occupation  # noqa: PLC0415
     meta = _get("projects", project_id)
     if meta is None:
         return None
+    spec = _server_decomposition(meta)
     target_maps = {coll: {sk: d for sk, d in _query_rows(coll, project_id)}
-                   for coll in occupation.TARGET_DECOMPOSITION}
+                   for coll in spec}
     child_maps = {table: {sk: d for sk, d in _query_rows(table, project_id)}
-                  for table in occupation.target_child_tables()}
+                  for table in _server_child_tables(spec)}
     return meta, target_maps, child_maps
 
 
@@ -962,9 +1003,6 @@ def apply_project_op_v3(project_id: str, op) -> "any":  # type: ignore[valid-typ
       - op() の contract (= pure / side-effect free) は v1/v2 と同じ要求で維持する
         (= 後日 optimistic 化した時に壊れないため)。
     """
-    import occupation  # noqa: PLC0415
-    target_colls = tuple(occupation.TARGET_DECOMPOSITION.keys())
-    child_tables = occupation.target_child_tables()
     conn = _conn()
     conn.autocommit(False)
     try:
@@ -980,6 +1018,13 @@ def apply_project_op_v3(project_id: str, op) -> "any":  # type: ignore[valid-typ
             if not row:
                 raise LookupError(f"Project '{project_id}' not found")
             meta = json.loads(row["data"])
+
+            # ms-157 e-5747: 分割対象は seed 固定でなく、この project 自身の記述子
+            #   から導く (descriptor-aware)。read 時点で使える真値は meta なので
+            #   meta から spec を起こす (built-in なら seed と一致)。
+            spec = _server_decomposition(meta)
+            target_colls = tuple(spec.keys())
+            child_tables = _server_child_tables(spec)
 
             # 2. 全 Target collection + 子テーブルを同 transaction 内で read
             #    (ms-109 e-3591: milestones/entries 固定でなく registry 駆動)。
@@ -1068,9 +1113,9 @@ def replace_project_v3(project_id: str, new_data: dict) -> None:
 
             # 既存 Target collection + 子行の sk を retrieve (= 削除対象算出用)。
             # ms-109 e-3591: milestones/entries 固定でなく registry 駆動。
-            import occupation  # noqa: PLC0415
-            all_tables = (*occupation.TARGET_DECOMPOSITION.keys(),
-                          *occupation.target_child_tables())
+            # ms-157 e-5747: 分割対象は new_data 自身の記述子から導く。
+            spec = _server_decomposition(new_data)
+            all_tables = (*spec.keys(), *_server_child_tables(spec))
             existing_sks: dict = {}
             for t in all_tables:
                 cur.execute(
@@ -1093,9 +1138,9 @@ def replace_project_v3(project_id: str, new_data: dict) -> None:
             # sk=target_id、child は composite sk。
             new_rows_by_table: dict = {
                 coll: target_maps.get(coll, {})
-                for coll in occupation.TARGET_DECOMPOSITION
+                for coll in spec
             }
-            for table in occupation.target_child_tables():
+            for table in _server_child_tables(spec):
                 new_rows_by_table[table] = child_maps.get(table, {})
             for table, rows in new_rows_by_table.items():
                 for key, d in rows.items():
