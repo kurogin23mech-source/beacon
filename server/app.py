@@ -895,9 +895,16 @@ def _get_role(data: dict, user: dict) -> str:
     for m in data.get("members", []):
         if m.get("user_id") == uid:
             return m.get("role", "viewer")
-    # Migration: ownerless projects are accessible to all
-    if not data.get("owner"):
-        return "editor"
+    # ms-158 / e-5757: ownerless projects used to fall through to "editor" for
+    # ANY signed-in user — a fail-open migration relic. The project-listing path
+    # already closed this (ms-95 / e-2794, 2026-07-03: list_projects denies
+    # ownerless rows by default), but this direct-by-id role check still granted
+    # editor to non-members, so anyone who knew a project_id could read/write an
+    # ownerless project. Deny by default here too. Members are unaffected — the
+    # members loop above already returned their role; only a stranger accessing
+    # an ownerless project loses the grant. Existing ownerless residue is
+    # inventoried and remediated by an admin via /api/admin/projects/ownerless
+    # (backfill an owner or archive).
     return ""
 
 
