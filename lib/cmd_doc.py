@@ -211,6 +211,40 @@ def cmd_doc_add():
     if target:
         _validate_link_target_exists(target)
 
+    # e-5730: fail-closed pre-flight — resolve the recording target BEFORE the
+    # doc is persisted below. cmd_doc_add writes the doc (disk/cloud) and only
+    # THEN records the changelog entry via record_target_entry; if recording
+    # raised (empty target + multiple active milestones and no --ms given), the
+    # doc was ALREADY written as an orphan with no target — a silent-write
+    # (e-5730). Load the project and resolve up front so the ambiguity errors
+    # out here, before anything is persisted. Mirrors record_target_entry's
+    # empty-target branch (core.resolve_recordable_milestone): None → a
+    # milestone-less project no-ops (fine); one active → will record; raise →
+    # a real user error (surface it and refuse to write).
+    data = load_project()
+    if scope != "core":
+        try:
+            if not target:
+                core.resolve_recordable_milestone(data, "")
+            elif work_model.target_kind(target) == "milestone":
+                # e-5730 sibling (PR #691 独立レビュー AX+保守性): an explicit but
+                # NONEXISTENT milestone target also orphan-writes. The earlier
+                # empty-target guard only closed the "Multiple active milestones"
+                # ambiguity; the with-target path stayed open. _validate_link_target_exists
+                # above is deliberately lenient for ms/op ids (forward-ref round-trip),
+                # so `doc add --ms ms-999` passes it, the doc is persisted, and only
+                # THEN record_target_entry raises "not found" — a raw traceback after
+                # the write. Verify existence here, pre-write, so this path is
+                # fail-closed too. Resolve through the profession-AGNOSTIC L2
+                # resolver ``occupation.resolve_target`` (NOT the dev-concrete
+                # ``core.find_target_milestone`` — capability-scope forbids an
+                # L2 shared verb like doc_add from reaching a dev concrete; the
+                # milestone-kind gate keeps trek/sales targets off this path).
+                occupation.resolve_target(data, target)
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
     content = _resolve_content_input(content)
 
     if not content:
@@ -253,7 +287,8 @@ def cmd_doc_add():
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
 
-    data = load_project()
+    # ``data`` was loaded up front for the e-5730 pre-flight guard above; reuse
+    # it here (nothing between mutates it — the doc write targets disk/cloud).
     today = _now_iso()  # ms-127 e-4838: unified through the commands_shared binding
     # ms-134 e-4720: record the doc-add side effect through the occupation layer,
     # which dispatches by the Target's kind and no-ops when there is no dev-era
