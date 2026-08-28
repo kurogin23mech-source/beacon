@@ -161,10 +161,15 @@ _SUBCOLLECTION_SK_NAMES = {
 
 
 def _table_name(entity: str) -> str:
-    try:
-        return TABLES[entity]
-    except KeyError:
-        raise KeyError(f"unknown entity {entity!r} (not in TABLES)")
+    # Built-ins map through TABLES; a descriptor-defined entity (ms-157 e-5750)
+    # resolves to the same {prefix}_{entity} shape so ensure_target_tables can
+    # create it and the I/O primitives can address it without static registration.
+    name = TABLES.get(entity)
+    if name is not None:
+        return name
+    if not entity or not entity.replace("_", "").isalnum():
+        raise KeyError(f"unknown / unsafe entity {entity!r}")
+    return f"{TABLE_PREFIX}_{entity}"
 
 
 # ---------------------------------------------------------------------------
@@ -411,15 +416,44 @@ def _now_iso_utc() -> str:
 # Table creation (idempotent)
 # ---------------------------------------------------------------------------
 
+def _descriptor_entities_across_projects() -> set:
+    """Union of the collection + fat-arm entities every stored project's
+    descriptor target-classes declare (ms-157 e-5750). Startup DDL uses this so a
+    class a project already declared gets its table even on a fresh DB. Best-
+    effort: a scan error yields an empty set (built-in DDL still runs)."""
+    import occupation  # noqa: PLC0415
+    out: set = set()
+    try:
+        projects = _scan("projects", id_field="project_id")
+    except Exception:
+        return out
+    for proj in projects:
+        try:
+            for coll, s in occupation.target_decomposition(proj).items():
+                if coll not in TABLES:
+                    out.add(coll)
+                for arm in s.get("arms", ()):
+                    if arm not in TABLES:
+                        out.add(arm)
+        except Exception:
+            continue
+    return out
+
+
 def create_mysql_tables() -> int:
     """CREATE TABLE IF NOT EXISTS for every entity. Returns count created.
 
     generic schema (pk, sk, data JSON) を全 entity に対して張る。冪等なので
     起動のたびに走っても安全。
+
+    ms-157 e-5750: 組み込み ENTITIES 決め打ちに加え、既存 project が記述子で宣言した
+    target-class の collection / arm テーブルも張る (= DDL が記述子追随)。さらに DB に
+    実在する descriptor テーブルを known-set に seed し、再起動後の read でも参加させる。
     """
     conn = _conn()
     created = 0
-    for entity in ENTITIES:
+    descriptor_entities = _descriptor_entities_across_projects()
+    for entity in (*ENTITIES, *sorted(descriptor_entities)):
         table = _table_name(entity)
         with conn.cursor() as cur:
             # 作成有無を数えるため事前に存在確認 (CREATE IF NOT EXISTS 自体は冪等)。
@@ -435,6 +469,12 @@ def create_mysql_tables() -> int:
             )
         if not exists:
             created += 1
+    # descriptor テーブルを known-set に seed (実在するものを SHOW TABLES から拾う)。
+    try:
+        _ENSURED_DESCRIPTOR_ENTITIES.update(
+            e for e in _scan_materialized_entities() if e not in TABLES)
+    except Exception:
+        pass
     return created
 
 
@@ -763,28 +803,107 @@ def _target_sort_key(collection: str, target: dict):
     return (0, target.get("created_at", "") or "￿", tid)
 
 
+# ms-157 e-5750 (DDL 記述子追随): entity suffixes whose row table this server
+# treats as existing = static built-ins (TABLES) PLUS descriptor tables created /
+# observed this process. ``create_mysql_tables`` seeds the descriptor half from a
+# SHOW TABLES scan at startup (covers restart / tables made by a prior run);
+# ``ensure_target_tables`` adds to it when a write introduces a new class. The
+# hot read guard (_server_decomposition) reads this set with NO per-call DB hit.
+_ENSURED_DESCRIPTOR_ENTITIES: set = set()
+
+
+def _known_entities() -> set:
+    """Entity suffixes whose row table the server may read/write: built-ins +
+    ensured descriptor tables (ms-157 e-5750). Pure (no DB) — the SHOW TABLES
+    seed happens once in create_mysql_tables / ensure_target_tables, not here, so
+    the decomposition guard stays cheap."""
+    return set(TABLES) | _ENSURED_DESCRIPTOR_ENTITIES
+
+
+def _scan_materialized_entities() -> set:
+    """Entity suffixes physically present in the DB (SHOW TABLES over the env
+    prefix). Used to seed the descriptor known-set at startup so a table a prior
+    run created participates in reads. Best-effort: any backend without SHOW
+    TABLES (or an error) yields an empty set and the caller relies on TABLES +
+    ensure instead."""
+    conn = _conn()
+    prefix = f"{TABLE_PREFIX}_"
+    with conn.cursor() as cur:
+        cur.execute("SHOW TABLES LIKE %s", (f"{prefix}%",))
+        rows = cur.fetchall()
+    out: set = set()
+    for r in rows:
+        vals = list(r.values()) if isinstance(r, dict) else list(r)
+        name = vals[0] if vals else ""
+        if isinstance(name, str) and name.startswith(prefix):
+            out.add(name[len(prefix):])
+    return out
+
+
+def _create_generic_table(entity: str) -> None:
+    """CREATE TABLE IF NOT EXISTS for one entity with the uniform (pk, sk, data)
+    schema every Beacon table shares. Idempotent — safe to call repeatedly.
+    NOTE: DDL implicitly commits in MySQL, so callers MUST invoke this OUTSIDE an
+    open transaction (never inside apply/replace's FOR UPDATE block)."""
+    conn = _conn()
+    with conn.cursor() as cur:
+        cur.execute(
+            f"CREATE TABLE IF NOT EXISTS `{_table_name(entity)}` ("
+            f"  pk   VARCHAR(191) NOT NULL,"
+            f"  sk   VARCHAR(191) NOT NULL DEFAULT '',"
+            f"  data JSON NOT NULL,"
+            f"  PRIMARY KEY (pk, sk)"
+            f") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        )
+
+
+def ensure_target_tables(data: dict | None) -> tuple:
+    """ms-157 e-5750: make the row tables a project's descriptor-defined target-
+    classes need EXIST, creating any that don't (无停止 retrofit = CREATE TABLE IF
+    NOT EXISTS, never dropping). Returns the tuple of entities newly ensured this
+    call.
+
+    A descriptor class declared under ``target_classes`` gets its collection table
+    and each fat-arm child table auto-created the first time a project carrying it
+    is written — the storage equivalent of ms-142's client-side「配線ゼロ自動同梱」.
+    Built-ins are skipped (their tables come from create_mysql_tables). MUST be
+    called OUTSIDE a transaction (DDL implicitly commits)."""
+    import occupation  # noqa: PLC0415
+    newly: list = []
+    for coll, s in occupation.target_decomposition(data).items():
+        for entity in (coll, *s.get("arms", ())):
+            if entity in TABLES or entity in _ENSURED_DESCRIPTOR_ENTITIES:
+                continue
+            _create_generic_table(entity)
+            _ENSURED_DESCRIPTOR_ENTITIES.add(entity)
+            newly.append(entity)
+    return tuple(newly)
+
+
 def _server_decomposition(data: dict | None) -> dict:
     """The physical Target decomposition this server can MATERIALIZE for
     ``data`` right now: ``occupation.target_decomposition(data)`` (descriptor-
-    aware — ms-122 e-3957) restricted to collections AND fat arms whose row
-    table already exists in ``TABLES``.
+    aware — ms-122 e-3957) restricted to collections AND fat arms whose row table
+    is known to exist (``_known_entities`` = built-ins + ensured descriptor
+    tables).
 
     ms-157 e-5747 (サーバの target 一級化 / A 段階): the live v3 I/O path used to
     consult ``occupation.TARGET_DECOMPOSITION`` — the built-in SEED, blind to a
-    project's descriptor-defined target-classes. Threading ``data`` here makes
-    the server split a descriptor class into its own rows the moment its table
-    exists, with ZERO data movement. Until the DDL follows the descriptor
-    (e-5750), a descriptor collection / arm with no table yet is OMITTED, so its
-    records ride inline in the projects meta / target row (assemble's read-through
-    fallback) — exactly today's behaviour. For dev / sales every built-in table
+    project's descriptor-defined target-classes. Threading ``data`` here splits a
+    descriptor class into its own rows with ZERO data movement. e-5750 then makes
+    those tables auto-exist (ensure_target_tables at write / create_mysql_tables
+    at startup). A descriptor collection / arm whose table is STILL absent is
+    OMITTED, so its records ride inline in the projects meta / target row
+    (assemble's read-through fallback). For dev / sales every built-in table
     exists, so this equals the seed byte-for-byte (pinned by
     test_mysql_v3_generic_io)."""
     import occupation  # noqa: PLC0415
+    known = _known_entities()
     spec: dict = {}
     for coll, s in occupation.target_decomposition(data).items():
-        if coll not in TABLES:
+        if coll not in known:
             continue
-        arms = tuple(a for a in s["arms"] if a in TABLES)
+        arms = tuple(a for a in s["arms"] if a in known)
         spec[coll] = {"id_field": s.get("id_field", "id"), "arms": arms}
     return spec
 
@@ -973,6 +1092,9 @@ def save_project_v3(project_id: str, data: dict) -> None:
     replace_project_v3 を使うこと。 ms-109 e-3591 で registry 駆動に一般化
     (Target collection + 子テーブルを一律 upsert)。
     """
+    # ms-157 e-5750: この project の記述子 target-class が要る行テーブルを先に用意
+    #   (無ければ CREATE)。save は transaction を張らないのでここで安全に DDL 可。
+    ensure_target_tables(data)
     meta, target_maps, child_maps = decompose_project_targets(data)
     _put("projects", project_id, {**meta, "project_id": project_id})
     for coll, tmap in target_maps.items():
@@ -1003,6 +1125,11 @@ def apply_project_op_v3(project_id: str, op) -> "any":  # type: ignore[valid-typ
       - op() の contract (= pure / side-effect free) は v1/v2 と同じ要求で維持する
         (= 後日 optimistic 化した時に壊れないため)。
     """
+    # ms-157 e-5750: 記述子 target-class の行テーブルを transaction の外で先に用意
+    #   する (DDL は暗黙 commit するので FOR UPDATE ブロック内で作ってはならない)。
+    #   op() が新しい記述子を足す稀ケースは pre-op meta に映らないが、その class は
+    #   次回書き込みまで inline に留まる (安全側、read-through fallback)。
+    ensure_target_tables(_get("projects", project_id))
     conn = _conn()
     conn.autocommit(False)
     try:
@@ -1099,6 +1226,8 @@ def replace_project_v3(project_id: str, new_data: dict) -> None:
     Firestore v2 の _replace_cloud_v2 と同じ semantics だが、 transaction 境界と
     lock は MySQL 流 (= SELECT ... FOR UPDATE + BEGIN/COMMIT)。
     """
+    # ms-157 e-5750: 記述子 target-class の行テーブルを transaction の外で用意。
+    ensure_target_tables(new_data)
     conn = _conn()
     conn.autocommit(False)
     try:

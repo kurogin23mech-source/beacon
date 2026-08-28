@@ -99,6 +99,21 @@ class _FakeConn:
         pass
 
 
+@pytest.fixture(autouse=True)
+def _reset_ensured_tables():
+    """ms-157 e-5750 keeps a module-global known-set of ensured descriptor tables.
+    Snapshot + restore it around every test so one test's auto-created class does
+    not leak into another."""
+    saved = set(mc._ENSURED_DESCRIPTOR_ENTITIES)
+    mc._ENSURED_DESCRIPTOR_ENTITIES.clear()
+    mc._ENSURED_DESCRIPTOR_ENTITIES.update(saved)
+    try:
+        yield
+    finally:
+        mc._ENSURED_DESCRIPTOR_ENTITIES.clear()
+        mc._ENSURED_DESCRIPTOR_ENTITIES.update(saved)
+
+
 @pytest.fixture
 def fake_db(monkeypatch):
     store: dict = {}
@@ -390,15 +405,41 @@ def test_descriptor_class_splits_into_rows_when_table_exists(fake_db, monkeypatc
     assert got["contracts"][0]["clauses"][0]["id"] == "cl-1"
 
 
-def test_descriptor_class_rides_inline_when_no_table(fake_db):
-    # No contracts/clauses table exists (pre-DDL). The materialized guard must
-    # keep the class inline in meta rather than KeyError on a missing table.
-    assert "contracts" not in mc.TABLES  # precondition: seed/DDL unaware
+def test_descriptor_class_auto_creates_tables_on_write(fake_db):
+    # ms-157 e-5750: no contracts/clauses table is pre-registered — writing a
+    # project that declares the class must AUTO-CREATE the tables (ensure_target_
+    # tables) and split into rows, not ride inline. "declare, don't wire".
+    assert "contracts" not in mc.TABLES  # precondition: built-in DDL unaware
+    newly = mc.ensure_target_tables(_descriptor_project())
+    assert set(newly) == {"contracts", "clauses"}  # both tables were created
+    assert "contracts" in mc._known_entities()
+
     mc.save_project_v3("b1", _descriptor_project())
     store = fake_db["store"]
+    # split into its own rows (not inline in meta)
+    assert any(k[2] == "ctr-1" for k in store if k[0].endswith("contracts"))
+    assert any(k[2] == "ctr-1#cl-1" for k in store if k[0].endswith("clauses"))
     meta = json.loads(store[(mc._table_name("projects"), "b1", "")])
-    # rode inline: contracts stayed in the projects meta row, no own rows
-    assert [c["id"] for c in meta.get("contracts", [])] == ["ctr-1"]
-    # read-through returns it intact (data never lost)
+    assert "contracts" not in meta
+    # ensure is idempotent: a second call creates nothing new
+    assert mc.ensure_target_tables(_descriptor_project()) == ()
+    # round-trips
     got = mc.get_project_v3("b1")
+    assert got["contracts"][0]["clauses"][0]["id"] == "cl-1"
+
+
+def test_descriptor_class_read_rides_inline_when_table_absent(fake_db):
+    # Safety net: a project meta that still carries the class INLINE (never
+    # written through) and whose table was never ensured must read through the
+    # fallback, never KeyError — the pre-e-5750 A-stage guarantee still holds.
+    assert "contracts" not in mc._known_entities()
+    store = fake_db["store"]
+    store[(mc._table_name("projects"), "b1", "")] = mc._dumps({
+        "project_id": "b1", "name": "BackOffice", "profession": "backoffice",
+        "milestones": [], "target_classes": [_CONTRACT_DESC],
+        "contracts": [{"id": "ctr-1", "title": "NDA",
+                       "clauses": [{"id": "cl-1", "text": "秘密保持"}]}],
+    })
+    got = mc.get_project_v3("b1")
+    assert got["contracts"][0]["id"] == "ctr-1"
     assert got["contracts"][0]["clauses"][0]["id"] == "cl-1"
