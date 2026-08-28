@@ -222,9 +222,21 @@ def cmd_doc_add():
     # milestone-less project no-ops (fine); one active → will record; raise →
     # a real user error (surface it and refuse to write).
     data = load_project()
-    if scope != "core" and not target:
+    if scope != "core":
         try:
-            core.resolve_recordable_milestone(data, "")
+            if not target:
+                core.resolve_recordable_milestone(data, "")
+            elif work_model.target_kind(target) == "milestone":
+                # e-5730 sibling (PR #691 独立レビュー AX+保守性): an explicit but
+                # NONEXISTENT milestone target also orphan-writes. The earlier
+                # empty-target guard only closed the "Multiple active milestones"
+                # ambiguity; the with-target path stayed open. _validate_link_target_exists
+                # above is deliberately lenient for ms/op ids (forward-ref round-trip),
+                # so `doc add --ms ms-999` passes it, the doc is persisted, and only
+                # THEN record_target_entry → save_entry → find_target_milestone raises
+                # "Milestone not found" — a raw traceback after the write. Verify
+                # milestone existence here, pre-write, so this path is fail-closed too.
+                core.find_target_milestone(data, target)
         except ValueError as e:
             print(f"Error: {e}")
             sys.exit(1)

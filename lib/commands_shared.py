@@ -364,7 +364,17 @@ def _resolve_active_api_url() -> str:
         # must NOT recurse into ``_resolve_active_api_url()`` — that self-call
         # infinite-looped and crashed the whole CLI in partial-install / sandbox
         # environments. Mirror profile.DEFAULT_API_URL as a bare literal.
-        api_url = os.environ.get("BEACON_API_URL", "https://beacon-ai.dev")
+        #
+        # Precedence MUST match profile._resolve_api_url (its docstring order:
+        # env BEACON_API_URL > cwd cloud.json.api_url > default). Independent AX
+        # review of PR #691 caught that an earlier form here seeded api_url from
+        # env and then let cloud.json OVERRIDE it — inverting the chain so a
+        # developer who set BEACON_API_URL would be silently pointed at
+        # cloud.json's url in the fallback path. Return env first when present.
+        env_url = os.environ.get("BEACON_API_URL")
+        if env_url:
+            return env_url
+        api_url = "https://beacon-ai.dev"
         config_path = _get_cloud_config_path()
         if os.path.exists(config_path):
             try:
