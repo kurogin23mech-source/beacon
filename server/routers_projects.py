@@ -56,6 +56,7 @@ from pydantic import BaseModel
 import store_router as db  # e-1544: same backend-routing binding app.py uses
 import core
 import occupation  # ms-157 e-5749: target-class 横断の generic target 投影
+import target_engine as te  # ms-157 e-5749: 記述子 class の generic な生成
 import machine_key as machine_key_mod  # ms-151 e-5474: headless machine 認証の鍵
 import operation_period  # ms-151 e-5477: operation-fires claim の period バケット
 import operations
@@ -119,6 +120,21 @@ class MilestoneCreate(BaseModel):
     priority: str = ""
     objective: str = ""
     acceptance_criteria: str = ""
+
+
+# ms-157 e-5749: generic (target-class 横断) write bodies. A descriptor-defined
+# target-class (new occupation added by DATA) is created / grown via these two
+# routes with zero per-class wiring.
+class TargetCreate(BaseModel):
+    kind: str                       # descriptor target-class kind (e.g. "contract")
+    label: str
+    fields: Dict[str, Any] = {}     # descriptor-declared field values
+
+
+class WorkItemCreate(BaseModel):
+    description: str
+    status: str = ""
+    extra: Dict[str, Any] = {}      # profession-specific fields (priority / deadline …)
 
 class MilestoneUpdate(BaseModel):
     title: str = ""
@@ -1122,6 +1138,61 @@ def make_router(
             return data, {"ms_id": ms_id, "title": body.title}
         return _apply_op_and_broadcast(
             project_id, op, op_name="milestone.create", actor=user.get("sub", ""),
+        )
+
+    # ------------------------------------------------------------------
+    # ms-157 e-5749 — generic (target-class 横断) write surface.
+    # Reads were already generic (whole-project GET + the additive targets[]
+    # projection). These give the WRITE half: a descriptor-defined target-class
+    # (a new occupation added by DATA, not code) is created and grown through ONE
+    # pair of routes, with zero per-class wiring — the server-side counterpart of
+    # ms-142's client「配線ゼロ自動同梱」. Built-in classes (milestone /
+    # opportunity) keep their dedicated endpoints unchanged; these drive the
+    # occupation-generic primitives (target_engine.create_target /
+    # occupation.add_work_item) which resolve everything from the descriptor.
+    # ------------------------------------------------------------------
+    @router.post("/api/projects/{project_id}/targets")
+    def create_target_generic(project_id: str, body: TargetCreate,
+                              user: dict = Depends(require_auth)):
+        actor = user.get("sub", "")
+
+        def op(data: dict):
+            _require_write(data, user)
+            desc = occupation.effective_get_descriptor(data, body.kind)
+            if desc is None:
+                # Built-in kinds (milestone / opportunity) have no descriptor and
+                # keep their own creators; be explicit rather than silently no-op.
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"target-class {body.kind!r} is not descriptor-defined; "
+                            f"built-in classes use their own endpoint"))
+            try:
+                target = te.create_target(data, desc, label=body.label,
+                                          fields=body.fields or None, actor=actor)
+            except te.TargetEngineError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, {"id": target.get("id"), "kind": body.kind}
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="target.create", actor=actor,
+        )
+
+    @router.post("/api/projects/{project_id}/targets/{target_id}/work-items")
+    def add_work_item_generic(project_id: str, target_id: str,
+                              body: WorkItemCreate,
+                              user: dict = Depends(require_auth)):
+        actor = user.get("sub", "")
+
+        def op(data: dict):
+            _require_write(data, user)
+            try:
+                item = occupation.add_work_item(
+                    data, target_id, description=body.description,
+                    status=body.status, **(body.extra or {}))
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, {"id": item.get("id"), "target_id": target_id}
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="work_item.create", actor=actor,
         )
 
     @router.get("/api/projects/{project_id}/milestones/{ms_id}")
