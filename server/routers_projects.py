@@ -1184,11 +1184,23 @@ def make_router(
 
         def op(data: dict):
             _require_write(data, user)
+            # ``extra`` carries profession-specific fields (priority / deadline …).
+            # Guard the keys add_work_item already binds explicitly: without this a
+            # caller putting "status"/"description"/"item_type" in extra would make
+            # the **spread raise TypeError (multiple values), escaping as a 500.
+            extra = dict(body.extra or {})
+            reserved = {"description", "status", "item_type"} & extra.keys()
+            if reserved:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"extra must not contain reserved key(s) "
+                            f"{sorted(reserved)}; pass description / status at the "
+                            f"top level"))
             try:
                 item = occupation.add_work_item(
                     data, target_id, description=body.description,
-                    status=body.status, **(body.extra or {}))
-            except ValueError as e:
+                    status=body.status, **extra)
+            except (ValueError, TypeError) as e:
                 raise HTTPException(status_code=400, detail=str(e))
             return data, {"id": item.get("id"), "target_id": target_id}
         return _apply_op_and_broadcast(

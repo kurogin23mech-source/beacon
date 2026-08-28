@@ -127,3 +127,18 @@ def test_generic_work_item_add_unknown_target_400():
         eps["work_item"]("p", "ms-nope",
                          rp.WorkItemCreate(description="x"), {"sub": "u1"})
     assert ei.value.status_code == 400
+
+
+def test_generic_work_item_reserved_extra_key_is_400_not_500():
+    # a caller putting a reserved key (status/description/item_type) in extra must
+    # get a clean 400, not a TypeError-escaped 500 from the **spread collision.
+    holder = {"data": _dev()}
+    eps = _build(holder)
+    with pytest.raises(HTTPException) as ei:
+        eps["work_item"]("p", "ms-1",
+                         rp.WorkItemCreate(description="x",
+                                           extra={"status": "done"}),
+                         {"sub": "u1"})
+    assert ei.value.status_code == 400
+    # the guard fired before any write — no work item leaked in.
+    assert holder["data"]["milestones"][0]["entries"] == []
