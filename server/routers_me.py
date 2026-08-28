@@ -357,12 +357,21 @@ def make_router(
         project = db.get_project(body.project_id)
         if not project:
             raise HTTPException(status_code=404, detail="project not found")
-        # _require_project_role would also work here but it raises only on
-        # explicit list_projects empty; the membership rule we want is
-        # "owner OR in members list OR project has no owner (migration)".
+        # Membership boundary. ms-158 / e-5773: this used to read
+        # ``if owner and owner != uid and uid not in members`` — the leading
+        # ``owner and`` made it fall OPEN for ownerless projects (owner falsy →
+        # short-circuit → any signed-in user could mint session records into an
+        # ownerless project). That is the same fail-open migration relic e-5757
+        # closed in ``_get_role``. Deny by default: an ownerless project has no
+        # members, so a caller who is neither owner nor in ``members`` is
+        # rejected. (Kept inline rather than routed through ``_get_role`` on
+        # purpose — ``_get_role`` bypasses to "owner" when auth is disabled, but
+        # this endpoint enforces the membership boundary unconditionally so a
+        # session record is never materialised in a project the caller doesn't
+        # belong to. See test_me_heartbeat_rejects_* .)
         owner = project.get("owner")
         members = [m.get("user_id") for m in project.get("members", []) or []]
-        if owner and owner != uid and uid not in members:
+        if owner != uid and uid not in members:
             raise HTTPException(
                 status_code=403,
                 detail="not a member of this project",

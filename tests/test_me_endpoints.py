@@ -297,6 +297,39 @@ def test_me_heartbeat_rejects_non_member():
     assert r.status_code == 403
 
 
+def test_me_heartbeat_rejects_ownerless_project():
+    """ms-158 / e-5773: an ownerless project must NOT fall open here.
+
+    Before the fix the inline check read ``if owner and ...`` — a project with
+    no owner short-circuited past the membership guard, so any signed-in user
+    (here user-alice, who is not a member) could mint session records into it.
+    This is the same fail-open relic e-5757 closed in ``_get_role``; deny by
+    default: a non-member of an ownerless project is rejected.
+    """
+    _projects["proj-orphan"] = {
+        "name": "Orphan", "members": [],  # no "owner" field at all
+    }
+    r = client.post("/api/me/heartbeat", json={
+        "project_id": "proj-orphan",
+        "machine_id": "mc-abc",
+        "parent_pid": 1234,
+    })
+    assert r.status_code == 403
+
+    # A member of an ownerless project is still allowed (parity with _get_role:
+    # the members loop wins before the ownerless branch).
+    _projects["proj-orphan-mem"] = {
+        "name": "Orphan2",
+        "members": [{"user_id": "user-alice", "role": "editor"}],
+    }
+    r2 = client.post("/api/me/heartbeat", json={
+        "project_id": "proj-orphan-mem",
+        "machine_id": "mc-abc",
+        "parent_pid": 1234,
+    })
+    assert r2.status_code == 200
+
+
 def test_me_heartbeat_404_for_missing_project():
     r = client.post("/api/me/heartbeat", json={
         "project_id": "proj-nonexistent",
