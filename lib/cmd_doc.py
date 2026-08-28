@@ -211,6 +211,24 @@ def cmd_doc_add():
     if target:
         _validate_link_target_exists(target)
 
+    # e-5730: fail-closed pre-flight — resolve the recording target BEFORE the
+    # doc is persisted below. cmd_doc_add writes the doc (disk/cloud) and only
+    # THEN records the changelog entry via record_target_entry; if recording
+    # raised (empty target + multiple active milestones and no --ms given), the
+    # doc was ALREADY written as an orphan with no target — a silent-write
+    # (e-5730). Load the project and resolve up front so the ambiguity errors
+    # out here, before anything is persisted. Mirrors record_target_entry's
+    # empty-target branch (core.resolve_recordable_milestone): None → a
+    # milestone-less project no-ops (fine); one active → will record; raise →
+    # a real user error (surface it and refuse to write).
+    data = load_project()
+    if scope != "core" and not target:
+        try:
+            core.resolve_recordable_milestone(data, "")
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
+
     content = _resolve_content_input(content)
 
     if not content:
@@ -253,7 +271,8 @@ def cmd_doc_add():
         with open(fpath, "w", encoding="utf-8") as f:
             f.write(content)
 
-    data = load_project()
+    # ``data`` was loaded up front for the e-5730 pre-flight guard above; reuse
+    # it here (nothing between mutates it — the doc write targets disk/cloud).
     today = _now_iso()  # ms-127 e-4838: unified through the commands_shared binding
     # ms-134 e-4720: record the doc-add side effect through the occupation layer,
     # which dispatches by the Target's kind and no-ops when there is no dev-era
