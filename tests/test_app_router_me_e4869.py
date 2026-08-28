@@ -136,6 +136,7 @@ def test_me_router_factory_is_standalone_with_injected_deps():
         require_auth=lambda: {"sub": "x"},
         stamp_session_liveness=lambda *a, **k: None,
         session_is_live=lambda *a, **k: True,
+        is_member=lambda *a, **k: True,
     )
     assert isinstance(router, APIRouter)
     paths = {r.path for r in router.routes}

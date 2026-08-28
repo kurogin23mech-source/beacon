@@ -876,6 +876,25 @@ def _require_admin(user: dict) -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _is_member(data: dict, uid: str) -> bool:
+    """Pure membership predicate: is ``uid`` the owner of, or a member in, ``data``?
+
+    Auth-mode agnostic on purpose — it does NOT bypass to "everyone is in" when
+    auth is disabled. It is the single source of truth for the raw membership
+    boundary, shared by ``_get_role`` (which wraps it with the auth-disabled
+    bypass and role resolution) and by callers that need the boundary WITHOUT
+    that bypass (e.g. /api/me/heartbeat, which must never materialise a session
+    record in a project the caller doesn't belong to — even in dev). An
+    ownerless project has no owner and (by definition of "ownerless") no members
+    the stranger is in, so a non-member is denied by default (ms-158 / e-5757).
+    """
+    if not uid:
+        return False
+    if data.get("owner") == uid:
+        return True
+    return any(m.get("user_id") == uid for m in data.get("members", []) or [])
+
+
 def _get_role(data: dict, user: dict) -> str:
     """Return user's role: 'owner', 'editor', 'viewer', or '' (no access).
 
@@ -886,6 +905,12 @@ def _get_role(data: dict, user: dict) -> str:
     e-1252/e-1254 for the history. The only sanctioned callers are
     `_require_project_role`, `_require_write`, and `_require_owner` — all of
     which are themselves centralized authorization gates.
+
+    Deny by default: an ownerless project grants no role to a non-member
+    (ms-158 / e-5757 closed a fail-open relic here — the listing path had
+    already closed it in ms-95 / e-2794). The boolean sibling ``_is_member``
+    holds the raw membership rule; residue is remediated by an admin via
+    /api/admin/projects/ownerless.
     """
     if not _auth_enabled:
         return "owner"
@@ -895,16 +920,6 @@ def _get_role(data: dict, user: dict) -> str:
     for m in data.get("members", []):
         if m.get("user_id") == uid:
             return m.get("role", "viewer")
-    # ms-158 / e-5757: ownerless projects used to fall through to "editor" for
-    # ANY signed-in user — a fail-open migration relic. The project-listing path
-    # already closed this (ms-95 / e-2794, 2026-07-03: list_projects denies
-    # ownerless rows by default), but this direct-by-id role check still granted
-    # editor to non-members, so anyone who knew a project_id could read/write an
-    # ownerless project. Deny by default here too. Members are unaffected — the
-    # members loop above already returned their role; only a stranger accessing
-    # an ownerless project loses the grant. Existing ownerless residue is
-    # inventoried and remediated by an admin via /api/admin/projects/ownerless
-    # (backfill an owner or archive).
     return ""
 
 
@@ -5804,6 +5819,7 @@ app.include_router(
         require_auth,
         stamp_session_liveness=_stamp_session_liveness,
         session_is_live=_session_is_live,
+        is_member=_is_member,
     )
 )
 

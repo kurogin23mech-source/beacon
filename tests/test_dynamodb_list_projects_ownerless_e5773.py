@@ -21,14 +21,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 
 
 @pytest.fixture
-def ddb(monkeypatch):
-    monkeypatch.setenv("BEACON_STORE_BACKEND", "dynamodb")
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
-    if "dynamodb_client" in sys.modules:
-        del sys.modules["dynamodb_client"]
+def ddb():
+    # Import the module directly and exercise ``list_projects`` with ``_scan_all``
+    # (the only I/O seam) stubbed. Deliberately does NOT touch sys.modules or
+    # BEACON_STORE_BACKEND: mutating global module/env state here pollutes other
+    # tests in the same process (e.g. the firestore-mocked /api/me tests start
+    # attempting real connections). Stubbing the one seam is enough — no AWS
+    # credentials, moto table, or module reload needed.
     import dynamodb_client
     return dynamodb_client
 

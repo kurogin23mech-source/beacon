@@ -93,6 +93,7 @@ def make_router(
     *,
     stamp_session_liveness: Callable[..., None],
     session_is_live: Callable[..., bool],
+    is_member: Callable[[dict, str], bool],
 ) -> APIRouter:
     """Build the /api/me/* router with the host app's auth + liveness helpers.
 
@@ -357,21 +358,17 @@ def make_router(
         project = db.get_project(body.project_id)
         if not project:
             raise HTTPException(status_code=404, detail="project not found")
-        # Membership boundary. ms-158 / e-5773: this used to read
-        # ``if owner and owner != uid and uid not in members`` — the leading
-        # ``owner and`` made it fall OPEN for ownerless projects (owner falsy →
-        # short-circuit → any signed-in user could mint session records into an
-        # ownerless project). That is the same fail-open migration relic e-5757
-        # closed in ``_get_role``. Deny by default: an ownerless project has no
-        # members, so a caller who is neither owner nor in ``members`` is
-        # rejected. (Kept inline rather than routed through ``_get_role`` on
-        # purpose — ``_get_role`` bypasses to "owner" when auth is disabled, but
-        # this endpoint enforces the membership boundary unconditionally so a
-        # session record is never materialised in a project the caller doesn't
-        # belong to. See test_me_heartbeat_rejects_* .)
-        owner = project.get("owner")
-        members = [m.get("user_id") for m in project.get("members", []) or []]
-        if owner != uid and uid not in members:
+        # Membership boundary. Delegate to the app-owned ``is_member`` predicate
+        # (= app.py ``_is_member``) — the single source of truth for "owner or in
+        # members" — rather than re-implementing it here. ms-158 / e-5773: the old
+        # inline copy read ``if owner and owner != uid and ...``, whose leading
+        # ``owner and`` fell OPEN for ownerless projects (any signed-in user could
+        # mint a session record into one), the same fail-open relic e-5757 closed
+        # in ``_get_role``. We deliberately use ``is_member`` (auth-mode agnostic)
+        # and NOT ``_get_role`` (which bypasses to "owner" when auth is disabled):
+        # this endpoint must enforce membership unconditionally so a session record
+        # is never materialised in a project the caller doesn't belong to.
+        if not is_member(project, uid):
             raise HTTPException(
                 status_code=403,
                 detail="not a member of this project",

@@ -235,3 +235,35 @@ class TestGetRoleOwnerlessDenyByDefault:
         monkeypatch.setattr(app_module, "_auth_enabled", False)
         proj = {"name": "orphan", "members": []}
         assert app_module._get_role(proj, {"sub": "anyone"}) == "owner"
+
+
+class TestIsMemberPredicate:
+    """ms-158 / e-5773: the shared membership predicate that /api/me/heartbeat
+    delegates to instead of re-implementing the rule inline (independent AX +
+    maintainability review consensus). Auth-mode agnostic by design: unlike
+    ``_get_role`` it does NOT bypass to "everyone in" when auth is disabled.
+    """
+
+    def test_owner_is_member(self):
+        assert app_module._is_member({"owner": "u1", "members": []}, "u1") is True
+
+    def test_listed_member_is_member(self):
+        proj = {"owner": "u1", "members": [{"user_id": "u2", "role": "editor"}]}
+        assert app_module._is_member(proj, "u2") is True
+
+    def test_stranger_is_not_member(self):
+        proj = {"owner": "u1", "members": [{"user_id": "u2"}]}
+        assert app_module._is_member(proj, "stranger") is False
+
+    def test_ownerless_stranger_is_not_member(self):
+        # The fail-open case: no owner, stranger not in members → deny.
+        assert app_module._is_member({"members": []}, "stranger") is False
+        assert app_module._is_member({"owner": "", "members": []}, "stranger") is False
+
+    def test_ownerless_member_is_member(self):
+        proj = {"members": [{"user_id": "u2", "role": "editor"}]}
+        assert app_module._is_member(proj, "u2") is True
+
+    def test_empty_uid_is_not_member(self):
+        # A missing/empty caller id must never satisfy membership.
+        assert app_module._is_member({"owner": "", "members": []}, "") is False
