@@ -99,6 +99,19 @@ class _FakeConn:
         pass
 
 
+@pytest.fixture(autouse=True)
+def _reset_ensured_tables():
+    """ms-157 e-5750 keeps a module-global known-set of ensured descriptor tables.
+    Snapshot + restore it around every test so one test's auto-created class does
+    not leak into another."""
+    saved = set(mc._ENSURED_DESCRIPTOR_ENTITIES)
+    try:
+        yield
+    finally:
+        mc._ENSURED_DESCRIPTOR_ENTITIES.clear()
+        mc._ENSURED_DESCRIPTOR_ENTITIES.update(saved)
+
+
 @pytest.fixture
 def fake_db(monkeypatch):
     store: dict = {}
@@ -334,3 +347,107 @@ def test_first_write_migrates_inline_to_rows(fake_db):
     # re-read is consistent and reflects the mutation
     got = mc.get_project_v3("s2")
     assert got["opportunities"][0]["title"] == "Migrated"
+
+
+# ---------------------------------------------------------------------------
+# ms-157 e-5747 — the server decomposition is DESCRIPTOR-driven, not seed-only.
+# A descriptor-defined target-class (a collection the built-in seed has never
+# heard of) splits into its own rows the moment its table exists — proving the
+# live v3 path reads occupation.target_decomposition(data), not the static seed.
+# And with no table yet (pre-DDL / e-5750) it rides inline safely (A-stage).
+# ---------------------------------------------------------------------------
+
+# A back-office target-class the built-in dev/sales seed does NOT declare.
+_CONTRACT_DESC = {
+    "kind": "contract", "label": "契約", "profession": "backoffice",
+    "type": "single-shot", "id_prefix": "ctr-", "collection": "contracts",
+    "decomposition": {"id_field": "id", "arms": ["clauses"]},
+}
+
+
+def _descriptor_project():
+    return {
+        "project_id": "b1", "name": "BackOffice", "profession": "backoffice",
+        "milestones": [],  # validate/assemble always-emit key
+        "target_classes": [_CONTRACT_DESC],
+        "contracts": [
+            {"id": "ctr-1", "title": "NDA", "status": "open",
+             "created_at": "2026-08-01T00:00:00Z",
+             "clauses": [
+                 {"id": "cl-1", "text": "秘密保持",
+                  "created_at": "2026-08-01T00:00:00Z"}]},
+        ],
+    }
+
+
+def test_descriptor_class_splits_into_rows_when_table_exists(fake_db, monkeypatch):
+    # Simulate the DDL (e-5750) having created the descriptor's tables.
+    monkeypatch.setitem(mc.TABLES, "contracts", "beacon_prod_contracts")
+    monkeypatch.setitem(mc.TABLES, "clauses", "beacon_prod_clauses")
+
+    mc.save_project_v3("b1", _descriptor_project())
+    store = fake_db["store"]
+    # The Target row (sk = ctr-1) and its fat-arm child (arm-qualified sk) each
+    # land in their OWN table — impossible unless the code read the descriptor,
+    # since the built-in seed knows nothing about "contracts"/"clauses".
+    assert any(k[2] == "ctr-1" for k in store if k[0].endswith("contracts"))
+    # single-arm collection → 2-segment child sk (same D2 rule as milestones)
+    assert any(k[2] == "ctr-1#cl-1"
+               for k in store if k[0].endswith("clauses"))
+    # meta must NOT carry the fat contracts array inline (it was decomposed).
+    meta = json.loads(store[(mc._table_name("projects"), "b1", "")])
+    assert "contracts" not in meta
+    # round-trips back to the unified shape
+    got = mc.get_project_v3("b1")
+    assert got["contracts"][0]["id"] == "ctr-1"
+    assert got["contracts"][0]["clauses"][0]["id"] == "cl-1"
+
+
+def test_descriptor_class_auto_creates_tables_on_write(fake_db):
+    # ms-157 e-5750: no contracts/clauses table is pre-registered — writing a
+    # project that declares the class must AUTO-CREATE the tables (ensure_target_
+    # tables) and split into rows, not ride inline. "declare, don't wire".
+    assert "contracts" not in mc.TABLES  # precondition: built-in DDL unaware
+    newly = mc.ensure_target_tables(_descriptor_project())
+    assert set(newly) == {"contracts", "clauses"}  # both tables were created
+    assert "contracts" in mc._known_entities()
+
+    mc.save_project_v3("b1", _descriptor_project())
+    store = fake_db["store"]
+    # split into its own rows (not inline in meta)
+    assert any(k[2] == "ctr-1" for k in store if k[0].endswith("contracts"))
+    assert any(k[2] == "ctr-1#cl-1" for k in store if k[0].endswith("clauses"))
+    meta = json.loads(store[(mc._table_name("projects"), "b1", "")])
+    assert "contracts" not in meta
+    # ensure is idempotent: a second call creates nothing new
+    assert mc.ensure_target_tables(_descriptor_project()) == ()
+    # round-trips
+    got = mc.get_project_v3("b1")
+    assert got["contracts"][0]["clauses"][0]["id"] == "cl-1"
+
+
+def test_table_name_rejects_unknown_entity():
+    # fail-fast restored (AX + maintainability review PR#692): an un-ensured,
+    # non-built-in entity (typically a typo like "milstones") raises rather than
+    # silently resolving to a plausible-but-nonexistent table name.
+    assert "milstones" not in mc.TABLES
+    assert "milstones" not in mc._ENSURED_DESCRIPTOR_ENTITIES
+    with pytest.raises(KeyError):
+        mc._table_name("milstones")
+
+
+def test_descriptor_class_read_rides_inline_when_table_absent(fake_db):
+    # Safety net: a project meta that still carries the class INLINE (never
+    # written through) and whose table was never ensured must read through the
+    # fallback, never KeyError — the pre-e-5750 A-stage guarantee still holds.
+    assert "contracts" not in mc._known_entities()
+    store = fake_db["store"]
+    store[(mc._table_name("projects"), "b1", "")] = mc._dumps({
+        "project_id": "b1", "name": "BackOffice", "profession": "backoffice",
+        "milestones": [], "target_classes": [_CONTRACT_DESC],
+        "contracts": [{"id": "ctr-1", "title": "NDA",
+                       "clauses": [{"id": "cl-1", "text": "秘密保持"}]}],
+    })
+    got = mc.get_project_v3("b1")
+    assert got["contracts"][0]["id"] == "ctr-1"
+    assert got["contracts"][0]["clauses"][0]["id"] == "cl-1"

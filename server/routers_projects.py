@@ -55,6 +55,17 @@ from pydantic import BaseModel
 
 import store_router as db  # e-1544: same backend-routing binding app.py uses
 import core
+import inspect  # ms-157 e-5749: derive add_work_item's reserved kwargs from source
+import occupation  # ms-157 e-5749: target-class 横断の generic target 投影
+import target_engine as te  # ms-157 e-5749: 記述子 class の generic な生成
+
+# Reserved kwargs occupation.add_work_item binds explicitly (description / status /
+# item_type). Derived from the SOURCE signature, not hand-copied, so adding a
+# keyword-only param there auto-updates this guard instead of silently regaining
+# the **spread-TypeError-as-500 bug (maintainability review of PR #692).
+_WORK_ITEM_RESERVED_KWARGS = frozenset(
+    n for n, p in inspect.signature(occupation.add_work_item).parameters.items()
+    if p.kind is inspect.Parameter.KEYWORD_ONLY)
 import machine_key as machine_key_mod  # ms-151 e-5474: headless machine 認証の鍵
 import operation_period  # ms-151 e-5477: operation-fires claim の period バケット
 import operations
@@ -118,6 +129,21 @@ class MilestoneCreate(BaseModel):
     priority: str = ""
     objective: str = ""
     acceptance_criteria: str = ""
+
+
+# ms-157 e-5749: generic (target-class 横断) write bodies. A descriptor-defined
+# target-class (new occupation added by DATA) is created / grown via these two
+# routes with zero per-class wiring.
+class TargetCreate(BaseModel):
+    kind: str                       # descriptor target-class kind (e.g. "contract")
+    label: str
+    fields: Dict[str, Any] = {}     # descriptor-declared field values
+
+
+class WorkItemCreate(BaseModel):
+    description: str
+    status: str = ""
+    extra: Dict[str, Any] = {}      # profession-specific fields (priority / deadline …)
 
 class MilestoneUpdate(BaseModel):
     title: str = ""
@@ -501,7 +527,17 @@ def _resolve_sales_funnels(data: dict, enriched: dict) -> dict:
 
 
 def _enrich_project(data: dict) -> dict:
-    """Add computed fields (total_tasks, done_tasks, entries_to_json) to project."""
+    """Add computed fields (total_tasks, done_tasks, entries_to_json) to project.
+
+    ms-157 e-5749 (target router を target-class 横断 generic へ): alongside the
+    milestone-specific enrichment (unchanged, for backward compat), emit a
+    profession-agnostic ``targets`` array via ``occupation.project_targets``. This
+    is the generic read surface — a descriptor-defined target-class (a new
+    occupation added by data, not code) appears here with ZERO router wiring,
+    same id/label/status/kind/work_items_* shape as dev milestones and sales
+    opportunities. Existing keys (milestones / opportunities / …) are untouched,
+    so every profession-specific endpoint's payload is byte-for-byte the same;
+    ``targets`` is purely additive."""
     enriched = {**data}
     milestones = []
     for ms in data.get("milestones", []):
@@ -514,6 +550,7 @@ def _enrich_project(data: dict) -> dict:
             "done_tasks": done,
         })
     enriched["milestones"] = milestones
+    enriched["targets"] = occupation.project_targets(data)
     return _resolve_sales_funnels(data, enriched)
 
 def _enrich_project_slim(data: dict) -> dict:
@@ -1110,6 +1147,80 @@ def make_router(
             return data, {"ms_id": ms_id, "title": body.title}
         return _apply_op_and_broadcast(
             project_id, op, op_name="milestone.create", actor=user.get("sub", ""),
+        )
+
+    # ------------------------------------------------------------------
+    # ms-157 e-5749 — generic (target-class 横断) write surface.
+    # Reads were already generic (whole-project GET + the additive targets[]
+    # projection). These give the WRITE half: a descriptor-defined target-class
+    # (a new occupation added by DATA, not code) is created and grown through ONE
+    # pair of routes, with zero per-class wiring — the server-side counterpart of
+    # ms-142's client「配線ゼロ自動同梱」. Built-in classes (milestone /
+    # opportunity) keep their dedicated endpoints unchanged; these drive the
+    # occupation-generic primitives (target_engine.create_target /
+    # occupation.add_work_item) which resolve everything from the descriptor.
+    # ------------------------------------------------------------------
+    @router.post("/api/projects/{project_id}/targets")
+    def create_target_generic(project_id: str, body: TargetCreate,
+                              user: dict = Depends(require_auth)):
+        actor = user.get("sub", "")
+
+        def op(data: dict):
+            _require_write(data, user)
+            desc = occupation.effective_get_descriptor(data, body.kind)
+            if desc is None:
+                # AX review (PR #692): don't collapse "typo" and "built-in" into
+                # one misleading message. List the descriptor kinds this route
+                # actually accepts (kills guess-retry) and name where built-ins go.
+                declared = sorted({d.get("kind")
+                                   for d in occupation.effective_descriptors(data)
+                                   if isinstance(d, dict) and d.get("kind")})
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"target-class {body.kind!r} cannot be created here. "
+                            f"This route creates descriptor-defined classes: "
+                            f"{declared or '(none declared)'}. Built-in classes "
+                            f"(milestone / opportunity) use their own endpoints "
+                            f"(e.g. POST /api/projects/{{id}}/milestones)."))
+            try:
+                target = te.create_target(data, desc, label=body.label,
+                                          fields=body.fields or None, actor=actor)
+            except te.TargetEngineError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, {"id": target.get("id"), "kind": body.kind}
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="target.create", actor=actor,
+        )
+
+    @router.post("/api/projects/{project_id}/targets/{target_id}/work-items")
+    def add_work_item_generic(project_id: str, target_id: str,
+                              body: WorkItemCreate,
+                              user: dict = Depends(require_auth)):
+        actor = user.get("sub", "")
+
+        def op(data: dict):
+            _require_write(data, user)
+            # ``extra`` carries profession-specific fields (priority / deadline …).
+            # Guard the keys add_work_item already binds explicitly: without this a
+            # caller putting "status"/"description"/"item_type" in extra would make
+            # the **spread raise TypeError (multiple values), escaping as a 500.
+            extra = dict(body.extra or {})
+            reserved = _WORK_ITEM_RESERVED_KWARGS & extra.keys()
+            if reserved:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"extra must not contain reserved key(s) "
+                            f"{sorted(reserved)}; pass description / status at the "
+                            f"top level"))
+            try:
+                item = occupation.add_work_item(
+                    data, target_id, description=body.description,
+                    status=body.status, **extra)
+            except (ValueError, TypeError) as e:
+                raise HTTPException(status_code=400, detail=str(e))
+            return data, {"id": item.get("id"), "target_id": target_id}
+        return _apply_op_and_broadcast(
+            project_id, op, op_name="work_item.create", actor=actor,
         )
 
     @router.get("/api/projects/{project_id}/milestones/{ms_id}")

@@ -161,10 +161,20 @@ _SUBCOLLECTION_SK_NAMES = {
 
 
 def _table_name(entity: str) -> str:
-    try:
-        return TABLES[entity]
-    except KeyError:
-        raise KeyError(f"unknown entity {entity!r} (not in TABLES)")
+    # Built-ins map through TABLES; a descriptor-defined entity (ms-157 e-5750)
+    # resolves to the same {prefix}_{entity} shape — but ONLY once it has been
+    # ensured (table created + registered in the known-set). An unknown /
+    # un-ensured entity (typically a typo) fails fast HERE rather than silently
+    # addressing a nonexistent table downstream (AX + maintainability review of
+    # PR #692: the earlier permissive fallback removed this fail-fast guard).
+    name = TABLES.get(entity)
+    if name is not None:
+        return name
+    if entity in _ENSURED_DESCRIPTOR_ENTITIES:
+        return f"{TABLE_PREFIX}_{entity}"
+    raise KeyError(
+        f"unknown entity {entity!r} (not a built-in, not an ensured descriptor "
+        f"table); check for a typo or call ensure_target_tables first")
 
 
 # ---------------------------------------------------------------------------
@@ -411,15 +421,44 @@ def _now_iso_utc() -> str:
 # Table creation (idempotent)
 # ---------------------------------------------------------------------------
 
+def _descriptor_entities_across_projects() -> set:
+    """Union of the collection + fat-arm entities every stored project's
+    descriptor target-classes declare (ms-157 e-5750). Startup DDL uses this so a
+    class a project already declared gets its table even on a fresh DB. Best-
+    effort: a scan error yields an empty set (built-in DDL still runs)."""
+    import occupation  # noqa: PLC0415
+    out: set = set()
+    try:
+        projects = _scan("projects", id_field="project_id")
+    except Exception:
+        return out
+    for proj in projects:
+        try:
+            for coll, s in occupation.target_decomposition(proj).items():
+                if coll not in TABLES:
+                    out.add(coll)
+                for arm in s.get("arms", ()):
+                    if arm not in TABLES:
+                        out.add(arm)
+        except Exception:
+            continue
+    return out
+
+
 def create_mysql_tables() -> int:
     """CREATE TABLE IF NOT EXISTS for every entity. Returns count created.
 
     generic schema (pk, sk, data JSON) を全 entity に対して張る。冪等なので
     起動のたびに走っても安全。
+
+    ms-157 e-5750: 組み込み ENTITIES 決め打ちに加え、既存 project が記述子で宣言した
+    target-class の collection / arm テーブルも張る (= DDL が記述子追随)。さらに DB に
+    実在する descriptor テーブルを known-set に seed し、再起動後の read でも参加させる。
     """
     conn = _conn()
     created = 0
-    for entity in ENTITIES:
+    descriptor_entities = _descriptor_entities_across_projects()
+    for entity in (*ENTITIES, *sorted(descriptor_entities)):
         table = _table_name(entity)
         with conn.cursor() as cur:
             # 作成有無を数えるため事前に存在確認 (CREATE IF NOT EXISTS 自体は冪等)。
@@ -435,6 +474,12 @@ def create_mysql_tables() -> int:
             )
         if not exists:
             created += 1
+    # descriptor テーブルを known-set に seed (実在するものを SHOW TABLES から拾う)。
+    try:
+        _ENSURED_DESCRIPTOR_ENTITIES.update(
+            e for e in _scan_materialized_entities() if e not in TABLES)
+    except Exception:
+        pass
     return created
 
 
@@ -727,17 +772,21 @@ def _v3_decompose(data: dict) -> tuple[dict, dict, dict]:
 # ---------------------------------------------------------------------------
 # Generic registry-driven decomposition (ms-109 e-3591 / SPEC F7mdrDA4djd3byyDbZAv)
 #
-# The milestone-specific _v3_decompose / _v3_assemble above are the DEVELOPMENT
+# The milestone-specific _v3_decompose / _v3_assemble above were the DEVELOPMENT
 # instance of a general pattern: split a Target collection's fat arms into child
-# rows. These generic forms read ``occupation.TARGET_DECOMPOSITION`` so the SAME
-# code decomposes development milestones AND sales opportunities/accounts,
-# satisfying SPEC AC2 ("dev も同機構の1インスタンス"). They reproduce the
-# milestone split byte-for-byte (pinned by test) and round-trip sales Targets.
+# rows. These generic forms decompose development milestones AND sales
+# opportunities/accounts with the SAME code, satisfying SPEC AC2 ("dev も同機構の
+# 1インスタンス"). They reproduce the milestone split byte-for-byte (pinned by
+# test) and round-trip sales Targets. They ARE the live atomic I/O path now
+# (apply/get/save/replace_project_v3 call them); the milestone-specific pair is
+# dead (no callers) and kept only as the reference the switchover reproduced.
 #
-# NOT yet wired into the live atomic I/O path (apply/get/save_project_v3): that
-# switchover needs the child tables added to ENTITIES + a MySQL integration test
-# (Phase 2d harness) before it can touch the production write path. These pure
-# functions are the proven core that switchover will adopt.
+# ms-157 e-5747 (サーバの target 一級化 / A 段階): the decomposition source is now
+# ``_server_decomposition(data)`` — ``occupation.target_decomposition(data)``
+# (descriptor-aware, ms-122) restricted to collections/arms whose table exists —
+# NOT the built-in ``TARGET_DECOMPOSITION`` seed. So a project's descriptor-
+# defined target-class splits into rows the moment its table exists (e-5750 DDL),
+# with zero data movement; until then it rides inline (read-through fallback).
 # ---------------------------------------------------------------------------
 
 # Collections that assemble emits even when empty. Only "milestones" — it is the
@@ -759,6 +808,145 @@ def _target_sort_key(collection: str, target: dict):
     return (0, target.get("created_at", "") or "￿", tid)
 
 
+# ms-157 e-5750 (DDL 記述子追随): entity suffixes whose row table this server
+# treats as existing = static built-ins (TABLES) PLUS descriptor tables created /
+# observed this process. ``create_mysql_tables`` seeds the descriptor half from a
+# SHOW TABLES scan at startup (covers restart / tables made by a prior run);
+# ``ensure_target_tables`` adds to it when a write introduces a new class. The
+# hot read guard (_server_decomposition) reads this set with NO per-call DB hit.
+_ENSURED_DESCRIPTOR_ENTITIES: set = set()
+
+
+def _known_entities() -> set:
+    """Entity suffixes whose row table the server may read/write: built-ins +
+    ensured descriptor tables (ms-157 e-5750). Pure (no DB) — the SHOW TABLES
+    seed happens once in create_mysql_tables / ensure_target_tables, not here, so
+    the decomposition guard stays cheap."""
+    return set(TABLES) | _ENSURED_DESCRIPTOR_ENTITIES
+
+
+def _scan_materialized_entities() -> set:
+    """Entity suffixes physically present in the DB (SHOW TABLES over the env
+    prefix). Used to seed the descriptor known-set at startup so a table a prior
+    run created participates in reads. Best-effort: any backend without SHOW
+    TABLES (or an error) yields an empty set and the caller relies on TABLES +
+    ensure instead."""
+    conn = _conn()
+    prefix = f"{TABLE_PREFIX}_"
+    with conn.cursor() as cur:
+        cur.execute("SHOW TABLES LIKE %s", (f"{prefix}%",))
+        rows = cur.fetchall()
+    out: set = set()
+    for r in rows:
+        vals = list(r.values()) if isinstance(r, dict) else list(r)
+        name = vals[0] if vals else ""
+        if isinstance(name, str) and name.startswith(prefix):
+            out.add(name[len(prefix):])
+    return out
+
+
+def _generic_table_name(entity: str) -> str:
+    """Table name for a descriptor entity WITHOUT the ensured-set gate — used
+    only by _create_generic_table (the creator, which is about to register the
+    entity). All other addressing goes through the gated _table_name so genuine
+    typos fail fast."""
+    if not entity or not entity.replace("_", "").isalnum():
+        raise KeyError(f"unsafe entity {entity!r}")
+    return TABLES.get(entity) or f"{TABLE_PREFIX}_{entity}"
+
+
+def _create_generic_table(entity: str) -> None:
+    """CREATE TABLE IF NOT EXISTS for one entity with the uniform (pk, sk, data)
+    schema every Beacon table shares. Idempotent — safe to call repeatedly.
+    NOTE: DDL implicitly commits in MySQL, so callers MUST invoke this OUTSIDE an
+    open transaction (never inside apply/replace's FOR UPDATE block) — enforced
+    below at runtime, not left to the comment."""
+    conn = _conn()
+    # Physically enforce the outside-transaction contract (AX + maintainability
+    # review of PR #692): creating a table inside apply/replace's FOR UPDATE block
+    # would let MySQL's implicit DDL commit silently split the transaction and
+    # destroy atomicity. Refuse rather than corrupt. The fake test connection has
+    # no get_autocommit, so this is a no-op under unit tests.
+    if hasattr(conn, "get_autocommit") and not conn.get_autocommit():
+        raise RuntimeError(
+            "_create_generic_table called inside a transaction; DDL implicitly "
+            "commits in MySQL — call ensure_target_tables BEFORE "
+            "conn.autocommit(False), never inside the FOR UPDATE block")
+    with conn.cursor() as cur:
+        cur.execute(
+            f"CREATE TABLE IF NOT EXISTS `{_generic_table_name(entity)}` ("
+            f"  pk   VARCHAR(191) NOT NULL,"
+            f"  sk   VARCHAR(191) NOT NULL DEFAULT '',"
+            f"  data JSON NOT NULL,"
+            f"  PRIMARY KEY (pk, sk)"
+            f") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
+        )
+
+
+def ensure_target_tables(data: dict | None) -> tuple:
+    """ms-157 e-5750: make the row tables a project's descriptor-defined target-
+    classes need EXIST, creating any that don't (无停止 retrofit = CREATE TABLE IF
+    NOT EXISTS, never dropping). Returns the tuple of entities newly ensured this
+    call.
+
+    A descriptor class declared under ``target_classes`` gets its collection table
+    and each fat-arm child table auto-created the first time a project carrying it
+    is written — the storage equivalent of ms-142's client-side「配線ゼロ自動同梱」.
+    Built-ins are skipped (their tables come from create_mysql_tables). MUST be
+    called OUTSIDE a transaction (DDL implicitly commits)."""
+    import occupation  # noqa: PLC0415
+    newly: list = []
+    for coll, s in occupation.target_decomposition(data).items():
+        for entity in (coll, *s.get("arms", ())):
+            if entity in TABLES or entity in _ENSURED_DESCRIPTOR_ENTITIES:
+                continue
+            _create_generic_table(entity)
+            _ENSURED_DESCRIPTOR_ENTITIES.add(entity)
+            newly.append(entity)
+    return tuple(newly)
+
+
+def _server_decomposition(data: dict | None) -> dict:
+    """The physical Target decomposition this server can MATERIALIZE for
+    ``data`` right now: ``occupation.target_decomposition(data)`` (descriptor-
+    aware — ms-122 e-3957) restricted to collections AND fat arms whose row table
+    is known to exist (``_known_entities`` = built-ins + ensured descriptor
+    tables).
+
+    ms-157 e-5747 (サーバの target 一級化 / A 段階): the live v3 I/O path used to
+    consult ``occupation.TARGET_DECOMPOSITION`` — the built-in SEED, blind to a
+    project's descriptor-defined target-classes. Threading ``data`` here splits a
+    descriptor class into its own rows with ZERO data movement. e-5750 then makes
+    those tables auto-exist (ensure_target_tables at write / create_mysql_tables
+    at startup). A descriptor collection / arm whose table is STILL absent is
+    OMITTED, so its records ride inline in the projects meta / target row
+    (assemble's read-through fallback). For dev / sales every built-in table
+    exists, so this equals the seed byte-for-byte (pinned by
+    test_mysql_v3_generic_io)."""
+    import occupation  # noqa: PLC0415
+    known = _known_entities()
+    spec: dict = {}
+    for coll, s in occupation.target_decomposition(data).items():
+        if coll not in known:
+            continue
+        arms = tuple(a for a in s["arms"] if a in known)
+        spec[coll] = {"id_field": s.get("id_field", "id"), "arms": arms}
+    return spec
+
+
+def _server_child_tables(spec: dict) -> tuple:
+    """Distinct child-table names across a ``_server_decomposition`` spec (union
+    of fat-arm names, dedup in declaration order). Mirrors
+    ``occupation.target_child_tables`` but over the materialized spec so it never
+    names a table that does not exist."""
+    seen: list = []
+    for s in spec.values():
+        for arm in s["arms"]:
+            if arm not in seen:
+                seen.append(arm)
+    return tuple(seen)
+
+
 def decompose_project_targets(data: dict) -> tuple[dict, dict, dict]:
     """Split a unified project dict into ``(meta, target_maps, child_maps)``,
     registry-driven across occupations.
@@ -772,8 +960,7 @@ def decompose_project_targets(data: dict) -> tuple[dict, dict, dict]:
       milestones, 3-seg ``{tid}#{arm}#{cid}`` otherwise). Children nested inside
       a fat-arm item stay inline in that item's dict (mirrors a dev commit nested
       in its task's entry row)."""
-    import occupation  # noqa: PLC0415
-    colls = occupation.TARGET_DECOMPOSITION
+    colls = _server_decomposition(data)
     meta = {k: v for k, v in (data or {}).items() if k not in colls}
     meta["schema_version"] = SCHEMA_V3_ENTRY
     target_maps: dict = {}
@@ -806,8 +993,7 @@ def assemble_project_targets(meta: dict, target_maps: dict,
     target id + arm parsed from the sk), reproducing the nested shape CLI/UI
     expect. Arm children are ordered by ``_v3_entry_sort_key``; Target
     collections by ``_target_sort_key``."""
-    import occupation  # noqa: PLC0415
-    colls = occupation.TARGET_DECOMPOSITION
+    colls = _server_decomposition(meta)
     result = {k: v for k, v in (meta or {}).items() if k not in colls}
     for coll, spec in colls.items():
         arms = spec["arms"]
@@ -873,17 +1059,17 @@ def _v3_plan_writes(before_by_table: dict, new_data: dict) -> tuple[dict, dict, 
     decomposes ``new_data`` via the registry and diffs every Target collection
     table + child table. The ``projects`` meta is returned separately (always
     upserted as the transaction anchor). Fully unit-testable without a DB."""
-    import occupation  # noqa: PLC0415
+    spec = _server_decomposition(new_data)
     meta, target_maps, child_maps = decompose_project_targets(new_data)
     upserts: dict = {}
     deletes: dict = {}
-    for coll in occupation.TARGET_DECOMPOSITION:
+    for coll in spec:
         up, dl = _diff_map(before_by_table.get(coll, {}), target_maps.get(coll, {}))
         if up:
             upserts[coll] = up
         if dl:
             deletes[coll] = dl
-    for table in occupation.target_child_tables():
+    for table in _server_child_tables(spec):
         up, dl = _diff_map(before_by_table.get(table, {}), child_maps.get(table, {}))
         if up:
             upserts[table] = up
@@ -896,14 +1082,14 @@ def _v3_read_target_state(project_id: str) -> tuple | None:
     """Read the projects meta + every Target collection row + child row into
     ``(meta, target_maps, child_maps)`` via the row primitives (each table's
     rows keyed by sk). Returns None when the project meta is absent."""
-    import occupation  # noqa: PLC0415
     meta = _get("projects", project_id)
     if meta is None:
         return None
+    spec = _server_decomposition(meta)
     target_maps = {coll: {sk: d for sk, d in _query_rows(coll, project_id)}
-                   for coll in occupation.TARGET_DECOMPOSITION}
+                   for coll in spec}
     child_maps = {table: {sk: d for sk, d in _query_rows(table, project_id)}
-                  for table in occupation.target_child_tables()}
+                  for table in _server_child_tables(spec)}
     return meta, target_maps, child_maps
 
 
@@ -932,6 +1118,9 @@ def save_project_v3(project_id: str, data: dict) -> None:
     replace_project_v3 を使うこと。 ms-109 e-3591 で registry 駆動に一般化
     (Target collection + 子テーブルを一律 upsert)。
     """
+    # ms-157 e-5750: この project の記述子 target-class が要る行テーブルを先に用意
+    #   (無ければ CREATE)。save は transaction を張らないのでここで安全に DDL 可。
+    ensure_target_tables(data)
     meta, target_maps, child_maps = decompose_project_targets(data)
     _put("projects", project_id, {**meta, "project_id": project_id})
     for coll, tmap in target_maps.items():
@@ -962,9 +1151,11 @@ def apply_project_op_v3(project_id: str, op) -> "any":  # type: ignore[valid-typ
       - op() の contract (= pure / side-effect free) は v1/v2 と同じ要求で維持する
         (= 後日 optimistic 化した時に壊れないため)。
     """
-    import occupation  # noqa: PLC0415
-    target_colls = tuple(occupation.TARGET_DECOMPOSITION.keys())
-    child_tables = occupation.target_child_tables()
+    # ms-157 e-5750: 記述子 target-class の行テーブルを transaction の外で先に用意
+    #   する (DDL は暗黙 commit するので FOR UPDATE ブロック内で作ってはならない)。
+    #   op() が新しい記述子を足す稀ケースは pre-op meta に映らないが、その class は
+    #   次回書き込みまで inline に留まる (安全側、read-through fallback)。
+    ensure_target_tables(_get("projects", project_id))
     conn = _conn()
     conn.autocommit(False)
     try:
@@ -980,6 +1171,13 @@ def apply_project_op_v3(project_id: str, op) -> "any":  # type: ignore[valid-typ
             if not row:
                 raise LookupError(f"Project '{project_id}' not found")
             meta = json.loads(row["data"])
+
+            # ms-157 e-5747: 分割対象は seed 固定でなく、この project 自身の記述子
+            #   から導く (descriptor-aware)。read 時点で使える真値は meta なので
+            #   meta から spec を起こす (built-in なら seed と一致)。
+            spec = _server_decomposition(meta)
+            target_colls = tuple(spec.keys())
+            child_tables = _server_child_tables(spec)
 
             # 2. 全 Target collection + 子テーブルを同 transaction 内で read
             #    (ms-109 e-3591: milestones/entries 固定でなく registry 駆動)。
@@ -1054,6 +1252,8 @@ def replace_project_v3(project_id: str, new_data: dict) -> None:
     Firestore v2 の _replace_cloud_v2 と同じ semantics だが、 transaction 境界と
     lock は MySQL 流 (= SELECT ... FOR UPDATE + BEGIN/COMMIT)。
     """
+    # ms-157 e-5750: 記述子 target-class の行テーブルを transaction の外で用意。
+    ensure_target_tables(new_data)
     conn = _conn()
     conn.autocommit(False)
     try:
@@ -1068,9 +1268,9 @@ def replace_project_v3(project_id: str, new_data: dict) -> None:
 
             # 既存 Target collection + 子行の sk を retrieve (= 削除対象算出用)。
             # ms-109 e-3591: milestones/entries 固定でなく registry 駆動。
-            import occupation  # noqa: PLC0415
-            all_tables = (*occupation.TARGET_DECOMPOSITION.keys(),
-                          *occupation.target_child_tables())
+            # ms-157 e-5747: 分割対象は new_data 自身の記述子から導く。
+            spec = _server_decomposition(new_data)
+            all_tables = (*spec.keys(), *_server_child_tables(spec))
             existing_sks: dict = {}
             for t in all_tables:
                 cur.execute(
@@ -1093,9 +1293,9 @@ def replace_project_v3(project_id: str, new_data: dict) -> None:
             # sk=target_id、child は composite sk。
             new_rows_by_table: dict = {
                 coll: target_maps.get(coll, {})
-                for coll in occupation.TARGET_DECOMPOSITION
+                for coll in spec
             }
-            for table in occupation.target_child_tables():
+            for table in _server_child_tables(spec):
                 new_rows_by_table[table] = child_maps.get(table, {})
             for table, rows in new_rows_by_table.items():
                 for key, d in rows.items():
