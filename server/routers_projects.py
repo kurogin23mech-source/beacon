@@ -55,6 +55,7 @@ from pydantic import BaseModel
 
 import store_router as db  # e-1544: same backend-routing binding app.py uses
 import core
+import occupation  # ms-157 e-5749: target-class 横断の generic target 投影
 import machine_key as machine_key_mod  # ms-151 e-5474: headless machine 認証の鍵
 import operation_period  # ms-151 e-5477: operation-fires claim の period バケット
 import operations
@@ -501,7 +502,17 @@ def _resolve_sales_funnels(data: dict, enriched: dict) -> dict:
 
 
 def _enrich_project(data: dict) -> dict:
-    """Add computed fields (total_tasks, done_tasks, entries_to_json) to project."""
+    """Add computed fields (total_tasks, done_tasks, entries_to_json) to project.
+
+    ms-157 e-5749 (target router を target-class 横断 generic へ): alongside the
+    milestone-specific enrichment (unchanged, for backward compat), emit a
+    profession-agnostic ``targets`` array via ``occupation.project_targets``. This
+    is the generic read surface — a descriptor-defined target-class (a new
+    occupation added by data, not code) appears here with ZERO router wiring,
+    same id/label/status/kind/work_items_* shape as dev milestones and sales
+    opportunities. Existing keys (milestones / opportunities / …) are untouched,
+    so every profession-specific endpoint's payload is byte-for-byte the same;
+    ``targets`` is purely additive."""
     enriched = {**data}
     milestones = []
     for ms in data.get("milestones", []):
@@ -514,6 +525,7 @@ def _enrich_project(data: dict) -> dict:
             "done_tasks": done,
         })
     enriched["milestones"] = milestones
+    enriched["targets"] = occupation.project_targets(data)
     return _resolve_sales_funnels(data, enriched)
 
 def _enrich_project_slim(data: dict) -> dict:
