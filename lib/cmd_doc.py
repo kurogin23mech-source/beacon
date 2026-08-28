@@ -233,10 +233,14 @@ def cmd_doc_add():
                 # ambiguity; the with-target path stayed open. _validate_link_target_exists
                 # above is deliberately lenient for ms/op ids (forward-ref round-trip),
                 # so `doc add --ms ms-999` passes it, the doc is persisted, and only
-                # THEN record_target_entry → save_entry → find_target_milestone raises
-                # "Milestone not found" — a raw traceback after the write. Verify
-                # milestone existence here, pre-write, so this path is fail-closed too.
-                core.find_target_milestone(data, target)
+                # THEN record_target_entry raises "not found" — a raw traceback after
+                # the write. Verify existence here, pre-write, so this path is
+                # fail-closed too. Resolve through the profession-AGNOSTIC L2
+                # resolver ``occupation.resolve_target`` (NOT the dev-concrete
+                # ``core.find_target_milestone`` — capability-scope forbids an
+                # L2 shared verb like doc_add from reaching a dev concrete; the
+                # milestone-kind gate keeps trek/sales targets off this path).
+                occupation.resolve_target(data, target)
         except ValueError as e:
             print(f"Error: {e}")
             sys.exit(1)

@@ -143,7 +143,8 @@ def test_doc_add_explicit_missing_milestone_fails_before_write(dev_project_two_a
     r = _run(dev_project_two_active, "doc", "add", "Bad target",
              "--scope", "spec", "--ms", "ms-999", "--content", "body")
     assert r.returncode != 0
-    assert "Milestone not found: ms-999" in (r.stdout + r.stderr)
+    # profession-agnostic L2 resolver (occupation.resolve_target) message.
+    assert "not found: ms-999" in (r.stdout + r.stderr)
     assert _docs_on_disk(dev_project_two_active) == before
 
 
