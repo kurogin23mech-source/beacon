@@ -1332,6 +1332,24 @@ body::after {
 .priority-low     { background: rgba(148,163,184,0.2); color: #94a3b8; border: 1px solid rgba(148,163,184,0.3); }
 .priority-lowest  { background: rgba(100,116,139,0.15); color: #64748b; border: 1px solid rgba(100,116,139,0.2); }
 
+/* ms-162 — task 締切バッジ (task 行に出す。超過は赤で強調) */
+.entry-deadline {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  margin-left: 6px;
+  border-radius: 3px;
+  vertical-align: middle;
+  font-family: var(--font-mono);
+  background: rgba(148,163,184,0.12);
+  color: var(--text-secondary);
+}
+.entry-deadline.overdue {
+  background: rgba(239,68,68,0.15);
+  color: #f87171;
+  font-weight: 600;
+}
+
 /* e-976: reason auto-link + missing-reason marker styling.
  * Goal: stay subtle in the entry row (no layout jolt) and slightly more
  * legible inside the modal where the reason text actually shows.
@@ -1531,7 +1549,7 @@ body::after {
 .tgt-empty { font-size: 12px; color: var(--text-dim); padding: 8px; }
 .tgt-row {
   display: grid;
-  grid-template-columns: 80px 62px 1fr auto auto auto 44px 60px;
+  grid-template-columns: 80px 62px 1fr auto auto 44px 60px;
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
@@ -1541,8 +1559,6 @@ body::after {
   font-size: 12px;
 }
 .tgt-prio { text-align: center; }
-.tgt-deadline { font-size: 11px; color: var(--text-secondary); font-family: monospace; white-space: nowrap; }
-.tgt-deadline.overdue { color: var(--cancelled); font-weight: 600; }
 .tgt-kind {
   font-size: 9px;
   font-weight: 600;
@@ -4099,6 +4115,13 @@ function renderEntry(entry) {
   }
   const priority = entry.meta?.priority;
   const priorityBadge = priority ? `<span class="priority-badge priority-${priority}">${priority}</span>` : '';
+  // ms-162 (task 締切、user FB 2026-08-29) — task 締切 (ms-139 の canonical
+  // top-level ``deadline``) を task 行に出す。締切は target(milestone/商談)では
+  // なく work-item 粒度で見せる。未完了かつ今日より前なら「⚠」赤字で超過を強調。
+  const _dl = entry.deadline || '';
+  const deadlineBadge = _dl
+    ? `<span class="entry-deadline${_deadlineOverdue(_dl, entry.status, _salesTodayISO()) ? ' overdue' : ''}">${_deadlineOverdue(_dl, entry.status, _salesTodayISO()) ? '⚠ ' : ''}期日 ${esc(_dl)}</span>`
+    : '';
   // e-976: warn-marker for done/cancelled entries with no reason recorded.
   const reasonMissing = reasonMissingBadge(entry);
 
@@ -4147,7 +4170,7 @@ function renderEntry(entry) {
     <div class="entry entry-type-${entry.type}${statusClass}${toggleClass}" ${rowAction}>
       ${entryTypeBadge(entry.type)}
       <span class="entry-id">${entry.id}</span>
-      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${reasonMissing}${childBadge}${priorityBadge}${infoBtn}</span>
+      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${reasonMissing}${childBadge}${priorityBadge}${deadlineBadge}${infoBtn}</span>
       ${authorSpan}
       <span class="entry-date">${entry.created_at || ''}</span>
       ${prMeta}
@@ -6194,12 +6217,15 @@ function collectTargets(project) {
   // 合成 detail は server targets[] の detail と同じ key で埋める (= 前方互換:
   // サーバが detail を enrich したら row 側は無変更で自動追随する)。milestone は
   // target_date、opportunity は deadline を締め切りに使う (row 側は両対応で読む)。
+  // 合成 detail は server targets[] の detail と同じ key で埋める (= 前方互換:
+  // サーバが detail を enrich したら row 側は無変更で自動追随する)。締切は target
+  // レベルでは出さない (task レベルに移した / user FB) ので priority のみ。
   const out = [];
   for (const ms of project.milestones || []) {
     out.push({
       id: ms.id, label: targetLabel(ms), status: ms.status, kind: 'milestone',
       work_items_total: ms.total_tasks || 0, work_items_done: ms.done_tasks || 0,
-      detail: { progress: ms.progress, target_date: ms.target_date || '', priority: ms.priority || '' },
+      detail: { progress: ms.progress, priority: ms.priority || '' },
     });
   }
   for (const o of project.opportunities || []) {
@@ -6208,7 +6234,7 @@ function collectTargets(project) {
       id: o.id, label: targetLabel(o), status: o.phase || o.status || '', kind: 'opportunity',
       work_items_total: acts.length,
       work_items_done: acts.filter((a) => a && a.status === 'done').length,
-      detail: { deadline: o.deadline || '', priority: o.priority || '' },
+      detail: { priority: o.priority || '' },
     });
   }
   return out;
@@ -6217,14 +6243,16 @@ function collectTargets(project) {
 // 締め切りが超過しているか (= 未完了 かつ 締切が today より前)。ms-139 の期日
 // 超過エンジンと同じ規則 (terminal = done/cancelled は超過扱いしない)。today は
 // 呼び出し側が渡す (= render 関数を純粋に保つ / 環境の new Date() を持ち込まない)。
-function _targetDeadlineOverdue(deadline, status, today) {
+// 締切は target(milestone/商談) レベルではなく task レベルで見せる (user FB
+// 2026-08-29): 期日は work-item に紐づく粒度の情報なので renderEntry で使う。
+function _deadlineOverdue(deadline, status, today) {
   if (!deadline || !today) return false;
   if (status === 'done' || status === 'cancelled') return false;
   return deadline < today;
 }
 
-// PURE render of one target row — same columns for every kind. today は超過判定用。
-function renderTargetRow(t, today) {
+// PURE render of one target row — same columns for every kind.
+function renderTargetRow(t) {
   if (!t) return '';
   const total = t.work_items_total || 0;
   const done = t.work_items_done || 0;
@@ -6236,12 +6264,6 @@ function renderTargetRow(t, today) {
   const prioBadge = priority
     ? `<span class="priority-badge priority-${esc(priority)}">${esc(priority)}</span>`
     : '';
-  // 締切は milestone=target_date / opportunity=deadline のどちらでも読む。
-  const deadline = det.target_date || det.deadline || '';
-  const overdue = _targetDeadlineOverdue(deadline, t.status, today);
-  const deadlineCell = deadline
-    ? `<span class="tgt-deadline${overdue ? ' overdue' : ''}">${overdue ? '⚠ ' : ''}${esc(deadline)}</span>`
-    : '<span class="tgt-deadline"></span>';
   return `
     <div class="tgt-row">
       <span class="tgt-kind tgt-kind-${esc(kind)}">${esc(kind)}</span>
@@ -6249,18 +6271,17 @@ function renderTargetRow(t, today) {
       <span class="tgt-label">${esc(t.label || '(no label)')}</span>
       <span class="tgt-prio">${prioBadge}</span>
       <span class="tgt-status">${esc(t.status || '')}</span>
-      ${deadlineCell}
       <span class="tgt-wi">${wi}</span>
       <div class="tgt-bar"><div class="tgt-bar-fill" style="width:${pct}%"></div></div>
     </div>`;
 }
 
 // PURE render of the whole cross-class list. '' の代わりに空メッセージを返す。
-function renderTargetsOverview(targets, today) {
+function renderTargetsOverview(targets) {
   if (!Array.isArray(targets) || !targets.length) {
     return '<div class="tgt-empty">target がありません。</div>';
   }
-  return targets.map((t) => renderTargetRow(t, today)).join('');
+  return targets.map((t) => renderTargetRow(t)).join('');
 }
 
 // Section wrapper (shell 側の compose 点)。合成 fallback 時は暫定である旨を明示。
@@ -6270,7 +6291,6 @@ function renderTargetsSection() {
   for (const t of targets) { const k = (t && t.kind) || 'other'; kinds[k] = (kinds[k] || 0) + 1; }
   const kindSummary = Object.keys(kinds).map((k) => `${k} ${kinds[k]}`).join(' · ');
   const synthesized = !hasServerTargets(state.project);
-  const today = _salesTodayISO();
   return `
     <section class="targets-section fade-in">
       <div class="milestones-header">
@@ -6278,7 +6298,7 @@ function renderTargetsSection() {
         <span class="milestones-count">${targets.length} 件${kindSummary ? ' · ' + kindSummary : ''}</span>
       </div>
       ${synthesized ? '<div class="tgt-synth-note">※ サーバの targets[] が未提供のため milestones + opportunities から暫定合成して表示しています (ms-157 の本番デプロイ後は server targets[] に自動で切り替わります)。</div>' : ''}
-      <div class="tgt-list">${renderTargetsOverview(targets, today)}</div>
+      <div class="tgt-list">${renderTargetsOverview(targets)}</div>
     </section>`;
 }
 
