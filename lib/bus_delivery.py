@@ -49,7 +49,15 @@ T1_SYSTEM_TIER = "T1-system"
 T1_SYSTEM_ISSUER = "beacon-system"
 
 # Downgrade reason tags (surfaced in the audit frame / inject note).
-DOWNGRADE_ALLOWLIST_MISS = ""  # allowlist miss carries no extra reason (parity)
+# e-5803 review (AX-9): DOWNGRADE_ALLOWLIST_MISS MUST stay the empty string. The
+# Claude hook attaches ``_downgrade_reason`` to an event only when the reason is
+# truthy (``if downgrade_reason:``); an allowlist miss historically carried NO
+# reason key, so a non-empty value here would change that hook's on-wire event
+# shape + audit frame (breaking parity with the pre-e-5803 inline logic). Do not
+# use ``reason == DOWNGRADE_ALLOWLIST_MISS`` for control flow (it aliases "unset");
+# branch on ``reason == DOWNGRADE_NON_SYSTEM_ENVELOPE`` and treat the else as
+# allowlist-miss. This constant is intentionally NOT in __all__.
+DOWNGRADE_ALLOWLIST_MISS = ""
 DOWNGRADE_NON_SYSTEM_ENVELOPE = "non-system-envelope"
 
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
@@ -137,6 +145,17 @@ def classify_auto_execute(
 
 def format_operation_trigger_imperative(events: list) -> str:
     """Render the "AUTONOMOUS ACTION" inject for opted-in operation-trigger events.
+
+    Scope boundary (e-5803 review / Maint-3): this module currently shares ONLY
+    the operation-trigger imperative. The trek-channel Level-3 imperatives
+    (trek-trigger / trek-progress-check / trek-task-review / trek-leader-digest)
+    still live as Claude-hook-only formatters in bin/beacon-bus-inbox-hook.py and
+    are NOT rendered by the Codex inbox hook. That is intentional for now (e-5803's
+    scope was operation-trigger + the downgrade gate), not an oversight — a Codex
+    session gets the generic event list for trek DMs, not the forced-invoke block.
+    Extending trek parity to Codex is deliberately deferred to a follow-up so this
+    module isn't a half-migrated home that invites duplicate trek formatters.
+
 
     Each event is an opted-in auto-execute event on the ``operation-trigger``
     channel (already passed ``classify_auto_execute`` as kept). The block tells

@@ -170,7 +170,17 @@ def main(argv: Optional[list] = None) -> int:
         )
         ss, crl = _import_modules(install_root)
         if ss is None:
-            sys.stdout.write("{}")
+            # e-5803 review (AX-3): this is the remote-STOP kill-switch surface.
+            # A silent no-op here means a STOP would go unnoticed every tool call
+            # while the autonomous loop keeps running. Fail LOUD instead: tell the
+            # session the halt-check is degraded so it pauses for human confirmation
+            # rather than assuming "no signal = safe to continue".
+            _emit_inject(
+                "⚠ BEACON HALT-CHECK DEGRADED: stop_signal module を import できず、"
+                "remote STOP (緊急停止) を検知できません。自律ループを続行せず、"
+                "停止要求が来ていないか人間に確認してから進めてください "
+                "(module 修復までこの警告が毎回出ます)。"
+            )
             return 0
 
         beacon_dir = str(root / ".beacon")

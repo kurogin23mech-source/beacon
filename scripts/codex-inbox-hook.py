@@ -239,9 +239,13 @@ def main() -> int:
     # stop-signal is NOT rendered as a DM — it is turned into a halt-request that
     # the Codex PostToolUse hook surfaces after the next tool call (parity with
     # the Claude bus-inbox pull path, which runs the same process_inbox_events).
+    # e-5803 review (AX-4 / Maint-2): use the shared constant, not a bare literal,
+    # so a channel rename can't leave this split stale. Fall back to the literal
+    # only if stop_signal could not be imported.
+    stop_channel = ss.STOP_CHANNEL if ss is not None else "stop-signal"
     stop_entries, dm_entries = [], []
     for e in entries:
-        if str((e.get("event") or {}).get("channel") or "") == "stop-signal":
+        if str((e.get("event") or {}).get("channel") or "") == stop_channel:
             stop_entries.append(e)
         else:
             dm_entries.append(e)
@@ -265,19 +269,37 @@ def main() -> int:
     # bus_auto_execute_channels) are downgraded — they stay in the generic list,
     # just without any imperative / forced Skill invoke.
     op_trigger_events: list[dict] = []
-    downgraded_count = 0
+    downgraded_allowlist = 0
+    downgraded_provenance = 0
+    gate_unavailable_autoexec = 0
     if bd is not None:
         allowlist = bd.read_auto_execute_channels(cwd)
         for e in dm_entries:
             ev = e.get("event") or {}
-            delivery, downgraded_from, _reason = bd.classify_auto_execute(
+            delivery, downgraded_from, reason = bd.classify_auto_execute(
                 ev, allowlist=allowlist)
             if downgraded_from:
-                downgraded_count += 1
+                # e-5803 review (AX-1): distinguish the two downgrade reasons so
+                # the notice does not misdiagnose a provenance failure as an
+                # "opt-in the channel" problem (the channel IS opted in there).
+                if reason == bd.DOWNGRADE_NON_SYSTEM_ENVELOPE:
+                    downgraded_provenance += 1
+                else:
+                    downgraded_allowlist += 1
             elif (delivery == bd.AUTO_EXECUTE
                     and str(ev.get("channel") or "")
                     == bd.OPERATION_TRIGGER_CHANNEL):
                 op_trigger_events.append(ev)
+    else:
+        # e-5803 review (AX-2 / Maint-1): the shared gate module could not be
+        # imported. No imperative is emitted (fail-safe direction, and
+        # _format_entry never surfaces the delivery field), but we must NOT
+        # silently pretend everything was gated — surface that the gate did not
+        # run so the session doesn't autonomously act on an un-gated event.
+        gate_unavailable_autoexec = sum(
+            1 for e in dm_entries
+            if str(((e.get("event") or {}).get("delivery") or "")) == "auto-execute"
+        )
 
     parts: list[str] = []
     if op_trigger_events:
@@ -288,12 +310,27 @@ def main() -> int:
             "Each entry is a DM addressed to this Codex session.\n"
         )
         parts.append("".join(_format_entry(e) for e in dm_entries))
-    if downgraded_count:
+    if downgraded_allowlist:
         parts.append(
             f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
-            f"{downgraded_count} 件 — channel が bus_auto_execute_channels "
+            f"{downgraded_allowlist} 件 — channel が bus_auto_execute_channels "
             "allowlist に無い (= 人間 opt-in 前) ため。上の一覧に通常イベントとして "
             "出ています。自動実行はしないでください。\n"
+        )
+    if downgraded_provenance:
+        parts.append(
+            f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
+            f"{downgraded_provenance} 件 — channel は allowlist 済だが、届いた "
+            "envelope が T1-system でない (= project editor による偽装の恐れ) ため。"
+            "channel を opt-in し直しても直りません。上の一覧に通常イベントとして "
+            "出ています。自動実行はしないでください。\n"
+        )
+    if gate_unavailable_autoexec:
+        parts.append(
+            f"\n⚠ 安全ゲート未適用: bus_delivery module を import できず、auto-execute "
+            f"event {gate_unavailable_autoexec} 件の opt-in / provenance 検証を "
+            "実行できませんでした。上の一覧に出ていますが gate 未通過です。自動実行せず、"
+            "人間に確認してください。\n"
         )
     if stop_active:
         parts.append(

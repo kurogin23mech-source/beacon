@@ -73,24 +73,29 @@ def test_opted_in_operation_trigger_emits_imperative(tmp_path):
     assert "安全側降格" not in ctx  # kept, not downgraded
 
 
-def test_non_opted_in_auto_execute_is_downgraded(tmp_path):
-    # bus_auto_execute_channels is empty → the operation-trigger auto-execute
-    # event is downgraded; no imperative, and a downgrade notice appears.
+def test_non_opted_in_auto_execute_is_downgraded_with_allowlist_reason(tmp_path):
+    # bus_auto_execute_channels is empty → allowlist-miss downgrade; no imperative,
+    # and the notice must name the allowlist / opt-in cause (not provenance).
     cwd = _setup(tmp_path, auto_execute_channels=[])
     _seed(cwd, _op_trigger_event(envelope=_T1_ENVELOPE))
     ctx = _run(cwd)
     assert "AUTONOMOUS ACTION" not in ctx
     assert "安全側降格" in ctx
+    assert "opt-in 前" in ctx
+    assert "T1-system" not in ctx  # e-5803 review AX-1: not a provenance failure
 
 
-def test_opted_in_but_no_system_envelope_is_downgraded(tmp_path):
-    # In the allowlist, but the persisted envelope is not T1-system → downgrade
-    # (a project editor must not be able to force a Skill invoke).
+def test_opted_in_but_no_system_envelope_downgraded_with_provenance_reason(tmp_path):
+    # In the allowlist, but the envelope is not T1-system → provenance downgrade.
+    # e-5803 review (AX-1): the notice must say envelope/provenance, NOT tell the
+    # AI to opt-in the channel (it already is opted in).
     cwd = _setup(tmp_path, auto_execute_channels=["operation-trigger"])
     _seed(cwd, _op_trigger_event(envelope=None))
     ctx = _run(cwd)
     assert "AUTONOMOUS ACTION" not in ctx
     assert "安全側降格" in ctx
+    assert "T1-system" in ctx  # provenance-specific wording
+    assert "opt-in 前" not in ctx
 
 
 def test_plain_dm_has_no_imperative_or_downgrade(tmp_path):
