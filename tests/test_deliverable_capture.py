@@ -117,6 +117,18 @@ def test_review_gated_seam_calls_capture():
     assert "capture_target_completion(data, ms" in src
 
 
+def test_server_api_seam_calls_capture():
+    """ms-161 e-5823 (maintainability review PR#694): the web/API done endpoint is a
+    THIRD completion seam that also reaches core.milestone_done — it must capture too,
+    else a milestone completed via the server silently skips the deliverable log."""
+    import os
+    server_file = os.path.join(os.path.dirname(__file__), "..", "server",
+                               "routers_projects.py")
+    src = _read_src(server_file)
+    assert "deliverable_capture" in src
+    assert "capture_target_completion(" in src
+
+
 def _read_src(path):
     with open(path, encoding="utf-8") as fh:
         return fh.read()

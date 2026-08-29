@@ -105,7 +105,8 @@ def _clean_source(raw) -> dict:
     dict carrying exactly those two keys."""
     if not isinstance(raw, dict):
         raise DeliverableValidationError(
-            "source is required and must be a {target_id, kind} object")
+            'source must be a dict with string keys "target_id" and "kind", '
+            'e.g. {"target_id": "ms-42", "kind": "milestone"}')
     return {
         "target_id": _clean_str(raw.get("target_id"), "source.target_id",
                                  required=True),
@@ -259,10 +260,14 @@ def read_deliverables(data: dict, *,
     """Read the root's deliverable-changelog, newest-append last (insertion
     order), with optional filters (受入条件1 read side).
 
-    - ``status`` — keep only entries with this lifecycle status (e.g.
-      ``STATUS_ACTIVE`` for the current-state view the map projector will use;
-      the active-only SUMMARY logic itself is e-5824). An unknown status value
-      raises, symmetric with append-time validation, so a filter typo is loud.
+    - ``status`` — keep only entries with this lifecycle status. An unknown status
+      value raises, symmetric with append-time validation, so a filter typo is loud.
+      NOTE: ``read_deliverables(status=STATUS_ACTIVE)`` is a RAW status filter — it
+      is NOT the current-state view. For "what the project can do now" use
+      ``active_deliverables`` instead: it additionally drops a predecessor that a
+      live successor supersedes (the ``supersedes`` exclusion), which a pure status
+      filter does not. Using this filter where you meant ``active_deliverables``
+      silently double-counts evolved capabilities.
     - ``category`` / ``source_target`` — keep only entries in that category / from
       that producing target.
 

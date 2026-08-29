@@ -12,13 +12,21 @@ occupation-free, and the occupation-aware capture is invoked one layer up at the
 CLI completion seams.
 
 Firing point (ms-161 e-5823). The SPEC wanted to ride ms-159's FR-6 domain events,
-but those are unbuilt (ms-159 is todo). Instead the capture is invoked at the two
-CLI seams that BOTH reach ``core.milestone_done`` — the direct ``milestone done``
-(``cmd_milestone.cmd_milestone_done``) and the review-gated ``target approve``
-(``cmd_target._apply_transition``) — so a milestone that reaches 完遂 through EITHER
-path records its produced value exactly once (the idempotent dedup below). When a
-domain-event bus later lands, these two call sites collapse behind one handler and
-this module's body is unchanged.
+but those are unbuilt (ms-159 is todo). Instead the capture is invoked at the THREE
+seams that reach ``core.milestone_done`` — a milestone reaches 完遂 through any of:
+
+  1. direct CLI ``milestone done`` — ``cmd_milestone.cmd_milestone_done``
+  2. review-gated CLI ``target approve`` — ``cmd_target._apply_transition``
+  3. the web/API done endpoint — ``server.routers_projects.done_milestone`` (the op)
+
+so the produced value is recorded exactly once regardless of path (the idempotent
+dedup below makes multiple seams safe). ``core.milestone_done`` itself CANNOT host
+the capture (it is a low module that ``occupation`` imports; this bridge sits above
+``occupation``, so wiring it into ``core`` would cycle), which is why each seam that
+CALLS ``milestone_done`` invokes the capture one layer up. When a domain-event bus
+later lands, these call sites collapse behind one handler and this module is
+unchanged. If a FOURTH completion path is added, it must call this too — the guard
+tests (``test_deliverable_capture``) assert each known seam references it.
 """
 from __future__ import annotations
 
