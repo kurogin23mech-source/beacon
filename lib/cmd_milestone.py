@@ -42,6 +42,7 @@ import core  # noqa: F401
 import work_model  # noqa: F401
 import occupation  # noqa: F401
 import root_target  # noqa: F401  # ms-153 e-5549: root-target assembler for status
+import deliverable_capture  # noqa: F401  # ms-161 e-5823: capture produced value on 完遂
 import transition_approval as _ta  # noqa: F401
 
 from commands_shared import (  # noqa: F401
@@ -785,6 +786,11 @@ def cmd_milestone_done():
         return
     ms = core.milestone_done(data, ms_id, reason=reason)
     _release_occupation_for_transition(data, ms_id, reason="done")
+    # ms-161 e-5823: record the milestone's produced value on the root
+    # deliverable-changelog (additive / idempotent; no-op if the class declares no
+    # deliverable or the value is already logged). Runs BEFORE save so the append
+    # persists in the same write.
+    deliverable_capture.capture_target_completion(data, ms, reason=reason)
     save_project(data, op={"op": "milestone_done", "ms_id": ms_id, "reason": reason})
     # ms-119 e-3911: this completion did NOT go through the review gate — fire a
     # review-due nudge (目的達成 toward the gate + 思想 if the MS has a SPEC).

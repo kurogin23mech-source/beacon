@@ -40,6 +40,7 @@ import transition_approval as _ta  # noqa: F401
 import target_descriptor as _td  # noqa: F401
 import target_engine as _te  # noqa: F401
 import occupation  # noqa: F401  (no cycle: occupation does not import cmd_target)
+import deliverable_capture  # noqa: F401  # ms-161 e-5823: capture produced value on 完遂
 
 from commands_shared import (  # noqa: F401
     _actor_str,
@@ -79,8 +80,12 @@ def _apply_transition(data: dict, target_id: str, new_state: str, *,
                                   reason=reason)
             _release_occupation_for_transition(data, target_id, reason="observe")
         else:
-            core.milestone_done(data, target_id, reason=reason)
+            ms = core.milestone_done(data, target_id, reason=reason)
             _release_occupation_for_transition(data, target_id, reason="done")
+            # ms-161 e-5823: capture the milestone's produced value on 完遂 through
+            # the review-gated path too (additive / idempotent — the dedup makes it
+            # safe alongside the direct `milestone done` seam). Caller saves.
+            deliverable_capture.capture_target_completion(data, ms, reason=reason)
     elif kind == "operation":
         core.operation_close(data, target_id)
     else:
