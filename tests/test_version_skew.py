@@ -65,6 +65,20 @@ def test_bare_version_strings_accepted():
     assert vs.has_skew("0.56.1", binaries) is True
 
 
+def test_prefixed_cli_version_vs_bare_hook_is_not_skew():
+    """ms-160 e-5800/parity: `beacon --version` prints `beacon 0.62.1` while the
+    hook stamps a bare `0.62.1`. Those are the SAME version — comparing them raw
+    used to report a phantom skew on every bcodex launch."""
+    assert vs.format_skew_report("beacon 0.62.1", [], hook_version="0.62.1") == []
+    assert vs.format_skew_report("beacon 0.62.1", [], daemon_version="0.62.1") == []
+
+
+def test_prefixed_cli_version_still_detects_real_skew():
+    """Normalization must not mask a genuine mismatch."""
+    report = vs.format_skew_report("beacon 0.62.1", [], hook_version="0.61.0")
+    assert report and "hook=0.61.0" in "\n".join(report)
+
+
 def test_fail_open_on_malformed_input():
     # Malformed rows / missing fields must not raise — they degrade to skipped.
     assert vs.format_skew_report("0.56.1", [None, {}, {"path": "/x"}, 42]) == []
