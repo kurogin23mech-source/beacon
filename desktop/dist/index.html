@@ -1837,6 +1837,35 @@ body::after {
 .entry-status-text.approved { color: #a3e635; }
 .entry-status-text.cancelled { color: var(--text-dim); }
 
+/* ms-162 e-5836 — cancelled work-item は取消線 + 「取消」タグ + 淡色で行に状態を出す
+   (営業側 .comm-row.cancelled と同じ L2 型)。取消線は説明文 (.entry-desc-text) だけ
+   に掛け、タグ・バッジには掛けない。 */
+.entry.cancelled { opacity: 0.75; }
+.entry.cancelled .entry-desc-text {
+  color: var(--text-dim);
+  text-decoration: line-through;
+  text-decoration-color: var(--border);
+}
+.entry-cancelled-tag {
+  display: inline-block;
+  font-size: 0.6rem;
+  color: var(--cancelled);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 3px;
+  padding: 0 4px;
+  margin-left: 6px;
+}
+/* ms-162 e-5836 — 基本 evidence: この work-item を閉じた commit のバッジ。
+   done 行の取消線が横切らないよう inline-block で装飾コンテキストを分ける。 */
+.entry-evidence {
+  display: inline-block;
+  font-size: 0.62rem;
+  font-family: monospace;
+  color: var(--done);
+  margin-left: 6px;
+  text-decoration: none;
+}
+
 .entry-date {
   font-size: 0.7rem;
   color: var(--text-dim);
@@ -4687,7 +4716,14 @@ function renderEntry(entry) {
     if (entry.status === 'cancelled' && !state.showCancelled.has(_currentMsId)) return '';
   }
 
-  const statusClass = entry.status === 'done' ? ' done' : '';
+  // ms-162 e-5836 — done は既存の淡色化、cancelled は取消線 + 「取消」タグで
+  // work-item 行そのものに状態を出す (営業側 .comm-row.cancelled と同じ L2 型)。
+  const statusClass = entry.status === 'done' ? ' done'
+    : entry.status === 'cancelled' ? ' cancelled' : '';
+  const cancelledTag = entry.status === 'cancelled'
+    ? `<span class="entry-cancelled-tag">取消</span>` : '';
+  // ms-162 e-5836 — 基本 evidence: この work-item を閉じた commit を行に出す。
+  const evidenceBadge = closingEvidenceBadge(entry);
   const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0, 7)}</span>` : '';
   const detail = entry.detail ? `<div class="entry-detail">${esc(entry.detail)}</div>` : '';
   let prMeta = '';
@@ -4761,7 +4797,7 @@ function renderEntry(entry) {
     <div class="entry entry-type-${entry.type}${statusClass}${toggleClass}" ${rowAction}>
       ${entryTypeBadge(entry.type)}
       <span class="entry-id">${entry.id}</span>
-      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${reasonMissing}${childBadge}${priorityBadge}${deadlineBadge}${infoBtn}</span>
+      <span class="entry-desc"><span class="entry-desc-text">${esc(entry.description)}</span>${cancelledTag}${evidenceBadge}${hash}${statusText}${reasonMissing}${childBadge}${priorityBadge}${deadlineBadge}${infoBtn}</span>
       ${authorSpan}
       <span class="entry-date">${entry.created_at || ''}</span>
       ${prMeta}
@@ -6511,6 +6547,34 @@ const _EVIDENCE_ENTRY_TYPES = new Set([
 ]);
 function entryDimension(type) {
   return _EVIDENCE_ENTRY_TYPES.has(type) ? 'evidence' : 'workitem';
+}
+
+// ms-162 e-5836 — 基本 evidence: 「どの commit がこの work-item を閉じたか」。
+// 完遂した work-item の下には、それを resolves した commit が子 entry として付く
+// (log --finalize --resolves の構造)。純関数で、entry 自身の子だけを見て閉じた
+// commit の短縮 hash を集める。budget / 構造化 evidence 3 値 (= L3 宣言駆動) は
+// 出さない — 「commit が閉じた」という基本 evidence のみ (L2 built-in 共有)。
+function closingCommits(entry) {
+  if (!entry || !Array.isArray(entry.entries)) return [];
+  const out = [];
+  for (const c of entry.entries) {
+    if (!c || c.type !== 'commit') continue;
+    const meta = c.meta || {};
+    if (!meta.hash) continue;
+    const res = meta.resolves;
+    const matches = Array.isArray(res) ? res.includes(entry.id) : res === entry.id;
+    if (matches) out.push(meta.hash.slice(0, 7));
+  }
+  return out;
+}
+
+// 行レベルの基本 evidence バッジ (portable 純関数)。閉じた commit が無ければ ''。
+// 展開しなくても「何がこの work-item を閉じたか」が一目で分かるようにする。
+function closingEvidenceBadge(entry) {
+  const hashes = closingCommits(entry);
+  if (!hashes.length) return '';
+  const label = hashes.map((h) => esc(h)).join(', ');
+  return `<span class="entry-evidence" title="この work-item を閉じた commit (基本 evidence)">✓ ${label}</span>`;
 }
 
 function renderMilestoneCard(ms, index) {

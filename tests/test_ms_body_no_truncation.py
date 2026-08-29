@@ -106,25 +106,38 @@ class TestMsEntriesRenderedWithoutSlice:
         self.src = _read(WEB_INDEX)
 
     def test_render_milestone_card_uses_full_entries_map(self):
-        """The expanded-body branch in `renderMilestoneCard` must call
-        `entries.map(renderEntry)` without a preceding `.slice(...)`
-        truncation (= no `entries.slice(0, N).map(...)`)."""
+        """The expanded-body branch in `renderMilestoneCard` must render every
+        entry without a head-N `.slice(...)` truncation.
+
+        ms-162 e-5833 split the detail into work-item / evidence / decision
+        sub-tabs, so the single `entries.map(renderEntry)` became a partition:
+        `wiEntries.map(renderEntry)` + `evEntries.map(renderEntry)`. Both halves
+        are mapped in full (workitem ∪ evidence covers every entry type), so the
+        e-2304 invariant (no rows silently lost) still holds — this test now
+        guards the partitioned form."""
         # Locate the renderMilestoneCard function body.
         start = self.src.find("function renderMilestoneCard(")
         assert start != -1, "renderMilestoneCard function missing"
         # Crude end-of-function detection — far enough to cover the body.
         body = self.src[start : start + 4000]
-        # Negative: no truncating slice on `entries`.
-        bad = re.search(r"entries\.slice\s*\(\s*0\s*,\s*\d+\s*\)", body)
+        # Negative: no truncating slice on any entries list (entries /
+        # wiEntries / evEntries).
+        bad = re.search(r"[Ee]ntries\.slice\s*\(\s*0\s*,\s*\d+\s*\)", body)
         assert bad is None, (
             "renderMilestoneCard truncates entries with "
             f"`{bad.group(0)}` — this is the failure mode e-2304 fixed. "
             "Render every entry; rely on outer page scroll."
         )
-        # Positive: full `.map(renderEntry)` is invoked on entries.
-        assert "entries.map(renderEntry)" in body, (
-            "renderMilestoneCard no longer maps over the full entries "
-            "array; large MS cards will silently lose rows."
+        # Positive: both dimensions are mapped in full. If a future edit drops
+        # one half (or re-collapses to a single map that omits a dimension),
+        # large MS cards would silently lose rows.
+        assert "wiEntries.map(renderEntry)" in body, (
+            "renderMilestoneCard no longer maps the full work-item entries; "
+            "large MS cards will silently lose work-item rows."
+        )
+        assert "evEntries.map(renderEntry)" in body, (
+            "renderMilestoneCard no longer maps the full evidence entries; "
+            "large MS cards will silently lose evidence rows."
         )
 
 
