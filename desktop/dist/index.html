@@ -5855,6 +5855,7 @@ function renderAccountModal(accId) {
       ${contactHtml}
       <div class="sm-sec">やり取り (Communication)</div>
       ${_renderCommunications(a)}
+      ${renderDecisionLog(decisionsForTarget(state.decisions, a))}
     </div>
   </div>`;
 }
@@ -5894,6 +5895,7 @@ function renderOpportunityModal(oppId) {
       ${_renderOppActivities(o)}
       ${_renderMeetings(o)}
       ${_renderCommunications(o)}
+      ${renderDecisionLog(decisionsForTarget(state.decisions, o))}
     </div>
   </div>`;
 }
@@ -6049,13 +6051,18 @@ const DECIDED_BY_LABEL = {
   'programmatic': '機械的',
 };
 
-// Select the decision events that belong to a target. A decision links to a
-// target either directly (related.target_id === ms.id) or through a task that
-// lives in the milestone (related.task_id matches one of its entry ids). The
-// task-id path lets task-scoped decisions (e.g. task-done 判定) surface on the
-// owning target even when the writer only stamped related.task_id.
-function decisionsForTarget(allDecisions, ms) {
-  if (!Array.isArray(allDecisions) || !allDecisions.length || !ms) return [];
+// Select the decision events that belong to a target — works for ANY target
+// class (milestone / opportunity / account), which is what makes it a shared
+// L1/L2 dimension (ms-162 §方針2b: factor the shared frame out, compose into
+// each per-class detail view, don't fold render paths). A decision links to a
+// target either directly (related.target_id === target.id, the cross-class
+// signal) or through a task that lives under it (related.task_id matches one of
+// its entry ids — the milestone path; opportunity/account carry no entries so
+// they fall back to the target_id match). The task-id path lets task-scoped
+// decisions (e.g. task-done 判定) surface on the owning target even when the
+// writer only stamped related.task_id.
+function decisionsForTarget(allDecisions, target) {
+  if (!Array.isArray(allDecisions) || !allDecisions.length || !target) return [];
   const taskIds = new Set();
   const collect = (entries) => {
     for (const e of entries || []) {
@@ -6063,10 +6070,10 @@ function decisionsForTarget(allDecisions, ms) {
       if (e && e.entries && e.entries.length) collect(e.entries);
     }
   };
-  collect(ms.entries);
+  collect(target.entries);
   const rows = allDecisions.filter((d) => {
     const rel = (d && d.related) || {};
-    if (rel.target_id && rel.target_id === ms.id) return true;
+    if (rel.target_id && rel.target_id === target.id) return true;
     if (rel.task_id && taskIds.has(rel.task_id)) return true;
     return false;
   });
@@ -6122,6 +6129,18 @@ function renderDecisionLog(decisions) {
       <div class="dec-log-label">決定ログ <span class="dec-count">${decisions.length}</span></div>
       ${decisions.map(renderDecisionEvent).join('')}
     </div>`;
+}
+
+// ms-162 e-5833 — lazy-load the project-wide decision stream once, on the first
+// open of ANY target detail (milestone card / opportunity modal / account
+// modal). Idempotent: guarded by state.decisions === null so repeated opens
+// don't re-fetch. Kept separate from the pure render 部品 above (this one is the
+// impure loader trigger; it routes through dataSource, never the fetch helper).
+function ensureDecisionsLoaded() {
+  if (state.decisions === null && !state.decisionsLoading) {
+    state.decisionsLoading = true;
+    dataSource.loadDecisions().then(() => { state.decisionsLoading = false; render(); });
+  }
 }
 
 function renderMilestoneCard(ms, index) {
@@ -9420,11 +9439,8 @@ function handleCommonAction(action, el) {
           dataSource.loadRelatedTreks('milestone', msId).then(() => render());
         }
         // ms-162 e-5833: lazy-load the (project-wide) decision stream once, on
-        // the first MS expand. Filtered per-target at render time.
-        if (state.decisions === null && !state.decisionsLoading) {
-          state.decisionsLoading = true;
-          dataSource.loadDecisions().then(() => { state.decisionsLoading = false; render(); });
-        }
+        // the first target detail open. Filtered per-target at render time.
+        ensureDecisionsLoaded();
       }
       return true;
     }
@@ -9572,12 +9588,12 @@ function handleCommonAction(action, el) {
     case 'sales-toggle-hide-done':
       state.salesHideDone = !state.salesHideDone; render(); return true;
     case 'open-account':
-      state.openAccountId = el.dataset.accId; render(); return true;
+      state.openAccountId = el.dataset.accId; ensureDecisionsLoaded(); render(); return true;
     case 'close-account':
       state.openAccountId = null; render(); return true;
     // ms-106 fb1/fb2: opportunity modal + phase filter (dev の filter-bar と同型)
     case 'open-opp':
-      state.openOppId = el.dataset.oppId; render(); return true;
+      state.openOppId = el.dataset.oppId; ensureDecisionsLoaded(); render(); return true;
     case 'close-opp':
       state.openOppId = null; render(); return true;
     case 'opp-filter-phase': {
