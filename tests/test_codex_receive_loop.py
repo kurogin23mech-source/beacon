@@ -19,6 +19,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import codex_receive_loop as crl
+import bus_protocol as bp
 
 
 # ------------------------------------------------------------------ #
@@ -610,3 +611,87 @@ class TestShouldPersistKept:
         # Only here is the autonomous reply the surfacing path, so the inbox
         # fallback is redundant (= preserve the pre-bug behavior).
         assert crl.should_persist_kept(has_app_server=True, armed=True) is False
+
+
+# ------------------------------------------------------------------ #
+# merge_allowed_channels (= channel/bus.mjs ALLOWED_CHANNELS parity, e-5804)
+# ------------------------------------------------------------------ #
+
+
+class TestMergeAllowedChannels:
+    def test_defaults_only_when_no_env_no_project(self, tmp_path):
+        got = crl.merge_allowed_channels(str(tmp_path), environ={})
+        assert got == bp.DEFAULT_ALLOWED_CHANNELS
+
+    def test_env_adds_channels_and_dedupes(self, tmp_path):
+        env = {"BEACON_CHANNEL_ALLOWLIST": "dm, custom-a , custom-b"}
+        got = crl.merge_allowed_channels(str(tmp_path), environ=env)
+        assert "custom-a" in got and "custom-b" in got
+        assert got.count("dm") == 1  # dm is a default → not duplicated
+        for ch in bp.DEFAULT_ALLOWED_CHANNELS:
+            assert ch in got  # defaults preserved
+
+    def test_project_bus_auto_execute_channels_merged(self, tmp_path):
+        beacon = tmp_path / ".beacon"
+        beacon.mkdir()
+        (beacon / "project.json").write_text(json.dumps(
+            {"bus_auto_execute_channels": ["operation-trigger", "proj-x"]}))
+        got = crl.merge_allowed_channels(str(tmp_path), environ={})
+        assert "proj-x" in got  # operation-trigger is already a default
+
+    def test_malformed_project_json_is_ignored(self, tmp_path):
+        beacon = tmp_path / ".beacon"
+        beacon.mkdir()
+        (beacon / "project.json").write_text("{ not valid json")
+        got = crl.merge_allowed_channels(str(tmp_path), environ={})
+        assert got == bp.DEFAULT_ALLOWED_CHANNELS
+
+    def test_superset_defaults_kept_even_if_env_omits_them(self, tmp_path):
+        # A session must not be able to opt OUT of the protocol defaults; env
+        # only ADDs (same posture as the stop-signal exemption).
+        got = crl.merge_allowed_channels(
+            str(tmp_path), environ={"BEACON_CHANNEL_ALLOWLIST": "only-this"})
+        for ch in bp.DEFAULT_ALLOWED_CHANNELS:
+            assert ch in got
+        assert "only-this" in got
+
+    def test_env_and_project_both_merged(self, tmp_path):
+        beacon = tmp_path / ".beacon"
+        beacon.mkdir()
+        (beacon / "project.json").write_text(json.dumps(
+            {"bus_auto_execute_channels": ["from-project"]}))
+        got = crl.merge_allowed_channels(
+            str(tmp_path), environ={"BEACON_CHANNEL_ALLOWLIST": "from-env"})
+        assert "from-env" in got and "from-project" in got
+
+
+class TestPollHonorsMergedAllowlist:
+    def _event(self, channel):
+        return {
+            "event_id": f"evt-{channel}",
+            "created_at": "2026-06-25T11:00:00Z",
+            "channel": channel,
+            "sender_session_id": "other-sid",
+            "payload": {"text": "hi"},  # no recipient stamp (broadcast-style)
+        }
+
+    def test_project_opted_channel_is_kept(self, tmp_path):
+        api = _FakeApi()
+        api.get_returns = [[self._event("proj-x")]]
+        allowed = crl.merge_allowed_channels(
+            str(tmp_path), environ={"BEACON_CHANNEL_ALLOWLIST": "proj-x"})
+        _latest, n = crl.poll_inbox_once(
+            api, project_id="p", session_id="codex-1-abc",
+            since="", cwd=str(tmp_path), allowed_channels=allowed,
+        )
+        assert n == 1
+        assert (tmp_path / ".beacon" / "codex" / "inbox" / "evt-proj-x.json").is_file()
+
+    def test_channel_outside_allowlist_dropped(self, tmp_path):
+        api = _FakeApi()
+        api.get_returns = [[self._event("random-ch")]]
+        _latest, n = crl.poll_inbox_once(
+            api, project_id="p", session_id="codex-1-abc",
+            since="", cwd=str(tmp_path),  # default allowlist, random-ch not in it
+        )
+        assert n == 0
