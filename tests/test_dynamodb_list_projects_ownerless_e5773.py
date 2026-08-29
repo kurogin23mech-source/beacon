@@ -17,6 +17,12 @@ import sys
 
 import pytest
 
+# ``dynamodb_client`` imports boto3 at module load; CI does not install boto3
+# (it is only needed for the AWS/DynamoDB backend). Skip the whole module when
+# boto3 is absent rather than erroring the run. The other DynamoDB test modules
+# gate on moto the same way (pytest.importorskip).
+pytest.importorskip("boto3")
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 
 
