@@ -10727,6 +10727,11 @@ async function selectProject(projectId) {
           pendingEntries.push(fetchMilestoneEntries(ms.id, { suppressRender: true }));
         }
       }
+      // ms-162 e-5833 — auto-expanded (in_progress) milestones open WITHOUT a
+      // toggle-ms click, so the click-path lazy-load never fires for them and
+      // their decision-log stayed blank. Load the decision stream here too so
+      // any expanded target (auto or click) can render its 決定ログ.
+      ensureDecisionsLoaded();
       render();
       if (pendingEntries.length > 0) {
         Promise.allSettled(pendingEntries).then(() => render());
