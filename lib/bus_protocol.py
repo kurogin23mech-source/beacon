@@ -52,6 +52,15 @@ DEFAULT_ALLOWED_CHANNELS = (
     "trek-task-review",
 )
 
+# ms-160 e-5800: the remote-STOP kill-switch channel. It is deliberately NOT in
+# DEFAULT_ALLOWED_CHANNELS (which is an opt-in list a project can override): a
+# session must never be able to opt OUT of being stoppable. filter_event always
+# keeps this channel (after the recipient filters), so a stop-signal reaches the
+# receive loop → gets turned into a halt-request → surfaces after the next tool
+# call, exactly like the Claude bus-inbox pull path. Mirror of
+# lib/stop_signal.STOP_CHANNEL (kept as a literal here to avoid an import cycle).
+STOP_SIGNAL_CHANNEL = "stop-signal"
+
 
 # ------------------------------------------------------------------ #
 # Heartbeat (= channel/bus-heartbeat.mjs::buildHeartbeatBody mirror)
@@ -171,6 +180,15 @@ def filter_event(event: dict, config: FilterConfig) -> str:
     if is_dm and not intended:
         return FILTER_DROP_DM_UNADDRESSED
 
+    # ms-160 e-5800: the remote-STOP kill-switch is exempt from the opt-in
+    # channel allowlist — a session must not be able to opt OUT of being
+    # stoppable. It still passed the recipient filters above (a stop addressed
+    # to another session was already dropped by Filter 2a), so we only bypass
+    # Filter 3 here. The receive loop persists it; the inbox hook turns it into
+    # a halt-request rather than rendering it as a DM.
+    if channel == STOP_SIGNAL_CHANNEL:
+        return FILTER_KEEP
+
     # Filter 3: channel allowlist. Anything outside the configured
     # channel list (= e.g. test broadcasts) is dropped.
     if channel and channel not in config.allowed_channels:
@@ -202,6 +220,7 @@ __all__ = [
     "ACK_STAGE_DELIVERED",
     "ACK_STAGE_OPENED",
     "DEFAULT_ALLOWED_CHANNELS",
+    "STOP_SIGNAL_CHANNEL",
     "FILTER_DROP_CHANNEL",
     "FILTER_DROP_DM_UNADDRESSED",
     "FILTER_DROP_RECIPIENT_MISMATCH",

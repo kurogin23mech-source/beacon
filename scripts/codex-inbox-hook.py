@@ -60,7 +60,11 @@ def _import_modules(install_root: Path):
         import codex_session as cs  # noqa: E402
     except Exception:
         cs = None
-    return crl, ac, cs
+    try:
+        import stop_signal as ss  # noqa: E402  (ms-160 e-5800)
+    except Exception:
+        ss = None
+    return crl, ac, cs, ss
 
 
 def _resolve_codex_session(cs_module, cwd: str):
@@ -214,7 +218,7 @@ def main() -> int:
 
     install_root = Path(args.install_root or Path(__file__).resolve().parent.parent)
     cwd = args.cwd or os.getcwd()
-    crl, ac, cs = _import_modules(install_root)
+    crl, ac, cs, ss = _import_modules(install_root)
 
     entries = crl.list_inbox_events(cwd=cwd)
     if not entries:
@@ -223,19 +227,55 @@ def main() -> int:
         print(json.dumps({}))
         return 0
 
-    header = (
-        f"BEACON BUS INBOX — {len(entries)} new event(s)\n"
-        "Each entry is a DM addressed to this Codex session.\n"
-    )
-    body = "".join(_format_entry(e) for e in entries)
-    additional = header + body
+    # Resolve the session up-front — needed both for the stop-signal processor
+    # and the archive/opened-ack below.
+    session_id, project_id = _resolve_codex_session(cs, cwd)
+
+    # ms-160 e-5800: split remote-STOP kill-switch events from normal DMs. A
+    # stop-signal is NOT rendered as a DM — it is turned into a halt-request that
+    # the Codex PostToolUse hook surfaces after the next tool call (parity with
+    # the Claude bus-inbox pull path, which runs the same process_inbox_events).
+    stop_entries, dm_entries = [], []
+    for e in entries:
+        if str((e.get("event") or {}).get("channel") or "") == "stop-signal":
+            stop_entries.append(e)
+        else:
+            dm_entries.append(e)
+
+    stop_active = False
+    if stop_entries and ss is not None and session_id:
+        try:
+            halt = ss.process_inbox_events(
+                [e["event"] for e in stop_entries],
+                session_id=session_id,
+                beacon_dir=str(Path(cwd) / ".beacon"),
+            )
+            stop_active = halt is not None
+        except Exception:
+            stop_active = False  # never let a broken processor block the hook
+
+    parts: list[str] = []
+    if dm_entries:
+        parts.append(
+            f"BEACON BUS INBOX — {len(dm_entries)} new event(s)\n"
+            "Each entry is a DM addressed to this Codex session.\n"
+        )
+        parts.append("".join(_format_entry(e) for e in dm_entries))
+    if stop_active:
+        parts.append(
+            "\n⚠ STOP signal received (remote kill-switch). Finish the current "
+            "step, persist in-progress work, then halt — do not start new tool "
+            "calls until the user clears it with `beacon resume`. Full details "
+            "surface again after the next tool call.\n"
+        )
+    additional = "".join(parts)
 
     if not args.no_archive:
         # The archive call is also where the ``opened`` ack fires
         # (= e-2502 SPEC §2-B closing drift #3). Best-effort: if we
         # can't find the session record or build an API client, the
-        # event still archives but the ack is skipped.
-        session_id, project_id = _resolve_codex_session(cs, cwd)
+        # event still archives but the ack is skipped. Stop-signal events
+        # archive too (idempotent: the halt-request is already on disk).
         api = _build_api_client(ac, cwd)
         for e in entries:
             crl.archive_inbox_event(
@@ -246,6 +286,9 @@ def main() -> int:
                 recipient_session_id=session_id,
             )
 
+    if not additional:
+        print(json.dumps({}))
+        return 0
     print(json.dumps(_hook_output(additional), ensure_ascii=False))
     return 0
 
