@@ -299,6 +299,12 @@ from cmd_retro import (  # noqa: F401
 )
 # ms-155 e-5602: deliverable family (produced-value projection resolver + list).
 from cmd_deliverable import cmd_deliverable_list  # noqa: F401
+# ms-161 e-5902/e-5903: deliverable-changelog curation surface (add/retire/
+# supersede) + derived-map render (map).
+from cmd_deliverable import (  # noqa: F401
+    cmd_deliverable_add, cmd_deliverable_retire,
+    cmd_deliverable_supersede, cmd_deliverable_map,
+)
 
 # ms-127 e-4815: deploy family moved to cmd_deploy.py, plus the application-map
 # applicability helper promoted to commands_shared. Re-export _application_map_applies
@@ -10447,6 +10453,11 @@ if __name__ == "__main__":
         "retro_done": cmd_retro_done,
         "retro_default_since": cmd_retro_default_since,
         "deliverable_list": cmd_deliverable_list,   # ms-155 e-5602
+        # ms-161 e-5902/e-5903: changelog curation + derived-map render.
+        "deliverable_add": cmd_deliverable_add,
+        "deliverable_retire": cmd_deliverable_retire,
+        "deliverable_supersede": cmd_deliverable_supersede,
+        "deliverable_map": cmd_deliverable_map,
         "trigger_fire": cmd_trigger_fire,
         "trigger_check": cmd_trigger_check,
         "trigger_tick": cmd_trigger_tick,

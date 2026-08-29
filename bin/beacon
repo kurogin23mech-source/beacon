@@ -3347,9 +3347,13 @@ EOF
     deliverable|deliverables)
         case "${2:-}" in
             list|ls) shift 2; cmd_deliverable_list "$@" ;;
-            "") echo "Usage: beacon deliverable list [--resolve] [--json]" >&2; exit 1 ;;
+            add) shift 2; cmd_deliverable_add "$@" ;;
+            retire) shift 2; cmd_deliverable_retire "$@" ;;
+            supersede) shift 2; cmd_deliverable_supersede "$@" ;;
+            map) shift 2; cmd_deliverable_map "$@" ;;
+            "") echo "Usage: beacon deliverable {list|add|retire|supersede|map} [...]" >&2; exit 1 ;;
             *)  echo "Unknown deliverable subcommand: ${2}" >&2
-                echo "Usage: beacon deliverable list [--resolve] [--json]" >&2
+                echo "Usage: beacon deliverable {list|add|retire|supersede|map} [...]" >&2
                 exit 1 ;;
         esac
         ;;

@@ -359,6 +359,13 @@ ALLOW_SUBVERB_MISSING_FROM_PYTHON: set[str] = {
     #  their parity.)
     # -- dev/ops verbs, bash-only for now (方針3, not on the hot Windows path) --
     "bus auto-execute",
+    # ms-161 e-5902/e-5903: deliverable-changelog curation + derived-map render.
+    # bash-only for now (dev-facing 記帳/整地 verbs, not on the hot Windows path);
+    # dispatch.py parity = follow-up, same precedent as the ops verbs below. The
+    # checker canonicalises this noun to its plural alias ("deliverables"), so the
+    # allowlist keys match that form.
+    "deliverables add", "deliverables retire", "deliverables supersede",
+    "deliverables map",
     "channel opt-in", "channel opt-out", "channel opt_in", "channel opt_out",
     "channel status", "channel uninstall",
     "claim view",

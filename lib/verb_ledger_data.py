@@ -160,6 +160,16 @@ VERB_LEDGER = {
     "doc_add": {"cls": "R", "secondary": ["C"], "note": "台帳追記(R)/対話(C)"},
     "deliverable_list": {"cls": "Q", "secondary": [],
                          "note": "produced-value 投影の read-only(Q) — ms-155 e-5602"},
+    # ms-161 e-5902/e-5903: changelog curation。append/retire/supersede は監査痕跡
+    # を残す append-only 記帳(R)、map は導出マップの read-only render(Q)。
+    "deliverable_add": {"cls": "R", "secondary": [],
+                        "note": "root 成果ログに surface 粒度 entry を記帳(R) — ms-161 e-5902"},
+    "deliverable_retire": {"cls": "R", "secondary": [],
+                           "note": "成果 entry を retire=現在地マップから脱落(R、監査痕跡残る) — ms-161 e-5903"},
+    "deliverable_supersede": {"cls": "R", "secondary": [],
+                              "note": "成果 entry を後継で置換(足す＆消すを atomic に、R) — ms-161 e-5903"},
+    "deliverable_map": {"cls": "Q", "secondary": [],
+                        "note": "成果ログ導出の現在地マップを render(Q) — ms-161 e-5851"},
     "doc_delete": {"cls": "B", "secondary": ["C"], "note": ""},
     "doc_history": {"cls": "Q", "secondary": [], "note": ""},
     "doc_image_upload": {"cls": "R", "secondary": ["C"], "note": ""},
