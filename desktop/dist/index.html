@@ -1425,6 +1425,95 @@ body::after {
   margin-bottom: 2px;
 }
 
+/* ms-162 e-5833 — decision-log panel (ms-154 decision-arm stream) */
+.dec-log {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.dec-log-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #c084fc;
+  margin-bottom: 6px;
+}
+.dec-count {
+  display: inline-block;
+  min-width: 16px;
+  padding: 0 5px;
+  margin-left: 4px;
+  border-radius: 8px;
+  background: rgba(192,132,252,0.18);
+  color: #c084fc;
+  font-size: 10px;
+  text-align: center;
+}
+.dec-event {
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  border-left: 2px solid rgba(192,132,252,0.45);
+  background: rgba(192,132,252,0.04);
+  border-radius: 0 4px 4px 0;
+}
+.dec-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.dec-kind {
+  font-size: 10px;
+  font-weight: 600;
+  color: #c084fc;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.dec-by {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(148,163,184,0.15);
+  color: #94a3b8;
+}
+/* autonomous-AI = 人間未確認の単独判断 = 最も監査価値が高い。目立たせる。 */
+.dec-by-autonomous-AI {
+  background: rgba(251,191,36,0.16);
+  color: #fbbf24;
+  font-weight: 600;
+}
+.dec-by-AI-proposed-human-chose { background: rgba(96,165,250,0.15); color: #60a5fa; }
+.dec-by-human-delegated { background: rgba(163,230,53,0.15); color: #a3e635; }
+.dec-when { font-size: 10px; color: #64748b; }
+.dec-id { font-size: 10px; color: #475569; margin-left: auto; font-family: monospace; }
+.dec-what { font-size: 12px; color: #e2e8f0; line-height: 1.4; }
+.dec-why, .dec-context, .dec-evidence, .dec-related {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 3px;
+  line-height: 1.4;
+}
+.dec-flabel {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+  margin-right: 5px;
+}
+.dec-ev-link {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(148,163,184,0.1);
+  color: #cbd5e1;
+  font-family: monospace;
+  font-size: 10px;
+}
+
 /* Entry detail button */
 .entry-info-btn {
   display: inline-flex;
@@ -5945,6 +6034,96 @@ function countTasksRecursive(entries) {
   return { total, done };
 }
 
+// ms-162 e-5833 — decision-log (portable render 部品).
+// PURE functions: given the decision stream + a target, they select and render
+// the ms-154 decision-arm events for that target. They read only their
+// arguments — no state, no fetch primitive — so the ms-159 shell can reuse
+// them verbatim (data plumbing stays the shell's job; these only render).
+
+// decided_by 語彙 → 読み手向けラベル (decision_vocab.DECIDED_BY と対応)。
+// autonomous-AI が最も監査価値が高い (= 人間が見ていない AI 単独判断) ので強調する。
+const DECIDED_BY_LABEL = {
+  'autonomous-AI': 'AI単独 (人間未確認)',
+  'AI-proposed-human-chose': 'AI提案→人間選択',
+  'human-delegated': '人間委譲',
+  'programmatic': '機械的',
+};
+
+// Select the decision events that belong to a target. A decision links to a
+// target either directly (related.target_id === ms.id) or through a task that
+// lives in the milestone (related.task_id matches one of its entry ids). The
+// task-id path lets task-scoped decisions (e.g. task-done 判定) surface on the
+// owning target even when the writer only stamped related.task_id.
+function decisionsForTarget(allDecisions, ms) {
+  if (!Array.isArray(allDecisions) || !allDecisions.length || !ms) return [];
+  const taskIds = new Set();
+  const collect = (entries) => {
+    for (const e of entries || []) {
+      if (e && e.id) taskIds.add(e.id);
+      if (e && e.entries && e.entries.length) collect(e.entries);
+    }
+  };
+  collect(ms.entries);
+  const rows = allDecisions.filter((d) => {
+    const rel = (d && d.related) || {};
+    if (rel.target_id && rel.target_id === ms.id) return true;
+    if (rel.task_id && taskIds.has(rel.task_id)) return true;
+    return false;
+  });
+  // newest first — a target detail reads "what was just decided" top-down.
+  rows.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+  return rows;
+}
+
+// Render one decision-arm event: what / why / 誰が / 根拠 / 関連。
+function renderDecisionEvent(d) {
+  if (!d) return '';
+  const kind = d.kind ? `<span class="dec-kind">${esc(d.kind)}</span>` : '';
+  const by = d.decided_by
+    ? `<span class="dec-by dec-by-${esc(d.decided_by)}">${esc(DECIDED_BY_LABEL[d.decided_by] || d.decided_by)}</span>`
+    : '';
+  const when = d.created_at
+    ? `<span class="dec-when">${esc(String(d.created_at).slice(0, 10))}</span>`
+    : '';
+  const what = d.decision ? `<div class="dec-what">${esc(d.decision)}</div>` : '';
+  const why = d.rationale
+    ? `<div class="dec-why"><span class="dec-flabel">なぜ</span>${esc(d.rationale)}</div>`
+    : '';
+  const ctx = d.context
+    ? `<div class="dec-context"><span class="dec-flabel">背景</span>${esc(d.context)}</div>`
+    : '';
+  const ev = (Array.isArray(d.evidence) && d.evidence.length)
+    ? `<div class="dec-evidence"><span class="dec-flabel">根拠</span>${d.evidence.map((x) => `<span class="dec-ev-link">${esc(x)}</span>`).join('')}</div>`
+    : '';
+  const rel = (d && d.related) || {};
+  const relParts = [];
+  if (rel.task_id) relParts.push(`task ${esc(rel.task_id)}`);
+  if (rel.target_id) relParts.push(`target ${esc(rel.target_id)}`);
+  if (rel.trek_id) relParts.push(`trek ${esc(rel.trek_id)}`);
+  if (rel.event_id) relParts.push(`event ${esc(rel.event_id)}`);
+  const related = relParts.length
+    ? `<div class="dec-related"><span class="dec-flabel">関連</span>${relParts.join(' · ')}</div>`
+    : '';
+  const did = d.decision_id ? `<span class="dec-id">${esc(d.decision_id)}</span>` : '';
+  return `
+    <div class="dec-event">
+      <div class="dec-head">${kind}${by}${when}${did}</div>
+      ${what}${why}${ctx}${ev}${related}
+    </div>`;
+}
+
+// Render the decision-log panel for a target. Returns '' when there are no
+// decisions, so a target with none shows nothing extra (produced-but-invisible
+// stays quiet; only real decision streams take up space).
+function renderDecisionLog(decisions) {
+  if (!Array.isArray(decisions) || !decisions.length) return '';
+  return `
+    <div class="dec-log">
+      <div class="dec-log-label">決定ログ <span class="dec-count">${decisions.length}</span></div>
+      ${decisions.map(renderDecisionEvent).join('')}
+    </div>`;
+}
+
 function renderMilestoneCard(ms, index) {
   const isExpanded = state.expanded.has(ms.id);
   const entries = ms.entries || [];
@@ -6003,6 +6182,7 @@ function renderMilestoneCard(ms, index) {
         ${msObjective}${msAc}
         ${ms.description ? `<div class="ms-description">${esc(ms.description)}</div>` : ''}
         ${renderedEntries}
+        ${renderDecisionLog(decisionsForTarget(state.decisions, ms))}
         ${renderRelatedTreksWidget('milestone', ms.id)}
       </div>
     `;
@@ -9238,6 +9418,12 @@ function handleCommonAction(action, el) {
         // ms-69 / e-1664: lazy-load related treks on first expand.
         if (state.relatedTreks['ms:' + msId] === undefined) {
           dataSource.loadRelatedTreks('milestone', msId).then(() => render());
+        }
+        // ms-162 e-5833: lazy-load the (project-wide) decision stream once, on
+        // the first MS expand. Filtered per-target at render time.
+        if (state.decisions === null && !state.decisionsLoading) {
+          state.decisionsLoading = true;
+          dataSource.loadDecisions().then(() => { state.decisionsLoading = false; render(); });
         }
       }
       return true;
