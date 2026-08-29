@@ -4599,13 +4599,11 @@ function renderMainContent() {
   const salesTabBar = `
       <button class="tab-btn ${effectiveTab === 'opportunities' ? 'active' : ''}" data-action="switch-tab" data-tab="opportunities">Opportunity</button>
       <button class="tab-btn ${effectiveTab === 'account' ? 'active' : ''}" data-action="switch-tab" data-tab="account">Account</button>
-      <button class="tab-btn ${effectiveTab === 'targets' ? 'active' : ''}" data-action="switch-tab" data-tab="targets">Targets</button>
       <button class="tab-btn ${effectiveTab === 'acquisition' ? 'active' : ''}" data-action="switch-tab" data-tab="acquisition">Acquisition</button>
       <button class="tab-btn ${effectiveTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${effectiveTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Session</button>`;
   const devTabBar = `
       <button class="tab-btn ${effectiveTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
-      <button class="tab-btn ${effectiveTab === 'targets' ? 'active' : ''}" data-action="switch-tab" data-tab="targets">Targets</button>
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
       <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
@@ -4618,7 +4616,6 @@ function renderMainContent() {
     <div class="tab-bar fade-in stagger-1">${isSales ? salesTabBar : devTabBar}</div>
     ${effectiveTab === 'opportunities' ? renderOpportunitiesSection() : ''}
     ${effectiveTab === 'account' ? renderAccountsSection() : ''}
-    ${effectiveTab === 'targets' ? renderTargetsSection() : ''}
     ${effectiveTab === 'acquisition' ? renderAcquisitionsSection() : ''}
     ${isSales && state.openAccountId ? renderAccountModal(state.openAccountId) : ''}
     ${isSales && state.openOppId ? renderOpportunityModal(state.openOppId) : ''}
@@ -6244,6 +6241,12 @@ function ensureDecisionsLoaded() {
 // board paradigm (正準状態 running/awaiting_human / 受信箱 / work-unit 抽象):
 // that is ms-159 の守備範囲で、踏み込むと Claude Code の内部表現に密結合する
 // (親 §方針2b の念押し)。純関数で status --json 由来の project だけを読む。
+//
+// ⚠ 現在 UI には配線していない (user 判断 2026-08-29): 「Targets」タブは Target
+// (抽象クラス) を Milestone (具象) の兄弟に平置きする category error だったので
+// 撤去した。この portable 部品は ms-159 の board / 将来の複数 target-class 横断
+// ビュー (= sales の Opportunity+Account union 等) で再利用するために温存する。
+// 消さないこと。再配線する時は「抽象を具象の兄弟に並べない」原則を守る。
 
 // True when the server已に投影した targets[] を持っている (ms-157)。
 function hasServerTargets(project) {
