@@ -148,3 +148,122 @@ class TestAdminOwnerlessEndpoint:
             "endpoint must gate on _require_admin so stolen user tokens "
             "cannot enumerate ownerless projects"
         )
+
+
+# ---------------------------------------------------------------------------
+# ms-158 / e-5757 — the direct-by-id role check must ALSO deny ownerless
+# projects. The tests above pin the 2026-07-03 *listing* fix, but `_get_role`
+# (the role primitive behind every REST/WS endpoint) still fell through to
+# "editor" for any signed-in user hitting an ownerless project by id. A
+# stranger who knew or guessed a project_id could therefore read and write it,
+# even though it never showed up in their listing. These behavioral tests pin
+# the close: deny by default here too, members unaffected.
+# ---------------------------------------------------------------------------
+
+class TestGetRoleOwnerlessFallOpenRemoved:
+    """Static guard: the fail-open migration relic must not resurface."""
+
+    def setup_method(self, _method):
+        self.src = _read(APP_PY)
+
+    def test_migration_comment_removed(self):
+        assert "Migration: ownerless projects are accessible to all" not in self.src, (
+            "the fail-open ownerless->editor fallthrough comment must be gone "
+            "(ms-158 / e-5757)"
+        )
+
+    def test_get_role_has_no_ownerless_editor_grant(self):
+        m = re.search(
+            r"def _get_role\([^)]*\)[^:]*:(.*?)\n\n\ndef ",
+            self.src,
+            re.DOTALL,
+        )
+        assert m, "could not locate _get_role body"
+        body = m.group(1)
+        # No branch may return "editor" for a missing/empty owner.
+        assert not re.search(
+            r"if\s+not\s+data\.get\(['\"]owner['\"]\)\s*:\s*\n\s*return\s+['\"]editor['\"]",
+            body,
+        ), "_get_role must not grant editor to non-members of ownerless projects"
+
+
+import os  # noqa: E402
+import sys  # noqa: E402
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
+os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
+
+import app as app_module  # noqa: E402
+
+
+class TestGetRoleOwnerlessDenyByDefault:
+    """Behavioral pin on the role primitive itself (auth enabled)."""
+
+    def test_stranger_denied_on_ownerless_project(self, monkeypatch):
+        # Non-member, non-owner user reaching an ownerless project by id.
+        # Previously returned "editor" (fail-open); must now be "" (no access).
+        monkeypatch.setattr(app_module, "_auth_enabled", True)
+        proj = {"name": "orphan", "members": []}  # no "owner" field at all
+        assert app_module._get_role(proj, {"sub": "stranger"}) == "", (
+            "ownerless project must not grant editor to a non-member"
+        )
+
+    def test_stranger_denied_when_owner_is_blank(self, monkeypatch):
+        # `owner` present but empty is still ownerless — same deny.
+        monkeypatch.setattr(app_module, "_auth_enabled", True)
+        proj = {"name": "orphan", "owner": "", "members": []}
+        assert app_module._get_role(proj, {"sub": "stranger"}) == ""
+
+    def test_member_of_ownerless_project_unaffected(self, monkeypatch):
+        # A member keeps their role — the members loop runs before the
+        # ownerless check, so closing the fail-open never touches them.
+        monkeypatch.setattr(app_module, "_auth_enabled", True)
+        proj = {"name": "orphan",
+                "members": [{"user_id": "u2", "role": "editor"}]}
+        assert app_module._get_role(proj, {"sub": "u2"}) == "editor"
+
+    def test_owned_project_stranger_still_denied(self, monkeypatch):
+        # Ordinary owned-project path is unchanged (regression guard).
+        monkeypatch.setattr(app_module, "_auth_enabled", True)
+        proj = {"name": "p", "owner": "u1", "members": []}
+        assert app_module._get_role(proj, {"sub": "stranger"}) == ""
+
+    def test_dev_mode_unaffected(self, monkeypatch):
+        # Auth disabled (dev/local) → everyone is owner. The fix only changes
+        # production (auth-enabled) behavior.
+        monkeypatch.setattr(app_module, "_auth_enabled", False)
+        proj = {"name": "orphan", "members": []}
+        assert app_module._get_role(proj, {"sub": "anyone"}) == "owner"
+
+
+class TestIsMemberPredicate:
+    """ms-158 / e-5773: the shared membership predicate that /api/me/heartbeat
+    delegates to instead of re-implementing the rule inline (independent AX +
+    maintainability review consensus). Auth-mode agnostic by design: unlike
+    ``_get_role`` it does NOT bypass to "everyone in" when auth is disabled.
+    """
+
+    def test_owner_is_member(self):
+        assert app_module._is_member({"owner": "u1", "members": []}, "u1") is True
+
+    def test_listed_member_is_member(self):
+        proj = {"owner": "u1", "members": [{"user_id": "u2", "role": "editor"}]}
+        assert app_module._is_member(proj, "u2") is True
+
+    def test_stranger_is_not_member(self):
+        proj = {"owner": "u1", "members": [{"user_id": "u2"}]}
+        assert app_module._is_member(proj, "stranger") is False
+
+    def test_ownerless_stranger_is_not_member(self):
+        # The fail-open case: no owner, stranger not in members → deny.
+        assert app_module._is_member({"members": []}, "stranger") is False
+        assert app_module._is_member({"owner": "", "members": []}, "stranger") is False
+
+    def test_ownerless_member_is_member(self):
+        proj = {"members": [{"user_id": "u2", "role": "editor"}]}
+        assert app_module._is_member(proj, "u2") is True
+
+    def test_empty_uid_is_not_member(self):
+        # A missing/empty caller id must never satisfy membership.
+        assert app_module._is_member({"owner": "", "members": []}, "") is False

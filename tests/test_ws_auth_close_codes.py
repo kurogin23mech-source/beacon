@@ -99,8 +99,15 @@ def _enable_auth():
 @pytest.fixture(autouse=True)
 def _seed_project():
     _store.clear()
+    # ms-158 / e-5757: p1 is owned by user1 (= the sub the valid-token tests
+    # verify as). It used to be seeded ownerless (owner=""), which only let the
+    # valid-token connection through because ownerless projects fell open to any
+    # signed-in user — the exact leak e-5757 closed. Give p1 a real owner so
+    # test_token_valid_accepts admits user1 for the right reason; the reject-path
+    # tests (missing/invalid token, unknown project) don't depend on ownership,
+    # and the forbidden test seeds its own owned project (p2).
     _store["p1"] = {
-        "name": "WS Test", "milestones": [], "owner": "", "members": [],
+        "name": "WS Test", "milestones": [], "owner": "user1", "members": [],
     }
     yield
     _store.clear()

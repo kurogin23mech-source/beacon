@@ -134,7 +134,14 @@ def reset_store():
     firestore_client.list_sessions = _mock_list_sessions
     firestore_client.upsert_session = _mock_upsert_session
     firestore_client.stamp_session_actor_email = _mock_stamp_session_actor_email
-    firestore_client.get_project = lambda pid: {"name": "test", "milestones": []}
+    # ms-158 / e-5757: the mock project carries owner="user-1" (= the sub the
+    # auth-enabled tests below verify as). Before e-5757 closed the ownerless
+    # fail-open, an owner-less project granted every signed-in user "editor", so
+    # these tests happened to pass against a project nobody owned. That relied on
+    # the exact leak e-5757 removed; give the test project a legitimate owner so
+    # the PUT /sessions membership gate (_require_project_role → _get_role) admits
+    # user-1 for the right reason.
+    firestore_client.get_project = lambda pid: {"name": "test", "milestones": [], "owner": "user-1"}
     firestore_client.save_project = lambda pid, data: None
     firestore_client.list_projects = lambda: []
     firestore_client.get_or_create_user = lambda *a, **kw: None
@@ -144,7 +151,7 @@ def reset_store():
     store_router.list_sessions = _mock_list_sessions
     store_router.upsert_session = _mock_upsert_session
     store_router.stamp_session_actor_email = _mock_stamp_session_actor_email
-    store_router.get_project = lambda pid: {"name": "test", "milestones": []}
+    store_router.get_project = lambda pid: {"name": "test", "milestones": [], "owner": "user-1"}
     store_router.save_project = lambda pid, data: None
     store_router.list_projects = lambda: []
     store_router.get_or_create_user = lambda *a, **kw: None

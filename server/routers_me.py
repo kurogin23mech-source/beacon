@@ -93,6 +93,7 @@ def make_router(
     *,
     stamp_session_liveness: Callable[..., None],
     session_is_live: Callable[..., bool],
+    is_member: Callable[[dict, str], bool],
 ) -> APIRouter:
     """Build the /api/me/* router with the host app's auth + liveness helpers.
 
@@ -357,12 +358,17 @@ def make_router(
         project = db.get_project(body.project_id)
         if not project:
             raise HTTPException(status_code=404, detail="project not found")
-        # _require_project_role would also work here but it raises only on
-        # explicit list_projects empty; the membership rule we want is
-        # "owner OR in members list OR project has no owner (migration)".
-        owner = project.get("owner")
-        members = [m.get("user_id") for m in project.get("members", []) or []]
-        if owner and owner != uid and uid not in members:
+        # Membership boundary. Delegate to the app-owned ``is_member`` predicate
+        # (= app.py ``_is_member``) — the single source of truth for "owner or in
+        # members" — rather than re-implementing it here. ms-158 / e-5773: the old
+        # inline copy read ``if owner and owner != uid and ...``, whose leading
+        # ``owner and`` fell OPEN for ownerless projects (any signed-in user could
+        # mint a session record into one), the same fail-open relic e-5757 closed
+        # in ``_get_role``. We deliberately use ``is_member`` (auth-mode agnostic)
+        # and NOT ``_get_role`` (which bypasses to "owner" when auth is disabled):
+        # this endpoint must enforce membership unconditionally so a session record
+        # is never materialised in a project the caller doesn't belong to.
+        if not is_member(project, uid):
             raise HTTPException(
                 status_code=403,
                 detail="not a member of this project",

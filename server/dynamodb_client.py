@@ -189,11 +189,20 @@ def list_projects(user_id: str | None = None,
             continue
         if user_id:
             owner = item.get("owner")
-            # owner 無し project は migration 期間のため全員に見える (= firestore 同挙動)
-            if owner:
-                members = [m.get("user_id") for m in item.get("members", [])]
-                if owner != user_id and user_id not in members:
-                    continue
+            # ms-158 / e-5773: deny by default when owner is missing. This used
+            # to fall through ("owner 無し project は全員に見える") with a comment
+            # claiming parity with firestore — but firestore closed that leak on
+            # 2026-07-03 (e-2794) and mysql_client already denies too. DynamoDB
+            # was the stale outlier: on an AWS/DynamoDB-backed deployment an
+            # ownerless project still leaked into every user's listing (the same
+            # cross-user visibility hole e-2794 fixed). Match the siblings:
+            # ownerless → visible to nobody; admins inventory via
+            # /api/admin/projects/ownerless.
+            if not owner:
+                continue
+            members = [m.get("user_id") for m in item.get("members", [])]
+            if owner != user_id and user_id not in members:
+                continue
         result.append({
             "project_id": item.get("project_id", ""),
             "name": item.get("name", ""),
