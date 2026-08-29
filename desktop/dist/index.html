@@ -1529,7 +1529,7 @@ body::after {
 .tgt-empty { font-size: 12px; color: var(--text-dim); padding: 8px; }
 .tgt-row {
   display: grid;
-  grid-template-columns: 84px 68px 1fr auto 46px 64px;
+  grid-template-columns: 80px 62px 1fr auto auto auto 44px 60px;
   align-items: center;
   gap: 8px;
   padding: 6px 10px;
@@ -1538,6 +1538,9 @@ body::after {
   border-radius: 5px;
   font-size: 12px;
 }
+.tgt-prio { text-align: center; }
+.tgt-deadline { font-size: 11px; color: var(--text-secondary); font-family: monospace; white-space: nowrap; }
+.tgt-deadline.overdue { color: var(--cancelled); font-weight: 600; }
 .tgt-kind {
   font-size: 9px;
   font-weight: 600;
@@ -6215,11 +6218,15 @@ function collectTargets(project) {
   if (Array.isArray(project.targets) && project.targets.length) return project.targets;
   const proj = project.root && project.root.projection;
   if (proj && Array.isArray(proj.targets) && proj.targets.length) return proj.targets;
+  // 合成 detail は server targets[] の detail と同じ key で埋める (= 前方互換:
+  // サーバが detail を enrich したら row 側は無変更で自動追随する)。milestone は
+  // target_date、opportunity は deadline を締め切りに使う (row 側は両対応で読む)。
   const out = [];
   for (const ms of project.milestones || []) {
     out.push({
       id: ms.id, label: targetLabel(ms), status: ms.status, kind: 'milestone',
       work_items_total: ms.total_tasks || 0, work_items_done: ms.done_tasks || 0,
+      detail: { progress: ms.progress, target_date: ms.target_date || '', priority: ms.priority || '' },
     });
   }
   for (const o of project.opportunities || []) {
@@ -6228,36 +6235,59 @@ function collectTargets(project) {
       id: o.id, label: targetLabel(o), status: o.phase || o.status || '', kind: 'opportunity',
       work_items_total: acts.length,
       work_items_done: acts.filter((a) => a && a.status === 'done').length,
+      detail: { deadline: o.deadline || '', priority: o.priority || '' },
     });
   }
   return out;
 }
 
-// PURE render of one target row — same columns for every kind.
-function renderTargetRow(t) {
+// 締め切りが超過しているか (= 未完了 かつ 締切が today より前)。ms-139 の期日
+// 超過エンジンと同じ規則 (terminal = done/cancelled は超過扱いしない)。today は
+// 呼び出し側が渡す (= render 関数を純粋に保つ / 環境の new Date() を持ち込まない)。
+function _targetDeadlineOverdue(deadline, status, today) {
+  if (!deadline || !today) return false;
+  if (status === 'done' || status === 'cancelled') return false;
+  return deadline < today;
+}
+
+// PURE render of one target row — same columns for every kind. today は超過判定用。
+function renderTargetRow(t, today) {
   if (!t) return '';
   const total = t.work_items_total || 0;
   const done = t.work_items_done || 0;
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
   const wi = total > 0 ? `${done}/${total}` : '';
   const kind = t.kind || 'other';
+  const det = t.detail || {};
+  const priority = det.priority || '';
+  const prioBadge = priority
+    ? `<span class="priority-badge priority-${esc(priority)}">${esc(priority)}</span>`
+    : '';
+  // 締切は milestone=target_date / opportunity=deadline のどちらでも読む。
+  const deadline = det.target_date || det.deadline || '';
+  const overdue = _targetDeadlineOverdue(deadline, t.status, today);
+  const deadlineCell = deadline
+    ? `<span class="tgt-deadline${overdue ? ' overdue' : ''}">${overdue ? '⚠ ' : ''}${esc(deadline)}</span>`
+    : '<span class="tgt-deadline"></span>';
   return `
     <div class="tgt-row">
       <span class="tgt-kind tgt-kind-${esc(kind)}">${esc(kind)}</span>
       <span class="tgt-id">${esc(t.id || '')}</span>
       <span class="tgt-label">${esc(t.label || '(no label)')}</span>
+      <span class="tgt-prio">${prioBadge}</span>
       <span class="tgt-status">${esc(t.status || '')}</span>
+      ${deadlineCell}
       <span class="tgt-wi">${wi}</span>
       <div class="tgt-bar"><div class="tgt-bar-fill" style="width:${pct}%"></div></div>
     </div>`;
 }
 
 // PURE render of the whole cross-class list. '' の代わりに空メッセージを返す。
-function renderTargetsOverview(targets) {
+function renderTargetsOverview(targets, today) {
   if (!Array.isArray(targets) || !targets.length) {
     return '<div class="tgt-empty">target がありません。</div>';
   }
-  return targets.map(renderTargetRow).join('');
+  return targets.map((t) => renderTargetRow(t, today)).join('');
 }
 
 // Section wrapper (shell 側の compose 点)。合成 fallback 時は暫定である旨を明示。
@@ -6267,6 +6297,7 @@ function renderTargetsSection() {
   for (const t of targets) { const k = (t && t.kind) || 'other'; kinds[k] = (kinds[k] || 0) + 1; }
   const kindSummary = Object.keys(kinds).map((k) => `${k} ${kinds[k]}`).join(' · ');
   const synthesized = !hasServerTargets(state.project);
+  const today = _salesTodayISO();
   return `
     <section class="targets-section fade-in">
       <div class="milestones-header">
@@ -6274,7 +6305,7 @@ function renderTargetsSection() {
         <span class="milestones-count">${targets.length} 件${kindSummary ? ' · ' + kindSummary : ''}</span>
       </div>
       ${synthesized ? '<div class="tgt-synth-note">※ サーバの targets[] が未提供のため milestones + opportunities から暫定合成して表示しています (ms-157 の本番デプロイ後は server targets[] に自動で切り替わります)。</div>' : ''}
-      <div class="tgt-list">${renderTargetsOverview(targets)}</div>
+      <div class="tgt-list">${renderTargetsOverview(targets, today)}</div>
     </section>`;
 }
 
