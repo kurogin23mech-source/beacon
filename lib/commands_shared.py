@@ -1892,19 +1892,26 @@ def _application_map_applies() -> bool:
 
     ms-155 e-5598/e-5599 (maintainability review): DERIVED from the deliverable
     declaration rather than a parallel ``profession == "dev"`` literal. The map IS
-    the milestone class's deliverable projection (``ref == "application-map"``), so
-    "does this project produce the map" is answered by whether the deliverable union
-    names it — the SAME single source ``root_target.synthesized_projection``
-    surfaces. Byte-identical today (only a dev project adopts milestone→機能), but
-    the two gates can no longer drift: a project that changes which classes it
-    adopts flips the union and this gate together. Best-effort: an unavailable store
-    defaults to True (the historical dev default — the surface stays visible rather
-    than silently vanishing on a transient read error)."""
+    the milestone class's deliverable projection, so "does this project produce the
+    map" is answered by whether the deliverable union names it — the SAME single
+    source ``root_target.synthesized_projection`` surfaces. Byte-identical today
+    (only a dev project adopts milestone→機能), but the two gates can no longer
+    drift: a project that changes which classes it adopts flips the union and this
+    gate together.
+
+    ms-161 e-5825: the marker is the class-declared ``kind == "feature-map"``, NOT
+    the old ``ref == "application-map"``. The deliverable was repointed off the
+    doc→application-map proxy onto the ``changelog`` projector (the map is now a
+    DERIVED summary of the root deliverable-changelog), so the ``ref`` proxy is
+    gone; ``kind`` is the stable identity of "this class produces the 機能 map"
+    across that projector change. Best-effort: an unavailable store defaults to True
+    (the historical dev default — the surface stays visible rather than silently
+    vanishing on a transient read error)."""
     try:
         data = get_store().load_project()
     except Exception:
         return True
-    return any((d.get("ref") or "") == "application-map"
+    return any((d.get("kind") or "") == "feature-map"
                for d in occupation.project_deliverables(data))
 
 

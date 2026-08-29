@@ -411,11 +411,19 @@ def evidence_fields(desc: dict) -> list:
 # operation→稼働状態 is deferred (SPEC やらない), so no strategy for it yet.
 PROJECTOR_DOC = "doc"        # produced value IS a named document (needs ``ref``)
 PROJECTOR_ROLLUP = "rollup"  # produced value is a roll-up over the class's Targets
+# ms-161 e-5825: the produced value is the ROOT deliverable-changelog, summarised
+# (``deliverable_map``) — the class contributes append-type produced-value entries
+# whose active summary IS the current-state map. milestone→機能 rides THIS now
+# (repointed off the ``doc``/``ref: application-map`` proxy): application-map became
+# a DERIVED output of the log, so the class no longer points at a hand-maintained
+# doc. Needs NO ``ref`` (the value is the log, not a named document).
+PROJECTOR_CHANGELOG = "changelog"
 # VALIDATION ALLOWLIST (ms-155 e-5597 AX review): the set of LEGAL projector ids —
 # adding a value HERE is what makes a projector pass ``validate_deliverable``.
 # ``normalize_deliverable`` returns None for any projector NOT in this set, so a
 # typo'd strategy never silently enters the union.
-DELIVERABLE_PROJECTORS = frozenset({PROJECTOR_DOC, PROJECTOR_ROLLUP})
+DELIVERABLE_PROJECTORS = frozenset({PROJECTOR_DOC, PROJECTOR_ROLLUP,
+                                    PROJECTOR_CHANGELOG})
 
 
 def normalize_deliverable(raw) -> Optional[dict]:

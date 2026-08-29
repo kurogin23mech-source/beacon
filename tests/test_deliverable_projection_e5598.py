@@ -33,9 +33,12 @@ import target_descriptor as td  # noqa: E402
 # ---------------------------------------------------------------------------
 
 def test_milestone_declares_feature_map_deliverable():
+    # ms-161 e-5825: repointed off the doc→application-map proxy onto the
+    # ``changelog`` projector (produced value = root deliverable-changelog summary).
+    # No ``ref`` — the value is the log, not a named doc.
     dl = tstate.BUILTIN_TARGET_CLASSES["milestone"]["deliverable"]
     assert dl == {"kind": "feature-map", "label": "機能",
-                  "projector": "doc", "ref": "application-map"}
+                  "projector": "changelog"}
 
 
 def test_deliverable_is_stripped_from_the_state_model():
@@ -52,7 +55,7 @@ def test_deliverable_is_stripped_from_the_state_model():
 def test_accessor_reads_milestone_code_class():
     proj = occupation.resolve_deliverable({"profession": "dev"}, "milestone")
     assert proj == {"kind": "feature-map", "label": "機能",
-                    "projector": "doc", "ref": "application-map"}
+                    "projector": "changelog", "ref": ""}
 
 
 def test_accessor_reads_descriptor_class():
@@ -90,7 +93,8 @@ def test_map_gate_is_class_adoption_not_a_profession_branch():
     for prof in ("dev", "sales", "backoffice", ""):
         proj = occupation.resolve_deliverable({"profession": prof},
                                                      "milestone")
-        assert proj["ref"] == "application-map"
+        # ms-161 e-5825: identified by the changelog projector now (no doc ref proxy).
+        assert proj["projector"] == "changelog"
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +124,7 @@ def test_union_surfaces_milestone_map_for_dev():
     dev = {"name": "D", "profession": "dev", "milestones": []}
     assert occupation.project_deliverables(dev) == [
         {"target_class": "milestone", "kind": "feature-map", "label": "機能",
-         "projector": "doc", "ref": "application-map"},
+         "projector": "changelog", "ref": ""},
     ]
 
 

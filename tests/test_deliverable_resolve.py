@@ -115,6 +115,40 @@ def test_rollup_label_cap_truncates_but_count_is_exact():
 
 
 # ---------------------------------------------------------------------------
+# changelog projector — the produced value IS the root deliverable-changelog,
+# summarised to its current-state map (ms-161 e-5825). milestone→機能 rides this.
+# ---------------------------------------------------------------------------
+
+def _changelog_spec():
+    return {"target_class": "milestone", "kind": "feature-map", "label": "機能",
+            "projector": td.PROJECTOR_CHANGELOG, "ref": ""}
+
+
+def test_changelog_resolves_to_derived_map():
+    import deliverable_changelog as dc
+    data = {"name": "P", "profession": "dev"}
+    dc.append_deliverable(data, {
+        "source": {"target_id": "ms-1", "kind": "milestone"},
+        "category": "feature-map", "title": "claim", "summary": "二重取り防止"})
+    out = dr.resolve_deliverable_content(data, _changelog_spec())
+    r = out["resolved"]
+    assert r["found"] is True
+    assert r["strategy"] == td.PROJECTOR_CHANGELOG
+    assert r["count_active"] == 1
+    assert r["categories"] == [{"category": "feature-map", "count": 1}]
+    # the derived dev render (application-map-flavoured) is carried for humans
+    assert "アプリケーション全貌マップ" in r["rendered"]
+    assert "二重取り防止" in r["rendered"]
+
+
+def test_changelog_empty_log_resolves_found_not_a_miss():
+    out = dr.resolve_deliverable_content({"profession": "dev"}, _changelog_spec())
+    r = out["resolved"]
+    assert r["found"] is True          # empty is a valid empty map, not a failure
+    assert r["count_active"] == 0
+
+
+# ---------------------------------------------------------------------------
 # dispatch + union.
 # ---------------------------------------------------------------------------
 

@@ -229,22 +229,25 @@ BUILTIN_TARGET_CLASSES: dict[str, dict] = {
             "evidence_arms": [{"arm": "entries", "item_type": "commit"}],
             "changelog": {"arm": "entries", "recorder": "milestone"},
         },
-        # ms-155 e-5598: the milestone class's DELIVERABLE (生み出した価値) is its
-        # 機能投影 — the application-map (今このプロダクトに何ができるかを写した現在地
-        # の索引, CORE doc ``application-map``). spine §2b names milestone→機能
-        # (application-map) as the first per-class deliverable, and this declaration
-        # RE-HOMES the existing map AS milestone's deliverable projection: the
-        # ``"doc"`` projector says "the produced value IS the document named by
-        # ``ref``". A registry-only slot (like ``arm_roles`` — inert data the state
-        # model never consumes; listed in REGISTRY_ONLY_KEYS below). WHY the map's
-        # long-standing ``profession==dev`` gate is the PRINCIPLE's manifestation,
-        # not a special-case: the deliverable rides the milestone CLASS, and only a
-        # dev project adopts the milestone class, so the map surfaces exactly for
-        # dev — the gate emerges from class-adoption, there is no separate
-        # ``if profession == 'dev'`` behind it (SPEC 受入条件3). The root union
-        # (e-5599) collects this only when the project adopts milestone.
+        # ms-155 e-5598 / ms-161 e-5825: the milestone class's DELIVERABLE (生み出した
+        # 価値) is its 機能投影 — the application-map (今このプロダクトに何ができるかを
+        # 写した現在地の索引, CORE doc ``application-map``). ms-155 declared this as a
+        # ``"doc"`` projector pointing (``ref: "application-map"``) at the hand-
+        # maintained map doc — a PROXY: the deliverable was a pointer to a doc, not the
+        # per-target produced value, with no history / attribution (SPEC ms-161 背景).
+        # ms-161 REPOINTS it onto the ``"changelog"`` projector: milestone completions
+        # append produced-value entries to the ROOT deliverable-changelog
+        # (``deliverable_capture``), and application-map becomes the DERIVED active
+        # summary of that log (``deliverable_map`` dev render) — 因果を「log → 要約 →
+        # map」に正す。The proxy ``ref`` is GONE (the value is the log, not a named
+        # doc); ``changelog`` needs no ref. WHY the map's long-standing
+        # ``profession==dev`` gate is the PRINCIPLE's manifestation, not a special-
+        # case: the deliverable rides the milestone CLASS, and only a dev project
+        # adopts milestone, so the map surfaces exactly for dev — the gate emerges
+        # from class-adoption (SPEC 受入条件3). A registry-only slot (inert data the
+        # state model never consumes; listed in REGISTRY_ONLY_KEYS below).
         "deliverable": {"kind": "feature-map", "label": "機能",
-                        "projector": "doc", "ref": "application-map"},
+                        "projector": "changelog"},
         "kind": "milestone",
         "shape": SHAPE_STATUS_ENUM,
         "state_field": "status",

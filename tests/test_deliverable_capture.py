@@ -42,7 +42,9 @@ def test_milestone_completion_appends_active_entry():
     assert stored["category"] == "feature-map"
     assert stored["title"] == "DM idle-wake"
     assert stored["summary"] == "AC 全部満たした"
-    assert stored["ref"] == "application-map"
+    # ms-161 e-5825: milestone repointed to the changelog projector (no doc ref
+    # proxy), so a captured entry carries no drill-down ref.
+    assert stored["ref"] == ""
     assert stored["status"] == dc.STATUS_ACTIVE
     # and it is readable as the current-state value
     assert [e["title"] for e in dc.active_deliverables(data)] == ["DM idle-wake"]

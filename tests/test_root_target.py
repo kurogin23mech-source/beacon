@@ -116,10 +116,12 @@ def test_projection_is_synthesized_rollup_over_children():
     assert proj["counts"] == {"total": 3, "done": 2, "open": 1}
     assert len(proj["targets"]) == 3
     # deliverable union filled by ms-155 e-5599: a dev project adopts the milestone
-    # class, whose deliverable IS the 機能 map (application-map).
+    # class, whose deliverable IS the 機能 map. ms-161 e-5825 repointed it off the
+    # doc→application-map proxy onto the ``changelog`` projector (the map is now a
+    # DERIVED summary of the root deliverable-changelog).
     assert proj["deliverables"] == [
         {"target_class": "milestone", "kind": "feature-map", "label": "機能",
-         "projector": "doc", "ref": "application-map"},
+         "projector": "changelog", "ref": ""},
     ]
 
 
@@ -133,9 +135,12 @@ def test_deliverable_union_is_empty_when_no_adopted_class_declares_one():
 def test_deliverable_union_present_even_with_no_children():
     # The union is over adopted CLASSES, not instances: a dev project with zero
     # milestones still declares its milestone-class deliverable (the map is the
-    # class's projection, independent of how many milestones exist).
+    # class's projection, independent of how many milestones exist). ms-161 e-5825:
+    # the deliverable is the changelog projector now (no doc ref proxy), so assert on
+    # the class-declared kind/projector rather than the removed ref.
     proj = root_target.synthesized_projection(_dev_project([]))
-    assert [d["ref"] for d in proj["deliverables"]] == ["application-map"]
+    assert [(d["kind"], d["projector"]) for d in proj["deliverables"]] \
+        == [("feature-map", "changelog")]
 
 
 def test_top_level_counts_agree_with_projection():

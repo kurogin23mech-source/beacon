@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import occupation as _occ
 import target_descriptor as _td
+import deliverable_map as _dmap
 from store import get_store
 
 # Statuses that mean a Target of ANY class has DELIVERED its value (so it counts
@@ -102,19 +103,43 @@ def _resolve_rollup(spec: dict, data: dict) -> dict:
     }
 
 
+def _resolve_changelog(data: dict) -> dict:
+    """Resolve a ``"changelog"`` deliverable (ms-161 e-5825): the produced value IS
+    the root deliverable-changelog, summarised to its current-state map. milestone→
+    機能 rides this — the resolved value is the DERIVED application-map (the active
+    entries grouped by category, dev-rendered), so ``deliverable list --resolve``
+    shows what the project can do NOW straight from the log, with NO hand-maintained
+    doc pointer. Always ``found`` (an empty log resolves to an empty-but-valid map,
+    not a miss — there is nothing that can fail to resolve)."""
+    summary = _dmap.summarize_map(data)
+    return {
+        "strategy": _td.PROJECTOR_CHANGELOG,
+        "found": True,
+        "count_active": summary["total"],
+        "categories": [
+            {"category": g["category"], "count": g["count"]}
+            for g in summary["categories"]
+        ],
+        "rendered": _dmap.render_map(data),
+    }
+
+
 def resolve_deliverable_content(data: dict, spec: dict) -> dict:
     """Resolve ONE deliverable-projection spec to its produced VALUE.
 
     Returns the spec augmented with a ``resolved`` block — the actual content
-    (doc body / roll-up summary) — so a caller keeps the pointer (``projector`` /
-    ``ref``) alongside what it resolved to. An unknown projector returns
-    ``resolved.found=False`` (defensive; ``normalize_deliverable`` already keeps
-    unknown projectors out of the union, so this only guards a hand-built spec)."""
+    (doc body / roll-up summary / changelog-derived map) — so a caller keeps the
+    pointer (``projector`` / ``ref``) alongside what it resolved to. An unknown
+    projector returns ``resolved.found=False`` (defensive; ``normalize_deliverable``
+    already keeps unknown projectors out of the union, so this only guards a
+    hand-built spec)."""
     projector = (spec.get("projector") or "").strip()
     if projector == _td.PROJECTOR_DOC:
         resolved = _resolve_doc(spec)
     elif projector == _td.PROJECTOR_ROLLUP:
         resolved = _resolve_rollup(spec, data)
+    elif projector == _td.PROJECTOR_CHANGELOG:
+        resolved = _resolve_changelog(data)
     else:
         resolved = {"strategy": projector, "found": False,
                     "error": f"no resolver for projector '{projector}'"}
