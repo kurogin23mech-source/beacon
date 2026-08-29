@@ -217,6 +217,103 @@ def test_read_empty_or_absent_log_is_empty_list():
     assert dc.read_deliverables({dc.CHANGELOG_KEY: "corrupt"}) == []
 
 
+# --- lifecycle: retire / supersede / active view (e-5822 / 受入条件2) ---------
+
+def test_retire_flips_status_and_stamps():
+    data = {}
+    e = dc.append_deliverable(data, _entry())
+    ret = dc.retire_deliverable(data, e["id"], reason="機能を撤去した",
+                                at="2026-08-30T00:00:00Z", actor="claude")
+    assert ret["status"] == dc.STATUS_RETIRED
+    assert ret["status_changed_at"] == "2026-08-30T00:00:00Z"
+    assert ret["status_changed_by"] == "claude"
+    assert ret["retire_reason"] == "機能を撤去した"
+    # creation stamp preserved (retire records removal, not creation)
+    assert ret["at"] != "2026-08-30T00:00:00Z"
+
+
+def test_retire_unknown_id_raises():
+    with pytest.raises(dc.DeliverableValidationError):
+        dc.retire_deliverable({}, "dlv-99")
+
+
+def test_retired_entry_falls_out_of_active_view():
+    data = {}
+    a = dc.append_deliverable(data, _entry(title="keep"))
+    b = dc.append_deliverable(data, _entry(title="drop"))
+    dc.retire_deliverable(data, b["id"])
+    titles = [e["title"] for e in dc.active_deliverables(data)]
+    assert titles == ["keep"]
+
+
+def test_supersede_appends_successor_and_flips_predecessor():
+    data = {}
+    old = dc.append_deliverable(data, _entry(title="v1"))
+    new = dc.supersede_deliverable(data, old["id"], _entry(title="v2"),
+                                   at="2026-08-30T00:00:00Z", actor="claude")
+    # successor carries the link, predecessor is flipped + back-linked
+    assert new["supersedes"] == old["id"]
+    stored_old = data[dc.CHANGELOG_KEY][0]
+    assert stored_old["status"] == dc.STATUS_SUPERSEDED
+    assert stored_old["superseded_by"] == new["id"]
+    # only the successor is current
+    titles = [e["title"] for e in dc.active_deliverables(data)]
+    assert titles == ["v2"]
+
+
+def test_supersede_overrides_caller_supersedes_value():
+    data = {}
+    old = dc.append_deliverable(data, _entry(title="v1"))
+    new = dc.supersede_deliverable(
+        data, old["id"], _entry(title="v2", supersedes="dlv-bogus"))
+    assert new["supersedes"] == old["id"]
+
+
+def test_supersede_unknown_old_id_raises_before_appending():
+    data = {}
+    with pytest.raises(dc.DeliverableValidationError):
+        dc.supersede_deliverable(data, "dlv-99", _entry())
+    # all-or-nothing: no successor was appended
+    assert dc.CHANGELOG_KEY not in data
+
+
+def test_supersede_validates_successor_before_touching_predecessor():
+    data = {}
+    old = dc.append_deliverable(data, _entry(title="v1"))
+    with pytest.raises(dc.DeliverableValidationError):
+        dc.supersede_deliverable(data, old["id"], _entry(title=""))
+    # predecessor untouched (still active), no half-written successor
+    assert data[dc.CHANGELOG_KEY][0]["status"] == dc.STATUS_ACTIVE
+    assert len(data[dc.CHANGELOG_KEY]) == 1
+
+
+def test_active_view_excludes_predecessor_superseded_by_live_even_if_not_flipped():
+    """Defensive: a plain append that sets supersedes (without going through
+    supersede_deliverable) must still drop the predecessor from the current view."""
+    data = {}
+    old = dc.append_deliverable(data, _entry(title="v1"))
+    # plain append leaves old ACTIVE, but the successor claims to supersede it
+    dc.append_deliverable(data, _entry(title="v2", supersedes=old["id"]))
+    assert data[dc.CHANGELOG_KEY][0]["status"] == dc.STATUS_ACTIVE  # not flipped
+    titles = [e["title"] for e in dc.active_deliverables(data)]
+    assert titles == ["v2"]
+
+
+def test_active_view_returns_copies():
+    data = {}
+    dc.append_deliverable(data, _entry(title="a"))
+    rows = dc.active_deliverables(data)
+    rows[0]["title"] = "MUTATED"
+    assert data[dc.CHANGELOG_KEY][0]["title"] == "a"
+
+
+def test_active_view_empty_when_all_terminal():
+    data = {}
+    a = dc.append_deliverable(data, _entry(title="a"))
+    dc.retire_deliverable(data, a["id"])
+    assert dc.active_deliverables(data) == []
+
+
 # --- profession independence (受入条件5) -------------------------------------
 
 def test_storage_key_and_schema_carry_no_dev_vocabulary():

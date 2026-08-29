@@ -191,6 +191,28 @@ def _log(data: dict) -> list:
     return log if isinstance(log, list) else []
 
 
+def _copy_entry(entry: dict) -> dict:
+    """Deep-ish copy one stored entry for a read consumer: the top-level dict plus
+    the two nested containers (``source`` / ``tags``) callers might mutate. Keeps
+    the read side non-mutating for its consumers without a full ``deepcopy`` (the
+    remaining values are immutable scalars)."""
+    copy = dict(entry)
+    if isinstance(entry.get("source"), dict):
+        copy["source"] = dict(entry["source"])
+    if isinstance(entry.get("tags"), list):
+        copy["tags"] = list(entry["tags"])
+    return copy
+
+
+def _find_entry(data: dict, entry_id: str) -> dict | None:
+    """Return the LIVE stored entry dict with ``entry_id`` (not a copy — lifecycle
+    ops mutate it in place), or ``None`` if absent."""
+    for entry in _log(data):
+        if isinstance(entry, dict) and entry.get("id") == entry_id:
+            return entry
+    return None
+
+
 def _mint_id(data: dict) -> str:
     """Mint the next ``dlv-<N>`` id over the ids already in the log — deterministic
     (max integer suffix + 1) so tests assert exact ids and concurrent-session
@@ -262,10 +284,114 @@ def read_deliverables(data: dict, *,
         if source_target is not None and \
                 (entry.get("source") or {}).get("target_id") != source_target:
             continue
-        copy = dict(entry)
-        if isinstance(entry.get("source"), dict):
-            copy["source"] = dict(entry["source"])
-        if isinstance(entry.get("tags"), list):
-            copy["tags"] = list(entry["tags"])
-        out.append(copy)
+        out.append(_copy_entry(entry))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle (SPEC 方針3) — the status/supersedes machinery that makes "要約 =
+# 現在地" true (ms-161 e-5822 / 受入条件2).
+#
+# e-5821 gave every entry a ``status`` column and a ``supersedes`` pointer but
+# only STORED them. A pure append log grows without bound, so a naive summary
+# would keep listing capabilities that were removed — the map would never "消す".
+# This section is the "足す＆消す" (add & remove) abstraction of application-map's
+# reconcile: two operations that move an entry OUT of the current-state set
+# (``retire`` = the capability is gone; ``supersede`` = a newer entry replaces
+# it), plus ``active_deliverables`` — the derived current-state view the map
+# projector (e-5824) summarises.
+#
+# Status transitions mutate the entry IN PLACE (like the rest of the codebase's
+# ``set_entry_state``), stamping WHEN/WHO for traceability (data-immutability
+# principle: every state change is auditable). In-memory only — the caller owns
+# persistence, matching ``append_deliverable``.
+# ---------------------------------------------------------------------------
+
+def _stamp_transition(entry: dict, status: str, at: str | None,
+                      actor: str | None) -> None:
+    """Move ``entry`` to ``status`` and stamp the transition provenance
+    (``status_changed_at`` / ``status_changed_by``) so a reader can audit WHEN a
+    capability left the current-state set and WHO recorded it — the original
+    append ``at``/``actor`` are preserved (they record creation, not retirement)."""
+    entry["status"] = status
+    entry["status_changed_at"] = at if at is not None else work_base.now_iso()
+    entry["status_changed_by"] = (
+        actor if actor is not None else work_base.current_actor())
+
+
+def retire_deliverable(data: dict, entry_id: str, *,
+                       reason: str = "",
+                       at: str | None = None,
+                       actor: str | None = None) -> dict:
+    """Retire a produced-value entry — the capability/outcome it recorded no
+    longer exists, so it drops out of the current-state summary ("消す").
+
+    Flips the entry's status to ``retired`` in place and stamps the transition;
+    an optional ``reason`` (why it was removed) is recorded when given. Returns
+    the mutated LIVE entry (not a copy) so a caller that immediately re-reads sees
+    the new status. Raises ``DeliverableValidationError`` if ``entry_id`` is not
+    in the log — retiring a non-existent entry is a caller bug, surfaced loudly
+    rather than a silent no-op. Idempotent-safe: retiring an already-retired
+    entry simply re-stamps."""
+    entry = _find_entry(data, entry_id)
+    if entry is None:
+        raise DeliverableValidationError(
+            f"cannot retire unknown deliverable {entry_id!r}")
+    _stamp_transition(entry, STATUS_RETIRED, at, actor)
+    reason = (reason or "").strip()
+    if reason:
+        entry["retire_reason"] = reason
+    return entry
+
+
+def supersede_deliverable(data: dict, old_id: str, new_entry: dict, *,
+                          at: str | None = None,
+                          actor: str | None = None) -> dict:
+    """Replace an earlier produced-value entry with an evolved one — the "足す＆
+    消す" done atomically (方針3): APPEND ``new_entry`` (forcing its ``supersedes``
+    pointer to ``old_id``) AND flip ``old_id`` to ``superseded`` so only the
+    successor remains in the current-state set.
+
+    ``new_entry`` is validated/appended through ``append_deliverable`` (so a bad
+    successor raises BEFORE the old entry is touched — the transition is
+    all-or-nothing). Its ``supersedes`` is SET to ``old_id`` by this operation
+    regardless of any value the caller put there: the link is defined by the
+    operation, not hand-authored. Returns the stored successor entry. Raises if
+    ``old_id`` is absent (cannot supersede what is not there)."""
+    old = _find_entry(data, old_id)
+    if old is None:
+        raise DeliverableValidationError(
+            f"cannot supersede unknown deliverable {old_id!r}")
+    # The successor's supersedes link is owned by THIS operation (override any
+    # caller value) so the pointer and the flip below can never disagree.
+    successor = append_deliverable(data, {**new_entry, "supersedes": old_id},
+                                   at=at, actor=actor)
+    _stamp_transition(old, STATUS_SUPERSEDED, at, actor)
+    old["superseded_by"] = successor["id"]
+    return successor
+
+
+def active_deliverables(data: dict) -> list:
+    """The current-state view — the entries a summary/map treats as WHAT THE
+    PROJECT CAN DO NOW (方針3: active のみ要約 = 現在地). This is the input the map
+    projector (e-5824) groups by category.
+
+    An entry is current iff BOTH hold:
+
+    1. its own ``status`` is ``active`` (not retired / superseded), AND
+    2. no OTHER active entry supersedes it — a defensive derivation so a live
+       successor removes its predecessor even if the predecessor's status was
+       never flipped (e.g. a plain ``append_deliverable`` that set ``supersedes``
+       without going through ``supersede_deliverable``). Belt-and-suspenders for
+       the "自動脱落" guarantee: the summary never double-counts an evolved
+       capability.
+
+    Returns fresh copies (non-mutating for consumers), insertion order preserved."""
+    entries = [e for e in _log(data) if isinstance(e, dict)]
+    active = [e for e in entries if e.get("status") == STATUS_ACTIVE]
+    # ids that a still-active entry claims to supersede — their predecessors are
+    # no longer current even if not explicitly flipped.
+    superseded_by_live = {
+        e.get("supersedes") for e in active if e.get("supersedes")}
+    return [_copy_entry(e) for e in active
+            if e.get("id") not in superseded_by_live]
