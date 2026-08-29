@@ -256,6 +256,7 @@ from cmd_operation import (  # noqa: F401
     cmd_operation_purge, cmd_operation_server_tick, cmd_operation_open,
     cmd_operation_set_status, cmd_operation_update, cmd_operation_task_add,
     cmd_operation_task_done, cmd_operation_task_list, cmd_operation_close,
+    cmd_operation_pause, cmd_operation_resume,
     cmd_operation_list, cmd_operation_show, cmd_operation_approve,
     cmd_operation_envelope_verify, cmd_operation_revoke,
 )
@@ -10458,6 +10459,9 @@ if __name__ == "__main__":
         "issue_sync": cmd_issue_sync,
         "operation_open": cmd_operation_open,
         "operation_close": cmd_operation_close,
+        # ms-160 e-5814 — operator-facing pause/resume (fire-suppression verb)
+        "operation_pause": cmd_operation_pause,
+        "operation_resume": cmd_operation_resume,
         # ms-107 e-3461 — server tick opt-in (内部専用、有効化 setup で使う)
         "operation_server_tick": cmd_operation_server_tick,
         "operation_set_status": cmd_operation_set_status,

@@ -781,6 +781,23 @@ case "${1:-}" in
             close)
                 BEACON_OPERATION_ID="${3:-}" python3 "$COMMANDS_PY" operation_close
                 ;;
+            pause|resume)
+                # ms-160 e-5814: operator stop/resume of an Operation's scheduled
+                # fire. `pause` suppresses the tick; `resume` re-enables it.
+                _op_verb="$2"
+                shift 2
+                op_id="" reason="" json_flag=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --reason) reason="${2:-}"; shift 2 ;;
+                        --json) json_flag="1"; shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *) [[ -z "$op_id" ]] && op_id="$1"; shift ;;
+                    esac
+                done
+                BEACON_OPERATION_ID="$op_id" BEACON_REASON="$reason" BEACON_JSON="$json_flag" \
+                    python3 "$COMMANDS_PY" "operation_${_op_verb}"
+                ;;
             list)
                 BEACON_JSON="${3:+1}" python3 "$COMMANDS_PY" operation_list
                 ;;
@@ -926,6 +943,8 @@ except ValueError as e:
                 echo "       beacon operation start <op-id>              (todo → in_progress; 準備着手)"
                 echo "       beacon operation activate <op-id>          (todo/in_progress → open)"
                 echo "       beacon operation close <op-id>              (→ closed)"
+                echo "       beacon operation pause <op-id> [--reason TEXT]  (定期発火を抑止)"
+                echo "       beacon operation resume <op-id> [--reason TEXT] (定期発火を再開)"
                 echo "       beacon operation status <op-id> <status>   (DEPRECATED: use start/activate/close; status now reads)"
                 echo "       beacon operation update <op-id> [--title --schedule --hint --objective --ac --priority]"
                 echo "       beacon operation list [--json]"

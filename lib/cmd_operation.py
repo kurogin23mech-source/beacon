@@ -25,6 +25,7 @@ from store import get_store
 from commands_shared import (
     load_project,
     save_project,
+    _actor_str,
     _local_date,
     _append_changelog,
     _resolve_current_author,
@@ -334,6 +335,54 @@ def cmd_operation_close():
                              target_title=op.get("title", ""),
                              has_spec=_spec_exists_for_op(op_id), gated=False)
     print(f"Operation closed: {op_id} \"{op.get('title', '')}\"")
+
+
+def cmd_operation_pause():
+    """PAUSE an Operation's execution cycle (ms-160 e-5814): move it to ``paused``
+    so its scheduled fire is suppressed until resumed. The core mechanism
+    (core.operation_pause) and the fire-suppression consumer (e-5484) already
+    exist; this is the operator-facing verb that was missing."""
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    if not op_id:
+        print("Error: operation id required (usage: beacon operation pause <op-id> [--reason ...])",
+              file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        op = core.operation_pause(
+            data, op_id,
+            actor=_actor_str(),
+            reason=os.environ.get("BEACON_REASON", ""),
+        )
+    except (ValueError, KeyError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"type": "operation_pause", "op_id": op_id})
+    print(f"Operation paused: {op_id} \"{op.get('title', '')}\" "
+          "(定期発火を抑止。resume で再開)")
+
+
+def cmd_operation_resume():
+    """RESUME a paused Operation (ms-160 e-5814): move it back to idle so the next
+    scheduled fire is honoured again. Raises if the Operation is mid-cycle
+    (due / running) rather than paused — the error names the recovery path."""
+    op_id = os.environ.get("BEACON_OPERATION_ID", "")
+    if not op_id:
+        print("Error: operation id required (usage: beacon operation resume <op-id> [--reason ...])",
+              file=sys.stderr)
+        sys.exit(1)
+    data = load_project()
+    try:
+        op = core.operation_resume(
+            data, op_id,
+            actor=_actor_str(),
+            reason=os.environ.get("BEACON_REASON", ""),
+        )
+    except (ValueError, KeyError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    save_project(data, op={"type": "operation_resume", "op_id": op_id})
+    print(f"Operation resumed: {op_id} \"{op.get('title', '')}\" (定期発火を再開)")
 
 
 def cmd_operation_list():
