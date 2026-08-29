@@ -1514,6 +1514,50 @@ body::after {
   font-size: 10px;
 }
 
+/* ms-162 e-5834 — generic targets[] cross-class overview (read-only) */
+.targets-section { margin-top: 4px; }
+.tgt-synth-note {
+  font-size: 11px;
+  color: #94a3b8;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border-left: 2px solid rgba(251,191,36,0.4);
+  background: rgba(251,191,36,0.05);
+  line-height: 1.5;
+}
+.tgt-list { display: flex; flex-direction: column; gap: 4px; }
+.tgt-empty { font-size: 12px; color: var(--text-dim); padding: 8px; }
+.tgt-row {
+  display: grid;
+  grid-template-columns: 84px 68px 1fr auto 46px 64px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 12px;
+}
+.tgt-kind {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  text-align: center;
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: rgba(148,163,184,0.15);
+  color: #94a3b8;
+}
+.tgt-kind-milestone { background: rgba(96,165,250,0.15); color: #60a5fa; }
+.tgt-kind-opportunity { background: rgba(74,222,128,0.15); color: #4ade80; }
+.tgt-id { font-family: monospace; font-size: 11px; color: var(--text-dim); }
+.tgt-label { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tgt-status { font-size: 11px; color: var(--text-secondary); }
+.tgt-wi { font-size: 11px; color: var(--text-dim); text-align: right; font-family: monospace; }
+.tgt-bar { height: 5px; background: var(--border-subtle); border-radius: 3px; overflow: hidden; }
+.tgt-bar-fill { height: 100%; background: var(--accent); border-radius: 3px; }
+
 /* Entry detail button */
 .entry-info-btn {
   display: inline-flex;
@@ -4979,11 +5023,13 @@ function renderMainContent() {
   const salesTabBar = `
       <button class="tab-btn ${effectiveTab === 'opportunities' ? 'active' : ''}" data-action="switch-tab" data-tab="opportunities">Opportunity</button>
       <button class="tab-btn ${effectiveTab === 'account' ? 'active' : ''}" data-action="switch-tab" data-tab="account">Account</button>
+      <button class="tab-btn ${effectiveTab === 'targets' ? 'active' : ''}" data-action="switch-tab" data-tab="targets">Targets</button>
       <button class="tab-btn ${effectiveTab === 'acquisition' ? 'active' : ''}" data-action="switch-tab" data-tab="acquisition">Acquisition</button>
       <button class="tab-btn ${effectiveTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${effectiveTab === 'notes' ? 'active' : ''}" data-action="switch-tab" data-tab="notes">Session</button>`;
   const devTabBar = `
       <button class="tab-btn ${effectiveTab === 'dashboard' ? 'active' : ''}" data-action="switch-tab" data-tab="dashboard">Milestones</button>
+      <button class="tab-btn ${effectiveTab === 'targets' ? 'active' : ''}" data-action="switch-tab" data-tab="targets">Targets</button>
       <button class="tab-btn ${state.activeTab === 'documents' ? 'active' : ''}" data-action="switch-tab" data-tab="documents">Documents</button>
       <button class="tab-btn ${state.activeTab === 'releases' ? 'active' : ''}" data-action="switch-tab" data-tab="releases">Releases</button>
       <button class="tab-btn ${state.activeTab === 'operations' ? 'active' : ''}" data-action="switch-tab" data-tab="operations">Operations</button>
@@ -4996,6 +5042,7 @@ function renderMainContent() {
     <div class="tab-bar fade-in stagger-1">${isSales ? salesTabBar : devTabBar}</div>
     ${effectiveTab === 'opportunities' ? renderOpportunitiesSection() : ''}
     ${effectiveTab === 'account' ? renderAccountsSection() : ''}
+    ${effectiveTab === 'targets' ? renderTargetsSection() : ''}
     ${effectiveTab === 'acquisition' ? renderAcquisitionsSection() : ''}
     ${isSales && state.openAccountId ? renderAccountModal(state.openAccountId) : ''}
     ${isSales && state.openOppId ? renderOpportunityModal(state.openOppId) : ''}
@@ -6141,6 +6188,94 @@ function ensureDecisionsLoaded() {
     state.decisionsLoading = true;
     dataSource.loadDecisions().then(() => { state.decisionsLoading = false; render(); });
   }
+}
+
+// ms-162 e-5834 — generic targets[] overview (portable render 部品).
+// A READ-ONLY cross-class list: every target (dev milestone / 営業商談 /
+// 記述子クラス) drawn in the SAME shape (id / label / status / kind /
+// work_items). This is a "見せ方" only — it deliberately does NOT enter the
+// board paradigm (正準状態 running/awaiting_human / 受信箱 / work-unit 抽象):
+// that is ms-159 の守備範囲で、踏み込むと Claude Code の内部表現に密結合する
+// (親 §方針2b の念押し)。純関数で status --json 由来の project だけを読む。
+
+// True when the server已に投影した targets[] を持っている (ms-157)。
+function hasServerTargets(project) {
+  if (!project) return false;
+  if (Array.isArray(project.targets) && project.targets.length) return true;
+  const proj = project.root && project.root.projection;
+  return !!(proj && Array.isArray(proj.targets) && proj.targets.length);
+}
+
+// Assemble the cross-class target list. Prefer the server-provided targets[]
+// (ms-157 の職種横断投影)。ms-157 のサーバ変更は本番未デプロイなので、無ければ
+// client 側で milestones + opportunities から同一 shape に暫定合成する (本番
+// デプロイ後は server targets[] がそのまま使われ、この分岐は死ぬ)。
+function collectTargets(project) {
+  if (!project) return [];
+  if (Array.isArray(project.targets) && project.targets.length) return project.targets;
+  const proj = project.root && project.root.projection;
+  if (proj && Array.isArray(proj.targets) && proj.targets.length) return proj.targets;
+  const out = [];
+  for (const ms of project.milestones || []) {
+    out.push({
+      id: ms.id, label: targetLabel(ms), status: ms.status, kind: 'milestone',
+      work_items_total: ms.total_tasks || 0, work_items_done: ms.done_tasks || 0,
+    });
+  }
+  for (const o of project.opportunities || []) {
+    const acts = o.activities || [];
+    out.push({
+      id: o.id, label: targetLabel(o), status: o.phase || o.status || '', kind: 'opportunity',
+      work_items_total: acts.length,
+      work_items_done: acts.filter((a) => a && a.status === 'done').length,
+    });
+  }
+  return out;
+}
+
+// PURE render of one target row — same columns for every kind.
+function renderTargetRow(t) {
+  if (!t) return '';
+  const total = t.work_items_total || 0;
+  const done = t.work_items_done || 0;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const wi = total > 0 ? `${done}/${total}` : '';
+  const kind = t.kind || 'other';
+  return `
+    <div class="tgt-row">
+      <span class="tgt-kind tgt-kind-${esc(kind)}">${esc(kind)}</span>
+      <span class="tgt-id">${esc(t.id || '')}</span>
+      <span class="tgt-label">${esc(t.label || '(no label)')}</span>
+      <span class="tgt-status">${esc(t.status || '')}</span>
+      <span class="tgt-wi">${wi}</span>
+      <div class="tgt-bar"><div class="tgt-bar-fill" style="width:${pct}%"></div></div>
+    </div>`;
+}
+
+// PURE render of the whole cross-class list. '' の代わりに空メッセージを返す。
+function renderTargetsOverview(targets) {
+  if (!Array.isArray(targets) || !targets.length) {
+    return '<div class="tgt-empty">target がありません。</div>';
+  }
+  return targets.map(renderTargetRow).join('');
+}
+
+// Section wrapper (shell 側の compose 点)。合成 fallback 時は暫定である旨を明示。
+function renderTargetsSection() {
+  const targets = collectTargets(state.project);
+  const kinds = {};
+  for (const t of targets) { const k = (t && t.kind) || 'other'; kinds[k] = (kinds[k] || 0) + 1; }
+  const kindSummary = Object.keys(kinds).map((k) => `${k} ${kinds[k]}`).join(' · ');
+  const synthesized = !hasServerTargets(state.project);
+  return `
+    <section class="targets-section fade-in">
+      <div class="milestones-header">
+        <span class="milestones-title">Targets (職種横断)</span>
+        <span class="milestones-count">${targets.length} 件${kindSummary ? ' · ' + kindSummary : ''}</span>
+      </div>
+      ${synthesized ? '<div class="tgt-synth-note">※ サーバの targets[] が未提供のため milestones + opportunities から暫定合成して表示しています (ms-157 の本番デプロイ後は server targets[] に自動で切り替わります)。</div>' : ''}
+      <div class="tgt-list">${renderTargetsOverview(targets)}</div>
+    </section>`;
 }
 
 function renderMilestoneCard(ms, index) {
