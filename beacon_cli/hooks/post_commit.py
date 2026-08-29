@@ -141,6 +141,18 @@ def _resolve_command_cwd(tool_cwd: str) -> Path:
 
 _COMMIT_RE = re.compile(r"git commit ")
 _PUSH_RE = re.compile(r"git push")
+# ms-160 e-5801: review 節目 (review-triggering moments) parity with the Claude
+# bash hook (bin/beacon-post-commit-hook.sh). Both wake /beacon-review-run; the
+# node id distinguishes them in the debug label. The patterns below are kept
+# BYTE-IDENTICAL to lib/review_nodes.py REVIEW_NODES[*].grep_pattern — the single
+# source of truth — and tests/test_review_node_manifest_drift.py fails the build
+# if either the bash hook OR this Python hook diverges from it (= the drift guard
+# is now bidirectional, not bash-only). re.MULTILINE mirrors grep's per-line ``$``
+# so the target-close ``( |$)`` anchor matches an end-of-line, not just end-of-string.
+_PR_OPEN_RE = re.compile(r"beacon pr (add|create)|gh pr create", re.MULTILINE)
+_TARGET_CLOSE_RE = re.compile(
+    r"beacon (milestone (done|close|observe)|operation close)( |$)", re.MULTILINE
+)
 _DEPLOY_RES = [
     re.compile(r"gcloud run deploy|gcloud app deploy|scripts/deploy\.sh"),
     re.compile(
@@ -156,26 +168,56 @@ _DEPLOY_RES = [
 ]
 
 
-def _classify(bare_cmd: str) -> Optional[Tuple[str, str]]:
-    """Return ``(skill_name, message)`` for the matched action, or None.
+def _classify(bare_cmd: str) -> Optional[Tuple[str, str, str]]:
+    """Return ``(skill_name, message, node_id)`` for the matched action, or None.
 
-    Precedence: commit > push > deploy (mirrors the bash if/elif chain).
+    ``node_id`` is the review-node id ("pr-open" / "target-close") for the two
+    review 節目 that share ``/beacon-review-run``, else "" — it feeds the debug
+    label so a PR-open wake and a target-close wake stay distinguishable.
+
+    Precedence: commit > push > pr-open > target-close > deploy (mirrors the
+    bash if/elif chain in bin/beacon-post-commit-hook.sh).
     """
     if _COMMIT_RE.search(bare_cmd):
         return (
             "/beacon-log",
             "BEACON: Commit detected. You MUST now run /beacon-log Skill to record this commit.",
+            "",
         )
     if _PUSH_RE.search(bare_cmd):
         return (
             "/beacon-push",
             "BEACON: Push detected. You MUST now run /beacon-push Skill to record this push.",
+            "",
+        )
+    if _PR_OPEN_RE.search(bare_cmd):
+        return (
+            "/beacon-review-run",
+            "BEACON: PR opened. AX + maintainability review are due (文脈ゼロの独立 "
+            "judge に原典+差分を渡す節目). You MUST now run 'beacon trigger check' to "
+            "see the pending <type>-review-due triggers, then run /beacon-review-run "
+            "--type ax --pr <N> and --type maintainability --pr <N> for the PR. "
+            "Approving/merging before these run is blocked by beacon pr approve.",
+            "pr-open",
+        )
+    if _TARGET_CLOSE_RE.search(bare_cmd):
+        return (
+            "/beacon-review-run",
+            "BEACON: Target close command detected (成否は未確認). 思想(philosophy) + "
+            "目的達成(attainment) review may be due. You MUST now run 'beacon trigger "
+            "check'; if a <type>-review-due トリガー fired, run /beacon-review-run "
+            "--type philosophy --target <target-id> for the 思想 review, and 'beacon "
+            "target review-request <target-id>' to assemble the 目的達成 evidence for "
+            "human approval (attainment verdict は人間所有). No review-due トリガー = "
+            "何もしなくてよい (close 失敗 / 誤マッチ含む).",
+            "target-close",
         )
     for rx in _DEPLOY_RES:
         if rx.search(bare_cmd):
             return (
                 "/beacon-deploy",
                 "BEACON: Deploy detected. You MUST now run /beacon-deploy Skill to record this deployment.",
+                "",
             )
     return None
 
@@ -274,9 +316,12 @@ def main(argv: Optional[list] = None) -> int:
         if classified is None:
             _debug_log("no-match", beacon_root, cmd)
             return 0
-        skill, message = classified
+        skill, message, node_id = classified
         _emit(message, beacon_root)
-        _debug_log(f"matched:{skill}", beacon_root, cmd)
+        # Mirror the bash label ``matched:$SKILL${NODE:+:$NODE}`` so the two
+        # review 節目 that share /beacon-review-run stay distinguishable.
+        label = f"matched:{skill}:{node_id}" if node_id else f"matched:{skill}"
+        _debug_log(label, beacon_root, cmd)
         return 0
     except Exception:
         # Last-ditch: never let a hook bug propagate to Claude Code.
