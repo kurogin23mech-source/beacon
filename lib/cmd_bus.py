@@ -1889,9 +1889,21 @@ def cmd_bus_directory():
         # が入るので human picker に接頭辞として添える (= 「どの project の
         # session か」 が即分かる、 誤送信防止に直結)。 cwd-only モードでは
         # project_id は暗黙 (= cwd と同じ) なので prefix 省略。
+        # ms-160 e-5809 / e-5813: surface the session's AI-authored intent in the
+        # human picker. attention_required (= 「人間の判断待ち」旗) is otherwise
+        # invisible (e-5809); the focus intent text is what the picker was designed
+        # to show the sender but only sid/health were printed (e-5813). Both live
+        # in the session row's ``intent`` block (written via `beacon session intent`)
+        # and are already returned by the directory endpoints — pure display.
+        intent = s.get("intent") if isinstance(s.get("intent"), dict) else {}
+        attn_tag = "  ⚠ATTN(判断待ち)" if intent.get("attention_required") else ""
+        focus_txt = str(intent.get("text") or "").strip().replace("\n", " ")
+        focus_tag = f'  focus="{focus_txt[:60]}"' if focus_txt else ""
+
         pid = s.get("project_id", "")
         pname = s.get("project_name", "") or pid
         if pname and not cwd_only and not explicit_project:
-            print(f"  [{pname}]  {sid}  {ident}  last_active={last}{health_tag}")
+            print(f"  [{pname}]  {sid}  {ident}  last_active={last}"
+                  f"{health_tag}{attn_tag}{focus_tag}")
         else:
-            print(f"  {sid}  {ident}  last_active={last}{health_tag}")
+            print(f"  {sid}  {ident}  last_active={last}{health_tag}{attn_tag}{focus_tag}")
