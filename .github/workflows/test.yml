@@ -64,3 +64,20 @@ jobs:
 
       - name: Run pytest
         run: pytest tests/ -q
+
+  frontend-drift:
+    # ms-160 e-5808: make the Web/Tauri frontend-drift guard a hard CI stop.
+    # The checker already supported --strict (exit 1) but nothing ran it in CI,
+    # so a PR that desynced server/static and desktop/dist only produced a local
+    # pre-commit WARNING and merged green. This job runs it strict on every PR +
+    # push to main. It uses only the Python stdlib, so no install step is needed
+    # (fast, independent of the pytest job).
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Check Web/Tauri frontend drift (strict)
+        run: python3 scripts/check-frontend-drift.py --strict
