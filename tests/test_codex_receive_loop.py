@@ -397,6 +397,41 @@ class TestPollInboxOnce:
         inbox = crl.list_inbox_events(cwd=str(tmp_path))
         assert [row["event"]["event_id"] for row in inbox] == ["evt-fallback"]
 
+    def _stop_event(self, **kw):
+        base = {
+            "event_id": "evt-stop",
+            "created_at": "2026-06-25T10:05:00Z",
+            "channel": "stop-signal",
+            "sender_session_id": "other-sid",
+            "payload": {
+                "kind": "stop", "scope": "global",
+                "issued_by_session_id": "other-sid",
+                "reason": "halt", "reason_kind": "manual",
+            },
+        }
+        base.update(kw)
+        return base
+
+    def test_stop_signal_always_persists_and_never_dispatches(self, tmp_path):
+        """ms-160 e-5856: a remote STOP is a kill-switch — it must land in the
+        file inbox for the PostToolUse halt hook even in armed+app-server mode
+        (persist_kept=False), and must NEVER be handed to on_kept_event (the
+        loop we are halting must not 'answer' its own STOP as a reply turn)."""
+        api = _FakeApi()
+        api.get_returns = [[self._stop_event()]]
+        seen = []
+        latest, n = crl.poll_inbox_once(
+            api, project_id="proj-1", session_id="codex-1-abc",
+            since="", cwd=str(tmp_path),
+            on_kept_event=lambda evt: seen.append(evt.get("event_id")),
+            persist_kept=False,
+        )
+        assert n == 1
+        assert latest == "2026-06-25T10:05:00Z"
+        assert seen == []  # a STOP is not a reply-worthy turn
+        inbox = crl.list_inbox_events(cwd=str(tmp_path))
+        assert [row["event"]["event_id"] for row in inbox] == ["evt-stop"]
+
     def test_get_transport_error_does_not_raise(self, tmp_path):
         api = _FakeApi()
         api.get_should_raise = True

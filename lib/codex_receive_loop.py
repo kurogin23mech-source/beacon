@@ -267,6 +267,21 @@ def poll_inbox_once(
         )
         if verdict != bp.FILTER_KEEP:
             continue
+        # ms-160 e-5856: a remote STOP is a kill-switch, never a DM. It must
+        # ALWAYS land in the file inbox — so the PostToolUse halt hook can turn
+        # it into a halt-request even mid autonomous loop — and must NEVER be
+        # handed to on_kept_event. Dispatching a STOP to the app-server /
+        # exec-worker as a reply-worthy turn would be both wrong (it is not a
+        # question) and self-defeating (the very loop we are trying to halt
+        # would "answer" it). This holds regardless of persist_kept, so the
+        # armed+app-server path (persist_kept=False) stays stoppable too.
+        if str(evt.get("channel") or "") == bp.STOP_SIGNAL_CHANNEL:
+            path = persist_inbox_event(evt, cwd=cwd)
+            if path is not None:
+                persisted += 1
+            if created_at > latest_seen:
+                latest_seen = created_at
+            continue
         if persist_kept:
             # Persist for the hook to read on the next user prompt.
             path = persist_inbox_event(evt, cwd=cwd)
