@@ -327,6 +327,13 @@ def cmd_operation_close():
     # ms-142 T7 (e-5162): retiring an Operation frees its live occupation claim,
     # symmetric with milestone done/observe releasing theirs.
     _release_occupation_for_transition(data, op_id, reason="close")
+    # ms-163 e-5879/5880: operation の retire も完遂 — generic な完遂 seam を発火して
+    # deliverable 記録 + 完遂 decision を残す (milestone done と対称)。deliverable は
+    # operation が slot を宣言しないので no-op、decision は完遂 verdict を記録する。save の
+    # 前に呼ぶ (capture が data を in-memory で書き換え、caller がまとめて永続化する)。
+    # on_target_completion は DIRECT 呼び出し必須 (helper 抽出は checker 被覆 credit を落とす)。
+    import target_completion
+    target_completion.on_target_completion(data, op, verdict="closed")
     save_project(data, op={"type": "operation_close", "op_id": op_id})
     # ms-119 e-3911: operation retirement is a completion claim — fire the
     # review-due nudge (目的達成 + 思想 if the operation has a SPEC).

@@ -753,6 +753,152 @@ def classify_reach(family: str, key: tuple) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Completion-producer coverage (ms-163). The reach/narrowing families above police the
+# DIRECTION of a dependency (a shared L1/L2 capability must not reach a profession
+# concrete). This is a DIFFERENT axis: an L2 dimension "produced at a target's 完遂
+# (completion)" — ``deliverable`` (生み出した価値) and ``decision`` (完遂判定) — must be
+# produced GENERICALLY across every terminable target-class, not hardwired to the dev
+# milestone. The ledger doc (37Svg6nD 2026-08-30 改訂) canonicalised the L2 rule "these
+# dimensions must be produced by a class-generic seam"; this section is its machine check.
+# Two invariants (scanned by scripts/check-capability-scope.py):
+#
+#   producer 被覆 (e-5876): each L2 completion-dimension has ≥1 real producer OR is
+#     annotated declaration-driven. Guards an L2-in-name-only dimension nobody produces.
+#   完遂 seam 被覆 (e-5877): every terminable built-in class's completion terminal must
+#     REACH each completion producer, so a new target-class (or the sales opportunity) is
+#     not silently dropped from deliverable/decision capture. The current 混入 (deliverable
+#     wired only to milestone seams / decision confined to the dev spine) are the gaps
+#     KNOWN_COMPLETION_SEAM_GAP allowlists (owner ms-163) until the e-5879/5880 fix.
+#
+# 原典: spine (doc uq1zgT6apEzAtYE4SfJG) §2b (deliverable 一級化) / §5 (L3/L4 hexagonal).
+# ---------------------------------------------------------------------------
+
+# The L2 dimensions produced at a target's completion. ``mode`` declares HOW producer 被覆
+# is satisfied:
+#   "builtin-producer"   — a real producer function actively writes it at completion (the
+#       generic case); the seam check then enforces EVERY terminable class reaches it. A
+#       completion IS a decision, so ``decision`` is universal.
+#   "declaration-driven" — produced only when a target-class DECLARES it (conditional,
+#       non-empty-only render): ``deliverable`` is declared per class via the target_state
+#       ``deliverable`` slot, and a class without the slot contributes nothing BY DESIGN.
+#       Still requires the seam to be GENERIC — the terminal must REACH the capture, which
+#       no-ops when undeclared — so a class that later declares one is captured.
+COMPLETION_DIMENSIONS = {
+    "deliverable": {
+        "mode": "declaration-driven",
+        "advice": "deliverable (生み出した価値) is declared per target-class via the "
+                  "target_state 'deliverable' slot; the completion capture "
+                  "(deliverable_capture.capture_target_completion) must fire from a "
+                  "class-generic completion seam so a class that declares one is captured "
+                  "— do NOT confine the firing to the milestone-done seams.",
+    },
+    "decision": {
+        "mode": "builtin-producer",
+        "advice": "the 完遂 decision (目的達成 verdict) must be written for EVERY terminable "
+                  "target-class's completion (a completion IS a decision). For a NEW class "
+                  "terminal, call target_completion.on_target_completion — it writes BOTH the "
+                  "deliverable capture and the completion decision in one call; wiring the raw "
+                  "decision_event_from_completion_verdict / _record_completion_verdict_decision "
+                  "directly would satisfy the decision check but SILENTLY drop deliverable "
+                  "capture. Those raw tokens are the underlying producers on_target_completion "
+                  "delegates to (and the pre-existing milestone/server seams still use them "
+                  "directly) — do NOT confine the decision to the dev spine.",
+    },
+}
+
+# The producer CALL tokens per dimension — the function names whose invocation at a
+# completion terminal counts as "this class produces this dimension". Scanned across lib/
+# + server/ (e-5878 adds server/). Attribution is DIRECT-call only: a terminal handler
+# produces a dimension only if the producer token is called from the handler's OWN body.
+# A producer call extracted into a helper is attributed to the HELPER, not the handler, and
+# loses coverage credit (the checker uses innermost-enclosing-function attribution — see
+# check-capability-scope._direct_call_tokens; there is no cmd→helper expansion, unlike the
+# reach families). So always call the producer token directly from the terminal handler.
+COMPLETION_PRODUCER_CALLS = {
+    # ``on_target_completion`` (lib/target_completion.py, ms-163 e-5879/5880) is the
+    # class-generic completion seam: it fires BOTH capture (deliverable) and the 完遂
+    # decision, so a terminal calling it produces both dimensions. milestone keeps its
+    # existing direct ``capture_target_completion`` / decision seams.
+    "deliverable": frozenset({"capture_target_completion", "on_target_completion"}),
+    "decision": frozenset({"decision_event_from_completion_verdict",
+                           "_record_completion_verdict_decision",
+                           "on_target_completion"}),
+}
+
+# Per-built-in-class completion TERMINAL handlers (the T5 coverage matrix target_state.py
+# anticipated — "keep the two in sync by hand" until this lands). Each terminable class
+# maps to the handler function(s) that finalize it. The class set + completion_gate come
+# from target_state.BUILTIN_TARGET_CLASSES (SSOT); this table adds only the HANDLER NAMES
+# (not derivable from the state model). SYNC REQUIREMENT: when a new terminable class
+# (never_terminal=False) is added to BUILTIN_TARGET_CLASSES, it MUST get a row here too, and
+# its handler MUST call target_completion.on_target_completion DIRECTLY (not via a helper —
+# see COMPLETION_PRODUCER_CALLS). Two forcing functions guard this:
+# ``test_every_terminable_class_has_a_terminal_handler_entry`` fails EARLY with a clear
+# message if the row is missing, and the seam check itself surfaces the class as a
+# new_violation gap; ``test_completion_terminal_handlers_resolve_to_real_functions`` pins
+# each name to a real function so a rename cannot rot the registry into a false pass.
+COMPLETION_TERMINAL_HANDLERS = {
+    "milestone": ("cmd_milestone_done", "done_milestone"),
+    "operation": ("cmd_operation_close",),
+    "opportunity": ("cmd_opportunity_judge",),
+    "acquisition": ("cmd_acquisition_status",),
+}
+# Descriptor-defined classes share ONE generic terminal (``beacon target close``); keyed
+# by the sentinel ``"*descriptor*"`` since they carry no fixed built-in kind.
+DESCRIPTOR_TERMINAL_SENTINEL = "*descriptor*"
+DESCRIPTOR_TERMINAL_HANDLERS = ("cmd_target_close",)
+
+# A GATE_SPINE class ALSO reaches terminal through ``beacon target approve``
+# (cmd_target_approve), which directly writes the completion decision
+# (``_record_completion_verdict_decision``) kind-agnostically — so this shared handler is
+# added to a GATE_SPINE class's terminal set by the checker, and is how operation reaches
+# the DECISION producer. NOTE it is added but does NOT falsely grant DELIVERABLE coverage:
+# cmd_target_approve delegates capture to ``_apply_transition``, whose capture call is
+# inside the milestone-only branch (the exact deliverable 混用), and the checker uses
+# DIRECT-call attribution (no helper expansion), so cmd_target_approve reaches decision but
+# not deliverable — operation stays a deliverable gap, milestone gets deliverable from its
+# own ``cmd_milestone_done`` seam.
+SHARED_SPINE_TERMINAL_HANDLERS = ("cmd_target_approve",)
+
+# Ratchet allowlist for accepted-pending completion-seam gaps (owner ms-163). Each entry
+# is (class_kind, dimension) — a terminable class whose completion does NOT yet reach the
+# dimension's producer, accepted PENDING the e-5879/5880 generic-seam fix. ONE-WAY ratchet
+# (same discipline as the reach allowlists): remediate by routing the class's completion
+# through the generic seam, then DROP the row — ``test_no_stale_completion_seam_gap``
+# forces the deletion so it cannot rot into a lie. A NEW gap (a terminable class/dimension
+# not listed) FAILS the checker.
+# EMPTIED by the e-5879/5880 fix (ms-163): every terminable class's completion now routes
+# through the generic seam ``target_completion.on_target_completion`` (opportunity judge /
+# operation close / acquisition status / descriptor close), so there is no accepted gap.
+# ``test_no_stale_completion_seam_gap`` forces this to stay empty unless a real gap exists.
+KNOWN_COMPLETION_SEAM_GAP: frozenset = frozenset()
+
+
+def is_known_completion_seam_gap(cls: str, dimension: str) -> bool:
+    """True when (cls, dimension) is an accepted-pending completion-seam gap (reported as
+    debt, not a CI failure). Symmetric to the reach allowlists (ms-163)."""
+    return (cls, dimension) in KNOWN_COMPLETION_SEAM_GAP
+
+
+def classify_completion_seam(cls: str, dimension: str) -> tuple:
+    """Classify a detected completion-seam gap into ``(status, advice)`` — the completion-
+    coverage peer of ``classify_reach`` (ms-163). A gap = a terminable class whose
+    completion does not reach ``dimension``'s producer.
+
+      * ``("pending_debt", advice)`` — an accepted gap in ``KNOWN_COMPLETION_SEAM_GAP``
+        (owner ms-163), one-way (fix the seam, drop the row).
+      * ``("new_violation", advice)`` — a fresh gap that fails the checker.
+
+    There is no ``reviewed_correct`` class: a terminable class whose completion emits no
+    audit decision / declared deliverable is never "correct by design" — that silent hole
+    is exactly what this MS closes."""
+    advice = COMPLETION_DIMENSIONS.get(dimension, {}).get("advice", "")
+    if is_known_completion_seam_gap(cls, dimension):
+        return "pending_debt", advice
+    return "new_violation", advice
+
+
+# ---------------------------------------------------------------------------
 # Classification by verb noun (the substring before the first "_"). The rule map
 # gives every current noun a scope; a per-verb OVERRIDE handles the exceptions
 # where a noun's verbs split across scopes. A noun the rules do not know resolves

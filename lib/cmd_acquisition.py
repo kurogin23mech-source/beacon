@@ -127,6 +127,14 @@ def cmd_acquisition_status():
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+    # ms-163 e-5879/5880: reaching a completion terminal (done 等、cancel は除外済) is a
+    # 完遂 — fire the generic seam so acquisition completion records a 完遂 decision like
+    # every other target-class. acquisition は非 aggregatable (find_target が引かない) ので
+    # 最小 dict を渡す。deliverable slot 無しなので capture は no-op、decision のみ記録。
+    # on_target_completion は DIRECT 呼び出し必須 (helper 抽出は checker 被覆 credit を落とす)。
+    if status in _completion_terminals:
+        import target_completion
+        target_completion.on_target_completion(data, {"id": acq_id}, verdict=status)
     save_project(data)
     print(f"{acq_id} → {status}")
 
