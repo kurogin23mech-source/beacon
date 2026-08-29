@@ -134,7 +134,7 @@ elif echo "$CMD_BARE" | grep -qE 'beacon pr (add|create)|gh pr create'; then  # 
   # commit/push/deploy, which each have a MUST-run wake here) — so AX /
   # maintainability reviews fired into a void and were skipped. This closes that
   # gap by giving PR-open the same forcing-function wake.
-  emit "BEACON: PR opened. AX + maintainability review are due (文脈ゼロの独立 judge に原典+差分を渡す節目). You MUST now run 'beacon trigger check' to see the pending <type>-review-due triggers, then run /beacon-review-run --type ax --pr <N> and --type maintainability --pr <N> for the PR. Approving/merging before these run is blocked by beacon pr approve."
+  emit "BEACON: PR opened. AX + maintainability review are due (文脈ゼロの独立 judge に原典+差分を渡す節目). まず 'beacon trigger check' を実行し、出てくる ax-review-due / maintainability-review-due トリガーの message から実際の PR 番号を得る (message に PR# が入っている)。次にその PR# で /beacon-review-run を 2 回、別々に実行する: (1) /beacon-review-run --type ax --pr <PR#>、続けて (2) /beacon-review-run --type maintainability --pr <PR#>。--type both は ax+philosophy を指し maintainability を含まないので使わないこと。approve/merge は両レビュー実施まで beacon pr approve でブロックされる。"
   SKILL="/beacon-review-run"
   NODE="pr-open"
 elif echo "$CMD_BARE" | grep -qE 'beacon (milestone (done|close|observe)|operation close)( |$)'; then  # review_nodes.py id=target-close
@@ -146,7 +146,7 @@ elif echo "$CMD_BARE" | grep -qE 'beacon (milestone (done|close|observe)|operati
   # fire nothing, so `trigger check` just shows no review-due — no false nag.
   # `milestone observe` is included because observing is a completion claim in
   # this codebase (運用改善フェーズ = 基本目的達成が前提), not a reversible pause.
-  emit "BEACON: Target close command detected (成否は未確認). 思想(philosophy) + 目的達成(attainment) review may be due. You MUST now run 'beacon trigger check'; if a <type>-review-due トリガー fired, run /beacon-review-run --type philosophy --target <target-id> for the 思想 review, and 'beacon target review-request <target-id>' to assemble the 目的達成 evidence for human approval (SPEC 方針2: attainment verdict は人間所有). No review-due トリガー = 何もしなくてよい (close 失敗 / 誤マッチ含む)."
+  emit "BEACON: Target close command detected (成否は未確認). 思想(philosophy) + 目的達成(attainment) review may be due. まず 'beacon trigger check' を実行する。<type>-review-due トリガーが出ていれば、その message に対象 target-id が入っている。出ていれば 2 つを実行する: (1) /beacon-review-run --type philosophy --target <target-id> で思想レビュー、続けて (2) 'beacon target review-request <target-id>' で目的達成の証拠を集めて人間承認へ (SPEC 方針2: attainment verdict は人間所有)。review-due トリガーが無ければ何もしなくてよい (close 失敗 / 誤マッチ含む)。"
   SKILL="/beacon-review-run"
   NODE="target-close"
 elif echo "$CMD_BARE" | grep -qE 'gcloud run deploy|gcloud app deploy|scripts/deploy\.sh'; then
