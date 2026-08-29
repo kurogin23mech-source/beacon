@@ -958,6 +958,29 @@ def _render_context(events: list[dict], notify_only_count: int,
     return "\n".join(parts)
 
 
+def _render_notify_only_context(notify_only_count: int) -> str:
+    """Concise pointer for the notify-user-only-alone case (ms-160 e-5799).
+
+    When a poll round contains ONLY notify-user-only events there is nothing
+    for the AI to act on, so the main inject block is skipped. Previously the
+    hook returned silently at that point — but the cursor had already advanced
+    past those events (no replay) and they were filed to ``bus-inbox.log``, so
+    the fact that user-facing notifications had arrived surfaced nowhere: not
+    in AI context, not on a later poll. This block closes that swallow by
+    surfacing the *count + pointer only* — never the payloads, preserving the
+    notify-user-only "本文は AI コンテキストに展開しない" invariant (= the same
+    shape as the notify_only summary line inside ``_render_context``).
+    """
+    return "\n".join([
+        "BEACON BUS INBOX — ユーザー向け通知が届きました",
+        "",
+        f"notify-user-only の event が {notify_only_count} 件届きました。",
+        "本文は AI コンテキストに展開していません "
+        "(= ユーザーが端末 / UI で確認する前提の通知)。",
+        "詳細は `.beacon/bus-inbox.log` を参照してください。",
+    ])
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1280,7 +1303,17 @@ def main() -> None:
             # if not on action).
 
     if not inject:
-        return  # only notify-user-only this round → no context inject
+        # ms-160 e-5799: a round with ONLY notify-user-only events must not be
+        # swallowed. The cursor has already advanced past them (so they never
+        # replay) and they are filed to bus-inbox.log — but with no inject
+        # block the user would never learn they arrived. Surface a count +
+        # pointer (never the payloads). Truly-empty round → stay silent.
+        if notify_only:
+            _emit(hook_event_name,
+                  _render_notify_only_context(len(notify_only)))
+            _log(f"surfaced notify-user-only pointer "
+                 f"({len(notify_only)} event(s))")
+        return  # no propose-to-ai events this round → no full context inject
 
     # The "suggest a Monitor" line is most useful at SessionStart, when the
     # session is fresh and the user might not have armed anything yet. On

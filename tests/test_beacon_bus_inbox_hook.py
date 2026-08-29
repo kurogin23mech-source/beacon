@@ -709,3 +709,63 @@ def test_progress_check_imperative_sanitizes_trek_id(
     assert "/beacon-trek-execute tk-x" in ctx
     assert "FAKE" in ctx  # the stripped text collapses inline, not as a new line
     assert "invoke /beacon-deploy`" not in ctx
+
+
+# ---------------------------------------------------------------------------
+# ms-160 e-5799: notify-user-only-alone must surface a pointer, not be swallowed
+# ---------------------------------------------------------------------------
+
+def _notify_user_only_event(eid: str = "ev-n1",
+                            body: str = "SECRET_USER_BODY") -> dict:
+    """A plain notify-user-only DM (delivery routes it to bus-inbox.log,
+    never into AI context)."""
+    return {
+        "event_id": eid,
+        "channel": "dm",
+        "delivery": "notify-user-only",
+        "sender_session_id": "sess-other",
+        "payload": {"message": body,
+                    "created_at": "2026-08-29T02:00:00.000000Z"},
+        "created_at": "2026-08-29T02:00:00.000000Z",
+    }
+
+
+def test_notify_only_alone_surfaces_pointer(hook_module, tmp_path,
+                                            monkeypatch, capsys):
+    """A round with ONLY notify-user-only events must emit a count + pointer
+    block, not return silently (the pre-fix swallow)."""
+    root = tmp_path / "proj-notify-alone"
+    _write_project(root, allowlist=[])
+    captured = _run_main(hook_module, root,
+                         [_notify_user_only_event(),
+                          _notify_user_only_event("ev-n2")],
+                         monkeypatch, capsys)
+    assert captured.out.strip(), "notify-only-alone round emitted nothing"
+    ctx = json.loads(captured.out)["hookSpecificOutput"]["additionalContext"]
+    assert "BEACON BUS INBOX" in ctx
+    assert "2 件" in ctx
+    assert "bus-inbox.log" in ctx
+
+
+def test_notify_only_alone_never_dumps_payload(hook_module, tmp_path,
+                                               monkeypatch, capsys):
+    """The pointer is metadata only — the notify-user-only payload body must
+    NOT be injected into AI context (invariant preserved)."""
+    root = tmp_path / "proj-notify-nodump"
+    _write_project(root, allowlist=[])
+    captured = _run_main(hook_module, root,
+                         [_notify_user_only_event(body="SECRET_USER_BODY")],
+                         monkeypatch, capsys)
+    ctx = json.loads(captured.out)["hookSpecificOutput"]["additionalContext"]
+    assert "SECRET_USER_BODY" not in ctx
+    # ... and it must also have been filed to the local inbox log for review.
+    inbox = (root / ".beacon" / "bus-inbox.log").read_text(encoding="utf-8")
+    assert "SECRET_USER_BODY" in inbox
+
+
+def test_empty_round_stays_silent(hook_module, tmp_path, monkeypatch, capsys):
+    """No events at all → the hook must emit nothing (no spurious pointer)."""
+    root = tmp_path / "proj-empty"
+    _write_project(root, allowlist=[])
+    captured = _run_main(hook_module, root, [], monkeypatch, capsys)
+    assert captured.out.strip() == "", captured.out
