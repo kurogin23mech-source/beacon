@@ -1,0 +1,6 @@
+triggers:
+  - "/beacon-scenario-gen"
+  - "シナリオを生成"
+  - "SPECからテストを作る"
+  - "自動デバッグシナリオ"
+  - "scenario generate"

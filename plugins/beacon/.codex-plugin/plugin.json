@@ -1,6 +1,6 @@
 {
   "name": "beacon",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Beacon for Codex CLI — DM inbox bridge + Beacon Skills bundled as one Codex plugin.",
   "author": {
     "name": "Beacon Team",
