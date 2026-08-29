@@ -82,6 +82,7 @@ sys.path.insert(0, os.path.join(REPO, "lib"))
 
 import capability_ledger as cl  # noqa: E402
 import work_model as _wm  # noqa: E402  (canonical Target id-prefix table, e-5253)
+import target_state as _ts  # noqa: E402  (BUILTIN_TARGET_CLASSES SSOT — terminable set + gate, ms-163)
 
 
 def _scanned_paths(commands_path: str = "") -> list:
@@ -637,6 +638,144 @@ def find_iterator_narrowing(path: str = "") -> list:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Completion-producer coverage (ms-163). A DIFFERENT axis from the reach families: an L2
+# dimension produced at 完遂 (deliverable / decision) must be produced GENERICALLY across
+# every terminable target-class, not hardwired to the dev milestone. Two checks:
+#   producer 被覆 (e-5876): each L2 completion-dimension has a real producer OR is
+#     declaration-driven (guards an L2-in-name-only dimension nobody produces).
+#   完遂 seam 被覆 (e-5877): every terminable built-in class's completion terminal REACHES
+#     each dimension's producer (a class dropped from decision/deliverable capture is the
+#     混用 this closes). Scans lib/ + server/ (e-5878 adds server/ so the server-side
+#     done_milestone producer wiring is in view).
+# The terminable class set + completion_gate come from target_state.BUILTIN_TARGET_CLASSES
+# (SSOT); the ledger adds the producer tokens + per-class terminal HANDLERS + the pending
+# allowlist. Reach uses DIRECT-call attribution (no helper expansion): every real producer
+# call is direct in its terminal handler (verified — cmd_milestone_done → capture,
+# cmd_target_approve → decision, done_milestone → both), and helper expansion would falsely
+# credit operation with deliverable via _apply_transition's milestone-only branch.
+# ---------------------------------------------------------------------------
+
+def _completion_scan_paths() -> list:
+    """Files the completion-seam scan walks: the CLI family (commands.py / commands_shared
+    + lib/cmd_*.py — the terminal verb handlers) PLUS every ``server/*.py`` (e-5878 — the
+    web/API completion seams like ``done_milestone`` live here; without server/ the scan
+    misses the server-side producer wiring entirely). Best-effort: a server module that
+    fails to parse is skipped, not fatal."""
+    lib = os.path.join(REPO, "lib")
+    out = list(_scanned_paths())  # commands.py + commands_shared.py + cmd_*.py
+    for p in sorted(glob.glob(os.path.join(REPO, "server", "*.py"))):
+        if os.path.exists(p):
+            out.append(p)
+    return out
+
+
+def _direct_call_tokens(trees: list) -> dict:
+    """Return ``{function_name: {call_token, ...}}`` for every function across ``trees``,
+    where a call_token is the bare name (``foo(...)``) or attribute attr
+    (``mod.foo(...)``) of a Call whose INNERMOST enclosing function is that function. This
+    is DIRECT attribution: a producer call inside a nested helper is attributed to the
+    helper, not its parent, so a handler is credited only for producers it calls itself
+    (no helper expansion — see the module note on why _apply_transition must not leak
+    deliverable coverage to operation). A ``def foo`` in two modules merges token sets
+    (fine: the checker only asks 'does ANY function named H call producer P')."""
+    out: dict = {}
+    for _rel, tree, funcs in trees:
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if isinstance(fn, ast.Name):
+                token = fn.id
+            elif isinstance(fn, ast.Attribute):
+                token = fn.attr
+            else:
+                continue
+            host = _enclosing_function(funcs, node.lineno)
+            if host:
+                out.setdefault(host, set()).add(token)
+    return out
+
+
+def _terminable_builtin_classes() -> list:
+    """Return ``[(kind, completion_gate)]`` for every built-in target-class that SETTLES
+    (has a completion terminal) — i.e. ``never_terminal`` is False, equivalently
+    ``completion_gate`` is non-None (target_state's XOR invariant). ``account`` is
+    never_terminal → excluded (no completion → nothing to produce)."""
+    out = []
+    for kind, cls in _ts.BUILTIN_TARGET_CLASSES.items():
+        if not cls.get("never_terminal", False) and cls.get("completion_gate"):
+            out.append((kind, cls.get("completion_gate")))
+    return out
+
+
+def find_producer_coverage_gaps() -> list:
+    """producer 被覆 (ms-163 e-5876): each L2 completion-dimension must have ≥1 REAL
+    producer function OR be declaration-driven. Returns the dimensions satisfying NEITHER —
+    an L2-in-name-only dimension nobody can produce. Each item:
+    ``{dimension, mode, advice, status}`` (status always ``"new_violation"`` — a dimension
+    with no producer is never acceptable; there is no pending class here)."""
+    trees = _load_trees(_completion_scan_paths())
+    # A producer "exists" when it is WIRED — invoked at ≥1 completion seam in the scanned
+    # population (the definition can live in a leaf module like deliverable_capture.py that
+    # is not itself a completion seam; what matters is that a terminal calls it).
+    wired = set()
+    for tokens in _direct_call_tokens(trees).values():
+        wired |= tokens
+    gaps = []
+    for dim, spec in cl.COMPLETION_DIMENSIONS.items():
+        tokens = cl.COMPLETION_PRODUCER_CALLS.get(dim, frozenset())
+        producer_exists = any(t in wired for t in tokens)
+        declaration_driven = spec.get("mode") == "declaration-driven"
+        if not producer_exists and not declaration_driven:
+            gaps.append({"dimension": dim, "mode": spec.get("mode", ""),
+                         "advice": spec.get("advice", ""), "status": "new_violation"})
+    return gaps
+
+
+def find_completion_seam_gaps() -> list:
+    """完遂 seam 被覆 (ms-163 e-5877 + e-5878 server scan): every terminable built-in class's
+    completion terminal must REACH each completion-dimension's producer. Returns the gaps —
+    a ``(class, dimension)`` whose terminal handlers call no producer for that dimension.
+
+    Each item: ``{class, dimension, terminals, status, advice}``. ``status`` (via
+    ``cl.classify_completion_seam``) is ``pending_debt`` (in ``KNOWN_COMPLETION_SEAM_GAP``,
+    owner ms-163 — the current 混用 accepted until the e-5879/5880 fix) or ``new_violation``
+    (a fresh gap — a new terminable class, or a regression that unwired a producer, that
+    FAILS the checker). Descriptor-defined classes are checked once under the
+    ``*descriptor*`` sentinel (their single generic terminal ``beacon target close``)."""
+    trees = _load_trees(_completion_scan_paths())
+    calls = _direct_call_tokens(trees)
+
+    def _reaches(handlers: tuple, producer_tokens) -> bool:
+        for h in handlers:
+            if calls.get(h, set()) & set(producer_tokens):
+                return True
+        return False
+
+    # Every terminable target = the built-ins that settle + the descriptor sentinel (all
+    # descriptor classes share the one generic close terminal).
+    targets = [(kind, gate) for kind, gate in _terminable_builtin_classes()]
+    targets.append((cl.DESCRIPTOR_TERMINAL_SENTINEL, _ts.GATE_SELF_CLOSE_BAN))
+
+    gaps = []
+    for kind, gate in targets:
+        if kind == cl.DESCRIPTOR_TERMINAL_SENTINEL:
+            handlers = cl.DESCRIPTOR_TERMINAL_HANDLERS
+        else:
+            handlers = cl.COMPLETION_TERMINAL_HANDLERS.get(kind, ())
+        # A GATE_SPINE class also reaches terminal through the shared review-gated approve
+        # path (which writes the decision generically).
+        if gate == _ts.GATE_SPINE:
+            handlers = tuple(handlers) + cl.SHARED_SPINE_TERMINAL_HANDLERS
+        for dim in cl.COMPLETION_DIMENSIONS:
+            if not _reaches(handlers, cl.COMPLETION_PRODUCER_CALLS.get(dim, frozenset())):
+                status, advice = cl.classify_completion_seam(kind, dim)
+                gaps.append({"class": kind, "dimension": dim, "terminals": list(handlers),
+                             "status": status, "advice": advice})
+    return sorted(gaps, key=lambda g: (g["class"], g["dimension"]))
+
+
 def run(commands_path: str = "", arm_path: str = "") -> dict:
     """Run all checks and return a structured result with an ``ok`` verdict.
 
@@ -710,11 +849,20 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
     # guards that fail if a future L0 verb/Skill leaks into the public distribution.
     l0_leak = cl.shipped_l0_verbs()
     l0_skill_leak = cl.shipped_l0_skills()
+    # Completion-producer coverage (ms-163): producer 被覆 (a dimension nobody produces) +
+    # 完遂 seam 被覆 (a terminable class dropped from a producer). The current 混用 are
+    # pending_debt (allowlisted, owner ms-163) so they don't fail this branch's CI until the
+    # e-5879/5880 fix; a NEW gap (fresh terminable class / unwired producer) is new_violation.
+    producer_coverage = find_producer_coverage_gaps()
+    all_completion_seam = find_completion_seam_gaps()
+    new_completion_seam = [g for g in all_completion_seam if g["status"] == "new_violation"]
+    pending_completion_seam = [g for g in all_completion_seam if g["status"] == "pending_debt"]
     ok = (not cov["unclassified"] and not skill_cov["unclassified"]
           and not ownership["unowned"] and not skill_ownership["unowned"]
           and not new_symbol and not new_collection and not new_arm
           and not new_iterator_narrowing
-          and not l0_leak and not l0_skill_leak)
+          and not l0_leak and not l0_skill_leak
+          and not producer_coverage and not new_completion_seam)
     return {"ok": ok, "coverage": cov, "skill_coverage": skill_cov,
             "ownership": ownership, "skill_ownership": skill_ownership,
             # the canonical family-token list — iterate this × {all,new,pending,
@@ -744,7 +892,15 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
             "reviewed_iterator_narrowing": reviewed_iterator_narrowing,
             # distribution exclusion — NOT a reach/narrowing family (own axis)
             "l0_distribution_leak": l0_leak,
-            "l0_skill_distribution_leak": l0_skill_leak}
+            "l0_skill_distribution_leak": l0_skill_leak,
+            # completion-producer coverage (ms-163) — its own axis (producer 被覆 +
+            # 完遂 seam 被覆), NOT a reach family. producer_coverage = dimensions nobody
+            # produces (always fails); {all,new,pending}_completion_seam = the terminable-
+            # class×dimension gaps by status (new fails, pending is allowlisted debt).
+            "producer_coverage": producer_coverage,
+            "all_completion_seam": all_completion_seam,
+            "new_completion_seam": new_completion_seam,
+            "pending_completion_seam": pending_completion_seam}
 
 
 def render_proposal(prop: dict) -> None:
@@ -945,6 +1101,29 @@ def main() -> int:
               f"literal does not narrow Target records, do NOT remediate):")
         for mod, signal_kind, token in rev_narr:
             print(f"    ✓ {mod} '{token}' ({signal_kind}) is not a Target narrowing")
+    # Completion-producer coverage (ms-163).
+    prod_cov = result["producer_coverage"]
+    if prod_cov:
+        print(f"  PRODUCER COVERAGE VIOLATION ({len(prod_cov)}) — an L2 completion-"
+              f"dimension has no producer and is not declaration-driven:")
+        for g in prod_cov:
+            print(f"    - {g['dimension']}: no built-in produces it (mode={g['mode']})")
+            print(f"      → {g['advice']}")
+    new_seam = result["new_completion_seam"]
+    pending_seam = result["pending_completion_seam"]
+    if new_seam:
+        print(f"  NEW COMPLETION-SEAM GAP ({len(new_seam)}) — a terminable target-class's "
+              f"completion does not reach a producer (ms-163):")
+        for g in new_seam:
+            print(f"    - {g['class']} completion does not produce '{g['dimension']}' "
+                  f"(terminals: {', '.join(g['terminals'])})")
+            print(f"      → {g['advice']}")
+    if pending_seam:
+        pend = sorted({(g["class"], g["dimension"]) for g in pending_seam})
+        print(f"  pending completion-seam gap ({len(pend)}, allowlisted — remediate via "
+              f"the generic completion seam then drop from KNOWN_COMPLETION_SEAM_GAP):")
+        for kind, dim in pend:
+            print(f"    · {kind} completion does not yet produce '{dim}'")
     if result["ok"]:
         print("  OK: every capability is classified and no profession-shared "
               "capability reaches a profession concrete (no NEW symbol reach or "
