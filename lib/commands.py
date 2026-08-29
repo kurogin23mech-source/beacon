@@ -5916,6 +5916,34 @@ def cmd_doctor():
         )
 
     # ------------------------------------------------------------------ #
+    # 2b. HOOK_MANIFEST completeness (ms-160 e-5807)
+    # ------------------------------------------------------------------ #
+    # The check above only confirms SOME runnable beacon PostToolUse hook exists.
+    # But beacon installs a whole set across several events (commit / save / halt
+    # / postcompact / stop / session-start / bus-inbox); a partial install — e.g.
+    # a `beacon skill install` from before e-5806 left the MCP save hook and the
+    # bus-inbox receive hook unwired — leaves the PostToolUse check green while
+    # DM receive / auto-save / STOP silently no-op. Check every manifest entry so
+    # a partial install surfaces instead of hiding. (installer manifest × doctor
+    # 照合 — the other half of the e-5806 forcing function.)
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, "r", encoding="utf-8") as _f:
+                _all_hooks = json.load(_f).get("hooks", {})
+            missing_hooks = [spec["key"] for spec in HOOK_MANIFEST
+                             if not _manifest_hook_present(_all_hooks, spec)]
+        except Exception:
+            missing_hooks = []
+        if missing_hooks:
+            warnings.append(
+                "WARN [hooks] Beacon hooks missing from ~/.claude/settings.json: "
+                + ", ".join(missing_hooks) + "\n"
+                "       (your install path did not wire these; the matching "
+                "receive / auto-save / STOP behaviour silently no-ops.)\n"
+                "       Run: beacon skill install"
+            )
+
+    # ------------------------------------------------------------------ #
     # 3. Required Skills installed
     # ------------------------------------------------------------------ #
     required_skills = ["beacon-log", "beacon-session-start", "beacon-session-end"]
