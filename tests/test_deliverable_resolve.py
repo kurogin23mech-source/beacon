@@ -115,6 +115,40 @@ def test_rollup_label_cap_truncates_but_count_is_exact():
 
 
 # ---------------------------------------------------------------------------
+# changelog projector — the produced value IS the root deliverable-changelog,
+# summarised to its current-state map (ms-161 e-5825). milestone→機能 rides this.
+# ---------------------------------------------------------------------------
+
+def _changelog_spec():
+    return {"target_class": "milestone", "kind": "feature-map", "label": "機能",
+            "projector": td.PROJECTOR_CHANGELOG, "ref": ""}
+
+
+def test_changelog_resolves_to_derived_map():
+    import deliverable_changelog as dc
+    data = {"name": "P", "profession": "dev"}
+    dc.append_deliverable(data, {
+        "source": {"target_id": "ms-1", "kind": "milestone"},
+        "category": "feature-map", "title": "claim", "summary": "二重取り防止"})
+    out = dr.resolve_deliverable_content(data, _changelog_spec())
+    r = out["resolved"]
+    assert r["found"] is True
+    assert r["strategy"] == td.PROJECTOR_CHANGELOG
+    assert r["count_active"] == 1
+    assert r["categories"] == [{"category": "feature-map", "count": 1}]
+    # the derived dev render (application-map-flavoured) is carried for humans
+    assert "アプリケーション全貌マップ" in r["rendered"]
+    assert "二重取り防止" in r["rendered"]
+
+
+def test_changelog_empty_log_resolves_found_not_a_miss():
+    out = dr.resolve_deliverable_content({"profession": "dev"}, _changelog_spec())
+    r = out["resolved"]
+    assert r["found"] is True          # empty is a valid empty map, not a failure
+    assert r["count_active"] == 0
+
+
+# ---------------------------------------------------------------------------
 # dispatch + union.
 # ---------------------------------------------------------------------------
 
@@ -123,6 +157,28 @@ def test_unknown_projector_is_defensive_not_a_crash():
     out = dr.resolve_deliverable_content({}, spec)
     assert out["resolved"]["found"] is False
     assert "bogus" in out["resolved"]["error"]
+
+
+def test_every_allowlisted_projector_has_a_resolver():
+    """Forcing function (ms-161 maintainability review PR#694): every projector in
+    DELIVERABLE_PROJECTORS must have a resolver branch in resolve_deliverable_content.
+    Without this, adding a projector to the allowlist but forgetting the elif branch
+    silently returns 'no resolver' (found=False) — a drift the master validator does
+    not catch. A resolver may legitimately return found=False (e.g. a doc whose ref
+    is missing), but it must NOT be the 'no resolver for projector' sentinel."""
+    import store as _store
+    for projector in td.DELIVERABLE_PROJECTORS:
+        spec = {"target_class": "milestone", "kind": "feature-map",
+                "projector": projector, "ref": "application-map"}
+        # doc resolver reaches the store; give it a benign one so this stays a pure
+        # dispatch check (we assert on the 'no resolver' sentinel, not doc content).
+        fake_store = mock.Mock()
+        fake_store.get_document.return_value = {"title": "m", "content": "", "updated_at": ""}
+        with mock.patch.object(dr, "get_store", return_value=fake_store):
+            out = dr.resolve_deliverable_content({"profession": "dev"}, spec)
+        err = out["resolved"].get("error", "") or ""
+        assert "no resolver" not in err, \
+            f"projector {projector!r} is allowlisted but has no resolver branch"
 
 
 def test_resolve_project_deliverables_is_io_counterpart_of_pure_union():

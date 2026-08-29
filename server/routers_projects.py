@@ -72,6 +72,7 @@ import operations
 import trek as trek_mod
 import envelope as envelope_mod
 import work_model
+import deliverable_capture  # ms-161 e-5823: capture produced value on milestone 完遂
 import sales_entities  # ms-108 e-5194: mirror the CLI's funnel resolution into the payload
 import master_adapter
 import approved_actions as approved_actions_mod
@@ -1299,6 +1300,13 @@ def make_router(
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
             captured["done_reason"] = (ms.get("meta") or {}).get("done_reason", "")
+            # ms-161 e-5823: capture the milestone's produced value on 完遂 through the
+            # SERVER seam too (the web/API done path, alongside the two CLI seams). The
+            # capture is additive / idempotent (no-op if the class declares no
+            # deliverable or the value is already logged); it mutates `data` in memory
+            # so _apply_op_and_broadcast persists it in the same write.
+            deliverable_capture.capture_target_completion(
+                data, ms, reason=captured["done_reason"])
             return data, {"id": ms["id"], "title": work_model.target_label(ms), "status": "done"}
         result = _apply_op_and_broadcast(
             project_id, op, op_name="milestone.done", actor=user.get("sub", ""),
