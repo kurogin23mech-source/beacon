@@ -331,6 +331,7 @@ def cmd_operation_close():
     # deliverable 記録 + 完遂 decision を残す (milestone done と対称)。deliverable は
     # operation が slot を宣言しないので no-op、decision は完遂 verdict を記録する。save の
     # 前に呼ぶ (capture が data を in-memory で書き換え、caller がまとめて永続化する)。
+    # on_target_completion は DIRECT 呼び出し必須 (helper 抽出は checker 被覆 credit を落とす)。
     import target_completion
     target_completion.on_target_completion(data, op, verdict="closed")
     save_project(data, op={"type": "operation_close", "op_id": op_id})

@@ -67,6 +67,18 @@ def test_completion_terminal_handlers_resolve_to_real_functions():
         f"(rename → registry rot): {missing}")
 
 
+def test_every_terminable_class_has_a_terminal_handler_entry():
+    # SYNC forcing function (maintainability review): a new terminable class added to
+    # target_state.BUILTIN_TARGET_CLASSES MUST get a COMPLETION_TERMINAL_HANDLERS row. This
+    # fails EARLY with a clear message naming the missing kind — before the (also-correct but
+    # generic) seam-gap new_violation the checker would otherwise emit.
+    missing = sorted(kind for kind, _gate in chk._terminable_builtin_classes()
+                     if kind not in cl.COMPLETION_TERMINAL_HANDLERS)
+    assert not missing, (
+        "terminable built-in class(es) with no COMPLETION_TERMINAL_HANDLERS entry "
+        f"(add a row + wire its terminal to on_target_completion): {missing}")
+
+
 def test_producer_call_tokens_are_wired():
     wired = _all_wired_call_tokens()
     for dim, tokens in cl.COMPLETION_PRODUCER_CALLS.items():

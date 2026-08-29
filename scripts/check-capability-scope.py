@@ -1118,6 +1118,9 @@ def main() -> int:
             print(f"    - {g['class']} completion does not produce '{g['dimension']}' "
                   f"(terminals: {', '.join(g['terminals'])})")
             print(f"      → {g['advice']}")
+    # This block fires only when KNOWN_COMPLETION_SEAM_GAP is non-empty (an accepted temporary
+    # gap). It is empty today (the ms-163 fix wired every class), so pending_seam is [] and
+    # this is dormant — NOT dead: it re-activates the moment a future PR allowlists a gap.
     if pending_seam:
         pend = sorted({(g["class"], g["dimension"]) for g in pending_seam})
         print(f"  pending completion-seam gap ({len(pend)}, allowlisted — remediate via "
@@ -1125,15 +1128,23 @@ def main() -> int:
         for kind, dim in pend:
             print(f"    · {kind} completion does not yet produce '{dim}'")
     if result["ok"]:
-        print("  OK: every capability is classified and no profession-shared "
-              "capability reaches a profession concrete (no NEW symbol reach or "
-              "collection coupling).")
+        print("  OK: every capability is classified, no profession-shared capability "
+              "reaches a profession concrete (no NEW symbol reach / collection coupling / "
+              "arm coupling / iterator narrowing), and every L2 completion-dimension has a "
+              "producer reached by every terminable class (no producer-coverage or "
+              "完遂-seam gap).")
     else:
-        print("  → Fix the items above (classify the verb/skill, or route the "
-              "shared capability through the occupation abstraction — "
-              "occupation.record_target_entry for recording, the work_model "
-              "target registry for enumeration), then re-run: "
-              "python3 scripts/check-capability-scope.py")
+        print("  → Fix the items above, then re-run "
+              "python3 scripts/check-capability-scope.py:")
+        print("    · unclassified / reach / narrowing: classify the verb/skill, or route "
+              "the shared capability through the occupation abstraction "
+              "(occupation.record_target_entry for recording, the work_model target "
+              "registry for enumeration).")
+        print("    · completion-seam gap (ms-163): wire the class's terminal to call "
+              "target_completion.on_target_completion DIRECTLY and add the class to "
+              "capability_ledger.COMPLETION_TERMINAL_HANDLERS.")
+        print("    · producer-coverage: give the L2 completion-dimension a real producer "
+              "(wired at a seam) or mark it declaration-driven in COMPLETION_DIMENSIONS.")
     return 0 if result["ok"] else 1
 
 

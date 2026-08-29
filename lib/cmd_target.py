@@ -898,6 +898,7 @@ def cmd_target_close():
     # ms-163 e-5879/5880: closing a descriptor target is a 完遂 — fire the generic seam
     # (deliverable 記録 + 完遂 decision) so a descriptor class is no longer dropped from
     # capture. Fetch the just-closed record before save (capture mutates data in-memory).
+    # on_target_completion は DIRECT 呼び出し必須 (helper 抽出は checker 被覆 credit を落とす)。
     _rec_for_capture = _te.find_target(data, desc, target_id)
     if isinstance(_rec_for_capture, dict):
         import target_completion

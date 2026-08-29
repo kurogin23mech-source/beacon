@@ -795,17 +795,25 @@ COMPLETION_DIMENSIONS = {
     "decision": {
         "mode": "builtin-producer",
         "advice": "the 完遂 decision (目的達成 verdict) must be written for EVERY terminable "
-                  "target-class's completion (a completion IS a decision), via "
-                  "decision_event_from_completion_verdict / _record_completion_verdict_"
-                  "decision — do NOT confine it to the dev spine (milestone/operation); the "
-                  "sales opportunity judge terminal must write one too.",
+                  "target-class's completion (a completion IS a decision). For a NEW class "
+                  "terminal, call target_completion.on_target_completion — it writes BOTH the "
+                  "deliverable capture and the completion decision in one call; wiring the raw "
+                  "decision_event_from_completion_verdict / _record_completion_verdict_decision "
+                  "directly would satisfy the decision check but SILENTLY drop deliverable "
+                  "capture. Those raw tokens are the underlying producers on_target_completion "
+                  "delegates to (and the pre-existing milestone/server seams still use them "
+                  "directly) — do NOT confine the decision to the dev spine.",
     },
 }
 
 # The producer CALL tokens per dimension — the function names whose invocation at a
 # completion terminal counts as "this class produces this dimension". Scanned across lib/
-# + server/ (e-5878 adds server/). A terminal handler that (transitively, cmd→helper one
-# level) calls one of these produces that dimension.
+# + server/ (e-5878 adds server/). Attribution is DIRECT-call only: a terminal handler
+# produces a dimension only if the producer token is called from the handler's OWN body.
+# A producer call extracted into a helper is attributed to the HELPER, not the handler, and
+# loses coverage credit (the checker uses innermost-enclosing-function attribution — see
+# check-capability-scope._direct_call_tokens; there is no cmd→helper expansion, unlike the
+# reach families). So always call the producer token directly from the terminal handler.
 COMPLETION_PRODUCER_CALLS = {
     # ``on_target_completion`` (lib/target_completion.py, ms-163 e-5879/5880) is the
     # class-generic completion seam: it fires BOTH capture (deliverable) and the 完遂
@@ -821,7 +829,13 @@ COMPLETION_PRODUCER_CALLS = {
 # anticipated — "keep the two in sync by hand" until this lands). Each terminable class
 # maps to the handler function(s) that finalize it. The class set + completion_gate come
 # from target_state.BUILTIN_TARGET_CLASSES (SSOT); this table adds only the HANDLER NAMES
-# (not derivable from the state model). ``test_completion_terminal_handlers_exist`` pins
+# (not derivable from the state model). SYNC REQUIREMENT: when a new terminable class
+# (never_terminal=False) is added to BUILTIN_TARGET_CLASSES, it MUST get a row here too, and
+# its handler MUST call target_completion.on_target_completion DIRECTLY (not via a helper —
+# see COMPLETION_PRODUCER_CALLS). Two forcing functions guard this:
+# ``test_every_terminable_class_has_a_terminal_handler_entry`` fails EARLY with a clear
+# message if the row is missing, and the seam check itself surfaces the class as a
+# new_violation gap; ``test_completion_terminal_handlers_resolve_to_real_functions`` pins
 # each name to a real function so a rename cannot rot the registry into a false pass.
 COMPLETION_TERMINAL_HANDLERS = {
     "milestone": ("cmd_milestone_done", "done_milestone"),
