@@ -694,12 +694,19 @@ HOOK_MANIFEST = [
      "resolver": "beacon-post-commit-hook.sh",
      "identity": ("beacon-post-commit-hook", "beacon-hook-post-commit",
                   "beacon_cli.hooks.post_commit"),
-     "timeout": 10, "statusMessage": "Beacon: checking for commit or deploy..."},
+     # e-5803 review (AX-11): this hook also detects PR-open / target-close now
+     # (ms-160 e-5801), so the status text names lifecycle events, not just commit.
+     "timeout": 10,
+     "statusMessage": "Beacon: checking for commit / PR / target-close / deploy..."},
     {"key": "save", "events": ["PostToolUse"], "matcher": "mcp__",
      "resolver": "beacon-save-hook.sh",
      "identity": ("beacon-save-hook", "beacon-hook-save",
                   "beacon_cli.hooks.save_hook"),
      "timeout": 10, "statusMessage": "Beacon: checking MCP operation..."},
+    # e-5803 review (AX-9): matcher "*" is Claude Code's settings.json glob for
+    # "all tools". The Codex equivalent uses the regex ".*" (see
+    # plugins/beacon/scripts/beacon-codex-bridge._halt_hook_entry) — the two hook
+    # systems spell "every tool" differently; do NOT copy "*" into Codex config.
     {"key": "halt-check", "events": ["PostToolUse"], "matcher": "*",
      "resolver": "beacon-halt-check.sh",
      "identity": ("beacon-hook-halt-check", "beacon_cli.hooks.halt_check"),
@@ -4755,14 +4762,17 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
 
     posttooluse_dirty = False
     if not already_present:
-        # Add beacon PostToolUse hook (commit + deploy detection)
+        # Add beacon PostToolUse hook (commit / PR / target-close / deploy detection).
+        # e-5803 review (AX-11): keep this statusMessage identical to the
+        # HOOK_MANIFEST post-commit entry so the init and skill-install paths write
+        # the same text.
         post_tool_use.append({
             "matcher": "Bash",
             "hooks": [{
                 "type": "command",
                 "command": hook_script,
                 "timeout": 10,
-                "statusMessage": "Beacon: checking for commit or deploy..."
+                "statusMessage": "Beacon: checking for commit / PR / target-close / deploy..."
             }]
         })
         posttooluse_dirty = True

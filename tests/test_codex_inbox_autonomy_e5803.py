@@ -98,6 +98,27 @@ def test_opted_in_but_no_system_envelope_downgraded_with_provenance_reason(tmp_p
     assert "opt-in 前" not in ctx
 
 
+def test_unprocessed_stop_surfaces_a_degraded_warning(tmp_path):
+    # e-5803 review (AX-1/AX-2): a STOP that can't be turned into a halt-request
+    # (here: no receive-loop.session.json → session_id unresolved) must NOT vanish
+    # silently on the kill-switch path — it must surface a fail-loud warning.
+    cwd = _setup(tmp_path, auto_execute_channels=[])
+    (cwd / ".beacon" / "codex" / "receive-loop.session.json").unlink()  # session_id ""
+    _seed(cwd, {
+        "event_id": "1787000099000-STOPx",
+        "channel": "stop-signal",
+        "sender_session_id": "other-sid",
+        "created_at": "2026-08-29T07:00:09.000000Z",
+        "payload": {"kind": "stop", "scope": "global",
+                    "issued_by_session_id": "other-sid", "reason": "halt"},
+    })
+    ctx = _run(cwd)
+    assert "STOP signal 受信" in ctx
+    assert "停止処理に失敗" in ctx
+    # and the stop is NOT rendered as a normal DM
+    assert "1787000099000-STOPx" not in ctx
+
+
 def test_plain_dm_has_no_imperative_or_downgrade(tmp_path):
     cwd = _setup(tmp_path, auto_execute_channels=["operation-trigger"])
     _seed(cwd, {

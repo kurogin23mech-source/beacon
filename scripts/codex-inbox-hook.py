@@ -251,16 +251,26 @@ def main() -> int:
             dm_entries.append(e)
 
     stop_active = False
-    if stop_entries and ss is not None and session_id:
-        try:
-            halt = ss.process_inbox_events(
-                [e["event"] for e in stop_entries],
-                session_id=session_id,
-                beacon_dir=str(Path(cwd) / ".beacon"),
-            )
-            stop_active = halt is not None
-        except Exception:
-            stop_active = False  # never let a broken processor block the hook
+    stop_unprocessed = False  # e-5803 review (AX-1/AX-2): could not process a STOP
+    if stop_entries:
+        if ss is not None and session_id:
+            try:
+                halt = ss.process_inbox_events(
+                    [e["event"] for e in stop_entries],
+                    session_id=session_id,
+                    beacon_dir=str(Path(cwd) / ".beacon"),
+                )
+                stop_active = halt is not None
+            except Exception:
+                # A broken processor must not block the hook — but a STOP that
+                # could not be processed must NOT vanish silently on the
+                # kill-switch path (parity with the halt-check hook's fail-loud).
+                stop_unprocessed = True
+        else:
+            # ss unavailable (module import failed) or session_id empty (daemon
+            # pointer missing / codex_session unavailable): the STOP was split out
+            # of the DM list but never turned into a halt-request. Surface it.
+            stop_unprocessed = True
 
     # ms-160 e-5803: apply the shared auto-execute downgrade + operation-trigger
     # imperative (parity with the Claude inbox hook). Kept operation-trigger
@@ -330,14 +340,26 @@ def main() -> int:
             f"\n⚠ 安全ゲート未適用: bus_delivery module を import できず、auto-execute "
             f"event {gate_unavailable_autoexec} 件の opt-in / provenance 検証を "
             "実行できませんでした。上の一覧に出ていますが gate 未通過です。自動実行せず、"
-            "人間に確認してください。\n"
+            "`beacon doctor` でフック状態を確認し、人間に報告してください "
+            "(修復後は次の受信で再評価されます)。\n"
+        )
+    if stop_unprocessed:
+        # e-5803 review (AX-1/AX-2): a STOP arrived but could not be turned into a
+        # halt-request. Fail LOUD (parity with the halt-check hook's degraded
+        # notice) so the session does not keep running as if no stop was sent.
+        parts.append(
+            "\n⚠ STOP signal 受信 (remote kill-switch) — ただし停止処理に失敗しました "
+            "(stop_signal module 未 import か session_id 未解決)。自律ループを続行せず、"
+            "`beacon doctor` でフック状態を確認し、停止要求が来ていないか人間に確認してから "
+            "進めてください。\n"
         )
     if stop_active:
         parts.append(
             "\n⚠ STOP signal received (remote kill-switch). Finish the current "
             "step, persist in-progress work, then halt — do not start new tool "
-            "calls until the user clears it with `beacon resume`. Full details "
-            "surface again after the next tool call.\n"
+            "calls until the user clears it with `beacon resume scoped --target "
+            "<kind>:<id>` (scoped) or `beacon resume global`. Full details surface "
+            "again after the next tool call.\n"
         )
     additional = "".join(parts)
 

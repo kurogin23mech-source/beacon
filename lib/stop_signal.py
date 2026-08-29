@@ -721,13 +721,18 @@ def render_halt_inject(halt_request: dict) -> str:
     issued_at = halt_request.get("issued_at") or "?"
     received_at = halt_request.get("received_at") or "?"
 
+    # e-5803 review (AX-3): emit the FULL, runnable resume command, not a vague
+    # `beacon resume ...`. The bare form errors (the CLI requires the `scoped`
+    # or `global` subcommand), so an AI that copies it literally cannot recover.
     if scope == SCOPE_GLOBAL:
         target_line = "scope: GLOBAL (every active session is asked to halt)"
+        resume_cmd = "beacon resume global"
     else:
         target = halt_request.get("target") or {}
-        target_line = (
-            f"scope: scoped → {target.get('kind', '?')}:{target.get('id', '?')}"
-        )
+        tk = target.get("kind", "?")
+        ti = target.get("id", "?")
+        target_line = f"scope: scoped → {tk}:{ti}"
+        resume_cmd = f"beacon resume scoped --target {tk}:{ti}"
 
     lines = [
         "⚠ STOP SIGNAL — halt requested",
@@ -741,7 +746,7 @@ def render_halt_inject(halt_request: dict) -> str:
         "",
         "Action: finish the current tool call cleanly, persist any in-progress",
         "work, then halt. Do not start new tool calls until the user clears",
-        "the halt with `beacon resume ...` (or you explicitly override after",
+        f"the halt with `{resume_cmd}` (or you explicitly override after",
         "explaining why).",
     ]
     return "\n".join(lines)

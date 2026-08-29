@@ -49,15 +49,16 @@ T1_SYSTEM_TIER = "T1-system"
 T1_SYSTEM_ISSUER = "beacon-system"
 
 # Downgrade reason tags (surfaced in the audit frame / inject note).
-# e-5803 review (AX-9): DOWNGRADE_ALLOWLIST_MISS MUST stay the empty string. The
-# Claude hook attaches ``_downgrade_reason`` to an event only when the reason is
-# truthy (``if downgrade_reason:``); an allowlist miss historically carried NO
-# reason key, so a non-empty value here would change that hook's on-wire event
-# shape + audit frame (breaking parity with the pre-e-5803 inline logic). Do not
-# use ``reason == DOWNGRADE_ALLOWLIST_MISS`` for control flow (it aliases "unset");
-# branch on ``reason == DOWNGRADE_NON_SYSTEM_ENVELOPE`` and treat the else as
-# allowlist-miss. This constant is intentionally NOT in __all__.
-DOWNGRADE_ALLOWLIST_MISS = ""
+# e-5803 review (AX-8/AX-9): the allowlist-miss sentinel MUST stay the empty
+# string. The Claude hook attaches ``_downgrade_reason`` to an event only when the
+# reason is truthy (``if downgrade_reason:``); an allowlist miss historically
+# carried NO reason key, so a non-empty value would change that hook's on-wire
+# event shape + audit frame (breaking parity with the pre-e-5803 inline logic).
+# It is ``_``-prefixed (private) so a caller can't ``import`` it and write
+# ``reason == bd._DOWNGRADE_ALLOWLIST_MISS`` — which would alias "unset" and
+# misclassify any empty reason. Branch on ``reason == DOWNGRADE_NON_SYSTEM_ENVELOPE``
+# and treat the else as allowlist-miss (or use ``if not reason``).
+_DOWNGRADE_ALLOWLIST_MISS = ""
 DOWNGRADE_NON_SYSTEM_ENVELOPE = "non-system-envelope"
 
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
@@ -137,7 +138,7 @@ def classify_auto_execute(
         return (delivery, "", "")
     channel = str(event.get("channel") or "")
     if channel not in allowlist:
-        return (PROPOSE_TO_AI, AUTO_EXECUTE, DOWNGRADE_ALLOWLIST_MISS)
+        return (PROPOSE_TO_AI, AUTO_EXECUTE, _DOWNGRADE_ALLOWLIST_MISS)
     if channel in provenance_channels and not has_system_provenance(event):
         return (PROPOSE_TO_AI, AUTO_EXECUTE, DOWNGRADE_NON_SYSTEM_ENVELOPE)
     return (AUTO_EXECUTE, "", "")
