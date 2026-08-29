@@ -235,9 +235,12 @@ def append_deliverable(data: dict, entry: dict, *,
     injectable so a test pins them and a backfill can carry a historical stamp.
 
     IN-MEMORY only: mutates ``data[CHANGELOG_KEY]`` (creating the list on first
-    append) and returns the stored dict. The CALLER owns persistence — mirroring
-    ``root_target.set_root_label`` — so this module stays I/O-free and the
-    cloud/local save path is unchanged."""
+    append) and returns a COPY of the stored entry. The CALLER owns persistence —
+    mirroring ``root_target.set_root_label`` — so this module stays I/O-free and the
+    cloud/local save path is unchanged. A COPY (not the live stored dict) is returned
+    so a caller that mutates the result cannot corrupt the log out-of-band —
+    symmetric with the read side (``read_deliverables`` / ``active_deliverables``);
+    the log is mutable ONLY through this module's API (ms-161 AX review PR#694)."""
     normalized = normalize_deliverable_entry(entry)
     stamped = {
         "id": _mint_id(data),
@@ -250,7 +253,7 @@ def append_deliverable(data: dict, entry: dict, *,
         log = []
         data[CHANGELOG_KEY] = log
     log.append(stamped)
-    return stamped
+    return _copy_entry(stamped)
 
 
 def read_deliverables(data: dict, *,
@@ -332,12 +335,13 @@ def retire_deliverable(data: dict, entry_id: str, *,
     longer exists, so it drops out of the current-state summary ("消す").
 
     Flips the entry's status to ``retired`` in place and stamps the transition;
-    an optional ``reason`` (why it was removed) is recorded when given. Returns
-    the mutated LIVE entry (not a copy) so a caller that immediately re-reads sees
-    the new status. Raises ``DeliverableValidationError`` if ``entry_id`` is not
-    in the log — retiring a non-existent entry is a caller bug, surfaced loudly
-    rather than a silent no-op. Idempotent-safe: retiring an already-retired
-    entry simply re-stamps."""
+    an optional ``reason`` (why it was removed) is recorded when given. Returns a
+    COPY of the mutated entry (showing the new status) — NOT the live stored dict,
+    so a caller mutating the result cannot corrupt the log out-of-band (symmetric
+    with the read side; ms-161 AX review PR#694). Raises ``DeliverableValidationError``
+    if ``entry_id`` is not in the log — retiring a non-existent entry is a caller
+    bug, surfaced loudly rather than a silent no-op. Idempotent-safe: retiring an
+    already-retired entry simply re-stamps."""
     entry = _find_entry(data, entry_id)
     if entry is None:
         raise DeliverableValidationError(
@@ -346,7 +350,7 @@ def retire_deliverable(data: dict, entry_id: str, *,
     reason = (reason or "").strip()
     if reason:
         entry["retire_reason"] = reason
-    return entry
+    return _copy_entry(entry)
 
 
 def supersede_deliverable(data: dict, old_id: str, new_entry: dict, *,
@@ -361,7 +365,9 @@ def supersede_deliverable(data: dict, old_id: str, new_entry: dict, *,
     successor raises BEFORE the old entry is touched — the transition is
     all-or-nothing). Its ``supersedes`` is SET to ``old_id`` by this operation
     regardless of any value the caller put there: the link is defined by the
-    operation, not hand-authored. Returns the stored successor entry. Raises if
+    operation, not hand-authored. Returns a COPY of the stored successor entry (via
+    ``append_deliverable``), so mutating the result cannot corrupt the log —
+    symmetric with append/retire/read (ms-161 AX review PR#694). Raises if
     ``old_id`` is absent (cannot supersede what is not there)."""
     old = _find_entry(data, old_id)
     if old is None:

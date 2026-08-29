@@ -314,6 +314,28 @@ def test_active_view_empty_when_all_terminal():
     assert dc.active_deliverables(data) == []
 
 
+def test_write_returns_are_copies_not_live_log_refs():
+    """ms-161 AX review PR#694: append/retire/supersede return COPIES, so mutating
+    the result cannot corrupt the stored log out-of-band — symmetric with reads."""
+    data = {}
+    appended = dc.append_deliverable(data, _entry(title="v1"))
+    appended["title"] = "HACKED-append"
+    appended["source"]["target_id"] = "HACKED"
+    assert data[dc.CHANGELOG_KEY][0]["title"] == "v1"
+    assert data[dc.CHANGELOG_KEY][0]["source"]["target_id"] == "ms-42"
+
+    retired = dc.retire_deliverable(data, appended["id"])
+    retired["status"] = "HACKED-retire"
+    assert data[dc.CHANGELOG_KEY][0]["status"] == dc.STATUS_RETIRED
+
+    data2 = {}
+    old = dc.append_deliverable(data2, _entry(title="a"))
+    successor = dc.supersede_deliverable(data2, old["id"], _entry(title="b"))
+    successor["title"] = "HACKED-supersede"
+    # the stored successor (last entry) is untouched
+    assert data2[dc.CHANGELOG_KEY][-1]["title"] == "b"
+
+
 # --- profession independence (受入条件5) -------------------------------------
 
 def test_storage_key_and_schema_carry_no_dev_vocabulary():
