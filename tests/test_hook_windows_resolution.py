@@ -166,8 +166,13 @@ def test_install_migrates_stale_backslash_both_hooks(monkeypatch, tmp_path):
     s = json.loads(settings_path.read_text(encoding="utf-8"))
     ptu = [h["command"] for e in s["hooks"]["PostToolUse"] for h in e["hooks"]]
     pc = [h["command"] for e in s["hooks"]["PostCompact"] for h in e["hooks"]]
-    # Each hook present exactly once, forward-slashed, no stale backslash dup.
-    assert ptu == [commit_cmd] and "\\" not in ptu[0]
+    # The commit hook is migrated: present exactly once, forward-slashed, no
+    # stale backslash dup. ms-160 e-5798 also wires a halt-check entry into
+    # PostToolUse, so filter to the commit hook rather than asserting the whole
+    # list equals a single entry.
+    commit_entries = [c for c in ptu if "post-commit" in c or "post_commit" in c]
+    assert commit_entries == [commit_cmd] and "\\" not in commit_entries[0]
+    assert all("\\" not in c for c in ptu), ptu
     assert pc == [pc_cmd] and "\\" not in pc[0]
 
 

@@ -173,3 +173,61 @@ def test_install_skips_postcompact_if_script_missing(fake_hooks, monkeypatch):
         for h in entry.get("hooks", [])
     ]
     assert "/nonexistent" not in pc_cmds
+
+
+# ms-160 e-5798: the halt-check hook (remote STOP kill-switch) must be wired by
+# the `beacon skill install` path too, or an autonomous loop installed that way
+# can't be stopped. matcher must be "*" so it fires after any tool call.
+
+_HALT_IDENTITY = ("beacon-hook-halt-check", "beacon_cli.hooks.halt_check")
+
+
+def _halt_entries(settings: dict) -> list:
+    """PostToolUse entries whose command references the halt-check hook."""
+    out = []
+    for entry in settings.get("hooks", {}).get("PostToolUse", []):
+        for h in entry.get("hooks", []):
+            cmd = h.get("command", "")
+            if any(s in cmd for s in _HALT_IDENTITY):
+                out.append((entry.get("matcher"), h))
+    return out
+
+
+def test_install_registers_halt_check_hook(fake_hooks):
+    """Fresh install must wire the halt-check hook under matcher "*"."""
+    fake_hooks["commands"]._install_claude_hooks(
+        fake_hooks["posttool"], fake_hooks["settings"]
+    )
+    s = _load_settings(fake_hooks["settings"])
+    halt = _halt_entries(s)
+    assert halt, s.get("hooks")
+    # A kill-switch must catch the AI after ANY tool, not just Bash.
+    assert all(matcher == "*" for matcher, _ in halt), halt
+
+
+def test_install_halt_check_is_idempotent(fake_hooks):
+    """Re-running install must not duplicate the halt-check entry."""
+    fake_hooks["commands"]._install_claude_hooks(
+        fake_hooks["posttool"], fake_hooks["settings"]
+    )
+    fake_hooks["commands"]._install_claude_hooks(
+        fake_hooks["posttool"], fake_hooks["settings"]
+    )
+    s = _load_settings(fake_hooks["settings"])
+    assert len(_halt_entries(s)) == 1, s.get("hooks")
+
+
+def test_init_path_registers_halt_check_hook(fake_hooks, tmp_path, monkeypatch):
+    """`beacon init` (_install_claude_hook, singular) must wire halt-check too —
+    AC1 requires "全 install", i.e. both the init and skill-install paths."""
+    commands = fake_hooks["commands"]
+    home = tmp_path / "init_home"
+    home.mkdir()
+    monkeypatch.setattr(commands, "_user_home", lambda: str(home))
+
+    commands._install_claude_hook()
+
+    s = _load_settings(str(home / ".claude" / "settings.json"))
+    halt = _halt_entries(s)
+    assert halt, s.get("hooks")
+    assert all(matcher == "*" for matcher, _ in halt), halt

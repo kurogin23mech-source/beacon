@@ -725,6 +725,36 @@ def _install_claude_hook():
             }],
         })
 
+    # ms-160 e-5798: install halt-check hook (remote STOP kill-switch).
+    # matcher "*" so it fires after EVERY tool call — an autonomous loop
+    # (operation-execute auto-execute / bus-armed 自動 DM 応答) may run Edit /
+    # Write / MCP tools, not just Bash, so scoping to "Bash" would let a
+    # running agent slip past the STOP. Identity check spans the entry-point
+    # name and the `python -m` fallback so re-install doesn't duplicate.
+    halt_cmd = _resolve_hook_command("beacon-halt-check.sh")
+    halt_hook_exists = False
+    for entry in post_tool_use:
+        for h in entry.get("hooks", []):
+            cmd = h.get("command", "")
+            if (
+                "beacon-hook-halt-check" in cmd
+                or "beacon_cli.hooks.halt_check" in cmd
+            ):
+                halt_hook_exists = True
+                break
+        if halt_hook_exists:
+            break
+    if halt_cmd and not halt_hook_exists:
+        post_tool_use.append({
+            "matcher": "*",
+            "hooks": [{
+                "type": "command",
+                "command": halt_cmd,
+                "timeout": 10,
+                "statusMessage": "Beacon: checking for STOP signal...",
+            }],
+        })
+
     # Install PostCompact hook (e-565): inject Tier-2 orientation after
     # transcript compaction so the AI re-fetches the source of truth rather
     # than trusting the (now blurry) summary's specific IDs / numbers.
@@ -4121,6 +4151,14 @@ def _resolve_hook_command(hook_basename: str) -> str:
             "beacon_cli.hooks.session_start",
             "CLAUDE_SESSION_START_HOOK_SCRIPT",
         ),
+        # ms-160 e-5798: PostToolUse halt-check hook (remote STOP kill-switch).
+        # bash 版は無く Python 専用 (session-start と同型)。エントリポイント
+        # beacon-hook-halt-check、fallback は python -m beacon_cli.hooks.halt_check。
+        "beacon-halt-check.sh": (
+            "beacon-hook-halt-check",
+            "beacon_cli.hooks.halt_check",
+            "CLAUDE_HALT_CHECK_HOOK_SCRIPT",
+        ),
     }
     entry_name, module_name, const_name = mapping.get(
         hook_basename, ("", "", "")
@@ -4866,10 +4904,56 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
             })
             sessionstart_dirty = True
 
-    if removed_stale or posttooluse_dirty or postcompact_dirty or stop_hook_dirty or sessionstart_dirty:
+    # ms-160 e-5798: register the PostToolUse halt-check hook (remote STOP
+    # kill-switch) so the `beacon skill install` path reaches the same end
+    # state as `beacon init` (_install_claude_hook). matcher "*" — a running
+    # autonomous loop must be caught after ANY tool call, not just Bash.
+    halt_hook_dirty = False
+    halt_cmd = _resolve_hook_command("beacon-halt-check.sh")
+    halt_ok = bool(halt_cmd) and (
+        not _is_path_command(halt_cmd) or os.path.exists(halt_cmd)
+    )
+    if halt_ok:
+        halt_identity = (
+            "beacon-hook-halt-check",
+            "beacon_cli.hooks.halt_check",
+        )
+        cleaned_halt = []
+        for entry in post_tool_use:
+            kept = []
+            for h in entry.get("hooks", []):
+                existing = h.get("command", "")
+                same_kind = any(s in existing for s in halt_identity)
+                if same_kind and existing != halt_cmd:
+                    removed_stale = True
+                    continue  # drop stale
+                kept.append(h)
+            entry["hooks"] = kept
+            if kept:
+                cleaned_halt.append(entry)
+        post_tool_use[:] = cleaned_halt
+
+        already_halt = any(
+            h.get("command", "") == halt_cmd
+            for entry in post_tool_use
+            for h in entry.get("hooks", [])
+        )
+        if not already_halt:
+            post_tool_use.append({
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": halt_cmd,
+                    "timeout": 10,
+                    "statusMessage": "Beacon: checking for STOP signal...",
+                }],
+            })
+            halt_hook_dirty = True
+
+    if removed_stale or posttooluse_dirty or postcompact_dirty or stop_hook_dirty or sessionstart_dirty or halt_hook_dirty:
         with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
-        if removed_stale and not (posttooluse_dirty or postcompact_dirty or stop_hook_dirty or sessionstart_dirty):
+        if removed_stale and not (posttooluse_dirty or postcompact_dirty or stop_hook_dirty or sessionstart_dirty or halt_hook_dirty):
             print(f"Hooks: cleaned stale {hook_basename} entries; current path active")
         else:
             parts = []
@@ -4881,6 +4965,8 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
                 parts.append("Stop")
             if sessionstart_dirty:
                 parts.append("SessionStart")
+            if halt_hook_dirty:
+                parts.append("HaltCheck")
             print(f"Hooks: registered {' + '.join(parts) or 'nothing new'} in {settings_path}")
     else:
         print("Hooks: already configured in ~/.claude/settings.json")
