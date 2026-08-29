@@ -27,3 +27,7 @@ iac/
 *.tfvars
 !*.tfvars.example
 *.tfplan
+
+# session/fork ローカル artifact (絶対パス混入を防ぐ、fork channel install が worktree 毎に作る)
+.mcp.json
+.claude/
