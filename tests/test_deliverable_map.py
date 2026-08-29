@@ -93,3 +93,66 @@ def test_render_profession_override_previews_other():
     out = dm.render_map(data, profession="backoffice")
     assert "backoffice" in out
     assert "汎用 render" in out
+
+
+# --- e-5851: surface-grained entries carry wedges + 大節/小節 structure ----------
+
+def _seed_surface():
+    """A surface-grained backfill-shaped log: two 小節 categories under one 大節
+    (``area:``), each bullet carrying its machine-checkable wedge(s) in ``tags``."""
+    data = {"name": "P", "profession": "dev"}
+    dc.append_deliverable(data, {
+        "source": {"target_id": "root", "kind": "root"},
+        "category": "状態を一望する", "title": "status",
+        "summary": "いま何が進行中かを1画面で把握できる",
+        "tags": ["area:見失わない — 現在地と進捗の可視化",
+                 "cli:beacon status", "api:GET /api/projects"]})
+    dc.append_deliverable(data, {
+        "source": {"target_id": "root", "kind": "root"},
+        "category": "マイルストーンを管理する", "title": "milestone",
+        "summary": "目的地を立て状態を回せる",
+        "tags": ["area:見失わない — 現在地と進捗の可視化",
+                 "cli:beacon milestone *"]})
+    return data
+
+
+def test_dev_render_emits_wedges_from_tags():
+    out = dm.render_map(_seed_surface())
+    # wedges appear as machine-checkable backtick `type:ident` tokens
+    assert "`cli:beacon status`" in out
+    assert "`api:GET /api/projects`" in out
+    assert "`cli:beacon milestone *`" in out
+    # the 散文 summary is the bullet body, wedge trails it
+    assert "- いま何が進行中かを1画面で把握できる  `cli:beacon status`" in out
+
+
+def test_dev_render_reconciles_via_check_map_drift():
+    """The DERIVED map's wedges must be parseable by the SAME reconciler the
+    hand-maintained doc used (e-5851 楔の機械照合維持)."""
+    import importlib
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    # module filename has a hyphen, so import via importlib, not the import stmt.
+    drift = importlib.import_module("check-map-drift")
+    out = dm.render_map(_seed_surface())
+    parsed = drift.parse_wedges(out)
+    assert ("cli", "beacon status") in parsed
+    assert ("api", "GET /api/projects") in parsed
+    assert ("cli", "beacon milestone *") in parsed
+
+
+def test_dev_render_emits_area_and_category_headers():
+    out = dm.render_map(_seed_surface())
+    # 大節 (area) as ## and 小節 (category) as ###
+    assert "## 見失わない — 現在地と進捗の可視化" in out
+    assert "### 状態を一望する" in out
+    assert "### マイルストーンを管理する" in out
+    # the area header appears ONCE even though two categories share it
+    assert out.count("## 見失わない — 現在地と進捗の可視化") == 1
+
+
+def test_dev_render_backward_compatible_without_wedges():
+    """Coarse entries (no wedge/area tags) render as before — no header-level flip,
+    no trailing wedges — so pre-e-5851 logs are unaffected."""
+    out = dm.render_map(_seed())
+    assert "## 機能 — 何ができるか" in out  # stays ## when no area is present
+    assert "- 他セッションの DM で起きる `→ application-map`" in out
