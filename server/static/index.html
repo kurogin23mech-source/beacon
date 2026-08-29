@@ -1623,6 +1623,55 @@ body::after {
 .tgt-bar { height: 5px; background: var(--border-subtle); border-radius: 3px; overflow: hidden; }
 .tgt-bar-fill { height: 100%; background: var(--accent); border-radius: 3px; }
 
+/* ms-162 e-5835 — root target 合成の header (objective + summary + arms rollup) */
+.root-header {
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+}
+.root-hdr-top { display: flex; align-items: baseline; gap: 8px; }
+.root-hdr-kind {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: rgba(148,163,184,0.15);
+  color: #94a3b8;
+  flex: none;
+}
+.root-hdr-objective { font-size: 13px; color: var(--text-primary); line-height: 1.5; }
+.root-hdr-rollup { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.root-hdr-pct { font-size: 12px; font-family: monospace; color: var(--accent); font-weight: 600; flex: none; }
+.root-hdr-bar { flex: 1; height: 5px; background: var(--border-subtle); border-radius: 3px; overflow: hidden; }
+.root-hdr-bar-fill { height: 100%; background: var(--accent); border-radius: 3px; }
+.root-hdr-count { font-size: 11px; font-family: monospace; color: var(--text-dim); flex: none; }
+.root-hdr-arms { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.root-arm-chip {
+  font-size: 10px;
+  font-family: monospace;
+  color: var(--text-secondary);
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-base);
+}
+.root-arm-k { color: var(--text-dim); margin-right: 5px; text-transform: uppercase; letter-spacing: 0.03em; }
+.root-hdr-summary { font-size: 11px; color: var(--text-secondary); line-height: 1.6; margin-top: 8px; }
+.root-hdr-summary-label {
+  display: block;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-dim);
+  margin-bottom: 2px;
+}
+
 /* Entry detail button */
 .entry-info-btn {
   display: inline-flex;
@@ -5601,13 +5650,24 @@ function renderShell(app) {
       ${PLATFORM.accountMenuItemsHTML()}
     </div>
 
-    ${(!state.openTrekId && (p.objective || retro || p.profession === 'sales')) ? `
+    ${!state.openTrekId ? renderRootHeader(p.root) : ''}
+
+    ${(() => {
+      // ms-162 e-5835 — root header が objective を出したら project-info の
+      // Objective 行は重複になるので落とす (両者は同一の on-project objective が
+      // 出典)。root/narrative が未投影 (本番デプロイ前) なら root header は
+      // objective を出せないので、従来通り p.objective をここで見せる (= 後退回避)。
+      const rootObjectiveShown = !!(p.root && p.root.narrative && p.root.narrative.objective);
+      const showObjectiveLine = !rootObjectiveShown && !!p.objective;
+      const show = !state.openTrekId && (showObjectiveLine || retro || p.profession === 'sales');
+      if (!show) return '';
+      return `
     <div class="project-info fade-in stagger-1">
-      ${p.objective ? `<div class="project-info-item"><span class="project-info-label">Objective</span><span class="project-info-value">${esc(p.objective)}</span></div>` : ''}
+      ${showObjectiveLine ? `<div class="project-info-item"><span class="project-info-label">Objective</span><span class="project-info-value">${esc(p.objective)}</span></div>` : ''}
       ${_renderSalesPipelineInfo(p)}
       ${retro ? `<div class="project-info-item${retro.isToday ? ' review-due' : ''}"><span class="project-info-label">${retro.isToday ? '⚠ Review Due Today' : 'Next Review'}</span><span class="project-info-value">${retro.date} (${esc(p.retro_day || 'friday')})</span></div>` : ''}
-    </div>
-    ` : ''}
+    </div>`;
+    })()}
 
     ${!state.openTrekId ? `
     <div class="global-search fade-in stagger-1">
@@ -6350,6 +6410,72 @@ function renderTargetsSection() {
       </div>
       ${synthesized ? '<div class="tgt-synth-note">※ サーバの targets[] が未提供のため milestones + opportunities から暫定合成して表示しています (ms-157 の本番デプロイ後は server targets[] に自動で切り替わります)。</div>' : ''}
       <div class="tgt-list">${renderTargetsOverview(targets)}</div>
+    </section>`;
+}
+
+// ms-162 e-5835 — root target 合成の header (portable 純関数)。
+//
+// root は「全 target を配下に持つ apex target」(ms-153 の root 合成、
+// root_target.project_as_root_target)。他の target-class 詳細と同じく純関数で、
+// root オブジェクト 1 つを受けて HTML を返す。project root だけでなく将来 Trek の
+// root (goal_state / halt を root_narrative 相当として持つ) にも再利用できる。
+//
+// 3 つの次元を 1 枚に集約する:
+//   - narrative.objective — 大目的 (vision seed)
+//   - narrative.summary   — 経緯 (直近の流れ)
+//   - arms rollup         — この target-class が仕事を回す機構 (work-item 源 /
+//                           decision の承認形 / deliverable の産物) + 配下 target の
+//                           work-item rollup (総数・完遂・進行中)
+//
+// server が root/narrative/arms を未投影でも「空でも壊れない」= 欠けた行を落とすだけ。
+// 全て空なら '' を返し、shell 側で丸ごと省略する (renderDecisionLog と同契約)。
+function renderRootHeader(root) {
+  if (!root) return '';
+  const nar = root.narrative || {};
+  const objective = nar.objective || '';
+  const summary = nar.summary || '';
+  const arms = root.arms || {};
+  const total = root.work_items_total || 0;
+  const done = root.work_items_done || 0;
+  const open = root.work_items_open != null ? root.work_items_open : Math.max(0, total - done);
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+  // arms rollup を chip 化: 欠けている機構は chip を出さない (前方互換 = server が
+  // arm を enrich したら自動で増える)。work_item_arm.item_type = 配下の仕事単位
+  // (root は 'target')、decision.kind = 完遂の承認形、deliverable.kind = 産物。
+  const wiArm = arms.work_item_arm || {};
+  const armPairs = [];
+  if (wiArm.item_type) armPairs.push(['work-item', wiArm.item_type]);
+  if (arms.decision && arms.decision.kind) armPairs.push(['decision', arms.decision.kind]);
+  if (arms.deliverable && arms.deliverable.kind) armPairs.push(['deliverable', arms.deliverable.kind]);
+  const armsChips = armPairs
+    .map(([k, v]) => `<span class="root-arm-chip"><span class="root-arm-k">${esc(k)}</span>${esc(v)}</span>`)
+    .join('');
+
+  if (!objective && !summary && !total && !armsChips) return '';
+
+  const objBlock = objective ? `<div class="root-hdr-objective">${esc(objective)}</div>` : '';
+  const rollupBlock = total > 0
+    ? `<div class="root-hdr-rollup">
+         <span class="root-hdr-pct">${pct}%</span>
+         <div class="root-hdr-bar"><div class="root-hdr-bar-fill" style="width:${pct}%"></div></div>
+         <span class="root-hdr-count">${done}/${total} 完遂 · ${open} 進行中</span>
+       </div>`
+    : '';
+  const armsBlock = armsChips ? `<div class="root-hdr-arms">${armsChips}</div>` : '';
+  const summaryBlock = summary
+    ? `<div class="root-hdr-summary"><span class="root-hdr-summary-label">直近の流れ</span>${esc(summary)}</div>`
+    : '';
+
+  return `
+    <section class="root-header fade-in stagger-1">
+      <div class="root-hdr-top">
+        <span class="root-hdr-kind">root</span>
+        ${objBlock}
+      </div>
+      ${rollupBlock}
+      ${armsBlock}
+      ${summaryBlock}
     </section>`;
 }
 
