@@ -895,6 +895,14 @@ def cmd_target_close():
     # ms-142 T7 (e-5162): closing a data-defined / release target frees its live
     # occupation claim, symmetric with milestone done/observe.
     _release_occupation_for_transition(data, target_id, reason="close")
+    # ms-163 e-5879/5880: closing a descriptor target is a 完遂 — fire the generic seam
+    # (deliverable 記録 + 完遂 decision) so a descriptor class is no longer dropped from
+    # capture. Fetch the just-closed record before save (capture mutates data in-memory).
+    _rec_for_capture = _te.find_target(data, desc, target_id)
+    if isinstance(_rec_for_capture, dict):
+        import target_completion
+        target_completion.on_target_completion(data, _rec_for_capture, verdict="done",
+                                               reason=reason)
     save_project(data, op={"op": "target_close", "kind": kind,
                            "target_id": target_id})
     print(f"完了: [{target_id}] を done にしました")

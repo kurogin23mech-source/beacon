@@ -9328,6 +9328,11 @@ def cmd_opportunity_judge():
             for w in sales_entities.opportunity_phase_warnings(data, cur, arg):
                 print(f"  ⚠ {w}", file=sys.stderr)
             trec = sales_entities.terminal_transition(data, opp_id, arg, note=note, at=at, actor=actor)
+            # ms-163 e-5879/5880: 商談の決着 (終端遷移) は完遂 — 開発の milestone done と
+            # 同じく generic な完遂 seam (deliverable 記録 + 完遂 decision) を発火する。
+            # opp は上で find_target 済 (terminal_transition が同じ dict の phase を更新)。
+            import target_completion
+            target_completion.on_target_completion(data, opp, verdict=arg, reason=note)
             save_project(data)
             print(f"{opp_id} terminal → {arg} (決着、遷移日は用済みでクリア)")
             _print_phase_fold(trec.get("fold"))

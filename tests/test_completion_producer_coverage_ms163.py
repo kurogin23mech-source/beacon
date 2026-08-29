@@ -119,15 +119,45 @@ def test_producer_coverage_declaration_driven_needs_no_producer(monkeypatch):
 
 # --- 完遂 seam 被覆 (e-5877 + e-5878 server scan) ---
 
-def test_completion_seam_detects_current_混用():
+def test_completion_seam_clean_after_fix():
+    # AC7 (fix 後 clean): every terminable class's completion now routes through the generic
+    # seam target_completion.on_target_completion, so there are ZERO gaps on real code.
+    assert chk.find_completion_seam_gaps() == []
+    result = chk.run()
+    assert result["new_completion_seam"] == []
+    assert result["pending_completion_seam"] == []
+    assert result["ok"] is True
+
+
+# Pre-fix tokens (WITHOUT the generic seam) reconstruct the 混用 state deterministically —
+# so the DETECTION proof does not depend on the real code being broken (it is now fixed).
+_PREFIX_PRODUCER_CALLS = {
+    "deliverable": frozenset({"capture_target_completion"}),
+    "decision": frozenset({"decision_event_from_completion_verdict",
+                           "_record_completion_verdict_decision"}),
+}
+
+
+def test_completion_seam_detects_the_混用_synthetically(monkeypatch):
+    # AC7 (fix 前 detect): unwire the generic seam (simulate the pre-fix state where only
+    # the milestone seams call a producer). The checker MUST surface exactly the 混用 — the
+    # sales/operation/acquisition/descriptor terminals dropped from capture — and NOT flag
+    # milestone. Deterministic (synthetic tokens), so a green run means "clean", not "asleep".
+    monkeypatch.setattr(cl, "COMPLETION_PRODUCER_CALLS", _PREFIX_PRODUCER_CALLS)
     gaps = {(g["class"], g["dimension"]) for g in chk.find_completion_seam_gaps()}
-    # the 混用 this MS closes — the sales/other terminals dropped from capture:
     for expected in (("opportunity", "decision"), ("opportunity", "deliverable"),
                      ("operation", "deliverable"), ("acquisition", "decision"),
                      ("acquisition", "deliverable"),
                      (cl.DESCRIPTOR_TERMINAL_SENTINEL, "decision"),
                      (cl.DESCRIPTOR_TERMINAL_SENTINEL, "deliverable")):
         assert expected in gaps, f"seam check failed to detect gap {expected}"
+    # milestone keeps its own direct seams (cmd_milestone_done capture + spine/server
+    # decision), so it is covered even without the generic seam.
+    assert ("milestone", "decision") not in gaps
+    assert ("milestone", "deliverable") not in gaps
+    # operation's decision is still covered via the shared review-gated approve path (only
+    # its deliverable was a gap) — proves the shared-spine modelling, not a blanket flag.
+    assert ("operation", "decision") not in gaps
 
 
 def test_milestone_completion_is_fully_covered():
@@ -138,33 +168,20 @@ def test_milestone_completion_is_fully_covered():
     assert ("milestone", "deliverable") not in gaps
 
 
-def test_operation_decision_is_covered_via_shared_spine():
-    # operation routes terminal through the review-gated approve path, which writes the
-    # decision generically — so operation is a deliverable gap but NOT a decision gap.
-    gaps = {(g["class"], g["dimension"]) for g in chk.find_completion_seam_gaps()}
-    assert ("operation", "decision") not in gaps
-    assert ("operation", "deliverable") in gaps
-
-
-def test_current_seam_gaps_are_all_allowlisted_pending():
-    # every current gap is pending_debt (owner ms-163) → the checker stays green on this
-    # branch until the e-5879/5880 fix; nothing is a fresh new_violation yet.
-    result = chk.run()
-    assert result["new_completion_seam"] == [], (
-        "an unexpected fresh completion-seam gap: "
-        + ", ".join(f"{g['class']}/{g['dimension']}" for g in result["new_completion_seam"]))
-    assert result["ok"] is True
-
-
-def test_fresh_seam_gap_fails_when_not_allowlisted(monkeypatch):
-    # With the ratchet allowlist emptied, the current gaps become new_violation → the
-    # checker FAILS. Proves the allowlist is what holds CI green, and a fresh terminable
-    # class (not allowlisted) cannot silently ship without capture.
-    monkeypatch.setattr(cl, "KNOWN_COMPLETION_SEAM_GAP", frozenset())
+def test_fresh_seam_gap_fails_when_a_producer_is_unwired(monkeypatch):
+    # A regression that unwires a producer (or a fresh terminable class with no capture) is a
+    # new_violation that FAILS the checker — the allowlist is empty, so nothing masks it.
+    monkeypatch.setattr(cl, "COMPLETION_PRODUCER_CALLS", _PREFIX_PRODUCER_CALLS)
     gaps = chk.find_completion_seam_gaps()
     assert gaps, "expected gaps to surface"
     assert all(g["status"] == "new_violation" for g in gaps)
     assert chk.run()["ok"] is False
+
+
+def test_known_completion_seam_gap_is_empty():
+    # The fix emptied the ratchet allowlist; it must stay empty (a new pending gap would be a
+    # regression re-introducing the 混用).
+    assert cl.KNOWN_COMPLETION_SEAM_GAP == frozenset()
 
 
 def test_no_stale_completion_seam_gap():
@@ -184,3 +201,38 @@ def test_server_is_in_the_completion_scan_population():
     paths = chk._completion_scan_paths()
     assert any(os.path.sep + "server" + os.path.sep in p for p in paths), (
         "server/ is not in the completion-seam scan population (e-5878)")
+
+
+# --- the generic seam itself (e-5879/5880) ---
+
+def test_on_target_completion_captures_a_declared_deliverable():
+    # the seam delegates deliverable capture — a milestone (declares 機能) completing through
+    # it appends the produced-value entry, exactly as the direct capture would (AC5).
+    import target_completion as tc
+    import deliverable_changelog as dc
+    data = {"name": "P", "profession": "dev", "milestones": []}
+    tc.on_target_completion(data, {"id": "ms-9", "title": "X", "status": "done"},
+                            verdict="done", reason="done それ")
+    assert [e["title"] for e in dc.active_deliverables(data)] == ["X"]
+
+
+def test_on_target_completion_noops_and_never_raises_in_local_mode():
+    # a class without a deliverable slot + local mode (no cloud) → no capture, no decision,
+    # and crucially NO exception (best-effort: a completion flow must never break).
+    import target_completion as tc
+    import deliverable_changelog as dc
+    data = {"name": "P", "profession": "sales", "opportunities": []}
+    tc.on_target_completion(data, {"id": "opp-3"}, verdict="closed_won", reason="決着")
+    assert dc.CHANGELOG_KEY not in data
+
+
+def test_all_four_gap_terminals_reference_the_generic_seam():
+    # AC5/AC6 wiring guard: the four previously-uncovered terminals must each call the
+    # generic seam, so a refactor that drops the call is caught here (not only by the
+    # coverage matrix). Uses the checker's own direct-call attribution over lib + server.
+    calls = chk._direct_call_tokens(chk._load_trees(chk._completion_scan_paths()))
+    for handler in ("cmd_opportunity_judge", "cmd_operation_close",
+                    "cmd_acquisition_status", "cmd_target_close"):
+        assert "on_target_completion" in calls.get(handler, set()), (
+            f"{handler} no longer calls the generic completion seam "
+            "target_completion.on_target_completion (e-5879/5880 wiring dropped)")

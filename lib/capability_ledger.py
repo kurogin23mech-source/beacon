@@ -807,9 +807,14 @@ COMPLETION_DIMENSIONS = {
 # + server/ (e-5878 adds server/). A terminal handler that (transitively, cmd→helper one
 # level) calls one of these produces that dimension.
 COMPLETION_PRODUCER_CALLS = {
-    "deliverable": frozenset({"capture_target_completion"}),
+    # ``on_target_completion`` (lib/target_completion.py, ms-163 e-5879/5880) is the
+    # class-generic completion seam: it fires BOTH capture (deliverable) and the 完遂
+    # decision, so a terminal calling it produces both dimensions. milestone keeps its
+    # existing direct ``capture_target_completion`` / decision seams.
+    "deliverable": frozenset({"capture_target_completion", "on_target_completion"}),
     "decision": frozenset({"decision_event_from_completion_verdict",
-                           "_record_completion_verdict_decision"}),
+                           "_record_completion_verdict_decision",
+                           "on_target_completion"}),
 }
 
 # Per-built-in-class completion TERMINAL handlers (the T5 coverage matrix target_state.py
@@ -848,15 +853,11 @@ SHARED_SPINE_TERMINAL_HANDLERS = ("cmd_target_approve",)
 # through the generic seam, then DROP the row — ``test_no_stale_completion_seam_gap``
 # forces the deletion so it cannot rot into a lie. A NEW gap (a terminable class/dimension
 # not listed) FAILS the checker.
-KNOWN_COMPLETION_SEAM_GAP: frozenset = frozenset({
-    ("operation", "deliverable"),
-    ("opportunity", "deliverable"),
-    ("opportunity", "decision"),
-    ("acquisition", "deliverable"),
-    ("acquisition", "decision"),
-    (DESCRIPTOR_TERMINAL_SENTINEL, "deliverable"),
-    (DESCRIPTOR_TERMINAL_SENTINEL, "decision"),
-})
+# EMPTIED by the e-5879/5880 fix (ms-163): every terminable class's completion now routes
+# through the generic seam ``target_completion.on_target_completion`` (opportunity judge /
+# operation close / acquisition status / descriptor close), so there is no accepted gap.
+# ``test_no_stale_completion_seam_gap`` forces this to stay empty unless a real gap exists.
+KNOWN_COMPLETION_SEAM_GAP: frozenset = frozenset()
 
 
 def is_known_completion_seam_gap(cls: str, dimension: str) -> bool:
