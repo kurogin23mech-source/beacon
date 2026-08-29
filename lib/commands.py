@@ -672,6 +672,138 @@ CLAUDE_POSTCOMPACT_HOOK_SCRIPT = _find_hook("beacon-postcompact.sh")
 CLAUDE_CONTEXT_MONITOR_HOOK_SCRIPT = _find_hook("context-usage-monitor.sh")
 
 
+# ms-160 e-5806 — single source of truth for the Claude Code hooks beacon
+# installs. Both install paths (`beacon init` = _install_claude_hook and
+# `beacon skill install` = _install_claude_hooks) wire this exact set, and
+# `beacon doctor` (e-5807) checks every entry, so a hook can no longer be wired
+# on one path and silently missing on the other. That divergence is what left
+# the MCP save hook off `beacon skill install` and the bus-inbox receive hook
+# off BOTH installers (= a fresh install received no cross-session DMs at all).
+#
+# Each entry:
+#   key          — stable id (doctor / messages)
+#   events       — Claude Code hook events this command registers on
+#   matcher      — tool matcher for PostToolUse ("Bash"/"mcp__"/"*"), else None
+#   resolver     — basename for _resolve_hook_command (entry-point / python -m),
+#                  OR
+#   script       — basename of a bin/ script hook (resolved to `<python> <path>`)
+#   identity     — command substrings that identify this hook (dedup / detect)
+#   timeout, statusMessage — settings.json entry fields
+HOOK_MANIFEST = [
+    {"key": "post-commit", "events": ["PostToolUse"], "matcher": "Bash",
+     "resolver": "beacon-post-commit-hook.sh",
+     "identity": ("beacon-post-commit-hook", "beacon-hook-post-commit",
+                  "beacon_cli.hooks.post_commit"),
+     "timeout": 10, "statusMessage": "Beacon: checking for commit or deploy..."},
+    {"key": "save", "events": ["PostToolUse"], "matcher": "mcp__",
+     "resolver": "beacon-save-hook.sh",
+     "identity": ("beacon-save-hook", "beacon-hook-save",
+                  "beacon_cli.hooks.save_hook"),
+     "timeout": 10, "statusMessage": "Beacon: checking MCP operation..."},
+    {"key": "halt-check", "events": ["PostToolUse"], "matcher": "*",
+     "resolver": "beacon-halt-check.sh",
+     "identity": ("beacon-hook-halt-check", "beacon_cli.hooks.halt_check"),
+     "timeout": 10, "statusMessage": "Beacon: checking for STOP signal..."},
+    {"key": "postcompact", "events": ["PostCompact"], "matcher": None,
+     "resolver": "beacon-postcompact.sh",
+     "identity": ("beacon-postcompact", "beacon-hook-postcompact",
+                  "beacon_cli.hooks.postcompact"),
+     "timeout": 10, "statusMessage": "Beacon: post-compaction orientation..."},
+    {"key": "context-monitor", "events": ["Stop"], "matcher": None,
+     "resolver": "context-usage-monitor.sh",
+     "identity": ("context-usage-monitor", "beacon-hook-context-monitor",
+                  "beacon_cli.hooks.context_monitor"),
+     "timeout": 10,
+     "statusMessage": "Beacon: checking context-usage threshold..."},
+    {"key": "session-start", "events": ["SessionStart"], "matcher": None,
+     "resolver": "beacon-session-start.sh",
+     "identity": ("beacon-hook-session-start", "beacon_cli.hooks.session_start"),
+     "timeout": 15, "statusMessage": "Beacon: checking for updates..."},
+    {"key": "bus-inbox", "events": ["SessionStart", "UserPromptSubmit"],
+     "matcher": None, "script": "beacon-bus-inbox-hook.py",
+     "identity": ("beacon-bus-inbox-hook",),
+     "timeout": 15, "statusMessage": "Beacon: checking bus inbox..."},
+]
+
+
+def _resolve_manifest_hook_command(spec: dict) -> str:
+    """Resolve a HOOK_MANIFEST entry to a settings.json command string, or "" if
+    it can't be resolved on this install (caller skips it — best-effort, e.g. a
+    wheel install with no bin/ script on disk)."""
+    resolver = spec.get("resolver")
+    if resolver:
+        return _resolve_hook_command(resolver)
+    script = spec.get("script")
+    if script:
+        path = _find_hook(script)
+        if path and os.path.exists(path) and not _hook_unusable_on_windows(path):
+            # No entry-point exists for the bin/ script, so invoke it through the
+            # current interpreter (cross-platform: a bare .py path won't self-run
+            # on Windows). Mirrors _resolve_hook_command's `python -m` fallback.
+            return f"{_bash_safe(sys.executable)} {_bash_safe(path)}"
+    return ""
+
+
+def _manifest_hook_present(hooks_dict: dict, spec: dict) -> bool:
+    """True iff the hook is registered on EVERY one of its events. `beacon
+    doctor` (e-5807) uses this to detect a partially-wired install."""
+    for event in spec["events"]:
+        found = False
+        for entry in hooks_dict.get(event, []):
+            for h in entry.get("hooks", []):
+                if any(s in h.get("command", "") for s in spec["identity"]):
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            return False
+    return True
+
+
+def _install_manifest_hook(hooks_dict: dict, spec: dict) -> bool:
+    """Idempotently register one HOOK_MANIFEST entry across all of its events.
+    Drops stale same-identity entries whose command differs (path migration),
+    then adds the resolved command wherever absent. Returns True if it changed
+    anything. No-op (returns False) when the command can't be resolved."""
+    command = _resolve_manifest_hook_command(spec)
+    if not command:
+        return False
+    if _is_path_command(command) and not os.path.exists(command):
+        return False
+    changed = False
+    for event in spec["events"]:
+        event_list = hooks_dict.setdefault(event, [])
+        # 1. drop stale same-identity entries whose command != the resolved one.
+        cleaned = []
+        for entry in event_list:
+            kept = []
+            for h in entry.get("hooks", []):
+                existing = h.get("command", "")
+                if any(s in existing for s in spec["identity"]) and existing != command:
+                    changed = True
+                    continue  # drop stale
+                kept.append(h)
+            entry["hooks"] = kept
+            if kept:
+                cleaned.append(entry)
+        event_list[:] = cleaned
+        # 2. add if the exact command is absent from this event.
+        present = any(h.get("command", "") == command
+                      for entry in event_list for h in entry.get("hooks", []))
+        if not present:
+            new_entry: dict = {"hooks": [{
+                "type": "command", "command": command,
+                "timeout": spec["timeout"],
+                "statusMessage": spec["statusMessage"],
+            }]}
+            if spec.get("matcher") is not None:
+                new_entry["matcher"] = spec["matcher"]
+            event_list.append(new_entry)
+            changed = True
+    return changed
+
+
 def _install_claude_hook():
     settings_path = os.path.join(_user_home(), ".claude", "settings.json")
     settings_dir = os.path.dirname(settings_path)
@@ -681,144 +813,20 @@ def _install_claude_hook():
         with open(settings_path, "r", encoding="utf-8") as f:
             settings = json.load(f)
     hooks = settings.setdefault("hooks", {})
-    post_tool_use = hooks.setdefault("PostToolUse", [])
 
-    # Install commit detection hook (matcher: Bash)
-    commit_hook_exists = False
-    for entry in post_tool_use:
-        if entry.get("matcher") == "Bash":
-            for h in entry.get("hooks", []):
-                cmd = h.get("command", "")
-                if "beacon-post-commit-hook" in cmd or "beacon log --prepare" in cmd:
-                    commit_hook_exists = True
-                    break
-    if not commit_hook_exists:
-        post_tool_use.append({
-            "matcher": "Bash",
-            "hooks": [{
-                "type": "command",
-                # ms-44 e-853: resolve cross-platform (entry-point / python -m)
-                # so Windows never gets a non-executable .sh commit hook.
-                "command": _resolve_hook_command("beacon-post-commit-hook.sh"),
-                "timeout": 10,
-                "statusMessage": "Beacon: checking commit...",
-            }],
-        })
-
-    # Install MCP save hook (matcher: mcp__)
-    save_hook_exists = False
-    for entry in post_tool_use:
-        if entry.get("matcher") == "mcp__":
-            for h in entry.get("hooks", []):
-                cmd = h.get("command", "")
-                if "beacon-save-hook" in cmd:
-                    save_hook_exists = True
-                    break
-    if not save_hook_exists:
-        post_tool_use.append({
-            "matcher": "mcp__",
-            "hooks": [{
-                "type": "command",
-                "command": _resolve_hook_command("beacon-save-hook.sh"),
-                "timeout": 10,
-                "statusMessage": "Beacon: checking MCP operation...",
-            }],
-        })
-
-    # ms-160 e-5798: install halt-check hook (remote STOP kill-switch).
-    # matcher "*" so it fires after EVERY tool call — an autonomous loop
-    # (operation-execute auto-execute / bus-armed 自動 DM 応答) may run Edit /
-    # Write / MCP tools, not just Bash, so scoping to "Bash" would let a
-    # running agent slip past the STOP. Identity check spans the entry-point
-    # name and the `python -m` fallback so re-install doesn't duplicate.
-    halt_cmd = _resolve_hook_command("beacon-halt-check.sh")
-    halt_hook_exists = False
-    for entry in post_tool_use:
-        for h in entry.get("hooks", []):
-            cmd = h.get("command", "")
-            if (
-                "beacon-hook-halt-check" in cmd
-                or "beacon_cli.hooks.halt_check" in cmd
-            ):
-                halt_hook_exists = True
-                break
-        if halt_hook_exists:
-            break
-    if halt_cmd and not halt_hook_exists:
-        post_tool_use.append({
-            "matcher": "*",
-            "hooks": [{
-                "type": "command",
-                "command": halt_cmd,
-                "timeout": 10,
-                "statusMessage": "Beacon: checking for STOP signal...",
-            }],
-        })
-
-    # Install PostCompact hook (e-565): inject Tier-2 orientation after
-    # transcript compaction so the AI re-fetches the source of truth rather
-    # than trusting the (now blurry) summary's specific IDs / numbers.
-    post_compact = hooks.setdefault("PostCompact", [])
-    postcompact_hook_exists = False
-    for entry in post_compact:
-        for h in entry.get("hooks", []):
-            cmd = h.get("command", "")
-            if (
-                "beacon-postcompact" in cmd
-                or "beacon-hook-postcompact" in cmd
-                or "beacon_cli.hooks.postcompact" in cmd
-            ):
-                postcompact_hook_exists = True
-                break
-        if postcompact_hook_exists:
-            break
-    # ms-44 e-853: resolve cross-platform; the command may be a ``python -m``
-    # form (not a path), so guard path-existence only for path commands.
-    _pc_cmd = _resolve_hook_command("beacon-postcompact.sh")
-    _pc_ok = bool(_pc_cmd) and (not _is_path_command(_pc_cmd) or os.path.exists(_pc_cmd))
-    if not postcompact_hook_exists and _pc_ok:
-        post_compact.append({
-            "hooks": [{
-                "type": "command",
-                "command": _pc_cmd,
-                "timeout": 10,
-                "statusMessage": "Beacon: post-compaction orientation...",
-            }],
-        })
-
-    # ms-44 e-854: register the Stop hook (context-usage threshold monitor)
-    # so Mac/Linux + Win all get a Python or bash hook that actually fires.
-    # OS branching is implicit via _resolve_hook_command + _hook_unusable_on_windows.
-    stop_hooks = hooks.setdefault("Stop", [])
-    stop_hook_exists = False
-    for entry in stop_hooks:
-        for h in entry.get("hooks", []):
-            cmd = h.get("command", "")
-            if (
-                "context-usage-monitor" in cmd
-                or "beacon-hook-context-monitor" in cmd
-                or "beacon_cli.hooks.context_monitor" in cmd
-            ):
-                stop_hook_exists = True
-                break
-        if stop_hook_exists:
-            break
-    _ctx_cmd = _resolve_hook_command("context-usage-monitor.sh")
-    _ctx_ok = bool(_ctx_cmd) and (not _is_path_command(_ctx_cmd) or os.path.exists(_ctx_cmd))
-    if not stop_hook_exists and _ctx_ok:
-        stop_hooks.append({
-            "hooks": [{
-                "type": "command",
-                "command": _ctx_cmd,
-                "timeout": 10,
-                "statusMessage": "Beacon: checking context-usage threshold...",
-            }],
-        })
+    # ms-160 e-5806: install every hook from the single-source-of-truth manifest
+    # so `beacon init` and `beacon skill install` can no longer diverge. This
+    # replaces the per-hook blocks that previously lived here (commit / save /
+    # halt / postcompact / stop) and additionally wires the session-start and
+    # bus-inbox receive hooks the init path was missing.
+    for spec in HOOK_MANIFEST:
+        _install_manifest_hook(hooks, spec)
 
     with open(settings_path, "w", encoding="utf-8") as f:
         json.dump(settings, f, indent=2, ensure_ascii=False)
         f.write("\n")
-    print("Installed Claude Code PostToolUse + PostCompact + Stop hooks")
+    print("Installed Claude Code hooks (commit / save / halt / postcompact / "
+          "stop / session-start / bus-inbox)")
 
 
 def _skill_profession_from_text(text: str) -> str:
@@ -4759,215 +4767,28 @@ def _install_claude_hooks(hook_script: str, settings_path: str) -> None:
         })
         posttooluse_dirty = True
 
-    # ms-43 e-672 / ms-44 e-777: register the PostCompact hook with the
-    # cross-platform resolver so wheel installs (no bash .sh on disk) still
-    # land on the Python entry-point.
-    postcompact_dirty = False
-    postcompact_cmd = _resolve_hook_command("beacon-postcompact.sh")
-    pc_ok = bool(postcompact_cmd) and (
-        not _is_path_command(postcompact_cmd) or os.path.exists(postcompact_cmd)
-    )
-    if pc_ok:
-        post_compact = hooks.setdefault("PostCompact", [])
-        pc_identity = (
-            "beacon-postcompact",
-            "beacon-hook-postcompact",
-            "beacon_cli.hooks.postcompact",
-        )
-        # Drop stale PostCompact entries (same kind, different command) so an
-        # old backslash path is rewritten with the freshly-resolved one. The
-        # PostToolUse branch above already did this; PostCompact previously only
-        # checked presence-by-kind and skipped, leaving the bad path in place
-        # on re-doctor (e-1043 migration gap).
-        cleaned_pc = []
-        for entry in post_compact:
-            kept = []
-            for h in entry.get("hooks", []):
-                existing = h.get("command", "")
-                same_kind = any(s in existing for s in pc_identity)
-                if same_kind and existing != postcompact_cmd:
-                    removed_stale = True
-                    continue  # drop stale
-                kept.append(h)
-            entry["hooks"] = kept
-            if kept:
-                cleaned_pc.append(entry)
-        post_compact[:] = cleaned_pc
+    # ms-160 e-5806: install the remaining hooks from the single-source-of-truth
+    # HOOK_MANIFEST (save / halt / postcompact / stop / session-start / bus-inbox).
+    # The commit hook stays param-driven above for back-compat; everything else is
+    # manifest-driven so `beacon skill install` reaches the SAME end state as
+    # `beacon init` — this is what finally wires the MCP save hook and the
+    # bus-inbox receive hook that skill-install previously left off (a fresh
+    # install used to receive no cross-session DMs at all). _install_manifest_hook
+    # folds the same stale-path migration (e-1043) the per-hook blocks used to do.
+    manifest_dirty = False
+    for spec in HOOK_MANIFEST:
+        if spec["key"] == "post-commit":
+            continue  # installed param-driven above
+        if _install_manifest_hook(hooks, spec):
+            manifest_dirty = True
 
-        already_pc = any(
-            h.get("command", "") == postcompact_cmd
-            for entry in post_compact
-            for h in entry.get("hooks", [])
-        )
-        if not already_pc:
-            post_compact.append({
-                "hooks": [{
-                    "type": "command",
-                    "command": postcompact_cmd,
-                    "timeout": 10,
-                    "statusMessage": "Beacon: post-compaction orientation...",
-                }],
-            })
-            postcompact_dirty = True
-
-    # ms-44 e-854: register the Stop hook (context-usage threshold monitor)
-    # via _resolve_hook_command so Mac/Linux source/brew users land on the
-    # bash .sh, while Windows / wheel users land on the Python entry-point
-    # (or `python -m beacon_cli.hooks.context_monitor` fallback). Critically,
-    # _hook_unusable_on_windows() inside the resolver prevents a .sh path
-    # from being written into Win settings.json — that was the e-854 bug.
-    stop_hook_dirty = False
-    stop_cmd = _resolve_hook_command("context-usage-monitor.sh")
-    stop_ok = bool(stop_cmd) and (
-        not _is_path_command(stop_cmd) or os.path.exists(stop_cmd)
-    )
-    if stop_ok:
-        stop_hooks = hooks.setdefault("Stop", [])
-        stop_identity = (
-            "context-usage-monitor",   # bash basename, Mac/Linux
-            "beacon-hook-context-monitor",  # console-script entry-point (pipx)
-            "beacon_cli.hooks.context_monitor",  # python -m fallback
-        )
-        cleaned_stop = []
-        for entry in stop_hooks:
-            kept = []
-            for h in entry.get("hooks", []):
-                existing = h.get("command", "")
-                same_kind = any(s in existing for s in stop_identity)
-                if same_kind and existing != stop_cmd:
-                    removed_stale = True
-                    continue  # drop stale
-                kept.append(h)
-            entry["hooks"] = kept
-            if kept:
-                cleaned_stop.append(entry)
-        stop_hooks[:] = cleaned_stop
-
-        already_stop = any(
-            h.get("command", "") == stop_cmd
-            for entry in stop_hooks
-            for h in entry.get("hooks", [])
-        )
-        if not already_stop:
-            stop_hooks.append({
-                "hooks": [{
-                    "type": "command",
-                    "command": stop_cmd,
-                    "timeout": 10,
-                    "statusMessage": "Beacon: checking context-usage threshold...",
-                }],
-            })
-            stop_hook_dirty = True
-
-    # ms-103: SessionStart hook — beacon の自動アップデート。bclaude 起動時に 1 日 1 回
-    # PyPI を見て新版があれば install 方法別に detached で更新する (更新後 smoke +
-    # 失敗時ロールバック / 公開後 24h 熟成待ち付き)。BEACON_AUTO_UPDATE=0 で無効化。
-    sessionstart_dirty = False
-    ss_cmd = _resolve_hook_command("beacon-session-start.sh")
-    ss_ok = bool(ss_cmd) and (
-        not _is_path_command(ss_cmd) or os.path.exists(ss_cmd)
-    )
-    if ss_ok:
-        session_start_hooks = hooks.setdefault("SessionStart", [])
-        ss_identity = (
-            "beacon-hook-session-start",
-            "beacon_cli.hooks.session_start",
-        )
-        cleaned_ss = []
-        for entry in session_start_hooks:
-            kept = []
-            for h in entry.get("hooks", []):
-                existing = h.get("command", "")
-                same_kind = any(s in existing for s in ss_identity)
-                if same_kind and existing != ss_cmd:
-                    removed_stale = True
-                    continue  # drop stale
-                kept.append(h)
-            entry["hooks"] = kept
-            if kept:
-                cleaned_ss.append(entry)
-        session_start_hooks[:] = cleaned_ss
-
-        already_ss = any(
-            h.get("command", "") == ss_cmd
-            for entry in session_start_hooks
-            for h in entry.get("hooks", [])
-        )
-        if not already_ss:
-            session_start_hooks.append({
-                "hooks": [{
-                    "type": "command",
-                    "command": ss_cmd,
-                    "timeout": 15,
-                    "statusMessage": "Beacon: checking for updates...",
-                }],
-            })
-            sessionstart_dirty = True
-
-    # ms-160 e-5798: register the PostToolUse halt-check hook (remote STOP
-    # kill-switch) so the `beacon skill install` path reaches the same end
-    # state as `beacon init` (_install_claude_hook). matcher "*" — a running
-    # autonomous loop must be caught after ANY tool call, not just Bash.
-    halt_hook_dirty = False
-    halt_cmd = _resolve_hook_command("beacon-halt-check.sh")
-    halt_ok = bool(halt_cmd) and (
-        not _is_path_command(halt_cmd) or os.path.exists(halt_cmd)
-    )
-    if halt_ok:
-        halt_identity = (
-            "beacon-hook-halt-check",
-            "beacon_cli.hooks.halt_check",
-        )
-        cleaned_halt = []
-        for entry in post_tool_use:
-            kept = []
-            for h in entry.get("hooks", []):
-                existing = h.get("command", "")
-                same_kind = any(s in existing for s in halt_identity)
-                if same_kind and existing != halt_cmd:
-                    removed_stale = True
-                    continue  # drop stale
-                kept.append(h)
-            entry["hooks"] = kept
-            if kept:
-                cleaned_halt.append(entry)
-        post_tool_use[:] = cleaned_halt
-
-        already_halt = any(
-            h.get("command", "") == halt_cmd
-            for entry in post_tool_use
-            for h in entry.get("hooks", [])
-        )
-        if not already_halt:
-            post_tool_use.append({
-                "matcher": "*",
-                "hooks": [{
-                    "type": "command",
-                    "command": halt_cmd,
-                    "timeout": 10,
-                    "statusMessage": "Beacon: checking for STOP signal...",
-                }],
-            })
-            halt_hook_dirty = True
-
-    if removed_stale or posttooluse_dirty or postcompact_dirty or stop_hook_dirty or sessionstart_dirty or halt_hook_dirty:
+    if removed_stale or posttooluse_dirty or manifest_dirty:
         with open(settings_path, "w", encoding="utf-8") as f:
             json.dump(settings, f, indent=2, ensure_ascii=False)
-        if removed_stale and not (posttooluse_dirty or postcompact_dirty or stop_hook_dirty or sessionstart_dirty or halt_hook_dirty):
+        if removed_stale and not (posttooluse_dirty or manifest_dirty):
             print(f"Hooks: cleaned stale {hook_basename} entries; current path active")
         else:
-            parts = []
-            if posttooluse_dirty:
-                parts.append("PostToolUse")
-            if postcompact_dirty:
-                parts.append("PostCompact")
-            if stop_hook_dirty:
-                parts.append("Stop")
-            if sessionstart_dirty:
-                parts.append("SessionStart")
-            if halt_hook_dirty:
-                parts.append("HaltCheck")
-            print(f"Hooks: registered {' + '.join(parts) or 'nothing new'} in {settings_path}")
+            print(f"Hooks: synced Claude Code hooks (manifest) in {settings_path}")
     else:
         print("Hooks: already configured in ~/.claude/settings.json")
 
