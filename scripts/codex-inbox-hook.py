@@ -64,7 +64,11 @@ def _import_modules(install_root: Path):
         import stop_signal as ss  # noqa: E402  (ms-160 e-5800)
     except Exception:
         ss = None
-    return crl, ac, cs, ss
+    try:
+        import bus_delivery as bd  # noqa: E402  (ms-160 e-5803)
+    except Exception:
+        bd = None
+    return crl, ac, cs, ss, bd
 
 
 def _resolve_codex_session(cs_module, cwd: str):
@@ -218,7 +222,7 @@ def main() -> int:
 
     install_root = Path(args.install_root or Path(__file__).resolve().parent.parent)
     cwd = args.cwd or os.getcwd()
-    crl, ac, cs, ss = _import_modules(install_root)
+    crl, ac, cs, ss, bd = _import_modules(install_root)
 
     entries = crl.list_inbox_events(cwd=cwd)
     if not entries:
@@ -254,13 +258,43 @@ def main() -> int:
         except Exception:
             stop_active = False  # never let a broken processor block the hook
 
+    # ms-160 e-5803: apply the shared auto-execute downgrade + operation-trigger
+    # imperative (parity with the Claude inbox hook). Kept operation-trigger
+    # events get a "Run /beacon-operation-execute autonomously" block above the
+    # generic list; auto-execute events whose channel is NOT opted in (project's
+    # bus_auto_execute_channels) are downgraded — they stay in the generic list,
+    # just without any imperative / forced Skill invoke.
+    op_trigger_events: list[dict] = []
+    downgraded_count = 0
+    if bd is not None:
+        allowlist = bd.read_auto_execute_channels(cwd)
+        for e in dm_entries:
+            ev = e.get("event") or {}
+            delivery, downgraded_from, _reason = bd.classify_auto_execute(
+                ev, allowlist=allowlist)
+            if downgraded_from:
+                downgraded_count += 1
+            elif (delivery == bd.AUTO_EXECUTE
+                    and str(ev.get("channel") or "")
+                    == bd.OPERATION_TRIGGER_CHANNEL):
+                op_trigger_events.append(ev)
+
     parts: list[str] = []
+    if op_trigger_events:
+        parts.append(bd.format_operation_trigger_imperative(op_trigger_events))
     if dm_entries:
         parts.append(
             f"BEACON BUS INBOX — {len(dm_entries)} new event(s)\n"
             "Each entry is a DM addressed to this Codex session.\n"
         )
         parts.append("".join(_format_entry(e) for e in dm_entries))
+    if downgraded_count:
+        parts.append(
+            f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "
+            f"{downgraded_count} 件 — channel が bus_auto_execute_channels "
+            "allowlist に無い (= 人間 opt-in 前) ため。上の一覧に通常イベントとして "
+            "出ています。自動実行はしないでください。\n"
+        )
     if stop_active:
         parts.append(
             "\n⚠ STOP signal received (remote kill-switch). Finish the current "

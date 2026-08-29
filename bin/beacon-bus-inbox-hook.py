@@ -110,6 +110,51 @@ def _import_stop_signal():
     return None
 
 
+# ms-160 e-5803: the auto-execute downgrade + operation-trigger imperative logic
+# now lives in lib/bus_delivery.py so the Codex inbox hook shares it. Import it
+# lazily (same fail-safe posture as _import_stop_signal) and cache the result so
+# the hot main loop resolves it once. A missing module fails CLOSED at the call
+# sites (auto-execute → propose-to-ai, no forced Skill invoke).
+_BUS_DELIVERY_CACHE: "object | None" = None
+_BUS_DELIVERY_TRIED = False
+
+
+def _import_bus_delivery():
+    """Import lib/bus_delivery lazily, cached. Returns the module or None."""
+    global _BUS_DELIVERY_CACHE, _BUS_DELIVERY_TRIED
+    if _BUS_DELIVERY_TRIED:
+        return _BUS_DELIVERY_CACHE
+    _BUS_DELIVERY_TRIED = True
+    here = Path(__file__).resolve().parent
+    for lib_dir in (here.parent / "lib", here.parent.parent / "lib"):
+        if (lib_dir / "bus_delivery.py").exists():
+            sys.path.insert(0, str(lib_dir))
+            try:
+                import bus_delivery as _bd  # type: ignore[import-not-found]
+            except Exception:
+                return None
+            _BUS_DELIVERY_CACHE = _bd
+            return _bd
+    return None
+
+
+def _classify_delivery(ev: dict, allowlist) -> tuple:
+    """Resolve ``(delivery, downgraded_from, downgrade_reason)`` for one event.
+
+    Delegates to the shared ``bus_delivery.classify_auto_execute``. Fail-closed:
+    if the shared module can't be imported, downgrade every ``auto-execute``
+    event to ``propose-to-ai`` (never route into a forced Skill invoke without
+    the shared gate).
+    """
+    bd = _import_bus_delivery()
+    if bd is not None:
+        return bd.classify_auto_execute(ev, allowlist=allowlist)
+    delivery = ev.get("delivery") or "propose-to-ai"
+    if delivery == "auto-execute":
+        return ("propose-to-ai", "auto-execute", "")
+    return (delivery, "", "")
+
+
 # ---------------------------------------------------------------------------
 # Project + session discovery
 # ---------------------------------------------------------------------------
@@ -273,18 +318,13 @@ _TREK_SCHEDULER_CHANNELS = {
 # gate, not mere defense-in-depth. Non-system events on these channels are
 # downgraded to propose-to-ai (same treatment as an allowlist miss) so a forced
 # Skill invoke with an attacker-controlled id is structurally impossible.
-_T1_SYSTEM_TIER = "T1-system"
-_T1_SYSTEM_ISSUER = "beacon-system"
-_SYSTEM_PROVENANCE_CHANNELS = {
-    "operation-trigger",
-    "trek-trigger",
-    "trek-progress-check",
-    "trek-task-review",
-    "trek-leader-digest",
-}
+# ms-160 e-5803: the T1-system provenance constants + gate AND the auto-execute
+# downgrade decision moved to lib/bus_delivery.py (SYSTEM_PROVENANCE_CHANNELS /
+# has_system_provenance / classify_auto_execute) so the Codex inbox hook shares
+# the exact same rules. The main loop below calls bus_delivery.classify_auto_execute.
 
 # Payload-derived ids (trek_id / task_id / op_id) are interpolated into the
-# imperative command strings. Even after the provenance gate above, defend the
+# imperative command strings. Even after the provenance gate, defend the
 # f-string against a malformed id (newline / markdown / shell metacharacter)
 # leaking into the injected instruction by restricting to the id charset Beacon
 # actually mints (``tk-<hex>`` / ``e-<n>`` / ``op-<n>`` / ``ms-<n>``).
@@ -294,28 +334,14 @@ _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
 def _sanitize_id(raw: object, *, fallback: str = "?", maxlen: int = 64) -> str:
     """Strip an id down to ``[A-Za-z0-9_-]`` and cap its length.
 
-    Returns ``fallback`` when nothing survives so the rendered block still
-    reads sensibly (and never emits an empty ``/beacon-… `` command).
+    Delegates to ``lib/bus_delivery.sanitize_id`` (single source, shared with the
+    Codex hook); the inline regex is the fail-safe fallback if that import fails.
     """
+    bd = _import_bus_delivery()
+    if bd is not None:
+        return bd.sanitize_id(raw, fallback=fallback, maxlen=maxlen)
     cleaned = _SAFE_ID_RE.sub("", str(raw or ""))[:maxlen]
     return cleaned or fallback
-
-
-def _has_system_provenance(ev: dict) -> bool:
-    """True when the event carries a persisted T1-system envelope.
-
-    The server persists ``body.envelope`` on the event (server/app.py
-    post_bus_event) after verifying its signature, so reading the claimed
-    ``tier`` / ``issuer`` here is sound: a fake T1-system claim would have been
-    degraded to T5 (and stripped of auto-execute) before persist.
-    """
-    env = ev.get("envelope")
-    if not isinstance(env, dict):
-        return False
-    return (
-        env.get("tier") == _T1_SYSTEM_TIER
-        and env.get("issuer") == _T1_SYSTEM_ISSUER
-    )
 
 
 def _is_trek_scheduler_event(ev: dict) -> tuple[bool, str]:
@@ -550,6 +576,10 @@ def _read_auto_execute_channels(root: Path) -> list[str]:
     the safety net — an unreadable allowlist must NOT be confused for "allow
     everything". This mirrors the bus_budget gate's posture.
     """
+    bd = _import_bus_delivery()
+    if bd is not None:
+        return bd.read_auto_execute_channels(root)
+    # Fail-safe fallback (shared module unavailable): same fail-closed read.
     path = root / ".beacon" / "project.json"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -595,41 +625,16 @@ def _format_autonomous_action_block(events: list[dict]) -> str:
     Visually distinct from the generic propose-to-ai event list (different
     header, called out with `## AUTONOMOUS ACTION`) so the AI's instruction
     parser doesn't conflate the two.
+
+    ms-160 e-5803: the body now lives in lib/bus_delivery so the Codex inbox hook
+    renders the identical block. Fail-safe: if the shared module can't be
+    imported, return "" (= no forced Skill invoke, the safe direction) — the
+    events still appear in the generic event list below.
     """
-    if not events:
+    bd = _import_bus_delivery()
+    if bd is None:
         return ""
-    lines: list[str] = []
-    lines.append("## AUTONOMOUS ACTION — operation autonomy active")
-    lines.append("")
-    lines.append(
-        "以下の operation-trigger event は `bus_auto_execute_channels` "
-        "allowlist に登録済 (= 人間 opt-in 済) のため、"
-        "**確認を取らず autonomous に実行する**。"
-    )
-    lines.append("Run this autonomously without asking the user first.")
-    lines.append("")
-    for ev in events:
-        payload = ev.get("payload") or {}
-        op_id = _sanitize_id(payload.get("op_id"))
-        spec_doc_id = _sanitize_id(payload.get("spec_doc_id"), fallback="")
-        trigger_name = payload.get("trigger_name", "")
-        eid = ev.get("event_id", "?")
-        lines.append(f"- event_id: {eid}")
-        lines.append(f"  - op_id: {op_id}")
-        if spec_doc_id:
-            lines.append(f"  - spec_doc_id: {spec_doc_id}")
-        if trigger_name:
-            lines.append(f"  - trigger_name: {trigger_name}")
-        cmd = f"/beacon-operation-execute {op_id}"
-        lines.append(f"  - launch: `{cmd}`  (no confirmation prompt)")
-    lines.append("")
-    lines.append(
-        "budget が枯渇していたら Skill 側 (Step 4.5) が自動で停止 → incident "
-        "open → note 残しに降格する。Skill の責務なのでこの inject 側で "
-        "事前判定はしない。"
-    )
-    lines.append("")
-    return "\n".join(lines)
+    return bd.format_operation_trigger_imperative(events)
 
 
 def _format_trek_progress_check_block(events: list[dict]) -> str:
@@ -1193,38 +1198,34 @@ def main() -> None:
     downgraded_count = 0
     downgraded_audit: list[dict] = []
     for ev in unread:
-        delivery = ev.get("delivery") or "propose-to-ai"
-        if delivery == "auto-execute":
+        # ms-160 e-5803: the auto-execute downgrade decision (allowlist miss +
+        # T1-system provenance gate) is now shared with the Codex inbox hook via
+        # lib/bus_delivery.classify_auto_execute.
+        delivery, downgraded_from, downgrade_reason = _classify_delivery(
+            ev, allowlist)
+        if downgraded_from:
+            # Mutate a copy so we don't change the upstream object the
+            # cursor-advance step still inspects for created_at. allowlist-miss
+            # carries no reason tag; a provenance miss tags "non-system-envelope"
+            # (parity with the pre-e-5803 inline logic + the audit frame).
+            ev = {**ev, "delivery": "propose-to-ai",
+                  "_downgraded_from": downgraded_from}
+            if downgrade_reason:
+                ev["_downgrade_reason"] = downgrade_reason
+            downgraded_count += 1
+            downgraded_audit.append(ev)
+            delivery = "propose-to-ai"
+        elif delivery == "auto-execute":
+            # Kept (opted-in, and system-minted where the channel is gated):
+            # route by channel into its Level 3 imperative bucket. The event
+            # ALSO stays in the generic list below (audit parity) because
+            # delivery remains "auto-execute".
             channel = ev.get("channel") or ""
-            if channel not in allowlist:
-                # Mutate a copy so we don't change the upstream object the
-                # cursor-advance step still inspects for created_at.
-                ev = {**ev, "delivery": "propose-to-ai",
-                       "_downgraded_from": "auto-execute"}
-                downgraded_count += 1
-                downgraded_audit.append(ev)
-                delivery = "propose-to-ai"
-            elif (channel in _SYSTEM_PROVENANCE_CHANNELS
-                    and not _has_system_provenance(ev)):
-                # ms-97 P2 (H2): the channel is opted-in AND auto-execute, but
-                # the persisted envelope is not a server-minted T1-system one.
-                # Refuse to route it into a Level 3 imperative block — a project
-                # editor could otherwise force a `/beacon-…  <attacker id>`
-                # invoke. Downgrade to propose-to-ai (same as an allowlist miss)
-                # and tag the reason so the audit frame explains the drop.
-                ev = {**ev, "delivery": "propose-to-ai",
-                       "_downgraded_from": "auto-execute",
-                       "_downgrade_reason": "non-system-envelope"}
-                downgraded_count += 1
-                downgraded_audit.append(ev)
-                delivery = "propose-to-ai"
-            elif channel == "operation-trigger":
+            if channel == "operation-trigger":
                 # ms-60 / e-1340 Phase B (e-1384): opted-in operation-trigger
                 # events get a structured "AUTONOMOUS ACTION" block ABOVE the
                 # generic event list, so the AI launches
-                # /beacon-operation-execute without scanning the noise. The
-                # event itself still appears in the regular list (for audit
-                # parity) but the block carries the instruction.
+                # /beacon-operation-execute without scanning the noise.
                 autonomous_actions.append(ev)
             elif channel == "trek-trigger":
                 # ms-75 / e-1870: opted-in trek-trigger events get a
