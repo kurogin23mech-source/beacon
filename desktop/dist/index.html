@@ -1348,6 +1348,50 @@ body::after {
   font-weight: 600;
 }
 
+/* ms-162 — target 詳細のサブタブ (work-item / evidence / decision) */
+.tgt-detail-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 8px 0 6px;
+  border-bottom: 1px solid var(--border);
+}
+.tgt-detail-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 5px 10px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+.tgt-detail-tab:hover { color: var(--text-secondary); }
+.tgt-detail-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+.tgt-detail-count {
+  display: inline-block;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: rgba(148,163,184,0.15);
+  color: var(--text-dim);
+  font-size: 9px;
+  text-align: center;
+}
+.tgt-detail-tab.active .tgt-detail-count {
+  background: rgba(74,222,128,0.18);
+  color: var(--accent);
+}
+.tgt-detail-panel { padding-top: 2px; }
+.tgt-detail-empty {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 10px 4px;
+}
+
 /* e-976: reason auto-link + missing-reason marker styling.
  * Goal: stay subtle in the entry row (no layout jolt) and slightly more
  * legible inside the modal where the reason text actually shows.
@@ -6329,6 +6373,17 @@ function renderTargetsSection() {
     </section>`;
 }
 
+// ms-162 — target 詳細サブタブの次元分類。work-model の 3 概念 (WorkItem /
+// Evidence / Decision) に対応: task/pr/incident/operation_task = 計画された仕事
+// の単位 (WorkItem)、commit/save/run_record/note/transition = 起きたことの
+// append-only 記録 (Evidence)。decision は別ストリームなので entry には無い。
+const _EVIDENCE_ENTRY_TYPES = new Set([
+  'commit', 'save', 'run_record', 'note', 'target-transition-approval',
+]);
+function entryDimension(type) {
+  return _EVIDENCE_ENTRY_TYPES.has(type) ? 'evidence' : 'workitem';
+}
+
 function renderMilestoneCard(ms, index) {
   const isExpanded = state.expanded.has(ms.id);
   const entries = ms.entries || [];
@@ -6345,11 +6400,20 @@ function renderMilestoneCard(ms, index) {
 
   let bodyHtml = '';
   if (isExpanded && (entries.length > 0 || ms.description)) {
+    // ms-162 — split the target detail into sub-tabs (work-item / evidence /
+    // decision) so each dimension is read on its own instead of one long
+    // vertical dump. Partition entries by dimension, render only the active tab.
+    const wiEntries = entries.filter(e => entryDimension(e.type) === 'workitem');
+    const evEntries = entries.filter(e => entryDimension(e.type) === 'evidence');
+    const decisions = decisionsForTarget(state.decisions, ms);
     _currentMsId = ms.id;
-    const renderedEntries = entries.map(renderEntry).join('');
+    const wiHtml = wiEntries.map(renderEntry).join('');
+    const evHtml = evEntries.map(renderEntry).join('');
     _currentMsId = null;
-    const hasDoneEntries = entries.some(e => e.status === 'done' || (e.entries || []).some(c => c.status === 'done'));
-    const hasCancelledEntries = entries.some(e => e.status === 'cancelled' || (e.entries || []).some(c => c.status === 'cancelled'));
+    const activeTab = state.targetTab[ms.id] || 'workitem';
+
+    const hasDoneEntries = wiEntries.some(e => e.status === 'done' || (e.entries || []).some(c => c.status === 'done'));
+    const hasCancelledEntries = wiEntries.some(e => e.status === 'cancelled' || (e.entries || []).some(c => c.status === 'cancelled'));
     const msHideDone = state.hideEntryDone.has(ms.id);
     const msShowCancelled = state.showCancelled.has(ms.id);
     const msObjective = ms.objective
@@ -6359,35 +6423,42 @@ function renderMilestoneCard(ms, index) {
       ? `<div class="ms-ac"><div class="ms-ac-label">done when</div>${esc(ms.acceptance_criteria)}</div>`
       : '';
     // ms-43 / e-2246 — creator (= 起票者) row in the expanded detail body.
-    // Shown unconditionally inside the expanded MS view, regardless of
-    // multi-actor heuristic, because the detail surface is where users
-    // explicitly ask "who set this up?" (AC #1).
     const _msExpandedCreatorLabel = renderCreatorLabel(ms);
     const msExpandedCreator = _msExpandedCreatorLabel
       ? `<div class="ms-creator-detail" style="font-size:0.7rem;color:var(--text-dim);margin:6px 0;">起票者: ${_msExpandedCreatorLabel}</div>`
       : '';
-    const showToolbar = hasDoneEntries || hasCancelledEntries;
+    // Sub-tab bar with per-dimension counts.
+    const tab = (key, label, count) =>
+      `<button class="tgt-detail-tab ${activeTab === key ? 'active' : ''}" data-action="target-tab" data-ms-id="${ms.id}" data-tab="${key}">${label} <span class="tgt-detail-count">${count}</span></button>`;
+    const tabBar = `
+      <div class="tgt-detail-tabs">
+        ${tab('workitem', 'work-item', wiEntries.length)}
+        ${tab('evidence', 'evidence', evEntries.length)}
+        ${tab('decision', 'decision', decisions.length)}
+      </div>`;
+    // Active tab content.
+    const showToolbar = (hasDoneEntries || hasCancelledEntries);
+    const toolbar = showToolbar ? `
+        <div class="ms-entries-toolbar">
+          ${hasDoneEntries ? `<button class="entry-filter-btn ${msHideDone ? 'active' : ''}" data-action="toggle-hide-done" data-ms-id="${ms.id}">${msHideDone ? 'show done' : 'hide done'}</button>` : ''}
+          ${hasCancelledEntries ? `<button class="entry-filter-btn ${msShowCancelled ? 'active' : ''}" data-action="toggle-show-cancelled" data-ms-id="${ms.id}">${msShowCancelled ? 'hide cancelled' : 'show cancelled'}</button>` : ''}
+        </div>` : '';
+    const empty = (t) => `<div class="tgt-detail-empty">${t} はありません。</div>`;
+    let tabContent;
+    if (activeTab === 'evidence') {
+      tabContent = evHtml || empty('evidence (commit 等の記録)');
+    } else if (activeTab === 'decision') {
+      tabContent = renderDecisionLog(decisions) || empty('decision (判断の記録)');
+    } else {
+      tabContent = toolbar + (wiHtml || empty('work-item (task 等)'));
+    }
     bodyHtml = `
       <div class="ms-entries">
-        ${showToolbar ? `
-        <div class="ms-entries-toolbar">
-          ${hasDoneEntries ? `
-          <button class="entry-filter-btn ${msHideDone ? 'active' : ''}" data-action="toggle-hide-done" data-ms-id="${ms.id}">
-            ${msHideDone ? 'show done' : 'hide done'}
-          </button>
-          ` : ''}
-          ${hasCancelledEntries ? `
-          <button class="entry-filter-btn ${msShowCancelled ? 'active' : ''}" data-action="toggle-show-cancelled" data-ms-id="${ms.id}">
-            ${msShowCancelled ? 'hide cancelled' : 'show cancelled'}
-          </button>
-          ` : ''}
-        </div>
-        ` : ''}
         ${msExpandedCreator}
         ${msObjective}${msAc}
         ${ms.description ? `<div class="ms-description">${esc(ms.description)}</div>` : ''}
-        ${renderedEntries}
-        ${renderDecisionLog(decisionsForTarget(state.decisions, ms))}
+        ${tabBar}
+        <div class="tgt-detail-panel">${tabContent}</div>
         ${renderRelatedTreksWidget('milestone', ms.id)}
       </div>
     `;
@@ -9633,6 +9704,11 @@ function handleCommonAction(action, el) {
     case 'toggle-entry': {
       const eid = el.dataset.entryId;
       state.collapsedEntries.has(eid) ? state.collapsedEntries.delete(eid) : state.collapsedEntries.add(eid);
+      render(); return true;
+    }
+    case 'target-tab': {
+      // ms-162 — switch the expanded target's sub-tab (work-item/evidence/decision).
+      state.targetTab[el.dataset.msId] = el.dataset.tab;
       render(); return true;
     }
     case 'toggle-hide-done': {
