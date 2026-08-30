@@ -89,6 +89,21 @@ def test_derived_render_has_parity_with_source():
     assert result["new_phantom"] == []
 
 
+def test_parse_empty_map_returns_no_entries():
+    """A map with no bullets parses to [] (the main() guard turns this into a loud
+    error instead of an IndexError — PR#699 AX review)."""
+    assert seed.parse_map("# title\n\nno bullets here\n") == []
+    assert seed.parse_map("") == []
+
+
+def test_wedge_regex_built_from_shared_type_set():
+    """The parser's wedge types come from the shared vocabulary, so a new surface
+    type is picked up here without a second edit (PR#699 maintainability review)."""
+    import deliverable_changelog as dc
+    for t in dc.WEDGE_SURFACE_TYPES:
+        assert seed._WEDGE_RE.search(f"- x `{t}:something`"), t
+
+
 def test_already_seeded_guard():
     import deliverable_changelog as dc
     data = {"name": "P", "profession": "dev"}

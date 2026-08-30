@@ -159,7 +159,7 @@ def _tags_with_area(tags: list, area: str) -> list:
     out = list(tags or [])
     area = (area or "").strip()
     if area:
-        out.insert(0, f"{_dm._AREA_TAG_PREFIX}{area}")
+        out.insert(0, f"{_dc.AREA_TAG_PREFIX}{area}")
     return out
 
 
@@ -218,7 +218,11 @@ def cmd_deliverable_add():
     if args.json:
         print(json.dumps(entry, ensure_ascii=False))
     else:
-        print(f"✓ deliverable {entry['id']} を記帳: [{args.category}] {args.title}")
+        # Echo the source attribution (PR#699 AX review): --source-target defaults
+        # to "root", so surfacing it here lets a caller catch a forgotten
+        # --source-target ms-XX before the mis-attribution is buried in the log.
+        print(f"✓ deliverable {entry['id']} を記帳: [{args.category}] {args.title} "
+              f"(source: {args.source_target})")
 
 
 def cmd_deliverable_retire():

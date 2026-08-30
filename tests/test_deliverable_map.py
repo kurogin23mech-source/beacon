@@ -182,6 +182,26 @@ def test_auto_completion_entries_excluded_from_surface_index():
     assert out.index("ms-42 の完了理由テキスト") > idx
 
 
+def test_area_resets_when_later_category_has_no_area():
+    """PR#699 review consensus (AX high + maintainability): a category WITHOUT an
+    area tag, appearing AFTER an area-ful one, must render at ## level — not stay
+    silently nested under the previous 大節. Regression for the current_area reset."""
+    data = {"name": "P", "profession": "dev"}
+    dc.append_deliverable(data, {"source": {"target_id": "root", "kind": "root"},
+                                 "category": "小節X", "title": "x", "summary": "sx",
+                                 "tags": ["area:大節A"]})
+    dc.append_deliverable(data, {"source": {"target_id": "root", "kind": "root"},
+                                 "category": "無所属", "title": "y", "summary": "sy"})
+    out = dm.render_map(data)
+    lines = out.splitlines()
+    # the area-less category renders as a top-level ## heading, not a nested ###
+    assert "## 無所属" in lines
+    assert "### 無所属" not in lines
+    # and the area-ful one is still nested under its 大節
+    assert "## 大節A" in lines
+    assert "### 小節X" in lines
+
+
 def test_completion_only_log_renders_just_the_trailing_section():
     """If the log holds ONLY auto-completion entries (no curated surfaces yet), the
     surface index is empty and only the 完遂 section shows — no phantom index."""

@@ -42,18 +42,11 @@ _DEV_CATEGORY_HEADINGS = {
 # WEDGE(s) in ``tags`` (SPEC 方針2: ``tags`` = "surface area 等"). A wedge is a
 # ``type:ident`` token in the 4-surface vocabulary check-map-drift reconciles
 # against the real CLI/API/Skill/file surfaces — so the DERIVED application-map
-# keeps the exact same machine safety net the hand-maintained doc had. This RE is
-# the SAME 4-type set as ``scripts/check-map-drift.py`` (WEDGE_RE); the two must
-# stay in lockstep — the derived doc's wedges are meaningless if the reconciler
-# does not recognise the same types.
-_WEDGE_TAG_RE = re.compile(r"^(cli|api|skill|file):")
-
-# An ``area:<heading>`` tag names the 大節 (top-level map section) an entry belongs
-# to — a DISPLAY grouping key for the dev render only, NOT a wedge (its ``area:``
-# prefix is outside ``_WEDGE_TAG_RE`` so check-map-drift never mistakes it for a
-# surface to reconcile). Absent → the entry renders under its 小節 (category) with
-# no top-level header.
-_AREA_TAG_PREFIX = "area:"
+# keeps the exact same machine safety net the hand-maintained doc had. The type set
+# lives in ``deliverable_changelog.WEDGE_SURFACE_TYPES`` (one home, shared with the
+# backfill parser and the reconciler); this RE is built FROM it so a new surface
+# type is a one-line edit there, not three.
+_WEDGE_TAG_RE = re.compile(r"^(" + "|".join(_dc.WEDGE_SURFACE_TYPES) + r"):")
 
 
 def _entry_wedges(entry: dict) -> list:
@@ -70,8 +63,8 @@ def _entry_area(entry: dict) -> str:
     ``""`` if none. Used only to emit top-level section headers in the dev render;
     it is not a wedge and never reaches check-map-drift as one."""
     for t in (entry.get("tags") or []):
-        if isinstance(t, str) and t.startswith(_AREA_TAG_PREFIX):
-            return t[len(_AREA_TAG_PREFIX):].strip()
+        if isinstance(t, str) and t.startswith(_dc.AREA_TAG_PREFIX):
+            return t[len(_dc.AREA_TAG_PREFIX):].strip()
     return ""
 
 
@@ -173,11 +166,16 @@ def _render_dev(summary: dict) -> str:
             continue  # a completion-only category contributes nothing to the index
         # A category's 大節 is consistent across its entries (a backfill sets the
         # same area on every bullet of a section); read it off the first entry.
+        # Reset on EVERY change incl. → "" (PR#699 review consensus, AX high +
+        # maintainability): an area-less category after an area-ful one must fall
+        # back to a ## heading, not silently nest under the previous 大節. Emit a
+        # ## area header only when the new area is non-empty.
         area = _entry_area(surface[0])
-        if area and area != current_area:
-            lines.append(f"## {area}")
-            lines.append("")
+        if area != current_area:
             current_area = area
+            if area:
+                lines.append(f"## {area}")
+                lines.append("")
         heading = _DEV_CATEGORY_HEADINGS.get(group["category"], group["category"])
         lines.append(f"### {heading}" if current_area else f"## {heading}")
         for e in surface:

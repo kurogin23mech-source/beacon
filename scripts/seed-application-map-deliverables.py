@@ -50,9 +50,12 @@ import deliverable_map as _dm  # noqa: E402
 # provenance breadcrumb ("this row came from the v1 application-map migration").
 SEED_MARKER = "seed:application-map-v1"
 
-# A wedge token inside a bullet: `type:ident` in backticks (same 4-surface
-# vocabulary as check-map-drift). Captured WITH the backticks stripped.
-_WEDGE_RE = re.compile(r"`((?:cli|api|skill|file):[^`]+)`")
+# A wedge token inside a bullet: `type:ident` in backticks. The surface-type set is
+# the SHARED ``deliverable_changelog.WEDGE_SURFACE_TYPES`` (one home with the render
+# + reconciler, PR#699 review) so a new surface type is not silently missed by this
+# parser. Captured WITH the backticks stripped.
+_WEDGE_RE = re.compile(
+    r"`((?:" + "|".join(_dc.WEDGE_SURFACE_TYPES) + r"):[^`]+)`")
 
 
 def _strip_frontmatter(text: str) -> list:
@@ -98,7 +101,7 @@ def parse_map(text: str) -> list:
         summary = re.sub(r"\s+", " ", summary).strip()
         if not summary:
             continue
-        tags = ([f"{_dm._AREA_TAG_PREFIX}{area}"] if area else []) + list(wedges)
+        tags = ([f"{_dc.AREA_TAG_PREFIX}{area}"] if area else []) + list(wedges)
         tags.append(SEED_MARKER)
         entries.append({
             "source": {"target_id": "root", "kind": "root"},
@@ -177,6 +180,13 @@ def main() -> int:
 
     text = _load_map_text(args)
     entries = parse_map(text)
+    # Guard the empty parse LOUDLY (PR#699 AX review): a map with no bullets (empty
+    # / malformed --file) would otherwise IndexError on entries[0] below with a bare
+    # traceback — the caller cannot tell "0 parsed" from a code bug.
+    if not entries:
+        print("Error: 入力 doc から bullet が 1 件も parse できませんでした。"
+              "--file / --doc-id の内容を確認してください。", file=sys.stderr)
+        return 1
     result = _reconcile_render(entries, source_text=text)
     counts = result["reconcile"]["counts"]
     parity = result.get("parity", True)
@@ -229,15 +239,23 @@ def main() -> int:
     print(f"✓ {len(entries)} entries を root deliverable-changelog に seed 済")
     # Swap the CORE doc to the derived render (the e-5851 re-home). sync overwrites
     # the existing hand-maintained application-map with the generated body — from
-    # here the doc auto-follows every deliverable mutation (受入条件4). If the doc
-    # is absent (unexpected — the map should exist), sync no-ops and we say so.
-    if _dsync.sync_application_map(data):
+    # here the doc auto-follows every deliverable mutation (受入条件4).
+    swapped = _dsync.sync_application_map(data)
+    if swapped:
         print("✓ application-map を導出物へ差替 (手メンテ廃止、以降 add/retire に自動追随)")
     else:
-        print("⚠ application-map doc が見つからず差替をスキップ "
-              "(dev+doc存在が前提)。`beacon deliverable map` で導出内容は確認可。",
-              file=sys.stderr)
-    return 0
+        # PR#699 AX review: the changelog seed SUCCEEDED but the doc-swap did not —
+        # that is a PARTIAL migration (map still hand-maintained), so exit NON-ZERO
+        # rather than reporting exit 0 for an incomplete result. The seed is durable;
+        # re-running is blocked by the idempotency guard, so fix the doc (dev + doc
+        # must exist) and run `beacon deliverable map` / `beacon doc update`.
+        print("⚠ application-map doc が見つからず差替をスキップ = 移行は未完了 "
+              "(dev+doc存在が前提)。changelog の seed は完了済。", file=sys.stderr)
+    if args.json:
+        import json as _json
+        print(_json.dumps({"seeded": len(entries), "doc_swapped": swapped},
+                          ensure_ascii=False))
+    return 0 if swapped else 1
 
 
 if __name__ == "__main__":
