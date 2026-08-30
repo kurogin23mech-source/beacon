@@ -79,6 +79,10 @@ PY
     env["BEACON_BIN"] = str(beacon_bin)
     env["BEACON_FAKE_CALLS"] = str(tmp_path / "beacon_calls.json")
     env["HOME"] = str(tmp_path / "home")
+    # ms-160: the fake app-server never serves /readyz, so skip the readyz gate
+    # here (tested separately) — otherwise every wrapper test would block on the
+    # poll for the full timeout.
+    env["BEACON_BCODEX_READYZ_TIMEOUT"] = "0"
     if extra_env:
         env.update(extra_env)
 
@@ -211,3 +215,121 @@ def test_bcodex_armed_turns_rejects_non_integer(tmp_path):
         tmp_path, args=["--armed", "--armed-turns", "abc"])
     assert proc.returncode == 2
     assert "positive integer" in proc.stderr
+
+
+# ms-160: the readyz gate — bcodex must wait for /readyz before launching the
+# TUI so `codex --remote` doesn't connect during the "listening but not ready"
+# window (codex 0.14x) and die with "failed to connect to remote app server".
+
+def _make_fake_codex_with_readyz(bin_dir, calls_path):
+    """A fake codex whose `app-server --listen ws://HOST:PORT` also serves a
+    200 /readyz on that PORT, so the bcodex readyz gate can go green."""
+    fake = bin_dir / "codex"
+    fake.write_text(textwrap.dedent(f"""
+        #!/usr/bin/env bash
+        set -euo pipefail
+        python3 - "$@" <<'PY'
+import json, os, sys
+with open(os.environ["FAKE_CODEX_CALLS"], "a", encoding="utf-8") as f:
+    f.write(json.dumps(sys.argv[1:]) + "\\n")
+PY
+        if [ "${{1:-}}" = "app-server" ]; then
+            # args: app-server --listen ws://127.0.0.1:PORT
+            url="${{3:-}}"
+            port="${{url##*:}}"
+            python3 - "$port" <<'PY'
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+port = int(sys.argv[1])
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        code = 200 if self.path == "/readyz" else 404
+        self.send_response(code); self.end_headers()
+    def log_message(self, *a):
+        pass
+HTTPServer(("127.0.0.1", port), H).serve_forever()
+PY
+        fi
+        exit 0
+    """).strip(), encoding="utf-8")
+    fake.chmod(0o755)
+
+
+def _run_readyz(tmp_path, args):
+    project = tmp_path / "project"
+    (project / ".beacon").mkdir(parents=True)
+    (project / ".beacon" / "cloud.json").write_text("{}", encoding="utf-8")
+    (project / "AGENTS.md").write_text("test", encoding="utf-8")
+    install_root = tmp_path / "install"
+    bridge_dir = install_root / "plugins" / "beacon" / "scripts"
+    bridge_dir.mkdir(parents=True)
+    bridge = bridge_dir / "beacon-codex-bridge"
+    bridge.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n", encoding="utf-8")
+    bridge.chmod(0o755)
+    beacon_bin = install_root / "bin" / "beacon"
+    beacon_bin.parent.mkdir(parents=True)
+    beacon_bin.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    beacon_bin.chmod(0o755)
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    calls_path = tmp_path / "codex_calls.json"
+    calls_path.write_text("", encoding="utf-8")
+    _make_fake_codex_with_readyz(bin_dir, calls_path)
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+    env["FAKE_CODEX_CALLS"] = str(calls_path)
+    env["BEACON_INSTALL_ROOT"] = str(install_root)
+    env["BEACON_BIN"] = str(beacon_bin)
+    env["HOME"] = str(tmp_path / "home")
+    env["BEACON_BCODEX_READYZ_TIMEOUT"] = "10"  # gate ON
+    proc = subprocess.run(["bash", str(BCODEX)] + args, cwd=str(project),
+                          env=env, capture_output=True, text=True, timeout=20)
+    calls = [json.loads(l) for l in calls_path.read_text().splitlines() if l.strip()]
+    return proc, calls, project
+
+
+def test_bcodex_waits_for_readyz_then_launches(tmp_path):
+    """With the gate ON and readyz served, bcodex reaches the --remote launch
+    (it neither hangs nor skips) and prints no readyz-timeout warning."""
+    proc, calls, project = _run_readyz(tmp_path, ["--port", "39987"])
+    assert proc.returncode == 0, proc.stderr
+    assert ["app-server", "--listen", "ws://127.0.0.1:39987"] in calls
+    assert any(c[:2] == ["--remote", "ws://127.0.0.1:39987"] for c in calls), calls
+    assert "readyz not green" not in proc.stderr, proc.stderr
+
+
+def test_bcodex_readyz_gate_fails_open_when_never_ready(tmp_path):
+    """If /readyz never goes green, bcodex must still launch after the cap
+    (fail-open) rather than hang. Uses the plain fake (no readyz) + short cap."""
+    project = tmp_path / "project"
+    (project / ".beacon").mkdir(parents=True)
+    (project / ".beacon" / "cloud.json").write_text("{}", encoding="utf-8")
+    (project / "AGENTS.md").write_text("test", encoding="utf-8")
+    install_root = tmp_path / "install"
+    bd = install_root / "plugins" / "beacon" / "scripts"
+    bd.mkdir(parents=True)
+    (bd / "beacon-codex-bridge").write_text(
+        "#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n", encoding="utf-8")
+    (bd / "beacon-codex-bridge").chmod(0o755)
+    bb = install_root / "bin" / "beacon"
+    bb.parent.mkdir(parents=True)
+    bb.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    bb.chmod(0o755)
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    calls_path = tmp_path / "codex_calls.json"
+    calls_path.write_text("", encoding="utf-8")
+    _make_fake_codex(bin_dir, calls_path)  # never serves readyz
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{env.get('PATH', '')}"
+    env["FAKE_CODEX_CALLS"] = str(calls_path)
+    env["BEACON_INSTALL_ROOT"] = str(install_root)
+    env["BEACON_BIN"] = str(bb)
+    env["HOME"] = str(tmp_path / "home")
+    env["BEACON_BCODEX_READYZ_TIMEOUT"] = "1"  # 1s cap → fail-open fast
+    proc = subprocess.run(["bash", str(BCODEX), "--port", "39986"], cwd=str(project),
+                          env=env, capture_output=True, text=True, timeout=20)
+    calls = [json.loads(l) for l in calls_path.read_text().splitlines() if l.strip()]
+    assert proc.returncode == 0, proc.stderr
+    assert any(c[:2] == ["--remote", "ws://127.0.0.1:39986"] for c in calls), calls
+    assert "readyz not green" in proc.stderr, proc.stderr

@@ -192,10 +192,15 @@ def test_install_hook_creates_file_when_absent(fake_hooks_path, tmp_path):
     cmd = entry["hooks"][0]["command"]
     assert "codex-inbox-hook.py" in cmd
     assert str(cwd) in cmd
+    # PostToolUse now carries two beacon entries: commit-detection (Bash) and
+    # the remote-STOP halt check (.* = every tool) — ms-160 e-5856.
     post = data["hooks"]["PostToolUse"]
-    assert len(post) == 1
-    assert post[0]["matcher"] == "^Bash$"
-    assert "codex-post-tool-use-hook.py" in post[0]["hooks"][0]["command"]
+    assert len(post) == 2
+    by_matcher = {e["matcher"]: e for e in post}
+    assert "codex-post-tool-use-hook.py" in (
+        by_matcher["^Bash$"]["hooks"][0]["command"])
+    assert "codex-halt-check-hook.py" in (
+        by_matcher[".*"]["hooks"][0]["command"])
 
 
 def test_install_hook_is_idempotent(fake_hooks_path, tmp_path):
@@ -207,7 +212,24 @@ def test_install_hook_is_idempotent(fake_hooks_path, tmp_path):
     assert bridge.cmd_install_hook(REPO_ROOT, cwd) == 0
     data = json.loads(target.read_text("utf-8"))
     assert len(data["hooks"]["UserPromptSubmit"]) == 1
-    assert len(data["hooks"]["PostToolUse"]) == 1
+    assert len(data["hooks"]["PostToolUse"]) == 2
+
+
+def test_uninstall_hook_removes_halt_entry(fake_hooks_path, tmp_path):
+    """Uninstalling the last beacon inbox hook also tears down BOTH PostToolUse
+    entries (commit-detection + the remote-STOP halt check)."""
+    bridge, target = fake_hooks_path
+    cwd = tmp_path / "proj"
+    cwd.mkdir()
+    assert bridge.cmd_install_hook(REPO_ROOT, cwd) == 0
+    assert bridge.cmd_uninstall_hook(cwd) == 0
+    data = json.loads(target.read_text("utf-8"))
+    assert data["hooks"].get("UserPromptSubmit") == []
+    post = data["hooks"].get("PostToolUse", [])
+    assert not any("codex-halt-check-hook.py" in
+                   (e.get("hooks") or [{}])[0].get("command", "") for e in post)
+    assert not any("codex-post-tool-use-hook.py" in
+                   (e.get("hooks") or [{}])[0].get("command", "") for e in post)
 
 
 def test_install_hook_creates_codex_project_guidance(fake_hooks_path, tmp_path):
@@ -329,7 +351,9 @@ def test_uninstall_hook_removes_only_requested_cwd(fake_hooks_path, tmp_path):
     cmds = [h["hooks"][0]["command"] for h in bucket]
     assert not any(str(cwd_a) in c for c in cmds)
     assert any(str(cwd_b) in c for c in cmds)
-    assert len(data["hooks"]["PostToolUse"]) == 1
+    # PostToolUse entries (commit-detection + halt check) are shared across
+    # cwd, so they survive while cwd_b's inbox hook remains — ms-160 e-5856.
+    assert len(data["hooks"]["PostToolUse"]) == 2
 
 
 def test_uninstall_last_cwd_removes_both_hook_events(fake_hooks_path, tmp_path):

@@ -429,9 +429,19 @@ def main() -> int:
         beacon_version=_beacon_version(install_root),
     )
 
+    # ms-160 e-5804: merge the channel allowlist from defaults + env
+    # (BEACON_CHANNEL_ALLOWLIST) + project.json (bus_auto_execute_channels),
+    # mirroring channel/bus.mjs's ALLOWED_CHANNELS. Computed once at startup —
+    # cwd never changes mid-session, same as bus.mjs.
+    allowed_channels = crl.merge_allowed_channels(str(cwd))
+
     print(
         f"codex-receive-loop: started "
         f"sid={session.session_id} project={project_id} cwd={cwd}",
+        flush=True,
+    )
+    print(
+        f"codex-receive-loop: allow=[{','.join(allowed_channels)}]",
         flush=True,
     )
 
@@ -700,6 +710,7 @@ def main() -> int:
                 api, project_id=project_id,
                 session_id=session.session_id,
                 since=state["since"], cwd=str(cwd),
+                allowed_channels=allowed_channels,
                 on_kept_event=(
                     _on_kept_event
                     if (app_server_client is not None or dn is not None)

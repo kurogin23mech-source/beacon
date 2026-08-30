@@ -76,6 +76,18 @@ EVENT_LISTENER_ROUTED_ACTIONS = {
     # local addEventListener in index.html (setup-prompt-copy), not the switch.
     "copy-setup-prompt",
 }
+# ms-160 e-5808 — buttons rendered with a `-noop` suffix are visible placeholders
+# whose handler is intentionally deferred: clicking them does nothing YET. Unlike
+# `sales-modal-noop` (which carries an explicit no-op `case`), these have no
+# handler on purpose. The Trek Resume/STOP buttons are the current members;
+# wiring them to real resume/stop behaviour is Trek-refactor work that ms-160
+# SPEC 方針5 explicitly excludes. Listing them keeps the strict CI drift gate
+# green on this known-deferred debt while still catching any NEW unhandled
+# action. Remove an entry here when its real handler lands.
+INTENTIONAL_NOOP_ACTIONS = {
+    "trek-resume-noop",
+    "trek-stop-noop",
+}
 # Tabs are expected to be 1:1 once e-743 (render() SHARED) completes.
 # Until then, allow-list Web-only tabs that Tauri hasn't caught up to yet.
 WEB_ONLY_TABS: set[str] = set()  # empty: drift treated as error after e-743
@@ -157,8 +169,10 @@ def main() -> int:
         if tauri_handle_match else set()
     ) | common_actions
 
-    web_unhandled = web_actions - web_handled - EVENT_LISTENER_ROUTED_ACTIONS
-    tauri_unhandled = tauri_actions - tauri_handled - EVENT_LISTENER_ROUTED_ACTIONS
+    web_unhandled = (web_actions - web_handled - EVENT_LISTENER_ROUTED_ACTIONS
+                     - INTENTIONAL_NOOP_ACTIONS)
+    tauri_unhandled = (tauri_actions - tauri_handled - EVENT_LISTENER_ROUTED_ACTIONS
+                       - INTENTIONAL_NOOP_ACTIONS)
     if web_unhandled:
         issues.append(
             f"  [actions/web] HTML emits actions that no handler covers: {sorted(web_unhandled)}\n"
@@ -176,12 +190,12 @@ def main() -> int:
     cross_drift_web_only = (
         web_actions - tauri_handled - common_actions
         - WEB_ONLY_ACTIONS - TAURI_ONLY_ACTIONS
-        - EVENT_LISTENER_ROUTED_ACTIONS
+        - EVENT_LISTENER_ROUTED_ACTIONS - INTENTIONAL_NOOP_ACTIONS
     )
     cross_drift_tauri_only = (
         tauri_actions - web_handled - common_actions
         - WEB_ONLY_ACTIONS - TAURI_ONLY_ACTIONS
-        - EVENT_LISTENER_ROUTED_ACTIONS
+        - EVENT_LISTENER_ROUTED_ACTIONS - INTENTIONAL_NOOP_ACTIONS
     )
     if cross_drift_web_only:
         issues.append(

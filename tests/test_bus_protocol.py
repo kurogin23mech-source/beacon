@@ -132,6 +132,25 @@ class TestFilterEvent:
         verdict = bp.filter_event(e, _config(channels=("dm", "operation-trigger")))
         assert verdict == bp.FILTER_KEEP
 
+    def test_keeps_stop_signal_even_outside_allowlist(self):
+        # ms-160 e-5800: the remote-STOP kill-switch must reach the receive loop
+        # regardless of the opt-in channel allowlist — a session cannot opt OUT
+        # of being stoppable. Without this the Codex filter dropped stop-signal
+        # (channel-not-allowed) and Codex could not be stopped at all.
+        e = _event(channel="stop-signal", payload={})
+        assert bp.filter_event(e, _config(channels=("dm",))) == bp.FILTER_KEEP
+
+    def test_stop_signal_addressed_to_another_session_still_drops(self):
+        # The allowlist exemption must NOT bypass the recipient filter: a stop
+        # aimed at someone else is not ours to act on.
+        e = _event(channel="stop-signal",
+                   payload={"recipient_session_id": "someone-else"})
+        assert bp.filter_event(e, _config()) == bp.FILTER_DROP_RECIPIENT_MISMATCH
+
+    def test_stop_signal_from_self_still_drops(self):
+        e = _event(channel="stop-signal", sender_session_id="sid-abc", payload={})
+        assert bp.filter_event(e, _config()) == bp.FILTER_DROP_SELF
+
     def test_drops_event_older_than_watermark(self):
         e = _event(created_at="2026-06-25T00:00:00Z")
         verdict = bp.filter_event(e, _config(watermark="2026-06-26T00:00:00Z"))

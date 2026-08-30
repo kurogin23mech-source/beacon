@@ -41,15 +41,23 @@ def distinct_versions(binaries: Iterable[dict]) -> list[str]:
     return sorted(seen)
 
 
+def _normalize_version(raw: str) -> str:
+    """``beacon 0.56.1`` -> ``0.56.1``; a bare ``0.56.1`` passes through.
+
+    ms-160 e-5800/parity: `beacon --version` prints ``beacon 0.62.1`` while the
+    hook / daemon stamp only the bare ``0.62.1``. Comparing the two raw strings
+    reported a phantom skew (``hook=0.62.1 / CLI=beacon 0.62.1``) on every launch
+    even when versions matched — normalize BOTH sides to the bare number so the
+    warning fires only on a real mismatch."""
+    s = (raw or "").strip()
+    return s.split()[-1].strip() if s else ""
+
+
 def _extract_version(row: dict) -> str:
     """Pull a bare version string (``0.56.1``) out of a probed-binary row."""
     if not isinstance(row, dict):
         return ""
-    raw = (row.get("version") or row.get("version_raw") or "").strip()
-    if not raw:
-        return ""
-    # ``beacon 0.56.1`` -> ``0.56.1``; a bare ``0.56.1`` passes through.
-    return raw.split()[-1].strip()
+    return _normalize_version(row.get("version") or row.get("version_raw") or "")
 
 
 def _binary_path(row: dict) -> str:
@@ -102,8 +110,8 @@ def format_skew_report(
             "  対処: 意図した install を PATH の先頭に置く / 不要な beacon を外す。"
         )
 
-    cur = (current_version or "").strip()
-    dv = (daemon_version or "").strip()
+    cur = _normalize_version(current_version)
+    dv = _normalize_version(daemon_version)
     if cur and dv and dv != cur:
         lines.append(
             "⚠ version skew: 起動中の受信 daemon は別バージョンです "
@@ -115,7 +123,7 @@ def format_skew_report(
             "(bcodex 再起動 / beacon channel install の再実行)。"
         )
 
-    hv = (hook_version or "").strip()
+    hv = _normalize_version(hook_version)
     if cur and hv and hv != cur:
         lines.append(
             "⚠ version skew: install 済の Codex hook は別バージョンです "

@@ -12,6 +12,7 @@ diverges from it, and if the debug label stops distinguishing the two review
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +21,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "bin" / "beacon-post-commit-hook.sh"
+# ms-160 e-5801: the Codex (cross-platform Python) half of the same wake hook.
+POST_COMMIT_PY = ROOT / "beacon_cli" / "hooks" / "post_commit.py"
+CODEX_WRAPPER = ROOT / "scripts" / "codex-post-tool-use-hook.py"
 LIB = ROOT / "lib"
 
 sys.path.insert(0, str(LIB))
@@ -75,6 +79,21 @@ def test_manifest_fires_matches_the_firing_authority():
     assert set(tclose["fires"]) - {review_spine.REVIEW_ATTAINMENT} <= completion_reviews
 
 
+def test_python_hook_has_each_manifest_pattern_verbatim():
+    """ms-160 e-5801: the drift guard is now BIDIRECTIONAL. The Codex Python hook
+    (beacon_cli/hooks/post_commit.py) must ALSO carry every manifest grep_pattern
+    byte-identical, so a review 節目 that fires the Claude bash hook but is missing
+    from the Codex hook (= silent on Codex) fails the build. Before this, the guard
+    checked only the bash hook and Codex could drift undetected."""
+    text = POST_COMMIT_PY.read_text(encoding="utf-8")
+    for node_id, pattern in review_nodes.grep_patterns():
+        assert pattern in text, (
+            f"review node {node_id!r}: the Codex Python hook is missing the manifest "
+            f"grep pattern.\n  expected substring: {pattern!r}\n"
+            f"  → keep beacon_cli/hooks/post_commit.py and lib/review_nodes.py in sync."
+        )
+
+
 def test_hook_sets_branch_specific_node_label():
     """The two review 節目 share SKILL=/beacon-review-run, so the hook must set a
     distinct NODE=<id> for each, and the debug label must interpolate it."""
@@ -128,3 +147,58 @@ def test_hook_debug_label_distinguishes_pr_open_from_target_close(beacon_project
                     debug=True)
     log2 = (home2 / ".beacon" / "hook-debug.log").read_text(encoding="utf-8")
     assert "matched:/beacon-review-run:target-close" in log2
+
+
+def _run_codex(cwd: Path, command: str, debug: bool = False):
+    """Run the Codex Python wake hook (scripts/codex-post-tool-use-hook.py →
+    beacon_cli.hooks.post_commit.main) the way the Codex bridge invokes it."""
+    import json
+    import os
+    env = dict(os.environ)
+    home = cwd / "_home_codex"
+    home.mkdir(exist_ok=True)
+    env["HOME"] = str(home)
+    if debug:
+        env["BEACON_HOOK_DEBUG"] = "1"
+    payload = {"hook_event_name": "PostToolUse",
+               "tool_input": {"command": command, "cwd": str(cwd)}}
+    proc = subprocess.run(
+        [sys.executable, str(CODEX_WRAPPER)],
+        input=json.dumps(payload),
+        capture_output=True, text=True, cwd=str(ROOT), timeout=10, env=env,
+    )
+    return proc, home
+
+
+def test_codex_hook_wakes_review_run_for_pr_open(beacon_project_dir):
+    """ms-160 e-5801: opening a PR from a Codex session must wake /beacon-review-run
+    (AX + maintainability), the same as the Claude bash hook — not silently pass."""
+    proc, home = _run_codex(beacon_project_dir, "gh pr create --fill", debug=True)
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    ctx = payload["hookSpecificOutput"]["additionalContext"]
+    assert "/beacon-review-run" in ctx
+    assert "AX" in ctx and "maintainability" in ctx
+    log = (home / ".beacon" / "hook-debug.log").read_text(encoding="utf-8")
+    assert "matched:/beacon-review-run:pr-open" in log
+
+
+def test_codex_hook_wakes_review_run_for_target_close(beacon_project_dir):
+    """ms-160 e-5801: closing a target (milestone done/close/observe / operation
+    close) from Codex must wake /beacon-review-run (philosophy + attainment)."""
+    proc, home = _run_codex(beacon_project_dir, "beacon milestone done ms-1 --reason x",
+                            debug=True)
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    ctx = payload["hookSpecificOutput"]["additionalContext"]
+    assert "/beacon-review-run" in ctx
+    log = (home / ".beacon" / "hook-debug.log").read_text(encoding="utf-8")
+    assert "matched:/beacon-review-run:target-close" in log
+
+
+def test_codex_hook_still_classifies_commit_over_review_nodes(beacon_project_dir):
+    """Precedence parity: commit/push win over the review nodes, so a normal commit
+    still wakes /beacon-log (the review nodes are inserted between push and deploy)."""
+    proc, _home = _run_codex(beacon_project_dir, "git commit -m 'x'")
+    payload = json.loads(proc.stdout)
+    assert "/beacon-log" in payload["hookSpecificOutput"]["additionalContext"]

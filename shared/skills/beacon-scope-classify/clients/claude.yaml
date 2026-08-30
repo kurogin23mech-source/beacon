@@ -1,0 +1,6 @@
+triggers:
+  - "/beacon-scope-classify"
+  - "スコープ分類"
+  - "層分類"
+  - "capability を分類"
+  - "この機能はどの層"

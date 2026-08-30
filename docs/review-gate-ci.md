@@ -30,7 +30,38 @@ recorded — gh, UI, and beacon alike.
   (AX / 思想 are advisory; 目的達成 is human-gated). Until that is designed, CI
   only enforces *that a review was run*, not the judge's verdict.
 
-## Activation (repo-admin — two steps)
+## Activation
+
+### One command (ms-160 e-5805)
+
+Both repo-admin steps are mechanized so activation is one auditable command
+instead of manual settings clicks (needs `gh` with repo-admin auth):
+
+```
+# preview exactly what will change (no mutation):
+python3 scripts/review-gate-ci.py activate --dry-run
+
+# apply — sets the variable AND requires the check on main:
+python3 scripts/review-gate-ci.py activate
+
+# inspect current state / roll back:
+python3 scripts/review-gate-ci.py status
+python3 scripts/review-gate-ci.py deactivate
+```
+
+`activate` is **minimal by default**: it requires only the `beacon-review-gate`
+check. It does not enforce admins or require PR-review approvals unless you ask:
+`--enforce-admins` and `--require-pr-reviews N` opt into stricter policy. If
+`main` already has branch protection, the gate check is **added** to the existing
+required checks (never clobbering them); if not, minimal protection is created.
+`activate` is idempotent — re-running when already active is a no-op.
+
+> **Note:** turning this on blocks the merge button on `main` for *every* route
+> (gh, UI, beacon) until each PR's reviews are recorded — including your own and
+> external contributors'. That is the point (path-independent gate), but it is a
+> repo-wide policy change, so review the `--dry-run` output before applying.
+
+### Manual equivalent (Settings UI)
 
 1. **Enable the workflow.** Set the repository *variable* (Settings → Secrets and
    variables → Actions → Variables):

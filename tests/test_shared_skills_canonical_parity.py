@@ -63,6 +63,36 @@ def _legacy_body(text: str) -> str:
 MIGRATED = _migrated_names()
 
 
+def _distributable_legacy_names() -> list[str]:
+    """Legacy ``skills/<name>.md`` that represent real, distributable Skills.
+
+    Excludes ``_``-prefixed files — those are methodology includes referenced by
+    other Skills (``_beacon-*-methodology``), not invocable Skills with triggers,
+    so they are intentionally never migrated / distributed to the Codex plugin.
+    """
+    if not LEGACY.is_dir():
+        return []
+    return sorted(
+        p.stem for p in LEGACY.glob("*.md") if not p.stem.startswith("_")
+    )
+
+
+def test_no_distributable_skill_is_legacy_only():
+    """ms-160 e-5801/e-5802: the parity guard is BIDIRECTIONAL. Before, it only
+    walked migrated → legacy, so a Skill that lived ONLY as ``skills/<name>.md``
+    (never migrated to ``shared/skills/``) was invisible: it silently dropped out
+    of the Codex plugin build (which ships only canonical skills). ``beacon-review-run``
+    — the post-commit review wake target — was exactly such a Codex gap. This test
+    fails if any distributable legacy Skill has no canonical counterpart."""
+    legacy_only = [n for n in _distributable_legacy_names() if n not in set(MIGRATED)]
+    assert not legacy_only, (
+        "these Skills exist only as legacy skills/<name>.md and are NOT in "
+        "shared/skills/<name>/, so the Codex plugin build (canonical-only) drops "
+        f"them: {legacy_only}. Migrate them to shared/skills/ (SKILL.md + "
+        "clients/claude.yaml) and run scripts/build-codex-plugin-skills.py."
+    )
+
+
 def test_at_least_the_pathfinder_is_migrated():
     """Guards the discovery glob itself: if it silently returns nothing, the
     parametrized parity tests below would vacuously pass and hide a regression.

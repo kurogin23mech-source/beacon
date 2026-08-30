@@ -194,6 +194,57 @@ def should_persist_kept(*, has_app_server: bool, armed: bool) -> bool:
 
 
 # ------------------------------------------------------------------ #
+# Channel allowlist merge (= channel/bus.mjs ALLOWED_CHANNELS mirror)
+# ------------------------------------------------------------------ #
+
+
+def merge_allowed_channels(cwd: str = "", *,
+                           base: tuple = bp.DEFAULT_ALLOWED_CHANNELS,
+                           environ: "dict | None" = None) -> tuple:
+    """Merge the channel allowlist from defaults + env + project.json.
+
+    Mirrors ``channel/bus.mjs``'s ``ALLOWED_CHANNELS`` construction (= env
+    ``BEACON_CHANNEL_ALLOWLIST`` ∪ ``.beacon/project.json``
+    ``bus_auto_execute_channels``). Before this (= ms-160 e-5804) the Codex
+    receive loop used a FIXED tuple and ignored both sources, so a project that
+    opted an extra channel in (e.g. ``operation-trigger`` via
+    ``bus_auto_execute_channels``) was silently dropped on Codex while bus.mjs
+    delivered it — the two sides were asymmetric.
+
+    SUPERSET merge: the protocol defaults are ALWAYS kept (a session must not be
+    able to opt OUT of them, same posture as the stop-signal exemption); env and
+    project only ADD channels. Order-preserving + de-duplicated (defaults first,
+    then env, then project). Best-effort: a missing / malformed project.json
+    contributes nothing.
+    """
+    environ = os.environ if environ is None else environ
+    merged = list(base)
+
+    def _add(items) -> None:
+        for it in items:
+            ch = str(it).strip()
+            if ch and ch not in merged:
+                merged.append(ch)
+
+    env_raw = str(environ.get("BEACON_CHANNEL_ALLOWLIST", "") or "")
+    if env_raw:
+        _add(env_raw.split(","))
+
+    if cwd:
+        pj = Path(cwd) / ".beacon" / "project.json"
+        try:
+            data = json.loads(pj.read_text(encoding="utf-8"))
+            raw = data.get("bus_auto_execute_channels")
+            if isinstance(raw, list):
+                _add(raw)
+        except Exception:
+            # Missing / malformed project.json → defaults + env only.
+            pass
+
+    return tuple(merged)
+
+
+# ------------------------------------------------------------------ #
 # poll_inbox_once — core filter + adapter persist
 # ------------------------------------------------------------------ #
 
@@ -266,6 +317,21 @@ def poll_inbox_once(
             recipient_session_id=session_id,
         )
         if verdict != bp.FILTER_KEEP:
+            continue
+        # ms-160 e-5856: a remote STOP is a kill-switch, never a DM. It must
+        # ALWAYS land in the file inbox — so the PostToolUse halt hook can turn
+        # it into a halt-request even mid autonomous loop — and must NEVER be
+        # handed to on_kept_event. Dispatching a STOP to the app-server /
+        # exec-worker as a reply-worthy turn would be both wrong (it is not a
+        # question) and self-defeating (the very loop we are trying to halt
+        # would "answer" it). This holds regardless of persist_kept, so the
+        # armed+app-server path (persist_kept=False) stays stoppable too.
+        if str(evt.get("channel") or "") == bp.STOP_SIGNAL_CHANNEL:
+            path = persist_inbox_event(evt, cwd=cwd)
+            if path is not None:
+                persisted += 1
+            if created_at > latest_seen:
+                latest_seen = created_at
             continue
         if persist_kept:
             # Persist for the hook to read on the next user prompt.

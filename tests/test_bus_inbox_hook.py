@@ -229,15 +229,26 @@ def test_main_routes_notify_user_only_to_log_not_context(hook_module,
                                                           fake_project,
                                                           monkeypatch,
                                                           capsys):
-    """notify-user-only MUST NOT appear in additionalContext — that's the
-    delivery-mode contract for keeping UI-only notifications out of the AI
+    """notify-user-only payloads MUST NOT appear in additionalContext — that's
+    the delivery-mode contract for keeping UI-only notifications out of the AI
     decision loop. The events still go to .beacon/bus-inbox.log so the user
-    can review them from the terminal."""
+    can review them from the terminal.
+
+    ms-160 e-5799: when notify-only arrives ALONE the hook now emits a concise
+    count + pointer block (previously it returned silently, swallowing the fact
+    that anything arrived). The block is metadata only — the payload body / the
+    raw event_id must still stay out of AI context."""
     events = [_make_event("notify-1", delivery="notify-user-only",
                           payload={"text": "user notice"})]
     out, _, acks = _run_main(hook_module, fake_project, events,
                               "UserPromptSubmit", monkeypatch, capsys)
-    assert out == "", "notify-user-only must NOT inject AI context"
+    # A pointer IS surfaced now (not the old silent swallow) ...
+    assert out.strip(), "notify-only-alone must surface a pointer"
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "1 件" in ctx and "bus-inbox.log" in ctx
+    # ... but the payload body and raw event id must NOT leak into context.
+    assert "user notice" not in ctx
+    assert "notify-1" not in ctx
     inbox_log = fake_project.root / ".beacon" / "bus-inbox.log"
     assert inbox_log.exists()
     content = inbox_log.read_text()

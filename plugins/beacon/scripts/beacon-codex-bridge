@@ -61,6 +61,10 @@ POST_TOOL_HOOK_EVENT = "PostToolUse"
 # Stable marker so we can detect "our" hook entry across upgrades.
 HOOK_SCRIPT_BASENAME = "codex-inbox-hook.py"
 POST_TOOL_HOOK_SCRIPT_BASENAME = "codex-post-tool-use-hook.py"
+# ms-160 e-5856: the remote-STOP kill-switch surface. A second PostToolUse
+# entry with matcher ``.*`` (every tool, not just Bash) so a STOP halts a
+# Codex session even mid autonomous loop.
+HALT_HOOK_SCRIPT_BASENAME = "codex-halt-check-hook.py"
 
 AGENTS_GUIDANCE_START = "<!-- BEACON_CODEX_PROJECT_RULES -->"
 AGENTS_GUIDANCE_END = "<!-- /BEACON_CODEX_PROJECT_RULES -->"
@@ -229,6 +233,28 @@ def _post_tool_hook_entry(install_root: Path, cwd: Path) -> dict:
                 "type": "command",
                 "command": _hook_command(
                     install_root, POST_TOOL_HOOK_SCRIPT_BASENAME
+                ),
+                "timeout": 10,
+            }
+        ],
+    }
+
+
+def _halt_hook_entry(install_root: Path, cwd: Path) -> dict:
+    """PostToolUse(.*) entry for the remote-STOP halt check (= ms-160 e-5856).
+
+    Matcher ``.*`` (not ``^Bash$``) so the halt surfaces after EVERY tool
+    call — a loop of non-Bash tools must still be stoppable. Like the
+    commit-detection PostToolUse hook it runs in the session cwd and
+    discovers the Beacon root from there, so it carries no ``--cwd``.
+    """
+    return {
+        "matcher": ".*",
+        "hooks": [
+            {
+                "type": "command",
+                "command": _hook_command(
+                    install_root, HALT_HOOK_SCRIPT_BASENAME
                 ),
                 "timeout": 10,
             }
@@ -524,6 +550,11 @@ def cmd_install_hook(install_root: Path, cwd: Path) -> int:
             _post_tool_hook_entry(install_root, cwd),
             POST_TOOL_HOOK_SCRIPT_BASENAME,
         ),
+        (
+            POST_TOOL_HOOK_EVENT,
+            _halt_hook_entry(install_root, cwd),
+            HALT_HOOK_SCRIPT_BASENAME,
+        ),
     )
     changed = False
     verdicts = []
@@ -581,6 +612,7 @@ def cmd_uninstall_hook(cwd: Path) -> int:
             keep = [
                 e for e in post_bucket
                 if not _is_our_hook(e, POST_TOOL_HOOK_SCRIPT_BASENAME)
+                and not _is_our_hook(e, HALT_HOOK_SCRIPT_BASENAME)
             ]
             removed += len(post_bucket) - len(keep)
             data["hooks"][POST_TOOL_HOOK_EVENT] = keep

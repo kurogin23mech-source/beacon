@@ -368,7 +368,9 @@ ALLOW_SUBVERB_MISSING_FROM_PYTHON: set[str] = {
     "milestone occupations", "milestone release", "milestone rename",
     "milestone wait",
     "operation activate", "operation approve", "operation close",
-    "operation create", "operation list", "operation open", "operation revoke",
+    "operation create", "operation list", "operation open",
+    "operation pause", "operation resume",  # ms-160 e-5814
+    "operation revoke",
     "operation show", "operation start", "operation status", "operation task",
     "operation update",
     "project cleanup", "project export", "project import", "project orphans",

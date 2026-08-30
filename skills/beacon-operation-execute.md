@@ -226,8 +226,11 @@ cd "$PROJECT_DIR" && beacon bus ack --event "$EVENT_ID" 2>&1 || \
 Step 4 の self-check で `verify` が exit 1 を返した action がある場合、autonomous 経路では停止して **人間に判断を仰ぐ**:
 
 ```bash
-# bus 経由で user に escalation DM を送る (channel=session-dm, delivery=propose-to-ai)
-cd "$PROJECT_DIR" && beacon bus send --channel session-dm \
+# bus 経由で user に escalation DM を送る (channel=dm, delivery=propose-to-ai)。
+# ms-160 e-5815: channel=dm は bridge の既定 allowlist にあり --to 宛て指定で
+# idle-wake で届く。旧 channel=session-dm は allowlist 外で drop され escalation が
+# user を起こせなかった (--to で宛先を明示するので dm の recipient filter は通る)。
+cd "$PROJECT_DIR" && beacon bus send --channel dm \
   --payload '{"text": "op-X autonomous 実行中、scope 外 action を検出: <action>。承認して実行 / 却下のどちらにしますか？", "scope_out_action": "<action>", "envelope_id": "<env-id>"}' \
   --to <user-session-id>
 ```

@@ -265,6 +265,31 @@ else
     echo "  Set BEACON_INSTALL_ROOT to your beacon checkout." >&2
 fi
 
+# ms-160: wait for the app-server to be READY, not merely "listening", before
+# launching the TUI. codex 0.14x prints "listening on" the instant the WS socket
+# binds, but its /readyz endpoint only goes green ~1-2s later; bcodex's
+# foreground setup (websockets probe + version-skew check) can finish inside that
+# gap, so `codex --remote` connected too early and died with
+# "failed to connect to remote app server". Poll /readyz until green. Fail-open:
+# after the cap (or if the app-server has already died, or curl is unavailable)
+# we launch anyway and let the TUI surface the real error. Skip when
+# BEACON_BCODEX_READYZ_TIMEOUT=0 (tests / opt-out).
+READYZ_TIMEOUT="${BEACON_BCODEX_READYZ_TIMEOUT:-15}"
+if [ "$READYZ_TIMEOUT" != "0" ] && command -v curl >/dev/null 2>&1; then
+    READYZ_URL="http://127.0.0.1:$PORT/readyz"
+    __max_iters=$(( READYZ_TIMEOUT * 5 ))   # 0.2s per iteration
+    __i=0
+    while [ "$__i" -lt "$__max_iters" ]; do
+        curl -fs -m 1 -o /dev/null "$READYZ_URL" 2>/dev/null && break
+        kill -0 "$APP_PID" >/dev/null 2>&1 || break   # app-server died
+        sleep 0.2
+        __i=$(( __i + 1 ))
+    done
+    if [ "$__i" -ge "$__max_iters" ]; then
+        echo "[bcodex] warning: app-server /readyz not green after ${READYZ_TIMEOUT}s; launching anyway." >&2
+    fi
+fi
+
 if [ "${#CODEX_ARGS[@]}" -gt 0 ]; then
     "$CODEX_BIN" --remote "$URL" -C "$ROOT" "${CODEX_ARGS[@]}"
 else
