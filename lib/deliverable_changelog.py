@@ -70,6 +70,17 @@ STATUS_SUPERSEDED = "superseded"
 STATUS_RETIRED = "retired"
 DELIVERABLE_STATUSES = frozenset({STATUS_ACTIVE, STATUS_SUPERSEDED, STATUS_RETIRED})
 
+# Marker tag stamped on the AUTO-CAPTURE completion entry (deliverable_capture):
+# a milestone reaching 完遂 records ONE coarse "this milestone shipped" entry, at
+# OUTCOME granularity, NOT surface granularity (the auto seam cannot know which
+# CLI/API/Skill surfaces the milestone produced — that is human/AI curation via
+# ``beacon deliverable add``). The dev map render uses this tag to keep the SURFACE
+# index clean: coarse completion entries are held out of the index and shown in a
+# separate "未 index 化の完遂" section, so the map stays a surface-単位 capability
+# index (ms-161 e-5902 Done-when) instead of a list of MS 完了理由. A curated
+# surface entry never carries this tag.
+AUTO_COMPLETION_TAG = "auto:completion"
+
 
 class DeliverableValidationError(ValueError):
     """Raised when a raw deliverable entry is missing a required field or carries

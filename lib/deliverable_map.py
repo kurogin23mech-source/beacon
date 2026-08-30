@@ -75,6 +75,15 @@ def _entry_area(entry: dict) -> str:
     return ""
 
 
+def _is_auto_completion(entry: dict) -> bool:
+    """True for a coarse auto-capture completion entry (ms-161 e-5902). These carry
+    ``deliverable_changelog.AUTO_COMPLETION_TAG`` and are OUTCOME-granularity ("this
+    milestone shipped"), not surface-granularity — so the dev render keeps them OUT
+    of the surface index (shown in a separate 完遂 section) and the map stays a
+    surface-単位 capability 索引, not a list of 完了理由."""
+    return _dc.AUTO_COMPLETION_TAG in (entry.get("tags") or [])
+
+
 def summarize_map(data: dict) -> dict:
     """The PROFESSION-INDEPENDENT current-state summary (方針4 の芯).
 
@@ -151,25 +160,43 @@ def _render_dev(summary: dict) -> str:
         lines.append("_(まだ記録された成果がありません — milestone を完遂すると"
                      "ここに積み上がります)_")
         return "\n".join(lines)
+    # Partition each category's entries: SURFACE (curated, part of the index) vs
+    # AUTO-COMPLETION (coarse milestone-完遂, held out — ms-161 e-5902). The surface
+    # index renders first; completion entries collect into a trailing section so the
+    # index stays a surface-単位 capability 索引, not a list of 完了理由.
+    completions: list = []
     current_area = None
     for group in summary["categories"]:
-        entries = group["entries"]
+        surface = [e for e in group["entries"] if not _is_auto_completion(e)]
+        completions.extend(e for e in group["entries"] if _is_auto_completion(e))
+        if not surface:
+            continue  # a completion-only category contributes nothing to the index
         # A category's 大節 is consistent across its entries (a backfill sets the
         # same area on every bullet of a section); read it off the first entry.
-        area = _entry_area(entries[0]) if entries else ""
+        area = _entry_area(surface[0])
         if area and area != current_area:
             lines.append(f"## {area}")
             lines.append("")
             current_area = area
         heading = _DEV_CATEGORY_HEADINGS.get(group["category"], group["category"])
         lines.append(f"### {heading}" if current_area else f"## {heading}")
-        for e in entries:
+        for e in surface:
             summary_text = e.get("summary") or e.get("title") or ""
             ref = e.get("ref") or ""
             ref_str = f" `→ {ref}`" if ref else ""
             wedges = _entry_wedges(e)
             wedge_str = ("  " + " ".join(f"`{w}`" for w in wedges)) if wedges else ""
             lines.append(f"- {summary_text}{ref_str}{wedge_str}")
+        lines.append("")
+    if completions:
+        # The completion log — milestones that shipped but whose surfaces are not
+        # yet curated into the index. A prompt to run `beacon deliverable add`, not
+        # index noise.
+        lines.append("## 🔧 未 index 化の完遂（`beacon deliverable add` で surface 化）")
+        for e in completions:
+            src = (e.get("source") or {}).get("target_id") or ""
+            tag = f" ({src})" if src else ""
+            lines.append(f"- {e.get('summary') or e.get('title') or ''}{tag}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

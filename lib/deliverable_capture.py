@@ -94,5 +94,10 @@ def capture_target_completion(data: dict, target: dict, *,
         "title": label,
         "summary": summary,
         "ref": _clean(decl.get("ref")),
+        # Mark this as a coarse OUTCOME-granularity completion (ms-161 e-5902): the
+        # auto seam cannot enumerate the milestone's surfaces, so the dev map render
+        # holds these out of the surface index (shown in a "未 index 化の完遂"
+        # section) and the map stays a surface-単位 index, not a list of 完了理由.
+        "tags": [_dc.AUTO_COMPLETION_TAG],
     }
     return _dc.append_deliverable(data, entry, at=at, actor=actor)

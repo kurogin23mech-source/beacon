@@ -156,3 +156,41 @@ def test_dev_render_backward_compatible_without_wedges():
     out = dm.render_map(_seed())
     assert "## 機能 — 何ができるか" in out  # stays ## when no area is present
     assert "- 他セッションの DM で起きる `→ application-map`" in out
+
+
+# --- e-5902: auto-completion entries are held out of the surface index ----------
+
+def test_auto_completion_entries_excluded_from_surface_index():
+    """A coarse auto-capture completion entry (AUTO_COMPLETION_TAG) must NOT appear
+    in the surface index — it lands in the trailing 完遂 section, so the map stays a
+    surface-単位 index, not a list of 完了理由 (e-5902 Done-when)."""
+    data = _seed_surface()  # two surface entries with wedges
+    dc.append_deliverable(data, {
+        "source": {"target_id": "ms-42", "kind": "milestone"},
+        "category": "feature-map", "title": "ms-42 done",
+        "summary": "ms-42 の完了理由テキスト",
+        "tags": [dc.AUTO_COMPLETION_TAG]})
+    out = dm.render_map(data)
+    # surface entries still in the index
+    assert "### 状態を一望する" in out
+    assert "`cli:beacon status`" in out
+    # the completion entry is in the trailing section, NOT under a 機能 index heading
+    assert "未 index 化の完遂" in out
+    assert "ms-42 の完了理由テキスト (ms-42)" in out
+    idx = out.index("未 index 化の完遂")
+    # its 完了理由 appears only AFTER the trailing-section header (not in the index)
+    assert out.index("ms-42 の完了理由テキスト") > idx
+
+
+def test_completion_only_log_renders_just_the_trailing_section():
+    """If the log holds ONLY auto-completion entries (no curated surfaces yet), the
+    surface index is empty and only the 完遂 section shows — no phantom index."""
+    data = {"name": "P", "profession": "dev"}
+    dc.append_deliverable(data, {
+        "source": {"target_id": "ms-1", "kind": "milestone"},
+        "category": "feature-map", "title": "t", "summary": "ms-1 完遂",
+        "tags": [dc.AUTO_COMPLETION_TAG]})
+    out = dm.render_map(data)
+    assert "未 index 化の完遂" in out
+    assert "ms-1 完遂" in out
+    assert "### " not in out  # no surface subsection rendered
