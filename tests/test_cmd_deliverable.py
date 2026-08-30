@@ -132,8 +132,12 @@ def _drive(monkeypatch, verb, argv, data):
         saved["called"] = True
 
     code = 0
+    # Stub the write-through (doc regeneration) — these tests pin the CHANGELOG
+    # mutation; the doc sync is covered separately (test_deliverable_doc_sync) and
+    # would otherwise reach the real store.
     with mock.patch.object(cd, "load_project", return_value=data), \
-         mock.patch.object(cd, "save_project", side_effect=_save):
+         mock.patch.object(cd, "save_project", side_effect=_save), \
+         mock.patch.object(cd, "_regenerate_map"):
         try:
             _VERB_FN[verb]()
         except SystemExit as e:

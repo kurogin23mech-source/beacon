@@ -214,8 +214,9 @@ def main() -> int:
         print("\n  → parity OK なら --commit で live project に seed します。")
         return 0 if parity else 1
 
-    # COMMIT: one atomic load → append-all → save.
+    # COMMIT: one atomic load → append-all → save, THEN swap the doc to derived.
     from commands_shared import load_project, save_project
+    import deliverable_doc_sync as _dsync
     data = load_project()
     if already_seeded(data):
         print("Error: 既に seed 済 (marker tag が存在)。二重 append を回避して中止。",
@@ -226,6 +227,16 @@ def main() -> int:
     save_project(data, op={"type": "deliverable_seed_application_map",
                            "count": len(entries)})
     print(f"✓ {len(entries)} entries を root deliverable-changelog に seed 済")
+    # Swap the CORE doc to the derived render (the e-5851 re-home). sync overwrites
+    # the existing hand-maintained application-map with the generated body — from
+    # here the doc auto-follows every deliverable mutation (受入条件4). If the doc
+    # is absent (unexpected — the map should exist), sync no-ops and we say so.
+    if _dsync.sync_application_map(data):
+        print("✓ application-map を導出物へ差替 (手メンテ廃止、以降 add/retire に自動追随)")
+    else:
+        print("⚠ application-map doc が見つからず差替をスキップ "
+              "(dev+doc存在が前提)。`beacon deliverable map` で導出内容は確認可。",
+              file=sys.stderr)
     return 0
 
 

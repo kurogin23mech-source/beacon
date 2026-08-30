@@ -28,7 +28,23 @@ import target_descriptor as _td
 import deliverable_resolve as _dr
 import deliverable_changelog as _dc
 import deliverable_map as _dm
+import deliverable_doc_sync as _dsync
 from commands_shared import load_project, save_project
+
+
+def _regenerate_map(data):
+    """Write-through: refresh the generated application-map doc after a changelog
+    mutation (ms-161 e-5851 / 受入条件4 = append/retire に自動追随). BEST-EFFORT — a
+    doc-regeneration failure must NOT fail the command, because the changelog was
+    already persisted by ``save_project``; losing the doc refresh is recoverable
+    (next mutation, or ``beacon deliverable map``), losing the append is not. Warn
+    to stderr and continue."""
+    try:
+        _dsync.sync_application_map(data)
+    except Exception as e:  # pragma: no cover - defensive, exercised via warn path
+        print(f"⚠ application-map の自動再生成に失敗しました "
+              f"(成果ログは記帳済み、`beacon deliverable map` で確認可): {e}",
+              file=sys.stderr)
 
 # How much of a resolved doc body to echo in the human view before eliding — the
 # --json path always carries the full content.
@@ -198,6 +214,7 @@ def cmd_deliverable_add():
     save_project(data, op={"type": "deliverable_add", "entry_id": entry["id"],
                            "source_target": args.source_target,
                            "category": args.category})
+    _regenerate_map(data)
     if args.json:
         print(json.dumps(entry, ensure_ascii=False))
     else:
@@ -224,6 +241,7 @@ def cmd_deliverable_retire():
         sys.exit(1)
     save_project(data, op={"type": "deliverable_retire",
                            "entry_id": args.entry_id, "reason": args.reason})
+    _regenerate_map(data)
     if args.json:
         print(json.dumps(entry, ensure_ascii=False))
     else:
@@ -260,6 +278,7 @@ def cmd_deliverable_supersede():
         sys.exit(1)
     save_project(data, op={"type": "deliverable_supersede",
                            "old_id": args.old_id, "new_id": successor["id"]})
+    _regenerate_map(data)
     if args.json:
         print(json.dumps(successor, ensure_ascii=False))
     else:
