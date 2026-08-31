@@ -981,6 +981,11 @@ def build_parser() -> argparse.ArgumentParser:
     # filters; orthogonal to scope/ms/op narrowing so the user can ask
     # "show all spec docs tagged to this trek".
     p_doc_list.add_argument("--trek", dest="doc_trek", default="")
+    # ms-109 e-3754 canonical --target filter + ms-160 e-5817 root rollup —
+    # previously bash-only, so a Windows/pipx user could not filter docs by
+    # Target at all (incl. ``--target root`` for the project-wide rollup).
+    # Wired here for bash↔Python parity.
+    p_doc_list.add_argument("--target", dest="doc_target", default="")
 
     p_doc_show = doc_sub.add_parser("show", aliases=["get"], add_help=False)
     p_doc_show.add_argument("doc_id", nargs="?", default="")
@@ -3366,6 +3371,8 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
             # ms-75 / e-1866: --trek <trek-id> filter forwarded as
             # BEACON_TREK_ID to cmd_doc_list. Empty string = no filter.
             "BEACON_TREK_ID": getattr(args, "doc_trek", "") or "",
+            # ms-109 e-3754 / ms-160 e-5817: --target <id|root> filter.
+            "BEACON_TARGET": getattr(args, "doc_target", "") or "",
         }
         return _run_commands_py(root, "doc_list", env)
 

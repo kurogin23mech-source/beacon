@@ -242,6 +242,41 @@ def synthesized_projection(data: dict) -> dict:
     }
 
 
+def child_target_ids(data: dict) -> set:
+    """The ids of the root's child Targets — the SAME set the root counts and
+    projects over (``occupation.project_targets``), so "reachable from root"
+    means "a child the root already rolls up". Cancelled Targets are excluded
+    (``project_targets`` drops them), so their docs do not resurface under root.
+    """
+    return {r.get("id") for r in occupation.project_targets(data) if r.get("id")}
+
+
+def doc_rolls_up_to_root(meta: dict, child_ids: set | None = None,
+                         *, data: dict | None = None) -> bool:
+    """True if a document is reachable from the root target (ms-160 e-5817).
+
+    The root is the first-class Target over the whole project (§0 fractal), so
+    a query for its documents must surface BOTH halves:
+
+    - **project-level docs** — linked to the root sentinel (``target == "root"``)
+      OR not linked to any Target yet (the pre-root "target 空" project docs that
+      ユーザー指摘 C1 could not reach from the root), and
+    - **rolled-up child docs** — every doc linked to a descendant Target, so a
+      spec / memo / report attached to e.g. ``ms-104`` is reachable from the root
+      too (flat single-target links used to hide these from the root).
+
+    Pass ``child_ids`` (from :func:`child_target_ids`) to avoid recomputing it
+    for every doc in a list filter; otherwise pass ``data`` and it is derived
+    once here.
+    """
+    t = work_model.doc_target(meta)
+    if t == "" or t == ROOT_TARGET_KIND:
+        return True
+    if child_ids is None:
+        child_ids = child_target_ids(data or {})
+    return t in child_ids
+
+
 def project_as_root_target(data: dict) -> dict:
     """Read ``data`` (a live project dict) AS the root target — a view/projection
     with NO new records and NO mutation of ``data`` (SPEC 受入条件1).
