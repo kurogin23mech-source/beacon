@@ -474,6 +474,72 @@ Step 1 で取得済みの `beacon status --json` の **`stop_signals`** をそ�
 続けるか切り上げるかは人間が決める)。AI が言い添えてよいのは「切り上げますか、
 それとも続けますか」という**問い**までで、判断そのものは user のもの。
 
+## Step 1r: decision arm (誰が何を決めたか) の surface (ms-160 e-5810)
+
+decision arm (= 「誰が・何を・なぜ決めたか」を証跡付きで残す記録面) は監査 consumer
+(`beacon review context`) は持っているが、session-start / retro / UI で日常的に表示する
+経路が無く、記録されても人 / AI が普段目にしない。ここで in-flow の可視化面を足す
+(記録するだけで誰も見ない、を塞ぐ)。
+
+Bash ツールで実行 (fail-safe、decision endpoint が未デプロイの本番や local mode では
+404 / error になるので silent skip):
+
+```bash
+beacon decision list --limit 5 --json 2>/dev/null
+```
+
+- 成功して 1 件以上返れば、最新 5 件を Step 3 の「最近の決定」section に転記する。
+  各行は `[decided_by] what — rationale (短縮)`。
+- error / 404 / 空配列なら **セクションごと省略** (endpoint 未デプロイでも session-start を
+  止めない。真値源はサーバ側 decision store で、ここは読むだけ)。
+
+この Step は **読み取り専用**。
+
+## Step 1s: 生み出した価値 (deliverable) の surface (ms-160 e-5811)
+
+deliverable list verb (= target が完遂して「生み出した価値」を projector (= 導出器) で
+集計・描画する面) は両フロント (CLI / API) 配線済みだが、どの Skill も呼んでおらず、
+produced value (= 生み出した価値) を surface する意図のユースケースで AI が in-flow で
+走らせていなかった。ここで session-start が呼ぶ。
+
+Bash ツールで実行 (fail-safe):
+
+```bash
+beacon deliverable list --resolve --json 2>/dev/null
+```
+
+- 返り JSON の `items[]` のうち `resolved.found == true` かつ `resolved.count_active > 0`
+  のものを、Step 3 の「生み出した価値」に転記する。各行は
+  `[target_class] label: count_active 件 (projector=projector)`。
+- items が空 / 全て `count_active == 0` (= まだ成果が積み上がっていない) / error なら
+  **セクションごと省略** (ノイズを出さない)。
+
+この Step は **読み取り専用**。
+
+## Step 1t: 自律活動 digest (beacon morning) の提案 (ms-160 e-5812)
+
+自律活動 (完了 / 停止 / skip / 介入要望) を 4 bucket で読む唯一の digest `beacon morning`
+が session-start / trigger のどこにも無く、user が暗記していないと「留守中に自律で何が
+起きたか」が見えなかった。ここで「前回以降に自律活動があれば」提案の 1 行を出す。
+
+**注意: `beacon morning` は既定で scope=report の doc を書き込む副作用がある**。
+session-start の読み取り専用原則を守るため、活動有無の判定には **必ず `--no-doc --json`
+を付けて read-only で走らせる** (この呼び出しでは doc を生成しない)。
+
+Bash ツールで実行 (fail-safe):
+
+```bash
+beacon morning --no-doc --json --since-hours 24 2>/dev/null
+```
+
+- `counts` の 4 値 (`completed` / `halted` / `skipped` / `needs_attention`) の合計が
+  **1 以上**なら、Step 3 出力ヘッダに提案の 1 行を出す (下記フォーマット参照)。
+- 合計が 0 / error / `counts` キー無し (古い CLI) なら **省略**。
+
+**この Step は digest 本体を自分で生成しない** (= `--no-doc` 無しの `beacon morning` を
+勝手に実行して report doc を書かない)。提案に留め、実際の digest 生成は user / AI が別途
+`beacon morning` を叩いたときに行う。読み取り専用。
+
 ## Step 1j: 前セッションの session log 読み込み（ms-43 e-1360）
 
 前セッション末で `/beacon-session-end` Skill が `beacon session end` で集約した session log には、**「次セッション最優先 / top of queue / 次にやること」セクションが summary 内に明文化されている**ことが多い。これは trigger より優先順位が高い (人間/AI が curate した継続意図そのもの)。
@@ -626,6 +692,9 @@ Beacon: [name]
     [preview 80 chars]...
   … 他 N 件 (詳細は `beacon bus receive --channel dm`)
 
+ℹ 前回以降に自律活動が [N] 件あります (完了 [c] / 停止 [h] / skip [s] / 介入要望 [a])。   ← Step 1t / counts 合計 > 0 のときのみ
+  詳細は `beacon morning` で 4-bucket digest を確認できます (実行すると report doc も保存されます)。
+
 ドキュメント (core=設計原則・常時参照 / spec=仕様・技術詳細 / memo=検討メモ):
   [CORE] [title]: [1行サマリー (ms-43 e-566)]
   ...
@@ -636,6 +705,14 @@ Beacon: [name]
   ※ 詳細は Web UI Documents タブ または `beacon doc show <doc_id>` で。
 
 前回の経緯: [summary]
+
+生み出した価値 (deliverable):   ← Step 1s / count_active > 0 の items があれば。無ければ省略
+  [target_class] [label]: [count_active] 件 (projector=[projector])
+  ...
+
+最近の決定 (decision — 誰が何を決めたか):   ← Step 1r / decision list が 1 件以上返れば。error/404/空なら省略
+  [decided_by] [what] — [rationale 短縮]
+  ...
 
 Active Operation: [op-id] "[title]" [schedule.frequency]  ← openのOperationがある場合
   直近のrun: [date] [✓ok/⚠warning/✗error] / [date] ... （最新3件）
