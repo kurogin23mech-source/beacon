@@ -3669,6 +3669,16 @@ let state = {
   // server/static/index.html for the Web parity.
   milestoneEntries: {},
   entriesLoading: new Set(),
+  // ms-162 — target 詳細のサブタブ (work-item / evidence / decision)。key=ms.id、
+  // value='workitem'|'evidence'|'decision'。SHARED render (renderMilestoneCard) が
+  // state.targetTab[ms.id] を読むので、web の state 初期化と同じ slot を desktop 側
+  // にも必ず持つ (無いと undefined[ms.id] で MS カード展開時にクラッシュする)。
+  targetTab: {},
+  // ms-162 e-5833 — decision-arm stream cache (ms-154 decision_events)。
+  // null = 未ロード / [] = ロード済(空 or 未配線)。SHARED の ensureDecisionsLoaded /
+  // decisionsForTarget が読むので web parity で slot を持つ。web/index.html 参照。
+  decisions: null,
+  decisionsLoading: false,
   // ms-84 / e-2326 follow-up — tab-scoped extras cache. The slim WS broadcast
   // also drops top-level arrays (pushes / deployments / worktree_sessions).
   // Tauri's initial IPC load seeds these from the full payload so subsequent
@@ -3746,6 +3756,21 @@ const dataSource = {
         : [];
     } catch (_e) {
       state.sessionLogs = [];
+    }
+  },
+  // ms-162 e-5833 — decision stream loader. SHARED の ensureDecisionsLoaded が
+  // dataSource.loadDecisions() を呼ぶので desktop 側にも必ず実装を持つ (無いと
+  // 「dataSource.loadDecisions is not a function」でクラッシュする)。Cloud Rust
+  // binding (cloud_list_decisions) は未配線なので、loadSessionLogs と同じく
+  // fail-soft で [] に落とす — web の loadDecisions と同契約 (404/未配線=空扱い、
+  // decision-log パネルは単に非表示)。binding を足したら web parity に寄せる。
+  loadDecisions: async () => {
+    try {
+      state.decisions = cloudMode && typeof invoke === 'function'
+        ? JSON.parse(await invoke('cloud_list_decisions', { limit: 500 }))
+        : [];
+    } catch (_e) {
+      state.decisions = [];
     }
   },
   loadDocumentContent: async (docId) => {
