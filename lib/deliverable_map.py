@@ -23,6 +23,8 @@ CLI/consumer layer, so no cycle.
 """
 from __future__ import annotations
 
+import re
+
 import deliverable_changelog as _dc
 import occupation as _occ
 
@@ -35,6 +37,44 @@ import occupation as _occ
 _DEV_CATEGORY_HEADINGS = {
     "feature-map": "機能 — 何ができるか",
 }
+
+# ms-161 e-5851: a surface-grained deliverable entry carries its machine-checkable
+# WEDGE(s) in ``tags`` (SPEC 方針2: ``tags`` = "surface area 等"). A wedge is a
+# ``type:ident`` token in the 4-surface vocabulary check-map-drift reconciles
+# against the real CLI/API/Skill/file surfaces — so the DERIVED application-map
+# keeps the exact same machine safety net the hand-maintained doc had. The type set
+# lives in ``deliverable_changelog.WEDGE_SURFACE_TYPES`` (one home, shared with the
+# backfill parser and the reconciler); this RE is built FROM it so a new surface
+# type is a one-line edit there, not three.
+_WEDGE_TAG_RE = re.compile(r"^(" + "|".join(_dc.WEDGE_SURFACE_TYPES) + r"):")
+
+
+def _entry_wedges(entry: dict) -> list:
+    """The surface wedges (``cli:``/``api:``/``skill:``/``file:`` tokens) carried in
+    an entry's ``tags``, in listed order. These are emitted as backtick
+    ``type:ident`` tokens by the dev render so the derived map is machine-reconciled
+    by check-map-drift exactly like the hand-maintained doc was (e-5851 楔維持)."""
+    return [t for t in (entry.get("tags") or [])
+            if isinstance(t, str) and _WEDGE_TAG_RE.match(t)]
+
+
+def _entry_area(entry: dict) -> str:
+    """The 大節 heading an entry belongs to (from its ``area:<heading>`` tag), or
+    ``""`` if none. Used only to emit top-level section headers in the dev render;
+    it is not a wedge and never reaches check-map-drift as one."""
+    for t in (entry.get("tags") or []):
+        if isinstance(t, str) and t.startswith(_dc.AREA_TAG_PREFIX):
+            return t[len(_dc.AREA_TAG_PREFIX):].strip()
+    return ""
+
+
+def _is_auto_completion(entry: dict) -> bool:
+    """True for a coarse auto-capture completion entry (ms-161 e-5902). These carry
+    ``deliverable_changelog.AUTO_COMPLETION_TAG`` and are OUTCOME-granularity ("this
+    milestone shipped"), not surface-granularity — so the dev render keeps them OUT
+    of the surface index (shown in a separate 完遂 section) and the map stays a
+    surface-単位 capability 索引, not a list of 完了理由."""
+    return _dc.AUTO_COMPLETION_TAG in (entry.get("tags") or [])
 
 
 def summarize_map(data: dict) -> dict:
@@ -91,24 +131,70 @@ def render_map(data: dict, *, profession: str | None = None) -> str:
 
 
 def _render_dev(summary: dict) -> str:
-    """Dev render = application-map-flavoured index (方針4). One section per
-    category (pretty-labelled), each active produced value as a 散文 bullet with
-    its drill-down ref. This is the shape ms-161 re-homes application-map onto
-    (e-5825): the doc becomes THIS render's output, so append/retire move the map
-    with no hand-maintenance."""
+    """Dev render = application-map-flavoured index (方針4). This is the shape ms-161
+    re-homes application-map onto (e-5825/e-5851): the doc becomes THIS render's
+    output, so append/retire move the map with no hand-maintenance.
+
+    Structure (e-5851 節構造維持): entries group by ``category`` (the 小節,
+    ``### heading``), and a category's entries may declare an ``area:`` tag (the
+    大節, ``## heading``) — a top-level header is emitted whenever the area changes,
+    reproducing the hand-maintained map's 大節/小節 nesting. Category first-seen
+    order (from ``summarize_map``) preserves the seeded document order, so a backfill
+    that appends in map order renders in map order.
+
+    Each produced value is a 散文 bullet: ``- <summary> [→ ref] <wedges>``. The
+    machine-checkable WEDGES (``tags`` in the 4-surface vocabulary) are emitted as
+    backtick ``type:ident`` tokens so check-map-drift reconciles the DERIVED doc
+    exactly like the hand-maintained one (e-5851 楔維持). An entry with no wedges
+    (e.g. a coarse milestone-completion entry) renders as before — backward
+    compatible with the pre-e-5851 shape."""
     lines = ["# アプリケーション全貌マップ（deliverable-changelog 導出）", ""]
     if summary["total"] == 0:
         lines.append("_(まだ記録された成果がありません — milestone を完遂すると"
                      "ここに積み上がります)_")
         return "\n".join(lines)
+    # Partition each category's entries: SURFACE (curated, part of the index) vs
+    # AUTO-COMPLETION (coarse milestone-完遂, held out — ms-161 e-5902). The surface
+    # index renders first; completion entries collect into a trailing section so the
+    # index stays a surface-単位 capability 索引, not a list of 完了理由.
+    completions: list = []
+    current_area = None
     for group in summary["categories"]:
+        surface = [e for e in group["entries"] if not _is_auto_completion(e)]
+        completions.extend(e for e in group["entries"] if _is_auto_completion(e))
+        if not surface:
+            continue  # a completion-only category contributes nothing to the index
+        # A category's 大節 is consistent across its entries (a backfill sets the
+        # same area on every bullet of a section); read it off the first entry.
+        # Reset on EVERY change incl. → "" (PR#699 review consensus, AX high +
+        # maintainability): an area-less category after an area-ful one must fall
+        # back to a ## heading, not silently nest under the previous 大節. Emit a
+        # ## area header only when the new area is non-empty.
+        area = _entry_area(surface[0])
+        if area != current_area:
+            current_area = area
+            if area:
+                lines.append(f"## {area}")
+                lines.append("")
         heading = _DEV_CATEGORY_HEADINGS.get(group["category"], group["category"])
-        lines.append(f"## {heading}")
-        for e in group["entries"]:
-            ref = e.get("ref") or ""
-            wedge = f" `→ {ref}`" if ref else ""
+        lines.append(f"### {heading}" if current_area else f"## {heading}")
+        for e in surface:
             summary_text = e.get("summary") or e.get("title") or ""
-            lines.append(f"- {summary_text}{wedge}")
+            ref = e.get("ref") or ""
+            ref_str = f" `→ {ref}`" if ref else ""
+            wedges = _entry_wedges(e)
+            wedge_str = ("  " + " ".join(f"`{w}`" for w in wedges)) if wedges else ""
+            lines.append(f"- {summary_text}{ref_str}{wedge_str}")
+        lines.append("")
+    if completions:
+        # The completion log — milestones that shipped but whose surfaces are not
+        # yet curated into the index. A prompt to run `beacon deliverable add`, not
+        # index noise.
+        lines.append("## 🔧 未 index 化の完遂（`beacon deliverable add` で surface 化）")
+        for e in completions:
+            src = (e.get("source") or {}).get("target_id") or ""
+            tag = f" ({src})" if src else ""
+            lines.append(f"- {e.get('summary') or e.get('title') or ''}{tag}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

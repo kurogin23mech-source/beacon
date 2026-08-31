@@ -30,3 +30,27 @@ cmd_deliverable_list() {
     BEACON_RESOLVE="$resolve" BEACON_JSON="$json" \
         python3 "$COMMANDS_PY" deliverable_list
 }
+
+# ms-161 e-5902/e-5903: changelog curation surface + derived-map render. These
+# forward their flags verbatim to the Python cmd (argparse over sys.argv[2:]),
+# unlike cmd_deliverable_list's env-var layout — the write verbs take repeatable
+# --tag and positional ids that argparse parses directly.
+cmd_deliverable_add() {
+    ensure_project
+    python3 "$COMMANDS_PY" deliverable_add "$@"
+}
+
+cmd_deliverable_retire() {
+    ensure_project
+    python3 "$COMMANDS_PY" deliverable_retire "$@"
+}
+
+cmd_deliverable_supersede() {
+    ensure_project
+    python3 "$COMMANDS_PY" deliverable_supersede "$@"
+}
+
+cmd_deliverable_map() {
+    ensure_project
+    python3 "$COMMANDS_PY" deliverable_map "$@"
+}

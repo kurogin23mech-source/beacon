@@ -2165,6 +2165,41 @@ def _add_frontmatter(content, scope, milestone="", operation="", trek_id="",
     lines.append("")
     return "\n".join(lines) + body
 
+
+def rewrite_document_body(doc_id, new_body):
+    """Overwrite an EXISTING document's body, preserving its title + frontmatter
+    (scope / milestone / operation / trek / target). Returns True if written,
+    False if the doc does not exist (nothing to regenerate).
+
+    This is the single seam a GENERATED doc uses to refresh itself WITHOUT a human
+    re-typing ``beacon doc update`` — ms-161 e-5851 write-through for the derived
+    application-map. It deliberately does NOT create a missing doc (a generated doc
+    only starts existing after the e-5851 backfill authors it once), so an
+    unmigrated / non-map project is a clean no-op. Mirrors ``cmd_doc``'s per-backend
+    write branch (until Store.save_document lands in Phase 3, this two-way branch is
+    the only document write path)."""
+    existing = get_store().get_document(doc_id)
+    if not existing:
+        return False
+    title = existing.get("title", "") or doc_id
+    content = _add_frontmatter(
+        new_body,
+        existing.get("scope", DEFAULT_SCOPE),
+        existing.get("milestone", "") or "",
+        existing.get("operation", "") or "",
+        existing.get("trek_id", "") or "",
+        target=existing.get("target", "") or "",
+    )
+    if _is_cloud_mode():
+        client, config = _get_api_client()
+        client.update_document(config["project_id"], doc_id, title, content)
+    else:
+        docs_dir = _get_docs_dir()
+        with open(os.path.join(docs_dir, f"{doc_id}.md"), "w", encoding="utf-8") as f:
+            f.write(content)
+    return True
+
+
 def _validate_link_target_exists(target: str) -> None:
     """Exit with a clear error if a doc's link ``target`` is a hard-validated
     class (sales account / opportunity / acquisition) whose id has no record.

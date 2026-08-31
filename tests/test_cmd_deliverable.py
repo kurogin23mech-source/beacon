@@ -102,3 +102,144 @@ def test_resolve_warnings_go_to_stderr_not_stdout(monkeypatch, capsys):
     out = capsys.readouterr()
     assert "未解決" in out.err            # warning on stderr
     assert "未解決" not in out.out        # not on stdout
+
+
+# ---------------------------------------------------------------------------
+# Curation surface — add / retire / supersede / map (ms-161 e-5902/e-5903/e-5851).
+#
+# These drive the CLI cmd functions over an in-memory ``data`` dict: ``load_project``
+# returns it, ``save_project`` records that it was called (so we assert the mutation
+# persisted through the same seam every write verb uses). No cloud / disk touched.
+# ---------------------------------------------------------------------------
+
+_VERB_FN = {
+    "add": lambda: cd.cmd_deliverable_add(),
+    "retire": lambda: cd.cmd_deliverable_retire(),
+    "supersede": lambda: cd.cmd_deliverable_supersede(),
+    "map": lambda: cd.cmd_deliverable_map(),
+}
+
+
+def _drive(monkeypatch, verb, argv, data):
+    """Run deliverable ``verb`` with ``argv`` (the flags after the verb) against a
+    shared ``data`` dict. ``load_project`` returns it; ``save_project`` asserts it
+    persisted the SAME dict. Returns (exit_code, saved_flag)."""
+    monkeypatch.setattr(sys, "argv", ["commands.py", f"deliverable_{verb}", *argv])
+    saved = {"called": False}
+
+    def _save(d, op=None):
+        assert d is data
+        saved["called"] = True
+
+    code = 0
+    # Stub the write-through (doc regeneration) — these tests pin the CHANGELOG
+    # mutation; the doc sync is covered separately (test_deliverable_doc_sync) and
+    # would otherwise reach the real store.
+    with mock.patch.object(cd, "load_project", return_value=data), \
+         mock.patch.object(cd, "save_project", side_effect=_save), \
+         mock.patch.object(cd, "_regenerate_map"):
+        try:
+            _VERB_FN[verb]()
+        except SystemExit as e:
+            code = e.code or 0
+    return code, saved["called"]
+
+
+def _add(monkeypatch, capsys, data, *flags):
+    code, saved = _drive(monkeypatch, "add", list(flags), data)
+    return code, saved, capsys.readouterr()
+
+
+def test_add_appends_surface_grained_entry_with_wedges(monkeypatch, capsys):
+    data = {"name": "P", "profession": "dev"}
+    code, saved, out = _add(
+        monkeypatch, capsys, data,
+        "--title", "status", "--summary", "1画面で把握できる",
+        "--category", "状態を一望する", "--area", "見失わない",
+        "--tag", "cli:beacon status", "--tag", "api:GET /api/projects", "--json")
+    assert code == 0 and saved
+    entry = _json.loads(out.out)
+    assert entry["id"] == "dlv-1"
+    assert entry["source"] == {"target_id": "root", "kind": "root"}
+    assert entry["category"] == "状態を一望する"
+    # --area became an area: tag, ordered before the wedges
+    assert entry["tags"][0] == "area:見失わない"
+    assert "cli:beacon status" in entry["tags"]
+    # persisted into the root changelog
+    assert data[cd._dc.CHANGELOG_KEY][0]["id"] == "dlv-1"
+
+
+def test_add_allows_multiple_entries_for_one_target(monkeypatch, capsys):
+    """e-5902 の核: 1 target が複数 surface を記帳できる（lib append に
+    (target,category) dedup が無いので CLI 経路で 2 本目が通る）。"""
+    data = {"name": "P", "profession": "dev"}
+    _add(monkeypatch, capsys, data,
+         "--title", "a", "--summary", "sa", "--category", "cat",
+         "--source-target", "ms-9", "--source-kind", "milestone")
+    _add(monkeypatch, capsys, data,
+         "--title", "b", "--summary", "sb", "--category", "cat",
+         "--source-target", "ms-9", "--source-kind", "milestone")
+    log = data[cd._dc.CHANGELOG_KEY]
+    assert [e["id"] for e in log] == ["dlv-1", "dlv-2"]
+    assert all(e["source"]["target_id"] == "ms-9" for e in log)
+
+
+def test_add_bad_input_exits_1(monkeypatch, capsys):
+    data = {"name": "P"}
+    # empty title is rejected by normalize_deliverable_entry → exit 1, no save
+    code, saved = _drive(
+        monkeypatch, "add",
+        ["--title", "", "--summary", "s", "--category", "c"], data)
+    assert code == 1 and not saved
+    assert "Error" in capsys.readouterr().err
+
+
+def test_retire_flips_status_and_drops_from_map(monkeypatch, capsys):
+    data = {"name": "P", "profession": "dev"}
+    cd._dc.append_deliverable(data, {
+        "source": {"target_id": "root", "kind": "root"},
+        "category": "cat", "title": "t", "summary": "s"})
+    code, saved = _drive(monkeypatch, "retire", ["dlv-1", "--reason", "廃止"], data)
+    assert code == 0 and saved
+    assert data[cd._dc.CHANGELOG_KEY][0]["status"] == "retired"
+    # gone from the derived current-state map
+    assert cd._dm.summarize_map(data)["total"] == 0
+
+
+def test_retire_unknown_id_exits_1(monkeypatch, capsys):
+    data = {"name": "P"}
+    code, saved = _drive(monkeypatch, "retire", ["dlv-999"], data)
+    assert code == 1 and not saved
+
+
+def test_supersede_replaces_predecessor(monkeypatch, capsys):
+    data = {"name": "P", "profession": "dev"}
+    cd._dc.append_deliverable(data, {
+        "source": {"target_id": "root", "kind": "root"},
+        "category": "cat", "title": "old", "summary": "old"})
+    code, saved = _drive(
+        monkeypatch, "supersede",
+        ["dlv-1", "--title", "new", "--summary", "new", "--category", "cat"],
+        data)
+    assert code == 0 and saved
+    log = data[cd._dc.CHANGELOG_KEY]
+    assert log[0]["status"] == "superseded"
+    assert log[1]["supersedes"] == "dlv-1"
+    # only the successor remains current
+    active = cd._dm.summarize_map(data)
+    assert active["total"] == 1
+    assert active["categories"][0]["entries"][0]["title"] == "new"
+
+
+def test_map_renders_derived_current_state(monkeypatch, capsys):
+    data = {"name": "P", "profession": "dev"}
+    cd._dc.append_deliverable(data, {
+        "source": {"target_id": "root", "kind": "root"},
+        "category": "状態を一望する", "title": "status",
+        "summary": "1画面で把握できる",
+        "tags": ["area:見失わない", "cli:beacon status"]})
+    code, _saved = _drive(monkeypatch, "map", [], data)
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "アプリケーション全貌マップ" in out
+    assert "`cli:beacon status`" in out       # wedge survives to the rendered map
