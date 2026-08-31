@@ -1406,6 +1406,11 @@ def build_parser() -> argparse.ArgumentParser:
     project_sub = p_project.add_subparsers(dest="project_cmd", metavar="<subcmd>")
     project_sub.add_parser("archive", add_help=False)
     project_sub.add_parser("unarchive", add_help=False)
+    # ms-160 e-5816: `project dump` emits the assembled project as JSON on
+    # stdout from the source of truth (SQLite locally). Registered in argparse
+    # too — not just bash — because the Tauri desktop shells out to it on every
+    # platform (a Windows/pipx user's `beacon` is this Python entry point).
+    project_sub.add_parser("dump", add_help=False)
 
     # ---- skill install (ms-44 e-777) ----
     # `beacon skill install` is the cross-platform install path used by
@@ -3830,7 +3835,7 @@ def _handle_operation(root: Path, args: argparse.Namespace) -> int:
 
 def _handle_project(root: Path, args: argparse.Namespace) -> int:
     if args.show_help or args.project_cmd is None:
-        print("Usage: beacon project archive|unarchive")
+        print("Usage: beacon project archive|unarchive|dump")
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
         return rc
@@ -3838,6 +3843,8 @@ def _handle_project(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "project_archive", {})
     if args.project_cmd == "unarchive":
         return _run_commands_py(root, "project_unarchive", {})
+    if args.project_cmd == "dump":
+        return _run_commands_py(root, "project_dump", {})
     return 1
 
 

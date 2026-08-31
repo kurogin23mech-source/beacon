@@ -557,9 +557,24 @@ fn get_retro_content(state: State<AppState>, week: String) -> Result<String, Str
 fn load_project_json(state: State<AppState>) -> Result<String, String> {
     let dir = state.project_dir.lock().unwrap();
     let dir = dir.as_deref().ok_or("No project directory set. Launch from a beacon project directory or set BEACON_PROJECT_DIR.")?;
-    let path = std::path::Path::new(dir).join(".beacon/project.json");
-    std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read project.json: {}", e))
+    // ms-160 e-5816: read the source of truth, not the mirror. In local mode
+    // the SQLite store (.beacon/project.db) is authoritative and
+    // .beacon/project.json is only a best-effort mirror refreshed after each
+    // commit — a swallowed mirror-write failure leaves the file stale while
+    // SQLite holds the current state. `beacon project dump` assembles the
+    // project from the active store (SQLite locally, authoritative in cloud),
+    // so it never returns stale data.
+    match run_beacon(dir, &["project", "dump"]) {
+        Ok(out) => Ok(out),
+        // Fall back to the mirror file when the CLI is unreachable (e.g. a
+        // packaged app with no `beacon` on PATH) or errors, so the desktop
+        // still shows something rather than failing hard.
+        Err(_) => {
+            let path = std::path::Path::new(dir).join(".beacon/project.json");
+            std::fs::read_to_string(&path)
+                .map_err(|e| format!("Failed to read project (beacon CLI unavailable and mirror unreadable): {}", e))
+        }
+    }
 }
 
 #[tauri::command]

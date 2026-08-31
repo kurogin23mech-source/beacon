@@ -447,6 +447,7 @@ from cmd_pr import (  # noqa: F401
 from cmd_project import (  # noqa: F401
     cmd_project_archive,
     cmd_project_cleanup,
+    cmd_project_dump,
     cmd_project_export,
     cmd_project_import,
     cmd_project_orphans,
@@ -10449,6 +10450,7 @@ if __name__ == "__main__":
         "project_unarchive": cmd_project_unarchive,
         "project_orphans": cmd_project_orphans,
         "project_cleanup": cmd_project_cleanup,
+        "project_dump": cmd_project_dump,
         "project_export": cmd_project_export,
         "project_import": cmd_project_import,
         "pr_add": cmd_pr_add,
