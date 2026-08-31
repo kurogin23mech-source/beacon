@@ -1332,6 +1332,68 @@ body::after {
 .priority-low     { background: rgba(148,163,184,0.2); color: #94a3b8; border: 1px solid rgba(148,163,184,0.3); }
 .priority-lowest  { background: rgba(100,116,139,0.15); color: #64748b; border: 1px solid rgba(100,116,139,0.2); }
 
+/* ms-162 — task 締切バッジ (task 行に出す。超過は赤で強調) */
+.entry-deadline {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  margin-left: 6px;
+  border-radius: 3px;
+  vertical-align: middle;
+  font-family: var(--font-mono);
+  background: rgba(148,163,184,0.12);
+  color: var(--text-secondary);
+}
+.entry-deadline.overdue {
+  background: rgba(239,68,68,0.15);
+  color: #f87171;
+  font-weight: 600;
+}
+
+/* ms-162 — target 詳細のサブタブ (work-item / evidence / decision) */
+.tgt-detail-tabs {
+  display: flex;
+  gap: 4px;
+  margin: 8px 0 6px;
+  border-bottom: 1px solid var(--border);
+}
+.tgt-detail-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 5px 10px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+.tgt-detail-tab:hover { color: var(--text-secondary); }
+.tgt-detail-tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+.tgt-detail-count {
+  display: inline-block;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: rgba(148,163,184,0.15);
+  color: var(--text-dim);
+  font-size: 9px;
+  text-align: center;
+}
+.tgt-detail-tab.active .tgt-detail-count {
+  background: rgba(74,222,128,0.18);
+  color: var(--accent);
+}
+.tgt-detail-panel { padding-top: 2px; }
+.tgt-detail-empty {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 10px 4px;
+}
+
 /* e-976: reason auto-link + missing-reason marker styling.
  * Goal: stay subtle in the entry row (no layout jolt) and slightly more
  * legible inside the modal where the reason text actually shows.
@@ -1424,6 +1486,189 @@ body::after {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   color: #a3e635;
+  margin-bottom: 2px;
+}
+
+/* ms-162 e-5833 — decision-log panel (ms-154 decision-arm stream) */
+.dec-log {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.dec-log-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #c084fc;
+  margin-bottom: 6px;
+}
+.dec-count {
+  display: inline-block;
+  min-width: 16px;
+  padding: 0 5px;
+  margin-left: 4px;
+  border-radius: 8px;
+  background: rgba(192,132,252,0.18);
+  color: #c084fc;
+  font-size: 10px;
+  text-align: center;
+}
+.dec-event {
+  padding: 6px 8px;
+  margin-bottom: 6px;
+  border-left: 2px solid rgba(192,132,252,0.45);
+  background: rgba(192,132,252,0.04);
+  border-radius: 0 4px 4px 0;
+}
+.dec-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.dec-kind {
+  font-size: 10px;
+  font-weight: 600;
+  color: #c084fc;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.dec-by {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: rgba(148,163,184,0.15);
+  color: #94a3b8;
+}
+/* autonomous-AI = 人間未確認の単独判断 = 最も監査価値が高い。目立たせる。 */
+.dec-by-autonomous-AI {
+  background: rgba(251,191,36,0.16);
+  color: #fbbf24;
+  font-weight: 600;
+}
+.dec-by-AI-proposed-human-chose { background: rgba(96,165,250,0.15); color: #60a5fa; }
+.dec-by-human-delegated { background: rgba(163,230,53,0.15); color: #a3e635; }
+.dec-when { font-size: 10px; color: #64748b; }
+.dec-id { font-size: 10px; color: #475569; margin-left: auto; font-family: monospace; }
+.dec-what { font-size: 12px; color: #e2e8f0; line-height: 1.4; }
+.dec-why, .dec-context, .dec-evidence, .dec-related {
+  font-size: 11px;
+  color: #94a3b8;
+  margin-top: 3px;
+  line-height: 1.4;
+}
+.dec-flabel {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+  margin-right: 5px;
+}
+.dec-ev-link {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(148,163,184,0.1);
+  color: #cbd5e1;
+  font-family: monospace;
+  font-size: 10px;
+}
+
+/* ms-162 e-5834 — generic targets[] cross-class overview (read-only) */
+.targets-section { margin-top: 4px; }
+.tgt-synth-note {
+  font-size: 11px;
+  color: #94a3b8;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border-left: 2px solid rgba(251,191,36,0.4);
+  background: rgba(251,191,36,0.05);
+  line-height: 1.5;
+}
+.tgt-list { display: flex; flex-direction: column; gap: 4px; }
+.tgt-empty { font-size: 12px; color: var(--text-dim); padding: 8px; }
+.tgt-row {
+  display: grid;
+  grid-template-columns: 80px 62px 1fr auto auto 44px 60px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 12px;
+}
+.tgt-prio { text-align: center; }
+.tgt-kind {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  text-align: center;
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: rgba(148,163,184,0.15);
+  color: #94a3b8;
+}
+.tgt-kind-milestone { background: rgba(96,165,250,0.15); color: #60a5fa; }
+.tgt-kind-opportunity { background: rgba(74,222,128,0.15); color: #4ade80; }
+.tgt-id { font-family: monospace; font-size: 11px; color: var(--text-dim); }
+.tgt-label { color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tgt-status { font-size: 11px; color: var(--text-secondary); }
+.tgt-wi { font-size: 11px; color: var(--text-dim); text-align: right; font-family: monospace; }
+.tgt-bar { height: 5px; background: var(--border-subtle); border-radius: 3px; overflow: hidden; }
+.tgt-bar-fill { height: 100%; background: var(--accent); border-radius: 3px; }
+
+/* ms-162 e-5835 — root target 合成の header (objective + summary + arms rollup) */
+.root-header {
+  margin-bottom: 12px;
+  padding: 12px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+}
+.root-hdr-top { display: flex; align-items: baseline; gap: 8px; }
+.root-hdr-kind {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: rgba(148,163,184,0.15);
+  color: #94a3b8;
+  flex: none;
+}
+.root-hdr-objective { font-size: 13px; color: var(--text-primary); line-height: 1.5; }
+.root-hdr-rollup { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.root-hdr-pct { font-size: 12px; font-family: monospace; color: var(--accent); font-weight: 600; flex: none; }
+.root-hdr-bar { flex: 1; height: 5px; background: var(--border-subtle); border-radius: 3px; overflow: hidden; }
+.root-hdr-bar-fill { height: 100%; background: var(--accent); border-radius: 3px; }
+.root-hdr-count { font-size: 11px; font-family: monospace; color: var(--text-dim); flex: none; }
+.root-hdr-arms { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.root-arm-chip {
+  font-size: 10px;
+  font-family: monospace;
+  color: var(--text-secondary);
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-base);
+}
+.root-arm-k { color: var(--text-dim); margin-right: 5px; text-transform: uppercase; letter-spacing: 0.03em; }
+.root-hdr-summary { font-size: 11px; color: var(--text-secondary); line-height: 1.6; margin-top: 8px; }
+.root-hdr-summary-label {
+  display: block;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--text-dim);
   margin-bottom: 2px;
 }
 
@@ -1593,6 +1838,35 @@ body::after {
 .entry-status-text.in_review { color: #fb923c; }
 .entry-status-text.approved { color: #a3e635; }
 .entry-status-text.cancelled { color: var(--text-dim); }
+
+/* ms-162 e-5836 — cancelled work-item は取消線 + 「取消」タグ + 淡色で行に状態を出す
+   (営業側 .comm-row.cancelled と同じ L2 型)。取消線は説明文 (.entry-desc-text) だけ
+   に掛け、タグ・バッジには掛けない。 */
+.entry.cancelled { opacity: 0.75; }
+.entry.cancelled .entry-desc-text {
+  color: var(--text-dim);
+  text-decoration: line-through;
+  text-decoration-color: var(--border);
+}
+.entry-cancelled-tag {
+  display: inline-block;
+  font-size: 0.6rem;
+  color: var(--cancelled);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 3px;
+  padding: 0 4px;
+  margin-left: 6px;
+}
+/* ms-162 e-5836 — 基本 evidence: この work-item を閉じた commit のバッジ。
+   done 行の取消線が横切らないよう inline-block で装飾コンテキストを分ける。 */
+.entry-evidence {
+  display: inline-block;
+  font-size: 0.62rem;
+  font-family: monospace;
+  color: var(--done);
+  margin-left: 6px;
+  text-decoration: none;
+}
 
 .entry-date {
   font-size: 0.7rem;
@@ -3417,6 +3691,10 @@ let state = {
   showCancelled: new Set(),
   // Collapsed nested entries
   collapsedEntries: new Set(),
+  // ms-162 — target 詳細のサブタブ (work-item / evidence / decision)。key=ms.id、
+  // value='workitem'|'evidence'|'decision'。未設定は 'workitem' 既定。展開した
+  // target の中を次元ごとに切り替えて見るための状態 (縦積みで見づらいのを解消)。
+  targetTab: {},
   // ms-84 / e-2326 — entries lazy-load cache. WS broadcasts a slim payload
   // (no milestones[].entries[]) so the 1 MiB frame limit can't be tripped;
   // entries are fetched per-MS via GET /api/projects/{id}/milestones/{ms_id}/entries
@@ -3424,6 +3702,15 @@ let state = {
   // Key: ms.id. Value: array of entry objects (same shape core.entries_to_json returns).
   milestoneEntries: {},
   entriesLoading: new Set(),
+  // ms-162 e-5833 — decision-arm stream cache (ms-154 decision_events).
+  // The project-wide append-only decision stream fetched once (lazily, on the
+  // first MS expand) via GET /api/projects/{id}/decisions. Filtered per-target
+  // client-side (decisionsForTarget) because the read口 has no target filter.
+  // null = not yet loaded; [] = loaded-but-empty or endpoint unavailable (the
+  // read口 may 404 on servers where the decision routes aren't deployed yet —
+  // treated as "no decisions" so the panel just stays hidden, never errors).
+  decisions: null,
+  decisionsLoading: false,
   // ms-84 / e-2326 follow-up — tab-scoped extras cache. The slim WS broadcast
   // also drops top-level arrays that the dashboard doesn't need (pushes /
   // deployments / worktree_sessions) so the frame fits. They are fetched
@@ -3935,7 +4222,14 @@ function renderEntry(entry) {
     if (entry.status === 'cancelled' && !state.showCancelled.has(_currentMsId)) return '';
   }
 
-  const statusClass = entry.status === 'done' ? ' done' : '';
+  // ms-162 e-5836 — done は既存の淡色化、cancelled は取消線 + 「取消」タグで
+  // work-item 行そのものに状態を出す (営業側 .comm-row.cancelled と同じ L2 型)。
+  const statusClass = entry.status === 'done' ? ' done'
+    : entry.status === 'cancelled' ? ' cancelled' : '';
+  const cancelledTag = entry.status === 'cancelled'
+    ? `<span class="entry-cancelled-tag">取消</span>` : '';
+  // ms-162 e-5836 — 基本 evidence: この work-item を閉じた commit を行に出す。
+  const evidenceBadge = closingEvidenceBadge(entry);
   const hash = entry.meta?.hash ? `<span class="entry-hash">${entry.meta.hash.slice(0, 7)}</span>` : '';
   const detail = entry.detail ? `<div class="entry-detail">${esc(entry.detail)}</div>` : '';
   let prMeta = '';
@@ -3954,6 +4248,13 @@ function renderEntry(entry) {
   }
   const priority = entry.meta?.priority;
   const priorityBadge = priority ? `<span class="priority-badge priority-${priority}">${priority}</span>` : '';
+  // ms-162 (task 締切、user FB 2026-08-29) — task 締切 (ms-139 の canonical
+  // top-level ``deadline``) を task 行に出す。締切は target(milestone/商談)では
+  // なく work-item 粒度で見せる。未完了かつ今日より前なら「⚠」赤字で超過を強調。
+  const _dl = entry.deadline || '';
+  const deadlineBadge = _dl
+    ? `<span class="entry-deadline${_deadlineOverdue(_dl, entry.status, _salesTodayISO()) ? ' overdue' : ''}">${_deadlineOverdue(_dl, entry.status, _salesTodayISO()) ? '⚠ ' : ''}期日 ${esc(_dl)}</span>`
+    : '';
   // e-976: warn-marker for done/cancelled entries with no reason recorded.
   const reasonMissing = reasonMissingBadge(entry);
 
@@ -4002,7 +4303,7 @@ function renderEntry(entry) {
     <div class="entry entry-type-${entry.type}${statusClass}${toggleClass}" ${rowAction}>
       ${entryTypeBadge(entry.type)}
       <span class="entry-id">${entry.id}</span>
-      <span class="entry-desc">${esc(entry.description)}${hash}${statusText}${reasonMissing}${childBadge}${priorityBadge}${infoBtn}</span>
+      <span class="entry-desc"><span class="entry-desc-text">${esc(entry.description)}</span>${cancelledTag}${evidenceBadge}${hash}${statusText}${reasonMissing}${childBadge}${priorityBadge}${deadlineBadge}${infoBtn}</span>
       ${authorSpan}
       <span class="entry-date">${entry.created_at || ''}</span>
       ${prMeta}
@@ -5259,6 +5560,7 @@ function renderAccountModal(accId) {
       ${contactHtml}
       <div class="sm-sec">やり取り (Communication)</div>
       ${_renderCommunications(a)}
+      ${renderDecisionLog(decisionsForTarget(state.decisions, a))}
     </div>
   </div>`;
 }
@@ -5298,6 +5600,7 @@ function renderOpportunityModal(oppId) {
       ${_renderOppActivities(o)}
       ${_renderMeetings(o)}
       ${_renderCommunications(o)}
+      ${renderDecisionLog(decisionsForTarget(state.decisions, o))}
     </div>
   </div>`;
 }
@@ -5383,13 +5686,24 @@ function renderShell(app) {
       ${PLATFORM.accountMenuItemsHTML()}
     </div>
 
-    ${(!state.openTrekId && (p.objective || retro || p.profession === 'sales')) ? `
+    ${!state.openTrekId ? renderRootHeader(p.root) : ''}
+
+    ${(() => {
+      // ms-162 e-5835 — root header が objective を出したら project-info の
+      // Objective 行は重複になるので落とす (両者は同一の on-project objective が
+      // 出典)。root/narrative が未投影 (本番デプロイ前) なら root header は
+      // objective を出せないので、従来通り p.objective をここで見せる (= 後退回避)。
+      const rootObjectiveShown = !!(p.root && p.root.narrative && p.root.narrative.objective);
+      const showObjectiveLine = !rootObjectiveShown && !!p.objective;
+      const show = !state.openTrekId && (showObjectiveLine || retro || p.profession === 'sales');
+      if (!show) return '';
+      return `
     <div class="project-info fade-in stagger-1">
-      ${p.objective ? `<div class="project-info-item"><span class="project-info-label">Objective</span><span class="project-info-value">${esc(p.objective)}</span></div>` : ''}
+      ${showObjectiveLine ? `<div class="project-info-item"><span class="project-info-label">Objective</span><span class="project-info-value">${esc(p.objective)}</span></div>` : ''}
       ${_renderSalesPipelineInfo(p)}
       ${retro ? `<div class="project-info-item${retro.isToday ? ' review-due' : ''}"><span class="project-info-label">${retro.isToday ? '⚠ Review Due Today' : 'Next Review'}</span><span class="project-info-value">${retro.date} (${esc(p.retro_day || 'friday')})</span></div>` : ''}
-    </div>
-    ` : ''}
+    </div>`;
+    })()}
 
     ${!state.openTrekId ? `
     <div class="global-search fade-in stagger-1">
@@ -5461,6 +5775,19 @@ const dataSource = {
       state.sessionLogs = await api(`/api/projects/${state.projectId}/session_logs?limit=5`);
     } catch (_e) {
       state.sessionLogs = [];
+    }
+  },
+  // ms-162 e-5833 — fetch the unified decision-arm stream (ms-154 decision_events).
+  // Bounded read (limit=500); the stream is append-only so the newest window is
+  // what a target detail cares about. On any failure (404 where the decision
+  // routes aren't deployed, local mode, 502) we settle to [] so the decision-log
+  // panel simply stays hidden rather than surfacing an error to the user.
+  loadDecisions: async () => {
+    try {
+      const r = await api(`/api/projects/${state.projectId}/decisions?limit=500`);
+      state.decisions = (r && Array.isArray(r.decisions)) ? r.decisions : [];
+    } catch (_e) {
+      state.decisions = [];
     }
   },
   loadDocumentContent: async (docId) => { state.documentContent = await api(`/api/projects/${state.projectId}/documents/${docId}`); },
@@ -5896,6 +6223,337 @@ function countTasksRecursive(entries) {
   return { total, done };
 }
 
+// ms-162 e-5833 — decision-log (portable render 部品).
+// PURE functions: given the decision stream + a target, they select and render
+// the ms-154 decision-arm events for that target. They read only their
+// arguments — no state, no fetch primitive — so the ms-159 shell can reuse
+// them verbatim (data plumbing stays the shell's job; these only render).
+
+// decided_by 語彙 → 読み手向けラベル (decision_vocab.DECIDED_BY と対応)。
+// autonomous-AI が最も監査価値が高い (= 人間が見ていない AI 単独判断) ので強調する。
+const DECIDED_BY_LABEL = {
+  'autonomous-AI': 'AI単独 (人間未確認)',
+  'AI-proposed-human-chose': 'AI提案→人間選択',
+  'human-delegated': '人間委譲',
+  'programmatic': '機械的',
+};
+
+// Select the decision events that belong to a target — works for ANY target
+// class (milestone / opportunity / account), which is what makes it a shared
+// L1/L2 dimension (ms-162 §方針2b: factor the shared frame out, compose into
+// each per-class detail view, don't fold render paths). A decision links to a
+// target either directly (related.target_id === target.id, the cross-class
+// signal) or through a task that lives under it (related.task_id matches one of
+// its entry ids — the milestone path; opportunity/account carry no entries so
+// they fall back to the target_id match). The task-id path lets task-scoped
+// decisions (e.g. task-done 判定) surface on the owning target even when the
+// writer only stamped related.task_id.
+function decisionsForTarget(allDecisions, target) {
+  if (!Array.isArray(allDecisions) || !allDecisions.length || !target) return [];
+  const taskIds = new Set();
+  const collect = (entries) => {
+    for (const e of entries || []) {
+      if (e && e.id) taskIds.add(e.id);
+      if (e && e.entries && e.entries.length) collect(e.entries);
+    }
+  };
+  collect(target.entries);
+  const rows = allDecisions.filter((d) => {
+    const rel = (d && d.related) || {};
+    if (rel.target_id && rel.target_id === target.id) return true;
+    if (rel.task_id && taskIds.has(rel.task_id)) return true;
+    return false;
+  });
+  // newest first — a target detail reads "what was just decided" top-down.
+  rows.sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+  return rows;
+}
+
+// Render one decision-arm event: what / why / 誰が / 根拠 / 関連。
+function renderDecisionEvent(d) {
+  if (!d) return '';
+  const kind = d.kind ? `<span class="dec-kind">${esc(d.kind)}</span>` : '';
+  const by = d.decided_by
+    ? `<span class="dec-by dec-by-${esc(d.decided_by)}">${esc(DECIDED_BY_LABEL[d.decided_by] || d.decided_by)}</span>`
+    : '';
+  const when = d.created_at
+    ? `<span class="dec-when">${esc(String(d.created_at).slice(0, 10))}</span>`
+    : '';
+  const what = d.decision ? `<div class="dec-what">${esc(d.decision)}</div>` : '';
+  const why = d.rationale
+    ? `<div class="dec-why"><span class="dec-flabel">なぜ</span>${esc(d.rationale)}</div>`
+    : '';
+  const ctx = d.context
+    ? `<div class="dec-context"><span class="dec-flabel">背景</span>${esc(d.context)}</div>`
+    : '';
+  const ev = (Array.isArray(d.evidence) && d.evidence.length)
+    ? `<div class="dec-evidence"><span class="dec-flabel">根拠</span>${d.evidence.map((x) => `<span class="dec-ev-link">${esc(x)}</span>`).join('')}</div>`
+    : '';
+  const rel = (d && d.related) || {};
+  const relParts = [];
+  if (rel.task_id) relParts.push(`task ${esc(rel.task_id)}`);
+  if (rel.target_id) relParts.push(`target ${esc(rel.target_id)}`);
+  if (rel.trek_id) relParts.push(`trek ${esc(rel.trek_id)}`);
+  if (rel.event_id) relParts.push(`event ${esc(rel.event_id)}`);
+  const related = relParts.length
+    ? `<div class="dec-related"><span class="dec-flabel">関連</span>${relParts.join(' · ')}</div>`
+    : '';
+  const did = d.decision_id ? `<span class="dec-id">${esc(d.decision_id)}</span>` : '';
+  return `
+    <div class="dec-event">
+      <div class="dec-head">${kind}${by}${when}${did}</div>
+      ${what}${why}${ctx}${ev}${related}
+    </div>`;
+}
+
+// Render the decision-log panel for a target. Returns '' when there are no
+// decisions, so a target with none shows nothing extra (produced-but-invisible
+// stays quiet; only real decision streams take up space).
+function renderDecisionLog(decisions) {
+  if (!Array.isArray(decisions) || !decisions.length) return '';
+  return `
+    <div class="dec-log">
+      <div class="dec-log-label">決定ログ <span class="dec-count">${decisions.length}</span></div>
+      ${decisions.map(renderDecisionEvent).join('')}
+    </div>`;
+}
+
+// ms-162 e-5833 — lazy-load the project-wide decision stream once, on the first
+// open of ANY target detail (milestone card / opportunity modal / account
+// modal). Idempotent: guarded by state.decisions === null so repeated opens
+// don't re-fetch. Kept separate from the pure render 部品 above (this one is the
+// impure loader trigger; it routes through dataSource, never the fetch helper).
+function ensureDecisionsLoaded() {
+  if (state.decisions === null && !state.decisionsLoading) {
+    state.decisionsLoading = true;
+    dataSource.loadDecisions().then(() => { state.decisionsLoading = false; render(); });
+  }
+}
+
+// ms-162 e-5834 — generic targets[] overview (portable render 部品).
+// A READ-ONLY cross-class list: every target (dev milestone / 営業商談 /
+// 記述子クラス) drawn in the SAME shape (id / label / status / kind /
+// work_items). This is a "見せ方" only — it deliberately does NOT enter the
+// board paradigm (正準状態 running/awaiting_human / 受信箱 / work-unit 抽象):
+// that is ms-159 の守備範囲で、踏み込むと Claude Code の内部表現に密結合する
+// (親 §方針2b の念押し)。純関数で status --json 由来の project だけを読む。
+//
+// ⚠ 現在 UI には配線していない (user 判断 2026-08-29): 「Targets」タブは Target
+// (抽象クラス) を Milestone (具象) の兄弟に平置きする category error だったので
+// 撤去した。この portable 部品は ms-159 の board / 将来の複数 target-class 横断
+// ビュー (= sales の Opportunity+Account union 等) で再利用するために温存する。
+// 消さないこと。再配線する時は「抽象を具象の兄弟に並べない」原則を守る。
+
+// True when the server已に投影した targets[] を持っている (ms-157)。
+function hasServerTargets(project) {
+  if (!project) return false;
+  if (Array.isArray(project.targets) && project.targets.length) return true;
+  const proj = project.root && project.root.projection;
+  return !!(proj && Array.isArray(proj.targets) && proj.targets.length);
+}
+
+// Assemble the cross-class target list. Prefer the server-provided targets[]
+// (ms-157 の職種横断投影)。ms-157 のサーバ変更は本番未デプロイなので、無ければ
+// client 側で milestones + opportunities から同一 shape に暫定合成する (本番
+// デプロイ後は server targets[] がそのまま使われ、この分岐は死ぬ)。
+function collectTargets(project) {
+  if (!project) return [];
+  if (Array.isArray(project.targets) && project.targets.length) return project.targets;
+  const proj = project.root && project.root.projection;
+  if (proj && Array.isArray(proj.targets) && proj.targets.length) return proj.targets;
+  // 合成 detail は server targets[] の detail と同じ key で埋める (= 前方互換:
+  // サーバが detail を enrich したら row 側は無変更で自動追随する)。milestone は
+  // target_date、opportunity は deadline を締め切りに使う (row 側は両対応で読む)。
+  // 合成 detail は server targets[] の detail と同じ key で埋める (= 前方互換:
+  // サーバが detail を enrich したら row 側は無変更で自動追随する)。締切は target
+  // レベルでは出さない (task レベルに移した / user FB) ので priority のみ。
+  const out = [];
+  for (const ms of project.milestones || []) {
+    out.push({
+      id: ms.id, label: targetLabel(ms), status: ms.status, kind: 'milestone',
+      work_items_total: ms.total_tasks || 0, work_items_done: ms.done_tasks || 0,
+      detail: { progress: ms.progress, priority: ms.priority || '' },
+    });
+  }
+  for (const o of project.opportunities || []) {
+    const acts = o.activities || [];
+    out.push({
+      id: o.id, label: targetLabel(o), status: o.phase || o.status || '', kind: 'opportunity',
+      work_items_total: acts.length,
+      work_items_done: acts.filter((a) => a && a.status === 'done').length,
+      detail: { priority: o.priority || '' },
+    });
+  }
+  return out;
+}
+
+// 締め切りが超過しているか (= 未完了 かつ 締切が today より前)。ms-139 の期日
+// 超過エンジンと同じ規則 (terminal = done/cancelled は超過扱いしない)。today は
+// 呼び出し側が渡す (= render 関数を純粋に保つ / 環境の new Date() を持ち込まない)。
+// 締切は target(milestone/商談) レベルではなく task レベルで見せる (user FB
+// 2026-08-29): 期日は work-item に紐づく粒度の情報なので renderEntry で使う。
+function _deadlineOverdue(deadline, status, today) {
+  if (!deadline || !today) return false;
+  if (status === 'done' || status === 'cancelled') return false;
+  return deadline < today;
+}
+
+// PURE render of one target row — same columns for every kind.
+function renderTargetRow(t) {
+  if (!t) return '';
+  const total = t.work_items_total || 0;
+  const done = t.work_items_done || 0;
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  const wi = total > 0 ? `${done}/${total}` : '';
+  const kind = t.kind || 'other';
+  const det = t.detail || {};
+  const priority = det.priority || '';
+  const prioBadge = priority
+    ? `<span class="priority-badge priority-${esc(priority)}">${esc(priority)}</span>`
+    : '';
+  return `
+    <div class="tgt-row">
+      <span class="tgt-kind tgt-kind-${esc(kind)}">${esc(kind)}</span>
+      <span class="tgt-id">${esc(t.id || '')}</span>
+      <span class="tgt-label">${esc(t.label || '(no label)')}</span>
+      <span class="tgt-prio">${prioBadge}</span>
+      <span class="tgt-status">${esc(t.status || '')}</span>
+      <span class="tgt-wi">${wi}</span>
+      <div class="tgt-bar"><div class="tgt-bar-fill" style="width:${pct}%"></div></div>
+    </div>`;
+}
+
+// PURE render of the whole cross-class list. '' の代わりに空メッセージを返す。
+function renderTargetsOverview(targets) {
+  if (!Array.isArray(targets) || !targets.length) {
+    return '<div class="tgt-empty">target がありません。</div>';
+  }
+  return targets.map((t) => renderTargetRow(t)).join('');
+}
+
+// Section wrapper (shell 側の compose 点)。合成 fallback 時は暫定である旨を明示。
+function renderTargetsSection() {
+  const targets = collectTargets(state.project);
+  const kinds = {};
+  for (const t of targets) { const k = (t && t.kind) || 'other'; kinds[k] = (kinds[k] || 0) + 1; }
+  const kindSummary = Object.keys(kinds).map((k) => `${k} ${kinds[k]}`).join(' · ');
+  const synthesized = !hasServerTargets(state.project);
+  return `
+    <section class="targets-section fade-in">
+      <div class="milestones-header">
+        <span class="milestones-title">Targets (職種横断)</span>
+        <span class="milestones-count">${targets.length} 件${kindSummary ? ' · ' + kindSummary : ''}</span>
+      </div>
+      ${synthesized ? '<div class="tgt-synth-note">※ サーバの targets[] が未提供のため milestones + opportunities から暫定合成して表示しています (ms-157 の本番デプロイ後は server targets[] に自動で切り替わります)。</div>' : ''}
+      <div class="tgt-list">${renderTargetsOverview(targets)}</div>
+    </section>`;
+}
+
+// ms-162 e-5835 — root target 合成の header (portable 純関数)。
+//
+// root は「全 target を配下に持つ apex target」(ms-153 の root 合成、
+// root_target.project_as_root_target)。他の target-class 詳細と同じく純関数で、
+// root オブジェクト 1 つを受けて HTML を返す。project root だけでなく将来 Trek の
+// root (goal_state / halt を root_narrative 相当として持つ) にも再利用できる。
+//
+// 3 つの次元を 1 枚に集約する:
+//   - narrative.objective — 大目的 (vision seed)
+//   - narrative.summary   — 経緯 (直近の流れ)
+//   - arms rollup         — この target-class が仕事を回す機構 (work-item 源 /
+//                           decision の承認形 / deliverable の産物) + 配下 target の
+//                           work-item rollup (総数・完遂・進行中)
+//
+// server が root/narrative/arms を未投影でも「空でも壊れない」= 欠けた行を落とすだけ。
+// 全て空なら '' を返し、shell 側で丸ごと省略する (renderDecisionLog と同契約)。
+function renderRootHeader(root) {
+  if (!root) return '';
+  const nar = root.narrative || {};
+  const objective = nar.objective || '';
+  const summary = nar.summary || '';
+  const arms = root.arms || {};
+  const total = root.work_items_total || 0;
+  const done = root.work_items_done || 0;
+  const open = root.work_items_open != null ? root.work_items_open : Math.max(0, total - done);
+  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+  // arms rollup を chip 化: 欠けている機構は chip を出さない (前方互換 = server が
+  // arm を enrich したら自動で増える)。work_item_arm.item_type = 配下の仕事単位
+  // (root は 'target')、decision.kind = 完遂の承認形、deliverable.kind = 産物。
+  const wiArm = arms.work_item_arm || {};
+  const armPairs = [];
+  if (wiArm.item_type) armPairs.push(['work-item', wiArm.item_type]);
+  if (arms.decision && arms.decision.kind) armPairs.push(['decision', arms.decision.kind]);
+  if (arms.deliverable && arms.deliverable.kind) armPairs.push(['deliverable', arms.deliverable.kind]);
+  const armsChips = armPairs
+    .map(([k, v]) => `<span class="root-arm-chip"><span class="root-arm-k">${esc(k)}</span>${esc(v)}</span>`)
+    .join('');
+
+  if (!objective && !summary && !total && !armsChips) return '';
+
+  const objBlock = objective ? `<div class="root-hdr-objective">${esc(objective)}</div>` : '';
+  const rollupBlock = total > 0
+    ? `<div class="root-hdr-rollup">
+         <span class="root-hdr-pct">${pct}%</span>
+         <div class="root-hdr-bar"><div class="root-hdr-bar-fill" style="width:${pct}%"></div></div>
+         <span class="root-hdr-count">${done}/${total} 完遂 · ${open} 進行中</span>
+       </div>`
+    : '';
+  const armsBlock = armsChips ? `<div class="root-hdr-arms">${armsChips}</div>` : '';
+  const summaryBlock = summary
+    ? `<div class="root-hdr-summary"><span class="root-hdr-summary-label">直近の流れ</span>${esc(summary)}</div>`
+    : '';
+
+  return `
+    <section class="root-header fade-in stagger-1">
+      <div class="root-hdr-top">
+        <span class="root-hdr-kind">root</span>
+        ${objBlock}
+      </div>
+      ${rollupBlock}
+      ${armsBlock}
+      ${summaryBlock}
+    </section>`;
+}
+
+// ms-162 — target 詳細サブタブの次元分類。work-model の 3 概念 (WorkItem /
+// Evidence / Decision) に対応: task/pr/incident/operation_task = 計画された仕事
+// の単位 (WorkItem)、commit/save/run_record/note/transition = 起きたことの
+// append-only 記録 (Evidence)。decision は別ストリームなので entry には無い。
+const _EVIDENCE_ENTRY_TYPES = new Set([
+  'commit', 'save', 'run_record', 'note', 'target-transition-approval',
+]);
+function entryDimension(type) {
+  return _EVIDENCE_ENTRY_TYPES.has(type) ? 'evidence' : 'workitem';
+}
+
+// ms-162 e-5836 — 基本 evidence: 「どの commit がこの work-item を閉じたか」。
+// 完遂した work-item の下には、それを resolves した commit が子 entry として付く
+// (log --finalize --resolves の構造)。純関数で、entry 自身の子だけを見て閉じた
+// commit の短縮 hash を集める。budget / 構造化 evidence 3 値 (= L3 宣言駆動) は
+// 出さない — 「commit が閉じた」という基本 evidence のみ (L2 built-in 共有)。
+function closingCommits(entry) {
+  if (!entry || !Array.isArray(entry.entries)) return [];
+  const out = [];
+  for (const c of entry.entries) {
+    if (!c || c.type !== 'commit') continue;
+    const meta = c.meta || {};
+    if (!meta.hash) continue;
+    const res = meta.resolves;
+    const matches = Array.isArray(res) ? res.includes(entry.id) : res === entry.id;
+    if (matches) out.push(meta.hash.slice(0, 7));
+  }
+  return out;
+}
+
+// 行レベルの基本 evidence バッジ (portable 純関数)。閉じた commit が無ければ ''。
+// 展開しなくても「何がこの work-item を閉じたか」が一目で分かるようにする。
+function closingEvidenceBadge(entry) {
+  const hashes = closingCommits(entry);
+  if (!hashes.length) return '';
+  const label = hashes.map((h) => esc(h)).join(', ');
+  return `<span class="entry-evidence" title="この work-item を閉じた commit (基本 evidence)">✓ ${label}</span>`;
+}
+
 function renderMilestoneCard(ms, index) {
   const isExpanded = state.expanded.has(ms.id);
   const entries = ms.entries || [];
@@ -5912,11 +6570,20 @@ function renderMilestoneCard(ms, index) {
 
   let bodyHtml = '';
   if (isExpanded && (entries.length > 0 || ms.description)) {
+    // ms-162 — split the target detail into sub-tabs (work-item / evidence /
+    // decision) so each dimension is read on its own instead of one long
+    // vertical dump. Partition entries by dimension, render only the active tab.
+    const wiEntries = entries.filter(e => entryDimension(e.type) === 'workitem');
+    const evEntries = entries.filter(e => entryDimension(e.type) === 'evidence');
+    const decisions = decisionsForTarget(state.decisions, ms);
     _currentMsId = ms.id;
-    const renderedEntries = entries.map(renderEntry).join('');
+    const wiHtml = wiEntries.map(renderEntry).join('');
+    const evHtml = evEntries.map(renderEntry).join('');
     _currentMsId = null;
-    const hasDoneEntries = entries.some(e => e.status === 'done' || (e.entries || []).some(c => c.status === 'done'));
-    const hasCancelledEntries = entries.some(e => e.status === 'cancelled' || (e.entries || []).some(c => c.status === 'cancelled'));
+    const activeTab = state.targetTab[ms.id] || 'workitem';
+
+    const hasDoneEntries = wiEntries.some(e => e.status === 'done' || (e.entries || []).some(c => c.status === 'done'));
+    const hasCancelledEntries = wiEntries.some(e => e.status === 'cancelled' || (e.entries || []).some(c => c.status === 'cancelled'));
     const msHideDone = state.hideEntryDone.has(ms.id);
     const msShowCancelled = state.showCancelled.has(ms.id);
     const msObjective = ms.objective
@@ -5926,34 +6593,42 @@ function renderMilestoneCard(ms, index) {
       ? `<div class="ms-ac"><div class="ms-ac-label">done when</div>${esc(ms.acceptance_criteria)}</div>`
       : '';
     // ms-43 / e-2246 — creator (= 起票者) row in the expanded detail body.
-    // Shown unconditionally inside the expanded MS view, regardless of
-    // multi-actor heuristic, because the detail surface is where users
-    // explicitly ask "who set this up?" (AC #1).
     const _msExpandedCreatorLabel = renderCreatorLabel(ms);
     const msExpandedCreator = _msExpandedCreatorLabel
       ? `<div class="ms-creator-detail" style="font-size:0.7rem;color:var(--text-dim);margin:6px 0;">起票者: ${_msExpandedCreatorLabel}</div>`
       : '';
-    const showToolbar = hasDoneEntries || hasCancelledEntries;
+    // Sub-tab bar with per-dimension counts.
+    const tab = (key, label, count) =>
+      `<button class="tgt-detail-tab ${activeTab === key ? 'active' : ''}" data-action="target-tab" data-ms-id="${ms.id}" data-tab="${key}">${label} <span class="tgt-detail-count">${count}</span></button>`;
+    const tabBar = `
+      <div class="tgt-detail-tabs">
+        ${tab('workitem', 'work-item', wiEntries.length)}
+        ${tab('evidence', 'evidence', evEntries.length)}
+        ${tab('decision', 'decision', decisions.length)}
+      </div>`;
+    // Active tab content.
+    const showToolbar = (hasDoneEntries || hasCancelledEntries);
+    const toolbar = showToolbar ? `
+        <div class="ms-entries-toolbar">
+          ${hasDoneEntries ? `<button class="entry-filter-btn ${msHideDone ? 'active' : ''}" data-action="toggle-hide-done" data-ms-id="${ms.id}">${msHideDone ? 'show done' : 'hide done'}</button>` : ''}
+          ${hasCancelledEntries ? `<button class="entry-filter-btn ${msShowCancelled ? 'active' : ''}" data-action="toggle-show-cancelled" data-ms-id="${ms.id}">${msShowCancelled ? 'hide cancelled' : 'show cancelled'}</button>` : ''}
+        </div>` : '';
+    const empty = (t) => `<div class="tgt-detail-empty">${t} はありません。</div>`;
+    let tabContent;
+    if (activeTab === 'evidence') {
+      tabContent = evHtml || empty('evidence (commit 等の記録)');
+    } else if (activeTab === 'decision') {
+      tabContent = renderDecisionLog(decisions) || empty('decision (判断の記録)');
+    } else {
+      tabContent = toolbar + (wiHtml || empty('work-item (task 等)'));
+    }
     bodyHtml = `
       <div class="ms-entries">
-        ${showToolbar ? `
-        <div class="ms-entries-toolbar">
-          ${hasDoneEntries ? `
-          <button class="entry-filter-btn ${msHideDone ? 'active' : ''}" data-action="toggle-hide-done" data-ms-id="${ms.id}">
-            ${msHideDone ? 'show done' : 'hide done'}
-          </button>
-          ` : ''}
-          ${hasCancelledEntries ? `
-          <button class="entry-filter-btn ${msShowCancelled ? 'active' : ''}" data-action="toggle-show-cancelled" data-ms-id="${ms.id}">
-            ${msShowCancelled ? 'hide cancelled' : 'show cancelled'}
-          </button>
-          ` : ''}
-        </div>
-        ` : ''}
         ${msExpandedCreator}
         ${msObjective}${msAc}
         ${ms.description ? `<div class="ms-description">${esc(ms.description)}</div>` : ''}
-        ${renderedEntries}
+        ${tabBar}
+        <div class="tgt-detail-panel">${tabContent}</div>
         ${renderRelatedTreksWidget('milestone', ms.id)}
       </div>
     `;
@@ -9190,12 +9865,20 @@ function handleCommonAction(action, el) {
         if (state.relatedTreks['ms:' + msId] === undefined) {
           dataSource.loadRelatedTreks('milestone', msId).then(() => render());
         }
+        // ms-162 e-5833: lazy-load the (project-wide) decision stream once, on
+        // the first target detail open. Filtered per-target at render time.
+        ensureDecisionsLoaded();
       }
       return true;
     }
     case 'toggle-entry': {
       const eid = el.dataset.entryId;
       state.collapsedEntries.has(eid) ? state.collapsedEntries.delete(eid) : state.collapsedEntries.add(eid);
+      render(); return true;
+    }
+    case 'target-tab': {
+      // ms-162 — switch the expanded target's sub-tab (work-item/evidence/decision).
+      state.targetTab[el.dataset.msId] = el.dataset.tab;
       render(); return true;
     }
     case 'toggle-hide-done': {
@@ -9337,12 +10020,12 @@ function handleCommonAction(action, el) {
     case 'sales-toggle-hide-done':
       state.salesHideDone = !state.salesHideDone; render(); return true;
     case 'open-account':
-      state.openAccountId = el.dataset.accId; render(); return true;
+      state.openAccountId = el.dataset.accId; ensureDecisionsLoaded(); render(); return true;
     case 'close-account':
       state.openAccountId = null; render(); return true;
     // ms-106 fb1/fb2: opportunity modal + phase filter (dev の filter-bar と同型)
     case 'open-opp':
-      state.openOppId = el.dataset.oppId; render(); return true;
+      state.openOppId = el.dataset.oppId; ensureDecisionsLoaded(); render(); return true;
     case 'close-opp':
       state.openOppId = null; render(); return true;
     case 'opp-filter-phase': {
@@ -10317,6 +11000,11 @@ async function selectProject(projectId) {
           pendingEntries.push(fetchMilestoneEntries(ms.id, { suppressRender: true }));
         }
       }
+      // ms-162 e-5833 — auto-expanded (in_progress) milestones open WITHOUT a
+      // toggle-ms click, so the click-path lazy-load never fires for them and
+      // their decision-log stayed blank. Load the decision stream here too so
+      // any expanded target (auto or click) can render its 決定ログ.
+      ensureDecisionsLoaded();
       render();
       if (pendingEntries.length > 0) {
         Promise.allSettled(pendingEntries).then(() => render());
