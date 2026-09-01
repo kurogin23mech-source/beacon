@@ -60,34 +60,40 @@ def _stub_client(monkeypatch, events):
 # --- _recipient_backlog_advisory -------------------------------------------
 
 def test_advisory_fires_on_stale_unopened_backlog(monkeypatch):
-    old = _iso(_now() - datetime.timedelta(seconds=600))  # 10 min old, unopened
+    now = _now()
+    old = _iso(now - datetime.timedelta(seconds=600))  # 10 min old, unopened
     _stub_client(monkeypatch, [
         {"event_id": "e1", "created_at": old, "opened_at": "",
          "payload": {"recipient_session_id": "R1"}},
     ])
-    msg = commands_shared._recipient_backlog_advisory("R1", "proj")
+    # `now` injected for a deterministic staleness boundary (no wall-clock race).
+    msg = commands_shared._recipient_backlog_advisory("R1", "proj", now=now)
     assert msg is not None
     assert "not draining" in msg
     assert "delivered✗" in msg
+    assert "/mcp" in msg  # actionable recovery hint (AX: no pre-send event_id)
+    assert "bus status" not in msg  # the pre-send event_id hint was removed
 
 
 def test_advisory_silent_when_events_are_opened(monkeypatch):
-    old = _iso(_now() - datetime.timedelta(seconds=600))
+    now = _now()
+    old = _iso(now - datetime.timedelta(seconds=600))
     _stub_client(monkeypatch, [
-        {"event_id": "e1", "created_at": old, "opened_at": _iso(_now()),
+        {"event_id": "e1", "created_at": old, "opened_at": _iso(now),
          "payload": {"recipient_session_id": "R1"}},
     ])
-    assert commands_shared._recipient_backlog_advisory("R1", "proj") is None
+    assert commands_shared._recipient_backlog_advisory("R1", "proj", now=now) is None
 
 
 def test_advisory_silent_when_backlog_is_recent(monkeypatch):
     # An event that just arrived is in-flight, not a wedge — no warning.
-    fresh = _iso(_now() - datetime.timedelta(seconds=5))
+    now = _now()
+    fresh = _iso(now - datetime.timedelta(seconds=5))
     _stub_client(monkeypatch, [
         {"event_id": "e1", "created_at": fresh, "opened_at": "",
          "payload": {"recipient_session_id": "R1"}},
     ])
-    assert commands_shared._recipient_backlog_advisory("R1", "proj") is None
+    assert commands_shared._recipient_backlog_advisory("R1", "proj", now=now) is None
 
 
 def test_advisory_silent_when_no_events(monkeypatch):
@@ -136,18 +142,19 @@ def test_heartbeat_freshness_and_attentive_field(monkeypatch):
         app_module._stamp_session_liveness(s, "proj", now)
         return s
 
-    # Fresh poll + fresh heartbeat → live AND attentive.
+    # Fresh poll + fresh heartbeat → live AND heartbeat_fresh.
     s = stamp(3, 10)
-    assert s["live"] is True and s["attentive"] is True
+    assert s["live"] is True and s["heartbeat_fresh"] is True
 
-    # Fresh poll (live) but stale heartbeat (idle fork) → live, NOT attentive.
-    # This is the no-regression guarantee: an idle fork stays live.
+    # Fresh poll (live) but stale heartbeat (idle fork) → live, NOT
+    # heartbeat_fresh. This is the no-regression guarantee: an idle fork stays
+    # live (still receives) even when nobody is driving it.
     s = stamp(3, 4000)
-    assert s["live"] is True and s["attentive"] is False
+    assert s["live"] is True and s["heartbeat_fresh"] is False
 
-    # No heartbeat stamp → attentive is None (unknown), live still from poll.
+    # No heartbeat stamp → heartbeat_fresh is None (unknown), live still holds.
     s = stamp(3, None)
-    assert s["live"] is True and s["attentive"] is None
+    assert s["live"] is True and s["heartbeat_fresh"] is None
 
 
 def test_heartbeat_is_fresh_helper_handles_malformed(monkeypatch):

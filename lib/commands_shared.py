@@ -1625,10 +1625,15 @@ def _make_notice(
 # means the recipient polled past it without consuming.
 _BACKLOG_STALE_SECONDS = int(
     os.environ.get("BEACON_BUS_BACKLOG_STALE_SECONDS", "180") or "180")
-_BACKLOG_LOOKBACK_HOURS = 48
+# Both dimensions are env-tunable so an operator tuning one discovers the other
+# (the staleness threshold AND the lookback window over which we scan for it).
+_BACKLOG_LOOKBACK_HOURS = int(
+    os.environ.get("BEACON_BUS_BACKLOG_LOOKBACK_HOURS", "48") or "48")
 
 
-def _recipient_backlog_advisory(recipient: str, project_id: str) -> Optional[str]:
+def _recipient_backlog_advisory(
+    recipient: str, project_id: str, *, now=None,
+) -> Optional[str]:
     """Return a loud advisory iff the (already-live) ``recipient`` has stale
     unopened events addressed to it — i.e. it is polling but not draining its
     inbox — else ``None``.
@@ -1637,19 +1642,28 @@ def _recipient_backlog_advisory(recipient: str, project_id: str) -> Optional[str
     without the /unread receipt fields, transport error) returns ``None`` so the
     send proceeds unchanged. Uses the recipient-filtered /unread endpoint
     (forward-walk, e-5964) with an explicit ``since`` window so the recipient's
-    own server cursor state does not hide the backlog.
+    own server cursor state does not hide the backlog. The single store
+    round-trip is bounded by the api client's request timeout (30s), so on a
+    hung server this delays the send by at most that and never blocks it.
+
+    ``now`` is injectable (defaults to current UTC) so boundary tests are
+    deterministic, mirroring ``_heartbeat_is_fresh(last, now_dt)`` in app.py.
     """
     if os.environ.get("BEACON_BUS_NO_BACKLOG_CHECK", "") == "1" or not project_id:
         return None
     import datetime as _dt
-    now = _dt.datetime.now(_dt.timezone.utc)
+    if now is None:
+        now = _dt.datetime.now(_dt.timezone.utc)
     try:
         client, _config = _get_api_client()
         since = (now - _dt.timedelta(hours=_BACKLOG_LOOKBACK_HOURS)).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ")
         events = client.list_unread_bus_events(
             project_id, recipient, since=since, limit=100)
-    except BaseException:
+    except (Exception, SystemExit):
+        # Best-effort. SystemExit is caught because _get_api_client sys.exit(1)s
+        # on missing credentials; a KeyboardInterrupt (BaseException, not
+        # Exception) still propagates so an operator can always ^C a send.
         return None
     if not isinstance(events, list):
         return None
@@ -1674,9 +1688,9 @@ def _recipient_backlog_advisory(recipient: str, project_id: str) -> Optional[str
         f"⚠ recipient session {recipient[:24]}… is LIVE but not draining its "
         f"inbox: {len(stale)} message(s) addressed to it are unopened and older "
         f"than {_BACKLOG_STALE_SECONDS}s (oldest {stale[0]}). It is polling but "
-        f"not consuming — your DM may sit undelivered (sent✓ delivered✗). "
-        f"Verify with `beacon bus status <event_id>`; the receiver may need a "
-        f"`/mcp` reconnect. (Set BEACON_BUS_NO_BACKLOG_CHECK=1 to suppress.)"
+        f"not consuming — your DM may sit undelivered (sent✓ delivered✗). The "
+        f"receiver likely needs a `/mcp` reconnect to resume consuming its "
+        f"inbox. (Set BEACON_BUS_NO_BACKLOG_CHECK=1 to suppress this check.)"
     )
 
 

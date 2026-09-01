@@ -1868,15 +1868,18 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     session["ws_live"] = ws_live
     poll_healthy = session["poll_health"].get("healthy") is True
     session["live"] = (ws_live is True) or poll_healthy
-    # ms-165 (e-5965): informational attentiveness. `live` (above) proves the
-    # bridge polls and — post-e-5964 — will deliver even to an idle session.
-    # `attentive` additionally reflects whether a human/AI is actively DRIVING
-    # the session: last_heartbeat_at (POST /api/me/heartbeat, the interactive
-    # PostToolUse hook) is fresh. A live session can be un-attentive (idle fork:
-    # the bridge still delivers idle-wakes, nobody is at the keyboard). This is
-    # advisory ONLY and is NOT folded into `live`, so an idle fork stays live —
-    # no delivery regression. None = no heartbeat stamp (can't tell).
-    session["attentive"] = _heartbeat_is_fresh(
+    # ms-165 (e-5965): informational signal. `live` (above) is the deliverability
+    # gate — it proves the bridge polls and, post-e-5964, will deliver even to an
+    # idle session. `heartbeat_fresh` is a SEPARATE, weaker signal: whether the
+    # interactive heartbeat (last_heartbeat_at, written by POST /api/me/heartbeat
+    # = the PostToolUse hook) is recent, i.e. a human/AI is actively driving the
+    # session. It is deliberately named for the MECHANISM (heartbeat freshness),
+    # NOT "attentive"/"consuming" — a wedged bridge can be heartbeat_fresh yet not
+    # drain its inbox, so importing a deliverability connotation would mislead.
+    # It is NOT folded into `live` (an idle fork stays live — no delivery
+    # regression), parallel to how `ws_live` sits beside `live`. None = no
+    # heartbeat stamp (can't tell).
+    session["heartbeat_fresh"] = _heartbeat_is_fresh(
         str(session.get("last_heartbeat_at") or ""), now_dt)
 
 
