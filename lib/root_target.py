@@ -267,13 +267,20 @@ def doc_rolls_up_to_root(meta: dict, child_ids: set | None = None,
 
     Pass ``child_ids`` (from :func:`child_target_ids`) to avoid recomputing it
     for every doc in a list filter; otherwise pass ``data`` and it is derived
-    once here.
+    once here. Exactly one of ``child_ids`` / ``data`` must be given — passing
+    neither is a caller bug (it would silently roll up only project-level docs
+    and drop every child-Target doc), so it raises rather than fail quietly.
     """
     t = work_model.doc_target(meta)
     if t == "" or t == ROOT_TARGET_KIND:
         return True
     if child_ids is None:
-        child_ids = child_target_ids(data or {})
+        if data is None:
+            raise ValueError(
+                "doc_rolls_up_to_root needs child_ids or data to resolve the "
+                "root's descendant Targets; passing neither would silently drop "
+                "every child-Target doc from the rollup.")
+        child_ids = child_target_ids(data)
     return t in child_ids
 
 

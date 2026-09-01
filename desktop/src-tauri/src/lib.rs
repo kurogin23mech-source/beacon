@@ -564,15 +564,27 @@ fn load_project_json(state: State<AppState>) -> Result<String, String> {
     // SQLite holds the current state. `beacon project dump` assembles the
     // project from the active store (SQLite locally, authoritative in cloud),
     // so it never returns stale data.
-    match run_beacon(dir, &["project", "dump"]) {
-        Ok(out) => Ok(out),
+    // Only trust the CLI output if it is actually JSON. `run_beacon` returns
+    // Ok on any zero-exit, so a future dump-format change or a stray warning /
+    // traceback on stdout must NOT be handed to the frontend as project data —
+    // validate here and fall back to the mirror otherwise (a malformed dump is
+    // a CLI-unavailable case for our purposes).
+    let dumped = run_beacon(dir, &["project", "dump"])
+        .ok()
+        .filter(|out| serde_json::from_str::<serde_json::Value>(out).is_ok());
+    match dumped {
+        Some(out) => Ok(out),
         // Fall back to the mirror file when the CLI is unreachable (e.g. a
-        // packaged app with no `beacon` on PATH) or errors, so the desktop
-        // still shows something rather than failing hard.
-        Err(_) => {
+        // packaged app with no `beacon` on PATH) or returned non-JSON, so the
+        // desktop still shows something rather than failing hard.
+        None => {
             let path = std::path::Path::new(dir).join(".beacon/project.json");
-            std::fs::read_to_string(&path)
-                .map_err(|e| format!("Failed to read project (beacon CLI unavailable and mirror unreadable): {}", e))
+            std::fs::read_to_string(&path).map_err(|e| format!(
+                "Failed to read project (tried: beacon project dump → fallback \
+                 .beacon/project.json). Check that `beacon` is on PATH and the \
+                 project dir is correct: {}",
+                e
+            ))
         }
     }
 }

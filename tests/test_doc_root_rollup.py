@@ -73,6 +73,16 @@ def test_doc_rolls_up_to_root_derives_children_when_not_passed():
     assert root_target.doc_rolls_up_to_root({"target": "ms-9"}, data=_data()) is False
 
 
+def test_doc_rolls_up_to_root_requires_child_ids_or_data():
+    # Passing neither is a caller bug: it would silently drop every child-Target
+    # doc (empty descendant set) instead of failing. Guard raises. A project-level
+    # doc still returns True before the guard (no descendant set needed).
+    assert root_target.doc_rolls_up_to_root({"target": "root"}) is True
+    assert root_target.doc_rolls_up_to_root({}) is True
+    with pytest.raises(ValueError):
+        root_target.doc_rolls_up_to_root({"target": "ms-1"})
+
+
 # --- integration: cmd_doc_list --target root filters correctly -------------
 
 def test_cmd_doc_list_target_root_rollup(monkeypatch, capsys):

@@ -985,7 +985,10 @@ def build_parser() -> argparse.ArgumentParser:
     # previously bash-only, so a Windows/pipx user could not filter docs by
     # Target at all (incl. ``--target root`` for the project-wide rollup).
     # Wired here for bash↔Python parity.
-    p_doc_list.add_argument("--target", dest="doc_target", default="")
+    p_doc_list.add_argument(
+        "--target", dest="doc_target", default="",
+        help="filter docs by Target id, or 'root' for the project-wide rollup "
+             "(child-Target docs + project-level docs)")
 
     p_doc_show = doc_sub.add_parser("show", aliases=["get"], add_help=False)
     p_doc_show.add_argument("doc_id", nargs="?", default="")
