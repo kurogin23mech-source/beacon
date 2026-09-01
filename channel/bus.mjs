@@ -697,6 +697,26 @@ async function apiGet(p) {
   return r.json()
 }
 
+// ms-165 (e-5964): the /bus/unread scan-frontier response header. Named here as
+// the single client-side source of truth (the server names it
+// `_UNREAD_FRONTIER_HEADER` in routers_projects.py) so a rename is a one-line
+// change on each side, and the structural pin test checks THIS constant rather
+// than a bare literal. Lower-cased for the Fetch `Headers.get` contract (which
+// is case-insensitive, but we match the stored key form).
+const BUS_UNREAD_FRONTIER_HEADER = 'x-bus-unread-frontier'
+
+// ms-165 (e-5964): like apiGet but also surfaces response headers. /bus/unread
+// returns the frontier header the poll loop uses to advance its watermark past
+// a barren scanned region even when the JSON body is empty — the deadlock break
+// for a session wedged behind a high-volume other recipient.
+async function apiGetWithHeaders(p) {
+  const r = await apiFetch(`${API_URL}${p}`, {
+    headers: { Authorization: `Bearer ${loadToken()}` },
+  })
+  if (!r.ok) throw new Error(`GET ${p} → ${r.status}: ${(await r.text()).slice(0, 200)}`)
+  return { data: await r.json(), headers: r.headers }
+}
+
 async function apiPost(p, body) {
   const r = await apiFetch(`${API_URL}${p}`, {
     method: 'POST',
@@ -1259,7 +1279,17 @@ if (!PROJECT_ID || !SESSION_ID) {
     const url = `/api/projects/${PROJECT_ID}/bus/unread`
       + `?recipient_id=${encodeURIComponent(SESSION_ID)}`
       + `&since=${encodeURIComponent(bridgeLastSeen)}`
-    const events = await apiGet(url)
+    const { data: events, headers } = await apiGetWithHeaders(url)
+    // ms-165 (e-5964): the server walked forward up to this created_at looking
+    // for events addressed to us. On an EMPTY result we advance our watermark to
+    // it, so a backlog of OTHER recipients' events past our (frozen) `since`
+    // can't wedge us behind the store's fetch window forever. Only used on the
+    // empty path: a non-empty result advances the watermark by the returned
+    // events' created_at below, which never skips a tie-boundary event the
+    // server's `limit` truncation withheld.
+    const frontier = headers && typeof headers.get === 'function'
+      ? (headers.get(BUS_UNREAD_FRONTIER_HEADER) || '')
+      : ''
     if (!Array.isArray(events) || events.length === 0) {
       // ms-140: never let a poll return silently. Distinguish two 0-event cases
       // so a monitoring AI can tell drop from idle (AX review C):
@@ -1274,6 +1304,16 @@ if (!PROJECT_ID || !SESSION_ID) {
         log(`poll: 0 events after WS push — possible silent drop (since=${bridgeLastSeen || '∅'})`)
       } else {
         log(`poll: 0 events (idle, since=${bridgeLastSeen || '∅'})`)
+      }
+      // ms-165: break the over-fetch-window deadlock. If the server proved it
+      // scanned past our watermark with nothing for us, jump forward so the
+      // next poll's window starts beyond the barren backlog. Strictly forward
+      // (never rewind); nothing is skipped because the scanned region held no
+      // event addressed to us.
+      if (frontier && frontier > bridgeLastSeen) {
+        bridgeLastSeen = frontier
+        persistDeliveryState()
+        log(`bridge watermark advanced to frontier ${frontier} (empty scan, e-5964)`)
       }
       return
     }

@@ -738,6 +738,79 @@ class BusEventReceiptAck(BaseModel):
 # constant with no app.py dependency.
 _RECEIPT_STAGES = ("delivered", "opened")
 
+# ms-165 (e-5964): /bus/unread forward-walk scan cap. The endpoint over-fetches
+# from the store in oldest-first batches of ``raw_limit`` (≤400) and filters to
+# the requesting recipient AFTER the fetch. A single 400-window silently starves
+# a recipient whose ``since`` sits far in the past when the project's total
+# events past ``since`` exceed 400 and are dominated by a HIGH-FREQUENCY OTHER
+# recipient: the window is all other-recipient events, the recipient's own
+# events fall beyond it, and — because the client watermark only advances by the
+# created_at of *returned* events — the recipient can never catch up (a
+# permanent, silently-worsening deadlock; fork/worktree sessions hit it because
+# their inbound watermark freezes at cold-start while a long-lived parent keeps
+# receiving and tracks near-now). The fix walks forward across multiple batches,
+# collecting the recipient's addressed events, bounded by this cap so a single
+# request still reads at most _UNREAD_SCAN_CAP events (preserving the 2026-08-20
+# OOM fix's per-request memory bound). The scan frontier is reported to the
+# client via the X-Bus-Unread-Frontier header so it can advance its watermark
+# past a barren region even on an empty result — amortising the backlog walk to
+# once instead of re-walking every poll. Env-overridable for prod tuning.
+_UNREAD_SCAN_CAP = int(os.environ.get("BEACON_BUS_UNREAD_SCAN_CAP", "2000") or "2000")
+_UNREAD_FRONTIER_HEADER = "X-Bus-Unread-Frontier"
+
+
+def _walk_unread_events(list_events, addressed, *, project_id, since, channel,
+                        raw_limit, limit, scan_cap=_UNREAD_SCAN_CAP):
+    """Forward-walk the bus event stream collecting events addressed to a
+    recipient, returning ``(collected, frontier)``.
+
+    Split out of ``list_unread_bus_events`` (ms-165 e-5964) so the paging seam
+    is independently testable: this is a pure function over its two injected
+    seams — ``list_events(project_id, since, channel, limit) -> [event]`` (the
+    store query) and ``addressed(event) -> bool`` (the per-recipient filter) —
+    with no HTTP / auth / redaction concerns. The handler owns those; this owns
+    only "walk forward until we have ``limit`` addressed events or the bounded
+    scan is exhausted".
+
+      * ``collected`` — up to ``limit`` events for which ``addressed`` is True,
+        oldest-first.
+      * ``frontier``  — the greatest created_at fully scanned. The caller reports
+        it so a client can skip a barren region even on an empty ``collected``.
+
+    Each store round-trip reads at most ``raw_limit`` events (the 2026-08-20 OOM
+    fix's per-request memory bound); ``scan_cap`` bounds the whole walk.
+    """
+    collected: list = []
+    scan_since = since
+    frontier = since
+    scanned = 0
+    while scanned < scan_cap:
+        batch = list_events(project_id, since=scan_since, channel=channel,
+                            limit=raw_limit)
+        if not batch:
+            break
+        scanned += len(batch)
+        for e in batch:
+            created = e.get("created_at", "")
+            if created and created > frontier:
+                frontier = created
+            if addressed(e):
+                collected.append(e)
+        if limit and len(collected) >= limit:
+            break
+        last_created = batch[-1].get("created_at", "")
+        if not last_created or last_created == scan_since:
+            # No forward progress possible (a full batch shares one created_at).
+            # Stop rather than loop forever; the next poll resumes from the same
+            # point. Rare (microsecond-precision ties across >raw_limit events).
+            break
+        scan_since = last_created
+        if len(batch) < raw_limit:
+            break  # store stream exhausted
+    if limit:
+        collected = collected[:limit]
+    return collected, frontier
+
 
 # ---------------------------------------------------------------------------
 # Bus/dm gate — module-level helpers (verbatim from app.py)
@@ -3909,11 +3982,21 @@ def make_bus_delivery_router(
         delivery (events stay readable until acknowledged) while structurally
         preventing duplicate delivery once they acknowledge.
 
-        We over-fetch from the store (``limit * 4`` capped at 400) before applying
-        the recipient filter so a high-volume channel doesn't starve the
-        requested recipient when most of the window is addressed to others.
-        The cursor still advances by ``created_at`` across the full set, so
-        skipped events are not redelivered on the next round.
+        We over-fetch from the store in oldest-first batches of ``limit * 4``
+        (capped at 400) and apply the recipient filter afterwards so a
+        high-volume channel doesn't starve the requested recipient when most of
+        a window is addressed to others. ms-165 (e-5964): a SINGLE such window
+        was not enough — when the recipient's ``since`` is far in the past and
+        the total events past it exceed the window (dominated by a high-frequency
+        OTHER recipient), the window was entirely other-recipient events, the
+        recipient's own events fell beyond it, ``filtered`` was always empty, and
+        the client watermark (which only advances by the created_at of *returned*
+        events) could never catch up — a permanent silent deadlock. We now walk
+        forward across up to ``_UNREAD_SCAN_CAP`` events, collecting the
+        recipient's addressed events, and report the scan frontier via the
+        ``X-Bus-Unread-Frontier`` header so the client can advance past a barren
+        region even on an empty result. Each store round-trip still reads at most
+        ``raw_limit`` events (preserving the 2026-08-20 OOM fix's memory bound).
 
         ``since`` override (ms-60 follow-up): callers can pass an explicit
         ``since`` to fetch events newer than a client-side high-water mark
@@ -3933,9 +4016,6 @@ def make_bus_delivery_router(
             since = cursor.get("last_seen_at", "")
         # Over-fetch so the recipient filter does not blank out a noisy window.
         raw_limit = min(max(limit * 4, limit), 400) if limit else 400
-        raw = db.list_bus_events(
-            project_id, since=since, channel=channel, limit=raw_limit,
-        )
         # ms-54 / e-2934: caller の user_id を _bus_event_addressed_to に渡して
         # user-scoped 宛先 (= payload.recipient_user_id) の DM も配信対象にする。
         # 認証済 user の user_id は require_auth で解決済 (= _caller_uid)。 caller
@@ -3944,17 +4024,30 @@ def make_bus_delivery_router(
         # (= 自分宛の user-scoped DM は自 poll で必ず届く、 他人宛の user-scoped
         # DM は他人の polling で拾わせる)。
         caller_uid = _caller_uid(user)
-        filtered = [e for e in raw
-                    if _bus_event_addressed_to(e, recipient_id, caller_uid)]
-        if limit:
-            filtered = filtered[:limit]
+        # ms-165 (e-5964): forward-walk the store (bounded) collecting the
+        # recipient's addressed events, tracking the greatest created_at scanned
+        # as ``frontier``. Split into _walk_unread_events so the paging seam is
+        # unit-testable independently of HTTP/auth/redaction.
+        filtered, frontier = _walk_unread_events(
+            db.list_bus_events,
+            lambda e: _bus_event_addressed_to(e, recipient_id, caller_uid),
+            project_id=project_id, since=since, channel=channel,
+            raw_limit=raw_limit, limit=limit,
+        )
         # ms-93 / e-2275: redact DM payloads the caller isn't a party to. The
         # recipient_id query param is the session asking for its inbox, but the
         # *caller* is the authenticated user behind that request. In dogfood,
         # callers typically pass their own recipient_id (= bridge polling for
         # itself), so this is a no-op for the common path; the guard catches
         # the cross-user case where a member queries another session's unread.
-        return _apply_dm_payload_visibility(project_id, filtered, _caller_uid(user))
+        visible = _apply_dm_payload_visibility(project_id, filtered, caller_uid)
+        # Frontier header lets the client break the deadlock on an EMPTY result
+        # (advance its watermark past the barren scanned region). A non-empty
+        # result advances the client via the returned events' created_at as
+        # before — the client ignores the header then, so no tie-boundary event
+        # withheld by the ``limit`` truncation is ever skipped.
+        headers = {_UNREAD_FRONTIER_HEADER: frontier} if frontier else None
+        return JSONResponse(content=visible, headers=headers)
 
     @router.post("/api/projects/{project_id}/bus/cursors/{recipient_id}")
     def advance_bus_cursor(
