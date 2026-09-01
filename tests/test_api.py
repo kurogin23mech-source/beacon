@@ -637,8 +637,10 @@ def test_list_decisions_reads_stream(monkeypatch):
         {"decision_id": "dec-2", "kind": "review-adjudication", "decision": "approve",
          "decided_by": "autonomous-AI", "evidence": ["pr:e-2"]},
     ]
+    # ms-166 e-5970: kind/limit/since are pushed INTO the store read (the store owns
+    # the newest-window + kind filter now), so the mock signature carries kind too.
     monkeypatch.setattr(_store_router_module, "list_decision_events",
-                        lambda pid, limit=100, since="": list(rows))
+                        lambda pid, kind="", limit=100, since="": list(rows))
     r = client.get(f"/api/projects/{PROJECT_ID}/decisions")
     assert r.status_code == 200
     body = r.json()
@@ -651,8 +653,12 @@ def test_list_decisions_filters_by_kind(monkeypatch):
         {"decision_id": "dec-1", "kind": "task-done", "decision": "done"},
         {"decision_id": "dec-2", "kind": "review-adjudication", "decision": "approve"},
     ]
-    monkeypatch.setattr(_store_router_module, "list_decision_events",
-                        lambda pid, limit=100, since="": list(rows))
+    # ms-166 e-5970: the kind filter is the STORE's responsibility now (applied before
+    # the limit window), not a route-level post-filter. The route must PASS kind through;
+    # the mock mirrors the real store by filtering on it.
+    def _fake(pid, kind="", limit=100, since=""):
+        return [r for r in rows if not kind or r.get("kind") == kind]
+    monkeypatch.setattr(_store_router_module, "list_decision_events", _fake)
     r = client.get(f"/api/projects/{PROJECT_ID}/decisions?kind=task-done")
     assert r.status_code == 200
     body = r.json()

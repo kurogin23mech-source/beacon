@@ -25,16 +25,29 @@ this seam covers the four classes that had none.
 """
 from __future__ import annotations
 
+import logging
+
 import deliverable_capture as _dc
+
+_LOG = logging.getLogger(__name__)
 
 
 def _record_completion_decision(target: dict, verdict: str, reason: str) -> None:
     """Record a 完遂 (目的達成) verdict for ``target`` on the decision arm — best-effort,
     cloud-only (ms-163 e-5880). ``verdict`` is what the completion settled to (the terminal
-    phase / status / "done"); ``reason`` is the why. Silently no-ops in local mode or on any
-    error so it never breaks a completion flow. decided_by follows the human/AI session
-    signal (a completion verdict is human-owned; an AI-assisted session is
-    AI-proposed-human-chose), matching ``cmd_target._decided_by_for_gate``."""
+    phase / status / "done"); ``reason`` is the why. No-ops in local mode. decided_by follows
+    the human/AI session signal (a completion verdict is human-owned; an AI-assisted session
+    is AI-proposed-human-chose), matching ``cmd_target._decided_by_for_gate``.
+
+    ms-166 e-5978: a write failure is LOGGED, not silently swallowed. The old
+    ``except BaseException: pass`` hid every error — so when the completion-verdict write
+    failed (endpoint down / rejected), the audit record vanished with no trace, and the
+    arm looked empty even though completions were happening. We keep the best-effort
+    contract (a failed audit write never breaks the completion flow) but surface the
+    failure at WARNING (Python's default lastResort handler prints it to stderr).
+    ``SystemExit`` is caught separately and still swallowed — ``_get_api_client`` may
+    ``sys.exit`` on config errors and the completion already persisted — but it too is
+    logged now. A genuine ``KeyboardInterrupt`` (user abort) is left to propagate."""
     try:
         from commands_shared import (_is_cloud_mode, _get_api_client,
                                      _session_kind_is_human)
@@ -57,8 +70,17 @@ def _record_completion_decision(target: dict, verdict: str, reason: str) -> None
             "evidence": [],
             "related": {"target_id": tid},
         })
-    except BaseException:
-        pass
+    except Exception as exc:
+        _LOG.warning(
+            "completion-verdict decision write failed for target=%s verdict=%s: %s",
+            ((target or {}).get("id") or "?"), verdict, exc)
+    except SystemExit as exc:
+        # _get_api_client() may sys.exit on config errors; the completion already
+        # persisted, so never let that abort the flow — but log it (no longer silent).
+        _LOG.warning(
+            "completion-verdict decision write skipped (client unavailable) "
+            "for target=%s verdict=%s: %s",
+            ((target or {}).get("id") or "?"), verdict, exc)
 
 
 def on_target_completion(data: dict, target: dict, *, verdict: str = "done",

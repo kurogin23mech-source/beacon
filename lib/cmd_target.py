@@ -33,6 +33,7 @@ family importing it).
 import os
 import sys
 import json
+import logging
 
 import core  # noqa: F401
 import work_model  # noqa: F401
@@ -294,8 +295,22 @@ def _record_completion_verdict_decision(target_id, verdict, entry, approval_rati
             "evidence": evidence,
             "related": {"target_id": target_id},
         })
-    except BaseException:
-        pass
+    except Exception as exc:
+        # ms-166 e-5978: best-effort (never break the approve flow), but a failed
+        # completion-verdict write is LOGGED, not silently dropped. The old
+        # `except BaseException: pass` hid endpoint/rejection failures, so the
+        # attainment audit record vanished undetected. WARNING reaches stderr via
+        # Python's lastResort handler.
+        logging.getLogger(__name__).warning(
+            "completion-verdict decision write failed for target=%s verdict=%s: %s",
+            target_id, verdict, exc)
+    except SystemExit as exc:
+        # _get_api_client() may sys.exit on config errors; the transition already
+        # committed, so never abort the approve flow — but log it (no longer silent).
+        # Kept separate from Exception so a genuine KeyboardInterrupt still propagates.
+        logging.getLogger(__name__).warning(
+            "completion-verdict decision write skipped (client unavailable) "
+            "for target=%s verdict=%s: %s", target_id, verdict, exc)
 
 
 def cmd_target_approve():
