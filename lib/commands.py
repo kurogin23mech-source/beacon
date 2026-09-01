@@ -3521,8 +3521,12 @@ def _record_review_adjudication_decision(review_type: str, pr_number: str,
             "decision": decision,
             "rationale": rationale,
             "decided_by": _decided_by_for_review(),
-            "evidence": [f"review:{review_type}"],
-            "related": {"pr_number": pr_number, "review_type": review_type},
+            # PR / review-type linkage lives in evidence as real link refs — the
+            # server's related schema (_RELATED_KEYS) only keeps task/target/trek/
+            # event ids, so `related.pr_number` was silently dropped (found by
+            # dogfooding this very seam; a review-adjudication is about a PR, not a
+            # task/target). "pr:<n>" makes "which採否 for PR N" queryable via evidence.
+            "evidence": [f"review:{review_type}", f"pr:{pr_number}"],
         })
 
 

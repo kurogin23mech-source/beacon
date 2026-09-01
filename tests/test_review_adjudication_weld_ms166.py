@@ -58,8 +58,10 @@ def test_採否をdecisionに溶接する(monkeypatch):
     assert "accepted[M1]: parity guard 拡張" in rec["rationale"]
     assert "declined[AX-2]: open-vocab 設計に反する" in rec["rationale"]
     assert rec["decided_by"] == "autonomous-AI"               # AI session
-    assert rec["evidence"] == ["review:ax"]
-    assert rec["related"] == {"pr_number": "702", "review_type": "ax"}
+    # PR/review-type linkage は evidence の実 link 参照に載る (related schema は
+    # pr_number を持たず server が silent に落とすため — dogfood で発見)。
+    assert rec["evidence"] == ["review:ax", "pr:702"]
+    assert "related" not in rec
 
 
 def test_明示summaryがdecisionになる(monkeypatch):
