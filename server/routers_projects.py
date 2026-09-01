@@ -1657,15 +1657,20 @@ def make_router(
         check each rationale against the actual code. ``kind`` filters to one
         decision family (e.g. ``task-done`` / ``review-adjudication`` /
         ``log-backstop``); ``since`` / ``limit`` page the append-only stream.
+
+        ms-166 e-5970: ``kind`` is pushed INTO the store read so it is applied
+        before the ``limit`` window. The previous filter-after-truncate here
+        filtered within the oldest ``limit`` rows, so a kind absent from that
+        slice returned ~0 even when many such rows existed further down the
+        stream (the "list shows 0" symptom the audit hit).
         """
         _load(project_id, user)  # read-access guard (404 / 403 as appropriate)
         try:
-            rows = db.list_decision_events(project_id, limit=limit, since=since)
+            rows = db.list_decision_events(
+                project_id, kind=kind, limit=limit, since=since)
         except Exception as exc:
             raise HTTPException(
                 status_code=502, detail=f"decision stream read failed: {exc}")
-        if kind:
-            rows = [r for r in rows if r.get("kind") == kind]
         return {"decisions": rows, "count": len(rows)}
 
     @router.delete("/api/projects/{project_id}/entries/{entry_id}")

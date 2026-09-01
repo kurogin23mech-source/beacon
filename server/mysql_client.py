@@ -2651,16 +2651,26 @@ def append_decision_event(project_id: str, data: dict) -> str:
     return decision_id
 
 
-def list_decision_events(project_id: str, *, limit: int = 100,
+def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
                          since: str = "") -> list[dict]:
-    """decision_events を created_at 昇順で返す (= 1 本のストリームとして読む)。
+    """decision_events を created_at 昇順で、直近 ``limit`` 件返す。
 
-    since: ISO8601 の下限 (= created_at > since のみ)。limit: 返却上限。
+    ms-166 e-5970: append-only で無制限に伸びるストリーム (dm-send だけで 500+)
+    を *古い方* から ``limit`` で切ると、backlog が ``limit`` を超えた時点で新しい
+    decision がすべて既定 read から不可視になる (= 永続化は成功しているのに
+    「載らない」ように見える)。さらに route 側の kind フィルタが truncate の *後*
+    だったため、古い slice に無い kind は ~0 件に見えた。監査はこの 2 症状を
+    write→read の *ストア* 不整合と読んだが、真因は read 窓だけ。直近 ``limit``
+    件 (``[-limit:]``) を返し、``kind`` は limit の *前* に絞る。
+
+    kind: 指定時はその decision family のみ。since: ISO8601 の下限 (created_at > since)。
     """
     rows = _query("decision_events", project_id)
+    if kind:
+        rows = [r for r in rows if (r.get("kind") or "") == kind]
     if since:
         rows = [r for r in rows if (r.get("created_at") or "") > since]
     rows.sort(key=lambda r: (r.get("created_at", ""), r.get("decision_id", "")))
     if limit and limit > 0:
-        rows = rows[:limit]
+        rows = rows[-limit:]
     return rows

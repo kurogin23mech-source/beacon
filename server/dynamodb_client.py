@@ -1914,12 +1914,17 @@ def append_decision_event(project_id: str, data: dict) -> str:
     return decision_id
 
 
-def list_decision_events(project_id: str, *, limit: int = 100,
+def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
                          since: str = "") -> list[dict]:
+    # ms-166 e-5970: return the newest ``limit`` (``[-limit:]``, not ``[:limit]``)
+    # and filter ``kind`` BEFORE the limit — see firestore_client for the full
+    # rationale (oldest-window + filter-after-truncate hid every recent decision).
     rows = list(_DECISION_EVENTS_FALLBACK.get(project_id) or [])
+    if kind:
+        rows = [r for r in rows if (r.get("kind") or "") == kind]
     if since:
         rows = [r for r in rows if (r.get("created_at") or "") > since]
     rows.sort(key=lambda r: (r.get("created_at", ""), r.get("decision_id", "")))
     if limit and limit > 0:
-        rows = rows[:limit]
+        rows = rows[-limit:]
     return rows
