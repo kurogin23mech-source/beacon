@@ -1612,6 +1612,74 @@ def _make_notice(
         lambda m: print(m, file=sys.stderr))
 
 
+# ms-165 (e-5965): "live but not draining" advisory. A recipient can be LIVE
+# (its bridge is polling, so last_poll_at is fresh) yet fail to CONSUME its
+# inbox — a wedged bridge, or the pre-e-5964 over-fetch deadlock — leaving DMs
+# addressed to it with the ``opened`` receipt never set. last_poll_at alone
+# cannot see this deceptive "sent✓ delivered✗" state (memo y1D3D5ZH: bus
+# directory live can't judge attentiveness). When the live-check confirms the
+# recipient is live we ALSO look for stale unopened events addressed to it and
+# warn the sender loudly. Env-tunable; best-effort / fail-open (never breaks a
+# send). ``opened_at`` is the truth source — the receiving bridge stamps it only
+# after the MCP push lands (channel/bus.mjs), so its absence on an old event
+# means the recipient polled past it without consuming.
+_BACKLOG_STALE_SECONDS = int(
+    os.environ.get("BEACON_BUS_BACKLOG_STALE_SECONDS", "180") or "180")
+_BACKLOG_LOOKBACK_HOURS = 48
+
+
+def _recipient_backlog_advisory(recipient: str, project_id: str) -> Optional[str]:
+    """Return a loud advisory iff the (already-live) ``recipient`` has stale
+    unopened events addressed to it — i.e. it is polling but not draining its
+    inbox — else ``None``.
+
+    Best-effort / fail-open: any failure (opt-out env, no client, older server
+    without the /unread receipt fields, transport error) returns ``None`` so the
+    send proceeds unchanged. Uses the recipient-filtered /unread endpoint
+    (forward-walk, e-5964) with an explicit ``since`` window so the recipient's
+    own server cursor state does not hide the backlog.
+    """
+    if os.environ.get("BEACON_BUS_NO_BACKLOG_CHECK", "") == "1" or not project_id:
+        return None
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc)
+    try:
+        client, _config = _get_api_client()
+        since = (now - _dt.timedelta(hours=_BACKLOG_LOOKBACK_HOURS)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ")
+        events = client.list_unread_bus_events(
+            project_id, recipient, since=since, limit=100)
+    except BaseException:
+        return None
+    if not isinstance(events, list):
+        return None
+    stale = []
+    for e in events:
+        if not isinstance(e, dict) or e.get("opened_at"):
+            continue  # non-dict, or already consumed (bridge MCP-pushed it)
+        created = str(e.get("created_at") or "")
+        if not created:
+            continue
+        try:
+            age = (now - _dt.datetime.fromisoformat(
+                created.replace("Z", "+00:00"))).total_seconds()
+        except Exception:
+            continue
+        if age > _BACKLOG_STALE_SECONDS:
+            stale.append(created)
+    if not stale:
+        return None
+    stale.sort()
+    return (
+        f"⚠ recipient session {recipient[:24]}… is LIVE but not draining its "
+        f"inbox: {len(stale)} message(s) addressed to it are unopened and older "
+        f"than {_BACKLOG_STALE_SECONDS}s (oldest {stale[0]}). It is polling but "
+        f"not consuming — your DM may sit undelivered (sent✓ delivered✗). "
+        f"Verify with `beacon bus status <event_id>`; the receiver may need a "
+        f"`/mcp` reconnect. (Set BEACON_BUS_NO_BACKLOG_CHECK=1 to suppress.)"
+    )
+
+
 def _resolve_recipient_live(
     recipient: str, channel: str,
     advise: Optional[Callable[[str], None]] = None,
@@ -1697,6 +1765,13 @@ def _resolve_recipient_live(
                 # sid→user resolution so a same-user cross-project reply is
                 # still recognised and not held in armed mode.
                 row_email = _resolve_recipient_email_via_self_sessions(recipient)
+            # ms-165 (e-5965): live is necessary but not sufficient — the
+            # recipient may be polling without draining its inbox. Warn loudly
+            # (best-effort) so the sender isn't fooled by "sent✓ delivered✗".
+            _backlog = _recipient_backlog_advisory(
+                recipient, str(row.get("project_id") or ""))
+            if _backlog:
+                _notice(_backlog)
             return (recipient, None, row_email)  # live + healthy, all good
 
     # Not in the live+healthy set. Try auto-swap before falling back to

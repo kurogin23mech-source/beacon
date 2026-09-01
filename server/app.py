@@ -1736,6 +1736,29 @@ _POLL_HEALTH_MIN_WINDOW_S = 30
 _POLL_HEALTH_DEFAULT_INTERVAL_MS = 2000
 _POLL_HEALTH_INTERVAL_MULTIPLIER = 2
 
+# ms-165 (e-5965): attentiveness window. last_heartbeat_at is written only by
+# POST /api/me/heartbeat (the interactive PostToolUse hook path), so its
+# freshness proves a human/AI is actively DRIVING the session — distinct from
+# `live` (bridge polling). Env-overridable.
+_ATTENTIVE_HEARTBEAT_MAX_AGE_S = int(
+    os.environ.get("BEACON_ATTENTIVE_MAX_AGE_S", "300") or "300")
+
+
+def _heartbeat_is_fresh(last_heartbeat_at: str, now_dt) -> Optional[bool]:
+    """Return True/False if ``last_heartbeat_at`` is within the attentiveness
+    window, or None if it can't be parsed. Malformed → None (unknown, not dead)."""
+    if not last_heartbeat_at:
+        return None
+    import datetime
+    try:
+        hb = datetime.datetime.fromisoformat(
+            last_heartbeat_at.replace("Z", "+00:00"))
+        if hb.tzinfo is None:
+            hb = hb.replace(tzinfo=datetime.timezone.utc)
+    except (ValueError, AttributeError):
+        return None
+    return (now_dt - hb).total_seconds() <= _ATTENTIVE_HEARTBEAT_MAX_AGE_S
+
 
 def _compute_poll_health(session: dict, now_dt) -> dict:
     """Compute the ``poll_health`` block for a session row (e-1318).
@@ -1845,6 +1868,16 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     session["ws_live"] = ws_live
     poll_healthy = session["poll_health"].get("healthy") is True
     session["live"] = (ws_live is True) or poll_healthy
+    # ms-165 (e-5965): informational attentiveness. `live` (above) proves the
+    # bridge polls and — post-e-5964 — will deliver even to an idle session.
+    # `attentive` additionally reflects whether a human/AI is actively DRIVING
+    # the session: last_heartbeat_at (POST /api/me/heartbeat, the interactive
+    # PostToolUse hook) is fresh. A live session can be un-attentive (idle fork:
+    # the bridge still delivers idle-wakes, nobody is at the keyboard). This is
+    # advisory ONLY and is NOT folded into `live`, so an idle fork stays live —
+    # no delivery regression. None = no heartbeat stamp (can't tell).
+    session["attentive"] = _heartbeat_is_fresh(
+        str(session.get("last_heartbeat_at") or ""), now_dt)
 
 
 # ---------------------------------------------------------------------------
