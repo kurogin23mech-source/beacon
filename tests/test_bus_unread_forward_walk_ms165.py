@@ -62,15 +62,23 @@ class TestServerForwardWalk:
 
     def test_unread_handler_walks_forward_in_batches(self):
         src = _routers()
-        # The handler must loop over list_bus_events (paging by scan_since),
-        # not a single fetch. Pin the loop + the cap guard together.
-        assert "while scanned < _UNREAD_SCAN_CAP" in src, (
-            "list_unread_bus_events must page forward under the scan cap, "
-            "not return one over-fetch window and give up (the deadlock)."
+        # The paging walk lives in a testable helper (not inline in the HTTP
+        # handler); the handler must delegate to it. Pin the helper + the
+        # forward-progress cursor advance + the handler's call site together.
+        assert "def _walk_unread_events(" in src, (
+            "The forward-walk must be a standalone helper so the paging seam is "
+            "unit-testable independently of HTTP/auth/redaction."
+        )
+        assert "while scanned < scan_cap" in src, (
+            "The walk must page forward under the scan cap, not return one "
+            "over-fetch window and give up (the deadlock)."
         )
         assert "scan_since = last_created" in src, (
             "The walk must advance its paging cursor by the batch's last "
             "created_at to make forward progress."
+        )
+        assert re.search(r"filtered,\s*frontier\s*=\s*_walk_unread_events\(", src), (
+            "list_unread_bus_events must delegate the walk to _walk_unread_events."
         )
 
     def test_unread_handler_emits_frontier_header(self):
@@ -90,11 +98,17 @@ class TestClientDeadlockBreak:
             "frontier header (plain apiGet drops headers)."
         )
 
-    def test_pollonce_reads_frontier_header(self):
+    def test_frontier_header_name_is_a_named_constant(self):
         src = _bus()
-        assert "x-bus-unread-frontier" in src, (
-            "pollOnce must read the X-Bus-Unread-Frontier response header "
-            "(lower-cased for the Headers.get contract)."
+        # SSOT: the header name must live as a named constant (mirroring the
+        # server's _UNREAD_FRONTIER_HEADER), not a bare literal at the read site,
+        # so a rename is a one-line change and greppable across both sides.
+        assert re.search(
+            r"const\s+BUS_UNREAD_FRONTIER_HEADER\s*=\s*'x-bus-unread-frontier'", src
+        ), "The frontier header name must be a named client-side constant."
+        assert "headers.get(BUS_UNREAD_FRONTIER_HEADER)" in src, (
+            "pollOnce must read the frontier header via the constant, not a "
+            "bare string literal (avoids a silent client/server name drift)."
         )
 
     def test_pollonce_advances_watermark_forward_only_on_empty(self):

@@ -759,6 +759,59 @@ _UNREAD_SCAN_CAP = int(os.environ.get("BEACON_BUS_UNREAD_SCAN_CAP", "2000") or "
 _UNREAD_FRONTIER_HEADER = "X-Bus-Unread-Frontier"
 
 
+def _walk_unread_events(list_events, addressed, *, project_id, since, channel,
+                        raw_limit, limit, scan_cap=_UNREAD_SCAN_CAP):
+    """Forward-walk the bus event stream collecting events addressed to a
+    recipient, returning ``(collected, frontier)``.
+
+    Split out of ``list_unread_bus_events`` (ms-165 e-5964) so the paging seam
+    is independently testable: this is a pure function over its two injected
+    seams — ``list_events(project_id, since, channel, limit) -> [event]`` (the
+    store query) and ``addressed(event) -> bool`` (the per-recipient filter) —
+    with no HTTP / auth / redaction concerns. The handler owns those; this owns
+    only "walk forward until we have ``limit`` addressed events or the bounded
+    scan is exhausted".
+
+      * ``collected`` — up to ``limit`` events for which ``addressed`` is True,
+        oldest-first.
+      * ``frontier``  — the greatest created_at fully scanned. The caller reports
+        it so a client can skip a barren region even on an empty ``collected``.
+
+    Each store round-trip reads at most ``raw_limit`` events (the 2026-08-20 OOM
+    fix's per-request memory bound); ``scan_cap`` bounds the whole walk.
+    """
+    collected: list = []
+    scan_since = since
+    frontier = since
+    scanned = 0
+    while scanned < scan_cap:
+        batch = list_events(project_id, since=scan_since, channel=channel,
+                            limit=raw_limit)
+        if not batch:
+            break
+        scanned += len(batch)
+        for e in batch:
+            created = e.get("created_at", "")
+            if created and created > frontier:
+                frontier = created
+            if addressed(e):
+                collected.append(e)
+        if limit and len(collected) >= limit:
+            break
+        last_created = batch[-1].get("created_at", "")
+        if not last_created or last_created == scan_since:
+            # No forward progress possible (a full batch shares one created_at).
+            # Stop rather than loop forever; the next poll resumes from the same
+            # point. Rare (microsecond-precision ties across >raw_limit events).
+            break
+        scan_since = last_created
+        if len(batch) < raw_limit:
+            break  # store stream exhausted
+    if limit:
+        collected = collected[:limit]
+    return collected, frontier
+
+
 # ---------------------------------------------------------------------------
 # Bus/dm gate — module-level helpers (verbatim from app.py)
 # ---------------------------------------------------------------------------
@@ -3971,39 +4024,16 @@ def make_bus_delivery_router(
         # (= 自分宛の user-scoped DM は自 poll で必ず届く、 他人宛の user-scoped
         # DM は他人の polling で拾わせる)。
         caller_uid = _caller_uid(user)
-        # ms-165 (e-5964): forward-walk. ``frontier`` = the greatest created_at
-        # this request has fully scanned (so the client may skip ahead past a
-        # region proven to hold nothing for it); ``scan_since`` pages the store.
-        filtered: list = []
-        scan_since = since
-        frontier = since
-        scanned = 0
-        while scanned < _UNREAD_SCAN_CAP:
-            batch = db.list_bus_events(
-                project_id, since=scan_since, channel=channel, limit=raw_limit,
-            )
-            if not batch:
-                break
-            scanned += len(batch)
-            for e in batch:
-                created = e.get("created_at", "")
-                if created and created > frontier:
-                    frontier = created
-                if _bus_event_addressed_to(e, recipient_id, caller_uid):
-                    filtered.append(e)
-            if limit and len(filtered) >= limit:
-                break
-            last_created = batch[-1].get("created_at", "")
-            if not last_created or last_created == scan_since:
-                # No forward progress possible (a full batch shares one
-                # created_at). Stop rather than loop forever; the next poll
-                # resumes from the same point. Rare (microsecond-precision ties).
-                break
-            scan_since = last_created
-            if len(batch) < raw_limit:
-                break  # store stream exhausted
-        if limit:
-            filtered = filtered[:limit]
+        # ms-165 (e-5964): forward-walk the store (bounded) collecting the
+        # recipient's addressed events, tracking the greatest created_at scanned
+        # as ``frontier``. Split into _walk_unread_events so the paging seam is
+        # unit-testable independently of HTTP/auth/redaction.
+        filtered, frontier = _walk_unread_events(
+            db.list_bus_events,
+            lambda e: _bus_event_addressed_to(e, recipient_id, caller_uid),
+            project_id=project_id, since=since, channel=channel,
+            raw_limit=raw_limit, limit=limit,
+        )
         # ms-93 / e-2275: redact DM payloads the caller isn't a party to. The
         # recipient_id query param is the session asking for its inbox, but the
         # *caller* is the authenticated user behind that request. In dogfood,

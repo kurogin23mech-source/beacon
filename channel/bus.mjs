@@ -697,10 +697,18 @@ async function apiGet(p) {
   return r.json()
 }
 
+// ms-165 (e-5964): the /bus/unread scan-frontier response header. Named here as
+// the single client-side source of truth (the server names it
+// `_UNREAD_FRONTIER_HEADER` in routers_projects.py) so a rename is a one-line
+// change on each side, and the structural pin test checks THIS constant rather
+// than a bare literal. Lower-cased for the Fetch `Headers.get` contract (which
+// is case-insensitive, but we match the stored key form).
+const BUS_UNREAD_FRONTIER_HEADER = 'x-bus-unread-frontier'
+
 // ms-165 (e-5964): like apiGet but also surfaces response headers. /bus/unread
-// returns an X-Bus-Unread-Frontier header the poll loop uses to advance its
-// watermark past a barren scanned region even when the JSON body is empty —
-// the deadlock break for a session wedged behind a high-volume other recipient.
+// returns the frontier header the poll loop uses to advance its watermark past
+// a barren scanned region even when the JSON body is empty — the deadlock break
+// for a session wedged behind a high-volume other recipient.
 async function apiGetWithHeaders(p) {
   const r = await apiFetch(`${API_URL}${p}`, {
     headers: { Authorization: `Bearer ${loadToken()}` },
@@ -1280,7 +1288,7 @@ if (!PROJECT_ID || !SESSION_ID) {
     // events' created_at below, which never skips a tie-boundary event the
     // server's `limit` truncation withheld.
     const frontier = headers && typeof headers.get === 'function'
-      ? (headers.get('x-bus-unread-frontier') || '')
+      ? (headers.get(BUS_UNREAD_FRONTIER_HEADER) || '')
       : ''
     if (!Array.isArray(events) || events.length === 0) {
       // ms-140: never let a poll return silently. Distinguish two 0-event cases

@@ -583,6 +583,85 @@ def test_unread_empty_scan_reports_frontier_to_break_deadlock():
     assert resp.headers.get("X-Bus-Unread-Frontier") == "2026-01-01T00:00:19.000000Z"
 
 
+# ---------------------------------------------------------------------------
+# _walk_unread_events unit tests (e-5964) — the paging seam in isolation, so
+# boundary conditions (cap / tie / exhaustion / past-window) are verified at the
+# behaviour level, not just source-grepped. Split out of the HTTP handler for
+# exactly this testability (maintainability review PR#701).
+# ---------------------------------------------------------------------------
+import routers_projects  # noqa: E402  (server/ is on sys.path via app import)
+
+
+def _fake_store(events):
+    """Return a list_events(project_id, since, channel, limit) over an ordered
+    in-memory list, mirroring the store contract: created_at ASC, since strict
+    >, channel ==, limit cap."""
+    ordered = sorted(events, key=lambda e: e.get("created_at", ""))
+
+    def list_events(project_id, since="", channel="", limit=100):
+        out = ordered
+        if since:
+            out = [e for e in out if e.get("created_at", "") > since]
+        if channel:
+            out = [e for e in out if e.get("channel") == channel]
+        return [dict(e) for e in (out[:limit] if limit else out)]
+
+    return list_events
+
+
+def _ev(i, rcpt, ca=None):
+    return {"event_id": f"w-{i:04d}", "created_at": ca or f"2026-03-01T00:00:{i:02d}.000000Z",
+            "payload": {"recipient": rcpt}}
+
+
+def test_walk_reaches_addressed_beyond_the_first_batch():
+    # 20 for R_OTHER then 1 for ME; raw_limit=8 → ME sits past two full batches.
+    events = [_ev(i, "R_OTHER") for i in range(20)] + [
+        {"event_id": "w-me", "created_at": "2026-03-02T00:00:00.000000Z",
+         "payload": {"recipient": "ME"}}]
+    collected, frontier = routers_projects._walk_unread_events(
+        _fake_store(events), lambda e: e["payload"]["recipient"] == "ME",
+        project_id="p", since="", channel="", raw_limit=8, limit=2)
+    assert [e["event_id"] for e in collected] == ["w-me"]
+    assert frontier == "2026-03-02T00:00:00.000000Z"
+
+
+def test_walk_empty_reports_max_scanned_frontier():
+    events = [_ev(i, "R_OTHER") for i in range(20)]
+    collected, frontier = routers_projects._walk_unread_events(
+        _fake_store(events), lambda e: e["payload"]["recipient"] == "ME",
+        project_id="p", since="", channel="", raw_limit=8, limit=2)
+    assert collected == []
+    assert frontier == "2026-03-01T00:00:19.000000Z"
+
+
+def test_walk_scan_cap_bounds_the_walk_and_reports_partial_frontier():
+    # 100 other events; cap=16 (two batches of 8) stops before the end. No
+    # addressed event, so collected empty but frontier only reaches the cap.
+    events = [_ev(i, "R_OTHER", ca=f"2026-03-01T00:{i // 60:02d}:{i % 60:02d}.000000Z")
+              for i in range(100)]
+    collected, frontier = routers_projects._walk_unread_events(
+        _fake_store(events), lambda e: False,
+        project_id="p", since="", channel="", raw_limit=8, limit=2, scan_cap=16)
+    assert collected == []
+    # Only the first 16 (two batches) were scanned — frontier is the 16th, far
+    # short of the 100th. The client resumes from here next poll (amortised).
+    assert frontier == "2026-03-01T00:00:15.000000Z"
+
+
+def test_walk_tie_boundary_halts_without_infinite_loop():
+    # A full batch (raw_limit=4) all sharing one created_at cannot be paged past
+    # with a created_at cursor; the walk must halt, not spin forever.
+    same = "2026-03-01T00:00:00.000000Z"
+    events = [{"event_id": f"t-{i}", "created_at": same,
+               "payload": {"recipient": "R_OTHER"}} for i in range(4)]
+    collected, frontier = routers_projects._walk_unread_events(
+        _fake_store(events), lambda e: False,
+        project_id="p", since="", channel="", raw_limit=4, limit=2)
+    assert collected == []
+    assert frontier == same  # scanned the tie block, then halted
+
+
 def test_advance_then_unread_only_returns_newer_events():
     """After advancing the cursor past event 2, /unread must return only event 3.
     Without this, the cursor wouldn't satisfy 'each recipient sees each event
