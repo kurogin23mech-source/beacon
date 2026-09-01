@@ -2737,42 +2737,39 @@ def _pr_open_reviewed_marker_path(pr_number: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# ms-166 e-5978: best-effort completion-verdict decision write (single source
-# of the failure contract, used by both completion writers so the handling
-# never drifts between them).
+# ms-166 e-5978/e-5971: best-effort decision-arm write (single source of the
+# failure contract, used by EVERY decision writer — completion verdicts,
+# review adjudications, … — so the handling never drifts between them).
 # ---------------------------------------------------------------------------
 
 @contextlib.contextmanager
-def best_effort_completion_decision(target_id: str, verdict: str):
-    """完遂 (目的達成) verdict の decision write を best-effort で包む単一真実源。
+def best_effort_decision_write(what: str, *, recovery_hint: str = ""):
+    """decision-arm への書き込みを best-effort で包む単一真実源 (ms-166 e-5978/e-5971)。
 
-    完遂の監査記録の書き込みが失敗しても完遂フロー自体は壊さない。ただし失敗を
-    **silent にしない** — これが e-5978 の核心 (旧 ``except BaseException: pass`` は
-    endpoint 障害を無言で飲み、記録が消えても誰も気づけなかった)。契約:
+    decision 書き込みは監査の副作用: 呼び出し元のフロー (完遂・採否 等) を絶対に
+    壊さない。ただし失敗を **silent にしない** — これが核心 (旧 ``except
+    BaseException: pass`` は endpoint 障害を無言で飲み、記録が消えても誰も気づけ
+    なかった)。契約:
 
     - ``Exception``: WARNING で可視化して飲む (通常の write 失敗)。
     - ``SystemExit``: WARNING で可視化して飲む (``_get_api_client`` が設定エラーで
-      ``sys.exit`` しうるが、完遂は既に確定済なので中断してはならない)。原因は
-      断定せず例外そのものを載せる。
+      ``sys.exit`` しうるが、呼び出し元の判断は既に確定済)。原因は断定せず例外を載せる。
     - ``KeyboardInterrupt``: 伝播する (利用者の中断 — ``BaseException`` は catch
       しない)。
 
-    どちらの WARNING も「完遂自体は確定済 — 再 approve するな」を添え、監査記録の
-    欠落に気づいた読み手が二重遷移で誤リカバリしないようにする (AX 原則3 = エラーは
-    回復経路を示す)。使い方::
+    ``what`` = 何の decision かの短いラベル (log に出る、例
+    ``"completion-verdict for target=ms-9 verdict=done"``)。``recovery_hint`` が
+    あれば WARNING 末尾に添える (AX 原則3 = エラーは次の一手を示す)。使い方::
 
-        with best_effort_completion_decision(target_id, verdict):
+        with best_effort_decision_write(f"review-adjudication for PR #{pr}"):
             client.record_decision(project_id, {...})
     """
+    hint = f" ({recovery_hint})" if recovery_hint else ""
     try:
         yield
     except Exception as exc:
         logging.getLogger(__name__).warning(
-            "completion-verdict decision write failed for target=%s verdict=%s: %s "
-            "(audit record NOT persisted; the completion itself is committed — "
-            "do not re-approve)", target_id, verdict, exc)
+            "decision write failed for %s: %s%s", what, exc, hint)
     except SystemExit as exc:
         logging.getLogger(__name__).warning(
-            "completion-verdict decision write skipped for target=%s verdict=%s: %s "
-            "(the completion itself is committed — do not re-approve)",
-            target_id, verdict, exc)
+            "decision write skipped for %s: %s%s", what, exc, hint)

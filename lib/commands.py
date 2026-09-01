@@ -3456,22 +3456,111 @@ def cmd_review_skip():
         sys.exit(3)
 
 
+def _record_review_adjudication_decision(review_type: str, pr_number: str,
+                                         verdict: str, adjudications: list) -> None:
+    """ms-166 e-5971 — weld the finding-level review adjudication onto the decision
+    arm at the SAME choke point that clears the review gate (``beacon review done``),
+    so recording a review structurally captures WHAT was decided about its findings —
+    not just THAT it ran. No AI-volition ``beacon decision record`` in between: the
+    call that unblocks the merge is the call that records the adjudication.
+
+    ``verdict`` = the overall disposition summary (what); ``adjudications`` = list of
+    ``{finding, disposition (accepted|declined|deferred), rationale}`` (why). Nothing
+    is recorded when both are empty (a review with no findings, or a caller that did
+    not pass an adjudication). ``decided_by`` follows the session kind — an AI session
+    adjudicating independent-judge findings is the most audit-critical ``autonomous-AI``,
+    a human terminal decided directly — mirroring ``cmd_pr._decided_by_for_review``.
+    cloud-only; best-effort but LOGGED on failure so it never breaks ``review done``."""
+    if not verdict and not adjudications:
+        return
+    from commands_shared import (best_effort_decision_write, _is_cloud_mode,
+                                 _get_api_client, _session_kind_is_human)
+    with best_effort_decision_write(
+            f"review-adjudication for PR #{pr_number} ({review_type})"):
+        if not _is_cloud_mode():
+            return
+        client, config = _get_api_client()
+        project_id = config.get("project_id", "")
+        if not project_id:
+            return
+        # rationale (why) = 各 finding の採否 + 理由。
+        parts = []
+        for a in (adjudications or []):
+            if not isinstance(a, dict):
+                continue
+            disp = (a.get("disposition") or "").strip()
+            finding = (a.get("finding") or "").strip()
+            why = (a.get("rationale") or "").strip()
+            seg = f"{disp}[{finding}]" if finding else disp
+            if why:
+                seg = f"{seg}: {why}"
+            if seg:
+                parts.append(seg)
+        rationale = " / ".join(parts) or None
+        # what (decision) = 明示 verdict、無ければ採否件数から合成。
+        if verdict:
+            decision = verdict
+        else:
+            n_acc = sum(1 for a in adjudications if isinstance(a, dict)
+                        and (a.get("disposition") or "").startswith("accept"))
+            n_dec = sum(1 for a in adjudications if isinstance(a, dict)
+                        and (a.get("disposition") or "").startswith("declin"))
+            decision = f"{review_type}: {n_acc} accepted / {n_dec} declined"
+        decided_by = "human-delegated" if _session_kind_is_human() else "autonomous-AI"
+        client.record_decision(project_id, {
+            "kind": "review-adjudication",
+            "decision": decision,
+            "rationale": rationale,
+            "decided_by": decided_by,
+            "evidence": [f"review:{review_type}"],
+            "related": {"pr_number": pr_number, "review_type": review_type},
+        })
+
+
+def _adjudications_from_env() -> list:
+    """Parse ``BEACON_REVIEW_ADJUDICATIONS`` (a JSON list) — ms-166 e-5971.
+
+    Best-effort: a malformed value warns and yields ``[]`` (the gate still clears;
+    only the adjudication decision is skipped). A non-list JSON is treated as empty."""
+    raw = os.environ.get("BEACON_REVIEW_ADJUDICATIONS", "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        print("  ⚠ --adjudications の JSON 解析に失敗しました "
+              "(review gate は解消しますが adjudication decision は記録しません)",
+              file=sys.stderr)
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 def cmd_review_done():
     """Mark an independent review as RUN for a PR — clears its review-due trigger
     so beacon pr approve/merge no longer blocks on it (ms-119 e-4060).
 
     beacon review done --type <ax|maintainability|...> --pr <N>
+        [--verdict <text>] [--adjudications <json-list>]
 
     Called by /beacon-review-run after a judge produces its verdict, so running
     the review is what unblocks the PR (the loop closes on the review, not on the
-    approve). Idempotent: clearing an absent trigger is a no-op."""
+    approve). Idempotent: clearing an absent trigger is a no-op.
+
+    ms-166 e-5971: ``--verdict`` / ``--adjudications`` weld the finding-level採否
+    (what was accepted/declined and why) onto the decision arm here, at the same
+    choke point that clears the gate — so the adjudication is captured structurally,
+    not by a separate AI-volition ``beacon decision record`` that is easy to skip."""
     review_type = os.environ.get("BEACON_REVIEW_TYPE", "").strip()
     pr_number = os.environ.get("BEACON_PR_NUMBER", "").strip()
     if not review_type or not pr_number:
         print("Usage: beacon review done --type <ax|maintainability|...> "
-              "--pr <N>", file=sys.stderr)
+              "--pr <N> [--verdict <text>] [--adjudications <json>]", file=sys.stderr)
         sys.exit(1)
     _clear_review_due_for_pr(review_type, pr_number)
+    _record_review_adjudication_decision(
+        review_type, pr_number,
+        os.environ.get("BEACON_REVIEW_VERDICT", "").strip(),
+        _adjudications_from_env())
     remaining = _pending_review_types_for_pr(pr_number)
     print(f"レビュー実施を記録: {review_type} / PR #{pr_number} (review-due 解消)")
     if remaining:
