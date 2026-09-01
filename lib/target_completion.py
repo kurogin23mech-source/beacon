@@ -31,16 +31,20 @@ import deliverable_capture as _dc
 def _record_completion_decision(target: dict, verdict: str, reason: str) -> None:
     """Record a 完遂 (目的達成) verdict for ``target`` on the decision arm — best-effort,
     cloud-only (ms-163 e-5880). ``verdict`` is what the completion settled to (the terminal
-    phase / status / "done"); ``reason`` is the why. Silently no-ops in local mode or on any
-    error so it never breaks a completion flow. decided_by follows the human/AI session
-    signal (a completion verdict is human-owned; an AI-assisted session is
-    AI-proposed-human-chose), matching ``cmd_target._decided_by_for_gate``."""
-    try:
-        from commands_shared import (_is_cloud_mode, _get_api_client,
-                                     _session_kind_is_human)
+    phase / status / "done"); ``reason`` is the why. No-ops in local mode. decided_by follows
+    the human/AI session signal (a completion verdict is human-owned; an AI-assisted session
+    is AI-proposed-human-chose), matching ``cmd_target._decided_by_for_gate``.
+
+    ms-166 e-5978: the write-failure contract (a failed audit write is LOGGED, not silently
+    swallowed, and never breaks the completion flow) is the single source
+    ``commands_shared.best_effort_completion_decision`` — shared with the milestone/target
+    approve path so the two never drift."""
+    from commands_shared import (best_effort_completion_decision, _is_cloud_mode,
+                                 _get_api_client, _session_kind_is_human)
+    tid = ((target or {}).get("id") or "").strip()
+    with best_effort_completion_decision(tid or "?", verdict):
         if not _is_cloud_mode():
             return
-        tid = ((target or {}).get("id") or "").strip()
         if not tid:
             return
         client, config = _get_api_client()
@@ -57,8 +61,6 @@ def _record_completion_decision(target: dict, verdict: str, reason: str) -> None
             "evidence": [],
             "related": {"target_id": tid},
         })
-    except BaseException:
-        pass
 
 
 def on_target_completion(data: dict, target: dict, *, verdict: str = "done",

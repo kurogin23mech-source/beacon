@@ -252,10 +252,14 @@ def _record_completion_verdict_decision(target_id, verdict, entry, approval_rati
     ms-154 philosophy review found missing, and it captures observing / closed
     verdicts too (not just done — AC3).
 
-    best-effort, cloud-only: never break the approve flow.
+    best-effort, cloud-only: never break the approve flow. The write-failure
+    contract (log-not-swallow, ms-166 e-5978) is the single source
+    ``commands_shared.best_effort_completion_decision`` — shared with the generic
+    completion seam so the two never drift.
     """
-    try:
-        from commands_shared import _is_cloud_mode, _get_api_client
+    from commands_shared import (best_effort_completion_decision, _is_cloud_mode,
+                                 _get_api_client)
+    with best_effort_completion_decision(target_id, verdict):
         if not _is_cloud_mode():
             return
         meta = entry.get("meta") or {}
@@ -294,8 +298,6 @@ def _record_completion_verdict_decision(target_id, verdict, entry, approval_rati
             "evidence": evidence,
             "related": {"target_id": target_id},
         })
-    except BaseException:
-        pass
 
 
 def cmd_target_approve():

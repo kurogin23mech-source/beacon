@@ -2376,27 +2376,27 @@ def append_decision_event(project_id: str, data: dict) -> str:
     return decision_id
 
 
-def list_decision_events(project_id: str, *, limit: int = 100,
+def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
                          since: str = "") -> list[dict]:
-    """Return ``projects/{pid}/decision_events`` ordered by ``created_at`` asc.
+    """Fetch ``projects/{pid}/decision_events`` and window them (ms-166 e-5970).
 
-    ``since`` is an optional ISO8601 lower bound (= created_at > since only).
-    ``limit`` caps the row count so the read stays bounded.
+    This backend only FETCHES the rows; the read-window semantics (kind filter →
+    since filter → newest ``limit``) live in the single source
+    ``decision_event.window_decision_events`` so the three store backends can
+    never drift from each other. See that helper for the full rationale (why the
+    newest window, not the oldest — an oldest-``limit`` slice hid every recent
+    decision once the append-only backlog exceeded ``limit``).
     """
+    from decision_event import window_decision_events
     col = (
         get_db()
         .collection(COLLECTION)
         .document(project_id)
         .collection(DECISION_EVENTS_SUBCOLLECTION)
     )
-    out: list[dict] = []
+    rows: list[dict] = []
     for d in col.stream():
         rec = d.to_dict() or {}
-        if since and (rec.get("created_at") or "") <= since:
-            continue
         rec["decision_id"] = d.id
-        out.append(rec)
-    out.sort(key=lambda r: (r.get("created_at", ""), r.get("decision_id", "")))
-    if limit and limit > 0:
-        out = out[:limit]
-    return out
+        rows.append(rec)
+    return window_decision_events(rows, kind=kind, limit=limit, since=since)

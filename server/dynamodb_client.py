@@ -1914,12 +1914,11 @@ def append_decision_event(project_id: str, data: dict) -> str:
     return decision_id
 
 
-def list_decision_events(project_id: str, *, limit: int = 100,
+def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
                          since: str = "") -> list[dict]:
-    rows = list(_DECISION_EVENTS_FALLBACK.get(project_id) or [])
-    if since:
-        rows = [r for r in rows if (r.get("created_at") or "") > since]
-    rows.sort(key=lambda r: (r.get("created_at", ""), r.get("decision_id", "")))
-    if limit and limit > 0:
-        rows = rows[:limit]
-    return rows
+    # ms-166 e-5970: fetch-only; the read-window semantics live in the single
+    # source decision_event.window_decision_events (shared by all 3 backends).
+    from decision_event import window_decision_events
+    return window_decision_events(
+        _DECISION_EVENTS_FALLBACK.get(project_id) or [],
+        kind=kind, limit=limit, since=since)

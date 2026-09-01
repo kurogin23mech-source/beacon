@@ -2651,16 +2651,17 @@ def append_decision_event(project_id: str, data: dict) -> str:
     return decision_id
 
 
-def list_decision_events(project_id: str, *, limit: int = 100,
+def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
                          since: str = "") -> list[dict]:
-    """decision_events を created_at 昇順で返す (= 1 本のストリームとして読む)。
+    """decision_events を取得して窓を掛けて返す (ms-166 e-5970).
 
-    since: ISO8601 の下限 (= created_at > since のみ)。limit: 返却上限。
+    この backend は「行の取得」だけを担い、read 窓のセマンティクス (kind 絞り →
+    since 絞り → 直近 ``limit`` 件) は単一真実源
+    ``decision_event.window_decision_events`` に集約している (3 backend で drift
+    しないため)。窓の根拠 (なぜ最新側か = 最古 ``limit`` 件だと backlog 超過分の
+    新しい判断記録が不可視になる) はその helper を参照。
     """
-    rows = _query("decision_events", project_id)
-    if since:
-        rows = [r for r in rows if (r.get("created_at") or "") > since]
-    rows.sort(key=lambda r: (r.get("created_at", ""), r.get("decision_id", "")))
-    if limit and limit > 0:
-        rows = rows[:limit]
-    return rows
+    from decision_event import window_decision_events
+    return window_decision_events(
+        _query("decision_events", project_id),
+        kind=kind, limit=limit, since=since)
