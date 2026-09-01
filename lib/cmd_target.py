@@ -254,14 +254,12 @@ def _record_completion_verdict_decision(target_id, verdict, entry, approval_rati
 
     best-effort, cloud-only: never break the approve flow. The write-failure
     contract (log-not-swallow, ms-166 e-5978) is the single source
-    ``commands_shared.best_effort_decision_write`` — shared with the generic
+    ``commands_shared.best_effort_completion_decision`` — shared with the generic
     completion seam so the two never drift.
     """
-    from commands_shared import (best_effort_decision_write, _is_cloud_mode,
+    from commands_shared import (best_effort_completion_decision, _is_cloud_mode,
                                  _get_api_client)
-    with best_effort_decision_write(
-            f"completion-verdict for target={target_id} verdict={verdict}",
-            recovery_hint="the completion itself is committed — do not re-approve"):
+    with best_effort_completion_decision(target_id, verdict):
         if not _is_cloud_mode():
             return
         meta = entry.get("meta") or {}

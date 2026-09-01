@@ -37,14 +37,12 @@ def _record_completion_decision(target: dict, verdict: str, reason: str) -> None
 
     ms-166 e-5978: the write-failure contract (a failed audit write is LOGGED, not silently
     swallowed, and never breaks the completion flow) is the single source
-    ``commands_shared.best_effort_decision_write`` — shared with the milestone/target
+    ``commands_shared.best_effort_completion_decision`` — shared with the milestone/target
     approve path so the two never drift."""
-    from commands_shared import (best_effort_decision_write, _is_cloud_mode,
+    from commands_shared import (best_effort_completion_decision, _is_cloud_mode,
                                  _get_api_client, _session_kind_is_human)
     tid = ((target or {}).get("id") or "").strip()
-    with best_effort_decision_write(
-            f"completion-verdict for target={tid or '?'} verdict={verdict}",
-            recovery_hint="the completion itself is committed — do not re-approve"):
+    with best_effort_completion_decision(tid, verdict):
         if not _is_cloud_mode():
             return
         if not tid:

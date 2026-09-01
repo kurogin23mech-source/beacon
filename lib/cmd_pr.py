@@ -552,7 +552,12 @@ def _decided_by_for_review() -> str:
     owner (the docstring's original intent); a human terminal session decided it
     directly. Mirrors ``cmd_target._decided_by_for_gate`` for cross-capability
     consistency (its ``human-delegated`` gloss-vs-usage tension is a known
-    follow-up, e-5670 — NOT re-litigated here)."""
+    follow-up, e-5670 — NOT re-litigated here).
+
+    ms-166 e-5971 (保守性 M1): this is the single source for the 採否 decided_by
+    mapping — ``commands._record_review_adjudication_decision`` (review-adjudication)
+    imports and calls THIS function rather than re-implementing it, so the PR-verdict
+    採否 and the finding-level 採否 cannot drift."""
     return "human-delegated" if _session_kind_is_human() else "autonomous-AI"
 
 

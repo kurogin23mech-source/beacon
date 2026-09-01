@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 
 import commands          # noqa: E402
 import commands_shared   # noqa: E402
+import cmd_pr            # noqa: E402
 
 
 class _FakeClient:
@@ -36,7 +37,8 @@ def _cloud(monkeypatch, fake, *, human=False):
     monkeypatch.setattr(commands_shared, "_is_cloud_mode", lambda: True)
     monkeypatch.setattr(commands_shared, "_get_api_client",
                         lambda: (fake, {"project_id": "p1"}))
-    monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: human)
+    # decided_by は cmd_pr._decided_by_for_review (単一真実源) 経由 = cmd_pr の binding を読む。
+    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: human)
 
 
 # --- decision payload -------------------------------------------------------
@@ -52,7 +54,7 @@ def test_採否をdecisionに溶接する(monkeypatch):
     assert len(fake.posted) == 1
     _pid, rec = fake.posted[0]
     assert rec["kind"] == "review-adjudication"
-    assert rec["decision"] == "ax: 1 accepted / 1 declined"   # verdict 無 → 件数合成
+    assert rec["decision"] == "ax: 1 accepted / 1 declined / 0 deferred"  # summary 無 → 全 disposition 合成
     assert "accepted[M1]: parity guard 拡張" in rec["rationale"]
     assert "declined[AX-2]: open-vocab 設計に反する" in rec["rationale"]
     assert rec["decided_by"] == "autonomous-AI"               # AI session
@@ -60,7 +62,7 @@ def test_採否をdecisionに溶接する(monkeypatch):
     assert rec["related"] == {"pr_number": "702", "review_type": "ax"}
 
 
-def test_明示verdictがdecisionになる(monkeypatch):
+def test_明示summaryがdecisionになる(monkeypatch):
     fake = _FakeClient()
     _cloud(monkeypatch, fake, human=True)
     commands._record_review_adjudication_decision(
@@ -68,6 +70,29 @@ def test_明示verdictがdecisionになる(monkeypatch):
     rec = fake.posted[0][1]
     assert rec["decision"] == "5件採用・1件却下"
     assert rec["decided_by"] == "human-delegated"             # human session
+
+
+def test_deferredも件数に入る(monkeypatch):
+    # AX/保守性 review: deferred が合成 verdict から silent に落ちる穴を塞いだ。
+    fake = _FakeClient()
+    _cloud(monkeypatch, fake)
+    adj = [{"finding": "A", "disposition": "deferred"},
+           {"finding": "B", "disposition": "deferred"},
+           {"finding": "C", "disposition": "accepted"}]
+    commands._record_review_adjudication_decision("ax", "702", "", adj)
+    assert fake.posted[0][1]["decision"] == "ax: 1 accepted / 0 declined / 2 deferred"
+
+
+def test_未知dispositionはwarnして件数に入れない(monkeypatch, capsys):
+    fake = _FakeClient()
+    _cloud(monkeypatch, fake)
+    adj = [{"finding": "A", "disposition": "rejected"}]   # typo/enum外
+    commands._record_review_adjudication_decision("ax", "702", "", adj)
+    err = capsys.readouterr().err
+    assert "未知の disposition 'rejected'" in err
+    rec = fake.posted[0][1]
+    assert rec["decision"] == "ax: 0 accepted / 0 declined / 0 deferred"
+    assert "rejected[A]" in rec["rationale"]              # rationale には残す
 
 
 def test_verdictもadjudicationも無ければ書かない(monkeypatch):
@@ -114,9 +139,16 @@ def test_adjudications_env_malformed_は空(monkeypatch, capsys):
     assert "JSON 解析に失敗" in capsys.readouterr().err   # gate は解消・記録だけ skip
 
 
-def test_adjudications_env_非list_は空(monkeypatch):
-    monkeypatch.setenv("BEACON_REVIEW_ADJUDICATIONS", '{"finding":"x"}')
+def test_adjudications_env_単一objectを昇格する(monkeypatch):
+    # AX review: 採否 1 件を素直に単一 object で渡した時、silent に空扱いせず [obj] に昇格。
+    monkeypatch.setenv("BEACON_REVIEW_ADJUDICATIONS", '{"finding":"x","disposition":"accepted"}')
+    assert commands._adjudications_from_env() == [{"finding": "x", "disposition": "accepted"}]
+
+
+def test_adjudications_env_非list非dictはwarnして空(monkeypatch, capsys):
+    monkeypatch.setenv("BEACON_REVIEW_ADJUDICATIONS", '"just a string"')
     assert commands._adjudications_from_env() == []
+    assert "list または object" in capsys.readouterr().err
 
 
 def test_adjudications_env_未設定_は空(monkeypatch):

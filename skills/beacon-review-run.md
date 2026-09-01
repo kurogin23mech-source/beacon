@@ -338,7 +338,7 @@ PR レビュー (`/review` / `/code-review`) の中で「この変更の AX は�
 # 叩かせない — gate を解消するこの call が採否を記録する call になる)。Step 5 で
 # 判断した「今直す / 記録して後で / 却下」がそのまま各 finding の disposition。
 beacon review done --type <ax|maintainability> --pr <n> \
-  --verdict "<採否の総括 1 行 (例: ax 4件中3件採用・1件却下)>" \
+  --adjudication-summary "<採否の総括 1 行 (例: ax 4件中3件採用・1件却下)>" \
   --adjudications '[{"finding":"<id/要約>","disposition":"accepted|declined|deferred","rationale":"<なぜ>"}]'
 ```
 

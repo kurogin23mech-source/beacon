@@ -89,6 +89,17 @@ _guard_flag() {
     esac
 }
 
+# ms-166 e-5971 (AX review): a value-taking flag placed last with no value makes the
+# `shift 2` fail under `set -euo pipefail` → exit 1 with NO output (unhelpful). Call
+# this BEFORE `shift 2` so a missing value fails loud with a recovery hint instead.
+_need_flag_value() {
+    # _need_flag_value <remaining-argc "$#"> <flag "$1">
+    [ "$1" -ge 2 ] || {
+        echo "Error: フラグ '$2' に値がありません (使い方: $2 <value>)。" >&2
+        exit 1
+    }
+}
+
 # ms-120 e-3907: `<entity> status <id> <state>` writes state, which reverses
 # the polarity of the read-only `beacon status`. The canonical path is a named
 # intent verb (activate / close / start / observe / done) — the verb names what
@@ -387,19 +398,19 @@ case "${1:-}" in
             context)  shift 2; cmd_review_context "$@" ;;
             done)
                 shift 2
-                _rd_type="" _rd_pr="" _rd_verdict="" _rd_adj=""
+                _rd_type="" _rd_pr="" _rd_summary="" _rd_adj=""
                 while [ "$#" -gt 0 ]; do
                     case "$1" in
-                        --type)          _rd_type="${2:-}";    shift 2 ;;
-                        --pr)            _rd_pr="${2:-}";       shift 2 ;;
-                        --verdict)       _rd_verdict="${2:-}";  shift 2 ;;
-                        --adjudications) _rd_adj="${2:-}";      shift 2 ;;
+                        --type)                 _need_flag_value "$#" "$1"; _rd_type="$2";    shift 2 ;;
+                        --pr)                   _need_flag_value "$#" "$1"; _rd_pr="$2";      shift 2 ;;
+                        --adjudication-summary) _need_flag_value "$#" "$1"; _rd_summary="$2"; shift 2 ;;
+                        --adjudications)        _need_flag_value "$#" "$1"; _rd_adj="$2";     shift 2 ;;
                         -?*)    _guard_flag "$1" ;;
                         *)      shift ;;
                     esac
                 done
                 BEACON_REVIEW_TYPE="$_rd_type" BEACON_PR_NUMBER="$_rd_pr" \
-                    BEACON_REVIEW_VERDICT="$_rd_verdict" \
+                    BEACON_REVIEW_ADJUDICATION_SUMMARY="$_rd_summary" \
                     BEACON_REVIEW_ADJUDICATIONS="$_rd_adj" \
                     python3 "$COMMANDS_PY" review_done ;;
             skip)
@@ -420,7 +431,7 @@ case "${1:-}" in
                     BEACON_TARGET_ID="$_rs_target" BEACON_REASON="$_rs_reason" \
                     BEACON_JSON="$_rs_json" python3 "$COMMANDS_PY" review_skip ;;
             *)        echo "Usage: beacon review context [--batch] --type <ax|maintainability|philosophy|attainment> [--pr <n> | --diff-ref <base...head>] [--origin-doc <doc-id>] [--target <ms-XX|op-X>] [--judge-model <m>] [--mode diff]  (独立 judge 用の review-kernel bundle を出力; ms-119。--batch は節目の全 review 種別を --pr で一括出力)" >&2
-                      echo "       beacon review done --type <ax|maintainability> --pr <n> [--verdict <text>] [--adjudications <json>]  (レビュー実施を記録し approve/merge gate を解消; ms-119 e-4060。--verdict/--adjudications は findings 採否を decision arm に構造記録; ms-166 e-5971)" >&2
+                      echo "       beacon review done --type <ax|maintainability> --pr <n> [--adjudication-summary <text>] [--adjudications '[{\"finding\":..,\"disposition\":accepted|declined|deferred,\"rationale\":..}]']  (レビュー実施を記録し approve/merge gate を解消; ms-119 e-4060。--adjudication-summary/--adjudications は findings 採否を decision arm に構造記録; ms-166 e-5971)" >&2
                       echo "       beacon review skip --type <ax|maintainability|philosophy|...> (--pr <n> | --target <ms-XX|op-X>) --reason \"...\"  (人間が意図的にレビューを省く一級経路、監査に理由を残す; ms-119 e-4124)" >&2
                       echo "  注: ax/philosophy は助言 judge の bundle、attainment は目的達成の証拠を独立 judge に生成させる bundle (verdict は human: 'beacon target approve')。完了ゲートは 'beacon milestone done --review'。" >&2
                       exit 1 ;;

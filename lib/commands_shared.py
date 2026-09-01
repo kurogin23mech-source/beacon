@@ -2773,3 +2773,21 @@ def best_effort_decision_write(what: str, *, recovery_hint: str = ""):
     except SystemExit as exc:
         logging.getLogger(__name__).warning(
             "decision write skipped for %s: %s%s", what, exc, hint)
+
+
+@contextlib.contextmanager
+def best_effort_completion_decision(target_id: str, verdict: str):
+    """完遂 verdict 用の thin wrapper (ms-166 e-5978 / e-5971 保守性 M2)。
+
+    失敗契約は汎用 :func:`best_effort_decision_write` に委譲し (単一真実源)、完遂
+    固有のラベルと回復ヒント (「完遂は確定済 — 再 approve するな」) だけをここ 1 箇所
+    に持つ (旧: 2 つの完遂経路に f-string で逐語コピーしていた)。"""
+    with best_effort_decision_write(
+            f"completion-verdict for target={target_id or '?'} verdict={verdict}",
+            recovery_hint="the completion itself is committed — do not re-approve"):
+        yield
+
+
+# ms-166 e-5971: review 採否の disposition 語彙の単一真実源 (SKILL.md はこれを写す
+# 側)。合成 verdict の集計・入力検証はこの定数を経由する (旧: 散文だけ + prefix-match)。
+ADJUDICATION_DISPOSITIONS: tuple = ("accepted", "declined", "deferred")
