@@ -981,6 +981,14 @@ def build_parser() -> argparse.ArgumentParser:
     # filters; orthogonal to scope/ms/op narrowing so the user can ask
     # "show all spec docs tagged to this trek".
     p_doc_list.add_argument("--trek", dest="doc_trek", default="")
+    # ms-109 e-3754 canonical --target filter + ms-160 e-5817 root rollup —
+    # previously bash-only, so a Windows/pipx user could not filter docs by
+    # Target at all (incl. ``--target root`` for the project-wide rollup).
+    # Wired here for bash↔Python parity.
+    p_doc_list.add_argument(
+        "--target", dest="doc_target", default="",
+        help="filter docs by Target id, or 'root' for the project-wide rollup "
+             "(child-Target docs + project-level docs)")
 
     p_doc_show = doc_sub.add_parser("show", aliases=["get"], add_help=False)
     p_doc_show.add_argument("doc_id", nargs="?", default="")
@@ -1406,6 +1414,11 @@ def build_parser() -> argparse.ArgumentParser:
     project_sub = p_project.add_subparsers(dest="project_cmd", metavar="<subcmd>")
     project_sub.add_parser("archive", add_help=False)
     project_sub.add_parser("unarchive", add_help=False)
+    # ms-160 e-5816: `project dump` emits the assembled project as JSON on
+    # stdout from the source of truth (SQLite locally). Registered in argparse
+    # too — not just bash — because the Tauri desktop shells out to it on every
+    # platform (a Windows/pipx user's `beacon` is this Python entry point).
+    project_sub.add_parser("dump", add_help=False)
 
     # ---- skill install (ms-44 e-777) ----
     # `beacon skill install` is the cross-platform install path used by
@@ -3361,6 +3374,8 @@ def _handle_doc(root: Path, args: argparse.Namespace) -> int:
             # ms-75 / e-1866: --trek <trek-id> filter forwarded as
             # BEACON_TREK_ID to cmd_doc_list. Empty string = no filter.
             "BEACON_TREK_ID": getattr(args, "doc_trek", "") or "",
+            # ms-109 e-3754 / ms-160 e-5817: --target <id|root> filter.
+            "BEACON_TARGET": getattr(args, "doc_target", "") or "",
         }
         return _run_commands_py(root, "doc_list", env)
 
@@ -3830,7 +3845,7 @@ def _handle_operation(root: Path, args: argparse.Namespace) -> int:
 
 def _handle_project(root: Path, args: argparse.Namespace) -> int:
     if args.show_help or args.project_cmd is None:
-        print("Usage: beacon project archive|unarchive")
+        print("Usage: beacon project archive|unarchive|dump")
         return 0 if args.show_help else 2
     if (rc := _ensure_project()) is not None:
         return rc
@@ -3838,6 +3853,8 @@ def _handle_project(root: Path, args: argparse.Namespace) -> int:
         return _run_commands_py(root, "project_archive", {})
     if args.project_cmd == "unarchive":
         return _run_commands_py(root, "project_unarchive", {})
+    if args.project_cmd == "dump":
+        return _run_commands_py(root, "project_dump", {})
     return 1
 
 

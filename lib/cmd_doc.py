@@ -99,8 +99,19 @@ def cmd_doc_list():
     if trek_filter:
         docs = [d for d in docs if d.get("trek_id") == trek_filter]
     if target_filter:
-        import work_model
-        docs = [d for d in docs if work_model.doc_target(d) == target_filter]
+        if target_filter == "root":
+            # ms-160 e-5817: root rollup. A query for the first-class root
+            # Target surfaces project-level docs (linked to the root sentinel or
+            # not yet linked — the pre-root "target 空" project docs) PLUS every
+            # doc attached to any descendant Target, so a spec / memo / report
+            # linked to a child Target (e.g. ms-104) is reachable from the root
+            # too. Flat single-target links used to hide these from the root.
+            import root_target
+            child_ids = root_target.child_target_ids(load_project())
+            docs = [d for d in docs
+                    if root_target.doc_rolls_up_to_root(d, child_ids)]
+        else:
+            docs = [d for d in docs if work_model.doc_target(d) == target_filter]
 
     if json_mode:
         print(json.dumps(docs, ensure_ascii=False))

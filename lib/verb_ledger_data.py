@@ -344,6 +344,7 @@ VERB_LEDGER = {
     # --- project ---
     "project_archive": {"cls": "B", "secondary": ["C"], "note": ""},
     "project_cleanup": {"cls": "B", "secondary": ["C"], "note": "[post-memo] orphan project 一括 archive=store 保守の機械(B)/人間確認 checkpoint(C)、ms-123 二段確認"},
+    "project_dump": {"cls": "Q", "secondary": [], "note": "ms-160 e-5816: 真値源(SQLite)から組み立てた project dict を JSON で emit する read-only 出力。Tauri desktop が stale ミラーでなく真値源を読むための seam"},
     "project_export": {"cls": "B", "secondary": [], "note": ""},
     "project_import": {"cls": "B", "secondary": [], "note": ""},
     "project_orphans": {"cls": "Q", "secondary": [], "note": "[post-memo] orphan 候補の read-only スキャン(Q)、変更なし (archive は別 verb)"},

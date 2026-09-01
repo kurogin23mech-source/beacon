@@ -384,6 +384,25 @@ def cmd_project_cleanup():
         print("  失敗分は owner/envelope/ネットワークを確認して再実行してください。")
     print("  取り消しは各 project で `beacon project unarchive`（復元可能）。")
 
+def cmd_project_dump():
+    """Emit the assembled project dict as JSON on stdout (ms-160 e-5816).
+
+    In local mode the source of truth is the SQLite store (ms-148); the
+    ``.beacon/project.json`` file is only a best-effort *mirror* refreshed after
+    each commit. The Tauri desktop app historically read that mirror directly,
+    so a swallowed mirror-write failure left the desktop showing stale data
+    while SQLite held the current state. This verb lets the desktop read the
+    source of truth instead: it goes through ``load_project()`` (= the active
+    store's ``load_project``), so it returns the SQLite-assembled project in
+    local mode and the authoritative project in cloud mode — never the mirror.
+
+    Output is a single JSON object (the full project dict), byte-for-byte the
+    same shape the mirror would contain. No side effects, read-only.
+    """
+    data = load_project()
+    print(json.dumps(data, ensure_ascii=False))
+
+
 _BACKUP_SCHEMA_VERSION = 1
 
 

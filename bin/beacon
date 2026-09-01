@@ -4374,7 +4374,19 @@ EOF
                 BEACON_INPUT="$_in" BEACON_TARGET="$_target" BEACON_FORCE="$_force" BEACON_JSON="$_json" \
                     python3 "$COMMANDS_PY" project_import
                 ;;
-            *) echo "Usage: beacon project rename <new-name>|archive|unarchive|orphans|cleanup|export|import" ;;
+            dump)
+                # ms-160 e-5816: emit the assembled project dict as JSON on
+                # stdout, read from the source of truth (SQLite in local mode)
+                # rather than the best-effort project.json mirror. The Tauri
+                # desktop reads this so a stale mirror can't drive the display.
+                case "${3:-}" in
+                    -h|--help)
+                        echo "Usage: beacon project dump   (emit the current project as JSON on stdout)"
+                        exit 0 ;;
+                esac
+                python3 "$COMMANDS_PY" project_dump
+                ;;
+            *) echo "Usage: beacon project rename <new-name>|archive|unarchive|orphans|cleanup|export|import|dump" ;;
         esac
         ;;
     reset)

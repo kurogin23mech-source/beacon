@@ -557,9 +557,36 @@ fn get_retro_content(state: State<AppState>, week: String) -> Result<String, Str
 fn load_project_json(state: State<AppState>) -> Result<String, String> {
     let dir = state.project_dir.lock().unwrap();
     let dir = dir.as_deref().ok_or("No project directory set. Launch from a beacon project directory or set BEACON_PROJECT_DIR.")?;
-    let path = std::path::Path::new(dir).join(".beacon/project.json");
-    std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read project.json: {}", e))
+    // ms-160 e-5816: read the source of truth, not the mirror. In local mode
+    // the SQLite store (.beacon/project.db) is authoritative and
+    // .beacon/project.json is only a best-effort mirror refreshed after each
+    // commit — a swallowed mirror-write failure leaves the file stale while
+    // SQLite holds the current state. `beacon project dump` assembles the
+    // project from the active store (SQLite locally, authoritative in cloud),
+    // so it never returns stale data.
+    // Only trust the CLI output if it is actually JSON. `run_beacon` returns
+    // Ok on any zero-exit, so a future dump-format change or a stray warning /
+    // traceback on stdout must NOT be handed to the frontend as project data —
+    // validate here and fall back to the mirror otherwise (a malformed dump is
+    // a CLI-unavailable case for our purposes).
+    let dumped = run_beacon(dir, &["project", "dump"])
+        .ok()
+        .filter(|out| serde_json::from_str::<serde_json::Value>(out).is_ok());
+    match dumped {
+        Some(out) => Ok(out),
+        // Fall back to the mirror file when the CLI is unreachable (e.g. a
+        // packaged app with no `beacon` on PATH) or returned non-JSON, so the
+        // desktop still shows something rather than failing hard.
+        None => {
+            let path = std::path::Path::new(dir).join(".beacon/project.json");
+            std::fs::read_to_string(&path).map_err(|e| format!(
+                "Failed to read project (tried: beacon project dump → fallback \
+                 .beacon/project.json). Check that `beacon` is on PATH and the \
+                 project dir is correct: {}",
+                e
+            ))
+        }
+    }
 }
 
 #[tauri::command]
