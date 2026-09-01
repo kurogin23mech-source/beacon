@@ -24,8 +24,10 @@ Dependency direction (ms-127 SPEC 方針4 = 循環 import を構造で防ぐ):
 so the dependency graph stays one-directional and no cycle can form.
 """
 
+import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import sys
@@ -2732,3 +2734,45 @@ def _pending_review_types_for_pr(pr_number: str) -> list:
 
 def _pr_open_reviewed_marker_path(pr_number: str) -> str:
     return os.path.join(_get_triggers_dir(), f".reviewed-pr-{pr_number}")
+
+
+# ---------------------------------------------------------------------------
+# ms-166 e-5978: best-effort completion-verdict decision write (single source
+# of the failure contract, used by both completion writers so the handling
+# never drifts between them).
+# ---------------------------------------------------------------------------
+
+@contextlib.contextmanager
+def best_effort_completion_decision(target_id: str, verdict: str):
+    """完遂 (目的達成) verdict の decision write を best-effort で包む単一真実源。
+
+    完遂の監査記録の書き込みが失敗しても完遂フロー自体は壊さない。ただし失敗を
+    **silent にしない** — これが e-5978 の核心 (旧 ``except BaseException: pass`` は
+    endpoint 障害を無言で飲み、記録が消えても誰も気づけなかった)。契約:
+
+    - ``Exception``: WARNING で可視化して飲む (通常の write 失敗)。
+    - ``SystemExit``: WARNING で可視化して飲む (``_get_api_client`` が設定エラーで
+      ``sys.exit`` しうるが、完遂は既に確定済なので中断してはならない)。原因は
+      断定せず例外そのものを載せる。
+    - ``KeyboardInterrupt``: 伝播する (利用者の中断 — ``BaseException`` は catch
+      しない)。
+
+    どちらの WARNING も「完遂自体は確定済 — 再 approve するな」を添え、監査記録の
+    欠落に気づいた読み手が二重遷移で誤リカバリしないようにする (AX 原則3 = エラーは
+    回復経路を示す)。使い方::
+
+        with best_effort_completion_decision(target_id, verdict):
+            client.record_decision(project_id, {...})
+    """
+    try:
+        yield
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "completion-verdict decision write failed for target=%s verdict=%s: %s "
+            "(audit record NOT persisted; the completion itself is committed — "
+            "do not re-approve)", target_id, verdict, exc)
+    except SystemExit as exc:
+        logging.getLogger(__name__).warning(
+            "completion-verdict decision write skipped for target=%s verdict=%s: %s "
+            "(the completion itself is committed — do not re-approve)",
+            target_id, verdict, exc)

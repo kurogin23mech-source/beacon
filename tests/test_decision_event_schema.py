@@ -191,9 +191,13 @@ def test_backend_exposes_decision_event_functions(mod_name):
         pytest.skip(f"{mod_name} import unavailable: {exc}")
     assert hasattr(mod, "append_decision_event")
     assert hasattr(mod, "list_decision_events")
-    # list signature parity: (project_id, *, limit=100, since="")
+    # list signature parity: (project_id, *, kind="", limit=100, since="")
+    # ms-166 e-5970: `kind` was added to all 3 backends (kind filter pushed into
+    # the store). This guard must move with it, else one backend could drop/rename
+    # `kind` and stay green until a backend switch fails with TypeError in prod.
     sig = inspect.signature(mod.list_decision_events)
     params = sig.parameters
+    assert "kind" in params and params["kind"].default == ""
     assert "limit" in params and params["limit"].default == 100
     assert "since" in params and params["since"].default == ""
 

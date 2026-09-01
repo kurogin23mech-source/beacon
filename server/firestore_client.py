@@ -2378,38 +2378,25 @@ def append_decision_event(project_id: str, data: dict) -> str:
 
 def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
                          since: str = "") -> list[dict]:
-    """Return the most recent ``limit`` ``decision_events``, in ``created_at``
-    ascending (chronological) order.
+    """Fetch ``projects/{pid}/decision_events`` and window them (ms-166 e-5970).
 
-    ms-166 e-5970 — read-window fix. The stream is append-only and unbounded
-    (dm-send alone was 500+). Windowing to the *oldest* ``limit`` (the previous
-    ``[:limit]``) made every recent decision invisible once the backlog exceeded
-    ``limit``: a write that persisted correctly looked "dropped" to any default
-    read, and a ``kind`` filter applied *after* that truncation returned ~0 for
-    any kind absent from the oldest slice. The audit read those two symptoms as
-    a write→read *store* mismatch; the real defect was purely the read window.
-    We now keep the newest ``limit`` (``[-limit:]``) and filter ``kind`` BEFORE
-    the limit, so a bounded read returns "the latest decisions", and a
-    kind-filtered read returns the newest ``limit`` *of that kind*.
-
-    ``since`` is an optional ISO8601 lower bound (= created_at > since only).
+    This backend only FETCHES the rows; the read-window semantics (kind filter →
+    since filter → newest ``limit``) live in the single source
+    ``decision_event.window_decision_events`` so the three store backends can
+    never drift from each other. See that helper for the full rationale (why the
+    newest window, not the oldest — an oldest-``limit`` slice hid every recent
+    decision once the append-only backlog exceeded ``limit``).
     """
+    from decision_event import window_decision_events
     col = (
         get_db()
         .collection(COLLECTION)
         .document(project_id)
         .collection(DECISION_EVENTS_SUBCOLLECTION)
     )
-    out: list[dict] = []
+    rows: list[dict] = []
     for d in col.stream():
         rec = d.to_dict() or {}
-        if kind and (rec.get("kind") or "") != kind:
-            continue
-        if since and (rec.get("created_at") or "") <= since:
-            continue
         rec["decision_id"] = d.id
-        out.append(rec)
-    out.sort(key=lambda r: (r.get("created_at", ""), r.get("decision_id", "")))
-    if limit and limit > 0:
-        out = out[-limit:]
-    return out
+        rows.append(rec)
+    return window_decision_events(rows, kind=kind, limit=limit, since=since)

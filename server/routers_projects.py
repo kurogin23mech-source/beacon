@@ -1656,13 +1656,19 @@ def make_router(
         judge fetches declared decisions (what / why / evidence / decided_by) to
         check each rationale against the actual code. ``kind`` filters to one
         decision family (e.g. ``task-done`` / ``review-adjudication`` /
-        ``log-backstop``); ``since`` / ``limit`` page the append-only stream.
+        ``log-backstop``).
 
-        ms-166 e-5970: ``kind`` is pushed INTO the store read so it is applied
-        before the ``limit`` window. The previous filter-after-truncate here
-        filtered within the oldest ``limit`` rows, so a kind absent from that
-        slice returned ~0 even when many such rows existed further down the
-        stream (the "list shows 0" symptom the audit hit).
+        Read-window semantics (ms-166 e-5970): the response is the **newest**
+        ``limit`` rows of the (kind-filtered) stream — NOT a forward page. ``kind``
+        is pushed INTO the store so it is applied before the ``limit`` window (the
+        previous filter-after-truncate filtered within the oldest ``limit`` rows,
+        so a kind absent from that slice returned ~0 even when such rows existed
+        further down — the "list shows 0" symptom the audit hit). ``since`` is a
+        created_at lower bound (returns the newest ``limit`` rows with
+        ``created_at > since``). NOTE: there is no upper-bound / cursor parameter,
+        so this endpoint cannot walk the whole stream oldest-to-newest; it answers
+        "the latest decisions" only. Full backward pagination (a ``before`` cursor
+        + ``has_more``) is a deliberate follow-up, not supported here yet.
         """
         _load(project_id, user)  # read-access guard (404 / 403 as appropriate)
         try:

@@ -76,7 +76,7 @@ def test_generic_seam_SystemExitは飲むがwarnする(monkeypatch, caplog):
     monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: False)
     with caplog.at_level(logging.WARNING):
         target_completion._record_completion_decision({"id": "ms-9"}, "done", "理由")
-    assert "skipped (client unavailable)" in " ".join(r.getMessage() for r in caplog.records)
+    assert "write skipped" in " ".join(r.getMessage() for r in caplog.records)
 
 
 # --- cmd_target._record_completion_verdict_decision (approve 主経路) ---------
@@ -107,4 +107,4 @@ def test_approve主経路_SystemExitは飲むがwarnする(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         cmd_target._record_completion_verdict_decision(
             "ms-9", "done", _approval_entry(), "承認")
-    assert "skipped (client unavailable)" in " ".join(r.getMessage() for r in caplog.records)
+    assert "write skipped" in " ".join(r.getMessage() for r in caplog.records)

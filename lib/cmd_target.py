@@ -33,7 +33,6 @@ family importing it).
 import os
 import sys
 import json
-import logging
 
 import core  # noqa: F401
 import work_model  # noqa: F401
@@ -253,10 +252,14 @@ def _record_completion_verdict_decision(target_id, verdict, entry, approval_rati
     ms-154 philosophy review found missing, and it captures observing / closed
     verdicts too (not just done — AC3).
 
-    best-effort, cloud-only: never break the approve flow.
+    best-effort, cloud-only: never break the approve flow. The write-failure
+    contract (log-not-swallow, ms-166 e-5978) is the single source
+    ``commands_shared.best_effort_completion_decision`` — shared with the generic
+    completion seam so the two never drift.
     """
-    try:
-        from commands_shared import _is_cloud_mode, _get_api_client
+    from commands_shared import (best_effort_completion_decision, _is_cloud_mode,
+                                 _get_api_client)
+    with best_effort_completion_decision(target_id, verdict):
         if not _is_cloud_mode():
             return
         meta = entry.get("meta") or {}
@@ -295,22 +298,6 @@ def _record_completion_verdict_decision(target_id, verdict, entry, approval_rati
             "evidence": evidence,
             "related": {"target_id": target_id},
         })
-    except Exception as exc:
-        # ms-166 e-5978: best-effort (never break the approve flow), but a failed
-        # completion-verdict write is LOGGED, not silently dropped. The old
-        # `except BaseException: pass` hid endpoint/rejection failures, so the
-        # attainment audit record vanished undetected. WARNING reaches stderr via
-        # Python's lastResort handler.
-        logging.getLogger(__name__).warning(
-            "completion-verdict decision write failed for target=%s verdict=%s: %s",
-            target_id, verdict, exc)
-    except SystemExit as exc:
-        # _get_api_client() may sys.exit on config errors; the transition already
-        # committed, so never abort the approve flow — but log it (no longer silent).
-        # Kept separate from Exception so a genuine KeyboardInterrupt still propagates.
-        logging.getLogger(__name__).warning(
-            "completion-verdict decision write skipped (client unavailable) "
-            "for target=%s verdict=%s: %s", target_id, verdict, exc)
 
 
 def cmd_target_approve():

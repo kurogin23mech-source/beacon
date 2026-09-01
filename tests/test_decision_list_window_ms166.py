@@ -26,6 +26,7 @@ if SERVER not in sys.path:
 
 import dynamodb_client as ddb  # noqa: E402
 import mysql_client as mc      # noqa: E402
+import decision_event          # noqa: E402
 
 
 def _events():
@@ -70,6 +71,37 @@ def ddb_stream():
 def mysql_stream(monkeypatch):
     events = list(_events())
     monkeypatch.setattr(mc, "_query", lambda entity, pk: list(events))
+
+
+# --- window_decision_events (単一真実源、3 backend 共通) --------------------
+# ms-166 e-5970 maintainability review (M2/M3): 窓ロジックは 3 backend に逐語
+# コピーせず decision_event.window_decision_events に集約した。ここでその pure
+# 関数を直接固定する = firestore を含む 3 backend の窓挙動が同時に守られる。
+
+def test_window_helper_最新側の窓():
+    rows = decision_event.window_decision_events(_events(), limit=100)
+    assert len(rows) == 100
+    assert rows[-1]["decision_id"] == "dec-new-0003"  # 最新が末尾
+    assert "review-adjudication" in {r["kind"] for r in rows}
+
+
+def test_window_helper_kindはlimitの前に絞る():
+    rows = decision_event.window_decision_events(
+        _events(), kind="review-adjudication", limit=100)
+    assert [r["decision_id"] for r in rows] == ["dec-new-0000", "dec-new-0002"]
+
+
+def test_window_helper_sinceは下限():
+    rows = decision_event.window_decision_events(
+        _events(), since="2026-09-01T00:00:00.000000Z")
+    assert rows and all(r["created_at"] > "2026-09-01T00:00:00.000000Z" for r in rows)
+
+
+def test_window_helper_入力listを変更しない():
+    src = _events()
+    before = list(src)
+    decision_event.window_decision_events(src, kind="dm-send", limit=5)
+    assert src == before  # 純関数 — 副作用なし
 
 
 # --- dynamodb fallback ------------------------------------------------------
