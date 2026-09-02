@@ -559,11 +559,12 @@ def _decided_by_for_review() -> str:
     consistency (its ``human-delegated`` gloss-vs-usage tension is a known
     follow-up, e-5670 — NOT re-litigated here).
 
-    ms-166 e-5971 (保守性 M1): this is the single source for the 採否 decided_by
-    mapping — ``commands._record_review_adjudication_decision`` (review-adjudication)
-    imports and calls THIS function rather than re-implementing it, so the PR-verdict
-    採否 and the finding-level 採否 cannot drift."""
-    return "human-delegated" if _session_kind_is_human() else "autonomous-AI"
+    ms-166 e-5972 (保守性 M1): the single source is now
+    ``commands_shared.decided_by_for_review`` (leaf), shared by review-adjudication
+    and pr-intent derivation too. This thin wrapper keeps the cmd_pr-local name its
+    call sites already use, delegating so no 兄弟 module re-implements the mapping."""
+    from commands_shared import decided_by_for_review
+    return decided_by_for_review()
 
 
 def _review_evidence_from_env() -> list:

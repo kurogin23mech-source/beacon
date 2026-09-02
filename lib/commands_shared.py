@@ -2791,3 +2791,15 @@ def best_effort_completion_decision(target_id: str, verdict: str):
 # ms-166 e-5971: review 採否の disposition 語彙の単一真実源 (SKILL.md はこれを写す
 # 側)。合成 verdict の集計・入力検証はこの定数を経由する (旧: 散文だけ + prefix-match)。
 ADJUDICATION_DISPOSITIONS: tuple = ("accepted", "declined", "deferred")
+
+
+def decided_by_for_review() -> str:
+    """PR / レビュー採否・PR intent 導出の ``decided_by`` を SESSION KIND から導く
+    単一真実源 (ms-154 e-5669 / ms-166 e-5971・e-5972 保守性 M1)。
+
+    独立 judge の verdict / findings を採否する AI セッションは最も監査が要る
+    ``autonomous-AI``、人間端末は直接 ``human-delegated``。PR verdict 採否
+    (``cmd_pr``)・review-adjudication (``cmd_review_done``)・pr-intent 導出
+    (``cmd_decision``) が同じ写像を共有する — leaf module に home したので全員が
+    上向きに import でき、cmd_* 兄弟間の横依存を作らない (旧: 3 箇所に別コピー)。"""
+    return "human-delegated" if _session_kind_is_human() else "autonomous-AI"

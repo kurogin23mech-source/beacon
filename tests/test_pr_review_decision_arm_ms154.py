@@ -80,7 +80,7 @@ def _capture_recorder(monkeypatch):
 def test_reject_records_reject_verdict(monkeypatch):
     calls = _capture_recorder(monkeypatch)
     # pin session kind (conftest defaults to human) so decided_by is deterministic
-    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: False)
+    monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: False)
     _run_verb("cmd_pr_reject", rationale="AC 未達")
     # AI session → autonomous-AI, no evidence supplied → []
     assert calls == [("e-400", "reject", "AC 未達", "autonomous-AI", [])]
@@ -88,7 +88,7 @@ def test_reject_records_reject_verdict(monkeypatch):
 
 def test_request_changes_records_rework_verdict(monkeypatch):
     calls = _capture_recorder(monkeypatch)
-    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: False)
+    monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: False)
     _run_verb("cmd_pr_request_changes", rationale="ここを直して")
     assert calls == [("e-400", "re-work", "ここを直して", "autonomous-AI", [])]
 
@@ -99,7 +99,7 @@ def test_approve_records_approve_verdict(monkeypatch):
     # test isolates the decision-recording wiring.
     monkeypatch.setattr(cmd_pr, "_review_gate_check", lambda *a, **k: None)
     monkeypatch.setattr(cmd_pr, "_judge_pr_approve_auto_done", lambda *a, **k: [])
-    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: False)
+    monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: False)
     _run_verb("cmd_pr_approve", rationale="良い")
     assert calls == [("e-400", "approve", "良い", "autonomous-AI", [])]
 
@@ -110,9 +110,9 @@ def test_approve_records_approve_verdict(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_decided_by_derived_from_session_kind(monkeypatch):
-    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: True)
+    monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: True)
     assert cmd_pr._decided_by_for_review() == "human-delegated"
-    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: False)
+    monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: False)
     assert cmd_pr._decided_by_for_review() == "autonomous-AI"
 
 
@@ -120,7 +120,7 @@ def test_human_approve_is_not_mislabelled_autonomous(monkeypatch):
     calls = _capture_recorder(monkeypatch)
     monkeypatch.setattr(cmd_pr, "_review_gate_check", lambda *a, **k: None)
     monkeypatch.setattr(cmd_pr, "_judge_pr_approve_auto_done", lambda *a, **k: [])
-    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: True)
+    monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: True)
     _run_verb("cmd_pr_approve", rationale="人間が承認")
     # the human decided directly — NOT autonomous-AI (the bug this fixes)
     assert calls[0][3] == "human-delegated"

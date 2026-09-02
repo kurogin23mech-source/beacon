@@ -107,7 +107,8 @@ def _wire(monkeypatch, existing):
     monkeypatch.setattr(cmd_decision, "_get_api_client",
                         lambda: (fake, {"project_id": "p1"}))
     monkeypatch.setattr(commands_shared, "load_project", lambda: _project())
-    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: False)
+    # decided_by は commands_shared.decided_by_for_review 経由 (単一真実源)。
+    monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: False)
     return fake
 
 
@@ -118,8 +119,8 @@ def test_derive_dry_run既定は書かない(monkeypatch, capsys):
     cmd_decision.cmd_decision_derive()
     import json as _j
     out = _j.loads(capsys.readouterr().out)
-    assert out == {"apply": False, "derived": 0, "pending": 2,
-                   "already_covered": 0, "pr_intent_artifacts": 2}
+    assert out == {"apply": False, "pending": 2, "already_covered": 0,
+                   "skipped_no_number": 0, "pr_intent_artifacts": 2}
     assert fake.posted == []                     # dry-run は書かない
 
 
@@ -131,7 +132,20 @@ def test_derive_applyで導出しdedupする(monkeypatch, capsys):
     cmd_decision.cmd_decision_derive()
     import json as _j
     out = _j.loads(capsys.readouterr().out)
-    assert out["derived"] == 1 and out["already_covered"] == 1
+    assert out["derived"] == 1 and out["failed"] == 0 and out["already_covered"] == 1
     assert [p["evidence"] for p in fake.posted] == [["pr:703"]]
     assert fake.posted[0]["kind"] == "pr-intent"
     assert fake.posted[0]["decided_by"] == "autonomous-AI"
+
+
+def test_derive_apply_dedup_read失敗で中止する(monkeypatch, capsys):
+    # 冪等の土台 (既存 decision の read) が壊れたら --apply は abort (重複を撒かない)。
+    fake = _wire(monkeypatch, existing=[])
+    def _boom(*a, **k):
+        raise RuntimeError("list down")
+    fake.list_decisions = _boom
+    monkeypatch.setenv("BEACON_APPLY", "1")
+    import pytest as _pt
+    with _pt.raises(SystemExit):
+        cmd_decision.cmd_decision_derive()
+    assert fake.posted == []                     # abort したので何も書かない

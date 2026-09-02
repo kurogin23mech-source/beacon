@@ -3476,10 +3476,8 @@ def _record_review_adjudication_decision(review_type: str, pr_number: str,
     if not summary and not adjudications:
         return
     from commands_shared import (best_effort_decision_write, _is_cloud_mode,
-                                 _get_api_client, ADJUDICATION_DISPOSITIONS)
-    # single source for the 採否 decided_by mapping (保守性 M1): reuse cmd_pr's, do
-    # not re-implement — commands.py already depends on cmd_pr (dispatch re-imports).
-    from cmd_pr import _decided_by_for_review
+                                 _get_api_client, ADJUDICATION_DISPOSITIONS,
+                                 decided_by_for_review)
     with best_effort_decision_write(
             f"review-adjudication for PR #{pr_number} ({review_type})",
             recovery_hint="re-run `beacon review done` with the same flags — the gate "
@@ -3521,7 +3519,7 @@ def _record_review_adjudication_decision(review_type: str, pr_number: str,
             "kind": "review-adjudication",
             "decision": decision,
             "rationale": rationale,
-            "decided_by": _decided_by_for_review(),
+            "decided_by": decided_by_for_review(),
             # PR / review-type linkage lives in evidence as real link refs — the
             # server's related schema (_RELATED_KEYS) only keeps task/target/trek/
             # event ids, so `related.pr_number` was silently dropped (found by
