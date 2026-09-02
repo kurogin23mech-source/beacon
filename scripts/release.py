@@ -88,18 +88,61 @@ def _stamp_review_gate(beacon_root, *, dry_run=False):
         print(f"  ✓ stamped beacon-review-gate=success on {sha[:7]}")
 
 
+# Unprotected scratch ref used only to land a bump commit's SHA on the remote so
+# GitHub's statuses API will accept a beacon-review-gate status for it (e-5975).
+# It is NOT a staging environment — it is a throwaway landing pad, force-pushed
+# and deleted each release. IMPORTANT: this ref MUST stay outside main's branch
+# protection; if a wildcard rule ever covers `_release-*`, step 1 below is
+# rejected and the release breaks. Keep it excluded in repo Settings > Branches.
+_RELEASE_STAGING_REF = "_release-gate-scratch"
+
+
 def _push_main(beacon_root, *, dry_run=False):
-    """Push main with the review gate stamped on the tip FIRST, as one operation.
+    """Push main with the review gate satisfied on the tip, as one operation.
 
     main requires the `beacon-review-gate` check per commit and the release bot
-    pushes mechanical bump commits without a PR (e-5975). Binding the stamp and
-    the push into a single helper makes "every direct push to main is stamped" a
-    structural guarantee, not a call-site convention: there is no bare
-    `git push origin main` left to copy, so a future push route physically
-    cannot skip the stamp. (Independent AX + maintainability review of PR #705
-    both flagged the earlier two-naked-call-sites shape — closed here.)"""
+    pushes mechanical bump commits without a PR (e-5975). A GitHub commit status
+    can only be attached to a SHA the remote already has, so stamping the gate
+    "before the push" is impossible for a first-time direct push — the statuses
+    API 422s on an unknown SHA and the protected push is then rejected with GH006
+    (observed in the v0.63.0 release run, 2026-09-02). So this helper:
+
+      1. lands the tip on an UNPROTECTED staging ref (that push has no required
+         check) so the SHA exists on the remote,
+      2. stamps `beacon-review-gate=success` on that now-existing SHA,
+      3. pushes main (the required check is present → the push passes),
+      4. deletes the staging ref (best-effort).
+
+    Binding all of this into one helper keeps "every direct push to main is
+    gate-satisfied" a structural guarantee: there is no bare `git push origin
+    main` left to copy, so a future push route physically cannot skip it.
+    (Independent AX + maintainability review of PR #705 flagged the earlier
+    two-naked-call-sites shape; the staging step corrects the pre-push stamp that
+    could not work against the real statuses API.)"""
+    if dry_run:
+        print("  [dry-run] push origin main via staging ref "
+              "(land SHA → stamp gate → push main → drop staging)")
+        return
+    # 1. Land the tip on GitHub so its SHA can carry a status (force: a prior
+    #    failed run may have left the staging ref behind).
+    run(["git", "push", "--force", "origin",
+         f"HEAD:refs/heads/{_RELEASE_STAGING_REF}"], cwd=beacon_root)
+    # 2. Stamp the required gate success on the now-existing SHA. (dry_run is
+    #    always False here — the guard above returns before this point — but pass
+    #    it through rather than hardcode, so the flag contract stays legible.)
     _stamp_review_gate(beacon_root, dry_run=dry_run)
-    run(["git", "push", "origin", "main"], cwd=beacon_root, dry_run=dry_run)
+    # 3. Protected push to main now satisfies the required check.
+    run(["git", "push", "origin", "main"], cwd=beacon_root)
+    # 4. Best-effort cleanup — never fail the release on teardown, but SURFACE a
+    #    failure so a dangling scratch ref on the remote is visible, not silent.
+    cleanup = subprocess.run(
+        ["git", "push", "origin", "--delete", _RELEASE_STAGING_REF],
+        cwd=beacon_root, capture_output=True, text=True)
+    if cleanup.returncode != 0:
+        print(f"  ⚠️  scratch ref cleanup failed (branch "
+              f"'{_RELEASE_STAGING_REF}' may persist on the remote): "
+              f"{(cleanup.stderr or cleanup.stdout).strip()[:200]}",
+              file=sys.stderr)
 
 
 def _update_readme_version(beacon_root, version_str, *, dry_run=False):

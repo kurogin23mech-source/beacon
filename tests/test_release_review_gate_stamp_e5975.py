@@ -118,16 +118,42 @@ def test_stamp_desc_uses_the_shared_constant(monkeypatch):
 
 # --- push to main is stamped by construction (structural, not textual) ------
 
-def test_push_main_stamps_before_pushing(monkeypatch):
-    """_push_main binds stamp+push into one operation: the stamp runs first,
-    then exactly the push. Behavioural, so it survives source-layout changes."""
+def test_push_main_lands_sha_then_stamps_then_pushes(monkeypatch):
+    """_push_main binds the whole gate-satisfying sequence into one operation:
+    (1) push the tip to an unprotected staging ref so GitHub has the SHA, (2)
+    stamp the gate, (3) push main, (4) delete staging. The stamp must sit AFTER
+    the staging push (the SHA must exist to carry a status) and BEFORE the main
+    push (the required check must be present). Behavioural, so it survives
+    source-layout changes."""
     calls = []
     monkeypatch.setattr(release, "_stamp_review_gate",
                         lambda *a, **k: calls.append("stamp"))
     monkeypatch.setattr(release, "run",
                         lambda cmd, **k: calls.append(("run", tuple(cmd))))
+
+    class _Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_sub(cmd, **k):
+        calls.append(("subprocess", tuple(cmd)))
+        return _Ok()
+
+    monkeypatch.setattr(release.subprocess, "run", fake_sub)
     release._push_main("/repo", dry_run=False)
-    assert calls == ["stamp", ("run", ("git", "push", "origin", "main"))]
+    # 1. staging push lands the SHA on the remote first, force-pushed (a prior
+    #    failed run may have left the scratch ref behind)
+    assert calls[0][0] == "run"
+    assert "--force" in calls[0][1]
+    assert f"HEAD:refs/heads/{release._RELEASE_STAGING_REF}" in calls[0][1]
+    # 2. stamp happens only after the SHA exists
+    assert calls[1] == "stamp"
+    # 3. then the protected push to main
+    assert calls[2] == ("run", ("git", "push", "origin", "main"))
+    # 4. scratch ref torn down last (via subprocess so a teardown failure can be
+    #    surfaced rather than swallowed)
+    assert calls[3][0] == "subprocess" and "--delete" in calls[3][1]
 
 
 def test_no_bare_push_to_main_outside_the_helper():
