@@ -82,7 +82,8 @@ def test_stamp_posts_success_on_resolved_head(monkeypatch):
 
 
 def test_stamp_is_best_effort_on_gate_failure(monkeypatch, capsys):
-    """A failed stamp must not raise — the push fails loudly on its own."""
+    """A failed stamp must not raise — the push fails loudly on its own (the
+    subsequent `git push` has check=True and aborts on GH006)."""
     monkeypatch.setattr(release, "run", lambda *a, **k: "abc1234")
 
     class _Result:
@@ -95,24 +96,60 @@ def test_stamp_is_best_effort_on_gate_failure(monkeypatch, capsys):
     assert "review-gate stamp failed" in capsys.readouterr().err
 
 
-# --- every direct push to main is preceded by a stamp -----------------------
+def test_stamp_desc_uses_the_shared_constant(monkeypatch):
+    """The gate description is a single-source-of-truth module constant, not an
+    inline literal (so a future edit is one place and pinnable)."""
+    monkeypatch.setattr(release, "run", lambda *a, **k: "sha1")
+    captured = {}
 
-def test_each_push_main_is_preceded_by_a_stamp():
-    """Source-level guard: both `git push origin main` calls in the pipeline are
-    immediately preceded by a `_stamp_review_gate(` call, so no push route can
-    ship an un-stamped bump commit."""
+    class _Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_sub(argv, **k):
+        captured["argv"] = argv
+        return _Result()
+
+    monkeypatch.setattr(release.subprocess, "run", fake_sub)
+    release._stamp_review_gate(str(ROOT), dry_run=False)
+    assert release._BUMP_COMMIT_GATE_DESC in captured["argv"]
+
+
+# --- push to main is stamped by construction (structural, not textual) ------
+
+def test_push_main_stamps_before_pushing(monkeypatch):
+    """_push_main binds stamp+push into one operation: the stamp runs first,
+    then exactly the push. Behavioural, so it survives source-layout changes."""
+    calls = []
+    monkeypatch.setattr(release, "_stamp_review_gate",
+                        lambda *a, **k: calls.append("stamp"))
+    monkeypatch.setattr(release, "run",
+                        lambda cmd, **k: calls.append(("run", tuple(cmd))))
+    release._push_main("/repo", dry_run=False)
+    assert calls == ["stamp", ("run", ("git", "push", "origin", "main"))]
+
+
+def test_no_bare_push_to_main_outside_the_helper():
+    """The only `git push origin main` in the pipeline lives inside _push_main.
+    This is the structural guarantee that replaces the old 6-line-window grep: a
+    new push route CANNOT ship an un-stamped bump commit because there is no bare
+    push left to copy (independent AX + maintainability consensus on PR #705)."""
     src = RELEASE.read_text(encoding="utf-8")
     lines = src.splitlines()
-    push_idxs = [
-        i for i, ln in enumerate(lines)
-        if '"git", "push", "origin", "main"' in ln
-    ]
-    assert len(push_idxs) >= 2, "expected the two bump-commit pushes to main"
-    for i in push_idxs:
-        window = "\n".join(lines[max(0, i - 6):i])
-        assert "_stamp_review_gate(" in window, (
-            f"push to main at line {i + 1} is not preceded by a review-gate stamp"
-        )
+    push_idxs = [i for i, ln in enumerate(lines)
+                 if '"git", "push", "origin", "main"' in ln]
+    assert len(push_idxs) == 1, (
+        "there must be exactly ONE push-to-main call and it must be inside "
+        "_push_main(); a bare push elsewhere would bypass the gate stamp"
+    )
+    def_idx = next(i for i, ln in enumerate(lines)
+                   if ln.startswith("def _push_main("))
+    next_def = next((i for i in range(def_idx + 1, len(lines))
+                     if lines[i].startswith("def ")), len(lines))
+    assert def_idx < push_idxs[0] < next_def, (
+        "the push-to-main call must live in the _push_main() body"
+    )
 
 
 # --- release.yml grants statuses: write -------------------------------------

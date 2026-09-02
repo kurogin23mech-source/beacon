@@ -47,6 +47,9 @@ def run(cmd, cwd=None, *, check=True, capture=False, dry_run=False):
     return result.stdout.strip() if capture else ""
 
 
+_BUMP_COMMIT_GATE_DESC = "release-bot bump commit (機械生成の配管, レビュー対象外 e-5975)"
+
+
 def _stamp_review_gate(beacon_root, *, dry_run=False):
     """Post `beacon-review-gate=success` onto the current HEAD before a direct
     push to main.
@@ -75,8 +78,7 @@ def _stamp_review_gate(beacon_root, *, dry_run=False):
     gate_script = os.path.join(beacon_root, "scripts", "review-gate-ci.py")
     result = subprocess.run(
         [sys.executable, gate_script, "set", "--state", "success",
-         "--sha", sha, "--desc",
-         "release-bot bump commit (機械生成の配管, レビュー対象外 e-5975)"],
+         "--sha", sha, "--desc", _BUMP_COMMIT_GATE_DESC],
         cwd=beacon_root, capture_output=True, text=True)
     if result.returncode != 0:
         print("  ⚠️  review-gate stamp failed (push may be rejected): "
@@ -84,6 +86,20 @@ def _stamp_review_gate(beacon_root, *, dry_run=False):
               file=sys.stderr)
     else:
         print(f"  ✓ stamped beacon-review-gate=success on {sha[:7]}")
+
+
+def _push_main(beacon_root, *, dry_run=False):
+    """Push main with the review gate stamped on the tip FIRST, as one operation.
+
+    main requires the `beacon-review-gate` check per commit and the release bot
+    pushes mechanical bump commits without a PR (e-5975). Binding the stamp and
+    the push into a single helper makes "every direct push to main is stamped" a
+    structural guarantee, not a call-site convention: there is no bare
+    `git push origin main` left to copy, so a future push route physically
+    cannot skip the stamp. (Independent AX + maintainability review of PR #705
+    both flagged the earlier two-naked-call-sites shape — closed here.)"""
+    _stamp_review_gate(beacon_root, dry_run=dry_run)
+    run(["git", "push", "origin", "main"], cwd=beacon_root, dry_run=dry_run)
 
 
 def _update_readme_version(beacon_root, version_str, *, dry_run=False):
@@ -323,11 +339,11 @@ def main():
             cwd=beacon_root, dry_run=dry)
 
     # ---- Push beacon repo (if any unpushed) ----
-    # Stamp the review gate on the bump commit first: main requires the
-    # beacon-review-gate check per commit, and this bot push has no PR (e-5975).
+    # _push_main stamps the review gate on the bump commit before pushing: main
+    # requires the beacon-review-gate check per commit, and this bot push has no
+    # PR (e-5975). Stamp + push are one operation so no route can skip it.
     print("=> Pushing beacon repo to origin/main")
-    _stamp_review_gate(beacon_root, dry_run=dry)
-    run(["git", "push", "origin", "main"], cwd=beacon_root, dry_run=dry)
+    _push_main(beacon_root, dry_run=dry)
 
     # ---- Create + push tag ----
     print(f"=> Tagging {v}")
@@ -407,10 +423,10 @@ def main():
                  f"docs(release): update README/CHANGELOG for {v}"],
                 cwd=beacon_root, dry_run=dry)
 
-    # Stamp again: the formula + README/CHANGELOG commits moved the tip, so the
-    # new HEAD needs its own beacon-review-gate status before this push (e-5975).
-    _stamp_review_gate(beacon_root, dry_run=dry)
-    run(["git", "push", "origin", "main"], cwd=beacon_root, dry_run=dry)
+    # The formula + README/CHANGELOG commits moved the tip, so the new HEAD needs
+    # its own beacon-review-gate status before this push (e-5975) — _push_main
+    # stamps then pushes as one operation.
+    _push_main(beacon_root, dry_run=dry)
 
     # ---- Mirror to tap ----
     print("=> Updating tap repo")
