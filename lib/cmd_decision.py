@@ -161,3 +161,79 @@ def cmd_decision_list():
             print(f"      なぜ: {r['rationale']}")
         if ev:
             print(f"      根拠: {', '.join(ev)}")
+
+
+def cmd_decision_derive():
+    """Derive decisions from existing artifacts that already carry the "why"
+    (ms-166 e-5972). Currently: **PR intent** — every recorded PR that declares an
+    intent becomes a ``pr-intent`` decision, so a change's "why" is a DERIVED product
+    of what was already written (no separate ``beacon decision record``). Idempotent:
+    PRs already on the arm are skipped, so re-running never duplicates. cloud-only.
+
+    (task done_reason は task-done seam、採否は review-adjudication、完遂 verdict は
+    completion-verdict で既に捕獲済み。commit rationale の導出は別 task = 粒度と
+    正規化規則が別物。) 会話の純粋内省判断は artifact に書かれていないので導出対象外。"""
+    import decision_derive
+    from commands_shared import load_project
+
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    # dry-run 既定 (deliverable backfill と同じ安全側): 既存 PR は数百件ありうるので、
+    # --apply を明示しない限り「何件導出するか」を報告するだけで書き込まない。
+    apply = os.environ.get("BEACON_APPLY", "") == "1"
+    if not _is_cloud_mode():
+        print("decision derive は cloud プロジェクトのみ "
+              "(local mode では決定ストリームが無い)")
+        return
+    try:
+        client, config = _get_api_client()
+        project_id = config.get("project_id", "")
+        if not project_id:
+            print("Error: no project_id in cloud.json", file=sys.stderr)
+            sys.exit(1)
+        data = load_project()
+        artifacts = list(decision_derive.iter_pr_intent_artifacts(data))
+        # 既存 pr-intent decision を読んで covered set を作る (dedup = 冪等)。
+        try:
+            res = client.list_decisions(
+                project_id, kind=decision_derive.DERIVED_PR_INTENT_KIND, limit=2000)
+            existing = res.get("decisions", []) if isinstance(res, dict) else []
+        except Exception:
+            existing = []
+        covered = decision_derive.covered_pr_numbers(existing)
+        from cmd_pr import _decided_by_for_review  # decided_by の単一真実源
+        decided_by = _decided_by_for_review()
+        to_derive = [
+            (pr_number, title, intent)
+            for (pr_number, title, intent) in artifacts
+            if str(pr_number) not in covered
+        ]
+        derived = 0
+        if apply:
+            for pr_number, title, intent in to_derive:
+                payload = decision_derive.build_pr_intent_decision(
+                    pr_number, title, intent, decided_by=decided_by)
+                if payload is None:
+                    continue
+                try:
+                    client.record_decision(project_id, payload)
+                    derived += 1
+                except Exception as exc:
+                    print(f"  ⚠ pr:{pr_number} の導出に失敗: {exc}", file=sys.stderr)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"Error: failed to derive decisions: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    pending = len(to_derive)
+    skipped = len(artifacts) - pending
+    if json_mode:
+        print(json.dumps({"apply": apply, "derived": derived, "pending": pending,
+                          "already_covered": skipped,
+                          "pr_intent_artifacts": len(artifacts)}, ensure_ascii=False))
+    elif apply:
+        print(f"decision derive: {derived} 件を導出 / {skipped} 件は既存済み "
+              f"(intent を持つ PR {len(artifacts)} 件が対象)")
+    else:
+        print(f"decision derive (dry-run): {pending} 件が導出対象 / {skipped} 件は既存済み "
+              f"(intent を持つ PR {len(artifacts)} 件)。実行するには --apply を付けてください。")
