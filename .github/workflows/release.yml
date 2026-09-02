@@ -31,6 +31,12 @@ on:
 
 permissions:
   contents: write   # push the bump commit + tag, create the GitHub release
+  statuses: write   # POST beacon-review-gate=success on the bot bump commits
+                    # before pushing them to main (e-5975). main's branch
+                    # protection requires that check per commit; the release bot
+                    # pushes mechanical bumps without a PR, so scripts/release.py
+                    # stamps the tip via scripts/review-gate-ci.py. Without this
+                    # scope the POST 403s and the push is rejected with GH006.
   actions: write    # dispatch downstream workflows (deploy-cloud-run.yml,
                     # release-build.yml) via `gh workflow run`. Without this
                     # the workflow_dispatch API returns HTTP 403
