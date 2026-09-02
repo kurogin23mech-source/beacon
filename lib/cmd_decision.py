@@ -161,3 +161,135 @@ def cmd_decision_list():
             print(f"      なぜ: {r['rationale']}")
         if ev:
             print(f"      根拠: {', '.join(ev)}")
+
+
+def cmd_decision_derive():
+    """Derive decisions from existing artifacts that already carry the "why"
+    (ms-166 e-5972). Currently the ONLY source is **PR intent** — every recorded PR
+    that declares an intent AND has a PR number becomes a ``pr-intent`` decision, so
+    a change's "why" is a DERIVED product of what was already written (no separate
+    ``beacon decision record``). dry-run 既定 / ``--apply`` で書込 / ``--json``。cloud-only.
+
+    Idempotent — PRs already on the arm are skipped by reading existing ``pr-intent``
+    decisions (dedup by ``pr:<n>`` in evidence). This holds ONLY when that read
+    succeeds and is not truncated at ``DEDUP_SCAN_LIMIT``; if the dedup basis cannot
+    be established, ``--apply`` aborts rather than risk duplicates (dry-run degrades
+    with a warning). PRs without a number are skipped (no dedup key).
+
+    (task done_reason は task-done seam、採否は review-adjudication、完遂 verdict は
+    completion-verdict で既に捕獲済み。commit rationale の導出は別 source = 粒度と
+    正規化規則が別物なので未対応。) 会話の純粋内省判断は artifact に書かれていない
+    ので導出対象外。"""
+    import decision_derive
+    from commands_shared import (load_project, decided_by_for_review,
+                                 best_effort_decision_write)
+
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+    # dry-run 既定 (deliverable backfill と同じ安全側): 既存 PR は数百件ありうるので、
+    # --apply を明示しない限り「何件導出するか」を報告するだけで書き込まない。
+    apply = os.environ.get("BEACON_APPLY", "") == "1"
+    if not _is_cloud_mode():
+        # 前提未充足も --json では機械可読に返す (AX review: exit 0 + 平文は自動化を誤らせる)。
+        if json_mode:
+            print(json.dumps({"error": "cloud-only",
+                              "message": "decision derive は cloud プロジェクトのみ"},
+                             ensure_ascii=False))
+        else:
+            print("decision derive は cloud プロジェクトのみ "
+                  "(local mode では決定ストリームが無い)")
+        return
+    try:
+        client, config = _get_api_client()
+        project_id = config.get("project_id", "")
+        if not project_id:
+            print("Error: no project_id in cloud.json", file=sys.stderr)
+            sys.exit(1)
+        data = load_project()
+        # pr_number を持つ artifact だけが dedup key を持てる = 導出可能。番号無しは
+        # 冪等に扱えないので除外して可視化する (AX/保守性 review)。
+        derivable = []
+        skipped_no_number = 0
+        for pr_number, title, intent in decision_derive.iter_pr_intent_artifacts(data):
+            if decision_derive.normalize_pr_number(pr_number):
+                derivable.append((pr_number, title, intent))
+            else:
+                skipped_no_number += 1
+
+        # 既存 pr-intent decision を読んで covered set を作る (dedup = 冪等)。冪等が
+        # この command の宣言契約なので、その土台の read が壊れたら握りつぶさない:
+        # --apply は中止 (重複を撒くくらいなら止める)、dry-run は縮退して警告のみ。
+        DEDUP_SCAN_LIMIT = decision_derive.DEDUP_SCAN_LIMIT
+        dedup_reliable = True
+        try:
+            res = client.list_decisions(
+                project_id, kind=decision_derive.DERIVED_PR_INTENT_KIND,
+                limit=DEDUP_SCAN_LIMIT)
+            existing = res.get("decisions", []) if isinstance(res, dict) else []
+            if len(existing) >= DEDUP_SCAN_LIMIT:
+                dedup_reliable = False  # truncation 疑い → 上限外は covered から漏れる
+                print(f"  ⚠ 既存 pr-intent decision が上限 {DEDUP_SCAN_LIMIT} 件に達し "
+                      "dedup が不完全な可能性があります。", file=sys.stderr)
+        except Exception as exc:
+            dedup_reliable = False
+            existing = []
+            print(f"  ⚠ 既存 decision の読み出しに失敗 (dedup 不能): {exc}", file=sys.stderr)
+        if apply and not dedup_reliable:
+            print("Error: dedup の前提 (既存 decision の確認) が満たせないため --apply を "
+                  "中止しました。冪等性が壊れ重複を撒くのを防ぐためです。時間をおいて "
+                  "再試行するか、`beacon decision derive --json` で状態を確認してください。",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        covered = decision_derive.covered_pr_numbers(existing)
+        decided_by = decided_by_for_review()
+        to_derive = [
+            (pr_number, title, intent)
+            for (pr_number, title, intent) in derivable
+            if decision_derive.normalize_pr_number(pr_number) not in covered
+        ]
+        derived = 0
+        failed = 0
+        if apply:
+            for pr_number, title, intent in to_derive:
+                payload = decision_derive.build_pr_intent_decision(
+                    pr_number, title, intent, decided_by=decided_by)
+                if payload is None:
+                    continue
+                # 失敗契約は正典 seam に一本化 (保守性 M2)。成功/失敗は ok フラグで数える。
+                ok = False
+                with best_effort_decision_write(f"pr-intent for PR #{pr_number}"):
+                    client.record_decision(project_id, payload)
+                    ok = True
+                if ok:
+                    derived += 1
+                else:
+                    failed += 1
+    except SystemExit:
+        raise
+    except Exception as exc:
+        print(f"Error: failed to derive decisions: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    attempted = len(to_derive)
+    already_covered = len(derivable) - attempted
+    if json_mode:
+        out = {"apply": apply, "already_covered": already_covered,
+               "skipped_no_number": skipped_no_number,
+               "pr_intent_artifacts": len(derivable) + skipped_no_number}
+        if apply:
+            out.update({"derived": derived, "failed": failed})
+        else:
+            out["pending"] = attempted
+        print(json.dumps(out, ensure_ascii=False))
+    elif apply:
+        msg = (f"decision derive: {derived} 件を導出 / {failed} 件失敗 / "
+               f"{already_covered} 件は既存済み")
+        if skipped_no_number:
+            msg += f" / {skipped_no_number} 件は PR 番号欠落で対象外"
+        print(msg)
+    else:
+        msg = (f"decision derive (dry-run): {attempted} 件が導出対象 / "
+               f"{already_covered} 件は既存済み")
+        if skipped_no_number:
+            msg += f" / {skipped_no_number} 件は PR 番号欠落で対象外"
+        print(msg + "。実行するには --apply を付けてください。")

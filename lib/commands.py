@@ -174,7 +174,8 @@ from cmd_task import (  # noqa: F401
 # canonical home + patch target is cmd_<family>._foo; a missing commands._foo now
 # fails loudly (AttributeError) instead of silently.
 from cmd_note import cmd_note_add, cmd_note_list, cmd_note_clear  # noqa: F401
-from cmd_decision import cmd_decision_record, cmd_decision_list  # noqa: F401  (ms-154 e-5594/e-5595)
+from cmd_decision import (cmd_decision_record, cmd_decision_list,  # noqa: F401  (ms-154 e-5594/e-5595)
+                          cmd_decision_derive)  # noqa: F401  (ms-166 e-5972)
 from cmd_incident import (  # noqa: F401
     cmd_incident_open, cmd_incident_close, cmd_incident_escalate, cmd_incident_list,
 )
@@ -3475,10 +3476,8 @@ def _record_review_adjudication_decision(review_type: str, pr_number: str,
     if not summary and not adjudications:
         return
     from commands_shared import (best_effort_decision_write, _is_cloud_mode,
-                                 _get_api_client, ADJUDICATION_DISPOSITIONS)
-    # single source for the 採否 decided_by mapping (保守性 M1): reuse cmd_pr's, do
-    # not re-implement — commands.py already depends on cmd_pr (dispatch re-imports).
-    from cmd_pr import _decided_by_for_review
+                                 _get_api_client, ADJUDICATION_DISPOSITIONS,
+                                 decided_by_for_review)
     with best_effort_decision_write(
             f"review-adjudication for PR #{pr_number} ({review_type})",
             recovery_hint="re-run `beacon review done` with the same flags — the gate "
@@ -3520,7 +3519,7 @@ def _record_review_adjudication_decision(review_type: str, pr_number: str,
             "kind": "review-adjudication",
             "decision": decision,
             "rationale": rationale,
-            "decided_by": _decided_by_for_review(),
+            "decided_by": decided_by_for_review(),
             # PR / review-type linkage lives in evidence as real link refs — the
             # server's related schema (_RELATED_KEYS) only keeps task/target/trek/
             # event ids, so `related.pr_number` was silently dropped (found by
@@ -10634,6 +10633,7 @@ if __name__ == "__main__":
         "note_clear": cmd_note_clear,
         "decision_record": cmd_decision_record,
         "decision_list": cmd_decision_list,
+        "decision_derive": cmd_decision_derive,
 
         "bus_send": cmd_bus_send,
         "bus_listen": cmd_bus_listen,

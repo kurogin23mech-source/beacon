@@ -172,6 +172,11 @@ def cmd_pr_add():
         sys.exit(1)
     save_project(data)
 
+    # ms-166 e-5972: write-through — derive a pr-intent decision from the PR's
+    # declared intent at record time, so the "why" of this change lands on the
+    # decision arm without a separate `beacon decision record` (成果物からの導出).
+    _derive_pr_intent_decision(_pr_number_from_url(url), title, intent)
+
     # ms-119 e-4003: a recorded PR is the beacon-owned PR-open 契機 — auto-bind
     # every PR-bound review (AX + maintainability, data-driven from the registry)
     # so they fire structurally at the 節目 (not only when a human remembers
@@ -554,11 +559,12 @@ def _decided_by_for_review() -> str:
     consistency (its ``human-delegated`` gloss-vs-usage tension is a known
     follow-up, e-5670 — NOT re-litigated here).
 
-    ms-166 e-5971 (保守性 M1): this is the single source for the 採否 decided_by
-    mapping — ``commands._record_review_adjudication_decision`` (review-adjudication)
-    imports and calls THIS function rather than re-implementing it, so the PR-verdict
-    採否 and the finding-level 採否 cannot drift."""
-    return "human-delegated" if _session_kind_is_human() else "autonomous-AI"
+    ms-166 e-5972 (保守性 M1): the single source is now
+    ``commands_shared.decided_by_for_review`` (leaf), shared by review-adjudication
+    and pr-intent derivation too. This thin wrapper keeps the cmd_pr-local name its
+    call sites already use, delegating so no 兄弟 module re-implements the mapping."""
+    from commands_shared import decided_by_for_review
+    return decided_by_for_review()
 
 
 def _review_evidence_from_env() -> list:
@@ -612,6 +618,28 @@ def _record_review_decision(entry_id: str, verdict: str, rationale: str,
         # missing; swallow everything so decision recording never breaks the
         # approve / reject / request-changes flow.
         pass
+
+
+def _derive_pr_intent_decision(pr_number, title: str, intent: str) -> None:
+    """ms-166 e-5972 — write-through: derive a ``pr-intent`` decision from the PR's
+    declared intent at record time, so a change's "why" reaches the decision arm as
+    a DERIVED product (no separate ``beacon decision record``). No-op when the PR
+    carries no intent (nothing to derive). cloud-only, best-effort but LOGGED on
+    failure (``best_effort_decision_write``) so it never breaks ``pr add``."""
+    import decision_derive
+    payload = decision_derive.build_pr_intent_decision(
+        pr_number, title, intent, decided_by=_decided_by_for_review())
+    if payload is None:
+        return
+    from commands_shared import (best_effort_decision_write, _is_cloud_mode,
+                                 _get_api_client)
+    with best_effort_decision_write(f"pr-intent for PR #{pr_number}"):
+        if not _is_cloud_mode():
+            return
+        client, config = _get_api_client()
+        project_id = config.get("project_id", "")
+        if project_id:
+            client.record_decision(project_id, payload)
 
 
 def cmd_pr_approve():

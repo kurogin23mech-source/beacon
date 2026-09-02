@@ -37,8 +37,8 @@ def _cloud(monkeypatch, fake, *, human=False):
     monkeypatch.setattr(commands_shared, "_is_cloud_mode", lambda: True)
     monkeypatch.setattr(commands_shared, "_get_api_client",
                         lambda: (fake, {"project_id": "p1"}))
-    # decided_by は cmd_pr._decided_by_for_review (単一真実源) 経由 = cmd_pr の binding を読む。
-    monkeypatch.setattr(cmd_pr, "_session_kind_is_human", lambda: human)
+    # decided_by は commands_shared.decided_by_for_review (単一真実源) 経由。
+    monkeypatch.setattr(commands_shared, "_session_kind_is_human", lambda: human)
 
 
 # --- decision payload -------------------------------------------------------

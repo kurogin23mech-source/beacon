@@ -2248,10 +2248,25 @@ EOF
                     BEACON_JSON="$_dec_json" \
                     python3 "$COMMANDS_PY" decision_list
                 ;;
+            derive)
+                shift 2
+                _dec_json="" _dec_apply=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json)  _dec_json="1"; shift ;;
+                        --apply) _dec_apply="1"; shift ;;
+                        -?*)     _guard_flag "$1" ;;
+                        *)       _guard_positional "$1" "Usage: beacon decision derive [--apply] [--json]  (このコマンドは flag のみを取ります。--apply を apply と打ち間違えていませんか?)" ;;
+                    esac
+                done
+                BEACON_JSON="$_dec_json" BEACON_APPLY="$_dec_apply" \
+                    python3 "$COMMANDS_PY" decision_derive
+                ;;
             *)
                 echo "Usage: beacon decision record --what \"<決定>\" --evidence \"<link>\" [--rationale \"<なぜ>\"]"
                 echo "                              [--kind log-backstop] [--decided-by autonomous-AI] [--related-task e-XXX] [--json]"
                 echo "       beacon decision list [--kind <kind>] [--limit N] [--json]"
+                echo "       beacon decision derive [--apply] [--json]  (既存 PR の intent から decision を導出; 現状 PR intent のみ対応; dry-run 既定、--apply で書込; ms-166 e-5972)"
                 echo ""
                 echo "  --evidence は複数回指定可 (1 link ごと)。decided_by を立てる一級決定は evidence 必須。"
                 ;;
