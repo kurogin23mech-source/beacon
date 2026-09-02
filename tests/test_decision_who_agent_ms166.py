@@ -78,3 +78,37 @@ def test_no_agent_still_normalizes_to_none_not_keyerror():
     # 回帰前の挙動 (agent 未指定) でも壊れない: None に正規化される
     ev = de.decision_event_from_task_done(entry_id="e-1", decider_user_id="1")
     assert ev["who"]["agent"] is None
+
+
+# --- trek fire 経路も同じ helper を通す (独立レビュー consensus, e-6012) ---
+
+def test_halt_carries_agent_into_who():
+    ev = de.decision_event_from_halt(
+        resumed=False, trek_id="tk-1", issuer_user_id="100953",
+        agent=de.agent_from_claims({"email": "a@b.com"}))
+    assert ev["who"]["agent"] == "a@b.com"
+
+
+def test_trek_review_carries_agent_into_who():
+    ev = de.decision_event_from_trek_review(
+        decision="approve", trek_id="tk-1", decider_user_id="100953",
+        agent=de.agent_from_claims({"email": "a@b.com"}))
+    assert ev["who"]["agent"] == "a@b.com"
+
+
+def test_all_human_fire_builders_expose_agent_param():
+    """全 human-claims 由来の builder が agent 引数を持つ (= どの fire site も
+    who.agent を載せられる) ことを構造的に保証する — 新 builder が agent 無しで
+    足された時にここで落ちる。"""
+    import inspect
+    builders = [
+        de.decision_event_from_task_done,
+        de.decision_event_from_completion_verdict,
+        de.decision_event_from_scope_approval,
+        de.decision_event_from_halt,
+        de.decision_event_from_trek_review,
+    ]
+    for fn in builders:
+        assert "agent" in inspect.signature(fn).parameters, (
+            f"{fn.__name__} は agent 引数を持つべき (who.agent を載せる fire site)"
+        )

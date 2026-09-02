@@ -991,11 +991,14 @@ def make_router(
 
     def _record_halt_decision(project_id: str, trek_id: str, *, resumed: bool,
                               issuer_session_id: str, issuer_user_id: str,
-                              context: str, rationale: str = "") -> None:
+                              context: str, rationale: str = "",
+                              agent: str | None = None) -> None:
         """ms-90 / e-3247 + e-3241: Trek の halt / resume を decision-event に記録。
 
         記録失敗は halt / resume 自体を壊してはならない (= 付随的) ので握り潰して
         ログするだけ。project_id が空 (= home project 解決失敗) なら skip する。
+        ``agent`` は who.agent (= 誰が halt/resume したか、e-6012) — 呼び出し側が
+        認証 claims から ``agent_from_claims`` で解決して渡す。
         """
         if not project_id:
             return
@@ -1009,6 +1012,7 @@ def make_router(
                     issuer_user_id=issuer_user_id,
                     context=context,
                     rationale=(rationale or None),
+                    agent=agent,
                 ),
             )
         except Exception as _dec_exc:  # pragma: no cover - defensive
@@ -1838,6 +1842,7 @@ def make_router(
             issuer_session_id=body.issued_by_session_id,
             issuer_user_id=user.get("sub") or "", context=body.reason or "",
             rationale=body.rationale or "",
+            agent=decision_event_mod.agent_from_claims(user),
         )
         return t
 
@@ -1852,6 +1857,7 @@ def make_router(
         _record_halt_decision(
             _resolve_leader_home_project_id(t), trek_id, resumed=True,
             issuer_session_id="", issuer_user_id=user.get("sub") or "", context="",
+            agent=decision_event_mod.agent_from_claims(user),
         )
         return t
 
@@ -2554,6 +2560,7 @@ def make_router(
                             task_id=body.task_id,
                             decider_session_id=caller_sid,
                             decider_user_id=user_id,
+                            agent=decision_event_mod.agent_from_claims(user),
                             rationale=(body.note or None),
                         ),
                     )
