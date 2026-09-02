@@ -102,6 +102,27 @@ def _normalize_who(who: dict | None) -> dict:
     }
 
 
+def agent_from_claims(user: dict | None) -> str | None:
+    """認証 claims から decision の ``who.agent`` (= 誰が判断したか) を解決する
+    単一の真実源。
+
+    ``agent`` は「判断を下した主体の識別子」で、人間トークンでは email
+    (dm-send が確立した規約 — envelope の sender email を agent に入れていた)。
+    CLI 発の decision fire 経路 (task-done / completion-verdict / 手動 record /
+    pr-intent / review 採否 / scope 承認) は claims に email があるのに
+    ``who`` へ載せておらず、``who.agent`` が一律 None になっていた (回帰)。
+    machine key は email を持たない (= backend agent) ので None のまま
+    (= backend decision は今日 agent 無しが正)。
+
+    各 fire 経路が ``user.get("email")`` を直書きすると 1 箇所忘れるだけで
+    再発するため、解決規則をこの 1 関数に集約し、呼び出し側は必ずこれを通す。
+    """
+    if not user:
+        return None
+    email = (user.get("email") or "").strip()
+    return email or None
+
+
 def _normalize_related(related: dict | None) -> dict:
     """related を固定 4 キー shape に正規化する (= 未指定キーは None)。"""
     src = dict(related or {})
