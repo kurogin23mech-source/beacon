@@ -88,7 +88,13 @@ def _stamp_review_gate(beacon_root, *, dry_run=False):
         print(f"  ✓ stamped beacon-review-gate=success on {sha[:7]}")
 
 
-_RELEASE_STAGING_REF = "_release-staging"
+# Unprotected scratch ref used only to land a bump commit's SHA on the remote so
+# GitHub's statuses API will accept a beacon-review-gate status for it (e-5975).
+# It is NOT a staging environment — it is a throwaway landing pad, force-pushed
+# and deleted each release. IMPORTANT: this ref MUST stay outside main's branch
+# protection; if a wildcard rule ever covers `_release-*`, step 1 below is
+# rejected and the release breaks. Keep it excluded in repo Settings > Branches.
+_RELEASE_STAGING_REF = "_release-gate-scratch"
 
 
 def _push_main(beacon_root, *, dry_run=False):
@@ -121,13 +127,22 @@ def _push_main(beacon_root, *, dry_run=False):
     #    failed run may have left the staging ref behind).
     run(["git", "push", "--force", "origin",
          f"HEAD:refs/heads/{_RELEASE_STAGING_REF}"], cwd=beacon_root)
-    # 2. Stamp the required gate success on the now-existing SHA.
-    _stamp_review_gate(beacon_root, dry_run=False)
+    # 2. Stamp the required gate success on the now-existing SHA. (dry_run is
+    #    always False here — the guard above returns before this point — but pass
+    #    it through rather than hardcode, so the flag contract stays legible.)
+    _stamp_review_gate(beacon_root, dry_run=dry_run)
     # 3. Protected push to main now satisfies the required check.
     run(["git", "push", "origin", "main"], cwd=beacon_root)
-    # 4. Best-effort cleanup — never fail the release on the staging teardown.
-    run(["git", "push", "origin", "--delete", _RELEASE_STAGING_REF],
-        cwd=beacon_root, check=False)
+    # 4. Best-effort cleanup — never fail the release on teardown, but SURFACE a
+    #    failure so a dangling scratch ref on the remote is visible, not silent.
+    cleanup = subprocess.run(
+        ["git", "push", "origin", "--delete", _RELEASE_STAGING_REF],
+        cwd=beacon_root, capture_output=True, text=True)
+    if cleanup.returncode != 0:
+        print(f"  ⚠️  scratch ref cleanup failed (branch "
+              f"'{_RELEASE_STAGING_REF}' may persist on the remote): "
+              f"{(cleanup.stderr or cleanup.stdout).strip()[:200]}",
+              file=sys.stderr)
 
 
 def _update_readme_version(beacon_root, version_str, *, dry_run=False):

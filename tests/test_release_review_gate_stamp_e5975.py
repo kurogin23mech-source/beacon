@@ -130,16 +130,30 @@ def test_push_main_lands_sha_then_stamps_then_pushes(monkeypatch):
                         lambda *a, **k: calls.append("stamp"))
     monkeypatch.setattr(release, "run",
                         lambda cmd, **k: calls.append(("run", tuple(cmd))))
+
+    class _Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_sub(cmd, **k):
+        calls.append(("subprocess", tuple(cmd)))
+        return _Ok()
+
+    monkeypatch.setattr(release.subprocess, "run", fake_sub)
     release._push_main("/repo", dry_run=False)
-    # 1. staging push lands the SHA on the remote first
+    # 1. staging push lands the SHA on the remote first, force-pushed (a prior
+    #    failed run may have left the scratch ref behind)
     assert calls[0][0] == "run"
+    assert "--force" in calls[0][1]
     assert f"HEAD:refs/heads/{release._RELEASE_STAGING_REF}" in calls[0][1]
     # 2. stamp happens only after the SHA exists
     assert calls[1] == "stamp"
     # 3. then the protected push to main
     assert calls[2] == ("run", ("git", "push", "origin", "main"))
-    # 4. staging ref torn down last
-    assert calls[3][0] == "run" and "--delete" in calls[3][1]
+    # 4. scratch ref torn down last (via subprocess so a teardown failure can be
+    #    surfaced rather than swallowed)
+    assert calls[3][0] == "subprocess" and "--delete" in calls[3][1]
 
 
 def test_no_bare_push_to_main_outside_the_helper():
