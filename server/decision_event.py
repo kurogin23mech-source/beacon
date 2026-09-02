@@ -102,6 +102,32 @@ def _normalize_who(who: dict | None) -> dict:
     }
 
 
+def agent_from_claims(user: dict | None) -> str | None:
+    """認証 claims (= require_auth が返す user dict) から decision の
+    ``who.agent`` (= 誰が判断したか) を解決する。返すのは人間トークンの email。
+
+    ``agent`` は「判断を下した主体の識別子」。decision には agent の解決元が
+    2 つあり、どちらも正当:
+      1. **認証 claims 経由** (この関数) — CLI 発の fire 経路 (task-done /
+         completion-verdict / 手動 record / pr-intent / review 採否 / scope 承認 /
+         trek halt・review)。email を claims から取る。
+      2. **envelope issuer 経由** (app.py の dm-send、``agent=env_issuer``) —
+         送信者は envelope から解決するので claims でなく issuer を使う。
+
+    経緯 (e-6012): 経路 1 の全 fire site が claims に email があるのに ``who`` へ
+    載せておらず ``who.agent`` が一律 None になっていた (回帰)。経路 1 の解決規則を
+    この 1 関数に集約し、各 fire site が ``user.get("email")`` を直書きして 1 箇所
+    忘れる事故を防ぐ。経路 2 (dm-send) はこの関数の対象外 (= envelope が真値源)。
+
+    machine key は email を持たない (= backend agent) ので None (= backend
+    decision は今日 agent 無しが正)。空文字 / 空白のみ / claims 無しも None。
+    """
+    if not user:
+        return None
+    email = (user.get("email") or "").strip()
+    return email or None
+
+
 def _normalize_related(related: dict | None) -> dict:
     """related を固定 4 キー shape に正規化する (= 未指定キーは None)。"""
     src = dict(related or {})

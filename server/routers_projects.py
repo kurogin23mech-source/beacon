@@ -1396,6 +1396,7 @@ def make_router(
                     done_reason=(captured.get("done_reason") or None),
                     decided_by=decided_by,
                     decider_user_id=user.get("sub", ""),
+                    agent=decision_event_mod.agent_from_claims(user),
                 ),
             )
         except Exception as _dec_exc:  # pragma: no cover - defensive
@@ -1590,6 +1591,7 @@ def make_router(
                     decided_by=decided_by,
                     evidence=matched,
                     decider_user_id=user.get("sub", ""),
+                    agent=decision_event_mod.agent_from_claims(user),
                 ),
             )
         except Exception as _dec_exc:  # pragma: no cover - defensive
@@ -1630,7 +1632,8 @@ def make_router(
                 decided_by=body.decided_by,
                 evidence=body.evidence,
                 options=body.options,
-                who={"user_id": user.get("sub", ""), "session_id": sid},
+                who={"user_id": user.get("sub", ""), "session_id": sid,
+                     "agent": decision_event_mod.agent_from_claims(user)},
                 related=(body.related or {}),
             )
         except ValueError as e:
@@ -3756,6 +3759,7 @@ def make_bus_gate_router(
                     event_id=event_id,
                     context=body.context or "",
                     rationale=body.rationale or None,
+                    agent=decision_event_mod.agent_from_claims(user),
                 ),
             )
         except Exception as _dec_exc:  # pragma: no cover - defensive
