@@ -57,7 +57,8 @@ def test_generic_seam_write失敗はwarnして飲まない(monkeypatch, caplog):
         # 例外が伝播しないこと (= 完遂フローを壊さない)。
         target_completion._record_completion_decision({"id": "ms-9"}, "done", "理由")
     msgs = " ".join(r.getMessage() for r in caplog.records)
-    assert "completion-verdict decision write failed" in msgs
+    assert "decision write failed" in msgs
+    assert "completion-verdict" in msgs
     assert "ms-9" in msgs
 
 
@@ -87,7 +88,8 @@ def test_approve主経路_write失敗はwarnして飲まない(monkeypatch, capl
         cmd_target._record_completion_verdict_decision(
             "ms-9", "done", _approval_entry(), "レビュー合格につき承認")
     msgs = " ".join(r.getMessage() for r in caplog.records)
-    assert "completion-verdict decision write failed" in msgs
+    assert "decision write failed" in msgs
+    assert "completion-verdict" in msgs
     assert "ms-9" in msgs
 
 

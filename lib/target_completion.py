@@ -42,7 +42,7 @@ def _record_completion_decision(target: dict, verdict: str, reason: str) -> None
     from commands_shared import (best_effort_completion_decision, _is_cloud_mode,
                                  _get_api_client, _session_kind_is_human)
     tid = ((target or {}).get("id") or "").strip()
-    with best_effort_completion_decision(tid or "?", verdict):
+    with best_effort_completion_decision(tid, verdict):
         if not _is_cloud_mode():
             return
         if not tid:

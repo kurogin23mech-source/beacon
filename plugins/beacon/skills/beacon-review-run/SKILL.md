@@ -331,8 +331,18 @@ PR レビュー (`/review` / `/code-review`) の中で「この変更の AX は�
 そのレビューが実施済みであることを記録する:
 
 ```bash
-beacon review done --type <ax|maintainability> --pr <n>
+# findings を採否したら、その採否 (何を採用/却下し・なぜか) も一緒に載せる
+# (ms-166 e-5971: 採否を decision arm に構造溶接する。別途 beacon decision record を
+# 叩かせない — gate を解消するこの call が採否を記録する call になる)。Step 5 で
+# 判断した「今直す / 記録して後で / 却下」がそのまま各 finding の disposition。
+beacon review done --type <ax|maintainability> --pr <n> \
+  --adjudication-summary "<採否の総括 1 行 (例: ax 4件中3件採用・1件却下)>" \
+  --adjudications '[{"finding":"<id/要約>","disposition":"accepted|declined|deferred","rationale":"<なぜ>"}]'
 ```
+
+`--verdict` / `--adjudications` は任意: findings がゼロ、または採否をまだ決めていない
+なら省いて gate 解消だけしてよい。**採否を決めたなら必ず載せる** — さもないと「誰が何を
+採用/却下し なぜか」の判断軌跡が落ちる (この採否こそ最も監査が要る AI 判断)。
 
 これは PR-open で発火した `<type>-review-due` トリガーを消し、`beacon pr
 approve` / `beacon pr merge` の**レビュー未実施ブロックを解消**する。ms-119 e-4060:
