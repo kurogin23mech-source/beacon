@@ -637,10 +637,12 @@ def test_list_decisions_reads_stream(monkeypatch):
         {"decision_id": "dec-2", "kind": "review-adjudication", "decision": "approve",
          "decided_by": "autonomous-AI", "evidence": ["pr:e-2"]},
     ]
-    # ms-166 e-5970: kind/limit/since are pushed INTO the store read (the store owns
-    # the newest-window + kind filter now), so the mock signature carries kind too.
+    # ms-166 e-5970 / ms-164 e-6030: kind/session/target/limit/since are pushed INTO
+    # the store read (the store owns the newest-window + filters now), so the mock
+    # signature carries them too.
     monkeypatch.setattr(_store_router_module, "list_decision_events",
-                        lambda pid, kind="", limit=100, since="": list(rows))
+                        lambda pid, kind="", limit=100, since="", session="",
+                        target="": list(rows))
     r = client.get(f"/api/projects/{PROJECT_ID}/decisions")
     assert r.status_code == 200
     body = r.json()
@@ -656,7 +658,7 @@ def test_list_decisions_filters_by_kind(monkeypatch):
     # ms-166 e-5970: the kind filter is the STORE's responsibility now (applied before
     # the limit window), not a route-level post-filter. The route must PASS kind through;
     # the mock mirrors the real store by filtering on it.
-    def _fake(pid, kind="", limit=100, since=""):
+    def _fake(pid, kind="", limit=100, since="", session="", target=""):
         return [r for r in rows if not kind or r.get("kind") == kind]
     monkeypatch.setattr(_store_router_module, "list_decision_events", _fake)
     r = client.get(f"/api/projects/{PROJECT_ID}/decisions?kind=task-done")
@@ -664,6 +666,22 @@ def test_list_decisions_filters_by_kind(monkeypatch):
     body = r.json()
     assert body["count"] == 1
     assert body["decisions"][0]["kind"] == "task-done"
+
+
+def test_list_decisions_forwards_session_and_target(monkeypatch):
+    # ms-164 e-6030: the route must PASS session/target through to the store so the
+    # filter is applied BEFORE the limit window (session-end reconciliation).
+    seen = {}
+
+    def _fake(pid, kind="", limit=100, since="", session="", target=""):
+        seen["session"] = session
+        seen["target"] = target
+        return []
+    monkeypatch.setattr(_store_router_module, "list_decision_events", _fake)
+    r = client.get(
+        f"/api/projects/{PROJECT_ID}/decisions?session=sv-abc&target=ms-9")
+    assert r.status_code == 200
+    assert seen == {"session": "sv-abc", "target": "ms-9"}
 
 
 def test_list_decisions_unknown_project_404():

@@ -232,41 +232,27 @@ def mechanical_summary(
 # Aggregation core
 # ---------------------------------------------------------------------------
 
-def resolve_worked_target(beacon_dir: Path, entry_target_ids: list) -> dict:
-    """Decide which Target this session actually worked on, so session-end can
-    scope its summary write to that Target rather than the whole project
-    (ms-153 e-5550 / SPEC 方針3, 問題 P3: write = 作業した target).
+def _read_fork_target_id(beacon_dir: Path) -> str:
+    """Return ``.beacon/fork.json``'s ``target_ms_id`` (the Target a fork worktree
+    exists to advance), or "" when there is no fork / it is malformed / the field
+    is empty. Read-only — never writes fork.json.
 
-    Resolution, highest confidence first:
-
-    1. **fork** — ``.beacon/fork.json``'s ``target_ms_id``. A fork worktree
-       exists to advance exactly that Target, so the write target is
-       STRUCTURALLY determined (SPEC 受入条件6: fork では target_ms_id で定まる),
-       independent of what the session happened to commit.
-    2. **inferred** — no fork, and the session's own entries all landed on ONE
-       Target: that Target.
-    3. **none / ambiguous** — no session entries (``none``) or entries spanning
-       several Targets (``ambiguous``): leave empty. The summary stays
-       project-wide/unattributed rather than guessing a single owner.
-
-    Returns ``{"target_id": str, "target_source": "fork"|"inferred"|"none"|
-    "ambiguous"}``. Read-only (never writes fork.json / project)."""
+    This is the filesystem half of worked-target resolution; the RULE that turns
+    (fork target + the session's entry targets) into the worked-target SET lives
+    in the pure, occupation-generic ``occupation.resolve_worked_targets`` (ms-164
+    実装順序1), which this module feeds. Kept tiny and local so ``aggregate_session``
+    reads the fork hint the same way ``cmd_log._read_fork_target_ms_id`` does."""
     fork_path = beacon_dir / "fork.json"
-    if fork_path.exists():
-        try:
-            fork = json.loads(fork_path.read_text(encoding="utf-8"))
-            tid = (fork.get("target_ms_id") or "").strip()
-            if tid:
-                return {"target_id": tid, "target_source": "fork"}
-        except (OSError, ValueError):
-            # malformed / unreadable fork.json → fall through to inference
-            pass
-    distinct = [t for t in dict.fromkeys(entry_target_ids or []) if t]
-    if len(distinct) == 1:
-        return {"target_id": distinct[0], "target_source": "inferred"}
-    if not distinct:
-        return {"target_id": "", "target_source": "none"}
-    return {"target_id": "", "target_source": "ambiguous"}
+    if not fork_path.exists():
+        return ""
+    try:
+        fork = json.loads(fork_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # malformed / unreadable fork.json → treat as no fork hint
+        return ""
+    if not isinstance(fork, dict):
+        return ""
+    return (fork.get("target_ms_id") or "").strip()
 
 
 def aggregate_session(
@@ -313,11 +299,23 @@ def aggregate_session(
         pr_texts=proj_entries["pr_texts"],
     )
 
-    # ms-153 e-5550 (SPEC 方針3): scope the write to the worked Target. In a fork
-    # this is structurally fixed by fork.json; else inferred from the session's
-    # own entries (empty when none / cross-target). This ATTRIBUTES the session
-    # summary to the Target it advanced instead of an implicit project-wide log.
-    worked = resolve_worked_target(beacon_dir, proj_entries.get("target_ids", []))
+    # ms-153 e-5550 → ms-164 e-5942 (SPEC 方針3): attribute the summary to the
+    # Target(s) this session actually advanced instead of an implicit project-wide
+    # log. ms-164 makes this MULTI: a session that touched several Targets in a day
+    # attributes to ALL of them (``target_ids``), so the record is reachable from
+    # the root AND from each child Target — the older single-target collapse folded
+    # a cross-target session to ``ambiguous`` → unattributed. The resolution RULE is
+    # the pure, occupation-generic ``occupation.resolve_worked_targets`` (実装順序1):
+    # fork ∪ entries → active fallback → none. This module only supplies the fork
+    # hint (filesystem) and the entry Targets (the same walk that collected the
+    # commits, so attribution never diverges from what was collected).
+    import occupation  # local import mirrors collect_project_entries (no top-level cycle)
+    worked = occupation.resolve_worked_targets(
+        project_data,
+        entry_target_ids=proj_entries.get("target_ids", []),
+        fork_target_id=_read_fork_target_id(beacon_dir),
+    )
+    worked_ids = worked["target_ids"]
 
     now = _now_iso()
     payload = {
@@ -326,7 +324,12 @@ def aggregate_session(
         "note_ids": notes["note_ids"],
         "commit_ids": proj_entries["commit_ids"],
         "pr_ids": proj_entries["pr_ids"],
-        "target_id": worked["target_id"],
+        # ``target_ids`` is the multi-attribution set (ms-164 e-5942). ``target_id``
+        # stays as the first of that set for back-compat with readers that predate
+        # multi (session-end Skill / any legacy consumer) — the read-side symmetric
+        # migration onto ``target_ids`` is a following slice.
+        "target_ids": worked_ids,
+        "target_id": worked_ids[0] if worked_ids else "",
         "target_source": worked["target_source"],
         "last_aggregated_at": now,
     }
@@ -353,5 +356,4 @@ __all__ = [
     "collect_local_notes",
     "collect_project_entries",
     "mechanical_summary",
-    "resolve_worked_target",
 ]

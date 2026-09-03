@@ -121,13 +121,30 @@ def cmd_decision_list():
     """
     kind = os.environ.get("BEACON_DECISION_KIND", "").strip()
     limit = _parse_limit(os.environ.get("BEACON_DECISION_LIMIT", "").strip())
+    # ms-164 e-6030: filter to one session's / one worked-Target's decisions so
+    # session-end can reconcile "did THIS session record the judgments it made on
+    # THIS target". Applied server-side before the limit window.
+    session = os.environ.get("BEACON_DECISION_SESSION", "").strip()
+    target = os.environ.get("BEACON_DECISION_TARGET", "").strip()
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not _is_cloud_mode():
+        # AX review PR#708: when a --session / --target filter was given, an empty
+        # result in local mode must NOT read as "this session recorded no
+        # decisions" — the stream simply does not exist locally and the filter was
+        # never evaluated. Signal ``filter_applied: false`` (JSON) / a note (text)
+        # so a caller can tell "filter ran, 0 matches" from "filter not evaluated".
+        filtered = bool(session or target)
         if json_mode:
-            print(json.dumps({"decisions": [], "count": 0}, ensure_ascii=False))
+            out = {"decisions": [], "count": 0}
+            if filtered:
+                out["filter_applied"] = False
+            print(json.dumps(out, ensure_ascii=False))
         else:
-            print("decision stream は cloud プロジェクトのみ (local mode では記録なし)")
+            msg = "decision stream は cloud プロジェクトのみ (local mode では記録なし)"
+            if filtered:
+                msg += " — --session / --target フィルタは適用されていません"
+            print(msg)
         return
 
     try:
@@ -136,7 +153,8 @@ def cmd_decision_list():
         if not project_id:
             print("Error: no project_id in cloud.json", file=sys.stderr)
             sys.exit(1)
-        result = client.list_decisions(project_id, kind=kind, limit=limit)
+        result = client.list_decisions(project_id, kind=kind, limit=limit,
+                                        session=session, target=target)
     except SystemExit:
         raise
     except Exception as exc:

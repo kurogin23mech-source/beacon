@@ -511,28 +511,62 @@ def assert_no_outcome(record: dict) -> None:
         )
 
 
+def _row_session_id(row: dict) -> str:
+    """A decision event's originating session — ``who.session_id`` (ms-164 e-6030).
+
+    The single place that knows WHERE the session lives on a row, so the filter and
+    any future reader read it the same way."""
+    return str((row.get("who") or {}).get("session_id") or "")
+
+
+def _row_target_id(row: dict) -> str:
+    """A decision event's worked Target — ``related.target_id`` with a top-level
+    ``target_id`` fallback (ms-164 e-6030).
+
+    ``related.target_id`` (ms-154 e-5592) is the canonical slot; the fallback keeps
+    the filter honest for any producer that stamped ``target_id`` at the top level.
+
+    NOTE — this layout is DECISION-EVENT specific. It is NOT the same shape as the
+    worked-target attribution on project.json records (session log / note / push),
+    which carry a top-level ``target_ids`` LIST (+ back-compat first ``target_id``).
+    A decision event is single-target (the one judgment's target); the record types
+    are multi. Do not copy this accessor onto those records — read their
+    ``target_ids`` list instead."""
+    related = row.get("related") or {}
+    return str(related.get("target_id") or row.get("target_id") or "")
+
+
 def window_decision_events(rows, *, kind: str = "", limit: int = 100,
-                           since: str = "") -> list[dict]:
-    """decision_events の read 窓の**単一真実源** (ms-166 e-5970).
+                           since: str = "", session: str = "",
+                           target: str = "") -> list[dict]:
+    """decision_events の read 窓の**単一真実源** (ms-166 e-5970 / ms-164 e-6030).
 
     3 つの store backend (firestore / mysql / dynamodb) は「行の取得」だけを担い、
-    窓のセマンティクス — ``kind`` で絞る → ``since`` (created_at 下限) で絞る →
-    ``(created_at, decision_id)`` 昇順に並べる → 直近 ``limit`` 件 (``[-limit:]``) —
-    はこの 1 関数に集約する。以前は同じロジックが 3 backend に逐語コピーされ、
-    1 箇所だけ直すと silent に drift した (= backend 切替時に初めて発覚する穴)。
+    窓のセマンティクス — ``kind`` / ``session`` / ``target`` で絞る → ``since``
+    (created_at 下限) で絞る → ``(created_at, decision_id)`` 昇順に並べる → 直近
+    ``limit`` 件 (``[-limit:]``) — はこの 1 関数に集約する。以前は同じロジックが
+    3 backend に逐語コピーされ、1 箇所だけ直すと silent に drift した (= backend
+    切替時に初めて発覚する穴)。
 
     なぜ最新側 (``[-limit:]``) か: append-only stream は無制限に伸び (dm-send だけで
     500+ 件)、最古 ``limit`` 件を返すと backlog が ``limit`` を超えた時点で新しい判断
     記録がすべて既定 read から不可視になる (= 永続化は成功しているのに「載らない」
-    ように見える)。``kind`` は ``limit`` の *前* に絞るので、kind 指定の read は
-    「最新 ``limit`` 件の中の kind」ではなく「その kind の最新 ``limit`` 件」を返す。
+    ように見える)。``kind`` / ``session`` / ``target`` は ``limit`` の *前* に絞るので、
+    絞り込み指定の read は「最新 ``limit`` 件の中の一致」ではなく「一致するものの最新
+    ``limit`` 件」を返す (ms-164 e-6030: session-end が『このセッション / この target の
+    判断』を件数窓こぼれなく取れる = scale-contract-principle 準拠)。
 
     ``rows`` は各 backend が取得した decision dict の list (``decision_id`` / ``kind``
-    / ``created_at`` を持つ)。純関数 — 副作用なし、入力 list は変更しない。
+    / ``created_at`` / ``who`` / ``related`` を持つ)。純関数 — 副作用なし、入力 list は
+    変更しない。
     """
     out = list(rows or [])
     if kind:
         out = [r for r in out if (r.get("kind") or "") == kind]
+    if session:
+        out = [r for r in out if _row_session_id(r) == session]
+    if target:
+        out = [r for r in out if _row_target_id(r) == target]
     if since:
         out = [r for r in out if (r.get("created_at") or "") > since]
     out.sort(key=lambda r: (r.get("created_at", ""), r.get("decision_id", "")))

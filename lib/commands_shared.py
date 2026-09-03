@@ -131,6 +131,66 @@ def load_project_unsafe():
     return store.load_project()
 
 
+# ---------------------------------------------------------------------------
+# Worked-target attribution (ms-164) — the ONE CLI-context resolver every
+# forward-record write (note / push / deploy / incident) routes through, so a
+# record is attributed to the Target(s) the session actually advanced and can be
+# reached from the root AND each child Target.
+# ---------------------------------------------------------------------------
+
+def _read_fork_target_ms_id() -> str:
+    """Return ``.beacon/fork.json``'s ``target_ms_id`` (the Target a fork worktree
+    exists to advance), or "" when there is no fork / it is malformed / the field
+    is empty (ms-164).
+
+    The single CLI-context fork-hint reader — resolves ``.beacon/`` from
+    ``get_project_file()``'s dirname, the same way every other beacon helper does.
+    ``cmd_log`` and the worked-target resolver below both read the fork hint through
+    here so the "where is the fork target" knowledge lives in ONE place (the
+    session-log aggregator has its own ``_read_fork_target_id(beacon_dir)`` because
+    it is handed an explicit dir, not the CLI's project-file env)."""
+    try:
+        fork_path = os.path.join(
+            os.path.dirname(get_project_file()), "fork.json")
+        if not os.path.exists(fork_path):
+            return ""
+        with open(fork_path, "r", encoding="utf-8") as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(rec, dict):
+        return ""
+    target = rec.get("target_ms_id")
+    return target.strip() if isinstance(target, str) else ""
+
+
+def resolve_worked_target_ids(data, *, entry_target_ids=None) -> list:
+    """Resolve the worked-Target id set (multi) for a record written from THIS CLI
+    context, routing through the single rule ``occupation.resolve_worked_targets``
+    (ms-164 SPEC 方針3 / 実装順序1).
+
+    ``entry_target_ids`` = the Targets a commit-group landed on; ``[]`` (default)
+    for point-in-time records (note / incident) that carry no commit set — those
+    resolve to the fork Target (in a fork worktree) or the active Target(s). Returns
+    the de-duplicated id list (possibly empty when there is no fork / active Target,
+    i.e. the record stays project-wide).
+
+    Callers routed through here today: ``note`` and ``push`` records. NOT yet:
+    ``deploy`` (``cmd_deploy`` still uses its own milestone-scan commit→target
+    mapping — its generalisation is e-5946, a KNOWN GAP, because deploy also carries
+    milestone-completion semantics that this id-only resolver does not model).
+
+    Returns ONLY the id list. A caller that also needs ``target_source`` (e.g. to
+    write it onto a record, as ``session_log.aggregate_session`` does) should call
+    ``occupation.resolve_worked_targets`` DIRECTLY and read both fields, rather than
+    this thin wrapper."""
+    return occupation.resolve_worked_targets(
+        data,
+        entry_target_ids=entry_target_ids or [],
+        fork_target_id=_read_fork_target_ms_id(),
+    )["target_ids"]
+
+
 def _local_date(iso_str: str) -> str:
     """Convert a UTC ISO8601 timestamp (e.g. '2026-05-24T23:30:00Z') to the
     operator's local YYYY-MM-DD. Empty/invalid input passes through (best-effort)."""

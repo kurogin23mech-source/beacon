@@ -19,6 +19,9 @@ from commands_shared import (
     _resolve_session_id,
     _resolve_commit_source,
     _check_ms_status_for_write,
+    # ms-164: the fork-hint reader now lives in commands_shared (the single
+    # CLI-context resolver shared by log / note / push / deploy / incident).
+    _read_fork_target_ms_id,
 )
 
 
@@ -182,44 +185,6 @@ def cmd_log_prepare():
         output["candidates"] = [core.milestone_prepare_info(ms) for ms in targets]
 
     print(json.dumps(output, ensure_ascii=False))
-
-
-def _read_fork_target_ms_id() -> str:
-    """Return the ``target_ms_id`` from ``.beacon/fork.json``, or "".
-
-    Fork worktrees are created by /beacon-session-fork (ms-67) and carry
-    a fork.json next to project.json that records the intent (= "this
-    worktree exists to work on ms-X"). cmd_log_prepare consults this
-    before falling back to the active-MS heuristic so commits made from
-    a fork worktree route to the milestone the fork was created for —
-    even if the parent repo has multiple active milestones (which would
-    otherwise force a candidates / picker dialog the human did not
-    intend in this child session).
-
-    Returns "" when:
-      - no fork.json exists (= regular worktree / main checkout)
-      - fork.json is malformed (= treat as no fork hint, don't crash)
-      - target_ms_id field is missing or empty
-
-    Reads from ``$(dirname project.json)/fork.json`` so it stays
-    consistent with how every other beacon helper resolves its
-    ``.beacon/`` directory.
-    """
-    try:
-        project_file = get_project_file()
-        fork_path = os.path.join(os.path.dirname(project_file), "fork.json")
-        if not os.path.exists(fork_path):
-            return ""
-        with open(fork_path, "r", encoding="utf-8") as f:
-            rec = json.load(f)
-        if not isinstance(rec, dict):
-            return ""
-        target = rec.get("target_ms_id")
-        if isinstance(target, str) and target.strip():
-            return target.strip()
-        return ""
-    except (OSError, json.JSONDecodeError, ValueError):
-        return ""
 
 
 def cmd_log_finalize():

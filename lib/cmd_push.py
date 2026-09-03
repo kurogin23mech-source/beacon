@@ -13,7 +13,11 @@ import sys
 
 import core
 import git_read_port
-from commands_shared import load_project, save_project
+from commands_shared import (
+    load_project,
+    save_project,
+    resolve_worked_target_ids,
+)
 
 # Read-only git introspection (branch / HEAD / commit range / git user) lives
 # behind git_read_port (ms-142 e-5527, spine §5): the outward-effect-free `git`
@@ -78,12 +82,25 @@ def cmd_push_record():
     except Exception:
         commits = []
 
-    # Resolve active ms_id if not given
-    if not ms_id:
-        for ms in data.get("milestones", []):
-            if ms.get("status") == "in_progress":
-                ms_id = ms["id"]
-                break
+    # Resolve the worked Target(s) if not explicitly given (ms-164 e-5945).
+    # Replaces the old `data['milestones']` + in_progress hardcode — which was
+    # blind to non-milestone target classes (a sales / back-office push attributed
+    # to nothing) — with the generic, occupation-aware, MULTI resolver: the fork
+    # Target in a fork worktree, else the active Target(s). Routed through the SAME
+    # rule as note / session log so attribution never diverges (SPEC 方針3). An
+    # explicit ms_id (from --ms / prepare) still wins and becomes the sole target.
+    if ms_id:
+        target_ids = [ms_id]
+    else:
+        try:
+            target_ids = resolve_worked_target_ids(data, entry_target_ids=[])
+        except Exception as exc:
+            # Best-effort, but SURFACE the failure (AX review PR#708): don't let a
+            # silent swallow make an unattributed push look like a no-active-target.
+            target_ids = []
+            print(f"Warning: worked-target attribution failed ({exc}); "
+                  f"push recorded without target_ids", file=sys.stderr)
+        ms_id = target_ids[0] if target_ids else ""
 
     # Pushed by: git user
     try:
@@ -100,6 +117,7 @@ def cmd_push_record():
             "to_hash": to_hash,
             "commits": commits[:30],
             "ms_id": ms_id,
+            "target_ids": target_ids,  # ms-164 e-5945: full worked-target set
             "last_push": {"id": last_push["id"], "date": last_push.get("pushed_at", "")} if last_push else None,
         }
         print(json.dumps(payload, ensure_ascii=False))
@@ -122,6 +140,11 @@ def cmd_push_record():
         "pushed_at": now,
         "ms_id": ms_id or None,
     }
+    # ms-164 e-5945: the full worked-target set (multi). ``ms_id`` stays as the
+    # first for back-compat with readers that predate multi; ``target_ids`` is the
+    # generic, occupation-neutral attribution a non-dev target class also lights up.
+    if target_ids:
+        push_entry["target_ids"] = target_ids
     if version:
         # e-1274: top-level version tag for cross-referencing with releases.
         push_entry["version"] = version

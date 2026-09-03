@@ -56,14 +56,28 @@ def cmd_incident_close():
 
 def cmd_incident_escalate():
     incident_id = os.environ.get("BEACON_INCIDENT_ID", "")
-    ms_id = os.environ.get("BEACON_MS_ID", "")
-    if not incident_id or not ms_id:
-        print("Error: incident id and -m <ms-id> required")
+    target_id = os.environ.get("BEACON_MS_ID", "")
+    if not incident_id or not target_id:
+        print("Error: incident id and -m <target-id> required")
         sys.exit(1)
     data = load_project()
-    op, incident, task = core.incident_escalate(data, incident_id, ms_id)
-    save_project(data, op={"type": "incident_escalate", "entry_id": incident_id, "ms_id": ms_id, "task_id": task["id"]})
-    print(f"Incident escalated: {incident_id} → {ms_id} as task {task['id']}")
+    # ms-164 e-5947: resolve the escalation target GENERICALLY (any target class,
+    # not just a milestone) here in the CLI layer — occupation.resolve_target is the
+    # profession-agnostic resolver, and core (which does the append) cannot import
+    # occupation. ``-m`` still names the target but now accepts any target id
+    # (ms-… / opp-… / a descriptor class). A bad / unknown id raises a clear error.
+    import occupation
+    try:
+        target = occupation.resolve_target(data, target_id)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        sys.exit(1)
+    tid = target.get("id", target_id)
+    op, incident, task = core.incident_escalate(data, incident_id, target)
+    # Keep ``ms_id`` in the audit op for back-compat; add generic ``target_id``.
+    save_project(data, op={"type": "incident_escalate", "entry_id": incident_id,
+                           "target_id": tid, "ms_id": tid, "task_id": task["id"]})
+    print(f"Incident escalated: {incident_id} → {tid} as task {task['id']}")
     print(f"  {task['description']}")
 
 

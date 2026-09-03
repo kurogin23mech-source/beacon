@@ -125,9 +125,17 @@ class _ListClient:
         self._rows = rows
         self.calls = []
 
-    def list_decisions(self, project_id, *, kind="", limit=100, since=""):
-        self.calls.append((project_id, kind, limit))
+    def list_decisions(self, project_id, *, kind="", limit=100, since="",
+                       session="", target=""):
+        self.calls.append((project_id, kind, limit, session, target))
         rows = [r for r in self._rows if not kind or r.get("kind") == kind]
+        if session:
+            rows = [r for r in rows
+                    if (r.get("who") or {}).get("session_id") == session]
+        if target:
+            rows = [r for r in rows
+                    if (r.get("related") or {}).get("target_id") == target
+                    or r.get("target_id") == target]
         return {"decisions": rows, "count": len(rows)}
 
 
@@ -155,6 +163,39 @@ def test_list_cloud_json(monkeypatch, capsys):
     import json as _json
     out = _json.loads(capsys.readouterr().out)
     assert out["count"] == 1 and out["decisions"][0]["decision_id"] == "dec-1"
+
+
+def test_list_forwards_session_and_target_env_to_client(monkeypatch, capsys):
+    """ms-164 e-6030 (maintainability review PR#708): the env → cmd_decision_list →
+    api_client seam must carry --session / --target. Guards against a future rename
+    of the env key or the keyword silently dropping the filter before the HTTP call."""
+    client = _ListClient([])
+    for k in ("BEACON_DECISION_KIND", "BEACON_DECISION_LIMIT"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("BEACON_JSON", "1")
+    monkeypatch.setenv("BEACON_DECISION_SESSION", "sv-test")
+    monkeypatch.setenv("BEACON_DECISION_TARGET", "ms-9")
+    monkeypatch.setattr(cmd_decision, "_is_cloud_mode", lambda: True)
+    monkeypatch.setattr(cmd_decision, "_get_api_client",
+                        lambda: (client, {"project_id": "p1"}))
+    cmd_decision.cmd_decision_list()
+    # calls tuple = (project_id, kind, limit, session, target)
+    assert client.calls[0] == ("p1", "", 100, "sv-test", "ms-9")
+
+
+def test_list_local_mode_signals_filter_not_applied(monkeypatch, capsys):
+    """ms-164 (AX review PR#708): in local mode an empty result with a filter given
+    must NOT read as 'no decisions' — signal filter_applied:false."""
+    for k in ("BEACON_DECISION_KIND", "BEACON_DECISION_LIMIT"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("BEACON_JSON", "1")
+    monkeypatch.setenv("BEACON_DECISION_SESSION", "sv-test")
+    monkeypatch.delenv("BEACON_DECISION_TARGET", raising=False)
+    monkeypatch.setattr(cmd_decision, "_is_cloud_mode", lambda: False)
+    cmd_decision.cmd_decision_list()
+    import json as _json
+    out = _json.loads(capsys.readouterr().out)
+    assert out == {"decisions": [], "count": 0, "filter_applied": False}
 
 
 def test_parse_limit_defaults_and_validates():

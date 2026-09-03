@@ -1081,6 +1081,67 @@ def iter_target_records(data: dict) -> list:
     return records
 
 
+def resolve_worked_targets(
+    data: dict,
+    *,
+    entry_target_ids: list | None = None,
+    fork_target_id: str = "",
+) -> dict:
+    """Resolve the SET of Targets a session (or commit group) actually worked on
+    — the single, occupation-generic, **multi-attribution** rule that every
+    forward-record write (session log / note / push / deploy / incident) is meant
+    to route through (ms-164 SPEC 方針3 / 実装順序1).
+
+    Why multi: one session commonly advances several Targets in a day. Collapsing
+    to a single "primary" — as the older single-target session-log resolver did,
+    folding a cross-target session to ``"ambiguous"`` → project-wide — starves those
+    records of attribution. (That single resolver has since been retired; ms-164
+    e-5942 routed ``session_log.aggregate_session`` onto THIS rule.) This returns
+    EVERY worked Target so a record can be reached from the root AND from each child
+    Target it touched (SPEC 設計判断 2026-09-03).
+
+    Resolution — ``entry_target_ids`` (the Targets the session's commits/PRs
+    actually landed on) are the authoritative evidence; ``fork_target_id`` is the
+    STRUCTURAL intent of a fork worktree (it exists to advance exactly that
+    Target, even before it has committed anything there). Both are legitimate, so
+    they are UNIONED rather than raced:
+
+      * fork worktree (``fork_target_id`` set AND it names a real Target in
+        ``data``): source ``"fork"`` — targets = the fork Target, then any others
+        the entries also touched.
+      * no (valid) fork, entries landed on ≥1 Target: source ``"inferred"`` —
+        targets = those Targets. One or many; multi is a first-class outcome now,
+        NOT collapsed to ``"ambiguous"``.
+      * neither: fall back to the active (``in_progress``) Target(s). source
+        ``"active"``.
+      * nothing active either: source ``"none"`` with an empty set — the record
+        stays project-wide / unattributed rather than guessing an owner.
+
+    Returns ``{"target_ids": [...], "target_source":
+    "fork"|"inferred"|"active"|"none"}`` with ``target_ids`` de-duplicated in
+    first-seen order. Pure: reads only ``data`` + the passed inputs, never the
+    filesystem (the caller resolves ``fork_target_id`` from ``.beacon/fork.json``),
+    so it is unit-testable without a worktree."""
+    entries = [t for t in dict.fromkeys(entry_target_ids or []) if t]
+    fork_tid = (fork_target_id or "").strip()
+    if fork_tid:
+        known = {r.get("id") for r in iter_target_records(data) if r.get("id")}
+        if fork_tid in known:
+            ordered = [fork_tid] + [t for t in entries if t != fork_tid]
+            return {"target_ids": ordered, "target_source": "fork"}
+        # fork.json names a Target that does not exist here (stale / renamed): do
+        # NOT stamp a bogus id — fall through to entry / active resolution, the
+        # same lenient recovery ``cmd_log`` uses for an unknown fork target.
+    if entries:
+        return {"target_ids": entries, "target_source": "inferred"}
+    active = [r.get("id") for r in iter_target_records(data)
+              if r.get("status") == "in_progress" and r.get("id")]
+    active = [t for t in dict.fromkeys(active) if t]
+    if active:
+        return {"target_ids": active, "target_source": "active"}
+    return {"target_ids": [], "target_source": "none"}
+
+
 # Sales secondary Target collections that are CLAIMABLE but are not manifest
 # Target collections (they ride a different persistence path and are not walked
 # by ``target_collections`` / the session-log aggregator). A 顧客獲得ターゲット =

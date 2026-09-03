@@ -121,3 +121,61 @@ def test_note_add_swallows_session_module_failure(project_dir, monkeypatch):
     note = _read_notes(project_dir)[0]
     assert note["text"] == "still recorded"
     assert "session_id" not in note
+
+
+# ---------------------------------------------------------------------------
+# Worked-target attribution (ms-164 e-5943)
+# ---------------------------------------------------------------------------
+
+def _write_project(project_dir: Path, milestones: list) -> None:
+    (project_dir / ".beacon" / "project.json").write_text(
+        json.dumps({"name": "t", "milestones": milestones}), encoding="utf-8")
+
+
+def test_note_add_attributes_to_active_target(project_dir, monkeypatch):
+    """A note written mid-session (no commits yet) attributes to the active
+    (in_progress) Target — reachable from the root AND that child Target."""
+    _write_project(project_dir, [
+        {"id": "ms-1", "status": "done"},
+        {"id": "ms-2", "status": "in_progress"},
+    ])
+    monkeypatch.setenv("BEACON_NOTE_TEXT", "mid-session thought")
+    commands.cmd_note_add()
+    note = _read_notes(project_dir)[0]
+    assert note["target_ids"] == ["ms-2"]
+    assert note["target_id"] == "ms-2"  # back-compat first-of-set
+
+
+def test_note_add_attributes_to_fork_target(project_dir, monkeypatch):
+    """In a fork worktree the note attributes to the fork Target structurally,
+    even with no active Target — the fork exists to advance exactly that Target."""
+    _write_project(project_dir, [{"id": "ms-9", "status": "todo"}])
+    (project_dir / ".beacon" / "fork.json").write_text(
+        json.dumps({"target_ms_id": "ms-9", "child_branch": "x"}), encoding="utf-8")
+    monkeypatch.setenv("BEACON_NOTE_TEXT", "fork note")
+    commands.cmd_note_add()
+    note = _read_notes(project_dir)[0]
+    assert note["target_ids"] == ["ms-9"]
+
+
+def test_note_add_no_target_when_none_active_no_fork(project_dir, monkeypatch):
+    """No active Target and no fork → the note stays project-wide (no target_ids),
+    rather than guessing an owner."""
+    _write_project(project_dir, [{"id": "ms-1", "status": "done"}])
+    monkeypatch.setenv("BEACON_NOTE_TEXT", "unattributed")
+    commands.cmd_note_add()
+    note = _read_notes(project_dir)[0]
+    assert "target_ids" not in note
+    assert "target_id" not in note
+
+
+def test_note_add_swallows_attribution_failure(project_dir, monkeypatch):
+    """Recording a note must succeed even if worked-target resolution blows up —
+    the note is more important than its attribution (best-effort)."""
+    monkeypatch.setattr(cmd_note, "resolve_worked_target_ids",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setenv("BEACON_NOTE_TEXT", "still recorded")
+    commands.cmd_note_add()
+    note = _read_notes(project_dir)[0]
+    assert note["text"] == "still recorded"
+    assert "target_ids" not in note
