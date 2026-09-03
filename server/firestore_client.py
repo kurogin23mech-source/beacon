@@ -2377,11 +2377,13 @@ def append_decision_event(project_id: str, data: dict) -> str:
 
 
 def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
-                         since: str = "") -> list[dict]:
-    """Fetch ``projects/{pid}/decision_events`` and window them (ms-166 e-5970).
+                         since: str = "", session: str = "",
+                         target: str = "") -> list[dict]:
+    """Fetch ``projects/{pid}/decision_events`` and window them (ms-166 e-5970 /
+    ms-164 e-6030).
 
-    This backend only FETCHES the rows; the read-window semantics (kind filter →
-    since filter → newest ``limit``) live in the single source
+    This backend only FETCHES the rows; the read-window semantics (kind / session /
+    target filter → since filter → newest ``limit``) live in the single source
     ``decision_event.window_decision_events`` so the three store backends can
     never drift from each other. See that helper for the full rationale (why the
     newest window, not the oldest — an oldest-``limit`` slice hid every recent
@@ -2399,4 +2401,5 @@ def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
         rec = d.to_dict() or {}
         rec["decision_id"] = d.id
         rows.append(rec)
-    return window_decision_events(rows, kind=kind, limit=limit, since=since)
+    return window_decision_events(rows, kind=kind, limit=limit, since=since,
+                                  session=session, target=target)

@@ -125,9 +125,17 @@ class _ListClient:
         self._rows = rows
         self.calls = []
 
-    def list_decisions(self, project_id, *, kind="", limit=100, since=""):
-        self.calls.append((project_id, kind, limit))
+    def list_decisions(self, project_id, *, kind="", limit=100, since="",
+                       session="", target=""):
+        self.calls.append((project_id, kind, limit, session, target))
         rows = [r for r in self._rows if not kind or r.get("kind") == kind]
+        if session:
+            rows = [r for r in rows
+                    if (r.get("who") or {}).get("session_id") == session]
+        if target:
+            rows = [r for r in rows
+                    if (r.get("related") or {}).get("target_id") == target
+                    or r.get("target_id") == target]
         return {"decisions": rows, "count": len(rows)}
 
 

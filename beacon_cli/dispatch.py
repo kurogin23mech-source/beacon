@@ -1053,6 +1053,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_decision.add_argument("--evidence", action="append", default=[])
     p_decision.add_argument("--related-task", dest="related_task", default="")
     p_decision.add_argument("--limit", default="")
+    # ms-164 e-6030: filter `decision list` to one session's / one worked-Target's
+    # decisions (session-end reconciliation).
+    p_decision.add_argument("--session", default="")
+    p_decision.add_argument("--target", default="")
     p_decision.add_argument("--json", action="store_true")
     p_decision.add_argument("--help", "-h", action="store_true", dest="show_help")
 
@@ -3546,8 +3550,9 @@ _DECISION_USAGE = (
     "Usage: beacon decision record --what \"<決定>\" --evidence \"<link>\" [--rationale \"<なぜ>\"]\n"
     "                              [--kind log-backstop] [--decided-by autonomous-AI]\n"
     "                              [--related-task e-XXX] [--json]\n"
-    "       beacon decision list [--kind <kind>] [--limit N] [--json]\n"
-    "  --evidence は複数回指定可。decided_by を立てる一級決定は evidence 必須。"
+    "       beacon decision list [--kind <kind>] [--session <sid>] [--target <id>] [--limit N] [--json]\n"
+    "  --evidence は複数回指定可。decided_by を立てる一級決定は evidence 必須。\n"
+    "  --session / --target は『このセッション / この作業対象で下した判断』に絞る (ms-164)。"
 )
 
 
@@ -3572,6 +3577,8 @@ def _handle_decision(root: Path, args: argparse.Namespace) -> int:
         env = {
             "BEACON_DECISION_KIND": args.kind or "",
             "BEACON_DECISION_LIMIT": args.limit or "",
+            "BEACON_DECISION_SESSION": args.session or "",
+            "BEACON_DECISION_TARGET": args.target or "",
             "BEACON_JSON": "1" if args.json else "",
         }
         return _run_commands_py(root, "decision_list", env)

@@ -2652,11 +2652,12 @@ def append_decision_event(project_id: str, data: dict) -> str:
 
 
 def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
-                         since: str = "") -> list[dict]:
-    """decision_events を取得して窓を掛けて返す (ms-166 e-5970).
+                         since: str = "", session: str = "",
+                         target: str = "") -> list[dict]:
+    """decision_events を取得して窓を掛けて返す (ms-166 e-5970 / ms-164 e-6030).
 
-    この backend は「行の取得」だけを担い、read 窓のセマンティクス (kind 絞り →
-    since 絞り → 直近 ``limit`` 件) は単一真実源
+    この backend は「行の取得」だけを担い、read 窓のセマンティクス (kind / session /
+    target 絞り → since 絞り → 直近 ``limit`` 件) は単一真実源
     ``decision_event.window_decision_events`` に集約している (3 backend で drift
     しないため)。窓の根拠 (なぜ最新側か = 最古 ``limit`` 件だと backlog 超過分の
     新しい判断記録が不可視になる) はその helper を参照。
@@ -2664,4 +2665,4 @@ def list_decision_events(project_id: str, *, kind: str = "", limit: int = 100,
     from decision_event import window_decision_events
     return window_decision_events(
         _query("decision_events", project_id),
-        kind=kind, limit=limit, since=since)
+        kind=kind, limit=limit, since=since, session=session, target=target)

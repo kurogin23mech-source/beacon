@@ -1652,6 +1652,8 @@ def make_router(
                        kind: str = Query(""),
                        limit: int = Query(100),
                        since: str = Query(""),
+                       session: str = Query(""),
+                       target: str = Query(""),
                        user: dict = Depends(require_auth)):
         """Read the unified decision-arm stream (ms-154 e-5595).
 
@@ -1659,7 +1661,12 @@ def make_router(
         judge fetches declared decisions (what / why / evidence / decided_by) to
         check each rationale against the actual code. ``kind`` filters to one
         decision family (e.g. ``task-done`` / ``review-adjudication`` /
-        ``log-backstop``).
+        ``log-backstop``). ``session`` (= ``who.session_id``) and ``target`` (=
+        ``related.target_id``) filter to one session's or one worked-Target's
+        decisions (ms-164 e-6030): session-end reconciles "did THIS session record
+        the judgments it made on THIS target". Like ``kind`` they are pushed INTO
+        the store window BEFORE the ``limit`` truncation, so a busy stream cannot
+        push the target session's decisions out of the read window.
 
         Read-window semantics (ms-166 e-5970): the response is the **newest**
         ``limit`` rows of the (kind-filtered) stream — NOT a forward page. ``kind``
@@ -1676,7 +1683,8 @@ def make_router(
         _load(project_id, user)  # read-access guard (404 / 403 as appropriate)
         try:
             rows = db.list_decision_events(
-                project_id, kind=kind, limit=limit, since=since)
+                project_id, kind=kind, limit=limit, since=since,
+                session=session, target=target)
         except Exception as exc:
             raise HTTPException(
                 status_code=502, detail=f"decision stream read failed: {exc}")
