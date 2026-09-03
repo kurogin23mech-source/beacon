@@ -166,6 +166,21 @@ def test_generic_work_item_sales_routes_through_activity_frontend():
     assert a["created_in_phase"] == "lead"   # defaulted from the opp's phase
 
 
+def test_generic_work_item_dev_nondefault_status_is_400():
+    # ms-167 Stage2 review (AX high): a frontend-owned kind creates work items in the
+    # default (todo) state and has no create-time status hook. A caller-provided
+    # non-default status is REJECTED (400), not silently dropped.
+    holder = {"data": _dev()}
+    eps = _build(holder)
+    with pytest.raises(HTTPException) as ei:
+        eps["work_item"]("p", "ms-1",
+                         rp.WorkItemCreate(description="x", status="done",
+                                           extra={"priority": "high"}),
+                         {"sub": "u1"})
+    assert ei.value.status_code == 400
+    assert holder["data"]["milestones"][0]["entries"] == []
+
+
 def test_generic_work_item_sales_invalid_ball_is_400():
     # sales-specific validation now applies via the frontend: a bad who_has_the_ball
     # is rejected (it was silently accepted when the generic path skipped the

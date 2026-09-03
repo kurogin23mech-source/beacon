@@ -2034,6 +2034,18 @@ def _all_work_item_ids(data: dict) -> list:
 _ARM_DEFAULT_ITEM_TYPE = object()  # sentinel: "use the arm's declared item_type"
 
 
+def _work_item_arm_meta(data: dict, target_id: str) -> tuple:
+    """Resolve a target's work-item arm addressing — ``(target_class, arm, id_field)``
+    — from the registry (target-class → work_item_arm). The SINGLE resolver both
+    ``add_work_item`` (write) and ``_find_work_item`` (read-back) consult, so the
+    target-class / arm / id_field derivation lives in ONE place instead of being
+    re-implemented in each (ms-167 Stage 2 review, maintainability finding: single
+    source of truth). ``arm`` is None when the kind declares no work-item arm."""
+    tc = target_class(data, _wm.target_kind(target_id))
+    wia = tc.get("work_item_arm") or {}
+    return tc, wia.get("arm"), tc.get("id_field", "id")
+
+
 def add_work_item(data: dict, target_id: str, *, description: str,
                   status: str = "", item_type=_ARM_DEFAULT_ITEM_TYPE,
                   **extra) -> dict:
@@ -2054,13 +2066,11 @@ def add_work_item(data: dict, target_id: str, *, description: str,
 
     Returns the new work-item dict. Raises ``ValueError`` if the target kind has
     no work-item arm or the target id is not found."""
-    kind = _wm.target_kind(target_id)
-    tc = target_class(data, kind)
-    wia = tc.get("work_item_arm") or {}
-    arm = wia.get("arm")
+    tc, arm, id_field = _work_item_arm_meta(data, target_id)
     if not arm:
-        raise ValueError(f"target-class {kind!r} has no work-item arm")
-    id_field = tc.get("id_field", "id")
+        raise ValueError(
+            f"target-class {_wm.target_kind(target_id)!r} has no work-item arm")
+    wia = tc.get("work_item_arm") or {}
     target = next((r for r in data.get(tc["collection"], []) or []
                    if r.get(id_field) == target_id), None)
     if target is None:
@@ -2099,15 +2109,12 @@ def add_work_item(data: dict, target_id: str, *, description: str,
 def _find_work_item(data: dict, target_id: str, item_id: str) -> dict | None:
     """Locate a just-created work item by id inside its Target's work-item arm, so
     the frontend-routed path (below) can return the same {item dict} shape the
-    skeleton ``add_work_item`` returns. Registry-driven (target-class → arm), so it
-    works for any occupation. Returns None if the target / item is not found."""
-    kind = _wm.target_kind(target_id)
-    tc = target_class(data, kind)
-    wia = tc.get("work_item_arm") or {}
-    arm = wia.get("arm")
+    skeleton ``add_work_item`` returns. Uses the shared ``_work_item_arm_meta``
+    resolver (same target-class → arm derivation as the write path). Returns None if
+    the target / item is not found."""
+    tc, arm, id_field = _work_item_arm_meta(data, target_id)
     if not arm:
         return None
-    id_field = tc.get("id_field", "id")
     target = next((r for r in data.get(tc.get("collection", ""), []) or []
                    if r.get(id_field) == target_id), None)
     if target is None:
@@ -2157,18 +2164,27 @@ _WORK_ITEM_FRONTENDS = {
 def add_work_item_via_frontend(data: dict, target_id: str, *, description: str,
                                status: str = "", author: dict | None = None,
                                **extra) -> dict:
-    """Add a work item routing through the owning target-class frontend when one is
-    registered (dev milestone → core.task_add, sales opportunity → activity_add), so
-    the generic write endpoint applies the SAME profession-specific validation and
-    field-stamping as the dedicated /entries path. A target-class with no registered
-    frontend (a data-defined descriptor occupation) falls back to the skeleton
-    ``add_work_item``. Returns the created work-item dict. Raises ``ValueError`` /
-    ``TypeError`` (unknown target, missing-required-field, wrong field for the kind)
+    """Add a work item — routing through the owning target-class frontend when one is
+    registered, ELSE falling back to the skeleton ``add_work_item`` (a data-defined
+    descriptor occupation with no bespoke frontend). When a frontend is used (dev
+    milestone → core.task_add, sales opportunity → activity_add) the generic write
+    endpoint applies the SAME profession-specific validation and field-stamping as the
+    dedicated /entries path. Returns the created work-item dict. Raises ``ValueError``
+    / ``TypeError`` (unknown target, missing-required-field, wrong field for the kind)
     for the caller to surface as a 400."""
     frontend = _WORK_ITEM_FRONTENDS.get(_wm.target_kind(target_id))
     if frontend is None:
         return add_work_item(data, target_id, description=description,
                              status=status, **extra)
+    # A frontend-owned kind creates its work items in the arm's default (todo) state
+    # and has no create-time status hook. Reject a non-default status rather than
+    # SILENTLY dropping it (Stage 2 AX review, high: silent no-op) — the caller learns
+    # the constraint instead of believing the status took effect.
+    if status and status != _wm.TODO_STATUS:
+        raise ValueError(
+            f"target-class {_wm.target_kind(target_id)!r} creates work items in the "
+            f"default state; status={status!r} is not settable at creation (omit it, "
+            f"then update the work item to change its status)")
     return frontend(data, target_id, description=description, status=status,
                     author=author, extra=extra)
 

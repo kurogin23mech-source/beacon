@@ -149,6 +149,28 @@ def test_sales_frontend_passes_created_at_key_but_value_is_empty():
     assert act["created_at"] == ""
 
 
+# ms-167 Stage2 review (maintainability): the shared arm resolver + the read-back
+# locator have their found / not-found paths pinned directly.
+
+def test_find_work_item_found_and_missing_paths():
+    data = _dev_rich()
+    item = occupation.add_work_item(data, "ms-1", description="t")
+    # found: returns the SAME dict object that lives in the arm
+    assert occupation._find_work_item(data, "ms-1", item["id"]) is item
+    # id miss / target miss → None (the frontend adapters' fallback trigger)
+    assert occupation._find_work_item(data, "ms-1", "e-nope") is None
+    assert occupation._find_work_item(data, "ms-404", item["id"]) is None
+
+
+def test_work_item_frontends_registry_keys_are_reachable_kinds():
+    # a frontend registered under a kind no target id ever resolves to would be dead
+    # (a typo like "milstone"). Assert every registry key is a reachable target kind.
+    valid = {work_model.target_kind(pfx + "1")
+             for pfx in work_model.known_target_prefixes()}
+    for kind in occupation._WORK_ITEM_FRONTENDS:
+        assert kind in valid, f"{kind!r} is not a reachable target kind"
+
+
 def test_missing_target_raises():
     with pytest.raises(ValueError, match="not found"):
         occupation.add_work_item(_dev_rich(), "ms-99", description="x")
