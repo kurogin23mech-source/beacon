@@ -1271,13 +1271,17 @@ def make_router(
                               body: WorkItemCreate,
                               user: dict = Depends(require_auth)):
         actor = user.get("sub", "")
+        # ms-167 Stage 2 (e-5788): resolve the human identity ONCE and thread it into
+        # the frontend, exactly as the dedicated /entries path does — a dev task
+        # created via this generic endpoint must carry the same meta.author.
+        author = _resolve_author(user)
 
         def op(data: dict):
             _require_write(data, user)
             # ``extra`` carries profession-specific fields (priority / deadline …).
-            # Guard the keys add_work_item already binds explicitly: without this a
-            # caller putting "status"/"description"/"item_type" in extra would make
-            # the **spread raise TypeError (multiple values), escaping as a 500.
+            # Guard the keys the write path binds explicitly: without this a caller
+            # putting "status"/"description"/"item_type" in extra would make the
+            # **spread raise TypeError (multiple values), escaping as a 500.
             extra = dict(body.extra or {})
             reserved = _WORK_ITEM_RESERVED_KWARGS & extra.keys()
             if reserved:
@@ -1287,9 +1291,15 @@ def make_router(
                             f"{sorted(reserved)}; pass description / status at the "
                             f"top level"))
             try:
-                item = occupation.add_work_item(
+                # ms-167 Stage 2 (e-5788): route through the owning target-class
+                # frontend (dev → core.task_add, sales → activity_add) instead of
+                # calling the skeleton directly. A dev task now gets priority
+                # (mandatory per ms-126) / author validated & stamped, closing the
+                # silent gap where the generic path produced malformed entries. A
+                # data-defined class with no frontend falls back to the skeleton.
+                item = occupation.add_work_item_via_frontend(
                     data, target_id, description=body.description,
-                    status=body.status, **extra)
+                    status=body.status, author=author, **extra)
             except (ValueError, TypeError) as e:
                 raise HTTPException(status_code=400, detail=str(e))
             return data, {"id": item.get("id"), "target_id": target_id}

@@ -2096,6 +2096,83 @@ def add_work_item(data: dict, target_id: str, *, description: str,
     return item
 
 
+def _find_work_item(data: dict, target_id: str, item_id: str) -> dict | None:
+    """Locate a just-created work item by id inside its Target's work-item arm, so
+    the frontend-routed path (below) can return the same {item dict} shape the
+    skeleton ``add_work_item`` returns. Registry-driven (target-class → arm), so it
+    works for any occupation. Returns None if the target / item is not found."""
+    kind = _wm.target_kind(target_id)
+    tc = target_class(data, kind)
+    wia = tc.get("work_item_arm") or {}
+    arm = wia.get("arm")
+    if not arm:
+        return None
+    id_field = tc.get("id_field", "id")
+    target = next((r for r in data.get(tc.get("collection", ""), []) or []
+                   if r.get(id_field) == target_id), None)
+    if target is None:
+        return None
+    return next((it for it in target.get(arm, []) or []
+                 if it.get("id") == item_id), None)
+
+
+def _frontend_dev_task(data, target_id, *, description, status, author, extra):
+    """dev work-item frontend: route through ``core.task_add`` so a task created via
+    the generic endpoint gets the SAME dev-shaped stamping as one created via
+    /entries — priority (mandatory per ms-126), author, created_by, meta. ``status``
+    is not a task_add parameter (a new task is always todo), so it is intentionally
+    dropped for this kind. Lazy import avoids the core↔occupation cycle."""
+    import core  # noqa: PLC0415
+    eid = core.task_add(data, target_id, description, author=author, **extra)
+    return _find_work_item(data, target_id, eid) or {"id": eid}
+
+
+def _frontend_sales_activity(data, target_id, *, description, status, author, extra):
+    """sales work-item frontend: route through ``sales_entities.activity_add`` so an
+    activity created via the generic endpoint gets the SAME sales-shaped stamping /
+    validation (who_has_the_ball, source, created_in_phase default). ``status`` /
+    ``author`` are not activity_add parameters and are dropped for this kind."""
+    import sales_entities  # noqa: PLC0415
+    aid = sales_entities.activity_add(data, target_id, description, **extra)
+    return _find_work_item(data, target_id, aid) or {"id": aid}
+
+
+# ms-167 Stage 2 (e-5788): the SINGLE registry mapping a built-in target-class kind
+# to its work-item frontend (the profession-specific validator + field-stamper that
+# core.task_add / sales_entities.activity_add own). The generic write endpoint
+# resolves the frontend HERE (one place) instead of an ``if kind == …`` branch at the
+# HTTP layer or — the e-5788 bug — calling the skeleton directly and skipping the
+# frontend, which produced dev tasks with no priority / author. A kind with NO entry
+# (a data-defined descriptor occupation) has no bespoke frontend, so it falls back to
+# the skeleton, which IS its frontend: it stamps created_at (Stage 1) and appends the
+# descriptor-declared fields. So "declare a new occupation ⇒ it lights up" still holds
+# — only the two built-in professions carry hand-written frontend code, registered in
+# this one dict rather than scattered as HTTP-layer branches.
+_WORK_ITEM_FRONTENDS = {
+    "milestone": _frontend_dev_task,
+    "opportunity": _frontend_sales_activity,
+}
+
+
+def add_work_item_via_frontend(data: dict, target_id: str, *, description: str,
+                               status: str = "", author: dict | None = None,
+                               **extra) -> dict:
+    """Add a work item routing through the owning target-class frontend when one is
+    registered (dev milestone → core.task_add, sales opportunity → activity_add), so
+    the generic write endpoint applies the SAME profession-specific validation and
+    field-stamping as the dedicated /entries path. A target-class with no registered
+    frontend (a data-defined descriptor occupation) falls back to the skeleton
+    ``add_work_item``. Returns the created work-item dict. Raises ``ValueError`` /
+    ``TypeError`` (unknown target, missing-required-field, wrong field for the kind)
+    for the caller to surface as a 400."""
+    frontend = _WORK_ITEM_FRONTENDS.get(_wm.target_kind(target_id))
+    if frontend is None:
+        return add_work_item(data, target_id, description=description,
+                             status=status, **extra)
+    return frontend(data, target_id, description=description, status=status,
+                    author=author, extra=extra)
+
+
 def _resolve_evidence_parent(data: dict, parent_id: str):
     """Resolve where a piece of evidence (a sales Communication / 事後記録型の証跡)
     is stored and which planned work item it fulfilled, occupation-generically

@@ -85,6 +85,12 @@ def _dev():
                             "entries": []}]}
 
 
+def _sales():
+    return {"project_id": "p", "name": "s", "profession": "sales",
+            "opportunities": [{"id": "opp-1", "label": "O", "phase": "lead",
+                               "activities": []}]}
+
+
 def test_generic_create_descriptor_target_zero_wiring():
     holder = {"data": _backoffice()}
     eps = _build(holder)
@@ -106,18 +112,72 @@ def test_generic_create_rejects_builtin_kind():
     assert ei.value.status_code == 400
 
 
-def test_generic_work_item_add_is_cross_class():
-    # add a work item to a dev milestone through the profession-agnostic route —
-    # occupation.add_work_item resolves the milestone's work-item arm (entries).
+def test_generic_work_item_dev_routes_through_frontend_with_priority():
+    # ms-167 Stage2 (e-5788): a dev task via the generic endpoint now ROUTES THROUGH
+    # core.task_add (the dev frontend), so it gets the same dev-shaped stamping as the
+    # /entries path — type="task", priority (mandatory per ms-126), created_at. Before
+    # Stage2 the generic path called the skeleton directly and produced a task with no
+    # priority / author (the silent gap e-5788 closes).
     holder = {"data": _dev()}
     eps = _build(holder)
     result = eps["work_item"]("p", "ms-1",
-                              rp.WorkItemCreate(description="task X"),
+                              rp.WorkItemCreate(description="task X",
+                                                extra={"priority": "high"}),
                               {"sub": "u1"})
     entries = holder["data"]["milestones"][0]["entries"]
     assert len(entries) == 1
-    assert entries[0]["id"] == result["id"]
-    assert entries[0]["description"] == "task X"
+    e = entries[0]
+    assert e["id"] == result["id"]
+    assert e["description"] == "task X"
+    assert e["type"] == "task"
+    assert e["meta"]["priority"] == "high"   # ms-126 enforced via the frontend
+    assert e["created_at"]                    # Stage1 stamp present
+
+
+def test_generic_work_item_dev_missing_priority_is_400():
+    # the core of the e-5788 fix: the generic path no longer silently produces a
+    # priority-less dev task. Routing through core.task_add enforces ms-126 (a task
+    # needs a priority), so an omitted priority is a clean 400, not a malformed entry.
+    holder = {"data": _dev()}
+    eps = _build(holder)
+    with pytest.raises(HTTPException) as ei:
+        eps["work_item"]("p", "ms-1", rp.WorkItemCreate(description="x"),
+                         {"sub": "u1"})
+    assert ei.value.status_code == 400
+    assert holder["data"]["milestones"][0]["entries"] == []
+
+
+def test_generic_work_item_sales_routes_through_activity_frontend():
+    # ms-167 Stage2: an activity via the generic endpoint routes through
+    # sales_entities.activity_add — who_has_the_ball is carried and created_in_phase
+    # is defaulted from the opportunity's current phase (sales frontend stamping).
+    holder = {"data": _sales()}
+    eps = _build(holder)
+    result = eps["work_item"]("p", "opp-1",
+                              rp.WorkItemCreate(
+                                  description="visit",
+                                  extra={"who_has_the_ball": "counterpart"}),
+                              {"sub": "u1"})
+    acts = holder["data"]["opportunities"][0]["activities"]
+    assert len(acts) == 1
+    a = acts[0]
+    assert a["id"] == result["id"]
+    assert a["who_has_the_ball"] == "counterpart"
+    assert a["created_in_phase"] == "lead"   # defaulted from the opp's phase
+
+
+def test_generic_work_item_sales_invalid_ball_is_400():
+    # sales-specific validation now applies via the frontend: a bad who_has_the_ball
+    # is rejected (it was silently accepted when the generic path skipped the
+    # frontend and called the skeleton directly).
+    holder = {"data": _sales()}
+    eps = _build(holder)
+    with pytest.raises(HTTPException) as ei:
+        eps["work_item"]("p", "opp-1",
+                         rp.WorkItemCreate(description="x",
+                                           extra={"who_has_the_ball": "bogus"}),
+                         {"sub": "u1"})
+    assert ei.value.status_code == 400
 
 
 def test_generic_work_item_add_unknown_target_400():
