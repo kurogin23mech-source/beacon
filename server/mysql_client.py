@@ -826,8 +826,85 @@ def _known_entities() -> set:
     """Entity suffixes whose row table the server may read/write: built-ins +
     ensured descriptor tables (ms-157 e-5750). Pure (no DB) — the SHOW TABLES
     seed happens once in create_mysql_tables / ensure_target_tables, not here, so
-    the decomposition guard stays cheap."""
+    the decomposition guard stays cheap.
+
+    NOTE: this reflects only what THIS process has ensured/observed. A descriptor
+    table another worker created after this process seeded its set is invisible
+    here until restart — the staleness _entity_materialized self-heals for the
+    decomposition guard (ms-157 e-5786)."""
     return set(TABLES) | _ENSURED_DESCRIPTOR_ENTITIES
+
+
+def _intern_descriptor_entity(entity: str) -> None:
+    """Record ``entity`` in the process known-set of ensured descriptor tables —
+    the SINGLE write入口 for the runtime ``.add`` path (ms-167 review, maintainability
+    finding: keep the mutation of the module-global set greppable in one place
+    rather than inline in whichever query function happens to discover the table).
+    Positive-only: callers add an entity only once its table is verified present;
+    misses are never interned (tables are additive-only, so a hit can't go stale
+    but a miss may become a hit later and must be re-probed). The bulk startup seed
+    (`create_mysql_tables` → `_scan_materialized_entities` → ``.update``) is the
+    other, deliberately-separate writer: it primes the set from a single SHOW TABLES
+    sweep, whereas this interns one entity discovered on demand."""
+    _ENSURED_DESCRIPTOR_ENTITIES.add(entity)
+
+
+def _table_exists(entity: str) -> bool:
+    """Does the row table for ``entity`` physically exist right now? One bounded
+    ``SHOW TABLES LIKE`` — a metadata query, NOT DDL, so it is safe even inside an
+    open transaction (apply's FOR UPDATE block).
+
+    Two failure modes are handled differently on purpose (ms-167 review consensus —
+    AX + maintainability judges both flagged the earlier blanket ``except`` that
+    masked both as "absent"):
+
+    1. **No usable backend** — ``_generic_table_name`` rejects a malformed name, or
+       ``_conn()`` can't hand back a connection at all (pymysql absent / local mode /
+       pure-unit context). Here MySQL row tables simply cannot exist, so "absent"
+       (False) is the honest answer, not a masked fault. Note: in a live read/write
+       path the meta SELECT runs BEFORE this probe, so a truly dead connection fails
+       there first — reaching this point with a broken ``_conn()`` means we're in a
+       no-MySQL context, not mid-outage.
+    2. **The probe query itself fails** — a connection existed but ``SHOW TABLES``
+       raised (reset / auth mid-flight). SHOW TABLES returns an EMPTY result, not an
+       exception, for a genuinely absent table, so a raised error here is a REAL
+       fault and is left to PROPAGATE. Swallowing it would silently reintroduce the
+       very staleness this probe fixes: a materialized collection would be mis-read
+       as inline and its rows dropped from the result with no signal. The caller is
+       already inside DB I/O, so a propagated error surfaces as a normal read
+       failure / rollback instead of silently-incomplete data."""
+    try:
+        name = _generic_table_name(entity)
+    except KeyError:
+        return False
+    try:
+        conn = _conn()
+    except Exception:
+        return False
+    with conn.cursor() as cur:
+        cur.execute("SHOW TABLES LIKE %s", (name,))
+        return cur.fetchone() is not None
+
+
+def _entity_materialized(entity: str) -> bool:
+    """Whether ``entity``'s row table is known-present, for the decomposition
+    guard. Built-ins and already-ensured descriptor tables answer with NO DB hit
+    (the hot path for dev / sales, which carry only built-in collections). An
+    UNKNOWN descriptor entity triggers ONE bounded existence probe (ms-157 e-5786):
+    if the table is there — created by another worker after this process seeded
+    its known-set — it is interned into the process set and treated as present.
+
+    Positive-only cache: a HIT is memoized (tables are additive-only / never
+    dropped, so caching a hit can never go stale), but a MISS is deliberately NOT
+    cached — another process may create the table later, and re-probing is what
+    lets a stale process converge without a restart. Built-in-only projects never
+    reach the probe, so the read guard stays DB-free for them."""
+    if entity in TABLES or entity in _ENSURED_DESCRIPTOR_ENTITIES:
+        return True
+    if _table_exists(entity):
+        _intern_descriptor_entity(entity)
+        return True
+    return False
 
 
 def _scan_materialized_entities() -> set:
@@ -906,7 +983,7 @@ def ensure_target_tables(data: dict | None) -> tuple:
             if entity in TABLES or entity in _ENSURED_DESCRIPTOR_ENTITIES:
                 continue
             _create_generic_table(entity)
-            _ENSURED_DESCRIPTOR_ENTITIES.add(entity)
+            _intern_descriptor_entity(entity)
             newly.append(entity)
     return tuple(newly)
 
@@ -927,14 +1004,19 @@ def _server_decomposition(data: dict | None) -> dict:
     OMITTED, so its records ride inline in the projects meta / target row
     (assemble's read-through fallback). For dev / sales every built-in table
     exists, so this equals the seed byte-for-byte (pinned by
-    test_mysql_v3_generic_io)."""
+    test_mysql_v3_generic_io).
+
+    ms-157 e-5786 (cross-process staleness): presence is resolved through
+    _entity_materialized, which self-heals a stale per-process known-set — a
+    descriptor table another worker materialized is discovered by a bounded probe
+    rather than mis-read as inline (which would lose the rows). Built-in-only
+    projects short-circuit before any DB hit, so the guard stays cheap for them."""
     import occupation  # noqa: PLC0415
-    known = _known_entities()
     spec: dict = {}
     for coll, s in occupation.target_decomposition(data).items():
-        if coll not in known:
+        if not _entity_materialized(coll):
             continue
-        arms = tuple(a for a in s["arms"] if a in known)
+        arms = tuple(a for a in s["arms"] if _entity_materialized(a))
         spec[coll] = {"id_field": s.get("id_field", "id"), "arms": arms}
     return spec
 
@@ -950,6 +1032,16 @@ def _server_child_tables(spec: dict) -> tuple:
             if arm not in seen:
                 seen.append(arm)
     return tuple(seen)
+
+
+def _spec_tables(spec: dict) -> set:
+    """All row-table names a decomposition spec touches — its collections PLUS their
+    fat-arm child tables — as a set. The unit a write path unions over when deciding
+    which tables to reconcile (ms-157 e-6028): ``replace_project_v3`` unions the
+    OLD-state spec's tables with the NEW-data spec's tables so a collection present
+    only in the old state still gets its rows deleted rather than orphaned. Named so
+    the 'tables a spec touches' notion has ONE greppable definition."""
+    return set(spec) | set(_server_child_tables(spec))
 
 
 def decompose_project_targets(data: dict) -> tuple[dict, dict, dict]:
@@ -1063,19 +1155,25 @@ def _v3_plan_writes(before_by_table: dict, new_data: dict) -> tuple[dict, dict, 
     ``(meta, upserts_by_table, deletes_by_table)``. Occupation-agnostic — it
     decomposes ``new_data`` via the registry and diffs every Target collection
     table + child table. The ``projects`` meta is returned separately (always
-    upserted as the transaction anchor). Fully unit-testable without a DB."""
-    spec = _server_decomposition(new_data)
+    upserted as the transaction anchor). Fully unit-testable without a DB.
+
+    ms-157 e-5787 (pre/post-op union): the tables reconciled are the UNION of what
+    was READ pre-op (``before_by_table``, populated from the pre-op meta's
+    decomposition) and what the POST-op ``new_data`` decomposes into. Diffing only
+    the post-op set would ORPHAN a collection the op DROPPED (its target-class
+    declaration removed) — those rows sit in before_by_table but are absent from
+    the post-op maps, so a post-op-only loop never emits their deletes. Unioning
+    makes a dropped table diff against ``{}`` → all its rows become deletes. For
+    the common case (pre-op and post-op decompose to the same tables) the union is
+    that same set, so behaviour is unchanged."""
     meta, target_maps, child_maps = decompose_project_targets(new_data)
+    # target_maps keys (collections) and child_maps keys (fat-arm tables) are
+    # disjoint name spaces; merge into one {table: {sk: row}} view of post-op rows.
+    new_by_table = {**target_maps, **child_maps}
     upserts: dict = {}
     deletes: dict = {}
-    for coll in spec:
-        up, dl = _diff_map(before_by_table.get(coll, {}), target_maps.get(coll, {}))
-        if up:
-            upserts[coll] = up
-        if dl:
-            deletes[coll] = dl
-    for table in _server_child_tables(spec):
-        up, dl = _diff_map(before_by_table.get(table, {}), child_maps.get(table, {}))
+    for table in set(before_by_table) | set(new_by_table):
+        up, dl = _diff_map(before_by_table.get(table, {}), new_by_table.get(table, {}))
         if up:
             upserts[table] = up
         if dl:
@@ -1263,19 +1361,30 @@ def replace_project_v3(project_id: str, new_data: dict) -> None:
     conn.autocommit(False)
     try:
         with conn.cursor() as cur:
-            # meta 行を lock (= 存在しなくても新規作成する、 upsert 想定)。
+            # meta 行を lock + 旧 meta を読む (= sk だけでなく data)。ms-157 e-6028:
+            # 削除対象を new_data の分解だけから決めると、new_data で宣言が消えた
+            # target-class の既存行が retrieve されず orphan(孤立行)として残る。旧 meta
+            # の分解も読み、削除対象を「旧 DB 状態 ∪ new_data」の union で算出する
+            # (e-5787 が apply の planner で塞いだ orphan の replace 版)。存在しない
+            # project は old_meta = {} (= upsert 新規作成)。
             cur.execute(
-                f"SELECT sk FROM `{_table_name('projects')}` "
+                f"SELECT data FROM `{_table_name('projects')}` "
                 f"WHERE pk=%s AND sk='' FOR UPDATE",
                 (project_id,),
             )
-            _ = cur.fetchone()
+            _old_row = cur.fetchone()
+            # raw project JSON as stored (target_classes などを含む生データ) — same
+            # shape _server_decomposition consumes as ``new_data``, NOT a processed
+            # meta fragment like ``new_meta`` below. Absent project → {} (upsert).
+            old_data = json.loads(_old_row["data"]) if _old_row else {}
 
             # 既存 Target collection + 子行の sk を retrieve (= 削除対象算出用)。
             # ms-109 e-3591: milestones/entries 固定でなく registry 駆動。
-            # ms-157 e-5747: 分割対象は new_data 自身の記述子から導く。
-            spec = _server_decomposition(new_data)
-            all_tables = (*spec.keys(), *_server_child_tables(spec))
+            # ms-157 e-5747 / e-6028: 削除対象テーブルは new_data の記述子 ∪ 旧データの
+            # 記述子。旧のみに在るテーブル(= 宣言が消えた target-class)を union で拾う。
+            new_spec = _server_decomposition(new_data)
+            old_spec = _server_decomposition(old_data)
+            all_tables = _spec_tables(new_spec) | _spec_tables(old_spec)
             existing_sks: dict = {}
             for t in all_tables:
                 cur.execute(
@@ -1294,15 +1403,20 @@ def replace_project_v3(project_id: str, new_data: dict) -> None:
                 (project_id, "", _dumps(new_meta)),
             )
 
-            # 新行を upsert / 消えた行を delete (全 table 一律)。target row は
-            # sk=target_id、child は composite sk。
-            new_rows_by_table: dict = {
-                coll: target_maps.get(coll, {})
-                for coll in spec
-            }
-            for table in _server_child_tables(spec):
-                new_rows_by_table[table] = child_maps.get(table, {})
-            for table, rows in new_rows_by_table.items():
+            # 新行を upsert / 消えた行を delete。all_tables (旧∪新) を一律に回すので、
+            # 旧のみに在るテーブル (= 宣言が消えた target-class) は new 側 rows が空に
+            # なり、その既存行が全て delete される (orphan を残さない)。target row は
+            # sk=target_id、child は composite sk。target_maps(collection 名) と
+            # child_maps(fat-arm 名) はキー空間が交わらないので 1 view にマージしてよい
+            # — その不変条件をコメントでなく assert で担保する (Stage3 review): 将来
+            # decompose_project_targets がキー空間を変えて衝突すると片方が黙って上書き
+            # されるのを、ここで即座に検知する。
+            assert not (set(target_maps) & set(child_maps)), (
+                "target_maps / child_maps key collision — a collection name equals a "
+                "fat-arm name; the merged write view would silently drop one side")
+            new_rows_by_table: dict = {**target_maps, **child_maps}
+            for table in all_tables:
+                rows = new_rows_by_table.get(table, {})
                 for key, d in rows.items():
                     cur.execute(
                         f"INSERT INTO `{_table_name(table)}` (pk, sk, data) "

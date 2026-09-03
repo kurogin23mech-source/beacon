@@ -92,6 +92,85 @@ def test_extra_fields_ride_through():
     assert item["who_has_the_ball"] == "them"
 
 
+# ms-167 e-6042 (Stage 1) — the skeleton guarantees created_at at the lowest layer,
+# so a DIRECT call (the generic /work-items endpoint) can't produce a created_at-less
+# item, while a frontend that already passes created_at keeps its exact value.
+
+def test_created_at_stamped_by_skeleton_when_absent():
+    # A direct skeleton call passing no created_at must still get one (FIXED_TS via
+    # the frozen now_iso) — otherwise the deadline engine / ordering silently break.
+    item = occupation.add_work_item(_dev_rich(), "ms-1", description="new task")
+    assert item["created_at"] == FIXED_TS
+
+
+def test_created_at_preserves_caller_value_byte_for_byte():
+    # dev core.task_add / sales activity_add always pass created_at; setdefault is a
+    # no-op for them, so the item shape stays byte-for-byte unchanged.
+    item = occupation.add_work_item(
+        _dev_rich(), "ms-1", description="t", created_at="2020-01-01T00:00:00Z")
+    assert item["created_at"] == "2020-01-01T00:00:00Z"
+
+
+def test_sales_explicit_empty_created_at_not_overridden():
+    # sales activity_add passes created_at explicitly (possibly ""). The skeleton must
+    # NOT force-fill it — an explicit "" is kept, so the sales shape is unchanged.
+    item = occupation.add_work_item(_sales_rich(), "opp-1", description="v",
+                                    created_at="")
+    assert item["created_at"] == ""
+
+
+# ms-167 review (maintainability F5): the "both frontends already pass created_at so
+# the skeleton setdefault is a no-op" assumption lived only in a comment. Machine-check
+# it end-to-end through the real frontends.
+
+def test_dev_frontend_passes_real_created_at():
+    # A dev task added through core.task_add carries a real created_at (the frozen
+    # now) — so the skeleton setdefault is a no-op for the dev path (byte-for-byte).
+    data = _dev_rich()
+    eid = core.task_add(data, "ms-1", "new task", priority="high")
+    entry = next(e for m in data["milestones"]
+                 for e in m.get("entries", []) if e["id"] == eid)
+    assert entry["created_at"] == FIXED_TS
+
+
+def test_sales_frontend_passes_created_at_key_but_value_is_empty():
+    # sales activity_add passes created_at explicitly, so the KEY is present and the
+    # skeleton setdefault stays a no-op (byte-for-byte). BUT it defaults the value to
+    # "" — a sales activity added without an explicit timestamp gets an EMPTY
+    # created_at, not a real one. That empty value is a KNOWN gap surfaced by the AX
+    # review (the deadline engine / ordering read created_at); it is tracked as a
+    # follow-up and deliberately NOT changed here (out of the Stage-1 byte-for-byte
+    # scope). This test pins the current shape so the follow-up is a conscious change.
+    data = _sales_rich()
+    aid = sales_entities.activity_add(data, "opp-1", "visit")
+    act = next(a for o in data["opportunities"]
+               for a in o.get("activities", []) if a["id"] == aid)
+    assert "created_at" in act
+    assert act["created_at"] == ""
+
+
+# ms-167 Stage2 review (maintainability): the shared arm resolver + the read-back
+# locator have their found / not-found paths pinned directly.
+
+def test_find_work_item_found_and_missing_paths():
+    data = _dev_rich()
+    item = occupation.add_work_item(data, "ms-1", description="t")
+    # found: returns the SAME dict object that lives in the arm
+    assert occupation._find_work_item(data, "ms-1", item["id"]) is item
+    # id miss / target miss → None (the frontend adapters' fallback trigger)
+    assert occupation._find_work_item(data, "ms-1", "e-nope") is None
+    assert occupation._find_work_item(data, "ms-404", item["id"]) is None
+
+
+def test_work_item_frontends_registry_keys_are_reachable_kinds():
+    # a frontend registered under a kind no target id ever resolves to would be dead
+    # (a typo like "milstone"). Assert every registry key is a reachable target kind.
+    valid = {work_model.target_kind(pfx + "1")
+             for pfx in work_model.known_target_prefixes()}
+    for kind in occupation._WORK_ITEM_FRONTENDS:
+        assert kind in valid, f"{kind!r} is not a reachable target kind"
+
+
 def test_missing_target_raises():
     with pytest.raises(ValueError, match="not found"):
         occupation.add_work_item(_dev_rich(), "ms-99", description="x")

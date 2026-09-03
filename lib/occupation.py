@@ -2118,6 +2118,18 @@ def _all_work_item_ids(data: dict) -> list:
 _ARM_DEFAULT_ITEM_TYPE = object()  # sentinel: "use the arm's declared item_type"
 
 
+def _work_item_arm_meta(data: dict, target_id: str) -> tuple:
+    """Resolve a target's work-item arm addressing — ``(target_class, arm, id_field)``
+    — from the registry (target-class → work_item_arm). The SINGLE resolver both
+    ``add_work_item`` (write) and ``_find_work_item`` (read-back) consult, so the
+    target-class / arm / id_field derivation lives in ONE place instead of being
+    re-implemented in each (ms-167 Stage 2 review, maintainability finding: single
+    source of truth). ``arm`` is None when the kind declares no work-item arm."""
+    tc = target_class(data, _wm.target_kind(target_id))
+    wia = tc.get("work_item_arm") or {}
+    return tc, wia.get("arm"), tc.get("id_field", "id")
+
+
 def add_work_item(data: dict, target_id: str, *, description: str,
                   status: str = "", item_type=_ARM_DEFAULT_ITEM_TYPE,
                   **extra) -> dict:
@@ -2138,13 +2150,11 @@ def add_work_item(data: dict, target_id: str, *, description: str,
 
     Returns the new work-item dict. Raises ``ValueError`` if the target kind has
     no work-item arm or the target id is not found."""
-    kind = _wm.target_kind(target_id)
-    tc = target_class(data, kind)
-    wia = tc.get("work_item_arm") or {}
-    arm = wia.get("arm")
+    tc, arm, id_field = _work_item_arm_meta(data, target_id)
     if not arm:
-        raise ValueError(f"target-class {kind!r} has no work-item arm")
-    id_field = tc.get("id_field", "id")
+        raise ValueError(
+            f"target-class {_wm.target_kind(target_id)!r} has no work-item arm")
+    wia = tc.get("work_item_arm") or {}
     target = next((r for r in data.get(tc["collection"], []) or []
                    if r.get(id_field) == target_id), None)
     if target is None:
@@ -2162,8 +2172,105 @@ def add_work_item(data: dict, target_id: str, *, description: str,
         item["type"] = resolved_type
     item["status"] = status or _wm.TODO_STATUS
     item.update(extra)
+    # ms-167 e-6042 (Stage 1 — lowest-layer common stamp): created_at is the one
+    # field EVERY work item must carry — the deadline engine, ordering, and audit
+    # all read it. Both frontends (core.task_add / sales_entities.activity_add)
+    # already pass created_at, so this setdefault is a no-op for them (dev / sales
+    # shape byte-for-byte unchanged). It only FILLS the field for a DIRECT skeleton
+    # call — the generic POST /targets/{id}/work-items endpoint — which otherwise
+    # appends a created_at-less item that silently breaks deadline/ordering. This is
+    # the structural guarantee: no caller can create a work item without created_at.
+    #   created_by / meta stay frontend-owned on purpose: dev keeps created_by INSIDE
+    #   meta and sales activities carry neither, so stamping them here would change
+    #   the sales shape. The frontend registry (Stage 2) routes the generic path
+    #   through the owning frontend, which is where those profession-shaped fields
+    #   belong.
+    item.setdefault("created_at", work_base.now_iso())
     target.setdefault(arm, []).append(item)
     return item
+
+
+def _find_work_item(data: dict, target_id: str, item_id: str) -> dict | None:
+    """Locate a just-created work item by id inside its Target's work-item arm, so
+    the frontend-routed path (below) can return the same {item dict} shape the
+    skeleton ``add_work_item`` returns. Uses the shared ``_work_item_arm_meta``
+    resolver (same target-class → arm derivation as the write path). Returns None if
+    the target / item is not found."""
+    tc, arm, id_field = _work_item_arm_meta(data, target_id)
+    if not arm:
+        return None
+    target = next((r for r in data.get(tc.get("collection", ""), []) or []
+                   if r.get(id_field) == target_id), None)
+    if target is None:
+        return None
+    return next((it for it in target.get(arm, []) or []
+                 if it.get("id") == item_id), None)
+
+
+def _frontend_dev_task(data, target_id, *, description, status, author, extra):
+    """dev work-item frontend: route through ``core.task_add`` so a task created via
+    the generic endpoint gets the SAME dev-shaped stamping as one created via
+    /entries — priority (mandatory per ms-126), author, created_by, meta. ``status``
+    is not a task_add parameter (a new task is always todo), so it is intentionally
+    dropped for this kind. Lazy import avoids the core↔occupation cycle."""
+    import core  # noqa: PLC0415
+    eid = core.task_add(data, target_id, description, author=author, **extra)
+    return _find_work_item(data, target_id, eid) or {"id": eid}
+
+
+def _frontend_sales_activity(data, target_id, *, description, status, author, extra):
+    """sales work-item frontend: route through ``sales_entities.activity_add`` so an
+    activity created via the generic endpoint gets the SAME sales-shaped stamping /
+    validation (who_has_the_ball, source, created_in_phase default). ``status`` /
+    ``author`` are not activity_add parameters and are dropped for this kind."""
+    import sales_entities  # noqa: PLC0415
+    aid = sales_entities.activity_add(data, target_id, description, **extra)
+    return _find_work_item(data, target_id, aid) or {"id": aid}
+
+
+# ms-167 Stage 2 (e-5788): the SINGLE registry mapping a built-in target-class kind
+# to its work-item frontend (the profession-specific validator + field-stamper that
+# core.task_add / sales_entities.activity_add own). The generic write endpoint
+# resolves the frontend HERE (one place) instead of an ``if kind == …`` branch at the
+# HTTP layer or — the e-5788 bug — calling the skeleton directly and skipping the
+# frontend, which produced dev tasks with no priority / author. A kind with NO entry
+# (a data-defined descriptor occupation) has no bespoke frontend, so it falls back to
+# the skeleton, which IS its frontend: it stamps created_at (Stage 1) and appends the
+# descriptor-declared fields. So "declare a new occupation ⇒ it lights up" still holds
+# — only the two built-in professions carry hand-written frontend code, registered in
+# this one dict rather than scattered as HTTP-layer branches.
+_WORK_ITEM_FRONTENDS = {
+    "milestone": _frontend_dev_task,
+    "opportunity": _frontend_sales_activity,
+}
+
+
+def add_work_item_via_frontend(data: dict, target_id: str, *, description: str,
+                               status: str = "", author: dict | None = None,
+                               **extra) -> dict:
+    """Add a work item — routing through the owning target-class frontend when one is
+    registered, ELSE falling back to the skeleton ``add_work_item`` (a data-defined
+    descriptor occupation with no bespoke frontend). When a frontend is used (dev
+    milestone → core.task_add, sales opportunity → activity_add) the generic write
+    endpoint applies the SAME profession-specific validation and field-stamping as the
+    dedicated /entries path. Returns the created work-item dict. Raises ``ValueError``
+    / ``TypeError`` (unknown target, missing-required-field, wrong field for the kind)
+    for the caller to surface as a 400."""
+    frontend = _WORK_ITEM_FRONTENDS.get(_wm.target_kind(target_id))
+    if frontend is None:
+        return add_work_item(data, target_id, description=description,
+                             status=status, **extra)
+    # A frontend-owned kind creates its work items in the arm's default (todo) state
+    # and has no create-time status hook. Reject a non-default status rather than
+    # SILENTLY dropping it (Stage 2 AX review, high: silent no-op) — the caller learns
+    # the constraint instead of believing the status took effect.
+    if status and status != _wm.TODO_STATUS:
+        raise ValueError(
+            f"target-class {_wm.target_kind(target_id)!r} creates work items in the "
+            f"default state; status={status!r} is not settable at creation (omit it, "
+            f"then update the work item to change its status)")
+    return frontend(data, target_id, description=description, status=status,
+                    author=author, extra=extra)
 
 
 def _resolve_evidence_parent(data: dict, parent_id: str):

@@ -42,6 +42,13 @@ class _FakeCursor:
 
     def execute(self, sql, params=()):
         s = " ".join(sql.split())
+        if s.startswith("SHOW TABLES LIKE"):
+            # ms-157 e-5786: existence probe. The param is the exact table name;
+            # a table "exists" iff the store holds at least one row for it.
+            like = params[0] if params else ""
+            self._result = ([{"t": like}]
+                            if any(k[0] == like for k in self.store) else [])
+            return len(self._result)
         table = re.search(r"`([^`]+)`", s).group(1)
         if s.startswith("SELECT data FROM"):
             # the apply lock query uses a literal sk='' (only pk is a param)
@@ -304,6 +311,23 @@ def test_plan_writes_deletes_removed_child():
     assert "ms-1#e-2" in deletes.get("entries", [])
 
 
+def test_plan_writes_deletes_dropped_collection_no_orphan():
+    # ms-157 e-5787: op() removed a descriptor target-class entirely. Its rows were
+    # read pre-op (they sit in before_by_table) but post-op new_data no longer
+    # decomposes into those tables. The planner must diff the dropped tables against
+    # {} and emit deletes — the pre-op ∪ post-op union — not orphan the rows by
+    # looping only over the post-op decomposition. (Pure: the planner just diffs
+    # dict maps, so no table registration / DB is needed.)
+    before = {
+        "contracts": {"ctr-1": {"id": "ctr-1", "title": "NDA"}},
+        "clauses": {"ctr-1#cl-1": {"id": "cl-1", "text": "x"}},
+    }
+    new_data = {"name": "p", "milestones": []}  # contracts target-class gone
+    _meta, _up, deletes = mc._v3_plan_writes(before, new_data)
+    assert "ctr-1" in deletes.get("contracts", [])
+    assert "ctr-1#cl-1" in deletes.get("clauses", [])
+
+
 # ---------------------------------------------------------------------------
 # rollout safety: un-migrated (inline-in-meta) sales data reads through, and the
 # first write splits it into rows (write-through migration)
@@ -451,3 +475,97 @@ def test_descriptor_class_read_rides_inline_when_table_absent(fake_db):
     got = mc.get_project_v3("b1")
     assert got["contracts"][0]["id"] == "ctr-1"
     assert got["contracts"][0]["clauses"][0]["id"] == "cl-1"
+
+
+def test_table_exists_propagates_db_error_not_swallow(monkeypatch):
+    # ms-167 review consensus (AX high + maintainability): a DB-level error during
+    # the existence probe must PROPAGATE, not be masked as "table absent". Masking
+    # it would silently drop a materialized collection's rows (reintroducing the
+    # e-5786 staleness) with no signal. SHOW TABLES returns an empty result — not an
+    # exception — for a genuinely absent table, so a raised error is always a real
+    # fault and is left to surface as a normal read failure / rollback.
+    class _BoomCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, *a, **k):
+            raise RuntimeError("connection reset")
+
+        def fetchone(self):
+            return None
+
+    class _BoomConn:
+        def cursor(self):
+            return _BoomCursor()
+
+    monkeypatch.setattr(mc, "_conn", lambda: _BoomConn())
+    with pytest.raises(RuntimeError, match="connection reset"):
+        mc._table_exists("contracts")
+
+
+def test_stale_process_self_heals_from_existing_db_table(fake_db):
+    # ms-157 e-5786: a descriptor table another worker materialized is absent from
+    # THIS process's known-set (stale — the set is per-process, seeded once at
+    # startup). Reading a project whose collection was already split into rows must
+    # self-heal via a bounded existence probe and return the rows — NOT mis-read
+    # the collection as inline and lose it (which is what the pre-fix guard did the
+    # moment worker A moved the records out of meta into rows).
+    # 1. "Worker A" ensures the tables and writes the project (rows, not inline).
+    mc.save_project_v3("b1", _descriptor_project())
+    store = fake_db["store"]
+    assert any(k[2] == "ctr-1" for k in store if k[0].endswith("contracts"))
+    meta = json.loads(store[(mc._table_name("projects"), "b1", "")])
+    assert "contracts" not in meta  # decomposed out of the inline meta
+    # 2. "Worker B" restart with a STALE set: forget the ensured tables, but the
+    #    physical tables (rows) still exist in the shared DB.
+    mc._ENSURED_DESCRIPTOR_ENTITIES.discard("contracts")
+    mc._ENSURED_DESCRIPTOR_ENTITIES.discard("clauses")
+    assert "contracts" not in mc._known_entities()
+    # 3. The stale process must still see the contract rows (self-heal), not None.
+    got = mc.get_project_v3("b1")
+    assert got["contracts"][0]["id"] == "ctr-1"
+    assert got["contracts"][0]["clauses"][0]["id"] == "cl-1"
+    # 4. and the probe folded the discovered table back into the known-set.
+    assert "contracts" in mc._ENSURED_DESCRIPTOR_ENTITIES
+
+
+def test_replace_deletes_dropped_descriptor_collection_no_orphan(fake_db):
+    # ms-157 e-6028: replace_project_v3 whole-replace with new_data that DROPPED a
+    # descriptor target-class must DELETE that class's existing rows — the deletion
+    # target set is the union of old-DB tables ∪ new_data tables, so a collection
+    # present only in the OLD state still gets its rows removed rather than orphaned.
+    # This is the replace-path twin of e-5787's apply-planner union fix.
+    store = fake_db["store"]
+    # 1. a prior write left the contracts class split into rows.
+    mc.save_project_v3("b1", _descriptor_project())
+    assert any(k[2] == "ctr-1" for k in store if k[0].endswith("contracts"))
+    assert any(k[2] == "ctr-1#cl-1" for k in store if k[0].endswith("clauses"))
+    # 2. replace with a project that no longer declares the contracts class at all.
+    mc.replace_project_v3("b1", {
+        "project_id": "b1", "name": "BackOffice", "profession": "backoffice",
+        "milestones": [], "target_classes": []})
+    # 3. the dropped class's rows (target + fat-arm child) are gone, not orphaned.
+    assert not any(k[2] == "ctr-1"
+                   for k in store if k[0].endswith("contracts") and k[1] == "b1")
+    assert not any(k[0].endswith("clauses") and k[1] == "b1" for k in store)
+
+
+def test_replace_on_new_project_upserts_without_old_row(fake_db):
+    # ms-157 e-6028 (Stage3 review): replace_project_v3 is also an upsert — for a
+    # project with NO existing meta row (old_data = {}), the old-spec union path must
+    # be a benign no-op (nothing to delete) and the new rows are written normally.
+    store = fake_db["store"]
+    assert not store  # nothing exists yet
+    mc.replace_project_v3("s2", {"project_id": "s2", "name": "New",
+                                 "profession": "sales", "milestones": [],
+                                 "opportunities": [
+                                     {"id": "opp-1", "title": "T", "phase": "lead",
+                                      "activities": [], "communications": []}]})
+    # the opportunity landed in its own row; no spurious deletes / crashes.
+    assert any(k[2] == "opp-1"
+               for k in store if k[0].endswith("opportunities") and k[1] == "s2")
+    got = mc.get_project_v3("s2")
+    assert got["opportunities"][0]["id"] == "opp-1"
