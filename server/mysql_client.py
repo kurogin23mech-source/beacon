@@ -830,23 +830,55 @@ def _known_entities() -> set:
     return set(TABLES) | _ENSURED_DESCRIPTOR_ENTITIES
 
 
+def _intern_descriptor_entity(entity: str) -> None:
+    """Record ``entity`` in the process known-set of ensured descriptor tables —
+    the SINGLE write入口 for the runtime ``.add`` path (ms-167 review, maintainability
+    finding: keep the mutation of the module-global set greppable in one place
+    rather than inline in whichever query function happens to discover the table).
+    Positive-only: callers add an entity only once its table is verified present;
+    misses are never interned (tables are additive-only, so a hit can't go stale
+    but a miss may become a hit later and must be re-probed). The bulk startup seed
+    (`create_mysql_tables` → `_scan_materialized_entities` → ``.update``) is the
+    other, deliberately-separate writer: it primes the set from a single SHOW TABLES
+    sweep, whereas this interns one entity discovered on demand."""
+    _ENSURED_DESCRIPTOR_ENTITIES.add(entity)
+
+
 def _table_exists(entity: str) -> bool:
-    """Best-effort: does the row table for ``entity`` physically exist right now?
-    One bounded ``SHOW TABLES LIKE`` — a metadata query, NOT DDL, so it is safe
-    even inside an open transaction (apply's FOR UPDATE block). Any backend
-    without SHOW TABLES, an unsafe entity name, or any error yields False, and the
-    caller treats the table as absent (rides inline — the safe direction)."""
+    """Does the row table for ``entity`` physically exist right now? One bounded
+    ``SHOW TABLES LIKE`` — a metadata query, NOT DDL, so it is safe even inside an
+    open transaction (apply's FOR UPDATE block).
+
+    Two failure modes are handled differently on purpose (ms-167 review consensus —
+    AX + maintainability judges both flagged the earlier blanket ``except`` that
+    masked both as "absent"):
+
+    1. **No usable backend** — ``_generic_table_name`` rejects a malformed name, or
+       ``_conn()`` can't hand back a connection at all (pymysql absent / local mode /
+       pure-unit context). Here MySQL row tables simply cannot exist, so "absent"
+       (False) is the honest answer, not a masked fault. Note: in a live read/write
+       path the meta SELECT runs BEFORE this probe, so a truly dead connection fails
+       there first — reaching this point with a broken ``_conn()`` means we're in a
+       no-MySQL context, not mid-outage.
+    2. **The probe query itself fails** — a connection existed but ``SHOW TABLES``
+       raised (reset / auth mid-flight). SHOW TABLES returns an EMPTY result, not an
+       exception, for a genuinely absent table, so a raised error here is a REAL
+       fault and is left to PROPAGATE. Swallowing it would silently reintroduce the
+       very staleness this probe fixes: a materialized collection would be mis-read
+       as inline and its rows dropped from the result with no signal. The caller is
+       already inside DB I/O, so a propagated error surfaces as a normal read
+       failure / rollback instead of silently-incomplete data."""
     try:
         name = _generic_table_name(entity)
     except KeyError:
         return False
     try:
         conn = _conn()
-        with conn.cursor() as cur:
-            cur.execute("SHOW TABLES LIKE %s", (name,))
-            return cur.fetchone() is not None
     except Exception:
         return False
+    with conn.cursor() as cur:
+        cur.execute("SHOW TABLES LIKE %s", (name,))
+        return cur.fetchone() is not None
 
 
 def _entity_materialized(entity: str) -> bool:
@@ -855,7 +887,7 @@ def _entity_materialized(entity: str) -> bool:
     (the hot path for dev / sales, which carry only built-in collections). An
     UNKNOWN descriptor entity triggers ONE bounded existence probe (ms-157 e-5786):
     if the table is there — created by another worker after this process seeded
-    its known-set — it is folded into the process set and treated as present.
+    its known-set — it is interned into the process set and treated as present.
 
     Positive-only cache: a HIT is memoized (tables are additive-only / never
     dropped, so caching a hit can never go stale), but a MISS is deliberately NOT
@@ -865,7 +897,7 @@ def _entity_materialized(entity: str) -> bool:
     if entity in TABLES or entity in _ENSURED_DESCRIPTOR_ENTITIES:
         return True
     if _table_exists(entity):
-        _ENSURED_DESCRIPTOR_ENTITIES.add(entity)
+        _intern_descriptor_entity(entity)
         return True
     return False
 
@@ -946,7 +978,7 @@ def ensure_target_tables(data: dict | None) -> tuple:
             if entity in TABLES or entity in _ENSURED_DESCRIPTOR_ENTITIES:
                 continue
             _create_generic_table(entity)
-            _ENSURED_DESCRIPTOR_ENTITIES.add(entity)
+            _intern_descriptor_entity(entity)
             newly.append(entity)
     return tuple(newly)
 

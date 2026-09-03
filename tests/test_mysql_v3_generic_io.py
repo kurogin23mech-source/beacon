@@ -477,6 +477,35 @@ def test_descriptor_class_read_rides_inline_when_table_absent(fake_db):
     assert got["contracts"][0]["clauses"][0]["id"] == "cl-1"
 
 
+def test_table_exists_propagates_db_error_not_swallow(monkeypatch):
+    # ms-167 review consensus (AX high + maintainability): a DB-level error during
+    # the existence probe must PROPAGATE, not be masked as "table absent". Masking
+    # it would silently drop a materialized collection's rows (reintroducing the
+    # e-5786 staleness) with no signal. SHOW TABLES returns an empty result — not an
+    # exception — for a genuinely absent table, so a raised error is always a real
+    # fault and is left to surface as a normal read failure / rollback.
+    class _BoomCursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, *a, **k):
+            raise RuntimeError("connection reset")
+
+        def fetchone(self):
+            return None
+
+    class _BoomConn:
+        def cursor(self):
+            return _BoomCursor()
+
+    monkeypatch.setattr(mc, "_conn", lambda: _BoomConn())
+    with pytest.raises(RuntimeError, match="connection reset"):
+        mc._table_exists("contracts")
+
+
 def test_stale_process_self_heals_from_existing_db_table(fake_db):
     # ms-157 e-5786: a descriptor table another worker materialized is absent from
     # THIS process's known-set (stale — the set is per-process, seeded once at

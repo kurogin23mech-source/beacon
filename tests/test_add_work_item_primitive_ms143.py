@@ -119,6 +119,36 @@ def test_sales_explicit_empty_created_at_not_overridden():
     assert item["created_at"] == ""
 
 
+# ms-167 review (maintainability F5): the "both frontends already pass created_at so
+# the skeleton setdefault is a no-op" assumption lived only in a comment. Machine-check
+# it end-to-end through the real frontends.
+
+def test_dev_frontend_passes_real_created_at():
+    # A dev task added through core.task_add carries a real created_at (the frozen
+    # now) — so the skeleton setdefault is a no-op for the dev path (byte-for-byte).
+    data = _dev_rich()
+    eid = core.task_add(data, "ms-1", "new task", priority="high")
+    entry = next(e for m in data["milestones"]
+                 for e in m.get("entries", []) if e["id"] == eid)
+    assert entry["created_at"] == FIXED_TS
+
+
+def test_sales_frontend_passes_created_at_key_but_value_is_empty():
+    # sales activity_add passes created_at explicitly, so the KEY is present and the
+    # skeleton setdefault stays a no-op (byte-for-byte). BUT it defaults the value to
+    # "" — a sales activity added without an explicit timestamp gets an EMPTY
+    # created_at, not a real one. That empty value is a KNOWN gap surfaced by the AX
+    # review (the deadline engine / ordering read created_at); it is tracked as a
+    # follow-up and deliberately NOT changed here (out of the Stage-1 byte-for-byte
+    # scope). This test pins the current shape so the follow-up is a conscious change.
+    data = _sales_rich()
+    aid = sales_entities.activity_add(data, "opp-1", "visit")
+    act = next(a for o in data["opportunities"]
+               for a in o.get("activities", []) if a["id"] == aid)
+    assert "created_at" in act
+    assert act["created_at"] == ""
+
+
 def test_missing_target_raises():
     with pytest.raises(ValueError, match="not found"):
         occupation.add_work_item(_dev_rich(), "ms-99", description="x")
