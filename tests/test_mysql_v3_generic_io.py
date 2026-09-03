@@ -530,3 +530,24 @@ def test_stale_process_self_heals_from_existing_db_table(fake_db):
     assert got["contracts"][0]["clauses"][0]["id"] == "cl-1"
     # 4. and the probe folded the discovered table back into the known-set.
     assert "contracts" in mc._ENSURED_DESCRIPTOR_ENTITIES
+
+
+def test_replace_deletes_dropped_descriptor_collection_no_orphan(fake_db):
+    # ms-157 e-6028: replace_project_v3 whole-replace with new_data that DROPPED a
+    # descriptor target-class must DELETE that class's existing rows — the deletion
+    # target set is the union of old-DB tables ∪ new_data tables, so a collection
+    # present only in the OLD state still gets its rows removed rather than orphaned.
+    # This is the replace-path twin of e-5787's apply-planner union fix.
+    store = fake_db["store"]
+    # 1. a prior write left the contracts class split into rows.
+    mc.save_project_v3("b1", _descriptor_project())
+    assert any(k[2] == "ctr-1" for k in store if k[0].endswith("contracts"))
+    assert any(k[2] == "ctr-1#cl-1" for k in store if k[0].endswith("clauses"))
+    # 2. replace with a project that no longer declares the contracts class at all.
+    mc.replace_project_v3("b1", {
+        "project_id": "b1", "name": "BackOffice", "profession": "backoffice",
+        "milestones": [], "target_classes": []})
+    # 3. the dropped class's rows (target + fat-arm child) are gone, not orphaned.
+    assert not any(k[2] == "ctr-1"
+                   for k in store if k[0].endswith("contracts") and k[1] == "b1")
+    assert not any(k[0].endswith("clauses") and k[1] == "b1" for k in store)

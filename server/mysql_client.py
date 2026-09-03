@@ -1346,19 +1346,27 @@ def replace_project_v3(project_id: str, new_data: dict) -> None:
     conn.autocommit(False)
     try:
         with conn.cursor() as cur:
-            # meta 行を lock (= 存在しなくても新規作成する、 upsert 想定)。
+            # meta 行を lock + 旧 meta を読む (= sk だけでなく data)。ms-157 e-6028:
+            # 削除対象を new_data の分解だけから決めると、new_data で宣言が消えた
+            # target-class の既存行が retrieve されず orphan(孤立行)として残る。旧 meta
+            # の分解も読み、削除対象を「旧 DB 状態 ∪ new_data」の union で算出する
+            # (e-5787 が apply の planner で塞いだ orphan の replace 版)。存在しない
+            # project は old_meta = {} (= upsert 新規作成)。
             cur.execute(
-                f"SELECT sk FROM `{_table_name('projects')}` "
+                f"SELECT data FROM `{_table_name('projects')}` "
                 f"WHERE pk=%s AND sk='' FOR UPDATE",
                 (project_id,),
             )
-            _ = cur.fetchone()
+            _old_row = cur.fetchone()
+            old_meta = json.loads(_old_row["data"]) if _old_row else {}
 
             # 既存 Target collection + 子行の sk を retrieve (= 削除対象算出用)。
             # ms-109 e-3591: milestones/entries 固定でなく registry 駆動。
-            # ms-157 e-5747: 分割対象は new_data 自身の記述子から導く。
-            spec = _server_decomposition(new_data)
-            all_tables = (*spec.keys(), *_server_child_tables(spec))
+            # ms-157 e-5747 / e-6028: 分割対象は new_data の記述子 ∪ 旧 meta の記述子。
+            new_spec = _server_decomposition(new_data)
+            old_spec = _server_decomposition(old_meta)
+            all_tables = (set(new_spec) | set(_server_child_tables(new_spec))
+                          | set(old_spec) | set(_server_child_tables(old_spec)))
             existing_sks: dict = {}
             for t in all_tables:
                 cur.execute(
@@ -1377,15 +1385,14 @@ def replace_project_v3(project_id: str, new_data: dict) -> None:
                 (project_id, "", _dumps(new_meta)),
             )
 
-            # 新行を upsert / 消えた行を delete (全 table 一律)。target row は
-            # sk=target_id、child は composite sk。
-            new_rows_by_table: dict = {
-                coll: target_maps.get(coll, {})
-                for coll in spec
-            }
-            for table in _server_child_tables(spec):
-                new_rows_by_table[table] = child_maps.get(table, {})
-            for table, rows in new_rows_by_table.items():
+            # 新行を upsert / 消えた行を delete。all_tables (旧∪新) を一律に回すので、
+            # 旧のみに在るテーブル (= 宣言が消えた target-class) は new 側 rows が空に
+            # なり、その既存行が全て delete される (orphan を残さない)。target row は
+            # sk=target_id、child は composite sk。target_maps / child_maps はキー空間が
+            # 交わらないので 1 view にマージしてよい。
+            new_rows_by_table: dict = {**target_maps, **child_maps}
+            for table in all_tables:
+                rows = new_rows_by_table.get(table, {})
                 for key, d in rows.items():
                     cur.execute(
                         f"INSERT INTO `{_table_name(table)}` (pk, sk, data) "
