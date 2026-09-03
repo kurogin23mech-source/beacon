@@ -115,6 +115,28 @@ class TestCollectRecentCommits:
         # text concatenates description + meta.message
         assert "third" in rows[0]["text"] and "third commit" in rows[0]["text"]
 
+    def test_collects_commits_under_operations_too(self):
+        """ms-164 e-5951: commits also live under Operations (a dev Target class).
+        The old milestone-only scan missed OperationTask commit evidence; the
+        occupation-generic walk picks them up (ms_id carries the operation id)."""
+        data = {
+            "milestones": [
+                {"id": "ms-1", "entries": [
+                    {"id": "e-1", "type": "commit", "description": "ms work",
+                     "created_at": "2026-06-01T00:00:00Z", "meta": {"hash": "a"}}]}],
+            "operations": [
+                {"id": "op-1", "entries": [
+                    {"id": "e-2", "type": "commit", "description": "op work",
+                     "created_at": "2026-06-02T00:00:00Z", "meta": {"hash": "b"}}]}],
+        }
+        rows = pde.collect_recent_commits(data, limit=10)
+        ids = {r["id"] for r in rows}
+        assert ids == {"e-1", "e-2"}  # operation commit is now included
+        op_row = next(r for r in rows if r["id"] == "e-2")
+        # PR#710 review: key renamed ms_id → target_id (it carries op- ids too)
+        assert op_row["target_id"] == "op-1"
+        assert "ms_id" not in op_row  # old lying key is gone
+
     def test_respects_limit(self):
         commits = [
             {"id": f"e-{i}", "type": "commit", "description": f"c{i}",

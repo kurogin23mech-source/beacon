@@ -152,23 +152,34 @@ def _iter_commit_entries(entries: list) -> list[dict]:
 
 
 def collect_recent_commits(data: dict, *, limit: int = DEFAULT_COMMIT_WINDOW) -> list[dict]:
-    """Collect the most-recent ``limit`` commit entries across all milestones.
+    """Collect the most-recent ``limit`` commit entries across all Targets.
+
+    ms-164 e-5951: walks ``occupation.iter_target_records`` instead of hardcoding
+    ``data['milestones']`` — commit entries also live under Operations (a dev
+    Target class), so the old milestone-only scan MISSED phantom-done evidence for
+    OperationTask commits. Non-commit-bearing Target classes (a sales Opportunity)
+    simply contribute nothing, so the broadening is safe (a project with no commits
+    yields the same empty result).
 
     Ordering: descending by ``created_at`` (falling back to ``date`` then
     empty string). Each returned dict has the shape
-    ``{"id": ..., "text": <commit_text>, "created_at": ..., "ms_id": ...}``
+    ``{"id": ..., "text": <commit_text>, "created_at": ..., "target_id": ...}``
     where ``text`` is the concatenation of the commit's ``description`` and
     ``meta.message`` (the latter is the raw git commit subject — usually
-    richer than the auto-derived ``description``).
+    richer than the auto-derived ``description``). ``target_id`` is the parent
+    Target's id — a milestone OR an operation (PR#710 review: the old key ``ms_id``
+    lied, since it also carries ``op-…`` ids; renamed for honesty — downstream
+    ``evaluate_done_evidence`` reads only id/text/created_at, so the rename is safe).
     """
     if not isinstance(data, dict):
         return []
+    import occupation  # ms-164 e-5951: occupation-generic Target enumeration
     rows: list[dict] = []
-    for ms in data.get("milestones", []) or []:
-        if not isinstance(ms, dict):
+    for target_rec in occupation.iter_target_records(data):
+        if not isinstance(target_rec, dict):
             continue
-        ms_id = ms.get("id", "")
-        for c in _iter_commit_entries(ms.get("entries", [])):
+        target_id = target_rec.get("id", "")
+        for c in _iter_commit_entries(target_rec.get("entries", [])):
             meta = c.get("meta", {}) or {}
             text = " ".join(
                 [
@@ -181,7 +192,7 @@ def collect_recent_commits(data: dict, *, limit: int = DEFAULT_COMMIT_WINDOW) ->
                     "id": c.get("id", ""),
                     "text": text,
                     "created_at": c.get("created_at", "") or c.get("date", "") or "",
-                    "ms_id": ms_id,
+                    "target_id": target_id,
                     "hash": meta.get("hash", "") or "",
                 }
             )

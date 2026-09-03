@@ -213,6 +213,7 @@ def list_projects(user_id: str | None = None,
 
 
 def list_all_projects() -> list[dict]:
+    import occupation  # ms-164 e-5952: occupation-generic target_count
     items = _scan_all(_table("projects"))
     return [
         {
@@ -220,7 +221,11 @@ def list_all_projects() -> list[dict]:
             "name": item.get("name", ""),
             "owner": item.get("owner", ""),
             "member_count": len(item.get("members", [])),
+            # ms-164 e-5952: milestone_count kept for back-compat; target_count is
+            # the occupation-generic headline metric (sales projects no longer show
+            # an empty card).
             "milestone_count": len(item.get("milestones", [])),
+            "target_count": occupation.project_target_count(item),
             "updated_at": item.get("updated_at", ""),
         }
         for item in items
