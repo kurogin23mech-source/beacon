@@ -551,3 +551,21 @@ def test_replace_deletes_dropped_descriptor_collection_no_orphan(fake_db):
     assert not any(k[2] == "ctr-1"
                    for k in store if k[0].endswith("contracts") and k[1] == "b1")
     assert not any(k[0].endswith("clauses") and k[1] == "b1" for k in store)
+
+
+def test_replace_on_new_project_upserts_without_old_row(fake_db):
+    # ms-157 e-6028 (Stage3 review): replace_project_v3 is also an upsert — for a
+    # project with NO existing meta row (old_data = {}), the old-spec union path must
+    # be a benign no-op (nothing to delete) and the new rows are written normally.
+    store = fake_db["store"]
+    assert not store  # nothing exists yet
+    mc.replace_project_v3("s2", {"project_id": "s2", "name": "New",
+                                 "profession": "sales", "milestones": [],
+                                 "opportunities": [
+                                     {"id": "opp-1", "title": "T", "phase": "lead",
+                                      "activities": [], "communications": []}]})
+    # the opportunity landed in its own row; no spurious deletes / crashes.
+    assert any(k[2] == "opp-1"
+               for k in store if k[0].endswith("opportunities") and k[1] == "s2")
+    got = mc.get_project_v3("s2")
+    assert got["opportunities"][0]["id"] == "opp-1"

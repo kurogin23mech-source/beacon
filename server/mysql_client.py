@@ -1029,6 +1029,16 @@ def _server_child_tables(spec: dict) -> tuple:
     return tuple(seen)
 
 
+def _spec_tables(spec: dict) -> set:
+    """All row-table names a decomposition spec touches — its collections PLUS their
+    fat-arm child tables — as a set. The unit a write path unions over when deciding
+    which tables to reconcile (ms-157 e-6028): ``replace_project_v3`` unions the
+    OLD-state spec's tables with the NEW-data spec's tables so a collection present
+    only in the old state still gets its rows deleted rather than orphaned. Named so
+    the 'tables a spec touches' notion has ONE greppable definition."""
+    return set(spec) | set(_server_child_tables(spec))
+
+
 def decompose_project_targets(data: dict) -> tuple[dict, dict, dict]:
     """Split a unified project dict into ``(meta, target_maps, child_maps)``,
     registry-driven across occupations.
@@ -1358,15 +1368,18 @@ def replace_project_v3(project_id: str, new_data: dict) -> None:
                 (project_id,),
             )
             _old_row = cur.fetchone()
-            old_meta = json.loads(_old_row["data"]) if _old_row else {}
+            # raw project JSON as stored (target_classes などを含む生データ) — same
+            # shape _server_decomposition consumes as ``new_data``, NOT a processed
+            # meta fragment like ``new_meta`` below. Absent project → {} (upsert).
+            old_data = json.loads(_old_row["data"]) if _old_row else {}
 
             # 既存 Target collection + 子行の sk を retrieve (= 削除対象算出用)。
             # ms-109 e-3591: milestones/entries 固定でなく registry 駆動。
-            # ms-157 e-5747 / e-6028: 分割対象は new_data の記述子 ∪ 旧 meta の記述子。
+            # ms-157 e-5747 / e-6028: 削除対象テーブルは new_data の記述子 ∪ 旧データの
+            # 記述子。旧のみに在るテーブル(= 宣言が消えた target-class)を union で拾う。
             new_spec = _server_decomposition(new_data)
-            old_spec = _server_decomposition(old_meta)
-            all_tables = (set(new_spec) | set(_server_child_tables(new_spec))
-                          | set(old_spec) | set(_server_child_tables(old_spec)))
+            old_spec = _server_decomposition(old_data)
+            all_tables = _spec_tables(new_spec) | _spec_tables(old_spec)
             existing_sks: dict = {}
             for t in all_tables:
                 cur.execute(
@@ -1388,8 +1401,14 @@ def replace_project_v3(project_id: str, new_data: dict) -> None:
             # 新行を upsert / 消えた行を delete。all_tables (旧∪新) を一律に回すので、
             # 旧のみに在るテーブル (= 宣言が消えた target-class) は new 側 rows が空に
             # なり、その既存行が全て delete される (orphan を残さない)。target row は
-            # sk=target_id、child は composite sk。target_maps / child_maps はキー空間が
-            # 交わらないので 1 view にマージしてよい。
+            # sk=target_id、child は composite sk。target_maps(collection 名) と
+            # child_maps(fat-arm 名) はキー空間が交わらないので 1 view にマージしてよい
+            # — その不変条件をコメントでなく assert で担保する (Stage3 review): 将来
+            # decompose_project_targets がキー空間を変えて衝突すると片方が黙って上書き
+            # されるのを、ここで即座に検知する。
+            assert not (set(target_maps) & set(child_maps)), (
+                "target_maps / child_maps key collision — a collection name equals a "
+                "fat-arm name; the merged write view would silently drop one side")
             new_rows_by_table: dict = {**target_maps, **child_maps}
             for table in all_tables:
                 rows = new_rows_by_table.get(table, {})
