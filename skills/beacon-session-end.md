@@ -282,6 +282,75 @@ beacon doc update <doc-id> --content "<既存本文 + 新セクション>"
 beacon note clear
 ```
 
+## Step 4.7: セッションの判断 (decision) 過不足チェック (ms-164 e-6031)
+
+session log (Step 4) は「このセッションで何が起きたか」の**物語 (narrative)** を残す。それとは別に、target 一級化では「1 つの作業対象 (target) で下した判断」は **decision arm** (= 誰が / なぜ / 何を根拠に判断したか、の監査可能な記録) に target 帰属で残るのが正。判断は `/beacon-log` の Step 4.7 (コミット単位の log-time backstop) で逐次記録されるが、記録漏れ・誤帰属が起こりうる。session-end は**そのセッションの全体像を持つ唯一の地点**なので、ここで「このセッションで下した判断が decision arm に過不足なく載っているか」を締める。これで session log は現状維持のまま、session-end が target 一級化に準拠する。
+
+> **なぜ decision で、session log ではないか**: session log は横断的 (= 1 セッションが複数 target に跨りうる) な**叙述**で、判断そのものではない。「1 target で下した判断」の一級の置き場は target の decision arm。session-end はその arm がセッションの実作業を正しく反映しているかを reconcile (= 突合して過不足を締める) する。
+
+### Step 4.7a: 前提ゲート (cloud 専用)
+
+decision stream は cloud プロジェクトのみ。**local mode (= `.beacon/cloud.json` 不在) では decision arm が無いのでこの Step を丸ごとスキップ**する。cloud 到達不能・未認証も同様に **黙ってスキップ** (= session-end 本体を止めない、best-effort)。
+
+### Step 4.7b: このセッションの判断を取得
+
+現セッションの `session_id` を解決する:
+```bash
+beacon session id
+```
+
+その sid で、このセッションが記録した判断だけを引く (ms-164 e-6030 の絞り込み):
+```bash
+beacon decision list --session <session_id> --json
+```
+
+- 返り JSON の各行は `decision` (何を) / `kind` / `rationale` (なぜ) / `evidence` (根拠) / `who.session_id` / `related.target_id` を持つ。
+- **サーバ側フィルタが未反映な環境への保険**: 返った行の `who.session_id` が現 sid と一致するものだけを自分でも絞り込む (= サーバが古く絞れていなくても取り違えない)。
+- worked-target を主語にしたいときは `--target <target_id>` も併用できる。target は Step 4 で session log に載った `target_ids` (無ければ `occupation.resolve_worked_targets` が解決した集合) を使う。
+
+### Step 4.7c: セッションの実作業と突合して過不足を判定
+
+「このセッションが実際に下した非自明な判断」を、セッションの実作業から洗い出して、Step 4.7b で取得した decision と突き合わせる。実作業の材料:
+
+- Step 1 で集めた **このセッションのコミット** (commit message = 何を選び、なぜそうしたか)
+- このセッション中の **タスク done / PR レビュー採否 / target 完遂判定** (これらは自動で decision を生むが、漏れや文脈不足がありうる)
+- Step 3 サマリー本文に書いた **設計判断・方針転換**
+
+各判断について 3 通りに分類する:
+
+- **不足 (加筆)**: 非自明な判断 (例: 「A ではなく B を採った」「既存機構を再利用し専用実装を却下した」) がコミット等に現れているのに、対応する decision が無い → **加筆する** (下記 4.7d)。
+- **誤り / 誤帰属 (訂正)**: 記録済み decision の `related.target_id` が誤っている、`rationale` が実装と食い違う等 → decision stream は **追記専用 (append-only) で上書きできない**ので、**訂正を上書きせず、正しい判断を superseding (= 上書きに代わる後追い訂正) として加筆**し、evidence に元の `decision_id` と「訂正: 〜」を明記する。
+- **過剰 (指摘のみ)**: 重複・些末な自動記録が多すぎる → append-only なので削除はしない。Step 5 レポートに 1 行「decision N 件が重複気味」と**指摘するだけ**に留める (= 記録を壊さない)。
+
+**判断の呼び水**: 「掃除機を買った ≠ 掃除した」と同じで、**コミットしただけの些末な変更は decision ではない**。decision に値するのは「別の選択肢がありえたのに、こちらを選んだ」判断のみ。無ければこの Step は「過不足なし」で終える (= 過剰記録もノイズ)。
+
+### Step 4.7d: 不足分の加筆
+
+不足と判定した判断を、1 件ずつ Bash ツールで記録する (= `/beacon-log` の decision backstop と同じ統一 arm に載せる):
+```bash
+beacon decision record \
+  --what "<何を選んだか — 1 行>" \
+  --rationale "<なぜそうしたか>" \
+  --kind log-backstop \
+  --evidence "<commit hash / file:line / url — 判断を裏付ける実 link (必須)>" \
+  --related-task "<関係する e-XXX があれば>"
+```
+
+- `--evidence` は必須 (= 一級の判断は根拠を link する)。裏付けが本当に無い判断は加筆しない (= phantom を作らない)。
+- target 帰属は `--related-task` (task 経由) か、サーバが認証・session context から補う `who` で決まる。誤帰属を訂正する superseding の場合は `--evidence` に元 `decision_id` を含める。
+
+### Step 4.7e: レポートへの反映
+
+Step 5 の終了レポートに 1 ブロック添える:
+```
+判断 (decision) 過不足チェック:
+  取得: [N]件 (session <sid 短縮>)
+  加筆: [M]件 — [各 what を 1 行]
+  訂正: [K]件 — [superseding した理由を 1 行]
+  指摘: [重複/過剰があれば 1 行]
+```
+過不足が無ければ「判断: 過不足なし ([N]件を確認)」の 1 行で済ませる。
+
 ## Step 5: 終了レポート
 
 ユーザーに結果を提示:
@@ -294,6 +363,8 @@ Active: [ms-id] [title] ([progress]%)
   残タスク: [N]件
   - [id] [description]
   ...
+
+判断 (decision) 過不足チェック: [Step 4.7e のブロック、または「過不足なし」]
 ---
 ```
 
