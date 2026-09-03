@@ -311,6 +311,23 @@ def test_plan_writes_deletes_removed_child():
     assert "ms-1#e-2" in deletes.get("entries", [])
 
 
+def test_plan_writes_deletes_dropped_collection_no_orphan():
+    # ms-157 e-5787: op() removed a descriptor target-class entirely. Its rows were
+    # read pre-op (they sit in before_by_table) but post-op new_data no longer
+    # decomposes into those tables. The planner must diff the dropped tables against
+    # {} and emit deletes — the pre-op ∪ post-op union — not orphan the rows by
+    # looping only over the post-op decomposition. (Pure: the planner just diffs
+    # dict maps, so no table registration / DB is needed.)
+    before = {
+        "contracts": {"ctr-1": {"id": "ctr-1", "title": "NDA"}},
+        "clauses": {"ctr-1#cl-1": {"id": "cl-1", "text": "x"}},
+    }
+    new_data = {"name": "p", "milestones": []}  # contracts target-class gone
+    _meta, _up, deletes = mc._v3_plan_writes(before, new_data)
+    assert "ctr-1" in deletes.get("contracts", [])
+    assert "ctr-1#cl-1" in deletes.get("clauses", [])
+
+
 # ---------------------------------------------------------------------------
 # rollout safety: un-migrated (inline-in-meta) sales data reads through, and the
 # first write splits it into rows (write-through migration)

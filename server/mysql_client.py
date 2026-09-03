@@ -1108,19 +1108,25 @@ def _v3_plan_writes(before_by_table: dict, new_data: dict) -> tuple[dict, dict, 
     ``(meta, upserts_by_table, deletes_by_table)``. Occupation-agnostic — it
     decomposes ``new_data`` via the registry and diffs every Target collection
     table + child table. The ``projects`` meta is returned separately (always
-    upserted as the transaction anchor). Fully unit-testable without a DB."""
-    spec = _server_decomposition(new_data)
+    upserted as the transaction anchor). Fully unit-testable without a DB.
+
+    ms-157 e-5787 (pre/post-op union): the tables reconciled are the UNION of what
+    was READ pre-op (``before_by_table``, populated from the pre-op meta's
+    decomposition) and what the POST-op ``new_data`` decomposes into. Diffing only
+    the post-op set would ORPHAN a collection the op DROPPED (its target-class
+    declaration removed) — those rows sit in before_by_table but are absent from
+    the post-op maps, so a post-op-only loop never emits their deletes. Unioning
+    makes a dropped table diff against ``{}`` → all its rows become deletes. For
+    the common case (pre-op and post-op decompose to the same tables) the union is
+    that same set, so behaviour is unchanged."""
     meta, target_maps, child_maps = decompose_project_targets(new_data)
+    # target_maps keys (collections) and child_maps keys (fat-arm tables) are
+    # disjoint name spaces; merge into one {table: {sk: row}} view of post-op rows.
+    new_by_table = {**target_maps, **child_maps}
     upserts: dict = {}
     deletes: dict = {}
-    for coll in spec:
-        up, dl = _diff_map(before_by_table.get(coll, {}), target_maps.get(coll, {}))
-        if up:
-            upserts[coll] = up
-        if dl:
-            deletes[coll] = dl
-    for table in _server_child_tables(spec):
-        up, dl = _diff_map(before_by_table.get(table, {}), child_maps.get(table, {}))
+    for table in set(before_by_table) | set(new_by_table):
+        up, dl = _diff_map(before_by_table.get(table, {}), new_by_table.get(table, {}))
         if up:
             upserts[table] = up
         if dl:
