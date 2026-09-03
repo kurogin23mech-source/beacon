@@ -2078,6 +2078,20 @@ def add_work_item(data: dict, target_id: str, *, description: str,
         item["type"] = resolved_type
     item["status"] = status or _wm.TODO_STATUS
     item.update(extra)
+    # ms-167 e-6042 (Stage 1 — lowest-layer common stamp): created_at is the one
+    # field EVERY work item must carry — the deadline engine, ordering, and audit
+    # all read it. Both frontends (core.task_add / sales_entities.activity_add)
+    # already pass created_at, so this setdefault is a no-op for them (dev / sales
+    # shape byte-for-byte unchanged). It only FILLS the field for a DIRECT skeleton
+    # call — the generic POST /targets/{id}/work-items endpoint — which otherwise
+    # appends a created_at-less item that silently breaks deadline/ordering. This is
+    # the structural guarantee: no caller can create a work item without created_at.
+    #   created_by / meta stay frontend-owned on purpose: dev keeps created_by INSIDE
+    #   meta and sales activities carry neither, so stamping them here would change
+    #   the sales shape. The frontend registry (Stage 2) routes the generic path
+    #   through the owning frontend, which is where those profession-shaped fields
+    #   belong.
+    item.setdefault("created_at", work_base.now_iso())
     target.setdefault(arm, []).append(item)
     return item
 

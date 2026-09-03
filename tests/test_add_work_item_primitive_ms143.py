@@ -92,6 +92,33 @@ def test_extra_fields_ride_through():
     assert item["who_has_the_ball"] == "them"
 
 
+# ms-167 e-6042 (Stage 1) — the skeleton guarantees created_at at the lowest layer,
+# so a DIRECT call (the generic /work-items endpoint) can't produce a created_at-less
+# item, while a frontend that already passes created_at keeps its exact value.
+
+def test_created_at_stamped_by_skeleton_when_absent():
+    # A direct skeleton call passing no created_at must still get one (FIXED_TS via
+    # the frozen now_iso) — otherwise the deadline engine / ordering silently break.
+    item = occupation.add_work_item(_dev_rich(), "ms-1", description="new task")
+    assert item["created_at"] == FIXED_TS
+
+
+def test_created_at_preserves_caller_value_byte_for_byte():
+    # dev core.task_add / sales activity_add always pass created_at; setdefault is a
+    # no-op for them, so the item shape stays byte-for-byte unchanged.
+    item = occupation.add_work_item(
+        _dev_rich(), "ms-1", description="t", created_at="2020-01-01T00:00:00Z")
+    assert item["created_at"] == "2020-01-01T00:00:00Z"
+
+
+def test_sales_explicit_empty_created_at_not_overridden():
+    # sales activity_add passes created_at explicitly (possibly ""). The skeleton must
+    # NOT force-fill it — an explicit "" is kept, so the sales shape is unchanged.
+    item = occupation.add_work_item(_sales_rich(), "opp-1", description="v",
+                                    created_at="")
+    assert item["created_at"] == ""
+
+
 def test_missing_target_raises():
     with pytest.raises(ValueError, match="not found"):
         occupation.add_work_item(_dev_rich(), "ms-99", description="x")
