@@ -42,6 +42,13 @@ class _FakeCursor:
 
     def execute(self, sql, params=()):
         s = " ".join(sql.split())
+        if s.startswith("SHOW TABLES LIKE"):
+            # ms-157 e-5786: existence probe. The param is the exact table name;
+            # a table "exists" iff the store holds at least one row for it.
+            like = params[0] if params else ""
+            self._result = ([{"t": like}]
+                            if any(k[0] == like for k in self.store) else [])
+            return len(self._result)
         table = re.search(r"`([^`]+)`", s).group(1)
         if s.startswith("SELECT data FROM"):
             # the apply lock query uses a literal sk='' (only pk is a param)
@@ -451,3 +458,29 @@ def test_descriptor_class_read_rides_inline_when_table_absent(fake_db):
     got = mc.get_project_v3("b1")
     assert got["contracts"][0]["id"] == "ctr-1"
     assert got["contracts"][0]["clauses"][0]["id"] == "cl-1"
+
+
+def test_stale_process_self_heals_from_existing_db_table(fake_db):
+    # ms-157 e-5786: a descriptor table another worker materialized is absent from
+    # THIS process's known-set (stale — the set is per-process, seeded once at
+    # startup). Reading a project whose collection was already split into rows must
+    # self-heal via a bounded existence probe and return the rows — NOT mis-read
+    # the collection as inline and lose it (which is what the pre-fix guard did the
+    # moment worker A moved the records out of meta into rows).
+    # 1. "Worker A" ensures the tables and writes the project (rows, not inline).
+    mc.save_project_v3("b1", _descriptor_project())
+    store = fake_db["store"]
+    assert any(k[2] == "ctr-1" for k in store if k[0].endswith("contracts"))
+    meta = json.loads(store[(mc._table_name("projects"), "b1", "")])
+    assert "contracts" not in meta  # decomposed out of the inline meta
+    # 2. "Worker B" restart with a STALE set: forget the ensured tables, but the
+    #    physical tables (rows) still exist in the shared DB.
+    mc._ENSURED_DESCRIPTOR_ENTITIES.discard("contracts")
+    mc._ENSURED_DESCRIPTOR_ENTITIES.discard("clauses")
+    assert "contracts" not in mc._known_entities()
+    # 3. The stale process must still see the contract rows (self-heal), not None.
+    got = mc.get_project_v3("b1")
+    assert got["contracts"][0]["id"] == "ctr-1"
+    assert got["contracts"][0]["clauses"][0]["id"] == "cl-1"
+    # 4. and the probe folded the discovered table back into the known-set.
+    assert "contracts" in mc._ENSURED_DESCRIPTOR_ENTITIES

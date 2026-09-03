@@ -821,8 +821,53 @@ def _known_entities() -> set:
     """Entity suffixes whose row table the server may read/write: built-ins +
     ensured descriptor tables (ms-157 e-5750). Pure (no DB) — the SHOW TABLES
     seed happens once in create_mysql_tables / ensure_target_tables, not here, so
-    the decomposition guard stays cheap."""
+    the decomposition guard stays cheap.
+
+    NOTE: this reflects only what THIS process has ensured/observed. A descriptor
+    table another worker created after this process seeded its set is invisible
+    here until restart — the staleness _entity_materialized self-heals for the
+    decomposition guard (ms-157 e-5786)."""
     return set(TABLES) | _ENSURED_DESCRIPTOR_ENTITIES
+
+
+def _table_exists(entity: str) -> bool:
+    """Best-effort: does the row table for ``entity`` physically exist right now?
+    One bounded ``SHOW TABLES LIKE`` — a metadata query, NOT DDL, so it is safe
+    even inside an open transaction (apply's FOR UPDATE block). Any backend
+    without SHOW TABLES, an unsafe entity name, or any error yields False, and the
+    caller treats the table as absent (rides inline — the safe direction)."""
+    try:
+        name = _generic_table_name(entity)
+    except KeyError:
+        return False
+    try:
+        conn = _conn()
+        with conn.cursor() as cur:
+            cur.execute("SHOW TABLES LIKE %s", (name,))
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _entity_materialized(entity: str) -> bool:
+    """Whether ``entity``'s row table is known-present, for the decomposition
+    guard. Built-ins and already-ensured descriptor tables answer with NO DB hit
+    (the hot path for dev / sales, which carry only built-in collections). An
+    UNKNOWN descriptor entity triggers ONE bounded existence probe (ms-157 e-5786):
+    if the table is there — created by another worker after this process seeded
+    its known-set — it is folded into the process set and treated as present.
+
+    Positive-only cache: a HIT is memoized (tables are additive-only / never
+    dropped, so caching a hit can never go stale), but a MISS is deliberately NOT
+    cached — another process may create the table later, and re-probing is what
+    lets a stale process converge without a restart. Built-in-only projects never
+    reach the probe, so the read guard stays DB-free for them."""
+    if entity in TABLES or entity in _ENSURED_DESCRIPTOR_ENTITIES:
+        return True
+    if _table_exists(entity):
+        _ENSURED_DESCRIPTOR_ENTITIES.add(entity)
+        return True
+    return False
 
 
 def _scan_materialized_entities() -> set:
@@ -922,14 +967,19 @@ def _server_decomposition(data: dict | None) -> dict:
     OMITTED, so its records ride inline in the projects meta / target row
     (assemble's read-through fallback). For dev / sales every built-in table
     exists, so this equals the seed byte-for-byte (pinned by
-    test_mysql_v3_generic_io)."""
+    test_mysql_v3_generic_io).
+
+    ms-157 e-5786 (cross-process staleness): presence is resolved through
+    _entity_materialized, which self-heals a stale per-process known-set — a
+    descriptor table another worker materialized is discovered by a bounded probe
+    rather than mis-read as inline (which would lose the rows). Built-in-only
+    projects short-circuit before any DB hit, so the guard stays cheap for them."""
     import occupation  # noqa: PLC0415
-    known = _known_entities()
     spec: dict = {}
     for coll, s in occupation.target_decomposition(data).items():
-        if coll not in known:
+        if not _entity_materialized(coll):
             continue
-        arms = tuple(a for a in s["arms"] if a in known)
+        arms = tuple(a for a in s["arms"] if _entity_materialized(a))
         spec[coll] = {"id_field": s.get("id_field", "id"), "arms": arms}
     return spec
 
