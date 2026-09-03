@@ -152,7 +152,15 @@ def _iter_commit_entries(entries: list) -> list[dict]:
 
 
 def collect_recent_commits(data: dict, *, limit: int = DEFAULT_COMMIT_WINDOW) -> list[dict]:
-    """Collect the most-recent ``limit`` commit entries across all milestones.
+    """Collect the most-recent ``limit`` commit entries across all Targets.
+
+    ms-164 e-5951: walks ``occupation.iter_target_records`` instead of hardcoding
+    ``data['milestones']`` — commit entries also live under Operations (a dev
+    Target class), so the old milestone-only scan MISSED phantom-done evidence for
+    OperationTask commits. Non-commit-bearing Target classes (a sales Opportunity)
+    simply contribute nothing, so the broadening is safe (a project with no commits
+    yields the same empty result). The ``ms_id`` output key is kept for back-compat
+    but now carries the parent Target's id (a milestone OR an operation).
 
     Ordering: descending by ``created_at`` (falling back to ``date`` then
     empty string). Each returned dict has the shape
@@ -163,8 +171,9 @@ def collect_recent_commits(data: dict, *, limit: int = DEFAULT_COMMIT_WINDOW) ->
     """
     if not isinstance(data, dict):
         return []
+    import occupation  # ms-164 e-5951: occupation-generic Target enumeration
     rows: list[dict] = []
-    for ms in data.get("milestones", []) or []:
+    for ms in occupation.iter_target_records(data):
         if not isinstance(ms, dict):
             continue
         ms_id = ms.get("id", "")
