@@ -85,8 +85,14 @@ def cmd_note_add():
     # attribution never diverges. Best-effort: never fail a note over attribution.
     try:
         worked_ids = resolve_worked_target_ids(load_project(), entry_target_ids=[])
-    except Exception:
+    except Exception as exc:
+        # Best-effort, but SURFACE the failure (AX review PR#708): a silent
+        # swallow makes an unattributed note indistinguishable from a genuine
+        # no-active-target. Warn on stderr so the note still records but the
+        # attribution miss is visible.
         worked_ids = []
+        print(f"Warning: worked-target attribution failed ({exc}); "
+              f"note recorded without target_ids", file=sys.stderr)
     if worked_ids:
         note["target_ids"] = worked_ids
         note["target_id"] = worked_ids[0]  # back-compat first-of-set

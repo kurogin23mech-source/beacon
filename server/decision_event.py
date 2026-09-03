@@ -524,7 +524,14 @@ def _row_target_id(row: dict) -> str:
     ``target_id`` fallback (ms-164 e-6030).
 
     ``related.target_id`` (ms-154 e-5592) is the canonical slot; the fallback keeps
-    the filter honest for any producer that stamped ``target_id`` at the top level."""
+    the filter honest for any producer that stamped ``target_id`` at the top level.
+
+    NOTE — this layout is DECISION-EVENT specific. It is NOT the same shape as the
+    worked-target attribution on project.json records (session log / note / push),
+    which carry a top-level ``target_ids`` LIST (+ back-compat first ``target_id``).
+    A decision event is single-target (the one judgment's target); the record types
+    are multi. Do not copy this accessor onto those records — read their
+    ``target_ids`` list instead."""
     related = row.get("related") or {}
     return str(related.get("target_id") or row.get("target_id") or "")
 

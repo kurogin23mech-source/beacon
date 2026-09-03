@@ -169,11 +169,21 @@ def resolve_worked_target_ids(data, *, entry_target_ids=None) -> list:
     context, routing through the single rule ``occupation.resolve_worked_targets``
     (ms-164 SPEC 方針3 / 実装順序1).
 
-    ``entry_target_ids`` = the Targets a commit-group landed on (push / deploy);
-    ``[]`` (default) for point-in-time records (note / incident) that carry no
-    commit set — those resolve to the fork Target (in a fork worktree) or the
-    active Target(s). Returns the de-duplicated id list (possibly empty when there
-    is no fork / active Target, i.e. the record stays project-wide)."""
+    ``entry_target_ids`` = the Targets a commit-group landed on; ``[]`` (default)
+    for point-in-time records (note / incident) that carry no commit set — those
+    resolve to the fork Target (in a fork worktree) or the active Target(s). Returns
+    the de-duplicated id list (possibly empty when there is no fork / active Target,
+    i.e. the record stays project-wide).
+
+    Callers routed through here today: ``note`` and ``push`` records. NOT yet:
+    ``deploy`` (``cmd_deploy`` still uses its own milestone-scan commit→target
+    mapping — its generalisation is e-5946, a KNOWN GAP, because deploy also carries
+    milestone-completion semantics that this id-only resolver does not model).
+
+    Returns ONLY the id list. A caller that also needs ``target_source`` (e.g. to
+    write it onto a record, as ``session_log.aggregate_session`` does) should call
+    ``occupation.resolve_worked_targets`` DIRECTLY and read both fields, rather than
+    this thin wrapper."""
     return occupation.resolve_worked_targets(
         data,
         entry_target_ids=entry_target_ids or [],

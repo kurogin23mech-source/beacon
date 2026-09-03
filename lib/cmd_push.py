@@ -94,8 +94,12 @@ def cmd_push_record():
     else:
         try:
             target_ids = resolve_worked_target_ids(data, entry_target_ids=[])
-        except Exception:
+        except Exception as exc:
+            # Best-effort, but SURFACE the failure (AX review PR#708): don't let a
+            # silent swallow make an unattributed push look like a no-active-target.
             target_ids = []
+            print(f"Warning: worked-target attribution failed ({exc}); "
+                  f"push recorded without target_ids", file=sys.stderr)
         ms_id = target_ids[0] if target_ids else ""
 
     # Pushed by: git user

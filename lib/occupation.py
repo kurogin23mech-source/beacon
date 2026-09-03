@@ -1093,11 +1093,12 @@ def resolve_worked_targets(
     to route through (ms-164 SPEC 方針3 / 実装順序1).
 
     Why multi: one session commonly advances several Targets in a day. Collapsing
-    to a single "primary" — as the older single-target
-    ``session_log.resolve_worked_target`` does, folding a cross-target session to
-    ``"ambiguous"`` → project-wide — starves those records of attribution. This
-    returns EVERY worked Target so a record can be reached from the root AND from
-    each child Target it touched (SPEC 設計判断 2026-09-03).
+    to a single "primary" — as the older single-target session-log resolver did,
+    folding a cross-target session to ``"ambiguous"`` → project-wide — starves those
+    records of attribution. (That single resolver has since been retired; ms-164
+    e-5942 routed ``session_log.aggregate_session`` onto THIS rule.) This returns
+    EVERY worked Target so a record can be reached from the root AND from each child
+    Target it touched (SPEC 設計判断 2026-09-03).
 
     Resolution — ``entry_target_ids`` (the Targets the session's commits/PRs
     actually landed on) are the authoritative evidence; ``fork_target_id`` is the

@@ -356,5 +356,4 @@ __all__ = [
     "collect_local_notes",
     "collect_project_entries",
     "mechanical_summary",
-    "_read_fork_target_id",
 ]

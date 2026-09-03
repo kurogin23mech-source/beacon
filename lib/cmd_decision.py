@@ -129,10 +129,22 @@ def cmd_decision_list():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
 
     if not _is_cloud_mode():
+        # AX review PR#708: when a --session / --target filter was given, an empty
+        # result in local mode must NOT read as "this session recorded no
+        # decisions" — the stream simply does not exist locally and the filter was
+        # never evaluated. Signal ``filter_applied: false`` (JSON) / a note (text)
+        # so a caller can tell "filter ran, 0 matches" from "filter not evaluated".
+        filtered = bool(session or target)
         if json_mode:
-            print(json.dumps({"decisions": [], "count": 0}, ensure_ascii=False))
+            out = {"decisions": [], "count": 0}
+            if filtered:
+                out["filter_applied"] = False
+            print(json.dumps(out, ensure_ascii=False))
         else:
-            print("decision stream は cloud プロジェクトのみ (local mode では記録なし)")
+            msg = "decision stream は cloud プロジェクトのみ (local mode では記録なし)"
+            if filtered:
+                msg += " — --session / --target フィルタは適用されていません"
+            print(msg)
         return
 
     try:
