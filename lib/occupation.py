@@ -389,6 +389,21 @@ def project_targets(data: dict) -> list:
     return rows
 
 
+def project_target_count(data: dict) -> int:
+    """Return how many Targets the project has, occupation-generically (ms-164
+    e-5952) — the single source a headline "how big is this project" metric asks,
+    instead of ``len(data['milestones'])`` (which reads 0 for any project whose
+    Targets are not milestones — a sales project's project-list card showed empty).
+
+    Counts the same projected set the detail view enriches with
+    (``project_targets``). Best-effort: returns 0 on any malformed project rather
+    than crashing a whole project-list over one bad row."""
+    try:
+        return len(project_targets(data))
+    except Exception:
+        return 0
+
+
 def stop_signal_rows(data: dict) -> list:
     """Return the open Targets that the mechanism thinks should probably be
     wrapped up, as ``[{id, label, kind, signals: [{kind, message}]}]`` (ms-146

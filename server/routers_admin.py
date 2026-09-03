@@ -140,7 +140,12 @@ def make_router(
                 "objective": (full.get("objective") or "")[:200],
                 "archived": bool(full.get("archived", False)),
                 "member_count": p.get("member_count", 0),
+                # ms-164 e-5952: milestone_count kept for back-compat; target_count
+                # is the occupation-generic headline metric so a non-milestone
+                # (sales) project's card is not empty. Falls back to milestone_count
+                # for a summary produced before this field existed.
                 "milestone_count": p.get("milestone_count", 0),
+                "target_count": p.get("target_count", p.get("milestone_count", 0)),
                 "updated_at": p.get("updated_at", ""),
             })
         return {"count": len(rows), "projects": rows}

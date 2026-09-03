@@ -176,6 +176,7 @@ def delete_user(user_id: str) -> bool:
 def list_all_projects() -> list[dict]:
     """List all projects (admin). Returns summary only, no entries."""
     import datetime
+    import occupation  # ms-164 e-5952: occupation-generic target_count
     docs = get_db().collection(COLLECTION).stream()
     result = []
     for doc in docs:
@@ -185,7 +186,11 @@ def list_all_projects() -> list[dict]:
             "name": data.get("name", ""),
             "owner": data.get("owner", ""),
             "member_count": len(data.get("members", [])),
+            # ms-164 e-5952: milestone_count kept for back-compat; target_count is
+            # the occupation-generic headline metric so a non-milestone project
+            # (sales) no longer shows an empty card.
             "milestone_count": len(data.get("milestones", [])),
+            "target_count": occupation.project_target_count(data),
             "updated_at": data.get("updated_at", ""),
         })
     return result
