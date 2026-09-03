@@ -3732,15 +3732,24 @@ def incident_close(data: dict, incident_id: str, *, resolution: str) -> tuple[di
     return container, entry
 
 
-def incident_escalate(data: dict, incident_id: str, ms_id: str) -> tuple[dict, dict, dict]:
-    """Escalate an Incident to a Milestone task. Returns (operation, incident_entry, task_entry)."""
+def incident_escalate(data: dict, incident_id: str, target: dict) -> tuple[dict, dict, dict]:
+    """Escalate an Incident to a task on the given Target record. Returns
+    (operation, incident_entry, task_entry).
+
+    ms-164 e-5947: ``target`` is a RESOLVED Target record (dict) of ANY class,
+    not a milestone id — the caller resolves it via ``occupation.resolve_target``
+    so this core function stays occupation-generic. Previously this hard-wired
+    ``find_target_milestone(data, ms_id)``, so an Incident could only ever be
+    escalated onto a development milestone (a sales / back-office project had no
+    valid escalation target). Core cannot import ``occupation`` (occupation → core),
+    which is exactly why the generic resolution lives in the CLI layer and the
+    record arrives pre-resolved here."""
     result = find_entry(data, incident_id)
     if not result:
         raise ValueError(f"Incident not found: {incident_id}")
     op, _, incident, _ = result
     if incident.get("type") != "incident":
         raise ValueError(f"{incident_id} is not an incident entry")
-    ms = find_target_milestone(data, ms_id)
     eid = next_entry_id(data)
     task = {
         "id": eid,
@@ -3754,7 +3763,7 @@ def incident_escalate(data: dict, incident_id: str, ms_id: str) -> tuple[dict, d
             "escalated_from_op": op.get("id"),
         },
     }
-    ms.setdefault("entries", []).append(task)
+    target.setdefault("entries", []).append(task)
     incident["linked_ms_task"] = eid
     return op, incident, task
 
