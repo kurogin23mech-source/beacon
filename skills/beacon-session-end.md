@@ -263,7 +263,19 @@ N件のメモのうちM件を memo ドキュメントに残します。
 
 **heredoc は必ず quoted EOF (`<<'EOF'` または `<< 'EOF'`) を使う**: 非引用 `<<EOF` だと shell が中身の backtick (`` ` ``) を command substitution として展開し、本文が silent corrupt する (2026-06-10 LPS dogfood で観察された病理、e-1401)。
 
-承認後、Bash ツールで実行:
+**昇格先 Doc を作業 target に紐付ける (ms-164 e-5944)**: session-end は Step 4 で「このセッションが進めた作業 target (worked-target)」を既に確定している (session log payload の `target_ids` / `target_source`)。memo 昇格 Doc も、この worked-target に紐付けて「どの target を進めた検討メモか」を target 起点で辿れるようにする — 昇格先を無条件で project 全体 (project-wide memo scope) に固定しない。判定:
+
+- `target_source` が **`fork` または `inferred`** (= 作業 target が確定している) かつ worked-target が **milestone (`ms-…`)** → `beacon doc add` に **`--ms <worked-target-id>`** を付ける (`target_ids` の先頭 = 主たる作業 target)。
+- `target_source` が **`none` / `ambiguous`** (= 作業 target 未確定)、または worked-target が milestone でない target-class (`beacon doc add` は現状 `--ms` / `--op` / `--trek` のみで汎用 `--target` を持たないため) → 従来どおり **project-wide memo scope** のまま (`--ms` を付けない)。
+
+承認後、Bash ツールで実行 (worked-target が確定していれば `--ms` を付ける):
+```bash
+beacon doc add "セッションメモ YYYY-MM-DD" --scope memo --ms <worked-target-id> --stdin <<'EOF'
+<統合ドキュメントの本文>
+EOF
+```
+
+作業 target が未確定なら `--ms` を省く:
 ```bash
 beacon doc add "セッションメモ YYYY-MM-DD" --scope memo --stdin <<'EOF'
 <統合ドキュメントの本文>
