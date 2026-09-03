@@ -17,6 +17,8 @@ from commands_shared import (
     _get_notes_path,
     _refuse_if_bus_origin,
     _resolve_active_api_url,
+    load_project,
+    resolve_worked_target_ids,
 )
 
 
@@ -75,6 +77,19 @@ def cmd_note_add():
     session_id = _resolve_session_id()
     if session_id:
         note["session_id"] = session_id
+    # ms-164 e-5943: attribute the note to the worked Target(s) so it is reachable
+    # from the root AND each child Target (SPEC 方針3), not just project-wide. A note
+    # is written mid-session before any commit, so it carries no entry set — the
+    # resolver falls back to the fork Target (in a fork worktree) or the active
+    # Target(s). Routed through the SAME rule as session log / push / deploy so
+    # attribution never diverges. Best-effort: never fail a note over attribution.
+    try:
+        worked_ids = resolve_worked_target_ids(load_project(), entry_target_ids=[])
+    except Exception:
+        worked_ids = []
+    if worked_ids:
+        note["target_ids"] = worked_ids
+        note["target_id"] = worked_ids[0]  # back-compat first-of-set
     path = _get_notes_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
