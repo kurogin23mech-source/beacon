@@ -133,7 +133,9 @@ class TestCollectRecentCommits:
         ids = {r["id"] for r in rows}
         assert ids == {"e-1", "e-2"}  # operation commit is now included
         op_row = next(r for r in rows if r["id"] == "e-2")
-        assert op_row["ms_id"] == "op-1"  # back-compat key, generic target id
+        # PR#710 review: key renamed ms_id → target_id (it carries op- ids too)
+        assert op_row["target_id"] == "op-1"
+        assert "ms_id" not in op_row  # old lying key is gone
 
     def test_respects_limit(self):
         commits = [

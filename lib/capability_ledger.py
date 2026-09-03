@@ -494,6 +494,17 @@ KNOWN_ARM_REACH = {
     # (session_log occupation-neutrality; the open follow-up is e-3702, named in
     # collect_project_entries' docstring).
     ("session_log", "entries"),
+    # ms-164 e-5951: phantom_done_evidence.collect_recent_commits now enumerates
+    # Targets via occupation.iter_target_records (was ``data['milestones']`` — the
+    # generic-isation that also picks up OperationTask commits), but then reads each
+    # record's dev ``entries`` arm to gather COMMIT entries. Commits live ONLY in the
+    # dev ``entries`` arm — profession_manifest has no commit-bearing arm (a commit
+    # is neither a work item nor standard evidence), and non-dev Targets (a sales
+    # Opportunity) have no commits, so the read is dev-legitimate and sales-safe (it
+    # gathers nothing from them). Registered symmetric with ``session_log``;
+    # remediation would need a generic "commit-bearing arm" concept, out of e-5951's
+    # scope (owner = ms-164, follow-up).
+    ("phantom_done_evidence", "entries"),
     # ms-142 e-5115 GREENED cmd_project: the backup manifest's ``top_level_entries``
     # integrity count now walks each Target's fat arms via
     # occupation.profession_manifest (arm names read from the manifest, no literal

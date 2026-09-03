@@ -396,11 +396,19 @@ def project_target_count(data: dict) -> int:
     Targets are not milestones — a sales project's project-list card showed empty).
 
     Counts the same projected set the detail view enriches with
-    (``project_targets``). Best-effort: returns 0 on any malformed project rather
-    than crashing a whole project-list over one bad row."""
+    (``project_targets``). Returns 0 for a MALFORMED project (bad-shaped data — e.g.
+    ``milestones`` is not a list) rather than crashing a whole project-list over one
+    bad row. A NARROW except on purpose (PR#710 AX review): a broad
+    ``except Exception`` would also swallow a programming error (a broken import, a
+    bug in ``project_targets`` / ``iter_target_records``) and return 0 — making
+    "5 targets exist but the count computation crashed" indistinguishable from
+    "empty project". That is exactly the silent-non-function this MS is sweeping out,
+    so unexpected errors must propagate and be seen, not be masked as 0."""
     try:
         return len(project_targets(data))
-    except Exception:
+    except (TypeError, KeyError, AttributeError, ValueError):
+        # Malformed project shape only (e.g. a non-list arm). Any other exception
+        # (import/logic bug) propagates so the failure is loud, not a silent 0.
         return 0
 
 
