@@ -1,13 +1,15 @@
-"""ms-153 e-5550 (SPEC 方針3 / 問題 P3): session-end writes its summary scoped to
-the TARGET the session actually worked on — not a project-wide log.
+"""ms-153 e-5550 → ms-164 e-5942 (SPEC 方針3 / 問題 P3): session-end attributes
+its summary to the Target(s) the session actually worked on — not a project-wide
+log.
 
-- In a fork worktree the write target is STRUCTURALLY fixed by fork.json's
-  ``target_ms_id`` (受入条件6).
-- Otherwise it is inferred from the session's own entries: one Target → that
-  Target; none / several → left empty (stays unattributed rather than guessing).
-
-These are pure-function tests over ``resolve_worked_target`` /
-``collect_project_entries`` / ``aggregate_session`` — no CLI, no cloud.
+ms-164 makes attribution MULTI: a session that touched several Targets in a day
+attributes to ALL of them (``target_ids``), reachable from the root AND from each
+child Target — the older single-target path folded a cross-target session to
+``ambiguous`` → unattributed. The resolution RULE itself now lives in the pure,
+occupation-generic ``occupation.resolve_worked_targets`` (実装順序1, unit-tested in
+``test_occupation_worked_targets_ms164.py``); these tests cover the session-log
+INTEGRATION — that ``aggregate_session`` reads the fork hint + entry Targets and
+stamps the multi set. No CLI, no cloud.
 """
 
 import json
@@ -40,56 +42,29 @@ def test_collect_surfaces_target_ids():
     assert out["target_ids"] == ["ms-1", "ms-2"]
 
 
-# --- resolve_worked_target --------------------------------------------------
+# --- _read_fork_target_id (the filesystem half) -----------------------------
 
-def test_fork_fixes_target_structurally():
+def test_read_fork_target_id():
     with tempfile.TemporaryDirectory() as tmp:
         bd = Path(tmp)
         (bd / "fork.json").write_text(
             json.dumps({"target_ms_id": "ms-153", "child_branch": "x"}),
             encoding="utf-8")
-        # even if the session touched OTHER targets, fork.json wins
-        got = session_log.resolve_worked_target(bd, ["ms-99"])
-        assert got == {"target_id": "ms-153", "target_source": "fork"}
+        assert session_log._read_fork_target_id(bd) == "ms-153"
 
 
-def test_fork_json_malformed_falls_through_to_inference():
+def test_read_fork_target_id_missing_or_malformed():
     with tempfile.TemporaryDirectory() as tmp:
         bd = Path(tmp)
+        assert session_log._read_fork_target_id(bd) == ""  # no file
         (bd / "fork.json").write_text("{ not json", encoding="utf-8")
-        got = session_log.resolve_worked_target(bd, ["ms-7"])
-        assert got == {"target_id": "ms-7", "target_source": "inferred"}
-
-
-def test_fork_json_without_target_falls_through():
-    with tempfile.TemporaryDirectory() as tmp:
-        bd = Path(tmp)
+        assert session_log._read_fork_target_id(bd) == ""  # malformed
         (bd / "fork.json").write_text(json.dumps({"child_branch": "x"}),
                                       encoding="utf-8")
-        got = session_log.resolve_worked_target(bd, ["ms-7"])
-        assert got["target_source"] == "inferred"
-        assert got["target_id"] == "ms-7"
+        assert session_log._read_fork_target_id(bd) == ""  # no target field
 
 
-def test_inferred_single_target():
-    with tempfile.TemporaryDirectory() as tmp:
-        got = session_log.resolve_worked_target(Path(tmp), ["ms-5", "ms-5"])
-        assert got == {"target_id": "ms-5", "target_source": "inferred"}
-
-
-def test_none_when_no_entries():
-    with tempfile.TemporaryDirectory() as tmp:
-        got = session_log.resolve_worked_target(Path(tmp), [])
-        assert got == {"target_id": "", "target_source": "none"}
-
-
-def test_ambiguous_when_multiple_targets():
-    with tempfile.TemporaryDirectory() as tmp:
-        got = session_log.resolve_worked_target(Path(tmp), ["ms-1", "ms-2"])
-        assert got == {"target_id": "", "target_source": "ambiguous"}
-
-
-# --- aggregate_session carries the attribution ------------------------------
+# --- aggregate_session carries the (multi) attribution ----------------------
 
 def test_aggregate_attributes_to_fork_target():
     with tempfile.TemporaryDirectory() as tmp:
@@ -100,7 +75,24 @@ def test_aggregate_attributes_to_fork_target():
             {"id": "ms-153", "entries": [_commit("e-1", "S1", "work")]}]}
         payload = session_log.aggregate_session(
             project_data=data, beacon_dir=bd, session_id="S1")
-        assert payload["target_id"] == "ms-153"
+        assert payload["target_ids"] == ["ms-153"]
+        assert payload["target_id"] == "ms-153"  # back-compat first-of-set
+        assert payload["target_source"] == "fork"
+
+
+def test_aggregate_fork_unions_other_touched_targets():
+    """ms-164: a fork session that ALSO committed to another Target attributes to
+    both — the fork Target leads, the other is kept (not dropped as before)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        bd = Path(tmp)
+        (bd / "fork.json").write_text(
+            json.dumps({"target_ms_id": "ms-153"}), encoding="utf-8")
+        data = {"milestones": [
+            {"id": "ms-153", "entries": [_commit("e-1", "S1", "work")]},
+            {"id": "ms-99", "entries": [_commit("e-2", "S1", "side")]}]}
+        payload = session_log.aggregate_session(
+            project_data=data, beacon_dir=bd, session_id="S1")
+        assert payload["target_ids"] == ["ms-153", "ms-99"]
         assert payload["target_source"] == "fork"
 
 
@@ -111,7 +103,22 @@ def test_aggregate_infers_target_without_fork():
             {"id": "ms-42", "entries": [_commit("e-1", "S1", "work")]}]}
         payload = session_log.aggregate_session(
             project_data=data, beacon_dir=bd, session_id="S1")
+        assert payload["target_ids"] == ["ms-42"]
         assert payload["target_id"] == "ms-42"
+        assert payload["target_source"] == "inferred"
+
+
+def test_aggregate_multi_inferred_keeps_all_targets():
+    """The behavioural heart of ms-164 e-5942: a non-fork session spanning two
+    Targets now attributes to BOTH (was ``ambiguous`` → unattributed)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        bd = Path(tmp)
+        data = {"milestones": [
+            {"id": "ms-1", "entries": [_commit("e-1", "S1", "a")]},
+            {"id": "ms-2", "entries": [_commit("e-2", "S1", "b")]}]}
+        payload = session_log.aggregate_session(
+            project_data=data, beacon_dir=bd, session_id="S1")
+        assert payload["target_ids"] == ["ms-1", "ms-2"]
         assert payload["target_source"] == "inferred"
 
 
@@ -121,5 +128,6 @@ def test_aggregate_project_wide_when_no_work():
         data = {"milestones": []}
         payload = session_log.aggregate_session(
             project_data=data, beacon_dir=bd, session_id="S1")
+        assert payload["target_ids"] == []
         assert payload["target_id"] == ""
         assert payload["target_source"] == "none"
