@@ -322,41 +322,14 @@ KNOWN_COLLECTION_COUPLING = {
     # violated SPEC AC6's "owning MS 付き" (it had none) precisely because it was not
     # debt at all; disposed here as reviewed-correct.
     #
-    # ms-164 e-5949: the transitive helper→helper attribution (checker deepening)
-    # NEWLY SURFACED these ``cmd_trigger`` (L1-shared) reads — a blind spot before
-    # because each lives TWO helper levels below the handler (cmd_trigger_check /
-    # cmd_trigger_tick → _auto_fire_*/cleanup helper → the data['milestones'] read),
-    # which the old one-level cmd→helper walk could not reach.
-    #
-    # ms-164 e-5950 (disposition精査, human-confirmed): the (verb, collection) key
-    # collapses THREE distinct read sites, whose correct dispositions DIFFER but
-    # cannot be recorded independently at this granularity — so the key stays
-    # tracked debt (the doctor pattern: correct to fix, but the fix is
-    # behaviour-sensitive + cascades), NOT reviewed-correct. The three sites:
-    #   1. _count_untriaged_active — reads milestones + nested tasks. The untriaged
-    #      sentinel is machine-only and is applied ONLY to dev milestones/tasks
-    #      today (opportunities/operations never carry it; the trigger output is
-    #      ms_count/task_count-shaped), so this read is EXACT for untriaged-as-it-
-    #      exists → would be reviewed-correct on its own.
-    #   2. _cleanup_spec_needed_triggers — reads milestones to validate ms-ids.
-    #      spec-needed-<ms-id> triggers are milestone-keyed BY DESIGN → also EXACT /
-    #      reviewed-correct on its own.
-    #   3. _cleanup_review_due_triggers — reads milestones + operations. This is a
-    #      GENUINE coupling: _fire_review_due_trigger fires for milestone /
-    #      operation AND descriptor targets (cmd_target), so the cleanup MISSES
-    #      descriptor-class targets. The correct fix is occupation.iter_target_records
-    #      — but that makes cmd_trigger an ARM-scanned module, which then flags its
-    #      .get("entries") reads (this site's approval scan AND site 1's nested-task
-    #      scan) as new arm-couplings needing occupation.profession_manifest routing.
-    # Because sites 1/2 (reviewed-correct) share the key with site 3 (real coupling),
-    # the key cannot be moved to REVIEWED_LEGITIMATE_COLLECTION_READS until site 3 is
-    # genericised. That arm-aware generic-isation is scoped to a dedicated follow-up
-    # task (behaviour-sensitive: descriptor-target review-due cleanup changes) rather
-    # than smuggled into e-5950. owner = ms-164 / e-6115 (the review-due arm-aware
-    # generic-isation follow-up; on its completion these two keys move to
-    # REVIEWED_LEGITIMATE_COLLECTION_READS, sites 1/2 being exact).
-    ("trigger_check", "milestones"),
-    ("trigger_tick", "milestones"),
+    # ms-164 e-6115 GREENED the (trigger_check|trigger_tick, milestones) debt:
+    # _cleanup_review_due_triggers (the one GENUINE coupling of the three sites the
+    # key collapsed — it missed descriptor-class targets) now enumerates via
+    # occupation.iter_target_records. The two remaining milestones reads under these
+    # verbs (_count_untriaged_active, _cleanup_spec_needed_triggers) are EXACT by
+    # design, so both keys moved to REVIEWED_LEGITIMATE_COLLECTION_READS (see there
+    # for the per-site evidence). Making cmd_trigger arm-scanned surfaced its
+    # .get("entries") arm reads — tracked in KNOWN_ARM_REACH ("cmd_trigger","entries").
 }
 
 # Reviewed-legitimate reads (ms-134 e-4737): (verb, collection) reads a
@@ -421,6 +394,24 @@ REVIEWED_LEGITIMATE_COLLECTION_READS = {
         "milestone aggregation (for ms in …) was remediated to "
         "occupation.target_records; this deployment-field read is exact, not "
         "coupling.",
+    ("trigger_check", "milestones"):
+        "ms-164 e-6115: the milestones reads remaining under this verb are both "
+        "EXACT by the data model: (1) _count_untriaged_active — the untriaged "
+        "sentinel is a dev-only machine flag (opportunities/operations never carry "
+        "it; the trigger output is ms_count/task_count-shaped), so counting it "
+        "belongs to milestones; (2) _cleanup_spec_needed_triggers — spec-needed-"
+        "<ms-id> triggers are milestone-keyed by design. Routing either through the "
+        "target abstraction would walk sales targets that never hold this data — "
+        "the wrong abstraction, same shape as target_list / session_fork. (The "
+        "former review-due cleanup coupling under this verb was genericised "
+        "separately; it no longer reads milestones directly.)",
+    ("trigger_tick", "milestones"):
+        "ms-164 e-6115: same two milestone-exact reads as (trigger_check, "
+        "milestones) — tick shares the _count_untriaged_active / "
+        "_cleanup_spec_needed_triggers helpers, both exact by the data model as "
+        "explained there. The one genuine coupling (review-due cleanup, which "
+        "missed descriptor-class targets) was genericised separately, so no "
+        "profession coupling remains under this verb.",
     ("acquisition_list", "acquisitions"):
         "ms-142 e-5250 (思想レビュー P2c): acquisitions is the SOLE home of "
         "acquisition (顧客獲得ターゲット) records and rides a separate persistence "
@@ -547,6 +538,21 @@ KNOWN_ARM_REACH = {
     # ``entries``), so it covers a sales project's activities/communications and no
     # longer reaches the dev arm. Row deleted (stale-entry test forces the deletion
     # once the arm read is abstracted).
+    # ms-164 e-6115: routing _cleanup_review_due_triggers to iter_target_records made
+    # cmd_trigger an ARM-scanned module, which surfaced its pre-existing ``entries``
+    # arm reads (all newly-flagged, none a new blind spot): (1) _count_untriaged_active
+    # walks milestone entries for the dev-only untriaged sentinel; (2) the review-due
+    # approval scan reads target-transition-approval entries (the approval mechanism
+    # lives in the dev ``entries`` arm universally); (3) _auto_fire operation checks
+    # read an operation's ``entries`` for run_records (operations are L1; reading an
+    # operation's entries is legitimate per the arm-scan's own operation carve-out).
+    # Full routing through profession_manifest work_item_arm / evidence_arms is
+    # behaviour-sensitive and spans functions unrelated to review-due (untriaged
+    # counting, operation firing), so it is DEFERRED as tracked debt rather than
+    # smuggled into e-6115. owner = ms-164, follow-up = e-6134 (arm-aware routing
+    # of cmd_trigger's three entries reads). Registered symmetric with session_log /
+    # phantom_done_evidence.
+    ("cmd_trigger", "entries"),
 }
 
 
