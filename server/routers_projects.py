@@ -2379,6 +2379,14 @@ class NoteCreate(BaseModel):
     # pre-ms-57 CLI) and is dropped server-side so Firestore docs stay
     # either "tagged with a real id" or "no field at all".
     session_id: str = ""
+    # ms-164 e-5943 (cloud API leg, SPEC 実装順序2): the worked-Target attribution
+    # the CLI stamps in cmd_note (resolve_worked_target_ids). Same rationale as
+    # SessionLogUpsert — undeclared fields were silently dropped, so a cloud-mode
+    # note was not reachable from its worked child Target(s) (AC1). Empty list =
+    # "no active target" and is dropped server-side (see add_note) so a doc is
+    # either tagged or has no field at all, symmetric with session_id above.
+    target_ids: Optional[list[str]] = None
+    target_id: str = ""
 
 class SessionUpsert(BaseModel):
     """Body for PUT /api/projects/{project_id}/sessions/{session_id}.
@@ -2473,6 +2481,18 @@ class SessionLogUpsert(BaseModel):
     note_ids: Optional[list[str]] = None
     commit_ids: Optional[list[str]] = None
     pr_ids: Optional[list[str]] = None
+    # ms-164 e-5942 (cloud API leg, SPEC 実装順序2 "cloud API 側の帰属フィールド
+    # 拡張も含む"): the worked-Target attribution the CLI stamps in
+    # session_log.aggregate_session. Without these declared, the default
+    # ``extra="ignore"`` Pydantic model silently dropped them before persistence,
+    # so a cloud-mode project's session log was reachable from the root but NOT
+    # from each worked child Target (AC1). ``target_ids`` = the multi-attribution
+    # set; ``target_id`` = first-of-set back-compat; ``target_source`` = how it was
+    # resolved (fork / entries / active / none). All optional (rescue / session-end
+    # write different subsets; upsert merge=True in the store keeps partials safe).
+    target_ids: Optional[list[str]] = None
+    target_id: Optional[str] = None
+    target_source: Optional[str] = None
     created_at: Optional[str] = None
     last_aggregated_at: Optional[str] = None
     recovered: Optional[bool] = None
@@ -2971,6 +2991,15 @@ def make_collab_router(
             note["context"] = body.context
         if body.session_id:
             note["session_id"] = body.session_id
+        # ms-164 e-5943 (cloud API leg): persist the worked-Target attribution the
+        # CLI stamps so a cloud-mode note is reachable from each worked child
+        # Target, not just the root (AC1). This handler builds ``note`` field-by-
+        # field (not via body.model_dump()), so the fields must be copied
+        # explicitly. Empty list = "no active target" → drop the field (symmetric
+        # with session_id) so a doc is either tagged or has no field at all.
+        if body.target_ids:
+            note["target_ids"] = body.target_ids
+            note["target_id"] = body.target_id or body.target_ids[0]
         note_id = db.add_note(project_id, note)
         return {"note_id": note_id, **note}
 

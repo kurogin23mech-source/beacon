@@ -794,9 +794,19 @@ def _cleanup_review_due_triggers() -> None:
         data = load_project()
     except Exception:
         return
+    # ms-164 e-6115: walk EVERY deliverable-bearing Target class via the generic
+    # occupation projection, not a hardcoded ``milestones + operations`` pair.
+    # review-due triggers fire for any target-class (a descriptor-defined class /
+    # a sales opportunity can go through the review 節目 too); the old hardcode
+    # left those classes out of ``status_by_id``, so their still-live review-due
+    # trigger was mis-read as "target gone" (tid not in status_by_id) and removed
+    # spuriously — the AC3 blind spot. iter_target_records returns each class's
+    # records verbatim with their nested ``entries`` (same walk cmd_retro /
+    # phantom_done_evidence use), so the pending-approval scan below is unchanged.
+    import occupation  # local import: leaf domain module, no top-level cycle
     status_by_id = {}
     pending_targets = set()
-    for c in list(data.get("milestones", [])) + list(data.get("operations", [])):
+    for c in occupation.iter_target_records(data):
         status_by_id[c.get("id")] = c.get("status")
         for e in c.get("entries", []):
             if (e.get("type") == "target-transition-approval"
