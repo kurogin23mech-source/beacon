@@ -251,6 +251,53 @@ def test_session_log_scoped_to_target_by_ms_filter():
     assert [r["id"] for r in sl_rows] == ["sv-a"]
 
 
+def test_session_log_legacy_only_row_survives_ms_scope_filter():
+    """ms-164 e-5942 (independent-review PR#716): a legacy row carrying ONLY the
+    old ms_id (no target_ids) must still survive an ms=<id> scoped retrospect.
+
+    The per-target filter (step 4b) runs on the RENDERED result list, so
+    ``_render_session_log`` has already promoted ms_id → target_ids before the
+    filter reads it. This encodes that ordering as a contract (both AX and
+    maintainability judges mis-read it as a raw pre-render read that would
+    silently drop legacy rows — this test refutes that and locks the truth)."""
+    project = {"milestones": [{"id": "ms-9", "title": "T",
+                               "status": "in_progress", "entries": []}],
+               "operations": []}
+    legacy = [{"session_id": "sv-legacy", "summary": "legacy worked ms-9",
+               "created_at": "2026-06-15", "ms_id": "ms-9"}]
+    kept = retro_query.retro_query(
+        project, ms="ms-9", include_session_logs=True, session_logs=legacy,
+    )
+    assert [r["id"] for r in kept["results"]
+            if r["entity_type"] == "session_log"] == ["sv-legacy"]
+    # and a non-matching legacy row is correctly excluded (no cross-Target leak)
+    dropped = retro_query.retro_query(
+        project, ms="ms-OTHER", include_session_logs=True, session_logs=legacy,
+    )
+    assert [r["id"] for r in dropped["results"]
+            if r["entity_type"] == "session_log"] == []
+
+
+def test_session_log_scoped_to_target_by_op_filter():
+    """ms-164 e-5942 (independent-review PR#716): the per-target filter is
+    class-generic — an op=<id> scope keeps only session logs attributed to that
+    Operation target, symmetric with the ms= path (the op leg of
+    ``target_scope = ms or op``)."""
+    project = {"milestones": [], "operations": [
+        {"id": "op-1", "title": "Health watch", "status": "open", "entries": []}]}
+    session_logs = [
+        {"session_id": "sv-op", "summary": "worked op-1", "created_at": "2026-06-15",
+         "target_ids": ["op-1"], "target_source": "inferred"},
+        {"session_id": "sv-other", "summary": "worked op-2", "created_at": "2026-06-15",
+         "target_ids": ["op-2"], "target_source": "inferred"},
+    ]
+    result = retro_query.retro_query(
+        project, op="op-1", include_session_logs=True, session_logs=session_logs,
+    )
+    sl_rows = [r for r in result["results"] if r["entity_type"] == "session_log"]
+    assert [r["id"] for r in sl_rows] == ["sv-op"]
+
+
 def test_include_bus_dm_merges_dm_archive():
     project = _project_with_one_human_one_autop_commit()
     bus_archive = [
