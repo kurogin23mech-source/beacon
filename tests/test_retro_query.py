@@ -185,6 +185,72 @@ def test_include_session_logs_merges_fork_sessions():
     assert fork_rows[0]["from_fork"] is True
 
 
+def test_session_log_surfaces_worked_target_stamp():
+    """ms-164 e-5942 (read-side): the renderer reads the worked-Target stamp the
+    write side actually persists (target_ids / target_id / target_source), not the
+    phantom ms_id / fork_parent_session_id the original e-1835 renderer read."""
+    project = _project_with_one_human_one_autop_commit()
+    session_logs = [
+        {
+            "session_id": "sv-fork-1",
+            "summary": "Fork session advanced ms-1 and ms-2",
+            "created_at": "2026-06-15T12:00:00Z",
+            # what session_log.aggregate_session actually writes:
+            "target_ids": ["ms-1", "ms-2"],
+            "target_id": "ms-1",
+            "target_source": "fork",
+        },
+    ]
+    result = retro_query.retro_query(
+        project, include_session_logs=True, session_logs=session_logs,
+    )
+    row = next(r for r in result["results"] if r["entity_type"] == "session_log")
+    # multi-attribution surfaced; single ms_id back-compat = first worked target
+    assert row["target_ids"] == ["ms-1", "ms-2"]
+    assert row["ms_id"] == "ms-1"
+    # target_source == "fork" drives the fork marker (no fork_parent_session_id)
+    assert row["from_fork"] is True
+
+
+def test_session_log_legacy_fields_still_attribute():
+    """Back-compat: a pre-stamp cached row carrying only the legacy ms_id /
+    fork_parent_session_id still attributes and flags fork."""
+    project = {"milestones": [], "operations": []}
+    session_logs = [
+        {
+            "session_id": "sv-old-1",
+            "summary": "legacy row",
+            "created_at": "2026-06-15",
+            "ms_id": "ms-9",
+            "fork_parent_session_id": "sv-parent-99",
+        },
+    ]
+    result = retro_query.retro_query(
+        project, include_session_logs=True, session_logs=session_logs,
+    )
+    row = next(r for r in result["results"] if r["entity_type"] == "session_log")
+    assert row["ms_id"] == "ms-9"
+    assert row["target_ids"] == ["ms-9"]
+    assert row["from_fork"] is True
+
+
+def test_session_log_scoped_to_target_by_ms_filter():
+    """ms-164 e-5942 (AC1): a per-Target retrospect (ms=<id>) keeps only the
+    session logs attributed to that Target — no cross-Target leak."""
+    project = _project_with_one_human_one_autop_commit()
+    session_logs = [
+        {"session_id": "sv-a", "summary": "worked ms-1", "created_at": "2026-06-15",
+         "target_ids": ["ms-1"], "target_source": "inferred"},
+        {"session_id": "sv-b", "summary": "worked ms-2", "created_at": "2026-06-15",
+         "target_ids": ["ms-2"], "target_source": "inferred"},
+    ]
+    result = retro_query.retro_query(
+        project, ms="ms-1", include_session_logs=True, session_logs=session_logs,
+    )
+    sl_rows = [r for r in result["results"] if r["entity_type"] == "session_log"]
+    assert [r["id"] for r in sl_rows] == ["sv-a"]
+
+
 def test_include_bus_dm_merges_dm_archive():
     project = _project_with_one_human_one_autop_commit()
     bus_archive = [
