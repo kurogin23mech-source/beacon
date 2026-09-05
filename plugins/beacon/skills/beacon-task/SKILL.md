@@ -171,16 +171,23 @@ beacon task list --ms <ms-id>
 beacon task show <entry-id>
 ```
 
-## Step 3: 進捗率の自動評価（done 操作時のみ）
+## Step 3: 進捗率の自動評価（done 操作時のみ、dev マイルストーン前提）
 
 done 操作の場合、タスク完了後にマイルストーンの進捗率を定性評価して更新する。
 
-### 3a. コンテキスト取得
+**ただしマイルストーンを持たないプロジェクト（= 営業 (sales) 等の非 dev 職種、仕事は商談 (Opportunity) 等の target で回す）では進捗率評価をスキップする（ms-164 e-5953）。** `/beacon-log` は Pattern C（`milestone_binding == "none"`）で同じ skip を持つのに、この Skill には無く、マイルストーンを持たないプロジェクトで `beacon milestone update` が更新対象不在のまま呼ばれて失敗する穴があった。
+
+### 3a. コンテキスト取得 + 職種 gate
 
 Bash ツールで実行:
 ```bash
 beacon log --prepare
 ```
+
+返る JSON の `milestone_binding` を確認する:
+
+- `milestone_binding == "none"`（= 非 dev / マイルストーンを持たない）→ **Step 3b・3c をスキップ**して Step 4 へ進む。ユーザーには「タスクを完了しました（このプロジェクトはマイルストーンを持たないため、進捗率は更新していません）」と 1 行報告する。
+- それ以外（= dev。`milestone` または `candidates` を持つ）→ 3b に進む。
 
 ### 3b. 進捗率の評価
 
