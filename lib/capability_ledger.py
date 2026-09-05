@@ -321,6 +321,18 @@ KNOWN_COLLECTION_COUPLING = {
     # as target_list / session_fork. Its old "tracked debt pending disposition" state
     # violated SPEC AC6's "owning MS 付き" (it had none) precisely because it was not
     # debt at all; disposed here as reviewed-correct.
+    #
+    # ms-164 e-5949: the transitive helper→helper attribution (checker deepening)
+    # NEWLY SURFACED these ``cmd_trigger`` (L1-shared) reads — they were a blind spot
+    # before because each lives TWO helper levels below the handler
+    # (cmd_trigger_check / cmd_trigger_tick → _auto_fire_*/cleanup helper → the
+    # data['milestones'] read), which the old one-level cmd→helper walk could not
+    # reach. Registered here as tracked debt so the deepened checker stays green; the
+    # DISPOSITION (route the untriaged-count / trigger-cleanup reads through
+    # occupation.iter_target_records, OR classify dev-only-legitimate and move to
+    # REVIEWED_LEGITIMATE_COLLECTION_READS) is e-5950's job. owner = ms-164 / e-5950.
+    ("trigger_check", "milestones"),
+    ("trigger_tick", "milestones"),
 }
 
 # Reviewed-legitimate reads (ms-134 e-4737): (verb, collection) reads a
