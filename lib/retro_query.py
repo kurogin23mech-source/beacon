@@ -201,6 +201,21 @@ def retro_query(
         results = [r for r in results
                    if _entry_claimant(r, meta_index, project) == claimant]
 
+    # ---- 4b. ms-164 e-5942: per-Target reachability for session logs ----
+    # The base ``search_project`` already scoped commit/task/… rows to the
+    # requested Target (``ms`` / ``op``), but the session_log rows are appended
+    # AFTER that filter (step 3), so a per-Target retrospect would leak every
+    # session's log. Keep only the session logs attributed to the scoped Target
+    # (``target_ids`` membership) so "each child Target's history" (AC1) is
+    # honest. Class-generic: ``ms``/``op`` both name a Target id; a session log
+    # attributed to that id survives regardless of its class. Only session_log
+    # rows are touched — bus/trek pass-through is unchanged.
+    target_scope = ms or op
+    if target_scope:
+        results = [r for r in results
+                   if r.get("entity_type") != "session_log"
+                   or target_scope in (r.get("target_ids") or [])]
+
     # ---- 5. sort + paginate (same order as search.search_project) ----
     results.sort(key=lambda r: r.get("updated_at") or r.get("created_at") or "",
                  reverse=True)
@@ -348,17 +363,39 @@ def _render_session_log(sl: dict, q: str) -> dict:
     """Render a session_log row into the standard search result shape.
 
     session_log records carry per-session aggregated summaries (e-1037)
-    plus the fork attribution that e-1835 (UC10-F4) wants surfaced.
+    plus the worked-Target attribution the write side stamps (e-5942).
+
+    ms-164 e-5942 (read-side symmetric migration): the original e-1835 renderer
+    read ``sl.get("ms_id")`` and ``sl.get("fork_parent_session_id")`` — fields
+    ``session_log.aggregate_session`` NEVER wrote, so per-Target reachability was
+    silently dead. session-end persists the worked-Target stamp instead
+    (``target_ids`` / ``target_id`` / ``target_source`` via
+    ``occupation.resolve_worked_targets``), body left project-wide — stamp-only,
+    the same shape as the deploy/push sisters. We read that stamp so a session log
+    is reachable from EACH worked Target (multi-attribution) in retrospect output.
+    Legacy ``ms_id`` / ``fork_parent_session_id`` are still honoured as a fallback
+    for any pre-stamp record or fixture that carries them.
     """
     summary = sl.get("summary") or ""
     snippet = _snippet(summary, q.lower() if q else "")
     sid = sl.get("session_id") or sl.get("id") or ""
+    # Worked-Target set, first-seen order. ``target_id`` is the back-compat single
+    # (first of the set); fall back to the legacy ``ms_id`` only when no generic
+    # stamp is present so old cached rows still attribute.
+    target_ids = [t for t in (sl.get("target_ids") or []) if t]
+    primary = sl.get("target_id") or (target_ids[0] if target_ids else "") \
+        or (sl.get("ms_id") or "")
+    if not target_ids and primary:
+        target_ids = [primary]
     return {
         "entity_type": "session_log",
         "id": sid,
         "title": f"session {sid[:12]}",
         "snippet": snippet,
-        "ms_id": sl.get("ms_id"),
+        "ms_id": primary,
+        # Generic multi-attribution — every Target this session advanced. Enables
+        # per-Target reachability regardless of class (milestone / opportunity).
+        "target_ids": target_ids,
         "op_id": None,
         "status": None,
         "priority": None,
@@ -366,8 +403,11 @@ def _render_session_log(sl: dict, q: str) -> dict:
         "created_at": sl.get("created_at", ""),
         "updated_at": sl.get("last_aggregated_at") or sl.get("created_at", ""),
         "url_hash": f"#session-log/{sid}",
-        # extra marker for the Skill output ("fork 由来" / "Trek 由来" 表示)
-        "from_fork": bool(sl.get("fork_parent_session_id")),
+        # extra marker for the Skill output ("fork 由来" / "Trek 由来" 表示).
+        # ``target_source == "fork"`` is the persisted signal; the legacy
+        # ``fork_parent_session_id`` is kept as a fallback for old fixtures/rows.
+        "from_fork": sl.get("target_source") == "fork"
+        or bool(sl.get("fork_parent_session_id")),
     }
 
 
