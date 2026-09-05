@@ -516,6 +516,19 @@ def project_deliverables(data: dict) -> list:
     return out
 
 
+# ms-164 e-5946 (review must-fix 3): the canonical token for the dev milestone
+# target-class. Consumers that key on the milestone kind (e.g. deploy's
+# completion→major table) MUST import this constant instead of writing a bare
+# ``"milestone"`` literal: a literal that drifts by one character from the token
+# ``deliverable_bearing_classes`` / ``target_records`` return would silently
+# no-op (completion never firing a major deploy), whereas a typo in the imported
+# name is an ImportError at load. Single-sourced from — and validated against —
+# the class registry so the constant itself cannot rot.
+CLASS_MILESTONE = "milestone"
+assert CLASS_MILESTONE in _tstate.BUILTIN_TARGET_CLASSES, \
+    "CLASS_MILESTONE drifted from target_state.BUILTIN_TARGET_CLASSES"
+
+
 def deliverable_bearing_classes(data: dict) -> list:
     """Return the KINDS of the project's adopted target-classes that DECLARE a
     deliverable, in adoption order (ms-155 e-5600). For a dev project this is

@@ -185,3 +185,39 @@ def test_links_to_generic_via_target_ids(project_dir):
     dep = _last_deploy(project_dir)
     assert dep["type"] == "minor"
     assert dep["links_to"] == ["d-9"]
+
+
+def _prepare_payload(project_dir, monkeypatch, capsys) -> dict:
+    monkeypatch.setenv("BEACON_MODE", "prepare")
+    cmd_deploy.cmd_deploy_record()
+    return json.loads(capsys.readouterr().out.strip())
+
+
+def test_prepare_payload_dev_shape(project_dir, monkeypatch, capsys):
+    """must-fix 2 review: prepare mode (context JSON the AI reads to write the
+    deploy description) carries target_ids AND the milestone-subset auxiliary, and
+    does NOT write a deployment record."""
+    _write(project_dir, {"name": "t",
+                         "milestones": [_ms_with_commit("ms-1", "done")]})
+    payload = _prepare_payload(project_dir, monkeypatch, capsys)
+    assert payload["deploy_type"] == "major"
+    assert [t["id"] for t in payload["target_ids"]] == ["ms-1"]
+    assert [t["id"] for t in payload["newly_completed_ms"]] == ["ms-1"]
+    assert payload["patch_ms"] == []
+    # prepare is read-only: no deployment record is written.
+    data = json.loads((project_dir / ".beacon" / "project.json").read_text())
+    assert data.get("deployments", []) == []
+
+
+def test_prepare_payload_non_milestone_deliverable_has_target_ids(
+        project_dir, monkeypatch, capsys):
+    """must-fix 1 review: a sales project whose commits land on a deliverable-
+    bearing 'deal' still surfaces target_ids in the prepare payload, so the AI
+    generator does not see "zero worked targets" and emit an empty description.
+    The milestone-subset fields are empty (deal declares no completion)."""
+    _write(project_dir, _deal_project())
+    payload = _prepare_payload(project_dir, monkeypatch, capsys)
+    assert [t["id"] for t in payload["target_ids"]] == ["deal-1"]
+    assert payload["newly_completed_ms"] == []
+    assert payload["patch_ms"] == []
+    assert payload["deploy_type"] == "minor"

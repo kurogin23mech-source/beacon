@@ -243,7 +243,12 @@ def _update_deployed_prod_marker(rev, json_mode=False):
 # ATTRIBUTION only (its shipped commits still map to it and stamp ``target_ids``)
 # and never flips a deploy to major. Adding a key here is the declaration point,
 # not a scatter of ``kind == "milestone"`` literals.
-_DEPLOY_COMPLETION_TERMINAL_STATES = {"milestone": ("done", "observing")}
+# ms-164 e-5946 (review must-fix 3): the key is ``occupation.CLASS_MILESTONE``, NOT
+# a bare ``"milestone"`` literal — the key MUST equal the token
+# ``deliverable_bearing_classes`` returns, and a silent drift would make completion
+# never fire a major deploy. Keying on the imported constant turns a drift into an
+# ImportError instead of a silent no-op.
+_DEPLOY_COMPLETION_TERMINAL_STATES = {occupation.CLASS_MILESTONE: ("done", "observing")}
 
 
 def cmd_deploy_record():
@@ -393,8 +398,8 @@ def cmd_deploy_record():
 
     # --- Prepare mode: return context JSON for AI description generation ---
     if mode == "prepare":
-        def _ms_context(ms_id):
-            ms = _target_by_id.get(ms_id, {})
+        def _target_context(tid):
+            rec = _target_by_id.get(tid, {})
             entries = []
             def _collect(es):
                 for e in es:
@@ -404,14 +409,22 @@ def cmd_deploy_record():
                             entries.append({"id": e.get("id",""), "description": e.get("description",""), "hash": h})
                     for child in e.get("entries", []):
                         _collect([child])
-            _collect(ms.get("entries", []))
-            return {"id": ms_id, "title": ms.get("title", ms_id), "commit_entries": entries}
+            _collect(rec.get("entries", []))
+            return {"id": tid, "title": rec.get("title", tid), "commit_entries": entries}
 
+        # ms-164 e-5946 (review must-fix 1): the AI description generator (the
+        # beacon-deploy Skill) reads ``target_ids`` as the AUTHORITATIVE set of
+        # Targets this deploy shipped — across ALL deliverable-bearing classes, so a
+        # sales project's opportunity is not seen as "zero worked targets" (which
+        # produced an empty description — the exact non-dev blind spot ms-164 exists
+        # to kill). ``newly_completed_ms`` / ``patch_ms`` stay as the milestone-subset
+        # auxiliary the Skill also consumes (major/minor framing), back-compat.
         payload = {
             "deploy_type": "major" if newly_completed else "minor",
             "new_commits": new_commits[:20],
-            "newly_completed_ms": [_ms_context(mid) for mid in sorted(newly_completed)],
-            "patch_ms": [_ms_context(mid) for mid in sorted(patch_ms)],
+            "target_ids": [_target_context(tid) for tid in target_ids],
+            "newly_completed_ms": [_target_context(mid) for mid in sorted(newly_completed)],
+            "patch_ms": [_target_context(mid) for mid in sorted(patch_ms)],
             "unassigned_commits": unassigned_commits,
             "last_deploy": {"id": deployments[-1]["id"], "date": deployments[-1].get("date","")} if deployments else None,
         }
