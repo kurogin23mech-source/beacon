@@ -2234,10 +2234,13 @@ def _frontend_dev_task(data, target_id, *, description, status, author, extra):
 def _frontend_sales_activity(data, target_id, *, description, status, author, extra):
     """sales work-item frontend: route through ``sales_entities.activity_add`` so an
     activity created via the generic endpoint gets the SAME sales-shaped stamping /
-    validation (who_has_the_ball, source, created_in_phase default). ``status`` /
-    ``author`` are not activity_add parameters and are dropped for this kind."""
+    validation (who_has_the_ball, source, created_in_phase default) AND — ms-167
+    e-6091 — the human ``author`` in meta, mirroring the dev task path. ``status`` is
+    not an activity_add parameter (a new activity starts in the default state) and is
+    dropped for this kind."""
     import sales_entities  # noqa: PLC0415
-    aid = sales_entities.activity_add(data, target_id, description, **extra)
+    aid = sales_entities.activity_add(data, target_id, description,
+                                      author=author, **extra)
     return _find_work_item(data, target_id, aid) or {"id": aid}
 
 

@@ -2498,12 +2498,21 @@ def opportunities_awaiting_gate_judgement(data: dict, now: str) -> list:
 def activity_add(data: dict, opportunity_id: str, description: str, *,
                  deadline: str = "", who_has_the_ball: str = BALL_SELF,
                  source: str = "", created_at: str = "",
-                 created_in_phase: str = "") -> str:
+                 created_in_phase: str = "",
+                 author: dict | None = None) -> str:
     """Append an Activity (業務・事前計画型) under an Opportunity, return its id.
 
     ``source`` records where the activity came from (e.g. ``"template-anchor"``
     for a phase's fixed step, ``"ai"`` for an AI-generated one, "" for a hand
     -added one) so the origin stays auditable.
+
+    ``author`` (ms-167 e-6091): the *human* identity ({user_id, email,
+    display_name}) that created the activity on the server side, mirroring the dev
+    task path (``core.task_add``). When provided it is stamped into ``meta.author``
+    (+ ``meta.created_by`` = the agent actor), so an activity created through the
+    generic write endpoint carries WHO made it — the same "no missing field"
+    guarantee ms-167 gives dev tasks. Omitted (CLI hand-add / phase seed) → no meta,
+    byte-for-byte unchanged.
 
     ``created_in_phase`` (e-3555) stamps which funnel phase this activity was
     born in — set-once and never mutated afterwards. When left blank it defaults
@@ -2530,13 +2539,29 @@ def activity_add(data: dict, opportunity_id: str, description: str, *,
     if who_has_the_ball not in VALID_BALL:
         raise ValueError(
             f"who_has_the_ball must be one of {sorted(VALID_BALL)}, got {who_has_the_ball!r}")
+    # ms-167 e-6091: stamp the human author (+ agent actor) into meta when an
+    # authenticated writer is known, mirroring core.task_add. ``core._clean_author``
+    # keeps only {user_id, email, display_name}, so None / {} / a non-canonical dict
+    # (e.g. raw JWT claims) all clean to {} → falsy → NO meta = existing callers
+    # (CLI hand-add / phase seed) stay meta-free, byte-for-byte unchanged. (Note the
+    # created_by-only-when-authenticated rule differs from core.task_add, which
+    # stamps created_by unconditionally — sales keeps byte-for-byte for its hand-add
+    # path, so the two assemblies are intentionally not one shared helper.) Lazy
+    # import avoids the core→sales_entities cycle.
+    import core  # noqa: PLC0415
+    meta_fields: dict = {}
+    author_clean = core._clean_author(author)
+    if author_clean:
+        meta_fields["meta"] = {"author": author_clean,
+                               "created_by": core._get_actor()}
     # created_in_phase defaults to the opportunity's current phase (sales-specific
     # enrichment, ms-106 e-3555) — computed here and passed as an extra field.
     act = occupation.add_work_item(
         data, opportunity_id, description=description.strip(),
         deadline=deadline, who_has_the_ball=who_has_the_ball, source=source,
         created_at=created_at,
-        created_in_phase=created_in_phase or opp.get("phase", ""))
+        created_in_phase=created_in_phase or opp.get("phase", ""),
+        **meta_fields)
     return act["id"]
 
 
