@@ -172,36 +172,6 @@ def _enclosing_function(funcs: list, lineno: int) -> str:
     return best
 
 
-def _cmd_handlers_calling(tree: ast.AST, helper: str) -> list:
-    """Return the cmd_<verb> handler names whose body calls ``helper`` (by bare
-    name or ``self.helper`` — commands.py uses module-level helpers so bare name
-    is the norm). Used to attribute a concrete call inside a helper back to the
-    handlers that reach it."""
-    callers = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name.startswith("cmd_"):
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Call):
-                    f = sub.func
-                    if isinstance(f, ast.Name) and f.id == helper:
-                        callers.append(node.name)
-                        break
-    return callers
-
-
-def _cmd_handlers_calling_any(trees: list, helper: str) -> list:
-    """``cmd_<verb>`` handlers across ALL scanned trees that call ``helper`` by
-    bare name. Cross-module because the god-module split can place the handler
-    (e.g. ``cmd_session_end`` in ``cmd_session.py``) and the helper it calls
-    (e.g. ``_release_all_occupations_for_session`` in ``commands.py`` /
-    ``commands_shared.py``) in different files — a single-tree search would miss
-    the edge and drop the read from attribution."""
-    callers = []
-    for _rel, tree, _funcs in trees:
-        callers.extend(_cmd_handlers_calling(tree, helper))
-    return callers
-
-
 def _verb_of_handler(handler: str) -> str:
     """``cmd_task_done`` -> ``task_done`` (the dispatch key). ``""`` for a
     non-handler name."""
@@ -210,21 +180,22 @@ def _verb_of_handler(handler: str) -> str:
 
 def _build_reverse_call_graph(trees: list) -> dict:
     """Return ``{callee_func_name: {caller_func_name, ...}}`` across ALL scanned
-    trees — a reverse call-edge map (ms-164 e-5949). An edge ``B -> A`` (i.e.
-    ``A in result[B]``) means function ``A``'s body contains a bare-name call
-    ``B(...)``. The caller is the INNERMOST enclosing function of the call site
-    (resolved via the tree's own function index), matching how a READ is
-    attributed to its enclosing function — so the graph and the read attribution
-    speak the same granularity.
+    trees — a reverse call-edge map (ms-164 e-5949). DIRECTION: the dict maps a
+    CALLEE to the set of functions that CALL it, so ``A in result[B]`` means
+    "``A``'s body contains a bare-name call ``B(...)``" (edge ``B -> A`` read as
+    "B is called by A"). The caller recorded is the INNERMOST enclosing function
+    of the call site (resolved via the tree's own function index), matching how a
+    READ is attributed to its enclosing function — so the graph and the read
+    attribution speak the same granularity.
 
-    Only bare ``Name`` callees are edges (helpers are module-level and called by
-    bare name, the convention ``_cmd_handlers_calling`` already assumes);
-    attribute-form calls (``occupation.iter_target_records``) are the abstraction
-    boundary and intentionally not followed. Built once per scan and walked
-    transitively by ``_cmd_handlers_reaching`` so a read buried under a
-    helper→helper chain is still attributed to the governing cmd handler (before,
-    only the direct cmd→helper edge was followed — a 2-level chain was a blind
-    spot where a profession read could hide)."""
+    Only bare ``Name`` callees are edges (module-level helpers are called by bare
+    name — the convention the whole scan assumes); attribute-form calls
+    (``occupation.iter_target_records``) are the abstraction boundary and
+    intentionally not followed. Built once per scan and walked transitively by
+    ``_cmd_handlers_reaching`` so a read buried under a helper→helper chain is
+    still attributed to the governing cmd handler (before this deepening, only the
+    direct cmd→helper edge was followed — a 2-level chain was a blind spot where a
+    profession read could hide)."""
     edges: dict = {}
     for _rel, tree, funcs in trees:
         for node in ast.walk(tree):
@@ -240,11 +211,14 @@ def _build_reverse_call_graph(trees: list) -> dict:
 
 
 def _cmd_handlers_reaching(callers_map: dict, start: str) -> list:
-    """Every ``cmd_<verb>`` handler that reaches ``start`` by walking reverse call
-    edges transitively (who calls ``start``, who calls them, …), cycle-guarded
-    (ms-164 e-5949). Generalises the old one-level ``_cmd_handlers_calling_any``
-    to an arbitrarily deep helper→helper chain. A ``cmd_`` handler found on the way
-    is collected AND still walked past (a cmd handler may itself be delegated to by
+    """Every ``cmd_<verb>`` handler that REACHES ``start`` (i.e. transitively CALLS
+    it) by walking the reverse call edges upward — the callers of ``start``, their
+    callers, … — cycle-guarded (ms-164 e-5949). ``callers_map`` is the
+    callee→callers dict from ``_build_reverse_call_graph``; ``start`` is the
+    callee end (the helper the read lives in), and the returned handlers are on the
+    caller end. Replaces the old one-level cmd→helper attribution with an
+    arbitrarily deep helper→helper walk. A ``cmd_`` handler found on the way is
+    collected AND still walked past (a cmd handler may itself be delegated to by
     another cmd handler, and both govern the read)."""
     seen, stack, result = set(), [start], set()
     while stack:

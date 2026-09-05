@@ -331,6 +331,9 @@ KNOWN_COLLECTION_COUPLING = {
     # DISPOSITION (route the untriaged-count / trigger-cleanup reads through
     # occupation.iter_target_records, OR classify dev-only-legitimate and move to
     # REVIEWED_LEGITIMATE_COLLECTION_READS) is e-5950's job. owner = ms-164 / e-5950.
+    # Which of the two dispositions applies is decided by the two binary questions
+    # documented on REVIEWED_LEGITIMATE_COLLECTION_READS below (is iter_target_records
+    # the right abstraction / does the sought data live only in this collection).
     ("trigger_check", "milestones"),
     ("trigger_tick", "milestones"),
 }
