@@ -118,12 +118,7 @@ def test_previously_deployed_not_newly_completed(project_dir):
     assert dep["target_ids"] == ["ms-3"]
 
 
-def test_generic_over_non_milestone_deliverable_class(project_dir):
-    """The milestone hardcode is gone: a sales project whose commits land on a
-    deliverable-bearing Opportunity-like class ('deal') gets ATTRIBUTION
-    (target_ids) even with no milestone at all — but the deploy stays MINOR because
-    'deal' declares no completion terminal states (the product-semantics decision
-    is deferred to parent/user, ms-164 DM 2026-09-03)."""
+def _deal_project() -> dict:
     deal = td.build_descriptor(
         kind="deal", label="商談", dtype="single-shot",
         id_prefix="deal-", collection="deals",
@@ -133,14 +128,60 @@ def test_generic_over_non_milestone_deliverable_class(project_dir):
     data["deals"] = [{"id": "deal-1", "status": "closed_won", "title": "big",
                       "entries": [{"id": "e-1", "type": "commit",
                                    "meta": {"hash": "cafef00"}}]}]
-    _write(project_dir, data)
+    return data
+
+
+def test_generic_over_non_milestone_deliverable_class(project_dir):
+    """The milestone hardcode is gone: a sales project whose commits land on a
+    deliverable-bearing Opportunity-like class ('deal') gets ATTRIBUTION
+    (target_ids) even with no milestone at all — but the deploy stays MINOR because
+    'deal' declares no completion terminal states (the product-semantics decision
+    is deferred to parent/user, ms-164 DM 2026-09-03)."""
+    _write(project_dir, _deal_project())
 
     cmd_deploy.cmd_deploy_record()
     dep = _last_deploy(project_dir)
     # Attribution is generic — the deal is a visible worked-target now.
     assert dep["target_ids"] == ["deal-1"]
-    assert dep["patch_ms"] == ["deal-1"]
+    # F1 review: the legacy _ms-named fields stay milestone-only (honest names),
+    # so a reader cross-referencing data["milestones"] never sees a foreign id.
+    assert dep["patch_ms"] == []
+    assert dep["newly_completed_ms"] == []
+    assert dep["milestones"] == []
+    # ...but the deal's commit is still ATTRIBUTED (not orphaned as unassigned).
+    assert dep["unassigned_commits"] == []
     # Completion is deferred — a class without declared terminal states never
     # triggers a major deploy, even when its status reads "done"-ish.
-    assert dep["newly_completed_ms"] == []
     assert dep["type"] == "minor"
+
+
+def test_previously_deployed_reads_generic_target_ids(project_dir):
+    """F2 review: a Target shipped in a prior deploy that recorded it ONLY in the
+    generic ``target_ids`` (no legacy ``newly_completed_ms``) is still recognised as
+    already-shipped, so a done milestone is patched, not re-counted as newly
+    completed. Proves the read-back is symmetric with the generic write."""
+    _write(project_dir, {"name": "t",
+                         "milestones": [_ms_with_commit("ms-5", "done")],
+                         "deployments": [{"id": "d-1", "type": "major",
+                                          "git_hash": "0000000",
+                                          "target_ids": ["ms-5"]}]})
+    cmd_deploy.cmd_deploy_record()
+    dep = _last_deploy(project_dir)
+    assert dep["newly_completed_ms"] == []
+    assert dep["patch_ms"] == ["ms-5"]
+    assert dep["type"] == "minor"
+
+
+def test_links_to_generic_via_target_ids(project_dir):
+    """F2 review: a minor deploy links to a prior major deploy that touched the
+    same Target even when the prior major recorded it only in generic
+    ``target_ids`` (not the legacy ``milestones`` field)."""
+    _write(project_dir, {"name": "t",
+                         "milestones": [_ms_with_commit("ms-6", "in_progress")],
+                         "deployments": [{"id": "d-9", "type": "major",
+                                          "git_hash": "0000000",
+                                          "milestones": [], "target_ids": ["ms-6"]}]})
+    cmd_deploy.cmd_deploy_record()
+    dep = _last_deploy(project_dir)
+    assert dep["type"] == "minor"
+    assert dep["links_to"] == ["d-9"]
