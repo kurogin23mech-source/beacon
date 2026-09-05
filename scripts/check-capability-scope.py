@@ -46,11 +46,14 @@ description into an ENFORCED norm. Three checks:
 The invariant scan uses the AST (not text/grep) so a mention of the forbidden
 symbol inside a comment or docstring is NOT a false hit — only a real call is.
 A call inside a private helper (``_foo``) is attributed to the scope of the
-cmd_<verb> handlers that call that helper (transitive), so a shared handler
-cannot dodge the check by moving the concrete call into a helper. NOTE: this is
-ONE level (cmd → helper); a helper → helper → concrete chain is not followed.
-commands.py has no such 2-level chain today; if one is introduced, deepen
-``_cmd_handlers_calling`` to walk helper-to-helper edges.
+cmd_<verb> handlers that reach that helper, so a shared handler cannot dodge the
+check by moving the concrete call into a helper. The attribution is TRANSITIVE
+across any depth of helper→helper edges (ms-164 e-5949): the reverse call graph
+(``_build_reverse_call_graph``) is walked from the read's enclosing helper up to
+every governing ``cmd_`` handler (``_cmd_handlers_reaching``), so a
+``cmd → helperA → helperB → concrete`` chain is followed the whole way. Before,
+only the direct ``cmd → helper`` edge was followed, and a read buried two helpers
+deep was a silent blind spot where a profession read could hide.
 
 usage:
   python3 scripts/check-capability-scope.py            # human report
@@ -169,60 +172,92 @@ def _enclosing_function(funcs: list, lineno: int) -> str:
     return best
 
 
-def _cmd_handlers_calling(tree: ast.AST, helper: str) -> list:
-    """Return the cmd_<verb> handler names whose body calls ``helper`` (by bare
-    name or ``self.helper`` — commands.py uses module-level helpers so bare name
-    is the norm). Used to attribute a concrete call inside a helper back to the
-    handlers that reach it."""
-    callers = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name.startswith("cmd_"):
-            for sub in ast.walk(node):
-                if isinstance(sub, ast.Call):
-                    f = sub.func
-                    if isinstance(f, ast.Name) and f.id == helper:
-                        callers.append(node.name)
-                        break
-    return callers
-
-
-def _cmd_handlers_calling_any(trees: list, helper: str) -> list:
-    """``cmd_<verb>`` handlers across ALL scanned trees that call ``helper`` by
-    bare name. Cross-module because the god-module split can place the handler
-    (e.g. ``cmd_session_end`` in ``cmd_session.py``) and the helper it calls
-    (e.g. ``_release_all_occupations_for_session`` in ``commands.py`` /
-    ``commands_shared.py``) in different files — a single-tree search would miss
-    the edge and drop the read from attribution."""
-    callers = []
-    for _rel, tree, _funcs in trees:
-        callers.extend(_cmd_handlers_calling(tree, helper))
-    return callers
-
-
 def _verb_of_handler(handler: str) -> str:
     """``cmd_task_done`` -> ``task_done`` (the dispatch key). ``""`` for a
     non-handler name."""
     return handler[4:] if handler.startswith("cmd_") else ""
 
 
-def _governing_shared_verbs(trees: list, file_funcs: list, lineno: int) -> list:
+def _build_reverse_call_graph(trees: list) -> dict:
+    """Return ``{callee_func_name: {caller_func_name, ...}}`` across ALL scanned
+    trees — a reverse call-edge map (ms-164 e-5949). DIRECTION: the dict maps a
+    CALLEE to the set of functions that CALL it, so ``A in result[B]`` means
+    "``A``'s body contains a bare-name call ``B(...)``" (edge ``B -> A`` read as
+    "B is called by A"). The caller recorded is the INNERMOST enclosing function
+    of the call site (resolved via the tree's own function index), matching how a
+    READ is attributed to its enclosing function — so the graph and the read
+    attribution speak the same granularity.
+
+    Only bare ``Name`` callees are edges (module-level helpers are called by bare
+    name — the convention the whole scan assumes); attribute-form calls
+    (``occupation.iter_target_records``) are the abstraction boundary and
+    intentionally not followed. Built once per scan and walked transitively by
+    ``_cmd_handlers_reaching`` so a read buried under a helper→helper chain is
+    still attributed to the governing cmd handler (before this deepening, only the
+    direct cmd→helper edge was followed — a 2-level chain was a blind spot where a
+    profession read could hide)."""
+    edges: dict = {}
+    for _rel, tree, funcs in trees:
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            f = node.func
+            if not isinstance(f, ast.Name):
+                continue
+            caller = _enclosing_function(funcs, node.lineno)
+            if caller:
+                edges.setdefault(f.id, set()).add(caller)
+    return edges
+
+
+def _cmd_handlers_reaching(callers_map: dict, start: str) -> list:
+    """Every ``cmd_<verb>`` handler that REACHES ``start`` (i.e. transitively CALLS
+    it) by walking the reverse call edges upward — the callers of ``start``, their
+    callers, … — cycle-guarded (ms-164 e-5949). ``callers_map`` is the
+    callee→callers dict from ``_build_reverse_call_graph``; ``start`` is the
+    callee end (the helper the read lives in), and the returned handlers are on the
+    caller end. Replaces the old one-level cmd→helper attribution with an
+    arbitrarily deep helper→helper walk. A ``cmd_`` handler found on the way is
+    collected AND still walked past (a cmd handler may itself be delegated to by
+    another cmd handler, and both govern the read)."""
+    seen, stack, result = set(), [start], set()
+    while stack:
+        fn = stack.pop()
+        for caller in callers_map.get(fn, ()):
+            if caller in seen:
+                continue
+            seen.add(caller)
+            if caller.startswith("cmd_"):
+                result.add(caller)
+            stack.append(caller)
+    return sorted(result)
+
+
+def _governing_shared_verbs(trees: list, file_funcs: list, lineno: int,
+                            callers_map: dict = None) -> list:
     """Return ``[(verb, scope, via)]`` for the profession-SHARED (L1/L2) cmd
     handlers whose scope governs the node at ``lineno`` — either the handler
-    directly, or (one level) every ``cmd_`` handler that calls the helper the
-    node lives in. Shared attribution used by BOTH invariant checks (the symbol
-    reach and the collection read), so they attribute a call/read to a capability
-    identically.
+    directly, or (transitively, via any depth of helper→helper edges) every
+    ``cmd_`` handler that reaches the helper the node lives in. Shared attribution
+    used by BOTH invariant checks (the symbol reach and the collection read), so
+    they attribute a call/read to a capability identically.
 
     ``file_funcs`` is the function index of the file the node lives in, so the
-    enclosing function is resolved within the node's own module; the cmd→helper
-    edge is then searched across ALL ``trees`` (the handler may live in a
-    different family module than the helper — ms-127 module-aware scan)."""
+    enclosing function is resolved within the node's own module; the reverse call
+    graph is then walked across ALL ``trees`` (the handler may live in a different
+    family module than the helper — ms-127 module-aware scan). ms-164 e-5949: the
+    walk is now TRANSITIVE (was one level cmd→helper), so a read under a
+    helper→helper→…→cmd chain is no longer a blind spot. ``callers_map`` (the
+    reverse call graph) is built once per scan and passed in; when omitted it is
+    built from ``trees`` on demand so direct callers (tests) stay simple."""
+    if callers_map is None:
+        callers_map = _build_reverse_call_graph(trees)
     encloser = _enclosing_function(file_funcs, lineno)
     candidates = []  # (verb, via)
     if encloser.startswith("cmd_"):
         candidates.append((_verb_of_handler(encloser), ""))
     elif encloser:
-        for h in _cmd_handlers_calling_any(trees, encloser):
+        for h in _cmd_handlers_reaching(callers_map, encloser):
             candidates.append((_verb_of_handler(h), encloser))
     out = []
     for verb, via in candidates:
@@ -406,13 +441,16 @@ def _find_family_reaches(family: str, path: str = "") -> list:
     hits = []
     if spec["attribution"] == "verbs":
         trees = _load_trees(spec["population"](path))
+        # ms-164 e-5949: build the reverse call graph once for the whole scan so
+        # the transitive helper→helper attribution is not recomputed per read.
+        callers_map = _build_reverse_call_graph(trees)
         for rel, tree, funcs in trees:
             for node in ast.walk(tree):
                 token = extract(node)
                 if not token:
                     continue
                 for verb, scope, via in _governing_shared_verbs(
-                        trees, funcs, node.lineno):
+                        trees, funcs, node.lineno, callers_map):
                     status, advice = cl.classify_reach(family, (verb, token))
                     hits.append({"verb": verb, "scope": scope, ok: token,
                                  "advice": advice, "via": via, "file": rel,

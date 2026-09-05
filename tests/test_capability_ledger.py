@@ -1104,6 +1104,48 @@ def test_governing_verbs_attribution_crosses_module_boundary():
     assert gov_single == [], gov_single
 
 
+def test_governing_verbs_attribution_is_transitive_helper_to_helper():
+    """ms-164 e-5949: a profession-collection read TWO helper levels below the
+    handler (cmd → helperA → helperB → read) is attributed to the shared verb.
+    The old one-level cmd→helper walk stopped at the first helper and missed this,
+    a blind spot where a profession read could hide (the exact gap that hid the
+    cmd_trigger untriaged/cleanup reads until this deepening)."""
+    # file A: the reading helper (_synth_deep, line 2) and a middle helper that
+    # calls it (_synth_mid) — the handler never calls the reader directly.
+    tree_a = ast.parse(
+        "def _synth_deep(d):\n"              # line 1
+        "    return d.get('milestones')\n"  # line 2 = the read
+        "def _synth_mid(d):\n"              # line 3
+        "    return _synth_deep(d)\n")      # line 4
+    funcs_a = chk._build_function_index(tree_a)
+    # file B: a SHARED (doc→L2) handler that calls the MIDDLE helper only.
+    tree_b = ast.parse("def cmd_doc_synthxdeep():\n    _synth_mid({})\n")
+    funcs_b = chk._build_function_index(tree_b)
+    trees = [("a.py", tree_a, funcs_a), ("b.py", tree_b, funcs_b)]
+
+    gov = chk._governing_shared_verbs(trees, funcs_a, 2)
+    assert {v for v, _s, _via in gov} == {"doc_synthxdeep"}, gov
+    # ``via`` names the helper the read physically lives in (the deepest one).
+    assert all(via == "_synth_deep" for _v, _s, via in gov), gov
+
+    # The reverse-reachability walk finds the cmd handler through the 2-hop chain.
+    cmap = chk._build_reverse_call_graph(trees)
+    assert chk._cmd_handlers_reaching(cmap, "_synth_deep") == ["cmd_doc_synthxdeep"]
+
+
+def test_reverse_call_graph_is_cycle_guarded():
+    """ms-164 e-5949: mutually-recursive helpers must not hang the transitive walk
+    (the reverse reachability is bounded by a visited set)."""
+    tree = ast.parse(
+        "def _synth_a(d):\n    return _synth_b(d)\n"
+        "def _synth_b(d):\n    return _synth_a(d)\n"
+        "def cmd_doc_synthxcycle():\n    _synth_a({})\n")
+    funcs = chk._build_function_index(tree)
+    trees = [("m.py", tree, funcs)]
+    cmap = chk._build_reverse_call_graph(trees)
+    assert chk._cmd_handlers_reaching(cmap, "_synth_b") == ["cmd_doc_synthxcycle"]
+
+
 def test_scanned_paths_default_includes_family_modules_and_shared():
     """Default scan set = commands.py + commands_shared.py + every lib/cmd_*.py.
     A single-file override (test fixture / --commands-path) restricts to that one
