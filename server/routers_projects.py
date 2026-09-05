@@ -2385,8 +2385,14 @@ class NoteCreate(BaseModel):
     # note was not reachable from its worked child Target(s) (AC1). Empty list =
     # "no active target" and is dropped server-side (see add_note) so a doc is
     # either tagged or has no field at all, symmetric with session_id above.
+    # ms-164 (PR#718 AX+maintainability consensus): target_id uses Optional[str] =
+    # None to MATCH SessionLogUpsert.target_id — the same "first-of-set back-compat
+    # id" field must not carry two different zero-values across the two sibling
+    # models (an "" here vs None there would drift model_dump's omit/keep behaviour
+    # and mislead an AI copying the pattern). The add_note fallback
+    # (`body.target_id or body.target_ids[0]`) treats None and "" identically.
     target_ids: Optional[list[str]] = None
-    target_id: str = ""
+    target_id: Optional[str] = None
 
 class SessionUpsert(BaseModel):
     """Body for PUT /api/projects/{project_id}/sessions/{session_id}.

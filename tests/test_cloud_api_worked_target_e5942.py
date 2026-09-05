@@ -59,4 +59,6 @@ def test_note_create_defaults_have_no_attribution():
     is either tagged or has no field at all, symmetric with session_id)."""
     m = rp.NoteCreate(text="hi")
     assert m.target_ids is None
-    assert m.target_id == ""
+    # target_id defaults to None (unified with SessionLogUpsert.target_id — the
+    # PR#718 AX+maintainability consensus finding: one zero-value across siblings).
+    assert m.target_id is None
