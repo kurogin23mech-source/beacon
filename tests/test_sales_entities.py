@@ -2629,3 +2629,27 @@ def test_phase_set_terminal_stays_on_direct_writer_and_mirrors_outcome():
     opp = se.find_opportunity(data, oid)
     assert opp["phase"] == terminal
     assert opp["status"] == "won"
+
+
+def test_activity_add_author_stamps_meta_else_byte_for_byte():
+    # ms-167 e-6091: activity_add stamps meta.author (+ created_by) when the
+    # authenticated writer is known (the generic-endpoint path), mirroring the dev
+    # task path — closing the AC4 gap where a sales activity carried no author.
+    # Existing callers (CLI hand-add / phase seed) pass no author and stay meta-free.
+    data = _fresh()
+    oid = se.opportunity_add(data, "Deal")
+
+    def _act(aid):
+        return next(a for a in se.find_opportunity(data, oid)["activities"]
+                    if a["id"] == aid)
+
+    aid1 = se.activity_add(data, oid, "hand-added")
+    assert "meta" not in _act(aid1)          # byte-for-byte: no author → no meta
+
+    aid2 = se.activity_add(
+        data, oid, "server write",
+        author={"user_id": "u1", "email": "e@x", "display_name": "E"})
+    act2 = _act(aid2)
+    assert act2["meta"]["author"] == {"user_id": "u1", "email": "e@x",
+                                      "display_name": "E"}
+    assert act2["meta"]["created_by"]        # agent actor stamped alongside author
