@@ -323,17 +323,38 @@ KNOWN_COLLECTION_COUPLING = {
     # debt at all; disposed here as reviewed-correct.
     #
     # ms-164 e-5949: the transitive helper→helper attribution (checker deepening)
-    # NEWLY SURFACED these ``cmd_trigger`` (L1-shared) reads — they were a blind spot
-    # before because each lives TWO helper levels below the handler
-    # (cmd_trigger_check / cmd_trigger_tick → _auto_fire_*/cleanup helper → the
-    # data['milestones'] read), which the old one-level cmd→helper walk could not
-    # reach. Registered here as tracked debt so the deepened checker stays green; the
-    # DISPOSITION (route the untriaged-count / trigger-cleanup reads through
-    # occupation.iter_target_records, OR classify dev-only-legitimate and move to
-    # REVIEWED_LEGITIMATE_COLLECTION_READS) is e-5950's job. owner = ms-164 / e-5950.
-    # Which of the two dispositions applies is decided by the two binary questions
-    # documented on REVIEWED_LEGITIMATE_COLLECTION_READS below (is iter_target_records
-    # the right abstraction / does the sought data live only in this collection).
+    # NEWLY SURFACED these ``cmd_trigger`` (L1-shared) reads — a blind spot before
+    # because each lives TWO helper levels below the handler (cmd_trigger_check /
+    # cmd_trigger_tick → _auto_fire_*/cleanup helper → the data['milestones'] read),
+    # which the old one-level cmd→helper walk could not reach.
+    #
+    # ms-164 e-5950 (disposition精査, human-confirmed): the (verb, collection) key
+    # collapses THREE distinct read sites, whose correct dispositions DIFFER but
+    # cannot be recorded independently at this granularity — so the key stays
+    # tracked debt (the doctor pattern: correct to fix, but the fix is
+    # behaviour-sensitive + cascades), NOT reviewed-correct. The three sites:
+    #   1. _count_untriaged_active — reads milestones + nested tasks. The untriaged
+    #      sentinel is machine-only and is applied ONLY to dev milestones/tasks
+    #      today (opportunities/operations never carry it; the trigger output is
+    #      ms_count/task_count-shaped), so this read is EXACT for untriaged-as-it-
+    #      exists → would be reviewed-correct on its own.
+    #   2. _cleanup_spec_needed_triggers — reads milestones to validate ms-ids.
+    #      spec-needed-<ms-id> triggers are milestone-keyed BY DESIGN → also EXACT /
+    #      reviewed-correct on its own.
+    #   3. _cleanup_review_due_triggers — reads milestones + operations. This is a
+    #      GENUINE coupling: _fire_review_due_trigger fires for milestone /
+    #      operation AND descriptor targets (cmd_target), so the cleanup MISSES
+    #      descriptor-class targets. The correct fix is occupation.iter_target_records
+    #      — but that makes cmd_trigger an ARM-scanned module, which then flags its
+    #      .get("entries") reads (this site's approval scan AND site 1's nested-task
+    #      scan) as new arm-couplings needing occupation.profession_manifest routing.
+    # Because sites 1/2 (reviewed-correct) share the key with site 3 (real coupling),
+    # the key cannot be moved to REVIEWED_LEGITIMATE_COLLECTION_READS until site 3 is
+    # genericised. That arm-aware generic-isation is scoped to a dedicated follow-up
+    # task (behaviour-sensitive: descriptor-target review-due cleanup changes) rather
+    # than smuggled into e-5950. owner = ms-164 / e-6115 (the review-due arm-aware
+    # generic-isation follow-up; on its completion these two keys move to
+    # REVIEWED_LEGITIMATE_COLLECTION_READS, sites 1/2 being exact).
     ("trigger_check", "milestones"),
     ("trigger_tick", "milestones"),
 }
