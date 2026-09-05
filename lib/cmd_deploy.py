@@ -30,6 +30,7 @@ import core
 import cloud_run_port
 import git_read_port
 import git_write_port
+import occupation
 from store import get_store
 from commands_shared import (
     load_project,
@@ -231,6 +232,25 @@ def _update_deployed_prod_marker(rev, json_mode=False):
     return result
 
 
+# ms-164 e-5946: which Target statuses count as "newly completed" (→ a MAJOR
+# deploy), per deliverable-bearing target-class. Today only the milestone class
+# has DECLARED completion semantics — its ``done`` / ``observing`` terminal states.
+# What counts as "completed" for another deliverable-bearing class (opportunity =
+# ``closed_won``? Operation = has no completion concept at all?) is asymmetric with
+# milestone's ``done`` and is a target-class PRODUCT decision deferred to
+# parent/user (ms-164 DM 2026-09-03, same escalation shape as ms-167's attribution
+# judgement). Until a class is added to this table it contributes commit
+# ATTRIBUTION only (its shipped commits still map to it and stamp ``target_ids``)
+# and never flips a deploy to major. Adding a key here is the declaration point,
+# not a scatter of ``kind == "milestone"`` literals.
+# ms-164 e-5946 (review must-fix 3): the key is ``occupation.CLASS_MILESTONE``, NOT
+# a bare ``"milestone"`` literal — the key MUST equal the token
+# ``deliverable_bearing_classes`` returns, and a silent drift would make completion
+# never fire a major deploy. Keying on the imported constant turns a drift into an
+# ImportError instead of a silent no-op.
+_DEPLOY_COMPLETION_TERMINAL_STATES = {occupation.CLASS_MILESTONE: ("done", "observing")}
+
+
 def cmd_deploy_record():
     """Record a deployment entry (major or minor) based on recent commits."""
     mode = os.environ.get("BEACON_MODE", "")          # "prepare" or "finalize" or ""
@@ -289,57 +309,97 @@ def cmd_deploy_record():
     head_hash = deploy_hash or (new_commits[0]["hash"] if new_commits
                                 else git_read_port.rev_parse_short("HEAD"))
 
-    # Map commit hashes to milestones via beacon entries
+    # Map commit hashes to the project's DELIVERABLE-BEARING Targets via beacon
+    # entries. ms-164 e-5946: walk every deliverable-bearing class (dev =
+    # ["milestone"], so byte-identical) instead of the bare ``data["milestones"]``,
+    # so a non-dev project that ships a deliverable class is no longer silently
+    # excluded from deploy attribution. Completion (→ major) still honours only the
+    # classes that declare terminal states (_DEPLOY_COMPLETION_TERMINAL_STATES).
     commit_hashes = [c["hash"] for c in new_commits]
-    ms_status: dict[str, str] = {ms["id"]: ms.get("status", "") for ms in data.get("milestones", [])}
+    deliverable_kinds = occupation.deliverable_bearing_classes(data)
 
-    # MSes that already appeared in previous deploys → they are patched, not newly completed
+    # Targets already shipped in a previous deploy → patched, not newly completed.
+    # ms-164 e-5946 (F2 review): read BOTH the legacy milestone fields AND the
+    # generic ``target_ids`` stamp, so the read-back is symmetric with the generic
+    # write below (a non-milestone Target shipped once is not re-counted as new).
     previously_deployed: set[str] = set()
     for d in deployments:
         previously_deployed.update(d.get("newly_completed_ms", []))
         previously_deployed.update(d.get("milestones", []))  # legacy records
+        previously_deployed.update(d.get("target_ids", []))  # generic attribution
 
-    # Find which MSes are touched by these commits, build per-MS commit lists
+    # Find which Targets are touched by these commits.
+    #   * ``attributed_target_ids`` — EVERY deliverable-bearing Target the commits
+    #     landed on, across all classes → stamped generically in ``target_ids``.
+    #   * ``newly_completed`` / ``patch_ms`` / ``milestone_commits`` — the LEGACY
+    #     milestone-shaped fields. ms-164 e-5946 (F1 review): these keep their
+    #     ``_ms`` names HONEST by being populated ONLY for classes that DECLARE
+    #     completion semantics (``_DEPLOY_COMPLETION_TERMINAL_STATES`` — today just
+    #     milestone). A class without declared completion contributes generic
+    #     attribution only, so a reader that cross-references ``data["milestones"]``
+    #     never sees a foreign id.
+    attributed_target_ids: set[str] = set()
+    assigned_hashes: set[str] = set()  # every commit mapped to any Target (all classes)
     newly_completed: set[str] = set()
     patch_ms: set[str] = set()
-    milestone_commits: dict[str, list[str]] = {}  # ms_id -> [commit_hashes]
+    milestone_commits: dict[str, list[str]] = {}  # milestone_id -> [commit_hashes]
 
-    for ms in data.get("milestones", []):
-        ms_id = ms["id"]
-        matched: list[str] = []
+    for kind in deliverable_kinds:
+        terminal_states = _DEPLOY_COMPLETION_TERMINAL_STATES.get(kind, ())
+        for target in occupation.target_records(data, kind):
+            tid = target.get("id")
+            if not tid:
+                continue
+            status = target.get("status", "")
+            matched: list[str] = []
 
-        def _scan(entries, _matched=matched, _ms_id=ms_id):
-            for e in entries:
-                if e.get("type") == "commit":
-                    h = (e.get("meta") or {}).get("hash", "")
-                    if h:
-                        for c in commit_hashes:
-                            if (h.startswith(c) or c.startswith(h)) and c not in _matched:
-                                _matched.append(c)
-                                status = ms_status.get(_ms_id, "")
-                                if status in ("done", "observing") and _ms_id not in previously_deployed:
-                                    newly_completed.add(_ms_id)
-                                else:
-                                    patch_ms.add(_ms_id)
-                for child in e.get("entries", []):
-                    _scan([child], _matched, _ms_id)
-        _scan(ms.get("entries", []))
+            # Pure hash-collector: gather the deployed commits that this Target's
+            # changelog claims. Inputs bound explicitly (no implicit closure over
+            # mutable state, ms-164 e-5946 §4 review); classification happens after.
+            def _scan(entries, _matched=matched, _commit_hashes=commit_hashes):
+                for e in entries:
+                    if e.get("type") == "commit":
+                        h = (e.get("meta") or {}).get("hash", "")
+                        if h:
+                            for c in _commit_hashes:
+                                if (h.startswith(c) or c.startswith(h)) and c not in _matched:
+                                    _matched.append(c)
+                    for child in e.get("entries", []):
+                        _scan([child], _matched, _commit_hashes)
+            _scan(target.get("entries", []))
 
-        if matched:
-            milestone_commits[ms_id] = matched
+            if not matched:
+                continue
+            attributed_target_ids.add(tid)
+            assigned_hashes.update(matched)
+            if terminal_states:  # completion-bearing class → legacy milestone fields
+                milestone_commits[tid] = matched
+                if status in terminal_states and tid not in previously_deployed:
+                    newly_completed.add(tid)
+                else:
+                    patch_ms.add(tid)
 
-    # Commits not associated with any milestone
-    assigned_hashes = {c for cs in milestone_commits.values() for c in cs}
+    # Commits not associated with any deliverable-bearing Target
     unassigned_commits = [c for c in commit_hashes if c not in assigned_hashes]
 
     # Determine type (allow manual override)
     deploy_type = type_override if type_override in ("major", "minor") else ("major" if newly_completed else "minor")
     affected_ms = sorted(newly_completed if newly_completed else patch_ms)
+    # ms-164 e-5946 (F1 review): generic attribution set — all deliverable-bearing
+    # Targets the deploy shipped (incl. non-milestone classes). Legacy ``milestones``
+    # stays milestone-only; ``target_ids`` is the authoritative generic stamp.
+    target_ids = sorted(attributed_target_ids)
+
+    # ms-164 e-5946: id → record lookup across the deliverable-bearing classes, so
+    # context/title resolution is not milestone-hardcoded either (dev = milestones,
+    # so unchanged).
+    _target_by_id = {r.get("id"): r for k in deliverable_kinds
+                     for r in occupation.target_records(data, k) if r.get("id")}
 
     # --- Prepare mode: return context JSON for AI description generation ---
     if mode == "prepare":
-        def _ms_context(ms_id):
-            ms = next((m for m in data.get("milestones", []) if m["id"] == ms_id), {})
+        def _target_context(tid):
+            rec = _target_by_id.get(tid, {})
             entries = []
             def _collect(es):
                 for e in es:
@@ -349,14 +409,22 @@ def cmd_deploy_record():
                             entries.append({"id": e.get("id",""), "description": e.get("description",""), "hash": h})
                     for child in e.get("entries", []):
                         _collect([child])
-            _collect(ms.get("entries", []))
-            return {"id": ms_id, "title": ms.get("title", ms_id), "commit_entries": entries}
+            _collect(rec.get("entries", []))
+            return {"id": tid, "title": rec.get("title", tid), "commit_entries": entries}
 
+        # ms-164 e-5946 (review must-fix 1): the AI description generator (the
+        # beacon-deploy Skill) reads ``target_ids`` as the AUTHORITATIVE set of
+        # Targets this deploy shipped — across ALL deliverable-bearing classes, so a
+        # sales project's opportunity is not seen as "zero worked targets" (which
+        # produced an empty description — the exact non-dev blind spot ms-164 exists
+        # to kill). ``newly_completed_ms`` / ``patch_ms`` stay as the milestone-subset
+        # auxiliary the Skill also consumes (major/minor framing), back-compat.
         payload = {
             "deploy_type": "major" if newly_completed else "minor",
             "new_commits": new_commits[:20],
-            "newly_completed_ms": [_ms_context(mid) for mid in sorted(newly_completed)],
-            "patch_ms": [_ms_context(mid) for mid in sorted(patch_ms)],
+            "target_ids": [_target_context(tid) for tid in target_ids],
+            "newly_completed_ms": [_target_context(mid) for mid in sorted(newly_completed)],
+            "patch_ms": [_target_context(mid) for mid in sorted(patch_ms)],
             "unassigned_commits": unassigned_commits,
             "last_deploy": {"id": deployments[-1]["id"], "date": deployments[-1].get("date","")} if deployments else None,
         }
@@ -365,20 +433,24 @@ def cmd_deploy_record():
 
     # Auto-generate description (fallback if not AI-provided)
     if not description:
-        ms_titles = []
-        for ms in data.get("milestones", []):
-            if ms["id"] in affected_ms:
-                ms_titles.append(ms.get("title", ms["id"]))
+        ms_titles = [_target_by_id[mid].get("title", mid)
+                     for mid in affected_ms if mid in _target_by_id]
         description = "・".join(ms_titles) if ms_titles else "deploy"
 
     deploy_id = _next_deploy_id(data, today)
 
-    # Find links_to for minor: find the most recent major deploys that touch the same MSes
+    # Find links_to for minor: the most recent major deploys that touch the same
+    # Targets. ms-164 e-5946 (F2 review): compare on the generic ``target_ids``
+    # (this deploy's full shipped set) against each prior deploy's legacy
+    # ``milestones`` ∪ generic ``target_ids``, so a non-milestone minor deploy is
+    # linked to its major just like a milestone one (for dev this is byte-identical
+    # since target_ids == affected_ms == the milestone set).
     links_to = []
     if deploy_type == "minor":
         for d in reversed(deployments):
             if d.get("type") == "major":
-                if any(m in d.get("milestones", []) for m in affected_ms):
+                prior_targets = set(d.get("milestones", [])) | set(d.get("target_ids", []))
+                if prior_targets.intersection(target_ids):
                     links_to.append(d["id"])
             if len(links_to) >= 3:
                 break
@@ -410,6 +482,14 @@ def cmd_deploy_record():
         deploy_entry["backend"] = backend
     if links_to:
         deploy_entry["links_to"] = links_to
+    # ms-164 e-5946: stamp the worked-Target set generically so the deploy record
+    # is reachable from EACH deliverable-bearing Target it shipped, like push
+    # (e-5945) and the session log (e-5942) — an attribution STAMP, not a physical
+    # relocation out of the project-wide ``data["deployments"]`` array. ``target_ids``
+    # (computed above) spans ALL deliverable-bearing classes incl. non-milestone;
+    # the legacy ``milestones`` field stays milestone-only for back-compat readers.
+    if target_ids:
+        deploy_entry["target_ids"] = target_ids
 
     # Handle semver: create a Release entry and link
     release_entry = None
