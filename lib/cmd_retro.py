@@ -98,7 +98,18 @@ def cmd_retro_prepare():
                     "entries": ms_entries,
                 })
 
-    # Include deploy records that fall within the period
+    # Include deploy records that fall within the period.
+    #
+    # ms-164 e-5948: read the deploy's worked-Target attribution generically.
+    # e-5946 (cmd_deploy.py) stamps ``target_ids`` on every deploy record — the
+    # AUTHORITATIVE set of deliverable-bearing Targets it shipped, spanning ALL
+    # classes (a non-milestone class like a sales opportunity is included there,
+    # never in ``milestones``). Retro is the weekly review of produced value, so
+    # it must surface that generic attribution, otherwise a non-dev project's
+    # deploys look Target-less in the retro. The legacy ``milestones`` field
+    # (milestone-only) is kept for back-compat readers; ``target_ids`` is the
+    # generic read-back, symmetric with cmd_deploy.py's own re-read idiom
+    # (``d.get("target_ids", [])``, line 329/452).
     weekly_deploys = []
     for dep in data.get("deployments", []):
         dep_date = (dep.get("date") or "")[:10]
@@ -108,6 +119,7 @@ def cmd_retro_prepare():
                 "type": dep.get("type", ""),
                 "date": dep.get("date", "")[:10],
                 "milestones": dep.get("milestones", []),
+                "target_ids": dep.get("target_ids", []),
                 "newly_completed_ms": dep.get("newly_completed_ms", []),
                 "description": dep.get("description", ""),
             })
