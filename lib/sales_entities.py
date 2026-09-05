@@ -2540,14 +2540,20 @@ def activity_add(data: dict, opportunity_id: str, description: str, *,
         raise ValueError(
             f"who_has_the_ball must be one of {sorted(VALID_BALL)}, got {who_has_the_ball!r}")
     # ms-167 e-6091: stamp the human author (+ agent actor) into meta when an
-    # authenticated writer is known, mirroring core.task_add. Only when author is
-    # non-empty → existing callers (CLI hand-add / phase seed) stay meta-free =
-    # byte-for-byte unchanged. Lazy import avoids the core→sales_entities cycle.
+    # authenticated writer is known, mirroring core.task_add. ``core._clean_author``
+    # keeps only {user_id, email, display_name}, so None / {} / a non-canonical dict
+    # (e.g. raw JWT claims) all clean to {} → falsy → NO meta = existing callers
+    # (CLI hand-add / phase seed) stay meta-free, byte-for-byte unchanged. (Note the
+    # created_by-only-when-authenticated rule differs from core.task_add, which
+    # stamps created_by unconditionally — sales keeps byte-for-byte for its hand-add
+    # path, so the two assemblies are intentionally not one shared helper.) Lazy
+    # import avoids the core→sales_entities cycle.
     import core  # noqa: PLC0415
-    optional: dict = {}
+    meta_fields: dict = {}
     author_clean = core._clean_author(author)
     if author_clean:
-        optional["meta"] = {"author": author_clean, "created_by": core._get_actor()}
+        meta_fields["meta"] = {"author": author_clean,
+                               "created_by": core._get_actor()}
     # created_in_phase defaults to the opportunity's current phase (sales-specific
     # enrichment, ms-106 e-3555) — computed here and passed as an extra field.
     act = occupation.add_work_item(
@@ -2555,7 +2561,7 @@ def activity_add(data: dict, opportunity_id: str, description: str, *,
         deadline=deadline, who_has_the_ball=who_has_the_ball, source=source,
         created_at=created_at,
         created_in_phase=created_in_phase or opp.get("phase", ""),
-        **optional)
+        **meta_fields)
     return act["id"]
 
 

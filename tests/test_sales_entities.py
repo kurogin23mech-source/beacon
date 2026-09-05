@@ -2645,6 +2645,11 @@ def test_activity_add_author_stamps_meta_else_byte_for_byte():
 
     aid1 = se.activity_add(data, oid, "hand-added")
     assert "meta" not in _act(aid1)          # byte-for-byte: no author → no meta
+    # empty / non-canonical author (e.g. raw JWT claims {sub:...}) clean to {} → no
+    # meta either, so a mis-shaped author never produces a half-stamped activity.
+    assert "meta" not in _act(se.activity_add(data, oid, "empty", author={}))
+    assert "meta" not in _act(
+        se.activity_add(data, oid, "rawclaim", author={"sub": "x"}))
 
     aid2 = se.activity_add(
         data, oid, "server write",
