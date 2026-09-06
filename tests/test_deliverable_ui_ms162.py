@@ -58,7 +58,9 @@ HARNESS = textwrap.dedent(r"""
     A(h.includes("dlv-panel"), "panel rendered");
     A(h.includes("生み出した価値"), "panel label present");
     A(h.includes("機能"), "deliverable label shown");
-    A(h.includes("projector=changelog"), "projector shown");
+    // PR#727 AX advisory: projector は内部名でなく読み手向けの日本語ラベルで出す。
+    A(h.includes("変更履歴から集計"), "projector shown as reader-facing label");
+    A(!h.includes("projector=changelog"), "raw projector=changelog must not leak");
     A(h.includes("3 件の価値"), "count_active total shown");
     A(h.includes("A1. 状態を一望する") && h.includes("A2. 記録する"), "categories shown");
     A(h.includes(">2<") && h.includes(">1<"), "category counts shown");
@@ -95,6 +97,27 @@ HARNESS = textwrap.dedent(r"""
     h = renderDeliverables(bad);
     A(h.includes("未解決"), "unresolved deliverable is surfaced, not hidden");
     A(h.includes("changelog missing"), "unresolved error shown");
+    A(h.includes("dlv-item-unresolved"), "unresolved row carries its class");
+
+    // --- PR#727 AX: unresolved with EMPTY error shows context, not bare fail ---
+    const badNoErr = [{
+      target_class: "milestone", kind: "feature-map", label: "壊れ2",
+      projector: "changelog", ref: "map:y",
+      resolved: { strategy: "changelog", found: false },
+    }];
+    h = renderDeliverables(badNoErr);
+    A(h.includes("strategy=changelog") || h.includes("ref=map:y"),
+      "empty-error unresolved still shows minimal context (strategy/ref)");
+    A(!h.includes("resolve failed"), "no bare English 'resolve failed' fallback");
+
+    // --- PR#727 AX: unknown strategy avoids the word 'resolved' ---------------
+    const unknown = [{
+      target_class: "milestone", kind: "k", label: "未知",
+      projector: "changelog", ref: "",
+      resolved: { strategy: "gantt", found: true },
+    }];
+    h = renderDeliverables(unknown);
+    A(h.includes("gantt 形式"), "unknown strategy shown as '<name> 形式'");
 
     // --- loaded + empty → '' (produced-but-invisible stays quiet) ------------
     A(renderDeliverables([]) === "", "loaded-empty → '' (no panel)");

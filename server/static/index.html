@@ -1589,6 +1589,8 @@ body::after {
 .dlv-doc-title { font-size: 12px; color: var(--text); }
 .dlv-doc-len { color: var(--text-dim); font-size: 10px; }
 .dlv-unresolved { font-size: 12px; color: #f59e0b; padding-left: 8px; }
+/* PR#727 AX advisory: unresolved 行を左枠でも視覚区別する (旧: class 付与済だが CSS 未定義の dead class) */
+.dlv-item-unresolved { border-left: 2px solid #f59e0b; padding-left: 8px; }
 .dec-event {
   padding: 6px 8px;
   margin-bottom: 6px;
@@ -6467,18 +6469,37 @@ function ensureDecisionsLoaded() {
 // Reads only its arguments (no state / fetch) so the ms-159 shell can reuse it.
 const _DLV_PREVIEW_CHARS = 240;
 
+// PR#727 AX advisory: `projector` は内部スキーマ名なので raw の「projector=changelog」を
+// そのまま出すと非開発者の読み手に意味が伝わらない。生成戦略を読み手向けの日本語に
+// 変換して出す (未知の値は原文にフォールバック)。
+const _DLV_PROJECTOR_LABEL = {
+  changelog: '変更履歴から集計',
+  rollup: '達成の積み上げ',
+  doc: 'ドキュメント',
+};
+
 // Render ONE deliverable row: its label + projector, then the resolved content.
 function renderDeliverableItem(d) {
   if (!d) return '';
   const label = d.label || d.kind || '(no label)';
   const tclass = d.target_class ? `<span class="dlv-class">${esc(d.target_class)}</span>` : '';
-  const projector = d.projector ? `<span class="dlv-projector">projector=${esc(d.projector)}</span>` : '';
+  const projector = d.projector
+    ? `<span class="dlv-projector">${esc(_DLV_PROJECTOR_LABEL[d.projector] || d.projector)}</span>`
+    : '';
   const head = `<div class="dlv-head"><span class="dlv-label">${esc(label)}</span>${tclass}${projector}</div>`;
   const r = (d && d.resolved) || {};
   if (!r.found) {
     // Unresolved pointer is not hidden — a broken deliverable must be visible, not
-    // silently absent (symmetric with the CLI --resolve non-zero exit).
-    const err = r.error ? esc(r.error) : 'resolve failed';
+    // silently absent (symmetric with the CLI --resolve non-zero exit). PR#727 AX
+    // advisory: when the resolver gave no error string, still show minimal context
+    // (strategy / ref) so the reader isn't left with a bare "resolve failed".
+    let err = r.error ? esc(r.error) : '';
+    if (!err) {
+      const bits = [];
+      if (r.strategy) bits.push(`strategy=${esc(r.strategy)}`);
+      if (d.ref) bits.push(`ref=${esc(d.ref)}`);
+      err = bits.length ? `解決できませんでした (${bits.join(', ')})` : '解決できませんでした';
+    }
     return `<div class="dlv-item dlv-item-unresolved">${head}<div class="dlv-unresolved">⚠ 未解決: ${err}</div></div>`;
   }
   let body = '';
@@ -6506,7 +6527,11 @@ function renderDeliverableItem(d) {
     body = `<div class="dlv-doc-title">${title} <span class="dlv-doc-len">(${(r.content || '').length} 文字)</span></div>` +
            (shown ? `<div class="dlv-doc-preview">${esc(shown)}${ell}</div>` : '');
   } else {
-    body = `<div class="dlv-total">${esc(strategy || 'resolved')}</div>`;
+    // PR#727 AX advisory: 未知の strategy で「resolved」という語を出すと resolved
+    // フィールド (= 解決済みか) の値と読み違えられる。中立な文言にする。
+    body = strategy
+      ? `<div class="dlv-total">${esc(strategy)} 形式</div>`
+      : `<div class="dlv-total">(内容を表示できません)</div>`;
   }
   return `<div class="dlv-item">${head}${body}</div>`;
 }
