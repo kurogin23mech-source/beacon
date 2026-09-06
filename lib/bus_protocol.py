@@ -67,19 +67,36 @@ STOP_SIGNAL_CHANNEL = "stop-signal"
 # ------------------------------------------------------------------ #
 
 
-def heartbeat_body(now_iso: str, *, poll_interval_ms: int, shutdown: bool = False) -> dict:
+def heartbeat_body(
+    now_iso: str,
+    *,
+    poll_interval_ms: int,
+    shutdown: bool = False,
+    transport: dict | None = None,
+) -> dict:
     """Return the canonical PUT /sessions/<sid> body.
 
     Shape MUST match ``channel/bus-heartbeat.mjs::buildHeartbeatBody``
     so the server's poll-health computation (= e-1318) treats every
     bus client identically.
+
+    ms-145 / e-5378 — optional ``transport`` (= receive-loop 側の実効的な
+    受信経路の状態) を載せる。「一部のクライアントだけが常時ポーリングに
+    落ちている」を fleet 全体で観測可能にするため、WS が開けているか
+    (= backstop に落とせているか) を各 session が自己申告する。receive-loop
+    ごとに実装が違う (Node bridge = WS accelerator あり / Codex loop =
+    poll-only) ので、どの実装がどの周期で回っているかを directory から
+    引けるようにするのが狙い。省略時は body に載せない (後方互換)。
     """
-    return {
+    body = {
         "last_active": now_iso,
         "last_poll_at": now_iso,
         "poll_interval_ms": int(poll_interval_ms),
         "shutdown": bool(shutdown),
     }
+    if transport is not None:
+        body["transport"] = transport
+    return body
 
 
 def heartbeat_path(project_id: str, session_id: str) -> str:

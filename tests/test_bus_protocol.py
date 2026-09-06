@@ -37,6 +37,21 @@ class TestHeartbeatBody:
         body = bp.heartbeat_body("now", poll_interval_ms=1000)
         assert body["shutdown"] is False
 
+    def test_transport_omitted_by_default(self):
+        # ms-145 / e-5378: back-compat — no transport arg → field absent, so the
+        # server merge doesn't clobber anything and old readers are unaffected.
+        body = bp.heartbeat_body("now", poll_interval_ms=1000)
+        assert "transport" not in body
+
+    def test_transport_included_when_provided(self):
+        # ms-145 / e-5378: Codex loop self-reports poll-only so the directory can
+        # explain why the session is on frequent polling (by design, not broken WS).
+        body = bp.heartbeat_body(
+            "now", poll_interval_ms=2000,
+            transport={"ws_state": "poll-only", "effective_poll_ms": 2000},
+        )
+        assert body["transport"] == {"ws_state": "poll-only", "effective_poll_ms": 2000}
+
 
 class TestHeartbeatPath:
     def test_includes_project_and_session(self):

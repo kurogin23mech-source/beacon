@@ -120,6 +120,35 @@ def test_heartbeat_body_sets_shutdown_false_explicitly():
     assert "shutdown" in body, body
 
 
+def test_heartbeat_body_omits_transport_by_default():
+    """ms-145 / e-5378: no transport arg → field absent (back-compat). Must match
+    lib/bus_protocol.heartbeat_body so both receive loops serialise identically."""
+    script = textwrap.dedent(f"""
+        import {{ buildHeartbeatBody }} from '{HEARTBEAT_MJS.as_posix()}'
+        process.stdout.write(JSON.stringify(buildHeartbeatBody({{
+          nowIso: '2026-06-09T01:00:00.000Z', pollIntervalMs: 5000,
+        }})))
+    """)
+    body = _run_scenario(script)
+    assert "transport" not in body, body
+
+
+def test_heartbeat_body_includes_transport_when_provided():
+    """ms-145 / e-5378: the Node bridge stamps ws_state + effective_poll_ms so the
+    fleet can see WS-healthy (backstop) vs stuck-on-5s sessions and why."""
+    script = textwrap.dedent(f"""
+        import {{ buildHeartbeatBody }} from '{HEARTBEAT_MJS.as_posix()}'
+        process.stdout.write(JSON.stringify(buildHeartbeatBody({{
+          nowIso: '2026-06-09T01:00:00.000Z', pollIntervalMs: 5000,
+          transport: {{ ws_state: 'open', effective_poll_ms: 120000, ws_opens: 1,
+                        ws_closes: 0, ws_last_close_code: null }},
+        }})))
+    """)
+    body = _run_scenario(script)
+    assert body["transport"]["ws_state"] == "open", body
+    assert body["transport"]["effective_poll_ms"] == 120000, body
+
+
 def test_heartbeat_body_clears_stale_shutdown_on_default_call():
     """The default ``shutdown`` value (= not passed) must also produce
     ``shutdown: false`` so cold-start heartbeats clear any stale flag.

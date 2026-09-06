@@ -370,6 +370,15 @@ const WS_BACKSTOP_MS = parseInt(process.env.BEACON_BUS_WS_BACKSTOP_MS || '120000
 const HEARTBEAT_INTERVAL_MS = parseInt(
   process.env.BEACON_BUS_HEARTBEAT_MS || '15000', 10)
 let wsHealthy = false
+// ms-145 / e-5378 — transport observability counters. Emitted in the heartbeat
+// so the fleet can tell a WS-healthy bridge (poll at backstop) from one stuck on
+// the 5s poll floor, and *why*: ws_opens==0 = handshake never succeeded
+// (proxy/TLS/auth), ws_opens>0 with rising ws_closes = flapping. See
+// currentTransport() below.
+let wsOpens = 0
+let wsCloses = 0
+let wsLastCloseCode = null
+let wsImplUnavailable = false
 // ms-101 / e-3012 — push 駆動で受け取った bus_event (= DM の wake hint) の累計。
 // server 側 push (e-3011) が届いているかを bridge ログから確認でき、e-3013 の
 // 「poll 停止後も push だけでズレなく届くか」検証の telemetry になる。
@@ -428,10 +437,31 @@ function _busWsUrl() {
   return url
 }
 
+// ms-145 / e-5378 — snapshot the effective receive transport for the heartbeat.
+// ws_state: open = WS healthy (poll at backstop) / reconnecting = opened before
+// but currently down (flapping) / connecting = never opened yet (handshake still
+// failing) / disabled = WS off or no impl (permanent poll floor). effective_poll_ms
+// is the interval the loop is actually sleeping (backstop vs 5s), so a fleet query
+// can count how many sessions sit on the 5s floor and why.
+function currentTransport() {
+  let state
+  if (!WS_ENABLED || !PROJECT_ID || wsImplUnavailable) state = 'disabled'
+  else if (wsHealthy) state = 'open'
+  else if (wsOpens > 0) state = 'reconnecting'
+  else state = 'connecting'
+  return {
+    ws_state: state,
+    effective_poll_ms: wsHealthy ? WS_BACKSTOP_MS : POLL_INTERVAL,
+    ws_opens: wsOpens,
+    ws_closes: wsCloses,
+    ws_last_close_code: wsLastCloseCode,
+  }
+}
+
 async function connectBusWs() {
   if (!WS_ENABLED || !PROJECT_ID) return
   const WS = await _resolveWS()
-  if (!WS) return
+  if (!WS) { wsImplUnavailable = true; return }   // e-5378: no WS impl → transport 'disabled'
 
   let backoff = 1000
   const BACKOFF_MAX = 30000
@@ -483,6 +513,7 @@ async function connectBusWs() {
     }
     ws.addEventListener('open', () => {
       wsHealthy = true
+      wsOpens += 1   // e-5378: successful handshakes — 0 forever = never opened
       log('bus WS connected (push-accelerated poll)')
       // e-3834 — reset backoff only after the connection has stayed up for
       // STABLE_MS. Resetting on 'open' meant a socket that opened then closed
@@ -518,6 +549,8 @@ async function connectBusWs() {
     })
     ws.addEventListener('close', (ev) => {
       const code = ev && typeof ev.code !== 'undefined' ? ev.code : ''
+      wsCloses += 1                                  // e-5378: rising with ws_opens>0 = flapping
+      wsLastCloseCode = code === '' ? null : code    // last close code = handshake-fail signature
       log(`bus WS closed (code=${code}) — falling back to ${POLL_INTERVAL}ms poll, reconnecting`)
       scheduleReconnect()
     })
@@ -1240,6 +1273,7 @@ if (!PROJECT_ID || !SESSION_ID) {
         nowIso,
         pollIntervalMs: POLL_INTERVAL,
         shutdown,
+        transport: currentTransport(),   // e-5378: fleet-observable receive transport state
       })
       await apiPut(
         `/api/projects/${PROJECT_ID}/sessions/${encodeURIComponent(SESSION_ID)}`,
