@@ -209,40 +209,55 @@ function discoverSessionIdViaCLI(forceMint) {
   return ''
 }
 
-// ms-165 (restart hand-off race): resolve the CANONICAL sid FIRST — the sid the
-// CLI (keyed on BEACON_PARENT_PID = this terminal) resolves without force-mint —
-// so the force-mint decision below can EXCLUDE a bridge that claims this same sid.
-// A same-sid alive bridge is my OWN session's dying bridge across a bclaude
-// restart (I must take over the sid), NOT a competitor. Only a DIFFERENT-sid
-// alive bridge (a concurrent bclaude in this cwd) warrants a fresh mint. Before
-// this fix, the restart overlap force-minted a divergent sid the CLI never
+// ms-165 (restart hand-off race): the startup session-id decision is a 3-step
+// PROTOCOL whose ORDER is load-bearing, so it lives in one function rather than
+// as module-level statements a future refactor could reorder / collapse:
+//   1. resolve the CANONICAL sid (no force-mint) — the sid the CLI resolves,
+//      keyed on BEACON_PARENT_PID = this terminal.
+//   2. scan for other alive bridges, EXCLUDING one that claims the canonical sid
+//      (that is my own session's dying bridge across a restart — see
+//      bridge_detect.mjs for the full same-sid-⟹-my-restart argument).
+//   3. reuse the canonical sid UNLESS a genuinely-concurrent bclaude (a bridge on
+//      a DIFFERENT sid) is alive, in which case mint a fresh sid.
+// Do NOT hoist step 1 out or merge it with the step-3 mint call: step 2 needs the
+// canonical sid to make the exclusion, and calling with forceMint=true mints a
+// NEW session (a write), so the two CLI calls are not interchangeable. Before
+// this fix the restart overlap force-minted a divergent sid the CLI never
 // resolves → the session's DMs routed to an absent bridge → silent receive death
-// (2026-09-05 incident). `mySid` empty (sid unresolved) → exclusion is a no-op.
-const canonicalSid = discoverSessionIdViaCLI(false)
-
-// e-1460 / e-3858: at cold-start, decide whether *another* bclaude already owns
-// an ALIVE bridge in this cwd. The predicate keys on the BRIDGE process liveness
-// (not merely its parent bclaude) and — ms-165 — excludes a bridge on my own
-// canonical sid. isPidAlive / detectOtherAliveBridges are unit-tested in
-// bridge_detect.mjs.
-const otherAliveBridges = detectOtherAliveBridges({
-  bridgesDir: BRIDGES_DIR,
-  legacyPath: path.join(CWD, '.beacon', 'bridge.json'),
-  myPpid: process.ppid,
-  myPid: process.pid,
-  mySid: canonicalSid,
-  log,
-})
-const FORCE_MINT = otherAliveBridges.length > 0
-if (FORCE_MINT) {
-  const labels = otherAliveBridges.map(c => `sid=${c.session_id} ppid=${c.parent_pid ?? '?'} pid=${c.pid ?? '?'}`).join(', ')
-  log(`force-mint: ${otherAliveBridges.length} other alive bridge(s) with a DIFFERENT sid detected [${labels}] — this bus.mjs will request a fresh session_id`)
+// (2026-09-05 incident). Returns { sessionId, forceMinted }.
+function resolveStartupSessionId() {
+  const legacyPath = path.join(CWD, '.beacon', 'bridge.json')
+  const canonicalSid = discoverSessionIdViaCLI(false)   // step 1 (read)
+  const otherAliveBridges = detectOtherAliveBridges({    // step 2
+    bridgesDir: BRIDGES_DIR, legacyPath,
+    myPpid: process.ppid, myPid: process.pid,
+    canonicalSid, log,
+  })
+  // Observability: make BOTH the fix path (restart-takeover) and the degraded
+  // path (exclusion off) visible — a silent takeover is invisible to anyone
+  // debugging a suspected receive-death regression.
+  if (!canonicalSid && otherAliveBridges.length > 0) {
+    log(`⚠ canonical sid unresolved (beacon session id returned empty) — the ms-165 restart-takeover exclusion is OFF; a divergent force-mint may recur`)
+  } else if (canonicalSid) {
+    try {
+      const mineClaimPath = path.join(BRIDGES_DIR, `${canonicalSid}.json`)
+      if (fs.existsSync(mineClaimPath)) {
+        const c = JSON.parse(fs.readFileSync(mineClaimPath, 'utf8'))
+        if (c && Number.isInteger(c.pid) && c.pid !== process.pid && isPidAlive(c.pid)) {
+          log(`restart-takeover: alive bridge (pid=${c.pid}) on my own canonical sid ${canonicalSid} — reusing sid, not force-minting`)
+        }
+      }
+    } catch {}
+  }
+  const forceMint = otherAliveBridges.length > 0
+  if (forceMint) {
+    const labels = otherAliveBridges.map(c => `sid=${c.session_id} ppid=${c.parent_pid ?? '?'} pid=${c.pid ?? '?'}`).join(', ')
+    log(`force-mint: ${otherAliveBridges.length} other alive bridge(s) with a DIFFERENT sid detected [${labels}] — this bus.mjs will request a fresh session_id`)
+  }
+  const sessionId = forceMint ? discoverSessionIdViaCLI(true) : canonicalSid  // step 3
+  return { sessionId, forceMinted: forceMint }
 }
-
-// Reuse the canonical sid unless a genuinely-concurrent bclaude (different sid)
-// forces a fresh mint. In the restart case FORCE_MINT is now false, so we keep
-// the canonical sid and take over its bridge below.
-const cliSessionId = FORCE_MINT ? discoverSessionIdViaCLI(true) : canonicalSid
+const { sessionId: cliSessionId } = resolveStartupSessionId()
 const session = safeLoadJSON(SESSION_JSON)
 
 // ms-64 / e-1459: api_url precedence chain (env > cwd cloud.json > profile.json > default)
