@@ -342,29 +342,40 @@ def save_project(data, op=None):
         _append_changelog(op)
 
 
-def verify_cloud_write_persisted(predicate, *, what: str) -> None:
+def verify_cloud_write_persisted(predicate, *, what: str, reader=None) -> None:
     """After a cloud write, confirm it ACTUALLY landed (ms-166 e-6036).
 
-    A whole-document PUT can return 2xx yet not persist under transient server load
-    (observed 2026-09-03: ``beacon milestone add`` printed "Added milestone" but neither
-    the cloud document nor the local mirror had it; a plain re-run fixed it — a silent
-    write). The server PUT returns only ``{"status":"ok"}`` and MUTATES the body it stores
-    (auto-sets ``owner`` / links accounts), so a generic whole-document hash-compare would
+    A cloud write can return 2xx yet not persist under transient server load (observed
+    2026-09-03: ``beacon milestone add`` printed "Added milestone" but neither the cloud
+    document nor the local mirror had it; a plain re-run fixed it — a silent write). The
+    server PUT returns only ``{"status":"ok"}`` and MUTATES the body it stores (auto-sets
+    ``owner`` / links accounts), so a generic whole-document hash-compare would
     false-positive. Instead the CALLER — which knows what it just wrote — passes a
-    ``predicate(fresh_data) -> bool`` that this checks against a FRESH cloud read
-    (``load_project`` does a genuine GET / WS-truth in cloud mode).
+    ``predicate(fresh) -> bool`` checked against a FRESH cloud read.
 
-    local mode is a no-op: the local write is synchronous and ``save_project`` already
-    raises on failure, so there is nothing async to verify. Cloud read errors are NOT
-    swallowed — an unverifiable write must not read as success (that is the very
-    silent-non-function this closes), so we exit non-zero with a retry hint.
+    ``reader`` is the fresh-read source (a 0-arg callable). Default ``load_project`` (a
+    genuine GET / WS-truth in cloud mode) verifies a project-document write (milestone /
+    task / target). A caller whose write lands in a DIFFERENT cloud store passes its own
+    reader — e.g. ``doc add`` passes ``get_store().list_documents`` so its predicate checks
+    the new doc_id, since documents are a separate collection not inside the project doc.
+
+    Adopters so far (the two verbs implicated in the 2026-09-03 incident): ``milestone add``
+    and ``doc add``. Rolling this out to every cloud mutating verb (task / target / …) is a
+    deliberate follow-up (ms-166 SPEC「可能なら task/doc/target 系横断」) — the helper is the
+    single place that rollout routes through, not per-verb re-implementations.
+
+    local mode is a no-op: the local write is synchronous and the store already raises on
+    failure, so there is nothing async to verify. Cloud read errors are NOT swallowed — an
+    unverifiable write must not read as success (that is the very silent-non-function this
+    closes), so we exit non-zero with a retry hint.
 
     Raises ``SystemExit(1)`` (with a retry hint) when the read-back does not reflect the
     write; returns None on success."""
     if not _is_cloud_mode():
         return
+    read = reader or load_project
     try:
-        fresh = load_project()
+        fresh = read()
     except SystemExit:
         raise
     except Exception as e:

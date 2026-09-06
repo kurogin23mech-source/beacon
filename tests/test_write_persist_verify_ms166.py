@@ -75,6 +75,27 @@ def test_unverifiable_readback_is_not_silent_success(monkeypatch):
     assert ei.value.code == 1
 
 
+def test_custom_reader_present_passes(monkeypatch):
+    # PR#728 AX-4: doc add verifies against a DIFFERENT store (documents are a separate
+    # collection, not the project doc) via the reader param. Present → no raise.
+    monkeypatch.setattr(cs, "_is_cloud_mode", lambda: True)
+    docs = [{"doc_id": "d1"}, {"doc_id": "d2"}]
+    cs.verify_cloud_write_persisted(
+        lambda ds: any(d.get("doc_id") == "d2" for d in ds),
+        what="document d2", reader=lambda: docs)
+
+
+def test_custom_reader_missing_is_detected(monkeypatch):
+    # The doc write did not land in its collection → SystemExit(1), same non-silent contract
+    # as the default (project) reader.
+    monkeypatch.setattr(cs, "_is_cloud_mode", lambda: True)
+    with pytest.raises(SystemExit) as ei:
+        cs.verify_cloud_write_persisted(
+            lambda ds: any(d.get("doc_id") == "d9" for d in ds),
+            what="document d9", reader=lambda: [{"doc_id": "d1"}])
+    assert ei.value.code == 1
+
+
 def test_systemexit_from_readback_propagates(monkeypatch):
     # If load_project itself raises SystemExit (e.g. a downstream credential guard), that
     # must propagate unchanged (not be reframed as a generic verify failure).

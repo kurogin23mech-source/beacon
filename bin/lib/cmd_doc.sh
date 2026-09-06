@@ -44,7 +44,7 @@ cmd_doc() {
                     --json)       json_flag="1"; shift ;;
                     --content)    doc_content="${2:-}"; shift 2 ;;
                     --bus-origin) doc_bus_origin="1"; shift ;;
-                    --force|-f)   doc_force="1"; shift ;;
+                    --force)      doc_force="1"; shift ;;
                     --stdin)      shift ;;  # stdin is handled by Python side
                     -?*)           _guard_flag "$1" ;;
                     *)            doc_title="$1"; shift ;;
