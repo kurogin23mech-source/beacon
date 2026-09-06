@@ -30,7 +30,7 @@ Pull 型は VPS 側が main を polling して self-update するので:
 | リポジトリ | `/opt/beacon` (ubuntu 所有, origin=GitHub public, branch=main) |
 | Python venv | `/opt/beacon/.venv` |
 | サービス | systemd `beacon-api.service` (repo: `deploy/systemd/beacon-api.service`) |
-| 起動 | `uvicorn app:app --host 127.0.0.1 --port 8000 --workers 2` (ms-145 e-5319 で単一→2ワーカー) |
+| 起動 | uvicorn (ワーカー2本)。正規の起動コマンドは unit の `ExecStart` を参照 (ms-145 e-5319) — 値をここに二重掲載しない |
 | 設定 | `/etc/beacon/db.env` + `/etc/beacon/app.env` (`BEACON_STORE_BACKEND=mysql`, `BEACON_ENV=prod`) |
 | データ | MySQL (127.0.0.1:3306) + Redis (127.0.0.1:6379) |
 | 公開 | Caddy が :80/:443 → uvicorn:8000 にリバースプロキシ |

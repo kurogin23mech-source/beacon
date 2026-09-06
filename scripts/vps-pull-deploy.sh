@@ -26,8 +26,9 @@ main() {
   # 本番の unit を手で編集すると次の再構築 (fresh VPS / setup 再実行) で黙って消える。
   # repo の deploy/systemd/<service> を単一の真値源にし、毎デプロイで /etc/systemd/system
   # へ一致させることで「手入れが消える」穴を構造で塞ぐ。dir は test で差し替え可能。
+  # 変数名は SOURCE (repo 側) / DEST (設置先) で向きを名前に固定する (AX review PR#725)。
   local UNIT_SRC="${BEACON_UNIT_SOURCE_DIR:-${REPO}/deploy/systemd}/${SERVICE}"
-  local UNIT_DST="${BEACON_SYSTEMD_UNIT_DIR:-/etc/systemd/system}/${SERVICE}"
+  local UNIT_DST="${BEACON_SYSTEMD_UNIT_DEST_DIR:-/etc/systemd/system}/${SERVICE}"
 
   log() { logger -t beacon-deploy -- "$*" 2>/dev/null || true; echo "[beacon-deploy] $*"; }
 
@@ -111,7 +112,7 @@ main() {
     local target="$1"
     local cur; cur="$(git rev-parse HEAD)"
     [ "$cur" != "$target" ] && git reset --hard "$target"
-    reconcile_unit    # e-5359: working tree が target に揃った後で unit を再適用する
+    reconcile_unit    # e-5359: working tree が target に揃った後で unit を再適用 (非致命的: 失敗は ERROR ログのみで続行、戻り値は見ない)
     pip_gate
     log "restarting ${SERVICE} for ${target:0:7}"
     sudo systemctl restart "$SERVICE"

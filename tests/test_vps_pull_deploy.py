@@ -333,7 +333,7 @@ def test_quarantine_clears_when_main_advances_past_bad_rev(env):
 # 本番の systemd unit (メモリ設定 / ワーカー数) を手で編集すると、次の再構築や
 # setup 再実行で黙って消える。repo の deploy/systemd/<service> を単一の真値源にし、
 # デプロイのたびに /etc/systemd/system へ一致させることで「手入れが消える」穴を塞ぐ。
-# BEACON_UNIT_SOURCE_DIR / BEACON_SYSTEMD_UNIT_DIR で source / 設置先を差し替えて検証する。
+# BEACON_UNIT_SOURCE_DIR / BEACON_SYSTEMD_UNIT_DEST_DIR で source / 設置先を差し替えて検証する。
 # ---------------------------------------------------------------------------
 
 def _unit_env(tmp_path, src_content, installed_content=None, service="fake.service"):
@@ -347,7 +347,7 @@ def _unit_env(tmp_path, src_content, installed_content=None, service="fake.servi
         (etc_dir / service).write_text(installed_content)
     return {
         "BEACON_UNIT_SOURCE_DIR": str(src_dir),
-        "BEACON_SYSTEMD_UNIT_DIR": str(etc_dir),
+        "BEACON_SYSTEMD_UNIT_DEST_DIR": str(etc_dir),
     }, etc_dir / service
 
 
@@ -411,7 +411,7 @@ def test_missing_unit_source_is_noop(env, tmp_path):
     etc_dir = tmp_path / "etc_empty"
     etc_dir.mkdir()
     ue = {"BEACON_UNIT_SOURCE_DIR": str(src_dir),
-          "BEACON_SYSTEMD_UNIT_DIR": str(etc_dir)}
+          "BEACON_SYSTEMD_UNIT_DEST_DIR": str(etc_dir)}
 
     r = _run(repo, bindir, state, ue)
     assert r.returncode == 0, r.stderr
