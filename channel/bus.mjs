@@ -175,26 +175,6 @@ const cloud = safeLoadJSON(CLOUD_JSON)
 // multiple bclaude in the same cwd can each own a distinct claim.
 const BRIDGES_DIR = path.join(CWD, '.beacon', 'bridges')
 
-// e-1460 / e-3858: at cold-start, decide whether *another* bclaude already owns
-// an ALIVE bridge in this cwd. If yes, this bus.mjs belongs to a 2nd+ bclaude
-// and must mint a fresh session_id rather than reuse the existing one. The
-// predicate keys on the BRIDGE process liveness (not merely its parent bclaude)
-// — see bridge_detect.mjs for why (a killed/crashed bridge's stale claim must
-// not force a divergent mint). isPidAlive / detectOtherAliveBridges are imported
-// from ./bridge_detect.mjs so the rule is unit-tested there.
-const otherAliveBridges = detectOtherAliveBridges({
-  bridgesDir: BRIDGES_DIR,
-  legacyPath: path.join(CWD, '.beacon', 'bridge.json'),
-  myPpid: process.ppid,
-  myPid: process.pid,
-  log,
-})
-const FORCE_MINT = otherAliveBridges.length > 0
-if (FORCE_MINT) {
-  const labels = otherAliveBridges.map(c => `sid=${c.session_id} ppid=${c.parent_pid ?? '?'} pid=${c.pid ?? '?'}`).join(', ')
-  log(`force-mint: ${otherAliveBridges.length} other alive bridge(s) detected [${labels}] — this bus.mjs will request a fresh session_id`)
-}
-
 // Cold-start fix: Claude Code does not pass CLAUDE_CODE_SESSION_ID to MCP
 // subprocesses (verified empirically 2026-06-07). The single reliable
 // refresh path is `beacon session id`, which calls
@@ -203,9 +183,9 @@ if (FORCE_MINT) {
 // the CLI's stdout directly rather than re-reading .beacon/session.json
 // from cwd (those can disagree when bus.mjs runs from a sandbox subdir).
 //
-// e-1460: when FORCE_MINT is on, propagate BEACON_FORCE_MINT=1 so the
+// e-1460: when force-mint is on, propagate BEACON_FORCE_MINT=1 so the
 // CLI's get_or_mint_session skips freshness reuse and mints a fresh sid.
-function discoverSessionIdViaCLI() {
+function discoverSessionIdViaCLI(forceMint) {
   // ms-54 e-1191: route through log() (which wraps appendFileSync in
   // try/catch) instead of bare appendFileSync. The bare path crashes the
   // whole MCP server if LOG points at an unwritable location (e.g. a
@@ -213,13 +193,13 @@ function discoverSessionIdViaCLI() {
   // mount). log() fails soft.
   try {
     const childEnv = { ...process.env }
-    if (FORCE_MINT) childEnv.BEACON_FORCE_MINT = '1'
+    if (forceMint) childEnv.BEACON_FORCE_MINT = '1'
     const sid = execSync('beacon session id', {
       cwd: CWD, stdio: ['ignore', 'pipe', 'pipe'], encoding: 'utf8', timeout: 10000,
       env: childEnv,
     }).trim()
     if (sid) {
-      log(`session id resolved via CLI: ${sid}${FORCE_MINT ? ' (force-minted)' : ''}`)
+      log(`session id resolved via CLI: ${sid}${forceMint ? ' (force-minted)' : ''}`)
       return sid
     }
   } catch (e) {
@@ -228,7 +208,56 @@ function discoverSessionIdViaCLI() {
   }
   return ''
 }
-const cliSessionId = discoverSessionIdViaCLI()
+
+// ms-165 (restart hand-off race): the startup session-id decision is a 3-step
+// PROTOCOL whose ORDER is load-bearing, so it lives in one function rather than
+// as module-level statements a future refactor could reorder / collapse:
+//   1. resolve the CANONICAL sid (no force-mint) — the sid the CLI resolves,
+//      keyed on BEACON_PARENT_PID = this terminal.
+//   2. scan for other alive bridges, EXCLUDING one that claims the canonical sid
+//      (that is my own session's dying bridge across a restart — see
+//      bridge_detect.mjs for the full same-sid-⟹-my-restart argument).
+//   3. reuse the canonical sid UNLESS a genuinely-concurrent bclaude (a bridge on
+//      a DIFFERENT sid) is alive, in which case mint a fresh sid.
+// Do NOT hoist step 1 out or merge it with the step-3 mint call: step 2 needs the
+// canonical sid to make the exclusion, and calling with forceMint=true mints a
+// NEW session (a write), so the two CLI calls are not interchangeable. Before
+// this fix the restart overlap force-minted a divergent sid the CLI never
+// resolves → the session's DMs routed to an absent bridge → silent receive death
+// (2026-09-05 incident). Returns { sessionId, forceMinted }.
+function resolveStartupSessionId() {
+  const legacyPath = path.join(CWD, '.beacon', 'bridge.json')
+  const canonicalSid = discoverSessionIdViaCLI(false)   // step 1 (read)
+  const otherAliveBridges = detectOtherAliveBridges({    // step 2
+    bridgesDir: BRIDGES_DIR, legacyPath,
+    myPpid: process.ppid, myPid: process.pid,
+    canonicalSid, log,
+  })
+  // Observability: make BOTH the fix path (restart-takeover) and the degraded
+  // path (exclusion off) visible — a silent takeover is invisible to anyone
+  // debugging a suspected receive-death regression.
+  if (!canonicalSid && otherAliveBridges.length > 0) {
+    log(`⚠ canonical sid unresolved (beacon session id returned empty) — the ms-165 restart-takeover exclusion is OFF; a divergent force-mint may recur`)
+  } else if (canonicalSid) {
+    try {
+      const mineClaimPath = path.join(BRIDGES_DIR, `${canonicalSid}.json`)
+      if (fs.existsSync(mineClaimPath)) {
+        const c = JSON.parse(fs.readFileSync(mineClaimPath, 'utf8'))
+        if (c && Number.isInteger(c.pid) && c.pid !== process.pid && isPidAlive(c.pid)) {
+          log(`restart-takeover: alive bridge (pid=${c.pid}) on my own canonical sid ${canonicalSid} — reusing sid, not force-minting`)
+        }
+      }
+    } catch {}
+  }
+  const forceMint = otherAliveBridges.length > 0
+  if (forceMint) {
+    const labels = otherAliveBridges.map(c => `sid=${c.session_id} ppid=${c.parent_pid ?? '?'} pid=${c.pid ?? '?'}`).join(', ')
+    log(`force-mint: ${otherAliveBridges.length} other alive bridge(s) with a DIFFERENT sid detected [${labels}] — this bus.mjs will request a fresh session_id`)
+  }
+  const sessionId = forceMint ? discoverSessionIdViaCLI(true) : canonicalSid  // step 3
+  return { sessionId, forceMinted: forceMint }
+}
+const { sessionId: cliSessionId } = resolveStartupSessionId()
 const session = safeLoadJSON(SESSION_JSON)
 
 // ms-64 / e-1459: api_url precedence chain (env > cwd cloud.json > profile.json > default)

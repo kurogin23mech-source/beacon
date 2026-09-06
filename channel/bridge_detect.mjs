@@ -32,25 +32,50 @@ export function isPidAlive(pid) {
   }
 }
 
-// Decide whether one claim dict belongs to a DIFFERENT, currently-alive bridge.
-//   - `pid` (the bus.mjs process) must be alive — this is the fix: a dead
-//     bridge's stale claim no longer counts.
-//   - it must not be mine: same bridge pid, or same parent bclaude pid.
-// A claim without a usable `pid` cannot be confirmed as a running bridge, so it
-// does not block reuse.
-export function claimIsOtherAliveBridge(data, { myPpid, myPid, pidAlive = isPidAlive }) {
+// Decide whether one claim dict belongs to a DIFFERENT, currently-alive bridge
+// (i.e. one that should force THIS bus.mjs to mint a fresh session_id).
+//
+// A claim is an "other alive bridge" iff ALL hold:
+//   - it has a usable bridge `pid` and that process is alive (`pidAlive`). A dead
+//     bridge's stale claim no longer counts (e-3858 — the original fix).
+//   - it is not mine: not my own bridge pid, not my own bclaude's parent pid.
+//   - it does not claim MY canonical session_id (`canonicalSid`) — the ms-165 rule.
+// A claim without a usable `pid` cannot be confirmed running, so it does not block.
+//
+// ms-165 (restart hand-off race) — why the canonicalSid exclusion:
+//   During a bclaude restart the dying old bridge briefly overlaps my new bus.mjs
+//   startup. Its claim names my CANONICAL session_id, because the sid is minted on
+//   (project, machine, BEACON_PARENT_PID) and BEACON_PARENT_PID = the TERMINAL pid
+//   — a restart in the same terminal resolves the SAME sid. I must TAKE OVER that
+//   sid, NOT force-mint a divergent one; otherwise the bridge heartbeats under a
+//   fresh sid the CLI never resolves, so the session's DMs route to a bridge that
+//   isn't there and receive dies silently (the 2026-09-05 incident). A genuinely
+//   CONCURRENT bclaude runs in a DIFFERENT terminal → different BEACON_PARENT_PID →
+//   DIFFERENT sid, so it is NOT excluded and still forces a mint (dispatch mode).
+//   (Two LIVE processes sharing one canonical sid would require terminal-pid
+//   RECYCLING within a session's lifetime — negligible, and the server expires
+//   stale (project,machine,ppid) tuples by created_at/heartbeat. So "same
+//   canonical sid ⟹ my own restart" holds in practice; we deliberately do NOT try
+//   to disambiguate via parent_pid, since a legitimate restart ALSO has a
+//   different parent_pid and such a check would false-fire on every restart.)
+//
+// When `canonicalSid` is empty (the CLI could not resolve a sid) the exclusion is
+// a no-op, preserving the pre-ms-165 behaviour. The caller is expected to surface
+// that degraded state (the exclusion — and thus the restart protection — is off).
+export function claimIsOtherAliveBridge(data, { myPpid, myPid, canonicalSid = '', pidAlive = isPidAlive }) {
   if (!data || typeof data !== 'object') return false
   const pp = Number.isInteger(data.parent_pid) ? data.parent_pid : 0
   const bp = Number.isInteger(data.pid) ? data.pid : 0
   if (!bp || bp === myPid) return false      // no bridge pid, or it's my own bridge
   if (pp && pp === myPpid) return false       // my own bclaude's prior claim
+  if (canonicalSid && data.session_id === canonicalSid) return false  // my own session restarting → take over
   return pidAlive(bp)                          // the bridge process must be live
 }
 
 // Scan `bridgesDir` (per-sid claims) and the legacy single-claim `legacyPath`,
 // returning the claims that belong to other, currently-alive bridges. Pure
 // except for the fs reads it is given; `pidAlive` is injectable for tests.
-export function detectOtherAliveBridges({ bridgesDir, legacyPath, myPpid, myPid, pidAlive = isPidAlive, log = () => {} }) {
+export function detectOtherAliveBridges({ bridgesDir, legacyPath, myPpid, myPid, canonicalSid = '', pidAlive = isPidAlive, log = () => {} }) {
   const found = []
   const seen = new Set()
   try {
@@ -63,7 +88,7 @@ export function detectOtherAliveBridges({ bridgesDir, legacyPath, myPpid, myPid,
         } catch {
           continue
         }
-        if (claimIsOtherAliveBridge(data, { myPpid, myPid, pidAlive })) {
+        if (claimIsOtherAliveBridge(data, { myPpid, myPid, canonicalSid, pidAlive })) {
           found.push(data)
           if (data.session_id) seen.add(data.session_id)
         }
@@ -77,7 +102,7 @@ export function detectOtherAliveBridges({ bridgesDir, legacyPath, myPpid, myPid,
   try {
     if (legacyPath && fs.existsSync(legacyPath)) {
       const data = JSON.parse(fs.readFileSync(legacyPath, 'utf8'))
-      if (claimIsOtherAliveBridge(data, { myPpid, myPid, pidAlive }) &&
+      if (claimIsOtherAliveBridge(data, { myPpid, myPid, canonicalSid, pidAlive }) &&
           !(data && data.session_id && seen.has(data.session_id))) {
         found.push(data)
       }
