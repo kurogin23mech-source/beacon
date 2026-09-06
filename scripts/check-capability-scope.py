@@ -735,6 +735,43 @@ def _direct_call_tokens(trees: list) -> dict:
     return out
 
 
+def _wired_tokens(trees: list) -> set:
+    """Function names that are WIRED across ``trees`` — either INVOKED (a Call's ``func``,
+    ``foo(...)`` / ``mod.foo(...)``) OR dispatch-REGISTERED (a value in a dict literal, e.g.
+    ``{"decision record": cmd_decision_record}``). Covers both a decision producer the routes
+    CALL (a builder) and the CLI verb handler the dispatch table REGISTERS by reference
+    (``cmd_decision_record``) — so a dispatched verb does not read as unwired though
+    ``beacon decision record`` works (ms-166 e-5974).
+
+    Deliberately NARROWER than "every ``ast.Name`` / ``ast.Attribute``" (maintainability
+    review PR#724): it does NOT count parameter / local-variable / import / class / decorator
+    names, so a producer token is credited only when genuinely called or registered — never
+    by a coincidental string collision with an unrelated local (e.g. a token named ``record``
+    matching a parameter would else false-green permanently). The two collected shapes are
+    exactly the two ways a producer becomes reachable: invoked, or placed in a dispatch map."""
+    out: set = set()
+
+    def _tok(node):
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            return node.attr
+        return None
+
+    for _rel, tree, _funcs in trees:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                t = _tok(node.func)
+                if t:
+                    out.add(t)
+            elif isinstance(node, ast.Dict):
+                for value in node.values:
+                    t = _tok(value)
+                    if t:
+                        out.add(t)
+    return out
+
+
 def _terminable_builtin_classes() -> list:
     """Return ``[(kind, completion_gate)]`` for every built-in target-class that SETTLES
     (has a completion terminal) — i.e. ``never_terminal`` is False, equivalently
@@ -814,6 +851,39 @@ def find_completion_seam_gaps() -> list:
     return sorted(gaps, key=lambda g: (g["class"], g["dimension"]))
 
 
+def find_decision_capture_gaps() -> list:
+    """decision 捕獲被覆 (ms-166 e-5974): every judgment-seam decision KIND must have a
+    WIRED producer. An ORTHOGONAL axis from the ms-163 completion-seam checks: those ask
+    "does every terminable target-CLASS reach the 完遂 decision producer"; this asks "does
+    every judgment-SEAM decision KIND (task-done / review-adjudication / completion-verdict
+    / halt / dm-send / pr-intent 導出 …) actually have a producer that is invoked". A kind
+    declared in the SSOT but produced by nothing = the "配線はあるが silent に produce
+    しない" non-function this MS targets.
+
+    Population = ``cl.DECISION_CAPTURE_PRODUCERS`` keys (kept in agreement with
+    ``decision_event.KNOWN_DECISION_KINDS`` by ``test_decision_capture_covers_known_kinds``
+    so the checker stays server-import-free). A producer is WIRED when its token is invoked
+    at ≥1 site across the scanned lib/ + server/ population (same wired-ness test as
+    ``find_producer_coverage_gaps``). Returns the gaps — each
+    ``{kind, producers, status, advice}``. ``status`` (via ``cl.classify_decision_capture``)
+    is ``pending_debt`` (allowlisted in ``KNOWN_DECISION_CAPTURE_GAP``) or ``new_violation``
+    (a fresh unwired kind that FAILS the checker)."""
+    trees = _load_trees(_completion_scan_paths())
+    # Wiredness counts INVOCATIONS + dispatch REGISTRATIONS (not every identifier): a producer
+    # may be a builder the routes CALL, or a CLI verb handler the dispatch table REGISTERS by
+    # reference (cmd_decision_record). Both mean "hooked into the system"; a bare local/param
+    # name collision does not (maintainability review PR#724).
+    wired = _wired_tokens(trees)
+    gaps = []
+    for kind in sorted(cl.DECISION_CAPTURE_PRODUCERS):
+        producers = cl.DECISION_CAPTURE_PRODUCERS[kind]
+        if not any(t in wired for t in producers):
+            status, advice = cl.classify_decision_capture(kind)
+            gaps.append({"kind": kind, "producers": sorted(producers),
+                         "status": status, "advice": advice})
+    return gaps
+
+
 def run(commands_path: str = "", arm_path: str = "") -> dict:
     """Run all checks and return a structured result with an ``ok`` verdict.
 
@@ -837,11 +907,13 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
 
     ``ok`` is the authoritative pass/fail (also the process exit code). It is
     False if ANY of: unclassified verbs/skills, unowned L3/L4 verbs/skills (ownership
-    axis, e-4738), an L0 distribution leak (verbs or skills), or a NEW reach/narrowing
+    axis, e-4738), an L0 distribution leak (verbs or skills), a NEW reach/narrowing
     in ANY of the four families — ``new_symbol`` (symbol reach), ``new_collection``
     (collection read), ``new_arm`` (arm-name read, ms-142 e-5012), or
-    ``new_iterator_narrowing`` (iterator narrowing, ms-142 e-5253). They are distinct
-    families with distinct item schemas, so gate on ``ok`` rather than iterating one
+    ``new_iterator_narrowing`` (iterator narrowing, ms-142 e-5253) — a producer-coverage
+    gap / ``new_completion_seam`` (ms-163 完遂 seam 被覆), or ``new_decision_capture``
+    (ms-166 e-5974 — a judgment-seam decision KIND with no wired producer). They are
+    distinct axes with distinct item schemas, so gate on ``ok`` rather than iterating one
     list (AX review 2026-08-03; e-5274 unified the names and kept this list current)."""
     cov = check_coverage()
     skill_cov = cl.reconcile_skills()
@@ -895,12 +967,19 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
     all_completion_seam = find_completion_seam_gaps()
     new_completion_seam = [g for g in all_completion_seam if g["status"] == "new_violation"]
     pending_completion_seam = [g for g in all_completion_seam if g["status"] == "pending_debt"]
+    # Decision-capture coverage (ms-166 e-5974) — its own axis, ORTHOGONAL to the ms-163
+    # completion seams above: every judgment-seam decision KIND must have a wired producer.
+    # A fresh unwired kind is new_violation (fails CI); an allowlisted one is pending debt.
+    all_decision_capture = find_decision_capture_gaps()
+    new_decision_capture = [g for g in all_decision_capture if g["status"] == "new_violation"]
+    pending_decision_capture = [g for g in all_decision_capture if g["status"] == "pending_debt"]
     ok = (not cov["unclassified"] and not skill_cov["unclassified"]
           and not ownership["unowned"] and not skill_ownership["unowned"]
           and not new_symbol and not new_collection and not new_arm
           and not new_iterator_narrowing
           and not l0_leak and not l0_skill_leak
-          and not producer_coverage and not new_completion_seam)
+          and not producer_coverage and not new_completion_seam
+          and not new_decision_capture)
     return {"ok": ok, "coverage": cov, "skill_coverage": skill_cov,
             "ownership": ownership, "skill_ownership": skill_ownership,
             # the canonical family-token list — iterate this × {all,new,pending,
@@ -938,7 +1017,13 @@ def run(commands_path: str = "", arm_path: str = "") -> dict:
             "producer_coverage": producer_coverage,
             "all_completion_seam": all_completion_seam,
             "new_completion_seam": new_completion_seam,
-            "pending_completion_seam": pending_completion_seam}
+            "pending_completion_seam": pending_completion_seam,
+            # decision-capture coverage (ms-166 e-5974) — its own axis (judgment-seam KIND
+            # → wired producer), NOT a completion seam. {all,new,pending}_decision_capture
+            # = the unwired-kind gaps by status (new fails CI, pending is allowlisted debt).
+            "all_decision_capture": all_decision_capture,
+            "new_decision_capture": new_decision_capture,
+            "pending_decision_capture": pending_decision_capture}
 
 
 def render_proposal(prop: dict) -> None:
@@ -1165,12 +1250,29 @@ def main() -> int:
               f"the generic completion seam then drop from KNOWN_COMPLETION_SEAM_GAP):")
         for kind, dim in pend:
             print(f"    · {kind} completion does not yet produce '{dim}'")
+    # Decision-capture coverage (ms-166 e-5974) — a judgment-seam kind with no wired producer.
+    new_dcap = result["new_decision_capture"]
+    pending_dcap = result["pending_decision_capture"]
+    if new_dcap:
+        print(f"  NEW DECISION-CAPTURE GAP ({len(new_dcap)}) — a judgment-seam decision kind "
+              f"produces no decision (配線はあるが silent、ms-166):")
+        for g in new_dcap:
+            print(f"    - kind '{g['kind']}' has no wired producer "
+                  f"(expected one of: {', '.join(g['producers'])})")
+            print(f"      → {g['advice']}")
+    # Dormant until KNOWN_DECISION_CAPTURE_GAP is non-empty (empty today — all kinds wired).
+    if pending_dcap:
+        print(f"  pending decision-capture gap ({len(pending_dcap)}, allowlisted — wire the "
+              f"producer then drop from KNOWN_DECISION_CAPTURE_GAP):")
+        for g in pending_dcap:
+            print(f"    · kind '{g['kind']}' produces no decision yet")
     if result["ok"]:
         print("  OK: every capability is classified, no profession-shared capability "
               "reaches a profession concrete (no NEW symbol reach / collection coupling / "
-              "arm coupling / iterator narrowing), and every L2 completion-dimension has a "
+              "arm coupling / iterator narrowing), every L2 completion-dimension has a "
               "producer reached by every terminable class (no producer-coverage or "
-              "完遂-seam gap).")
+              "完遂-seam gap), and every judgment-seam decision kind has a wired producer "
+              "(no decision-capture gap).")
     else:
         print("  → Fix the items above, then re-run "
               "python3 scripts/check-capability-scope.py:")
@@ -1183,6 +1285,10 @@ def main() -> int:
               "capability_ledger.COMPLETION_TERMINAL_HANDLERS.")
         print("    · producer-coverage: give the L2 completion-dimension a real producer "
               "(wired at a seam) or mark it declaration-driven in COMPLETION_DIMENSIONS.")
+        print("    · decision-capture gap (ms-166): wire a producer that builds/records the "
+              "kind's decision and call/register it, or (if the kind names a conversational-"
+              "only judgment with no code seam) add it to "
+              "capability_ledger.DECISION_CAPTURE_BOUNDARY.")
     return 0 if result["ok"] else 1
 
 
