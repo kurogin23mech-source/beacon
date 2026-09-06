@@ -399,3 +399,24 @@ cmd_target_class_list() {
     done
     BEACON_JSON="$json" python3 "$COMMANDS_PY" target_class_list
 }
+
+# ms-150 (全 target 一律 adoptable): adopt a built-in / catalog target-class into
+# this project's adopted set. `<kind>` adopts one class; `--profession-defaults`
+# backfills this profession's built-in defaults (union) into a stale/legacy set.
+cmd_target_class_adopt() {
+    ensure_project
+    local kind="" defaults=0 json=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --profession-defaults) defaults=1; shift ;;
+            --json)                json=1;     shift ;;
+            -?*)  _guard_positional "$1" "Usage: beacon target-class adopt <kind> [--profession-defaults] [--json]" ;;
+            *)    if [[ -n "$kind" ]]; then
+                      echo "Error: 余分な引数 '$1' — adopt は 1 つの kind を取ります (Usage: beacon target-class adopt <kind>)" >&2; exit 1
+                  fi
+                  kind="$1"; shift ;;
+        esac
+    done
+    BEACON_TC_KIND="$kind" BEACON_TC_PROFESSION_DEFAULTS="$defaults" \
+        BEACON_JSON="$json" python3 "$COMMANDS_PY" target_class_adopt
+}
