@@ -566,25 +566,11 @@ def _find_entry_in(entries: list, entry_id: str, ms: dict):
 # Milestone operations
 # ---------------------------------------------------------------------------
 
-def next_milestone_id(data: dict) -> str:
-    """Generate the next milestone id using max(existing ids) + 1.
-
-    Issue #14: the previous implementation used `len(milestones) + 1`, which
-    silently re-issues IDs of physically-removed milestones (e.g. if a
-    project.json hand-edit drops one). The max-id allocator is the only
-    structural fix — cancelled / done / observing milestones all stay in
-    the array and contribute to the max, so the new ID is monotonic
-    forever (until the int counter literally rolls over).
-    """
-    max_id = 0
-    for ms in data.get("milestones", []):
-        mid = ms.get("id", "")
-        if mid.startswith("ms-"):
-            try:
-                max_id = max(max_id, int(mid[3:]))
-            except ValueError:
-                pass
-    return f"ms-{max_id + 1}"
+# ms-164 e-6022: ``next_milestone_id`` (a dev-only max+1 allocator) was removed —
+# it had no live caller (milestone_add allocates via occupation.create_target →
+# occupation.next_target_id, the profession-generic allocator). Only tests +
+# stale docstrings referenced it. The Issue #14 monotonic-id guarantee now lives
+# in occupation.next_target_id / work_base.next_suffixed_id and is tested there.
 
 
 def milestone_add(data: dict, title: str, target_date: str = "",
@@ -595,8 +581,9 @@ def milestone_add(data: dict, title: str, target_date: str = "",
                    allow_untriaged: bool = False) -> str:
     """Add a milestone. Returns the new ms_id.
 
-    Issue #14: the ID is computed via `next_milestone_id` (max + 1) and we
-    re-check for collisions before appending. The collision check is
+    Issue #14: the ID is computed via `occupation.create_target` →
+    `occupation.next_target_id` (max + 1) and we re-check for collisions before
+    appending (see below). The collision check is
     belt-and-suspenders: if validate_project ran during load and the data
     already has duplicate IDs, raising here prevents us from compounding
     the corruption.

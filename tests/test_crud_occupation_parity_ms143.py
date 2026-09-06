@@ -8,11 +8,13 @@ ms-143 の目的: profession-shared な CRUD verb (create / add-work-item / set-
 を覆う保証がない)。so this pins the CONTRACT DIRECTLY at the verb/function boundary.
 
 現況 (この harness が凍結する対象):
-  - dev  : ``core.milestone_add`` (next_milestone_id + data['milestones'].append) /
+  - dev  : ``core.milestone_add`` (occupation.create_target 経由 = next_target_id +
+           collection append; 旧 next_milestone_id は e-6022 で除去) /
            ``core.task_add`` (find_target_milestone + next_entry_id) /
            ``core.task_done`` (find_entry walk of data['milestones']).
-  - sales: ``sales_entities.opportunity_add`` (next_opportunity_id + hand-built
-           skeleton + data['opportunities'].append) / ``activity_add`` /
+  - sales: ``sales_entities.opportunity_add`` (occupation.create_target 経由 =
+           next_target_id + skeleton; 旧 next_opportunity_id は e-6022 で除去) /
+           ``activity_add`` /
            ``activity_set_status`` (find_activity walk of data['opportunities']).
 
 付け替え後 (create_target / add_work_item / find_target_entry+set_entry_state を

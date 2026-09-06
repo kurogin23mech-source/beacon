@@ -146,8 +146,10 @@ def next_account_id(data: dict) -> str:
     return _next_prefixed_id([a.get("id", "") for a in data.get("accounts", [])], "acc-")
 
 
-def next_opportunity_id(data: dict) -> str:
-    return _next_prefixed_id([o.get("id", "") for o in data.get("opportunities", [])], "opp-")
+# ms-164 e-6022: ``next_opportunity_id`` was removed — no live caller
+# (opportunity_add allocates via occupation.create_target → next_target_id, the
+# profession-generic allocator). ``next_activity_id`` below stays: activities are
+# a per-opportunity nested arm with no target-class allocator equivalent.
 
 
 def next_activity_id(data: dict) -> str:

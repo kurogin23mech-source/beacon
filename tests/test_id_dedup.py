@@ -3,7 +3,8 @@
 These tests reproduce the original failure mode (length-based allocator
 silently re-issuing existing IDs) and verify the structural fixes:
 
-  1. next_milestone_id is monotonic regardless of array length
+  1. next_target_id (the live allocator; next_milestone_id removed in
+     e-6022) is monotonic regardless of array length
   2. milestone_add now refuses to create a colliding ID
   3. find_target_milestone raises on duplicate IDs instead of returning
      the first match (the original bug)
@@ -20,6 +21,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
 import core
+import occupation  # ms-164 e-6022: next_milestone_id removed; the live max+1
+                   # allocator is occupation.next_target_id(data, "milestone")
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +67,7 @@ class TestOriginalBugRepro:
     def test_max_id_allocator_never_collides_after_physical_removal(self):
         existing = [_ms("ms-1"), _ms("ms-3")]
         data = _project(existing)
-        next_id = core.next_milestone_id(data)
+        next_id = occupation.next_target_id(data, "milestone")
         assert next_id == "ms-4"
         assert next_id not in {m["id"] for m in existing}
 
@@ -77,7 +80,7 @@ class TestOriginalBugRepro:
             _ms("ms-2", status="done"),
             _ms("ms-3", status="in_progress"),
         ]
-        assert core.next_milestone_id(_project(existing)) == "ms-4"
+        assert occupation.next_target_id(_project(existing), "milestone") == "ms-4"
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +298,7 @@ class TestMilestonePurge:
         # SILENT one (len-based). We just document the behavior.
         data = _project([_ms("ms-1"), _ms("ms-2"), _ms("ms-3")])
         core.milestone_purge(data, "ms-3", reason="dup recovery")
-        next_id = core.next_milestone_id(data)
+        next_id = occupation.next_target_id(data, "milestone")
         # max remaining is 2, so next would be ms-3. That re-use is the
         # purge's explicit cost; callers know what they did.
         assert next_id == "ms-3"
