@@ -291,3 +291,22 @@ def test_list_sessions_attaches_bridge_field():
     # Both rows must also carry poll_health (composition, not replacement).
     assert "poll_health" in by_id["with-bridge"]
     assert "poll_health" in by_id["no-bridge"]
+
+
+def test_session_upsert_accepts_and_forwards_transport():
+    """ms-145 / e-5378: the heartbeat carries receive-transport observability
+    (ws_state / effective_poll_ms / counters). The SessionUpsert schema must
+    accept it and the endpoint's `body.model_dump()` must forward it, so the
+    directory can show which sessions run the WS accelerator vs poll-only and
+    why. Pydantic default is extra='ignore', so without the explicit field the
+    server would silently drop it (= the diagnostic signal would vanish)."""
+    sys.path.insert(0, str(REPO_ROOT / "server"))
+    import routers_projects as rp  # type: ignore
+
+    transport = {"ws_state": "reconnecting", "effective_poll_ms": 5000,
+                 "ws_opens": 0, "ws_closes": 3, "ws_last_close_code": 1006}
+    body = rp.SessionUpsert(last_active="2026-09-06T00:00:00Z", transport=transport)
+    assert body.transport == transport
+    # The endpoint forwards non-None fields via model_dump(); transport must ride.
+    forwarded = {k: v for k, v in body.model_dump().items() if v is not None}
+    assert forwarded["transport"] == transport

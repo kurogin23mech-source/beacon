@@ -43,13 +43,19 @@
 //   duplicated in lib/codex_receive_loop.py::heartbeat_to_server. Move
 //   the shape to lib/bus_protocol.py once that lands; this function
 //   becomes a thin Node wrapper.
-export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false }) {
-  return {
+export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, transport }) {
+  const body = {
     last_active: nowIso,
     last_poll_at: nowIso,
     poll_interval_ms: pollIntervalMs,
     shutdown: !!shutdown,
   }
+  // ms-145 / e-5378 — optional transport observability. Lets the fleet
+  // distinguish a WS-healthy bridge (poll dropped to backstop) from one stuck
+  // on the 5s poll floor, and *why* (never-opened vs flapping). Shape MUST match
+  // lib/bus_protocol.py::heartbeat_body. Omitted when not provided (back-compat).
+  if (transport !== undefined && transport !== null) body.transport = transport
+  return body
 }
 
 /**

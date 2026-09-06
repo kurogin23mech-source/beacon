@@ -66,20 +66,54 @@ STOP_SIGNAL_CHANNEL = "stop-signal"
 # Heartbeat (= channel/bus-heartbeat.mjs::buildHeartbeatBody mirror)
 # ------------------------------------------------------------------ #
 
+# ms-145 / e-5378 — canonical receive-transport ``ws_state`` value set. Defined
+# once here (the shared bus-protocol module) so the legal values aren't scattered
+# and ungreppable across emitters. Producers reference this set:
+#   * channel/bus.mjs currentTransport() emits open/reconnecting/connecting/disabled
+#     (see its comment which cross-refs this constant by name)
+#   * lib/codex_receive_loop.py emits WS_STATE_POLL_ONLY (a WS-less loop by design)
+#   * server SessionUpsert.transport.ws_state stores one of these
+# Grep ``WS_STATE_VALUES`` to find every place that must agree on the vocabulary.
+WS_STATE_POLL_ONLY = "poll-only"
+WS_STATE_VALUES = (
+    "open",          # WS healthy → poll dropped to backstop
+    "reconnecting",  # opened before, currently down (flapping)
+    "connecting",    # never opened yet (handshake still failing)
+    "disabled",      # WS off / no impl → permanent poll floor
+    WS_STATE_POLL_ONLY,  # receive loop has no WS at all (Codex)
+)
 
-def heartbeat_body(now_iso: str, *, poll_interval_ms: int, shutdown: bool = False) -> dict:
+
+def heartbeat_body(
+    now_iso: str,
+    *,
+    poll_interval_ms: int,
+    shutdown: bool = False,
+    transport: dict | None = None,
+) -> dict:
     """Return the canonical PUT /sessions/<sid> body.
 
     Shape MUST match ``channel/bus-heartbeat.mjs::buildHeartbeatBody``
     so the server's poll-health computation (= e-1318) treats every
     bus client identically.
+
+    ms-145 / e-5378 — optional ``transport`` (= receive-loop 側の実効的な
+    受信経路の状態) を載せる。「一部のクライアントだけが常時ポーリングに
+    落ちている」を fleet 全体で観測可能にするため、WS が開けているか
+    (= backstop に落とせているか) を各 session が自己申告する。receive-loop
+    ごとに実装が違う (Node bridge = WS accelerator あり / Codex loop =
+    poll-only) ので、どの実装がどの周期で回っているかを directory から
+    引けるようにするのが狙い。省略時は body に載せない (後方互換)。
     """
-    return {
+    body = {
         "last_active": now_iso,
         "last_poll_at": now_iso,
         "poll_interval_ms": int(poll_interval_ms),
         "shutdown": bool(shutdown),
     }
+    if transport is not None:
+        body["transport"] = transport
+    return body
 
 
 def heartbeat_path(project_id: str, session_id: str) -> str:

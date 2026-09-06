@@ -94,6 +94,12 @@ def heartbeat_to_server(
         _now_iso(),
         poll_interval_ms=poll_interval_ms,
         shutdown=shutdown,
+        # ms-145 / e-5378 — the Codex receive loop has no WS accelerator (unlike
+        # the Node bridge channel/bus.mjs), so it polls at a fixed cadence and
+        # never drops to a backstop. Self-report as poll-only so the directory
+        # shows *why* this session is on frequent polling (= it is by design, not
+        # a broken WS handshake). This is one root of "only some clients poll".
+        transport={"ws_state": bp.WS_STATE_POLL_ONLY, "effective_poll_ms": int(poll_interval_ms)},
     )
     if actor:
         body["actor"] = actor

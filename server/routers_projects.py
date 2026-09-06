@@ -2517,6 +2517,17 @@ class SessionUpsert(BaseModel):
     focus: Optional[dict] = None      # {milestone: {id, title}, recent_task: {id, description}}
     channels: Optional[list[str]] = None
     budget: Optional[dict] = None     # {remaining, total}
+    # ms-145 / e-5378 — receive-loop transport observability. Lets the directory
+    # show which sessions run the WS accelerator (poll dropped to backstop) vs
+    # which are stuck on frequent polling, and why. Heterogeneous receive loops
+    # (Node bridge = WS-capable, Codex loop = poll-only) self-report here.
+    #   {ws_state: one of lib/bus_protocol.WS_STATE_VALUES (canonical set),
+    #    effective_poll_ms: int, ws_opens: int, ws_closes: int,
+    #    ws_last_close_code: int|null}
+    # Shaped dict (not a nested model) to match the actor/git/focus/budget
+    # convention above — nested namespaces stay Optional[dict] so adding a sub-key
+    # later doesn't bump the SessionUpsert surface area.
+    transport: Optional[dict] = None
 
 class SessionIntentUpsert(BaseModel):
     """Body for POST /api/projects/{project_id}/sessions/{session_id}/intent
