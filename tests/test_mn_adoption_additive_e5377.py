@@ -76,13 +76,13 @@ def _operate_release(data):
 
 def test_dev_adopting_release_can_operate_and_enumerate_it():
     dev = _adopting_release("dev")
-    assert "release" in occupation.owned_target_classes(dev, "dev")
+    assert "release" in occupation.owned_target_classes(dev)
     assert "rel-1" in _operate_release(dev)
 
 
 def test_non_dev_adopting_release_can_operate_and_enumerate_it():
     legal = _adopting_release("legal")
-    assert "release" in occupation.owned_target_classes(legal, "legal")
+    assert "release" in occupation.owned_target_classes(legal)
     # the whole point: a legal project drives the dev-provenance class end-to-end
     assert "rel-1" in _operate_release(legal)
 
@@ -106,7 +106,7 @@ def test_a_legal_project_that_did_not_adopt_release_does_not_own_it():
     # sneaks it back in.
     legal = {"name": "p", "profession": "legal", "milestones": [],
              "adopted_target_classes": []}
-    assert "release" not in occupation.owned_target_classes(legal, "legal")
+    assert "release" not in occupation.owned_target_classes(legal)
 
 
 def test_operating_release_without_adopting_it_is_refused():
@@ -124,7 +124,7 @@ def test_legal_project_declaring_undertaking_beyond_its_empty_default():
     # legal's built-in default set is empty; declaring 「やること」 adds it additively.
     legal = {"name": "p", "profession": "legal", "milestones": [],
              "adopted_target_classes": [], "target_classes": [dict(UNDERTAKING)]}
-    assert "undertaking" in occupation.owned_target_classes(legal, "legal")
+    assert "undertaking" in occupation.owned_target_classes(legal)
 
     # and it operates end-to-end via the generic engine
     occupation.assert_target_class_owned(legal, "undertaking")
@@ -140,5 +140,5 @@ def test_a_project_can_carry_both_an_adopted_and_a_declared_class():
     legal = {"name": "p", "profession": "legal", "milestones": [],
              "adopted_target_classes": ["release"],
              "target_classes": [dict(UNDERTAKING)]}
-    owned = occupation.owned_target_classes(legal, "legal")
+    owned = occupation.owned_target_classes(legal)
     assert "release" in owned and "undertaking" in owned

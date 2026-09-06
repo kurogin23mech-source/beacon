@@ -78,7 +78,7 @@ def test_stampless_class_is_owned_and_enumerated():
             "target_classes": [dict(NEUTRAL)]}
     kinds = [d["kind"] for d in occupation._descriptors_owned_by(data)]
     assert "undertaking" in kinds
-    assert "undertaking" in occupation.owned_target_classes(data, "dev")
+    assert "undertaking" in occupation.owned_target_classes(data)
 
 
 # ---------------------------------------------------------------------------

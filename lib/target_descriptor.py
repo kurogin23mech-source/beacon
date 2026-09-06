@@ -25,7 +25,7 @@ malformed descriptor (best-effort, occupation code must not crash on bad data);
 
 Like ``work_base`` / ``work_model`` this module performs no I/O: every function
 is a pure transform over the values it is handed. Wiring the descriptors into
-the occupation registry (``occupation.py`` OWNED_TARGET_CLASSES etc.) is a
+the occupation registry (``occupation.py`` PROFESSION_ADAPTER_KINDS etc.) is a
 separate task (e-3957); this module is the schema + loader + validator only.
 """
 
@@ -1141,23 +1141,188 @@ RELEASE_DESCRIPTOR: dict = {
 }
 
 
-# Layer 1 (ms-147 e-5397 / SPEC 方針4) — the global catalog: every built-in-as-
-# data descriptor, profession-NEUTRAL, indexed by kind. A material lives here,
-# not on a profession, so more than one profession can adopt the same class.
-# This is deliberately SEPARATE from the manifest below: which professions adopt
-# a class by default (layer 2) can change without making an already-copied kind
-# unresolvable (a project's copied set resolves against THIS, layer 1).
+# ---------------------------------------------------------------------------
+# The 5 built-in Target classes as catalog MATERIAL (ms-150 e-5714 / 全 target を
+# 一律 adoptable に). milestone / operation / opportunity / account / acquisition
+# were the ONE half of the axis inversion (ms-147 e-5375) left UN-inverted: their
+# membership was decided by ``occupation.OWNED_TARGET_CLASSES`` (profession → class,
+# hard-wired) instead of by adoption, so a sales project could never adopt
+# ``milestone`` (Cairn-Sales の「milestone を使いたい」依頼で発覚). Adding them here —
+# profession-NEUTRAL, exactly like ``release`` — lets ANY project adopt ANY of them
+# via the same M:N path the ``release`` precedent already proved (SPEC 受入条件3).
+#
+# 二重真値源を作らない (single source of truth): the authoritative state model,
+# collection, and arm classification live in ``target_state.BUILTIN_TARGET_CLASSES``;
+# the canonical id-prefix lives in ``work_model``'s prefix table. Each catalog entry
+# below is DERIVED from both at import (``_builtin_descriptor_from_state``), never
+# hand-copied — the derivation IS the sync, so a catalog entry cannot drift from its
+# master. Only the two facets with NO home in the state model are declared here: the
+# human label, and the finite/persistent nature (target-axes 2 軸: 有限=価値創造 /
+# persistent=運用).
+#
+# SCOPE (ms-150 handoff / 権限・列挙の反転まで): this makes the 5 classes ADOPTABLE /
+# enumerable / gate-able / generically create-able. milestone's BESPOKE surface
+# (progress% / タスク / SPEC / レビュー gate / dispatch) stays in the dev adapter
+# (``core.project_targets``) and is NOT reproduced generically — a non-dev project
+# that adopts milestone gets it as a GENERIC Target (it appears in the frame, it is
+# owned, it can be created), and the rich dev rendering is an explicit follow-on.
+# ``phases`` is left EMPTY on purpose: the 5 built-ins advance through gate-managed
+# status / config-driven funnels modelled in ``target_state``, NOT a static
+# descriptor phase-ladder, so a hand-baked phase list here would be a second, lying
+# source. Generic phase-advance of an adopted built-in is part of that deferred
+# bespoke surface.
+
+# Descriptor-native facets (no home in the state model): human label + finite /
+# persistent nature. Declared here because ``target_state`` models STATE, not
+# presentation or the 2-axis classification.
+_BUILTIN_DESCRIPTOR_LABELS = {
+    "milestone": "マイルストーン",
+    "operation": "オペレーション",
+    "opportunity": "商談",
+    "account": "顧客",
+    "acquisition": "顧客獲得ターゲット",
+}
+_BUILTIN_DESCRIPTOR_TYPES = {
+    "milestone": TYPE_SINGLE_SHOT,   # 有限 (価値創造): done/observing で settle
+    "operation": TYPE_PERSISTENT,    # 運用: 定常的に回り続ける
+    "opportunity": TYPE_SINGLE_SHOT,  # 有限: 成約/失注で決着
+    "account": TYPE_PERSISTENT,      # 運用: 顧客関係は継続 (never_terminal)
+    "acquisition": TYPE_SINGLE_SHOT,  # 有限: 獲得できたら終わり
+}
+
+# The built-in kinds that become catalog material (ms-150). ``trek`` is a scope,
+# not an adoptable Target class, so it is deliberately absent even though it has a
+# prefix in ``work_model``.
+_BUILTIN_ADOPTABLE_KINDS = ("milestone", "operation", "opportunity",
+                            "account", "acquisition")
+
+
+def _builtin_descriptor_from_state(kind: str) -> dict:
+    """Derive the catalog descriptor for a built-in class from its authoritative
+    sources (ms-150), so the entry cannot drift from its master:
+
+    * ``target_state.BUILTIN_TARGET_CLASSES[kind]`` → collection + arm classification
+      (work-item / evidence arms, and the fat arms it decomposes into);
+    * ``work_model``'s prefix table → the canonical target id-prefix (``ms-`` …).
+
+    The label / type come from the descriptor-native maps above (facets the state
+    model does not carry). ``phases`` is intentionally empty (see the block comment):
+    the built-ins' phase/state behaviour lives in the state model, not here."""
+    import target_state as _ts
+    import work_model as _wm
+    cls = _ts.BUILTIN_TARGET_CLASSES[kind]
+    roles = cls.get("arm_roles") or {}
+    wia = roles.get("work_item_arm")
+    # ms-150 maintainability review M2: use the PUBLIC accessor, not a hand-inverted
+    # private ``_TARGET_PREFIX_KIND``. The accessor returns "" (not KeyError) for an
+    # unknown kind; the import-time guard below (``_assert_builtin_catalog_coverage``)
+    # turns a missing prefix / label / type into a loud, early, self-describing failure
+    # instead of an opaque KeyError deep in a dict comprehension.
+    id_prefix = _wm.target_id_prefix(kind)
+    # The fat arms this class physically decomposes into = the union of its
+    # work-item + evidence arm names (deduped, declaration order), mirroring
+    # ``occupation.TARGET_DECOMPOSITION``'s ``arms`` tuple — derived, not re-listed.
+    arms: list = []
+    if wia and wia.get("arm"):
+        arms.append(wia["arm"])
+    for a in (roles.get("evidence_arms") or []):
+        if a.get("arm") and a["arm"] not in arms:
+            arms.append(a["arm"])
+    return {
+        "kind": kind,
+        "label": _BUILTIN_DESCRIPTOR_LABELS.get(kind, kind),
+        "type": _BUILTIN_DESCRIPTOR_TYPES.get(kind, TYPE_SINGLE_SHOT),
+        "id_prefix": id_prefix,
+        "collection": cls["collection"],
+        # ms-150: carry the state model's ``aggregatable`` flag onto the descriptor
+        # so the enumeration registries can preserve the owned-but-NOT-aggregatable
+        # distinction. acquisition is aggregatable=False (it rides a separate
+        # persistence path and must NOT be walked by the session-log / manifest
+        # aggregators): a project that adopts it OWNS it (``owned_target_classes``
+        # reads the kind regardless), but its collection stays OUT of the aggregatable
+        # ``target_collections`` walk — matching the pre-ms-150 behaviour where
+        # acquisition was owned via the profession map yet excluded from the manifest.
+        "aggregatable": cls.get("aggregatable", True),
+        "decomposition": {"id_field": "id", "arms": arms},
+        "work_item_arm": ({"arm": wia["arm"], "item_type": wia.get("item_type")}
+                          if wia and wia.get("arm") else None),
+        "evidence_arms": [{"arm": a["arm"], "item_type": a.get("item_type")}
+                          for a in (roles.get("evidence_arms") or [])
+                          if a.get("arm")],
+        "fields": [],
+        "phases": [],
+    }
+
+
+# Layer 1 (ms-147 e-5397 / SPEC 方針4, extended by ms-150) — the global catalog:
+# every built-in-as-data descriptor, profession-NEUTRAL, indexed by kind. A material
+# lives here, not on a profession, so more than one profession can adopt the same
+# class. This is deliberately SEPARATE from the manifest below: which professions
+# adopt a class by default (layer 2) can change without making an already-copied
+# kind unresolvable (a project's copied set resolves against THIS, layer 1).
+#
+# ms-150: the 5 built-ins join ``release`` here (derived, single-sourced), so the
+# catalog now covers EVERY built-in Target class — the axis inversion is complete
+# (no built-in is decided by profession any more).
 BUILTIN_DESCRIPTOR_CATALOG: dict = {
+    **{k: _builtin_descriptor_from_state(k) for k in _BUILTIN_ADOPTABLE_KINDS},
     "release": RELEASE_DESCRIPTOR,
 }
 
+
+def _assert_builtin_catalog_coverage() -> None:
+    """Fail LOUD at import if the 3 per-kind maps that feed the built-in catalog have
+    drifted out of sync (ms-150 maintainability review M2/M3/M5). Adding a built-in is
+    inherently a multi-site edit (``target_state`` state model + ``work_model`` prefix
+    + the label/type maps here); this guard makes an OMITTED site a self-describing
+    ImportError at load — early and named — instead of a silent wrong default (label =
+    the kind string, type = single-shot) or an opaque KeyError deep in the
+    comprehension above. It is the structural backstop for the coordinated-edit cost
+    the review flagged: the machine, not a human counting entries, verifies the maps
+    grew together."""
+    adoptable = set(_BUILTIN_ADOPTABLE_KINDS)
+    missing_prefix = [k for k in _BUILTIN_ADOPTABLE_KINDS
+                      if not BUILTIN_DESCRIPTOR_CATALOG[k].get("id_prefix")]
+    if missing_prefix:
+        raise ImportError(
+            f"built-in catalog: kind(s) {missing_prefix} have no id-prefix — add them "
+            f"to work_model._TARGET_PREFIX_KIND (id-prefix は work_model が単一真実源)")
+    if set(_BUILTIN_DESCRIPTOR_LABELS) != adoptable:
+        raise ImportError(
+            f"built-in catalog: _BUILTIN_DESCRIPTOR_LABELS keys "
+            f"{sorted(_BUILTIN_DESCRIPTOR_LABELS)} != adoptable kinds {sorted(adoptable)} "
+            f"— every built-in must declare its label (silent kind-as-label fallback 禁止)")
+    if set(_BUILTIN_DESCRIPTOR_TYPES) != adoptable:
+        raise ImportError(
+            f"built-in catalog: _BUILTIN_DESCRIPTOR_TYPES keys "
+            f"{sorted(_BUILTIN_DESCRIPTOR_TYPES)} != adoptable kinds {sorted(adoptable)} "
+            f"— every built-in must declare its 有限/persistent nature (silent "
+            f"single-shot fallback 禁止)")
+
+
+_assert_builtin_catalog_coverage()
+
 # Layer 2 — the profession manifest: which catalog kinds a profession adopts by
-# DEFAULT (built-in, modelled as data). Only dev has one today (release). A
-# profession absent from this map contributes no defaults, so sales / a data-
-# defined occupation are unchanged. This is the seed `beacon init` COPIES into a
-# project's adopted set; after that the project's copy — not this map — is read.
+# DEFAULT (built-in, modelled as data). A profession absent from this map
+# contributes no defaults, so a data-defined occupation is unchanged. This is the
+# seed `beacon init` COPIES into a project's adopted set; after that the project's
+# copy — not this map — is read.
+#
+# ms-150: dev's default set gains its own built-ins (milestone / operation) beside
+# ``release``, and sales gains opportunity / account / acquisition. BEFORE, these
+# were wired by ``occupation.OWNED_TARGET_CLASSES`` (profession-as-authority); now
+# they are ordinary adoption defaults, so an EXISTING dev/sales project (whose
+# effective set derives from the profession when it has no copied set) enumerates
+# and owns exactly the same classes as before (byte-invariant), while a project can
+# now ALSO adopt a class beyond its profession's defaults. back-office keeps ``[]``
+# (its classes are descriptor-declared, not built-in).
 PROFESSION_DEFAULT_DESCRIPTORS: dict = {
-    "dev": [RELEASE_DESCRIPTOR],
+    "dev": [BUILTIN_DESCRIPTOR_CATALOG["milestone"],
+            BUILTIN_DESCRIPTOR_CATALOG["operation"],
+            RELEASE_DESCRIPTOR],
+    "sales": [BUILTIN_DESCRIPTOR_CATALOG["opportunity"],
+              BUILTIN_DESCRIPTOR_CATALOG["account"],
+              BUILTIN_DESCRIPTOR_CATALOG["acquisition"]],
 }
 
 

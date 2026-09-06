@@ -96,21 +96,22 @@ def test_data_defined_profession_creates_descriptor_skeleton(project_cwd,
 # into, so it gets its own coverage per profession.
 # ---------------------------------------------------------------------------
 
-def test_dev_stamps_adopted_release(project_cwd):
-    # dev's only built-in-as-data class today is `release`; the manifest copies
-    # it into the project's adopted set at init.
+def test_dev_stamps_adopted_builtins(project_cwd):
+    # ms-150: every built-in is now catalog material, so dev's default set copies
+    # its own built-ins (milestone / operation) beside release into the adopted set.
     commands.cmd_init()
     data = _read(project_cwd)
-    assert data["adopted_target_classes"] == ["release"]
+    assert data["adopted_target_classes"] == ["milestone", "operation", "release"]
 
 
-def test_sales_stamps_empty_adopted_set(project_cwd, monkeypatch):
-    # sales' target-classes (opportunity / account) are still code-wired, not in
-    # the built-in descriptor catalog, so nothing is copied yet.
+def test_sales_stamps_its_builtins(project_cwd, monkeypatch):
+    # ms-150: sales' target-classes (opportunity / account / acquisition) are now in
+    # the built-in descriptor catalog too, so the manifest copies them at init
+    # (previously code-wired via occupation.OWNED_TARGET_CLASSES → nothing copied).
     monkeypatch.setenv("BEACON_PROFESSION", "sales")
     commands.cmd_init()
     data = _read(project_cwd)
-    assert data["adopted_target_classes"] == []
+    assert data["adopted_target_classes"] == ["opportunity", "account", "acquisition"]
 
 
 def test_data_defined_stamps_empty_adopted_set(project_cwd, monkeypatch):
@@ -164,7 +165,7 @@ def test_seam_composes_dev_directly():
     data = occupation.build_new_project("p", "obj", "dev")
     assert data["profession"] == "dev"
     assert data["milestones"] == []
-    assert data["adopted_target_classes"] == ["release"]
+    assert data["adopted_target_classes"] == ["milestone", "operation", "release"]
     assert "opportunities" not in data
 
 
@@ -173,7 +174,7 @@ def test_seam_composes_sales_directly():
     assert data["profession"] == "sales"
     assert data["opportunities"] == []
     assert data["accounts"] == []
-    assert data["adopted_target_classes"] == []
+    assert data["adopted_target_classes"] == ["opportunity", "account", "acquisition"]
 
 
 def test_seam_normalises_raw_profession():
@@ -188,7 +189,7 @@ def test_seam_normalises_raw_profession():
 def test_seam_empty_profession_is_dev():
     data = occupation.build_new_project("p", "obj", "")
     assert data["profession"] == "dev"
-    assert data["adopted_target_classes"] == ["release"]
+    assert data["adopted_target_classes"] == ["milestone", "operation", "release"]
 
 
 def test_init_display_single_source_mapping():

@@ -32,7 +32,7 @@ def test_non_dev_profession_adopting_release_owns_it():
 
 def test_owned_target_classes_includes_adopted_release_for_non_dev():
     assert "release" in occupation.owned_target_classes(
-        _adopting_release("legal"), "legal")
+        _adopting_release("legal"))
 
 
 def test_adopted_release_surfaces_as_a_projected_target_row():
@@ -45,10 +45,29 @@ def test_adopted_release_surfaces_as_a_projected_target_row():
 
 # --- dev on the adopted model keeps its built-ins AND release ----------------
 
-def test_dev_adopted_still_owns_builtins_and_release():
-    owned = occupation.owned_target_classes(_adopting_release("dev"), "dev")
+def test_dev_complete_adopted_set_owns_all_builtins_and_release():
+    # ms-150 completed the inversion e-5374 staged: milestone / operation are now
+    # catalog material carried in the adopted set, not a separate profession-keyed
+    # authority. A dev project seeded with the full default adopted set owns all of
+    # them via the SAME single read (owned_target_classes = effective kinds).
+    proj = {"name": "p", "profession": "dev", "milestones": [],
+            "adopted_target_classes": td.profession_adopted_kinds("dev")}
+    owned = occupation.owned_target_classes(proj)
     for kind in ("milestone", "operation", "release"):
         assert kind in owned
+
+
+def test_partial_adopted_set_is_authoritative_ms150():
+    # ms-150 条件B — the adopted set is the COMPLETE ownership truth (一本読み). A
+    # dev project whose copied set lists only ["release"] (e.g. the pre-ms-150 seed,
+    # which stored only shareable materials) owns EXACTLY release until it is
+    # backfilled — the profession is NEVER re-consulted to silently re-add milestone.
+    # This is the negative anchor: the ownership read must not re-impose the
+    # built-ins (the backfill migration, not a hidden fallback, upgrades such a
+    # project — ms-150 実装順序4).
+    proj = {"name": "p", "profession": "dev", "milestones": [],
+            "adopted_target_classes": ["release"]}
+    assert set(occupation.owned_target_classes(proj)) == {"release"}
 
 
 # --- legacy projects (no adopted key): the stamp is provenance, not a filter ---
@@ -69,18 +88,23 @@ def test_legacy_project_enumerates_a_declared_class_regardless_of_stamp():
     assert "release" in kinds
 
 
-def test_legacy_sales_with_no_declarations_still_gets_no_dev_builtin():
-    # The removal is of the STAMP filter, not of profession-level seeding: a
-    # legacy sales project that declares nothing still surfaces no release,
-    # because the manifest seed (not the stamp) decides built-ins (ms-142 e-5161).
+def test_legacy_sales_gets_its_own_builtins_not_dev_ones():
+    # ms-150 (5-built-in extension): a legacy sales project (no adopted key) derives
+    # its OWN profession defaults (opportunity / account / acquisition) via
+    # effective_descriptors — and still NO dev built-in (milestone / operation /
+    # release). The stamp filter is gone; profession-level seeding (WHICH built-ins a
+    # profession carries by default) remains and is now symmetric across dev / sales.
     proj = {"name": "p", "profession": "sales", "milestones": []}
     kinds = [d["kind"] for d in occupation._descriptors_owned_by(proj)]
-    assert kinds == []
+    assert kinds == ["opportunity", "account", "acquisition"]
+    for dev_builtin in ("milestone", "operation", "release"):
+        assert dev_builtin not in kinds
 
 
-def test_legacy_dev_still_surfaces_release_default():
-    # Legacy dev project (no adopted key) still gets its built-in release via the
-    # live manifest-seed derivation — ms-142 e-5161 behaviour unchanged.
+def test_legacy_dev_surfaces_its_builtin_defaults():
+    # ms-150 (5-built-in extension of ms-142 e-5161): a legacy dev project (no
+    # adopted key) derives its FULL built-in default set (milestone / operation /
+    # release) via the live manifest-seed derivation.
     proj = {"name": "p", "profession": "dev", "milestones": []}
     kinds = [d["kind"] for d in occupation._descriptors_owned_by(proj)]
-    assert kinds == ["release"]
+    assert kinds == ["milestone", "operation", "release"]

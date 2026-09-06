@@ -371,6 +371,7 @@ case "${1:-}" in
     target-class|tclass)
         case "${2:-}" in
             add)      shift 2; cmd_target_class_add "$@" ;;
+            adopt)    shift 2; cmd_target_class_adopt "$@" ;;
             update)   shift 2; cmd_target_class_update "$@" ;;
             list|ls)  shift 2; cmd_target_class_list "$@" ;;
             *)        echo "Usage: beacon target-class <subcommand>  (data 定義 target-class をコード無しで追加, ms-124)
@@ -381,6 +382,8 @@ case "${1:-}" in
         [--evidence-field key:label:type ...] [--required-evidence-field ...]
     add --stdin [--profession <p>]   # 記述子全体を JSON で stdin から渡す
                        # --profession はファイルの職種を上書き (共有ファイルの取り込み用)
+    adopt <kind> [--json]                  # built-in / catalog クラスを採用 (ms-150 全 target 一律 adoptable)
+    adopt --profession-defaults [--json]   # 職種既定を採用集合に補充 (旧 seed の backfill)
     update --kind <k>  # 宣言済みクラスに field を足す (追加のみ / 削除・改名は不可)
         [--profession <p>]   # このクラスを持つ職種を直す (共有ファイルを別職種で使うとき)
         [--field key:label:type ...] [--required-field ...]

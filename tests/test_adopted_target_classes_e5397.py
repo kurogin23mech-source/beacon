@@ -26,12 +26,23 @@ import target_descriptor as td  # noqa: E402
 
 # --- the manifest / catalog seam (SPEC 方針4 layer 1 & 2) --------------------
 
-def test_profession_adopted_kinds_dev_is_release():
-    assert td.profession_adopted_kinds("dev") == ["release"]
+def test_profession_adopted_kinds_dev_is_builtins_plus_release():
+    # ms-150: dev's default adopted set now carries its own built-ins (milestone /
+    # operation) beside release — the built-ins are catalog material, not a
+    # profession-keyed authority any more.
+    assert td.profession_adopted_kinds("dev") == ["milestone", "operation", "release"]
+
+
+def test_profession_adopted_kinds_sales_is_its_builtins():
+    # ms-150: sales's default adopted set carries opportunity / account / acquisition
+    # (previously wired by occupation.OWNED_TARGET_CLASSES, now ordinary defaults).
+    assert td.profession_adopted_kinds("sales") == [
+        "opportunity", "account", "acquisition"]
 
 
 def test_profession_adopted_kinds_empty_for_professions_without_defaults():
-    assert td.profession_adopted_kinds("sales") == []
+    # A profession absent from the manifest (data-defined / back-office) contributes
+    # no built-in default — its classes are descriptor-declared, not catalog seeds.
     assert td.profession_adopted_kinds("backoffice") == []
     assert td.profession_adopted_kinds("legal") == []
 
@@ -64,30 +75,34 @@ def _dev_project_with_copied_set():
     }
 
 
+_DEV_BUILTINS = ["milestone", "operation", "release"]  # ms-150 dev default set
+
+
 def test_effective_descriptors_reads_copied_set_not_live_manifest(monkeypatch):
     proj = _dev_project_with_copied_set()
-    assert [d["kind"] for d in occupation.effective_descriptors(proj)] == ["release"]
+    assert [d["kind"] for d in occupation.effective_descriptors(proj)] == _DEV_BUILTINS
 
     # Emptying the manifest simulates "the profession's defaults changed later".
     # A project that copied its set must be UNAFFECTED.
     monkeypatch.setattr(td, "PROFESSION_DEFAULT_DESCRIPTORS", {})
-    assert [d["kind"] for d in occupation.effective_descriptors(proj)] == ["release"], \
+    assert [d["kind"] for d in occupation.effective_descriptors(proj)] == _DEV_BUILTINS, \
         "copied adopted set must survive a manifest change (SPEC 方針3 複写)"
 
 
 def test_effective_descriptors_ignores_profession_field_flip():
-    # The copied set — not the profession field — decides enumeration. A project
-    # whose profession is flipped to sales but which copied release still lists it.
+    # The copied set — not the profession field — decides enumeration. A dev project
+    # whose profession is flipped to sales but which copied the dev built-ins still
+    # lists exactly them.
     proj = _dev_project_with_copied_set()
     proj["profession"] = "sales"
-    assert [d["kind"] for d in occupation.effective_descriptors(proj)] == ["release"]
+    assert [d["kind"] for d in occupation.effective_descriptors(proj)] == _DEV_BUILTINS
 
 
 def test_legacy_project_without_key_falls_back_to_live_derivation(monkeypatch):
     legacy = {"name": "p", "profession": "dev", "milestones": []}  # no adopted key
-    assert [d["kind"] for d in occupation.effective_descriptors(legacy)] == ["release"]
+    assert [d["kind"] for d in occupation.effective_descriptors(legacy)] == _DEV_BUILTINS
 
-    # Fallback IS live: empty the manifest and the legacy project loses release.
+    # Fallback IS live: empty the manifest and the legacy project loses its built-ins.
     monkeypatch.setattr(td, "PROFESSION_DEFAULT_DESCRIPTORS", {})
     assert occupation.effective_descriptors(legacy) == []
 
@@ -106,9 +121,10 @@ def test_data_defined_empty_adopted_unions_with_declared_target_classes():
 
 def test_none_and_empty_data_still_surface_dev_defaults():
     # The import-time coverage-matrix floor: a no-data consult has no adopted key,
-    # so it falls back and the dev defaults still inject.
-    assert [d["kind"] for d in occupation.effective_descriptors(None)] == ["release"]
-    assert [d["kind"] for d in occupation.effective_descriptors({})] == ["release"]
+    # so it falls back and the dev defaults still inject (ms-150: the full built-in
+    # default set).
+    assert [d["kind"] for d in occupation.effective_descriptors(None)] == _DEV_BUILTINS
+    assert [d["kind"] for d in occupation.effective_descriptors({})] == _DEV_BUILTINS
 
 
 # --- end-to-end: beacon init copies the set into project.json (受入条件2) -----
@@ -136,9 +152,11 @@ def _init_project(profession):
         return json.load(f)
 
 
-def test_init_dev_copies_release_into_adopted_set():
+def test_init_dev_copies_builtins_into_adopted_set():
     data = _init_project("dev")
-    assert data.get("adopted_target_classes") == ["release"]
+    # ms-150: init seeds the FULL dev built-in default set (milestone/operation/
+    # release), so a fresh dev project's adopted set is authoritative and complete.
+    assert data.get("adopted_target_classes") == ["milestone", "operation", "release"]
 
 
 def test_init_data_defined_copies_empty_adopted_set_present():
@@ -152,13 +170,14 @@ def test_init_data_defined_copies_empty_adopted_set_present():
 # profession, not just dev / data-defined. Before the seeding was centralised, the
 # delegated sales / back-office init branches wrote no key, leaving those projects
 # on the legacy live-derivation fallback (asymmetric protection). These pin that
-# the key is now PRESENT (empty, since neither adopts a built-in) for both.
+# the key is now PRESENT for both — ms-150: sales seeds ITS built-ins, back-office
+# stays empty (its classes are descriptor-declared, not built-in defaults).
 
-def test_init_sales_seeds_adopted_set_present_empty():
+def test_init_sales_seeds_its_builtins_into_adopted_set():
     data = _init_project("sales")
     assert "adopted_target_classes" in data, \
         "sales init must seed the key (not fall back to legacy live-derivation)"
-    assert data["adopted_target_classes"] == []
+    assert data["adopted_target_classes"] == ["opportunity", "account", "acquisition"]
 
 
 def test_init_backoffice_seeds_adopted_set_present_empty():

@@ -60,7 +60,7 @@ def test_iter_target_records_includes_descriptor_collection():
 
 
 def test_owned_target_classes_includes_descriptor_kind():
-    assert occ.owned_target_classes(_backoffice(), "backoffice") == ("contract",)
+    assert occ.owned_target_classes(_backoffice()) == ("contract",)
 
 
 def test_target_collections_includes_descriptor_collection():
@@ -110,7 +110,7 @@ def test_dev_project_unchanged():
     # project with NO release record is otherwise unchanged (only ms-1 projects).
     rows = occ.project_targets(data)
     assert [r["id"] for r in rows] == ["ms-1"]
-    assert occ.owned_target_classes(data, "dev") == (
+    assert occ.owned_target_classes(data) == (
         "milestone", "operation", "release")
     # ms-142 e-5156 (T1): operations joined the Target-collection seed. e-5256:
     # accounts joined too (4th built-in Target-class; profession-agnostic seed — a

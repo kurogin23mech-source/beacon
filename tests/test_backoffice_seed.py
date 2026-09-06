@@ -74,7 +74,7 @@ def test_occupation_projects_backoffice_targets_in_shared_frame():
     kinds = sorted(r["kind"] for r in rows)
     assert kinds == ["contract", "monthly_close"]
     # And the registry recognises back-office ownership without editing occupation.py
-    assert set(occ.owned_target_classes(data, "backoffice")) == {
+    assert set(occ.owned_target_classes(data)) == {
         "contract", "evaluation", "monthly_close", "attendance_watch"}
 
 

@@ -1706,6 +1706,109 @@ def cmd_target_class_list():
             print(f"      - {p}")
 
 
+def cmd_target_class_adopt():
+    """Adopt a built-in / catalog target-class into THIS project's adopted set
+    (ms-150 — 全 target 一律 adoptable / handoff 実装順序4).
+
+    beacon target-class adopt <kind>          # e.g. a sales project adopts milestone
+    beacon target-class adopt --profession-defaults  # backfill: (re)seed this
+        profession's built-in defaults into the adopted set (union)
+
+    Additive & idempotent. Adopting a class makes the project OWN it (it enumerates,
+    the create gate passes) via the same M:N path ``release`` proved. The BESPOKE
+    surface of a built-in (milestone's progress% / tasks) is not reproduced for a
+    non-native profession here — that is an explicit follow-on — but the class
+    becomes a first-class generic Target the moment it is adopted.
+
+    A LEGACY project (no adopted key) has been deriving its built-ins live from its
+    profession; adopting must NOT drop those, so the current set is first
+    materialised from the profession defaults, THEN the new kind is appended (else a
+    sales project that adopts milestone would end up owning ONLY milestone). The
+    ``--profession-defaults`` mode unions the profession's defaults into a
+    present-but-incomplete set — the backfill for a stale seed written before ms-150
+    (e.g. a dev project whose copied set is just ``["release"]``)."""
+    data = load_project()
+    kind = os.environ.get("BEACON_TC_KIND", "").strip()
+    backfill = os.environ.get("BEACON_TC_PROFESSION_DEFAULTS", "") == "1"
+    json_mode = os.environ.get("BEACON_JSON", "") == "1"
+
+    # ms-150 AX review AX1: <kind> と --profession-defaults は排他。両方渡すと
+    # backfill が kind を無言で握りつぶす silent no-op になっていたので、明示エラーで
+    # 落とす (どちらのつもりだったか CLI に判断させない)。
+    if kind and backfill:
+        print("Error: adopt は <kind> と --profession-defaults を同時に指定できません "
+              "(どちらか一方: 1 クラスを採用するなら <kind>、職種既定をまとめて補充するなら "
+              "--profession-defaults)", file=sys.stderr)
+        sys.exit(1)
+
+    profession = occupation.resolve_profession(data)
+    # Materialise the current adopted set (seed from profession defaults when the
+    # project has no copied key, so nothing already-owned is lost on first adopt).
+    current = _td.load_adopted_kinds(data)
+    if current is None:
+        current = _td.profession_adopted_kinds(profession)
+
+    added: list = []
+    if backfill:
+        for k in _td.profession_adopted_kinds(profession):
+            if k not in current:
+                current.append(k)
+                added.append(k)
+    else:
+        if not kind:
+            print("Error: adopt する target-class の kind を指定してください "
+                  "(例: beacon target-class adopt milestone)", file=sys.stderr)
+            sys.exit(1)
+        catalog = _td.builtin_descriptor_catalog()
+        declared = {(d.get("kind") or "").strip()
+                    for d in _td.load_descriptors(data) if isinstance(d, dict)}
+        # ms-150 maintainability review M4: adopt は CATALOG (built-in) 専用。データ
+        # 定義クラスは ``target_classes`` 経由で自動的に所有され、``resolve_adopted_
+        # descriptors`` は catalog に無い kind を skip する。よって declared kind を
+        # adopted_target_classes に書いても所有には無影響な GHOST エントリになるだけ。
+        # 書かずに「もう所有している」と伝えて no-op で返す (採用集合を汚さない)。
+        if kind not in catalog:
+            if kind in declared:
+                if json_mode:
+                    print(json.dumps({"added": [], "adopted": current},
+                                     ensure_ascii=False))
+                else:
+                    print(f"'{kind}' は既にデータ定義クラスとして所有しています "
+                          f"(採用不要 — adopt は built-in クラス専用です)。")
+                return
+            valid = ", ".join(sorted(catalog))
+            print(f"Error: '{kind}' は採用できる target-class ではありません。"
+                  f"採用できる built-in: {valid} "
+                  f"(独自のデータ定義クラスは beacon target-class add で宣言します)",
+                  file=sys.stderr)
+            sys.exit(1)
+        if kind not in current:
+            current.append(kind)
+            added.append(kind)
+
+    # ms-150 AX review AX4: 常に同じ JSON 形 ``{"added", "adopted"}`` を返す。以前は
+    # 「既に採用済み」だけ ``{"kind", "already_adopted"}`` と別形で、自動処理が壊れた。
+    # 無変更 (added==[]) は added の空配列で表す (専用 flag を持たせない)。
+    if kind and not added and not backfill:
+        # already adopted: nothing written, but report the consistent shape.
+        if json_mode:
+            print(json.dumps({"added": [], "adopted": current}, ensure_ascii=False))
+        else:
+            print(f"'{kind}' はこのプロジェクトで既に採用済みです。")
+        return
+
+    data[_td.ADOPTED_TARGET_CLASSES_KEY] = current
+    save_project(data, op={"op": "target_class_adopt", "kinds": added})
+    if json_mode:
+        print(json.dumps({"added": added, "adopted": current}, ensure_ascii=False))
+        return
+    if added:
+        print(f"採用しました: {', '.join(added)}")
+        print(f"  現在の採用 target-class: {', '.join(current)}")
+    else:
+        print("変更なし (指定のクラスは既にすべて採用済みです)。")
+
+
 def _spec_exists_for_descriptor_target(target_id: str) -> bool:
     """True if a spec-scoped document is attached to a data-defined (descriptor)
     target (ms-119 / e-4087).

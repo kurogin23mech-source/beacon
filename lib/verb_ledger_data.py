@@ -448,6 +448,7 @@ VERB_LEDGER = {
     "target_split": {"cls": "B", "secondary": [], "note": "[ms-146 e-5340] 作業中に湧いた思いつきを別 target として切り出す。元 target は読むだけで一切変えない (scope creep を意志でなく動線で止める)"},
     "target_purge": {"cls": "B", "secondary": [], "note": "[ms-146 e-5351] data 定義 target インスタンスの物理削除。soft-cancel(証跡を残す)ではなく本当に消す機械操作(B)。移設済みデータ/他所へ移した個人記録の掃除が動機で、--reason 必須 (entry purge / milestone purge と同形)"},
     "target_class_list": {"cls": "Q", "secondary": [], "note": "[post-memo] 宣言済 target-class の read-only 一覧(Q)"},
+    "target_class_adopt": {"cls": "B", "secondary": [], "note": "[ms-150 全 target 一律 adoptable] built-in/catalog クラスを project の採用集合へ足す=採用メンバーシップ(schema 配線)の機械操作(B)。target_class_add と同型(宣言でなく既存 catalog の採用)。--profession-defaults は旧 seed の backfill"},
     "target_close": {"cls": "R", "secondary": ["B"], "note": "[post-memo] target を done に=完了決定記録(R)/review-due 発火(B)、milestone done と同型"},
     "target_create": {"cls": "R", "secondary": [], "note": "[post-memo] data-defined target 起票=台帳追記(R)、milestone add と同型"},
     "target_evidence": {"cls": "R", "secondary": [], "note": "[post-memo] target の Evidence 追加/一覧=追記(R、list は read だが primary は add)"},
