@@ -62,6 +62,28 @@ jobs:
       - name: Install beacon CLI
         run: pip install -e .
 
+      # ms-145 e-5318: surface a mis-wired notification path NOW, as a standing
+      # warning on the run — instead of discovering it only during a real outage
+      # when the alert DM silently fails to send. Non-failing on purpose: the fix
+      # is a human action in repo Settings (the token is a secret, never in code),
+      # so a warning that persists until configured is the right forcing function.
+      - name: Preflight — notification path configured?
+        env:
+          TOKEN: ${{ secrets.BEACON_DEPLOY_MONITOR_TOKEN }}
+          OWNER: ${{ vars.BEACON_OWNER_USER_ID }}
+        run: |
+          ok=1
+          if [ -z "$TOKEN" ]; then
+            echo "::warning title=Deploy monitor: alert token unset::BEACON_DEPLOY_MONITOR_TOKEN secret is empty — outage detection still runs, but the alert DM cannot be sent. Set it in Settings → Secrets and variables → Actions (see workflow header). ms-145 e-5318"
+            ok=0
+          fi
+          if [ -z "$OWNER" ]; then
+            echo "::warning title=Deploy monitor: owner fallback unset::BEACON_OWNER_USER_ID variable is empty — alerts have no fallback recipient when no session sits at the deployed rev. Set it as a repo variable. ms-145 e-5318"
+            ok=0
+          fi
+          [ "$ok" = 1 ] && echo "notification path configured (token + owner present)"
+          exit 0
+
       # Persist the "last alerted rev" between runs so a persistent stuck deploy
       # alerts once per rev, not every 10 minutes.
       - name: Restore alert dedup state
