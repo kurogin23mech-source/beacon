@@ -99,7 +99,7 @@ def heartbeat_to_server(
         # never drops to a backstop. Self-report as poll-only so the directory
         # shows *why* this session is on frequent polling (= it is by design, not
         # a broken WS handshake). This is one root of "only some clients poll".
-        transport={"ws_state": "poll-only", "effective_poll_ms": int(poll_interval_ms)},
+        transport={"ws_state": bp.WS_STATE_POLL_ONLY, "effective_poll_ms": int(poll_interval_ms)},
     )
     if actor:
         body["actor"] = actor

@@ -2458,9 +2458,12 @@ class SessionUpsert(BaseModel):
     # show which sessions run the WS accelerator (poll dropped to backstop) vs
     # which are stuck on frequent polling, and why. Heterogeneous receive loops
     # (Node bridge = WS-capable, Codex loop = poll-only) self-report here.
-    #   {ws_state: "open"|"reconnecting"|"connecting"|"disabled"|"poll-only",
+    #   {ws_state: one of lib/bus_protocol.WS_STATE_VALUES (canonical set),
     #    effective_poll_ms: int, ws_opens: int, ws_closes: int,
-    #    ws_last_close_code: int|str}
+    #    ws_last_close_code: int|null}
+    # Shaped dict (not a nested model) to match the actor/git/focus/budget
+    # convention above — nested namespaces stay Optional[dict] so adding a sub-key
+    # later doesn't bump the SessionUpsert surface area.
     transport: Optional[dict] = None
     """Body for POST /api/projects/{project_id}/sessions/{session_id}/intent
     (ms-54 / e-1369 Layer 4).

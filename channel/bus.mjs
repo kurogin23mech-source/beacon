@@ -443,6 +443,8 @@ function _busWsUrl() {
 // failing) / disabled = WS off or no impl (permanent poll floor). effective_poll_ms
 // is the interval the loop is actually sleeping (backstop vs 5s), so a fleet query
 // can count how many sessions sit on the 5s floor and why.
+// Canonical value set: lib/bus_protocol.WS_STATE_VALUES (the Codex loop emits the
+// 5th value 'poll-only' from there). Keep these four strings in sync with it.
 function currentTransport() {
   let state
   if (!WS_ENABLED || !PROJECT_ID || wsImplUnavailable) state = 'disabled'

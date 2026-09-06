@@ -66,6 +66,23 @@ STOP_SIGNAL_CHANNEL = "stop-signal"
 # Heartbeat (= channel/bus-heartbeat.mjs::buildHeartbeatBody mirror)
 # ------------------------------------------------------------------ #
 
+# ms-145 / e-5378 — canonical receive-transport ``ws_state`` value set. Defined
+# once here (the shared bus-protocol module) so the legal values aren't scattered
+# and ungreppable across emitters. Producers reference this set:
+#   * channel/bus.mjs currentTransport() emits open/reconnecting/connecting/disabled
+#     (see its comment which cross-refs this constant by name)
+#   * lib/codex_receive_loop.py emits WS_STATE_POLL_ONLY (a WS-less loop by design)
+#   * server SessionUpsert.transport.ws_state stores one of these
+# Grep ``WS_STATE_VALUES`` to find every place that must agree on the vocabulary.
+WS_STATE_POLL_ONLY = "poll-only"
+WS_STATE_VALUES = (
+    "open",          # WS healthy → poll dropped to backstop
+    "reconnecting",  # opened before, currently down (flapping)
+    "connecting",    # never opened yet (handshake still failing)
+    "disabled",      # WS off / no impl → permanent poll floor
+    WS_STATE_POLL_ONLY,  # receive loop has no WS at all (Codex)
+)
+
 
 def heartbeat_body(
     now_iso: str,
