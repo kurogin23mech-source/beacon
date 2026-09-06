@@ -74,6 +74,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+import occupation  # top-level: leaf domain module, confirmed non-cyclic (does not import retro_query / search)
 import search as _search
 
 
@@ -255,7 +256,6 @@ def _build_meta_index(project: dict) -> dict[str, dict]:
     # target's entries (a sales opportunity's activities / approvals) were invisible
     # to the source / actor / session_id post-filters because they were never
     # indexed here. iter_target_records covers all classes incl. descriptor ones.
-    import occupation  # local import: leaf domain module, no top-level cycle
     for tgt in occupation.iter_target_records(project):
         _index_entries(tgt.get("entries", []) or [], out)
     return out

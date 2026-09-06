@@ -53,6 +53,33 @@ def test_meta_index_covers_descriptor_class_entries():
     assert idx["e-900"].get("source") == "human"
 
 
+def test_entry_claimant_stays_milestone_scoped():
+    """Lock the deliberate asymmetry (PR#719 maintainability §2/§7): _build_meta_index
+    was generalised to all target classes, but _entry_claimant is INTENTIONALLY left
+    milestone-scoped because its ``ms_id`` back-ref is a milestone-only field. Without
+    this guard, a future generalisation of _entry_claimant to iter_target_records would
+    pass CI silently (an opportunity carries no ms_id, so the milestone loop just
+    skips). This test fixes the expected behaviour on both sides of the branch."""
+    project = {
+        "name": "t", "milestones": [
+            {"id": "ms-1", "status": "in_progress", "claim_holder": "alice",
+             "entries": []},
+        ],
+        "operations": [], "target_classes": [OPPORTUNITY],
+        "opportunities": [
+            {"id": "opp-1", "status": "lead", "claim_holder": "bob", "entries": []},
+        ],
+    }
+    # A milestone-attributed result resolves its claim holder.
+    ms_result = {"id": "e-1", "ms_id": "ms-1"}
+    assert retro_query._entry_claimant(ms_result, {}, project) == "alice"
+    # A non-dev result (no ms_id) must NOT pick up the opportunity's claim_holder
+    # via this milestone-scoped lookup — it returns "" (its claim, if any, comes
+    # from meta.claim_holder, checked earlier in the function).
+    opp_result = {"id": "e-2", "ms_id": ""}
+    assert retro_query._entry_claimant(opp_result, {}, project) == ""
+
+
 def test_meta_index_still_covers_milestones_and_operations():
     """Regression guard: generalising to iter_target_records must not drop the
     dev/ops entries the old hardcode covered."""
