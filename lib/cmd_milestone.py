@@ -221,9 +221,11 @@ def cmd_milestone_list():
             # ms-115 e-3788 — 発見性: この職種が作れる target-class を session-start が
             # 読む status に載せる。「この職種で作れるのは X」を最初から見せて、他職種の
             # 対象を誤って作ろうとする前に自然に正しい入口へ導く (封じ込め block は最後の砦)。
-            "owned_target_classes": list(
-                occupation.OWNED_TARGET_CLASSES.get(
-                    occupation.resolve_profession(data), ())),
+            # ms-150: read the project's ACTUAL owned set (its adopted/declared
+            # classes), not a profession-keyed built-in map — so a project that
+            # adopted a class beyond its profession's defaults (e.g. a sales project
+            # that adopted milestone) shows it here as creatable.
+            "owned_target_classes": list(occupation.owned_target_classes(data)),
             # ms-109 e-3751 — class-layer forward-motion frame, so every
             # project's session-start reads "advance the target" inline (a
             # per-project CORE doc would only reach this repo's sessions).
@@ -329,8 +331,7 @@ def cmd_milestone_list():
     print(f"\u25a0 \u524d\u9032\u306e\u67a0\u7d44\u307f: {work_model.target_advancement_frame(data)}\n")
     # ms-115 e-3788 \u2014 \u767a\u898b\u6027: \u975e\u958b\u767a\u8077\u7a2e\u3067\u306f\u300c\u3053\u306e\u8077\u7a2e\u3067\u4f5c\u308c\u308b\u5bfe\u8c61\u300d\u3092 1 \u884c\u6dfb\u3048\u308b\u3002
     # \u55b6\u696d\u30e6\u30fc\u30b6\u30fc\u304c milestone \u3092\u63a2\u3057\u3066\u8ff7\u3046 / acquisition \u306e\u5b58\u5728\u306b\u6c17\u3065\u304b\u306a\u3044\u7a74\u3092\u57cb\u3081\u308b\u3002
-    _owned = occupation.OWNED_TARGET_CLASSES.get(
-        occupation.resolve_profession(data), ())
+    _owned = occupation.owned_target_classes(data)  # ms-150: actual owned set
     if occupation.resolve_profession(data) != "dev" and _owned:
         print(f"  \u3053\u306e\u8077\u7a2e\u3067\u4f5c\u308c\u308b\u5bfe\u8c61: {', '.join(_owned)} "
               f"(\u4ed6\u8077\u7a2e\u306e\u5bfe\u8c61\u306f\u4f5c\u6210\u3067\u304d\u307e\u305b\u3093)\n")

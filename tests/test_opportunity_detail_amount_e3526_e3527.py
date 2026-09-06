@@ -147,6 +147,12 @@ def sales_project(tmp_path, monkeypatch):
     pf = tmp_path / ".beacon" / "project.json"
     d = json.loads(pf.read_text())
     d["profession"] = "sales"
+    # ms-150: the adopted set is the authoritative ownership truth (not the
+    # profession field), so flipping profession must also flip the adopted set —
+    # otherwise this project keeps dev's built-ins (milestone/operation) and
+    # `account add` is correctly refused. A real sales project inits with exactly
+    # this set; this hand-flip fixture must match.
+    d["adopted_target_classes"] = ["opportunity", "account", "acquisition"]
     d["opportunity_phases"] = copy.deepcopy(se.DEFAULT_OPPORTUNITY_PHASES)
     d["account_phases"] = copy.deepcopy(se.DEFAULT_ACCOUNT_PHASES)
     pf.write_text(json.dumps(d, ensure_ascii=False))

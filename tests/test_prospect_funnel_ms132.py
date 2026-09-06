@@ -236,5 +236,5 @@ def test_funnel_kind_dicts_are_consistent():
     assert kinds_from_aliases == set(se._FUNNEL_KEYS)
     # every owning class must be a real sales target-class (ownership check input)
     import occupation
-    sales_owned = set(occupation.OWNED_TARGET_CLASSES["sales"])
+    sales_owned = set(occupation.PROFESSION_ADAPTER_KINDS["sales"])
     assert set(commands._FUNNEL_OWNING_CLASS.values()) <= sales_owned

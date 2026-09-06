@@ -80,7 +80,7 @@ def normalize_profession(profession: str | None) -> str:
 # ---------------------------------------------------------------------------
 # Descriptor-derived registry augmentation (ms-122 e-3957).
 #
-# The six registries below (PROJECTION_ADAPTERS / OWNED_TARGET_CLASSES /
+# The six registries below (PROJECTION_ADAPTERS / PROFESSION_ADAPTER_KINDS /
 # TARGET_COLLECTIONS / TARGET_DECOMPOSITION / NARROWING_KINDS /
 # NARROWING_ID_PREFIXES) each hardcode the two built-in occupations (dev /
 # sales). Before ms-122, adding a third occupation meant editing all six. Now a
@@ -379,7 +379,22 @@ def project_targets(data: dict) -> list:
     adapter = PROJECTION_ADAPTERS.get(prof)
     if adapter is not None:
         rows.extend(adapter(data))
+    # ms-150 条件A — avoid double-projection. Now that every built-in is catalog
+    # material, ``_descriptors_owned_by`` (the effective set) includes this
+    # project's OWN built-ins too (e.g. milestone for a dev project). The bespoke
+    # ``adapter`` above ALREADY rendered those with its rich frame, so the generic
+    # loop must SKIP a kind the project's own-profession adapter covers — otherwise
+    # a dev project's milestones would appear twice (regression floor: 既存 dev/sales
+    # は byte 不変). The skip set is resolved from THIS project's profession only
+    # (``PROFESSION_ADAPTER_KINDS[prof]``), never a global union: a sales project
+    # that adopts ``milestone`` finds it NOT in its coverage {opportunity, account,
+    # acquisition}, so the generic loop DOES project it (adopted-but-non-native
+    # classes are exactly what the generic path is for — それが無いと消える).
+    adapter_covered = set(PROFESSION_ADAPTER_KINDS.get(prof, ())) \
+        if adapter is not None else set()
     for desc in _descriptors_owned_by(data):
+        if (desc.get("kind") or "").strip() in adapter_covered:
+            continue
         for rec in _te.list_targets(data, desc):
             if _wm.is_cancelled(rec):   # match the default status view
                 continue
@@ -913,20 +928,35 @@ def onboarding_plan(profession: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Profession ⊃ Target-class containment (ms-115 e-3785).
+# Which built-in classes a profession's BESPOKE adapter projects (ms-150).
 #
-# The data model is "profession OWNS its set of target-classes": development
-# owns Milestone / Operation, sales owns Opportunity / Account (顧客獲得ターゲット
-# lands here in e-3786). Before this, the *projection* honored that ownership
-# but *mutation* did not — `beacon milestone add` ran unchecked in a sales
-# project and `beacon account add` only warned in a dev project, so a target of
-# the wrong occupation could be created and then never appear in its frame (a
-# "ghost"). This is the ONE place that knows which occupation owns which
-# target-class; the CLI entry points ask here before creating a target so the
-# containment is enforced structurally, not by prompt convention.
+# ⚠ HISTORY / semantic shift: this map was ``OWNED_TARGET_CLASSES`` (ms-115 e-3785)
+# and was the AUTHORITY for "which target-classes a profession owns" — the create
+# gate and the enumeration both read it, hard-wiring profession → class. ms-150
+# completed the axis inversion (ms-147 e-5375): OWNERSHIP is now decided by a
+# project's ADOPTED set (see ``owned_target_classes`` / ``assert_target_class_owned``
+# below — both read the effective/adopted descriptors, NOT this map). What survives
+# here is a NARROWER, honest role: the kinds each profession's bespoke projection
+# adapter (``PROJECTION_ADAPTERS``) ALREADY renders with its rich frame
+# (milestone with progress%/tasks, opportunity with its funnel). The name changed
+# WITH the meaning (旧 ``OWNED_TARGET_CLASSES`` → ``PROFESSION_ADAPTER_KINDS``) so a
+# later reader cannot mistake it for the old ownership authority — a semantic trap
+# ms-165 の naming 封じ と同方針で避ける。
+#
+# It is used in exactly TWO places, both legitimate provenance/coverage reads, never
+# as a wiring authority:
+#   1. ``project_targets`` — the generic descriptor-projection loop SKIPS a kind that
+#      is in the project's own-profession coverage here, so an adopted built-in is
+#      not double-projected (once by the bespoke adapter, once generically). The skip
+#      is resolved by the PROJECT'S OWN profession, never a global union — a sales
+#      project that adopts milestone finds milestone NOT in {opportunity, account,
+#      acquisition}, so the generic loop DOES project it (それが無いと sales の milestone
+#      がどこからも投影されず silent に消える, ms-150 条件A).
+#   2. ``target_class_owner`` — the PROVENANCE label ("milestone is a dev class") for
+#      a wrong-class error message; not an ownership decision.
 # ---------------------------------------------------------------------------
 
-OWNED_TARGET_CLASSES = {
+PROFESSION_ADAPTER_KINDS = {
     "dev": ("milestone", "operation"),
     "sales": ("opportunity", "account", "acquisition"),
 }
@@ -949,23 +979,30 @@ class TargetClassProfessionError(ValueError):
     message; CLI callers print it and exit non-zero."""
 
 
-def owned_target_classes(data: dict, profession: str) -> tuple:
-    """Return every target-class the ``profession`` owns in THIS project: the
-    built-in seed for dev / sales PLUS the kinds of any descriptors declared for
-    that profession (ms-122 e-3957). A dev / sales project (no descriptors)
-    returns exactly the built-in tuple, so existing behaviour is unchanged.
+def owned_target_classes(data: dict, profession: str | None = None) -> tuple:
+    """Return every target-class THIS project owns — its full EFFECTIVE set, read
+    from ONE source: the project's adopted/declared descriptors
+    (``_descriptors_owned_by`` → ``effective_descriptors``).
 
-    ms-147 e-5375 — the ``profession`` arg scopes ONLY the built-in seed half
-    (``OWNED_TARGET_CLASSES``: milestone/operation for dev, opportunity/account/
-    acquisition for sales — a profession's CORE classes, deliberately NOT
-    shareable materials). The descriptor half comes from the project's effective
-    set via ``_descriptors_owned_by(data)`` and is NOT filtered by ``profession``
-    (a descriptor/adopted class like ``release`` belongs to whoever adopted it,
-    regardless of stamp). This two-tier split is intentional (SPEC 方針6): the
-    axis inversion frees descriptor MATERIALS, not the core built-in classes."""
-    prof = (profession or "").strip().lower()
-    builtin = OWNED_TARGET_CLASSES.get(prof, ())
-    out = list(builtin)
+    ms-150 (axis inversion 完遂 / SPEC 方針1・条件B): this NO LONGER splits into a
+    profession-keyed built-in half plus a descriptor half. Every built-in class is
+    now catalog material (``target_descriptor.BUILTIN_DESCRIPTOR_CATALOG``), so a
+    project's ownership is decided entirely by what it ADOPTED / declared — the same
+    M:N rule the ``release`` precedent proved, now covering milestone / operation /
+    opportunity / account / acquisition too. A project with a copied adopted set
+    reads that copy; a legacy project with no copied key derives its profession's
+    built-in defaults via ``effective_descriptors`` (provenance seed, tolerant
+    compat) — so an existing dev/sales project owns exactly the classes it did
+    before (byte-invariant), while any project can now ALSO own a class it adopts
+    beyond its profession's defaults.
+
+    The ``profession`` argument is now VESTIGIAL (accepted for call-site
+    compatibility, ignored): the effective set already encodes the project's
+    profession via ``data``. It is DELIBERATELY not used as a wiring input — reading
+    it here would re-impose the profession-as-authority this MS removes (条件B: the
+    ownership read must not consult ``PROFESSION_ADAPTER_KINDS`` or the profession
+    directly)."""
+    out: list = []
     for desc in _descriptors_owned_by(data):
         kind = (desc.get("kind") or "").strip()
         if kind and kind not in out:
@@ -974,12 +1011,19 @@ def owned_target_classes(data: dict, profession: str) -> tuple:
 
 
 def target_class_owner(kind: str, data: dict | None = None) -> str:
-    """Return the profession that owns ``kind`` (e.g. ``"milestone"`` → ``"dev"``),
-    or ``""`` when no occupation claims it. When ``data`` is given, a descriptor-
-    defined class also resolves to its declared ``profession`` (ms-122 e-3957);
-    without ``data`` only the built-in dev / sales classes are known (keeps the
-    old single-argument call sites working)."""
-    for prof, kinds in OWNED_TARGET_CLASSES.items():
+    """Return the PROVENANCE profession of ``kind`` — where the class came from,
+    e.g. ``"milestone"`` → ``"dev"`` — or ``""`` when no built-in profession is its
+    origin. When ``data`` is given, a descriptor-defined class also resolves to its
+    declared ``profession`` (ms-122 e-3957); without ``data`` only the built-in
+    dev / sales classes are known (keeps the old single-argument call sites working).
+
+    ms-150: this is a PROVENANCE label, not an ownership decision — a class's
+    origin profession, used only to phrase a wrong-class error message ("milestone
+    is a dev class"). Whether a given PROJECT owns ``kind`` is a separate question
+    answered by ``owned_target_classes`` (its adopted set), not by this origin. The
+    built-in origins are read from ``PROFESSION_ADAPTER_KINDS`` (the same map whose
+    bespoke adapter renders them), which is the provenance of the 5 built-ins."""
+    for prof, kinds in PROFESSION_ADAPTER_KINDS.items():
         if kind in kinds:
             return prof
     if data is not None:
@@ -1095,8 +1139,17 @@ def target_collections(data: dict | None = None) -> tuple:
     release."""
     out = list(TARGET_COLLECTIONS)
     for desc in effective_descriptors(data):
-        coll = (desc.get("collection") or "").strip() \
-            if isinstance(desc, dict) else ""
+        if not isinstance(desc, dict):
+            continue
+        # ms-150: honour a descriptor's ``aggregatable`` flag. A built-in like
+        # acquisition (aggregatable=False) is now catalog material a project can
+        # adopt, but it must NOT enter the aggregatable Target walk (session-log /
+        # manifest / claim) — the same owned-but-not-aggregatable split it had before
+        # the axis inversion. A descriptor WITHOUT the flag (every data-defined class,
+        # release) defaults to aggregatable, preserving the pre-ms-150 behaviour.
+        if desc.get("aggregatable") is False:
+            continue
+        coll = (desc.get("collection") or "").strip()
         if coll and coll not in out:
             out.append(coll)
     return tuple(out)

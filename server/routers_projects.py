@@ -1241,6 +1241,25 @@ def make_router(
 
         def op(data: dict):
             _require_write(data, user)
+            # ms-150: a built-in class (milestone / opportunity / operation / account
+            # / acquisition) is now catalog material a project can ADOPT, so it now
+            # RESOLVES in ``effective_get_descriptor`` where it used to return None.
+            # But its BESPOKE create surface (progress% / tasks / funnel) is not
+            # reproduced on this generic route (handoff: milestone bespoke = follow-on),
+            # so built-ins must still be created through their own endpoint — the
+            # ms-157 boundary. Discriminate on the AUTHORITATIVE built-in registry
+            # (``target_state.BUILTIN_TARGET_CLASSES``), NOT on descriptor resolution
+            # (which no longer distinguishes them). ``release`` and data-defined
+            # classes are absent from that registry, so they still create here.
+            import target_state as _tstate
+            if body.kind in _tstate.BUILTIN_TARGET_CLASSES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"target-class {body.kind!r} is a built-in class; create "
+                            f"it through its own endpoint (e.g. POST /api/projects/"
+                            f"{{id}}/milestones), which carries the bespoke fields the "
+                            f"generic route does not. This route is for "
+                            f"descriptor-defined classes."))
             desc = occupation.effective_get_descriptor(data, body.kind)
             if desc is None:
                 # AX review (PR #692): don't collapse "typo" and "built-in" into
