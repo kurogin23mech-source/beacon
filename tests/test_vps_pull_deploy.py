@@ -325,3 +325,95 @@ def test_quarantine_clears_when_main_advances_past_bad_rev(env):
     quar = repo / ".venv" / ".beacon-quarantine-rev"
     assert (not quar.exists()) or quar.read_text().strip() == "", "quarantine cleared"
     assert (repo / ".venv" / ".beacon-deployed-rev").read_text().strip() == fixed
+
+
+# ---------------------------------------------------------------------------
+# systemd unit reconcile (ms-145 e-5359)
+#
+# 本番の systemd unit (メモリ設定 / ワーカー数) を手で編集すると、次の再構築や
+# setup 再実行で黙って消える。repo の deploy/systemd/<service> を単一の真値源にし、
+# デプロイのたびに /etc/systemd/system へ一致させることで「手入れが消える」穴を塞ぐ。
+# BEACON_UNIT_SOURCE_DIR / BEACON_SYSTEMD_UNIT_DEST_DIR で source / 設置先を差し替えて検証する。
+# ---------------------------------------------------------------------------
+
+def _unit_env(tmp_path, src_content, installed_content=None, service="fake.service"):
+    """Return (extra_env, installed_path) for reconcile tests."""
+    src_dir = tmp_path / "unitsrc"
+    src_dir.mkdir(exist_ok=True)
+    etc_dir = tmp_path / "etc"
+    etc_dir.mkdir(exist_ok=True)
+    (src_dir / service).write_text(src_content)
+    if installed_content is not None:
+        (etc_dir / service).write_text(installed_content)
+    return {
+        "BEACON_UNIT_SOURCE_DIR": str(src_dir),
+        "BEACON_SYSTEMD_UNIT_DEST_DIR": str(etc_dir),
+    }, etc_dir / service
+
+
+def test_unit_reconciled_from_repo_on_deploy(env, tmp_path):
+    """A new-rev deploy also re-applies the repo unit onto the box."""
+    origin, seed, repo, state, bindir = env
+    _advance_origin(seed, origin)          # new rev → not fast-path
+    (state / "active").touch()
+    (state / "health_ok").touch()
+    ue, installed = _unit_env(tmp_path, "REPO-UNIT-v2\n", installed_content="OLD-UNIT\n")
+
+    r = _run(repo, bindir, state, ue)
+    assert r.returncode == 0, r.stdout
+    assert _calls(state) == ["restart"]
+    assert installed.read_text() == "REPO-UNIT-v2\n", "box unit must match repo after deploy"
+
+
+def test_unit_drift_forces_restart_when_git_unchanged(env, tmp_path):
+    """THE e-5359 case: git == origin/main and service is up, but the installed
+    unit was hand-edited away from repo. Must reconcile + restart, not fast-path."""
+    origin, seed, repo, state, bindir = env
+    head = _head(repo)
+    (repo / ".venv" / ".beacon-deployed-rev").write_text(head)
+    (state / "active").touch()
+    (state / "health_ok").touch()
+    ue, installed = _unit_env(tmp_path, "REPO-UNIT\n", installed_content="HAND-EDITED\n")
+
+    r = _run(repo, bindir, state, ue)
+    assert r.returncode == 0, r.stdout
+    assert _calls(state) == ["restart"], (
+        "unit drift must force a restart even when git is unchanged; got %r\n%s"
+        % (_calls(state), r.stdout)
+    )
+    assert installed.read_text() == "REPO-UNIT\n", "box unit must be reconciled to repo"
+
+
+def test_unit_in_sync_keeps_fast_path(env, tmp_path):
+    """Steady state with the installed unit already matching repo → no restart
+    (reconcile must not create churn)."""
+    origin, seed, repo, state, bindir = env
+    head = _head(repo)
+    (repo / ".venv" / ".beacon-deployed-rev").write_text(head)
+    (state / "active").touch()
+    ue, installed = _unit_env(tmp_path, "SAME\n", installed_content="SAME\n")
+
+    r = _run(repo, bindir, state, ue)
+    assert r.returncode == 0, r.stderr
+    assert _calls(state) == [], "matching unit must not trigger a restart"
+    assert installed.read_text() == "SAME\n"
+
+
+def test_missing_unit_source_is_noop(env, tmp_path):
+    """No repo unit source (old repo / different service name) → behave exactly
+    as before: fast-path still skips, nothing installed."""
+    origin, seed, repo, state, bindir = env
+    head = _head(repo)
+    (repo / ".venv" / ".beacon-deployed-rev").write_text(head)
+    (state / "active").touch()
+    src_dir = tmp_path / "unitsrc_empty"
+    src_dir.mkdir()
+    etc_dir = tmp_path / "etc_empty"
+    etc_dir.mkdir()
+    ue = {"BEACON_UNIT_SOURCE_DIR": str(src_dir),
+          "BEACON_SYSTEMD_UNIT_DEST_DIR": str(etc_dir)}
+
+    r = _run(repo, bindir, state, ue)
+    assert r.returncode == 0, r.stderr
+    assert _calls(state) == [], "no unit source → no restart (back-compat)"
+    assert not (etc_dir / "fake.service").exists()

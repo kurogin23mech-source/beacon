@@ -29,8 +29,8 @@ Pull 型は VPS 側が main を polling して self-update するので:
 | OS / ユーザー | Ubuntu 24.04 LTS / `ubuntu` (パスワード無し sudo 可) |
 | リポジトリ | `/opt/beacon` (ubuntu 所有, origin=GitHub public, branch=main) |
 | Python venv | `/opt/beacon/.venv` |
-| サービス | systemd `beacon-api.service` |
-| 起動 | `/opt/beacon/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000` |
+| サービス | systemd `beacon-api.service` (repo: `deploy/systemd/beacon-api.service`) |
+| 起動 | uvicorn (ワーカー2本)。正規の起動コマンドは unit の `ExecStart` を参照 (ms-145 e-5319) — 値をここに二重掲載しない |
 | 設定 | `/etc/beacon/db.env` + `/etc/beacon/app.env` (`BEACON_STORE_BACKEND=mysql`, `BEACON_ENV=prod`) |
 | データ | MySQL (127.0.0.1:3306) + Redis (127.0.0.1:6379) |
 | 公開 | Caddy が :80/:443 → uvicorn:8000 にリバースプロキシ |
@@ -155,32 +155,55 @@ tick が**再び無音で止まる**のを検知するため、GitHub Actions cr
 
 ## systemd unit (beacon-api 本体 / 参照・復旧用)
 
-`/etc/systemd/system/beacon-api.service`:
+**unit の実体は repo の [`deploy/systemd/beacon-api.service`](../deploy/systemd/beacon-api.service) に置いてある** (ms-145 e-5319)。
+以前はこの runbook にインライン記載されているだけで repo に実体が無く、cgroup メモリ設定は
+VPS 実機に手で入れた状態だった (次の再構築で黙って消える穴 = e-5359)。実体を repo に固定した。
 
-```ini
-[Unit]
-Description=Beacon API (FastAPI, MySQL backend) — ms-96 e-2378
-After=network.target mysql.service redis-server.service
-Wants=mysql.service redis-server.service
+初回だけ (fresh VPS / 未設置) は手で 1 回コピーする:
 
-[Service]
-Type=simple
-User=ubuntu
-WorkingDirectory=/opt/beacon/server
-EnvironmentFile=/etc/beacon/db.env
-EnvironmentFile=/etc/beacon/app.env
-Environment=BEACON_STORE_BACKEND=mysql
-Environment=BEACON_ENV=prod
-# ms-110 / e-3497: 別ユーザー宛 DM の送信側 consent gate を本番で有効化。
-# (app.env にも書けるが、全 prod で同一の固定フラグなので unit に直書きしておく)
-Environment=BEACON_SENDER_CONSENT_ENABLED=1
-ExecStart=/opt/beacon/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
+```bash
+ssh ubuntu@beacon-ai.dev
+cd /opt/beacon
+git fetch && git reset --hard origin/main
+sudo cp deploy/systemd/beacon-api.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl restart beacon-api.service
+curl -fsS https://beacon-ai.dev/health   # 200 を確認
+systemctl show beacon-api -p MemoryMax -p MemorySwapMax -p OOMPolicy   # 反映確認
 ```
+
+### 以降は自動で repo から再適用される (ms-145 e-5359)
+
+`vps-pull-deploy.sh` は毎デプロイで `deploy/systemd/beacon-api.service` を
+`/etc/systemd/system/beacon-api.service` と照合し、差があれば `install` + `daemon-reload`
+してから restart する。git rev が同じでも **本番 unit が repo と乖離していれば** (= 手で
+編集された / 再構築で古い版が入った) fast-path を抜けて再適用する。これで「手で入れた
+メモリ設定が次の再構築で黙って消える」穴を構造で塞ぐ (repo が unit の単一の真値源)。
+
+> ⚠ デプロイ timer は `ubuntu` として走るので、自動再適用には `install` と
+> `systemctl daemon-reload` の **NOPASSWD sudo 権限** が要る。未付与だとデプロイログに
+> `ERROR ... unit を repo から適用できませんでした` が出て、コード配置は続くが unit は
+> 乖離したまま (= 手動 cp に戻る)。`/etc/sudoers.d/beacon-deploy` に例えば:
+>
+> ```
+> ubuntu ALL=(root) NOPASSWD: /usr/bin/install -m 0644 /opt/beacon/deploy/systemd/beacon-api.service /etc/systemd/system/beacon-api.service, /bin/systemctl daemon-reload, /bin/systemctl restart beacon-api.service
+> ```
+>
+> (`systemctl` の実パスは環境により `/usr/bin/systemctl`。`command -v systemctl` で確認。)
+
+### この unit で押さえた 2 点 (ms-145 e-5319)
+
+- **ワーカー数 1 → 2**: 単一ワーカーは 1 本のリクエストが詰まると全体が飢える (ms-145 の主題)。
+  タイムアウト (e-5316/e-5317) でハングは有界化済みだが、2 ワーカーで「片方処理中でも
+  もう片方が応答」する冗長性 + uvicorn マスターによるワーカー自動 respawn を得る。接続台帳・
+  liveness は Redis 共有なので複数プロセスで整合する。メモリが厳しければ `--workers 1` に戻せる。
+- **メモリ設定を最終形で固定**: `MemoryHigh=infinity / MemoryMax=1400M / MemorySwapMax=0 /
+  OOMPolicy=continue / Restart=always / RestartSec=2` (2026-08 本番 OOM の教訓、session memo
+  `tjDPP7Pp9ZtdShWA9ETT` §3)。殺す閾値 (MemoryMax) と絞る閾値 (MemoryHigh) を混ぜない。
+  cgroup 上限はスライス全体なので、2 ワーカーの常駐が 1400M を超えたら片方が OOM-kill →
+  respawn (= サービス全体死より軽い degrade) で閉じる。
+
+> unit の全文とコメント (判断の背景) は repo の [`deploy/systemd/beacon-api.service`](../deploy/systemd/beacon-api.service) を参照。ここに二重掲載しない (drift 防止)。
 
 ## 必須アプリ env (`/etc/beacon/app.env`) — ms-96 e-3196 / e-3197
 
@@ -231,6 +254,11 @@ curl -fsS https://beacon-ai.dev/health   # 200 なら OK、503 なら env 欠落
 > おけば無停止で切り替わる。入れ忘れると (狙い通り) deploy が 503 で止まる。
 
 ### 別ユーザー宛 DM の consent gate を有効化する (ms-110 / e-3497)
+
+> ℹ ms-145 e-5319 以降、repo の `deploy/systemd/beacon-api.service` は
+> `Environment=BEACON_SENDER_CONSENT_ENABLED=1` を**既に含む**。上の「実体を repo から cp」
+> 手順で unit を設置していれば下の sed は不要 (重ねて実行すると行が重複する)。以下は
+> app.env 直書きの旧経路 / 古い実機 unit を手当てする場合の参照。
 
 `vps-pull-deploy.sh` は `git pull` + `pip` + `systemctl restart` しかせず、
 systemd unit や `/etc/beacon/app.env` を repo から再同期しない。よって
