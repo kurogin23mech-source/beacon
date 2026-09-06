@@ -250,10 +250,14 @@ def _build_meta_index(project: dict) -> dict[str, dict]:
     much cheaper than re-finding each entry per filter call.
     """
     out: dict[str, dict] = {}
-    for ms in project.get("milestones", []) or []:
-        _index_entries(ms.get("entries", []) or [], out)
-    for op in project.get("operations", []) or []:
-        _index_entries(op.get("entries", []) or [], out)
+    # ms-164 e-6023: index entries across EVERY target-class via the generic
+    # occupation projection, not a hardcoded milestones+operations pair. A non-dev
+    # target's entries (a sales opportunity's activities / approvals) were invisible
+    # to the source / actor / session_id post-filters because they were never
+    # indexed here. iter_target_records covers all classes incl. descriptor ones.
+    import occupation  # local import: leaf domain module, no top-level cycle
+    for tgt in occupation.iter_target_records(project):
+        _index_entries(tgt.get("entries", []) or [], out)
     return out
 
 
@@ -346,6 +350,11 @@ def _entry_claimant(result: dict, meta_index: dict, project: dict) -> str:
         return holder
     ms_id = result.get("ms_id") or ""
     if ms_id:
+        # This resolves a claim_holder from a result's ``ms_id`` back-ref, which is
+        # a milestone-scoped field (ms-55 claims); a non-dev result carries no ms_id
+        # and skips this loop, so reading milestones is exact (ms-164 e-6023
+        # adjudication — kept milestone-scoped, unlike _build_meta_index which walks
+        # all classes because it indexes EVERY entry's meta).
         for ms in project.get("milestones", []) or []:
             if ms.get("id") == ms_id:
                 ch = ms.get("claim_holder")
