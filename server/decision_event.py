@@ -129,8 +129,26 @@ def agent_from_claims(user: dict | None) -> str | None:
 
 
 def _normalize_related(related: dict | None) -> dict:
-    """related を固定 4 キー shape に正規化する (= 未指定キーは None)。"""
+    """related を固定 shape (:data:`_RELATED_KEYS`) に正規化する (= 未指定キーは None)。
+
+    許可キー外を渡されたら **ValueError で弾く** (ms-166 e-5996)。旧実装は未知キーを
+    無言で drop していた = write は成功 (decision_id を返す) のにそのフィールドだけ
+    消える「write accepted / field lost」の silent 非機能で、dogfood で
+    review-adjudication に載せた ``pr_number`` が消えた (書いた側は成功と誤認)。
+    POST /decisions ルートは build_decision_event の ValueError を 400 に写す
+    (routers_projects.record_decision) ので、呼び出し元は「関連付けが保存されなかった」
+    ことに即座に気付ける (CORE doc pzNKeE1 原則6: 破れは構造で塞ぐ、プロンプトで塞がない)。
+    新しい参照キーが要るときは :data:`_RELATED_KEYS` を **意図的に** 拡張する
+    (= schema を silent に増やさず、追加は 1 箇所の enum 変更として可視化する)。
+    """
     src = dict(related or {})
+    unknown = sorted(set(src) - set(_RELATED_KEYS))
+    if unknown:
+        raise ValueError(
+            f"unknown related key(s): {unknown} "
+            f"(allowed: {sorted(_RELATED_KEYS)}). related は固定 shape — "
+            f"新しい参照キーは server/decision_event._RELATED_KEYS を拡張して足す"
+        )
     return {key: (src.get(key) if src.get(key) else None) for key in _RELATED_KEYS}
 
 

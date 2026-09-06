@@ -615,6 +615,24 @@ def test_record_decision_accepts_decided_by_with_empty_evidence(monkeypatch):
     assert captured[0]["evidence"] == []
 
 
+def test_record_decision_rejects_unknown_related_key(monkeypatch):
+    # ms-166 e-5996: related の許可キー外は 400 (無言 drop で 200 成功に見せない)。
+    # 旧挙動は未知キーを silent に落とし decision_id を返した = write accepted /
+    # field lost の silent 非機能 (dogfood: review-adjudication の pr_number 消失)。
+    # append が呼ばれてしまえば「壊れた related のまま保存」なので、呼ばれないことも確認。
+    captured = []
+    monkeypatch.setattr(_store_router_module, "append_decision_event",
+                        lambda pid, rec: (captured.append(rec) or "dec-z"))
+    r = client.post(
+        f"/api/projects/{PROJECT_ID}/decisions",
+        json={"kind": "review-adjudication", "decision": "approve",
+              "related": {"task_id": "e-42", "pr_number": "710"}},  # pr_number は許可外
+    )
+    assert r.status_code == 400
+    assert "pr_number" in r.json().get("detail", "")
+    assert captured == []  # 弾かれたので永続化層には一切届かない
+
+
 def test_record_decision_rejects_empty_kind():
     r = client.post(
         f"/api/projects/{PROJECT_ID}/decisions",

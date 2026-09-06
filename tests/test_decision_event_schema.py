@@ -163,6 +163,29 @@ def test_who_and_related_normalized_from_partial():
     assert e["related"]["event_id"] is None
 
 
+def test_unknown_related_key_raises_not_silently_dropped():
+    # ms-166 e-5996: related の許可キー外は無言 drop でなく ValueError で弾く。
+    # 旧挙動は未知キーを silent に落とし、write は decision_id を返す (= 成功に見える)
+    # のに related フィールドだけ消える「write accepted / field lost」の silent 非機能
+    # だった (dogfood: review-adjudication の pr_number が消えた)。POST /decisions は
+    # この ValueError を 400 に写すので呼び出し元が保存漏れに即気付ける (原則6)。
+    with pytest.raises(ValueError) as ei:
+        de.build_decision_event(
+            kind="review-adjudication", decision="approve",
+            related={"task_id": "e-1", "pr_number": "710"},  # pr_number は許可外
+        )
+    # エラーは具体的に「どのキーが未知か」を告げる (silent でも曖昧でもない)。
+    assert "pr_number" in str(ei.value)
+
+    # 許可キーのみなら従来通り通り、未指定キーは None 埋め (回帰なし)。
+    e = de.build_decision_event(
+        kind="review-adjudication", decision="approve",
+        related={"task_id": "e-1"},
+    )
+    assert e["related"]["task_id"] == "e-1"
+    assert e["related"]["event_id"] is None  # 未指定の許可キーは None 埋め
+
+
 def test_created_at_and_decision_id_preserved_when_given():
     e = de.build_decision_event(
         kind="resume", decision="resume",
