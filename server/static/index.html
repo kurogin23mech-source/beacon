@@ -1514,6 +1514,13 @@ body::after {
   font-size: 10px;
   text-align: center;
 }
+/* ms-162 e-5956 — decision stream lazy-load placeholder (AX advisory b) */
+.dec-log-loading {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-style: italic;
+  padding: 2px 0;
+}
 .dec-event {
   padding: 6px 8px;
   margin-bottom: 6px;
@@ -5560,7 +5567,7 @@ function renderAccountModal(accId) {
       ${contactHtml}
       <div class="sm-sec">やり取り (Communication)</div>
       ${_renderCommunications(a)}
-      ${renderDecisionLog(decisionsForTarget(state.decisions, a))}
+      ${renderDecisionLog(decisionsForTarget(state.decisions, a), { loading: isDecisionsPending() })}
     </div>
   </div>`;
 }
@@ -5600,7 +5607,7 @@ function renderOpportunityModal(oppId) {
       ${_renderOppActivities(o)}
       ${_renderMeetings(o)}
       ${_renderCommunications(o)}
-      ${renderDecisionLog(decisionsForTarget(state.decisions, o))}
+      ${renderDecisionLog(decisionsForTarget(state.decisions, o), { loading: isDecisionsPending() })}
     </div>
   </div>`;
 }
@@ -6309,13 +6316,45 @@ function renderDecisionEvent(d) {
 // Render the decision-log panel for a target. Returns '' when there are no
 // decisions, so a target with none shows nothing extra (produced-but-invisible
 // stays quiet; only real decision streams take up space).
-function renderDecisionLog(decisions) {
-  if (!Array.isArray(decisions) || !decisions.length) return '';
+//
+// ms-162 e-5956 (AX advisory b): the caller may pass {loading:true} while the
+// project-wide decision stream is still being fetched (state.decisions === null).
+// During load the filtered result is legitimately empty, but that is NOT the
+// same as "this target has no decisions" — so render a loading placeholder
+// instead of '' / an empty message, and let the re-render after the fetch settle
+// to the real content or to '' when the target genuinely has none.
+//
+// ms-162 e-5956 (AX advisory c): the heading label is "decision" to match the
+// English sub-tab label (siblings work-item / evidence / decision) — the panel
+// title used to read 決定ログ, which split languages with the tab that opens it.
+function renderDecisionLog(decisions, opts) {
+  const loading = !!(opts && opts.loading);
+  if (!Array.isArray(decisions) || !decisions.length) {
+    if (loading) {
+      return `
+    <div class="dec-log">
+      <div class="dec-log-loading">decision を読み込み中…</div>
+    </div>`;
+    }
+    return '';
+  }
   return `
     <div class="dec-log">
-      <div class="dec-log-label">決定ログ <span class="dec-count">${decisions.length}</span></div>
+      <div class="dec-log-label">decision <span class="dec-count">${decisions.length}</span></div>
       ${decisions.map(renderDecisionEvent).join('')}
     </div>`;
+}
+
+// ms-162 e-5956 — single truth source for "is the decision stream still loading?".
+// The stream is fetched lazily; before it lands, state.decisions is null (an empty
+// array means "loaded, none"). Every decision-log callsite (ms card sub-tab +
+// opportunity / account modals) must ask this ONE getter instead of re-writing the
+// `state.decisions === null` sentinel inline — so a future change to how "pending"
+// is decided (e.g. folding in state.decisionsLoading) lives in one place and can't
+// drift a callsite into a silent not-loading verdict. (PR#722 review consensus:
+// AX + maintainability both flagged the inline sentinel duplication.)
+function isDecisionsPending() {
+  return state.decisions === null;
 }
 
 // ms-162 e-5833 — lazy-load the project-wide decision stream once, on the first
@@ -6473,7 +6512,18 @@ function renderRootHeader(root) {
   const arms = root.arms || {};
   const total = root.work_items_total || 0;
   const done = root.work_items_done || 0;
-  const open = root.work_items_open != null ? root.work_items_open : Math.max(0, total - done);
+  // ms-162 e-5956 (AX advisory a): work_items_open は server が cancelled を除いた
+  // 真の「進行中」を投影した時だけ正確。未投影時は total-done に fallback するが、
+  // これは cancelled (打ち切り) も含むので「進行中」と言い切れない。fallback 時は
+  // 「未完了(概算)」と明示し、打ち切り作業を進行中に見せる誤カウントを防ぐ。
+  const openProvided = root.work_items_open != null;
+  const open = openProvided ? root.work_items_open : Math.max(0, total - done);
+  const openLabel = openProvided ? '進行中' : '未完了(概算)';
+  // AX advisory (PR#722): 「概算」の理由を surface 上で自己記述にする — 読み手が
+  // 「壊れている / データ未取得」と誤診しないよう、なぜ概算かを tooltip で示す。
+  const openTitle = openProvided
+    ? ''
+    : ' title="進行中の正確な数がサーバから提供されていないため、総数−完遂で概算しています（打ち切り分を含みます）"';
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
   // arms rollup を chip 化: 欠けている機構は chip を出さない (前方互換 = server が
@@ -6495,7 +6545,7 @@ function renderRootHeader(root) {
     ? `<div class="root-hdr-rollup">
          <span class="root-hdr-pct">${pct}%</span>
          <div class="root-hdr-bar"><div class="root-hdr-bar-fill" style="width:${pct}%"></div></div>
-         <span class="root-hdr-count">${done}/${total} 完遂 · ${open} 進行中</span>
+         <span class="root-hdr-count"${openTitle}>${done}/${total} 完遂 · ${open} ${openLabel}</span>
        </div>`
     : '';
   const armsBlock = armsChips ? `<div class="root-hdr-arms">${armsChips}</div>` : '';
@@ -6576,6 +6626,13 @@ function renderMilestoneCard(ms, index) {
     const wiEntries = entries.filter(e => entryDimension(e.type) === 'workitem');
     const evEntries = entries.filter(e => entryDimension(e.type) === 'evidence');
     const decisions = decisionsForTarget(state.decisions, ms);
+    // ms-162 e-5956 (AX advisory b): the decision stream loads lazily on first
+    // target open; while state.decisions === null the per-target result is empty
+    // only because nothing is loaded yet. Distinguish that from "no decisions" so
+    // the tab count shows … (not a misleading 0) and the panel shows a loading
+    // placeholder (not "はありません").
+    const decLoading = isDecisionsPending();
+    const decCount = decLoading ? '…' : decisions.length;
     _currentMsId = ms.id;
     const wiHtml = wiEntries.map(renderEntry).join('');
     const evHtml = evEntries.map(renderEntry).join('');
@@ -6604,7 +6661,7 @@ function renderMilestoneCard(ms, index) {
       <div class="tgt-detail-tabs">
         ${tab('workitem', 'work-item', wiEntries.length)}
         ${tab('evidence', 'evidence', evEntries.length)}
-        ${tab('decision', 'decision', decisions.length)}
+        ${tab('decision', 'decision', decCount)}
       </div>`;
     // Active tab content.
     const showToolbar = (hasDoneEntries || hasCancelledEntries);
@@ -6618,7 +6675,7 @@ function renderMilestoneCard(ms, index) {
     if (activeTab === 'evidence') {
       tabContent = evHtml || empty('evidence (commit 等の記録)');
     } else if (activeTab === 'decision') {
-      tabContent = renderDecisionLog(decisions) || empty('decision (判断の記録)');
+      tabContent = renderDecisionLog(decisions, { loading: decLoading }) || empty('decision (判断の記録)');
     } else {
       tabContent = toolbar + (wiHtml || empty('work-item (task 等)'));
     }
@@ -11003,7 +11060,7 @@ async function selectProject(projectId) {
       // ms-162 e-5833 — auto-expanded (in_progress) milestones open WITHOUT a
       // toggle-ms click, so the click-path lazy-load never fires for them and
       // their decision-log stayed blank. Load the decision stream here too so
-      // any expanded target (auto or click) can render its 決定ログ.
+      // any expanded target (auto or click) can render its decision log.
       ensureDecisionsLoaded();
       render();
       if (pendingEntries.length > 0) {

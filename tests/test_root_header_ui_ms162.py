@@ -64,7 +64,8 @@ HARNESS = textwrap.dedent(r"""
     A(h.includes("大目的テキスト"), "objective shown");
     A(h.includes("A → B → C の流れ"), "summary shown");
     A(/43%/.test(h), "rollup pct = round(67/155) = 43%");
-    A(h.includes("67/155 完遂") && h.includes("88 進行中"), "rollup counts shown");
+    A(h.includes("67/155 完遂") && h.includes("88 進行中"),
+      "rollup counts shown, server-provided work_items_open labelled 進行中");
     A(h.includes("target") && h.includes("completion_approval") && h.includes("achievement"),
       "all three arms chips shown");
     A(h.includes('style="width:43%"'), "progress bar width follows pct");
@@ -94,9 +95,19 @@ HARNESS = textwrap.dedent(r"""
     A(!h.includes("deliverable"), "absent arm produces no chip");
 
     // --- 6. open falls back to total-done when work_items_open missing -----
+    // ms-162 e-5956 (AX advisory a): the fallback total-done includes cancelled
+    // work, so it must NOT claim "進行中" — it is labelled 未完了(概算) instead.
     h = renderRootHeader({ work_items_total: 10, work_items_done: 4,
                            narrative: { objective: "y" } });
-    A(h.includes("4/10 完遂") && h.includes("6 進行中"), "open derived from total-done");
+    A(h.includes("4/10 完遂") && h.includes("6 未完了(概算)"),
+      "derived open is labelled 未完了(概算), not 進行中 (cancelled not miscounted)");
+    A(!/6 進行中/.test(h), "derived open must not claim 進行中");
+
+    // --- 6b. server-provided work_items_open is trusted as 進行中 -----------
+    h = renderRootHeader({ work_items_total: 10, work_items_done: 4,
+                           work_items_open: 3, narrative: { objective: "y" } });
+    A(h.includes("3 進行中"), "server-provided open labelled 進行中");
+    A(!h.includes("未完了(概算)"), "no 概算 label when server provides open");
 
     // --- 7. html-escaping of narrative/arms --------------------------------
     h = renderRootHeader({ narrative: { objective: "<script>&\"'" },
