@@ -2465,6 +2465,8 @@ class SessionUpsert(BaseModel):
     # convention above — nested namespaces stay Optional[dict] so adding a sub-key
     # later doesn't bump the SessionUpsert surface area.
     transport: Optional[dict] = None
+
+class SessionIntentUpsert(BaseModel):
     """Body for POST /api/projects/{project_id}/sessions/{session_id}/intent
     (ms-54 / e-1369 Layer 4).
 
