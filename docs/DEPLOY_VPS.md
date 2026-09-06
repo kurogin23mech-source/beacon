@@ -159,7 +159,7 @@ tick が**再び無音で止まる**のを検知するため、GitHub Actions cr
 以前はこの runbook にインライン記載されているだけで repo に実体が無く、cgroup メモリ設定は
 VPS 実機に手で入れた状態だった (次の再構築で黙って消える穴 = e-5359)。実体を repo に固定した。
 
-実機へ設置 / 更新するには repo の unit を `/etc/systemd/system/` へコピーする:
+初回だけ (fresh VPS / 未設置) は手で 1 回コピーする:
 
 ```bash
 ssh ubuntu@beacon-ai.dev
@@ -172,8 +172,24 @@ curl -fsS https://beacon-ai.dev/health   # 200 を確認
 systemctl show beacon-api -p MemoryMax -p MemorySwapMax -p OOMPolicy   # 反映確認
 ```
 
-> ⚠ `vps-pull-deploy.sh` は systemd unit を repo から再同期しない (git pull + pip + restart のみ)。
-> よって unit を変えたら **上記 cp を手で 1 回** 実行する必要がある。unit の自動同期は e-5359 の範囲。
+### 以降は自動で repo から再適用される (ms-145 e-5359)
+
+`vps-pull-deploy.sh` は毎デプロイで `deploy/systemd/beacon-api.service` を
+`/etc/systemd/system/beacon-api.service` と照合し、差があれば `install` + `daemon-reload`
+してから restart する。git rev が同じでも **本番 unit が repo と乖離していれば** (= 手で
+編集された / 再構築で古い版が入った) fast-path を抜けて再適用する。これで「手で入れた
+メモリ設定が次の再構築で黙って消える」穴を構造で塞ぐ (repo が unit の単一の真値源)。
+
+> ⚠ デプロイ timer は `ubuntu` として走るので、自動再適用には `install` と
+> `systemctl daemon-reload` の **NOPASSWD sudo 権限** が要る。未付与だとデプロイログに
+> `ERROR ... unit を repo から適用できませんでした` が出て、コード配置は続くが unit は
+> 乖離したまま (= 手動 cp に戻る)。`/etc/sudoers.d/beacon-deploy` に例えば:
+>
+> ```
+> ubuntu ALL=(root) NOPASSWD: /usr/bin/install -m 0644 /opt/beacon/deploy/systemd/beacon-api.service /etc/systemd/system/beacon-api.service, /bin/systemctl daemon-reload, /bin/systemctl restart beacon-api.service
+> ```
+>
+> (`systemctl` の実パスは環境により `/usr/bin/systemctl`。`command -v systemctl` で確認。)
 
 ### この unit で押さえた 2 点 (ms-145 e-5319)
 

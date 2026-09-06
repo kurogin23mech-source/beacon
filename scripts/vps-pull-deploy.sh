@@ -22,6 +22,13 @@ main() {
   local BRANCH="${BEACON_DEPLOY_BRANCH:-main}"
   local HEALTH_URL="${BEACON_HEALTH_URL:-https://beacon-ai.dev/health}"
 
+  # e-5359: systemd unit (メモリ設定 / ワーカー数) を repo から本番へ再適用する経路。
+  # 本番の unit を手で編集すると次の再構築 (fresh VPS / setup 再実行) で黙って消える。
+  # repo の deploy/systemd/<service> を単一の真値源にし、毎デプロイで /etc/systemd/system
+  # へ一致させることで「手入れが消える」穴を構造で塞ぐ。dir は test で差し替え可能。
+  local UNIT_SRC="${BEACON_UNIT_SOURCE_DIR:-${REPO}/deploy/systemd}/${SERVICE}"
+  local UNIT_DST="${BEACON_SYSTEMD_UNIT_DIR:-/etc/systemd/system}/${SERVICE}"
+
   log() { logger -t beacon-deploy -- "$*" 2>/dev/null || true; echo "[beacon-deploy] $*"; }
 
   cd "$REPO"
@@ -78,6 +85,25 @@ main() {
     fi
   }
 
+  # e-5359: repo の systemd unit を本番 /etc/systemd/system に一致させる。
+  # 呼び出し前提: working tree が serving 予定の rev に合っている (= git reset 済) こと。
+  # source 無し (= 別 service 名 / 旧 repo) や既に一致していれば何もしない。差分があれば
+  # install + daemon-reload する (daemon-reload はこの後の restart より前に効かせる)。
+  # sudo 権限が無くて適用できない場合は LOUD にログして続行する (= コード配置自体は
+  # 止めない。unit を手で cp する運用に落ちるが、それを「気付ける」形にするのが目的)。
+  reconcile_unit() {
+    [ -f "$UNIT_SRC" ] || return 0                       # source 無し = 対象外
+    if cmp -s "$UNIT_SRC" "$UNIT_DST" 2>/dev/null; then
+      return 0                                            # 既に一致
+    fi
+    if sudo install -m 0644 "$UNIT_SRC" "$UNIT_DST" 2>/dev/null \
+       && sudo systemctl daemon-reload 2>/dev/null; then
+      log "reconciled ${SERVICE} unit from repo (${UNIT_SRC} -> ${UNIT_DST}); daemon-reload done"
+    else
+      log "ERROR ${SERVICE} unit を repo から適用できませんでした (sudo install / systemctl daemon-reload 権限を確認) — /etc/systemd/system の unit が repo と乖離したまま。手動 cp が必要"
+    fi
+  }
+
   # working tree を $1 に合わせ、pip → restart → health poll を行う。health OK なら
   # serving 確認済み rev を stamp して 0 を返す。失敗時は stamp を更新せず非 0 を
   # 返す (= 次 tick で再試行される self-heal、e-3222)。
@@ -85,6 +111,7 @@ main() {
     local target="$1"
     local cur; cur="$(git rev-parse HEAD)"
     [ "$cur" != "$target" ] && git reset --hard "$target"
+    reconcile_unit    # e-5359: working tree が target に揃った後で unit を再適用する
     pip_gate
     log "restarting ${SERVICE} for ${target:0:7}"
     sudo systemctl restart "$SERVICE"
@@ -126,14 +153,24 @@ main() {
     fi
   fi
 
-  # fast path: target を serving 済み かつ service 稼働中なら何もしない。
-  if [ "$DEPLOYED" = "$TARGET" ] && systemctl is-active --quiet "$SERVICE"; then
+  # e-5359: git rev が同じでも、本番の systemd unit が repo と乖離していたら
+  # (= 手で編集された / 再構築で古い版が入っている) fast-path を抜けて再適用+restart する。
+  # working tree は steady state で HEAD == DEPLOYED == TARGET なので UNIT_SRC と比較できる。
+  local UNIT_DRIFT=0
+  if [ -f "$UNIT_SRC" ] && ! cmp -s "$UNIT_SRC" "$UNIT_DST" 2>/dev/null; then
+    UNIT_DRIFT=1
+  fi
+
+  # fast path: target を serving 済み かつ service 稼働中 かつ unit も一致なら何もしない。
+  if [ "$DEPLOYED" = "$TARGET" ] && [ "$UNIT_DRIFT" = 0 ] && systemctl is-active --quiet "$SERVICE"; then
     [ -n "$QUARANTINE" ] && log "holding last-good ${TARGET:0:7}; ${REMOTE:0:7} quarantined (main を直して push すると解除)"
     exit 0
   fi
 
   if [ -n "$QUARANTINE" ]; then
     log "restoring last-good ${TARGET:0:7} (${REMOTE:0:7} quarantined)"
+  elif [ "$DEPLOYED" = "$TARGET" ] && [ "$UNIT_DRIFT" = 1 ]; then
+    log "systemd unit が repo と乖離 — 再適用 + restart (e-5359)"
   elif [ "$DEPLOYED" = "$TARGET" ]; then
     log "serving ${TARGET:0:7} だが ${SERVICE} が停止中 — restart (self-heal)"
   else
