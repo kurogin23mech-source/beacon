@@ -66,6 +66,7 @@ from commands_shared import (  # noqa: F401
     get_store,
     load_project,
     save_project,
+    verify_cloud_write_persisted,
 )
 
 
@@ -113,6 +114,23 @@ def cmd_milestone_add():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     save_project(data)
+    # ms-166 e-6036: confirm the write actually persisted before reporting success. A cloud
+    # PUT can return 2xx yet silently not persist under transient load (observed 2026-09-03:
+    # this verb printed success but neither cloud nor local mirror had the milestone). Read
+    # back and verify the new ms_id is present; local mode is a no-op inside the helper.
+    # Resolve the just-written Target occupation-generically (occupation.resolve_target, the
+    # L2 profession-agnostic resolver) — NOT data['milestones'] directly nor a bare
+    # iter_target_records walk here (either would trip capability-scope: the first is a
+    # dev-concrete collection read, the second pulls this module into the arm-coupling scan).
+    def _milestone_persisted(fresh: dict) -> bool:
+        try:
+            occupation.resolve_target(fresh, ms_id)
+            return True
+        except ValueError:
+            return False
+
+    verify_cloud_write_persisted(_milestone_persisted,
+                                 what=f"milestone {ms_id} ({title})")
     print(f"Added milestone {ms_id}: {title}")
     if owner or assignee:
         if owner:

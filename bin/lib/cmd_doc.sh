@@ -29,6 +29,7 @@ cmd_doc() {
             local doc_opportunity=""
             local doc_target=""
             local doc_bus_origin=""
+            local doc_force=""
 
             while [[ $# -gt 0 ]]; do
                 case "$1" in
@@ -43,6 +44,7 @@ cmd_doc() {
                     --json)       json_flag="1"; shift ;;
                     --content)    doc_content="${2:-}"; shift 2 ;;
                     --bus-origin) doc_bus_origin="1"; shift ;;
+                    --force)      doc_force="1"; shift ;;
                     --stdin)      shift ;;  # stdin is handled by Python side
                     -?*)           _guard_flag "$1" ;;
                     *)            doc_title="$1"; shift ;;
@@ -50,8 +52,9 @@ cmd_doc() {
             done
 
             if [ -z "$doc_title" ]; then
-                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--account acc-id] [--opportunity opp-id] [--target id] [--id slug] [--content text] [--json]"
+                echo "Usage: beacon doc add \"title\" [--scope core|spec|memo|retro|report] [--ms ms-id] [--op op-id] [--trek trek-id] [--account acc-id] [--opportunity opp-id] [--target id] [--id slug] [--content text] [--force] [--json]"
                 echo "  Content can also be piped via stdin."
+                echo "  --force: 同 title+scope の既存があっても重複作成する (既定は中止)"
                 exit 1
             fi
             BEACON_TITLE="$doc_title" BEACON_DOC_ID="$doc_id" \
@@ -62,6 +65,7 @@ cmd_doc() {
                 BEACON_TARGET="$doc_target" \
                 BEACON_JSON="$json_flag" \
                 BEACON_BUS_ORIGIN="$doc_bus_origin" \
+                BEACON_FORCE="$doc_force" \
                 python3 "$COMMANDS_PY" doc_add
             ;;
         list|ls)

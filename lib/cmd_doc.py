@@ -40,6 +40,7 @@ from commands_shared import (  # noqa: F401
     VALID_SCOPES,
     load_project,
     save_project,
+    verify_cloud_write_persisted,
     get_store,
     _is_cloud_mode,
     _get_api_client,
@@ -262,20 +263,40 @@ def cmd_doc_add():
         print("Error: content required (pass via BEACON_CONTENT or stdin)")
         sys.exit(1)
 
-    # Duplicate check: warn if same title+scope already exists.
-    # ms-84 Phase 2: Store 経由で local / cloud を統一 (= 受入条件 10 の _is_cloud_mode
-    # 分岐削減)。 失敗時は best-effort で skip する従来挙動を維持。
+    # Duplicate guard: same title+scope already exists (ms-166 e-6044).
+    # 旧挙動は "Proceeding anyway" で **重複を黙って作成** していた。cloud 同時書き込みの
+    # retry と相まって同じ SPEC doc が4重生成された実害があり (2026-09-03)、これは
+    # 「書き込み系が黙って重複する」silent 非機能。default では重複を作らず、既存 update か
+    # 別 title を促して exit 1 で止める。意図的に重複させたい時だけ --force (BEACON_FORCE)。
+    # ms-84 Phase 2: Store 経由で local / cloud を統一。dupe 判定の read が失敗したら
+    # best-effort で skip (= 従来通り、read 不能を理由に書き込みを止めはしない)。
+    force = os.environ.get("BEACON_FORCE", "") == "1"
     try:
         existing = get_store().list_documents()
         dupes = [d for d in existing
                  if d.get("title") == title and d.get("scope") == scope]
-        if dupes:
-            print(
-                f"Warning: document with same title+scope already exists "
-                f"({dupes[0]['doc_id']}). Proceeding anyway."
-            )
     except Exception:
-        pass
+        dupes = []
+    if dupes and not force:
+        existing_id = dupes[0].get("doc_id", "?")
+        # 出力先の使い分け (PR#728 保守性 M2): --json 時は機械可読な error object を stdout に
+        # (呼び出し側は stdout を parse して existing_doc_id で次の一手を取れる)、非 json 時は
+        # 人向けテキストを stderr に。メッセージ本文は "Error:" prefix 以降を日本語で統一する
+        # (PR#728 AX: 1 文中で英日が混ざると日本語非対応の agent が回復手順を読み違える)。
+        if json_mode:
+            print(json.dumps({"error": "duplicate",
+                              "existing_doc_id": existing_id,
+                              "title": title, "scope": scope}, ensure_ascii=False))
+        else:
+            print(f"Error: 同じ title+scope の document が既に存在します "
+                  f"({existing_id} [{scope}])。重複を作らないため中止しました。"
+                  f"既存を更新するなら `beacon doc update {existing_id} ...`、別物なら "
+                  f"title を変えてください。意図的に重複を作る場合のみ --force を付けます。",
+                  file=sys.stderr)
+        sys.exit(1)
+    if dupes and force:
+        print(f"Warning: --force 指定のため同 title+scope の重複 "
+              f"({dupes[0].get('doc_id', '?')}) を許して作成します。", file=sys.stderr)
 
     # Add frontmatter with scope, milestone, operation, trek_id, and the
     # canonical ``target`` linkage (ms-109 e-3754).
@@ -289,6 +310,16 @@ def cmd_doc_add():
         else:
             result = client.create_document(config["project_id"], title, content)
         doc_id = result["doc_id"]
+        # ms-166 e-6036 (PR#728 AX high finding): verify the doc write actually landed —
+        # doc add is the verb that produced the 4× silent duplicate/miss on 2026-09-03, yet
+        # only milestone add verified its write. Documents live in a SEPARATE cloud
+        # collection (not inside the project document), so pass list_documents as the reader
+        # and check the new doc_id is present. A 2xx create that did not persist now exits
+        # non-zero with a retry hint instead of a false "Saved" line.
+        verify_cloud_write_persisted(
+            lambda docs: any(d.get("doc_id") == doc_id for d in docs),
+            what=f"document {doc_id} [{scope}] ({title})",
+            reader=lambda: get_store().list_documents())
     else:
         docs_dir = _get_docs_dir()
         os.makedirs(docs_dir, exist_ok=True)

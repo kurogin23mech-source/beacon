@@ -6451,7 +6451,7 @@ def _help_registry():
         {"command": "beacon save <desc>", "flags": ["-m <ms-id>", "--hash <hash>", "--source manual", "--json"], "description": "Save a freeform entry to a milestone"},
         {"command": "beacon sync", "flags": [], "description": "Auto-sync recent git commits to active milestone"},
         {"command": "beacon summary <text>", "flags": [], "description": "Update project summary"},
-        {"command": "beacon doc add", "flags": ["--scope <core|spec|memo>", "--ms <id>", "--title <title>", "--content <text>", "--stdin"], "description": "Add a document"},
+        {"command": "beacon doc add", "flags": ["--scope <core|spec|memo>", "--ms <id>", "--title <title>", "--content <text>", "--stdin", "--force"], "description": "Add a document (refuses a same title+scope duplicate unless --force; ms-166 e-6044)"},
         {"command": "beacon doc list", "flags": ["--json", "--scope <scope>", "--ms <id>"], "description": "List documents"},
         {"command": "beacon doc show <doc-id>", "flags": [], "description": "Show document content"},
         {"command": "beacon doc update <doc-id>", "flags": ["--content <text>", "--stdin"], "description": "Update document content"},
