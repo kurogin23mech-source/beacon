@@ -73,6 +73,7 @@ import trek as trek_mod
 import envelope as envelope_mod
 import work_model
 import deliverable_capture  # ms-161 e-5823: capture produced value on milestone 完遂
+import deliverable_resolve  # ms-162 e-5837: resolve produced-value pointers for the UI read口
 import sales_entities  # ms-108 e-5194: mirror the CLI's funnel resolution into the payload
 import master_adapter
 import approved_actions as approved_actions_mod
@@ -1726,6 +1727,41 @@ def make_router(
             raise HTTPException(
                 status_code=502, detail=f"decision stream read failed: {exc}")
         return {"decisions": rows, "count": len(rows)}
+
+    @router.get("/api/projects/{project_id}/deliverables")
+    def list_deliverables(project_id: str,
+                          user: dict = Depends(require_auth)):
+        """Read the project's DELIVERABLE (produced-value) projection, resolved
+        (ms-162 e-5837).
+
+        The read口 that lets the UI show WHAT VALUE the project has produced — the
+        gap the 発端 named: deliverables were readable via CLI (``beacon deliverable
+        list --resolve``) and carried in ``status --json`` as bare pointers, but the
+        UI could only show the ``arms.deliverable.kind`` label, never the content.
+        This mirrors the decisions read口 above: load the project, resolve each
+        adopted-class deliverable pointer to its actual content
+        (``deliverable_resolve.resolve_project_deliverables`` — the same union +
+        resolver the CLI ``--resolve`` path uses), and hand the resolved rows to a
+        portable render 部品. Resolution is heavier than the slim project fetch
+        (it walks the deliverable-changelog), so it lives on its own lazy-loaded
+        endpoint rather than bloating ``GET /api/projects/{id}``.
+
+        Each row: ``{target_class, kind, label, projector, ref, resolved}`` where
+        ``resolved`` carries the strategy-specific body (changelog → ``count_active``
+        + ``categories``; rollup → ``count_delivered``/``count_total`` + ``labels``;
+        doc → ``title`` + ``content``). ``all_resolved`` / ``unresolved`` are the
+        top-level partial-failure discriminators the CLI ``--json`` path also emits.
+        """
+        data = _load(project_id, user)  # read-access guard (404 / 403 as appropriate)
+        try:
+            rows = deliverable_resolve.resolve_project_deliverables(data)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"deliverable resolve failed: {exc}")
+        unresolved = [r.get("ref") or r.get("target_class", "?")
+                      for r in rows if not r.get("resolved", {}).get("found")]
+        return {"deliverables": rows, "count": len(rows),
+                "all_resolved": not unresolved, "unresolved": unresolved}
 
     @router.delete("/api/projects/{project_id}/entries/{entry_id}")
     def delete_entry(project_id: str, entry_id: str,

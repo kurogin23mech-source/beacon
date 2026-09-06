@@ -357,6 +357,29 @@ fn cloud_list_session_logs(state: State<AppState>, limit: Option<u32>) -> Result
     cloud_get(&format!("/api/projects/{}/session_logs?limit={}", pid, n))
 }
 
+/// ms-162 e-5838: Tauri cloud mode の decision-log 用バインディング。
+/// Web UI と同じく GET /api/projects/{id}/decisions?limit=N を叩く。layer.js は
+/// e-5833 以来 `invoke('cloud_list_decisions', { limit })` を呼んで fail-soft して
+/// いたが Rust 側が未配線で常に空だった (= desktop の決定ログが空のまま)。返りは
+/// {decisions:[...], count} なので layer.js 側で .decisions を取り出す。
+#[tauri::command]
+fn cloud_list_decisions(state: State<AppState>, limit: Option<u32>) -> Result<String, String> {
+    let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
+    let n = limit.unwrap_or(500);
+    cloud_get(&format!("/api/projects/{}/decisions?limit={}", pid, n))
+}
+
+/// ms-162 e-5838: Tauri cloud mode の deliverable(生み出した価値) 用バインディング。
+/// Web UI と同じく GET /api/projects/{id}/deliverables を叩く。返りは
+/// {deliverables:[...], count, all_resolved, unresolved} なので layer.js 側で
+/// .deliverables を取り出す。これで Web で作った produced-value パネルが desktop
+/// でも実データで描画される (e-5837 の Web 部品 + この binding = Web/Desktop 一致)。
+#[tauri::command]
+fn cloud_list_deliverables(state: State<AppState>) -> Result<String, String> {
+    let pid = state.cloud_project_id.lock().unwrap().clone().ok_or("No cloud project selected")?;
+    cloud_get(&format!("/api/projects/{}/deliverables", pid))
+}
+
 fn cloud_post(path: &str) -> Result<String, String> {
     let token = load_auth_token()
         .ok_or("Not authenticated. Run: beacon auth login")?;
@@ -729,6 +752,8 @@ pub fn run() {
             cloud_refresh_auth_token,
             cloud_list_notes,
             cloud_list_session_logs,
+            cloud_list_decisions,
+            cloud_list_deliverables,
             cloud_get_api_url,
             // ms-72 e-1779 — Member admin + invitation flow + sign-out.
             member::cloud_list_members,

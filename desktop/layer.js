@@ -119,6 +119,12 @@ let state = {
   // decisionsForTarget が読むので web parity で slot を持つ。web/index.html 参照。
   decisions: null,
   decisionsLoading: false,
+  // ms-162 e-5837 — deliverable (produced-value) projection cache。null = 未ロード /
+  // [] = ロード済(空 or 未配線)。SHARED の ensureDeliverablesLoaded / renderDeliverables /
+  // isDeliverablesPending が読むので web parity で slot を持つ (無いと SHARED render が
+  // undefined 参照でクラッシュ)。web/index.html 参照。
+  deliverables: null,
+  deliverablesLoading: false,
   // ms-84 / e-2326 follow-up — tab-scoped extras cache. The slim WS broadcast
   // also drops top-level arrays (pushes / deployments / worktree_sessions).
   // Tauri's initial IPC load seeds these from the full payload so subsequent
@@ -206,11 +212,40 @@ const dataSource = {
   // decision-log パネルは単に非表示)。binding を足したら web parity に寄せる。
   loadDecisions: async () => {
     try {
-      state.decisions = cloudMode && typeof invoke === 'function'
-        ? JSON.parse(await invoke('cloud_list_decisions', { limit: 500 }))
-        : [];
+      if (cloudMode && typeof invoke === 'function') {
+        // ms-162 e-5838: the endpoint returns {decisions:[...], count} — extract the
+        // array (assigning the whole object would break decisionsForTarget, which
+        // expects an array). Tolerate a bare array too, for forward compat.
+        const r = JSON.parse(await invoke('cloud_list_decisions', { limit: 500 }));
+        state.decisions = Array.isArray(r) ? r
+          : (r && Array.isArray(r.decisions) ? r.decisions : []);
+      } else {
+        state.decisions = [];
+      }
     } catch (_e) {
       state.decisions = [];
+    }
+  },
+  // ms-162 e-5837 — deliverable projection loader. SHARED の ensureDeliverablesLoaded
+  // が dataSource.loadDeliverables() を呼ぶので desktop 側にも必ず実装を持つ (無いと
+  // 「dataSource.loadDeliverables is not a function」でクラッシュ)。Cloud Rust
+  // binding (cloud_list_deliverables) は未配線なので fail-soft で [] に落とす — web の
+  // loadDeliverables と同契約 (未配線=空扱い、パネルは単に非表示)。binding を足したら
+  // web parity に寄せる。
+  loadDeliverables: async () => {
+    try {
+      if (cloudMode && typeof invoke === 'function') {
+        // ms-162 e-5838: the endpoint returns {deliverables:[...], count, ...} —
+        // extract the array (renderDeliverables expects an array). Tolerate a bare
+        // array too, for forward compat.
+        const r = JSON.parse(await invoke('cloud_list_deliverables'));
+        state.deliverables = Array.isArray(r) ? r
+          : (r && Array.isArray(r.deliverables) ? r.deliverables : []);
+      } else {
+        state.deliverables = [];
+      }
+    } catch (_e) {
+      state.deliverables = [];
     }
   },
   loadDocumentContent: async (docId) => {

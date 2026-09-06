@@ -75,6 +75,11 @@ def test_shared_actually_dereferences_these():
     assert "state.targetTab[" in shared, "expected state.targetTab[...] index access in SHARED"
     assert "dataSource.loadDecisions(" in shared, "expected dataSource.loadDecisions() call in SHARED"
     assert "state.decisions" in shared, "expected state.decisions usage in SHARED"
+    # ms-162 e-5837: the deliverable panel adds a new method call + state read to
+    # SHARED, so desktop/layer.js must supply them too or the desktop bundle
+    # crashes on project load.
+    assert "dataSource.loadDeliverables(" in shared, "expected dataSource.loadDeliverables() call in SHARED"
+    assert "state.deliverables" in shared, "expected state.deliverables usage in SHARED"
 
 
 def test_layer_defines_targetTab():
@@ -99,4 +104,39 @@ def test_layer_defines_loadDecisions():
     assert _defines_datasource_method(_read(LAYER), "loadDecisions"), (
         "desktop/layer.js dataSource must define `loadDecisions` — SHARED calls "
         "dataSource.loadDecisions() and calling undefined crashes the desktop app."
+    )
+
+
+def test_layer_defines_deliverables_slots():
+    layer = _read(LAYER)
+    assert _defines_state_slot(layer, "deliverables"), (
+        "desktop/layer.js state must define `deliverables` (produced-value cache) "
+        "— SHARED renderDeliverables(state.deliverables, ...) reads it (ms-162 e-5837)."
+    )
+    assert _defines_state_slot(layer, "deliverablesLoading"), (
+        "desktop/layer.js state must define `deliverablesLoading`."
+    )
+
+
+def test_layer_defines_loadDeliverables():
+    assert _defines_datasource_method(_read(LAYER), "loadDeliverables"), (
+        "desktop/layer.js dataSource must define `loadDeliverables` — SHARED calls "
+        "dataSource.loadDeliverables() and calling undefined crashes the desktop app."
+    )
+
+
+def test_layer_extracts_arrays_from_endpoint_objects():
+    """ms-162 e-5838: the decisions/deliverables endpoints return
+    {decisions:[...]} / {deliverables:[...]} objects, not bare arrays. layer.js
+    must EXTRACT the array (decisionsForTarget / renderDeliverables expect an
+    array) — assigning the whole parsed object would silently break rendering.
+    Pin the extraction so a regression to `state.X = JSON.parse(...)` fails."""
+    layer = _strip_comments(_read(LAYER))
+    assert "r.decisions" in layer, (
+        "loadDecisions must extract r.decisions from the endpoint object, "
+        "not assign the whole {decisions,count} object to state.decisions."
+    )
+    assert "r.deliverables" in layer, (
+        "loadDeliverables must extract r.deliverables from the endpoint object, "
+        "not assign the whole {deliverables,...} object to state.deliverables."
     )

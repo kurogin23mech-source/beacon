@@ -708,6 +708,66 @@ def test_list_decisions_unknown_project_404():
 
 
 # ---------------------------------------------------------------------------
+# Deliverable arm — produced-value read口 (ms-162 e-5837)
+# The UI read path that lets a reader see WHAT VALUE the project produced (the
+# 発端: deliverables were CLI-readable but the UI showed only the arm label).
+# ---------------------------------------------------------------------------
+
+import deliverable_resolve as _dr_mod
+
+
+def test_list_deliverables_wraps_resolver(monkeypatch):
+    # The route resolves each adopted-class deliverable pointer and wraps the rows
+    # with the same {deliverables,count,all_resolved,unresolved} discriminator the
+    # CLI --resolve --json path emits. Patch the resolver to a known shape and
+    # assert the route hands it back verbatim + computes the top-level signals.
+    rows = [
+        {"target_class": "milestone", "kind": "feature-map", "label": "機能",
+         "projector": "changelog", "ref": "",
+         "resolved": {"strategy": "changelog", "found": True,
+                      "count_active": 3,
+                      "categories": [{"category": "A1", "count": 2},
+                                     {"category": "A2", "count": 1}]}},
+    ]
+    monkeypatch.setattr(_dr_mod, "resolve_project_deliverables",
+                        lambda data: list(rows))
+    r = client.get(f"/api/projects/{PROJECT_ID}/deliverables")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["count"] == 1
+    assert body["all_resolved"] is True
+    assert body["unresolved"] == []
+    d = body["deliverables"][0]
+    assert d["label"] == "機能"
+    assert d["resolved"]["count_active"] == 3
+    assert [c["category"] for c in d["resolved"]["categories"]] == ["A1", "A2"]
+
+
+def test_list_deliverables_reports_unresolved(monkeypatch):
+    # An unresolved pointer must surface at the top level (all_resolved False +
+    # listed in unresolved) so a consumer detects partial failure without walking
+    # every row — symmetric with the CLI's AX contract.
+    rows = [
+        {"target_class": "milestone", "kind": "feature-map", "label": "機能",
+         "projector": "changelog", "ref": "map:app",
+         "resolved": {"strategy": "changelog", "found": False,
+                      "error": "changelog missing"}},
+    ]
+    monkeypatch.setattr(_dr_mod, "resolve_project_deliverables",
+                        lambda data: list(rows))
+    r = client.get(f"/api/projects/{PROJECT_ID}/deliverables")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["all_resolved"] is False
+    assert body["unresolved"] == ["map:app"]
+
+
+def test_list_deliverables_unknown_project_404():
+    r = client.get("/api/projects/no-such-project/deliverables")
+    assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Log
 # ---------------------------------------------------------------------------
 
