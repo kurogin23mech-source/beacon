@@ -604,6 +604,15 @@ def cmd_target_list():
     json_mode = os.environ.get("BEACON_JSON", "") == "1"
     data = load_project()
     rows = []
+    # ms-164 e-6023 (adjudicated): this stays milestones+operations by design. It
+    # lists ONLY target-transition-approval entries (filtered below), and those are
+    # created solely for _SPINE_ENFORCED_KINDS = {milestone, operation}
+    # (transition_approval.requires_spine_approval → False for every other class;
+    # sales/descriptor targets use the judge flow, not the spine gate). So no
+    # descriptor-class target can hold one — the read is EXACT, not a blind spot,
+    # and is classified reviewed-legitimate as (target_list, milestones) in
+    # capability_ledger. Routing through iter_target_records would walk targets that
+    # never carry these approvals (the ledger's "wrong abstraction" case).
     containers = list(data.get("milestones", [])) + list(data.get("operations", []))
     for c in containers:
         for e in c.get("entries", []):

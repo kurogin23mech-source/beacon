@@ -553,6 +553,18 @@ KNOWN_ARM_REACH = {
     # of cmd_trigger's three entries reads). Registered symmetric with session_log /
     # phantom_done_evidence.
     ("cmd_trigger", "entries"),
+    # ms-164 e-6023: retro_query._build_meta_index now indexes entries across EVERY
+    # target-class via occupation.iter_target_records (was a hardcoded
+    # milestones+operations pair that hid a non-dev opportunity's activity entries
+    # from the source/actor/session_id search post-filters — a real blind spot,
+    # unlike the approval-only cmd_target_list read which stays milestones+operations
+    # because target-transition-approvals exist only on _SPINE_ENFORCED_KINDS). That
+    # made retro_query arm-scanned, surfacing its ``entries`` arm read (each Target's
+    # entries indexed by id). The read is dev-arm-shaped but the generic walk makes it
+    # sales-safe (an opportunity's entries are indexed too); full profession_manifest
+    # routing is the same behaviour-sensitive deferral as cmd_trigger.
+    # owner = ms-164, follow-up = e-6134.
+    ("retro_query", "entries"),
 }
 
 
