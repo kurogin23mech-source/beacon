@@ -5073,6 +5073,63 @@ async def _verify_scheduler_key_configured():
         )
 
 
+@app.on_event("startup")
+async def _verify_sender_consent_configured():
+    """Refuse to start in production with sender-consent silently OFF (e-6208).
+
+    Twin guard to ``_verify_scheduler_key_configured`` for the *cross-user DM
+    误送信* boundary. The sender-consent backstop (``BEACON_SENDER_CONSENT_ENABLED``,
+    read at the send choke point in ``forward_bus_event``) is a runtime-only
+    flag with no startup check — unlike the scheduler key, nothing reddened the
+    deploy health check when it was missing. The deploy templates
+    (``deploy/app.env.example`` / ``docker-compose.yml`` / ``docs/DEPLOY_VPS.md``)
+    all set ``=1``, yet production ``/etc/beacon/app.env`` drifted to *not
+    having it* and ran fail-open on consent silently until 2026-09-06. That is
+    exactly the "実装した ≠ 効いている" pathology ms-158 set out to kill: a guard
+    that exists but is not actually effective in prod, with no forcing function.
+
+    This handler makes the *disabled* state loud instead of silent:
+
+      * ``_auth_enabled`` (production posture) AND consent not enabled AND no
+        explicit opt-out → raise RuntimeError (fail fast at boot → deploy
+        health check fails), same posture gate as the scheduler-key twin.
+      * explicit opt-out ``BEACON_SENDER_CONSENT_ALLOW_DISABLED=1`` → boot but
+        emit a loud WARNING. This is the sanctioned escape hatch for a phased
+        rollout (a prod tier that intentionally runs consent OFF must *say so*
+        — silence is no longer a valid "off").
+      * ``_auth_enabled=False`` (local dev / unit tests) → no-op.
+
+    Note the asymmetry vs the scheduler key: an unset scheduler key is an
+    active vulnerability (public dev fallback), so it has no escape hatch.
+    Consent OFF is a *guard not active* rather than an open door, so an
+    acknowledged opt-out is permitted — but only when acknowledged explicitly.
+    """
+    consent_enabled = os.environ.get("BEACON_SENDER_CONSENT_ENABLED") == "1"
+    if not _auth_enabled or consent_enabled:
+        return
+    if os.environ.get("BEACON_SENDER_CONSENT_ALLOW_DISABLED") == "1":
+        _server_logger.warning(
+            "sender-consent enforcement is DISABLED in a production posture "
+            "(BEACON_API_AUTH=1, BEACON_SENDER_CONSENT_ENABLED != 1) — allowed "
+            "only because BEACON_SENDER_CONSENT_ALLOW_DISABLED=1 was set "
+            "explicitly. Cross-user DM 误送信 is NOT structurally blocked while "
+            "this holds. Remove the opt-out and set BEACON_SENDER_CONSENT_ENABLED=1 "
+            "as soon as the phased rollout allows."
+        )
+        return
+    msg = (
+        "BEACON_SENDER_CONSENT_ENABLED not set for production "
+        "(BEACON_API_AUTH=1 but the cross-user DM sender-consent gate would be "
+        "OFF, so 误送信 to another user is not structurally blocked). Set "
+        "BEACON_SENDER_CONSENT_ENABLED=1 in /etc/beacon/app.env and restart "
+        "beacon-api. If a phased rollout genuinely needs it OFF, acknowledge "
+        "explicitly with BEACON_SENDER_CONSENT_ALLOW_DISABLED=1. See "
+        "docs/DEPLOY_VPS.md『送信 consent』and ms-158 e-6208."
+    )
+    _server_logger.error(msg)
+    raise RuntimeError(msg)
+
+
 def _hydrate_v2_milestones(project_id: str, data: dict) -> dict:
     """Re-attach milestones from the v2 subcollection before broadcasting.
 

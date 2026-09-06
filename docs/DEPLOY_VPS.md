@@ -283,3 +283,12 @@ sudo systemctl restart beacon-api
 > と誤判定して弾く回帰 (e-3492/3531/3566/3567/3880) が再発する。順序厳守。
 > また、claim を発行できる新しい CLI が全端末に配布済 (e-3496) でないと、正規の
 > cross-user 送信が古いクライアントから 403 になりうる点に注意。
+
+> 🔒 ms-158 e-6208: 本番姿勢 (`BEACON_API_AUTH=1`) で `BEACON_SENDER_CONSENT_ENABLED`
+> が `1` 以外 (未設定含む) だと **beacon-api は起動を拒否する** (scheduler key ガードの
+> twin)。手で有効化する運用のため、テンプレは `=1` でも本番 app.env に入れ忘れて
+> consent OFF のまま silent 稼働する drift が実際に起きた (〜2026-09-06)。それを起動時に
+> loud に落として塞ぐ。段階リリース等で意図的に OFF にしたい間だけ
+> `BEACON_SENDER_CONSENT_ALLOW_DISABLED=1` を明示すれば、WARNING を出した上で起動する
+> (= 「無言の OFF」は不可、OFF は必ず明示 ack させる)。rollout 完了後はこの opt-out を
+> 外して `BEACON_SENDER_CONSENT_ENABLED=1` に戻すこと。
