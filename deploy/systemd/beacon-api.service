@@ -1,0 +1,58 @@
+# ms-96 e-2378 — Beacon API 本体 (FastAPI + MySQL backend)。
+# ms-145 e-5319 — 単一ワーカー構成の見直し + 本番 OOM 対策のメモリ設定を repo 管理化。
+#
+# これまで本ファイルは docs/DEPLOY_VPS.md にインライン記載されているだけで repo に
+# 実体が無く、cgroup メモリ設定は VPS 実機に手で入れた状態だった (= e-5359 が指摘する
+# 「次の再構築で黙って消える」穴)。ここに実体を置き /etc/systemd/system/ へ cp して使う。
+#
+# 【なぜ複数ワーカーにするか】単一ワーカーだと 1 本のリクエストが詰まると全体が飢える
+# (ms-145 の主題)。リクエスト全体タイムアウト (e-5317) と証明書取得タイムアウト (e-5316)
+# でハング自体は有界化済みだが、ワーカーを 2 本にすることで「片方が処理中でももう片方が
+# 応答する」冗長性と、uvicorn マスターによるワーカー自動 respawn (単一ワーカーには無い) を
+# 得る。接続台帳・liveness は Redis 共有なので複数プロセスでも整合する
+# (server/redis_client.py: WS 接続台帳 / push pub/sub 中継)。
+#
+# 【メモリの前提】cgroup MemoryMax=1400M は beacon-api スライス全体の上限で、ワーカー数を
+# 増やしても上限は変わらず「複数プロセスが 1400M を分け合う」。2 本の常駐 RSS が 1400M を
+# 超えたら片方のワーカーが OOM-kill され uvicorn が respawn する (OOMPolicy=continue +
+# マスター supervisor)。= 単一ワーカー + サービス全体死 より軽い degrade で済む。3 本以上は
+# 常駐だけで上限に迫るため既定 2 本。増減は下の --workers を編集して daemon-reload。
+#
+# 【メモリ設定の最終形】2026-08 の本番 OOM (最大12時間停止, report 6zemTMFXXxDko6vdgcQw)
+# の教訓 (session memo tjDPP7Pp9ZtdShWA9ETT §3): 殺す閾値 (MemoryMax) と絞る閾値
+# (MemoryHigh) を混ぜない。MemoryHigh を残したまま swap を塞ぐと「殺されず応答もしない」
+# 帯で無応答化するため、絞る側は infinity にして殺す側 + swap 遮断 + 継続ポリシーで閉じる。
+
+[Unit]
+Description=Beacon API (FastAPI, MySQL backend) — ms-96 e-2378 / ms-145 e-5319
+After=network.target mysql.service redis-server.service
+Wants=mysql.service redis-server.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/beacon/server
+EnvironmentFile=/etc/beacon/db.env
+EnvironmentFile=/etc/beacon/app.env
+Environment=BEACON_STORE_BACKEND=mysql
+Environment=BEACON_ENV=prod
+# ms-110 / e-3497: 別ユーザー宛 DM の送信側 consent gate を本番で有効化。
+# (app.env にも書けるが、全 prod で同一の固定フラグなので unit に直書きしておく)
+Environment=BEACON_SENDER_CONSENT_ENABLED=1
+# ms-145 e-5319: 単一ワーカー脱却 (--workers 2)。詰まり冗長性 + ワーカー自動 respawn を得る。
+# メモリが厳しければ 1 に戻す / 余裕があれば増やす (編集後 daemon-reload + restart)。
+# --timeout-graceful-shutdown で、詰まったワーカーにより restart/deploy が固まらないよう有界化。
+ExecStart=/opt/beacon/.venv/bin/uvicorn app:app --host 127.0.0.1 --port 8000 --workers 2 --timeout-graceful-shutdown 10
+
+# --- ms-145 メモリハードニング (session memo tjDPP7Pp9ZtdShWA9ETT §3 の最終形) ---
+# 絞る側 (MemoryHigh) は逃がし先がある前提の仕組み。swap を塞ぐなら絞る側も外す。
+MemoryHigh=infinity
+MemoryMax=1400M
+MemorySwapMax=0
+# ワーカー 1 本が OOM-kill されてもサービス全体を failed 扱いにしない (uvicorn が respawn)。
+OOMPolicy=continue
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
