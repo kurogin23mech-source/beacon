@@ -129,8 +129,37 @@ def agent_from_claims(user: dict | None) -> str | None:
 
 
 def _normalize_related(related: dict | None) -> dict:
-    """related を固定 4 キー shape に正規化する (= 未指定キーは None)。"""
+    """related を固定 shape (:data:`_RELATED_KEYS`) に正規化する (= 未指定キーは None)。
+
+    許可キー外を渡されたら **ValueError で弾く** (ms-166 e-5996)。旧実装は未知キーを
+    無言で drop していた = write は成功 (decision_id を返す) のにそのフィールドだけ
+    消える「write accepted / field lost」の silent 非機能で、dogfood で
+    review-adjudication に載せた ``pr_number`` が消えた (書いた側は成功と誤認)。
+    POST /decisions ルートは build_decision_event の ValueError を 400 に写す
+    (routers_projects.record_decision) ので、呼び出し元は「関連付けが保存されなかった」
+    ことに即座に気付ける (CORE doc pzNKeE1 原則6: 破れは構造で塞ぐ、プロンプトで塞がない)。
+    新しい参照キーが要るときは :data:`_RELATED_KEYS` を **意図的に** 拡張する
+    (= schema を silent に増やさず、追加は 1 箇所の enum 変更として可視化する)。
+
+    姉妹の ``_normalize_who`` は同じ「固定 shape へ正規化」パターンだが、未知キーを
+    黙って drop する — これは **意図的な非対称**。related は client が body で渡す
+    外部入力なので未知キーを loud に弾く必要があるが、who は server が token から
+    組み立てる内部値 (client は who を渡さない) で、外部から未知キーが到達する経路が
+    無い。ゆえに who 側に同じ guard を置いても発火しない dead guard になる。
+    """
     src = dict(related or {})
+    unknown = sorted(set(src) - set(_RELATED_KEYS))
+    if unknown:
+        # エラー文言は呼び出し元 (POST /decisions を叩いた側) が今すぐ取れる復旧策を
+        # 先に出す: 未知キーを外して allowed キーだけで再送する。schema 拡張は
+        # decision_event のコード変更を伴い呼び出し側では実行不能なので、それは後段の
+        # 補足に留める (= source path を「今の一手」として提示しない / AX medium 反映)。
+        raise ValueError(
+            f"unknown related key(s): {unknown} — これらを related から外し、"
+            f"allowed キー {sorted(_RELATED_KEYS)} だけで再送してください。"
+            f"(related は固定 shape。新しい参照キーの追加は decision_event の "
+            f"_RELATED_KEYS を拡張するコード変更が必要で、呼び出し側だけでは足せません)"
+        )
     return {key: (src.get(key) if src.get(key) else None) for key in _RELATED_KEYS}
 
 
