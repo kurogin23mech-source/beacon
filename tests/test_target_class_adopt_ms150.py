@@ -109,3 +109,42 @@ def test_dev_can_adopt_a_sales_class_symmetry(project, monkeypatch):
     _run_adopt(monkeypatch, kind="opportunity")
     assert "opportunity" in occupation.owned_target_classes(project["data"])
     occupation.assert_target_class_owned(project["data"], "opportunity")  # no raise
+
+
+# --- ms-150 AX / maintainability review fixes -------------------------------
+
+def test_kind_and_profession_defaults_are_mutually_exclusive(project, monkeypatch):
+    # AX1: passing both a <kind> and --profession-defaults used to silently ignore
+    # the kind (backfill won) — now it is a hard error, not a silent no-op.
+    project["data"] = occupation.build_new_project("D", "o", "sales")
+    with pytest.raises(SystemExit):
+        _run_adopt(monkeypatch, kind="milestone", defaults=True)
+
+
+def test_json_shape_is_consistent_across_modes(project, monkeypatch, capsys):
+    # AX4: every JSON output is {"added", "adopted"} — the already-adopted case no
+    # longer returns a different {"kind","already_adopted"} shape that broke automation.
+    import json as _json
+    project["data"] = occupation.build_new_project("D", "o", "dev")  # already owns milestone
+    _run_adopt(monkeypatch, kind="milestone", json_mode=True)  # already adopted
+    out = _json.loads(capsys.readouterr().out.strip())
+    assert set(out.keys()) == {"added", "adopted"} and out["added"] == []
+    # a fresh adoption uses the same shape
+    _run_adopt(monkeypatch, kind="opportunity", json_mode=True)
+    out2 = _json.loads(capsys.readouterr().out.strip())
+    assert set(out2.keys()) == {"added", "adopted"} and out2["added"] == ["opportunity"]
+
+
+def test_adopting_a_data_defined_class_is_a_noop_not_a_ghost(project, monkeypatch):
+    # M4: a data-defined class is already owned via target_classes; adopting it must
+    # NOT write a ghost entry into adopted_target_classes (which resolve_adopted skips).
+    declared = {"kind": "contract", "label": "契約", "profession": "legal",
+                "type": "single-shot", "id_prefix": "ct-", "collection": "contracts",
+                "phases": [{"key": "draft"}]}
+    data = {"name": "p", "profession": "legal", "milestones": [],
+            "adopted_target_classes": [], "target_classes": [declared]}
+    project["data"] = data
+    _run_adopt(monkeypatch, kind="contract")  # no-op, no raise
+    # contract is still owned (via target_classes) but NOT written to the adopted set
+    assert "contract" in occupation.owned_target_classes(project["data"])
+    assert "contract" not in project["data"]["adopted_target_classes"]

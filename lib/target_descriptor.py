@@ -1213,7 +1213,12 @@ def _builtin_descriptor_from_state(kind: str) -> dict:
     cls = _ts.BUILTIN_TARGET_CLASSES[kind]
     roles = cls.get("arm_roles") or {}
     wia = roles.get("work_item_arm")
-    prefix_by_kind = {v: k for k, v in _wm._TARGET_PREFIX_KIND.items()}
+    # ms-150 maintainability review M2: use the PUBLIC accessor, not a hand-inverted
+    # private ``_TARGET_PREFIX_KIND``. The accessor returns "" (not KeyError) for an
+    # unknown kind; the import-time guard below (``_assert_builtin_catalog_coverage``)
+    # turns a missing prefix / label / type into a loud, early, self-describing failure
+    # instead of an opaque KeyError deep in a dict comprehension.
+    id_prefix = _wm.target_id_prefix(kind)
     # The fat arms this class physically decomposes into = the union of its
     # work-item + evidence arm names (deduped, declaration order), mirroring
     # ``occupation.TARGET_DECOMPOSITION``'s ``arms`` tuple — derived, not re-listed.
@@ -1227,7 +1232,7 @@ def _builtin_descriptor_from_state(kind: str) -> dict:
         "kind": kind,
         "label": _BUILTIN_DESCRIPTOR_LABELS.get(kind, kind),
         "type": _BUILTIN_DESCRIPTOR_TYPES.get(kind, TYPE_SINGLE_SHOT),
-        "id_prefix": prefix_by_kind[kind] + "-",
+        "id_prefix": id_prefix,
         "collection": cls["collection"],
         # ms-150: carry the state model's ``aggregatable`` flag onto the descriptor
         # so the enumeration registries can preserve the owned-but-NOT-aggregatable
@@ -1263,6 +1268,39 @@ BUILTIN_DESCRIPTOR_CATALOG: dict = {
     **{k: _builtin_descriptor_from_state(k) for k in _BUILTIN_ADOPTABLE_KINDS},
     "release": RELEASE_DESCRIPTOR,
 }
+
+
+def _assert_builtin_catalog_coverage() -> None:
+    """Fail LOUD at import if the 3 per-kind maps that feed the built-in catalog have
+    drifted out of sync (ms-150 maintainability review M2/M3/M5). Adding a built-in is
+    inherently a multi-site edit (``target_state`` state model + ``work_model`` prefix
+    + the label/type maps here); this guard makes an OMITTED site a self-describing
+    ImportError at load — early and named — instead of a silent wrong default (label =
+    the kind string, type = single-shot) or an opaque KeyError deep in the
+    comprehension above. It is the structural backstop for the coordinated-edit cost
+    the review flagged: the machine, not a human counting entries, verifies the maps
+    grew together."""
+    adoptable = set(_BUILTIN_ADOPTABLE_KINDS)
+    missing_prefix = [k for k in _BUILTIN_ADOPTABLE_KINDS
+                      if not BUILTIN_DESCRIPTOR_CATALOG[k].get("id_prefix")]
+    if missing_prefix:
+        raise ImportError(
+            f"built-in catalog: kind(s) {missing_prefix} have no id-prefix — add them "
+            f"to work_model._TARGET_PREFIX_KIND (id-prefix は work_model が単一真実源)")
+    if set(_BUILTIN_DESCRIPTOR_LABELS) != adoptable:
+        raise ImportError(
+            f"built-in catalog: _BUILTIN_DESCRIPTOR_LABELS keys "
+            f"{sorted(_BUILTIN_DESCRIPTOR_LABELS)} != adoptable kinds {sorted(adoptable)} "
+            f"— every built-in must declare its label (silent kind-as-label fallback 禁止)")
+    if set(_BUILTIN_DESCRIPTOR_TYPES) != adoptable:
+        raise ImportError(
+            f"built-in catalog: _BUILTIN_DESCRIPTOR_TYPES keys "
+            f"{sorted(_BUILTIN_DESCRIPTOR_TYPES)} != adoptable kinds {sorted(adoptable)} "
+            f"— every built-in must declare its 有限/persistent nature (silent "
+            f"single-shot fallback 禁止)")
+
+
+_assert_builtin_catalog_coverage()
 
 # Layer 2 — the profession manifest: which catalog kinds a profession adopts by
 # DEFAULT (built-in, modelled as data). A profession absent from this map

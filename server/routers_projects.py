@@ -1253,13 +1253,21 @@ def make_router(
             # classes are absent from that registry, so they still create here.
             import target_state as _tstate
             if body.kind in _tstate.BUILTIN_TARGET_CLASSES:
+                # ms-150 AX review AX3: name the SPECIFIC endpoint for the kind the
+                # caller actually asked for (not just milestone), so an AI creating an
+                # operation / opportunity / account / acquisition gets a concrete
+                # recovery path instead of guessing. The collection IS the endpoint
+                # segment (POST /api/projects/{id}/<collection>), read from the
+                # authoritative registry so it cannot drift from the real route.
+                _coll = _tstate.BUILTIN_TARGET_CLASSES[body.kind].get(
+                    "collection", f"{body.kind}s")
                 raise HTTPException(
                     status_code=400,
                     detail=(f"target-class {body.kind!r} is a built-in class; create "
-                            f"it through its own endpoint (e.g. POST /api/projects/"
-                            f"{{id}}/milestones), which carries the bespoke fields the "
-                            f"generic route does not. This route is for "
-                            f"descriptor-defined classes."))
+                            f"it through its own endpoint (POST /api/projects/{{id}}/"
+                            f"{_coll}), which carries the bespoke fields the generic "
+                            f"route does not. This route is for descriptor-defined "
+                            f"classes."))
             desc = occupation.effective_get_descriptor(data, body.kind)
             if desc is None:
                 # AX review (PR #692): don't collapse "typo" and "built-in" into

@@ -189,6 +189,23 @@ def known_target_prefixes() -> tuple:
     return tuple(sorted(p + "-" for p in _TARGET_PREFIX_KIND))
 
 
+def target_id_prefix(kind: str) -> str:
+    """Return the canonical id-prefix (WITH the trailing ``-``, e.g. ``"ms-"``) for a
+    built-in Target ``kind``, or ``""`` when the kind has no known prefix (ms-150
+    maintainability review M2). Public accessor over the private prefix→kind table so
+    a consumer (e.g. ``target_descriptor``'s built-in catalog derivation) does NOT
+    reach into ``_TARGET_PREFIX_KIND`` and does NOT hand-invert it with a bare
+    key-access that would raise on an unknown kind. Returns ``""`` (not KeyError) so
+    the caller decides how to surface a missing prefix — a new built-in that lands in
+    ``target_state`` but forgets its prefix here is caught by an explicit guard at the
+    catalog's import, not by an opaque KeyError deep in a dict comprehension."""
+    want = (kind or "").strip()
+    for prefix, k in _TARGET_PREFIX_KIND.items():
+        if k == want:
+            return prefix + "-"
+    return ""
+
+
 def doc_target(meta: dict) -> str:
     """Tolerant read of a document's linked Target id (ms-109 e-3754): canonical
     ``target`` first, then legacy ``milestone`` / ``operation`` / ``trek_id``

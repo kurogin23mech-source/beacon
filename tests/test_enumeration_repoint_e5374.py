@@ -32,7 +32,7 @@ def test_non_dev_profession_adopting_release_owns_it():
 
 def test_owned_target_classes_includes_adopted_release_for_non_dev():
     assert "release" in occupation.owned_target_classes(
-        _adopting_release("legal"), "legal")
+        _adopting_release("legal"))
 
 
 def test_adopted_release_surfaces_as_a_projected_target_row():

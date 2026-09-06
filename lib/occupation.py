@@ -522,9 +522,8 @@ def project_deliverables(data: dict) -> list:
     path, so a caller that learned None is safe there must not hit a crash here."""
     if data is None:
         return []
-    prof = resolve_profession(data)
     out: list = []
-    for kind in owned_target_classes(data, prof):
+    for kind in owned_target_classes(data):
         proj = resolve_deliverable(data, kind)
         if proj is not None:
             out.append({"target_class": kind, **proj})
@@ -979,7 +978,7 @@ class TargetClassProfessionError(ValueError):
     message; CLI callers print it and exit non-zero."""
 
 
-def owned_target_classes(data: dict, profession: str | None = None) -> tuple:
+def owned_target_classes(data: dict) -> tuple:
     """Return every target-class THIS project owns — its full EFFECTIVE set, read
     from ONE source: the project's adopted/declared descriptors
     (``_descriptors_owned_by`` → ``effective_descriptors``).
@@ -996,12 +995,13 @@ def owned_target_classes(data: dict, profession: str | None = None) -> tuple:
     before (byte-invariant), while any project can now ALSO own a class it adopts
     beyond its profession's defaults.
 
-    The ``profession`` argument is now VESTIGIAL (accepted for call-site
-    compatibility, ignored): the effective set already encodes the project's
-    profession via ``data``. It is DELIBERATELY not used as a wiring input — reading
-    it here would re-impose the profession-as-authority this MS removes (条件B: the
-    ownership read must not consult ``PROFESSION_ADAPTER_KINDS`` or the profession
-    directly)."""
+    Takes NO ``profession`` argument (ms-150 AX / maintainability review consensus):
+    the effective set already encodes the project's profession via ``data``, and an
+    accepted-but-ignored parameter is a lie in the signature — a caller (or a future
+    AI) would pass it expecting it to scope the result and get no error, only wrong
+    data. Scoping by profession here would also re-impose the profession-as-authority
+    this MS removes (条件B: the ownership read must not consult
+    ``PROFESSION_ADAPTER_KINDS`` or the profession directly)."""
     out: list = []
     for desc in _descriptors_owned_by(data):
         kind = (desc.get("kind") or "").strip()
@@ -1043,8 +1043,8 @@ def assert_target_class_owned(data: dict, kind: str) -> None:
     rather than merely blocked. Descriptor-defined classes are owned by their
     declared profession, so a data-defined class in the right project passes
     (ms-122 e-3957)."""
-    prof = resolve_profession(data)
-    owned = owned_target_classes(data, prof)
+    prof = resolve_profession(data)  # for the guidance message only, NOT for ownership
+    owned = owned_target_classes(data)
     if kind in owned:
         return
     owner = target_class_owner(kind, data)
