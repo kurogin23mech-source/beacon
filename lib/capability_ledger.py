@@ -964,6 +964,87 @@ def classify_completion_seam(cls: str, dimension: str) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Decision-capture coverage (ms-166 e-5974). A DIFFERENT axis from the ms-163
+# completion-seam checks above: those police whether every terminable target-CLASS
+# reaches the 完遂 decision producer. THIS one polices whether every judgment-SEAM
+# decision KIND (task の done 判定 / レビュー採否 / 完遂 verdict / halt / DM 発信 /
+# 導出 …) has a real producer that is WIRED — a kind declared in the SSOT but produced
+# by nothing is the "配線はあるが silent に produce しない" non-function this MS targets.
+#
+# Population = decision_event.KNOWN_DECISION_KINDS (the SSOT vocabulary) PLUS derived
+# kinds not in that set (pr-intent 導出). ``test_decision_capture_covers_known_kinds``
+# forces every KNOWN_DECISION_KIND to appear either here (with a producer) or in
+# DECISION_CAPTURE_BOUNDARY, so a new kind cannot be added to the vocabulary without
+# either wiring a producer or explicitly declaring it seam-less.
+#
+# A producer "exists" when its token is invoked at ≥1 site across the scanned lib/ +
+# server/ population (same wired-ness test as find_producer_coverage_gaps). The tokens
+# are the decision-event BUILDER for that kind (server routes call these) or the
+# client-side recorder that posts that kind (cmd_pr._record_review_decision,
+# decision_derive.build_pr_intent_decision, cmd_decision_record). Verified call sites
+# 2026-09-06: routers_projects (task-done / completion-verdict / scope-approval),
+# app.py (dm-send), routers_treks (trek-review / halt+resume), cmd_pr (review-
+# adjudication / pr-intent), commands dispatch (log-backstop).
+DECISION_CAPTURE_PRODUCERS = {
+    "task-done": frozenset({"decision_event_from_task_done"}),
+    "completion-verdict": frozenset({"decision_event_from_completion_verdict",
+                                     "_record_completion_verdict_decision"}),
+    "scope-approval": frozenset({"decision_event_from_scope_approval"}),
+    "dm-send": frozenset({"decision_event_from_dm_send", "maybe_dm_send_record"}),
+    "trek-review": frozenset({"decision_event_from_trek_review"}),
+    # halt / resume share one builder (decision_event_from_halt, resumed flag flips kind).
+    "halt": frozenset({"decision_event_from_halt"}),
+    "resume": frozenset({"decision_event_from_halt"}),
+    "review-adjudication": frozenset({"_record_review_decision"}),
+    "log-backstop": frozenset({"cmd_decision_record"}),
+    # 導出 kind (KNOWN_DECISION_KINDS 外だが判断軌跡の一級 source): PR intent から導出。
+    "pr-intent": frozenset({"build_pr_intent_decision"}),
+}
+
+# Judgment kinds that are structurally seam-LESS: a pure in-conversation judgment that
+# never reaches a code seam (no route / CLI verb / builder fires), so no producer can
+# capture it — this is the boundary SPEC ms-166 asks to make explicit ("seam に届かない
+# 会話判断は捕獲対象外"). EMPTY today: every KNOWN_DECISION_KIND is a real seam. This set
+# exists so that IF a future kind names a conversational-only judgment, it is declared
+# here on purpose (visible boundary) rather than silently failing the coverage checker.
+DECISION_CAPTURE_BOUNDARY: frozenset = frozenset()
+
+# Ratchet allowlist for accepted-pending decision-capture gaps (owner ms-166). A kind
+# whose producer is not yet wired, accepted as debt. ONE-WAY ratchet (same discipline as
+# KNOWN_COMPLETION_SEAM_GAP): wire the producer, then DROP the row —
+# ``test_no_stale_decision_capture_gap`` forces the deletion so it cannot rot into a lie.
+# EMPTY today: all producers are wired (e-5970/5971/5972/5978). A NEW unwired kind FAILS.
+KNOWN_DECISION_CAPTURE_GAP: frozenset = frozenset()
+
+
+def is_known_decision_capture_gap(kind: str) -> bool:
+    """True when ``kind`` is an accepted-pending decision-capture gap (reported as debt,
+    not a CI failure). Symmetric to is_known_completion_seam_gap (ms-166 e-5974)."""
+    return kind in KNOWN_DECISION_CAPTURE_GAP
+
+
+def classify_decision_capture(kind: str) -> tuple:
+    """Classify a decision KIND whose producer is not wired into ``(status, advice)`` —
+    the decision-capture peer of classify_completion_seam (ms-166 e-5974).
+
+      * ``("pending_debt", advice)`` — an accepted gap in ``KNOWN_DECISION_CAPTURE_GAP``
+        (owner ms-166), one-way (wire the producer, drop the row).
+      * ``("new_violation", advice)`` — a fresh gap that fails the checker (a judgment
+        seam kind that produces no decision = the silent non-function this MS closes).
+
+    There is no ``reviewed_correct``: a judgment seam that records no decision is never
+    "correct by design" — that silent hole is exactly what e-5974 detects."""
+    advice = (f"decision kind '{kind}' has no wired producer — a judgment seam that "
+              f"produces no decision is a silent non-function (write なし = 監査不能). "
+              f"Wire a producer that builds/records this kind and call it from the seam, "
+              f"or (if this names a conversational-only judgment with no code seam) add it "
+              f"to capability_ledger.DECISION_CAPTURE_BOUNDARY to declare the boundary.")
+    if is_known_decision_capture_gap(kind):
+        return "pending_debt", advice
+    return "new_violation", advice
+
+
+# ---------------------------------------------------------------------------
 # Classification by verb noun (the substring before the first "_"). The rule map
 # gives every current noun a scope; a per-verb OVERRIDE handles the exceptions
 # where a noun's verbs split across scopes. A noun the rules do not know resolves
