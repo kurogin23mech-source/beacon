@@ -342,6 +342,43 @@ def save_project(data, op=None):
         _append_changelog(op)
 
 
+def verify_cloud_write_persisted(predicate, *, what: str) -> None:
+    """After a cloud write, confirm it ACTUALLY landed (ms-166 e-6036).
+
+    A whole-document PUT can return 2xx yet not persist under transient server load
+    (observed 2026-09-03: ``beacon milestone add`` printed "Added milestone" but neither
+    the cloud document nor the local mirror had it; a plain re-run fixed it — a silent
+    write). The server PUT returns only ``{"status":"ok"}`` and MUTATES the body it stores
+    (auto-sets ``owner`` / links accounts), so a generic whole-document hash-compare would
+    false-positive. Instead the CALLER — which knows what it just wrote — passes a
+    ``predicate(fresh_data) -> bool`` that this checks against a FRESH cloud read
+    (``load_project`` does a genuine GET / WS-truth in cloud mode).
+
+    local mode is a no-op: the local write is synchronous and ``save_project`` already
+    raises on failure, so there is nothing async to verify. Cloud read errors are NOT
+    swallowed — an unverifiable write must not read as success (that is the very
+    silent-non-function this closes), so we exit non-zero with a retry hint.
+
+    Raises ``SystemExit(1)`` (with a retry hint) when the read-back does not reflect the
+    write; returns None on success."""
+    if not _is_cloud_mode():
+        return
+    try:
+        fresh = load_project()
+    except SystemExit:
+        raise
+    except Exception as e:
+        print(f"Error: {what} を書き込みましたが、cloud 読み戻しで反映を検証できませんでした "
+              f"({e})。成功と断定できないため、反映を確認して再実行してください。",
+              file=sys.stderr)
+        sys.exit(1)
+    if not predicate(fresh):
+        print(f"Error: {what} は成功を返しましたが cloud 読み戻しに現れません — "
+              f"transient な書き込み失敗の可能性があります。再実行してください "
+              f"(ms-166 e-6036: 書き込み系の silent 失敗検知)。", file=sys.stderr)
+        sys.exit(1)
+
+
 def save_project_unsafe(data, op=None):
     """Save project data WITHOUT validate_project.
 
