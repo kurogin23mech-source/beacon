@@ -140,12 +140,18 @@ def make_router(
                 "objective": (full.get("objective") or "")[:200],
                 "archived": bool(full.get("archived", False)),
                 "member_count": p.get("member_count", 0),
-                # ms-164 e-5952: milestone_count kept for back-compat; target_count
-                # is the occupation-generic headline metric so a non-milestone
-                # (sales) project's card is not empty. Falls back to milestone_count
-                # for a summary produced before this field existed.
+                # ms-164 e-5952: milestone_count kept for back-compat; target_count is the
+                # occupation-generic headline metric so a non-milestone (sales) project's
+                # card is not empty. The store layer (list_all_projects in all 3 backends)
+                # computes target_count via occupation.project_target_count on every call, so
+                # it is always present here. ms-166 e-6073: do NOT fall back to milestone_count
+                # when it is absent — that silently RE-INTRODUCED the unknown/zero conflation
+                # PR#710 fixed at the store (a sales project's milestone_count is 0, so a
+                # pre-migration summary with no target_count read as "0 targets" = an empty
+                # card indistinguishable from a genuinely empty project). Absent → None
+                # (unknown), a visible sentinel distinct from a real 0.
                 "milestone_count": p.get("milestone_count", 0),
-                "target_count": p.get("target_count", p.get("milestone_count", 0)),
+                "target_count": p.get("target_count"),
                 "updated_at": p.get("updated_at", ""),
             })
         return {"count": len(rows), "projects": rows}
