@@ -971,20 +971,22 @@ def classify_completion_seam(cls: str, dimension: str) -> tuple:
 # 導出 …) has a real producer that is WIRED — a kind declared in the SSOT but produced
 # by nothing is the "配線はあるが silent に produce しない" non-function this MS targets.
 #
-# Population = decision_event.KNOWN_DECISION_KINDS (the SSOT vocabulary) PLUS derived
-# kinds not in that set (pr-intent 導出). ``test_decision_capture_covers_known_kinds``
-# forces every KNOWN_DECISION_KIND to appear either here (with a producer) or in
-# DECISION_CAPTURE_BOUNDARY, so a new kind cannot be added to the vocabulary without
-# either wiring a producer or explicitly declaring it seam-less.
+# Population = decision_event.KNOWN_DECISION_KINDS (the SSOT vocabulary) PLUS the derived
+# kinds in DECISION_CAPTURE_DERIVED_KINDS (pr-intent 導出, not in that vocabulary). Two tests
+# machine-check the SSOT both ways so vocabulary and coverage cannot silently diverge:
+# ``test_decision_capture_covers_known_kinds`` (every KNOWN_DECISION_KIND has a producer here
+# or is in DECISION_CAPTURE_BOUNDARY — no new kind ships without wiring or a boundary
+# declaration) and ``test_decision_capture_no_orphan_producers`` (every key here is a
+# KNOWN_DECISION_KIND or a declared derived kind — a kind removed from the vocabulary cannot
+# leave a dead producer row behind).
 #
-# A producer "exists" when its token is invoked at ≥1 site across the scanned lib/ +
-# server/ population (same wired-ness test as find_producer_coverage_gaps). The tokens
-# are the decision-event BUILDER for that kind (server routes call these) or the
-# client-side recorder that posts that kind (cmd_pr._record_review_decision,
-# decision_derive.build_pr_intent_decision, cmd_decision_record). Verified call sites
-# 2026-09-06: routers_projects (task-done / completion-verdict / scope-approval),
-# app.py (dm-send), routers_treks (trek-review / halt+resume), cmd_pr (review-
-# adjudication / pr-intent), commands dispatch (log-backstop).
+# A producer is "wired" when its token is INVOKED or dispatch-REGISTERED at ≥1 site across the
+# scanned lib/ + server/ population (see check-capability-scope._wired_tokens) — the checker's
+# own green status is the machine-readable proof of wiring, so no hand-maintained call-site
+# list is kept here (it would rot). The tokens are the decision-event BUILDER for that kind
+# (server routes call these) or the client-side recorder that posts it
+# (cmd_pr._record_review_decision, decision_derive.build_pr_intent_decision,
+# cmd_decision_record). Proof-of-detection lives in tests/test_decision_capture_coverage_ms166.
 DECISION_CAPTURE_PRODUCERS = {
     "task-done": frozenset({"decision_event_from_task_done"}),
     "completion-verdict": frozenset({"decision_event_from_completion_verdict",
@@ -998,8 +1000,17 @@ DECISION_CAPTURE_PRODUCERS = {
     "review-adjudication": frozenset({"_record_review_decision"}),
     "log-backstop": frozenset({"cmd_decision_record"}),
     # 導出 kind (KNOWN_DECISION_KINDS 外だが判断軌跡の一級 source): PR intent から導出。
+    # Must be listed in DECISION_CAPTURE_DERIVED_KINDS below (the orphan-guard's exception set).
     "pr-intent": frozenset({"build_pr_intent_decision"}),
 }
+
+# Kinds that are producers here but intentionally NOT in decision_event.KNOWN_DECISION_KINDS
+# (= derived from an existing artifact rather than a first-class vocabulary kind). The
+# orphan-guard (test_decision_capture_no_orphan_producers) treats these as allowed extras, so
+# it can still fail on an ACCIDENTAL orphan (a producer row whose kind was removed/renamed in
+# the vocabulary) without false-flagging a deliberate derived kind. Add a derived kind here
+# ONLY when it is genuinely outside the vocabulary by design (like pr-intent 導出).
+DECISION_CAPTURE_DERIVED_KINDS: frozenset = frozenset({"pr-intent"})
 
 # Judgment kinds that are structurally seam-LESS: a pure in-conversation judgment that
 # never reaches a code seam (no route / CLI verb / builder fires), so no producer can

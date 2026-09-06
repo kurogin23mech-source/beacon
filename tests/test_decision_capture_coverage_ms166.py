@@ -85,6 +85,29 @@ def test_decision_capture_covers_known_kinds():
         f"DECISION_CAPTURE_BOUNDARY): {uncovered}")
 
 
+def test_decision_capture_no_orphan_producers():
+    # Inverse SSOT guard (maintainability review PR#724): every DECISION_CAPTURE_PRODUCERS key
+    # must be a KNOWN_DECISION_KIND or a declared derived kind (DECISION_CAPTURE_DERIVED_KINDS).
+    # So a kind removed/renamed in the vocabulary cannot leave a dead producer row wired behind
+    # (the row would keep the checker green while the kind is gone = silent divergence).
+    allowed = set(de.KNOWN_DECISION_KINDS) | set(cl.DECISION_CAPTURE_DERIVED_KINDS)
+    orphans = sorted(k for k in cl.DECISION_CAPTURE_PRODUCERS if k not in allowed)
+    assert not orphans, (
+        "DECISION_CAPTURE_PRODUCERS key that is neither a KNOWN_DECISION_KIND nor a declared "
+        f"derived kind (a vocabulary kind was removed/renamed — drop or reclassify the row): "
+        f"{orphans}")
+
+
+def test_decision_capture_derived_kinds_are_outside_vocabulary():
+    # A derived kind is by definition NOT in the vocabulary; if one gets promoted INTO
+    # KNOWN_DECISION_KINDS, it should be dropped from the derived set (else the exception rots).
+    leaked = sorted(k for k in cl.DECISION_CAPTURE_DERIVED_KINDS
+                    if k in de.KNOWN_DECISION_KINDS)
+    assert not leaked, (
+        "DECISION_CAPTURE_DERIVED_KINDS lists a kind now IN KNOWN_DECISION_KINDS "
+        f"(it is no longer a derived exception — drop the row): {leaked}")
+
+
 def test_decision_capture_producers_and_boundary_disjoint():
     # A kind is either seam-full (has a producer) or seam-less (boundary) — never both.
     both = sorted(set(cl.DECISION_CAPTURE_PRODUCERS) & set(cl.DECISION_CAPTURE_BOUNDARY))
