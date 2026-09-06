@@ -49,7 +49,14 @@ def _ms(ms_id, status="todo", title=None, entries=None):
 # ---------------------------------------------------------------------------
 
 class TestOriginalBugRepro:
-    """Demonstrates why `len(milestones) + 1` is structurally broken."""
+    """Demonstrates why `len(milestones) + 1` is structurally broken.
+
+    NEGATIVE-REGRESSION ANCHOR (PR#720 maintainability §5): the broken
+    `len(...)+1` allocator no longer exists in production code (the max+1 rule
+    lives in occupation.next_target_id). Keep this class anyway — it pins the
+    bug this project fixed so a future re-introduction is caught. Do not delete
+    it just because there is no live `len(...)+1` to protect.
+    """
 
     def test_len_based_allocator_collides_after_physical_removal(self):
         # Simulate the life-plan-simulator scenario:
@@ -290,17 +297,18 @@ class TestMilestonePurge:
         with pytest.raises(ValueError, match="out of range"):
             core.milestone_purge(data, "ms-13", reason="dup", index=5)
 
-    def test_purge_then_add_does_not_reuse_id(self):
-        # After we purge, max-id allocator still bases on max(existing IDs)
-        # — so purging ms-3 from [ms-1, ms-2, ms-3] and then adding gives
-        # ms-3 back IF max is still 2. This is acceptable: purge is opt-in,
-        # explicit, and reason-required. The bug we're fixing is the
-        # SILENT one (len-based). We just document the behavior.
+    def test_purge_then_allocate_may_return_purged_id(self):
+        # Renamed (PR#720 maintainability §7): this exercises the ALLOCATOR
+        # PRIMITIVE (next_target_id) after a purge, NOT the end-to-end
+        # milestone_add write path — so it documents that the max+1 allocator
+        # MAY re-issue a purged id (it does not assert milestone_add's separate
+        # collision guard). After we purge ms-3 from [ms-1, ms-2, ms-3], max
+        # remaining is 2, so the allocator returns ms-3 again. This re-use is
+        # acceptable: purge is opt-in, explicit, reason-required. The bug we're
+        # fixing is the SILENT (len-based) one; this just documents the behavior.
         data = _project([_ms("ms-1"), _ms("ms-2"), _ms("ms-3")])
         core.milestone_purge(data, "ms-3", reason="dup recovery")
         next_id = occupation.next_target_id(data, "milestone")
-        # max remaining is 2, so next would be ms-3. That re-use is the
-        # purge's explicit cost; callers know what they did.
         assert next_id == "ms-3"
 
 
