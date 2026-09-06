@@ -97,18 +97,53 @@ def test_decision_log_render(tmp_path):
     assert "ALL_PASS" in result.stdout
 
 
-def test_ms_card_decision_tab_loading_wired():
-    """The milestone-card decision sub-tab must feed the loading flag through —
-    count shows … (not a misleading 0) and the panel passes {loading} so it
-    shows the placeholder instead of the 'はありません' empty state mid-fetch.
-    Guards the wiring the pure-fn test above can't see (ms-162 e-5956 b)."""
+def test_decision_loading_wired_at_every_callsite():
+    """Every decision-log callsite must feed the loading flag through the ONE
+    shared getter isDecisionsPending() — not a re-typed `state.decisions === null`
+    sentinel. Guards the wiring the pure-fn test can't see, at all 3 callsites
+    (ms card sub-tab + opportunity modal + account modal). PR#722 review
+    consensus: AX + maintainability both flagged the inline-sentinel duplication
+    and the account/opp callsites being untested (ms-162 e-5956 b)."""
     with open(INDEX_HTML, encoding="utf-8") as f:
         html = f.read()
-    assert "const decLoading = state.decisions === null;" in html, \
-        "MS card must derive decLoading from the unloaded (null) stream"
+    # single truth source getter exists
+    assert "function isDecisionsPending()" in html, \
+        "the shared 'is the decision stream pending?' getter must exist"
+    assert "return state.decisions === null;" in html, \
+        "isDecisionsPending must be the one place that reads the null sentinel"
+    # ms card sub-tab: loading-aware count (… not 0) + loading passed to the panel
+    assert "const decLoading = isDecisionsPending();" in html, \
+        "MS card must derive decLoading from the shared getter, not an inline sentinel"
     assert "const decCount = decLoading ? '…' : decisions.length;" in html, \
         "decision tab count must show … while loading, not 0"
     assert "tab('decision', 'decision', decCount)" in html, \
         "decision tab must render the loading-aware count"
     assert "renderDecisionLog(decisions, { loading: decLoading })" in html, \
         "decision tab content must pass the loading flag through"
+    # opportunity + account modals: both must pass loading via the shared getter.
+    # (Maint#1: these callsites were previously untested and could silently break.)
+    modal_calls = html.count(
+        "renderDecisionLog(decisionsForTarget(state.decisions, "
+    )
+    assert modal_calls >= 2, \
+        f"expected the 2 modal callsites, found {modal_calls}"
+    assert html.count(
+        "), { loading: isDecisionsPending() })"
+    ) >= 2, "both opportunity & account modal decision logs must pass loading via the getter"
+    # the inline sentinel must NOT be passed to renderDecisionLog anymore
+    assert "loading: state.decisions === null" not in html, \
+        "no callsite may re-type the null sentinel inline; all go through the getter"
+
+
+def test_root_header_approximate_open_has_self_describing_title():
+    """AX#2 (PR#722): the fallback 未完了(概算) count must carry a tooltip that
+    says WHY it is approximate, so a zero-context reader doesn't misread it as a
+    fault / unloaded data. The server-provided 進行中 path carries no such note."""
+    with open(INDEX_HTML, encoding="utf-8") as f:
+        html = f.read()
+    assert "const openTitle = openProvided" in html, \
+        "root header must compute a title only for the approximate (fallback) case"
+    assert "総数−完遂で概算" in html, \
+        "the tooltip must explain the count is an estimate from total-minus-done"
+    assert '<span class="root-hdr-count"${openTitle}>' in html, \
+        "the count span must carry the conditional title attribute"

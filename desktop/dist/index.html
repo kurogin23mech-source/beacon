@@ -6086,7 +6086,7 @@ function renderAccountModal(accId) {
       ${contactHtml}
       <div class="sm-sec">やり取り (Communication)</div>
       ${_renderCommunications(a)}
-      ${renderDecisionLog(decisionsForTarget(state.decisions, a), { loading: state.decisions === null })}
+      ${renderDecisionLog(decisionsForTarget(state.decisions, a), { loading: isDecisionsPending() })}
     </div>
   </div>`;
 }
@@ -6126,7 +6126,7 @@ function renderOpportunityModal(oppId) {
       ${_renderOppActivities(o)}
       ${_renderMeetings(o)}
       ${_renderCommunications(o)}
-      ${renderDecisionLog(decisionsForTarget(state.decisions, o), { loading: state.decisions === null })}
+      ${renderDecisionLog(decisionsForTarget(state.decisions, o), { loading: isDecisionsPending() })}
     </div>
   </div>`;
 }
@@ -6393,6 +6393,18 @@ function renderDecisionLog(decisions, opts) {
     </div>`;
 }
 
+// ms-162 e-5956 — single truth source for "is the decision stream still loading?".
+// The stream is fetched lazily; before it lands, state.decisions is null (an empty
+// array means "loaded, none"). Every decision-log callsite (ms card sub-tab +
+// opportunity / account modals) must ask this ONE getter instead of re-writing the
+// `state.decisions === null` sentinel inline — so a future change to how "pending"
+// is decided (e.g. folding in state.decisionsLoading) lives in one place and can't
+// drift a callsite into a silent not-loading verdict. (PR#722 review consensus:
+// AX + maintainability both flagged the inline sentinel duplication.)
+function isDecisionsPending() {
+  return state.decisions === null;
+}
+
 // ms-162 e-5833 — lazy-load the project-wide decision stream once, on the first
 // open of ANY target detail (milestone card / opportunity modal / account
 // modal). Idempotent: guarded by state.decisions === null so repeated opens
@@ -6555,6 +6567,11 @@ function renderRootHeader(root) {
   const openProvided = root.work_items_open != null;
   const open = openProvided ? root.work_items_open : Math.max(0, total - done);
   const openLabel = openProvided ? '進行中' : '未完了(概算)';
+  // AX advisory (PR#722): 「概算」の理由を surface 上で自己記述にする — 読み手が
+  // 「壊れている / データ未取得」と誤診しないよう、なぜ概算かを tooltip で示す。
+  const openTitle = openProvided
+    ? ''
+    : ' title="進行中の正確な数がサーバから提供されていないため、総数−完遂で概算しています（打ち切り分を含みます）"';
   const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
   // arms rollup を chip 化: 欠けている機構は chip を出さない (前方互換 = server が
@@ -6576,7 +6593,7 @@ function renderRootHeader(root) {
     ? `<div class="root-hdr-rollup">
          <span class="root-hdr-pct">${pct}%</span>
          <div class="root-hdr-bar"><div class="root-hdr-bar-fill" style="width:${pct}%"></div></div>
-         <span class="root-hdr-count">${done}/${total} 完遂 · ${open} ${openLabel}</span>
+         <span class="root-hdr-count"${openTitle}>${done}/${total} 完遂 · ${open} ${openLabel}</span>
        </div>`
     : '';
   const armsBlock = armsChips ? `<div class="root-hdr-arms">${armsChips}</div>` : '';
@@ -6662,7 +6679,7 @@ function renderMilestoneCard(ms, index) {
     // only because nothing is loaded yet. Distinguish that from "no decisions" so
     // the tab count shows … (not a misleading 0) and the panel shows a loading
     // placeholder (not "はありません").
-    const decLoading = state.decisions === null;
+    const decLoading = isDecisionsPending();
     const decCount = decLoading ? '…' : decisions.length;
     _currentMsId = ms.id;
     const wiHtml = wiEntries.map(renderEntry).join('');
