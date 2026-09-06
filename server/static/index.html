@@ -1521,6 +1521,74 @@ body::after {
   font-style: italic;
   padding: 2px 0;
 }
+/* ms-162 e-5837 — deliverable (produced-value) panel */
+.dlv-panel {
+  margin: 12px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(52,211,153,0.04);
+}
+.dlv-panel-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #34d399;
+  margin-bottom: 8px;
+}
+.dlv-panel-loading {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-style: italic;
+}
+.dlv-count {
+  display: inline-block;
+  min-width: 16px;
+  padding: 0 5px;
+  margin-left: 4px;
+  border-radius: 8px;
+  background: rgba(52,211,153,0.18);
+  color: #34d399;
+  font-size: 10px;
+  text-align: center;
+}
+.dlv-item {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+.dlv-item:first-of-type { border-top: none; }
+.dlv-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.dlv-label { font-weight: 600; color: var(--text); }
+.dlv-class {
+  font-size: 10px;
+  color: var(--text-dim);
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.dlv-projector { font-size: 10px; color: var(--text-dim); }
+.dlv-total { font-size: 12px; color: #34d399; margin-bottom: 4px; }
+.dlv-cat {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 12px;
+  padding: 1px 0 1px 8px;
+  color: var(--text);
+}
+.dlv-cat-name { color: var(--text-dim); }
+.dlv-cat-count { color: #34d399; font-variant-numeric: tabular-nums; }
+.dlv-labels, .dlv-doc-preview { font-size: 12px; color: var(--text-dim); padding-left: 8px; }
+.dlv-doc-title { font-size: 12px; color: var(--text); }
+.dlv-doc-len { color: var(--text-dim); font-size: 10px; }
+.dlv-unresolved { font-size: 12px; color: #f59e0b; padding-left: 8px; }
 .dec-event {
   padding: 6px 8px;
   margin-bottom: 6px;
@@ -3718,6 +3786,14 @@ let state = {
   // treated as "no decisions" so the panel just stays hidden, never errors).
   decisions: null,
   decisionsLoading: false,
+  // ms-162 e-5837 — deliverable (produced-value) projection cache. The project's
+  // adopted-class deliverables, RESOLVED to their content (count_active +
+  // categories etc.), fetched once (lazily, on project load) via
+  // GET /api/projects/{id}/deliverables. Same null / [] contract as decisions:
+  // null = not yet loaded; [] = loaded-but-empty or endpoint unavailable (older
+  // servers 404 → treated as "no deliverables" so the panel stays hidden).
+  deliverables: null,
+  deliverablesLoading: false,
   // ms-84 / e-2326 follow-up — tab-scoped extras cache. The slim WS broadcast
   // also drops top-level arrays that the dashboard doesn't need (pushes /
   // deployments / worktree_sessions) so the frame fits. They are fetched
@@ -5694,6 +5770,7 @@ function renderShell(app) {
     </div>
 
     ${!state.openTrekId ? renderRootHeader(p.root) : ''}
+    ${!state.openTrekId ? renderDeliverables(state.deliverables, { loading: isDeliverablesPending() }) : ''}
 
     ${(() => {
       // ms-162 e-5835 — root header が objective を出したら project-info の
@@ -5795,6 +5872,18 @@ const dataSource = {
       state.decisions = (r && Array.isArray(r.decisions)) ? r.decisions : [];
     } catch (_e) {
       state.decisions = [];
+    }
+  },
+  // ms-162 e-5837 — fetch the resolved deliverable (produced-value) projection.
+  // Same fail-soft contract as loadDecisions: on any failure (404 where the
+  // deliverable route isn't deployed, local mode, 502) settle to [] so the
+  // deliverable panel simply stays hidden rather than surfacing an error.
+  loadDeliverables: async () => {
+    try {
+      const r = await api(`/api/projects/${state.projectId}/deliverables`);
+      state.deliverables = (r && Array.isArray(r.deliverables)) ? r.deliverables : [];
+    } catch (_e) {
+      state.deliverables = [];
     }
   },
   loadDocumentContent: async (docId) => { state.documentContent = await api(`/api/projects/${state.projectId}/documents/${docId}`); },
@@ -6366,6 +6455,97 @@ function ensureDecisionsLoaded() {
   if (state.decisions === null && !state.decisionsLoading) {
     state.decisionsLoading = true;
     dataSource.loadDecisions().then(() => { state.decisionsLoading = false; render(); });
+  }
+}
+
+// ms-162 e-5837 — deliverable (produced-value) panel (portable render 部品).
+// PURE functions: given the RESOLVED deliverable rows (from GET
+// /api/projects/{id}/deliverables), render "what value has this project
+// produced" — the gap the 発端 named (deliverables were CLI-readable but the UI
+// showed only the arm's kind label). Each row's `resolved` carries a
+// strategy-specific body; render each strategy in its own readable shape.
+// Reads only its arguments (no state / fetch) so the ms-159 shell can reuse it.
+const _DLV_PREVIEW_CHARS = 240;
+
+// Render ONE deliverable row: its label + projector, then the resolved content.
+function renderDeliverableItem(d) {
+  if (!d) return '';
+  const label = d.label || d.kind || '(no label)';
+  const tclass = d.target_class ? `<span class="dlv-class">${esc(d.target_class)}</span>` : '';
+  const projector = d.projector ? `<span class="dlv-projector">projector=${esc(d.projector)}</span>` : '';
+  const head = `<div class="dlv-head"><span class="dlv-label">${esc(label)}</span>${tclass}${projector}</div>`;
+  const r = (d && d.resolved) || {};
+  if (!r.found) {
+    // Unresolved pointer is not hidden — a broken deliverable must be visible, not
+    // silently absent (symmetric with the CLI --resolve non-zero exit).
+    const err = r.error ? esc(r.error) : 'resolve failed';
+    return `<div class="dlv-item dlv-item-unresolved">${head}<div class="dlv-unresolved">⚠ 未解決: ${err}</div></div>`;
+  }
+  let body = '';
+  const strategy = r.strategy || '';
+  if (strategy === 'changelog') {
+    const cats = Array.isArray(r.categories) ? r.categories : [];
+    const total = (r.count_active != null) ? r.count_active : cats.reduce((s, c) => s + (c.count || 0), 0);
+    const rows = cats.map((c) =>
+      `<div class="dlv-cat"><span class="dlv-cat-name">${esc(c.category)}</span><span class="dlv-cat-count">${c.count}</span></div>`
+    ).join('');
+    body = `<div class="dlv-total">${total} 件の価値</div>${rows}`;
+  } else if (strategy === 'rollup') {
+    const delivered = r.count_delivered != null ? r.count_delivered : 0;
+    const totalR = r.count_total != null ? r.count_total : 0;
+    const labels = Array.isArray(r.labels) ? r.labels : [];
+    const joined = labels.slice(0, 12).map((x) => esc(x)).join(' / ');
+    const more = (r.labels_truncated || labels.length > 12) ? ' …' : '';
+    body = `<div class="dlv-total">${delivered}/${totalR} delivered</div>` +
+           (joined ? `<div class="dlv-labels">${joined}${more}</div>` : '');
+  } else if (strategy === 'doc') {
+    const title = r.title ? esc(r.title) : '';
+    const content = (r.content || '').trim().replace(/\s+/g, ' ');
+    const shown = content.slice(0, _DLV_PREVIEW_CHARS);
+    const ell = content.length > _DLV_PREVIEW_CHARS ? '…' : '';
+    body = `<div class="dlv-doc-title">${title} <span class="dlv-doc-len">(${(r.content || '').length} 文字)</span></div>` +
+           (shown ? `<div class="dlv-doc-preview">${esc(shown)}${ell}</div>` : '');
+  } else {
+    body = `<div class="dlv-total">${esc(strategy || 'resolved')}</div>`;
+  }
+  return `<div class="dlv-item">${head}${body}</div>`;
+}
+
+// Render the deliverable panel. Returns '' when there are no deliverables so a
+// project that has produced nothing yet shows nothing extra (produced-but-
+// invisible stays quiet). While the stream is still loading, show a placeholder
+// instead of '' so the panel doesn't read as "no value produced" mid-fetch.
+function renderDeliverables(deliverables, opts) {
+  const loading = !!(opts && opts.loading);
+  if (!Array.isArray(deliverables) || !deliverables.length) {
+    if (loading) {
+      return `
+    <section class="dlv-panel">
+      <div class="dlv-panel-loading">生み出した価値を読み込み中…</div>
+    </section>`;
+    }
+    return '';
+  }
+  return `
+    <section class="dlv-panel">
+      <div class="dlv-panel-label">生み出した価値 (deliverable) <span class="dlv-count">${deliverables.length}</span></div>
+      ${deliverables.map(renderDeliverableItem).join('')}
+    </section>`;
+}
+
+// ms-162 e-5837 — single truth source for "is the deliverable projection still
+// loading?" (mirrors isDecisionsPending — one place reads the null sentinel).
+function isDeliverablesPending() {
+  return state.deliverables === null;
+}
+
+// ms-162 e-5837 — lazy-load the resolved deliverable projection once, on project
+// load (the panel is dashboard-level, always visible). Idempotent: guarded by
+// state.deliverables === null so repeated renders don't re-fetch.
+function ensureDeliverablesLoaded() {
+  if (state.deliverables === null && !state.deliverablesLoading) {
+    state.deliverablesLoading = true;
+    dataSource.loadDeliverables().then(() => { state.deliverablesLoading = false; render(); });
   }
 }
 
@@ -11062,6 +11242,9 @@ async function selectProject(projectId) {
       // their decision-log stayed blank. Load the decision stream here too so
       // any expanded target (auto or click) can render its decision log.
       ensureDecisionsLoaded();
+      // ms-162 e-5837 — the deliverable panel is dashboard-level (always visible),
+      // so load the resolved produced-value projection on project load too.
+      ensureDeliverablesLoaded();
       render();
       if (pendingEntries.length > 0) {
         Promise.allSettled(pendingEntries).then(() => render());
