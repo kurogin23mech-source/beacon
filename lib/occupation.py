@@ -1694,9 +1694,11 @@ def next_target_id(data: dict, kind: str) -> str:
     (milestones count ``ms-``, opportunities count ``opp-``), collision-safe and
     deterministic via ``work_base.next_suffixed_id`` (max integer suffix + 1).
 
-    This is the single generic allocator the hand-rolled per-collection ones
-    (``core.next_milestone_id`` / ``sales_entities.next_opportunity_id``) collapse
-    into; those stay as thin back-compat shims delegating here."""
+    This is the single generic allocator that replaced the hand-rolled
+    per-collection ones (``core.next_milestone_id`` /
+    ``sales_entities.next_opportunity_id``), removed as dead code in ms-164 e-6022:
+    they never delegated here — each had its own max+1 impl with no live caller
+    once ``create_target`` became the sole Target write path."""
     tc = target_class(data, kind)
     id_field = tc.get("id_field", "id")
     ids = [rec.get(id_field, "") for rec in data.get(tc["collection"], []) or []]

@@ -18,6 +18,8 @@ sys.path.insert(0, str(REPO / "lib"))
 
 import core  # noqa: E402
 import sales_entities as se  # noqa: E402
+import occupation  # noqa: E402  (ms-164 e-6022: next_opportunity_id removed; the
+                   # live allocator is occupation.next_target_id(data, "opportunity"))
 
 
 def _fresh():
@@ -2297,7 +2299,7 @@ def _legacy_opp(data, *, phase, transition_date="", phase_seq=None):
     directly and no ``gates`` — the shape existing data has on disk."""
     seq = phase_seq or [phase]
     data.setdefault("opportunities", []).append({
-        "id": se.next_opportunity_id(data), "title": "Legacy", "account_id": None,
+        "id": occupation.next_target_id(data, "opportunity"), "title": "Legacy", "account_id": None,
         "phase": phase, "status": se._opportunity_status_for_phase(data, phase),
         "phase_history": [{"phase": p, "at": f"T{i}", "note": ""}
                           for i, p in enumerate(seq)],

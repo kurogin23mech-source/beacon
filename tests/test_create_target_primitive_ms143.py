@@ -82,8 +82,10 @@ def test_id_spaces_are_independent_and_deterministic():
 
 
 def test_next_target_id_is_max_plus_one_not_count():
-    """physically-removed id を再発行しない (max+1、core.next_milestone_id が Issue#14
-    で入れた不変条件を generic allocator が継承)。"""
+    """physically-removed id を再発行しない (max+1 不変条件)。かつて Issue#14 で
+    core.next_milestone_id が入れたこの規則は、e-6022 で generic allocator
+    occupation.next_target_id に一本化された (旧 dev/sales 専用採番器は dead code
+    として除去済)。"""
     data = {"id": "p", "profession": "dev",
             "milestones": [{"id": "ms-1"}, {"id": "ms-5"}]}
     assert occupation.next_target_id(data, "milestone") == "ms-6"
