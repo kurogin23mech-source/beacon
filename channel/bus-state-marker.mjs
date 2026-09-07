@@ -16,11 +16,13 @@ import fs from 'node:fs'
  * Read the state marker at `markerPath`.
  *
  * @param {string} markerPath  Path to .beacon/session-state.json.
- * @returns {{declaredState: string, declaredAt: string}|null}
- *   The declared state + timestamp, or null when the marker is absent,
- *   unreadable, malformed, or missing either required field. Both fields are
- *   required together — the server's derive_state needs declared_at to judge
- *   staleness, so a marker with only one is treated as no declaration.
+ * @returns {{declaredState: string, declaredAt: string, stateSince: string}|null}
+ *   The declared state + timestamps, or null when the marker is absent,
+ *   unreadable, malformed, or missing either required field. declared_state and
+ *   declared_at are required together — the server's derive_state needs
+ *   declared_at to judge staleness, so a marker with only one is treated as no
+ *   declaration. stateSince falls back to declaredAt when the marker predates
+ *   the field (ms-159 e-6245 back-compat with e-6244 markers).
  */
 export function readStateMarker(markerPath) {
   let raw
@@ -35,7 +37,9 @@ export function readStateMarker(markerPath) {
     const declaredAt = obj && obj.declared_at
     if (typeof declaredState === 'string' && declaredState &&
         typeof declaredAt === 'string' && declaredAt) {
-      return { declaredState, declaredAt }
+      const rawSince = obj && obj.state_since
+      const stateSince = (typeof rawSince === 'string' && rawSince) ? rawSince : declaredAt
+      return { declaredState, declaredAt, stateSince }
     }
   } catch (e) {
     // malformed JSON → treat as no declaration (never throw into the poll loop)

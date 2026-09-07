@@ -62,11 +62,40 @@ class TestEventToState:
         assert m == {
             "declared_state": bus_liveness.STATE_AWAITING_HUMAN,
             "declared_at": "2026-09-07T00:00:00.000Z",
+            "state_since": "2026-09-07T00:00:00.000Z",  # first write ⇒ since = now
             "source_event": "Notification",
         }
 
     def test_build_marker_none_for_unrecognized(self):
         assert session_state_hook.build_state_marker("nope", "2026-09-07T00:00:00.000Z") is None
+
+    def test_state_since_preserved_on_same_state_redeclaration(self):
+        # e-6245: re-declaring the SAME state advances declared_at but keeps
+        # state_since (so "how long waiting" doesn't reset on every hook fire).
+        prev = {"declared_state": bus_liveness.STATE_RUNNING,
+                "declared_at": "2026-09-07T00:00:00.000Z",
+                "state_since": "2026-09-07T00:00:00.000Z"}
+        m = session_state_hook.build_state_marker("PostToolUse", "2026-09-07T00:05:00.000Z", prev_marker=prev)
+        assert m["declared_state"] == bus_liveness.STATE_RUNNING
+        assert m["declared_at"] == "2026-09-07T00:05:00.000Z"      # advanced
+        assert m["state_since"] == "2026-09-07T00:00:00.000Z"      # preserved
+
+    def test_state_since_resets_on_transition(self):
+        # A different state ⇒ new entry time.
+        prev = {"declared_state": bus_liveness.STATE_RUNNING,
+                "declared_at": "2026-09-07T00:00:00.000Z",
+                "state_since": "2026-09-07T00:00:00.000Z"}
+        m = session_state_hook.build_state_marker("Notification", "2026-09-07T00:05:00.000Z", prev_marker=prev)
+        assert m["declared_state"] == bus_liveness.STATE_AWAITING_HUMAN
+        assert m["state_since"] == "2026-09-07T00:05:00.000Z"      # reset on transition
+
+    def test_state_since_from_e6244_marker_without_field(self):
+        # Back-compat: a prior marker written by e-6244 (no state_since) that
+        # matches state ⇒ state_since becomes now (no prior entry time to keep).
+        prev = {"declared_state": bus_liveness.STATE_IDLE,
+                "declared_at": "2026-09-07T00:00:00.000Z"}
+        m = session_state_hook.build_state_marker("Stop", "2026-09-07T00:05:00.000Z", prev_marker=prev)
+        assert m["state_since"] == "2026-09-07T00:05:00.000Z"
 
 
 # ===========================================================================
@@ -132,6 +161,31 @@ class TestHookWritesMarker:
         with open(_marker_path(tmp_path), encoding="utf-8") as f:
             marker = json.load(f)
         assert marker["declared_state"] == bus_liveness.STATE_AWAITING_HUMAN
+
+    def test_state_since_preserved_across_two_same_state_fires(self, tmp_path):
+        # e-6245 end-to-end through the bin hook: two PostToolUse fires keep the
+        # first entry time in state_since while declared_at advances.
+        (tmp_path / ".beacon").mkdir()
+        _run_hook({"hook_event_name": "PreToolUse", "cwd": str(tmp_path)})
+        with open(_marker_path(tmp_path), encoding="utf-8") as f:
+            first = json.load(f)
+        _run_hook({"hook_event_name": "PostToolUse", "cwd": str(tmp_path)})
+        with open(_marker_path(tmp_path), encoding="utf-8") as f:
+            second = json.load(f)
+        assert second["declared_state"] == bus_liveness.STATE_RUNNING
+        assert second["state_since"] == first["state_since"]  # preserved
+        assert second["declared_at"] >= first["declared_at"]  # advanced (or equal)
+
+    def test_state_since_resets_across_transition_fires(self, tmp_path):
+        (tmp_path / ".beacon").mkdir()
+        _run_hook({"hook_event_name": "PreToolUse", "cwd": str(tmp_path)})
+        with open(_marker_path(tmp_path), encoding="utf-8") as f:
+            running = json.load(f)
+        _run_hook({"hook_event_name": "Notification", "cwd": str(tmp_path)})
+        with open(_marker_path(tmp_path), encoding="utf-8") as f:
+            waiting = json.load(f)
+        assert waiting["declared_state"] == bus_liveness.STATE_AWAITING_HUMAN
+        assert waiting["state_since"] != running["state_since"]  # reset on transition
 
     def test_no_beacon_dir_is_noop_not_crash(self, tmp_path):
         # No .beacon anywhere up the tree ⇒ fail-safe no-op, exit 0.

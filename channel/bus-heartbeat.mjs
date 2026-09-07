@@ -40,13 +40,14 @@
  * @param {object} [opts.transport]
  * @param {string} [opts.declaredState]  ms-159 e-6244 — session self-declared state.
  * @param {string} [opts.declaredAt]     ISO8601 of that declaration.
+ * @param {string} [opts.stateSince]     ms-159 e-6245 — ISO8601 the session ENTERED that state.
  * @returns {object}
  */
 // @e-2502-core-candidate — heartbeat body is bus protocol, currently
 //   duplicated in lib/codex_receive_loop.py::heartbeat_to_server. Move
 //   the shape to lib/bus_protocol.py once that lands; this function
 //   becomes a thin Node wrapper.
-export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, transport, declaredState, declaredAt }) {
+export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, transport, declaredState, declaredAt, stateSince }) {
   const body = {
     last_active: nowIso,
     last_poll_at: nowIso,
@@ -68,6 +69,11 @@ export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, t
   if (declaredState && declaredAt) {
     body.declared_state = declaredState
     body.declared_at = declaredAt
+    // ms-159 e-6245 — state_since (when the session ENTERED this state) rides
+    // alongside so the server/attention面 can sort by "how long in this state".
+    // Falls back to declared_at when the marker predates state_since so the
+    // field is always populated when a state is declared.
+    body.state_since = stateSince || declaredAt
   }
   return body
 }

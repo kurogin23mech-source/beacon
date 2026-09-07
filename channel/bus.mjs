@@ -1305,14 +1305,17 @@ if (!PROJECT_ID || !SESSION_ID) {
     // hooks last wrote (or nothing, if no marker exists).
     let declaredState
     let declaredAt
+    let stateSince
     if (shutdown) {
       declaredState = 'terminated'
       declaredAt = nowIso
+      stateSince = nowIso   // entering terminated now
     } else {
       const marker = readStateMarker(STATE_MARKER_JSON)
       if (marker) {
         declaredState = marker.declaredState
         declaredAt = marker.declaredAt
+        stateSince = marker.stateSince
       }
     }
     try {
@@ -1323,6 +1326,7 @@ if (!PROJECT_ID || !SESSION_ID) {
         transport: currentTransport(),   // e-5378: fleet-observable receive transport state
         declaredState,
         declaredAt,
+        stateSince,
       })
       await apiPut(
         `/api/projects/${PROJECT_ID}/sessions/${encodeURIComponent(SESSION_ID)}`,

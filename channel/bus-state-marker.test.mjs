@@ -21,12 +21,26 @@ function tmpFile(contents) {
 test('reads a well-formed marker', () => {
   const p = tmpFile(JSON.stringify({
     declared_state: 'awaiting_human',
-    declared_at: '2026-09-07T00:00:00.000Z',
+    declared_at: '2026-09-07T00:05:00.000Z',
+    state_since: '2026-09-07T00:00:00.000Z',
     source_event: 'Notification',
   }))
   assert.deepEqual(readStateMarker(p), {
     declaredState: 'awaiting_human',
+    declaredAt: '2026-09-07T00:05:00.000Z',
+    stateSince: '2026-09-07T00:00:00.000Z',
+  })
+})
+
+test('marker without state_since falls back to declared_at (e-6244 back-compat)', () => {
+  const p = tmpFile(JSON.stringify({
+    declared_state: 'idle',
+    declared_at: '2026-09-07T00:00:00.000Z',
+  }))
+  assert.deepEqual(readStateMarker(p), {
+    declaredState: 'idle',
     declaredAt: '2026-09-07T00:00:00.000Z',
+    stateSince: '2026-09-07T00:00:00.000Z',
   })
 })
 
@@ -51,13 +65,23 @@ test('marker missing declared_state → null', () => {
 
 // --- buildHeartbeatBody piggyback ------------------------------------------
 
-test('heartbeat carries declared_state/declared_at when both present', () => {
+test('heartbeat carries declared_state/declared_at/state_since when present', () => {
+  const body = buildHeartbeatBody({
+    nowIso: '2026-09-07T00:05:00Z', pollIntervalMs: 5000,
+    declaredState: 'awaiting_human', declaredAt: '2026-09-07T00:05:00Z',
+    stateSince: '2026-09-07T00:00:00Z',
+  })
+  assert.equal(body.declared_state, 'awaiting_human')
+  assert.equal(body.declared_at, '2026-09-07T00:05:00Z')
+  assert.equal(body.state_since, '2026-09-07T00:00:00Z')
+})
+
+test('heartbeat state_since falls back to declared_at when not provided', () => {
   const body = buildHeartbeatBody({
     nowIso: '2026-09-07T00:00:00Z', pollIntervalMs: 5000,
     declaredState: 'idle', declaredAt: '2026-09-07T00:00:00Z',
   })
-  assert.equal(body.declared_state, 'idle')
-  assert.equal(body.declared_at, '2026-09-07T00:00:00Z')
+  assert.equal(body.state_since, '2026-09-07T00:00:00Z')
 })
 
 test('heartbeat omits declared_* when no declaration (negative regression)', () => {

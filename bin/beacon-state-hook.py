@@ -94,20 +94,33 @@ def main() -> int:
     mod = _import_session_state_hook()
     if mod is None:
         return 0
+    if mod.event_to_declared_state(event_name) is None:
+        # Unrecognized / empty event declares nothing — leave the last marker
+        # untouched (never clobber a real state with a guess). Cheap check before
+        # touching the filesystem.
+        return 0
     now_iso = datetime.datetime.now(datetime.timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%S.%fZ")
-    marker = mod.build_state_marker(event_name, now_iso)
-    if marker is None:
-        # Unrecognized / empty event declares nothing — leave the last marker
-        # untouched (never clobber a real state with a guess).
-        return 0
 
     start = Path(hook_input.get("cwd") or os.getcwd())
     beacon_dir = _find_beacon_dir(start)
     if beacon_dir is None:
         return 0
+    marker_path = beacon_dir / "session-state.json"
+    # Read the prior marker so build_state_marker can preserve state_since across
+    # a re-declaration of the same state (only reset the "since" clock on a real
+    # transition). A missing / unreadable prior marker is fine — treated as None.
+    prev_marker = None
     try:
-        _atomic_write_json(beacon_dir / "session-state.json", marker)
+        with open(marker_path, encoding="utf-8") as f:
+            prev_marker = json.load(f)
+    except Exception:
+        prev_marker = None
+    marker = mod.build_state_marker(event_name, now_iso, prev_marker=prev_marker)
+    if marker is None:  # defensive: mapping already checked above, but re-guard
+        return 0
+    try:
+        _atomic_write_json(marker_path, marker)
     except Exception as e:  # never block the turn on a marker write
         print(f"beacon-state-hook: marker write failed (non-fatal): {e}",
               file=sys.stderr)

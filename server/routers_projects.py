@@ -2549,6 +2549,11 @@ class SessionUpsert(BaseModel):
     # with no marker simply omits them and the prior declaration is preserved.
     declared_state: Optional[str] = None
     declared_at: Optional[str] = None
+    # ms-159 / e-6245 — WHEN the session entered ``declared_state`` (preserved by
+    # the hook across re-declarations of the same state, reset on transition).
+    # Distinct from ``declared_at`` (last declared): the attention面 sorts by how
+    # long a session has been in its state, so this must not reset on every fire.
+    state_since: Optional[str] = None
 
 class SessionIntentUpsert(BaseModel):
     """Body for POST /api/projects/{project_id}/sessions/{session_id}/intent
