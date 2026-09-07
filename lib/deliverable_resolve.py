@@ -121,6 +121,28 @@ def _resolve_changelog(data: dict) -> dict:
             for g in summary["categories"]
         ],
         "rendered": _dmap.render_map(data),
+        # ms-162 e-6219: per-entry rows carrying producing-target attribution, so
+        # a UI can filter "what THIS target produced" client-side (the same shape
+        # decisionsForTarget filters a decision stream by target). Derived from
+        # the SAME ``summary`` the aggregate above uses (its category buckets
+        # already hold the active entries with their ``source``), so the per-entry
+        # rows can never diverge from count_active / categories — they are the
+        # same active set, just flattened + attributed rather than counted.
+        # ADDITIVE: the aggregate keys (count_active / categories / rendered) are
+        # byte-unchanged; only this ``entries`` key is new.
+        "entries": [
+            {
+                "source_target": (e.get("source") or {}).get("target_id", ""),
+                "source_kind": (e.get("source") or {}).get("kind", ""),
+                "category": e.get("category", ""),
+                "title": e.get("title", ""),
+                "summary": e.get("summary", ""),
+                "status": e.get("status", ""),
+                "ref": e.get("ref", ""),
+            }
+            for g in summary["categories"]
+            for e in g["entries"]
+        ],
     }
 
 
