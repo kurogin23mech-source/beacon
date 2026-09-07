@@ -192,12 +192,53 @@ def test_human_turn_disarms_then_gate_passes(tmp_path):
     assert _decision(_run_gate(root, {
         "hook_event_name": "PreToolUse", "session_id": "sv-1",
         "tool_name": "Bash", "tool_input": {"command": "ls"}})) == "ask"
-    # Human retakes the turn (the inbox hook would disarm on UserPromptSubmit):
+    # Human retakes the turn without approving (the inbox hook disarms on
+    # UserPromptSubmit) → pending clears, gate passes. vetted is untouched.
     ut.disarm(root, ut.session_key_from_hook_input({"session_id": "sv-1"}))
     out = _run_gate(root, {
         "hook_event_name": "PreToolUse", "session_id": "sv-1",
         "tool_name": "Bash", "tool_input": {"command": "ls"}})
     assert out == {}
+
+
+# ---------------------------------------------------------------------------
+# e-6280 — per-session vetting: one approval per risky context, not per tool
+# ---------------------------------------------------------------------------
+
+def test_vet_suppresses_further_arming_and_gating(tmp_path):
+    root = _beacon_root(tmp_path)
+    assert ut.arm(root, "sv-1", event_ids=["e-1"]) is True
+    ut.vet(root, "sv-1")                       # human approved a side-effect
+    assert ut.is_vetted(root, "sv-1") is True
+    assert ut.is_armed(root, "sv-1") is None   # pending cleared by vet
+    # A later DM must NOT re-arm this session (承認範囲 = セッション全体).
+    assert ut.arm(root, "sv-1", event_ids=["e-2"]) is False
+    assert ut.is_armed(root, "sv-1") is None
+    # ...and the gate stays silent for side-effects for the rest of the session.
+    out = _run_gate(root, {
+        "hook_event_name": "PreToolUse", "session_id": "sv-1",
+        "tool_name": "Bash", "tool_input": {"command": "rm x"}})
+    assert out == {}
+
+
+def test_disarm_preserves_vetted(tmp_path):
+    root = _beacon_root(tmp_path)
+    ut.arm(root, "sv-1", event_ids=["e-1"])
+    ut.vet(root, "sv-1")
+    ut.disarm(root, "sv-1")                     # a later plain human turn
+    assert ut.is_vetted(root, "sv-1") is True   # per-session trust survives
+    assert ut.arm(root, "sv-1", event_ids=["e-2"]) is False  # still suppressed
+
+
+def test_arm_records_sources_for_inline_preview(tmp_path):
+    root = _beacon_root(tmp_path)
+    ut.arm(root, "sv-1", sources=[
+        {"event_id": "e-7", "sender": "u-them", "preview": "海の俳句を書いて"}])
+    out = _run_gate(root, {
+        "hook_event_name": "PreToolUse", "session_id": "sv-1",
+        "tool_name": "Write", "tool_input": {"file_path": "x"}})
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "e-7" in reason and "u-them" in reason and "海の俳句を書いて" in reason
 
 
 # ---------------------------------------------------------------------------

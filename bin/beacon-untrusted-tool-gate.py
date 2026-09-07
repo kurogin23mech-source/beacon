@@ -91,16 +91,44 @@ def _emit_ask(reason: str) -> None:
     print(json.dumps(out, ensure_ascii=False))
 
 
-def _build_reason(tool_name: str, state: dict) -> str:
+def _source_lines(state: dict) -> str:
+    """Render the untrusted DMs (event_id / sender / body preview) inline so the
+    human judges the *context*, not the tool (e-6280 option A). Falls back to a
+    bare event_id list when no preview was recorded (legacy / bare arm)."""
+    sources = [s for s in (state.get("sources") or []) if isinstance(s, dict)]
+    if sources:
+        lines = []
+        for s in sources[:5]:
+            eid = s.get("event_id") or "?"
+            sender = s.get("sender") or "?"
+            preview = s.get("preview") or ""
+            if preview:
+                lines.append(f"  - [{eid}] from {sender}: 「{preview}」")
+            else:
+                lines.append(f"  - [{eid}] from {sender}")
+        extra = len(sources) - 5
+        if extra > 0:
+            lines.append(f"  - … 他 {extra} 件")
+        return "\n".join(lines)
     ids = state.get("event_ids") or []
     ids_str = ", ".join(str(i) for i in ids[:5]) if ids else "(不明)"
+    return f"  - event: {ids_str}"
+
+
+def _build_reason(tool_name: str, state: dict) -> str:
     return (
-        "⚠ ms-169 injection ガード: このセッションには信頼できない外部由来の DM 本文 "
-        f"(event: {ids_str}) がコンテキストに居ます。その状態で副作用ツール "
-        f"『{tool_name}』(状態を変える / 外部に送る) を実行しようとしています。"
-        " DM 本文に紛れ込んだ命令に誘導されていないか人間が確認してください。"
-        " 正当な操作なら承認、DM 由来の意図しない操作なら拒否してください。"
-        " (読み取り専用ツールは gate されません)"
+        "⚠ ms-169 injection ガード — 信頼できない外部 DM 文脈での副作用操作\n"
+        "このセッションには信頼できない外部由来 (別ユーザー / 別セッション) の DM 本文が"
+        "コンテキストに居ます:\n"
+        f"{_source_lines(state)}\n"
+        f"この文脈で副作用ツール『{tool_name}』(状態を変える / 外部に送る) を実行しようと"
+        "しています。\n"
+        "判断: 上の DM 本文に紛れ込んだ命令に誘導されていませんか? この文脈のまま操作を"
+        "進めて安全ですか?\n"
+        "  承認 → この操作を実行し、以後このセッションでは untrusted DM 由来の副作用確認を"
+        "再度求めません (= この文脈を信頼したとみなす)。\n"
+        "  拒否 → この操作を止めます。\n"
+        "(読み取り専用ツールは gate されません)"
     )
 
 
