@@ -156,32 +156,49 @@ def derive_state(declared_state, declared_at, live, now,
     Authority model (作業単位状態モデル SPEC ``np2fSUqpE5LSIkOqHLuK`` 判断1/4 +
     slice SPEC ``Icb8zFtbnZZ1yXzMsLO6`` 方針1/4):
 
-    - **A fresh self-declaration is authoritative.** The session knows its own
-      state best, so a recognized, in-window ``declared_state`` is returned as
-      is (方針1). ``running`` / ``idle`` / ``awaiting_human`` / ``blocked``.
     - **``terminated`` is terminal.** A session that reported SessionEnd stays
       ``terminated`` regardless of liveness or age — it legitimately stops
-      emitting, so staleness must not flip it to ``unknown``.
-    - **A stale non-terminal declaration ⇒ ``unknown``.** The self-report can no
-      longer be trusted; raising ``unknown`` (the attention-drawing side) both
-      satisfies 方針1 ("live-but-silent ⇒ unknown") and neutralizes the 判断4
-      固着 hazard (a dead session frozen in ``awaiting_human`` would otherwise
-      nag the inbox forever).
-    - **No declaration ⇒ fall back to liveness** (AC1: "宣言が無いときは liveness
-      から fallback"). ``live`` is load-bearing HERE: a live-but-unstated session
-      becomes ``unknown`` (判断4: never silently assume ``running`` — safe side
-      toward human attention), while a not-live session with nothing ever
-      declared becomes ``terminated`` (the coarse fallback: no transport and no
-      state = gone).
+      emitting, so nothing flips it to ``unknown``.
+    - **While LIVE, the latest declaration is authoritative — staleness does NOT
+      apply.** The bridge heartbeats every few seconds; that live heartbeat
+      continuously re-affirms the marker (the session would push a NEW marker if
+      its state changed), so ``declared_at`` age is not evidence the state is
+      wrong. This is the correction that lets a session parked in
+      ``awaiting_human`` for hours stay visible at the top of the attention面
+      (its ``declared_at`` freezes while it waits — no hook fires — but the
+      heartbeat proves it is still genuinely waiting). Uniform staleness would
+      instead hide exactly the long-waiting sessions this MS exists to surface.
+      The one live exception: **no declaration at all ⇒ ``unknown``** (判断4:
+      never silently assume ``running`` — the safe side toward human attention).
+    - **Once NOT LIVE, staleness is what indicts the declaration.** With the
+      heartbeat gone we can no longer confirm the state, so:
+        * a *fresh* declaration is a very recent death — trust it through a short
+          grace window (a just-crashed ``awaiting_human`` still reads
+          ``awaiting_human`` for a moment, indistinguishable from a real pause);
+        * a *stale* declaration ⇒ ``unknown`` — transport gone AND the last
+          report is old, so a lingering non-terminal state must be neutralized
+          (判断4 固着 backstop: a dead session frozen in ``awaiting_human`` must
+          not nag the inbox forever);
+        * *no* declaration ⇒ ``terminated`` (no transport and nothing ever
+          declared = gone).
+
+    So ``stale_after_seconds`` is a *post-death grace window*, not a general
+    freshness clock — it is consulted only on the not-live path. (The precise
+    live-stuck detector — a session that is live but silently stopped declaring
+    because its hooks broke — is the deferred deadline-sweep / generic server
+    tick, np2 判断6; this slice deliberately trusts a live declaration over
+    catching that rarer case, because mis-hiding awaiting_human is the worse
+    failure.)
 
     Args:
         declared_state: the session's last self-declared state, or a falsy /
             unrecognized value when it never declared one.
         declared_at: ISO-8601 timestamp of that declaration (``None`` if absent).
         live: transport liveness of the session (the ``live`` union used by the
-            picker). Only consulted on the no-declaration fallback path.
+            picker). Load-bearing: the primary axis here.
         now: current tz-aware ``datetime``.
-        stale_after_seconds: freshness window for a declaration.
+        stale_after_seconds: post-death grace window (only consulted when
+            ``live`` is false).
 
     Returns:
         One of ``STATE_RUNNING`` / ``STATE_IDLE`` / ``STATE_AWAITING_HUMAN`` /
@@ -192,14 +209,16 @@ def derive_state(declared_state, declared_at, live, now,
     if declared_state == STATE_TERMINATED:
         return STATE_TERMINATED
 
-    # 2. A recognized non-terminal self-declaration is authoritative *while
-    #    fresh* (方針1). Once stale, the report is untrustworthy ⇒ unknown
-    #    (方針1 live-but-silent + 判断4 固着 backstop; not-live folds in here too
-    #    — a lingering non-terminal state must be actively neutralized).
+    # 2. A recognized non-terminal declaration.
     if declared_state in DECLARABLE_STATES:  # non-terminal (terminated handled)
-        if not _declaration_is_stale(declared_at, now, stale_after_seconds):
+        if live:
+            # Live heartbeat re-affirms the marker → trust it regardless of age.
+            # This keeps a long-waiting awaiting_human at the top of attention.
             return declared_state
-        return STATE_UNKNOWN
+        # Not live: the heartbeat is gone, so staleness now decides.
+        if not _declaration_is_stale(declared_at, now, stale_after_seconds):
+            return declared_state          # very recent death: grace window
+        return STATE_UNKNOWN               # gone + stale ⇒ 固着 backstop
 
     # 3. No (or unrecognized) declaration ⇒ liveness fallback (判断4 safe side).
     #    live ⇒ up but unstated ⇒ unknown; not live ⇒ gone ⇒ terminated.
