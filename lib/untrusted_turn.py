@@ -190,6 +190,7 @@ def is_armed(root: "str | Path", session_key: str) -> "dict | None":
 __all__ = [
     "STATE_RELPATH",
     "session_key_from_hook_input",
+    "resolve_session_key",
     "arm",
     "disarm",
     "is_armed",
