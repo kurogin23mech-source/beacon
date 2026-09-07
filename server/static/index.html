@@ -5771,8 +5771,7 @@ function renderShell(app) {
       ${PLATFORM.accountMenuItemsHTML()}
     </div>
 
-    ${!state.openTrekId ? renderRootHeader(p.root) : ''}
-    ${!state.openTrekId ? renderDeliverables(state.deliverables, { loading: isDeliverablesPending() }) : ''}
+    ${!state.openTrekId ? renderRootHeader(p.root, state.deliverables, isDeliverablesPending()) : ''}
 
     ${(() => {
       // ms-162 e-5835 — root header が objective を出したら project-info の
@@ -6558,6 +6557,55 @@ function renderDeliverables(deliverables, opts) {
     </section>`;
 }
 
+// ms-162 e-6219 — per-target produced value. The deliverable projection is a
+// per-CLASS union (ONE changelog row for dev, one rollup for sales, …); the
+// changelog row carries per-ENTRY producing-target attribution (source_target,
+// threaded server-side in e-6219). This filters those entries down to ONE
+// target so a target detail can show "what THIS target produced" — the
+// deliverable analog of decisionsForTarget. Class-level rows that carry no
+// per-entry attribution (rollup / doc) are project-level only, so they surface
+// on the root/project union, never on an individual target.
+function deliverablesForTarget(deliverables, target) {
+  if (!Array.isArray(deliverables) || !deliverables.length || !target) return [];
+  const out = [];
+  for (const d of deliverables) {
+    const r = (d && d.resolved) || {};
+    const entries = Array.isArray(r.entries) ? r.entries : [];
+    for (const e of entries) {
+      if (e && e.source_target === target.id) out.push(e);
+    }
+  }
+  return out;
+}
+
+// Render ONE per-target produced-value entry (title / summary / category /
+// status). A retired/superseded entry would not reach here (the resolver's
+// entries are the active set), but a non-active status is still labelled if
+// present. Kept a sibling of renderDeliverableItem (which renders the
+// class-level union rows) rather than reused: a per-target entry is a changelog
+// row, not a resolved deliverable pointer, so the two shapes differ.
+function renderDeliverableTargetEntry(e) {
+  if (!e) return '';
+  const title = esc(e.title || '(no title)');
+  const cat = e.category ? `<span class="dlv-class">${esc(e.category)}</span>` : '';
+  const status = (e.status && e.status !== 'active')
+    ? `<span class="dlv-class">${esc(e.status)}</span>` : '';
+  const ref = e.ref ? `<span class="dlv-projector">${esc(e.ref)}</span>` : '';
+  const summary = e.summary ? `<div class="dlv-doc-preview">${esc(e.summary)}</div>` : '';
+  return `<div class="dlv-item"><div class="dlv-head"><span class="dlv-label">${title}</span>${cat}${status}${ref}</div>${summary}</div>`;
+}
+
+// Render the per-target produced-value list. Returns '' for empty so the caller
+// chooses the empty-state copy (per e-6219 gate: "まだ記録された価値はありません",
+// shown not hidden — a target with no recorded value yet is a valid empty state).
+function renderDeliverablesForTarget(entries) {
+  if (!Array.isArray(entries) || !entries.length) return '';
+  return `
+    <section class="dlv-panel">
+      ${entries.map(renderDeliverableTargetEntry).join('')}
+    </section>`;
+}
+
 // ms-162 e-5837 — single truth source for "is the deliverable projection still
 // loading?" (mirrors isDecisionsPending — one place reads the null sentinel).
 function isDeliverablesPending() {
@@ -6709,7 +6757,15 @@ function renderTargetsSection() {
 //
 // server が root/narrative/arms を未投影でも「空でも壊れない」= 欠けた行を落とすだけ。
 // 全て空なら '' を返し、shell 側で丸ごと省略する (renderDecisionLog と同契約)。
-function renderRootHeader(root) {
+// ms-162 e-6219: ``deliverables`` / ``deliverablesLoading`` are the project's
+// resolved deliverable union (GET /api/projects/{id}/deliverables). The root IS
+// the project-as-target, so the class-level union (application-map changelog
+// aggregate, sales pipeline rollup, …) is the ROOT's produced value — it renders
+// HERE, below the objective, as part of the root's own surface. This replaces
+// the old free-floating dashboard panel that rendered above the objective when
+// root/narrative was unprojected (the placement bug). Per-target (per-milestone)
+// produced value lives on each target's own deliverable sub-tab instead.
+function renderRootHeader(root, deliverables, deliverablesLoading) {
   if (!root) return '';
   const nar = root.narrative || {};
   const objective = nar.objective || '';
@@ -6743,7 +6799,11 @@ function renderRootHeader(root) {
     .map(([k, v]) => `<span class="root-arm-chip"><span class="root-arm-k">${esc(k)}</span>${esc(v)}</span>`)
     .join('');
 
-  if (!objective && !summary && !total && !armsChips) return '';
+  // The root/project deliverable union (class-level aggregate), rendered below
+  // the narrative. '' when there is nothing produced yet (and not loading).
+  const dlvBlock = renderDeliverables(deliverables, { loading: !!deliverablesLoading });
+
+  if (!objective && !summary && !total && !armsChips && !dlvBlock) return '';
 
   const objBlock = objective ? `<div class="root-hdr-objective">${esc(objective)}</div>` : '';
   const rollupBlock = total > 0
@@ -6767,6 +6827,7 @@ function renderRootHeader(root) {
       ${rollupBlock}
       ${armsBlock}
       ${summaryBlock}
+      ${dlvBlock}
     </section>`;
 }
 
@@ -6838,6 +6899,11 @@ function renderMilestoneCard(ms, index) {
     // placeholder (not "はありません").
     const decLoading = isDecisionsPending();
     const decCount = decLoading ? '…' : decisions.length;
+    // ms-162 e-6219 — per-target produced value (changelog entries attributed to
+    // this milestone). Same lazy-load / …-count contract as the decision tab.
+    const dlvEntries = deliverablesForTarget(state.deliverables, ms);
+    const dlvLoading = isDeliverablesPending();
+    const dlvCount = dlvLoading ? '…' : dlvEntries.length;
     _currentMsId = ms.id;
     const wiHtml = wiEntries.map(renderEntry).join('');
     const evHtml = evEntries.map(renderEntry).join('');
@@ -6867,6 +6933,7 @@ function renderMilestoneCard(ms, index) {
         ${tab('workitem', 'work-item', wiEntries.length)}
         ${tab('evidence', 'evidence', evEntries.length)}
         ${tab('decision', 'decision', decCount)}
+        ${tab('deliverable', '生み出した価値', dlvCount)}
       </div>`;
     // Active tab content.
     const showToolbar = (hasDoneEntries || hasCancelledEntries);
@@ -6881,6 +6948,14 @@ function renderMilestoneCard(ms, index) {
       tabContent = evHtml || empty('evidence (commit 等の記録)');
     } else if (activeTab === 'decision') {
       tabContent = renderDecisionLog(decisions, { loading: decLoading }) || empty('decision (判断の記録)');
+    } else if (activeTab === 'deliverable') {
+      // e-6219 gate: empty is shown ("まだ記録された価値はありません"), not hidden —
+      // a target with no recorded value yet is a valid empty state, and while the
+      // projection is still loading say so rather than read as "produced nothing".
+      tabContent = dlvLoading
+        ? '<div class="dlv-panel-loading">生み出した価値を読み込み中…</div>'
+        : (renderDeliverablesForTarget(dlvEntries)
+           || '<div class="tgt-detail-empty">まだ記録された価値はありません。</div>');
     } else {
       tabContent = toolbar + (wiHtml || empty('work-item (task 等)'));
     }
@@ -10139,7 +10214,8 @@ function handleCommonAction(action, el) {
       render(); return true;
     }
     case 'target-tab': {
-      // ms-162 — switch the expanded target's sub-tab (work-item/evidence/decision).
+      // ms-162 — switch the expanded target's sub-tab
+      // (work-item / evidence / decision / deliverable).
       state.targetTab[el.dataset.msId] = el.dataset.tab;
       render(); return true;
     }
@@ -11267,8 +11343,9 @@ async function selectProject(projectId) {
       // their decision-log stayed blank. Load the decision stream here too so
       // any expanded target (auto or click) can render its decision log.
       ensureDecisionsLoaded();
-      // ms-162 e-5837 — the deliverable panel is dashboard-level (always visible),
-      // so load the resolved produced-value projection on project load too.
+      // ms-162 e-5837/e-6219 — the resolved produced-value projection feeds both
+      // the root/project union (root header) and every target's deliverable
+      // sub-tab, so load it once on project load (not gated on a click path).
       ensureDeliverablesLoaded();
       render();
       if (pendingEntries.length > 0) {

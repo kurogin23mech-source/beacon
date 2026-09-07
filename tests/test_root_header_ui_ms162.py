@@ -33,7 +33,7 @@ pytestmark = pytest.mark.skipif(shutil.which("node") is None,
 def _extract_fn() -> str:
     with open(INDEX_HTML, encoding="utf-8") as f:
         html = f.read()
-    start = html.index("function renderRootHeader(root)")
+    start = html.index("function renderRootHeader(root")
     # the pure fn ends at the next top-level comment block that follows it
     end = html.index("// ms-162 — target 詳細サブタブの次元分類", start)
     block = html[start:end]
@@ -43,6 +43,14 @@ def _extract_fn() -> str:
 
 HARNESS = textwrap.dedent(r"""
     function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+    // ms-162 e-6219: renderRootHeader now composes the root/project deliverable
+    // union via renderDeliverables. This test isolates the header, so stub the
+    // union renderer — a non-empty projection yields a marker, empty/absent → ''
+    // (the same "no deliverables → no block" contract the real renderer has).
+    function renderDeliverables(dlv, opts){
+      if (Array.isArray(dlv) && dlv.length) return '<section class="dlv-panel">UNION_STUB</section>';
+      return '';
+    }
 
     __RENDER_BLOCK__
 
@@ -114,6 +122,15 @@ HARNESS = textwrap.dedent(r"""
                            arms: {}, work_items_total: 0 });
     A(!h.includes("<script>"), "objective is html-escaped");
     A(h.includes("&lt;script&gt;"), "escaped entities present");
+
+    // --- 8. ms-162 e-6219: the root/project deliverable union composes in ---
+    // A root with a produced-value projection renders it (below the narrative).
+    // An empty/absent projection adds no block (and cannot alone force a header).
+    h = renderRootHeader({ narrative: { objective: "z" }, arms: {},
+                           work_items_total: 0 }, [{ resolved: {} }]);
+    A(h.includes("UNION_STUB"), "root header composes the deliverable union");
+    A(renderRootHeader({ narrative: {}, arms: {}, work_items_total: 0 }, []) === "",
+      "empty union does not by itself force a header");
 
     console.log("ALL_PASS");
 """)

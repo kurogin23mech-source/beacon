@@ -146,6 +146,66 @@ def test_changelog_empty_log_resolves_found_not_a_miss():
     r = out["resolved"]
     assert r["found"] is True          # empty is a valid empty map, not a failure
     assert r["count_active"] == 0
+    assert r["entries"] == []          # ms-162 e-6219: empty log → no per-target rows
+
+
+def test_changelog_entries_carry_producing_target_attribution():
+    """ms-162 e-6219: resolved.entries flattens each active changelog row with its
+    producing-target (source_target / source_kind), so the UI can show "what THIS
+    target produced" by filtering source_target == target.id (the same shape
+    decisionsForTarget filters a decision stream)."""
+    import deliverable_changelog as dc
+    data = {"name": "P", "profession": "dev"}
+    dc.append_deliverable(data, {
+        "source": {"target_id": "ms-1", "kind": "milestone"},
+        "category": "feature-map", "title": "A", "summary": "aaa"})
+    dc.append_deliverable(data, {
+        "source": {"target_id": "ms-2", "kind": "milestone"},
+        "category": "feature-map", "title": "B", "summary": "bbb", "ref": "e-9"})
+    r = dr.resolve_deliverable_content(data, _changelog_spec())["resolved"]
+    entries = r["entries"]
+    assert len(entries) == 2
+    by_target = {e["source_target"]: e for e in entries}
+    assert set(by_target) == {"ms-1", "ms-2"}
+    a = by_target["ms-1"]
+    assert a["source_kind"] == "milestone"
+    assert a["category"] == "feature-map"
+    assert a["title"] == "A" and a["summary"] == "aaa"
+    assert a["status"] == "active"
+    assert by_target["ms-2"]["ref"] == "e-9"
+    # a client-side per-target filter (source_target === target.id) selects one row
+    ms1_only = [e for e in entries if e["source_target"] == "ms-1"]
+    assert len(ms1_only) == 1 and ms1_only[0]["title"] == "A"
+
+
+def test_changelog_entries_are_additive_root_aggregate_byte_unchanged():
+    """The parent's e-6219 GO gate: resolved.entries is ADDITIVE — the root
+    aggregate (count_active / categories / rendered) is byte-for-byte unchanged.
+    Proven by dropping the new key and matching a freshly, independently computed
+    pre-e6219 aggregate exactly. If a future edit perturbs an aggregate field, the
+    root/project deliverable tab (the class-level union consumer) regresses and
+    this test goes red."""
+    import deliverable_changelog as dc
+    import deliverable_map as dmap
+    data = {"name": "P", "profession": "dev"}
+    dc.append_deliverable(data, {
+        "source": {"target_id": "ms-1", "kind": "milestone"},
+        "category": "feature-map", "title": "A", "summary": "aaa"})
+    dc.append_deliverable(data, {
+        "source": {"target_id": "ms-2", "kind": "milestone"},
+        "category": "flow", "title": "B", "summary": "bbb"})
+    r = dr.resolve_deliverable_content(data, _changelog_spec())["resolved"]
+    summary = dmap.summarize_map(data)
+    expected_aggregate = {
+        "strategy": td.PROJECTOR_CHANGELOG,
+        "found": True,
+        "count_active": summary["total"],
+        "categories": [{"category": g["category"], "count": g["count"]}
+                       for g in summary["categories"]],
+        "rendered": dmap.render_map(data),
+    }
+    aggregate_only = {k: v for k, v in r.items() if k != "entries"}
+    assert aggregate_only == expected_aggregate
 
 
 # ---------------------------------------------------------------------------
