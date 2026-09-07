@@ -2199,6 +2199,26 @@ EOF
                 ;;
         esac
         ;;
+    attention)
+        # ms-159 e-6246: list sessions awaiting a human (awaiting_human / blocked
+        # / terminated:failed), longest-waiting first. Top-level verb (distinct
+        # from `session attention --set`, which is one session's intent flag).
+        ensure_project
+        shift
+        _att_all=""
+        _att_json=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --all-projects) _att_all="1"; shift ;;
+                --json)         _att_json="1"; shift ;;
+                -?*)            _guard_flag "$1" ;;
+                *)              shift ;;
+            esac
+        done
+        BEACON_ATTENTION_ALL_PROJECTS="$_att_all" \
+            BEACON_JSON="$_att_json" \
+            python3 "$COMMANDS_PY" attention
+        ;;
     decision)
         # ms-154 e-5594: record an AI decision to the unified decision arm.
         ensure_project

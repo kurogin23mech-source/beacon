@@ -1725,6 +1725,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_morning.add_argument("--json", action="store_true")
 
+    # `beacon attention` (ms-159 e-6246) — sessions awaiting a human, oldest first.
+    p_attention = sub.add_parser(
+        "attention", help="List sessions awaiting a human (longest-waiting first)",
+        add_help=False,
+    )
+    p_attention.add_argument("--help", "-h", action="store_true", dest="show_help")
+    p_attention.add_argument("--all-projects", dest="all_projects", action="store_true")
+    p_attention.add_argument("--json", action="store_true")
+
     # ---- monitor (ms-44 e-854) ----
     # `beacon monitor context` invokes the Stop hook context-usage monitor on
     # the current cwd's transcript payload, mirroring the bash entrypoint
@@ -5179,6 +5188,17 @@ def _handle_morning(root: Path, args: argparse.Namespace) -> int:
     })
 
 
+def _handle_attention(root: Path, args: argparse.Namespace) -> int:
+    """`beacon attention [--all-projects] [--json]` (ms-159 e-6246)."""
+    if args.show_help:
+        print("Usage: beacon attention [--all-projects] [--json]")
+        return 0
+    return _run_commands_py(root, "attention", {
+        "BEACON_ATTENTION_ALL_PROJECTS": "1" if getattr(args, "all_projects", False) else "",
+        "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+    })
+
+
 def _handle_monitor(root: Path, args: argparse.Namespace) -> int:
     """`beacon monitor context [--dry-run]` (ms-44 e-854).
 
@@ -5741,6 +5761,7 @@ _HANDLERS: Dict[str, Callable[[Path, argparse.Namespace], int]] = {
     "claim": _handle_claim,
     "stuck": _handle_stuck,
     "morning": _handle_morning,
+    "attention": _handle_attention,  # ms-159 e-6246
 }
 
 
