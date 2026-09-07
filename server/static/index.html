@@ -5771,7 +5771,7 @@ function renderShell(app) {
       ${PLATFORM.accountMenuItemsHTML()}
     </div>
 
-    ${!state.openTrekId ? renderRootHeader(p.root, state.deliverables, isDeliverablesPending()) : ''}
+    ${!state.openTrekId ? renderRootHeader(p.root) : ''}
 
     ${(() => {
       // ms-162 e-5835 — root header が objective を出したら project-info の
@@ -6765,27 +6765,15 @@ function renderTargetsSection() {
 // the old free-floating dashboard panel that rendered above the objective when
 // root/narrative was unprojected (the placement bug). Per-target (per-milestone)
 // produced value lives on each target's own deliverable sub-tab instead.
-function renderRootHeader(root, deliverables, deliverablesLoading) {
+function renderRootHeader(root) {
+  // ms-162 fix: root header は大目的(objective)・arm chip・直近の流れ だけを出す。
+  // 進捗率 rollup と deliverable 集約 dump (class-level application-map) は user 要望で
+  // 除去 (集約リストがトップを潰す / 進捗%不要)。per-target deliverable は target 詳細タブ側。
   if (!root) return '';
   const nar = root.narrative || {};
   const objective = nar.objective || '';
   const summary = nar.summary || '';
   const arms = root.arms || {};
-  const total = root.work_items_total || 0;
-  const done = root.work_items_done || 0;
-  // ms-162 e-5956 (AX advisory a): work_items_open は server が cancelled を除いた
-  // 真の「進行中」を投影した時だけ正確。未投影時は total-done に fallback するが、
-  // これは cancelled (打ち切り) も含むので「進行中」と言い切れない。fallback 時は
-  // 「未完了(概算)」と明示し、打ち切り作業を進行中に見せる誤カウントを防ぐ。
-  const openProvided = root.work_items_open != null;
-  const open = openProvided ? root.work_items_open : Math.max(0, total - done);
-  const openLabel = openProvided ? '進行中' : '未完了(概算)';
-  // AX advisory (PR#722): 「概算」の理由を surface 上で自己記述にする — 読み手が
-  // 「壊れている / データ未取得」と誤診しないよう、なぜ概算かを tooltip で示す。
-  const openTitle = openProvided
-    ? ''
-    : ' title="進行中の正確な数がサーバから提供されていないため、総数−完遂で概算しています（打ち切り分を含みます）"';
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
   // arms rollup を chip 化: 欠けている機構は chip を出さない (前方互換 = server が
   // arm を enrich したら自動で増える)。work_item_arm.item_type = 配下の仕事単位
@@ -6799,20 +6787,9 @@ function renderRootHeader(root, deliverables, deliverablesLoading) {
     .map(([k, v]) => `<span class="root-arm-chip"><span class="root-arm-k">${esc(k)}</span>${esc(v)}</span>`)
     .join('');
 
-  // The root/project deliverable union (class-level aggregate), rendered below
-  // the narrative. '' when there is nothing produced yet (and not loading).
-  const dlvBlock = renderDeliverables(deliverables, { loading: !!deliverablesLoading });
-
-  if (!objective && !summary && !total && !armsChips && !dlvBlock) return '';
+  if (!objective && !summary && !armsChips) return '';
 
   const objBlock = objective ? `<div class="root-hdr-objective">${esc(objective)}</div>` : '';
-  const rollupBlock = total > 0
-    ? `<div class="root-hdr-rollup">
-         <span class="root-hdr-pct">${pct}%</span>
-         <div class="root-hdr-bar"><div class="root-hdr-bar-fill" style="width:${pct}%"></div></div>
-         <span class="root-hdr-count"${openTitle}>${done}/${total} 完遂 · ${open} ${openLabel}</span>
-       </div>`
-    : '';
   const armsBlock = armsChips ? `<div class="root-hdr-arms">${armsChips}</div>` : '';
   const summaryBlock = summary
     ? `<div class="root-hdr-summary"><span class="root-hdr-summary-label">直近の流れ</span>${esc(summary)}</div>`
@@ -6824,10 +6801,8 @@ function renderRootHeader(root, deliverables, deliverablesLoading) {
         <span class="root-hdr-kind">root</span>
         ${objBlock}
       </div>
-      ${rollupBlock}
       ${armsBlock}
       ${summaryBlock}
-      ${dlvBlock}
     </section>`;
 }
 
