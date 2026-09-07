@@ -138,6 +138,147 @@ def _import_bus_delivery():
     return None
 
 
+_UNTRUSTED_FRAME_CACHE: "object | None" = None
+_UNTRUSTED_FRAME_TRIED = False
+
+
+def _import_untrusted_frame():
+    """Import lib/untrusted_frame lazily, cached. Returns the module or None.
+
+    ms-169 e-6235: the untrusted framing text + per-event marker live in the
+    shared module so this hook and the Codex hook frame received bodies
+    identically. Fail-safe: a missing module must never block the inbox path
+    (the caller falls back to emitting the raw body — see _render_context)."""
+    global _UNTRUSTED_FRAME_CACHE, _UNTRUSTED_FRAME_TRIED
+    if _UNTRUSTED_FRAME_TRIED:
+        return _UNTRUSTED_FRAME_CACHE
+    _UNTRUSTED_FRAME_TRIED = True
+    here = Path(__file__).resolve().parent
+    for lib_dir in (here.parent / "lib", here.parent.parent / "lib"):
+        if (lib_dir / "untrusted_frame.py").exists():
+            sys.path.insert(0, str(lib_dir))
+            try:
+                import untrusted_frame as _uf  # type: ignore[import-not-found]
+            except Exception:
+                return None
+            _UNTRUSTED_FRAME_CACHE = _uf
+            return _uf
+    return None
+
+
+_UNTRUSTED_TURN_CACHE: "object | None" = None
+_UNTRUSTED_TURN_TRIED = False
+
+
+def _import_untrusted_turn():
+    """Import lib/untrusted_turn lazily, cached. Returns the module or None.
+
+    ms-169 e-6237: the receive hook arms / disarms the untrusted-turn state that
+    the PreToolUse gate (beacon-untrusted-tool-gate.py) reads. Fail-safe: a
+    missing module must never block the inbox path (arming is best-effort; the
+    gate stays silent when unarmed)."""
+    global _UNTRUSTED_TURN_CACHE, _UNTRUSTED_TURN_TRIED
+    if _UNTRUSTED_TURN_TRIED:
+        return _UNTRUSTED_TURN_CACHE
+    _UNTRUSTED_TURN_TRIED = True
+    here = Path(__file__).resolve().parent
+    for lib_dir in (here.parent / "lib", here.parent.parent / "lib"):
+        if (lib_dir / "untrusted_turn.py").exists():
+            sys.path.insert(0, str(lib_dir))
+            try:
+                import untrusted_turn as _ut  # type: ignore[import-not-found]
+            except Exception:
+                return None
+            _UNTRUSTED_TURN_CACHE = _ut
+            return _ut
+    return None
+
+
+_DM_UNTRUSTED_CACHE: "object | None" = None
+_DM_UNTRUSTED_TRIED = False
+
+
+def _import_dm_untrusted():
+    """Import lib/dm_untrusted lazily, cached. Returns the module or None.
+
+    ms-169 e-6238: cross-user DM body isolation (classify + local body cache +
+    bodyless notice). Fail-safe: a missing module means B degrades to the
+    same-user full-body path for every DM (still framed + gated by A)."""
+    global _DM_UNTRUSTED_CACHE, _DM_UNTRUSTED_TRIED
+    if _DM_UNTRUSTED_TRIED:
+        return _DM_UNTRUSTED_CACHE
+    _DM_UNTRUSTED_TRIED = True
+    here = Path(__file__).resolve().parent
+    for lib_dir in (here.parent / "lib", here.parent.parent / "lib"):
+        if (lib_dir / "dm_untrusted.py").exists():
+            sys.path.insert(0, str(lib_dir))
+            try:
+                import dm_untrusted as _du  # type: ignore[import-not-found]
+            except Exception:
+                return None
+            _DM_UNTRUSTED_CACHE = _du
+            return _du
+    return None
+
+
+def _partition_cross_user(root: Path, inject: list) -> dict:
+    """Return {event_id: notice_str} for the cross-user DMs in ``inject``.
+
+    For each cross-user DM (ms-169 e-6238) the body is stashed locally (for
+    `beacon dm show`) and a bodyless notice is prepared; the caller renders the
+    notice instead of the body and excludes the event from arming. Same-user DMs
+    are absent from the returned map (they keep the full-body path). Best-effort:
+    if the module can't load, returns {} (every DM stays full-body)."""
+    du = _import_dm_untrusted()
+    if du is None:
+        return {}
+    notices: dict = {}
+    try:
+        my_uid = du.resolve_my_user_id()
+        for ev in inject:
+            eid = ev.get("event_id")
+            if not eid or not du.is_cross_user(ev, my_uid):
+                continue
+            du.cache_body(root, ev)
+            notices[eid] = du.format_cross_user_notice(ev)
+    except Exception as exc:
+        _log(f"cross-user partition failed: {exc}")
+        return {}
+    return notices
+
+
+def _arm_untrusted_turn(root: Path, hook_input: dict, inject: list,
+                        skip_ids: "set | None" = None) -> None:
+    """Arm the untrusted-turn state (for the PreToolUse gate) when ``inject``
+    carries untrusted DM content whose body is actually in context (ms-169
+    e-6237). ``skip_ids`` excludes cross-user DMs (e-6238) whose body was NOT
+    injected — those arm on explicit fetch (beacon dm show), not here.
+
+    The framing (e-6235) and the gate share one classifier
+    (``untrusted_frame.is_untrusted_event``), so what gets fenced as untrusted in
+    the AI context is exactly what arms the gate. Best-effort: any failure is
+    logged and swallowed (arming must never block the inbox path)."""
+    uf = _import_untrusted_frame()
+    ut = _import_untrusted_turn()
+    if uf is None or ut is None:
+        return
+    skip = skip_ids or set()
+    try:
+        untrusted_ids = [
+            ev.get("event_id") for ev in inject
+            if uf.is_untrusted_event(ev) and ev.get("event_id")
+            and ev.get("event_id") not in skip
+        ]
+        if untrusted_ids:
+            ut.arm(
+                root,
+                ut.resolve_session_key(root, hook_input),
+                event_ids=untrusted_ids,
+            )
+    except Exception as exc:
+        _log(f"untrusted-turn arm failed: {exc}")
+
+
 def _classify_delivery(ev: dict, allowlist) -> tuple:
     """Resolve ``(delivery, downgraded_from, downgrade_reason)`` for one event.
 
@@ -853,8 +994,14 @@ def _render_context(events: list[dict], notify_only_count: int,
                     trek_actions: list[dict] | None = None,
                     trek_progress_check_actions: list[dict] | None = None,
                     trek_task_review_actions: list[dict] | None = None,
-                    trek_leader_digest_actions: list[dict] | None = None) -> str:
+                    trek_leader_digest_actions: list[dict] | None = None,
+                    cross_user_notices: dict | None = None) -> str:
     """Build the additionalContext markdown for AI inject.
+
+    ``cross_user_notices`` (ms-169 e-6238) maps event_id → a bodyless arrival
+    notice for cross-user DMs whose body was withheld from context (stashed for
+    `beacon dm show`). Events in this map are rendered as notices; every other
+    event keeps the full-body path inside the untrusted frame.
 
     ``autonomous_actions`` is the subset of ``events`` that survived the
     auto-execute allowlist gate AND landed on the ``operation-trigger``
@@ -921,9 +1068,36 @@ def _render_context(events: list[dict], notify_only_count: int,
             "`bus_auto_execute_channels` allowlist に無いため)"
         )
     parts.append("")
-    for ev in events:
-        parts.append(_format_event(ev))
-        parts.append("")
+    # ms-169 e-6235: the generic event list is free-text received from other
+    # sessions — a body is DATA, never an instruction to this AI. Fence it in
+    # the shared untrusted frame so an embedded「〜して」can't pass as the user's
+    # own request (the 2026-09-07 ocean.txt injection). Fail-safe: if the shared
+    # module can't load, fall back to the bare body (framing is prompt-level
+    # mitigation per ms-169 方針5; the PreToolUse gate (A) is the hard stop).
+    # ms-169 e-6238: cross-user DMs render as a bodyless notice (their body was
+    # withheld from context and stashed for `beacon dm show`); every other event
+    # keeps the full-body path inside the untrusted frame.
+    notices = cross_user_notices or {}
+    _uf = _import_untrusted_frame()
+    body_events = [ev for ev in events if ev.get("event_id") not in notices]
+    rendered = []
+    for ev in body_events:
+        rendered.append(_format_event(ev))
+        rendered.append("")
+    if rendered:
+        if _uf is not None and any(_uf.is_untrusted_event(ev) for ev in body_events):
+            parts.append(_uf.wrap_untrusted("\n".join(rendered).rstrip("\n")))
+            parts.append("")
+        else:
+            parts.extend(rendered)
+    if notices:
+        parts.append(
+            "以下は cross-user DM の到着通知です (本文は injection 対策で伏せてあります):")
+        for ev in events:
+            note = notices.get(ev.get("event_id"))
+            if note:
+                parts.append(note)
+                parts.append("")
     parts.append("--- 取り扱いガイド ---")
     parts.append(
         "- 返信する場合: `beacon bus send --channel <ch> --payload '<json>' "
@@ -1054,6 +1228,19 @@ def main() -> None:
     session_id = _load_session_id(root, hook_input)
     if not session_id:
         return
+
+    # ms-169 e-6237: a human UserPromptSubmit is a turn boundary — the human has
+    # retaken the turn, so clear any untrusted-turn armed by a prior DM. If this
+    # same round injects new untrusted content, it re-arms below. Done before the
+    # cloud-config early returns so a human prompt clears stale state even when
+    # the bus is briefly unreachable. Best-effort: never blocks the hook.
+    if hook_event_name == "UserPromptSubmit":
+        _ut = _import_untrusted_turn()
+        if _ut is not None:
+            try:
+                _ut.disarm(root, _ut.resolve_session_key(root, hook_input))
+            except Exception as exc:
+                _log(f"untrusted-turn disarm failed: {exc}")
 
     # ms-54 / e-1319: the CLI heartbeat refresh was retired post Option C.
     # The bridge's poll loop now stamps both last_active and last_poll_at
@@ -1321,6 +1508,17 @@ def main() -> None:
     # later prompts it's noise.
     monitor_suggested = hook_event_name == "SessionStart"
 
+    # ms-169 e-6238 (B, cross-user scoped): a cross-user DM's body must NOT be
+    # auto-injected as prose — only a bodyless notice, with the body stashed
+    # locally for explicit `beacon dm show <event_id>`. Same-user DMs keep the
+    # full-body path. Fail-closed: unresolved identity ⇒ treated as cross-user.
+    cross_user_notices = _partition_cross_user(root, inject)
+
+    # ms-169 e-6237: arm the untrusted-turn for the PreToolUse gate. Only the
+    # same-user (full-body) events arm here — a cross-user DM has no body in
+    # context yet, so it arms on explicit fetch (beacon dm show) instead.
+    _arm_untrusted_turn(root, hook_input, inject, skip_ids=set(cross_user_notices))
+
     # Read the budget gate state so the AI knows how many sends it has left
     # before refuse. The hook never mutates the budget — only `bus send`
     # decrements; the hook is read-only.
@@ -1335,6 +1533,7 @@ def main() -> None:
         trek_progress_check_actions,
         trek_task_review_actions,
         trek_leader_digest_actions,
+        cross_user_notices=cross_user_notices,
     ))
 
     elapsed_ms = int((time.monotonic() - started) * 1000)

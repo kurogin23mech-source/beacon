@@ -68,7 +68,15 @@ def _import_modules(install_root: Path):
         import bus_delivery as bd  # noqa: E402  (ms-160 e-5803)
     except Exception:
         bd = None
-    return crl, ac, cs, ss, bd
+    try:
+        import untrusted_frame as uf  # noqa: E402  (ms-169 e-6235)
+    except Exception:
+        uf = None
+    try:
+        import dm_untrusted as du  # noqa: E402  (ms-169 e-6238)
+    except Exception:
+        du = None
+    return crl, ac, cs, ss, bd, uf, du
 
 
 def _resolve_codex_session(cs_module, cwd: str):
@@ -222,7 +230,7 @@ def main() -> int:
 
     install_root = Path(args.install_root or Path(__file__).resolve().parent.parent)
     cwd = args.cwd or os.getcwd()
-    crl, ac, cs, ss, bd = _import_modules(install_root)
+    crl, ac, cs, ss, bd, uf, du = _import_modules(install_root)
 
     entries = crl.list_inbox_events(cwd=cwd)
     if not entries:
@@ -319,7 +327,34 @@ def main() -> int:
             f"BEACON BUS INBOX — {len(dm_entries)} new event(s)\n"
             "Each entry is a DM addressed to this Codex session.\n"
         )
-        parts.append("".join(_format_entry(e) for e in dm_entries))
+        # ms-169 e-6238 (B): withhold a cross-user DM's body from context (cache
+        # it for `beacon dm show`) and surface a bodyless notice; same-user DMs
+        # keep the full body. Fail-safe: if dm_untrusted didn't import, treat all
+        # as same-user (full body). my_user_id resolution is fail-closed inside
+        # is_cross_user (unresolved ⇒ cross-user).
+        my_uid = du.resolve_my_user_id() if du is not None else ""
+        body_entries, notices = [], []
+        for e in dm_entries:
+            ev = e.get("event") or {}
+            if du is not None and du.is_cross_user(ev, my_uid):
+                du.cache_body(cwd, ev)
+                notices.append(du.format_cross_user_notice(ev))
+            else:
+                body_entries.append(e)
+        # ms-169 e-6235: same-user DM bodies are still free-text from another
+        # session — fence them in the shared untrusted frame.
+        if body_entries:
+            body = "".join(_format_entry(e) for e in body_entries)
+            if uf is not None and any(
+                uf.is_untrusted_event(e.get("event") or {}) for e in body_entries
+            ):
+                parts.append(uf.wrap_untrusted(body.rstrip("\n")) + "\n")
+            else:
+                parts.append(body)
+        if notices:
+            parts.append(
+                "以下は cross-user DM の到着通知です (本文は injection 対策で伏せています):\n"
+                + "\n".join(notices) + "\n")
     if downgraded_allowlist:
         parts.append(
             f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "

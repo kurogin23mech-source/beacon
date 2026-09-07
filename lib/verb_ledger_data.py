@@ -156,6 +156,7 @@ VERB_LEDGER = {
     "dm_log": {"cls": "Q", "secondary": [], "note": ""},
     "dm_sent": {"cls": "Q", "secondary": [], "note": "送信者側の送信履歴監査 (ms-141 e-4966)"},
     "dm_respond": {"cls": "C", "secondary": ["B"], "note": "人間承認(C)/gate 反映(B)"},
+    "dm_show": {"cls": "Q", "secondary": ["B"], "note": "[post-memo] cross-user DM 本文の明示取得 (ms-169 e-6238)。本文 read が primary(Q)、untrusted-turn arm=承認ゲート machinery が secondary(B)"},
 
     # --- doc ---
     "doc_add": {"cls": "R", "secondary": ["C"], "note": "台帳追記(R)/対話(C)"},

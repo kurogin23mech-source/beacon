@@ -1902,6 +1902,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_dm_sent.add_argument("--project", dest="dm_project_id", default="")
     p_dm_sent.add_argument("--json", action="store_true")
 
+    # ms-169 e-6238 (B): explicit fetch of a withheld cross-user DM body.
+    p_dm_show = dm_sub.add_parser("show", add_help=False)
+    p_dm_show.add_argument("dm_event_id", nargs="?", default="")
+    p_dm_show.add_argument("--json", action="store_true")
+
     # ---- auth login / logout / status (cloud OAuth) ----
     # `beacon auth login` opens a browser and signs in with Google so the
     # cloud project APIs (firestore / WS) become reachable. commands.py
@@ -5650,6 +5655,14 @@ def _handle_dm(root: Path, args: argparse.Namespace) -> int:
             "BEACON_JSON": "1" if getattr(args, "json", False) else "",
         }
         return _run_commands_py(root, "dm_sent", env)
+
+    if cmd == "show":
+        # ms-169 e-6238 (B): explicit fetch of a withheld cross-user DM body.
+        env = {
+            "BEACON_DM_EVENT_ID": getattr(args, "dm_event_id", "") or "",
+            "BEACON_JSON": "1" if getattr(args, "json", False) else "",
+        }
+        return _run_commands_py(root, "dm_show", env)
 
     print(f"Unknown dm subcommand: {cmd}")
     return 2

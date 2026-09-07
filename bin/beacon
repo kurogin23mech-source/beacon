@@ -3370,9 +3370,35 @@ EOF
                         python3 "$COMMANDS_PY" dm_sent
                 fi
                 ;;
+            # ms-169 / e-6238: explicit fetch for a cross-user DM body that the
+            # inbox hook withheld from AI context (injection root fix B). Reads
+            # the locally-stashed body, prints it under the untrusted frame, and
+            # arms the untrusted-turn so subsequent side-effect tools gate.
+            # Usage: beacon dm show <event_id> [--json]
+            show)
+                _dm_show_event_id=""
+                _dm_show_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --json) _dm_show_json="1"; shift ;;
+                        -h|--help)
+                            echo "Usage: beacon dm show <event_id> [--json]"
+                            echo "  Read a withheld cross-user DM body (ms-169 B). Prints it as"
+                            echo "  untrusted data and arms the side-effect approval gate."
+                            exit 0 ;;
+                        *)
+                            if [[ -z "$_dm_show_event_id" ]]; then _dm_show_event_id="$1"; fi
+                            shift ;;
+                    esac
+                done
+                BEACON_DM_EVENT_ID="$_dm_show_event_id" \
+                    BEACON_JSON="$_dm_show_json" \
+                    python3 "$COMMANDS_PY" dm_show
+                ;;
             *)
                 cat <<'EOF'
 Usage: beacon dm send    --to <sid> --payload '<json>' [--in-reply-to <eid>] [--manual] [--recipient-confirmed] [--client-event-id <id> --retry] [--action <name>]... [--project <id>] [--json]
+       beacon dm show   <event_id> [--json]
        (--client-event-id <id> --retry: idempotent resend after an ambiguous
         failure — reuse the id from the first send's --json; single-recipient only)
        beacon dm respond approve <event_id> [--project <id>] [--json]
