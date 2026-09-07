@@ -146,6 +146,44 @@ HARNESS = textwrap.dedent(r"""
     A(!h.includes("<script>"), "label is html-escaped");
     A(h.includes("&lt;script&gt;"), "escaped entities present");
 
+    // --- ms-162 e-6219: per-target filter (deliverablesForTarget) ------------
+    const withEntries = [{
+      target_class: "milestone", kind: "feature-map", label: "機能",
+      projector: "changelog", ref: "",
+      resolved: { strategy: "changelog", found: true, count_active: 3,
+        categories: [],
+        entries: [
+          { source_target: "ms-1", source_kind: "milestone", category: "cap",
+            title: "A", summary: "aaa", status: "active", ref: "e-1" },
+          { source_target: "ms-2", source_kind: "milestone", category: "cap",
+            title: "B", summary: "bbb", status: "active", ref: "" },
+          { source_target: "ms-1", source_kind: "milestone", category: "flow",
+            title: "C", summary: "ccc", status: "active", ref: "" },
+        ] },
+    }];
+    const f1 = deliverablesForTarget(withEntries, { id: "ms-1" });
+    A(f1.length === 2, "deliverablesForTarget selects only ms-1 entries");
+    A(f1.every(e => e.source_target === "ms-1"), "filtered entries all belong to ms-1");
+    const f2 = deliverablesForTarget(withEntries, { id: "ms-2" });
+    A(f2.length === 1 && f2[0].title === "B", "ms-2 selects its one entry");
+    A(deliverablesForTarget(withEntries, { id: "ms-9" }).length === 0, "unrelated target → none");
+    A(deliverablesForTarget([], { id: "ms-1" }).length === 0, "no deliverables → none");
+    A(deliverablesForTarget(withEntries, null).length === 0, "no target → none");
+    // rollup/doc rows carry no per-entry attribution → contribute nothing per-target
+    A(deliverablesForTarget(rollup, { id: "opp-1" }).length === 0, "rollup has no per-entry attribution");
+
+    // --- per-target render + empty contract ----------------------------------
+    const ph = renderDeliverablesForTarget(f1);
+    A(ph.includes(">A<") || ph.includes("A</span>"), "per-target render shows entry A");
+    A(ph.includes("aaa"), "per-target render shows summary");
+    A(ph.includes("cap"), "per-target render shows category");
+    A(renderDeliverablesForTarget([]) === "", "empty per-target → '' (caller shows empty copy)");
+    A(renderDeliverablesForTarget(null) === "", "null per-target → ''");
+    // escaping in the per-target row
+    const xh = renderDeliverablesForTarget([{ source_target: "ms-1", title: "<b>&", summary: "" }]);
+    A(!xh.includes("<b>&"), "per-target title escaped");
+    A(xh.includes("&lt;b&gt;"), "per-target escaped entities present");
+
     console.log("ALL_PASS");
 """)
 
@@ -159,19 +197,33 @@ def test_deliverable_panel_render(tmp_path):
     assert "ALL_PASS" in result.stdout
 
 
-def test_deliverable_panel_wired_into_dashboard():
-    """The panel must be composed into the dashboard, lazy-loaded on project load
-    via the shared getter, and backed by a single pending-sentinel getter — the
-    same wiring discipline the decision-log uses (guards what the pure-fn test
-    can't see)."""
+def test_deliverable_wired_into_root_and_per_target():
+    """ms-162 e-6219: the produced-value projection feeds TWO surfaces — (a) the
+    root/project union in the root header, and (b) each target's deliverable
+    sub-tab — lazy-loaded once on project load via the shared getter. The old
+    free-floating dashboard panel (which rendered above the objective) is gone.
+    Guards what the pure-fn test can't see (the composition wiring)."""
     with open(INDEX_HTML, encoding="utf-8") as f:
         html = f.read()
     assert "function isDeliverablesPending()" in html, \
         "the shared 'is the deliverable projection pending?' getter must exist"
     assert "function ensureDeliverablesLoaded()" in html, \
         "the lazy-loader must exist"
-    assert "renderDeliverables(state.deliverables, { loading: isDeliverablesPending() })" in html, \
-        "the dashboard must compose the panel via the shared getter"
+    assert "function deliverablesForTarget(" in html, \
+        "the per-target filter (the decisionsForTarget analog) must exist"
+    # (a) root/project union rides the root header, receiving the resolved projection
+    assert "renderRootHeader(p.root, state.deliverables, isDeliverablesPending())" in html, \
+        "the root header must receive the deliverable union"
+    # the old free-floating standalone panel must be GONE (it caused the placement bug)
+    assert "renderDeliverables(state.deliverables, { loading: isDeliverablesPending() })" not in html, \
+        "the standalone dashboard deliverable panel must be removed"
+    # (b) per-target deliverable sub-tab, filtered by that target
+    assert "deliverablesForTarget(state.deliverables, ms)" in html, \
+        "each milestone detail must compute its per-target produced value"
+    assert "tab('deliverable', '生み出した価値'" in html, \
+        "the per-target deliverable sub-tab must be declared with its label"
+    assert "まだ記録された価値はありません" in html, \
+        "empty per-target state must be shown, not hidden"
     assert "ensureDeliverablesLoaded();" in html, \
         "the deliverable projection must be lazy-loaded on project load"
     assert "/api/projects/${state.projectId}/deliverables" in html, \
