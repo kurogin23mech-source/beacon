@@ -51,6 +51,7 @@ import tick_scheduler  # ms-107 e-3434/e-3461: target-agnostic periodic-tick cad
 import deadline  # ms-139 e-4953: L2 締切エンジン (overdue 規則 + reminder dedup)
 import occupation  # ms-142 e-5010: 職種非依存の Target/WorkItem 抽象イテレータ
 import tick_health as tick_health_mod  # e-1391 / ms-66: tick-liveness evaluation
+import bus_liveness  # ms-165 e-5965: progress dimension (draining/reachable) pure helpers
 
 # e-1391 (ms-66) — last successful periodic tick, recorded by the
 # trek-scheduler tick endpoint and read back by /api/system/tick-health so an
@@ -1836,9 +1837,44 @@ def _compute_poll_health(session: dict, now_dt) -> dict:
     }
 
 
+# ms-165 (e-5965): one oldest-first store window is read per LIVE session to
+# find its oldest unread event (the draining probe). Bounded to preserve the
+# 2026-08-20 per-request memory bound; a backlog beyond this window is not
+# detected here, which fails toward "reachable" (never a false wedge that would
+# wrongly warn a healthy send). Env-tunable for prod.
+_DRAINING_SCAN_LIMIT = int(
+    os.environ.get("BEACON_BUS_DRAINING_SCAN_LIMIT", "400") or "400")
+
+
+def _oldest_unread_addressed_created_at(project_id: str, recipient_sid: str,
+                                        now_dt) -> str:
+    """Return the ``created_at`` of the OLDEST event still unread by
+    ``recipient_sid`` (past its cursor watermark), or ``""`` if none is found
+    within the bounded scan.
+
+    Reads the recipient's cursor, then a single oldest-first window of events
+    newer than it, returning the first one addressed to the recipient — because
+    the stream is oldest-first, that IS the oldest unread event. Session-scoped
+    only (``recipient_user_id=""``): the documented wedge is session-pinned DMs
+    piling up (a695553f), and resolving the session's user_id per call would add
+    cost for the far rarer user-scoped case. Best-effort — callers wrap in a
+    fail-open try/except and treat any miss as unknown draining.
+    """
+    if not recipient_sid:
+        return ""
+    cursor = db.get_bus_cursor(project_id, recipient_sid) or {}
+    since = str(cursor.get("last_seen_at", "") or "")
+    batch = db.list_bus_events(
+        project_id, since=since, channel="", limit=_DRAINING_SCAN_LIMIT) or []
+    for e in batch:
+        if _bus_event_addressed_to(e, recipient_sid, ""):
+            return str(e.get("created_at") or "")
+    return ""
+
+
 def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
-    """Stamp poll_health / bridge / ws_live / live onto a session row in place
-    (ms-101 / e-3010).
+    """Stamp poll_health / bridge / ws_live / live / draining / reachable onto a
+    session row in place (ms-101 / e-3010, ms-165 / e-5965).
 
     従来 directory の「この session は今 DM を受け取れるか」の signal は
     ``poll_health.healthy`` だった。これは ``last_poll_at`` (= 最後にポーリング
@@ -1881,6 +1917,52 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     # heartbeat stamp (can't tell).
     session["heartbeat_fresh"] = _heartbeat_is_fresh(
         str(session.get("last_heartbeat_at") or ""), now_dt)
+    # ms-165 (e-5965): progress dimension. `live`/`ws_live` above are TRANSPORT
+    # (does a receive path exist), `heartbeat_fresh` is ATTENTION (is a human/AI
+    # driving). `draining` is the third, orthogonal axis: is the session
+    # actually CONSUMING its inbox? A live session can be wedged — polling but
+    # never advancing its cursor past events that arrived long ago. `reachable`
+    # folds it in for the send path: reachable = live AND (draining is not
+    # False). The `live` union is deliberately UNCHANGED (an idle fork stays
+    # live → no picker/delivery regression); `reachable` is an ADDITIONAL field
+    # only the send-path strict check reads. Scanned only for LIVE sessions (a
+    # not-live session is unreachable regardless, so the store window is skipped
+    # to bound directory cost). See CORE doc `liveness-three-dimensions`.
+    draining: Optional[bool] = None
+    if session["live"] and os.environ.get("BEACON_BUS_NO_DRAINING_CHECK", "") != "1":
+        try:
+            oldest = _oldest_unread_addressed_created_at(project_id, sid, now_dt)
+            draining = bus_liveness.derive_draining(
+                oldest, now_dt, _ATTENTIVE_HEARTBEAT_MAX_AGE_S)
+        except Exception:  # pragma: no cover - defensive; fail-open to unknown
+            draining = None
+    session["draining"] = draining
+    session["reachable"] = bus_liveness.is_reachable(session["live"], draining)
+
+
+def _classify_recipient_send_delivery(project_id: str, recipient_sid: str,
+                                      now_dt) -> Optional[str]:
+    """Return the ms-165 graded send verdict for a DM recipient session, or
+    ``None`` if it can't be resolved (fail-open — no new response flags).
+
+    Resolves the recipient session row, stamps liveness (which computes
+    ``draining``/``reachable``), and maps to
+    :func:`bus_liveness.classify_send_delivery`. This is the SERVER choke point
+    every client path (CLI --json, MCP reply, headless) passes, so the wedged
+    signal reaches paths the CLI-side advisory (``commands_shared`` bridge
+    discovery) can't. Unknown recipient / opt-out / store error → ``None`` so a
+    reachability blip never breaks a send.
+    """
+    if os.environ.get("BEACON_BUS_NO_DRAINING_CHECK", "") == "1":
+        return None
+    sessions = db.list_sessions(project_id) or []
+    row = next((s for s in sessions
+                if s.get("session_id") == recipient_sid), None)
+    if row is None:
+        return None
+    _stamp_session_liveness(row, project_id, now_dt)
+    return bus_liveness.classify_send_delivery(
+        row.get("live"), row.get("draining"))
 
 
 # ---------------------------------------------------------------------------
@@ -2365,6 +2447,33 @@ async def post_bus_event(
     # the very next turn.
     if should_gate:
         data["pending_approval"] = True
+
+    # ms-165 (e-5965): graded send-side reachability. A DM can be addressed to a
+    # session that is LIVE (bridge polling) yet WEDGED (not draining its inbox);
+    # last_poll_at can't see this, so the sender is fooled into "sent✓
+    # delivered✗". Classify the recipient from the existing unread+cursor state
+    # (computed BEFORE append, so this fresh event doesn't count against its own
+    # verdict) and, when it is live-but-wedged, persist LOUD STRUCTURED flags on
+    # the event. They ride the send response (every client path surfaces them,
+    # not a soft field a caller skips past) AND the stored event, so `bus status`
+    # shows "delivery uncertain" on the receipt too. not-live keeps existing
+    # behaviour (the picker / soft-warn covers a dead session); the healthy
+    # common path is byte-unchanged (no extra keys) — the no-regression
+    # guarantee pinned by test. This is the SERVER choke point, reaching paths
+    # the CLI-side advisory can't (MCP reply / headless). Best-effort.
+    if body.channel == "dm" and recipient_sid_for_gate:
+        try:
+            _send_verdict = _classify_recipient_send_delivery(
+                project_id, recipient_sid_for_gate,
+                datetime.datetime.now(datetime.timezone.utc))
+        except Exception as _reach_exc:  # pragma: no cover - defensive
+            logging.getLogger(__name__).warning(
+                "recipient reachability check failed for recipient=%s: %s",
+                recipient_sid_for_gate, _reach_exc)
+            _send_verdict = None
+        if _send_verdict == bus_liveness.SEND_WEDGED:
+            data["recipient_wedged"] = True
+            data["delivery_uncertain"] = True
 
     event_id = db.append_bus_event(project_id, data)
     audit_record["event_id"] = event_id
