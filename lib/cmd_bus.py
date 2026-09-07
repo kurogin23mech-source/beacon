@@ -1163,6 +1163,18 @@ def cmd_bus_send():
         remaining = max(total - used, 0)
         line += f"  (budget: {used}/{total}, {remaining} remaining)"
     print(line)
+    # ms-165 (e-5965): the server flags a live-but-wedged recipient (polling but
+    # not draining its inbox) on the send response. In --json mode these fields
+    # ride the event object above (structured, not skippable); on the human path
+    # we print a loud warning so the sender isn't fooled by "sent✓ delivered✗".
+    if event.get("recipient_wedged"):
+        print(
+            "⚠ recipient is LIVE but NOT draining its inbox (delivery "
+            "uncertain): it is polling yet not consuming addressed messages. "
+            "Your DM was enqueued but may sit undelivered — the receiver likely "
+            "needs a `/mcp` reconnect to resume consuming.",
+            file=sys.stderr,
+        )
 
 
 def _fetch_pending_dm_lookup(client, project_id: str) -> dict:
@@ -1560,6 +1572,13 @@ def cmd_bus_status():
                _fmt_by(delivered_by, event.get("delivered_by_identity"))))
     print(_row("✓" if opened_at else "✗", "opened", opened_at,
                _fmt_by(opened_by, event.get("opened_by_identity"))))
+    # ms-165 (e-5965): if the recipient was LIVE but not draining its inbox at
+    # send time, the server stamped these flags on the event. Surface them on
+    # the receipt so "sent ✓ / delivered ✗" is explained ("the recipient was
+    # polling but not consuming") rather than looking like a transient stall.
+    if event.get("delivery_uncertain") or event.get("recipient_wedged"):
+        print("  ⚠ recipient not draining at send time — delivery uncertain "
+              "(live but not consuming its inbox; likely needs a /mcp reconnect)")
 
 
 def cmd_dm_sent():
