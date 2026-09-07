@@ -166,6 +166,61 @@ def _import_untrusted_frame():
     return None
 
 
+_UNTRUSTED_TURN_CACHE: "object | None" = None
+_UNTRUSTED_TURN_TRIED = False
+
+
+def _import_untrusted_turn():
+    """Import lib/untrusted_turn lazily, cached. Returns the module or None.
+
+    ms-169 e-6237: the receive hook arms / disarms the untrusted-turn state that
+    the PreToolUse gate (beacon-untrusted-tool-gate.py) reads. Fail-safe: a
+    missing module must never block the inbox path (arming is best-effort; the
+    gate stays silent when unarmed)."""
+    global _UNTRUSTED_TURN_CACHE, _UNTRUSTED_TURN_TRIED
+    if _UNTRUSTED_TURN_TRIED:
+        return _UNTRUSTED_TURN_CACHE
+    _UNTRUSTED_TURN_TRIED = True
+    here = Path(__file__).resolve().parent
+    for lib_dir in (here.parent / "lib", here.parent.parent / "lib"):
+        if (lib_dir / "untrusted_turn.py").exists():
+            sys.path.insert(0, str(lib_dir))
+            try:
+                import untrusted_turn as _ut  # type: ignore[import-not-found]
+            except Exception:
+                return None
+            _UNTRUSTED_TURN_CACHE = _ut
+            return _ut
+    return None
+
+
+def _arm_untrusted_turn(root: Path, hook_input: dict, inject: list) -> None:
+    """Arm the untrusted-turn state (for the PreToolUse gate) when ``inject``
+    carries untrusted DM content (ms-169 e-6237).
+
+    The framing (e-6235) and the gate share one classifier
+    (``untrusted_frame.is_untrusted_event``), so what gets fenced as untrusted in
+    the AI context is exactly what arms the gate. Best-effort: any failure is
+    logged and swallowed (arming must never block the inbox path)."""
+    uf = _import_untrusted_frame()
+    ut = _import_untrusted_turn()
+    if uf is None or ut is None:
+        return
+    try:
+        untrusted_ids = [
+            ev.get("event_id") for ev in inject
+            if uf.is_untrusted_event(ev) and ev.get("event_id")
+        ]
+        if untrusted_ids:
+            ut.arm(
+                root,
+                ut.session_key_from_hook_input(hook_input),
+                event_ids=untrusted_ids,
+            )
+    except Exception as exc:
+        _log(f"untrusted-turn arm failed: {exc}")
+
+
 def _classify_delivery(ev: dict, allowlist) -> tuple:
     """Resolve ``(delivery, downgraded_from, downgrade_reason)`` for one event.
 
@@ -1096,6 +1151,19 @@ def main() -> None:
     if not session_id:
         return
 
+    # ms-169 e-6237: a human UserPromptSubmit is a turn boundary — the human has
+    # retaken the turn, so clear any untrusted-turn armed by a prior DM. If this
+    # same round injects new untrusted content, it re-arms below. Done before the
+    # cloud-config early returns so a human prompt clears stale state even when
+    # the bus is briefly unreachable. Best-effort: never blocks the hook.
+    if hook_event_name == "UserPromptSubmit":
+        _ut = _import_untrusted_turn()
+        if _ut is not None:
+            try:
+                _ut.disarm(root, _ut.session_key_from_hook_input(hook_input))
+            except Exception as exc:
+                _log(f"untrusted-turn disarm failed: {exc}")
+
     # ms-54 / e-1319: the CLI heartbeat refresh was retired post Option C.
     # The bridge's poll loop now stamps both last_active and last_poll_at
     # per iteration (PR #111 / commit 78048b6), so a parallel CLI write would
@@ -1361,6 +1429,11 @@ def main() -> None:
     # session is fresh and the user might not have armed anything yet. On
     # later prompts it's noise.
     monitor_suggested = hook_event_name == "SessionStart"
+
+    # ms-169 e-6237: arm the untrusted-turn for the PreToolUse gate when this
+    # inject carries untrusted DM content. From here until the next human prompt,
+    # a side-effect tool call in this session routes to human approval.
+    _arm_untrusted_turn(root, hook_input, inject)
 
     # Read the budget gate state so the AI knows how many sends it has left
     # before refuse. The hook never mutates the budget — only `bus send`

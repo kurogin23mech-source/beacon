@@ -740,6 +740,15 @@ HOOK_MANIFEST = [
      "matcher": None, "script": "beacon-bus-inbox-hook.py",
      "identity": ("beacon-bus-inbox-hook",),
      "timeout": 15, "statusMessage": "Beacon: checking bus inbox..."},
+    # ms-169 e-6237: the injection hard stop. A PreToolUse gate (matcher "*" =
+    # every tool) that routes a side-effect tool call to human approval while an
+    # untrusted DM body is live in the turn (armed by the bus-inbox hook above).
+    # Read-only calls pass; the gate fails safe (tool proceeds) on any error.
+    {"key": "untrusted-gate", "events": ["PreToolUse"], "matcher": "*",
+     "script": "beacon-untrusted-tool-gate.py",
+     "identity": ("beacon-untrusted-tool-gate",),
+     "timeout": 10,
+     "statusMessage": "Beacon: checking untrusted-turn side-effect gate..."},
 ]
 
 
