@@ -211,9 +211,14 @@ def test_deliverable_wired_into_root_and_per_target():
         "the lazy-loader must exist"
     assert "function deliverablesForTarget(" in html, \
         "the per-target filter (the decisionsForTarget analog) must exist"
-    # (a) root/project union rides the root header, receiving the resolved projection
-    assert "renderRootHeader(p.root, state.deliverables, isDeliverablesPending())" in html, \
-        "the root header must receive the deliverable union"
+    # (a) root header NO LONGER carries the deliverable union (user 要望で除去) —
+    # the class-level union (application-map dump) cluttered the project top, so
+    # the caller now passes only the root. Per-target deliverable stays (below);
+    # the union re-homes to a root deliverable tab as a follow-up.
+    assert "renderRootHeader(p.root)" in html, \
+        "the root header receives only the root (no deliverable union args)"
+    assert "renderRootHeader(p.root, state.deliverables" not in html, \
+        "the deliverable union must NOT be threaded into the root header anymore"
     # the old free-floating standalone panel must be GONE (it caused the placement bug)
     assert "renderDeliverables(state.deliverables, { loading: isDeliverablesPending() })" not in html, \
         "the standalone dashboard deliverable panel must be removed"

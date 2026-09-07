@@ -135,15 +135,16 @@ def test_decision_loading_wired_at_every_callsite():
         "no callsite may re-type the null sentinel inline; all go through the getter"
 
 
-def test_root_header_approximate_open_has_self_describing_title():
-    """AX#2 (PR#722): the fallback 未完了(概算) count must carry a tooltip that
-    says WHY it is approximate, so a zero-context reader doesn't misread it as a
-    fault / unloaded data. The server-provided 進行中 path carries no such note."""
+def test_root_header_has_no_progress_rollup():
+    """ms-162 fix (user 要望): the root header no longer renders the work-item
+    progress rollup (43% バー + 完遂/進行中 と、その概算 tooltip)。集約リストと共に
+    プロジェクト top を潰していたので除去した。header は 大目的 + arm chip + 直近の流れ
+    だけ。ここで rollup 由来のマークアップが silently 復活しないよう固定する。"""
     with open(INDEX_HTML, encoding="utf-8") as f:
         html = f.read()
-    assert "const openTitle = openProvided" in html, \
-        "root header must compute a title only for the approximate (fallback) case"
-    assert "総数−完遂で概算" in html, \
-        "the tooltip must explain the count is an estimate from total-minus-done"
-    assert '<span class="root-hdr-count"${openTitle}>' in html, \
-        "the count span must carry the conditional title attribute"
+    assert "const openTitle = openProvided" not in html, \
+        "the approximate-open title logic (part of the removed rollup) must be gone"
+    assert '<span class="root-hdr-count"${openTitle}>' not in html, \
+        "the rollup count span must be gone from the header"
+    assert 'class="root-hdr-rollup"' not in html, \
+        "the progress rollup markup must be gone from the header"
