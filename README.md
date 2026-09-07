@@ -28,6 +28,7 @@ Beaconが想定するワークフローは**コミット駆動・マイルスト
 - **Audit trail** — every commit and task is recorded under a milestone, making AI session handoffs transparent and human-auditable
 - **CLI-first design** — structured JSON output enables seamless integration with Claude Code Skills
 - **Trek (cross-project協奏作業領域)** — `beacon trek` で複数プロジェクト・複数セッションをまたぐ協奏作業を 1 枚の trek にまとめて追跡できる。CLI でも Web UI でも同じ trek を見て協奏でき、参加・離脱・対象 (scope) 編集・非常停止 (halt) も CLI 1 行で。詳細は [CLI Commands → Treks](#treks)
+- **Injection-safe parallel coordination** — 並行セッション間の DM 連携で、外部から届いた文面 (別ユーザーの DM 本文など) に AI が誘導されて副作用ツール (ファイル書き込み・コマンド実行・外部送信) を勝手に実行しないよう、人間承認ゲートで構造的に防ぐ。AI 開発を安全に並列化するための土台 (ms-169)
 
 ## Requirements
 
@@ -230,17 +231,17 @@ The project owner can invite members from the Web UI (hamburger menu → Members
 | `beacon milestone workspace <id> [--executor ai\|human]` | Create git worktree for isolated development / worktree作成 |
 | `beacon milestone workspace-cleanup <id>` | Remove worktree after work completes / worktree削除 |
 
-### Target Reviews (目的達成レビュー / ms-119)
+### Completion Review (完了レビュー / ms-119)
 
-Human-approval gate for a target's goal-attainment transition (milestone done/close, operation close). The AI assembles intent + evidence; the human owns the verdict. `approve` executes the transition, `reject` does not.
-target が目的を達成したかの遷移（マイルストーン完了・オペレーション終了）に人間承認を挟む。AI が根拠を揃え、確定は人間。approve で遷移実行、reject で遷移せず記録。
+A human-approval gate for a **completion** transition — a milestone reaching done/close, or an operation closing. The AI assembles the intent + evidence; the human owns the verdict. `approve` executes the transition, `reject` records the decision without transitioning.
+マイルストーンの完了（done / close）やオペレーションの終了といった「完了」の遷移に、人間の承認を一段挟む。AI が意図と根拠を揃え、達成したかの確定は人間が下す。approve で遷移が実行され、reject は遷移せず判断だけ記録に残す。
 
 | Command | Description |
 |---------|-------------|
-| `beacon target review-request <id> --new-state <s> [--old-state <s>] [--intent <text>] [--evidence e-1,e-2]` | Request approval for a target transition / 遷移の承認依頼 |
+| `beacon target review-request <id> --new-state <s> [--old-state <s>] [--intent <text>] [--evidence e-1,e-2]` | Request approval for a completion transition / 完了遷移の承認依頼 |
 | `beacon target approve <entry-id> [--rationale <text>]` | Approve (= executes the transition) / 承認（遷移実行） |
 | `beacon target reject <entry-id> [--rationale <text>]` | Reject (= transition does NOT execute) / 却下（遷移せず） |
-| `beacon target list [--target <id>] [--pending] [--json]` | List transition-approval requests / 承認依頼一覧 |
+| `beacon target list [--target <id>] [--pending] [--json]` | List pending completion-approval requests / 承認依頼一覧 |
 | `beacon milestone done <id> --review` | Route completion through the review gate / 完了をレビュー経由に |
 | `beacon review context --type <ax\|philosophy> [--pr <n> \| --diff-ref <base...head>] [--origin-doc <doc-id>] [--mode diff]` | Emit the review-kernel bundle (原典 + mechanical diff) for an independent judge / 独立 judge 用の review-kernel bundle を出力 |
 
