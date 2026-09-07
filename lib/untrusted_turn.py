@@ -66,18 +66,40 @@ def _now_iso() -> str:
 
 
 def session_key_from_hook_input(hook_input: dict) -> str:
-    """Resolve the key both hooks agree on: the harness session id.
+    """Resolve the key from a harness hook input's ``session_id``.
 
     Claude Code passes the same ``session_id`` to every hook event in a session
-    (UserPromptSubmit and PreToolUse alike), so keying on it makes the receive
-    hook's arm and the gate's read line up. Sanitised to a safe token. Returns
-    "" when absent — callers treat an empty key as "cannot track" (fail-safe:
-    the gate then does not fire, rather than gate everything blindly).
+    (UserPromptSubmit and PreToolUse alike). Sanitised to a safe token. Returns
+    "" when absent. Prefer ``resolve_session_key`` when a project root is
+    available (it also lets a plain CLI — ``beacon dm show`` — agree on the key).
     """
     if not isinstance(hook_input, dict):
         return ""
     raw = hook_input.get("session_id") or ""
     return _SAFE_KEY_RE.sub("", str(raw))[:128]
+
+
+def resolve_session_key(root: "str | Path", hook_input: dict = None) -> str:
+    """Resolve the untrusted-turn key that hook + gate + CLI all agree on.
+
+    Prefers ``.beacon/session.json``'s ``session_id`` (readable by every process
+    in the cwd — the two inbox hooks, the PreToolUse gate, AND the ``beacon dm
+    show`` CLI that has no harness hook input), falling back to the harness
+    ``hook_input.session_id``. Sanitised; "" when neither resolves.
+
+    Keying on the on-disk beacon session id (not only the harness id) is what
+    lets the CLI's explicit fetch (``beacon dm show``) arm the SAME turn the gate
+    reads — the harness id never reaches a plain CLI invocation.
+    """
+    try:
+        sess = json.loads(
+            (Path(root) / ".beacon" / "session.json").read_text(encoding="utf-8"))
+        sid = sess.get("session_id") if isinstance(sess, dict) else ""
+    except Exception:
+        sid = ""
+    if not sid and isinstance(hook_input, dict):
+        sid = hook_input.get("session_id") or ""
+    return _SAFE_KEY_RE.sub("", str(sid or ""))[:128]
 
 
 def _state_path(root: "str | Path") -> Path:

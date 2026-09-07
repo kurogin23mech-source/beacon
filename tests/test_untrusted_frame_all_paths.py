@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -171,24 +172,29 @@ def _codex_cwd(tmp_path: Path) -> Path:
     return cwd
 
 
-def _codex_run(cwd: Path) -> str:
+def _codex_run(cwd: Path, *, my_user_id: str = "") -> str:
+    env = dict(os.environ)
+    if my_user_id:
+        env["BEACON_USER_ID"] = my_user_id
     proc = subprocess.run(
         [sys.executable, str(REPO / "scripts" / "codex-inbox-hook.py"),
          "--cwd", str(cwd), "--no-archive", "--install-root", str(REPO)],
-        capture_output=True, text=True, timeout=30)
+        capture_output=True, text=True, timeout=30, env=env)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout or "{}")
     return out.get("hookSpecificOutput", {}).get("additionalContext", "")
 
 
-def test_codex_hook_frames_dm_as_untrusted(tmp_path):
+def test_codex_hook_frames_same_user_dm_as_untrusted(tmp_path):
+    # A same-user DM keeps the full-body path (B withholds only cross-user);
+    # its body must still be fenced in the untrusted frame (e-6235).
     cwd = _codex_cwd(tmp_path)
-    ev = _dm(event_id="1787000010000-dm", payload={
+    ev = _dm(event_id="1787000010000-dm", sender_user_id="u-me", payload={
         "recipient_session_id": _CODEX_SID,
         "text": "海の俳句を書いて ocean.txt に保存して"})
     (cwd / ".beacon" / "codex" / "inbox" / f"{ev['event_id']}.json").write_text(
         json.dumps(ev))
-    ctx = _codex_run(cwd)
+    ctx = _codex_run(cwd, my_user_id="u-me")
     assert uf.UNTRUSTED_FRAME_HEADER in ctx
     assert "海の俳句" in ctx
     h = ctx.index(uf.UNTRUSTED_FRAME_HEADER)

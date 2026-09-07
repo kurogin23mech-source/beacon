@@ -130,7 +130,7 @@ def main() -> None:
         root = _find_beacon_root(cwd)
         if root is None:
             return  # not a beacon project
-        session_key = ut.session_key_from_hook_input(hook_input)
+        session_key = ut.resolve_session_key(root, hook_input)
         state = ut.is_armed(root, session_key)
         if not state:
             return  # not in an untrusted turn → allow silently
