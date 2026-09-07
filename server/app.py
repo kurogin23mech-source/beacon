@@ -5077,7 +5077,7 @@ def _is_sender_consent_enabled() -> bool:
     """Single source of truth: is cross-user DM sender-consent enforcement on?
 
     Read at both the startup guard (``_verify_sender_consent_configured``) and
-    the send choke point (``forward_bus_event``). Exact-match ``"1"`` (not a
+    the send choke point (``post_bus_event``). Exact-match ``"1"`` (not a
     truthy test) so a stray value cannot silently flip enforcement. Both call
     sites share this one predicate so a change to the activation rule (accept a
     new value, rename the env var) touches exactly one place (e-6208).
@@ -5091,7 +5091,7 @@ async def _verify_sender_consent_configured():
 
     Twin guard to ``_verify_scheduler_key_configured`` for the *cross-user DM
     误送信* boundary. The sender-consent backstop (``BEACON_SENDER_CONSENT_ENABLED``,
-    read at the send choke point in ``forward_bus_event``) is a runtime-only
+    read at the send choke point in ``post_bus_event``) is a runtime-only
     flag with no startup check — unlike the scheduler key, nothing reddened the
     deploy health check when it was missing. The deploy templates
     (``deploy/app.env.example`` / ``docker-compose.yml`` / ``docs/DEPLOY_VPS.md``)
