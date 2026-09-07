@@ -2251,7 +2251,7 @@ async def post_bus_event(
     #      with a misleading "use /beacon-dm-send" hint. Fixed: BEACON_SENDER_
     #      CONSENT_ENABLED gates enforcement (default OFF); flip it on only once
     #      a claim-capable client is rolled out.
-    consent_enforced = os.environ.get("BEACON_SENDER_CONSENT_ENABLED") == "1"
+    consent_enforced = _is_sender_consent_enabled()
     # Sender = the authoritative (project-independent) identity resolved once
     # above (e-3886). The ms-70 gate and this backstop now share exactly one
     # sender axis, so they can never diverge on "who is sending".
@@ -5073,6 +5073,18 @@ async def _verify_scheduler_key_configured():
         )
 
 
+def _is_sender_consent_enabled() -> bool:
+    """Single source of truth: is cross-user DM sender-consent enforcement on?
+
+    Read at both the startup guard (``_verify_sender_consent_configured``) and
+    the send choke point (``forward_bus_event``). Exact-match ``"1"`` (not a
+    truthy test) so a stray value cannot silently flip enforcement. Both call
+    sites share this one predicate so a change to the activation rule (accept a
+    new value, rename the env var) touches exactly one place (e-6208).
+    """
+    return os.environ.get("BEACON_SENDER_CONSENT_ENABLED") == "1"
+
+
 @app.on_event("startup")
 async def _verify_sender_consent_configured():
     """Refuse to start in production with sender-consent silently OFF (e-6208).
@@ -5104,8 +5116,14 @@ async def _verify_sender_consent_configured():
     Consent OFF is a *guard not active* rather than an open door, so an
     acknowledged opt-out is permitted — but only when acknowledged explicitly.
     """
-    consent_enabled = os.environ.get("BEACON_SENDER_CONSENT_ENABLED") == "1"
-    if not _auth_enabled or consent_enabled:
+    if _is_sender_consent_enabled():
+        return
+    if not _auth_enabled:
+        _server_logger.info(
+            "sender-consent enforcement inactive "
+            "(BEACON_API_AUTH=0 — local dev / test posture); set "
+            "BEACON_SENDER_CONSENT_ENABLED=1 before deploying to production"
+        )
         return
     if os.environ.get("BEACON_SENDER_CONSENT_ALLOW_DISABLED") == "1":
         _server_logger.warning(

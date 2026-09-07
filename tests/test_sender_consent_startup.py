@@ -101,11 +101,20 @@ def test_startup_allows_production_with_explicit_optout(
 
 
 def test_startup_allows_dev_mode_with_consent_disabled(
-    monkeypatch, _restore_auth_flag
+    monkeypatch, _restore_auth_flag, caplog
 ):
-    # local dev / unit tests (auth off): consent OFF is fine, no-op
+    # local dev / unit tests (auth off): consent OFF is fine, but must not be
+    # a *silent* no-op — an INFO log confirms the guard ran and skipped (mirrors
+    # the scheduler-key twin's dev-posture INFO, e-6208 AX finding).
+    import logging
+
     app_module._auth_enabled = False
-    _run_startup_guard()  # must not raise
+    with caplog.at_level(logging.INFO):
+        _run_startup_guard()  # must not raise
+    assert any(
+        "sender-consent enforcement inactive" in r.message
+        for r in caplog.records
+    ), "dev-posture skip must emit an observable INFO log, not be silent"
 
 
 def test_optout_ignored_when_consent_actually_enabled(
