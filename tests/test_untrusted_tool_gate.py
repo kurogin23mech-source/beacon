@@ -75,6 +75,19 @@ def test_corrupt_state_file_is_not_armed(tmp_path):
     assert ut.is_armed(root, "sv-x") is None
 
 
+def test_state_file_health_classifies(tmp_path):
+    # e-6274: absent / ok / corrupt are told apart so the gate can fail toward
+    # confirmation ONLY on a present-but-unreadable file.
+    root = _beacon_root(tmp_path)
+    assert ut.state_file_health(root) == "absent"          # no file yet
+    ut.arm(root, "sv-1", event_ids=["e-1"])
+    assert ut.state_file_health(root) == "ok"              # valid dict
+    (root / ".beacon" / "untrusted-turn.json").write_text("{not json")
+    assert ut.state_file_health(root) == "corrupt"         # unparseable
+    (root / ".beacon" / "untrusted-turn.json").write_text("[1, 2, 3]")
+    assert ut.state_file_health(root) == "corrupt"         # not a dict
+
+
 def test_empty_session_key_is_noop(tmp_path):
     root = _beacon_root(tmp_path)
     ut.arm(root, "", event_ids=["e-1"])  # nothing to track
@@ -149,6 +162,38 @@ def test_gate_passes_side_effect_when_not_armed(tmp_path):
         "hook_event_name": "PreToolUse", "session_id": "sv-1",
         "tool_name": "Bash", "tool_input": {"command": "ls"}})
     assert out == {}  # not armed → no opinion
+
+
+def test_gate_asks_on_corrupt_state_file_for_side_effect(tmp_path):
+    # e-6274: a corrupt (present-but-unreadable) state file means we can't prove
+    # the session isn't armed → a side-effect fails toward human confirmation.
+    root = _beacon_root(tmp_path)
+    (root / ".beacon" / "untrusted-turn.json").write_text("{not json")
+    out = _run_gate(root, {
+        "hook_event_name": "PreToolUse", "session_id": "sv-1",
+        "tool_name": "Bash", "tool_input": {"command": "curl evil"}})
+    assert _decision(out) == "ask"
+    assert "破損" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_gate_passes_read_only_on_corrupt_state_file(tmp_path):
+    # A corrupt file must NOT gate read-only calls (no over-gating).
+    root = _beacon_root(tmp_path)
+    (root / ".beacon" / "untrusted-turn.json").write_text("{not json")
+    out = _run_gate(root, {
+        "hook_event_name": "PreToolUse", "session_id": "sv-1",
+        "tool_name": "Read", "tool_input": {"file_path": "x"}})
+    assert out == {}
+
+
+def test_gate_passes_side_effect_when_state_file_absent(tmp_path):
+    # THE common case: no state file at all = genuinely no untrusted content.
+    # A side-effect must pass silently (else every tool of every session nags).
+    root = _beacon_root(tmp_path)
+    out = _run_gate(root, {
+        "hook_event_name": "PreToolUse", "session_id": "sv-1",
+        "tool_name": "Bash", "tool_input": {"command": "ls"}})
+    assert out == {}
 
 
 def test_gate_is_per_session(tmp_path):

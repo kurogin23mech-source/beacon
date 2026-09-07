@@ -132,6 +132,25 @@ def _build_reason(tool_name: str, state: dict) -> str:
     )
 
 
+def _build_corrupt_reason(tool_name: str) -> str:
+    """Reason shown when the untrusted-turn state file is corrupt (e-6274).
+
+    We can't read the file, so we can't prove this session isn't in an untrusted
+    turn — fail toward confirmation rather than silently passing a side-effect."""
+    return (
+        "⚠ ms-169 injection ガード — untrusted-turn 状態ファイルが読めません\n"
+        "`.beacon/untrusted-turn.json` が破損 / 読み取り不能で、このセッションが"
+        "信頼できない DM 文脈に居るかどうかを確認できませんでした。\n"
+        f"安全側に倒して副作用ツール『{tool_name}』(状態を変える / 外部に送る) の実行前に"
+        "人間確認を求めています。\n"
+        "  承認 → この操作を実行します (直近に別セッションからの DM に誘導されていない"
+        "ことを確認してください)。\n"
+        "  拒否 → この操作を止めます。\n"
+        "状態ファイルを復旧するには一度人間プロンプトを送ると再生成されます。"
+        " (読み取り専用ツールは gate されません)"
+    )
+
+
 def main() -> None:
     try:
         raw = sys.stdin.read()
@@ -159,14 +178,21 @@ def main() -> None:
         if root is None:
             return  # not a beacon project
         session_key = ut.resolve_session_key(root, hook_input)
-        state = ut.is_armed(root, session_key)
-        if not state:
-            return  # not in an untrusted turn → allow silently
         tool_name = hook_input.get("tool_name") or ""
         tool_input = hook_input.get("tool_input")
-        if not te.is_side_effect(tool_name, tool_input):
-            return  # read-only call → passes even in an untrusted turn
-        _emit_ask(_build_reason(str(tool_name), state))
+        state = ut.is_armed(root, session_key)
+        if state:
+            if not te.is_side_effect(tool_name, tool_input):
+                return  # read-only call → passes even in an untrusted turn
+            _emit_ask(_build_reason(str(tool_name), state))
+            return
+        # Not armed. e-6274: distinguish a *missing* state file (benign — the
+        # common case, genuinely no untrusted content → pass) from a *corrupt*
+        # one (present-but-unreadable → we can't prove not-armed). For a corrupt
+        # file, tilt a side-effect toward human confirmation instead of silently
+        # passing; read-only calls still pass (no over-gating).
+        if ut.state_file_health(root) == "corrupt" and te.is_side_effect(tool_name, tool_input):
+            _emit_ask(_build_corrupt_reason(str(tool_name)))
     except Exception:
         # Never brick the harness on a gate bug — fail safe (tool proceeds).
         return

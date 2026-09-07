@@ -40,11 +40,16 @@ autonomous safety: in an ``armed`` autonomous session an「ask」has no human to
 approve it, so the side-effect never executes ⇒ the vet hook never fires ⇒ the
 gate stays up. Vetting is thus impossible without a real human decision.
 
-Fail-safe on I/O (missing / corrupt state → "not armed"): the gate must never
-brick a session because the state file is unreadable. The security property is
-carried by the *classification* being fail-closed (unknown tool → side-effect),
-not by this file. A follow-up (Codex PreToolUse parity) will consume the same
-state once Codex grows a pre-execution hook; today only the Claude gate reads it.
+Fail-safe on I/O: the gate must never brick a session because the state file is
+unreadable. ``is_armed`` returns None (not armed) on any read error so a corrupt
+file can't stop every tool call. e-6274 hardens the fail-OPEN edge of that: a
+*missing* file is benign (pass), but a *corrupt* one (present-but-unreadable) is
+suspicious — ``state_file_health`` lets the gate tilt side-effect tools toward
+human confirmation rather than silently passing, without over-gating read-only
+calls or the common absent-file case. The security property is still ultimately
+carried by the fail-closed *classification* (unknown tool → side-effect). A
+follow-up (Codex PreToolUse parity, e-6273) is blocked until Codex grows a
+pre-execution hook; today only the Claude gate reads this state.
 """
 
 from __future__ import annotations
@@ -126,6 +131,35 @@ def _read_all(root: "str | Path") -> dict:
     except Exception:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def state_file_health(root: "str | Path") -> str:
+    """Classify the on-disk state file as ``"absent"`` / ``"ok"`` / ``"corrupt"``.
+
+    e-6274 hardening: ``is_armed`` fails safe (corrupt → None → not armed), which
+    for a corrupt file means fail-OPEN toward a side-effect. That is a bounded but
+    real gap. This lets the gate tell the two "not armed" causes apart:
+
+      * ``absent`` — no file at all. The overwhelming common case (a session that
+        never received untrusted content); genuinely not armed, must pass so the
+        gate doesn't nag every tool of every session.
+      * ``ok`` — file parsed to a dict. Trust ``is_armed``'s answer.
+      * ``corrupt`` — file exists but is unreadable / not a JSON object (truncated
+        write, tampering, disk error). We CANNOT prove the session isn't armed, so
+        the gate tilts a side-effect toward human confirmation instead of silently
+        passing. Read-only calls still pass (no over-gating).
+    """
+    path = _state_path(root)
+    try:
+        if not path.exists():
+            return "absent"
+    except Exception:
+        return "corrupt"  # can't even stat it → treat as suspicious
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return "corrupt"
+    return "ok" if isinstance(data, dict) else "corrupt"
 
 
 def _hours_between(a_iso: str, b_iso: str) -> float:
@@ -309,4 +343,5 @@ __all__ = [
     "is_vetted",
     "disarm",
     "is_armed",
+    "state_file_health",
 ]
