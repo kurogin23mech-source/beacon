@@ -58,6 +58,7 @@ import core
 import inspect  # ms-157 e-5749: derive add_work_item's reserved kwargs from source
 import occupation  # ms-157 e-5749: target-class 横断の generic target 投影
 import target_engine as te  # ms-157 e-5749: 記述子 class の generic な生成
+import root_target  # ms-162 e-6220: cloud payload に root 投影 (objective/narrative) を載せる
 
 # Reserved kwargs occupation.add_work_item binds explicitly (description / status /
 # item_type). Derived from the SOURCE signature, not hand-copied, so adding a
@@ -553,6 +554,11 @@ def _enrich_project(data: dict) -> dict:
         })
     enriched["milestones"] = milestones
     enriched["targets"] = occupation.project_targets(data)
+    # ms-162 e-6220: emit the root projection so the cloud payload carries the
+    # objective/narrative + rolled-up projection the CLI already exposes via
+    # ``beacon status``. Same "CLI にあるが cloud に無い" gap the decision endpoint
+    # (e-5827) closed; purely additive (existing keys untouched, pure read).
+    enriched["root"] = root_target.project_as_root_target(data)
     return _resolve_sales_funnels(data, enriched)
 
 def _enrich_project_slim(data: dict) -> dict:
@@ -591,6 +597,10 @@ def _enrich_project_slim(data: dict) -> dict:
         slim_ms["done_tasks"] = done
         milestones.append(slim_ms)
     enriched["milestones"] = milestones
+    # ms-162 e-6220: root projection is small (counts + narrative, no entries[]),
+    # so it belongs in the slim WS/initial-fetch payload too — that is the path
+    # the Web UI reads on load to render the root header's objective.
+    enriched["root"] = root_target.project_as_root_target(data)
     return _resolve_sales_funnels(data, enriched)
 
 def _build_document_change_payload(project_id: str, doc_id: str, op: str,

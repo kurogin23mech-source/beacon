@@ -74,6 +74,41 @@ def test_targets_is_purely_additive():
     # dropping the new key reproduces the pre-e-5749 milestone-only shape:
     # every other key equals what the old enrichment produced.
     assert "targets" in enriched
-    rest = {k: v for k, v in enriched.items() if k != "targets"}
+    # ms-162 e-6220 added ``root`` as a second additive projection key. Both are
+    # pure read-projections layered on top of the raw payload; dropping them
+    # reproduces the pre-projection milestone-only shape.
+    rest = {k: v for k, v in enriched.items() if k not in ("targets", "root")}
     # milestones enriched, sales funnels resolved (empty for dev), nothing else new
     assert set(rest.keys()) == set(data.keys())
+
+
+# ---------------------------------------------------------------------------
+# ms-162 e-6220 — the project REST payload carries the ``root`` projection
+# (root_target.project_as_root_target), closing the "CLI にあるが cloud に無い"
+# gap that left the Web UI root header unable to show the objective. Same shape
+# CLI's ``beacon status`` already exposes; purely additive.
+# ---------------------------------------------------------------------------
+
+def _dev_with_objective():
+    data = _dev()
+    data["objective"] = "常時可視化で方向性を見失わないツールを作る"
+    data["summary"] = "直近の流れ: X を実装"
+    return data
+
+
+def test_enrich_emits_root_projection_with_narrative():
+    enriched = rp._enrich_project(_dev_with_objective())
+    root = enriched["root"]
+    assert root["kind"] == "root" and root["id"] == "root"
+    # narrative carries the on-project objective/summary the Web UI header reads
+    assert root["narrative"]["objective"] == "常時可視化で方向性を見失わないツールを作る"
+    assert root["narrative"]["summary"] == "直近の流れ: X を実装"
+    # synthesized projection rolls up the child target counts (1 total, 0 done)
+    assert root["projection"]["counts"]["total"] == 1
+
+
+def test_slim_payload_also_carries_root():
+    # the Web UI reads root on the slim initial fetch, so slim must carry it too
+    enriched = rp._enrich_project_slim(_dev_with_objective())
+    assert enriched["root"]["narrative"]["objective"] == \
+        "常時可視化で方向性を見失わないツールを作る"
