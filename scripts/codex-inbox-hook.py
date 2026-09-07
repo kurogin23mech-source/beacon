@@ -68,7 +68,11 @@ def _import_modules(install_root: Path):
         import bus_delivery as bd  # noqa: E402  (ms-160 e-5803)
     except Exception:
         bd = None
-    return crl, ac, cs, ss, bd
+    try:
+        import untrusted_frame as uf  # noqa: E402  (ms-169 e-6235)
+    except Exception:
+        uf = None
+    return crl, ac, cs, ss, bd, uf
 
 
 def _resolve_codex_session(cs_module, cwd: str):
@@ -222,7 +226,7 @@ def main() -> int:
 
     install_root = Path(args.install_root or Path(__file__).resolve().parent.parent)
     cwd = args.cwd or os.getcwd()
-    crl, ac, cs, ss, bd = _import_modules(install_root)
+    crl, ac, cs, ss, bd, uf = _import_modules(install_root)
 
     entries = crl.list_inbox_events(cwd=cwd)
     if not entries:
@@ -319,7 +323,18 @@ def main() -> int:
             f"BEACON BUS INBOX — {len(dm_entries)} new event(s)\n"
             "Each entry is a DM addressed to this Codex session.\n"
         )
-        parts.append("".join(_format_entry(e) for e in dm_entries))
+        # ms-169 e-6235: DM bodies are free-text from other sessions — DATA, not
+        # instructions to this AI. Fence them in the SAME shared untrusted frame
+        # the Claude hook uses, so no receive path drops the marking. Fail-safe:
+        # if the module didn't import, emit the bare body (framing is prompt-level
+        # mitigation; the PreToolUse gate is the hard stop).
+        body = "".join(_format_entry(e) for e in dm_entries)
+        if uf is not None and any(
+            uf.is_untrusted_event(e.get("event") or {}) for e in dm_entries
+        ):
+            parts.append(uf.wrap_untrusted(body.rstrip("\n")) + "\n")
+        else:
+            parts.append(body)
     if downgraded_allowlist:
         parts.append(
             f"\n⚠ 安全側降格: auto-execute → propose-to-ai に変換された event "

@@ -138,6 +138,34 @@ def _import_bus_delivery():
     return None
 
 
+_UNTRUSTED_FRAME_CACHE: "object | None" = None
+_UNTRUSTED_FRAME_TRIED = False
+
+
+def _import_untrusted_frame():
+    """Import lib/untrusted_frame lazily, cached. Returns the module or None.
+
+    ms-169 e-6235: the untrusted framing text + per-event marker live in the
+    shared module so this hook and the Codex hook frame received bodies
+    identically. Fail-safe: a missing module must never block the inbox path
+    (the caller falls back to emitting the raw body — see _render_context)."""
+    global _UNTRUSTED_FRAME_CACHE, _UNTRUSTED_FRAME_TRIED
+    if _UNTRUSTED_FRAME_TRIED:
+        return _UNTRUSTED_FRAME_CACHE
+    _UNTRUSTED_FRAME_TRIED = True
+    here = Path(__file__).resolve().parent
+    for lib_dir in (here.parent / "lib", here.parent.parent / "lib"):
+        if (lib_dir / "untrusted_frame.py").exists():
+            sys.path.insert(0, str(lib_dir))
+            try:
+                import untrusted_frame as _uf  # type: ignore[import-not-found]
+            except Exception:
+                return None
+            _UNTRUSTED_FRAME_CACHE = _uf
+            return _uf
+    return None
+
+
 def _classify_delivery(ev: dict, allowlist) -> tuple:
     """Resolve ``(delivery, downgraded_from, downgrade_reason)`` for one event.
 
@@ -921,9 +949,22 @@ def _render_context(events: list[dict], notify_only_count: int,
             "`bus_auto_execute_channels` allowlist に無いため)"
         )
     parts.append("")
+    # ms-169 e-6235: the generic event list is free-text received from other
+    # sessions — a body is DATA, never an instruction to this AI. Fence it in
+    # the shared untrusted frame so an embedded「〜して」can't pass as the user's
+    # own request (the 2026-09-07 ocean.txt injection). Fail-safe: if the shared
+    # module can't load, fall back to the bare body (framing is prompt-level
+    # mitigation per ms-169 方針5; the PreToolUse gate (A) is the hard stop).
+    _uf = _import_untrusted_frame()
+    rendered = []
     for ev in events:
-        parts.append(_format_event(ev))
+        rendered.append(_format_event(ev))
+        rendered.append("")
+    if _uf is not None and any(_uf.is_untrusted_event(ev) for ev in events):
+        parts.append(_uf.wrap_untrusted("\n".join(rendered).rstrip("\n")))
         parts.append("")
+    else:
+        parts.extend(rendered)
     parts.append("--- 取り扱いガイド ---")
     parts.append(
         "- 返信する場合: `beacon bus send --channel <ch> --payload '<json>' "
