@@ -45,6 +45,16 @@ def main() -> int:
               f"CI test_verb_ledger.py still enforces coverage.")
         return 0
 
+    # Shape guard (AX review PR #736): a malformed reconcile() return (None, or a
+    # dict missing both keys) does not raise, so the ``except`` above never catches
+    # it. Without this, a future change to reconcile()'s return schema would make
+    # the two ``.get(...) or []`` below silently yield [] → a green pass that hides
+    # a dead gate. Route it to the same fail-safe skip (CI still enforces).
+    if not isinstance(rec, dict) or ("unclassified" not in rec and "stale" not in rec):
+        print("[skip] verb ledger reconcile() returned an unexpected shape; "
+              "CI test_verb_ledger.py still enforces coverage.")
+        return 0
+
     unclassified = rec.get("unclassified") or []
     stale = rec.get("stale") or []
     if not unclassified and not stale:

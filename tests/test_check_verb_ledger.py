@@ -62,6 +62,17 @@ def test_tooling_failure_is_fail_safe(monkeypatch, capsys):
     assert "[skip]" in out
 
 
+@pytest.mark.parametrize("bad", [None, {}, {"other": []}, [1, 2, 3], "nope"])
+def test_malformed_reconcile_shape_is_fail_safe(monkeypatch, capsys, bad):
+    """A non-raising but malformed reconcile() return (schema drift) must route
+    to the fail-safe skip, not silently pass green (AX review PR #736)."""
+    _patch_reconcile(monkeypatch, lambda: bad)
+    rc = _load_script().main()
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "[skip]" in out
+
+
 def test_live_ledger_is_actually_clean():
     """Dogfood: against the real repo surface the gate must currently pass (0),
     i.e. this PR did not itself introduce an unclassified verb."""
