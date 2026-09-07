@@ -7,19 +7,23 @@ human has approved a side-effect *while the turn was armed with untrusted DM
 content*, this session is marked ``vetted`` and stops re-gating for the rest of
 the session.
 
-The fire condition (both must hold):
+The fire condition (all three must hold):
   * ``tool_effect.is_side_effect`` — the tool that just ran changes state / sends
     outward (read-only completions are ignored), AND
   * ``untrusted_turn.is_armed`` — the session was in an UNVETTED untrusted turn
-    *at completion time*.
+    *at completion time*, AND
+  * that armed state carries an ``asked_at`` marker — the PreToolUse gate actually
+    emitted an「ask」for a side-effect this turn (stamped by ``record_asked``).
 
-Why "armed at completion time" is the security-critical guard: the PreToolUse
-gate fires「ask」on every (armed AND side-effect) call, so a side-effect tool that
-ACTUALLY executed while armed can only mean the human approved it (in an
-autonomous session there is no human to approve, so「ask」never resolves and the
-tool never runs — the vet never happens, the gate stays up). A side-effect that
-ran while NOT armed is ordinary work, and vetting it would wrongly suppress the
-gate for a *later* real injection — so we require ``is_armed`` before vetting.
+Why all three: a side-effect that ran while NOT armed is ordinary work, and
+vetting it would wrongly suppress the gate for a *later* real injection. And a
+side-effect that ran while armed but WITHOUT a real ask — the gate hook
+fail-safe-returned, timed out, wasn't installed, or the harness runs an
+auto-accept permission mode — is NOT proof of human approval either. Requiring
+the ``asked_at`` marker turns "the human approved" from a cross-process timing
+assumption into a measured fact (independent AX + maintainability review
+consensus). In an autonomous session no human resolves the「ask」, so the tool
+never runs — the vet never happens and the gate stays up.
 
 Fail-safe: any error, unreadable state, or missing lib means "do nothing" (the
 session stays in whatever state it was — the gate is unaffected). This hook only
@@ -100,10 +104,19 @@ def main() -> None:
         if root is None:
             return  # not a beacon project
         session_key = ut.resolve_session_key(root, hook_input)
-        if ut.is_armed(root, session_key) is None:
+        state = ut.is_armed(root, session_key)
+        if state is None:
             return  # side-effect ran while NOT armed → ordinary work, don't vet
-        # A side-effect executed while armed ⇒ the human approved it at the gate.
-        # Trust this untrusted context for the rest of the session.
+        # Require proof the gate actually asked (asked_at). A side-effect that ran
+        # while armed but WITHOUT a real「ask」(gate fail-safe / timeout / not
+        # installed / auto-accept permission mode) must NOT be read as human
+        # approval — else it would silently vet the session and drop the gate for
+        # every later DM. This turns the old cross-process timing inference into a
+        # measured fact (ms-169 e-6280 review fix, AX + maintainability consensus).
+        if not state.get("asked_at"):
+            return  # armed side-effect, but the gate never asked → do not vet
+        # A side-effect executed while armed AND the gate asked ⇒ the human
+        # approved it. Trust this untrusted context for the rest of the session.
         ut.vet(root, session_key)
     except Exception:
         # Never brick the harness on a hook bug — fail safe (state unchanged).

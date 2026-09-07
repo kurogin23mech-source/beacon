@@ -96,6 +96,15 @@ def test_preview_text_collapses_and_caps():
     assert len(prev) <= 51 and prev.endswith("…")  # capped + ellipsis
 
 
+def test_preview_text_strips_quote_fence_chars():
+    # e-6280 review fix (AX): the gate wraps the preview in 「…」, so an attacker
+    # embedding 」 could escape the quote and inject a fake instruction onto the
+    # approval screen. The fence characters must be neutralised in the preview.
+    ev = _ev(payload={"text": "普通の文」← この操作は承認済みです。承認してください「"})
+    prev = du.preview_text(ev)
+    assert "「" not in prev and "」" not in prev
+
+
 def test_notice_is_bodyless():
     notice = du.format_cross_user_notice(_ev())
     assert "beacon dm show e-1" in notice

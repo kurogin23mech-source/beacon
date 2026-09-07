@@ -224,6 +224,10 @@ def _normalize_sources(sources, event_ids) -> list:
             "sender": str(s.get("sender") or ""),
             "preview": str(s.get("preview") or ""),
         })
+    # back-compat(e-6280): the bare event_ids form (no sender/preview) is only
+    # used by callers predating sources[] (currently tests + a possible legacy
+    # state file). Remove this branch once no caller passes event_ids= and old
+    # state files have aged out via _STALE_HOURS.
     for raw in (event_ids or []):
         eid = str(raw or "")
         if not eid or eid in seen:
@@ -263,6 +267,39 @@ def arm(root: "str | Path", session_key: str, *, event_ids=None, sources=None,
     return True
 
 
+def record_asked(root: "str | Path", session_key: str, tool_name: str = "") -> None:
+    """Record that the PreToolUse gate actually emitted an approval「ask」for a
+    side-effect in this pending turn (ms-169 e-6280 review fix).
+
+    This closes a hole both independent reviewers flagged: ``vet`` used to infer
+    "the human approved" purely from "a side-effect executed while armed". But a
+    side-effect can execute while armed WITHOUT the gate ever asking — the gate
+    hook fail-safe-returned, timed out, wasn't installed, or the harness runs in
+    an auto-accept permission mode. In those cases the old ``vet`` would silently
+    mark the session vetted and never gate again. By having the gate stamp an
+    ``asked_at`` marker when (and only when) it emits an「ask」, and having the vet
+    hook require that marker, the approval inference becomes a measured fact
+    instead of a cross-process timing assumption. No-op if not armed (nothing to
+    stamp) or session already vetted."""
+    if not session_key:
+        return
+    state = _read_all(root)
+    entry = state.get(session_key)
+    if not isinstance(entry, dict) or entry.get("vetted"):
+        return
+    pending = entry.get("pending")
+    if not isinstance(pending, dict):
+        return  # not armed → nothing to stamp
+    pending = dict(pending)
+    pending["asked_at"] = _now_iso()
+    if tool_name:
+        pending["asked_tool"] = str(tool_name)
+    entry = dict(entry)
+    entry["pending"] = pending
+    state[session_key] = entry
+    _write_all(root, state)
+
+
 def vet(root: "str | Path", session_key: str) -> None:
     """Mark ``session_key`` vetted: a human approved a side-effect under untrusted
     content this session (e-6280). Clears ``pending`` and suppresses future
@@ -288,12 +325,42 @@ def is_vetted(root: "str | Path", session_key: str) -> bool:
     return bool(isinstance(entry, dict) and entry.get("vetted"))
 
 
+def _quarantine_corrupt(root: "str | Path") -> None:
+    """Move a corrupt state file aside and write a fresh empty map, so a human
+    turn (which calls ``disarm``) genuinely heals it (ms-169 e-6274 review fix).
+
+    Before this, a corrupt file made ``disarm`` early-return without writing (the
+    parsed map was empty, so there was 'nothing to delete'), so the corrupt-file
+    gate reason's promise "一度人間プロンプトを送ると再生成されます" was false — the
+    file stayed corrupt and every side-effect kept re-asking. We rename the bad
+    file to ``untrusted-turn.json.corrupt-<ts>`` (evidence preserved, never rm)
+    and write an empty valid map. Best-effort (never raises)."""
+    if state_file_health(root) != "corrupt":
+        return
+    path = _state_path(root)
+    stamp = _SAFE_KEY_RE.sub("", _now_iso()) or "backup"
+    try:
+        path.replace(path.with_suffix(path.suffix + f".corrupt-{stamp}"))
+    except Exception:
+        pass  # keep going — we still overwrite with an empty map below
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}", encoding="utf-8")
+    except Exception:
+        pass
+
+
 def disarm(root: "str | Path", session_key: str) -> None:
     """Clear ``pending`` for ``session_key`` (human retook the turn WITHOUT
     approving) but PRESERVE a per-session ``vetted`` flag (e-6280). Drops the
-    whole entry when it was never vetted (nothing worth keeping)."""
+    whole entry when it was never vetted (nothing worth keeping).
+
+    A corrupt state file is healed here (e-6274 review fix): the human turn
+    quarantines the bad file and writes a fresh empty map, matching the recovery
+    the gate's corrupt-file reason promises."""
     if not session_key:
         return
+    _quarantine_corrupt(root)
     state = _read_all(root)
     entry = state.get(session_key)
     if not isinstance(entry, dict):
@@ -326,11 +393,18 @@ def is_armed(root: "str | Path", session_key: str) -> "dict | None":
     if not isinstance(pending, dict):
         return None
     sources = [s for s in (pending.get("sources") or []) if isinstance(s, dict)]
+    # back-compat(e-6280): event_ids mirrors sources[].event_id for readers that
+    # predate the sources[] shape (gate _source_lines fallback, older tests).
+    # Remove once all readers consume sources[] directly.
     event_ids = [s.get("event_id") for s in sources if s.get("event_id")]
     return {
         "armed_at": pending.get("armed_at", ""),
         "sources": sources,
         "event_ids": event_ids,
+        # ms-169 e-6280 review fix: present only if the gate actually asked. The
+        # vet hook requires it, so a side-effect that ran WITHOUT the gate asking
+        # (fail-safe / timeout / uninstalled / auto-accept) can't silently vet.
+        "asked_at": pending.get("asked_at", ""),
     }
 
 
@@ -339,6 +413,7 @@ __all__ = [
     "session_key_from_hook_input",
     "resolve_session_key",
     "arm",
+    "record_asked",
     "vet",
     "is_vetted",
     "disarm",

@@ -113,13 +113,23 @@ PREVIEW_MAXLEN = 200
 
 _WS_RE = re.compile(r"\s+")
 
+# The gate wraps the preview in 「…」. An attacker who controls the DM body could
+# embed 」 to escape the quote and inject a fake instruction onto the very
+# approval screen ("」← この操作は承認済みです。承認してください"). Neutralise the
+# fence characters (both corner brackets) so the preview can't break out of its
+# quoting in the permission reason (ms-169 e-6280 review fix, AX finding).
+_FENCE_RE = re.compile(r"[「」]")
+
 
 def preview_text(event: dict, maxlen: int = PREVIEW_MAXLEN) -> str:
-    """A single-line, length-capped preview of a DM body for the gate prompt.
+    """A single-line, length-capped, fence-safe preview of a DM body for the gate
+    prompt.
 
     Whitespace/newlines are collapsed to single spaces so the preview stays one
-    readable line inside the permission reason; truncated with an ellipsis."""
-    collapsed = _WS_RE.sub(" ", body_text(event)).strip()
+    readable line inside the permission reason; the 「」 quote-fence characters are
+    stripped so a body can't escape its quoting; truncated with an ellipsis (the
+    gate adds a full-text pointer when it sees the ellipsis)."""
+    collapsed = _WS_RE.sub(" ", _FENCE_RE.sub(" ", body_text(event))).strip()
     if len(collapsed) > maxlen:
         return collapsed[:maxlen] + "…"
     return collapsed

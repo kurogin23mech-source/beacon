@@ -758,7 +758,7 @@ HOOK_MANIFEST = [
      "script": "beacon-untrusted-turn-vet-hook.py",
      "identity": ("beacon-untrusted-turn-vet-hook",),
      "timeout": 10,
-     "statusMessage": "Beacon: recording untrusted-turn approval..."},
+     "statusMessage": "Beacon: checking untrusted-turn vet condition..."},
 ]
 
 

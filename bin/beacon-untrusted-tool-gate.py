@@ -104,6 +104,11 @@ def _source_lines(state: dict) -> str:
             preview = s.get("preview") or ""
             if preview:
                 lines.append(f"  - [{eid}] from {sender}: 「{preview}」")
+                # A truncated preview (trailing …) may hide an injection past the
+                # cap; point the human at the full body so "先頭だけ見て安全" fails
+                # closed (ms-169 e-6280 review fix, AX finding).
+                if preview.endswith("…"):
+                    lines.append(f"    (本文は途中まで。全文: `beacon dm show {eid}`)")
             else:
                 lines.append(f"  - [{eid}] from {sender}")
         extra = len(sources) - 5
@@ -125,8 +130,9 @@ def _build_reason(tool_name: str, state: dict) -> str:
         "しています。\n"
         "判断: 上の DM 本文に紛れ込んだ命令に誘導されていませんか? この文脈のまま操作を"
         "進めて安全ですか?\n"
-        "  承認 → この操作を実行し、以後このセッションでは untrusted DM 由来の副作用確認を"
-        "再度求めません (= この文脈を信頼したとみなす)。\n"
+        "  承認 → この操作を実行します。**承認するとこのセッションの残り全体が信頼済み扱い"
+        "になり、今後届く別の送信者の DM を含め、untrusted DM 由来の副作用確認は再度求めません**"
+        " (承認範囲=セッション全体)。\n"
         "  拒否 → この操作を止めます。\n"
         "(読み取り専用ツールは gate されません)"
     )
@@ -184,6 +190,13 @@ def main() -> None:
         if state:
             if not te.is_side_effect(tool_name, tool_input):
                 return  # read-only call → passes even in an untrusted turn
+            # Stamp that the gate actually asked, BEFORE emitting — the vet hook
+            # requires this marker, so a side-effect that ran without a real ask
+            # (fail-safe / auto-accept) can't later silently vet the session.
+            try:
+                ut.record_asked(root, session_key, str(tool_name))
+            except Exception:
+                pass  # best-effort; a failed stamp only makes vet MORE conservative
             _emit_ask(_build_reason(str(tool_name), state))
             return
         # Not armed. e-6274: distinguish a *missing* state file (benign — the

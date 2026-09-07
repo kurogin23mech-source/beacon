@@ -52,35 +52,49 @@ def _gate_decision(cwd: Path, session_id: str, tool_name: str, tool_input=None) 
     return out.get("hookSpecificOutput", {}).get("permissionDecision", "")
 
 
-def _vet(cwd: Path, session_id: str, tool_name: str, tool_input=None) -> None:
-    _run(VET, cwd, {"hook_event_name": "PostToolUse", "session_id": session_id,
+def _vet(cwd: Path, session_id: str, tool_name: str, tool_input=None,
+         event: str = "PostToolUse") -> None:
+    _run(VET, cwd, {"hook_event_name": event, "session_id": session_id,
                     "tool_name": tool_name, "tool_input": tool_input or {}})
 
 
 # ---------------------------------------------------------------------------
-# The vet hook's fire condition (both must hold)
+# The vet hook's fire condition (all three must hold: armed + side-effect + asked)
 # ---------------------------------------------------------------------------
 
-def test_vet_hook_vets_armed_side_effect(tmp_path):
+def test_vet_hook_vets_armed_asked_side_effect(tmp_path):
     root = _beacon_root(tmp_path)
     ut.arm(root, "sv-1", event_ids=["e-1"])
-    _vet(root, "sv-1", "Write", {"file_path": "x"})  # armed + side-effect → vet
+    ut.record_asked(root, "sv-1", "Write")           # the gate asked (approved)
+    _vet(root, "sv-1", "Write", {"file_path": "x"})  # armed + asked + side-effect
     assert ut.is_vetted(root, "sv-1") is True
     assert ut.is_armed(root, "sv-1") is None
+
+
+def test_vet_hook_does_not_vet_without_gate_ask(tmp_path):
+    # THE new security guard (independent review consensus): a side-effect that
+    # ran while armed but WITHOUT the gate emitting an ask (fail-safe / timeout /
+    # not installed / auto-accept mode) is NOT proof of human approval. It must
+    # not silently vet the session and drop the gate for later DMs.
+    root = _beacon_root(tmp_path)
+    ut.arm(root, "sv-1", event_ids=["e-1"])          # armed, but gate never asked
+    _vet(root, "sv-1", "Write", {"file_path": "x"})
+    assert ut.is_vetted(root, "sv-1") is False
+    assert ut.is_armed(root, "sv-1") is not None      # still armed → still gates
 
 
 def test_vet_hook_ignores_read_only_completion(tmp_path):
     root = _beacon_root(tmp_path)
     ut.arm(root, "sv-1", event_ids=["e-1"])
+    ut.record_asked(root, "sv-1", "Read")
     _vet(root, "sv-1", "Read", {"file_path": "x"})   # read-only → never vets
     assert ut.is_vetted(root, "sv-1") is False
     assert ut.is_armed(root, "sv-1") is not None      # still armed
 
 
 def test_vet_hook_does_not_vet_unarmed_side_effect(tmp_path):
-    # THE security-critical guard: a side-effect that runs while NOT armed is
-    # ordinary work; vetting it would suppress the gate for a LATER real
-    # injection. So an unarmed side-effect must leave the session un-vetted.
+    # A side-effect that runs while NOT armed is ordinary work; vetting it would
+    # suppress the gate for a LATER real injection.
     root = _beacon_root(tmp_path)
     _vet(root, "sv-1", "Bash", {"command": "ls"})
     assert ut.is_vetted(root, "sv-1") is False
@@ -90,16 +104,19 @@ def test_vet_hook_does_not_vet_unarmed_side_effect(tmp_path):
 
 
 def test_vet_hook_ignores_non_posttooluse_event(tmp_path):
+    # A PreToolUse event delivered to the vet hook must NOT vet (event filter).
     root = _beacon_root(tmp_path)
     ut.arm(root, "sv-1", event_ids=["e-1"])
-    _vet(root, "sv-1", "Write", {"file_path": "x"})  # wrong event name below:
-    # (the helper always sends PostToolUse; assert the positive path worked)
-    assert ut.is_vetted(root, "sv-1") is True
+    ut.record_asked(root, "sv-1", "Write")
+    _vet(root, "sv-1", "Write", {"file_path": "x"}, event="PreToolUse")
+    assert ut.is_vetted(root, "sv-1") is False        # wrong event → ignored
+    assert ut.is_armed(root, "sv-1") is not None
 
 
 def test_vet_hook_is_per_session(tmp_path):
     root = _beacon_root(tmp_path)
     ut.arm(root, "sv-A", event_ids=["e-1"])
+    ut.record_asked(root, "sv-A", "Write")
     ut.arm(root, "sv-B", event_ids=["e-2"])
     _vet(root, "sv-A", "Write", {"file_path": "x"})
     assert ut.is_vetted(root, "sv-A") is True
@@ -108,7 +125,9 @@ def test_vet_hook_is_per_session(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Full state machine — one approval per risky context, not per tool
+# Full state machine — one approval per risky context, not per tool.
+# This exercises the REAL flow: the gate stamps asked_at when it asks, so the
+# subsequent vet finds the marker and vets.
 # ---------------------------------------------------------------------------
 
 def test_one_approval_then_rest_of_session_passes(tmp_path):
@@ -116,6 +135,7 @@ def test_one_approval_then_rest_of_session_passes(tmp_path):
     # DM arrives → armed. First side-effect → gate asks (the ONE confirmation).
     ut.arm(root, "sv-1", event_ids=["e-1"])
     assert _gate_decision(root, "sv-1", "Bash", {"command": "a"}) == "ask"
+    assert ut.is_armed(root, "sv-1")["asked_at"]  # the gate stamped the marker
     # Human approves → the tool runs → PostToolUse vets the session.
     _vet(root, "sv-1", "Bash", {"command": "a"})
     # Every subsequent side-effect in the session now passes without asking.

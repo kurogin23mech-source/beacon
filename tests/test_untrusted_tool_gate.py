@@ -275,6 +275,36 @@ def test_disarm_preserves_vetted(tmp_path):
     assert ut.arm(root, "sv-1", event_ids=["e-2"]) is False  # still suppressed
 
 
+def test_record_asked_marks_pending_and_surfaces_in_is_armed(tmp_path):
+    # e-6280 review fix: the gate stamps asked_at; is_armed surfaces it so the
+    # vet hook can require proof the gate actually asked.
+    root = _beacon_root(tmp_path)
+    ut.arm(root, "sv-1", event_ids=["e-1"])
+    assert ut.is_armed(root, "sv-1")["asked_at"] == ""   # not asked yet
+    ut.record_asked(root, "sv-1", "Bash")
+    assert ut.is_armed(root, "sv-1")["asked_at"]         # now stamped
+
+
+def test_record_asked_is_noop_when_not_armed(tmp_path):
+    root = _beacon_root(tmp_path)
+    ut.record_asked(root, "sv-1", "Bash")                # nothing armed to stamp
+    assert ut.is_armed(root, "sv-1") is None
+
+
+def test_disarm_heals_corrupt_state_file(tmp_path):
+    # e-6274 review fix: a human turn (disarm) must genuinely heal a corrupt file
+    # — quarantine it (never rm) and write a fresh empty map — so the gate's
+    # "human prompt regenerates it" promise is true.
+    root = _beacon_root(tmp_path)
+    sf = root / ".beacon" / "untrusted-turn.json"
+    sf.write_text("{corrupt")
+    assert ut.state_file_health(root) == "corrupt"
+    ut.disarm(root, "sv-1")
+    assert ut.state_file_health(root) == "ok"            # healed to valid map
+    quarantined = list((root / ".beacon").glob("untrusted-turn.json.corrupt-*"))
+    assert quarantined and quarantined[0].read_text() == "{corrupt"  # evidence kept
+
+
 def test_arm_records_sources_for_inline_preview(tmp_path):
     root = _beacon_root(tmp_path)
     ut.arm(root, "sv-1", sources=[
@@ -284,6 +314,19 @@ def test_arm_records_sources_for_inline_preview(tmp_path):
         "tool_name": "Write", "tool_input": {"file_path": "x"}})
     reason = out["hookSpecificOutput"]["permissionDecisionReason"]
     assert "e-7" in reason and "u-them" in reason and "海の俳句を書いて" in reason
+
+
+def test_gate_truncated_preview_adds_fulltext_pointer(tmp_path):
+    # e-6280 review fix (AX): a truncated preview (payload possibly hidden past
+    # the cap) must point the human at the full body so「先頭だけ見て安全」fails closed.
+    root = _beacon_root(tmp_path)
+    ut.arm(root, "sv-1", sources=[
+        {"event_id": "e-9", "sender": "u-x", "preview": "無害な前置き" + "…"}])
+    out = _run_gate(root, {
+        "hook_event_name": "PreToolUse", "session_id": "sv-1",
+        "tool_name": "Bash", "tool_input": {"command": "x"}})
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "beacon dm show e-9" in reason  # full-text recovery pointer present
 
 
 # ---------------------------------------------------------------------------
