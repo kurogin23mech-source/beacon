@@ -227,4 +227,25 @@ if echo "$STAGED" | grep -qE "^(lib/commands\.py|lib/capability_ledger\.py|lib/o
   fi
 fi
 
+# ==============================================================================
+# Check 10: Verb ledger coverage (added 2026-09-07, ms-114 e-6275)
+# ==============================================================================
+# When the CLI verb surface changes (a new `beacon <verb>` added via the dispatch
+# dict / bin entrypoint / dispatch.py, or the ledger data itself), verify every
+# live verb is classified in the Q/R/B/C ledger (lib/verb_ledger_data.py) and no
+# ledger entry is stale. Without this, a forgotten ledger entry only surfaces
+# ~10min into CI (test_verb_ledger.py); PR #734 (dm_show) and #735 (attention)
+# each ate a red-CI round-trip on exactly this. strict (= exit 1) so the ledger
+# stays live; the check itself fails safe (exit 0 with a [skip] note) if it can't
+# run, so a gate bug never bricks commits.
+if echo "$STAGED" | grep -qE "^(lib/commands\.py|beacon_cli/dispatch\.py|bin/beacon|lib/verb_ledger_data\.py)$"; then
+  if [ -f scripts/check-verb-ledger.py ]; then
+    python3 scripts/check-verb-ledger.py 2>&1 | sed 's/^/[pre-commit] /'
+    if [ ${PIPESTATUS[0]} -ne 0 ]; then
+      echo "[pre-commit] ERROR: verb ledger が実 CLI と乖離しています (ms-114 e-6275)。" >&2
+      exit 1
+    fi
+  fi
+fi
+
 exit 0
