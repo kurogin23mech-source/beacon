@@ -1,0 +1,175 @@
+"""ms-159 / e-6244 — session execution-state declaration via lifecycle hooks.
+
+Pins the two ends the slice owns on the client side (AC2):
+
+  1. the pure event→state map (lib/session_state_hook) matches SPEC 方針2 exactly;
+  2. the hook entry point (bin/beacon-state-hook.py) turns a Claude Code hook
+     stdin payload into a .beacon/session-state.json marker the bridge can read,
+     and is fail-safe (unrecognized event ⇒ no clobber; no .beacon ⇒ no crash).
+
+The bridge→server leg (marker piggybacked onto the heartbeat, server persists
+declared_state/declared_at) is covered by the JS marker/heartbeat tests +
+test_session_upsert_declared_state below.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "lib"))
+
+import bus_liveness  # noqa: E402
+import session_state_hook  # noqa: E402
+
+HOOK = os.path.join(os.path.dirname(__file__), "..", "bin", "beacon-state-hook.py")
+
+
+# ===========================================================================
+# 1. Pure event→state map (SPEC 方針2 table).
+# ===========================================================================
+
+class TestEventToState:
+    @pytest.mark.parametrize("event,expected", [
+        ("UserPromptSubmit", bus_liveness.STATE_RUNNING),
+        ("PreToolUse", bus_liveness.STATE_RUNNING),
+        ("PostToolUse", bus_liveness.STATE_RUNNING),
+        ("Notification", bus_liveness.STATE_AWAITING_HUMAN),
+        ("Stop", bus_liveness.STATE_IDLE),
+        ("SessionEnd", bus_liveness.STATE_TERMINATED),
+    ])
+    def test_mapped_events(self, event, expected):
+        assert session_state_hook.event_to_declared_state(event) == expected
+
+    @pytest.mark.parametrize("event", [None, "", "SomethingElse", "PostToolUseX"])
+    def test_unrecognized_event_declares_nothing(self, event):
+        assert session_state_hook.event_to_declared_state(event) is None
+
+    def test_declared_states_are_all_declarable(self):
+        # Nothing this map emits may be the server-only ``unknown`` (方針1).
+        for event in ("UserPromptSubmit", "PreToolUse", "PostToolUse",
+                      "Notification", "Stop", "SessionEnd"):
+            state = session_state_hook.event_to_declared_state(event)
+            assert state in bus_liveness.DECLARABLE_STATES
+            assert state != bus_liveness.STATE_UNKNOWN
+
+    def test_build_marker_shape(self):
+        m = session_state_hook.build_state_marker("Notification", "2026-09-07T00:00:00.000Z")
+        assert m == {
+            "declared_state": bus_liveness.STATE_AWAITING_HUMAN,
+            "declared_at": "2026-09-07T00:00:00.000Z",
+            "source_event": "Notification",
+        }
+
+    def test_build_marker_none_for_unrecognized(self):
+        assert session_state_hook.build_state_marker("nope", "2026-09-07T00:00:00.000Z") is None
+
+
+# ===========================================================================
+# 2. The hook entry point (bin/beacon-state-hook.py) — stdin → marker file.
+# ===========================================================================
+
+def _run_hook(payload: dict):
+    """Invoke the hook with a JSON stdin payload; return CompletedProcess."""
+    return subprocess.run(
+        [sys.executable, HOOK],
+        input=json.dumps(payload),
+        capture_output=True, text=True, timeout=15,
+    )
+
+
+def _marker_path(root):
+    return os.path.join(str(root), ".beacon", "session-state.json")
+
+
+class TestHookWritesMarker:
+    def test_stop_writes_idle_marker(self, tmp_path):
+        (tmp_path / ".beacon").mkdir()
+        proc = _run_hook({"hook_event_name": "Stop", "cwd": str(tmp_path)})
+        assert proc.returncode == 0, proc.stderr
+        with open(_marker_path(tmp_path), encoding="utf-8") as f:
+            marker = json.load(f)
+        assert marker["declared_state"] == bus_liveness.STATE_IDLE
+        assert marker["source_event"] == "Stop"
+        assert marker["declared_at"]  # timestamp stamped
+
+    def test_notification_writes_awaiting_human(self, tmp_path):
+        (tmp_path / ".beacon").mkdir()
+        proc = _run_hook({"hook_event_name": "Notification", "cwd": str(tmp_path)})
+        assert proc.returncode == 0, proc.stderr
+        with open(_marker_path(tmp_path), encoding="utf-8") as f:
+            marker = json.load(f)
+        assert marker["declared_state"] == bus_liveness.STATE_AWAITING_HUMAN
+
+    def test_marker_written_to_beacon_dir_found_by_walking_up(self, tmp_path):
+        # cwd is a nested subdir; the hook must walk up to the .beacon root.
+        (tmp_path / ".beacon").mkdir()
+        nested = tmp_path / "a" / "b"
+        nested.mkdir(parents=True)
+        proc = _run_hook({"hook_event_name": "PreToolUse", "cwd": str(nested)})
+        assert proc.returncode == 0, proc.stderr
+        # Marker lands in the ROOT .beacon, not a nested one.
+        with open(_marker_path(tmp_path), encoding="utf-8") as f:
+            marker = json.load(f)
+        assert marker["declared_state"] == bus_liveness.STATE_RUNNING
+
+    def test_unrecognized_event_writes_nothing(self, tmp_path):
+        (tmp_path / ".beacon").mkdir()
+        proc = _run_hook({"hook_event_name": "SubagentStop", "cwd": str(tmp_path)})
+        assert proc.returncode == 0, proc.stderr
+        assert not os.path.exists(_marker_path(tmp_path))  # no clobber
+
+    def test_unrecognized_event_does_not_clobber_existing_marker(self, tmp_path):
+        (tmp_path / ".beacon").mkdir()
+        # Seed an existing declaration.
+        _run_hook({"hook_event_name": "Notification", "cwd": str(tmp_path)})
+        # A no-op event must leave it intact.
+        _run_hook({"hook_event_name": "PreCompact", "cwd": str(tmp_path)})
+        with open(_marker_path(tmp_path), encoding="utf-8") as f:
+            marker = json.load(f)
+        assert marker["declared_state"] == bus_liveness.STATE_AWAITING_HUMAN
+
+    def test_no_beacon_dir_is_noop_not_crash(self, tmp_path):
+        # No .beacon anywhere up the tree ⇒ fail-safe no-op, exit 0.
+        proc = _run_hook({"hook_event_name": "Stop", "cwd": str(tmp_path)})
+        assert proc.returncode == 0, proc.stderr
+
+    def test_garbage_stdin_is_noop_not_crash(self):
+        proc = subprocess.run(
+            [sys.executable, HOOK], input="not json at all",
+            capture_output=True, text=True, timeout=15,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+
+# ===========================================================================
+# 3. Server model — declared_state/declared_at accepted + persisted.
+# ===========================================================================
+
+class TestSessionUpsertDeclaredState:
+    def test_model_accepts_declared_fields(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
+        os.environ.setdefault("BEACON_OPERATIONS_BACKEND", "mock")
+        import routers_projects  # noqa: E402
+        body = routers_projects.SessionUpsert(
+            last_active="2026-09-07T00:00:00Z",
+            declared_state="awaiting_human",
+            declared_at="2026-09-07T00:00:01Z",
+        )
+        # The upsert handler persists exactly the non-None fields.
+        payload = {k: v for k, v in body.model_dump().items() if v is not None}
+        assert payload["declared_state"] == "awaiting_human"
+        assert payload["declared_at"] == "2026-09-07T00:00:01Z"
+
+    def test_heartbeat_without_declaration_omits_fields(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
+        import routers_projects  # noqa: E402
+        body = routers_projects.SessionUpsert(last_active="2026-09-07T00:00:00Z")
+        payload = {k: v for k, v in body.model_dump().items() if v is not None}
+        # Back-compat: a heartbeat with no marker grows no declared_* keys.
+        assert "declared_state" not in payload
+        assert "declared_at" not in payload

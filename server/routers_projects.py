@@ -2539,6 +2539,17 @@ class SessionUpsert(BaseModel):
     # later doesn't bump the SessionUpsert surface area.
     transport: Optional[dict] = None
 
+    # ms-159 / e-6244 — the session's self-declared execution state, written by
+    # Claude Code lifecycle hooks (beacon-state-hook.py) into
+    # .beacon/session-state.json and piggybacked onto the heartbeat by the bridge
+    # (方針4: no new send path). ``declared_state`` is one of
+    # lib/bus_liveness.DECLARABLE_STATES; ``declared_at`` is the ISO8601 UTC of
+    # the declaration and travels WITH the state (the server's derive_state uses
+    # it to judge staleness, e-6245). Both optional / merge=True: a heartbeat
+    # with no marker simply omits them and the prior declaration is preserved.
+    declared_state: Optional[str] = None
+    declared_at: Optional[str] = None
+
 class SessionIntentUpsert(BaseModel):
     """Body for POST /api/projects/{project_id}/sessions/{session_id}/intent
     (ms-54 / e-1369 Layer 4).

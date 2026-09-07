@@ -759,6 +759,22 @@ HOOK_MANIFEST = [
      "identity": ("beacon-untrusted-turn-vet-hook",),
      "timeout": 10,
      "statusMessage": "Beacon: checking untrusted-turn vet condition..."},
+    # ms-159 e-6244: declare this session's execution state so the 統合
+    # オペレーションUI can show "which sessions are waiting on a human" without
+    # opening each terminal. One script (beacon-state-hook.py) handles every
+    # event — it maps hook_event_name→state internally and writes a marker the
+    # bridge piggybacks onto the heartbeat. Split into two specs because the
+    # tool events take a "*" matcher ("all tools") while the lifecycle events
+    # take none — matcher only applies to Pre/PostToolUse in Claude Code.
+    {"key": "state-declare-tool", "events": ["PreToolUse", "PostToolUse"],
+     "matcher": "*", "script": "beacon-state-hook.py",
+     "identity": ("beacon-state-hook",),
+     "timeout": 5, "statusMessage": "Beacon: declaring session state..."},
+    {"key": "state-declare-lifecycle",
+     "events": ["UserPromptSubmit", "Notification", "Stop", "SessionEnd"],
+     "matcher": None, "script": "beacon-state-hook.py",
+     "identity": ("beacon-state-hook",),
+     "timeout": 5, "statusMessage": "Beacon: declaring session state..."},
 ]
 
 
@@ -862,7 +878,7 @@ def _install_claude_hook():
         json.dump(settings, f, indent=2, ensure_ascii=False)
         f.write("\n")
     print("Installed Claude Code hooks (commit / save / halt / postcompact / "
-          "stop / session-start / bus-inbox)")
+          "stop / session-start / bus-inbox / state-declare)")
 
 
 def _skill_profession_from_text(text: str) -> str:
