@@ -36,6 +36,29 @@ SEND_NORMAL = "normal"
 SEND_WEDGED = "wedged"
 SEND_NOT_LIVE = "not_live"
 
+# ---------------------------------------------------------------------------
+# ms-159 / e-6243 — the *work-unit state* projection (統合オペレーションUI).
+#
+# The 5 canonical work-unit states (作業単位状態モデル SPEC ``np2fSUqpE5LSIkOqHLuK``
+# 判断1). A session/Operation run往復 between these; every UI / inbox / attention
+#面 reads ONLY this small frozen set, never an executor's native vocabulary.
+STATE_RUNNING = "running"                # 自律実行中 — no human attention needed
+STATE_IDLE = "idle"                      # 生きて待機、判断要求なし — no attention
+STATE_AWAITING_HUMAN = "awaiting_human"  # 具体的な判断要求が立っている — attention
+STATE_BLOCKED = "blocked"                # 外部要因で停止 — conditional attention
+STATE_TERMINATED = "terminated"          # 終了(completed/aborted/failed)
+# ``unknown`` は状態集合の一員だが *宣言できない* 特別枠 (判断1補足 / 判断4):
+# セッションは自分が unknown だと報告できない (死んだ executor は「私は死んだ」と
+# 言えない)。server が不在検知 / 宣言不信で立てる、人間の注意を引く側の安全弁。
+STATE_UNKNOWN = "unknown"
+
+# The states a session may self-declare (方針1: 自己宣言が正)。``unknown`` は
+# 含まない — 宣言由来では決して現れない (判断4)。
+DECLARABLE_STATES = frozenset({
+    STATE_RUNNING, STATE_IDLE, STATE_AWAITING_HUMAN, STATE_BLOCKED,
+    STATE_TERMINATED,
+})
+
 
 def derive_draining(oldest_unread_created_at, now, window_seconds) -> Optional[bool]:
     """Return whether a session is *draining* its inbox.
@@ -98,3 +121,88 @@ def classify_send_delivery(live, draining) -> str:
     if draining is False:
         return SEND_WEDGED
     return SEND_NORMAL
+
+
+def _declaration_is_stale(declared_at, now, stale_after_seconds) -> bool:
+    """Return whether a state declaration is too old to trust.
+
+    ``True`` when the declaration is older than ``stale_after_seconds`` — OR when
+    its timestamp is missing/unparseable. A declaration we cannot date is treated
+    as stale (safe side: we would rather raise ``unknown`` for human attention
+    than trust an undatable self-report). ``False`` only when the stamp parses AND
+    is within the freshness window.
+    """
+    if not declared_at:
+        return True
+    try:
+        stamped = datetime.datetime.fromisoformat(
+            str(declared_at).replace("Z", "+00:00"))
+        if stamped.tzinfo is None:
+            stamped = stamped.replace(tzinfo=datetime.timezone.utc)
+    except (ValueError, AttributeError, TypeError):
+        return True
+    return (now - stamped).total_seconds() > stale_after_seconds
+
+
+def derive_state(declared_state, declared_at, live, now,
+                 stale_after_seconds) -> str:
+    """Project a work unit's canonical ``state`` (ms-159 / e-6243).
+
+    The one place the 5 canonical states + ``unknown`` are decided. Pure: the
+    impure liveness scan that produces ``live`` lives on the server; keeping the
+    derivation pure lets every branch be pinned without a bus fixture (same
+    discipline as ``derive_draining``).
+
+    Authority model (作業単位状態モデル SPEC ``np2fSUqpE5LSIkOqHLuK`` 判断1/4 +
+    slice SPEC ``Icb8zFtbnZZ1yXzMsLO6`` 方針1/4):
+
+    - **A fresh self-declaration is authoritative.** The session knows its own
+      state best, so a recognized, in-window ``declared_state`` is returned as
+      is (方針1). ``running`` / ``idle`` / ``awaiting_human`` / ``blocked``.
+    - **``terminated`` is terminal.** A session that reported SessionEnd stays
+      ``terminated`` regardless of liveness or age — it legitimately stops
+      emitting, so staleness must not flip it to ``unknown``.
+    - **A stale non-terminal declaration ⇒ ``unknown``.** The self-report can no
+      longer be trusted; raising ``unknown`` (the attention-drawing side) both
+      satisfies 方針1 ("live-but-silent ⇒ unknown") and neutralizes the 判断4
+      固着 hazard (a dead session frozen in ``awaiting_human`` would otherwise
+      nag the inbox forever).
+    - **No declaration ⇒ fall back to liveness** (AC1: "宣言が無いときは liveness
+      から fallback"). ``live`` is load-bearing HERE: a live-but-unstated session
+      becomes ``unknown`` (判断4: never silently assume ``running`` — safe side
+      toward human attention), while a not-live session with nothing ever
+      declared becomes ``terminated`` (the coarse fallback: no transport and no
+      state = gone).
+
+    Args:
+        declared_state: the session's last self-declared state, or a falsy /
+            unrecognized value when it never declared one.
+        declared_at: ISO-8601 timestamp of that declaration (``None`` if absent).
+        live: transport liveness of the session (the ``live`` union used by the
+            picker). Only consulted on the no-declaration fallback path.
+        now: current tz-aware ``datetime``.
+        stale_after_seconds: freshness window for a declaration.
+
+    Returns:
+        One of ``STATE_RUNNING`` / ``STATE_IDLE`` / ``STATE_AWAITING_HUMAN`` /
+        ``STATE_BLOCKED`` / ``STATE_TERMINATED`` / ``STATE_UNKNOWN``.
+    """
+    # 1. Terminal declaration is authoritative forever — never let age or a
+    #    dropped transport flip an ended session to unknown.
+    if declared_state == STATE_TERMINATED:
+        return STATE_TERMINATED
+
+    # 2. A recognized non-terminal self-declaration is authoritative *while
+    #    fresh* (方針1). Once stale, the report is untrustworthy ⇒ unknown
+    #    (方針1 live-but-silent + 判断4 固着 backstop; not-live folds in here too
+    #    — a lingering non-terminal state must be actively neutralized).
+    if declared_state in DECLARABLE_STATES:  # non-terminal (terminated handled)
+        if not _declaration_is_stale(declared_at, now, stale_after_seconds):
+            return declared_state
+        return STATE_UNKNOWN
+
+    # 3. No (or unrecognized) declaration ⇒ liveness fallback (判断4 safe side).
+    #    live ⇒ up but unstated ⇒ unknown; not live ⇒ gone ⇒ terminated.
+    if live:
+        return STATE_UNKNOWN
+    return STATE_TERMINATED
