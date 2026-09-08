@@ -2212,7 +2212,11 @@ EOF
                 --all-projects) _att_all="1"; shift ;;
                 --json)         _att_json="1"; shift ;;
                 -?*)            _guard_flag "$1" ;;
-                *)              shift ;;
+                # ms-159 review (#735): a positional arg is not a state filter —
+                # error instead of silently dropping it, else `beacon attention
+                # awaiting_human` returns every row and the AI mis-reads it as
+                # "these all match". Scope is set by --all-projects, not positionals.
+                *)              echo "Error: unexpected argument '$1' (beacon attention は位置引数を取りません; スコープは --all-projects で指定します)." >&2; exit 1 ;;
             esac
         done
         BEACON_ATTENTION_ALL_PROJECTS="$_att_all" \

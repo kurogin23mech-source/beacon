@@ -227,3 +227,27 @@ class TestSessionUpsertDeclaredState:
         # Back-compat: a heartbeat with no marker grows no declared_* keys.
         assert "declared_state" not in payload
         assert "declared_at" not in payload
+
+    def test_all_declarable_states_accepted(self):
+        """The Literal (ms-159 review #735) must accept every one of the 5
+        canonical DECLARABLE_STATES — no false rejection of a valid declaration."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
+        import routers_projects  # noqa: E402
+        for state in sorted(bus_liveness.DECLARABLE_STATES):
+            body = routers_projects.SessionUpsert(
+                last_active="2026-09-07T00:00:00Z", declared_state=state,
+                declared_at="2026-09-07T00:00:01Z")
+            assert body.declared_state == state
+
+    def test_invalid_declared_state_rejected(self):
+        """ms-159 review #735: an out-of-enum declaration (paused/done/…) is
+        rejected at the request boundary instead of silently falling back in
+        derive_state (a silent no-op is a Beacon 禁忌). The Literal is the guard."""
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
+        import pydantic
+        import routers_projects  # noqa: E402
+        for bad in ("paused", "done", "unknown", "RUNNING", ""):
+            with pytest.raises(pydantic.ValidationError):
+                routers_projects.SessionUpsert(
+                    last_active="2026-09-07T00:00:00Z", declared_state=bad,
+                    declared_at="2026-09-07T00:00:01Z")

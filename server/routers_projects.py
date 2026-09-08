@@ -2547,7 +2547,18 @@ class SessionUpsert(BaseModel):
     # the declaration and travels WITH the state (the server's derive_state uses
     # it to judge staleness, e-6245). Both optional / merge=True: a heartbeat
     # with no marker simply omits them and the prior declaration is preserved.
-    declared_state: Optional[str] = None
+    #
+    # ms-159 review (#735): pin the allowed values to a Literal enum (the 5
+    # lib/bus_liveness.DECLARABLE_STATES — ``unknown`` is NOT declarable, 判断4)
+    # instead of a free ``str``. This puts an enum in the OpenAPI schema AND
+    # rejects an invalid declaration (``paused``/``done``/…) at the request
+    # boundary, rather than letting it through to derive_state where it would
+    # silently fall back (a silent no-op is a Beacon 禁忌). Mirrors the
+    # MachineRunRecordBody.status Literal above. Keep this set in sync with
+    # DECLARABLE_STATES (the state_hook test pins that source is unchanged).
+    declared_state: Optional[
+        Literal["running", "idle", "awaiting_human", "blocked", "terminated"]
+    ] = None
     declared_at: Optional[str] = None
     # ms-159 / e-6245 — WHEN the session entered ``declared_state`` (preserved by
     # the hook across re-declarations of the same state, reset on transition).
