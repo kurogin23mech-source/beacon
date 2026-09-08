@@ -283,6 +283,10 @@ from cmd_bus import (  # noqa: F401
     cmd_bus_status, cmd_bus_directory, cmd_dm_sent,
 )
 
+# ms-159 e-6246: `beacon attention` — the human-attention projection over the
+# session directory (awaiting_human / blocked / terminated:failed, oldest first).
+from cmd_attention import cmd_attention  # noqa: F401
+
 # ms-127 e-4809: retro family moved to cmd_retro.py, plus its retro-day / week /
 # document / content-input leaf helpers promoted to commands_shared. Re-export the
 # 5 promoted helpers so commands.py callers (_auto_fire_retro_trigger / cmd_search
@@ -759,6 +763,22 @@ HOOK_MANIFEST = [
      "identity": ("beacon-untrusted-turn-vet-hook",),
      "timeout": 10,
      "statusMessage": "Beacon: checking untrusted-turn vet condition..."},
+    # ms-159 e-6244: declare this session's execution state so the 統合
+    # オペレーションUI can show "which sessions are waiting on a human" without
+    # opening each terminal. One script (beacon-state-hook.py) handles every
+    # event — it maps hook_event_name→state internally and writes a marker the
+    # bridge piggybacks onto the heartbeat. Split into two specs because the
+    # tool events take a "*" matcher ("all tools") while the lifecycle events
+    # take none — matcher only applies to Pre/PostToolUse in Claude Code.
+    {"key": "state-declare-tool", "events": ["PreToolUse", "PostToolUse"],
+     "matcher": "*", "script": "beacon-state-hook.py",
+     "identity": ("beacon-state-hook",),
+     "timeout": 5, "statusMessage": "Beacon: declaring session state..."},
+    {"key": "state-declare-lifecycle",
+     "events": ["UserPromptSubmit", "Notification", "Stop", "SessionEnd"],
+     "matcher": None, "script": "beacon-state-hook.py",
+     "identity": ("beacon-state-hook",),
+     "timeout": 5, "statusMessage": "Beacon: declaring session state..."},
 ]
 
 
@@ -862,7 +882,7 @@ def _install_claude_hook():
         json.dump(settings, f, indent=2, ensure_ascii=False)
         f.write("\n")
     print("Installed Claude Code hooks (commit / save / halt / postcompact / "
-          "stop / session-start / bus-inbox)")
+          "stop / session-start / bus-inbox / state-declare)")
 
 
 def _skill_profession_from_text(text: str) -> str:
@@ -6552,6 +6572,7 @@ def _help_registry():
         {"command": "beacon claim list", "flags": ["--json"], "description": "List active claims from local `.beacon/active_claims.json` (= restart restore path)"},
         {"command": "beacon stuck check", "flags": ["--telemetry-file <path>", "--idle-min N", "--json"], "description": "Detect sessions idle past --idle-min; emit STUCK stop signals so morning briefing surfaces 介入要望"},
         {"command": "beacon morning", "flags": ["--since-hours N", "--events-file <path>", "--no-doc", "--json"], "description": "4-bucket digest of recent autonomous activity (完了 / 停止 / skip / 介入要望); auto-saves as scope=report doc"},
+        {"command": "beacon attention", "flags": ["--all-projects", "--json"], "description": "List sessions awaiting a human (awaiting_human / blocked / terminated:failed), longest-waiting first; --all-projects spans every project you belong to (ms-159)"},
         {"command": "beacon help", "flags": ["--json"], "description": "Show help (--json for machine-readable output)"},
     ]
 
@@ -10746,6 +10767,7 @@ if __name__ == "__main__":
         "bus_ack": cmd_bus_ack,
         "bus_status": cmd_bus_status,
         "bus_directory": cmd_bus_directory,
+        "attention": cmd_attention,  # ms-159 e-6246
         # ms-70 / e-1716: receiver-side decision primitive for pending DM
         # actions. Reached by `beacon dm respond approve|deny <event_id>`.
         "dm_respond": cmd_dm_respond,

@@ -540,6 +540,7 @@ design.
 | `beacon claim list [--json]` | List active claims from local `.beacon/active_claims.json` |
 | `beacon stuck check [--telemetry-file <path>] [--idle-min N]` | Detect sessions idle past `--idle-min`; emit STUCK signals so `beacon morning` surfaces 介入要望 |
 | `beacon morning [--since-hours N] [--events-file <path>] [--no-doc] [--json]` | 4-bucket digest (完了 / 停止 / skip / 介入要望); auto-saves as a `scope=report` doc |
+| `beacon attention [--all-projects] [--json]` | List sessions awaiting a human (awaiting_human / blocked / terminated:failed), longest-waiting first; `--all-projects` spans every project you belong to |
 
 ## Dashboard
 

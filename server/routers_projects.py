@@ -2539,6 +2539,33 @@ class SessionUpsert(BaseModel):
     # later doesn't bump the SessionUpsert surface area.
     transport: Optional[dict] = None
 
+    # ms-159 / e-6244 — the session's self-declared execution state, written by
+    # Claude Code lifecycle hooks (beacon-state-hook.py) into
+    # .beacon/session-state.json and piggybacked onto the heartbeat by the bridge
+    # (方針4: no new send path). ``declared_state`` is one of
+    # lib/bus_liveness.DECLARABLE_STATES; ``declared_at`` is the ISO8601 UTC of
+    # the declaration and travels WITH the state (the server's derive_state uses
+    # it to judge staleness, e-6245). Both optional / merge=True: a heartbeat
+    # with no marker simply omits them and the prior declaration is preserved.
+    #
+    # ms-159 review (#735): pin the allowed values to a Literal enum (the 5
+    # lib/bus_liveness.DECLARABLE_STATES — ``unknown`` is NOT declarable, 判断4)
+    # instead of a free ``str``. This puts an enum in the OpenAPI schema AND
+    # rejects an invalid declaration (``paused``/``done``/…) at the request
+    # boundary, rather than letting it through to derive_state where it would
+    # silently fall back (a silent no-op is a Beacon 禁忌). Mirrors the
+    # MachineRunRecordBody.status Literal above. Keep this set in sync with
+    # DECLARABLE_STATES (the state_hook test pins that source is unchanged).
+    declared_state: Optional[
+        Literal["running", "idle", "awaiting_human", "blocked", "terminated"]
+    ] = None
+    declared_at: Optional[str] = None
+    # ms-159 / e-6245 — WHEN the session entered ``declared_state`` (preserved by
+    # the hook across re-declarations of the same state, reset on transition).
+    # Distinct from ``declared_at`` (last declared): the attention面 sorts by how
+    # long a session has been in its state, so this must not reset on every fire.
+    state_since: Optional[str] = None
+
 class SessionIntentUpsert(BaseModel):
     """Body for POST /api/projects/{project_id}/sessions/{session_id}/intent
     (ms-54 / e-1369 Layer 4).

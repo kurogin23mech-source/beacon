@@ -46,6 +46,7 @@ import {
 import { selectTierForBridge } from './bus-envelope.mjs'
 import { buildHeartbeatBody } from './bus-heartbeat.mjs'
 import { createLocalSessionHeartbeat } from './bus-local-heartbeat.mjs'
+import { readStateMarker, STATE_TERMINATED } from './bus-state-marker.mjs'
 import { isPidAlive, detectOtherAliveBridges } from './bridge_detect.mjs'
 import {
   buildAutonomousActionContent,
@@ -62,6 +63,9 @@ import {
 const CWD = process.cwd()
 const CLOUD_JSON = path.join(CWD, '.beacon', 'cloud.json')
 const SESSION_JSON = path.join(CWD, '.beacon', 'session.json')
+// ms-159 e-6244: where beacon-state-hook.py writes this session's declared
+// execution state; the poll heartbeat piggybacks it (see writePollHeartbeat).
+const STATE_MARKER_JSON = path.join(CWD, '.beacon', 'session-state.json')
 
 // ms-64 / e-1459: profile-aware credentials + api_url resolution.
 // MUST stay behavior-equivalent to lib/profile.py — pinned by
@@ -1293,12 +1297,36 @@ if (!PROJECT_ID || !SESSION_ID) {
 
   async function writePollHeartbeat({ shutdown = false } = {}) {
     const nowIso = new Date().toISOString()
+    // ms-159 e-6244: piggyback the session's self-declared state. On graceful
+    // shutdown the bridge KNOWS the session is ending, so it declares
+    // `terminated` directly (overriding a possibly-stale marker like `running`)
+    // — otherwise derive_state would trust the fresh non-terminal marker even
+    // though the transport is gone. On a normal poll it forwards whatever the
+    // hooks last wrote (or nothing, if no marker exists).
+    let declaredState
+    let declaredAt
+    let stateSince
+    if (shutdown) {
+      declaredState = STATE_TERMINATED  // shared constant (parity w/ lib/bus_liveness)
+      declaredAt = nowIso
+      stateSince = nowIso   // entering terminated now
+    } else {
+      const marker = readStateMarker(STATE_MARKER_JSON)
+      if (marker) {
+        declaredState = marker.declaredState
+        declaredAt = marker.declaredAt
+        stateSince = marker.stateSince
+      }
+    }
     try {
       const body = buildHeartbeatBody({
         nowIso,
         pollIntervalMs: POLL_INTERVAL,
         shutdown,
         transport: currentTransport(),   // e-5378: fleet-observable receive transport state
+        declaredState,
+        declaredAt,
+        stateSince,
       })
       await apiPut(
         `/api/projects/${PROJECT_ID}/sessions/${encodeURIComponent(SESSION_ID)}`,

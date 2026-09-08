@@ -1101,6 +1101,9 @@ _NOUN_SCOPE = {
     "master": "L1",   # was L0: customer-identity master-sync drain (ms-111)
     "morning": "L1",  # was L3-sales: bus autonomous-activity summary (ms-55)
     "profile": "L1",  # was L3-sales: Beacon auth/backend profile listing (ms-64)
+    "attention": "L1",  # human-attention projection over the session directory
+                        # (awaiting_human/blocked/terminated:failed, oldest first);
+                        # profession-shared bus/session infra, read-only (ms-159 e-6246)
     # L2 — class-abstraction: operate on a Target via the abstraction.
     "claim": "L2", "doc": "L2", "review": "L2", "status": "L2",
     "summary": "L2", "target": "L2",

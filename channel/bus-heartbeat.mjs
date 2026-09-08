@@ -37,13 +37,17 @@
  * @param {string} opts.nowIso     ISO8601 of the current poll iteration.
  * @param {number} opts.pollIntervalMs
  * @param {boolean} [opts.shutdown]
+ * @param {object} [opts.transport]
+ * @param {string} [opts.declaredState]  ms-159 e-6244 — session self-declared state.
+ * @param {string} [opts.declaredAt]     ISO8601 of that declaration.
+ * @param {string} [opts.stateSince]     ms-159 e-6245 — ISO8601 the session ENTERED that state.
  * @returns {object}
  */
 // @e-2502-core-candidate — heartbeat body is bus protocol, currently
 //   duplicated in lib/codex_receive_loop.py::heartbeat_to_server. Move
 //   the shape to lib/bus_protocol.py once that lands; this function
 //   becomes a thin Node wrapper.
-export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, transport }) {
+export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, transport, declaredState, declaredAt, stateSince }) {
   const body = {
     last_active: nowIso,
     last_poll_at: nowIso,
@@ -55,6 +59,27 @@ export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, t
   // on the 5s poll floor, and *why* (never-opened vs flapping). Shape MUST match
   // lib/bus_protocol.py::heartbeat_body. Omitted when not provided (back-compat).
   if (transport !== undefined && transport !== null) body.transport = transport
+  // ms-159 e-6244 — piggyback the session's self-declared execution state
+  // (written to .beacon/session-state.json by beacon-state-hook.py) onto the
+  // existing heartbeat (方針4: no new send path). Both fields travel together
+  // or not at all: the server's derive_state needs declared_at to judge whether
+  // the declaration is still fresh. Omitted entirely when no marker exists
+  // (back-compat: a heartbeat with no declaration preserves the prior one via
+  // the server's merge=True upsert).
+  if (declaredState && declaredAt) {
+    body.declared_state = declaredState
+    body.declared_at = declaredAt
+    // ms-159 e-6245 — state_since (when the session ENTERED this state) rides
+    // alongside so the server/attention面 can sort by "how long in this state".
+    // ms-159 review (#735): only send it when the marker actually carries it.
+    // The hook-preserved state_since is the real value (the server cannot
+    // reconstruct it — it only sees individual heartbeats), so we always forward
+    // it when present. When absent (an e-6244 marker predating the field) we OMIT
+    // it and let the server's single authoritative fallback fill it (state_since
+    // ← declared_at ← last_poll_at ← last_active), instead of fabricating the
+    // fallback here too. One place decides; no client↔server divergence.
+    if (stateSince) body.state_since = stateSince
+  }
   return body
 }
 

@@ -1744,6 +1744,16 @@ _POLL_HEALTH_INTERVAL_MULTIPLIER = 2
 _ATTENTIVE_HEARTBEAT_MAX_AGE_S = int(
     os.environ.get("BEACON_ATTENTIVE_MAX_AGE_S", "300") or "300")
 
+# ms-159 (e-6245): post-death grace window for the work-unit state projection.
+# bus_liveness.derive_state consults it ONLY on the not-live path — a session
+# whose transport just dropped keeps its last declared state for this long
+# before flipping to `unknown` (a just-crashed session is indistinguishable from
+# a brief pause for a few minutes). While LIVE the declaration is trusted
+# regardless of age (the heartbeat re-affirms it), so this is NOT a general
+# freshness clock. Env-overridable.
+_STATE_DECL_GRACE_S = int(
+    os.environ.get("BEACON_STATE_DECL_GRACE_S", "300") or "300")
+
 
 def _heartbeat_is_fresh(last_heartbeat_at: str, now_dt) -> Optional[bool]:
     """Return True/False if ``last_heartbeat_at`` is within the attentiveness
@@ -1938,6 +1948,29 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
             draining = None
     session["draining"] = draining
     session["reachable"] = bus_liveness.is_reachable(session["live"], draining)
+
+    # ms-159 (e-6245): project the canonical work-unit `state` + `state_since`
+    # onto the row so `bus directory --json` (and the attention面) can read them.
+    # `state` is derived from the session's self-declaration (方針1) with the
+    # server filling `unknown` in the gap (方針1/判断4); see bus_liveness.derive_state.
+    declared_state = session.get("declared_state") or ""
+    declared_at = session.get("declared_at") or ""
+    state = bus_liveness.derive_state(
+        declared_state, declared_at, session["live"], now_dt, _STATE_DECL_GRACE_S)
+    session["state"] = state
+    # `state_since` = when the session entered `state`. When the derived state
+    # matches what the session declared, the hook-tracked entry time is authoritative
+    # (preserved across re-declarations, so a long wait sorts correctly). When the
+    # server INFERRED a divergent state (unknown / fallback terminated), the marker's
+    # state_since is for a now-superseded state, so fall back to the freshest known
+    # timestamp as a best-effort "since" (unknown/terminated are not sorted in the
+    # attention面, so precision there is not load-bearing).
+    if state == declared_state and declared_state:
+        session["state_since"] = (session.get("state_since") or declared_at
+                                  or session.get("last_poll_at") or "")
+    else:
+        session["state_since"] = (declared_at or session.get("last_poll_at")
+                                  or session.get("last_active") or "")
 
 
 def _classify_recipient_send_delivery(project_id: str, recipient_sid: str,

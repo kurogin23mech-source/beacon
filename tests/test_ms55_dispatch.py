@@ -311,12 +311,38 @@ def test_morning_no_doc_and_events_file(project_dir, no_bash, captured_call):
 
 
 # ---------------------------------------------------------------------------
+# attention (ms-159 e-6246) — #735 review (maintainability): the env-var
+# contract BEACON_ATTENTION_ALL_PROJECTS / BEACON_JSON is set in three places
+# (bin/beacon, dispatch._handle_attention, cmd_attention.py). Without a parity
+# test a typo in one copy silently drops the flag on that path. Same shape as
+# the morning/stuck classes above.
+# ---------------------------------------------------------------------------
+
+def test_attention_defaults(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["attention"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_ATTENTION_ALL_PROJECTS"] == ""
+    assert env["BEACON_JSON"] == ""
+    assert captured_call["cmd"][-1] == "attention"
+
+
+def test_attention_all_projects_and_json(project_dir, no_bash, captured_call):
+    rc = main_mod.main(["attention", "--all-projects", "--json"])
+    assert rc == 0
+    env = captured_call["env"]
+    assert env["BEACON_ATTENTION_ALL_PROJECTS"] == "1"
+    assert env["BEACON_JSON"] == "1"
+    assert captured_call["cmd"][-1] == "attention"
+
+
+# ---------------------------------------------------------------------------
 # Handler registration — pin the dict so a future rename doesn't silently
 # break Windows parity.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
-    "verb", ["stop", "resume", "rollback", "claim", "stuck", "morning"],
+    "verb", ["stop", "resume", "rollback", "claim", "stuck", "morning", "attention"],
 )
 def test_handler_registered(verb: str) -> None:
     assert verb in dispatch._HANDLERS, (

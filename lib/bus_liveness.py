@@ -36,6 +36,29 @@ SEND_NORMAL = "normal"
 SEND_WEDGED = "wedged"
 SEND_NOT_LIVE = "not_live"
 
+# ---------------------------------------------------------------------------
+# ms-159 / e-6243 — the *work-unit state* projection (統合オペレーションUI).
+#
+# The 5 canonical work-unit states (作業単位状態モデル SPEC ``np2fSUqpE5LSIkOqHLuK``
+# 判断1). A session/Operation run往復 between these; every UI / inbox / attention
+#面 reads ONLY this small frozen set, never an executor's native vocabulary.
+STATE_RUNNING = "running"                # 自律実行中 — no human attention needed
+STATE_IDLE = "idle"                      # 生きて待機、判断要求なし — no attention
+STATE_AWAITING_HUMAN = "awaiting_human"  # 具体的な判断要求が立っている — attention
+STATE_BLOCKED = "blocked"                # 外部要因で停止 — conditional attention
+STATE_TERMINATED = "terminated"          # 終了(completed/aborted/failed)
+# ``unknown`` は状態集合の一員だが *宣言できない* 特別枠 (判断1補足 / 判断4):
+# セッションは自分が unknown だと報告できない (死んだ executor は「私は死んだ」と
+# 言えない)。server が不在検知 / 宣言不信で立てる、人間の注意を引く側の安全弁。
+STATE_UNKNOWN = "unknown"
+
+# The states a session may self-declare (方針1: 自己宣言が正)。``unknown`` は
+# 含まない — 宣言由来では決して現れない (判断4)。
+DECLARABLE_STATES = frozenset({
+    STATE_RUNNING, STATE_IDLE, STATE_AWAITING_HUMAN, STATE_BLOCKED,
+    STATE_TERMINATED,
+})
+
 
 def derive_draining(oldest_unread_created_at, now, window_seconds) -> Optional[bool]:
     """Return whether a session is *draining* its inbox.
@@ -98,3 +121,107 @@ def classify_send_delivery(live, draining) -> str:
     if draining is False:
         return SEND_WEDGED
     return SEND_NORMAL
+
+
+def _declaration_is_stale(declared_at, now, stale_after_seconds) -> bool:
+    """Return whether a state declaration is too old to trust.
+
+    ``True`` when the declaration is older than ``stale_after_seconds`` — OR when
+    its timestamp is missing/unparseable. A declaration we cannot date is treated
+    as stale (safe side: we would rather raise ``unknown`` for human attention
+    than trust an undatable self-report). ``False`` only when the stamp parses AND
+    is within the freshness window.
+    """
+    if not declared_at:
+        return True
+    try:
+        stamped = datetime.datetime.fromisoformat(
+            str(declared_at).replace("Z", "+00:00"))
+        if stamped.tzinfo is None:
+            stamped = stamped.replace(tzinfo=datetime.timezone.utc)
+    except (ValueError, AttributeError, TypeError):
+        return True
+    return (now - stamped).total_seconds() > stale_after_seconds
+
+
+def derive_state(declared_state, declared_at, live, now,
+                 stale_after_seconds) -> str:
+    """Project a work unit's canonical ``state`` (ms-159 / e-6243).
+
+    The one place the 5 canonical states + ``unknown`` are decided. Pure: the
+    impure liveness scan that produces ``live`` lives on the server; keeping the
+    derivation pure lets every branch be pinned without a bus fixture (same
+    discipline as ``derive_draining``).
+
+    Authority model (作業単位状態モデル SPEC ``np2fSUqpE5LSIkOqHLuK`` 判断1/4 +
+    slice SPEC ``Icb8zFtbnZZ1yXzMsLO6`` 方針1/4):
+
+    - **``terminated`` is terminal.** A session that reported SessionEnd stays
+      ``terminated`` regardless of liveness or age — it legitimately stops
+      emitting, so nothing flips it to ``unknown``.
+    - **While LIVE, the latest declaration is authoritative — staleness does NOT
+      apply.** The bridge heartbeats every few seconds; that live heartbeat
+      continuously re-affirms the marker (the session would push a NEW marker if
+      its state changed), so ``declared_at`` age is not evidence the state is
+      wrong. This is the correction that lets a session parked in
+      ``awaiting_human`` for hours stay visible at the top of the attention面
+      (its ``declared_at`` freezes while it waits — no hook fires — but the
+      heartbeat proves it is still genuinely waiting). Uniform staleness would
+      instead hide exactly the long-waiting sessions this MS exists to surface.
+      The one live exception: **no declaration at all ⇒ ``unknown``** (判断4:
+      never silently assume ``running`` — the safe side toward human attention).
+    - **Once NOT LIVE, staleness is what indicts the declaration.** With the
+      heartbeat gone we can no longer confirm the state, so:
+        * a *fresh* declaration is a very recent death — trust it through a short
+          grace window (a just-crashed ``awaiting_human`` still reads
+          ``awaiting_human`` for a moment, indistinguishable from a real pause);
+        * a *stale* declaration ⇒ ``unknown`` — transport gone AND the last
+          report is old, so a lingering non-terminal state must be neutralized
+          (判断4 固着 backstop: a dead session frozen in ``awaiting_human`` must
+          not nag the inbox forever);
+        * *no* declaration ⇒ ``terminated`` (no transport and nothing ever
+          declared = gone).
+
+    So ``stale_after_seconds`` is a *post-death grace window*, not a general
+    freshness clock — it is consulted only on the not-live path. (The precise
+    live-stuck detector — a session that is live but silently stopped declaring
+    because its hooks broke — is the deferred deadline-sweep / generic server
+    tick, np2 判断6; this slice deliberately trusts a live declaration over
+    catching that rarer case, because mis-hiding awaiting_human is the worse
+    failure.)
+
+    Args:
+        declared_state: the session's last self-declared state, or a falsy /
+            unrecognized value when it never declared one.
+        declared_at: ISO-8601 timestamp of that declaration (``None`` if absent).
+        live: transport liveness of the session (the ``live`` union used by the
+            picker). Load-bearing: the primary axis here.
+        now: current tz-aware ``datetime``.
+        stale_after_seconds: post-death grace window (only consulted when
+            ``live`` is false).
+
+    Returns:
+        One of ``STATE_RUNNING`` / ``STATE_IDLE`` / ``STATE_AWAITING_HUMAN`` /
+        ``STATE_BLOCKED`` / ``STATE_TERMINATED`` / ``STATE_UNKNOWN``.
+    """
+    # 1. Terminal declaration is authoritative forever — never let age or a
+    #    dropped transport flip an ended session to unknown.
+    if declared_state == STATE_TERMINATED:
+        return STATE_TERMINATED
+
+    # 2. A recognized non-terminal declaration.
+    if declared_state in DECLARABLE_STATES:  # non-terminal (terminated handled)
+        if live:
+            # Live heartbeat re-affirms the marker → trust it regardless of age.
+            # This keeps a long-waiting awaiting_human at the top of attention.
+            return declared_state
+        # Not live: the heartbeat is gone, so staleness now decides.
+        if not _declaration_is_stale(declared_at, now, stale_after_seconds):
+            return declared_state          # very recent death: grace window
+        return STATE_UNKNOWN               # gone + stale ⇒ 固着 backstop
+
+    # 3. No (or unrecognized) declaration ⇒ liveness fallback (判断4 safe side).
+    #    live ⇒ up but unstated ⇒ unknown; not live ⇒ gone ⇒ terminated.
+    if live:
+        return STATE_UNKNOWN
+    return STATE_TERMINATED
