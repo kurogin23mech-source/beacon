@@ -63,6 +63,9 @@ VERB_LEDGER = {
     "account_phase": {"cls": "R", "secondary": [], "note": ""},
     "account_rename": {"cls": "R", "secondary": [], "note": ""},
 
+    # --- attention (post-memo, ms-159 e-6246) ---
+    "attention": {"cls": "Q", "secondary": [], "note": "[post-memo/ms-159] read-only: 人間の判断を待つセッション (awaiting_human/blocked/terminated:failed) を横断投影。session_attention (--set の記録=R) と別物の一覧(Q)"},
+
     # --- acquisition (post-memo, ms-115 target-class) ---
     "acquisition_add": {"cls": "R", "secondary": [], "note": "[post-memo] 獲得ターゲット起票=台帳追記(R)、milestone add と同型"},
     "acquisition_list": {"cls": "Q", "secondary": [], "note": "[post-memo] read-only 一覧"},
