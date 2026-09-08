@@ -52,6 +52,7 @@ import deadline  # ms-139 e-4953: L2 締切エンジン (overdue 規則 + remind
 import occupation  # ms-142 e-5010: 職種非依存の Target/WorkItem 抽象イテレータ
 import tick_health as tick_health_mod  # e-1391 / ms-66: tick-liveness evaluation
 import bus_liveness  # ms-165 e-5965: progress dimension (draining/reachable) pure helpers
+import working_target  # ms-159 e-6290/e-6292: derive session working target + activity
 
 # e-1391 (ms-66) — last successful periodic tick, recorded by the
 # trek-scheduler tick endpoint and read back by /api/system/tick-health so an
@@ -1971,6 +1972,36 @@ def _stamp_session_liveness(session: dict, project_id: str, now_dt) -> None:
     else:
         session["state_since"] = (declared_at or session.get("last_poll_at")
                                   or session.get("last_active") or "")
+
+    # ms-159 (e-6292): project the session's WORKING TARGET, ACTIVITY, and
+    # USER identity onto the row so the ops面 (D slice) can read "which session
+    # is on which root ＞ target, doing what, owned by whom". Same hybrid truth
+    # source as `state` (方針2): the session's own declaration (intent doc) is
+    # authoritative, and the server DERIVES a fallback from git.branch / cwd /
+    # focus when absent. `activity` reuses the intent `text` (方針: no duplicate
+    # field) with git.head_subject as the derived proxy. The server has no
+    # `.beacon/fork.json` (worktree-local) so it passes fork_json=None; the
+    # branch/cwd heuristic already recovers the fork's ms-id. Pure logic lives in
+    # lib/working_target (e-6290) so this stamp is a thin projection.
+    intent = session.get("intent") if isinstance(session.get("intent"), dict) else {}
+    git = session.get("git") if isinstance(session.get("git"), dict) else {}
+    focus = session.get("focus") if isinstance(session.get("focus"), dict) else {}
+    actor = session.get("actor") if isinstance(session.get("actor"), dict) else {}
+    session["working_target"] = working_target.derive_working_target(
+        intent.get("working_target"),
+        branch=str(git.get("branch") or ""),
+        cwd=str(session.get("cwd") or ""),
+        fork_json=None,
+        focus_milestone=focus.get("milestone"),
+        project={"kind": "project", "id": project_id,
+                 "label": session.get("project_name") or project_id},
+    )
+    session["activity"] = working_target.derive_activity(
+        intent.get("text"), head_subject=str(git.get("head_subject") or ""))
+    # user_id identifies the row's owner so the ops面 can default to "just mine"
+    # (方針3: model is multi-user, default view is self). Best-effort: the actor's
+    # user_id when present, else its email (the identity sid_to_uid keys on).
+    session["user_id"] = (actor.get("user_id") or actor.get("email") or "")
 
 
 def _classify_recipient_send_delivery(project_id: str, recipient_sid: str,
