@@ -113,10 +113,11 @@ def main() -> None:
         # approval — else it would silently vet the session and drop the gate for
         # every later DM. This turns the old cross-process timing inference into a
         # measured fact (ms-169 e-6280 review fix, AX + maintainability consensus).
-        if not state.get("asked_at"):
+        if not ut.was_asked(state):
             return  # armed side-effect, but the gate never asked → do not vet
         # A side-effect executed while armed AND the gate asked ⇒ the human
-        # approved it. Trust this untrusted context for the rest of the session.
+        # approved it. Clear THIS untrusted context (per-context, e-6280): the
+        # rest of this context passes, but a later new untrusted DM re-arms.
         ut.vet(root, session_key)
     except Exception:
         # Never brick the harness on a hook bug — fail safe (state unchanged).

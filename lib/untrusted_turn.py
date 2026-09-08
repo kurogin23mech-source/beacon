@@ -25,16 +25,17 @@ Lifetime (documented tradeoff — ms-169 方針1/2, refined by e-6280):
     human approval (read-only calls pass), surfacing the sources inline so the
     human judges the *context*, not the tool. Holds in every session — including
     an ``armed`` autonomous one, which is exactly when no human is watching.
-  * VET (e-6280): when a human approves a side-effect *while pending* (proven by
-    the PostToolUse vet hook: a side-effect tool actually executed in an armed
-    turn ⇒ the human approved it), the session is marked ``vetted``. From then on
-    this session does NOT re-arm — subsequent untrusted DMs no longer nag for
-    per-tool approval (承認範囲 = セッション全体, a deliberate friction/safety
-    tradeoff: B body-isolation + untrusted framing remain for later DMs). This is
-    what turns「毎ツール確認地獄」into「リスク文脈ごとの1回承認」.
-  * DISARM: a plain *human* UserPromptSubmit clears ``pending`` (the human retook
-    the turn without approving) but PRESERVES ``vetted`` — so per-session trust
-    survives a normal turn, while an un-approved DM re-gates the next new DM.
+  * VET (e-6280, per-context — corrected in the #738 review): when a human
+    approves a side-effect *while pending* (proven by the PostToolUse vet hook: a
+    side-effect executed in an armed turn AND the gate had asked), the CURRENT
+    untrusted context is cleared. Subsequent side-effects in that same context
+    pass, but a later NEW untrusted DM re-arms and is confirmed on its own —
+    approval is scoped to「その untrusted 文脈」, NOT the whole session. This turns
+    「毎ツール確認地獄」into「リスク文脈ごとの1回承認」without letting a first
+    approval silently un-gate a *later* attacker's DM (the per-session hole the
+    #738 review flagged: arm no longer no-ops after one approval).
+  * DISARM: a plain *human* UserPromptSubmit drops any un-approved pending context
+    (the human retook the turn); a genuinely new untrusted DM re-arms afterward.
 
 autonomous safety: in an ``armed`` autonomous session an「ask」has no human to
 approve it, so the side-effect never executes ⇒ the vet hook never fires ⇒ the
@@ -70,6 +71,13 @@ STATE_RELPATH = (".beacon", "untrusted-turn.json")
 # Entries older than this (hours) are pruned on write, so dead sessions that
 # never disarmed don't accumulate forever.
 _STALE_HOURS = 24
+
+# The single name for "the gate actually asked" marker inside a pending context.
+# Named here so the PreToolUse gate (stamps it via record_asked) and the
+# PostToolUse vet hook (reads it via was_asked) share ONE string — a rename can't
+# silently break the security invariant across the two hook processes (ms-169
+# e-6280 review, maintainability finding #4).
+ASKED_MARKER = "asked_at"
 
 _SAFE_KEY_RE = re.compile(r"[^A-Za-z0-9_.:-]")
 
@@ -176,13 +184,13 @@ def _hours_between(a_iso: str, b_iso: str) -> float:
 def _entry_timestamp(v: dict) -> str:
     """The most-recent activity timestamp on a state entry, for staleness pruning.
 
-    Reads the new-shape ``pending.armed_at`` / ``vetted_at`` and falls back to a
-    legacy top-level ``armed_at`` so pre-e-6280 files prune too."""
+    Reads the new-shape ``pending.armed_at`` and falls back to a legacy top-level
+    ``armed_at`` so pre-e-6280 files prune too."""
     if not isinstance(v, dict):
         return ""
     pend = v.get("pending")
     pend_at = pend.get("armed_at", "") if isinstance(pend, dict) else ""
-    return pend_at or v.get("vetted_at", "") or v.get("armed_at", "")
+    return pend_at or v.get("armed_at", "")  # armed_at fallback = legacy shape
 
 
 def _write_all(root: "str | Path", state: dict) -> None:
@@ -239,29 +247,36 @@ def _normalize_sources(sources, event_ids) -> list:
 
 def arm(root: "str | Path", session_key: str, *, event_ids=None, sources=None,
         at: str = "") -> bool:
-    """Arm ``pending`` untrusted content for ``session_key``. Returns True if it
-    armed, False on a no-op.
+    """Arm (or extend) the CURRENT untrusted ``pending`` context for
+    ``session_key``. Returns True if it armed, False on a blank-key no-op.
 
     ``sources`` (preferred, e-6280) is a list of ``{event_id, sender, preview}``
     the gate surfaces inline; ``event_ids`` is the back-compat bare form. New
-    sources merge into any existing pending set (dedup by event_id).
+    sources merge into any existing pending context (dedup by event_id).
 
-    No-op (returns False) when ``session_key`` is blank OR the session is already
-    ``vetted`` (e-6280 per-session trust: once a human approved an untrusted
-    context this session, later DMs no longer re-arm)."""
+    Per-context (e-6280 方針4, corrected in the #738 review from the earlier
+    per-session model): approval is scoped to the untrusted *context*, NOT the
+    whole session. So arming is NEVER suppressed by a prior approval — a genuinely
+    new untrusted DM always re-arms and gets its own one-time confirmation. When
+    new event(s) enter the context, the ``asked_at`` marker is dropped so the new
+    content is re-confirmed (a stale ask must not cover fresh untrusted data)."""
     if not session_key:
         return False
     state = _read_all(root)
     entry = state.get(session_key)
-    if isinstance(entry, dict) and entry.get("vetted"):
-        return False  # per-session: already vetted → suppress further arming
-    new_sources = _normalize_sources(sources, event_ids)
     prev_pending = entry.get("pending") if isinstance(entry, dict) else None
     prev_sources = prev_pending.get("sources") if isinstance(prev_pending, dict) else None
-    merged = _normalize_sources(list(prev_sources or []) + new_sources, None)
+    prev_norm = _normalize_sources(list(prev_sources or []), None)
+    new_sources = _normalize_sources(sources, event_ids)
+    merged = _normalize_sources(prev_norm + new_sources, None)
+    pending = {"armed_at": at or _now_iso(), "sources": merged}
+    # Preserve an existing ask ONLY when the context is unchanged (idempotent
+    # re-arm); any newly-added event is fresh untrusted content and must re-ask.
+    prev_asked = prev_pending.get(ASKED_MARKER) if isinstance(prev_pending, dict) else ""
+    if prev_asked and len(merged) == len(prev_norm):
+        pending[ASKED_MARKER] = prev_asked
     entry = dict(entry) if isinstance(entry, dict) else {}
-    entry["vetted"] = bool(entry.get("vetted", False))  # stays False here
-    entry["pending"] = {"armed_at": at or _now_iso(), "sources": merged}
+    entry["pending"] = pending
     state[session_key] = entry
     _write_all(root, state)
     return True
@@ -269,29 +284,28 @@ def arm(root: "str | Path", session_key: str, *, event_ids=None, sources=None,
 
 def record_asked(root: "str | Path", session_key: str, tool_name: str = "") -> None:
     """Record that the PreToolUse gate actually emitted an approval「ask」for a
-    side-effect in this pending turn (ms-169 e-6280 review fix).
+    side-effect in the current pending context (ms-169 e-6280 review fix).
 
     This closes a hole both independent reviewers flagged: ``vet`` used to infer
     "the human approved" purely from "a side-effect executed while armed". But a
     side-effect can execute while armed WITHOUT the gate ever asking — the gate
     hook fail-safe-returned, timed out, wasn't installed, or the harness runs in
     an auto-accept permission mode. In those cases the old ``vet`` would silently
-    mark the session vetted and never gate again. By having the gate stamp an
-    ``asked_at`` marker when (and only when) it emits an「ask」, and having the vet
-    hook require that marker, the approval inference becomes a measured fact
-    instead of a cross-process timing assumption. No-op if not armed (nothing to
-    stamp) or session already vetted."""
+    mark the turn approved and drop the gate. By having the gate stamp the
+    ``ASKED_MARKER`` when (and only when) it emits an「ask」, and having the vet
+    hook require it (via ``was_asked``), the approval inference becomes a measured
+    fact instead of a cross-process timing assumption. No-op if not armed."""
     if not session_key:
         return
     state = _read_all(root)
     entry = state.get(session_key)
-    if not isinstance(entry, dict) or entry.get("vetted"):
+    if not isinstance(entry, dict):
         return
     pending = entry.get("pending")
     if not isinstance(pending, dict):
         return  # not armed → nothing to stamp
     pending = dict(pending)
-    pending["asked_at"] = _now_iso()
+    pending[ASKED_MARKER] = _now_iso()
     if tool_name:
         pending["asked_tool"] = str(tool_name)
     entry = dict(entry)
@@ -300,29 +314,25 @@ def record_asked(root: "str | Path", session_key: str, tool_name: str = "") -> N
     _write_all(root, state)
 
 
+def was_asked(armed_state: dict) -> bool:
+    """True when an ``is_armed`` result carries proof the gate asked (e-6280
+    review, finding #4 — single reader of the ASKED_MARKER contract). The vet hook
+    calls this so the marker name lives in exactly one place."""
+    return bool(isinstance(armed_state, dict) and armed_state.get(ASKED_MARKER))
+
+
 def vet(root: "str | Path", session_key: str) -> None:
-    """Mark ``session_key`` vetted: a human approved a side-effect under untrusted
-    content this session (e-6280). Clears ``pending`` and suppresses future
-    arming for the rest of the session. Blank key is a no-op."""
+    """Clear the CURRENT untrusted context for ``session_key`` — a human approved
+    a side-effect under it (e-6280, per-context). This trusts ONLY that context:
+    the pending entry is dropped, so subsequent side-effects in the same context
+    pass, but a later new untrusted DM re-arms and is confirmed on its own. Blank
+    key is a no-op."""
     if not session_key:
         return
     state = _read_all(root)
-    entry = state.get(session_key)
-    entry = dict(entry) if isinstance(entry, dict) else {}
-    entry["vetted"] = True
-    entry["vetted_at"] = _now_iso()
-    entry["pending"] = None
-    state[session_key] = entry
-    _write_all(root, state)
-
-
-def is_vetted(root: "str | Path", session_key: str) -> bool:
-    """True when this session already approved an untrusted context (e-6280).
-    Fail-safe: unreadable / missing state → False."""
-    if not session_key:
-        return False
-    entry = _read_all(root).get(session_key)
-    return bool(isinstance(entry, dict) and entry.get("vetted"))
+    if session_key in state:
+        del state[session_key]
+        _write_all(root, state)
 
 
 def _quarantine_corrupt(root: "str | Path") -> None:
@@ -351,9 +361,9 @@ def _quarantine_corrupt(root: "str | Path") -> None:
 
 
 def disarm(root: "str | Path", session_key: str) -> None:
-    """Clear ``pending`` for ``session_key`` (human retook the turn WITHOUT
-    approving) but PRESERVE a per-session ``vetted`` flag (e-6280). Drops the
-    whole entry when it was never vetted (nothing worth keeping).
+    """Clear any pending untrusted context for ``session_key`` (human retook the
+    turn without approving). Per-context (e-6280): there is no session-wide flag
+    to preserve, so the whole entry is dropped.
 
     A corrupt state file is healed here (e-6274 review fix): the human turn
     quarantines the bad file and writes a fresh empty map, matching the recovery
@@ -362,32 +372,23 @@ def disarm(root: "str | Path", session_key: str) -> None:
         return
     _quarantine_corrupt(root)
     state = _read_all(root)
-    entry = state.get(session_key)
-    if not isinstance(entry, dict):
-        if session_key in state:
-            del state[session_key]
-            _write_all(root, state)
-        return
-    if entry.get("vetted"):
-        entry = dict(entry)
-        entry["pending"] = None
-        state[session_key] = entry
-    else:
+    if session_key in state:
         del state[session_key]
-    _write_all(root, state)
+        _write_all(root, state)
 
 
 def is_armed(root: "str | Path", session_key: str) -> "dict | None":
-    """Return the pending-turn dict when ``session_key`` has UNVETTED untrusted
-    content live, else None. The dict carries ``armed_at`` / ``sources``
-    ([{event_id, sender, preview}]) and a back-compat ``event_ids`` list.
+    """Return the pending-context dict when ``session_key`` has untrusted content
+    live and unapproved, else None. The dict carries ``armed_at`` / ``sources``
+    ([{event_id, sender, preview}]), a back-compat ``event_ids`` list, and
+    ``asked_at`` (present only if the gate asked — see ``was_asked``).
 
-    Fail-safe: an unreadable / missing state file, or a vetted session, returns
-    None (not armed) so a corrupt file can never brick tool calls."""
+    Fail-safe: an unreadable / missing state file returns None (not armed) so a
+    corrupt file can never brick tool calls."""
     if not session_key:
         return None
     entry = _read_all(root).get(session_key)
-    if not isinstance(entry, dict) or entry.get("vetted"):
+    if not isinstance(entry, dict):
         return None
     pending = entry.get("pending")
     if not isinstance(pending, dict):
@@ -412,10 +413,11 @@ __all__ = [
     "STATE_RELPATH",
     "session_key_from_hook_input",
     "resolve_session_key",
+    "ASKED_MARKER",
     "arm",
     "record_asked",
+    "was_asked",
     "vet",
-    "is_vetted",
     "disarm",
     "is_armed",
     "state_file_health",

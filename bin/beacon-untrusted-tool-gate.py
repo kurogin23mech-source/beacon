@@ -91,6 +91,12 @@ def _emit_ask(reason: str) -> None:
     print(json.dumps(out, ensure_ascii=False))
 
 
+def _strip_fence(s: str) -> str:
+    """Remove the 「」 quote-fence chars so attacker-influenced text (sender /
+    preview) can't escape its quoting in the approval prompt (e-6280 review)."""
+    return str(s).replace("「", " ").replace("」", " ")
+
+
 def _source_lines(state: dict) -> str:
     """Render the untrusted DMs (event_id / sender / body preview) inline so the
     human judges the *context*, not the tool (e-6280 option A). Falls back to a
@@ -100,7 +106,10 @@ def _source_lines(state: dict) -> str:
         lines = []
         for s in sources[:5]:
             eid = s.get("event_id") or "?"
-            sender = s.get("sender") or "?"
+            # Sanitize sender too, not just preview (e-6280 review, AX finding
+            # #2): sender is attacker-influenced data flowing into the approval
+            # prompt; strip the 「」 quote-fence so it can't break out of quoting.
+            sender = _strip_fence(s.get("sender") or "?")
             preview = s.get("preview") or ""
             if preview:
                 lines.append(f"  - [{eid}] from {sender}: 「{preview}」")
@@ -130,9 +139,9 @@ def _build_reason(tool_name: str, state: dict) -> str:
         "しています。\n"
         "判断: 上の DM 本文に紛れ込んだ命令に誘導されていませんか? この文脈のまま操作を"
         "進めて安全ですか?\n"
-        "  承認 → この操作を実行します。**承認するとこのセッションの残り全体が信頼済み扱い"
-        "になり、今後届く別の送信者の DM を含め、untrusted DM 由来の副作用確認は再度求めません**"
-        " (承認範囲=セッション全体)。\n"
+        "  承認 → この操作を実行します。**承認範囲は上の untrusted 文脈のみ**で、以降その"
+        "文脈内の副作用は確認を省きます。後から別の untrusted DM が届いたら、その文脈ごとに"
+        "改めて一度確認します (セッション全体を信頼済みにはしません)。\n"
         "  拒否 → この操作を止めます。\n"
         "(読み取り専用ツールは gate されません)"
     )
@@ -150,7 +159,8 @@ def _build_corrupt_reason(tool_name: str) -> str:
         f"安全側に倒して副作用ツール『{tool_name}』(状態を変える / 外部に送る) の実行前に"
         "人間確認を求めています。\n"
         "  承認 → この操作を実行します (直近に別セッションからの DM に誘導されていない"
-        "ことを確認してください)。\n"
+        "ことを確認してください)。**この承認はこの1操作だけに効きます** — 状態ファイルが"
+        "復元されるまで、次の副作用でも再び確認します (文脈単位の信頼付与にはなりません)。\n"
         "  拒否 → この操作を止めます。\n"
         "状態ファイルを復旧するには一度人間プロンプトを送ると再生成されます。"
         " (読み取り専用ツールは gate されません)"

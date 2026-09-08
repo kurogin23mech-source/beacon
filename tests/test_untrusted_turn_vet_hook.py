@@ -62,24 +62,22 @@ def _vet(cwd: Path, session_id: str, tool_name: str, tool_input=None,
 # The vet hook's fire condition (all three must hold: armed + side-effect + asked)
 # ---------------------------------------------------------------------------
 
-def test_vet_hook_vets_armed_asked_side_effect(tmp_path):
+def test_vet_hook_clears_armed_asked_context(tmp_path):
     root = _beacon_root(tmp_path)
     ut.arm(root, "sv-1", event_ids=["e-1"])
     ut.record_asked(root, "sv-1", "Write")           # the gate asked (approved)
     _vet(root, "sv-1", "Write", {"file_path": "x"})  # armed + asked + side-effect
-    assert ut.is_vetted(root, "sv-1") is True
-    assert ut.is_armed(root, "sv-1") is None
+    assert ut.is_armed(root, "sv-1") is None          # context cleared → passes
 
 
 def test_vet_hook_does_not_vet_without_gate_ask(tmp_path):
-    # THE new security guard (independent review consensus): a side-effect that
-    # ran while armed but WITHOUT the gate emitting an ask (fail-safe / timeout /
-    # not installed / auto-accept mode) is NOT proof of human approval. It must
-    # not silently vet the session and drop the gate for later DMs.
+    # THE security guard (independent review consensus): a side-effect that ran
+    # while armed but WITHOUT the gate emitting an ask (fail-safe / timeout / not
+    # installed / auto-accept mode) is NOT proof of human approval. It must not
+    # silently clear the context and drop the gate.
     root = _beacon_root(tmp_path)
     ut.arm(root, "sv-1", event_ids=["e-1"])          # armed, but gate never asked
     _vet(root, "sv-1", "Write", {"file_path": "x"})
-    assert ut.is_vetted(root, "sv-1") is False
     assert ut.is_armed(root, "sv-1") is not None      # still armed → still gates
 
 
@@ -87,30 +85,28 @@ def test_vet_hook_ignores_read_only_completion(tmp_path):
     root = _beacon_root(tmp_path)
     ut.arm(root, "sv-1", event_ids=["e-1"])
     ut.record_asked(root, "sv-1", "Read")
-    _vet(root, "sv-1", "Read", {"file_path": "x"})   # read-only → never vets
-    assert ut.is_vetted(root, "sv-1") is False
+    _vet(root, "sv-1", "Read", {"file_path": "x"})   # read-only → never clears
     assert ut.is_armed(root, "sv-1") is not None      # still armed
 
 
 def test_vet_hook_does_not_vet_unarmed_side_effect(tmp_path):
-    # A side-effect that runs while NOT armed is ordinary work; vetting it would
-    # suppress the gate for a LATER real injection.
+    # A side-effect that runs while NOT armed is ordinary work; clearing/vetting
+    # it would suppress the gate for a LATER real injection.
     root = _beacon_root(tmp_path)
     _vet(root, "sv-1", "Bash", {"command": "ls"})
-    assert ut.is_vetted(root, "sv-1") is False
+    assert ut.is_armed(root, "sv-1") is None          # nothing to clear
     # A subsequent real DM still arms and the gate still fires.
     ut.arm(root, "sv-1", event_ids=["e-late"])
     assert _gate_decision(root, "sv-1", "Write", {"file_path": "y"}) == "ask"
 
 
 def test_vet_hook_ignores_non_posttooluse_event(tmp_path):
-    # A PreToolUse event delivered to the vet hook must NOT vet (event filter).
+    # A PreToolUse event delivered to the vet hook must NOT clear (event filter).
     root = _beacon_root(tmp_path)
     ut.arm(root, "sv-1", event_ids=["e-1"])
     ut.record_asked(root, "sv-1", "Write")
     _vet(root, "sv-1", "Write", {"file_path": "x"}, event="PreToolUse")
-    assert ut.is_vetted(root, "sv-1") is False        # wrong event → ignored
-    assert ut.is_armed(root, "sv-1") is not None
+    assert ut.is_armed(root, "sv-1") is not None       # wrong event → ignored
 
 
 def test_vet_hook_is_per_session(tmp_path):
@@ -119,29 +115,28 @@ def test_vet_hook_is_per_session(tmp_path):
     ut.record_asked(root, "sv-A", "Write")
     ut.arm(root, "sv-B", event_ids=["e-2"])
     _vet(root, "sv-A", "Write", {"file_path": "x"})
-    assert ut.is_vetted(root, "sv-A") is True
-    assert ut.is_vetted(root, "sv-B") is False       # B untouched, still armed
-    assert ut.is_armed(root, "sv-B") is not None
+    assert ut.is_armed(root, "sv-A") is None          # A's context cleared
+    assert ut.is_armed(root, "sv-B") is not None       # B untouched, still armed
 
 
 # ---------------------------------------------------------------------------
-# Full state machine — one approval per risky context, not per tool.
-# This exercises the REAL flow: the gate stamps asked_at when it asks, so the
-# subsequent vet finds the marker and vets.
+# Full state machine — one approval per risky CONTEXT, not per tool, and a NEW
+# untrusted DM re-arms (per-context, corrected from per-session in the #738
+# review). Exercises the REAL flow: the gate stamps asked_at when it asks, so
+# the subsequent vet finds the marker and clears that context.
 # ---------------------------------------------------------------------------
 
-def test_one_approval_then_rest_of_session_passes(tmp_path):
+def test_one_approval_clears_context_but_new_dm_rearms(tmp_path):
     root = _beacon_root(tmp_path)
     # DM arrives → armed. First side-effect → gate asks (the ONE confirmation).
     ut.arm(root, "sv-1", event_ids=["e-1"])
     assert _gate_decision(root, "sv-1", "Bash", {"command": "a"}) == "ask"
     assert ut.is_armed(root, "sv-1")["asked_at"]  # the gate stamped the marker
-    # Human approves → the tool runs → PostToolUse vets the session.
+    # Human approves → the tool runs → PostToolUse clears THIS context.
     _vet(root, "sv-1", "Bash", {"command": "a"})
-    # Every subsequent side-effect in the session now passes without asking.
+    # Every subsequent side-effect in the SAME context passes without asking.
     assert _gate_decision(root, "sv-1", "Bash", {"command": "b"}) == ""
     assert _gate_decision(root, "sv-1", "Write", {"file_path": "c"}) == ""
-    assert _gate_decision(root, "sv-1", "mcp__gmail__send_email", {"to": "x"}) == ""
-    # A brand-new DM does NOT re-arm the vetted session (承認範囲 = セッション全体).
-    assert ut.arm(root, "sv-1", event_ids=["e-2"]) is False
-    assert _gate_decision(root, "sv-1", "Bash", {"command": "d"}) == ""
+    # A brand-new untrusted DM RE-ARMS (per-context) → the gate asks again for it.
+    assert ut.arm(root, "sv-1", event_ids=["e-2"]) is True
+    assert _gate_decision(root, "sv-1", "Bash", {"command": "d"}) == "ask"

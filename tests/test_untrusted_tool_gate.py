@@ -247,32 +247,38 @@ def test_human_turn_disarms_then_gate_passes(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# e-6280 — per-session vetting: one approval per risky context, not per tool
+# e-6280 — per-context vetting: one approval per risky context, and a NEW
+# untrusted DM re-arms (corrected from per-session in the #738 review)
 # ---------------------------------------------------------------------------
 
-def test_vet_suppresses_further_arming_and_gating(tmp_path):
+def test_vet_clears_context_then_new_dm_rearms(tmp_path):
     root = _beacon_root(tmp_path)
     assert ut.arm(root, "sv-1", event_ids=["e-1"]) is True
-    ut.vet(root, "sv-1")                       # human approved a side-effect
-    assert ut.is_vetted(root, "sv-1") is True
-    assert ut.is_armed(root, "sv-1") is None   # pending cleared by vet
-    # A later DM must NOT re-arm this session (承認範囲 = セッション全体).
-    assert ut.arm(root, "sv-1", event_ids=["e-2"]) is False
-    assert ut.is_armed(root, "sv-1") is None
-    # ...and the gate stays silent for side-effects for the rest of the session.
+    ut.vet(root, "sv-1")                        # human approved this context
+    assert ut.is_armed(root, "sv-1") is None    # context cleared
+    # Same-context side-effects now pass.
     out = _run_gate(root, {
         "hook_event_name": "PreToolUse", "session_id": "sv-1",
-        "tool_name": "Bash", "tool_input": {"command": "rm x"}})
+        "tool_name": "Bash", "tool_input": {"command": "b"}})
     assert out == {}
+    # A NEW untrusted DM re-arms (per-context) → the gate asks again.
+    assert ut.arm(root, "sv-1", event_ids=["e-2"]) is True
+    assert ut.is_armed(root, "sv-1") is not None
+    out2 = _run_gate(root, {
+        "hook_event_name": "PreToolUse", "session_id": "sv-1",
+        "tool_name": "Bash", "tool_input": {"command": "rm x"}})
+    assert _decision(out2) == "ask"
 
 
-def test_disarm_preserves_vetted(tmp_path):
+def test_arm_resets_ask_when_new_event_enters_context(tmp_path):
+    # A new untrusted event joining the pending context must drop a prior ask so
+    # the fresh content is re-confirmed (asked_at must not cover new data).
     root = _beacon_root(tmp_path)
     ut.arm(root, "sv-1", event_ids=["e-1"])
-    ut.vet(root, "sv-1")
-    ut.disarm(root, "sv-1")                     # a later plain human turn
-    assert ut.is_vetted(root, "sv-1") is True   # per-session trust survives
-    assert ut.arm(root, "sv-1", event_ids=["e-2"]) is False  # still suppressed
+    ut.record_asked(root, "sv-1", "Bash")
+    assert ut.is_armed(root, "sv-1")["asked_at"]        # asked for {e-1}
+    ut.arm(root, "sv-1", event_ids=["e-2"])             # new event joins
+    assert ut.is_armed(root, "sv-1")["asked_at"] == ""  # ask dropped → re-confirm
 
 
 def test_record_asked_marks_pending_and_surfaces_in_is_armed(tmp_path):
