@@ -1031,12 +1031,17 @@ class ApiClient:
 
     def upsert_session_intent(self, project_id: str, session_id: str, *,
                               text: Optional[str] = None,
-                              attention_required: Optional[bool] = None) -> dict:
+                              attention_required: Optional[bool] = None,
+                              working_target: Optional[dict] = None) -> dict:
         body: dict = {}
         if text is not None:
             body["text"] = text
         if attention_required is not None:
             body["attention_required"] = attention_required
+        # ms-159 / e-6291 — the session's declaration of which target it works on
+        # ({root, target:{kind,id,title}}), riding the same intent doc as text.
+        if working_target is not None:
+            body["working_target"] = working_target
         return self.post(
             f"/api/projects/{project_id}/sessions/{urllib.parse.quote(session_id)}/intent",
             body,

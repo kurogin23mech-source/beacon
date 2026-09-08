@@ -637,6 +637,112 @@ def cmd_session_attention():
         print(f"attention_required: {flag}")
 
 
+# ms-159 / e-6291 — canonical target kinds a session may declare it works on,
+# with the short aliases the CLI accepts. Milestone/task/opportunity mirror the
+# targets the ops面 groups by; unknown kinds pass through verbatim (the deriver
+# and readers tolerate it) rather than erroring, so a new target class isn't
+# blocked here.
+_WORKING_KIND_ALIASES = {
+    "ms": "milestone", "milestone": "milestone",
+    "task": "task", "e": "task",
+    "opp": "opportunity", "opportunity": "opportunity",
+}
+
+
+def _parse_working_target(spec: str):
+    """Parse a ``--target`` spec into ``(kind, id)``.
+
+    Accepts ``<kind>:<id>`` (``ms:ms-159`` / ``task:e-6290``) or a bare id whose
+    prefix implies the kind (``ms-159`` → milestone, ``e-6290`` → task). Returns
+    ``(kind, id)`` or ``(None, None)`` when unparseable.
+    """
+    spec = (spec or "").strip()
+    if not spec:
+        return None, None
+    if ":" in spec:
+        raw_kind, ident = spec.split(":", 1)
+        kind = _WORKING_KIND_ALIASES.get(raw_kind.strip().lower(), raw_kind.strip().lower())
+        return (kind or None), (ident.strip() or None)
+    # Bare id — infer kind from the id prefix (ms-* milestone, e-* task).
+    low = spec.lower()
+    if low.startswith("ms-"):
+        return "milestone", spec
+    if low.startswith("e-"):
+        return "task", spec
+    return None, spec
+
+
+def cmd_session_working():
+    """Declare WHICH target this session is working on (ms-159 / e-6291).
+
+    Modes:
+      * `beacon session working --target <kind:id> [--title "<t>"]` — declare
+      * `beacon session working --clear`                            — clear
+      * `beacon session working --show`                             — read
+
+    The declaration rides the same intent doc as `session focus` (which sets the
+    *activity* = "what am I doing"): together they let a session self-report both
+    its target and its activity. Absent a declaration the server derives the
+    target from git.branch/cwd/focus (`lib/working_target`, e-6292), so this verb
+    is the precision override, not a requirement.
+    """
+    show = os.environ.get("BEACON_SESSION_WORKING_SHOW", "") == "1"
+    clear = os.environ.get("BEACON_SESSION_WORKING_CLEAR", "") == "1"
+    target_spec = os.environ.get("BEACON_SESSION_WORKING_TARGET", "")
+    title = os.environ.get("BEACON_SESSION_WORKING_TITLE", "")
+    json_out = os.environ.get("BEACON_JSON", "") == "1"
+
+    client, config = _get_api_client()
+    project_id = _resolve_bus_project_id(config)
+    session_id = _resolve_current_session_id()
+    if not session_id:
+        print("Error: could not resolve current session_id "
+              "(run `beacon session id` first)", file=sys.stderr)
+        sys.exit(1)
+
+    if show:
+        s = client.get_session(project_id, session_id)
+        wt = (s.get("intent") or {}).get("working_target") or {}
+        if json_out:
+            print(json.dumps(wt, ensure_ascii=False))
+        else:
+            tgt = (wt or {}).get("target") or {}
+            if tgt.get("id"):
+                title_s = f" ({tgt.get('title')})" if tgt.get("title") else ""
+                print(f"working_target: {tgt.get('kind')}:{tgt.get('id')}{title_s}")
+            else:
+                print("working_target: (not declared — server derives from branch/cwd)")
+        return
+
+    if clear:
+        # Empty dict clears the declaration; the server falls back to derived.
+        result = client.upsert_session_intent(
+            project_id, session_id, working_target={})
+    else:
+        kind, ident = _parse_working_target(target_spec)
+        if not ident:
+            print("Usage: beacon session working --target <kind:id> "
+                  "[--title \"<t>\"] | --clear | --show [--json]\n"
+                  "  kinds: ms|milestone, task|e, opp|opportunity "
+                  "(bare ms-XX / e-XXXX infers kind)", file=sys.stderr)
+            sys.exit(2)
+        working_target = {
+            "target": {"kind": kind or "", "id": ident, "title": title.strip()},
+        }
+        result = client.upsert_session_intent(
+            project_id, session_id, working_target=working_target)
+
+    if json_out:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        wt = (result.get("intent") or {}).get("working_target") or {}
+        tgt = (wt or {}).get("target") or {}
+        if tgt.get("id"):
+            print(f"working_target: {tgt.get('kind')}:{tgt.get('id')}")
+        else:
+            print("working_target: (cleared)")
+
+
 def cmd_session_fork():
     """Fork a sibling worktree for parallel work on a target milestone (ms-67 / e-1549).
 

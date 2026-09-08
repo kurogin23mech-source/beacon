@@ -2029,6 +2029,35 @@ except ValueError as e:
                     BEACON_JSON="$_sa_json" \
                     python3 "$COMMANDS_PY" session_attention
                 ;;
+            working)
+                # ms-159 / e-6291: AI declares WHICH target it works on. The
+                # activity ("what am I doing") reuses the intent text set by
+                # `session focus`; this sets the structured working_target.
+                # Absent a declaration the server derives it from branch/cwd/focus.
+                shift 2
+                _sw_target=""
+                _sw_title=""
+                _sw_show=""
+                _sw_clear=""
+                _sw_json=""
+                while [[ $# -gt 0 ]]; do
+                    case "$1" in
+                        --target) _sw_target="${2:-}"; shift 2 ;;
+                        --title)  _sw_title="${2:-}";  shift 2 ;;
+                        --show)   _sw_show="1";  shift ;;
+                        --clear)  _sw_clear="1"; shift ;;
+                        --json)   _sw_json="1";  shift ;;
+                        -?*) _guard_flag "$1" ;;
+                        *)      shift ;;
+                    esac
+                done
+                BEACON_SESSION_WORKING_TARGET="$_sw_target" \
+                    BEACON_SESSION_WORKING_TITLE="$_sw_title" \
+                    BEACON_SESSION_WORKING_SHOW="$_sw_show" \
+                    BEACON_SESSION_WORKING_CLEAR="$_sw_clear" \
+                    BEACON_JSON="$_sw_json" \
+                    python3 "$COMMANDS_PY" session_working
+                ;;
             fork)
                 # ms-67 / e-1549: create a sibling worktree + bclaude-ready
                 # workspace for parallel work on a target milestone.
@@ -2075,13 +2104,14 @@ except ValueError as e:
                 echo "       beacon session id"
                 echo "       beacon session focus \"<text>\" | --clear | --show [--json]"
                 echo "       beacon session attention --set true|false [--json]"
+                echo "       beacon session working --target <kind:id> [--title <t>] | --clear | --show [--json]"
                 echo "       beacon session fork <ms-id> [--json]"
                 echo "       beacon session fork list [--json]"
                 echo "  --bus-origin: refuse the write (persistence poisoning defense, ms-54 / e-1293)"
                 ;;
             *)
                 echo "Unknown session subcommand: ${2:-}"
-                echo "Usage: beacon session [end|rescue|log|id|focus|attention|fork]"
+                echo "Usage: beacon session [end|rescue|log|id|focus|attention|working|fork]"
                 ;;
         esac
         ;;

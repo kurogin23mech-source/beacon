@@ -1471,6 +1471,16 @@ def build_parser() -> argparse.ArgumentParser:
                                       choices=["true", "false"], default="")
     p_session_attention.add_argument("--json", action="store_true")
 
+    # ms-159 / e-6291: declare WHICH target this session works on.
+    p_session_working = session_sub.add_parser("working", add_help=False)
+    p_session_working.add_argument("--target", dest="working_target", default="")
+    p_session_working.add_argument("--title", dest="working_title", default="")
+    p_session_working.add_argument("--show", action="store_true",
+                                    help="Show current working_target (read-only)")
+    p_session_working.add_argument("--clear", action="store_true",
+                                    help="Clear the declared working_target")
+    p_session_working.add_argument("--json", action="store_true")
+
     # ms-73 / e-1762: Win parity for session lifecycle / forensics verbs.
     # `end` aggregates this session's notes/commits/PRs into the session log
     # (graceful close path). `rescue` aggregates all OTHER sessions (used when
@@ -4739,6 +4749,8 @@ def _handle_session(root: Path, args: argparse.Namespace) -> int:
         print("Usage: beacon session id")
         print("       beacon session focus \"<text>\" | --clear | --show [--json]")
         print("       beacon session attention --set true|false [--json]")
+        print("       beacon session working --target <kind:id> [--title <t>] "
+              "| --clear | --show [--json]")
         print("       beacon session end [--summary <text>] [--session-id <id>] "
               "[--bus-origin] [--json]")
         print("       beacon session rescue [--json]")
@@ -4763,6 +4775,15 @@ def _handle_session(root: Path, args: argparse.Namespace) -> int:
             "BEACON_JSON": "1" if args.json else "",
         }
         return _run_commands_py(root, "session_attention", env)
+    if args.session_cmd == "working":
+        env = {
+            "BEACON_SESSION_WORKING_TARGET": getattr(args, "working_target", "") or "",
+            "BEACON_SESSION_WORKING_TITLE": getattr(args, "working_title", "") or "",
+            "BEACON_SESSION_WORKING_SHOW": "1" if getattr(args, "show", False) else "",
+            "BEACON_SESSION_WORKING_CLEAR": "1" if getattr(args, "clear", False) else "",
+            "BEACON_JSON": "1" if args.json else "",
+        }
+        return _run_commands_py(root, "session_working", env)
     # ----- ms-73 e-1762 additions -----
     if args.session_cmd == "end":
         env = {

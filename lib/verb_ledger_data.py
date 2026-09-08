@@ -414,6 +414,7 @@ VERB_LEDGER = {
     "session_attention": {"cls": "R", "secondary": [], "note": "attention_required フラグの記録(R)"},
     "session_end": {"cls": "R", "secondary": ["C"], "note": "session-end 記録(R)/対話(C)"},
     "session_focus": {"cls": "R", "secondary": [], "note": "intent の記録(R)"},
+    "session_working": {"cls": "R", "secondary": [], "note": "[post-memo/ms-159] 作業 target(working_target) の宣言記録(R)。activity は session_focus の intent text を再利用、これは構造化した target を書く"},
     "session_fork": {"cls": "C", "secondary": [], "note": "local"},
     "session_fork_list": {"cls": "Q", "secondary": [], "note": ""},
     "session_id": {"cls": "Q", "secondary": [], "note": ""},

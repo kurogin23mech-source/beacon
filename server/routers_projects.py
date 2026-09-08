@@ -2579,9 +2579,20 @@ class SessionIntentUpsert(BaseModel):
     `attention_required` is a boolean flag the AI raises when it is waiting
     on a human decision. Readers (directory picker, Web UI) show it
     prominently so a teammate sees "who needs me" at a glance.
+
+    `working_target` (ms-159 / e-6291) is the AI's declaration of WHICH target
+    it is working on — ``{root: {...}, target: {kind, id, title}}``. It rides the
+    same intent doc (same器 = the session row) as ``text`` (which doubles as the
+    D-slice's *activity* = "what am I doing"), so a session declares both its
+    target and its activity through this one Layer-4 self-report. Absent a
+    declaration the server derives it from git.branch/cwd/focus
+    (``lib/working_target.derive_working_target``, e-6292). Shaped dict (not a
+    nested model) to mirror ``SessionUpsert.focus``; the deriver tolerates a
+    partial/garbage shape and falls back rather than trusting it.
     """
     text: Optional[str] = None
     attention_required: Optional[bool] = None
+    working_target: Optional[dict] = None
 
 class SessionLogUpsert(BaseModel):
     """Body for PUT /api/projects/{project_id}/session_logs/{session_id}.
