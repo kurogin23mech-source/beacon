@@ -1737,11 +1737,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     # `beacon attention` (ms-159 e-6246) — sessions awaiting a human, oldest first.
     p_attention = sub.add_parser(
-        "attention", help="List sessions awaiting a human (longest-waiting first)",
+        "attention", help="Session roster grouped by target (--attention-only for 要対応)",
         add_help=False,
     )
     p_attention.add_argument("--help", "-h", action="store_true", dest="show_help")
     p_attention.add_argument("--all-projects", dest="all_projects", action="store_true")
+    p_attention.add_argument("--attention-only", dest="attention_only",
+                             action="store_true")
+    p_attention.add_argument("--scope", dest="scope", default="")
+    p_attention.add_argument("--target", dest="root_target", default="")
     p_attention.add_argument("--json", action="store_true")
 
     # ---- monitor (ms-44 e-854) ----
@@ -5210,12 +5214,27 @@ def _handle_morning(root: Path, args: argparse.Namespace) -> int:
 
 
 def _handle_attention(root: Path, args: argparse.Namespace) -> int:
-    """`beacon attention [--all-projects] [--json]` (ms-159 e-6246)."""
+    """`beacon attention [--all-projects] [--attention-only] [--scope self|team]
+    [--target <root>] [--json]` (ms-159 e-6246/e-6293).
+
+    Default: a roster of the caller's sessions grouped by root target, each row
+    showing 作業 target / 状態 / activity / 待機. --attention-only narrows to 要対応
+    (awaiting_human/blocked/terminated:failed) = the C+A view. --scope team shows
+    everyone in the project; --target filters to one root target.
+    """
     if args.show_help:
-        print("Usage: beacon attention [--all-projects] [--json]")
+        print("Usage: beacon attention [--all-projects] [--attention-only] "
+              "[--scope self|team] [--target <root>] [--json]\n"
+              "  Default: roster of your sessions grouped by root target "
+              "(作業 target / 状態 / activity / 待機, oldest-waiting first within a group).\n"
+              "  --attention-only: only 要対応 (awaiting_human / blocked / terminated:failed).\n"
+              "  --scope team: include other members' sessions (default: just yours).")
         return 0
     return _run_commands_py(root, "attention", {
         "BEACON_ATTENTION_ALL_PROJECTS": "1" if getattr(args, "all_projects", False) else "",
+        "BEACON_ATTENTION_ATTENTION_ONLY": "1" if getattr(args, "attention_only", False) else "",
+        "BEACON_ATTENTION_SCOPE": getattr(args, "scope", "") or "",
+        "BEACON_ATTENTION_TARGET": getattr(args, "root_target", "") or "",
         "BEACON_JSON": "1" if getattr(args, "json", False) else "",
     })
 

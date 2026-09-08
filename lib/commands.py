@@ -6573,7 +6573,7 @@ def _help_registry():
         {"command": "beacon claim list", "flags": ["--json"], "description": "List active claims from local `.beacon/active_claims.json` (= restart restore path)"},
         {"command": "beacon stuck check", "flags": ["--telemetry-file <path>", "--idle-min N", "--json"], "description": "Detect sessions idle past --idle-min; emit STUCK stop signals so morning briefing surfaces 介入要望"},
         {"command": "beacon morning", "flags": ["--since-hours N", "--events-file <path>", "--no-doc", "--json"], "description": "4-bucket digest of recent autonomous activity (完了 / 停止 / skip / 介入要望); auto-saves as scope=report doc"},
-        {"command": "beacon attention", "flags": ["--all-projects", "--json"], "description": "List sessions awaiting a human (awaiting_human / blocked / terminated:failed), longest-waiting first; --all-projects spans every project you belong to (ms-159)"},
+        {"command": "beacon attention", "flags": ["--all-projects", "--attention-only", "--scope", "--target", "--json"], "description": "Session roster grouped by root target (作業 target / 状態 / activity / 待機); --attention-only narrows to 要対応 (awaiting_human / blocked / terminated:failed); --scope self|team; --target <root>; --all-projects spans every project you belong to (ms-159)"},
         {"command": "beacon help", "flags": ["--json"], "description": "Show help (--json for machine-readable output)"},
     ]
 
