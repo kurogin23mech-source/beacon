@@ -2203,7 +2203,6 @@ EOF
         # ms-159 e-6246: list sessions awaiting a human (awaiting_human / blocked
         # / terminated:failed), longest-waiting first. Top-level verb (distinct
         # from `session attention --set`, which is one session's intent flag).
-        ensure_project
         shift
         _att_all=""
         _att_json=""
@@ -2219,6 +2218,13 @@ EOF
                 *)              echo "Error: unexpected argument '$1' (beacon attention は位置引数を取りません; スコープは --all-projects で指定します)." >&2; exit 1 ;;
             esac
         done
+        # ms-159 review (#735 AX medium): --all-projects is user-scoped (spans
+        # every project you belong to), so it must NOT require a cwd project —
+        # gating it behind ensure_project made `beacon attention --all-projects`
+        # fail from a non-project dir while the dispatch.py frontend worked there,
+        # a silent two-frontend divergence. Gate only the cwd-scoped path; parse
+        # flags first so the gate can see --all-projects.
+        [[ -n "$_att_all" ]] || ensure_project
         BEACON_ATTENTION_ALL_PROJECTS="$_att_all" \
             BEACON_JSON="$_att_json" \
             python3 "$COMMANDS_PY" attention

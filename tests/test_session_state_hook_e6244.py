@@ -251,3 +251,26 @@ class TestSessionUpsertDeclaredState:
                 routers_projects.SessionUpsert(
                     last_active="2026-09-07T00:00:00Z", declared_state=bad,
                     declared_at="2026-09-07T00:00:01Z")
+
+    def test_literal_matches_declarable_states_both_ways(self):
+        """ms-159 review #735 (maintainability): the server-side Literal and
+        lib DECLARABLE_STATES are two copies of one set. `test_all_declarable_
+        states_accepted` only pins one direction (canonical ⊆ Literal). Pin the
+        reverse too — extract the Literal's members from the model annotation and
+        assert set-equality — so a value added to the Literal but NOT to the
+        canonical set (or vice versa) fails CI instead of drifting silently."""
+        import typing
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
+        import routers_projects  # noqa: E402
+        ann = routers_projects.SessionUpsert.model_fields["declared_state"].annotation
+        # annotation is Optional[Literal[...]] == Union[Literal[...], None];
+        # unwrap the Union, then the Literal, to recover the declared members.
+        literal_members = set()
+        for arg in typing.get_args(ann):
+            literal_members.update(typing.get_args(arg))
+        assert literal_members == set(bus_liveness.DECLARABLE_STATES), (
+            "SessionUpsert.declared_state Literal has drifted from "
+            "bus_liveness.DECLARABLE_STATES — keep the two in sync "
+            f"(Literal={sorted(literal_members)}, "
+            f"canonical={sorted(bus_liveness.DECLARABLE_STATES)})"
+        )
