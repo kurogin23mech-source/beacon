@@ -144,12 +144,19 @@ def sender_label(event: dict) -> str:
 def build_source(event: dict, maxlen: int = PREVIEW_MAXLEN) -> dict:
     """Build the ``{event_id, sender, preview}`` record the untrusted-turn state
     stores so the gate can show the human *which* DM (and a body preview) put the
-    turn in an untrusted context (e-6280 inline preview)."""
-    return {
-        "event_id": str((event or {}).get("event_id") or ""),
-        "sender": sender_label(event),
-        "preview": preview_text(event, maxlen),
-    }
+    turn in an untrusted context (e-6280 inline preview).
+
+    This adapts an event into the canonical source shape via
+    ``untrusted_turn.make_source`` (ms-169 e-6297) — the shape's single
+    definition — so this producer can never drift from the normalizer / renderer.
+    """
+    import untrusted_turn as ut  # sibling lib module; imported lazily to keep
+    #                              this pure-data module import-light.
+    return ut.make_source(
+        event_id=(event or {}).get("event_id"),
+        sender=sender_label(event),
+        preview=preview_text(event, maxlen),
+    )
 
 
 def _cache_path(root: "str | Path", event_id: str) -> Path:

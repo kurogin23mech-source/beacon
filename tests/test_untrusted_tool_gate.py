@@ -258,7 +258,7 @@ def test_human_turn_disarms_then_gate_passes(tmp_path):
 
 def test_vet_clears_context_then_new_dm_rearms(tmp_path):
     root = _beacon_root(tmp_path)
-    assert ut.arm(root, "sv-1", event_ids=["e-1"]) is True
+    assert ut.arm(root, "sv-1", event_ids=["e-1"]) == ut.ARM_OK
     ut.vet(root, "sv-1")                        # human approved this context
     assert ut.is_armed(root, "sv-1") is None    # context cleared
     # Same-context side-effects now pass.
@@ -267,7 +267,7 @@ def test_vet_clears_context_then_new_dm_rearms(tmp_path):
         "tool_name": "Bash", "tool_input": {"command": "b"}})
     assert out == {}
     # A NEW untrusted DM re-arms (per-context) → the gate asks again.
-    assert ut.arm(root, "sv-1", event_ids=["e-2"]) is True
+    assert ut.arm(root, "sv-1", event_ids=["e-2"]) == ut.ARM_OK
     assert ut.is_armed(root, "sv-1") is not None
     out2 = _run_gate(root, {
         "hook_event_name": "PreToolUse", "session_id": "sv-1",
