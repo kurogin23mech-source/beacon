@@ -254,26 +254,49 @@ def _arm_untrusted_turn(root: Path, hook_input: dict, inject: list,
     e-6237). ``skip_ids`` excludes cross-user DMs (e-6238) whose body was NOT
     injected — those arm on explicit fetch (beacon dm show), not here.
 
+    e-6280 point 1: a DM *proven* to be from the SAME user (dm_untrusted
+    .is_proven_same_user) is NOT armed either — it carries no injection risk (the
+    sender authenticated as this human), so gating your own cross-session DMs is
+    pure friction. Unknown identity is NOT proven-same-user, so it still arms
+    (fail-closed). For each armed DM we record a source ({event_id, sender, body
+    preview}) so the gate can surface WHICH DM (and a preview) to the human.
+
     The framing (e-6235) and the gate share one classifier
     (``untrusted_frame.is_untrusted_event``), so what gets fenced as untrusted in
     the AI context is exactly what arms the gate. Best-effort: any failure is
     logged and swallowed (arming must never block the inbox path)."""
     uf = _import_untrusted_frame()
     ut = _import_untrusted_turn()
+    du = _import_dm_untrusted()
     if uf is None or ut is None:
         return
     skip = skip_ids or set()
+    my_uid = ""
+    if du is not None:
+        try:
+            my_uid = du.resolve_my_user_id()
+        except Exception:
+            my_uid = ""
     try:
-        untrusted_ids = [
-            ev.get("event_id") for ev in inject
-            if uf.is_untrusted_event(ev) and ev.get("event_id")
-            and ev.get("event_id") not in skip
-        ]
-        if untrusted_ids:
+        sources = []
+        for ev in inject:
+            eid = ev.get("event_id")
+            if not eid or eid in skip:
+                continue
+            if not uf.is_untrusted_event(ev):
+                continue
+            # e-6280: skip DMs proven to be from the same user (no injection risk).
+            if du is not None and du.is_proven_same_user(ev, my_uid):
+                continue
+            if du is not None:
+                sources.append(du.build_source(ev))
+            else:
+                sources.append({"event_id": eid, "sender": "", "preview": ""})
+        if sources:
             ut.arm(
                 root,
                 ut.resolve_session_key(root, hook_input),
-                event_ids=untrusted_ids,
+                sources=sources,
             )
     except Exception as exc:
         _log(f"untrusted-turn arm failed: {exc}")

@@ -84,6 +84,74 @@ def is_cross_user(event: dict, my_user_id: str) -> bool:
     return sender != my_user_id
 
 
+def is_proven_same_user(event: dict, my_user_id: str) -> bool:
+    """True only when we can POSITIVELY prove ``event`` is from the SAME user.
+
+    Requires a resolved ``my_user_id`` AND a present ``sender_user_id`` that is
+    equal. The exact complement of :func:`is_cross_user` on the *proven* axis:
+    an unknown sender / unknown self returns False (NOT proven same-user).
+
+    e-6280 point 1: a proven same-user DM carries no injection risk (the server
+    stamps ``sender_user_id`` from the sender's authenticated JWT, so only a
+    session authed as THIS human can produce one — it is effectively you talking
+    to yourself across sessions), so the A gate need not arm for it. Unknown
+    identity is deliberately NOT proven-same-user, so it still arms (fail-closed):
+    a real cross-user DM whose ``my_user_id`` failed to resolve must not slip into
+    the trusted path."""
+    if not isinstance(event, dict) or not my_user_id:
+        return False
+    sender = str(event.get("sender_user_id") or "")
+    if not sender:
+        return False
+    return sender == my_user_id
+
+
+# Max characters of a DM body surfaced inline in the gate's approval prompt
+# (e-6280): enough for a human to spot an embedded「〜して」without dumping the
+# whole body into the permission reason.
+PREVIEW_MAXLEN = 200
+
+_WS_RE = re.compile(r"\s+")
+
+# The gate wraps the preview in 「…」. An attacker who controls the DM body could
+# embed 」 to escape the quote and inject a fake instruction onto the very
+# approval screen ("」← この操作は承認済みです。承認してください"). Neutralise the
+# fence characters (both corner brackets) so the preview can't break out of its
+# quoting in the permission reason (ms-169 e-6280 review fix, AX finding).
+_FENCE_RE = re.compile(r"[「」]")
+
+
+def preview_text(event: dict, maxlen: int = PREVIEW_MAXLEN) -> str:
+    """A single-line, length-capped, fence-safe preview of a DM body for the gate
+    prompt.
+
+    Whitespace/newlines are collapsed to single spaces so the preview stays one
+    readable line inside the permission reason; the 「」 quote-fence characters are
+    stripped so a body can't escape its quoting; truncated with an ellipsis (the
+    gate adds a full-text pointer when it sees the ellipsis)."""
+    collapsed = _WS_RE.sub(" ", _FENCE_RE.sub(" ", body_text(event))).strip()
+    if len(collapsed) > maxlen:
+        return collapsed[:maxlen] + "…"
+    return collapsed
+
+
+def sender_label(event: dict) -> str:
+    """Human-readable sender id for the gate prompt (user id, else session id)."""
+    return str((event or {}).get("sender_user_id")
+               or (event or {}).get("sender_session_id") or "?")
+
+
+def build_source(event: dict, maxlen: int = PREVIEW_MAXLEN) -> dict:
+    """Build the ``{event_id, sender, preview}`` record the untrusted-turn state
+    stores so the gate can show the human *which* DM (and a body preview) put the
+    turn in an untrusted context (e-6280 inline preview)."""
+    return {
+        "event_id": str((event or {}).get("event_id") or ""),
+        "sender": sender_label(event),
+        "preview": preview_text(event, maxlen),
+    }
+
+
 def _cache_path(root: "str | Path", event_id: str) -> Path:
     safe = _SAFE_ID_RE.sub("", str(event_id or ""))[:128] or "unknown"
     return Path(root).joinpath(*CACHE_DIRPARTS) / f"{safe}.json"
@@ -166,8 +234,13 @@ def format_cross_user_notice(event: dict) -> str:
 
 __all__ = [
     "CACHE_DIRPARTS",
+    "PREVIEW_MAXLEN",
     "resolve_my_user_id",
     "is_cross_user",
+    "is_proven_same_user",
+    "preview_text",
+    "sender_label",
+    "build_source",
     "cache_body",
     "read_cached_body",
     "body_text",
