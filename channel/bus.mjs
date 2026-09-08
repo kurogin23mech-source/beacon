@@ -46,7 +46,7 @@ import {
 import { selectTierForBridge } from './bus-envelope.mjs'
 import { buildHeartbeatBody } from './bus-heartbeat.mjs'
 import { createLocalSessionHeartbeat } from './bus-local-heartbeat.mjs'
-import { readStateMarker } from './bus-state-marker.mjs'
+import { readStateMarker, STATE_TERMINATED } from './bus-state-marker.mjs'
 import { isPidAlive, detectOtherAliveBridges } from './bridge_detect.mjs'
 import {
   buildAutonomousActionContent,
@@ -1307,7 +1307,7 @@ if (!PROJECT_ID || !SESSION_ID) {
     let declaredAt
     let stateSince
     if (shutdown) {
-      declaredState = 'terminated'
+      declaredState = STATE_TERMINATED  // shared constant (parity w/ lib/bus_liveness)
       declaredAt = nowIso
       stateSince = nowIso   // entering terminated now
     } else {

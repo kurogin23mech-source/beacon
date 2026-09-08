@@ -32,7 +32,10 @@ test('reads a well-formed marker', () => {
   })
 })
 
-test('marker without state_since falls back to declared_at (e-6244 back-compat)', () => {
+test('marker without state_since passes through undefined (server owns fallback, #735)', () => {
+  // ms-159 review (#735): the reader no longer fabricates state_since ←
+  // declared_at. An e-6244 marker (predating the field) yields undefined so the
+  // heartbeat omits it and the SERVER's single authoritative fallback fills it.
   const p = tmpFile(JSON.stringify({
     declared_state: 'idle',
     declared_at: '2026-09-07T00:00:00.000Z',
@@ -40,7 +43,7 @@ test('marker without state_since falls back to declared_at (e-6244 back-compat)'
   assert.deepEqual(readStateMarker(p), {
     declaredState: 'idle',
     declaredAt: '2026-09-07T00:00:00.000Z',
-    stateSince: '2026-09-07T00:00:00.000Z',
+    stateSince: undefined,
   })
 })
 
@@ -76,12 +79,18 @@ test('heartbeat carries declared_state/declared_at/state_since when present', ()
   assert.equal(body.state_since, '2026-09-07T00:00:00Z')
 })
 
-test('heartbeat state_since falls back to declared_at when not provided', () => {
+test('heartbeat OMITS state_since when not provided (server owns fallback, #735)', () => {
+  // ms-159 review (#735): no client-side fallback — an absent state_since is
+  // omitted from the wire so the server's authoritative chain (state_since ←
+  // declared_at ← last_poll_at ← last_active) is the single decider.
   const body = buildHeartbeatBody({
     nowIso: '2026-09-07T00:00:00Z', pollIntervalMs: 5000,
     declaredState: 'idle', declaredAt: '2026-09-07T00:00:00Z',
   })
-  assert.equal(body.state_since, '2026-09-07T00:00:00Z')
+  assert.ok(!('state_since' in body))
+  // declared_* still travel together (unchanged contract).
+  assert.equal(body.declared_state, 'idle')
+  assert.equal(body.declared_at, '2026-09-07T00:00:00Z')
 })
 
 test('heartbeat omits declared_* when no declaration (negative regression)', () => {

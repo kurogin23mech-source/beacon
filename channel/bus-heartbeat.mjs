@@ -71,9 +71,14 @@ export function buildHeartbeatBody({ nowIso, pollIntervalMs, shutdown = false, t
     body.declared_at = declaredAt
     // ms-159 e-6245 — state_since (when the session ENTERED this state) rides
     // alongside so the server/attention面 can sort by "how long in this state".
-    // Falls back to declared_at when the marker predates state_since so the
-    // field is always populated when a state is declared.
-    body.state_since = stateSince || declaredAt
+    // ms-159 review (#735): only send it when the marker actually carries it.
+    // The hook-preserved state_since is the real value (the server cannot
+    // reconstruct it — it only sees individual heartbeats), so we always forward
+    // it when present. When absent (an e-6244 marker predating the field) we OMIT
+    // it and let the server's single authoritative fallback fill it (state_since
+    // ← declared_at ← last_poll_at ← last_active), instead of fabricating the
+    // fallback here too. One place decides; no client↔server divergence.
+    if (stateSince) body.state_since = stateSince
   }
   return body
 }
