@@ -285,3 +285,64 @@ def test_server_install_serves_the_identical_page():
         for s in (local, exposed):
             s.shutdown()
             s.server_close()
+
+
+# --- Windows の既定文字コードで落ちない ------------------------------------
+
+def test_startup_output_is_encodable_on_windows_legacy_codepage():
+    """起動時に出す文字は cp932 (Windows 日本語環境の既定) で表現できること。
+
+    表現できない記号を混ぜると、日本語 Windows では出力時に例外が出る。実際に
+    警告文の U+26A0 (⚠) がこれに該当し、**よりによって「外に開いています」という
+    安全上の警告そのものが出せない** 状態になっていた (2026-09-09 に発見)。
+    """
+    import io as _io
+    import contextlib
+
+    for host, expose in (("127.0.0.1", False), ("0.0.0.0", True)):
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            server, _ = cmd_view.serve(
+                port=0, open_browser=False, store=_FakeStore(), forever=False,
+                sessions=[], host=host, expose=expose)
+        server.shutdown()
+        server.server_close()
+        out = buf.getvalue()
+        assert out.strip(), "起動時に何も出ていない (住所が分からない)"
+        try:
+            out.encode("cp932")
+        except UnicodeEncodeError as e:
+            raise AssertionError(
+                f"cp932 で出せない文字が起動出力にある ({host}): {e}")
+
+
+def test_startup_output_tells_the_url_and_source():
+    """利用者が最低限知る必要があるのは『どこを開くか』と『何を見ているか』。"""
+    import io as _io
+    import contextlib
+
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        server, url = cmd_view.serve(
+            port=0, open_browser=False, store=_FakeStore(), forever=False,
+            sessions=[])
+    server.shutdown()
+    server.server_close()
+    out = buf.getvalue()
+    assert url in out
+    assert "ローカル" in out
+
+
+def test_exposed_startup_warns_that_it_is_open_to_others():
+    """外に開いた設置では、その事実を毎回伝える。"""
+    import io as _io
+    import contextlib
+
+    buf = _io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        server, _ = cmd_view.serve(
+            port=0, open_browser=False, store=_FakeStore(), forever=False,
+            sessions=[], host="0.0.0.0", expose=True)
+    server.shutdown()
+    server.server_close()
+    assert "外にも開いています" in buf.getvalue()

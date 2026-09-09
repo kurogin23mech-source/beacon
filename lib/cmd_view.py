@@ -163,12 +163,12 @@ def serve(port: int = DEFAULT_PORT, *, open_browser: bool = True,
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
-    print(f"盤を開きました: {url}")
-    print(f"  取得元: {'クラウド' if store.is_cloud() else 'ローカル'}")
+    print(f"盤を開きました: {url}", flush=True)
+    print(f"  取得元: {'クラウド' if store.is_cloud() else 'ローカル'}", flush=True)
     if not _is_loopback(host):
-        print("  ⚠ この盤は自分の機械の外にも開いています。認証は無いので、"
-              "この口に届く全員が読めます。")
-    print("  終了: Ctrl+C")
+        print("  [警告] この盤は自分の機械の外にも開いています。認証は無いので、"
+              "この口に届く全員が読めます。", flush=True)
+    print("  終了: Ctrl+C", flush=True)
 
     # 外に開いた設置ではブラウザを立ち上げても意味がない (画面のある機械ではない)。
     if open_browser and _is_loopback(host):
