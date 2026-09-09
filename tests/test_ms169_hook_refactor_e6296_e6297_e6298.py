@@ -74,7 +74,10 @@ def test_import_lib_returns_modules_or_none():
     assert hasattr(libs["tool_effect"], "is_side_effect")
     # A module that doesn't exist → the whole batch fails safe to None.
     assert hb.import_lib("untrusted_turn", "definitely_not_a_real_lib_xyz") is None
-    assert hb.import_lib() is None
+    # Zero args is a caller bug (forgot the name), NOT an env condition → it raises
+    # rather than returning the same None that means "lib absent" (e-6296 AX review).
+    with pytest.raises(ValueError):
+        hb.import_lib()
 
 
 @pytest.mark.parametrize("script", [
@@ -90,6 +93,19 @@ def test_hooks_delegate_to_bootstrap_no_local_copies(script):
     assert "import hook_bootstrap" in src
     assert not re.search(r"\ndef _find_beacon_root\b", src)
     assert not re.search(r"\ndef _import_lib\b", src)
+
+
+def test_hook_bootstrap_is_in_install_manifest():
+    """Distribution-sync lock (e-6296 maintainability review): the 3 hooks import
+    hook_bootstrap as a sibling, so any packaging that copies a hook individually
+    must also copy hook_bootstrap. This asserts the manifest carries it — so a
+    future edit that ships a hook without its bootstrap fails here, not silently on
+    a user's stale install."""
+    manifest = json.loads((REPO / "manifest.json").read_text(encoding="utf-8"))
+    files = manifest.get("install", {}).get("files", {})
+    assert "bin/hook_bootstrap.py" in files, (
+        "bin/hook_bootstrap.py must be in manifest.json install.files — the hook "
+        "scripts sibling-import it")
 
 
 # ---------------------------------------------------------------------------
@@ -135,14 +151,16 @@ def test_arm_ok_when_written(tmp_path):
     status = ut.arm(root, "sv-1", event_ids=["e-1"])
     assert status == ut.ARM_OK
     assert ut.arm_succeeded(status) is True
+    assert bool(status) is True                 # truthiness matches arm_succeeded
     assert ut.is_armed(root, "sv-1") is not None
 
 
 def test_arm_noop_on_blank_key(tmp_path):
     root = _beacon_root(tmp_path)
     status = ut.arm(root, "", event_ids=["e-1"])
-    assert status == ut.ARM_NOOP_BLANK_KEY
+    assert status == ut.ARM_NOOP_NO_SESSION_KEY
     assert ut.arm_succeeded(status) is False    # a benign no-op, NOT armed
+    assert not status                           # truthiness matches arm_succeeded
 
 
 def test_arm_reports_write_failure_instead_of_faking_armed(tmp_path, monkeypatch):
@@ -154,7 +172,9 @@ def test_arm_reports_write_failure_instead_of_faking_armed(tmp_path, monkeypatch
     status = ut.arm(root, "sv-1", event_ids=["e-1"])
     assert status == ut.ARM_WRITE_FAILED
     assert ut.arm_succeeded(status) is False
+    assert not status                           # a failure status is falsy, so the
+    #                                             old `if arm(...)` idiom is safe
 
 
 def test_arm_status_constants_are_distinct():
-    assert len({ut.ARM_OK, ut.ARM_NOOP_BLANK_KEY, ut.ARM_WRITE_FAILED}) == 3
+    assert len({ut.ARM_OK, ut.ARM_NOOP_NO_SESSION_KEY, ut.ARM_WRITE_FAILED}) == 3

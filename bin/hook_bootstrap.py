@@ -87,9 +87,15 @@ def import_lib(*names: str) -> "dict | None":
     imports cleanly; otherwise ``None`` (fail-safe: a hook that cannot import the
     libs it classifies with stays silent). The lib dir is put on ``sys.path`` once.
     This is the ONLY place the lib-search convention lives, so a layout change is a
-    one-line edit here rather than five copies across three scripts."""
+    one-line edit here rather than five copies across three scripts.
+
+    Calling with NO names is a programming error (a caller forgot the module
+    name), NOT an environment condition, so it raises rather than returning the
+    same ``None`` that means "lib genuinely absent" — otherwise a forgotten
+    argument would make a hook silently no-op forever, indistinguishable from a
+    missing lib (ms-169 e-6296 AX review finding)."""
     if not names:
-        return None
+        raise ValueError("import_lib requires at least one module name")
     for lib_dir in _lib_dirs():
         try:
             present = all((lib_dir / f"{n}.py").exists() for n in names)

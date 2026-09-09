@@ -108,12 +108,35 @@ def make_source(event_id: str = "", sender: str = "", preview: str = "") -> dict
 # both used to collapse into False (and a silently-swallowed write error even
 # collapsed into True). ``arm_succeeded`` is the one predicate for "the turn is now
 # armed".
-ARM_OK = "armed"                    # a pending context was written
-ARM_NOOP_BLANK_KEY = "noop_blank_key"  # no session key to key the state on
-ARM_WRITE_FAILED = "write_failed"   # had a key + intent, but the state write failed
+#
+# The status is an ``_ArmStatus`` (a str whose truthiness == "is this ARM_OK"), NOT
+# a plain str. A plain str return reopened the very hole this change closes: every
+# status string is non-empty ⇒ truthy, so the old ``if ut.arm(...)`` idiom would
+# read a *failure* status (write_failed / noop_no_session_key) as success — the
+# "false green light" again, via API misuse (ms-169 e-6298 review, consensus AX +
+# maintainability finding). Making ``bool(status)`` agree with ``arm_succeeded``
+# means both the ``if arm(...)`` idiom and explicit ``== ARM_OK`` comparison read
+# correctly, so misuse is structurally impossible rather than merely discouraged.
 
 
-def arm_succeeded(status: str) -> bool:
+class _ArmStatus(str):
+    """An ``arm()`` status string whose ``bool()`` is True only for ARM_OK.
+
+    Subclasses ``str`` so ``== ARM_OK`` comparison and ``json.dumps`` keep working
+    unchanged, but overrides truthiness so a bare ``if arm(...)`` can't treat a
+    failure status as success."""
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return self == ARM_OK
+
+
+ARM_OK = _ArmStatus("armed")                       # a pending context was written
+ARM_NOOP_NO_SESSION_KEY = _ArmStatus("noop_no_session_key")  # no session key to key state on
+ARM_WRITE_FAILED = _ArmStatus("write_failed")      # had a key + intent, but the write failed
+
+
+def arm_succeeded(status) -> bool:
     """True iff ``status`` (an ``arm`` return value) means the turn is now armed."""
     return status == ARM_OK
 
@@ -293,8 +316,8 @@ def arm(root: "str | Path", session_key: str, *, event_ids=None, sources=None,
     ``session_key``. Returns an ``ARM_*`` status (ms-169 e-6298):
 
       * ``ARM_OK`` — a pending context was written (the turn is now armed),
-      * ``ARM_NOOP_BLANK_KEY`` — no session key, so there was nothing to key state
-        on (a benign no-op, not a failure),
+      * ``ARM_NOOP_NO_SESSION_KEY`` — no session key, so there was nothing to key
+        state on (a benign no-op, not a failure),
       * ``ARM_WRITE_FAILED`` — a key + intent were present but the state write
         failed, so the gate will NOT actually see this context.
 
@@ -313,7 +336,7 @@ def arm(root: "str | Path", session_key: str, *, event_ids=None, sources=None,
     new event(s) enter the context, the ``asked_at`` marker is dropped so the new
     content is re-confirmed (a stale ask must not cover fresh untrusted data)."""
     if not session_key:
-        return ARM_NOOP_BLANK_KEY
+        return ARM_NOOP_NO_SESSION_KEY
     state = _read_all(root)
     entry = state.get(session_key)
     prev_pending = entry.get("pending") if isinstance(entry, dict) else None
@@ -468,7 +491,7 @@ __all__ = [
     "SOURCE_KEYS",
     "make_source",
     "ARM_OK",
-    "ARM_NOOP_BLANK_KEY",
+    "ARM_NOOP_NO_SESSION_KEY",
     "ARM_WRITE_FAILED",
     "arm_succeeded",
     "arm",

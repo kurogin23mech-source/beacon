@@ -75,8 +75,16 @@ from pathlib import Path
 # it via THIS file's own directory so there is no lib-search convention to
 # duplicate just to import it (ms-169 e-6296). It owns beacon-root discovery,
 # stdin parsing, and the lib-import convention shared with the gate / vet hooks.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import hook_bootstrap as hb  # noqa: E402
+#
+# Guard the import: if the sibling bootstrap is absent (e.g. a stale install
+# where only the hook scripts were copied), fail SAFE (hb=None → main no-ops)
+# rather than let an ImportError escape into the harness — the harness must never
+# block on the bus (ms-169 e-6296 review, maintainability finding).
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import hook_bootstrap as hb  # noqa: E402
+except Exception:
+    hb = None
 
 
 # ---------------------------------------------------------------------------
@@ -1187,6 +1195,8 @@ def _append_to_inbox_log(root: Path, events: list[dict]) -> None:
 
 def main() -> None:
     # Never let an exception escape — the harness must not block on the bus.
+    if hb is None:
+        return  # bootstrap missing → fail-safe no-op
     # Lenient by design: an unreadable / malformed payload degrades to {} and the
     # hook proceeds (cwd falls back to os.getcwd()), unlike the gate/vet hooks
     # which return on a missing payload.

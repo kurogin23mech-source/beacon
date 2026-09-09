@@ -40,11 +40,22 @@ from pathlib import Path
 # it via THIS file's own directory so there is no lib-search convention to
 # duplicate just to import it (ms-169 e-6296). It owns beacon-root discovery,
 # stdin parsing, and the lib-import convention for all three hook scripts.
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import hook_bootstrap as hb  # noqa: E402
+#
+# Guard the import: if the sibling bootstrap is absent (e.g. a stale install
+# where only the hook scripts were copied), fail SAFE (hb=None → this hook
+# no-ops, leaving state unchanged) rather than let an ImportError escape into the
+# harness. This hook only ever RELAXES gating, so a silent no-op is always safe
+# (ms-169 e-6296 review, maintainability finding).
+try:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import hook_bootstrap as hb  # noqa: E402
+except Exception:
+    hb = None
 
 
 def main() -> None:
+    if hb is None:
+        return  # bootstrap missing → fail-safe (state unchanged)
     hook_input = hb.read_hook_input()
     if hook_input is None:
         return
