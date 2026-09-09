@@ -331,11 +331,13 @@ func (s *Server) buildBoard() (*Board, error) {
 	}
 	if s.cloud != nil {
 		// クラウドに繋いだときだけ、Beacon に名乗っているセッションの名簿が取れる。
-		// 名簿が取れなくても盤は出す (見えないことより出ないことのほうが困る)。
+		// 名簿もドキュメントも、取れなくても盤は出す (見えないことより出ないことの
+		// ほうが困る)。
 		sessions, _ := s.cloud.Sessions()
-		return BuildBoard(p, SourceCloud, s.cloud.ProjectID, nil, sessions), nil
+		docs, _ := s.cloud.Documents()
+		return BuildBoard(p, SourceCloud, s.cloud.ProjectID, docs, sessions), nil
 	}
-	board := BuildBoard(p, SourceLocal, "", nil, nil)
+	board := BuildBoard(p, SourceLocal, "", localDocuments(s.src.BeaconDir), nil)
 	// このマシンで動いているセッションを添える (ms-171)。取れなくても盤は出す。
 	board.LocalSessions = LocalSessions(
 		filepath.Dir(s.src.BeaconDir), 24*time.Hour, time.Now())

@@ -273,3 +273,38 @@ func (c *CloudSource) Sessions() ([]SessionRow, error) {
 	}
 	return rows, nil
 }
+
+// Documents はプロジェクトのドキュメント一覧を返す。
+//
+// 盤の脇に「何が書かれているか」が並ぶと、目的や決定の在り処に辿り着ける。
+// 取れなくても盤は出す (呼び出し側で握りつぶす)。
+func (c *CloudSource) Documents() ([]DocumentRow, error) {
+	var raw []struct {
+		DocID     string `json:"doc_id"`
+		ID        string `json:"id"`
+		Title     string `json:"title"`
+		Scope     string `json:"scope"`
+		UpdatedAt string `json:"updated_at"`
+		Milestone string `json:"milestone"`
+		Target    string `json:"target"`
+	}
+	if err := c.get("/api/projects/"+c.ProjectID+"/documents", &raw); err != nil {
+		return nil, err
+	}
+	rows := []DocumentRow{}
+	for _, d := range raw {
+		id := d.DocID
+		if id == "" {
+			id = d.ID
+		}
+		target := d.Target
+		if target == "" {
+			target = d.Milestone
+		}
+		rows = append(rows, DocumentRow{
+			ID: id, Title: d.Title, Scope: d.Scope,
+			UpdatedAt: d.UpdatedAt, Target: target,
+		})
+	}
+	return rows, nil
+}

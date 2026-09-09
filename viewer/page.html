@@ -25,6 +25,11 @@
   header { margin-bottom: 18px; }
   h1 { font-size: 18px; margin: 0 0 2px; }
   .objective { color: var(--dim); font-size: 13px; }
+  /* 前回までの経緯。長いので折り返しつつ、主役の邪魔をしない濃さにする。 */
+  .summary {
+    color: var(--dim); font-size: 12px; margin-top: 6px;
+    padding-left: 10px; border-left: 2px solid var(--line);
+  }
   .meta { color: var(--dim); font-size: 11px; margin-top: 6px; }
   .meta b { font-weight: 600; }
 
@@ -151,6 +156,17 @@ let viewerState = {};
 // 選ぶ画面を開いている間は自動更新を止める。止めないと、入力している最中に
 // 盤へ戻されてしまう。
 let pickerOpen = false;
+// 開いている組 (未着手 / 完了 / ドキュメント)。**画面を作り直しても開いたままにする。**
+// ローカルセッションの最終活動時刻は数秒ごとに変わるため盤は頻繁に更新される。
+// 状態を引き継がないと、読んでいる最中に組が閉じてしまう (2026-09-09 の指摘)。
+const openGroups = new Set();
+
+// 経過時間の表示だけを、画面を作り直さずに書き換える。
+function updateTimes() {
+  for (const el of document.querySelectorAll("[data-ts]")) {
+    el.textContent = ago(el.dataset.ts);
+  }
+}
 
 function ago(iso) {
   if (!iso) return "";
@@ -171,8 +187,9 @@ function sessionCard(s) {
     <div class="sub">${esc(s.agent)}${s.machine ? " · " + esc(s.machine) : ""}</div>
     ${s.target ? `<div class="target">${esc(s.target)}</div>` : ""}
     ${commit}
-    <div class="sub">${s.live ? "稼働中" : "停止"}${
-      s.last_active ? " · " + ago(s.last_active) : ""}</div>
+    <div class="sub">${s.live ? "稼働中" : "停止"}${s.last_active
+      ? ` · <span data-ts="${esc(s.last_active)}">${ago(s.last_active)}</span>`
+      : ""}</div>
   </div>`;
 }
 
@@ -183,8 +200,9 @@ function localCard(s) {
     <div class="who"><span class="dot ${s.running ? "on" : ""}"></span>${esc(s.tool)}</div>
     ${s.title ? `<div class="sub">${esc(s.title)}</div>` : ""}
     <div class="commit" title="${esc(s.directory)}">${esc(s.directory)}</div>
-    <div class="sub">${s.running ? "この道具は起動中" : "停止"}${
-      s.last_active ? " · " + ago(s.last_active) : ""}</div>
+    <div class="sub">${s.running ? "この道具は起動中" : "停止"}${s.last_active
+      ? ` · <span data-ts="${esc(s.last_active)}">${ago(s.last_active)}</span>`
+      : ""}</div>
   </div>`;
 }
 
@@ -273,6 +291,43 @@ function wireRows() {
   }
 }
 
+// 一度に描く行数。対象が数百件あるプロジェクトでは、全部描くと開いた瞬間に
+// 固まる (2026-09-09 の指摘)。畳んでいる組は **開くまで描かない**。
+const PAGE_SIZE = 50;
+
+// 畳んだ組。中身は開いたときに初めて描く。
+function group(key, title, rows) {
+  if (!rows.length) return "";
+  return `<details class="group" data-group="${key}"${openGroups.has(key) ? " open" : ""}>
+    <summary>${esc(title)} (${rows.length})</summary>
+    <div class="rows" id="g-${key}"></div>
+  </details>`;
+}
+
+// 組の中身を描く。多いときは少しずつ足す。
+function fillGroup(key, rows, owners, rosterKnown) {
+  const box = document.getElementById("g-" + key);
+  if (!box || box.dataset.filled) return;
+  let shown = 0;
+  const more = () => {
+    const slice = rows.slice(shown, shown + PAGE_SIZE);
+    shown += slice.length;
+    const html = slice.map(t => targetRow(t, owners[t.id] || [], rosterKnown)).join("");
+    const btn = box.querySelector(".more");
+    if (btn) btn.remove();
+    box.insertAdjacentHTML("beforeend", html);
+    if (shown < rows.length) {
+      box.insertAdjacentHTML("beforeend",
+        `<button class="more linkish" style="margin:10px 0;">
+           のこり ${rows.length - shown} 件を表示</button>`);
+      box.querySelector(".more").onclick = more;
+    }
+    wireRows();
+  };
+  more();
+  box.dataset.filled = "1";
+}
+
 function render(board) {
   lastBoard = board;
   const p = board.project || {}, g = board.progress || {};
@@ -287,6 +342,7 @@ function render(board) {
 
   const sessions = board.sessions || [];
   const local = board.local_sessions || [];
+  const docs = board.documents || [];
   // 1 件でも名簿が取れていれば「誰も付いていない対象」は本当に無人と言える。
   // 1 件も無いときは、名簿そのものが取れていないだけの可能性が高い。
   const rosterKnown = sessions.length > 0;
@@ -300,6 +356,7 @@ function render(board) {
     <header>
       <h1>${esc(p.name)}</h1>
       <div class="objective">${esc(p.objective)}</div>
+      ${p.summary ? `<div class="summary">${esc(p.summary)}</div>` : ""}
       <div class="meta">
         <b>${g.total}</b> 対象 · 完了 <b>${g.done}</b> · 進行中 <b>${g.open}</b>
         &nbsp;·&nbsp; 取得元: ${esc(src.kind)}${
@@ -330,19 +387,69 @@ function render(board) {
     </div>` : ""}
 
     <div class="section-title">進行中 / 担当あり (${focus.length})</div>
-    <div class="rows">${focus.map(t => targetRow(t, owners[t.id] || [], rosterKnown)).join("")
-      || `<p class="empty">進行中の対象はありません。</p>`}</div>
+    <div class="rows" id="g-focus">${focus.length ? "" :
+      `<p class="empty">進行中の対象はありません。</p>`}</div>
 
-    ${todo.length ? `<details class="group"><summary>未着手 (${todo.length})</summary>
-      <div class="rows">${todo.map(t => targetRow(t, owners[t.id] || [], rosterKnown)).join("")}</div>
+    ${docs.length ? `<details class="group" data-group="docs"${
+      openGroups.has("docs") ? " open" : ""}>
+      <summary>ドキュメント (${docs.length})</summary>
+      <div class="rows" id="g-docs"></div>
     </details>` : ""}
 
-    ${closed.length ? `<details class="group"><summary>完了・観察中 (${closed.length})</summary>
-      <div class="rows">${closed.map(t => targetRow(t, owners[t.id] || [], rosterKnown)).join("")}</div>
-    </details>` : ""}
+    ${group("todo", "未着手", todo)}
+    ${group("closed", "完了・観察中", closed)}
   `;
   wireRows();
   document.getElementById("switch").onclick = openPicker;
+
+  // 進行中の組は既定で開いているので、その場で描く (多ければ分割して足す)。
+  if (focus.length) fillGroup("focus", focus, owners, rosterKnown);
+
+  // 畳んだ組は、開かれたときに初めて中身を描く。
+  const docsEl = document.querySelector('[data-group="docs"]');
+  if (docsEl) {
+    const fillDocs = () => {
+      const box = document.getElementById("g-docs");
+      if (!box || box.dataset.filled) return;
+      let shown = 0;
+      const more = () => {
+        const slice = docs.slice(shown, shown + PAGE_SIZE);
+        shown += slice.length;
+        const btn = box.querySelector(".more");
+        if (btn) btn.remove();
+        box.insertAdjacentHTML("beforeend", slice.map(d => `<div class="row"
+            style="grid-template-columns:74px 1fr 128px 96px; cursor:default">
+            <div class="id">${esc(d.scope)}</div>
+            <div class="label" title="${esc(d.title)}">${esc(d.title)}</div>
+            <div class="count">${esc((d.updated_at || "").slice(0, 10))}</div>
+            <div class="count">${esc(d.target || "")}</div>
+          </div>`).join(""));
+        if (shown < docs.length) {
+          box.insertAdjacentHTML("beforeend",
+            `<button class="more linkish" style="margin:10px 0;">
+               のこり ${docs.length - shown} 件を表示</button>`);
+          box.querySelector(".more").onclick = more;
+        }
+      };
+      more();
+      box.dataset.filled = "1";
+    };
+    docsEl.ontoggle = () => {
+      if (docsEl.open) { openGroups.add("docs"); fillDocs(); }
+      else openGroups.delete("docs");
+    };
+    if (docsEl.open) fillDocs();
+  }
+
+  for (const [key, rows] of [["todo", todo], ["closed", closed]]) {
+    const el = document.querySelector(`[data-group="${key}"]`);
+    if (!el) continue;
+    el.ontoggle = () => {
+      if (el.open) { openGroups.add(key); fillGroup(key, rows, owners, rosterKnown); }
+      else openGroups.delete(key);
+    };
+    if (el.open) fillGroup(key, rows, owners, rosterKnown);
+  }
 }
 
 // --- プロジェクトがまだ決まっていないとき ---------------------------------
@@ -558,7 +665,12 @@ async function refresh() {
       return;
     }
     // 中身が前と同じなら画面に触らない。ここが点滅を止める要。
-    const json = JSON.stringify(b);
+    //
+    // 判定からは「刻々と変わる時刻」を外す。最終活動時刻は数秒ごとに変わるので、
+    // これを含めると **中身が何も変わっていなくても毎回作り直す** ことになり、
+    // 読んでいる最中に開いた組が閉じたり、表示位置が飛んだりする。
+    // 時刻の表示だけは、下の updateTimes が作り直さずに書き換える。
+    const json = JSON.stringify(b, (k, v) => k === "last_active" ? undefined : v);
     if (json === lastBoardJSON) return;
     // 内容が変わった対象だけ、詳細の覚えを捨てる (次に開いたとき取り直す)。
     if (lastBoard) {
@@ -581,5 +693,7 @@ async function refresh() {
 
 refresh();
 setInterval(refresh, 5000);
+// 経過時間の表示だけは、盤が変わらなくても進める (作り直しは伴わない)。
+setInterval(updateTimes, 10000);
 </script>
 </html>
